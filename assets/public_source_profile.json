@@ -1198,6 +1198,7 @@
     "tests/fixtures/psp_oracle/insn_trace_fixtures.h",
     "tests/fixtures/psp_oracle/insn_trace_tramp.S",
     "tests/fixtures/psp_oracle/io_cases_host.c",
+    "tests/fixtures/psp_oracle/kernel_library_tls_imports.S",
     "tests/fixtures/psp_oracle/libfont_imports.S",
     "tests/fixtures/psp_oracle/mem_edge.h",
     "tests/fixtures/psp_oracle/mutex_imports.S",

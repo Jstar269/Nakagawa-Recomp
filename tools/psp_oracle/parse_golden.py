@@ -2169,6 +2169,46 @@ _register_campaign_probe(
     dict(IO_UMD_EOF_ROWS),
 )
 
+# safe-scalar (141, probe_kernel_semantics.c): #2640 cells src/rt stops at by name or answers
+# from an emulator, with no device, dialog, GE or radio call and no handler installed:
+# sceRtcCheckValid on a day of 0 or past the month (words: year, month, day, hour as passed),
+# sceRtcGetDayOfWeek on a month of 0 or 13..24, a year of 0 or 10000 and a day past 1000000
+# (words: year, month, day as passed), sceRtcGetTime_t before 1970, past 32 bits and with one
+# field out of range (words: the two output words, preset to the sentinel), sceRtcTickAddYears
+# from a tick past year 9999 (words: destination low and high, preset to the sentinel, and the
+# year count), sceKernelGetThreadmanIdList for classes 9 and 10 (words: count, slots written),
+# and sceKernelCreateTlspl with and without attribute 0x4000: every address is a difference
+# from a block the probe allocated at the low or the high end of the partition's free space.
+# tls-fragmentation, the first TLS row, is the partition's total free size minus its largest
+# free block before anything is allocated: 0 when the free memory is one run. Only then do the
+# tls-place rows read as "0x100 means nothing new at that end"; otherwise the tls-addr rows
+# decide where a pool lies.
+# Every row is emitted on every run with a fixed word count (SKIP rows keep the shape).
+SAFE_SCALAR_ROWS = (
+    ("rtc-valid-day-0", 4), ("rtc-valid-feb-29-2023", 4), ("rtc-valid-feb-29-1900", 4),
+    ("rtc-valid-feb-30-2024", 4), ("rtc-valid-feb-31-2024", 4), ("rtc-valid-apr-31-2024", 4),
+    ("rtc-valid-day-0-hour-24", 4),
+    ("rtc-dow-month-0", 3), ("rtc-dow-month-13", 3), ("rtc-dow-month-13-again", 3),
+    ("rtc-dow-month-14", 3), ("rtc-dow-month-24", 3), ("rtc-dow-year-0", 3),
+    ("rtc-dow-year-10000", 3), ("rtc-dow-day-1000001", 3), ("rtc-dow-day-max", 3),
+    ("rtc-time-1969", 2), ("rtc-time-1601", 2), ("rtc-time-2106-past", 2), ("rtc-time-9999", 2),
+    ("rtc-time-month-0", 2), ("rtc-time-month-13", 2), ("rtc-time-day-0", 2),
+    ("rtc-time-day-32", 2), ("rtc-time-feb-30", 2), ("rtc-time-hour-24", 2),
+    ("rtc-time-second-60", 2),
+    ("rtc-addyears-y10000-plus-0", 3), ("rtc-addyears-y10000-plus-1", 3),
+    ("rtc-addyears-y10000-minus-1", 3), ("rtc-addyears-y10001-minus-2", 3),
+    ("tmid-9-list", 2), ("tmid-10-list", 2),
+    ("tls-fragmentation", 1),
+    ("tls-brackets", 7), ("tls-create-normal", 2), ("tls-place-normal", 6), ("tls-addr-normal", 6),
+    ("tls-status-normal", 8), ("tls-create-high", 2), ("tls-place-high", 6), ("tls-addr-high", 6),
+    ("tls-status-high", 8), ("tls-create-high-2", 2), ("tls-addr-high-2", 6), ("tls-thread", 6),
+    ("tls-free", 3), ("tls-delete", 3), ("tls-cleanup", 4),
+)
+_register_campaign_probe(
+    "safe-scalar", "PSP-SAFE-SCALAR-001", tuple(row for row, _ in SAFE_SCALAR_ROWS),
+    dict(SAFE_SCALAR_ROWS),
+)
+
 # memory-edge (138, probe_memory_edge.c, fixture mem_edge.h): the #303 invalid-tail and
 # boundary cells and #1380's sceIoRead into a boundary buffer. Three measurement rows, then for
 # each of three placements (the last bytes of user RAM, the first bytes of user RAM, the last
@@ -3475,6 +3515,9 @@ HLE_MACHINERY_STATUS_CASES = frozenset({
     "hle-null-out-pointers", "hle-audio-src", "hle-timer-order", "hle-savedata-getsize",
     "hle-savedata-nodata",
     "hle-io-trunc",
+    # safe-scalar (probe_kernel_semantics.c) follows the same rule: a row is SKIP when a block,
+    # a pool or the second thread was not obtained.
+    "safe-scalar",
 })
 VFPU_RAW_WORD_CASES = frozenset({"vfpu-transcendental-corpus"})
 #: Cases whose every cell is an unconditional observation: each record is PASS. hle-io-seek,

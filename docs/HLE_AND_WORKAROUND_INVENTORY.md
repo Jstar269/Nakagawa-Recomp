@@ -552,10 +552,12 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_io_async_and_path_imports
   - Evidence: tests/native/hle_thread_selftest.c:test_io_memory_stick_cells_through_syscall
 - **`h_AllocMemoryBlock`** (`sceKernel`): `sceKernelAllocMemoryBlock` (0xfe707fdf)
-  - Limitation: types 0 (Low, the partition's bump and free-list path) and 1 (High, from the top of the arena thread stacks share, 0x100 granularity) allocate, and the type, size, option-size and NULL-name codes are pspautotests-recorded; the code for an unmapped name or option pointer is uOFW's 0x800200D3, not measured; memory-block UIDs are separate from partition-block UIDs here, while the PSP shares them (memblock.expected Partition usage)
+  - Limitation: types 0 (Low, the partition's bump and free-list path) and 1 (High, from the top of the arena thread stacks share, 0x100 granularity) allocate, and the type, size, option-size and NULL-name codes are pspautotests-recorded; in a partition based below the runtime stacks a High block lies above the bump region, so the free sizes, which measure that region, do not count it (#2640); the code for an unmapped name or option pointer is uOFW's 0x800200D3, not measured; memory-block UIDs are separate from partition-block UIDs here, while the PSP shares them (memblock.expected Partition usage)
   - Evidence: tests/native/hle_thread_selftest.c:test_kernel_import_sweep_memory_blocks_and_sdk_alias
   - Evidence: PSPAutotests tests/sysmem/memblock.expected (2ed7c9c5, recorded on a PSP): names, types, sizes, option sizes and type-1 placement deltas
   - Evidence: uOFW src/kd/sysmem/memblock.c (MIT): validation order and the AllocPartitionMemory call
+  - Evidence: tests/native/hle_thread_selftest.c:test_memory_block_high_in_low_based_partition
+  - Evidence: PSPAutotests tests/sysmem/memblock.expected lines 9 and 25 to 33 (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): type 1 allocates, and a second type-1 block lies its size rounded up to 0x100 below the first
 - **`h_AllocPartitionMemory`** (`sceKernel`): `sceKernelAllocPartitionMemory` (0x237dbd4f)
   - Limitation: partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), a zero size allocates 16 bytes rather than being checked against the recorded size cells, and blocks are placed from a bump heap rather than the kernel's allocator (#341)
   - Evidence: PSPAutotests tests/sysmem/partition.expected at 2ed7c9c5 (partitions 1, 3 and 4 0x800200D6, other numbers 0x800200D2, type past 4 0x800200D8)
@@ -683,9 +685,13 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-NULLCODE-001: CreateThread with a NULL entry returned a UID)
   - Evidence: docs/research/PSP_THREADING_SEMANTICS.md (FIRMWARE_CREATE_THREAD_ARG5_T0: attribute arrives in $t0)
 - **`h_CreateTlspl`** (`sceKernel`): `sceKernelCreateTlspl` (0x8daff657)
-  - Limitation: the recorded arguments are reproduced; attribute 0x4000 (allocation from the top of the partition) is accepted but not exercised by a test, and partitions 5 and 11 and above and alignments above 0x10000 keep a refusal the cells do not record (#341)
+  - Limitation: the recorded arguments are reproduced; where an attribute 0x4000 pool lies is PSP-measured for one pool shape only (PSP-SAFE-SCALAR-001: partition 2, attribute exactly 0x4000, four 0x100-byte blocks, NULL options): the top of the partition; for every other attribute 0x4000 pool (another block size or count, an options block, another attribute bit beside 0x4000, partition 6) the top of the partition is PPSSPP-derived, not PSP-measured (hrydgard/ppsspp 65181eea1deb7361beb3be6062ea98e8427f2786, Core/HLE/sceKernelMemory.cpp sceKernelCreateTlspl; jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414 SceKernelTls agrees) and is logged once per run; the measured free-size words are not reproduced exactly: the free total carries a 0x100 tail per block slot, and in a partition based below the runtime stacks the free sizes do not count such a pool, which lies above the bump region they measure (#2640); partitions 5 and 11 and above and alignments above 0x10000 keep a refusal the cells do not record (#341)
   - Evidence: PSPAutotests tests/threads/tls/create.expected (a NULL name 0x80020190; partitions 2 and 6 accepted, 1, 3 and 4 0x800200D1, others 0x800200D2; a block size or count of 0 or -1 0x800201B7; power-of-two alignments; the 17th pool 0x800201D1)
   - Evidence: tests/native/hle_thread_selftest.c:test_wb_tlspl_vpl_cells
+  - Evidence: PSPAutotests tests/threads/tls/create.expected line 29 (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): attribute 0x4000 creates a pool that reports the attribute and takes 1024 bytes from the partition's free total, returned by the delete
+  - Evidence: tests/native/hle_thread_selftest.c:test_tlspl_highmem_pool
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tls-create-normal, tls-place-normal, tls-addr-normal, tls-create-high, tls-place-high, tls-addr-high, tls-create-high-2, tls-addr-high-2: in partition 2 a pool of four 0x100-byte blocks with NULL options lies at the low end of the free memory without attribute 0x4000 and at the high end with it, a second such pool below the first)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_tls_20261117
 - **`h_CreateVTimer`** (`sceKernel`): `sceKernelCreateVTimer` (0x20fff560)
   - Limitation: the option struct is ignored, as on a PSP (pspautotests vtimers/create.expected at 2ed7c9c5, recorded on a PSP: every declared size creates the same timer), and an unreadable one stops the run by name; 64 creates in a row are measured (PSP-HLE-VTIMER-003), so the table holds 64, while the same PSP-recorded output shows 1024 creates succeed; a NULL name is accepted here, where that output shows 0x80020001; the no-slot code 0x80020190 is unmeasured; the microsecond unit is consistent with PSP-HLE-VTIMER-002, not a precise rate measurement (#325)
 - **`h_CreateVpl`** (`sceKernel`): `sceKernelCreateVpl` (0x56c039b5)
@@ -789,9 +795,10 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_GetMemoryBlockAddr`** (`sceKernel`): `sceKernelGetMemoryBlockAddr` (0xdb83a952)
   - Limitation: resolves UIDs created by the modeled Low allocation path; output-pointer and unknown-UID results are source-tested but not hardware measured
 - **`h_GetModuleIdList`** (`sceKernel`): `sceKernelGetModuleIdList` (0x644395e2)
-  - Limitation: lists only the main module and the modules the runtime loaded (a PSP also lists firmware modules), main first and then in load order, an order that is not measured; an unwritable count or buffer is not measured and stops the run by name
+  - Limitation: lists only the main module and the modules the runtime loaded (a PSP also lists firmware modules), main first and then in load order, an order that is not measured; the recorded 0x800200D3 covers a NULL pointer and one whose address, end or size has bit 31 set, of which the recording has 0x88000000; a count pointer or buffer that passes that check and is not guest memory has no recorded cell and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_imports_20261102_measured_contracts
-  - Evidence: PSPAutotests tests/modules/idlist/idlist.expected (1a9e6c31, recorded on a PSP): byte size, whole entries, count is the total, the caller's module is listed
+  - Evidence: PSPAutotests tests/modules/idlist/idlist.expected (774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP): byte size, whole entries, count is the total, the caller's module is listed; 0x800200D3 for a NULL count and for a count pointer or a buffer in the kernel segment (lines 14 to 16)
+  - Evidence: uOFW src/kd/modulemgr/queryModule.c (f7b0623168842f02cddbdbf9437ac0c2380c51c8, MIT): both pointers pass the kernel's user-pointer check before anything is written
 - **`h_GetSystemTime`** (`sceKernel`): `sceKernelGetSystemTime` (0xdb738f35)
   - Limitation: writes the 64-bit modeled microsecond clock and returns 0; the illegal-address result is the runtime's own code (RTC_ILLEGAL_ADDR), not a PSP measurement, and the clock origin is not compared with hardware
 - **`h_GetSystemTimeLow`** (`sceKernel`): `sceKernelGetSystemTimeLow` (0x369ed59d)
@@ -812,9 +819,11 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/threads/threads/stackfree.expected (0xea0 free on an unused 0x1000 stack and after 1 KiB of 0xFF, 0xaa0 after 1 KiB of zeros, 0 without the stack-fill attribute; unknown ids 0x80020198)
   - Evidence: tests/native/hle_thread_selftest.c:test_thread_stack_free_size_contract
 - **`h_GetThreadmanIdList`** (`sceKernel`): `sceKernelGetThreadmanIdList` (0x94416130)
-  - Limitation: the recorded sizes and types are reproduced; the list order for objects created in another order than uid order is not measured (#341)
+  - Limitation: the recorded sizes and types are reproduced; the thread event handler class (type 9) answers only the measured call shape, a 16-slot buffer and a count pointer, with the measured empty list, whose precondition (no handler registered) holds for every guest because this runtime has no call that registers one; type 9 with any other buffer size, or a NULL or unmapped buffer or count pointer, is not measured and stops the run by name; the list order for objects created in another order than uid order is not measured (#341)
   - Evidence: PSPAutotests tests/threads/threads/threadmanidlist.expected (a negative size 0x800200D3 with the count unwritten; types 1 to 14 listed, 15 and above illegal)
   - Evidence: tests/native/hle_thread_selftest.c:test_threadman_id_list_cells
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: tmid-9-list and tmid-10-list, an empty list returns 0 with a count of 0 and no slot written)
+  - Evidence: tests/native/hle_thread_selftest.c:test_threadman_id_list
 - **`h_GetVTimerBase`** (`sceKernel`): `sceKernelGetVTimerBase` (0xb3a59970)
   - Limitation: returns the same base as ReferVTimerStatus, measured equal while running and 0 once stopped (PSP-HLE-VTIMER-002); the value, guest time at the most recent Start, is consistent with that run's system-clock reads, not measured exactly; NULL out-pointer returns ILLEGAL_ADDR as a runtime safety choice after PSP-3000 hung on ReferSystemStatus(NULL) (PSP-HLE-NULL-OUT-001), not as a measured VTimer result; deleted-UID code is unmeasured and reused by analogy; no game relies on the NULL output (#325)
 - **`h_GetVTimerTime`** (`sceKernel`): `sceKernelGetVTimerTime` (0x034a921f)
@@ -1296,9 +1305,11 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_RegSetKeyValue`** (`sceReg`): `sceRegSetKeyValue` (0x17768e14)
   - Limitation: writes an existing key through a mode-2 category handle (mode 1 is EACCES): INT exactly 4 bytes, a STR takes the size of its new value (string sizes follow their values, measured on PSP-3000 6.6.1, 2026-10-09, read-only enumeration), BIN up to its fixed size with the rest zero-filled; persists on a flush; write semantics and the errno-class codes are not hardware measured
 - **`h_RtcCheckValid`** (`sceRtc`): `sceRtcCheckValid` (0x4b1b5e82)
-  - Limitation: returns 0 or the first failing field as -1 year, -2 month, -3 day, -4 hour, -5 minute, -6 second, -7 microsecond (measured); a day of 0 or one from the month length to 31, and a NULL or unmapped pointer, are not measured and stop the run by name
+  - Limitation: returns 0 or the first failing field as -1 year, -2 month, -3 day, -4 hour, -5 minute, -6 second, -7 microsecond (measured); a day of 0 or past the month's length is -3, measured by PSP-SAFE-SCALAR-001 in January, February and April and applied to the other months from the same month table; a NULL or unmapped pointer is not measured and stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/lookup.expected (f573fe8c, recorded on a PSP): checkRtcCheckValid and checkMaxYear
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-valid-day-0, rtc-valid-feb-29-2023, rtc-valid-feb-29-1900, rtc-valid-feb-30-2024, rtc-valid-feb-31-2024, rtc-valid-apr-31-2024, rtc-valid-day-0-hour-24)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
 - **`h_RtcConvertLocalToUtc`** (`sceRtc`): `sceRtcConvertLocalTimeToUTC` (0x779242a2)
   - Limitation: applies the time zone and daylight saving of the system profile, the registry keys sceUtilityGetSystemParamInt reports; the 60-minute daylight-saving shift is the setting's meaning, not measured, and the checked-overflow failure class is not autotest-verified (#1382, #341)
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_local_time_follows_the_system_profile
@@ -1310,17 +1321,21 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_local_time_follows_the_system_profile
   - Evidence: src/rt/hle.c:psp_profile_local_offset_minutes
 - **`h_RtcGetDayOfWeek`** (`sceRtc`): `sceRtcGetDayOfWeek` (0x57726bc1)
-  - Limitation: Sunday is 0; months 1..12 of years 1..9999 with the day carried linearly (the measured cells); a month of 0 or above 12 answers only the seven measured triples, and any other month, year or day outside those stops the run by name
+  - Limitation: Sunday is 0; months 1..12 of years 1..9999 with the day carried linearly up to 1000000 (the pspautotests cells); a month of 0 or above 12, a year outside 1..9999 and a day above 1000000 answer only the fifteen measured triples (seven pspautotests, eight PSP-SAFE-SCALAR-001), which fit no single calendar rule, and any other such month, year or day stops the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_day_of_week_check_valid_autotest
   - Evidence: PSPAutotests tests/rtc/lookup.expected (f573fe8c, recorded on a PSP): checkDayOfWeek
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-dow-month-0, rtc-dow-month-13, rtc-dow-month-13-again, rtc-dow-month-14, rtc-dow-month-24, rtc-dow-year-0, rtc-dow-year-10000, rtc-dow-day-1000001, rtc-dow-day-max)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
 - **`h_RtcGetTime64_t`** (`sceRtc`): `sceRtcGetTime64_t` (0xe1c93e47)
   - Limitation: out-of-range fields normalise by calendar carry, whose exact seconds are this arithmetic rather than measured; year 0, month 0 and day 0 are refused with 0x800001fe and a refusal leaves the output unwritten, both unmeasured; a NULL or unreadable date and an unwritable non-NULL output take the HLE guest-fault stop
   - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_rtc_time64_20261024
   - Evidence: hardware measurement 2026-10-24, PSP-3000 6.61 (valid dates convert; year 1 and pre-1970 dates return 0x800001fe; month 13, day 32, Feb 30 and hour 24 return 0 and normalise; NULL output returns 0; NULL date faults inside the module)
 - **`h_RtcGetTime_t`** (`sceRtc`): `sceRtcGetTime_t` (0x27c4594c)
-  - Limitation: converts in-range dates from 1970 whose seconds fit 32 bits, as one 32-bit word (the measured cell); a field out of range, a date before 1970, a value past 32 bits and a NULL or unmapped pointer are not measured for this function and stop the run by name
+  - Limitation: converts in-range dates from 1970 whose seconds fit 32 bits, as one 32-bit word; PSP-SAFE-SCALAR-001 measured eleven dates: 1601-01-01 00:00:00 and 1969-12-31 23:59:59 return 0x800001fe and write 0; 2106-02-07 06:28:16 (the first second past 32 bits) and 9999-12-31 23:59:59 return 0x800001fe and write 0x7fffffff; the runtime applies each answer to the valid dates between its two measured ends, which is its rule and not a measurement (the seconds count is monotone in the date and both ends give one answer); seven dates with one field out of range (2024-00-10, 2024-13-01, 2024-01-00, 2024-01-32, 2024-02-30, 2024-01-01 24:00:00 and 2024-01-01 00:00:60, microsecond 0) return 0 and write the measured seconds, and are answered as those exact dates only; every other date with a field out of range, a valid date before 1601 and a NULL or unmapped pointer are not measured and stop the run by name; where between 2038-01-19 03:14:08 and 2106-02-07 06:28:15 the PSP begins to refuse is not measured, and those dates still convert
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest
   - Evidence: PSPAutotests tests/rtc/convert.expected (2ed7c9c5, recorded on a PSP): checkRtcGetTime_t, 2012-09-20 07:12:15.000500 -> 1348125135
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-time-1969, rtc-time-1601, rtc-time-2106-past, rtc-time-9999 and the seven one-field-out-of-range cells, rtc-time-month-0 to rtc-time-second-60)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
 - **`h_RtcGetWin32FileTime`** (`sceRtc`): `sceRtcGetWin32FileTime` (0xcf561893)
   - Limitation: cold-first-call error reporting may differ from firmware (PSPAutotests convert.c notes errors report properly only after a prior error and that the rules are hard to determine); component bounds beyond the measured year/epoch/day-carry cases stay fail-closed rather than measured (#341)
 - **`h_RtcTickAddDays`** (`sceRtc`): `sceRtcTickAddDays` (0xe51b4b7a)
@@ -1348,9 +1363,11 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_tick_add_minutes_hours_weeks_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (f573fe8c, recorded on a PSP): checkRtcTickAddWeeks, the 8 fixed rows
 - **`h_RtcTickAddYears`** (`sceRtc`): `sceRtcTickAddYears` (0x42842c77)
-  - Limitation: moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); a source tick past year 9999 and NULL or unmapped pointers are not measured and stop the run by name
+  - Limitation: moves the calendar year with the leap day clamped to February 28, and a result outside years 1..9999 returns 0 with dest unwritten (pspautotests-recorded); PSP-SAFE-SCALAR-001 measured two source ticks past year 9999, 10000-01-01 00:00:00 and 10001-01-01 00:00:00, which follow the same rule; the runtime applies it to the source ticks between those two (the rest of year 10000), which is its rule and not a measurement; a source tick past 10001-01-01 00:00:00 and NULL or unmapped pointers are not measured and stop the run by name
   - Evidence: tests/native/hle_thread_selftest.c:test_rtc_time_t_add_years_resolution_autotest
   - Evidence: PSPAutotests tests/rtc/arithmetic.expected (2ed7c9c5, recorded on a PSP): checkRtcTickAddYears
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-SAFE-SCALAR-001: rtc-addyears-y10000-plus-0, rtc-addyears-y10000-plus-1, rtc-addyears-y10000-minus-1, rtc-addyears-y10001-minus-2)
+  - Evidence: tests/native/hle_thread_selftest.c:test_psp_measured_safe_scalar_rtc_20261117
 - **`h_UmdActivate`** (`sceUmd`): `sceUmdActivate` (0xc6183d47)
   - Limitation: the callback argument follows PPSSPP (0x22 when no compiled SDK version is set, 0x32 otherwise) and is host-selftested, not hardware measured; the activation result and argument checks are not hardware measured either
   - Evidence: tests/native/hle_thread_selftest.c:test_umd_unregister_callback

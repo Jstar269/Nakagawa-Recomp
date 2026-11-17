@@ -1043,9 +1043,7 @@ static void gui_cull_sync(void) {
     /* Confirmed only while no matrix was left alone; a full table is a partial run (contract 11.3.6). */
     ace_set_cull_untracked(ge_wide_cull_untracked());
     if (ge_wide_cull_untracked())
-        ace_feature_unavailable(ACE_FEATURE_CULL,
-                                "partial: more than 4096 widened matrices were in guest memory at once, "
-                                "later matrices were left alone");
+        ace_feature_unavailable(ACE_FEATURE_CULL, ACE_CULL_PARTIAL_REASON);
     else if (ge_wide_cull_calls())
         ace_confirm(ACE_FEATURE_CULL);   /* the title's hook has run */
 }

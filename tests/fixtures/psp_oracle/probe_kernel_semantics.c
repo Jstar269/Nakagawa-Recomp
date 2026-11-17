@@ -14,6 +14,13 @@
 //     past 32 bits. Read-only opens only; nothing is written to the Memory Stick or the disc,
 //     and the UMD is never activated or changed (the build pins sceUmdUser to the two state
 //     reads). Only counts, positions and return codes are recorded, never disc bytes.
+//   CASE=safe-scalar (PSP-SAFE-SCALAR-001): #2640 cells the recompiled-game runtime stops at
+//     by name or answers from an emulator: sceRtcCheckValid, sceRtcGetDayOfWeek,
+//     sceRtcGetTime_t and sceRtcTickAddYears on out-of-range dates,
+//     sceKernelGetThreadmanIdList for the thread event handler and alarm classes, and where
+//     sceKernelCreateTlspl places a pool with and without attribute 0x4000. No device, dialog,
+//     GE or radio call and no file but the host0 log; no handler is installed; an address is
+//     recorded only as a difference from a block the probe allocated.
 //
 // These cells live apart from probe_hle_issues.c because they do what that file may not:
 // they write and remove a Memory Stick file and directory, allocate partition memory, and
@@ -37,6 +44,9 @@
 #if PSP_ORACLE_CASE == 137
 #include <pspumd.h>
 #endif
+#if PSP_ORACLE_CASE == 141
+#include <psprtc.h>
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -52,6 +62,7 @@ PSP_HEAP_SIZE_KB(64);
 #define KS_CASE_KERNEL_SEM 127
 #define KS_CASE_IO_EOF 136
 #define KS_CASE_IO_UMD_EOF 137
+#define KS_CASE_SAFE_SCALAR 141
 #if PSP_ORACLE_CASE == KS_CASE_KERNEL_SEM
 #define HLE_CAMPAIGN_ID "kernel-semantics"
 #define HLE_TEST_ID "PSP-KERNEL-SEM-001"
@@ -64,6 +75,10 @@ PSP_HEAP_SIZE_KB(64);
 #define HLE_CAMPAIGN_ID "io-umd-eof"
 #define HLE_TEST_ID "PSP-IO-EOF-002"
 #define HLE_LOG "host0:/io_umd_eof_log.txt"
+#elif PSP_ORACLE_CASE == KS_CASE_SAFE_SCALAR
+#define HLE_CAMPAIGN_ID "safe-scalar"
+#define HLE_TEST_ID "PSP-SAFE-SCALAR-001"
+#define HLE_LOG "host0:/safe_scalar_log.txt"
 #else
 #error probe_kernel_semantics.c has no case for this PSP_ORACLE_CASE
 #endif
@@ -1115,6 +1130,534 @@ static void ku_io(void)
 }
 #endif /* KS_CASE_IO_UMD_EOF */
 
+#if PSP_ORACLE_CASE == KS_CASE_SAFE_SCALAR
+/* ---- safe-scalar: #2640 RTC edge dates, thread-list classes 9 and 10, TLS pool placement --- */
+/* One launch, user mode. The cells are ones src/rt answers with a named stop (hle_rtc.c,
+   hle_kernel_thread.c) or from an emulator (sceKernelCreateTlspl attribute 0x4000:
+   "PPSSPP-derived, not PSP-measured"). Nothing here opens a device or a file other than the
+   host0 log, starts a dialog, touches the GE or a radio, or installs a handler. Every pointer
+   the kernel receives is a probe-owned buffer or a documented optional NULL, and every month
+   stays within 0..24, so a table lookup by month cannot leave the module's own data. The order
+   is by rising cost of a failure: date arithmetic, two list reads, then the pools.
+   Every row is emitted on every run with a fixed word count; a word that does not apply is
+   HLE_SENTINEL, and a row whose object was not obtained is SKIP. No address is recorded: an
+   address appears only as a difference from a block the probe allocated at the low or the
+   high end of the user partition's free space, or as its low byte. */
+#define SS_PART 2
+#define SS_BRACKET 0x100u
+#define SS_TLS_BLOCK 0x100u
+#define SS_TLS_BLOCKS 4u
+#define SS_TLS_HIGHMEM 0x4000u
+#define SS_TLS_INFO_WORDS 16u
+#define SS_TLS_INFO_SIZE 60u
+#define SS_ID_SLOTS 16u
+#define SS_WORDS_MAX 8u
+#define SS_THREAD_STACK 0x2000
+#define SS_THREAD_PRIORITY 0x20
+#define SS_THREAD_WAIT_US 1000000u
+/* Tick 0 is 0001-01-01 00:00:00 and a tick is a microsecond: year 10000 begins 3652059 days
+   in, year 10001 3652425 days in. */
+#define SS_TICK_Y10000 315537897600000000ull
+#define SS_TICK_Y10001 315569520000000000ull
+
+/* The PSPSDK headers do not declare the TLS pool calls. Their import stubs are in
+   threadman_user_imports.S (ThreadManForUser) and kernel_library_tls_imports.S
+   (sceKernelGetTlsAddr, a Kernel_Library call). */
+SceUID sceKernelCreateTlspl(const char *name, int partition, SceUInt attr, SceSize block_size,
+                            SceUInt blocks, void *option);
+int sceKernelDeleteTlspl(SceUID uid);
+int sceKernelFreeTlspl(SceUID uid);
+int sceKernelReferTlsplStatus(SceUID uid, void *info);
+void *sceKernelGetTlsAddr(SceUID uid);
+
+/* ---- (a) RTC: the dates src/rt/hle_rtc.c stops at ------------------------------------------ */
+typedef struct {
+    const char *row;
+    uint16_t year, month, day, hour, minute, second;
+} SsDate;
+
+typedef struct {
+    const char *row;
+    int year, month, day;
+} SsDow;
+
+typedef struct {
+    const char *row;
+    uint64_t tick;
+    int years;
+} SsAdd;
+
+/* sceRtcCheckValid: a day of 0, and a day past the month's length but not past 31. The last
+   row also has hour 24, so the result shows which field is checked first. Words: year, month,
+   day, hour as passed. */
+#define SS_VALID_ROWS 7u
+#define SS_VALID_WORDS 4u
+static const SsDate k_ss_valid[SS_VALID_ROWS] = {
+    { "rtc-valid-day-0", 2024, 1, 0, 0, 0, 0 },
+    { "rtc-valid-feb-29-2023", 2023, 2, 29, 0, 0, 0 },
+    { "rtc-valid-feb-29-1900", 1900, 2, 29, 0, 0, 0 },
+    { "rtc-valid-feb-30-2024", 2024, 2, 30, 0, 0, 0 },
+    { "rtc-valid-feb-31-2024", 2024, 2, 31, 0, 0, 0 },
+    { "rtc-valid-apr-31-2024", 2024, 4, 31, 0, 0, 0 },
+    { "rtc-valid-day-0-hour-24", 2024, 1, 0, 24, 0, 0 },
+};
+
+/* sceRtcGetDayOfWeek: a month of 0 or 13..24 (one triple twice, to see whether the answer
+   repeats), a year of 0 and of 10000, and a day past 1000000. Words: year, month, day as
+   passed. */
+#define SS_DOW_ROWS 9u
+#define SS_DOW_WORDS 3u
+static const SsDow k_ss_dow[SS_DOW_ROWS] = {
+    { "rtc-dow-month-0", 2026, 0, 1 },
+    { "rtc-dow-month-13", 2026, 13, 1 },
+    { "rtc-dow-month-13-again", 2026, 13, 1 },
+    { "rtc-dow-month-14", 2026, 14, 15 },
+    { "rtc-dow-month-24", 2026, 24, 1 },
+    { "rtc-dow-year-0", 0, 1, 1 },
+    { "rtc-dow-year-10000", 10000, 1, 1 },
+    { "rtc-dow-day-1000001", 2026, 1, 1000001 },
+    { "rtc-dow-day-max", 2026, 1, 0x7fffffff },
+};
+
+/* sceRtcGetTime_t: a date before 1970, the first second past 32 bits (2106-02-07 06:28:16),
+   the last valid date, and one field out of range at a time. Words: the two output words,
+   both preset to HLE_SENTINEL, so an unwritten output and a 64-bit store are both visible. */
+#define SS_TIME_ROWS 11u
+#define SS_TIME_WORDS 2u
+static const SsDate k_ss_time[SS_TIME_ROWS] = {
+    { "rtc-time-1969", 1969, 12, 31, 23, 59, 59 },
+    { "rtc-time-1601", 1601, 1, 1, 0, 0, 0 },
+    { "rtc-time-2106-past", 2106, 2, 7, 6, 28, 16 },
+    { "rtc-time-9999", 9999, 12, 31, 23, 59, 59 },
+    { "rtc-time-month-0", 2024, 0, 10, 0, 0, 0 },
+    { "rtc-time-month-13", 2024, 13, 1, 0, 0, 0 },
+    { "rtc-time-day-0", 2024, 1, 0, 0, 0, 0 },
+    { "rtc-time-day-32", 2024, 1, 32, 0, 0, 0 },
+    { "rtc-time-feb-30", 2024, 2, 30, 0, 0, 0 },
+    { "rtc-time-hour-24", 2024, 1, 1, 24, 0, 0 },
+    { "rtc-time-second-60", 2024, 1, 1, 0, 0, 60 },
+};
+
+/* sceRtcTickAddYears from a source tick past year 9999. Words: the destination's low and high
+   words, both preset to HLE_SENTINEL, then the year count as passed. */
+#define SS_ADD_ROWS 4u
+#define SS_ADD_WORDS 3u
+static const SsAdd k_ss_add[SS_ADD_ROWS] = {
+    { "rtc-addyears-y10000-plus-0", SS_TICK_Y10000, 0 },
+    { "rtc-addyears-y10000-plus-1", SS_TICK_Y10000, 1 },
+    { "rtc-addyears-y10000-minus-1", SS_TICK_Y10000, -1 },
+    { "rtc-addyears-y10001-minus-2", SS_TICK_Y10001, -2 },
+};
+
+static void ss_date(ScePspDateTime *out, const SsDate *in)
+{
+    memset(out, 0, sizeof(*out));
+    out->year = in->year;
+    out->month = in->month;
+    out->day = in->day;
+    out->hour = in->hour;
+    out->minute = in->minute;
+    out->second = in->second;
+}
+
+static void ss_rtc(void)
+{
+    uint32_t w[SS_WORDS_MAX];
+    ScePspDateTime date;
+    for (unsigned i = 0; i < SS_VALID_ROWS; i++) {
+        const SsDate *in = &k_ss_valid[i];
+        ss_date(&date, in);
+        hle_step(in->row);
+        const int rc = sceRtcCheckValid(&date);
+        w[0] = in->year;
+        w[1] = in->month;
+        w[2] = in->day;
+        w[3] = in->hour;
+        hle_record(in->row, "PASS", (uint32_t)rc, w, SS_VALID_WORDS);
+    }
+    for (unsigned i = 0; i < SS_DOW_ROWS; i++) {
+        const SsDow *in = &k_ss_dow[i];
+        hle_step(in->row);
+        const int rc = sceRtcGetDayOfWeek(in->year, in->month, in->day);
+        w[0] = (uint32_t)in->year;
+        w[1] = (uint32_t)in->month;
+        w[2] = (uint32_t)in->day;
+        hle_record(in->row, "PASS", (uint32_t)rc, w, SS_DOW_WORDS);
+    }
+    for (unsigned i = 0; i < SS_TIME_ROWS; i++) {
+        const SsDate *in = &k_ss_time[i];
+        ss_date(&date, in);
+        w[0] = HLE_SENTINEL;
+        w[1] = HLE_SENTINEL;
+        hle_step(in->row);
+        const int rc = sceRtcGetTime_t(&date, (void *)w);
+        hle_record(in->row, "PASS", (uint32_t)rc, w, SS_TIME_WORDS);
+    }
+    for (unsigned i = 0; i < SS_ADD_ROWS; i++) {
+        const SsAdd *in = &k_ss_add[i];
+        uint64_t src = in->tick;
+        uint64_t dest = ((uint64_t)HLE_SENTINEL << 32) | HLE_SENTINEL;
+        hle_step(in->row);
+        const int rc = sceRtcTickAddYears(&dest, &src, in->years);
+        w[0] = (uint32_t)dest;
+        w[1] = (uint32_t)(dest >> 32);
+        w[2] = (uint32_t)in->years;
+        hle_record(in->row, "PASS", (uint32_t)rc, w, SS_ADD_WORDS);
+    }
+}
+
+/* ---- (b) sceKernelGetThreadmanIdList for the two classes src/rt has no table for ----------- */
+/* The thread event handler class (9) and the alarm class (10), with nothing of either class
+   created by the probe. Words: the count the call stored (preset to HLE_SENTINEL) and how many
+   of the 16 slots it wrote. The identifiers themselves are not recorded. */
+#define SS_TMID_WORDS 2u
+static void ss_tmid_row(const char *row, enum SceKernelIdListType type)
+{
+    uint32_t ids[SS_ID_SLOTS];
+    uint32_t w[SS_TMID_WORDS];
+    int count = (int)HLE_SENTINEL;
+    for (unsigned i = 0; i < SS_ID_SLOTS; i++) ids[i] = HLE_SENTINEL;
+    hle_step(row);
+    const int rc = sceKernelGetThreadmanIdList(type, (SceUID *)ids, (int)SS_ID_SLOTS, &count);
+    uint32_t written = 0;
+    for (unsigned i = 0; i < SS_ID_SLOTS; i++) written += ids[i] != HLE_SENTINEL;
+    w[0] = (uint32_t)count;
+    w[1] = written;
+    hle_record(row, "PASS", (uint32_t)rc, w, SS_TMID_WORDS);
+}
+
+static void ss_tmid(void)
+{
+    ss_tmid_row("tmid-9-list", SCE_KERNEL_TMID_ThreadEventHandler);
+    ss_tmid_row("tmid-10-list", SCE_KERNEL_TMID_Alarm);
+}
+
+/* ---- (c) TLS pools: where a pool lies with and without attribute 0x4000 ------------------- */
+/* The first row holds how far the free memory of the user partition is from one run: its total
+   free size minus its largest free block, 0 when it is one run. Two 0x100 blocks then bracket
+   the free space, one from its low end and one from its high end. A pool of four 0x100 blocks
+   is created without the attribute, and two with it. After each of the first two, a fresh
+   0x100 block from each end shows which end moved (tls-place-*), and sceKernelGetTlsAddr gives
+   the block's distance from both brackets (tls-addr-*). A second thread asks for its own block
+   of the first two pools. Everything is released: the blocks the threads hold, the three
+   pools, the brackets; the last row holds what the partition's free sizes differ by from the
+   start.
+   Every path emits all sixteen rows, each once and in this order: a row whose object was not
+   obtained is SKIP with its words left at HLE_SENTINEL (tools/test_psp_oracle.py walks every
+   path of these functions and counts). */
+enum {
+    SS_T_FRAGMENTATION, SS_T_BRACKETS, SS_T_CREATE_NORMAL, SS_T_PLACE_NORMAL, SS_T_ADDR_NORMAL,
+    SS_T_STATUS_NORMAL, SS_T_CREATE_HIGH, SS_T_PLACE_HIGH, SS_T_ADDR_HIGH, SS_T_STATUS_HIGH,
+    SS_T_CREATE_HIGH_2, SS_T_ADDR_HIGH_2, SS_T_THREAD, SS_T_FREE, SS_T_DELETE, SS_T_CLEANUP,
+};
+#define SS_TLS_ROWS 16u
+static const char *const k_ss_tls_rows[SS_TLS_ROWS] = {
+    "tls-fragmentation", "tls-brackets", "tls-create-normal", "tls-place-normal",
+    "tls-addr-normal", "tls-status-normal", "tls-create-high", "tls-place-high",
+    "tls-addr-high", "tls-status-high", "tls-create-high-2", "tls-addr-high-2", "tls-thread",
+    "tls-free", "tls-delete", "tls-cleanup",
+};
+static const uint32_t k_ss_tls_words[SS_TLS_ROWS] = {
+    1u, 7u, 2u, 6u, 6u, 8u, 2u, 6u, 6u, 8u, 2u, 6u, 6u, 3u, 3u, 4u,
+};
+
+typedef struct {
+    SceUID uid;
+    uint32_t head;
+} SsBlock;
+
+static SceUID s_ss_t_pool[2];
+static volatile uint32_t s_ss_t_addr[2];
+static volatile uint32_t s_ss_t_free[2];
+
+/* 1 when the identifier was obtained, else the value the call returned. */
+static uint32_t ss_obtained(SceUID uid)
+{
+    return uid > 0 ? 1u : (uint32_t)uid;
+}
+
+static void ss_fill(uint32_t *w)
+{
+    for (unsigned i = 0; i < SS_WORDS_MAX; i++) w[i] = HLE_SENTINEL;
+}
+
+static void ss_tls_rec(unsigned row, const char *status, uint32_t result, const uint32_t *w)
+{
+    hle_record(k_ss_tls_rows[row], status, result, w, k_ss_tls_words[row]);
+}
+
+static void ss_tls_skip_from(unsigned first)
+{
+    uint32_t w[SS_WORDS_MAX];
+    ss_fill(w);
+    for (unsigned r = first; r < SS_TLS_ROWS; r++) ss_tls_rec(r, "SKIP", 0u, w);
+}
+
+static SsBlock ss_block(const char *name, int type)
+{
+    SsBlock b;
+    b.uid = sceKernelAllocPartitionMemory(SS_PART, name, type, SS_BRACKET, NULL);
+    b.head = b.uid > 0 ? (uint32_t)(uintptr_t)sceKernelGetBlockHeadAddr(b.uid) : 0u;
+    return b;
+}
+
+static uint32_t ss_block_free(const SsBlock *b)
+{
+    return b->uid > 0 ? (uint32_t)sceKernelFreePartitionMemory(b->uid) : HLE_SENTINEL;
+}
+
+/* Word: the partition's total free size minus its largest free block, before the probe
+   allocates anything in it. 0 means the free memory is one run, so the two brackets are its
+   two ends and the tls-place rows read as their comment says. Anything else means several
+   runs (or that the two calls round differently): the tls-addr rows then decide where a pool
+   lies and the tls-place rows are a cross-check only. A size difference, not an address. */
+static void ss_tls_fragmentation(void)
+{
+    uint32_t w[SS_WORDS_MAX];
+    ss_fill(w);
+    hle_step(k_ss_tls_rows[SS_T_FRAGMENTATION]);
+    const uint32_t total = (uint32_t)sceKernelTotalFreeMemSize();
+    w[0] = total - (uint32_t)sceKernelMaxFreeMemSize();
+    ss_tls_rec(SS_T_FRAGMENTATION, "PASS", 0u, w);
+}
+
+/* Result: 1 when the pool was created, else the error. Words: how much the partition's total
+   and largest free sizes fell across the create. */
+static SceUID ss_tls_create(unsigned row, const char *name, SceUInt attr)
+{
+    uint32_t w[SS_WORDS_MAX];
+    ss_fill(w);
+    hle_step(k_ss_tls_rows[row]);
+    const uint32_t total = (uint32_t)sceKernelTotalFreeMemSize();
+    const uint32_t max = (uint32_t)sceKernelMaxFreeMemSize();
+    const SceUID uid = sceKernelCreateTlspl(name, SS_PART, attr, SS_TLS_BLOCK, SS_TLS_BLOCKS,
+                                            NULL);
+    w[0] = total - (uint32_t)sceKernelTotalFreeMemSize();
+    w[1] = max - (uint32_t)sceKernelMaxFreeMemSize();
+    ss_tls_rec(row, "PASS", ss_obtained(uid), w);
+    return uid;
+}
+
+/* Words: whether each fresh block was obtained, the fresh low block's head minus the low
+   bracket's, the high bracket's head minus the fresh high block's, and the two frees. With
+   nothing new at an end the distance is one bracket, 0x100; a pool there adds its size. That
+   reading needs the free memory to have been one run (tls-fragmentation word 0): a block
+   asked from an end takes the first hole it fits, so with several runs a pool can lie at an
+   end and still leave this distance at 0x100. The tls-addr rows then decide. */
+static void ss_tls_place(unsigned row, SceUID pool, const SsBlock *lo, const SsBlock *hi)
+{
+    uint32_t w[SS_WORDS_MAX];
+    ss_fill(w);
+    if (pool <= 0) {
+        ss_tls_rec(row, "SKIP", 0u, w);
+        return;
+    }
+    hle_step(k_ss_tls_rows[row]);
+    const SsBlock low = ss_block("nkssl2", PSP_SMEM_Low);
+    const SsBlock high = ss_block("nkssh2", PSP_SMEM_High);
+    w[0] = ss_obtained(low.uid);
+    w[1] = ss_obtained(high.uid);
+    if (low.uid > 0) {
+        w[2] = low.head - lo->head;
+    }
+    if (high.uid > 0) {
+        w[3] = hi->head - high.head;
+    }
+    w[4] = ss_block_free(&low);
+    w[5] = ss_block_free(&high);
+    ss_tls_rec(row, "PASS", 0u, w);
+}
+
+/* Words: whether an address came back, the address minus the low bracket's head, the high
+   bracket's head minus the address, the address's low byte, whether a second call gave the
+   same address, and the address minus that of the pool named in ref (0: none). */
+static uint32_t ss_tls_addr(unsigned row, SceUID pool, const SsBlock *lo, const SsBlock *hi,
+                            uint32_t ref)
+{
+    uint32_t w[SS_WORDS_MAX];
+    ss_fill(w);
+    if (pool <= 0) {
+        ss_tls_rec(row, "SKIP", 0u, w);
+        return 0u;
+    }
+    hle_step(k_ss_tls_rows[row]);
+    const uint32_t addr = (uint32_t)(uintptr_t)sceKernelGetTlsAddr(pool);
+    const uint32_t again = (uint32_t)(uintptr_t)sceKernelGetTlsAddr(pool);
+    w[0] = addr != 0u;
+    if (addr != 0u) {
+        w[1] = addr - lo->head;
+        w[2] = hi->head - addr;
+        w[3] = addr & 0xffu;
+        w[4] = again == addr;
+        if (ref != 0u) {
+            w[5] = addr - ref;
+        }
+    }
+    ss_tls_rec(row, "PASS", 0u, w);
+    return addr;
+}
+
+/* Words: the status structure's size word, then attr, index, block size, block count, free
+   blocks and waiting threads, then the word after the 60 bytes asked for (preset to
+   HLE_SENTINEL). The name is the probe's own and is not recorded.
+   The buffer must hold more than the structure whatever the size word says: a PSP writes all
+   60 bytes for any non-zero size word (pspautotests tests/threads/tls/refer.expected), so a
+   shorter buffer would be overrun on the probe's stack. */
+static void ss_tls_status(unsigned row, SceUID pool)
+{
+    uint32_t w[SS_WORDS_MAX];
+    uint32_t info[SS_TLS_INFO_WORDS];
+    _Static_assert(SS_TLS_INFO_SIZE == 60u, "SceKernelTlsplInfo is 60 bytes");
+    _Static_assert(sizeof(info) >= SS_TLS_INFO_SIZE + sizeof(info[0]),
+                   "the status buffer holds the 60 bytes the kernel writes and one guard word");
+    ss_fill(w);
+    if (pool <= 0) {
+        ss_tls_rec(row, "SKIP", 0u, w);
+        return;
+    }
+    for (unsigned i = 0; i < SS_TLS_INFO_WORDS; i++) info[i] = HLE_SENTINEL;
+    info[0] = SS_TLS_INFO_SIZE;
+    hle_step(k_ss_tls_rows[row]);
+    const int rc = sceKernelReferTlsplStatus(pool, info);
+    w[0] = info[0];
+    for (unsigned i = 0; i < 6; i++) w[1 + i] = info[9 + i];
+    w[7] = info[15];
+    ss_tls_rec(row, "PASS", (uint32_t)rc, w);
+}
+
+/* The second thread: its own block of each pool, then that block freed. */
+static int ss_tls_thread(SceSize args, void *argp)
+{
+    (void)args;
+    (void)argp;
+    for (unsigned i = 0; i < 2; i++) {
+        if (s_ss_t_pool[i] > 0) {
+            s_ss_t_addr[i] = (uint32_t)(uintptr_t)sceKernelGetTlsAddr(s_ss_t_pool[i]);
+            s_ss_t_free[i] = (uint32_t)sceKernelFreeTlspl(s_ss_t_pool[i]);
+        }
+    }
+    sceKernelExitThread(0);
+    return 0;
+}
+
+/* Result: sceKernelStartThread. Words: whether the thread was created, the bounded wait for
+   its end (the start's own error when it did not start), its address in each of the two pools
+   minus the main thread's, and its two frees. Each pool has four blocks and two threads ask,
+   so no request can wait for a block. */
+static void ss_tls_second_thread(SceUID normal, SceUID high, uint32_t addr_normal,
+                                 uint32_t addr_high)
+{
+    uint32_t w[SS_WORDS_MAX];
+    ss_fill(w);
+    if (normal <= 0 && high <= 0) {
+        ss_tls_rec(SS_T_THREAD, "SKIP", 0u, w);
+        return;
+    }
+    s_ss_t_pool[0] = normal;
+    s_ss_t_pool[1] = high;
+    for (unsigned i = 0; i < 2; i++) {
+        s_ss_t_addr[i] = 0u;
+        s_ss_t_free[i] = HLE_SENTINEL;
+    }
+    hle_step(k_ss_tls_rows[SS_T_THREAD]);
+    const SceUID thid = sceKernelCreateThread("nkss_tls", ss_tls_thread, SS_THREAD_PRIORITY,
+                                              SS_THREAD_STACK, 0, NULL);
+    w[0] = ss_obtained(thid);
+    if (thid <= 0) {
+        ss_tls_rec(SS_T_THREAD, "SKIP", 0u, w);
+        return;
+    }
+    const int started = sceKernelStartThread(thid, 0, NULL);
+    SceUInt timeout = SS_THREAD_WAIT_US;
+    const int waited = started >= 0 ? sceKernelWaitThreadEnd(thid, &timeout) : started;
+    w[1] = (uint32_t)waited;
+    if (started < 0) {
+        /* Never started: the thread is dormant and is deleted as it is. */
+        (void)sceKernelDeleteThread(thid);
+    } else if (waited >= 0) {
+        if (s_ss_t_addr[0] != 0u && addr_normal != 0u) {
+            w[2] = s_ss_t_addr[0] - addr_normal;
+        }
+        if (s_ss_t_addr[1] != 0u && addr_high != 0u) {
+            w[3] = s_ss_t_addr[1] - addr_high;
+        }
+        w[4] = s_ss_t_free[0];
+        w[5] = s_ss_t_free[1];
+        (void)sceKernelDeleteThread(thid);
+    } else {
+        (void)sceKernelTerminateDeleteThread(thid);
+    }
+    ss_tls_rec(SS_T_THREAD, "PASS", (uint32_t)started, w);
+}
+
+static void ss_tls(void)
+{
+    uint32_t w[SS_WORDS_MAX];
+    ss_tls_fragmentation();
+    ss_fill(w);
+    hle_step(k_ss_tls_rows[SS_T_BRACKETS]);
+    const uint32_t total0 = (uint32_t)sceKernelTotalFreeMemSize();
+    const uint32_t max0 = (uint32_t)sceKernelMaxFreeMemSize();
+    const SsBlock lo = ss_block("nksslo", PSP_SMEM_Low);
+    const SsBlock hi = ss_block("nksshi", PSP_SMEM_High);
+    w[0] = ss_obtained(lo.uid);
+    w[1] = ss_obtained(hi.uid);
+    if (lo.uid > 0 && hi.uid > 0) {
+        w[2] = hi.head - lo.head;
+        w[3] = lo.head & 0xffu;
+        w[4] = hi.head & 0xffu;
+    }
+    w[5] = total0 - (uint32_t)sceKernelTotalFreeMemSize();
+    w[6] = max0 - (uint32_t)sceKernelMaxFreeMemSize();
+    if (lo.uid <= 0 || hi.uid <= 0) {
+        ss_tls_rec(SS_T_BRACKETS, "SKIP", 0u, w);
+        (void)ss_block_free(&lo);
+        (void)ss_block_free(&hi);
+        ss_tls_skip_from(SS_T_CREATE_NORMAL);
+        return;
+    }
+    ss_tls_rec(SS_T_BRACKETS, "PASS", 0u, w);
+
+    const SceUID normal = ss_tls_create(SS_T_CREATE_NORMAL, "nktls0", 0u);
+    ss_tls_place(SS_T_PLACE_NORMAL, normal, &lo, &hi);
+    const uint32_t addr_normal = ss_tls_addr(SS_T_ADDR_NORMAL, normal, &lo, &hi, 0u);
+    ss_tls_status(SS_T_STATUS_NORMAL, normal);
+
+    const SceUID high = ss_tls_create(SS_T_CREATE_HIGH, "nktls1", SS_TLS_HIGHMEM);
+    ss_tls_place(SS_T_PLACE_HIGH, high, &lo, &hi);
+    const uint32_t addr_high = ss_tls_addr(SS_T_ADDR_HIGH, high, &lo, &hi, addr_normal);
+    ss_tls_status(SS_T_STATUS_HIGH, high);
+
+    const SceUID high2 = ss_tls_create(SS_T_CREATE_HIGH_2, "nktls2", SS_TLS_HIGHMEM);
+    (void)ss_tls_addr(SS_T_ADDR_HIGH_2, high2, &lo, &hi, addr_high);
+
+    ss_tls_second_thread(normal, high, addr_normal, addr_high);
+
+    /* The main thread's block of each pool, then the pools, then the brackets. */
+    ss_fill(w);
+    hle_step(k_ss_tls_rows[SS_T_FREE]);
+    w[0] = normal > 0 ? (uint32_t)sceKernelFreeTlspl(normal) : HLE_SENTINEL;
+    w[1] = high > 0 ? (uint32_t)sceKernelFreeTlspl(high) : HLE_SENTINEL;
+    w[2] = high2 > 0 ? (uint32_t)sceKernelFreeTlspl(high2) : HLE_SENTINEL;
+    ss_tls_rec(SS_T_FREE, "PASS", 0u, w);
+
+    ss_fill(w);
+    hle_step(k_ss_tls_rows[SS_T_DELETE]);
+    w[0] = normal > 0 ? (uint32_t)sceKernelDeleteTlspl(normal) : HLE_SENTINEL;
+    w[1] = high > 0 ? (uint32_t)sceKernelDeleteTlspl(high) : HLE_SENTINEL;
+    w[2] = high2 > 0 ? (uint32_t)sceKernelDeleteTlspl(high2) : HLE_SENTINEL;
+    ss_tls_rec(SS_T_DELETE, "PASS", 0u, w);
+
+    ss_fill(w);
+    hle_step(k_ss_tls_rows[SS_T_CLEANUP]);
+    w[0] = ss_block_free(&lo);
+    w[1] = ss_block_free(&hi);
+    w[2] = total0 - (uint32_t)sceKernelTotalFreeMemSize();
+    w[3] = max0 - (uint32_t)sceKernelMaxFreeMemSize();
+    ss_tls_rec(SS_T_CLEANUP, "PASS", 0u, w);
+}
+#endif /* KS_CASE_SAFE_SCALAR */
+
 static int hle_run(void)
 {
 #if PSP_ORACLE_CASE == KS_CASE_IO_EOF
@@ -1122,6 +1665,11 @@ static int hle_run(void)
     return 1;
 #elif PSP_ORACLE_CASE == KS_CASE_IO_UMD_EOF
     ku_io();
+    return 1;
+#elif PSP_ORACLE_CASE == KS_CASE_SAFE_SCALAR
+    ss_rtc();
+    ss_tmid();
+    ss_tls();
     return 1;
 #else
     ks_subintr_order();

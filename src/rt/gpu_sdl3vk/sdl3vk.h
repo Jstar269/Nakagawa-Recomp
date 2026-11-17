@@ -113,6 +113,8 @@ typedef struct {
  * device needed). max_dim bounds the prescale image (maxImageDimension2D); a sharp prescale
  * beyond it falls back to one linear blit. */
 Sdl3VkPresentPlan sdl3vk_present_plan(int mode, int srcw, int srch, int dw, int dh, int max_dim);
+/* Whether the blit destination leaves any swapchain pixels to clear before presenting. */
+int sdl3vk_present_needs_clear(const Sdl3VkPresentPlan *plan, int dw, int dh);
 
 /* In-game performance HUD control (F3 / SR_HUD=1) */
 int  sdl3vk_hud_is_enabled(void);

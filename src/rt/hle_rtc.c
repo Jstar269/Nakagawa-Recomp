@@ -283,24 +283,76 @@ static uint32_t h_RtcGetTime64_t(CpuState *s) {
  * the microseconds dropped, written as one 32-bit word. Measured on a PSP by pspautotests
  * tests/rtc/convert.expected (rev 2ed7c9c5, checkRtcGetTime_t): 2012-09-20 07:12:15.000500
  * returns 0 and writes 1348125135, the same seconds sceRtcGetTime64_t gives for that date.
- * Only in-range dates on or after the epoch whose seconds fit the 32-bit word are measured.
- * What the PSP does with a field out of range, a date before 1970, a value past 32 bits, or a
- * NULL or unmapped pointer is not measured for this function (sceRtcGetTime64_t's measured
- * answers are not assumed to carry over), so each of those stops the run by name. */
+ * PSP-measured 2026-11-17 (PSP-3000, PSP-SAFE-SCALAR-001; docs/HARDWARE_ORACLE.md), eleven dates,
+ * each with a microsecond field of 0, the word after the output untouched in every cell:
+ *   - rtc-time-1601 and rtc-time-1969: 1601-01-01 00:00:00 and 1969-12-31 23:59:59 return
+ *     0x800001fe and write 0. Only those two dates were measured. A valid date between them takes
+ *     the same answer: that is this runtime's rule, not a measurement, and it rests on the
+ *     seconds count being monotone in the date with one answer at both ends.
+ *   - rtc-time-2106-past and rtc-time-9999: 2106-02-07 06:28:16, the first second past 32 bits,
+ *     and 9999-12-31 23:59:59 return 0x800001fe and write 0x7fffffff. Only those two dates were
+ *     measured; a valid date between them takes the same answer on the same ground.
+ *   - seven dates with one field out of range return 0 and write the seconds below, which are
+ *     what the fields give when a month of 0 reads as January, a month of 13 as December and
+ *     every other field is added as it stands. They are answered as exact dates (rtc_time_t_cell):
+ *     the same out-of-range field at any other date is not measured.
+ * Not measured, so each stops the run by name: every other date with a field out of range (a
+ * year outside 1..9999 among them), a valid date before 1601, and a NULL or unmapped pointer.
+ * Valid dates from 2038-01-19 03:14:08 to 2106-02-07 06:28:15 keep the conversion they had: where
+ * in that range the PSP begins to refuse is not measured. */
+static int rtc_time_t_cell(uint32_t year, uint32_t month, uint32_t day, uint32_t hour, uint32_t minute,
+                           uint32_t second, uint32_t microsecond, uint32_t *seconds) {
+    static const struct { uint16_t year, month, day, hour, minute, second; uint32_t seconds; } cells[] = {
+        { 2024, 0, 10, 0, 0, 0, 0x659dde00u },    /* rtc-time-month-0 */
+        { 2024, 13, 1, 0, 0, 0, 0x674ba700u },    /* rtc-time-month-13 */
+        { 2024, 1, 0, 0, 0, 0, 0x6590af00u },     /* rtc-time-day-0 */
+        { 2024, 1, 32, 0, 0, 0, 0x65badf00u },    /* rtc-time-day-32 */
+        { 2024, 2, 30, 0, 0, 0, 0x65e11a80u },    /* rtc-time-feb-30 */
+        { 2024, 1, 1, 24, 0, 0, 0x65935200u },    /* rtc-time-hour-24 */
+        { 2024, 1, 1, 0, 0, 60, 0x659200bcu },    /* rtc-time-second-60 */
+    };
+    if (microsecond != 0u) return 0;
+    for (size_t i = 0; i < sizeof cells / sizeof cells[0]; i++) {
+        if (cells[i].year == year && cells[i].month == month && cells[i].day == day &&
+            cells[i].hour == hour && cells[i].minute == minute && cells[i].second == second) {
+            *seconds = cells[i].seconds;
+            return 1;
+        }
+    }
+    return 0;
+}
 static uint32_t h_RtcGetTime_t(CpuState *s) {
     if (!A0 || !sr_guest_span_readable(A0, 16u))
         return hle_unmodelled_stop("sceRtcGetTime_t", "with an unreadable date 0x%08x is not measured", A0);
     if (!A1 || !sr_guest_span_writable(A1, 4u))
         return hle_unmodelled_stop("sceRtcGetTime_t", "with an unwritable output 0x%08x is not measured", A1);
-    RtcDateTime value;
-    if (rtc_read_datetime(A0, &value) != 0)
-        return hle_unmodelled_stop("sceRtcGetTime_t", "with a date field out of range is not measured");
-    uint64_t tick = rtc_datetime_to_tick(&value);
-    if (tick < RTC_UNIX_EPOCH_TICK)
-        return hle_unmodelled_stop("sceRtcGetTime_t", "with a date before 1970 is not measured");
-    uint64_t seconds = (tick - RTC_UNIX_EPOCH_TICK) / 1000000u;
-    if (seconds > UINT32_MAX)
-        return hle_unmodelled_stop("sceRtcGetTime_t", "with a date past the 32-bit range is not measured");
+    const uint32_t year = MEM_R16(A0 + 0u), month = MEM_R16(A0 + 2u), day = MEM_R16(A0 + 4u);
+    const uint32_t hour = MEM_R16(A0 + 6u), minute = MEM_R16(A0 + 8u), second = MEM_R16(A0 + 10u);
+    const uint32_t microsecond = MEM_R32(A0 + 12u);
+    if (year < 1u || year > 9999u || month < 1u || month > 12u || day < 1u ||
+        day > rtc_days_in_month(year, month) || hour > 23u || minute > 59u || second > 59u ||
+        microsecond > 999999u) {
+        uint32_t measured;
+        if (!rtc_time_t_cell(year, month, day, hour, minute, second, microsecond, &measured))
+            return hle_unmodelled_stop("sceRtcGetTime_t", "with a field out of range (%u-%u-%u %u:%u:%u, "
+                                       "microsecond %u) is not measured",
+                                       year, month, day, hour, minute, second, microsecond);
+        MEM_W32(A1, measured);
+        return 0;
+    }
+    const RtcDateTime date = { year, month, day, hour, minute, second, 0u };
+    const int64_t seconds = (int64_t)(rtc_datetime_to_tick(&date) / 1000000u) -
+                            (int64_t)(RTC_UNIX_EPOCH_TICK / 1000000u);
+    if (seconds < 0) {
+        if (year < 1601u)
+            return hle_unmodelled_stop("sceRtcGetTime_t", "with a date before 1601 is not measured");
+        MEM_W32(A1, 0u);
+        return RTC_INVALID_VALUE;
+    }
+    if (seconds > (int64_t)UINT32_MAX) {
+        MEM_W32(A1, 0x7fffffffu);
+        return RTC_INVALID_VALUE;
+    }
     MEM_W32(A1, (uint32_t)seconds);
     return 0;
 }
@@ -313,18 +365,26 @@ static uint32_t h_RtcGetTime_t(CpuState *s) {
  *     0002-01-01, + 2000 is 3970-01-01, - 20 is 1950-01-01; 1850 to 2300 + 1 move one year;
  *   - a result year below 1 (1970 - 1970 and beyond, 10 - 10) or above 9999 (9998 + 2) still
  *     returns 0 but leaves dest holding 0x1337, unwritten.
- * A source tick past year 9999, and a NULL or unmapped pointer, are not measured, so each stops
- * the run by name. */
+ * PSP-measured 2026-11-17 (PSP-3000, PSP-SAFE-SCALAR-001; docs/HARDWARE_ORACLE.md), dest preset to
+ * a sentinel, two source ticks past year 9999, which follow the same rule. From 10000-01-01
+ * 00:00:00, + 0 and + 1 return 0 and leave dest unwritten (rtc-addyears-y10000-plus-0,
+ * rtc-addyears-y10000-plus-1) and - 1 writes the tick of 9999-01-01 (rtc-addyears-y10000-minus-1);
+ * from 10001-01-01 00:00:00, - 2 writes that tick too (rtc-addyears-y10001-minus-2). A source
+ * tick between those two, the rest of year 10000, takes the rule as well: that is this runtime's
+ * rule, not a measurement, for ticks that lie between two measured sources which follow it.
+ * A source tick past 10001-01-01 00:00:00 (RTC_ADD_YEARS_LAST_MEASURED_SOURCE), the last source
+ * measured, and a NULL or unmapped pointer are not measured, so each stops the run by name. */
+#define RTC_ADD_YEARS_LAST_MEASURED_SOURCE 315569520000000000ull   /* 10001-01-01 00:00:00.000000 */
 static uint32_t h_RtcTickAddYears(CpuState *s) {
     uint64_t tick;
     if (!rtc_read_u64(A1, &tick))
         return hle_unmodelled_stop("sceRtcTickAddYears", "with an unreadable source 0x%08x is not measured", A1);
     if (!A0 || !sr_guest_span_writable(A0, 8u))
         return hle_unmodelled_stop("sceRtcTickAddYears", "with an unwritable destination 0x%08x is not measured", A0);
+    if (tick > RTC_ADD_YEARS_LAST_MEASURED_SOURCE)
+        return hle_unmodelled_stop("sceRtcTickAddYears", "from a tick past 10001-01-01 00:00:00 is not measured");
     RtcDateTime value;
     rtc_tick_to_datetime(tick, &value);
-    if (value.year > 9999u)
-        return hle_unmodelled_stop("sceRtcTickAddYears", "from a tick past year 9999 is not measured");
     int64_t year = (int64_t)value.year + (int32_t)A2;
     if (year < 1 || year > 9999) return 0;
     value.year = (uint32_t)year;
@@ -379,8 +439,13 @@ static uint32_t h_RtcTickAddWeeks(CpuState *s) {
  * 0; a year 10000 or a field read as a huge unsigned value (the test stores -98 and the like in the
  * 16-bit fields) fails with year -1, month -2, day -3, hour -4, minute -5, second -6 and
  * microsecond -7, in that order, the first failing field deciding ("Very invalid Date" is -1).
- * A day of 0, or one from the month's length to 31, is not measured; neither is a NULL or unmapped
- * pointer, so each stops the run by name. */
+ * PSP-measured 2026-11-17 (PSP-3000, PSP-SAFE-SCALAR-001; docs/HARDWARE_ORACLE.md): a day of 0
+ * (rtc-valid-day-0) and a day past the month's length (rtc-valid-feb-29-2023,
+ * rtc-valid-feb-29-1900, rtc-valid-feb-30-2024, rtc-valid-feb-31-2024, rtc-valid-apr-31-2024) are
+ * -3 as well, and a day of 0 with an hour of 24 is still -3 (rtc-valid-day-0-hour-24). The cells
+ * are January, February in a leap, a plain and a century year, and April; the other months take
+ * the same rule from the month table valid dates already use.
+ * A NULL or unmapped pointer is not measured and stops the run by name. */
 static uint32_t h_RtcCheckValid(CpuState *s) {
     (void)s;
     if (!A0 || !sr_guest_span_readable(A0, 16u))
@@ -388,9 +453,7 @@ static uint32_t h_RtcCheckValid(CpuState *s) {
     uint32_t year = MEM_R16(A0 + 0u), month = MEM_R16(A0 + 2u), day = MEM_R16(A0 + 4u);
     if (year < 1u || year > 9999u) return (uint32_t)-1;
     if (month < 1u || month > 12u) return (uint32_t)-2;
-    if (day > 31u) return (uint32_t)-3;
-    if (day < 1u || day > rtc_days_in_month(year, month))
-        return hle_unmodelled_stop("sceRtcCheckValid", "with day %u of month %u is not measured", day, month);
+    if (day < 1u || day > rtc_days_in_month(year, month)) return (uint32_t)-3;
     if (MEM_R16(A0 + 6u) > 23u) return (uint32_t)-4;
     if (MEM_R16(A0 + 8u) > 59u) return (uint32_t)-5;
     if (MEM_R16(A0 + 10u) > 59u) return (uint32_t)-6;
@@ -401,23 +464,34 @@ static uint32_t h_RtcCheckValid(CpuState *s) {
 /* sceRtcGetDayOfWeek(year, month, day): 0 is Sunday. Measured on a PSP by PSPAutotests
  * tests/rtc/lookup.expected (f573fe8c, checkDayOfWeek): 2010-04-27 is 2, and a day outside the
  * month carries linearly (2000-01-00 is 5, 2000-01-2458 is 6, 2001-01-00 is 0, 2001-01-2458 is 1).
- * A month of 0 or above 12 is measured only at seven exact triples, answered from that table; any
- * other such month, and a year outside 1..9999, is not measured and stops the run by name. */
+ * A month of 0 or above 12, a year outside 1..9999 and a day above 1000000 are measured only at
+ * exact triples, answered from the table: seven from lookup.expected, and eight PSP-measured
+ * 2026-11-17 (PSP-3000, PSP-SAFE-SCALAR-001; docs/HARDWARE_ORACLE.md): rtc-dow-month-0,
+ * rtc-dow-month-13 (the same answer on a second call, rtc-dow-month-13-again), rtc-dow-month-14,
+ * rtc-dow-month-24, rtc-dow-year-0, rtc-dow-year-10000, rtc-dow-day-1000001 and rtc-dow-day-max.
+ * The triples do not fit one calendar rule (month 13 answers as the next January, month 0 not as
+ * the last December; day 1000001 carries linearly, day 0x7fffffff does not), so no rule is drawn
+ * from them: any other such month, year or day is not measured and stops the run by name. */
 static uint32_t h_RtcGetDayOfWeek(CpuState *s) {
     (void)s;
     uint32_t year = A0, month = A1, day = A2;
-    if (month < 1u || month > 12u) {
+    const int month_out = month < 1u || month > 12u;
+    if (month_out || year < 1u || year > 9999u || day > 1000000u) {
         static const struct { uint32_t y, m, d, dow; } measured[] = {
             { 166970016u, 1024u, 0u, 3u },
             { 2000u, 0u, 0u, 1u }, { 2000u, 573u, 0u, 0u }, { 2000u, 4587u, 2458u, 0u },
             { 2001u, 0u, 0u, 2u }, { 2001u, 573u, 0u, 1u }, { 2001u, 4587u, 2458u, 1u },
+            /* PSP-SAFE-SCALAR-001 */
+            { 2026u, 0u, 1u, 6u }, { 2026u, 13u, 1u, 5u }, { 2026u, 14u, 15u, 1u }, { 2026u, 24u, 1u, 6u },
+            { 0u, 1u, 1u, 0u }, { 10000u, 1u, 1u, 6u },
+            { 2026u, 1u, 1000001u, 5u }, { 2026u, 1u, 0x7fffffffu, 0u },
         };
         for (size_t i = 0; i < sizeof measured / sizeof measured[0]; i++)
             if (measured[i].y == year && measured[i].m == month && measured[i].d == day) return measured[i].dow;
-        return hle_unmodelled_stop("sceRtcGetDayOfWeek", "with month %u (year %u, day %u) is not measured", month, year, day);
-    }
-    if (year < 1u || year > 9999u || day > 1000000u)
+        if (month_out)
+            return hle_unmodelled_stop("sceRtcGetDayOfWeek", "with month %u (year %u, day %u) is not measured", month, year, day);
         return hle_unmodelled_stop("sceRtcGetDayOfWeek", "with year %u, day %u is not measured", year, day);
+    }
     /* 0001-01-01 is a Monday in the proleptic Gregorian calendar. */
     RtcDateTime value = { year, month, 1u, 0u, 0u, 0u, 0u };
     int64_t days = (int64_t)(rtc_datetime_to_tick(&value) / 86400000000ull) + (int64_t)day - 1;

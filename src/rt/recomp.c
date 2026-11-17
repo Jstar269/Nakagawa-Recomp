@@ -96,11 +96,13 @@ static SrProfEntry *prof_find(uint32_t pc) {
 static int g_prof_final_dumped;
 
 void sr_profile_init(void) {
-    memset(g_prof_table, 0, sizeof(g_prof_table));
-    g_prof_lookup_drops = 0;
-    g_prof_final_dumped = 0;
     const char *e = getenv("SR_PROFILE");
     g_prof_enabled = (e != NULL && strcmp(e, "0") != 0) || ((g_sr_debug & 0x04) != 0);
+    if (g_prof_enabled) {
+        memset(g_prof_table, 0, sizeof(g_prof_table));
+    }
+    g_prof_lookup_drops = 0;
+    g_prof_final_dumped = 0;
     if (g_prof_enabled) {
         fprintf(stderr, "[profiler] Hot-path profiling enabled (SR_PROFILE=1 or SR_DEBUG & 0x04)\n");
         atexit(sr_profile_dump_final);
@@ -134,6 +136,7 @@ void sr_profile_dump(void) {
 }
 
 void sr_profile_block(uint32_t target_pc) {
+    if (!g_prof_enabled) return;
     SrProfEntry *entry = prof_lookup(target_pc);
     if (entry) {
         entry->block_count++;
@@ -147,6 +150,7 @@ void sr_profile_test_reset(void) {
 }
 
 uint64_t sr_profile_test_block_count(uint32_t pc) {
+    if (!g_prof_enabled) return 0;
     SrProfEntry *entry = prof_find(pc);
     return entry ? entry->block_count : 0;
 }
