@@ -4374,7 +4374,7 @@
         "id": "PSP-SAFE-SCALAR-001",
         "status": "implemented",
         "hardware_evidence": "NOT_RUN",
-        "evidence_note": "Built as the fixed-shape case 141 stream: 48 records and the done record. No hardware run is cited.",
+        "evidence_note": "Built as the fixed-shape case 141 stream: 49 records and the done record. No hardware run is cited.",
         "group": "kernel",
         "source": "tests/fixtures/psp_oracle/probe_kernel_semantics.c",
         "prx": "safe_scalar.prx",
@@ -4397,7 +4397,9 @@
           "sceKernelCreateThread",
           "sceKernelStartThread",
           "sceKernelWaitThreadEnd",
-          "sceKernelDeleteThread"
+          "sceKernelDeleteThread",
+          "sceKernelTerminateDeleteThread",
+          "sceKernelExitThread"
         ],
         "diagnostic_case_ids": [
           "safe-scalar"
@@ -4436,6 +4438,7 @@
           "rtc-addyears-y10001-minus-2",
           "tmid-9-list",
           "tmid-10-list",
+          "tls-fragmentation",
           "tls-brackets",
           "tls-create-normal",
           "tls-place-normal",
@@ -4453,7 +4456,7 @@
           "tls-cleanup",
           "safe-scalar-done"
         ],
-        "invariant": "Raw results of #2640 cells the runtime stops at by name or answers from an emulator, with no expected value compared: sceRtcCheckValid for a day of 0 and a day past the month's length; sceRtcGetDayOfWeek for a month of 0 or 13 to 24, a year of 0 or 10000 and a day past 1000000; sceRtcGetTime_t for a date before 1970, the first second past 32 bits, the last valid date and one field out of range at a time, the output preset to a sentinel; sceRtcTickAddYears from a source tick in year 10000 or 10001, the destination preset to a sentinel; sceKernelGetThreadmanIdList for the thread event handler class (9) and the alarm class (10) with none created by the probe (the count and how many slots were written, never an identifier); and where sceKernelCreateTlspl places a pool of four 0x100 blocks without and with attribute 0x4000, shown by a fresh 0x100 block from each end of the user partition's free space after each create and by sceKernelGetTlsAddr for the main thread and a second thread. Every address is recorded as a difference from a block the probe allocated, or as its low byte.",
+        "invariant": "Raw results of #2640 cells the runtime stops at by name or answers from an emulator, with no expected value compared: sceRtcCheckValid for a day of 0 and a day past the month's length; sceRtcGetDayOfWeek for a month of 0 or 13 to 24, a year of 0 or 10000 and a day past 1000000; sceRtcGetTime_t for a date before 1970, the first second past 32 bits, the last valid date and one field out of range at a time, the output preset to a sentinel; sceRtcTickAddYears from a source tick in year 10000 or 10001, the destination preset to a sentinel; sceKernelGetThreadmanIdList for the thread event handler class (9) and the alarm class (10) with none created by the probe (the count and how many slots were written, never an identifier); and where sceKernelCreateTlspl places a pool of four 0x100 blocks without and with attribute 0x4000, shown by a fresh 0x100 block from each end of the user partition's free space after each create and by sceKernelGetTlsAddr for the main thread and a second thread. The first TLS row records the partition's total free size minus its largest free block before anything is allocated: 0 when the free memory is one run. When it is not 0, a fresh block from an end can land in a hole the pool did not fit, so the fresh-block rows are a cross-check only and the sceKernelGetTlsAddr distances decide where the pool lies. Every address is recorded as a difference from a block the probe allocated, or as its low byte.",
         "issues": [
           2640
         ],

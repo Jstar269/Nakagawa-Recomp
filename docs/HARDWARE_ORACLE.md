@@ -3950,7 +3950,7 @@ not expected PSP values.
 | `kernel-semantics` | `PSP-KERNEL-SEM-001` | `MEASURED` (2026-10-31, `0c3cf0da`, boot 84; single launch, not in the campaign queue) | #1287, #1390, #1383, #1380, #1382: VBLANK sub-interrupt delivery order, controller read consumption, peek counts, analog by sampling mode and cycle spacing, volatile-lock types and partition-5 allocations, Memory Stick exclusive create and seeks past 4 GiB in a probe-owned directory, WLAN switch and power state; never the MAC or OpenPSID |
 | `io-seek-eof` | `PSP-IO-EOF-001` | `MEASURED` (2026-11-02, `f484ef58`, boot 100; single launch, not in the campaign queue) | #1380: Memory Stick opens of a missing file without `PSP_O_CREAT`, seeks before the start from each whence and through `sceIoLseek32`, a write after a seek past the end (sizes, position, tail) and a read past the end, in a probe-owned directory; the gap bytes stay private |
 | `io-umd-eof` | `PSP-IO-EOF-002` | `MEASURED` (2026-11-04, `999f3ce3`, boot 116; single launch, not in the campaign queue) | #1380: read-only, a game disc in the drive: seeks past the end and before the start of two `disc0:` files and of the raw device `umd0:` through `sceIoLseek` and `sceIoLseek32`, each with the position after it, reads across and at the end (count, bytes changed, position), and the UMD state before and after; sizes, the last sector's number and the bytes read stay private |
-| `safe-scalar` | `PSP-SAFE-SCALAR-001` | `NOT_RUN` (built as case 141; single launch, not in the campaign queue) | #2640: cells the runtime stops at by name or answers from an emulator, with no device, dialog, GE or radio call and no handler installed: `sceRtcCheckValid` for a day of 0 or past the month's length; `sceRtcGetDayOfWeek` for a month of 0 or 13 to 24, a year of 0 or 10000 and a day past 1000000; `sceRtcGetTime_t` before 1970, past 32 bits and with one field out of range; `sceRtcTickAddYears` from a tick past year 9999; `sceKernelGetThreadmanIdList` for the thread event handler and alarm classes; and where `sceKernelCreateTlspl` places a pool without and with attribute `0x4000`, each address recorded only as a difference from a block the probe allocated. No hardware result is claimed. |
+| `safe-scalar` | `PSP-SAFE-SCALAR-001` | `NOT_RUN` (built as case 141; single launch, not in the campaign queue) | #2640: cells the runtime stops at by name or answers from an emulator, with no device, dialog, GE or radio call and no handler installed: `sceRtcCheckValid` for a day of 0 or past the month's length; `sceRtcGetDayOfWeek` for a month of 0 or 13 to 24, a year of 0 or 10000 and a day past 1000000; `sceRtcGetTime_t` before 1970, past 32 bits and with one field out of range; `sceRtcTickAddYears` from a tick past year 9999; `sceKernelGetThreadmanIdList` for the thread event handler and alarm classes; and where `sceKernelCreateTlspl` places a pool without and with attribute `0x4000`, each address recorded only as a difference from a block the probe allocated; the first TLS row records whether the free memory was one run ([how to read the TLS rows](#reading-the-safe-scalar-tls-rows)). 49 records. No hardware result is claimed. |
 | `hle-utility-none` | `PSP-HLE-UTILITY-NONE-001` | `MEASURED` (2026-11-04, `999f3ce3`, boot 115, XMB context; single launch, not in the campaign queue) | #1386: `GetStatus`, `Update(1)` and `ShutdownStart` of savedata, the message dialog, netconf, gamedata install and game sharing with no `InitStart`; no dialog is started |
 | `ge-sample` | `PSP-GE-SAMPLE-001` | `MEASURED` (2026-10-28, `86e55611`; single launch, not in the campaign queue) | #282: the raw 8888 pixels of a 16x16 window after 48 through-mode draws (triangle pair and sprite, nearest and bilinear, two parity textures) over 1:1, +0.5-texel, 2x-magnified and 20-to-12 mappings with float and 16-bit vertex words. 816 result records. |
 | `dma-timing` | `PSP-DMAC-002` | `MEASURED` (2026-10-29, `0e40e7d3`, `281a21a4` and `1310e632`; single launches, not in the campaign queue) | #303: `sceDmacMemcpy` / `sceDmacTryMemcpy` per-call duration by size (0x10 to 0x100000) and main-RAM/VRAM pair, relative-alignment cost, BUSY against the NULL and zero-size checks, what a refused Try copies, the order of queued callers, the busy window, and the sizes a pending transfer lets through. 202 result records in the last build. |
@@ -3991,6 +3991,37 @@ not expected PSP values.
 | `vfpu-wider-ops` | `PSP-VFPU-WIDEROPS-001` | `MEASURED` (2026-11-10, PSP-3000, boot 176, `9426722a`; 223 records) | #326: vdiv.p/.t/.q, vsin/vcos/vrcp .p/.t/.q, vrsq.q, vsqrt.q, vocp.s/.q, the .p/.t dot and matrix forms over finite order-sensitive, NaN, inf and denormal cells, and vidt.q/.p into every column and row register of one matrix. |
 | `vfpu-reserved-widths` | `PSP-VFPU-RESERVED-001` | `MEASURED` (2026-11-10, PSP-3000, boot 182, `c6abab53`; 9 records; POWER RISK: reserved encodings; owner present) | #326: hand-encoded vus2i.t/.q and vs2i.t/.q words (refused by psp-as) over a sentinel image, M200 and C000 recorded. No word raised an exception; at .t and .q each form wrote what its .p form writes, four lanes from two source words. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured three times, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145, 2026-11-08 boot 152 and 2026-11-12 boot 202 in the game context; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. On boot 202, at `3872796c` with that bound, mode 3's first decode returned 0 and the second again did not return: the bound recorded `0x800201a8`, and the CSC and decode-stop cells were not called. That envelope is not acceptance-eligible either: the probe still prints the earlier `RC` status, its completion contract is unregistered and its module was not proven unloaded. The console powered off during the Nakagawa Link reset that followed it. |
+
+### Reading the safe-scalar TLS rows
+
+`safe-scalar` (`PSP-SAFE-SCALAR-001`) has not run. This is how its sixteen TLS rows are to be read when it
+does. Every word is a size, a return value or the difference of two addresses, never an address; a SKIP row has
+its words at `0xA5A5A5A5` and measures nothing.
+
+1. `tls-fragmentation`: out0 is the user partition's total free size minus its largest free block, before the
+   probe allocates anything. `0` means the free memory is one run, so the two brackets of the next row are its
+   two ends. Any other value means several free runs (or that the two calls round differently).
+2. `tls-brackets`: out0 and out1 are 1 when the low and the high bracket (`0x100` bytes each) were obtained;
+   out2 is the high bracket's head minus the low bracket's; out5 and out6 are how far the total and the largest
+   free size fell (`0x200` each when both brackets came out of one run).
+3. `tls-create-normal`, `tls-create-high`, `tls-create-high-2`: the result is 1 when the pool was created,
+   else the error; out0 is the pool's footprint in the total free size.
+4. `tls-place-normal`, `tls-place-high`: out2 is a fresh low block's head minus the low bracket's, out3 the high
+   bracket's head minus a fresh high block's. When row 1 is `0`, a distance of `0x100` means nothing new lies at
+   that end and a larger one means a pool does, the excess being its footprint (`tls-place-high` includes the
+   first pool). When row 1 is not `0` these two rows are a cross-check only: a block asked from an end takes
+   the first hole it fits, so a pool can lie at an end and still leave the distance at `0x100`.
+5. `tls-addr-normal`, `tls-addr-high`, `tls-addr-high-2` decide the placement in every case: out1 is the
+   thread's TLS block address minus the low bracket's head, out2 the high bracket's head minus that address.
+   The two differ by about the size of the free memory, so the smaller one names the end the pool lies at. out5
+   is the distance from the previous pool's block.
+6. `tls-thread`: out2 and out3 are the second thread's block minus the main thread's in each of the first two
+   pools.
+7. `tls-free`, `tls-delete`: return values. `tls-cleanup`: out2 and out3 are the total and the largest free
+   size at the start minus the same at the end, `0` and `0` when nothing leaked.
+
+The runtime places a pool with attribute `0x4000` at the top of the partition, a rule that is PPSSPP-derived and
+not PSP-measured. Rows 4 and 5 for the second pool are the cells that would confirm or replace it.
 
 ### PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12
 

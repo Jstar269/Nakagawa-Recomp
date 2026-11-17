@@ -1333,27 +1333,32 @@ static void ss_tmid(void)
 }
 
 /* ---- (c) TLS pools: where a pool lies with and without attribute 0x4000 ------------------- */
-/* Two 0x100 blocks bracket the free space of the user partition, one from its low end and one
-   from its high end. A pool of four 0x100 blocks is then created without the attribute, and
-   two with it. After each of the first two, a fresh 0x100 block from each end shows which end
-   moved (tls-place-*), and sceKernelGetTlsAddr gives the block's distance from both brackets
-   (tls-addr-*). A second thread asks for its own block of the first two pools. Everything is
-   released: the blocks the threads hold, the three pools, the brackets; the last row holds
-   what the partition's free sizes differ by from the start. */
+/* The first row holds how far the free memory of the user partition is from one run: its total
+   free size minus its largest free block, 0 when it is one run. Two 0x100 blocks then bracket
+   the free space, one from its low end and one from its high end. A pool of four 0x100 blocks
+   is created without the attribute, and two with it. After each of the first two, a fresh
+   0x100 block from each end shows which end moved (tls-place-*), and sceKernelGetTlsAddr gives
+   the block's distance from both brackets (tls-addr-*). A second thread asks for its own block
+   of the first two pools. Everything is released: the blocks the threads hold, the three
+   pools, the brackets; the last row holds what the partition's free sizes differ by from the
+   start.
+   Every path emits all sixteen rows, each once and in this order: a row whose object was not
+   obtained is SKIP with its words left at HLE_SENTINEL (tools/test_psp_oracle.py walks every
+   path of these functions and counts). */
 enum {
-    SS_T_BRACKETS, SS_T_CREATE_NORMAL, SS_T_PLACE_NORMAL, SS_T_ADDR_NORMAL, SS_T_STATUS_NORMAL,
-    SS_T_CREATE_HIGH, SS_T_PLACE_HIGH, SS_T_ADDR_HIGH, SS_T_STATUS_HIGH, SS_T_CREATE_HIGH_2,
-    SS_T_ADDR_HIGH_2, SS_T_THREAD, SS_T_FREE, SS_T_DELETE, SS_T_CLEANUP,
+    SS_T_FRAGMENTATION, SS_T_BRACKETS, SS_T_CREATE_NORMAL, SS_T_PLACE_NORMAL, SS_T_ADDR_NORMAL,
+    SS_T_STATUS_NORMAL, SS_T_CREATE_HIGH, SS_T_PLACE_HIGH, SS_T_ADDR_HIGH, SS_T_STATUS_HIGH,
+    SS_T_CREATE_HIGH_2, SS_T_ADDR_HIGH_2, SS_T_THREAD, SS_T_FREE, SS_T_DELETE, SS_T_CLEANUP,
 };
-#define SS_TLS_ROWS 15u
+#define SS_TLS_ROWS 16u
 static const char *const k_ss_tls_rows[SS_TLS_ROWS] = {
-    "tls-brackets", "tls-create-normal", "tls-place-normal", "tls-addr-normal",
-    "tls-status-normal", "tls-create-high", "tls-place-high", "tls-addr-high",
-    "tls-status-high", "tls-create-high-2", "tls-addr-high-2", "tls-thread", "tls-free",
-    "tls-delete", "tls-cleanup",
+    "tls-fragmentation", "tls-brackets", "tls-create-normal", "tls-place-normal",
+    "tls-addr-normal", "tls-status-normal", "tls-create-high", "tls-place-high",
+    "tls-addr-high", "tls-status-high", "tls-create-high-2", "tls-addr-high-2", "tls-thread",
+    "tls-free", "tls-delete", "tls-cleanup",
 };
 static const uint32_t k_ss_tls_words[SS_TLS_ROWS] = {
-    7u, 2u, 6u, 6u, 8u, 2u, 6u, 6u, 8u, 2u, 6u, 6u, 3u, 3u, 4u,
+    1u, 7u, 2u, 6u, 6u, 8u, 2u, 6u, 6u, 8u, 2u, 6u, 6u, 3u, 3u, 4u,
 };
 
 typedef struct {
@@ -1401,6 +1406,21 @@ static uint32_t ss_block_free(const SsBlock *b)
     return b->uid > 0 ? (uint32_t)sceKernelFreePartitionMemory(b->uid) : HLE_SENTINEL;
 }
 
+/* Word: the partition's total free size minus its largest free block, before the probe
+   allocates anything in it. 0 means the free memory is one run, so the two brackets are its
+   two ends and the tls-place rows read as their comment says. Anything else means several
+   runs (or that the two calls round differently): the tls-addr rows then decide where a pool
+   lies and the tls-place rows are a cross-check only. A size difference, not an address. */
+static void ss_tls_fragmentation(void)
+{
+    uint32_t w[SS_WORDS_MAX];
+    ss_fill(w);
+    hle_step(k_ss_tls_rows[SS_T_FRAGMENTATION]);
+    const uint32_t total = (uint32_t)sceKernelTotalFreeMemSize();
+    w[0] = total - (uint32_t)sceKernelMaxFreeMemSize();
+    ss_tls_rec(SS_T_FRAGMENTATION, "PASS", 0u, w);
+}
+
 /* Result: 1 when the pool was created, else the error. Words: how much the partition's total
    and largest free sizes fell across the create. */
 static SceUID ss_tls_create(unsigned row, const char *name, SceUInt attr)
@@ -1420,7 +1440,10 @@ static SceUID ss_tls_create(unsigned row, const char *name, SceUInt attr)
 
 /* Words: whether each fresh block was obtained, the fresh low block's head minus the low
    bracket's, the high bracket's head minus the fresh high block's, and the two frees. With
-   nothing new at an end the distance is one bracket, 0x100; a pool there adds its size. */
+   nothing new at an end the distance is one bracket, 0x100; a pool there adds its size. That
+   reading needs the free memory to have been one run (tls-fragmentation word 0): a block
+   asked from an end takes the first hole it fits, so with several runs a pool can lie at an
+   end and still leave this distance at 0x100. The tls-addr rows then decide. */
 static void ss_tls_place(unsigned row, SceUID pool, const SsBlock *lo, const SsBlock *hi)
 {
     uint32_t w[SS_WORDS_MAX];
@@ -1476,11 +1499,17 @@ static uint32_t ss_tls_addr(unsigned row, SceUID pool, const SsBlock *lo, const 
 
 /* Words: the status structure's size word, then attr, index, block size, block count, free
    blocks and waiting threads, then the word after the 60 bytes asked for (preset to
-   HLE_SENTINEL). The name is the probe's own and is not recorded. */
+   HLE_SENTINEL). The name is the probe's own and is not recorded.
+   The buffer must hold more than the structure whatever the size word says: a PSP writes all
+   60 bytes for any non-zero size word (pspautotests tests/threads/tls/refer.expected), so a
+   shorter buffer would be overrun on the probe's stack. */
 static void ss_tls_status(unsigned row, SceUID pool)
 {
     uint32_t w[SS_WORDS_MAX];
     uint32_t info[SS_TLS_INFO_WORDS];
+    _Static_assert(SS_TLS_INFO_SIZE == 60u, "SceKernelTlsplInfo is 60 bytes");
+    _Static_assert(sizeof(info) >= SS_TLS_INFO_SIZE + sizeof(info[0]),
+                   "the status buffer holds the 60 bytes the kernel writes and one guard word");
     ss_fill(w);
     if (pool <= 0) {
         ss_tls_rec(row, "SKIP", 0u, w);
@@ -1564,6 +1593,7 @@ static void ss_tls_second_thread(SceUID normal, SceUID high, uint32_t addr_norma
 static void ss_tls(void)
 {
     uint32_t w[SS_WORDS_MAX];
+    ss_tls_fragmentation();
     ss_fill(w);
     hle_step(k_ss_tls_rows[SS_T_BRACKETS]);
     const uint32_t total0 = (uint32_t)sceKernelTotalFreeMemSize();

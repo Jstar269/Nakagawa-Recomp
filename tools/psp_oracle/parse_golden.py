@@ -2179,6 +2179,10 @@ _register_campaign_probe(
 # year count), sceKernelGetThreadmanIdList for classes 9 and 10 (words: count, slots written),
 # and sceKernelCreateTlspl with and without attribute 0x4000: every address is a difference
 # from a block the probe allocated at the low or the high end of the partition's free space.
+# tls-fragmentation, the first TLS row, is the partition's total free size minus its largest
+# free block before anything is allocated: 0 when the free memory is one run. Only then do the
+# tls-place rows read as "0x100 means nothing new at that end"; otherwise the tls-addr rows
+# decide where a pool lies.
 # Every row is emitted on every run with a fixed word count (SKIP rows keep the shape).
 SAFE_SCALAR_ROWS = (
     ("rtc-valid-day-0", 4), ("rtc-valid-feb-29-2023", 4), ("rtc-valid-feb-29-1900", 4),
@@ -2194,6 +2198,7 @@ SAFE_SCALAR_ROWS = (
     ("rtc-addyears-y10000-plus-0", 3), ("rtc-addyears-y10000-plus-1", 3),
     ("rtc-addyears-y10000-minus-1", 3), ("rtc-addyears-y10001-minus-2", 3),
     ("tmid-9-list", 2), ("tmid-10-list", 2),
+    ("tls-fragmentation", 1),
     ("tls-brackets", 7), ("tls-create-normal", 2), ("tls-place-normal", 6), ("tls-addr-normal", 6),
     ("tls-status-normal", 8), ("tls-create-high", 2), ("tls-place-high", 6), ("tls-addr-high", 6),
     ("tls-status-high", 8), ("tls-create-high-2", 2), ("tls-addr-high-2", 6), ("tls-thread", 6),
