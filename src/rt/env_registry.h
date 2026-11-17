@@ -96,7 +96,6 @@
     X("SR_GESCENE_DIR", "path", "unset (scene dump refused)", "ge.c", "Output directory for the SR_GESCENE dump, gescene_f<frame>.bin.") \
     X("SR_GESIGNALLOG", "flag-presence", "off", "ge.c", "Logs the first few GE signal command occurrences per behavior to stderr.") \
     X("SR_GESTAT", "flag-presence", "off", "ge.c", "Prints per-frame GE statistics once per 60-vblank window to diagnose culled or rejected geometry.") \
-    X("SR_GUEST_MEMORY_CHANNEL", "string", "unset", "recomp.c,sched.c", "Optional local shared guest-memory channel set by the player for a vblank-synchronized host read callback.") \
     X("SR_GEUNK", "flag-nonzero", "on", "ge.c", "Unhandled GE commands are reported once each unless this is set to 0.") \
     X("SR_GEWATCH", "flag-presence", "off", "debug.h,ge.c,hle_display.c", "Logs GE primitive details and interleaves present lines with GE list lines to expose draw order.") \
     X("SR_GEWATCH_AFTER", "number", "0", "ge.c,hle_display.c", "Frame number from which SR_GEWATCH GE and present watch output starts.") \
@@ -143,6 +142,7 @@
     X("SR_GPU_TWIN_DUMP", "path", "unset (no dump)", "gpu_sdl3vk/ge_gpu_selftest.inc", "File prefix where the coherence self-test's twin-scene case writes each shown frame as raw RGBA.") \
     X("SR_GPU_TWIN_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test's twin cases: a twin-off run writes it, a twin-on run at the same scale checks it.") \
     X("SR_GPU_XFER_RING_KB", "number", "built-in default ring size", "gpu_sdl3vk/ge_gpu.c", "Transfer ring size in KiB (0 disables, above 65536 ignored).") \
+    X("SR_GUEST_MEMORY_CHANNEL", "string", "unset", "gui.c,recomp.c", "Optional local shared guest-memory channel set by the player for a vblank-synchronized host read callback.") \
     X("SR_HEADLESS", "flag-nonzero", "off", "audio_sdl3.c,gui.c,sched.c", "Marks the run headless: silent audio, headless presenter and no pause UI (audio check wants exactly 1).") \
     X("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", "string", "unset (off)", "gui.c,sched.c", "Requests the headless presented-frames acceptance checkpoint; any non-empty value enables it.") \
     X("SR_HEAP_BASE", "number", "first page-aligned address after the loaded image", "hle.c", "Hexadecimal base address for the user heap partition.") \
