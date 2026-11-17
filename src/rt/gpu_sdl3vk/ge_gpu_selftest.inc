@@ -15471,6 +15471,148 @@ static int coherence_run_movie_target(void) {
     return ok;
 }
 
+static uint32_t coherence_batch_state_list(uint32_t fba, int blend_pair) {
+    SubmitBatchList l = { (uint32_t *)SR_HOST(SB_LIST), 0u, 0u };
+    sb_emit(&l, 0x10, (SB_VTX >> 8) & 0x000F0000u);
+    sb_emit(&l, 0x13, 0);
+    sb_emit(&l, 0x4C, 0);
+    sb_emit(&l, 0x4D, 0);
+    sb_target(&l, fba);
+    sb_emit(&l, 0x9E, SB_ZBA);
+    sb_emit(&l, 0x9F, 512u | (0x04000000u >> 8));
+    sb_emit(&l, 0xD2, 3u);
+    sb_emit(&l, 0xD3, 0u);
+    static const uint8_t disabled[] = { 0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22,
+                                        0x23, 0x24, 0x27, 0x28 };
+    for (size_t i = 0; i < sizeof(disabled); i++) sb_emit(&l, disabled[i], 0u);
+    sb_emit(&l, 0xE7, 1u);  /* depth writes disabled */
+    sb_emit(&l, 0xDE, 1u);  /* ALWAYS when the test is enabled */
+    sb_emit(&l, 0x15, 0u);
+    sb_emit(&l, 0x16, ((FB_H - 1u) << 10) | (FB_W - 1u));
+    sb_emit(&l, 0xD4, 0u);
+    sb_emit(&l, 0xD5, ((FB_H - 1u) << 10) | (FB_W - 1u));
+    sb_emit(&l, 0x12, (7u << 2) | (3u << 7) | (1u << 23)); /* 8888 colour, float position */
+    if (blend_pair) {
+        sb_emit(&l, 0x21, 1u);
+        sb_emit(&l, 0xDF, 10u); /* FIXA * src + ZERO * dst: native blend, visible bconst */
+        sb_emit(&l, 0xE0, 0x204060u);
+        sb_sprite(&l, 0, 24.0f, 36.0f, 0.0f, 0.0f, 24.0f, 0xFFFFFFFFu);
+        sb_emit(&l, 0xE0, 0xD0A050u);
+        sb_sprite(&l, 0, 88.0f, 36.0f, 0.0f, 0.0f, 24.0f, 0xFFFFFFFFu);
+        sb_emit(&l, 0x21, 0u);
+    } else {
+        /* The Z-test toggle changes only the pipeline key. All five batches keep the same
+         * set-0 descriptor, scissor and blend constants, and all fragments pass. */
+        for (uint32_t i = 0; i < 5u; i++) {
+            sb_emit(&l, 0x23, i & 1u);
+            sb_sprite(&l, 0, (float)(16u + i * 64u), 40.0f, 0.0f, 0.0f, 20.0f,
+                      0xFFFFFFFFu);
+        }
+    }
+    sb_emit(&l, 0x0F, 0u);
+    sb_emit(&l, 0x0C, 0u);
+    return SB_LIST;
+}
+
+static void coherence_batch_state_fill(uint32_t fba) {
+    const uint32_t base = 0x04000000u | fba;
+    uint32_t *fb = (uint32_t *)SR_HOST(base);
+    for (uint32_t i = 0; i < 512u * FB_H; i++) fb[i] = 0u;
+    sr_gpu_vram_dirty(base, 512u * FB_H * 4u);
+}
+
+static int coherence_run_record_range_state_counts(void) {
+    enum { FBA = 0x00000000u, BATCHES = 5u };
+    const int saved_twin = s_twin;
+    s_twin = 0;
+    coherence_reset_targets();
+    coherence_batch_state_fill(FBA);
+    GeGpuReplayStats before, after;
+    gegpu_replay_stats_get(&before);
+    s_selftest_record_commands = (GegpuSelftestRecordCommands){0};
+    ge_set_gpu_hooks(&k_hooks);
+    int ok = ge_run_list(coherence_batch_state_list(FBA, 0), 0) == 0;
+    ge_set_gpu_hooks(&k_hooks);
+    if (s_nbatch) ok = submit_pending() && ok;
+    gegpu_replay_stats_get(&after);
+    if (after.batches - before.batches != BATCHES ||
+        s_selftest_record_commands.render_pass_begins != 1u ||
+        s_selftest_record_commands.descriptor_binds != 1u ||
+        s_selftest_record_commands.scissors != 1u ||
+        s_selftest_record_commands.blend_constants != 1u) {
+        fprintf(stderr, "gpu coherence selftest [record-range-state]: real display-list op recorded %llu batches; "
+                        "record_range began %u pass(es) and emitted descriptor=%u scissor=%u blend=%u "
+                        "(want 5 batches in 1 pass, 1 each)\n",
+                (unsigned long long)(after.batches - before.batches),
+                s_selftest_record_commands.render_pass_begins,
+                s_selftest_record_commands.descriptor_binds, s_selftest_record_commands.scissors,
+                s_selftest_record_commands.blend_constants);
+        ok = 0;
+    }
+    coherence_reset_targets();
+    s_twin = saved_twin;
+    if (ok) puts("gpu coherence selftest: PASS record_range counted one descriptor/scissor/blend for five real batches");
+    return ok;
+}
+
+static int coherence_run_batch_blend_change(void) {
+    enum { FBA = 0x00000000u };
+    const uint32_t base = 0x04000000u | FBA;
+    const int saved_twin = s_twin;
+    const size_t pixels = (size_t)FB_W * FB_H;
+    uint32_t *gpu = (uint32_t *)malloc(pixels * sizeof(*gpu));
+    if (!gpu) return 0;
+    s_twin = 0;
+    coherence_reset_targets();
+    coherence_batch_state_fill(FBA);
+    GeGpuReplayStats before, after;
+    gegpu_replay_stats_get(&before);
+    s_selftest_record_commands = (GegpuSelftestRecordCommands){0};
+    ge_set_gpu_hooks(&k_hooks);
+    int ok = ge_run_list(coherence_batch_state_list(FBA, 1), 0) == 0;
+    ge_set_gpu_hooks(&k_hooks);
+    if (s_nbatch) ok = submit_pending() && ok;
+    GeGpuFbDescriptor desc = { base, 3u, 512u, FB_W, FB_H };
+    ok = gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK && ok;
+    gegpu_replay_stats_get(&after);
+    const unsigned long long recorded_batches = after.batches - before.batches;
+    const unsigned blend_commands = s_selftest_record_commands.blend_constants;
+    const int command_counts_ok = recorded_batches == 2u &&
+                                  s_selftest_record_commands.render_pass_begins == 1u &&
+                                  blend_commands == 2u;
+    if (!command_counts_ok) {
+        fprintf(stderr, "gpu coherence selftest [batch-blend-change]: production range recorded %llu batches in %u "
+                        "pass(es) with %u blend-constant commands (want 2 in 1 pass, 2 commands)\n",
+                recorded_batches, s_selftest_record_commands.render_pass_begins, blend_commands);
+    }
+    for (uint32_t y = 0; ok && y < FB_H; y++)
+        memcpy(gpu + (size_t)y * FB_W, (uint32_t *)SR_HOST(base) + (size_t)y * 512u,
+               (size_t)FB_W * sizeof(*gpu));
+
+    coherence_reset_targets();
+    coherence_batch_state_fill(FBA);
+    ge_set_gpu_hooks(NULL);
+    ok = (ge_run_list(coherence_batch_state_list(FBA, 1), 0) == 0) && ok;
+    ge_set_gpu_hooks(&k_hooks);
+    for (uint32_t y = 0; ok && y < FB_H; y++) {
+        const uint32_t *ref = (const uint32_t *)SR_HOST(base) + (size_t)y * 512u;
+        for (uint32_t x = 0; x < FB_W; x++) {
+            if (gpu[(size_t)y * FB_W + x] != ref[x]) {
+                fprintf(stderr, "gpu coherence selftest [batch-blend-change]: GPU pixel (%u,%u)=%08x; "
+                                "ge.c=%08x after the second FIXA batch\n",
+                        x, y, gpu[(size_t)y * FB_W + x], ref[x]);
+                ok = 0;
+                break;
+            }
+        }
+    }
+    coherence_reset_targets();
+    s_twin = saved_twin;
+    free(gpu);
+    if (ok) puts("gpu coherence selftest: PASS two same-pass FIXA batches match ge.c");
+    return ok && command_counts_ok;
+}
+
 static int coherence_run_batch_state_elision(void) {
     BatchCommandState state = {0};
     VkDescriptorSet descriptor = VK_NULL_HANDLE;
@@ -15520,7 +15662,9 @@ static int coherence_run_batch_state_elision(void) {
         fprintf(stderr, "gpu coherence selftest [batch-state]: a new render pass did not start unknown\n");
         return 0;
     }
-    puts("gpu coherence selftest: PASS batch-state five identical batches emit one bind/scissor/blend each");
+    if (!coherence_run_record_range_state_counts()) return 0;
+    if (!coherence_run_batch_blend_change()) return 0;
+    puts("gpu coherence selftest: PASS batch-state helper invariants and production-path cases");
     return 1;
 }
 

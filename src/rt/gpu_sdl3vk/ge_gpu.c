@@ -2874,6 +2874,14 @@ typedef struct {
     int descriptor, scissor, blend;
 } BatchCommandEmit;
 
+#ifdef SR_GPU_COHERENCE_SELFTEST
+typedef struct {
+    unsigned descriptor_binds, scissors, blend_constants;
+    unsigned render_pass_begins;
+} GegpuSelftestRecordCommands;
+static GegpuSelftestRecordCommands s_selftest_record_commands;
+#endif
+
 static BatchCommandEmit batch_command_state_update(BatchCommandState *state, VkDescriptorSet descriptor,
                                                     const VkRect2D *scissor, const float blend[4]) {
     BatchCommandEmit emit = {
@@ -2920,6 +2928,9 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
     rbi.framebuffer = rmw ? (twin ? t->tfb_rmw : t->fb_rmw) : (twin ? t->tfb : t->fb);
     rbi.renderArea.extent.width = cw; rbi.renderArea.extent.height = ch;
     vkCmdBeginRenderPass(s_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    s_selftest_record_commands.render_pass_begins++;
+#endif
 
     /* the vertex NDC transform is resolution-independent: scaling the viewport IS the
      * internal-resolution upscale */
@@ -2968,15 +2979,29 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
                         { (uint32_t)(b->sw * scale), (uint32_t)(b->sh * scale) } };
         VkDescriptorSet dset = twin ? twin_dset(b) : b->dset;
         BatchCommandEmit emit = batch_command_state_update(&batch_state, dset, &sc, b->bconst);
-        if (emit.scissor) vkCmdSetScissor(s_cmd, 0, 1, &sc);
-        if (emit.blend) vkCmdSetBlendConstants(s_cmd, b->bconst);
+        if (emit.scissor) {
+            vkCmdSetScissor(s_cmd, 0, 1, &sc);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+            s_selftest_record_commands.scissors++;
+#endif
+        }
+        if (emit.blend) {
+            vkCmdSetBlendConstants(s_cmd, b->bconst);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+            s_selftest_record_commands.blend_constants++;
+#endif
+        }
         PushPC tpc;
         if (twin) twin_pc(b, &tpc);
         vkCmdPushConstants(s_cmd, playout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(b->pc),
                            twin ? &tpc : &b->pc);
         uint64_t bind_started = cpu_profile_now();
-        if (emit.descriptor)
+        if (emit.descriptor) {
             vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 0, 1, &dset, 0, NULL);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+            s_selftest_record_commands.descriptor_binds++;
+#endif
+        }
         if (s_cpu_profile) {
             cpu_profile_add(GEGPU_CPU_BIND_RECORD, bind_started);
             if (emit.descriptor) s_cpu_profile_stats.descriptor_binds++;

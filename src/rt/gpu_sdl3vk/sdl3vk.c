@@ -81,6 +81,9 @@ typedef struct PresentFrame {
 
 static SDL_Window      *s_win;
 static int              s_window_hidden;      /* SR_WINDOW_HIDDEN: created hidden, never raised */
+#ifdef SR_VIDEOREC_SELFTEST
+static unsigned         s_selftest_present_clear_commands;
+#endif
 static SDL_Gamepad     *s_pad;
 static VkInstance       s_inst;
 static VkSurfaceKHR     s_surf;
@@ -2678,6 +2681,9 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
             vkCmdClearColorImage(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                  &black, 1, &rng);
+#ifdef SR_VIDEOREC_SELFTEST
+            s_selftest_present_clear_commands++;
+#endif
             /* The clear overlaps the blit at the image level; keep the dependency only when it ran. */
             barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,

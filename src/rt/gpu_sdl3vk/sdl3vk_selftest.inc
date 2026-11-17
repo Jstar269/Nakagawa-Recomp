@@ -1975,6 +1975,55 @@ static int sdl3vk_capture_selftest_body(void) {
     /* ---- CPU framebuffer path (B8G8R8A8 fbimg) -------------------------------------- */
     static uint32_t px[PSP_W * PSP_H];
     cap_test_fill_cpu(px, PSP_W, PSP_H);
+#ifdef SR_VIDEOREC_SELFTEST
+    /* Count the clear command from present_common itself. The initial 2x window is an exact
+     * fit for 480x272; a 512x272 upload is wider than the same window and leaves top/bottom bars. */
+    {
+        const int saved_scaling = s_scaling;
+        const int dw = (int)s_swap_ext.width, dh = (int)s_swap_ext.height;
+        s_scaling = SDL3VK_SCALING_SHARP;
+        Sdl3VkPresentPlan exact = sdl3vk_present_plan(s_scaling, PSP_W, PSP_H, dw, dh,
+                                                       (int)s_max_image_dim);
+        if (exact.x != 0 || exact.y != 0 || exact.w != dw || exact.h != dh || dw <= 0 || dh <= 0) {
+            fprintf(stderr, "present clear: test window is %dx%d, not an exact fit for 480x272\n", dw, dh);
+            ok = 0;
+        } else {
+            s_selftest_present_clear_commands = 0u;
+            if (sdl3vk_present_rgba(px) != 1 || s_selftest_present_clear_commands != 0u) {
+                fprintf(stderr, "present clear: exact-fit production present emitted %u clear command(s), want 0\n",
+                        s_selftest_present_clear_commands);
+                ok = 0;
+            }
+        }
+        const int wide_w = PSP_W + 32;
+        Sdl3VkPresentPlan bars = sdl3vk_present_plan(s_scaling, wide_w, PSP_H, dw, dh,
+                                                      (int)s_max_image_dim);
+        if (!sdl3vk_present_needs_clear(&bars, dw, dh)) {
+            fprintf(stderr, "present clear: %dx%d source plan for %dx%d has no uncovered bar area\n",
+                    wide_w, PSP_H, dw, dh);
+            ok = 0;
+        } else {
+            uint32_t *wide = (uint32_t *)malloc((size_t)wide_w * PSP_H * sizeof(*wide));
+            if (!wide) {
+                fprintf(stderr, "present clear: could not allocate the synthetic wide source\n");
+                ok = 0;
+            } else {
+                for (size_t i = 0; i < (size_t)wide_w * PSP_H; i++)
+                    wide[i] = 0xff204080u ^ (uint32_t)(i * 0x00010101u);
+                s_selftest_present_clear_commands = 0u;
+                if (sdl3vk_present_rgba_ex(wide, wide_w, PSP_H) != 1 ||
+                    s_selftest_present_clear_commands != 1u) {
+                    fprintf(stderr, "present clear: letterboxed production present emitted %u clear command(s), want 1\n",
+                            s_selftest_present_clear_commands);
+                    ok = 0;
+                }
+                free(wide);
+            }
+        }
+        s_scaling = saved_scaling;
+        if (ok) puts("gpu capture selftest: production present emitted one bar clear and no exact-fit clear");
+    }
+#endif
     if (terminal_fault && terminal_fault[0]) {
         VkResult fault_result;
         if (strcmp(terminal_fault, "surface-lost") == 0) {
