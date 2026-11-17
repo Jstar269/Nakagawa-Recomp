@@ -50,6 +50,8 @@ Where this page and the code disagree, the code is current and this page is upda
 | `surface_high` | `#18202B` | chips, focused secondary button, focused row |
 | `line` | `#1C232D` | hairlines, card edges |
 | `line_strong` | `#2E3846` | control and chip borders, focused card edge |
+| `selected_neutral_edge` | `#6B7684` | edge of a current value marked without the accent (4.2:1 on the ground, 3.5:1 on `surface_high`) |
+| `selected_neutral_edge_dimmed` | `#576270` | that edge on a dimmed row, a step weaker (3.1:1 on the ground; 2.6:1 on `surface_high`, its own box, under 3:1 and accepted because a dimmed row is inert) |
 | `paper` | `#F5F7FA` | primary text |
 | `muted` | `#9AA4B2` | secondary text (7.6:1 on the ground) |
 | `dim` | `#6B7684` | disabled text and footnotes only (4.2:1, not for body text) |
@@ -628,8 +630,13 @@ REMOVE TEXTURE PACK are the last rows of Picture.
 Each option is one sentence-case row, as high as a control (44 px), and one focus stop: its name on the left, with an
 ACE ONLY tag beside the name where it applies, and on the right every value it can take, each in its own small box
 (34 px). The current value is filled with the accent, with `ink` text, when it is on or chosen (16X, ON, FSR 1).
-A current OFF is never filled with the accent: it is marked by the raised box (`surface_high`, a `line_strong`
-edge) and `paper` text, so a tab whose options are off is not a column of accent boxes. Up and Down move row by row: Down from PLAY MODE lands on the active tab, Down from
+A current OFF is never filled with the accent: it is marked by the raised box (`surface_high`) with a
+`selected_neutral_edge` edge and `paper` text, so a tab whose options are off is not a column of accent boxes. That
+edge stands 4.2:1 from the list's ground and 3.5:1 from the box, so the mark is told from an unselected value's
+hairline (`line`, 1.2:1) without the accent. A dimmed row's mark has the weaker `selected_neutral_edge_dimmed`
+(3.1:1 on the ground), so that an inert row among live ones still reads as dimmed. Against its own box fill
+(`surface_high`) that edge is 2.6:1, under 3:1: accepted because a dimmed row is inert, so its mark shows a value
+and offers nothing to act on. Up and Down move row by row: Down from PLAY MODE lands on the active tab, Down from
 a tab on its first row, Down from the last row on BACK, and Up goes back the same way. The rows name those
 neighbours (`nk_ui_register_button_between`), because a full-width row and a small tab are not each other's nearest
 by position, and every tab names the active tab's first row as its Down neighbour (`NkUiSection.down`): at Larger

@@ -1008,8 +1008,10 @@ static bool settings_enhanced_step_row(NkUi *ui, NkUiId id, const char *name, co
 /* One value of a part, in its own box. A pointer picks it; the keys go to its row. `on` is
    whether the row's value is other than Off: the accent marks a value that is on or chosen
    (16x, On), and a selected Off is marked as the library's value is, by the raised box with
-   its stronger edge, and by primary text, so a tab of options that are off is not a column
-   of accent boxes. */
+   an edge that stands 3:1 or more from the list and from the box (selected_neutral_edge),
+   and by primary text, so a tab of options that are off is not a column of accent boxes. A
+   dimmed row's mark has a weaker edge (selected_neutral_edge_dimmed, still 3:1 from the
+   list), so that an inert row does not look as live as the rows around it. */
 static bool settings_enhanced_chip(NkUi *ui, NkUiId id, const char *label, bool selected,
                                    bool inherited, bool dimmed, bool on) {
     const NkUiTheme *theme = nk_ui_theme(ui);
@@ -1034,7 +1036,10 @@ static bool settings_enhanced_chip(NkUi *ui, NkUiId id, const char *label, bool 
                              : hovered ? theme->accent_hover : theme->accent_dark)
                       : live && nk_ui_pressed(ui, id) ? theme->pressed
                       : selected || hovered ? theme->surface_high : theme->surface;
-    style.border_rgba = lit ? style.fill_rgba : selected ? theme->line_strong : theme->line;
+    style.border_rgba = lit ? style.fill_rgba
+                        : !selected ? theme->line
+                        : dimmed ? theme->selected_neutral_edge_dimmed
+                                 : theme->selected_neutral_edge;
     style.border_width = NK_UI_BORDER_HAIRLINE;
     if (selected && dimmed) text.rgba = theme->muted;
     if (selected && inherited && !dimmed) text.rgba = theme->muted;

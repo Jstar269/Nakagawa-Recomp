@@ -5246,9 +5246,11 @@ static double enhanced_contrast(uint32_t a, uint32_t b) {
 
 /* Review of #2644: how Settings > Enhanced marks a row's value. The accent fill, with ink
    text, is for a value that is on or chosen (16x, On, FSR 1). A selected Off is neutral: the
-   raised box with its stronger edge and primary text, never the accent, so a tab whose
-   options are off is not a column of accent boxes. On a game's page the library's value is
-   the same raised box with muted text, and a dimmed row's value likewise. An unselected value
+   raised box with an edge of its own (selected_neutral_edge) and primary text, never the
+   accent, so a tab whose options are off is not a column of accent boxes. On a game's page the
+   library's value is the same raised box with muted text. A dimmed row's value is that box
+   with a weaker edge (selected_neutral_edge_dimmed), so an inert row among live ones still
+   reads as dimmed. An unselected value
    is a flat box with muted (dimmed: dim) text. Every part is checked at every one of its
    values, on the library's page and on a game's; and each text colour keeps WCAG AA (4.5:1)
    on its box. */
@@ -5258,6 +5260,19 @@ static void test_enhanced_selected_value_styles(void) {
     const int saved_tab = g_enhanced_tab;
     const NkUiId saved_focus = g_enhanced_focus_id;
     const char *saved_mode = g_enhanced_mode;
+    /* WCAG 2.1 SC 1.4.11: what identifies a state stands 3:1 from what is next to it. The
+       edge of a value marked without the accent does, from the list's ground and from its
+       own box; an unselected value's hairline does not, which is what tells them apart. */
+    CHECK(enhanced_contrast(theme->selected_neutral_edge, theme->surface) >= 3.0 &&
+              enhanced_contrast(theme->selected_neutral_edge, theme->surface_high) >= 3.0 &&
+              enhanced_contrast(theme->line, theme->surface) < 3.0,
+          "the edge of a neutral selected value stands 3:1 from the list and from its box");
+    /* A dimmed row's mark is a step weaker than a live row's, and still 3:1 from the list's
+       ground, which is what a dimmed row lies on. */
+    CHECK(enhanced_contrast(theme->selected_neutral_edge_dimmed, theme->surface) >= 3.0 &&
+              enhanced_contrast(theme->selected_neutral_edge_dimmed, theme->surface) + 0.5 <=
+                  enhanced_contrast(theme->selected_neutral_edge, theme->surface),
+          "a dimmed row's marked value has a weaker edge, still 3:1 from the list");
     CHECK(enhanced_contrast(theme->paper, theme->surface_high) >= 4.5 &&
               enhanced_contrast(theme->ink, theme->accent_dark) >= 4.5 &&
               enhanced_contrast(theme->muted, theme->surface_high) >= 4.5 &&
@@ -5309,11 +5324,12 @@ static void test_enhanced_selected_value_styles(void) {
                         want_text = dimmed ? theme->dim : theme->muted;
                     } else if (dimmed || value < 0) {
                         want_fill = theme->surface_high;
-                        want_edge = theme->line_strong;
+                        want_edge = dimmed ? theme->selected_neutral_edge_dimmed
+                                           : theme->selected_neutral_edge;
                         want_text = theme->muted;
                     } else if (off) {
                         want_fill = theme->surface_high;
-                        want_edge = theme->line_strong;
+                        want_edge = theme->selected_neutral_edge;
                         want_text = theme->paper;
                     } else {
                         want_fill = theme->accent_dark;
