@@ -530,6 +530,15 @@ def hle_inventoried_addresses() -> set[int]:
     return result
 
 
+def uninventoried_hle_addresses(source: str) -> dict[int, list[int]]:
+    """Guest address -> lines, for every HLE guest address that no live
+    HLE_GUEST_ADDRESS_GROUPS group inventories. A retired address is not
+    inventoried, so it is reported here as well."""
+    inventoried = hle_inventoried_addresses()
+    return {address: lines for address, lines in extract_hle_guest_addresses(source).items()
+            if address not in inventoried}
+
+
 def hle_title_configured_addresses() -> set[int]:
     result: set[int] = set()
     for group in getattr(compat_overrides, "HLE_TITLE_CONFIGURED_COMPAT", []):
@@ -562,13 +571,31 @@ class HleGuestAddressCoverageTests(unittest.TestCase):
     def test_every_hle_guest_address_is_inventoried(self):
         """CLEAN POSITIVE / contamination gate: the current hle.c passes, and any
         uninventoried title address added to it fails here."""
-        found = extract_hle_guest_addresses(hle_sources.text())
-        missing = set(found) & hle_retired_diagnostic_addresses()
-        self.assertFalse(
-            missing,
-            "src/rt/hle.c reintroduced retired title diagnostic address(es): "
-            + ", ".join(f"0x{a:08x} (line {found[a][0]})" for a in sorted(missing))
+        missing = uninventoried_hle_addresses(hle_sources.text())
+        self.assertEqual(
+            missing, {},
+            "the HLE sources use guest address(es) that no HLE_GUEST_ADDRESS_GROUPS "
+            "group inventories: "
+            + ", ".join(f"0x{a:08x} (line {missing[a][0]})" for a in sorted(missing))
             )
+        found = extract_hle_guest_addresses(hle_sources.text())
+        retired = set(found) & hle_retired_diagnostic_addresses()
+        self.assertFalse(
+            retired,
+            "src/rt/hle.c reintroduced retired title diagnostic address(es): "
+            + ", ".join(f"0x{a:08x} (line {found[a][0]})" for a in sorted(retired))
+            )
+
+    def test_the_inventory_gate_rejects_a_new_title_address(self):
+        """FAILING-BEFORE PROOF: a title address that was never retired, added to
+        the real HLE sources, must fail the inventory gate. The former gate only
+        intersected with the retired addresses and passed this."""
+        address = 0x08901234
+        self.assertNotIn(address, hle_retired_diagnostic_addresses())
+        self.assertNotIn(address, hle_inventoried_addresses())
+        contaminated = (hle_sources.text()
+                        + "\nstatic void h_x(CpuState *s){ MEM_W32(0x08901234u, 1u); }\n")
+        self.assertIn(address, uninventoried_hle_addresses(contaminated))
 
     def test_manifest_has_no_stale_hle_entries(self):
         """CLASSIFICATION DRIFT: if an inventoried site disappears or materially

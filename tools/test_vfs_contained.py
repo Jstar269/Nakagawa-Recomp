@@ -25,7 +25,10 @@ import shutil
 import subprocess
 import sys
 import unittest
-import hle_sources  # noqa: E402
+try:
+    import hle_sources
+except ModuleNotFoundError:  # Running as ``python -m unittest tools.test_vfs_contained``.
+    from tools import hle_sources
 
 ROOT = Path(__file__).resolve().parent.parent
 SELFTEST_C = ROOT / "tests" / "native" / "vfs_contained_selftest.c"

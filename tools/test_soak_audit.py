@@ -16,7 +16,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-import hle_sources  # noqa: E402
+try:
+    import hle_sources
+except ModuleNotFoundError:  # Running as ``python -m unittest tools.test_soak_audit``.
+    from tools import hle_sources
 
 ROOT = Path(__file__).resolve().parents[1]
 PERF_HEADER = "vblank_total,wall_ms,fps,frame_ms,vblank_hz\n"
