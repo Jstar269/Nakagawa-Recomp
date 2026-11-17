@@ -30,3 +30,47 @@ insert_final_newline = unset
 end_of_line = unset
 trim_trailing_whitespace = unset
 insert_final_newline = unset
+
+# Vendored imports pin their upstream bytes: some upstream lines end in spaces, and
+# .gitattributes exempts these trees from the whitespace checks so their blob IDs stay the
+# pinned ones. An EditorConfig-aware save must not normalise what git then refuses to
+# normalise. The project-authored PROVENANCE.md manifests keep the normal rules below.
+[third_party/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[src/rt/atrac3p/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[src/rt/h264_ffmpeg_sub/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[src/rt/minimp3/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[src/rt/xr/openxr/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[third_party/**/PROVENANCE.md]
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[src/rt/atrac3p/PROVENANCE.md]
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[src/rt/h264_ffmpeg_sub/PROVENANCE.md]
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[src/rt/minimp3/PROVENANCE.md]
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[src/rt/xr/openxr/PROVENANCE.md]
+trim_trailing_whitespace = true
+insert_final_newline = true

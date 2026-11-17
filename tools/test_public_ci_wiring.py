@@ -4728,6 +4728,28 @@ class ClusterFuzzLiteWiringTests(unittest.TestCase):
             with self.subTest(header=header):
                 self.assertIn(f"src/core/{header}", self._paths())
 
+    def test_the_image_copies_only_the_fuzzed_inputs(self) -> None:
+        """Docker uses the checkout as the build context, so `COPY .` bakes whatever a local
+        working tree holds (build/, logs/, oracle/, place_game_here/, keys/) into an image
+        layer; only the files the fuzz target compiles may enter it."""
+        dockerfile = (ROOT / ".clusterfuzzlite" / "Dockerfile").read_text(encoding="utf-8")
+        copy_lines = [line for line in dockerfile.splitlines() if line.startswith("COPY ")]
+        self.assertTrue(copy_lines, dockerfile)
+        copied: set[str] = set()
+        for line in copy_lines:
+            sources = line.split()[1:-1]
+            self.assertNotIn(".", sources, "the image must not copy the whole build context")
+            copied.update(sources)
+        build = (ROOT / ".clusterfuzzlite" / "build.sh").read_text(encoding="utf-8")
+        needed = set(re.findall(r"-c (\S+\.c) ", build))
+        needed |= {f"src/core/{header}" for header
+                   in re.findall(r'#include "([^"]+)"',
+                                 (ROOT / "src" / "core" / "nk_json.c").read_text(encoding="utf-8"))}
+        self.assertTrue(needed)
+        for source in sorted(needed):
+            with self.subTest(source=source):
+                self.assertIn(source, copied, f"{source} must be copied into the image")
+
     def test_nightly_and_manual_runs_fuzz_without_a_diff(self) -> None:
         on_text = "\n".join(self.on_block)
         self.assertIn("  schedule:", on_text)

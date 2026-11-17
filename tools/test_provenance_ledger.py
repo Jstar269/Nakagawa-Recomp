@@ -25,6 +25,7 @@ Run directly or through ``python -m unittest discover -s tools``.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -3558,3 +3559,67 @@ class GeneratorClassMappingRegressions(unittest.TestCase):
         refreshed = provenance_ledger._refresh_class_for("font/README.md", record)
         self.assertEqual(generated, refreshed)
         self.assertIsNone(refreshed[1].get("record_id"))
+
+
+class EditorConfigImportByteTests(unittest.TestCase):
+    """A save in an EditorConfig-aware editor must not rewrite a pinned import's bytes.
+
+    ``.gitattributes`` exempts these vendored imports from the whitespace checks so their
+    pinned blob IDs stay the same.  ``.editorconfig`` must not ask an editor to do what
+    ``.gitattributes`` then refuses to normalise, or saving an untouched import changes its
+    content hash; the project-authored PROVENANCE.md manifests keep the normal rules.
+    """
+
+    IMPORT_MANIFESTS = (
+        "third_party/libchdr/PROVENANCE.md",
+        "third_party/stb/PROVENANCE.md",
+        "src/rt/atrac3p/PROVENANCE.md",
+        "src/rt/h264_ffmpeg_sub/PROVENANCE.md",
+        "src/rt/minimp3/PROVENANCE.md",
+        "src/rt/xr/openxr/PROVENANCE.md",
+    )
+    IMPORT_SOURCES = (
+        "third_party/stb/stb_vorbis.c",
+        "src/rt/atrac3p/atrac3p_api.c",
+        "src/rt/h264_ffmpeg_sub/compat/va_copy.h",
+        "src/rt/minimp3/minimp3.h",
+        "src/rt/xr/openxr/openxr.h",
+    )
+
+    @staticmethod
+    def _effective(path: str) -> dict[str, str]:
+        values: dict[str, str] = {}
+        section: str | None = None
+        for raw in (ROOT / ".editorconfig").read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith(("#", ";")):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1]
+                continue
+            if section is None or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if section in ("*", path) or fnmatch.fnmatchcase(path, section):
+                values[key.strip().lower()] = value.strip().lower()
+        return values
+
+    def test_imports_keep_their_upstream_whitespace(self) -> None:
+        for path in self.IMPORT_SOURCES:
+            with self.subTest(path=path):
+                values = self._effective(path)
+                self.assertEqual(values.get("trim_trailing_whitespace"), "unset")
+                self.assertEqual(values.get("insert_final_newline"), "unset")
+
+    def test_a_normal_project_file_keeps_the_text_rules(self) -> None:
+        values = self._effective("src/rt/ge.c")
+        self.assertEqual(values.get("trim_trailing_whitespace"), "true")
+        self.assertEqual(values.get("insert_final_newline"), "true")
+
+    def test_import_manifests_keep_the_text_rules(self) -> None:
+        for manifest in self.IMPORT_MANIFESTS:
+            with self.subTest(path=manifest):
+                self.assertTrue((ROOT / manifest).is_file(), f"{manifest} is not a tracked manifest")
+                values = self._effective(manifest)
+                self.assertEqual(values.get("trim_trailing_whitespace"), "true")
+                self.assertEqual(values.get("insert_final_newline"), "true")

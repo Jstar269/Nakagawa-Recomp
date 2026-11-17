@@ -887,6 +887,66 @@ class KeyFileIgnoreTests(unittest.TestCase):
                 self.assertIsNone(publish_audit._forbidden_path(path))
         self.assertEqual(sorted(_check_ignored(sources)), [])
 
+    def test_release_signing_keystores_are_gitignored_and_rejected(self) -> None:
+        # A signed APK's keystore is a credential (AGENTS.md section 5): `git add -A` must
+        # not stage it, and publish_audit must reject it even when no ignore rule matched.
+        paths = [
+            "android/app/release.keystore",
+            "android/app/upload.jks",
+            "android/app/release.p12",
+            "android/app/release.pfx",
+            "android/app/keystore.properties",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(publish_audit._forbidden_path(path), "local-only key file")
+        missing = sorted(set(paths) - _check_ignored(paths))
+        self.assertEqual(
+            missing, [],
+            "these signing keystores are rejected by publish_audit but no longer "
+            "gitignored, so `git add -A` can stage them:\n  " + "\n  ".join(missing),
+        )
+
+
+class FirmwareAndLicenceIgnoreTests(unittest.TestCase):
+    """A firmware font or console-bound licence file dropped anywhere stays out of `git add -A`.
+
+    docs/SETUP.md has users copy flash0 fonts into a folder Nakagawa reads, and AGENTS.md
+    section 5 forbids committing firmware font payloads or PSP licence files. The ignore
+    rules are the first line of defence, so they cannot be anchored to one drop folder.
+    """
+
+    PAYLOADS = (
+        "assets/fonts/ltn0.pgf",
+        "flash0/font/ltn0.pgf",
+        "x/ltn0.pgf",
+        "x/LTN0.PGF",
+        "flash0/font/jpn0.pgd",
+        "x/jpn0.pgd",
+        "flash0/font/a.rif",
+        "x/a.rif",
+        "act.dat",
+        "flash0/act.dat",
+        "x/ACT.DAT",
+    )
+
+    def test_firmware_payloads_and_licence_files_are_gitignored(self) -> None:
+        missing = sorted(set(self.PAYLOADS) - _check_ignored(self.PAYLOADS))
+        self.assertEqual(
+            missing, [],
+            "these firmware or console-bound files are not gitignored, so `git add -A` can "
+            "stage them (AGENTS.md section 5):\n  " + "\n  ".join(missing),
+        )
+
+    def test_project_files_naming_the_formats_stay_trackable(self) -> None:
+        sources = [
+            "src/rt/flash0_font.c",
+            "src/rt/flash0_font.h",
+            "tools/test_flash0_font.py",
+            "font/README.md",
+        ]
+        self.assertEqual(sorted(_check_ignored(sources)), [], sources)
+
 
 if __name__ == "__main__":
     unittest.main()
