@@ -12012,6 +12012,29 @@ static void test_play_mode_title_page(void) {
     assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 8);
     player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, 0);
     assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 16);
+    /* Review of #2644, D1: with a preset the library's page shows the preset's value for a
+     * part the preset sets (Medium: Sharper enlarging on, over the library's own off).
+     * Picking the value the row shows changes nothing; picking another saves it and makes the
+     * preset Custom. */
+    {
+        const PlayerEnhancedPartInfo *upscale = player_enhanced_part(PLAYER_PART_UPSCALE);
+        const PlayerSettings kept = app->settings; /* leaving a preset keeps its values */
+        int shown;
+        assert(upscale && upscale->value_count == 2);
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
+        shown = player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE);
+        assert(app->settings.graphics_preset == PLAYER_PRESET_MEDIUM);
+        assert(shown == upscale->values[0] &&
+               app->settings.enhanced.part[PLAYER_PART_UPSCALE] == upscale->values[1]);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_UPSCALE, 0);   /* as shown */
+        assert(app->settings.graphics_preset == PLAYER_PRESET_MEDIUM);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == upscale->values[1]);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_UPSCALE, 1);   /* Off */
+        assert(app->settings.graphics_preset == PLAYER_PRESET_CUSTOM);
+        assert(player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE) ==
+               upscale->values[1]);
+        app->settings = kept;
+    }
     player_app_close_enhanced_page(app);
     assert(app->active_view == VIEW_SETTINGS);
 
