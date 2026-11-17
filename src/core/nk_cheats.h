@@ -1,5 +1,31 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Copyright (C) 2026 the Nakagawa Recomp authors */
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2012- PPSSPP Project.
+ * Copyright (C) 2026 the Nakagawa Recomp authors
+ *
+ * Cheat codes in the CWCheat text format (#2639): the interface of nk_cheats.c.
+ *
+ * The line types and code forms this header lists, and the address base
+ * NK_CHEATS_ADDRESS_BASE, are translated from PPSSPP's CWCheat engine
+ * (https://github.com/hrydgard/ppsspp), Core/CwCheat.cpp at revision
+ * c437463bc5cb78a0236312ad23f9c3b56fb9ae67 (GPL-2.0-or-later): CheatFileParser::ParseLine,
+ * CWCheatEngine::InterpretNextCwCheat and CWCheatEngine::ExecuteOp, with
+ * CWCheatEngine::GetAddress in Core/CwCheat.h. Label: derived-translated
+ * (docs/provenance/INDEPENDENCE_MODEL.md); PPSSPP-derived, not PSP-measured. This file is
+ * conveyed as GPL-3.0-or-later.
+ *
+ * Core/CwCheat.cpp and Core/CwCheat.h carry no copyright or licence line of their own at that
+ * revision. The PPSSPP line above is the notice PPSSPP's source files carry, copied from the
+ * first line of Core/Core.cpp at the same revision; that file's notice and PPSSPP's LICENSE.TXT
+ * give the licence, GPL version 2.0 or later.
+ *
+ * Modified for this project (2026-11-16; see src/core/PROVENANCE.md and the list in
+ * nk_cheats.c):
+ *   - The declarations below (NkCheatHost, NkCheatConfig, NkCheatInfo, NkCheatSummary, the
+ *     nk_cheats_* functions and the limits) are this project's own; PPSSPP has no counterpart
+ *     to them. No line of PPSSPP's code was copied.
+ *   - The table of code forms gives each form's fields as InterpretNextCwCheat reads them,
+ *     narrowed to the forms that run here. The refusals, the check made when a file is read
+ *     and the whole-or-nothing rule are this project's own. */
 
 #ifndef NK_CHEATS_H
 #define NK_CHEATS_H
@@ -9,12 +35,11 @@
  * cheats that are on once per delivered VBLANK. Nothing here reads the network, and nothing
  * here knows a game: the user supplies the file.
  *
- * The format has no specification. The semantics follow PPSSPP's implementation, the public
- * reference for the format (PPSSPP-derived, not PSP-measured: https://github.com/hrydgard/ppsspp
- * at c437463bc5cb78a0236312ad23f9c3b56fb9ae67, Core/CwCheat.cpp, CheatFileParser::ParseLine,
- * CWCheatEngine::InterpretNextCwCheat and CWCheatEngine::ExecuteOp). The code is written from
- * those semantics, not copied. It is stricter than PPSSPP wherever PPSSPP skips, guesses or
- * widens: a line it cannot run exactly as written refuses its whole cheat.
+ * The format has no specification. The meaning of each line type and code form is PPSSPP's,
+ * the public reference for the format (the note at the top of this file names the revision
+ * and the functions; PPSSPP-derived, not PSP-measured). The reader is stricter than PPSSPP
+ * wherever PPSSPP skips, guesses or widens: a line it cannot run exactly as written refuses
+ * its whole cheat.
  *
  * The file
  *   _S <disc ID>     the lines that follow are for this disc (hyphens and case do not count)
@@ -78,6 +103,9 @@ extern "C" {
 
 /* The address a code's 28-bit offset counts from: the start of PSP user memory. */
 #define NK_CHEATS_ADDRESS_BASE 0x08800000u
+/* The PPSSPP revision the code forms' meaning is translated from. A run that applies cheats
+ * names it once, with the words "PPSSPP-derived, not PSP-measured" (src/rt/cheats.c). */
+#define NK_CHEATS_PPSSPP_REVISION "c437463bc5cb78a0236312ad23f9c3b56fb9ae67"
 /* A cheat file larger than this is refused whole. A full cheat.db is about 10 MiB. */
 #define NK_CHEATS_MAX_FILE_BYTES (64u * 1024u * 1024u)
 /* The most one cheat may write in one frame (its undo record is this large). */

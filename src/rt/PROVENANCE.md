@@ -264,9 +264,12 @@ Created in this repository. The code moved out of a sal063-lineage file, so the 
   wrapper over minimp3 (CC0, byte-identical, `src/rt/minimp3/PROVENANCE.md`). They contain
   no PPSSPP code.
 - `rt/cheats.c` and `rt/cheats.h` (#2639): GPL-3.0-or-later, project-authored. They bind
-  the cheat reader and applier of `src/core/nk_cheats.c` to a run (the switch, the file,
-  guest memory, the translated code, the pad and the marker) and contain no PPSSPP code;
-  the code forms' semantics, which are PPSSPP-derived, are in `src/core/PROVENANCE.md`.
+  the cheat reader and applier to a run (the switch, the file, guest memory, the translated
+  code, the pad and the marker) and contain no PPSSPP code. The reader and applier they
+  bind, `src/core/nk_cheats.c` and `src/core/nk_cheats.h`, are derived-translated from
+  PPSSPP's `Core/CwCheat.cpp` and recorded in `src/core/PROVENANCE.md`; `rt/cheats.c`
+  prints the run's one "PPSSPP-derived, not PSP-measured" line at the first VBLANK that
+  applies cheats.
 - Tests and documents that compare behaviour against PPSSPP (for example
   `rt/hle_thread_selftest.c`, `rt/intr_conformance.h`, `rt/guest_printf.c`) cite
   it as an oracle and are GPL-3.0-or-later. They are not adaptations.

@@ -22,6 +22,11 @@
  * refused by name: a recompiled game does not read its code again, so the write could not take
  * effect. Refusals are stderr lines that start "CHEATS:".
  *
+ * Where the meaning comes from. The code forms are read as PPSSPP reads them
+ * (src/core/nk_cheats.h): PPSSPP-derived, not PSP-measured. The first VBLANK of a run that
+ * applies cheats says so on one "CHEATS:" line, with the PPSSPP revision; a run that applies
+ * none never says it, and sr_cheats_init starts a new run.
+ *
  * The marker. While any cheat is on, or one was refused, the window shows a short line
  * ("Cheats on: 2 (1 refused)") through the in-game UI pass (gui.c, gpu_sdl3vk/ace_ui.h). It is
  * on the window only, like everything that pass draws. In a windowed run cheats are applied

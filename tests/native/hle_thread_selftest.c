@@ -57043,6 +57043,68 @@ static void test_cheats_refused_for_the_whole_run(void) {
     cheats_end(path);
 }
 
+/* AGENTS.md section 7: the meaning of the code forms is PPSSPP's, not measured on a PSP, and a
+ * run that uses it says so once, at first use. For cheats that is the first VBLANK that applies
+ * them: not the start, not a VBLANK that applies nothing, and no later VBLANK. */
+#define CHEATS_ORIGIN_LINE \
+    "CHEATS: the code forms are read as PPSSPP reads them (Core/CwCheat.cpp at " \
+    "c437463bc5cb78a0236312ad23f9c3b56fb9ae67): PPSSPP-derived, not PSP-measured"
+
+static unsigned cheats_log_count(const char *text) {
+    unsigned n = 0;
+    for (const char *p = s_cheat_log; (p = strstr(p, text)) != NULL; p += strlen(text)) n++;
+    return n;
+}
+
+static void test_cheats_say_their_origin_once_at_first_use(void) {
+    char path[MAX_PATH];
+    char refused[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "origin", "_C1 Write\n_L 0x00000100 0x000000AB\n") &&
+           cheats_file_write(refused, sizeof(refused), "origin_refused",
+                             "_C1 Delay\n_L 0xB0000000 0x00000001\n"),
+           "cheats origin: the cheat files are written");
+    /* Off, and on with every cheat refused: nothing of PPSSPP's reading is used, so nothing is said. */
+    cheats_start("0", path);
+    cheats_tick(2);
+    expect(cheats_log_count("PPSSPP") == 0u, "cheats origin: a run with cheats off never says it");
+    cheats_start("1", refused);
+    sr_cheats_status(&status);
+    expect(status.file_opened && !status.applying && status.refused == 1u &&
+           cheats_log_count("not PSP-measured") == 0u,
+           "cheats origin: the start does not say it");
+    cheats_tick(2);
+    expect(cheats_log_count("PPSSPP") == 0u, "cheats origin: a run that applies no cheat never says it");
+    /* On, but held back by the hardcore seam: the first use is the first VBLANK that applies. */
+    cheats_start("1", path);
+    expect(cheats_log_count("not PSP-measured") == 0u, "cheats origin: reading the file is not the first use");
+    sr_cheats_set_hardcore(1);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && cheats_log_count("not PSP-measured") == 0u,
+           "cheats origin: a VBLANK that applies nothing does not say it");
+    sr_cheats_set_hardcore(0);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu, "cheats origin: the first applying VBLANK writes");
+    expect(cheats_log_count(CHEATS_ORIGIN_LINE) == 1u && cheats_log_count("not PSP-measured") == 1u,
+           "cheats origin: the first applying VBLANK says PPSSPP-derived, not PSP-measured, with the revision, once");
+    cheats_tick(3);
+    expect(cheats_log_count("PPSSPP") == 0u, "cheats origin: later VBLANKs do not say it again");
+    /* Stopped and applying again in the same run is not a first use. */
+    sr_cheats_set_hardcore(1);
+    sr_cheats_set_hardcore(0);
+    MEM_W8(CHEAT_BASE + 0x100u, 0u);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu && cheats_log_count("PPSSPP") == 0u,
+           "cheats origin: cheats that apply again in the same run do not say it again");
+    /* A new start is a new run. */
+    cheats_start("1", path);
+    cheats_tick(2);
+    expect(cheats_log_count(CHEATS_ORIGIN_LINE) == 1u, "cheats origin: the next run says it once at its own first use");
+    remove(refused);
+    cheats_end(path);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && (strcmp(argv[1], "--psp-oracle") == 0 ||
                      strcmp(argv[1], "--exit-game-poisoned") == 0))
@@ -57793,6 +57855,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_cheats_every_code_type_at_vblank();
     test_cheats_refuse_code_writes_and_bad_lines_by_name();
     test_cheats_refused_for_the_whole_run();
+    test_cheats_say_their_origin_once_at_first_use();
     test_pad_vblank_deadline();
     test_pad_late_through_the_boundary();
     test_pad_latency_charges_reads_to_new_frames();

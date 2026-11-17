@@ -25,6 +25,7 @@ static int s_started;      /* the switch was read for this run */
 static SrCheatsStatus s_status;
 static int s_hardcore;
 static int s_no_marker;
+static int s_origin_said;  /* this run has said where the code forms' meaning comes from */
 static char s_marker[SR_CHEATS_MARKER_MAX];
 
 static void host_read(void *ctx, uint32_t addr, void *out, uint32_t size) {
@@ -72,6 +73,7 @@ void sr_cheats_reset(void) {
     memset(&s_status, 0, sizeof(s_status));
     s_hardcore = 0;
     s_no_marker = 0;
+    s_origin_said = 0;
     s_marker[0] = '\0';
 }
 
@@ -151,6 +153,13 @@ void sr_cheats_init(void) {
 void sr_cheats_vblank(void) {
     if (!s_started) sr_cheats_init();   /* a run with no window: gui_init did not read them */
     if (!s_status.applying) return;     /* off, refused or nothing on: the whole cost */
+    if (!s_origin_said) {
+        /* The first use in this run of behaviour taken from an emulator and not measured on a
+         * PSP is logged once (AGENTS.md section 7). */
+        s_origin_said = 1;
+        fprintf(stderr, "CHEATS: the code forms are read as PPSSPP reads them (Core/CwCheat.cpp at "
+                        NK_CHEATS_PPSSPP_REVISION "): PPSSPP-derived, not PSP-measured\n");
+    }
     (void)nk_cheats_apply(s_set, &k_host);
 }
 

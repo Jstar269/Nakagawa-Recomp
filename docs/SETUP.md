@@ -1263,8 +1263,10 @@ cannot show the marker. The player's acceptance checkpoint (`--headless-accept-p
 starts its game without cheats. RetroAchievements has no hardcore mode here yet; when it does,
 cheats will be refused while it is on.
 
-The semantics of each code form follow PPSSPP's implementation, the public reference for the
-format; they are PPSSPP-derived, not measured on a PSP.
+The meaning of each code form is PPSSPP's: the reader and applier are translated from its CWCheat
+engine, the public reference for the format (lineage in
+[`src/core/PROVENANCE.md`](../src/core/PROVENANCE.md)). It is PPSSPP-derived, not measured on a
+PSP, and the log says so once per run, at the first VBLANK that applies a cheat.
 
 ### Public synthetic verification routes
 

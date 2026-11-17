@@ -1,16 +1,68 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Copyright (C) 2026 the Nakagawa Recomp authors */
-
-/* CWCheat codes (#2639): nk_cheats.h says what is read, what runs and what is refused.
+/* SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright (c) 2012- PPSSPP Project.
+ * Copyright (C) 2026 the Nakagawa Recomp authors
  *
- * PPSSPP-derived, not PSP-measured. The meaning of each code form is PPSSPP's
- * (https://github.com/hrydgard/ppsspp at c437463bc5cb78a0236312ad23f9c3b56fb9ae67,
- * Core/CwCheat.cpp: CheatFileParser::ParseLine for the file's line types,
- * CWCheatEngine::GetAddress for the address base, CWCheatEngine::InterpretNextCwCheat for the
- * fields of each form and CWCheatEngine::ExecuteOp for what a form does). This file is written
- * from those semantics and shares no code with it. Where PPSSPP accepts more than the forms
- * nk_cheats.h lists (a wider value than the form holds, an unknown sub-form, a condition that
- * runs past the end), this reader refuses the cheat instead of choosing a meaning. */
+ * CWCheat codes (#2639): nk_cheats.h says what is read, what runs and what is refused.
+ *
+ * The line types of a cheat file, the decode of each code form and what each form does are
+ * translated from PPSSPP's CWCheat engine (https://github.com/hrydgard/ppsspp),
+ * Core/CwCheat.cpp at revision c437463bc5cb78a0236312ad23f9c3b56fb9ae67 (GPL-2.0-or-later):
+ * CheatFileParser::ParseLine and CheatFileParser::ParseDataLine, the CheatOp and CheatOperation
+ * types, CWCheatEngine::InterpretNextCwCheat, and CWCheatEngine::ExecuteOp with
+ * ApplyMemoryOperator, TestIf and TestIfAddr; the address base is CWCheatEngine::GetAddress in
+ * Core/CwCheat.h. Label: derived-translated (docs/provenance/INDEPENDENCE_MODEL.md);
+ * PPSSPP-derived, not PSP-measured. This file is conveyed as GPL-3.0-or-later.
+ *
+ * Core/CwCheat.cpp and Core/CwCheat.h carry no copyright or licence line of their own at that
+ * revision. The PPSSPP line above is the notice PPSSPP's source files carry, copied from the
+ * first line of Core/Core.cpp at the same revision; that file's notice and PPSSPP's LICENSE.TXT
+ * give the licence, GPL version 2.0 or later.
+ *
+ * Modified for this project (2026-11-16; see src/core/PROVENANCE.md):
+ *   - C99 over a host interface (NkCheatHost) instead of PPSSPP's memory map, JIT cache and
+ *     controller state. No line of PPSSPP's code was copied. These parts follow its structure
+ *     closely:
+ *       OpKind        the operation kinds, in the order of PPSSPP's CheatOp. Its Vibration,
+ *                     PostShader, Delay and Assert kinds are left out; its four value tests are
+ *                     one kind with a comparison, as are its four address tests and its two
+ *                     button tests.
+ *       CheatOp       one record per code, as PPSSPP's CheatOperation: an address, a size and a
+ *                     value, and a multi-write's count, step and add under PPSSPP's names.
+ *       check_code    the switch over a code's top four bits, and the bit fields each form is
+ *                     read from, are those of InterpretNextCwCheat.
+ *       run_cheat     one case per kind, as ExecuteOp: the multi-write loop (the address grows
+ *                     by step, the value by add), the copy, the pointer walk (a 0x2 or 0x3 step
+ *                     in either word of a line, then the write at the pointer plus or minus the
+ *                     offset) and the tests that skip lines when they fail.
+ *       code_address, user_address    GetAddress's base 0x08800000 and its 0x3FFFFFFF mask.
+ *       parse_text    the _S, _G, _C and _L line types, _C0 for off and _C1 to _C9 for on, and
+ *                     a comment after a code line's two values, as ParseLine and ParseDataLine.
+ *   - This project's own, with no counterpart in PPSSPP:
+ *       the text reader's code (no sscanf; a name is cleaned for display; a line that belongs
+ *       to no cheat becomes a note);
+ *       the load-time check (check_cheat): a whole cheat is compiled to its operation list
+ *       once, where PPSSPP decodes each code every time it runs. Every span a code names is
+ *       proved to lie in user memory, each test's count of lines becomes the operation it
+ *       continues at, and what one frame can write is bounded;
+ *       the refusal of a write into code the recompiler translated, asked when the file is
+ *       read and again before every write, where PPSSPP writes and invalidates its JIT cache;
+ *       the whole-or-nothing apply: an undo journal puts back what a cheat wrote on a frame it
+ *       cannot finish, and each cause of a hold is reported once.
+ *   - Stricter than PPSSPP. Each of these refuses its whole cheat by name, where PPSSPP picks
+ *     a meaning or skips the code: a value wider than its form holds (PPSSPP makes a type 0x0
+ *     write 16 or 32 bits wide when the value has higher bits set); bits set where a form has
+ *     zeros; a 0x3 form other than 1 to 6; a 0x8 value line that is neither 0x000000vv nor
+ *     0x1000vvvv; a count of 0 and a copy that overlaps itself; a 0x6 code with a base offset,
+ *     a write type above 5 or a 0x1 (copy) or 0x9 (multi-address) line; a 0x7 operation above
+ *     5; a test with an unknown comparison, a 0xE test other than 0xE0 and 0xE1, a test that
+ *     guards no line, runs past the end of its cheat or ends inside a multi-line code; a span
+ *     a code names that leaves user memory (PPSSPP skips the access; a pointer that leads
+ *     outside it holds the cheat for the frame); code types 0x9, 0xA, 0xB, 0xC and 0xF; and
+ *     _M and _N lines (PPSSPP runs PSP Action Replay codes). Comparisons are unsigned
+ *     here and signed in PPSSPP; the two agree for 8 and 16 bits, and the 32-bit orderings of
+ *     two addresses, where they would not, are refused. A section applies only when its _S
+ *     disc ID is the run's (PPSSPP also applies a file whose only section names another
+ *     game). */
 
 #include "nk_cheats.h"
 
