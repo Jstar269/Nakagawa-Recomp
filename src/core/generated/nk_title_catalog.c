@@ -16,10 +16,7 @@
 #include <pthread.h>
 #endif
 
-#define NK_CATALOG_MAX_OVERLAYS 8
-#define NK_CATALOG_MAX_COMPATIBLE_DISC_IDS 16
-#define NK_CATALOG_MAX_MODULES 32
-static const NkTitleEntry *s_private_overlay_entries[NK_CATALOG_MAX_OVERLAYS];
+static const NkTitleEntry *s_private_overlay_entries[NK_TITLE_MAX_OVERLAYS];
 static int s_private_overlay_count = 0;
 static NkOverlayStorageResetFn s_overlay_storage_reset = NULL;
 static uint64_t s_catalog_epoch = 1;
@@ -120,9 +117,9 @@ bool nk_title_catalog_snapshot_copy_locked(const NkTitleEntry *source,
     out_snapshot->entry.codegen_profile = owned->scalar_strings[8];
     if (source->compatible_disc_ids) {
         size_t count = 0;
-        while (count <= NK_CATALOG_MAX_COMPATIBLE_DISC_IDS &&
+        while (count <= NK_TITLE_MAX_COMPATIBLE_DISC_IDS &&
                source->compatible_disc_ids[count]) count++;
-        if (count > NK_CATALOG_MAX_COMPATIBLE_DISC_IDS) goto failed;
+        if (count > NK_TITLE_MAX_COMPATIBLE_DISC_IDS) goto failed;
         owned->compatible_count = count;
         owned->compatible_disc_ids = (const char **)calloc(
             count + 1, sizeof(*owned->compatible_disc_ids));
@@ -148,6 +145,11 @@ bool nk_title_catalog_snapshot_copy_locked(const NkTitleEntry *source,
             const NkLooseContentRoot *root = &source->loose_content_roots[i];
             NkLooseContentRoot *copy = &owned->loose_content_roots[i];
             *copy = *root;
+            /* Drop the source's borrowed pointers before any allocation can
+             * fail: release frees whatever these fields hold. */
+            copy->root = NULL;
+            copy->mount = NULL;
+            copy->exclude = NULL;
             if (root->root) {
                 copy->root = nk_title_catalog_copy_string(root->root);
                 if (!copy->root) goto failed;
@@ -176,7 +178,7 @@ bool nk_title_catalog_snapshot_copy_locked(const NkTitleEntry *source,
     }
     else out_snapshot->entry.loose_content_roots = NULL;
     if (source->module_count < 0 ||
-        source->module_count > NK_CATALOG_MAX_MODULES ||
+        source->module_count > NK_TITLE_MAX_MODULES ||
         (source->module_count > 0 && !source->modules)) goto failed;
     owned->module_count = (size_t)source->module_count;
     if (owned->module_count) {
@@ -213,33 +215,28 @@ void nk_title_catalog_set_overlay_storage_reset_locked(NkOverlayStorageResetFn r
     s_overlay_storage_reset = reset_fn;
 }
 
-void nk_title_catalog_register_overlay_locked(const NkTitleEntry *overlay_entry) {
-    if (!overlay_entry) return;
+bool nk_title_catalog_register_overlay_locked(const NkTitleEntry *overlay_entry) {
+    if (!overlay_entry) return false;
     for (int i = 0; i < s_private_overlay_count; i++) {
-        if (s_private_overlay_entries[i] == overlay_entry) return;
+        if (s_private_overlay_entries[i] == overlay_entry) return true;
         if (s_private_overlay_entries[i]->id && overlay_entry->id &&
              strcmp(s_private_overlay_entries[i]->id, overlay_entry->id) == 0) {
             s_private_overlay_entries[i] = overlay_entry;
             nk_title_catalog_advance_epoch_locked();
-            return;
+            return true;
         }
     }
-    if (s_private_overlay_count < NK_CATALOG_MAX_OVERLAYS) {
-        s_private_overlay_entries[s_private_overlay_count++] = overlay_entry;
-        nk_title_catalog_advance_epoch_locked();
-    }
+    if (s_private_overlay_count >= NK_TITLE_MAX_OVERLAYS) return false;
+    s_private_overlay_entries[s_private_overlay_count++] = overlay_entry;
+    nk_title_catalog_advance_epoch_locked();
+    return true;
 }
 
-void nk_title_catalog_set_overlay_storage_reset(NkOverlayStorageResetFn reset_fn) {
+bool nk_title_catalog_register_overlay(const NkTitleEntry *overlay_entry) {
     nk_title_catalog_lock();
-    nk_title_catalog_set_overlay_storage_reset_locked(reset_fn);
+    bool registered = nk_title_catalog_register_overlay_locked(overlay_entry);
     nk_title_catalog_unlock();
-}
-
-void nk_title_catalog_register_overlay(const NkTitleEntry *overlay_entry) {
-    nk_title_catalog_lock();
-    nk_title_catalog_register_overlay_locked(overlay_entry);
-    nk_title_catalog_unlock();
+    return registered;
 }
 
 void nk_title_catalog_clear_overlay(void) {
@@ -252,20 +249,6 @@ void nk_title_catalog_clear_overlay(void) {
     if (registry_changed || storage_changed)
         nk_title_catalog_advance_epoch_locked();
     nk_title_catalog_unlock();
-}
-
-const NkTitleEntry *nk_title_catalog_get_overlay_locked(void) {
-    return s_private_overlay_count > 0 ? s_private_overlay_entries[s_private_overlay_count - 1] : NULL;
-}
-
-bool nk_title_catalog_get_overlay(NkTitleEntrySnapshot *out_snapshot) {
-    if (!out_snapshot) return false;
-    memset(out_snapshot, 0, sizeof(*out_snapshot));
-    nk_title_catalog_lock();
-    const NkTitleEntry *entry = nk_title_catalog_get_overlay_locked();
-    bool found = entry && nk_title_catalog_snapshot_copy_locked(entry, out_snapshot);
-    nk_title_catalog_unlock();
-    return found;
 }
 
 static const NkModuleDefinition s_modules_title_1[] = {
@@ -495,7 +478,7 @@ const NkTitleEntry *nk_title_catalog_find_by_disc_id_locked(const char *disc_id)
     normalize_disc_id(disc_id, norm, sizeof(norm));
     if (!norm[0]) return NULL;
 
-    /* 1. Check in-memory private overlays first (most recently registered first) */
+    /* 1. Check in-memory private overlays first (newest registry slot first; re-registering an entry or its id keeps its slot) */
     for (int i = s_private_overlay_count - 1; i >= 0; i--) {
         const NkTitleEntry *ov = s_private_overlay_entries[i];
         if (!ov) continue;

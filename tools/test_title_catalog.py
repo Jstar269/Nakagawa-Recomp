@@ -313,17 +313,47 @@ int main(void) {{
         capacity[i].primary_disc_id = capacity_discs[i];
     }}
     uint64_t capacity_epoch = nk_title_catalog_epoch();
-    for (int i = 0; i < 8; i++) nk_title_catalog_register_overlay(&capacity[i]);
+    for (int i = 0; i < NK_TITLE_MAX_OVERLAYS; i++)
+        assert(nk_title_catalog_register_overlay(&capacity[i]));
     assert(nk_title_catalog_epoch() == capacity_epoch + 8);
     capacity_epoch = nk_title_catalog_epoch();
-    nk_title_catalog_register_overlay(&capacity[0]);
-    nk_title_catalog_register_overlay(&capacity[8]);
+    /* An already registered entry is still accepted; a ninth title is refused
+       and reported, never dropped silently. */
+    assert(nk_title_catalog_register_overlay(&capacity[0]));
+    assert(!nk_title_catalog_register_overlay(&capacity[8]));
+    assert(!nk_title_catalog_find_by_id("capacity-title-8", &missing));
     assert(nk_title_catalog_epoch() == capacity_epoch);
     nk_title_catalog_clear_overlay();
     assert(nk_title_catalog_epoch() == capacity_epoch + 1);
     empty_epoch = nk_title_catalog_epoch();
     nk_title_catalog_clear_overlay();
     assert(nk_title_catalog_epoch() == empty_epoch);
+
+    /* The snapshot copy accepts every module count the manifest parser
+       accepts: one shared limit, so a valid 33-module overlay stays findable. */
+    static NkModuleDefinition many_modules[NK_TITLE_MAX_MODULES];
+    for (int i = 0; i < NK_TITLE_MAX_MODULES; i++) {{
+        many_modules[i].name = "module.prx";
+        many_modules[i].load_address = 0x08900000U + (uint32_t)i * 0x1000U;
+    }}
+    NkTitleEntry module_overlay;
+    memset(&module_overlay, 0, sizeof(module_overlay));
+    module_overlay.id = "many-modules-v1";
+    module_overlay.primary_disc_id = "ULUS00004";
+    module_overlay.modules = many_modules;
+    module_overlay.module_count = 33;
+    assert(nk_title_catalog_register_overlay(&module_overlay));
+    NkTitleEntrySnapshot module_snapshot = {{0}};
+    assert(nk_title_catalog_find_by_id("many-modules-v1", &module_snapshot));
+    assert(module_snapshot.entry.module_count == 33);
+    nk_title_catalog_snapshot_release(&module_snapshot);
+    module_overlay.module_count = NK_TITLE_MAX_MODULES;
+    assert(nk_title_catalog_find_by_id("many-modules-v1", &module_snapshot));
+    assert(module_snapshot.entry.module_count == NK_TITLE_MAX_MODULES);
+    nk_title_catalog_snapshot_release(&module_snapshot);
+    module_overlay.module_count = NK_TITLE_MAX_MODULES + 1;
+    assert(!nk_title_catalog_find_by_id("many-modules-v1", &module_snapshot));
+    nk_title_catalog_clear_overlay();
 
     /* Test nonexistent disc ID */
     assert(!nk_title_catalog_find_by_disc_id("ULUS99999", &missing));
@@ -360,6 +390,137 @@ int main(void) {{
         res_exec = subprocess.run([str(exe_path)], capture_output=True, text=True)
         self.assertEqual(res_exec.returncode, 0, f"Execution failed: {res_exec.stderr}")
         self.assertIn("ALL_NATIVE_CATALOG_C_ASSERTIONS_PASSED", res_exec.stdout)
+
+    def test_snapshot_copy_failure_frees_only_owned_storage(self) -> None:
+        """Fail each allocation of a snapshot copy in turn: the failed copy must free
+        only what it allocated. A loose root's borrowed root/mount pointers used to
+        stay in the owned array when its root copy failed, and release then freed
+        the source's string literal (audit 2026-11-17, F-27efef84)."""
+        gcc = shutil.which("gcc")
+        if not gcc:
+            self.skipTest("gcc not available in PATH on this host")
+
+        cat_h = ROOT / "src" / "core" / "generated" / "nk_title_catalog.h"
+        cat_c = ROOT / "src" / "core" / "generated" / "nk_title_catalog.c"
+        harness = self.temp_dir / "fault_harness.c"
+        # The catalog source is compiled inside this translation unit, after the
+        # C library headers, so its malloc/calloc/free calls go to a tracking
+        # allocator that can fail the Nth allocation and refuses a foreign free.
+        harness.write_text(f"""#if !defined(_WIN32) && !defined(_WIN64) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
+#define NK_FAULT_MAX_LIVE 4096
+static void *s_live[NK_FAULT_MAX_LIVE];
+static int s_live_count = 0;
+static int s_alloc_count = 0;
+static int s_fail_at = 0;
+
+static void *nk_fault_track(void *p) {{
+    if (!p) return NULL;
+    if (s_live_count >= NK_FAULT_MAX_LIVE) {{ fprintf(stderr, "TRACK_FULL\\n"); exit(4); }}
+    s_live[s_live_count++] = p;
+    return p;
+}}
+static void *nk_fault_malloc(size_t size) {{
+    if (++s_alloc_count == s_fail_at) return NULL;
+    return nk_fault_track(malloc(size));
+}}
+static void *nk_fault_calloc(size_t count, size_t size) {{
+    if (++s_alloc_count == s_fail_at) return NULL;
+    return nk_fault_track(calloc(count, size));
+}}
+static void nk_fault_free(void *p) {{
+    if (!p) return;
+    for (int i = 0; i < s_live_count; i++) {{
+        if (s_live[i] == p) {{
+            s_live[i] = s_live[--s_live_count];
+            free(p);
+            return;
+        }}
+    }}
+    fprintf(stderr, "FOREIGN_FREE after failing allocation %d\\n", s_fail_at);
+    exit(3);
+}}
+#define malloc nk_fault_malloc
+#define calloc nk_fault_calloc
+#define free nk_fault_free
+#include "{cat_c.as_posix()}"
+#undef malloc
+#undef calloc
+#undef free
+
+int main(void) {{
+    static const char *const compat[] = {{ "ULES00001", "ULJS00002", NULL }};
+    static const char *const excludes[] = {{ "skip/a.bin", "skip/b.bin" }};
+    static const NkLooseContentRoot roots[] = {{
+        {{ "loose", "", 0U, false, excludes, 2 }},
+        {{ ".", "mnt", 1U, true, NULL, 0 }},
+    }};
+    static const NkModuleDefinition modules[] = {{
+        {{ "one.prx", 0x08900000U, true }},
+        {{ "two.prx", 0x08a00000U, false }},
+    }};
+    NkTitleEntry overlay;
+    memset(&overlay, 0, sizeof(overlay));
+    overlay.id = "fault-copy-v1";
+    overlay.game_name = "fault-copy";
+    overlay.display_name = "Fault Copy";
+    overlay.primary_disc_id = "ULUS00003";
+    overlay.compatible_disc_ids = compat;
+    overlay.bss_metadata_source = "elf";
+    overlay.data_root = "data";
+    overlay.loose_content_roots = roots;
+    overlay.loose_content_root_count = 2;
+    overlay.memory_stick_root = "ms";
+    overlay.hle_profile = "generic";
+    overlay.codegen_profile = "none";
+    overlay.modules = modules;
+    overlay.module_count = 2;
+    nk_title_catalog_register_overlay(&overlay);
+
+    NkTitleEntrySnapshot snapshot;
+    s_alloc_count = 0;
+    s_fail_at = 0;
+    if (!nk_title_catalog_find_by_id("fault-copy-v1", &snapshot)) return 5;
+    int allocations = s_alloc_count;
+    nk_title_catalog_snapshot_release(&snapshot);
+    if (s_live_count != 0 || allocations < 10) return 6;
+    for (int fail = 1; fail <= allocations; fail++) {{
+        s_alloc_count = 0;
+        s_fail_at = fail;
+        if (nk_title_catalog_find_by_id("fault-copy-v1", &snapshot)) return 7;
+        if (snapshot.owned_storage || s_live_count != 0) {{
+            fprintf(stderr, "LEAK after failing allocation %d\\n", fail);
+            return 8;
+        }}
+    }}
+    s_fail_at = 0;
+    nk_title_catalog_clear_overlay();
+    printf("SNAPSHOT_FAULT_INJECTION_PASSED %d\\n", allocations);
+    return 0;
+}}
+""", encoding="utf-8")
+        exe_path = self.temp_dir / ("fault_harness.exe" if sys.platform == "win32" else "fault_harness")
+        res_comp = subprocess.run(
+            [gcc, "-Wall", "-Wextra", "-Werror", "-std=c99", "-I", str(cat_h.parent),
+             str(harness), "-o", str(exe_path)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(res_comp.returncode, 0, f"Compilation failed: {res_comp.stderr}")
+        res_exec = subprocess.run([str(exe_path)], capture_output=True, text=True)
+        self.assertEqual(res_exec.returncode, 0,
+                         f"Execution failed ({res_exec.returncode}): {res_exec.stderr}")
+        self.assertIn("SNAPSHOT_FAULT_INJECTION_PASSED", res_exec.stdout)
 
     def test_parity_between_python_registry_and_c_catalog(self) -> None:
         """Ensure Python TitleRegistry and C catalog headers have the exact same titles."""
