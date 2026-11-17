@@ -1156,7 +1156,9 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             row->disabled = true;
             row->disabled_reason = "Play mode is Authentic.";
         } else if (title >= 0 && row->tag != NULL &&
-                   strcmp(model->enhanced_mode, "Ace") != 0) {
+                   (strcmp(model->enhanced_mode, "Ace") != 0 ||
+                    !app->title_enhancements[title].available)) {
+            /* A saved Ace whose package has gone is no Ace: its Ace-only rows stay dimmed. */
             row->disabled = true;
             row->disabled_reason = app->title_enhancements[title].available
                 ? "Available only in Ace."
@@ -1280,7 +1282,8 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     }
     model.resolution = player_ui_resolution_word(app->settings.resolution_scale);
     model.pacing = app->settings.fps_cap < 0 ? "PSP timing" : "No extra cap";
-    model.pacing_sentence = "Sets whether this player follows PSP timing or adds no frame cap.";
+    model.pacing_sentence = "Sets whether every game, in every play mode, follows PSP timing "
+                            "or adds no frame cap.";
     model.scaling = player_present_scaling_label(app->settings.present_scaling);
     model.preset = player_app_graphics_preset_label(app);
     model.vsync = app->settings.vsync;

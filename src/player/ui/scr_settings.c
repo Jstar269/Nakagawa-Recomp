@@ -1263,16 +1263,32 @@ static void settings_enhanced_row_detail(SettingsEnhancedDetail *detail,
     detail->value_muted = row->inherited || row->disabled;
 }
 
+/* The row of which list Settings > Enhanced last kept its padding for, and for how many
+   frames more: the frame focus enters a row and the frames after it in which the focus graph
+   brings it into view again (NK_UI_FOCUS_REVEAL_FRAMES in nk_ui_focus.c). The page is drawn
+   from one thread; a frame with no row focused clears it, so a new NkUi starts afresh. */
+#define ENHANCED_PAD_FRAMES 3
+static struct {
+    const NkUi *ui;
+    NkUiId list;
+    NkUiId row;
+    int frames;
+} s_enhanced_pad;
+
 /* How tall `text` is wrapped in `width`, for the room the page keeps for its list:
-   nk_ui_text_clamp wraps as the layout does, so the first line count it does not cut at is the
-   text's. */
+   nk_ui_text_clamp wraps as the layout does, so the first line count at which it gives the
+   whole text back is the text's. The whole text is what a clamp to the most lines returns: an
+   ellipsis the text has of its own (a game's title can) is not a cut. */
 static float settings_enhanced_text_height(NkUi *ui, const char *text, NkUiTypeRole role,
                                            float width) {
+    enum { MOST_LINES = 12 };
     NkUiTextStyle style = nk_ui_type(role, 0u);
+    const char *whole;
     int lines = 1;
     if (text == NULL || text[0] == '\0') return 0.0f;
-    while (lines < 12 &&
-           strstr(nk_ui_text_clamp(ui, text, &style, width, lines), "\xE2\x80\xA6") != NULL) {
+    whole = nk_ui_text_clamp(ui, text, &style, width, MOST_LINES);
+    while (lines < MOST_LINES &&
+           strcmp(nk_ui_text_clamp(ui, text, &style, width, lines), whole) != 0) {
         ++lines;
     }
     return (float)lines * nk_ui_line_height(ui, &style);
@@ -1379,7 +1395,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
     char lead_text[256];
     int active_group = model->enhanced_tab;
     int preset_index = 0;
-    int mode_index = 0;
+    int mode_index;
     int pacing_index = strcmp(safe_text(model->pacing, pacing_values[0]), pacing_values[1]) == 0;
     int tab_rows[PLAYER_UI_ENHANCED_GROUP_COUNT] = {0};
     int most_rows = 0;
@@ -1437,6 +1453,10 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             if (strcmp(model->preset, preset_labels[i]) == 0) preset_index = i;
         }
     }
+    /* -1: the mode is none of the list's, a saved Ace whose package has gone. It sits where
+       Ace would, after the last mode: Right goes round to the first, Left to the last, as the
+       select button steps it (player_app_cycle_title_play_mode). */
+    mode_index = -1;
     for (int i = 0; i < model->enhanced_mode_count; ++i) {
         if (strcmp(safe_text(model->enhanced_mode, ""),
                    safe_text(model->enhanced_modes[i], "")) == 0) mode_index = i;
@@ -1559,8 +1579,10 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                 }
                 if (step != 0 && model->enhanced_mode_count > 0) {
                     *result = settings_op(PLAYER_UI_SETTINGS_SET_PLAY_MODE);
-                    result->choice_index = (mode_index + step + model->enhanced_mode_count) %
-                                           model->enhanced_mode_count;
+                    result->choice_index =
+                        mode_index < 0 ? (step > 0 ? 0 : model->enhanced_mode_count - 1)
+                                       : (mode_index + step + model->enhanced_mode_count) %
+                                             model->enhanced_mode_count;
                 } else if (activated) {
                     *result = settings_op(PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE);
                 }
@@ -1654,6 +1676,8 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                                 detail.name = "Frame pacing";
                                 detail.value = pacing_values[pacing_index];
                                 detail.sentence = model->pacing_sentence;
+                                /* fps_cap is the library's: a game's page says so. */
+                                detail.scope = title ? "All games" : NULL;
                                 have_detail = true;
                                 focused_place = listed;
                             }
@@ -1724,10 +1748,29 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
             nk_ui_end_container(ui);
         }
         /* The focused row scrolls into view flush with the list's edge, which would cut its
-           focus ring there: keep the list's own padding between them. */
-        if (focused_place >= 0) {
+           focus ring there: keep the list's own padding between them. Only in the frames
+           just after focus enters the row, as the focus graph brings it into view: after
+           that the list stays where the wheel or a drag puts it, focused row or not. */
+        if (focused_place < 0) {
+            s_enhanced_pad.row = 0u;
+        } else {
             NkUiScrollState state;
-            if (nk_ui_scroll_state(ui, list_id, &state) && state.max_offset > 0.5f) {
+            const NkUiId row = nk_ui_focused(ui);
+            memset(&state, 0, sizeof(state));
+            if (s_enhanced_pad.ui != ui || s_enhanced_pad.list != list_id ||
+                s_enhanced_pad.row != row) {
+                s_enhanced_pad.ui = ui;
+                s_enhanced_pad.list = list_id;
+                s_enhanced_pad.row = row;
+                s_enhanced_pad.frames = ENHANCED_PAD_FRAMES;
+            }
+            /* A frame before the list's first layout knows no offset and does not count. */
+            if (s_enhanced_pad.frames > 0 && nk_ui_scroll_state(ui, list_id, &state)) {
+                --s_enhanced_pad.frames;
+            } else {
+                state.max_offset = 0.0f;
+            }
+            if (state.max_offset > 0.5f) {
                 float top = ENHANCED_LIST_PAD + (float)focused_place * pitch;
                 float want = state.offset;
                 if (top - want < ENHANCED_LIST_PAD) want = top - ENHANCED_LIST_PAD;

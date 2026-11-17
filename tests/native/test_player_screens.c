@@ -106,6 +106,10 @@ static const char *const k_enhanced_title_modes[] = {"Library (Enhanced)", "Auth
    keeps the fixture's) and the play mode (NULL keeps the case's). */
 static const char *g_enhanced_value[PLAYER_PART_COUNT];
 static const char *g_enhanced_mode;
+/* A game's page: its name and how many play modes its row steps (NULL and 0 keep the case's
+   "Test Game" and four; three is a game with no package of its own). */
+static const char *g_enhanced_title_name;
+static int g_enhanced_mode_count;
 static int g_enhanced_tab;
 static NkUiId g_enhanced_focus_id;
 /* A graphics preset's note for Settings > Enhanced (NULL: Medium, with no note set). */
@@ -487,12 +491,14 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         bool title = which == FLOW_SETTINGS_ACE_TITLE;
         settings.enhanced_library_on = which != FLOW_SETTINGS_ACE_OFF;
         settings.enhanced_on = settings.enhanced_library_on;
-        settings.enhanced_title = title ? "Test Game" : NULL;
+        settings.enhanced_title =
+            !title ? NULL : g_enhanced_title_name != NULL ? g_enhanced_title_name : "Test Game";
         settings.enhanced_mode = title ? "Library (Enhanced)"
                                : settings.enhanced_on ? "Enhanced" : "Authentic";
         if (g_enhanced_mode != NULL) settings.enhanced_mode = g_enhanced_mode;
         settings.enhanced_modes = title ? k_enhanced_title_modes : k_enhanced_library_modes;
-        settings.enhanced_mode_count = title ? 4 : 2;
+        settings.enhanced_mode_count =
+            !title ? 2 : g_enhanced_mode_count > 0 ? g_enhanced_mode_count : 4;
         settings.enhanced_mode_sentence =
             title ? "Enhanced adds the parts below. Ace needs a package made for this game."
                   : "The default for every game; each game's page can choose its own.";
@@ -553,7 +559,8 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
         }
     }
     settings.pacing = "PSP timing";
-    settings.pacing_sentence = "Sets whether this player follows PSP timing or adds no frame cap.";
+    settings.pacing_sentence = "Sets whether every game, in every play mode, follows PSP timing "
+                               "or adds no frame cap.";
     settings.scaling = "Sharp";
     settings.preset = "Medium";
     if (g_enhanced_preset_note != NULL) {
@@ -4089,8 +4096,8 @@ static void test_settings_pages(void) {
               "Frame pacing, on the Motion tab, switches in every play mode");
         g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_PACING;
         CHECK(enhanced_panel_reads(FLOW_SETTINGS_ACE, 1280, 720, "Frame pacing", "PSP timing",
-                                   "Sets whether this player follows PSP timing or adds no "
-                                   "frame cap.", NULL, true),
+                                   "Sets whether every game, in every play mode, follows PSP "
+                                   "timing or adds no frame cap.", NULL, true),
               "focusing Frame pacing shows its value and what it changes");
         g_enhanced_focus_id = 0u;
         g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
@@ -5116,6 +5123,143 @@ static bool enhanced_focus_box_is_whole(const NkUiDrawList *draw, NkUiId id, int
         }
     }
     return boxes > 0;
+}
+
+/* Audit 2026-11-17, F-af61f9a8: the room the page keeps for its lead is the lead's own lines.
+   A game's title with an ellipsis of its own (common in Japanese titles) was taken for a cut
+   at every line count, so the lead kept twelve lines and the list fell to two rows. */
+static float enhanced_list_viewport(FlowCase which, int width, int height) {
+    NkUi *ui = NULL;
+    NkUiScrollState state;
+    const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
+    float viewport = draw != NULL && ui != NULL &&
+                             nk_ui_scroll_state(ui, ENHANCED_TEST_LIST_ID(g_enhanced_tab), &state)
+                         ? state.viewport
+                         : -1.0f;
+    if (ui != NULL) nk_ui_destroy(ui);
+    return viewport;
+}
+
+static void test_enhanced_title_with_an_ellipsis(void) {
+    const int saved_tab = g_enhanced_tab;
+    char message[200];
+    float plain;
+    float ellipsis;
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    g_enhanced_mode = NULL;
+    plain = enhanced_list_viewport(FLOW_SETTINGS_ACE_TITLE, 1280, 720);
+    g_enhanced_title_name = "Test Game\xE2\x80\xA6 Two";
+    ellipsis = enhanced_list_viewport(FLOW_SETTINGS_ACE_TITLE, 1280, 720);
+    g_enhanced_title_name = NULL;
+    (void)snprintf(message, sizeof(message),
+                   "a game's title with an ellipsis of its own keeps the list's height "
+                   "(%.0f px, against %.0f px for a plain title)", (double)ellipsis,
+                   (double)plain);
+    CHECK(plain > 0.0f && fabsf(ellipsis - plain) < 0.5f, message);
+    g_enhanced_tab = saved_tab;
+}
+
+/* Audit 2026-11-17, F-a919f78f: a game saved as Ace whose package has gone shows Ace, which
+   its three modes do not list. The arrows step from where Ace sits, after Enhanced, as the
+   select button does: Right is Library, Left is Enhanced. Right stepped from Library. */
+static void test_enhanced_stale_ace_steps_from_ace(void) {
+    PlayerUiAction step;
+    g_enhanced_mode = "Ace";
+    g_enhanced_mode_count = 3;
+    step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, PLAYER_UI_ID_SETTINGS_ACE_MODE, NK_UI_EV_NAV,
+                         NK_UI_DIR_RIGHT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_PLAY_MODE) && step.choice_index == 0,
+          "Right on a saved Ace with no package sets Library, the mode after Ace");
+    step = enhanced_send(FLOW_SETTINGS_ACE_TITLE, PLAYER_UI_ID_SETTINGS_ACE_MODE, NK_UI_EV_NAV,
+                         NK_UI_DIR_LEFT);
+    CHECK(settings_op_is(step, PLAYER_UI_SETTINGS_SET_PLAY_MODE) && step.choice_index == 2,
+          "Left on a saved Ace with no package sets Enhanced, the mode before Ace");
+    g_enhanced_mode_count = 0;
+    g_enhanced_mode = NULL;
+}
+
+/* Audit 2026-11-17, F-48d858cb: Frame pacing is one value for every game. On a game's page,
+   whose lead says "For <game> alone", its panel says so, as a part's says "This game". */
+static void test_enhanced_pacing_says_all_games(void) {
+    static char dump[CASE_DUMP_CAP];
+    const int saved_tab = g_enhanced_tab;
+    const NkUiId saved_focus = g_enhanced_focus_id;
+    g_enhanced_mode = NULL;
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_MOTION;
+    g_enhanced_focus_id = PLAYER_UI_ID_SETTINGS_PACING;
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_TITLE, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "\"ALL GAMES\"") != NULL,
+          "on a game's page the Frame pacing panel says it is for all games");
+    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE, 1280, 720, dump, sizeof(dump)) &&
+              strstr(dump, "\"ALL GAMES\"") == NULL,
+          "the library's page, every row of which is for all games, has no such tag");
+    g_enhanced_tab = saved_tab;
+    g_enhanced_focus_id = saved_focus;
+}
+
+/* Audit 2026-11-17, F-34e88423: the list keeps its padding around a row only as focus enters
+   it. With a row focused (a click on a value focuses its row), the mouse wheel scrolls the
+   list on, and it stays there: the page pulled it back to the focused row every frame. */
+static void test_enhanced_wheel_scrolls_past_the_focused_row(void) {
+    const int saved_tab = g_enhanced_tab;
+    const NkUiId saved_focus = g_enhanced_focus_id;
+    const NkUiId row = PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_FILTERING);
+    NkUiViewport viewport = launcher_viewport(1280, 720, 1.0f);
+    NkUiScale scale;
+    NkUiScrollState state;
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw;
+    double clock_s = 0.0;
+    float x = -1.0f;
+    float y = -1.0f;
+    float scrolled = -1.0f;
+    float later = -1.0f;
+    char message[200];
+    g_enhanced_mode = NULL;
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    g_enhanced_focus_id = row;
+    viewport.text_size_pct = g_flow_text_size_pct;
+    scale = nk_ui_scale_for_viewport(&viewport);
+    draw = flow_case_layout(FLOW_SETTINGS_ACE, 1280, 720, &ui);
+    if (ui != NULL) draw = enhanced_more_frames(ui, FLOW_SETTINGS_ACE, &scale, 4, &clock_s);
+    for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &draw->cmd[i];
+        if (cmd->kind != NK_UI_DRAW_RECTANGLE || cmd->element_id != row) continue;
+        x = (float)(cmd->bounds[0] + cmd->bounds[2]) * 0.5f / scale.density;
+        y = (float)(cmd->bounds[1] + cmd->bounds[3]) * 0.5f / scale.density;
+        break;
+    }
+    CHECK(ui != NULL && nk_ui_focused(ui) == row && x > 0.0f &&
+              nk_ui_scroll_state(ui, ENHANCED_TEST_LIST_ID(g_enhanced_tab), &state) &&
+              state.max_offset > 0.0f && state.offset < 0.5f,
+          "the Picture list at 1280 x 720 scrolls, at its top, with its first row focused");
+    for (int notch = 0; ui != NULL && notch < 2; ++notch) {
+        NkUiEvent wheel;
+        memset(&wheel, 0, sizeof(wheel));
+        wheel.type = NK_UI_EV_WHEEL;
+        wheel.x = x;
+        wheel.y = y;
+        wheel.dir = NK_UI_DIR_DOWN;
+        wheel.down = true;
+        nk_ui_push_event(ui, &wheel);
+        (void)enhanced_more_frames(ui, FLOW_SETTINGS_ACE, &scale, 1, &clock_s);
+    }
+    if (ui != NULL && nk_ui_scroll_state(ui, ENHANCED_TEST_LIST_ID(g_enhanced_tab), &state)) {
+        scrolled = state.offset;
+    }
+    if (ui != NULL) (void)enhanced_more_frames(ui, FLOW_SETTINGS_ACE, &scale, 4, &clock_s);
+    if (ui != NULL && nk_ui_scroll_state(ui, ENHANCED_TEST_LIST_ID(g_enhanced_tab), &state)) {
+        later = state.offset;
+    }
+    (void)snprintf(message, sizeof(message),
+                   "two wheel notches over the list scroll it on and it stays (offset %.1f, "
+                   "then %.1f), its first row still focused", (double)scrolled, (double)later);
+    CHECK(scrolled > 0.5f && fabsf(later - scrolled) < 0.5f && ui != NULL &&
+              nk_ui_focused(ui) == row,
+          message);
+    if (ui != NULL) nk_ui_destroy(ui);
+    g_enhanced_tab = saved_tab;
+    g_enhanced_focus_id = saved_focus;
 }
 
 /* Review of #2644, N1: Up and Down alone walk Settings > Enhanced at every text size, in a
@@ -9032,6 +9176,10 @@ int main(int argc, char **argv) {
     test_enhanced_target_sizes();
     test_enhanced_selected_value_styles();
     test_enhanced_walk_at_every_text_size();
+    test_enhanced_title_with_an_ellipsis();
+    test_enhanced_stale_ace_steps_from_ace();
+    test_enhanced_pacing_says_all_games();
+    test_enhanced_wheel_scrolls_past_the_focused_row();
     test_prompt_bar_stays_whole();
     test_game_page_text_is_never_cut();
     test_psp_fonts_page();

@@ -405,6 +405,52 @@ static int test_nested_scrollers(void) {
     return 1;
 }
 
+/* A page body that scrolls (scroller 300) under a top bar, holding one control, a button
+   far down its text (the About page's Third-party notices at Larger text). With the body
+   scrolled to text and the button out of view, the body shows none of its controls: Down from
+   the top bar still lands on the button, and the body scrolls it into view (audit 2026-11-17,
+   F-f3ac8b3e: the move found no target and did nothing). */
+static void body_frame(NkUiFocusGraph *g, float body_scroll, bool second_control) {
+    NkUiFocusScroller body;
+    nk_ui_focus_begin_frame(g);
+    body.id = 300u;
+    body.viewport = (NkUiRect){0.0f, 60.0f, 600.0f, 240.0f};
+    body.scroll_x = 0.0f;
+    body.scroll_y = body_scroll;
+    body.content_w = 600.0f;
+    body.content_h = 900.0f;
+    body.parent = 0u;
+    if (!nk_ui_focus_register_scroller(g, &body)) {
+        exit(2);
+    }
+    reg(g, 1u, 0.0f, 0.0f, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    reg(g, 31u, 0.0f, 60.0f + 700.0f - body_scroll, 200.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 300u);
+    if (second_control) {
+        reg(g, 32u, 0.0f, 60.0f + 100.0f - body_scroll, 200.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT,
+            300u);
+    }
+    nk_ui_focus_end_frame(g);
+}
+
+static int test_scroller_showing_no_control(void) {
+    NkUiFocusGraph *g = nk_ui_focus_graph_create();
+    NkUiFocusScrollRequest r;
+    CHECK(g != NULL, "create graph");
+    body_frame(g, 0.0f, false);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the top bar's tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 31u,
+          "down from the top bar reaches the body's one control, out of view");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 300u && r.scroll_y > 0.0f,
+          "and the body scrolls it into view");
+    /* With a control of the body on screen, the clipped one stays no target from outside. */
+    body_frame(g, 0.0f, true);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the tab again");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 32u,
+          "down takes the control the body shows");
+    nk_ui_focus_graph_destroy(g);
+    return 1;
+}
+
 static int test_ragged_row(void) {
     NkUiFocusGraph *g = nk_ui_focus_graph_create();
     NkUiFocusEntry list[3];
@@ -1768,7 +1814,7 @@ int main(int argc, char **argv) {
     if (!test_grid() || !test_no_default_entry() || !test_owns_horizontal() ||
         !test_pointer_only_and_named_neighbours() ||
         !test_ragged_row() || !test_scroll_into_view() || !test_place_follows_the_layout() ||
-        !test_nested_scrollers() ||
+        !test_nested_scrollers() || !test_scroller_showing_no_control() ||
         !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
         !test_repeat_timing() || !test_stick_hysteresis() || !test_event_construction() ||
         !test_prompt_style_follows_device() ||

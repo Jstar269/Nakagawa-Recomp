@@ -111,27 +111,44 @@ static bool nk_ui_focus_scroller_inside(const NkUiFocusScroller *scrollers,
     return false;
 }
 
+static bool nk_ui_focus_in_viewport(NkUiRect rect, const NkUiFocusScroller *s) {
+    return nk_ui_focus_overlap(rect.y, rect.y + rect.h, s->viewport.y,
+                               s->viewport.y + s->viewport.h) &&
+           nk_ui_focus_overlap(rect.x, rect.x + rect.w, s->viewport.x,
+                               s->viewport.x + s->viewport.w);
+}
+
 /* Whether a move from `from` may land on `cand`: an entry that its scroll container clips
    away whole is reached only from inside that container (its neighbours scroll it into
    view), never from a control outside it, which would jump to something not on screen. A
    control in a container nested in that one is inside it: the last row of a list in a page
-   that scrolls reaches the button under the list, though the page has it out of view. */
-static bool nk_ui_focus_on_screen_for(const NkUiFocusEntry *from, const NkUiFocusEntry *cand,
+   that scrolls reaches the button under the list, though the page has it out of view. A
+   container that shows none of its controls (a page body scrolled to a stretch of text) has
+   nothing on screen to enter by, so there its clipped controls are targets as they were
+   before, and the one a move lands on is scrolled into view. */
+static bool nk_ui_focus_on_screen_for(const NkUiFocusEntry *entries, size_t count,
+                                      const NkUiFocusEntry *from, const NkUiFocusEntry *cand,
                                       const NkUiFocusScroller *scrollers,
                                       size_t scroller_count) {
+    const NkUiFocusScroller *s;
     size_t i;
     if (cand->scroller == 0u || scrollers == NULL ||
         nk_ui_focus_scroller_inside(scrollers, scroller_count, from->scroller,
                                     cand->scroller)) {
         return true;
     }
-    for (i = 0; i < scroller_count; ++i) {
-        const NkUiFocusScroller *s = &scrollers[i];
-        if (s->id == cand->scroller) {
-            return nk_ui_focus_overlap(cand->rect.y, cand->rect.y + cand->rect.h, s->viewport.y,
-                                       s->viewport.y + s->viewport.h) &&
-                   nk_ui_focus_overlap(cand->rect.x, cand->rect.x + cand->rect.w, s->viewport.x,
-                                       s->viewport.x + s->viewport.w);
+    s = nk_ui_focus_scroller(scrollers, scroller_count, cand->scroller);
+    if (s == NULL || nk_ui_focus_in_viewport(cand->rect, s)) {
+        return true;
+    }
+    for (i = 0; i < count; ++i) {
+        const NkUiFocusEntry *e = &entries[i];
+        if (e != from && nk_ui_focus_enabled(e) && e->scope == cand->scope &&
+            (e->flags & NK_UI_FOCUS_POINTER_ONLY) == 0u &&
+            nk_ui_focus_scroller_inside(scrollers, scroller_count, e->scroller,
+                                        cand->scroller) &&
+            nk_ui_focus_in_viewport(e->rect, s)) {
+            return false;
         }
     }
     return true;
@@ -175,7 +192,7 @@ static long nk_ui_focus_pick(const NkUiFocusEntry *entries, size_t count,
         bool in_half_plane;
         if (i == current || !nk_ui_focus_enabled(cand) || cand->scope != from->scope ||
             (cand->flags & NK_UI_FOCUS_POINTER_ONLY) != 0u ||
-            !nk_ui_focus_on_screen_for(from, cand, scrollers, scroller_count)) {
+            !nk_ui_focus_on_screen_for(entries, count, from, cand, scrollers, scroller_count)) {
             continue;
         }
         dx = nk_ui_focus_cx(cand->rect) - from_cx;

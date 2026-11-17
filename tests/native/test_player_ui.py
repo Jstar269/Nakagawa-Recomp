@@ -6405,6 +6405,45 @@ class NativePlayerUiTests(unittest.TestCase):
                          ["Library (Enhanced)", "Enhanced", "Authentic"],
                          "Left goes round the other way, past Ace as well")
 
+    def test_next_ui_enhanced_page_steps_from_a_saved_ace_without_its_package(self) -> None:
+        """Audit 2026-11-17, F-a919f78f: a game saved as Ace whose package has gone shows Ace
+        on its page, which its three modes do not list. Right and Left step from where Ace
+        sits, after Enhanced, as the select button does: Right is Library default, Left is
+        Enhanced (Right stepped from Library, to Authentic). Its Ace-only rows stay dimmed:
+        Right and Enter on Controls' Analog stick row change nothing."""
+        # fps_cap marks the file as the settings the run reads back, changed or not.
+        settings = {**self.LIBRARY_ENHANCED, "fps_cap": -1,
+                    "title_play": {"TEST00005": {"mode": "ace"}}}
+        # By Tab, which goes by the order the title page declares its controls in: three stops
+        # to the ENHANCEMENTS card's Play mode, one more to Enhanced options (the card lays its
+        # buttons out otherwise for a saved Ace with no package).
+        to_mode = (*self.OPEN_FIRST, *(("KEY_TAB", "WAIT_MS=80") * 4),
+                   "KEY_RETURN", "WAIT_MS=250", "KEY_DOWN", "WAIT_MS=80")
+        leave = ("KEY_ESCAPE", "WAIT_MS=150")
+        for step, mode, saved in (("KEY_RIGHT", "Library (Enhanced)", "library"),
+                                  ("KEY_LEFT", "Enhanced", "enhanced")):
+            with self.subTest(step=step):
+                run = self.next_ui_run("library", to_mode + (step, "WAIT_MS=120") + leave,
+                                       wait_background=True, settings=settings)
+                self.assertIn(self.SETTINGS_FOCUS["ace_mode"], self.focus_trail(run),
+                              "Down from Graphics preset is the Play mode row")
+                pages = [page for page in self.enhanced_pages(run)
+                         if page.get("title") == "TEST00005"]
+                self.assertEqual([page.get("mode") for page in pages], ["Ace", mode],
+                                 "one step from the saved Ace")
+                self.assertEqual(self.title_play(run).get("TEST00005", {}).get("mode", "library"),
+                                 saved, "the step is saved for that game")
+        stick = self.enhanced_row_focus(self.ENHANCED_PART_KEYS.index("stick"))
+        dimmed = self.next_ui_run(
+            "library",
+            to_mode + ("KEY_DOWN", "WAIT_MS=80") + ("KEY_E", "WAIT_MS=80") * 3 +
+            ("KEY_DOWN", "WAIT_MS=80", "KEY_RIGHT", "WAIT_MS=120", "KEY_RETURN", "WAIT_MS=120") +
+            leave,
+            wait_background=True, settings=settings)
+        self.assertIn(stick, self.focus_trail(dimmed), "Down from the Controls tab is its row")
+        self.assertEqual(self.title_play(dimmed).get("TEST00005"), {"mode": "ace"},
+                         "an Ace-only row of a game with no package changes nothing")
+
     def test_next_ui_title_enhanced_options_are_that_games_and_back_returns(self) -> None:
         """#2055: Enhanced options opens Settings > Enhanced for that game: its rows show the
         game's own values and change only them, and Escape returns to its title page with
