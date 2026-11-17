@@ -7,17 +7,29 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from typing import Any
 import unittest
 
+# The repository root, so ``tools.`` imports also resolve when this file runs as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tools import psp_issue_matrix
+from tools import psp_issue_matrix  # noqa: E402
 
 
 class PspIssueMatrixTests(unittest.TestCase):
+    def test_the_module_runs_as_a_script(self) -> None:
+        # ``python tools/test_psp_issue_matrix.py`` puts only tools/ on the path;
+        # its imports still resolve.
+        with tempfile.TemporaryDirectory() as cwd:
+            run = subprocess.run([sys.executable, "-E", str(Path(__file__).resolve()), "-h"],
+                                 cwd=cwd, capture_output=True, text=True, check=False,
+                                 timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
     def routing_file(self, entries: list[dict[str, object]]) -> Path:
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         path = directory / "routing.json"

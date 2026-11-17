@@ -130,7 +130,8 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
     disc member, the name written, the engine's exit status (0 for a kept copy), its decrypt
     code (``status_code``; None on success) and its last message line. A file the engine
     refuses (firmware is refused by name) stays encrypted and the bring-up names that
-    boundary.
+    boundary. A member gone from the image after discovery is a row with status -1 and code
+    ``DISC_DECRYPT_MEMBER_MISSING``; the other members are still decrypted.
     """
     from . import iso_inspect as ii
 
@@ -178,10 +179,11 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
             with iso.open("rb") as stream:
                 extent = ii._lookup_iso_file(stream, size, members)
                 if extent is None:
-                    raise ii.IsoInspectionError(
-                        "encrypted disc member disappeared after discovery",
-                        boundary_code="DISC_DECRYPT_MEMBER_MISSING",
-                    )
+                    # The image changed after discovery: this member keeps its own named
+                    # refusal and the rest of the disc is still decrypted.
+                    rows.append({**row, "status": -1, "code": "DISC_DECRYPT_MEMBER_MISSING",
+                                 "message": "encrypted disc member disappeared after discovery"})
+                    continue
                 lba, count = extent
                 blob = ii._read_iso_extent(stream, size, lba, count, 0, count)
             encrypted = Path(staging) / (name + ".enc")

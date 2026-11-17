@@ -297,6 +297,19 @@ class DecryptTests(unittest.TestCase):
         self.assertGreater(len(names), 12)
         self.assertEqual(sorted(names - codes_in("decrypt")), [])
 
+    def test_every_code_the_disc_decryption_records_is_registered(self) -> None:
+        # decrypt_disc rows feed library_build's decrypt_step.first_failure_code; a coded
+        # exception it raised would reach that record only as INTERNAL_ERROR.
+        tree = _tree("tools/nk_core/decrypt_tool.py")
+        found = _assigned(tree, set(), {"code"}, {}, {"boundary_code", "code"})
+        self.assertIn("DISC_DECRYPT_MEMBER_MISSING", found)
+        self.assertEqual(sorted(found - codes_in("decrypt", "report")), [],
+                         "recorded but not registered")
+        raised = [node for node in ast.walk(tree) if isinstance(node, ast.Raise)
+                  and isinstance(node.exc, ast.Call)
+                  and getattr(node.exc.func, "attr", None) == "IsoInspectionError"]
+        self.assertEqual(raised, [], "a disc refusal is a coded row, not a raise")
+
     def test_nk_decrypt_exit_codes_match_the_tooling(self) -> None:
         names = self._status_names()
         body = _c_function("src/core/nk_decrypt_main.c", "print_diagnostic")

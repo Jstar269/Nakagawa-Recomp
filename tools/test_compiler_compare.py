@@ -16,6 +16,8 @@ import unittest
 from unittest import mock
 from typing import Any, NotRequired, TypedDict, cast
 
+# The repository root, so ``tools.`` imports also resolve when this file runs as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tools import compiler_compare  # noqa: E402
 
@@ -136,6 +138,15 @@ class FakeToolchain:
 
 
 class CompilerCompareTests(unittest.TestCase):
+    def test_the_module_runs_as_a_script(self) -> None:
+        # ``python tools/test_compiler_compare.py`` puts only tools/ on the path;
+        # its imports still resolve.
+        with tempfile.TemporaryDirectory() as cwd:
+            run = subprocess.run([sys.executable, "-E", str(Path(__file__).resolve()), "-h"],
+                                 cwd=cwd, capture_output=True, text=True, check=False,
+                                 timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

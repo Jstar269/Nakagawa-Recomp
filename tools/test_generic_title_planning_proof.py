@@ -47,6 +47,8 @@ import unittest
 from typing import Any, TypedDict, cast
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# The repository root, so ``tools.`` imports also resolve when this file runs as a script.
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from tools import title_codegen_plan  # noqa: E402
@@ -932,6 +934,15 @@ class PathTextRenderingTests(unittest.TestCase):
         # The planner's _path_text should not be described as containment
         self.assertNotIn("containment", text.lower())
         self.assertNotIn("security validation", text.lower())
+
+    def test_the_module_runs_as_a_script(self) -> None:
+        # ``python tools/test_generic_title_planning_proof.py`` puts only tools/ on the path;
+        # its imports still resolve.
+        with tempfile.TemporaryDirectory() as cwd:
+            script = str(pathlib.Path(__file__).resolve())
+            run = subprocess.run([sys.executable, "-E", script, "-h"], cwd=cwd,
+                                 capture_output=True, text=True, check=False, timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr)
 
 
 if __name__ == "__main__":

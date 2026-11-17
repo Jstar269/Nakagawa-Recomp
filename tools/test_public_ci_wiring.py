@@ -172,10 +172,11 @@ class PublicCiWiringTests(unittest.TestCase):
             self.assertEqual(mypy_baseline.main(["--scope", "issue-1391"]), 0)
         self.assertEqual(tuple(run.call_args.args[0][-len(expected):]), expected)
 
-    def test_mypy_ratchet_stays_below_the_import_fallback_cleanup(self) -> None:
-        """#1391: try/except import fallbacks are typed, so the ratchet sits at or below 246."""
+    def test_mypy_ratchet_stays_at_zero(self) -> None:
+        """#1391: tools/ has no mypy errors, so the ratchet stays empty."""
         baseline = json.loads((ROOT / "tools" / "mypy_baseline.json").read_text(encoding="utf-8"))
-        self.assertLessEqual(baseline["total_errors"], 246)
+        self.assertEqual(baseline["total_errors"], 0)
+        self.assertEqual(baseline["errors_by_module"], {})
 
     def test_mypy_clean_scope_rejects_any_reported_error(self) -> None:
         diagnostic = "tools/hle_manifest.py:7: error: invalid fixture [misc]\n"
@@ -207,7 +208,10 @@ class PublicCiWiringTests(unittest.TestCase):
                             mypy_baseline.subprocess,
                             "run",
                             return_value=subprocess.CompletedProcess([], 1, stdout=diagnostic, stderr=""),
-                        ), contextlib.redirect_stderr(io.StringIO()):
+                        ), contextlib.redirect_stderr(io.StringIO()) as captured:
+                    # The check CI runs (no --update) and an update both refuse the new error.
+                    self.assertEqual(mypy_baseline.main([]), 1)
+                    self.assertIn("tools/new_tool.py", captured.getvalue())
                     self.assertEqual(mypy_baseline.main(["--update"]), 1)
                 self.assertEqual(mypy_baseline._read_baseline(), ({}, 0))
 
