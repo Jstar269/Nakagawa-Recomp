@@ -154,19 +154,63 @@ static int guest_arena_is_guard(void) {
     return 1;
 }
 
+/* After an accepted load, every arena byte that is no longer the guard lies inside one of the
+ * segments the image reports, and every reported segment lies inside the arena: a loader that
+ * wrote a segment to the wrong place and returned success fails here. */
+static int guest_arena_writes_within_segments(const SrPrxImage *img) {
+    const uint64_t base = 0x08800000u;
+    if (img->nseg > SR_PRX_MAX_SEGMENTS) return 0;
+    for (uint32_t s = 0; s < img->nseg; s++) {
+        uint64_t start = img->segs[s].guest_addr;
+        uint64_t end = start + img->segs[s].mem_size;
+        if (img->segs[s].mem_size != 0 &&
+            (start < base || end > base + sizeof(s_guest_arena))) return 0;
+    }
+    for (size_t i = 0; i < sizeof(s_guest_arena); i++) {
+        if (s_guest_arena[i] == 0xA5) continue;
+        uint64_t addr = base + i;
+        int inside = 0;
+        for (uint32_t s = 0; s < img->nseg && !inside; s++) {
+            uint64_t start = img->segs[s].guest_addr;
+            inside = addr >= start && addr < start + img->segs[s].mem_size;
+        }
+        if (!inside) return 0;
+    }
+    return 1;
+}
+
 /* Mutate buffer in-place with bit flips, truncations, inserts, deletions,
    and length/offset/integer boundary value corruptions. */
 static void mutate_elf_field(uint8_t *data, size_t size);
 
-static unsigned parse_fuzz_iterations(const char *text, unsigned fallback) {
+/* An iteration count given in FUZZ_ITERS or --iters must be a whole number from 1 to 100000: a
+ * value outside that, or a typo such as "5k", stops the run by name instead of running the
+ * default depth under a passing banner. */
+static unsigned parse_fuzz_iterations(const char *source, const char *text, unsigned fallback) {
     if (!text || !*text) return fallback;
     errno = 0;
     char *end = NULL;
     unsigned long value = strtoul(text, &end, 10);
-    if (errno != 0 || end == text || *end != '\0' || value == 0 || value > 100000ul) {
-        return fallback;
+    if (text[0] == '-' || errno != 0 || end == text || *end != '\0' || value == 0 ||
+        value > 100000ul) {
+        fprintf(stderr, "FUZZ_ITERS_INVALID: %s '%s' is not a whole number from 1 to 100000\n",
+                source, text);
+        exit(2);
     }
     return (unsigned)value;
+}
+
+/* An exact-size heap copy of a mutated input. The work buffer the mutations ran in can be larger
+ * than the bytes the parser is given (a truncation or a deletion shrinks the length, not the
+ * buffer), so the parser gets this copy, which ends at its length argument: a read past that
+ * length leaves the allocation. An AddressSanitizer build (`make fuzz-parsers` on Linux and
+ * macOS) traps it; a build without a sanitizer only catches a read that crashes. */
+static uint8_t *fuzz_exact_copy(const uint8_t *data, size_t size) {
+    uint8_t *copy = (uint8_t *)malloc(size);
+    if (!copy && size == 0) copy = (uint8_t *)malloc(1u);
+    assert(copy != NULL);
+    if (size > 0) memcpy(copy, data, size);
+    return copy;
 }
 
 static void mutate_buffer(uint8_t *data, size_t *size, size_t max_cap) {
@@ -341,9 +385,18 @@ static void test_fuzz_param_sfo(unsigned iters) {
 
         NkIsoMetadata meta;
         memset(&meta, 0, sizeof(meta));
-        if (nk_iso_parse_sfo_buffer(mutated, cur_size, &meta)) {
+        uint8_t *exact = fuzz_exact_copy(mutated, cur_size);
+        if (nk_iso_parse_sfo_buffer(exact, cur_size, &meta)) {
+            /* Every string an accepted SFO fills ends inside its field. */
+            assert(memchr(meta.disc_id, 0, sizeof(meta.disc_id)) != NULL);
+            assert(memchr(meta.title_name, 0, sizeof(meta.title_name)) != NULL);
+            assert(memchr(meta.disc_version, 0, sizeof(meta.disc_version)) != NULL);
+            assert(memchr(meta.sfo_disc_id, 0, sizeof(meta.sfo_disc_id)) != NULL);
+            assert(memchr(meta.volume_id, 0, sizeof(meta.volume_id)) != NULL);
+            assert(memchr(meta.error_message, 0, sizeof(meta.error_message)) != NULL);
             accepted++;
         }
+        free(exact);
     }
     printf("[FUZZ] PARAM.SFO completed: %u/%u accepted, 0 crashes\n", accepted, iters);
     fflush(stdout);
@@ -758,7 +811,8 @@ static void test_fuzz_xb(unsigned iters) {
 
         bool be = (i & 1) != 0;
         NkXbArchive archive;
-        if (nk_xb_open_memory(mutated, cur_size, "mutated.xb", be, NULL,
+        uint8_t *exact = fuzz_exact_copy(mutated, cur_size);
+        if (nk_xb_open_memory(exact, cur_size, "mutated.xb", be, NULL,
                               &archive, err, sizeof(err)) == NK_OK) {
             accepted++;
             for (size_t e = 0; e < archive.entry_count; e++) {
@@ -768,6 +822,7 @@ static void test_fuzz_xb(unsigned iters) {
             }
             nk_xb_close(&archive);
         }
+        free(exact);
     }
 
     free(seed.data);
@@ -1082,11 +1137,17 @@ static void test_fuzz_prx(unsigned iters) {
 
         SrPrxImage img;
         reset_guest_arena();
-        rc = sr_prx_load_from_memory(mutated, cur_size, 0x08800000u,
+        uint8_t *exact = fuzz_exact_copy(mutated, cur_size);
+        rc = sr_prx_load_from_memory(exact, cur_size, 0x08800000u,
                                      &img, err, sizeof(err));
-        if (rc == 0) accepted++;
-        else if (strstr(err, "guest write failed") == NULL) assert(guest_arena_is_guard());
+        if (rc == 0) {
+            assert(guest_arena_writes_within_segments(&img));
+            accepted++;
+        } else if (strstr(err, "guest write failed") == NULL) {
+            assert(guest_arena_is_guard());
+        }
         sr_prx_image_free(&img);
+        free(exact);
     }
 
     printf("[FUZZ] PRX / ~PSP loader completed: %u/%u accepted, 0 crashes\n", accepted, iters);
@@ -1129,10 +1190,12 @@ static void test_fuzz_manifest(unsigned iters) {
         mutate_buffer(mutated, &cur_size, sizeof(mutated));
 
         NkTitleEntry entry;
-        if (nk_title_manifest_parse_buffer((const char *)mutated, cur_size,
+        uint8_t *exact = fuzz_exact_copy(mutated, cur_size);
+        if (nk_title_manifest_parse_buffer((const char *)exact, cur_size,
                                            true, &entry, err, sizeof(err))) {
             accepted++;
         }
+        free(exact);
     }
 
     printf("[FUZZ] Title Manifest JSON completed: %u/%u accepted, 0 crashes\n", accepted, iters);
@@ -2251,6 +2314,7 @@ static void test_fuzz_decrypt_boundary(unsigned iters) {
     }
 
     uint8_t wrapped[1200];
+    uint8_t work[1200];
     uint8_t *mutated;
     unsigned accepted = 0;
     for (unsigned i = 0; i < iters; i++) {
@@ -2271,12 +2335,12 @@ static void test_fuzz_decrypt_boundary(unsigned iters) {
             seed = wrapped;
             seed_len = 0x28u + sealed_len;
         }
-        /* Exact-size heap copy: any read past the caller's length traps. */
-        mutated = (uint8_t *)malloc(seed_len);
-        assert(mutated != NULL);
-        memcpy(mutated, seed, seed_len);
+        assert(seed_len <= sizeof(work));
+        memcpy(work, seed, seed_len);
         size_t cur_size = seed_len;
-        mutate_buffer(mutated, &cur_size, seed_len);
+        mutate_buffer(work, &cur_size, seed_len);
+        /* A truncation shrinks cur_size below seed_len: the parsers get an exact copy. */
+        mutated = fuzz_exact_copy(work, cur_size);
 
         NkPspCtx ctx;
         NkContainerInfo info;
@@ -2678,11 +2742,14 @@ static void test_fuzz_inflate(unsigned iters) {
     for (unsigned i = 0; i < iters; i++) {
         unsigned pick = (unsigned)(fuzz_rand32() % 5u);
         size_t seed_size = seeds[pick].size;
-        uint8_t *mutated = (uint8_t *)malloc(seed_size);
-        assert(mutated != NULL);
-        memcpy(mutated, seeds[pick].data, seed_size);
+        uint8_t *work = (uint8_t *)malloc(seed_size);
+        assert(work != NULL);
+        memcpy(work, seeds[pick].data, seed_size);
         size_t cur_size = seed_size;
-        mutate_buffer(mutated, &cur_size, seed_size);
+        mutate_buffer(work, &cur_size, seed_size);
+        /* A truncation shrinks cur_size below seed_size: the decoder gets an exact copy. */
+        uint8_t *mutated = fuzz_exact_copy(work, cur_size);
+        free(work);
 
         uint8_t *out = NULL;
         size_t out_len = 0;
@@ -2994,17 +3061,18 @@ static void test_fuzz_kle(unsigned iters) {
         int is_kl4e = (fuzz_rand32() % 2u) != 0u;
         const uint8_t *seed = is_kl4e ? kl4e : kl3e;
         size_t seed_len = is_kl4e ? kl4e_len : kl3e_len;
-        /* Exact-size heap copy: the decoder may never read past it. */
-        uint8_t *inbuf = (uint8_t *)malloc(seed_len);
-        assert(inbuf != NULL);
-        memcpy(inbuf, seed, seed_len);
+        uint8_t work[128];
+        assert(seed_len <= sizeof(work));
+        memcpy(work, seed, seed_len);
         size_t cur_size = seed_len;
-        mutate_buffer(inbuf, &cur_size, seed_len);
+        mutate_buffer(work, &cur_size, seed_len);
+        /* A truncation shrinks cur_size below seed_len: the decoder gets an exact copy. */
+        uint8_t *inbuf = fuzz_exact_copy(work, cur_size);
 
         memset(out, 0, FUZZ_KLE_SIZE);
         void *end = NULL;
         int in_size = (cur_size > 4u) ? (int)(cur_size - 4u) : 0;
-        int rc = decompress_kle(out, (int)FUZZ_KLE_SIZE, inbuf + 4, in_size,
+        int rc = decompress_kle(out, (int)FUZZ_KLE_SIZE, in_size > 0 ? inbuf + 4 : inbuf, in_size,
                                 &end, is_kl4e);
         assert(rc <= (int)FUZZ_KLE_SIZE);
         if (rc > 0) {
@@ -4068,11 +4136,18 @@ int main(int argc, char **argv) {
     unsigned iters = 100;
 
     const char *env_iters = getenv("FUZZ_ITERS");
-    iters = parse_fuzz_iterations(env_iters, iters);
+    iters = parse_fuzz_iterations("FUZZ_ITERS", env_iters, iters);
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
-            iters = parse_fuzz_iterations(argv[++i], iters);
+        if (strcmp(argv[i], "--iters") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "FUZZ_ITERS_INVALID: --iters needs a value\n");
+                return 2;
+            }
+            iters = parse_fuzz_iterations("--iters", argv[++i], iters);
+        } else {
+            fprintf(stderr, "FUZZ_ARGUMENT_UNKNOWN: '%s' (the only option is --iters N)\n", argv[i]);
+            return 2;
         }
     }
 
