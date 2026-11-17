@@ -194,7 +194,10 @@ class TestHistoryAudit(unittest.TestCase):
         bs = chr(92)
         seeds = [
             "ghp_" + "A" * 36, "github_pat_" + "B" * 80, "sk_live_" + "C" * 24, "AKIA" + "D" * 16,
+            "gho_" + "E" * 36, "ghs_" + "F" * 36, "github_pat_" + "B" * 82, "sk_live_" + "C" * 99,
             "C:" + bs + "Users" + bs + "someone" + bs + "notes",
+            "C:" + bs * 2 + "Users" + bs * 2 + "someone" + bs * 2 + "notes",
+            "C:" + bs * 2 + "Windows" + bs * 2 + "Temp" + bs * 2 + "x",
             "C:" + bs + "Documents and Settings" + bs + "someone" + bs + "x",
             "/ho" + "me/someone/x", "/Us" + "ers/someone/x", "/mnt/c/Us" + "ers/someone/x",
             bs + bs + "server" + bs + "share",
@@ -444,6 +447,76 @@ class TestHistoryAudit(unittest.TestCase):
             "archive = " + "GAMEDATA" + ".BDL"))
         self.assertIsNotNone(history_audit.PRIVATE_OPERATIONAL_VOCABULARY.search(
             "HST" + "_PGD_VKEY_HEX"))
+
+    def test_real_length_tokens_are_secrets_in_blobs_and_messages(self):
+        # A real fine-grained PAT body is 22 characters, an underscore and 59 more; a
+        # current Stripe live key runs far past 24. The fixed {80} and {24} counts, each
+        # followed by \b, could match neither, so the history gate passed over both.
+        tokens = {
+            "fine-grained PAT": "github" + "_pat_" + "Q7" * 11 + "_" + "w3" * 29 + "x",
+            "long live key": "sk" + "_live_" + "Zt9" * 33,
+            "OAuth token": "gh" + "o_" + "N4" * 18,
+            "server token": "gh" + "s_" + "k8" * 18,
+        }
+        for label, token in tokens.items():
+            with self.subTest(token=label):
+                self.assertTrue(history_audit._has_api_token("value " + token + "\n"))
+                self.assertIn("HISTORICAL_BLOB_SECRET",
+                              [f.code for f in self._blob_findings("key " + token + "\n")])
+                finding = history_audit.HistoryFinding("DEFINITE_SECRET", "X", "c", "p", "saw " + token)
+                self.assertNotIn(token[-8:], finding.to_dict()["detail"], "the whole token is redacted")
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self._repo_with_message(root, "clean subject", "body names " + token)
+                    codes = [f.code for f in history_audit.audit_history_commit_metadata(
+                        root, private_roots=("Q:/nowhere",))]
+                self.assertIn("COMMIT_LOG_SECRET", codes)
+
+    def test_escaped_windows_and_unc_paths_are_local_paths(self):
+        # JSON, C and Python literals double every backslash. The single-backslash
+        # patterns matched none of these, so a committed manifest naming a user's
+        # folder passed the gate.
+        bs = chr(92)
+        escaped = bs * 2
+        positives = {
+            "json user path": '{"p": "C:' + escaped + "Us" + "ers" + escaped + "someone" + escaped + 'Desktop"}',
+            "json legacy profile": '"D:' + escaped + "Documents and Settings" + escaped + 'someone"',
+            "json unc share": '{"p": "' + escaped * 2 + "fileserver" + escaped + 'share"}',
+            "json temp dir": '"C:' + escaped + "Windows" + escaped + "Te" + "mp" + escaped + 'build1"',
+        }
+        for label, text in positives.items():
+            with self.subTest(text=label):
+                self.assertIn("HISTORICAL_BLOB_LOCAL_PATH",
+                              [f.code for f in self._blob_findings(text + "\n")])
+        # An escape sequence in source is not a share: a mixed backslash count is refused.
+        for text in ('printf("' + escaped + "n" + escaped + 't");',
+                     "r'" + escaped + "w+" + bs + "d'"):
+            with self.subTest(text=text):
+                self.assertIsNone(history_audit.UNC_PATH.search(text))
+        message_path = "C:" + escaped + "Us" + "ers" + escaped + "someone" + escaped + "x"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._repo_with_message(root, "clean subject", "copied " + message_path)
+            codes = [f.code for f in history_audit.audit_history_commit_metadata(
+                root, private_roots=("Q:/nowhere",))]
+        self.assertIn("COMMIT_LOG_LOCAL_PATH", codes)
+
+    def test_keys_directory_and_upper_case_key_names_are_forbidden_paths(self):
+        # keys/ holds a user's local key constants (AGENTS.md section 5); no prefix,
+        # name or extension rule covered it, and a forbidden name in another letter
+        # case slipped past the exact comparison.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_git(("init", "-q"), cwd=root, check=True, capture_output=True)
+            (root / "keys").mkdir()
+            (root / "keys" / "console_values.txt").write_text("synthetic\n", encoding="utf-8")
+            # Distinct bytes: rev-list names each object once, under one of its paths.
+            (root / "PGD_KEYS.TXT").write_text("another synthetic\n", encoding="utf-8")
+            run_git(["add", "-A"], cwd=root, check=True)
+            run_git(["commit", "-qm", "fixture"], cwd=root, check=True)
+            found = sorted((f.code, f.path) for f in history_audit.audit_history_tree_paths(root))
+        self.assertIn(("HISTORICAL_PATH_PREFIX", "keys/console_values.txt"), found)
+        self.assertIn(("HISTORICAL_GAME_ARTIFACT", "PGD_KEYS.TXT"), found)
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,11 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / ".betterleaks.toml"
+# Betterleaks exits 1 both for "leaks found" and for a fatal error such as a config
+# that does not load or a git target that is not a repository. Every scan passes
+# --exit-code with this distinct value, so a positive canary passes only on a real
+# detection and any other code is reported as a scanner failure.
+LEAKS_FOUND_EXIT = 99
 
 
 def _material(seed: str, length: int) -> str:
@@ -48,7 +53,7 @@ def _scan(
     *,
     config: Path = CONFIG,
     extra: tuple[str, ...] = (),
-) -> int:
+) -> subprocess.CompletedProcess[str]:
     command = [
         binary,
         mode,
@@ -56,21 +61,30 @@ def _scan(
         "--config",
         str(config),
         "--redact",
+        "--exit-code",
+        str(LEAKS_FOUND_EXIT),
         *extra,
     ]
-    result = subprocess.run(
+    return subprocess.run(
         command,
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
-    return result.returncode
 
 
-def _require(label: str, actual: int, expected: int) -> None:
+def _require(label: str, result: subprocess.CompletedProcess[str], *, leaks: bool) -> None:
+    expected = LEAKS_FOUND_EXIT if leaks else 0
+    actual = result.returncode
     if actual != expected:
-        raise RuntimeError(f"{label}: expected exit {expected}, got {actual}")
+        kind = "" if actual in (0, LEAKS_FOUND_EXIT) else " (a scanner error, not a scan verdict)"
+        stderr = "\n".join((result.stderr or "").strip().splitlines()[-5:])
+        detail = f"\n{stderr}" if stderr else ""
+        raise RuntimeError(f"{label}: expected exit {expected}, got {actual}{kind}{detail}")
     print(f"{label}: PASS")
 
 
@@ -132,7 +146,7 @@ def run(binary: str) -> int:
         for label, content in _build_canaries(temp_root):
             case = temp_root / f"{label}.txt"
             _write_synthetic_fixture(case, content)
-            _require(label, _scan(binary, "dir", str(case)), 1)
+            _require(label, _scan(binary, "dir", str(case)), leaks=True)
 
         # The scanner must inspect encoded and archive-contained content when
         # the caller explicitly enables the documented traversal depths.
@@ -144,7 +158,7 @@ def run(binary: str) -> int:
         _require(
             "base64-decoded-secret",
             _scan(binary, "dir", str(encoded), extra=("--max-decode-depth", "5")),
-            1,
+            leaks=True,
         )
 
         archive = temp_root / "archive.zip"
@@ -153,7 +167,7 @@ def run(binary: str) -> int:
         _require(
             "archive-contained-secret",
             _scan(binary, "dir", str(archive), extra=("--max-archive-depth", "2")),
-            1,
+            leaks=True,
         )
 
         # The checked-in fixture is intentionally synthetic and must be
@@ -161,7 +175,7 @@ def run(binary: str) -> int:
         _require(
             "deliberate-history-audit-fixture",
             _scan(binary, "dir", "tools/test_history_audit.py"),
-            0,
+            leaks=False,
         )
 
         markdown = temp_root / "README.md"
@@ -169,21 +183,21 @@ def run(binary: str) -> int:
             f"# Synthetic canary\n\napi_key = {_material('markdown', 48)}\n",
             encoding="utf-8",
         )
-        _require("markdown-secret", _scan(binary, "dir", str(markdown)), 1)
+        _require("markdown-secret", _scan(binary, "dir", str(markdown)), leaks=True)
 
         unusual_path = temp_root / "path-without-a-source-extension"
         unusual_path.write_text(
             f"credential = {_material('unusual-path', 64)}\n",
             encoding="utf-8",
         )
-        _require("unusual-filename", _scan(binary, "dir", str(unusual_path)), 1)
+        _require("unusual-filename", _scan(binary, "dir", str(unusual_path)), leaks=True)
 
         unsafe_tools = temp_root / "tools"
         unsafe_tools.mkdir()
         (unsafe_tools / "unsafe.py").write_text(
             f'api_key = "{_material("tools-unsafe", 48)}"\n', encoding="utf-8"
         )
-        _require("tools-path-variation", _scan(binary, "dir", str(unsafe_tools)), 1)
+        _require("tools-path-variation", _scan(binary, "dir", str(unsafe_tools)), leaks=True)
 
         mixed_case_dir = temp_root / "mixed-case"
         mixed_case_dir.mkdir()
@@ -191,7 +205,7 @@ def run(binary: str) -> int:
         mixed_case_path.write_text(
             f'api_key = "{_material("mixed-case-path", 48)}"\n', encoding="utf-8"
         )
-        _require("mixed-case-path-variation", _scan(binary, "dir", str(mixed_case_path)), 1)
+        _require("mixed-case-path-variation", _scan(binary, "dir", str(mixed_case_path)), leaks=True)
 
         moved_fixture = temp_root / "fixtures" / "history-audit-copy.py"
         moved_fixture.parent.mkdir()
@@ -200,7 +214,7 @@ def run(binary: str) -> int:
             moved_fixture,
             f'token = "{deliberate_value}"\n',
         )
-        _require("moved-outside-fixture-path", _scan(binary, "dir", str(moved_fixture)), 1)
+        _require("moved-outside-fixture-path", _scan(binary, "dir", str(moved_fixture)), leaks=True)
 
         # The same fixture path must not suppress a different value.
         value_repo = temp_root / "value-scope-repo"
@@ -223,7 +237,7 @@ def run(binary: str) -> int:
             cwd=value_repo,
             check=True,
         )
-        _require("fixture-path-new-value", _scan(binary, "git", str(value_repo)), 1)
+        _require("fixture-path-new-value", _scan(binary, "git", str(value_repo)), leaks=True)
 
         # A second rule matching the allowed value at the allowed path must
         # still report. This proves the project exception is rule-scoped rather
@@ -260,12 +274,12 @@ keywords = ["ghp_"]
         _require(
             "fixture-secondary-rule",
             _scan(binary, "git", str(rule_repo), config=rule_config),
-            1,
+            leaks=True,
         )
 
         # A full reachable-history run protects the primary scanner from a
         # configuration change that only covers the current filesystem tree.
-        _require("sanitized-history", _scan(binary, "git", "."), 0)
+        _require("sanitized-history", _scan(binary, "git", "."), leaks=False)
 
         # Git mode intentionally covers committed history, not ignored or
         # untracked working-tree bytes.  The directory mode remains the
@@ -282,8 +296,8 @@ keywords = ["ghp_"]
         ignored.write_text(
             f'api_key = "{_material("ignored-untracked", 48)}"\n', encoding="utf-8"
         )
-        _require("ignored-untracked-directory", _scan(binary, "dir", str(ignored)), 1)
-        _require("ignored-untracked-history", _scan(binary, "git", str(ignored_repo)), 0)
+        _require("ignored-untracked-directory", _scan(binary, "dir", str(ignored)), leaks=True)
+        _require("ignored-untracked-history", _scan(binary, "git", str(ignored_repo)), leaks=False)
 
         # Prove the history path is not merely a current-tree check: put a
         # positive synthetic value in an ancestor commit and remove it before
@@ -298,7 +312,7 @@ keywords = ["ghp_"]
         run_git(["commit", "-qm", "synthetic canary"], cwd=ancestor, check=True)
         historical.unlink()
         run_git(["commit", "-qam", "remove synthetic canary"], cwd=ancestor, check=True)
-        _require("ancestor-only-secret", _scan(binary, "git", str(ancestor)), 1)
+        _require("ancestor-only-secret", _scan(binary, "git", str(ancestor)), leaks=True)
     return 0
 
 

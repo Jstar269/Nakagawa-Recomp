@@ -4996,5 +4996,72 @@ class BetterleaksAllowlistTests(unittest.TestCase):
                                 "a different value at the same path must still be caught")
 
 
+class BetterleaksCanaryExitCodeTests(unittest.TestCase):
+    """tools/betterleaks_canary.py: a positive canary passes only on a detection.
+
+    Betterleaks exits 1 for leaks found and also for a fatal error (a config that does
+    not load, a git target that is not a repository). With exit 1 as the positive
+    expectation, a canary whose scan never ran printed PASS.
+    """
+
+    FAKE = "fake-betterleaks"
+
+    @staticmethod
+    def _fake_scanner(*, broken_rule_config: bool):
+        """A stand-in that answers each canary scan as a working scanner would.
+
+        It mirrors the pinned binary's codes: a leak exits with --exit-code (default 1),
+        a clean scan exits 0, and a config that fails to load exits 1 whatever
+        --exit-code says.
+        """
+        import betterleaks_canary
+
+        real_run = subprocess.run
+        clean_targets = {("dir", "tools/test_history_audit.py"), ("git", ".")}
+
+        def fake_run(command, *args, **kwargs):
+            if not command or command[0] != BetterleaksCanaryExitCodeTests.FAKE:
+                return real_run(command, *args, **kwargs)
+            mode, target = command[1], command[2]
+            config = Path(command[command.index("--config") + 1])
+            if broken_rule_config and config != betterleaks_canary.CONFIG:
+                return subprocess.CompletedProcess(command, 1, None, "FTL unable to load config\n")
+            if (mode, target) in clean_targets or (mode == "git" and Path(target).name == "ignored-repo"):
+                return subprocess.CompletedProcess(command, 0, None, "")
+            leak_exit = int(command[command.index("--exit-code") + 1]) if "--exit-code" in command else 1
+            return subprocess.CompletedProcess(command, leak_exit, None, "WRN leaks found: 1\n")
+
+        return mock.patch.object(betterleaks_canary.subprocess, "run", side_effect=fake_run)
+
+    def test_working_scanner_passes_every_canary(self) -> None:
+        import betterleaks_canary
+
+        with self._fake_scanner(broken_rule_config=False), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(betterleaks_canary.run(self.FAKE), 0)
+
+    def test_config_that_does_not_load_fails_the_positive_canary(self) -> None:
+        import betterleaks_canary
+
+        with self._fake_scanner(broken_rule_config=True), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, r"fixture-secondary-rule: .*got 1 \(a scanner error"):
+                betterleaks_canary.run(self.FAKE)
+
+    def test_pinned_scanner_config_error_is_not_a_detection(self) -> None:
+        import betterleaks_canary
+
+        scanner = BetterleaksAllowlistTests._betterleaks()
+        if scanner is None:
+            self.skipTest("the pinned Betterleaks binary is not installed (pre-commit has not run here)")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "canary.txt"
+            target.write_text("nothing secret here\n", encoding="utf-8")
+            broken = Path(tmp) / "broken.toml"
+            broken.write_text("[[rules]\nid =\n", encoding="utf-8")
+            result = betterleaks_canary._scan(scanner, "dir", str(target), config=broken)
+            self.assertNotIn(result.returncode, (0, betterleaks_canary.LEAKS_FOUND_EXIT))
+            with self.assertRaisesRegex(RuntimeError, "a scanner error"):
+                betterleaks_canary._require("broken-config", result, leaks=True)
+
+
 if __name__ == "__main__":
     unittest.main()

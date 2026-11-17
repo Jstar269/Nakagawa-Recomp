@@ -27,7 +27,14 @@ POLICY_PATH = Path("assets") / "public_source_profile.json"
 
 HEX_16_BYTES = re.compile(r"\b[0-9a-fA-F]{32}\b")
 PRIVATE_KEY_HEADER = re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")
-API_TOKEN_PATTERN = re.compile(r"\b(?:ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{80}|sk_live_[a-zA-Z0-9]{24}|AKIA[0-9A-Z]{16})\b")
+# GitHub classic, OAuth, user-to-server, server-to-server and refresh tokens are a
+# prefix and exactly 36 characters. A real fine-grained PAT body is 82 characters
+# (22, an underscore, 59) and Stripe live keys have grown past 24, so those two take a
+# minimum length: a fixed count followed by \b never matches a longer real token,
+# because the character after the count is also a word character.
+API_TOKEN_PATTERN = re.compile(
+    r"\b(?:gh[oprsu]_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{80,}|sk_live_[a-zA-Z0-9]{24,}|AKIA[0-9A-Z]{16})\b"
+)
 
 # PRIVATE_KEY_HEADER above stays as it is because redaction wants the bare
 # delimiter: if one ever reaches a finding's detail string it must be masked.
@@ -44,14 +51,21 @@ PEM_KEY_MATERIAL = re.compile(
     r"[A-Za-z0-9+/]{40,}",      # at least one full-width base64 body line
 )
 
-# Sensitive local path patterns (fragmented to prevent self-match)
-WINDOWS_USER_PATH = re.compile(r"[a-zA-Z]:\\(?:" + r"Us" + r"ers|Documents and Settings)\\[^\s\\/]+", re.IGNORECASE)
+# Sensitive local path patterns (fragmented to prevent self-match). A drive path's
+# separator is one backslash or a run of them: JSON, C and Python string literals store
+# each separator doubled, and that is the form a path takes in a committed manifest or
+# settings file. A UNC path is matched plain or with every backslash doubled; a mixed
+# count is not accepted, so an escaped sequence such as \\n\\t in source is not a path.
+WINDOWS_USER_PATH = re.compile(r"[a-zA-Z]:\\+(?:" + r"Us" + r"ers|Documents and Settings)\\+[^\s\\/]+", re.IGNORECASE)
 POSIX_USER_PATH = re.compile(r"/(?:" + r"ho" + r"me|Us" + r"ers)/[^\s/]+")
 MAC_USER_PATH = re.compile(r"/(?:" + r"Us" + r"ers)/[^\s/]+")
 WSL_USER_PATH = re.compile(r"/mnt/[a-z]/(?:" + r"Us" + r"ers)/[^\s/]+")
-UNC_PATH = re.compile(r"\\\\[a-zA-Z0-9_.-]+\\[a-zA-Z0-9_.-]+")
+UNC_PATH = re.compile(
+    r"\\\\[a-zA-Z0-9_.-]+\\[a-zA-Z0-9_.-]+"
+    r"|\\\\\\\\[a-zA-Z0-9_.-]+\\\\[a-zA-Z0-9_.-]+"
+)
 ONEDRIVE_PATH = re.compile(r"\bOne" + r"Drive\b(?:\s*-\s*[^/\\]+)?", re.IGNORECASE)
-TEMP_PATH = re.compile(r"(?:/tm" + r"p/|/var/tm" + r"p/|[a-zA-Z]:\\(?:[^\s\\/]+\\)*(?:Windows\\Te" + r"mp|AppData\\Local\\Te" + r"mp)\\)[a-zA-Z0-9_.-]+", re.IGNORECASE)
+TEMP_PATH = re.compile(r"(?:/tm" + r"p/|/var/tm" + r"p/|[a-zA-Z]:\\+(?:[^\s\\/]+\\+)*(?:Windows\\+Te" + r"mp|AppData\\+Local\\+Te" + r"mp)\\+)[a-zA-Z0-9_.-]+", re.IGNORECASE)
 
 # Content signatures are deliberately contextual.  Public SHA-256 values and
 # ordinary PSP NIDs are allowed; the audit looks for credentials, private
@@ -91,7 +105,10 @@ BINARY_CONTROL_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 # so no match is ever lost. The API-token literals are case-sensitive, so they are checked
 # as written.
 def _has_api_token(text: str) -> bool:
-    if "ghp_" not in text and "github_pat_" not in text and "sk_live_" not in text and "AKIA" not in text:
+    if (
+        not any(prefix in text for prefix in ("ghp_", "gho_", "ghr_", "ghs_", "ghu_"))
+        and "github_pat_" not in text and "sk_live_" not in text and "AKIA" not in text
+    ):
         return False
     return API_TOKEN_PATTERN.search(text) is not None
 
@@ -141,8 +158,10 @@ FORBIDDEN_NAMES = {
     "nidseq_mine.txt", "pgd_keys.txt"
 }
 
+# keys/ holds a user's local KIRK/amctrl constants (.gitignore; AGENTS.md section 5),
+# so nothing under it is ever public.
 FORBIDDEN_PREFIXES = (
-    "build/", "docs/opengrip_ref/", "fs/", "logs/", "memstick/", "opengrip_ref/",
+    "build/", "docs/opengrip_ref/", "fs/", "keys/", "logs/", "memstick/", "opengrip_ref/",
     "OpenGrip_For_Inspiration/", "oracle/", "original_game/", "place_game_here/",
     "third_party/ghidra/exports/", "third_party/ghidra/projects/"
 )
@@ -254,7 +273,7 @@ def audit_history_tree_paths(repo_root: Path = ROOT,
 
         # Check forbidden names
         name = Path(rel_path_clean).name
-        if name in FORBIDDEN_NAMES:
+        if name.lower() in FORBIDDEN_NAMES:  # every entry is lowercase
             findings.append(HistoryFinding(
                 category="PROPRIETARY_ARTIFACT",
                 code="HISTORICAL_GAME_ARTIFACT",
