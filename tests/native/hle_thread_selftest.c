@@ -50083,6 +50083,24 @@ static void test_pad_late_through_the_boundary(void) {
     }
     pad_late_teardown();
 
+    /* S2b (#1732): a pause opens and closes in the hold, then another thread passes the update
+     * boundary before the held thread resumes. The held update keeps its own pause count, not the
+     * shared one the second boundary overwrote, so its refresh stays blocked. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held before the pause and the second boundary");
+        s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;
+        s_pause_count++;                  /* a pause opened and closed in the hold */
+        s_pad_host_ns = t + 6u * PAD_MS;
+        sr_enhancement_update_begin();    /* the test's own context: a second thread's boundary, never held */
+        pad_update_resume(u, t + 12u * PAD_MS);
+        expect(ace_pad_plan()->refreshed == 0u && pad_read_newest() == 0u,
+               "pad: a second thread's boundary after a pause in the hold does not unblock the held refresh");
+    }
+    pad_late_teardown();
+
     /* Round 5 S1: a pause in the hold, or a change of speed before the update's wait, moves the
      * VBLANK schedule under the update. Its wait comes long after the deadline it had, which is
      * no miss: the update is dropped (interrupted), and the plan's costs, back-off and margin stay

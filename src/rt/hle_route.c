@@ -1931,13 +1931,15 @@ void sr_enhancement_update_begin(void) {
     const uint64_t hold = ace_pad_plan_begin(plan, now, sched_vblank_deadline_ns(), sched_vblank_period_ns(),
                                              can_wait);
     s_pad_update_uid = uid ? uid : UINT32_MAX;
-    s_pad_update_pauses = sched_pause_count();
+    const uint64_t pauses = sched_pause_count();   /* this update's own: another thread's boundary
+                                                  * may overwrite s_pad_update_pauses during the hold */
+    s_pad_update_pauses = pauses;
     s_pad_update_speed = sched_fast_forward_speed();
     if (hold >= 1000u) {
         sched_delay_current(hold / 1000u);
         /* A pause that opened and closed during the hold leaves the sample as latched: its input
          * would be from after the pause, in a sample stamped before it. */
-        if (sched_pause_count() == s_pad_update_pauses && pad_refresh_live()) plan->refreshed++;
+        if (sched_pause_count() == pauses && pad_refresh_live()) plan->refreshed++;
         now = sched_host_now_ns();
     }
     ace_pad_plan_release(plan, now);
