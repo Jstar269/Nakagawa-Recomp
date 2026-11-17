@@ -34593,6 +34593,26 @@ static void test_dmac_queued_callers_are_served_in_arrival_order(void) {
            "each queued caller returns after the transfer ahead of it plus its own (58 us)");
 }
 
+/* The presenter and the capture readers take 480 pixels from each of the 272 rows, so a legal
+ * stride narrower than 480 (any multiple of 64) still reads 480 pixels on the last row. The span
+ * check must cover that extent: a stride-64 32-bit framebuffer ending exactly at the top of RAM or
+ * eDRAM passes a 272-stride check, yet its last row reads about 1.6 KiB past it. */
+static void test_display_narrow_stride_span(void) {
+    reset_fixture();
+    sr_hle_init();
+    s_test_gui_on = 1;
+    s_test_gui_present_calls = 0;
+    expect(display_set(0x04000000u, 64, 3, 1) == 0u,
+           "a latched request selects the legal stride 64");
+    expect(display_set(0x08800000u, 64, 3, 0) == 0u && s_test_gui_present_calls == 1u,
+           "a stride-64 framebuffer whose 480-pixel rows fit is presented");
+    expect(display_set(0x0bfef000u, 64, 3, 0) == 0u && s_test_gui_present_calls == 1u,
+           "a stride-64 framebuffer whose last 480-pixel row runs past RAM is not presented");
+    expect(display_set(0x041ef000u, 64, 3, 0) == 0u && s_test_gui_present_calls == 1u,
+           "a stride-64 framebuffer whose last 480-pixel row runs past eDRAM is not presented");
+    s_test_gui_on = 0;
+}
+
 static void test_display_framebuf_latch(void) {
     reset_fixture();
     sr_hle_init();
@@ -57540,10 +57560,11 @@ static int run_atrac_zero_frame_child(const char *route) {
  * Every stop that ends the run with _Exit (which skips atexit) calls sr_texdump_exit_finish before
  * it finishes a recording, and that call runs what the Vulkan GE's dump registered at its start
  * (ge_gpu.c's tex_dump_shutdown: the files land, the exit line prints; gpu-texscale-selftest's
- * dump-exit cell checks that part). Here two real stops run in a child process with a probe
- * registered in the dump's place: an unregistered NID (a fail-closed stop, status 7) and
- * SR_WATCHDOG_EXIT (status 1). The probe writes a file, so the parent sees that the stop reached
- * the dump's finish before the process ended. */
+ * dump-exit cell checks that part). Here three real stops run in a child process with a probe
+ * registered in the dump's place: an unregistered NID (a fail-closed stop, status 7),
+ * SR_WATCHDOG_EXIT (status 1) and the SR_FBDUMP capture exit after an immediate flip (status 1,
+ * since this harness's presenter publishes no capture). The probe writes a file, so the parent
+ * sees that the stop reached the dump's finish before the process ended. */
 #define TEXDUMP_STOP_CHILD "--texdump-stop-child="
 
 /* The child changes directory as it starts, so its files are named from the parent's scratch root,
@@ -57583,6 +57604,12 @@ static int run_texdump_stop_child(const char *arg) {
     } else if (strcmp(route, "watchdog") == 0) {
         hle_test_setenv("SR_WATCHDOG_EXIT", "600");   /* no new frame for 600 vblanks: status 1 */
         for (unsigned i = 0; i < 1300u; i++) { sr_display_advance_vcount(1u); sr_vblank_tick(); }
+    } else if (strcmp(route, "fbdump") == 0) {
+        /* The armed present reports its capture and the verdict exit follows it (#57). */
+        hle_test_setenv("SR_FBDUMP", "1");
+        s_test_gui_on = 1;
+        sr_display_advance_vcount(1u);
+        (void)display_set(0x04000000u, 512, 3, 0);
     }
     return 98;   /* the stop did not end the run */
 }
@@ -57591,6 +57618,7 @@ static void test_texdump_finished_by_run_stops(const char *self) {
     static const struct { const char *route, *line; int status; } stops[] = {
         { "nid", "HLE: unimplemented nid 0x0badd00d", 7 },
         { "watchdog", "WATCHDOG: aborting after 600 vblanks", 1 },
+        { "fbdump", "present capture result=0", 1 },
     };
     char root[MAX_PATH];
     if (!hle_scratch_root(root, sizeof(root))) {
@@ -58008,6 +58036,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_queued_callers_are_served_in_arrival_order();
     test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
+    test_display_narrow_stride_span();
     test_time_domains_are_coherent();
     test_kernel_import_sweep_sysclock_conversion();
     test_unregistered_batch_sysclock_wide();

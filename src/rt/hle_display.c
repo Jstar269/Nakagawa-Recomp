@@ -166,9 +166,15 @@ static int display_host_span_valid(const DisplayFrameState *fb) {
     if (!fb->addr) return 1;
     if (fb->stride <= 0 || fb->fmt < 0 || fb->fmt > 3) return 0;
     uint32_t bpp = fb->fmt == 3 ? 4u : 2u;
-    uint32_t row_bytes, bytes, last;
-    if (!sr_size_mul_ok((uint32_t)fb->stride, bpp, &row_bytes) ||
-        !sr_size_mul_ok(row_bytes, 272u, &bytes) || bytes == 0u)
+    /* The readers (gui.c convert_fb_pixels, fb_decode_px, dump_fb_fmt, route_sample) take
+     * 480 pixels from each of the 272 rows, so a legal stride narrower than 480 still reads
+     * 480 pixels on the last row: the span is 271 strides plus the wider of one stride and
+     * 480 pixels. For a stride of 480 or more this is the 272 strides it always was. */
+    uint32_t stride = (uint32_t)fb->stride;
+    uint32_t last_row_px = stride > 480u ? stride : 480u;
+    uint32_t px, bytes, last;
+    if (!sr_size_mul_ok(stride, 271u, &px) || !sr_size_add_ok(px, last_row_px, &px) ||
+        !sr_size_mul_ok(px, bpp, &bytes) || bytes == 0u)
         return 0;
     uint32_t phys = (uint32_t)SR_PHYS(fb->addr);
     if (!sr_size_add_ok(phys, bytes - 1u, &last)) return 0;
@@ -781,7 +787,9 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
      * (8 most recent kept) without windows, snap_v<vcount>.ppm when windows are set, so
      * existing routes and tooling are unaffected. Host-side gate only: no guest work is
      * skipped, no timing changes, and the frames that are captured are byte-identical
-     * to an ungated run. */
+     * to an ungated run. The report below clears the arm, so whether this present was armed
+     * is kept for the SR_FBDUMP verdict after it. */
+    const int capture_armed = s_fbcap_armed[0] != '\0';
     if (s_fbcap_armed[0]) {
         if (s_fbcap_legacy[0]) {
             if (snapshot_sync_ok(s_display_active.addr, (uint32_t)s_display_active.fmt,
@@ -821,7 +829,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
             fbdu = sr_fbcap_env_on("SR_FBDUMP");
             fbdu_n = fd ? atoi(fd) : 0;
         }
-        if (sync == 0u && fbdu && s_fbcap_armed[0] && s_framebuf &&
+        if (sync == 0u && fbdu && capture_armed && s_framebuf &&
             s_vcount >= (uint32_t)fbdu_n &&
             display_host_span_valid(&s_display_active)) {
             int snap_ok = snapshot_sync_ok(s_display_active.addr,
