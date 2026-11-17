@@ -123,14 +123,13 @@ from the earlier snapshot and was not re-verified in this run.)
 
 ## What remains for #317
 
-1. GCC/default: find the field that differs between repeats (keep the raw per-repeat output, diff
-   the first divergent line, then normalise it or fix its source). Until the hash is stable no
+1. GCC/default: the harness now names the field that differs between repeats (#2633). Work out why
+   it differs and whether it can be normalised or fixed at its source. Until the hash is stable no
    cross-toolchain semantic comparison is possible.
-2. GCC/lld: make `profiler-selftest` link under lld (it references symbols defined in sources its
-   list omits, such as `src/rt/ge.c`), then re-run to reach the gates after `native-core-tests`.
-   Also fix the extractor's `first_error` (`Clay error 1` above).
-3. Clang: `src/rt/videorec.c` `s_cur` (line 83) and `s_clock_deterministic` (line 718) are set but
-   never read; then re-run to reach the later gates.
+2. GCC/lld: `profiler-selftest` links under lld since #2633; re-run to reach the gates after
+   `native-core-tests`. Also fix the extractor's `first_error` (`Clay error 1` above).
+3. Clang: #2633 removed the unused `s_cur` and made `s_clock_deterministic` read; re-run to reach
+   the later gates.
 4. Repeat on a quiet machine for clean compile and link times.
 
 This table does not establish a compiler winner or behavior equivalence. A default-toolchain change

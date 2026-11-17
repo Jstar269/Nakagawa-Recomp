@@ -10,7 +10,7 @@ same sense as
 > The [source-owned scalar-probe runbook](../tests/fixtures/psp_oracle/README.md), its
 > [strict result protocol](../tools/psp_oracle/protocol.py), and the shipped
 > [`tools/psp_readiness.py`](../tools/psp_readiness.py) cover the implemented subset. Read those
-> first. In particular, the `tools/hw_doctor.py` proposed in §7 is superseded by the readiness tool
+> first. In particular, the `tools/hw_doctor.py` proposed in §8 (and the struck item 4 in §9) is superseded by the readiness tool
 > — extend that tool rather than adding a second precondition checker.
 > The PSP-side v2 instruction-trace producer now exists for source-owned microprograms: the
 > `insn-trace` probe (`PSP-TRACE-001`, `tests/fixtures/psp_oracle/probe_insn_trace.c`) single-steps the
