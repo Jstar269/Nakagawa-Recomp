@@ -49,6 +49,8 @@ static void reg(NkUiFocusGraph *g, NkUiId id, float x, float y, float w, float h
     e.flags = flags;
     e.scope = scope;
     e.scroller = scroller;
+    e.up = 0u;
+    e.down = 0u;
     if (!nk_ui_focus_register(g, &e)) {
         fprintf(stderr, "register failed for id %u\n", (unsigned)id);
         exit(2);
@@ -144,6 +146,150 @@ static int test_owns_horizontal(void) {
     return 1;
 }
 
+/* A page of option rows under a tab strip (Settings > Enhanced): each row owns left and
+   right and holds pointer-only choices, and the rows beside the strip name its active tab.
+   Ids: 1 the play mode row; 11 to 14 the tabs, 11 active; 21 and 22 the rows, with the
+   choices 31 to 33 and 41 to 42 inside them; 50 Back, a small button under the left end. */
+static void reg_between(NkUiFocusGraph *g, NkUiId id, float x, float y, float w, float h,
+                        uint32_t flags, NkUiId up, NkUiId down) {
+    NkUiFocusEntry e;
+    e.id = id;
+    e.rect.x = x;
+    e.rect.y = y;
+    e.rect.w = w;
+    e.rect.h = h;
+    e.flags = flags;
+    e.scope = NK_UI_SCOPE_ROOT;
+    e.scroller = 0u;
+    e.up = up;
+    e.down = down;
+    if (!nk_ui_focus_register(g, &e)) {
+        fprintf(stderr, "register failed for id %u\n", (unsigned)id);
+        exit(2);
+    }
+}
+
+static void rows_and_tabs_frame(NkUiFocusGraph *g, bool named) {
+    int i;
+    nk_ui_focus_begin_frame(g);
+    reg_between(g, 1u, 0.0f, 0.0f, 600.0f, 44.0f, NK_UI_FOCUS_OWNS_HORIZONTAL, 0u,
+                named ? 11u : 0u);
+    for (i = 0; i < 4; ++i) {
+        reg(g, (NkUiId)(11 + i), (float)(i * 110), 60.0f, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT,
+            0u);
+    }
+    reg_between(g, 21u, 0.0f, 110.0f, 600.0f, 44.0f, NK_UI_FOCUS_OWNS_HORIZONTAL,
+                named ? 11u : 0u, 0u);
+    for (i = 0; i < 3; ++i) {
+        reg(g, (NkUiId)(31 + i), 420.0f + (float)(i * 60), 115.0f, 50.0f, 34.0f,
+            NK_UI_FOCUS_POINTER_ONLY, NK_UI_SCOPE_ROOT, 0u);
+    }
+    reg(g, 22u, 0.0f, 160.0f, 600.0f, 44.0f, NK_UI_FOCUS_OWNS_HORIZONTAL, NK_UI_SCOPE_ROOT, 0u);
+    for (i = 0; i < 2; ++i) {
+        reg(g, (NkUiId)(41 + i), 480.0f + (float)(i * 60), 165.0f, 50.0f, 34.0f,
+            NK_UI_FOCUS_POINTER_ONLY, NK_UI_SCOPE_ROOT, 0u);
+    }
+    reg_between(g, 50u, 0.0f, 230.0f, 100.0f, 44.0f, 0u, named ? 22u : 0u, 0u);
+    nk_ui_focus_end_frame(g);
+}
+
+static int test_pointer_only_and_named_neighbours(void) {
+    static const NkUiId tab_order[] = {11u, 12u, 13u, 14u, 21u, 22u, 50u, 1u};
+    NkUiFocusGraph *g = nk_ui_focus_graph_create();
+    size_t i;
+    CHECK(g != NULL, "create graph");
+    /* A pointer-only entry is never the first focus, even when it is drawn first. */
+    nk_ui_focus_begin_frame(g);
+    reg(g, 31u, 0.0f, 0.0f, 50.0f, 34.0f, NK_UI_FOCUS_POINTER_ONLY, NK_UI_SCOPE_ROOT, 0u);
+    reg(g, 21u, 0.0f, 50.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    nk_ui_focus_end_frame(g);
+    CHECK(nk_ui_focus_current(g) == 21u, "first focus passes over a pointer-only entry");
+    nk_ui_focus_graph_destroy(g);
+
+    /* By position alone the full-width rows miss the active tab at the strip's left end, and
+       the small Back button under it jumps over both rows to it. */
+    g = nk_ui_focus_graph_create();
+    CHECK(g != NULL, "create graph");
+    rows_and_tabs_frame(g, false);
+    CHECK(nk_ui_focus_current(g) == 1u, "focus starts on the first row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 13u, "by position, down picks the nearest tab");
+    CHECK(nk_ui_focus_set(g, 50u), "focus Back");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 11u, "by position, up from Back skips the rows");
+    nk_ui_focus_graph_destroy(g);
+
+    g = nk_ui_focus_graph_create();
+    CHECK(g != NULL, "create graph");
+    rows_and_tabs_frame(g, true);
+    CHECK(nk_ui_focus_current(g) == 1u, "focus starts on the first row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 11u, "down enters the strip at the named tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_RIGHT) == 12u, "right reaches the next tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_RIGHT) == 13u, "and the one after it");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_LEFT) == 12u, "left comes back along the strip");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 21u,
+          "down from a tab reaches the first row, not a choice inside it");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_RIGHT) == 0u && nk_ui_focus_current(g) == 21u,
+          "right stays with the row: its choices are not focus stops");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 22u, "down reaches the next row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 50u, "down from the last row reaches Back");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 22u, "up from Back reaches the row it names");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 21u, "up reaches the first row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 11u, "up from the first row reaches the named tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 1u, "up from the strip reaches the row above");
+    /* Tab passes over every choice and still stops on every tab. */
+    for (i = 0; i < sizeof(tab_order) / sizeof(tab_order[0]); ++i) {
+        CHECK(nk_ui_focus_cycle(g, false) == tab_order[i], "Tab follows the rows and tabs");
+    }
+    CHECK(nk_ui_focus_cycle(g, true) == 50u, "Shift+Tab wraps to Back");
+    CHECK(nk_ui_focus_cycle(g, true) == 22u, "Shift+Tab passes over the choices");
+    /* A pointer press still focuses a choice, and the keys then leave it for a row. */
+    CHECK(nk_ui_focus_accepts_pointer(g, 32u), "a pointer can press a choice");
+    CHECK(nk_ui_focus_set(g, 32u) && nk_ui_focus_current(g) == 32u, "a press focuses the choice");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 22u, "down from a pressed choice reaches a row");
+    CHECK(nk_ui_focus_set(g, 32u), "focus the choice again");
+    CHECK(nk_ui_focus_cycle(g, false) == 22u, "Tab from a pressed choice reaches the next row");
+    /* A row its scroll container clips away whole is not a target from outside the
+       container: with the list (scroller 90) scrolled down, row 21 lies behind the play
+       mode row and row 22 behind the strip, and the moves outside the list pass them by. */
+    nk_ui_focus_begin_frame(g);
+    {
+        NkUiFocusScroller list;
+        list.id = 90u;
+        list.viewport = (NkUiRect){0.0f, 110.0f, 600.0f, 94.0f};
+        list.scroll_x = 0.0f;
+        list.scroll_y = 100.0f;
+        list.content_w = 600.0f;
+        list.content_h = 194.0f;
+        CHECK(nk_ui_focus_register_scroller(g, &list), "register the list");
+    }
+    reg(g, 1u, 0.0f, 0.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    for (i = 0; i < 4; ++i) {
+        reg(g, (NkUiId)(11 + i), (float)(i * 110), 60.0f, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT,
+            0u);
+    }
+    reg(g, 21u, 0.0f, 10.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 22u, 0.0f, 60.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 23u, 0.0f, 110.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 24u, 0.0f, 160.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 50u, 0.0f, 230.0f, 100.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    nk_ui_focus_end_frame(g);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the play mode row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 13u, "down passes the row hidden behind it");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_RIGHT) == 14u, "right along the strip passes row 22");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 1u, "up from the strip passes the hidden rows");
+    CHECK(nk_ui_focus_set(g, 13u), "focus a tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 23u, "down from the strip takes a row on screen");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 22u, "inside the list, up reaches a hidden row");
+    /* A named neighbour that is not on screen is ignored: the move is by position. */
+    nk_ui_focus_begin_frame(g);
+    reg_between(g, 1u, 0.0f, 0.0f, 600.0f, 44.0f, 0u, 0u, 99u);
+    reg(g, 21u, 0.0f, 110.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    nk_ui_focus_end_frame(g);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 21u, "a missing named neighbour falls back");
+    nk_ui_focus_graph_destroy(g);
+    return 1;
+}
+
 static int test_ragged_row(void) {
     NkUiFocusGraph *g = nk_ui_focus_graph_create();
     NkUiFocusEntry list[3];
@@ -181,6 +327,8 @@ static int test_ragged_row(void) {
     list[0].flags = list[1].flags = list[2].flags = 0u;
     list[0].scope = list[1].scope = list[2].scope = 0u;
     list[0].scroller = list[1].scroller = list[2].scroller = 0u;
+    list[0].up = list[1].up = list[2].up = 0u;
+    list[0].down = list[1].down = list[2].down = 0u;
     CHECK(nk_ui_focus_directional(list, 3, 1u, NK_UI_DIR_RIGHT) == 3u,
           "an overlapping row beats a staggered one");
     CHECK(nk_ui_focus_directional(list, 2, 1u, NK_UI_DIR_RIGHT) == 2u,
@@ -1502,6 +1650,7 @@ int main(int argc, char **argv) {
         }
     }
     if (!test_grid() || !test_no_default_entry() || !test_owns_horizontal() ||
+        !test_pointer_only_and_named_neighbours() ||
         !test_ragged_row() || !test_scroll_into_view() || !test_place_follows_the_layout() ||
         !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
         !test_repeat_timing() || !test_stick_hysteresis() || !test_event_construction() ||

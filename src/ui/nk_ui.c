@@ -1746,6 +1746,11 @@ void nk_ui_focus(NkUi *ui, NkUiId id) {
 }
 
 void nk_ui_register_button(NkUi *ui, NkUiId id, uint32_t flags) {
+    nk_ui_register_button_between(ui, id, flags, 0u, 0u);
+}
+
+void nk_ui_register_button_between(NkUi *ui, NkUiId id, uint32_t flags, NkUiId up,
+                                   NkUiId down) {
     NkUiFocusEntry entry;
     NkUiRect rect = {0.0f, 0.0f, 0.0f, 0.0f};
     if (ui == NULL || id == 0u || ui->focus_graph == NULL) {
@@ -1764,6 +1769,9 @@ void nk_ui_register_button(NkUi *ui, NkUiId id, uint32_t flags) {
     if ((flags & NK_UI_BUTTON_OWNS_HORIZONTAL) != 0u) {
         entry.flags |= NK_UI_FOCUS_OWNS_HORIZONTAL;
     }
+    if ((flags & NK_UI_BUTTON_POINTER_ONLY) != 0u) {
+        entry.flags |= NK_UI_FOCUS_POINTER_ONLY;
+    }
     /* A destructive action is never the default focus (PLAYER_UI_DESIGN.md). */
     if ((flags & NK_UI_BUTTON_DANGER) != 0u) {
         entry.flags |= NK_UI_FOCUS_NO_DEFAULT;
@@ -1773,11 +1781,14 @@ void nk_ui_register_button(NkUi *ui, NkUiId id, uint32_t flags) {
        old focus is gone, focus lands here (the title page's PLAY or BUILD
        PACKAGE), not on the first control drawn (a top-bar tab). */
     if ((entry.flags & NK_UI_FOCUS_DISABLED) == 0u && ui->focus_entry_count == 0u &&
-        (flags & (NK_UI_BUTTON_NOT_DEFAULT | NK_UI_BUTTON_DANGER)) == 0u) {
+        (flags & (NK_UI_BUTTON_NOT_DEFAULT | NK_UI_BUTTON_DANGER |
+                  NK_UI_BUTTON_POINTER_ONLY)) == 0u) {
         entry.flags |= NK_UI_FOCUS_DEFAULT;
     }
     entry.scope = NK_UI_SCOPE_ROOT;
     entry.scroller = ui->open_scroller;
+    entry.up = up;
+    entry.down = down;
     (void)nk_ui_focus_register(ui->focus_graph, &entry);
     /* Controls that may not take default focus, disabled ones included, do
        not use up the default. */

@@ -358,7 +358,11 @@ enum {
     /* Left and right change the control instead of moving focus (a segmented
        control, a slider): while it is focused they stay queued as NK_UI_EV_NAV for
        nk_ui_take_event. For nk_ui_register_button. */
-    NK_UI_BUTTON_OWNS_HORIZONTAL = 1u << 8
+    NK_UI_BUTTON_OWNS_HORIZONTAL = 1u << 8,
+    /* A pointer target inside a control that takes the keys (one choice in a row of
+       choices): it can be hovered and clicked, and no directional move, Tab or first
+       focus lands on it. The screen moves focus back to the owning control. */
+    NK_UI_BUTTON_POINTER_ONLY = 1u << 9
 };
 
 /* Device scale and edge rounding are shared helpers for hosts and tests. The
@@ -398,6 +402,10 @@ void nk_ui_end_container(NkUi *ui);
    was queued; the event is consumed. It returns false otherwise, including
    when the button could not be added. */
 bool nk_ui_button(NkUi *ui, NkUiId id, const char *label, uint32_t flags);
+/* The same button, naming the controls an up and a down move from it land on (0: the
+   nearest that way). See nk_ui_register_button_between in nk_ui_widgets.h. */
+bool nk_ui_button_between(NkUi *ui, NkUiId id, const char *label, uint32_t flags, NkUiId up,
+                          NkUiId down);
 void nk_ui_label(NkUi *ui, NkUiId id, const char *text, int font, int size_px);
 /* A text run with an explicit style. The text is copied into the frame, so a
    temporary buffer is fine. */

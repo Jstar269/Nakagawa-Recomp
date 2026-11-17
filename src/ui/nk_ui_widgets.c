@@ -113,6 +113,11 @@ void nk_ui_eyebrow(NkUi *ui, NkUiId id, const char *text) {
 /* ---- Buttons ---------------------------------------------------------------------- */
 
 bool nk_ui_button(NkUi *ui, NkUiId id, const char *label, uint32_t flags) {
+    return nk_ui_button_between(ui, id, label, flags, 0u, 0u);
+}
+
+bool nk_ui_button_between(NkUi *ui, NkUiId id, const char *label, uint32_t flags, NkUiId up,
+                          NkUiId down) {
     NkUiLayout layout;
     NkUiStyle style;
     NkUiTextStyle text;
@@ -123,7 +128,7 @@ bool nk_ui_button(NkUi *ui, NkUiId id, const char *label, uint32_t flags) {
         return false;
     }
     theme = nk_ui_theme(ui);
-    nk_ui_register_button(ui, id, flags);
+    nk_ui_register_button_between(ui, id, flags, up, down);
     nk_ui_button_configuration(ui, flags, &layout, &style);
     focused = nk_ui_button_focused(ui, id);
     if ((flags & NK_UI_BUTTON_DISABLED) == 0u) {
