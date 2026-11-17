@@ -276,7 +276,7 @@ Every substantial document carries one status.
 | `cleanroom/PRX_LOADER_SPEC.md` | DRAFT | Runtime PRX loader behaviour spec (G3); read for intent, never cite as shipped behaviour |
 | `cleanroom/PGF_SPEC.md` | DRAFT | Runtime PGF reader behaviour spec (G4); read for intent, never cite as shipped behaviour |
 | `cleanroom/PGF_CONVERTER_SPEC.md` | CURRENT | Deterministic TTF to PGF converter behaviour spec, refusal catalogue, and independence/provenance record (#313) |
-| `provenance/GUEST_INTERP_ATTESTATION.md` | CURRENT | Live attestation finding |
+| `provenance/GUEST_INTERP_ATTESTATION.md` | CURRENT | Resolved attestation disposition (#332); history of the original RECORD_ABSENT finding |
 | `provenance/FONT_ORIGINS.md` | CURRENT | PGF replacement-font origin evidence and route decision |
 | `archive/IMPORT_AUDIT.md` | ARCHIVED | Pre-republication import-coverage audit; method current, snapshot superseded |
 | `archive/ISSUE196_DIRECT_XB.md` | ARCHIVED | Superseded hypothesis preserved with scope banner |

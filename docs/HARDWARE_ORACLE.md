@@ -5279,8 +5279,8 @@ loop; route those to the batch path.
 
 | Artifact | Status |
 | --- | --- |
-| Homebrew module authored here + its hardware trace | Ours. Committable. |
-| VFPU fuzz corpus + hardware results | Ours. Committable. |
+| Homebrew module authored here + curated, reviewed result records | Ours. The probe source and reviewed result records are committable. Raw traces, envelopes and host0 logs stay private (AGENTS.md Section 5). |
+| VFPU fuzz corpus + curated, reviewed result records | Ours. The corpus source and reviewed result records are committable. Raw traces, envelopes and host0 logs stay private. |
 | Any trace of the **retail game** on hardware | Game-derived. Private, permanently. |
 | Frame or memory dumps from the retail title | Game-derived. Private, permanently. |
 
