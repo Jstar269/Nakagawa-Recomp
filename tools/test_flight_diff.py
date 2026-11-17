@@ -1483,8 +1483,10 @@ _RECORDER_FORBIDDEN_CALL = re.compile(
     r"|thrd_sleep|thrd_yield|SwitchToThread|WaitFor\w+|SDL_\w+|sr_yield|SR_YIELD"
     r"|sr_coro_\w+|sched_\w+|switch_to_scheduler)\s*\(")
 # ace.h is declarations, constants and pure inline arithmetic; the recorder takes ACE_SPEC_MAX from it.
+# windows.h is included on Win32 only, for MoveFileExA (the bundle's atomic replace); the call
+# check above still refuses Sleep, SwitchToThread and the WaitFor* family it declares.
 _RECORDER_INCLUDES = {"flight_recorder.h", "ace.h", "recomp.h", "errno.h", "stdio.h", "stdlib.h",
-                      "string.h"}
+                      "string.h", "windows.h"}
 _C_COMMENT_OR_LITERAL = re.compile(
     r"/\*.*?\*/|//[^\n]*|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'", re.DOTALL)
 

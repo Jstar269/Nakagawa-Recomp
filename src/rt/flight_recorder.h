@@ -231,10 +231,14 @@ typedef struct {
  * The full trace is one line per guest instruction, which no run of any length
  * can afford to write. SR_TRACE_PC=LO:HI keeps only the records whose guest pc
  * is inside the window and adds the ABSOLUTE value of the registers SR_TRACE_V
- * (VFPU) and SR_TRACE_F (FPU) name, because a window cannot reconstruct a value
- * written before it. SR_TRACE_LIMIT stops the stream after that many records
- * and disarms the gate, so the rest of the run executes uninstrumented. Every
- * delivered vblank is marked, which places each record on the frame timeline.
+ * (VFPU, 0..127) and SR_TRACE_F (FPU, 0..31) name, because a window cannot
+ * reconstruct a value written before it; an index outside its register file, or
+ * a bound that is not a whole number, refuses the window by name. SR_TRACE_LIMIT
+ * completes the stream after that many records: the gate stays armed and admits
+ * no instruction, so neither this stream nor the full trace records anything
+ * more. Each record is flushed as it is written, so a host crash keeps the
+ * records leading into it. Every delivered vblank is marked, which places each
+ * record on the frame timeline.
  *
  * This is a diagnostic stream, not the byte-comparable oracle trace: a record is
  * the canonical line the trace writer already rendered, followed by the absolute

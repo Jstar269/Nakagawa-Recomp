@@ -21,17 +21,26 @@ non-invasive:
   the frame markers, so the trace build needs no title-specific code;
 * the parse rejects a malformed window and never arms on one.
 
-It is a source-shape test on purpose: the hooks live in recomp.c, which the
-native selftests do not link (they build from an explicit file list), and the
-behavioural evidence is the traced run itself.
+Most of it is a source-shape test: the hooks live in recomp.c, and the
+behavioural evidence for them is profiler-selftest (the one native selftest that
+links recomp.c) and the traced run itself. TraceWindowParseTests compiles the
+recorder alone and checks how each SR_TRACE_* value arms or refuses the window.
 """
 
+import os
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from makefile_text import read_makefile  # noqa: E402
+
+try:
+    import scratch_dir
+except ModuleNotFoundError:
+    from tools import scratch_dir
 
 ROOT = Path(__file__).resolve().parents[1]
 RECOMP_C = (ROOT / "src/rt/recomp.c").read_text(encoding="utf-8")
@@ -89,7 +98,10 @@ class TraceWindowProbeTests(unittest.TestCase):
         # A window without a separator, or an inverted one, is refused before the
         # stream is opened, so a typo cannot silently produce an empty trace.
         self.assertLess(configure.index("needs LO:HI"), configure.index("fopen"))
+        self.assertLess(configure.index("two 32-bit addresses"), configure.index("fopen"))
         self.assertLess(configure.index("empty window"), configure.index("fopen"))
+        self.assertLess(configure.index("SR_TRACE_LIMIT needs a record count"),
+                        configure.index("fopen"))
         self.assertIn("if (hi < lo)", configure)
 
     def test_window_is_env_probed_once(self):
@@ -125,11 +137,19 @@ class TraceWindowProbeTests(unittest.TestCase):
         # register values are uint32_t and print through PRIx32 (format_portability_check.py)
         self.assertIn('abs v%u=0x%08" PRIx32', end)
         self.assertIn('abs f%u=0x%08" PRIx32', end)
-        # Spending the record budget disarms the gate, so the rest of the run is
-        # uninstrumented and the writer's own stream is left open.
+        # Spending the record budget completes the window: the gate stays armed and
+        # admits nothing more. Disarming it would hand every later instruction to the
+        # full trace (the else branch above) and run into the 50M-step abort.
         record = body_of(WINDOW_C, "void sr_trace_window_record(uint32_t pc, const char *text)")
         self.assertIn("if (s_tw_limit && ++s_tw_count >= s_tw_limit)", record)
-        self.assertIn("s_tw_armed = 0;", record)
+        self.assertIn("s_tw_complete = 1;", record)
+        self.assertNotIn("s_tw_armed = 0", WINDOW_C)
+        gate = body_of(WINDOW_C, "int sr_trace_window_begin_instruction(uint32_t pc)")
+        self.assertIn("s_tw_skip = s_tw_complete || pc < s_tw_lo || pc > s_tw_hi;", gate)
+        # Each record is flushed as it is written, so a host crash keeps it.
+        self.assertLess(record.index('fprintf(s_tw_fp, "%s\\n", text);'),
+                        record.index("fflush(s_tw_fp);"))
+        self.assertLess(record.index("fflush(s_tw_fp);"), record.index("if (s_tw_limit"))
 
     def test_vblank_hooks_mark_trace_and_watch_timelines(self):
         flight_init = body_of(WINDOW_C, "void sr_flight_init(void)")
@@ -142,7 +162,7 @@ class TraceWindowProbeTests(unittest.TestCase):
         self.assertIn("sr_watch_note_vblank(frame);", configure)
         # The frame marker is a no-op unless a window is armed.
         note = body_of(WINDOW_C, "void sr_trace_note_frame(uint32_t frame)")
-        self.assertIn("if (!s_tw_armed || !s_tw_fp) return;", note)
+        self.assertIn("if (!s_tw_armed || s_tw_complete || !s_tw_fp) return;", note)
 
     def test_window_is_armed_before_guest_execution(self):
         main = body_of(DRIVER_C, "int main(int argc, char **argv)")
@@ -154,9 +174,13 @@ class TraceWindowProbeTests(unittest.TestCase):
                         "a guest busy-loop before its first vblank must still be traceable")
 
     def test_index_list_is_bounded(self):
-        listing = body_of(WINDOW_C, "static void sr_trace_window_list(")
-        self.assertIn("*count < SR_TRACE_WINDOW_MAX_INDEX", listing)
-        self.assertIn("if (value < 128u)", listing)
+        listing = body_of(WINDOW_C, "static int sr_trace_window_list(")
+        self.assertIn("if (*count >= SR_TRACE_WINDOW_MAX_INDEX)", listing)
+        self.assertIn("if (value >= limit)", listing)
+        configure = body_of(WINDOW_C, "void sr_trace_window_configure(void)")
+        # Each list is bounded by the register file the record reads: v[128], fi[32].
+        self.assertIn('sr_trace_window_list("SR_TRACE_V", getenv("SR_TRACE_V"), 128u,', configure)
+        self.assertIn('sr_trace_window_list("SR_TRACE_F", getenv("SR_TRACE_F"), 32u,', configure)
 
     def test_store_watch_parses_an_overflow_safe_range_and_reports_each_overlap(self):
         configure = body_of(WINDOW_C, "void sr_watch_configure(void)")
@@ -236,6 +260,106 @@ class TraceWindowProbeTests(unittest.TestCase):
         self.assertIn("--watch 0x08801000:4", MAKEFILE)
         self.assertIn('strcmp(argv[1], "--watch") == 0', DISPATCH_SELFTEST)
         self.assertIn("native-core-tests: memory-watch-selftest", MAKEFILE)
+
+
+PARSE_HARNESS = r"""
+#include "flight_recorder.h"
+#include <stdio.h>
+
+int main(void) {
+    sr_trace_window_configure();
+    const SrTraceWindowIndices *indices = sr_trace_window_indices();
+    printf("armed=%d v=%u f=%u\n", sr_trace_window_armed(), indices ? indices->vn : 0u,
+           indices ? indices->fn : 0u);
+    return 0;
+}
+"""
+
+
+def _find_compiler() -> str:
+    for candidate in (os.environ.get("CC", ""), "gcc", "cc", "clang"):
+        word = candidate.split()[0] if candidate.strip() else ""
+        if word and shutil.which(word):
+            return shutil.which(word)
+    return ""
+
+
+COMPILER = _find_compiler()
+
+
+@unittest.skipUnless(COMPILER, "no C compiler on PATH")
+class TraceWindowParseTests(unittest.TestCase):
+    """The production SR_TRACE_* parse, compiled with the recorder alone."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._scratch = scratch_dir.TemporaryDirectory()
+        cls.tmp = Path(cls._scratch.name)
+        source = cls.tmp / "trace_window_parse.c"
+        source.write_text(PARSE_HARNESS, encoding="utf-8")
+        cls.executable = cls.tmp / f"trace_window_parse{'.exe' if os.name == 'nt' else ''}"
+        result = subprocess.run(
+            [COMPILER, "-std=c99", "-O0", "-Wall", "-Wextra", "-Werror", "-I",
+             str(ROOT / "src" / "rt"), "-DSR_FLIGHT_RECORDER_LINKED", str(source),
+             "src/rt/flight_recorder.c", "-o", str(cls.executable)],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        if result.returncode != 0:
+            cls._scratch.cleanup()
+            raise AssertionError(result.stdout + result.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._scratch.cleanup()
+
+    def _configure(self, **values):
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith("SR_TRACE") and not key.startswith("SR_FLIGHT")}
+        env["SR_TRACE"] = str(self.tmp / "window.txt")
+        env.update(values)
+        result = subprocess.run([str(self.executable)], cwd=self.tmp, env=env,
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout.strip(), result.stderr
+
+    def test_well_formed_windows_arm(self):
+        for window in ("0x08804000:0x08805000", "0x08804000-0x08805000", "0:0"):
+            with self.subTest(window=window):
+                stdout, stderr = self._configure(SR_TRACE_PC=window, SR_TRACE_LIMIT="16")
+                self.assertEqual(stdout, "armed=1 v=0 f=0", stderr)
+        stdout, stderr = self._configure(SR_TRACE_PC="0x08804000:0x08805000",
+                                         SR_TRACE_V="0,127", SR_TRACE_F="0, 31")
+        self.assertEqual(stdout, "armed=1 v=2 f=2", stderr)
+
+    def test_a_register_index_outside_its_file_refuses_the_window(self):
+        # fi[] has 32 entries and v[] has 128: a record must never read past either.
+        for name, value, message in (
+            ("SR_TRACE_F", "40", "SR_TRACE_F index 40 out of range 0..31"),
+            ("SR_TRACE_F", "32", "SR_TRACE_F index 32 out of range 0..31"),
+            ("SR_TRACE_V", "128", "SR_TRACE_V index 128 out of range 0..127"),
+            ("SR_TRACE_F", "3,x", "SR_TRACE_F needs a list of register indices"),
+            ("SR_TRACE_V", "-1", "SR_TRACE_V needs a list of register indices"),
+        ):
+            with self.subTest(name=name, value=value):
+                stdout, stderr = self._configure(SR_TRACE_PC="0x08804000:0x08805000",
+                                                 **{name: value})
+                self.assertEqual(stdout, "armed=0 v=0 f=0")
+                self.assertIn(f"TRACE_WINDOW: {message}", stderr)
+
+    def test_a_malformed_bound_or_limit_refuses_the_window(self):
+        # A letter O for a zero, or a word, used to parse as 0 and arm an empty 0..0 window.
+        for window in ("O8804000:08805000", "pc:end", "0x08804000:0x08805000x",
+                       "0x08804000:0x100000000", ":0x08805000", "-1:5"):
+            with self.subTest(window=window):
+                stdout, stderr = self._configure(SR_TRACE_PC=window)
+                self.assertEqual(stdout, "armed=0 v=0 f=0")
+                self.assertIn("TRACE_WINDOW: SR_TRACE_PC needs", stderr)
+        for limit in ("abc", "10x", "-3"):
+            with self.subTest(limit=limit):
+                stdout, stderr = self._configure(SR_TRACE_PC="0x08804000:0x08805000",
+                                                 SR_TRACE_LIMIT=limit)
+                self.assertEqual(stdout, "armed=0 v=0 f=0")
+                self.assertIn("TRACE_WINDOW: SR_TRACE_LIMIT needs a record count", stderr)
 
 
 if __name__ == "__main__":
