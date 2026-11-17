@@ -11256,6 +11256,480 @@ static void test_adhoc_d1_lifetime_across_term(void) {
 #endif
 }
 
+/* ---- Reusable multi-client loopback mini-relay for D4 / D3 / D8 / D9 / D7 --------------- */
+typedef struct {
+    adh_p2_sock_t fd;
+    int active, logged_in, in_group;
+    uint32_t peer_id;
+    uint8_t mac[6], group[8], nick[128], rx[2048];
+    size_t rx_len;
+} MiniRelayPeer;
+
+typedef struct {
+    adh_p2_sock_t fd;
+    int active, kind, partner; /* 0=PDP, 1=PTP_LISTEN, 2=PTP_CONNECT, 3=PTP_ACCEPT, 4=PAIRED */
+    uint8_t src_mac[6], dst_mac[6];
+    uint16_t sport, dport;
+    uint8_t rx[65536];
+    size_t rx_len;
+} MiniRelayConn;
+
+typedef struct {
+    adh_p2_sock_t lobby_lsn, data_lsn;
+    uint16_t lobby_port, data_port;
+    MiniRelayPeer peers[6];
+    MiniRelayConn conns[24];
+    int group_exists;
+    uint8_t active_group[8], group_bssid[6];
+    volatile int stop, running;
+    volatile int drop_lobby_on_connect;
+    volatile int silent_lobby;
+    volatile int stall_ptp_forward;
+    volatile int closed_unmatched_ptp_connects;
+    volatile int last_login_ok;
+    char last_login_nick[129], last_login_game[10];
+#ifdef _WIN32
+    uintptr_t th;
+#else
+    pthread_t th;
+    int pt_ok;
+#endif
+} AdhP2MiniRelay;
+
+static void mr_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v & 0xffu); p[1] = (uint8_t)(v >> 8); }
+static uint16_t mr_get16(const uint8_t *p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
+static void mr_put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xffu); p[1] = (uint8_t)((v >> 8) & 0xffu);
+    p[2] = (uint8_t)((v >> 16) & 0xffu); p[3] = (uint8_t)((v >> 24) & 0xffu);
+}
+static uint32_t mr_get32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static void mr_nonblock(adh_p2_sock_t s) {
+#ifdef _WIN32
+    u_long on = 1u;
+    (void)ioctlsocket(s, FIONBIO, &on);
+#else
+    int fl = fcntl(s, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(s, F_SETFL, fl | O_NONBLOCK);
+#endif
+    int nd = 1;
+    (void)setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&nd, sizeof(nd));
+}
+static void mr_send(adh_p2_sock_t fd, const void *buf, size_t n) {
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t sent = 0u;
+    for (int tries = 0; sent < n && tries < 2000; tries++) {
+        int r = send(fd, (const char *)(p + sent), (int)(n - sent), 0);
+        if (r > 0) sent += (size_t)r;
+    }
+}
+static void mr_pump_once(AdhP2MiniRelay *r) {
+    for (;;) {
+        adh_p2_sock_t c = accept(r->lobby_lsn, NULL, NULL);
+        if (c == ADH_P2_BAD_SOCK) break;
+        mr_nonblock(c);
+        int placed = 0;
+        for (int i = 0; i < 6; i++) {
+            if (!r->peers[i].active) {
+                memset(&r->peers[i], 0, sizeof(r->peers[i]));
+                r->peers[i].fd = c; r->peers[i].active = 1; r->peers[i].peer_id = (uint32_t)(i + 1);
+                placed = 1; break;
+            }
+        }
+        if (!placed) adh_p2_close_sock(c);
+    }
+    for (;;) {
+        adh_p2_sock_t c = accept(r->data_lsn, NULL, NULL);
+        if (c == ADH_P2_BAD_SOCK) break;
+        mr_nonblock(c);
+        int placed = 0;
+        for (int i = 0; i < 24; i++) {
+            if (!r->conns[i].active) {
+                memset(&r->conns[i], 0, sizeof(r->conns[i]));
+                r->conns[i].fd = c; r->conns[i].active = 1; r->conns[i].kind = -1; r->conns[i].partner = -1;
+                placed = 1; break;
+            }
+        }
+        if (!placed) adh_p2_close_sock(c);
+    }
+    for (int i = 0; i < 6; i++) {
+        MiniRelayPeer *p = &r->peers[i];
+        if (!p->active) continue;
+        int closed = 0;
+        while (p->rx_len < sizeof(p->rx)) {
+            int n = recv(p->fd, (char *)(p->rx + p->rx_len), (int)(sizeof(p->rx) - p->rx_len), 0);
+            if (n > 0) p->rx_len += (size_t)n;
+            else { if (n == 0) closed = 1; break; }
+        }
+        while (p->rx_len > 0u) {
+            const uint8_t op = p->rx[0];
+            size_t need = (op == 0u || op == 3u || op == 4u) ? 1u : (op == 1u ? 144u : (op == 2u ? 9u : 0u));
+            if (need == 0u) { p->rx_len = 0u; break; }
+            if (p->rx_len < need) break;
+            if (op == 1u) {
+                memcpy(p->mac, p->rx + 1, 6u);
+                memcpy(p->nick, p->rx + 7, 128u);
+                memcpy(r->last_login_nick, p->rx + 7, 128u);
+                r->last_login_nick[128] = '\0';
+                memcpy(r->last_login_game, p->rx + 135, 9u);
+                r->last_login_game[9] = '\0';
+                r->last_login_ok = 1;
+                p->logged_in = 1;
+            } else if (op == 2u && !r->silent_lobby) {
+                if (r->drop_lobby_on_connect) { closed = 1; p->rx_len = 0u; break; }
+                memcpy(p->group, p->rx + 1, 8u);
+                if (!r->group_exists) { r->group_exists = 1; memcpy(r->active_group, p->group, 8u); }
+                for (int j = 0; j < 6; j++) {
+                    if (r->peers[j].active && r->peers[j].in_group && memcmp(r->peers[j].group, p->group, 8u) == 0) {
+                        uint8_t cp1[139], cp2[139];
+                        memset(cp1, 0, sizeof(cp1)); memset(cp2, 0, sizeof(cp2));
+                        cp1[0] = 2u; memcpy(cp1 + 1, r->peers[j].nick, 128u); memcpy(cp1 + 129, r->peers[j].mac, 6u); mr_put32(cp1 + 135, r->peers[j].peer_id);
+                        cp2[0] = 2u; memcpy(cp2 + 1, p->nick, 128u); memcpy(cp2 + 129, p->mac, 6u); mr_put32(cp2 + 135, p->peer_id);
+                        mr_send(p->fd, cp1, sizeof(cp1));
+                        mr_send(r->peers[j].fd, cp2, sizeof(cp2));
+                    }
+                }
+                p->in_group = 1;
+                uint8_t bp[7] = {6u, r->group_bssid[0], r->group_bssid[1], r->group_bssid[2],
+                                 r->group_bssid[3], r->group_bssid[4], r->group_bssid[5]};
+                mr_send(p->fd, bp, sizeof(bp));
+            } else if (op == 3u) {
+                if (p->in_group) {
+                    p->in_group = 0;
+                    for (int j = 0; j < 6; j++) {
+                        if (j != i && r->peers[j].active && r->peers[j].in_group) {
+                            uint8_t dp[5] = {3u, 0, 0, 0, 0}; mr_put32(dp + 1, p->peer_id);
+                            mr_send(r->peers[j].fd, dp, sizeof(dp));
+                        }
+                    }
+                }
+            } else if (op == 4u && !r->silent_lobby) {
+                if (r->drop_lobby_on_connect) { closed = 1; p->rx_len = 0u; break; }
+                if (r->group_exists) {
+                    uint8_t spkt[15]; spkt[0] = 4u;
+                    memcpy(spkt + 1, r->active_group, 8u); memcpy(spkt + 9, r->group_bssid, 6u);
+                    mr_send(p->fd, spkt, sizeof(spkt));
+                }
+                const uint8_t done = 5u; mr_send(p->fd, &done, 1u);
+            }
+            if (need < p->rx_len) memmove(p->rx, p->rx + need, p->rx_len - need);
+            p->rx_len -= need;
+        }
+        if (closed) {
+            adh_p2_close_sock(p->fd); p->fd = ADH_P2_BAD_SOCK; p->active = 0;
+        }
+    }
+    for (int i = 0; i < 24; i++) {
+        MiniRelayConn *dc = &r->conns[i];
+        if (!dc->active) continue;
+        if (dc->kind == 4 && r->stall_ptp_forward) continue;
+        int closed = 0;
+        while (dc->rx_len < sizeof(dc->rx)) {
+            int n = recv(dc->fd, (char *)(dc->rx + dc->rx_len), (int)(sizeof(dc->rx) - dc->rx_len), 0);
+            if (n > 0) dc->rx_len += (size_t)n;
+            else { if (n == 0) closed = 1; break; }
+        }
+        if (dc->kind < 0 && dc->rx_len >= 24u) {
+            dc->kind = (int)mr_get32(dc->rx);
+            memcpy(dc->src_mac, dc->rx + 4, 6u); dc->sport = mr_get16(dc->rx + 12);
+            memcpy(dc->dst_mac, dc->rx + 14, 6u); dc->dport = mr_get16(dc->rx + 22);
+            if (dc->rx_len > 24u) memmove(dc->rx, dc->rx + 24u, dc->rx_len - 24u);
+            dc->rx_len -= 24u;
+            if (dc->kind == 2) {
+                int matched = 0;
+                for (int j = 0; j < 24; j++) {
+                    MiniRelayConn *ls = &r->conns[j];
+                    if (ls->active && ls->kind == 1 &&
+                        memcmp(ls->src_mac, dc->dst_mac, 6u) == 0 && ls->sport == dc->dport) {
+                        uint8_t note[10]; memset(note, 0, sizeof(note));
+                        memcpy(note, dc->src_mac, 6u); mr_put16(note + 8, dc->sport);
+                        mr_send(ls->fd, note, sizeof(note));
+                        matched = 1; break;
+                    }
+                }
+                if (!matched) {
+                    r->closed_unmatched_ptp_connects++;
+                    adh_p2_close_sock(dc->fd); dc->fd = ADH_P2_BAD_SOCK; dc->active = 0; continue;
+                }
+            } else if (dc->kind == 3) {
+                for (int j = 0; j < 24; j++) {
+                    MiniRelayConn *cl = &r->conns[j];
+                    if (cl->active && cl->kind == 2 &&
+                        memcmp(cl->src_mac, dc->dst_mac, 6u) == 0 && cl->sport == dc->dport &&
+                        memcmp(cl->dst_mac, dc->src_mac, 6u) == 0 && cl->dport == dc->sport) {
+                        uint8_t ac1[10], ac2[10];
+                        memset(ac1, 0, sizeof(ac1)); memset(ac2, 0, sizeof(ac2));
+                        memcpy(ac1, dc->src_mac, 6u); mr_put16(ac1 + 8, dc->sport);
+                        memcpy(ac2, cl->src_mac, 6u); mr_put16(ac2 + 8, cl->sport);
+                        mr_send(cl->fd, ac1, sizeof(ac1)); mr_send(dc->fd, ac2, sizeof(ac2));
+                        cl->kind = 4; dc->kind = 4; cl->partner = i; dc->partner = j; break;
+                    }
+                }
+            }
+        }
+        if (dc->kind == 0) {
+            while (dc->rx_len >= 14u) {
+                uint32_t plen = mr_get32(dc->rx + 10);
+                if (dc->rx_len < 14u + plen) break;
+                const uint8_t *dst = dc->rx;
+                const uint16_t dp = mr_get16(dc->rx + 8);
+                for (int j = 0; j < 24; j++) {
+                    MiniRelayConn *tc = &r->conns[j];
+                    if (tc->active && tc->kind == 0 &&
+                        memcmp(tc->src_mac, dst, 6u) == 0 && tc->sport == dp) {
+                        uint8_t hdr[14]; memset(hdr, 0, sizeof(hdr));
+                        memcpy(hdr, dc->src_mac, 6u); mr_put16(hdr + 8, dc->sport); mr_put32(hdr + 10, plen);
+                        mr_send(tc->fd, hdr, sizeof(hdr));
+                        if (plen) mr_send(tc->fd, dc->rx + 14, plen);
+                    }
+                }
+                const size_t tot = 14u + plen;
+                if (tot < dc->rx_len) memmove(dc->rx, dc->rx + tot, dc->rx_len - tot);
+                dc->rx_len -= tot;
+            }
+        } else if (dc->kind == 4 && dc->rx_len > 0u) {
+            if (dc->partner >= 0 && r->conns[dc->partner].active)
+                mr_send(r->conns[dc->partner].fd, dc->rx, dc->rx_len);
+            dc->rx_len = 0u;
+        }
+        if (closed) {
+            if (dc->partner >= 0 && r->conns[dc->partner].active) {
+                adh_p2_close_sock(r->conns[dc->partner].fd);
+                r->conns[dc->partner].fd = ADH_P2_BAD_SOCK;
+                r->conns[dc->partner].active = 0;
+            }
+            adh_p2_close_sock(dc->fd); dc->fd = ADH_P2_BAD_SOCK; dc->active = 0;
+        }
+    }
+}
+#ifdef _WIN32
+static unsigned __stdcall mr_thread_fn(void *arg) {
+#else
+static void *mr_thread_fn(void *arg) {
+#endif
+    AdhP2MiniRelay *r = (AdhP2MiniRelay *)arg;
+    while (!r->stop) {
+        mr_pump_once(r);
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        adh_p2_sock_t max_fd = 0;
+        if (r->lobby_lsn != ADH_P2_BAD_SOCK) { FD_SET(r->lobby_lsn, &rfds); if (r->lobby_lsn > max_fd) max_fd = r->lobby_lsn; }
+        if (r->data_lsn != ADH_P2_BAD_SOCK) { FD_SET(r->data_lsn, &rfds); if (r->data_lsn > max_fd) max_fd = r->data_lsn; }
+        for (int i = 0; i < 6; i++) if (r->peers[i].active && r->peers[i].fd != ADH_P2_BAD_SOCK) {
+            FD_SET(r->peers[i].fd, &rfds); if (r->peers[i].fd > max_fd) max_fd = r->peers[i].fd;
+        }
+        for (int i = 0; i < 24; i++) if (r->conns[i].active && r->conns[i].fd != ADH_P2_BAD_SOCK && !(r->conns[i].kind == 4 && r->stall_ptp_forward)) {
+            FD_SET(r->conns[i].fd, &rfds); if (r->conns[i].fd > max_fd) max_fd = r->conns[i].fd;
+        }
+        struct timeval tv = {0, 1000};
+        (void)select((int)max_fd + 1, &rfds, NULL, NULL, &tv);
+    }
+    return 0;
+}
+static int mr_start(AdhP2MiniRelay *r) {
+    memset(r, 0, sizeof(*r));
+    r->lobby_lsn = socket(AF_INET, SOCK_STREAM, 0);
+    r->data_lsn = socket(AF_INET, SOCK_STREAM, 0);
+    if (r->lobby_lsn == ADH_P2_BAD_SOCK || r->data_lsn == ADH_P2_BAD_SOCK) return 0;
+    struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET; sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t sl = sizeof(sa);
+    if (bind(r->lobby_lsn, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(r->lobby_lsn, 8) != 0 ||
+        getsockname(r->lobby_lsn, (struct sockaddr *)&sa, &sl) != 0) return 0;
+    r->lobby_port = ntohs(sa.sin_port);
+    sa.sin_port = 0u; sl = sizeof(sa);
+    if (bind(r->data_lsn, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(r->data_lsn, 16) != 0 ||
+        getsockname(r->data_lsn, (struct sockaddr *)&sa, &sl) != 0) return 0;
+    r->data_port = ntohs(sa.sin_port);
+    mr_nonblock(r->lobby_lsn); mr_nonblock(r->data_lsn);
+    r->group_bssid[0] = 0x02u; r->group_bssid[5] = 0x77u;
+    for (int i = 0; i < 6; i++) r->peers[i].fd = ADH_P2_BAD_SOCK;
+    for (int i = 0; i < 24; i++) { r->conns[i].fd = ADH_P2_BAD_SOCK; r->conns[i].kind = -1; r->conns[i].partner = -1; }
+#ifdef _WIN32
+    r->th = _beginthreadex(NULL, 0, mr_thread_fn, r, 0, NULL);
+    r->running = r->th != 0u;
+#else
+    r->pt_ok = pthread_create(&r->th, NULL, mr_thread_fn, r) == 0;
+    r->running = r->pt_ok;
+#endif
+    return r->running;
+}
+static void mr_stop(AdhP2MiniRelay *r) {
+    r->stop = 1;
+#ifdef _WIN32
+    if (r->th) { WaitForSingleObject((HANDLE)r->th, 3000u); CloseHandle((HANDLE)r->th); }
+#else
+    if (r->pt_ok) pthread_join(r->th, NULL);
+#endif
+    adh_p2_close_sock(r->lobby_lsn); adh_p2_close_sock(r->data_lsn);
+    for (int i = 0; i < 6; i++) if (r->peers[i].fd != ADH_P2_BAD_SOCK) adh_p2_close_sock(r->peers[i].fd);
+    for (int i = 0; i < 24; i++) if (r->conns[i].fd != ADH_P2_BAD_SOCK) adh_p2_close_sock(r->conns[i].fd);
+}
+
+/* ---- D4 regression: PtpOpen before Peer listens retries cleanly in PtpConnect; self-connect ---- */
+enum { D4_WORKER_ENTRY = 0x089e3f90u, D4_WORKER_NAME = 0x089e4e20u };
+static AdhP2MiniRelay *s_d4_srv;
+static int32_t s_d4_ptp_id;
+static volatile uint32_t s_d4_conn_rc;
+static volatile int s_d4_conn_done;
+static int s_d4_done;
+
+static void d4_worker_connect_fn(CpuState *cpu) {
+    s_d4_conn_rc = adh_call_full(0xfc6fc07bu /* PtpConnect */, cpu->r[29], (uint32_t)s_d4_ptp_id,
+                                 2000000u, 0u, 0u, 0u, 0u, 0u, 0u);
+    s_d4_conn_done = 1;
+    cpu->r[2] = 0u;
+}
+
+static void d4_main_fn(CpuState *cpu) {
+    static const uint8_t peer_mac[6] = {0x02u, 0x33u, 0x44u, 0x55u, 0x66u, 0x77u};
+    NkAdhocRelayConfig pcfg = {"127.0.0.1", s_d4_srv->lobby_port, s_d4_srv->data_port, 0u};
+    NkAdhocRelayClient *peer_rc = nk_relay_client_create(&pcfg);
+    expect(peer_rc != NULL, "d4: peer relay client created");
+    NkAdhocTransport *tp = nk_relay_client_transport(peer_rc);
+    const uint8_t grp[8] = {'D', '4', 'G', 'R', 'P', '0', '1', 0};
+    expect(tp->ops->login(tp, peer_mac, "D4Peer", "TEST00004") == NK_NET_OK &&
+           tp->ops->connect(tp, grp) == NK_NET_OK,
+           "d4: peer logged into D4GRP01");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '4'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d4: guest init");
+    expect(adh(ADH_NID_CREATE, adh_name(0, "D4GRP01"), 0u, 0u) == 0u, "d4: guest Create");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "d4: AdhocInit");
+
+    /* Scenario 2: self-connect to unlistened local port succeeds in PtpOpen, refuses in PtpConnect. */
+    const int32_t self_ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                    ADH_P2_SELF_MAC, 0u, ADH_P2_SELF_MAC, 0x4299u,
+                                                    0x1000u, 100000u, 3u, 0u);
+    char msg[160];
+    snprintf(msg, sizeof(msg), "d4: PtpOpen targeting self without listener returns valid ID (got %d)", self_ptp);
+    expect(self_ptp > 0, msg);
+    if (self_ptp > 0) {
+        const uint32_t sc = adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)self_ptp, 0u, 0u);
+        snprintf(msg, sizeof(msg),
+                 "d4: PtpConnect targeting self without listener returns CONNECTION_REFUSED (0x%08x)", sc);
+        expect(sc == 0x80410718u, msg);
+        (void)adh(0x157e6225u /* PtpClose */, (uint32_t)self_ptp, 0u, 0u);
+    }
+
+    /* Scenario 1: PtpOpen before peer listens gets relay close, then peer listens, then PtpConnect retries. */
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
+    const int32_t cli_ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x4200u, ADH_P2_PEER_MAC, 0x4201u,
+                                                   0x1000u, 100000u, 3u, 0u);
+    expect(cli_ptp > 0, "d4: PtpOpen before peer listens succeeds cleanly");
+    for (int w = 0; w < 200 && s_d4_srv->closed_unmatched_ptp_connects == 0; w++) {
+        cpu->r[4] = 2000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+        tp->ops->pump(tp);
+        if (s_d4_srv->closed_unmatched_ptp_connects == 0) {
+#ifdef _WIN32
+            Sleep(1u);
+#else
+            usleep(1000);
+#endif
+        }
+    }
+    /* Pump HLE via GetPtpStat so early refusal reaches the client handle before PtpConnect. */
+    for (int w = 0; w < 10; w++) {
+        MEM_W32(ADH_P2_LEN, 0u);
+        (void)adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, 0u, 0u);
+    }
+
+    const int peer_lsn = tp->ops->ptp_listen(tp, 0x4201u, 4);
+    expect(peer_lsn >= 0, "d4: peer starts listening on 0x4201");
+    for (int w = 0; w < 40; w++) {
+        tp->ops->pump(tp);
+        cpu->r[4] = 1000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        usleep(1000);
+#endif
+    }
+
+    /* Run blocking PtpConnect on a guest worker while main pumps the peer listener/accept. */
+    s_d4_ptp_id = cli_ptp;
+    s_d4_conn_rc = 0xdeadbeefu;
+    s_d4_conn_done = 0;
+    MEM_W8(D4_WORKER_NAME, 'd'); MEM_W8(D4_WORKER_NAME + 1u, '4'); MEM_W8(D4_WORKER_NAME + 2u, 0u);
+    sr_test_register_guest_fn(D4_WORKER_ENTRY, d4_worker_connect_fn);
+    const uint32_t th = adh_call_full(0x446d8de6u /* sceKernelCreateThread */, cpu->r[29],
+                                      D4_WORKER_NAME, D4_WORKER_ENTRY, 0x20u, 0x2000u, 0u, 0u, 0u, 0u);
+    expect(th > 0u && th < 0x80000000u, "d4: connect worker created");
+    expect(adh_call_full(0xf475845du /* sceKernelStartThread */, cpu->r[29],
+                         th, 0u, 0u, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "d4: connect worker started");
+    int accepted = NK_NET_AGAIN;
+    for (int w = 0; w < 400 && (!s_d4_conn_done || accepted < 0); w++) {
+        tp->ops->pump(tp);
+        if (accepted < 0 && peer_lsn >= 0) accepted = tp->ops->ptp_accept(tp, peer_lsn, NULL, NULL);
+        cpu->r[4] = 2000u;
+        (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+#ifdef _WIN32
+        Sleep(1u);
+#else
+        usleep(1000);
+#endif
+    }
+    snprintf(msg, sizeof(msg),
+             "d4: PtpConnect after early open+listen succeeds (done=%d got 0x%08x)", s_d4_conn_done, s_d4_conn_rc);
+    expect(s_d4_conn_done && s_d4_conn_rc == 0u, msg);
+    expect(accepted >= 0, "d4: peer accepted retried PTP connection");
+
+    if (accepted >= 0) tp->ops->ptp_close(tp, accepted);
+    if (peer_lsn >= 0) tp->ops->ptp_close(tp, peer_lsn);
+    if (cli_ptp > 0) (void)adh(0x157e6225u, (uint32_t)cli_ptp, 0u, 0u);
+    tp->ops->logout(tp);
+    nk_relay_client_destroy(peer_rc);
+    (void)adh(0xa62c6f57u, 0u, 0u, 0u);
+    (void)adh(ADH_NID_TERM, 0u, 0u, 0u);
+    (void)net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u);
+    s_d4_done = 1;
+}
+
+static void test_adhoc_d4_ptp_open_connect_regression(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d4: WSAStartup");
+#endif
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "d4: mini relay started");
+    if (srv.running) {
+        s_d4_srv = &srv;
+        char srv_spec[64];
+        snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                 (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+        s_d4_done = 0;
+        const uint32_t loaded_end = adh_fixture_begin();
+        hle_test_setenv("SR_ADHOC_ENABLED", "1");
+        hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+        hle_net_reset();
+        adh_run(ADH_P2_MAIN, d4_main_fn);
+        expect(s_d4_done == 1, "d4: PTP open/connect regression finished");
+        hle_net_reset();
+        hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+        hle_test_setenv("SR_ADHOC_SERVER", NULL);
+        hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+        adh_fixture_end(loaded_end);
+        mr_stop(&srv);
+        s_d4_srv = NULL;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
 extern void sr_hle_test_volatile_mem_reset(void);
 static TCB *fixture_thread(uint32_t uid, int state, int priority);
 
@@ -58568,6 +59042,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhoc_online_real_tcp_loopback_e2e();
         test_adhoc_d2_d12_regressions();
         test_adhoc_d1_lifetime_across_term();
+        test_adhoc_d4_ptp_open_connect_regression();
         fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
@@ -58723,6 +59198,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_online_real_tcp_loopback_e2e();
     test_adhoc_d2_d12_regressions();
     test_adhoc_d1_lifetime_across_term();
+    test_adhoc_d4_ptp_open_connect_regression();
     test_unregistered_batch_profiler_refer_null();
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();

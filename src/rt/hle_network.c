@@ -1786,6 +1786,54 @@ static uint32_t ptp_poll_connect_blocking(int id, uint32_t timeout, uint32_t fla
     }
 }
 
+/* PPSSPP RelayTransport::PtpConnect / PtpConnectPoll (Core/HLE/AdhocTransportRelay.cpp:762-789)
+ * and NetAdhocPtp_Connect (Core/HLE/sceNetAdhoc.cpp:1184, 4114-4218): start or retry the client
+ * transport connect attempt; local self-connects without a listener refuse cleanly at Connect. */
+static int adhoc_ptp_start_connect(AdhocSockSlot *sk, uint32_t *out_err) {
+    if (out_err) *out_err = 0u;
+    if (sk->transport_lost) {
+        if (out_err) *out_err = SCE_NET_ADHOC_ERROR_DISCONNECTED;
+        return -1;
+    }
+    uint8_t self_mac[6];
+    if (!adhoc_local_mac(self_mac)) {
+        if (out_err) *out_err = SCE_NET_ERROR_INTERNAL;
+        return -1;
+    }
+    if (is_mac_match(self_mac, sk->paddr) && !adhoc_ptp_port_in_use(sk->pport, 1, NULL, 0u)) {
+        sk->state = ADHOC_PTP_STATE_CLOSED;
+        if (out_err) *out_err = SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
+        return -1;
+    }
+    NkAdhocTransport *t = s_adhoc_active_transport;
+    if (!t || !t->ops || !t->ops->ptp_open) {
+        if (out_err) *out_err = SCE_NET_ERROR_INTERNAL;
+        return -1;
+    }
+    if (sk->transport_handle >= 0 && t->ops->ptp_close) {
+        (void)t->ops->ptp_close(t, sk->transport_handle);
+        sk->transport_handle = -1;
+    }
+    uint8_t target[6];
+    memcpy(target, sk->paddr, 6u);
+    adhoc_fix_mac(target);
+    const int th = t->ops->ptp_open(t, sk->lport, target, sk->pport);
+    if (th == NK_NET_PORT_IN_USE) {
+        sk->state = ADHOC_PTP_STATE_CLOSED;
+        if (out_err) *out_err = SCE_NET_ADHOC_ERROR_PORT_IN_USE;
+        return -1;
+    }
+    if (th < 0) {
+        sk->state = ADHOC_PTP_STATE_CLOSED;
+        if (out_err) *out_err = SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
+        return -1;
+    }
+    sk->transport_handle = th;
+    sk->state = ADHOC_PTP_STATE_SYN_SENT;
+    adhoc_pump_all();
+    return 0;
+}
+
 static uint32_t h_NetAdhocPtpOpen(CpuState *s) {
     if (!adhoc_online_mode()) return hle_adhoc_refuse_offline(s);
     if (!s_netlib.inited) return 0x800201cau;
@@ -1813,35 +1861,31 @@ static uint32_t h_NetAdhocPtpOpen(CpuState *s) {
     if (sport == 0u) return SCE_NET_ADHOC_ERROR_SOCKET_ID_NOT_AVAIL;
     uint8_t self_mac[6];
     if (!adhoc_local_mac(self_mac)) return SCE_NET_ERROR_INTERNAL;
-    if (is_mac_match(self_mac, daddr) && !adhoc_ptp_port_in_use(dport, 1, NULL, 0u))
-        return SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
     int free_idx = -1;
     for (int i = 0; i < ADHOC_MAX_SOCKETS; i++) {
         if (!s_adhoc.slots[i].used) { free_idx = i; break; }
     }
     if (free_idx < 0) return SCE_NET_ADHOC_ERROR_SOCKET_ID_NOT_AVAIL;
-    NkAdhocTransport *t = s_adhoc_active_transport;
-    if (!t || !t->ops || !t->ops->ptp_open) return SCE_NET_ERROR_INTERNAL;
-    uint8_t target[6];
-    memcpy(target, daddr, 6u);
-    adhoc_fix_mac(target);
-    const int th = t->ops->ptp_open(t, sport, target, dport);
-    if (th == NK_NET_PORT_IN_USE) return SCE_NET_ADHOC_ERROR_PORT_IN_USE;
-    if (th < 0) return SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
     AdhocSockSlot *sk = &s_adhoc.slots[free_idx];
     memset(sk, 0, sizeof(*sk));
     sk->used = 1;
     sk->gen = ++s_adhoc.next_sock_gen;
     sk->type = ADHOC_SOCK_PTP;
-    sk->transport_handle = th;
-    sk->state = ADHOC_PTP_STATE_SYN_SENT;
+    sk->transport_handle = -1;
+    sk->state = ADHOC_PTP_STATE_CLOSED;
     sk->bufsize = bufsize > 0 ? (uint32_t)bufsize : PSP_ADHOC_PDP_MFS;
     memcpy(sk->laddr, self_mac, 6u);
     sk->lport = sport;
     memcpy(sk->paddr, daddr, 6u);
     sk->pport = dport;
     sk->is_client = 1;
-    adhoc_pump_all();
+    uint32_t start_err = 0u;
+    (void)adhoc_ptp_start_connect(sk, &start_err);
+    if (start_err == SCE_NET_ADHOC_ERROR_PORT_IN_USE || start_err == SCE_NET_ERROR_INTERNAL) {
+        memset(sk, 0, sizeof(*sk));
+        sk->transport_handle = -1;
+        return start_err;
+    }
     return (uint32_t)(free_idx + 1);
 }
 
@@ -1853,12 +1897,21 @@ static uint32_t h_NetAdhocPtpConnect(CpuState *s) {
     if (flag & ~ADHOC_F_NONBLOCK) return SCE_NET_ADHOC_ERROR_INVALID_ARG;
     AdhocSockSlot *sk = adhoc_sock_get(id);
     if (!sk || sk->type != ADHOC_SOCK_PTP) return SCE_NET_ADHOC_ERROR_INVALID_SOCKET_ID;
+    if (!sk->transport_lost && sk->state == ADHOC_PTP_STATE_SYN_SENT) adhoc_pump_all();
+    if (sk->state == ADHOC_PTP_STATE_ESTABLISHED) return 0u;
     if (sk->flags & ADHOC_F_ALERTCONNECT) {
         sk->alerted_flags |= ADHOC_F_ALERTCONNECT;
         return SCE_NET_ADHOC_ERROR_SOCKET_ALERTED;
     }
-    if (sk->state == ADHOC_PTP_STATE_ESTABLISHED) return 0u;
-    if (sk->state != ADHOC_PTP_STATE_SYN_SENT) return SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
+    if (sk->transport_lost) return SCE_NET_ADHOC_ERROR_DISCONNECTED;
+    if (sk->state == ADHOC_PTP_STATE_LISTEN || !sk->is_client)
+        return SCE_NET_ADHOC_ERROR_NOT_OPENED;
+    if (sk->state == ADHOC_PTP_STATE_CLOSED) {
+        uint32_t start_err = 0u;
+        if (adhoc_ptp_start_connect(sk, &start_err) < 0) return start_err;
+        if (sk->state == ADHOC_PTP_STATE_ESTABLISHED) return 0u;
+        if (sk->state == ADHOC_PTP_STATE_CLOSED) return SCE_NET_ADHOC_ERROR_CONNECTION_REFUSED;
+    }
     return ptp_poll_connect_blocking(id, timeout, flag);
 }
 
