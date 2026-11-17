@@ -14702,6 +14702,7 @@ class HleUtilityAttendedProbeTests(unittest.TestCase):
                 self.assertEqual(row["case_ids"], [f"{kind}-*"])
                 self.assertEqual(row["prx"], f"{campaign.replace('-', '_')}.prx")
                 self.assertEqual(row["issues"], [1386])
+                self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_measure.c")
                 self.assertTrue(row["risk"].startswith("ATTENDED, POWER RISK: needs a person at "
                                                        "the console to dismiss the"))
                 for term in ("Circle or Cross, whichever the dialog shows",
