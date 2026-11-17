@@ -139,6 +139,12 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
         recipes=("$(PLAYER_UI_TEST_EXE)",),
         defines=("NK_PLAYER_UI_REGRESSION_TEST",),
     ),
+    # The RA bridge uses pinned player-only rcheevos headers. Those include roots come from
+    # the player recipe, not the generic native-core include set.
+    "src/core/nk_achievements.c": StrictUnit(
+        recipes=("$(PLAYER_EXE)",),
+        includes=("third_party/rcheevos/include", "third_party/rcheevos/src"),
+    ),
     "tests/native/atrac3p_bridge_selftest.c": StrictUnit(
         recipes=("atrac3p-bridge-selftest",),
         includes=("tests/native",),

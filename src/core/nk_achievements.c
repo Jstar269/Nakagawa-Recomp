@@ -6,11 +6,11 @@
 #include "nk_achievements.h"
 
 #include "nk_iso.h"
-#include "../../third_party/rcheevos/include/rc_client.h"
-#include "../../third_party/rcheevos/include/rc_consoles.h"
-#include "../../third_party/rcheevos/include/rc_api_request.h"
-#include "../../third_party/rcheevos/include/rc_api_runtime.h"
-#include "../../third_party/rcheevos/src/rhash/md5.h"
+#include "rc_client.h"
+#include "rc_consoles.h"
+#include "rc_api_request.h"
+#include "rc_api_runtime.h"
+#include "rhash/md5.h"
 
 #include <stdio.h>
 #include <stdlib.h>
