@@ -170,7 +170,7 @@ struct NkCheatSet {
     size_t count;
     size_t cap;
     uint32_t other_game;
-    char notes[NK_CHEATS_MAX_NOTES][120];
+    char notes[NK_CHEATS_MAX_NOTES][144];   /* "line <n>: " and the longest note text, whole */
     uint32_t notes_kept;
     uint32_t notes_total;
     UndoRecord *undo;

@@ -2760,8 +2760,10 @@ int      sr_thread_has_pending_callbacks(uint32_t thread_uid);
 int      sr_thread_dispatch_callbacks(void);
 int      sr_vblank_dispatch_registered(void);
 void     sr_vblank_tick(void);
-/* The buttons of the pad state latched at the last VBLANK, which every sample the guest reads
- * until the next one carries (hle_input.c). */
+/* The buttons of the newest pad sample (hle_input.c): the state latched at the last VBLANK,
+ * which every sample the guest reads until the next one carries, unless late pad sampling
+ * (ace.h, pad=late) has refreshed that sample since (ctrl_refresh_newest). The cheats read it at
+ * the VBLANK itself, right after the latch (cheats.h). */
 uint32_t sr_ctrl_live_buttons(void);
 /* The guest VBLANK count (hle.c) and the host audio backend's statistics dump. */
 uint32_t sr_audio_vbl(void);

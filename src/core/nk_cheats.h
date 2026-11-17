@@ -44,14 +44,19 @@
  * The file
  *   _S <disc ID>     the lines that follow are for this disc (hyphens and case do not count)
  *   _G <name>        the game's name; not read
- *   _C0 <name>       a cheat that is off; _C1 to _C9 <name>, one that is on
+ *   _C0 <name>       a cheat that is off; _C1 to _C9 <name>, one that is on. A _C line with
+ *                    no name starts no cheat, as in PPSSPP (which reads a _ line only from
+ *                    five characters up): it is noted, and the code lines after it stay with
+ *                    the cheat before it
  *   _L 0xAAAAAAAA 0xVVVVVVVV   one code line of the cheat above it
  *   // ... or # ...  a comment, also after a code line's two values
  * A file with no _S line is for whatever disc it is read for. Cheats under another disc's _S
  * line are not for this run: they are counted, and nothing else of them is kept.
  *
- * Code forms that run. aaaaaaa is an offset from 0x08800000; every address a code reads or
- * writes must lie whole inside user memory (NkCheatConfig), checked before anything is written.
+ * Code forms that run. aaaaaaa is an offset from 0x08800000, a PSP address; every address a
+ * code reads or writes must lie whole inside user memory (NkCheatConfig), checked before
+ * anything is written. In a run whose image is not where a PSP has it, the address must lie
+ * whole inside the PSP's image and is moved with the image (NkCheatConfig says how).
  *   0x0aaaaaaa 0x000000vv                   write 8 bits
  *   0x1aaaaaaa 0x0000vvvv                   write 16 bits
  *   0x2aaaaaaa 0xvvvvvvvv                   write 32 bits
@@ -85,13 +90,19 @@
  * (PSP Action Replay codes); the 0x6 lines 0x1ooooooo (copy) and 0x9ooooooo (multi-address) and
  * a 0x6 with a base offset; any form above with bits set where it shows zeros; a count of 0; a
  * condition that guards no line, runs past the end of its cheat or ends inside a multi-line
- * code; an address outside user memory; a cheat that could write more than
- * NK_CHEATS_MAX_FRAME_BYTES in one frame; and a write into code the recompiler translated
+ * code; an address outside user memory, or outside the PSP's image in a run that has the
+ * image somewhere else; a cheat that could write more than NK_CHEATS_MAX_FRAME_BYTES in one
+ * frame, or that would bring what the file's cheats do in one frame past the frame limits
+ * below; a code line past NK_CHEATS_MAX_LINES; and a write into code the recompiler translated
  * (NkCheatHost.is_code), because a recompiled game does not read its code again at run time.
+ * Cheats past NK_CHEATS_MAX_CHEATS are not read: they are counted (NkCheatSummary.not_kept) and
+ * the first is noted.
  *
  * A cheat applies completely on a frame or not at all. A pointer that leads outside user memory
  * on some frame, or into translated code, holds its cheat for that frame: what the cheat had
- * already written on that frame is put back, and the reason is reported once per cause. */
+ * already written on that frame is put back. Each cause is reported once for each cheat, and
+ * the first time the cheat applies again once; a cheat that is held and released frame after
+ * frame says no more than that, and nk_cheats_report_holds gives the counts. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -109,9 +120,13 @@ extern "C" {
 /* A cheat file larger than this is refused whole. A full cheat.db is about 10 MiB. */
 #define NK_CHEATS_MAX_FILE_BYTES (64u * 1024u * 1024u)
 /* What the reader keeps for one disc: cheats (_C lines) and code lines (_L lines). More are left
- * out by name. A cheat record is about 420 bytes and a code line at most 60 once it is checked,
- * so the two bounds hold what any file can make the reader allocate to about 18 MiB, where the
- * file cap alone allowed several GiB. The largest list in a cheat.db is a few hundred cheats. */
+ * out by name. A cheat record is about 430 bytes. A code line is 12 bytes as read, 72 while its
+ * cheat is being checked and 56 once it is checked, and an off cheat keeps its checked codes like
+ * one that is on. So the two bounds hold what any file can make the reader allocate, beside the
+ * file's own text, to about 20 MiB at the peak of a load and about 17 MiB after it (measured:
+ * 19.7 MiB with every line in one cheat, 16.9 MiB kept with the lines spread over off cheats
+ * and one cheat at the frame limits), where the file cap alone allowed several GiB. The largest
+ * list in a cheat.db is a few hundred cheats. */
 #define NK_CHEATS_MAX_CHEATS 4096u
 #define NK_CHEATS_MAX_LINES 262144u
 /* What the cheats that are on may do in one frame, all of them together: separate writes, bytes

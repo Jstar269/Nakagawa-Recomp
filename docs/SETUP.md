@@ -1201,7 +1201,8 @@ no `_S` line is for the game it is read for, and cheats under another disc's `_S
 and left out). `_G` is the game's name and is not read. `_C0` starts a cheat that is off and
 `_C1` one that is on; each `_L` line under it is one code line of two hexadecimal words. `//`
 and `#` start a comment. To turn a cheat on or off, change its `_C0` or `_C1` and start the
-game again.
+game again. A `_C0` or `_C1` line with no name after it starts no cheat, as in PPSSPP: the log
+notes it, and the `_L` lines after it stay with the cheat before it.
 
 **While a cheat is on** the game's window shows a marker at its top left, `Cheats on: 2`, or
 `Cheats on: 2 (1 refused)` when the file also turned on a cheat that cannot run. The marker cannot
@@ -1209,13 +1210,44 @@ be hidden. It is drawn on the window only, not into captures, recordings or the 
 The run's log says what the file held and names every refusal on lines that start `CHEATS:`.
 
 **When they apply.** The cheats that are on are applied once per VBLANK, 59.94 times a second,
-after that VBLANK's interrupt handlers and the pad sample the game reads next. A button condition
-reads that same sample. A cheat applies whole on a VBLANK or not at all: when a pointer it follows
-leads outside user memory or into the game's code on some VBLANK, what it had already written on
-that VBLANK is put back, the cheat is held until the pointer is usable again, and the log says so
-once.
+after that VBLANK's interrupt handlers and its pad sample. A button condition reads that sample,
+which is the one the game reads next. The one exception is an Ace run with late pad sampling
+(`pad=late`), which may refresh the sample after the VBLANK and before the game reads it: the
+condition was then tested on the earlier state, one frame's difference.
 
-**Code forms that run.** `aaaaaaa` is an offset from `0x08800000`. Comparisons are unsigned.
+PPSSPP applies a cheat file on a timer instead, every 77 ms of emulated time unless you change its
+refresh interval, about 13 times a second. A code that sets a value behaves the same at either
+rate. A code that changes a value every time it runs (the `0x3` add and subtract forms, a `0x7`
+XOR) changes it about 4.6 times as often here as in PPSSPP at that default, so a cheat tuned to
+PPSSPP's timer counts faster here. There is no setting for the rate.
+
+A cheat applies whole on a VBLANK or not at all: when a pointer it follows leads outside user
+memory or into the game's code on some VBLANK, what it had already written on that VBLANK is put
+back and the cheat is held until the pointer is usable again. The log says so once for each
+cause, and once when the cheat first applies again; a cheat that is held and released again and
+again adds no more lines, and the end of the run gives how many VBLANKs each such cheat was held
+and applied on.
+
+**Where an address is.** A code names a PSP address: `aaaaaaa` in the table below is an offset
+from `0x08800000`, and a game's own image starts at `0x08804000` on a PSP. For almost every game
+the package's memory is laid out the same way and an address is used as written. A few title
+profiles load the game's image at address 0 instead (a title manifest whose executable has
+`"base": 0`; Hot Shots Tennis, `UCUS98701`, is the one in this repository). There the image is
+somewhere else and so are the heap and the stacks, so:
+
+- an address inside the game's image (the data and variables the executable itself holds) is
+  moved with the image and the cheat works; a write into the image's code is refused there as
+  everywhere;
+- a cheat with an address anywhere else (memory the game allocates while it runs) is refused by
+  name, because where that memory is in such a run is not known and a cheat is never applied to a
+  guess.
+
+The log says so at the start, on a line that begins `CHEATS: this game's image is at`. If the game
+starts another program (a launcher that loads the real game, for example), cheats stop from there
+on, by name: the file was read for the first program's memory.
+
+**Code forms that run.** `aaaaaaa` is an offset from `0x08800000`
+([where an address is](#cheats-cwcheat-files), above). Comparisons are unsigned.
 
 | First word, second word (and a following line) | What it does |
 | --- | --- |
@@ -1249,19 +1281,37 @@ The other cheats in the file still run.
 | The `0x6` pointer lines `0x1ooooooo` (copy) and `0x9ooooooo` (several addresses), and a `0x6` with a base offset | not supported |
 | A condition that guards no line, runs past the end of its cheat or ends inside a two-line code | half a code would run |
 | An address outside user memory (`0x08800000` up to `0x0C000000`), or a span that leaves it | cheats write the game's memory, never the kernel's, VRAM or anything past the end |
+| In a game whose image is loaded at address 0: an address outside the game's image | where that memory is in such a run is not known ([where an address is](#cheats-cwcheat-files)) |
 | A cheat that could write more than 1 MiB in one VBLANK | it cannot be put back if it has to be held |
+| A cheat that does not fit what the file's cheats may do in one VBLANK together: 16,384 writes, 1 MiB written and 16,384 codes, handed out in file order | the cheats run between two frames of the game, so their time is the game's; a file that asked for more used to stall the game without a word. Turn another cheat off to use the refused one |
+| Code lines past the 262,144 the reader keeps for one disc; cheats past the first 4,096 for one disc are not read and are counted | a file cannot make the game start with gigabytes of cheat records (the bound is about 20 MiB at the peak of reading a file and about 17 MiB after it, beside the file's own text; a file over 64 MiB is refused whole) |
 | A write that lands in the game's code (a "code write") | a recompiled game runs the code translated when its package was built and does not read its code from memory again, so the write could not change what the game does |
 
 The last row is the difference from an emulator that matters most: cheats that patch instructions
 (many "60 FPS" and "widescreen" codes) cannot work here, and are refused instead of doing nothing
 quietly. Cheats that write values (health, money, items, timers the game stores as data) work.
 
-**Runs that refuse every cheat**, each with a `CHEATS:` line saying so: a run that records or
-replays (`SR_RECORD`, `SR_REPLAY`), because a recording has to replay without a cheat file; and
-a run in the GDI window (`SR_VIDEO=gdi`, or when Vulkan does not start), because that window
-cannot show the marker. The player's acceptance checkpoint (`--headless-accept-presented-frames`)
-starts its game without cheats. RetroAchievements has no hardcore mode here yet; when it does,
-cheats will be refused while it is on.
+**Runs that refuse every cheat**, each with a `CHEATS:` line saying so:
+
+- a run that records or replays (`SR_RECORD`, `SR_REPLAY`), because a recording has to replay
+  without a cheat file;
+- an acceptance checkpoint (`SR_HEADLESS_ACCEPT_PRESENTED_FRAMES`), which is evidence of the game
+  as it is. The player's `--headless-accept-presented-frames` starts its game without cheats, the
+  launcher refuses to start one with them, and a runtime started by hand refuses them itself;
+- a run in the GDI window (`SR_VIDEO=gdi`, or when Vulkan does not start), because that window
+  cannot show the marker; and a run whose window stops drawing the marker later, from the next
+  VBLANK on;
+- a run with no game image placed by the host loader, and the rest of a run whose game started
+  another program.
+
+A package carries the runtime it was built with. One built before cheats existed would ignore the
+switch without a word, so the launcher does not start it with cheats on: it says that the package
+was built before cheats existed, and to rebuild the package or turn cheats off.
+
+RetroAchievements has no hardcore mode here yet; when it does, cheats will be refused while it is
+on.
+
+The start of a run names at most 32 refused cheats one by one and counts the rest on one line.
 
 The meaning of each code form is PPSSPP's: the reader and applier are translated from its CWCheat
 engine, the public reference for the format (lineage in
