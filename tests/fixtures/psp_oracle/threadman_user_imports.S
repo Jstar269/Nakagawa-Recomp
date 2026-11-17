@@ -19,7 +19,9 @@
    list, add its NID here.
 
    Every NID was read from the PSPSDK libpspuser.a `.rodata.sceNid` members and
-   matches src/rt/nid_names.h. */
+   matches src/rt/nid_names.h, except the four TLS pool calls at the end: PSPSDK
+   ships no stub for them, so their NIDs are the ones src/rt/nid_names.h carries
+   (each is the first four bytes of the SHA-1 of the function name). */
 
 #include "pspimport.s"
 
@@ -120,3 +122,7 @@
     IMPORT_FUNC "ThreadManForUser", 0x912354A7, sceKernelRotateThreadReadyQueue
     IMPORT_FUNC "ThreadManForUser", 0xE1619D7C, sceKernelSysClock2USecWide
     IMPORT_FUNC "ThreadManForUser", 0x94416130, sceKernelGetThreadmanIdList
+    IMPORT_FUNC "ThreadManForUser", 0x8DAFF657, sceKernelCreateTlspl
+    IMPORT_FUNC "ThreadManForUser", 0x32BF938E, sceKernelDeleteTlspl
+    IMPORT_FUNC "ThreadManForUser", 0x4A719FB2, sceKernelFreeTlspl
+    IMPORT_FUNC "ThreadManForUser", 0x721067F3, sceKernelReferTlsplStatus
