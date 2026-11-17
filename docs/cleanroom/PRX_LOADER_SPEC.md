@@ -1,4 +1,4 @@
-# Clean-room behaviour specification — runtime PSP module (PRX) loader
+# Behaviour specification — runtime PSP module (PRX) loader
 
 Status: spec — no code in this document. Written under the campaign protocol
 (`../INDEPENDENCE_CAMPAIGN.md` §5) as a **spec-session** output for rewrite unit
@@ -288,7 +288,7 @@ Decryption/decompression; GP-relative relocation; firmware version checks; modul
 attribute enforcement (kernel/user); the firmware's own memory placement policy
 (the base is an input); resolving imports.
 
-## 5. Clean-room constraints for this item
+## 5. Independence constraints
 
 - The implementation session receives only the §0 allow-list. It must not read
   `tools/prxload.py`, `tools/imports.py`, any other loader in history, or the public

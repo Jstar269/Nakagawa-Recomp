@@ -172,14 +172,14 @@ history lives in git, so nothing is deleted.
   it is implemented unless marked. Since the 2026-10-20 re-scope, working inherited
   code is no longer rewritten only to make it original.
 - [`cleanroom/SCHED_SPEC.md`](cleanroom/SCHED_SPEC.md) specifies scheduler
-  behaviour. It was written for a clean-room rewrite that is no longer planned
+  behaviour. It was written for a rewrite that is no longer planned
   ([#340](https://github.com/Jstar269/nakagawa-recomp/issues/340) was closed as not planned); it stays as a behaviour reference, and the
   derived scheduler is the shipped code.
 - [`cleanroom/PRX_LOADER_SPEC.md`](cleanroom/PRX_LOADER_SPEC.md) specifies the
-  runtime PSP module (PRX) loader. It was written for clean-room rewrite unit G3,
+  runtime PSP module (PRX) loader. It was written for rewrite unit G3,
   which the 2026-10-20 re-scope no longer plans; it stays as a behaviour reference.
 - [`cleanroom/PGF_SPEC.md`](cleanroom/PGF_SPEC.md) specifies the runtime PSP
-  PGF reader for clean-room rewrite unit G4. The public reader built from it
+  PGF reader for rewrite unit G4. The public reader built from it
   landed as `src/rt/pgf_public.c` (PR #474) and is available for supported inputs,
   including composite row-order-3 glyphs and the supported revision and
   shadow-map variants ([#521](https://github.com/Jstar269/nakagawa-recomp/issues/521));
@@ -272,9 +272,9 @@ Every substantial document carries one status.
 | `provenance/HST_PUBLIC_CENSUS.md` | CURRENT | Title-specific vs generic/synthetic classification |
 | `provenance/INDEPENDENCE_MODEL.md` | CURRENT | Independence model |
 | `INDEPENDENCE_CAMPAIGN.md` | DRAFT | Independence route plan; read for intent, never cite as built state |
-| `cleanroom/SCHED_SPEC.md` | DRAFT | Scheduler clean-room behaviour spec; read for intent, never cite as shipped behaviour |
-| `cleanroom/PRX_LOADER_SPEC.md` | DRAFT | Runtime PRX loader clean-room behaviour spec (G3); read for intent, never cite as shipped behaviour |
-| `cleanroom/PGF_SPEC.md` | DRAFT | Runtime PGF reader clean-room behaviour spec (G4); read for intent, never cite as shipped behaviour |
+| `cleanroom/SCHED_SPEC.md` | DRAFT | Scheduler behaviour spec; read for intent, never cite as shipped behaviour |
+| `cleanroom/PRX_LOADER_SPEC.md` | DRAFT | Runtime PRX loader behaviour spec (G3); read for intent, never cite as shipped behaviour |
+| `cleanroom/PGF_SPEC.md` | DRAFT | Runtime PGF reader behaviour spec (G4); read for intent, never cite as shipped behaviour |
 | `cleanroom/PGF_CONVERTER_SPEC.md` | CURRENT | Deterministic TTF to PGF converter behaviour spec, refusal catalogue, and independence/provenance record (#313) |
 | `provenance/GUEST_INTERP_ATTESTATION.md` | CURRENT | Live attestation finding |
 | `provenance/FONT_ORIGINS.md` | CURRENT | PGF replacement-font origin evidence and route decision |
