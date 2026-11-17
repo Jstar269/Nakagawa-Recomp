@@ -70,7 +70,9 @@ _SPECIAL_WRITES_RD = frozenset(
         0x09,                    # jalr (link register is rd)
         0x0A, 0x0B,              # movz, movn
         0x10, 0x12,              # mfhi, mflo
+        0x16, 0x17,              # clz, clo
         0x2A, 0x2B,              # slt, sltu
+        0x2C, 0x2D,              # max, min
     }
     | set(range(0x20, 0x28))     # add, addu, sub, subu, and, or, xor, nor
 )
@@ -80,10 +82,10 @@ _SPECIAL_WRITES_RD = frozenset(
 #: delta set as if the walk had finished.
 DEFAULT_STEP_LIMIT = 40000
 
-#: How far back the shared-tail search looks for additional structural owners.
-#: Bounded because it traces one function per candidate.  The declared owner is
-#: checked exactly by :func:`owner_covers`, which uses no window, so a window
-#: miss can only weaken the multiple-owner search -- never the role assertion.
+#: How far back :func:`find_frame_owners` looks for structural owners when called
+#: with a bounded window.  Production direct-``j`` and direct-branch audits use
+#: :func:`index_frame_owners` over the full start set instead, so an owner
+#: outside the window or at a higher address is never missed during promotion.
 OWNER_SEARCH_WINDOW = 0x8000
 
 
@@ -119,17 +121,25 @@ def sp_effect(word):
     if word is None:
         return 0, True
     op, fn = word >> 26, word & 0x3F
-    if op == 0x09 and ((word >> 16) & 0x1F) == SP:  # addiu $sp, rs, imm
-        if ((word >> 21) & 0x1F) == SP:
+    rs, rt, rd = (word >> 21) & 0x1F, (word >> 16) & 0x1F, (word >> 11) & 0x1F
+    if op == 0x09 and rt == SP:  # addiu $sp, rs, imm
+        if rs == SP:
             imm = (word & 0xFFFF) - (0x10000 if word & 0x8000 else 0)
             return imm, False
         return 0, True
-    if op == 0 and ((word >> 11) & 0x1F) == SP and fn in _SPECIAL_WRITES_RD:
+    if op == 0 and rd == SP and fn in _SPECIAL_WRITES_RD:
         return 0, True
-    if op in (0x08, 0x0C, 0x0D, 0x0E, 0x0F) and ((word >> 16) & 0x1F) == SP:
-        return 0, True  # addi/andi/ori/xori/lui writing $sp
-    if op in (0x20, 0x21, 0x23, 0x24, 0x25) and ((word >> 16) & 0x1F) == SP:
-        return 0, True  # a load into $sp
+    if (0x08 <= op <= 0x0F or 0x20 <= op <= 0x26 or op in (0x30, 0x38)) and rt == SP:
+        return 0, True  # ALU immediates, loads, lwl/lwr, ll/sc writing $sp
+    if op == 0x11 and rs in (0x00, 0x02) and rt == SP:
+        return 0, True  # mfc1, cfc1 writing $sp
+    if op == 0x12 and rs in (0x03, 0x07) and rt == SP:
+        return 0, True  # mfv, mfvc writing $sp
+    if op == 0x1F:
+        if fn in (0x00, 0x04) and rt == SP:
+            return 0, True  # ext, ins writing $sp
+        if fn == 0x20 and rd == SP:
+            return 0, True  # seb, seh, wsbh, bitrev writing $sp
     return 0, False
 
 
@@ -279,7 +289,21 @@ def profile_entry(elf, addr, ranges, limit=DEFAULT_STEP_LIMIT):
     terminate a path as :func:`analyze.trace_function` does, so the traversal
     agrees with the extent the analyzer recovers.
     """
-    return _walk_frame(elf, addr, ranges, limit, gated=True)
+    ranges = span_index(ranges)
+    key = (addr, span_key(ranges), limit)
+    cache = getattr(elf, "_frame_profiles", None)
+    if cache is None:
+        cache = {}
+        try:
+            elf._frame_profiles = cache
+        except AttributeError:
+            cache = None
+    if cache is not None and key in cache:
+        return cache[key]
+    profile = _walk_frame(elf, addr, ranges, limit, gated=True)
+    if cache is not None:
+        cache[key] = profile
+    return profile
 
 
 def profile_exact_paths(elf, addr, ranges, limit=DEFAULT_STEP_LIMIT):
@@ -331,6 +355,7 @@ def linked_target_role(elf, target, ranges, limit=DEFAULT_STEP_LIMIT):
     answer is the same in whatever order sites are asked.  Images are immutable
     once loaded, so the role is memoized on the image per target and range set.
     """
+    ranges = span_index(ranges)
     key = (target, span_key(ranges), limit)
     cache = getattr(elf, "_linked_target_roles", None)
     if cache is None:
@@ -387,8 +412,12 @@ def _walk_frame(elf, addr, ranges, limit, gated, exact_paths=False):
             unknown = unknown or unk
             op, fn = word >> 26, word & 0x3F
 
-            slot_step, slot_unknown = sp_effect(read32(elf, pc + 4))
-            if exact_paths and (unk or (slot_unknown and _runs_delay_slot(pc, word)
+            runs_slot = _runs_delay_slot(pc, word)
+            if runs_slot:
+                slot_step, slot_unknown = sp_effect(read32(elf, pc + 4))
+            else:
+                slot_step, slot_unknown = 0, False
+            if exact_paths and (unk or (slot_unknown and runs_slot
                                         and not branch_likely(word))):
                 unknown = True
                 break
@@ -415,8 +444,6 @@ def _walk_frame(elf, addr, ranges, limit, gated, exact_paths=False):
                 else:
                     tails.add(delta)
                 break
-            if op == 0 and fn == 0x0C:  # syscall: an HLE boundary, not a return
-                break
             if op == 1 and linked_branch_target(pc, word) is not None and (
                 not gated or linked_branch_is_call(elf, pc, word, ranges, limit)
             ):
@@ -438,8 +465,10 @@ def _walk_frame(elf, addr, ranges, limit, gated, exact_paths=False):
                 unknown = unknown or slot_unknown
                 if in_ranges(target, ranges) and not (is_likely and drop_taken):
                     stack.append((target, delta + slot_step))
-                if op == 4 and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) == 0:
-                    break  # unconditional `b`: no fall-through path
+                if (op in (4, 20) and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) == 0) or (
+                    op == 1 and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) in (1, 3)
+                ):
+                    break  # unconditional `b` / `beql $0,$0` / `bgez(l) $0`: no fall-through path
                 # A branch-likely nullifies its delay slot when not taken.
                 delta += 0 if is_likely else slot_step
                 pc += 8
@@ -648,6 +677,7 @@ def audit_direct_j_candidates(elf, starts, ranges, limit=DEFAULT_STEP_LIMIT):
         addr for addr in starts if in_ranges(addr, ranges)
     )
     edges = direct_j_edges(elf, ranges, callable_starts)
+    evidence = code_pointer_evidence(elf, ranges)
     profile_cache = {}
 
     def profile(addr):
@@ -655,7 +685,9 @@ def audit_direct_j_candidates(elf, starts, ranges, limit=DEFAULT_STEP_LIMIT):
             profile_cache[addr] = profile_entry(elf, addr, ranges, limit=limit)
         return profile_cache[addr]
 
-    records = []
+    settled = []
+    pending = []
+    interest = set()
     for addr in sorted(edges):
         target_profile = profile(addr)
         role = classify(target_profile)
@@ -663,7 +695,7 @@ def audit_direct_j_candidates(elf, starts, ranges, limit=DEFAULT_STEP_LIMIT):
             continue
         sources = edges[addr]
         if target_profile.has_prologue:
-            records.append(
+            settled.append(
                 DirectJumpCandidate(
                     addr=addr,
                     sources=sources,
@@ -678,23 +710,76 @@ def audit_direct_j_candidates(elf, starts, ranges, limit=DEFAULT_STEP_LIMIT):
                 )
             )
             continue
+
+        call_evidence = []
+        if addr in evidence["jal"]:
+            call_evidence.append("direct-jal-target")
+        if addr in evidence["branch-link"]:
+            call_evidence.append("linking-branch-target")
+        if call_evidence:
+            settled.append(
+                DirectJumpCandidate(
+                    addr=addr,
+                    sources=sources,
+                    role=role,
+                    classification=AMBIGUOUS,
+                    owners=(),
+                    continuation_delta=target_profile.continuation_delta,
+                    reason=(
+                        "call evidence (" + ", ".join(call_evidence) + ") contradicts the "
+                        "continuation stack signature; the address is entered as a fresh "
+                        "call on at least one path"
+                    ),
+                )
+            )
+            continue
+
+        taken_evidence = []
+        if addr in evidence["immediate"]:
+            taken_evidence.append("address-taken-constant")
+        if addr in evidence["data"]:
+            taken_evidence.append("code-pointer-in-data")
+        if taken_evidence:
+            settled.append(
+                DirectJumpCandidate(
+                    addr=addr,
+                    sources=sources,
+                    role=role,
+                    classification=AMBIGUOUS,
+                    owners=(),
+                    continuation_delta=target_profile.continuation_delta,
+                    reason=(
+                        "address-taken evidence (" + ", ".join(taken_evidence) + "); the "
+                        "incoming contract of an indirect dispatch is not visible to this "
+                        "analysis"
+                    ),
+                )
+            )
+            continue
+
+        pending.append((addr, sources, role, target_profile))
+        interest.add(addr)
+        interest.update(sources)
+
+    owner_index = (
+        index_frame_owners(elf, callable_starts, ranges, interest, limit=limit)
+        if interest else {}
+    )
+    records = list(settled)
+    for addr, sources, role, target_profile in pending:
         cycle_sources = tuple(
             source for source in sources if source in target_profile.depths
         )
 
-        # ``find_frame_owners`` is intentionally a broad structural search;
-        # tighten it here by requiring that every direct source belongs to the
-        # same balanced callable CFG.  A target reached only through another
-        # path is not evidence for this direct-j slice.
-        owners = find_frame_owners(
-            elf, addr, ranges, callable_starts, limit=limit
-        )
+        # Resolve owners across the full start set via index_frame_owners, and
+        # tighten here by requiring that every direct source belongs to the same
+        # balanced callable CFG at one live depth.
+        owners = owner_index.get(addr, {})
         proven = []
-        for owner, _depth in sorted(owners.items()):
-            owner_profile = profile(owner)
-            if owner_profile.depth_at(addr) != target_profile.continuation_delta:
+        for owner, depth in sorted(owners.items()):
+            if depth is None or depth != target_profile.continuation_delta:
                 continue
-            if not all(source in owner_profile.depths for source in sources):
+            if not all(owner_index.get(source, {}).get(owner) is not None for source in sources):
                 continue
             proven.append(owner)
 
@@ -738,6 +823,7 @@ def audit_direct_j_candidates(elf, starts, ranges, limit=DEFAULT_STEP_LIMIT):
                 reason=reason,
             )
         )
+    records.sort(key=lambda candidate: candidate.addr)
     return tuple(records)
 
 
@@ -835,13 +921,18 @@ def _fall_in_predecessor(elf, addr, ranges):
 
     Control reaches ``addr`` by fall-through unless the instruction two slots
     back is a hard terminator, in which case ``addr - 4`` is that terminator's
-    delay slot and execution leaves.  Returns ``addr - 4`` when a fall-in exists.
+    delay slot and execution leaves.  When ``addr - 8`` executes ``addr - 4`` as
+    its delay slot (a call or conditional branch), the walker records depths at
+    ``addr - 8`` and steps over ``addr - 4``, so ``addr - 8`` is the recorded
+    predecessor PC.  Otherwise returns ``addr - 4``.
     """
     if not in_ranges(addr - 8, ranges) or not in_ranges(addr - 4, ranges):
         return None
     word = read32(elf, addr - 8)
     if word is None or is_hard_terminator(word):
         return None
+    if _runs_delay_slot(addr - 8, word):
+        return addr - 8
     return addr - 4
 
 

@@ -57,14 +57,17 @@ MANIFEST_SCHEMA = 1
 # What build_manifest() reads: every runtime HLE source, listed in tools/hle_sources.py.
 MANIFEST_SOURCE = "runtime HLE sources (tools/hle_sources.py)"
 
-_REGISTRATION_CALL_RE = re.compile(r"\bsr_hle_register(?:_unsupported)?\s*\(")
+_REGISTRATION_CALL_RE = re.compile(r"\bsr_hle_register(?:_unsupported|_entry)?\s*\(")
 _LITERAL_RE = re.compile(
     r"sr_hle_register\(\s*0x([0-9a-fA-F]{1,8})[uU]?\s*,\s*\"([^\"\\]+)\"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*;"
 )
 _UNSUPPORTED_LITERAL_RE = re.compile(
     r"sr_hle_register_unsupported\(\s*0x([0-9a-fA-F]{1,8})[uU]?\s*,\s*\"([^\"\\]+)\"\s*,\s*0x([0-9a-fA-F]{1,8})[uU]?\s*\)\s*;"
 )
-_DEFINITION_RE = re.compile(r"\bvoid\s+(sr_hle_register(?:_unsupported)?)\(")
+_DEFINITION_RE = re.compile(r"\bvoid\s+(sr_hle_register(?:_unsupported|_entry)?)\(")
+_WRAPPER_ENTRY_CALL_RE = re.compile(
+    r"\bsr_hle_register_entry\(\s*nid\s*,\s*name\s*,\s*(?:fn\s*,\s*0u|h_ControlledUnsupported\s*,\s*error)\s*\)\s*;"
+)
 _SAS_LOOP_RE = re.compile(r"sr_hle_register\(\s*sas_ok\[i\]\s*,\s*\"([^\"]+)\"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*;")
 _SAS_ARRAY_RE = re.compile(r"\bsas_ok\[\]\s*=\s*\{([^}]*)\}\s*;", re.DOTALL)
 _HANDLER_DEF_RE = re.compile(r"\b(?:static\s+)?uint32_t\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*CpuState\s*\*")
@@ -254,7 +257,9 @@ _MECHANICAL_CONTROL_WORDS = frozenset(
 # A single `=` that is not part of `==`, `!=`, `<=`, `>=`, `+=`, `-=`, etc.
 _MECHANICAL_SINGLE_EQ = r"(?<![=!<>+\-*/%&|^])=(?!=)"
 
-_MECHANICAL_RETURN_ZERO_RE = re.compile(r"\breturn\s+(?:\(uint32_t\))?\s*0u?\s*;")
+_MECHANICAL_RETURN_ZERO_RE = re.compile(
+    r"\breturn\s+(?:\(uint32_t\))?\s*(?:0(?:[xX]0+)?[uU]?|SCE_OK)\s*;"
+)
 _MECHANICAL_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _MECHANICAL_HANDLER_DEF_RE = re.compile(
     r"\b(?:static\s+)?uint32_t\s+(h_\w+)\s*\(\s*CpuState\s*\*\s*\w+\s*\)\s*\{"
@@ -451,6 +456,8 @@ def extract_registrations(raw_source: str, sources: list[tuple[str, str]] | None
 
     for m in _DEFINITION_RE.finditer(source):
         accounted.add(m.start(1))
+    for m in _WRAPPER_ENTRY_CALL_RE.finditer(source):
+        accounted.add(m.start())
 
     sas_loops = list(_SAS_LOOP_RE.finditer(source))
     if sas_loops:
@@ -1421,6 +1428,11 @@ def evidence_tier(entry: dict) -> tuple[str, str]:
     reach = entry["registration"]["reachable_from"]
     ex = entry["exercised"]
     if ex["psp_oracle_probes"]:
+        if entry["registration"]["classification"] == "fake_success":
+            return "NOT_EVIDENCE", (
+                "a source-owned PSP probe calls this API on hardware, but the registered "
+                "handler is a generic success stub, so the exercise asserts nothing about the API"
+            )
         return "HARDWARE_MEASURED", "a source-owned PSP probe calls this API on hardware"
     if ex["conformance_cells"] or ex["hle_selftest_dispatch"]:
         if entry["registration"]["classification"] == "fake_success":
@@ -1691,7 +1703,11 @@ def build_evidence_chain(manifest: dict | None = None, imports_path: Path | None
             },
         }
         entry["exercised_stub"] = bool(
-            (entry["exercised"]["conformance_cells"] or entry["exercised"]["hle_selftest_dispatch"])
+            (
+                entry["exercised"]["conformance_cells"]
+                or entry["exercised"]["hle_selftest_dispatch"]
+                or entry["exercised"]["psp_oracle_probes"]
+            )
             and reg["classification"] == "fake_success"
         )
         tier, why = evidence_tier(entry)

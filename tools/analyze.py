@@ -1376,8 +1376,10 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
                 if in_ranges(target, ranges):
                     stack.append(target)
                 covered.add(pc + 4)
-                # Unconditional b (beq $zero,$zero): no fall-through after the delay slot.
-                if op == 4 and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) == 0:
+                # Unconditional b (beq/beql $zero,$zero or bgez/bgezl $zero): no fall-through after the delay slot.
+                if (op in (4, 20) and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) == 0) or (
+                    op == 1 and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) in (1, 3)
+                ):
                     break
                 pc += 8
                 continue
@@ -1387,8 +1389,8 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
 
 def _is_hard_terminator(word):
     # True for instructions after which control never falls through to the next
-    # slot-pair: `j`, any `jr`, unlinked `jalr $zero, $rs`, or the unconditional `b` idiom (beq $0,$0).
-    # `jal`/linked `jalr`/`bal` return, so they are NOT terminators here.
+    # slot-pair: `j`, any `jr`, unlinked `jalr $zero, $rs`, or an unconditional branch idiom
+    # (`beq`/`beql $0,$0`, `bgez`/`bgezl $0`). `jal`/linked `jalr`/`bal` return, so they are NOT terminators here.
     op = word >> 26
     if op == 2:
         return True
@@ -1399,7 +1401,9 @@ def _is_hard_terminator(word):
         if fn == 0x09 and ((word >> 11) & 0x1F) == 0:  # jalr $zero, rs
             return True
         return False
-    if op == 4 and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) == 0:
+    if op in (4, 20) and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) == 0:
+        return True
+    if op == 1 and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) in (1, 3):
         return True
     return False
 
@@ -1618,7 +1622,9 @@ def branch_kind(word):
     op = word >> 26
     if op == 1 and ((word >> 16) & 0x1F) in REGIMM_LINK_RT:
         return BRANCH_LINK
-    if op == 4 and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) == 0:
+    if (op in (4, 20) and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) == 0) or (
+        op == 1 and ((word >> 21) & 0x1F) == 0 and ((word >> 16) & 0x1F) in (1, 3)
+    ):
         return BRANCH_UNCOND
     return BRANCH_COND
 

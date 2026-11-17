@@ -137,6 +137,12 @@ static void init(void) {
             extract_registrations(src)
         self.assertIn("cannot account for", str(ctx.exception))
 
+    def test_direct_register_entry_call_fails_closed(self) -> None:
+        src = SYNTH_SOURCE + '\nstatic void late(void) { sr_hle_register_entry(0x00000090u, "x", h_Alpha, 0u); }\n'
+        with self.assertRaises(ManifestError) as ctx:
+            extract_registrations(src)
+        self.assertIn("cannot account for", str(ctx.exception))
+
     def test_duplicate_nid_fails(self) -> None:
         src = SYNTH_SOURCE.replace('0x00000020, "synthBeta"', '0x00000010, "synthBeta"')
         with self.assertRaises(ManifestError) as ctx:
@@ -1376,6 +1382,17 @@ static uint32_t h_SynthReal(CpuState *s) {
         self.assertIn("h_SynthLogStub", stubs)
         self.assertNotIn("h_SynthReal", stubs)
 
+    def test_hex_zero_return_stub_is_flagged_as_mechanical_stub(self) -> None:
+        src = (
+            "static uint32_t h_HexZero(CpuState *s) { (void)s; return 0x0; }\n"
+            "static uint32_t h_HexZeroU(CpuState *s) { (void)s; return (uint32_t)0x00000000U; }\n"
+            "static uint32_t h_NonZero(CpuState *s) { (void)s; return 0x10; }\n"
+        )
+        stubs = hle_manifest.mechanical_stub_handlers(src)
+        self.assertIn("h_HexZero", stubs)
+        self.assertIn("h_HexZeroU", stubs)
+        self.assertNotIn("h_NonZero", stubs)
+
     def test_mechanical_stubs_classify_as_fake_success(self) -> None:
         stubs = hle_manifest.mechanical_stub_handlers(self.SYNTH_STUB_SOURCE)
         self.assertEqual(
@@ -2010,6 +2027,13 @@ class EvidenceTierTests(unittest.TestCase):
             tier, "NOT_EVIDENCE",
             "entering h_ok proves the registry resolves, not that the API behaves",
         )
+        self.assertIn("stub", why)
+
+    def test_hardware_probe_on_fake_success_stub_stays_not_evidence(self) -> None:
+        tier, why = hle_manifest.evidence_tier(
+            self._entry(classification="fake_success", oracle=["PSP-SMOKE-001"])
+        )
+        self.assertEqual(tier, "NOT_EVIDENCE")
         self.assertIn("stub", why)
 
     def test_a_dedicated_handler_with_no_coverage_is_only_static(self) -> None:
