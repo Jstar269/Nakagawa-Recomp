@@ -350,6 +350,8 @@ static struct {
     int online_active;       /* online transport attached for this Init session */
     int lobby_group;         /* the lobby was asked to put this console in a group and has not
                                 been asked to take it out (PPSSPP adhocctlInServerGroup) */
+    int abandoned_joins;     /* joins given up at their timeout whose answer the lobby may still
+                                send (PPSSPP abandonedGroupJoins) */
     int lobby_lost_reported; /* logged dead-lobby warning once for this session */
     unsigned error_events;   /* ALREADY_CONNECTED events still to deliver */
     struct { int used; uint32_t fn, arg; } handlers[ADHOCCTL_HANDLERS];
@@ -562,11 +564,11 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
     for (size_t i = 0u; i < n && s_adhocctl.gen == gen; i++) {
         switch (ev[i].kind) {
         case NK_LOBBY_CONNECT:
-            /* A player of a group this console is neither in nor joining: the lobby had not yet
-             * seen the leave. PPSSPP drops it too (Core/HLE/proAdhoc.cpp:1739-1742). */
-            if (s_adhocctl.state != 1 && s_adhocctl.request != ADHOCCTL_REQ_CREATE &&
-                s_adhocctl.request != ADHOCCTL_REQ_CONNECT)
-                break;
+            /* A player of an abandoned join's group, or of a group this console has left (the
+             * lobby had not yet seen the leave): dropped, as PPSSPP drops it
+             * (Core/HLE/proAdhoc.cpp:1738-1742). The lobby sends a group's players before its
+             * BSSID, so an abandoned join's players all arrive while its count is still up. */
+            if (s_adhocctl.abandoned_joins > 0 || !s_adhocctl.lobby_group) break;
             adhoc_upsert_peer(&ev[i]);
             break;
         case NK_LOBBY_DISCONNECT:
@@ -590,17 +592,29 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
             adhocctl_call_handlers(s, gen, sp, gp, ADHOCCTL_EVENT_SCAN, 0u);
             break;
         case NK_LOBBY_CONNECT_BSSID:
+            if (s_adhocctl.abandoned_joins > 0) {
+                /* The answer to a join that timed out below. The lobby answers joins in the order
+                 * it got them, so this one is not the answer to a join started since; PPSSPP
+                 * counts the abandoned joins and drops one BSSID for each
+                 * (Core/HLE/proAdhoc.cpp:1673-1677). The log names the first. */
+                static int abandoned_bssid_logged;
+                s_adhocctl.abandoned_joins--;
+                if (!abandoned_bssid_logged) {
+                    abandoned_bssid_logged = 1;
+                    fprintf(stderr, "HLE: adhocctl ignored the BSSID of an abandoned group join\n");
+                }
+                break;
+            }
             if (s_adhocctl.request != ADHOCCTL_REQ_CREATE &&
                 s_adhocctl.request != ADHOCCTL_REQ_CONNECT) {
-                /* No join is waiting for this answer: it timed out below, or the server sent it
-                 * unasked. PPSSPP drops the BSSID of an abandoned group join
-                 * (Core/HLE/proAdhoc.cpp:1673-1677); the state, the group's BSSID and the
-                 * handlers are left alone, and the log names it once. */
-                static int late_bssid_logged;
-                if (!late_bssid_logged) {
-                    late_bssid_logged = 1;
-                    fprintf(stderr, "HLE: adhocctl ignored the BSSID of a group join nothing "
-                                    "waits for (state=%d)\n", s_adhocctl.state);
+                /* A BSSID no join asked for (this project's guard; PPSSPP has no such case): the
+                 * state, the group's BSSID and the handlers are left alone, and the log names it
+                 * once. */
+                static int unasked_bssid_logged;
+                if (!unasked_bssid_logged) {
+                    unasked_bssid_logged = 1;
+                    fprintf(stderr, "HLE: adhocctl ignored a BSSID no group join asked for "
+                                    "(state=%d)\n", s_adhocctl.state);
                 }
                 break;
             }
@@ -628,6 +642,7 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
                               s_adhocctl.request == ADHOCCTL_REQ_SCAN ||
                               s_adhocctl.state != 0);
         s_adhocctl.lobby_group = 0;
+        s_adhocctl.abandoned_joins = 0; /* as PPSSPP's killAdhocctlClient (proAdhoc.cpp:1351-1352) */
         if (!s_adhocctl.lobby_lost_reported) {
             s_adhocctl.lobby_lost_reported = 1;
             const char *err = nk_relay_client_last_error(s_adhoc_relay_client);
@@ -653,9 +668,9 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
      * sends ADHOCCTL_EVENT_ERROR with SCE_NET_ADHOCCTL_ERROR_TIMEOUT only for a game-mode join
      * that timed out (Core/HLE/proAdhoc.cpp:1627). Here the call has already returned 0, so the
      * handlers get that event and error and the log names the request. A join given up this way
-     * is withdrawn from the lobby, as PPSSPP withdraws the game-mode join it gives up
-     * (NetAdhocctl_GameModeTimedOut, Core/HLE/sceNetAdhoc.cpp:1727-1736), and its late answer is
-     * dropped above. */
+     * is counted as abandoned and withdrawn from the lobby, as PPSSPP does for the game-mode join
+     * it gives up (NetAdhocctl_GameModeTimedOut and AbandonGroupJoin,
+     * Core/HLE/sceNetAdhoc.cpp:1727-1736 and 813-825), and its late answer is dropped above. */
     if ((s_adhocctl.request == ADHOCCTL_REQ_CREATE ||
          s_adhocctl.request == ADHOCCTL_REQ_CONNECT ||
          s_adhocctl.request == ADHOCCTL_REQ_SCAN) &&
@@ -666,6 +681,7 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
                 req_kind, ADHOCCTL_ONLINE_REQUEST_TIMEOUT_US / 1000u,
                 (err && err[0]) ? " (" : "", (err && err[0]) ? err : "",
                 (err && err[0]) ? ")" : "");
+        if (req_kind != ADHOCCTL_REQ_SCAN) s_adhocctl.abandoned_joins++;
         if (s_adhocctl.lobby_group && t->ops->disconnect) {
             (void)t->ops->disconnect(t);
             s_adhocctl.lobby_group = 0;
@@ -744,6 +760,7 @@ static void adhocctl_teardown(void) {
     s_adhocctl.inited = 0;
     s_adhocctl.online_active = 0;
     s_adhocctl.lobby_group = 0;
+    s_adhocctl.abandoned_joins = 0;
     s_adhocctl.lobby_lost_reported = 0;
     s_adhocctl.thread_uid = 0u;
     s_adhocctl.state = 0;
@@ -887,6 +904,7 @@ static uint32_t h_NetAdhocctlInit(CpuState *s) {
     s_adhocctl.inited = 1;
     s_adhocctl.online_active = online;
     s_adhocctl.lobby_group = 0;
+    s_adhocctl.abandoned_joins = 0;
     s_adhocctl.lobby_lost_reported = 0;
     s_adhocctl.state = 0;
     s_adhocctl.request = ADHOCCTL_REQ_NONE;

@@ -11303,7 +11303,8 @@ typedef struct {
     volatile int drop_lobby_mid_session;
     volatile int silent_lobby;
     volatile int hold_connect_reply; /* joins the group but keeps the members and the BSSID back */
-    volatile int inject_late_reply;  /* sends a member and the BSSID to every logged-in client once */
+    volatile int inject_late_reply;  /* sends a member and a BSSID to a logged-in client once */
+    volatile int late_reply_before_next; /* the same, just ahead of the answer to the next join */
     volatile int leaves_seen;        /* DISCONNECT frames from clients that were in a group */
     volatile int kicked;             /* clients logged out for breaking a server rule (below) */
     volatile int stall_ptp_forward;
@@ -11346,6 +11347,18 @@ static void mr_send(adh_p2_sock_t fd, const void *buf, size_t n) {
         if (r > 0) sent += (size_t)r;
     }
 }
+/* The answer to a join the client no longer waits for: a member called Ghost, then a BSSID
+ * (02:00:00:00:00:66) that is not the test group's (02:00:00:00:00:77). */
+static void mr_send_stale_join_reply(adh_p2_sock_t fd) {
+    uint8_t ghost[139], bp[7] = {6u, 0x02u, 0u, 0u, 0u, 0u, 0x66u};
+    memset(ghost, 0, sizeof(ghost));
+    ghost[0] = 2u; memcpy(ghost + 1, "Ghost", 5u);
+    ghost[129] = 0x02u; ghost[130] = 0xdeu; ghost[131] = 0xadu; ghost[134] = 0x01u;
+    mr_put32(ghost + 135, 0x7f000063u);
+    mr_send(fd, ghost, sizeof(ghost));
+    mr_send(fd, bp, sizeof(bp));
+}
+
 static void mr_pump_once(AdhP2MiniRelay *r) {
     for (;;) {
         adh_p2_sock_t c = accept(r->lobby_lsn, NULL, NULL);
@@ -11384,13 +11397,7 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
         }
         int closed = 0;
         if (r->inject_late_reply && p->logged_in) {
-            uint8_t ghost[139], bp[7] = {6u, 0x02u, 0u, 0u, 0u, 0u, 0x66u};
-            memset(ghost, 0, sizeof(ghost));
-            ghost[0] = 2u; memcpy(ghost + 1, "Ghost", 5u);
-            ghost[129] = 0x02u; ghost[130] = 0xdeu; ghost[131] = 0xadu; ghost[134] = 0x01u;
-            mr_put32(ghost + 135, 0x7f000063u);
-            mr_send(p->fd, ghost, sizeof(ghost));
-            mr_send(p->fd, bp, sizeof(bp));
+            mr_send_stale_join_reply(p->fd);
             r->inject_late_reply = 0;
         }
         while (p->rx_len < sizeof(p->rx)) {
@@ -11424,6 +11431,10 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
                     if (need < p->rx_len) memmove(p->rx, p->rx + need, p->rx_len - need);
                     p->rx_len -= need;
                     continue;
+                }
+                if (r->late_reply_before_next) {
+                    mr_send_stale_join_reply(p->fd);
+                    r->late_reply_before_next = 0;
                 }
                 for (int j = 0; j < 6; j++) {
                     if (r->peers[j].active && r->peers[j].in_group && memcmp(r->peers[j].group, p->group, 8u) == 0) {
@@ -11796,7 +11807,7 @@ static void d3_step(CpuState *cpu) {
 }
 
 static void d3_main_fn(CpuState *cpu) {
-    char msg[224];
+    char msg[288];
     const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '3'};
     for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
     for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
@@ -11927,8 +11938,9 @@ static void d3_main_fn(CpuState *cpu) {
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
            net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.4: cleanup");
 
-    /* 5. A join the lobby does not answer in time is given up: ERROR/TIMEOUT to the handlers, the
-     *    lobby told the console left, and the late answer (a member, then the BSSID) dropped. */
+    /* 5. A join the lobby does not answer in time is given up: ERROR/TIMEOUT to the handlers and
+     *    the lobby told the console left. Its late answer (a member, then a BSSID) is dropped even
+     *    when it arrives just ahead of the answer to the next join, and so is one nobody asked for. */
     s_adh_events = 0u;
     const int kicked1 = s_d3_srv->kicked, leaves1 = s_d3_srv->leaves_seen;
     s_d3_srv->hold_connect_reply = 1;
@@ -11953,23 +11965,48 @@ static void d3_main_fn(CpuState *cpu) {
              s_d3_srv->leaves_seen - leaves1, s_d3_srv->kicked - kicked1);
     expect(s_d3_srv->leaves_seen == leaves1 + 1 && s_d3_srv->kicked == kicked1, msg);
     s_d3_srv->hold_connect_reply = 0;
-    s_d3_srv->inject_late_reply = 1;
-    for (int w = 0; w < 60; w++) d3_step(cpu);
+    s_d3_srv->late_reply_before_next = 1;
+    const uint32_t new_rc = adh(ADH_NID_CREATE, adh_name(0, "D3NEW01"), 0u, 0u);
+    for (int w = 0; w < 200 && new_rc == 0u &&
+                    (adh_state() != 1u || s_d3_srv->late_reply_before_next); w++)
+        d3_step(cpu);
+    for (int w = 0; w < 20; w++) d3_step(cpu); /* the answer to the new join follows the late one */
+    MEM_W32(ADH_P2_LEN, 256u);
+    uint32_t list_rc = adh(ADH_NID_PEER_LIST, ADH_P2_LEN, ADH_P2_BUF, 0u);
+    uint32_t param_rc = adh(ADH_NID_GET_PARAM, ADH_P2_STAT, 0u, 0u);
     snprintf(msg, sizeof(msg),
-             "d3.5: the late member and BSSID of the abandoned join change nothing "
+             "d3.5: the next Create takes its own answer, not the abandoned join's "
+             "(rc=0x%08x sent=%d state=%u events=%u list=0x%08x bytes=%u param=0x%08x bssid=..%02x)",
+             new_rc, s_d3_srv->late_reply_before_next == 0, adh_state(), s_adh_events, list_rc,
+             MEM_R32(ADH_P2_LEN), param_rc, MEM_R8(ADH_P2_STAT + 145u));
+    expect(new_rc == 0u && s_d3_srv->late_reply_before_next == 0 && adh_state() == 1u &&
+           s_adh_events == 2u && ADH_AT(1).event == 1 && list_rc == 0u &&
+           MEM_R32(ADH_P2_LEN) == 0u && param_rc == 0u && MEM_R8(ADH_P2_STAT + 140u) == 0x02u &&
+           MEM_R8(ADH_P2_STAT + 145u) == 0x77u, msg);
+    expect(adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u, "d3.5: Disconnect leaves the group");
+    for (int w = 0; w < 200 && s_adh_events < 3u; w++) d3_step(cpu);
+    s_d3_srv->inject_late_reply = 1;
+    for (int w = 0; w < 200 && s_d3_srv->inject_late_reply; w++) d3_step(cpu);
+    for (int w = 0; w < 40; w++) d3_step(cpu);
+    snprintf(msg, sizeof(msg),
+             "d3.5: a member and a BSSID nobody asked for change nothing "
              "(sent=%d state=%u events=%u)",
              s_d3_srv->inject_late_reply == 0, adh_state(), s_adh_events);
-    expect(s_d3_srv->inject_late_reply == 0 && adh_state() == 0u && s_adh_events == 1u, msg);
-    const uint32_t new_rc = adh(ADH_NID_CREATE, adh_name(0, "D3NEW01"), 0u, 0u);
-    for (int w = 0; w < 200 && new_rc == 0u && adh_state() != 1u; w++) d3_step(cpu);
+    expect(s_d3_srv->inject_late_reply == 0 && adh_state() == 0u && s_adh_events == 3u &&
+           ADH_AT(2).event == 2, msg);
+    const uint32_t end_rc = adh(ADH_NID_CREATE, adh_name(0, "D3END01"), 0u, 0u);
+    for (int w = 0; w < 200 && end_rc == 0u && adh_state() != 1u; w++) d3_step(cpu);
     MEM_W32(ADH_P2_LEN, 256u);
-    const uint32_t list_rc = adh(ADH_NID_PEER_LIST, ADH_P2_LEN, ADH_P2_BUF, 0u);
+    list_rc = adh(ADH_NID_PEER_LIST, ADH_P2_LEN, ADH_P2_BUF, 0u);
+    param_rc = adh(ADH_NID_GET_PARAM, ADH_P2_STAT, 0u, 0u);
     snprintf(msg, sizeof(msg),
-             "d3.5: the next Create connects with no member of the abandoned group "
-             "(rc=0x%08x state=%u events=%u list=0x%08x bytes=%u)",
-             new_rc, adh_state(), s_adh_events, list_rc, MEM_R32(ADH_P2_LEN));
-    expect(new_rc == 0u && adh_state() == 1u && s_adh_events == 2u && ADH_AT(1).event == 1 &&
-           list_rc == 0u && MEM_R32(ADH_P2_LEN) == 0u, msg);
+             "d3.5: and the Create after them connects alone, with the group's BSSID "
+             "(rc=0x%08x state=%u events=%u list=0x%08x bytes=%u param=0x%08x bssid=..%02x kicked=%d)",
+             end_rc, adh_state(), s_adh_events, list_rc, MEM_R32(ADH_P2_LEN), param_rc,
+             MEM_R8(ADH_P2_STAT + 145u), s_d3_srv->kicked - kicked1);
+    expect(end_rc == 0u && adh_state() == 1u && s_adh_events == 4u && ADH_AT(3).event == 1 &&
+           list_rc == 0u && MEM_R32(ADH_P2_LEN) == 0u && param_rc == 0u &&
+           MEM_R8(ADH_P2_STAT + 145u) == 0x77u && s_d3_srv->kicked == kicked1, msg);
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
            net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.5: cleanup");
     s_d3_done = 1;
