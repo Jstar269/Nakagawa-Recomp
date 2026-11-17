@@ -3535,6 +3535,57 @@ static bool enhanced_panel_reads(FlowCase which, int width, int height, const ch
     return reads;
 }
 
+/* What one row of Settings > Enhanced shows, in a 1280 x 1600 window where every row of the
+   active tab is on screen: whether the row with id `row` draws `name` as its name and marks
+   `value`, and that value alone. A part's row (part >= 0) marks one of its value boxes, the
+   raised or accent-filled one, and every other box of the row is flat; a pinned row
+   (part < 0) shows its value as "< value >". The value is read from the row that owns it,
+   not found somewhere on the page. */
+static bool enhanced_row_shows(FlowCase which, NkUiId row, int part, const char *name,
+                               const char *value) {
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    NkUi *ui = NULL;
+    const NkUiDrawList *draw = flow_case_layout(which, 1280, 1600, &ui);
+    char got_name[96] = "";
+    char got_value[96] = "";
+    int marked = 0;
+    bool shows;
+    for (int box = -2; draw != NULL && box < (part >= 0 ? 8 : 0); ++box) {
+        /* -2: the row's name; -1: its "< value >" box; 0 and up: a value box of the part. */
+        const NkUiId text_id = box == -2 ? nk_ui_child_id(row, 2u)
+                               : box == -1 ? nk_ui_child_id(row, 8u)
+                               : nk_ui_child_id(ENHANCED_TEST_CHOICE_ID(part, box), 1u);
+        const NkUiTextRun *text = NULL;
+        bool raised = box < 0;
+        char *out = box == -2 ? got_name : got_value;
+        size_t length;
+        for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+            const NkUiDrawCmd *cmd = &draw->cmd[i];
+            if (box >= 0 && cmd->kind == NK_UI_DRAW_RECTANGLE &&
+                cmd->element_id == ENHANCED_TEST_CHOICE_ID(part, box)) {
+                raised = cmd->rgba_pm != theme->surface;
+            } else if (cmd->kind == NK_UI_DRAW_TEXT && cmd->element_id == text_id) {
+                text = (const NkUiTextRun *)cmd->custom;
+            }
+        }
+        if (text == NULL || text->text == NULL || !raised) continue;
+        if (box != -2) ++marked;
+        length = text->length;
+        while (length > 0u && text->text[length - 1u] == ' ') --length;
+        if (length >= sizeof(got_name)) length = sizeof(got_name) - 1u;
+        memcpy(out, text->text, length);
+        out[length] = '\0';
+    }
+    shows = marked == 1 && strcmp(got_name, name) == 0 && strcmp(got_value, value) == 0;
+    if (!shows) {
+        fprintf(stderr, "  the row %08X reads \"%s\" and marks %d value(s), the last \"%s\": "
+                "not \"%s\" and \"%s\" alone\n", (unsigned)row, got_name, marked, got_value,
+                name, value);
+    }
+    if (ui != NULL) nk_ui_destroy(ui);
+    return shows;
+}
+
 static void test_settings_pages(void) {
     static char dump[CASE_DUMP_CAP];
     static const struct { FlowCase which; NkUiId id; PlayerUiSettingsOp op; const char *what; }
@@ -3874,13 +3925,35 @@ static void test_settings_pages(void) {
         int words = k_enhanced_words[i].count;
         int marked = 0;
         PlayerUiAction part;
-        char message[160];
+        char message[220];
         CHECK(enhanced_tab_of(i) >= 0, "every part is on a tab");
         g_enhanced_tab = enhanced_tab_of(i);
         for (int word = 0; word < words; ++word) {
             if (strcmp(k_enhanced_words[i].labels[word], k_enhanced_parts[i].value) == 0) {
                 marked = word;
             }
+        }
+        /* The row itself, on each page: its part's name, and that part's value marked and no
+           other. With the library Authentic the row is dimmed and keeps its value; on a
+           game's page it marks the library's, an Ace-only part's too while it is dimmed. */
+        {
+            char library[48];
+            (void)snprintf(library, sizeof(library), "Library (%s)", k_enhanced_parts[i].value);
+            (void)snprintf(message, sizeof(message),
+                           "%s's row names it and marks %s, and that alone, on the library's "
+                           "page", k_enhanced_parts[i].name, k_enhanced_parts[i].value);
+            CHECK(enhanced_row_shows(FLOW_SETTINGS_ACE, row, i, k_enhanced_parts[i].name,
+                                     k_enhanced_parts[i].value), message);
+            (void)snprintf(message, sizeof(message),
+                           "with the library Authentic %s's row keeps %s marked",
+                           k_enhanced_parts[i].name, k_enhanced_parts[i].value);
+            CHECK(enhanced_row_shows(FLOW_SETTINGS_ACE_OFF, row, i, k_enhanced_parts[i].name,
+                                     k_enhanced_parts[i].value), message);
+            (void)snprintf(message, sizeof(message),
+                           "on a game's page %s's row marks %s, and that alone",
+                           k_enhanced_parts[i].name, library);
+            CHECK(enhanced_row_shows(FLOW_SETTINGS_ACE_TITLE, row, i, k_enhanced_parts[i].name,
+                                     library), message);
         }
         part = activate_flow_button(row, FLOW_SETTINGS_ACE);
         CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART) &&
@@ -3923,7 +3996,9 @@ static void test_settings_pages(void) {
                              NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
         if (enhanced_part_is_ace_only(i)) {
             /* Before the tabs an Ace-only row could be set on a game's page in any mode; the
-               tabs dim it until the game's mode is Ace, so that check is these two. */
+               tabs dim it until the game's mode is Ace. So outside Ace the row is inert (and
+               marks the library's value, checked above), and in Ace, below, this part's row
+               and each of its values set what the other parts' do. */
             CHECK(part.kind == PLAYER_UI_ACTION_NONE &&
                       activate_flow_button(row, FLOW_SETTINGS_ACE_TITLE).kind ==
                           PLAYER_UI_ACTION_NONE &&
@@ -3950,6 +4025,28 @@ static void test_settings_pages(void) {
         CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART) &&
                   part.title_index == (size_t)i,
               "in Ace every part's row on a game's page steps that part");
+        part = enhanced_send(FLOW_SETTINGS_ACE_TITLE, ENHANCED_TEST_CHOICE_ID(i, 0),
+                             NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
+        CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+                  part.title_index == (size_t)i && part.choice_index == -1,
+              "in Ace the first value of every part on a game's page is the library's: it "
+              "clears the game's own");
+        for (int word = 0; word < words; ++word) {
+            part = enhanced_send(FLOW_SETTINGS_ACE_TITLE, ENHANCED_TEST_CHOICE_ID(i, word + 1),
+                                 NK_UI_EV_ACTIVATE, NK_UI_DIR_NONE);
+            (void)snprintf(message, sizeof(message),
+                           "in Ace a click on %s's %s on a game's page sets that value for "
+                           "the game (got op %d, part %d, value %d)",
+                           k_enhanced_parts[i].name, k_enhanced_words[i].labels[word],
+                           (int)part.primary, (int)part.title_index, part.choice_index);
+            CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+                      part.title_index == (size_t)i && part.choice_index == word,
+                  message);
+        }
+        part = enhanced_send(FLOW_SETTINGS_ACE_TITLE, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT);
+        CHECK(settings_op_is(part, PLAYER_UI_SETTINGS_SET_ENHANCED_PART) &&
+                  part.title_index == (size_t)i && part.choice_index == 0,
+              "in Ace, Right on a row that follows the library sets the part's first own value");
         g_enhanced_mode = NULL;
         CHECK(activate_flow_button(row, FLOW_SETTINGS_ACE_OFF).kind == PLAYER_UI_ACTION_NONE &&
                   enhanced_send(FLOW_SETTINGS_ACE_OFF, row, NK_UI_EV_NAV, NK_UI_DIR_RIGHT).kind ==
@@ -4002,9 +4099,13 @@ static void test_settings_pages(void) {
                                FLOW_SETTINGS_ACE).primary ==
               (PlayerUiPrimaryAction)PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB,
           "a category tab is a focusable control that selects its tab");
-    CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_OFF, 1600, 1200, dump, sizeof(dump)) &&
-              strstr(dump, "Authentic") != NULL && strstr(dump, "Texture filtering") != NULL &&
-              strstr(dump, "16x") != NULL,
+    /* The two rows by name, each read from the row that owns the value (review of #2644: a
+       "16x" found anywhere on the page proved nothing about Texture filtering). */
+    CHECK(enhanced_row_shows(FLOW_SETTINGS_ACE_OFF, PLAYER_UI_ID_SETTINGS_ACE_MODE, -1,
+                             "Play mode", "Authentic") &&
+              enhanced_row_shows(FLOW_SETTINGS_ACE_OFF,
+                                 PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_FILTERING),
+                                 PLAYER_PART_FILTERING, "Texture filtering", "16x"),
           "with the library Authentic the parts keep their values");
     CHECK(dump_flow_case_sized(FLOW_SETTINGS_ACE_TITLE, 1600, 1200, dump, sizeof(dump)) &&
               strstr(dump, "For Test Game alone.") != NULL &&
