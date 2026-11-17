@@ -2863,6 +2863,44 @@ static void record_rmw_range(Target *t, const RangeRec *r, int twin) {
 /* Record batches [r->b0, r->b1) as one render pass into `t`'s image, or (twin) into its host
  * twin with the twin's picture options, descriptor sets and snapshot. Color ends
  * SHADER_READ_ONLY (the render pass's final layout); an RMW run (r->rmw) leaves it GENERAL. */
+typedef struct {
+    VkDescriptorSet descriptor;
+    VkRect2D scissor;
+    float blend[4];
+    int have_descriptor, have_scissor, have_blend;
+} BatchCommandState;
+
+typedef struct {
+    int descriptor, scissor, blend;
+} BatchCommandEmit;
+
+#ifdef SR_GPU_COHERENCE_SELFTEST
+typedef struct {
+    unsigned descriptor_binds, scissors, blend_constants;
+    unsigned render_pass_begins;
+} GegpuSelftestRecordCommands;
+static GegpuSelftestRecordCommands s_selftest_record_commands;
+#endif
+
+static BatchCommandEmit batch_command_state_update(BatchCommandState *state, VkDescriptorSet descriptor,
+                                                    const VkRect2D *scissor, const float blend[4]) {
+    BatchCommandEmit emit = {
+        !state->have_descriptor || state->descriptor != descriptor,
+        !state->have_scissor || state->scissor.offset.x != scissor->offset.x ||
+            state->scissor.offset.y != scissor->offset.y ||
+            state->scissor.extent.width != scissor->extent.width ||
+            state->scissor.extent.height != scissor->extent.height,
+        !state->have_blend || memcmp(state->blend, blend, sizeof(state->blend)) != 0,
+    };
+    if (emit.descriptor) state->descriptor = descriptor;
+    if (emit.scissor) state->scissor = *scissor;
+    if (emit.blend) memcpy(state->blend, blend, sizeof(state->blend));
+    state->have_descriptor = 1;
+    state->have_scissor = 1;
+    state->have_blend = 1;
+    return emit;
+}
+
 static void record_range(Target *t, const RangeRec *r, int twin) {
 #if SR_GPU_DSTREAD_MUTANT == 9
     if (!twin)
@@ -2890,6 +2928,9 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
     rbi.framebuffer = rmw ? (twin ? t->tfb_rmw : t->fb_rmw) : (twin ? t->tfb : t->fb);
     rbi.renderArea.extent.width = cw; rbi.renderArea.extent.height = ch;
     vkCmdBeginRenderPass(s_cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    s_selftest_record_commands.render_pass_begins++;
+#endif
 
     /* the vertex NDC transform is resolution-independent: scaling the viewport IS the
      * internal-resolution upscale */
@@ -2908,7 +2949,9 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
                             0, NULL);
 
     VkPipeline cur = VK_NULL_HANDLE;
-    VkDescriptorSet cur_set = VK_NULL_HANDLE;
+    /* Dynamic state and set 0 belong to this command buffer and this compatible layout. A fresh
+     * render pass starts unknown; no remembered values cross a pass or command-buffer begin. */
+    BatchCommandState batch_state = {0};
     for (uint32_t i = b0; i < b1; i++) {
         const Batch *b = &r->arr[i];
         VkPipeline p = rmw ? pipe_get_rmw(&b->key, r->zshader) : pipe_get(&b->key);
@@ -2934,21 +2977,36 @@ static void record_range(Target *t, const RangeRec *r, int twin) {
         }
         VkRect2D sc = { { b->sx * scale, b->sy * scale },
                         { (uint32_t)(b->sw * scale), (uint32_t)(b->sh * scale) } };
-        vkCmdSetScissor(s_cmd, 0, 1, &sc);
-        vkCmdSetBlendConstants(s_cmd, b->bconst);
+        VkDescriptorSet dset = twin ? twin_dset(b) : b->dset;
+        BatchCommandEmit emit = batch_command_state_update(&batch_state, dset, &sc, b->bconst);
+        if (emit.scissor) {
+            vkCmdSetScissor(s_cmd, 0, 1, &sc);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+            s_selftest_record_commands.scissors++;
+#endif
+        }
+        if (emit.blend) {
+            vkCmdSetBlendConstants(s_cmd, b->bconst);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+            s_selftest_record_commands.blend_constants++;
+#endif
+        }
         PushPC tpc;
         if (twin) twin_pc(b, &tpc);
         vkCmdPushConstants(s_cmd, playout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(b->pc),
                            twin ? &tpc : &b->pc);
-        VkDescriptorSet dset = twin ? twin_dset(b) : b->dset;
         uint64_t bind_started = cpu_profile_now();
-        vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 0, 1, &dset, 0, NULL);
+        if (emit.descriptor) {
+            vkCmdBindDescriptorSets(s_cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 0, 1, &dset, 0, NULL);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+            s_selftest_record_commands.descriptor_binds++;
+#endif
+        }
         if (s_cpu_profile) {
             cpu_profile_add(GEGPU_CPU_BIND_RECORD, bind_started);
-            s_cpu_profile_stats.descriptor_binds++;
-            if (dset == cur_set) s_cpu_profile_stats.descriptor_bind_redundant++;
+            if (emit.descriptor) s_cpu_profile_stats.descriptor_binds++;
+            else s_cpu_profile_stats.descriptor_bind_redundant++;
         }
-        cur_set = dset;
         if (bound_tnl != (int)b->key.tnl) {
             vkCmdBindVertexBuffers(s_cmd, 0, 1, b->key.tnl ? &s_cmd_slot->tbuf : &s_cmd_slot->vbuf,
                                    b->key.tnl ? &r->tvertex_offset

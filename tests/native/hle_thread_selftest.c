@@ -331,6 +331,7 @@ static uint32_t vblank_delivered(uint32_t no, uint32_t *arg) {
 #define NID_SCE_KERNEL_FREE_MEMORY_BLOCK 0x50f61d8au
 #define NID_SCE_KERNEL_GET_MEMORY_BLOCK_ADDR 0xdb83a952u
 #define NID_SCE_KERNEL_ALLOC_MEMORY_BLOCK 0xfe707fdfu
+#define NID_SCE_KERNEL_GET_MODULE_ID_LIST 0x644395e2u
 #define NID_SCE_KERNEL_SET_COMPILED_SDK_VERSION_370 0x342061e5u
 #define NID_SCE_GE_LIST_ENQUEUE_HEAD 0x1c0d95a6u
 #define NID_SCE_GE_CONTINUE 0x4c06e472u
@@ -2851,8 +2852,8 @@ static void test_runtime_placed_modules(void) {
     MEM_W32(RT_OPTION_ADDR + 4u, 2u);
     MEM_W8(RT_OPTION_ADDR + 16u, 1u);
     /* Position 1 is High (uOFW modulemgr.c). This fixture's partition is based low, below the
-     * runtime stacks, where no High region is modelled, so it fails closed by name; the High
-     * allocator itself is covered by the memory-block test. */
+     * runtime stacks, where a module image placed High is not modelled, so it fails closed by
+     * name; the High allocator itself is covered by the memory-block and TLS-pool tests. */
     rt_capture_begin();
     refused = rt_load(alpha_guest, RT_OPTION_ADDR);
     out = rt_capture_end();
@@ -3001,6 +3002,105 @@ static void test_runtime_placed_modules(void) {
         expect(uid == 0x80020146u /* PROHIBIT_LOADMODULE_DEVICE */ &&
                    sr_hle_test_module_count() == 0u,
                "runtime placement: a disc title's LoadModule from ms0: is refused by the device");
+        /* sceKernelLoadExec while a utility dialog holds the slot (#1386): every dialog type gets the
+         * named synthetic refusal; with no dialog the call gets past that check (the next refusal in this
+         * host-only fixture is the scheduler's). */
+        {
+            extern void sr_hle_test_osk_slot_reset(void);
+            static const struct { uint32_t init_nid, size; const char *name; } dlg[] = {
+                {0x2ad8e239u, 0x2c4u, "message"},        /* sceUtilityMsgDialogInitStart */
+                {0x4db1e739u, 0x44u, "netconf"},         /* sceUtilityNetconfInitStart */
+                {0x24ac31ebu, 0x590u, "gamedata install"}, /* sceUtilityGamedataInstallInitStart */
+                {0xc492f751u, 0x50u, "game sharing"},    /* sceUtilityGameSharingInitStart */
+            };
+            const uint32_t param = 0x09034000u;
+            char log[1024], what[160];
+            CpuState lc;
+            title_hle_write_cstr(RT_PATH_ADDR, alpha_guest);
+            for (size_t i = 0; i < sizeof(dlg) / sizeof(dlg[0]); i++) {
+                sr_hle_test_osk_slot_reset();
+                for (uint32_t off = 0; off < dlg[i].size; off += 4u) MEM_W32(param + off, 0u);
+                MEM_W32(param, dlg[i].size);
+                memset(&lc, 0, sizeof(lc));
+                lc.r[4] = param;
+                snprintf(what, sizeof(what), "runtime placement: the %s dialog InitStart takes the slot", dlg[i].name);
+                expect(sr_syscall(&lc, dlg[i].init_nid) == 0u, what);
+                FILE *capture = NULL;
+                int saved_fd = -1;
+                int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+                memset(&lc, 0, sizeof(lc));
+                lc.r[4] = RT_PATH_ADDR;
+                const uint32_t rc = sr_syscall(&lc, NID_SCE_KERNEL_LOAD_EXEC);
+                log[0] = '\0';
+                if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+                snprintf(what, sizeof(what),
+                         "runtime placement: LoadExec while the %s dialog is active is the named dialog refusal", dlg[i].name);
+                expect(capturing && rc == 0x80020002u &&
+                           strstr(log, "LOAD_EXEC_DIALOG_ACTIVE_SYNTHETIC") != NULL, what);
+            }
+            /* The keyboard after use (#1386): one scripted run (SR_OSK_TEXT, no host box) from InitStart to
+             * NONE. The slot is free again, so LoadExec passes the dialog check; a stale OSK slot refused it
+             * for good. The OSK NIDs are the literals of the keyboard's syscalls (defined further down). */
+            {
+                CpuState oc;
+                uint32_t ost = 0u;
+                const uint32_t oparam = 0x09030000u, ofield = 0x09030100u;
+                sr_hle_test_osk_slot_reset();
+                for (uint32_t off = 0; off < 0x340u; off += 4u) MEM_W32(oparam + off, 0u);
+                MEM_W32(oparam, 0x40u);
+                MEM_W32(oparam + 0x30u, 1u);
+                MEM_W32(oparam + 0x34u, ofield);
+                MEM_W32(ofield + 0x24u, 16u);
+                MEM_W32(ofield + 0x28u, 0x09030300u);
+                hle_test_setenv("SR_OSK_TEXT", "x");
+                memset(&oc, 0, sizeof(oc));
+                oc.r[4] = oparam;
+                expect(sr_syscall(&oc, 0xf6269b82u) == 0u, "runtime placement: the OSK InitStart takes the slot");
+                for (int frame = 0; frame < 16; frame++) {
+                    memset(&oc, 0, sizeof(oc));
+                    ost = sr_syscall(&oc, 0xf3f76017u);
+                    sr_display_advance_vcount(1u);
+                    if (ost == 3u) break;
+                }
+                expect(ost == 3u, "runtime placement: the scripted OSK keyboard reaches QUIT");
+                memset(&oc, 0, sizeof(oc));
+                expect(sr_syscall(&oc, 0x3dfaeba9u) == 0u, "runtime placement: the OSK ShutdownStart is accepted in QUIT");
+                for (int frame = 0; frame < 4; frame++) {
+                    memset(&oc, 0, sizeof(oc));
+                    ost = sr_syscall(&oc, 0xf3f76017u);
+                    sr_display_advance_vcount(1u);
+                    if (ost == 0u) break;
+                }
+                expect(ost == 0u, "runtime placement: the OSK keyboard is back at NONE after use");
+                hle_test_setenv("SR_OSK_TEXT", NULL);
+                FILE *capture = NULL;
+                int saved_fd = -1;
+                int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+                memset(&lc, 0, sizeof(lc));
+                lc.r[4] = RT_PATH_ADDR;
+                (void)sr_syscall(&lc, NID_SCE_KERNEL_LOAD_EXEC);
+                log[0] = '\0';
+                if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+                expect(capturing && strstr(log, "LOAD_EXEC_DIALOG_ACTIVE_SYNTHETIC") == NULL &&
+                           strstr(log, "LOAD_EXEC_SCHEDULER_UNAVAILABLE") != NULL,
+                       "runtime placement: LoadExec after an OSK keyboard reached NONE passes the dialog check");
+            }
+            sr_hle_test_osk_slot_reset();
+            {
+                FILE *capture = NULL;
+                int saved_fd = -1;
+                int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+                memset(&lc, 0, sizeof(lc));
+                lc.r[4] = RT_PATH_ADDR;
+                const uint32_t rc = sr_syscall(&lc, NID_SCE_KERNEL_LOAD_EXEC);
+                log[0] = '\0';
+                if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof(log));
+                expect(capturing && rc == 0x80020002u &&
+                           strstr(log, "LOAD_EXEC_DIALOG_ACTIVE_SYNTHETIC") == NULL &&
+                           strstr(log, "LOAD_EXEC_SCHEDULER_UNAVAILABLE") != NULL,
+                       "runtime placement: LoadExec with no dialog passes the dialog check");
+            }
+        }
         /* The program a LoadExec boots decides from then on: the disc title replaced by
          * its ms0: program (the manifest's required runtime module) may load from ms0:. */
         {
@@ -15660,18 +15760,22 @@ static void test_rtc_time_t_add_years_resolution_autotest(void) {
     rtct_date(1970u, 1u, 1u, 0u, 0u, 0u, 0u);
     expect(td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u) == 0u && MEM_R32(RTCT_OUT) == 0u,
            "sceRtcGetTime_t writes 0 for the epoch");
+    /* 1969-12-31 23:59:59 and the first second past 32 bits stopped here until PSP-SAFE-SCALAR-001
+     * measured them (test_psp_measured_safe_scalar_rtc_20261117); a date before 1601, a microsecond
+     * out of range, (2025, 13, 1), which is not one of the measured dates, and a NULL pointer are
+     * still not measured. */
     uint32_t stops = sr_hle_test_unmodelled_stops();
-    rtct_date(1969u, 12u, 31u, 23u, 59u, 59u, 0u);
+    rtct_date(1600u, 12u, 31u, 23u, 59u, 59u, 0u);
     (void)td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u);
     rtct_date(2025u, 13u, 1u, 0u, 0u, 0u, 0u);
     (void)td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u);
-    rtct_date(2106u, 2u, 7u, 6u, 28u, 16u, 0u);       /* 2^32 seconds */
+    rtct_date(2012u, 9u, 20u, 7u, 12u, 15u, 1000000u);
     (void)td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u);
     rtct_date(2012u, 9u, 20u, 7u, 12u, 15u, 500u);
     (void)td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, 0u, 0u, 0u);
     (void)td24b_dispatch4(RTCT_NID_GET_TIME_T, 0u, RTCT_OUT, 0u, 0u);
     expect(sr_hle_test_unmodelled_stops() == stops + 5u,
-           "sceRtcGetTime_t stops by name before 1970, on a field out of range, past 32 bits and on NULL");
+           "sceRtcGetTime_t stops by name before 1601, on a field out of range and on NULL");
     rtct_date(2106u, 2u, 7u, 6u, 28u, 15u, 0u);
     expect(td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u) == 0u &&
                MEM_R32(RTCT_OUT) == 0xffffffffu,
@@ -15711,7 +15815,7 @@ static void test_rtc_time_t_add_years_resolution_autotest(void) {
     MEM_W32(RTCT_SRC, 0xffffffffu); MEM_W32(RTCT_SRC + 4u, 0xffffffffu);
     (void)td24b_dispatch4(RTCT_NID_ADD_YEARS, RTCT_DST, RTCT_SRC, 1u, 0u);
     expect(sr_hle_test_unmodelled_stops() == stops + 3u,
-           "sceRtcTickAddYears stops by name on NULL pointers and on a source past year 9999");
+           "sceRtcTickAddYears stops by name on NULL pointers and on a source past 10001-01-01 00:00:00");
 }
 
 /* sceRtcTickAddMicroseconds, sceRtcTickAddSeconds, sceRtcTickAddDays, sceRtcGetDayOfWeek and
@@ -15939,12 +16043,161 @@ static void test_rtc_tick_add_day_of_week_check_valid_autotest(void) {
     expect(rtca_check_valid(2012, 9, 20, 7, (uint16_t)-10, 10, 10) == 0xfffffffbu, "an invalid minute is -5");
     expect(rtca_check_valid(2012, 9, 20, 7, 10, (uint16_t)-10, 10) == 0xfffffffau, "an invalid second is -6");
     expect(rtca_check_valid(2012, 9, 20, 7, 10, 10, (uint32_t)-10) == 0xfffffff9u, "an invalid microsecond is -7");
+    /* A day of 0 and a day past the month's length stopped here until PSP-SAFE-SCALAR-001 measured
+     * them as -3 (test_psp_measured_safe_scalar_rtc_20261117). */
     stops = sr_hle_test_unmodelled_stops();
-    (void)rtca_check_valid(2012, 9, 0, 7, 0, 0, 0);
-    (void)rtca_check_valid(2013, 2, 29, 7, 0, 0, 0);
+    expect(rtca_check_valid(2012, 9, 0, 7, 0, 0, 0) == 0xfffffffdu &&
+               rtca_check_valid(2013, 2, 29, 7, 0, 0, 0) == 0xfffffffdu &&
+               sr_hle_test_unmodelled_stops() == stops,
+           "a day of 0 and February 29 of a plain year are -3, the day");
     (void)td24b_dispatch4(RTCA_NID_CHECK_VALID, 0u, 0u, 0u, 0u);
-    expect(sr_hle_test_unmodelled_stops() == stops + 3u,
-           "sceRtcCheckValid stops by name on day 0, a day past the month length and a NULL pointer");
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u,
+           "sceRtcCheckValid stops by name on a NULL pointer");
+}
+
+/* PSP-SAFE-SCALAR-001 (2026-11-17, PSP-3000, boot 221, XMB context; docs/HARDWARE_ORACLE.md): the
+ * 31 RTC cells of the safe-scalar probe, each through its production NID with the probe's own
+ * arguments and presets (0xa5a5a5a5 in every output word). Before this record the runtime stopped
+ * the run by name on every one of them (#2640). The last block holds what the cells leave
+ * unmeasured: those still stop by name. */
+static void test_psp_measured_safe_scalar_rtc_20261117(void) {
+    reset_fixture();
+    sr_hle_init();
+    char msg[192];
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+
+    static const struct { const char *row; uint16_t y, mo, d, h; } valid[] = {
+        { "rtc-valid-day-0", 2024, 1, 0, 0 }, { "rtc-valid-feb-29-2023", 2023, 2, 29, 0 },
+        { "rtc-valid-feb-29-1900", 1900, 2, 29, 0 }, { "rtc-valid-feb-30-2024", 2024, 2, 30, 0 },
+        { "rtc-valid-feb-31-2024", 2024, 2, 31, 0 }, { "rtc-valid-apr-31-2024", 2024, 4, 31, 0 },
+        { "rtc-valid-day-0-hour-24", 2024, 1, 0, 24 },
+    };
+    for (size_t i = 0; i < sizeof valid / sizeof valid[0]; i++) {
+        snprintf(msg, sizeof msg, "%s: sceRtcCheckValid is 0xfffffffd, the day (PSP-SAFE-SCALAR-001)", valid[i].row);
+        expect(rtca_check_valid(valid[i].y, valid[i].mo, valid[i].d, valid[i].h, 0, 0, 0) == 0xfffffffdu, msg);
+    }
+
+    static const struct { const char *row; uint32_t y, m, d, dow; } dow[] = {
+        { "rtc-dow-month-0", 2026, 0, 1, 6 }, { "rtc-dow-month-13", 2026, 13, 1, 5 },
+        { "rtc-dow-month-13-again", 2026, 13, 1, 5 }, { "rtc-dow-month-14", 2026, 14, 15, 1 },
+        { "rtc-dow-month-24", 2026, 24, 1, 6 }, { "rtc-dow-year-0", 0, 1, 1, 0 },
+        { "rtc-dow-year-10000", 10000, 1, 1, 6 }, { "rtc-dow-day-1000001", 2026, 1, 1000001, 5 },
+        { "rtc-dow-day-max", 2026, 1, 0x7fffffffu, 0 },
+    };
+    for (size_t i = 0; i < sizeof dow / sizeof dow[0]; i++) {
+        snprintf(msg, sizeof msg, "%s: sceRtcGetDayOfWeek is %u (PSP-SAFE-SCALAR-001)", dow[i].row, (unsigned)dow[i].dow);
+        expect(td24b_dispatch4(RTCA_NID_DAY_OF_WEEK, dow[i].y, dow[i].m, dow[i].d, 0u) == dow[i].dow, msg);
+    }
+
+    static const struct { const char *row; uint16_t y, mo, d, h, mi, sec; uint32_t result, out; } tm[] = {
+        { "rtc-time-1969", 1969, 12, 31, 23, 59, 59, 0x800001feu, 0x00000000u },
+        { "rtc-time-1601", 1601, 1, 1, 0, 0, 0, 0x800001feu, 0x00000000u },
+        { "rtc-time-2106-past", 2106, 2, 7, 6, 28, 16, 0x800001feu, 0x7fffffffu },
+        { "rtc-time-9999", 9999, 12, 31, 23, 59, 59, 0x800001feu, 0x7fffffffu },
+        { "rtc-time-month-0", 2024, 0, 10, 0, 0, 0, 0u, 0x659dde00u },
+        { "rtc-time-month-13", 2024, 13, 1, 0, 0, 0, 0u, 0x674ba700u },
+        { "rtc-time-day-0", 2024, 1, 0, 0, 0, 0, 0u, 0x6590af00u },
+        { "rtc-time-day-32", 2024, 1, 32, 0, 0, 0, 0u, 0x65badf00u },
+        { "rtc-time-feb-30", 2024, 2, 30, 0, 0, 0, 0u, 0x65e11a80u },
+        { "rtc-time-hour-24", 2024, 1, 1, 24, 0, 0, 0u, 0x65935200u },
+        { "rtc-time-second-60", 2024, 1, 1, 0, 0, 60, 0u, 0x659200bcu },
+    };
+    for (size_t i = 0; i < sizeof tm / sizeof tm[0]; i++) {
+        rtct_date(tm[i].y, tm[i].mo, tm[i].d, tm[i].h, tm[i].mi, tm[i].sec, 0u);
+        MEM_W32(RTCT_OUT, 0xa5a5a5a5u); MEM_W32(RTCT_OUT + 4u, 0xa5a5a5a5u);
+        const uint32_t rc = td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u);
+        snprintf(msg, sizeof msg, "%s: sceRtcGetTime_t is 0x%08x and writes 0x%08x as one word (PSP-SAFE-SCALAR-001)",
+                 tm[i].row, (unsigned)tm[i].result, (unsigned)tm[i].out);
+        expect(rc == tm[i].result && MEM_R32(RTCT_OUT) == tm[i].out && MEM_R32(RTCT_OUT + 4u) == 0xa5a5a5a5u, msg);
+    }
+
+    static const struct { const char *row; uint64_t tick; int32_t years; uint32_t lo, hi; } add[] = {
+        { "rtc-addyears-y10000-plus-0", 315537897600000000ull, 0, 0xa5a5a5a5u, 0xa5a5a5a5u },
+        { "rtc-addyears-y10000-plus-1", 315537897600000000ull, 1, 0xa5a5a5a5u, 0xa5a5a5a5u },
+        { "rtc-addyears-y10000-minus-1", 315537897600000000ull, -1, 0x3f8b4000u, 0x0460e75du },
+        { "rtc-addyears-y10001-minus-2", 315569520000000000ull, -2, 0x3f8b4000u, 0x0460e75du },
+    };
+    for (size_t i = 0; i < sizeof add / sizeof add[0]; i++) {
+        MEM_W32(RTCT_SRC, (uint32_t)add[i].tick); MEM_W32(RTCT_SRC + 4u, (uint32_t)(add[i].tick >> 32));
+        MEM_W32(RTCT_DST, 0xa5a5a5a5u); MEM_W32(RTCT_DST + 4u, 0xa5a5a5a5u);
+        const uint32_t rc = td24b_dispatch4(RTCT_NID_ADD_YEARS, RTCT_DST, RTCT_SRC, (uint32_t)add[i].years, 0u);
+        snprintf(msg, sizeof msg, "%s: sceRtcTickAddYears is 0 and dest reads 0x%08x%08x (PSP-SAFE-SCALAR-001)",
+                 add[i].row, (unsigned)add[i].hi, (unsigned)add[i].lo);
+        expect(rc == 0u && MEM_R32(RTCT_DST) == add[i].lo && MEM_R32(RTCT_DST + 4u) == add[i].hi, msg);
+    }
+    expect(sr_hle_test_unmodelled_stops() == stops, "PSP-SAFE-SCALAR-001: none of the 31 RTC cells stops the run");
+
+    /* Between two measured dates of one answer the answer holds; the month table gives the day
+     * rule for the months the cells did not visit. */
+    rtct_date(1950, 6, 15, 12, 0, 0, 0u);
+    MEM_W32(RTCT_OUT, 0xa5a5a5a5u);
+    expect(td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u) == 0x800001feu && MEM_R32(RTCT_OUT) == 0u,
+           "sceRtcGetTime_t: a date between 1601 and 1969 is 0x800001fe and writes 0");
+    rtct_date(3000, 1, 1, 0, 0, 0, 0u);
+    MEM_W32(RTCT_OUT, 0xa5a5a5a5u);
+    expect(td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u) == 0x800001feu &&
+               MEM_R32(RTCT_OUT) == 0x7fffffffu,
+           "sceRtcGetTime_t: a date between 2106-02-07 06:28:16 and 9999 is 0x800001fe and writes 0x7fffffff");
+    expect(rtca_check_valid(2024, 6, 31, 0, 0, 0, 0) == 0xfffffffdu && rtca_check_valid(2024, 6, 30, 0, 0, 0, 0) == 0u,
+           "sceRtcCheckValid: June 31 is the day, -3, and June 30 is valid");
+    expect(sr_hle_test_unmodelled_stops() == stops, "PSP-SAFE-SCALAR-001: the dates between the cells stop nothing");
+
+    /* Not measured: each still stops the run by name. */
+    static const struct { uint16_t y, mo, d, h, mi, sec; } time_stops[] = {
+        { 1600, 12, 31, 23, 59, 59 },   /* before 1601 */
+        { 2024, 14, 1, 0, 0, 0 },       /* a month past 13 */
+        { 2024, 1, 33, 0, 0, 0 },       /* two days past the month */
+        { 2024, 2, 31, 0, 0, 0 },
+        { 2024, 1, 1, 25, 0, 0 },       /* an hour past 24 */
+        { 2024, 1, 1, 0, 60, 0 },       /* a minute out of range */
+        { 2024, 1, 1, 0, 0, 61 },       /* a second past 60 */
+        { 2024, 0, 0, 0, 0, 0 },        /* two fields out of range */
+        { 1970, 1, 0, 0, 0, 0 },        /* a field out of range and a date before 1970 */
+        { 0, 1, 1, 0, 0, 0 },           /* year 0 */
+        /* the measured out-of-range fields at a date that was not measured */
+        { 2024, 0, 11, 0, 0, 0 },
+        { 2025, 13, 1, 0, 0, 0 },
+        { 2023, 1, 0, 0, 0, 0 },
+        { 2024, 3, 32, 0, 0, 0 },
+        { 2023, 2, 29, 0, 0, 0 },
+        { 2024, 1, 2, 24, 0, 0 },
+        { 2024, 1, 1, 0, 1, 60 },
+    };
+    for (size_t i = 0; i < sizeof time_stops / sizeof time_stops[0]; i++) {
+        rtct_date(time_stops[i].y, time_stops[i].mo, time_stops[i].d, time_stops[i].h, time_stops[i].mi,
+                  time_stops[i].sec, 0u);
+        (void)td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u);
+    }
+    rtct_date(2024, 1, 0, 0, 0, 0, 1u);   /* rtc-time-day-0 with a microsecond of 1 */
+    (void)td24b_dispatch4(RTCT_NID_GET_TIME_T, RTCT_DATE, RTCT_OUT, 0u, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 18u,
+           "sceRtcGetTime_t still stops by name on every date with a field out of range but the seven measured");
+
+    /* sceRtcTickAddYears: the last measured source is 10001-01-01 00:00:00 (in the table above).
+     * A tick between the two measured sources follows the recorded rule; one tick past the last
+     * measured source, and 10002-01-01, stop by name. */
+    const uint64_t y10000_day_100 = 315546537600000000ull;   /* 10000-04-10 00:00:00 */
+    MEM_W32(RTCT_SRC, (uint32_t)y10000_day_100); MEM_W32(RTCT_SRC + 4u, (uint32_t)(y10000_day_100 >> 32));
+    MEM_W32(RTCT_DST, 0xa5a5a5a5u); MEM_W32(RTCT_DST + 4u, 0xa5a5a5a5u);
+    expect(td24b_dispatch4(RTCT_NID_ADD_YEARS, RTCT_DST, RTCT_SRC, (uint32_t)-1, 0u) == 0u &&
+               (((uint64_t)MEM_R32(RTCT_DST + 4u) << 32) | MEM_R32(RTCT_DST)) == 315514915200000000ull &&
+               sr_hle_test_unmodelled_stops() == stops + 18u,
+           "sceRtcTickAddYears: 10000-04-10, between the two measured sources, - 1 is 9999-04-10");
+    const uint64_t past_last = 315569520000000001ull;        /* 10001-01-01 00:00:00.000001 */
+    MEM_W32(RTCT_SRC, (uint32_t)past_last); MEM_W32(RTCT_SRC + 4u, (uint32_t)(past_last >> 32));
+    MEM_W32(RTCT_DST, 0xa5a5a5a5u); MEM_W32(RTCT_DST + 4u, 0xa5a5a5a5u);
+    (void)td24b_dispatch4(RTCT_NID_ADD_YEARS, RTCT_DST, RTCT_SRC, (uint32_t)-2, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 19u && MEM_R32(RTCT_DST) == 0xa5a5a5a5u &&
+               MEM_R32(RTCT_DST + 4u) == 0xa5a5a5a5u,
+           "sceRtcTickAddYears: one tick past the last measured source stops by name and writes nothing");
+    MEM_W32(RTCT_SRC, (uint32_t)315601056000000000ull); MEM_W32(RTCT_SRC + 4u, (uint32_t)(315601056000000000ull >> 32));
+    (void)td24b_dispatch4(RTCT_NID_ADD_YEARS, RTCT_DST, RTCT_SRC, (uint32_t)-3, 0u);   /* 10002-01-01 */
+    (void)td24b_dispatch4(RTCA_NID_DAY_OF_WEEK, 2026u, 0u, 2u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_DAY_OF_WEEK, 2026u, 25u, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_DAY_OF_WEEK, 10001u, 1u, 1u, 0u);
+    (void)td24b_dispatch4(RTCA_NID_DAY_OF_WEEK, 2026u, 1u, 1000002u, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 24u,
+           "sceRtcTickAddYears from year 10002 and sceRtcGetDayOfWeek off the measured triples still stop by name");
 }
 
 static void test_psp_measured_rtc_time64_20261024(void) {
@@ -18523,6 +18776,87 @@ static char *hle_archive_route_env_copy(const char *value) {
 
 static void hle_archive_route_set_env(const char *name, const char *value) {
     hle_test_setenv(name, value);
+}
+
+static void test_hle_hot_log_switches_are_cached(void) {
+    extern void sr_hle_test_ge_log_reset(void);
+    extern unsigned sr_hle_test_ge_log_env_reads(void);
+    extern void sr_hle_test_io_statlog_switch_reset(void);
+    extern unsigned sr_hle_test_io_statlog_env_reads(void);
+    enum { GE_UNSET_NID = 0x05db22ceu, IO_GETSTAT_NID = 0xace946e8u,
+           PATH_ADDR = 0x0903e000u, STAT_ADDR = 0x0903e100u };
+    static const char ms_root[] = HLE_BUILD_ROOT "/hle_log_switch";
+    static const char guest_path[] = "ms0:/HOT_LOG_SWITCH.BIN";
+    char host_file[512];
+    char *old_ge = hle_archive_route_env_copy(getenv("SR_GELOG"));
+    char *old_gedump = hle_archive_route_env_copy(getenv("SR_GEDUMP"));
+    char *old_debug = hle_archive_route_env_copy(getenv("SR_DEBUG"));
+    char *old_statlog = hle_archive_route_env_copy(getenv("SR_STATLOG"));
+    char *old_memstick = hle_archive_route_env_copy(getenv("SR_MEMSTICK"));
+
+    snprintf(host_file, sizeof(host_file), "%s/HOT_LOG_SWITCH.BIN", ms_root);
+    expect(nk_platform_mkdir_p(ms_root), "hot-log test creates a synthetic Memory Stick root");
+    (void)remove(host_file);
+    FILE *file = fopen(host_file, "wb");
+    expect(file != NULL, "hot-log test creates a synthetic file for sceIoGetstat");
+    if (file) {
+        static const char contents[] = "cached stat log fixture";
+        expect(fwrite(contents, 1, sizeof(contents) - 1u, file) == sizeof(contents) - 1u,
+               "hot-log test writes its synthetic stat file");
+        fclose(file);
+    }
+    hle_archive_route_set_env("SR_MEMSTICK", ms_root);
+    memcpy(SR_HOST(PATH_ADDR), guest_path, sizeof(guest_path));
+
+    hle_archive_route_set_env("SR_GELOG", NULL);
+    hle_archive_route_set_env("SR_GEDUMP", NULL);
+    hle_archive_route_set_env("SR_DEBUG", NULL);
+    /* The handlers below are the registered production ones, reached through sr_syscall. The
+     * counters sit inside the cached switches, so a call site that asks the environment itself
+     * (as both did before #2642) leaves its counter at zero and prints after the switch is set. */
+    sr_hle_init();
+    sr_hle_test_register_iofilemgr();
+    sr_hle_test_ge_log_reset();
+    for (unsigned i = 0; i < 4u; i++) {
+        CpuState cpu;
+        memset(&cpu, 0, sizeof(cpu));
+        expect(sr_syscall(&cpu, GE_UNSET_NID) == 0u,
+               "sceGeUnsetCallback production handler returns through sr_syscall");
+        if (i == 0u) hle_archive_route_set_env("SR_GELOG", "1");
+    }
+    expect(sr_hle_test_ge_log_env_reads() == 1u,
+           "sceGeUnsetCallback production path reads the cached GE log switch once across repeated syscalls");
+
+    hle_archive_route_set_env("SR_STATLOG", NULL);
+    sr_hle_test_io_statlog_switch_reset();
+    for (unsigned i = 0; i < 4u; i++) {
+        CpuState cpu;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = PATH_ADDR;
+        cpu.r[5] = STAT_ADDR;
+        expect(sr_syscall(&cpu, IO_GETSTAT_NID) == 0u &&
+                   MEM_R32(STAT_ADDR + 8u) == sizeof("cached stat log fixture") - 1u,
+               "sceIoGetstat production handler runs through sr_syscall on a host-backed file");
+        if (i == 0u) hle_archive_route_set_env("SR_STATLOG", "1");
+    }
+    expect(sr_hle_test_io_statlog_env_reads() == 1u,
+           "sceIoGetstat production path reads SR_STATLOG once across repeated syscalls");
+    sr_hle_test_io_statlog_switch_reset();
+
+    hle_archive_route_set_env("SR_GELOG", old_ge);
+    hle_archive_route_set_env("SR_GEDUMP", old_gedump);
+    hle_archive_route_set_env("SR_DEBUG", old_debug);
+    hle_archive_route_set_env("SR_STATLOG", old_statlog);
+    hle_archive_route_set_env("SR_MEMSTICK", old_memstick);
+    free(old_ge);
+    free(old_gedump);
+    free(old_debug);
+    free(old_statlog);
+    free(old_memstick);
+    sr_hle_test_ge_log_reset();
+    sr_hle_test_io_statlog_switch_reset();
+    (void)remove(host_file);
+    (void)rmdir(ms_root);
 }
 
 static uint32_t hle_archive_route_open_result(const char *path) {
@@ -40755,6 +41089,92 @@ static void test_kernel_import_sweep_memory_blocks_and_sdk_alias(void) {
            "sceKernelSetCompiledSdkVersion370 updates shared SDK-version state");
 }
 
+/* sceKernelAllocMemoryBlock type 1 (High) in a partition based below the runtime stacks, the layout
+ * of this fixture's default image, where the call stopped the run by name (#2640). pspautotests
+ * tests/sysmem/memblock.expected at 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party
+ * recording made on a PSP: line 9 "Type 1: OK", and lines 25-33 a second type-1 block lying its
+ * size rounded up to 0x100 below a 0x100-byte one just placed (delta 100 for sizes 1 to 0x11, 200
+ * for 0x101, 1100 for 0x1001, 10100 for 0x10001). The blocks come from the top of user RAM, where
+ * this layout's thread stacks come from too; its bump region, which the free sizes measure, ends
+ * below the runtime stacks, so neither shortens it. */
+static void test_memory_block_high_in_low_based_partition(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_bump_top(void);
+    const uint32_t addr_out = 0x00280004u;
+    const uint32_t name = 0x00280010u;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    title_hle_write_cstr(name, "test");
+    expect(sr_hle_test_partition_bump_top() == SR_VBLANK_STACK_BASE,
+           "memblock high: the default image's partition ends at the runtime stacks");
+
+    static const struct { uint32_t size, delta; } deltas[] = {
+        {1u, 0x100u}, {2u, 0x100u}, {3u, 0x100u}, {4u, 0x100u}, {5u, 0x100u}, {0x11u, 0x100u},
+        {0x101u, 0x200u}, {0x1001u, 0x1100u}, {0x10001u, 0x10100u},
+    };
+    enum { NDELTAS = sizeof(deltas) / sizeof(deltas[0]) };
+    const uint32_t stops = sr_hle_test_unmodelled_stops();
+    uint32_t uids[2 * NDELTAS];
+    size_t nuids = 0;
+    int deltas_ok = 1, placed_ok = 1;
+    uint32_t next_top = SR_STACK_ARENA_CEIL;
+    for (size_t i = 0; i < NDELTAS; i++) {
+        uint32_t u1 = memblock_alloc(name, 1u, 0x100u, 0u);
+        uint32_t u2 = memblock_alloc(name, 1u, deltas[i].size, 0u);
+        if (u1 != 0u && u1 < 0x80000000u) uids[nuids++] = u1;
+        if (u2 != 0u && u2 < 0x80000000u) uids[nuids++] = u2;
+        if (u1 == 0u || u1 >= 0x80000000u || u2 == 0u || u2 >= 0x80000000u) {
+            deltas_ok = 0;
+            continue;
+        }
+        uint32_t a1 = memblock_addr(u1, addr_out), a2 = memblock_addr(u2, addr_out);
+        if (a1 - a2 != deltas[i].delta) deltas_ok = 0;
+        if (a1 + 0x100u != next_top || (a2 & 0xffu) != 0u) placed_ok = 0;
+        next_top = a2;
+    }
+    expect(deltas_ok && sr_hle_test_unmodelled_stops() == stops,
+           "memblock high: type 1 allocates with the recorded deltas (sizes 1..0x10001) and "
+           "stops nothing");
+    expect(placed_ok, "memblock high: the blocks stack downward from the top of user RAM");
+
+    uint32_t low = memblock_alloc(name, 0u, 0x100u, 0u);
+    uint32_t low_addr = low != 0u && low < 0x80000000u ? memblock_addr(low, addr_out) : 0u;
+    expect(low_addr != 0u && low_addr + 0x100u <= SR_VBLANK_STACK_BASE &&
+               sr_hle_test_partition_bump_top() == SR_VBLANK_STACK_BASE,
+           "memblock high: a Low block still comes from the bump region, which the High blocks "
+           "leave whole");
+    int freed_ok = low_addr != 0u && memblock_free(low) == 0u;
+    for (size_t i = 0; i < nuids; i++)
+        if (memblock_free(uids[i]) != 0u) freed_ok = 0;
+    uint32_t again = memblock_alloc(name, 1u, 0x100u, 0u);
+    expect(freed_ok && nuids == 2u * NDELTAS && again != 0u && again < 0x80000000u &&
+               memblock_addr(again, addr_out) + 0x100u == SR_STACK_ARENA_CEIL &&
+               memblock_free(again) == 0u,
+           "memblock high: freed blocks go back, and the next one lands at the top again");
+
+    /* The arena's own rule, as in the user-RAM layout: a live thread stack holds the top, and the
+     * High block goes directly below it. */
+    uint32_t thread = sched_create_thread(0x2000u, 32, 0x8000u);
+    uint32_t floor = sched_guest_stack_floor();
+    uint32_t under = memblock_alloc(name, 1u, 0x100u, 0u);
+    expect(thread != 0u && floor == SR_STACK_ARENA_CEIL - 0x8000u && under != 0u &&
+               under < 0x80000000u && memblock_addr(under, addr_out) + 0x100u == floor &&
+               memblock_free(under) == 0u,
+           "memblock high: a High block lies directly below a live thread stack");
+
+    /* The refusals memblock.expected records (lines 10, 24 and 2) hold in this layout, and a block
+     * the top of user RAM cannot hold fails with the allocation code instead of stopping. */
+    expect(memblock_alloc(name, 2u, 0x100u, 0u) == 0x800200d8u &&
+               memblock_alloc(name, 1u, 0u, 0u) == 0x800200d9u &&
+               memblock_alloc(0u, 1u, 0x100u, 0u) == 0x80020001u &&
+               memblock_alloc(name, 1u, 0xffffff00u, 0u) == 0x800200d9u &&
+               sr_hle_test_unmodelled_stops() == stops,
+           "memblock high: type 2, size 0 and a NULL name keep their recorded codes, and an "
+           "oversized block is 0x800200D9");
+    sr_hle_test_partition_reset();
+}
+
 static void test_td28_partition_free_reuse(void) {
     extern void sr_hle_test_partition_reset(void);
     extern int sr_hle_test_partition_free_block_count(void);
@@ -41367,7 +41787,7 @@ static void test_imports_20261102_measured_contracts(void) {
            "a latched request for framebuffer 0 leaves it foreground until the vblank");
 
     /* idlist.expected: byte size, whole entries, count is the module total, the caller's module is in it. */
-    const uint32_t NID_ID_LIST = 0x644395e2u, NID_GET_ID_BY_ADDR = 0xd8b73127u;
+    const uint32_t NID_ID_LIST = NID_SCE_KERNEL_GET_MODULE_ID_LIST, NID_GET_ID_BY_ADDR = 0xd8b73127u;
     const uint32_t BUF = 0x00200600u, CNT = 0x00200680u;
     const uint32_t A_BASE = 0x08a10000u, B_BASE = 0x08a20000u, SPAN = 0x10000u;
     s_fixture_loaded_base = 0x08804000u;
@@ -41413,10 +41833,38 @@ static void test_imports_20261102_measured_contracts(void) {
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u; cpu.r[6] = CNT;
     (void)sr_syscall(&cpu, NID_ID_LIST);
     expect(MEM_R32(CNT) == 2u, "an unloaded module leaves the list");
+    /* idlist.expected lines 14-16 at pspautotests 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a
+     * third-party recording made on a PSP: a NULL count, a count pointer in the kernel segment
+     * (0x88000000) and a buffer there are each 0x800200d3, and the count-pointer refusal leaves
+     * the buffer untouched. 0x88000000 names physical 0x08000000 here, so that word must stay as
+     * it was too. Before #2640 the NULL count stopped the run by name and the kernel-segment
+     * pointers were written through. */
+    const uint32_t KSEG = 0x88000000u, KSEG_PHYS = 0x08000000u;
     stops = sr_hle_test_unmodelled_stops();
-    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 8u;
+    for (uint32_t w = 0; w < 8u; w++) MEM_W32(BUF + 4u * w, 0xdeadbeefu);
+    MEM_W32(KSEG_PHYS, 0x12345678u);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u;
+    expect(sr_syscall(&cpu, NID_ID_LIST) == 0x800200d3u && MEM_R32(BUF) == 0xdeadbeefu,
+           "a NULL count pointer is 0x800200d3 and writes nothing");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u; cpu.r[6] = KSEG;
+    expect(sr_syscall(&cpu, NID_ID_LIST) == 0x800200d3u && MEM_R32(BUF) == 0xdeadbeefu &&
+               MEM_R32(KSEG_PHYS) == 0x12345678u,
+           "a kernel-segment count pointer is 0x800200d3 and leaves the buffer untouched");
+    MEM_W32(CNT, 0xffffffffu);
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = KSEG; cpu.r[5] = 4u; cpu.r[6] = CNT;
+    expect(sr_syscall(&cpu, NID_ID_LIST) == 0x800200d3u && MEM_R32(KSEG_PHYS) == 0x12345678u,
+           "a kernel-segment buffer is 0x800200d3 and is not written");
+    expect(sr_hle_test_unmodelled_stops() == stops, "the recorded pointer refusals stop nothing");
+    /* A pointer outside guest memory that is not in the kernel segment has no recorded cell: it
+     * still stops by name, before anything is written. */
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = BUF; cpu.r[5] = 32u; cpu.r[6] = 0x0c000000u;
     (void)sr_syscall(&cpu, NID_ID_LIST);
-    expect(sr_hle_test_unmodelled_stops() == stops + 1u, "a NULL count pointer stops by name");
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u && MEM_R32(BUF) == 0xdeadbeefu,
+           "a count pointer outside guest memory stops by name and writes nothing");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = 0x0c000000u; cpu.r[5] = 4u; cpu.r[6] = CNT;
+    (void)sr_syscall(&cpu, NID_ID_LIST);
+    expect(sr_hle_test_unmodelled_stops() == stops + 2u && MEM_R32(CNT) == 0xffffffffu,
+           "a buffer outside guest memory stops by name and leaves count untouched");
     sr_hle_test_module_reset();
     s_fixture_loaded_base = UINT32_MAX;
     s_fixture_loaded_end = 0x00400000u;
@@ -42672,10 +43120,10 @@ static void test_wb_tlspl_vpl_cells(void) {
     uint32_t p6 = wb_tlspl_create("tls", 6u, 0u, 0x100u, 4u, 0xdeadbeefu);
     expect(p6 != 0u && p6 < 0x80000000u, "wb tlspl: partition 6 succeeds");
     if (p6 < 0x80000000u) (void)selftest_tlspl_simple(p6, NID_TLSPL_DELETE);
-    static const uint32_t good_attr[] = {0x1u, 0x100u}; /* 0x4000 needs the High region, which this fixture partition does not model */
+    static const uint32_t good_attr[] = {0x1u, 0x100u, 0x4000u};
     for (size_t i = 0; i < sizeof good_attr / sizeof good_attr[0]; ++i) {
         uint32_t u = wb_tlspl_create("tls", 2u, good_attr[i], 0x100u, 4u, 0xdeadbeefu);
-        expect(u != 0u && u < 0x80000000u, "wb tlspl: attrs 1 and 0x100 succeed");
+        expect(u != 0u && u < 0x80000000u, "wb tlspl: attrs 1, 0x100 and 0x4000 succeed");
         if (u < 0x80000000u) {
             expect(selftest_tlspl_refer(u, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO + 36u) == good_attr[i],
                    "wb tlspl: the attr is reported as given");
@@ -42801,6 +43249,316 @@ static void test_wb_tlspl_vpl_cells(void) {
                "wb vpl: AllocateCB of 0, more than the pool, or -1 bytes is 0x800201B7");
     }
     (void)selftest_vpl_delete(vpl);
+}
+
+/* sceKernelCreateTlspl attr 0x4000 (PSP_TLSPL_ATTR_HIGHMEM), #2640, in both partition layouts: the
+ * fixture's default image, linked below the runtime stacks, where the create stopped the run by
+ * name, and an image in user RAM, as a game's is. pspautotests tests/threads/tls/create.expected
+ * at 774dfddc467ae0cbb7d3d8b22fc271f74135cd38, a third-party recording made on a PSP, fixes what
+ * the caller sees. Line 29: a pool whose status reads attr=00004000, blockSize 0x100 and four free
+ * blocks of four, 1024 bytes taken from the partition's free total and given back by the delete
+ * (no LEAK line). Lines 28 and 30: 0x80020191 for attr 0x2000 and 0x8000. Where the pool lies is
+ * not in that recording. For one shape it is PSP-measured, the top of the partition: partition 2,
+ * attribute exactly 0x4000, four 0x100-byte blocks, NULL options (PSP-SAFE-SCALAR-001,
+ * test_psp_measured_safe_scalar_tls_20261117). For every other attr 0x4000 pool the top of the
+ * partition is still PPSSPP-derived, not PSP-measured (h_CreateTlspl), and the handler says so once
+ * per run.
+ *
+ * The free total carries a 0x100 tail for every partition block slot ever used
+ * (h_TotalFreeMemSize), so the slots the case uses are opened first; the recorded cell also runs
+ * after other pools came and went. In the low-based layout the free total measures the bump
+ * region, which ends below the runtime stacks and so below these pools: there only the leak is
+ * checked. */
+static uint32_t tlspl_total_free(void) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    return sr_syscall(&cpu, 0xf919f628u);   /* sceKernelTotalFreeMemSize */
+}
+
+static int tlspl_created(uint32_t uid) { return uid != 0u && uid < 0x80000000u; }
+
+static void test_tlspl_highmem_pool(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_bump_top(void);
+    extern void sr_hle_test_tlspl_highmem_note_reset(void);
+    static const char note[] = "PPSSPP-derived, not PSP-measured: sceKernelCreateTlspl";
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    for (int user_ram = 0; user_ram < 2; ++user_ram) {
+        reset_fixture();
+        s_fixture_loaded_end = user_ram ? 0x08a00000u : loaded_end;
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        sr_hle_test_tlspl_highmem_note_reset();
+        TCB *thread = fixture_thread(0x33b1u, TH_RUNNING, 32);
+        expect(thread != NULL &&
+                   (sr_hle_test_partition_bump_top() == SR_VBLANK_STACK_BASE) == !user_ram,
+               "tlspl highmem: only the default image's partition ends at the runtime stacks");
+        if (!thread) break;
+        s_cur = (int)(thread - s_tcb);
+
+        uint32_t low = wb_tlspl_create("low", 2u, 0u, 0x100u, 4u, 0xdeadbeefu);
+        uint32_t gone1 = wb_tlspl_create("tls", 2u, 0x1u, 0x100u, 4u, 0xdeadbeefu);
+        uint32_t gone2 = wb_tlspl_create("tls", 2u, 0x100u, 0x100u, 4u, 0xdeadbeefu);
+        expect(tlspl_created(low) && tlspl_created(gone1) && tlspl_created(gone2) &&
+                   selftest_tlspl_simple(gone1, NID_TLSPL_DELETE) == 0u &&
+                   selftest_tlspl_simple(gone2, NID_TLSPL_DELETE) == 0u,
+               "tlspl highmem: an attr 0 pool stays, and attr 1 and 0x100 pools come and go");
+        const uint32_t before = tlspl_total_free();
+        const uint32_t stops = sr_hle_test_unmodelled_stops();
+        rt_capture_begin();
+        uint32_t high = wb_tlspl_create("tls", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        const uint32_t taken = before - tlspl_total_free();
+        uint32_t second = wb_tlspl_create("tls", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        const char *out = rt_capture_end();
+        expect(tlspl_created(high) && tlspl_created(second) &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "tlspl highmem: attr 0x4000 creates a pool and stops nothing");
+        int notes = 0;
+        for (const char *p = out; (p = strstr(p, note)) != NULL; p += sizeof(note) - 1u) ++notes;
+        expect(notes == 0, "tlspl highmem: the measured pool shape logs no derived placement (PSP-SAFE-SCALAR-001)");
+        if (tlspl_created(high) && tlspl_created(second)) {
+            MEM_W32(TLSPL_INFO, 60u);
+            expect(selftest_tlspl_refer(high, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO) == 60u &&
+                       MEM_R8(TLSPL_INFO + 4u) == (uint8_t)'t' &&
+                       MEM_R32(TLSPL_INFO + 36u) == 0x4000u && MEM_R32(TLSPL_INFO + 44u) == 0x100u &&
+                       MEM_R32(TLSPL_INFO + 48u) == 4u && MEM_R32(TLSPL_INFO + 52u) == 4u &&
+                       MEM_R32(TLSPL_INFO + 56u) == 0u,
+                   "tlspl highmem: the status reads attr 0x4000, block size 0x100 and 4 free blocks of 4");
+            if (user_ram)
+                expect(taken == 0x400u,
+                       "tlspl highmem: the pool takes its 1024 bytes from the free total");
+            const uint32_t a_low = selftest_tlspl_get_addr(low);
+            const uint32_t a_high = selftest_tlspl_get_addr(high);
+            const uint32_t a_second = selftest_tlspl_get_addr(second);
+            expect(a_low != 0u && a_high == SR_STACK_ARENA_CEIL - 0x400u &&
+                       a_second == a_high - 0x400u && a_low < a_second &&
+                       (user_ram || a_low < SR_VBLANK_STACK_BASE),
+                   "tlspl highmem: the pools sit at the top of user RAM, the second below the "
+                   "first, and the attr 0 pool below both");
+            expect(selftest_tlspl_simple(high, NID_TLSPL_FREE) == 0u &&
+                       selftest_tlspl_simple(second, NID_TLSPL_FREE) == 0u &&
+                       selftest_tlspl_simple(high, NID_TLSPL_DELETE) == 0u &&
+                       selftest_tlspl_simple(second, NID_TLSPL_DELETE) == 0u &&
+                       tlspl_total_free() == before,
+                   "tlspl highmem: deleting the pools gives every byte back");
+            uint32_t again = wb_tlspl_create("tls", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+            expect(tlspl_created(again) &&
+                       selftest_tlspl_get_addr(again) == SR_STACK_ARENA_CEIL - 0x400u &&
+                       selftest_tlspl_simple(again, NID_TLSPL_FREE) == 0u &&
+                       selftest_tlspl_simple(again, NID_TLSPL_DELETE) == 0u,
+                   "tlspl highmem: the next attr 0x4000 pool lands at the top again");
+        } else {
+            if (tlspl_created(high)) (void)selftest_tlspl_simple(high, NID_TLSPL_DELETE);
+            if (tlspl_created(second)) (void)selftest_tlspl_simple(second, NID_TLSPL_DELETE);
+        }
+        /* Only one pool shape is in the measurement (partition 2, attribute exactly 0x4000, four
+         * 0x100-byte blocks, NULL options). Every other attr 0x4000 pool keeps the PPSSPP-derived
+         * placement and its note, logged once per run. */
+        static const struct { const char *what; uint32_t partition, attr, block_size, count, align; } derived[] = {
+            { "eight blocks", 2u, 0x4000u, 0x100u, 8u, 0xdeadbeefu },
+            { "0x200-byte blocks", 2u, 0x4000u, 0x200u, 4u, 0xdeadbeefu },
+            { "an options block", 2u, 0x4000u, 0x100u, 4u, 4u },
+            { "attribute 0x4001", 2u, 0x4001u, 0x100u, 4u, 0xdeadbeefu },
+            { "partition 6", 6u, 0x4000u, 0x100u, 4u, 0xdeadbeefu },
+        };
+        for (size_t i = 0; i < sizeof derived / sizeof derived[0]; i++) {
+            char msg[160];
+            sr_hle_test_tlspl_highmem_note_reset();
+            rt_capture_begin();
+            const uint32_t pool = wb_tlspl_create("tls", derived[i].partition, derived[i].attr, derived[i].block_size,
+                                                  derived[i].count, derived[i].align);
+            out = rt_capture_end();
+            snprintf(msg, sizeof msg, "tlspl highmem: an attr 0x4000 pool with %s is created and logs the "
+                     "PPSSPP-derived placement", derived[i].what);
+            expect(tlspl_created(pool) && strstr(out, note) != NULL && sr_hle_test_unmodelled_stops() == stops, msg);
+            if (tlspl_created(pool)) (void)selftest_tlspl_simple(pool, NID_TLSPL_DELETE);
+        }
+        sr_hle_test_tlspl_highmem_note_reset();
+        rt_capture_begin();
+        uint32_t six = wb_tlspl_create("tls", 6u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        uint32_t six2 = wb_tlspl_create("tls", 6u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        out = rt_capture_end();
+        notes = 0;
+        for (const char *p = out; (p = strstr(p, note)) != NULL; p += sizeof(note) - 1u) ++notes;
+        expect(tlspl_created(six) && tlspl_created(six2) && notes == 1 &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "tlspl highmem: the PPSSPP-derived placement is logged once for two partition 6 pools");
+        if (tlspl_created(six)) (void)selftest_tlspl_simple(six, NID_TLSPL_DELETE);
+        if (tlspl_created(six2)) (void)selftest_tlspl_simple(six2, NID_TLSPL_DELETE);
+        expect(wb_tlspl_create("tls", 2u, 0x2000u, 0x100u, 4u, 0xdeadbeefu) == 0x80020191u &&
+                   wb_tlspl_create("tls", 2u, 0x8000u, 0x100u, 4u, 0xdeadbeefu) == 0x80020191u,
+               "tlspl highmem: attr 0x2000 and 0x8000 stay 0x80020191");
+        /* memory.expected line 7 records 0x80020190 for an attr 0 pool of four 0x01000000-byte
+         * blocks; an attr 0x4000 pool the top of user RAM cannot hold takes the same exit. */
+        expect(wb_tlspl_create("tls", 2u, 0x4000u, 0x01000000u, 4u, 0xdeadbeefu) == 0x80020190u &&
+                   sr_hle_test_unmodelled_stops() == stops,
+               "tlspl highmem: a pool the partition cannot hold is 0x80020190, not a stop");
+        if (tlspl_created(low)) {
+            (void)selftest_tlspl_simple(low, NID_TLSPL_FREE);
+            (void)selftest_tlspl_simple(low, NID_TLSPL_DELETE);
+        }
+    }
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
+}
+
+/* PSP-SAFE-SCALAR-001 (2026-11-17, PSP-3000, boot 221, XMB context; docs/HARDWARE_ORACLE.md):
+ * where sceKernelCreateTlspl places a pool, replayed through the production NIDs in both
+ * partition layouts. The probe brackets the free memory with a Low and a High 0x100 block and
+ * records every address as a distance from one of them; the same distances are asserted here,
+ * row by row. The probe takes its High blocks with sceKernelAllocPartitionMemory type 1, which
+ * this runtime still places as a Low block (h_AllocPartitionMemory), so the High blocks here
+ * come from sceKernelAllocMemoryBlock type 1 (h_AllocMemoryBlock). Not replayed:
+ * tls-fragmentation and the distance between the brackets, which are the console's memory state,
+ * and the free-size words, because the free total carries a 0x100 tail per block slot
+ * (h_TotalFreeMemSize). */
+static uint32_t sstls_low_block(uint32_t *head) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 2u; cpu.r[5] = TLSPL_NAMEBUF; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
+    const uint32_t uid = sr_syscall(&cpu, 0x237dbd4fu);   /* sceKernelAllocPartitionMemory */
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid;
+    *head = sr_syscall(&cpu, 0x9d9a5ba1u);                /* sceKernelGetBlockHeadAddr */
+    return uid;
+}
+
+static uint32_t sstls_low_free(uint32_t uid) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid;
+    return sr_syscall(&cpu, 0xb6d61d02u);                 /* sceKernelFreePartitionMemory */
+}
+
+static uint32_t sstls_high_block(uint32_t *head) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = TLSPL_NAMEBUF; cpu.r[5] = 1u; cpu.r[6] = 0x100u;
+    const uint32_t uid = sr_syscall(&cpu, NID_SCE_KERNEL_ALLOC_MEMORY_BLOCK);
+    MEM_W32(TLSPL_OPTIONS, 0u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid; cpu.r[5] = TLSPL_OPTIONS;
+    (void)sr_syscall(&cpu, NID_SCE_KERNEL_GET_MEMORY_BLOCK_ADDR);
+    *head = MEM_R32(TLSPL_OPTIONS);
+    return uid;
+}
+
+static uint32_t sstls_high_free(uint32_t uid) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid;
+    return sr_syscall(&cpu, NID_SCE_KERNEL_FREE_MEMORY_BLOCK);
+}
+
+/* tls-status-*: size 0x3c, the attribute, the index, block size 0x100, 4 blocks, 3 free, nobody
+ * waiting, and the word after the 60 bytes left at the preset. */
+static int sstls_status_is(uint32_t pool, uint32_t attr, uint32_t index) {
+    for (uint32_t i = 0; i < 16u; ++i) MEM_W32(TLSPL_INFO + 4u * i, 0xa5a5a5a5u);
+    MEM_W32(TLSPL_INFO, 60u);
+    return selftest_tlspl_refer(pool, TLSPL_INFO) == 0u && MEM_R32(TLSPL_INFO) == 0x3cu &&
+           MEM_R32(TLSPL_INFO + 36u) == attr && MEM_R32(TLSPL_INFO + 40u) == index &&
+           MEM_R32(TLSPL_INFO + 44u) == 0x100u && MEM_R32(TLSPL_INFO + 48u) == 4u &&
+           MEM_R32(TLSPL_INFO + 52u) == 3u && MEM_R32(TLSPL_INFO + 56u) == 0u &&
+           MEM_R32(TLSPL_INFO + 60u) == 0xa5a5a5a5u;
+}
+
+/* tls-place-*: a fresh Low block's head minus the low bracket's, and the high bracket's head minus
+ * a fresh High block's; both blocks freed with result 0. */
+static int sstls_place_is(uint32_t lo_head, uint32_t hi_head, uint32_t low_distance, uint32_t high_distance) {
+    uint32_t low_head = 0u, high_head = 0u;
+    const uint32_t low = sstls_low_block(&low_head);
+    const uint32_t high = sstls_high_block(&high_head);
+    const int placed = tlspl_created(low) && tlspl_created(high) && low_head - lo_head == low_distance &&
+                       hi_head - high_head == high_distance;
+    const int freed = tlspl_created(low) && sstls_low_free(low) == 0u && tlspl_created(high) &&
+                      sstls_high_free(high) == 0u;
+    return placed && freed;
+}
+
+static void test_psp_measured_safe_scalar_tls_20261117(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern void sr_hle_test_tlspl_highmem_note_reset(void);
+    const uint32_t loaded_end = s_fixture_loaded_end;
+    for (int user_ram = 0; user_ram < 2; ++user_ram) {
+        reset_fixture();
+        s_fixture_loaded_end = user_ram ? 0x08a00000u : loaded_end;
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        sr_hle_test_tlspl_highmem_note_reset();
+        TCB *first = fixture_thread(0x33c1u, TH_RUNNING, 32);
+        TCB *other = fixture_thread(0x33c2u, TH_READY, 32);
+        expect(first != NULL && other != NULL, "safe-scalar tls: the fixture has two threads");
+        if (!first || !other) break;
+        s_cur = (int)(first - s_tcb);
+        const uint32_t stops = sr_hle_test_unmodelled_stops();
+        rt_capture_begin();
+
+        MEM_W8(TLSPL_NAMEBUF, (uint8_t)'b'); MEM_W8(TLSPL_NAMEBUF + 1u, 0u);
+        uint32_t lo_head = 0u, hi_head = 0u;
+        const uint32_t lo = sstls_low_block(&lo_head);
+        const uint32_t hi = sstls_high_block(&hi_head);
+        expect(tlspl_created(lo) && tlspl_created(hi) && (lo_head & 0xffu) == 0u && (hi_head & 0xffu) == 0u &&
+                   lo_head < hi_head,
+               "tls-brackets: a Low and a High 0x100 block are obtained, their heads 0x100-aligned");
+
+        const uint32_t normal = wb_tlspl_create("nktls0", 2u, 0u, 0x100u, 4u, 0xdeadbeefu);
+        expect(tlspl_created(normal), "tls-create-normal: a pool of four 0x100 blocks is created");
+        expect(sstls_place_is(lo_head, hi_head, 0x500u, 0x100u),
+               "tls-place-normal: a fresh Low block lands 0x500 above the low bracket, a fresh High "
+               "block 0x100 below the high one");
+        const uint32_t a_normal = selftest_tlspl_get_addr(normal);
+        expect(a_normal != 0u && a_normal - lo_head == 0x100u && (a_normal & 0xffu) == 0u &&
+                   selftest_tlspl_get_addr(normal) == a_normal,
+               "tls-addr-normal: the block is 0x100 above the low bracket's head, again on a second call");
+        expect(sstls_status_is(normal, 0u, 0u), "tls-status-normal: attr 0, index 0, 3 of 4 blocks free");
+
+        const uint32_t high = wb_tlspl_create("nktls1", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        expect(tlspl_created(high), "tls-create-high: an attr 0x4000 pool is created");
+        expect(sstls_place_is(lo_head, hi_head, 0x500u, 0x500u),
+               "tls-place-high: a fresh Low block does not move, a fresh High block lands 0x500 below "
+               "the high bracket");
+        const uint32_t a_high = selftest_tlspl_get_addr(high);
+        expect(a_high != 0u && hi_head - a_high == 0x400u && (a_high & 0xffu) == 0u &&
+                   selftest_tlspl_get_addr(high) == a_high,
+               "tls-addr-high: the block is 0x400 below the high bracket's head: the pool lies directly "
+               "below that bracket");
+        expect(sstls_status_is(high, 0x4000u, 1u), "tls-status-high: attr 0x4000, index 1, 3 of 4 blocks free");
+
+        const uint32_t high2 = wb_tlspl_create("nktls2", 2u, 0x4000u, 0x100u, 4u, 0xdeadbeefu);
+        expect(tlspl_created(high2), "tls-create-high-2: a second attr 0x4000 pool is created");
+        const uint32_t a_high2 = selftest_tlspl_get_addr(high2);
+        expect(a_high2 != 0u && hi_head - a_high2 == 0x800u && a_high2 - a_high == 0xfffffc00u &&
+                   (a_high2 & 0xffu) == 0u && selftest_tlspl_get_addr(high2) == a_high2,
+               "tls-addr-high-2: the second pool's block is 0x800 below the high bracket, 0x400 below "
+               "the first pool's");
+
+        s_cur = (int)(other - s_tcb);
+        const uint32_t b_normal = selftest_tlspl_get_addr(normal);
+        const uint32_t b_high = selftest_tlspl_get_addr(high);
+        expect(b_normal - a_normal == 0x100u && b_high - a_high == 0x100u &&
+                   selftest_tlspl_simple(normal, NID_TLSPL_FREE) == 0u &&
+                   selftest_tlspl_simple(high, NID_TLSPL_FREE) == 0u,
+               "tls-thread: a second thread's block is 0x100 above the first thread's in both pools, "
+               "and its frees return 0");
+        s_cur = (int)(first - s_tcb);
+
+        expect(selftest_tlspl_simple(normal, NID_TLSPL_FREE) == 0u &&
+                   selftest_tlspl_simple(high, NID_TLSPL_FREE) == 0u &&
+                   selftest_tlspl_simple(high2, NID_TLSPL_FREE) == 0u,
+               "tls-free: the three frees return 0");
+        expect(selftest_tlspl_simple(normal, NID_TLSPL_DELETE) == 0u &&
+                   selftest_tlspl_simple(high, NID_TLSPL_DELETE) == 0u &&
+                   selftest_tlspl_simple(high2, NID_TLSPL_DELETE) == 0u,
+               "tls-delete: the three deletes return 0");
+        expect(sstls_low_free(lo) == 0u && sstls_high_free(hi) == 0u,
+               "tls-cleanup: both brackets free with result 0");
+        const char *out = rt_capture_end();
+        expect(sr_hle_test_unmodelled_stops() == stops &&
+                   strstr(out, "PPSSPP-derived, not PSP-measured: sceKernelCreateTlspl") == NULL,
+               "PSP-SAFE-SCALAR-001: the partition 2 placement stops nothing and carries no derived label");
+    }
+    s_fixture_loaded_end = loaded_end;
+    sr_hle_test_partition_reset();
 }
 
 static void test_fpl_blocking_waits(void) {
@@ -49674,6 +50432,24 @@ static void test_pad_late_through_the_boundary(void) {
     }
     pad_late_teardown();
 
+    /* S2b (#1732): a pause opens and closes in the hold, then another thread passes the update
+     * boundary before the held thread resumes. The held update keeps its own pause count, not the
+     * shared one the second boundary overwrote, so its refresh stays blocked. */
+    pad_late_fixture();
+    {
+        const uint64_t t = s_pad_vblank_ns;
+        TCB *u = pad_update_start();
+        expect(pad_update_held(u), "pad: held before the pause and the second boundary");
+        s_test_gui_buttons = NK_PSP_BTN_CROSS_BIT;
+        s_pause_count++;                  /* a pause opened and closed in the hold */
+        s_pad_host_ns = t + 6u * PAD_MS;
+        sr_enhancement_update_begin();    /* the test's own context: a second thread's boundary, never held */
+        pad_update_resume(u, t + 12u * PAD_MS);
+        expect(ace_pad_plan()->refreshed == 0u && pad_read_newest() == 0u,
+               "pad: a second thread's boundary after a pause in the hold does not unblock the held refresh");
+    }
+    pad_late_teardown();
+
     /* Round 5 S1: a pause in the hold, or a change of speed before the update's wait, moves the
      * VBLANK schedule under the update. Its wait comes long after the deadline it had, which is
      * no miss: the update is dropped (interrupted), and the plan's costs, back-off and margin stay
@@ -56454,15 +57230,40 @@ static void test_threadman_id_list(void) {
                    MEM_R32(TMID_BUF) == TMID_SENTINEL, msg);
     }
 
-    /* Thread event handlers are a PSPSDK class this runtime does not track: a named
-     * refusal, never an empty success. */
-    tmid_fill();
-    uint32_t tmid_stops = sr_hle_test_unmodelled_stops();
-    rc = tmid_list(9u, TMID_BUF, 4u, TMID_COUNT);
-    expect(rc == TMID_NOT_MODELLED_ERR && MEM_R32(TMID_COUNT) == TMID_SENTINEL &&
-               MEM_R32(TMID_BUF) == TMID_SENTINEL &&
-               sr_hle_test_unmodelled_stops() == tmid_stops + 1u,
-           "ThreadmanIdList ThreadEventHandler: the run stops by name, nothing written");
+    /* PSP-SAFE-SCALAR-001 (2026-11-17, PSP-3000; docs/HARDWARE_ORACLE.md), tmid-9-list and
+     * tmid-10-list: with no thread event handler and no alarm created by the caller and a 16-slot
+     * buffer, each list returns 0, stores a count of 0 and writes no slot. The runtime has no
+     * call that registers a thread event handler, so the measured precondition always holds;
+     * until this record type 9 stopped the run by name. */
+    for (uint32_t type = 9u; type <= 10u; type++) {
+        tmid_fill();
+        const uint32_t tmid_stops = sr_hle_test_unmodelled_stops();
+        rc = tmid_list(type, TMID_BUF, 16u, TMID_COUNT);
+        int untouched = 1;
+        for (uint32_t i = 0; i < 16u; i++) untouched &= MEM_R32(TMID_BUF + 4u * i) == TMID_SENTINEL;
+        snprintf(msg, sizeof msg, "tmid-%u-list: returns 0, count 0, no slot written, no stop "
+                 "(PSP-SAFE-SCALAR-001; rc=0x%x count=0x%x)", (unsigned)type, rc, MEM_R32(TMID_COUNT));
+        expect(rc == 0u && MEM_R32(TMID_COUNT) == 0u && untouched &&
+                   sr_hle_test_unmodelled_stops() == tmid_stops, msg);
+    }
+    /* Type 9 was measured with that one call shape. Any other is still a named refusal, never an
+     * empty success: four slots (the assertion this test held before the record), no buffer, no
+     * count pointer. */
+    static const struct { const char *what; uint32_t buf, size, count; } tmid9_stops[] = {
+        { "4 slots", TMID_BUF, 4u, TMID_COUNT }, { "17 slots", TMID_BUF, 17u, TMID_COUNT },
+        { "size 0", TMID_BUF, 0u, TMID_COUNT }, { "a NULL buffer", 0u, 16u, TMID_COUNT },
+        { "a NULL count pointer", TMID_BUF, 16u, 0u },
+    };
+    for (size_t i = 0; i < sizeof tmid9_stops / sizeof tmid9_stops[0]; i++) {
+        tmid_fill();
+        const uint32_t tmid_stops = sr_hle_test_unmodelled_stops();
+        rc = tmid_list(9u, tmid9_stops[i].buf, tmid9_stops[i].size, tmid9_stops[i].count);
+        snprintf(msg, sizeof msg, "ThreadmanIdList ThreadEventHandler with %s: the run stops by name, "
+                 "nothing written (rc=0x%x)", tmid9_stops[i].what, rc);
+        expect(rc == TMID_NOT_MODELLED_ERR && MEM_R32(TMID_COUNT) == TMID_SENTINEL &&
+                   MEM_R32(TMID_BUF) == TMID_SENTINEL &&
+                   sr_hle_test_unmodelled_stops() == tmid_stops + 1u, msg);
+    }
 
     /* Bad guest pointers and sizes are refused before any write. */
     tmid_fill();
@@ -57953,6 +58754,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_nested_frame_under_psp_callback_dispatch();
     test_nested_frame_handle_hygiene();
     test_ge_guest_sentinel();
+    test_hle_hot_log_switches_are_cached();
     test_ge_consumed_list_ignores_late_stall_address();
     test_ge_stall_alias_across_call_return();
     test_ge_stall_alias_linear_from_uncached_list();
@@ -58007,6 +58809,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_power_set_clock_frequency_range_checks();
     test_rtc_time_t_add_years_resolution_autotest();
     test_rtc_tick_add_day_of_week_check_valid_autotest();
+    test_psp_measured_safe_scalar_rtc_20261117();
     test_rtc_tick_add_minutes_hours_weeks_autotest();
     test_imports_20261102_measured_contracts();
     test_psp_measured_umd_state_20261024();
@@ -58150,6 +58953,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_msgpipe_cancel_skips_paused_callback_wait();
     test_td23_guest_pointer_validation();
     test_kernel_import_sweep_memory_blocks_and_sdk_alias();
+    test_memory_block_high_in_low_based_partition();
     test_td28_partition_free_reuse();
     test_alloc_block_at_fixed_address();
     test_partition_ends_at_lowest_live_stack();
@@ -58167,6 +58971,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_vpl_block_count_bounded_by_pool_size();
     test_tlspl_lifecycle_and_thread_isolation();
     test_wb_tlspl_vpl_cells();
+    test_tlspl_highmem_pool();
+    test_psp_measured_safe_scalar_tls_20261117();
     test_vpl_blocking_waits();
     test_std_handles_measured();
     test_kernel_pool_bounds_measured();

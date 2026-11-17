@@ -321,7 +321,7 @@ static uint32_t utility_slot_claim_locked(int type) {
  * hrydgard/pspautotests master). A refused block never takes the slot: every type still reports
  * WRONG_TYPE after it. Measured for game sharing; the other dialogs share the one slot and are
  * checked in the same order (UNMEASURED for them). */
-static int utility_slot_busy(void) {
+int utility_slot_busy(void) {
     dialog_lock();
     const int busy = utility_slot_active_locked();
     dialog_unlock();

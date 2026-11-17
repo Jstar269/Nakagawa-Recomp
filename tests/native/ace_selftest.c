@@ -963,6 +963,14 @@ static void cell_switch(void) {
     CHECK(ace_effective()->cull == 0 && ace_requested()->cull == 1 &&
           ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"cull\": false") != NULL &&
           strstr(json, "partial: test") != NULL, "a partial cull run is reported unavailable:\n%s", json);
+    /* The partial reason the player passes reaches the report whole (#2302). */
+    CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=fill;smooth=off;sas=off;tess=off;twin=off;tier=ace;"
+                        "cull=on", NULL) == 1, "cull=on again");
+    ace_set_cull_untracked(1);
+    ace_feature_unavailable(ACE_FEATURE_CULL, ACE_CULL_PARTIAL_REASON);
+    CHECK(ace_report_json(json, sizeof(json)) > 0 &&
+              strstr(json, "later matrices were left alone\"") != NULL,
+          "the partial cull reason reaches the report whole:\n%s", json);
     /* texpack: named in the words and the report; a refused pack is unavailable, never quietly on. */
     CHECK(ace_init_spec("v1;af=0;text=off;readout=off;notice=off;wide=off;smooth=off;sas=off;tess=off;twin=off;"
                         "texpack=on", NULL) == 1 && ace_effective()->texpack == 1, "texpack=on turns texpack on");
@@ -2437,7 +2445,7 @@ static void cell_report(const char *dir) {
  * each rate class the run has no seconds for as present. */
 static void cell_report_worst(void) {
     char json[ACE_REPORT_MAX];
-    char reason[128];
+    char reason[ACE_UNAVAILABLE_REASON_CAP + 1u];
     memset(reason, 'r', sizeof(reason));
     reason[sizeof(reason) - 1] = '\0';
     CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;"
