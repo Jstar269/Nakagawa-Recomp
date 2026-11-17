@@ -83,6 +83,71 @@ static void fake_transport(void *ctx, const NkAchRequest *req, NkAchDone done, v
     done(&r, done_ctx);
 }
 
+/* A transport that answers later, as NkAchTransport allows ("now or later"): each request waits
+ * until the test delivers an answer to it. */
+typedef struct Pending {
+    NkAchDone done;
+    void *done_ctx;
+    char post[512];
+} Pending;
+
+typedef struct Deferred {
+    int count;
+    Pending q[8];
+} Deferred;
+
+static void deferred_transport(void *ctx, const NkAchRequest *req, NkAchDone done, void *done_ctx) {
+    Deferred *d = (Deferred *)ctx;
+    if (d->count == 8) {
+        NkAchResponse r = {"", 0u, NK_ACH_HTTP_CLIENT_ERROR};
+        done(&r, done_ctx);
+        return;
+    }
+    Pending *p = &d->q[d->count++];
+    p->done = done;
+    p->done_ctx = done_ctx;
+    snprintf(p->post, sizeof p->post, "%s", req->post_data ? req->post_data : "");
+}
+
+/* Answers the oldest waiting request whose post data starts with prefix. False when none waits. */
+static int deliver(Deferred *d, const char *prefix, int http_status, const char *body) {
+    for (int i = 0; i < d->count; i++) {
+        if (!starts_with(d->q[i].post, prefix)) continue;
+        const Pending p = d->q[i];
+        memmove(&d->q[i], &d->q[i + 1], (size_t)(d->count - i - 1) * sizeof d->q[0]);
+        d->count--;
+        NkAchResponse r = {body, strlen(body), http_status};
+        p.done(&r, p.done_ctx);
+        return 1;
+    }
+    return 0;
+}
+
+/* Answers every waiting request as a client error, so nothing is left in flight. */
+static void drain(Deferred *d) {
+    while (d->count > 0) {
+        const Pending p = d->q[0];
+        memmove(&d->q[0], &d->q[1], (size_t)(d->count - 1) * sizeof d->q[0]);
+        d->count--;
+        NkAchResponse r = {"", 0u, NK_ACH_HTTP_CLIENT_ERROR};
+        p.done(&r, p.done_ctx);
+    }
+}
+
+static int count_events(const NkAchEvent *ev, size_t n, NkAchEventKind kind) {
+    int c = 0;
+    for (size_t i = 0; i < n; i++)
+        if (ev[i].kind == kind) c++;
+    return c;
+}
+
+static char g_log_award[160];
+static void RC_CCONV award_log(const char *message, const rc_client_t *client) {
+    (void)client;
+    if (message && starts_with(message, "Awarded achievement "))
+        snprintf(g_log_award, sizeof g_log_award, "%s", message);
+}
+
 static int find_request(const Fake *f, const char *prefix) {
     for (int i = 0; i < f->requests && i < 16; i++)
         if (starts_with(f->log[i], prefix)) return i;
@@ -309,6 +374,107 @@ static void test_award_offline_is_pending(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+/* A client over the deferred transport, signed in. NULL (with a failure counted) when it cannot be. */
+static NkAch *deferred_login(uint8_t *ram, Deferred *d) {
+    memset(d, 0, sizeof *d);
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, deferred_transport, d);
+    CHECK(ach != NULL, "create");
+    if (!ach) return NULL;
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "login starts");
+    CHECK(deliver(d, "r=login2&", 200, k_login), "the login request waits for its answer");
+    CHECK(nk_ach_logged_in(ach), "logged in");
+    return ach;
+}
+
+/* rcheevos LOCAL DELTA (rc_client_start_session_callback): the set reply names a game but no set,
+ * so the load fails while the session request is still out. When that session reply then carries a
+ * server error, rc_client_end_load_state frees the abandoned load; upstream at the pin went on to
+ * report the error on the freed load, calling its callback a second time and freeing it again. */
+static void test_session_error_after_failed_load(uint8_t *ram) {
+    Deferred d;
+    NkAch *ach = deferred_login(ram, &d);
+    if (!ach) return;
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    static const char no_sets[] =
+        "{\"Success\":true,\"GameId\":1234,\"Title\":\"Synthetic Game\",\"ConsoleId\":41,"
+        "\"ImageIconUrl\":\"\",\"RichPresenceGameId\":1234,\"RichPresencePatch\":\"\",\"Sets\":[]}";
+    CHECK(nk_ach_begin_load_game(ach, HASH), "load starts");
+    CHECK(deliver(&d, "r=achievementsets&", 200, no_sets), "the set request waits for its answer");
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(count_events(ev, n, NK_ACH_EVENT_GAME_FAILED) == 1, "a reply with no set fails the load once");
+    CHECK(deliver(&d, "r=startsession&", 500, "{\"Success\":false,\"Error\":\"Server failure\"}"),
+          "the session request was still out when the load failed");
+    n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(count_events(ev, n, NK_ACH_EVENT_GAME_FAILED) == 0,
+          "the session error is not reported again on the abandoned load (%d GAME_FAILED)",
+          count_events(ev, n, NK_ACH_EVENT_GAME_FAILED));
+    CHECK(!nk_ach_game_loaded(ach), "no game loaded");
+    CHECK(d.count == 0, "nothing left in flight (%d)", d.count);
+    nk_ach_destroy(ach);
+}
+
+/* Loads the synthetic game over the deferred transport and earns 5501, leaving its award request
+ * waiting. False (with a failure counted) when it cannot. */
+static int deferred_unlock(NkAch *ach, uint8_t *ram, Deferred *d) {
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    CHECK(nk_ach_begin_load_game(ach, HASH), "load starts");
+    CHECK(deliver(d, "r=achievementsets&", 200, k_sets), "the set request waits");
+    CHECK(deliver(d, "r=startsession&", 200, k_session), "the session request waits");
+    CHECK(nk_ach_game_loaded(ach), "game loaded");
+    for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+    ram[ACH_ADDR] = 5;
+    nk_ach_frame(ach);
+    const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_UNLOCKED) >= 0, "5501 unlocks");
+    for (int i = 0; i < d->count; i++)
+        if (starts_with(d->q[i].post, "r=awardachievement&")) return 1;
+    CHECK(0, "the award request waits for its answer");
+    return 0;
+}
+
+/* rcheevos LOCAL DELTA (rc_client_award_achievement_callback): the mastering award's answer
+ * arrives after the game was unloaded for the next load. Upstream at the pin walked
+ * client->game->subsets with client->game NULL. */
+static void test_award_reply_after_unload(uint8_t *ram) {
+    Deferred d;
+    NkAch *ach = deferred_login(ram, &d);
+    if (!ach) return;
+    if (deferred_unlock(ach, ram, &d)) {
+        /* The next load unloads this game at once and leaves its own set request waiting. */
+        CHECK(nk_ach_begin_load_game(ach, "fedcba9876543210fedcba9876543210"), "the next load starts");
+        CHECK(!nk_ach_game_loaded(ach), "the game is unloaded");
+        CHECK(deliver(&d, "r=awardachievement&", 200, k_award),
+              "the award request was still out when the game was unloaded");
+        CHECK(!nk_ach_game_loaded(ach), "still no game loaded");
+    }
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
+/* rcheevos LOCAL DELTA (rc_client_award_achievement_callback): when the server awards another
+ * achievement, the error names both IDs. Upstream at the pin passed error_message (NULL on this
+ * path) for the second %u. */
+static void test_award_of_another_id_is_logged(uint8_t *ram) {
+    Deferred d;
+    NkAch *ach = deferred_login(ram, &d);
+    if (!ach) return;
+    g_log_award[0] = '\0';
+    rc_client_enable_logging(nk_ach_rc_client(ach), RC_CLIENT_LOG_LEVEL_WARN, award_log);
+    if (deferred_unlock(ach, ram, &d)) {
+        static const char other[] =
+            "{\"Success\":true,\"Score\":0,\"SoftcoreScore\":17,\"AchievementID\":9999,"
+            "\"AchievementsRemaining\":1}";
+        CHECK(deliver(&d, "r=awardachievement&", 200, other), "the award request waits");
+        CHECK(strcmp(g_log_award, "Awarded achievement 9999 instead of 5501") == 0,
+              "the log names the awarded and the requested achievement: \"%s\"", g_log_award);
+    }
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
 int main(void) {
     uint8_t *ram = (uint8_t *)calloc(1u, USER_RAM_SIZE);
     if (!ram) {
@@ -321,6 +487,9 @@ int main(void) {
     test_no_transport_sends_nothing(ram);
     test_login_load_unlock(ram);
     test_award_offline_is_pending(ram);
+    test_award_of_another_id_is_logged(ram);
+    test_session_error_after_failed_load(ram);
+    test_award_reply_after_unload(ram);
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);

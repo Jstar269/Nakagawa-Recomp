@@ -19,7 +19,8 @@ host's callback, so nothing here opens a connection.
   1999, 2000, 2002 Aladdin Enterprises"), under the zlib licence in their own headers, which are kept unchanged;
   rcheevos uses it to sign unlock requests. The zlib licence is compatible with GPL-3.0-or-later.
 - Import method: each file was read from a clone of the repository with `git show <commit>:<path>`. Its Git blob ID
-  matches the pinned commit's tree, and the SHA-256 values below were calculated from the local bytes.
+  matches the pinned commit's tree, and the SHA-256 values below were calculated from the local bytes. `src/rc_client.c` has
+  since been changed (Local deltas below); its row keeps the upstream blob ID.
 - Only what rc_client needs to sign in, load a game's achievement set by its hash, evaluate it and submit unlocks is
   vendored, in the upstream layout so every `#include` resolves without an edit: the public headers, `rc_client`, the
   `rapi` request builders and parsers, the `rcheevos` runtime, and `rhash`'s MD5. Not vendored: the rest of `rhash`
@@ -49,7 +50,7 @@ host's callback, so nothing here opens a connection.
 | `src/rapi/rc_api_info.c` | `src/rapi/rc_api_info.c` | imported byte-identical | `327a6dff3fc8f775f0bf369205c11482e43f9638` | `d9a3707339b36052672eca0a0195487666a0866ff1c428cec69508bb5cef5f5c` |
 | `src/rapi/rc_api_runtime.c` | `src/rapi/rc_api_runtime.c` | imported byte-identical | `261741d55aeebf4323b126f993dbf53483529c83` | `5ce6ea89d8f4bc4cfbf492ef2553323f7f0f043dd2e5a0a45588ca0661f44ae2` |
 | `src/rapi/rc_api_user.c` | `src/rapi/rc_api_user.c` | imported byte-identical | `6943c98c443d647070e637758184fc4c09bec499` | `2430718f9fce10d4aa9f887b3cafdb817c37164291983fc345c19dac8c2ccfe2` |
-| `src/rc_client.c` | `src/rc_client.c` | imported byte-identical | `7a7399580ebe48fd92b84d3a198f51b6675a23fd` | `f3fcc544f082acef62ca32fdd8d05f43fed5f77e14484c344e8dca9402e0024f` |
+| `src/rc_client.c` | `src/rc_client.c` | imported + LOCAL DELTA | `7a7399580ebe48fd92b84d3a198f51b6675a23fd` | `093f7159a99354bf57628798cc2801051e3a15c321fed55ddfa0a15683e717f9` (this tree's bytes) |
 | `src/rc_client_external.h` | `src/rc_client_external.h` | imported byte-identical | `b3c0e5eba9bfa12f32cc54bf6150bf67d67b6da9` | `dbca667b2ec79cc74347d234085b7c9fb3bd931e22bc2d598fb0af9931edc3ba` |
 | `src/rc_client_external_versions.h` | `src/rc_client_external_versions.h` | imported byte-identical | `90f6f689604498d8d9ec61f6126c6c13f7f7328d` | `47c3a1975907b4d77ae7f427257f15cead2a9eef95c32b6034ebd3c048a330f1` |
 | `src/rc_client_internal.h` | `src/rc_client_internal.h` | imported byte-identical | `fad288d62aee1717d4062bb2661ef5b5c9075a5a` | `a7fa88dbad2cb390cf84a5b2697284c928ef74fd4438afa81e6e633cbd8aacd2` |
@@ -80,6 +81,31 @@ host's callback, so nothing here opens a connection.
 
 ## Local deltas
 
-None. No source file is edited. The bridge builds rc_client without `RC_CLIENT_SUPPORTS_HASH`,
+One file, `src/rc_client.c`, modified by Nakagawa Recomp contributors on 2026-11-17 (audit 2026-11-17). Its
+upstream v12.5.0 bytes have SHA-256 `f3fcc544f082acef62ca32fdd8d05f43fed5f77e14484c344e8dca9402e0024f`; the three
+changes below give the SHA-256 in the table. Each is marked `LOCAL DELTA` in the file, and
+`tests/native/test_nk_achievements.c` (`achievements-selftest`) fails on the upstream bytes for each of them, with a
+transport that answers later, as `NkAchTransport` allows. The first and third are the changes upstream made after
+the pin, in commit `db8ca2e622f05b5c870c43db9a1d796036aebbb8` ("add null checks to rc_client functions", #570, in
+`src/client/rc_client_load.c` and `src/client/rc_client_do_frame.c`, where upstream has since split
+`rc_client.c`); a later pin that includes that commit drops them.
+
+- `rc_client_start_session_callback` tests for an aborted load (`outstanding_requests < 0`) before it reports a
+  server error. Upstream at the pin tests the error first. When a set reply names a game but no set, the load fails
+  while the session request is still out; if that session reply then carries a server error,
+  `rc_client_end_load_state` frees the abandoned load, and the error was reported on the freed load: its callback
+  ran a second time and the load was freed again (a use after free and a double free). The selftest checks that
+  the load fails exactly once.
+- `rc_client_award_achievement_callback`: when the server awards another achievement than the one asked for, the
+  error log's second `%u` is the requested achievement's ID. Upstream passes `error_message`, a pointer that is
+  NULL on this path, so the log read a pointer as an unsigned int and showed 0. The selftest checks the logged
+  text. Upstream's current source still has this line.
+- `rc_client_award_achievement_callback`: the mastery check after an award with no achievement left moves into
+  `rc_client_award_achievement_check_mastery`, which holds the state mutex and does nothing when no game is
+  loaded. Upstream at the pin walked `client->game->subsets` without either, so an award whose answer arrived
+  after the game was unloaded (a new load unloads it at once) read through a NULL `client->game`. The selftest
+  delivers the award's answer after the next load has started.
+
+The bridge builds rc_client without `RC_CLIENT_SUPPORTS_HASH`,
 `RC_CLIENT_SUPPORTS_EXTERNAL` and `RC_CLIENT_SUPPORTS_RAINTEGRATION`, rcheevos' own defaults, so the files those
 switches would pull in are not needed.
