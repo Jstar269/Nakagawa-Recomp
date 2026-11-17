@@ -1184,7 +1184,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cells: audio-ch-release, audio-ch-query-released",
         ],
-        "limitation": "the cells release channel 0 after the two valid blocking-output calls and query it after release; unreserved, out-of-range, and other channel-state release results are unmeasured (#341)",
+        "limitation": "the cells release channel 0 after the two valid blocking-output calls and query it after release; a release clears the channel's length, format and volumes; the out-of-range (0x80260003) and not-reserved (0x80260008) refusals follow PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp sceAudioChRelease and are unmeasured, as are other channel-state release results (#341)",
     },
     "h_AudioChReserve": {
         "status": "partial",
@@ -1222,7 +1222,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cell: audio-out2-output-blocking",
         ],
-        "limitation": "audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; not-reserved, buffer-error and audio_output error-propagation behavior are not covered (the handler discards audio_output's return) (#341)",
+        "limitation": "audio-out2-output-blocking measures one valid silent 1024-sample block at volume 0x8000 and makes no acoustic claim; volumes above 0xFFFFF are refused with 0x8026000b following PPSSPP caa91b54b535 Core/HLE/sceAudio.cpp, unmeasured; an unreadable buffer returns audio_output's 0x80000103 to the guest, a host contract that is unmeasured; the not-reserved code is not covered (#341)",
     },
     "h_AudioOutput2Release": {
         "status": "partial",
@@ -1250,7 +1250,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/fixtures/psp_oracle/probe.c:run_audio_query",
             "PSP-AUDIO-001 cells: audio-ch-output-blocking-0, audio-ch-output-blocking-1",
         ],
-        "limitation": "the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers/channels, and error precedence are unmeasured (#341)",
+        "limitation": "the cells exercise two maximum-volume outputs with a valid silent stereo buffer and record timing and rest-length values, not audible output; mono, other volumes, invalid buffers, and error precedence are unmeasured; a channel of 8 or more (0x80260003) and an unreserved channel (0x80260001) are refused following PPSSPP caa91b54b535, corroborated by PSPAutotests output.expected for channel -1 and unreserved channel 5 (#341)",
     },
     "h_GeEdramGetAddr": {
         "status": "complete",
@@ -3188,7 +3188,7 @@ WAIVERS: tuple[FindingWaiver, ...] = ()
 # Never add an entry to make that gate pass: review the handler instead.
 PROFILE_ZERO_ISSUE = "https://github.com/Jstar269/nakagawa-recomp/issues/341"
 PROFILE_ZERO_UNREVIEWED_IMPORTS = {
-    0x13F592BC: {"name": "sceAudioOutputPannedBlocking", "issue": PROFILE_ZERO_ISSUE},  # h_AudioOutputPannedBlocking: output.expected records bad channel 0x80260003, unreserved 0x80260001 and volume over 0xFFFF 0x8026000b, which audio_output() does not check (shared with h_AudioOutputBlocking and the non-blocking Panned NID); needs its own fix
+    0x13F592BC: {"name": "sceAudioOutputPannedBlocking", "issue": PROFILE_ZERO_ISSUE},  # h_AudioOutputPannedBlocking: output.expected records bad channel 0x80260003, unreserved 0x80260001 (both refused now) and volume over 0xFFFF 0x8026000b, which is still not checked (nor by h_AudioOutputBlocking or h_AudioOutputPanned); needs its own fix
     0x172D316E: {"name": "sceKernelStdin", "issue": PROFILE_ZERO_ISSUE},  # h_StdFd: PSP-HLE-STDIO-001 measured three distinct handles, none of them 1, where all three return 1 here (#2397), so a close through the Stdin or Stderr handle answers as Stdout's does; the measured Stdout write and close results are reproduced, sceIoCloseAsync of a std stream is unmeasured
     0xA6BAB2E9: {"name": "sceKernelStdout", "issue": PROFILE_ZERO_ISSUE},  # h_StdFd: same reason as sceKernelStdin
     0xD675EBB8: {"name": "sceKernelSelfStopUnloadModule", "issue": PROFILE_ZERO_ISSUE},  # h_SelfStopUnloadModule: PSP-HLE-SELFSTOP-001 measured (0, 0, NULL), (1, 0, NULL) and (0, 4, argp past RAM) from a helper thread; the first two are reproduced (a first argument of 1 only with no argument block), the third is refused with ILLEGAL_ADDR here where the PSP ran module_stop with an argp it chose (#2397)

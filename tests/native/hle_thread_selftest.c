@@ -14086,6 +14086,132 @@ static void test_audio_regular_contract_safety(void) {
            "the negative queue sentinel takes the open-loop path after one query");
 }
 
+/* Regular output and release refuse a channel that is out of range or not reserved, and
+ * sceAudioOutputPanned is the non-blocking form (audit 2026-11-17). The refusal codes and the
+ * busy rule are PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp and __sceAudio.cpp). Entered
+ * through the production NIDs; HOST_TESTED, not PSP_HARDWARE evidence.
+ *
+ * MUTANT: drop the channel check in sceAudioOutputBlocking -- channel 9 plays 1024 frames and
+ *   returns 1024, and under fast forward its queue model indexes past its nine slots.
+ * MUTANT: drop the reservation check -- an unreserved or released channel returns its length.
+ * MUTANT: sceAudioChRelease keeps the length -- the state check after release fails.
+ * MUTANT: map sceAudioOutputPanned back to the blocking handler -- the busy check returns 64.
+ * MUTANT: (void) the Output2 output's result again -- the unreadable buffer returns 0. */
+static void test_audio_regular_output_refuses_bad_channels(void) {
+    enum {
+        STEREO_BUF = 0x08a00000u,   /* 1024 stereo frames fit inside the arena */
+        NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING = 0x13f592bcu,
+        NID_SCE_AUDIO_OUTPUT_PANNED = 0xe2d56b2du,
+    };
+    const uint32_t NOT_RESERVED = 0x80260008u, OUTPUT_BUSY = 0x80260002u;
+    CpuState cpu;
+    int reserved = -1, format = -1;
+    uint32_t frames = 0xffffffffu, left = 1u, right = 1u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_test_audio_wait_reset();
+    const unsigned long silence_before = s_audio_silence_calls;
+
+    /* Out of range: 8 is the Output2/SRC slot, 9 has no slot, -1 is a reserve error passed back. */
+    const uint32_t bad[] = {8u, 9u, 0x7fffffffu, 0xffffffffu, 0x80260005u};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, bad[i], 0x8000u, STEREO_BUF) ==
+                   SCE_AUDIO_ERROR_INVALID_CH,
+               "AudioOutputBlocking refuses a channel outside 0..7 with INVALID_CH");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = bad[i]; cpu.r[5] = 0x8000u; cpu.r[6] = 0x8000u; cpu.r[7] = STEREO_BUF;
+        expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == SCE_AUDIO_ERROR_INVALID_CH,
+               "AudioOutputPannedBlocking refuses a channel outside 0..7 with INVALID_CH");
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, bad[i], 0u, 0u) ==
+                   SCE_AUDIO_ERROR_INVALID_CH,
+               "AudioChRelease refuses a channel outside 0..7 with INVALID_CH");
+    }
+    /* The same under fast forward, where the queue model answers. */
+    s_det_clock = 0;
+    s_ff_speed = SCHED_FAST_FORWARD_SPEED;
+    s_ff_epoch++;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 9u, 0x8000u, STEREO_BUF) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "under fast forward channel 9 is refused before the queue model is reached");
+    s_ff_speed = 1u;
+    expect(s_audio_push_calls == 0u && s_audio_silence_calls == silence_before,
+           "a refused channel hands the host nothing");
+    expect(sr_hle_test_audio_wait_total_us() == 0u, "a refused channel never waits");
+
+    /* Not reserved: never reserved, then reserved and released. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 1u, 0x8000u, STEREO_BUF) ==
+               SCE_AUDIO_ERROR_NOT_INITIALIZED,
+           "AudioOutputBlocking refuses an unreserved channel with NOT_INITIALIZED");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 1u, 0u, 0u) == NOT_RESERVED,
+           "AudioChRelease refuses an unreserved channel with NOT_RESERVED");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0x10u) == 0u,
+           "release fixture reserves a 64-frame mono channel");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CHANGE_VOLUME, 0u, 0x4000u, 0x2000u) == 0u,
+           "release fixture retains a volume pair");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
+           "AudioChRelease releases a reserved channel");
+    expect(sr_hle_test_audio_state(0u, &reserved, &frames, &format) &&
+               reserved == 0 && frames == 0u && format == 0,
+           "release clears the channel's length and format");
+    expect(sr_hle_test_audio_volume(0u, &left, &right) && left == 0u && right == 0u,
+           "release clears the channel's retained volumes");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == NOT_RESERVED,
+           "a second release refuses with NOT_RESERVED");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, STEREO_BUF) ==
+               SCE_AUDIO_ERROR_NOT_INITIALIZED,
+           "a released channel no longer plays its old length");
+    expect(s_audio_push_calls == 0u && sr_hle_test_audio_wait_total_us() == 0u,
+           "an unreserved channel hands the host nothing and never waits");
+
+    /* sceAudioOutputPanned does not block: busy while the guest sees frames queued, else it
+     * hands the buffer over and returns at once. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "non-blocking fixture reserves a 64-frame stereo channel");
+    s_audio_queue_result = 64;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0u; cpu.r[5] = 0x8000u; cpu.r[6] = 0x8000u; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == OUTPUT_BUSY,
+           "AudioOutputPanned refuses as busy while the previous buffer is still queued");
+    expect(s_audio_push_calls == 0u, "a busy refusal hands the host nothing");
+    s_audio_queue_result = 0;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0u; cpu.r[5] = 0x8000u; cpu.r[6] = 0x4000u; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == 64u,
+           "AudioOutputPanned returns the sample count once the channel is idle");
+    expect(s_audio_push_calls == 1u && s_audio_push_vol_l == 0x8000 && s_audio_push_vol_r == 0x4000,
+           "the non-blocking output hands its buffer over at its own volumes");
+    expect(sr_hle_test_audio_wait_total_us() == 0u, "the non-blocking output never waits");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 3u; cpu.r[5] = 0x8000u; cpu.r[6] = 0x8000u; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == SCE_AUDIO_ERROR_NOT_INITIALIZED,
+           "AudioOutputPanned refuses an unreserved channel with NOT_INITIALIZED");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
+           "non-blocking fixture releases its channel");
+
+    /* sceAudioOutput2OutputBlocking passes audio_output's span refusal to the guest. */
+    audio_fixture_reset();
+    sr_hle_test_audio_wait_reset();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 64u, 0u, 0u) == 0u,
+           "Output2 reserves a 64-sample channel");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0x8000u,
+                          STEREO_BUF + 0x08000000u, 0u) == SCE_KERNEL_ERROR_ILLEGAL_ADDR,
+           "Output2 output with an unreadable buffer returns ILLEGAL_ADDR, not success");
+    expect(s_audio_push_calls == 0u && sr_hle_test_audio_wait_total_us() == 0u,
+           "the refused Output2 output hands the host nothing and never waits");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0x8000u, STEREO_BUF, 0u) == 0u &&
+               s_audio_push_calls == 1u,
+           "Output2 output with a readable buffer still returns 0 and plays");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "Output2 releases");
+
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
 /* sceAudioOutput2Release busy rule (issue #311).
  *
  * Measured on PSP-3001, firmware 6.6.1 (2026-10-01; the #311 comment, raw records private):
@@ -57929,6 +58055,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wait_thread_end_blocking_and_resume();
     test_wait_thread_end_cb_execution();
     test_audio_regular_contract_safety();
+    test_audio_regular_output_refuses_bad_channels();
     test_audio_output2_release_refuses_while_queued();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();

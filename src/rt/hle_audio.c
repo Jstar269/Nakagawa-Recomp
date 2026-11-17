@@ -43,6 +43,7 @@ extern void sr_audio_push(int ch, const int16_t *lr, int nframes, int volL, int 
 extern void sr_audio_push_wide(int ch, const int16_t *lr, const int32_t *wide, int nframes, int volL, int volR);
 /* Slots 0..7 are the regular hardware channels. Slot 8 models the separate
  * sceAudioOutput2 channel, which has its own reservation and queue. */
+#define AUDIO_OUTPUT2_CHANNEL 8u
 static int s_audio_ch[9], s_audio_fmt[9];   /* regular fmt: 0=stereo, 0x10=mono */
 static uint32_t s_audio_len[9];
 /* sceAudioSRC* shares slot 8 with Output2: the PSP-3000 refused either API's reserve with
@@ -112,7 +113,23 @@ static uint32_t h_AudioChReserve(CpuState *s) {
     s_audio_fmt[ch] = (int)A2;
     return (uint32_t)ch;
 }
-static uint32_t h_AudioChRelease(CpuState *s) { if (A0 < 8) s_audio_ch[A0] = 0; return 0; }
+static uint32_t s_audio_volL[8], s_audio_volR[8];
+/* sceAudioChRelease(ch): only a reserved regular channel releases, and with it goes the length,
+ * format and retained volumes the reservation set, so nothing of it outlives the channel. The two
+ * refusals are PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+ * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp, sceAudioChRelease returns
+ * INVALID_CH for a channel of 8 or more and NOT_RESERVED for one that is not reserved. A buffer
+ * already handed to the host keeps playing to its end. */
+static uint32_t h_AudioChRelease(CpuState *s) {
+    if (A0 >= 8u) return SCE_AUDIO_ERROR_INVALID_CH;
+    if (!s_audio_ch[A0]) return SCE_AUDIO_ERROR_NOT_RESERVED;
+    s_audio_ch[A0] = 0;
+    s_audio_len[A0] = 0u;
+    s_audio_fmt[A0] = 0;
+    s_audio_volL[A0] = 0u;
+    s_audio_volR[A0] = 0u;
+    return 0;
+}
 static uint32_t h_AudioSetChannelDataLen(CpuState *s) {
     if (A0 >= 8u) return SCE_AUDIO_ERROR_INVALID_CH;
     if (!s_audio_ch[A0]) return SCE_AUDIO_ERROR_NOT_INITIALIZED;
@@ -128,8 +145,8 @@ static uint32_t h_AudioSetChannelDataLen(CpuState *s) {
  * unmeasured: PPSSPP's docs/sceAudio.md records 0xFFFF for this call. Whether
  * the retained levels multiply the per-call volumes handed to the
  * OutputBlocking family, and the power-on default level, are UNMEASURED here:
- * mixing still consumes the per-call volumes only. */
-static uint32_t s_audio_volL[8], s_audio_volR[8];
+ * mixing still consumes the per-call volumes only. The levels are declared above, with the
+ * release that clears them. */
 static uint32_t h_AudioChangeChannelVolume(CpuState *s) {
     if (A0 >= 8u) return SCE_AUDIO_ERROR_INVALID_CH;
     if (!s_audio_ch[A0]) return SCE_AUDIO_ERROR_NOT_INITIALIZED;
@@ -273,8 +290,10 @@ int hle_audio_queued(int ch) {
     return (uint32_t)lead > hold ? (int)((uint32_t)lead - hold) : 0;
 }
 
-/* The model answers on `ch` (0 to 8) under the deterministic clock and while fast forward runs. */
+/* The model answers on `ch` (0 to 8) under the deterministic clock and while fast forward runs.
+ * Any other channel has no model slot, so the arrays below are never indexed with it. */
 static int audio_vq_on(int ch) {
+    if (ch < 0 || ch > 8) return 0;
     if (sched_clock_deterministic()) return 1;
     if (!sched_fast_forward_on()) return 0;
     const uint32_t epoch = sched_fast_forward_epoch();
@@ -464,10 +483,16 @@ static void audio_wait(uint32_t us) {
 
 static const int32_t *sas_wide_for_output(uint32_t buf, uint32_t n, const int16_t *lr);
 
-static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, int volr) {
+/* `ch` is a regular channel the caller checked (audio_regular_output_refusal) or the
+ * Output2/SRC slot 8; anything else is refused here too, before any state is read. A blocking
+ * output waits out the queue below; a non-blocking one (sceAudioOutputPanned) never waits and is
+ * refused as busy while the guest still sees frames queued on the channel. */
+static uint32_t audio_output_mode(CpuState *s, uint32_t ch, uint32_t buf, int voll, int volr,
+                                  int blocking) {
     (void)s;
-    uint32_t n = ch < 9 ? s_audio_len[ch] : 1024;
-    int mono = ch < 9 && s_audio_fmt[ch] == (int)PSP_AUDIO_FORMAT_MONO;
+    if (ch > AUDIO_OUTPUT2_CHANNEL) return SCE_AUDIO_ERROR_INVALID_CH;
+    uint32_t n = s_audio_len[ch];
+    int mono = s_audio_fmt[ch] == (int)PSP_AUDIO_FORMAT_MONO;
     uint32_t bytes = 0;
 
     /* Validate the complete source span before telemetry, scalar reads, backend
@@ -478,6 +503,16 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
         (!sr_size_mul_ok(n, mono ? 2u : 4u, &bytes) ||
          !sr_guest_span_readable(buf, bytes)))
         return 0x80000103u; /* SCE_KERNEL_ERROR_ILLEGAL_ADDR */
+
+    /* The non-blocking output's busy rule is PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+     * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/__sceAudio.cpp, __AudioEnqueue keeps one
+     * buffer slot per channel and returns SCE_ERROR_AUDIO_CHANNEL_BUSY while the previous buffer
+     * still plays (corroborative only: PSPAutotests tests/audio/sceaudio/output.expected at
+     * ea71108f00933712c4662276261b39cd42249b1e records 0x80260002 for a second non-blocking
+     * sceAudioOutput straight after the first). Here that is the queue the guest sees
+     * (hle_audio_queued: the guest-time model, or the host mixer's less its device hold). With no
+     * host queue at all (-1) nothing is known to be playing, so the buffer is taken. */
+    if (!blocking && hle_audio_queued((int)ch) > 0) return SCE_AUDIO_ERROR_OUTPUT_BUSY;
 
     if (audio_stat_on()) audio_note_buf(ch, buf);
     if (buf && n > 0 && n <= 65536) {
@@ -503,6 +538,7 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
         audio_vq_pushed((int)ch, (int)n);
         if (out_started) sr_perf_audio_output(out_started, n);
     }
+    if (!blocking) return n;
     int q = hle_audio_queued((int)ch);
     if (q < 0 || n == 0) {                 /* no host audio: open-loop pacing as before */
         audio_wait(n ? audio_frames_to_us(ch, n) : 1000u);
@@ -528,13 +564,51 @@ static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, i
     audio_note_lead((int)ch, q);
     return n;
 }
+static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, int volr) {
+    return audio_output_mode(s, ch, buf, voll, volr, 1);
+}
+
+/* A regular output names a reserved channel 0 to 7, or nothing is played and nothing waits. The
+ * codes are PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+ * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp, sceAudioOutputBlocking,
+ * sceAudioOutputPannedBlocking and sceAudioOutputPanned return INVALID_CH for a channel of 8 or
+ * more, and Core/HLE/__sceAudio.cpp, __AudioEnqueue, returns NOT_INITIALIZED (0x80260001) for one
+ * that is not reserved, the code SetChannelDataLen and ChangeChannelConfig give here too.
+ * Corroborative only: PSPAutotests tests/audio/sceaudio/output.expected at
+ * ea71108f00933712c4662276261b39cd42249b1e records 0x80260003 for sceAudioOutputBlocking on
+ * channel -1 and 0x80260001 on an unreserved channel 5. The first refusal of a run is reported by
+ * name. */
+static int s_audio_output_refusal_noted;
+static uint32_t audio_regular_output_refusal(const char *call, uint32_t ch) {
+    uint32_t code = 0u;
+    if (ch >= 8u) code = SCE_AUDIO_ERROR_INVALID_CH;
+    else if (!s_audio_ch[ch]) code = SCE_AUDIO_ERROR_NOT_INITIALIZED;
+    if (code && !s_audio_output_refusal_noted) {
+        s_audio_output_refusal_noted = 1;
+        fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: %s refuses channel 0x%08x with "
+                        "0x%08x (a channel of 8 or more, or one not reserved)\n", call, ch, code);
+    }
+    return code;
+}
 static uint32_t h_AudioOutputBlocking(CpuState *s) {
     /* sceAudioOutputBlocking(ch, vol, buf) */
+    const uint32_t refused = audio_regular_output_refusal("sceAudioOutputBlocking", A0);
+    if (refused) return refused;
     return audio_output(s, A0, A2, (int)(A1 & 0xFFFF), (int)(A1 & 0xFFFF));
 }
 static uint32_t h_AudioOutputPannedBlocking(CpuState *s) {
     /* sceAudioOutputPannedBlocking(ch, leftvol, rightvol, buf) */
+    const uint32_t refused = audio_regular_output_refusal("sceAudioOutputPannedBlocking", A0);
+    if (refused) return refused;
     return audio_output(s, A0, A3, (int)(A1 & 0xFFFF), (int)(A2 & 0xFFFF));
+}
+/* sceAudioOutputPanned(ch, leftvol, rightvol, buf): the non-blocking form. It hands the buffer over
+ * and returns the sample count at once, or refuses it as busy (audio_output_mode); it never parks
+ * the calling thread. */
+static uint32_t h_AudioOutputPanned(CpuState *s) {
+    const uint32_t refused = audio_regular_output_refusal("sceAudioOutputPanned", A0);
+    if (refused) return refused;
+    return audio_output_mode(s, A0, A3, (int)(A1 & 0xFFFF), (int)(A2 & 0xFFFF), 0);
 }
 static uint32_t h_AudioChangeChannelConfig(CpuState *s) {
     (void)s;
@@ -560,7 +634,7 @@ void hle_register_regular_audio_handlers(void) {
     sr_hle_register(0x6fc46853, "sceAudioChRelease", h_AudioChRelease);
     sr_hle_register(0x136caf51, "sceAudioOutputBlocking", h_AudioOutputBlocking);
     sr_hle_register(0x13f592bc, "sceAudioOutputPannedBlocking", h_AudioOutputPannedBlocking);
-    sr_hle_register(0xe2d56b2d, "sceAudioOutputPanned", h_AudioOutputPannedBlocking);
+    sr_hle_register(0xe2d56b2d, "sceAudioOutputPanned", h_AudioOutputPanned);
     sr_hle_register(0x95fd0c2d, "sceAudioChangeChannelConfig", h_AudioChangeChannelConfig);
     sr_hle_register(0xb011922f, "sceAudioGetChannelRestLength", h_AudioRestLen);
     /* sceAudioGetChannelRestLen (#2361) shares the handler. Measured on a PSP-3000
@@ -577,8 +651,6 @@ void hle_register_regular_audio_handlers(void) {
     sr_hle_register(0xb7e1d8e7, "sceAudioChangeChannelVolume", h_AudioChangeChannelVolume);
     sr_hle_register(0xcb2e439e, "sceAudioSetChannelDataLen", h_AudioSetChannelDataLen);
 }
-
-#define AUDIO_OUTPUT2_CHANNEL 8u
 
 /* Slot 8 reserved through sceAudioOutput2Reserve, as opposed to sceAudioSRCChReserve. Using one
  * API's call on the other's reservation is unmeasured; it is refused as "not reserved". */
@@ -620,7 +692,9 @@ static uint32_t h_AudioOutput2ChangeLength(CpuState *s) {
 static uint32_t h_AudioOutput2Blocking(CpuState *s) {
     if (!audio_output2_reserved()) return SCE_AUDIO_ERROR_NOT_RESERVED;
     if (A0 > SCE_AUDIO_OUTPUT2_VOLUME_MAX) return SCE_AUDIO_ERROR_INVALID_VOL;
-    (void)audio_output(s, AUDIO_OUTPUT2_CHANNEL, A1, (int)A0, (int)A0);
+    /* A refusal (an unreadable buffer) reaches the guest; a played block returns 0. */
+    const uint32_t r = audio_output(s, AUDIO_OUTPUT2_CHANNEL, A1, (int)A0, (int)A0);
+    if (r >= 0x80000000u) return r;
     return 0;
 }
 static uint32_t h_AudioOutput2Rest(CpuState *s) {

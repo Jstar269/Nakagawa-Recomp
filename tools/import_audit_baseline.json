@@ -3850,7 +3850,7 @@
   },
   "0xe2d56b2d": {
     "classification": "dedicated",
-    "handler": "h_AudioOutputPannedBlocking",
+    "handler": "h_AudioOutputPanned",
     "name": "sceAudioOutputPanned",
     "status": "unreviewed"
   },
