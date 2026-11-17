@@ -63,8 +63,8 @@ typedef struct NkAchResponse {
 } NkAchResponse;
 
 typedef void (*NkAchDone)(const NkAchResponse *response, void *done_ctx);
-/* Sends one request and calls done exactly once, now or later on the thread that calls
- * nk_ach_frame. The request's strings are valid only until done is called. */
+/* Sends one request and calls done exactly once, now or later, on any thread: done takes the
+ * bridge's lock (NkAchLock) itself. The request's strings are valid only until done is called. */
 typedef void (*NkAchTransport)(void *ctx, const NkAchRequest *request, NkAchDone done,
                                void *done_ctx);
 
@@ -81,15 +81,20 @@ typedef enum NkAchEventKind {
                                     * it reads could not be read; message: rc_client's note */
     NK_ACH_EVENT_QUEUE_FULL,       /* a real unlock could not fit the bounded offline queue */
     NK_ACH_EVENT_QUEUE_CHANGED,    /* the persisted pending queue gained or lost a record */
-    NK_ACH_EVENT_UNLOCK_REFUSED    /* id: a saved unlock the server answered with an error of its
+    NK_ACH_EVENT_UNLOCK_REFUSED,   /* id: a saved unlock the server answered with an error of its
                                     * own; it left the queue. message: the server's error */
+    NK_ACH_EVENT_LOGIN_UNREACHABLE, /* a token sign-in got no answer from the server (no
+                                    * connection, 5xx, 408, 429): nk_ach_token_login_due says
+                                    * when to try it again */
+    NK_ACH_EVENT_UNLOCKS_DISCARDED /* count: saved unlocks that belong to another account than
+                                    * the one now signed in; they left the queue unsent */
 } NkAchEventKind;
 
 typedef struct NkAchEvent {
     NkAchEventKind kind;
     uint32_t id;
     uint32_t points;   /* UNLOCKED and LOGIN_OK only; 0 otherwise */
-    uint32_t count;    /* GAME_LOADED only; 0 otherwise */
+    uint32_t count;    /* GAME_LOADED and UNLOCKS_DISCARDED only; 0 otherwise */
     char title[96];
     char message[160];
 } NkAchEvent;
@@ -97,7 +102,8 @@ typedef struct NkAchEvent {
 #define NK_ACH_EVENT_QUEUE 32u
 #define NK_ACH_PENDING_UNLOCKS_MAX 4096u
 
-/* Token-free, owner-persistable record for an offline unlock. */
+/* Token-free, owner-persistable record for an offline unlock. The queue the records wait in
+ * belongs to one account, named by its tag (nk_ach_account_tag), never by a record. */
 typedef struct NkAchPendingUnlock {
     char game_hash[33];
     uint32_t achievement_id;
@@ -114,6 +120,23 @@ typedef struct NkAchAchievement {
 } NkAchAchievement;
 
 typedef struct NkAch NkAch;
+
+/* The bridge may be entered from two threads: the one that serves guest frames (nk_ach_frame)
+ * and the caller's own. Every function below that takes an NkAch, and the done callback a
+ * transport is given, runs between enter and leave, so a transport is always called inside the
+ * lock. The lock must be recursive: a transport may call done at once. Set it right after
+ * nk_ach_create, before a second thread exists; with no lock the bridge is for one thread. */
+typedef struct NkAchLock {
+    void *context;
+    void (*enter)(void *context);
+    void (*leave)(void *context);
+} NkAchLock;
+
+/* The tag a saved queue names its account by: 32 lowercase hex digits, the MD5 of a fixed label
+ * and the account name in lower case. It keeps the name itself out of the queue file; it is not
+ * a secret. False for an empty name. */
+#define NK_ACH_ACCOUNT_TAG_SIZE 33u
+bool nk_ach_account_tag(const char *username, char out[NK_ACH_ACCOUNT_TAG_SIZE]);
 
 /* True only for an https URL on NK_ACH_HOST itself (no other host, port, user part or
  * scheme). */
@@ -135,6 +158,7 @@ uint32_t nk_ach_read_memory(const NkAchMemory *mem, uint32_t ra_address, uint8_t
 /* A client over mem (copied) with transport, which may be NULL: then every request is refused
  * and nothing is sent. NULL when rc_client cannot be created. Hardcore is off. */
 NkAch *nk_ach_create(const NkAchMemory *mem, NkAchTransport transport, void *transport_ctx);
+void nk_ach_set_lock(NkAch *ach, const NkAchLock *lock);
 void nk_ach_destroy(NkAch *ach);
 
 /* The player updates this bounded guest-memory span when a runtime channel is opened. */
@@ -142,8 +166,14 @@ void nk_ach_set_memory(NkAch *ach, const NkAchMemory *mem);
 
 /* Signs in with an RA API token (never a password: the token comes from the user's own
  * sign-in, kept in the OS credential store by the player). False only for a missing name or
- * token; otherwise the outcome arrives as a LOGIN_OK or LOGIN_FAILED event. */
+ * token; otherwise the outcome arrives as a LOGIN_OK, LOGIN_FAILED or LOGIN_UNREACHABLE event. */
 bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token);
+/* After LOGIN_UNREACHABLE: true once when the token sign-in is due again, 30 seconds after the
+ * first call that follows the failure, then twice as long after each further one, up to ten
+ * minutes. The bridge keeps no token: the caller reads it from the credential store again and
+ * calls nk_ach_begin_login. A sign-in the server answered, a password sign-in, nk_ach_logout and
+ * nk_ach_sign_out end the retries. */
+bool nk_ach_token_login_due(NkAch *ach, uint64_t now_ms);
 /* Exchanges the password once for the RA token. The bridge retains no password after rcheevos
  * has constructed its request; the player must clear its input buffers and store only the token. */
 bool nk_ach_begin_login_with_password(NkAch *ach, const char *username, const char *password);
@@ -153,8 +183,7 @@ bool nk_ach_copy_user_name(const NkAch *ach, char *out, size_t out_size);
  * stays (the Achievements switch turned off). */
 void nk_ach_logout(NkAch *ach);
 /* The user's Sign out: ends the session and discards every pending unlock, returning how many.
- * A pending record names no account, so one kept past a sign-out would be awarded to whoever
- * signs in next. */
+ * The queue is the signed-out account's, and nothing of that account stays on this PC. */
 size_t nk_ach_sign_out(NkAch *ach);
 /* Loads the achievement set for the disc whose RA hash (32 lowercase hex digits, the MD5 RA's
  * PSP rule takes of PARAM.SFO then EBOOT.BIN) is hash. False only for a malformed hash;
@@ -183,11 +212,61 @@ uint32_t nk_ach_events_dropped(const NkAch *ach);
  * one at a time. An unlock the server has leaves the queue; with no definite answer (no
  * connection, 5xx, 408, 429) it waits 30 seconds; an unlock the server refuses by its own error
  * leaves the queue as an UNLOCK_REFUSED event, so it cannot hold the others back; a refused
- * account (401, 403) keeps every record and stops the replay until the next sign-in. */
+ * account (401, 403) keeps every record and stops the replay until the next sign-in.
+ *
+ * The queue belongs to one account, the first to put a record in it, and only that account's
+ * session sends it. When another account signs in, or a record is added or restored while
+ * another is signed in, the records are discarded and reported (UNLOCKS_DISCARDED): they are
+ * never awarded to an account that did not earn them. */
 size_t nk_ach_pending_unlock_count(const NkAch *ach);
 size_t nk_ach_copy_pending_unlocks(const NkAch *ach, NkAchPendingUnlock *out, size_t max);
-bool nk_ach_restore_pending_unlock(NkAch *ach, const NkAchPendingUnlock *unlock);
+/* owner_tag: the account the record belongs to (nk_ach_account_tag). False for a malformed
+ * record or tag, a full queue, or a queue that already holds another account's records. */
+bool nk_ach_restore_pending_unlock(NkAch *ach, const NkAchPendingUnlock *unlock,
+                                   const char *owner_tag);
+/* The tag of the account the waiting records belong to; false when none waits. */
+bool nk_ach_copy_pending_owner(const NkAch *ach, char out[NK_ACH_ACCOUNT_TAG_SIZE]);
 void nk_ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms);
+
+/* The queue file. All integers are little-endian.
+ *   0   8 bytes  "NKRAQ001"
+ *   8   u32      format version: 2 (1 is read, see below)
+ *   12  u32      record count, at most NK_ACH_PENDING_UNLOCKS_MAX
+ *   16  32 bytes the owner's account tag, lowercase hex; thirty-two '0' when count is 0
+ *   48  count records of 44 bytes: 32 bytes game hash (lowercase hex), u32 achievement ID,
+ *       u64 unlock time (seconds since 1970 UTC)
+ * Version 1 had no owner: its header ends after the count and its records start at 16.
+ *
+ * nk_ach_save_queue_file writes the file through a private temporary file and a rename. It
+ * refuses, and leaves the file as it is, after a load that could neither read the file nor set
+ * it aside.
+ *
+ * nk_ach_load_queue_file reads it into an empty queue, once, before sign-in. No file is not an
+ * error. A file this version cannot read (damaged, cut short, from a later version, or not
+ * readable at all) is never loaded and never overwritten: it is renamed beside itself with the
+ * ending ".unreadable" (".unreadable.2" and so on when that exists), and when even that fails
+ * saving is refused for this run.
+ *
+ * A version 1 record is loaded only when it can be tied to the account whose credential is
+ * stored: it was unlocked after that credential was last written. Every sign-in writes the
+ * credential and a record is only made in a signed-in session, so, with a system clock that did
+ * not go back in between, such a record was earned by that account. The others are counted in
+ * unproven and not loaded; the caller reports them and saves, which drops them. */
+typedef struct NkAchQueueLegacy {
+    const char *username;            /* the stored credential's account, or NULL */
+    uint64_t credential_written_utc; /* when it was last written; 0 when not known */
+} NkAchQueueLegacy;
+typedef struct NkAchQueueLoad {
+    size_t loaded;      /* records now waiting */
+    size_t unproven;    /* version 1 records not tied to the stored account: not loaded */
+    bool legacy;        /* the file was version 1: save now, so the next start reads an owner */
+    bool unreadable;    /* the file is not a queue this version reads */
+    bool kept_aside;    /* ... and it was renamed with the ".unreadable" ending */
+    bool save_blocked;  /* nk_ach_save_queue_file refuses for the rest of this run */
+} NkAchQueueLoad;
+bool nk_ach_load_queue_file(NkAch *ach, const char *path, const NkAchQueueLegacy *legacy,
+                            NkAchQueueLoad *out);
+bool nk_ach_save_queue_file(NkAch *ach, const char *path);
 /* Copies only the official/core achievement set. `total` receives the full count even when
  * `out` is smaller; the caller owns all copied strings. */
 size_t nk_ach_copy_achievement_list(const NkAch *ach, NkAchAchievement *out, size_t max,

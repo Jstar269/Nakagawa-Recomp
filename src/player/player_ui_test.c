@@ -828,6 +828,21 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
                : strstr(app->drop_notice, "being set up") ? "busy" : "summary",
            player_ui_nk_music_state_name(g_ui_test_next_ui));
 
+    /* RetroAchievements (#1316): its status line each time it changes, in hex so every byte
+       reads back exactly. A UI regression run refuses the feature's actions, and this is where
+       a test reads that it did. */
+    static char last_achievements_status[sizeof(app->achievements_status)];
+    if (strcmp(last_achievements_status, app->achievements_status) != 0) {
+        snprintf(last_achievements_status, sizeof(last_achievements_status), "%s",
+                 app->achievements_status);
+        printf("[PLAYER_UI_TEST] achievements frame=%d enabled=%d status_hex=", frame_number,
+               app->settings.achievements_enabled ? 1 : 0);
+        for (size_t i = 0; app->achievements_status[i] != '\0'; i++) {
+            printf("%02x", (unsigned)(unsigned char)app->achievements_status[i]);
+        }
+        printf("\n");
+    }
+
     if (g_ui_test_next_ui != NULL) {
         /* The nickname editor (#2197) while it is open: what it holds, in hex so a
            space or any byte reads back exactly, and the count it shows. */

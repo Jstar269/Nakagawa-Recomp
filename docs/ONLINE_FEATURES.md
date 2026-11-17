@@ -119,11 +119,37 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   package, guest memory, telemetry or capture is sent.
 - **Offline unlocks** are stored as owner-only, token-free records in the player's data folder. After the
   next sign-in, the player submits each pending unlock through rcheevos' award request builder and the
-  same transport. The queue holds at most 4,096 records and names no account: **Sign out** discards what
-  is still waiting, so it is never sent for the next account. With no definite answer (no connection, a
+  same transport. The queue holds at most 4,096 records. With no definite answer (no connection, a
   busy server) a record waits 30 seconds; a record the server refuses by its own error leaves the queue
   and is reported; a refused account keeps every record until the next sign-in. The game's title page
   shows its core achievements and unlock toasts appear in-game.
+- **The queue belongs to one account.** It names that account by a tag, the MD5 of a fixed label and the
+  account name in lower case: the name itself and the token are not in the file. Only that account's
+  session sends the records. **Sign out** discards what is still waiting; records another account left
+  (a different account signs in, or the credential was changed outside the player) are discarded and
+  reported, never awarded to the account now signed in.
+- **The queue file** is `achievements/unlock-queue.bin` under the player's data folder, written through a
+  private temporary file and a rename. Integers are little-endian: the 8 bytes `NKRAQ001`, a 32-bit
+  format version (2), a 32-bit record count, the owner's 32-character tag (thirty-two `0` when the queue is
+  empty), then 44-byte records: 32 characters of game hash, a 32-bit achievement ID and a 64-bit unlock
+  time in seconds since 1970 UTC. Version 1, written by the first builds of this feature, had no owner. A
+  version 1 record is loaded only when it was unlocked after the stored credential was last written:
+  every sign-in writes the credential and a record is only made in a signed-in session, so, unless the
+  system clock went back in between, that account earned it. The others are reported and dropped. A file
+  the player cannot read (damaged, cut short, from a later version) is renamed beside itself with the
+  ending `.unreadable`, never loaded and never written over; when it cannot even be renamed, nothing is
+  saved over it in that run, which the **RA account** line says.
+- **Sign-in at start** uses the stored token. When the server gives no answer (no connection, a 5xx, 408 or
+  429), the token was not refused: the player tries it again after 30 seconds, then after twice as long
+  each time, up to ten minutes, with no password asked. A refusal by the server ends that, as do the
+  switch turned off and **Sign out**. A password is never kept, so a password sign-in is not retried.
+- **Frames.** For a game started with achievements on, the runtime and the player share the guest memory
+  through a local channel, and at each VBLANK the runtime waits while the achievements are evaluated once
+  on that frame's memory. A thread of the player's own serves this, so a modal box or a window being
+  dragged, which stop the player's event loop, do not stop the game. A runtime that is told to use a
+  channel it cannot open ends at once with `GUEST_MEMORY_CHANNEL_UNAVAILABLE` and exit status 2.
+- **UI regression runs** refuse the switch, **Sign in** and **Sign out**, and say so: they stay offline,
+  open no consent or credential box and read no credential.
 - **Hardcore is unavailable.** The client starts softcore sessions only; the UI and requests do not claim
   hardcore eligibility.
 - **Tests** use rcheevos' server callback with canned responses and never touch the internet. The

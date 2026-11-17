@@ -61,9 +61,7 @@ static const char k_invalid_disc_message[] = "This file isn't a PSP disc image."
 static const char k_ach_credential_target[] = "NakagawaRecomp/RetroAchievements";
 #define PLAYER_ACH_HTTP_BODY_MAX (4u * 1024u * 1024u)
 enum {
-    PLAYER_ACH_HTTP_EVENT_CODE = 0x5241,
-    PLAYER_ACH_FRAME_EVENT_CODE = 0x5242,
-    PLAYER_ACH_CHANNEL_STOP_EVENT_CODE = 0x5243
+    PLAYER_ACH_HTTP_EVENT_CODE = 0x5241
 };
 
 static bool player_view_is_library(PlayerView view) {
@@ -4268,11 +4266,12 @@ typedef struct PlayerRun {
     bool launcher_handoff_attempted;
     SDL_Gamepad *gamepad;
     NkAch *achievements;
+    /* The bridge is entered from this thread and from the guest-memory channel's frame service
+       (player_ach_serve_frame); achievements_lock is the lock it was given, and it also guards
+       ach_http_job. It is never held across anything that waits for the person. */
+    SDL_Mutex *achievements_lock;
+    SDL_AtomicInt achievements_transport_open;
     NkGuestMemoryChannel guest_memory_channel;
-    SDL_Thread *guest_memory_thread;
-    SDL_AtomicInt guest_memory_thread_done;
-    SDL_AtomicInt guest_memory_sync_failed;
-    SDL_AtomicInt guest_memory_stop_requested;
     PlayerAchHttpJob *ach_http_job;
     char achievements_game_hash[33];
     char achievements_disc_id[MAX_DISC_ID_LEN];
@@ -4281,6 +4280,8 @@ typedef struct PlayerRun {
     bool achievements_login_pending;
     bool achievements_signout_pending;
     bool achievements_queue_load_checked;
+    /* What the saved queue's load had to say, shown again once the sign-in has settled. */
+    char achievements_queue_notice[160];
     /* The frame loop. */
     PlayerLaunchJob *launch_job;
     PlayerStagingJob *staging_job;
@@ -4446,13 +4447,24 @@ finished:
     return 0;
 }
 
+/* Open only while the user's switch is on, the credential store exists and the player is not
+   closing: the default is closed. */
+static void player_achievements_sync_transport(PlayerRun *run) {
+    SDL_SetAtomicInt(&run->achievements_transport_open,
+                     run->app.settings.achievements_enabled &&
+                     run->app.achievements_store_available &&
+                     !run->achievements_shutting_down ? 1 : 0);
+}
+
 static void player_ach_transport(void *context, const NkAchRequest *request,
                                  NkAchDone done, void *done_context) {
     PlayerRun *run = (PlayerRun *)context;
     NkAchResponse refusal = {NULL, 0u, NK_ACH_HTTP_CLIENT_ERROR};
     if (!done) return;
-    if (!run || !request || !request->url || run->achievements_shutting_down ||
-        !run->app.settings.achievements_enabled || !run->app.achievements_store_available) {
+    /* Called inside the bridge's lock, on this thread or the frame service's: it reads the one
+       flag player_achievements_sync_transport keeps, not the settings. */
+    if (!run || !request || !request->url ||
+        !SDL_GetAtomicInt(&run->achievements_transport_open)) {
         done(&refusal, done_context);
         return;
     }
@@ -4505,169 +4517,120 @@ static void player_ach_transport(void *context, const NkAchRequest *request,
 }
 
 static void player_ach_http_poll(PlayerRun *run) {
-    PlayerAchHttpJob *job = run ? run->ach_http_job : NULL;
-    if (!job || !SDL_GetAtomicInt(&job->done)) return;
-    if (job->thread) SDL_WaitThread(job->thread, NULL);
-    run->ach_http_job = NULL;
-    NkAchResponse response = {job->response_body, job->response_body_size,
-                              job->response_status};
-    if (job->done_callback) job->done_callback(&response, job->done_context);
-    player_secure_clear(job->post_data, job->post_data_size);
-    player_secure_clear(job->response_body, job->response_body_size);
-    free(job->post_data);
-    free(job->response_body);
-    free(job);
-}
-
-#define PLAYER_ACH_QUEUE_HEADER_SIZE 16u
-#define PLAYER_ACH_QUEUE_RECORD_SIZE 44u
-#define PLAYER_ACH_QUEUE_FILE_MAX \
-    (PLAYER_ACH_QUEUE_HEADER_SIZE + NK_ACH_PENDING_UNLOCKS_MAX * PLAYER_ACH_QUEUE_RECORD_SIZE)
-
-static void player_ach_queue_put_u32(uint8_t *out, uint32_t value) {
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8);
-    out[2] = (uint8_t)(value >> 16);
-    out[3] = (uint8_t)(value >> 24);
-}
-
-static void player_ach_queue_put_u64(uint8_t *out, uint64_t value) {
-    for (unsigned i = 0u; i < 8u; i++) out[i] = (uint8_t)(value >> (i * 8u));
-}
-
-static uint32_t player_ach_queue_get_u32(const uint8_t *bytes) {
-    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
-           ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
-}
-
-static uint64_t player_ach_queue_get_u64(const uint8_t *bytes) {
-    uint64_t value = 0u;
-    for (unsigned i = 0u; i < 8u; i++) value |= (uint64_t)bytes[i] << (i * 8u);
-    return value;
-}
-
-static bool player_ach_hash_valid(const char hash[33]) {
-    if (!hash || hash[32] != '\0') return false;
-    for (size_t i = 0u; i < 32u; i++) {
-        if (!((hash[i] >= '0' && hash[i] <= '9') ||
-              (hash[i] >= 'a' && hash[i] <= 'f'))) return false;
+    if (!run) return;
+    SDL_LockMutex(run->achievements_lock);
+    PlayerAchHttpJob *job = run->ach_http_job;
+    if (job && SDL_GetAtomicInt(&job->done)) {
+        if (job->thread) SDL_WaitThread(job->thread, NULL);
+        run->ach_http_job = NULL;
+        NkAchResponse response = {job->response_body, job->response_body_size,
+                                  job->response_status};
+        if (job->done_callback) job->done_callback(&response, job->done_context);
+        player_secure_clear(job->post_data, job->post_data_size);
+        player_secure_clear(job->response_body, job->response_body_size);
+        free(job->post_data);
+        free(job->response_body);
+        free(job);
     }
+    SDL_UnlockMutex(run->achievements_lock);
+}
+
+static void player_ach_lock_enter(void *context) { SDL_LockMutex((SDL_Mutex *)context); }
+static void player_ach_lock_leave(void *context) { SDL_UnlockMutex((SDL_Mutex *)context); }
+
+/* The bridge and its lock, made together: SDL's mutex is recursive, as the bridge asks. */
+static bool player_achievements_create(PlayerRun *run) {
+    if (run->achievements) return true;
+    if (!run->achievements_lock) run->achievements_lock = SDL_CreateMutex();
+    if (!run->achievements_lock) return false;
+    run->achievements = nk_ach_create(NULL, player_ach_transport, run);
+    if (!run->achievements) return false;
+    const NkAchLock lock = {run->achievements_lock, player_ach_lock_enter,
+                            player_ach_lock_leave};
+    nk_ach_set_lock(run->achievements, &lock);
     return true;
 }
 
-static bool player_ach_queue_path(char *path, size_t path_size, char *tmp_path,
-                                  size_t tmp_path_size) {
+/* The offline unlock queue: <app data>/achievements/unlock-queue.bin in the user's private
+   folder. The bridge owns its format, its account tag and its reading and writing
+   (nk_achievements.h); the file holds no account name and no token. */
+static bool player_ach_queue_path(char *path, size_t path_size) {
     char data_root[NK_MAX_PATH];
     char directory[NK_MAX_PATH];
     const char separator = nk_platform_path_separator();
-    if (!path || path_size == 0u || !tmp_path || tmp_path_size == 0u ||
+    if (!path || path_size == 0u ||
         !nk_platform_get_app_data_dir(data_root, sizeof data_root)) return false;
     int n = snprintf(directory, sizeof directory, "%s%cachievements", data_root, separator);
     if (n <= 0 || (size_t)n >= sizeof directory ||
         !nk_platform_mkdir_p_private(directory)) return false;
     n = snprintf(path, path_size, "%s%cunlock-queue.bin", directory, separator);
-    if (n <= 0 || (size_t)n >= path_size) return false;
-    n = snprintf(tmp_path, tmp_path_size, "%s.tmp", path);
-    return n > 0 && (size_t)n < tmp_path_size;
+    return n > 0 && (size_t)n < path_size;
 }
 
 static bool player_achievements_save_queue(PlayerRun *run) {
-    if (!run || !run->achievements) return false;
-    const size_t count = nk_ach_pending_unlock_count(run->achievements);
-    if (count > NK_ACH_PENDING_UNLOCKS_MAX) return false;
-    NkAchPendingUnlock *entries = (NkAchPendingUnlock *)calloc(
-        count ? count : 1u, sizeof(*entries));
-    if (!entries) return false;
-    const size_t copied = nk_ach_copy_pending_unlocks(run->achievements, entries, count);
-    if (copied != count) {
-        free(entries);
-        return false;
-    }
-
     char path[NK_MAX_PATH];
-    char tmp_path[NK_MAX_PATH];
-    if (!player_ach_queue_path(path, sizeof path, tmp_path, sizeof tmp_path)) {
-        free(entries);
-        return false;
-    }
-    FILE *file = nk_platform_fopen_private(tmp_path, "wb");
-    if (!file) {
-        free(entries);
-        return false;
-    }
-    static const uint8_t magic[8] = {'N', 'K', 'R', 'A', 'Q', '0', '0', '1'};
-    uint8_t header[PLAYER_ACH_QUEUE_HEADER_SIZE];
-    memcpy(header, magic, sizeof magic);
-    player_ach_queue_put_u32(header + 8u, 1u);
-    player_ach_queue_put_u32(header + 12u, (uint32_t)count);
-    bool ok = fwrite(header, 1u, sizeof header, file) == sizeof header;
-    uint8_t record[PLAYER_ACH_QUEUE_RECORD_SIZE];
-    for (size_t i = 0u; ok && i < count; i++) {
-        if (!player_ach_hash_valid(entries[i].game_hash) || entries[i].achievement_id == 0u) {
-            ok = false;
-            break;
-        }
-        memcpy(record, entries[i].game_hash, 32u);
-        player_ach_queue_put_u32(record + 32u, entries[i].achievement_id);
-        player_ach_queue_put_u64(record + 36u, entries[i].unlocked_at_utc);
-        ok = fwrite(record, 1u, sizeof record, file) == sizeof record;
-    }
-    if (fflush(file) != 0) ok = false;
-    if (fclose(file) != 0) ok = false;
-    if (ok && nk_rename_utf8(tmp_path, path) != 0) ok = false;
-    free(entries);
-    return ok;
+    return run && run->achievements && player_ach_queue_path(path, sizeof path) &&
+           nk_ach_save_queue_file(run->achievements, path);
 }
 
-static bool player_achievements_load_queue(PlayerRun *run) {
-    if (!run || !run->achievements) return false;
-    char path[NK_MAX_PATH];
-    char tmp_path[NK_MAX_PATH];
-    if (!player_ach_queue_path(path, sizeof path, tmp_path, sizeof tmp_path)) return false;
-    if (!nk_platform_file_exists(path)) return true;
-    const int64_t raw_size = nk_platform_get_file_size(path);
-    if (raw_size < (int64_t)PLAYER_ACH_QUEUE_HEADER_SIZE ||
-        (uint64_t)raw_size > PLAYER_ACH_QUEUE_FILE_MAX) return false;
-    FILE *file = nk_fopen_utf8(path, "rb");
-    if (!file) return false;
+static void player_achievements_save_queue_or_report(PlayerRun *run);
 
-    uint8_t header[PLAYER_ACH_QUEUE_HEADER_SIZE];
-    static const uint8_t magic[8] = {'N', 'K', 'R', 'A', 'Q', '0', '0', '1'};
-    bool ok = fread(header, 1u, sizeof header, file) == sizeof header &&
-              memcmp(header, magic, sizeof magic) == 0 &&
-              player_ach_queue_get_u32(header + 8u) == 1u;
-    const uint32_t count = ok ? player_ach_queue_get_u32(header + 12u) : 0u;
-    const uint64_t expected = (uint64_t)PLAYER_ACH_QUEUE_HEADER_SIZE +
-                              (uint64_t)count * PLAYER_ACH_QUEUE_RECORD_SIZE;
-    if (count > NK_ACH_PENDING_UNLOCKS_MAX || expected != (uint64_t)raw_size) ok = false;
-    NkAchPendingUnlock *entries = ok
-        ? (NkAchPendingUnlock *)calloc(count ? count : 1u, sizeof(*entries)) : NULL;
-    if (ok && !entries) ok = false;
-    uint8_t record[PLAYER_ACH_QUEUE_RECORD_SIZE];
-    for (uint32_t i = 0u; ok && i < count; i++) {
-        if (fread(record, 1u, sizeof record, file) != sizeof record) {
-            ok = false;
-            break;
-        }
-        memcpy(entries[i].game_hash, record, 32u);
-        entries[i].game_hash[32] = '\0';
-        entries[i].achievement_id = player_ach_queue_get_u32(record + 32u);
-        entries[i].unlocked_at_utc = player_ach_queue_get_u64(record + 36u);
-        if (!player_ach_hash_valid(entries[i].game_hash) || entries[i].achievement_id == 0u)
-            ok = false;
+/* Reads the saved queue once, before any sign-in. Whatever could not be loaded is said in the
+   log and kept as a notice for the status line; a file that could not be read is kept, never
+   written over (nk_ach_load_queue_file). */
+static void player_achievements_load_queue(PlayerRun *run) {
+    char path[NK_MAX_PATH];
+    char *notice = run->achievements_queue_notice;
+    const size_t notice_size = sizeof run->achievements_queue_notice;
+    notice[0] = '\0';
+    if (!player_ach_queue_path(path, sizeof path)) {
+        snprintf(notice, notice_size, "The offline unlock queue folder is unavailable.");
+        fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", notice);
+        return;
     }
-    if (ok && fgetc(file) != EOF) ok = false;
-    fclose(file);
-    if (ok) {
-        for (uint32_t i = 0u; i < count; i++) {
-            if (!nk_ach_restore_pending_unlock(run->achievements, &entries[i])) {
-                ok = false;
-                break;
-            }
-        }
+    /* A queue file from before files named their account is tied to the stored account by the
+       time that account's credential was last written; this runs before the sign-in below
+       writes it again. */
+    char username[256] = "";
+    char token[1024] = "";
+    NkAchQueueLegacy stored = {NULL, 0u};
+    if (nk_platform_credential_read(k_ach_credential_target, username, sizeof username,
+                                    token, sizeof token) &&
+        nk_platform_credential_written_utc(k_ach_credential_target,
+                                           &stored.credential_written_utc)) {
+        stored.username = username;
     }
-    free(entries);
-    return ok;
+    player_secure_clear(token, sizeof token);
+    NkAchQueueLoad report;
+    const bool loaded = nk_ach_load_queue_file(run->achievements, path, &stored, &report);
+    player_secure_clear(username, sizeof username);
+    if (report.unreadable && report.kept_aside) {
+        snprintf(notice, notice_size, "A saved offline unlock queue could not be read; it "
+                                      "was kept as unlock-queue.bin.unreadable.");
+    } else if (!loaded) {
+        snprintf(notice, notice_size, "A saved offline unlock queue could not be read; it is "
+                                      "left untouched and nothing is saved over it now.");
+    } else if (report.unproven) {
+        snprintf(notice, notice_size, "%u saved unlock%s from an earlier version could not be "
+                                      "tied to this account and %s discarded.",
+                 (unsigned)report.unproven, report.unproven == 1u ? "" : "s",
+                 report.unproven == 1u ? "was" : "were");
+    }
+    if (notice[0]) fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", notice);
+    /* An earlier version's file is written again at once, so the next start reads its owner. */
+    if (loaded && report.legacy) player_achievements_save_queue_or_report(run);
+}
+
+/* A status the sign-in comes to rest on, followed once by what the queue's load had to say. */
+static void player_achievements_rest_status(PlayerRun *run, const char *text) {
+    PlayerApp *app = &run->app;
+    if (run->achievements_queue_notice[0]) {
+        snprintf(app->achievements_status, sizeof app->achievements_status, "%s %s", text,
+                 run->achievements_queue_notice);
+        run->achievements_queue_notice[0] = '\0';
+    } else {
+        snprintf(app->achievements_status, sizeof app->achievements_status, "%s", text);
+    }
 }
 
 static void player_achievements_refresh_list(PlayerRun *run) {
@@ -4708,9 +4671,9 @@ static void player_achievements_save_queue_or_report(PlayerRun *run) {
              "The offline unlock queue could not be saved to this PC.");
 }
 
-/* The user's Sign out, once the credential is gone: the session ends and the unlocks still
-   waiting are discarded and the queue file rewritten, because a record names no account and
-   the next account to sign in must not be awarded them. */
+/* The user's Sign out, once the credential is gone: the session ends, the unlocks still
+   waiting are discarded and the queue file is rewritten. The queue was that account's, and
+   nothing of a signed-out account stays on this PC. */
 static void player_achievements_end_account(PlayerRun *run, bool credential_removed) {
     if (!run) return;
     if (!credential_removed) {
@@ -4779,8 +4742,8 @@ static void player_achievements_collect_events(PlayerRun *run) {
                     app->achievements_signed_in = true;
                     snprintf(app->achievements_account, sizeof app->achievements_account,
                              "%.*s", (int)sizeof(app->achievements_account) - 1, username);
-                    snprintf(app->achievements_status, sizeof app->achievements_status,
-                             app->is_game_running && !run->guest_memory_channel_active
+                    player_achievements_rest_status(
+                        run, app->is_game_running && !run->guest_memory_channel_active
                                  ? "Signed in. Restart this game to start softcore tracking."
                                  : "Signed in. Softcore only.");
                     nk_ach_replay_pending_unlocks(run->achievements, SDL_GetTicks());
@@ -4789,17 +4752,32 @@ static void player_achievements_collect_events(PlayerRun *run) {
                 break;
             }
             case NK_ACH_EVENT_LOGIN_FAILED:
+            case NK_ACH_EVENT_LOGIN_UNREACHABLE:
                 run->achievements_login_pending = false;
                 if (run->achievements_signout_pending) {
                     (void)nk_platform_credential_delete(k_ach_credential_target);
                     run->achievements_signout_pending = false;
                     player_achievements_end_account(run, true);
+                } else if (event->kind == NK_ACH_EVENT_LOGIN_UNREACHABLE) {
+                    /* The stored token was not refused: player_frame_begin signs in with it
+                       again when the bridge says it is due. No password is asked. */
+                    player_achievements_rest_status(
+                        run, "RetroAchievements could not be reached. Sign-in is tried again "
+                             "by itself.");
                 } else {
-                    snprintf(app->achievements_status, sizeof app->achievements_status,
-                             "Sign-in failed. Check the account or connection.");
+                    player_achievements_rest_status(
+                        run, "Sign-in failed. Check the account or connection.");
                 }
                 app->achievements_signed_in = false;
                 app->achievements_account[0] = '\0';
+                break;
+            case NK_ACH_EVENT_UNLOCKS_DISCARDED:
+                snprintf(app->achievements_status, sizeof app->achievements_status,
+                         "%u saved unlock%s of another account %s discarded, not sent.",
+                         event->count, event->count == 1u ? "" : "s",
+                         event->count == 1u ? "was" : "were");
+                fprintf(stderr, "[PLAYER] RetroAchievements: %s\n", app->achievements_status);
+                player_achievements_save_queue_or_report(run);
                 break;
             case NK_ACH_EVENT_GAME_LOADED:
                 player_achievements_refresh_list(run);
@@ -4862,36 +4840,15 @@ static void player_achievements_collect_events(PlayerRun *run) {
     }
 }
 
-static void player_achievements_start(PlayerRun *run) {
-    if (!run) return;
+/* Signs in with the token the credential store holds. No password is asked or needed. */
+static void player_achievements_sign_in_stored(PlayerRun *run) {
     PlayerApp *app = &run->app;
-    if (!app->settings.achievements_enabled) return;
-    if (!app->achievements_store_available) {
-        snprintf(app->achievements_status, sizeof app->achievements_status,
-                 "Sign-in requires Windows Credential Manager; this platform is unsupported.");
-        return;
-    }
-    if (!run->achievements) {
-        run->achievements = nk_ach_create(NULL, player_ach_transport, run);
-        if (!run->achievements) {
-            snprintf(app->achievements_status, sizeof app->achievements_status,
-                     "RetroAchievements could not initialize.");
-            return;
-        }
-    }
-    if (!run->achievements_queue_load_checked) {
-        run->achievements_queue_load_checked = true;
-        if (!player_achievements_load_queue(run))
-            snprintf(app->achievements_status, sizeof app->achievements_status,
-                     "A saved offline unlock queue could not be read; sign-in can continue.");
-    }
     char username[256] = "";
     char token[1024] = "";
     if (!nk_platform_credential_read(k_ach_credential_target, username, sizeof username,
                                      token, sizeof token)) {
         app->achievements_signed_in = false;
-        snprintf(app->achievements_status, sizeof app->achievements_status,
-                 "Sign in to connect. Softcore only.");
+        player_achievements_rest_status(run, "Sign in to connect. Softcore only.");
         return;
     }
     snprintf(app->achievements_account, sizeof app->achievements_account,
@@ -4904,6 +4861,28 @@ static void player_achievements_start(PlayerRun *run) {
     snprintf(app->achievements_status, sizeof app->achievements_status,
              run->achievements_login_pending ? "Signing in. Softcore only."
                                              : "Sign-in could not start.");
+}
+
+static void player_achievements_start(PlayerRun *run) {
+    if (!run) return;
+    PlayerApp *app = &run->app;
+    player_achievements_sync_transport(run);
+    if (!app->settings.achievements_enabled) return;
+    if (!app->achievements_store_available) {
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "Sign-in requires Windows Credential Manager; this platform is unsupported.");
+        return;
+    }
+    if (!player_achievements_create(run)) {
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "RetroAchievements could not initialize.");
+        return;
+    }
+    if (!run->achievements_queue_load_checked) {
+        run->achievements_queue_load_checked = true;
+        player_achievements_load_queue(run);
+    }
+    player_achievements_sign_in_stored(run);
 }
 
 static bool player_achievements_consent(PlayerRun *run) {
@@ -4944,10 +4923,7 @@ static bool player_achievements_prompt_sign_in(PlayerRun *run) {
                  "Sign-in is already in progress.");
         return false;
     }
-    if (!run->achievements) {
-        run->achievements = nk_ach_create(NULL, player_ach_transport, run);
-        if (!run->achievements) return false;
-    }
+    if (!player_achievements_create(run)) return false;
     /* The operating system's own credential dialog takes the password (nk_platform.h); the
        player sees it only long enough to hand it to the sign-in request. */
     char username[256] = "";
@@ -4977,62 +4953,33 @@ static bool player_achievements_prompt_sign_in(PlayerRun *run) {
     return true;
 }
 
-static int SDLCALL player_ach_guest_memory_thread_main(void *userdata) {
-    PlayerRun *run = (PlayerRun *)userdata;
-    if (!run) return 0;
-    for (;;) {
-        const int result = nk_platform_guest_memory_channel_wait_frame(
-            &run->guest_memory_channel);
-        if (result <= 0) {
-            if (result < 0 || !SDL_GetAtomicInt(&run->guest_memory_stop_requested))
-                SDL_SetAtomicInt(&run->guest_memory_sync_failed, 1);
-            break;
-        }
-        SDL_Event event;
-        SDL_zero(event);
-        event.type = SDL_EVENT_USER;
-        event.user.code = PLAYER_ACH_FRAME_EVENT_CODE;
-        event.user.data1 = run;
-        if (!SDL_PushEvent(&event)) {
-            SDL_SetAtomicInt(&run->guest_memory_sync_failed, 1);
-            (void)nk_platform_guest_memory_channel_ack_frame(&run->guest_memory_channel);
-            nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
-            break;
-        }
-    }
-    SDL_SetAtomicInt(&run->guest_memory_thread_done, 1);
-    SDL_Event event;
-    SDL_zero(event);
-    event.type = SDL_EVENT_USER;
-    event.user.code = PLAYER_ACH_CHANNEL_STOP_EVENT_CODE;
-    event.user.data1 = run;
-    (void)SDL_PushEvent(&event);
-    return 0;
+/* The frame service's thread (nk_platform_guest_memory_channel_serve): one evaluation for each
+   VBLANK the runtime publishes, while the guest is paused on that VBLANK, and the runtime goes
+   on as soon as it returns. It never waits for this player's event loop, which a modal box or
+   a dragged window stops: it enters nothing but the bridge, whose lock it takes. */
+static void player_ach_serve_frame(void *context) {
+    PlayerRun *run = (PlayerRun *)context;
+    nk_ach_frame(run->achievements);
 }
 
 static void player_achievements_stop_channel(PlayerRun *run) {
     if (!run) return;
-    SDL_SetAtomicInt(&run->guest_memory_stop_requested, 1);
     if (run->guest_memory_channel.view) {
+        /* Stops the frame service, waits for it, then unmaps the arena it read. Nothing here
+           holds the bridge's lock, which a frame in progress needs to finish. */
         nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
-    }
-    if (run->guest_memory_thread) {
-        SDL_WaitThread(run->guest_memory_thread, NULL);
-        run->guest_memory_thread = NULL;
-    }
-    if (run->achievements) nk_ach_set_memory(run->achievements, NULL);
-    if (run->guest_memory_channel.view) {
         nk_platform_guest_memory_channel_close(&run->guest_memory_channel);
     }
+    if (run->achievements) nk_ach_set_memory(run->achievements, NULL);
     run->guest_memory_channel_active = false;
     run->achievements_game_hash[0] = '\0';
-    SDL_SetAtomicInt(&run->guest_memory_sync_failed, 0);
-    SDL_SetAtomicInt(&run->guest_memory_stop_requested, 0);
 }
 
 static void player_achievements_shutdown(PlayerRun *run) {
     if (!run) return;
     run->achievements_shutting_down = true;
+    player_achievements_sync_transport(run);
+    /* After this the bridge is entered from this thread alone. */
     player_achievements_stop_channel(run);
     PlayerAchHttpJob *job = run->ach_http_job;
     if (job) {
@@ -5047,6 +4994,10 @@ static void player_achievements_shutdown(PlayerRun *run) {
         (void)player_achievements_save_queue(run);
         nk_ach_destroy(run->achievements);
         run->achievements = NULL;
+    }
+    if (run->achievements_lock) {
+        SDL_DestroyMutex(run->achievements_lock);
+        run->achievements_lock = NULL;
     }
 }
 
@@ -5097,17 +5048,13 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
     }
     snprintf(work->guest_memory_channel, sizeof work->guest_memory_channel, "%s", channel_name);
     snprintf(run->achievements_game_hash, sizeof run->achievements_game_hash, "%s", hash);
-    SDL_SetAtomicInt(&run->guest_memory_thread_done, 0);
-    SDL_SetAtomicInt(&run->guest_memory_sync_failed, 0);
-    SDL_SetAtomicInt(&run->guest_memory_stop_requested, 0);
     run->guest_memory_channel_active = true;
-    run->guest_memory_thread = SDL_CreateThread(player_ach_guest_memory_thread_main,
-                                                 "ra-frame-sync", run);
-    if (!run->guest_memory_thread) {
+    if (!nk_platform_guest_memory_channel_serve(&run->guest_memory_channel,
+                                                player_ach_serve_frame, run)) {
         player_achievements_stop_channel(run);
         work->guest_memory_channel[0] = '\0';
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
-                 "The local guest-memory thread could not start; achievements are off for this run.");
+                 "The local guest-memory service could not start; achievements are off for this run.");
         return;
     }
     snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
@@ -5135,6 +5082,13 @@ static void player_achievements_sign_out(PlayerRun *run) {
 static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettingsOp op) {
     if (!run) return;
     PlayerApp *app = &run->app;
+    if (player_ui_test_active(&run->ui_test)) {
+        /* A native UI regression run stays offline, opens no modal box and reads no
+           credential: the switch, Sign in and Sign out are refused, and say so. */
+        snprintf(app->achievements_status, sizeof app->achievements_status,
+                 "RetroAchievements is not available in a UI regression run.");
+        return;
+    }
     if (app->launch_pending) {
         snprintf(app->achievements_status, sizeof app->achievements_status,
                  "Wait for the current launch before changing RetroAchievements.");
@@ -5144,6 +5098,7 @@ static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettings
     case PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS:
         if (app->settings.achievements_enabled) {
             player_app_set_achievements_enabled(app, false);
+            player_achievements_sync_transport(run);
             if (run->achievements_login_pending) run->achievements_signout_pending = false;
             if (run->achievements) nk_ach_logout(run->achievements);
             player_achievements_stop_channel(run);
@@ -6344,15 +6299,21 @@ static void player_loop_start(PlayerRun *run) {
 /* The start of a frame: update state, the UI-test script step, and the tick. */
 static void player_frame_begin(PlayerRun *run) {
     PlayerApp *app = &run->app;
+    player_achievements_sync_transport(run);
     player_ach_http_poll(run);
     if (run->achievements && app->settings.achievements_enabled) {
         nk_ach_idle(run->achievements);
         player_achievements_collect_events(run);
-        if (app->achievements_signed_in)
+        if (app->achievements_signed_in) {
             nk_ach_replay_pending_unlocks(run->achievements, SDL_GetTicks());
+        } else if (!run->achievements_login_pending && !run->achievements_signout_pending &&
+                   nk_ach_token_login_due(run->achievements, SDL_GetTicks())) {
+            /* A sign-in at start that reached no server: the stored token again. */
+            player_achievements_sign_in_stored(run);
+        }
     }
-    if (SDL_GetAtomicInt(&run->guest_memory_sync_failed)) {
-        SDL_SetAtomicInt(&run->guest_memory_sync_failed, 0);
+    if (run->guest_memory_channel_active &&
+        nk_platform_guest_memory_channel_serving(&run->guest_memory_channel) < 0) {
         snprintf(app->achievements_status, sizeof app->achievements_status,
                  "The local guest-memory channel stopped; achievements are off for this run.");
         player_achievements_stop_channel(run);
@@ -6436,23 +6397,6 @@ static void player_frame_events(PlayerRun *run) {
                         if (run->achievements && app->settings.achievements_enabled)
                             nk_ach_idle(run->achievements);
                         player_achievements_collect_events(run);
-                    } else if (event.user.code == PLAYER_ACH_FRAME_EVENT_CODE &&
-                               event.user.data1 == run) {
-                        player_ach_http_poll(run);
-                        if (run->achievements && app->settings.achievements_enabled &&
-                            app->achievements_signed_in) {
-                            nk_ach_frame(run->achievements);
-                        } else if (run->achievements) {
-                            nk_ach_idle(run->achievements);
-                        }
-                        player_achievements_collect_events(run);
-                        if (run->guest_memory_channel_active)
-                            (void)nk_platform_guest_memory_channel_ack_frame(
-                                &run->guest_memory_channel);
-                    } else if (event.user.code == PLAYER_ACH_CHANNEL_STOP_EVENT_CODE &&
-                               event.user.data1 == run) {
-                        /* The frame waiter stopped; player_frame_begin reports an OS failure
-                           separately when the channel was not deliberately stopped. */
                     } else if (run->package_status_job &&
                         event.user.data1 == run->package_status_job &&
                         event.user.code == PLAYER_PACKAGE_STATUS_EVENT_CODE) {

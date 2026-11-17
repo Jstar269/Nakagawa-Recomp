@@ -1680,20 +1680,51 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
     def test_offline_achievement_queue_is_private_and_token_free(self) -> None:
         main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
         header = (REPO_ROOT / "src" / "core" / "nk_achievements.h").read_text(encoding="utf-8")
-        start = main.index("#define PLAYER_ACH_QUEUE_HEADER_SIZE")
-        end = main.index("static void player_achievements_collect_events", start)
-        queue_code = main[start:end]
+        bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
         record = header.split("typedef struct NkAchPendingUnlock {", 1)[1].split("}", 1)[0]
         for field in ("char game_hash[33]", "uint32_t achievement_id", "uint64_t unlocked_at_utc"):
             self.assertIn(field, record)
         self.assertNotRegex(record, r"\b(?:username|password|token|secret)\b")
+        # The player names the file, in the user's private folder, and hands the path to the
+        # bridge; it formats nothing itself.
+        start = main.index("static bool player_ach_queue_path(")
+        end = main.index("static void player_achievements_collect_events", start)
+        player_queue = main[start:end]
         for required in ("nk_platform_get_app_data_dir", "nk_platform_mkdir_p_private",
-                         "nk_platform_fopen_private", "nk_rename_utf8",
+                         "nk_ach_save_queue_file(run->achievements, path)",
+                         "nk_ach_load_queue_file(run->achievements, path, &stored, &report)"):
+            self.assertIn(required, player_queue)
+        self.assertNotRegex(player_queue, r"\b(?:fopen|nk_fopen_utf8|fwrite|fread)\s*\(")
+        # The bridge reads and writes it (achievements-selftest runs that code on real files):
+        # a private temporary file renamed into place, the three record fields, and for its
+        # owner a tag, never an account name or a token.
+        start = bridge.index("/* ---- the queue file")
+        queue_code = bridge[start:]
+        for required in ("nk_platform_fopen_private", "nk_rename_utf8",
                          "entries[i].game_hash", "entries[i].achievement_id",
-                         "entries[i].unlocked_at_utc"):
+                         "entries[i].unlocked_at_utc", "ach->pending_owner"):
             self.assertIn(required, queue_code)
         self.assertRegex(queue_code, r"\{'N', 'K', 'R', 'A', 'Q', '0', '0', '1'\}")
-        # A record names no account, so the user's Sign out discards what is still waiting
+        encode = queue_code[queue_code.index("static uint8_t *ach_queue_encode("):
+                            queue_code.index("typedef struct AchQueueFile")]
+        self.assertNotRegex(encode, r"username|password|token|secret")
+        self.assertIn("bool nk_ach_account_tag(const char *username", header)
+        # The game never waits for the player's event loop: the guest-memory channel's own
+        # thread evaluates each frame, and the loop handles no frame event.
+        self.assertIn("nk_platform_guest_memory_channel_serve(&run->guest_memory_channel,", main)
+        self.assertNotRegex(main, r"nk_platform_guest_memory_channel_(?:wait|ack)_frame")
+        self.assertEqual(len(re.findall(r"\bnk_ach_frame\(", main)), 1)
+        serve_start = main.index("static void player_ach_serve_frame(void *context) {")
+        serve = main[serve_start:
+                     main.index("static void player_achievements_stop_channel", serve_start)]
+        self.assertIn("nk_ach_frame(run->achievements);", serve)
+        self.assertNotRegex(serve, r"\bSDL_|\bapp\b")
+        # A native UI regression run refuses the three Achievements actions before anything else.
+        action = main[main.index("static void player_achievements_settings_action(PlayerRun *run, "
+                                 "PlayerUiSettingsOp op) {"):]
+        self.assertLess(action.index("player_ui_test_active(&run->ui_test)"),
+                        action.index("switch (op)"))
+        # The queue is one account's, so the user's Sign out discards what is still waiting
         # (nk_ach_sign_out) and rewrites the file; only the switch turned off keeps the records.
         sign_out = main[main.index("static void player_achievements_end_account"):
                         main.index("static void player_achievements_collect_events")]

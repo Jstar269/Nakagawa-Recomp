@@ -129,6 +129,9 @@ bool nk_platform_credential_read(const char *target, char *username, size_t user
                                 char *secret, size_t secret_size);
 bool nk_platform_credential_write(const char *target, const char *username, const char *secret);
 bool nk_platform_credential_delete(const char *target);
+/* When the credential for target was last written, in seconds since 1970 UTC. False when there
+ * is none or the store does not say. */
+bool nk_platform_credential_written_utc(const char *target, uint64_t *out_utc);
 /* Asks for a user name and password in the operating system's own credential dialog, which
  * names target; nothing is stored. 1 when both were entered, 0 when the user cancelled, -1 when
  * there is no such dialog or it failed. On anything but 1 both buffers are empty. The caller
@@ -160,6 +163,11 @@ typedef struct {
     void *stop_event;
     bool owner;
     char name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
+    /* Parent, once nk_platform_guest_memory_channel_serve started its thread. */
+    void *service_thread;
+    void (*service_frame)(void *context);
+    void *service_context;
+    volatile int32_t service_state;
 } NkGuestMemoryChannel;
 bool nk_platform_guest_memory_channel_create(NkGuestMemoryChannel *channel,
                                              const char *name, size_t arena_size);
@@ -169,6 +177,18 @@ bool nk_platform_guest_memory_channel_open(NkGuestMemoryChannel *channel,
 int nk_platform_guest_memory_channel_wait_frame(NkGuestMemoryChannel *channel);
 /* Parent: releases the runtime after evaluating one vblank. */
 bool nk_platform_guest_memory_channel_ack_frame(NkGuestMemoryChannel *channel);
+/* Parent: serves the channel on a thread of its own, so the runtime never waits for the
+ * caller's event loop (a modal box or a window being dragged stops that loop, and must not
+ * stop the game). For each vblank the runtime publishes, frame(context) runs once on that
+ * thread while the guest is paused on that vblank, and the vblank is then acknowledged. The
+ * thread ends when the channel is stopped; nk_platform_guest_memory_channel_close waits for it,
+ * so do not close while holding anything frame needs. The channel must stay where it is while
+ * it is served. False when the thread cannot start or the platform has no channel. */
+bool nk_platform_guest_memory_channel_serve(NkGuestMemoryChannel *channel,
+                                            void (*frame)(void *context), void *context);
+/* Parent: 1 while frames are served, 0 when serving never started or ended with a stop, -1 when
+ * it ended on an OS error (the channel is then stopped, which releases the runtime). */
+int nk_platform_guest_memory_channel_serving(NkGuestMemoryChannel *channel);
 /* Runtime: publishes one vblank and waits until the player acknowledges it or stops. */
 bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel);
 void nk_platform_guest_memory_channel_stop(NkGuestMemoryChannel *channel);

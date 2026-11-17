@@ -556,6 +556,23 @@ bool nk_platform_credential_read(const char *target, char *username, size_t user
     return ok;
 }
 
+bool nk_platform_credential_written_utc(const char *target, uint64_t *out_utc) {
+    if (out_utc) *out_utc = 0u;
+    if (!target || !out_utc) return false;
+    WCHAR wtarget[512];
+    if (!utf8_to_wide(target, wtarget, sizeof(wtarget) / sizeof(wtarget[0]))) return false;
+    PCREDENTIALW credential = NULL;
+    if (!CredReadW(wtarget, CRED_TYPE_GENERIC, 0u, &credential) || !credential) return false;
+    /* FILETIME counts 100 ns from 1601-01-01; 11644473600 s separate that from 1970-01-01. */
+    const uint64_t ticks = ((uint64_t)credential->LastWritten.dwHighDateTime << 32) |
+                           (uint64_t)credential->LastWritten.dwLowDateTime;
+    CredFree(credential);
+    const uint64_t seconds = ticks / 10000000u;
+    if (seconds <= 11644473600u) return false;
+    *out_utc = seconds - 11644473600u;
+    return true;
+}
+
 bool nk_platform_credential_write(const char *target, const char *username, const char *secret) {
     if (!target || !username || !username[0] || !secret || !secret[0]) return false;
     const size_t secret_size = strlen(secret);
@@ -779,6 +796,50 @@ bool nk_platform_guest_memory_channel_ack_frame(NkGuestMemoryChannel *channel) {
     return channel && channel->ack_event && SetEvent((HANDLE)channel->ack_event) != 0;
 }
 
+static DWORD WINAPI guest_memory_channel_service_main(LPVOID parameter) {
+    NkGuestMemoryChannel *channel = (NkGuestMemoryChannel *)parameter;
+    LONG ended = 0;
+    for (;;) {
+        const int frame = nk_platform_guest_memory_channel_wait_frame(channel);
+        if (frame <= 0) {
+            ended = frame;
+            break;
+        }
+        channel->service_frame(channel->service_context);
+        if (!nk_platform_guest_memory_channel_ack_frame(channel)) {
+            ended = -1;
+            break;
+        }
+    }
+    /* An OS failure here must not leave the runtime waiting for an acknowledgement. */
+    if (ended < 0) nk_platform_guest_memory_channel_stop(channel);
+    (void)InterlockedExchange((volatile LONG *)&channel->service_state, ended);
+    return 0u;
+}
+
+bool nk_platform_guest_memory_channel_serve(NkGuestMemoryChannel *channel,
+                                            void (*frame)(void *context), void *context) {
+    if (!channel || !frame || !channel->owner || !channel->frame_event ||
+        !channel->ack_event || !channel->stop_event || channel->service_thread) return false;
+    channel->service_frame = frame;
+    channel->service_context = context;
+    (void)InterlockedExchange((volatile LONG *)&channel->service_state, 1);
+    HANDLE thread = CreateThread(NULL, 0u, guest_memory_channel_service_main, channel, 0u, NULL);
+    if (!thread) {
+        (void)InterlockedExchange((volatile LONG *)&channel->service_state, 0);
+        channel->service_frame = NULL;
+        channel->service_context = NULL;
+        return false;
+    }
+    channel->service_thread = thread;
+    return true;
+}
+
+int nk_platform_guest_memory_channel_serving(NkGuestMemoryChannel *channel) {
+    if (!channel || !channel->service_thread) return 0;
+    return (int)InterlockedCompareExchange((volatile LONG *)&channel->service_state, 0, 0);
+}
+
 bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel) {
     if (!channel || !channel->frame_event || !channel->ack_event || !channel->stop_event ||
         !SetEvent((HANDLE)channel->frame_event)) return false;
@@ -797,6 +858,12 @@ void nk_platform_guest_memory_channel_stop(NkGuestMemoryChannel *channel) {
 
 void nk_platform_guest_memory_channel_close(NkGuestMemoryChannel *channel) {
     if (!channel) return;
+    if (channel->service_thread) {
+        /* The thread reads the arena inside frame(): it ends before the view goes. */
+        nk_platform_guest_memory_channel_stop(channel);
+        (void)WaitForSingleObject((HANDLE)channel->service_thread, INFINITE);
+        CloseHandle((HANDLE)channel->service_thread);
+    }
     if (channel->view) UnmapViewOfFile(channel->view);
     if (channel->mapping_handle) CloseHandle((HANDLE)channel->mapping_handle);
     if (channel->owner_process) CloseHandle((HANDLE)channel->owner_process);

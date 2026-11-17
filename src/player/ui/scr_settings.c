@@ -1040,12 +1040,14 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                   inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
             }
-            if ((model->achievements_available || model->achievements_enabled) &&
-                scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
-                                  "Achievements",
-                                  "Softcore only. Agree to the host and data disclosure before signing in.",
-                                  model->achievements_enabled, inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS);
+            /* One row: the switch where the feature can run, the reason where it cannot. */
+            if (model->achievements_available || model->achievements_enabled) {
+                if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,
+                                      "Achievements",
+                                      "Softcore only. Agree to the host and data disclosure before signing in.",
+                                      model->achievements_enabled, inner - 32.0f, &column)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_ACHIEVEMENTS);
+                }
             } else {
                 (void)scr_wizard_value_state(
                     ui, PLAYER_UI_ID_SETTINGS_ACHIEVEMENTS, SET_ID_TEXT + 0xF0u,

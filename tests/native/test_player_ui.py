@@ -2765,6 +2765,43 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(self.screens(tabs), [("settings", "1"), ("library", "3")],
                          "the ABOUT tab on Settings closes it and opens About")
 
+    # Settings > Online and developer: the RetroAchievements switch (#1316).
+    SETTINGS_ACHIEVEMENTS = str(0x455C)
+
+    def test_next_ui_achievements_switch_is_refused_in_a_ui_regression_run(self) -> None:
+        """#1316: a UI regression run stays offline and opens no box, so the Achievements
+        switch is refused and says so. No consent is asked for, and nothing is saved. Where
+        the feature cannot run (no credential store), the row is its reason, not a switch."""
+        focus = self.SETTINGS_FOCUS
+        run = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS +
+            ("KEY_LEFT", "KEY_RETURN", "WAIT_MS=100", "WAIT_LAID_OUT=5000") +
+            ("KEY_DOWN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"),
+        )
+        stdout = run["stdout"]
+        assert isinstance(stdout, str)
+        said = [bytes.fromhex(status).decode("utf-8") for status in re.findall(
+            r"\[PLAYER_UI_TEST\] achievements frame=\d+ enabled=0 status_hex=([0-9a-f]+)", stdout)]
+        self.assertNotRegex(stdout, r"achievements frame=\d+ enabled=1")
+        settings = run.get("settings") or {}
+        assert isinstance(settings, dict)
+        self.assertIsNot(settings.get("achievements_enabled"), True)
+        trail = self.focus_trail(run)
+        if os.name == "nt":
+            self.assertEqual(trail[-2:], [focus["developer"], self.SETTINGS_ACHIEVEMENTS],
+                             "the keyboard reaches the Achievements switch, below Developer mode")
+            self.assertEqual(
+                said, ["Softcore only. Sign in to connect.",
+                       "RetroAchievements is not available in a UI regression run."],
+                "the switch is refused before the consent box or the credential store is asked")
+        else:
+            self.assertNotIn(self.SETTINGS_ACHIEVEMENTS, trail)
+            self.assertEqual(
+                said, ["Sign-in requires Windows Credential Manager; this platform is "
+                       "unsupported."],
+                "no credential store here: the row is its reason, and nothing is asked")
+
     def test_next_ui_scaling_and_menu_sounds_are_saved(self) -> None:
         """Scaling (#1129) cycles Sharp to Integer and is saved by its name; Menu
         sounds, off by default, is switched on and saved."""

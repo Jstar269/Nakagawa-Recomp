@@ -1231,6 +1231,12 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.online_reports = app->settings.online_reports;
     model.developer_mode = app->settings.developer_mode;
     model.download_cover_art = app->settings.download_cover_art;
+    /* RetroAchievements (#1316) is on the Online and developer page. */
+    model.achievements_enabled = app->settings.achievements_enabled;
+    model.achievements_available = app->achievements_store_available;
+    model.achievements_signed_in = app->achievements_signed_in;
+    model.achievements_account = app->achievements_account[0] ? app->achievements_account : NULL;
+    model.achievements_status = app->achievements_status[0] ? app->achievements_status : NULL;
     model.cover_art_cache_size = app->cover_art_cache_size_label;
     model.share_system_libraries = app->settings.share_system_libraries;
     /* The build tools and cache page says what its clear button did. */
@@ -1296,13 +1302,6 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         model.check_updates_at_start = app->settings.check_updates_at_start;
         model.discord_presence = app->settings.discord_presence;
         model.discord_available = nk_discord_available();
-        model.achievements_enabled = app->settings.achievements_enabled;
-        model.achievements_available = app->achievements_store_available;
-        model.achievements_signed_in = app->achievements_signed_in;
-        model.achievements_account = app->achievements_account[0]
-            ? app->achievements_account : NULL;
-        model.achievements_status = app->achievements_status[0]
-            ? app->achievements_status : NULL;
         model.current_version = NK_PLAYER_VERSION;
         if (checked) {
             model.update_version = newest->version;
