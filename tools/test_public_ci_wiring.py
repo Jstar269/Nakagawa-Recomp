@@ -187,6 +187,30 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn(diagnostic.rstrip(), captured.getvalue())
 
+    def test_empty_mypy_ratchet_accepts_zero_and_rejects_a_new_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            baseline_path = Path(temporary) / "mypy_baseline.json"
+            with mock.patch.object(mypy_baseline, "BASELINE", baseline_path):
+                mypy_baseline._write_baseline({})
+                self.assertEqual(mypy_baseline._read_baseline(), ({}, 0))
+                with mock.patch.object(mypy_baseline, "_installed_mypy_version", return_value="2.4.1"), \
+                        mock.patch.object(
+                            mypy_baseline.subprocess,
+                            "run",
+                            return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+                        ), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(mypy_baseline.main([]), 0)
+
+                diagnostic = "tools/new_tool.py:1: error: unexpected regression [misc]\n"
+                with mock.patch.object(mypy_baseline, "_installed_mypy_version", return_value="2.4.1"), \
+                        mock.patch.object(
+                            mypy_baseline.subprocess,
+                            "run",
+                            return_value=subprocess.CompletedProcess([], 1, stdout=diagnostic, stderr=""),
+                        ), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(mypy_baseline.main(["--update"]), 1)
+                self.assertEqual(mypy_baseline._read_baseline(), ({}, 0))
+
     def test_python_tools_ci_enforces_mypy_baseline(self) -> None:
         python_tools = _ci_job_blocks()["python_tools"]
         step = _ci_step(python_tools, "Enforce tools mypy baseline")
