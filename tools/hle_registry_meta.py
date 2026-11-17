@@ -367,7 +367,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "status": "partial",
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_net_core_without_network",
-            "tests/native/hle_thread_selftest.c:test_adhoc_online_real_tcp_loopback_e2e",
+            "tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp",
             "PSPAutotests tests/net (70e72391, recorded on a PSP): before sceNetAdhocctlInit, GetState, AddHandler and Create return NOT_INITIALIZED 0x80410b08 (net/adhoc/adhocctl \"Before init\")",
         ],
         "limitation": "offline before sceNetAdhocctlInit it returns NOT_INITIALIZED (0x80410b08) matching the measured calls; when initialized locally or online (#1139), writes channel, product ID, group name, BSSID, and nickname from console/group state (with the online active state PPSSPP-derived, not PSP-measured; pre-init code and WLAN-off 0x80410b09 remain UNMEASURED)",
@@ -3000,7 +3000,7 @@ for _adhoc_handler in _ADHOC_ONLINE_HANDLERS:
         "status": "partial",
         "evidence": [
             "tests/native/hle_thread_selftest.c:test_adhoc_offline_refusal_stays_closed",
-            "tests/native/hle_thread_selftest.c:test_adhoc_online_real_tcp_loopback_e2e",
+            "tests/native/hle_thread_selftest.c:test_adhoc_online_all_39_handlers_real_tcp",
         ],
         "limitation": (
             "PPSSPP-derived, not PSP-measured (derived-translated from PPSSPP rev "

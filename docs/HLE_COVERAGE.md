@@ -309,7 +309,7 @@ a title that translates none has generated code unchanged.
 | `0x4cfa57b0` | `sceRtcGetCurrentClock` | rtc | `synthetic` | HLE selftest dispatch |
 | `0x4d2ce199` | `sceNetAdhocGetSocketAlert` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0x4d4e10ec` | `sceDisplayIsVblank` | display | `synthetic` | HLE selftest dispatch |
-| `0x4da4c788` | `sceNetAdhocPtpSend` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
+| `0x4da4c788` | `sceNetAdhocPtpSend` | network | `ppsspp-derived` | handler comment names PPSSPP; sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0x4db1e739` | `sceUtilityNetconfInitStart` | utility | `synthetic` | HLE selftest dispatch |
 | `0x4e3a1105` | `sceKernelWaitSema` | kernel_sync | `synthetic` | conformance cells and HLE selftest dispatch; note |
 | `0x4f160bf4` | `sceVideocodecReleaseEDRAM` | videocodec | `unverified` | no recorded evidence |
@@ -522,7 +522,7 @@ a title that translates none has generated code unchanged.
 | `0x9d689e13` | `sceNetAdhocctlTerm` | network | `synthetic` | HLE selftest dispatch |
 | `0x9d9a5ba1` | `sceKernelGetBlockHeadAddr` | kernel_memory | `synthetic` | HLE selftest dispatch |
 | `0x9dcfb7ea` | `sceMpegChangeGetAuMode` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c |
-| `0x9df81198` | `sceNetAdhocPtpAccept` | network | `ppsspp-derived` | sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
+| `0x9df81198` | `sceNetAdhocPtpAccept` | network | `ppsspp-derived` | handler comment names PPSSPP; sceNetAdhoc block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0x9ec3676a` | `__sceSasSetADSRmode` | audio | `synthetic` | HLE selftest dispatch |
 | `0x9f9b46b9` | `sceKernelCreateNotifyCallback` | kernel_thread | `unverified` | no recorded evidence |
 | `0x9fa03cd3` | `sceKernelDeleteThread` | kernel_thread | `synthetic` | HLE selftest dispatch; note |

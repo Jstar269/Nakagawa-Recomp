@@ -9899,8 +9899,25 @@ static void test_adhoc_offline_refusal_stays_closed(void) {
         {0x157e6225u, "sceNetAdhocPtpClose"},
         {0xb9685118u, "sceNetAdhocGetPtpStat"},
         {0x7a662d6bu, "sceNetAdhocPollSocket"},
+        {0x73bfd52du, "sceNetAdhocSetSocketAlert"},
+        {0x4d2ce199u, "sceNetAdhocGetSocketAlert"},
         {0x2a2a1e07u, "sceNetAdhocMatchingInit"},
+        {0x7945ecdau, "sceNetAdhocMatchingTerm"},
         {0xca5eda6fu, "sceNetAdhocMatchingCreate"},
+        {0xf16eaf4fu, "sceNetAdhocMatchingDelete"},
+        {0x93ef3843u, "sceNetAdhocMatchingStart"},
+        {0xe8454c65u, "sceNetAdhocMatchingStart2"},
+        {0x32b156b3u, "sceNetAdhocMatchingStop"},
+        {0x5e3d4b79u, "sceNetAdhocMatchingSelectTarget"},
+        {0xea3c6108u, "sceNetAdhocMatchingCancelTarget"},
+        {0x8f58bedfu, "sceNetAdhocMatchingCancelTargetWithOpt"},
+        {0xb58e61b7u, "sceNetAdhocMatchingSetHelloOpt"},
+        {0xb5d96c2au, "sceNetAdhocMatchingGetHelloOpt"},
+        {0xc58bcd9eu, "sceNetAdhocMatchingGetMembers"},
+        {0xf79472d7u, "sceNetAdhocMatchingSendData"},
+        {0xec19337du, "sceNetAdhocMatchingAbortSendData"},
+        {0x40f8f435u, "sceNetAdhocMatchingGetPoolMaxAlloc"},
+        {0x9c5cfb7du, "sceNetAdhocMatchingGetPoolStat"},
         {0x5e7f79c9u, "sceNetAdhocctlJoin"},
         {0x8916c003u, "sceNetAdhocctlGetNameByAddr"},
         {0x99560abeu, "sceNetAdhocctlGetAddrByName"},
@@ -12050,6 +12067,426 @@ static void test_adhoc_d8_d9_regressions(void) {
         adh_fixture_end(loaded_end);
         mr_stop(&srv);
         s_d89_srv = NULL;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+/* D7: Real loopback TCP end-to-end test covering all 39 opt-in online handlers (plus
+ * sceNetAdhocctlGetParameter) over AdhP2MiniRelay + a second NkAdhocRelayClient peer. */
+static AdhP2MiniRelay *s_d7_srv;
+static NkAdhocTransport *s_d7_peer;
+static int s_d7_done;
+
+static void d7_step(CpuState *cpu, unsigned sleep_ms, uint32_t delay_us) {
+    if (sleep_ms) {
+#ifdef _WIN32
+        Sleep((DWORD)sleep_ms);
+#else
+        usleep((useconds_t)(sleep_ms * 1000u));
+#endif
+    }
+    if (s_d7_peer) s_d7_peer->ops->pump(s_d7_peer);
+    cpu->r[4] = delay_us;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+    if (s_d7_peer) s_d7_peer->ops->pump(s_d7_peer);
+}
+
+static int d7_count_match_event(int ev) {
+    int n = 0;
+    for (int i = 0; i < s_adh_p2_match.count && i < 16; i++) {
+        if (s_adh_p2_match.event[i] == ev) n++;
+    }
+    return n;
+}
+
+static void d7_all39_main_fn(CpuState *cpu) {
+    static const uint8_t peer_mac[6] = {0x02u, 0x77u, 0x39u, 0x00u, 0x00u, 0x01u};
+    const uint8_t grp[8] = {'R', 'E', 'A', 'L', '3', '9', 'G', 0};
+    NkAdhocTransport *t0 = s_d7_peer;
+    expect(t0->ops->login(t0, peer_mac, "Peer39", "TEST00039") == NK_NET_OK &&
+           t0->ops->connect(t0, grp) == NK_NET_OK,
+           "d7: peer logs into loopback relay and joins REAL39G");
+    int peer_connected = 0;
+    for (int w = 0; w < 60 && !peer_connected; w++) {
+        d7_step(cpu, 2u, 1000u);
+        NkLobbyEvent evs[4];
+        size_t n = t0->ops->take_events(t0, evs, 4u);
+        for (size_t k = 0; k < n; k++) {
+            if (evs[k].kind == NK_LOBBY_CONNECT_BSSID) peer_connected = 1;
+        }
+    }
+    expect(peer_connected == 1, "d7: peer joined REAL39G over real TCP");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '3', '9'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "d7: Net + Adhocctl init");
+    uint8_t self_mac[6];
+    for (uint32_t i = 0u; i < 6u; i++) self_mac[i] = MEM_R8(ADH_P2_SELF_MAC + i);
+
+    /* 1..3: Scan -> Join -> GetParameter -> GetPeerList -> GetNameByAddr -> GetAddrByName. */
+    s_adh_events = 0u;
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "d7: Scan starts");
+    for (int w = 0; w < 60 && s_adh_events == 0u; w++) d7_step(cpu, 2u, 20000u);
+    expect(s_adh_events >= 1u && ADH_AT(0).event == 3, "d7: Scan completes over real TCP");
+    MEM_W32(ADH_P2_LEN, 256u);
+    expect(adh(0x81aee1beu /* GetScanInfo */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 28u,
+           "d7: GetScanInfo finds REAL39G");
+    expect(adh(0x5e7f79c9u /* Join */, ADH_P2_BUF, 0u, 0u) == 0u, "d7: Join starts");
+    for (int w = 0; w < 60 && adh_state() != 1u; w++) d7_step(cpu, 2u, 20000u);
+    expect(adh_state() == 1u, "d7: Join reaches CONNECTED over real TCP");
+    expect(adh(ADH_NID_GET_PARAM, ADH_P2_STAT, 0u, 0u) == 0u && MEM_R8(ADH_P2_STAT + 4u) == 'R',
+           "d7: GetParameter reports active online group over real TCP");
+    for (int w = 0; w < 40; w++) {
+        MEM_W32(ADH_P2_LEN, 256u);
+        if (adh(0xe162cb14u /* GetPeerList */, ADH_P2_LEN, ADH_P2_BUF, 0u) == 0u &&
+            MEM_R32(ADH_P2_LEN) >= 152u)
+            break;
+        d7_step(cpu, 2u, 20000u);
+    }
+    expect(MEM_R32(ADH_P2_LEN) == 152u, "d7: GetPeerList sees Peer39");
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, peer_mac[i]);
+    char pnick[32] = {0};
+    expect(adh(0x8916c003u /* GetNameByAddr */, ADH_P2_PEER_MAC, ADH_P2_NICK, 0u) == 0u,
+           "d7: GetNameByAddr succeeds");
+    for (int i = 0; i < 16; i++) pnick[i] = (char)MEM_R8(ADH_P2_NICK + (uint32_t)i);
+    expect(strcmp(pnick, "Peer39") == 0, "d7: GetNameByAddr returns Peer39");
+    MEM_W32(ADH_P2_LEN, 152u);
+    expect(adh(0x99560abeu /* GetAddrByName */, ADH_P2_NICK, ADH_P2_LEN, ADH_P2_BUF) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 152u,
+           "d7: GetAddrByName returns 152-byte PeerInfoEmu");
+
+    /* 4..12: AdhocInit, PdpCreate, Set/GetSocketAlert, PdpSend, GetPdpStat, PollSocket, PdpRecv, PdpDelete. */
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u, "d7: AdhocInit");
+    int p0_pdp = t0->ops->pdp_open(t0, 0x3301u);
+    expect(p0_pdp >= 0, "d7: peer PDP open");
+    const int32_t pdp_id = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x3302u, 0x1000u);
+    expect(pdp_id > 0, "d7: PdpCreate");
+    expect(adh(0x73bfd52du /* SetSocketAlert */, (uint32_t)pdp_id, 0x0040u /* ALERTPOLL */, 0u) == 0u,
+           "d7: SetSocketAlert");
+    MEM_W32(ADH_P2_LEN, 0u);
+    expect(adh(0x4d2ce199u /* GetSocketAlert */, (uint32_t)pdp_id, ADH_P2_LEN, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 0x0040u,
+           "d7: GetSocketAlert reads 0x0040");
+    expect(adh(0x73bfd52du, (uint32_t)pdp_id, 0u, 0u) == 0u, "d7: clear alert flags");
+
+    const char *pdp_msg = "PDP39_PING";
+    for (uint32_t i = 0u; i < 10u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)pdp_msg[i]);
+    expect(adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp_id, ADH_P2_PEER_MAC,
+                         0x3301u, ADH_P2_BUF, 10u, 0u, 0u, 0u) == 0u,
+           "d7: PdpSend sends PDP39_PING");
+    uint8_t prx[64] = {0}, pmac[6] = {0};
+    uint16_t pport = 0u;
+    uint32_t prlen = 0u;
+    int got_pdp = 0;
+    for (int w = 0; w < 60 && !got_pdp; w++) {
+        d7_step(cpu, 2u, 5000u);
+        if (t0->ops->pdp_recv(t0, p0_pdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK)
+            got_pdp = 1;
+    }
+    expect(got_pdp == 1 && prlen == 10u && memcmp(prx, "PDP39_PING", 10u) == 0 && pport == 0x3302u,
+           "d7: peer received PDP39_PING over real TCP");
+    expect(t0->ops->pdp_send(t0, p0_pdp, self_mac, 0x3302u, "PDP39_PONG", 10u) == NK_NET_OK,
+           "d7: peer sends PDP39_PONG");
+    t0->ops->pump(t0);
+
+    int polled = 0;
+    for (int w = 0; w < 60 && !polled; w++) {
+        MEM_W32(ADH_P2_SDS, (uint32_t)pdp_id);
+        MEM_W32(ADH_P2_SDS + 4u, 0x0002u /* ADHOC_EV_RECV */);
+        MEM_W32(ADH_P2_SDS + 8u, 0u);
+        if (adh_call5(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 1000u, 1u /* NONBLOCK */, 0u) == 1u &&
+            (MEM_R32(ADH_P2_SDS + 8u) & 0x0002u) != 0u) {
+            polled = 1;
+            break;
+        }
+        d7_step(cpu, 2u, 5000u);
+    }
+    expect(polled == 1, "d7: PollSocket detects PDP RECV over real TCP");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh(0xc7c1fc57u /* GetPdpStat */, ADH_P2_LEN, ADH_P2_STAT, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 20u && MEM_R16(ADH_P2_STAT + 14u) == 0x3302u &&
+           MEM_R32(ADH_P2_STAT + 16u) == 10u,
+           "d7: GetPdpStat reports 10 queued bytes on port 0x3302");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp_id,
+                         ADH_P2_BUF + 64u, ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u, 0u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 10u,
+           "d7: PdpRecv reads PDP39_PONG");
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp_id, 0u, 0u) == 0u, "d7: PdpDelete");
+    (void)t0->ops->pdp_close(t0, p0_pdp);
+
+    /* 13..21: PTP Listen, Accept, GetPtpStat, Recv, Send, Flush, Close + Open/Connect. */
+    const int32_t ptp_srv = (int32_t)adh_call_full(0xe08bdac1u /* PtpListen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0x4301u, 0x1000u,
+                                                   100000u, 3u, 4u, 0u, 0u);
+    expect(ptp_srv > 0, "d7: PtpListen on 0x4301");
+    for (int w = 0; w < 10; w++) d7_step(cpu, 2u, 5000u);
+    int p0_cli = t0->ops->ptp_open(t0, 0x4309u, self_mac, 0x4301u);
+    expect(p0_cli >= 0, "d7: peer ptp_open connects to 0x4301");
+    int32_t ptp_child = -1;
+    for (int w = 0; w < 80; w++) {
+        d7_step(cpu, 2u, 5000u);
+        ptp_child = (int32_t)adh_call5(0x9df81198u /* PtpAccept */, (uint32_t)ptp_srv,
+                                       ADH_P2_BUF + 64u, ADH_P2_PORT, 0u, 1u);
+        if (ptp_child > 0) break;
+    }
+    expect(ptp_child > 0 && MEM_R16(ADH_P2_PORT) == 0x4309u, "d7: PtpAccept over real TCP");
+    int p0_est = 0;
+    for (int w = 0; w < 60 && !p0_est; w++) {
+        d7_step(cpu, 2u, 5000u);
+        if (t0->ops->ptp_connect_poll(t0, p0_cli) > 0) p0_est = 1;
+    }
+    expect(p0_est == 1, "d7: peer PTP established");
+    uint32_t p0_sent = 0u;
+    expect(t0->ops->ptp_send(t0, p0_cli, "PTP_TO_G", 8u, &p0_sent) == NK_NET_OK && p0_sent == 8u,
+           "d7: peer sends PTP_TO_G");
+    int saw_ptp_rx = 0;
+    for (int w = 0; w < 60 && !saw_ptp_rx; w++) {
+        d7_step(cpu, 2u, 5000u);
+        MEM_W32(ADH_P2_LEN, 144u);
+        if (adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, ADH_P2_STAT, 0u) == 0u &&
+            MEM_R32(ADH_P2_LEN) >= 72u) {
+            for (uint32_t off = 0u; off + 36u <= MEM_R32(ADH_P2_LEN); off += 36u) {
+                if (MEM_R32(ADH_P2_STAT + off + 4u) == (uint32_t)ptp_child &&
+                    MEM_R32(ADH_P2_STAT + off + 28u) == 8u) {
+                    saw_ptp_rx = 1;
+                    break;
+                }
+            }
+        }
+    }
+    expect(saw_ptp_rx == 1, "d7: GetPtpStat reports accepted socket rx=8 over real TCP");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh_call5(0x8bea2b3eu /* PtpRecv */, (uint32_t)ptp_child, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 8u,
+           "d7: PtpRecv reads PTP_TO_G");
+    for (uint32_t i = 0u; i < 8u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)"G_TO_PTP"[i]);
+    MEM_W32(ADH_P2_LEN, 8u);
+    expect(adh_call5(0x4da4c788u /* PtpSend */, (uint32_t)ptp_child, ADH_P2_BUF, ADH_P2_LEN, 0u, 0u) == 0u &&
+           adh(0x9ac2eeacu /* PtpFlush */, (uint32_t)ptp_child, 0u, 0u) == 0u,
+           "d7: PtpSend + PtpFlush");
+    int got_ptp_reply = 0;
+    for (int w = 0; w < 60 && !got_ptp_reply; w++) {
+        d7_step(cpu, 2u, 5000u);
+        if (t0->ops->ptp_recv(t0, p0_cli, prx, sizeof(prx), &prlen) == NK_NET_OK)
+            got_ptp_reply = 1;
+    }
+    expect(got_ptp_reply == 1 && prlen == 8u && memcmp(prx, "G_TO_PTP", 8u) == 0,
+           "d7: peer received G_TO_PTP over real TCP");
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_child, 0u, 0u) == 0u &&
+           adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_srv, 0u, 0u) == 0u,
+           "d7: PtpClose listener and accepted child");
+    (void)t0->ops->ptp_close(t0, p0_cli);
+
+    /* Client PTP: PtpOpen + PtpConnect over real TCP. */
+    int p0_lsn = t0->ops->ptp_listen(t0, 0x4302u, 4);
+    expect(p0_lsn >= 0, "d7: peer ptp_listen on 0x4302");
+    for (int w = 0; w < 10; w++) d7_step(cpu, 2u, 5000u);
+    const int32_t ptp_out = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29],
+                                                   ADH_P2_SELF_MAC, 0u, ADH_P2_PEER_MAC, 0x4302u,
+                                                   0x1000u, 100000u, 3u, 0u);
+    expect(ptp_out > 0, "d7: PtpOpen targeting peer listener");
+    int cli_conn = 0;
+    for (int w = 0; w < 80; w++) {
+        d7_step(cpu, 2u, 5000u);
+        if (adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)ptp_out, 0u, 1u) == 0u) {
+            cli_conn = 1;
+            break;
+        }
+    }
+    expect(cli_conn == 1, "d7: PtpConnect completed over real TCP");
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)ptp_out, 0u, 0u) == 0u, "d7: PtpClose client");
+    (void)t0->ops->ptp_close(t0, p0_lsn);
+
+    /* 22..38: All 17 Matching handlers over real TCP. */
+    sr_test_register_guest_fn(ADH_P2_MATCH_CB, d12_match_cb_fn);
+    memset(&s_adh_p2_match, 0, sizeof(s_adh_p2_match));
+    int p0_mpdp = t0->ops->pdp_open(t0, 0x5301u);
+    expect(p0_mpdp >= 0, "d7: peer matching PDP opens on 0x5301");
+    for (int w = 0; w < 10; w++) d7_step(cpu, 2u, 5000u);
+    expect(adh(0x2a2a1e07u /* MatchingInit */, 0x20000u, 0u, 0u) == 0u, "d7: MatchingInit");
+    expect(adh(0x40f8f435u /* GetPoolMaxAlloc */, 0u, 0u, 0u) == 0u,
+           "d7: MatchingGetPoolMaxAlloc is 0 before MatchingCreate");
+    const uint32_t saved_sp0 = MEM_R32(cpu->r[29]);
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const int32_t mid1 = (int32_t)adh_call_full(0xca5eda6fu /* MatchingCreate */, cpu->r[29],
+                                                1u /* HOST */, 4u, 0x5301u, 0x1000u,
+                                                100000u, 2000000u, 5u, 100000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid1 > 0, "d7: MatchingCreate");
+    expect(adh(0x40f8f435u /* GetPoolMaxAlloc */, 0u, 0u, 0u) > 0u,
+           "d7: MatchingGetPoolMaxAlloc > 0 with live context");
+    expect(adh(0x9c5cfb7du /* GetPoolStat */, ADH_P2_STAT, 0u, 0u) == 0u &&
+           MEM_R32(ADH_P2_STAT) >= 0x10000u && MEM_R32(ADH_P2_STAT + 4u) > 0u,
+           "d7: MatchingGetPoolStat");
+    for (uint32_t i = 0u; i < 5u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"HELLO"[i]);
+    expect(adh_call_full(0x93ef3843u /* MatchingStart */, cpu->r[29], (uint32_t)mid1,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 5u, ADH_P2_OPT, 0u) == 0u,
+           "d7: MatchingStart");
+    int got_hello = 0;
+    for (int w = 0; w < 60 && !got_hello; w++) {
+        d7_step(cpu, 2u, 20000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen >= 5u && prx[0] == 1u) got_hello = 1;
+        }
+    }
+    expect(got_hello == 1, "d7: peer received MATCH_PKT_HELLO over real TCP");
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"HOPT"[i]);
+    expect(adh(0xb58e61b7u /* SetHelloOpt */, (uint32_t)mid1, 4u, ADH_P2_OPT) == 0u,
+           "d7: MatchingSetHelloOpt");
+    MEM_W32(ADH_P2_LEN, 16u);
+    expect(adh(0xb5d96c2au /* GetHelloOpt */, (uint32_t)mid1, ADH_P2_LEN, ADH_P2_BUF) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 4u && MEM_R8(ADH_P2_BUF) == 'H' && MEM_R8(ADH_P2_BUF + 3u) == 'T',
+           "d7: MatchingGetHelloOpt returns HOPT");
+
+    /* Join -> CancelTargetWithOpt, then Join -> CancelTarget. */
+    const uint8_t join_pkt[7] = {2u, 2u, 0u, 0u, 0u, 'J', 'N'};
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5301u, join_pkt, sizeof(join_pkt)) == NK_NET_OK,
+           "d7: peer sends JOIN 1");
+    for (int w = 0; w < 60 && d7_count_match_event(2) < 1; w++) d7_step(cpu, 2u, 20000u);
+    expect(d7_count_match_event(2) >= 1, "d7: callback saw REQUEST 1");
+    for (uint32_t i = 0u; i < 3u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"BYE"[i]);
+    expect(adh_call5(0x8f58bedfu /* CancelTargetWithOpt */, (uint32_t)mid1, ADH_P2_PEER_MAC,
+                     3u, ADH_P2_OPT, 0u) == 0u,
+           "d7: MatchingCancelTargetWithOpt");
+    int got_cancel_opt = 0;
+    for (int w = 0; w < 60 && !got_cancel_opt; w++) {
+        d7_step(cpu, 2u, 5000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen == 8u && prx[0] == 4u && memcmp(prx + 5, "BYE", 3u) == 0) got_cancel_opt = 1;
+        }
+    }
+    expect(got_cancel_opt == 1, "d7: peer received CANCEL with opt BYE over real TCP");
+
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5301u, join_pkt, sizeof(join_pkt)) == NK_NET_OK,
+           "d7: peer sends JOIN 2");
+    for (int w = 0; w < 60 && d7_count_match_event(2) < 2; w++) d7_step(cpu, 2u, 20000u);
+    expect(adh(0xea3c6108u /* CancelTarget */, (uint32_t)mid1, ADH_P2_PEER_MAC, 0u) == 0u,
+           "d7: MatchingCancelTarget");
+    int got_cancel = 0;
+    for (int w = 0; w < 60 && !got_cancel; w++) {
+        d7_step(cpu, 2u, 5000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen == 5u && prx[0] == 4u) got_cancel = 1;
+        }
+    }
+    expect(got_cancel == 1, "d7: peer received CANCEL over real TCP");
+
+    /* Join 3 -> SelectTarget -> peer ACCEPT -> GetMembers -> SendData -> AbortSendData -> Stop/Delete. */
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5301u, join_pkt, sizeof(join_pkt)) == NK_NET_OK,
+           "d7: peer sends JOIN 3");
+    for (int w = 0; w < 60 && d7_count_match_event(2) < 3; w++) d7_step(cpu, 2u, 20000u);
+    expect(adh_call5(0x5e3d4b79u /* SelectTarget */, (uint32_t)mid1, ADH_P2_PEER_MAC, 0u, 0u, 0u) == 0u,
+           "d7: MatchingSelectTarget");
+    const uint8_t acc_pkt[5] = {3u, 0u, 0u, 0u, 0u};
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5301u, acc_pkt, sizeof(acc_pkt)) == NK_NET_OK,
+           "d7: peer sends ACCEPT over real TCP");
+    for (int w = 0; w < 60 && d7_count_match_event(7) < 1; w++) d7_step(cpu, 2u, 20000u);
+    expect(d7_count_match_event(7) >= 1, "d7: Matching callback saw ESTABLISHED over real TCP");
+    MEM_W32(ADH_P2_LEN, 64u);
+    expect(adh(0xc58bcd9eu /* GetMembers */, (uint32_t)mid1, ADH_P2_LEN, ADH_P2_BUF) == 0u &&
+           MEM_R32(ADH_P2_LEN) == 24u,
+           "d7: MatchingGetMembers returns 2 members (24 bytes)");
+    for (uint32_t i = 0u; i < 5u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)"MDTCP"[i]);
+    expect(adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid1, ADH_P2_PEER_MAC, 5u, ADH_P2_BUF, 0u) == 0u,
+           "d7: MatchingSendData sends MDTCP");
+    int got_bulk = 0;
+    for (int w = 0; w < 60 && !got_bulk; w++) {
+        d7_step(cpu, 2u, 10000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen == 10u && prx[0] == 5u && memcmp(prx + 5, "MDTCP", 5u) == 0) got_bulk = 1;
+        }
+    }
+    expect(got_bulk == 1, "d7: peer received MATCH_PKT_BULK (MDTCP) over real TCP");
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)"ABRT"[i]);
+    expect(adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid1, ADH_P2_PEER_MAC, 4u, ADH_P2_BUF, 0u) == 0u &&
+           adh_call5(0xf79472d7u, (uint32_t)mid1, ADH_P2_PEER_MAC, 4u, ADH_P2_BUF, 0u) == 0x80410818u &&
+           adh(0xec19337du /* AbortSendData */, (uint32_t)mid1, ADH_P2_PEER_MAC, 0u) == 0u &&
+           adh_call5(0xf79472d7u, (uint32_t)mid1, ADH_P2_PEER_MAC, 4u, ADH_P2_BUF, 0u) == 0u,
+           "d7: MatchingAbortSendData clears DATA_BUSY cleanly");
+    expect(adh(0x32b156b3u /* MatchingStop */, (uint32_t)mid1, 0u, 0u) == 0u &&
+           adh(0xf16eaf4fu /* MatchingDelete */, (uint32_t)mid1, 0u, 0u) == 0u,
+           "d7: MatchingStop + MatchingDelete");
+
+    /* MatchingStart2 over real TCP. */
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const int32_t mid2 = (int32_t)adh_call_full(0xca5eda6fu, cpu->r[29], 1u, 4u, 0x5301u, 0x1000u,
+                                                100000u, 2000000u, 5u, 100000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid2 > 0, "d7: MatchingCreate #2");
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_OPT + i, (uint8_t)"STR2"[i]);
+    MEM_W32(cpu->r[29], ADH_P2_OPT);
+    const uint32_t s2rc = adh_call_full(0xe8454c65u /* MatchingStart2 */, cpu->r[29],
+                                        (uint32_t)mid2, 0x30u, 0x2000u, 1u,
+                                        0x30u, 0x2000u, 1u, 4u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(s2rc == 0u, "d7: MatchingStart2");
+    int got_hello2 = 0;
+    for (int w = 0; w < 60 && !got_hello2; w++) {
+        d7_step(cpu, 2u, 20000u);
+        while (t0->ops->pdp_recv(t0, p0_mpdp, pmac, &pport, prx, sizeof(prx), &prlen) == NK_NET_OK) {
+            if (prlen >= 9u && prx[0] == 1u && memcmp(prx + 5, "STR2", 4u) == 0) got_hello2 = 1;
+        }
+    }
+    expect(got_hello2 == 1, "d7: peer received MatchingStart2 HELLO (STR2) over real TCP");
+    expect(adh(0x32b156b3u, (uint32_t)mid2, 0u, 0u) == 0u &&
+           adh(0xf16eaf4fu, (uint32_t)mid2, 0u, 0u) == 0u &&
+           adh(0x7945ecdau /* MatchingTerm */, 0u, 0u, 0u) == 0u,
+           "d7: MatchingStart2 Stop/Delete + MatchingTerm");
+    (void)t0->ops->pdp_close(t0, p0_mpdp);
+
+    /* 39: AdhocTerm + AdhocctlTerm + NetTerm. */
+    expect(adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
+           net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "d7: AdhocTerm + AdhocctlTerm + NetTerm");
+    (void)t0->ops->logout(t0);
+    s_d7_done = 1;
+}
+
+static void test_adhoc_online_all_39_handlers_real_tcp(void) {
+#ifdef _WIN32
+    WSADATA wsa;
+    expect(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "d7: WSAStartup");
+#endif
+    AdhP2MiniRelay srv;
+    expect(mr_start(&srv), "d7: mini relay started");
+    if (srv.running) {
+        s_d7_srv = &srv;
+        NkAdhocRelayConfig pcfg = {"127.0.0.1", srv.lobby_port, srv.data_port, 0u};
+        NkAdhocRelayClient *peer_rc = nk_relay_client_create(&pcfg);
+        expect(peer_rc != NULL, "d7: peer relay client created");
+        if (peer_rc) {
+            s_d7_peer = nk_relay_client_transport(peer_rc);
+            char srv_spec[64];
+            snprintf(srv_spec, sizeof(srv_spec), "127.0.0.1:%u,%u",
+                     (unsigned)srv.lobby_port, (unsigned)srv.data_port);
+            s_d7_done = 0;
+            const uint32_t loaded_end = adh_fixture_begin();
+            hle_test_setenv("SR_ADHOC_ENABLED", "1");
+            hle_test_setenv("SR_ADHOC_SERVER", srv_spec);
+            hle_test_setenv("SR_ADHOC_PORT_OFFSET", "0");
+            hle_net_reset();
+            adh_run(ADH_P2_MAIN, d7_all39_main_fn);
+            expect(s_d7_done == 1, "d7: all 39 online handlers verified over real loopback TCP");
+            hle_net_reset();
+            hle_test_setenv("SR_ADHOC_ENABLED", NULL);
+            hle_test_setenv("SR_ADHOC_SERVER", NULL);
+            hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
+            adh_fixture_end(loaded_end);
+            s_d7_peer = NULL;
+            nk_relay_client_destroy(peer_rc);
+        }
+        mr_stop(&srv);
+        s_d7_srv = NULL;
     }
 #ifdef _WIN32
     WSACleanup();
@@ -59371,6 +59808,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhoc_d4_ptp_open_connect_regression();
         test_adhoc_d3_dead_and_silent_lobby();
         test_adhoc_d8_d9_regressions();
+        test_adhoc_online_all_39_handlers_real_tcp();
         fprintf(stderr, "adhocctl: %d checks, %d failures\n", s_checks, s_failures);
         free(g_mem_base);
         return s_failures ? 1 : 0;
@@ -59529,6 +59967,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_d4_ptp_open_connect_regression();
     test_adhoc_d3_dead_and_silent_lobby();
     test_adhoc_d8_d9_regressions();
+    test_adhoc_online_all_39_handlers_real_tcp();
     test_unregistered_batch_profiler_refer_null();
     test_kernel_import_sweep_ge_head();
     test_ge_blocking_sync_waits_for_stalled_list();
