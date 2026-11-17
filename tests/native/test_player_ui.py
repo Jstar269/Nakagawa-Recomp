@@ -2765,7 +2765,9 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(self.screens(tabs), [("settings", "1"), ("library", "3")],
                          "the ABOUT tab on Settings closes it and opens About")
 
-    # Settings > Online and developer: the RetroAchievements switch (#1316).
+    # Settings > Online and developer: Download cover art, then the RetroAchievements switch
+    # (#1316), the last row, which exists where the platform has a credential store.
+    SETTINGS_COVER_ART = str(0x4563)
     SETTINGS_ACHIEVEMENTS = str(0x455C)
 
     def test_next_ui_achievements_switch_is_refused_in_a_ui_regression_run(self) -> None:
@@ -2777,7 +2779,7 @@ class NativePlayerUiTests(unittest.TestCase):
             "settings",
             ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS +
             ("KEY_LEFT", "KEY_RETURN", "WAIT_MS=100", "WAIT_LAID_OUT=5000") +
-            ("KEY_DOWN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"),
+            ("KEY_DOWN",) * 3 + ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"),
         )
         stdout = run["stdout"]
         assert isinstance(stdout, str)
@@ -2789,8 +2791,10 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertIsNot(settings.get("achievements_enabled"), True)
         trail = self.focus_trail(run)
         if os.name == "nt":
-            self.assertEqual(trail[-2:], [focus["developer"], self.SETTINGS_ACHIEVEMENTS],
-                             "the keyboard reaches the Achievements switch, below Developer mode")
+            self.assertEqual(
+                trail[-4:], [focus["developer"], self.SETTINGS_NICKNAME, self.SETTINGS_COVER_ART,
+                             self.SETTINGS_ACHIEVEMENTS],
+                "the keyboard reaches the Achievements switch, the last row of the page")
             self.assertEqual(
                 said, ["Softcore only. Sign in to connect.",
                        "RetroAchievements is not available in a UI regression run."],

@@ -1004,6 +1004,12 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                 model->discord_presence ? "On" : "Off",
                                                 discord_sentence};
             }
+            rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
+            rows[row_count++] = (WizardRow){"Download cover art",
+                                            settings_on_off(model->download_cover_art),
+                                            k_cover_art_sentence};
+            /* RetroAchievements (#1316) comes last: where it can run it adds a switch, and the
+               rows above keep their keyboard order on every platform. */
             rows[row_count++] = (WizardRow){
                 "Achievements",
                 model->achievements_enabled ? "On" : model->achievements_available ? "Off" : "Unavailable",
@@ -1018,10 +1024,6 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                                 safe_text(model->achievements_status,
                                                           "Softcore only. Hardcore is unavailable.")};
             }
-            rows[row_count++] = (WizardRow){"Nickname", "", SCR_NICKNAME_SENTENCE};
-            rows[row_count++] = (WizardRow){"Download cover art",
-                                            settings_on_off(model->download_cover_art),
-                                            k_cover_art_sentence};
             WizardColumn column = scr_wizard_column(ui, rows, row_count, inner - 32.0f, false);
             if (model->online_mode &&
                 scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_ONLINE_MODE, SET_ID_TEXT + 0x80u,
@@ -1039,6 +1041,25 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                                   "Discord status", discord_sentence, model->discord_presence,
                                   inner - 32.0f, &column)) {
                 *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_DISCORD);
+            }
+            {
+                /* The console nickname games read (#2197); its button opens the nickname
+                   editor. A long one is shortened here. */
+                NkUiTextStyle value = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
+                if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_NICKNAME, SET_ID_TEXT + 0xB4u,
+                                     "Nickname",
+                                     nk_ui_text_clamp(ui, safe_text(model->nickname,
+                                                                    NK_NICKNAME_DEFAULT),
+                                                      &value, column.cell * 0.5f, 1),
+                                     SCR_NICKNAME_SENTENCE,
+                                     false, inner - 32.0f, &column)) {
+                    *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
+                }
+            }
+            if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_COVER_ART, SET_ID_TEXT + 0xB8u,
+                                  "Download cover art", k_cover_art_sentence,
+                                  model->download_cover_art, inner - 32.0f, &column)) {
+                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_COVER_ART);
             }
             /* One row: the switch where the feature can run, the reason where it cannot. */
             if (model->achievements_available || model->achievements_enabled) {
@@ -1067,25 +1088,6 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 *result = settings_op(model->achievements_signed_in
                                           ? PLAYER_UI_SETTINGS_SIGN_OUT_ACHIEVEMENTS
                                           : PLAYER_UI_SETTINGS_SIGN_IN_ACHIEVEMENTS);
-            }
-            {
-                /* The console nickname games read (#2197); its button opens the nickname
-                   editor. A long one is shortened here. */
-                NkUiTextStyle value = nk_ui_type(NK_UI_TYPE_BODY, theme->paper);
-                if (scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_NICKNAME, SET_ID_TEXT + 0xB4u,
-                                     "Nickname",
-                                     nk_ui_text_clamp(ui, safe_text(model->nickname,
-                                                                    NK_NICKNAME_DEFAULT),
-                                                      &value, column.cell * 0.5f, 1),
-                                     SCR_NICKNAME_SENTENCE,
-                                     false, inner - 32.0f, &column)) {
-                    *result = settings_op(PLAYER_UI_SETTINGS_EDIT_NICKNAME);
-                }
-            }
-            if (scr_wizard_switch(ui, PLAYER_UI_ID_SETTINGS_COVER_ART, SET_ID_TEXT + 0xB8u,
-                                  "Download cover art", k_cover_art_sentence,
-                                  model->download_cover_art, inner - 32.0f, &column)) {
-                *result = settings_op(PLAYER_UI_SETTINGS_TOGGLE_COVER_ART);
             }
             nk_ui_end_container(ui);
         }
