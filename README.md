@@ -8,7 +8,7 @@
 
 # Nakagawa Recomp
 
-**Play PSP games you own as native Windows programs: add your disc image, build&nbsp;it,&nbsp;play.**
+**Play PSP games you own as native Windows programs: add your disc image, build it, play.**
 
 Experimental pre-release: one game is playable so far. [See what works](docs/COMPATIBILITY.md).
 
@@ -36,9 +36,9 @@ screenshots of Enhanced mode.
 
 | Approach | How the game runs | Which games | What you get |
 | :--- | :--- | :--- | :--- |
-| **Nakagawa Recomp** | Its code is translated into C on your PC, ahead of time, and compiled into a native program. | The same steps for every disc: import, build, and the player names anything it doesn't support. One game is playable so far. | **Authentic** play as released, **Enhanced** options for any game (higher resolution, texture packs and more), and **Ace** packages for one game at a time. |
-| A port of one game | Also translated ahead of time, in a project made for that one game. | One game per project. | Whatever its authors build, including deep changes to the game. |
-| An emulator such as PPSSPP | The game's code is translated or interpreted while it runs. | Most of the PSP library, on PCs, phones and handhelds. | Save states, online and ad hoc play, upscaling, texture packs and more. |
+| **Nakagawa Recomp** | Its code is translated into C on your PC, ahead of time, and compiled into a native program. | The same steps for every disc: import, build, and the player names anything it doesn't support. One game is playable so far. | **Authentic** play as released, **Enhanced** options for any game (supersampling, texture packs, Widescreen and more), and **Ace** packages for one game at a time. |
+| Recompiled port of one game | Also translated ahead of time, in a project made for that one game. | One game per project. | Whatever its authors build, including deep changes to the game. |
+| Emulator such as PPSSPP | The game's code is translated or interpreted while it runs. | Most of the PSP library, on PCs, phones and handhelds. | Save states, online and ad hoc play, upscaling, texture packs and more. |
 
 If you only want to play PSP games today, an emulator such as [PPSSPP](https://github.com/hrydgard/ppsspp) runs far
 more of them, and Nakagawa adapts some of its code ([credits](CREDITS.md)). Nakagawa is for running a game you own as
