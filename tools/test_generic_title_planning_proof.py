@@ -44,7 +44,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import Any
+from typing import Any, Mapping
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -147,7 +147,7 @@ class GenericTitleProofFixtures(unittest.TestCase):
 
 
 class GenericPlannerAcceptsSyntheticTitle2(unittest.TestCase):
-    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> dict[str, Any]:
+    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> Mapping[str, object]:
         manifest = _load(manifest_path)
         return title_codegen_plan.build_manager_plan(
             manifest,
