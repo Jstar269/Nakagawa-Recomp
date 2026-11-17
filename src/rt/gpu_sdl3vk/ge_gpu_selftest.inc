@@ -15514,11 +15514,18 @@ static uint32_t coherence_batch_state_list(uint32_t fba, int blend_pair) {
     return SB_LIST;
 }
 
+/* Rows the two production-path cases clear and compare; every sprite of both lists ends above
+ * row 64. The CPU store stays this short on purpose: these cases run first in the default
+ * suite, before any texture is cached, and a store over the whole frame would mark the pages
+ * of the texture addresses later fixtures use (0x04040000 and up) as holding no texture, which
+ * texture-clean-page-index expects its own first store to find out. */
+enum { BATCH_STATE_ROWS = 96u };
+
 static void coherence_batch_state_fill(uint32_t fba) {
     const uint32_t base = 0x04000000u | fba;
     uint32_t *fb = (uint32_t *)SR_HOST(base);
-    for (uint32_t i = 0; i < 512u * FB_H; i++) fb[i] = 0u;
-    sr_gpu_vram_dirty(base, 512u * FB_H * 4u);
+    for (uint32_t i = 0; i < 512u * BATCH_STATE_ROWS; i++) fb[i] = 0u;
+    sr_gpu_vram_dirty(base, 512u * BATCH_STATE_ROWS * 4u);
 }
 
 static int coherence_run_record_range_state_counts(void) {
@@ -15559,7 +15566,7 @@ static int coherence_run_batch_blend_change(void) {
     enum { FBA = 0x00000000u };
     const uint32_t base = 0x04000000u | FBA;
     const int saved_twin = s_twin;
-    const size_t pixels = (size_t)FB_W * FB_H;
+    const size_t pixels = (size_t)FB_W * BATCH_STATE_ROWS;
     uint32_t *gpu = (uint32_t *)malloc(pixels * sizeof(*gpu));
     if (!gpu) return 0;
     s_twin = 0;
@@ -15585,7 +15592,7 @@ static int coherence_run_batch_blend_change(void) {
                         "pass(es) with %u blend-constant commands (want 2 in 1 pass, 2 commands)\n",
                 recorded_batches, s_selftest_record_commands.render_pass_begins, blend_commands);
     }
-    for (uint32_t y = 0; ok && y < FB_H; y++)
+    for (uint32_t y = 0; ok && y < BATCH_STATE_ROWS; y++)
         memcpy(gpu + (size_t)y * FB_W, (uint32_t *)SR_HOST(base) + (size_t)y * 512u,
                (size_t)FB_W * sizeof(*gpu));
 
@@ -15594,7 +15601,7 @@ static int coherence_run_batch_blend_change(void) {
     ge_set_gpu_hooks(NULL);
     ok = (ge_run_list(coherence_batch_state_list(FBA, 1), 0) == 0) && ok;
     ge_set_gpu_hooks(&k_hooks);
-    for (uint32_t y = 0; ok && y < FB_H; y++) {
+    for (uint32_t y = 0; ok && y < BATCH_STATE_ROWS; y++) {
         const uint32_t *ref = (const uint32_t *)SR_HOST(base) + (size_t)y * 512u;
         for (uint32_t x = 0; x < FB_W; x++) {
             if (gpu[(size_t)y * FB_W + x] != ref[x]) {
