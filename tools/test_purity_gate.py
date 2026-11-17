@@ -97,6 +97,30 @@ class PurityGateTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("expects 1 occurrence(s), found 2", messages[0])
 
+    def test_the_cheats_entry_allows_one_load_address_in_cheats_c_only(self):
+        """The PSP's main-module load address is allowed once, in src/rt/cheats.c (#2639)."""
+        allow = tuple(entry for entry in purity_gate.ALLOWLIST if entry.path == "src/rt/cheats.c")
+        self.assertEqual([(entry.value, entry.count) for entry in allow], [(0x08804000, 1)])
+        define = "#define CHEATS_PSP_IMAGE_BASE 0x08804000u\n"
+        self.write("src/rt/cheats.c", define)
+        self.assertEqual(purity_gate.scan(self.root, allow), [])
+        # Refused: another address in that file, the same address in another file, a second use.
+        self.write("src/rt/cheats.c", define + "static const uint32_t k = 0x08804004u;\n")
+        messages = purity_gate.scan(self.root, allow)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("src/rt/cheats.c:2:", messages[0])
+        self.assertIn("0x08804004", messages[0])
+        self.write("src/rt/cheats.c", define)
+        self.write("src/rt/hle.c", "static const uint32_t k = 0x08804000u;\n")
+        messages = purity_gate.scan(self.root, allow)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("src/rt/hle.c:1:", messages[0])
+        self.write("src/rt/hle.c", "static const uint32_t k = 1u;\n")
+        self.write("src/rt/cheats.c", define + "static const uint32_t k = 0x08804000u;\n")
+        messages = purity_gate.scan(self.root, allow)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("expects 1 occurrence(s), found 2", messages[0])
+
     def test_stale_allowlist_entry_fails(self):
         allow = (Allowed("src/rt/gone.c", 0x08800000, 1, "a literal that was removed later"),)
         messages = purity_gate.scan(self.root, allow)

@@ -82,6 +82,12 @@ ALLOWLIST: tuple[Allowed, ...] = (
     Allowed("src/rt/ge_replay.c", 0x08800000, 1,
             "start of the PSP user partition as the placement of ge_replay's generated "
             "--write-synthetic capture (the first-bad-draw selftest); no game is involved"),
+    Allowed("src/rt/cheats.c", 0x08804000, 1,
+            "CHEATS_PSP_IMAGE_BASE: where a PSP loads a relocatable main module (the "
+            "PSP_DEFAULT_MAIN_LOAD_ADDRESS of tools/nk_core/iso_inspect.py), which is where a "
+            "CWCheat written for any game counts that game's image from (#2639); the same "
+            "for every title, and used only to move a cheat's address with an image the host "
+            "loaded somewhere else"),
     Allowed("src/rt/ge.c", 0x09D517ED, 1,
             "GE_POW_TH word: the high half of -log2 of a ge_powf reciprocal in Q63, a "
             "number of the power function's log table, not an address"),
