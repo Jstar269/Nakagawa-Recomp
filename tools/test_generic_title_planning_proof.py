@@ -44,7 +44,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from typing import Any, Mapping
+from typing import Any, TypedDict, cast
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -59,6 +59,33 @@ SYNTHETIC2 = TITLES / "synthetic-title2.json"
 PSPDEV = TITLES / "pspdev-phase5.json"
 PLANNER = ROOT / "tools" / "title_codegen_plan.py"
 HELPER = ROOT / "tools" / "title_manager_plan.ps1"
+
+
+class _ManagerMakePlan(TypedDict):
+    game_name: str
+    codegen_profile_arg: str
+    build_dir: str
+
+
+class _ManagerPlanEnvironment(TypedDict):
+    GAME_BASE: str
+    GAME_ENTRY: str
+    TITLE_EXTRA_SPANS: str
+
+
+class _ManagerPlanView(TypedDict):
+    title_manifest_id: str
+    title_kind: str
+    game_name: str
+    game_base: int
+    game_entry: int
+    codegen_profile: str
+    bss_metadata_source: str
+    extra_executable_spans: list[object]
+    disc: object
+    make: _ManagerMakePlan
+    environment: _ManagerPlanEnvironment
+    private_binding_requirements: dict[str, bool]
 
 
 def _scratch_build_root(test: unittest.TestCase) -> pathlib.Path:
@@ -147,15 +174,18 @@ class GenericTitleProofFixtures(unittest.TestCase):
 
 
 class GenericPlannerAcceptsSyntheticTitle2(unittest.TestCase):
-    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> Mapping[str, object]:
+    def _plan(self, manifest_path: pathlib.Path, game_name: str, build_dir: pathlib.Path) -> _ManagerPlanView:
         manifest = _load(manifest_path)
-        return title_codegen_plan.build_manager_plan(
-            manifest,
-            game_name=game_name,
-            game_elf=pathlib.Path("build/fixtures/synthetic2.elf"),
-            build_dir=build_dir,
-            funcs_per_chunk=64,
-        )
+        return cast(
+            _ManagerPlanView,
+            title_codegen_plan.build_manager_plan(
+                manifest,
+                game_name=game_name,
+                game_elf=pathlib.Path("build/fixtures/synthetic2.elf"),
+                build_dir=build_dir,
+                funcs_per_chunk=64,
+            ),
+        )  # The builder constructs these projected keys with the annotated value types.
 
     def test_synthetic_title2_plans_successfully_via_generic_planner(self) -> None:
         """Generic fields are projected without pretending to be HST."""
