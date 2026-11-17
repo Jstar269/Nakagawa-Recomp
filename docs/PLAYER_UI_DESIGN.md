@@ -121,7 +121,14 @@ Labels, chips and eyebrows are drawn in caps (`nk_ui_caps`); the words stay sent
   theme.
 - A focusable control calls `nk_ui_register_button` and, when focused, `nk_ui_focus_ring(ui, id, radius)`. A focused
   secondary button also fills with `surface_high`; a focused card's edge becomes `line_strong`.
-- Arrow keys move to the nearest control in that direction.
+- Arrow keys move to the nearest control in that direction. A control may name the control an Up and a Down move
+  from it land on instead (`nk_ui_register_button_between`, `nk_ui_button_between`), for a place where the nearest
+  one by position is not the next one to a person: a list of full-width rows under a strip of small tabs. A control
+  that a scroll container clips away whole is reached only from inside that container, whose rows scroll it into
+  view, never from a control outside it.
+- A control made of several pointer targets (a row of values) registers the row as the focus stop and each target
+  with `NK_UI_BUTTON_POINTER_ONLY`: a press focuses a target and its release activates it, no move, Tab or first
+  focus lands on it, and the screen hands focus back to the row.
 - The pointer is the other way in: a press focuses the control under it, and the release on the same control
   activates it. Clay finds what is under the pointer from the last layout (`Clay_SetPointerState`, every frame),
   inside clip containers, so a control scrolled or clipped out of view takes no click, and only controls of the
@@ -596,14 +603,26 @@ PICTURE contains TEXTURE FILTERING; WIDESCREEN; SHARPER ENLARGING; TEXTURE PACK;
 SMOOTH FAR TEXTURES; TEXTURE SCALING; SMART 2D FILTER; CRISP SYSTEM TEXT. MOTION contains SMOOTH MOTION and the
 existing global FRAME PACING control. SOUND contains CLEAN PITCHED SOUND and UNCLIPPED SOUND. CONTROLS contains
 STICK DEAD ZONE. ON-SCREEN contains SPEED READOUT and GAME BADGE. ADVANCED contains FINER PATCHES, WIDER CULLING,
-SHORT LOADS, LATE PAD SAMPLING and SOFT SHADOWS. A title's TEXTURE PACK FOLDER and optional REMOVE TEXTURE PACK
-actions follow TEXTURE PACK in Picture.
-Each option has a compact sentence-case row with inline values. A controller's Left and Right change the focused
-value, and clicking a value selects it. Category tabs are focusable toggles; headings do not add focus stops. The
-right-side detail panel shows only the focused option's name, current value, help and caveats. On a game's page,
-inherited values read LIBRARY (value) in muted text and a title override is accented. Ace-only options carry a small
-tag. An option that cannot apply in the current play mode stays visible but dimmed, with the reason in the detail
-panel. The tab content scrolls inside the dialog and keeps a focused row in view. The title page's ENHANCEMENTS card
+SHORT LOADS, LATE PAD SAMPLING and SOFT SHADOWS. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
+REMOVE TEXTURE PACK are the last rows of Picture.
+Each option is one sentence-case row, as high as a control (44 px), and one focus stop: its name on the left, with an
+ACE ONLY tag beside the name where it applies, and on the right every value it can take, each in its own small box
+(34 px), the current one filled. Up and Down move row by row: Down from PLAY MODE lands on the active tab, Down from
+a tab on its first row, Down from the last row on BACK, and Up goes back the same way. The rows name those
+neighbours (`nk_ui_register_button_between`), because a full-width row and a small tab are not each other's nearest
+by position. Left and Right step the focused row's value, Confirm takes the next one, and a click picks any value; a
+value box is a pointer target only (`NK_UI_BUTTON_POINTER_ONLY`), never a focus stop. GRAPHICS PRESET, PLAY MODE
+and FRAME PACING show their value as `< value >` in one box, as does a row whose values no longer fit beside its
+name at a larger text size. Category tabs are focusable. The panel on the right shows the focused row's name, its
+value, its whole description and, for a dimmed row, the reason; with a tab or BACK focused it shows the tab's first
+option. On a game's page, a row's first value is the library's, LIBRARY (value), in a raised box with muted text,
+and a value of the game's own is filled. An option that cannot apply as the page stands stays in the walk, dimmed
+and inert, with the reason in the panel; WIDESCREEN under SMOOTH MOTION marks OFF, the value that runs, and keeps
+the choice it had for when SMOOTH MOTION is off. The list shows as many whole rows as the window leaves (four at
+1280 x 720, a whole tab at 1920 x 1080), the same number on every tab so that changing tabs moves nothing. A longer
+tab scrolls inside the list, with a thin thumb at the list's right edge, and the panel and BACK stay on screen. At a
+larger text size the panel narrows so that the six tabs stay whole, and a page taller than the window scrolls as a
+whole, as every page does. The title page's ENHANCEMENTS card
 shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable package;
 `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the same tabs
 for that game alone, and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
@@ -622,7 +641,8 @@ that, its last line counts the parts it leaves out ("and 9 more"). With every pa
 every window, and the caption shows them all in the default 960 x 544 game window and any taller one
 (`ace-ui-selftest`, `nk-ui-overlay-screens-selftest`).
 GRAPHICS PRESET is the first row on Settings > Enhanced and each game's ENHANCED OPTIONS page (#2150). It steps
-through LOW, MEDIUM, HIGH, ULTRA and HANDHELD.
+through LOW, MEDIUM, HIGH, ULTRA and HANDHELD. While the row has focus, the panel beside the list carries the
+preset's note, which says where the preset is used and which Enhanced parts it turns on.
 A preset is used only by Enhanced and Ace sessions, where its values take the place of the RESOLUTION, SCALING,
 VSYNC and GAME FULLSCREEN rows and of up to three Enhanced parts' library values: CRISP SYSTEM TEXT, SHARPER
 ENLARGING (the FSR 1 upscaler) and, under ULTRA, FULL 32-BIT COLOUR. Choosing one changes none of those rows or
