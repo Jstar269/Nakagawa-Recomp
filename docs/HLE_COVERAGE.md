@@ -24,9 +24,9 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 73 |
-| `ppsspp-derived` | 166 | 88 |
+| `ppsspp-derived` | 167 | 88 |
 | `game-route` | 0 | 0 |
-| `synthetic` | 341 | 183 |
+| `synthetic` | 340 | 183 |
 | `unverified` | 144 | 22 |
 | total | 715 | 366 |
 
@@ -224,7 +224,7 @@ a title that translates none has generated code unchanged.
 | `0x33d4ab37` | `__sceSasRevType` | audio | `synthetic` | HLE selftest dispatch |
 | `0x340b7686` | `sceUmdGetDiscInfo` | umd | `ppsspp-derived` | handler comment names PPSSPP; note |
 | `0x342061e5` | `sceKernelSetCompiledSdkVersion370` | kernel_memory | `synthetic` | HLE selftest dispatch |
-| `0x34401d65` | `sceNetAdhocctlDisconnect` | network | `synthetic` | HLE selftest dispatch |
+| `0x34401d65` | `sceNetAdhocctlDisconnect` | network | `ppsspp-derived` | handler comment names PPSSPP |
 | `0x34885e0d` | `sceRtcConvertUtcToLocalTime` | rtc | `synthetic` | HLE selftest dispatch |
 | `0x349b864d` | `sceKernelCancelMsgPipe` | kernel_sync | `ppsspp-derived` | handler comment names PPSSPP |
 | `0x349d6d6c` | `sceKernelCheckCallback` | kernel_thread | `synthetic` | HLE selftest dispatch |
