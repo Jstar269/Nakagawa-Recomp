@@ -1853,9 +1853,9 @@ void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on);
 /* The --experimental-60hz flag: on for this session only, never saved. */
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on);
 /* The --cheats and --cheats-file flags (#2639): cheats on for this session only, never saved.
- * `file` is the cheat file to read, made absolute here, or NULL or "" for each title's own
- * (cheats/<DISC-ID>.ini in the user data folder). False, with nothing changed, when `file`
- * cannot be made an absolute path that fits. */
+ * `file` is the cheat file to read, which must exist and is made absolute here, or NULL or ""
+ * for each title's own (cheats/<DISC-ID>.ini in the user data folder). False, with nothing
+ * changed, when `file` is not a file or cannot be made an absolute path that fits. */
 bool player_app_set_cheats_session(PlayerApp *app, const char *file);
 /* An Ace launch of the title with its Wider culling part on (section 11.3.6): the launch line
    carries cull=on, and the title builds and launches with its culling package when it has a

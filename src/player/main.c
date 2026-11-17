@@ -4320,7 +4320,7 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
             if (!app->cheats_session) (void)player_app_set_cheats_session(app, NULL);
         } else if (strncmp(argv[i], "--cheats-file=", 14) == 0) {
             if (!argv[i][14] || !player_app_set_cheats_session(app, argv[i] + 14)) {
-                fprintf(stderr, "[PLAYER] Invalid --cheats-file value.\n");
+                fprintf(stderr, "[PLAYER] --cheats-file must name a cheat file that exists.\n");
                 return 2;
             }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST

@@ -3376,7 +3376,13 @@ void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on) {
 bool player_app_set_cheats_session(PlayerApp *app, const char *file) {
     char absolute[MAX_PATH_LEN] = "";
     if (!app) return false;
-    if (file && file[0] && !nk_platform_absolute_path(file, absolute, sizeof(absolute))) return false;
+    /* A named file has to be there, on every host: only then can it be made absolute
+       (nk_platform_absolute_path), and a mistyped name is said at start, not after a launch. */
+    if (file && file[0] &&
+        (!nk_platform_file_exists(file) ||
+         !nk_platform_absolute_path(file, absolute, sizeof(absolute)))) {
+        return false;
+    }
     app->cheats_session = true;
     snprintf(app->cheats_session_file, sizeof(app->cheats_session_file), "%s", absolute);
     player_dev_log_add(app, "settings", "cheats on for this session, from %s",

@@ -16547,11 +16547,20 @@ int main(int argc, char **argv) {
         assert(!s_app2->settings.cheats);
         assert(player_app_set_cheats_session(s_app2, NULL));
         assert(s_app2->cheats_session && s_app2->cheats_session_file[0] == '\0');
-        assert(player_app_set_cheats_session(s_app2, "session-cheats.ini"));
         {
+            /* A named file must be there (so it can be made absolute on every host); one that
+               is not changes nothing. */
+            char named[sizeof(test_settings_path) + 32];
             char absolute[MAX_PATH_LEN];
-            assert(nk_platform_absolute_path("session-cheats.ini", absolute, sizeof(absolute)));
+            snprintf(named, sizeof(named), "%s.session-cheats.ini", test_settings_path);
+            remove(named);
+            assert(!player_app_set_cheats_session(s_app2, named));
+            assert(s_app2->cheats_session && s_app2->cheats_session_file[0] == '\0');
+            write_text_file(named, "_C1 Write\n_L 0x00000100 0x00000001\n");
+            assert(player_app_set_cheats_session(s_app2, named));
+            assert(nk_platform_absolute_path(named, absolute, sizeof(absolute)));
             assert(s_app2->cheats_session && strcmp(s_app2->cheats_session_file, absolute) == 0);
+            remove(named);
         }
         assert(!s_app2->settings.cheats);   /* the session's cheats are not the stored switch */
         assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);

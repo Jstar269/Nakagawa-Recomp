@@ -1178,7 +1178,7 @@ that PPSSPP's per-game cheat files and `cheat.db` use.
 - **Cheats** on Settings > Online and developer options in the player (off by default; stored as
   the optional `"cheats"` key of `settings.json`).
 - `nakagawa_player --cheats`, for that session only, or `nakagawa_player --cheats-file=<path>`
-  to read one file you name instead of the game's own. Neither is saved.
+  to read one file you name instead of the game's own (the file must exist). Neither is saved.
 
 The launcher then starts the game with `SR_CHEATS=1` and `SR_CHEATS_FILE=<the file>`. It
 exports both for every game it starts (`SR_CHEATS=0` and an empty file name while cheats are off),
