@@ -119,6 +119,8 @@ static VkFence        s_swap_img_fence[8];
 static VkSemaphore    s_swap_sem_done[8];
 
 static int      s_renderer_terminal = 0;
+/* Set once a failed present has named why the renderer turned terminal on stderr. */
+static int      s_terminal_reported = 0;
 static int      s_denorm_preserve_f32 = 0;   /* see sdl3vk_init: VK_KHR_shader_float_controls */
 static int      s_dst_read = SDL3VK_DST_READ_SNAPSHOT;   /* see sdl3vk_init: SR_GPU_DST_READ */
 static uint32_t s_dev_extensions = 0;        /* what vkCreateDevice was given (sdl3vk_get_vk) */
@@ -140,7 +142,8 @@ static VkResult s_present_fault_result = VK_SUCCESS;
  * the call, which is not made; a success code (VK_SUBOPTIMAL_KHR) replaces the call's own
  * VK_SUCCESS. One-shot; PSTEP_NONE is disarmed. */
 enum { PSTEP_NONE, PSTEP_FRAME_WAIT, PSTEP_ACQUIRE, PSTEP_IMAGE_WAIT, PSTEP_RESET_CMD,
-       PSTEP_BEGIN_CMD, PSTEP_END_CMD, PSTEP_RESET_FENCE, PSTEP_SUBMIT };
+       PSTEP_BEGIN_CMD, PSTEP_END_CMD, PSTEP_RESET_FENCE, PSTEP_SUBMIT, PSTEP_CAP_ALLOC,
+       PSTEP_PRESENT };
 static int      s_pstep_fault = PSTEP_NONE;
 static VkResult s_pstep_fault_result = VK_SUCCESS;
 
@@ -463,6 +466,10 @@ static int wait_swapchain_unused(void) {
     return 0;
 }
 
+/* Surface seam for the lifecycle selftest: the next swapchain creation sees the 0x0 extent of a
+ * minimized window. One-shot; 0 in production. */
+static int s_swap_extent_zero_fault = 0;
+
 static int init_step_fails(void);
 /* Set while sdl3vk_init creates its swapchain: each present semaphore is then one of its fallible
  * steps, as it was when the semaphores were per frame, so the init unwind reaches every one. */
@@ -506,6 +513,7 @@ static int create_swapchain(void) {
     if (ext.width  > caps.maxImageExtent.width)  ext.width  = caps.maxImageExtent.width;
     if (ext.height < caps.minImageExtent.height) ext.height = caps.minImageExtent.height;
     if (ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
+    if (s_swap_extent_zero_fault) { s_swap_extent_zero_fault = 0; ext.width = ext.height = 0; }
     if (ext.width == 0 || ext.height == 0) return 0;   /* minimized: keep old swapchain */
     s_swap_ext = ext;
 
@@ -1312,6 +1320,14 @@ static uint32_t s_button_pulse;
  * from s_button_pulse, which the guest's sample consumes, so both see every press. */
 static uint32_t s_pad_pulse;
 static int      s_text_claim;
+/* Keyboard keys the on-screen keyboard has (sdl3vk.h, text entry): every key held while it
+ * is open, and once it closes each key still held, until that key is let go or pressed anew.
+ * The game sees none of them, so a key typed into the field, or the Enter that confirmed it,
+ * never reaches the title as a held button or a pushed stick. */
+static bool     s_text_keys[NK_HOST_KEY_MOUSE_FIRST];
+/* Keyboard-state seam for the input selftests: it stands in SDL's own key array, which pushed
+ * events do not change. NULL in production. */
+static const bool *(*s_key_state_fn)(int *count) = NULL;
 
 /* In-game pause (sdl3vk.h). The gate hides input from the game while the overlay has it and
  * after it lets go; the raw host state is kept for the moment the claim ends. */
@@ -1524,6 +1540,14 @@ static void poll_input_on_this_stack(void *arg) {
         case SDL_EVENT_GAMEPAD_REMOVED:
             if (s_pad && SDL_GetGamepadID(s_pad) == ev.gdevice.which) {
                 SDL_CloseGamepad(s_pad); s_pad = NULL;
+                /* A gamepad still connected takes over, so the player can answer the pause
+                 * with it: its own ADDED event came while this one was open, and was passed by. */
+                int npads = 0;
+                SDL_JoystickID *ids = SDL_GetGamepads(&npads);
+                for (int i = 0; ids && i < npads && !s_pad; i++)
+                    if (ids[i] != ev.gdevice.which) s_pad = SDL_OpenGamepad(ids[i]);
+                SDL_free(ids);
+                /* The controller in use went away mid-game either way: the game pauses. */
                 pause_request_latch(SDL3VK_PAUSE_REQUEST_PAD_LOST);
             }
             break;
@@ -1565,7 +1589,12 @@ static void poll_input_on_this_stack(void *arg) {
             if (ev.key.key == SDLK_F12 && !ev.key.repeat) sr_screenshot_request();
             /* While the keyboard is claimed its keys go to the keyboard only: a keyboard Enter that
              * confirms the field must not leave a START pulse behind for the title to see. */
-            if (!ev.key.repeat && !s_text_claim) s_button_pulse |= keyboard_button(ev.key.scancode);
+            if (!ev.key.repeat && !s_text_claim) {
+                s_button_pulse |= keyboard_button(ev.key.scancode);
+                /* Pressed anew after the keyboard closed: the game's own key again. */
+                if ((int)ev.key.scancode >= 0 && (int)ev.key.scancode < NK_HOST_KEY_MOUSE_FIRST)
+                    s_text_keys[ev.key.scancode] = false;
+            }
             if (s_text_claim) {
                 int repeats;
                 int key = text_entry_key(ev.key.key, &repeats);
@@ -1608,16 +1637,23 @@ static void poll_input_on_this_stack(void *arg) {
     }
 
     int key_count = 0;
-    const bool *k = SDL_GetKeyboardState(&key_count);
+    const bool *k = s_key_state_fn ? s_key_state_fn(&key_count) : SDL_GetKeyboardState(&key_count);
     /* The profile's keyboard keys (#1299). Its defaults are the GDI front-end's map
      * (gui.c read_keys); SR_PADSCRIPT keeps the defaults, as it does for the gamepad. */
     const NkInputProfile *key_prof = padscript_active() ? NULL : sdl3vk_get_input_profile();
     bool keys[NK_HOST_KEY_LIMIT];
     host_key_state(k, key_count, s_mouse_held, keys);
+    /* The on-screen keyboard's keys are its own (s_text_keys): neither its buttons nor its
+     * stick keys reach the game while it is open, nor a key still held as it closes. */
+    for (int i = 0; i < NK_HOST_KEY_MOUSE_FIRST; i++) {
+        if (s_text_claim) s_text_keys[i] = keys[i];
+        else if (!keys[i]) s_text_keys[i] = false;
+        if (s_text_keys[i]) keys[i] = false;
+    }
     uint32_t b = sdl3vk_map_keyboard(key_prof, keys, NK_HOST_KEY_LIMIT);
     /* Tab held is fast forward (ace.h), unless the profile binds Tab to a PSP button or the
      * on-screen keyboard has the keys. */
-    ace_ff_hold(!s_text_claim && SDL_SCANCODE_TAB < key_count && k[SDL_SCANCODE_TAB] &&
+    ace_ff_hold(!s_text_claim && SDL_SCANCODE_TAB < key_count && keys[SDL_SCANCODE_TAB] &&
                             sdl3vk_map_key(key_prof, (int)SDL_SCANCODE_TAB) == 0u);
 
     uint8_t lx = 128, ly = 128;
@@ -2443,8 +2479,11 @@ static void draw_profile_hud(SDL_Renderer *ren, int w, int h, double game_fps, d
     }
 }
 
+static int overlay_format_order(VkFormat fmt, int *rgba);
+
 /* The HUD, or with the HUD off the slowed-logic notice alone in a box of its own (`slowed`,
- * at `slow_rate` updates/s), copied at the top left. */
+ * at `slow_rate` updates/s), copied at the top left. Its surface is 8-bit RGBA or BGRA, so a
+ * swapchain in any other format (10-bit, half float) gets no HUD, as it gets no pause overlay. */
 static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_img, int swap_w, int swap_h,
                              int slowed, unsigned slow_rate) {
     /* The profile HUD needs a window it fits in; a smaller one shows the performance HUD. */
@@ -2456,13 +2495,20 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
     if (!slowed && notice_only) return;
     if (slowed) hud_h += LOGIC_NOTICE_H;
     if (!f || !f->hud_staging_map || swap_w < hud_w || swap_h < hud_h) return;
+    int hud_rgba = 0;
+    if (!overlay_format_order(s_swap_fmt, &hud_rgba)) {
+        static int hud_format_warned;
+        if (!hud_format_warned++)
+            fprintf(stderr, "sdl3vk: the HUD is not shown: swapchain format %d is not 8-bit "
+                            "RGBA or BGRA\n", (int)s_swap_fmt);
+        return;
+    }
 
     if (!s_hud_surf || s_hud_fmt != s_swap_fmt || s_hud_surf->w != hud_w || s_hud_surf->h != hud_h) {
         if (s_hud_ren) { SDL_DestroyRenderer(s_hud_ren); s_hud_ren = NULL; }
         if (s_hud_surf) { SDL_DestroySurface(s_hud_surf); s_hud_surf = NULL; }
         s_hud_fmt = s_swap_fmt;
-        SDL_PixelFormat sdl_fmt = (s_swap_fmt == VK_FORMAT_R8G8B8A8_UNORM || s_swap_fmt == VK_FORMAT_R8G8B8A8_SRGB)
-                                  ? SDL_PIXELFORMAT_RGBA32 : SDL_PIXELFORMAT_BGRA32;
+        SDL_PixelFormat sdl_fmt = hud_rgba ? SDL_PIXELFORMAT_RGBA32 : SDL_PIXELFORMAT_BGRA32;
         s_hud_surf = SDL_CreateSurface(hud_w, hud_h, sdl_fmt);
         if (s_hud_surf) {
             s_hud_ren = SDL_CreateSoftwareRenderer(s_hud_surf);
@@ -2589,6 +2635,17 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
     if (upload) { memcpy(f->staging_map, upload, (size_t)srcw * (size_t)srch * 4u); src = f->fbimg; }
     if (src) s_upscale_cpu_frame = upload ? SDL3VK_FRAME_CPU : movie ? SDL3VK_FRAME_MOVIE : SDL3VK_FRAME_GE;
     VkCommandBuffer cmd = f->cmd;
+    /* An armed capture's readback buffer is made before any image is acquired, so a failure to
+     * make it, or a present with no source to read back, has acquired nothing and the renderer
+     * goes on (#1377). */
+    CapBuffer *cap_cb = NULL;
+    if (sr_capture_is_armed()) {
+        if (!src) { why = "capture has no source image"; goto fail; }
+        cap_cb = sr_capture_pending_is_probe() ? &s_probe : &s_cap;
+        if (pstep_skips(PSTEP_CAP_ALLOC) || !cap_ensure(cap_cb, (uint32_t)srcw, (uint32_t)srch)) {
+            why = "capture buffer allocation failed"; goto fail;
+        }
+    }
 
     for (int attempt = 0; attempt < 2; attempt++) {
         uint32_t idx = 0;
@@ -2796,21 +2853,19 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         }
 
         int cap_in_submit = 0;
-        if (sr_capture_is_armed()) {
-            CapBuffer *cb = sr_capture_pending_is_probe() ? &s_probe : &s_cap;
-            if (!cap_ensure(cb, (uint32_t)srcw, (uint32_t)srch)) {
-                why = "capture buffer allocation failed"; goto fail;
-            }
+        if (cap_cb) {
             /* fbimg is B8G8R8A8_UNORM; a GE render target is R8G8B8A8_UNORM. */
             sr_cap_order order = upload ? SR_CAP_ORDER_BGRX : SR_CAP_ORDER_RGBX;
-            if (cb == &s_probe) {
+            if (cap_cb == &s_probe) {
                 s_probe_w = (uint32_t)srcw;
                 s_probe_order = order;
             } else {
                 s_cap_w = (uint32_t)srcw;
                 s_cap_order = order;
             }
-            if (!cap_record(cmd, cb, src, srcw, srch)) { why = "capture record failed"; goto fail; }
+            if (!cap_record(cmd, cap_cb, src, srcw, srch)) {
+                why = "capture record failed"; goto fail_acquired;
+            }
             cap_in_submit = 1;
         }
         if (s_pts_pool)
@@ -2871,7 +2926,7 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
                 }
             }
         } else {
-            pr = vkQueuePresentKHR(s_queue, &pi);
+            pr = PSTEP_VK(PSTEP_PRESENT, vkQueuePresentKHR(s_queue, &pi));
         }
 
         int did_present = 0;
@@ -2885,8 +2940,11 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
 
         case PRESENT_ENQUEUED_REBUILD:
             presented = 1;
-            if (!create_swapchain()) {
-                s_renderer_terminal = 1;
+            /* create_swapchain makes the renderer terminal itself whenever a failure loses the
+             * swapchain. A window minimized to a 0x0 extent, or a surface query that failed,
+             * keeps the old one, which the next acquire reports again and rebuilds then: this
+             * frame was presented and the renderer goes on. */
+            if (!create_swapchain() && s_renderer_terminal) {
                 why = "swapchain rebuild after presentation failed";
                 goto fail;
             }
@@ -2988,11 +3046,16 @@ fail_acquired:
     /* Between a successful acquire and the submit: the image stays acquired and f->sem_acq
      * stays to be signalled, and neither is handed back without a present, so the renderer is
      * terminal (#1377). */
-    fprintf(stderr, "sdl3vk: %s; the renderer is terminal\n", why);
     s_renderer_terminal = 1;
 fail:
     /* One exit for every failure above: the armed capture resolves as failed, never as
-     * an invented success, and a show pass learns its picture was not shown. */
+     * an invented success, and a show pass learns its picture was not shown. A failure that
+     * turned the renderer terminal (a lost device or surface, an unclassified present result,
+     * a step after the acquire) names why once, since every later present is refused. */
+    if (s_renderer_terminal && !s_terminal_reported) {
+        s_terminal_reported = 1;
+        fprintf(stderr, "sdl3vk: %s; the renderer is terminal\n", why ? why : "present failed");
+    }
     sr_capture_fail(why);
     if (pass_ran && s_show_done) s_show_done(-1, pass_submission);
     return -1;
@@ -3479,11 +3542,14 @@ void sdl3vk_shutdown(void) {
     if (s_win)         { SDL_DestroyWindow(s_win); s_win = NULL; }
     s_mouse_captured = false;                      /* the window took its grab with it */
     s_mouse_held = 0;                              /* and no click outlives it */
+    memset(s_text_keys, 0, sizeof s_text_keys);
     if (s_sdl_subsystems) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
         s_sdl_subsystems = 0;
     }
     s_renderer_terminal = 0;
+    s_terminal_reported = 0;
+    s_swap_extent_zero_fault = 0;
     s_denorm_preserve_f32 = 0;
     s_quit_requested = 0;
     s_pstep_fault = PSTEP_NONE;

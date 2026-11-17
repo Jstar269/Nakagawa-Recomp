@@ -764,10 +764,29 @@ int sdl3vk_pause_input_selftest(void) {
     (void)pause_test_sample();
     (void)sdl3vk_take_pad_pulses();
 
-    /* Losing the open pad asks for the pause. */
+    /* Losing the open pad asks for the pause, and a pad still connected takes over: it was
+     * passed by when it arrived, since one was open then. */
+    SDL_JoystickID id2 = SDL_AttachVirtualJoystick(&desc);
+    SDL_Joystick *joy2 = id2 ? SDL_OpenJoystick(id2) : NULL;
+    PAUSE_CHECK(joy2 != NULL, "a second virtual gamepad is unavailable: %s", SDL_GetError());
+    (void)pause_test_sample();
+    PAUSE_CHECK(s_pad && SDL_GetGamepadID(s_pad) == id, "a second pad arriving replaced the open one");
     SDL_CloseJoystick(joy);
     SDL_DetachVirtualJoystick(id);
     (void)pause_test_sample();
+    PAUSE_CHECK(s_pad && SDL_GetGamepadID(s_pad) == id2, "the pad still connected was not opened");
+    PAUSE_CHECK(sdl3vk_take_pause_request() == SDL3VK_PAUSE_REQUEST_PAD_LOST,
+                "losing the pad in use, with another connected, did not ask for the pause");
+    if (joy2) {
+        SDL_SetJoystickVirtualButton(joy2, SDL_GAMEPAD_BUTTON_SOUTH, true);
+        PAUSE_CHECK(pause_test_sample() & cross, "the pad that took over is not read");
+        SDL_SetJoystickVirtualButton(joy2, SDL_GAMEPAD_BUTTON_SOUTH, false);
+        (void)pause_test_sample();
+        (void)sdl3vk_take_pad_pulses();
+        SDL_CloseJoystick(joy2);
+        SDL_DetachVirtualJoystick(id2);
+        (void)pause_test_sample();
+    }
     PAUSE_CHECK(s_pad == NULL, "the removed pad stayed open");
     PAUSE_CHECK(sdl3vk_take_pause_request() == SDL3VK_PAUSE_REQUEST_PAD_LOST, "losing the pad did not ask for the pause");
 
@@ -1235,6 +1254,104 @@ static int sdl3vk_mouse_buttons_selftest(void) {
 }
 #undef MBTN_CHECK
 
+/* ---- the on-screen keyboard's keys (sdl3vk.h, text entry); no Vulkan needed ------------
+ * Drives the real poll (poll_input) with pushed key events and a stand-in for SDL's key array.
+ * While the keyboard is claimed no held key reaches the game, as a button or as the stick;
+ * a key still held as it closes (the Enter that confirmed the field) stays hidden until it is
+ * let go; pressed again, it is the game's. */
+#define TKEY_CHECK(cond, ...) do { if (!(cond)) { \
+    fprintf(stderr, "text_keys_selftest: " __VA_ARGS__); fputc('\n', stderr); ok = 0; } } while (0)
+
+static bool s_tkey_state[SDL_SCANCODE_COUNT];
+static const bool *tkey_state(int *count) {
+    if (count) *count = SDL_SCANCODE_COUNT;
+    return s_tkey_state;
+}
+
+static void tkey_set(SDL_Scancode sc, bool down) {
+    s_tkey_state[sc] = down;
+    SDL_Event ev;
+    SDL_zero(ev);
+    ev.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+    ev.key.scancode = sc;
+    ev.key.down = down;
+    SDL_PushEvent(&ev);
+}
+
+static int sdl3vk_text_keys_selftest(void) {
+    int ok = 1;
+    if (!SDL_InitSubSystem(SDL_INIT_EVENTS)) {
+        fprintf(stderr, "text_keys_selftest: SDL events unavailable: %s\n", SDL_GetError());
+        return 0;
+    }
+    memset(s_tkey_state, 0, sizeof s_tkey_state);
+    s_key_state_fn = tkey_state;
+    sdl3vk_reset_input_profile();
+    sdl3vk_init_input_profile();
+    const uint32_t start = 0x0008u, cross = NK_PSP_BTN_CROSS_BIT;
+    uint8_t lx, ly;
+    uint32_t seen;
+
+    /* The game's keys: x is Cross and i pushes the stick (the default profile). */
+    tkey_set(SDL_SCANCODE_X, true);
+    (void)mbtn_test_sample(&lx, &ly);
+    seen = mbtn_test_sample(&lx, &ly);
+    TKEY_CHECK(seen & cross, "x held is not Cross for the game (0x%x)", seen);
+    tkey_set(SDL_SCANCODE_X, false);
+    (void)mbtn_test_sample(&lx, &ly);
+    tkey_set(SDL_SCANCODE_I, true);
+    (void)mbtn_test_sample(&lx, &ly);
+    TKEY_CHECK(lx != 128 || ly != 128, "i held does not push the stick");
+    tkey_set(SDL_SCANCODE_I, false);
+    (void)mbtn_test_sample(&lx, &ly);
+
+    /* The keyboard has the keys: typed and held, none reaches the game. */
+    sdl3vk_set_text_claim(1);
+    tkey_set(SDL_SCANCODE_X, true);
+    tkey_set(SDL_SCANCODE_I, true);
+    for (int i = 0; i < 3; i++) {
+        seen = mbtn_test_sample(&lx, &ly);
+        TKEY_CHECK(seen == 0 && lx == 128 && ly == 128,
+                   "keys held for the on-screen keyboard reached the game (sample %d: 0x%x %u,%u)",
+                   i, seen, lx, ly);
+    }
+    tkey_set(SDL_SCANCODE_X, false);
+    tkey_set(SDL_SCANCODE_I, false);
+    (void)mbtn_test_sample(&lx, &ly);
+
+    /* Enter confirms the field and is still held as the keyboard closes. */
+    tkey_set(SDL_SCANCODE_RETURN, true);
+    seen = mbtn_test_sample(&lx, &ly);
+    TKEY_CHECK(seen == 0, "Enter for the on-screen keyboard reached the game (0x%x)", seen);
+    sdl3vk_set_text_claim(0);
+    for (int i = 0; i < 3; i++) {
+        seen = mbtn_test_sample(&lx, &ly);
+        TKEY_CHECK((seen & start) == 0, "the Enter that closed the keyboard became START (sample %d)", i);
+    }
+    tkey_set(SDL_SCANCODE_RETURN, false);
+    seen = mbtn_test_sample(&lx, &ly);
+    TKEY_CHECK(seen == 0, "released keys still show (0x%x)", seen);
+    tkey_set(SDL_SCANCODE_RETURN, true);
+    seen = mbtn_test_sample(&lx, &ly);
+    TKEY_CHECK(seen & start, "Enter pressed again after the keyboard closed is not START (0x%x)", seen);
+    tkey_set(SDL_SCANCODE_RETURN, false);
+    (void)mbtn_test_sample(&lx, &ly);
+
+    s_key_state_fn = NULL;
+    memset(s_text_keys, 0, sizeof s_text_keys);
+    s_key_head = 0;
+    s_key_count = 0;
+    sdl3vk_reset_input_profile();
+    nk_input_gate_init(&s_gate);
+    s_button_pulse = s_pad_pulse = 0;
+    s_buttons = 0;
+    s_lx = s_ly = 128;
+    SDL_QuitSubSystem(SDL_INIT_EVENTS);
+    if (ok) printf("text_keys_selftest: OK\n");
+    return ok;
+}
+#undef TKEY_CHECK
+
 /* Set while the lifecycle selftest holds its own SDL video reference: SDL_WasInit cannot tell
  * that reference from one sdl3vk leaked, so the per-step count then checks the gamepad
  * subsystem only, and the selftest checks video once after releasing its reference. */
@@ -1353,15 +1470,64 @@ static int sdl3vk_lifecycle_selftest(void) {
         int reached = s_pstep_fault == PSTEP_NONE;
         s_pstep_fault = PSTEP_NONE;
         int terminal = sdl3vk_renderer_terminal();
+        int reported = s_terminal_reported;
         int after = sdl3vk_present_rgba(px);
         sdl3vk_shutdown();
         int live = lifecycle_live_objects();
         if (!warm || !reached || got != pcases[i].want || terminal != pcases[i].terminal ||
-            after != (pcases[i].terminal ? -1 : 1) || live != 0) {
+            reported != terminal || after != (pcases[i].terminal ? -1 : 1) || live != 0) {
             fprintf(stderr, "lifecycle: present fault '%s': warm=%d reached=%d present=%d (want %d) "
-                            "terminal=%d (want %d) next present=%d, %d object(s) alive after "
-                            "shutdown\n", pcases[i].name, warm, reached, got, pcases[i].want,
-                    terminal, pcases[i].terminal, after, live);
+                            "terminal=%d (want %d, named %d) next present=%d, %d object(s) alive "
+                            "after shutdown\n", pcases[i].name, warm, reached, got, pcases[i].want,
+                    terminal, pcases[i].terminal, reported, after, live);
+            ok = 0;
+        }
+    }
+    /* Two faults the renderer goes on from. An armed capture whose readback buffer cannot be
+     * made has acquired nothing yet: the capture fails and the next presents are shown. A
+     * suboptimal present whose rebuild finds the window minimized (a 0x0 surface) was shown:
+     * the old swapchain stays, and the next presents are shown. Neither leaves an image or a
+     * semaphore behind for the validation layer to report. */
+    for (int c = 0; ok && c < 2; c++) {
+        const char *name = c == 0 ? "capture buffer allocation" : "suboptimal present, minimized";
+        if (!sdl3vk_init("Nakagawa GPU lifecycle selftest")) {
+            fprintf(stderr, "lifecycle: re-init before present case '%s' failed\n", name);
+            ok = 0;
+            break;
+        }
+        const int errors_before = sdl3vk_validation_error_count();
+        int warm = 1;
+        for (int k = 0; k < PRESENT_FRAMES; k++) warm &= sdl3vk_present_rgba(px) == 1;
+        int armed = 1;
+        if (c == 0) {
+            armed = sr_capture_arm("selftest_lifecycle.ppm");
+            s_pstep_fault = PSTEP_CAP_ALLOC;
+            s_pstep_fault_result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        } else {
+            s_swap_extent_zero_fault = 1;
+            s_pstep_fault = PSTEP_PRESENT;
+            s_pstep_fault_result = VK_SUBOPTIMAL_KHR;
+        }
+        const int got = sdl3vk_present_rgba(px);
+        const int reached = s_pstep_fault == PSTEP_NONE && s_swap_extent_zero_fault == 0;
+        s_pstep_fault = PSTEP_NONE;
+        s_swap_extent_zero_fault = 0;
+        const int capture = c == 0 ? sr_capture_result() : -1;
+        const int terminal = sdl3vk_renderer_terminal();
+        int after = 1;
+        for (int k = 0; k <= PRESENT_FRAMES; k++) after &= sdl3vk_present_rgba(px) == 1;
+        const int verrors = sdl3vk_validation_error_count() - errors_before;
+        sdl3vk_shutdown();
+        remove("selftest_lifecycle.ppm");
+        const int live = lifecycle_live_objects();
+        const int want = c == 0 ? -1 : 1;
+        if (!warm || !armed || !reached || got != want || capture != -1 || terminal || !after ||
+            verrors != 0 || live != 0) {
+            fprintf(stderr, "lifecycle: present fault '%s': warm=%d armed=%d reached=%d present=%d "
+                            "(want %d) capture=%d (want -1) terminal=%d (want 0) next presents "
+                            "shown=%d, %d validation error(s), %d object(s) alive after "
+                            "shutdown\n", name, warm, armed, reached, got, want, capture,
+                    terminal, after, verrors, live);
             ok = 0;
         }
     }
@@ -1382,7 +1548,7 @@ static int sdl3vk_lifecycle_selftest(void) {
     }
     if (!ok) return 1;
     printf("gpu lifecycle selftest: init unwind at each of %d steps OK; %d present faults OK\n",
-           steps, npcases);
+           steps, npcases + 2);
     return 0;
 }
 
@@ -1898,6 +2064,12 @@ static int sdl3vk_capture_selftest_body(void) {
         return 1;
     }
 
+    /* ---- the on-screen keyboard's keys; no Vulkan needed ----------------------------- */
+    if (!sdl3vk_text_keys_selftest()) {
+        fprintf(stderr, "gpu capture selftest: text keys selftest failed\n");
+        return 1;
+    }
+
     /* ---- validation-layer requirement ---------------------------------------------- */
     {
         uint32_t n = 0;
@@ -2055,6 +2227,11 @@ static int sdl3vk_capture_selftest_body(void) {
                             terminal_fault);
                     ok = 0;
                 }
+                if (!s_terminal_reported) {
+                    fprintf(stderr, "terminal fault %s: the renderer turned terminal without a "
+                                    "line naming why\n", terminal_fault);
+                    ok = 0;
+                }
                 if (sdl3vk_frame_semaphore_generation() != sem0) {
                     fprintf(stderr, "terminal fault %s: semaphore generation changed\n",
                             terminal_fault);
@@ -2159,6 +2336,29 @@ static int sdl3vk_capture_selftest_body(void) {
                 fprintf(stderr, "hud: with the HUD off a present still copied a HUD\n");
                 ok = 0;
             }
+        }
+        /* A swapchain that is not 8-bit RGBA or BGRA (a 10-bit or a half-float surface, which
+         * create_swapchain takes when the surface offers no B8G8R8A8_UNORM) gets no HUD: the
+         * HUD's 4-byte texels would show the wrong colours there, or be too few for the copy.
+         * The format stands in for the one create_swapchain stored. */
+        {
+            static const VkFormat other[] = { VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+                                              VK_FORMAT_R16G16B16A16_SFLOAT };
+            const VkFormat saved_fmt = s_swap_fmt;
+            hud_set_mode(SDL3VK_HUD_PERF);
+            for (size_t i = 0; i < sizeof other / sizeof other[0]; i++) {
+                const unsigned before = s_hud_last.copies;
+                s_swap_fmt = other[i];
+                const int shown = sdl3vk_present_rgba(px);
+                s_swap_fmt = saved_fmt;
+                if (shown != 1 || s_hud_last.copies != before) {
+                    fprintf(stderr, "hud: a present to swapchain format %d returned %d and copied "
+                                    "%u HUD(s) (want 1 and none)\n", (int)other[i], shown,
+                            s_hud_last.copies - before);
+                    ok = 0;
+                }
+            }
+            hud_set_mode(SDL3VK_HUD_OFF);
         }
         s_developer = saved_developer;
         hud_set_mode(saved_mode);
