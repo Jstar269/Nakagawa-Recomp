@@ -8,7 +8,9 @@
 
 # Nakagawa Recomp
 
-**Play PSP games you own as native Windows programs: add your disc image, build it once, play.**
+**Play PSP games you own as native Windows programs: add your disc image, build&nbsp;it,&nbsp;play.**
+
+Experimental pre-release: one game is playable so far. [See what works](docs/COMPATIBILITY.md).
 
 **[Download](https://github.com/Jstar269/Nakagawa-Recomp/releases/tag/v0.0.3) · [Website](https://jstar269.github.io/Nakagawa-Recomp/) · [Compatibility](docs/COMPATIBILITY.md) · [Discussions](https://github.com/Jstar269/Nakagawa-Recomp/discussions)**
 
@@ -34,9 +36,9 @@ screenshots of Enhanced mode.
 
 | Approach | How the game runs | Which games | What you get |
 | :--- | :--- | :--- | :--- |
-| **Nakagawa Recomp** | Its code is translated into C once, on your PC, and compiled into a native program, with a runtime that stands in for the PSP's system software. | The same steps for every disc: the player imports it, builds a package and names anything that isn't supported. One game is playable so far. | **Authentic** play as released, **Enhanced** options that work for any game, and **Ace** packages made for one game at a time. |
-| A recompiled port of one game | Also translated ahead of time, in a separate project built by hand for that game. | One game per project. | Whatever its authors build, including deep changes to the game. |
-| An emulator such as PPSSPP | The game's code is translated or interpreted while it runs. | Most of the PSP library, on PCs, phones and handhelds. | Upscaling, texture packs, save states, online play and more. |
+| **Nakagawa Recomp** | Its code is translated into C on your PC, ahead of time, and compiled into a native program. | The same steps for every disc: import, build, and the player names anything it doesn't support. One game is playable so far. | **Authentic** play as released, **Enhanced** options for any game (higher resolution, texture packs and more), and **Ace** packages for one game at a time. |
+| A port of one game | Also translated ahead of time, by hand, as a project of its own. | One game per project. | Whatever its authors build, including deep changes to the game. |
+| An emulator such as PPSSPP | The game's code is translated or interpreted while it runs. | Most of the PSP library, on PCs, phones and handhelds. | Save states, online and ad hoc play, upscaling, texture packs and more. |
 
 If you only want to play PSP games today, an emulator such as [PPSSPP](https://github.com/hrydgard/ppsspp) runs far
 more of them, and Nakagawa adapts some of its code ([credits](CREDITS.md)). Nakagawa is for running a game you own as
@@ -48,10 +50,11 @@ a native program.
 matches and Story Mode. It runs in **Authentic** mode, as released, or in **Enhanced** mode, which adds options such
 as texture filtering, Smooth motion and Widescreen. **Ace** mode is Enhanced plus a game's own 60 FPS game logic: it
 ships for Hot Shots Tennis, and as an Experimental package for *LittleBigPlanet* (disc version 2.00 only).
-*PAC-MAN Championship Edition* plays a stage, about a dozen more games start and get part of the way in, and most
-others stop early and name what is missing. In the maintainer's whole-library build of 2026-10-31, 352 of the 755
-disc images counted drew at least one frame in their first launch
-([how they were counted](docs/COMPATIBILITY.md#whole-library)).
+*PAC-MAN Championship Edition* plays a stage, *Super Stardust Portable* reaches its menus, and fifteen more games
+have been seen to start or run. Other games are untested, or have had only a first launch with no input: in the
+maintainer's whole-library build of 2026-10-31, before v0.0.2 and v0.0.3, 326 of the 692 verified retail disc images
+drew at least one frame that way ([how they were counted](docs/COMPATIBILITY.md#whole-library)). When a game needs
+something Nakagawa doesn't support, it stops and names what is missing.
 
 **To play:** [download v0.0.3](#download) for Windows 11, extract the ZIP, start `bin\nakagawa_player.exe`, drag in
 your game's `.iso`, then press **BUILD PACKAGE** and **PLAY**. Without a game of your own, the library's
@@ -100,8 +103,8 @@ You need:
 | *Hot Shots Tennis: Get a Grip* | Playable | Full matches and Story Mode play. Its title file ships with Nakagawa. On the reference PC, a 2026-10-27 measurement of current main ([#1296](https://github.com/Jstar269/nakagawa-recomp/issues/1296)) ran at about 29.5 of the game's own 30 frames per second in matches and 29.2 to 29.6 in menus. Sound effects and text clicks can drop out while the game loads. The opening movie shows black in v0.0.1 and plays from v0.0.2. |
 | PAC-MAN Championship Edition | In-game | Reaches its menu, plays a stage and resumes from its own save, through general fixes with no game-specific code ([#552](https://github.com/Jstar269/nakagawa-recomp/pull/552), [#556](https://github.com/Jstar269/nakagawa-recomp/pull/556), [#1126](https://github.com/Jstar269/nakagawa-recomp/issues/1126)). The rest of the game hasn't been tried. |
 | *Super Stardust Portable* | Title screen | Goes through its menus to difficulty select, then stops by name at a VFPU instruction Nakagawa doesn't support yet ([#326](https://github.com/Jstar269/Nakagawa-Recomp/issues/326)). |
-| Eleven more games, *LittleBigPlanet* among them | No tier | Seen to start or run, in the project's testing or in user reports on v0.0.1, but not checked by the maintainer. Several reach menus or gameplay, most well below full speed. [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) says how far each one gets. |
-| Any other PSP game | No tier | The player imports it, builds a package and names anything that isn't supported. For most games it stops at one of those named limits ([#308](https://github.com/Jstar269/Nakagawa-Recomp/issues/308)). |
+| Fifteen more games, *LittleBigPlanet* among them | No tier | Seen to start or run, in the project's testing or in user reports, but not checked by the maintainer. Several reach menus or gameplay, most well below full speed. [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) says how far each one gets. |
+| Any other PSP game | No tier | The player imports it, builds a package and names anything that isn't supported. Most are untested or have had only a first launch with no input ([whole library](docs/COMPATIBILITY.md#whole-library); [#308](https://github.com/Jstar269/Nakagawa-Recomp/issues/308)). |
 | Two showcase demos | Playable | Small PSP programs the project wrote as tests. They ship with the release and need no game files. |
 
 Ratings use the player's words. Hot Shots Tennis and the two showcase demos are rated from the player's own record;
