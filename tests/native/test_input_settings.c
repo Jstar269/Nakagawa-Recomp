@@ -1056,14 +1056,30 @@ static void test_per_title_scope_and_atomic_save(void) {
 
     /* The document the player writes is bounded: a full table refuses another
      * disc rather than dropping one. */
-    for (int i = 0; after_failed.file.title_count < NK_INPUT_MAX_PER_TITLE; i++) {
+    int fill_count = 0;
+    for (; after_failed.file.title_count < NK_INPUT_MAX_PER_TITLE; fill_count++) {
         char disc_id[NK_MAX_DISC_ID_LEN];
-        snprintf(disc_id, sizeof(disc_id), "FILL%05d", i);
+        snprintf(disc_id, sizeof(disc_id), "FILL%05d", fill_count);
         assert(input_settings_set_scope(&after_failed, disc_id));
     }
-    assert(!input_settings_set_scope(&after_failed, "ONET00TOOMANY"));
-    assert(!input_settings_is_title_scope(&after_failed) ||
-           strcmp(after_failed.editing_disc_id, "ONET00TOOMANY") != 0);
+    {
+        /* The refusal changes nothing: the table keeps every disc it held, and
+         * the scope being edited stays the one chosen last. */
+        char scope_before[sizeof(after_failed.editing_disc_id)];
+        const bool title_scope_before = input_settings_is_title_scope(&after_failed);
+        snprintf(scope_before, sizeof(scope_before), "%s", after_failed.editing_disc_id);
+        assert(title_scope_before && scope_before[0] != '\0');
+        assert(!input_settings_set_scope(&after_failed, "ONET00TOOMANY"));
+        assert(after_failed.file.title_count == NK_INPUT_MAX_PER_TITLE);
+        assert(input_settings_is_title_scope(&after_failed) == title_scope_before);
+        assert(strcmp(after_failed.editing_disc_id, scope_before) == 0);
+        assert(nk_input_profile_file_find_title(&after_failed.file, "ONET00TOOMANY") < 0);
+        for (int i = 0; i < fill_count; i++) {
+            char disc_id[NK_MAX_DISC_ID_LEN];
+            snprintf(disc_id, sizeof(disc_id), "FILL%05d", i);
+            assert(nk_input_profile_file_find_title(&after_failed.file, disc_id) >= 0);
+        }
+    }
 
     remove(path);
     remove(file_path);
@@ -1118,7 +1134,7 @@ static void test_hostile_profile_files(void) {
         "\"analog_y\":{\"host_axis\":\"lefty\",\"deadzone_inner\":1000}},"
         "\"psp_bindings\":[],\"navigation_bindings\":[]} TRAILING",               /* garbage */
     };
-    static const char *const kRawNulFile =
+    static const char kRawNulFile[] =
         "{\"schema_version\":2,\"device\":{\"guid\":\"g\0h\"}}";
     size_t hostile_count = sizeof(kHostileFiles) / sizeof(kHostileFiles[0]);
     const char *path = SR_SELFTEST_BUILD_ROOT "/test_hostile_settings.json";
@@ -1161,15 +1177,23 @@ static void test_hostile_profile_files(void) {
         }
     }
 
-    /* A NUL byte inside the file is data, not an end of file. */
+    /* A NUL byte inside the file is data, not an end of file: the whole document,
+     * the bytes after the NUL included, reaches the parser, which refuses the raw
+     * control character inside the string. A loader that stopped at the NUL would
+     * report the truncated document's unterminated string instead. */
     {
         InputSettingsState state;
+        const size_t raw_nul_size = sizeof(kRawNulFile) - 1u;
         FILE *f = fopen(path, "wb");
         assert(f != NULL);
-        assert(fwrite(kRawNulFile, 1, strlen(kRawNulFile) + 1, f) == strlen(kRawNulFile) + 1);
+        assert(fwrite(kRawNulFile, 1, raw_nul_size, f) == raw_nul_size);
         assert(fclose(f) == 0);
         assert(input_settings_load(&state, path) != NK_OK);
         assert(state.has_load_diagnostic);
+        if (strstr(state.load_diagnostic, "Unescaped control character") == NULL) {
+            printf("  raw NUL file: unexpected diagnostic: %s\n", state.load_diagnostic);
+            assert(0 && "a raw NUL inside the file was not refused as a control character");
+        }
         assert(state.file.title_count == 0);
     }
 

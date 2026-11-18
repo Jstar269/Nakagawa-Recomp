@@ -611,12 +611,13 @@ static int test_rounded_corner_fringe(void) {
     corner = target_pixel(&target, 8, 8);
     CHECK(center == 0xFFFFFFFFu, "the middle is solid");
     CHECK(corner == 0x000000FFu, "the cut corner stays background");
-    /* The fringe fades from white to black without a dark halo: a pixel on the
-       curve is a grey no darker than the background and no brighter than white. */
+    /* The fringe fades from white to black without a colour halo. (11.5, 11.5) is
+       12.02 px from the corner's centre (20, 20): inside the fringe band from 11.5
+       to 12.5 px, so the pixel is a grey strictly between background and white. */
     {
-        uint32_t edge = target_pixel(&target, 10, 10);
+        uint32_t edge = target_pixel(&target, 11, 11);
         int r = (int)(edge >> 24);
-        CHECK(r >= 0 && r <= 255, "fringe pixel is a valid grey");
+        CHECK(r > 0 && r < 255, "the curve is antialiased");
         CHECK(((edge >> 16) & 0xFFu) == (uint32_t)r && ((edge >> 8) & 0xFFu) == (uint32_t)r,
               "fringe pixels stay neutral grey: premultiplied blending, no colour halo");
     }

@@ -289,6 +289,7 @@ static void test_png_validation_and_fetch(void) {
                kHugePng, sizeof(kHugePng));
     assert(nk_cover_art_fetch_url(fake_open, &net, net.answers[0].url, "thumbnails.libretro.com",
                                   bad_file, NULL, NULL, NULL) == NK_COVER_ART_INVALID_PNG);
+    assert(!file_exists(bad_file));
 
     memset(&net, 0, sizeof(net));
     add_answer(&net, "https://thumbnails.libretro.com/Sony%20-%20PlayStation%20Portable/Named_Boxarts/Big.png",
@@ -296,12 +297,14 @@ static void test_png_validation_and_fetch(void) {
     net.answers[0].declared_length = NK_COVER_ART_MAX_BYTES + 1u;
     assert(nk_cover_art_fetch_url(fake_open, &net, net.answers[0].url, "thumbnails.libretro.com",
                                   bad_file, NULL, NULL, NULL) == NK_COVER_ART_TOO_LARGE);
+    assert(!file_exists(bad_file));
 
     memset(&net, 0, sizeof(net));
     add_answer(&net, expected_url, kValidPng, sizeof(kValidPng));
     net.cancel_after_reads = 1;
     assert(nk_cover_art_fetch_url(fake_open, &net, expected_url, "thumbnails.libretro.com",
                                   bad_file, cancel_after_first_read, &net, NULL) == NK_COVER_ART_CANCELLED);
+    assert(!file_exists(bad_file));
 
     /* RetroAchievements fallback seam: invoked when primary libretro has no match. */
     FakeFallbackState ra;

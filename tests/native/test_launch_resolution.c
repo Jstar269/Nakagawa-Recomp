@@ -92,6 +92,10 @@ static void write_file(const char *path, const char *data) {
 
 /* A disc image as the homebrew import writes it, as far as a launch looks: the primary
    volume descriptor with the import's volume identifier (nk_pbp_homebrew.c). */
+/* Link-escape legs (review of #2426, N2/m1) this host could not run because it cannot make
+   a folder link. Any such leg makes the run end in SKIP (exit 77), never a pass. */
+static int s_link_legs_not_run;
+
 /* A folder link at link_path leading to target: a symlink on POSIX, a junction (which needs
    no rights) on Windows. False where the host cannot make one. */
 static bool make_folder_link(const char *link_path, const char *target) {
@@ -1169,7 +1173,9 @@ static void test_no_iso_child_environment(const char *test_executable,
                 snprintf(link_path, sizeof(link_path), "%s%c%s", link_folder, sep,
                          level == 0 ? "MYHB" : level == 1 ? "levels" : "PSP");
                 if (!make_folder_link(link_path, outside)) {
-                    printf("[LAUNCH_TEST] NOT_RUN: this host cannot make a folder link\n");
+                    printf("[LAUNCH_TEST] NOT_RUN: link-escape leg %d: this host cannot make a "
+                           "folder link\n", level);
+                    s_link_legs_not_run++;
                     continue;
                 }
                 copy_field(session.memstick_root, sizeof(session.memstick_root), link_stick);
@@ -2969,7 +2975,11 @@ int main(int argc, char **argv) {
     make_game(&game, iso_path);
     snprintf(game.disc_id, sizeof(game.disc_id), "ZZZZ99999");
     snprintf(game.title_id, sizeof(game.title_id), "not-a-catalog-title");
-    assert(nk_launch_prepare_session(&session, &game, base) != NK_OK);
+    /* The catalog refuses it by name, before any runtime is looked for: a runtime
+     * missing under `base` must not be what makes this subtest pass. */
+    assert(nk_launch_prepare_session(&session, &game, base) == NK_ERROR_UNSUPPORTED_TITLE);
+    assert(strstr(session.last_error, "No catalog entry describes this title") != NULL);
+    assert(strstr(session.last_error, "not-a-catalog-title") != NULL);
 
     /* 9. A stale retail-shaped build must not satisfy a second title (#366).
      *
@@ -3404,7 +3414,7 @@ int main(int argc, char **argv) {
      * when the runtime is actually spawned. The sentinel verifies that the
      * child still receives unrelated parent environment values. */
 #if defined(__ANDROID__)
-    /* Subtests 18 and 20 start the runtime as a child process. On Android a title starts in
+    /* Subtests 18 and 21 start the runtime as a child process. On Android a title starts in
      * its own process through TitleActivity, over JNI, which a program run from adb shell has
      * no Java VM for; nk_launch_start fails closed there (tests/native/test_posix_process.c).
      * They run inside the app instead, and are reported as skipped below. */
@@ -3417,9 +3427,9 @@ int main(int argc, char **argv) {
     test_non_ascii_user_data_root(base, sep);
     test_game_data_root_status(base, sep);
 
-    /* 20. nk_launch_stop state changes and process termination. */
+    /* 21. nk_launch_stop state changes and process termination. */
 #if defined(__ANDROID__)
-    printf("[LAUNCH_TEST] Subtest 20: skipped on Android (needs the app's TitleActivity)\n");
+    printf("[LAUNCH_TEST] Subtest 21: skipped on Android (needs the app's TitleActivity)\n");
 #else
     test_launch_stop_functionality(argv[0], base, sep);
 #endif
@@ -3432,11 +3442,19 @@ int main(int argc, char **argv) {
 #if defined(__ANDROID__)
     (void)test_no_iso_child_environment;
     (void)test_launch_stop_functionality;
+    (void)s_link_legs_not_run;
     native_test_assert_real_config_untouched();
-    printf("SKIP launch_resolution_test subtests 18 and 20 (exit 77): they spawn the runtime, "
+    printf("SKIP launch_resolution_test subtests 18 and 21 (exit 77): they spawn the runtime, "
            "which Android does through TitleActivity; every other subtest passed\n");
     return 77;
 #else
+    if (s_link_legs_not_run > 0) {
+        native_test_assert_real_config_untouched();
+        printf("SKIP launch_resolution_test (exit 77): %d link-escape leg(s) of the review of "
+               "#2426 (N2/m1) were NOT_RUN because this host cannot make a folder link; every "
+               "other subtest passed\n", s_link_legs_not_run);
+        return 77;
+    }
     printf("[LAUNCH_TEST] ALL LAUNCH RESOLUTION TESTS PASSED!\n");
     native_test_assert_real_config_untouched();
     return 0;
