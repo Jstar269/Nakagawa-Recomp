@@ -528,11 +528,19 @@ try {
 # mapping against the structured lines `make gpu-selftest-status` prints.
 try {
     $gpuGates = @("gpu-coherence-selftest", "gpu-capture-selftest")
+    # `make gpu-selftest-status` runs gpu_capture_selftest.exe once by default and once
+    # per terminal-fault leg; these are the leg lines a host with that verdict prints.
+    function New-CaptureLegLines {
+        param([string]$Verdict, [int]$Code)
+        return (@("surface-lost", "unclassified", "device-lost") | ForEach-Object {
+            "GPU_SELFTEST_RESULT gpu_capture_selftest.exe:$_ $Verdict $Code`n" }) -join ""
+    }
 
     Test-Case "child exit 77 is SKIP with a reason, not a failure" {
         $log = "GPU_SELFTEST_RESULT gpu_coherence_selftest.exe SKIP 77`n" +
                "vulkan loader unavailable`n" +
-               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe PASS 0`n"
+               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe PASS 0`n" +
+               (New-CaptureLegLines -Verdict PASS -Code 0)
         $results = Get-GpuSelftestResults -Log $log
         $status = Resolve-GpuSelftestStatus -Results $results -Gates $gpuGates -ExitCode 0
         Assert-True ($status.Gates[0].Status -eq "SKIP") "child 77 was not SKIP"
@@ -568,16 +576,45 @@ try {
 
     Test-Case "every executed pass reports EXECUTED completeness" {
         $log = "GPU_SELFTEST_RESULT gpu_coherence_selftest.exe PASS 0`n" +
-               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe PASS 0`n"
+               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe PASS 0`n" +
+               (New-CaptureLegLines -Verdict PASS -Code 0)
         $status = Resolve-GpuSelftestStatus -Results (Get-GpuSelftestResults -Log $log) `
             -Gates $gpuGates -ExitCode 0
+        Assert-True ($status.Gates[1].Status -eq "PASS") "all capture legs passed but gate is $($status.Gates[1].Status)"
         Assert-True ($status.Completeness -eq "EXECUTED") `
             "executed checks reported as $($status.Completeness)"
     }
 
+    Test-Case "the capture gate is not PASS when its terminal-fault legs never ran" {
+        $log = "GPU_SELFTEST_RESULT gpu_coherence_selftest.exe PASS 0`n" +
+               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe PASS 0`n"
+        $status = Resolve-GpuSelftestStatus -Results (Get-GpuSelftestResults -Log $log) `
+            -Gates $gpuGates -ExitCode 0
+        Assert-True ($status.Gates[1].Status -eq "FAIL") `
+            "default run alone reported gpu-capture-selftest as $($status.Gates[1].Status)"
+        Assert-True ($status.Gates[1].Reason -match "device-lost") "the missing leg is not named"
+        Assert-True ($status.Completeness -ne "EXECUTED") `
+            "missing legs reported graphics evidence as EXECUTED"
+    }
+
+    Test-Case "a failing terminal-fault leg fails the capture gate" {
+        $log = "GPU_SELFTEST_RESULT gpu_coherence_selftest.exe PASS 0`n" +
+               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe PASS 0`n" +
+               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe:surface-lost PASS 0`n" +
+               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe:unclassified PASS 0`n" +
+               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe:device-lost FAIL 3`n"
+        $status = Resolve-GpuSelftestStatus -Results (Get-GpuSelftestResults -Log $log) `
+            -Gates $gpuGates -ExitCode 2
+        Assert-True ($status.Gates[0].Status -eq "PASS") "coherence gate misreported"
+        Assert-True ($status.Gates[1].Status -eq "FAIL") `
+            "device-lost failure reported gpu-capture-selftest as $($status.Gates[1].Status)"
+        Assert-True ($status.Gates[1].Reason -match "device-lost exit 3") "failing leg not named"
+    }
+
     Test-Case "a host that skips both binaries reports absent graphics evidence" {
         $log = "GPU_SELFTEST_RESULT gpu_coherence_selftest.exe SKIP 77`n" +
-               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe SKIP 77`n"
+               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe SKIP 77`n" +
+               (New-CaptureLegLines -Verdict SKIP -Code 77)
         $status = Resolve-GpuSelftestStatus -Results (Get-GpuSelftestResults -Log $log) `
             -Gates $gpuGates -ExitCode 0
         Assert-True ($status.Completeness -eq "NOT_RUN_HOST_UNSUPPORTED") `

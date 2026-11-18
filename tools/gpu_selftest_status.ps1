@@ -49,14 +49,38 @@ function Get-GpuSelftestBinaryName {
     return ($Gate -replace '-', '_') + ".exe"
 }
 
+# The terminal-fault legs `make gpu-capture-selftest` runs after its default run
+# (GPU_CAPTURE_TERMINAL_CASES in mk/selftests.mk). `make gpu-selftest-status`
+# reports each as `gpu_capture_selftest.exe:<case>`.
+$script:GpuSelftestGateLegs = @{
+    "gpu-capture-selftest" = @("surface-lost", "unclassified", "device-lost")
+}
+
+function Get-GpuSelftestResultNames {
+    <#
+    .SYNOPSIS
+        The result-line names one gate needs: its binary's default run plus
+        every leg the gate's Make target runs.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Gate)
+    $binary = Get-GpuSelftestBinaryName -Gate $Gate
+    $names = @($binary)
+    if ($script:GpuSelftestGateLegs.ContainsKey($Gate)) {
+        foreach ($leg in $script:GpuSelftestGateLegs[$Gate]) { $names += "${binary}:$leg" }
+    }
+    return $names
+}
+
 function Resolve-GpuSelftestStatus {
     <#
     .SYNOPSIS
         Map parsed GPU selftest results onto manager gate outcomes.
     .DESCRIPTION
-        A binary with no result line never ran, so its gate is FAIL (a build or
-        launch failure) even when the log text happens to contain the word
-        "skip". A SKIP keeps its reason and never counts as a failure. The
+        A binary or leg with no result line never ran, so its gate is FAIL (a
+        build or launch failure) even when the log text happens to contain the
+        word "skip". gpu-capture-selftest also needs its terminal-fault legs
+        (Get-GpuSelftestResultNames). A SKIP keeps its reason and never counts
+        as a failure. The
         returned Completeness value is the evidence fact: EXECUTED when every
         binary reported a verdict, PARTIAL_SKIPPED when some did, and
         NOT_RUN_HOST_UNSUPPORTED when every binary skipped, so callers can report
@@ -72,32 +96,41 @@ function Resolve-GpuSelftestStatus {
 
     $outcomes = @()
     $skipped = 0
+    $failedGates = 0
     foreach ($gate in $Gates) {
-        $binary = Get-GpuSelftestBinaryName -Gate $gate
-        if (-not $Results.ContainsKey($binary)) {
+        # A gate passes only when its default run and every leg its Make target
+        # runs reported PASS; a missing leg never ran, so it is a failure.
+        $names = @(Get-GpuSelftestResultNames -Gate $gate)
+        $missing = @($names | Where-Object { -not $Results.ContainsKey($_) })
+        $failing = @($names | Where-Object {
+            $Results.ContainsKey($_) -and $Results[$_].Verdict -eq "FAIL" })
+        $skipping = @($names | Where-Object {
+            $Results.ContainsKey($_) -and $Results[$_].Verdict -eq "SKIP" })
+        if ($missing.Count -gt 0) {
+            $failedGates++
             $outcomes += [pscustomobject]@{
                 Gate    = $gate
                 Status  = "FAIL"
-                Reason  = "no GPU_SELFTEST_RESULT for $binary; the binary was not built or not run (make exit $ExitCode)"
+                Reason  = "no GPU_SELFTEST_RESULT for $($missing -join ', '); the binary was not built or not run (make exit $ExitCode)"
             }
-            continue
-        }
-        $result = $Results[$binary]
-        if ($result.Verdict -eq "PASS") {
-            $outcomes += [pscustomobject]@{ Gate = $gate; Status = "PASS"; Reason = "child exit 0" }
-        } elseif ($result.Verdict -eq "SKIP") {
-            $skipped++
-            $outcomes += [pscustomobject]@{
-                Gate   = $gate
-                Status = "SKIP"
-                Reason = "child exit $($result.Code): graphics evidence was not produced on this host"
-            }
-        } else {
+        } elseif ($failing.Count -gt 0) {
+            $failedGates++
+            $detail = @($failing | ForEach-Object { "$_ exit $($Results[$_].Code)" }) -join ", "
             $outcomes += [pscustomobject]@{
                 Gate   = $gate
                 Status = "FAIL"
-                Reason = "child exit $($result.Code): GPU selftest reported a real failure"
+                Reason = "child $($detail): GPU selftest reported a real failure"
             }
+        } elseif ($skipping.Count -gt 0) {
+            $skipped++
+            $detail = @($skipping | ForEach-Object { "$_ exit $($Results[$_].Code)" }) -join ", "
+            $outcomes += [pscustomobject]@{
+                Gate   = $gate
+                Status = "SKIP"
+                Reason = "child $($detail): graphics evidence was not produced on this host"
+            }
+        } else {
+            $outcomes += [pscustomobject]@{ Gate = $gate; Status = "PASS"; Reason = "child exit 0" }
         }
     }
 
@@ -105,7 +138,7 @@ function Resolve-GpuSelftestStatus {
         "NOT_RUN_HOST_UNSUPPORTED"
     } elseif ($skipped -gt 0) {
         "PARTIAL_SKIPPED"
-    } elseif ($ExitCode -ne 0) {
+    } elseif ($ExitCode -ne 0 -or $failedGates -gt 0) {
         "FAILED"
     } else {
         "EXECUTED"

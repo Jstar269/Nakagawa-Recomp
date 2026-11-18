@@ -522,6 +522,88 @@ class TestSpecGeneration(unittest.TestCase):
         self.assertIn(gen.PLACEHOLDER, body)
         self.assertIn(SAMPLE.hex(), body)
 
+    @unittest.skipUnless(os.name == "nt", "Windows paths compare case-insensitively")
+    def test_refuses_case_changed_path_inside_repo(self):
+        # ntpath.commonpath returns the prefix in the first path's case, so a
+        # differently-cased spelling of the checkout once slipped past the guard.
+        repo_root = Path(gen.__file__).resolve().parent.parent
+        in_repo = repo_root / "should_not_be_written.txt"
+        with tempfile.TemporaryDirectory() as d:
+            keys = Path(d) / "keys.txt"
+            keys.write_text("k = " + SAMPLE.hex() + "\n", encoding="utf-8")
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    rc = gen.main(["--keys", str(keys), "--out", str(in_repo).swapcase()])
+            finally:
+                written = in_repo.exists()
+                if written:
+                    in_repo.unlink()
+        self.assertEqual(rc, 2)
+        self.assertFalse(written)
+
+    def test_refuses_link_into_repo(self):
+        repo_root = Path(gen.__file__).resolve().parent.parent
+        in_repo = repo_root / "should_not_be_written.txt"
+        with tempfile.TemporaryDirectory() as d:
+            keys = Path(d) / "keys.txt"
+            keys.write_text("k = " + SAMPLE.hex() + "\n", encoding="utf-8")
+            link = Path(d) / "repo_link"
+            try:
+                os.symlink(repo_root, link, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                if os.name != "nt":
+                    self.skipTest("cannot create a directory symlink here")
+                import _winapi  # a junction needs no symlink privilege
+                _winapi.CreateJunction(str(repo_root), str(link))
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    rc = gen.main(["--keys", str(keys), "--out", str(link / in_repo.name)])
+            finally:
+                written = in_repo.exists()
+                if written:
+                    in_repo.unlink()
+                # Remove the link itself before the temporary tree is cleaned, so
+                # the cleanup can never walk into the checkout.
+                if os.name == "nt":
+                    os.rmdir(link)
+                else:
+                    os.unlink(link)
+        self.assertEqual(rc, 2)
+        self.assertFalse(written)
+
+    @unittest.skipUnless(os.name == "nt", "drive letters exist only on Windows")
+    def test_output_on_another_drive_is_outside_the_repo(self):
+        repo_drive = os.path.splitdrive(str(Path(gen.__file__).resolve()))[0].upper()
+        candidates = [f"{letter}:" for letter in "QXZYW"
+                      if f"{letter}:" != repo_drive and not os.path.exists(f"{letter}:\\")]
+        if not candidates:
+            self.skipTest("no unused drive letter to point at")
+        out = candidates[0] + "\\no_such_dir\\spec.txt"
+        with tempfile.TemporaryDirectory() as d:
+            keys = Path(d) / "keys.txt"
+            keys.write_text("k = " + SAMPLE.hex() + "\n", encoding="utf-8")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = gen.main(["--keys", str(keys), "--out", out])
+        # The guard treats another drive as outside the repo (no ValueError
+        # traceback); the unwritable destination is then reported, not raised.
+        self.assertEqual(rc, 2)
+        self.assertNotIn("refusing", err.getvalue())
+        self.assertIn("cannot write", err.getvalue())
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_spec_is_private_to_the_owner(self):
+        with tempfile.TemporaryDirectory() as d:
+            keys = Path(d) / "keys.txt"
+            keys.write_text("k = " + SAMPLE.hex() + "\n", encoding="utf-8")
+            out = Path(d) / "spec.txt"
+            out.write_text("stale\n", encoding="utf-8")
+            out.chmod(0o644)
+            rc = gen.main(["--keys", str(keys), "--out", str(out)])
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.stat().st_mode & 0o077, 0)
+            self.assertNotIn("stale", out.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
