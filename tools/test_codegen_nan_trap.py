@@ -50,6 +50,7 @@ import sys
 import tempfile
 from typing import Any
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -493,17 +494,19 @@ class TestMatrixFormsCostNothingWhenOff(unittest.TestCase):
         body = "\n".join(f"void form_{i}(CpuState *s) {{ {text} }}"
                          for i, text in enumerate(self.statements(False)))
         objects = {}
-        for label, flag in (("plain", []), ("defined", ["-DSR_NAN_TRAP"])):
-            obj = Path(tempfile.mkdtemp(prefix="nan_trap_matrix_")) / f"{label}.o"
-            self.addCleanup(obj.unlink, True)
-            result = subprocess.run(
-                [CC, "-std=c11", "-O1", "-w", "-I", os.fspath(RT), "-I",
-                 os.fspath(ROOT / "src" / "core"), *flag, "-x", "c", "-c", "-",
-                 "-o", os.fspath(obj)],
-                input='#include "recomp.h"\n' + body + "\n",
-                capture_output=True, text=True, cwd=ROOT)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            objects[label] = obj.read_bytes()
+        with tempfile.TemporaryDirectory(prefix="nan_trap_matrix_") as temporary:
+            root = Path(temporary)
+            for label, flag in (("plain", []), ("defined", ["-DSR_NAN_TRAP"])):
+                obj = root / f"{label}.o"
+                result = subprocess.run(
+                    [CC, "-std=c11", "-O1", "-w", "-I", os.fspath(RT), "-I",
+                     os.fspath(ROOT / "src" / "core"), *flag, "-x", "c", "-c", "-",
+                     "-o", os.fspath(obj)],
+                    input='#include "recomp.h"\n' + body + "\n",
+                    capture_output=True, text=True, cwd=ROOT)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                objects[label] = obj.read_bytes()
+        self.assertFalse(root.exists(), "the per-test object directory must be removed")
         self.assertEqual(objects["plain"], objects["defined"])
         self.assertGreater(len(objects["plain"]), 0)
 
@@ -530,7 +533,7 @@ class TestEveryTrappedVfpuFormCompiles(unittest.TestCase):
                                 | size_bits[size])
                         try:
                             text = codegen.effect(0x00001000, word, options=options)[0]
-                        except Exception:
+                        except codegen.Unsupported:
                             continue
                         if text and "SR_NAN_TRAP" in text and text not in snippets:
                             snippets[text] = f"0x{word:08x}"
@@ -643,11 +646,14 @@ class TrapHarness:
 
     @staticmethod
     def run_exe(exe: Path, env: dict[str, str]) -> tuple[subprocess.CompletedProcess, list[str]]:
-        environ = dict(os.environ)
-        environ.setdefault("SR_VBL", "4711")
+        environ = {key: value for key, value in os.environ.items() if not key.startswith("SR_")}
+        environ["SR_VBL"] = "4711"
         environ.update(env)
         result = subprocess.run([os.fspath(exe)], capture_output=True, text=True,
                                 env=environ, cwd=ROOT)
+        if result.returncode != 0:
+            raise AssertionError(
+                f"{exe.name} exited with {result.returncode}: {result.stdout}{result.stderr}")
         reports = [line for line in result.stderr.splitlines() if line.startswith("NAN_TRAP pc=")]
         return result, reports
 
@@ -658,8 +664,39 @@ class TrapHarness:
         self.assertEqual(reports, [], f"{label} emitted a NAN_TRAP: {result.stderr}")
         if expected_stdout is not None:
             self.assertEqual(result.stdout.strip(), expected_stdout, label)
+        else:
+            self.assertTrue(result.stdout.strip(), f"{label} produced no result output")
         if forbidden_stdout is not None:
             self.assertNotIn(forbidden_stdout, result.stdout, label)
+
+
+class TrapRunnerContractTests(unittest.TestCase):
+    def test_run_exe_rejects_a_crash_without_trap_output(self):
+        crashed = subprocess.CompletedProcess(["fixture"], -11, stdout="", stderr="")
+        with mock.patch.object(subprocess, "run", return_value=crashed):
+            with self.assertRaisesRegex(AssertionError, "exited with -11"):
+                TrapHarness.run_exe(Path("fixture"), {})
+
+    def test_run_exe_clears_inherited_sr_overrides_before_applying_case_env(self):
+        completed = subprocess.CompletedProcess(["fixture"], 0, stdout="RESULT=ok\n", stderr="")
+        inherited = {
+            "SR_VBL": "90210",
+            "SR_NAN_TRAP_LIMIT": "0",
+            "SR_FLIGHT": "fault,sched;8",
+            "SR_FLIGHT_OUTPUT": "fixture-output.json",
+            "SR_TEST_SENTINEL": "inherited",
+        }
+        with mock.patch.dict(os.environ, inherited), \
+                mock.patch.object(subprocess, "run", return_value=completed) as run:
+            TrapHarness.run_exe(Path("fixture"), {"ARG": "case", "SR_NAN_TRAP_LIMIT": "3"})
+
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(child_env["SR_VBL"], "4711")
+        self.assertEqual(child_env["SR_NAN_TRAP_LIMIT"], "3")
+        self.assertNotIn("SR_FLIGHT", child_env)
+        self.assertNotIn("SR_FLIGHT_OUTPUT", child_env)
+        self.assertNotIn("SR_TEST_SENTINEL", child_env)
+        self.assertEqual(child_env["ARG"], "case")
 
 
 class TestScalarFpuTrap(TrapHarness, unittest.TestCase):
@@ -711,7 +748,8 @@ int main(void) {
         self.assertEqual(reports, [])
 
     def test_propagating_an_existing_inf_is_not_reported(self):
-        _result, reports = self.run_exe(self.exe, {"NUM": "7f800000", "DEN": "3f800000"})
+        result, reports = self.run_exe(self.exe, {"NUM": "7f800000", "DEN": "3f800000"})
+        self.assertEqual(result.stdout.strip(), "RESULT=0x7f800000")
         self.assertEqual(reports, [])
 
     def test_limit_env_bounds_the_report(self):
@@ -722,19 +760,24 @@ int main(void) {
             """
 int main(void) {
     CpuState st; CpuState *s = &st;
+    int completed = 0;
     for (int i = 0; i < 4; i++) {
         memset(s, 0, sizeof *s);
         body(s);
+        completed++;
     }
+    printf("RESULT=%d\\n", completed);
     return 0;
 }
 """)
-        _result, reports = self.run_exe(exe, {"NUM": "00000000", "DEN": "00000000",
-                                          "SR_NAN_TRAP_LIMIT": "2"})
+        result, reports = self.run_exe(exe, {"NUM": "00000000", "DEN": "00000000",
+                                            "SR_NAN_TRAP_LIMIT": "2"})
         self.assertEqual(len(reports), 2, "limit must bound the reports")
-        _result, reports = self.run_exe(exe, {"NUM": "00000000", "DEN": "00000000",
-                                          "SR_NAN_TRAP_LIMIT": "0"})
+        self.assertEqual(result.stdout.strip(), "RESULT=4")
+        result, reports = self.run_exe(exe, {"NUM": "00000000", "DEN": "00000000",
+                                            "SR_NAN_TRAP_LIMIT": "0"})
         self.assertEqual(reports, [], "limit 0 silences the trap entirely")
+        self.assertEqual(result.stdout.strip(), "RESULT=4")
 
     def test_default_limit_is_twenty(self):
         exe = self.compile(
@@ -846,7 +889,8 @@ int main(void) {{
         return self.exe, {"NUM": "3f800000", "DEN": "40000000"}, "RESULT=0x3f000000", None
 
     def test_propagating_an_existing_nan_is_not_reported(self):
-        _result, reports = self.run_exe(self.exe, {"NUM": "7fc00000", "DEN": "3f800000"})
+        result, reports = self.run_exe(self.exe, {"NUM": "7fc00000", "DEN": "3f800000"})
+        self.assertEqual(result.stdout.strip(), "RESULT=0x7f800001")
         self.assertEqual(reports, [])
 
 
@@ -1062,7 +1106,8 @@ int main(void) {{
         return self.exe, {"NUM": "3f800000", "DEN": "40000000"}, "RC=1 RESULT=0x3f000000", None
 
     def test_propagating_an_existing_nan_is_not_reported(self):
-        _result, reports = self.run_exe(self.exe, {"NUM": "7fc00000", "DEN": "3f800000"})
+        result, reports = self.run_exe(self.exe, {"NUM": "7fc00000", "DEN": "3f800000"})
+        self.assertEqual(result.stdout.strip(), "RC=1 RESULT=0x7f800001")
         self.assertEqual(reports, [])
 
 
@@ -1100,7 +1145,7 @@ int main(void) {{
         self.assertTrue(reports[0].endswith("out=[nan]"), reports[0])
 
     def _finite_result_case(self):
-        return self.exe, {"ARG": "40800000"}, None, None  # sqrt(4)
+        return self.exe, {"ARG": "40800000"}, "RC=1 RESULT=0x40000000", None  # sqrt(4)
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
@@ -1189,7 +1234,9 @@ int main(void) {{
         # Both tiers must gather the same operand list, or a report would depend
         # on which tier the instruction happened to run in.
         env = overflowing_env(self.matrix, self.vector)
-        _result, generated = self.run_exe(self.generated, env)
+        result, generated = self.run_exe(self.generated, env)
+        self.assertTrue(generated, "generated tier must report the finite-to-nonfinite origin")
+        self.assertIn("OUT0=", result.stdout)
         _result, interpreted = self.run_exe(self.interpreted, env)
         self.assertEqual(interpreted, generated)
 
@@ -1324,6 +1371,14 @@ class TestFiniteResultIsSilent(unittest.TestCase):
                 self.assertFalse(result.skipped, result.skipped)
                 self.assertFalse(result.errors, result.errors)
                 self.assertFalse(result.failures, result.failures)
+
+
+class TrapSweepExceptionTests(unittest.TestCase):
+    def test_sweep_propagates_generator_bugs_instead_of_dropping_forms(self):
+        sweep = TestEveryTrappedVfpuFormCompiles("test_all_trapped_vfpu_statements_compile").sweep
+        with mock.patch.object(codegen, "effect", side_effect=TypeError("synthetic generator bug")):
+            with self.assertRaisesRegex(TypeError, "synthetic generator bug"):
+                sweep()
 
 
 if __name__ == "__main__":

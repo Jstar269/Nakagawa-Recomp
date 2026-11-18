@@ -42,9 +42,12 @@
 /* The AV_CH_* / AV_CH_LAYOUT_* channel mask constants are provided by the
  * imported upstream libavutil/channel_layout.h. */
 
-/* Codec tag used only for the imported decode-entry comparison
- * (avctx->codec_id == AV_CODEC_ID_ATRAC3P). The numeric value is not
- * meaningful in this subset; the wrapper sets the same constant. */
+/* Codec tags. The numeric values are not meaningful in this subset. The only
+ * codec_id comparison left in the imported code is atrac3.c's
+ * AV_CODEC_ID_ATRAC3AL check in atrac3_decode_init(); the atrac3plusdec.c
+ * LOCAL DELTA entry point dropped upstream's AV_CODEC_ID_ATRAC3P comparison.
+ * The wrapper (atrac3p_api.c) sets AV_CODEC_ID_ATRAC3P or AV_CODEC_ID_ATRAC3
+ * on each context it creates. */
 #define AV_CODEC_ID_ATRAC3P 0x17008
 #define AV_CODEC_ID_ATRAC3  0x17003
 #define AV_CODEC_ID_ATRAC3AL 0x17004

@@ -96,21 +96,14 @@ The process is meant to be forgiving. An unticked box, a missing sign-off or an 
 
 - Nobody, person or agent, adds a sign-off on someone else's behalf.
 - History is not rewritten to add sign-offs to commits already merged.
-- If you want to add sign-offs to your own open pull request, amend your own commits on your own branch.
-  Only the person does this; an agent never adds a sign-off or force-pushes:
-
-### Single Commit Branch
-
-```bash
-git commit --amend -s
-git push --force-with-lease
-```
-
-### Multiple Commit Branch
+- If you want to sign off your own work, do it before the first push with `git commit -s`. If the
+  branch is already pushed, add a new signed-off commit for later work or leave the existing commits
+  as they are: a missing sign-off is not a merge blocker (Section 4). Never rebase or force-push a
+  pushed branch (`AGENTS.md` Section 10), and never amend a commit whose exact head has been pushed.
+  Only the person does this; an agent never adds a sign-off.
 
 ```bash
-git rebase --exec "git commit --amend --no-edit -s" @~N  # where N is the number of commits
-git push --force-with-lease
+git commit -s  # before the first push
 ```
 
 ---

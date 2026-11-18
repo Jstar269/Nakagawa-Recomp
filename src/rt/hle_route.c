@@ -236,6 +236,7 @@ void hle_exit_close_audio_dump(void) {
 static void route_fail(const char *fmt, ...) {
     va_list ap;
     s_route_state = ROUTE_FAILED;
+    route_nid_watch(0);
     route_until_nid_arm(0, 0u);
     fputs("ROUTE_FAIL: ", stderr);
     va_start(ap, fmt);
@@ -254,6 +255,8 @@ static void route_fail(const char *fmt, ...) {
         sr_perf_shutdown();
         sr_profile_dump_final();
         SR_VERIFY_REPORT_NOW();
+        hle_state_sample_close();   /* _Exit flushes no stdio stream: land the SR_SAMPLE_OUT tail */
+        sr_trace_close();           /* and the SR_TRACE tail, the evidence closest to the failure */
         _Exit(ROUTE_FAIL_EXIT);
     }
 }
@@ -390,6 +393,27 @@ static int route_parse_axis(const char *t, uint32_t *out) {
     if (!end || *end || v > 255ul) return -1;
     *out = (uint32_t)v;
     return 0;
+}
+
+/* A route count: plain decimal digits in [lo, hi] and nothing after them. strtoul and atol
+ * alone read '12x' as 12, 'abc' as 0 and '-1' as UINT32_MAX, so a typo ran a different
+ * schedule than the file says; every count a route line carries is read here instead. */
+static int route_parse_u32(const char *t, uint32_t lo, uint32_t hi, uint32_t *out) {
+    char *end = NULL;
+    if (!t || t[0] < '0' || t[0] > '9') return -1;
+    unsigned long long v = strtoull(t, &end, 10);
+    if (!end || *end || v < lo || v > hi) return -1;
+    *out = (uint32_t)v;
+    return 0;
+}
+
+/* route_parse_u32 over the whole uint32_t range, naming the field and the token it refuses;
+ * the caller keeps its own range check and message. */
+static int route_count(const char *t, uint32_t *out, const char *path, int lineno, const char *field) {
+    if (route_parse_u32(t, 0u, UINT32_MAX, out) == 0) return 0;
+    fprintf(stderr, "ROUTE_PARSE: %s:%d: %s: '%s' is not a decimal count\n", path, lineno, field,
+            t ? t : "");
+    return -1;
 }
 
 /* The names a mask argument may use, for the refusal that has to teach the fix. */
@@ -563,9 +587,13 @@ static int route_parse_line(char *line, int lineno, const char *path) {
                     path, lineno, m, route_button_names());
             return -1;
         }
-        s_route_legacy[s_route_nlegacy].f    = (uint32_t)strtoul(tok, NULL, 10);
+        uint32_t lf = 0u, lw = 0u;
+        if (route_count(tok, &lf, path, lineno, "pad-script frame") != 0 ||
+            route_count(w, &lw, path, lineno, "pad-script width") != 0)
+            return -1;
+        s_route_legacy[s_route_nlegacy].f    = lf;
         s_route_legacy[s_route_nlegacy].mask = lmask;
-        s_route_legacy[s_route_nlegacy].w    = (uint32_t)strtoul(w, NULL, 10);
+        s_route_legacy[s_route_nlegacy].w    = lw;
         s_route_legacy[s_route_nlegacy].stick = row_stick;
         s_route_nlegacy++;
         return 0;
@@ -659,23 +687,32 @@ static int route_parse_line(char *line, int lineno, const char *path) {
     if (strcmp(tok, "SIGGRID") == 0) {
         char *c = strtok(NULL, " \t\r\n"), *r = strtok(NULL, " \t\r\n");
         if (!c || !r) { fprintf(stderr, "ROUTE_PARSE: %s:%d: SIGGRID <cols> <rows>\n", path, lineno); return -1; }
-        int cols = atoi(c), rows = atoi(r);
-        if (cols < 1 || rows < 1 || cols * rows > ROUTE_MAX_CELLS) {
-            fprintf(stderr, "ROUTE_PARSE: %s:%d: SIGGRID %dx%d out of range (cols*rows <= %d)\n",
-                    path, lineno, cols, rows, ROUTE_MAX_CELLS);
+        /* Each axis is bounded before the product is formed, so no pair of values can wrap the
+         * cols*rows check and size a grid larger than the signature buffers. */
+        char *c_end = NULL, *r_end = NULL;
+        long cols = strtol(c, &c_end, 10), rows = strtol(r, &r_end, 10);
+        if (c_end == c || *c_end != '\0' || r_end == r || *r_end != '\0' ||
+            cols < 1 || rows < 1 || cols > ROUTE_MAX_CELLS || rows > ROUTE_MAX_CELLS ||
+            cols > ROUTE_MAX_CELLS / rows) {
+            fprintf(stderr, "ROUTE_PARSE: %s:%d: SIGGRID %s %s out of range (cols*rows <= %d)\n",
+                    path, lineno, c, r, ROUTE_MAX_CELLS);
             return -1;
         }
         if (s_route_ncp > 0) {
             fprintf(stderr, "ROUTE_PARSE: %s:%d: SIGGRID must precede every CHECKPOINT\n", path, lineno);
             return -1;
         }
-        s_route_cols = cols; s_route_rows = rows;
+        s_route_cols = (int)cols; s_route_rows = (int)rows;
         return 0;
     }
     if (strcmp(tok, "SAMPLE_EVERY") == 0 || strcmp(tok, "TOLERANCE") == 0) {
         char *v = strtok(NULL, " \t\r\n");
-        int n = v ? atoi(v) : -1;
-        if (n < 1) { fprintf(stderr, "ROUTE_PARSE: %s:%d: %s <n>, n >= 1\n", path, lineno, tok); return -1; }
+        uint32_t nv = 0u;
+        if (route_parse_u32(v, 1u, (uint32_t)INT32_MAX, &nv) != 0) {
+            fprintf(stderr, "ROUTE_PARSE: %s:%d: %s <n>, n a decimal >= 1\n", path, lineno, tok);
+            return -1;
+        }
+        int n = (int)nv;
         if (tok[0] == 'S') { s_route_sample_every = n; return 0; }
         /* A checkpoint takes the tolerance in force when it is parsed, and its tolerance
          * also decides which bytes are informative. A later TOLERANCE would silently mean
@@ -693,9 +730,11 @@ static int route_parse_line(char *line, int lineno, const char *path) {
         int tol = s_route_tol;
         if (!name || !next) { fprintf(stderr, "ROUTE_PARSE: %s:%d: CHECKPOINT <NAME> [tol=<n>] <hex>\n", path, lineno); return -1; }
         if (strncmp(next, "tol=", 4) == 0) {
-            tol = atoi(next + 4);
+            uint32_t tv = 0u;
+            const int tol_ok = route_parse_u32(next + 4, 0u, (uint32_t)INT32_MAX, &tv) == 0;
+            tol = (int)tv;
             next = strtok(NULL, " \t\r\n");
-            if (tol < 0 || !next) { fprintf(stderr, "ROUTE_PARSE: %s:%d: bad tol= or missing signature\n", path, lineno); return -1; }
+            if (!tol_ok || !next) { fprintf(stderr, "ROUTE_PARSE: %s:%d: bad tol= or missing signature\n", path, lineno); return -1; }
         }
         if (strlen(name) >= ROUTE_NAME_MAX) { fprintf(stderr, "ROUTE_PARSE: %s:%d: checkpoint name too long\n", path, lineno); return -1; }
         int idx = route_find(name);
@@ -704,6 +743,15 @@ static int route_parse_line(char *line, int lineno, const char *path) {
             idx = s_route_ncp++;
             memset(&s_route_cp[idx], 0, sizeof s_route_cp[idx]);
             snprintf(s_route_cp[idx].name, ROUTE_NAME_MAX, "%s", name);
+        }
+        /* All recordings of one checkpoint share one tolerance, which sets both its mask and its
+         * match threshold. An alternate line that carries another one (its own tol=, or the
+         * TOLERANCE default without one) would silently replace what the earlier line asked for. */
+        if (s_route_cp[idx].nsig > 0 && s_route_cp[idx].tol != tol) {
+            fprintf(stderr, "ROUTE_PARSE: %s:%d: '%s' already has tolerance %d and this recording asks for "
+                            "%d; give every recording of one checkpoint the same tol= (or none)\n",
+                    path, lineno, name, s_route_cp[idx].tol, tol);
+            return -1;
         }
         if (s_route_cp[idx].nsig >= ROUTE_MAX_ALT) {
             fprintf(stderr, "ROUTE_PARSE: %s:%d: more than %d signatures for '%s'\n", path, lineno, ROUTE_MAX_ALT, name);
@@ -732,9 +780,11 @@ static int route_parse_line(char *line, int lineno, const char *path) {
             snprintf(st.name, ROUTE_NAME_MAX, "%s", name);
             if (st.op == ROUTE_OP_WAIT) {
                 char *t = strtok(NULL, " \t\r\n");
-                long to = t ? atol(t) : -1;
-                if (to < 1) { fprintf(stderr, "ROUTE_PARSE: %s:%d: WAIT <NAME> <timeout_vblanks>\n", path, lineno); return -1; }
-                st.a = (uint32_t)to;
+                if (route_parse_u32(t, 1u, UINT32_MAX, &st.a) != 0) {
+                    fprintf(stderr, "ROUTE_PARSE: %s:%d: WAIT <NAME> <timeout_vblanks>, a decimal >= 1\n",
+                            path, lineno);
+                    return -1;
+                }
             }
         } else if (strcmp(tok, "PRESS_UNTIL") == 0 || strcmp(tok, "PRESS_WHILE") == 0) {
             /* The boot prefix is the one part of a route that genuinely has to repeat an
@@ -764,9 +814,9 @@ static int route_parse_line(char *line, int lineno, const char *path) {
                                 "(%s)\n", path, lineno, tok, m, route_button_names());
                 return -1;
             }
-            st.b = (uint32_t)strtoul(w, NULL, 10);
-            st.c = (uint32_t)strtoul(p, NULL, 10);
-            st.d = (uint32_t)strtoul(t, NULL, 10);
+            if (route_count(w, &st.b, path, lineno, tok) != 0 || route_count(p, &st.c, path, lineno, tok) != 0 ||
+                route_count(t, &st.d, path, lineno, tok) != 0)
+                return -1;
             if (st.reads) {
                 /* The width and the period are reads; the timeout is still vblanks, so the
                  * one comparison that would mix the two units is not made. */
@@ -806,9 +856,9 @@ static int route_parse_line(char *line, int lineno, const char *path) {
                                 "(%s)\n", path, lineno, m, route_button_names());
                 return -1;
             }
-            st.b = (uint32_t)strtoul(w, NULL, 10);
-            st.c = (uint32_t)strtoul(p, NULL, 10);
-            st.d = (uint32_t)strtoul(t, NULL, 10);
+            if (route_count(w, &st.b, path, lineno, tok) != 0 || route_count(p, &st.c, path, lineno, tok) != 0 ||
+                route_count(t, &st.d, path, lineno, tok) != 0)
+                return -1;
             if (st.reads) {
                 if (st.b < 1 || st.c <= st.b || st.d < 1) {
                     fprintf(stderr, "ROUTE_PARSE: %s:%d: PRESS_UNTIL_NID with READS needs width >= 1, period > "
@@ -829,7 +879,7 @@ static int route_parse_line(char *line, int lineno, const char *path) {
                         path, lineno, m, route_button_names());
                 return -1;
             }
-            st.b = (uint32_t)strtoul(w, NULL, 10);
+            if (route_count(w, &st.b, path, lineno, tok) != 0) return -1;
             if (st.b < 1) { fprintf(stderr, "ROUTE_PARSE: %s:%d: PRESS width must be >= 1\n", path, lineno); return -1; }
         } else if (strcmp(tok, "WAIT_NID") == 0) {
             st.op = ROUTE_OP_NID;
@@ -845,7 +895,7 @@ static int route_parse_line(char *line, int lineno, const char *path) {
                         path, lineno, nid);
                 return -1;
             }
-            st.a = (uint32_t)strtoul(to, NULL, 10);
+            if (route_count(to, &st.a, path, lineno, tok) != 0) return -1;
             if (st.a < 1u) {
                 fprintf(stderr, "ROUTE_PARSE: %s:%d: WAIT_NID timeout must be >= 1 vblank\n", path, lineno);
                 return -1;
@@ -853,9 +903,10 @@ static int route_parse_line(char *line, int lineno, const char *path) {
         } else if (strcmp(tok, "DELAY") == 0) {
             st.op = ROUTE_OP_DELAY;
             char *n = strtok(NULL, " \t\r\n");
-            long v = n ? atol(n) : -1;
-            if (v < 0) { fprintf(stderr, "ROUTE_PARSE: %s:%d: DELAY <vblanks>\n", path, lineno); return -1; }
-            st.a = (uint32_t)v;
+            if (route_parse_u32(n, 0u, UINT32_MAX, &st.a) != 0) {
+                fprintf(stderr, "ROUTE_PARSE: %s:%d: DELAY <vblanks>, a decimal >= 0\n", path, lineno);
+                return -1;
+            }
         } else if (strcmp(tok, "END") == 0) {
             st.op = ROUTE_OP_END;
         } else {
@@ -868,6 +919,17 @@ static int route_parse_line(char *line, int lineno, const char *path) {
     return 0;
 }
 
+/* The settings a route file may set (SIGGRID, TOLERANCE, SAMPLE_EVERY), the NID watch and the
+ * last screen seen, back at their defaults: a route file that leaves one unset gets the default,
+ * never the value a previously loaded file chose. */
+static void route_file_settings_reset(void) {
+    s_route_cols = 12; s_route_rows = 8;
+    s_route_tol = 12;
+    s_route_sample_every = 20;
+    route_nid_watch(0);
+    snprintf(s_route_seen, sizeof s_route_seen, "no screen was observed at all");
+}
+
 /* Discard every loaded route. Only the executable regression tests call this; a run loads
  * its route once. */
 void sr_route_reset(void) {
@@ -876,9 +938,7 @@ void sr_route_reset(void) {
     s_route_step_start = 0;
     s_route_step_started = 0;
     s_route_state = ROUTE_OFF;
-    s_route_cols = 12; s_route_rows = 8;
-    s_route_tol = 12;
-    s_route_sample_every = 20;
+    route_file_settings_reset();
     s_route_widths_reads = 0;
     s_route_widths_set = 0;
     s_route_keys = 0;
@@ -886,9 +946,7 @@ void sr_route_reset(void) {
     s_route_while_seen = 0;
     s_route_last_attempt = 0;
     s_route_have_attempt = 0;
-    route_nid_watch(0);
     route_until_nid_arm(0, 0u);
-    snprintf(s_route_seen, sizeof s_route_seen, "no screen was observed at all");
     s_route_loaded = 0;
     sr_input_reset(&s_input);
     s_route_legacy_nseg = s_route_legacy_pos = s_route_legacy_reported = 0;
@@ -904,6 +962,7 @@ int sr_route_load(const char *path) {
     s_route_ncp = s_route_nsteps = s_route_nlegacy = 0;
     s_route_pc = 0;
     s_route_step_started = 0;
+    route_file_settings_reset();
     route_until_nid_arm(0, 0u);
     s_route_keys = 0;
     s_route_stick_digital_noted = 0;
@@ -924,7 +983,9 @@ int sr_route_load(const char *path) {
     }
     fp = fopen(path, "r");
     if (!fp) {
-        fprintf(stderr, "ROUTE_PARSE: cannot open route file '%s'\n", path);
+        /* A named route that cannot be read must not become an unscripted run on the default
+         * START pulse: the run fails like any other unusable route file. */
+        route_fail("cannot open route file '%s'; refusing to run without the route it names", path);
         return 0;
     }
     while (fgets(line, sizeof line, fp)) {
@@ -939,7 +1000,8 @@ int sr_route_load(const char *path) {
     if (s_route_nsteps > 0) {
         for (int i = 0; i < s_route_nsteps; i++) {
             RouteStep *st = &s_route_prog[i];
-            if ((st->op == ROUTE_OP_WAIT || st->op == ROUTE_OP_EXPECT) && route_find(st->name) < 0) {
+            if ((st->op == ROUTE_OP_WAIT || st->op == ROUTE_OP_EXPECT || st->op == ROUTE_OP_UNTIL ||
+                 st->op == ROUTE_OP_WHILE) && route_find(st->name) < 0) {
                 fprintf(stderr, "ROUTE_PARSE: %s:%d: no CHECKPOINT defines '%s'\n", path, st->line, st->name);
                 route_fail("route file '%s' names undefined checkpoints", path);
                 return 0;
@@ -1023,6 +1085,8 @@ int sr_route_load(const char *path) {
         route_fail("route file '%s' defines checkpoints but no steps", path);
         return 0;
     }
+    /* Nothing at all, for the same reason: an empty or comment-only file is not a route. */
+    route_fail("route file '%s' has no steps; refusing to run it as an unscripted run", path);
     return 0;
 }
 
@@ -1132,6 +1196,8 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
     for (int guard = 0; guard <= ROUTE_MAX_STEPS; guard++) {
         if (s_route_pc >= s_route_nsteps) {
             s_route_state = ROUTE_DONE;
+            route_nid_watch(0);
+            route_until_nid_arm(0, 0u);
             fprintf(stderr, "ROUTE_OK: %d steps completed by vblank %u\n", s_route_nsteps, v);
             return keys;
         }
@@ -1308,6 +1374,8 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
         }
         case ROUTE_OP_END:
             s_route_state = ROUTE_DONE;
+            route_nid_watch(0);
+            route_until_nid_arm(0, 0u);
             fprintf(stderr, "ROUTE_OK: %d steps completed by vblank %u\n", s_route_pc + 1, v);
             return keys;
         default:
@@ -1746,6 +1814,7 @@ static void hle_state_sample_refuse(const char *path, int line, const char *why)
     sr_perf_shutdown();
     sr_profile_dump_final();
     SR_VERIFY_REPORT_NOW();
+    sr_trace_close();   /* _Exit flushes no stdio stream: land the SR_TRACE tail */
     fflush(stderr);
     _Exit(2);
 }
@@ -1762,7 +1831,9 @@ static void hle_state_sample_init(void) {
         line++;
         char *hash = strchr(text, '#');
         if (hash) *hash = '\0';
-        char *tokens[3 + HLE_SAMPLE_MAX_OFFSETS + 1];
+        /* Exactly room for label, type, address and HLE_SAMPLE_MAX_OFFSETS offsets, so one more
+         * token is refused before values[] and offsets[] could be written past their ends. */
+        char *tokens[3 + HLE_SAMPLE_MAX_OFFSETS];
         int n = 0;
         for (char *t = strtok(text, " \t\r\n"); t; t = strtok(NULL, " \t\r\n")) {
             if (n == (int)(sizeof(tokens) / sizeof(tokens[0]))) hle_state_sample_refuse(path, line, "too many offsets");
@@ -2023,8 +2094,12 @@ static void ge_call_guest(CpuState *s, uint32_t fn, uint32_t a0, uint32_t a1, ui
      * there is no correct stack to hand the callee, and dispatching onto a frame
      * another owner holds is the defect this replaced. */
     if (!sr_nested_frame_acquire(sched_current_uid(), &frame_sp, &frame)) {
+        /* The callback cannot run, and the guest may be waiting on what it would have done; a
+         * run that carried on would hang or drop a frame with nothing to say why. Stop by name. */
         fprintf(stderr, "GE_CALL_GUEST: fn=0x%08x refused -- no nested guest-call frame "
-                        "available (cur_uid=0x%x)\n", fn, sched_current_uid());
+                        "available (cur_uid=0x%x); stopping the run\n", fn, sched_current_uid());
+        s->flow_kind = SR_FLOW_FATAL;
+        s->flow_target = fn;
         return;
     }
     if (ge_log_on())
@@ -2131,8 +2206,12 @@ static void ge_finish_callback_run(CpuState *s, uint32_t cbid, uint32_t finish_i
     }
     if (ge_log_on())
         fprintf(stderr, "GE_FINISH_CB: cbid=%u id=0x%04x fn=0x%08x arg=0x%08x\n",
-                cbid, finish_id, cb->finish_func, cb->finish_arg ? cb->finish_arg : user_arg);
-    ge_call_guest(s, cb->finish_func, finish_id, cb->finish_arg ? cb->finish_arg : user_arg, cbid);
+                cbid, finish_id, cb->finish_func, cb->finish_arg);
+    /* The callback gets the argument it was registered with (sceGeSetCallback's finish_arg),
+     * 0 included. user_arg is sceGeListEnQueue's optional SceGeListArgs pointer: it is not a
+     * callback argument, and handing it on gave a callback registered with 0 an address. */
+    (void)user_arg;
+    ge_call_guest(s, cb->finish_func, finish_id, cb->finish_arg, cbid);
     if (ge_log_on())
         fprintf(stderr, "GE_FINISH_CB: callback fn=0x%08x returned\n", cb->finish_func);
 }

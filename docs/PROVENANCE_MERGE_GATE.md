@@ -131,8 +131,9 @@ The boundary is enforced structurally, not by convention:
 ## Rule tiers
 
 **Tier A — absolute, whole tree, never grandfathered.** `LEDGER_SCHEMA`,
-`LEDGER_COVERAGE`, `CONTENT_MISMATCH`, `RECORD_ABSENT`, `RECORD_NOT_COVERING`,
-unapproved `POLICY_SUBSTITUTION`, `EXPORT_LEDGER_DIGEST_STALE`,
+`LEDGER_COVERAGE`, `CONTENT_MISMATCH`, `TRUSTED_RECORD_UNRESOLVED`,
+`TRUSTED_SCOPE_VIOLATION`, `INCLUDED_PATH_UNTRACKED`, `CLASSIFICATION_DOWNGRADE`,
+unapproved `POLICY_SUBSTITUTION`, `EXPORT_FIELD_MISMATCH`, `MERGE_BASE_STALE`,
 `TRUSTED_WORKFLOW_WEAKENED`, `CI_CONTEXT_COLLISION`.
 
 An externally blessed candidate policy may remove only the exact path-list
@@ -521,7 +522,7 @@ record for every path this repository attests. Two are outstanding: the
 [`docs/provenance/GUEST_INTERP_ATTESTATION.md`](provenance/GUEST_INTERP_ATTESTATION.md))
 and an entry for `tools/provenance_attest_verify.py` on the record the public
 ledger names `provenance-tooling`. Until both land, the gate reports
-`RECORD_ABSENT` / `CLAIM_UNBACKED` and fails, by design.
+`TRUSTED_RECORD_UNRESOLVED` / `CLAIM_UNBACKED` and fails, by design.
 
 **2. Repository secret.** `PROVENANCE_AUTHORITY_TOKEN`, a fine-grained personal
 access token scoped to the private authority repository only, with

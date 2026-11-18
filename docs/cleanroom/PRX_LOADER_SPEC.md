@@ -1,4 +1,4 @@
-# Clean-room behaviour specification — runtime PSP module (PRX) loader
+# Behaviour specification — runtime PSP module (PRX) loader
 
 Status: spec — no code in this document. Written under the campaign protocol
 (`../INDEPENDENCE_CAMPAIGN.md` §5) as a **spec-session** output for rewrite unit
@@ -120,8 +120,8 @@ as the start routine [C4]. An `e_entry` of
 ### 3.4 Module information block
 
 1. The module-information block (`SceModuleInfo`) is located by the first loadable
-   segment's `p_paddr`: for relocatable modules, `p_paddr` holds the block's file
-   offset relative to that segment, so its guest address is `segment 0 address +
+   segment's `p_paddr`: for relocatable modules, `p_paddr` holds the block's absolute
+   file offset in the input, so its guest address is `segment 0 address +
    ((p_paddr & 0x1FFFFFFF) − p_offset(0))`; the top three bits are address-space bits
    (a kernel module sets `0x80000000`), masked as the start-entry rule in
    `src/rt/prx_loader.h` masks them [C3], [C4]. When a section named `.rodata.sceModuleInfo`
@@ -296,7 +296,7 @@ Decryption/decompression; GP-relative relocation; firmware version checks; modul
 attribute enforcement (kernel/user); the firmware's own memory placement policy
 (the base is an input); resolving imports.
 
-## 5. Clean-room constraints for this item
+## 5. Independence constraints
 
 - The implementation session receives only the §0 allow-list. It must not read
   `tools/prxload.py`, `tools/imports.py`, any other loader in history, or the public

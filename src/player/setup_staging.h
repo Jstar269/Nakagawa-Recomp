@@ -44,15 +44,8 @@ typedef struct {
  * .xb/.xbN archive. If the user's standard PPSSPP dump locations contain the
  * three known already-decrypted support PRXs, they are copied into
  * `EXTRACTED/decrypted/` as an optional local bridge; no decryption is
- * performed. */
-NkResult player_stage_game(const char *iso_path, const char *staging_root,
-                           const char *const *loose_content_roots,
-                           size_t loose_content_root_count,
-                           const PlayerStageCallbacks *callbacks,
-                           char *error_message, size_t error_message_size);
-
-/* Summary-bearing variant used by the native player. The legacy entry point
- * above remains a wrapper for callers that only need the result. */
+ * performed. `summary` may be NULL. The player reaches this only through
+ * player_stage_title below; the native tests call it directly. */
 NkResult player_stage_game_with_summary(const char *iso_path,
                                         const char *staging_root,
                                         const char *const *loose_content_roots,
@@ -62,9 +55,10 @@ NkResult player_stage_game_with_summary(const char *iso_path,
                                         char *error_message,
                                         size_t error_message_size);
 
-/* Remove a staging tree created by player_stage_game after a failed or
- * cancelled attempt. The function only accepts a basename beginning with
- * `.staging_`, so callers cannot accidentally hand it a general data root. */
+/* Remove a staging tree created by player_stage_game_with_summary after a
+ * failed or cancelled attempt. The function only accepts a basename beginning
+ * with `.staging_`, so callers cannot accidentally hand it a general data
+ * root. */
 bool player_stage_discard(const char *staging_root);
 
 /* One title's staging request. Every route that installs a disc's files (the
@@ -102,18 +96,23 @@ typedef enum {
  *
  *   1. take the title's staging lock (a second staging of the same title, in
  *      this or another process, is refused rather than allowed to share files);
- *   2. clear what an interrupted earlier attempt left behind (its unpromoted
- *      `.staging_<disc>` tree or a replaced tree it did not finish removing);
+ *   2. when `games/<disc>` is missing, put back the tree an interrupted
+ *      replacement set aside: the new complete tree when its staging record
+ *      matches this request, otherwise the previous tree;
  *   3. reuse an existing `games/<disc>` tree when its staging record matches
- *      this request and every required folder is present;
- *   4. otherwise extract into `.staging_<disc>`, validate it, write its staging
- *      record, and promote it with one directory rename. An older or
+ *      this request and every required folder is present (a leftover beside
+ *      it is removed when it can be, and never blocks the reuse);
+ *   4. otherwise clear what an interrupted earlier attempt left behind (its
+ *      unpromoted `.staging_<disc>` tree or a replaced tree it did not finish
+ *      removing), extract into `.staging_<disc>`, validate it, write its
+ *      staging record, and promote it with one directory rename. An older or
  *      incomplete tree is replaced only after the new one is complete, and is
  *      restored if the replacing rename fails.
  *
  * An interruption at any point leaves either the previous tree or the new
- * complete tree at `games/<disc>`, never a partial one; the next call finishes
- * the cleanup and stages again. On success `prepared_root` receives the
+ * complete tree, never a partial one, at `games/<disc>` or set aside for the
+ * next call to put back there; that call finishes the cleanup and stages
+ * again when it must. On success `prepared_root` receives the
  * promoted directory and `summary` the extracted counts (restored from the
  * staging record when the tree was reused). On failure `message` holds a
  * bracketed boundary code, a plain sentence, and what to do next. */

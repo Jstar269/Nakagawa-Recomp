@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests" / "fixtures" / "showcase"))
 
+import betterleaks_canary  # noqa: E402
 import ci_required  # noqa: E402
 import ci_paths  # noqa: E402
 import ci_test_shards  # noqa: E402
@@ -168,6 +169,14 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertIn("--require-hashes", text)
         self.assertIn("python tools/mypy_baseline.py --scope issue-1391", text)
         self.assertIn("python tools/mypy_baseline.py", text)
+        # One shard runs it: the baseline checks the whole tools/ tree whatever the shard,
+        # and shard 0 is in every shard list the classifier exports.
+        conditions = [line.strip() for line in step if line.strip().startswith("if:")]
+        self.assertEqual(conditions, ["if: matrix.shard == 0"])
+        for paths in (["tools/ci_paths.py"], ["Makefile"], ["docs/HLE_COVERAGE.md"]):
+            with self.subTest(paths=paths):
+                shards = json.loads(ci_paths.classify(paths)["python_shards"])
+                self.assertEqual(shards[0], 0)
         config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
         self.assertRegex(config, r"(?ms)- id: mypy-tools\n.*?entry: python tools/mypy_baseline\.py --scope issue-1391\n")
         self.assertIn("files: ^tools/.*\\.py$", config)
@@ -361,7 +370,9 @@ class PublicCiWiringTests(unittest.TestCase):
         """ge_gpu.c's coherence selftest ran on no hosted job, so a #1481 regression went unseen.
 
         It needs a Vulkan device and a window: the step selects lavapipe and runs under Xvfb as
-        the capture selftest does, and a Make failure (an exit 77 skip included) fails it.
+        the capture selftest does, and a Make failure fails it. An exit 77 from a plain run fails
+        it too, but the recipe itself passes three kinds of SKIP, which the step's comment and
+        docs/CI.md must name rather than promise that every skip fails.
         """
         native_tools = _ci_job_blocks()["native_tools"]
         step_name = "Run GPU coherence selftest on lavapipe"
@@ -370,8 +381,7 @@ class PublicCiWiringTests(unittest.TestCase):
         assert step is not None
         text = "\n".join(step)
         self.assertIn("set -euo pipefail", text)
-        self.assertIn("-name 'lvp_icd*.json'", text)
-        self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
+        self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text)
         self.assertIn('xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11', text)
         # The VRAM viewer identity test (#314) needs the same device and window, so it runs in
         # this step, after the coherence selftest.
@@ -392,6 +402,57 @@ class PublicCiWiringTests(unittest.TestCase):
         )
         docs = (ROOT / "docs" / "CI.md").read_text(encoding="utf-8")
         self.assertIn("`gpu-coherence-selftest`", docs)
+        # The recipe turns these exits 77 into SKIP lines and carries on with status 0.
+        self.assertIn('echo "SKIP gpu-coherence-selftest gpu-timestamps (exit 77', makefile)
+        self.assertIn('echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77', makefile)
+        self.assertIn("ge-first-bad-draw-selftest GE_FBD_SKIP_STATUS=0", makefile)
+        self.assertIn("a device that refuses the interlock prints a SKIP line", makefile)
+        lines = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8").splitlines()
+        at = lines.index(f"      - name: {step_name}")
+        start = at
+        while lines[start - 1].lstrip().startswith("#"):
+            start -= 1
+        comment = " ".join(line.strip().lstrip("#").strip() for line in lines[start:at])
+        flat_docs = " ".join(docs.split())
+        for where, text in (("ci.yml comment", comment), ("docs/CI.md", flat_docs)):
+            with self.subTest(where=where):
+                self.assertNotIn("an exit 77 skip fails the step like the capture selftest's", text)
+                self.assertNotIn("blend cases against the software GE, where an exit 77 skip also fails", text)
+                for named in ("gpu-timestamps", "interlock", "ge-first-bad-draw-selftest"):
+                    self.assertIn(named, text)
+
+    def test_lavapipe_is_found_once_per_job_and_every_vulkan_step_selects_it(self) -> None:
+        """The find / fail-if-missing / export block was pasted into seven steps.
+
+        One setup step per job finds the ICD the apt step installed, fails the job if it is
+        missing and records the path; each Vulkan step exports VK_ICD_FILENAMES from it, so no
+        other step's Vulkan loader sees a changed environment, and an unset value fails the step.
+        """
+        select = "Select the lavapipe Vulkan ICD"
+        blocks = _ci_job_blocks()
+        for job in ("native_tools", "c_coverage"):
+            with self.subTest(job=job):
+                block = blocks[job]
+                self.assertEqual("\n".join(block).count("-name 'lvp_icd*.json'"), 1,
+                                 f"{job} must find the lavapipe ICD in one step")
+                step = _uncommented("\n".join(_ci_step(block, select) or []))
+                self.assertIn("set -euo pipefail", step)
+                self.assertIn(
+                    "lvp_icd=\"$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' "
+                    "-print -quit)\"", step)
+                self.assertIn("mesa-vulkan-drivers did not install a lavapipe ICD", step)
+                self.assertIn('echo "NK_LAVAPIPE_ICD=$lvp_icd" >> "$GITHUB_ENV"', step)
+                self.assertNotIn("if:", step)
+                names = [line.strip()[len("- name: "):] for line in block
+                         if line.startswith("      - name: ")]
+                vulkan = [name for name in names
+                          if "VK_ICD_FILENAMES" in _uncommented("\n".join(_ci_step(block, name) or []))]
+                self.assertTrue(vulkan, f"{job} runs no Vulkan step")
+                for name in vulkan:
+                    text = _uncommented("\n".join(_ci_step(block, name) or []))
+                    self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text, name)
+                    self.assertIn("set -euo pipefail", text, name)
+                    self.assertLess(_ci_step_index(block, select), _ci_step_index(block, name), name)
 
     def test_fsr3_pass_selftest_runs_on_lavapipe_and_a_skip_fails(self) -> None:
         """The FSR 3 passes run under the validation layer on lavapipe; a skip must not pass."""
@@ -401,7 +462,7 @@ class PublicCiWiringTests(unittest.TestCase):
         assert step is not None
         text = "\n".join(step)
         self.assertIn("set -euo pipefail", text)
-        self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
+        self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text)
         self.assertRegex(text, r"(?m)^\s+NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest$")
         self.assertNotIn("continue-on-error", text)
 
@@ -413,7 +474,7 @@ class PublicCiWiringTests(unittest.TestCase):
         assert step is not None
         text = "\n".join(step)
         self.assertIn("set -euo pipefail", text)
-        self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
+        self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text)
         self.assertRegex(
             text, r'(?m)^\s+NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"$')
         self.assertNotIn("continue-on-error", text)
@@ -1167,6 +1228,8 @@ _NATIVE_SERIAL_GATES = {
         "CC=gcc python tools/codegen_gate.py build/microtest_b.elf build/microtest_b.trace build/verify",
     "Run synthetic framebuffer-memory parity checks (A/B framebuffer diffs)":
         "python tools/ppmdiff.py --threshold 3 build/verify/snap build/verify/gold",
+    "Run the analysis IR module gate on the showcase PRXs":
+        "run: python -m unittest -v tools.test_analysis_ir.AnalysisIrModuleGateTests",
 }
 # Steps every part repeats: the toolchain and library setup and the build directory.
 _NATIVE_EVERY_PART = (
@@ -1181,6 +1244,7 @@ _NATIVE_EVERY_PART = (
     "Restore the pinned SDL3_ttf install",
     "Install and verify pinned SDL3_ttf and shaping libraries",
     "Install PSPDEV from the checked-in lock",
+    "Select the lavapipe Vulkan ICD",
     "Create build directory",
 )
 # Steps with their own condition: the cache-miss library builds (every part) and the
@@ -1861,7 +1925,12 @@ class PublicExportJobTests(unittest.TestCase):
         "Run compact import/publication smoke": "run: python tools/import_audit_gate.py",
         "Run provenance record and disposition gap check": "run: python tools/provenance_record_gap.py --check",
     }
-    MAIN_SMOKE_CONDITION = "if: ${{ needs.classify.outputs.run_main_smoke == 'true' }}"
+    # Skipped when native_tools runs, whose core part runs the same two commands
+    # (test_main_smoke_commands_run_once_whenever_the_smoke_is_due).
+    MAIN_SMOKE_CONDITION = (
+        "if: ${{ needs.classify.outputs.run_main_smoke == 'true' && "
+        "!(needs.classify.outputs.allow_substantive == 'true' && needs.classify.outputs.run_native == 'true') }}"
+    )
     MARKDOWN_STEPS = {
         "Set up Node.js": 'node-version: "26.13.1"',
         "Lint repository Markdown": "run: npx --yes markdownlint-cli2@0.24.1",
@@ -1895,6 +1964,41 @@ class PublicExportJobTests(unittest.TestCase):
         for name in self.HYGIENE_STEPS:
             with self.subTest(step=name):
                 self.assertEqual(self._conditions(self.blocks["hygiene"], name), [])
+
+    def test_main_smoke_commands_run_once_whenever_the_smoke_is_due(self) -> None:
+        """Hygiene's smoke steps and native_tools' core part never both run, and never both skip."""
+        conditions = {
+            condition
+            for name in self.MAIN_SMOKE_STEPS
+            for condition in self._conditions(self.blocks["hygiene"], name)
+        }
+        self.assertEqual(len(conditions), 1, conditions)
+        hygiene_if = _matched(re.fullmatch(r"if: \$\{\{(.*)\}\}", conditions.pop())).group(1)
+        native_if = _job_if(self.blocks["native_tools"])
+        core = "\n".join(self.blocks["native_tools"])
+        self.assertIn("part: [core, translation, player]", core)
+        native_steps = [
+            "\n".join(_ci_step(self.blocks["native_tools"], name) or [])
+            for name in self._step_names(self.blocks["native_tools"])
+        ]
+        for name, command in self.MAIN_SMOKE_STEPS.items():
+            with self.subTest(step=name):
+                running = [step for step in native_steps if f"\n        {command}" in step]
+                self.assertEqual(len(running), 1, f"native_tools no longer runs {command!r} once")
+                self.assertIn("if: matrix.part == 'core'", running[0])
+        for smoke in ("true", "false"):
+            for substantive in ("true", "false"):
+                for native in ("true", "false"):
+                    outputs = {"run_main_smoke": smoke, "allow_substantive": substantive, "run_native": native}
+                    context = {"needs": {"classify": {"result": "success", "outputs": outputs},
+                                         "public_export": {"result": "success"}}}
+                    with self.subTest(**outputs):
+                        in_hygiene = _actions_eval(hygiene_if, context)
+                        in_native = _actions_eval(native_if, context)
+                        if smoke == "true":
+                            self.assertNotEqual(in_hygiene, in_native)
+                        else:
+                            self.assertFalse(in_hygiene)
 
     def test_folded_main_smoke_and_markdown_steps_keep_their_commands_and_conditions(self) -> None:
         hygiene = self.blocks["hygiene"]
@@ -1935,8 +2039,12 @@ class PublicExportJobTests(unittest.TestCase):
         self.assertFalse(any("--all" in scan for scan in scans))
         self.assertIn("BASE_SHA: ${{ github.event.pull_request.base.sha }}", text)
         self.assertIn('if [ -n "$BASE_SHA" ]; then', text)
-        self.assertIn('--log-opts="--full-history ${BASE_SHA}..HEAD"', scans[0])
-        self.assertIn('--log-opts="--full-history HEAD"', scans[1])
+        # The canary proves a merge-only value is found with these exact log options, and
+        # `git log -p` gives a merge commit no patch without `--diff-merges`.
+        options = betterleaks_canary.HISTORY_LOG_OPTIONS
+        self.assertIn("--diff-merges=first-parent", options)
+        self.assertIn(f'--log-opts="{options} ${{BASE_SHA}}..HEAD"', scans[0])
+        self.assertIn(f'--log-opts="{options} HEAD"', scans[1])
 
     def test_pre_commit_bootstrap_uses_a_hash_locked_closure(self) -> None:
         step = _ci_step(self.blocks["hygiene"], "Install pre-commit")
@@ -2209,6 +2317,7 @@ class CoverageWiringTests(unittest.TestCase):
         "Build pinned SDL3_ttf with vendored FreeType and HarfBuzz",
         "Install and verify pinned SDL3_ttf and shaping libraries",
         "Install PSPDEV from the checked-in lock",
+        "Select the lavapipe Vulkan ICD",
     )
     #: Every native_tools gate is either measured or named here with the reason it is not, so a
     #: gate added later fails this test until it is classified (docs/CI.md, "Coverage").
@@ -2271,6 +2380,7 @@ class CoverageWiringTests(unittest.TestCase):
         "Generate golden oracle trace (Gate B)": "a codegen gate",
         "Run recompiler codegen gate (Gate B — Allegrex extensions)": "a codegen gate",
         "Run synthetic framebuffer-memory parity checks (A/B framebuffer diffs)": "a codegen gate",
+        "Run the analysis IR module gate on the showcase PRXs": "a Python test",
     }
 
     def setUp(self) -> None:
@@ -3859,6 +3969,53 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
             ],
         )
 
+    def _concurrency(self) -> tuple[str, str]:
+        lines = self.ci.splitlines()
+        start = lines.index("concurrency:")
+        body = {}
+        for line in lines[start + 1:]:
+            if line and not line.startswith(" "):
+                break
+            match = re.match(r"^  (group|cancel-in-progress): (.*)$", line)
+            if match:
+                body[match.group(1)] = match.group(2)
+        group = _matched(re.fullmatch(r"ci-\$\{\{ github\.workflow \}\}-\$\{\{(.*)\}\}", body["group"]))
+        return group.group(1).strip(), body["cancel-in-progress"]
+
+    def test_runs_on_main_never_cancel_each_other(self) -> None:
+        """A landing must not cancel the nightly full-tier run, nor a schedule a push's main smoke."""
+        expression, cancel = self._concurrency()
+        self.assertEqual(cancel, "true")
+        main_runs = [
+            ("push", 101), ("push", 102), ("schedule", 103), ("workflow_dispatch", 104), ("merge_group", 105),
+        ]
+        groups = [
+            _actions_value(expression, {"github": {"event_name": event, "ref": "refs/heads/main",
+                                                   "run_id": run_id, "event": {}}})
+            for event, run_id in main_runs
+        ]
+        self.assertEqual(len(set(groups)), len(groups), groups)
+        # A pull request's runs still share one group, so a new head supersedes the old run.
+        pull = [
+            _actions_value(expression, {"github": {"event_name": "pull_request", "ref": "refs/pull/7/merge",
+                                                   "run_id": run_id,
+                                                   "event": {"pull_request": {"number": 7}}}})
+            for run_id in (201, 202)
+        ]
+        self.assertEqual(pull[0], pull[1])
+        # A run's own group cannot collide with a pull request number.
+        collide = _actions_value(expression, {"github": {"event_name": "push", "run_id": 7, "event": {}}})
+        self.assertNotEqual(collide, pull[0])
+
+    def test_a_merge_group_runs_the_full_test_tier_like_a_manual_run(self) -> None:
+        """The header promises a group the same complete matrix as a manual run, test tier included."""
+        python_tools = "\n".join(_ci_job_blocks()["python_tools"])
+        line = _matched(re.search(r"NK_TEST_TIER: \$\{\{(.*)\}\}", python_tools)).group(1)
+        for event, tier in (("schedule", "full"), ("workflow_dispatch", "full"), ("merge_group", "full"),
+                            ("pull_request", "pr"), ("push", "pr")):
+            with self.subTest(event=event):
+                self.assertEqual(_actions_value(line, {"github": {"event_name": event}}), tier)
+
     def test_event_conditions_only_select_the_export_and_python_tier(self) -> None:
         blocks = _ci_job_blocks()
         export = "\n".join(blocks["public_export"])
@@ -4728,6 +4885,28 @@ class ClusterFuzzLiteWiringTests(unittest.TestCase):
             with self.subTest(header=header):
                 self.assertIn(f"src/core/{header}", self._paths())
 
+    def test_the_image_copies_only_the_fuzzed_inputs(self) -> None:
+        """Docker uses the checkout as the build context, so `COPY .` bakes whatever a local
+        working tree holds (build/, logs/, oracle/, place_game_here/, keys/) into an image
+        layer; only the files the fuzz target compiles may enter it."""
+        dockerfile = (ROOT / ".clusterfuzzlite" / "Dockerfile").read_text(encoding="utf-8")
+        copy_lines = [line for line in dockerfile.splitlines() if line.startswith("COPY ")]
+        self.assertTrue(copy_lines, dockerfile)
+        copied: set[str] = set()
+        for line in copy_lines:
+            sources = line.split()[1:-1]
+            self.assertNotIn(".", sources, "the image must not copy the whole build context")
+            copied.update(sources)
+        build = (ROOT / ".clusterfuzzlite" / "build.sh").read_text(encoding="utf-8")
+        needed = set(re.findall(r"-c (\S+\.c) ", build))
+        needed |= {f"src/core/{header}" for header
+                   in re.findall(r'#include "([^"]+)"',
+                                 (ROOT / "src" / "core" / "nk_json.c").read_text(encoding="utf-8"))}
+        self.assertTrue(needed)
+        for source in sorted(needed):
+            with self.subTest(source=source):
+                self.assertIn(source, copied, f"{source} must be copied into the image")
+
     def test_nightly_and_manual_runs_fuzz_without_a_diff(self) -> None:
         on_text = "\n".join(self.on_block)
         self.assertIn("  schedule:", on_text)
@@ -4843,6 +5022,201 @@ class PolicyDeltaLookupWiringTests(unittest.TestCase):
                 self.assertIn('policy_dir="${flat_policy_dir}"', text)
                 self.assertIn('test -s "${RUNNER_TEMP}/trusted/candidate-policy.json"', text)
                 self.assertIn('test -s "${RUNNER_TEMP}/trusted/policy-delta-authority.json"', text)
+
+    # The stand-in for `gh api`: it answers each nested (both digests) or flat (candidate digest
+    # only) record with its content, nothing, or gh's own error line for an HTTP status.
+    GH_STUB = (
+        '#!/bin/bash\nfor url; do :; done\necho "$url" >> "$NK_TEST_LOG"\n'
+        'case "$url" in\n'
+        '  *"/$NK_TEST_BASE/"*candidate-policy.json*) answer="$NK_TEST_NESTED_CANDIDATE" ;;\n'
+        '  *"/$NK_TEST_BASE/"*) answer="$NK_TEST_NESTED_AUTHORITY" ;;\n'
+        '  *) answer="$NK_TEST_FLAT" ;;\n'
+        'esac\n'
+        'case "$answer" in\n'
+        '  ok) echo "{\\"record\\": \\"$url\\"}" ;;\n'
+        '  empty) ;;\n'
+        '  *) echo "gh: request failed (HTTP $answer)" >&2; exit 1 ;;\n'
+        'esac\n'
+    )
+
+    def _legacy_lookup(self, nested_candidate: str, nested_authority: str,
+                       flat: str) -> tuple[int, str, list[str], str]:
+        """Run the workflows' own V1/V2 lookup against the stub; return its status, outputs, URLs and stderr."""
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        snippets = set()
+        for name in self.WORKFLOWS:
+            text = _workflow_text(name)
+            begin, end = "# legacy-policy-delta-lookup:begin", "# legacy-policy-delta-lookup:end"
+            self.assertEqual((text.count(begin), text.count(end)), (1, 1), name)
+            snippets.add(textwrap.dedent(text[text.index(begin):text.index(end)]))
+        self.assertEqual(len(snippets), 1, "the two lookups must not drift apart")
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        scratch = Path(holder.name)
+        (scratch / "bin").mkdir()
+        (scratch / "trusted").mkdir()
+        stub = scratch / "bin" / "gh"
+        stub.write_bytes(self.GH_STUB.encode("utf-8"))
+        stub.chmod(0o755)
+        for name in ("log", "output"):
+            (scratch / name).write_text("", encoding="utf-8")
+        env = {
+            **os.environ,
+            "NK_TEST_STUBS": _bash_path(scratch / "bin"), "NK_TEST_LOG": _bash_path(scratch / "log"),
+            "NK_TEST_BASE": "b" * 64, "NK_TEST_NESTED_CANDIDATE": nested_candidate,
+            "NK_TEST_NESTED_AUTHORITY": nested_authority, "NK_TEST_FLAT": flat,
+            "RUNNER_TEMP": _bash_path(scratch), "GITHUB_OUTPUT": _bash_path(scratch / "output"),
+            "TRUSTED_REPO": "example/authority", "authority_sha": "a" * 40,
+            "candidate_policy_sha": "c" * 64, "base_policy_sha": "b" * 64,
+        }
+        script = 'export PATH="$NK_TEST_STUBS:$PATH"\nset -euo pipefail\n' + snippets.pop()
+        done = subprocess.run([bash, "-c", script], capture_output=True, text=True, env=env, timeout=60, check=False)
+        return (done.returncode, (scratch / "output").read_text(encoding="utf-8"),
+                (scratch / "log").read_text(encoding="utf-8").splitlines(), done.stderr)
+
+    def test_only_a_confirmed_absence_of_the_nested_record_takes_the_flat_layout(self) -> None:
+        """Failing-before (audit 2026-11-17 F-324e15c6): any error on a nested fetch (a 5xx, a rate-limit 403,
+        a network failure) fell through to the flat record, so a transient error fetched a different record
+        and the job reported a misleading verdict instead of the lookup error. V4 and V3 already fell back
+        on a 404 alone."""
+        nested = "docs/provenance/policy-deltas/" + "c" * 64 + "/" + "b" * 64 + "/"
+        flat = "docs/provenance/policy-deltas/" + "c" * 64 + "/"
+        for answers, took in ((("ok", "ok", "404"), nested), (("404", "ok", "ok"), flat),
+                              (("ok", "404", "ok"), flat), (("empty", "empty", "ok"), flat)):
+            with self.subTest(answers=answers):
+                code, output, urls, err = self._legacy_lookup(*answers)
+                self.assertEqual(code, 0, err)
+                self.assertTrue(urls[-1].startswith(f"repos/example/authority/contents/{took}"), urls)
+                self.assertIn("trusted_candidate_policy=", output)
+                self.assertIn("policy_delta_authority=", output)
+        for answers in (("502", "ok", "ok"), ("403", "ok", "ok"), ("ok", "500", "ok"), ("ok", "403", "ok")):
+            with self.subTest(answers=answers):
+                code, output, urls, err = self._legacy_lookup(*answers)
+                self.assertEqual(code, 1)
+                self.assertEqual(output, "")
+                self.assertIn(f"(HTTP {next(answer for answer in answers if answer != 'ok')})", err)
+                self.assertIn("failed for a reason other than its absence", err)
+                self.assertEqual([url for url in urls if not url.count("b" * 64)], [], "the flat layout was read")
+        # No record in either layout: the step fails on the flat fetch, as before.
+        self.assertEqual(self._legacy_lookup("404", "ok", "404")[0], 1)
+
+
+class WorkflowJobLimitsTests(unittest.TestCase):
+    """Every job carries its own time limit, and a newer push to a pull request stops its older scan."""
+
+    def test_every_job_sets_a_time_limit(self) -> None:
+        # Failing-before (audit 2026-11-17 F-63908bf6): the OSV-Scanner and Scorecard jobs had none, so a hung
+        # scan held a runner for GitHub's six-hour default. A job that calls a reusable workflow takes the
+        # limits of that workflow's own jobs.
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+            for job, block in _workflow_job_blocks(path.name).items():
+                with self.subTest(workflow=path.name, job=job):
+                    self.assertTrue(any(re.match(r"^ {4}(timeout-minutes|uses):", line) for line in block))
+
+    def test_a_newer_pull_request_push_cancels_its_older_osv_scan(self) -> None:
+        # Failing-before: no concurrency group, so every push started another scan while the older ones ran on.
+        # Every run that is not a pull request's is a group of its own, so a landing never cancels a scan.
+        code = _uncommented(_workflow_text("osv-scanner.yml"))
+        self.assertIn("\nconcurrency:\n"
+                      "  group: osv-scanner-${{ github.event.pull_request.number || format('run-{0}', github.run_id) }}\n"
+                      "  cancel-in-progress: true\n", code)
+
+
+class WorkflowDigestGuardTests(unittest.TestCase):
+    """A SHA or digest a workflow puts into a ref, a URL or a path is exactly that many lowercase hex digits."""
+
+    #: Each value checked before it is used: (workflow, variable, hex digits).
+    GUARDED = (
+        ("codeql.yml", "TARGET_SHA", 40), ("codeql.yml", "tree_sha", 40),
+        ("provenance-attestation-merge-group.yml", "HEAD_SHA", 40),
+        ("provenance-attestation-merge-group.yml", "base_sha", 40),
+        ("provenance-attestation-merge-group.yml", "authority_sha", 40),
+        ("provenance-attestation-merge-group.yml", "value", 64),
+        ("provenance-attestation-merge-group.yml", "v4_name", 64),
+        ("provenance-attestation-merge-group.yml", "v3_name", 64),
+        ("provenance-attestation.yml", "value", 64),
+        ("provenance-attestation.yml", "v4_name", 64),
+        ("provenance-attestation.yml", "v3_name", 64),
+    )
+    # The strict form, and the case-glob form it replaced: [0-9a-f]* matches a hex digit followed by anything.
+    STRICT = re.compile(r'(?m)^ *\[\[ "\$\{(\w+)\}" =~ \^\[0-9a-f\]\{(\d+)\}\$ \]\] \|\| \{ echo "[^"]*" >&2; exit 1; \}$')
+    CASE = re.compile(r'(?m)^ *case "\$\{(\w+)\}" in\n *\[0-9a-f\]\*\) \[ "\$\{#\1\}" -eq (\d+) \].*\n.*\n *esac$')
+
+    def _guards(self, name: str) -> list[tuple[str, int, str]]:
+        code = _uncommented(_workflow_text(name))
+        return [(match.group(1), int(match.group(2)), textwrap.dedent(match.group(0)))
+                for pattern in (self.STRICT, self.CASE) for match in pattern.finditer(code)]
+
+    def test_no_workflow_takes_a_leading_hex_digit_for_a_hex_string(self) -> None:
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+            with self.subTest(workflow=path.name):
+                self.assertNotIn("[0-9a-f]*)", _uncommented(path.read_text(encoding="utf-8")))
+
+    def test_each_guard_refuses_a_value_that_is_not_all_hex_when_run(self) -> None:
+        """Failing-before (audit 2026-11-17 F-2acbba1c): each of these accepted ``a`` followed by any characters
+        of the right length, '/', '?', '&' and spaces included, although the names go into refs and URLs."""
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        for name, variable, digits in self.GUARDED:
+            guards = [script for found, length, script in self._guards(name) if (found, length) == (variable, digits)]
+            with self.subTest(workflow=name, variable=variable):
+                self.assertTrue(guards, "no guard for this value")
+            cases = (("a" * digits, True), (("0123456789abcdef" * 4)[:digits], True),
+                     ("a" + "/" * (digits - 1), False), (("a" + "x?& " * digits)[:digits], False),
+                     ("A" * digits, False), ("a" * (digits - 1), False), ("a" * (digits + 1), False), ("", False))
+            for script in guards:
+                for value, accepted in cases:
+                    with self.subTest(workflow=name, variable=variable, value=value):
+                        done = subprocess.run([bash, "-c", "set -euo pipefail\n" + script], capture_output=True,
+                                              text=True, env={**os.environ, variable: value}, timeout=60,
+                                              check=False)
+                        self.assertEqual(done.returncode == 0, accepted, done.stderr)
+
+
+class MergeGroupTrustedAuditTests(unittest.TestCase):
+    """The merge-group observation audits the group tree with the same trusted publication audit."""
+
+    STEP = "Audit the candidate tree with the trusted publication audit"
+
+    def test_the_group_commit_gets_the_trusted_publication_audit(self) -> None:
+        """Failing-before (audit 2026-11-17 F-63173426): only the pull-request attestation ran the default
+        branch's publication audit, so a group commit combining queued pull requests, and its binary waivers
+        against the group's base, was never audited by the trusted copy."""
+        pull_request = "\n".join(_workflow_job_blocks("provenance-attestation.yml")["attest"])
+        group = "\n".join(_workflow_job_blocks("provenance-attestation-merge-group.yml")["attest-merge-group"])
+        self.assertIn(f"      - name: {self.STEP}", group)
+        step = _named_step(group, self.STEP)
+        self.assertEqual(_step_script(step), _step_script(_named_step(pull_request, self.STEP)))
+        self.assertIn("          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}\n", step)
+        self.assertIn("          BASE_SHA: ${{ steps.base.outputs.base_sha }}\n", step)
+        self.assertNotIn("        if:", step)
+        self.assertLess(group.index("      - name: Generate and verify ephemeral provenance controls"),
+                        group.index(f"      - name: {self.STEP}"))
+        explain = _named_step(group, "Explain the verdict in plain words")
+        self.assertIn('&& [ ! -e "${RUNNER_TEMP}/tree-audit/passed" ]; then\n', explain)
+        self.assertIn("### Trusted publication audit: FAIL", explain)
+
+
+class PagesReferenceRuleTests(unittest.TestCase):
+    """The site's local-reference rule lives in tools/test_site_mobile.py alone."""
+
+    def test_the_pages_build_runs_the_one_reference_rule_before_the_browser_install(self) -> None:
+        # Failing-before (audit 2026-11-17 F-59f5ade6): the workflow grepped the page with its own copy of the
+        # rule, which LOCAL_REF mirrored by hand, and the same job ran the Python rule again.
+        job = "\n".join(_workflow_job_blocks("pages.yml")["build"])
+        self.assertNotIn("grep -oE", job)
+        step = _named_step(job, "Check that every local reference resolves")
+        self.assertIn("          NK_SITE_DIR: _site\n", step)
+        self.assertIn("python -m unittest -v tools.test_site_mobile.SiteStaticTests.test_every_local_reference_is_"
+                      "published\n", step)
+        # Still before the browser download, so a missing file fails in seconds.
+        self.assertLess(job.index("      - name: Set up Python"),
+                        job.index("      - name: Check that every local reference resolves"))
+        self.assertLess(job.index("      - name: Check that every local reference resolves"),
+                        job.index("      - name: Install Playwright and its headless Chromium"))
 
 
 class MainRulesetClaimsTests(unittest.TestCase):
@@ -4994,6 +5368,73 @@ class BetterleaksAllowlistTests(unittest.TestCase):
             self.assertEqual(scan(self.ALLOWED), 0, "the allowed value must pass")
             self.assertNotEqual(scan("libadler." + "7e3a" + "90d4" + ".prx"), 0,
                                 "a different value at the same path must still be caught")
+
+
+class BetterleaksCanaryExitCodeTests(unittest.TestCase):
+    """tools/betterleaks_canary.py: a positive canary passes only on a detection.
+
+    Betterleaks exits 1 for leaks found and also for a fatal error (a config that does
+    not load, a git target that is not a repository). With exit 1 as the positive
+    expectation, a canary whose scan never ran printed PASS.
+    """
+
+    FAKE = "fake-betterleaks"
+
+    @staticmethod
+    def _fake_scanner(*, broken_rule_config: bool):
+        """A stand-in that answers each canary scan as a working scanner would.
+
+        It mirrors the pinned binary's codes: a leak exits with --exit-code (default 1),
+        a clean scan exits 0, and a config that fails to load exits 1 whatever
+        --exit-code says.
+        """
+        import betterleaks_canary
+
+        real_run = subprocess.run
+        clean_targets = {("dir", "tools/test_history_audit.py"), ("git", ".")}
+
+        def fake_run(command, *args, **kwargs):
+            if not command or command[0] != BetterleaksCanaryExitCodeTests.FAKE:
+                return real_run(command, *args, **kwargs)
+            mode, target = command[1], command[2]
+            config = Path(command[command.index("--config") + 1])
+            if broken_rule_config and config != betterleaks_canary.CONFIG:
+                return subprocess.CompletedProcess(command, 1, None, "FTL unable to load config\n")
+            if (mode, target) in clean_targets or (mode == "git" and Path(target).name == "ignored-repo"):
+                return subprocess.CompletedProcess(command, 0, None, "")
+            leak_exit = int(command[command.index("--exit-code") + 1]) if "--exit-code" in command else 1
+            return subprocess.CompletedProcess(command, leak_exit, None, "WRN leaks found: 1\n")
+
+        return mock.patch.object(betterleaks_canary.subprocess, "run", side_effect=fake_run)
+
+    def test_working_scanner_passes_every_canary(self) -> None:
+        import betterleaks_canary
+
+        with self._fake_scanner(broken_rule_config=False), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(betterleaks_canary.run(self.FAKE), 0)
+
+    def test_config_that_does_not_load_fails_the_positive_canary(self) -> None:
+        import betterleaks_canary
+
+        with self._fake_scanner(broken_rule_config=True), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, r"fixture-secondary-rule: .*got 1 \(a scanner error"):
+                betterleaks_canary.run(self.FAKE)
+
+    def test_pinned_scanner_config_error_is_not_a_detection(self) -> None:
+        import betterleaks_canary
+
+        scanner = BetterleaksAllowlistTests._betterleaks()
+        if scanner is None:
+            self.skipTest("the pinned Betterleaks binary is not installed (pre-commit has not run here)")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "canary.txt"
+            target.write_text("nothing secret here\n", encoding="utf-8")
+            broken = Path(tmp) / "broken.toml"
+            broken.write_text("[[rules]\nid =\n", encoding="utf-8")
+            result = betterleaks_canary._scan(scanner, "dir", str(target), config=broken)
+            self.assertNotIn(result.returncode, (0, betterleaks_canary.LEAKS_FOUND_EXIT))
+            with self.assertRaisesRegex(RuntimeError, "a scanner error"):
+                betterleaks_canary._require("broken-config", result, leaks=True)
 
 
 if __name__ == "__main__":

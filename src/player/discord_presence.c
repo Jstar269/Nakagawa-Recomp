@@ -50,6 +50,23 @@ static size_t utf8_copy_chars(char *out, size_t cap, const char *src, size_t max
     return chars;
 }
 
+/* The length of s[0..len) without a partial character at its end: a lead byte followed by
+   fewer continuation bytes than it needs. Anything else is kept for the caller to validate. */
+static size_t utf8_drop_partial_tail(const char *s, size_t len) {
+    size_t continuation = 0;
+    while (continuation < 3 && continuation < len &&
+           ((unsigned char)s[len - 1 - continuation] & 0xC0u) == 0x80u) {
+        continuation++;
+    }
+    if (continuation == len) return len;
+    unsigned char lead = (unsigned char)s[len - 1 - continuation];
+    size_t need = (lead >= 0xC2u && lead <= 0xDFu) ? 2u
+                : (lead >= 0xE0u && lead <= 0xEFu) ? 3u
+                : (lead >= 0xF0u && lead <= 0xF4u) ? 4u
+                : 0u;
+    return need > continuation + 1u ? len - 1 - continuation : len;
+}
+
 bool nk_discord_activity_make(NkDiscordActivity *out, const char *title, const char *mode,
                               int64_t start_ms) {
     if (!out) return false;
@@ -59,11 +76,9 @@ bool nk_discord_activity_make(NkDiscordActivity *out, const char *title, const c
         while (*title == ' ') title++;
         size_t len = strlen(title);
         /* A title the library cut to NK_MAX_TITLE_LEN bytes may end inside a character: drop
-           that partial character (at most 3 bytes) and keep the rest. */
-        for (int k = 0; k < 3 && len > 0 &&
-                        !nk_json_validate_utf8((const uint8_t *)title, len); k++) {
-            len--;
-        }
+           that partial character and keep the rest. Any other invalid byte leaves the title
+           out below. */
+        len = utf8_drop_partial_tail(title, len);
         while (len > 0 && title[len - 1] == ' ') len--;
         char trimmed[sizeof(out->details)];
         /* Titles hold ':' and '/' ("Fate/Extra"), never a backslash: one would be a

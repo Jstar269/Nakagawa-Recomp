@@ -253,9 +253,11 @@ def synthetic_art_iso(
     path.write_bytes(image)
 
 
-def write_large_library(scratch: Path, data: Path, count: int) -> None:
+def write_large_library(scratch: Path, data: Path, count: int,
+                        first_title_name: str | None = None) -> None:
     """A saved library of `count` experimental titles, each on its own synthetic
-    disc with its own one-pixel ICON0.PNG, in the player's data folder `data`."""
+    disc with its own one-pixel ICON0.PNG, in the player's data folder `data`.
+    `first_title_name`, when given, names the first title instead of its number."""
     discs = scratch / "large-library"
     discs.mkdir()
     games = []
@@ -265,7 +267,9 @@ def write_large_library(scratch: Path, data: Path, count: int) -> None:
         synthetic_art_iso(iso, include_picture=False,
                           icon_bytes=png_pixel(index % 251, (index * 7) % 251, 90))
         games.append({
-            "disc_id": disc_id, "title_name": f"Synthetic title {index}",
+            "disc_id": disc_id,
+            "title_name": (first_title_name if index == 0 and first_title_name is not None
+                           else f"Synthetic title {index}"),
             "iso_path": str(iso), "title_id": f"experimental-{disc_id.lower()}",
             "is_experimental": True, "selected_executable": "EBOOT.BIN",
         })
@@ -700,6 +704,9 @@ def compute_effective_timeout(
       - WAIT_REPORT=<phase>,<timeout_ms>: waits for the Problem report phase number.
       - WAIT_MUSIC=<state>,<timeout_ms>: waits until the launcher music is in <state>, by
         its "music=" name (loading, playing, fading_out, paused, stopped, missing, ...).
+      - WAIT_PACKAGE_FAILURE=<disc>,<failures>,<timeout_ms>: waits until that title's
+        package worker failed to start <failures> times; the run fails when timeout_ms
+        passes first.
 
     When explicit_timeout is None, sums all wait event bounds and adds
     TIMEOUT_BUFFER_SECONDS over DEFAULT_BASE_TIMEOUT_SECONDS to ensure slow
@@ -719,7 +726,8 @@ def compute_effective_timeout(
                 effective += int(ev.split(",", 1)[1]) / 1000.0
             except ValueError:
                 pass
-        elif ev.startswith(("WAIT_PACKAGE_STATUS=", "WAIT_UPDATE=")) and "," in ev:
+        elif ev.startswith(("WAIT_PACKAGE_STATUS=", "WAIT_UPDATE=",
+                            "WAIT_PACKAGE_FAILURE=")) and "," in ev:
             try:
                 effective += int(ev.rsplit(",", 1)[1]) / 1000.0
             except ValueError:
@@ -1152,6 +1160,12 @@ def update_report(stdout: str) -> tuple[list[dict[str, str]], list[str]]:
 
 
 class NativePlayerUiTests(unittest.TestCase):
+    # The executable runs from a sandbox folder under build/, where none of the folders
+    # beside it holds tools/nk_cli.py, and the working folder is never searched
+    # (package_builder_cli_candidate_paths). A test that needs the CLI (the problem
+    # report, a package rebuild) names the checkout as the install root with this.
+    CLI_INSTALL_ROOT = {"NK_INSTALL_ROOT": str(ROOT)}
+
     def run_player(
         self,
         view: str,
@@ -1181,6 +1195,7 @@ class NativePlayerUiTests(unittest.TestCase):
         height: int = 720,
         timeout: float | None = None,
         library_titles: int = 0,
+        library_first_title_name: str | None = None,
         dedicated_data_root: bool = False,
         settings: dict[str, object] | None = None,
         package_built_by: str | None = None,
@@ -1190,6 +1205,7 @@ class NativePlayerUiTests(unittest.TestCase):
         culling_packages: dict[str, dict[str, object]] | None = None,
         cover_cache: dict[str, bytes] | None = None,
         expect_failure: bool = False,
+        library_unwritable: bool = False,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
@@ -1205,8 +1221,13 @@ class NativePlayerUiTests(unittest.TestCase):
             # a disc list the user imported (nk_disc_verify.h).
             data_folder = (localappdata / "Nakagawa" / "data" if os.name == "nt"
                            else userprofile / "data" / "Nakagawa" / "data")
+            if library_unwritable:
+                # library.json loads (there is none) but is never written: its temporary
+                # file's name is taken by a folder that is not empty (nk_library_save).
+                (data_folder / "library.json.tmp").mkdir(parents=True)
+                (data_folder / "library.json.tmp" / "keep").write_text("x", encoding="utf-8")
             if disc_list is not None:
-                (data_folder / "verification").mkdir(parents=True)
+                (data_folder / "verification").mkdir(parents=True, exist_ok=True)
                 (data_folder / "verification" / "redump.dat").write_text(disc_list,
                                                                         encoding="utf-8")
             if cover_cache is not None:
@@ -1388,6 +1409,7 @@ class NativePlayerUiTests(unittest.TestCase):
                     localappdata / "Nakagawa" / "data" if os.name == "nt"
                     else userprofile / "data" / "Nakagawa" / "data",
                     library_titles,
+                    library_first_title_name,
                 )
             if settings is not None:
                 # A settings.json saved before this run, where the player reads it.
@@ -1416,6 +1438,10 @@ class NativePlayerUiTests(unittest.TestCase):
                     "NK_INPUT_PROFILE": str(profile),
                 }
             )
+            # No install root unless the test names one (env_extra, CLI_INSTALL_ROOT): a
+            # player that finds tools/nk_cli.py starts its CLI-backed startup work, which a
+            # test of something else must not wait on.
+            env.pop("NK_INSTALL_ROOT", None)
             if env_extra:
                 env.update(env_extra)
             if incompatible_package:
@@ -1628,6 +1654,33 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(font_frames[1]["wizard_step"], "ready_launch")
         self.assertEqual(font_frames[1]["font_confirmed"], "1")
 
+    def test_wizard_ready_step_buttons_report_a_title_not_saved(self) -> None:
+        """Audit 2026-11-17 (F-e7f8730a): the Ready step's Play / Save to library and Go to
+        library buttons ignored player_app_add_game's result, then showed the library or
+        closed the wizard, so a title library.json did not take vanished with no card.
+
+        Failing before: both buttons ended on the library. Now each raises the
+        LIBRARY_WRITE_FAILED card; with a library that can be written, both still end on
+        the library."""
+        presses = {
+            "Save to library": ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100"),
+            "Go to library": ("WAIT_MS=100", "KEY_RIGHT", "KEY_RETURN", "WAIT_MS=100"),
+        }
+        for button, events in presses.items():
+            with self.subTest(button=button, library="not writable"):
+                run = self.next_ui_run("wizard5", events, library_unwritable=True)
+                frames = run["frames"]
+                assert isinstance(frames, list)
+                self.assertEqual(frames[0]["wizard_step"], "ready_launch")
+                self.assertEqual(frames[-1]["view"], "error", run["stdout"])
+                self.assertEqual(frames[-1]["error"], "LIBRARY_WRITE_FAILED")
+            with self.subTest(button=button, library="writable"):
+                run = self.next_ui_run("wizard5", events)
+                frames = run["frames"]
+                assert isinstance(frames, list)
+                self.assertEqual(frames[-1]["view"], "library", run["stdout"])
+                self.assertNotIn("LIBRARY_WRITE_FAILED", [frame["error"] for frame in frames])
+
     def test_developer_log_panel_needs_developer_mode(self) -> None:
         panel = self.run_player("developer-log", ("KEY_F12",))
         frames = panel["frames"]
@@ -1680,6 +1733,26 @@ class NativePlayerUiTests(unittest.TestCase):
                       "the disc's 1 x 1 ICON0.PNG is decoded and shown on its card")
         self.assertNotIn("next_ui_disc_icon", missing["stdout"],
                          "an unreadable disc keeps the placeholder")
+
+    def test_next_ui_wait_wakes_each_frame_while_disc_art_is_read(self) -> None:
+        """Audit 2026-11-17 (F-8100ccc0): the launcher loop's wait (player_ui_nk_wait_ms)
+        ignored the disc-art loader, so with a read waiting to start the loop slept the
+        full 50 ms idle wait and a library page filled in one card per idle wake.
+
+        Failing before: busy_ms=50. The wait is now at most PLAYER_UI_ART_POLL_MS (16 ms)
+        while a read runs or waits, and the full idle wait when nothing is wanted."""
+        with tempfile.TemporaryDirectory(prefix=".art-wait-", dir=ROOT) as tmp:
+            probe = Path(tmp) / "never-read.iso"
+            run = self.next_ui_run("library", ("WAIT_MS=50",),
+                                   env_extra={"NK_UI_TEST_ART_WAIT_PROBE": str(probe)})
+        match = re.search(r"\[PLAYER_UI_TEST\] art_wait idle_ms=(\d+) busy=(\d) busy_ms=(\d+)",
+                          str(run["stdout"]))
+        self.assertIsNotNone(match, run["stdout"])
+        assert match is not None
+        idle_ms, busy, busy_ms = (int(group) for group in match.groups())
+        self.assertEqual(idle_ms, 50, "nothing wanted: the loop sleeps the idle wait")
+        self.assertEqual(busy, 1, "the probe's read waits to start")
+        self.assertLessEqual(busy_ms, 16, "a read waiting to start wakes the loop each frame")
 
     @staticmethod
     def backdrops(run: dict[str, object]) -> list[tuple[int, str, str]]:
@@ -2100,6 +2173,65 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertLess(trail.index(str(0x452B)), trail.index(str(0x451E)), trail)
         back = self.run_player("psp-fonts", ("WAIT_MS=100", "KEY_ESCAPE", "WAIT_MS=100"))
         self.assertEqual(self.screens(back)[-1][0], "settings", "Esc goes back to Settings")
+
+    @unittest.skipUnless(sys.platform == "win32", "the Windows shell's Open folder (player_host.c)")
+    def test_open_folder_reports_a_folder_the_shell_could_not_open(self) -> None:
+        """Audit 2026-11-17: Open folder handed the UTF-8 path to ShellExecuteA, which reads
+        the ANSI code page, threw its result away and returned true, so a folder the shell
+        could not open (a non-ASCII profile path read wrong, or a missing folder) never
+        reached player_app_set_folder_open_error.
+
+        Failing before: a missing folder read as opened (ok=1). The host now converts the
+        path to UTF-16 for ShellExecuteW and reports the shell's failure."""
+        with tempfile.TemporaryDirectory(prefix=".open-folder-", dir=ROOT) as tmp:
+            missing = Path(tmp) / "never-made" / "saves"
+            run = self.run_player(
+                "library", ("WAIT_MS=50",),
+                env_extra={"NK_UI_TEST_OPEN_FOLDER": str(missing)})
+        stdout = str(run["stdout"])
+        self.assertIn("[PLAYER_UI_TEST] open_folder ok=0 ", stdout)
+        self.assertIn("Windows could not open the folder (shell error", stdout)
+
+    def test_picked_disc_and_fonts_are_taken_on_the_main_thread(self) -> None:
+        """Audit 2026-11-17: SDL may call a file picker's callback on a thread of its own
+        (player_host.h; on Windows it always does). The regression build answers the picker
+        from such a thread too (PICK_FILE).
+
+        Failing before: the disc and fonts callbacks inspected the disc, changed the view and
+        the settings, and imported fonts right there, on SDL's thread, while the main loop
+        drew and changed the same state. The pick must reach the player on the main thread,
+        as the save and texture pack pickers already hand theirs over."""
+        with tempfile.TemporaryDirectory(prefix=".picker-thread-", dir=ROOT) as tmp:
+            picked = Path(tmp) / "picked.iso"
+            picked.write_bytes(b"synthetic invalid PSP disc image\n")
+            disc = self.run_player(
+                "library",
+                ("KEY_O", "WAIT_MS=100", f"PICK_FILE={picked}", "WAIT_VIEW=error,5000",
+                 "WAIT_MS=100"))
+            stdout = str(disc["stdout"])
+            self.assertIn("[PLAYER_UI_TEST] pick_file answered", stdout)
+            self.assertIn("[PLAYER_UI_TEST] pick_taken what=disc main_thread=1", stdout)
+            self.assertNotIn("main_thread=0", stdout)
+            frames = disc["frames"]
+            assert isinstance(frames, list)
+            self.assertEqual(frames[-1]["view"], "error", stdout)
+            self.assertEqual(frames[-1]["error"], "ISO_CORRUPT", stdout)
+            self.assertEqual(frames[-1]["picker"], "0", "the answered picker is closed")
+
+            font_folder = Path(tmp) / "fonts"
+            font_folder.mkdir()
+            font = font_folder / "ltn0.pgf"
+            font.write_bytes(b"synthetic PGF stand-in, not a font\n")
+            fonts = self.run_player(
+                "psp-fonts",
+                ("WAIT_MS=100", "KEY_RIGHT", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100",
+                 f"PICK_FILE={font}", "WAIT_MS=300"))
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(fonts["stdout"]):
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        stdout = str(fonts["stdout"])
+        self.assertIn("[PLAYER_UI_TEST] pick_file answered", stdout)
+        self.assertIn("[PLAYER_UI_TEST] pick_taken what=fonts main_thread=1", stdout)
+        self.assertNotIn("main_thread=0", stdout)
 
     def test_settings_factory_reset_asks_then_moves_the_data_aside(self) -> None:
         """Owner 2026-10-29: Factory reset asks first, with Keep everything focused.
@@ -3275,8 +3407,10 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[-1]["online_mode"], "0",
                          "online mode has no switch until the feature exists (#2007)")
 
+        # The notices page is opened through tools/nk_cli.py (CLI_INSTALL_ROOT).
         notices = self.next_ui_run(
             "settings", ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS + ("KEY_RETURN", "WAIT_MS=100"),
+            env_extra=self.CLI_INSTALL_ROOT,
         )
         self.assertEqual([view for view, _ in self.screens(notices)],
                          ["settings", "prereq_about"])
@@ -4020,7 +4154,7 @@ class NativePlayerUiTests(unittest.TestCase):
         # The report tool refuses a data folder inside the repository, where the
         # sandbox lies, so the regression build writes under a folder outside it.
         with tempfile.TemporaryDirectory(prefix="nk-report-test-") as tmp:
-            env = {"NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            env = {**self.CLI_INSTALL_ROOT, "NK_UI_TEST_REPORT_DATA_ROOT": tmp}
             # Wait for the previewed phase (2), press Create, then wait for done (4); 6 is
             # the no-Python page, which ends either wait and skips the test below.
             run = self.next_ui_run(
@@ -4046,6 +4180,51 @@ class NativePlayerUiTests(unittest.TestCase):
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["view"], "problem_report")
+
+    def test_problem_report_previews_under_a_non_ascii_data_folder(self) -> None:
+        """Audit 2026-11-17: the report tool's answer file sits in the data folder, which on
+        Windows is under the user's profile. A profile with a non-ASCII name must still preview.
+
+        Failing before: the player read and removed the answer file with the narrow C runtime
+        (fopen, remove), which reads the UTF-8 path in the ANSI code page, so the file the tool
+        wrote was never found and the page showed a failed report."""
+        with tempfile.TemporaryDirectory(prefix="nk-report-test-José-") as tmp:
+            env = {**self.CLI_INSTALL_ROOT, "NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            run = self.next_ui_run(
+                "problem-report", ("WAIT_REPORT=2|5|6,60000",), env_extra=env)
+            stdout = run["stdout"]
+            assert isinstance(stdout, str)
+            steps, names = self.problem_report_steps(stdout)
+            phases = [int(step["problem_report"]) for step in steps]
+            if 6 in phases:
+                self.skipTest("no Python interpreter on this host, so the page shows the command")
+            self.assertNotIn(5, phases, stdout)
+            self.assertEqual(phases[-1], 2, stdout)
+            self.assertIn("about.txt", names)
+            self.assertFalse((Path(tmp) / "report-output.json").exists(),
+                             "the answer file is removed once it has been read")
+
+    def test_problem_report_previews_a_title_whose_name_starts_with_a_dash(self) -> None:
+        """Audit 2026-11-17: the report job passed the selected title's name as its own
+        argument after --title-name. argparse reads a value that starts with '-' (a homebrew
+        title such as '-=Demo=-') as an option, so the tool refused the command line.
+
+        Failing before: the preview of such a title ended in the failed phase (5) with
+        'Run this in a terminal'. The name now travels as one --title-name=<name> argument."""
+        with tempfile.TemporaryDirectory(prefix="nk-report-test-") as tmp:
+            env = {**self.CLI_INSTALL_ROOT, "NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            run = self.next_ui_run(
+                "problem-report", ("WAIT_REPORT=2|5|6,60000",), env_extra=env,
+                library_titles=1, library_first_title_name="-=Demo=-")
+            stdout = run["stdout"]
+            assert isinstance(stdout, str)
+            steps, names = self.problem_report_steps(stdout)
+            phases = [int(step["problem_report"]) for step in steps]
+            if 6 in phases:
+                self.skipTest("no Python interpreter on this host, so the page shows the command")
+            self.assertNotIn(5, phases, stdout)
+            self.assertEqual(phases[-1], 2, stdout)
+            self.assertIn("about.txt", names)
 
     def test_problem_report_that_cannot_start_its_worker_says_so_on_the_page(self) -> None:
         """#1849: if the report thread cannot start, the page shows a failed phase with the
@@ -4137,11 +4316,47 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("result=PASS", run["stdout"])
         for step in ("WAIT_UPDATE=nonsense,1000", "WAIT_UPDATE=installed",
                      "WAIT_UPDATE=,1000", "WAIT_UPDATE=installed,0",
-                     "WAIT_UPDATE=installed,-5", "WAIT_UPDATE=installed,4294967296"):
+                     "WAIT_UPDATE=installed,-5", "WAIT_UPDATE=installed,4294967296",
+                     # Digits only: a sign or a leading space is not a number.
+                     "WAIT_UPDATE=installed,+300", "WAIT_UPDATE=installed, 300"):
             with self.subTest(step=step):
                 run = self.next_ui_run("library", (step,), expect_failure=True, timeout=60)
                 self.assertIn("Invalid synthetic event script", run["stderr"], run["stdout"])
                 self.assertNotIn("wait_update target=", run["stdout"])
+
+    def test_wait_package_failure_fails_on_timeout_and_refuses_bad_steps(self) -> None:
+        """WAIT_PACKAGE_FAILURE is a ceiling like every other wait: a count that never comes
+        fails the run by name instead of blocking it until the outer timeout, and a step
+        with no timeout, or for a title the failure list does not name, is refused."""
+        fail_for = {"NK_UI_TEST_FAIL_PACKAGE_STATUS_THREAD_CREATE_FOR": "TEST00005"}
+        run = self.run_player("library", ("WAIT_PACKAGE_FAILURE=TEST00005,1000,300",),
+                              env_extra=fail_for, expect_failure=True, timeout=60)
+        self.assertIn("[PLAYER_UI_TEST] wait_package_failure result=FAIL disc=TEST00005 "
+                      "target=1000", run["stderr"], run["stdout"])
+        self.assertNotIn("wait_package_failure disc=TEST00005 target=1000 result=PASS",
+                         run["stdout"])
+        for step in ("WAIT_PACKAGE_FAILURE=TEST00005,1",
+                     "WAIT_PACKAGE_FAILURE=TEST00006,1,1000",
+                     "WAIT_PACKAGE_FAILURE=TEST00005,0,1000",
+                     "WAIT_PACKAGE_FAILURE=TEST00005,1,0",
+                     "WAIT_PACKAGE_FAILURE=,1,1000"):
+            with self.subTest(step=step):
+                run = self.run_player("library", (step,), env_extra=fail_for,
+                                      expect_failure=True, timeout=60)
+                self.assertIn("Invalid synthetic event script", run["stderr"], run["stdout"])
+                self.assertNotIn("wait_package_failure disc=", run["stdout"])
+
+    def test_view_steps_take_every_view_name_the_frame_record_prints(self) -> None:
+        """WAIT_VIEW and ASSERT_VIEW read the names the frame record prints, so a view the
+        record can report (wizard, controller, developer_log, ...) can be waited for."""
+        names = ("inspecting", "wizard", "controller", "online_settings", "developer_log",
+                 "library")
+        run = self.run_player("library", ("WAIT_VIEW=" + "|".join(names) + ",2000",))
+        self.assertIn("[PLAYER_UI_TEST] wait_view actual=library result=PASS", run["stdout"],
+                      run["stderr"])
+        panel = self.run_player("developer-log", ("ASSERT_VIEW=developer_log", "KEY_F12"))
+        self.assertIn("[PLAYER_UI_TEST] assert_view result=PASS actual=developer_log",
+                      panel["stdout"], panel["stderr"])
 
     def test_update_check_at_start_is_off_by_default_and_quiet_when_offline(self) -> None:
         """No setting, no request: the player is offline by default (AGENTS.md section 5)."""
@@ -4808,7 +5023,7 @@ class NativePlayerUiTests(unittest.TestCase):
             "library",
             events=(
                 "START_SYNTHETIC_BUILD=1",
-                "WAIT_PACKAGE_FAILURE=TEST00005,1",
+                "WAIT_PACKAGE_FAILURE=TEST00005,1,10000",
                 "START_SYNTHETIC_BUILD=2",
                 "WAIT_VIEW=ready_library,10000",
                 "START_SYNTHETIC_BUILD=2",
@@ -4857,9 +5072,9 @@ class NativePlayerUiTests(unittest.TestCase):
             "library",
             events=(
                 "START_SYNTHETIC_BUILD=2",
-                "WAIT_PACKAGE_FAILURE=TEST00006,1",
+                "WAIT_PACKAGE_FAILURE=TEST00006,1,10000",
                 "START_SYNTHETIC_BUILD=1",
-                "WAIT_PACKAGE_FAILURE=TEST00005,1",
+                "WAIT_PACKAGE_FAILURE=TEST00005,1,10000",
                 # Select B, open its title, then RETRY PACKAGE CHECK.
                 "WAIT_MS=100",
                 "KEY_RIGHT",
@@ -4867,7 +5082,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 "KEY_RETURN",
                 "WAIT_MS=300",
                 "KEY_RETURN",
-                "WAIT_PACKAGE_FAILURE=TEST00006,2",
+                "WAIT_PACKAGE_FAILURE=TEST00006,2,10000",
                 "QUIT",
             ),
             runtime_ready=True,
@@ -5721,6 +5936,8 @@ class NativePlayerUiTests(unittest.TestCase):
              "KEY_ESCAPE", "WAIT_MS=2000"),          # Play anyway
             post_build_ready=True, wait_background=True,
             package_built_by="v0.0.1",
+            # This flow needs tools/nk_cli.py (CLI_INSTALL_ROOT).
+            env_extra=self.CLI_INSTALL_ROOT,
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
@@ -6213,6 +6430,51 @@ class NativePlayerUiTests(unittest.TestCase):
                            str(run["stdout"]), re.M)
         self.assertTrue(lines, run["stdout"])
         return lines[-1]
+
+    def test_a_result_for_another_build_of_the_title_is_not_counted_as_its_check(
+            self) -> None:
+        """The frame record's titles_* counts use the player's own package key, the build
+        variant included (player_runtime_package_cache_entry_is_for): turning Wider culling
+        off in the library's Settings > Enhanced changes which build the Ace title launches,
+        and the result checked for the culling build does not answer for the build without
+        it. Counted by disc, title and executable alone, the stale result read as checked."""
+        settings = {"enhanced": dict(self.EVERY_PART_ON),
+                    "title_play": {"TEST00006": {"mode": "authentic"}}}
+        culling = {"id": "fixture-cull", "target_title_id": "display-smoke-v1",
+                   "category": "guest_memory_code_hook"}
+        run = self.next_ui_run(
+            "ready",
+            # Open the title and step its Play mode to Enhanced, then Ace (with culling),
+            # and let that build's check finish.
+            ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
+             "KEY_RETURN", "WAIT_MS=200", "KEY_RETURN", "WAIT_MS=800",
+             # Back to the library, Settings (F1), its Play mode row opens the library's
+             # Settings > Enhanced, and Down to Wider culling turns it off.
+             "KEY_ESCAPE", "WAIT_MS=200", "KEY_F1", "WAIT_MS=200", *("KEY_DOWN",) * 5,
+             "KEY_RETURN", "WAIT_MS=200", *("KEY_DOWN", "WAIT_MS=50") * 9, "KEY_RETURN",
+             "WAIT_MS=300"),
+            post_build_ready=True, wait_background=True, settings=settings,
+            enhancement_packages={"TEST00006": "display-smoke-v1"},
+            culling_packages={"TEST00006": culling})
+        play_lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
+                                str(run["stdout"]), re.M)
+        self.assertTrue(play_lines and play_lines[-1].startswith("Ace for this game: ") and
+                        "wider culling" in play_lines[-1], play_lines)
+        # The first frame drawn with Wider culling off is the one the switch happened in.
+        toggled = None
+        seen_off = False
+        for line in str(run["stdout"]).splitlines():
+            if (line.startswith("[PLAYER_UI_TEST] next_ui_enhanced_page title=library") and
+                    "|cull=Off|" in line):
+                seen_off = True
+            elif seen_off and line.startswith("[PLAYER_UI_TEST] frame="):
+                toggled = parse_frames(line)[0]
+                break
+        self.assertIsNotNone(toggled, "Wider culling was not turned off: " + str(run["stdout"]))
+        assert toggled is not None
+        self.assertEqual(toggled["selected_disc"], "TEST00006", toggled)
+        self.assertGreaterEqual(int(toggled["titles_pending"]) + int(toggled["titles_unclaimed"]),
+                                1, f"the culling build's result counted as checked: {toggled}")
 
     def test_next_ui_play_line_names_an_unusable_culling_package(self) -> None:
         """Contract 11.3.6 (#2302): with Wider culling on in an Ace launch, a culling package the
@@ -6886,6 +7148,90 @@ class FirstRunRouteTests(unittest.TestCase):
         # No runtime is built in the scratch root, so the bounded launch refuses.
         self.assertEqual(completed.returncode, 3, completed.stdout + completed.stderr)
         self.assertIn("SAMPLE", completed.stderr)
+
+    def test_launch_index_that_is_not_a_whole_number_is_refused(self) -> None:
+        """Audit 2026-11-17: --launch-index was read with atoi, so a value that is not a whole
+        number (a typo in a shortcut, or an empty value) became 0 and launched the first entry.
+
+        Failing before: --demo --launch-index=abc reached the first SAMPLE entry (exit 3, no
+        runtime) instead of refusing the argument with exit 2."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-demo-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for value in ("abc", "", "1x", "-1", "99999999999"):
+                with self.subTest(value=value):
+                    completed = self.run_route(
+                        scratch, ["--demo", f"--launch-index={value}", "--headless-launch"])
+                    self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                    self.assertIn("--launch-index must be a whole number", completed.stderr)
+                    self.assertNotIn("SAMPLE", completed.stdout + completed.stderr)
+
+    def test_screenshot_that_is_not_saved_fails_the_run(self) -> None:
+        """Audit 2026-11-17: --screenshot logged a failed save and still exited 0, and a
+        --width or --height of zero or less (read with atoi) went on to draw.
+
+        Failing before: a capture into a folder that does not exist exited 0, and --width=0
+        drew a frame instead of refusing the argument."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-screenshot-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            missing = scratch / "no-such-folder" / "shot.bmp"
+            completed = self.run_route(scratch, ["--view=library", f"--screenshot={missing}"])
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("Failed saving screenshot", completed.stderr)
+            self.assertFalse(missing.exists())
+            shot = scratch / "shot.bmp"
+            for size in ("--width=0", "--height=-5", "--width=abc", "--height="):
+                with self.subTest(size=size):
+                    completed = self.run_route(
+                        scratch, ["--view=library", size, f"--screenshot={shot}"])
+                    self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                    self.assertIn("--width and --height must be whole numbers",
+                                  completed.stderr)
+                    self.assertFalse(shot.exists())
+            completed = self.run_route(
+                scratch, ["--view=library", "--width=640", "--height=360", f"--screenshot={shot}"])
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertTrue(shot.is_file())
+
+    def test_stage_route_finishes_when_the_completion_event_is_lost(self) -> None:
+        """Audit 2026-11-17: the staging worker's completion reached the launcher only as an
+        SDL event. If SDL refused the push (a full queue), the wizard stayed extracting for
+        the rest of the session. NK_UI_TEST_DROP_WORKER_EVENT models that refusal.
+
+        Failing before: the --stage route never reached the ready library card. The frame
+        loop now finishes a staging job whose worker is done, as it does for a PSN job."""
+        sys.path.insert(0, str(ROOT / "tools"))
+        from test_iso_parity import (
+            archive_title_manifest,
+            build_plain_mips_elf,
+            create_archive_title_iso,
+        )
+
+        with tempfile.TemporaryDirectory(prefix=".first-run-archive-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            iso = scratch / "archive.iso"
+            create_archive_title_iso(iso, disc_id="ULUS99996", title="Synthetic Archive",
+                                     executable=build_plain_mips_elf())
+            user_root = scratch / "user-data"
+            (user_root / "manifests").mkdir(parents=True)
+            (user_root / "manifests" / "archive.json").write_text(
+                json.dumps(archive_title_manifest("ULUS99996", "archive-ulus99996")),
+                encoding="utf-8",
+            )
+            env = self.scratch_env(scratch)
+            env["NK_UI_TEST_DROP_WORKER_EVENT"] = "1"
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--user-data-root={user_root}", f"--iso={iso}", "--stage",
+                 "--ui-test-events=WAIT_VIEW=ready_library,30000;QUIT",
+                 f"--ui-test-screenshot={scratch / 'last-frame.bmp'}"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            frames = parse_frames(completed.stdout)
+            self.assertTrue(frames, completed.stdout)
+            self.assertEqual(frames[-1]["view"], "ready_library", completed.stdout)
+            self.assertEqual(frames[-1]["extracting"], "0")
+            library = json.loads((user_root / "library.json").read_text(encoding="utf-8"))
+            self.assertEqual([game["disc_id"] for game in library["games"]], ["ULUS99996"])
 
 
 class ScreenshotDeterminismTests(unittest.TestCase):
