@@ -734,6 +734,8 @@ class MemoryDebugger:
         status = "running"
         artifacts = build_artifact_dir(self.attached_exe_path())
         status_file = os.path.join(artifacts, "paused.flag")
+        # exited.flag is written beside the executable at sceKernelExitGame only when the
+        # runtime was started with SR_EXIT_DUMP set.
         exit_file = os.path.join(artifacts, "exited.flag")
         if os.path.exists(exit_file):
             status = "exited"
@@ -1106,7 +1108,9 @@ class MemoryDebugger:
     def trace_exit(self):
         dump_path = os.path.join(build_artifact_dir(self.attached_exe_path()), "crash_dump.bin")
         if not os.path.exists(dump_path):
-            return {"error": "crash_dump.bin not found. Did the game exit?"}
+            return {"error": "crash_dump.bin not found. Did the game exit? The runtime "
+                             "writes it at sceKernelExitGame only when started with "
+                             "SR_EXIT_DUMP set."}
 
         with open(dump_path, "rb") as f:
             blob = f.read()

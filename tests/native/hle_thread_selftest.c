@@ -21969,6 +21969,44 @@ static void test_cancel_release_wake_results(void) {
                "PSP-B3-01: ReleaseWaitThread(0) on the running caller returns 0x80020197");
         s_cur = -1;
     }
+
+    /* ---- ReleaseWaitThread of a live thread that is not waiting ----------------------
+     * PSP-B3-01 measures a waiter, the caller and a deleted thread. A live thread that is
+     * ready, dormant or in a DelayThread wait is none of those: it stops by name and keeps
+     * its state, and only a uid no live thread holds answers UNKNOWN_THID.
+     * MUTANT: return UNKNOWN_THID whenever the wake fails -- a live thread reads as deleted. */
+    {
+        static const struct { int state; const char *what; } cells[] = {
+            { TH_READY, "ready" }, { TH_DORMANT, "dormant" }, { TH_WAIT_DELAY, "delayed" },
+        };
+        for (size_t i = 0; i < sizeof cells / sizeof cells[0]; i++) {
+            reset_fixture();
+            sr_hle_init();
+            TCB *main_t = fixture_thread(0x1e3u, TH_RUNNING, 32);
+            main_t->started = 1;
+            TCB *target = fixture_thread(0x1e4u, cells[i].state, 40);
+            s_cur = (int)(main_t - s_tcb);
+            const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = target->uid;
+            snprintf(msg, sizeof msg,
+                     "ReleaseWaitThread of a live %s thread stops by name, not UNKNOWN_THID",
+                     cells[i].what);
+            expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+                       sr_hle_test_unmodelled_stops() == stops_before + 1u &&
+                       target->state == cells[i].state,
+                   msg);
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = 0x1e5u;
+            snprintf(msg, sizeof msg,
+                     "ReleaseWaitThread of a uid no live thread holds answers UNKNOWN_THID (%s cell)",
+                     cells[i].what);
+            expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0x80020198u &&
+                       sr_hle_test_unmodelled_stops() == stops_before + 1u,
+                   msg);
+            s_cur = -1;
+        }
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -24640,6 +24678,7 @@ static void test_refer_thread_status(void) {
     expect(uid >= 0x110u, "CreateThread production dispatch returns a thread UID");
 
     memset((void *)SR_HOST(THREAD_INFO), 0xa5, sizeof(SrThreadInfo));
+    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo));
     s_cpu->r[4] = uid;
     s_cpu->r[5] = THREAD_INFO;
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u,
@@ -24659,10 +24698,111 @@ static void test_refer_thread_status(void) {
     s_cpu->r[5] = THREAD_INFO;
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_UNKNOWN_THID,
            "ReferThreadStatus reports an unknown thread UID");
+    MEM_W32(0x0bfffff0u, (uint32_t)sizeof(SrThreadInfo));
     s_cpu->r[4] = uid;
     s_cpu->r[5] = 0x0bfffff0u;
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR,
            "ReferThreadStatus validates the complete output structure span");
+
+    /* The caller's size word selects the write (the PSP-KERNEL-STATUS-001 rule of the sema,
+     * event-flag and mailbox status calls): 0 writes nothing, a smaller size writes only that
+     * many bytes of the 0x68-byte record, and an unmeasured larger one stops by name.
+     * MUTANT: write sizeof(SrThreadInfo) bytes whatever the size word says -- the size-0 and
+     *   size-8 cells see bytes past the caller's struct overwritten. */
+    enum { INFO_GUARD = 0x70u };
+    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
+    MEM_W32(THREAD_INFO, 0u);
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = THREAD_INFO;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               MEM_R32(THREAD_INFO) == 0u && MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u &&
+               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
+           "ReferThreadStatus with a size word of 0 succeeds and writes nothing");
+    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
+    MEM_W32(THREAD_INFO, 8u);
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = THREAD_INFO;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               MEM_R32(THREAD_INFO) == (uint32_t)sizeof(SrThreadInfo) &&
+               memcmp((const void *)SR_HOST(THREAD_INFO + 4u), "show", 4u) == 0 &&
+               MEM_R32(THREAD_INFO + 8u) == 0xa5a5a5a5u &&
+               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
+           "ReferThreadStatus with a size word of 8 writes only the first 8 bytes of the record");
+    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
+    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo));
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = THREAD_INFO;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               MEM_R32(THREAD_INFO + 0x64u) != 0xa5a5a5a5u &&
+               MEM_R32(THREAD_INFO + 0x68u) == 0xa5a5a5a5u,
+           "ReferThreadStatus with the full size writes the record and nothing past it");
+    const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
+    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo) + 4u);
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = THREAD_INFO;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops_before + 1u &&
+               MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u,
+           "ReferThreadStatus with a size word above 0x68 stops by name and writes nothing");
+}
+
+/* sceKernelReferThreadRunStatus and sceKernelReferCallbackStatus check the whole record span
+ * before they write, as ReferThreadStatus does: an out pointer whose record runs off the end
+ * of guest memory answers ILLEGAL_ADDR and leaves its mapped bytes untouched.
+ * MUTANT: drop either span check -- the call returns 0 and writes the mapped part. */
+extern uint32_t sr_hle_test_refer_thread_run_status(CpuState *s);
+extern uint32_t sr_hle_test_refer_callback_status(CpuState *s);
+static void test_refer_run_and_callback_status_check_their_span(void) {
+    enum {
+        RUN_INFO = 0x08302000u,
+        RUN_EDGE = 0x0bffffe0u,      /* 0x20 mapped bytes: the 0x2c-byte record overruns */
+        CB_INFO = 0x08302100u,
+        CB_EDGE = 0x0bffffe0u,       /* 0x20 mapped bytes: the 56-byte record overruns */
+        CB_NAME = 0x08302200u,
+        TEST_ILLEGAL_ADDR = 0x80000103u,
+    };
+    TCB *self = wsv_begin();
+    CpuState cpu;
+
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = self->uid;
+    cpu.r[5] = RUN_INFO;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0u && MEM_R32(RUN_INFO) == 0x2cu,
+           "ReferThreadRunStatus fills a mapped 0x2c-byte record");
+    memset((void *)SR_HOST(RUN_EDGE), 0xa5, 0x20u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = self->uid;
+    cpu.r[5] = RUN_EDGE;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_ILLEGAL_ADDR &&
+               MEM_R32(RUN_EDGE) == 0xa5a5a5a5u,
+           "ReferThreadRunStatus answers ILLEGAL_ADDR for a record that runs off guest memory");
+
+    title_hle_write_cstr(CB_NAME, "span-callback");
+    uint32_t cb = b1_call(0xe81caf8fu, CB_NAME, 0u, 0u, 0u);
+    expect((int32_t)cb > 0, "a callback for the status span cells is created");
+    MEM_W32(CB_INFO, 56u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb;
+    cpu.r[5] = CB_INFO;
+    expect(sr_hle_test_refer_callback_status(&cpu) == 0u && MEM_R32(CB_INFO) == 56u &&
+               memcmp((const void *)SR_HOST(CB_INFO + 4u), "span-callback", 14u) == 0,
+           "ReferCallbackStatus fills a mapped 56-byte record");
+    memset((void *)SR_HOST(CB_EDGE), 0xa5, 0x20u);
+    MEM_W32(CB_EDGE, 56u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb;
+    cpu.r[5] = CB_EDGE;
+    expect(sr_hle_test_refer_callback_status(&cpu) == TEST_ILLEGAL_ADDR &&
+               MEM_R32(CB_EDGE) == 56u && MEM_R32(CB_EDGE + 4u) == 0xa5a5a5a5u,
+           "ReferCallbackStatus answers ILLEGAL_ADDR for a record that runs off guest memory");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb;
+    cpu.r[5] = 0x0c000000u;
+    expect(sr_hle_test_refer_callback_status(&cpu) == TEST_ILLEGAL_ADDR,
+           "ReferCallbackStatus answers ILLEGAL_ADDR for an unmapped info pointer");
+    (void)b1_call(0xedba5844u, cb, 0u, 0u, 0u);
+    s_cur = -1;
 }
 
 /* -------------------------------------------------------------------------
@@ -49192,6 +49332,68 @@ static intptr_t exit_game_spawn_child(const char *self) {
 static void exit_game_command_line_is_quoted(void) { }
 #endif
 
+/* The UTF-8 path of NAME beside this executable, resolved the way sceKernelExitGame resolves
+ * its exit artifacts; the child is this same executable, so it resolves the same folder. */
+int sr_wide_module_dir_alloc(wchar_t **out);
+int sr_wide_join_alloc(const wchar_t *left, const wchar_t *right, wchar_t **out);
+int sr_wide_to_utf8_alloc(const wchar_t *src, char **out);
+FILE *sr_fopen_utf8(const char *path, const wchar_t *mode);
+static char *exit_game_artifact_path(const wchar_t *name) {
+    wchar_t *dir = NULL, *joined = NULL;
+    char *out = NULL;
+    if (!sr_wide_module_dir_alloc(&dir) || !sr_wide_join_alloc(dir, name, &joined) ||
+        !sr_wide_to_utf8_alloc(joined, &out)) {
+        free(out);
+        out = NULL;
+    }
+    free(dir);
+    free(joined);
+    return out;
+}
+
+static int exit_game_artifact_exists(const char *path) {
+    FILE *f = path ? sr_fopen_utf8(path, L"rb") : NULL;
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+/* The exit dump holds guest memory (CpuState and 64 KiB of guest stack), a private capture: a
+ * normal sceKernelExitGame writes neither crash_dump.bin nor exited.flag beside the
+ * executable, and SR_EXIT_DUMP opts in to both.
+ * MUTANT: write the two files whatever SR_EXIT_DUMP says -- the default exit leaves them. */
+static void test_exit_game_dump_is_opt_in(const char *self) {
+    char *dump = exit_game_artifact_path(L"crash_dump.bin");
+    char *flag = exit_game_artifact_path(L"exited.flag");
+    expect(dump != NULL && flag != NULL, "exit-game artifacts resolve beside the executable");
+    if (!dump || !flag) {
+        free(dump);
+        free(flag);
+        return;
+    }
+    remove(dump);
+    remove(flag);
+    hle_test_setenv("SR_EXIT_DUMP", NULL);
+    intptr_t rc = exit_game_spawn_child(self);
+    expect(rc == 0, "exit-game child exits cleanly without SR_EXIT_DUMP");
+    expect(!exit_game_artifact_exists(dump) && !exit_game_artifact_exists(flag),
+           "a normal sceKernelExitGame writes no guest-memory dump and no exit flag");
+    hle_test_setenv("SR_EXIT_DUMP", "1");
+    rc = exit_game_spawn_child(self);
+    hle_test_setenv("SR_EXIT_DUMP", NULL);
+    expect(rc == 0, "exit-game child exits cleanly with SR_EXIT_DUMP");
+    char magic[4] = {0};
+    FILE *f = sr_fopen_utf8(dump, L"rb");
+    size_t got = f ? fread(magic, 1, sizeof magic, f) : 0u;
+    if (f) fclose(f);
+    expect(got == sizeof magic && memcmp(magic, "SRCD", 4) == 0 && exit_game_artifact_exists(flag),
+           "SR_EXIT_DUMP writes the versioned crash_dump.bin and exited.flag");
+    remove(dump);
+    remove(flag);
+    free(dump);
+    free(flag);
+}
+
 static void test_exit_game_ignores_argument_registers(const char *self) {
     intptr_t rc;
     exit_game_command_line_is_quoted();
@@ -49202,6 +49404,7 @@ static void test_exit_game_ignores_argument_registers(const char *self) {
     rc = exit_game_spawn_child(self);
     expect(rc != -1, "exit-game child process starts");
     if (rc == -1) return;
+    test_exit_game_dump_is_opt_in(self);
     expect(rc != (intptr_t)EXITGAME_NO_REQUEST,
            "exit-game child leaves a quit request's exit callback pending before ExitGame");
     expect(rc != (intptr_t)EXITGAME_REENTERED,
@@ -49424,6 +49627,41 @@ static void test_real_module_start_lifecycle(void) {
     expect(ret == 0, "gate on: start untranslated entry returns 0 (today's behaviour)");
     expect(MEM_R32(SYNTH_MOD_STATUS_ADDR) == 0x12345678u,
            "gate on: untranslated entry does not write status pointer");
+
+    /* Every module whose module_start never ran is named, not only the first in the run:
+     * two more untranslated modules each print their own line with uid, path and entry.
+     * MUTANT: log only the first such start in a run -- the two lines below are missing. */
+    {
+        uint32_t uid_b = sr_hle_test_register_module("untrans_b.prx", 0x089b0100u, 0);
+        uint32_t uid_c = sr_hle_test_register_module("untrans_c.prx", 0x089b0200u, 0);
+        FILE *capture = NULL;
+        int saved_fd = -1;
+        char captured[4096];
+        char line_b[192], line_c[192];
+        captured[0] = '\0';
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = uid_b;
+        uint32_t ret_b = sr_syscall(&cpu, 0x50f0c1ecu);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = uid_c;
+        uint32_t ret_c = sr_syscall(&cpu, 0x50f0c1ecu);
+        if (capturing) {
+            hle_data_stderr_capture_end(capture, saved_fd, captured, sizeof(captured));
+            fprintf(stderr, "%s", captured);
+        }
+        snprintf(line_b, sizeof line_b,
+                 "sceKernelStartModule(uid=0x%x, path='untrans_b.prx', entry=0x089b0100) -> "
+                 "unknown or untranslated entry; module_start not executed", uid_b);
+        snprintf(line_c, sizeof line_c,
+                 "sceKernelStartModule(uid=0x%x, path='untrans_c.prx', entry=0x089b0200) -> "
+                 "unknown or untranslated entry; module_start not executed", uid_c);
+        expect(capturing, "gate on: the untranslated-start log capture begins");
+        expect(uid_b != 0 && uid_c != 0 && ret_b == 0u && ret_c == 0u,
+               "gate on: two more untranslated modules start without running module_start");
+        expect(strstr(captured, line_b) != NULL && strstr(captured, line_c) != NULL,
+               "gate on: each untranslated module_start names its module, not only the first");
+    }
 
     uint32_t uid_no_stop = sr_hle_test_register_module(
         "missing_stop.prx", SYNTH_MOD_START, SYNTH_MOD_STOP + 0x40u);
@@ -51996,6 +52234,7 @@ static void late_obj_guest_runner(CpuState *s) {
     expect(s_late_obj_returned == 0,
            "late-objects: the worker has not returned from its wait");
 
+    MEM_W32(LATE_OBJ_INFO_THREAD, (uint32_t)sizeof(SrThreadInfo));
     expect(late_obj_guest_call(s, LATE_OBJ_REFER_THREAD, s_late_obj_waiter_uid,
                                LATE_OBJ_INFO_THREAD, 0u, 0u, 0u, 0u) == 0u,
            "late-objects: the worker resolves before the stop");
@@ -52025,6 +52264,7 @@ static void late_obj_guest_runner(CpuState *s) {
     expect(s_late_obj_unload_rc == 0u,
            "late-objects: unloading the stopped module returns 0");
 
+    MEM_W32(LATE_OBJ_INFO_THREAD, (uint32_t)sizeof(SrThreadInfo));
     expect(late_obj_guest_call(s, LATE_OBJ_REFER_THREAD, s_late_obj_waiter_uid,
                                LATE_OBJ_INFO_THREAD, 0u, 0u, 0u, 0u) == 0u,
            "late-objects: the worker still resolves after unload");
@@ -52100,6 +52340,7 @@ static void test_late_prx_unload_keeps_module_owned_objects(void) {
      * that owner removes it, matching the measured #1106 post-exit observation. */
     expect(!sr_callback_is_valid(s_late_obj_callback),
            "late-objects: callback unregisters with its owner thread's exit");
+    MEM_W32(LATE_OBJ_INFO_THREAD, (uint32_t)sizeof(SrThreadInfo));
     expect(late_obj_call(LATE_OBJ_REFER_THREAD, s_late_obj_waiter_uid,
                          LATE_OBJ_INFO_THREAD, 0u) == 0u,
            "late-objects: orphaned worker remains queryable after its owner exits");
@@ -59127,6 +59368,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_thread_stack_free_size_contract();
     test_check_thread_stack_contract();
     test_refer_thread_status();
+    test_refer_run_and_callback_status_check_their_span();
     test_change_current_thread_attr();
     test_suspend_resume_errors_and_ready_thread();
     test_change_thread_priority_contract();

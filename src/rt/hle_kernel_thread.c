@@ -372,6 +372,10 @@ static uint32_t h_WaitThreadEndCB(CpuState *s) {
 static uint32_t h_ReferThreadRunStatus(CpuState *s) {
     uint32_t out = A1;
     if (out) {
+        /* The whole 0x2c-byte record must be guest memory before the first write, as for
+         * ReferThreadStatus: a partly mapped or unmapped out pointer answers ILLEGAL_ADDR
+         * instead of a partial record and success. */
+        if (!sr_guest_span_writable(out, 0x2cu)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
         SrThreadRunStatus rs;
         int rc = sched_thread_run_status(A0, &rs);
         if (rc < 0) return 0x800201a0u;
@@ -393,30 +397,28 @@ static uint32_t h_ReferThreadRunStatus(CpuState *s) {
     }
     return 0;
 }
+/* sceKernelReferThreadStatus(thid, SceKernelThreadInfo *info). The caller's size word selects
+ * the write, by the rule the sema, event-flag and mailbox status calls share
+ * (PSP-KERNEL-STATUS-001), applied here without a thread-specific cite as for VTimer: a size of
+ * 0 writes nothing and succeeds; otherwise min(size, 0x68) bytes of a record whose size word is
+ * 0x68 reach guest memory, so nothing past the caller's declared struct is written. A size word
+ * above 0x68 is not measured for threads and stops the run by name. */
+_Static_assert(sizeof(SrThreadInfo) == 0x68u, "SceKernelThreadInfo is 0x68 bytes");
 static uint32_t h_ReferThreadStatus(CpuState *s) {
-    if (!A1 || !sr_guest_span_writable(A1, (uint32_t)sizeof(SrThreadInfo)))
+    if (!A1 || !sr_guest_span_readable(A1, 4u))
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     SrThreadInfo info;
     if (sched_thread_info(A0, &info) != 0) return 0x80020198u;
-    for (uint32_t i = 0; i < sizeof(info.name); i++) MEM_W8(A1 + 4u + i, (uint8_t)info.name[i]);
-    MEM_W32(A1 + 0x00u, info.size);
-    MEM_W32(A1 + 0x24u, info.attr);
-    MEM_W32(A1 + 0x28u, info.status);
-    MEM_W32(A1 + 0x2cu, info.entry);
-    MEM_W32(A1 + 0x30u, info.stack);
-    MEM_W32(A1 + 0x34u, info.stackSize);
-    MEM_W32(A1 + 0x38u, info.gpReg);
-    MEM_W32(A1 + 0x3cu, info.initPriority);
-    MEM_W32(A1 + 0x40u, info.currentPriority);
-    MEM_W32(A1 + 0x44u, info.waitType);
-    MEM_W32(A1 + 0x48u, info.waitId);
-    MEM_W32(A1 + 0x4cu, info.wakeupCount);
-    MEM_W32(A1 + 0x50u, info.exitStatus);
-    MEM_W32(A1 + 0x54u, info.runClocksLow);
-    MEM_W32(A1 + 0x58u, info.runClocksHigh);
-    MEM_W32(A1 + 0x5cu, info.intrPreemptCount);
-    MEM_W32(A1 + 0x60u, info.threadPreemptCount);
-    MEM_W32(A1 + 0x64u, info.releaseCount);
+    const uint32_t input_size = MEM_R32(A1);
+    if (input_size == 0u) return 0;
+    if (input_size > (uint32_t)sizeof(SrThreadInfo))
+        return hle_unmodelled_stop("ThreadManForUser_17C1684E",
+                                   "with a size word of 0x%x, above the 0x68-byte "
+                                   "SceKernelThreadInfo, is not measured", input_size);
+    if (!sr_guest_span_writable(A1, input_size))
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    for (uint32_t i = 0; i < input_size; i++)
+        MEM_W8(A1 + i, ((const uint8_t *)&info)[i]);
     return 0;
 }
 
@@ -599,7 +601,12 @@ static uint32_t h_ReferCallbackStatus(CpuState *s) {
     uint32_t infop = A1;
     int idx = sr_callback_find_in_table(uid);
     if (idx < 0) return 0x800201A1u;
+    /* The size word is read and the 56-byte record written only once each span is guest
+     * memory, as for ReferThreadStatus: an unmapped or partly mapped info pointer answers
+     * ILLEGAL_ADDR instead of a partial record and success. */
+    if (infop && !sr_guest_span_readable(infop, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (infop && MEM_R32(infop) != 0) {
+        if (!sr_guest_span_writable(infop, 56u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
         CallbackEntry *cb = &s_callbacks[idx];
         for (uint32_t i = 0; i < 56u; i++) MEM_W8(infop + i, 0);
         MEM_W32(infop + 0, 56u);
@@ -656,12 +663,20 @@ static uint32_t h_ReleaseWaitThread(CpuState *s) {
     /* a0=thid. Measured on a PSP-3000, firmware 6.61 (PSP-B3-01,
      * docs/HARDWARE_ORACLE.md): a waiter is released with WAIT_RELEASE;
      * the running caller (by uid or 0) answers ILLEGAL_THID
-     * and a deleted thread answers UNKNOWN_THID. */
+     * and a deleted thread answers UNKNOWN_THID. A live thread that is not in an object
+     * wait or a SleepThread (ready, dormant, or in a DelayThread wait) is not measured: it
+     * is not the deleted-thread case, so it stops the run by name rather than answering
+     * UNKNOWN_THID for a thread that exists. */
     uint32_t uid = A0;
     uint32_t self = sched_current_uid();
     if (uid == 0u || uid == self) return 0x80020197u;
-    if (!sched_wake_one_object_waiter_with_result(uid, SCE_KERNEL_ERROR_WAIT_RELEASE))
-        return 0x80020198u;
+    if (!sched_wake_one_object_waiter_with_result(uid, SCE_KERNEL_ERROR_WAIT_RELEASE)) {
+        SrThreadInfo info;
+        if (sched_thread_info(uid, &info) != 0) return 0x80020198u;
+        return hle_unmodelled_stop("ThreadManForUser_2C34E053",
+                                   "of live thread 0x%x that is not waiting (status 0x%x) "
+                                   "is not measured", uid, info.status);
+    }
     sched_preempt();
     return 0;
 }
@@ -944,4 +959,10 @@ void hle_register_init_kernel_thread_2(void) {
     sr_hle_register(0x730ed8bc, "sceKernelReferCallbackStatus", h_ReferCallbackStatus);
 }
 #endif
+#endif
+
+#ifdef SR_HLE_THREAD_SELFTEST
+/* Test-build-only call-throughs to the production handlers this build leaves unregistered. */
+uint32_t sr_hle_test_refer_thread_run_status(CpuState *s) { return h_ReferThreadRunStatus(s); }
+uint32_t sr_hle_test_refer_callback_status(CpuState *s) { return h_ReferCallbackStatus(s); }
 #endif

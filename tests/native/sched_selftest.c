@@ -558,14 +558,26 @@ static void pause_test_reset(int paced, uint64_t host_us_now) {
     g_pause_test_alarm_calls = 0;
 }
 
+/* NULL unsets NAME; any other value, the empty string included, sets it. The Windows C runtime
+ * cannot hold an empty value (_putenv("NAME=") deletes it), so there "" also unsets; the
+ * empty-value cells are checked on the POSIX legs (pause_test_env_holds_empty). */
 static void pause_test_set_env(const char *name, const char *value) {
 #if defined(_WIN32) || defined(_WIN64)
     char assignment[160];
     snprintf(assignment, sizeof(assignment), "%s=%s", name, value ? value : "");
     _putenv(assignment);
 #else
-    if (value && value[0]) setenv(name, value, 1);
+    if (value) setenv(name, value, 1);
     else unsetenv(name);
+#endif
+}
+
+/* Whether a "" given to pause_test_set_env reaches the environment as a set, empty value. */
+static int pause_test_env_holds_empty(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    return 0;
+#else
+    return 1;
 #endif
 }
 
@@ -1803,6 +1815,20 @@ static void test_clock_mode_follows_the_environment(void) {
         pause_test_set_env("SR_PADSCRIPT", cases[i].padscript);
         pause_test_set_env("SR_FBSNAP_WINDOWS", cases[i].fbsnap);
         pause_test_set_env("SR_DETERMINISTIC_SLICE_US", cases[i].slice);
+        /* An empty cell must reach pace_setup as a set, empty value, not as an unset one:
+         * otherwise "empty values count as unset" only repeats the unset cell.
+         * MUTANT: treat an empty SR_DETERMINISTIC_CLOCK as on in sched_det_parse -- the empty
+         *   cell reports a deterministic run (POSIX legs; the Windows CRT cannot hold ""). */
+        if (pause_test_env_holds_empty()) {
+            const char *const values[2] = { cases[i].novbpace, cases[i].det };
+            const char *const keys[2] = { "SR_NOVBPACE", "SR_DETERMINISTIC_CLOCK" };
+            for (int k = 0; k < 2; k++) {
+                if (!values[k] || values[k][0]) continue;
+                const char *seen = getenv(keys[k]);
+                expect(seen != NULL && seen[0] == '\0',
+                       "an empty environment cell is set to the empty string, not unset");
+            }
+        }
         s_pace_on = -1;
         s_det_clock = 0;
         s_det_slice_us = SCHED_DET_SLICE_US_DEFAULT;
@@ -4641,16 +4667,22 @@ static void test_liveness_interrupt_wake_enters_scheduler(void) {
            "the liveness trace records both interrupt entry and object wake ownership");
 }
 
+/* A two-slot queue whose producer parks on NOT_FULL and whose consumer parks on NOT_EMPTY.
+ * The test only parks a thread (the state a blocking call leaves); every release is the
+ * scheduler's own sched_wake, and the wait set is read back through sched_count_waiters
+ * right after each wake, so the membership checks see production bookkeeping.
+ * MUTANT: make sched_wake a no-op -- the parked peer stays in its wait set and the
+ *   "wake readies" and "no membership left behind" checks fail. */
 static void test_liveness_queue_full_and_empty_without_spin(void) {
     reset_sched();
     int producer = mk(0x36fu, TH_READY, 32);
     int consumer = mk(0x370u, TH_READY, 32);
-    int queue[2] = {0, 0};
     int count = 0;
     int producer_attempts = 0;
     int consumer_attempts = 0;
     int producer_waited = 0;
     int consumer_waited = 0;
+    int wakes_ok = 1;
     for (int step = 0; step < 12; step++) {
         if (s_tcb[producer].state != TH_WAIT_OBJ) {
             if (count == 2) {
@@ -4659,38 +4691,42 @@ static void test_liveness_queue_full_and_empty_without_spin(void) {
                 producer_waited++;
             } else {
                 producer_attempts++;
-                queue[count++] = step;
+                count++;
+                const int consumer_parked = s_tcb[consumer].state == TH_WAIT_OBJ;
                 sched_wake(LIVENESS_QUEUE_NOT_EMPTY);
-                if (s_tcb[consumer].state == TH_WAIT_OBJ) {
-                    s_tcb[consumer].state = TH_READY;
-                    s_tcb[consumer].wait_obj = 0;
-                }
+                wakes_ok &= sched_count_waiters(LIVENESS_QUEUE_NOT_EMPTY) == 0;
+                if (consumer_parked) wakes_ok &= s_tcb[consumer].state == TH_READY;
             }
         }
-        if ((step & 1) != 0 && count > 0) {
+        if ((step & 1) != 0 && count > 0 && s_tcb[consumer].state != TH_WAIT_OBJ) {
             consumer_attempts++;
-            (void)queue[--count];
+            count--;
             if (step >= 7 && count > 0) {
                 consumer_attempts++;
-                (void)queue[--count];
+                count--;
             }
+            const int producer_parked = s_tcb[producer].state == TH_WAIT_OBJ;
             sched_wake(LIVENESS_QUEUE_NOT_FULL);
-            if (s_tcb[producer].state == TH_WAIT_OBJ) {
-                s_tcb[producer].state = TH_READY;
-                s_tcb[producer].wait_obj = 0;
-            }
+            wakes_ok &= sched_count_waiters(LIVENESS_QUEUE_NOT_FULL) == 0;
+            if (producer_parked) wakes_ok &= s_tcb[producer].state == TH_READY;
         }
-        if (count == 0) {
+        if (count == 0 && s_tcb[consumer].state != TH_WAIT_OBJ) {
             s_tcb[consumer].state = TH_WAIT_OBJ;
             s_tcb[consumer].wait_obj = LIVENESS_QUEUE_NOT_EMPTY;
             consumer_waited++;
         }
-        expect(count >= 0 && count <= 2, "bounded queue never exceeds its capacity");
     }
+    /* Drain: a parked consumer is released by one more item, through sched_wake alone. */
     if (s_tcb[consumer].state == TH_WAIT_OBJ) {
-        s_tcb[consumer].state = TH_READY;
-        s_tcb[consumer].wait_obj = 0;
+        producer_attempts++;
+        count++;
+        sched_wake(LIVENESS_QUEUE_NOT_EMPTY);
+        wakes_ok &= s_tcb[consumer].state == TH_READY;
     }
+    expect(wakes_ok,
+           "each sched_wake readies the parked peer and empties that object's wait set");
+    expect(s_tcb[producer].state == TH_READY && s_tcb[consumer].state == TH_READY,
+           "queue workload ends with both threads released by the scheduler");
     expect(producer_attempts > 0 && consumer_attempts > 0,
            "queue workload performs bounded producer and consumer progress");
     expect(producer_waited > 0 && consumer_waited > 0,

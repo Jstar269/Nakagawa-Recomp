@@ -1524,10 +1524,15 @@ static uint32_t h_ExitGame(CpuState *s) {
      * beside the executable that produced them, where tools/mem_debug.py
      * build_artifact_dir looks, so each title writes its own dump. The folder is
      * resolved at run time, never compiled in: a packaged game writes beside its own
-     * executable, and the compiled object carries no build path (#1306). */
+     * executable, and the compiled object carries no build path (#1306). The dump holds
+     * guest memory (CpuState and 64 KiB of the guest stack), a private capture, so both
+     * files are written only when the operator opts in with SR_EXIT_DUMP; a normal exit
+     * leaves nothing beside the executable. */
     char *sr_dump_path = NULL, *sr_flag_path = NULL;
-    sr_exit_artifact_path_alloc(L"crash_dump.bin", &sr_dump_path);
-    sr_exit_artifact_path_alloc(L"exited.flag", &sr_flag_path);
+    if (getenv("SR_EXIT_DUMP")) {
+        sr_exit_artifact_path_alloc(L"crash_dump.bin", &sr_dump_path);
+        sr_exit_artifact_path_alloc(L"exited.flag", &sr_flag_path);
+    }
     FILE *f_dump = sr_dump_path ? sr_fopen_utf8(sr_dump_path, L"wb") : NULL;
     if (f_dump) {
         /* Versioned header so tools/mem_debug.py can reject dumps written by a
@@ -2339,15 +2344,17 @@ static uint32_t h_StartModule(CpuState *s) {
         return hle_libfont_startup_stop(reason);
     }
 
-    static int s_logged_untranslated = 0;
-    if (!is_libfont && !s_logged_untranslated) {
-        s_logged_untranslated = 1;
-        if (mod->host_served) {
-            fprintf(stderr, "sceKernelStartModule(uid=0x%x, path='%s') -> host HLE serves this "
-                            "module's exports; module_start not executed\n", uid, mod->path);
-        } else {
-            fprintf(stderr, "sceKernelStartModule(uid=0x%x) -> unknown or untranslated entry, skipping\n", uid);
-        }
+    /* Every module whose module_start never ran is named on each such start, not only the
+     * first one in a run: a second untranslated module marked STARTED with no line would
+     * hide its missing entry. */
+    if (mod->host_served) {
+        fprintf(stderr, "sceKernelStartModule(uid=0x%x, path='%s', entry=0x%08x) -> host HLE "
+                        "serves this module's exports; module_start not executed\n",
+                uid, mod->path, mod->module_start);
+    } else {
+        fprintf(stderr, "sceKernelStartModule(uid=0x%x, path='%s', entry=0x%08x) -> unknown or "
+                        "untranslated entry; module_start not executed\n",
+                uid, mod->path, mod->module_start);
     }
     mod->state = MODULE_STATE_STARTED;
     return 0;
