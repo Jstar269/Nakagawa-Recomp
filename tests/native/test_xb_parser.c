@@ -999,6 +999,50 @@ static void test_unpack_refuses_case_collisions(void) {
     printf("[XB_TEST] unpack refuses names that differ only in letter case PASSED\n");
 }
 
+/* Windows writes a member as its CP932 name converted to UTF-16, and some different
+ * Shift-JIS bytes land on one file there: 0xED 0x40 (NEC-selected IBM extension) and
+ * 0xFA 0x5C (IBM extension) both decode to U+7E8A, and 0xFA 0x40 (small Roman numeral
+ * one, U+2170) folds onto 0x87 0x54 (capital Roman numeral one, U+2160). On a host
+ * whose file names fold case, unpack refuses each pair by name before writing either;
+ * on a POSIX host the names stay distinct Shift-JIS bytes and both members unpack. */
+static void test_unpack_refuses_windows_name_aliases(void) {
+    static const uint8_t first[] = "first";
+    static const uint8_t second[] = "second";
+    static const char *const pairs[][2] = {
+        { "\xED\x40.bin", "\xFA\x5C.bin" },
+        { "\xFA\x40.bin", "\x87\x54.bin" },
+        { "dir/\x87\x90.bin", "dir/\x81\xE0.bin" }
+    };
+    char dest[512];
+    char error[256];
+    char probe[600];
+    bool folds = nk_platform_paths_fold_case();
+    for (size_t p = 0; p < sizeof(pairs) / sizeof(pairs[0]); p++) {
+        const FixtureEntry entries[] = {
+            { pairs[p][0], first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+            { pairs[p][1], second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+        };
+        NkResult result = unpack_fixture(entries, 2u, dest, sizeof(dest), error, sizeof(error));
+        snprintf(probe, sizeof(probe), "%s/%s", dest, pairs[p][1]);
+        if (folds) {
+            if (result == NK_OK) fprintf(stderr, "unpacked a Windows name alias, pair %zu\n", p);
+            assert(result != NK_OK);
+            assert(strstr(error, "one file on this host") != NULL);
+        } else {
+            assert(result == NK_OK);
+            assert(nk_platform_get_file_size(probe) == (int64_t)(sizeof(second) - 1u));
+        }
+    }
+    /* Two distinct kanji still unpack side by side on every host. */
+    const FixtureEntry distinct[] = {
+        { "\x88\x9F.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "\x88\xA0.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    assert(unpack_fixture(distinct, 2u, dest, sizeof(dest), error, sizeof(error)) == NK_OK);
+    assert(native_test_remove_tree(dest));
+    printf("[XB_TEST] unpack refuses Shift-JIS names Windows writes as one file PASSED\n");
+}
+
 /* The Shift-JIS character 0x83 0x5C carries a 0x5C trail byte, a backslash in ASCII.
  * Unpack writes the member into the destination itself: on POSIX, where the name stays
  * Shift-JIS bytes, no folder named after its lead byte appears beside it. */
@@ -2389,6 +2433,7 @@ int main(void) {
     test_lazy_mount_retail_string_table_at_eof();
     test_unpack_refuses_host_aliased_names();
     test_unpack_refuses_case_collisions();
+    test_unpack_refuses_windows_name_aliases();
     test_unpack_sjis_trail_backslash_is_not_a_separator();
     test_deterministic_mutation_fuzz();
     test_archive_vfs_precedence();

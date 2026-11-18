@@ -50,6 +50,19 @@ static bool utf8_to_wide(const char *utf8, WCHAR *out_wide, size_t max_wide_char
     return true;
 }
 
+int nk_platform_compare_file_names(const char *a, const char *b) {
+    WCHAR wide_a[NK_PLATFORM_FILE_NAME_UNITS];
+    WCHAR wide_b[NK_PLATFORM_FILE_NAME_UNITS];
+    bool a_wide = utf8_to_wide(a, wide_a, NK_PLATFORM_FILE_NAME_UNITS);
+    bool b_wide = utf8_to_wide(b, wide_b, NK_PLATFORM_FILE_NAME_UNITS);
+    if (a_wide != b_wide) return a_wide ? -1 : 1;
+    if (a_wide) {
+        int order = CompareStringOrdinal(wide_a, -1, wide_b, -1, TRUE);
+        if (order != 0) return order - CSTR_EQUAL;
+    }
+    return strcmp(a, b);
+}
+
 /* Bounded UTF-16 -> UTF-8 conversion; unpaired surrogates are refused. */
 static bool wide_to_utf8(const WCHAR *wide, char *out_utf8, size_t max_utf8_bytes) {
     if (!wide || !out_utf8 || max_utf8_bytes == 0) return false;

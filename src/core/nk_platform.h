@@ -63,6 +63,16 @@ char nk_platform_path_list_separator(void);
    (NTFS folds case), false on POSIX hosts, whose realpath() names are compared
    byte for byte. */
 bool nk_platform_paths_fold_case(void);
+/* Orders two UTF-8 file names the way the host's file system matches them, so 0 means
+   the host opens both as one file. Win32: the UTF-16 names compared ordinally with case
+   ignored through the system's upper-case table (CompareStringOrdinal), so two names
+   that differ only in case, or that are different UTF-8 for one UTF-16 text, order
+   equal; POSIX: the bytes (strcmp). Returns <0, 0 or >0, one consistent order fit for
+   sorting. On Win32 a name that is not valid UTF-8 or has NK_PLATFORM_FILE_NAME_UNITS
+   UTF-16 units or more is ordered by its bytes after every name that converts; a name
+   shorter than NK_PLATFORM_FILE_NAME_UNITS UTF-8 bytes always converts when valid. */
+#define NK_PLATFORM_FILE_NAME_UNITS 4096u
+int nk_platform_compare_file_names(const char *a, const char *b);
 bool nk_platform_file_exists(const char *path);
 bool nk_platform_dir_exists(const char *path);
 /* True only when the OS says the name does not exist: ENOENT or ENOTDIR on POSIX, and

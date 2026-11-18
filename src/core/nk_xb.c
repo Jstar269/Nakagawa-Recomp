@@ -1591,12 +1591,15 @@ static NkResult xb_check_host_member_name(const char *member, char *error_messag
     return NK_OK;
 }
 
-/* The trail byte of the upper-case letter Windows folds a two-byte Shift-JIS letter
-   onto, or the trail byte itself. Windows writes a member name as CP932 converted to
-   UTF-16, and NTFS folds the case of the full-width Latin (U+FF41 onto U+FF21), Greek
-   and Cyrillic letters that CP932 encodes after the lead bytes 0x82, 0x83 and 0x84.
-   Other trail bytes, katakana among them (0x83 0x41 and 0x83 0x61), are distinct
-   characters, not two cases of one. */
+/* The trail byte of the upper-case letter a two-byte Shift-JIS full-width Latin
+   (U+FF41 onto U+FF21), Greek or Cyrillic letter folds onto, or the trail byte itself:
+   the letter pairs CP932 encodes after the lead bytes 0x82, 0x83 and 0x84, refused on
+   every host so an archive with them unpacks nowhere. Katakana (0x83 0x41 and 0x83
+   0x61) are distinct characters. This is not every pair Windows writes as one file:
+   CP932 has two encodings of some characters (0xED 0x40 and 0xFA 0x5C are both
+   U+7E8A) and NTFS folds other cases (small Roman numerals, 0xFA 0x40, onto capital
+   ones, 0x87 0x54); xb_check_host_names_distinct finds those on such a host from the
+   names it writes. */
 static uint8_t xb_sjis_upper_trail(uint8_t lead, uint8_t trail) {
     if (lead == 0x82u && trail >= 0x81u && trail <= 0x9au) return (uint8_t)(trail - 0x21u);
     if (lead == 0x83u && trail >= 0xbfu && trail <= 0xd6u) return (uint8_t)(trail - 0x20u);
@@ -1640,9 +1643,10 @@ static bool xb_folded_names_equal(const char *a, const char *b) {
 /* Refuses two members whose names differ only in letter case (ASCII, or the
    full-width Latin, Greek and Cyrillic letters of xb_sjis_upper_trail): Windows opens
    both as one file, so the second would silently replace the first. It applies on
-   every host, as the ZIP reader's duplicate rule does. Names that are byte-identical
-   are the parser's accepted duplicates (their bytes were found identical), and
-   writing either gives the same file. */
+   every host, as the ZIP reader's duplicate rule does; xb_check_host_names_distinct
+   adds the rest of the host's own aliases. Names that are byte-identical are the
+   parser's accepted duplicates (their bytes were found identical), and writing
+   either gives the same file. */
 static NkResult xb_check_member_names_distinct(const NkXbArchive *archive,
                                                char *error_message,
                                                size_t error_message_size) {
@@ -1672,6 +1676,60 @@ static NkResult xb_check_member_names_distinct(const NkXbArchive *archive,
         if (result == NK_OK && slots[slot] == -1) slots[slot] = (int32_t)i;
     }
     free(slots);
+    return result;
+}
+
+typedef struct {
+    char *host;          /* the name as the host writes it (UTF-8) */
+    const char *member;  /* the archive's Shift-JIS name */
+} XbHostName;
+
+static int xb_host_name_order(const void *a, const void *b) {
+    return nk_platform_compare_file_names(((const XbHostName *)a)->host,
+                                          ((const XbHostName *)b)->host);
+}
+
+/* Refuses two members the host writes as one file, judged on the names it is given:
+   on Windows the CP932 name converted to UTF-16, compared as the file system matches
+   names (nk_platform_compare_file_names). That covers what xb_sjis_upper_trail does
+   not: two CP932 encodings of one character, and case pairs outside its letters. On a
+   host whose names are bytes there is nothing more to find. Byte-identical names stay
+   the parser's accepted duplicates. A name that cannot be converted is refused here,
+   as the unpack would refuse it, so nothing is written. */
+static NkResult xb_check_host_names_distinct(const NkXbArchive *archive,
+                                             char *error_message,
+                                             size_t error_message_size) {
+    size_t count = archive->entry_count;
+    if (count < 2u || !nk_platform_paths_fold_case()) return NK_OK;
+    if (count > SIZE_MAX / sizeof(XbHostName)) return NK_ERROR_OUT_OF_MEMORY;
+    XbHostName *names = (XbHostName *)calloc(count, sizeof(XbHostName));
+    if (!names) return NK_ERROR_OUT_OF_MEMORY;
+    NkResult result = NK_OK;
+    char host[NK_PLATFORM_FILE_NAME_UNITS];
+    for (size_t i = 0; i < count && result == NK_OK; i++) {
+        names[i].member = archive->entries[i].path;
+        if (!xb_member_path_to_host_utf8(names[i].member, host, sizeof(host))) {
+            result = xb_fail(error_message, error_message_size,
+                             "XB member path is too long or cannot be contained");
+        } else if (!(names[i].host = xb_strdup(host))) {
+            result = NK_ERROR_OUT_OF_MEMORY;
+        }
+    }
+    if (result == NK_OK) {
+        qsort(names, count, sizeof(XbHostName), xb_host_name_order);
+        for (size_t i = 1; i < count; i++) {
+            if (nk_platform_compare_file_names(names[i - 1u].host, names[i].host) == 0 &&
+                strcmp(names[i - 1u].member, names[i].member) != 0) {
+                result = xb_fail(error_message, error_message_size,
+                                 "two XB members have different names that are one file on "
+                                 "this host (letter case, or two Shift-JIS spellings of one "
+                                 "character), so one would replace the other");
+                break;
+            }
+        }
+    }
+    for (size_t i = 0; i < count; i++) free(names[i].host);
+    free(names);
     return result;
 }
 
@@ -1707,6 +1765,9 @@ NkResult nk_xb_unpack(const char *archive_path, const char *destination_root,
     }
     if (result == NK_OK) {
         result = xb_check_member_names_distinct(&archive, error_message, error_message_size);
+    }
+    if (result == NK_OK) {
+        result = xb_check_host_names_distinct(&archive, error_message, error_message_size);
     }
     if (result != NK_OK) {
         nk_xb_close(&archive);
