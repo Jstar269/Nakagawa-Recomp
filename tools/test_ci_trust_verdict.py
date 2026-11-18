@@ -29,6 +29,7 @@ try:
     import ci_trust_verdict as ctv
 except ModuleNotFoundError:  # Running as ``python -m unittest tools.test_ci_trust_verdict``.
     from tools import ci_trust_verdict as ctv
+from nk_core.git_isolation import isolated_git_env  # noqa: E402  (ci_trust_verdict put tools/ on sys.path)
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -47,6 +48,20 @@ LABELLED = "2026-10-28T10:30:00Z"     # Scenario.label's default
 RECORDED = "2026-10-28T10:31:00Z"     # after it: when Scenario.record's job completed
 PROVENANCE = next(producer for producer in ctv.PRODUCERS if producer.workflow == PROV)
 NAMED_TITLE = "Provenance attestation of {head}"   # the attestation workflow's run-name; see WorkflowWiringTests
+
+
+def _isolate_git(case: unittest.TestCase, root: Path) -> dict[str, str]:
+    """Strip the caller's repository-selecting variables and global Git configuration for the rest of ``case``.
+
+    ``git -C <scratch>`` still obeys an exported GIT_DIR, GIT_INDEX_FILE or GIT_WORK_TREE (a git hook,
+    ``git rebase --exec``, a worktree tool), and the verifier's own git calls inherit ``os.environ``, so both the
+    scratch commands and the code under test run in ``isolated_git_env``. Returns that environment.
+    """
+    env = isolated_git_env(root=root)
+    patcher = mock.patch.dict(os.environ, env, clear=True)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+    return env
 
 
 def _run(run_id: int, path: str, event: str = "pull_request", *, sha: str = HEAD, created: str = PUSHED,
@@ -813,10 +828,24 @@ class ProtectedPathTests(unittest.TestCase):
         self.assertNotIn("tools/nk_cli.py", paths)
         self.assertNotIn("tools/hle_registry_meta.py", paths)
 
+    def test_an_added_osv_scanner_configuration_is_a_protected_change(self) -> None:
+        """OSV-Scanner reads an osv-scanner.toml beside a scanned lockfile or in a parent directory, and its
+        [[IgnoredVulns]] turn the required 'OSV Vulnerability Scan' green. Failing-before: no rule named the
+        file, so a candidate could add one with no CI_CHANGE_UNAPPROVED."""
+        trusted = {OSV: "1", "tools/requirements-lock.txt": "2"}
+        for path in ("tools/osv-scanner.toml", "osv-scanner.toml", "src/deep/osv-scanner.toml"):
+            with self.subTest(path=path):
+                candidate = trusted | {path: "3"}
+                paths = ctv.protected_paths(trusted, candidate, [])
+                self.assertIn(path, paths)
+                self.assertEqual(ctv.protected_changes(trusted, candidate, trusted, paths),
+                                 [{"path": path, "kind": "added"}])
+        self.assertNotIn("tools/osv-scanner.toml.md", ctv.protected_paths({}, {"tools/osv-scanner.toml.md": "x"}, []))
+
     def test_git_facts_on_a_real_repository(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            env = os.environ | {
+            env = _isolate_git(self, repo) | {
                 "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
             }
@@ -1212,6 +1241,41 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(self._main(gh, "--pull-request", str(PR)), 1)
         self.assertEqual(gh.posts[0][1]["state"], "failure")
         self.assertIn("CI_CHANGE_UNAPPROVED", gh.posts[0][1]["description"])
+
+    def test_main_refuses_a_head_whose_candidate_deleted_a_producer_workflow(self) -> None:
+        """A required workflow the candidate deleted (or whose triggers it edited) never runs at the head, and
+        GitHub starts a pull_request run together with the others. Failing-before: the collector stopped at the
+        first producer with no run and main() posted 'Waiting for: dependency-review' for ever, so the
+        unapproved CI change was never named."""
+        scenario = Scenario()
+        scenario.drop_runs(DEP)
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts([{"path": DEP, "kind": "deleted"}])) as facts:
+            self.assertEqual(self._main(gh, "--pull-request", str(PR)), 1)
+        facts.assert_called_once()
+        self.assertEqual([body["state"] for _, body in gh.posts], ["failure"])
+        self.assertIn("CI_CHANGE_UNAPPROVED", gh.posts[0][1]["description"])
+
+    def test_a_producer_without_a_run_and_no_ci_change_stays_pending(self) -> None:
+        """The full read for an absent producer judges it pending, not passed, when nothing protected changed."""
+        scenario = Scenario()
+        scenario.drop_runs(DEP)
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()):
+            self.assertEqual(self._main(gh, "--pull-request", str(PR)), 0)
+        self.assertEqual([(body["state"], body["description"]) for _, body in gh.posts],
+                         [("pending", "Waiting for: dependency-review")])
+
+    def test_an_absent_producer_waits_while_another_is_unfinished(self) -> None:
+        """Only the last producer to finish pays for the full read (the token budget, 2026-10-30)."""
+        scenario = Scenario()
+        scenario.drop_runs(DEP)
+        scenario.raw["workflow_runs"][1].update(status="in_progress", conclusion=None)    # OSV still running
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()) as facts:
+            raw = ctv.collect(gh, Path("."), "main", HEAD, PR)
+        facts.assert_not_called()
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": ["OSV Vulnerability Scan", "dependency-review"]})
 
     def test_main_replaces_an_old_verdict_with_error_when_it_cannot_judge(self) -> None:
         gh = FakeGitHub(Scenario())
@@ -2307,7 +2371,7 @@ class ApprovalDigestTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.repo = Path(self._tmp.name) / "origin"
         self.repo.mkdir()
-        self.env = os.environ | {
+        self.env = _isolate_git(self, Path(self._tmp.name)) | {
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
         }
@@ -3043,6 +3107,7 @@ class NamedRouteCollectorTests(unittest.TestCase):
     def test_on_default_branch_reads_ancestry_from_the_trusted_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            _isolate_git(self, repo)
 
             def git(*args: str) -> str:
                 return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
@@ -3071,6 +3136,7 @@ class NamedRouteCollectorTests(unittest.TestCase):
         workflow = ".github/workflows/gate.yml"
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            _isolate_git(self, repo)
 
             def git(*args: str) -> str:
                 return subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c",
@@ -3633,6 +3699,54 @@ class GateCodeTests(unittest.TestCase):
         missing = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); import nk_core; nk_core.nope"],
                                  cwd=ROOT, check=False, capture_output=True, text=True)
         self.assertIn("AttributeError", missing.stderr)
+
+
+class ScratchRepositoryIsolationTests(unittest.TestCase):
+    """The tests that build scratch repositories act on those repositories only."""
+
+    SCRATCH_TESTS = (
+        "ProtectedPathTests.test_git_facts_on_a_real_repository",
+        "ApprovalDigestTests.test_a_change_to_a_protected_path_changes_the_digest",
+        "NamedRouteCollectorTests.test_on_default_branch_reads_ancestry_from_the_trusted_checkout",
+        "NamedRouteCollectorTests.test_only_the_default_branchs_current_copy_of_a_workflow_is_a_trusted_definition",
+    )
+
+    def test_a_callers_repository_variables_leave_the_callers_repository_alone(self) -> None:
+        """A git hook, ``git rebase --exec`` or a worktree tool exports GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE;
+        ``git -C <scratch>`` then still acts on the caller's repository. Failing-before: the scratch tests passed
+        os.environ on, and their ``add -A``, ``commit`` and ``update-ref`` wrote into the caller's repository."""
+        with tempfile.TemporaryDirectory() as tmp:
+            caller = Path(tmp) / "caller"
+            caller.mkdir()
+            clean = isolated_git_env(root=caller)
+
+            def caller_git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(caller), *args], check=True, capture_output=True, text=True,
+                                      env=clean).stdout.strip()
+
+            caller_git("init", "-q", "-b", "work")
+            (caller / "mine.txt").write_text("the caller's file\n", encoding="utf-8")
+            caller_git("add", "mine.txt")
+            caller_git("commit", "-q", "-m", "the caller's commit")
+
+            def state() -> tuple[str, str, str]:
+                return (caller_git("for-each-ref", "--format=%(refname) %(objectname)"),
+                        caller_git("status", "--porcelain", "--untracked-files=all"),
+                        caller_git("ls-files", "--stage"))
+
+            before = state()
+            exported = {"GIT_DIR": str(caller / ".git"), "GIT_INDEX_FILE": str(caller / ".git" / "index"),
+                        "GIT_WORK_TREE": str(caller)}
+            module = sys.modules[__name__]
+            suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name, module)
+                                       for name in self.SCRATCH_TESTS)
+            result = unittest.TestResult()
+            with mock.patch.dict(os.environ, exported):
+                suite.run(result)
+            self.assertEqual(state(), before, "a scratch-repository test wrote into the caller's repository")
+            self.assertEqual(result.testsRun, len(self.SCRATCH_TESTS))
+            self.assertEqual([test.id() for test, _ in result.errors + result.failures], [],
+                             "".join(trace for _, trace in result.errors + result.failures))
 
 
 if __name__ == "__main__":

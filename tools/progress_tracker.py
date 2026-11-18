@@ -64,7 +64,19 @@ OUT = REPO / "progress.json"
 # --------------------------------------------------------------
 
 
+# While verify_all() runs, the selected run log is read and decoded once and every checker
+# shares its lines: SR_GELOG run logs reach hundreds of MB, and some twenty checkers read
+# it. Any other log, and every read outside a verify pass, comes from the file afresh.
+_LOG_LINES_CACHE: dict[str, list[str]] = {}
+
+
 def _log_lines(name: str) -> list[str]:
+    if name in _LOG_LINES_CACHE:
+        return _LOG_LINES_CACHE[name]
+    return _read_log_lines(name)
+
+
+def _read_log_lines(name: str) -> list[str]:
     p = LOGS / name
     if not p.exists():
         return []
@@ -299,8 +311,22 @@ def _evidence_grade(status: str, *, kind: str, identity_bound: bool, stale: bool
 
 
 def verify_all() -> list[Item]:
-    items: list[Item] = []
+    return verify_all_with_run()[0]
+
+
+def verify_all_with_run() -> tuple[list[Item], dict]:
+    """The graded items and the run block (``_run_metadata``) they were graded against."""
     latest = latest_log()
+    if latest:
+        _LOG_LINES_CACHE[latest] = _read_log_lines(latest)
+    try:
+        return _verify_all_items(latest)
+    finally:
+        _LOG_LINES_CACHE.clear()
+
+
+def _verify_all_items(latest: str | None) -> tuple[list[Item], dict]:
+    items: list[Item] = []
     run_meta = _run_metadata(latest)
 
     # - Phase 1: Pipeline -
@@ -444,7 +470,7 @@ def verify_all() -> list[Item]:
             identity_bound=identity_bound,
             stale=stale,
         )
-    return items
+    return items, run_meta
 
 
 # --------------------------------------------------------------
@@ -507,11 +533,10 @@ def _check_hst_exe() -> str:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except Exception:
         return "pending"
-    try:
-        current_hash = hashlib.sha256(exe.read_bytes()).hexdigest().upper()
-    except Exception:
+    current_hash = _sha256_file(exe)
+    if current_hash is None:
         return "pending"
-    if data.get("exe_sha256") != current_hash:
+    if data.get("exe_sha256") != current_hash.upper():
         return "pending"
     return "verified"
 
@@ -770,16 +795,11 @@ def _check_split_function() -> str:
         return "pending"
     for c in chunks:
         text = c.read_text(encoding="utf-8", errors="ignore")
-        # Loose check: body of f_0005a648 contains only jr ra + move v0, a0
-        m = re.search(
-            r"void f_0005a648\(CpuState \*s\)\s*\{"
-            r"[\s\S]*?"
-            r"0x00801021u"
-            r"[\s\S]*?"
-            r"return;\s*\}",
-            text,
-        )
-        if m:
+        # Loose check: body of f_0005a648 contains only jr ra + move v0, a0. Only its own
+        # body, up to its column-0 closing brace: a later function in the chunk with the
+        # same word is not the mis-split.
+        body = _c_function_body(text, r"void\s+f_0005a648\s*\(")
+        if body is not None and re.search(r"0x00801021u[\s\S]*?return;\s*(?:\}|$)", body):
             return "regressed"
     return "verified"
 
@@ -1373,11 +1393,10 @@ def main(argv: list[str]) -> int:
         if not BUILD.exists():
             print(f"error: missing build dir {BUILD}", file=sys.stderr)
             return 2
-        items = verify_all()
+        items, run_meta = verify_all_with_run()
         result = aggregate(items)
-        latest = latest_log()
-        result["latest_log"] = latest
-        result["run"] = _run_metadata(latest)
+        result["latest_log"] = run_meta["selected_log"]
+        result["run"] = run_meta
         # Preserve other keys (like opengrip_progress) from existing file
         existing_data = {}
         if OUT.exists():
@@ -1401,10 +1420,10 @@ def main(argv: list[str]) -> int:
         axes = measure_all_axes()
         milestone = None
         if BUILD.exists():
-            milestone = aggregate(verify_all())
-            _latest = latest_log()
-            milestone["latest_log"] = _latest
-            milestone["run"] = _run_metadata(_latest)
+            milestone_items, run_meta = verify_all_with_run()
+            milestone = aggregate(milestone_items)
+            milestone["latest_log"] = run_meta["selected_log"]
+            milestone["run"] = run_meta
         doc = render_progress_markdown(axes, milestone)
         LOGS.mkdir(parents=True, exist_ok=True)
         out_path = LOGS / "PROGRESS.md"

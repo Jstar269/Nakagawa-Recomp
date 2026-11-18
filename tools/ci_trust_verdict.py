@@ -41,7 +41,8 @@ Rules (finding codes)
 
 (a) Protected definitions. A protected path is anything under
 ``.github/workflows/`` or ``.github/actions/``, the CI tools named in
-``PROTECTED_EXTRA``, and every ``tools/`` file a default-branch workflow names
+``PROTECTED_EXTRA``, every gate configuration file named in ``GATE_CONFIG_NAMES``
+wherever it stands, and every ``tools/`` file a default-branch workflow names
 outside a comment. A head whose copy differs from the default branch's is
 
 ``CI_CHANGE_UNAPPROVED``
@@ -353,6 +354,13 @@ PROTECTED_EXTRA = frozenset({
     "tools/publication_policy.py",
     "tools/publish_audit.py",
 })
+
+# Configuration a required gate reads from the candidate's own checkout, wherever it stands. The OSV job runs
+# ``osv-scanner --recursive ./`` on the pull request's tree, and OSV-Scanner applies the ``[[IgnoredVulns]]`` of
+# an ``osv-scanner.toml`` beside a scanned lockfile or in a parent directory, so an added one could silence the
+# required ``OSV Vulnerability Scan``. (Dependency Review reads a configuration only through its ``config-file``
+# input, which the workflow does not set.)
+GATE_CONFIG_NAMES = frozenset({"osv-scanner.toml"})
 
 # A tools/ path standing on its own, not the tail of a longer path such as an
 # installed copy (``$dir/source/tools/nk_cli.py``) or a module name.
@@ -935,6 +943,7 @@ def protected_paths(trusted: dict[str, str], candidate: dict[str, str], workflow
     paths = {path for path in set(trusted) | set(candidate) if path.startswith(PROTECTED_PREFIXES)}
     paths |= PROTECTED_EXTRA
     paths |= {path for path in set(trusted) | set(candidate) if _shadows_stdlib(path)}
+    paths |= {path for path in set(trusted) | set(candidate) if path.rsplit("/", 1)[-1] in GATE_CONFIG_NAMES}
     for text in workflow_texts:
         paths |= {path for path in referenced_tools(text) if path in trusted}
     return paths
@@ -1409,6 +1418,19 @@ def unfinished_producers(workflow_runs: list[dict], head_sha: str, default_branc
     return waiting
 
 
+def absent_producers(workflow_runs: list[dict], head_sha: str, default_branch: str = "main",
+                     producers: tuple[Producer, ...] = PRODUCERS) -> set[str]:
+    """The head-attached producers (no named route) that have no run at this head at all.
+
+    GitHub starts a ``pull_request`` producer's run with the others for the same event, so once every other
+    producer has finished, none of these is still coming: the candidate deleted the workflow or edited its
+    triggers. Waiting for it would post pending for ever and never name that change, so ``collect`` reads the
+    rest and ``evaluate`` judges the head: ``CI_CHANGE_UNAPPROVED`` for an unapproved change, else pending.
+    """
+    return {producer.context for producer in producers
+            if not producer.named_events and not producer_runs(workflow_runs, producer, head_sha, default_branch)}
+
+
 def collect(
     gh: GitHub, repo: Path, default_branch: str, head_sha: str, number: int | None,
     producers: tuple[Producer, ...] = PRODUCERS,
@@ -1416,7 +1438,8 @@ def collect(
     """Read everything the rules need. ``None`` when no pull request into the default branch has this head.
 
     While a producer is unfinished (``unfinished_producers``) only the workflow runs are read, and the result
-    holds ``waiting_producers`` in place of the rest.
+    holds ``waiting_producers`` in place of the rest. A head-attached producer with no run at all does not hold
+    the read back once every other producer has finished (``absent_producers``).
     """
     open_prs = gh.paginate("pulls?state=open")
     if number is None:
@@ -1427,10 +1450,11 @@ def collect(
         number = min(int(pr["number"]) for pr in matches)
     workflow_runs = gh.paginate(f"actions/runs?head_sha={head_sha}", "workflow_runs")
     waiting = unfinished_producers(workflow_runs, head_sha, default_branch, producers)
+    absent = absent_producers(workflow_runs, head_sha, default_branch, producers)
     # A named route is listed only when it can change the answer: while a producer without one is unfinished the
     # head is pending whatever the list says, and the list is one more API call (several for an old head).
     named_contexts = {producer.context for producer in producers if producer.named_events}
-    if not set(waiting) <= named_contexts:
+    if not set(waiting) - absent <= named_contexts:
         return {"head_sha": head_sha, "waiting_producers": waiting}
     since = min((run["created_at"] for run in workflow_runs if run.get("created_at")), default=None)
     horizons: dict[str, str] = {}
@@ -1448,7 +1472,7 @@ def collect(
         if lost:
             return {"head_sha": head_sha, "waiting_producers": lost}
         waiting = unfinished_producers(workflow_runs, head_sha, default_branch, producers)
-    if waiting:
+    if set(waiting) - absent:
         return {"head_sha": head_sha, "waiting_producers": waiting}
     pr = gh.get(f"pulls/{number}")
     assert isinstance(pr, dict)

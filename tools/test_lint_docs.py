@@ -1083,9 +1083,6 @@ class TestNativeUiMatrixEvidence(unittest.TestCase):
                             for error in errors), errors)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class RetiredIssueDenylistExpiry(unittest.TestCase):
     """GitHub numbers issues and PRs from one sequence, so the public repository
@@ -1754,3 +1751,20 @@ class TestDigestInventory(unittest.TestCase):
             self._make_repo(root, {}, None)
             self.assertEqual(lint_digest_inventory(root),
                              [f"{DIGEST_DOC}: missing; it holds the digest inventory"])
+
+
+class TestMainGuard(unittest.TestCase):
+    def test_the_main_guard_is_the_last_statement(self) -> None:
+        """`python tools/test_lint_docs.py` runs unittest.main(), which runs the classes defined so
+        far and exits. Failing-before: the guard stood halfway down the file, so a direct run skipped
+        the tools README index and digest inventory gates and still reported OK."""
+        import ast  # noqa: PLC0415
+
+        tree = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
+        guards = [index for index, node in enumerate(tree.body)
+                  if isinstance(node, ast.If) and "__main__" in ast.unparse(node.test)]
+        self.assertEqual(guards, [len(tree.body) - 1])
+
+
+if __name__ == "__main__":
+    unittest.main()

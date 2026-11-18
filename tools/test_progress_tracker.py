@@ -755,5 +755,113 @@ class TestItemEvidenceGrades(TrackerTestBase):
         self.assertGreater(emitted["units_regressed"], 0)
 
 
+
+class TestSplitFunctionBoundary(TrackerTestBase):
+    """P3.4 judges the body of f_0005a648 only (audit F-46faa873)."""
+
+    MIS_SPLIT = ("void f_0005a648(CpuState *s) {\n"
+                 "    sr_begin(s, 0x0005a64cu, 0x00801021u);\n"
+                 "    return;\n"
+                 "}\n")
+    WHOLE = ("void f_0005a648(CpuState *s) {\n"
+             "    s->r[2] = s->r[4] + s->r[5];\n"
+             "    return;\n"
+             "}\n")
+    LATER = ("void f_0005a700(CpuState *s) {\n"
+             "    sr_begin(s, 0x0005a704u, 0x00801021u);\n"
+             "    return;\n"
+             "}\n")
+
+    def _chunk(self, *functions: str) -> None:
+        (self.build / "hst_recomp_0.c").write_text(
+            "void f_0005a648(CpuState *s);\n\n" + "\n".join(functions), encoding="utf-8")
+
+    def test_a_later_function_with_the_word_is_not_the_mis_split(self):
+        """Failing-before: the lazy regex ran past f_0005a648's closing brace and matched the
+        word and the return of the next function, so P3.4 read 'regressed'."""
+        self._chunk(self.WHOLE, self.LATER)
+        self.assertEqual(pt._check_split_function(), "verified")
+
+    def test_the_mis_split_body_is_still_a_regression(self):
+        self._chunk(self.MIS_SPLIT, self.LATER)
+        self.assertEqual(pt._check_split_function(), "regressed")
+
+
+class TestVerifyReadsEachInputOnce(TrackerTestBase):
+    """One verify pass reads the selected run log once, hashes hst.exe by streaming, and
+    stores the run block it graded against (audit F-094a5e69)."""
+
+    def _count_reads(self, target: Path):
+        from unittest import mock  # noqa: PLC0415
+
+        real = Path.read_bytes
+        reads: list[Path] = []
+
+        def read_bytes(path: Path) -> bytes:
+            if Path(path) == target:
+                reads.append(path)
+            return real(path)
+
+        return reads, mock.patch.object(Path, "read_bytes", autospec=True, side_effect=read_bytes)
+
+    def test_verify_decodes_the_selected_log_once(self):
+        """Failing-before: every checker re-read and re-decoded the log, some twenty times."""
+        log = self.write_log("stderr_run1.log",
+                             ["create thread #1", "start thread", "DISPLAY_SET_FB: 0x04000000",
+                              PRESENT_LINE, "DISPLAY_SET_FB: 0x04000000"], mtime=time.time())
+        reads, patch = self._count_reads(log)
+        with patch:
+            by_id = {it.id: it for it in pt.verify_all()}
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(by_id["P2.2"].status, "verified")
+        # Outside a verify pass the file is read afresh.
+        with patch:
+            pt._log_lines("stderr_run1.log")
+        self.assertEqual(len(reads), 2)
+
+    def test_hst_exe_is_hashed_without_reading_it_whole(self):
+        """Failing-before: _check_hst_exe loaded the whole binary (over 100 MB) into memory."""
+        exe = self.build / "hst.exe"
+        size = 100_000_001
+        with exe.open("wb") as handle:
+            handle.truncate(size)
+        digest = hashlib.sha256()
+        with exe.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        then = time.time() - 100
+        os.utime(exe, (then, then))
+        (self.logs / "build_manifest.json").write_text(
+            json.dumps({"exe_sha256": digest.hexdigest().upper()}), encoding="utf-8")
+        reads, patch = self._count_reads(exe)
+        with patch:
+            self.assertEqual(pt._check_hst_exe(), "verified")
+        self.assertEqual(reads, [])
+
+    def test_verify_main_stores_the_run_block_it_graded_against(self):
+        """Failing-before: main computed a second _run_metadata, hashing hst.exe again and
+        stamping a generated_at other than the grading one."""
+        self.write_log("stderr_run1.log", ["create thread #1"], mtime=time.time())
+        (self.build / "hst.exe").write_bytes(b"B" * 1024)
+        calls: list[dict] = []
+        real = pt._run_metadata
+
+        def run_metadata(latest):
+            calls.append(real(latest))
+            return calls[-1]
+
+        saved = (pt._run_metadata, pt.OUT)
+        pt._run_metadata = run_metadata  # type: ignore[assignment]
+        pt.OUT = Path(self._tmp.name) / "progress.json"
+        try:
+            pt.main(["verify"])
+            emitted = json.loads(pt.OUT.read_text(encoding="utf-8"))
+        finally:
+            pt._run_metadata, pt.OUT = saved  # type: ignore[assignment]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(emitted["run"], calls[0])
+        self.assertEqual(emitted["latest_log"], "stderr_run1.log")
+
+
 if __name__ == "__main__":
     unittest.main()
