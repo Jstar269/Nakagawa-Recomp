@@ -14,6 +14,7 @@ import contextlib
 import copy
 import io
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 import sys
@@ -459,6 +460,24 @@ class RepositoryInventoryTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             with contextlib.redirect_stderr(io.StringIO()):
                 rhi.main(["--check", "--details"])
+
+    def test_untracked_sources_do_not_reach_the_inventory(self) -> None:
+        # The committed inventory describes the tree: an untracked scratch file
+        # under src/ must not change it, or a clean checkout's --check differs.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src" / "rt").mkdir(parents=True)
+            (root / "src" / "rt" / "tracked.c").write_text("int a;\n", encoding="utf-8")
+            (root / "src" / "rt" / "scratch.c").write_text("int b;\n", encoding="utf-8")
+            (root / "src" / "rt" / "notes.txt").write_text("x\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "add", "src/rt/tracked.c", "src/rt/notes.txt"],
+                check=True,
+            )
+            overrides = {rhi.EMITTER: "", rhi.EMITTER_DATA: "", rhi.LEDGER: "{}"}
+            sources, _emitter, _ledger = rhi.load_inputs(root, overrides)
+            self.assertEqual(sorted(sources), ["src/rt/tracked.c"])
 
     def test_harness_classification(self) -> None:
         self.assertTrue(rhi._is_harness("tests/native/hle_thread_selftest.c"))

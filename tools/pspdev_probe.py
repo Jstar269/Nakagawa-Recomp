@@ -403,8 +403,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     try:
-        data, _ = pspdev_lock.load_lock(args.lock)
-        pspdev_lock.validate_lock(data)
+        pspdev_lock.load_lock(args.lock)
     except pspdev_lock.LockError as exc:
         print(f"pspdev_probe: invalid lock: {exc}", file=sys.stderr)
         return 1
