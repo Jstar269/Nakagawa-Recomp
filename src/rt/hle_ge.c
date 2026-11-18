@@ -301,6 +301,14 @@ static void (*s_ge_test_preempt_hook)(uint32_t list_id);
 void sr_hle_test_ge_preempt_hook(void (*hook)(uint32_t list_id)) { s_ge_test_preempt_hook = hook; }
 #endif
 
+/* The signal function of the callback `cbid` names, or 0 when it names none: a negative id
+ * (the SDK's -1), one past the table, a slot no sceGeSetCallback holds, or a callback
+ * registered with a NULL signal function (PSP-GE-SIGNAL-001 registered such an id 2). */
+static uint32_t ge_list_signal_func(uint32_t cbid) {
+    if ((int32_t)cbid < 0 || cbid >= (uint32_t)(sizeof(s_ge_cb) / sizeof(s_ge_cb[0]))) return 0;
+    return s_ge_cb[cbid].used ? s_ge_cb[cbid].signal_func : 0u;
+}
+
 /* Run the list in `slot` from `pc` until it stalls or reaches its END, and give *next_pc what
  * ge_run_list returned; or return 0 when another caller took the list over.
  *
@@ -322,13 +330,18 @@ static int ge_list_run(int slot, uint32_t pc, int resume, uint32_t *next_pc) {
         l->preempted = 0;
         g_ge_stall_addr = l->stall_addr;
         g_ge_signal_stack_limit = l->signal_stacks;
+        g_ge_signal_handler = ge_list_signal_func(l->cbid);
         uint32_t next = ge_run_list_until(pc, resume, &sr_preempt_due, &stopped);
         g_ge_stall_addr = 0;
+        g_ge_signal_handler = 0;
         if (ge_timing_on()) ge_timing_charge_run();
         char fault[160];
         if (ge_take_signal_fault(fault, sizeof(fault))) {
-            /* The list stopped at a SIGNAL JUMP, CALL or RET the GE driver refuses (ge.c
-             * ge_signal_end): the run stops by name, and the list stays at that SIGNAL. */
+            /* The list stopped at a SIGNAL JUMP, CALL or RET the GE driver refuses, at a
+             * SIGNAL behaviour that is not modelled, such as a handler behaviour whose list
+             * has a signal callback, or PAUSE (ge.c
+             * ge_signal_end), or at a CALL or RET past its call stack (ge_list_fail): the run
+             * stops by name, and the list stays at that command. */
             (void)hle_unmodelled_stop(hle_import_name(sr_last_nid), "%s", fault);
             *next_pc = next;
             return 1;

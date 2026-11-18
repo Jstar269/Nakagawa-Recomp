@@ -26,6 +26,10 @@
 //               of the division d*F, which differ from the PSP's d: the dome costs less, the ribbon and
 //               the small patch more. On 8888 without depth test, each added triangle adds a fixed
 //               row charge on spans under 48 pixels; elsewhere the charge is per pixel.
+//   alloc       a patch draw whose control-point copy, u weights or vertex rows cannot be
+//               allocated draws nothing and is counted (ge_patch_alloc_failures), not dropped
+//               silently; the same draw with the allocations served draws. The link wraps
+//               malloc (mk/selftests.mk) so one chosen call fails.
 //   exit        the run's end prints PATCH_TESS: exit with the quads drawn and the capped draws.
 
 #include "recomp.h"
@@ -45,6 +49,16 @@
 #include <string.h>
 
 extern uint32_t ge_run_list(uint32_t addr, int resume);
+
+/* The link wraps malloc (-Wl,--wrap=malloc): the call s_malloc_fail_at counts down to returns
+ * NULL, once; -1 fails none. */
+void *__real_malloc(size_t size);
+void *__wrap_malloc(size_t size);
+static int s_malloc_fail_at = -1;
+void *__wrap_malloc(size_t size) {
+    if (s_malloc_fail_at >= 0 && s_malloc_fail_at-- == 0) return NULL;
+    return __real_malloc(size);
+}
 
 /* ---- Runtime state at its disabled values, and entry points that must stay cold ---- */
 
@@ -478,6 +492,43 @@ int main(void) {
         check(ok, "timing", what);
         ge_timing_set_enabled(0);
         ge_patch_tess_set(1);
+    }
+
+    /* alloc: draw_patch allocates the control points, then the u weights and the vertex rows.
+     * Each failing in turn draws nothing and is counted, and adds no quads; served, the same
+     * draw draws. Before, the draw returned with no count and no note. */
+    {
+        static const char *const names[] = { "control points", "u weights", "vertex rows" };
+        ge_patch_tess_set(1);
+        memset(SR_HOST(FB), 0, 512u * FB_H * 4u);
+        const uint64_t blank = fb_hash();
+        int ok = 1;
+        char detail[256] = "";
+        for (int at = 0; at < 3; at++) {
+            unsigned long long q0, q1;
+            const unsigned long long f0 = ge_patch_alloc_failures();
+            ge_patch_tess_counts(&q0, NULL);
+            s_malloc_fail_at = at;
+            run_patches(&dome_p, 1, 2, 1, 0);
+            const int consumed = s_malloc_fail_at == -1;
+            s_malloc_fail_at = -1;
+            ge_patch_tess_counts(&q1, NULL);
+            const unsigned long long f1 = ge_patch_alloc_failures();
+            if (!consumed || f1 != f0 + 1u || q1 != q0 || fb_hash() != blank) {
+                ok = 0;
+                snprintf(detail, sizeof detail, ": %s failing gave consumed=%d failures +%llu quads +%llu %s",
+                         names[at], consumed, f1 - f0, q1 - q0, fb_hash() == blank ? "blank" : "drawn");
+            }
+        }
+        const unsigned long long f0 = ge_patch_alloc_failures();
+        run_patches(&dome_p, 1, 2, 1, 0);
+        if (ge_patch_alloc_failures() != f0 || fb_hash() == blank) {
+            ok = 0;
+            snprintf(detail, sizeof detail, ": the served draw %s", fb_hash() == blank ? "drew nothing" : "was counted");
+        }
+        snprintf(what, sizeof what, "a patch draw whose control points, u weights or vertex rows cannot be "
+                 "allocated draws nothing and is counted, and the served draw draws%s", detail);
+        check(ok, "alloc", what);
     }
 
     /* exit: the end-of-run report. The settings cell turned the feature on, which registered it;

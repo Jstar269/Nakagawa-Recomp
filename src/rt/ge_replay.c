@@ -8,6 +8,7 @@
 #include "gpu_sdl3vk/sdl3vk.h"
 
 #include <SDL3/SDL_timer.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,12 +69,6 @@ void sr_heap_note_bulk_write(uint32_t addr, uint32_t width, uint32_t pc) {
 uint32_t sched_current_uid(void) { return 0; }
 uint32_t sr_get_ge_status(void) { return 0; }
 
-static uint32_t fb_addr(const GeState *state) {
-    uint32_t addr = state->fbp;
-    if ((addr & 0x0F000000u) == 0x04000000u) return addr;
-    return 0x04000000u | (addr & 0x001FFFFFu);
-}
-
 static void unpack(uint32_t raw, uint32_t fmt, unsigned char rgb[3]) {
     uint32_t r, g, b;
     switch (fmt & 3u) {
@@ -90,7 +85,7 @@ static void unpack(uint32_t raw, uint32_t fmt, unsigned char rgb[3]) {
 static int write_ppm(const char *path, const GeState *state) {
     FILE *file = fopen(path, "wb");
     if (!file) return 0;
-    uint32_t base = fb_addr(state);
+    uint32_t base = ge_fb_addr_of(state);   /* where ge.c drew: a RAM target stays in RAM */
     uint32_t stride = state->fbw ? state->fbw : 512u;
     uint32_t bpp = (state->fbfmt & 3u) == 3u ? 4u : 2u;
     int ok = fprintf(file, "P6\n480 272\n255\n") > 0;
@@ -105,6 +100,18 @@ static int write_ppm(const char *path, const GeState *state) {
     }
     if (fclose(file) != 0) ok = 0;
     return ok;
+}
+
+/* A whole decimal count: digits only, nothing after them, inside unsigned long. strtoul alone
+ * would take "5x" as 5, "1e6" as 1 and "-1" as ULONG_MAX. */
+static int replay_parse_count(const char *text, unsigned long *out) {
+    char *end = NULL;
+    if (!text || text[0] < '0' || text[0] > '9') return 0;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno == ERANGE || !end || *end != '\0') return 0;
+    *out = value;
+    return 1;
 }
 
 static void usage(const char *exe) {
@@ -311,21 +318,25 @@ static int fbd_observer(void *ctx, unsigned long index, uint32_t op, uint32_t cm
      * rows reaches pixels neither renderer has (their targets are 512x272) and whose PSP
      * result is unmeasured: a gap, not a difference. */
     const uint32_t raster_w = fbd_raster_w(st);
+    /* ge.c's strides: FBW 0 draws at 512, ZBW 0 at FBW and then 512 (zbuf_stride). */
+    const uint32_t color_stride = st->fbw ? st->fbw : 512u;
+    const uint32_t depth_stride = st->zbw ? st->zbw : color_stride;
+    const uint32_t color_base = ge_fb_addr_of(st);
     const uint32_t scis_w = fbd_extent(st->scis_x2), scis_h = fbd_extent(st->scis_y2);
     const uint32_t need_w = scis_w < raster_w ? scis_w : raster_w;
     const uint32_t need_h = scis_h < FBD_RASTER_H ? scis_h : FBD_RASTER_H;
     if (scis_w > FBD_RASTER_W || scis_h > FBD_RASTER_H)
-        fbd_gap(run, FBD_KIND_COLOR, fb_addr(st), st->fbw, scis_w, scis_h, need_w, need_h,
+        fbd_gap(run, FBD_KIND_COLOR, color_base, color_stride, scis_w, scis_h, need_w, need_h,
                 "raster-bound");
-    fbd_add_region(run, FBD_KIND_COLOR, fb_addr(st), st->fbw, st->fbfmt & 3u, need_w, need_h);
+    fbd_add_region(run, FBD_KIND_COLOR, color_base, color_stride, st->fbfmt & 3u, need_w, need_h);
     /* Depth only where the draw can write it (ge.c: the clear's depth bit, else the depth
      * test with writes on). */
     const int writes_depth = st->clear ? (st->clear_mode & 0x400u) != 0
                                        : st->ztest_enable && !st->zwrite_disable;
     if (writes_depth)
-        /* and only inside the depth buffer's zbw columns (ge.c's zbuf_write_index) */
-        fbd_add_region(run, FBD_KIND_DEPTH, fbd_depth_base(st), st->zbw, 0u,
-                       st->zbw && st->zbw < need_w ? st->zbw : need_w, need_h);
+        /* and only inside the depth buffer's columns (ge.c's zbuf_write_index) */
+        fbd_add_region(run, FBD_KIND_DEPTH, fbd_depth_base(st), depth_stride, 0u,
+                       depth_stride < need_w ? depth_stride : need_w, need_h);
     if (st->blend_enable && !st->clear) run->blended = 1;
     return 0;
 }
@@ -336,11 +347,17 @@ static uint32_t fbd_addr(const FbdRegion *r, uint32_t x, uint32_t y) {
     return r->kind == FBD_KIND_DEPTH ? addr ^ 0x2040u : addr;
 }
 
+/* A pixel as a guest access to its address sees it. Colour pixels and transfer rows reach
+ * VRAM through SR_HOST and MEM_W in ge.c, which translate the 0x042-0x046 views into physical
+ * VRAM, so they are read the same way (a naturally aligned pixel never straddles a swizzle
+ * block). Depth is read as ge.c's depth accessors write it: SR_HOST_LINEAR on a surface
+ * ge_zbuf_layout_valid kept inside the linear 0x040 view. */
 static uint32_t fbd_load(const FbdRegion *r, uint32_t x, uint32_t y) {
     uint32_t addr = fbd_addr(r, x, y);
     if (!sr_inrange_n(addr, fbd_bpp(r))) return 0;
-    if (fbd_bpp(r) == 4u) { uint32_t v; memcpy(&v, SR_HOST_LINEAR(addr), 4); return v; }
-    uint16_t v; memcpy(&v, SR_HOST_LINEAR(addr), 2); return v;
+    const uint8_t *host = r->kind == FBD_KIND_DEPTH ? SR_HOST_LINEAR(addr) : SR_HOST(addr);
+    if (fbd_bpp(r) == 4u) { uint32_t v; memcpy(&v, host, 4); return v; }
+    uint16_t v; memcpy(&v, host, 2); return v;
 }
 
 static int fbd_snapshot(const FbdRun *regions, FbdShot *shot) {
@@ -421,6 +438,14 @@ static void fbd_compare(const FbdRun *regions, const FbdShot *sw, const FbdShot 
     }
 }
 
+/* ge_capture_apply's depth destination. ge_zbuf_ptr() would first validate and reload the depth
+ * layout the previous pass or repeat left in the live state, and refuse a valid fixture after one
+ * that ends with a ZBW past 512 or ZBP bit 6. ge_replay_restore installs the fixture's own depth. */
+static uint16_t *replay_apply_zbuf(void) {
+    static uint16_t zbuf[GE_CAPTURE_ZBUF_WORDS];
+    return zbuf;
+}
+
 /* One renderer, one prefix. hooks NULL is ge.c's software rasterizer. `regions` NULL records
  * the prefix's buffers into run; otherwise the snapshot covers those regions. */
 static int fbd_pass(const GeCaptureFixture *fixture, const GeGpuHooks *hooks, unsigned long limit,
@@ -429,7 +454,7 @@ static int fbd_pass(const GeCaptureFixture *fixture, const GeGpuHooks *hooks, un
     if (hooks && !gegpu_replay_reset()) return 0;
     memset(run, 0, sizeof(*run));
     run->limit = limit;
-    if (!ge_capture_apply(fixture, ge_state_ptr(), ge_zbuf_ptr())) return 0;
+    if (!ge_capture_apply(fixture, ge_state_ptr(), replay_apply_zbuf())) return 0;
     ge_replay_restore(&fixture->initial_state, fixture->initial_zbuf);
     ge_set_draw_observer(fbd_observer, run);
     int ok = 1;
@@ -555,7 +580,7 @@ static void fbd_print_draw(const FbdRun *run) {
            "ztest=%d zfunc=%u zwrite_disable=%d atest=%d atest_word=0x%06x "
            "stencil=%d stencil_test=0x%06x stencil_op=0x%06x dither=%d logic_op=%d "
            "mask_rgb=0x%06x mask_alpha=0x%02x\n",
-           st->vtype, (st->vtype >> 23) & 1u, st->clear, st->clear_mode, fb_addr(st), st->fbw,
+           st->vtype, (st->vtype >> 23) & 1u, st->clear, st->clear_mode, ge_fb_addr_of(st), st->fbw,
            st->fbfmt, st->zbp, st->zbw, st->tex_enable, st->tex_fmt, st->tex_addr, st->tex_func,
            st->blend_enable, st->blend_mode, st->blend_fixa, st->blend_fixb,
            st->ztest_enable, st->ztest, st->zwrite_disable, st->atest_enable, st->atest,
@@ -770,6 +795,100 @@ static int fbd_self_check(void) {
                "5650: 2 LSB of a 5-bit channel is a difference");
     FBD_EXPECT(fbd_classify(&depth, 0x1000u, 0x1001u, 1, &diff) == 0 && diff == 1,
                "depth: any difference counts");
+
+    /* --repeat takes a whole decimal count and nothing else. */
+    unsigned long count = 0;
+    FBD_EXPECT(replay_parse_count("5", &count) && count == 5ul, "--repeat 5 is 5");
+    FBD_EXPECT(!replay_parse_count("5x", &count), "--repeat 5x is refused, not run 5 times");
+    FBD_EXPECT(!replay_parse_count("1e6", &count), "--repeat 1e6 is refused, not run once");
+    FBD_EXPECT(!replay_parse_count("", &count), "an empty --repeat is refused");
+    FBD_EXPECT(!replay_parse_count("-1", &count), "a negative --repeat is refused");
+    FBD_EXPECT(!replay_parse_count("99999999999999999999999", &count),
+               "a --repeat past unsigned long is refused");
+
+    /* The cells below run on a guest arena, as a replay does. */
+    uint8_t *arena = (uint8_t *)calloc(0x0c000000u, 1);
+    if (!arena) { fprintf(stderr, "FAIL no guest arena for the self-check\n"); return 1; }
+    g_mem = arena + 0x08000000u;
+    static uint16_t zbuf[GE_CAPTURE_ZBUF_WORDS];
+
+    /* The regions a draw records are the buffers ge.c draws to: the colour target as
+     * ge_fb_addr_of folds it (a main-RAM target kept, a VRAM mirror view folded), and FBW 0 or
+     * ZBW 0 at the 512 (colour) and FBW-then-512 (depth) strides ge.c falls back to. */
+    static const struct { uint32_t fbp, fbw, zbw, color_base, color_stride, depth_stride, depth_w; }
+        draws[] = {
+        /* render-to-RAM */
+        { SR_RAM_BASE + 0x00800000u, 480u, 480u, SR_RAM_BASE + 0x00800000u, 480u, 480u, 480u },
+        { 0x04600000u, 480u, 480u, 0x04000000u, 480u, 480u, 480u },   /* a mirror view */
+        { 0x00044000u, 480u, 480u, 0x04044000u, 480u, 480u, 480u },   /* a 2 MiB-local offset */
+        { 0x04000000u, 0u, 0u, 0x04000000u, 512u, 512u, 480u },       /* FBW 0, ZBW 0 */
+        { 0x04000000u, 256u, 0u, 0x04000000u, 256u, 256u, 256u },     /* ZBW 0 under FBW 256 */
+    };
+    for (size_t i = 0; i < sizeof draws / sizeof draws[0]; i++) {
+        static FbdRun run;
+        GeState st;
+        memset(&st, 0, sizeof st);
+        st.fbp = draws[i].fbp;
+        st.fbw = draws[i].fbw;
+        st.zbw = draws[i].zbw;
+        st.fbfmt = 3u;
+        st.scis_x2 = 479;
+        st.scis_y2 = 271;
+        st.ztest_enable = 1;
+        ge_replay_restore(&st, zbuf);
+        memset(&run, 0, sizeof run);
+        run.limit = 1;
+        char what[128];
+        snprintf(what, sizeof what, "draw cell %u: fbp 0x%08x fbw %u zbw %u", (unsigned)i,
+                 draws[i].fbp, draws[i].fbw, draws[i].zbw);
+        FBD_EXPECT(fbd_observer(&run, 0, 0x04000000u, 0u, 0u) == 0 && run.ngaps == 0 &&
+                   run.nregions == 2 && run.regions[0].kind == FBD_KIND_COLOR &&
+                   run.regions[0].base == draws[i].color_base &&
+                   run.regions[0].base == ge_fb_addr_of(&st) &&
+                   run.regions[0].stride == draws[i].color_stride &&
+                   run.regions[1].kind == FBD_KIND_DEPTH &&
+                   run.regions[1].stride == draws[i].depth_stride &&
+                   run.regions[1].need_w == draws[i].depth_w, what);
+        s_fbd_current = (unsigned long)-1;
+    }
+
+    /* A compared pixel is the one a guest access to its address reaches: a transfer into the
+     * linear 0x044 view and a colour row that runs into the swizzled 0x042 view both land in
+     * physical VRAM, where ge.c's SR_HOST and MEM_W stores put them. */
+    const uint32_t xfer_px = 0x11223344u, color_px = 0x55667788u;
+    memcpy(SR_HOST(0x04400010u), &xfer_px, 4);
+    memcpy(SR_HOST(0x04200700u), &color_px, 4);
+    FbdRegion xfer = { FBD_KIND_XFER, 0x04400000u, 512u, 4u, 8u, 1u, 8u, 1u };
+    FbdRegion edge = { FBD_KIND_COLOR, 0x041FFF00u, 512u, 3u, 8u, 2u, 8u, 2u };
+    FBD_EXPECT(fbd_load(&xfer, 4u, 0u) == xfer_px, "a transfer through the 0x044 view is read where it landed");
+    FBD_EXPECT(fbd_load(&edge, 0u, 1u) == color_px, "a colour row past 0x04200000 is read where it landed");
+
+    /* Each pass applies the fixture whatever depth layout the pass before it left: a ZBW past
+     * 512 or a ZBP with bit 6 set, which ge.c refuses to draw with, is not the fixture's. */
+    GeCaptureFixture fixture;
+    memset(&fixture, 0, sizeof fixture);
+    fixture.initial_zbuf = (uint16_t *)calloc(GE_CAPTURE_ZBUF_WORDS, sizeof(uint16_t));
+    fixture.initial_vram = (uint8_t *)calloc(GE_CAPTURE_VRAM_SIZE, 1);
+    static const struct { uint32_t zbp, zbw; } prev[] = { { 0x04000000u, 1024u }, { 0x04000040u, 512u } };
+    for (size_t i = 0; fixture.initial_zbuf && fixture.initial_vram && i < 2; i++) {
+        static FbdRun run;
+        FbdShot shot;
+        memset(&shot, 0, sizeof shot);
+        GeState st;
+        memset(&st, 0, sizeof st);
+        st.zbp = prev[i].zbp;
+        st.zbw = prev[i].zbw;
+        ge_replay_restore(&st, zbuf);
+        FBD_EXPECT(fbd_pass(&fixture, NULL, 1ul, &run, NULL, &shot),
+                   i == 0 ? "a pass after one that left ZBW 1024 applies the fixture"
+                          : "a pass after one that left ZBP bit 6 applies the fixture");
+        fbd_shot_free(&shot);
+    }
+    FBD_EXPECT(fixture.initial_zbuf && fixture.initial_vram, "fixture buffers");
+    free(fixture.initial_zbuf);
+    free(fixture.initial_vram);
+    g_mem = NULL;
+    free(arena);
 #undef FBD_EXPECT
     if (fails) return 1;
     puts("ge first-bad-draw self-check: OK");
@@ -1012,7 +1131,9 @@ int main(int argc, char **argv) {
     unsigned long repeat = 1;
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) backend = argv[++i];
-        else if (strcmp(argv[i], "--repeat") == 0 && i + 1 < argc) repeat = strtoul(argv[++i], NULL, 10);
+        else if (strcmp(argv[i], "--repeat") == 0 && i + 1 < argc) {
+            if (!replay_parse_count(argv[++i], &repeat)) { usage(argv[0]); return 2; }
+        }
         else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) output = argv[++i];
         else if (strcmp(argv[i], "--first-bad-draw") == 0) { if (!fbd_mode) fbd_mode = "auto"; }
         else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) fbd_mode = argv[++i];
@@ -1085,7 +1206,7 @@ int main(int argc, char **argv) {
         if (vulkan && !gegpu_replay_reset()) return 3;
         wall_phase_end(&wall_stats[REPLAY_WALL_RESET], wall_profile, phase_started);
         phase_started = wall_phase_begin(wall_profile);
-        if (!ge_capture_apply(&fixture, ge_state_ptr(), ge_zbuf_ptr())) return 3;
+        if (!ge_capture_apply(&fixture, ge_state_ptr(), replay_apply_zbuf())) return 3;
         wall_phase_end(&wall_stats[REPLAY_WALL_FIXTURE_APPLY], wall_profile, phase_started);
         phase_started = wall_phase_begin(wall_profile);
         ge_replay_restore(&fixture.initial_state, fixture.initial_zbuf);
