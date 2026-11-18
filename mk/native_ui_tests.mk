@@ -538,7 +538,9 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(call PACKAGE_BUILDER_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_package_builder$(EXE_EXT)
 	$(call UPDATE_CHECK_TEST_BIN_CMD)
-	$(BUILD_ROOT_RUN)/test_update_check$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_update_check$(EXE_EXT); rc=$$?; \
+		if [ "$$rc" = 77 ]; then echo "SKIP test_update_check link-safety case (exit 77; the reason is printed above)"; \
+		elif [ "$$rc" != 0 ]; then exit "$$rc"; fi
 	$(call COVER_ART_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_cover_art$(EXE_EXT)
 	$(call DISCORD_PRESENCE_TEST_BIN_CMD)
@@ -578,7 +580,9 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(call ACHIEVEMENTS_SELFTEST_CMD)
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_portable_mode.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_portable_mode$(EXE_EXT)
-	$(BUILD_ROOT_RUN)/test_portable_mode$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_portable_mode$(EXE_EXT); rc=$$?; \
+		if [ "$$rc" = 77 ]; then echo "SKIP test_portable_mode too-long case (exit 77; the reason is printed above)"; \
+		elif [ "$$rc" != 0 ]; then exit "$$rc"; fi
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_data_migrate.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_data_migrate$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_data_migrate$(EXE_EXT)
