@@ -521,11 +521,11 @@ python tools/vblank_ledger.py --perf logs/perf.csv --stderr logs/stderr_run.log
 ```
 
 ```text
-VBLANK_CHECK: presenting PASS presenting_s=3454 wall_s=3457.723 source_periods=207256.1 delivered=207248
+VBLANK_CHECK: presenting INFO presenting_s=3454 wall_s=3457.723 source_periods=207256.1 delivered=207248
 VBLANK_CHECK: rate PASS ratio=0.99992 band=[0.99500,1.00500] excess_episodes=-16 ... per_second_delivered={59: 617, 60: 2209, 61: 623}
 VBLANK_CHECK: identity PASS owed=205096 coalesced=7 delivered=205102 dropped=0 in_flight=1 residual=1 late_owed=84207 late_delivered=84206
 VBLANK_CHECK: masked PASS coalesced=7 masked_periods=11 credit=-4 in_flight=1
-VBLANK_AUDIT: verdict=PASS checks=4 failures=0
+VBLANK_AUDIT: verdict=PASS checks=3 failures=0
 ```
 
 - `rate` divides delivered episodes by the source periods that elapsed
@@ -540,6 +540,9 @@ VBLANK_AUDIT: verdict=PASS checks=4 failures=0
   (`PERF_ATTRIB vblank_late ... masked_periods=`). A credit beyond the in-flight
   residual is a masked window counted twice; the hardware probe measured `+1` for a
   window however many periods it covered (`docs/ARCHITECTURE.md`).
+- `presenting` is `INFO`: it names the window the rate is judged over and is not a
+  check, so a run that presented frames but could judge neither the rate nor the
+  ledger is still `NOT_RUN`.
 - A missing ledger is `SKIP` with its reason, and a run where nothing could be
   judged is `NOT_RUN` with a non-zero exit: an absent artifact is not a pass.
 
