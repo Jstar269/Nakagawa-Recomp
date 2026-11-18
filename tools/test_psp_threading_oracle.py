@@ -8,6 +8,7 @@ All fixtures are synthetic and self-contained; no hardware, no retail data.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import pathlib
@@ -25,7 +26,9 @@ from psp_threading_oracle.parser import (
     parse_threading_output,
     analyze_runs,
     load_matrix,
+    expected_case_ids,
     CAMPAIGN_VERSION,
+    FULL_ONLY_CLASSIFICATION,
     evidence_label,
     SyntheticCaptureContext,
     HardwareCaptureContext,
@@ -211,6 +214,50 @@ def _zero_arg_problems(source: str) -> list[str]:
         problems.append(f"child_a1 is not the raw snapshot or NOT_MEASURED: {sorted(values)}")
     return problems
 
+
+def _gating_plan_problems(matrix: dict[str, Any]) -> list[str]:
+    """Where the declared gating launch plan disagrees with the counts of the cases it plans.
+
+    Every number in ``launch_plan.gating`` is derived here from ``matrix["cases"]``, by
+    classification and launch, so an edit to the case list that leaves the declared numbers
+    alone is caught.
+    """
+    plan = matrix["launch_plan"]["gating"]
+    gating = [c for c in matrix["cases"] if c["expected_classification"] != FULL_ONLY_CLASSIFICATION]
+    controls = sum(1 for c in gating if c["expected_classification"] == "CONTROL_EXPECTED")
+    per_launch: dict[str, int] = {}
+    for c in gating:
+        per_launch[c["launch"]] = per_launch.get(c["launch"], 0) + 1
+    launches = sorted(per_launch, key=lambda name: int(name.lstrip("L")))
+    derived = {
+        "unique_cases": len(gating),
+        "controls": controls,
+        "discriminators": len(gating) - controls,
+        "launches": len(launches),
+        "records_per_launch": [per_launch[name] for name in launches],
+    }
+    problems = [f"{key}: declared {plan[key]!r}, cases give {value!r}"
+                for key, value in derived.items() if plan[key] != value]
+    repeat = plan["repeat"]
+    if not launches or repeat["launches"] % len(launches):
+        problems.append(f"repeat.launches {repeat['launches']} is not a whole number of "
+                        f"{len(launches)}-launch campaigns")
+    elif repeat["records"] != len(gating) * (repeat["launches"] // len(launches)):
+        problems.append(f"repeat.records: declared {repeat['records']}, cases give "
+                        f"{len(gating) * (repeat['launches'] // len(launches))}")
+    return problems
+
+
+def _mutant_matrix(**reclassify: str) -> dict[str, Any]:
+    """A copy of MATRIX with each named case (``CT_C05="..."``) given a new classification."""
+    mutant = copy.deepcopy(MATRIX)
+    for case in mutant["cases"]:
+        new = reclassify.get(case["case_id"].replace("-", "_"))
+        if new is not None:
+            case["expected_classification"] = new
+    return mutant
+
+
 class MatrixFidelityTests(unittest.TestCase):
     def test_matrix_has_corrected_minimum(self) -> None:
         # Matrix has 30 total cases including CT-C05/CT-C06 as full-campaign-only
@@ -243,6 +290,8 @@ class MatrixFidelityTests(unittest.TestCase):
             "Gating repeat must produce 56 records")
         self.assertEqual(MATRIX["launch_plan"]["gating"]["repeat"]["launches"], 10,
             "Gating repeat must have 10 launches")
+        # The declared numbers are the cases' own counts, not just constants.
+        self.assertEqual([], _gating_plan_problems(MATRIX))
 
     def test_controls_preserved(self) -> None:
         controls = [c for c in MATRIX["cases"] if c["expected_classification"] == "CONTROL_EXPECTED"]
@@ -811,18 +860,33 @@ class MutantTests(unittest.TestCase):
     """Semantic scratch mutants (Stage 14): each mutant must be caught."""
 
     def test_m1_promote_c05_to_gating_fails(self) -> None:
-        # M1: promote C05 from FULL_ONLY to gating would make gating count 29 not 28
-        # This tests that the gating count check catches oversized gating
-        self.assertEqual(MATRIX["launch_plan"]["gating"]["unique_cases"], 28)
-        # Verify C05 is not in gating (FULL_ONLY)
-        c05 = next(x for x in MATRIX["cases"] if x["case_id"] == "CT-C05")
-        self.assertEqual(c05["expected_classification"], "FULL_ONLY_HYPOTHESIS")
+        # M1: promoting C05 from FULL_ONLY into gating makes 29 gating cases against 28 planned.
+        mutant = _mutant_matrix(CT_C05="HARDWARE_TO_MEASURE")
+        self.assertIn("unique_cases: declared 28, cases give 29", _gating_plan_problems(mutant))
+        with self.assertRaises(ProtocolError):
+            expected_case_ids(mutant)
 
     def test_m2_promote_c06_to_gating_fails(self) -> None:
-        # M2: promote C06 from FULL_ONLY to gating would make gating count 29 not 28
-        self.assertEqual(MATRIX["launch_plan"]["gating"]["unique_cases"], 28)
-        c06 = next(x for x in MATRIX["cases"] if x["case_id"] == "CT-C06")
-        self.assertEqual(c06["expected_classification"], "FULL_ONLY_HYPOTHESIS")
+        # M2: the same for C06.
+        mutant = _mutant_matrix(CT_C06="HARDWARE_TO_MEASURE")
+        self.assertIn("unique_cases: declared 28, cases give 29", _gating_plan_problems(mutant))
+        with self.assertRaises(ProtocolError):
+            expected_case_ids(mutant)
+
+    def test_m2b_swap_a_control_for_c05_keeps_the_count_but_fails(self) -> None:
+        # Dropping the L1 control CT-A01 and promoting C05 to a control leaves 28 gating
+        # cases and 6 controls, so the declared totals still hold; the per-launch split does not.
+        mutant = _mutant_matrix(CT_C05="CONTROL_EXPECTED")
+        mutant["cases"] = [c for c in mutant["cases"] if c["case_id"] != "CT-A01"]
+        self.assertEqual(len(expected_case_ids(mutant)), 28)
+        self.assertEqual(["records_per_launch: declared [8, 8, 3, 6, 3], cases give [7, 9, 3, 6, 3]"],
+                         _gating_plan_problems(mutant))
+
+    def test_m2c_reclassify_a_control_as_a_discriminator_fails(self) -> None:
+        mutant = _mutant_matrix(CT_A01="HARDWARE_TO_MEASURE")
+        self.assertEqual(["controls: declared 6, cases give 5",
+                          "discriminators: declared 22, cases give 23"],
+                         _gating_plan_problems(mutant))
 
     def test_m3_remove_c05_from_full_fails(self) -> None:
         # M3: remove C05 from full campaign matrix

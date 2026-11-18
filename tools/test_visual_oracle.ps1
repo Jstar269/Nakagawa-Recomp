@@ -38,11 +38,20 @@ function Assert-True {
 # A child process that exits after N seconds, with no console window of its own.
 # `ping -n` rather than `timeout`: timeout refuses to run without an interactive console
 # and exits 125 immediately, which would make the deadline test vacuously pass.
+# ping.exe is started directly, not under `cmd.exe /c`: the deadline test kills the process
+# it was handed, and a cmd.exe wrapper would leave its ping.exe child running on its own.
 function Start-SleeperProcess {
     param([int]$Seconds)
-    return Start-Process -FilePath "cmd.exe" `
-        -ArgumentList @("/c", "ping -n $($Seconds + 1) 127.0.0.1 > nul") `
+    return Start-Process -FilePath "ping.exe" `
+        -ArgumentList @("-n", "$($Seconds + 1)", "127.0.0.1") `
         -PassThru -WindowStyle Hidden
+}
+
+# The live processes whose parent is `$ProcessId`.
+function Get-LiveChildProcess {
+    param([int]$ProcessId)
+    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" |
+        Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
 }
 
 # --- Wait-ProcessOrKill: early exit -------------------------------------------------
@@ -68,6 +77,9 @@ Test-Case "wait kills and reports a timeout at the deadline" {
     $r = Wait-ProcessOrKill -Process $p -TimeoutSeconds 2
     Assert-True ($r.TimedOut) "should have reported a timeout"
     Assert-True ($p.HasExited) "the process should have been killed"
+    $orphans = Get-LiveChildProcess -ProcessId $p.Id
+    Assert-True ($orphans.Count -eq 0) `
+        "the sleeper left $($orphans.Count) child process(es) running after its kill"
     Assert-True ($r.ElapsedSeconds -lt 30) `
         "took $($r.ElapsedSeconds)s to enforce a 2s deadline"
 }
