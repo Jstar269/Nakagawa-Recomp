@@ -539,7 +539,7 @@ class HstManagerManifestTests(unittest.TestCase):
             ("missing oracle and executable", {"DiffTarget": "f_08804000", "DiffOracle": str(self.root / "missing.trace")}),
         ):
             with self.subTest(case=name):
-                proc = self.run_manager("DiffFunc", **overrides)
+                proc = self.run_manager("DiffFunc", None, **overrides)
                 blob = proc.stdout + proc.stderr
                 self.assertNotIn("FATAL SCRIPT ERROR", blob)
                 self.assertEqual(proc.returncode, 1, blob)
