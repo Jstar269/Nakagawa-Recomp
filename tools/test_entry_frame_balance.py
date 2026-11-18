@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import struct
 import sys
+from types import SimpleNamespace
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -45,6 +46,11 @@ def jr(rs=31):
 
 def jalr(rs, rd=31):
     return (rs << 21) | (rd << 11) | 0x09
+
+
+def bvt(offset):
+    """COP2 branch-on-true with condition code zero."""
+    return (0x12 << 26) | (8 << 21) | (1 << 16) | (offset & 0xFFFF)
 
 
 def j(target):
@@ -88,6 +94,10 @@ def lui(rt, imm):
 
 def addu(rd, rs, rt):
     return (rs << 21) | (rt << 16) | (rd << 11) | 0x21
+
+
+def sc(rt, base, offset=0):
+    return (0x38 << 26) | (base << 21) | (rt << 16) | (offset & 0xFFFF)
 
 
 NOP = 0
@@ -716,6 +726,70 @@ class DirectJumpAuditTests(unittest.TestCase):
         )
 
 
+class TraceFunctionTerminatorTests(unittest.TestCase):
+    def test_direct_jump_outside_ranges_stops_after_its_delay_slot(self):
+        words = emit(0x1000, j(0x2000), NOP, addiu(SP, SP, -0x20), jr(RA), NOP)
+        elf, ranges = image(words)
+        covered = set()
+
+        analyze.trace_function(elf, 0x1000, ranges, covered, set(), set())
+
+        self.assertEqual(covered, {0x1000, 0x1004})
+
+    def test_jalr_with_zero_destination_stops_after_its_delay_slot(self):
+        words = emit(0x1000, jalr(T9, rd=0), NOP, addiu(SP, SP, -0x20), jr(RA), NOP)
+        elf, ranges = image(words)
+        covered = set()
+
+        analyze.trace_function(elf, 0x1000, ranges, covered, set(), set())
+
+        self.assertEqual(covered, {0x1000, 0x1004})
+
+    def test_vfpu_branch_traces_its_target_after_the_return_path(self):
+        words = emit(0x1000, bvt(4), NOP, jr(RA), NOP, NOP,
+                     addiu(SP, SP, -0x20), jr(RA), NOP)
+        elf, ranges = image(words)
+        covered = set()
+
+        analyze.trace_function(elf, 0x1000, ranges, covered, set(), set())
+
+        self.assertIn(0x1014, covered)
+
+    def test_vfpu_branch_ends_the_materialization_straight_line_run(self):
+        words = emit(0x1000, lui(T9, 0), bvt(4), NOP, addiu(T9, T9, 0x1010),
+                     jr(RA), NOP, jr(RA), NOP)
+        elf, ranges = image(words)
+        read_word = elf.read_at_vaddr
+
+        def read(address, size):
+            if size == 4:
+                return read_word(address, size)
+            if size <= 0 or size % 4:
+                return None
+            parts = [read_word(at, 4) for at in range(address, address + size, 4)]
+            return b"".join(parts) if all(part is not None for part in parts) else None
+
+        elf.read_at_vaddr = read
+        discovery = SimpleNamespace(
+            elf=elf,
+            ranges=ranges,
+            file_exec_ranges=[],
+            relocated=None,
+            jumps=None,
+            hc=set(),
+            noisy=set(),
+            jtails=set(),
+            cfg_gate=False,
+            in_text=lambda address: analyze.in_ranges(address, ranges),
+            shadow=frozenset(),
+            materialized={},
+        )
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertNotIn(0x1010, discovery.hc)
+
+
 class BranchEdgeCensusTests(unittest.TestCase):
     """The edge census must report what the encoding says, and nothing else."""
 
@@ -792,6 +866,14 @@ class CodePointerEvidenceTests(unittest.TestCase):
         evidence = analyze.code_pointer_evidence(elf, ranges)
         self.assertIn(0x1010, evidence["immediate"])
 
+    def test_chained_la_tracks_the_completed_value_in_the_destination(self):
+        base = 0x08800000
+        words = emit(base, lui(A0, 0x0880), addiu(A0, A0, 0x10), addiu(5, A0, 0x40))
+        elf, _ranges = image(words)
+        evidence = analyze.code_pointer_evidence(elf, [(base, base + 0x100)])
+        self.assertIn(base + 0x50, evidence["immediate"])
+        self.assertNotIn(base + 0x40, evidence["immediate"])
+
     def test_a_branch_between_the_halves_breaks_the_pair(self):
         """The high half does not survive a control-flow edge."""
         words = emit(
@@ -812,6 +894,83 @@ class CodePointerEvidenceTests(unittest.TestCase):
         elf, ranges = image(words)
         self.assertEqual(analyze.code_pointer_evidence(elf, ranges)["data"],
                          frozenset())
+
+
+class AddressMaterializationTests(unittest.TestCase):
+    BASE = 0x08800000
+    END = BASE + 0x100
+
+    def discovery(self, instructions):
+        words = {address: NOP for address in range(self.BASE, self.END, 4)}
+        words.update(instructions)
+        elf = WordImage(words)
+        read_word = elf.read_at_vaddr
+
+        def read(address, size):
+            if size == 4:
+                return read_word(address, size)
+            if size <= 0 or size % 4:
+                return None
+            parts = [read_word(at, 4) for at in range(address, address + size, 4)]
+            return b"".join(parts) if all(part is not None for part in parts) else None
+
+        elf.read_at_vaddr = read
+        ranges = [(self.BASE, self.END)]
+        return SimpleNamespace(
+            elf=elf,
+            ranges=ranges,
+            file_exec_ranges=[],
+            relocated=None,
+            jumps=None,
+            hc=set(),
+            noisy=set(),
+            jtails=set(),
+            cfg_gate=False,
+            in_text=lambda address: analyze.in_ranges(address, ranges),
+            shadow=frozenset(),
+            materialized={},
+        )
+
+    def test_chained_la_tracks_the_completed_value_not_the_stale_high_half(self):
+        base = self.BASE
+        discovery = self.discovery({
+            base: lui(A0, 0x0880),
+            base + 4: addiu(A0, A0, 0x10),
+            base + 8: addiu(5, A0, 0x40),
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertIn(base + 0x10, discovery.materialized)
+        self.assertNotIn(base + 0x40, discovery.materialized)
+
+    def test_addu_does_not_copy_a_tracked_register_over_an_unknown_operand(self):
+        base = self.BASE
+        discovery = self.discovery({
+            base: lui(A0, 0x0880),
+            base + 4: addu(5, A0, 8),
+            base + 8: addiu(6, 5, 0x50),
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertNotIn(base + 0x50, discovery.materialized)
+
+
+class ScWriteTests(unittest.TestCase):
+    def test_sc_invalidates_a_constant_call_argument(self):
+        target = 0x1040
+        words = emit(
+            0x1000,
+            lui(A0, 0), addiu(A0, A0, 0x1010),
+            lui(5, 0), addiu(5, 5, 0x1020),
+            sc(A0, 16), jal(target), NOP,
+        )
+        elf, _ranges = image(words)
+
+        arguments = list(analyze._constant_arguments_at_calls(elf, set(words), None))
+
+        self.assertEqual(arguments, [])
 
 
 class DirectBranchAuditTests(unittest.TestCase):

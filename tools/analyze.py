@@ -216,7 +216,7 @@ def _scan_module_info(segments, data, seg_data):
     a printable string followed by plausible pointers is not taken for the
     record, while real records with gp == 0 or short names are still found.
     """
-    for o in range(0, len(seg_data) - MODULE_INFO_SIZE, 4):
+    for o in range(0, len(seg_data) - MODULE_INFO_SIZE + 1, 4):
         record = _decode_module_info(segments, seg_data, o)
         if record is None or not _module_info_is_consistent(segments, data, record):
             continue
@@ -600,11 +600,14 @@ class Elf:
         return next((s for s in self.sections if s.get("nm") == name), None)
 
     def read_at_vaddr(self, vaddr, n):
+        if n < 0:
+            return None
         # For a relocated PRX, serve the rebased+relocated image directly.
         if self.reloc is not None:
-            if self.reloc.lo <= vaddr < self.reloc.lo + len(self.reloc.mem):
+            image_end = self.reloc.lo + len(self.reloc.mem)
+            if self.reloc.lo <= vaddr < image_end:
                 o = vaddr - self.reloc.lo
-                return bytes(self.reloc.mem[o:o + n])
+                return bytes(self.reloc.mem[o:min(o + n, len(self.reloc.mem))])
             return None
         # Otherwise read from the loaded image via PT_LOAD program headers. Sections are not
         # used here because non-code allocated sections (.reginfo, .MIPS.abiflags) can share a
@@ -620,7 +623,7 @@ class Elf:
         for lo, hi, off in loads:
             if lo <= vaddr < hi:
                 start = off + (vaddr - lo)
-                return self.data[start:start + n]
+                return self.data[start:start + min(n, hi - vaddr)]
         return None
 
     def func_symbols(self):
@@ -628,10 +631,14 @@ class Elf:
         if not symtab or not strtab:
             return None
         d = self.data
+        size, entry_size, offset = symtab["size"], symtab["entsz"], symtab["off"]
+        if (entry_size < 16 or size < 0 or size % entry_size
+                or offset < 0 or offset > len(d) - size):
+            return None
         out = set()
-        for i in range(symtab["size"] // symtab["entsz"]):
-            o = symtab["off"] + i * symtab["entsz"]
-            st_name, st_value, st_size, st_info, st_other, st_shndx = struct.unpack("<IIIBBH", d[o:o + 16])
+        for i in range(size // entry_size):
+            o = offset + i * entry_size
+            st_name, st_value, st_size, st_info, st_other, st_shndx = struct.unpack_from("<IIIBBH", d, o)
             if (st_info & 0xF) == 2 and st_value != 0:  # STT_FUNC
                 out.add(st_value)
         return out
@@ -964,10 +971,11 @@ POINTER_ARRAY_WALKER_MAX_DEPTH = 4
 #: General registers a call may change: at, v0-v1, a0-a3, t0-t9 and ra.
 _CALL_CLOBBERED_GPRS = frozenset((1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 31))
 #: Opcodes that write no general register: branches (beq..bgtz and the likely forms) and
-#: stores (sb..sw, swl/swr, sc, swc1, the VFPU stores and sdc1).
+#: stores (sb..sw, swl/swr, swc1, the VFPU stores and sdc1). ``sc`` is excluded because it
+#: writes its success flag to ``rt``.
 _NO_GPR_WRITE_OPS = frozenset((
     0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17,
-    0x28, 0x29, 0x2A, 0x2B, 0x2E, 0x38, 0x39, 0x3A, 0x3D, 0x3E, 0x3F,
+    0x28, 0x29, 0x2A, 0x2B, 0x2E, 0x39, 0x3A, 0x3D, 0x3E, 0x3F,
 ))
 
 
@@ -1299,6 +1307,7 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
             word = int.from_bytes(wb, 'little')
             op = word >> 26
             funct = word & 0x3F
+            rd = (word >> 11) & 0x1F
             if op in (2, 3) and not _relocated_as(relocated, pc, "jump26"):
                 # Its target is not this module's code: a call (jal) continues past the delay
                 # slot like any call, a jump (j) ends the path like a tail call.
@@ -1354,6 +1363,10 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
                     else:
                         stack.append(target)
                         break
+                break
+            if op == 0 and funct == 0x09 and rd == 0:  # jalr $zero, rs: computed tail transfer
+                covered.add(pc + 4)
+                break
             if op == 0 and funct == 0x08:  # jr (return / computed): end this path
                 covered.add(pc + 4)
                 # If the instruction after the delay slot is also jr $ra, the
@@ -1366,13 +1379,10 @@ def trace_function(elf, start, ranges, covered, calls, hc, walked=None, unreloca
                     pc += 8
                     continue
                 break
-            # Branches: REGIMM (1), beq/bne/blez/bgtz (4-7) and their likely forms (20-23),
-            # and FPU bc1 (cop1 with rs=8). Target is intra-function; fork and continue.
-            is_branch = op in (1, 4, 5, 6, 7, 20, 21, 22, 23) or (op == 0x11 and ((word >> 21) & 0x1F) == 8)
-            if is_branch:
-                off = word & 0xFFFF
-                off = off - 0x10000 if off & 0x8000 else off
-                target = pc + 4 + (off << 2)
+            # Use the shared decoder so trace coverage follows the same VFPU/COP2
+            # branch edges as the code generator and canonical CFG.
+            target = branch_target(pc, word)
+            if target is not None:
                 if in_ranges(target, ranges):
                     stack.append(target)
                 covered.add(pc + 4)
@@ -1445,11 +1455,9 @@ def direct_j_edges(elf, ranges, targets=None):
     edges = {}
     for lo, hi in ranges:
         blob = elf.read_at_vaddr(lo, hi - lo)
-        if blob is None:
-            # Small synthetic images used by analyzer/codegen regressions often
-            # expose only the scalar read surface.  Keep the production path
-            # bulk-read based, but make the evidence helper honor that same
-            # read contract without requiring an ELF container.
+        if blob is None or len(blob) != hi - lo:
+            # Small synthetic images expose only scalar reads. A short PT_LOAD read
+            # also falls back so later segments are read at their own file offsets.
             words = (
                 (source, elf.read_at_vaddr(source, 4))
                 for source in range(lo, hi, 4)
@@ -1559,7 +1567,7 @@ def _iter_code_words(elf, ranges):
     """
     for lo, hi in ranges:
         blob = elf.read_at_vaddr(lo, hi - lo)
-        if blob is None:
+        if blob is None or len(blob) != hi - lo:
             for addr in range(lo, hi, 4):
                 raw = elf.read_at_vaddr(addr, 4)
                 if raw is not None and len(raw) >= 4:
@@ -1853,6 +1861,7 @@ def code_pointer_evidence(elf, ranges):
             hireg.clear()
             clear_next = False
         op = word >> 26
+        rs, rt = (word >> 21) & 0x1F, (word >> 16) & 0x1F
         if op == 3:  # jal
             target = (addr & 0xF0000000) | ((word & 0x3FFFFFF) << 2)
             if in_ranges(target, ranges) and _relocated_as(jumps, addr, "jump26"):
@@ -1863,18 +1872,33 @@ def code_pointer_evidence(elf, ranges):
                 evidence["branch-link"].add(target)
 
         if op == 0x0F:  # lui rt, imm
-            hireg[(word >> 16) & 0x1F] = (word & 0xFFFF) << 16
+            if rt:
+                hireg[rt] = (word & 0xFFFF) << 16
         elif op in (0x09, 0x0D):  # addiu / ori: the low half of an `la`
-            base = hireg.get((word >> 21) & 0x1F)
+            base = hireg.get(rs)
             if isinstance(base, int):
                 if op == 0x09:
                     low = (word & 0xFFFF) - (0x10000 if word & 0x8000 else 0)
                     value = (base + low) & 0xFFFFFFFF
                 else:
                     value = base | (word & 0xFFFF)
-                if (in_ranges(value, ranges) and (value & 3) == 0
+                if rt and (in_ranges(value, ranges) and (value & 3) == 0
                         and _relocated_as(relocated, addr, "lo16")):
                     evidence["immediate"].add(value)
+                if rt:
+                    hireg[rt] = value
+            elif rt:
+                hireg.pop(rt, None)
+        else:
+            writes = _gpr_writes(word)
+            if writes == "unknown":
+                if (branch_target(addr, word) is None and op not in (2, 3)
+                        and not (op == 0 and (word & 0x3F) in (0x08, 0x09))):
+                    hireg.clear()
+            elif writes is not None:
+                for register in writes:
+                    if register:
+                        hireg.pop(register, None)
         if branch_target(addr, word) is not None or op in (2, 3) or (
             op == 0 and (word & 0x3F) in (0x08, 0x09)
         ):
@@ -2245,9 +2269,6 @@ def _seed_address_materializations(d):
             hc.add(val)
 
     for lo, hi in ranges:
-        blob = elf.read_at_vaddr(lo, hi - lo)
-        if blob is None:
-            continue
         hireg = {}
         # A control transfer ends the straight-line run after its delay slot, which
         # still executes first: an `la` whose low half sits in a `jal` delay slot
@@ -2255,9 +2276,11 @@ def _seed_address_materializations(d):
         # the state at the word after the delay slot, keeping what the slot wrote.
         clear_at = None
         before_slot = None
-        for off in range(0, len(blob) - 3, 4):
-            word = int.from_bytes(blob[off:off + 4], 'little')
-            addr = lo + off
+        previous = None
+        for addr, word in _iter_code_words(elf, ((lo, hi),)):
+            if previous is not None and addr != previous + 4:
+                hireg, clear_at, before_slot = {}, None, None
+            previous = addr
             if addr in shadow:
                 # A word only withdrawn code reaches is no evidence and ends a straight-line run
                 # (_non_code_entries: the shadow). The set is empty for every other image.
@@ -2304,34 +2327,54 @@ def _seed_address_materializations(d):
                 else:
                     noisy.add(addr + 8)
 
-            is_branch = op in (1, 4, 5, 6, 7, 20, 21, 22, 23) or (op == 0x11 and ((word >> 21) & 0x1F) == 8)
+            is_branch = branch_target(addr, word) is not None
             is_jump_or_call = op in (2, 3) or (op == 0 and (word & 0x3F) in (0x08, 0x09))
             if (is_branch or is_jump_or_call) and clear_at is None:
                 clear_at = addr + 8
 
             if op == 0x0F:  # lui rt, imm
-                hireg[(word >> 16) & 0x1F] = (word & 0xFFFF) << 16
+                rt_reg = (word >> 16) & 0x1F
+                if rt_reg:
+                    hireg[rt_reg] = (word & 0xFFFF) << 16
             elif op == 0x09:  # addiu rt, rs, simm  (la low half)
-                rs = (word >> 21) & 0x1F
-                if rs in hireg and isinstance(hireg[rs], int):
-                    val = (hireg[rs] + ((word & 0xFFFF) - (0x10000 if word & 0x8000 else 0))) & 0xFFFFFFFF
-                    note_address_taken(val, addr)
+                rs_reg, rt_reg = (word >> 21) & 0x1F, (word >> 16) & 0x1F
+                base = hireg.get(rs_reg)
+                if isinstance(base, int):
+                    val = (base + ((word & 0xFFFF) - (0x10000 if word & 0x8000 else 0))) & 0xFFFFFFFF
+                    if rt_reg:
+                        note_address_taken(val, addr)
+                        hireg.pop(rt_reg, None)
+                elif rt_reg:
+                    hireg.pop(rt_reg, None)
             elif op == 0x0D:  # ori rt, rs, imm  (la low half)
-                rs = (word >> 21) & 0x1F
-                if rs in hireg and isinstance(hireg[rs], int):
-                    val = hireg[rs] | (word & 0xFFFF)
-                    note_address_taken(val, addr)
+                rs_reg, rt_reg = (word >> 21) & 0x1F, (word >> 16) & 0x1F
+                base = hireg.get(rs_reg)
+                if isinstance(base, int):
+                    val = base | (word & 0xFFFF)
+                    if rt_reg:
+                        note_address_taken(val, addr)
+                        hireg.pop(rt_reg, None)
+                elif rt_reg:
+                    hireg.pop(rt_reg, None)
             elif op == 0 and (word & 0x3F) == 0x21: # addu rd, rs, rt
                 rs_reg, rt_reg, rd_reg = (word >> 21) & 0x1F, (word >> 16) & 0x1F, (word >> 11) & 0x1F
-                if rs_reg in hireg and isinstance(hireg[rs_reg], int):
-                    hireg[rd_reg] = hireg[rs_reg]
-                elif rt_reg in hireg and isinstance(hireg[rt_reg], int):
-                    hireg[rd_reg] = hireg[rt_reg]
+                rs_value = 0 if rs_reg == 0 else hireg.get(rs_reg)
+                rt_value = 0 if rt_reg == 0 else hireg.get(rt_reg)
+                if rd_reg:
+                    if rs_reg == 0 and rt_reg in hireg:
+                        hireg[rd_reg] = rt_value
+                    elif rt_reg == 0 and rs_reg in hireg:
+                        hireg[rd_reg] = rs_value
+                    else:
+                        hireg.pop(rd_reg, None)
             elif op == 0x23:  # lw rt, simm(rs)
-                rs_reg = (word >> 21) & 0x1F
-                if rs_reg in hireg and isinstance(hireg[rs_reg], int):
-                    table_addr = (hireg[rs_reg] + ((word & 0xFFFF) - (0x10000 if word & 0x8000 else 0))) & 0xFFFFFFFF
-                    hireg[(word >> 16) & 0x1F] = ("table", table_addr)
+                rs_reg, rt_reg = (word >> 21) & 0x1F, (word >> 16) & 0x1F
+                base = hireg.get(rs_reg)
+                if rt_reg and isinstance(base, int):
+                    table_addr = (base + ((word & 0xFFFF) - (0x10000 if word & 0x8000 else 0))) & 0xFFFFFFFF
+                    hireg[rt_reg] = ("table", table_addr)
+                elif rt_reg:
+                    hireg.pop(rt_reg, None)
             elif op == 0x2B:  # sw rt, simm(rs)
                 rt_reg = (word >> 16) & 0x1F
                 if rt_reg in hireg and isinstance(hireg[rt_reg], int):
@@ -2360,6 +2403,14 @@ def _seed_address_materializations(d):
                         if in_text(val) and _relocated_as(relocated, table_addr + j*4, "word32"):
                             hc.add(val)
                         else: break
+            elif not is_branch and not is_jump_or_call:
+                writes = _gpr_writes(word)
+                if writes == "unknown":
+                    hireg.clear()
+                elif writes is not None:
+                    for register in writes:
+                        if register:
+                            hireg.pop(register, None)
 
 
 #: What became of a miss seed (`analyze`'s `report["miss_seeds"]`), decided by comparing the build
@@ -3078,9 +3129,10 @@ def _non_code_evidence(elf, ranges, cache):
     for lo, hi in ranges:
         key = (lo, hi)
         if key not in cache:
-            raw = elf.read_at_vaddr(lo, hi - lo) or b""
-            cache[key] = {lo + i: why for i in range(0, len(raw) - 3, 4)
-                          if (why := reserved_encoding(int.from_bytes(raw[i:i + 4], "little")))}
+            cache[key] = {
+                address: why for address, word in _iter_code_words(elf, (key,))
+                if (why := reserved_encoding(word))
+            }
         found.update(cache[key])
     return found
 

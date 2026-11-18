@@ -2229,6 +2229,27 @@ def overlapping_segments_elf() -> tuple[bytes, list[tuple[int, int, int, int]]]:
 class ElfLoadSpanTests(unittest.TestCase):
     """read_at_vaddr serves the first PT_LOAD in header order that holds the address on file."""
 
+    def test_bulk_instruction_walk_does_not_join_file_bytes_at_a_segment_boundary(self) -> None:
+        image_bytes, _headers = overlapping_segments_elf()
+        image = analyze.Elf(image_bytes, base=0)
+        start = PRIMARY_BASE + 0x3C
+        ranges = [(start, start + 8)]
+
+        expected = []
+        for address in range(start, start + 8, 4):
+            raw = image.read_at_vaddr(address, 4)
+            if raw is not None and len(raw) == 4:
+                expected.append((address, int.from_bytes(raw, "little")))
+
+        self.assertEqual(list(analyze._iter_code_words(image, ranges)), expected)
+
+    def test_read_clips_to_the_file_segment_end(self) -> None:
+        image_bytes, _headers = overlapping_segments_elf()
+        image = analyze.Elf(image_bytes, base=0)
+        raw = image.read_at_vaddr(PRIMARY_BASE + 0x10E, 4)
+        self.assertIsNotNone(raw)
+        self.assertEqual(len(raw), 2)
+
     def test_reads_match_a_walk_over_the_program_headers(self) -> None:
         image_bytes, headers = overlapping_segments_elf()
         image = analyze.Elf(image_bytes, base=0)
@@ -2236,7 +2257,8 @@ class ElfLoadSpanTests(unittest.TestCase):
         def reference(vaddr: int, n: int):
             for p_type, off, lo, filesz in headers:
                 if p_type == 1 and lo <= vaddr < lo + filesz:
-                    return image_bytes[off + vaddr - lo:off + vaddr - lo + n]
+                    start = off + vaddr - lo
+                    return image_bytes[start:start + min(n, lo + filesz - vaddr)]
             return None
 
         probes: set[int] = set()
@@ -2252,6 +2274,49 @@ class ElfLoadSpanTests(unittest.TestCase):
         self.assertEqual(image.read_at_vaddr(PRIMARY_BASE + 0x20, 1),
                          image_bytes[first[1] + 0x20:first[1] + 0x21])
         self.assertIsNone(image.read_at_vaddr(PRIMARY_BASE + 0x110, 4))
+
+
+class ModuleInfoScanBoundaryTests(unittest.TestCase):
+    def test_fallback_scan_checks_the_last_record_ending_at_segment_end(self) -> None:
+        table = bytearray(20)
+        table[8] = 5  # one well-formed five-word import-table record
+        code = bytearray(56)
+        module_info_offset = 4
+        struct.pack_into("<H", code, module_info_offset, 0x1007)
+        code[module_info_offset + 4:module_info_offset + 32] = b"Synthetic\0".ljust(28, b"\0")
+        struct.pack_into("<5I", code, module_info_offset + 32,
+                         0, 0, 0, 0x2000, 0x2014)
+        data = bytes(table + code)
+        segments = [
+            {"type": 1, "off": 0, "vaddr": 0x2000, "filesz": 20, "memsz": 20},
+            {"type": 1, "off": 20, "vaddr": 0x1000, "filesz": 56, "memsz": 56},
+        ]
+
+        result = analyze._scan_module_info(segments, data, data[20:])
+
+        self.assertEqual(result, (4, 0, 0, 0x2000, 0x2014))
+
+
+class FuncSymbolEntrySizeTests(unittest.TestCase):
+    def elf_with_symtab(self, entsize: int, size: int = 16):
+        blob, _addresses = _sectioned_exec([
+            (".text", 6, _words(0x03E00008, 0)),
+            (".symtab", 0, bytes(16)),
+            (".strtab", 0, b"\0symbol\0"),
+        ])
+        blob = bytearray(blob)
+        shoff = struct.unpack_from("<I", blob, 32)[0]
+        symtab_header = shoff + 2 * 40
+        struct.pack_into("<I", blob, symtab_header + 4, 2)  # SHT_SYMTAB
+        struct.pack_into("<I", blob, symtab_header + 20, size)
+        struct.pack_into("<I", blob, symtab_header + 24, 3)  # .strtab
+        struct.pack_into("<I", blob, symtab_header + 36, entsize)
+        return analyze.Elf(bytes(blob), base=0)
+
+    def test_malformed_symbol_entry_sizes_are_ignored_without_crashing(self) -> None:
+        for entsize, size in ((0, 16), (8, 16), (16, 17)):
+            with self.subTest(entsize=entsize, size=size):
+                self.assertIsNone(self.elf_with_symtab(entsize, size).func_symbols())
 
     def test_in_ranges_matches_any_over_random_range_lists(self) -> None:
         rng = random.Random(1296)
