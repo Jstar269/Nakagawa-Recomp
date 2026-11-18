@@ -282,8 +282,9 @@ contract:
   `AV_LOG_INFO` (upstream's default `av_log_level`) is dropped, so FFmpeg's
   `AV_LOG_DEBUG` lines from `atrac3_decode_init()` no longer reach stderr on
   every AT3 create and reset. Each kept call is one line, prefixed
-  `atrac3p: ` and ended with a newline if the format has none, written to
-  stderr or to a sink installed with `atrac3p_set_log_sink()`. Before that
+  `"atrac3p: "` (a trailing space included) and ended with a newline if
+  the format has none, written to stderr or to a sink installed with
+  `atrac3p_set_log_sink()`. Before that
   the level was ignored and the format was written verbatim
   (`test_decoder_log_lines`).
 - Ledger record: the public provenance ledger lists `atrac3p_api.c` and
