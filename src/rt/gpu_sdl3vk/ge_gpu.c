@@ -3427,6 +3427,19 @@ static void stats_emit(int final) {
 
 static void stats_tick(void) { stats_emit(0); }
 
+/* The exit line of the failures each said once and then counted (tex_get's full cache,
+ * target_kept_unsynced, software_fallback_refused, target_failed_fallback), written to `buf`.
+ * Returns 0, `buf` empty, when none happened. gegpu_shutdown prints it; gegpu_release clears
+ * the counts, so a later gegpu_init says each first one again. */
+static int failures_line(char *buf, size_t cap) {
+    buf[0] = '\0';
+    if (!s_cnt_tex_evict_failed && !s_cnt_target_kept && !s_cnt_fallback_refused && !s_cnt_target_failed)
+        return 0;
+    snprintf(buf, cap, "gegpu: failures: tex-evict=%lu target-kept=%lu fallback-refused=%lu target-failed=%lu\n",
+             s_cnt_tex_evict_failed, s_cnt_target_kept, s_cnt_fallback_refused, s_cnt_target_failed);
+    return 1;
+}
+
 /* ---- targets ----------------------------------------------------------------------------- */
 
 /* Write the target's GPU contents back to guest VRAM (eviction, CLUT-from-VRAM). */
@@ -4373,11 +4386,28 @@ static int depth_readback_to_guest(DepthEnt *d) {
     return 1;
 }
 
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* The coherence selftest's depth-init-fail and tex-make-fail cells: the next slot_drain reports a
+ * failure. */
+static int s_selftest_slot_drain_fail = 0;
+#endif
+
+/* The drain before a depth or texture slot's objects are freed (depth_slot_free, tex_slot_unmake,
+ * tex_left_retire): 0 when the GPU's work, which may still use them, could not be retired. */
+static int slot_drain(void) {
+    int drained = cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    if (s_selftest_slot_drain_fail) { s_selftest_slot_drain_fail = 0; drained = 0; }
+#endif
+    return drained;
+}
+
 /* Free depth slot `d`'s images and its twin, and the framebuffers every target made over them,
  * and clear the slot. Returns 0, the slot keeping its images, when the GPU's work (which may still
- * use them) could not be retired. */
+ * use them) could not be retired: a slot not used then still holds them, and depth_acquire (when
+ * it takes the slot) or depth_slots_release (at shutdown) frees them. */
 static int depth_slot_free(DepthEnt *d) {
-    if ((d->img || d->timg) && !cmd_drain(GEGPU_BOUNDARY_LIFETIME)) return 0;
+    if ((d->img || d->timg) && !slot_drain()) return 0;
     if (d->view) vkDestroyImageView(s_dev, d->view, NULL);
     if (d->img) vkDestroyImage(s_dev, d->img, NULL);
     if (d->mem) vkFreeMemory(s_dev, d->mem, NULL);
@@ -4397,6 +4427,21 @@ static int depth_slot_free(DepthEnt *d) {
         }
     memset(d, 0, sizeof(*d));
     return 1;
+}
+
+/* Every depth slot's objects, once the device has retired its work (no drain): at shutdown and
+ * after a failed init. A slot not used is included: depth_slot_free leaves its images there when
+ * its drain fails, and every other free clears the slot. The targets' framebuffers are already
+ * gone (target_destroy). */
+static void depth_slots_release(void) {
+    for (int i = 0; i < MAX_DEP; i++) {
+        DepthEnt *d = &s_deps[i];
+        if (d->view) vkDestroyImageView(s_dev, d->view, NULL);
+        if (d->img) vkDestroyImage(s_dev, d->img, NULL);
+        if (d->mem) vkFreeMemory(s_dev, d->mem, NULL);
+        twin_depth_free(d);
+        memset(d, 0, sizeof(*d));
+    }
 }
 
 static DepthEnt *depth_acquire(uint32_t zba, uint32_t zstride) {
@@ -7061,16 +7106,45 @@ void gegpu_movie_counts(unsigned long *tex_matches, unsigned long *tex_frames, u
     if (target_frames) *target_frames = s_cnt_movie_present_target;
 }
 
+/* The objects of a failed texture that tex_slot_unmake could not free (its drain failed: the GPU's
+ * work may still use them). They are held here, not in the cache slot, which the next miss
+ * clears and eviction overwrites, until a drain succeeds (tex_left_retire, at the next miss) or
+ * the device is idle (gegpu_release). tex_get retires them before it makes a texture, so this
+ * holds one texture's objects at most. */
+static struct { VkSampler smp; VkImageView view; VkImage img; VkDeviceMemory mem; } s_tex_left;
+
+static int tex_left_held(void) { return s_tex_left.smp || s_tex_left.view || s_tex_left.img || s_tex_left.mem; }
+
+/* Frees what s_tex_left holds, with no drain: the caller has retired the GPU's work. */
+static void tex_left_destroy(void) {
+    if (s_tex_left.smp) vkDestroySampler(s_dev, s_tex_left.smp, NULL);
+    if (s_tex_left.view) vkDestroyImageView(s_dev, s_tex_left.view, NULL);
+    if (s_tex_left.img) vkDestroyImage(s_dev, s_tex_left.img, NULL);
+    if (s_tex_left.mem) vkFreeMemory(s_dev, s_tex_left.mem, NULL);
+    memset(&s_tex_left, 0, sizeof s_tex_left);
+}
+
+/* 1 once nothing is held (freed now if the GPU's work can be retired); 0 while the drain fails. */
+static int tex_left_retire(void) {
+    if (!tex_left_held()) return 1;
+    if (!slot_drain()) return 0;
+    tex_left_destroy();
+    return 1;
+}
+
 /* A cache slot whose texture failed after tex_make (its first upload, or its descriptor set): the
  * slot is not counted, and the next miss clears it, so its objects go now, once the GPU's work
- * (an upload recorded before the failure) is retired. A drain that fails leaves them, as
- * depth_slot_free does. */
+ * (an upload recorded before the failure) is retired. When the drain fails they move to
+ * s_tex_left, empty here (tex_get retired it before tex_make), so the slot's reset loses none. */
 static void tex_slot_unmake(TexEnt *e) {
-    if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) return;
-    if (e->smp) vkDestroySampler(s_dev, e->smp, NULL);
-    if (e->view) vkDestroyImageView(s_dev, e->view, NULL);
-    if (e->img) vkDestroyImage(s_dev, e->img, NULL);
-    if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
+    if (slot_drain()) {
+        if (e->smp) vkDestroySampler(s_dev, e->smp, NULL);
+        if (e->view) vkDestroyImageView(s_dev, e->view, NULL);
+        if (e->img) vkDestroyImage(s_dev, e->img, NULL);
+        if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
+    } else {
+        s_tex_left.smp = e->smp; s_tex_left.view = e->view; s_tex_left.img = e->img; s_tex_left.mem = e->mem;
+    }
     e->smp = VK_NULL_HANDLE; e->view = VK_NULL_HANDLE; e->img = VK_NULL_HANDLE; e->mem = VK_NULL_HANDLE;
 }
 
@@ -7176,6 +7250,9 @@ static VkDescriptorSet tex_get(void) {
             return s_white_set;
         }
     }
+    /* An earlier failed texture's objects go first; while the GPU's work still cannot be retired,
+     * none is made (tex_slot_unmake has room for one failure's objects only). */
+    if (!tex_left_retire()) return s_white_set;
     TexEnt *e = &s_tex[s_tex_n];
     memset(e, 0, sizeof(*e));
     e->hm_levels = tex_hm_levels_for(w, h, levels, min_linear);
@@ -10368,6 +10445,10 @@ void gegpu_shutdown(void) {
      * object that a recorded command or descriptor can reference. */
     (void)vkDeviceWaitIdle(s_dev);
     stats_emit(1);
+    {
+        char failures[256];
+        if (failures_line(failures, sizeof failures)) fputs(failures, stderr);
+    }
     if (s_cnt_movie_tex || s_cnt_movie_present_tex || s_cnt_movie_present_target || s_cnt_movie_present_ge)
         fprintf(stderr, "gegpu: movie frames (#2111): %lu presents of a drawn movie picture, %lu of one "
                         "decoded into the target; %lu texture uploads were movie pictures; %lu presents "
@@ -10403,19 +10484,14 @@ static void gegpu_release(void) {
         fprintf(stderr, "gegpu: Fill presented %lu pictures, %lu of them with black wings\n",
                 s_cnt_wide_present, s_cnt_wide_black);
     s_cnt_wide_present = s_cnt_wide_black = 0;
+    /* gegpu_shutdown printed their exit line: a later gegpu_init says each first failure again. */
+    s_cnt_tex_evict_failed = s_cnt_target_kept = s_cnt_fallback_refused = s_cnt_target_failed = 0;
     wide_image_free(0);
     for (int i = 0; i < MAX_TGT; i++) target_destroy(&s_tgts[i]);
-    for (int i = 0; i < MAX_DEP; i++) {
-        DepthEnt *d = &s_deps[i];
-        if (!d->used) continue;
-        if (d->view) vkDestroyImageView(s_dev, d->view, NULL);
-        if (d->img) vkDestroyImage(s_dev, d->img, NULL);
-        if (d->mem) vkFreeMemory(s_dev, d->mem, NULL);
-        twin_depth_free(d);
-        memset(d, 0, sizeof(*d));
-    }
+    depth_slots_release();
     for (int i = 0; i < s_tex_n; i++) tex_entry_free(&s_tex[i]);
     s_tex_n = 0;
+    tex_left_destroy();
     tex_index_rebuild();
     s_submit_done = s_submit_serial;   /* the device is idle: every retired copy can go */
     tex_xs_retire_collect();

@@ -8173,15 +8173,7 @@ static int coherence_run_wide_fill(void) {
 static void coherence_reset_depths(void) {
     coherence_reset_targets();
     (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
-    for (int i = 0; i < MAX_DEP; i++) {
-        DepthEnt *d = &s_deps[i];
-        if (!d->used) continue;
-        if (d->view) vkDestroyImageView(s_dev, d->view, NULL);
-        if (d->img) vkDestroyImage(s_dev, d->img, NULL);
-        if (d->mem) vkFreeMemory(s_dev, d->mem, NULL);
-        twin_depth_free(d);
-        memset(d, 0, sizeof(*d));
-    }
+    depth_slots_release();   /* as gegpu_release frees them: slots not used included */
 }
 
 /* Depth newer than guest VRAM survives eviction. A draw that writes depth marks its surface
@@ -16340,6 +16332,7 @@ static int coherence_run_fallback_refused(void) {
     s_ge->zbp = 0x04000000u | AUD_Z; s_ge->zbw = 128u;
     const GeVtx p = { 10.0f, 10.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
     (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+    const unsigned long refused0 = s_cnt_fallback_refused;
     s_cmd_failed = 1;   /* the readback cannot record */
     const int refused = hook_point(&p, 0);
     s_cmd_failed = 0;
@@ -16350,6 +16343,16 @@ static int coherence_run_fallback_refused(void) {
         fprintf(stderr, "gpu coherence selftest [%s]: FAIL a fallback whose readback failed: hook=%d (want 1, "
                 "dropped) target kept=%d, then hook=%d (want 0, ge.c draws)%s\n", name, refused, kept, handed,
                 refused == 0 ? " -- ge.c would draw over stale guest VRAM" : "");
+        coherence_reset_targets();
+        return 0;
+    }
+    /* The refusal is counted, and the count reaches the exit line gegpu_shutdown prints. Failing
+     * before: only the first was said, and no line named the count. */
+    char line[256], want[64];
+    snprintf(want, sizeof want, " fallback-refused=%lu ", refused0 + 1u);
+    if (!failures_line(line, sizeof line) || !strstr(line, want)) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the refusal's count did not reach the exit line "
+                "(want \"%s\"): %s\n", name, want, line[0] ? line : "no line\n");
         coherence_reset_targets();
         return 0;
     }
@@ -16380,16 +16383,46 @@ static int coherence_run_depth_init_fail(void) {
     int keyed = 0;
     for (int i = 0; i < MAX_DEP; i++) if (s_deps[i].used && s_deps[i].zba == zba) keyed = 1;
     DepthEnt *again = d || keyed ? NULL : aud2_depth(zba);
-    const int ok = !d && !keyed && again && again->layout != VK_IMAGE_LAYOUT_UNDEFINED && !again->cpu_dirty;
+    int ok = !d && !keyed && again && again->layout != VK_IMAGE_LAYOUT_UNDEFINED && !again->cpu_dirty;
     if (!ok)
         fprintf(stderr, "gpu coherence selftest [%s]: FAIL a depth surface whose upload failed: made=%d left "
                 "keyed=%d, then made=%d seeded=%d%s\n", name, d != NULL, keyed, again != NULL,
                 again && again->layout != VK_IMAGE_LAYOUT_UNDEFINED,
                 keyed ? " -- the next acquire would return its never-seeded image" : "");
+    /* The failed upload's free cannot retire the GPU's work either (its drain fails, injected): the
+     * slot, not used, keeps its images, and the release gegpu_release runs (depth_slots_release,
+     * through coherence_reset_depths) frees them. Failing before: it skipped every slot not used. */
+    if (ok) {
+        coherence_reset_depths();
+        (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+        s_cmd_failed = 1;
+        s_selftest_slot_drain_fail = 1;
+        DepthEnt *f = aud2_depth(zba);
+        const int injected = s_selftest_slot_drain_fail == 0;
+        s_cmd_failed = 0;
+        s_selftest_slot_drain_fail = 0;
+        int held = 0, rekeyed = 0, left = 0;
+        for (int i = 0; i < MAX_DEP; i++) {
+            const DepthEnt *e = &s_deps[i];
+            if (e->used && e->zba == zba) rekeyed = 1;
+            if (!e->used && (e->img || e->view || e->mem)) held = 1;
+        }
+        coherence_reset_depths();
+        for (int i = 0; i < MAX_DEP; i++) {
+            const DepthEnt *e = &s_deps[i];
+            if (e->img || e->view || e->mem || e->timg || e->tview || e->tmem) left = 1;
+        }
+        ok = !f && injected && held && !rekeyed && !left;
+        if (!ok)
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL a depth surface whose upload and free both failed: "
+                    "made=%d injected=%d images held by an unused slot=%d keyed=%d, after the release left=%d%s\n",
+                    name, f != NULL, injected, held, rekeyed, left,
+                    left ? " -- the release skipped the unused slot and leaked its images" : "");
+    }
     *s_ge = saved;
     coherence_reset_depths();
     if (ok) printf("gpu coherence selftest: PASS %s a failed first upload left no slot keyed; the next acquire "
-                   "made and seeded it\n", name);
+                   "made and seeded it; a failed free's images were released\n", name);
     return ok;
 }
 
@@ -16627,26 +16660,37 @@ static int coherence_run_tex_make_fail(void) {
     coherence_fill_raw((uint8_t *)SR_HOST(addr), bytes / 4u, 4u, 0xFF305070u);
     sr_gpu_vram_dirty(addr, bytes);
     const int n0 = s_tex_n;
-    int white[2], left[2];
-    for (int k = 0; k < 2; k++) {
+    /* k = 2: the upload fails and so does the drain before its objects are freed (injected); they
+     * are held outside the slot, and the next miss frees them before it makes its texture. Failing
+     * before: they stayed in the slot, and that miss's slot reset lost them. */
+    int white[3], left[3], held = 0, injected = 0;
+    for (int k = 0; k < 3; k++) {
         if (k) { (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME); s_cmd_failed = 1; }   /* the upload cannot record */
         else s_selftest_alloc_fail = 1;                                          /* the image has no memory */
+        if (k == 2) s_selftest_slot_drain_fail = 1;                              /* nor can the free retire */
         white[k] = tex_get() == s_white_set;
+        if (k == 2) { injected = s_selftest_slot_drain_fail == 0; held = tex_left_held(); }
         s_cmd_failed = 0;
         s_selftest_alloc_fail = 0;
+        s_selftest_slot_drain_fail = 0;
         const TexEnt *e = &s_tex[s_tex_n];
         left[k] = s_tex_n != n0 || e->img || e->mem || e->view || e->smp;
     }
     const int made = tex_get() != s_white_set && s_tex_n == n0 + 1;
+    const int still_held = tex_left_held();
     if (s_nbatch) (void)submit_pending();
     *s_ge = saved;
-    if (!white[0] || !white[1] || left[0] || left[1] || !made) {
+    if (!white[0] || !white[1] || !white[2] || left[0] || left[1] || left[2] || !injected || !held || !made ||
+        still_held) {
         fprintf(stderr, "gpu coherence selftest [%s]: FAIL failed textures: alloc white=%d left objects=%d, upload "
-                "white=%d left objects=%d, then made=%d%s\n", name, white[0], left[0], white[1], left[1], made,
-                left[0] || left[1] ? " -- the next texture's slot reset loses them" : "");
+                "white=%d left objects=%d, upload and free white=%d injected=%d left objects=%d held=%d, then made=%d "
+                "still held=%d%s\n", name, white[0], left[0], white[1], left[1], white[2], injected, left[2], held,
+                made, still_held,
+                left[0] || left[1] || left[2] ? " -- the next texture's slot reset loses them" : "");
         return 0;
     }
-    printf("gpu coherence selftest: PASS %s failed textures left no Vulkan object in their slot\n", name);
+    printf("gpu coherence selftest: PASS %s failed textures left no Vulkan object in their slot; a failed free's "
+           "objects were freed at the next miss\n", name);
     return 1;
 }
 
