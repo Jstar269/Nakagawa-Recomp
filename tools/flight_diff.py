@@ -130,7 +130,7 @@ def _validate_schema(value: Any, schema: dict[str, Any], path: str = "$") -> Non
         if "maxLength" in schema and len(value) > schema["maxLength"]:
             _fail(path, "string is too long")
         pattern = schema.get("pattern")
-        if pattern is not None and re.search(pattern, value) is None:
+        if pattern is not None and re.fullmatch(pattern, value) is None:
             _fail(path, "string does not match its schema pattern")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:
@@ -200,9 +200,20 @@ def _forbid_embedded_text(value: Any, path: str = "$") -> None:
             _fail(path, "path-like or guest-derived text is not allowed")
 
 
+_SCHEMA_CACHE: dict[str, Any] | None = None
+
+
+def _bundle_schema() -> dict[str, Any]:
+    """The bundle schema, read once per process: every bundle is validated against it."""
+    global _SCHEMA_CACHE
+    if _SCHEMA_CACHE is None:
+        _SCHEMA_CACHE = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    return _SCHEMA_CACHE
+
+
 def validate_bundle(bundle: Any, schema: dict[str, Any] | None = None) -> None:
     if schema is None:
-        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        schema = _bundle_schema()
     # The schema also forbids an identity-less v3 build block; this check runs first so
     # the operator gets the specific reason rather than a generic schema mismatch.
     build = bundle.get("build") if isinstance(bundle, dict) else None
@@ -488,13 +499,34 @@ def _first_sequence_divergence(
     return None
 
 
-def _first_class_divergence(
+def _first_one_sided_sequence(
     baseline: dict[str, Any], candidate: dict[str, Any]
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None] | None:
+    """The first event sequence retained by only one bundle.
+
+    A run that ends inside a checkpoint window keeps the trigger terminal, so two windows
+    of different lengths can agree on every shared event and on the terminal; the event
+    only one side recorded is then the divergence.
+    """
+    left = {event["sequence"]: event for event in baseline["events"]}
+    right = {event["sequence"]: event for event in candidate["events"]}
+    one_sided = sorted(set(left) ^ set(right))
+    if not one_sided:
+        return None
+    sequence = one_sided[0]
+    return f"sequence {sequence}", left.get(sequence), right.get(sequence)
+
+
+def _first_class_divergence(
+    baseline: dict[str, Any], candidate: dict[str, Any], *, bounded: bool = True
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None] | None:
+    """First class-aligned divergence; ``bounded`` ignores events past the shorter run."""
     max_common_sequence = min(
         max((event["sequence"] for event in baseline["events"]), default=0),
         max((event["sequence"] for event in candidate["events"]), default=0),
     )
+    if not bounded:
+        max_common_sequence = max(baseline["recorder"]["recorded"], candidate["recorder"]["recorded"])
     candidates: list[tuple[int, str, dict[str, Any] | None, dict[str, Any] | None]] = []
     for event_class in CLASS_ORDER:
         left = [event for event in baseline["events"] if event["class"] == event_class]
@@ -682,6 +714,8 @@ def diff_bundles(
        terminal reason/sequence/kind/arg0, then, when both bundles carry a
        schema 5 ``refusals`` block, its count, first_nid, first_pc,
        first_sequence and nids (nids_unlisted follows from count and nids).
+       When all of that agrees but the recorded counts differ, the first
+       event only one side retained is the divergence.
        Any difference is DIVERGENCE (exit 1); only full agreement prints
        MATCH (exit 0).
     5. A schema 6 ``threads`` block is the thread state at the cut. It is
@@ -702,6 +736,13 @@ def diff_bundles(
         divergence = _terminal_divergence(baseline, candidate)
     if divergence is None:
         divergence = _refusals_divergence(baseline, candidate)
+    if divergence is None and baseline["recorder"]["recorded"] != candidate["recorder"]["recorded"]:
+        # Everything both runs share agrees, yet one recorded more: the extra event is
+        # the divergence (a run that ended inside a checkpoint window, for example).
+        if align == "sequence":
+            divergence = _first_one_sided_sequence(baseline, candidate)
+        else:
+            divergence = _first_class_divergence(baseline, candidate, bounded=False)
     return divergence
 
 

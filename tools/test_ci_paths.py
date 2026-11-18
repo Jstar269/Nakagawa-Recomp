@@ -84,6 +84,53 @@ class CiPathClassificationTests(unittest.TestCase):
         self.assertEqual(result["security_publication"], "true")
         self.assertEqual(result["run_python"], "true")
 
+    def test_a_generated_document_alone_routes_the_python_freshness_tests(self) -> None:
+        """A full run of a docs-only change has no quick checks: the Python job must check freshness.
+
+        ``quick_checks`` (``regen_all.py --check``) runs only on a light run, so on the full
+        tier a hand edit to a generated document is caught only by the Python tooling job.
+        """
+        for path in (
+            "docs/HLE_COVERAGE.md",
+            "docs/RECOMP_HELPER_INVENTORY.md",
+            "docs/PSP_INTR_WAITS_CENSUS.md",
+            "docs/HLE_AND_WORKAROUND_INVENTORY.md",
+        ):
+            with self.subTest(path=path):
+                result = classify([path], tier=ci_paths_module.TIER_FULL)
+                self.assertEqual(result["docs_only"], "true")
+                self.assertEqual(result["tier"], "full")
+                self.assertEqual(result["allow_substantive"], "true")
+                self.assertEqual(result["run_python"], "true")
+                self.assertEqual(result["python_scope"], "all")
+        # A hand-written document still routes no Python job.
+        self.assertEqual(classify(["docs/CI.md"], tier=ci_paths_module.TIER_FULL)["run_python"], "false")
+        # The routed set is regen_all's own: every output its --check regenerates.
+        import regen_all
+
+        checked = {output for step in regen_all.STEPS if not step.skip for output in step.outputs}
+        self.assertEqual(ci_paths_module._regenerated_outputs(), frozenset(checked))
+
+    def test_public_export_tools_route_the_hosted_export_exercise(self) -> None:
+        """A change to the export tool or a gate it runs meets the fail-closed export check.
+
+        ci.yml's "Exercise public-export generation and candidate audit" step runs only
+        when ``security_publication`` is true (or on a manual run).
+        """
+        for path in (
+            "tools/build_public_export.py",
+            "tools/test_public_export.py",
+            "tools/public_export.py",
+            "tools/public_candidate.py",
+            "tools/publication_policy.py",
+            "tools/history_audit.py",
+            "tools/verify_sbom.py",
+        ):
+            with self.subTest(path=path):
+                result = classify([path])
+                self.assertEqual(result["security_publication"], "true")
+                self.assertEqual(result["run_python"], "true")
+
     def test_provenance_and_independence_campaign_route_security_publication(self) -> None:
         for path in (
             "docs/INDEPENDENCE_CAMPAIGN.md",
@@ -1828,6 +1875,21 @@ class CodeqlWorkflowCategoryTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: true", codeql)
         # The per-run group it replaced would let every superseded head run to a refused upload.
         self.assertNotIn("github.event.workflow_run.id", codeql)
+
+    def test_codeql_main_pushes_and_the_schedule_never_cancel_each_other(self) -> None:
+        """A push to main or the schedule has no wake fields, so it falls through to the last term.
+
+        Keyed on the ref, every main run shared one cancel-in-progress group: a landing during an
+        analysis cancelled the previous main commit's analysis, and the weekly run with it. Only a
+        superseded wake head (or a repeated dispatch for one pull request) may cancel a run.
+        """
+        codeql = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "codeql.yml").read_text(
+            encoding="utf-8")
+        group = next(line.strip() for line in codeql.splitlines() if line.strip().startswith("group: codeql-"))
+        self.assertTrue(
+            group.endswith("|| github.event.inputs.pull_request_number || format('run-{0}', github.run_id) }}"),
+            group)
+        self.assertNotIn("github.ref", group)
 
     def test_codeql_wake_workflow_is_signal_only(self) -> None:
         """codeql-wake.yml emits a signal: no checkout, no secrets, no permissions, no repo code."""

@@ -25,6 +25,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -32,6 +33,7 @@ import sys
 import tempfile
 from typing import NamedTuple
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
@@ -51,6 +53,9 @@ COSIM_GENERATOR = ROOT / "tests" / "fixtures" / "cosim" / "generate.py"
 # mk/cosim_snapshot.mk: COSIM_BASE_ADDR, FUNCS_PER_CHUNK=1 and COSIM_CODEGEN_ARGS.
 COSIM_BASE = 0x08900000
 COSIM_CODEGEN_ARGS = ("--funcs-per-chunk=1", "--stack-census")
+# Set by the hosted native/translation step that installs PSPDEV: there the showcase half of
+# the module gate must run, so a missing PSPDEV fails instead of reporting NOT_RUN.
+SHOWCASE_REQUIRED = "NK_ANALYSIS_IR_SHOWCASE_REQUIRED"
 
 BASE = 0x1000
 NOP = 0x00000000
@@ -71,6 +76,13 @@ def write_elf(path: Path, words) -> None:
     for index, word in enumerate(words):
         struct.pack_into("<I", blob, payload_off + index * 4, word & 0xFFFFFFFF)
     path.write_bytes(blob)
+
+
+def _clean_codegen_env() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in ("TITLE_EXTRA_SPANS", "HST_EXTRA_SPANS", "GAME_BASE"):
+        environment.pop(name, None)
+    return environment
 
 
 # f_00001000: call f_00001020, then a counted loop, then return.
@@ -104,7 +116,7 @@ class AnalysisIrTests(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(TOOLS / "codegen.py"), str(elf), str(out / "out.c"), "--base=0",
              "--profile=none", "--funcs-per-chunk=2000", f"--cfg-report={report}"],
-            cwd=ROOT, capture_output=True, text=True, check=False,
+            cwd=ROOT, env=_clean_codegen_env(), capture_output=True, text=True, check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return json.loads(report.read_text(encoding="utf-8"))
@@ -130,6 +142,12 @@ class AnalysisIrTests(unittest.TestCase):
         slot = next(i for i in ir["instructions"] if i["address"] == 0x1008)
         self.assertEqual(slot["delay_slot_of"], 0x1004)
 
+    def test_codegen_report_ignores_ambient_title_spans(self):
+        baseline = self._report(CALL_LOOP_WORDS, "clean-environment")
+        with mock.patch.dict(os.environ, {"TITLE_EXTRA_SPANS": "0x2000,0x2008"}):
+            contaminated = self._report(CALL_LOOP_WORDS, "ambient-span")
+        self.assertEqual(contaminated, baseline)
+
     def test_parity_names_a_tampered_owner(self):
         report = self._report(CALL_LOOP_WORDS)
         ir = analysis_ir.build_ir(report)
@@ -140,6 +158,42 @@ class AnalysisIrTests(unittest.TestCase):
         ir["functions"].pop()
         codes = {f["code"] for f in analysis_ir.ownership_parity(ir, report)}
         self.assertIn("function-missing", codes)
+
+    def test_ownership_parity_indexes_blocks_in_one_pass(self):
+        class CountingBlocks(list):
+            def __init__(self, rows):
+                super().__init__(rows)
+                self.iterations = 0
+
+            def __iter__(self):
+                self.iterations += 1
+                return super().__iter__()
+
+        blocks = CountingBlocks([
+            {"start": 0x1000, "owners": [0x1000]},
+            {"start": 0x2000, "owners": [0x2000]},
+        ])
+        report = {
+            "schema_version": analysis_ir.CFG_SCHEMA_VERSION,
+            "emitted_ownership_map": {"regions": [
+                {"start": 0x1000, "classification": "callable"},
+                {"start": 0x2000, "classification": "resume"},
+            ]},
+            "instructions": [], "edges": [], "entries": [],
+            "continuation_edges": [], "interior_entries": [],
+        }
+        ir = {
+            "functions": [
+                {"entry": 0x1000, "kind": "callable", "blocks": [0x1000]},
+                {"entry": 0x2000, "kind": "resume", "blocks": [0x2000]},
+            ],
+            "blocks": blocks,
+            "instructions": [], "continuations": [],
+            "source": {"cfg_report_sha256": analysis_ir._sha256(report)},
+        }
+
+        self.assertEqual(analysis_ir.ownership_parity(ir, report), [])
+        self.assertEqual(blocks.iterations, 1)
 
     def test_json_round_trip_is_stable(self):
         ir = analysis_ir.build_ir(self._report(CALL_LOOP_WORDS))
@@ -188,6 +242,27 @@ class AnalysisIrTests(unittest.TestCase):
         interior = next(d for d in result["disagreements"] if d["annotation"]["address"] == 0x100C)
         self.assertEqual(interior["analyzer"], "interior of 0x00001000")
         self.assertEqual([f["entry"] for f in ir["functions"]], [0x1000, 0x1020])
+
+    def test_function_name_annotations_require_nonempty_token_suffixes(self):
+        ir = {
+            "functions": [{"entry": 0x1000, "kind": "callable",
+                           "symbol": "func_00001000", "unresolved_indirect": []}],
+            "instructions": [],
+            "xrefs": [],
+        }
+        base = {"address": 0x1000, "kind": "function-name", "source": "manual",
+                "evidence_class": "manual", "confidence": "medium"}
+        for name in ("", "   "):
+            with self.subTest(name=name), self.assertRaises(analysis_ir.IRError):
+                self._annotations([{**base, "name": name}])
+
+        fragment = analysis_ir.apply_annotations(
+            ir, self._annotations([{**base, "name": "8"}]))
+        self.assertEqual(fragment["counts"]["agreements"], 0)
+        self.assertEqual(fragment["counts"]["advisories"], 1)
+        full_suffix = analysis_ir.apply_annotations(
+            ir, self._annotations([{**base, "name": "00001000"}]))
+        self.assertEqual(full_suffix["counts"]["agreements"], 1)
 
     def test_exported_annotations_round_trip_as_agreements(self):
         ir = analysis_ir.build_ir(self._report(CALL_LOOP_WORDS))
@@ -247,9 +322,9 @@ LADDER_MODULES = ("ladder-zero", "ladder-reloc", "ladder-sched", "ladder-fpu", "
                   "ladder-title2")
 
 
-def _run_tool(*args: str) -> subprocess.CompletedProcess:
+def _run_tool(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, *args], cwd=ROOT, capture_output=True, text=True,
-                          check=False)
+                          env=env, check=False)
 
 
 class Module(NamedTuple):
@@ -315,6 +390,8 @@ class AnalysisIrModuleGateTests(unittest.TestCase):
                                         ("--funcs-per-chunk=2000",)))
                 cls._showcase_modules = tuple(built)
         if cls._showcase_missing is not None:
+            if os.environ.get(SHOWCASE_REQUIRED) == "1":
+                raise AssertionError(f"{SHOWCASE_REQUIRED}=1: {cls._showcase_missing}")
             raise unittest.SkipTest(cls._showcase_missing)
         assert cls._showcase_modules is not None
         return cls._showcase_modules
@@ -322,7 +399,8 @@ class AnalysisIrModuleGateTests(unittest.TestCase):
     def _codegen(self, module: Module, out_dir: Path, *extra: str) -> None:
         out_dir.mkdir(parents=True)
         gen = _run_tool(str(TOOLS / "codegen.py"), str(module.elf), str(out_dir / "out.c"),
-                        f"--base={module.base:#x}", "--profile=none", *module.codegen_args, *extra)
+                        f"--base={module.base:#x}", "--profile=none", *module.codegen_args,
+                        *extra, env=_clean_codegen_env())
         self.assertEqual(gen.returncode, 0, f"{module.name}: codegen {gen.stdout}{gen.stderr}")
 
     def _chain(self, module: Module, root: Path) -> tuple[Path, Path]:
@@ -403,6 +481,33 @@ class AnalysisIrModuleGateTests(unittest.TestCase):
             self.assertIn("ANALYSIS_IR_PARITY FAIL", verified.stdout)
             self.assertIn("instruction-owners", verified.stdout)
             self.assertIn("function-missing", verified.stdout)
+
+
+class ShowcaseRequirementTests(unittest.TestCase):
+    """The hosted PSPDEV step sets SHOWCASE_REQUIRED: there a missing PSPDEV is a failure."""
+
+    def _showcase_without_pspdev(self, environment: dict[str, str]):
+        gate = AnalysisIrModuleGateTests
+        with mock.patch.object(gate, "_showcase_modules", None), \
+                mock.patch.object(gate, "_showcase_missing", None), \
+                mock.patch.object(gate, "_showcase_dir", None), \
+                mock.patch.object(showcase, "_check_pspdev",
+                                  side_effect=showcase.ShowcaseError("synthetic: no PSPDEV")), \
+                mock.patch.dict(os.environ, environment):
+            gate._showcase()
+
+    def test_missing_pspdev_is_not_run_by_default(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop(SHOWCASE_REQUIRED, None)
+            with self.assertRaisesRegex(unittest.SkipTest, "^NOT_RUN: the showcase PRXs need PSPDEV"):
+                self._showcase_without_pspdev({})
+
+    def test_missing_pspdev_fails_where_the_showcase_is_required(self):
+        try:
+            with self.assertRaisesRegex(AssertionError, f"{SHOWCASE_REQUIRED}=1: NOT_RUN"):
+                self._showcase_without_pspdev({SHOWCASE_REQUIRED: "1"})
+        except unittest.SkipTest as skipped:
+            self.fail(f"the required showcase gate was skipped: {skipped}")
 
 
 if __name__ == "__main__":

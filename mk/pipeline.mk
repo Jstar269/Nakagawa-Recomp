@@ -8,6 +8,8 @@
 # Split out of the root Makefile (#1531), text unchanged: guest-input tracking, the codegen pipeline, the player link and the player UI regressions.
 # The root Makefile includes it where the text used to be, so evaluation order is unchanged.
 
+.DELETE_ON_ERROR:
+
 # Re-checked on every invocation that needs a guest input (hence FORCE), but rewritten
 # only when an input's identity actually changed, so dependents do not rebuild spuriously.
 # GAME_PSP_HEADER and GAME_EXTRA_ELFS_ENV are optional; GAME_ELF is not.
