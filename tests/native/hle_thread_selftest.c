@@ -22711,9 +22711,7 @@ static uint32_t fpl_make_pool(void) {
     return sr_syscall(&setup, NID_FPL_CREATE);
 }
 
-/* s_fpls[] has FPL_MAX=16 slots, reset_fixture() does not clear it, and the
- * conformance matrix already uses all 16. Every pool this test creates must go
- * back or the matrix starves. */
+/* reset_fixture() does not clear the FPL table, so every pool this test creates goes back. */
 static void fpl_free_pool(uint32_t uid) {
     CpuState c;
     memset(&c, 0, sizeof c);
@@ -40909,14 +40907,50 @@ static void test_td23_guest_pointer_validation(void) {
     expect(sr_syscall(&cpu, NID_ALLOC_PARTITION) == SCE_KERNEL_ERROR_ILLEGAL_ADDR,
            "AllocPartitionMemory rejects unmapped name pointer");
 
-    /* Non-NULL unterminated name in AllocPartitionMemory is rejected */
+    /* Audit 2026-11-17 (F-79a1ffb4): a readable name of 64 bytes or more is a valid pointer. It
+     * allocates with the name truncated, as a name longer than the 31-byte field does on a PSP
+     * (memblock.expected); only an unreadable byte before the NUL is ILLEGAL_ADDR. */
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = 2u;
     cpu.r[5] = unterminated_buf;
     cpu.r[6] = 0u;
     cpu.r[7] = 256u;
+    uint32_t uid_long = sr_syscall(&cpu, NID_ALLOC_PARTITION);
+    expect(uid_long != 0u && uid_long < 0x80000000u,
+           "AllocPartitionMemory keeps a readable name of 64 bytes or more");
+    if (uid_long != 0u && uid_long < 0x80000000u) {
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = uid_long;
+        (void)sr_syscall(&cpu, 0xb6d61d02u);   /* sceKernelFreePartitionMemory */
+    }
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = unterminated_buf;
+    cpu.r[5] = 0u;     /* type Low */
+    cpu.r[6] = 256u;   /* size */
+    uint32_t mb_long = sr_syscall(&cpu, NID_SCE_KERNEL_ALLOC_MEMORY_BLOCK);
+    expect(mb_long != 0u && mb_long < 0x80000000u,
+           "AllocMemoryBlock keeps a readable name of 64 bytes or more");
+    if (mb_long != 0u && mb_long < 0x80000000u) {
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = mb_long;
+        (void)sr_syscall(&cpu, NID_SCE_KERNEL_FREE_MEMORY_BLOCK);
+    }
+    /* A name whose bytes run off the end of guest memory before any NUL stays refused. */
+    const uint32_t name_tail = ARENA_END - 8u;
+    memset((char *)SR_HOST(name_tail), 'B', 8);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 2u;
+    cpu.r[5] = name_tail;
+    cpu.r[6] = 0u;
+    cpu.r[7] = 256u;
     expect(sr_syscall(&cpu, NID_ALLOC_PARTITION) == SCE_KERNEL_ERROR_ILLEGAL_ADDR,
-           "AllocPartitionMemory rejects unterminated name string");
+           "AllocPartitionMemory rejects a name that runs off the end of guest memory");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = name_tail;
+    cpu.r[5] = 0u;
+    cpu.r[6] = 256u;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_ALLOC_MEMORY_BLOCK) == 0x800200d3u,
+           "AllocMemoryBlock rejects a name that runs off the end of guest memory");
 
     /* 4. Struct whose tail crosses the end of guest RAM rejected for items 2 and 4 */
     /* Item 2: sceGeSetCallback (16-byte struct) */
@@ -42433,19 +42467,20 @@ static void test_fpl_delete_releases_partition(void) {
     expect(sr_hle_test_partition_free_block_count() == 1,
            "delete fpl1 releases its partition block to free list");
 
-    /* 5. Double-delete pool 1: assert it returns existing error/status code (0) and does not free twice */
+    /* 5. Double-delete pool 1: UNKNOWN_FPLID (0x8002019D, pspautotests threads/fpl/delete.expected),
+     * and nothing is freed twice */
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = fpl1;
     uint32_t double_del_rc = sr_syscall(&cpu, NID_FPL_DELETE);
-    expect(double_del_rc == 0u, "double-delete of fpl1 returns existing error/status (0)");
+    expect(double_del_rc == 0x8002019du, "double-delete of fpl1 returns UNKNOWN_FPLID (0x8002019D)");
     expect(sr_hle_test_partition_free_block_count() == 1,
            "double-delete of fpl1 does not free twice (free block count unchanged)");
 
-    /* Also assert deleting an unknown uid returns existing code (0) and does not free */
+    /* Deleting an unknown uid is UNKNOWN_FPLID too and frees nothing */
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = 0x9999u;
     uint32_t unknown_del_rc = sr_syscall(&cpu, NID_FPL_DELETE);
-    expect(unknown_del_rc == 0u, "delete unknown uid returns existing error/status (0)");
+    expect(unknown_del_rc == 0x8002019du, "delete unknown uid returns UNKNOWN_FPLID (0x8002019D)");
     expect(sr_hle_test_partition_free_block_count() == 1,
            "delete unknown uid does not free (free block count unchanged)");
 
@@ -44234,6 +44269,295 @@ static void test_partition_alloc_size_zero_refused(void) {
             (void)sr_syscall(&cpu, 0xb6d61d02u);
         }
     }
+}
+
+/* Audit 2026-11-17 (F-3bf27c21): a PSP limits FPL and VPL creation only by memory and UIDs. The
+ * runtime's tables held 16 pools each, and the 17th create returned an unmeasured 0x800200D9. A
+ * VPL the partition cannot hold is NO_MEMORY (pspautotests tests/threads/vpl/create.expected at
+ * 70e72391e95b4b5bf6cd7ffd7e0259f52abf9a99, "Size 0x10000000: Failed (80020190)"). */
+#define POOL_GROW_COUNT 40
+static void test_pools_past_the_old_table(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t count_out = 0x00271400u, out = 0x00271404u, info = 0x00271440u;
+    char msg[192];
+    for (int vpl = 0; vpl < 2; vpl++) {
+        const char *k = vpl ? "VPL" : "FPL";
+        const uint32_t tmid = vpl ? 5u : 6u;   /* SCE_KERNEL_TMID_Vpl / _Fpl */
+        uint32_t pools[POOL_GROW_COUNT];
+        MEM_W32(count_out, 0xa5a5a5a5u);
+        const uint32_t listed_before = b1_call(SYNC_GROW_TMID_EVF, tmid, 0u, 0u, count_out) == 0u
+            ? MEM_R32(count_out) : UINT32_MAX;
+        int created = 0;
+        uint32_t failed = 0u;
+        for (; created < POOL_GROW_COUNT; created++) {
+            pools[created] = vpl ? selftest_vpl_create(0x100u) : selftest_fpl_create(16u, 1u);
+            if ((int32_t)pools[created] <= 0) { failed = pools[created]; break; }
+        }
+        snprintf(msg, sizeof msg, "%s past the old table: %d pools create in a row (stopped at %d with 0x%08x)",
+                 k, POOL_GROW_COUNT, created, failed);
+        expect(created == POOL_GROW_COUNT, msg);
+        MEM_W32(count_out, 0xa5a5a5a5u);
+        const uint32_t listed_after = b1_call(SYNC_GROW_TMID_EVF, tmid, 0u, 0u, count_out) == 0u
+            ? MEM_R32(count_out) : UINT32_MAX;
+        snprintf(msg, sizeof msg, "%s past the old table: GetThreadmanIdList lists all %d new pools "
+                 "(0x%08x before, 0x%08x after)", k, created, listed_before, listed_after);
+        expect(listed_before != UINT32_MAX && listed_after == listed_before + (uint32_t)created, msg);
+        if (created > 0) {
+            const uint32_t last = pools[created - 1];
+            uint32_t rc = vpl ? selftest_vpl_try_allocate(last, 16u, out) : selftest_fpl_try_allocate(last, out);
+            snprintf(msg, sizeof msg, "%s past the old table: the last pool allocates", k);
+            expect(rc == 0u, msg);
+            if (rc == 0u) {
+                rc = vpl ? selftest_vpl_free(last, MEM_R32(out)) : selftest_fpl_free(last, MEM_R32(out));
+                snprintf(msg, sizeof msg, "%s past the old table: the last pool takes its block back", k);
+                expect(rc == 0u, msg);
+            }
+            CpuState cpu;
+            memset(&cpu, 0, sizeof cpu);
+            MEM_W32(info, vpl ? 52u : 56u);
+            cpu.r[4] = last;
+            cpu.r[5] = info;
+            snprintf(msg, sizeof msg, "%s past the old table: the last pool refers", k);
+            expect(sr_syscall(&cpu, vpl ? NID_VPL_REFER : NID_RFS_REFER_FPL) == 0u, msg);
+        }
+        uint32_t delete_failed = 0u;
+        while (--created >= 0) {
+            uint32_t rc = vpl ? selftest_vpl_delete(pools[created]) : selftest_fpl_delete(pools[created]);
+            if (rc != 0u && delete_failed == 0u) delete_failed = rc;
+        }
+        snprintf(msg, sizeof msg, "%s past the old table: every pool deletes (first failure 0x%08x)",
+                 k, delete_failed);
+        expect(delete_failed == 0u, msg);
+        MEM_W32(count_out, 0xa5a5a5a5u);
+        snprintf(msg, sizeof msg, "%s past the old table: GetThreadmanIdList lists none of the deleted pools", k);
+        expect(b1_call(SYNC_GROW_TMID_EVF, tmid, 0u, 0u, count_out) == 0u &&
+                   MEM_R32(count_out) == listed_before, msg);
+    }
+    const uint32_t big = selftest_vpl_create(0x10000000u);
+    expect(big == 0x80020190u, "CreateVpl of 0x10000000 bytes, more than the partition holds, is "
+                               "NO_MEMORY (vpl/create.expected)");
+    if ((int32_t)big > 0) (void)selftest_vpl_delete(big);
+}
+
+/* Audit 2026-11-17 (F-51d6e4b2): pspautotests tests/threads/fpl/delete.expected (70e72391, recorded
+ * on a PSP): a NULL, invalid or already deleted FPL id is 0x8002019D. DeleteFpl used to return 0. */
+static void test_delete_unknown_fpl(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t pool = selftest_fpl_create(64u, 1u);
+    expect(pool != 0u && pool < 0x80000000u, "DeleteFpl unknown: the pool is created");
+    expect(selftest_fpl_delete(pool) == 0u, "DeleteFpl unknown: the first delete succeeds");
+    expect(selftest_fpl_delete(pool) == FPL_UNKNOWN_ID_ERR, "DeleteFpl of a deleted pool is 0x8002019D");
+    expect(selftest_fpl_delete(0u) == FPL_UNKNOWN_ID_ERR, "DeleteFpl of id 0 is 0x8002019D");
+    expect(selftest_fpl_delete(0x7ffffff0u) == FPL_UNKNOWN_ID_ERR, "DeleteFpl of an invalid id is 0x8002019D");
+    const uint32_t vpl = selftest_vpl_create(256u);
+    expect(selftest_vpl_delete(vpl) == 0u && selftest_vpl_delete(vpl) == 0x8002019cu,
+           "DeleteVpl of a deleted pool is 0x8002019C (control)");
+}
+
+/* A waiter that, once its first allocate returns, allocates from the same pool again. */
+typedef struct {
+    TCB *tcb;
+    int vpl;
+    uint32_t pool;
+    uint32_t outptr;
+    uint32_t ret[2];
+    int returned;
+} PoolRetryCtx;
+
+static void pool_retry_waiter_body(void *arg) {
+    PoolRetryCtx *c = (PoolRetryCtx *)arg;
+    for (int i = 0; i < 2; i++) {
+        c->ret[i] = c->vpl ? selftest_vpl_allocate(c->pool, 128u, c->outptr, 0u)
+                           : selftest_fpl_allocate(c->pool, c->outptr, 0u);
+        c->returned = i + 1;
+    }
+    s_pool_parks++;
+    selftest_park_on_scheduler();
+}
+
+typedef struct {
+    TCB *tcb;
+    int vpl;
+    uint32_t pool;
+    uint32_t ret;
+    int returned;
+} PoolDeleterCtx;
+
+static void pool_deleter_body(void *arg) {
+    PoolDeleterCtx *c = (PoolDeleterCtx *)arg;
+    c->ret = c->vpl ? selftest_vpl_delete(c->pool) : selftest_fpl_delete(c->pool);
+    c->returned = 1;
+    s_pool_parks++;
+    selftest_park_on_scheduler();
+}
+
+/* Audit 2026-11-17 (F-ec89dc05): DeleteFpl and DeleteVpl woke their waiters and preempted to a
+ * stronger one while the pool was still live, and tore it down only when the deleter ran again.
+ * A woken waiter that allocated again then queued on the doomed pool and was never woken. The
+ * pool must already be unknown when the waiter runs. */
+static void test_pool_delete_tears_down_before_waking(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int vpl = 0; vpl < 2; vpl++) {
+        const char *k = vpl ? "VPL" : "FPL";
+        char msg[192];
+        reset_fixture();
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        TCB *cur = fixture_thread(0x101u, TH_RUNNING, 32);
+        s_cur = (int)(cur - s_tcb);
+        cur->started = 1;
+        const uint32_t out1 = 0x00271480u, out2 = 0x00271484u;
+        const uint32_t pool = vpl ? selftest_vpl_create(256u) : selftest_fpl_create(64u, 1u);
+        const uint32_t rc = vpl ? selftest_vpl_allocate(pool, 216u, out1, 0u) : selftest_fpl_allocate(pool, out1, 0u);
+        snprintf(msg, sizeof msg, "%s delete order: the owner exhausts a new pool", k);
+        expect(pool != 0u && pool < 0x80000000u && rc == 0u, msg);
+
+        PoolRetryCtx a;
+        memset(&a, 0, sizeof a);
+        a.tcb = fixture_thread(0x13au, TH_READY, 16);   /* stronger than the deleter */
+        a.tcb->started = 1;
+        a.vpl = vpl;
+        a.pool = pool;
+        a.outptr = out2;
+        a.tcb->coro = sr_coro_create(pool_retry_waiter_body, &a, (size_t)4 << 20);
+        s_cur = (int)(a.tcb - s_tcb);
+        sr_coro_switch(a.tcb->coro);
+        snprintf(msg, sizeof msg, "%s delete order: the stronger waiter blocks", k);
+        expect(a.returned == 0 && a.tcb->state == TH_WAIT_OBJ, msg);
+
+        PoolDeleterCtx b;
+        memset(&b, 0, sizeof b);
+        b.tcb = fixture_thread(0x13bu, TH_READY, 32);
+        b.tcb->started = 1;
+        b.vpl = vpl;
+        b.pool = pool;
+        b.tcb->coro = sr_coro_create(pool_deleter_body, &b, (size_t)4 << 20);
+        s_cur = (int)(b.tcb - s_tcb);
+        b.tcb->state = TH_RUNNING;
+        sr_coro_switch(b.tcb->coro);
+        snprintf(msg, sizeof msg, "%s delete order: the delete wakes the stronger waiter and yields to it", k);
+        expect(b.returned == 0 && a.tcb->state == TH_READY, msg);
+
+        s_cur = (int)(a.tcb - s_tcb);
+        a.tcb->state = TH_RUNNING;
+        sr_coro_switch(a.tcb->coro);
+        snprintf(msg, sizeof msg, "%s delete order: the waiter returns WAIT_DELETE (ret 0x%08x)", k, a.ret[0]);
+        expect(a.returned >= 1 && a.ret[0] == 0x800201b5u, msg);
+        snprintf(msg, sizeof msg, "%s delete order: its next allocate finds the pool unknown at once "
+                 "(returned %d, ret 0x%08x)", k, a.returned, a.ret[1]);
+        expect(a.returned == 2 && a.ret[1] == (vpl ? 0x8002019cu : FPL_UNKNOWN_ID_ERR), msg);
+
+        s_cur = (int)(b.tcb - s_tcb);
+        b.tcb->state = TH_RUNNING;
+        sr_coro_switch(b.tcb->coro);
+        snprintf(msg, sizeof msg, "%s delete order: the delete returns 0", k);
+        expect(b.returned == 1 && b.ret == 0u, msg);
+
+        sr_coro_destroy(a.tcb->coro);
+        a.tcb->coro = NULL;
+        sr_coro_destroy(b.tcb->coro);
+        b.tcb->coro = NULL;
+        s_cur = (int)(cur - s_tcb);
+    }
+}
+
+/* Audit 2026-11-17 (F-894b7467): under attribute 0x100 a freed block goes to the waiter with the
+ * best priority, first of equals; without it to the first waiter. pspautotests
+ * tests/threads/fpl/priority.expected and tests/threads/vpl/priority.expected (70e72391, recorded
+ * on a PSP) give that order. FPL and VPL used to wake the first waiter under either attribute. */
+static void test_pool_priority_attribute_orders_waiters(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int vpl = 0; vpl < 2; vpl++) {
+        for (int prio_attr = 0; prio_attr < 2; prio_attr++) {
+            const char *k = vpl ? "VPL" : "FPL";
+            const char *order = prio_attr ? "attr 0x100" : "attr 0 (FIFO control)";
+            char msg[192];
+            reset_fixture();
+            sr_hle_test_partition_reset();
+            sr_hle_init();
+            TCB *cur = fixture_thread(0x101u, TH_RUNNING, 8);   /* never preempted by a waiter */
+            s_cur = (int)(cur - s_tcb);
+            cur->started = 1;
+            const uint32_t out0 = 0x00271500u, out1 = 0x00271504u, out2 = 0x00271508u;
+            CpuState cpu;
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = FPL_NAMEBUF;
+            cpu.r[5] = 2u;
+            cpu.r[6] = prio_attr ? 0x100u : 0u;
+            cpu.r[7] = vpl ? 256u : 64u;
+            cpu.r[8] = 1u;   /* FPL numBlocks */
+            const uint32_t pool = sr_syscall(&cpu, vpl ? NID_VPL_CREATE : NID_FPL_CREATE);
+            const uint32_t rc = vpl ? selftest_vpl_allocate(pool, 216u, out0, 0u) : selftest_fpl_allocate(pool, out0, 0u);
+            snprintf(msg, sizeof msg, "%s %s: the owner exhausts a new pool", k, order);
+            expect(pool != 0u && pool < 0x80000000u && rc == 0u, msg);
+            const uint32_t held = MEM_R32(out0);
+
+            SelftestPoolWaiterCtx w[2];
+            const int prio[2] = {40, 20};   /* the weaker thread queues first */
+            for (int i = 0; i < 2; i++) {
+                memset(&w[i], 0, sizeof w[i]);
+                w[i].uid = 0x140u + (uint32_t)i;
+                w[i].tcb = fixture_thread(w[i].uid, TH_READY, prio[i]);
+                w[i].tcb->started = 1;
+                w[i].pool_uid = pool;
+                w[i].req_size = 128u;
+                w[i].outptr = i ? out2 : out1;
+                w[i].tcb->coro = sr_coro_create(vpl ? selftest_vpl_waiter_fiber_body : selftest_fpl_waiter_fiber_body,
+                                                &w[i], (size_t)4 << 20);
+                s_cur = (int)(w[i].tcb - s_tcb);
+                sr_coro_switch(w[i].tcb->coro);
+            }
+            s_cur = (int)(cur - s_tcb);
+            snprintf(msg, sizeof msg, "%s %s: both waiters block", k, order);
+            expect(w[0].tcb->state == TH_WAIT_OBJ && w[1].tcb->state == TH_WAIT_OBJ, msg);
+
+            const uint32_t frc = vpl ? selftest_vpl_free(pool, held) : selftest_fpl_free(pool, held);
+            const int woken = prio_attr ? 1 : 0;
+            snprintf(msg, sizeof msg, "%s %s: the free wakes the %s waiter only", k, order,
+                     prio_attr ? "stronger (second-queued)" : "first-queued");
+            expect(frc == 0u && w[woken].tcb->state == TH_READY && w[1 - woken].tcb->state == TH_WAIT_OBJ, msg);
+
+            s_cur = (int)(w[woken].tcb - s_tcb);
+            w[woken].tcb->state = TH_RUNNING;
+            sr_coro_switch(w[woken].tcb->coro);
+            snprintf(msg, sizeof msg, "%s %s: the woken waiter receives the freed block", k, order);
+            expect(w[woken].returned == 1 && w[woken].ret == 0u, msg);
+            s_cur = (int)(cur - s_tcb);
+
+            if (vpl) (void)selftest_vpl_delete(pool);
+            else (void)selftest_fpl_delete(pool);
+            for (int i = 0; i < 2; i++) {
+                sr_coro_destroy(w[i].tcb->coro);
+                w[i].tcb->coro = NULL;
+            }
+        }
+    }
+}
+
+/* Audit 2026-11-17 (F-9d16eaf3): the FPL create and allocate paths print only under
+ * SR_ALLOC_TRACE; they wrote a stderr line on every sceKernelTryAllocateFpl. */
+static void test_fpl_calls_are_quiet_without_trace(void) {
+    extern void sr_hle_test_partition_reset(void);
+    if (getenv("SR_ALLOC_TRACE")) return;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t out = 0x00271580u;
+    rt_capture_begin();
+    const uint32_t pool = selftest_fpl_create(64u, 1u);
+    const uint32_t ok = selftest_fpl_try_allocate(pool, out);
+    const uint32_t full = selftest_fpl_try_allocate(pool, out);
+    const char *log = rt_capture_end();
+    expect(ok == 0u && full == FPL_NO_MEMORY_ERR, "quiet FPL: the pool allocates once, then is full");
+    expect(strstr(log, "sceKernelCreateFpl:") == NULL && strstr(log, "sceKernelTryAllocateFpl:") == NULL,
+           "quiet FPL: CreateFpl and TryAllocateFpl write no stderr line without SR_ALLOC_TRACE");
+    (void)selftest_fpl_delete(pool);
 }
 
 /* Pool bounds measured on the PSP-3000 (docs/HARDWARE_ORACLE.md, #2397):
@@ -58421,6 +58745,11 @@ static int hle_selftest_main(int argc, char **argv) {
     test_pool_uids_come_from_the_shared_pool();
     test_partition_alloc_size_zero_refused();
     test_fpl_free_bounds_do_not_wrap();
+    test_pools_past_the_old_table();
+    test_delete_unknown_fpl();
+    test_pool_delete_tears_down_before_waking();
+    test_pool_priority_attribute_orders_waiters();
+    test_fpl_calls_are_quiet_without_trace();
     test_std_handles_measured();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();

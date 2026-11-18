@@ -1665,7 +1665,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics: FPL blocks are blockSize apart)",
             "docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-002: block size 0 is 0x800201B7, a 0x7FFFFFFF-byte block 0x80020190)",
         ],
-        "limitation": "valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, a create with no free FPL slot keeps its pre-measurement code, and partition, attribute and option error precedence need separate evidence",
+        "limitation": "valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, and partition, attribute and option error precedence need separate evidence",
     },
     "h_CreateLwMutex": {
         "status": "partial",
@@ -1694,7 +1694,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (PSP-B1-01 and PSP-B2-01: valid VPL creation, accounting, allocation, and deletion)",
         ],
-        "limitation": "valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results, allocation exhaustion, or option behavior",
+        "limitation": "valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results or option behavior; a pool the partition cannot hold returns NO_MEMORY as pspautotests threads/vpl/create.expected records",
     },
     "h_DeleteFpl": {
         "status": "partial",
@@ -1702,7 +1702,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: valid fpl-delete and refer-after-delete cells)",
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B2-01: deleting an FPL with a waiter)",
         ],
-        "limitation": "valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID currently returns success in the handler, while the cited delete cells use a valid pool, and multi-waiter teardown ordering is not measured",
+        "limitation": "valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID returns UNKNOWN_FPLID as pspautotests threads/fpl/delete.expected records, outside the cited cells, which use a valid pool, and multi-waiter teardown ordering is not measured",
     },
     "h_DeleteLwMutex": {
         "status": "partial",

@@ -720,12 +720,12 @@ static int hle_visit_threadman_ids(int tmid, SrUidVisitor visit, void *ctx) {
                 if (s_mbx[i].used) visit(s_mbx[i].uid, ctx);
             return 1;
         case SR_TMID_VPL:   /* vpl_lookup: the UID stored in the slot */
-            for (uint32_t i = 0; i < VPL_MAX; i++)
-                if (s_vpls[i].used) visit(s_vpls[i].uid, ctx);
+            for (size_t i = 0, n = vpl_slot_count(); i < n; i++)
+                if (vpl_slot(i)->used) visit(vpl_slot(i)->uid, ctx);
             return 1;
         case SR_TMID_FPL:   /* fpl_lookup: the UID stored in the slot */
-            for (uint32_t i = 0; i < FPL_MAX; i++)
-                if (s_fpls[i].used) visit(s_fpls[i].uid, ctx);
+            for (size_t i = 0, n = fpl_slot_count(); i < n; i++)
+                if (fpl_slot(i)->used) visit(fpl_slot(i)->uid, ctx);
             return 1;
         case 12:   /* PSPSDK SCE_KERNEL_TMID_Mutex: s_mutexes holds the live ones */
             for (size_t i = 0; i < s_mutex_len; i++)

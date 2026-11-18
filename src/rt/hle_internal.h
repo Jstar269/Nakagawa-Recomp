@@ -215,8 +215,8 @@ typedef struct {
 #define HLE_KERNEL_ERROR_NO_MEMORY 0x80020190u      /* SCE_KERNEL_ERROR_NO_MEMORY */
 
 /* Fixed Pool (FPL) — partition-backed fixed block pool with free list,
- * waiter queuing, and blocking allocation support (PR-G). */
-#define FPL_MAX 16
+ * waiter queuing, and blocking allocation support (PR-G). The table of pools grows on
+ * demand (fpl_new_slot). */
 #define FPL_MAX_WAITERS 64
 
 typedef struct {
@@ -244,8 +244,8 @@ typedef struct {
 /* Variable Pool (VPL): one SysMem partition block per pool, with a host-side free list
  * free list for the pool span, waiter queuing, and blocking allocation support (PR-G).
  * The accounting is the PSP-B1-01 measurement (hle_kernel_memory.c: a 0x20-byte pool
- * header, roundup(size, 8) + 8 bytes per block, carved from the top down). */
-#define VPL_MAX 16
+ * header, roundup(size, 8) + 8 bytes per block, carved from the top down). The table of
+ * pools grows on demand (vpl_new_slot). */
 #define VPL_MAX_WAITERS 64
 typedef struct { uint32_t addr, size; } VplSpan;
 typedef struct { uint32_t addr, size; } VplAlloc;
@@ -260,6 +260,7 @@ typedef struct {
     uint32_t base, size, block_uid;
     uint32_t attr;
     int used;
+    char name[32];         /* pspautotests tests/threads/vpl/refer.expected prints name=refer */
     VplSpan *free;
     int nfree, free_cap;
     VplAlloc *allocs;
@@ -1158,10 +1159,21 @@ uint32_t free_block(uint32_t uid);
 void hle_net_reset(void);
 int sr_hle_test_net_inited(void);
 uint32_t sr_hle_test_net_pool_uid(void);
-extern FplPool s_fpls[FPL_MAX];
+/* The FPL and VPL tables (hle.c). A PSP limits pool creation only by memory and UIDs, so each
+ * table grows by chunks that never move, as the semaphore table does (#1892): a pool pointer a
+ * handler holds across a reschedule stays valid while another thread creates pools. Slots run
+ * 0..*_slot_count()-1. *_new_slot returns an unused slot, growing the table, and stops the run by
+ * name when the host cannot allocate a chunk; *_table_reset releases every pool and chunk. */
+size_t fpl_slot_count(void);
+FplPool *fpl_slot(size_t index);
+FplPool *fpl_new_slot(void);
+void fpl_table_reset(void);
 FplPool *fpl_lookup(uint32_t uid);
 void fpl_remove_waiter(FplPool *p, uint32_t thread_uid);
-extern VplPool s_vpls[VPL_MAX];
+size_t vpl_slot_count(void);
+VplPool *vpl_slot(size_t index);
+VplPool *vpl_new_slot(void);
+void vpl_table_reset(void);
 void vpl_release(VplPool *p);
 void vpl_remove_waiter(VplPool *p, uint32_t thread_uid);
 VplPool *vpl_lookup(uint32_t uid);

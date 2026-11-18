@@ -2253,22 +2253,100 @@ uint32_t free_block(uint32_t uid) {
     return HLE_KERNEL_ERROR_UNKNOWN_UID;
 }
 
-FplPool s_fpls[FPL_MAX];
+/* The FPL and VPL tables grow by chunks of this many pools, each at a fixed address for the
+ * table's lifetime. They held 16 pools each, and the 17th create returned an unmeasured
+ * 0x800200D9 the PSP does not give: its pools are limited only by memory and UIDs. */
+#define HLE_POOL_CHUNK 16u
+typedef struct {
+    unsigned char **chunks;
+    size_t nchunks;
+    size_t elem_size;
+    const char *what;
+} HlePoolTable;
+
+static HlePoolTable s_fpl_table = {NULL, 0u, sizeof(FplPool), "FPL"};
+static HlePoolTable s_vpl_table = {NULL, 0u, sizeof(VplPool), "VPL"};
+
+static void *pool_table_slot(const HlePoolTable *t, size_t index) {
+    return t->chunks[index / HLE_POOL_CHUNK] + (index % HLE_POOL_CHUNK) * t->elem_size;
+}
+
+/* Appends a zeroed chunk and returns its first slot. A host that cannot provide one stops the
+ * run by name: refusing the create would report a pool limit the PSP does not have. */
+static void *pool_table_grow(HlePoolTable *t) {
+    unsigned char *chunk = NULL;
+    unsigned char **grown = NULL;
+    if (t->nchunks < SIZE_MAX / sizeof(*grown) / HLE_POOL_CHUNK)
+        chunk = (unsigned char *)calloc(HLE_POOL_CHUNK, t->elem_size);
+    if (chunk) grown = (unsigned char **)realloc(t->chunks, (t->nchunks + 1u) * sizeof(*grown));
+    if (!grown) {
+        free(chunk);
+        fprintf(stderr, "HLE: the %s table cannot grow past %zu pools: the host could not allocate "
+                "more memory\n", t->what, t->nchunks * HLE_POOL_CHUNK);
+        sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, (uint32_t)(t->nchunks * HLE_POOL_CHUNK),
+                        (uint32_t)t->elem_size);
+        abort();
+    }
+    t->chunks = grown;
+    t->chunks[t->nchunks++] = chunk;
+    return chunk;
+}
+
+static void pool_table_free(HlePoolTable *t) {
+    for (size_t i = 0; i < t->nchunks; i++) free(t->chunks[i]);
+    free(t->chunks);
+    t->chunks = NULL;
+    t->nchunks = 0u;
+}
+
+size_t fpl_slot_count(void) { return s_fpl_table.nchunks * HLE_POOL_CHUNK; }
+FplPool *fpl_slot(size_t index) { return (FplPool *)pool_table_slot(&s_fpl_table, index); }
+
+FplPool *fpl_new_slot(void) {
+    for (size_t i = 0, n = fpl_slot_count(); i < n; i++)
+        if (!fpl_slot(i)->used) return fpl_slot(i);
+    return (FplPool *)pool_table_grow(&s_fpl_table);
+}
+
+void fpl_table_reset(void) {
+    for (size_t i = 0, n = fpl_slot_count(); i < n; i++) {
+        free(fpl_slot(i)->free_blocks);
+        free(fpl_slot(i)->allocated);
+    }
+    pool_table_free(&s_fpl_table);
+}
 
 /* FPL and VPL UIDs come from the shared sr_alloc_uid pool (a fixed 0x500 + slot range used to
  * alias a semaphore or thread UID once the pool reached it), so a lookup matches the stored UID. */
 FplPool *fpl_lookup(uint32_t uid) {
     if (uid == 0u) return NULL;
-    for (int i = 0; i < FPL_MAX; i++)
-        if (s_fpls[i].used && s_fpls[i].uid == uid) return &s_fpls[i];
+    for (size_t i = 0, n = fpl_slot_count(); i < n; i++) {
+        FplPool *p = fpl_slot(i);
+        if (p->used && p->uid == uid) return p;
+    }
     return NULL;
 }
-VplPool s_vpls[VPL_MAX];
+
+size_t vpl_slot_count(void) { return s_vpl_table.nchunks * HLE_POOL_CHUNK; }
+VplPool *vpl_slot(size_t index) { return (VplPool *)pool_table_slot(&s_vpl_table, index); }
+
+VplPool *vpl_new_slot(void) {
+    for (size_t i = 0, n = vpl_slot_count(); i < n; i++)
+        if (!vpl_slot(i)->used) return vpl_slot(i);
+    return (VplPool *)pool_table_grow(&s_vpl_table);
+}
+
+void vpl_table_reset(void) {
+    for (size_t i = 0, n = vpl_slot_count(); i < n; i++) vpl_release(vpl_slot(i));
+    pool_table_free(&s_vpl_table);
+}
 
 VplPool *vpl_lookup(uint32_t uid) {
     if (uid == 0u) return NULL;
-    for (int i = 0; i < VPL_MAX; i++)
-        if (s_vpls[i].used && s_vpls[i].uid == uid) return &s_vpls[i];
+    for (size_t i = 0, n = vpl_slot_count(); i < n; i++) {
+        VplPool *p = vpl_slot(i);
+        if (p->used && p->uid == uid) return p;
+    }
     return NULL;
 }
 
@@ -2951,11 +3029,11 @@ void sr_hle_release_thread_resources(uint32_t thread_uid) {
         hle_io_release_thread(thread_uid);
         mbx_remove_thread_waiters(thread_uid);
 
-        for (int i = 0; i < FPL_MAX; i++) {
-            if (s_fpls[i].used) fpl_remove_waiter(&s_fpls[i], thread_uid);
+        for (size_t i = 0, n = fpl_slot_count(); i < n; i++) {
+            if (fpl_slot(i)->used) fpl_remove_waiter(fpl_slot(i), thread_uid);
         }
-        for (int i = 0; i < VPL_MAX; i++) {
-            if (s_vpls[i].used) vpl_remove_waiter(&s_vpls[i], thread_uid);
+        for (size_t i = 0, n = vpl_slot_count(); i < n; i++) {
+            if (vpl_slot(i)->used) vpl_remove_waiter(vpl_slot(i), thread_uid);
         }
         for (int i = 0; i < TLSPL_MAX; i++) {
             if (s_tlspls[i].used) tlspl_release_thread(&s_tlspls[i], thread_uid);

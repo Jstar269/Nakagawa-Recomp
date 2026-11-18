@@ -658,7 +658,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: tests/native/hle_thread_selftest.c:test_evf_create_and_refer
   - Evidence: tests/native/hle_thread_selftest.c:test_sync_objects_past_the_old_table
 - **`h_CreateFpl`** (`sceKernel`): `sceKernelCreateFpl` (0xc07bb470)
-  - Limitation: valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, a create with no free FPL slot keeps its pre-measurement code, and partition, attribute and option error precedence need separate evidence
+  - Limitation: valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, and partition, attribute and option error precedence need separate evidence
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: fpl-create and valid pool status/allocation cells)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics: FPL blocks are blockSize apart)
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-002: block size 0 is 0x800201B7, a 0x7FFFFFFF-byte block 0x80020190)
@@ -695,7 +695,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_CreateVTimer`** (`sceKernel`): `sceKernelCreateVTimer` (0x20fff560)
   - Limitation: the option struct is ignored, as on a PSP (pspautotests vtimers/create.expected at 2ed7c9c5, recorded on a PSP: every declared size creates the same timer), and an unreadable one stops the run by name; 64 creates in a row are measured (PSP-HLE-VTIMER-003), so the table holds 64, while the same PSP-recorded output shows 1024 creates succeed; a NULL name is accepted here, where that output shows 0x80020001; the no-slot code 0x80020190 is unmeasured; the microsecond unit is consistent with PSP-HLE-VTIMER-002, not a precise rate measurement (#325)
 - **`h_CreateVpl`** (`sceKernel`): `sceKernelCreateVpl` (0x56c039b5)
-  - Limitation: valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results, allocation exhaustion, or option behavior
+  - Limitation: valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results or option behavior; a pool the partition cannot hold returns NO_MEMORY as pspautotests threads/vpl/create.expected records
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-B1-01 and PSP-B2-01: valid VPL creation, accounting, allocation, and deletion)
 - **`h_DcacheRangeMaintenance`** (`sceKernel`): `sceKernelDcacheWritebackRange` (0x3ee30821), `sceKernelDcacheInvalidateRange` (0xbfa98062)
   - Limitation: guest RAM is one coherent array, so the post-maintenance words the cells check are met, but the pre-maintenance contrast words (an uncached read before writeback, a stale cached read before invalidate) are not reproduced; a title that reads stale data through the cached alias is outside this model
@@ -719,7 +719,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/threads/events/delete/delete.expected at 2ed7c9c5 (NULL, invalid and deleted ids 0x8002019A; a blocked waiter leaves with 0x800201B5)
   - Evidence: tests/native/hle_thread_selftest.c:test_evf_typed_uids_and_delete
 - **`h_DeleteFpl`** (`sceKernel`): `sceKernelDeleteFpl` (0xed1410e0)
-  - Limitation: valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID currently returns success in the handler, while the cited delete cells use a valid pool, and multi-waiter teardown ordering is not measured
+  - Limitation: valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID returns UNKNOWN_FPLID as pspautotests threads/fpl/delete.expected records, outside the cited cells, which use a valid pool, and multi-waiter teardown ordering is not measured
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: valid fpl-delete and refer-after-delete cells)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B2-01: deleting an FPL with a waiter)
 - **`h_DeleteLwMutex`** (`sceKernel`): `sceKernelDeleteLwMutex` (0x60107536)
