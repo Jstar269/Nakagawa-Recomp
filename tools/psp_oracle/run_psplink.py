@@ -1125,6 +1125,12 @@ def _render_argv(template: list[str], **values: str) -> list[str]:
     return rendered
 
 
+RUNNER_ARGV_PLACEHOLDERS = {
+    "pspsh_argv": frozenset({"remote_command"}),
+    "usbhostfs_argv": frozenset({"host0_root", "host0_root_wsl"}),
+}
+
+
 def _parse_usbipd_psplink_devices(output: str) -> list[tuple[str, str]]:
     """Return (busid, state) rows for PSPLink devices in ``usbipd list`` output."""
 
@@ -3269,17 +3275,28 @@ def _write_campaign_json(path: Path, value: dict[str, object]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _hardware_lock_holder_problem(lock: object, session_id: str) -> str | None:
+    if not isinstance(lock, dict) or lock.get("state") != "HELD":
+        return "HARDWARE_LOCK_NOT_HELD"
+    if lock.get("holder_session") != session_id:
+        return "HARDWARE_LOCK_SESSION_MISMATCH"
+    return None
+
+
 def _read_hardware_lock(
     session_id: str,
+    *,
+    lock_path: Path | None = None,
 ) -> tuple[bool, str, dict[str, object] | None]:
+    path = HARDWARE_LOCK_PATH if lock_path is None else Path(lock_path)
     try:
-        lock = json.loads(HARDWARE_LOCK_PATH.read_text(encoding="utf-8"))
+        lock = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return False, f"HARDWARE_LOCK_UNAVAILABLE:{type(exc).__name__}", None
-    if not isinstance(lock, dict) or lock.get("state") != "HELD":
-        return False, "HARDWARE_LOCK_NOT_HELD", None
-    if lock.get("holder_session") != session_id:
-        return False, "HARDWARE_LOCK_SESSION_MISMATCH", None
+    problem = _hardware_lock_holder_problem(lock, session_id)
+    if problem:
+        return False, problem, None
+    assert isinstance(lock, dict)
     device_state, status = _validate_device_state_attestation(lock, session_id)
     if device_state is None:
         return False, status, None

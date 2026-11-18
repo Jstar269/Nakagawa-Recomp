@@ -13,7 +13,6 @@ production-HLE selftest invoke that generated body.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -24,6 +23,13 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOLS = ROOT / "tools"
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
+try:
+    from .run_psplink import _host_binary_sha256  # noqa: E402
+except ImportError:  # direct ``python tools/psp_oracle/build_nakagawa_smoke.py`` invocation
+    from psp_oracle.run_psplink import _host_binary_sha256  # type: ignore[no-redef]  # noqa: E402
+
 ENTRY_NAME = "nakagawa_psp_oracle_sum_u32"
 FUNCTION_RE = re.compile(r"^void f_([0-9a-f]{8})\(CpuState \*s\);$", re.MULTILINE)
 
@@ -90,14 +96,6 @@ def _symbol_address(elf_path: Path, symbol_name: str) -> int:
     return matches[0]
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--elf", type=Path, required=True)
@@ -153,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest = {
         "schema": 1,
         "source_elf": str(elf_path),
-        "source_elf_sha256": _sha256(elf_path),
+        "source_elf_sha256": _host_binary_sha256(elf_path),
         "guest_symbol": args.symbol,
         "guest_address": f"0x{entry:08x}",
         "generated_header": str(header),

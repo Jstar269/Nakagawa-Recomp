@@ -23,6 +23,7 @@ import tempfile
 import time
 import unittest
 from typing import Any, cast
+from unittest.mock import patch
 
 from tools.psp_oracle import oracle_matrix as om
 
@@ -205,6 +206,21 @@ class MatrixTestCase(unittest.TestCase):
     def lock(self) -> dict[str, Any]:
         return cast(dict[str, Any], json.loads(self.lock_path.read_text(encoding="utf-8")))
 
+
+class LockHelperTests(MatrixTestCase):
+    def test_note_launch_removes_temporary_lock_after_replace_failure(self) -> None:
+        temporary = self.lock_path.with_name(f".{self.lock_path.name}.{os.getpid()}.matrix.tmp")
+        with patch.object(om.os, "replace", side_effect=PermissionError("lock file is busy")):
+            with self.assertRaisesRegex(PermissionError, "busy"):
+                om.note_launch(self.lock_path, SESSION, "test note")
+        self.assertFalse(temporary.exists())
+
+    def test_attested_boot_uses_shared_runner_lock_reader_for_custom_path(self) -> None:
+        self.device()
+        boot, status = om.attested_boot(self.lock_path, SESSION)
+        self.assertEqual(boot, 70)
+        self.assertEqual(status, "HELD_AND_QUALIFIED")
+
     def test_timeout_stops_descendants_that_inherit_the_capture_pipes(self) -> None:
         fixture_build = om.ROOT / "tests" / "fixtures" / "psp_oracle" / "build"
         fixture_build.mkdir(exist_ok=True)
@@ -265,6 +281,15 @@ class PlanValidationTests(MatrixTestCase):
         self.refuses("timeout_seconds must be", [{"case_id": "delay-zero", "timeout_seconds": 7200}])
         self.refuses("at most 64", [{"case_id": f"c{i}", "timeout_seconds": 60} for i in range(65)])
 
+    def test_refuses_case_ids_that_collide_after_staging_name_normalization(self) -> None:
+        with self.assertRaisesRegex(om.MatrixError, "stage to the same PRX name"):
+            self.load([
+                {"case_id": "a-b", "timeout_seconds": 60},
+                {"case_id": "a_b", "timeout_seconds": 60},
+            ])
+        with self.assertRaisesRegex(om.MatrixError, "transport-write.*transport_write"):
+            self.load([{"case_id": "transport_write", "timeout_seconds": 60}])
+
     def test_refuses_host0_outside_the_fixture_scratch_and_evidence_outside_the_plan(self) -> None:
         self.refuses("host0_root must stay under", host0_root=str(self.private))
         plan = self.plan_dict([{"case_id": "delay-zero", "timeout_seconds": 60}])
@@ -305,6 +330,22 @@ class PlanValidationTests(MatrixTestCase):
         self.refuses("watchdog_deadline_seconds", watchdog_deadline_seconds=5)
         self.refuses("max_contained_failures", max_contained_failures=9)
         self.refuses("expected_firmware", expected_firmware="6.61")
+
+    def test_runner_argv_templates_reject_unknown_placeholders(self) -> None:
+        for command, valid, invalid in (
+            ("pspsh_argv", "{remote_command}", "{remote_comand}"),
+            ("usbhostfs_argv", "{host0_root_wsl}", "{host0_root_wsl_path}"),
+        ):
+            with self.subTest(command=command):
+                plan = self.plan_dict([{"case_id": "delay-zero", "timeout_seconds": 60}])
+                plan["commands"][command] = ["tool", valid]
+                self.assertEqual(
+                    om.load_plan(self.write_plan(plan), repo_root=self.repo).commands[command],
+                    ["tool", valid],
+                )
+                plan["commands"][command] = ["tool", invalid]
+                with self.assertRaisesRegex(om.MatrixError, "unknown placeholder"):
+                    om.load_plan(self.write_plan(plan), repo_root=self.repo)
 
     def test_null_expected_firmware_is_refused_during_plan_load(self) -> None:
         with self.assertRaisesRegex(om.MatrixError, "expected_firmware"):
@@ -385,6 +426,29 @@ class BuildTests(MatrixTestCase):
         with self.assertRaisesRegex(om.MatrixError, "not the pinned one"):
             self.runner(bad, self.device()).build()
 
+    def test_companion_prx_is_built_staged_hashed_and_verified(self) -> None:
+        plan = self.load([{
+            "case_id": "hle-self-stop-unload",
+            "timeout_seconds": om.MAX_CASE_TIMEOUT_SECONDS,
+        }])
+        runner = self.runner(plan, self.device())
+        staged = runner.build()
+        companion = plan.host0_root / "hle_self_stop_helper.prx"
+        self.assertTrue(companion.is_file())
+        self.assertEqual(staged["hle-self-stop-helper"], hashlib.sha256(companion.read_bytes()).hexdigest())
+        runner.verify_staged(staged)
+        companion.write_bytes(b"stale companion from another matrix")
+        with self.assertRaisesRegex(om.MatrixError, "hle-self-stop-helper: staged PRX changed"):
+            runner.verify_staged(staged)
+
+    def test_build_uses_the_shared_runner_binary_hasher(self) -> None:
+        plan = self.load([{"case_id": "delay-zero", "timeout_seconds": 60}])
+        runner = self.runner(plan, self.device())
+        with patch.object(om._runner, "_host_binary_sha256", wraps=om._runner._host_binary_sha256) as shared:
+            staged = runner.build()
+        self.assertEqual(list(staged), ["transport-write", "delay-zero"])
+        self.assertGreaterEqual(shared.call_count, 2)
+
 
 class MatrixExecutionTests(MatrixTestCase):
     CASES = [{"case_id": "delay-zero", "timeout_seconds": 60}, {"case_id": "ge-nan", "timeout_seconds": 60},
@@ -401,6 +465,131 @@ class MatrixExecutionTests(MatrixTestCase):
         self.assertEqual(report["state"], "COMPLETE")
         notes = self.lock()["probes_run"]
         self.assertEqual(len(notes), 6)
+
+    def test_lock_lost_mid_matrix_writes_a_report_of_prior_hardware_results(self) -> None:
+        plan = self.load(self.CASES[:2])
+        device = self.device()
+        runner = self.runner(plan, device)
+        original_launch = runner.launch
+
+        def release_lock_after_launch(case, boot, index, staged):
+            outcome = original_launch(case, boot, index, staged)
+            lock = self.lock()
+            lock["state"] = "RELEASED"
+            self.lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            return outcome
+
+        runner.launch = release_lock_after_launch  # type: ignore[method-assign]
+        plan.evidence_dir.mkdir(parents=True, exist_ok=True)
+        plan.report_path.write_text(json.dumps({"state": "STALE_REPORT"}), encoding="utf-8")
+        code, report = runner.execute()
+        self.assertEqual(code, 2)
+        self.assertEqual(report["state"], om.LOCK_LOST)
+        self.assertEqual(report["accepted"], ["delay-zero"])
+        self.assertEqual([item["case_id"] for item in report["not_run"]], ["ge-nan"])
+        saved = json.loads(plan.report_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["accepted"], ["delay-zero"])
+        self.assertIn("HARDWARE_LOCK_NOT_HELD", " ".join(saved["events"]))
+
+    def test_post_launch_probe_log_oserror_keeps_outcome_checkpointed(self) -> None:
+        plan = self.load(self.CASES[:1])
+        device = self.device()
+        runner = self.runner(plan, device)
+        original_write = Path.write_text
+
+        def fail_probe_log(path, data, *args, **kwargs):
+            if path.name.endswith(".probe-command.txt"):
+                raise OSError("evidence volume is unavailable")
+            return original_write(path, data, *args, **kwargs)
+
+        with patch.object(Path, "write_text", autospec=True, side_effect=fail_probe_log):
+            code, report = runner.execute()
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["accepted"], ["delay-zero"])
+        self.assertTrue(any("probe-command evidence" in event for event in report["events"]))
+        saved = json.loads(plan.checkpoint_path.read_text(encoding="utf-8"))
+        self.assertEqual([item["case_id"] for item in saved["outcomes"]], ["delay-zero"])
+        runner.execute()
+        self.assertEqual(len(device.launched), 1)
+
+    def test_post_launch_lock_note_oserror_keeps_outcome_checkpointed(self) -> None:
+        plan = self.load(self.CASES[:1])
+        device = self.device()
+        runner = self.runner(plan, device)
+        real_note = om.note_launch
+
+        def fail_closing_note(path, session_id, text):
+            if " on boot " in text and text.endswith("ACCEPTED"):
+                raise OSError("lock note volume is unavailable")
+            return real_note(path, session_id, text)
+
+        with patch.object(om, "note_launch", side_effect=fail_closing_note):
+            code, report = runner.execute()
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["accepted"], ["delay-zero"])
+        self.assertTrue(any("probes_run note after delay-zero not written" in event
+                            for event in report["events"]))
+        saved = json.loads(plan.checkpoint_path.read_text(encoding="utf-8"))
+        self.assertEqual([item["case_id"] for item in saved["outcomes"]], ["delay-zero"])
+        runner.execute()
+        self.assertEqual(len(device.launched), 1)
+
+    def test_checkpoint_identity_binds_measurement_and_execution_parameters(self) -> None:
+        data = b"synthetic prebuilt PRX for checkpoint identity"
+        (self.private / "nk_hang.prx").write_bytes(data)
+        case = {
+            "case_id": "nk-hang",
+            "timeout_seconds": 600,
+            "prebuilt_prx": "nk_hang.prx",
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        base = self.plan_dict([case])
+        plan = om.load_plan(self.write_plan(base), repo_root=self.repo)
+        device = self.device(nk_hang="wedge")
+        self.assertEqual(self.runner(plan, device).execute()[0], 3)
+
+        alternate = self.private / "alternate.prx"
+        alternate.write_bytes(data)
+        mutations = (
+            ("console_model", lambda raw: raw.update(console_model="PSP-2000")),
+            ("expected_firmware", lambda raw: raw.update(expected_firmware="6.6.0")),
+            ("host0_root", lambda raw: raw.update(host0_root="build/host0-other")),
+            ("watchdog_deadline", lambda raw: raw.update(
+                watchdog_deadline_seconds=om.DEFAULT_WATCHDOG_DEADLINE + 1
+            )),
+            ("max_contained_failures", lambda raw: raw.update(max_contained_failures=2)),
+            ("case_timeout", lambda raw: raw["cases"][0].update(timeout_seconds=601)),
+            ("prebuilt_path", lambda raw: raw["cases"][0].update(prebuilt_prx="alternate.prx")),
+            ("prebuilt_pin", lambda raw: raw["cases"][0].update(sha256="f" * 64)),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                changed = json.loads(json.dumps(base))
+                mutate(changed)
+                candidate = om.load_plan(self.write_plan(changed), repo_root=self.repo)
+                resume_device = self.device()
+                with self.assertRaisesRegex(om.MatrixError, "different matrix"):
+                    self.runner(candidate, resume_device).execute()
+                self.assertEqual(resume_device.calls, [])
+
+    def test_resume_refuses_checkpoint_prebuilt_digest_that_disagrees_with_plan_pin(self) -> None:
+        data = b"synthetic pinned PRX"
+        (self.private / "nk_hang.prx").write_bytes(data)
+        pin = hashlib.sha256(data).hexdigest()
+        plan = self.load([{
+            "case_id": "nk-hang", "timeout_seconds": 600,
+            "prebuilt_prx": "nk_hang.prx", "sha256": pin,
+        }])
+        runner = self.runner(plan, self.device(nk_hang="wedge"))
+        self.assertEqual(runner.execute()[0], 3)
+        checkpoint = json.loads(plan.checkpoint_path.read_text(encoding="utf-8"))
+        tampered = b"different checkpointed PRX"
+        checkpointed_digest = hashlib.sha256(tampered).hexdigest()
+        (plan.host0_root / "nk_hang.prx").write_bytes(tampered)
+        checkpoint["staged"]["nk-hang"] = checkpointed_digest
+        plan.checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+        with self.assertRaisesRegex(om.MatrixError, "checkpoint staged digest.*pinned"):
+            runner.execute()
 
     def test_runner_without_boot_report_cannot_accept_a_launch(self) -> None:
         plan = self.load(self.CASES[:1], matrix_id="no-boots")

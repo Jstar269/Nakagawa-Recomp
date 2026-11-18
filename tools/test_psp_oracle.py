@@ -2346,6 +2346,9 @@ class PspOracleRunnerTests(unittest.TestCase):
         self.assertIn('TOOLS / "codegen.py"', text)
         self.assertIn("nakagawa_psp_oracle_sum_u32", text)
         self.assertNotIn("NAKAGAWA_PSP_TEST", text)
+        from psp_oracle import build_nakagawa_smoke, run_psplink  # noqa: PLC0415
+
+        self.assertIs(build_nakagawa_smoke._host_binary_sha256, run_psplink._host_binary_sha256)
 
     def test_oracle_capture_launcher_preserves_child_stdout(self) -> None:
         launcher = Path(__file__).resolve().parent / "psp_oracle" / "run_nakagawa.py"
