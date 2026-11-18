@@ -200,12 +200,14 @@ class GpuVerificationStatusTests(unittest.TestCase):
         recipe = self.makefile[self.makefile.index("\ngpu-capture-selftest:"):]
         recipe = recipe[: recipe.index("\n\n")]
         cases = re.search(r"(?m)^GPU_CAPTURE_TERMINAL_CASES := (.+)$", self.makefile)
-        self.assertIsNotNone(cases, "GPU_CAPTURE_TERMINAL_CASES must list the legs")
+        if cases is None:
+            self.fail("GPU_CAPTURE_TERMINAL_CASES must list the legs")
         legs = cases.group(1).split()
         self.assertEqual(sorted(legs), sorted(re.findall(r"SR_GPU_CAPTURE_TERMINAL_CASE=(\S+)", recipe)),
                          "the status seam and gpu-capture-selftest must run the same legs")
         helper_legs = re.search(r'"gpu-capture-selftest" = @\(([^)]*)\)', self.helper)
-        self.assertIsNotNone(helper_legs)
+        if helper_legs is None:
+            self.fail("the manager helper must list the gpu-capture-selftest legs")
         self.assertEqual(sorted(legs), sorted(re.findall(r'"([^"]+)"', helper_legs.group(1))),
                          "the manager must require every leg the Makefile runs")
         with tempfile.TemporaryDirectory(prefix="gpu_status_legs_") as tmp:
