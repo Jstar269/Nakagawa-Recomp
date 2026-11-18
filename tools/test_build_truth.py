@@ -4392,6 +4392,31 @@ class DoctorRefusesTrackedCodeCaptureTests(unittest.TestCase):
         self.assertEqual([r.status for r in tracked], ["FAIL"])
         self.assertIn(".nkcap", tracked[0].detail or "")
 
+    def test_a_tracked_dump_profile_or_database_fails_the_repository_contract(self):
+        import nk_doctor_checks
+        import nk_doctor_core
+
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("git is required")
+        for name in ("crash.dmp", "session.psess", "index.sqlite"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                subprocess.run([git, "init", "-q"], cwd=root, check=True)
+                (root / name).write_bytes(b"synthetic")
+                subprocess.run([git, "add", "-f", "."], cwd=root, check=True)
+                report = nk_doctor_core.Report(root, "build")
+                nk_doctor_checks.check_repository_contract(report)
+                tracked = [r for r in report.results if r.code == "GIT_TRACKED_PRIVATE"]
+                self.assertEqual([r.status for r in tracked], ["FAIL"])
+                self.assertIn(name, tracked[0].detail or "")
+
+    def test_the_doctor_refuses_every_extension_the_history_audit_forbids(self):
+        import history_audit
+        import nk_doctor_core
+
+        self.assertEqual(history_audit.FORBIDDEN_EXTENSIONS - nk_doctor_core.PRIVATE_EXTENSIONS, set())
+
 
 class LinkerSpellingTests(unittest.TestCase):
     """Unused-section removal is spelled by the linker, not the compiler: GNU ld and the MinGW

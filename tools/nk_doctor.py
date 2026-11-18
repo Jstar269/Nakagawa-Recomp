@@ -206,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--disc-id",
-        help="validate the private runtime package cache for this disc ID",
+        help="validate the private runtime package cache for this disc ID (scopes products, run and all)",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--strict", action="store_true", help="make warnings produce exit status 2")
@@ -322,6 +322,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.scope in {"products", "run", "all"}:
             check_runtime_package_cache(report, args.user_data_root, args.disc_id.upper())
+        else:
+            report.fail(
+                "RUNTIME_PACKAGE_CACHE",
+                f"--disc-id package validation does not run under --scope {args.scope}",
+                remediation="Rerun Doctor with --scope products, run or all to validate the package cache.",
+            )
 
     output = render_json(report, args.strict) if args.json else render_text(report)
     print(output)

@@ -1328,6 +1328,29 @@ class LongPathDiagnosticTests(unittest.TestCase):
                 long_paths[0]["metadata"]["deepest_source"], "per-user package output root"
             )
 
+    def test_disc_id_under_a_scope_that_skips_the_package_cache_is_not_a_pass(self) -> None:
+        # --disc-id asks for the package-cache validation; a scope that never runs it names
+        # that, instead of ending PASS with the requested check silently not run.
+        for scope in ("repo", "inputs", "build"):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir) / "checkout"
+                root.mkdir()
+                output: list[str] = []
+                with (
+                    mock.patch.object(nk_doctor, "check_runtime_package_cache") as cache_check,
+                    mock.patch("builtins.print", side_effect=lambda value: output.append(value)),
+                ):
+                    returned = nk_doctor.main([
+                        "--root", str(root), "--scope", scope, "--user-data-root",
+                        str(Path(tmpdir) / "user"), "--disc-id", "test00001", "--json",
+                    ])
+                cache_check.assert_not_called()
+                payload = json.loads(output[-1])
+                cache = [r for r in payload["results"] if r["code"] == "RUNTIME_PACKAGE_CACHE"]
+                self.assertEqual([r["status"] for r in cache], ["FAIL"])
+                self.assertIn(f"--scope {scope}", cache[0]["summary"])
+                self.assertNotEqual(returned, 0)
+
 
 class TypographyRuntimeCheckTests(unittest.TestCase):
     """The player's SDL3_ttf runtime is a reported workspace fact, never silent."""
