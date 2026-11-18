@@ -242,11 +242,15 @@ class TitleCodegenPlanTests(unittest.TestCase):
                 "gcc -O2 -c src/rt/hle.c -o build/x/hle.o",  # repeated: counted once
                 "gcc -O2 -o build/x/game.exe @build/x/link-objects.rsp -lm",  # the link
                 "gcc -c src/rt/ge.c -o \"build/x/ge.o\"",
+                "gcc -o build/x/reordered.o -c src/rt/reordered.c",
+                "gcc -MMD -MP -c src/rt/continued.c \\",
+                "  -o build/x/continued.o",
             ))
             objects = title_codegen_plan.planned_compile_objects(listing, cwd)
         self.assertEqual(
             objects,
-            [cwd / "build/x/hle.o", Path(absolute) / "game_recomp_0.o", cwd / "build/x/ge.o"],
+            [cwd / "build/x/hle.o", Path(absolute) / "game_recomp_0.o", cwd / "build/x/ge.o",
+             cwd / "build/x/reordered.o", cwd / "build/x/continued.o"],
         )
         self.assertEqual(title_codegen_plan.planned_compile_objects("make: Nothing to be done", cwd), [])
 
@@ -512,7 +516,7 @@ class TitleCodegenPlanTests(unittest.TestCase):
             with mock.patch.dict(os.environ, environment),                     mock.patch.object(title_codegen_plan, "_make_input_images",
                                       return_value=({}, {}, [], [])),                     mock.patch.object(title_codegen_plan, "_make_build_targets",
                                       return_value=("compile",)),                     mock.patch.object(title_codegen_plan, "_cache_key_for_build",
-                                      return_value={}),                     mock.patch.object(title_codegen_plan, "_version_identity",
+                                      return_value=({"key": "synthetic"}, {}, {})),                     mock.patch.object(title_codegen_plan, "_version_identity",
                                       return_value=("tool", "tool 1")),                     mock.patch.object(title_codegen_plan.shutil, "which",
                                       side_effect=lambda name: name),                     mock.patch.object(title_codegen_plan, "available_physical_memory",
                                       return_value=16 * gib),                     mock.patch.object(title_codegen_plan.os, "process_cpu_count",
@@ -536,6 +540,136 @@ class TitleCodegenPlanTests(unittest.TestCase):
         self.assertIsInstance(call.get("plan"), title_codegen_plan.PackageBuildPlan)
         self.assertEqual((call["plan"].jobs, call["plan"].limit), (6, "memory"))
         self.assertEqual(call["jobs"], 6)
+
+    def test_android_package_uses_the_shared_library_output_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(json.dumps(self.synthetic), encoding="utf-8")
+            game_elf = root / "game.elf"
+            game_elf.write_bytes(b"synthetic executable")
+            output_dir = root / "out"
+            output_dir.mkdir()
+            cache_options = {"planner_sha256": "synthetic-planner"}
+            tool_digests = {
+                "planner": "synthetic-planner", "analyzer": "synthetic-analyzer",
+                "codegen": "synthetic-codegen",
+            }
+
+            def fake_compile(_make_executable, *, build_dir, **_kwargs):
+                build = Path(build_dir)
+                (build / "libsynthetic.so").write_bytes(b"synthetic Android library")
+                (build / "synthetic_image.bin").write_bytes(b"synthetic image")
+                (build / "synthetic_recomp_funcs.h").write_text(
+                    "void f_00001000(CpuState *s);\n", encoding="ascii")
+                (build / "synthetic_recomp_stubs.txt").write_text("", encoding="ascii")
+                (build / "synthetic_recomp_opt.mk").write_text("# synthetic\n", encoding="ascii")
+                (build / "synthetic.map").write_text("synthetic map\n", encoding="ascii")
+                return 0
+
+            with mock.patch.dict(os.environ, {
+                "CC": "android-clang",
+                title_codegen_plan.COMPILE_PROGRESS_FILE_ENV: str(root / "progress.jsonl"),
+            }), \
+                    mock.patch.object(title_codegen_plan, "_make_input_images",
+                                      return_value=([], {}, [], [])), \
+                    mock.patch.object(title_codegen_plan, "_make_build_targets",
+                                      return_value=("compile",)), \
+                    mock.patch.object(title_codegen_plan, "_cache_key_for_build",
+                                      return_value=({"synthetic": True}, cache_options, tool_digests)), \
+                    mock.patch.object(title_codegen_plan, "_cache_codegen_options",
+                                      side_effect=AssertionError("cache options must be reused")), \
+                    mock.patch.object(title_codegen_plan, "_version_identity",
+                                      return_value=("tool", "tool 1")), \
+                    mock.patch.object(title_codegen_plan.shutil, "which",
+                                      side_effect=lambda name: f"/fake/{name}"), \
+                    mock.patch.object(title_codegen_plan, "_run_compile_phase",
+                                      side_effect=fake_compile), \
+                    mock.patch.object(package_cache, "cache_metadata",
+                                      return_value={"key": "synthetic"}) as cache_metadata, \
+                    mock.patch.object(package_cache, "validate_package_cache",
+                                      return_value=(True, "ok")), \
+                    mock.patch("package_notices.generate_package_notices"):
+                package = title_codegen_plan.build_package(
+                    self.synthetic,
+                    manifest_path=manifest_path,
+                    game_elf=game_elf,
+                    output_dir=output_dir,
+                    game_name="synthetic",
+                    make_command="make",
+                    target="android",
+                )
+            self.assertEqual(package["executable"]["path"], "libsynthetic.so")
+            self.assertTrue((output_dir / "libsynthetic.so").is_file())
+            self.assertEqual(cache_metadata.call_args.args[1], cache_options)
+
+    def test_package_inputs_with_the_same_name_keep_distinct_staged_bytes(self) -> None:
+        class StopAfterStaging(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "disc inputs"
+            manifest_source = source / "manifest"
+            elf_source = source / "executable"
+            manifest_source.mkdir(parents=True)
+            elf_source.mkdir(parents=True)
+            manifest_path = manifest_source / "EBOOT.BIN"
+            manifest_bytes = json.dumps(self.synthetic).encode("utf-8")
+            manifest_path.write_bytes(manifest_bytes)
+            game_elf = elf_source / "EBOOT.BIN"
+            elf_bytes = b"synthetic executable"
+            game_elf.write_bytes(elf_bytes)
+            observed: list[tuple[Path, Path, bytes, bytes]] = []
+
+            def inspect_staged_inputs(_manifest, staged_elf, *_args):
+                staged_manifest = Path(_manifest_path_seen[0])
+                staged_executable = Path(staged_elf)
+                observed.append((staged_manifest, staged_executable,
+                                 staged_manifest.read_bytes(), staged_executable.read_bytes()))
+                raise StopAfterStaging
+
+            _manifest_path_seen: list[Path] = []
+            real_stage = title_codegen_plan._stage_for_make
+
+            def capture_manifest_stage(path, stage_dir, label):
+                staged = real_stage(path, stage_dir, label)
+                if label == "title manifest":
+                    _manifest_path_seen.append(staged)
+                return staged
+
+            with mock.patch.object(title_codegen_plan, "_stage_for_make",
+                                  side_effect=capture_manifest_stage), \
+                    mock.patch.object(title_codegen_plan, "_make_input_images",
+                                      side_effect=inspect_staged_inputs):
+                with self.assertRaises(StopAfterStaging):
+                    title_codegen_plan.build_package(
+                        self.synthetic,
+                        manifest_path=manifest_path,
+                        game_elf=game_elf,
+                        output_dir=root / "out",
+                        game_name="synthetic",
+                    )
+
+        staged_manifest, staged_executable, staged_manifest_bytes, staged_elf_bytes = observed[0]
+        self.assertNotEqual(staged_manifest, staged_executable)
+        self.assertEqual(staged_manifest_bytes, manifest_bytes)
+        self.assertEqual(staged_elf_bytes, elf_bytes)
+
+    def test_versioned_manifest_without_game_name_uses_the_catalog_name(self) -> None:
+        import title_catalog_codegen
+        from nk_core import title_registry
+
+        manifest = copy.deepcopy(self.synthetic)
+        manifest.pop("game_name", None)
+        expected = "synthetic-allegrex"
+        names = (
+            title_codegen_plan._package_game_name(manifest, None),
+            title_catalog_codegen._manifest_game_name(manifest),
+            title_registry._manifest_game_name(manifest),
+        )
+        self.assertEqual(names, (expected, expected, expected))
+
 
     def test_unconfigured_data_root_has_no_invalid_local_asset_record(self) -> None:
         manifest = copy.deepcopy(self.synthetic)
@@ -769,6 +903,36 @@ class TitleCodegenPlanTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         for call in captured:
             self.assertEqual(call["codegen_options"].get("planner_sha256"), expected)
+
+    def test_planner_cache_key_returns_reusable_options_and_tool_digests(self) -> None:
+        def file_digest(path) -> str:
+            name = Path(path).name
+            return {"title_codegen_plan.py": "planner-digest",
+                    "codegen.py": "codegen-digest"}.get(name, "other-digest")
+
+        with mock.patch.object(package_cache, "build_cache_key",
+                               return_value={"key": "synthetic"}) as build_key, \
+                mock.patch.object(package_cache, "sha256_file", side_effect=file_digest), \
+                mock.patch.object(package_cache, "analyzer_sources_sha256",
+                                  return_value="analyzer-digest"), \
+                mock.patch.object(package_cache, "compiler_identity", return_value="compiler"), \
+                mock.patch.object(package_cache, "compiler_target", return_value="target"), \
+                mock.patch.object(package_cache, "source_tree_digest", return_value="runtime"), \
+                mock.patch.object(package_cache, "native_compile_flags", return_value=[]):
+            result = title_codegen_plan._cache_key_for_build(
+                input_hashes={}, title_input_identity={}, plan=self.plan(),
+                selected_optional=set(), funcs_per_chunk=2000, compiler_name="gcc",
+            )
+
+        self.assertIsInstance(result, tuple)
+        key, options, tool_digests = result
+        self.assertEqual(key, {"key": "synthetic"})
+        self.assertEqual(options["planner_sha256"], "planner-digest")
+        self.assertEqual(tool_digests, {
+            "planner": "planner-digest", "analyzer": "analyzer-digest", "codegen": "codegen-digest",
+        })
+        self.assertEqual(build_key.call_args.kwargs["analyzer_sha256"], tool_digests["analyzer"])
+        self.assertEqual(build_key.call_args.kwargs["codegen_sha256"], tool_digests["codegen"])
 
     def test_player_and_planner_hash_a_runtime_placed_module_alike(self) -> None:
         manifest = copy.deepcopy(self.synthetic)

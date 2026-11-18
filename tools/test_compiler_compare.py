@@ -86,6 +86,52 @@ class SubprocessTimeoutTests(unittest.TestCase):
                          compiler_compare.COMMAND_TIMEOUT_SECONDS)
 
 
+class ProcessTreeSamplingTests(unittest.TestCase):
+    def test_process_api_bindings_are_reused_across_samples(self) -> None:
+        rows = ((1, 0), (2, 1), (3, 2))
+        cursor = {"index": 0}
+
+        def advance(_snapshot, entry_pointer):
+            if cursor["index"] == len(rows):
+                return False
+            entry = entry_pointer._obj
+            entry.th32ProcessID, entry.th32ParentProcessID = rows[cursor["index"]]
+            cursor["index"] += 1
+            return True
+
+        kernel = mock.Mock()
+        kernel.CreateToolhelp32Snapshot.return_value = 7
+        kernel.Process32FirstW.side_effect = lambda snapshot, entry: (
+            cursor.update(index=0) or advance(snapshot, entry))
+        kernel.Process32NextW.side_effect = advance
+        kernel.OpenProcess.side_effect = lambda _access, _inherit, pid: pid + 100
+        kernel.CloseHandle.return_value = True
+        psapi = mock.Mock()
+
+        def memory_info(_process, counters_pointer, _size):
+            counters_pointer._obj.WorkingSetSize = _process
+            return True
+
+        psapi.GetProcessMemoryInfo.side_effect = memory_info
+        api_loader = mock.Mock(side_effect=lambda name, **_kwargs:
+                               kernel if name == "kernel32" else psapi)
+        had_cached_apis = hasattr(compiler_compare, "_PROCESS_APIS")
+        previous_apis = getattr(compiler_compare, "_PROCESS_APIS", None)
+        try:
+            if had_cached_apis:
+                compiler_compare._PROCESS_APIS = None
+            with mock.patch.object(compiler_compare.sys, "platform", "win32"), \
+                    mock.patch.object(compiler_compare.ctypes, "WinDLL", api_loader, create=True):
+                first = compiler_compare._process_tree_working_set(1)
+                cursor["index"] = 0
+                second = compiler_compare._process_tree_working_set(1)
+        finally:
+            if had_cached_apis:
+                compiler_compare._PROCESS_APIS = previous_apis
+        self.assertEqual((first, second), (306, 306))
+        self.assertEqual(api_loader.call_count, 2)
+
+
 class FakeToolchain:
     """Fake compiler, linker and Make output without executing a build."""
 
@@ -469,6 +515,18 @@ class CompilerCompareTests(unittest.TestCase):
         with self.assertRaises(compiler_compare.CompareError):
             compiler_compare.validate_report(report)
 
+    def test_measured_report_requires_every_veto_gate_to_pass(self) -> None:
+        report = self.compare()
+        veto = report["toolchains"][0]["veto"]
+        veto["gates"] = veto["gates"][:1]
+        with self.assertRaises(compiler_compare.CompareError):
+            compiler_compare.render_markdown(report)
+
+        report = self.compare()
+        report["toolchains"][0]["veto"]["gates"][2]["status"] = compiler_compare.GATE_FAIL
+        with self.assertRaises(compiler_compare.CompareError):
+            compiler_compare.validate_report(report)
+
     def test_report_validator_rejects_timing_under_unavailable_compiler(self) -> None:
         self.fake.available = ()
         report = self.compare(compilers=["clang"])
@@ -542,6 +600,30 @@ class CompilerCompareTests(unittest.TestCase):
         self.assertEqual(report["schema"], compiler_compare.SCHEMA)
         markdown = (self.output / "compiler_compare.md").read_text(encoding="utf-8")
         self.assertIn("Semantic SHA-256", markdown)
+
+    def test_main_redacts_host_paths_from_json_and_stdout(self) -> None:
+        report = self.compare()
+        private_path = r"C:\Users\AuditFixture\AppData\Local\toolchain\gcc.exe"
+        report["host_tools"]["python_path"] = private_path
+        entry = report["toolchains"][0]
+        entry["compiler_path"] = private_path
+        entry["build_root"] = r"C:\Users\AuditFixture\AppData\Local\build"
+        entry["veto"]["gates"][0]["command"] = ["make", f"BUILD_ROOT={entry['build_root']}"]
+        entry["veto"]["gates"][0]["output"] = "open /PSP_GAME/USRDIR/a.bin ok"
+        output = io.StringIO()
+        with mock.patch.object(compiler_compare, "compare", return_value=report), \
+                mock.patch("sys.stdout", output):
+            result = compiler_compare.main([
+                "--compilers", "gcc", "--linkers", "default", "--make", "mingw32-make",
+                "--python", sys.executable, "--repeats", "3", "--output", str(self.output),
+            ])
+        self.assertEqual(result, 0)
+        serialized = (self.output / "compiler_compare.json").read_text(encoding="utf-8")
+        self.assertNotIn("AuditFixture", serialized, "JSON output must redact local path components")
+        self.assertNotIn("AuditFixture", output.getvalue(), "stdout must redact local path components")
+        self.assertIn("<HOST_PATH>", serialized)
+        self.assertIn("<HOST_PATH>", output.getvalue())
+        self.assertIn("/PSP_GAME/USRDIR/a.bin", serialized)
 
     def test_main_writes_veto_report_and_returns_failure(self) -> None:
         self.fake.failing_gate = "cosim-selftest"

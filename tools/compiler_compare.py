@@ -500,6 +500,10 @@ _POSIX_NAMED_ROOT_RE = re.compile(
 _POSIX_MULTI_SEGMENT_RE = re.compile(
     r"(?:(?<=-[IL])|(?<![A-Za-z0-9_.>/:~-]))/(?:[A-Za-z0-9_.@-]+/)+[^\s\"'`<>|;,)\]]*",
 )
+_GUEST_VFS_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])/(?:PSP_GAME(?:/[^\s\"'`<>|;,\)\]]*)?|UMD_DATA\.BIN)",
+    re.IGNORECASE,
+)
 _HOST_KEYED_PTR_RE = re.compile(r"\b(host_?(?:addr|ptr)=)(?:0x)?[0-9a-fA-F]+\b", re.IGNORECASE)
 _CALL_ADDR_RE = re.compile(r"((?:-> calling|<- returned from) fn )(?:0x)?[0-9a-fA-F]{8,16}")
 _WIDE_HEX_PTR_RE = re.compile(r"(?<![A-Za-z0-9_])0x[0-9a-fA-F]{9,16}\b")
@@ -568,7 +572,13 @@ def _host_path_roots() -> tuple[str, ...]:
 
 def _redact_host_details(text: str, *, preserve_guest_wide_fields: bool = False) -> str:
     """Redact host paths (user homes, temp dirs, absolute paths) and hex host addresses."""
-    result = text
+    guest_paths: list[str] = []
+
+    def preserve_guest_path(match: re.Match[str]) -> str:
+        guest_paths.append(match.group(0))
+        return f"__SR_GUEST_PATH_{len(guest_paths) - 1}__"
+
+    result = _GUEST_VFS_PATH_RE.sub(preserve_guest_path, text)
     for root_prefix in _host_path_roots():
         flags = re.IGNORECASE if (len(root_prefix) >= 2 and root_prefix[1] == ":") else 0
         pattern = re.escape(root_prefix) + r"(?:[\\/][^\s\"'`<>|;,)\]]*)*"
@@ -595,7 +605,20 @@ def _redact_host_details(text: str, *, preserve_guest_wide_fields: bool = False)
 
     result = _WIDE_HEX_PTR_RE.sub(redact_wide, result)
     result = _WIN_BARE_PTR_RE.sub(redact_wide, result)
+    for index, path in enumerate(guest_paths):
+        result = result.replace(f"__SR_GUEST_PATH_{index}__", path)
     return result
+
+
+def _redact_report_details(value: Any) -> Any:
+    """Redact host paths and addresses recursively before a report is serialized."""
+    if isinstance(value, dict):
+        return {key: _redact_report_details(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_redact_report_details(child) for child in value]
+    if isinstance(value, str):
+        return _redact_host_details(value, preserve_guest_wide_fields=True)
+    return value
 
 
 def _normalise_semantic_output(text: str, build_root: Path) -> str:
@@ -1316,6 +1339,10 @@ def validate_report(report: Any) -> None:
             if _timing_keys(entry):
                 raise CompareError(f"{path}: failed veto leaks performance values")
             continue
+        if names != list(GATE_ORDER):
+            raise CompareError(f"{path}.veto.gates: measured toolchains require the full gate chain")
+        if any(gate.get("status") != GATE_PASS for gate in gates):
+            raise CompareError(f"{path}.veto.gates: every gate must pass before measurement")
         if veto.get("status") != GATE_PASS or veto.get("failed_gate") is not None:
             raise CompareError(f"{path}.veto: measured toolchain must pass every gate")
         if status == STATUS_FAILED_MEASUREMENT:
@@ -1559,24 +1586,36 @@ class _PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
     ]
 
 
+_PROCESS_APIS: tuple[Any, Any] | None = None
+
+
+def _process_apis() -> tuple[Any, Any]:
+    """Load and bind the process-sampling APIs once, on the first Windows sample."""
+    global _PROCESS_APIS
+    if _PROCESS_APIS is None:
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        kernel.Process32FirstW.restype = wintypes.BOOL
+        kernel.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        kernel.Process32NextW.restype = wintypes.BOOL
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_PROCESS_MEMORY_COUNTERS_EX), wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        _PROCESS_APIS = (kernel, psapi)
+    return _PROCESS_APIS
+
+
 def _process_tree_working_set(root_pid: int) -> int:
     if sys.platform != "win32":
         raise OSError("process-tree working-set sampling is currently implemented for Windows")
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    psapi = ctypes.WinDLL("psapi", use_last_error=True)
-    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
-    kernel.Process32FirstW.restype = wintypes.BOOL
-    kernel.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
-    kernel.Process32NextW.restype = wintypes.BOOL
-    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel.OpenProcess.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    psapi.GetProcessMemoryInfo.argtypes = [
-        wintypes.HANDLE, ctypes.POINTER(_PROCESS_MEMORY_COUNTERS_EX), wintypes.DWORD,
-    ]
-    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    kernel, psapi = _process_apis()
     snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
     if snapshot == wintypes.HANDLE(-1).value:
         raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
@@ -1590,12 +1629,17 @@ def _process_tree_working_set(root_pid: int) -> int:
             ok = kernel.Process32NextW(snapshot, ctypes.byref(entry))
     finally:
         kernel.CloseHandle(snapshot)
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
     descendants = {root_pid}
-    changed = True
-    while changed:
-        previous = len(descendants)
-        descendants.update(pid for pid, parent in parents.items() if parent in descendants)
-        changed = len(descendants) != previous
+    pending = deque((root_pid,))
+    while pending:
+        parent = pending.popleft()
+        for child in children.get(parent, ()):
+            if child not in descendants:
+                descendants.add(child)
+                pending.append(child)
     total = 0
     for pid in descendants:
         process = kernel.OpenProcess(0x0410, False, pid)
@@ -1737,10 +1781,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     json_path = output / "compiler_compare.json"
     markdown_path = output / "compiler_compare.md"
-    json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    public_report = _redact_report_details(report)
+    json_path.write_text(json.dumps(public_report, indent=2, sort_keys=True), encoding="utf-8")
     markdown = render_markdown(report)
     markdown_path.write_text(markdown, encoding="utf-8")
-    print(json.dumps(report, indent=2, sort_keys=True))
+    print(json.dumps(public_report, indent=2, sort_keys=True))
     print(markdown)
     return 0 if report["summary"][STATUS_MEASURED] and not (
         report["summary"][STATUS_NOT_AVAILABLE] or report["summary"][STATUS_FAILED_VETO]
