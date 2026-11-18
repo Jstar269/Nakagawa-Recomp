@@ -19,6 +19,8 @@ commit to run it:
 
 Without that variable every test skips, so the public suite stays green after the
 public repository is replaced and the incident commit no longer exists anywhere.
+When the variable is set but names no file, the class fails instead of skipping:
+an explicitly requested run must not look finished when it never ran.
 This test must never become the only proof the gate works.
 """
 
@@ -58,14 +60,14 @@ EXPECTED_EXCLUDED = (
 
 
 def _incident_tar() -> Path | None:
+    """The archive named by the variable, or None only when the variable is unset."""
     raw = os.environ.get(ENV_VAR)
     if not raw:
         return None
-    path = Path(raw)
-    return path if path.is_file() else None
+    return Path(raw)
 
 
-@unittest.skipIf(_incident_tar() is None, f"{ENV_VAR} not set to a readable incident archive")
+@unittest.skipIf(_incident_tar() is None, f"{ENV_VAR} not set")
 class TestExactIncidentRejected(unittest.TestCase):
     """The real ee398561 tree must be rejected path-for-path."""
     _tmp: tempfile.TemporaryDirectory[str]
@@ -74,13 +76,18 @@ class TestExactIncidentRejected(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        archive_path = _incident_tar()
+        if archive_path is None or not archive_path.is_file():
+            raise AssertionError(f"{ENV_VAR} is set but does not name a file: {archive_path}")
         cls._tmp = tempfile.TemporaryDirectory()
         cls.candidate = Path(cls._tmp.name) / "incident"
         cls.candidate.mkdir()
-        with tarfile.open(_incident_tar()) as archive:
+        with tarfile.open(archive_path) as archive:
             archive.extractall(cls.candidate, filter="data")
         # The policy deliberately comes from THIS repository, never from the
-        # extracted tree -- which carries its own, older profile.
+        # extracted tree -- which carries its own, older profile. No mode flag is
+        # passed, so every assertion below is a default-mode result: no flag is
+        # required to reject an excluded path.
         cls.result = subprocess.run(
             [sys.executable, str(AUDIT), "--candidate-root", str(cls.candidate)],
             cwd=ROOT, capture_output=True, text=True,
@@ -110,16 +117,28 @@ class TestExactIncidentRejected(unittest.TestCase):
         """The historical result was 6 of 15 under --public-scope and 0 of 15 by default."""
         self.assertEqual(len(self._rejected_paths() & set(EXPECTED_EXCLUDED)), 15)
 
-    def test_rejection_happens_in_default_mode(self):
-        """No flag should be required to reject an excluded path."""
-        self.assertNotIn("--public-scope", " ".join(self.result.args))
-        self.assertEqual(self.result.returncode, 1)
-
     def test_stale_export_and_manifest_are_also_reported(self):
         """The incident tree carries the pre-hardening export and manifest."""
         codes = {line.split(":", 1)[0] for line in self.result.stderr.splitlines() if ":" in line}
         self.assertIn("POLICY_EXPORT_STALE", codes)
         self.assertIn("POLICY_MANIFEST_MISSING", codes)
+
+
+class TestIncidentArchiveVariable(unittest.TestCase):
+    """Runs without the private archive: a mistyped archive path fails, never skips."""
+
+    def test_set_but_missing_archive_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            missing = Path(temp) / "no-such-incident-tree.tar"
+            env = dict(os.environ, **{ENV_VAR: str(missing)})
+            result = subprocess.run(
+                [sys.executable, "-m", "unittest",
+                 "tools.test_incident_regression_private.TestExactIncidentRejected"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=120,
+            )
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("is set but does not name a file", result.stderr)
+        self.assertNotIn("skipped", result.stderr)
 
 
 if __name__ == "__main__":

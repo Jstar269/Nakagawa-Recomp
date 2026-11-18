@@ -40,12 +40,19 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 function Assert-Throws {
-    param([scriptblock]$Body, [string]$Message)
-    try {
-        & $Body | Out-Null
-        throw "expected an exception: $Message"
-    } catch {
-        if ($_.Exception.Message -like "expected an exception*") { throw }
+    # Passes only for the refusal named by -Expected (a -like pattern). A missing command,
+    # a parameter-binding error or any other message is a failure, not the refusal.
+    param([scriptblock]$Body, [string]$Message, [Parameter(Mandatory)][string]$Expected)
+    $caught = $null
+    try { & $Body | Out-Null } catch { $caught = $_ }
+    if ($null -eq $caught) { throw "expected an exception: $Message" }
+    $exception = $caught.Exception
+    if ($exception -is [System.Management.Automation.CommandNotFoundException] -or
+        $exception -is [System.Management.Automation.ParameterBindingException]) {
+        throw "expected the refusal ($Message), got $($exception.GetType().Name): $($exception.Message)"
+    }
+    if ($exception.Message -notlike $Expected) {
+        throw "expected an exception like '$Expected' ($Message), got: $($exception.Message)"
     }
 }
 
@@ -97,7 +104,7 @@ try {
             $junction = Join-Path $root "evil"
             New-Item -ItemType Junction -Path $junction -Target $outside -Force | Out-Null
             Assert-True (-not (Test-PathContained -Path $junction -Root $root)) "junction accepted as contained"
-            Assert-Throws { Remove-SafeDirectory -Path $junction -Root $root } "recursive delete through junction"
+            Assert-Throws { Remove-SafeDirectory -Path $junction -Root $root } "recursive delete through junction" -Expected "refusing recursive delete of *"
             Assert-True (Test-Path -LiteralPath (Join-Path $outside "marker.txt")) "outside marker destroyed"
         }
 
@@ -109,7 +116,7 @@ try {
             Set-Content -LiteralPath (Join-Path $outside "marker.txt") -Value "x"
             New-Item -ItemType Junction -Path (Join-Path $root "oracle_x/sub") -Target $outside -Force | Out-Null
             Set-Content -LiteralPath (Join-Path $root "oracle_x/snap_0.ppm") -Value "evidence"
-            Assert-Throws { Remove-SafeDirectory -Path (Join-Path $root "oracle_x") -Root $root } "delete with escaping descendant"
+            Assert-Throws { Remove-SafeDirectory -Path (Join-Path $root "oracle_x") -Root $root } "delete with escaping descendant" -Expected "refusing recursive delete of *: reparse descendant *"
             Assert-True (Test-Path -LiteralPath (Join-Path $root "oracle_x/snap_0.ppm")) "evidence deleted despite refusal"
             Assert-True (Test-Path -LiteralPath (Join-Path $outside "marker.txt")) "outside marker destroyed"
         }
@@ -123,7 +130,7 @@ try {
             $link = Join-Path $root "evil"
             New-Item -ItemType SymbolicLink -Path $link -Target $outside -Force | Out-Null
             Assert-True (-not (Test-PathContained -Path $link -Root $root)) "symlink accepted as contained"
-            Assert-Throws { Remove-SafeDirectory -Path $link -Root $root } "recursive delete through symlink"
+            Assert-Throws { Remove-SafeDirectory -Path $link -Root $root } "recursive delete through symlink" -Expected "refusing recursive delete of *"
             Assert-True (Test-Path -LiteralPath (Join-Path $outside "marker.txt")) "outside marker destroyed"
         }
     }
@@ -429,7 +436,7 @@ try {
     Test-Case "workspace root validation fails closed on missing anchors" {
         $fake = Join-Path $tmpRoot "ws1"
         New-Item -ItemType Directory -Path $fake -Force | Out-Null
-        Assert-Throws { Assert-NkWorkspaceRoot -Root $fake } "anchor-less dir accepted"
+        Assert-Throws { Assert-NkWorkspaceRoot -Root $fake } "anchor-less dir accepted" -Expected "Not a Nakagawa Recomp workspace root (missing *"
         Set-Content -LiteralPath (Join-Path $fake "Makefile") -Value ""
         Set-Content -LiteralPath (Join-Path $fake "AGENTS.md") -Value ""
         New-Item -ItemType Directory -Path (Join-Path $fake "src/rt") -Force | Out-Null

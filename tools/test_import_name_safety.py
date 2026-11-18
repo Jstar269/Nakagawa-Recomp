@@ -536,7 +536,8 @@ class TestImportNameSafety(unittest.TestCase):
         elf = imports_tool.Elf(bytes(blob), base=base)
 
         out_of_range_stub = 0x09000000
-        unaligned_stub = base + 0x201
+        # Inside the mapped stub bytes, so only the alignment term can reject it.
+        unaligned_stub = stub + 2
         valid_stub = stub
 
         hostile_impmap = {

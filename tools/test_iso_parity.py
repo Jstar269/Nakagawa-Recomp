@@ -628,6 +628,9 @@ class IsoParityTests(unittest.TestCase):
         # launch behaviour, not compiler freshness; each test still receives
         # its own input/output directory below.
         cls._build_dir = Path(tempfile.mkdtemp(prefix="nk_parity_build_"))
+        # A class cleanup runs even when a compile failure below raises out of
+        # setUpClass, which tearDownClass does not.
+        cls.addClassCleanup(shutil.rmtree, cls._build_dir, True)
         cls.harness_c = cls._build_dir / "parity_harness.c"
         executable_name = "parity_harness.exe" if sys.platform == "win32" else "parity_harness"
         cls.harness_exe = cls._build_dir / executable_name
@@ -635,7 +638,6 @@ class IsoParityTests(unittest.TestCase):
             "parity_path_limit.exe" if sys.platform == "win32" else "parity_path_limit"
         )
 
-        has_launch = (ROOT / "src" / "core" / "nk_launch.c").is_file()
         core_srcs = [
             ROOT / "src" / "core" / "nk_shared_helpers.c",
             ROOT / "src" / "core" / "nk_iso.c",
@@ -643,21 +645,21 @@ class IsoParityTests(unittest.TestCase):
             ROOT / "src" / "core" / "nk_title_manifest.c",
             ROOT / "src" / "core" / "nk_json.c",
             ROOT / "src" / "core" / "generated" / "nk_title_catalog.c",
-        ]
-        if has_launch:
-            core_srcs.append(ROOT / "src" / "core" / "nk_launch.c")
+            # The launch modes are required: a missing nk_launch.c fails the build.
+            ROOT / "src" / "core" / "nk_launch.c",
             # nk_launch.c starts a homebrew program from its Memory Stick folder
             # (nk_pbp_homebrew.c), whose package reader reports through the PSP crypto
             # engine (nk_psp_fail), which reads the key store.
-            core_srcs.extend(ROOT / "src" / "core" / name
-                             for name in ("nk_pbp_homebrew.c", "nk_psp_crypto.c",
-                                          "nk_psp_keystore.c", "nk_psp_builtin_keys.c"))
+            *(ROOT / "src" / "core" / name
+              for name in ("nk_pbp_homebrew.c", "nk_psp_crypto.c",
+                           "nk_psp_keystore.c", "nk_psp_builtin_keys.c")),
+        ]
         if sys.platform == "win32":
             core_srcs.append(ROOT / "src" / "core" / "nk_platform_win32.c")
         else:
             core_srcs.append(ROOT / "src" / "core" / "nk_platform_posix.c")
 
-        harness_code = f"""#include <ctype.h>
+        harness_code = """#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -666,72 +668,70 @@ class IsoParityTests(unittest.TestCase):
 #include "../rt/prx_loader.h"
 #include "nk_library.h"
 #include "nk_title_manifest.h"
-#if {1 if has_launch else 0}
 #include "nk_launch.h"
-#endif
 
 static bool print_module_path(const char *path, const NkIsoDirEntry *entry,
-                              void *userdata) {{
+                              void *userdata) {
     (void)userdata;
     size_t length = strlen(entry->name);
     if (length >= 4 &&
         tolower((unsigned char)entry->name[length - 4]) == '.' &&
         tolower((unsigned char)entry->name[length - 3]) == 'p' &&
         tolower((unsigned char)entry->name[length - 2]) == 'r' &&
-        tolower((unsigned char)entry->name[length - 1]) == 'x') {{
+        tolower((unsigned char)entry->name[length - 1]) == 'x') {
         printf("MODULE_PATH:%s\\n", path);
-    }} else if (length >= 4 &&
+    } else if (length >= 4 &&
         tolower((unsigned char)entry->name[length - 4]) == '.' &&
         tolower((unsigned char)entry->name[length - 3]) == 'e' &&
         tolower((unsigned char)entry->name[length - 2]) == 'l' &&
-        tolower((unsigned char)entry->name[length - 1]) == 'f') {{
+        tolower((unsigned char)entry->name[length - 1]) == 'f') {
         printf("MODULE_PATH:%s\\n", path);
-    }}
+    }
     return true;
-}}
+}
 
-static bool harness_file_read(void *context, uint64_t offset, void *dst, uint32_t bytes) {{
+static bool harness_file_read(void *context, uint64_t offset, void *dst, uint32_t bytes) {
     FILE *image = (FILE *)context;
     if (offset > 0x7fffffffULL || fseek(image, (long)offset, SEEK_SET) != 0) return false;
     return fread(dst, 1, bytes, image) == bytes;
-}}
+}
 
-int main(int argc, char **argv) {{
+int main(int argc, char **argv) {
     if (argc < 2) return 1;
     const char *mode = argv[1];
 
-    if (strcmp(mode, "elf_layout") == 0) {{
+    if (strcmp(mode, "elf_layout") == 0) {
         /* elf_layout <file> <module 0|1>: the shared PSP ELF32/MIPS layout rule. */
         if (argc < 4) return 1;
         FILE *image = fopen(argv[2], "rb");
         if (!image) return 2;
-        if (fseek(image, 0, SEEK_END) != 0) {{ fclose(image); return 2; }}
+        if (fseek(image, 0, SEEK_END) != 0) { fclose(image); return 2; }
         long image_size = ftell(image);
-        if (image_size < 0) {{ fclose(image); return 2; }}
+        if (image_size < 0) { fclose(image); return 2; }
         const char *rule = nk_elf32_mips_layout_violation(
             harness_file_read, image, (uint64_t)image_size, strcmp(argv[3], "1") == 0);
         fclose(image);
         printf("ELF_LAYOUT:%s\\n", rule ? rule : "USABLE");
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "start_entry") == 0) {{
+    if (strcmp(mode, "start_entry") == 0) {
         /* start_entry <file>: where the PSP starts this executable (sr_prx_start_entry in src/rt/prx_loader.h). */
         if (argc < 3) return 1;
         FILE *image = fopen(argv[2], "rb");
         if (!image) return 2;
-        if (fseek(image, 0, SEEK_END) != 0) {{ fclose(image); return 2; }}
+        if (fseek(image, 0, SEEK_END) != 0) { fclose(image); return 2; }
         long image_size = ftell(image);
-        if (image_size < 0) {{ fclose(image); return 2; }}
+        if (image_size < 0) { fclose(image); return 2; }
         uint32_t entry = 0;
         const char *rule = sr_prx_start_entry(harness_file_read, image, (uint64_t)image_size,
                                               &entry);
         fclose(image);
         printf("START_ENTRY:%s:%08x\\n", rule ? rule : "OK", entry);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "module_walk") == 0) {{
+    if (strcmp(mode, "module_walk") == 0) {
         if (argc < 3) return 1;
         NkIsoReader *reader = nk_iso_reader_open(argv[2]);
         if (!reader) return 2;
@@ -740,19 +740,19 @@ int main(int argc, char **argv) {{
         printf("MODULE_WALK_STATUS:%d\\n", (int)status);
         nk_iso_reader_close(reader);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "inspect") == 0) {{
+    if (strcmp(mode, "inspect") == 0) {
         if (argc < 3) return 1;
         const char *iso_path = argv[2];
         NkIsoMetadata meta;
         NkResult res = nk_iso_inspect(iso_path, &meta);
-        if (res != NK_OK) {{
+        if (res != NK_OK) {
             printf("RESULT:ERROR:%d:%s\\n", (int)res, meta.error_message);
             printf("BOUNDARY:%s\\n", meta.boundary_code);
             printf("MESSAGE:%s\\n", meta.error_message);
             return 0;
-        }}
+        }
         printf("RESULT:OK\\n");
         printf("DISC_ID:%s\\n", meta.disc_id);
         printf("SFO_DISC_ID:%s\\n", meta.sfo_disc_id);
@@ -771,9 +771,9 @@ int main(int argc, char **argv) {{
         printf("MATCHED_ID:%s\\n", meta.matched_title_id[0] ? meta.matched_title_id : "NONE");
         printf("STATUS:%d\\n", (int)meta.status);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "library_test") == 0) {{
+    if (strcmp(mode, "library_test") == 0) {
         if (argc < 3) return 1;
         const char *lib_json = argv[2];
         static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
@@ -823,28 +823,28 @@ int main(int argc, char **argv) {{
 
         printf("LIBRARY_TEST_PASSED\\n");
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "experimental_profile") == 0) {{
+    if (strcmp(mode, "experimental_profile") == 0) {
         if (argc < 4) return 1;
         const char *iso_path = argv[2];
         const char *user_data_root = argv[3];
         NkIsoMetadata meta;
         NkResult inspect_result = nk_iso_inspect(iso_path, &meta);
-        if (inspect_result != NK_OK) {{
+        if (inspect_result != NK_OK) {
             printf("PROFILE_RESULT:ERROR:DISC:%s\\n", meta.error_message);
             return 0;
-        }}
-        char profile_id[64] = {{0}};
-        char error[256] = {{0}};
+        }
+        char profile_id[64] = {0};
+        char error[256] = {0};
         bool ok = nk_title_manifest_write_experimental_profile(
             iso_path, meta.param_sfo_parsed, meta.disc_id, meta.title_name,
             meta.executables.selected_path, user_data_root, profile_id,
             sizeof(profile_id), error, sizeof(error));
-        if (!ok) {{
+        if (!ok) {
             printf("PROFILE_RESULT:ERROR:%s\\n", error);
             return 0;
-        }}
+        }
         printf("PROFILE_RESULT:OK\\n");
         printf("PROFILE_ID:%s\\n", profile_id);
         printf("PACKAGE_AVAILABLE:%d\\n",
@@ -861,10 +861,9 @@ int main(int argc, char **argv) {{
                launch_result == NK_OK ? "OK" : "REFUSED");
         printf("LAUNCH_REASON:%s\\n", session.last_error);
         return 0;
-    }}
+    }
 
-#if {1 if has_launch else 0}
-    if (strcmp(mode, "launch_test") == 0) {{
+    if (strcmp(mode, "launch_test") == 0) {
         if (argc < 4) return 1;
         const char *repo_root = argv[2];
         const char *iso_path = argv[3];
@@ -880,19 +879,19 @@ int main(int argc, char **argv) {{
 
         NkLaunchSession session;
         NkResult res = nk_launch_prepare_session(&session, &g, repo_root);
-        if (res != NK_OK) {{
+        if (res != NK_OK) {
             printf("LAUNCH_PREPARE_ERROR:%d:%s\\n", (int)res, session.last_error);
             return 0;
-        }}
+        }
         printf("LAUNCH_PREPARE_OK\\n");
         printf("EXE:%s\\n", session.executable_path);
         printf("ISO:%s\\n", session.iso_path);
         printf("BASE:0x%08x\\n", session.base_address);
         printf("ENTRY:0x%08x\\n", session.entry_point);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "boot_roundtrip") == 0) {{
+    if (strcmp(mode, "boot_roundtrip") == 0) {
         if (argc < 5) return 1;
         static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
         NkResult load_result = nk_library_load(&lib, argv[2]);
@@ -917,9 +916,9 @@ int main(int argc, char **argv) {{
         printf("SESSION_BOOT_MATCH:%d\\n",
                strcmp(entry->boot_executable, session.boot_executable) == 0);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "boot_session_unterminated") == 0) {{
+    if (strcmp(mode, "boot_session_unterminated") == 0) {
         NkGameEntry game;
         NkLaunchSession session;
         memset(&game, 0, sizeof(game));
@@ -931,10 +930,9 @@ int main(int argc, char **argv) {{
         printf("SESSION_RESULT:%d\\n", (int)result);
         printf("ERROR:%s\\n", session.last_error);
         return 0;
-    }}
-#endif
+    }
 
-    if (strcmp(mode, "boot_save_unterminated") == 0) {{
+    if (strcmp(mode, "boot_save_unterminated") == 0) {
         if (argc < 3) return 1;
         static NkLibrary lib;  /* too large for the stack (NK_MAX_GAMES) */
         NkGameEntry game;
@@ -946,16 +944,16 @@ int main(int argc, char **argv) {{
         NkResult result = nk_library_save(&lib, argv[2]);
         printf("SAVE_RESULT:%d\\n", (int)result);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "reader_test") == 0) {{
+    if (strcmp(mode, "reader_test") == 0) {
         if (argc < 3) return 1;
         const char *iso_path = argv[2];
         NkIsoReader *reader = nk_iso_reader_open(iso_path);
-        if (!reader) {{
+        if (!reader) {
             printf("READER:OPEN_FAILED\\n");
             return 0;
-        }}
+        }
         printf("READER:OPEN_OK\\n");
         printf("VOLUME_ID:%s\\n", nk_iso_reader_volume_id(reader));
         printf("FILE_SIZE:%llu\\n", (unsigned long long)nk_iso_reader_file_size(reader));
@@ -987,46 +985,46 @@ int main(int argc, char **argv) {{
 
         nk_iso_reader_close(reader);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "lookup") == 0) {{
+    if (strcmp(mode, "lookup") == 0) {
         if (argc < 4) return 1;
         NkIsoReader *reader = nk_iso_reader_open(argv[2]);
-        if (!reader) {{
+        if (!reader) {
             printf("READER:OPEN_FAILED\\n");
             return 0;
-        }}
+        }
         uint32_t lba = 0, sz = 0;
         bool is_dir = false;
         int rc = nk_iso_reader_lookup(reader, argv[3], &lba, &sz, &is_dir);
         printf("LOOKUP:%d:%u:%u:%d\\n", rc, (unsigned)lba, (unsigned)sz, is_dir ? 1 : 0);
         nk_iso_reader_close(reader);
         return 0;
-    }}
+    }
 
-    if (strcmp(mode, "entries") == 0) {{
+    if (strcmp(mode, "entries") == 0) {
         if (argc < 4) return 1;
         NkIsoReader *reader = nk_iso_reader_open(argv[2]);
-        if (!reader) {{
+        if (!reader) {
             printf("READER:OPEN_FAILED\\n");
             return 0;
-        }}
-        for (uint32_t index = 0;; index++) {{
+        }
+        for (uint32_t index = 0;; index++) {
             NkIsoDirEntry de;
             int rc = nk_iso_reader_list(reader, argv[3], index, &de);
-            if (rc != 1) {{
+            if (rc != 1) {
                 printf("END:%d\\n", rc);
                 break;
-            }}
+            }
             printf("ENTRY:%s:%u:%u:%d\\n", de.name, (unsigned)de.lba, (unsigned)de.size,
                    de.is_directory ? 1 : 0);
-        }}
+        }
         nk_iso_reader_close(reader);
         return 0;
-    }}
+    }
 
     return 2;
-}}
+}
 """
         cls.harness_c.write_text(harness_code, encoding="utf-8")
 
@@ -1057,13 +1055,6 @@ int main(int argc, char **argv) {{
 
     def tearDown(self) -> None:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        build_dir = getattr(cls, "_build_dir", None)
-        if build_dir is not None:
-            shutil.rmtree(build_dir, ignore_errors=True)
-        super().tearDownClass()
 
     def _run_native_inspect(self, iso_path: Path) -> dict[str, str]:
         cmd = [str(self.exe_path), "inspect", str(iso_path)]
@@ -3095,12 +3086,9 @@ int main(int argc, char **argv) {{
             self.assertEqual(nk_cli.cmd_build_package(args), 0)
             self.assertTrue(len(captured_commands) > 0)
             self.assertIn("--public-safe", captured_commands[0])
-            report = json.loads((user_root / "packages" / disc_id / "build-report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report.get("backends"), "public")
-            self.assertEqual(report.get("limits"), [
-                "Fonts: import your own PSP fonts; the public PGF reader is available for supported inputs.",
-                "PGD-protected data: unavailable; broader ISO-to-Play support is in the works.",
-            ])
+            # build-report.json here is the fake planner's own output, so reading it
+            # back proves nothing; test_production_smoke covers the real report. The
+            # completion manifest is written by cmd_build_package itself.
             completion = json.loads((user_root / "packages" / disc_id / "completion-manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(completion.get("backends"), "public")
             self.assertEqual(completion.get("limits"), [
@@ -3954,8 +3942,6 @@ int main(int argc, char **argv) {{
         with another title's session data. The stale artifact now must be
         irrelevant, and only the selected title's own build may resolve.
         """
-        if not (ROOT / "src" / "core" / "nk_launch.c").is_file():
-            self.skipTest("nk_launch.c not present in this slice")
         mock_root = self.temp_dir / "mock_repo"
         stale_dir = mock_root / "build" / "hst"
         stale_dir.mkdir(parents=True, exist_ok=True)

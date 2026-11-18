@@ -63,6 +63,10 @@ class IsolatedRunTests(unittest.TestCase):
         code, out = self._main("-c", stub, "SR_TEST_SETTINGS", "extra.ini", settings=True)
         self.assertEqual(code, 0, out)
         self.assertEqual(self.settings.read_text(), "a=1")
+        # The write must land beside the copy: an exported original path would put
+        # extra.ini beside the original and leave settings.ini itself unchanged.
+        self.assertFalse((self.settings.parent / "extra.ini").exists())
+        self.assertEqual(len(list(self.work.glob("isolated-*/settings0/extra.ini"))), 1)
 
     def test_write_to_original_fails_and_names_file(self) -> None:
         stub = "import pathlib; pathlib.Path(%r).write_bytes(b'bad')" % str(
