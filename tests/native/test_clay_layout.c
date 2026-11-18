@@ -21,11 +21,14 @@
 
 static int clay_error_count;
 static Clay_ErrorType clay_last_error;
+/* One bit per Clay_ErrorType seen since a test last cleared it. */
+static unsigned clay_errors_seen;
 
 static void record_clay_error(Clay_ErrorData error)
 {
     clay_error_count++;
     clay_last_error = error.errorType;
+    if ((unsigned)error.errorType < 32u) clay_errors_seen |= 1u << (unsigned)error.errorType;
     fprintf(stderr, "Clay error %d\n", (int)error.errorType);
 }
 
@@ -218,7 +221,9 @@ int main(void)
 
     /* A layout past the element limit fills the element-id map. The next
        layout, back under the limit, reuses the slots pruning freed and lays
-       out without an error. */
+       out without an error. The full map is reported, not dropped in silence. */
+    clay_error_count = 0;
+    clay_errors_seen = 0u;
     Clay_BeginLayout();
     for (int i = 0; i < Clay_GetMaxElementCount() + 16; ++i) {
         CLAY(CLAY_IDI("crowd", (uint32_t)i), {
@@ -227,6 +232,12 @@ int main(void)
         }) {}
     }
     (void)Clay_EndLayout(0.0f);
+    if ((clay_errors_seen & (1u << (unsigned)CLAY_ERROR_TYPE_HASH_MAP_CAPACITY_EXCEEDED)) == 0u) {
+        fprintf(stderr, "FAIL: a layout past the element limit did not report a full element-id "
+                        "map (errors=%d, last=%d)\n", clay_error_count, (int)clay_last_error);
+        free(memory);
+        return EXIT_FAILURE;
+    }
     clay_error_count = 0;
     Clay_BeginLayout();
     CLAY(CLAY_ID("after-crowd"), {
