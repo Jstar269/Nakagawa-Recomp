@@ -9147,6 +9147,85 @@ static int pcache_reopen_cell(const char *cell, VkPhysicalDevice pdev, const cha
     return 1;
 }
 
+/* pcache-shader-set: the cache file's shader-set key covers every SPIR-V module a cached pipeline
+ * is made from, the RMW fragment module (pipe_create's interlock pipelines, through the same
+ * s_pcache) included, so a build that changes that module alone refuses the old file. */
+static uint64_t coherence_shader_set_with(const uint32_t *rmw) {
+    uint64_t h = 0;
+    uint64_t n[4] = { sizeof(k_vert_spv), sizeof(k_frag_spv), sizeof(k_tnl_vert_spv), sizeof(k_frag_rmw_spv) };
+    h = nk_pcache_fnv1a64(h, n, sizeof n);
+    h = nk_pcache_fnv1a64(h, k_vert_spv, sizeof(k_vert_spv));
+    h = nk_pcache_fnv1a64(h, k_frag_spv, sizeof(k_frag_spv));
+    h = nk_pcache_fnv1a64(h, k_tnl_vert_spv, sizeof(k_tnl_vert_spv));
+    return nk_pcache_fnv1a64(h, rmw, sizeof(k_frag_rmw_spv));
+}
+
+static int coherence_run_pcache_shader_set(void) {
+    const char *name = "pcache-shader-set";
+    uint32_t *rmw = (uint32_t *)malloc(sizeof(k_frag_rmw_spv));
+    if (!rmw) return 0;
+    memcpy(rmw, k_frag_rmw_spv, sizeof(k_frag_rmw_spv));
+    rmw[sizeof(k_frag_rmw_spv) / sizeof(rmw[0]) - 1u] ^= 1u;   /* an RMW module of another build */
+    const uint64_t set = pcache_shader_set(), want = coherence_shader_set_with(k_frag_rmw_spv),
+                   other = coherence_shader_set_with(rmw);
+    free(rmw);
+    if (set != want || set == other) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL the shader set %016llx, over all four modules "
+                "%016llx, with another RMW module %016llx -- a build that changes the RMW fragment module "
+                "alone keeps the old cache key\n", name, (unsigned long long)set, (unsigned long long)want,
+                (unsigned long long)other);
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s the cache key covers the RMW fragment module\n", name);
+    return 1;
+}
+
+/* pipe-index: the pipeline cache's index finds every pipeline the run made, past its growths:
+ * 256 distinct keys each make one pipeline, a second lookup of each returns the same pipeline and
+ * makes none, and every entry is found where a scan of the cache finds it. */
+static int coherence_run_pipe_index(void) {
+    const char *name = "pipe-index";
+    enum { KEYS = 256 };
+    static VkPipeline made[KEYS];
+    int ok = 1, n1 = 0;
+    for (int pass = 0; pass < 2 && ok; pass++) {
+        int k = 0;
+        for (int cull = 0; cull < 4 && ok; cull++)
+            for (int cm = 0; cm < 16 && ok; cm++)
+                for (int zf = 0; zf < 4 && ok; zf++, k++) {
+                    PipeKey key;
+                    memset(&key, 0, sizeof key);
+                    key.cull = (uint8_t)cull; key.cmask = (uint8_t)cm; key.zfunc = (uint8_t)zf;
+                    const VkPipeline p = pipe_get(&key);
+                    if (!p || (pass && p != made[k])) {
+                        fprintf(stderr, "gpu coherence selftest [%s]: FAIL key %d, lookup %d: pipeline %p (first "
+                                "made %p)\n", name, k, pass + 1, (void *)p, pass ? (void *)made[k] : NULL);
+                        ok = 0;
+                    }
+                    if (!pass) made[k] = p;
+                }
+        if (!pass) n1 = s_pipe_n;
+        else if (ok && s_pipe_n != n1) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the second lookups made %d pipelines again\n",
+                    name, s_pipe_n - n1);
+            ok = 0;
+        }
+    }
+    for (int i = 0; ok && i < s_pipe_n; i++) {
+        int scan = -1;
+        for (int j = 0; j < s_pipe_n && scan < 0; j++)
+            if (!memcmp(&s_pipes[j].key, &s_pipes[i].key, sizeof(PipeKey))) scan = j;
+        const int found = pipe_index_find(&s_pipe_idx, s_pipes, s_pipe_n, &s_pipes[i].key);
+        if (found != scan) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL entry %d found at %d by the index, %d by a scan\n",
+                    name, i, found, scan);
+            ok = 0;
+        }
+    }
+    if (ok) printf("gpu coherence selftest: PASS %s %d pipelines, each found again by the index\n", name, s_pipe_n);
+    return ok;
+}
+
 static int coherence_run_pipeline_cache_reject(void) {
     const char *name = "pipeline-cache-reject";
     Sdl3VkInfo vi;
@@ -9364,6 +9443,31 @@ void gegpu_selftest_ssaa_limits(unsigned long long budget_bytes, unsigned max_di
 
 void gegpu_selftest_init_fail(int on) {
     s_selftest_init_fail = on ? 1 : 0;
+}
+
+int gegpu_selftest_init_left(void) {
+    int n = 0;
+    n += s_pool != VK_NULL_HANDLE; n += s_rp != VK_NULL_HANDLE; n += s_rp_rmw != VK_NULL_HANDLE;
+    n += s_dlayout != VK_NULL_HANDLE; n += s_dst_dlayout != VK_NULL_HANDLE; n += s_tnl_dlayout != VK_NULL_HANDLE;
+    n += s_rmw_dlayout != VK_NULL_HANDLE; n += s_playout != VK_NULL_HANDLE; n += s_playout_rmw != VK_NULL_HANDLE;
+    n += s_dpool_tex != VK_NULL_HANDLE; n += s_dpool_fix != VK_NULL_HANDLE; n += s_tnl_dpool != VK_NULL_HANDLE;
+    n += s_dpool_rmw != VK_NULL_HANDLE; n += s_rmw_zbuf != VK_NULL_HANDLE; n += s_rmw_zbuf_mem != VK_NULL_HANDLE;
+    n += s_vs != VK_NULL_HANDLE; n += s_fs != VK_NULL_HANDLE; n += s_fs_rmw != VK_NULL_HANDLE;
+    n += s_vs_tnl != VK_NULL_HANDLE; n += s_snapimg != VK_NULL_HANDLE; n += s_snapimg_mem != VK_NULL_HANDLE;
+    n += s_snap_view != VK_NULL_HANDLE; n += s_dst_set != VK_NULL_HANDLE; n += s_white != VK_NULL_HANDLE;
+    n += s_white_mem != VK_NULL_HANDLE; n += s_white_view != VK_NULL_HANDLE; n += s_white_smp != VK_NULL_HANDLE;
+    n += s_white_set != VK_NULL_HANDLE; n += s_xfer != VK_NULL_HANDLE; n += s_xfer_m != VK_NULL_HANDLE;
+    for (unsigned i = 0; i < TEX_FILTER_VARIANTS; i++) {
+        n += s_smp[i] != VK_NULL_HANDLE;
+        n += s_snap_set[i] != VK_NULL_HANDLE;
+    }
+    for (int i = 0; i < SUBMIT_FRAMES; i++)
+        n += s_submit[i].fence != VK_NULL_HANDLE || s_submit[i].vbuf != VK_NULL_HANDLE ||
+             s_submit[i].vbuf_mem != VK_NULL_HANDLE || s_submit[i].xfer != VK_NULL_HANDLE;
+    for (int i = 0; i < READBACK_FRAMES; i++)
+        n += s_readback[i].fence != VK_NULL_HANDLE || s_readback[i].buf != VK_NULL_HANDLE ||
+             s_readback[i].mem != VK_NULL_HANDLE;
+    return n;
 }
 
 /* Signed distance, in guest pixels, from (x, y) to the triangle's diagonal edge x / 480 + y / 272 = 1,
@@ -15761,6 +15865,29 @@ static int coherence_run_tex_evict_fail(void) {
             ok = 0;
         }
     }
+    /* Entries used again out of slot order, so the least recently used are not the first slots. */
+    for (uint32_t j = 0; ok && j < MAX_TEX / 2; j++) {
+        const uint32_t addr = AUD_TEX + ((j * 37u) % MAX_TEX) * 256u;
+        s_ge->tex_addr = s_ge->tex_mip_addr[0] = addr;
+        const int n0 = s_tex_n;
+        if (tex_get() == s_white_set || s_tex_n != n0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL texture %08x was not found again\n", name, addr);
+            ok = 0;
+        }
+        if (s_nbatch) (void)submit_pending();
+    }
+    /* The eviction's result, from a minimum scan per victim with the last slot moved into it. */
+    static uint32_t want_addr[MAX_TEX];
+    static uint64_t want_lru[MAX_TEX];
+    int want_n = s_tex_n;
+    for (int t = 0; t < want_n; t++) { want_addr[t] = s_tex[t].addr; want_lru[t] = s_tex[t].lru; }
+    for (int r = 0; r < MAX_TEX / 4 && want_n > 0; r++) {
+        int v = 0;
+        for (int t = 1; t < want_n; t++)
+            if (want_lru[t] < want_lru[v]) v = t;
+        want_n--;
+        want_addr[v] = want_addr[want_n]; want_lru[v] = want_lru[want_n];
+    }
     if (ok) {   /* the drain works again: the next miss evicts a quarter and caches */
         const uint32_t addr = AUD_TEX + i++ * 256u;
         coherence_fill_raw((uint8_t *)SR_HOST(addr), 64u, 4u, 0xFF405060u);
@@ -15771,6 +15898,27 @@ static int coherence_run_tex_evict_fail(void) {
             fprintf(stderr, "gpu coherence selftest [%s]: FAIL the lookup after the failure: white=%d "
                     "entries=%d (want %d)\n", name, set == s_white_set, s_tex_n, MAX_TEX - MAX_TEX / 4 + 1);
             ok = 0;
+        }
+        int moved = -1;
+        for (int t = 0; ok && t < want_n; t++)
+            if (s_tex[t].addr != want_addr[t]) { moved = t; break; }
+        if (ok && (moved >= 0 || s_tex[want_n].addr != addr)) {
+            fprintf(stderr, "gpu coherence selftest [%s]: FAIL the eviction left slot %d holding %08x (want "
+                    "%08x): not the least recently used quarter, swap-removed oldest first\n", name,
+                    moved >= 0 ? moved : want_n, moved >= 0 ? s_tex[moved].addr : s_tex[want_n].addr,
+                    moved >= 0 ? want_addr[moved] : addr);
+            ok = 0;
+        }
+        /* Every entry the eviction kept or moved is found again, none made twice. */
+        for (int t = 0; ok && t < s_tex_n; t++) {
+            s_ge->tex_addr = s_ge->tex_mip_addr[0] = s_tex[t].addr;
+            const int n0 = s_tex_n;
+            if (tex_get() == s_white_set || s_tex_n != n0) {
+                fprintf(stderr, "gpu coherence selftest [%s]: FAIL slot %d (%08x) after the eviction: entries "
+                        "%d (want %d) -- the lookup did not find it\n", name, t, s_tex[t].addr, s_tex_n, n0);
+                ok = 0;
+            }
+            if (s_nbatch) (void)submit_pending();
         }
     }
     if (s_nbatch) (void)submit_pending();
@@ -16515,6 +16663,8 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "depth-view-dirty") == 0) return coherence_run_depth_view_dirty();
         if (strcmp(only, "xfer-stride") == 0) return coherence_run_xfer_stride();
         if (strcmp(only, "tex-make-fail") == 0) return coherence_run_tex_make_fail();
+        if (strcmp(only, "pcache-shader-set") == 0) return coherence_run_pcache_shader_set();
+        if (strcmp(only, "pipe-index") == 0) return coherence_run_pipe_index();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
@@ -16581,6 +16731,8 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_depth_view_dirty()) ok = 0;
     if (!coherence_run_xfer_stride()) ok = 0;
     if (!coherence_run_tex_make_fail()) ok = 0;
+    if (!coherence_run_pcache_shader_set()) ok = 0;
+    if (!coherence_run_pipe_index()) ok = 0;
     if (!coherence_run_fallback_reasons()) ok = 0;
     /* Last: its chain-fallback case draws through the software fallback, which hands the
      * current depth surface to ge.c, and the fixtures above start from the depth state the

@@ -12,9 +12,10 @@
  *
  * Architecture: ge.c keeps doing vertex decode + T&L + clipping + primitive acceptance
  * (the parts validated against PPSSPP), then hands SCREEN-SPACE primitives to this
- * backend through the GeGpuHooks seam. Every primitive renders on the GPU — there is no
- * software-rasterizer fallback; unmappable blend modes are approximated (see
- * build_state). GE framebuffers are PERSISTENT GPU images (color RGBA8 + shared D16
+ * backend through the GeGpuHooks seam. Primitives render on the GPU, except the states it
+ * cannot draw exactly (gpu_state_unsupported_reason, points, textured lines): those go to
+ * ge.c's software rasterizer, counted by reason (GEGPU_FALLBACK_*); unmappable blend modes
+ * are approximated (see build_state). GE framebuffers are PERSISTENT GPU images (color RGBA8 + shared D16
  * depth keyed by zbp): no guest-VRAM upload/readback per flush. Guest VRAM is read only
  * when a target is first created (or invalidated by a CPU write: movie decode, DMA),
  * and written only on the rare paths that genuinely consume it (CLUT load from VRAM,
@@ -83,8 +84,8 @@
  *  - Write masks: a channel whose native bits are all masked or all written maps to the
  *    colour write mask; any other mask (and in clear mode an alpha mask that is not) falls
  *    back to ge.c (gpu_state_unsupported_reason).
- *  - Approximated (no software fallback): untextured lines (1px quads, not DDA). Points and
- *    textured lines fall back to ge.c.
+ *  - Lines: an untextured line runs ge.c draw_line_vtx's DDA here and draws its pixels as
+ *    one-pixel quads (hook_line). Points and textured lines fall back to ge.c.
  *  - Render scale (default 1): SR_RESOLUTION_SCALE carries the player's Settings >
  *    Internal Render Resolution choice (1..4); SR_GPU_SCALE overrides it as an
  *    explicit diagnostic (sr_parse_render_scale in ge_gpu.h). Targets/depth/snapshot images are
@@ -2057,14 +2058,17 @@ static int pcache_mode_parse(const char *v) {
     return -1;
 }
 
-/* The shader set the cache was made for: the renderer's SPIR-V modules, as embedded. */
+/* The shader set the cache was made for: every SPIR-V module a cached pipeline is made from, as
+ * embedded. The RMW fragment module (pipe_create's interlock pipelines) goes through the same
+ * cache, so it is in the set too. */
 static uint64_t pcache_shader_set(void) {
     uint64_t h = 0;
-    uint64_t n[3] = { sizeof(k_vert_spv), sizeof(k_frag_spv), sizeof(k_tnl_vert_spv) };
+    uint64_t n[4] = { sizeof(k_vert_spv), sizeof(k_frag_spv), sizeof(k_tnl_vert_spv), sizeof(k_frag_rmw_spv) };
     h = nk_pcache_fnv1a64(h, n, sizeof n);
     h = nk_pcache_fnv1a64(h, k_vert_spv, sizeof(k_vert_spv));
     h = nk_pcache_fnv1a64(h, k_frag_spv, sizeof(k_frag_spv));
-    return nk_pcache_fnv1a64(h, k_tnl_vert_spv, sizeof(k_tnl_vert_spv));
+    h = nk_pcache_fnv1a64(h, k_tnl_vert_spv, sizeof(k_tnl_vert_spv));
+    return nk_pcache_fnv1a64(h, k_frag_rmw_spv, sizeof(k_frag_rmw_spv));
 }
 
 /* How much data the driver's cache holds now (0 if it cannot say). */
@@ -2360,16 +2364,65 @@ static VkPipeline pipe_create(const PipeKey *k, int rmw) {
     return p;
 }
 
+/* A pipeline cache's index: open addressing over FNV-1a of the key, each slot an entry number + 1
+ * (0: empty), its capacity a power of two at least twice the slots it holds, so a lookup costs a
+ * few key compares however many pipelines the run has made. A slot names an entry by number and
+ * a hit compares that entry's key, so a slot left by entries dropped from the cache only costs a
+ * probe; the next growth rebuilds the index from the entries alone. */
+typedef struct { int *slot; uint32_t cap, used; } PipeIndex;
+static PipeIndex s_pipe_idx, s_rmw_pipe_idx[2];
+
+static uint32_t pipe_key_hash(const PipeKey *k) {
+    const uint64_t h = nk_pcache_fnv1a64(0, k, sizeof(*k));
+    return (uint32_t)(h ^ (h >> 32));
+}
+
+static int pipe_index_find(const PipeIndex *ix, const PipeEnt *ents, int n, const PipeKey *k) {
+    if (!ix->cap) return -1;
+    const uint32_t mask = ix->cap - 1u;
+    for (uint32_t i = pipe_key_hash(k) & mask, probes = 0; probes < ix->cap; i = (i + 1u) & mask, probes++) {
+        const int s = ix->slot[i];
+        if (!s) return -1;
+        if (s <= n && !memcmp(&ents[s - 1].key, k, sizeof(*k))) return s - 1;
+    }
+    return -1;
+}
+
+static void pipe_index_put(PipeIndex *ix, const PipeKey *k, int entry) {
+    const uint32_t mask = ix->cap - 1u;
+    uint32_t i = pipe_key_hash(k) & mask;
+    while (ix->slot[i]) i = (i + 1u) & mask;
+    ix->slot[i] = entry + 1;
+    ix->used++;
+}
+
+/* Room for one more slot; 0 when the index cannot grow (the caller makes no pipeline). */
+static int pipe_index_reserve(PipeIndex *ix, const PipeEnt *ents, int n) {
+    if (ix->cap && (ix->used + 1u) * 2u <= ix->cap) return 1;
+    uint32_t cap = 64u;
+    while (cap < ((uint32_t)n + 1u) * 2u) cap *= 2u;
+    int *slot = (int *)calloc(cap, sizeof(*slot));
+    if (!slot) return 0;
+    free(ix->slot);
+    ix->slot = slot; ix->cap = cap; ix->used = 0;
+    for (int i = 0; i < n; i++) pipe_index_put(ix, &ents[i].key, i);
+    return 1;
+}
+
+static void pipe_index_free(PipeIndex *ix) {
+    free(ix->slot);
+    ix->slot = NULL; ix->cap = ix->used = 0;
+}
+
 static VkPipeline pipe_get(const PipeKey *k) {
     uint64_t profile_started = cpu_profile_now();
-    for (int i = 0; i < s_pipe_n; i++) {
-        if (!memcmp(&s_pipes[i].key, k, sizeof(*k))) {
-            if (s_cpu_profile) {
-                s_cpu_profile_stats.pipeline_hits++;
-                cpu_profile_add(GEGPU_CPU_PIPELINE_LOOKUP, profile_started);
-            }
-            return s_pipes[i].pipe;
+    const int hit = pipe_index_find(&s_pipe_idx, s_pipes, s_pipe_n, k);
+    if (hit >= 0) {
+        if (s_cpu_profile) {
+            s_cpu_profile_stats.pipeline_hits++;
+            cpu_profile_add(GEGPU_CPU_PIPELINE_LOOKUP, profile_started);
         }
+        return s_pipes[hit].pipe;
     }
     if (s_cpu_profile) {
         s_cpu_profile_stats.pipeline_misses++;
@@ -2384,9 +2437,12 @@ static VkPipeline pipe_get(const PipeKey *k) {
         s_pipes = grown;
         s_pipe_cap = cap;
     }
+    if (!pipe_index_reserve(&s_pipe_idx, s_pipes, s_pipe_n)) return VK_NULL_HANDLE;
     VkPipeline p = pipe_create(k, 0);
     if (!p) return VK_NULL_HANDLE;
-    s_pipes[s_pipe_n].key = *k; s_pipes[s_pipe_n].pipe = p; s_pipe_n++;
+    s_pipes[s_pipe_n].key = *k; s_pipes[s_pipe_n].pipe = p;
+    pipe_index_put(&s_pipe_idx, k, s_pipe_n);
+    s_pipe_n++;
     return p;
 }
 
@@ -2394,8 +2450,8 @@ static VkPipeline pipe_get(const PipeKey *k) {
  * the shader tests and writes depth, record_rmw_range). */
 static VkPipeline pipe_get_rmw(const PipeKey *k, int zshader) {
     const int m = zshader ? 1 : 0;
-    for (int i = 0; i < s_rmw_pipe_n[m]; i++)
-        if (!memcmp(&s_rmw_pipes[m][i].key, k, sizeof(*k))) return s_rmw_pipes[m][i].pipe;
+    const int hit = pipe_index_find(&s_rmw_pipe_idx[m], s_rmw_pipes[m], s_rmw_pipe_n[m], k);
+    if (hit >= 0) return s_rmw_pipes[m][hit].pipe;
     if (s_rmw_pipe_n[m] == s_rmw_pipe_cap[m]) {
         int cap = s_rmw_pipe_cap[m] ? s_rmw_pipe_cap[m] * 2 : 16;
         PipeEnt *grown = (PipeEnt *)realloc(s_rmw_pipes[m], (size_t)cap * sizeof(*grown));
@@ -2403,9 +2459,12 @@ static VkPipeline pipe_get_rmw(const PipeKey *k, int zshader) {
         s_rmw_pipes[m] = grown;
         s_rmw_pipe_cap[m] = cap;
     }
+    if (!pipe_index_reserve(&s_rmw_pipe_idx[m], s_rmw_pipes[m], s_rmw_pipe_n[m])) return VK_NULL_HANDLE;
     VkPipeline p = pipe_create(k, 1 + m);
     if (!p) return VK_NULL_HANDLE;
-    s_rmw_pipes[m][s_rmw_pipe_n[m]].key = *k; s_rmw_pipes[m][s_rmw_pipe_n[m]].pipe = p; s_rmw_pipe_n[m]++;
+    s_rmw_pipes[m][s_rmw_pipe_n[m]].key = *k; s_rmw_pipes[m][s_rmw_pipe_n[m]].pipe = p;
+    pipe_index_put(&s_rmw_pipe_idx[m], k, s_rmw_pipe_n[m]);
+    s_rmw_pipe_n[m]++;
     return p;
 }
 
@@ -4919,6 +4978,77 @@ static void tex_hm_free(TexEnt *e) {
     e->hm_levels = 0u;
 }
 
+/* tex_get's index over the cache: open addressing on the entry key, each slot an entry number + 1
+ * (0: empty), at most half full, so a lookup costs a few compares however full the cache is. A
+ * slot names an entry by number and a hit compares that entry's whole identity, so a slot left
+ * by an entry that went only costs a probe; eviction, which moves entries, rebuilds the index. */
+#define TEX_IDX_BITS 11
+#define TEX_IDX_CAP (1u << TEX_IDX_BITS)
+_Static_assert(TEX_IDX_CAP >= 2u * MAX_TEX, "the texture index stays at most half full");
+static int s_tex_idx[TEX_IDX_CAP];
+static uint32_t s_tex_idx_used;
+
+static uint32_t tex_index_home(uint64_t key) {
+    return (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> (64 - TEX_IDX_BITS));
+}
+
+static void tex_index_put_raw(int entry) {
+    uint32_t i = tex_index_home(s_tex[entry].key);
+    while (s_tex_idx[i]) i = (i + 1u) & (TEX_IDX_CAP - 1u);
+    s_tex_idx[i] = entry + 1;
+    s_tex_idx_used++;
+}
+
+static void tex_index_rebuild(void) {
+    memset(s_tex_idx, 0, sizeof s_tex_idx);
+    s_tex_idx_used = 0;
+    for (int i = 0; i < s_tex_n; i++) tex_index_put_raw(i);
+}
+
+/* Index s_tex[entry], the entry tex_get is adding at s_tex_n. */
+static void tex_index_put(int entry) {
+    if (s_tex_idx_used + 1u > TEX_IDX_CAP / 2u) tex_index_rebuild();   /* drops the slots left behind */
+    tex_index_put_raw(entry);
+}
+
+/* The entry for the current texture state: its key, level 0's address and buffer width (the key
+ * folds the width into the address bits, so two textures can share it), and the mip key. */
+static TexEnt *tex_index_find(uint64_t key, const TexMipKey *mip) {
+    uint32_t i = tex_index_home(key);
+    for (uint32_t probes = 0; probes < TEX_IDX_CAP; probes++, i = (i + 1u) & (TEX_IDX_CAP - 1u)) {
+        const int s = s_tex_idx[i];
+        if (!s) return NULL;
+        if (s > s_tex_n) continue;
+        TexEnt *e = &s_tex[s - 1];
+        if (e->key == key && e->addr == s_ge->tex_addr && e->bufw == s_ge->tex_bufw &&
+            memcmp(&e->mip, mip, sizeof(*mip)) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+/* Every object a cache entry holds, released once the GPU's work is retired (eviction, shutdown).
+ * A handle the entry never made is skipped. */
+static void tex_entry_free(TexEnt *e) {
+    tex_shadow_release(e);
+    if (e->set) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set);
+    if (e->smp) vkDestroySampler(s_dev, e->smp, NULL);
+    if (e->set_af) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set_af);
+    if (e->smp_af) vkDestroySampler(s_dev, e->smp_af, NULL);
+    tex_hm_free(e);
+    if (e->view) vkDestroyImageView(s_dev, e->view, NULL);
+    if (e->img) vkDestroyImage(s_dev, e->img, NULL);
+    if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
+    tex_xs_free(e);
+    tex_gl_free(e);
+}
+
+/* qsort order for tex_evict_lru: cache slots by their use stamp, oldest first. */
+static int tex_lru_order(const void *a, const void *b) {
+    const uint64_t la = s_tex[*(const int *)a].lru, lb = s_tex[*(const int *)b].lru;
+    return la < lb ? -1 : la > lb;
+}
+
 #ifdef SR_GPU_COHERENCE_SELFTEST
 /* The coherence selftest's tex-evict-fail cell: the next eviction's drain reports a failure. */
 static int s_selftest_tex_evict_drain_fail = 0;
@@ -4934,25 +5064,23 @@ static int tex_evict_lru(void) {
     if (s_selftest_tex_evict_drain_fail) { s_selftest_tex_evict_drain_fail = 0; drained = 0; }
 #endif
     if (!drained) return 0;
-    int goal = s_tex_n - MAX_TEX / 4;
-    while (s_tex_n > goal) {
-        int v = 0;
-        for (int i = 1; i < s_tex_n; i++)
-            if (s_tex[i].lru < s_tex[v].lru) v = i;
-        TexEnt *e = &s_tex[v];
-        tex_shadow_release(e);
-        vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set);
-        vkDestroySampler(s_dev, e->smp, NULL);
-        if (e->set_af) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set_af);
-        if (e->smp_af) vkDestroySampler(s_dev, e->smp_af, NULL);
-        tex_hm_free(e);
-        vkDestroyImageView(s_dev, e->view, NULL);
-        vkDestroyImage(s_dev, e->img, NULL);
-        vkFreeMemory(s_dev, e->mem, NULL);
-        tex_xs_free(e);
-        tex_gl_free(e);
-        *e = s_tex[--s_tex_n];
+    /* The MAX_TEX/4 least recently used entries go, oldest first, each swap-removed (the last
+     * entry moves into its slot). The stamps are unique (s_texlru++), so one sort picks the
+     * victims, in the order, and leaves the array, that a minimum scan per victim would. */
+    static int order[MAX_TEX], slot_rank[MAX_TEX], rank_slot[MAX_TEX / 4];
+    const int k = s_tex_n < MAX_TEX / 4 ? s_tex_n : MAX_TEX / 4;
+    for (int i = 0; i < s_tex_n; i++) { order[i] = i; slot_rank[i] = -1; }
+    qsort(order, (size_t)s_tex_n, sizeof(order[0]), tex_lru_order);
+    for (int r = 0; r < k; r++) { rank_slot[r] = order[r]; slot_rank[order[r]] = r; }
+    for (int r = 0; r < k; r++) {
+        const int v = rank_slot[r], last = s_tex_n - 1;
+        tex_entry_free(&s_tex[v]);
+        s_tex[v] = s_tex[last];
+        slot_rank[v] = slot_rank[last];
+        if (slot_rank[v] >= 0) rank_slot[slot_rank[v]] = v;   /* a later victim moved into the slot */
+        s_tex_n--;
     }
+    tex_index_rebuild();
     return 1;
 }
 
@@ -6982,12 +7110,9 @@ static VkDescriptorSet tex_get(void) {
     uint64_t hash = tex_hash();
     if (mip.max_level) hash = tex_mip_hash(hash, &mip, mip_bytes);
     uint64_t lookup_started = cpu_profile_now();
-    for (int i = 0; i < s_tex_n; i++) {
-        TexEnt *e = &s_tex[i];
-        /* The key folds the buffer width into the address bits, so two textures can share it:
-         * level 0's address and width are compared as well, as the mip key compares the others'. */
-        if (e->key != key || e->addr != s_ge->tex_addr || e->bufw != s_ge->tex_bufw ||
-            memcmp(&e->mip, &mip, sizeof(mip)) != 0) continue;
+    TexEnt *const hit = tex_index_find(key, &mip);
+    if (hit) {
+        TexEnt *e = hit;
         cpu_profile_add(GEGPU_CPU_OBJECT_LOOKUP, lookup_started);
         if (s_cpu_profile) s_cpu_profile_stats.texture_hits++;
         e->lru = s_texlru++;
@@ -7078,6 +7203,7 @@ static VkDescriptorSet tex_get(void) {
     e->pending = 1;
     e->lru = s_texlru++;
     s_cnt_texup++;
+    tex_index_put(s_tex_n);
     s_tex_n++;
     tex_xs_note_upload(e, levels);   /* s_texscratch still holds level 0 when levels == 1 */
     tex_dump_note(e, levels);
@@ -7913,6 +8039,7 @@ static SnapRect s_tail_prims;
  * it on the same canvas. A stencil batch that reads its own writes is never merged. */
 static int stencil_depth_blind(const Batch *b);
 static void depth_blind_pair(const Batch *b, Batch *colour, Batch *stencil);
+static int batch_extends(const Batch *last, const Batch *b, uint32_t first);
 
 static void append_wing(Batch *b, uint32_t first, uint32_t count) {
     if (b->sw <= 0 || count == 0) return;
@@ -7929,11 +8056,7 @@ static void append_wing(Batch *b, uint32_t first, uint32_t count) {
     }
     if (s_nwbatch && s_wbatch_w[s_nwbatch - 1] == s_wing_dst && !stencil_reads_own_writes(b)) {
         Batch *last = &s_wbatch[s_nwbatch - 1];
-        if (last->first + last->count == first &&
-            !memcmp(&last->key, &b->key, sizeof(b->key)) &&
-            last->sx == b->sx && last->sy == b->sy && last->sw == b->sw && last->sh == b->sh &&
-            !memcmp(last->bconst, b->bconst, sizeof(b->bconst)) &&
-            !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset) {
+        if (batch_extends(last, b, first)) {
             last->count += count;
             return;
         }
@@ -8447,6 +8570,14 @@ static int wing_state(int persp, int sprite, int soft_ctest, Batch *b) {
     return 1;
 }
 
+/* nk_smart2d_triangle on a screen-space triangle: its texels map one to one onto pixel centres. */
+static int tri_onetoone(const GeVtx *A, const GeVtx *B, const GeVtx *C) {
+    const float x[3] = { A->x, B->x, C->x }, y[3] = { A->y, B->y, C->y };
+    const float u[3] = { A->u, B->u, C->u }, v[3] = { A->v, B->v, C->v };
+    const float rw[3] = { A->rw, B->rw, C->rw };
+    return nk_smart2d_triangle(x, y, u, v, rw);
+}
+
 static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
     if (!s_ready) return 0;
     cpu_profile_hook_enter();
@@ -8480,18 +8611,15 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
         s_tri_state.batch = b;
     }
     const int movie = movie_draw_samples(&b);   /* before smart 2D or a 1:1 draw rebinds the set */
+    int onetoone = -1;   /* tri_onetoone's verdict, taken once: unknown until a candidate needs it */
     if (hm_level0_candidate(&b)) {
-        const float x[3] = { A->x, B->x, C->x }, y[3] = { A->y, B->y, C->y };
-        const float u[3] = { A->u, B->u, C->u }, v[3] = { A->v, B->v, C->v };
-        const float rw[3] = { A->rw, B->rw, C->rw };
-        if (nk_smart2d_triangle(x, y, u, v, rw)) hm_level0_apply(&b);
+        onetoone = tri_onetoone(A, B, C);
+        if (onetoone) hm_level0_apply(&b);
     }
-    const int s2d = smart2d_candidate(&b), xs1 = xs_onetoone_candidate(&b);
+    const int s2d = smart2d_candidate(&b), xs1 = xs_onetoone_candidate(&b);   /* after hm_level0_apply */
     if (s2d || xs1) {
-        const float x[3] = { A->x, B->x, C->x }, y[3] = { A->y, B->y, C->y };
-        const float u[3] = { A->u, B->u, C->u }, v[3] = { A->v, B->v, C->v };
-        const float rw[3] = { A->rw, B->rw, C->rw };
-        if (nk_smart2d_triangle(x, y, u, v, rw)) {
+        if (onetoone < 0) onetoone = tri_onetoone(A, B, C);
+        if (onetoone) {
             if (s2d) smart2d_apply(&b);
             if (xs1) xs_onetoone_plain(&b);
         }
@@ -9704,7 +9832,11 @@ static void tex_xs_report(void) {
     nk_tex_scale_report();
 }
 
-int gegpu_init(void) {
+static void gegpu_release(void);
+
+/* Every step of gegpu_init; 0 at the first that fails, with what the steps before it made still
+ * held (gegpu_init releases it). */
+static int gegpu_init_parts(void) {
     Sdl3VkInfo vi;
     if (!sdl3vk_get_vk(&vi)) { fprintf(stderr, "gegpu: sdl3vk not initialized\n"); return 0; }
     s_pdev  = (VkPhysicalDevice)vi.physical;
@@ -10192,7 +10324,8 @@ int gegpu_init(void) {
     if (s_depth32) ace_confirm(ACE_FEATURE_DEPTH);   /* ... and the one that tests at 32 bits */
     s_ready = 1;
     ge_set_gpu_hooks(&k_hooks);
-    fprintf(stderr, "gegpu: full GPU GE active (persistent targets, %s, no software fallback)\n",
+    fprintf(stderr, "gegpu: full GPU GE active (persistent targets, %s, states it cannot draw go to the "
+                    "software rasterizer, counted by reason)\n",
             s_async_submit ? "8-slot async render/snapshot batching" : "exact synchronous submits");
     if (s_cpu_profile)
         fprintf(stderr, "gegpu: aggregate CPU profiling enabled\n");
@@ -10208,6 +10341,18 @@ int gegpu_init(void) {
                     s_submit_batch_ops);
     }
     return 1;
+}
+
+int gegpu_init(void) {
+    s_dev = VK_NULL_HANDLE;   /* set by the first step, once sdl3vk lends its device */
+    if (gegpu_init_parts()) return 1;
+    /* A failed init leaves nothing behind (the host falls back to the software renderer and
+     * sdl3vk later destroys the device): what its steps made goes once the device is idle. */
+    if (s_dev) {
+        (void)vkDeviceWaitIdle(s_dev);
+        gegpu_release();
+    }
+    return 0;
 }
 
 void gegpu_shutdown(void) {
@@ -10245,7 +10390,12 @@ void gegpu_shutdown(void) {
     s_ts_unavailable = 0;
     ge_set_gpu_hooks(NULL);
     s_ready = 0;
+    gegpu_release();
+}
 
+/* Releases every object gegpu_init's steps make, once the device has retired its work: at
+ * shutdown, and after an init that failed part way (a handle never made is skipped). */
+static void gegpu_release(void) {
     for (int i = 0; i < MAX_WING; i++) wing_release(&s_wings[i]);
     if (s_cnt_wide_present)
         fprintf(stderr, "gegpu: Fill presented %lu pictures, %lu of them with black wings\n",
@@ -10262,21 +10412,9 @@ void gegpu_shutdown(void) {
         twin_depth_free(d);
         memset(d, 0, sizeof(*d));
     }
-    for (int i = 0; i < s_tex_n; i++) {
-        TexEnt *e = &s_tex[i];
-        tex_shadow_release(e);
-        if (e->set) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set);
-        if (e->smp) vkDestroySampler(s_dev, e->smp, NULL);
-        if (e->set_af) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set_af);
-        if (e->smp_af) vkDestroySampler(s_dev, e->smp_af, NULL);
-        tex_hm_free(e);
-        if (e->view) vkDestroyImageView(s_dev, e->view, NULL);
-        if (e->img) vkDestroyImage(s_dev, e->img, NULL);
-        if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
-        tex_xs_free(e);
-        tex_gl_free(e);
-    }
+    for (int i = 0; i < s_tex_n; i++) tex_entry_free(&s_tex[i]);
     s_tex_n = 0;
+    tex_index_rebuild();
     s_submit_done = s_submit_serial;   /* the device is idle: every retired copy can go */
     tex_xs_retire_collect();
     tex_hm_shutdown();
@@ -10285,10 +10423,8 @@ void gegpu_shutdown(void) {
         s_glyphs_asked = s_glyphs = 0;
     }
     tex_dump_shutdown();   /* its exit line; nothing else depends on it */
-    const int had_repl = s_repl != NULL, had_soft = s_soft_on;
     tex_repl_shutdown();   /* the exit line, the pack closed; the scaled-copy machinery it used goes next */
     tex_soft_shutdown();
-    if ((had_repl || had_soft) && !s_xs_factor && !s_xs_smart2d) nk_tex_scale_shutdown();
     if (s_xs_factor || s_xs_smart2d) {
         nk_tex_scale_shutdown();
         tex_xs_report();
@@ -10302,12 +10438,14 @@ void gegpu_shutdown(void) {
     free(s_pipes);
     s_pipes = NULL;
     s_pipe_cap = 0;
+    pipe_index_free(&s_pipe_idx);
     for (int m = 0; m < 2; m++) {
         for (int i = 0; i < s_rmw_pipe_n[m]; i++)
             if (s_rmw_pipes[m][i].pipe) vkDestroyPipeline(s_dev, s_rmw_pipes[m][i].pipe, NULL);
         free(s_rmw_pipes[m]);
         s_rmw_pipes[m] = NULL;
         s_rmw_pipe_n[m] = s_rmw_pipe_cap[m] = 0;
+        pipe_index_free(&s_rmw_pipe_idx[m]);
     }
     if (s_fs_rmw) vkDestroyShaderModule(s_dev, s_fs_rmw, NULL);
     s_fs_rmw = VK_NULL_HANDLE;
@@ -10389,6 +10527,16 @@ void gegpu_shutdown(void) {
     s_rmw_zbuf = VK_NULL_HANDLE; s_rmw_zbuf_mem = VK_NULL_HANDLE; s_rmw_zbuf_size = 0;
     s_dst_interlock = 0;
     if (s_pool) vkDestroyCommandPool(s_dev, s_pool, NULL);
+    /* Nothing names a released object any more: a later init (or its failure) starts clean. */
+    s_pool = VK_NULL_HANDLE; s_rp = VK_NULL_HANDLE; s_playout = VK_NULL_HANDLE; s_dlayout = VK_NULL_HANDLE;
+    s_dpool_tex = VK_NULL_HANDLE; s_dpool_fix = VK_NULL_HANDLE; s_white_set = VK_NULL_HANDLE;
+    memset(s_snap_set, 0, sizeof s_snap_set);
+    s_vs = VK_NULL_HANDLE; s_fs = VK_NULL_HANDLE;
+    s_white_smp = VK_NULL_HANDLE; s_white_view = VK_NULL_HANDLE; s_white = VK_NULL_HANDLE;
+    s_white_mem = VK_NULL_HANDLE;
+    s_snap_view = VK_NULL_HANDLE; s_snapimg = VK_NULL_HANDLE; s_snapimg_mem = VK_NULL_HANDLE;
+    memset(s_smp, 0, sizeof s_smp);
+    s_xfer_map = NULL; s_xfer = VK_NULL_HANDLE; s_xfer_m = VK_NULL_HANDLE;
 
     s_cmd = VK_NULL_HANDLE;
     s_cmd_slot = NULL;

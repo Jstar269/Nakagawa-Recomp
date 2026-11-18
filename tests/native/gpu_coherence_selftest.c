@@ -360,8 +360,8 @@ int main(int argc, char **argv) {
     if (init_fail) {
         /* --init-fail (with --depth 32): gegpu_init fails after every part is set up, and a failed
          * init registers nothing (ge_gpu.h), so the Ace report's settle finds 32-bit depth never
-         * confirmed and reports it unavailable. The device stays up: the failed init's objects
-         * are not freed, and the process ends here. */
+         * confirmed and reports it unavailable. It also leaves no object behind: everything its
+         * steps made is released before it returns. */
         gegpu_selftest_init_fail(1);
         if (!sdl3vk_init("Nakagawa GPU coherence selftest")) {
             fprintf(stderr, "gpu coherence selftest: SKIP (Vulkan initialization unavailable)\n");
@@ -370,16 +370,18 @@ int main(int argc, char **argv) {
         }
         const int asked = g_ace_on && ace_effective()->depth;
         const int made = gegpu_init();
+        const int held = gegpu_selftest_init_left();
         ace_finish();
         const int left = ace_effective()->depth;
         free(arena);
-        if (!asked || made || left) {
+        if (!asked || made || left || held) {
             fprintf(stderr, "gpu coherence selftest: FAIL init-fail depth=32 asked=%d init made=%d, depth left "
-                    "on after the report=%d%s\n", asked, made, left,
-                    left ? " -- the failed init confirmed a part the software rasterizer stood in for" : "");
+                    "on after the report=%d%s, objects still held=%d%s\n", asked, made, left,
+                    left ? " -- the failed init confirmed a part the software rasterizer stood in for" : "", held,
+                    held ? " -- the failed init leaked what its steps made" : "");
             return 1;
         }
-        puts("gpu coherence selftest: PASS init-fail a failed init confirmed no Ace part");
+        puts("gpu coherence selftest: PASS init-fail a failed init confirmed no Ace part and released every object");
         return 0;
     }
     if (!sdl3vk_init("Nakagawa GPU coherence selftest") || !gegpu_init()) {
