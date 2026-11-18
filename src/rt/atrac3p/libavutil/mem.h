@@ -674,13 +674,23 @@ void *av_dynarray2_add(void **tab_ptr, int *nb_ptr, size_t elem_size,
  */
 static inline int av_size_mult(size_t a, size_t b, size_t *r)
 {
-    size_t t = a * b;
-    /* Hack inspired from glibc: don't try the division if nelem and elsize
-     * are both less than sqrt(SIZE_MAX). */
-    if ((a | b) >= ((size_t)1 << (sizeof(size_t) * 4)) && a && t / a != b)
+    /* LOCAL DELTA (Nakagawa recomp, 2026-11-17): upstream n4.4 decides overflow
+     * with a glibc-inspired bit trick that only skips the division when both
+     * operands are below sqrt(SIZE_MAX), then compares t / a with b. The
+     * compiler's own overflow check decides every operand pair directly; the
+     * division is the portable fallback. See PROVENANCE.md. */
+#if (!defined(__INTEL_COMPILER) && AV_GCC_VERSION_AT_LEAST(5,1)) || AV_HAS_BUILTIN(__builtin_mul_overflow)
+    size_t t;
+    if (__builtin_mul_overflow(a, b, &t))
         return AVERROR(EINVAL);
     *r = t;
     return 0;
+#else
+    if (a && b > SIZE_MAX / a)
+        return AVERROR(EINVAL);
+    *r = a * b;
+    return 0;
+#endif
 }
 
 /**
