@@ -150,6 +150,7 @@ class _ReleaseLockState(Protocol):
     last_validated_py_lock: Path | None
     last_validated_toolchain_policy: dict[str, Any] | None
     last_validated_observed_toolchain: dict[str, Any] | None
+    last_resolved_python_metadata: generate_sbom.PythonArtifactMetadata | None
 
 
 def verify_release_locks(
@@ -164,6 +165,7 @@ def verify_release_locks(
     _release_lock_state.last_validated_py_lock = None
     _release_lock_state.last_validated_toolchain_policy = None
     _release_lock_state.last_validated_observed_toolchain = None
+    _release_lock_state.last_resolved_python_metadata = None
     errors: list[str] = []
     if not manifest_path.is_file():
         return [f"Release manifest file missing: {manifest_path}"]
@@ -174,6 +176,7 @@ def verify_release_locks(
         )
     except generate_sbom.LockfileParseError as exc:
         return [str(exc)]
+    _release_lock_state.last_resolved_python_metadata = python_artifact_metadata
 
     py_lock_path: Path | None = None
     toolchain_policy: dict | None = None
@@ -577,22 +580,30 @@ def verify_sbom_matches(
     release_index_path: Path = generate_sbom.PYTHON_RELEASE_INDEX_PATH,
     fetch_live_metadata: bool = False,
     metadata_timeout: float = 30.0,
+    python_artifact_metadata: generate_sbom.PythonArtifactMetadata | None = None,
 ) -> tuple[list[str], dict]:
-    """Verify the SPDX document against the exact Python lock inventory."""
+    """Verify the SPDX document against the exact Python lock inventory.
+
+    ``python_artifact_metadata`` is the release index ``verify_release_locks`` already
+    resolved; given, it is used instead of resolving (and with live metadata, fetching)
+    the same index again.
+    """
     errors: list[str] = []
     verified_digests: dict[str, str | None] = {"python": None}
     if not spdx_path.is_file():
-        return errors, verified_digests
+        return [f"SPDX SBOM missing or not a file: {spdx_path}"], verified_digests
     try:
         spdx_data = json.loads(spdx_path.read_text(encoding="utf-8"))
         manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
         errors.extend(verify_provenance_families(manifest_data))
         errors.extend(_spdx_root_version_errors(spdx_data, manifest_data))
         try:
-            metadata = generate_sbom.resolve_pypi_release_index(
-                release_index_path, fetch_live=fetch_live_metadata,
-                timeout=metadata_timeout,
-            )
+            metadata = python_artifact_metadata
+            if metadata is None:
+                metadata = generate_sbom.resolve_pypi_release_index(
+                    release_index_path, fetch_live=fetch_live_metadata,
+                    timeout=metadata_timeout,
+                )
             snapshot = generate_sbom.snapshot_lockfile(py_lock_path, "Python")
             verified_digests["python"] = snapshot.sha256
             py_packages = generate_sbom._parse_python_lock_text(snapshot, py_lock_path, metadata)
@@ -840,6 +851,7 @@ def main(argv: list[str] | None = None) -> int:
             release_index_path=args.release_index,
             fetch_live_metadata=args.fetch_live_metadata,
             metadata_timeout=args.metadata_timeout,
+            python_artifact_metadata=_release_lock_state.last_resolved_python_metadata,
         )
         errors.extend(match_errors)
     if args.spdx3 or args.cyclonedx:
@@ -867,6 +879,7 @@ def main(argv: list[str] | None = None) -> int:
         checked_items.append("SBOM elements")
         py_digest = verified_digests["python"]
         if py_digest is None:
+            print("SBOM Verification FAIL: no Python lockfile digest was verified", file=sys.stderr)
             return 1
         print(
             f"SBOM Verification: OK ({', '.join(checked_items)} verified)\n"

@@ -781,6 +781,31 @@ class CiPathAdversarialTests(unittest.TestCase):
         self.assertEqual(result["run_native"], "false")
         self.assertEqual(result["run_windows"], "false")
 
+    def test_helpers_the_code_generator_imports_route_the_native_gates(self) -> None:
+        """Failing-before: only name prefixes made a tool native, so an edit to
+        tools/entry_frame_balance.py (imported by codegen.py, a prerequisite of the generated
+        C in mk/pipeline.mk) or tools/elf_bounds.py (imported by analyze.py) ran the Python
+        gate alone."""
+
+        for path in ("tools/entry_frame_balance.py", "tools/elf_bounds.py"):
+            with self.subTest(path=path):
+                result = classify([path])
+                self.assertEqual(result["run_native"], "true")
+                self.assertEqual(result["run_windows"], "true")
+        # A tool outside the code generator's imports keeps the Python-only route.
+        result = classify(["tools/lint_docs.py"])
+        self.assertEqual(result["run_native"], "false")
+
+    def test_an_unreadable_code_generator_makes_every_tool_native(self) -> None:
+        ci_paths_module._codegen_import_closure.cache_clear()
+        try:
+            with patch.object(ci_paths_module, "ROOT", Path(tempfile.gettempdir()) / "ci-paths-no-tree"), \
+                    patch.object(ci_paths_module, "_tools_module_path", return_value="tools/codegen.py"):
+                self.assertIsNone(ci_paths_module._codegen_import_closure())
+                self.assertTrue(ci_paths_module._is_native_tool("tools/lint_docs.py"))
+        finally:
+            ci_paths_module._codegen_import_closure.cache_clear()
+
     def test_all_test_tools_follow_logical_subject_predicates(self) -> None:
         tools_root = Path(__file__).resolve().parent
         for test_path in sorted(tools_root.glob("test_*.py")):
@@ -1664,6 +1689,50 @@ class MakefileRecipeOnlyRoutingTests(unittest.TestCase):
         self.assertEqual(outputs["flag"]["python_scope"], "all")
         self.assertEqual(outputs["flag"]["build_system"], "true")
 
+    def test_a_fragment_the_makefile_does_not_inline_keeps_build_system_routing(self) -> None:
+        """Failing-before: only a bare ``include mk/x.mk`` was inlined. A fragment pulled in
+        any other way (``-include``, a trailing comment) left both inlined texts equal, so a
+        CFLAGS edit in it alone was routed as a recipe-only change."""
+
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+        def git(*args: str) -> str:
+            return subprocess.run(
+                ["git", "-c", "user.name=ci-paths-test", "-c", "user.email=ci-paths-test@invalid",
+                 "-c", "commit.gpgsign=false", *args],
+                cwd=repo, env=env, check=True, capture_output=True, text=True, encoding="utf-8",
+            ).stdout.strip()
+
+        for include in ("-include mk/flags.mk", "include mk/flags.mk  # compiler flags"):
+            with self.subTest(include=include), tempfile.TemporaryDirectory() as scratch:
+                repo = Path(scratch)
+                git("init", "-q")
+                (repo / "mk").mkdir()
+                (repo / "Makefile").write_text(f"{include}\n\nall:\n\techo ok\n", encoding="utf-8")
+                (repo / "mk" / "flags.mk").write_text("CFLAGS := -O2 -Wall\n", encoding="utf-8")
+                git("add", "Makefile", "mk/flags.mk")
+                git("commit", "-q", "-m", "base")
+                base = git("rev-parse", "HEAD")
+                (repo / "mk" / "flags.mk").write_text("CFLAGS := -O3 -Wall\n", encoding="utf-8")
+                git("commit", "-q", "-am", "flag")
+                head = git("rev-parse", "HEAD")
+                event = repo / "event.json"
+                event.write_text(json.dumps({"pull_request": {"base": {"sha": base}}}), encoding="utf-8")
+                github_output = repo / "flag.out"
+                with mock.patch.object(ci_paths_module, "ROOT", repo), \
+                        mock.patch.dict(os.environ, {"GITHUB_SHA": head}), \
+                        mock.patch("sys.stdout"):
+                    ci_paths_module.main([
+                        "--event-name", "pull_request", "--event-path", str(event),
+                        "--github-output", str(github_output),
+                    ])
+                outputs = dict(
+                    line.split("=", 1) for line in github_output.read_text(encoding="utf-8").splitlines()
+                )
+                self.assertEqual(outputs["makefile_recipe_only"], "false")
+                self.assertEqual(outputs["build_system"], "true")
+                self.assertEqual(outputs["python_scope"], "all")
+
     def test_missing_revision_fails_safe(self) -> None:
         with mock.patch.object(
             ci_paths_module.subprocess, "run", side_effect=subprocess.CalledProcessError(128, "git")
@@ -2457,6 +2526,29 @@ class CodeqlScopeTests(unittest.TestCase):
         self.assertTrue(self.needed(["<history-unavailable>"]))
         with patch.object(ci_paths_module.subprocess, "run", side_effect=OSError("no git")):
             self.assertEqual(ci_paths_module.codeql_scope_from_git("a" * 40, "b" * 40), ["<history-unavailable>"])
+
+    def test_cli_never_prints_a_raw_name_that_could_start_a_workflow_command(self) -> None:
+        """Failing-before: ``-z`` keeps a newline in a name, and the trusted CodeQL job printed
+        it raw, so a line of the name starting with ``::`` ran as a workflow command there."""
+
+        import io
+
+        nul = chr(0)
+        hostile = "docs/a.md" + chr(10) + "::stop-commands::x" + chr(13) + "y.c"
+        diff = subprocess.CompletedProcess([], 0, stdout=f"A{nul}{hostile}{nul}M{nul}docs/b.md{nul}".encode())
+        with tempfile.TemporaryDirectory() as scratch:
+            output_path = Path(scratch) / "github_output"
+            printed = io.StringIO()
+            with patch.object(ci_paths_module.subprocess, "run", return_value=diff), patch("sys.stdout", printed):
+                ci_paths_module.main(["--codeql-scope", "a" * 40, "b" * 40, "--github-output", str(output_path)])
+            self.assertEqual(output_path.read_text(encoding="utf-8"), "scan=true" + chr(10))
+        text = printed.getvalue()
+        self.assertEqual(text.count(chr(10)), 3, text)
+        self.assertNotIn(chr(13), text)
+        self.assertFalse(any(line.startswith("::") for line in text.splitlines()), text)
+        (paths_line,) = [line for line in text.splitlines() if line.startswith("changed_paths=")]
+        self.assertIn("docs/b.md", paths_line)
+        self.assertIn(json.dumps(hostile), paths_line)
 
     def test_cli_writes_only_the_scan_decision(self) -> None:
         nul = chr(0)

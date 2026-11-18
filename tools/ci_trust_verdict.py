@@ -133,6 +133,11 @@ event) is ignored when the second route has a run.
     the intended run belongs to a different pull request, or another open pull
     request has the same head (its base, and so its merge-ref definitions,
     may differ).
+``RUN_BEFORE_RETARGET``
+    the pull request changed its base after the intended run was created (or
+    either time cannot be read): the run tested the head against the old base,
+    and retargeting starts no new run. A push, or closing and reopening the
+    pull request, runs it against the default branch.
 ``PR_NOT_OPEN`` / ``BASE_NOT_DEFAULT``
     nothing to judge for merge into the default branch.
 ``DRAFT_LIGHT_CI``
@@ -418,6 +423,12 @@ def normalise(raw: dict) -> dict:
             "labels": sorted(label.get("name", "") for label in pr.get("labels") or []),
         }
     approval = None
+    # ``label_events`` is every event of a labelled pull request; ``base_changes`` holds the retargets the
+    # collector reads whether or not the label is on.
+    retargets = [
+        event for event in [*(raw.get("label_events") or []), *(raw.get("base_changes") or [])]
+        if event.get("event") == "base_ref_changed"
+    ]
     events = [
         event for event in raw.get("label_events") or []
         if event.get("event") in ("labeled", "unlabeled")
@@ -459,7 +470,10 @@ def normalise(raw: dict) -> dict:
             key=lambda record: (record["recorded_at"], str(record["digest"]), str(record["route"])),
         ),
         "approval_list_truncated": raw.get("approval_list_truncated") is True,
-        "retargeted": any(event.get("event") == "base_ref_changed" for event in raw.get("label_events") or []),
+        "retargeted": bool(retargets),
+        # When each retarget happened; a head-attached run created before the newest proves nothing about the
+        # current base (``RUN_BEFORE_RETARGET``). A missing time stays an empty string, which proves nothing.
+        "retargeted_at": [event.get("created_at") or "" for event in retargets],
         "workflow_runs": [
             {
                 "id": int(run["id"]),
@@ -759,6 +773,21 @@ def _check_producer(snapshot: dict, producer: Producer, pending: list[str]) -> l
         findings.append(Finding(
             "RUN_FOR_OTHER_PR", producer.context,
             f"run {latest['id']} belongs to pull request(s) {latest['pull_requests']}",
+        ))
+    # A head-attached run tested the head against the base the pull request had when the run was created
+    # (``pull_request``: merged into it; ``pull_request_target``: its workflow). Retargeting starts no run and a
+    # re-run keeps the old base, so a run created before the newest retarget is not evidence for this base. A
+    # named run comes from the default branch whatever the base was.
+    created = _when(latest["created_at"])
+    if not named and any(
+        created is None or moved is None or moved >= created
+        for moved in (_when(stamp) for stamp in snapshot.get("retargeted_at") or [])
+    ):
+        findings.append(Finding(
+            "RUN_BEFORE_RETARGET", producer.context,
+            f"run {latest['id']} was created before the pull request changed its base, so it tested the head "
+            "against the old one; push a commit, or close and reopen the pull request, to run it against "
+            f"{snapshot['default_branch']!r}",
         ))
     jobs = [job for job in snapshot["jobs"].get(str(latest["id"]), []) if job["name"] == producer.context]
     if len(jobs) > 1:
@@ -1396,13 +1425,16 @@ def collect(
     pr = gh.get(f"pulls/{number}")
     assert isinstance(pr, dict)
     labelled = any(label.get("name") == APPROVAL_LABEL for label in pr.get("labels") or [])
+    # A retarget matters with or without the label (``RUN_BEFORE_RETARGET``), so the events are always read.
+    issue_events = gh.paginate(f"issues/{number}/events")
     raw: dict = {
         "head_sha": head_sha,
         "default_branch": default_branch,
         "pull_request": pr,
         "open_pull_requests": open_prs,
-        # The events only matter when the label is on the pull request: without it nothing is approved.
-        "label_events": gh.paginate(f"issues/{number}/events") if labelled else [],
+        # The label events only matter when the label is on the pull request: without it nothing is approved.
+        "label_events": issue_events if labelled else [],
+        "base_changes": [event for event in issue_events if event.get("event") in BASE_MOVED_EVENTS],
         "workflow_runs": workflow_runs,
         "check_runs": gh.paginate(f"commits/{head_sha}/check-runs?filter=all", "check_runs"),
         "statuses": gh.paginate(f"commits/{head_sha}/statuses"),

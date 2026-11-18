@@ -1622,6 +1622,7 @@ and each token's remaining budget.
 | `JOB_MISSING`, `JOB_FAILED`, `JOB_CANCELLED`, `DUPLICATE_CONTEXT` | the latest non-cancelled intended run lacks the job, the job did not succeed, every run was cancelled, or two jobs share the name |
 | `STALE_HEAD`, `RUN_HEAD_MISMATCH` | the head is no longer the pull request's head, or a result names another SHA |
 | `RUN_FOR_OTHER_PR`, `AMBIGUOUS_HEAD` | the intended run belongs to another pull request, or another open pull request has the same head |
+| `RUN_BEFORE_RETARGET` | the pull request changed its base after the intended run was created, so that run tested the head against the old base; retargeting starts no run, so push a commit or close and reopen the pull request |
 | `PR_NOT_OPEN`, `BASE_NOT_DEFAULT` | nothing to judge for a merge into `main` |
 | `DRAFT_LIGHT_CI` | the pull request is a Draft, or its draft state cannot be read: CI ran only the quick checks ([Draft pull requests](#draft-pull-requests)); mark it Ready for review |
 

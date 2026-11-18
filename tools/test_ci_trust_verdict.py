@@ -367,6 +367,26 @@ class StaleHeadCanaryTests(VerdictAssertions):
         scenario.raw["open_pull_requests"].append(twin)
         self.assertVerdict(scenario, "failure", "AMBIGUOUS_HEAD")
 
+    def test_runs_from_before_a_retarget_are_not_evidence_for_the_new_base(self) -> None:
+        """Failing-before: a pull request opened against another branch ran CI on merge(head, that branch),
+        and retargeting it to main starts no run, so those runs were judged as if they had tested main."""
+        scenario = Scenario(fork=True)
+        for run in scenario.raw["workflow_runs"]:
+            run["pull_requests"] = []          # GitHub lists no pull request on a fork's run
+        scenario.raw["label_events"].append(
+            {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T10:20:00Z"})
+        verdict = self.assertVerdict(scenario, "failure", "RUN_BEFORE_RETARGET")
+        self.assertIn("reopen", " ".join(item.message for item in verdict.findings))
+        # A run created after the retarget (a push, or a close and reopen) is evidence again.
+        fresh = Scenario(fork=True)
+        fresh.raw["label_events"].append(
+            {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T09:30:00Z"})
+        self.assertVerdict(fresh, "success")
+        # A retarget whose time cannot be read proves no run came after it.
+        unknown = Scenario()
+        unknown.raw["label_events"].append({"id": 9, "event": "base_ref_changed"})
+        self.assertVerdict(unknown, "failure", "RUN_BEFORE_RETARGET")
+
     def test_definitions_behind_main_fail_even_with_a_label(self) -> None:
         scenario = Scenario()
         scenario.change(CI, "behind")
@@ -1306,18 +1326,41 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(ctv.unfinished_producers(stale, HEAD),
                          [producer.context for producer in ctv.PRODUCERS])
 
-    def test_label_events_are_read_only_when_the_label_is_on(self) -> None:
-        gh = FakeGitHub(Scenario())
+    def test_label_events_are_judged_only_when_the_label_is_on(self) -> None:
+        """The events are always read, for a retarget (``RUN_BEFORE_RETARGET``); without the label none of
+        them is kept as a label event, so nothing asks for the labeller's permission."""
+        scenario = Scenario()
+        scenario.raw["label_events"].append({
+            "id": 1, "event": "labeled", "created_at": "2026-10-28T09:05:00Z",
+            "actor": {"login": "maintainer"}, "label": {"name": ctv.APPROVAL_LABEL},
+        })
+        gh = FakeGitHub(scenario)
         with mock.patch.object(ctv, "git_facts", return_value=_facts()):
             raw = ctv.collect(gh, Path("."), "main", HEAD, PR)
         assert raw is not None
-        self.assertNotIn(f"issues/{PR}/events", gh.reads)
+        self.assertIn(f"issues/{PR}/events", gh.reads)
+        self.assertEqual(raw["label_events"], [])
+        self.assertFalse(any(read.startswith("collaborators/") for read in gh.reads))
         labelled = Scenario()
         labelled.label(at="2026-10-28T10:05:00Z", permission="write")
         gh = FakeGitHub(labelled)
         with mock.patch.object(ctv, "git_facts", return_value=_facts()):
             ctv.collect(gh, Path("."), "main", HEAD, PR)
         self.assertIn(f"issues/{PR}/events", gh.reads)
+
+    def test_a_retarget_is_read_without_the_label(self) -> None:
+        """Failing-before: the collector read the pull request's events only under the label, so an
+        unlabelled pull request retargeted after its runs was judged on runs against its old base."""
+        scenario = Scenario()
+        scenario.raw["label_events"].append(
+            {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T10:20:00Z"})
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()):
+            raw = ctv.collect(gh, Path("."), "main", HEAD, PR)
+        assert raw is not None
+        verdict = ctv.evaluate(ctv.normalise(raw))
+        self.assertEqual(verdict.state, "failure", verdict.findings)
+        self.assertIn("RUN_BEFORE_RETARGET", {item.code for item in verdict.findings if item.fatal})
 
     def test_main_rejects_a_malformed_head(self) -> None:
         gh = FakeGitHub(Scenario())
@@ -1731,8 +1774,10 @@ class DispatchedApprovalTests(VerdictAssertions):
         for route, state in (("dispatch", "success"), ("head", "failure")):
             with self.subTest(route=route):
                 scenario = self._approved(route=route)
+                # Retargeted before the head's runs were created, so they are evidence for the current base
+                # (``RUN_BEFORE_RETARGET``) and only the approval route decides.
                 scenario.raw["label_events"].append(
-                    {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T10:20:00Z"})
+                    {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T09:20:00Z"})
                 self.assertVerdict(scenario, state)
 
     def test_a_record_of_an_unknown_route_does_not_approve(self) -> None:
