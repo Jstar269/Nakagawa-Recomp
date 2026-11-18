@@ -455,12 +455,13 @@ void sr_vfpu_tables_publish(const SrVfpuTables *t) {
 }
 
 /* Record the resolved manifest in run/build evidence so differential and
- * visual results are reproducible against a specific table set. */
-static void sr_vfpu_evidence(const char *root, int overridden) {
+ * visual results are reproducible against a specific table set. `source` names
+ * where the root came from: the caller's explicit root, PSP_VFPU_TABLES, or the
+ * default assets/vfpu. */
+static void sr_vfpu_evidence(const char *root, const char *source) {
     size_t n = 0;
     const SrVfpuTableSpec *specs = sr_vfpu_table_manifest(&n);
-    fprintf(stderr, "[vfpu_tables] root=%s override=%s\n",
-            root, overridden ? "PSP_VFPU_TABLES" : "default-assets/vfpu");
+    fprintf(stderr, "[vfpu_tables] root=%s override=%s\n", root, source);
     for (size_t i = 0; i < n; i++) {
         fprintf(stderr, "[vfpu_tables] %s bytes=%zu sha256=%s\n",
                 specs[i].name, specs[i].bytes, specs[i].sha256);
@@ -506,9 +507,11 @@ void sr_vfpu_load_with_root(const char *root) {
     sr_vfpu_tables_publish(&agg);
     atomic_store_explicit(&g_vfpu_state, 2, memory_order_release);
     atomic_flag_clear_explicit(&g_vfpu_lock, memory_order_release);
-    /* The override flag must reflect whether PSP_VFPU_TABLES is really set:
-     * a default run must not look like an override run (and vice versa). */
-    sr_vfpu_evidence(effective, env_overridden);
+    /* The label names the root really loaded: an explicit root is neither the
+     * environment override nor the default, and a default run must not look like
+     * an override run (and vice versa). */
+    sr_vfpu_evidence(effective, root ? "explicit"
+                                     : env_overridden ? "PSP_VFPU_TABLES" : "default-assets/vfpu");
 }
 
 void sr_vfpu_load(void) {

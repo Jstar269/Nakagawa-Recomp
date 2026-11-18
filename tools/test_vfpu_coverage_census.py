@@ -408,6 +408,18 @@ class VfpuCoverageCensusTests(unittest.TestCase):
         self.assertIn("if ((unsigned)c % shard_n != shard_k) continue;", source)
         self.assertIn("admits no case", source)
 
+    def test_vfpu_fuzz_reads_its_constraint_once(self):
+        """rand_float runs 128 times per trial; FUZZ_CONSTRAINT cannot change mid-run, so main
+        reads it once and rand_float switches on the stored value instead of calling getenv."""
+        source = (ROOT / "src" / "rt" / "vfpu_fuzz.c").read_text(encoding="utf-8")
+        body = source.split("static float rand_float(void) {", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotIn("getenv", body)
+        self.assertNotIn("strcmp", body)
+        main = source.split("int main(int argc, char **argv) {", 1)[1]
+        self.assertIn("s_constraint = fuzz_constraint_from_env();", main.split("\n", 2)[1])
+        for name in ("allow_nan_inf", "positive", "no_zero"):
+            self.assertIn(f'strcmp(constraint, "{name}") == 0', source)
+
     def test_hardware_ids_are_row_level_not_inherited(self):
         memory_rows = [
             row for row in self.census["rows"]

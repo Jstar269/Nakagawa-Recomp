@@ -5362,7 +5362,8 @@ class VfpuTranscendentalParserFormatTests(unittest.TestCase):
             domains[name] = words(_matched(match).group(1))
             self.assertEqual(len(domains[name]), 43, name)
 
-        old_probe = (self.root / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_probe.c").read_text(
+        # The measured probe's words, in the header it shares with the Nakagawa-side emitter.
+        old_probe = (self.root / "tests" / "fixtures" / "vfpu_oracle" / "vfpu_oracle_cases.h").read_text(
             encoding="utf-8")
         old_match = re.search(r"VASIN_DOMAIN_INPUTS\[\]\s*=\s*\{([^}]*)\}", old_probe)
         self.assertIsNotNone(old_match)

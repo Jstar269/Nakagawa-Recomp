@@ -7,6 +7,7 @@
 // state machine, the latest-frame mailbox, that the frame loop cannot change what the
 // producer sees, and the layout maths.
 
+#include <float.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1246,6 +1247,9 @@ static void test_layout(void) {
     CHECK(nk_xr_quad_extent(INFINITY, &w, &h) == -1);
     CHECK(nk_xr_quad_extent(NAN, &w, &h) == -1);
     CHECK(nk_xr_quad_extent(2.0f, NULL, &h) == -1);
+    // Every positive finite width has a finite extent: width * 272 would overflow first.
+    CHECK(nk_xr_quad_extent(FLT_MAX, &w, &h) == 0 && w == FLT_MAX && isfinite(h) && h > 0.0f);
+    CHECK(nk_xr_quad_extent(2e36f, &w, &h) == 0 && isfinite(h) && fabsf(h / 2e36f - 272.0f / 480.0f) < 1e-6f);
 
     float pos[3] = {9, 9, 9}, quat[4] = {9, 9, 9, 9};
     CHECK(nk_xr_quad_pose(2.5f, 1.25f, pos, quat) == 0);
@@ -1272,6 +1276,10 @@ static void test_layout(void) {
     CHECK(isnan(nk_xr_eye_clip_x(1.0f, 4.0f, INFINITY, c, -1)));
     CHECK(isnan(nk_xr_eye_clip_x(1.0f, 4.0f, s, INFINITY, +1)));
     CHECK(isnan(nk_xr_eye_clip_x(NAN, 4.0f, s, c, 0)));
+    // Finite inputs whose s * (w - c) overflows: mono keeps x, a stereo eye is refused with NaN.
+    CHECK(nk_xr_eye_clip_x(1.0f, FLT_MAX, 1.0f, -FLT_MAX, 0) == 1.0f);
+    CHECK(isnan(nk_xr_eye_clip_x(1.0f, FLT_MAX, 1.0f, -FLT_MAX, +1)));
+    CHECK(isnan(nk_xr_eye_clip_x(1.0f, FLT_MAX, 1.0f, -FLT_MAX, -1)));
     for (int i = 0; i < 16; i++) {
         float x = 0.25f * (float)(i - 8), wc = 0.5f * (float)i;
         float r = nk_xr_eye_clip_x(x, wc, s, c, +1), l = nk_xr_eye_clip_x(x, wc, s, c, -1);
