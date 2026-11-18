@@ -83,8 +83,24 @@ static uint32_t ge_r32(uint32_t addr) {
 static uint8_t ge_capture_r8(uint32_t addr) { ge_capture_note_memory(addr, 1); return sr_r8(addr); }
 static uint16_t ge_capture_r16(uint32_t addr) { ge_capture_note_memory(addr, 2); return sr_r16(addr); }
 static uint32_t ge_capture_r32(uint32_t addr) { ge_capture_note_memory(addr, 4); return ge_r32(addr); }
-static void ge_capture_w16(uint32_t addr, uint16_t value) { ge_capture_note_memory(addr, 2); sr_w16(addr, value); }
-static void ge_capture_w32(uint32_t addr, uint32_t value) { ge_capture_note_memory(addr, 4); sr_w32(addr, value); }
+/* Set around the GE's own guest stores, so sr_ge_vram_write_commit tells a CPU store to VRAM
+ * (which the capture's begin-time VRAM copy lacks) from one the replay makes itself. */
+static int s_ge_capture_own_store;
+static void ge_capture_w16(uint32_t addr, uint16_t value) {
+    const uint8_t bytes[2] = { (uint8_t)value, (uint8_t)(value >> 8) };
+    ge_capture_note_write(addr, bytes, 2);
+    s_ge_capture_own_store = 1;
+    sr_w16(addr, value);
+    s_ge_capture_own_store = 0;
+}
+static void ge_capture_w32(uint32_t addr, uint32_t value) {
+    const uint8_t bytes[4] = { (uint8_t)value, (uint8_t)(value >> 8),
+                               (uint8_t)(value >> 16), (uint8_t)(value >> 24) };
+    ge_capture_note_write(addr, bytes, 4);
+    s_ge_capture_own_store = 1;
+    sr_w32(addr, value);
+    s_ge_capture_own_store = 0;
+}
 
 #undef MEM_R8
 #undef MEM_R16
@@ -1363,6 +1379,8 @@ void sr_ge_vram_write_commit(uint32_t physical_addr, uint32_t width) {
         s_zbuf_guest_valid = 0;
         s_zbuf_guest_dirty = 0;
     }
+    if (g_ge_capture_active && !s_ge_capture_own_store)
+        ge_capture_note_cpu_vram_store(physical_addr, width);
     sr_gpu_vram_dirty(physical_addr, width);
     g_sr_vram_read_pending = s_zbuf_guest_dirty ||
         (s_gpu && s_gpu->vram_pending && s_gpu->vram_pending());
@@ -8122,11 +8140,13 @@ static void ge_block_transfer(uint32_t startdata) {
         uint32_t dofs = dst.first + y * dst.row_pitch;
         if (!sr_guest_span_readable_current(so, src.row_bytes)) return;
         ge_capture_note_memory(so, src.row_bytes);
-        ge_capture_note_memory(dofs, dst.row_bytes);
+        if (g_ge_capture_active) ge_capture_note_write(dofs, SR_HOST(so), src.row_bytes);
         if (g_sr_heap_watch) sr_heap_note_bulk_write(dofs, dst.row_bytes, 0u);
+        s_ge_capture_own_store = 1;
         sr_guest_vram_write_prepare_bytes(dofs, dst.row_bytes);
         memmove(SR_HOST(dofs), SR_HOST(so), src.row_bytes);
         sr_guest_vram_write_commit_bytes(dofs, dst.row_bytes);
+        s_ge_capture_own_store = 0;
         if (__builtin_expect(s_twin_mode > 0, 0) && !s_gpu) ge_twin_copy_row(dofs, so, src.row_bytes);
     }
 }
@@ -8640,6 +8660,8 @@ static void ge_list_end(uint32_t list_addr, unsigned long sig, unsigned long pri
 /* Start (or extend) the GE capture for the list about to run, and reset the per-list counters. */
 static void ge_list_begin(uint32_t list_addr, int resume) {
     ge_capture_configure();
+    /* A CPU store to VRAM since begin drops the capture; this list may begin it again. */
+    if (ge_capture_active()) (void)ge_capture_drop_after_cpu_vram_store();
     if (!s_capture_done && !ge_capture_active() && s_ge_frame >= s_capture_frame &&
         s_ge_frame <= s_capture_frame_end) {
         int boundary_ok = !s_gpu || !s_gpu->capture_boundary || s_gpu->capture_boundary();

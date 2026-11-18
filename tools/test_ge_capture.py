@@ -78,7 +78,19 @@ class TestGeCaptureWiring(unittest.TestCase):
         ge = (RT / "ge.c").read_text(encoding="utf-8")
         self.assertIn("g_ge_capture_active ? ge_capture_r32((a))", ge)
         self.assertIn("ge_capture_note_memory(so, src.row_bytes)", ge)
-        self.assertIn("ge_capture_note_memory(dofs, dst.row_bytes)", ge)
+        # The GE's own stores are noted as writes (replayed, so no CPU change), and every
+        # other VRAM store commit is a CPU store the begin-time VRAM copy lacks.
+        self.assertIn("ge_capture_note_write(dofs, SR_HOST(so), src.row_bytes)", ge)
+        self.assertEqual(ge.count("ge_capture_note_write(addr, bytes, "), 2)
+        self.assertIn("if (g_ge_capture_active && !s_ge_capture_own_store)\n"
+                      "        ge_capture_note_cpu_vram_store(physical_addr, width);", ge)
+        transfer = ge.split("ge_capture_note_write(dofs, SR_HOST(so), src.row_bytes)", 1)[1]
+        transfer = transfer.split("s_ge_capture_own_store = 0;", 1)[0]
+        self.assertIn("s_ge_capture_own_store = 1;", transfer)
+        self.assertIn("sr_guest_vram_write_commit_bytes(dofs, dst.row_bytes);", transfer)
+        begin = ge.split("static void ge_list_begin(uint32_t list_addr, int resume) {", 1)[1]
+        self.assertLess(begin.index("ge_capture_drop_after_cpu_vram_store()"),
+                        begin.index("ge_capture_begin("))
         self.assertIn("capture_boundary", ge)
         self.assertIn(
             "ge_capture_begin(s_capture_path, s_ge_frame, list_addr, &ge, s_zbuf)",

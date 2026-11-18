@@ -77,7 +77,11 @@ int main(int argc, char **argv) {
         fprintf(stderr, "usage: ge-vram-decoder IMAGE ADDR WIDTH HEIGHT STRIDE FORMAT SWIZZLED CLUT_ADDR CLUT_FORMAT CLUT_FILE RGBA_OUT\n");
         return 2;
     }
+    /* No GE buffer is wider than 4096 pixels. The cap also keeps every texel offset the
+     * decoder forms, (y * stride + x) * bytes, well inside 32 bits, so a huge stride cannot
+     * wrap back into the image and pass with the wrong pixels. */
     if (!width || !height || width > 4096u || height > 4096u || stride < width ||
+        stride > 4096u ||
         swizzled > 1u || (format > 10u && format != 11u) ||
         (format >= 8u && format <= 10u && swizzled) ||
         (format >= 8u && format <= 10u && (stride & 3u)) ||
@@ -89,7 +93,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "VRAM decoder rejected out-of-range or unsupported surface metadata\n");
         return 2;
     }
-    if (format <= 3u) {
+    if (format <= 3u || format == 11u) {
         bytes_per_pixel = format == 3u ? 4u : 2u;
         byte_extent = ((uint64_t)height - 1u) * stride * bytes_per_pixel +
                       (uint64_t)width * bytes_per_pixel;

@@ -874,6 +874,29 @@ class NkCliVramTests(unittest.TestCase):
             self.assertEqual(fits.returncode, 0, fits.stdout + fits.stderr)
             self.assertEqual(self._read_png(root / "fits.png")[2], [(0, 255, 0, 255)])
 
+    def test_vram_huge_stride_is_refused_not_wrapped(self) -> None:
+        # Row 1 of a DEPTH16 surface with stride 0x80000000 lies 4 GiB past row 0. Before, the
+        # 32-bit address wrapped back to row 0, every read stayed in the image and the export
+        # passed with row 0 twice. No GE buffer is wider than 4096 pixels, so the metadata is
+        # refused; a CLUT format with the same stride is refused the same way.
+        with tempfile.TemporaryDirectory(prefix="nk_cli_vram_stride_") as temp:
+            root = Path(temp)
+            image_path = root / "vram.bin"
+            image_path.write_bytes(bytes(2 * 1024 * 1024))
+            for fmt, clut in (("DEPTH16", []),
+                              ("CLUT8", ["--clut-addr", "0x04100000", "--clut-format", "0xff00"])):
+                output = root / f"{fmt}.png"
+                refused = subprocess.run(
+                    [sys.executable, str(CLI_PATH), "vram", str(image_path),
+                     "--addr", "0x04000000", "--width", "1", "--height", "2",
+                     "--stride", str(0x80000000), "--format", fmt, *clut,
+                     "--output", str(output)],
+                    cwd=ROOT, capture_output=True, text=True,
+                )
+                self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+                self.assertIn("rejected out-of-range", refused.stderr)
+                self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
