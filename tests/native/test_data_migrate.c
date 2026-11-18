@@ -488,6 +488,46 @@ static bool stand_in_profile(const char *name, char *config, size_t cap) {
     return nk_platform_resolve_path(NK_PATH_CONFIG, config, cap);
 }
 
+/* True when path names root itself or something below it. Windows compares without case and
+   takes '/' and '\\' as the same separator. */
+static bool path_is_under(const char *path, const char *root) {
+    size_t length = strlen(root);
+    while (length > 0 && (root[length - 1] == '/' || root[length - 1] == '\\')) length--;
+    if (length == 0) return false;
+    for (size_t i = 0; i < length; i++) {
+        char a = path[i], b = root[i];
+        if (a == '\0') return false;
+#if defined(_WIN32) || defined(_WIN64)
+        if (a == '/') a = '\\';
+        if (b == '/') b = '\\';
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+#endif
+        if (a != b) return false;
+    }
+    char next = path[length];
+#if defined(_WIN32) || defined(_WIN64)
+    return next == '\0' || next == '/' || next == '\\';
+#else
+    return next == '\0' || next == '/';
+#endif
+}
+
+/* The containment check the guard test relies on before it writes anything. */
+static void test_path_is_under(void) {
+    CHECK(path_is_under("/tmp/nk-root/a/config", "/tmp/nk-root"), "a folder below the root");
+    CHECK(path_is_under("/tmp/nk-root", "/tmp/nk-root/"), "the root itself, trailing separator");
+    CHECK(!path_is_under("/tmp/nk-root-other/config", "/tmp/nk-root"), "a sibling with the root as prefix");
+    CHECK(!path_is_under("/tmp/nk", "/tmp/nk-root"), "a shorter path");
+    CHECK(!path_is_under("/home/user/.config/nakagawa", "/tmp/nk-root"), "a folder outside the root");
+    CHECK(!path_is_under("/tmp/nk-root", ""), "an empty root contains nothing");
+#if defined(_WIN32) || defined(_WIN64)
+    CHECK(path_is_under("c:/Temp/NK-Root\\a", "C:\\temp\\nk-root"), "Windows: case and separators");
+#else
+    CHECK(!path_is_under("/tmp/NK-ROOT/a", "/tmp/nk-root"), "POSIX: case matters");
+#endif
+}
+
 /* The real-profile guard watches every file of the settings folder by content: a rewrite of any
    file that keeps its size and its timestamp trips it, settings.json as well as the disc profile.
    Checked on a stand-in profile in the temporary root, never the real one. */
@@ -495,7 +535,19 @@ static void test_guard_watches_every_file(void) {
     char config[NK_MAX_PATH], profiles[NK_MAX_PATH], settings[NK_MAX_PATH], disc[NK_MAX_PATH];
     char problem[2 * NATIVE_TEST_PATH_MAX + 64];
     char sep = nk_platform_path_separator();
-    CHECK(stand_in_profile("guard-files", config, sizeof(config)), "a stand-in settings folder");
+    memset(config, 0, sizeof(config));
+    /* Nothing below is written unless the resolver names a folder inside the temporary root: a
+       failed stand-in could otherwise leave it naming the real settings folder. */
+    if (!stand_in_profile("guard-files", config, sizeof(config))) {
+        CHECK(false, "GUARD_STAND_IN_FAILED: a stand-in settings folder");
+        return;
+    }
+    if (!path_is_under(config, native_test_get_root())) {
+        fprintf(stderr, "GUARD_STAND_IN_OUTSIDE_ROOT: the resolver names %s, not a folder under %s\n",
+                config, native_test_get_root());
+        CHECK(false, "GUARD_STAND_IN_OUTSIDE_ROOT: the stand-in settings folder is inside the test root");
+        return;
+    }
     snprintf(profiles, sizeof(profiles), "%s%cinput_profiles", config, sep);
     snprintf(settings, sizeof(settings), "%s%csettings.json", config, sep);
     snprintf(disc, sizeof(disc), "%s%cUCUS98701.json", profiles, sep);
@@ -610,6 +662,7 @@ static void test_remove_tree_read_only_and_locked(void) {
 int main(void) {
     native_test_create_root("data_migrate");
     test_notice();
+    test_path_is_under();
 #if !defined(_WIN32) && !defined(_WIN64)
     snprintf(g_base, sizeof(g_base), "%s", native_test_get_root());
     test_rule_table();

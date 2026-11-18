@@ -3384,6 +3384,13 @@ static uint8_t *fuzz_guest(uint32_t address) {
 #define FUZZ_PGF_CAP 16384u
 #define FUZZ_PGF_MAX_GLYPHS 6u
 #define FUZZ_PGF_MAX_SPAN (FUZZ_PGF_MAX_GLYPHS + 4u)
+/* The most a glyph needs besides its raster payload: 3 bytes of alignment, a 33-byte
+ * record (9 bytes plus three 8-byte metric groups), 6 composite-part bytes and the
+ * 6-byte shadow block. The builder keeps this much free for every glyph still to come. */
+#define FUZZ_PGF_GLYPH_TAIL 48u
+/* The smallest buffer build_fuzz_pgf accepts: the largest header and tables (at most 584
+ * bytes) plus a glyph tail for every glyph. */
+#define FUZZ_PGF_MIN_CAP 1024u
 
 typedef struct {
     uint32_t first_code;
@@ -3423,8 +3430,8 @@ static uint8_t fuzz_pgf_index(uint8_t count) {
 }
 
 static size_t build_fuzz_pgf(uint8_t *out, size_t cap, FuzzPgfLayout *layout) {
-    assert(cap >= FUZZ_PGF_CAP);
-    memset(out, 0, FUZZ_PGF_CAP);
+    assert(cap >= FUZZ_PGF_MIN_CAP);
+    memset(out, 0, cap);
     memset(layout, 0, sizeof(*layout));
 
     unsigned revision_pick = fuzz_rand32() % 8u;
@@ -3557,7 +3564,14 @@ static size_t build_fuzz_pgf(uint8_t *out, size_t cap, FuzzPgfLayout *layout) {
             record_size += (flags & (1u << group)) ? 1u : 8u;
         }
         size_t payload = composite ? 6u : fuzz_pick(0u, (width * height + 1u) / 2u + 8u);
-        if (record + record_size + payload + 8u > FUZZ_PGF_CAP) payload = 0u;
+        /* The record, a composite's parts and the shadow block are always written, and
+         * every later glyph keeps its own fixed tail; only a raster payload can shrink. */
+        size_t fixed = record_size + (composite ? 6u : 0u) + (shadow_id ? 6u : 0u);
+        size_t later = (size_t)(glyphs - g - 1u) * FUZZ_PGF_GLYPH_TAIL;
+        assert(record + fixed + later <= cap);
+        if (!composite && payload > cap - record - fixed - later) {
+            payload = cap - record - fixed - later;
+        }
         uint32_t shadow_offset = shadow_id ? (uint32_t)(record_size + payload) : 0u;
         size_t bits_size = record_size;
         fuzz_pgf_bits(out + record, bits_size, 0u, 14u, shadow_offset);
@@ -3607,7 +3621,7 @@ static size_t build_fuzz_pgf(uint8_t *out, size_t cap, FuzzPgfLayout *layout) {
     layout->char_map_bits = map_bits;
     layout->char_pointer_bits = pointer_bits;
     memcpy(layout->glyph_code, code_of_glyph, sizeof(code_of_glyph[0]) * glyphs);
-    assert(cursor <= FUZZ_PGF_CAP);
+    assert(cursor <= cap);
     return cursor;
 }
 
@@ -3750,6 +3764,44 @@ static int fuzz_pgf_draw(const PGF *p, const FuzzPgfLayout *layout) {
         }
     }
     return drawn;
+}
+
+/* Every font the builder makes stays inside the buffer it is given, however close to
+ * the end its glyph payloads land. A small buffer reaches that edge in most builds; the
+ * guard bytes after it catch a write past the end even without a sanitizer. */
+static void test_fuzz_pgf_builder_bounds(void) {
+    enum { BUILDS = 2000, GUARD = 64 };
+    uint64_t saved_state = s_rng_state;
+    s_rng_state = 0x9F0B0A2D5EEDF00DULL;
+    uint8_t *font = (uint8_t *)malloc(FUZZ_PGF_MIN_CAP + GUARD);
+    assert(font);
+    unsigned near_end = 0;
+    for (unsigned i = 0; i < BUILDS; i++) {
+        memset(font + FUZZ_PGF_MIN_CAP, 0xA5, GUARD);
+        FuzzPgfLayout layout;
+        size_t size = build_fuzz_pgf(font, FUZZ_PGF_MIN_CAP, &layout);
+        for (size_t b = 0; b < GUARD; b++) {
+            if (font[FUZZ_PGF_MIN_CAP + b] != 0xA5u) {
+                fprintf(stderr, "PGF_BUILDER_OVERRUN: build %u wrote byte %u past its %u-byte buffer\n",
+                        i, (unsigned)b, FUZZ_PGF_MIN_CAP);
+                assert(0);
+            }
+        }
+        assert(size <= FUZZ_PGF_MIN_CAP);
+        if (size + 64u > FUZZ_PGF_MIN_CAP) near_end++;
+        PgfVerdict verdict;
+        if (!pgf_validate_memory(font, size, &verdict)) {
+            fprintf(stderr, "PGF_BUILDER_REFUSED: build %u refused (rule %d)\n", i, (int)verdict.refusal);
+            assert(0);
+        }
+    }
+    /* The check means something only if builds actually reach the end of the buffer. */
+    assert(near_end > BUILDS / 10u);
+    free(font);
+    s_rng_state = saved_state;
+    printf("[FUZZ] PGF builder stays inside its buffer (%u builds, %u within 64 bytes of the end)\n",
+           (unsigned)BUILDS, near_end);
+    fflush(stdout);
 }
 
 static void test_fuzz_pgf(unsigned iters) {
@@ -4206,6 +4258,7 @@ int main(int argc, char **argv) {
     test_fuzz_input_profile(iters);
     test_fuzz_package(run[2]);
     test_fuzz_library(run[3]);
+    test_fuzz_pgf_builder_bounds();
     test_fuzz_pgf(run[4]);
     test_fuzz_archive_vfs(run[5]);
     test_fuzz_decrypt_boundary(run[6]);
