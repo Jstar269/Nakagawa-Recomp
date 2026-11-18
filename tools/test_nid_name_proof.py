@@ -134,7 +134,7 @@ class ClassifierTest(unittest.TestCase):
 
 
 class ShippedTableTest(unittest.TestCase):
-    """Locks the measurement the provenance ledger cites."""
+    """Pins the classifier counts against the tracked corpus (`tools/nid_corpus.json`)."""
     entries: list[proof.Entry]
     report: dict[str, Any]
 
@@ -151,13 +151,19 @@ class ShippedTableTest(unittest.TestCase):
         for entry in self.entries:
             self.assertIn(entry.classification, proof.CLASSIFICATIONS)
 
-    def test_measurement_matches_the_ledger(self) -> None:
+    def test_measurement_matches_tracked_corpus(self) -> None:
+        import json
+        corpus = json.loads((ROOT / "tools" / "nid_corpus.json").read_text(encoding="utf-8"))
+        corpus_counts = corpus["counts"]
         counts = self.report["counts"]
-        self.assertEqual(self.report["total"], 1615)
-        self.assertEqual(counts["verified"], 1464)
-        self.assertEqual(counts["library-attributed-unknown-name"], 53)
-        self.assertEqual(counts["editorial-alias"], 11)
-        self.assertEqual(counts["unresolved"], 87)
+        self.assertEqual(self.report["total"], len(corpus["entries"]))
+        self.assertEqual(
+            counts["verified"],
+            corpus_counts["pspsdk-sourced"] + corpus_counts["hash-verified"],
+        )
+        self.assertEqual(counts["library-attributed-unknown-name"], corpus_counts["library-attributed"])
+        self.assertEqual(counts["editorial-alias"], corpus_counts["editorial-alias"])
+        self.assertEqual(counts["unresolved"], corpus_counts["unresolved"])
 
     def test_no_sentinels_remain_in_the_shipped_table(self) -> None:
         """IND-1 step A removed the eight; the generator cannot reintroduce them."""

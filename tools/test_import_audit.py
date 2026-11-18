@@ -667,6 +667,8 @@ class GateWiringTests(unittest.TestCase):
             "0x11111111": {"name": "synthDedicated", "handler": "h_Synth",
                            "classification": "dedicated", "status": "partial"},
         }
+        import contextlib
+        import io
         import tempfile
 
         with tempfile.TemporaryDirectory() as td:
@@ -674,11 +676,14 @@ class GateWiringTests(unittest.TestCase):
             path.write_text(json.dumps(baseline), encoding="ascii")
             old = import_audit_gate.DEFAULT_BASELINE
             import_audit_gate.DEFAULT_BASELINE = path
+            err = io.StringIO()
             try:
-                with self.assertRaises(SystemExit):
+                with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
                     import_audit_gate.check_baseline(manifest)
             finally:
                 import_audit_gate.DEFAULT_BASELINE = old
+        self.assertIn("import-coverage regression", err.getvalue())
+        self.assertIn("dedicated -> fake_success", err.getvalue())
 
 
 if __name__ == "__main__":
