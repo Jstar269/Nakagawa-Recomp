@@ -398,6 +398,10 @@ def analyze_runs(texts: Sequence[str | bytes], evidence_contexts: list[Any] | No
     Each launch must be one launch group or a CASE=all build, and every
     observed case must be observed equally often; violations are listed in
     ``launch_group_issues`` / ``repetition_issues`` and clear ``campaign_valid``.
+    ``repetitions`` is the fewest observations of any required case;
+    ``repetitions_complete`` says whether that reaches ``expected_repetitions``,
+    the repeat plan's observations per gating case, so a one-launch campaign
+    reports its repetition shortfall instead of passing for a repeated one.
 
     evidence_contexts, if provided, must align 1:1 with texts and are used
     to label each run's evidence; default is UNVERIFIED_CAPTURE per run.
@@ -467,6 +471,13 @@ def analyze_runs(texts: Sequence[str | bytes], evidence_contexts: list[Any] | No
     launch_group_issues = _launch_group_issues(runs, run_ids, required_map, gating)
     counts = {cid: len(per_case.get(cid, [])) for cid in reported}
     repetition_issues = _repetition_issues(counts)
+    repetitions = min(counts[cid] for cid in required)
+    repeat_plan = matrix["launch_plan"]["gating"]["repeat"]
+    expected_repetitions, remainder = divmod(repeat_plan["records"],
+                                             matrix["launch_plan"]["gating"]["unique_cases"])
+    if remainder or expected_repetitions < 1:
+        raise ProtocolError(f"launch_plan.gating.repeat.records {repeat_plan['records']} is not a "
+                            "whole number of observations per gating case")
     evidence_labels: list[str] = []
     if evidence_contexts is not None:
         if len(evidence_contexts) != len(texts):
@@ -487,7 +498,9 @@ def analyze_runs(texts: Sequence[str | bytes], evidence_contexts: list[Any] | No
         "all_required_observed": not missing,
         "launch_group_issues": launch_group_issues,
         "repetition_issues": repetition_issues,
-        "repetitions": min(counts[cid] for cid in required),
+        "repetitions": repetitions,
+        "expected_repetitions": expected_repetitions,
+        "repetitions_complete": repetitions >= expected_repetitions,
         "campaign_valid": not missing and not launch_group_issues and not repetition_issues,
         "launch_count": len(runs),
         "run_ids": run_ids,

@@ -11,6 +11,10 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from typing import Any
 
@@ -74,6 +78,138 @@ def valid_campaign_text_plausible(run_id: int = 0x11111111) -> str:
     for case in MATRIX["cases"]:
         lines.append(synth_record(case["case_id"], result=0, attempt=0))
     return "\n".join(lines) + "\n"
+
+
+# The PSP harness itself. The parser tests above cannot see what it does on the console, so
+# its safety and honesty guarantees are checked here, on its own source: the checked
+# arithmetic helpers are compiled and run on the host, and the source gates below each have
+# an in-memory mutant that they must reject.
+HARNESS_C = ROOT / "tests" / "fixtures" / "psp_threading_oracle" / "thread_oracle.c"
+_HOST_CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
+
+
+def _harness() -> str:
+    return HARNESS_C.read_text(encoding="utf-8")
+
+
+def _c_code(source: str) -> str:
+    """The C text with its comments removed, so a gate never matches a comment."""
+    return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", " ", source, flags=re.DOTALL))
+
+
+def _c_definition(source: str, header: str) -> str:
+    """The top-level definition that starts with ``header``, through its closing brace."""
+    start = source.index(header)
+    return source[start:source.index("\n}\n", start) + 2]
+
+
+def _case_block(source: str, case_id: str) -> str:
+    """The harness text from a case's thread creation to its first record."""
+    start = source.index(f'sceKernelCreateThread("{case_id}"')
+    return source[start:source.index(f'emit_test("{case_id}"', start)]
+
+
+def _probe_window_problems(source: str) -> list[str]:
+    """Why probe_stack_window could read outside its stack or guess a stack size."""
+    source = _c_code(source)
+    body = _c_definition(source, "static PHASE_MAYBE_UNUSED int probe_stack_window(")
+    read = body.find("(uintptr_t)(probe_addr + i)")
+    if read < 0:
+        return ["probe_stack_window does not read through the checked probe_addr"]
+    problems = []
+    fallback = body[body.index("#else"):body.index("#endif")]
+    if not re.search(r"^\s*stack_size = 0;", fallback, re.MULTILINE):
+        problems.append("without PSP_THREAD_INFO_HAS_STACKSIZE the stack size is not left unknown")
+    unknown = body.find("if (stack_size == 0) {")
+    if unknown < 0 or unknown > read or "return 1;" not in body[unknown:body.index("}", unknown)]:
+        problems.append("an unknown stack size does not return NOT_MEASURABLE before the read")
+    for check in ("checked_range_u32((uint32_t)stack_addr, probe_offset, probe_bytes, stack_size, "
+                  "&probe_addr) != 0",
+                  "checked_add_u32(probe_addr, probe_bytes, &probe_end) != 0"):
+        at = body.find(check)
+        if at < 0 or at > read:
+            problems.append(f"not checked before the read: {check}")
+    if re.search(r"probe_addr\s*\+\s*probe_bytes", body):
+        problems.append("the probe end is formed by a direct probe_addr + probe_bytes")
+    return problems
+
+
+def _child_copy_problems(source: str) -> list[str]:
+    """Why a StartThread argument copy could read child memory not proven inside its stack."""
+    source = _c_code(source)
+    problems = []
+    copies = list(re.finditer(r"memcpy\(tmp,\(void\*\)\(uintptr_t\)child_a1,(\d+)\);", source))
+    if not copies:
+        return ["no child argument copy found"]
+    if source.count("(uintptr_t)child_a1") != len(copies):
+        problems.append("child_a1 becomes a pointer outside a guarded copy")
+    for copy in copies:
+        length = copy.group(1)
+        guard_at = source.rfind("if (", 0, copy.start())
+        guard = source[guard_at:source.index("{", guard_at) + 1]
+        if not re.fullmatch(r"if \(inside && child_a1(?: != 0)?\) \{", guard):
+            problems.append(f"the {length}-byte copy is not guarded by inside: {guard}")
+        region = source[source.rfind("sceKernelCreateThread(", 0, copy.start()):copy.start()]
+        sets = list(re.finditer(r"\binside\s*=\s*1\s*;", region))
+        if len(sets) != 1:
+            problems.append(f"the {length}-byte copy's case sets inside {len(sets)} times")
+        for found in sets:
+            header = region[region.rfind("if (", 0, found.start()):found.start()]
+            if not re.fullmatch(rf"if \(checked_range_u32\(stack_low, child_a1 - stack_low, {length}, "
+                                r"stack_size, &probe_addr\)\s*==\s*0\) \{\s*", header):
+                problems.append(f"inside is set without a {length}-byte checked range: {header!r}")
+    return problems
+
+
+def _raw_checksum_problems(source: str) -> list[str]:
+    """Why a child checksum could be reported other than raw or NOT_MEASURED."""
+    source = _c_code(source)
+    problems = []
+    for case in ("ST-SA02", "ST-SA03"):
+        block = _case_block(source, case)
+        writes = list(re.finditer(r"\bchild_csum\s*([\^|&+\-*/]?=)(?!=)", block))
+        if not writes:
+            problems.append(f"{case}: child_csum is never written")
+        for write in writes:
+            value = re.match(r"\s*(?:checksum_bytes\(tmp,\s*\d+\)|NOT_MEASURED)\s*[;,]",
+                             block[write.end():])
+            if write.group(1) != "=" or value is None:
+                problems.append(f"{case}: child_csum is not the raw checksum: "
+                                f"{block[write.start():block.index(';', write.start())]}")
+    return problems
+
+
+def _effective_attr_problems(source: str) -> list[str]:
+    """Why CT-A* could report a requested attribute as the effective one."""
+    source = _c_code(source)
+    body = _c_definition(source, "static PHASE_MAYBE_UNUSED void run_ct_attr_cases(void) {")
+    problems = []
+    values = set(re.findall(r"\bout_eff\s*=\s*([^;]+);", body))
+    if values != {"NOT_MEASURED", "(uint32_t)info.attr"}:
+        problems.append(f"out_eff takes values other than NOT_MEASURED or the read attr: {sorted(values)}")
+    observed = body.find("out_eff = (uint32_t)info.attr;")
+    ifdef = body.rfind("#ifdef PSP_THREAD_INFO_HAS_ATTR", 0, observed)
+    if observed >= 0 and (ifdef < 0 or "#else" in body[ifdef:observed] or "#endif" in body[ifdef:observed]):
+        problems.append("the read attr is used without PSP_THREAD_INFO_HAS_ATTR")
+    if "(unsigned int)out_wait, (unsigned int)out_eff);" not in body:
+        problems.append("out3 is not out_eff")
+    return problems
+
+
+def _zero_arg_problems(source: str) -> list[str]:
+    """Why ST-SA01 (argSize 0) could dereference or summarise the child's argument pointer."""
+    source = _c_code(source)
+    block = _case_block(source, "ST-SA01")
+    problems = []
+    if "sceKernelStartThread(thid, 0, NULL)" not in block:
+        problems.append("ST-SA01 does not start its thread with argSize 0 and no argument")
+    for banned in ("memcpy(", "(uintptr_t)", "checksum_bytes(", "*(volatile"):
+        if banned in block:
+            problems.append(f"ST-SA01 uses {banned}")
+    values = set(re.findall(r"\bchild_a1\s*=\s*([^,;]+)", block))
+    if values != {"NOT_MEASURED", "g_thread_snapshot.a1"}:
+        problems.append(f"child_a1 is not the raw snapshot or NOT_MEASURED: {sorted(values)}")
+    return problems
 
 class MatrixFidelityTests(unittest.TestCase):
     def test_matrix_has_corrected_minimum(self) -> None:
@@ -390,11 +526,22 @@ class RunIdentityTests(unittest.TestCase):
         self.assertNotEqual(vals[0], vals[1])
 
     def test_missing_repetition_detected(self) -> None:
+        # One launch observes every case once; the repeat plan wants each case twice.
         analysis = analyze_runs([valid_campaign_text(run_id=0x11111111)])
         self.assertEqual(analysis["launch_count"], 1)
-        self.assertEqual(analysis["expected_launches_repeat"], 10)
         self.assertTrue(analysis["all_required_observed"])
-        # run_ids distinct check
+        self.assertEqual(analysis["repetitions"], 1)
+        self.assertEqual(analysis["expected_repetitions"],
+                         MATRIX["launch_plan"]["gating"]["repeat"]["records"]
+                         // MATRIX["launch_plan"]["gating"]["unique_cases"])
+        self.assertFalse(analysis["repetitions_complete"])
+        # A single observation is not a repeat, so no case reads stable.
+        self.assertTrue(all(rep["stable"] is None for rep in analysis["case_reports"]))
+        # Two launches of every case meet the plan.
+        repeated = analyze_runs([valid_campaign_text(run_id=0x11111111),
+                                 valid_campaign_text(run_id=0x22222222)])
+        self.assertEqual(repeated["repetitions"], 2)
+        self.assertTrue(repeated["repetitions_complete"])
         self.assertEqual(len(analysis["run_ids"]), 1)
 
     def test_stable_repeated_result(self) -> None:
@@ -456,61 +603,19 @@ class StatusSemanticsTests(unittest.TestCase):
         self.assertIn("result", dict(r.values))
 
 class StackAndArithmeticTests(unittest.TestCase):
-    def test_overflow_arithmetic_rejected(self) -> None:
-        # Simulate checked_range: offset > size -> reject, length > size - offset -> reject
-        def checked_range(base, offset, length, size):
-            if offset > size:
-                raise ProtocolError("offset > size")
-            if length > size - offset:
-                raise ProtocolError("length > size - offset")
-            if offset > (0xffffffff - base):
-                raise ProtocolError("base+offset overflow")
-            addr = base + offset
-            if length > (0xffffffff - addr):
-                raise ProtocolError("addr+length overflow")
-            end = addr + length
-            alloc_end = base + size
-            if end > alloc_end:
-                raise ProtocolError("end > alloc")
-            return addr
-        # Valid
-        self.assertEqual(checked_range(0x08800000, 0x100, 64, 0x1000), 0x08800100)
-        # Offset overflow -> reject
-        with self.assertRaises(ProtocolError):
-            checked_range(0x08800000, 0x2000, 64, 0x1000)
-        # Length overflow -> reject
-        with self.assertRaises(ProtocolError):
-            checked_range(0x08800000, 0x100, 0x2000, 0x1000)
-        # Base+offset overflow
-        with self.assertRaises(ProtocolError):
-            checked_range(0xffffffff, 0x10, 1, 0x1000)
+    """The parser keeps the harness's raw words; what the harness writes is checked below."""
 
-    def test_unsafe_stack_bounds_produce_not_measurable(self) -> None:
-        # If stack_size ==0, probe must be NOT_MEASURABLE, not guessed
-        # Our harness probe returns 1 for NOT_MEASURABLE; parser would see out fields with NOT_MEASURED sentinel 0xffffffff
-        text = valid_campaign_text()
-        # For CT-D00, out7 is csum; if NOT_MEASURABLE, it would be 0xffffffff
-        # Ensure parser accepts NOT_MEASURED sentinel as valid hex
-        lines = text.splitlines()
-        for line in lines:
-            if "CT-D00" in line:
-                # ensure out7 is 0xffffffff (NOT_MEASURED) still passes hex validation
-                self.assertIn("out6", line)
-        # Oversized probe_len already tested as rejected
+    def test_parser_keeps_the_not_measured_sentinel(self) -> None:
+        # CT-D00's out7 is NOT_MEASURED (0xffffffff) when the stack window cannot be probed.
+        text = "".join(
+            line.replace("out7=0x00000007", "out7=0xffffffff") + "\n" if "case_id=CT-D00 " in line
+            else line + "\n" for line in valid_campaign_text().splitlines())
+        self.assertIn("out7=0xffffffff", text)
+        r = next(x for x in parse_threading_output(text).results if x.case_id == "CT-D00")
+        self.assertEqual(dict(r.values)["out7"], "0xffffffff")
 
-    def test_zero_startthread_never_dereferenced(self) -> None:
-        # ST-SA01 with argSize 0 must have child_a1 = 0 or NOT_MEASURED and never deref
-        text = valid_campaign_text()
-        parsed = parse_threading_output(text)
-        r = next(x for x in parsed.results if x.case_id=="ST-SA01")
-        vals = dict(r.values)
-        # out1 is child_a1 – for zero arg it should be 0 or NOT_MEASURED, but parser just checks hex
-        self.assertIn("out1", vals)
-        # The harness must not have read child memory for zero size – we trust C implementation
-
-    def test_positive_copy_preserves_raw_checksums(self) -> None:
-        # ST-SA02 must preserve source and child checksums separately, not mutated
-        # Simulate: source 0x11111111, child 0x22222222, equality 0, both preserved raw
+    def test_parser_passes_raw_checksums_through(self) -> None:
+        # ST-SA02's source (out3) and child (out4) checksums reach the report as written.
         text = synth_meta() + "\n"
         for c in MATRIX["cases"]:
             if c["case_id"] == "ST-SA02":
@@ -525,36 +630,135 @@ class StackAndArithmeticTests(unittest.TestCase):
         self.assertEqual(vals["out4"], "0x22222222") # child raw, not mutated
         self.assertEqual(vals["out5"], "0x00000000") # equality 0 indicates mismatch, but checksums not XORed
 
-class EffectiveAttributeTests(unittest.TestCase):
-    def test_effective_attribute_not_fabricated(self) -> None:
-        # CT-A03 etc should have effective_attr = NOT_MEASURED (0xffffffff) not fabricated as requested_attr
-        # Our matrix expects out3 to be effective_attr; harness now emits NOT_MEASURED if not measured
-        text = valid_campaign_text()
-        parsed = parse_threading_output(text)
-        for cid in ("CT-A03","CT-A04","CT-A05"):
-            r = next(x for x in parsed.results if x.case_id==cid)
-            vals = dict(r.values)
-            # out3 is effective_attr – should be valid hex, but we check it is not necessarily equal to requested attr
-            # For test synthetic data we use 0, but real harness will emit 0xffffffff
-            # Ensure parser accepts any hex, but harness docs state NOT_MEASURED when not measured
-            self.assertIn("out3", vals)
-            # In synthetic valid campaign we generated out3 as 0x00000003 etc – parser accepts
-            # The important check is that harness does not echo requested attr as measured
-            # This is a harness C-level guarantee, verified by code inspection: out_eff = NOT_MEASURED
+
+@unittest.skipUnless(_HOST_CC, "no host C compiler on PATH")
+class HarnessCheckedArithmeticHostTests(unittest.TestCase):
+    """thread_oracle.c's own checked_add_u32 and checked_range_u32, compiled on the host.
+
+    The helpers are cut from the harness source unchanged; a driver feeds them the edge
+    cases. The mutant test compiles a copy without the overflow guard and shows the same
+    cases then accept an address that wraps, so the cases are not vacuous.
+    """
+
+    DRIVER = (
+        "#include <stdint.h>\n#include <stdio.h>\n#define PHASE_MAYBE_UNUSED\n%s\n"
+        "int main(void) {\n"
+        "    char op[8]; unsigned long a, b, c, d;\n"
+        "    while (scanf(\"%%7s %%lx %%lx %%lx %%lx\", op, &a, &b, &c, &d) == 5) {\n"
+        "        uint32_t out = 0; int rc;\n"
+        "        if (op[0] == 'a') rc = checked_add_u32((uint32_t)a, (uint32_t)b, &out);\n"
+        "        else rc = checked_range_u32((uint32_t)a, (uint32_t)b, (uint32_t)c, (uint32_t)d, &out);\n"
+        "        if (rc == 0) printf(\"ok 0x%%08x\\n\", (unsigned int)out);\n"
+        "        else printf(\"reject\\n\");\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n")
+
+    CASES = (
+        # (operation base offset length size, expected)
+        ("range 08800000 100 40 1000", "ok 0x08800100"),
+        ("range 08800000 fc0 40 1000", "ok 0x08800fc0"),      # ends exactly at the allocation end
+        ("range 08800000 fc1 40 1000", "reject"),             # one byte past it
+        ("range 08800000 2000 40 1000", "reject"),            # offset beyond the size
+        ("range 08800000 100 2000 1000", "reject"),           # length beyond the size
+        ("range ffffffff 10 1 1000", "reject"),               # base + offset wraps
+        ("range fffff000 0 10 1000", "reject"),               # base + size wraps
+        ("range 08900000 fff00000 10 2000", "reject"),        # child_a1 below the stack base
+        ("add fffffffe 1 0 0", "ok 0xffffffff"),
+        ("add ffffffff 1 0 0", "reject"),
+    )
+
+    def _run(self, source: str) -> list[str]:
+        helpers = (_c_definition(source, "static inline PHASE_MAYBE_UNUSED int checked_add_u32(")
+                   + _c_definition(source, "static inline PHASE_MAYBE_UNUSED int checked_range_u32("))
+        with tempfile.TemporaryDirectory(prefix="thread_oracle_checked_") as tmp:
+            driver = pathlib.Path(tmp) / "checked.c"
+            exe = pathlib.Path(tmp) / "checked.exe"
+            driver.write_text(self.DRIVER % helpers, encoding="utf-8")
+            built = subprocess.run(
+                [str(_HOST_CC), "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror", "-o", str(exe),
+                 str(driver)], capture_output=True, text=True, check=False)
+            self.assertEqual(built.returncode, 0, built.stderr)
+            ran = subprocess.run([str(exe)], input="".join(f"{case}\n" for case, _ in self.CASES),
+                                 capture_output=True, text=True, check=False, timeout=60)
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            return ran.stdout.splitlines()
+
+    def test_the_harness_helpers_reject_every_out_of_range_window(self) -> None:
+        self.assertEqual(self._run(_harness()), [expected for _, expected in self.CASES])
+
+    def test_a_helper_without_its_overflow_guard_is_caught(self) -> None:
+        guard = "    if (offset > UINT32_MAX - base) return -1;\n"
+        source = _harness()
+        self.assertEqual(source.count(guard), 1)
+        results = self._run(source.replace(guard, ""))
+        accepted = {case for (case, expected), got in zip(self.CASES, results, strict=True)
+                    if expected == "reject" and got != "reject"}
+        self.assertIn("add ffffffff 1 0 0", accepted)
+
+
+class HarnessSourceGateTests(unittest.TestCase):
+    """What thread_oracle.c writes for the cells the parser cannot judge.
+
+    Each gate runs on the harness source and must report nothing, and on an in-memory mutant
+    of it and must name the fault. These are source gates, not semantic kills: the mutants
+    are not built or run on a PSP.
+    """
+
+    def _assert_gate(self, gate: Any, original: str, mutant: str, reason: str) -> None:
+        source = _harness()
+        self.assertEqual(gate(source), [])
+        self.assertEqual(source.count(original), 1, original)
+        problems = gate(source.replace(original, mutant))
+        self.assertTrue(any(reason in problem for problem in problems), problems)
+
+    def test_unknown_stack_bounds_are_not_measurable_not_guessed(self) -> None:
+        self._assert_gate(_probe_window_problems,
+                          "    stack_size = 0; // force NOT_MEASURABLE",
+                          "    stack_size = 0x1000; // guessed",
+                          "stack size is not left unknown")
+        # CT-D00 reports that outcome as NOT_MEASURED in out7, not as a checksum.
+        body = _c_definition(_harness(), "static PHASE_MAYBE_UNUSED void run_ct_attr_cases(void) {")
+        unmeasurable = body[body.index("} else if (pr == 1) {"):]
+        unmeasurable = unmeasurable[:unmeasurable.index("} else {")]
+        self.assertIn('" out6=0x%08x out7=0x%08x", (unsigned int)probe_sp, NOT_MEASURED);', unmeasurable)
+
+    def test_zero_size_start_never_dereferences_the_child_argument(self) -> None:
+        self._assert_gate(_zero_arg_problems,
+                          "            sceKernelWaitThreadEnd(thid, NULL);\n"
+                          "            if (g_snapshot_valid) { child_a0=g_thread_snapshot.a0; child_a1=",
+                          "            sceKernelWaitThreadEnd(thid, NULL);\n"
+                          "            canary = *(volatile uint32_t*)(uintptr_t)g_thread_snapshot.a1;\n"
+                          "            if (g_snapshot_valid) { child_a0=g_thread_snapshot.a0; child_a1=",
+                          "ST-SA01 uses (uintptr_t)")
+
+    def test_effective_attribute_is_never_the_requested_one(self) -> None:
+        self._assert_gate(_effective_attr_problems,
+                          "            out_eff = NOT_MEASURED;\n#endif",
+                          "            out_eff = cases[i].attr;\n#endif",
+                          "out_eff takes values other than")
+
 
 class HumanTableTests(unittest.TestCase):
+    def _row(self, table: str, case_id: str) -> str:
+        rows = [line for line in table.splitlines() if re.match(rf"{re.escape(case_id)}\s", line)]
+        self.assertEqual(len(rows), 1, table)
+        return rows[0]
+
     def test_human_table_is_stable(self) -> None:
         from psp_threading_oracle.parser import human_table
-        analysis = analyze_runs([valid_campaign_text()])
-        table = human_table(analysis)
-        self.assertIn("CT-A01", table)
-        self.assertIn("STABLE", table)
-
-    def test_missing_repetition_is_detected(self) -> None:
-        analysis = analyze_runs([valid_campaign_text(0x11111111)])
-        self.assertEqual(analysis["launch_count"], 1)
-        self.assertEqual(analysis["expected_launches_repeat"], 10)
-        self.assertTrue(analysis["all_required_observed"])
+        repeated = human_table(analyze_runs([valid_campaign_text(0x11111111),
+                                             valid_campaign_text(0x22222222)]))
+        self.assertRegex(self._row(repeated, "CT-A01"), r"^CT-A01\s+.*\sSTABLE\s")
+        self.assertRegex(self._row(human_table(analyze_runs([valid_campaign_text(0x11111111)])),
+                                   "CT-A01"), r"^CT-A01\s+.*\sSINGLE\s")
+        changed = valid_campaign_text(0x22222222).replace(
+            "case_id=CT-A01 status=PASS result=0x00000000 out0=0x00000000",
+            "case_id=CT-A01 status=PASS result=0x00000000 out0=0x00000001")
+        self.assertIn("out0=0x00000001", changed)
+        variable = human_table(analyze_runs([valid_campaign_text(0x11111111), changed]))
+        self.assertRegex(self._row(variable, "CT-A01"), r"^CT-A01\s+.*\sVARIABLE\s")
+        self.assertRegex(self._row(variable, "CT-A03"), r"^CT-A03\s+.*\sSTABLE\s")
 
 class ExtensionNamespaceTests(unittest.TestCase):
     """Tests for optional extension namespace consistency."""
@@ -654,22 +858,15 @@ class MutantTests(unittest.TestCase):
             parse_threading_output(text2)
 
     def test_m7_direct_unchecked_probe_end_restored_fails(self) -> None:
-        # M7: direct unchecked probe_addr + probe_bytes would bypass safety
-        # This test verifies the arithmetic safety test structure exists
-        # The actual test checks that bad unchecked arithmetic is rejected
-        def bad_checked(base, size):
-            # Bad: forms end address directly without checked derivation
-            end = base + size  # Direct addition - this is the M7 mutant
-            return end
-        def good_checked(base, size):
-            # Good: uses checked_add
-            if size > 0xffffffff - base:
-                raise ProtocolError("overflow")
-            return base + size
-        # The good version should work for valid inputs
-        self.assertEqual(good_checked(0x08800000, 0x100), 0x08800100)
-        # The bad version bypasses safety checks
-        # Our harness uses checked helpers, so this mutant would fail hardware safety
+        # M7 (source gate on thread_oracle.c): the stack probe's end is formed directly as
+        # probe_addr + probe_bytes instead of through checked_add_u32.
+        source = _harness()
+        self.assertEqual(_probe_window_problems(source), [])
+        checked = "    if (checked_add_u32(probe_addr, probe_bytes, &probe_end) != 0) {\n"
+        self.assertEqual(source.count(checked), 1)
+        mutant = source.replace(checked, "    probe_end = probe_addr + probe_bytes;\n    if (0) {\n")
+        problems = _probe_window_problems(mutant)
+        self.assertIn("the probe end is formed by a direct probe_addr + probe_bytes", problems)
 
     def test_m8_ctd00_orientation_state_incorrectly_proven_fails(self) -> None:
         # M8: CT-D00/orientation state incorrectly treated as proven
@@ -720,26 +917,25 @@ class MutantTests(unittest.TestCase):
             parse_threading_output(text2)
 
     def test_m7_stack_checked_after_overflow_fails(self) -> None:
-        # Checked arithmetic must be before pointer formation – overflow must be rejected
-        def bad_checked(base, offset, size):
-            # Bad: forms pointer then checks (overflow already happened)
-            addr = (base + offset) & 0xffffffff  # overflow wraps
-            if addr + 64 > base + size:
-                raise ProtocolError("overflow check too late")
-            return addr
-        def good_checked(base, offset, length, size):
-            if offset > size:
-                raise ProtocolError("offset > size")
-            if length > size - offset:
-                raise ProtocolError("length > size - offset")
-            if offset > 0xffffffff - base:
-                raise ProtocolError("overflow")
-            addr = base + offset
-            return addr
-        # Good rejects overflow before formation
-        with self.assertRaises(ProtocolError):
-            good_checked(0xffffffff, 0x10, 1, 0x1000)
-        # Bad would wrap and maybe not be caught correctly – we ensure good path is used
+        # M7 (source gate on thread_oracle.c): a child argument pointer is read before the
+        # checked range proves it inside the child's stack.
+        source = _harness()
+        self.assertEqual(_child_copy_problems(source), [])
+        guard = "                if (inside && child_a1 != 0) {\n"
+        self.assertEqual(source.count(guard), 1)
+        problems = _child_copy_problems(source.replace(guard, "                if (child_a1 != 0) {\n"))
+        self.assertTrue(any("the 16-byte copy is not guarded by inside" in p for p in problems), problems)
+        checked = "if (checked_range_u32(stack_low, child_a1 - stack_low, 64, stack_size, &probe_addr)==0) {"
+        self.assertEqual(source.count(checked), 1)
+        problems = _child_copy_problems(source.replace(checked, "if (child_a1 >= stack_low) {"))
+        self.assertTrue(any("without a 64-byte checked range" in p for p in problems), problems)
+        # The window probe reads only after its own checked range.
+        ranged = ("    if (checked_range_u32((uint32_t)stack_addr, probe_offset, probe_bytes, stack_size, "
+                  "&probe_addr) != 0) {\n")
+        self.assertEqual(source.count(ranged), 1)
+        problems = _probe_window_problems(source.replace(ranged, "    probe_addr = (uint32_t)stack_addr + probe_offset;\n    if (0) {\n"))
+        self.assertTrue(any(p.startswith("not checked before the read: checked_range_u32") for p in problems),
+                        problems)
 
     def test_m8_synthetic_labeled_hardware_fails(self) -> None:
         text = valid_campaign_text() # synthetic placeholder
@@ -776,19 +972,16 @@ class MutantTests(unittest.TestCase):
         self.assertFalse(rep["stable"])
 
     def test_m10_raw_checksum_altered_on_mismatch_fails(self) -> None:
-        # Raw checksum must be preserved, not XORed
-        # Mutant would do child_csum ^= 0xffffffff on mismatch; our test ensures raw preserved
-        text = synth_meta() + "\n"
-        for c in MATRIX["cases"]:
-            if c["case_id"] == "ST-SA02":
-                text += "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-THREAD-001 case_id=ST-SA02 status=PASS result=0x00000000 out0=0x00000010 out1=0x08a00100 out2=0x08a00000 out3=0x11111111 out4=0x22222222 out5=0x00000000 out6=0x08b00000 out7=0x00000001 out8=0x00000100 attempt=0x00000000 canary=0xA5A5A5A5\n"
-            else:
-                text += synth_record(c["case_id"]) + "\n"
-        parsed = parse_threading_output(text)
-        vals = dict(next(x for x in parsed.results if x.case_id=="ST-SA02").values)
-        # If mutant altered, out4 would be 0xdddddddd (xor), not raw
-        self.assertEqual(vals["out4"], "0x22222222")
-        self.assertNotEqual(vals["out4"], "0xdddddddd")
+        # M10 (source gate on thread_oracle.c): the harness alters the child checksum on a
+        # mismatch (child_csum ^= ...) instead of reporting it raw.
+        source = _harness()
+        self.assertEqual(_raw_checksum_problems(source), [])
+        equality = "                raw_eq = (src_csum == child_csum && child_csum != NOT_MEASURED) ? 1 : 0;\n"
+        self.assertEqual(source.count(equality), 2)
+        mutant = source.replace(equality, equality + "                if (!raw_eq) child_csum ^= 0xffffffffu;\n", 1)
+        problems = _raw_checksum_problems(mutant)
+        self.assertTrue(any(p.startswith("ST-SA02: child_csum is not the raw checksum") for p in problems),
+                        problems)
 
 GATING_LAUNCHES = ("L1", "L2", "L3", "L4", "L5")
 

@@ -4702,23 +4702,42 @@ class ProbeProgressAndBoundedWaitTests(unittest.TestCase):
         # cpu-timing's blocking sceGeDrawSync(0) cell): inside a helper-thread entry whose
         # creator waits for it with a timeout and terminates it when the wait fails, so a
         # sync that never returns costs one cell.
+        checked = 0
         for source in sorted(self.fixture.glob("*.c")):
             text = re.sub(r"/\*.*?\*/|//[^\n]*", "", source.read_text(encoding="utf-8"),
                           flags=re.DOTALL)
-            for call in re.finditer(r"sceGeListSync\([^;]*,\s*0\s*\)|sceGeDrawSync\(\s*0\s*\)", text):
-                head = text.rfind("\nstatic ", 0, call.start())
-                entry = re.match(r"\nstatic int (\w+)\(SceSize \w+, void \*\w+\) \{",
-                                 text[head:text.index("{", head) + 1])
-                self.assertIsNotNone(entry, f"{source.name}: {call.group(0)} outside a helper thread")
-                create = re.search(
-                    r"sceKernelCreateThread\([^;]*\b%s\b" % _matched(entry).group(1), text
-                )
-                self.assertIsNotNone(create, f"{source.name}: {_matched(entry).group(1)} is never started")
-                caller_head = text.rfind("\nstatic ", 0, _matched(create).start())
-                caller = text[caller_head:text.index("\n}\n", _matched(create).start())]
-                self.assertRegex(caller, r"sceKernelWaitThreadEnd\(\s*\w+\s*,\s*&\w+\s*\)", source.name)
-                self.assertIn("sceKernelTerminateDeleteThread(", caller, source.name)
-            self.assertNotIn("sceGuSync(", text, source.name)
+            checked += len(_GE_BLOCKING_SYNC_RE.findall(text))
+            self.assertEqual(_unbounded_ge_sync_problems(source.name, text), [])
+        self.assertGreater(checked, 0)
+
+    def test_a_blocking_sync_after_a_helper_thread_is_credited_to_its_own_function(self) -> None:
+        # A non-static function placed after a helper-thread entry is its own function: its
+        # blocking sync runs on the caller's thread with no bound and is reported.
+        text = (
+            "\nstatic int gs_thread(SceSize args, void *argp) {\n"
+            "    (void)args; (void)argp;\n    sceGeDrawSync(0);\n    return 0;\n}\n"
+            "int gs_caller_sync(void) {\n    sceGeDrawSync(0);\n    return 0;\n}\n"
+            "static void gs_run(void) {\n"
+            "    SceUID t = sceKernelCreateThread(\"gs\", gs_thread, 0x20, 0x1000, 0, NULL);\n"
+            "    SceUInt timeout = 1000;\n"
+            "    if (sceKernelWaitThreadEnd(t, &timeout) < 0) {\n"
+            "        sceKernelTerminateDeleteThread(t);\n    }\n}\n"
+        )
+        self.assertEqual(_unbounded_ge_sync_problems("synthetic.c", text),
+                         ["synthetic.c: sceGeDrawSync(0) in gs_caller_sync, outside a helper thread"])
+        # The creator is also its own function, not the nearest static line above the call.
+        waits = text.replace("int gs_caller_sync(void) {\n    sceGeDrawSync(0);\n    return 0;\n}\n", "")
+        self.assertEqual(_unbounded_ge_sync_problems("synthetic.c", waits), [])
+        unbounded = waits[:waits.index("static void gs_run(void) {\n")] + (
+            "static void gs_other(void) {\n    SceUInt timeout = 1;\n"
+            "    if (sceKernelWaitThreadEnd(0, &timeout) < 0) {\n"
+            "        sceKernelTerminateDeleteThread(0);\n    }\n}\n"
+            "void gs_run(void) {\n"
+            "    SceUID t = sceKernelCreateThread(\"gs\", gs_thread, 0x20, 0x1000, 0, NULL);\n"
+            "    sceKernelWaitThreadEnd(t, NULL);\n}\n")
+        self.assertEqual(_unbounded_ge_sync_problems("synthetic.c", unbounded), [
+            "synthetic.c: gs_thread's creator gs_run does not wait for it with a timeout",
+            "synthetic.c: gs_thread's creator gs_run does not terminate it when the wait fails"])
 
     def test_ge_break_continue_writes_the_list_back_before_enqueueing_it(self) -> None:
         body = self._function("static void run_ge_break_continue(int emulated) {")
@@ -4816,6 +4835,88 @@ def _c_function_list(code: str) -> list[tuple[str, str]]:
         brace = code.index("{", match.end() - 1)
         found.append((match.group(1), code[brace:_c_close(code, brace) + 1]))
     return found
+
+
+def _c_definitions(code: str) -> list[tuple[str, str, int, int]]:
+    """(name, header through its brace, start, closing-brace index) of every top-level
+    function definition of comment-free C text, static or not, in source order."""
+    found: list[tuple[str, str, int, int]] = []
+    for match in re.finditer(r"^(?:static\s+)?[A-Za-z_][\w \t\*]*?\b(\w+)\s*\(([^;{}]*)\)\s*\{",
+                             code, re.MULTILINE):
+        if match.group(1) in _C_NOT_CALLS or (found and match.start() <= found[-1][3]):
+            continue
+        brace = code.index("{", match.end() - 1)
+        found.append((match.group(1), code[match.start():brace + 1], match.start(),
+                      _c_close(code, brace)))
+    return found
+
+
+def _manifest_pattern_problems(case: str, patterns: list[str], emitted: tuple[str, ...]) -> list[str]:
+    """Why a manifest row's case_ids patterns are not exactly the records a probe emits: an
+    emitted record no pattern names, a pattern that names no record, or a catch-all."""
+    import fnmatch
+    problems = [f"pattern {pattern!r} names every record of the case"
+                for pattern in patterns if pattern in ("*", f"{case}-*")]
+    problems += [f"record {record!r} matches no pattern" for record in emitted
+                 if not any(fnmatch.fnmatchcase(record, pattern) for pattern in patterns)]
+    problems += [f"pattern {pattern!r} matches no record" for pattern in patterns
+                 if not any(fnmatch.fnmatchcase(record, pattern) for record in emitted)]
+    return problems
+
+
+def _makefile_route_objs(makefile: str, case: str) -> list[str]:
+    """The OBJS words of the oracle Makefile's build route for CASE=case (its TARGET block)."""
+    start = makefile.find(f"else ifeq ($(CASE),{case})\nTARGET = ")
+    if start < 0:
+        raise AssertionError(f"no build route for CASE={case}")
+    end = makefile.find("\nelse", start + 1)
+    objs: list[str] = re.findall(r"^OBJS = (.*)$",
+                                 makefile[start:end if end >= 0 else len(makefile)], re.MULTILINE)
+    if len(objs) != 1:
+        raise AssertionError(f"CASE={case}'s build route has {len(objs)} OBJS lines")
+    return objs[0].split()
+
+
+_GE_BLOCKING_SYNC_RE = re.compile(r"sceGeListSync\([^;]*,\s*0\s*\)|sceGeDrawSync\(\s*0\s*\)")
+
+
+def _unbounded_ge_sync_problems(name: str, text: str) -> list[str]:
+    """Blocking GE syncs of a comment-free oracle source that are not a bounded cell.
+
+    A blocking sync is allowed only in a helper-thread entry
+    ``static int X(SceSize a, void *b)`` whose creator waits for it with a timeout and
+    terminates it when the wait fails. The function holding the sync and the one holding the
+    create call are found by brace matching, so a function of any linkage is its own scope.
+    """
+    definitions = _c_definitions(text)
+
+    def enclosing(at: int) -> tuple[str, str, int, int] | None:
+        return next((d for d in definitions if d[2] <= at <= d[3]), None)
+
+    problems = []
+    for call in _GE_BLOCKING_SYNC_RE.finditer(text):
+        owner = enclosing(call.start())
+        entry = owner and re.fullmatch(r"static int (\w+)\(SceSize \w+, void \*\w+\) \{", owner[1])
+        if not entry:
+            where = owner[0] if owner else "no function"
+            problems.append(f"{name}: {call.group(0)} in {where}, outside a helper thread")
+            continue
+        thread = entry.group(1)
+        create = re.search(r"sceKernelCreateThread\([^;]*\b%s\b" % thread, text)
+        creator = enclosing(create.start()) if create else None
+        if creator is None:
+            problems.append(f"{name}: {thread} is never started")
+            continue
+        body = text[creator[2]:creator[3] + 1]
+        if not re.search(r"sceKernelWaitThreadEnd\(\s*\w+\s*,\s*&\w+\s*\)", body):
+            problems.append(f"{name}: {thread}'s creator {creator[0]} does not wait for it "
+                            "with a timeout")
+        if "sceKernelTerminateDeleteThread(" not in body:
+            problems.append(f"{name}: {thread}'s creator {creator[0]} does not terminate it "
+                            "when the wait fails")
+    if "sceGuSync(" in text:
+        problems.append(f"{name}: sceGuSync")
+    return problems
 
 
 def _c_depth(body: str, at: int) -> int:
@@ -6401,36 +6502,56 @@ class HleMeasureProbeTests(unittest.TestCase):
     # ---- probe source rules ------------------------------------------------------
 
     def test_every_measured_call_follows_a_step_marker_within_three_lines(self) -> None:
-        lines = self.probe.splitlines()
-        callback_start = self.probe.index("static void hle_timer_order_capture(")
-        callback_end = self.probe.index("\n}\n", callback_start)
+        unstepped, checked = self._unstepped_measured_lines(self.probe)
+        self.assertEqual(unstepped, [])
+        self.assertGreaterEqual(checked, 40)
+
+    def test_a_copy_of_the_callback_clock_line_elsewhere_needs_its_own_step(self) -> None:
+        # Only the callback's own clock line is exempt: an identical line in a later function
+        # with no step before it is reported.
+        start = self.probe.index("static void hle_timer_order_capture(")
+        clock = next(line for line in self.probe[start:].splitlines()
+                     if "const uint64_t now = (uint64_t)sceKernelGetSystemTimeWide();" in line)
+        copied = self.probe + f"\nstatic void hle_copied_clock(void)\n{{\n{clock}\n    (void)now;\n}}\n"
+        unstepped, _checked = self._unstepped_measured_lines(copied)
+        self.assertEqual(unstepped, [f"line {copied.count(chr(10), 0, copied.rindex(clock)) + 1} "
+                                     f"has no hle_step before it: {clock.strip()}"])
+
+    def _unstepped_measured_lines(self, probe: str) -> tuple[list[str], int]:
+        """Measured calls of probe_hle_measure.c with no hle_step in the three lines before
+        them, outside the exempt spans, and how many calls were checked."""
+        lines = probe.splitlines()
+        callback_start = probe.index("static void hle_timer_order_capture(")
+        callback_lines = (probe.count("\n", 0, callback_start),
+                          probe.count("\n", 0, probe.index("\n}\n", callback_start)))
         callback_clock_line = "const uint64_t now = (uint64_t)sceKernelGetSystemTimeWide();"
         # hle-audio-rest (#279) times back-to-back blocking outputs: a host0 write between two
         # of them can take longer than a block and would starve the channel. One step names the
         # whole run, written before the reserve, and nothing reaches host0 until the release.
-        arest_start = self.probe.index("static void hle_arest_size(")
-        arest_end = self.probe.index("\n}\n", arest_start)
-        arest = self.probe[arest_start:arest_end]
+        arest_start = probe.index("static void hle_arest_size(")
+        arest_end = probe.index("\n}\n", arest_start)
+        arest = probe[arest_start:arest_end]
         reserve = arest.index("sceAudioChReserve(")
         release = arest.index("sceAudioChRelease(")
         self.assertIn("hle_step(step);", arest[:reserve])
         self.assertEqual(arest[:reserve].count("hle_step("), 1)
         for writer in ("hle_step(", "hle_write(", "hle_record(", "hle_skip("):
             self.assertNotIn(writer, arest[reserve:release])
-        arest_lines = (self.probe.count("\n", 0, arest_start + reserve),
-                       self.probe.count("\n", 0, arest_start + release))
+        arest_lines = (probe.count("\n", 0, arest_start + reserve),
+                       probe.count("\n", 0, arest_start + release))
         # hle-io-trunc's it_st() is a sceIoGetstat helper; every call to it runs inside a cell
         # that has already written its step.
-        it_st_start = self.probe.index("static uint32_t it_st(void)")
-        it_st_lines = (self.probe.count("\n", 0, it_st_start),
-                       self.probe.count("\n", 0, self.probe.index("\n}\n", it_st_start)))
+        it_st_start = probe.index("static uint32_t it_st(void)")
+        it_st_lines = (probe.count("\n", 0, it_st_start),
+                       probe.count("\n", 0, probe.index("\n}\n", it_st_start)))
         checked = 0
+        unstepped: list[str] = []
         for index, line in enumerate(lines):
             if not self.MEASURED_CALL_RE.search(line):
                 continue
             if self.PROTOTYPE_LINE_RE.fullmatch(line):
                 continue  # a whole-line prototype, not a call
-            if callback_start <= self.probe.find(line) < callback_end and callback_clock_line in line:
+            if callback_lines[0] <= index <= callback_lines[1] and callback_clock_line in line:
                 continue  # the callback samples time; host logging is unsafe there
             if arest_lines[0] <= index <= arest_lines[1]:
                 continue  # covered by the run's one step (above)
@@ -6438,9 +6559,9 @@ class HleMeasureProbeTests(unittest.TestCase):
                 continue  # called only inside a stepped hle-io-trunc cell (above)
             checked += 1
             window = lines[max(0, index - 3):index]
-            self.assertTrue(any("hle_step(" in previous for previous in window),
-                            f"line {index + 1} has no hle_step before it: {line.strip()}")
-        self.assertGreaterEqual(checked, 40)
+            if not any("hle_step(" in previous for previous in window):
+                unstepped.append(f"line {index + 1} has no hle_step before it: {line.strip()}")
+        return unstepped, checked
 
     def test_timer_callback_samples_only_the_clock_and_owned_capture(self) -> None:
         start = self.probe.index("static void hle_timer_order_capture(")
@@ -7625,8 +7746,7 @@ class KernelEntryNullcodeProbeTests(unittest.TestCase):
         for case, case_id in expected_ids.items():
             with self.subTest(case=case):
                 self.assertEqual(routes.get(case), case_id)
-                self.assertIn(f"else ifeq ($(CASE),{case})\n", makefile)
-                self.assertIn("probe_hle_issues.o", makefile)
+                self.assertIn("$(BUILD_DIR)/probe_hle_issues.o", _makefile_route_objs(makefile, case))
         for macro in ("HLE_CASE_NULL_CODE_REGISTRATION", "HLE_CASE_NULL_THREAD_INVOCATION",
                       "HLE_CASE_NULL_CALLBACK_INVOCATION"):
             self.assertIn(f"#define {macro} ", probe)
@@ -7653,6 +7773,24 @@ class KernelEntryNullcodeProbeTests(unittest.TestCase):
         self.assertIn("jr $25", exception_probe)
         self.assertIn("case_id=fetch-armed status=SKIP", exception_probe)
         self.assertIn("NAKAGAWA_PSP_STEP schema=1", exception_probe)
+
+    def test_build_route_objects_are_read_from_each_case_route(self) -> None:
+        # A null-handler route that builds another source is caught even though other routes
+        # still name probe_hle_issues.o.
+        makefile = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+                    / "Makefile").read_text(encoding="utf-8")
+        route = ("else ifeq ($(CASE),null-thread-invocation)\n"
+                 "TARGET = $(BUILD_DIR)/null_thread_invocation\n"
+                 "OBJS = $(BUILD_DIR)/probe_hle_issues.o")
+        self.assertEqual(makefile.count(route), 1)
+        moved = makefile.replace(route, route.replace("probe_hle_issues.o", "probe_dmac_timing.o"))
+        self.assertIn("probe_hle_issues.o", moved)
+        self.assertNotIn("$(BUILD_DIR)/probe_hle_issues.o",
+                         _makefile_route_objs(moved, "null-thread-invocation"))
+        self.assertIn("$(BUILD_DIR)/probe_hle_issues.o",
+                      _makefile_route_objs(moved, "null-callback-invocation"))
+        with self.assertRaises(AssertionError):
+            _makefile_route_objs(makefile, "no-such-case")
 
     def test_interrupt_and_ge_null_handlers_are_registered_but_never_enabled_or_queued(self) -> None:
         probe = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
@@ -12811,11 +12949,25 @@ class _GeNewCaseMixin:
         report = parse_campaign_probe_output("".join(lines), self.CASE)
         test.assertTrue(report.complete)
         # The manifest's case patterns name every record and only those.
-        import fnmatch
         patterns = self.row["case_ids"]
         test.assertEqual(patterns[-1], f"{self.CASE}-done")
-        for case in (*spec.semantic_cases, spec.terminal_case):
-            test.assertTrue(any(fnmatch.fnmatchcase(case, pattern) for pattern in patterns), case)
+        test.assertEqual(_manifest_pattern_problems(
+            self.CASE, patterns, (*spec.semantic_cases, spec.terminal_case)), [])
+
+    def test_manifest_patterns_that_over_claim_are_refused(self) -> None:
+        test = cast(unittest.TestCase, self)
+        spec, _counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        emitted = (*spec.semantic_cases, spec.terminal_case)
+        patterns = list(self.row["case_ids"])
+        test.assertEqual(_manifest_pattern_problems(self.CASE, patterns, emitted), [])
+        test.assertEqual(_manifest_pattern_problems(self.CASE, [*patterns, "stale-*"], emitted),
+                         ["pattern 'stale-*' matches no record"])
+        test.assertEqual(_manifest_pattern_problems(self.CASE, ["*"], emitted),
+                         ["pattern '*' names every record of the case"])
+        test.assertIn(f"pattern '{self.CASE}-*' names every record of the case",
+                      _manifest_pattern_problems(self.CASE, [f"{self.CASE}-*", *patterns], emitted))
+        test.assertEqual(_manifest_pattern_problems(self.CASE, patterns[:-1], emitted),
+                         [f"record '{self.CASE}-done' matches no pattern"])
 
 
 class GeRasterBoundsProbeTests(_GeNewCaseMixin, unittest.TestCase):
@@ -13687,6 +13839,27 @@ def _c_statement_end(text: str, start: int) -> int:
     raise AssertionError("statement without a terminating semicolon")
 
 
+def _c_top_level_conditional(statement: str) -> bool:
+    """Whether a C statement has a short-circuit or ternary operator outside every bracket
+    (string and character literals skipped), so part of it may not run."""
+    depth = 0
+    i = 0
+    while i < len(statement):
+        ch = statement[i]
+        if ch in "\"'":
+            i += 1
+            while statement[i] != ch:
+                i += 2 if statement[i] == "\\" else 1
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and (ch == "?" or statement.startswith(("&&", "||"), i)):
+            return True
+        i += 1
+    return False
+
+
 def _c_block_paths(block: str, events: Any, loop: Any,
                    env: dict[str, Any]) -> list[tuple[tuple[str, ...], bool]]:
     """Every control-flow path through a comment-free C block: (what it emits, returned).
@@ -13695,7 +13868,8 @@ def _c_block_paths(block: str, events: Any, loop: Any,
     plain statements. events(statement, env) names what a plain statement emits;
     loop(header, body, env) gives a for loop's variable and the values it takes. Anything else
     (while, do, switch, goto, break, continue, an if body without braces, a loop body whose
-    emission depends on a branch or that returns) raises, so a construct this walker cannot
+    emission depends on a branch or that returns, a statement that emits behind a top-level
+    &&, || or ?) raises, so a construct this walker cannot
     count fails the test instead of being passed over.
     """
     text = block[1:-1]
@@ -13771,7 +13945,11 @@ def _c_block_paths(block: str, events: Any, loop: Any,
             extend(_c_block_paths(body, events, loop, env))
         else:
             end = _c_statement_end(text, i)
-            extend({(tuple(events(text[i:end + 1], env)), False)})
+            statement = text[i:end + 1]
+            emitted_here = tuple(events(statement, env))
+            if emitted_here and _c_top_level_conditional(statement):
+                raise AssertionError(f"a record made conditional inside one statement: {statement}")
+            extend({(emitted_here, False)})
             i = end + 1
 
 
@@ -14096,6 +14274,29 @@ class SafeScalarProbeTests(unittest.TestCase):
         branch = branch[branch.index("\n") + 1:branch.index("#else")]
         self.assertEqual(_c_block_paths("{" + branch + "}", walker._events, walker._loop, {}),
                          [(rows, True)])
+
+    def test_the_row_walk_refuses_a_record_made_conditional_inside_one_statement(self) -> None:
+        def events(statement: str, _env: dict[str, Any]) -> list[str]:
+            return re.findall(r'hle_record\("([a-z-]+)"', statement)
+
+        def loop(header: str, _body: str, _env: dict[str, Any]) -> tuple[str, list[int]]:
+            raise AssertionError(header)
+
+        for statement in ('ok && (hle_record("tls-thread", "PASS", 0, out, 1), 0);',
+                          'ok || hle_record("tls-thread", "PASS", 0, out, 1);',
+                          'ok ? hle_record("tls-thread", "PASS", 0, out, 1) : (void)0;'):
+            with self.subTest(statement=statement):
+                with self.assertRaisesRegex(AssertionError, "conditional inside one statement"):
+                    _c_block_paths("{ " + statement + " }", events, loop, {})
+        # A conditional inside the record's own arguments, or in a literal, still records once.
+        for statement in ('hle_record("tls-thread", ok ? "PASS" : "FAIL", 0, out, 1);',
+                          'hle_record("tls-thread", "a?b||c", 0, out, 1);',
+                          "hle_record(\"tls-thread\", q == '?' ? \"PASS\" : \"FAIL\", 0, out, 1);"):
+            with self.subTest(statement=statement):
+                self.assertEqual(_c_block_paths("{ " + statement + " }", events, loop, {}),
+                                 [(("tls-thread",), False)])
+        # A conditional statement that records nothing is plain code.
+        self.assertEqual(_c_block_paths("{ x = ok ? 1 : 2; }", events, loop, {}), [((), False)])
 
     def test_the_row_walk_fails_when_any_record_is_dropped_or_doubled(self) -> None:
         """The walk is not vacuous: removing or repeating any one record statement of the
@@ -16199,6 +16400,23 @@ def _font_tree(info_count: int = 2) -> list[str]:
     return nodes
 
 
+class HostHarnessClassCleanupTests(unittest.TestCase):
+    """A host harness whose compile fails still removes its scratch directory."""
+
+    def test_a_failed_compile_leaves_no_scratch_directory(self) -> None:
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="synthetic compile failure")
+        for harness in (RegistryFontWalkHostTests, IoCasesHostTests, FontListHostTests):
+            with self.subTest(harness=harness.__name__):
+                probe: Any = type(f"{harness.__name__}CleanupProbe", (harness,), {})
+                with patch("subprocess.run", return_value=failed):
+                    with self.assertRaisesRegex(AssertionError, "did not compile"):
+                        probe.setUpClass()
+                scratch = probe.tmp
+                self.assertTrue(os.path.isdir(scratch))
+                probe.doClassCleanups()
+                self.assertFalse(os.path.exists(scratch))
+
+
 @unittest.skipUnless(_HOST_CC, "no host C compiler on PATH")
 class RegistryFontWalkHostTests(unittest.TestCase):
     """registry_walk.h, the probe's font-registry walk, run against a fake registry.
@@ -16218,6 +16436,8 @@ class RegistryFontWalkHostTests(unittest.TestCase):
         cls.root = Path(__file__).resolve().parents[1]
         cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.tmp = tempfile.mkdtemp(prefix="registry_walk_host_")
+        # A class cleanup runs even when setUpClass fails; tearDownClass would not.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         cls.exe = str(Path(cls.tmp) / "registry_walk_host.exe")
         result = subprocess.run(
             [cast(str, _HOST_CC), "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror",
@@ -16226,10 +16446,6 @@ class RegistryFontWalkHostTests(unittest.TestCase):
         )
         if result.returncode != 0:
             raise AssertionError("registry_walk_host.c did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _run(self, nodes: list[str], *, root_lists: bool = True,
              options: tuple[str, ...] = ()) -> SimpleNamespace:
@@ -16653,6 +16869,8 @@ class IoCasesHostTests(unittest.TestCase):
         cls.root = Path(__file__).resolve().parents[1]
         cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.tmp = tempfile.mkdtemp(prefix="io_cases_host_")
+        # A class cleanup runs even when setUpClass fails; tearDownClass would not.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         cls.exe = str(Path(cls.tmp) / "io_cases_host.exe")
         result = subprocess.run(
             [cast(str, _HOST_CC), "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror",
@@ -16661,10 +16879,6 @@ class IoCasesHostTests(unittest.TestCase):
         )
         if result.returncode != 0:
             raise AssertionError("io_cases_host.c did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _run(self, mode: str, lines: list[str]) -> SimpleNamespace:
         result = subprocess.run([self.exe, mode], input="\n".join(lines) + "\n",
@@ -16686,10 +16900,15 @@ class IoCasesHostTests(unittest.TestCase):
         emitted = "".join(line[5:] + "\n" for line in out if line.startswith("EMIT "))
         stream = META.format(source="psp", model="PSP-3000", firmware="6.6.1",
                              binary=MEASURED_SHA, commit=MEASURED_COMMIT) + emitted
-        return SimpleNamespace(lines=out, calls=calls, host0=host0, stream=stream)
+        return SimpleNamespace(lines=out, calls=calls, host0=host0, stream=stream, scenario=lines)
 
     def _assert_font_calls_safe(self, run: SimpleNamespace) -> None:
-        listed: set[str] = set()
+        # The names the fake flash0:/font listing returns, from the scenario's entry lines.
+        listed = {bytes.fromhex(line.split()[3]).decode("ascii", "replace")
+                  if line.split()[3] != "-" else "" for line in run.scenario
+                  if line.startswith("entry ")}
+        read_from_flash: set[str] = set()
+        opened_for_write: set[str] = set()
         for name, fields in run.calls:
             path = fields.get("path", "")
             if name == "sceIoDopen":
@@ -16700,18 +16919,44 @@ class IoCasesHostTests(unittest.TestCase):
                 flags = int(fields["flags"], 16)
                 if path.startswith("flash0:"):
                     self.assertEqual(flags, 0x1, path)
+                    self.assertTrue(path.startswith("flash0:/font/"), path)
+                    leaf = path[len("flash0:/font/"):]
+                    self.assertIn(leaf, listed, f"{path} was never listed")
+                    read_from_flash.add(leaf)
                 else:
                     self.assertTrue(path.startswith("host0:/fonts/"), path)
                     self.assertIn(flags, (0x1, 0x602), path)
                     leaf = path[len("host0:/fonts/"):]
                     self.assertRegex(leaf, r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,62}$")
                     if flags == 0x602:
-                        listed.add(leaf)
+                        self.assertIn(leaf, read_from_flash,
+                                      f"{path} is written before its listed flash0 file is read")
+                        opened_for_write.add(path)
             elif name == "sceIoWrite":
-                self.assertTrue(fields["target"].startswith("host0:/fonts/"), fields)
+                self.assertIn(fields["target"], opened_for_write, fields)
             else:
                 self.assertIn(name, ("sceIoDread", "sceIoDclose", "sceIoRead", "sceIoClose"))
         self.assertNotIn("DREAD-PRIVATE-NOT-NULL", run.lines)
+
+    def test_the_safety_replay_refuses_a_write_to_a_name_never_listed(self) -> None:
+        listing = [("sceIoDopen", {"path": "flash0:/font"}),
+                   ("sceIoOpen", {"path": "flash0:/font/a.bin", "flags": "0x00000001"})]
+        never = [("sceIoOpen", {"path": "host0:/fonts/never.bin", "flags": "0x00000602"}),
+                 ("sceIoWrite", {"target": "host0:/fonts/never.bin"})]
+        listed = [("sceIoOpen", {"path": "host0:/fonts/a.bin", "flags": "0x00000602"}),
+                  ("sceIoWrite", {"target": "host0:/fonts/a.bin"})]
+        scenario = [_entry("a.bin", 4, 1)]
+        self._assert_font_calls_safe(SimpleNamespace(lines=[], scenario=scenario,
+                                                     calls=listing + listed))
+        with self.assertRaisesRegex(AssertionError, "host0:/fonts/never.bin is written before"):
+            self._assert_font_calls_safe(SimpleNamespace(lines=[], scenario=scenario,
+                                                         calls=listing + never))
+        with self.assertRaisesRegex(AssertionError, "flash0:/font/b.bin was never listed"):
+            self._assert_font_calls_safe(SimpleNamespace(lines=[], scenario=scenario, calls=[
+                *listing, ("sceIoOpen", {"path": "flash0:/font/b.bin", "flags": "0x00000001"})]))
+        with self.assertRaises(AssertionError):
+            self._assert_font_calls_safe(SimpleNamespace(lines=[], scenario=scenario, calls=[
+                *listing, ("sceIoWrite", {"target": "host0:/fonts/a.bin"})]))
 
     def test_listing_is_copied_byte_for_byte_and_verified(self) -> None:
         files = {"a.bin": (100, 7), "large.bin": (140_000, 9), "empty.bin": (0, 3),
@@ -17502,6 +17747,8 @@ class FontListHostTests(unittest.TestCase):
         cls.root = Path(__file__).resolve().parents[1]
         cls.fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
         cls.tmp = tempfile.mkdtemp(prefix="font_list_host_")
+        # A class cleanup runs even when setUpClass fails; tearDownClass would not.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         cls.exe = str(Path(cls.tmp) / "io_cases_host.exe")
         result = subprocess.run(
             [cast(str, _HOST_CC), "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror",
@@ -17510,10 +17757,6 @@ class FontListHostTests(unittest.TestCase):
         )
         if result.returncode != 0:
             raise AssertionError("io_cases_host.c did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _run(self, lines: list[str]) -> SimpleNamespace:
         result = subprocess.run([self.exe, "fontlist"], input="\n".join(lines) + "\n",
@@ -18175,25 +18418,44 @@ class Record20261015Tests(unittest.TestCase):
             ("26 case envelopes", "acceptance-eligible"),
             "the number of acceptance-eligible campaign envelopes",
         )
-        table_rows = self._table_rows(entry)
-        eligible_rows = {
-            (row[0], row[1]) for row in table_rows if len(row) >= 3 and row[0] != "Campaign case"
-        }
+        self._assert_requalification_table(entry)
         for case, test_id in self.REQUALIFIED.items():
             with self.subTest(case=case):
-                self.assertIn((case, test_id), eligible_rows)
                 row = self.rows[test_id]
                 self.assertEqual(row["hardware_evidence"], "MEASURED")
                 self.assertIn("f2d6c91a", row["measurement_note"])
-        for case in self.NOT_ELIGIBLE:
-            with self.subTest(case=case):
-                self.assertIn(case, entry)
-                self.assertNotIn(case, {row[0] for row in table_rows if row})
         # Captured-only rows stay captured: the requalification run adds no measured cell.
         self.assertEqual(self.rows["PSP-TEARDOWN-001"]["hardware_evidence"], "CAPTURED")
         self.assertIn("f2d6c91a", self.rows["PSP-TEARDOWN-001"]["evidence_note"])
         self.assertIn("f2d6c91a", self.rows["PSP-DMAC-001"]["measurement_note"])
-        self.assertEqual(len(self.REQUALIFIED) + len(self.NOT_ELIGIBLE), 32)
+
+    def _assert_requalification_table(self, entry: str) -> None:
+        """The entry's table names exactly the acceptance-eligible cases, each once, and with
+        the cases it leaves out accounts for the entry's case count."""
+        table_rows = self._table_rows(entry)
+        # The case table runs from its "Campaign case" header to the first non-table line.
+        lines = entry[entry.index("| Campaign case |"):].splitlines()
+        end = next((i for i, line in enumerate(lines) if not line.strip().startswith("|")),
+                   len(lines))
+        eligible_rows = [(row[0], row[1]) for row in self._table_rows("\n".join(lines[:end]))
+                         if row[0] != "Campaign case"]
+        self.assertEqual(sorted(eligible_rows), sorted(self.REQUALIFIED.items()))
+        for case in self.NOT_ELIGIBLE:
+            self.assertIn(case, entry, case)
+            self.assertNotIn(case, {row[0] for row in table_rows if row}, case)
+        total = len(eligible_rows) + len(self.NOT_ELIGIBLE)
+        self.assertEqual(total, 32)
+        self.assertIn(f"requalification of the {total}-case campaign queue", entry)
+
+    def test_a_requalification_table_that_differs_from_the_cases_is_refused(self) -> None:
+        entry = self._entry("- **PSP-3000 requalification of the 32-case campaign queue")
+        self._assert_requalification_table(entry)
+        row = "  | `wait-outcomes` | `PSP-WAIT-001` | 5 records PASS, all identical |\n"
+        self.assertEqual(entry.count(row), 1)
+        for changed in (entry.replace(row, row + row.replace("wait-outcomes", "wait-extra")),
+                        entry.replace(row, row + row), entry.replace(row, "")):
+            with self.assertRaises(AssertionError):
+                self._assert_requalification_table(changed)
 
     def test_readme_and_index_agree_on_the_status_of_the_new_probes(self) -> None:
         rows = self._table_rows(self.readme)
