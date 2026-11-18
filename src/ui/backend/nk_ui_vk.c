@@ -104,6 +104,10 @@ void nk_ui_vk_get_stats(const NkUiVk *vk, NkUiVkStats *out) {
    size (at most 480 px wide) and are scaled up with a linear filter. */
 #define NK_UI_VK_WAVES_DIVISOR 3
 #define NK_UI_VK_WAVES_MAX_W 480
+/* A box far taller than wide keeps its height in bounds too; 4096 px is more
+   than any real window needs at a third of its size, and every Vulkan device
+   takes a 4096 px side. */
+#define NK_UI_VK_WAVES_MAX_H 4096
 /* Waves commands one list may hold: each needs its own texture for the frame,
    because every upload is recorded before any draw. The launcher draws one. */
 #define NK_UI_VK_WAVES_SLOTS 4
@@ -1150,6 +1154,8 @@ static bool nk_ui_vk_prepare_image(NkUiVk *vk, const NkUiDrawCmd *cmd) {
     const NkUiImage *image = (const NkUiImage *)cmd->custom;
     NkUiVkTexture *texture;
     uint32_t first;
+    int64_t box_w;
+    int64_t box_h;
     int width;
     int height;
     if (image == NULL || image->rgba_pm == NULL || image->width == 0u || image->height == 0u ||
@@ -1159,13 +1165,21 @@ static bool nk_ui_vk_prepare_image(NkUiVk *vk, const NkUiDrawCmd *cmd) {
         return true;
     }
     /* Shrunk by more than a quarter: upload an area-averaged copy at the drawn
-       size, so a 64 px glyph drawn at 24 px does not alias. */
+       size, so a 64 px glyph drawn at 24 px does not alias. Only a shrinking
+       axis takes the drawn size; one drawn larger keeps the image's own, so the
+       copy is never bigger than the image and the linear filter stretches it.
+       The extents are 64-bit, so a box side past INT_MAX / 5 cannot overflow. */
     width = (int)image->width;
     height = (int)image->height;
-    if ((cmd->bounds[2] - cmd->bounds[0]) * 5 < width * 4 ||
-        (cmd->bounds[3] - cmd->bounds[1]) * 5 < height * 4) {
-        width = cmd->bounds[2] - cmd->bounds[0];
-        height = cmd->bounds[3] - cmd->bounds[1];
+    box_w = (int64_t)cmd->bounds[2] - (int64_t)cmd->bounds[0];
+    box_h = (int64_t)cmd->bounds[3] - (int64_t)cmd->bounds[1];
+    if (box_w * 5 < (int64_t)width * 4 || box_h * 5 < (int64_t)height * 4) {
+        if (box_w < (int64_t)width) {
+            width = (int)box_w;
+        }
+        if (box_h < (int64_t)height) {
+            height = (int)box_h;
+        }
     }
     if (!nk_ui_vk_reserve_quads(vk, 1u)) {
         return false;
@@ -1207,6 +1221,12 @@ static bool nk_ui_vk_prepare_waves(NkUiVk *vk, const NkUiDrawCmd *cmd) {
         w = NK_UI_VK_WAVES_MAX_W;
     }
     h = (int)((long long)bh * w / bw);
+    if (h > NK_UI_VK_WAVES_MAX_H) {
+        h = NK_UI_VK_WAVES_MAX_H;
+    }
+    if (h > vk->image_max_side) {
+        h = vk->image_max_side;
+    }
     if (w < 1) w = 1;
     if (h < 1) h = 1;
     if (waves->texture == NULL || waves->w != w || waves->h != h) {

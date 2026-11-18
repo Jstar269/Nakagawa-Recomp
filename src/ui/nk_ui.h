@@ -195,6 +195,8 @@ typedef struct {
     float advance_y;
 } NkUiGlyphBitmap;
 
+/* shape writes at most `max` glyphs to `out` and returns how many it wrote;
+   renderers draw no more than `max` whatever it returns. */
 typedef struct {
     void *user;
     NkUiTextSize (*measure)(void *user, int font, int px, const char *s, size_t n);

@@ -907,6 +907,234 @@ static int test_command_clip_bounds_text(void) {
     return 1;
 }
 
+/* A text backend that writes at most `max` glyphs but, once g_shape_overstates
+   is set, returns three more than it wrote (a "size needed" convention). Its
+   glyphs are 2 x 2 squares 4 px apart. */
+static bool g_shape_overstates;
+
+static int overstating_shape(void *user, int font, int px, const char *s, size_t n,
+                             NkUiGlyph *out, int max) {
+    int i;
+    (void)user;
+    (void)font;
+    (void)px;
+    (void)s;
+    for (i = 0; i < max && (size_t)i < n; ++i) {
+        memset(&out[i], 0, sizeof(out[i]));
+        out[i].glyph = 1u;
+        out[i].codepoint = 'x';
+        out[i].x = (float)(i * 4);
+        out[i].advance_x = 4.0f;
+        out[i].text_index = (uint32_t)i;
+    }
+    return g_shape_overstates ? i + 3 : i;
+}
+
+static bool square_raster(void *user, int font, int px, uint32_t glyph, NkUiGlyphBitmap *out) {
+    static const uint8_t ink[4] = {0xFFu, 0xFFu, 0xFFu, 0xFFu};
+    (void)user;
+    (void)font;
+    (void)px;
+    (void)glyph;
+    memset(out, 0, sizeof(*out));
+    out->pixels = ink;
+    out->width = 2;
+    out->height = 2;
+    out->pitch = 2;
+    out->bearing_y = 2;
+    out->advance_x = 4.0f;
+    return true;
+}
+
+static int test_shape_count_is_clamped(void) {
+    /* A shaper that reports more glyphs than the room it was given draws only
+       the glyphs that fit: the renderer never reads past its glyph buffer. A
+       longer run first leaves the buffers bigger than the short run needs, so
+       an unclamped count reads stale glyphs instead of past the allocation. */
+    NkUiTextBackend text;
+    Target target;
+    NkUiSdlr *backend;
+    NkUiSdlrStats stats;
+    NkUiDrawBuffer buffer;
+    uint32_t drawn;
+    memset(&text, 0, sizeof(text));
+    text.shape = overstating_shape;
+    text.raster = square_raster;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 64, 16), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, &text);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_text(&buffer, (NkUiPixelRect){0, 0, 64, 16}, "xxxxxxxxxx", 10, 0, 8,
+                              0xFFFFFFFFu, 1u), "queue a ten-glyph run");
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the long run");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    drawn = stats.glyphs_drawn;
+    CHECK(drawn == 10u, "an honest shaper draws every glyph");
+    nk_ui_draw_buffer_reset(&buffer);
+    CHECK(nk_ui_draw_add_text(&buffer, (NkUiPixelRect){0, 0, 64, 16}, "xx", 2, 0, 8,
+                              0xFFFFFFFFu, 2u), "queue a two-glyph run");
+    g_shape_overstates = true;
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the short run");
+    g_shape_overstates = false;
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.glyphs_drawn - drawn == 2u, "only the two glyphs the shaper wrote are drawn");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_image_shrinks_per_axis(void) {
+    /* An image drawn narrower than itself but far taller is shrunk across only:
+       the texture is never taller than the image, so a tall box needs no texture
+       past the renderer's limit. Box sides past INT_MAX / 5 compare without
+       overflowing and are drawn at the image's own size. */
+    static uint8_t big[64u * 64u * 4u];
+    NkUiImage image = {64u, 64u, big, 0x5EED0101ull};
+    Target target;
+    NkUiSdlr *backend;
+    NkUiSdlrStats stats;
+    NkUiDrawBuffer buffer;
+    const uint32_t black = 0x000000FFu;
+    bool rendered;
+    memset(big, 0xFF, sizeof(big));
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 64, 64), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, NULL);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_image(&buffer, &image, (NkUiPixelRect){0, 0, 30, 40000}, 0xFFFFFFFFu, 1u),
+          "a narrow, very tall image box");
+    target_clear(&target, black);
+    /* The software renderer sets no texture limit, so large allocations stand
+       in for one: a 30 x 40000 texture needs megabytes, a 30 x 64 one does not. */
+    g_fail_large_allocations = true;
+    rendered = nk_ui_sdlr_render(backend, &buffer.list);
+    g_fail_large_allocations = false;
+    CHECK(rendered, "render the tall image");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.images_failed == 0u && stats.images_drawn == 1u, "the tall image is drawn");
+    CHECK(target_pixel(&target, 10, 32) == 0xFFFFFFFFu && target_pixel(&target, 40, 32) == black,
+          "it fills its box and nothing beside it");
+    nk_ui_draw_buffer_reset(&buffer);
+    CHECK(nk_ui_draw_add_image(&buffer, &image, (NkUiPixelRect){0, 0, 500000000, 64}, 0xFFFFFFFFu,
+                               2u), "an image box wider than INT_MAX / 5");
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the wide image");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.images_failed == 0u && stats.images_drawn == 2u, "the wide image is drawn");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_tall_waves_fit_the_renderer(void) {
+    /* Waves in a box far taller than wide get a texture of bounded height; the
+       linear scale-up covers the rest. The software renderer sets no texture
+       limit, so large allocations stand in for one (a 1 x 333333 texture needs
+       over a megabyte). */
+    NkUiWavesCommand waves;
+    NkUiWavePalette palette;
+    Target target;
+    NkUiSdlr *backend;
+    NkUiSdlrStats stats;
+    NkUiDrawBuffer buffer;
+    bool rendered;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(nk_ui_waves_palette(0u, &palette), "base wave palette");
+    nk_ui_waves_command(37.0, 3.0f, 1000000.0f, &palette, &waves);
+    CHECK(target_open(&target, 16, 16), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, NULL);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_custom(&buffer, NK_UI_CUSTOM_WAVES, &waves,
+                                (NkUiPixelRect){0, 0, 3, 1000000}, 1u), "a 3 px wide waves box");
+    CHECK(nk_ui_draw_add_rect(&buffer, (NkUiRect){8.0f, 8.0f, 4.0f, 4.0f}, 1.0f, 0.0f,
+                              0xFF0000FFu, 2u), "a rectangle after the waves");
+    target_clear(&target, 0x000000FFu);
+    g_fail_large_allocations = true;
+    rendered = nk_ui_sdlr_render(backend, &buffer.list);
+    g_fail_large_allocations = false;
+    CHECK(rendered, "render the tall waves");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.waves_drawn == 1u, "the tall waves are drawn");
+    CHECK(target_pixel(&target, 9, 9) == 0xFF0000FFu, "and so is what follows them");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_unbalanced_scissor_end_is_malformed(void) {
+    /* A scissor end with none open is a malformed list, as in the Vulkan
+       backend: render refuses it before drawing anything. The draw buffer never
+       emits one, so the list is a balanced one with its start removed. */
+    Target target;
+    NkUiSdlr *backend;
+    NkUiDrawBuffer buffer;
+    NkUiDrawCmd commands[2];
+    NkUiDrawList list;
+    const uint32_t black = 0x000000FFu;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 16, 16), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, NULL);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_rect(&buffer, (NkUiRect){0.0f, 0.0f, 16.0f, 16.0f}, 1.0f, 0.0f,
+                              0xFF0000FFu, 1u), "a rectangle");
+    CHECK(nk_ui_draw_add_scissor(&buffer, true, (NkUiPixelRect){0, 0, 16, 16}, 2u) &&
+              nk_ui_draw_add_scissor(&buffer, false, (NkUiPixelRect){0, 0, 16, 16}, 2u),
+          "a scissor start and end");
+    CHECK(buffer.list.ncmd == 3u && buffer.list.cmd[1].kind == NK_UI_DRAW_SCISSOR_START,
+          "the rectangle, then the scissor");
+    commands[0] = buffer.list.cmd[0];
+    commands[1] = buffer.list.cmd[2];
+    list = buffer.list;
+    list.cmd = commands;
+    list.ncmd = 2u;
+    target_clear(&target, black);
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "the balanced list renders");
+    target_clear(&target, black);
+    CHECK(!nk_ui_sdlr_render(backend, &list), "the unbalanced list is refused");
+    CHECK(target_pixel(&target, 8, 8) == black, "and nothing of it is drawn");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_geometry_failure_fails_the_render(void) {
+    /* Geometry SDL cannot queue (here for want of memory) fails the render
+       rather than reporting a frame that is missing it. */
+    Target target;
+    NkUiSdlr *backend;
+    NkUiDrawBuffer buffer;
+    bool rendered;
+    int i;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 16, 16), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, NULL);
+    CHECK(backend != NULL, "create the backend");
+    /* Enough neighbouring rectangles that their one batch needs over a
+       megabyte of SDL vertex data. */
+    for (i = 0; i < 30000; ++i) {
+        if (!nk_ui_draw_add_rect(&buffer, (NkUiRect){(float)(i % 16), 0.0f, 1.0f, 1.0f}, 1.0f,
+                                 0.0f, 0xFF0000FFu, 1u)) {
+            break;
+        }
+    }
+    CHECK(i == 30000, "queue the rectangles");
+    target_clear(&target, 0x000000FFu);
+    g_fail_large_allocations = true;
+    rendered = nk_ui_sdlr_render(backend, &buffer.list);
+    g_fail_large_allocations = false;
+    CHECK(!rendered, "geometry SDL refused fails the render");
+    target_clear(&target, 0x000000FFu);
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "the next render succeeds");
+    CHECK(target_pixel(&target, 4, 0) == 0xFF0000FFu, "and draws the rectangles");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
 #if defined(_WIN32)
 /* A copy of SDL3_ttf.dll in the current folder (here a file that is no library at all) is
    never the one nk_ui_ttf_create loads: its Windows default is a full path, beside the
@@ -1041,6 +1269,11 @@ int main(void) {
     RUN(test_atlas_page_failure_is_reported);
     RUN(test_letter_spacing_counts_characters);
     RUN(test_command_clip_bounds_text);
+    RUN(test_shape_count_is_clamped);
+    RUN(test_image_shrinks_per_axis);
+    RUN(test_tall_waves_fit_the_renderer);
+    RUN(test_unbalanced_scissor_end_is_malformed);
+    RUN(test_geometry_failure_fails_the_render);
 #undef RUN
     nk_ui_ttf_destroy(g_ttf);
     printf("nk_ui_sdlr: %d of %d tests passed\n", passed, total);
