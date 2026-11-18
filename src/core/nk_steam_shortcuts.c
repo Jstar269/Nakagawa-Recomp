@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
+#define _POSIX_C_SOURCE 200809L
+
 /* Add to Steam (#2152). The layout and rules are in nk_steam_shortcuts.h. */
 
 #include "nk_steam_shortcuts.h"
@@ -931,18 +933,29 @@ bool nk_steam_client_running(void) {
 NkSteamStatus nk_steam_find_root(char *root, size_t root_cap) {
     char home[NK_MAX_PATH];
     static const char *const suffixes[] = {"/.local/share/Steam", "/.steam/steam"};
+    char first_root[NK_MAX_PATH] = "";
     if (!root || root_cap == 0u) return NK_STEAM_ERR_ARGUMENT;
     root[0] = '\0';
     if (nk_platform_env_utf8("HOME", home, sizeof(home)) <= 0 || home[0] != '/') {
         return NK_STEAM_ERR_NOT_FOUND;
     }
     for (size_t i = 0u; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
-        int n = snprintf(root, root_cap, "%s%s", home, suffixes[i]);
+        char candidate[NK_MAX_PATH], userdata[NK_MAX_PATH];
+        int n = snprintf(candidate, sizeof(candidate), "%s%s", home, suffixes[i]);
+        if (n < 0 || (size_t)n >= sizeof(candidate) || !nk_platform_dir_exists(candidate)) continue;
+        if (first_root[0] == '\0') memcpy(first_root, candidate, (size_t)n + 1u);
+        n = snprintf(userdata, sizeof(userdata), "%s/userdata", candidate);
+        if (n < 0 || (size_t)n >= sizeof(userdata) || !nk_platform_dir_exists(userdata)) continue;
+        n = snprintf(root, root_cap, "%s", candidate);
         if (n < 0 || (size_t)n >= root_cap) {
             root[0] = '\0';
             continue;
         }
-        if (nk_platform_dir_exists(root)) return NK_STEAM_OK;
+        return NK_STEAM_OK;
+    }
+    if (first_root[0] != '\0') {
+        int n = snprintf(root, root_cap, "%s", first_root);
+        if (n >= 0 && (size_t)n < root_cap) return NK_STEAM_OK;
     }
     root[0] = '\0';
     return NK_STEAM_ERR_NOT_FOUND;

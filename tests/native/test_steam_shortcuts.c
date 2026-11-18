@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
+#define _POSIX_C_SOURCE 200809L
+
 /* Add to Steam (#2152, src/core/nk_steam_shortcuts.c): the binary shortcuts.vdf edit and the
  * file-level rules around it. The files are built here byte by byte in a temporary folder; no
  * Steam client, registry entry or network is involved. */
@@ -14,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(__linux__) && !defined(__ANDROID__)
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -596,6 +599,15 @@ static void test_linux_steam_paths_and_pid(void) {
     CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
                  "find Steam when both roots exist");
     CHECK(strstr(root, "/.local/share/Steam") != NULL, "prefer the standard root");
+    snprintf(path, sizeof(path), "%s/.steam/steam/userdata", home);
+    CHECK(nk_platform_mkdir_p(path), "create userdata in the alternate root");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "prefer the root that contains userdata");
+    CHECK(strstr(root, "/.steam/steam") != NULL, "use the root with Steam accounts");
+    CHECK(rmdir(path) == 0, "remove alternate userdata fixture");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "fall back to standard root without userdata");
+    CHECK(strstr(root, "/.local/share/Steam") != NULL, "prefer standard root when neither has userdata");
     snprintf(path, sizeof(path), "%s/.local/share/Steam", home);
     CHECK(rmdir(path) == 0, "remove standard root to check the alternate layout");
     CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
@@ -612,10 +624,19 @@ static void test_linux_steam_paths_and_pid(void) {
     CHECK(nk_steam_client_running(), "malformed PID fails closed");
     CHECK(nk_remove_utf8(path) == 0, "remove malformed PID");
     CHECK(write_bytes(path, (const uint8_t *)"123\n", 4u), "write PID for unreadable file test");
-    if (chmod(path, 0000) == 0 && geteuid() != 0) {
-        CHECK(nk_steam_client_running(), "unreadable PID file fails closed");
+    int unreadable_fd = open(path, O_RDONLY);
+    CHECK(unreadable_fd >= 0, "open PID fixture for descriptor-based permission change");
+    if (unreadable_fd >= 0) {
+        if (geteuid() == 0) {
+            puts("SKIP (root reads any mode): unreadable PID file permission test");
+        } else {
+            int mode_changed = fchmod(unreadable_fd, 0000) == 0;
+            CHECK(mode_changed, "make PID fixture unreadable through its open descriptor");
+            if (mode_changed) CHECK(nk_steam_client_running(), "unreadable PID file fails closed");
+            CHECK(fchmod(unreadable_fd, 0600) == 0, "restore PID fixture permissions through its descriptor");
+        }
+        CHECK(close(unreadable_fd) == 0, "close PID fixture descriptor");
     }
-    (void)chmod(path, 0600);
     CHECK(nk_remove_utf8(path) == 0, "remove unreadable PID fixture");
     pid_t child = fork();
     CHECK(child >= 0, "fork a process for stale PID test");
@@ -663,7 +684,7 @@ static void test_linux_steam_paths_and_pid(void) {
           "running Steam leaves shortcuts.vdf byte for byte unchanged");
     free(prior);
     free(after);
-    if (have_original_home) native_test_set_env("HOME", original_home);
+    native_test_set_env("HOME", have_original_home ? original_home : NULL);
 }
 #endif
 
