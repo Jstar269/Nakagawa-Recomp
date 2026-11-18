@@ -204,6 +204,12 @@ NkResult nk_iso_classify_executables(const char *iso_path,
 /* Extract a file from an ISO9660 disc image to the host filesystem.
  * disc_rel_path: path inside ISO (e.g. "PSP_GAME/PARAM.SFO" or "PSP_GAME/ICON0.PNG")
  * host_dest_path: destination file path on host
+ * The path resolves as nk_iso_reader_lookup resolves it. A path that names a
+ * directory, or that is not on the disc, is NK_ERROR_FILE_NOT_FOUND; a damaged
+ * image or directory is NK_ERROR_INVALID_ISO; a path refused before the disc is
+ * read (too long, or a ".." component) is NK_ERROR_GENERIC. A zero-length file
+ * is extracted as an empty file. A read, write or close failure is NK_ERROR_IO
+ * and leaves no file at host_dest_path.
  */
 NkResult nk_iso_extract_file(const char *iso_path, const char *disc_rel_path, const char *host_dest_path);
 

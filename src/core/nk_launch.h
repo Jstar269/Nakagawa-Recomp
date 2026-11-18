@@ -208,7 +208,9 @@ typedef struct {
  * shared contract in generated/nk_title_catalog.h); an unknown title, or a
  * workspace holding only another title's build, is not "available". This is
  * the same probe used by nk_launch_prepare_session, so UI readiness cannot
- * drift from the eventual launch path. */
+ * drift from the eventual launch path. A NULL or empty `root` stands for the
+ * per-user data directory (or "." when the platform names none), exactly as
+ * it does for nk_launch_prepare_session. */
 bool nk_launch_runtime_available(const char *root, const char *title_id);
 
 /* True only when the selected title's identity-matched runtime executable and

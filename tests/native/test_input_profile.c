@@ -1315,13 +1315,14 @@ static void test_hostile_documents_fail_closed(void) {
         expect_refused("duplicate primary in a binding", s_hostile_doc, len,
                        "duplicate JSON object key");
 
-        /* A key that equals a real one only up to an embedded NUL is an unknown
-         * key, not a duplicate -- and an unknown binding key binds nothing. */
+        /* A key that equals a real one only up to an embedded NUL binds
+         * nothing: the JSON reader refuses a key holding \u0000 by name
+         * (audit 2026-11-17, F-09aceff2), before it could read as "pri". */
         len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), NULL, NULL,
                          "\"psp_bindings\": [ { \"control\": \"cross\","
                          " \"pri\\u0000mary\": \"south\" } ]", NULL);
         expect_refused("binding key with an embedded NUL", s_hostile_doc, len,
-                       "neither 'primary' nor 'secondary'");
+                       "\\u0000 is not supported in a JSON object key");
 
         {
             char entries[1024];

@@ -1590,6 +1590,59 @@ static void test_sha256_hex(const uint8_t *bytes, size_t size, char out[65]) {
     out[64] = '\0';
 }
 
+/* Audit 2026-11-17 (F-4d727f52): with no root the readiness probe looks where
+ * nk_launch_prepare_session looks, the per-user data directory. It used to
+ * probe the current directory, so the player's readiness gate and the launch
+ * could disagree about the same runtime. */
+static void test_null_root_probes_user_data_dir(const char *base, char sep,
+                                                const char *iso_path) {
+    printf("[LAUNCH_TEST] NULL root: readiness and prepare share one root\n");
+    fflush(stdout);
+    const char *title_id = "pspdev-phase5-v1";
+    NkTitleEntrySnapshot snapshot = {0};
+    const NkTitleEntry *title = lookup_title_snapshot(title_id, &snapshot);
+    assert(title != NULL && title->game_name != NULL);
+
+    /* The current directory holds no runtime for this title, so a probe of "."
+     * cannot satisfy the checks below. */
+    assert(!nk_launch_runtime_available(".", title_id));
+
+    char user_root[NK_MAX_PATH];
+    char runtime_dir[NK_MAX_PATH * 2];
+    char exe[NK_MAX_PATH * 3];
+    char img[NK_MAX_PATH * 3];
+    snprintf(user_root, sizeof(user_root), "%s%cnull_root_user_data", base, sep);
+    snprintf(runtime_dir, sizeof(runtime_dir), "%s%cbuild%c%s", user_root, sep, sep,
+             title->game_name);
+    assert(nk_platform_mkdir_p(runtime_dir));
+    snprintf(exe, sizeof(exe), "%s%c%s", runtime_dir, sep, title->game_name);
+    snprintf(img, sizeof(img), "%s%c%s_image.bin", runtime_dir, sep, title->game_name);
+    write_file(exe, "binary");
+    write_file(img, "image");
+    make_catalog_data_root(user_root, title_id);
+
+    assert(nk_platform_set_app_data_dir_override(user_root));
+    assert(nk_launch_runtime_available(user_root, title_id));
+    assert(nk_launch_runtime_available(NULL, title_id));
+    assert(nk_launch_runtime_available("", title_id));
+
+    NkGameEntry game;
+    NkLaunchSession session;
+    make_game(&game, iso_path);
+    snprintf(game.disc_id, sizeof(game.disc_id), "TEST00005");
+    snprintf(game.title_id, sizeof(game.title_id), "%s", title_id);
+    assert(nk_launch_prepare_session(&session, &game, NULL) == NK_OK);
+    assert(strstr(session.executable_path, "null_root_user_data") != NULL);
+
+    /* Without the runtime both say no. */
+    remove(exe);
+    assert(!nk_launch_runtime_available(NULL, title_id));
+    assert(nk_launch_prepare_session(&session, &game, NULL) != NK_OK);
+    assert(nk_platform_set_app_data_dir_override(NULL));
+    remove(img);
+    nk_title_catalog_snapshot_release(&snapshot);
+}
+
 static void test_build_identity_run_entry(const char *base, char sep) {
     static const char title_id[] = "build-identity-entry-v1";
     static const char game_name[] = "build-identity-entry";
@@ -3416,6 +3469,7 @@ int main(int argc, char **argv) {
 
     test_launcher_display_choice();
     test_build_identity_run_entry(base, sep);
+    test_null_root_probes_user_data_dir(base, sep, iso_path);
 
 #if defined(__ANDROID__)
     (void)test_no_iso_child_environment;

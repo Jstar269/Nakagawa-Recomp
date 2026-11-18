@@ -758,9 +758,24 @@ static void test_hostile_iso_parser(const char *test_dir) {
     sec17_endian[32] = 8;
     memcpy(&sec17_endian[33], "PSP_GAME", 8);
     write_test_file(fpath, endian_iso, sizeof(endian_iso));
+    /* Audit 2026-11-17 (F-02d33f36): the record is refused, as the stager and
+     * iso_inspect.py refuse it. It used to be skipped, and the damaged disc was
+     * accepted as one without PSP_GAME. */
     memset(&meta, 0, sizeof(meta));
-    assert(nk_iso_inspect(fpath, &meta) == NK_OK);
-    assert(strcmp(meta.volume_id, "ENDIAN_TEST_VOL") == 0);
+    assert(nk_iso_inspect(fpath, &meta) == NK_ERROR_INVALID_ISO);
+    assert(strstr(meta.error_message, "both-endian") != NULL);
+    assert(!meta.has_psp_game_folder);
+
+    /* 7b. The same disagreement on the PARAM.SFO record inside PSP_GAME. */
+    memset(sec17_endian, 0, 2048);
+    write_dir_record(sec17_endian, 0, "PSP_GAME", 8, 18, 2048, true);
+    write_dir_record(&endian_iso[18 * 2048], 0, "PARAM.SFO;1", 11, 18, 64, false);
+    endian_iso[18 * 2048 + 17] = 65; /* big-endian size: 65, not 64 */
+    write_test_file(fpath, endian_iso, sizeof(endian_iso));
+    memset(&meta, 0, sizeof(meta));
+    assert(nk_iso_inspect(fpath, &meta) == NK_ERROR_INVALID_ISO);
+    assert(strstr(meta.error_message, "PSP_GAME directory record") != NULL);
+    assert(strstr(meta.error_message, "both-endian") != NULL);
 
     /* 8. Duplicate SFO keys */
     printf("[HOSTILE_TEST] Subtest 8a: conflicting duplicate SFO keys (must reject as ambiguous)\n"); fflush(stdout);
@@ -2922,6 +2937,329 @@ static void test_nk_json_scalar_extraction_and_queries(void) {
 }
 
 
+/* Audit 2026-11-17 (F-9060630f, F-d41e7038, F-8163dca6, F-02d33f36):
+ * nk_iso_extract_file resolves its path through the reader's lookup, so it
+ * takes the reader's 512 KiB directory bound and record rules, refuses a path
+ * that names a directory, and extracts a zero-length file as an empty file.
+ * The reader's lookup fails on a damaged directory record instead of passing
+ * over it to a later record of the same name. */
+static void test_iso_extract_file_matches_reader(const char *test_dir) {
+    printf("[HOSTILE_TEST] Testing nk_iso_extract_file against the reader's rules...\n");
+    fflush(stdout);
+    const char sep = nk_platform_path_separator();
+    char path[700], out_file[800];
+    snprintf(path, sizeof(path), "%s%cextract_contract.iso", test_dir, sep);
+    snprintf(out_file, sizeof(out_file), "%s%cextract_contract.out", test_dir, sep);
+
+    uint8_t *image = walk_image_new();
+    size_t off = walk_dot_records(WALK_SECTOR(image, 17), 17, 17);
+    off = append_iso_record_test(WALK_SECTOR(image, 17), off, (const uint8_t *)"PSP_GAME", 8,
+                                 18, WALK_SECTOR_SIZE, true);
+    off = append_iso_record_test(WALK_SECTOR(image, 17), off, (const uint8_t *)"EMPTY.BIN;1",
+                                 11, 0, 0, false);
+    size_t file_record = off;
+    append_iso_record_test(WALK_SECTOR(image, 17), off, (const uint8_t *)"FILE.BIN;1", 10,
+                           24, 5, false);
+    memcpy(WALK_SECTOR(image, 24), "hello", 5);
+    off = walk_dot_records(WALK_SECTOR(image, 18), 18, 17);
+    append_iso_record_test(WALK_SECTOR(image, 18), off, (const uint8_t *)"SUB", 3,
+                           19, WALK_SECTOR_SIZE, true);
+    walk_dot_records(WALK_SECTOR(image, 19), 19, 18);
+    write_test_file(path, image, WALK_TOTAL_SECTORS * WALK_SECTOR_SIZE);
+
+    /* 1. A file extracts with its bytes. */
+    remove(out_file);
+    assert(nk_iso_extract_file(path, "FILE.BIN", out_file) == NK_OK);
+    assert(host_file_holds(out_file, "hello"));
+
+    /* 2. A zero-length file (ISO9660 records it at LBA 0) is an empty file, not
+     * a missing one. */
+    remove(out_file);
+    assert(nk_iso_extract_file(path, "EMPTY.BIN", out_file) == NK_OK);
+    assert(nk_platform_file_exists(out_file));
+    assert(nk_platform_get_file_size(out_file) == 0);
+
+    /* 3. A path naming a directory is not a file: its extent is never written
+     * out as file bytes. */
+    remove(out_file);
+    assert(nk_iso_extract_file(path, "PSP_GAME", out_file) == NK_ERROR_FILE_NOT_FOUND);
+    assert(!nk_platform_file_exists(out_file));
+    assert(nk_iso_extract_file(path, "PSP_GAME/SUB", out_file) == NK_ERROR_FILE_NOT_FOUND);
+    assert(!nk_platform_file_exists(out_file));
+    assert(nk_iso_extract_file(path, "PSP_GAME/MISSING.BIN", out_file) ==
+           NK_ERROR_FILE_NOT_FOUND);
+    assert(!nk_platform_file_exists(out_file));
+
+    /* 4. A record whose both-endian size disagrees, ahead of an intact record
+     * of the same name, fails the lookup and the extraction. Both used to pass
+     * over it and resolve the later record. */
+    {
+        uint8_t *damaged = (uint8_t *)malloc(WALK_TOTAL_SECTORS * WALK_SECTOR_SIZE);
+        assert(damaged != NULL);
+        memcpy(damaged, image, WALK_TOTAL_SECTORS * WALK_SECTOR_SIZE);
+        size_t next = append_iso_record_test(WALK_SECTOR(damaged, 17), file_record,
+                                             (const uint8_t *)"FILE.BIN;1", 10, 24, 5, false);
+        append_iso_record_test(WALK_SECTOR(damaged, 17), next, (const uint8_t *)"FILE.BIN;1",
+                               10, 24, 5, false);
+        WALK_SECTOR(damaged, 17)[file_record + 17] = 6; /* big-endian size: 6, not 5 */
+        char damaged_path[700];
+        snprintf(damaged_path, sizeof(damaged_path), "%s%cextract_endian.iso", test_dir, sep);
+        write_test_file(damaged_path, damaged, WALK_TOTAL_SECTORS * WALK_SECTOR_SIZE);
+        free(damaged);
+        NkIsoReader *reader = nk_iso_reader_open(damaged_path);
+        assert(reader != NULL);
+        uint32_t lba = 0, size = 0;
+        bool is_dir = false;
+        assert(nk_iso_reader_lookup(reader, "FILE.BIN", &lba, &size, &is_dir) == -1);
+        nk_iso_reader_close(reader);
+        remove(out_file);
+        assert(nk_iso_extract_file(damaged_path, "FILE.BIN", out_file) == NK_ERROR_INVALID_ISO);
+        assert(!nk_platform_file_exists(out_file));
+        remove(damaged_path);
+    }
+
+    /* 5. A record that crosses a sector boundary ahead of the wanted name is a
+     * damaged directory (ECMA-119 6.8.1.1), refused as the reader refuses it.
+     * It used to be skipped and the name reported missing. */
+    {
+        uint8_t *crossing = walk_image_new();
+        fill_dir_chain(WALK_SECTOR(crossing, 17), 2040);
+        WALK_SECTOR(crossing, 17)[2040] = 34; /* 2040 + 34 > 2048 */
+        char crossing_path[700];
+        snprintf(crossing_path, sizeof(crossing_path), "%s%cextract_crossing.iso", test_dir, sep);
+        write_test_file(crossing_path, crossing, WALK_TOTAL_SECTORS * WALK_SECTOR_SIZE);
+        free(crossing);
+        assert(nk_iso_extract_file(crossing_path, "FILE.BIN", out_file) == NK_ERROR_INVALID_ISO);
+        assert(!nk_platform_file_exists(out_file));
+        remove(crossing_path);
+    }
+
+    /* 6. A directory larger than NK_ISO_MAX_DIR_BYTES is refused, as every other
+     * reader refuses it. The 4 MiB bound this route used to apply read it. */
+    {
+        const size_t big_dir_bytes = 600u * 1024u;
+        const size_t sectors = 20u + big_dir_bytes / WALK_SECTOR_SIZE + 2u;
+        uint8_t *big = (uint8_t *)calloc(sectors, WALK_SECTOR_SIZE);
+        assert(big != NULL);
+        memcpy(big, image, WALK_TOTAL_SECTORS * WALK_SECTOR_SIZE);
+        assert(big_dir_bytes > 512u * 1024u); /* NK_ISO_MAX_DIR_BYTES */
+        memset(WALK_SECTOR(big, 17), 0, WALK_SECTOR_SIZE);
+        size_t at = walk_dot_records(WALK_SECTOR(big, 17), 17, 17);
+        append_iso_record_test(WALK_SECTOR(big, 17), at, (const uint8_t *)"BIG", 3, 20,
+                               (uint32_t)big_dir_bytes, true);
+        memset(WALK_SECTOR(big, 20), 0, big_dir_bytes);
+        walk_dot_records(WALK_SECTOR(big, 20), 20, 17);
+        char big_path[700];
+        snprintf(big_path, sizeof(big_path), "%s%cextract_big_dir.iso", test_dir, sep);
+        write_test_file(big_path, big, sectors * WALK_SECTOR_SIZE);
+        free(big);
+        assert(nk_iso_extract_file(big_path, "BIG/X.BIN", out_file) == NK_ERROR_INVALID_ISO);
+        assert(!nk_platform_file_exists(out_file));
+        remove(big_path);
+    }
+
+    free(image);
+    remove(path);
+    printf("[HOSTILE_TEST] nk_iso_extract_file against the reader's rules PASSED!\n");
+    fflush(stdout);
+}
+
+typedef struct {
+    bool saw_plain_name;
+    bool saw_trailing_dot;
+} StageNameSeen;
+
+static bool stage_record_member_names(const char *relative_path, uint64_t bytes_complete,
+                                      uint64_t bytes_total, size_t files_complete,
+                                      size_t total_files, void *userdata) {
+    (void)bytes_complete; (void)bytes_total; (void)files_complete; (void)total_files;
+    StageNameSeen *seen = (StageNameSeen *)userdata;
+    size_t length = strlen(relative_path);
+    if (strcmp(relative_path, "DATA/NOEXT") == 0) seen->saw_plain_name = true;
+    if (length > 0 && relative_path[length - 1] == '.') seen->saw_trailing_dot = true;
+    return true;
+}
+
+/* Audit 2026-11-17 (F-04109bea): an extensionless member keeps ECMA-119's
+ * separator dot on the disc ("NOEXT.;1"). It stages as "NOEXT", the name
+ * nk_iso_reader_list reports and Win32 stores, on every host. It used to stage
+ * as "NOEXT.", a different file name on POSIX. */
+static void test_iso_stage_drops_separator_dot(const char *test_dir) {
+    printf("[HOSTILE_TEST] Testing staged names of extensionless members...\n");
+    fflush(stdout);
+    const char sep = nk_platform_path_separator();
+    const char *roots[] = { "DATA" };
+    char iso_path[700], host_root[700], probe[800];
+    snprintf(iso_path, sizeof(iso_path), "%s%cstage_separator_dot.iso", test_dir, sep);
+    snprintf(host_root, sizeof(host_root), "%s%cstage_separator_dot", test_dir, sep);
+    build_stage_iso_test(iso_path, "NOEXT.;1", false, NULL, NULL);
+    StageNameSeen seen;
+    memset(&seen, 0, sizeof(seen));
+    assert(nk_iso_extract_game(iso_path, host_root, roots, 1, stage_record_member_names,
+                               &seen) == NK_OK);
+    assert(seen.saw_plain_name);
+    assert(!seen.saw_trailing_dot);
+    snprintf(probe, sizeof(probe), "%s%cDATA%cNOEXT", host_root, sep, sep);
+    assert(host_file_holds(probe, "payload"));
+    remove(iso_path);
+    printf("[HOSTILE_TEST] Staged names of extensionless members PASSED!\n");
+    fflush(stdout);
+}
+
+/* Audit 2026-11-17 (F-dfb4592f): Win32 drops a trailing '.' or ' ', so the
+ * content roots "DATA" and "DATA." (or "DATA ") stage into one host folder.
+ * The overlap check compared their spellings and let both through; such a
+ * root is now refused before the disc is read or anything is written. */
+static void test_iso_stage_roots_refuse_win32_folded_names(const char *test_dir) {
+    printf("[HOSTILE_TEST] Testing content roots that Win32 folds together...\n");
+    fflush(stdout);
+    const char sep = nk_platform_path_separator();
+    char iso_path[700], host_root[700], probe[800];
+    snprintf(iso_path, sizeof(iso_path), "%s%cstage_folded_roots.iso", test_dir, sep);
+    build_stage_iso_test(iso_path, "MEMBER.BIN;1", false, NULL, NULL);
+    static const char *const second_roots[] = { "DATA.", "DATA ", "DATA/SUB.", "DATA /SUB" };
+    for (size_t i = 0; i < sizeof(second_roots) / sizeof(second_roots[0]); i++) {
+        const char *roots[] = { "DATA", second_roots[i] };
+        snprintf(host_root, sizeof(host_root), "%s%cstage_folded_roots_%zu", test_dir, sep, i);
+        NkResult result = nk_iso_extract_game(iso_path, host_root, roots, 2, NULL, NULL);
+        if (result != NK_ERROR_INVALID_ISO) {
+            fprintf(stderr, "[HOSTILE_TEST] roots DATA and '%s' gave %d\n", second_roots[i],
+                    (int)result);
+        }
+        assert(result == NK_ERROR_INVALID_ISO);
+        snprintf(probe, sizeof(probe), "%s%cEBOOT.BIN", host_root, sep);
+        assert(!nk_platform_file_exists(probe));
+    }
+    /* Control: "DATA" alone stages. */
+    {
+        const char *roots[] = { "DATA" };
+        snprintf(host_root, sizeof(host_root), "%s%cstage_folded_roots_ok", test_dir, sep);
+        assert(nk_iso_extract_game(iso_path, host_root, roots, 1, NULL, NULL) == NK_OK);
+    }
+    remove(iso_path);
+    printf("[HOSTILE_TEST] Content roots that Win32 folds together PASSED!\n");
+    fflush(stdout);
+}
+
+static bool json_refused_naming(const char *text, const char *named) {
+    char err[256] = "";
+    NkJsonNode *root = nk_json_parse(text, strlen(text), err, sizeof(err));
+    if (root) {
+        nk_json_free(root);
+        fprintf(stderr, "[HOSTILE_TEST] JSON accepted: %s\n", text);
+        return false;
+    }
+    if (named && strstr(err, named) == NULL) {
+        fprintf(stderr, "[HOSTILE_TEST] JSON refused as '%s', expected '%s'\n", err, named);
+        return false;
+    }
+    return true;
+}
+
+static bool json_accepted(const char *text) {
+    char err[256] = "";
+    NkJsonNode *root = nk_json_parse(text, strlen(text), err, sizeof(err));
+    if (!root) {
+        fprintf(stderr, "[HOSTILE_TEST] JSON refused: %s (%s)\n", text, err);
+        return false;
+    }
+    nk_json_free(root);
+    return true;
+}
+
+/* Audit 2026-11-17 (F-e31fe5c0, F-f07bcde4, F-09aceff2, F-e3b7fc81): numbers
+ * with a leading zero are refused as Python's json refuses them; a number token
+ * too long for the reader is refused, never cut to a different number; an object
+ * key holding \u0000 is refused instead of colliding with or matching another
+ * key; and a large object's duplicate-key check stays exact. */
+static void test_json_strict_numbers_and_keys(void) {
+    printf("[HOSTILE_TEST] Testing JSON number grammar and NUL keys...\n");
+    fflush(stdout);
+
+    /* Leading zeros. */
+    assert(json_refused_naming("[01]", "leading zero"));
+    assert(json_refused_naming("[-007]", "leading zero"));
+    assert(json_refused_naming("{\"v\": 00}", "leading zero"));
+    assert(json_refused_naming("[01.5]", "leading zero"));
+    assert(json_accepted("[0]"));
+    assert(json_accepted("[-0]"));
+    assert(json_accepted("[0.5, -0.25, 0e1, 0E-2, 10, 100]"));
+
+    /* A zero-padded value that the old 63-byte cut turned into 429: refused by
+     * its leading zero, and a token that long is refused even without one. */
+    char padded[200];
+    size_t used = (size_t)snprintf(padded, sizeof(padded), "{\"load_address\": ");
+    for (int i = 0; i < 60; i++) padded[used++] = '0';
+    snprintf(padded + used, sizeof(padded) - used, "4294967296}");
+    assert(json_refused_naming(padded, "leading zero"));
+
+    char long_number[200];
+    used = (size_t)snprintf(long_number, sizeof(long_number), "[1");
+    for (int i = 0; i < 69; i++) long_number[used++] = '0';
+    snprintf(long_number + used, sizeof(long_number) - used, "]");
+    assert(json_refused_naming(long_number, "Number too long"));
+
+    char long_fraction[200];
+    used = (size_t)snprintf(long_fraction, sizeof(long_fraction), "[0.");
+    for (int i = 0; i < 70; i++) long_fraction[used++] = '0';
+    snprintf(long_fraction + used, sizeof(long_fraction) - used, "1e5]");
+    assert(json_refused_naming(long_fraction, "Number too long"));
+
+    /* 63 bytes is the longest token the reader holds; it parses exactly. */
+    char longest[100];
+    used = (size_t)snprintf(longest, sizeof(longest), "[0.");
+    for (int i = 0; i < 60; i++) longest[used++] = '0';
+    snprintf(longest + used, sizeof(longest) - used, "5]");
+    assert(strlen(longest) == 2u + 63u);
+    assert(json_accepted(longest));
+
+    /* NUL in a key: refused by name, never a duplicate of "a" nor an alias of
+     * "sha256". A NUL in a string value keeps the documented rule. */
+    assert(json_refused_naming("{\"a\\u0000b\": 1, \"a\": 2}", "\\u0000"));
+    assert(json_refused_naming("{\"sha256\\u0000x\": \"v\"}", "\\u0000"));
+    {
+        const char text[] = "{\"k\": \"a\\u0000b\"}";
+        char err[256] = "";
+        NkJsonNode *root = nk_json_parse(text, strlen(text), err, sizeof(err));
+        assert(root != NULL);
+        assert(strcmp(nk_json_get_string(nk_json_obj_get(root, "k")), "a") == 0);
+        nk_json_free(root);
+    }
+
+    /* A large object: every key is found and a duplicate after them is named. */
+    {
+        enum { KEYS = 5000 };
+        size_t capacity = (size_t)KEYS * 24u + 64u;
+        char *text = (char *)malloc(capacity);
+        assert(text != NULL);
+        size_t at = 0;
+        text[at++] = '{';
+        for (int i = 0; i < KEYS; i++) {
+            at += (size_t)snprintf(text + at, capacity - at, "%s\"key%d\": %d",
+                                   i ? ", " : "", i, i);
+        }
+        snprintf(text + at, capacity - at, "}");
+        char err[256] = "";
+        NkJsonNode *root = nk_json_parse(text, strlen(text), err, sizeof(err));
+        assert(root != NULL);
+        assert(root->u.obj.count == KEYS);
+        for (int i = 0; i < KEYS; i += 499) {
+            char key[32];
+            snprintf(key, sizeof(key), "key%d", i);
+            int64_t value = -1;
+            assert(nk_json_get_int64(nk_json_obj_get(root, key), &value));
+            assert(value == i);
+        }
+        nk_json_free(root);
+        snprintf(text + at, capacity - at, ", \"key1234\": 0}");
+        assert(json_refused_naming(text, "duplicate JSON object key: 'key1234'"));
+        free(text);
+    }
+
+    printf("[HOSTILE_TEST] JSON number grammar and NUL keys PASSED!\n");
+    fflush(stdout);
+}
+
 int main(void) {
     test_nk_json_utf8_encode();
     test_nk_json_scalar_extraction_and_queries();
@@ -2949,6 +3287,10 @@ int main(void) {
     test_iso_stage_keeps_semicolon_names(hostile_dir);
     test_iso_stage_collisions_by_content(hostile_dir);
     test_iso_stage_write_failures_are_named(hostile_dir);
+    test_iso_extract_file_matches_reader(hostile_dir);
+    test_iso_stage_drops_separator_dot(hostile_dir);
+    test_iso_stage_roots_refuse_win32_folded_names(hostile_dir);
+    test_json_strict_numbers_and_keys();
 #if defined(_WIN32) || defined(_WIN64)
     test_invalid_utf8_path_is_refused(hostile_dir);
 #endif

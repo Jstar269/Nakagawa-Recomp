@@ -462,6 +462,17 @@ static bool find_candidate_executable(
     return false;
 }
 
+/* The root a NULL or empty caller root stands for: the per-user data
+ * directory, or "." when the platform cannot name one. The readiness probes
+ * (nk_launch_runtime_available, nk_launch_runtime_package_available) and
+ * nk_launch_prepare_session all resolve it here, so readiness looks where the
+ * launch looks. */
+static const char *launch_effective_root(const char *root, char *buffer, size_t buffer_size) {
+    if (root && *root) return root;
+    if (nk_platform_get_app_data_dir(buffer, buffer_size)) return buffer;
+    return ".";
+}
+
 static NkLaunchDataRootStatus launch_resolve_data_root(
     const NkGameEntry *game,
     const NkTitleEntry *entry,
@@ -536,11 +547,7 @@ NkLaunchDataRootStatus nk_launch_game_data_root_status(
     }
 
     char default_root[NK_MAX_PATH];
-    const char *root = (runtime_root && runtime_root[0]) ? runtime_root : NULL;
-    if (!root) {
-        if (nk_platform_get_app_data_dir(default_root, sizeof(default_root))) root = default_root;
-        else root = ".";
-    }
+    const char *root = launch_effective_root(runtime_root, default_root, sizeof(default_root));
 
     NkTitleEntrySnapshot snapshot = {0};
     char identity_error[512] = "";
@@ -572,7 +579,8 @@ NkLaunchDataRootStatus nk_launch_game_data_root_status(
 
 bool nk_launch_runtime_available(const char *root, const char *title_id) {
     char resolved[NK_MAX_PATH];
-    const char *effective_root = (root && *root) ? root : ".";
+    char default_root[NK_MAX_PATH];
+    const char *effective_root = launch_effective_root(root, default_root, sizeof(default_root));
     NkTitleEntrySnapshot snapshot = {0};
     bool found = title_id && *title_id &&
         nk_title_catalog_find_by_id(title_id, &snapshot);
@@ -936,7 +944,8 @@ static bool find_candidate_image(
 }
 
 bool nk_launch_runtime_package_available(const char *root, const char *title_id) {
-    const char *effective_root = (root && *root) ? root : ".";
+    char default_root[NK_MAX_PATH];
+    const char *effective_root = launch_effective_root(root, default_root, sizeof(default_root));
     NkTitleEntrySnapshot snapshot = {0};
     bool found = title_id && *title_id &&
         nk_title_catalog_find_by_id(title_id, &snapshot);
@@ -1052,11 +1061,8 @@ NkResult nk_launch_prepare_session(
     }
 
     char default_root[NK_MAX_PATH];
-    const char *root = (repo_or_install_root && *repo_or_install_root) ? repo_or_install_root : NULL;
-    if (!root) {
-        if (nk_platform_get_app_data_dir(default_root, sizeof(default_root))) root = default_root;
-        else root = ".";
-    }
+    const char *root = launch_effective_root(repo_or_install_root, default_root,
+                                             sizeof(default_root));
     /* #366: `root` is a directory by contract. A direct file path is not an
        escape hatch in the generic API: handing the launcher an exact legacy
        binary path does not make it a validated runtime for this title, and
