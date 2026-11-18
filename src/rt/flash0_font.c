@@ -617,7 +617,7 @@ uint32_t sr_flash0_font_list_dir(const char *guest_path, const Flash0Sources *so
         if (flash0_resolve(sources, slot, &fp, &size) == FLASH0_SOURCE_NONE) continue;
         fclose(fp);
         if (!sr_vfs_dirlist_merge_lba(list, s_flash0_slots[i].served_name, 0, size, 0u))
-            return flash0_refuse(0x80010008u, "listing ran out of memory", guest_path);
+            return flash0_refuse(SR_FLASH0_ERR_NO_MEMORY, "listing ran out of memory", guest_path);
     }
     for (int index = 0; index < NK_FONT_LATIN_INDEX_COUNT; index++) {
         char path[SR_FLASH0_PATH_MAX + 64];
@@ -627,7 +627,7 @@ uint32_t sr_flash0_font_list_dir(const char *guest_path, const Flash0Sources *so
                                        &fp, &size, NULL) == FLASH0_SOURCE_NONE) continue;
         fclose(fp);
         if (!sr_vfs_dirlist_merge_lba(list, nk_font_latin_index_filename(index), 0, size, 0u))
-            return flash0_refuse(0x80010008u, "listing ran out of memory", guest_path);
+            return flash0_refuse(SR_FLASH0_ERR_NO_MEMORY, "listing ran out of memory", guest_path);
     }
     sr_vfs_dirlist_sort(list);
     return 0u;

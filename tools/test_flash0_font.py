@@ -879,6 +879,18 @@ class Flash0FontDeviceTests(unittest.TestCase):
         self.assertEqual(header_value, vfs_not_found)
         self.assertEqual(c_unsigned_define(SELFTEST_SOURCE, "F0T_ERR_NOT_FOUND"), header_value)
 
+    def test_listing_out_of_memory_returns_enomem(self) -> None:
+        # A listing the host could not allocate returns ENOMEM (0x8001000C), the runtime's other
+        # ENOMEM value (hle_system.c SREG_ERR_NOMEM). Failing before: both sites returned
+        # 0x80010008, which is ENOEXEC in the PSP errno space.
+        enomem = c_unsigned_define(ROOT / "src" / "rt" / "hle_system.c", "SREG_ERR_NOMEM")
+        self.assertEqual(enomem, 0x8001000C)
+        self.assertEqual(c_unsigned_define(FLASH0_HEADER, "SR_FLASH0_ERR_NO_MEMORY"), enomem)
+        source = (ROOT / "src" / "rt" / "flash0_font.c").read_text(encoding="utf-8")
+        self.assertNotIn("0x80010008u", source)
+        self.assertEqual(
+            source.count('flash0_refuse(SR_FLASH0_ERR_NO_MEMORY, "listing ran out of memory"'), 2)
+
     def test_native_device_contract_on_synthetic_fonts(self) -> None:
         if sys.platform != "win32" and unguarded_windows_include(
             SELFTEST_SOURCE.read_text(encoding="utf-8")

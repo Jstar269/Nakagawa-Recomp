@@ -8,6 +8,7 @@
 # common prefix, entry beyond oracle -> MATCH 0 steps); now it pins the
 # fail-closed contract.
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -320,6 +321,139 @@ class TestFuncdiffCmpContractUnit(unittest.TestCase):
             slice_of([f"{i} pc=0x1 op=0x2" for i in range(3)], 0, 4)
         with self.assertRaises(self.m.TraceFormatError):
             slice_of(rows, 6, 1)
+
+
+CC = shutil.which("gcc")
+ROOT = os.path.dirname(TOOLS)
+RT = os.path.join(ROOT, "src", "rt")
+FUNC_ENTRY = 0x00001000
+# Replaces the gate stub's HLE pair: a syscall becomes an import call (sr_hle_call) whose
+# handler longjmps out, as an unimplemented NID does in hle.c.
+FUNCDIFF_HLE_STUB = """\
+#include "recomp.h"
+uint32_t sr_syscall(CpuState *s, uint32_t nid) { (void)s; (void)nid; longjmp(g_hle_jmp, 1); }
+void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) { (void)pc; sr_hle_call(s, code); }
+"""
+
+
+@unittest.skipUnless(CC, "gcc is required to build src/rt/funcdiff.c")
+class TestFuncdiffReplay(unittest.TestCase):
+    """src/rt/funcdiff.c built headlessly (the codegen-gate link set with funcdiff.c as main)
+    against a synthetic function, replaying synthetic reference traces."""
+
+    WORDS = [
+        (0x11 << 26) | (8 << 21) | (1 << 16) | 2,   # 0x1000 bc1t +2 (to 0x100c)
+        0x00000000,                                  # 0x1004 nop (delay slot)
+        0x3409BEEF,                                  # 0x1008 ori t1, zero, 0xbeef
+        0x03E00008,                                  # 0x100c jr ra
+        0x00000000,                                  # 0x1010 nop
+        (0x210C << 6) | 0x0C,                        # 0x1014 syscall 0x210c (an import)
+        0x03E00008,                                  # 0x1018 jr ra
+        0x00000000,                                  # 0x101c nop
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, TOOLS)
+        from test_codegen_fp_convert import _synthetic_elf
+
+        cls._tmp = tempfile.TemporaryDirectory()
+        work = cls.work = cls._tmp.name
+        elf = os.path.join(work, "f.elf")
+        with open(elf, "wb") as fh:
+            fh.write(_synthetic_elf(cls.WORDS))
+        cls.image = os.path.join(work, "image.bin")
+        with open(cls.image, "wb") as fh:
+            fh.write(b"\0" * 16)
+        gen = os.path.join(work, "gen.c")
+        steps = [
+            [sys.executable, os.path.join(TOOLS, "codegen.py"), elf, gen],
+            [sys.executable, os.path.join(TOOLS, "title_runtime_config.py"),
+             "--output", os.path.join(work, "sr_title_config.h")],
+        ]
+        for argv in steps:
+            proc = subprocess.run(argv, capture_output=True, text=True, cwd=ROOT)
+            if proc.returncode != 0:
+                raise AssertionError(proc.stdout + proc.stderr)
+        stub_src = os.path.join(work, "hle_stub.c")
+        with open(stub_src, "w", encoding="ascii") as fh:
+            fh.write(FUNCDIFF_HLE_STUB)
+        flags = [CC, "-O0", "-w", "-D_CRT_SECURE_NO_WARNINGS", "-DSR_INSTRUCTION_TRACE",
+                 "-DSR_GATE_BUILD", "-I", RT, "-I", work]
+        gate_obj = os.path.join(work, "gate_stub.o")
+        chunks = sorted(os.path.join(work, n) for n in os.listdir(work)
+                        if n.startswith("gen_") and n.endswith(".c"))
+        cls.exe = os.path.join(work, "funcdiff.exe")
+        builds = [
+            flags + ["-Dsr_syscall=gate_unused_sr_syscall",
+                     "-Dsr_raw_syscall=gate_unused_sr_raw_syscall",
+                     "-c", os.path.join(TOOLS, "gate_stub.c"), "-o", gate_obj],
+            flags + ["-o", cls.exe, gen, *chunks, stub_src, gate_obj,
+                     *(os.path.join(RT, n) for n in (
+                         "funcdiff.c", "recomp.c", "guest_interp.c", "cpu_lle.c",
+                         "domain_mode.c", "stale_code.c", "vfpu_tables.c", "title_config.c",
+                         "nested_frames.c")),
+                     os.path.join(ROOT, "src", "core", "nk_shared_helpers.c"), "-lm"],
+        ]
+        for argv in builds:
+            proc = subprocess.run(argv, capture_output=True, text=True, cwd=ROOT)
+            if proc.returncode != 0:
+                raise AssertionError(proc.stdout + proc.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def replay(self, name, lines, target=FUNC_ENTRY, step=0):
+        ref = os.path.join(self.work, name + ".ref")
+        out = os.path.join(self.work, name + ".out")
+        with open(ref, "w", encoding="ascii", newline="\n") as fh:
+            fh.write("\n".join(lines) + "\n")
+        proc = subprocess.run([self.exe, self.image, "08900000", ref, f"{target:x}", str(step), out],
+                              capture_output=True, text=True, timeout=60)
+        trace = ""
+        if os.path.exists(out):
+            with open(out, encoding="ascii") as fh:
+                trace = fh.read()
+            os.unlink(out)
+        return proc, trace
+
+    INIT = "# init r29=0x09f00000 r31=0x08800000"
+
+    def test_replayed_fcr31_sets_the_fcc0_bc1t_reads(self):
+        """Failing before: fcr31 was replayed without fpcond, so bc1t fell through to the ori."""
+        proc, trace = self.replay("fcc0", [self.INIT + " fcr31=0x00800000",
+                                           "0 pc=0x00001000 op=0x45010002"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("r9=", trace)
+        self.assertIn("pc=0x0000100c", trace)
+        proc, trace = self.replay("fcc0_clear", [self.INIT + " fcr31=0x00000000",
+                                                 "0 pc=0x00001000 op=0x45010002"])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("r9=0x0000beef", trace)
+
+    def test_stop_at_an_import_is_a_partial_run(self):
+        """Failing before: the longjmp out at an import still exited 0."""
+        proc, trace = self.replay("hle", [self.INIT, "0 pc=0x00001014 op=0x0008430c"],
+                                  target=FUNC_ENTRY + 0x14)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertIn("PARTIAL", proc.stderr)
+        self.assertIn("pc=0x00001014", trace)
+
+    def test_step_line_without_pc_field_is_refused(self):
+        """Failing before: pc_s + 3 was parsed without the pc= prefix."""
+        proc, _ = self.replay("nopc", [self.INIT, "0 xx 0x00000000",
+                                       "1 pc=0x00001000 op=0x45010002"], step=1)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("no pc= and op= fields", proc.stderr)
+
+    def test_line_longer_than_the_buffer_is_refused(self):
+        """Failing before: fgets split the line and its tail was replayed as a step line."""
+        filler = " ".join(f"r1=0x{i:08x}" for i in range(7000))   # about 98 KB
+        proc, _ = self.replay("long", [self.INIT + " " + filler,
+                                       "0 pc=0x00001000 op=0x45010002"])
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("does not fit", proc.stderr)
 
 
 if __name__ == "__main__":

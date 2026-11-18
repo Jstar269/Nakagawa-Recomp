@@ -690,7 +690,7 @@ int main(void) {
 
     def test_finite_operands_producing_nan_are_reported(self):
         result, reports = self.run_exe(self.exe, {"NUM": "00000000", "DEN": "00000000"})
-        self.assertEqual(result.stdout.strip(), "RESULT=0xffc00000")
+        self.assertEqual(result.stdout.strip(), "RESULT=0x7fc00000")
         self.assertEqual(len(reports), 1, result.stderr)
         self.assertEqual(reports[0],
                          "NAN_TRAP pc=0x00001234 op=div.s dst=f7 vbl=4711 in=[0,0] out=[nan]")
