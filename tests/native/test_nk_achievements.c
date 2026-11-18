@@ -109,18 +109,24 @@ static void deferred_transport(void *ctx, const NkAchRequest *req, NkAchDone don
     snprintf(p->post, sizeof p->post, "%s", req->post_data ? req->post_data : "");
 }
 
-/* Answers the oldest waiting request whose post data starts with prefix. False when none waits. */
-static int deliver(Deferred *d, const char *prefix, int http_status, const char *body) {
+/* Answers the oldest waiting request whose post data starts with prefix with body_length bytes of
+ * body. False when none waits. */
+static int deliver_n(Deferred *d, const char *prefix, int http_status, const char *body,
+                     size_t body_length) {
     for (int i = 0; i < d->count; i++) {
         if (!starts_with(d->q[i].post, prefix)) continue;
         const Pending p = d->q[i];
         memmove(&d->q[i], &d->q[i + 1], (size_t)(d->count - i - 1) * sizeof d->q[0]);
         d->count--;
-        NkAchResponse r = {body, strlen(body), http_status};
+        NkAchResponse r = {body, body_length, http_status};
         p.done(&r, p.done_ctx);
         return 1;
     }
     return 0;
+}
+
+static int deliver(Deferred *d, const char *prefix, int http_status, const char *body) {
+    return deliver_n(d, prefix, http_status, body, strlen(body));
 }
 
 /* Answers every waiting request as a client error, so nothing is left in flight. */
@@ -475,6 +481,115 @@ static void test_award_of_another_id_is_logged(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+/* The synthetic set with achievement 5501's MemAddr and Author replaced. */
+static void sets_with(char *out, size_t size, const char *memaddr, const char *author) {
+    snprintf(out, size,
+             "{\"Success\":true,\"GameId\":1234,\"Title\":\"Synthetic Game\",\"ConsoleId\":41,"
+             "\"ImageIconUrl\":\"\",\"RichPresenceGameId\":1234,\"RichPresencePatch\":\"\","
+             "\"Sets\":[{\"AchievementSetId\":1111,\"GameId\":1234,\"Title\":\"Core\",\"Type\":\"core\","
+             "\"ImageIconUrl\":\"\",\"Achievements\":["
+             "{\"ID\":5501,\"Title\":\"Five\",\"Description\":\"The watched byte reads 5\","
+             "\"Flags\":3,\"Points\":5,\"MemAddr\":%s,\"Author\":%s,"
+             "\"BadgeName\":\"00001\",\"Created\":1700000000,\"Modified\":1700000000}"
+             "],\"Leaderboards\":[]}]}",
+             memaddr, author);
+}
+
+/* rcheevos LOCAL DELTA (rc_json_get_required_string, upstream 8409479c #577): a set whose
+ * achievement has "MemAddr": null fails the load. Upstream at the pin took null as a present
+ * required string, and activating the set passed the NULL definition to strlen. An achievement
+ * whose author is null (a deleted user) still loads, as upstream #577 keeps it. */
+static void test_null_required_string(uint8_t *ram) {
+    char body[1024];
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    Deferred d;
+    NkAch *ach = deferred_login(ram, &d);
+    if (!ach) return;
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    sets_with(body, sizeof body, "null", "\"Synthetic\"");
+    CHECK(nk_ach_begin_load_game(ach, HASH), "load starts");
+    CHECK(deliver(&d, "r=achievementsets&", 200, body), "the set request waits for its answer");
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const int failed = has_event(ev, n, NK_ACH_EVENT_GAME_FAILED);
+    CHECK(failed >= 0, "a set with \"MemAddr\": null fails the load");
+    if (failed >= 0)
+        CHECK(strstr(ev[failed].message, "MemAddr") != NULL, "the error names MemAddr: %s",
+              ev[failed].message);
+    CHECK(!nk_ach_game_loaded(ach), "no game loaded");
+    drain(&d);
+    nk_ach_destroy(ach);
+
+    ach = deferred_login(ram, &d);
+    if (!ach) return;
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    sets_with(body, sizeof body, "\"0xH800100=5\"", "null");
+    CHECK(nk_ach_begin_load_game(ach, HASH), "load starts");
+    CHECK(deliver(&d, "r=achievementsets&", 200, body), "the set request waits for its answer");
+    CHECK(deliver(&d, "r=startsession&", 200, k_session), "the session request waits");
+    CHECK(nk_ach_game_loaded(ach), "an achievement whose author is null still loads");
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
+/* A client over the deferred transport whose login request waits for its answer. */
+static NkAch *deferred_login_waiting(uint8_t *ram, Deferred *d) {
+    memset(d, 0, sizeof *d);
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, deferred_transport, d);
+    CHECK(ach != NULL, "create");
+    if (!ach) return NULL;
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "login starts");
+    return ach;
+}
+
+/* rcheevos LOCAL DELTA (rc_json_parse_field, upstream 8409479c #577): a reply nested deeper than
+ * 32 arrays is refused as invalid JSON. Upstream at the pin recursed once per '[' with no limit,
+ * so a reply of a million '[' overflowed the native stack. */
+static void test_deep_json_is_refused(uint8_t *ram) {
+    static const char prefix[] = "{\"Success\":true,\"User\":";
+    const size_t depth = (size_t)1u << 20;
+    const size_t len = sizeof prefix - 1u + depth;
+    char *body = (char *)malloc(len + 1u);
+    CHECK(body != NULL, "out of memory");
+    if (!body) return;
+    memcpy(body, prefix, sizeof prefix - 1u);
+    memset(body + sizeof prefix - 1u, '[', depth);
+    body[len] = '\0';
+    Deferred d;
+    NkAch *ach = deferred_login_waiting(ram, &d);
+    if (ach) {
+        CHECK(deliver_n(&d, "r=login2&", 200, body, len), "the login request waits for its answer");
+        NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+        const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+        CHECK(has_event(ev, n, NK_ACH_EVENT_LOGIN_FAILED) >= 0, "a reply nested 2^20 deep fails the login");
+        CHECK(!nk_ach_logged_in(ach), "not logged in");
+        drain(&d);
+        nk_ach_destroy(ach);
+    }
+    free(body);
+}
+
+/* rcheevos LOCAL DELTA (rc_json_parse_server_response): an answer with body_length 0 is an empty
+ * body whatever its pointer points at. Upstream at the pin read body[0] past the length, so a 504
+ * whose zero-length body pointed at a non-NUL byte lost its "Request has timed out." message. */
+static void test_empty_body_reads_nothing(uint8_t *ram) {
+    static const char after[] = "x";
+    Deferred d;
+    NkAch *ach = deferred_login_waiting(ram, &d);
+    if (!ach) return;
+    CHECK(deliver_n(&d, "r=login2&", 504, after, 0u), "the login request waits for its answer");
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const int failed = has_event(ev, n, NK_ACH_EVENT_LOGIN_FAILED);
+    CHECK(failed >= 0, "a 504 with no body fails the login");
+    if (failed >= 0)
+        CHECK(strstr(ev[failed].message, "Request has timed out.") != NULL,
+              "the empty 504 reads as a timeout: \"%s\"", ev[failed].message);
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
 int main(void) {
     uint8_t *ram = (uint8_t *)calloc(1u, USER_RAM_SIZE);
     if (!ram) {
@@ -490,6 +605,9 @@ int main(void) {
     test_award_of_another_id_is_logged(ram);
     test_session_error_after_failed_load(ram);
     test_award_reply_after_unload(ram);
+    test_null_required_string(ram);
+    test_empty_body_reads_nothing(ram);
+    test_deep_json_is_refused(ram);
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);

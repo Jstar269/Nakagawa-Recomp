@@ -573,7 +573,7 @@
           "Copyright (C) 2025-2026 the psp-recomp authors (sal063 / psp-recomp)",
           "Copyright (c) 2012- PPSSPP Project and contributors"
         ],
-        "note": "Source files under src/rt/ and src/ref/ that carry GPL-2.0-or-later and derive from the sal063 PSP Recompilation Project and, for the files listed in src/rt/PROVENANCE.md, from PPSSPP. They are compiled into the runtime itself, so no separate relink step applies. The runtime is conveyed under GPL-3.0-or-later, which GPL-2.0-or-later permits. No disposition in this inventory names statically compiled GPL source of this kind; statically_linked_subset is the closest documented value.",
+        "note": "Source files under src/rt/ and src/ref/ that carry GPL-2.0-or-later and derive from the sal063 PSP Recompilation Project and, for the files listed in src/rt/PROVENANCE.md, from PPSSPP. They are compiled into the runtime itself, so no separate relink step applies. GPL-2.0-or-later lets them be conveyed under GPL version 3, the licence of the player that links them: the project's own files are GPL-3.0-or-later, and the player also links GPL-3.0-only files (the pspdecrypt-derived src/core/nk_psp_* files and xBRZ), so it is conveyed under GPL version 3 (NOTICE.md). No disposition in this inventory names statically compiled GPL source of this kind; statically_linked_subset is the closest documented value.",
         "license_texts": [
           {
             "file": "third_party/licenses/GPL-2.0.txt",
@@ -583,7 +583,7 @@
           {
             "file": "third_party/licenses/SAL063_CREDITS.txt",
             "copied_from": "sal063 CREDITS.md at da17b0e1db209206a407d097d132201e516e3855 with Nakagawa corrections (third_party/licenses/SAL063_CREDITS.txt)",
-            "sha256": "e6fba06ec3eb22142c431ff4f2d4edb7212a8e0e72e68bf01b056cca5117b143"
+            "sha256": "619dd74e6f84e955b99c4adecc167c2e602626fc9555b98cbb07ce04c2b411ef"
           }
         ]
       },
