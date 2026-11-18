@@ -713,19 +713,28 @@ class TestNonFiniteVertex(unittest.TestCase):
     def test_the_harness_ignores_ambient_ge_settings(self):
         # SR_FBSNAP makes the stat window dump framebuffers into the current directory, and
         # SR_NOCULL changes what is drawn; neither may reach the harness from the caller.
-        def snapshots() -> set[Path]:
-            return {path.resolve() for folder in {ROOT, Path.cwd(), self.exe.parent}
-                    for path in folder.glob("snap_f*.ppm")}
+        # _run starts the harness in the scratch exe folder, so only that folder is cleaned;
+        # the checkout and this process's directory are only checked, never written to.
+        def snapshots(folder: Path) -> set[Path]:
+            return {path.resolve() for path in folder.glob("snap_f*.ppm")}
 
-        before = snapshots()
+        scratch = self.exe.parent
+        watched = {ROOT.resolve(), Path.cwd().resolve()} - {scratch.resolve()}
+        before_scratch = snapshots(scratch)
+        before_watched = {folder: snapshots(folder) for folder in watched}
         with mock.patch.dict(os.environ, {"SR_FBSNAP": "1", "SR_NOCULL": "1"}):
             result = _run(self.exe, "finite")
-        leaked = sorted(snapshots() - before)
+        leaked = sorted(snapshots(scratch) - before_scratch)
         for path in leaked:
             self.addCleanup(path.unlink, missing_ok=True)
+        escaped = sorted(str(path) for folder in watched
+                         for path in snapshots(folder) - before_watched[folder])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([path.name for path in leaked], [],
                          "an ambient SR_FBSNAP made the harness write GE snapshots")
+        self.assertEqual(escaped, [],
+                         "the harness wrote GE snapshots outside its scratch folder "
+                         "(left in place for inspection)")
         self.assertEqual(_stat(result.stderr, 120).get("nonfinite"), "0")
 
     def test_docs_name_the_boundary(self):

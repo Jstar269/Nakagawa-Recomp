@@ -142,8 +142,10 @@ def load_excluded_paths(export_root: Path, source_root: Path = ROOT) -> tuple[fr
     """Return (excluded exact paths, excluded fnmatch patterns) for the public-safe profile.
 
     Prefers the export's own ``PUBLIC_EXPORT.json`` because that records what the
-    export actually removed: its ``excluded_paths`` and ``excluded_globs`` (an older
-    manifest without ``excluded_globs`` takes the source profile's globs and prefixes).
+    export actually removed: its ``excluded_paths`` and ``excluded_globs``. The manifest
+    never records prefixes, so the source profile's ``exclude_prefixes`` apply on both
+    routes when that profile exists (an older manifest without ``excluded_globs`` takes
+    the profile's globs as well).
     Falls back to the profile in the source tree.
     """
     profile = source_root / PROFILE_PATH
@@ -162,7 +164,12 @@ def load_excluded_paths(export_root: Path, source_root: Path = ROOT) -> tuple[fr
         paths = data.get("excluded_paths")
         if isinstance(paths, list) and paths:
             if "excluded_globs" in data:
+                # public_export.py records the policy's globs but not its prefixes, so the
+                # source profile's prefixes still apply when that profile is present.
                 globs = _strings(data.get("excluded_globs"))
+                if profile.is_file():
+                    globs.extend(glob.escape(prefix) + "*" for prefix in
+                                 _strings(read_profile().get("exclude_prefixes")))
             else:
                 globs = _profile_globs(read_profile())
             return frozenset(_strings(paths)), globs

@@ -157,6 +157,23 @@ class ExcludedPathLoadingTests(unittest.TestCase):
             self.assertTrue(drift.is_excluded("private[1]/notes.txt", exact, globs))
             self.assertFalse(drift.is_excluded("private1/notes.txt", exact, globs))
 
+    def test_manifest_with_globs_still_takes_the_profile_prefixes(self):
+        """public_export.py writes no prefixes, so a manifest's globs never stand alone."""
+        with tempfile.TemporaryDirectory() as tmp:
+            export, source = Path(tmp) / "export", Path(tmp) / "source"
+            _write(export, drift.EXPORT_MANIFEST, json.dumps(
+                {"excluded_paths": ["src/rt/pgd.c"], "excluded_globs": ["font/*.pgf"]}))
+            _write(source, drift.PROFILE_PATH, json.dumps(
+                {"exclude_paths": [], "exclude_globs": [], "exclude_prefixes": ["private[1]/"]}))
+            exact, globs = drift.load_excluded_paths(export, source_root=source)
+            self.assertTrue(drift.is_excluded("font/x.pgf", exact, globs))
+            self.assertTrue(drift.is_excluded("private[1]/notes.txt", exact, globs))
+            self.assertFalse(drift.is_excluded("private1/notes.txt", exact, globs))
+            findings = drift.classify({"private[1]/notes.txt": "n"}, {"private[1]/notes.txt": "n"},
+                                      exact, globs)
+            self.assertEqual([f["category"] for f in findings
+                              if f["path"] == "private[1]/notes.txt"], ["UNKNOWN"])
+
     def test_globs_match_the_whole_path_as_the_publication_policy_does(self):
         """Policy.resolve uses fnmatchcase over the whole path, not right-anchored matching."""
         self.assertTrue(drift.is_excluded("font/ltn0.pgf", frozenset(), GLOBS))

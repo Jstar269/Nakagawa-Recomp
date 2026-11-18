@@ -77,6 +77,7 @@
     X("SR_EXE_DIR", "path", "unset (executable directory is detected)", "hle_host.c", "Overrides the directory the host treats as the executable root; read as a wide string on Windows.") \
     X("SR_EXITSNAP", "flag-presence", "off", "hle_kernel_thread.c", "Arms capture of the last worker thread's CPU state at thread exit for later diagnostics.") \
     X("SR_EXIT_AT_VBLANK", "number", "0 (never exit)", "hle_display.c,sched.c", "Ends the run successfully once the vblank count reaches this value; also counts as pause automation.") \
+    X("SR_EXPECT_DATA_FILE_COUNT", "number", "unset", "hle_thread_selftest.c", "Expected data-file count the title-config self-test compares with sr_title_config_expected_data_file_count().") \
     X("SR_EXPECT_HLE_DIAGNOSTICS", "string", "unset", "hle_thread_selftest.c", "Expected HLE diagnostics state that the title-config self-test compares against.") \
     X("SR_FBDIAG", "flag-presence", "off", "hle_display.c", "Prints a FRAMEBUF MISMATCH warning when the presented buffer differs from the GE draw target.") \
     X("SR_FBDUMP", "number", "off", "ge.c,hle_display.c", "Frame count (vcount) from which a framebuffer dump is captured; also enables the GE list snapshot.") \

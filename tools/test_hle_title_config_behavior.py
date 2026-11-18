@@ -84,8 +84,9 @@ def selftest_make() -> str:
 
     Windows builds it with MSYS2's mingw32-make. Linux and WSL build the same
     ``hle-title-selftest-one`` target with make (CI's Linux native job does), when
-    pkg-config finds the SDL3 and Vulkan development files it links. The hosted
-    Windows selftests job runs this module, so a skip here is not the only coverage.
+    pkg-config finds the SDL3 and Vulkan development files it links. Hosted CI runs
+    this module in the core part of the Linux ``native_tools`` job and accepts only a
+    bare ``OK``; the ``python_tools`` shards skip it.
     """
     make = shutil.which("mingw32-make")
     if make:
