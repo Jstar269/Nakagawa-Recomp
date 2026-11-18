@@ -252,7 +252,9 @@ class CensusGateAndReporting(unittest.TestCase):
         self.assertEqual(len(census.check_failures([late])), 1)
 
     def test_handled_nids_are_the_sr_hle_registrations(self):
-        with mock.patch.object(census.hle_manifest, "registered_nids", return_value=frozenset({0xf3f76017, 0x3dfaeba9})) as reg_mock:
+        with mock.patch.object(
+            census.hle_manifest, "registered_nids", return_value=frozenset({0xf3f76017, 0x3dfaeba9})
+        ) as reg_mock:
             self.assertEqual(census.handled_nids("ignored"), frozenset({0xf3f76017, 0x3dfaeba9}))
             reg_mock.assert_called_once()
         # Live runtime check: controlled-unsupported registrations (e.g. sceNetAdhocInit 0xe1d621d7) are included.
@@ -402,7 +404,10 @@ class ManifestImages(unittest.TestCase):
             )
             out_path = os.path.join(root, "census.jsonl")
             markdown_path = os.path.join(root, "census.md")
-            with mock.patch.object(census, "handled_nids", return_value=frozenset()),                     contextlib.redirect_stdout(io.StringIO()):
+            with (
+                mock.patch.object(census, "handled_nids", return_value=frozenset()),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
                 census.main(["--manifest", manifest_path, "--title-dir", title_dir,
                              "--out", out_path, "--markdown", markdown_path])
             with open(out_path, encoding="utf-8") as fh:
