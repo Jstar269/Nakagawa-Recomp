@@ -679,9 +679,16 @@ static uint32_t h_ReleaseWaitThread(CpuState *s) {
  * buffer is the number written or the total (the PSPSDK leaves it open), and the error
  * codes, which are the PSPSDK pspkerror.h names for each case: ILLEGAL_TYPE for a type
  * outside SceKernelIdListType, ILLEGAL_SIZE for a negative readbufsize, ILLEGAL_ADDR for
- * an unwritable readbuf span or idcount. Thread event handlers are a PSPSDK class this
- * runtime does not track (their registration is not implemented), so that type is a named
- * refusal, never an empty list. */
+ * an unwritable readbuf span or idcount.
+ *
+ * PSP-measured 2026-11-17 (PSP-3000, PSP-SAFE-SCALAR-001; docs/HARDWARE_ORACLE.md), with a
+ * 16-slot buffer, a count pointer and no object of the class created by the caller: the thread
+ * event handler class (tmid-9-list) and the alarm class (tmid-10-list) each return 0, store a
+ * count of 0 and write no slot. Thread event handlers are a class this runtime does not track:
+ * it has no call that registers one (sceKernelRegisterThreadEventHandler is an unknown NID and
+ * stops the run by name), so no guest can hold one and the measured precondition always holds.
+ * Type 9 answers that one call shape only: with any other buffer size, or a NULL or unmapped
+ * buffer or count pointer, it is not measured and stops the run by name. */
 #define THREADMAN_ERROR_ILLEGAL_TYPE 0x800201bbu   /* SCE_KERNEL_ERROR_ILLEGAL_TYPE */
 
 typedef struct {
@@ -746,6 +753,8 @@ static int hle_visit_threadman_ids(int tmid, SrUidVisitor visit, void *ctx) {
             for (int i = 0; i < VTIMER_MAX; i++)
                 if (s_vtimers[i].used) visit(s_vtimers[i].uid, ctx);
             return 1;
+        case SR_TMID_THREAD_EVENT_HANDLER:   /* none can be registered here: the measured empty list */
+            return 1;
         default:
             return 0;
     }
@@ -765,10 +774,13 @@ static uint32_t h_GetThreadmanIdList(CpuState *s) {
     const int32_t readbufsize = (int32_t)A2;
     const uint32_t idcount = A3;
     if (!threadman_id_type_listed(tmid)) return THREADMAN_ERROR_ILLEGAL_TYPE;
-    if (tmid == SR_TMID_THREAD_EVENT_HANDLER) {
+    if (tmid == SR_TMID_THREAD_EVENT_HANDLER &&
+        (readbufsize != 16 || !readbuf || !sr_guest_span_writable(readbuf, 64u) || !idcount ||
+         !sr_guest_span_writable(idcount, 4u))) {
         return hle_unmodelled_stop("sceKernelGetThreadmanIdList",
-                                   "type %d (ThreadEventHandler): thread event handlers are "
-                                   "not modelled", tmid);
+                                   "type %d (ThreadEventHandler) is measured only with a 16-slot buffer "
+                                   "and a count pointer (size %d, buffer 0x%08x, count 0x%08x)",
+                                   tmid, (int)readbufsize, readbuf, idcount);
     }
     /* pspautotests tests/threads/threads/threadmanidlist.expected "Size ffffffff/fffffffe":
      * res=800200d3 (ILLEGAL_ADDR) with the count word unwritten. */

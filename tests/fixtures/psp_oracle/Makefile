@@ -443,6 +443,11 @@ CASE_ID = 136
 # device, read-only (probe_kernel_semantics.c).
 else ifeq ($(CASE),io-umd-eof)
 CASE_ID = 137
+# 141: #2640's safe-scalar cells (probe_kernel_semantics.c): RTC edge dates, the thread-list
+# classes 9 and 10, and where a TLS pool lies with and without attribute 0x4000. No device,
+# dialog, GE or radio call and no handler.
+else ifeq ($(CASE),safe-scalar)
+CASE_ID = 141
 # 128: #1375 P1 plus non-invoking P2 registrations; 129/130 are separately guarded NULL invokes.
 else ifeq ($(CASE),null-code-registration)
 CASE_ID = 128
@@ -758,6 +763,10 @@ OBJS = $(BUILD_DIR)/probe_kernel_semantics.o $(BUILD_DIR)/threadman_user_imports
 else ifeq ($(CASE),io-umd-eof)
 TARGET = $(BUILD_DIR)/io_umd_eof
 OBJS = $(BUILD_DIR)/probe_kernel_semantics.o $(BUILD_DIR)/threadman_user_imports.o
+# safe-scalar also links its own complete Kernel_Library block, for sceKernelGetTlsAddr.
+else ifeq ($(CASE),safe-scalar)
+TARGET = $(BUILD_DIR)/safe_scalar
+OBJS = $(BUILD_DIR)/probe_kernel_semantics.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/kernel_library_tls_imports.o
 else ifeq ($(CASE),null-code-registration)
 TARGET = $(BUILD_DIR)/null_code_registration
 OBJS = $(BUILD_DIR)/probe_hle_issues.o $(BUILD_DIR)/threadman_user_imports.o
@@ -962,6 +971,21 @@ USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUmdUser=0x46EBB729,0x6B4A146C
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library sceCtrl
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceSuspendForUser --forbid-library sceWlanDrv
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceOpenPSID --forbid-library KUBridge --forbid-library SystemCtrlForUser
+endif
+# safe-scalar: exactly the four sceRtc date calls, the five partition-memory calls and, from
+# Kernel_Library, sceKernelGetTlsAddr beside the two LwMutex calls the PSPSDK libc glue
+# imports; none of kernel-semantics' interrupt, controller, suspend or WLAN imports, no
+# registry, GE, display, audio, power or UMD library, nothing from the bridge.
+ifeq ($(CASE),safe-scalar)
+LIBS += -lpsprtc
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceRtc=0x4B1B5E82,0x57726BC1,0x27C4594C,0x42842C77
+USER_MODE_IMPORT_GATE_ARGS += --exact-library SysMemUserForUser=0x237DBD4F,0xB6D61D02,0x9D9A5BA1,0xA291F107,0xF919F628
+USER_MODE_IMPORT_GATE_ARGS += --exact-library Kernel_Library=0xBEA46419,0x15B6446B,0xFA835CDE
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library InterruptManager --forbid-library sceCtrl
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceSuspendForUser --forbid-library sceWlanDrv
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceOpenPSID --forbid-library KUBridge --forbid-library SystemCtrlForUser
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceReg --forbid-library sceGe_user --forbid-library sceDisplay
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceAudio --forbid-library scePower --forbid-library sceUmdUser
 endif
 # memory-edge: partition-memory, file and DMAC calls only; none of the interrupt, controller,
 # suspend or WLAN imports, nothing from the kernel bridge, and no OpenPSID.
@@ -1198,6 +1222,9 @@ $(BUILD_DIR)/mutex_imports.o: mutex_imports.S
 	$(CC) $(ASFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/threadman_user_imports.o: threadman_user_imports.S
+	$(CC) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/kernel_library_tls_imports.o: kernel_library_tls_imports.S
 	$(CC) $(ASFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/display_user_imports.o: display_user_imports.S

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta
 import hashlib
 import io
 import json
@@ -2734,7 +2735,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 164)
+        self.assertEqual(len(routes), 165)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2742,7 +2743,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         self.assertEqual(set(range(1, 79)) | set(range(90, 106)) | {180} | {106, 107, 108, 109}
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
-                         | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140}
+                         | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141}
                          | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
@@ -3778,6 +3779,9 @@ class PspDmacProbeTests(unittest.TestCase):
                 # The 2026-11-10 acceptance-eligible ge-through-z (boot 180, e4e6a3a2) and
                 # vfpu-reserved-widths (#326, boot 182, c6abab53) runs.
                 "PSP-GE-THROUGHZ-001", "PSP-VFPU-RESERVED-001",
+                # The 2026-11-17 (UTC) acceptance-eligible safe-scalar (#2640, boot 221, XMB context)
+                # run of 86279e852.
+                "PSP-SAFE-SCALAR-001",
             },
         )
         self.assertEqual(
@@ -13168,6 +13172,8 @@ class KernelSemanticsProbeTests(unittest.TestCase):
             "sceKernelDelayThread", "sceKernelGetSystemTimeLow", "sceKernelSleepThread",
             "sceKernelExitThread", "sceKernelWakeupThread", "sceKernelWaitThreadEnd",
             "sceKernelDeleteThread", "sceKernelGetThreadId",
+            # safe-scalar (SafeScalarProbeTests pins its section's own set)
+            *SafeScalarProbeTests.CALLS,
         }
         self.assertEqual(sorted(called - expected), [])
 
@@ -13178,7 +13184,8 @@ class KernelSemanticsProbeTests(unittest.TestCase):
         literals = set(re.findall(r'"((?:ms0|host0|flash0|disc0|umd0):[^"]*)"', self.code))
         self.assertEqual(literals, {"ms0:/NKKSEM00", "host0:/kernel_semantics_log.txt",
                                     "ms0:/NKKSEM01", "host0:/io_seek_eof_log.txt",
-                                    "host0:/io_umd_eof_log.txt", "disc0:/UMD_DATA.BIN",
+                                    "host0:/io_umd_eof_log.txt", "host0:/safe_scalar_log.txt",
+                                    "disc0:/UMD_DATA.BIN",
                                     "disc0:/PSP_GAME/PARAM.SFO", "umd0:",
                                     "host0:/nakagawa_transport_write.bin"})
         io = self.bodies["ks_io"]
@@ -13389,6 +13396,688 @@ class KernelSemanticsProbeTests(unittest.TestCase):
         self.assertNotIn("sceKernelDcacheInvalidateRange", read)
         self.assertEqual(re.findall(r"s_ku_buf\[(\w+)\]", section), ["KU_BUF", "i"])
         self.assertIn("changed += s_ku_buf[i] != KU_FILL;", read)
+
+
+def _c_statement_end(text: str, start: int) -> int:
+    """Index of the semicolon that ends the statement starting at start (brackets skipped)."""
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            i += 1
+            while text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif ch in "({[":
+            i = _c_close(text, i)
+        elif ch == ";":
+            return i
+        i += 1
+    raise AssertionError("statement without a terminating semicolon")
+
+
+def _c_block_paths(block: str, events: Any, loop: Any,
+                   env: dict[str, Any]) -> list[tuple[tuple[str, ...], bool]]:
+    """Every control-flow path through a comment-free C block: (what it emits, returned).
+
+    Understood: if / else if / else with braced bodies, for loops, return, nested blocks and
+    plain statements. events(statement, env) names what a plain statement emits;
+    loop(header, body, env) gives a for loop's variable and the values it takes. Anything else
+    (while, do, switch, goto, break, continue, an if body without braces, a loop body whose
+    emission depends on a branch or that returns) raises, so a construct this walker cannot
+    count fails the test instead of being passed over.
+    """
+    text = block[1:-1]
+    paths: set[tuple[tuple[str, ...], bool]] = {((), False)}
+
+    def extend(more: Any) -> None:
+        nonlocal paths
+        paths = ({(emitted, True) for emitted, done in paths if done}
+                 | {(emitted + extra, ended) for emitted, done in paths if not done
+                    for extra, ended in more})
+
+    def braced(at: int) -> tuple[str, int]:
+        while text[at].isspace():
+            at += 1
+        if text[at] != "{":
+            raise AssertionError("a branch body without braces")
+        end = _c_close(text, at)
+        return text[at:end + 1], end + 1
+
+    i = 0
+    while True:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text):
+            return sorted(paths)
+        word = re.match(r"[A-Za-z_]\w*", text[i:])
+        head = word.group(0) if word else ""
+        if head in ("while", "do", "switch", "goto", "case", "default", "break", "continue"):
+            raise AssertionError(f"unsupported construct: {head}")
+        if head == "if":
+            branches: set[tuple[tuple[str, ...], bool]] = set()
+            closed = False
+            while True:
+                body, i = braced(_c_close(text, text.index("(", i)) + 1)
+                branches |= set(_c_block_paths(body, events, loop, env))
+                tail = re.match(r"\s*else\b\s*", text[i:])
+                if tail is None:
+                    break
+                i += tail.end()
+                if re.match(r"if\b", text[i:]):
+                    continue
+                body, i = braced(i)
+                branches |= set(_c_block_paths(body, events, loop, env))
+                closed = True
+                break
+            if not closed:
+                branches.add(((), False))
+            extend(branches)
+        elif head == "for":
+            close = _c_close(text, text.index("(", i))
+            header = text[text.index("(", i) + 1:close]
+            at = close + 1
+            while text[at].isspace():
+                at += 1
+            if text[at] == "{":
+                body, i = braced(at)
+            else:
+                end = _c_statement_end(text, at)
+                body, i = "{" + text[at:end + 1] + "}", end + 1
+            variable, values = loop(header, body, env)
+            emitted: tuple[str, ...] = ()
+            for value in values:
+                once = _c_block_paths(body, events, loop, {**env, variable: value, "loop": body})
+                if len(once) != 1 or once[0][1]:
+                    raise AssertionError(f"a loop body whose emission depends on a branch: {header}")
+                emitted += once[0][0]
+            extend({(emitted, False)})
+        elif head == "return":
+            i = _c_statement_end(text, i) + 1
+            extend({((), True)})
+        elif text[i] == "{":
+            body, i = braced(i)
+            extend(_c_block_paths(body, events, loop, env))
+        else:
+            end = _c_statement_end(text, i)
+            extend({(tuple(events(text[i:end + 1], env)), False)})
+            i = end + 1
+
+
+class _SafeScalarRows:
+    """The record rows each path of the safe-scalar section emits, read from its C text.
+
+    rows(function) walks every path of a function of the section and returns the one row
+    sequence they all emit; it raises when two paths differ. A call to another function of
+    the section stands for that function's own sequence, with its first parameter bound to the
+    call's first argument, so an early return that skips a record, or writes one twice, shows
+    as a path with a different sequence.
+    """
+
+    def __init__(self, section: str) -> None:
+        self.section = section
+        self.bodies = _c_function_bodies(section)
+        self.parameters = {
+            name: (re.findall(r"(\w+)\s*(?:,|$)", arguments.strip())[:1] or [""])[0]
+            for name, arguments in re.findall(
+                r"^static\s+[\w \t\*]*?\b(\w+)\s*\(([^;{}]*)\)\s*\{", section, re.MULTILINE)}
+        self.enum = re.findall(r"\bSS_T_\w+", _matched(re.search(r"enum \{([^}]*)\}", section)).group(1))
+        self.tls_rows = re.findall(r'"(tls-[a-z0-9-]+)"', _matched(re.search(
+            r"k_ss_tls_rows\[SS_TLS_ROWS\] = \{([^}]*)\}", section)).group(1))
+
+    def define(self, name: str) -> int:
+        return int(_matched(re.search(rf"^#define {name} (\w+?)(?:u|ull)?$", self.section,
+                                      re.MULTILINE)).group(1), 0)
+
+    def table(self, name: str) -> list[str]:
+        body = _matched(re.search(rf"{name}\[\w+\] = \{{(.*?)\n\}};", self.section, re.S)).group(1)
+        return re.findall(r'\{ "([a-z0-9-]+)",', body)
+
+    def value(self, text: str, env: dict[str, Any]) -> Any:
+        """An integer, a row name, or None for an expression this reader does not evaluate."""
+        text = text.strip()
+        if re.fullmatch(r"(?:0x[0-9a-fA-F]+|\d+)u?", text):
+            return int(text.rstrip("u"), 0)
+        if text in env:
+            return env[text]
+        if text in self.enum:
+            return self.enum.index(text)
+        if re.fullmatch(r'"[a-z0-9-]+"', text):
+            return text[1:-1]
+        indexed = re.fullmatch(r"k_ss_tls_rows\[(\w+)\]", text)
+        if indexed:
+            index = self.value(indexed.group(1), env)
+            return self.tls_rows[index] if isinstance(index, int) else None
+        if text == "in->row" and "loop" in env:
+            alias = re.search(r"\*in = &(k_ss_\w+)\[(\w+)\];", env["loop"])
+            if alias and isinstance(env.get(alias.group(2)), int):
+                return self.table(alias.group(1))[env[alias.group(2)]]
+        if re.fullmatch(r"SS_[A-Z0-9_]+", text) and re.search(rf"^#define {text} ", self.section,
+                                                              re.MULTILINE):
+            return self.define(text)
+        return None
+
+    def _loop(self, header: str, _body: str, env: dict[str, Any]) -> tuple[str, list[int]]:
+        match = re.fullmatch(r"(?:unsigned|int|uint32_t|size_t) (\w+) = (\w+); \1 < (\w+); \1\+\+",
+                             header.strip())
+        if match is None:
+            raise AssertionError(f"a loop that does not count up to a constant: {header}")
+        first, bound = self.value(match.group(2), env), self.value(match.group(3), env)
+        if not isinstance(first, int) or not isinstance(bound, int):
+            raise AssertionError(f"a loop bound this reader cannot evaluate: {header}")
+        return match.group(1), list(range(first, bound))
+
+    def _events(self, statement: str, env: dict[str, Any]) -> list[str]:
+        emitted: list[str] = []
+        for call in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", statement):
+            name = call.group(1)
+            if name != "hle_record" and name not in self.bodies:
+                continue
+            arguments = statement[call.end():_c_close(statement, call.end() - 1)]
+            depth, first = 0, len(arguments)
+            for index, ch in enumerate(arguments):
+                depth += ch in "([{"
+                depth -= ch in ")]}"
+                if ch == "," and depth == 0:
+                    first = index
+                    break
+            argument = self.value(arguments[:first], env)
+            if name == "hle_record":
+                if not isinstance(argument, str):
+                    raise AssertionError(f"a record whose row this reader cannot name: {statement}")
+                emitted.append(argument)
+            else:
+                emitted.extend(self.rows(name, argument))
+        return emitted
+
+    def paths(self, function: str, argument: Any = None) -> list[tuple[tuple[str, ...], bool]]:
+        env = {self.parameters.get(function, ""): argument}
+        return _c_block_paths(self.bodies[function], self._events, self._loop, env)
+
+    def rows(self, function: str, argument: Any = None) -> tuple[str, ...]:
+        sequences = {emitted for emitted, _returned in self.paths(function, argument)}
+        if len(sequences) != 1:
+            raise AssertionError(f"{function}: its paths do not all emit the same rows: "
+                                 f"{sorted(sequences)}")
+        return next(iter(sequences))
+
+
+class SafeScalarProbeTests(unittest.TestCase):
+    """CASE=safe-scalar (141, PSP-SAFE-SCALAR-001) in probe_kernel_semantics.c: #2640 cells the
+    runtime stops at by name or answers from an emulator (RTC edge dates, the thread-list classes
+    9 and 10, TLS pool placement). The case may call no device, dialog, GE or radio function,
+    install no handler, pass the kernel no pointer that is not its own buffer or a documented
+    optional NULL, and record no address except as a difference."""
+
+    CASE = "safe-scalar"
+    TEST_ID = "PSP-SAFE-SCALAR-001"
+    # Every firmware call the section may make.
+    CALLS = frozenset({
+        "sceRtcCheckValid", "sceRtcGetDayOfWeek", "sceRtcGetTime_t", "sceRtcTickAddYears",
+        "sceKernelGetThreadmanIdList",
+        "sceKernelCreateTlspl", "sceKernelGetTlsAddr", "sceKernelReferTlsplStatus",
+        "sceKernelFreeTlspl", "sceKernelDeleteTlspl",
+        "sceKernelAllocPartitionMemory", "sceKernelGetBlockHeadAddr",
+        "sceKernelFreePartitionMemory", "sceKernelTotalFreeMemSize", "sceKernelMaxFreeMemSize",
+        "sceKernelCreateThread", "sceKernelStartThread", "sceKernelWaitThreadEnd",
+        "sceKernelDeleteThread", "sceKernelTerminateDeleteThread", "sceKernelExitThread",
+    })
+    # The link-time gate's exact sets: library -> {NID: name}.
+    EXACT_IMPORTS = {
+        "sceRtc": {0x4B1B5E82: "sceRtcCheckValid", 0x57726BC1: "sceRtcGetDayOfWeek",
+                   0x27C4594C: "sceRtcGetTime_t", 0x42842C77: "sceRtcTickAddYears"},
+        "SysMemUserForUser": {
+            0x237DBD4F: "sceKernelAllocPartitionMemory", 0xB6D61D02: "sceKernelFreePartitionMemory",
+            0x9D9A5BA1: "sceKernelGetBlockHeadAddr", 0xA291F107: "sceKernelMaxFreeMemSize",
+            0xF919F628: "sceKernelTotalFreeMemSize",
+        },
+        "Kernel_Library": {0xBEA46419: "sceKernelLockLwMutex", 0x15B6446B: "sceKernelUnlockLwMutex",
+                           0xFA835CDE: "sceKernelGetTlsAddr"},
+    }
+    FORBIDDEN = ("InterruptManager", "KUBridge", "SystemCtrlForUser", "sceAudio", "sceCtrl",
+                 "sceDisplay", "sceGe_user", "sceOpenPSID", "scePower", "sceReg",
+                 "sceSuspendForUser", "sceUmdUser", "sceWlanDrv")
+    TLS_POOL_STUBS = {"sceKernelCreateTlspl": 0x8DAFF657, "sceKernelDeleteTlspl": 0x32BF938E,
+                      "sceKernelFreeTlspl": 0x4A719FB2, "sceKernelReferTlsplStatus": 0x721067F3}
+    root: ClassVar[Path]
+    probe: ClassVar[str]
+    makefile: ClassVar[str]
+    threadman: ClassVar[str]
+    kernel_library: ClassVar[str]
+    section: ClassVar[str]
+    bodies: ClassVar[dict[str, str]]
+    row: ClassVar[dict[str, Any]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root = Path(__file__).resolve().parents[1]
+        fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_kernel_semantics.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.threadman = (fixture / "threadman_user_imports.S").read_text(encoding="utf-8")
+        cls.kernel_library = (fixture / "kernel_library_tls_imports.S").read_text(encoding="utf-8")
+        start = cls.probe.index("#if PSP_ORACLE_CASE == KS_CASE_SAFE_SCALAR\n/* ----")
+        cls.section = _c_code(cls.probe[start:cls.probe.index("#endif /* KS_CASE_SAFE_SCALAR */")])
+        cls.bodies = _c_function_bodies(cls.section)
+        manifest = json.loads((cls.root / "tools" / "psp_oracle" / "manifest.json")
+                              .read_text(encoding="utf-8"))
+        cls.row = next(row for row in manifest["tests"] if row["id"] == cls.TEST_ID)
+
+    def _define(self, name: str) -> int:
+        return int(_matched(re.search(rf"^#define {name} (\w+?)(?:u|ull)?$", self.section,
+                                      re.MULTILINE)).group(1), 0)
+
+    def _table(self, name: str) -> list[tuple[str, list[int]]]:
+        """One of the row tables: (row name, the integers after it)."""
+        body = _matched(re.search(rf"{name}\[\w+\] = \{{(.*?)\n\}};", self.section, re.S)).group(1)
+        return [(row, [int(value, 0) for value in re.findall(r"-?(?:0x[0-9a-f]+|\d+)\b", rest)])
+                for row, rest in re.findall(r'\{ "([a-z0-9-]+)", ([^}]*) \}', body)]
+
+    def _stream(self, statuses: dict[str, str] | None = None, drop: str | None = None,
+                short: str | None = None) -> str:
+        spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        lines = [META.format(source="psp", model="unknown", firmware="unknown",
+                             binary="0" * 64, commit="1" * 40)]
+        for case_id in spec.ordered_cases:
+            if case_id == drop:
+                continue
+            words = counts[case_id] - (1 if case_id == short else 0)
+            outs = "".join(f" out{index}=0xa5a5a5a5" for index in range(words))
+            if case_id == spec.terminal_case:
+                outs = f" out0=0x{spec.terminal_count:x}"
+            status = (statuses or {}).get(case_id, "PASS")
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id={self.TEST_ID} case_id={case_id} "
+                         f"status={status} result=0x00000000{outs}\n")
+        return "".join(lines)
+
+    def test_route_registration_and_log(self) -> None:
+        self.assertIn("else ifeq ($(CASE),safe-scalar)\nCASE_ID = 141\n", self.makefile)
+        self.assertIn("else ifeq ($(CASE),safe-scalar)\nTARGET = $(BUILD_DIR)/safe_scalar\n"
+                      "OBJS = $(BUILD_DIR)/probe_kernel_semantics.o "
+                      "$(BUILD_DIR)/threadman_user_imports.o "
+                      "$(BUILD_DIR)/kernel_library_tls_imports.o\n", self.makefile)
+        self.assertIn("$(BUILD_DIR)/kernel_library_tls_imports.o: kernel_library_tls_imports.S\n"
+                      "\t$(CC) $(ASFLAGS) -c $< -o $@\n", self.makefile)
+        # The Kernel_Library block is linked by this case alone.
+        self.assertEqual(len(re.findall(r"^OBJS \+?= .*kernel_library_tls_imports\.o.*$",
+                                        self.makefile, re.MULTILINE)), 1)
+        self.assertIn("#define KS_CASE_SAFE_SCALAR 141\n", self.probe)
+        self.assertIn("#if PSP_ORACLE_CASE == 141\n#include <psprtc.h>\n#endif\n", self.probe)
+        self.assertIn('#define HLE_CAMPAIGN_ID "safe-scalar"\n'
+                      '#define HLE_TEST_ID "PSP-SAFE-SCALAR-001"\n'
+                      '#define HLE_LOG "host0:/safe_scalar_log.txt"', self.probe)
+        self.assertEqual(_campaign_host0_log_path(Path("/scratch"), self.CASE).name,
+                         "safe_scalar_log.txt")
+        self.assertEqual(_campaign_completeness_contract(self.CASE), "strict-golden-sequence")
+        self.assertNotIn(self.CASE, CAMPAIGN_QUEUE_CASES)
+        run = _c_function_bodies(_c_code(self.probe))["hle_run"]
+        order = [run.index(call) for call in ("ss_rtc();", "ss_tmid();", "ss_tls();",
+                                              "ks_subintr_order();")]
+        self.assertEqual(order, sorted(order))
+
+    def test_stream_shape_matches_the_registry_and_the_manifest(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        rows = tuple(row for row, _ in parse_golden.SAFE_SCALAR_ROWS)
+        self.assertEqual(spec.test_id, self.TEST_ID)
+        self.assertEqual(spec.terminal_case, "safe-scalar-done")
+        self.assertEqual(spec.ordered_cases[:-1], rows)
+        self.assertEqual(len(rows), 49)
+        # Every row is named once in the source, in the order it is emitted.
+        self.assertEqual(tuple(re.findall(r'"((?:rtc|tmid|tls)-[a-z0-9-]+)"', self.section)), rows)
+        for table, prefix, count, words in (
+                ("k_ss_valid", "rtc-valid-", "SS_VALID_ROWS", "SS_VALID_WORDS"),
+                ("k_ss_dow", "rtc-dow-", "SS_DOW_ROWS", "SS_DOW_WORDS"),
+                ("k_ss_time", "rtc-time-", "SS_TIME_ROWS", "SS_TIME_WORDS"),
+                ("k_ss_add", "rtc-addyears-", "SS_ADD_ROWS", "SS_ADD_WORDS")):
+            with self.subTest(table=table):
+                named = [row for row, _values in self._table(table)]
+                self.assertEqual(named, [row for row in rows if row.startswith(prefix)])
+                self.assertEqual(len(named), self._define(count))
+                self.assertEqual({counts[row] for row in named}, {self._define(words)})
+        self.assertEqual({counts["tmid-9-list"], counts["tmid-10-list"]},
+                         {self._define("SS_TMID_WORDS")})
+        tls_rows = re.findall(r'"(tls-[a-z0-9-]+)"', _matched(re.search(
+            r"k_ss_tls_rows\[SS_TLS_ROWS\] = \{([^}]*)\}", self.section)).group(1))
+        tls_words = [int(word) for word in re.findall(r"(\d+)u", _matched(re.search(
+            r"k_ss_tls_words\[SS_TLS_ROWS\] = \{([^}]*)\}", self.section)).group(1))]
+        self.assertEqual(tls_rows, [row for row in rows if row.startswith("tls-")])
+        self.assertEqual([counts[row] for row in tls_rows], tls_words)
+        self.assertEqual(len(tls_rows), self._define("SS_TLS_ROWS"))
+        # The row indexes are the table's positions.
+        indexes = re.findall(r"\bSS_T_\w+", _matched(re.search(r"enum \{([^}]*)\}",
+                                                               self.section)).group(1))
+        self.assertEqual([name[len("SS_T_"):].lower().replace("_", "-") for name in indexes],
+                         [row[len("tls-"):] for row in tls_rows])
+        self.assertLessEqual(max(counts[row] for row in rows), self._define("SS_WORDS_MAX"))
+        self.assertEqual(self.row["hardware_evidence"], "MEASURED")
+        self.assertEqual(self.row["case_ids"], [*rows, "safe-scalar-done"])
+        self.assertEqual(self.row["diagnostic_case_ids"], [self.CASE])
+        self.assertEqual(self.row["prx"], "safe_scalar.prx")
+        self.assertEqual(self.row["source"], "tests/fixtures/psp_oracle/probe_kernel_semantics.c")
+        self.assertEqual(self.row["issues"], [2640])
+        # The API list is exactly the firmware calls the section makes, read from its source:
+        # none missing, none extra, none twice.
+        called = set(re.findall(r"\b(sce\w+)\s*\(", self.section))
+        self.assertEqual(sorted(self.row["apis"]), sorted(called))
+        self.assertEqual(len(self.row["apis"]), len(set(self.row["apis"])))
+
+    def test_parser_takes_pass_and_skip_and_refuses_fail_or_another_shape(self) -> None:
+        spec, _counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        self.assertIn(self.CASE, parse_golden.HLE_MACHINERY_STATUS_CASES)
+        report = parse_campaign_probe_output(self._stream(), self.CASE)
+        self.assertTrue(report.complete)
+        self.assertEqual(report.record_count, 50)
+        self.assertEqual(spec.terminal_count, 49)
+        skipped = parse_campaign_probe_output(
+            self._stream({"tls-place-high": "SKIP", "tls-thread": "SKIP"}), self.CASE)
+        self.assertTrue(skipped.complete)
+        for text in (self._stream({"tls-create-high": "FAIL"}),
+                     self._stream(drop="tmid-9-list"),
+                     self._stream(short="rtc-time-1969")):
+            with self.assertRaises(ProtocolError):
+                parse_campaign_probe_output(text, self.CASE)
+
+    def _all_rows(self, section: str) -> tuple[str, ...]:
+        walker = _SafeScalarRows(section)
+        return walker.rows("ss_rtc") + walker.rows("ss_tmid") + walker.rows("ss_tls")
+
+    def test_every_path_emits_every_row_once_and_in_order(self) -> None:
+        """#2651 review: the parser takes only the complete ordered stream, so an early return
+        that left out its SKIP record would lose the launch on the console. Every path of every
+        function of the section is walked, and all of them must emit the same rows."""
+        spec, _counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        rows = tuple(row for row, _ in parse_golden.SAFE_SCALAR_ROWS)
+        tls = tuple(row for row in rows if row.startswith("tls-"))
+        walker = _SafeScalarRows(self.section)
+        self.assertEqual(walker.rows("ss_rtc"), tuple(row for row in rows if row.startswith("rtc-")))
+        self.assertEqual(walker.rows("ss_tmid"), ("tmid-9-list", "tmid-10-list"))
+        self.assertEqual(walker.rows("ss_tls"), tls)
+        self.assertEqual(self._all_rows(self.section), rows)
+        self.assertEqual((len(rows), len(tls), spec.terminal_count), (49, 16, 49))
+        # ss_tls has the bracket-failure path beside the full one; both were walked.
+        self.assertGreaterEqual(len(walker.paths("ss_tls")), 2)
+        # Each row function emits its own row and nothing else on every one of its paths, the
+        # early returns included; the skip helper emits every row from its argument on.
+        for function, argument, expected in (
+                ("ss_tls_fragmentation", None, ("tls-fragmentation",)),
+                ("ss_tls_create", tls.index("tls-create-high"), ("tls-create-high",)),
+                ("ss_tls_place", tls.index("tls-place-high"), ("tls-place-high",)),
+                ("ss_tls_addr", tls.index("tls-addr-high-2"), ("tls-addr-high-2",)),
+                ("ss_tls_status", tls.index("tls-status-normal"), ("tls-status-normal",)),
+                ("ss_tls_second_thread", None, ("tls-thread",)),
+                ("ss_tls_skip_from", tls.index("tls-create-normal"), tls[2:]),
+                ("ss_tls_skip_from", 0, tls),
+                ("ss_tmid_row", "tmid-10-list", ("tmid-10-list",)),
+                # The second thread and the block helpers write no record.
+                ("ss_tls_thread", None, ()), ("ss_block", "nksslo", ()), ("ss_block_free", None, ())):
+            with self.subTest(function=function, argument=argument):
+                self.assertEqual(walker.rows(function, argument), expected)
+        # The early returns walked above: one in each of the place, addr and status rows and
+        # in ss_tls (the bracket failure), two in the second-thread row.
+        for function, returns in (("ss_tls_place", 1), ("ss_tls_addr", 1), ("ss_tls_status", 1),
+                                  ("ss_tls_second_thread", 2), ("ss_tls", 1)):
+            with self.subTest(early_returns=function):
+                self.assertEqual(len(re.findall(r"\breturn(?: 0u)?;\n\s*\}", self.bodies[function])),
+                                 returns)
+        # hle_run's branch for this case runs the three groups once each and nothing else.
+        run = _c_function_bodies(_c_code(self.probe))["hle_run"]
+        branch = run[run.index("#elif PSP_ORACLE_CASE == KS_CASE_SAFE_SCALAR\n"):]
+        branch = branch[branch.index("\n") + 1:branch.index("#else")]
+        self.assertEqual(_c_block_paths("{" + branch + "}", walker._events, walker._loop, {}),
+                         [(rows, True)])
+
+    def test_the_row_walk_fails_when_any_record_is_dropped_or_doubled(self) -> None:
+        """The walk is not vacuous: removing or repeating any one record statement of the
+        section, the SKIP record of an early return included, changes what some path emits."""
+        golden = self._all_rows(self.section)
+        statements = list(re.finditer(
+            r"^[ \t]*(?:\(void\))?(?:ss_tls_rec|ss_tls_skip_from|hle_record|ss_tmid_row|"
+            r"ss_tls_fragmentation|ss_tls_place|ss_tls_addr|ss_tls_status|ss_tls_second_thread)"
+            r"\([^;]*\);\n", self.section, re.MULTILINE))
+        self.assertGreaterEqual(len(statements), 25)
+        per_function = {name: sum(statement.group(0) in body for statement in statements)
+                        for name, body in self.bodies.items()}
+        # The early returns the review named: three records in the second-thread row (two of
+        # them SKIP), two in each of the place, addr and status rows.
+        self.assertGreaterEqual(per_function["ss_tls_second_thread"], 3)
+        for function in ("ss_tls_place", "ss_tls_addr", "ss_tls_status"):
+            self.assertGreaterEqual(per_function[function], 2, function)
+        survivors = []
+        for statement in statements:
+            dropped = self.section[:statement.start()] + self.section[statement.end():]
+            doubled = (self.section[:statement.end()] + statement.group(0)
+                       + self.section[statement.end():])
+            for kind, mutant in (("dropped", dropped), ("doubled", doubled)):
+                try:
+                    emitted = self._all_rows(mutant)
+                except AssertionError:
+                    continue
+                if emitted == golden:
+                    line = self.section.count("\n", 0, statement.start()) + 1
+                    survivors.append(f"{kind} at section line {line}: {statement.group(0).strip()}")
+        self.assertEqual(survivors, [])
+
+    def test_status_buffer_is_larger_than_the_sixty_bytes_the_kernel_writes(self) -> None:
+        """#2651 review: a PSP writes all 60 bytes of the status record for any non-zero size
+        word (pspautotests tests/threads/tls/refer.expected), so the buffer's own size, not the
+        size word, is what keeps the probe's stack intact."""
+        body = self.bodies["ss_tls_status"]
+        declared = _matched(re.search(r"\buint32_t info\[(\w+)\];", body)).group(1)
+        words = int(declared) if declared.isdigit() else self._define(declared)
+        size = self._define("SS_TLS_INFO_SIZE")
+        self.assertEqual(size, 60)
+        self.assertGreaterEqual(words * 4, size + 4)
+        self.assertEqual(len(re.findall(r"\b\w+ info\[\w+\];", body)), 1)
+        self.assertIn("sceKernelReferTlsplStatus(pool, info)", body)
+        # The compiler refuses a shorter buffer or another structure size.
+        self.assertIn('_Static_assert(SS_TLS_INFO_SIZE == 60u, "SceKernelTlsplInfo is 60 bytes");',
+                      body)
+        self.assertIn("_Static_assert(sizeof(info) >= SS_TLS_INFO_SIZE + sizeof(info[0]),", body)
+        # The whole buffer is preset, the size word is the structure's, and every word read
+        # lies inside it: the six fields after the 32-byte name, then the one guard word.
+        self.assertIn(f"for (unsigned i = 0; i < {declared}; i++) info[i] = HLE_SENTINEL;", body)
+        self.assertIn("info[0] = SS_TLS_INFO_SIZE;", body)
+        self.assertIn("for (unsigned i = 0; i < 6; i++) w[1 + i] = info[9 + i];", body)
+        guard = int(_matched(re.search(r"w\[7\] = info\[(\d+)\];", body)).group(1))
+        self.assertEqual(guard, size // 4)
+        self.assertLess(guard, words)
+        self.assertLess(9 + 5, guard)
+
+    def test_fragmentation_row_is_a_size_difference_taken_before_any_allocation(self) -> None:
+        """#2651 review: tls-place reads "0x100 means nothing new at that end" only when the free
+        memory was one run, so the first TLS row records total free minus largest free."""
+        _spec, counts = CAMPAIGN_PROBE_CASES[self.CASE]
+        self.assertEqual(counts["tls-fragmentation"], 1)
+        row = self.bodies["ss_tls_fragmentation"]
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\(", row)),
+                         {"sceKernelTotalFreeMemSize", "sceKernelMaxFreeMemSize"})
+        self.assertIn("const uint32_t total = (uint32_t)sceKernelTotalFreeMemSize();", row)
+        self.assertIn("w[0] = total - (uint32_t)sceKernelMaxFreeMemSize();", row)
+        # It is the first thing ss_tls does: no block, pool or thread exists yet.
+        tls = self.bodies["ss_tls"]
+        first_call = _matched(re.search(r"\b(?:sce\w+|ss_\w+)\s*\(", tls))
+        self.assertEqual(first_call.group(0), "ss_tls_fragmentation(")
+        self.assertLess(tls.index("ss_tls_fragmentation();"), tls.index("ss_block("))
+        # The docs and the manifest say how the row changes the reading.
+        docs = (self.root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        section = docs[docs.index("### Reading the safe-scalar TLS rows\n"):]
+        section = section[:section.index("\n### ", 1)]
+        for term in ("tls-fragmentation", "one run", "cross-check only", "tls-addr-normal",
+                     "decide the placement", "never an address"):
+            self.assertIn(term, section)
+        self.assertIn("(#reading-the-safe-scalar-tls-rows)", docs)
+        self.assertIn("one run", self.row["invariant"])
+        self.assertIn("cross-check only", self.row["invariant"])
+        self.assertIn("49 records", self.row["measurement_note"])
+
+    def test_import_gate_pins_the_three_libraries_and_refuses_device_libraries(self) -> None:
+        start = self.makefile.index("ifeq ($(CASE),safe-scalar)\nLIBS += -lpsprtc\n")
+        block = self.makefile[start:self.makefile.index("\nendif\n", start)]
+        pins = {library: {int(nid, 16) for nid in nids.split(",")}
+                for library, nids in re.findall(r"--exact-library (\w+)=((?:0x[0-9A-F]{8},?)+)",
+                                                block)}
+        self.assertEqual(pins, {library: set(table)
+                                for library, table in self.EXACT_IMPORTS.items()})
+        self.assertEqual(sorted(re.findall(r"--forbid-library (\w+)", block)),
+                         sorted(self.FORBIDDEN))
+        nid_names = dict(
+            (int(nid, 16), name) for nid, name in re.findall(
+                r'\{0x([0-9a-f]{8})u, "(\w+)"\}',
+                (self.root / "src" / "rt" / "nid_names.h").read_text(encoding="utf-8")))
+        for table in (*self.EXACT_IMPORTS.values(),
+                      {nid: name for name, nid in self.TLS_POOL_STUBS.items()}):
+            for nid, name in table.items():
+                self.assertEqual(nid_names[nid], name, hex(nid))
+        # The Kernel_Library block: one library, the SDK's version word for it, the two calls
+        # the PSPSDK libc glue imports and sceKernelGetTlsAddr, which no PSPSDK stub provides.
+        self.assertEqual(re.findall(r'IMPORT_START\s+"([^"]+)",\s*0x([0-9A-Fa-f]+)',
+                                    self.kernel_library), [("Kernel_Library", "00010000")])
+        declared = HleMeasureProbeTests._imports(self.kernel_library)
+        self.assertEqual({(library, nid, name) for library, nid, name in declared},
+                         {("Kernel_Library", nid, name)
+                          for nid, name in self.EXACT_IMPORTS["Kernel_Library"].items()})
+        self.assertEqual(HleMeasureProbeTests._nid("sceKernelGetTlsAddr"), 0xFA835CDE)
+        threadman = {name: nid for _lib, nid, name in HleMeasureProbeTests._imports(self.threadman)}
+        for name, nid in self.TLS_POOL_STUBS.items():
+            with self.subTest(stub=name):
+                self.assertEqual(threadman[name], nid)
+                self.assertEqual(HleMeasureProbeTests._nid(name), nid)
+        # The gate takes exactly this table and refuses one more import from a pinned library
+        # or any import from a forbidden one.
+        tables = {"ThreadManForUser": sorted(threadman.values()),
+                  **{library: sorted(table) for library, table in self.EXACT_IMPORTS.items()}}
+        exact = {library: frozenset(table) for library, table in self.EXACT_IMPORTS.items()}
+        forbidden = frozenset(self.FORBIDDEN)
+        self.assertTrue(user_mode_imports.check_module(
+            build_import_elf(sorted(tables.items())), exact, forbidden).passed)
+        extra = {**tables, "sceRtc": [*tables["sceRtc"], 0x3F7AD767]}
+        self.assertFalse(user_mode_imports.check_module(
+            build_import_elf(sorted(extra.items())), exact, forbidden).passed)
+        device = {**tables, "sceGe_user": [0xE47E40E4]}
+        self.assertFalse(user_mode_imports.check_module(
+            build_import_elf(sorted(device.items())), exact, forbidden).passed)
+
+    def test_calls_only_the_listed_functions_and_no_device_dialog_ge_radio_or_handler(self) -> None:
+        called = set(re.findall(r"\b(sce\w+)\s*\(", self.section))
+        self.assertEqual(called, set(self.CALLS))
+        for banned in ("sceIo", "sceGe", "sceDisplay", "sceUtility", "sceCtrl", "sceWlan", "sceNet",
+                       "sceAudio", "scePower", "sceUmd", "sceReg", "SetAlarm", "SubIntr",
+                       "EventHandler(", "Callback", "ModuleIdList", "DelayThread", "host0:", "ms0:",
+                       "flash", "while (", "do {", "goto ", "malloc("):
+            self.assertNotIn(banned, self.section, banned)
+        # A NULL goes only where the call documents an optional argument.
+        self.assertEqual(set(re.findall(r"\b(sce\w+)\s*\([^;]*\bNULL\b", self.section)),
+                         {"sceKernelAllocPartitionMemory", "sceKernelCreateTlspl",
+                          "sceKernelCreateThread", "sceKernelStartThread"})
+        # The list classes are the two enumerators, read into a 16-slot buffer of the probe's.
+        self.assertEqual(re.findall(r"ss_tmid_row\(\"[a-z0-9-]+\", (\w+)\);", self.section),
+                         ["SCE_KERNEL_TMID_ThreadEventHandler", "SCE_KERNEL_TMID_Alarm"])
+        self.assertIn("sceKernelGetThreadmanIdList(type, (SceUID *)ids, (int)SS_ID_SLOTS, &count)",
+                      self.bodies["ss_tmid_row"])
+        self.assertIn("uint32_t ids[SS_ID_SLOTS];", self.bodies["ss_tmid_row"])
+
+    def test_dates_stay_in_the_range_a_month_lookup_can_take(self) -> None:
+        dates = [*self._table("k_ss_valid"), *self._table("k_ss_time")]
+        self.assertEqual(len(dates), 18)
+        for row, (year, month, day, hour, minute, second) in dates:
+            with self.subTest(row=row):
+                self.assertTrue(1 <= year <= 9999 and 0 <= month <= 13 and 0 <= day <= 32)
+                self.assertTrue(0 <= hour <= 24 and 0 <= minute <= 59 and 0 <= second <= 60)
+        days = self._table("k_ss_dow")
+        self.assertEqual(len(days), 9)
+        for row, (year, month, day) in days:
+            with self.subTest(row=row):
+                self.assertTrue(0 <= month <= 24 and 0 <= year <= 10000 and 0 <= day <= 0x7FFFFFFF)
+        # The first second a 32-bit time_t cannot hold, and the two ticks past year 9999
+        # (tick 0 is 0001-01-01 and a tick is a microsecond).
+        self.assertEqual(dict(self._table("k_ss_time"))["rtc-time-2106-past"],
+                         [2106, 2, 7, 6, 28, 16])
+        self.assertEqual(datetime(1970, 1, 1) + timedelta(seconds=2 ** 32),
+                         datetime(2106, 2, 7, 6, 28, 16))
+        days_to_10000 = (datetime(9999, 12, 31) - datetime(1, 1, 1)).days + 1
+        self.assertEqual(self._define("SS_TICK_Y10000"), days_to_10000 * 86400 * 1000000)
+        self.assertEqual(self._define("SS_TICK_Y10001"), (days_to_10000 + 366) * 86400 * 1000000)
+        adds = re.findall(r'\{ "(rtc-addyears-[a-z0-9-]+)", (SS_TICK_Y\d+), (-?\d+) \}', self.section)
+        self.assertEqual([(tick, int(years)) for _row, tick, years in adds],
+                         [("SS_TICK_Y10000", 0), ("SS_TICK_Y10000", 1), ("SS_TICK_Y10000", -1),
+                          ("SS_TICK_Y10001", -2)])
+
+    def test_no_address_is_recorded_except_as_a_difference(self) -> None:
+        for name, body in self.bodies.items():
+            with self.subTest(function=name):
+                # A record word never takes a block head, a TLS address or an identifier whole.
+                self.assertEqual(re.findall(
+                    r"w\[\d\] = (?:\(uint32_t\))?(?:\w+(?:\.|->)(?:head|uid)|addr|again|thid|uid|"
+                    r"s_ss_t_addr\[\d\]|pool|normal|high2?|ids\[\w+\]);", body), [])
+        self.assertIn("w[1] = addr - lo->head;", self.bodies["ss_tls_addr"])
+        self.assertIn("w[2] = hi->head - addr;", self.bodies["ss_tls_addr"])
+        self.assertIn("w[3] = addr & 0xffu;", self.bodies["ss_tls_addr"])
+        self.assertIn("w[2] = low.head - lo->head;", self.bodies["ss_tls_place"])
+        self.assertIn("w[3] = hi->head - high.head;", self.bodies["ss_tls_place"])
+        self.assertIn("return uid > 0 ? 1u : (uint32_t)uid;", self.bodies["ss_obtained"])
+        self.assertIn("written += ids[i] != HLE_SENTINEL;", self.bodies["ss_tmid_row"])
+
+    def test_every_cell_writes_its_step_first_and_every_object_is_released(self) -> None:
+        # Helpers that are only called inside a stepped cell, and the second thread's body.
+        helpers = {"ss_block", "ss_block_free", "ss_tls_thread"}
+        stepped = 0
+        for name, body in self.bodies.items():
+            calls = [match.start() for match in re.finditer(r"\b(?:sce\w+|ss_block)\s*\(", body)]
+            if name in helpers or not calls:
+                continue
+            with self.subTest(function=name):
+                stepped += 1
+                self.assertIn("hle_step(", body)
+                self.assertLess(body.index("hle_step("), calls[0])
+        self.assertEqual(stepped, 9)
+        rtc = self.bodies["ss_rtc"]
+        for call in ("sceRtcCheckValid(", "sceRtcGetDayOfWeek(", "sceRtcGetTime_t(",
+                     "sceRtcTickAddYears("):
+            with self.subTest(call=call):
+                self.assertEqual(rtc.count(call), 1)
+                before = rtc[:rtc.index(call)]
+                self.assertIn("hle_step(in->row);", before[before.rindex("for ("):])
+        # Loops: every one counts up to a constant.
+        headers = [self.section[loop.end():_c_close(self.section, loop.end() - 1)]
+                   for loop in re.finditer(r"\bfor \(", self.section)]
+        self.assertEqual(len(headers), 12)
+        for header in headers:
+            self.assertRegex(header, r"^unsigned (\w+) = (?:0|first); \1 < (?:\d+|SS_[A-Z_]+); \1\+\+$")
+        # Pools: four blocks each and two threads, so no request for a block can wait.
+        self.assertEqual((self._define("SS_TLS_BLOCKS"), self._define("SS_TLS_BLOCK"),
+                          self._define("SS_TLS_HIGHMEM"), self._define("SS_PART")),
+                         (4, 0x100, 0x4000, 2))
+        tls = self.bodies["ss_tls"]
+        self.assertEqual(re.findall(r'ss_tls_create\(\w+, "(\w+)", (\w+)\)', tls),
+                         [("nktls0", "0u"), ("nktls1", "SS_TLS_HIGHMEM"),
+                          ("nktls2", "SS_TLS_HIGHMEM")])
+        order = [tls.index(text) for text in (
+            "ss_tls_second_thread(", "sceKernelFreeTlspl(normal)", "sceKernelFreeTlspl(high)",
+            "sceKernelFreeTlspl(high2)", "sceKernelDeleteTlspl(normal)", "sceKernelDeleteTlspl(high)",
+            "sceKernelDeleteTlspl(high2)", "w[0] = ss_block_free(&lo);", "w[1] = ss_block_free(&hi);")]
+        self.assertEqual(order, sorted(order))
+        # The brackets are freed on the early return too.
+        early = tls[:tls.index("return;")]
+        self.assertIn("(void)ss_block_free(&lo);", early)
+        self.assertIn("(void)ss_block_free(&hi);", early)
+        place = self.bodies["ss_tls_place"]
+        self.assertIn("w[4] = ss_block_free(&low);", place)
+        self.assertIn("w[5] = ss_block_free(&high);", place)
+        # The second thread frees the block it took, and the main thread's wait for it is one
+        # second; the thread is deleted on both outcomes.
+        worker = self.bodies["ss_tls_thread"]
+        self.assertLess(worker.index("sceKernelGetTlsAddr(s_ss_t_pool[i])"),
+                        worker.index("sceKernelFreeTlspl(s_ss_t_pool[i])"))
+        second = self.bodies["ss_tls_second_thread"]
+        self.assertEqual(self._define("SS_THREAD_WAIT_US"), 1000000)
+        self.assertIn("SceUInt timeout = SS_THREAD_WAIT_US;", second)
+        self.assertIn("sceKernelWaitThreadEnd(thid, &timeout)", second)
+        self.assertIn("(void)sceKernelTerminateDeleteThread(thid);", second)
+        # A thread that did not start is dormant: it is deleted, not terminated. One that
+        # ended in time is deleted after its words are read.
+        not_started = second[second.index("if (started < 0) {"):second.index("} else if (waited >= 0) {")]
+        self.assertIn("(void)sceKernelDeleteThread(thid);", not_started)
+        self.assertEqual(second.count("(void)sceKernelDeleteThread(thid);"), 2)
+        self.assertEqual(second.count("sceKernelTerminateDeleteThread("), 1)
 
 
 class HleIoSeekMemoryStickSetupAndCleanupTests(unittest.TestCase):
@@ -17218,6 +17907,7 @@ class Record20261015Tests(unittest.TestCase):
             ("ge-depth-round", "PSP-GE-RASTER-003", "MEASURED"),
             ("mpeg-ycbcr", "PSP-MPEG-YCBCR-001", "NOT_RUN"),
             ("hle-io-trunc", "PSP-HLE-IO-TRUNC-001", "MEASURED"),
+            ("safe-scalar", "PSP-SAFE-SCALAR-001", "MEASURED"),
         )
         docs = {row[0]: row for row in self._table_rows(self.doc) if len(row) == 4}
         readme = {row[0]: row for row in self._table_rows(self.readme) if len(row) == 3}
@@ -17239,6 +17929,40 @@ class Record20261015Tests(unittest.TestCase):
                      "0x80020323", "0x80010016", "queues nothing"):
             self.assertIn(term, note)
         self.assertIn("- **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**", self.doc)
+
+    def test_the_safe_scalar_run_is_measured_from_the_runner_envelope(self) -> None:
+        """#2640: the 2026-11-17 safe-scalar run. The host wrapper printed no verdict, so the
+        record says what it rests on: the runner's acceptance-eligible envelopes."""
+        row = self.rows["PSP-SAFE-SCALAR-001"]
+        self.assertEqual(row["hardware_evidence"], "MEASURED")
+        self.assertNotIn("evidence_note", row)
+        self.assertEqual(row["evidence_ref"],
+                         "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize")
+        self.assertEqual(row["evidence_cases"], row["case_ids"])
+        note = row["measurement_note"]
+        for term in ("2026-11-17", "PSP-3000", "boot 221", "XMB context", "86279e852",
+                     "ARK-5 5.2.0", "0x06060010", "acceptance-eligible with 0 blockers",
+                     "printed no verdict", "rests on the runner's report",
+                     "0xfffffffd", "0x800001fe", "0x7fffffff", "0x0008b600",
+                     "directly below the high bracket"):
+            self.assertIn(term, note)
+        start = self.doc.index("- **PSP-3000 single-case run of `safe-scalar` (2026-11-17 UTC)**")
+        entry = self.doc[start:self.doc.index("\n- **", start + 1)]
+        for term in ("printed no verdict", "acceptance-eligible with 0 blockers", "boot 221",
+                     "oracle_matrix.py` would not have named a launch `ACCEPTED`"):
+            self.assertIn(term, " ".join(entry.split()))
+        # The record table names every row once, in stream order, PASS, with the row's word
+        # count, and the done record counts the 49 rows.
+        table = [[cell.strip() for cell in line.strip().strip("|").split("|")]
+                 for line in entry.splitlines() if line.startswith("  | `")]
+        records = [cells for cells in table if len(cells) == 4 and cells[1] == "PASS"]
+        expected = [*parse_golden.SAFE_SCALAR_ROWS, ("safe-scalar-done", 1)]
+        self.assertEqual([cells[0].strip("`") for cells in records], [name for name, _ in expected])
+        for cells, (name, words) in zip(records, expected, strict=True):
+            with self.subTest(row=name):
+                self.assertRegex(cells[2], r"^`0x[0-9a-f]{8}`$")
+                self.assertEqual(len(re.findall(r"`0x[0-9a-f]{8}`", cells[3])), words)
+        self.assertEqual(records[-1][3], "`0x00000031`")
 
     def test_the_io_trunc_run_is_measured_in_game_context(self) -> None:
         """#1892: the 2026-11-02 hle-io-trunc run was built from 08934592f, which is not an

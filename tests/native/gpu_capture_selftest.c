@@ -146,6 +146,14 @@ int main(void) {
             assert(p.w == 0 && p.h == 0 && p.prescale == 1);
         }
         Sdl3VkPresentPlan p;
+        p = sdl3vk_present_plan(SHARP, 480, 272, 480, 272, 4096);
+        assert(!sdl3vk_present_needs_clear(&p, 480, 272));
+        p = sdl3vk_present_plan(SHARP, 480, 272, 1280, 480, 4096); /* pillarbox */
+        assert(p.x == 216 && p.y == 0 && p.w == 847 && p.h == 480);
+        assert(sdl3vk_present_needs_clear(&p, 1280, 480));
+        p = sdl3vk_present_plan(SHARP, 480, 272, 800, 600, 4096); /* letterbox */
+        assert(p.x == 0 && p.y == 73 && p.w == 800 && p.h == 453);
+        assert(sdl3vk_present_needs_clear(&p, 800, 600));
         /* 1080p fullscreen: 3.97x fits 1905x1080. Sharp enlarges to 4x (1920x1088) with nearest,
          * then shrinks linearly; integer letterboxes 3x; bilinear is one linear blit. */
         p = sdl3vk_present_plan(SHARP, 480, 272, 1920, 1080, 4096);
