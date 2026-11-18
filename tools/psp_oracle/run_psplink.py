@@ -101,6 +101,24 @@ _FULL_COMMIT_RE = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _PSPVER_FIRMWARE_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 
 
+def _is_git_ignored(path: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(ROOT.resolve()).as_posix()
+    except (OSError, ValueError):
+        return False
+    try:
+        checked = subprocess.run(
+            ["git", "check-ignore", "-q", "--", relative],
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return checked.returncode == 0
+
+
 def _expected_firmware_problem(value: object) -> str | None:
     """Explain why an expected firmware cannot match `pspver`, or return None."""
 
@@ -4534,6 +4552,8 @@ def main(argv: list[str] | None = None) -> int:
             results_root.relative_to(ROOT.resolve())
         except ValueError:
             parser.error("--results-directory must be inside the repository root")
+        if not _is_git_ignored(results_root):
+            parser.error("--results-directory must be Git-ignored to keep captures private")
         if args.ge_corpus_write:
             try:
                 report = write_ge_corpus_probe_runs(
@@ -4573,6 +4593,8 @@ def main(argv: list[str] | None = None) -> int:
         args.results_directory.relative_to(ROOT.resolve())
     except ValueError:
         parser.error("--results-directory must be inside the repository root")
+    if not _is_git_ignored(args.results_directory):
+        parser.error("--results-directory must be Git-ignored to keep captures private")
 
     if args.campaign_case:
         if (
@@ -4604,18 +4626,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(
                 "--host0-root must be inside the ignored tests/fixtures/psp_oracle/build directory"
             )
-        try:
-            ignored_path = host0_root.relative_to(ROOT.resolve()).as_posix()
-            ignore_check = subprocess.run(
-                ["git", "check-ignore", "-q", "--", ignored_path],
-                cwd=ROOT,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        except OSError:
-            parser.error("--host0-root could not be verified as ignored by Git")
-        if ignore_check.returncode != 0:
+        if not _is_git_ignored(host0_root):
             parser.error("--host0-root must be ignored by Git to keep captures private")
         if not host0_root.is_dir():
             parser.error("--host0-root must be an existing scratch directory")
@@ -4769,7 +4780,9 @@ def main(argv: list[str] | None = None) -> int:
     capture_started_ns = time.time_ns()
     returncode, stdout, stderr, process_status = _run_command(command, args.timeout)
     args.results_directory.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    timestamp = (
+        f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{capture_started_ns}"
+    )
     capture = args.results_directory / f"psplink-{timestamp}.stdout.txt"
     capture.write_text(stdout, encoding="utf-8")
     report = {
@@ -4785,23 +4798,36 @@ def main(argv: list[str] | None = None) -> int:
     report["test_record_count"] = record_count
     capture_ok = True
     if args.psp_output and args.nakagawa_output:
-        raw_psp_text = args.psp_output.read_text(encoding="utf-8")
-        comparison = compare_texts(
-            _canonicalize_psp(raw_psp_text, args),
-            args.nakagawa_output.read_text(encoding="utf-8"),
-        )
-        if any(getattr(args, flag, None) for flag in PROVENANCE_FLAGS):
-            identity = _device_identity(raw_psp_text, args)
-            identity_blockers = cast(
-                list[str], identity["DEVICE_IDENTITY_BLOCKERS"]
+        try:
+            raw_psp_text = args.psp_output.read_text(encoding="utf-8")
+            raw_nakagawa_text = args.nakagawa_output.read_text(encoding="utf-8")
+            comparison = compare_texts(
+                _canonicalize_psp(raw_psp_text, args),
+                raw_nakagawa_text,
             )
-            comparison.update(identity)
-            if identity_blockers:
-                comparison["acceptance_blockers"] = [
-                    *cast(list[str], comparison["acceptance_blockers"]),
-                    *identity_blockers,
-                ]
-                comparison["acceptance_eligible"] = False
+            if any(getattr(args, flag, None) for flag in PROVENANCE_FLAGS):
+                identity = _device_identity(raw_psp_text, args)
+                identity_blockers = cast(
+                    list[str], identity["DEVICE_IDENTITY_BLOCKERS"]
+                )
+                comparison.update(identity)
+                if identity_blockers:
+                    comparison["acceptance_blockers"] = [
+                        *cast(list[str], comparison["acceptance_blockers"]),
+                        *identity_blockers,
+                    ]
+                    comparison["acceptance_eligible"] = False
+        except (OSError, UnicodeError, ProtocolError, ValueError) as exc:
+            comparison = {
+                "classification": "INCONCLUSIVE",
+                "acceptance_eligible": False,
+                "acceptance_blockers": [
+                    f"comparison input could not be parsed ({type(exc).__name__})"
+                ],
+            }
+            capture_ok = False
+        if comparison["classification"] == "INCONCLUSIVE":
+            capture_ok = False
         report["comparison"] = comparison
     elif args.psp_output or args.nakagawa_output:
         report["comparison"] = {

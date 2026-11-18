@@ -8,9 +8,11 @@ import io
 import json
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 from typing import Any
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -18,6 +20,22 @@ import psp_issue_matrix
 
 
 class PspIssueMatrixTests(unittest.TestCase):
+    def test_live_query_only_fetches_open_issues_and_refuses_a_full_page(self) -> None:
+        single = subprocess.CompletedProcess([], 0, json.dumps([self.issue(501)]), "")
+        with patch.object(psp_issue_matrix.subprocess, "run", return_value=single) as run:
+            self.assertEqual(len(psp_issue_matrix._run_gh()), 1)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--state") + 1], "open")
+        limit = int(command[command.index("--limit") + 1])
+        self.assertEqual(limit, 500)
+
+        full_page = subprocess.CompletedProcess(
+            [], 0, json.dumps([{"number": number} for number in range(limit)]), ""
+        )
+        with patch.object(psp_issue_matrix.subprocess, "run", return_value=full_page):
+            with self.assertRaisesRegex(SystemExit, "limit"):
+                psp_issue_matrix._run_gh()
+
     def routing_file(self, entries: list[dict[str, object]]) -> Path:
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         path = directory / "routing.json"

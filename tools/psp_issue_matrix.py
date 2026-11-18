@@ -20,6 +20,7 @@ from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[1]
+GH_ISSUE_LIST_LIMIT = 500
 DEFAULT_OUT = ROOT / "docs" / "PSP_ISSUE_MATRIX.json"
 DEFAULT_ROUTING = ROOT / "assets" / "issue_routing.json"
 DEFAULT_ORACLE_MANIFEST = ROOT / "tools" / "psp_oracle" / "manifest.json"
@@ -259,9 +260,9 @@ def _run_gh() -> list[dict[str, Any]]:
         "issue",
         "list",
         "--state",
-        "all",
+        "open",
         "--limit",
-        "500",
+        str(GH_ISSUE_LIST_LIMIT),
         "--json",
         "number,title,body,state,milestone,labels,url,updatedAt",
     ]
@@ -275,6 +276,10 @@ def _run_gh() -> list[dict[str, Any]]:
         raise SystemExit("gh issue list did not return valid JSON") from exc
     if not isinstance(result, list):
         raise SystemExit("gh issue list did not return a JSON array")
+    if len(result) >= GH_ISSUE_LIST_LIMIT:
+        raise SystemExit(
+            f"gh issue list reached the {GH_ISSUE_LIST_LIMIT}-issue limit; refusing possibly truncated results"
+        )
     return result
 
 
@@ -552,7 +557,7 @@ def build_matrix(
     return {
         "schema": 2,
         "generated_at": generated_at,
-        "source": "gh issue list --state all --limit 500",
+        "source": f"gh issue list --state open --limit {GH_ISSUE_LIST_LIMIT}",
         "repository": "Jstar269/nakagawa-recomp",
         "routing_source": _source_label(route_source, "assets/issue_routing.json"),
         "oracle_source": _source_label(oracle_source, "tools/psp_oracle/manifest.json"),

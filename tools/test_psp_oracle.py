@@ -892,7 +892,9 @@ class GeCorpusGateTests(unittest.TestCase):
         if document is None:
             return subprocess.run(command, capture_output=True, text=True, check=False)
         fixture_dir = self.root / "tests" / "fixtures" / "psp_oracle"
-        with tempfile.TemporaryDirectory(prefix="ge-corpus-gate-", dir=fixture_dir) as scratch:
+        build_root = fixture_dir / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-gate-", dir=build_root) as scratch:
             results_dir = Path(scratch) / "results"
             results_dir.mkdir()
             for relative, text in (results or {}).items():
@@ -1721,8 +1723,10 @@ class PspOracleRunnerTests(unittest.TestCase):
     ) -> dict[str, Any]:
         root = Path(__file__).resolve().parents[1]
         fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(
-            prefix="compare-output-", dir=fixture_root
+            prefix="compare-output-", dir=build_root
         ) as name:
             scratch = Path(name)
             binary = scratch / "probe.prx"
@@ -1769,6 +1773,136 @@ class PspOracleRunnerTests(unittest.TestCase):
                 ])
             self.assertEqual(code, 0)
             return cast(dict[str, Any], json.loads(report_path.read_text(encoding="utf-8")))
+
+    def _capture_argv(
+        self,
+        scratch: Path,
+        *,
+        results_directory: Path | None = None,
+        psp_text: str | None = None,
+        nakagawa_text: str | None = None,
+        report_name: str = "report.json",
+    ) -> tuple[list[str], Path]:
+        binary = scratch / "probe.prx"
+        binary.write_bytes(STAGED_PRX)
+        report = scratch / report_name
+        results = results_directory or scratch / "results"
+        args = [
+            "--command", "fake-pspsh",
+            "--session-id", "synthetic-session",
+            "--results-directory", str(results),
+            "--out", str(report),
+            "--binary", str(binary),
+            "--source-commit", MEASURED_COMMIT,
+            "--model", "PSP-3000",
+            "--firmware", "6.61-ARK",
+        ]
+        if psp_text is not None and nakagawa_text is not None:
+            psp_path = scratch / f"{report.stem}-psp.txt"
+            nakagawa_path = scratch / f"{report.stem}-nakagawa.txt"
+            psp_path.write_text(psp_text, encoding="utf-8")
+            nakagawa_path.write_text(nakagawa_text, encoding="utf-8")
+            args.extend(["--psp-output", str(psp_path), "--nakagawa-output", str(nakagawa_path)])
+        return args, report
+
+    def test_results_directory_must_be_git_ignored(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="results-policy-", dir=build_root) as name:
+            args, _report = self._capture_argv(
+                Path(name), results_directory=root / "docs"
+            )
+            from psp_oracle import run_psplink
+
+            stderr = io.StringIO()
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                side_effect=run_psplink.HardwareLockError("HARDWARE_LOCK_NOT_HELD"),
+            ), redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as raised:
+                    run_psplink_main(args)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("ignored", stderr.getvalue())
+
+    def test_command_captures_in_the_same_second_do_not_overwrite(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="capture-unique-", dir=build_root) as name:
+            scratch = Path(name)
+            first_args, first_report_path = self._capture_argv(scratch, report_name="first.json")
+            second_args, second_report_path = self._capture_argv(scratch, report_name="second.json")
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                side_effect=[
+                    (0, "first synthetic capture\n", "", "PROCESS_EXITED"),
+                    (0, "second synthetic capture\n", "", "PROCESS_EXITED"),
+                ],
+            ), patch("psp_oracle.run_psplink.time.strftime", return_value="same-second"):
+                self.assertEqual(run_psplink_main(first_args), 0)
+                self.assertEqual(run_psplink_main(second_args), 0)
+            first_report = json.loads(first_report_path.read_text(encoding="utf-8"))
+            second_report = json.loads(second_report_path.read_text(encoding="utf-8"))
+            first_capture = (root / first_report["stdout_file"]).resolve()
+            second_capture = (root / second_report["stdout_file"]).resolve()
+            self.assertNotEqual(first_capture, second_capture)
+            self.assertEqual(first_capture.read_text(encoding="utf-8"), "first synthetic capture\n")
+            self.assertEqual(second_capture.read_text(encoding="utf-8"), "second synthetic capture\n")
+
+    def test_malformed_psp_compare_writes_an_inconclusive_report(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="malformed-compare-", dir=build_root) as name:
+            args, report_path = self._capture_argv(
+                Path(name),
+                psp_text="malformed PSP stream\n",
+                nakagawa_text=measured_stream("nakagawa"),
+            )
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                return_value=(0, "synthetic capture\n", "", "PROCESS_EXITED"),
+            ):
+                try:
+                    code = run_psplink_main(args)
+                except Exception as exc:
+                    self.fail(f"malformed comparison escaped without a report: {type(exc).__name__}")
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(code, 2)
+        self.assertEqual(report["comparison"]["classification"], "INCONCLUSIVE")
+        self.assertFalse(report["comparison"]["acceptance_eligible"])
+
+    def test_inconclusive_comparison_returns_nonzero(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_root / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="inconclusive-compare-", dir=build_root) as name:
+            psp_text = measured_stream("psp")
+            args, report_path = self._capture_argv(
+                Path(name), psp_text=psp_text, nakagawa_text="not a Nakagawa stream\n"
+            )
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                return_value=(0, "synthetic capture\n", "", "PROCESS_EXITED"),
+            ):
+                code = run_psplink_main(args)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["comparison"]["classification"], "INCONCLUSIVE")
+        self.assertNotEqual(code, 0)
 
     def test_compare_cli_preserves_emulator_source_for_acceptance_gate(self) -> None:
         comparison = self._compare_output_report("ppsspp")["comparison"]
@@ -2068,8 +2202,10 @@ class PspOracleRunnerTests(unittest.TestCase):
 
     def test_capture_uses_selected_scratch_results_directory(self) -> None:
         root = Path(__file__).resolve().parents[1]
+        build_root = root / "tests" / "fixtures" / "psp_oracle" / "build"
+        build_root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(
-            prefix="run-psplink-", dir=root / "tests" / "fixtures" / "psp_oracle"
+            prefix="run-psplink-", dir=build_root
         ) as scratch_name:
             scratch = Path(scratch_name)
             results = scratch / "results"

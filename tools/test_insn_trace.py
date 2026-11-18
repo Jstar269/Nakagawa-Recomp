@@ -4,15 +4,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
+import struct
 import tempfile
 import unittest
 from typing import Any, ClassVar
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -113,6 +118,129 @@ class FixtureHeaderTests(unittest.TestCase):
         self.assertEqual([f["base"] for f in self.data["fixtures"]],
                          [0x08900000, 0x08910000, 0x08920000, 0x08930000])
         self.assertEqual([len(f["words"]) for f in self.data["fixtures"]], [29, 35, 4, 5])
+
+    def test_main_reports_malformed_fixture_tables_as_rejected(self) -> None:
+        fixtures = (
+            "#define NT_FIXTURE_COUNT 0u\n",
+            "#define NT_FIXTURE_COUNT 1u\n"
+            "static const NtFixture nt_fixtures[] = {\n"
+            '{"fixture", 0x08900000u, 1u, nt_missing_words},\n};\n',
+        )
+        with tempfile.TemporaryDirectory(prefix="bad-insn-table-", dir=FIXTURE_DIR) as name:
+            root = Path(name)
+            log_path = root / "capture.txt"
+            log_path.write_text("synthetic capture\n", encoding="utf-8")
+            for index, content in enumerate(fixtures):
+                header = root / f"fixtures-{index}.h"
+                header.write_text(content, encoding="utf-8")
+                stderr = io.StringIO()
+                with self.subTest(index=index), patch.object(
+                    insn_trace, "FIXTURES_H", header
+                ), contextlib.redirect_stderr(stderr):
+                    try:
+                        result = insn_trace.main([
+                            "psp", str(log_path), str(root / f"out-{index}"),
+                            "--model", "PSP-3000", "--firmware", "6.6.1",
+                        ])
+                    except Exception as exc:
+                        self.fail(f"malformed fixture escaped as {type(exc).__name__}")
+                self.assertEqual(result, 2)
+                self.assertIn("REJECTED:", stderr.getvalue())
+
+    def test_fixture_elf_uses_the_shared_fixed_address_builder(self) -> None:
+        import analyze
+
+        fixture = self.data["fixtures"][0]
+        text = b"".join(
+            struct.pack("<I", word)
+            for word in fixture["words"] + [insn_trace.EXIT_SYSCALL_WORD]
+        )
+        sections = [(b".text", 1, 0x6, fixture["base"], 0, len(text))]
+        with patch.object(analyze, "_fixed_address_elf", wraps=analyze._fixed_address_elf) as build:
+            image = insn_trace.fixture_elf(fixture)
+        expected = bytearray(analyze._fixed_address_elf(
+            fixture["base"], text, len(text), sections
+        ))
+        struct.pack_into("<I", expected, 24, fixture["base"])
+        struct.pack_into("<I", expected, 64, fixture["base"])
+        struct.pack_into("<I", expected, 76, 5)
+        self.assertEqual(image, bytes(expected))
+        build.assert_called_once_with(fixture["base"], text, len(text), sections)
+
+    def test_local_mode_refuses_dirty_or_mismatched_source_identity(self) -> None:
+        requested = ("b" * 40, "a" * 40)
+        states = ("", " M tools/example.py\n")
+        with tempfile.TemporaryDirectory(prefix="insn-trace-source-", dir=FIXTURE_DIR) as name:
+            root = Path(name)
+            for commit, status in zip(requested, states, strict=True):
+                with self.subTest(commit_matches=(commit == "a" * 40), dirty=bool(status)):
+                    head_result = subprocess.CompletedProcess([], 0, "a" * 40 + "\n", "")
+                    status_result = subprocess.CompletedProcess([], 0, status, "")
+                    out = root / f"out-{int(bool(status))}-{commit[0]}"
+                    stderr = io.StringIO()
+                    with patch.object(
+                        insn_trace.subprocess,
+                        "run",
+                        side_effect=[head_result, status_result],
+                    ), patch.object(insn_trace, "local_records") as local_records, patch.dict(
+                        os.environ, {"NK_INSN_TRACE_TMP": str(root)}
+                    ), contextlib.redirect_stderr(stderr):
+                        result = insn_trace.main([
+                            "local", str(out),
+                            "--source-commit", commit,
+                            "--model", "PSP-3000",
+                            "--firmware", "6.6.1",
+                        ])
+                    self.assertEqual(result, 2)
+                    self.assertIn("REJECTED:", stderr.getvalue())
+                    local_records.assert_not_called()
+
+    def test_main_reports_missing_or_unknown_fixture_tables_as_rejected(self) -> None:
+        bad_headers = (
+            "#define NT_FIXTURE_COUNT 0u\n",
+            "#define NT_FIXTURE_COUNT 1u\n"
+            "static const NtFixture nt_fixtures[] = {\n"
+            '{"fixture", 0x08900000u, 1u, nt_missing_words},\n};\n',
+        )
+        with tempfile.TemporaryDirectory(prefix="bad-insn-header-", dir=FIXTURE_DIR) as name:
+            root = Path(name)
+            log_path = root / "capture.txt"
+            log_path.write_text("synthetic capture\n", encoding="utf-8")
+            for index, text in enumerate(bad_headers):
+                with self.subTest(index=index):
+                    fixture_header = root / f"fixtures-{index}.h"
+                    fixture_header.write_text(text, encoding="utf-8")
+                    stderr = io.StringIO()
+                    with patch.object(insn_trace, "FIXTURES_H", fixture_header), contextlib.redirect_stderr(stderr):
+                        try:
+                            result = insn_trace.main([
+                                "psp", str(log_path), str(root / f"out-{index}"),
+                                "--model", "PSP-3000", "--firmware", "6.6.1",
+                            ])
+                        except Exception as exc:
+                            self.fail(f"malformed fixture escaped as {type(exc).__name__}")
+                    self.assertEqual(result, 2)
+                    self.assertIn("REJECTED:", stderr.getvalue())
+
+    def test_fixture_elf_uses_the_shared_fixed_address_builder(self) -> None:
+        import analyze
+
+        fixture = self.data["fixtures"][0]
+        text = b"".join(
+            struct.pack("<I", word)
+            for word in fixture["words"] + [insn_trace.EXIT_SYSCALL_WORD]
+        )
+        sections = [(b".text", 1, 0x6, fixture["base"], 0, len(text))]
+        with patch.object(analyze, "_fixed_address_elf", wraps=analyze._fixed_address_elf) as build:
+            image = insn_trace.fixture_elf(fixture)
+        expected = bytearray(analyze._fixed_address_elf(
+            fixture["base"], text, len(text), sections
+        ))
+        struct.pack_into("<I", expected, 24, fixture["base"])
+        struct.pack_into("<I", expected, 64, fixture["base"])
+        struct.pack_into("<I", expected, 76, 5)
+        self.assertEqual(image, bytes(expected))
+        build.assert_called_once_with(fixture["base"], text, len(text), sections)
 
     def test_selected_fpu_vfpu_initial_state_is_source_owned(self) -> None:
         state = insn_trace.initial_state(self.data["consts"])
@@ -309,6 +437,73 @@ class ConversionTests(unittest.TestCase):
             text, data = self._log(fixture, steps, tamper)
             with self.subTest(why=why), self.assertRaisesRegex(insn_trace.InsnTraceError, why):
                 insn_trace.psp_records(text, fixture, data["consts"])
+
+    def test_psp_records_preserve_full_commit_and_reject_repeated_run_records(self) -> None:
+        fixture = insn_trace.parse_fixtures()["fixtures"][0]
+        steps = [(0x08900000, 0x24080005, {"r8": 5}, (0, 0, 0))]
+        text, data = self._log(fixture, steps)
+        text = text.replace("source_commit=" + "1" * 40, "source_commit=" + "a" * 64)
+        _lines, commit = insn_trace.psp_records(text, fixture, data["consts"])
+        self.assertEqual(commit, "a" * 64)
+
+        meta = next(line for line in text.splitlines() if line.startswith("NAKAGAWA_PSP_META "))
+        duplicate_meta = text.replace(meta, meta + "\n" + meta, 1)
+        with self.assertRaisesRegex(insn_trace.InsnTraceError, "exactly one NAKAGAWA_PSP_META"):
+            insn_trace.psp_records(duplicate_meta, fixture, data["consts"])
+
+        step = next(line for line in text.splitlines() if "case_id=alu-branch-ls-s0000 " in line)
+        duplicate_step = text.replace(step, step + "\n" + step, 1)
+        with self.assertRaisesRegex(insn_trace.InsnTraceError, "duplicate record"):
+            insn_trace.psp_records(duplicate_step, fixture, data["consts"])
+
+    def test_end_record_without_outputs_is_a_named_refusal(self) -> None:
+        fixture = insn_trace.parse_fixtures()["fixtures"][0]
+        steps = [(0x08900000, 0x24080005, {"r8": 5}, (0, 0, 0))]
+        text, data = self._log(fixture, steps)
+        end = next(line for line in text.splitlines() if "case_id=alu-branch-ls-end " in line)
+        without_outputs = text.replace(end, end.split(" out0=", 1)[0], 1)
+        with self.assertRaisesRegex(insn_trace.InsnTraceError, "end record is malformed"):
+            insn_trace.psp_records(without_outputs, fixture, data["consts"])
+
+    def test_bad_end_status_message_names_status_not_result(self) -> None:
+        fixture = insn_trace.parse_fixtures()["fixtures"][0]
+        steps = [(0x08900000, 0x24080005, {"r8": 5}, (0, 0, 0))]
+        text, data = self._log(fixture, steps)
+        end = next(line for line in text.splitlines() if "case_id=alu-branch-ls-end " in line)
+        failed_end = end.replace("status=PASS result=0x00000000", "status=FAIL result=0x00000002")
+        with self.assertRaisesRegex(insn_trace.InsnTraceError, "status FAIL"):
+            insn_trace.psp_records(text.replace(end, failed_end, 1), fixture, data["consts"])
+
+    def test_psp_records_preserve_full_commit_and_reject_repeated_run_records(self) -> None:
+        fixture = insn_trace.parse_fixtures()["fixtures"][0]
+        steps = [(0x08900000, 0x24080005, {"r8": 5}, (0, 0, 0))]
+        text, data = self._log(fixture, steps)
+        text = text.replace("source_commit=" + "1" * 40, "source_commit=" + "a" * 64)
+        _lines, commit = insn_trace.psp_records(text, fixture, data["consts"])
+        self.assertEqual(commit, "a" * 64)
+
+        meta = next(line for line in text.splitlines() if line.startswith("NAKAGAWA_PSP_META "))
+        duplicate_meta = text.replace(meta, meta + "\n" + meta, 1)
+        with self.assertRaisesRegex(insn_trace.InsnTraceError, "exactly one NAKAGAWA_PSP_META"):
+            insn_trace.psp_records(duplicate_meta, fixture, data["consts"])
+
+        step = next(line for line in text.splitlines() if "case_id=alu-branch-ls-s0000 " in line)
+        duplicate_step = text.replace(step, step + "\n" + step, 1)
+        with self.assertRaisesRegex(insn_trace.InsnTraceError, "duplicate record"):
+            insn_trace.psp_records(duplicate_step, fixture, data["consts"])
+
+    def test_end_record_without_outputs_and_bad_status_are_named_refusals(self) -> None:
+        fixture = insn_trace.parse_fixtures()["fixtures"][0]
+        steps = [(0x08900000, 0x24080005, {"r8": 5}, (0, 0, 0))]
+        text, data = self._log(fixture, steps)
+        end = next(line for line in text.splitlines() if "case_id=alu-branch-ls-end " in line)
+        without_outputs = text.replace(end, end.split(" out0=", 1)[0], 1)
+        with self.assertRaisesRegex(insn_trace.InsnTraceError, "end record is malformed"):
+            insn_trace.psp_records(without_outputs, fixture, data["consts"])
+
+        failed_end = end.replace("status=PASS result=0x00000000", "status=FAIL result=0x00000002")
+        with self.assertRaisesRegex(insn_trace.InsnTraceError, "status FAIL"):
+            insn_trace.psp_records(text.replace(end, failed_end, 1), fixture, data["consts"])
 
     def test_v2_header_identity(self) -> None:
         fixture = insn_trace.parse_fixtures()["fixtures"][1]

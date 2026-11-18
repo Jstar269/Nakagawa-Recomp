@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import struct
 import sys
 from typing import Any
@@ -261,6 +262,28 @@ class ExportTableTests(unittest.TestCase):
         with self.assertRaises(ImportTableError) as ctx:
             parse_export_table(bytes(blob))
         self.assertIn("exceeds cap", str(ctx.exception))
+
+    def test_export_library_count_matches_the_runtime_loader_limit(self) -> None:
+        runtime = (ROOT / "src" / "rt" / "hle_kernel_module.c").read_text(encoding="utf-8")
+        loader = runtime.split("unsigned register_prx_exports", 1)[1].split("\n}", 1)[0]
+        match = re.search(r"\bcount\s*>\s*(\d+)", loader)
+        self.assertIsNotNone(match, "runtime export count cap was not found")
+        runtime_cap = int(match.group(1))
+        exports = [("SyntheticLarge", 0x4000, list(range(runtime_cap + 1)), [])]
+        with self.assertRaises(ImportTableError):
+            parse_export_table(build_module_elf(exports))
+        self.assertEqual(psp_import_table.MAX_EXPORTS_PER_LIB, runtime_cap)
+
+    def test_export_count_cap_matches_the_runtime_loader(self) -> None:
+        runtime = (ROOT / "src" / "rt" / "hle_kernel_module.c").read_text(encoding="utf-8")
+        loader = runtime.split("unsigned register_prx_exports", 1)[1].split("\n}", 1)[0]
+        match = re.search(r"\bcount\s*>\s*(\d+)", loader)
+        self.assertIsNotNone(match, "runtime export count cap was not found")
+        runtime_cap = int(match.group(1))
+        oversized = [("SyntheticLarge", 0x4000, list(range(runtime_cap + 1)), [])]
+        with self.assertRaises(ImportTableError):
+            parse_export_table(build_module_elf(oversized))
+        self.assertEqual(psp_import_table.MAX_EXPORTS_PER_LIB, runtime_cap)
 
 
 class InterleavedImportTests(unittest.TestCase):
