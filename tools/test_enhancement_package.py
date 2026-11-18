@@ -33,7 +33,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Literal, overload
 import unittest
 from unittest import mock
 
@@ -80,8 +80,13 @@ GCC = shutil.which("gcc") or shutil.which("cc")
 SUBPROCESS_TIMEOUT_S = 120
 
 
-def _run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess:
-    """subprocess.run with a bound, for this module's CLI and compiled-harness calls only."""
+@overload
+def _run(*args: Any, text: Literal[True], **kwargs: Any) -> subprocess.CompletedProcess[str]: ...
+@overload
+def _run(*args: Any, text: Literal[False] = ..., **kwargs: Any) -> subprocess.CompletedProcess[bytes]: ...
+def _run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    """subprocess.run with a bound, for this module's CLI and compiled-harness calls only.
+    Text-mode calls (text=True) return CompletedProcess[str]; the rest return bytes."""
     kwargs.setdefault("timeout", SUBPROCESS_TIMEOUT_S)
     return subprocess.run(*args, **kwargs)
 

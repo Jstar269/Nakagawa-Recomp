@@ -364,7 +364,7 @@ class LibraryBuildTests(unittest.TestCase):
 
         def tracked_wait() -> bool:
             entered_pause.set()
-            return orig_wait()
+            return bool(orig_wait())
 
         build._wait_while_paused = tracked_wait  # type: ignore[method-assign]
         runner = threading.Thread(target=lambda: finished.append(build.run()), daemon=True)
