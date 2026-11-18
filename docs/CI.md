@@ -92,7 +92,8 @@ The jobs:
 - **Hygiene.** The check keeps its name, which the ruleset and the
   [Trusted CI verdict](#trusted-ci-verdict) require. The main smoke steps carry
   `run_main_smoke` and follow hygiene's own steps, so, as before, they run only after every
-  hygiene check passed. The Markdown steps carry `run_markdown` with `!cancelled()`: the
+  hygiene check passed. They are skipped when `native_tools` runs, whose core part runs the
+  same two commands on the same commit. The Markdown steps carry `run_markdown` with `!cancelled()`: the
   Markdown job never waited for hygiene, so its lint still runs and reports when an earlier
   step failed. Node.js is set up after pre-commit, so no hook's environment changes.
 - **Public export.** The export step runs first, on the clean checkout, under its own
@@ -325,7 +326,9 @@ routes exactly the gates the quick run of the same change skipped. What a push t
 unchanged: `allow_substantive` still narrows it there, and `CI required` still runs.
 
 `Generated files and repository lints` runs only on a quick run. It holds checks that a quick run
-would otherwise leave to the landing batch, each of which the full tier runs inside a longer job:
+would otherwise leave to the landing batch, each of which the full tier runs inside a longer job
+(a change to a file `tools/regen_all.py` regenerates routes the Python tooling job, so a full run
+of a documentation-only change still checks it):
 `python -m unittest tools.test_lint_docs`, `python tools/format_portability_check.py`,
 `python tools/regen_all.py --check`, and the tools mypy baseline (`tools/mypy_baseline.py --scope
 issue-1391`, then without `--scope`, with the Python tooling job's pinned install). Five lane runs of
@@ -532,7 +535,9 @@ current-tree scan; the hook runs Betterleaks in directory mode over the files it
 is given (every tracked file under `--all-files`, the staged files at the commit
 stage). The hook is commit-stage only: at pre-push pre-commit supplies no file
 names, which would turn directory mode into a whole-working-tree scan. Hygiene then runs an explicit Betterleaks reachable-history
-scan in git mode and the synthetic canary gate. It also runs the core purity gate,
+scan in git mode and the synthetic canary gate. The history scan passes `--diff-merges=first-parent`
+to `git log`, which otherwise prints no patch for a merge commit, so a value added while resolving
+a merge and removed later is still found; a canary pins that case. It also runs the core purity gate,
 [`tools/purity_gate.py`](../tools/purity_gate.py): a hexadecimal literal in PSP user RAM
 (`0x08800000`-`0x09ffffff`) in `src/rt/` code fails it, outside title-config files, native
 self-tests, registered NIDs and the reviewed allowlist in that file (one entry per literal,
@@ -542,7 +547,7 @@ synthetic/public-input gates; no private game input is put in Actions.
 The shared pre-commit hooks include `mypy-tools`, which requires mypy 2.4.1 and checks the clean
 issue #1391 scope. Hygiene skips that local-system hook because the `python_tools` job installs
 the same version from a hash-locked requirements file, runs the clean-scope check, then runs the
-full `tools/` per-module ratchet. This keeps the developer hook and hosted checks on one pin
+full `tools/` per-module ratchet, in its first shard only (the baseline reads the whole tree). This keeps the developer hook and hosted checks on one pin
 without repeating the full scan in two jobs.
 
 The Windows job also runs `mingw32-make production-smoke` in the existing MSYS2 UCRT64/GCC,
@@ -634,8 +639,10 @@ SDL3 build. `vulkaninfo --summary` selects the lavapipe ICD and must list llvmpi
 terminal present-fault cases each get a fresh process, because the renderer must not reuse a
 device after a terminal failure; an exit 77 skip fails the gate. A separate step runs
 `gpu-coherence-selftest` the same way on lavapipe: the Vulkan backend's render-target coherence,
-texture cache, per-draw state template, filtering and blend cases against the software GE, where
-an exit 77 skip also fails. Its scaled-upload case then runs alone at render scales 2 and 4, where
+texture cache, per-draw state template, filtering and blend cases against the software GE. A plain
+run's exit 77 also fails it, but the recipe passes three kinds of SKIP with the step still green: the
+gpu-timestamps legs (its own and the twin's), the interlock dst-read and stencil-once cells on a
+device that refuses the interlock, and `ge-first-bad-draw-selftest` (`GE_FBD_SKIP_STATUS=0`). Its scaled-upload case then runs alone at render scales 2 and 4, where
 every device pixel of an uploaded target must hold its guest pixel, and so does its mip-lod case,
 where the shader's per-fragment mip level must not change with the render scale, and so does its
 readback-rows case, where guest memory must get the top-left device pixel of each cell while the
@@ -1076,7 +1083,7 @@ fail-closed NID/dispatch, cosimulation, provenance, import-audit, and security
 gates remain in their normal PR jobs and tests. `python_tools` includes a
 one-line summary of skips by `NIGHTLY_TIER`, `WINDOWS_ONLY`, and `PRIVATE_INPUT`.
 
-The nightly `schedule` and manual `workflow_dispatch` both force the full CI
+The nightly `schedule`, manual `workflow_dispatch` and a merge-queue group all force the full CI
 matrix and set `NK_TEST_TIER=full`, so every nightly case runs. The normal local
 command uses the PR tier; set the environment variable to run the full tier:
 
@@ -1348,7 +1355,9 @@ belongs to a new subsystem.
 
 GitHub-hosted Windows time is billed at a higher multiplier than Linux time. The
 workflow therefore starts the Windows runner only after the cheaper Linux classify
-and public-export jobs (the second also builds the fixture), cancels superseded PR runs, and avoids repeating the full matrix on
+and public-export jobs (the second also builds the fixture), cancels superseded PR runs (runs on
+`main` never cancel each other: each push, schedule, manual run and merge group is its own
+concurrency group), and avoids repeating the full matrix on
 ordinary main pushes. Besides dependency and tool caches (pip, the SDL3 installs),
 the only cache is the Windows compiler cache below. Build trees and generated
 shader/code output are not cached across jobs or runs, so the repository's
@@ -1419,6 +1428,8 @@ analyse another commit or repository, run its own code in that context, or suppl
 the required check's evidence. Its trusted-run concurrency group is the head
 repository and branch, so a newer head of a branch cancels the analysis of the
 older one; repositories never share a group, so forks cannot cancel one another.
+A push to `main` and the weekly schedule each run in a group of their own, so a landing
+never cancels the analysis of the previous `main` commit.
 The wake workflow's name is part of the trust path: `codeql.yml` names it in
 `workflows:`, and `tools/test_public_ci_wiring.py` pins that the two agree.
 
@@ -1492,7 +1503,10 @@ the trusted run. Serialising CodeQL after `CI`, by a `workflow_run` of the merge
 alternative is not used.
 
 **Provenance on a group.** `.github/workflows/provenance-attestation-merge-group.yml`
-observes each group commit with the default-branch provenance verifier. It runs as a
+observes each group commit with the default-branch provenance verifier, then audits the
+group tree with the default-branch publication audit (`tools/publish_audit.py
+--committed-tree`, the same step as the pull-request attestation), so the tree that
+combines the queued pull requests is checked as a whole. It runs as a
 `workflow_run` of the group's `CI` run, filtered to `merge_group` runs of this
 repository's `gh-readonly-queue/` branches, and reads the group commit as data only,
 without checking it out. Its verdict base is the merge base of the group with the
@@ -2244,8 +2258,9 @@ developer runs locally, without private inputs:
   directory outside the build tree (`production-smoke-staged`).
 - The `public_export` job ("Public export audit and profile-zero fixture") is ungated
   and runs in parallel with `hygiene` (#735 item 5). Its step "Exercise public-export
-  generation and candidate audit" runs on `security_publication` changes and every
-  manual `workflow_dispatch`, and the job reports success when the step is skipped.
+  generation and candidate audit" runs on `security_publication` changes (which include the
+  export tool and every gate it runs, `PUBLIC_EXPORT_TOOLS` in `tools/ci_paths.py`), every
+  full-matrix event and every manual `workflow_dispatch`, and the job reports success when the step is skipped.
   `ci_required` requires the job to succeed. One
   `build_public_export.py --export-dir ... --public-safe-profile` invocation
   runs the publication gates, generates the public-safe candidate, and audits
