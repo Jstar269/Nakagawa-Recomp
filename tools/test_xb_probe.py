@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import json
 from pathlib import Path
 import struct
 import sys
@@ -288,6 +289,24 @@ class XBProbeTests(unittest.TestCase):
             with redirect_stderr(stderr):
                 self.assertEqual(main([str(path), "--lookup", "data/missing.bin"]), 2)
             self.assertIn("inner key not found", stderr.getvalue())
+
+    def test_cli_output_names_archive_by_leaf_only(self) -> None:
+        data = _make_archive([("data/test.bin", b"x", XBCompression.NONE)])
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="nk-private-dir-") as directory:
+            path = Path(directory) / "sample.xb2"
+            path.write_bytes(data)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main([str(path), "--json"]), 0)
+            self.assertEqual(json.loads(stdout.getvalue())["path"], "sample.xb2")
+            self.assertEqual(XBArchiveReader(path).metadata()["path"], "sample.xb2")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main([str(path)]), 0)
+            self.assertIn("archive=sample.xb2 ", stdout.getvalue())
+            self.assertNotIn(Path(directory).name, stdout.getvalue())
 
     def test_shortest_valid_archive(self) -> None:
         raw = _make_archive([("a.bin", b"x", XBCompression.NONE)])

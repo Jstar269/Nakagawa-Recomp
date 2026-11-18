@@ -597,8 +597,27 @@ def generate_package_notices(
             license_files_to_copy.append(
                 (extra_name, extra_src, f"{linked['name']} ({Path(extra_display).name})")
             )
-        if linked.get("object_glob"):
-            component["relink_objects"] = linked["object_glob"]
+        if "object_glob" in linked:
+            raise PackageRouteError(
+                "PACKAGE_LICENSE_RECORD_MISSING",
+                f"LICENSE_RECORD_MALFORMED: linked component {linked.get('id', linked['name'])!r} "
+                f"uses the retired single-pattern object_glob; record object_globs in {COMPONENTS_IDENTITY}",
+            )
+        object_globs = linked.get("object_globs")
+        if object_globs is not None:
+            # Objects live both beside the build directory and in per-library
+            # subdirectories, so one glob cannot name them all: require a list.
+            if (
+                not isinstance(object_globs, list)
+                or not object_globs
+                or not all(isinstance(glob, str) and glob for glob in object_globs)
+            ):
+                raise PackageRouteError(
+                    "PACKAGE_LICENSE_RECORD_MISSING",
+                    f"LICENSE_RECORD_MALFORMED: linked component {linked.get('id', linked['name'])!r} "
+                    f"object_globs must be a non-empty list of glob strings in {COMPONENTS_IDENTITY}",
+                )
+            component["relink_objects"] = list(object_globs)
 
     # Process bundled binaries
     for binary in binaries:

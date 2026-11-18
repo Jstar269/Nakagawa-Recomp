@@ -186,9 +186,7 @@ is not built
    - Atomic directory promotion occurs only after the worker completes; failed/cancelled staging is discarded.
    - The promoted root is registered with a persistent asset census and becomes
      the launch session's preferred `SR_DATAROOT`/`SR_MEMSTICK` source.
-   - An encrypted `~PSP`/`~SCE` executable without a user-supplied `EBOOT.elf` stops as
-     `ENCRYPTED_EXECUTABLE` ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)). Without a supported plain or decrypted
-     executable, a missing recompiled child is reported instead of fabricated.
+   - The disc check first decrypts the encrypted `EBOOT.BIN` and modules locally with the built-in tables ([#1494](https://github.com/Jstar269/nakagawa-recomp/pull/1494)); when that cannot produce a usable executable, an encrypted `~PSP`/`~SCE` executable stops as `ENCRYPTED_EXECUTABLE` or names the files to supply. Without a supported plain or decrypted executable, a missing recompiled child is reported instead of fabricated.
    - Every check classifies the disc's program input (`PlayerInputClass` in `src/player/player_state.h`): plain ELF,
      homebrew or project-made, user-supplied decrypted retail, encrypted retail still short of decrypted copies, or
      unsupported (unreadable disc, empty or malformed program, a module tree that cannot be listed). For encrypted
@@ -196,7 +194,9 @@ is not built
      and the per-title folder `titles/<DISC_ID>/decrypted`. The game-found card, the wizard's Verify step and the
      title page show that list with OPEN FOLDER and CHECK AGAIN, which checks the same disc again without a new
      import ([#308](https://github.com/Jstar269/nakagawa-recomp/issues/308)); the title page's check also runs again
-     by itself when a listed file appears or changes. Nothing in this route decrypts or reads a key.
+     by itself when a listed file appears or changes. The disc check decrypts local copies with
+     the built-in tables (#1494) and reads no user-supplied or console key; the staging step itself
+     does not decrypt.
 6. **One-Click Play**: The hero card exposes *"PLAY NOW"* when a validating
    package is present or, for a non-experimental catalog title, when the
    launcher resolves that title's developer runtime ([#483](https://github.com/Jstar269/nakagawa-recomp/pull/483)).

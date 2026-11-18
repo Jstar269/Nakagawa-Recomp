@@ -43,7 +43,7 @@
       "name": "PPSSPP PSP emulator lineage",
       "license": "GPL-2.0-or-later and component notices",
       "origin": "https://github.com/hrydgard/ppsspp",
-      "revision": "f0baf3ade7bcb6c86f0835962b36eb4e51559d8f",
+      "revision": "unknown; inherited via sal063 da17b0e1db209206a407d097d132201e516e3855 (partial pin 4e109dd6ae34cbcb39751bb7647d345569700161 for Core/HLE/sceMpeg.cpp), see src/rt/PROVENANCE.md",
       "notice_path": "third_party/licenses/SAL063_CREDITS.txt",
       "evidence_path": "assets/public_provenance_ledger.json",
       "disposition": "included_data_and_attribution; PGF_surface_excluded"
@@ -116,7 +116,7 @@
       "revision": "4.0.3 / ab2b16dd619ad5f6979a4fbe69cfa324a6fcc35f",
       "notice_path": "third_party/monocypher/LICENCE.md",
       "evidence_path": "third_party/monocypher/PROVENANCE.md",
-      "disposition": "vendored_source_only; upstream dual BSD-2-Clause OR CC0-1.0, CC0-1.0 elected; not linked into player runtime yet"
+      "disposition": "linked into the player for the signed update check (src/core/nk_sig.c, mk/pipeline.mk UPDATE_SIG_SRCS); upstream dual BSD-2-Clause OR CC0-1.0, CC0-1.0 elected"
     },
     {
       "id": "sdl3",

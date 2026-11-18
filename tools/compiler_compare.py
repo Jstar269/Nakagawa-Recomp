@@ -50,6 +50,48 @@ GCC_ONLY_TRACKING_FLAG = "-ftrack-macro-expansion=0"
 MEASUREMENT_TARGETS = ("production-smoke", "production-smoke-gap", "display-smoke-run", "cosim-selftest")
 MEASUREMENT_NAMES = ("generated_c_compile_wall_seconds", "link_wall_seconds",
                      "peak_working_set_bytes", "object_bytes", "executable_bytes")
+_PINNED_ASSIGNMENT_VALUES = {
+    "RUNTIME_OPT": "-O0",
+    "RECOMP_OPT": "-O0",
+    "TRACE": "0",
+    "PERF_AOT_INSTRUCTIONS": "0",
+    "CODEGEN_BACKEND": "c",
+    "CODEGEN_USER_ARGS": "",
+    "COSIM_CODEGEN_ARGS": "--stack-census",
+    "PUBLIC_SAFE": "1",
+    "FUNCS_PER_CHUNK": "1",
+    "CHUNK_TARGET_BYTES": "",
+    "NAN_TRAP": "0",
+    "GAME_NAME": "compiler_compare",
+    "GAME_BASE": "0",
+    "GAME_ENTRY": "0",
+    "GAME_ELF": "",
+    "GAME_PSP_HEADER": "",
+    "GAME_EXTRA_ELFS": "",
+    "TITLE_MANIFEST": "",
+    "TITLE_EXTRA_SPANS": "",
+    "CODEGEN_PROFILE_ARG": "",
+    "SYMBOL_MAP": "",
+    "NAME_IMPORTS": "0",
+    "ENHANCEMENT_PACKAGE": "",
+    "ENHANCEMENT_DATA_ROOT": "",
+    "ENHANCEMENT_CODE_HOOK_PACKAGE": "",
+    "CODEGEN_TOOL": "tools/codegen.py",
+}
+_PINNED_ASSIGNMENT_GROUPS = {
+    "runtime": ("RUNTIME_OPT", "RECOMP_OPT", "TRACE"),
+    "base_codegen": ("PERF_AOT_INSTRUCTIONS", "CODEGEN_BACKEND", "CODEGEN_USER_ARGS",
+                     "COSIM_CODEGEN_ARGS", "PUBLIC_SAFE"),
+    "measurement_codegen": ("CODEGEN_BACKEND", "CODEGEN_USER_ARGS", "PERF_AOT_INSTRUCTIONS",
+                            "COSIM_CODEGEN_ARGS", "PUBLIC_SAFE"),
+    "title": ("GAME_NAME", "GAME_BASE", "GAME_ENTRY", "GAME_ELF", "GAME_PSP_HEADER",
+              "GAME_EXTRA_ELFS", "TITLE_MANIFEST", "TITLE_EXTRA_SPANS",
+              "CODEGEN_PROFILE_ARG", "SYMBOL_MAP", "NAME_IMPORTS", "ENHANCEMENT_PACKAGE",
+              "ENHANCEMENT_DATA_ROOT", "ENHANCEMENT_CODE_HOOK_PACKAGE"),
+    "base_tail": ("NAN_TRAP", "FUNCS_PER_CHUNK", "CHUNK_TARGET_BYTES"),
+    "measurement_tail": ("FUNCS_PER_CHUNK", "CHUNK_TARGET_BYTES", "NAN_TRAP"),
+    "codegen_tool": ("CODEGEN_TOOL",),
+}
 STATUS_MEASURED = "MEASURED"
 STATUS_FAILED_VETO = "FAILED_VETO"
 STATUS_FAILED_MEASUREMENT = "FAILED_MEASUREMENT"
@@ -63,6 +105,7 @@ GATE_SKIP = "SKIP"
 OUTPUT_TAIL = 8000
 OUTPUT_HEAD = 4000
 SAMPLE_INTERVAL_SECONDS = 0.02
+COMMAND_TIMEOUT_SECONDS = 30 * 60
 GENERATED_C_NAME = re.compile(r"_recomp(?:_|\.|$)", re.IGNORECASE)
 SETTING_LINE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
 FORBIDDEN_FP_FLAGS = ("-ffast-math", "-fassociative-math", "-funsafe-math-optimizations", "-ofast")
@@ -87,6 +130,12 @@ TIMING_KEYS = frozenset({
 
 class CompareError(ValueError):
     """A comparison input, build, measurement or report violated its contract."""
+
+
+def _pinned_assignments(*groups: str) -> list[str]:
+    """The comparison's shared Make pins, in the requested command-line order."""
+    return [f"{name}={_PINNED_ASSIGNMENT_VALUES[name]}"
+            for group in groups for name in _PINNED_ASSIGNMENT_GROUPS[group]]
 
 
 @dataclass(frozen=True)
@@ -119,7 +168,16 @@ def _run(command: list[str], *, env: dict[str, str], cwd: Path = ROOT) -> Outcom
         completed = subprocess.run(
             command, cwd=cwd, env=env, check=False, text=True, errors="replace",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=COMMAND_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stdout if exc.stdout is not None else exc.output
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        detail = f"{command[0]} timed out after {COMMAND_TIMEOUT_SECONDS} seconds"
+        if partial:
+            detail += f"\n{partial}"
+        return Outcome(None, detail, time.perf_counter() - started)
     except OSError as exc:
         return Outcome(None, f"{command[0]} could not be executed: {exc}", time.perf_counter() - started)
     return Outcome(completed.returncode, completed.stdout, time.perf_counter() - started)
@@ -256,15 +314,7 @@ def _build_settings(make: str, compiler_path: str, linker: str, build_root: Path
     base_command = [
         make, "--no-print-directory", "--silent", f"CC={_make_path(compiler_path)}",
         f"BUILD_ROOT={info_root}", f"BUILD_DIR={info_build_dir}", f"LOG_DIR={info_log_dir}",
-        "RUNTIME_OPT=-O0", "RECOMP_OPT=-O0", "TRACE=0",
-        "PERF_AOT_INSTRUCTIONS=0", "CODEGEN_BACKEND=c", "CODEGEN_USER_ARGS=",
-        "COSIM_CODEGEN_ARGS=--stack-census", "PUBLIC_SAFE=1",
-        "GAME_NAME=compiler_compare", "GAME_BASE=0", "GAME_ENTRY=0",
-        "GAME_ELF=", "GAME_PSP_HEADER=", "GAME_EXTRA_ELFS=", "TITLE_MANIFEST=",
-        "TITLE_EXTRA_SPANS=", "CODEGEN_PROFILE_ARG=", "SYMBOL_MAP=",
-        "NAME_IMPORTS=0", "ENHANCEMENT_PACKAGE=", "ENHANCEMENT_DATA_ROOT=", "ENHANCEMENT_CODE_HOOK_PACKAGE=",
-        "NAN_TRAP=0", "FUNCS_PER_CHUNK=1", "CHUNK_TARGET_BYTES=",
-        "CODEGEN_TOOL=tools/codegen.py",
+        *_pinned_assignments("runtime", "base_codegen", "title", "base_tail", "codegen_tool"),
         "compiler-info",
     ]
     base = _run(base_command, env=env)
@@ -297,15 +347,7 @@ def _build_settings(make: str, compiler_path: str, linker: str, build_root: Path
     controlled = [
         make, "--no-print-directory", "--silent", f"CC={_make_path(compiler_path)}",
         f"BUILD_ROOT={info_root}", f"BUILD_DIR={info_build_dir}", f"LOG_DIR={info_log_dir}",
-        "RUNTIME_OPT=-O0", "RECOMP_OPT=-O0", "TRACE=0",
-        "PERF_AOT_INSTRUCTIONS=0", "CODEGEN_BACKEND=c", "CODEGEN_USER_ARGS=",
-        "COSIM_CODEGEN_ARGS=--stack-census", "PUBLIC_SAFE=1",
-        "GAME_NAME=compiler_compare", "GAME_BASE=0", "GAME_ENTRY=0",
-        "GAME_ELF=", "GAME_PSP_HEADER=", "GAME_EXTRA_ELFS=", "TITLE_MANIFEST=",
-        "TITLE_EXTRA_SPANS=", "CODEGEN_PROFILE_ARG=", "SYMBOL_MAP=",
-        "NAME_IMPORTS=0", "ENHANCEMENT_PACKAGE=", "ENHANCEMENT_DATA_ROOT=", "ENHANCEMENT_CODE_HOOK_PACKAGE=",
-        "NAN_TRAP=0", "FUNCS_PER_CHUNK=1", "CHUNK_TARGET_BYTES=",
-        "CODEGEN_TOOL=tools/codegen.py",
+        *_pinned_assignments("runtime", "base_codegen", "title", "base_tail", "codegen_tool"),
         f"CFLAGS={cflags}", f"RECOMP_FLAGS={recomp_flags}",
         f"GE_CFLAGS={ge_cflags}", f"LDFLAGS={ldflags}", "compiler-info",
     ]
@@ -352,38 +394,15 @@ def _make_assignments(compiler: str, settings: dict[str, str], build_root: Path,
         f"BUILD_DIR={_make_build_path(build_root / 'compiler_compare')}",
         f"LOG_DIR={_make_build_path(log_root)}",
         f"SDL3_DIR={settings.get('SDL3_DIR', '')}",
-        "RUNTIME_OPT=-O0",
-        "RECOMP_OPT=-O0",
-        "TRACE=0",
+        *_pinned_assignments("runtime"),
         f"CFLAGS={_make_owned_flags(settings['CFLAGS'], remove_perf=True)}",
         f"GE_CFLAGS={settings.get('GE_CFLAGS', '')}",
         f"RECOMP_FLAGS={_comparison_recomp_flags(settings.get('RECOMP_FLAGS', ''))}",
         f"LDFLAGS={settings.get('LDFLAGS', '')}",
         f"LIBS={settings.get('LIBS', '')}",
-        "CODEGEN_BACKEND=c",
-        "CODEGEN_USER_ARGS=",
-        "PERF_AOT_INSTRUCTIONS=0",
-        "COSIM_CODEGEN_ARGS=--stack-census",
-        "PUBLIC_SAFE=1",
-        "FUNCS_PER_CHUNK=1",
-        "CHUNK_TARGET_BYTES=",
-        "NAN_TRAP=0",
+        *_pinned_assignments("measurement_codegen", "measurement_tail"),
         f"RECOMP_CC_IS_CLANG={settings.get('RECOMP_CC_IS_CLANG_OVERRIDE', '')}",
-        "GAME_NAME=compiler_compare",
-        "GAME_BASE=0",
-        "GAME_ENTRY=0",
-        "GAME_ELF=",
-        "GAME_PSP_HEADER=",
-        "GAME_EXTRA_ELFS=",
-        "TITLE_MANIFEST=",
-        "TITLE_EXTRA_SPANS=",
-        "CODEGEN_PROFILE_ARG=",
-        "SYMBOL_MAP=",
-        "NAME_IMPORTS=0",
-        "ENHANCEMENT_PACKAGE=",
-        "ENHANCEMENT_DATA_ROOT=",
-        "ENHANCEMENT_CODE_HOOK_PACKAGE=",
-        "CODEGEN_TOOL=tools/codegen.py",
+        *_pinned_assignments("title", "codegen_tool"),
     ]
     return assignments
 
@@ -481,10 +500,15 @@ _POSIX_NAMED_ROOT_RE = re.compile(
 _POSIX_MULTI_SEGMENT_RE = re.compile(
     r"(?:(?<=-[IL])|(?<![A-Za-z0-9_.>/:~-]))/(?:[A-Za-z0-9_.@-]+/)+[^\s\"'`<>|;,)\]]*",
 )
+_GUEST_VFS_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])/(?:PSP_GAME(?:/[^\s\"'`<>|;,\)\]]*)?|UMD_DATA\.BIN)",
+    re.IGNORECASE,
+)
 _HOST_KEYED_PTR_RE = re.compile(r"\b(host_?(?:addr|ptr)=)(?:0x)?[0-9a-fA-F]+\b", re.IGNORECASE)
 _CALL_ADDR_RE = re.compile(r"((?:-> calling|<- returned from) fn )(?:0x)?[0-9a-fA-F]{8,16}")
 _WIDE_HEX_PTR_RE = re.compile(r"(?<![A-Za-z0-9_])0x[0-9a-fA-F]{9,16}\b")
 _WIN_BARE_PTR_RE = re.compile(r"(?<![A-Za-z0-9_])0000(?=[0-9a-fA-F]{12}\b)(?!0{11})[0-9a-fA-F]{12}\b")
+_GUEST_WIDE_FIELD_PREFIX_RE = re.compile(r"\b(?:acc|hi_lo|ticks)=$", re.IGNORECASE)
 _TIMING_FIELD_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_]*_ms|fps)=\d+(?:\.\d+)?", re.IGNORECASE)
 
 _EQ_FIELD_RE = re.compile(
@@ -546,9 +570,15 @@ def _host_path_roots() -> tuple[str, ...]:
     return tuple(sorted(set(candidates), key=len, reverse=True))
 
 
-def _redact_host_details(text: str) -> str:
+def _redact_host_details(text: str, *, preserve_guest_wide_fields: bool = False) -> str:
     """Redact host paths (user homes, temp dirs, absolute paths) and hex host addresses."""
-    result = text
+    guest_paths: list[str] = []
+
+    def preserve_guest_path(match: re.Match[str]) -> str:
+        guest_paths.append(match.group(0))
+        return f"__SR_GUEST_PATH_{len(guest_paths) - 1}__"
+
+    result = _GUEST_VFS_PATH_RE.sub(preserve_guest_path, text)
     for root_prefix in _host_path_roots():
         flags = re.IGNORECASE if (len(root_prefix) >= 2 and root_prefix[1] == ":") else 0
         pattern = re.escape(root_prefix) + r"(?:[\\/][^\s\"'`<>|;,)\]]*)*"
@@ -567,9 +597,28 @@ def _redact_host_details(text: str) -> str:
     result = re.sub(r"SR_HOST=0x[0-9a-fA-F]+", "SR_HOST=<HOST_ADDR>", result)
     result = _HOST_KEYED_PTR_RE.sub(r"\1<HOST_ADDR>", result)
     result = _CALL_ADDR_RE.sub(r"\1<HOST_ADDR>", result)
-    result = _WIDE_HEX_PTR_RE.sub("<HOST_ADDR>", result)
-    result = _WIN_BARE_PTR_RE.sub("<HOST_ADDR>", result)
+    def redact_wide(match: re.Match[str]) -> str:
+        prefix = result[max(0, match.start() - 64):match.start()]
+        if preserve_guest_wide_fields and _GUEST_WIDE_FIELD_PREFIX_RE.search(prefix):
+            return match.group(0)
+        return "<HOST_ADDR>"
+
+    result = _WIDE_HEX_PTR_RE.sub(redact_wide, result)
+    result = _WIN_BARE_PTR_RE.sub(redact_wide, result)
+    for index, path in enumerate(guest_paths):
+        result = result.replace(f"__SR_GUEST_PATH_{index}__", path)
     return result
+
+
+def _redact_report_details(value: Any) -> Any:
+    """Redact host paths and addresses recursively before a report is serialized."""
+    if isinstance(value, dict):
+        return {key: _redact_report_details(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_redact_report_details(child) for child in value]
+    if isinstance(value, str):
+        return _redact_host_details(value, preserve_guest_wide_fields=True)
+    return value
 
 
 def _normalise_semantic_output(text: str, build_root: Path) -> str:
@@ -1007,7 +1056,9 @@ def _measurement_trials(compiler_path: str, make: str, python: str, settings: di
     trials: list[dict[str, Any]] = []
     for index in range(1, repeats + 1):
         trial_root = build_root / f"trial-{index}"
-        trial_root.mkdir(parents=True, exist_ok=True)
+        if trial_root.exists():
+            shutil.rmtree(trial_root)
+        trial_root.mkdir(parents=True)
         events_path = trial_root / "compiler_events.jsonl"
         measured_env = env.copy()
         measured_env["NK_COMPILER_COMPARE_EVENTS"] = str(events_path)
@@ -1103,26 +1154,19 @@ def _workload_measurements(compiler_path: str, make: str, python: str, settings:
         "--make", make, "--python", python,
         "--output", str(perf_dir), "--build-prefix", _make_build_path(build_prefix),
     ]
+    # Runtime workload rows choose their own game/title inputs and codegen tool; pin only
+    # the compiler and codegen settings shared with the comparison trials.
     make_assignments = [
         f"CC={_make_path(compiler_path)}",
         f"SDL3_DIR={settings.get('SDL3_DIR', '')}",
-        "RUNTIME_OPT=-O0",
-        "RECOMP_OPT=-O0",
-        "TRACE=0",
+        *_pinned_assignments("runtime"),
         f"CFLAGS={_make_owned_flags(settings['CFLAGS'], remove_perf=True)}",
         f"GE_CFLAGS={settings.get('GE_CFLAGS', '')}",
         f"RECOMP_FLAGS={_comparison_recomp_flags(settings.get('RECOMP_FLAGS', ''))}",
         f"LDFLAGS={settings.get('LDFLAGS', '')}",
         f"BUILD_ROOT={_make_build_path(build_prefix)}",
         f"LIBS={settings.get('LIBS', '')}",
-        "CODEGEN_BACKEND=c",
-        "CODEGEN_USER_ARGS=",
-        "PERF_AOT_INSTRUCTIONS=0",
-        "COSIM_CODEGEN_ARGS=--stack-census",
-        "PUBLIC_SAFE=1",
-        "FUNCS_PER_CHUNK=1",
-        "CHUNK_TARGET_BYTES=",
-        "NAN_TRAP=0",
+        *_pinned_assignments("measurement_codegen", "measurement_tail"),
         f"RECOMP_CC_IS_CLANG={settings.get('RECOMP_CC_IS_CLANG_OVERRIDE', '')}",
     ]
     for assignment in make_assignments:
@@ -1295,6 +1339,10 @@ def validate_report(report: Any) -> None:
             if _timing_keys(entry):
                 raise CompareError(f"{path}: failed veto leaks performance values")
             continue
+        if names != list(GATE_ORDER):
+            raise CompareError(f"{path}.veto.gates: measured toolchains require the full gate chain")
+        if any(gate.get("status") != GATE_PASS for gate in gates):
+            raise CompareError(f"{path}.veto.gates: every gate must pass before measurement")
         if veto.get("status") != GATE_PASS or veto.get("failed_gate") is not None:
             raise CompareError(f"{path}.veto: measured toolchain must pass every gate")
         if status == STATUS_FAILED_MEASUREMENT:
@@ -1359,7 +1407,9 @@ def _format_range(value: Any, divisor: float = 1.0, suffix: str = "") -> str:
 def _format_markdown_line(line: str, *, absent: bool = False) -> str:
     if not line:
         return "(line absent)" if absent else "(empty line)"
-    redacted = _redact_host_details(line)
+    # Semantic diff lines may contain guest state (acc/hi_lo/ticks) wider than a host pointer.
+    # Preserve those keyed values while continuing to redact unkeyed host addresses.
+    redacted = _redact_host_details(line, preserve_guest_wide_fields=True)
     fence = "`" * (max((len(match.group(0)) for match in re.finditer(r"`+", redacted)), default=0) + 1)
     pad = " " if redacted.startswith("`") or redacted.endswith("`") else ""
     return f"{fence}{pad}{redacted}{pad}{fence}"
@@ -1536,24 +1586,38 @@ class _PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
     ]
 
 
+_PROCESS_APIS: tuple[Any, Any] | None = None
+
+
+def _process_apis() -> tuple[Any, Any]:
+    """Load and bind the process-sampling APIs once, on the first Windows sample."""
+    global _PROCESS_APIS
+    if sys.platform != "win32":
+        raise OSError("process sampling through kernel32 and psapi is implemented for Windows only")
+    if _PROCESS_APIS is None:
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        kernel.Process32FirstW.restype = wintypes.BOOL
+        kernel.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+        kernel.Process32NextW.restype = wintypes.BOOL
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_PROCESS_MEMORY_COUNTERS_EX), wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        _PROCESS_APIS = (kernel, psapi)
+    return _PROCESS_APIS
+
+
 def _process_tree_working_set(root_pid: int) -> int:
     if sys.platform != "win32":
         raise OSError("process-tree working-set sampling is currently implemented for Windows")
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    psapi = ctypes.WinDLL("psapi", use_last_error=True)
-    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
-    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
-    kernel.Process32FirstW.restype = wintypes.BOOL
-    kernel.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
-    kernel.Process32NextW.restype = wintypes.BOOL
-    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel.OpenProcess.restype = wintypes.HANDLE
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    psapi.GetProcessMemoryInfo.argtypes = [
-        wintypes.HANDLE, ctypes.POINTER(_PROCESS_MEMORY_COUNTERS_EX), wintypes.DWORD,
-    ]
-    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    kernel, psapi = _process_apis()
     snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
     if snapshot == wintypes.HANDLE(-1).value:
         raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot failed")
@@ -1567,12 +1631,17 @@ def _process_tree_working_set(root_pid: int) -> int:
             ok = kernel.Process32NextW(snapshot, ctypes.byref(entry))
     finally:
         kernel.CloseHandle(snapshot)
+    children: dict[int, list[int]] = {}
+    for pid, parent in parents.items():
+        children.setdefault(parent, []).append(pid)
     descendants = {root_pid}
-    changed = True
-    while changed:
-        previous = len(descendants)
-        descendants.update(pid for pid, parent in parents.items() if parent in descendants)
-        changed = len(descendants) != previous
+    pending = deque((root_pid,))
+    while pending:
+        parent = pending.popleft()
+        for child in children.get(parent, ()):
+            if child not in descendants:
+                descendants.add(child)
+                pending.append(child)
     total = 0
     for pid in descendants:
         process = kernel.OpenProcess(0x0410, False, pid)
@@ -1714,10 +1783,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     json_path = output / "compiler_compare.json"
     markdown_path = output / "compiler_compare.md"
-    json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    public_report = _redact_report_details(report)
+    json_path.write_text(json.dumps(public_report, indent=2, sort_keys=True), encoding="utf-8")
     markdown = render_markdown(report)
     markdown_path.write_text(markdown, encoding="utf-8")
-    print(json.dumps(report, indent=2, sort_keys=True))
+    print(json.dumps(public_report, indent=2, sort_keys=True))
     print(markdown)
     return 0 if report["summary"][STATUS_MEASURED] and not (
         report["summary"][STATUS_NOT_AVAILABLE] or report["summary"][STATUS_FAILED_VETO]

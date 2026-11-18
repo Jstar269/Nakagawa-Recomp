@@ -69,8 +69,10 @@ We aim to respond promptly and will remove material where appropriate.
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `third_party/licenses/PSPSDK.txt` and `assets/upstream/`.
 - **FFmpeg n4.4 ATRAC3 and ATRAC3+ subsets** — LGPL-2.1-or-later. The imported
-  decoders and their license/provenance file are under `src/rt/atrac3p/`; the project wrapper
-  remains separately identified in the ledger. Two byte-identical imports,
+  decoders, the project-authored API layer over them (`atrac3p_api.c`/`.h`) and their
+  license/provenance file are under `src/rt/atrac3p/`. The provenance ledger lists all of
+  these under the FFmpeg decoder-import record; the HLE bridge that drives them,
+  `src/rt/atrac3p_bridge.c`, has its own project-authored record. Two byte-identical imports,
   `libavcodec/fft_init_table.c` and `libavcodec/fft_table.h`, also carry a MIPS
   Technologies, Inc. BSD-3-Clause notice. Its verbatim text is in
   `third_party/licenses/FFMPEG_MIPS_FFT.txt` and is included in the generated
@@ -89,23 +91,34 @@ We aim to respond promptly and will remove material where appropriate.
 - **Portable Snippets `safe-math`** — `CC0-1.0` (public domain dedication). The
   byte-identical header, upstream `COPYING.md`, pinned source manifest, and
   SHA-256 values are under `third_party/portable-snippets/`. It is compiled into
-  the native player through `src/core/nk_iso.c` and `src/core/nk_xb.c`.
+  the native player through `src/core/nk_iso.c` and `src/core/nk_xb.c`, and into
+  every title runtime through `src/core/nk_xb.c` (`mk/runtime_sources.mk`).
 - **dr_libs `dr_wav`** — the Unlicense (public domain), elected from upstream's
   Unlicense or `MIT-0` choice; both texts are kept. The byte-identical header,
   upstream `LICENSE`, pinned source manifest, and SHA-256 values are under
   `third_party/dr_libs/`. Only selftests compile it; it is not in the player or
   the runtime.
-- **libchdr** — `BSD-3-Clause`, Copyright Romain Tisserand. The CHD reader, pinned at
+- **libchdr** — `BSD-3-Clause`, Copyright Romain Tisserand; the MAME-derived CHD, CD-ROM,
+  Huffman, bitstream, FLAC and A/V Huffman sources are Copyright Aaron Giles, under the
+  BSD-3-Clause text at the top of `third_party/libchdr/src/libchdr_chd.c`. The CHD reader,
+  pinned at
   `47d794151b2b64f6aba60304e6480f4f5a2bc24b`, with the codecs it carries: miniz 3.1.2
   (`MIT`), the Zstandard 1.5.7 single-file decompressor (`BSD-3-Clause`, elected from
   upstream's `BSD-3-Clause OR GPL-2.0-only`), the LZMA SDK decoder (public domain) and
   the dr_flac v0.13.4 development snapshot libchdr carries at that pin (the Unlicense, elected from its Unlicense or `MIT-0` choice). Every file
-  keeps its upstream bytes apart from LF line endings and two small code fixes in
+  keeps its upstream bytes apart from LF line endings, one added final newline and two small code fixes in
   `src/libchdr_codec_flac.c` and `src/libchdr_huffman.c`, all recorded as LOCAL DELTA in
   `third_party/libchdr/PROVENANCE.md`; the
   licence texts and the pinned manifest are under `third_party/libchdr/`. It is compiled into the native player, which uses it only
   to expand a CHD disc image into a plain `.iso` when the image is added; it is not in the
   runtime.
+- **xBRZ 1.9** — `GPL-3.0-only`, Copyright (C) Zenju, with the author's linking exception for
+  MAME, FreeFileSync, Snes9x and ePSXe kept unchanged. The pixel-art scaler is a C translation
+  of the upstream C++ release (LOCAL DELTA), pinned to release 1.9 (`xBRZ_1.9.zip`, 2026-01-24;
+  zip SHA-256 `b2dff73b3abd24a18a7cde78d5ff5ed8f0922296dce6ed734dce2264cd0a0fc9`). The licence,
+  the manifest and the SHA-256 values are under `third_party/xbrz/`. It is statically linked
+  into the runtime, where the Vulkan GE renderer's Ace Mode texture scaling uses it; it is not
+  in `nk_decrypt`.
 - **Monocypher 4.0.3 Ed25519 signature check** — upstream offers `BSD-2-Clause OR CC0-1.0`;
   the project uses it under CC0-1.0. Four byte-identical source files, the complete upstream
   `LICENCE.md` and the pinned manifest are under `third_party/monocypher/`. It is compiled into
@@ -114,8 +127,10 @@ We aim to respond promptly and will remove material where appropriate.
 - **FFmpeg n4.4 H.264 decoder subset** — LGPL-2.1-or-later, the same pin as the ATRAC3+
   subset. The imported libavcodec/libavutil files (generic C only, no `--enable-gpl` or
   `--enable-nonfree` component), their license text and the byte-exact manifest are under
-  `src/rt/h264_ffmpeg_sub/`; the project API layer and configuration stand-ins there are
-  separately identified in the ledger. It is the default H.264 decoder where no platform decoder
+  `src/rt/h264_ffmpeg_sub/`. One imported file, `libavcodec/h264_slice.c`, is modified: it
+  carries two upstream FFmpeg `release/4.4` fixes as a dated LOCAL DELTA, recorded in the
+  file header and the manifest; the project API layer and configuration stand-ins there are
+  identified in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`. It is the default H.264 decoder where no platform decoder
   exists (`H264_FFMPEG=1`, the default off Windows); Windows uses Media Foundation, an operating
   system component, and links none of it. Build notes are in `docs/PLATFORM_PORTABILITY.md`.
 - **SDL3** — zlib; used by the optional host renderer/audio integration. The
@@ -241,7 +256,7 @@ license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
 | `SDL3.dll` | Zlib | `third_party/licenses/sdl3/LICENSE.txt` |
 | `SDL3_ttf.dll` | Zlib | `third_party/licenses/SDL3_ttf.txt` |
 | `libfreetype-6.dll` | FTL | `third_party/licenses/FreeType-FTL.txt` |
-| `libharfbuzz-0.dll` | MIT | `third_party/licenses/HarfBuzz.txt` |
+| `libharfbuzz-0.dll` | MIT-Modern-Variant | `third_party/licenses/HarfBuzz.txt` |
 | `libgraphite2.dll` | MIT (chosen) | `third_party/licenses/Graphite2.txt` |
 | `libpng16-16.dll` | libpng-2.0 | `third_party/licenses/libpng.txt` |
 | `zlib1.dll` | Zlib | `third_party/licenses/zlib.txt` |
@@ -274,7 +289,7 @@ The FFmpeg ATRAC3 and ATRAC3+ subsets and, in builds with `H264_FFMPEG=1`, the F
 subset (LGPL-2.1-or-later) are statically linked. The whole
 program is distributed under the GNU GPL version 3 (the project's own files are
 GPL-3.0-or-later; the player and `nk_decrypt` also link the GPL-3.0-only decryption files
-listed above) with its complete corresponding source, and `SOURCE.txt` names the exact repository commit or tag of each
+listed above, and the player links the GPL-3.0-only xBRZ scaler) with its complete corresponding source, and `SOURCE.txt` names the exact repository commit or tag of each
 package, which is what lets a user modify and relink it (issue #421).
 
 ## Public-safe exclusions

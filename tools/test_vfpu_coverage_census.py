@@ -427,6 +427,22 @@ class VfpuCoverageCensusTests(unittest.TestCase):
         self.assertNotIn("PSP-A3-14", ids)
         self.assertIn("PSP-A3-14", self.census["hardware_oracle_boundary"]["context_only_not_inherited"])
 
+    def test_formal_manifest_vfpu_ids_are_the_measured_manifest_rows(self):
+        from verification_ledger import VFPU_MEASURED_SELFTESTS
+
+        manifest = json.loads((TOOLS / "psp_oracle" / "manifest.json").read_text(encoding="utf-8"))
+        expected = sorted(
+            test["id"] for test in manifest["tests"]
+            if test["id"].startswith("PSP-VFPU-") and test["hardware_evidence"] == "MEASURED"
+        )
+        boundary = self.census["hardware_oracle_boundary"]
+        self.assertTrue(expected)
+        self.assertEqual(boundary["formal_manifest_vfpu_ids"], expected)
+        # Every oracle row a measured selftest cites is one of them.
+        cited = {entry["oracle_id"] for entry in VFPU_MEASURED_SELFTESTS.values()}
+        self.assertLessEqual(cited, set(expected))
+        self.assertNotIn("has no VFPU id", boundary["rule"])
+
     def test_encounter_input_accepts_only_words_and_counts(self):
         with tempfile.TemporaryDirectory(prefix="vfpu_encounter_") as tmp:
             path = Path(tmp) / "words.json"
@@ -508,6 +524,73 @@ class VfpuCoverageCensusTests(unittest.TestCase):
         signatures = {signature for _, _, signature in cases}
         for relation in ("d=s", "d~s", "d|s", "d=t", "d~t", "s=t", "s~t"):
             self.assertTrue(any(relation in signature for signature in signatures), relation)
+
+    def test_sweep_words_is_built_once_for_the_whole_census(self):
+        # _differential_tests looks every census record up in sweep_words(); the set is
+        # built once, not once per record.
+        from unittest import mock
+
+        import vfpu_overlap_diff_gen as gen
+
+        calls = []
+
+        def fake_cases():
+            calls.append(1)
+            return ("form",), ((0x60000000, 0, "as-encoded"),)
+
+        clear = getattr(gen.sweep_words, "cache_clear", lambda: None)
+        clear()
+        try:
+            with mock.patch.object(gen, "build_sweep_cases", fake_cases):
+                for _ in range(3):
+                    self.assertEqual(census.sweep_words(), frozenset({0x60000000}))
+        finally:
+            clear()
+        self.assertEqual(len(calls), 1)
+
+    def test_sweep_header_emits_each_case_body_once(self):
+        from unittest import mock
+
+        import vfpu_overlap_diff_gen as gen
+
+        forms, cases = gen.build_sweep_cases()
+        real = gen._direct_body
+        calls = []
+
+        def counting(word):
+            calls.append(word)
+            return real(word)
+
+        with mock.patch.object(gen, "_direct_body", counting):
+            lines = gen._sweep_lines(forms, cases)
+        self.assertEqual(len(calls), len(cases))
+        self.assertIn(f"#define SWEEP_NCASES {len(cases)}", lines)
+
+    def test_overlap_word_builders_keep_their_encodings(self):
+        # The overlap generator builds its words with vfpu_synth_gen's encoders.
+        import vfpu_overlap_diff_gen as gen
+
+        self.assertEqual(gen._bin_word(0x19, 4, 3, 0x20, 0x20, 0x00), 0x6600A020)
+        self.assertEqual(gen._bin_word(0x1B, 0, 4, 5, 0x00, 0x01), 0x6C018085)
+        self.assertEqual(gen._vv2_word(28, 1, 0x40, 0x00), 0xD01C0040)
+        self.assertEqual(gen._matrix1_word(1, 3, 0x20, 0x20), 0xF381A020)
+        self.assertEqual(gen.census_gap_size(0xF3A1800F), 3)
+        self.assertEqual(gen.census_gap_size(0x6C01818F), 4)
+
+    def test_boundary_dispositions_drive_every_boundary_site(self):
+        # A disposition added to BOUNDARY_DISPOSITIONS reaches the evidence tier, not only
+        # the route gate; the refused subset is the one verification_ledger uses.
+        from unittest import mock
+
+        import verification_ledger
+
+        widened = census.BOUNDARY_DISPOSITIONS | {"synthetic-new-boundary"}
+        with mock.patch.object(census, "BOUNDARY_DISPOSITIONS", widened):
+            self.assertEqual(census._evidence_tier("synthetic-new-boundary", ["x"], []), "U")
+            self.assertEqual(census._semantic_verification("synthetic-new-boundary", ["x"], []),
+                             "not-applicable")
+        self.assertLessEqual(census.REFUSED_DISPOSITIONS, census.BOUNDARY_DISPOSITIONS)
+        self.assertIs(verification_ledger.VFPU_REFUSED_DISPOSITIONS, census.REFUSED_DISPOSITIONS)
 
     def test_alias_signature_names_each_overlap(self):
         import vfpu_overlap_diff_gen as gen
@@ -703,6 +786,20 @@ class VfpuRouteCensusTests(unittest.TestCase):
             report = census.build_route_report(Path("route.elf"), ["--lle-cpu"])
         self.assertEqual(seen[-1], True)
         self.assertTrue(report["classification_lle_cpu"])
+        # codegen's --lle-import-seam implies the LLE CPU, so the route it scanned
+        # was emitted with it and is classified with it.
+        seen.clear()
+        with mock.patch.object(census, "_route_words", words), \
+                mock.patch.object(census, "_classify_aot", spy):
+            report = census.build_route_report(Path("route.elf"), ["--lle-import-seam"])
+        self.assertEqual(seen, [True])
+        self.assertTrue(report["classification_lle_cpu"])
+        seen.clear()
+        with mock.patch.object(census, "_route_words", words), \
+                mock.patch.object(census, "_classify_aot", spy):
+            report = census.build_route_report(Path("route.elf"), ["--static-verify"])
+        self.assertEqual(seen, [False])
+        self.assertFalse(report["classification_lle_cpu"])
 
     def test_route_census_rejects_non_route_input(self):
         with tempfile.TemporaryDirectory(prefix="vfpu_route_bad_") as tmp:

@@ -19,11 +19,15 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+TOOLS = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(TOOLS)
+sys.path.insert(0, TOOLS)
 
 import analyze
 from makefile_text import read_makefile
@@ -184,9 +188,12 @@ class ImportStubNameTest(unittest.TestCase):
         corpus = json.loads(gen_nidnames.CORPUS.read_text(encoding="utf-8"))
         names = gen_nidnames.nid_names(corpus)
         cls.nids = [gen_nidnames.nid_of(name) for name in cls.NAMED] + [cls.UNNAMED_NID]
-        assert all(names.get(nid) == name for nid, name in zip(cls.nids, cls.NAMED, strict=False))
-        assert cls.UNNAMED_NID not in names
+        if not all(names.get(nid) == name for nid, name in zip(cls.nids, cls.NAMED, strict=False)):
+            raise AssertionError("the import name corpus does not match its named fixture NIDs")
+        if cls.UNNAMED_NID in names:
+            raise AssertionError("the synthetic unnamed NID unexpectedly appears in the corpus")
         cls._tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls._tmp.cleanup)
         data, cls.stubs = import_fixtures.build_text_stub_run_elf(nids=cls.nids)
         cls.elf = os.path.join(cls._tmp.name, "stubs.elf")
         with open(cls.elf, "wb") as fh:
@@ -203,16 +210,13 @@ class ImportStubNameTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
                 rc = codegen.main(["codegen.py", cls.elf, os.path.join(out_dir, "out.c"),
                                    "--base=%08x" % BASE, *extra])
-            assert rc == 0, stderr.getvalue()
+            if rc != 0:
+                raise AssertionError(stderr.getvalue())
             files = {}
             for name in sorted(os.listdir(out_dir)):
                 with open(os.path.join(out_dir, name), encoding="ascii") as fh:
                     files[name] = fh.read()
             cls.runs[label] = (files, stderr.getvalue())
-
-    @classmethod
-    def tearDownClass(cls):
-        cls._tmp.cleanup()
 
     def _chunks(self, label):
         files = self.runs[label][0]
@@ -268,6 +272,41 @@ class ImportStubNameTest(unittest.TestCase):
         self.assertIn("$(NAME_IMPORTS_ARG)", rule.group(2).split())
         entries = re.search(r"^export NK_CODEGEN_PROFILE_ENTRIES := ([^\n]*)", makefile, re.M)
         self.assertIn("$(NAME_IMPORTS_PROFILE_LINE)", entries.group(1))
+
+
+class ImportStubNameSetupTests(unittest.TestCase):
+    def test_setup_guards_survive_optimized_python(self):
+        script = "\n".join((
+            "import sys",
+            f"sys.path.insert(0, {os.fspath(TOOLS)!r})",
+            "import gen_nidnames",
+            "import test_analyze_import_stub_entries as tests",
+            "gen_nidnames.nid_names = lambda _corpus: {}",
+            "tests.ImportStubNameTest.setUpClass()",
+        ))
+        result = subprocess.run([sys.executable, "-O", "-c", script],
+                                cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertNotEqual(result.returncode, 0,
+                            "optimized setup accepted a mismatched NID-name fixture")
+        self.assertIn("AssertionError", result.stderr)
+
+    def test_setup_failure_cleans_its_temporary_directory(self):
+        created = []
+        real_temporary_directory = tempfile.TemporaryDirectory
+
+        def tracked_directory(*args, **kwargs):
+            temporary = real_temporary_directory(*args, **kwargs)
+            created.append(temporary.name)
+            return temporary
+
+        with mock.patch.object(tempfile, "TemporaryDirectory", side_effect=tracked_directory), \
+                mock.patch.object(codegen, "main", return_value=1):
+            with self.assertRaises(AssertionError):
+                ImportStubNameTest.setUpClass()
+            ImportStubNameTest.doClassCleanups()
+
+        self.assertEqual(len(created), 1)
+        self.assertFalse(os.path.exists(created[0]))
 
 
 if __name__ == "__main__":

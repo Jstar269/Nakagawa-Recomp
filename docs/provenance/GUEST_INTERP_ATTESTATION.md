@@ -30,7 +30,9 @@ reproduced here. The maintainer resolution path is handed over separately.
 
 This is the strongest shape a public entry can take: a named record, an
 explicit tier, a specific upstream attribution. It is exactly what a
-machine-generated, fully-backed entry looks like.
+machine-generated, fully-backed entry looks like. The claims-only public ledger
+(#1785) now emits `upstream_attribution: null` for `project_authored_attested`
+entries; the block above is the pre-#1785 shape, kept as history.
 
 ## What the trusted authority holds
 
