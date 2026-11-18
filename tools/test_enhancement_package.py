@@ -6973,6 +6973,29 @@ class TestAcePartsLoad(_AcePartsFixture):
     """ace_parts.load and its vblank_wait_skip transform (ENHANCEMENT_CONTRACT.md sections 9.8 and
     11.3.10)."""
 
+    def test_llvm_keeps_update_boundary_function_in_c(self) -> None:
+        pkg = self.package()
+        # Keep the other executable rewrite outside the boundary function so that the
+        # manifest proves update_boundary itself caused the LLVM fallback.
+        pkg["sites"][0].update({
+            "function": "synth_loader",
+            "insn_offset": 4,
+            "stock_digest": self._digest("synth_loader", 4),
+            "stock_values": [1],
+        })
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            rc, output, files = self._codegen(
+                Path(tmp_dir), "llvm_boundary", pkg, self.symbols(),
+                extra=("--backend=llvm",),
+            )
+        self.assertEqual(rc, 0, output)
+        c_output = "\n".join(text for name, text in files.items() if name.endswith(".c"))
+        self.assertEqual(c_output.count("nk_enhancement_updates++"), 1, output)
+        manifest = json.loads(files["out_llvm.json"])
+        self.assertIn(
+            {"address": f"0x{self.callee:08x}",
+             "reason": "enhancement-package update_boundary"}, manifest["fallbacks"])
+
     def test_a_code_hook_site_on_an_ace_part_site_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             rc, out, files = self._codegen_with_hook(Path(tmp_dir), 8, "SYNTH_WIDEN")

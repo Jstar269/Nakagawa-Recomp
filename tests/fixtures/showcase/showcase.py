@@ -424,7 +424,8 @@ def loadexec_smoke() -> None:
         raise ShowcaseError(f"LoadExec AOT package build failed (exit {result.returncode})")
     metadata = json.loads((package_dir / "package.json").read_text(encoding="utf-8"))
     executable = package_dir / metadata["executable"]["path"]
-    image = package_dir / f"{manifest['id']}_image.bin"
+    # The package names its image after its executable (the game name), not the manifest id.
+    image = package_dir / f"{executable.stem}_image.bin"
     module_root = package_dir / "modules"
     module_root.mkdir(parents=True, exist_ok=True)
     packaged_module = module_root / "loadexec_b.prx"
@@ -652,8 +653,8 @@ def _runtime_command(demo: dict[str, object], padscript: Path | None,
     package_dir = DEMO_ROOT / "packages" / disc_id
     meta = json.loads((package_dir / "package.json").read_text(encoding="utf-8"))
     manifest = json.loads((ROOT / str(demo["manifest"])).read_text(encoding="utf-8"))
-    image = package_dir / f"{str(demo['id'])}_image.bin"
     exe = package_dir / meta["executable"]["path"]
+    image = package_dir / f"{exe.stem}_image.bin"
     base = int(manifest["executable"]["base"])
     command = [str(exe), "--image", str(image), f"0x{base:08x}",
                meta["runtime"]["run_entry"], "none", "none", "--sched"]

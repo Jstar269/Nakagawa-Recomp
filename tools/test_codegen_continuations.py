@@ -736,10 +736,14 @@ class EntrySplitTests(unittest.TestCase):
         cli = codegen._command_line_parser().parse_args(["--region-split-threshold=19"])
         codegen._apply_options(cli, codegen._validated_options(cli), options)
         self.assertEqual(options.region_split_threshold, 19)
-        self.assertEqual(codegen.main(["codegen.py", "missing.elf", "out.c",
-                                       "--region-split-threshold=-1"]), 2)
-        self.assertEqual(codegen.main(["codegen.py", "missing.elf", "out.c",
-                                       "--region-split-threshold=many"]), 2)
+        for value in ("-1", "many"):
+            with self.subTest(value=value):
+                invalid = codegen._command_line_parser().parse_args(
+                    [f"--region-split-threshold={value}"])
+                with self.assertRaises(codegen._Refusal) as refused:
+                    codegen._validated_options(invalid)
+                self.assertEqual(refused.exception.status, 2)
+                self.assertIn("invalid --region-split-threshold value", refused.exception.message)
 
 
 def addiu(rt, rs, imm):
@@ -1035,7 +1039,37 @@ class StateResumeTests(unittest.TestCase):
     def test_default_output_has_no_resume_point(self):
         plain = "\n".join(codegen.emit_function(
             FakeElf(self.words()), 0x1000, self.RANGES, self.KNOWN))
-        self.assertEqual(self.emit(state_resume=False), plain)
+        expected = "\n".join((
+            "void f_00001000(CpuState *s) {",
+            "    SR_HOST_STACK_CHECK(0x00001000u);",
+            "    SR_YIELD(s, 0x00001000u);",
+            "    uint32_t _sp_entry = s->r[29]; (void)_sp_entry;",
+            "    sr_begin(s, 0x00001000u, 0x24100003u); s->r[16] = (0u + 0x00000003u); sr_end(s, 0u, 0);",
+            "  L_00001004: ;",
+            "    sr_begin(s, 0x00001004u, 0x0c000410u); s->r[31] = 0x0000100cu; sr_end(s, 0u, 0);",
+            "    sr_begin(s, 0x00001008u, 0x24420001u); s->r[2] = (s->r[2] + 0x00000001u); sr_end(s, 0u, 0);",
+            "    if (sr_aot_return_boundary_begin(s, 0x0000100cu, 0x00001004u, 1u)) return; "
+            "f_00001040(s); SR_TAIL_DRAIN(s); if (sr_aot_return_boundary_end(s)) return;",
+            "    sr_begin(s, 0x0000100cu, 0x2610ffffu); s->r[16] = (s->r[16] + 0xffffffffu); sr_end(s, 0u, 0);",
+            "    { uint32_t _c = (s->r[16] != 0u);",
+            "      sr_begin(s, 0x00001010u, 0x1600fffcu); sr_end(s, 0u, 0);",
+            "       sr_begin(s, 0x00001014u, 0x00000000u); (void)0; sr_end(s, 0u, 0);",
+            "      if (_c) { SR_YIELD(s, 0x00001010u); goto L_00001004; } }",
+            "    { uint32_t _c = ((int32_t)s->r[4] >= 0);",
+            "      sr_begin(s, 0x00001018u, 0x04910009u); s->r[31] = 0x00001020u; sr_end(s, 0u, 0);",
+            "       sr_begin(s, 0x0000101cu, 0x00000000u); (void)0; sr_end(s, 0u, 0);",
+            "      if (_c) { if (sr_aot_return_boundary_begin(s, 0x00001020u, 0x00001018u, 1u)) return; "
+            "f_00001040(s); SR_TAIL_DRAIN(s); if (sr_aot_return_boundary_end(s)) return; } }",
+            "    { uint32_t _sr_return_target = s->r[31];",
+            "      SR_AOT_RETURN_CAPTURE(s, _sr_return_target);",
+            "      sr_begin(s, 0x00001020u, 0x03e00008u); sr_end(s, 0u, 0);",
+            "    sr_begin(s, 0x00001024u, 0x00000000u); (void)0; sr_end(s, 0u, 0);",
+            "      s->r[29] = _sp_entry; return; }",
+            "    s->r[29] = _sp_entry; /* o32 ABI: sp is callee-saved; balance on fall-through end (F3E) */",
+            "}",
+        ))
+        expected += "\n"
+        self.assertEqual(plain, expected)
         for token in ("_nk_resume", "_nk_enter", "SR_STATE_ENTRY", "SR_YIELD_PARK",
                       "sr_aot_return_boundary_begin_at", "sr_resume_"):
             self.assertNotIn(token, plain)
