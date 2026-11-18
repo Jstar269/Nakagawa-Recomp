@@ -350,12 +350,21 @@ static void test_vram_mirror_bulk_copy(void) {
     CHECK(memcmp(vram + window, expect_vram, sizeof expect_vram) == 0,
           "overlapping base-to-mirror memmove must read every source byte first");
 
-    /* Arena bounds still fail closed without touching memory. */
-    memset(vram, 0, VRAM_BYTES);
+    /* Arena bounds still fail closed without touching memory. The source holds a
+     * nonzero pattern and the in-arena destination bytes a different sentinel, so a
+     * copy of any byte before the refusal shows. */
+    memset(vram, 0xA5, VRAM_BYTES);
+    memset(ram + 0x03fff800u, 0xEE, 0x800u);
     g_oor_calls = 0;
     sr_native_memmove(0x0bfff800u, 0x04200000u, size, 0u);
     CHECK(g_oor_calls == 2, "a destination past the arena end must be refused");
-    CHECK(ram[0x03fff800u] == 0u, "a refused copy must not store its first byte");
+    {
+        uint32_t stored = 0;
+        for (uint32_t p = 0x03fff800u; p < 0x04000000u; p++) if (ram[p] != 0xEEu) stored++;
+        CHECK(stored == 0u, "a refused copy must not store a byte (%u changed)", stored);
+    }
+    memset(ram + 0x03fff800u, 0, 0x800u);
+    memset(vram, 0, VRAM_BYTES);
 }
 
 /* ---- Movie-frame write primitives through the swizzled mirrors (#1049) ------------
@@ -549,19 +558,33 @@ static void fuzz_differential(void) {
     uint32_t x = 0x12345678u;
     const int iters = 400000;
     int span_mismatch = 0, add_mismatch = 0, mul_mismatch = 0;
+    int edge_accepted = 0, edge_rejected = 0, mul_fits = 0, mul_overflows = 0;
     for (int i = 0; i < iters; i++) {
         x = x * 1103515245u + 12345u;
         uint32_t a = x;
         x = x * 1103515245u + 12345u;
         uint32_t s = x;
-        /* Bias a chunk of samples toward the boundary and toward huge sizes. */
-        if ((i & 7) == 0) a = 0x08000000u + (x & 0x07ffffffu);
-        if ((i & 3) == 0) s = 0xFFFFFF00u + (x & 0xFFu);
+        /* Disjoint bias classes, so no class cancels another: a base within 4 KiB of
+         * the arena end with a small size (both sides of the end), a RAM base with a
+         * moderate size (mostly accepted), a huge size, operands whose product fits,
+         * and operands whose product straddles 2^32. The rest stay full-range. */
+        switch (i & 7) {
+        case 0: a = 0x0c000000u - (x & 0xFFFu); s = 1u + ((x >> 12) & 0x1FFFu); break;
+        case 1: a = 0x08000000u + (x & 0x03ffffffu); s = 1u + ((x >> 8) & 0xFFFFu); break;
+        case 2: s = 0xFFFFFF00u + (x & 0xFFu); break;
+        case 3: a = x & 0xFFFFu; s = (x >> 16) & 0xFFFFu; break;
+        case 4: a = 0x10000u + (x & 0xFFu); s = 0xFF00u + ((x >> 8) & 0xFFu); break;
+        default: break;
+        }
 
         if (s != 0u) {
             int got = sr_inrange_n(a, s);
             int want = ref_span_ok(a, s);
             if (got != want) span_mismatch++;
+            if ((i & 7) == 0) {
+                if (want) edge_accepted++;
+                else edge_rejected++;
+            }
             int gotr = sr_guest_span_readable(a, s);
             int span_want = want && !sr_guest_span_hits_swizzled_vram_mirror(a, s);
             if (gotr != span_want) span_mismatch++;
@@ -577,7 +600,15 @@ static void fuzz_differential(void) {
         int mul_ref = ((uint64_t)a * (uint64_t)s) <= 0xFFFFFFFFULL;
         if (mul_ok != mul_ref) mul_mismatch++;
         if (mul_ok && out != (uint32_t)(a * s)) mul_mismatch++;
+        if (mul_ref) mul_fits++;
+        else mul_overflows++;
     }
+    /* The fuzz must reach both sides of the arena end and both sides of 2^32, or its
+     * agreement above says nothing about the accept and success paths. */
+    CHECK(edge_accepted > 1000 && edge_rejected > 1000,
+          "fuzz reached the arena end %d accepted / %d rejected time(s)", edge_accepted, edge_rejected);
+    CHECK(mul_fits > 1000 && mul_overflows > 1000,
+          "fuzz reached a fitting product %d time(s), an overflow %d time(s)", mul_fits, mul_overflows);
     CHECK(span_mismatch == 0, "span check disagreed with 64-bit reference %d time(s)", span_mismatch);
     CHECK(add_mismatch == 0, "checked add disagreed with reference %d time(s)", add_mismatch);
     CHECK(mul_mismatch == 0, "checked mul disagreed with reference %d time(s)", mul_mismatch);

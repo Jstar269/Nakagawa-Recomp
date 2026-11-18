@@ -161,6 +161,9 @@ int main(int argc, char **argv) {
     unsigned ssaa_dim = 0;
     const char *glyphs_key = "on";
     const char *soft_mode = NULL;
+    /* Only `--ace LINE` names an Ace line here: one inherited from the shell (the player's
+     * SR_ACE) must not change the configuration a cell expects. */
+    if (!set_env("SR_ACE", "unset")) return 2;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--soft-shadow") == 0) {
             if (i + 1 >= argc) {
@@ -217,7 +220,13 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "gpu coherence selftest: %s needs a number\n", argv[i]);
                 return 2;
             }
-            if (strcmp(argv[i], "--ssaa") == 0) ssaa_arg = (int)v;
+            if (strcmp(argv[i], "--ssaa") == 0) {
+                if (v != 0u && v != 2u && v != 4u) {
+                    fprintf(stderr, "gpu coherence selftest: --ssaa takes 2 or 4\n");
+                    return 2;
+                }
+                ssaa_arg = (int)v;
+            }
             else if (strcmp(argv[i], "--ssaa-budget-mb") == 0) ssaa_budget_mb = v;
             else if (strcmp(argv[i], "--ssaa-max-dim") == 0) ssaa_dim = (unsigned)v;
             else ssaa_expect = (int)v;
@@ -354,11 +363,19 @@ int main(int argc, char **argv) {
 #endif
 
     gegpu_selftest_ssaa_limits(ssaa_budget_mb << 20, ssaa_dim, ssaa_expect);
-    if (!sdl3vk_init("Nakagawa GPU coherence selftest") || !gegpu_init()) {
+    if (!sdl3vk_init("Nakagawa GPU coherence selftest")) {
         fprintf(stderr, "gpu coherence selftest: SKIP (Vulkan initialization unavailable)\n");
         sdl3vk_shutdown();
         free(arena);
         return 77;
+    }
+    /* Vulkan is present from here on: a renderer that cannot set itself up (its buffers,
+     * pipelines or Ace Mode resources) is the project's failure, not an environment skip. */
+    if (!gegpu_init()) {
+        fprintf(stderr, "gpu coherence selftest: FAIL gegpu_init failed with Vulkan present\n");
+        sdl3vk_shutdown();
+        free(arena);
+        return 1;
     }
 
     int ok;
