@@ -1288,6 +1288,14 @@ bool package_builder_bootstrap_python_start(
         !python_item->filename[0] || strchr(python_item->filename, '/') ||
         strchr(python_item->filename, '\\') || strcmp(python_item->filename, ".") == 0 ||
         strcmp(python_item->filename, "..") == 0) return false;
+    /* The session belongs to its worker until the worker is joined: one still running
+       keeps writing into it and into python.pending, so a second install is refused
+       rather than started over it. One that has finished is joined here, so its handle
+       is not lost. */
+    if (session->thread_handle) {
+        if (InterlockedCompareExchange((volatile LONG *)&session->done, 0, 0) == 0) return false;
+        package_builder_bootstrap_python_close(session);
+    }
     memset(session, 0, sizeof(*session));
     session->item = *python_item;
     int n = snprintf(session->prerequisites_root, sizeof(session->prerequisites_root),
@@ -1554,10 +1562,13 @@ bool package_builder_parse_progress_line(
         return true;
     }
     if (event_name && strcmp(event_name, "install-complete") == 0) {
-        snprintf(out_event->stage, sizeof(out_event->stage), "package");
+        /* The end of the build tools' download, which comes before any build: it is no
+           package PASS, so a session that ran the fetch is never taken for a finished
+           package build (prerequisite_install_complete carries it instead). */
+        snprintf(out_event->stage, sizeof(out_event->stage), "preflight");
         snprintf(out_event->status, sizeof(out_event->status), "PASS");
         snprintf(out_event->message, sizeof(out_event->message), "Build tools installed.");
-        out_event->stage_enum = PACKAGE_BUILD_STAGE_PACKAGE;
+        out_event->stage_enum = PACKAGE_BUILD_STAGE_PREFLIGHT;
         out_event->status_enum = PACKAGE_PROGRESS_STATUS_PASS;
         out_event->install_complete = true;
         nk_json_free(root);
@@ -2714,6 +2725,7 @@ void package_builder_poll(PackageBuildSession *session, uint64_t current_time_ms
                records the title's input identity), so a failed exit after it is a failed
                build: complete means the PASS line and a clean exit. */
             session->is_complete = false;
+            session->prerequisite_install_complete = false;
             session->is_failed = true;
             if (session->current_stage != PACKAGE_BUILD_STAGE_FAILED) {
                 session->current_stage = PACKAGE_BUILD_STAGE_FAILED;
@@ -2743,10 +2755,12 @@ void package_builder_poll(PackageBuildSession *session, uint64_t current_time_ms
                              "The build stopped with exit code %d. Use Copy details to see why, then try again.", session->exit_code);
                 }
             }
-        } else if (!session->is_complete && !session->is_failed) {
+        } else if (!session->is_complete && !session->prerequisite_install_complete &&
+                   !session->is_failed) {
             /* A clean exit is a result only when the child reported the package
-             * PASS. Without it nothing was verified, so the session ends here
-             * as a failure instead of waiting in the building state forever. */
+             * PASS, or the build tools' install-complete. Without it nothing was
+             * verified, so the session ends here as a failure instead of waiting
+             * in the building state forever. */
             session->is_failed = true;
             session->current_stage = PACKAGE_BUILD_STAGE_FAILED;
             safe_str_copy(session->failure_boundary, sizeof(session->failure_boundary),

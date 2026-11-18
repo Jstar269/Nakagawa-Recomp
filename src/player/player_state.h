@@ -814,6 +814,9 @@ typedef struct {
     bool scanned;
     /* main.c runs a scan: at start, after a library change, after the queue. */
     bool scan_requested;
+    /* A scan began and its result is not in yet: its worker reads the packages in the
+       user data, so a factory reset waits for it. */
+    bool scan_running;
     /* This player's own identity, from its source tree; read once a session. */
     bool identity_known;
     NkPackageBuildIdentity identity;

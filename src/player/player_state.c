@@ -7360,14 +7360,18 @@ size_t player_app_factory_reset_folders(const PlayerApp *app, char out[][NK_MAX_
 
 bool player_app_factory_reset(PlayerApp *app, const char *stamp) {
     if (!app || !stamp || !stamp[0]) return false;
+    /* A problem report reads and writes in the user data, and a package age scan reads
+       the packages there: either would run on into the moved or the fresh folders. */
     if (app->is_game_running || app->launch_pending || app->build_session.is_building ||
         app->prerequisite_job_started || app->prerequisite_fetcher_started ||
         app->update.phase == PLAYER_UPDATE_CHECKING ||
         app->update.phase == PLAYER_UPDATE_DOWNLOADING ||
-        app->update.phase == PLAYER_UPDATE_INSTALLING) {
+        app->update.phase == PLAYER_UPDATE_INSTALLING ||
+        app->report.phase == PLAYER_REPORT_PREVIEWING ||
+        app->report.phase == PLAYER_REPORT_CREATING || app->outdated.scan_running) {
         player_app_set_error(app, "FACTORY_RESET_BUSY", "Factory reset has to wait",
-                             "Stop the game, and let any build, tool download or update "
-                             "finish, then reset again. Nothing was moved.",
+                             "Stop the game, and let any build, tool download, update or "
+                             "problem report finish, then reset again. Nothing was moved.",
                              "Back to settings", VIEW_SETTINGS);
         return false;
     }
@@ -11748,6 +11752,7 @@ bool player_app_outdated_scan_begin(PlayerApp *app, PlayerOutdatedScan *scan) {
                  game->iso_path);
         scan->count++;
     }
+    app->outdated.scan_running = true;
     return true;
 }
 
@@ -11774,6 +11779,7 @@ void player_outdated_scan_run(PlayerOutdatedScan *scan) {
 void player_app_outdated_scan_finish(PlayerApp *app, const PlayerOutdatedScan *scan,
                                      const char *player_version) {
     if (!app || !scan) return;
+    app->outdated.scan_running = false;
     if (player_version) {
         snprintf(app->outdated.player_version, sizeof(app->outdated.player_version), "%s",
                  player_version);

@@ -1638,6 +1638,105 @@ static void test_pass_then_failed_exit_is_not_complete(void) {
     (void)nk_remove_utf8(session.progress_file_path);
 }
 
+/* Audit 2026-11-17: the build tools' fetch runs on the build session, and its
+ * install-complete event was read as a package PASS. When the build that follows the
+ * install stopped in its own preflight (before it reset the session), the launcher's
+ * completion branch took the fetch for a finished build of the title. Failing before:
+ * is_complete was set by install-complete. The install is now its own result, and a
+ * clean exit after it is not a failure. The child is this test binary with
+ * --child-exit-zero. */
+static void test_install_complete_is_not_a_package_build(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: build tools install-complete is no package PASS\n");
+    assert(s_self_executable && s_self_executable[0]);
+    const char *child_argv[] = { s_self_executable, "--child-exit-zero", NULL };
+
+    PackageBuildSession session;
+    package_builder_init_session(&session, "TEST80008", "Build Tools Fixture");
+    int n = snprintf(session.progress_file_path, sizeof(session.progress_file_path),
+                     "%s%cinstall-complete.progress", native_test_get_root(),
+                     nk_platform_path_separator());
+    assert(n > 0 && (size_t)n < sizeof(session.progress_file_path));
+    FILE *progress = nk_fopen_utf8(session.progress_file_path, "wb");
+    assert(progress != NULL);
+    fputs("{\"event\": \"install-complete\"}\n", progress);
+    fclose(progress);
+    session.is_building = true;
+    session.start_time_ms = 0;
+    bool spawned = nk_platform_spawn_tool(s_self_executable, child_argv, NULL, NULL,
+                                          NULL, &session.process);
+    assert(spawned);
+
+    uint64_t deadline = route_now_ms() + 30000u;
+    while (session.is_building && route_now_ms() < deadline) {
+        package_builder_poll(&session, route_now_ms());
+        if (session.is_building) route_pause_ms(10);
+    }
+    assert(!session.is_building);
+    assert(session.exit_code == 0);
+    assert(session.prerequisite_install_complete);
+    assert(!session.is_complete);
+    assert(!session.is_failed);
+    assert(session.current_stage != PACKAGE_BUILD_STAGE_COMPLETE);
+    (void)nk_remove_utf8(session.progress_file_path);
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+static DWORD WINAPI wait_for_release(void *context) {
+    WaitForSingleObject((HANDLE)context, INFINITE);
+    return 0;
+}
+
+/* Audit 2026-11-17: a second Python install started on a session whose worker was still
+ * running zeroed the session under it, lost its handle, and set two workers on one
+ * python.pending folder. Failing before: start wiped the session and returned true. A
+ * running worker now refuses the start; a finished one is joined, then the start goes
+ * ahead. The item has no size, so the new worker stops at its manifest check offline. */
+static void test_bootstrap_start_refuses_a_running_worker(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: Python install refuses a session in use\n");
+    PackagePrerequisite item;
+    memset(&item, 0, sizeof(item));
+    snprintf(item.id, sizeof(item.id), "cpython-embed-amd64");
+    snprintf(item.filename, sizeof(item.filename), "python-embed.zip");
+
+    static PackageBootstrapSession session;
+    memset(&session, 0, sizeof(session));
+    HANDLE release = CreateEventA(NULL, TRUE, FALSE, NULL);
+    assert(release != NULL);
+    HANDLE worker = CreateThread(NULL, 0, wait_for_release, release, 0, NULL);
+    assert(worker != NULL);
+    session.thread_handle = worker;
+    snprintf(session.staging_path, sizeof(session.staging_path), "worker-in-use");
+
+    assert(!package_builder_bootstrap_python_start(&session, &item, native_test_get_root()));
+    assert(session.thread_handle == worker);
+    assert(strcmp(session.staging_path, "worker-in-use") == 0);
+
+    /* The worker finishes; the next start joins it and runs a new one. */
+    assert(SetEvent(release));
+    assert(WaitForSingleObject(worker, 30000) == WAIT_OBJECT_0);
+    session.done = 1;
+    assert(package_builder_bootstrap_python_start(&session, &item, native_test_get_root()));
+    /* (Windows may hand the closed handle's value to the new thread.) */
+    assert(session.thread_handle != NULL);
+
+    bool finished = false;
+    bool succeeded = true;
+    char code[48] = "";
+    char message[512] = "";
+    uint64_t deadline = route_now_ms() + 30000u;
+    while (!finished && route_now_ms() < deadline) {
+        assert(package_builder_bootstrap_python_poll(&session, NULL, &finished, &succeeded,
+                                                     code, sizeof(code),
+                                                     message, sizeof(message)));
+        if (!finished) route_pause_ms(10);
+    }
+    assert(finished && !succeeded);
+    package_builder_bootstrap_python_close(&session);
+    assert(session.thread_handle == NULL);
+    CloseHandle(release);
+}
+#endif
+
 /* Settings > Build speed reaches the build child: nk_cli.py gets --build-speed with the
  * setting's key, and a Background child runs below normal while Balanced keeps the
  * player's priority. */
@@ -1808,6 +1907,10 @@ int main(int argc, char *argv[]) {
     test_clean_exit_without_completion_is_a_failure();
     test_poll_ends_a_session_whose_child_was_already_reaped();
     test_pass_then_failed_exit_is_not_complete();
+    test_install_complete_is_not_a_package_build();
+#if defined(_WIN32) || defined(_WIN64)
+    test_bootstrap_start_refuses_a_running_worker();
+#endif
     test_build_speed_reaches_the_child();
     test_output_line_circular_buffer();
     test_python_candidate_validation();

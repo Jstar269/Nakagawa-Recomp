@@ -19071,6 +19071,33 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < 4u; ++i) assert(nk_platform_file_exists(marks[i]));
         reset->is_game_running = false;
 
+        /* Audit 2026-11-17: a problem report and a package age scan work in the user
+           data too. Failing before: the reset moved the folders out from under both. */
+        for (int phase = PLAYER_REPORT_PREVIEWING; phase <= PLAYER_REPORT_CREATING; ++phase) {
+            if (phase == PLAYER_REPORT_PREVIEWED) continue;
+            reset->report.phase = (PlayerReportPhase)phase;
+            memset(&reset->last_error, 0, sizeof(reset->last_error));
+            assert(!player_app_factory_reset(reset, "20261029-010203"));
+            assert(strcmp(reset->last_error.error_code, "FACTORY_RESET_BUSY") == 0);
+            assert(!reset->factory_reset_done);
+            for (size_t i = 0; i < 4u; ++i) assert(nk_platform_file_exists(marks[i]));
+        }
+        reset->report.phase = PLAYER_REPORT_IDLE;
+        {
+            PlayerOutdatedScan *age_scan = (PlayerOutdatedScan *)calloc(1, sizeof(*age_scan));
+            assert(age_scan != NULL);
+            reset->outdated.identity_known = true;
+            assert(player_app_outdated_scan_begin(reset, age_scan));
+            memset(&reset->last_error, 0, sizeof(reset->last_error));
+            assert(!player_app_factory_reset(reset, "20261029-010203"));
+            assert(strcmp(reset->last_error.error_code, "FACTORY_RESET_BUSY") == 0);
+            assert(!reset->factory_reset_done);
+            for (size_t i = 0; i < 4u; ++i) assert(nk_platform_file_exists(marks[i]));
+            player_app_outdated_scan_finish(reset, age_scan, "0.0.0-test");
+            assert(!reset->outdated.scan_running);
+            free(age_scan);
+        }
+
 #if defined(_WIN32) || defined(_WIN64)
         /* A file held open in the cache folder: that folder cannot move, and
            the folders moved before it are put back. */

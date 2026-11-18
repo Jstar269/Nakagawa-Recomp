@@ -384,7 +384,8 @@ typedef struct {
 /* Windows-only install of the pinned embedded CPython ("cpython-embed-amd64") into
  * <data_root>/prerequisites/python on a worker thread: it downloads and verifies the
  * archive, expands it into python.pending, then moves it into place. start returns
- * false on bad arguments, on other platforms, or when the thread cannot start.
+ * false on bad arguments, on other platforms, while the session's previous worker is
+ * still running (a finished one is joined first), or when the thread cannot start.
  * poll reports progress and, once `finished`, the outcome with its error code and
  * message; it returns false only for a NULL session or an unsupported platform.
  * cancel asks the worker to stop; close waits for it and releases its handle. */

@@ -4189,8 +4189,7 @@ static void player_update_prerequisite_operation(PlayerApp *app) {
                     app->build_session.failure_code[0] ? app->build_session.failure_code : "PREREQUISITE_INSTALL_FAILED",
                     app->build_session.failure_boundary[0] ? app->build_session.failure_boundary :
                         "The verified build prerequisites could not be installed. Check the error and retry.");
-            } else if (app->build_session.is_complete &&
-                       app->build_session.prerequisite_install_complete) {
+            } else if (app->build_session.prerequisite_install_complete) {
                 player_app_prereq_complete(app);
             } else {
                 player_app_prereq_fail(app, "PREREQUISITE_INSTALL_FAILED",
@@ -6001,13 +6000,15 @@ static void player_frame_render(PlayerRun *run) {
         /* A finished staging or PSN job stays allocated until the next one. */
         if (cover_art_writing ||
             run->launch_job || run->package_status_job || s_update_job || run->disc_check_job ||
+            run->outdated_scan_job || s_report_job ||
             (run->staging_job && !run->staging_job->completion_handled) ||
             (run->psn_job && !run->psn_job->completion_handled)) {
             /* A worker may still have a file in the user data open. */
             player_app_set_error(app, "FACTORY_RESET_BUSY", "Factory reset has to wait",
                                  "Nakagawa Recomp is still checking or setting up a "
-                                 "game. Wait a moment, then reset again. Nothing was "
-                                 "moved.", "Back to settings", VIEW_SETTINGS);
+                                 "game, or writing a problem report. Wait a moment, "
+                                 "then reset again. Nothing was moved.",
+                                 "Back to settings", VIEW_SETTINGS);
         } else {
             char stamp[32];
             time_t now = time(NULL);
@@ -6061,7 +6062,9 @@ static int player_shutdown(PlayerRun *run) {
         player_capture_window_settings(app, run->window);
         player_app_save_settings(app, NULL);
     }
-    if (app->prerequisite_job_started) {
+    /* By its handle, not only the flag: a new consent card clears the flag while a
+       worker it no longer polls may still be running. */
+    if (app->prerequisite_job_started || app->bootstrap_session.thread_handle) {
         package_builder_bootstrap_python_cancel(&app->bootstrap_session);
         package_builder_bootstrap_python_close(&app->bootstrap_session);
         app->prerequisite_job_started = false;

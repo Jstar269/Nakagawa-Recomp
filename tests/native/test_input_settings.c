@@ -88,6 +88,14 @@ static void test_default_load(void) {
         input_settings_format_binding(&state, i, binding_str, sizeof(binding_str));
         assert(strlen(binding_str) > 0);
     }
+    /* Audit 2026-11-17: the stick's four directions have keys only. Failing before: their
+     * indices 15-18 read psp_buttons[15..18], past its 14 entries, and printed whatever
+     * lay there (the menu navigation bindings). */
+    for (int i = INPUT_CONTROL_STICK_UP; i <= INPUT_CONTROL_STICK_RIGHT; i++) {
+        char binding_str[128] = {0};
+        input_settings_format_binding(&state, i, binding_str, sizeof(binding_str));
+        assert(strcmp(binding_str, "None") == 0);
+    }
 
     printf("[INPUT_SETTINGS_TEST] Subtest 1 PASSED!\n");
 }
@@ -323,6 +331,23 @@ static void test_conflict_detection(void) {
     assert(!input_settings_is_control_conflicted(&state, INPUT_CONTROL_BTN_TRIANGLE));
     const char *summary = input_settings_get_conflict_summary(&state);
     assert(strstr(summary, "Square") != NULL && strstr(summary, "Home") != NULL);
+
+    /* Audit 2026-11-17: one control's first input as a later control's second input is a
+     * conflict too. Failing before: the pair (i's first, j's second) was never compared,
+     * so Select's input on Cross's second slot went unmarked. */
+    InputSettingsState crossed;
+    input_settings_init(&crossed);
+    const NkBindingSource select_input =
+        crossed.profile.psp_buttons[INPUT_CONTROL_BTN_SELECT].primary;
+    assert(select_input.type != NK_BINDING_NONE);
+    crossed.profile.psp_buttons[INPUT_CONTROL_BTN_CROSS].secondary = select_input;
+    input_settings_refresh_conflicts(&crossed);
+    assert(input_settings_get_conflict_count(&crossed) == 1);
+    assert(input_settings_is_control_conflicted(&crossed, INPUT_CONTROL_BTN_SELECT));
+    assert(input_settings_is_control_conflicted(&crossed, INPUT_CONTROL_BTN_CROSS));
+    assert(!input_settings_is_control_conflicted(&crossed, INPUT_CONTROL_BTN_CIRCLE));
+    summary = input_settings_get_conflict_summary(&crossed);
+    assert(strstr(summary, "Select") != NULL && strstr(summary, "Cross") != NULL);
 
     printf("[INPUT_SETTINGS_TEST] Subtest 4 PASSED!\n");
 }
@@ -1192,6 +1217,10 @@ static void test_hostile_profile_files(void) {
         if (i == 0 || i == 2) {
             assert(input_settings_save(&state, path) == NK_OK);
             assert(!state.has_save_diagnostic);
+            char aside[NK_MAX_PATH + 32];
+            snprintf(aside, sizeof(aside), "%s.unreadable.bak", path);
+            assert(nk_platform_file_exists(aside));
+            assert(remove(aside) == 0);
             InputSettingsState reloaded;
             assert(input_settings_load(&reloaded, path) == NK_OK);
             assert(!reloaded.has_load_diagnostic);
@@ -1234,6 +1263,93 @@ static void test_hostile_profile_files(void) {
 
     remove(path);
     printf("[INPUT_SETTINGS_TEST] Subtest 11 PASSED!\n");
+}
+
+/* -----------------------------------------------------------------------------
+ * 11b. A profile that does not load is kept, never written over (audit 2026-11-17)
+ * A JSON typo in a current-version file left the player on the defaults, and the first
+ * edit saved them over the file: the global mapping and every per-title one were gone,
+ * with no backup. Failing before: no .unreadable.bak existed after that save.
+ * -------------------------------------------------------------------------- */
+static size_t read_whole_file(const char *path, char *buf, size_t cap) {
+    FILE *f = fopen(path, "rb");
+    assert(f != NULL);
+    size_t n = fread(buf, 1, cap, f);
+    assert(fclose(f) == 0);
+    return n;
+}
+
+static void test_unreadable_profile_is_kept(void) {
+    printf("[INPUT_SETTINGS_TEST] Subtest 11b: an unreadable profile is kept before a save...\n");
+    const char *path = SR_SELFTEST_BUILD_ROOT "/test_unreadable_kept.json";
+    char aside[NK_MAX_PATH + 32];
+    snprintf(aside, sizeof(aside), "%s.unreadable.bak", path);
+    (void)remove(aside);
+    assert(nk_platform_mkdir_p(SR_SELFTEST_BUILD_ROOT));
+
+    /* A saved mapping of the user's, then its closing brace lost. */
+    InputSettingsState first;
+    input_settings_init(&first);
+    assert(input_settings_set_deadzone(&first, NK_PSP_AXIS_ANALOG_X, 12345));
+    assert(input_settings_save(&first, path) == NK_OK);
+    static char broken[65536];
+    size_t broken_len = read_whole_file(path, broken, sizeof(broken));
+    assert(broken_len > 2 && broken_len < sizeof(broken));
+    while (broken_len > 0 && broken[broken_len - 1] != '}') broken_len--;
+    assert(broken_len > 0);
+    broken_len--;
+    FILE *f = fopen(path, "wb");
+    assert(f != NULL);
+    assert(fwrite(broken, 1, broken_len, f) == broken_len);
+    assert(fclose(f) == 0);
+
+    /* The aside name is taken by a folder: the save is refused and the file stays. */
+    {
+        InputSettingsState blocked;
+        assert(input_settings_load(&blocked, path) != NK_OK);
+        assert(blocked.has_load_diagnostic && blocked.keep_unreadable);
+#if defined(_WIN32) || defined(_WIN64)
+        assert(CreateDirectoryA(aside, NULL) != 0);
+#else
+        assert(mkdir(aside, 0777) == 0);
+#endif
+        assert(input_settings_set_deadzone(&blocked, NK_PSP_AXIS_ANALOG_X, 2000));
+        assert(input_settings_save_if_dirty(&blocked) != NK_OK);
+        assert(blocked.has_save_diagnostic && blocked.unsaved);
+        assert(strstr(blocked.save_diagnostic, "unreadable.bak") != NULL);
+        static char after[65536];
+        assert(read_whole_file(path, after, sizeof(after)) == broken_len);
+        assert(memcmp(after, broken, broken_len) == 0);
+        assert(test_rmdir(aside) == 0);
+    }
+
+    /* The first edit's save moves the file aside, then writes the mapping. */
+    InputSettingsState state;
+    assert(input_settings_load(&state, path) != NK_OK);
+    assert(state.has_load_diagnostic && state.keep_unreadable);
+    assert(input_settings_set_deadzone(&state, NK_PSP_AXIS_ANALOG_X, 2000));
+    assert(input_settings_save_if_dirty(&state) == NK_OK);
+    assert(!state.has_save_diagnostic && !state.keep_unreadable);
+    assert(nk_platform_file_exists(aside));
+    static char kept[65536];
+    assert(read_whole_file(aside, kept, sizeof(kept)) == broken_len);
+    assert(memcmp(kept, broken, broken_len) == 0);
+    /* The Controls page says where it went. */
+    assert(state.has_load_diagnostic);
+    assert(strstr(state.load_diagnostic, "test_unreadable_kept.json.unreadable.bak") != NULL);
+
+    InputSettingsState reloaded;
+    assert(input_settings_load(&reloaded, path) == NK_OK && !reloaded.keep_unreadable);
+    assert(reloaded.profile.axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner == 2000);
+
+    /* Later saves write as usual and leave nothing more aside. */
+    assert(remove(aside) == 0);
+    assert(input_settings_set_deadzone(&state, NK_PSP_AXIS_ANALOG_X, 3000));
+    assert(input_settings_save_if_dirty(&state) == NK_OK);
+    assert(!nk_platform_file_exists(aside));
+
+    remove(path);
+    printf("[INPUT_SETTINGS_TEST] Subtest 11b PASSED!\n");
 }
 
 /* -----------------------------------------------------------------------------
@@ -1653,6 +1769,7 @@ int main(void) {
     test_guided_calibration_and_resting_extremes();
     test_per_title_scope_and_atomic_save();
     test_hostile_profile_files();
+    test_unreadable_profile_is_kept();
     test_keyboard_keys();
     test_stick_keys_and_saving();
     test_per_title_rebind_persists();
