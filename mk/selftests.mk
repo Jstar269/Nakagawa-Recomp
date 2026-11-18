@@ -516,14 +516,15 @@ native-core-tests: ge-tnl-census-selftest
 # patches at every factor, and a crack the check finds when the two are drawn at different
 # factors; line and point patches keep the PSP's division; the vertex cap lowers the factor
 # along its divisor chain, after the PSP's own cap; with the GE timing model on, factor F costs
-# the clocks of division d*F, not the PSP's d; the PATCH_TESS: exit line. It writes one scratch file under
+# the clocks of division d*F, not the PSP's d; a draw whose buffers cannot be allocated (malloc is
+# wrapped so one chosen call fails) is counted and draws nothing; the PATCH_TESS: exit line. It writes one scratch file under
 # BUILD_ROOT. No game input.
 GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
 
 ge-patch-tess-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
 		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm -Wl,--wrap=malloc
 	$(GE_PATCH_TESS_SELFTEST)
 
 native-core-tests: ge-patch-tess-selftest

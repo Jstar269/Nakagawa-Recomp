@@ -780,6 +780,7 @@ static int s_hw_floor = 0;
 static int s_stalled_signal = 0;
 static uint32_t s_stalled_signal_op = 0;
 uint32_t g_ge_signal_stack_limit = 32u;
+uint32_t g_ge_signal_handler = 0u;
 static char s_ge_signal_fault[160];
 /* Result of the last BOUNDINGBOX, read by BJUMP (ge_bounding_box_visible). A list starts
  * with "visible", so a BJUMP before any BOUNDINGBOX falls through; the PSP's value there is
@@ -6260,6 +6261,20 @@ int ge_patch_tess_init(int factor) {
     return factor;
 }
 
+/* A patch draw whose working buffers cannot be allocated draws nothing: each is counted
+ * (ge_patch_alloc_failures) and the first is named with what it asked for. */
+static unsigned long long s_patch_alloc_failed;
+
+unsigned long long ge_patch_alloc_failures(void) { return s_patch_alloc_failed; }
+
+static void ge_patch_alloc_failed(int spline, int nu, int nv, int tu, int tv, const char *what,
+                                  size_t bytes) {
+    if (s_patch_alloc_failed++ == 0)
+        fprintf(stderr, "GE: draw_patch (%s, %dx%d control points, division %dx%d) could not "
+                "allocate %zu bytes for its %s; the patch is not drawn [reported once, counted]\n",
+                spline ? "SPLINE" : "BEZIER", nu, nv, tu, tv, bytes, what);
+}
+
 static void draw_patch(uint32_t op,int spline){
     int nu=(int)(op&255),nv=(int)((op>>8)&255);
     VFmt vf;decode_vtype(ge.vtype,&vf);int idxfmt=(int)((ge.vtype>>11)&3),count=nu*nv;
@@ -6267,7 +6282,12 @@ static void draw_patch(uint32_t op,int spline){
     if(idxfmt)ge.iaddr+=(uint32_t)(count<<(idxfmt-1));else ge.vaddr+=(uint32_t)(count*vf.stride);
     if(nu<4||nv<4)return;
     ge_note_mip_draw();
-    ModelVtx *all=(ModelVtx*)malloc((size_t)count*sizeof(*all));if(!all)return;
+    ModelVtx *all=(ModelVtx*)malloc((size_t)count*sizeof(*all));
+    if(!all){
+        ge_patch_alloc_failed(spline,nu,nv,(int)(ge.patch_division&0x7F),(int)((ge.patch_division>>8)&0x7F),
+                              "control points",(size_t)count*sizeof(*all));
+        return;
+    }
     for(int i=0;i<count;i++)decode_model_vtx(prim_vtx_addr(vbase,ibase,idxfmt,i,vf.stride),&vf,&all[i]);
     int pu=spline?nu-3:(nu-1)/3,pv=spline?nv-3:(nv-1)/3;
     int tu=(int)(ge.patch_division&0x7F),tv=(int)((ge.patch_division>>8)&0x7F);if(tu<1)tu=1;if(tv<1)tv=1;
@@ -6286,14 +6306,18 @@ static void draw_patch(uint32_t op,int spline){
         if(f<s_patch_tess)s_patch_capped++;
         tu*=f;tv*=f;
     }
-    s_patch_quads+=(unsigned long long)pu*(unsigned long long)pv*(unsigned long long)tu*(unsigned long long)tv;
     /* Each grid vertex is evaluated once: the u weights of a patch's tu+1 columns are computed
      * once per patch, and two rows of evaluated vertices (the tile row's top and bottom edges)
      * are kept, so a tile reads its four corners from them. Every corner is evaluated with the
      * same weights and parameters a per-tile evaluation gave it, so the vertices are the same. */
     PatchWeight *wu=(PatchWeight*)malloc((size_t)(tu+1)*sizeof(*wu));
     ModelVtx *rows=(ModelVtx*)malloc((size_t)(tu+1)*2u*sizeof(*rows));
-    if(!wu||!rows){free(wu);free(rows);free(all);return;}
+    if(!wu||!rows){
+        if(!wu)ge_patch_alloc_failed(spline,nu,nv,tu,tv,"u weights",(size_t)(tu+1)*sizeof(*wu));
+        else ge_patch_alloc_failed(spline,nu,nv,tu,tv,"vertex rows",(size_t)(tu+1)*2u*sizeof(*rows));
+        free(wu);free(rows);free(all);return;
+    }
+    s_patch_quads+=(unsigned long long)pu*(unsigned long long)pv*(unsigned long long)tu*(unsigned long long)tv;
     const int gen=vf.tc_off<0;
     for(int py=0;py<pv;py++)for(int px=0;px<pu;px++){
         int base=(spline?py:py*3)*nu+(spline?px:px*3);
@@ -8582,12 +8606,15 @@ static int ge_signal_fail(const char *name, uint32_t signal_pc, const char *why)
  * A JUMP or CALL to an address that is not word-aligned or not readable, a CALL with the
  * list's stack full and a RET with it empty return -1 with the fault recorded: the GE
  * driver reports each, and stops the game on an SDK 2.00 or later title, so the list stops
- * at the SIGNAL. Every other behaviour also returns -1 with a named fault: the handler
- * behaviours HANDLER_SUSPEND, HANDLER_CONTINUE and HANDLER_PAUSE (0x01-0x03) call the
- * list's signal callback, and PAUSE parks the list until sceGeContinue, which is not
- * modelled; running on would skip the callback a title may wait on. No other behaviour is
- * modelled either (PSP-GE-SIGNAL-001, only CAPTURED, showed the undefined 0x00 and 0x04
- * leaving the GE busy). */
+ * at the SIGNAL. The handler behaviours HANDLER_SUSPEND and HANDLER_CONTINUE (0x01, 0x02)
+ * call the list's signal callback (g_ge_signal_handler), which is not modelled, so with one
+ * they return -1 with a named fault: running on would skip the callback a title may wait
+ * on. With none they return 0 after a once-per-behaviour note and the list runs on after the
+ * END, as PSP-GE-SIGNAL-001 b01-nocb and b02-nocb (CAPTURED, not accepted) showed both
+ * completing without a sceGeContinue. Every other behaviour also returns -1 with a named
+ * fault: HANDLER_PAUSE (0x03) parks the list until sceGeContinue, with or without a handler
+ * (b03-nocb), which is not modelled, and the undefined 0x00 and 0x04 left the GE busy in
+ * the same capture. */
 static int ge_signal_end(uint32_t signal_op, uint32_t end_data, uint32_t addr, uint32_t *next) {
     static const char *const names[] = {"JUMP", "CALL", "RET", "RJUMP", "RCALL", "OJUMP", "OCALL"};
     static const char *const handlers[] = {"HANDLER_SUSPEND", "HANDLER_CONTINUE", "HANDLER_PAUSE"};
@@ -8595,11 +8622,22 @@ static int ge_signal_end(uint32_t signal_op, uint32_t end_data, uint32_t addr, u
     const uint32_t signal_pc = addr - 8u;
     if (behavior < 0x10u || behavior > 0x16u) {
         const int handler = behavior >= 0x01u && behavior <= 0x03u;
+        if (behavior != 0x03u && handler && g_ge_signal_handler == 0u) {
+            static unsigned char reported[3];
+            if (!reported[behavior]) {
+                reported[behavior] = 1;
+                fprintf(stderr, "GE: SIGNAL %s at 0x%08" PRIx32 " with no signal callback runs on "
+                        "after its END (PSP-GE-SIGNAL-001 b0%u-nocb, CAPTURED, not accepted) "
+                        "[reported once]\n", handlers[behavior - 1u], signal_pc, behavior);
+            }
+            return 0;
+        }
         char other[24];
         snprintf(other, sizeof other, "behaviour 0x%02x", behavior);
-        return ge_signal_fail(handler ? handlers[behavior - 1u] : other, signal_pc,
-                              handler ? "signal handler dispatch is not modelled"
-                                      : "this SIGNAL behaviour is not modelled");
+        const char *why = !handler ? "this SIGNAL behaviour is not modelled"
+                          : behavior == 0x03u ? "the pause until sceGeContinue is not modelled"
+                                              : "signal handler dispatch is not modelled";
+        return ge_signal_fail(handler ? handlers[behavior - 1u] : other, signal_pc, why);
     }
     const char *name = names[behavior - 0x10u];
     if (behavior == 0x12u) {

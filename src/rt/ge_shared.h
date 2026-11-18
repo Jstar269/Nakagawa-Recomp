@@ -554,6 +554,9 @@ int       ge_patch_tess_init(int factor);
 int       ge_patch_tess_set(int factor);
 void      ge_patch_tess_counts(unsigned long long *quads, unsigned long long *capped);
 void      ge_patch_tess_exit_report(void);
+/* Patch draws (BEZIER, SPLINE) that drew nothing because their working buffers could not be
+ * allocated, since the run started; ge.c names the first. */
+unsigned long long ge_patch_alloc_failures(void);
 /* The specular and powered-diffuse power light_vertex uses: 0 (the default) the C library's
  * powf, 1 ge_powf, the integer power psp_tnl.vert repeats bit for bit, which also lets the GPU
  * T&L take those lights. The selftest seams give ge_powf and its 64 x 64-bit high product

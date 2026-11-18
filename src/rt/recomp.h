@@ -2214,10 +2214,13 @@ double   ge_timing_run_clk(void);
 void ge_transition_trace_check(const char *why, uint32_t vcount);
 extern uint32_t g_ge_stall_addr;
 /* SIGNAL list control (ge.c): how many SIGNAL CALLs the running list may nest (the numStacks
- * its sceGeListEnQueue took), and the fault the last run met, if any: a SIGNAL JUMP, CALL or
- * RET, a CALL with the call stack full or a RET with it empty. A fault stops the list at that
- * command; ge_take_signal_fault names it once. */
+ * its sceGeListEnQueue took), the signal function of the running list's callback (0 when it
+ * has none: a callback id of -1, or one registered with a NULL signal function), and the
+ * fault the last run met, if any: a SIGNAL JUMP, CALL or RET, a CALL with the call stack full
+ * or a RET with it empty, or a SIGNAL behaviour that is not modelled. A fault stops the list
+ * at that command; ge_take_signal_fault names it once. */
 extern uint32_t g_ge_signal_stack_limit;
+extern uint32_t g_ge_signal_handler;
 int ge_take_signal_fault(char *detail, size_t size);
 /* Diagnostic counters the watchdog and statistics reports print (hle.c). The GE ones
  * are kept by ge.c, the MPEG ones by mpeg.c. */

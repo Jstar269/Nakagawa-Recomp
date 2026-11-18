@@ -31715,34 +31715,81 @@ static void test_ge_signal_jump_call_ret(void) {
     expect(sr_hle_test_unmodelled_stops() == stops + 1u,
            "a SIGNAL RET with an empty stack stops the run by name");
 
-    /* The handler behaviours HANDLER_SUSPEND, HANDLER_CONTINUE and HANDLER_PAUSE (0x01 to
-     * 0x03) call the list's signal callback, and 0x03 pauses the list; neither is modelled,
-     * and the undefined 0x00 and 0x04 are not either. Each stops the run by name at the
-     * SIGNAL, the list unfinished. Before, the list ran on after a once-only note and the
-     * callback a title waits on never ran. */
-    static const unsigned handler_behaviours[] = {0x01u, 0x02u, 0x03u, 0x00u, 0x04u};
-    const uint32_t hl = 0x08927800u;
+    /* The handler behaviours HANDLER_SUSPEND and HANDLER_CONTINUE (0x01, 0x02) call the list's
+     * signal callback, which is not modelled, so a list with one stops the run by name at the
+     * SIGNAL, the list unfinished; before, it ran on after a once-only note and the callback a
+     * title waits on never ran. HANDLER_PAUSE (0x03) pauses the list until sceGeContinue and
+     * the undefined 0x00 and 0x04 left the GE busy (PSP-GE-SIGNAL-001, CAPTURED): each stops
+     * with or without a handler. With no handler (a callback id of -1, or one registered with
+     * a NULL signal function), 0x01 and 0x02 run on after the END to the list's own END, as
+     * the capture's b01-nocb and b02-nocb completed without a sceGeContinue. */
+    const uint32_t hl = 0x08927800u, cb_with = 0x08927a00u, cb_none = 0x08927a10u;
+    MEM_W32(cb_with, 0x08a00000u);              /* signal_func: never called, the run stops */
+    MEM_W32(cb_with + 4u, 0u);
+    MEM_W32(cb_with + 8u, 0u);
+    MEM_W32(cb_with + 12u, 0u);
+    for (uint32_t w = 0; w < 16u; w += 4u) MEM_W32(cb_none + w, 0u);   /* all NULL */
+    const uint32_t id_with = gsw_call(NID_SCE_GE_SET_CALLBACK, cb_with, 0u, 0u, 0u);
+    const uint32_t id_none = gsw_call(NID_SCE_GE_SET_CALLBACK, cb_none, 0u, 0u, 0u);
+    expect(id_with < 16u && id_none < 16u && id_with != id_none,
+           "a callback with a signal function and an all-NULL one register");
+    static const struct { unsigned behaviour; int handler; } cells[] = {
+        {0x01u, 1}, {0x02u, 1}, {0x03u, 1}, {0x03u, 0}, {0x00u, 0}, {0x04u, 0},
+    };
     int handler_stops_ok = 1;
-    for (size_t k = 0; k < sizeof handler_behaviours / sizeof handler_behaviours[0]; k++) {
-        sr_hle_test_ge_lists_reset();
-        MEM_W32(hl, 0x0e000000u | (handler_behaviours[k] << 16) | 0x1234u);   /* SIGNAL */
-        MEM_W32(hl + 4u, 0x0c000000u);              /* END */
-        MEM_W32(hl + 8u, 0xcd0000bbu);              /* FOG1: reached only if the list runs on */
-        MEM_W32(hl + 12u, 0x0f000000u);             /* FINISH */
-        MEM_W32(hl + 16u, 0x0c000000u);             /* END */
-        MEM_W32(0x08928000u, 0xcd000000u);          /* FOG1 0 */
-        MEM_W32(0x08928004u, 0x0c000000u);
-        (void)ge_run_list(0x08928000u, 0);
-        stops = sr_hle_test_unmodelled_stops();
-        const uint32_t h = gsw_call(NID_SCE_GE_LIST_ENQUEUE, hl, 0u, 0xffffffffu, 0u);
-        if (sr_hle_test_unmodelled_stops() != stops + 1u ||
-            gsw_call(NID_SCE_GE_LIST_SYNC, h, 1u, 0u, 0u) == 0u ||
-            gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) != 0u)
-            handler_stops_ok = 0;
+    for (size_t k = 0; k < sizeof cells / sizeof cells[0]; k++) {
+        for (int with_null_cb = 0; with_null_cb < 2; with_null_cb++) {
+            if (cells[k].handler && with_null_cb) continue;
+            const uint32_t cbid = cells[k].handler ? id_with : with_null_cb ? id_none : 0xffffffffu;
+            sr_hle_test_ge_lists_reset();
+            MEM_W32(hl, 0x0e000000u | (cells[k].behaviour << 16) | 0x1234u);   /* SIGNAL */
+            MEM_W32(hl + 4u, 0x0c000000u);          /* END */
+            MEM_W32(hl + 8u, 0xcd0000bbu);          /* FOG1: reached only if the list runs on */
+            MEM_W32(hl + 12u, 0x0f000000u);         /* FINISH */
+            MEM_W32(hl + 16u, 0x0c000000u);         /* END */
+            MEM_W32(0x08928000u, 0xcd000000u);      /* FOG1 0 */
+            MEM_W32(0x08928004u, 0x0c000000u);
+            (void)ge_run_list(0x08928000u, 0);
+            stops = sr_hle_test_unmodelled_stops();
+            const uint32_t h = gsw_call(NID_SCE_GE_LIST_ENQUEUE, hl, 0u, cbid, 0u);
+            if (sr_hle_test_unmodelled_stops() != stops + 1u ||
+                gsw_call(NID_SCE_GE_LIST_SYNC, h, 1u, 0u, 0u) == 0u ||
+                gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) != 0u)
+                handler_stops_ok = 0;
+        }
     }
     expect(handler_stops_ok,
-           "a SIGNAL handler behaviour (0x01-0x03) or an undefined one (0x00, 0x04) stops the "
-           "run by name at the SIGNAL, and the list does not run on");
+           "a SIGNAL 0x01 or 0x02 whose list has a signal callback, a 0x03 and an undefined 0x00 "
+           "or 0x04 stop the run by name at the SIGNAL, and the list does not run on");
+
+    static const unsigned no_handler[] = {0x01u, 0x02u};
+    int no_handler_runs_on = 1;
+    for (size_t k = 0; k < sizeof no_handler / sizeof no_handler[0]; k++) {
+        for (int with_null_cb = 0; with_null_cb < 2; with_null_cb++) {
+            sr_hle_test_ge_lists_reset();
+            MEM_W32(hl, 0x0e000000u | (no_handler[k] << 16) | 0x1234u);   /* SIGNAL */
+            MEM_W32(hl + 4u, 0x0c000000u);          /* END */
+            MEM_W32(hl + 8u, 0xcd0000bbu);          /* FOG1: runs after the END */
+            MEM_W32(hl + 12u, 0x0f000000u);         /* FINISH */
+            MEM_W32(hl + 16u, 0x0c000000u);         /* END */
+            MEM_W32(0x08928000u, 0xcd000000u);      /* FOG1 0 */
+            MEM_W32(0x08928004u, 0x0c000000u);
+            (void)ge_run_list(0x08928000u, 0);
+            stops = sr_hle_test_unmodelled_stops();
+            const uint32_t h = gsw_call(NID_SCE_GE_LIST_ENQUEUE, hl, 0u,
+                                        with_null_cb ? id_none : 0xffffffffu, 0u);
+            if (sr_hle_test_unmodelled_stops() != stops ||
+                gsw_call(NID_SCE_GE_LIST_SYNC, h, 1u, 0u, 0u) != 0u ||
+                gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) != 0xbbu)
+                no_handler_runs_on = 0;
+        }
+    }
+    expect(no_handler_runs_on,
+           "a SIGNAL 0x01 or 0x02 whose list has no signal callback (id -1, or a NULL signal "
+           "function) runs on after its END to the list's END (PSP-GE-SIGNAL-001 b01-nocb, "
+           "b02-nocb, CAPTURED)");
+    (void)gsw_call(NID_SCE_GE_UNSET_CALLBACK, id_with, 0u, 0u, 0u);
+    (void)gsw_call(NID_SCE_GE_UNSET_CALLBACK, id_none, 0u, 0u, 0u);
     sr_hle_test_set_compiled_sdk_version(0u);
     sr_hle_test_ge_lists_reset();
 }
