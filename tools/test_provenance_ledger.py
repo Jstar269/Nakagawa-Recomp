@@ -3711,10 +3711,11 @@ class EditorConfigImportByteTests(unittest.TestCase):
                 check=True,
             )
             .stdout.decode("utf-8")
+            .removesuffix("\0")
             .split("\0")
         )
         attr_exempt = set()
-        for path, value in zip(fields[0::3], fields[2::3]):
+        for path, value in zip(fields[0::3], fields[2::3], strict=True):
             if value == "unset" or "-blank-at-eol" in value.split(","):
                 attr_exempt.add(path)
         precommit_trim = {p for p in tracked if trim_exempt.match(p)} - self.LEGACY_PROJECT_FILES
