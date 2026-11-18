@@ -677,6 +677,33 @@ class VerifierPureTests(unittest.TestCase):
             )
         self.assertIn("SHORTCUT_FAILED", err.getvalue())
 
+    def test_a_failed_cleanup_is_reported_by_name_and_fails_a_passing_check(self):
+        folder = self.root / "cleanup-install"
+        folder.mkdir()
+        (folder / "unins000.exe").write_bytes(b"u")
+        shortcut = self.root / "Nakagawa Recomp.lnk"
+        shortcut.write_bytes(b"lnk")
+        with unittest.mock.patch.object(verify_installer, "_hkcu_key_exists", return_value=True), \
+                unittest.mock.patch.object(verify_installer, "_wait_for", return_value=False), \
+                unittest.mock.patch.object(verify_installer.subprocess, "run", side_effect=OSError("synthetic")), \
+                unittest.mock.patch.object(verify_installer.stage_install, "read_shortcut_app_id",
+                                           side_effect=stage_install.InstallError("SHORTCUT_UNREADABLE: synthetic")):
+            failures = verify_installer._cleanup_installs((folder,), shortcut, ["/VERYSILENT"])
+        self.assertEqual(len(failures), 3, failures)
+        self.assertIn("cannot run", failures[0])
+        self.assertIn(verify_installer.UNINSTALL_KEY, failures[1])
+        self.assertIn("SHORTCUT_UNREADABLE", failures[2])
+
+        # After a PASS the cleanup failure is the result; after an earlier failure it is only printed.
+        with unittest.mock.patch("sys.stderr", new=io.StringIO()) as err:
+            with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_VERIFY_CLEANUP_FAILED"):
+                verify_installer._report_cleanup(failures, raise_error=True)
+        self.assertEqual(err.getvalue().count("INSTALLER_VERIFY_CLEANUP_FAILED: "), 3)
+        with unittest.mock.patch("sys.stderr", new=io.StringIO()) as err:
+            verify_installer._report_cleanup(failures, raise_error=False)
+            verify_installer._report_cleanup([], raise_error=True)
+        self.assertEqual(err.getvalue().count("INSTALLER_VERIFY_CLEANUP_FAILED: "), 3)
+
     def test_an_install_equal_to_its_package_matches_even_with_the_uninstaller_beside_it(self):
         (self.installed / "unins000.exe").write_bytes(b"u")
         (self.installed / "unins000.dat").write_bytes(b"d")

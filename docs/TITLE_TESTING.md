@@ -51,8 +51,12 @@ The Make target forces a fresh fixture and player build before launch. The repor
 identity (the package cache compiler identity), and compile result. The verifier
 `validate --report PATH` requires that evidence and checks the current staged artifact
 against its digest. A direct `smoke` run does not build and its report is therefore
-not accepted as build qualification evidence. The source revision identifies HEAD;
-uncommitted source changes are not represented by that revision.
+not accepted as build qualification evidence. The source revision identifies HEAD, so
+the Make target (and `title_qualification.py build-smoke`, which it runs) refuses a
+working tree with uncommitted changes to tracked files: it prints
+`TITLE_QUALIFICATION status=REFUSED reason=BUILD_SOURCE_DIRTY: ...`, exits 2, and builds
+and launches nothing. Commit or set aside the changes first; untracked files do not
+count.
 
 Exit status 2 means different things per command. For `validate` it means at least
 one candidate failed validation, and the first problem in each failing candidate is
@@ -161,9 +165,16 @@ Every launch runs in a temporary sandbox inside the title's build directory:
 - `HOME` and the `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME`
   bases point into the sandbox as well, so a POSIX player never reads or writes `~/.config`,
   `~/.local/share`, `~/.cache` or `~/.local/state`;
-- `--user-data-root` points at the sandbox, so the library and caches stay there;
+- `--user-data-root` points at the sandbox's `user-data` folder, so the library and caches
+  stay there;
+- the public input profile (`--input-profile`, default
+  `assets/input_profiles/standard-gamepad.json`) is copied to
+  `config/input_profile.json` under that `--user-data-root` folder, where the player reads
+  it, so a person's own input profile is never used;
 - video and audio use the dummy drivers and the offscreen presenter, so no window opens;
-- `SR_FLIGHT*` and `SR_DATAROOT` are removed from the child's environment.
+- every variable whose name starts with `SR_FLIGHT`, `SR_DATAROOT`, `NK_INPUT_PROFILE` or
+  `SR_INPUT_PROFILE` is removed from the child's environment, so neither a flight
+  recorder nor a person's input-profile override reaches the run.
 
 The sandbox is deleted when the run ends.
 

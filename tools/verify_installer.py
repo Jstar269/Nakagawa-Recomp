@@ -277,6 +277,39 @@ def _hold_open(path: Path):
     return lambda: kernel32.CloseHandle(handle)
 
 
+def _cleanup_installs(folders: tuple[Path, ...], shortcut: Path, silent_uninstall: list[str]) -> list[str]:
+    """Remove what the check installed: each folder's install through its own uninstaller, and the Start-menu
+    shortcut when it is the one this check made. Returns one reason per step that failed, so the caller still
+    removes its sentinels and folders and then reports them."""
+    failures: list[str] = []
+    for folder in folders:
+        uninstaller = folder / "unins000.exe"
+        if _hkcu_key_exists() and uninstaller.is_file():
+            try:
+                subprocess.run([str(uninstaller), *silent_uninstall], capture_output=True, text=True, timeout=600,
+                               check=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append(f"cannot run {uninstaller}: {exc}")
+            _wait_for(lambda: not _hkcu_key_exists(), 60.0)
+    if _hkcu_key_exists():
+        failures.append(f"HKCU\\{UNINSTALL_KEY} is still there; uninstall Nakagawa Recomp from Settings > Apps")
+    try:
+        if shortcut.is_file() and stage_install.read_shortcut_app_id(shortcut) == stage_install.APP_USER_MODEL_ID:
+            shortcut.unlink()  # the one this check made (the check refused to start with one present)
+    except (OSError, stage_install.InstallError) as exc:
+        failures.append(f"cannot remove {shortcut}: {exc}")
+    return failures
+
+
+def _report_cleanup(failures: list[str], *, raise_error: bool) -> None:
+    """Print each cleanup failure by name; with ``raise_error`` (no earlier failure in flight), fail the check."""
+    for failure in failures:
+        print(f"INSTALLER_VERIFY_CLEANUP_FAILED: {failure}", file=sys.stderr)
+    if failures and raise_error:
+        raise build_installer.InstallerError(
+            f"INSTALLER_VERIFY_CLEANUP_FAILED: {len(failures)} cleanup step(s) failed: " + "; ".join(failures))
+
+
 def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str = DEFAULT_SHORTCUT_NAME,
                      iscc: Path | None = None) -> dict:
     """Run the whole check; raise ``InstallerError`` on the first failure. Windows only.
@@ -346,6 +379,7 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
             verify_runtime=lambda _bin: None,
             extra_defines=None if shortcut_name == DEFAULT_SHORTCUT_NAME else {"ShortcutName": shortcut_name},
         )["installer"])
+        completed = False
         try:
             sentinels.plant()
             # 1. A shortcut that starts another copy (what tools/stage_install.py writes) is never taken over.
@@ -431,25 +465,17 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
             result["upgrade_kept"] = sorted({*PERSON_FILES, UPGRADE_EDITED})
             result["user_data_sentinels_kept"] = len(sentinels.files)
             result["status"] = "PASS"
+            completed = True
         finally:
+            cleanup_failures: list[str] = []
             try:
-                for folder in (upgraded, dest):
-                    if _hkcu_key_exists() and (folder / "unins000.exe").is_file():
-                        try:
-                            subprocess.run([str(folder / "unins000.exe"), *silent_uninstall], capture_output=True,
-                                           text=True, timeout=600, check=False)
-                        except (OSError, subprocess.SubprocessError):
-                            pass
-                        _wait_for(lambda: not _hkcu_key_exists(), 60.0)
-                try:
-                    if shortcut.is_file() and stage_install.read_shortcut_app_id(shortcut) == stage_install.APP_USER_MODEL_ID:
-                        shortcut.unlink()  # the one this check made (the check refused to start with one present)
-                except (OSError, stage_install.InstallError):
-                    pass
+                cleanup_failures = _cleanup_installs((upgraded, dest), shortcut, silent_uninstall)
             finally:
                 sentinels.remove()
                 shutil.rmtree(dest, ignore_errors=True)
                 shutil.rmtree(upgraded, ignore_errors=True)
+            # A failure already in flight stays the result; the cleanup failures are still printed by name.
+            _report_cleanup(cleanup_failures, raise_error=completed)
     return result
 
 
