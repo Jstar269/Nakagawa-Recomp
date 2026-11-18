@@ -2742,9 +2742,13 @@ static void test_settings_save_that_did_not_reach_the_disk_keeps_the_file(void) 
     assert(player_app_save_settings(app, path) == NK_ERROR_IO);
 
     struct stat st;
-    assert(lstat(path, &st) == 0 && S_ISREG(st.st_mode));
     assert(lstat(tmp_path, &st) != 0);   /* the link is removed; /dev/null is not touched */
-    f = nk_fopen_utf8(path, "rb");
+    /* The settings file is still a regular file, not a link: checked on the
+     * descriptor that is then read, so the check and the read see one file. */
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    assert(fd >= 0);
+    assert(fstat(fd, &st) == 0 && S_ISREG(st.st_mode));
+    f = fdopen(fd, "rb");
     assert(f != NULL);
     size_t after_size = fread(after, 1, sizeof(after), f);
     fclose(f);
