@@ -133,7 +133,7 @@ static void test_alloc_free_reuse(void) {
 
 static void test_forward_coalesce(void) {
     heap_reset();
-    /* Three adjacent blocks; free the FIRST then the SECOND so the second free
+    /* Three adjacent blocks; free the SECOND then the FIRST so the first free
      * absorbs its already-free successor (forward merge). */
     uint32_t a = sr_newlib_malloc(4096u, 0u);
     uint32_t b = sr_newlib_malloc(4096u, 0u);
@@ -168,7 +168,9 @@ static void test_backward_coalesce(void) {
 
 /* The #122 regression: fragment the arena into many small blocks, release them
  * all, then demand a block far larger than any individual one. Without
- * coalescing this fails despite ample total free bytes. */
+ * coalescing no free block is large enough. The arena still has untouched bump
+ * space that could satisfy the request, so the allocation must come back at
+ * p[0], the start of the merged region, not merely succeed. */
 static void test_fragmentation_then_large_alloc(void) {
     heap_reset();
     enum { N = 512, SZ = 8192u };
@@ -195,6 +197,8 @@ static void test_fragmentation_then_large_alloc(void) {
     CHECK(big != 0u,
           "large alloc of 0x%x failed after coalescing (largest_free=0x%x, free=%u blocks)",
           big_bytes, st.largest_free, st.free_blocks);
+    CHECK(big == p[0],
+          "large alloc 0x%08x did not reuse the merged region at 0x%08x", big, p[0]);
     if (big) sr_newlib_free(big, 0u);
 }
 
@@ -238,6 +242,9 @@ static void test_merged_payload_is_clean(void) {
     sr_newlib_free(b, 0u);   /* backward merge: a absorbs b */
     uint32_t big = sr_newlib_malloc(8000u, 0u);
     CHECK(big != 0u, "merged block should satisfy 8000 bytes");
+    /* Only the merged block exercises the absorbed-metadata words; fresh bump
+     * space is zero anyway. */
+    CHECK(big == a, "8000-byte alloc 0x%08x did not reuse the merged block at 0x%08x", big, a);
     if (big) {
         int dirty = 0;
         for (uint32_t off = 0; off < 8000u; off += 4u)

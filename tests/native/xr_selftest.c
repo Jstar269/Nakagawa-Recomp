@@ -9,6 +9,8 @@
 
 #include <float.h>
 #include <math.h>
+#include <stdalign.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -898,6 +900,23 @@ static void test_state_machine(void) {
 // ---------------------------------------------------------------------------
 // Mailbox.
 
+// The producer-private, consumer-private and shared words each own a 64-byte line,
+// and frame_id[], which the producer writes on every publish, shares none of them.
+static void test_mailbox_layout(void) {
+    enum { LINE = 64 };
+    size_t middle = offsetof(NkXrMailbox, middle) / LINE;
+    size_t back = offsetof(NkXrMailbox, back) / LINE;
+    size_t front_first = offsetof(NkXrMailbox, front) / LINE;
+    size_t front_last = (offsetof(NkXrMailbox, have_front) + sizeof(int) - 1u) / LINE;
+    size_t ids_first = offsetof(NkXrMailbox, frame_id) / LINE;
+    size_t ids_last = (offsetof(NkXrMailbox, frame_id) + sizeof(uint64_t) * NK_XR_MAILBOX_SLOTS - 1u) / LINE;
+    CHECK(alignof(NkXrMailbox) >= LINE);
+    CHECK(middle != back && middle != front_first && back != front_first);
+    CHECK(front_first == front_last);
+    CHECK(ids_first > front_last && ids_first == ids_last);
+    CHECK(ids_first != middle && ids_first != back);
+}
+
 static void test_mailbox_basic(void) {
     NkXrMailbox m;
     uint64_t id = 77;
@@ -1294,6 +1313,7 @@ int main(void) {
     test_null_table_refusals();
     test_loss_then_exit();
     test_state_machine();
+    test_mailbox_layout();
     test_mailbox_basic();
     test_mailbox_interleavings();
     test_mailbox_producer_never_waits();
