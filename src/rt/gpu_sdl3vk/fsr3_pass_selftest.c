@@ -1376,9 +1376,11 @@ int main(int argc, char **argv) {
     }
     syncval_canary();
     shader_canary();
-    if (g.validation && !g_syncval_shader) {
-        /* The cells still run, but nothing checks the barriers between passes. */
-        printf("SKIP the barrier proof (synchronisation validation of shader accesses is not active)\n");
+    if (!g.validation || !g_syncval_shader) {
+        /* The cells still run, but nothing checks the barriers between passes: without the layer no
+         * messenger exists, so a cell's "no validation messages" check would hold trivially. */
+        printf("SKIP the barrier proof (%s)\n",
+               !g.validation ? "no validation layer" : "synchronisation validation of shader accesses is not active");
         s_skip = 1;
     }
     for (unsigned c = 0; c < CELL_COUNT; c++)

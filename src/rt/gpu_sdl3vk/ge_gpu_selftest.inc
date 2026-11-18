@@ -1013,7 +1013,7 @@ static int coherence_run_sprite_semantics(void) {
     }
 
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride, .width = 480, .height = 272 };
-    if (!gegpu_sync_guest_fb(&desc)) {
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [sprite-semantics]: gegpu_sync_guest_fb failed\n");
         return 0;
     }
@@ -1517,12 +1517,19 @@ static int coherence_run_linear_sprite(void) {
     sr_gpu_vram_dirty(base, stride * FB_H * 4u);
 
     uint32_t list_addr = coherence_prepare_linear_sprite_fixture(tex_base);
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(list_addr, 0);
 
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride, .width = 480, .height = 272 };
-    if (!gegpu_sync_guest_fb(&desc)) {
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [linear-gpu]: gegpu_sync_guest_fb failed\n");
+        return 0;
+    }
+    /* The GPU leg is the GPU's: a primitive ge.c drew would make it ge.c compared with ge.c. */
+    if (s_replay_stats.fallback_prims != fallback0) {
+        fprintf(stderr, "gpu coherence selftest [linear-gpu]: %llu primitives fell back to ge.c\n",
+                s_replay_stats.fallback_prims - fallback0);
         return 0;
     }
     uint32_t *fb = (uint32_t *)guest;
@@ -1661,12 +1668,19 @@ static int coherence_run_tflt_case(const char *name, int primitive_type, uint32_
     uint32_t list_addr = coherence_prepare_tflt_fixture(tex_base, tflt, primitive_type,
                                                         rect_w, rect_h,
                                                         u0, v0, u_span, v_span);
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(list_addr, 0);
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                .width = 480, .height = 272 };
-    if (!gegpu_sync_guest_fb(&desc)) {
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [TFLT-%s]: GPU readback failed\n", name);
+        coherence_reset_targets();
+        return 0;
+    }
+    if (s_replay_stats.fallback_prims != fallback0) {
+        fprintf(stderr, "gpu coherence selftest [TFLT-%s]: %llu primitives fell back to ge.c\n", name,
+                s_replay_stats.fallback_prims - fallback0);
         coherence_reset_targets();
         return 0;
     }
@@ -2029,12 +2043,19 @@ static int coherence_run_psp_sample_points(void) {
     coherence_reset_targets();
     memset(fb, 0, bytes);
     sr_gpu_vram_dirty(base, (uint32_t)bytes);
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(COH_SAMPLE_LIST, 0);
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                .width = 480, .height = 272 };
-    int ok = gegpu_sync_guest_fb(&desc);
+    int ok = gegpu_sync_guest_fb(&desc) == GEGPU_SYNC_OK;
     if (!ok) fprintf(stderr, "gpu coherence selftest [psp-sample-points]: GPU readback failed\n");
+    if (ok && s_replay_stats.fallback_prims != fallback0) {
+        /* ge.c drew the GPU leg: the comparison below would be ge.c against ge.c. */
+        fprintf(stderr, "gpu coherence selftest [psp-sample-points]: %llu primitives fell back to ge.c\n",
+                s_replay_stats.fallback_prims - fallback0);
+        ok = 0;
+    }
     if (ok) {
         memcpy(gpu, fb, bytes);
         memset(fb, 0, bytes);
@@ -3907,13 +3928,15 @@ static int through_float_z_passes(float z, uint32_t depth, int gpu, uint32_t zfu
     DL_EMIT(0x0F, 0);
     DL_EMIT(0x0C, 0);
     #undef DL_EMIT
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(gpu ? &k_hooks : NULL);
     ge_run_list(list_addr, 0);
     ge_set_gpu_hooks(&k_hooks);
     if (gpu) {
         GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                    .width = 480, .height = 272 };
-        if (!gegpu_sync_guest_fb(&desc)) return -1;
+        if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) return -1;
+        if (s_replay_stats.fallback_prims != fallback0) return -1;   /* ge.c drew the GPU leg */
     }
     const uint32_t px = guest[32u * stride + 32u] & 0x00FFFFFFu;
     return px == (over & 0x00FFFFFFu) ? 1 : px == (under & 0x00FFFFFFu) ? 0 : -1;
@@ -3961,12 +3984,19 @@ static int coherence_run_through_float_z(void) {
         DL_EMIT(0x0F, 0);
         DL_EMIT(0x0C, 0);
         #undef DL_EMIT
+        const unsigned long long fallback0 = s_replay_stats.fallback_prims;
         ge_set_gpu_hooks(&k_hooks);
         ge_run_list(list_addr, 0);
         GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                    .width = 480, .height = 272 };
-        if (!gegpu_sync_guest_fb(&desc)) {
+        if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
             fprintf(stderr, "gpu coherence selftest [%s]: GPU readback failed\n", name);
+            coherence_reset_targets();
+            return 0;
+        }
+        if (s_replay_stats.fallback_prims != fallback0) {
+            fprintf(stderr, "gpu coherence selftest [%s]: z=%.1f: %llu primitives fell back to ge.c, not the "
+                    "Vulkan path\n", name, (double)z, s_replay_stats.fallback_prims - fallback0);
             coherence_reset_targets();
             return 0;
         }
@@ -4098,12 +4128,19 @@ static int coherence_run_clut_format_list(void) {
     DL_EMIT(0x0F, 0);
     DL_EMIT(0x0C, 0);
     #undef DL_EMIT
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(list_addr, 0);
     GeGpuFbDescriptor desc = { .addr = base, .format = 3, .stride = stride,
                                .width = 480, .height = 272 };
-    if (!gegpu_sync_guest_fb(&desc)) {
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) {
         fprintf(stderr, "gpu coherence selftest [clut-format-list]: GPU readback failed\n");
+        coherence_reset_targets();
+        return 0;
+    }
+    if (s_replay_stats.fallback_prims != fallback0) {
+        fprintf(stderr, "gpu coherence selftest [clut-format-list]: %llu primitives fell back to ge.c\n",
+                s_replay_stats.fallback_prims - fallback0);
         coherence_reset_targets();
         return 0;
     }
@@ -9296,6 +9333,16 @@ static int coherence_run_twin_scene(void) {
                "device refused it\n", name, getenv("SR_GPU_TWIN_COLOR"));
         return 1;
     }
+    /* The twin-off leg writes the reference, so only a run that asked for no twin may take it: a
+     * twin or supersampling the line or SR_GPU_TWIN_COLOR asked for that is not running (gegpu_init
+     * lowered supersampling to 1x: memory budget, image side, no linear blit) tests nothing here. */
+    const char *tc = getenv("SR_GPU_TWIN_COLOR");   /* it wins over the line's twin key, as in gegpu_init */
+    const int twin_asked = tc && tc[0] ? twin_mode_parse(tc) > 0 : ace_requested()->twin != 0;
+    if (!s_twin && g_ace_on && (ace_requested()->ssaa > 1 || twin_asked)) {
+        printf("gpu coherence selftest: SKIP %s: the host twin or supersampling (ssaa=%d) was requested but is not "
+               "running; no reference is written or checked\n", name, ace_requested()->ssaa);
+        return 1;
+    }
     const unsigned long ops0 = s_cnt_twin_ops, reseed0 = s_cnt_twin_reseed;
     TwinRun run = {0};
     int ok = twin_run_scene(&run);
@@ -9492,9 +9539,12 @@ static double ss_edge_dist(double x, double y) {
 static int coherence_run_ssaa_edge(void) {
     const char *name = "ssaa-edge";
     const char *ref_path = getenv("SR_GPU_SSAA_REF");
-    if (s_twin_unavailable && g_ace_on && ace_effective()->ssaa > 1) {
-        printf("gpu coherence selftest: SKIP %s: supersampling was asked for but this device refused the "
-               "host twin\n", name);
+    /* gegpu_init turns a refused factor off in the effective line (ace_set_ssaa_effective), so the
+     * request is read: supersampling asked for and not running (the twin refused, the memory budget,
+     * the image side, no linear blit) is a SKIP, never a 1x run that writes the reference. */
+    if (g_ace_on && ace_requested()->ssaa > 1 && s_ssaa == 1) {
+        printf("gpu coherence selftest: SKIP %s: supersampling (ssaa=%d) was asked for but is not running on "
+               "this device (gegpu_init says why)\n", name, ace_requested()->ssaa);
         return 1;
     }
     coherence_reset_targets();
@@ -9656,9 +9706,10 @@ static int coherence_run_ssaa_edge(void) {
  * authentic ones, made for 1x, splits a quarter-off sprite's texels inside each guest pixel. */
 static int coherence_run_ssaa_sprite(void) {
     const char *name = "ssaa-sprite";
-    if (s_twin_unavailable && g_ace_on && ace_effective()->ssaa > 1) {
-        printf("gpu coherence selftest: SKIP %s: supersampling was asked for but this device refused the "
-               "host twin\n", name);
+    /* As in ssaa-edge: at 1x the shown image is the authentic one, so a refused factor would pass. */
+    if (g_ace_on && ace_requested()->ssaa > 1 && s_ssaa == 1) {
+        printf("gpu coherence selftest: SKIP %s: supersampling (ssaa=%d) was asked for but is not running on "
+               "this device (gegpu_init says why)\n", name, ace_requested()->ssaa);
         return 1;
     }
     const uint32_t fba = 0x00160000u, base = 0x04000000u | fba, stride = 512u;
@@ -14401,10 +14452,17 @@ static int hd_draw(const HdQuad *q, int n) {
     DL_EMIT(0x0F, 0);
     DL_EMIT(0x0C, 0);
     #undef DL_EMIT
+    const unsigned long long fallback0 = s_replay_stats.fallback_prims;
     ge_set_gpu_hooks(&k_hooks);
     ge_run_list(HD_LIST, 0);
     GeGpuFbDescriptor desc = { .addr = HD_BASE, .format = 3, .stride = 512u, .width = 480, .height = 272 };
-    return gegpu_sync_guest_fb(&desc);
+    if (gegpu_sync_guest_fb(&desc) != GEGPU_SYNC_OK) return 0;
+    if (s_replay_stats.fallback_prims != fallback0) {
+        fprintf(stderr, "gpu coherence selftest [host-depth]: %llu primitives fell back to ge.c\n",
+                s_replay_stats.fallback_prims - fallback0);
+        return 0;
+    }
+    return 1;
 }
 
 /* A fresh target and depth surface, the depth surface seeded from the CPU with `z` everywhere. */
@@ -14440,7 +14498,9 @@ static int coherence_run_host_depth(void) {
     const char *name = "host-depth";
     const char *mode = s_depth32 ? "depth=32" : "16-bit";
     int ok = 1;
-    if (g_ace_on && ace_effective()->depth == 32 && !s_depth32) {
+    /* A refused depth=32 is turned off in the effective line (ace_feature_unavailable), so the request
+     * is read: such a run is a SKIP, never a 16-bit run that writes the key-off reference. */
+    if (g_ace_on && ace_requested()->depth == 32 && !s_depth32) {
         printf("gpu coherence selftest: SKIP %s: depth=32 was requested but this device refused it\n", name);
         return 1;
     }
