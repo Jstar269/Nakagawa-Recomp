@@ -168,11 +168,9 @@ typedef struct {
     uint32_t magic, rawVersion; int version;
     uint32_t offset, streamSize;
     int64_t firstTimestamp, lastTimestamp;
-    int avcRegistered, atracRegistered;
-    int isAnalyzed;
     int h264DemuxFailed, h264DemuxErrorReported;
     int64_t videoPts, audioPts;  /* media-engine timestamp model */
-    int videoEnd, audioEnd;
+    int videoEnd;
     uint32_t totalPackets;       /* streamSize/packetSize: whole-movie packet count */
     uint32_t fedPackets;         /* cumulative packets the game has put into the ring */
     int streamEnded;             /* the fed stream ran out with the whole movie in: nothing follows */
@@ -181,7 +179,6 @@ typedef struct {
     int feedShort;
     uint32_t feedShortAt;
     uint32_t videoDryAt, audioDryAt; /* fedPackets when a getter last found nothing to hand out */
-    uint32_t headerAddr;         /* guest address of the PSMF header passed to QueryStreamOffset */
     int h264;                    /* host H.264 backend id (-1 = none) */
     int h264Init, h264Frames;
     int h264Units;               /* access units handed out for decoding */
@@ -198,8 +195,8 @@ typedef struct {
     uint32_t auPacketsDone;   /* ring packets released by real access units */
     int64_t lastAuPts;        /* presentation time of the last real access unit (-1 before any) */
     int esBuffers[2];           /* MPEG_DATA_ES_BUFFERS: allocated-flag per ES buffer */
-    /* stream map: small fixed table sid -> (type,num,needsReset,auMode) */
-    struct { int used, type, num, needsReset, auMode; uint32_t sid; } streams[8];
+    /* stream map: small fixed table sid -> (type,num,auMode) */
+    struct { int used, type, num, auMode; uint32_t sid; } streams[8];
     /* The last ids this context unregistered (0 = empty), oldest overwritten first. */
     uint32_t retiredSids[8];
     uint32_t retiredNext;
@@ -342,17 +339,12 @@ static void mpeg_audio_pump(Mpeg *ctx) {
                 sr_psmf_au_release(&au);
                 continue;
             }
-            uint8_t *copy = (uint8_t *)malloc(au.size);
-            if (!copy) {
-                sr_psmf_au_release(&au);
-                ctx->audioDemuxFailed = 1;
-                mpeg_audio_report(ctx, "no host memory for an ATRAC frame");
-                return;
-            }
-            memcpy(copy, au.data, au.size);
+            /* The FIFO takes the access unit's own heap buffer (emit_au allocated it). */
             uint32_t tail = (ctx->audioFifoHead + ctx->audioFifoCount) % MPEG_ATRAC_FIFO_DEPTH;
-            ctx->audioFifo[tail].data = copy;
+            ctx->audioFifo[tail].data = au.data;
             ctx->audioFifo[tail].bytes = au.size;
+            au.data = NULL;
+            au.size = 0;
             ctx->audioFifoCount++;
             ctx->audioAusOut++;
             sr_psmf_au_release(&au);
@@ -587,7 +579,6 @@ static int getMpegVersion(uint32_t raw) {
 
 /* AnalyzeMpeg: parse the PSMF header at bufferAddr into the context. */
 static void analyze(uint32_t buffer, Mpeg *ctx) {
-    ctx->magic = be32(buffer) == 0 ? 0 : 0; /* placeholder to avoid warning */
     /* magic is stored little-endian in memory but compared as PSMF_MAGIC ('PSMF' LE) */
     ctx->magic = MEM_R32(buffer);
     ctx->rawVersion = MEM_R32(buffer + PSMF_STREAM_VERSION_OFFSET);
@@ -596,7 +587,7 @@ static void analyze(uint32_t buffer, Mpeg *ctx) {
     ctx->streamSize = be32(buffer + PSMF_STREAM_SIZE_OFFSET);
     ctx->firstTimestamp = mpeg_ts(buffer + PSMF_FIRST_TIMESTAMP_OFFSET);
     ctx->lastTimestamp = mpeg_ts(buffer + PSMF_LAST_TIMESTAMP_OFFSET);
-    ctx->videoPts = 0; ctx->audioPts = 0; ctx->videoEnd = 0; ctx->audioEnd = 0;
+    ctx->videoPts = 0; ctx->audioPts = 0; ctx->videoEnd = 0;
     ctx->streamWidth = 0; ctx->streamHeight = 0;
     if (sr_guest_span_readable(buffer, PSMF_AVC_HEIGHT_OFFSET + 1u)) {
         uint32_t macroblocksWide = MEM_R8(buffer + PSMF_AVC_WIDTH_OFFSET);
@@ -654,7 +645,7 @@ static uint32_t h264_demux_error(Mpeg *ctx, uint32_t auAddr) {
 
 uint32_t mpeg_init(void) { s_mpegInit = 1; return 0; }
 uint32_t mpeg_finish(void) {
-#ifdef SR_SDL3VK
+#if defined(SR_SDL3VK) || defined(SR_MPEG_MEDIA_SELFTEST)   /* the guard of the create in Put */
     for (int i = 0; i < 8; i++) if (s_mpeg[i].used && s_mpeg[i].h264 >= 0) {
         sr_h264_destroy(s_mpeg[i].h264);
         s_mpeg[i].h264 = -1;
@@ -711,6 +702,19 @@ uint32_t mpeg_ringbuffer_construct(uint32_t ring, uint32_t numPackets, uint32_t 
 
 static void mpeg_pictures_report_all(const char *reason);
 void sr_psmf_av_set_pictures_report(void (*report)(const char *reason));
+static void mpeg_pictures_report(const Mpeg *ctx, const char *reason);
+
+/* Tear a live context down and free its slot (sceMpegDelete, or a create over its handle). */
+static void mpeg_release(Mpeg *ctx, const char *reason) {
+    mpeg_pictures_report(ctx, reason);
+    sr_movie_forget_owner(ctx->guestAddr);   /* its pictures are no longer movie frames (#2111) */
+#if defined(SR_SDL3VK) || defined(SR_MPEG_MEDIA_SELFTEST)   /* the guard of the create in Put */
+    if (ctx->h264 >= 0) { sr_h264_destroy(ctx->h264); ctx->h264 = -1; }
+#endif
+    ycbcr_reset_mpeg(ctx->guestAddr);
+    mpeg_audio_close(ctx);
+    ctx->used = 0;
+}
 
 uint32_t mpeg_create(uint32_t mpegAddr, uint32_t dataPtr, uint32_t size, uint32_t ringAddr,
                      uint32_t frameWidth, uint32_t mode, uint32_t ddrTop) {
@@ -718,27 +722,40 @@ uint32_t mpeg_create(uint32_t mpegAddr, uint32_t dataPtr, uint32_t size, uint32_
     if (!mpegAddr) return (uint32_t)-1;
     if (size < MPEG_MEMSIZE_0105) return SCE_MPEG_ERROR_NO_MEMORY;
 
+    RingState ring;
+    if (ringAddr && !rb_read_valid(ringAddr, &ring, 1)) return SCE_MPEG_ERROR_INVALID_VALUE;
+
+    /* handle = dataPtr + 0x30.  The host context is found before any guest write, so a create
+     * refused for want of one leaves *mpegAddr, the struct and the ring as they were.  A live
+     * context with the same handle is the same guest object made again: it is torn down and its
+     * slot reused, so one handle never names two contexts. */
+    uint32_t h = dataPtr + 0x30;
+    Mpeg *ctx = 0;
+    for (int i = 0; i < 8; i++) if (s_mpeg[i].used && s_mpeg[i].handle == h) { ctx = &s_mpeg[i]; break; }
+    if (ctx) {
+        fprintf(stderr, "MPEG: sceMpegCreate over the live context of handle 0x%08" PRIx32
+                        " (mpeg=0x%08" PRIx32 "): that context is deleted first\n", h, ctx->guestAddr);
+        mpeg_release(ctx, "re-create");
+    } else {
+        for (int i = 0; i < 8; i++) if (!s_mpeg[i].used) { ctx = &s_mpeg[i]; break; }
+    }
+    if (!ctx) return SCE_MPEG_ERROR_NO_MEMORY;
+
     if (ringAddr) {
-        RingState ring;
-        if (!rb_read_valid(ringAddr, &ring, 1)) return SCE_MPEG_ERROR_INVALID_VALUE;
         rb_set(ringAddr, RB_packetsAvail,
                ring.packets - (ring.dataUpper - ring.data) / ring.packetSize);
         rb_set(ringAddr, RB_mpeg, mpegAddr);
     }
-
-    /* Generate handle = dataPtr + 0x30, write it at *mpegAddr, and lay down the fake struct. */
-    uint32_t h = dataPtr + 0x30;
+    /* Write the handle at *mpegAddr and lay down the fake struct. */
     MEM_W32(mpegAddr, h);
     const char *lib = "LIBMPEG\0"; for (int i = 0; i < 8; i++) MEM_W8(h + (uint32_t)i, (uint8_t)lib[i]);
     const char *v = "001\0"; for (int i = 0; i < 4; i++) MEM_W8(h + 8 + (uint32_t)i, (uint8_t)v[i]);
     MEM_W32(h + 12, (uint32_t)-1);
     if (ringAddr) { MEM_W32(h + 16, ringAddr); MEM_W32(h + 20, rb_get(ringAddr, RB_dataUpperBound)); }
 
-    Mpeg *ctx = 0; for (int i = 0; i < 8; i++) if (!s_mpeg[i].used) { ctx = &s_mpeg[i]; break; }
-    if (!ctx) return SCE_MPEG_ERROR_NO_MEMORY;
     memset(ctx, 0, sizeof(*ctx));
     ctx->used = 1; ctx->handle = h; ctx->guestAddr = mpegAddr; ctx->ringAddr = ringAddr;
-    ctx->defaultFrameWidth = (int)frameWidth; ctx->pixelMode = 3; ctx->isAnalyzed = 0;
+    ctx->defaultFrameWidth = (int)frameWidth; ctx->pixelMode = 3;
     ctx->lastAuPts = -1;
     ctx->h264 = -1;
     sr_psmf_av_set_pictures_report(mpeg_pictures_report_all);
@@ -782,14 +799,7 @@ static void mpeg_pictures_report_all(const char *reason) {
 uint32_t mpeg_delete(uint32_t mpegAddr) {
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (!ctx) return (uint32_t)-1;
-    mpeg_pictures_report(ctx, "delete");
-    sr_movie_forget_owner(ctx->guestAddr);   /* its pictures are no longer movie frames (#2111) */
-#ifdef SR_SDL3VK
-    if (ctx->h264 >= 0) { sr_h264_destroy(ctx->h264); ctx->h264 = -1; }
-#endif
-    ycbcr_reset_mpeg(ctx->guestAddr);
-    mpeg_audio_close(ctx);
-    ctx->used = 0;
+    mpeg_release(ctx, "delete");
     return 0;
 }
 
@@ -797,8 +807,6 @@ uint32_t mpeg_query_stream_offset(uint32_t mpegAddr, uint32_t bufferAddr, uint32
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (!ctx || !bufferAddr || !offsetAddr) return (uint32_t)-1;
     analyze(bufferAddr, ctx);
-    ctx->isAnalyzed = 1;
-    ctx->headerAddr = bufferAddr;
     if (ctx->magic != PSMF_MAGIC) { MEM_W32(offsetAddr, 0); return SCE_MPEG_ERROR_INVALID_VALUE; }
     if (ctx->version < 0) { MEM_W32(offsetAddr, 0); return SCE_MPEG_ERROR_BAD_VERSION; }
     if ((ctx->offset & 2047) != 0 || ctx->offset == 0) { MEM_W32(offsetAddr, 0); return SCE_MPEG_ERROR_INVALID_VALUE; }
@@ -819,15 +827,12 @@ uint32_t mpeg_query_stream_size(uint32_t bufferAddr, uint32_t sizeAddr) {
 uint32_t mpeg_regist_stream(uint32_t mpegAddr, uint32_t streamType, uint32_t streamNum) {
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (!ctx) return (uint32_t)-1;
-    if (streamType == MPEG_AVC_STREAM) ctx->avcRegistered = 1;
-    else if (streamType == MPEG_ATRAC_STREAM || streamType == MPEG_AUDIO_STREAM) {
-        ctx->atracRegistered = 1;
+    if (streamType == MPEG_ATRAC_STREAM || streamType == MPEG_AUDIO_STREAM)
         mpeg_audio_open(ctx, (int)streamNum);
-    }
     uint32_t sid = s_streamIdGen++;
     for (int i = 0; i < 8; i++) if (!ctx->streams[i].used) {
         ctx->streams[i].used = 1; ctx->streams[i].type = (int)streamType;
-        ctx->streams[i].num = (int)streamNum; ctx->streams[i].sid = sid; ctx->streams[i].needsReset = 1;
+        ctx->streams[i].num = (int)streamNum; ctx->streams[i].sid = sid;
         ctx->streams[i].auMode = MPEG_AU_MODE_DECODE;
         break;
     }
@@ -857,24 +862,35 @@ uint32_t mpeg_query_atrac_es_size(uint32_t mpegAddr, uint32_t esSizeAddr, uint32
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (!ctx) return (uint32_t)-1;
     if (esSizeAddr) MEM_W32(esSizeAddr, MPEG_ATRAC_ES_SIZE);
-    if (outSizeAddr) MEM_W32(outSizeAddr, 8192);
+    if (outSizeAddr) MEM_W32(outSizeAddr, MPEG_ATRAC_ES_OUTPUT_SIZE);
     return 0;
 }
 uint32_t mpeg_init_au(uint32_t mpegAddr, uint32_t esBuffer, uint32_t auAddr) {
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (!ctx) return (uint32_t)-1;
     int isAvc = (esBuffer >= 1 && esBuffer <= 2 && ctx->esBuffers[esBuffer - 1]);
-    au_write_pts(auAddr, 0, isAvc ? 0 : 0);                 /* pts = 0 */
+    au_write_pts(auAddr, 0, 0);                             /* pts = 0 */
     au_write_pts(auAddr, 8, isAvc ? 0 : -1);                /* dts: AVC 0, Atrac UNKNOWN(-1) */
     MEM_W32(auAddr + 16, 0);                                /* esBuffer */
     MEM_W32(auAddr + 20, isAvc ? MPEG_AVC_ES_SIZE : MPEG_ATRAC_ES_SIZE);
     return 0;
 }
+static int mpeg_stream_is_audio(int type) {
+    return type == MPEG_ATRAC_STREAM || type == MPEG_AUDIO_STREAM;
+}
 uint32_t mpeg_unregist_stream(uint32_t mpegAddr, uint32_t sid) {
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (ctx) for (int i = 0; i < 8; i++) if (ctx->streams[i].used && ctx->streams[i].sid == sid) {
-        if (ctx->streams[i].type == MPEG_ATRAC_STREAM || ctx->streams[i].type == MPEG_AUDIO_STREAM)
-            mpeg_audio_close(ctx);
+        /* The audio demux belongs to the last registered ATRAC stream (mpeg_audio_open): it closes
+         * only when the stream going away is that one and no other registration of it remains. */
+        if (mpeg_stream_is_audio(ctx->streams[i].type) && ctx->streams[i].num == ctx->audioStreamNum) {
+            int owner_left = 0;
+            for (int j = 0; j < 8; j++)
+                if (j != i && ctx->streams[j].used && mpeg_stream_is_audio(ctx->streams[j].type) &&
+                    ctx->streams[j].num == ctx->audioStreamNum)
+                    owner_left = 1;
+            if (!owner_left) mpeg_audio_close(ctx);
+        }
         ctx->retiredSids[ctx->retiredNext] = sid;
         ctx->retiredNext = (ctx->retiredNext + 1u) % 8u;
         ctx->streams[i].used = 0;
@@ -1032,6 +1048,7 @@ uint32_t mpeg_ringbuffer_put(CpuState *s, uint32_t ring, uint32_t numPackets, ui
 }
 
 static int mpeg_stream_index(const Mpeg *ctx, uint32_t sid);
+static int mpeg_stream_retired(const Mpeg *ctx, uint32_t sid);
 /* sceMpegChangeGetAuMode(..., MPEG_AU_MODE_SKIP): the stream's AU getters hand out the clock and
  * consume no stream data until the mode returns to decode (PPSSPP's streamIgnoreMap, c9e2afb6).
  * UNMEASURED on this project's PSP; a guest PSMF player switches its streams this way when it
@@ -1041,16 +1058,11 @@ static int mpeg_stream_skipped(const Mpeg *ctx, uint32_t sid) {
     return index >= 0 && ctx->streams[index].auMode == (int)MPEG_AU_MODE_SKIP;
 }
 
-static Mpeg *au_stream(uint32_t mpegAddr, uint32_t sid, int *needsReset, int *num) {
-    Mpeg *ctx = mpeg_find(mpegAddr);
-    if (!ctx) return 0;
-    for (int i = 0; i < 8; i++) if (ctx->streams[i].used && ctx->streams[i].sid == sid) {
-        if (needsReset) *needsReset = ctx->streams[i].needsReset;
-        if (num) *num = ctx->streams[i].num;
-        ctx->streams[i].needsReset = 0;
-        return ctx;
-    }
-    return ctx;   /* stream not found still returns ctx; caller checks */
+/* The registered stream number of sid in ctx, or 0 for an id the context does not hold. */
+static int au_stream_num(const Mpeg *ctx, uint32_t sid) {
+    for (int i = 0; i < 8; i++) if (ctx->streams[i].used && ctx->streams[i].sid == sid)
+        return ctx->streams[i].num;
+    return 0;
 }
 
 uint32_t mpeg_get_avc_au(uint32_t mpegAddr, uint32_t sid, uint32_t auAddr, uint32_t attrAddr) {
@@ -1059,6 +1071,12 @@ uint32_t mpeg_get_avc_au(uint32_t mpegAddr, uint32_t sid, uint32_t auAddr, uint3
     if (!ctx) return (uint32_t)-1;
     uint32_t ring = ctx->ringAddr;
     if (!ring) return (uint32_t)-1;
+    /* The AU is checked before anything is written to it, as GetAtracAu checks it, and the id as
+     * ChangeGetAuMode checks it: one this context holds, or one it unregistered. */
+    if (!auAddr || (auAddr & 3u) || !sr_guest_span_writable(auAddr, 24u))
+        return mpeg_contract_error("sceMpegGetAvcAu", "invalid AU pointer", (uint32_t)-1);
+    if (mpeg_stream_index(ctx, sid) < 0 && !mpeg_stream_retired(ctx, sid))
+        return mpeg_contract_error("sceMpegGetAvcAu", "unknown stream", SCE_MPEG_ERROR_INVALID_VALUE);
     if (ctx->h264DemuxFailed) return h264_demux_error(ctx, auAddr);
     /* Real end-of-stream: the game has fed the whole movie (fedPackets >= totalPackets) and the
      * ring has drained. This mirrors PPSSPP's mediaengine->IsVideoEnd() without ffmpeg -- the movie
@@ -1076,8 +1094,7 @@ uint32_t mpeg_get_avc_au(uint32_t mpegAddr, uint32_t sid, uint32_t auAddr, uint3
         au_write_pts(auAddr, 0, -1); au_write_pts(auAddr, 8, -1);
         return SCE_MPEG_ERROR_NO_DATA;
     }
-    int needsReset = 0, num = 0;
-    au_stream(mpegAddr, sid, &needsReset, &num);
+    int num = au_stream_num(ctx, sid);
     if (mpeg_stream_skipped(ctx, sid)) {
         int64_t clock = ctx->videoPts + ctx->firstTimestamp;
         au_write_pts(auAddr, 0, clock);
@@ -1158,8 +1175,7 @@ uint32_t mpeg_get_atrac_au(uint32_t mpegAddr, uint32_t sid, uint32_t auAddr, uin
     if (!ring) return (uint32_t)-1;
     if (!auAddr || (auAddr & 3u) || !sr_guest_span_writable(auAddr, 24u))
         return mpeg_contract_error("sceMpegGetAtracAu", "invalid AU pointer", (uint32_t)-1);
-    int needsReset = 0, num = 0;
-    au_stream(mpegAddr, sid, &needsReset, &num);
+    int num = au_stream_num(ctx, sid);
     /* PSP/PPSSPP's libmpeg clock uses the PSMF presentation origin for ATRAC AUs.  In
      * particular, PPSSPP's sceMpeg implementation documents audioFirstTimestamp as 90000,
      * matching the PSMF first timestamp and the first AVC AU.  A raw private-stream PES PTS is
@@ -2234,17 +2250,13 @@ uint32_t mpeg_avc_decode_stop(uint32_t mpegAddr, uint32_t frameWidth, uint32_t b
     (void)mpegAddr; return 0;
 }
 
-/* sceMpegFlushAllStream(mpeg): reset stream analysis, clear queued packets,
- * and mark streams as needing reset. Public behaviour reference: PSPSDK
+/* sceMpegFlushAllStream(mpeg): clear the queued packets and start the audio and video demuxes
+ * over; the registered streams, their ids and AU modes stay. Public behaviour reference: PSPSDK
  * pspmpeg.h and PPSSPP Core/HLE/sceMpeg.cpp. */
 uint32_t mpeg_flush_all_stream(uint32_t mpegAddr) {
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (!ctx) return (uint32_t)-1;
-    ctx->isAnalyzed = 0;
     ctx->feedShort = 0;   /* the game refills from a new position */
-    for (int i = 0; i < 8; i++) {
-        if (ctx->streams[i].used) ctx->streams[i].needsReset = 1;
-    }
     if (ctx->ringAddr && sr_guest_span_writable(ctx->ringAddr, RB_BYTES)) {
         rb_set(ctx->ringAddr, RB_packetsRead, 0);
         rb_set(ctx->ringAddr, RB_packetsWritePos, 0);

@@ -56,6 +56,12 @@
 #include "perf.h"
 #include "pcm_wav_dump.h"
 
+/* White-box: the private title acceptance tool's container parser and entry point, compiled into
+ * this TU so its refusals are checked on synthetic containers (no title input). */
+#define main atrac3p_title_accept_main
+#include "atrac3p_title_accept.c"
+#undef main
+
 static int g_checks = 0;
 static int g_failures = 0;
 
@@ -352,6 +358,65 @@ static void test_invalid_gain_frame_refuses_once(void)
     atrac3p_bridge_destroy(bridge);
 }
 
+/* A synthetic RIFF/WAVE ATRAC3+ container of the layout the title tool parses: fmt (16 bytes),
+ * fact (4 bytes), then `frames` copies of `frame` (and the pad byte an odd chunk takes).  Returns its
+ * size, or 0 when it does not fit in `cap`. */
+static size_t title_riff(uint8_t *out, size_t cap, uint16_t channels, uint32_t rate, uint16_t align,
+                         uint32_t fact, uint32_t frames, const uint8_t *frame)
+{
+    const size_t data = (size_t)frames * align;
+    const size_t total = 12u + 8u + 16u + 8u + 4u + 8u + data + (data & 1u);   /* RIFF pad byte */
+    if (total > cap) return 0;
+    memset(out, 0, total);
+    memcpy(out, "RIFF", 4u);
+    const uint32_t riff = (uint32_t)(total - 8u);
+    for (int i = 0; i < 4; i++) out[4 + i] = (uint8_t)(riff >> (8 * i));
+    memcpy(out + 8, "WAVEfmt ", 8u);
+    out[16] = 16u;
+    out[20] = 0xfeu; out[21] = 0xffu;   /* WAVE_FORMAT_EXTENSIBLE, as the title stream */
+    out[22] = (uint8_t)channels;
+    for (int i = 0; i < 4; i++) out[24 + i] = (uint8_t)(rate >> (8 * i));
+    out[32] = (uint8_t)align; out[33] = (uint8_t)(align >> 8);
+    memcpy(out + 36, "fact", 4u);
+    out[40] = 4u;
+    for (int i = 0; i < 4; i++) out[44 + i] = (uint8_t)(fact >> (8 * i));
+    memcpy(out + 48, "data", 4u);
+    for (int i = 0; i < 4; i++) out[52 + i] = (uint8_t)((uint32_t)data >> (8 * i));
+    for (uint32_t f = 0; f < frames; f++) memcpy(out + 56 + (size_t)f * align, frame, align);
+    return total;
+}
+
+static void test_title_accept_refusals(void)
+{
+    uint8_t buf[256];
+    TitleStream ts;
+    size_t n = title_riff(buf, sizeof(buf), 1u, 44100u, sizeof(MONO_UNIT_FRAME), 2048u, 1u,
+                          MONO_UNIT_FRAME);
+    CHECK(n && accept_parse(buf, n, &ts) && ts.channels == 1u && ts.fact_samples == 2048u,
+          "title-accept: a well-formed synthetic container parses");
+    /* A fact count past 0x7fffffff, as atrac_parse_track refuses: its frame rounding once wrapped
+     * in 32 bits, so a stream far shorter than it declared passed the truncation check. */
+    n = title_riff(buf, sizeof(buf), 1u, 44100u, sizeof(MONO_UNIT_FRAME), 0xfffff900u, 1u,
+                   MONO_UNIT_FRAME);
+    CHECK(n && !accept_parse(buf, n, &ts), "title-accept: a fact count above 0x7fffffff is refused");
+    CHECK(accept_fact_frames(0xffffffffu) == 0x200000u && accept_fact_frames(2049u) == 2u,
+          "title-accept: the declared frame count rounds up without wrapping");
+    /* A zero sample rate has no duration: refused by name, not printed as inf. */
+    n = title_riff(buf, sizeof(buf), 1u, 0u, sizeof(MONO_UNIT_FRAME), 2048u, 1u, MONO_UNIT_FRAME);
+    CHECK(n && !accept_parse(buf, n, &ts), "title-accept: a zero sample rate is refused");
+    /* Only a missing input is SKIP (77); one that exists but cannot be opened as a file (here a
+     * directory) is a FAIL, never "not run". */
+    char missing[] = "atrac3p-title-accept-input-that-does-not-exist.sgb";
+    char dir[] = ".";
+    char tool[] = "atrac3p_title_accept";
+    char *argv_missing[] = { tool, missing, NULL };
+    char *argv_dir[] = { tool, dir, NULL };
+    CHECK(atrac3p_title_accept_main(2, argv_missing) == 77,
+          "title-accept: a missing input is SKIP (77)");
+    CHECK(atrac3p_title_accept_main(2, argv_dir) == 1,
+          "title-accept: an input that exists but cannot be read is FAIL, not SKIP");
+}
+
 int main(void)
 {
     sr_perf_init();
@@ -360,6 +425,7 @@ int main(void)
     test_terminator_decode();
     test_imdct_path_decode();
     test_invalid_gain_frame_refuses_once();
+    test_title_accept_refusals();
 
     atrac3p_bridge_destroy(NULL);   /* no-op */
 

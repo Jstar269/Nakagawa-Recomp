@@ -1289,9 +1289,10 @@ static uint32_t h_MpegAvcDecodeFlush(CpuState *s) {
     uint32_t mpegAddr = A0;
     if (!mpegAddr || !sr_guest_span_readable(mpegAddr, 4u)) return 0x80020003u;
 #ifndef SR_HLE_THREAD_SELFTEST
-    mpeg_avc_decode_flush(mpegAddr);
-#endif
+    return mpeg_avc_decode_flush(mpegAddr);   /* -1 for a handle no context has */
+#else
     return 0;
+#endif
 }
 void hle_register_mpeg_shared_handlers(void) {
     /* MPEG flush/destruct family: shared between selftest harness and production. */

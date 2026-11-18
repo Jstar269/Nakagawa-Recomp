@@ -5717,6 +5717,153 @@ static void test_mpeg_atrac_failure_named_per_context(void) {
     mpeg_finish();
 }
 
+/* sceMpegCreate with every host context in use refuses before it writes anything: the guest's
+ * handle word, the LIBMPEG struct and the ring a live context owns stay as they were.  A create
+ * over a live context's handle replaces that context, so one handle names one context. */
+static void test_mpeg_create_refusal_writes_nothing(void) {
+    enum {
+        CR_DESC = 0x08600000u, CR_DATA = 0x08610000u, CR_RING = 0x08630000u,
+        CR_RING_DATA = 0x086c0000u, CR_PACKETS = 16u, CR_SPARE_DESC = 0x08600f00u,
+        CR_SPARE_DATA = 0x08618000u,
+    };
+    const uint32_t sentinel = 0x5a5a5a5au;
+    mpeg_finish();
+    CHECK(mpeg_init() == 0u &&
+              mpeg_ringbuffer_construct(CR_RING, CR_PACKETS, CR_RING_DATA,
+                                        CR_PACKETS * MPEG_RING_BYTES_PER_PKT, 0u, 0u) == 0u,
+          "mpeg-create: the ring is set up");
+    int created = 1;
+    for (uint32_t i = 0; i < 8u; i++) {
+        MEM_W32(CR_DESC + i * 0x10u, 0u);
+        created &= mpeg_create(CR_DESC + i * 0x10u, CR_DATA + i * 0x100u, 0x10000u,
+                               i == 0u ? CR_RING : 0u, 512u, 0u, 0u) == 0u;
+    }
+    CHECK(created && mpeg_ringbuffer_available_size(CR_RING) == CR_PACKETS,
+          "mpeg-create: eight contexts, the first on the ring");
+    MEM_W32(CR_SPARE_DESC, sentinel);
+    MEM_W32(CR_SPARE_DATA + 0x30u, sentinel);
+    CHECK(mpeg_create(CR_SPARE_DESC, CR_SPARE_DATA, 0x10000u, CR_RING, 512u, 0u, 0u) ==
+              SCE_MPEG_ERROR_NO_MEMORY,
+          "mpeg-create: a ninth context is refused");
+    CHECK(MEM_R32(CR_SPARE_DESC) == sentinel && MEM_R32(CR_SPARE_DATA + 0x30u) == sentinel,
+          "mpeg-create: the refused create writes neither the handle nor the LIBMPEG struct");
+    CHECK(rb_get(CR_RING, RB_mpeg) == CR_DESC && mpeg_ringbuffer_available_size(CR_RING) == CR_PACKETS,
+          "mpeg-create: the ring stays with its live context after the refusal");
+    /* With a slot free again, a create over context 1's handle replaces context 1. */
+    CHECK(mpeg_delete(CR_DESC + 7u * 0x10u) == 0u, "mpeg-create: one context is deleted");
+    MEM_W32(CR_SPARE_DESC, 0u);
+    CHECK(mpeg_create(CR_SPARE_DESC, CR_DATA + 0x100u, 0x10000u, 0u, 512u, 0u, 0u) == 0u,
+          "mpeg-create: a create over a live context's handle succeeds");
+    unsigned same = 0, used = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!s_mpeg[i].used) continue;
+        used++;
+        if (s_mpeg[i].handle == CR_DATA + 0x100u + 0x30u) same++;
+    }
+    const Mpeg *now = mpeg_find(CR_SPARE_DESC);
+    CHECK(same == 1u && used == 7u && now && now->guestAddr == CR_SPARE_DESC,
+          "mpeg-create: the handle names one context, the new one");
+    mpeg_finish();
+}
+
+/* Unregistering an ATRAC stream closes the audio demux only when that stream owns it: a second
+ * registration replaces the demux, and the first one's unregister leaves the second's alone. */
+static void test_mpeg_unregist_keeps_the_registered_atrac_demux(void) {
+    enum { UA_DESC = 0x08600000u, UA_DATA = 0x08610000u };
+    mpeg_finish();
+    MEM_W32(UA_DESC, 0u);
+    CHECK(mpeg_init() == 0u && mpeg_create(UA_DESC, UA_DATA, 0x10000u, 0u, 512u, 0u, 0u) == 0u,
+          "mpeg-unregist: a context");
+    uint32_t first = mpeg_regist_stream(UA_DESC, MPEG_ATRAC_STREAM, 0u);
+    uint32_t second = mpeg_regist_stream(UA_DESC, MPEG_ATRAC_STREAM, 1u);
+    Mpeg *ctx = mpeg_find(UA_DESC);
+    CHECK(ctx && ctx->audioDemux && ctx->audioStreamNum == 1 && !ctx->audioDemuxFailed,
+          "mpeg-unregist: the second ATRAC registration's demux is open");
+    CHECK(mpeg_unregist_stream(UA_DESC, first) == 0u && ctx && ctx->audioDemux &&
+              ctx->audioStreamNum == 1,
+          "mpeg-unregist: unregistering the first ATRAC stream keeps the second's demux");
+    CHECK(mpeg_unregist_stream(UA_DESC, second) == 0u && ctx && !ctx->audioDemux,
+          "mpeg-unregist: unregistering the stream that owns the demux closes it");
+    mpeg_finish();
+}
+
+/* sceMpegGetAvcAu refuses an AU pointer it cannot write and a stream id the context never issued,
+ * as GetAtracAu and ChangeGetAuMode do, and writes nothing for either.  sceMpegAvcDecodeFlush on
+ * a handle no context has returns -1, as the other context calls do. */
+static void test_mpeg_get_avc_au_refusals(void) {
+    enum {
+        GA_DESC = 0x08600000u, GA_DATA = 0x08610000u, GA_RING = 0x08630000u, GA_AU = 0x08641000u,
+        GA_RING_DATA = 0x086c0000u, GA_PACKETS = 16u,
+    };
+    mpeg_finish();
+    MEM_W32(GA_DESC, 0u);
+    CHECK(mpeg_init() == 0u &&
+              mpeg_ringbuffer_construct(GA_RING, GA_PACKETS, GA_RING_DATA,
+                                        GA_PACKETS * MPEG_RING_BYTES_PER_PKT, 0u, 0u) == 0u &&
+              mpeg_create(GA_DESC, GA_DATA, 0x10000u, GA_RING, 512u, 0u, 0u) == 0u,
+          "mpeg-avc-au: the ring and its context are set up");
+    uint32_t avc = mpeg_regist_stream(GA_DESC, MPEG_AVC_STREAM, 0u);
+    CHECK(mpeg_get_avc_au(GA_DESC, avc, GA_AU, 0u) == SCE_MPEG_ERROR_NO_DATA,
+          "mpeg-avc-au: a registered stream with an empty ring has no data");
+    memset(SR_HOST(GA_AU), 0xa5, 32u);
+    CHECK(mpeg_get_avc_au(GA_DESC, avc, 0u, 0u) == 0xffffffffu,
+          "mpeg-avc-au: a NULL AU pointer is refused");
+    CHECK(mpeg_get_avc_au(GA_DESC, avc, GA_AU + 2u, 0u) == 0xffffffffu &&
+              guest_bytes_are(GA_AU, 32u, 0xa5u),
+          "mpeg-avc-au: a misaligned AU pointer is refused and nothing is written");
+    CHECK(mpeg_get_avc_au(GA_DESC, 0xfffffff0u, GA_AU, 0u) == SCE_MPEG_ERROR_INVALID_VALUE &&
+              guest_bytes_are(GA_AU, 32u, 0xa5u),
+          "mpeg-avc-au: a stream id never issued is refused and nothing is written");
+    CHECK(mpeg_unregist_stream(GA_DESC, avc) == 0u &&
+              mpeg_get_avc_au(GA_DESC, avc, GA_AU, 0u) == SCE_MPEG_ERROR_NO_DATA,
+          "mpeg-avc-au: an id this context unregistered is still answered, as ChangeGetAuMode answers it");
+    mpeg_finish();
+    hle_register_mpeg_shared_handlers();
+    MEM_W32(GA_DESC, GA_DATA + 0x30u);   /* the deleted context's handle */
+    CHECK(guest_mpeg_import(0x4571cc64u, GA_DESC, 0u, 0u, 0u, 0u) == 0xffffffffu,
+          "mpeg-avc-au: AvcDecodeFlush on a handle no context has returns -1");
+}
+
+/* Every context's H.264 instance goes back to the backend's pool when the context is deleted or
+ * sceMpegFinish runs, in every build that creates one, so a title that plays more movies than the
+ * pool holds still decodes the last one. */
+static void test_mpeg_h264_instances_return_to_the_pool(void) {
+    enum {
+        HP_DESC = 0x08600000u, HP_DATA = 0x08610000u, HP_RING = 0x08630000u,
+        HP_RING_DATA = 0x086c0000u, HP_PACKETS = 4u, HP_CYCLES = 12u,
+    };
+    if (!sr_h264_backend_available()) {
+        fprintf(stderr, "SKIP: the H.264 pool check needs a real H.264 backend\n");
+        return;
+    }
+    for (int via_finish = 0; via_finish < 2; via_finish++) {
+        mpeg_finish();
+        int ok = 1;
+        unsigned ran = 0;
+        for (unsigned cycle = 0; cycle < HP_CYCLES && ok; cycle++) {
+            MEM_W32(HP_DESC, 0u);
+            memset(SR_HOST(HP_RING_DATA), 0, HP_PACKETS * MPEG_PACKET_SIZE);
+            if (mpeg_init() != 0u ||
+                mpeg_ringbuffer_construct(HP_RING, HP_PACKETS, HP_RING_DATA,
+                                          HP_PACKETS * MPEG_RING_BYTES_PER_PKT, 0u, 0u) != 0u ||
+                mpeg_create(HP_DESC, HP_DATA, 0x10000u, HP_RING, 512u, 0u, 0u) != 0u) {
+                ok = 0;
+                break;
+            }
+            (void)mpeg_ringbuffer_put(NULL, HP_RING, HP_PACKETS, HP_PACKETS);
+            const Mpeg *ctx = mpeg_find(HP_DESC);
+            ok = ctx && ctx->h264Init && ctx->h264 >= 0;
+            ran += (unsigned)ok;
+            if (via_finish) (void)mpeg_finish();
+            else ok &= mpeg_delete(HP_DESC) == 0u;
+        }
+        CHECK(ok && ran == HP_CYCLES,
+              via_finish ? "mpeg-h264-pool: every create/finish cycle gets an H.264 instance"
+                         : "mpeg-h264-pool: every create/delete cycle gets an H.264 instance");
+    }
+    mpeg_finish();
+}
+
 /* sceMpegFlushAllStream: the game refills the ring from another position.  The H.264 demux,
  * which RingbufferPut feeds at put time, starts over with it, and so do the feed's end and the
  * packet accounting (PPSSPP reloads its media engine at the first put after the flush).
@@ -6727,6 +6874,10 @@ int main(int argc, char **argv) {
     test_mpeg_atrac_untaken_backlog_is_bounded();
     test_mpeg_atrac_failure_named_per_context();
     test_mpeg_flush_restarts_the_video();
+    test_mpeg_h264_instances_return_to_the_pool();
+    test_mpeg_create_refusal_writes_nothing();
+    test_mpeg_unregist_keeps_the_registered_atrac_demux();
+    test_mpeg_get_avc_au_refusals();
     test_mpeg_avc_decode_detail();
     test_psmf_contract_fragmentation_and_malformed_rejection();
     if (fuzz_iterations) test_legacy_demux_mutations(fuzz_iterations);
