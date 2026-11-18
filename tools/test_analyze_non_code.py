@@ -298,15 +298,16 @@ class NonCodeOverlayTest(unittest.TestCase):
                 return items
             return order
 
-        outputs = []
-        for seed in (1,):
-            with mock.patch.object(analyze, "_entry_order", shuffled(seed)):
-                module, _ = translate(self.overlay)
-            outputs.append(("\n".join(codegen.runtime_module_descriptor_lines(module)),
-                            [str(t) for t in module.texts], module.non_code, module.spans))
+        orders = (("seed-1", shuffled(1)), ("seed-7", shuffled(7)),
+                  ("reverse", lambda entries: sorted(entries, reverse=True)))
         expected = ("\n".join(codegen.runtime_module_descriptor_lines(self.module)),
                     [str(t) for t in self.module.texts], self.module.non_code, self.module.spans)
-        self.assertEqual(outputs, [expected])
+        for name, order in orders:
+            with self.subTest(order=name), mock.patch.object(analyze, "_entry_order", order):
+                module, _ = translate(self.overlay)
+                self.assertEqual(("\n".join(codegen.runtime_module_descriptor_lines(module)),
+                                  [str(t) for t in module.texts], module.non_code, module.spans),
+                                 expected)
 
     def test_the_withdrawal_only_grows_and_ends(self):
         passes = self.passes
@@ -1062,16 +1063,19 @@ def generated_digest(image, base):
         work = pathlib.Path(tmp)
         (work / "guest.elf").write_bytes(image)
         cwd = os.getcwd()
-        environment = {key: os.environ.pop(key) for key in
-                       ("TITLE_EXTRA_SPANS", "HST_EXTRA_SPANS", "GAME_BASE") if key in os.environ}
-        os.chdir(work)
+        environment = {}
         try:
+            environment = {key: os.environ.pop(key) for key in
+                           ("TITLE_EXTRA_SPANS", "HST_EXTRA_SPANS", "GAME_BASE") if key in os.environ}
+            os.chdir(work)
             with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
                 rc = codegen.main(["codegen.py", "guest.elf", "guest_recomp.c", f"--base={base}",
                                    "--profile=none"])
         finally:
-            os.chdir(cwd)
-            os.environ.update(environment)
+            try:
+                os.chdir(cwd)
+            finally:
+                os.environ.update(environment)
         assert rc == 0, rc
         for path in sorted(p for p in work.iterdir() if p.name != "guest.elf"):
             digest.update(path.name.encode())
@@ -1195,6 +1199,18 @@ class PublicFixtureTest(unittest.TestCase):
     GUESTS = ("cosim", "display_smoke", "production_smoke", "snapshot")
     LOAD = 0x08804000
 
+    def test_generated_digest_restores_title_environment_when_chdir_fails(self):
+        expected = {
+            "TITLE_EXTRA_SPANS": "0x00420000,0x00420400",
+            "HST_EXTRA_SPANS": "legacy-value",
+            "GAME_BASE": "0x08804000",
+        }
+        with mock.patch.dict(os.environ, expected), \
+                mock.patch.object(os, "chdir", side_effect=OSError("synthetic chdir failure")):
+            with self.assertRaisesRegex(OSError, "synthetic chdir failure"):
+                generated_digest(b"synthetic fixture", 0)
+            self.assertEqual({key: os.environ.get(key) for key in expected}, expected)
+
     def text(self, generator):
         if "frames" in generator.build_text_segment.__code__.co_varnames:
             return generator.build_text_segment(generator.DEFAULT_FRAMES)
@@ -1222,7 +1238,12 @@ class PublicFixtureTest(unittest.TestCase):
                       ("exec", fixed_executable((), self.LOAD, self.text(generator)), "0"))
             for kind, image, base in images:
                 with self.subTest(name=name, image=kind):
-                    self.assertEqual(generated_digest(image, base), self.MAIN_DIGESTS[(name, kind)])
+                    generated = generated_digest(image, base)
+                    with stock_analysis():
+                        without_withdrawal = generated_digest(image, base)
+                    self.assertEqual(generated, without_withdrawal,
+                                     "the non-code withdrawal changed code-only output")
+                    self.assertEqual(generated, self.MAIN_DIGESTS[(name, kind)])
 
     def test_a_module_with_relocations_is_untouched(self):
         # Each guest as its loader sees it, a PRX with its relocation map: analysed exactly

@@ -1094,15 +1094,20 @@ class TitleCodegenPlanTests(unittest.TestCase):
 
     def test_cli_emits_json_and_never_executes_codegen(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            out_c = Path(temp) / "build" / "synthetic" / "synthetic_recomp.c"
+            build_dir = Path(temp) / "build" / "synthetic"
+            out_c = build_dir / "synthetic_recomp.c"
             proc = subprocess.run([
                 sys.executable, str(ROOT / "tools" / "title_codegen_plan.py"),
                 str(self.synthetic_path), "--game-name=synthetic",
-                "--game-elf=tests/fixtures/synthetic.elf", "--build-dir=build/synthetic",
+                "--game-elf=tests/fixtures/synthetic.elf", f"--build-dir={build_dir}",
                 "--profile=none",
             ], cwd=ROOT, capture_output=True, text=True, check=False)
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertEqual(json.loads(proc.stdout)["game_name"], "synthetic")
+            plan = json.loads(proc.stdout)
+            self.assertEqual(plan["game_name"], "synthetic")
+            # out_c is the file the planned codegen command would write, so its absence shows
+            # the planner did not run codegen.
+            self.assertIn(out_c, [Path(arg) for arg in plan["commands"]["codegen"]])
             self.assertFalse(out_c.exists())
 
     def test_resolve_make_safe_build_root_priority(self) -> None:

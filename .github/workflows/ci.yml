@@ -1613,6 +1613,16 @@ jobs:
           python tools/ppmdiff.py --threshold 3 build/verify/snap build/verify/gold
           python -c "import json; r=json.load(open('visual_regression_report.json')); exit(1 if r['summary']['failed_frames'] > 0 else 0)"
 
+      # The Python shards have no PSPDEV, so they report the showcase half of the analysis IR
+      # module gate as NOT_RUN. This part installs PSPDEV, so the gate runs here on the
+      # showcase PRXs built from source; NK_ANALYSIS_IR_SHOWCASE_REQUIRED turns a missing
+      # PSPDEV into a failure instead of a skip.
+      - name: Run the analysis IR module gate on the showcase PRXs
+        if: matrix.part == 'translation'
+        env:
+          NK_ANALYSIS_IR_SHOWCASE_REQUIRED: "1"
+        run: python -m unittest -v tools.test_analysis_ir.AnalysisIrModuleGateTests
+
   linux_gcc16:
     name: Linux GCC 16 canary
     # A released GCC 16.2 on Linux, beside native_tools (ubuntu-24.04, GCC 13.3), not instead of

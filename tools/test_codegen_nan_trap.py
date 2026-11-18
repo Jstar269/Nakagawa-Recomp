@@ -533,7 +533,7 @@ class TestEveryTrappedVfpuFormCompiles(unittest.TestCase):
                                 | size_bits[size])
                         try:
                             text = codegen.effect(0x00001000, word, options=options)[0]
-                        except Exception:
+                        except codegen.Unsupported:
                             continue
                         if text and "SR_NAN_TRAP" in text and text not in snippets:
                             snippets[text] = f"0x{word:08x}"
@@ -646,8 +646,8 @@ class TrapHarness:
 
     @staticmethod
     def run_exe(exe: Path, env: dict[str, str]) -> tuple[subprocess.CompletedProcess, list[str]]:
-        environ = dict(os.environ)
-        environ.setdefault("SR_VBL", "4711")
+        environ = {key: value for key, value in os.environ.items() if not key.startswith("SR_")}
+        environ["SR_VBL"] = "4711"
         environ.update(env)
         result = subprocess.run([os.fspath(exe)], capture_output=True, text=True,
                                 env=environ, cwd=ROOT)
@@ -676,6 +676,27 @@ class TrapRunnerContractTests(unittest.TestCase):
         with mock.patch.object(subprocess, "run", return_value=crashed):
             with self.assertRaisesRegex(AssertionError, "exited with -11"):
                 TrapHarness.run_exe(Path("fixture"), {})
+
+    def test_run_exe_clears_inherited_sr_overrides_before_applying_case_env(self):
+        completed = subprocess.CompletedProcess(["fixture"], 0, stdout="RESULT=ok\n", stderr="")
+        inherited = {
+            "SR_VBL": "90210",
+            "SR_NAN_TRAP_LIMIT": "0",
+            "SR_FLIGHT": "fault,sched;8",
+            "SR_FLIGHT_OUTPUT": "fixture-output.json",
+            "SR_TEST_SENTINEL": "inherited",
+        }
+        with mock.patch.dict(os.environ, inherited), \
+                mock.patch.object(subprocess, "run", return_value=completed) as run:
+            TrapHarness.run_exe(Path("fixture"), {"ARG": "case", "SR_NAN_TRAP_LIMIT": "3"})
+
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(child_env["SR_VBL"], "4711")
+        self.assertEqual(child_env["SR_NAN_TRAP_LIMIT"], "3")
+        self.assertNotIn("SR_FLIGHT", child_env)
+        self.assertNotIn("SR_FLIGHT_OUTPUT", child_env)
+        self.assertNotIn("SR_TEST_SENTINEL", child_env)
+        self.assertEqual(child_env["ARG"], "case")
 
 
 class TestScalarFpuTrap(TrapHarness, unittest.TestCase):
@@ -1350,6 +1371,14 @@ class TestFiniteResultIsSilent(unittest.TestCase):
                 self.assertFalse(result.skipped, result.skipped)
                 self.assertFalse(result.errors, result.errors)
                 self.assertFalse(result.failures, result.failures)
+
+
+class TrapSweepExceptionTests(unittest.TestCase):
+    def test_sweep_propagates_generator_bugs_instead_of_dropping_forms(self):
+        sweep = TestEveryTrappedVfpuFormCompiles("test_all_trapped_vfpu_statements_compile").sweep
+        with mock.patch.object(codegen, "effect", side_effect=TypeError("synthetic generator bug")):
+            with self.assertRaisesRegex(TypeError, "synthetic generator bug"):
+                sweep()
 
 
 if __name__ == "__main__":

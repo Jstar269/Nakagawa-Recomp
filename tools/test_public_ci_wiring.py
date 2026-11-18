@@ -1167,6 +1167,8 @@ _NATIVE_SERIAL_GATES = {
         "CC=gcc python tools/codegen_gate.py build/microtest_b.elf build/microtest_b.trace build/verify",
     "Run synthetic framebuffer-memory parity checks (A/B framebuffer diffs)":
         "python tools/ppmdiff.py --threshold 3 build/verify/snap build/verify/gold",
+    "Run the analysis IR module gate on the showcase PRXs":
+        "run: python -m unittest -v tools.test_analysis_ir.AnalysisIrModuleGateTests",
 }
 # Steps every part repeats: the toolchain and library setup and the build directory.
 _NATIVE_EVERY_PART = (
@@ -2271,6 +2273,7 @@ class CoverageWiringTests(unittest.TestCase):
         "Generate golden oracle trace (Gate B)": "a codegen gate",
         "Run recompiler codegen gate (Gate B — Allegrex extensions)": "a codegen gate",
         "Run synthetic framebuffer-memory parity checks (A/B framebuffer diffs)": "a codegen gate",
+        "Run the analysis IR module gate on the showcase PRXs": "a Python test",
     }
 
     def setUp(self) -> None:
