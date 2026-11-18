@@ -2191,6 +2191,156 @@ static void test_stale_hook_redirects_to_interpreter(void) {
     sr_exec_span_reset();
 }
 
+/* Portable environment setter for the child cases below; "" removes the variable. */
+static void set_env_var(const char *name, const char *value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    if (value[0]) setenv(name, value, 1);
+    else unsetenv(name);
+#endif
+}
+
+/* ---- a configured alias honours the TD-27 stale redirect ---------------------------
+ *
+ * Runs in a child started with SR_STALE_DETECT=1 (the gate is read once per process).
+ * The alias destination owns a registered AOT body and codegen-shaped stale records for
+ * its original words; after the guest overwrites a word and the invalidate-time check
+ * fires, a dispatch through the alias SOURCE must run the new bytes through the
+ * interpreter exactly as a direct dispatch to the destination does, never the AOT body
+ * translated from the old ones. The gate-on direction of the direct-dispatch test above
+ * runs here too. Returns 0 when every check holds. */
+static int run_stale_alias_child(void) {
+    if (!sr_stale_enabled()) {
+        fprintf(stderr, "stale alias child: SR_STALE_DETECT did not arm the gate\n");
+        return 2;
+    }
+    test_stale_hook_redirects_to_interpreter();
+
+    const SrTitleRuntimeConfig *cfg = sr_title_config();
+    if (cfg->dispatch_alias_count == 0u) return g_failures ? 1 : 0;
+    const uint32_t from = cfg->dispatch_aliases[0].from;
+    const uint32_t to = cfg->dispatch_aliases[0].to;
+    const uint32_t resume = to + 0x0cu;
+    const uint32_t orig_words[3] = {
+        STALE_ADDIU_V0(STALE_ORIG_IMM), 0x03e00008u, 0x00000000u,
+    };
+    uint32_t bad = 0u, exp = 0u, act = 0u;
+
+    sr_stale_reset();
+    sr_exec_span_reset();
+    for (uint32_t i = 0; i < 3u; i++) MEM_W32(to + 4u * i, orig_words[i]);
+    sr_stale_register_word(to, orig_words[0]);
+    sr_stale_register_block(to, 3u, sr_stale_fnv1a(orig_words, 3u));
+    CHECK(sr_exec_span_register(to, resume), "alias destination span registration failed");
+    sr_register(to, stale_aot_body);
+
+    MEM_W32(to, STALE_ADDIU_V0(STALE_NEW_IMM));
+    CHECK(sr_stale_check_range(to, 12u, stale_test_mem_read, NULL, &bad, &exp, &act) == 1 &&
+              sr_stale_block_is_stale(to) == 1,
+          "the overwritten alias destination 0x%08x did not read as stale", to);
+
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    s.pc = PROBE_PC;
+    s.r[29] = 0x00400000u;
+    s.r[31] = resume;
+    s.r[2] = 0xdeadbeefu;
+    g_stale_aot_hits = 0;
+    int rc = dispatch_call_try(&s, from, resume);
+    CHECK(rc == SR_GUEST_INTERP_CALL_RETURN && g_stale_aot_hits == 0,
+          "alias 0x%08x -> 0x%08x entered the stale AOT body (rc=%d hits=%d)",
+          from, to, rc, g_stale_aot_hits);
+    CHECK(s.r[2] == STALE_NEW_IMM && s.pc == resume,
+          "alias 0x%08x did not follow the destination's NEW bytes (v0=0x%08x pc=0x%08x)",
+          from, s.r[2], s.pc);
+
+    sr_stale_reset();
+    sr_exec_span_reset();
+    return g_failures ? 1 : 0;
+}
+
+static void test_configured_alias_honours_stale_redirect(const char *self_path) {
+    int status = run_dispatch_child(self_path, "--stale-alias-child");
+    CHECK(status == 0, "a configured alias or direct dispatch ignored the stale redirect "
+          "with SR_STALE_DETECT=1 (child status=%d)", status);
+}
+
+/* ---- named stops end the run with status 1, never a host crash ----------------------
+ *
+ * AGENTS.md: no host crash to signal a gap. An unsupported form (sr_unimplemented) and a
+ * raw MIPS syscall (sr_raw_syscall) are named stops like every other boundary in
+ * recomp.c: the child prints its line and exits with status 1. abort() instead reads as
+ * status 3 on Windows and as a signal (status -1 here) on POSIX hosts. */
+static void test_named_stops_exit_instead_of_crashing(const char *self_path) {
+    static const char *const modes[] = { "--unimplemented-child", "--raw-syscall-child" };
+    for (size_t i = 0; i < sizeof modes / sizeof modes[0]; i++) {
+        int status = run_dispatch_child(self_path, modes[i]);
+        CHECK(status == 1, "%s did not stop with status 1 (status=%d)", modes[i], status);
+    }
+}
+
+/* ---- SR_TRACE_PC: only in-window instructions write records -------------------------
+ *
+ * The child arms a window around TRACE_IN_PC and runs one in-window instruction, then two
+ * out of the window, through the production hooks sr_begin_impl/sr_end_impl. The window
+ * file must hold exactly the one in-window record: an out-of-window instruction must
+ * write nothing, rather than a record labelled with the last in-window pc. */
+#define TRACE_IN_PC  0x00651000u
+#define TRACE_OUT_PC 0x00652000u
+
+static int run_trace_window_child(const char *self_path) {
+    char stream_path[512];
+    snprintf(stream_path, sizeof stream_path, "%s.trace-stream.txt", self_path);
+    sr_trace_window_configure();
+    if (!sr_trace_window_armed() || sr_trace_open(stream_path, "selftest", TRACE_IN_PC) != 0) {
+        fprintf(stderr, "trace window child: the window or the trace stream did not open\n");
+        return 2;
+    }
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    sr_begin_impl(&s, TRACE_IN_PC, STALE_ADDIU_V0(1u));
+    s.r[2] = 1u;
+    sr_end_impl(&s, 0u, 0);
+    sr_begin_impl(&s, TRACE_OUT_PC, STALE_ADDIU_V0(2u));
+    s.r[2] = 2u;
+    sr_end_impl(&s, 0u, 0);
+    sr_begin_impl(&s, TRACE_OUT_PC + 4u, STALE_ADDIU_V0(3u));
+    s.r[2] = 3u;
+    sr_end_impl(&s, 0u, 0);
+    sr_trace_close();
+    remove(stream_path);
+    return 0;
+}
+
+static void test_trace_window_records_only_in_window_instructions(const char *self_path) {
+    char window_path[512], window[64];
+    snprintf(window_path, sizeof window_path, "%s.trace-window.txt", self_path);
+    snprintf(window, sizeof window, "0x%08x:0x%08x", TRACE_IN_PC, TRACE_IN_PC + 3u);
+    remove(window_path);
+    set_env_var("SR_TRACE_PC", window);
+    set_env_var("SR_TRACE", window_path);
+    int status = run_dispatch_child(self_path, "--trace-window-child");
+    set_env_var("SR_TRACE_PC", "");
+    set_env_var("SR_TRACE", "");
+    CHECK(status == 0, "trace window child failed (status=%d)", status);
+
+    unsigned records = 0u, in_window = 0u;
+    char line[4096];
+    FILE *fp = fopen(window_path, "rb");
+    CHECK(fp != NULL, "trace window file was not written");
+    while (fp && fgets(line, sizeof line, fp)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\0') continue;
+        records++;
+        if (strstr(line, "pc=0x00651000 ") && strstr(line, " r2=0x00000001")) in_window++;
+    }
+    if (fp) fclose(fp);
+    remove(window_path);
+    CHECK(records == 1u && in_window == 1u,
+          "the window holds %u record(s), %u of them the in-window instruction; "
+          "out-of-window instructions must write none", records, in_window);
+}
+
 /* ---- #1375: a null code pointer vs. the offset-0 function of a zero-based image ----
  *
  * The synthetic image is based at 0: its offset-0 function is registered at guest
@@ -2739,6 +2889,9 @@ static void test_host_entries_return_through_the_host_return_address(const char 
 }
 
 int main(int argc, char **argv) {
+    /* The stale-code gate is read once per process, so its child arms it first. */
+    if (argc == 2 && strcmp(argv[1], "--stale-alias-child") == 0)
+        set_env_var("SR_STALE_DETECT", "1");
     sr_mem_init();
     /* `--watch ADDR:LEN` arms SR_WATCH for this run (and the children it starts), so
      * memory-watch-selftest can run one binary under two ranges without a sub-make. */
@@ -2780,6 +2933,19 @@ int main(int argc, char **argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--host-tail-return-child") == 0)
         return run_host_tail_return_child();
+    if (argc == 2 && strcmp(argv[1], "--stale-alias-child") == 0)
+        return run_stale_alias_child();
+    if (argc == 2 && strcmp(argv[1], "--trace-window-child") == 0)
+        return run_trace_window_child(argv[0]);
+    if (argc == 2 && strcmp(argv[1], "--unimplemented-child") == 0) {
+        sr_unimplemented(PROBE_PC, "synthetic unsupported form");
+        return 99; /* fail-open: a named stop must never return */
+    }
+    if (argc == 2 && strcmp(argv[1], "--raw-syscall-child") == 0) {
+        CpuState s = nullptr_state(PROBE_PC);
+        sr_raw_syscall(&s, 0x1u, PROBE_PC);
+        return 99; /* fail-open: a named stop must never return */
+    }
     if (argc == 2 && strcmp(argv[1], "--null-return-child") == 0) {
         CpuState s = nullptr_state(PROBE_PC);
         SR_AOT_RETURN_CAPTURE(&s, 0u);
@@ -2827,6 +2993,9 @@ int main(int argc, char **argv) {
     test_configured_aliases_redirect();
     test_foreign_aliases_do_not_redirect();
     test_stale_hook_redirects_to_interpreter();
+    test_configured_alias_honours_stale_redirect(argv[0]);
+    test_named_stops_exit_instead_of_crashing(argv[0]);
+    test_trace_window_records_only_in_window_instructions(argv[0]);
     test_null_code_pointer_is_not_the_offset0_function(argv[0]);
     test_host_entries_return_through_the_host_return_address(argv[0]);
 

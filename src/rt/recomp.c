@@ -813,10 +813,13 @@ static int sr_heap_freelist_unlink(uint32_t target) {
  * allocator header (bitmap), the sizes make the blocks exactly physically
  * adjacent, and the neighbour's allocation bit is clear.  A stray footer-shaped
  * word inside an allocated neighbour's payload therefore cannot trigger a bad
- * merge.  Absorbed metadata words are zeroed so the merged block keeps free()'s
- * clean-payload guarantee.  The caller must have marked hdr and prepared its
- * payload.  Because merging keeps the free list short, the first-fit allocation
- * scan stays O(small) instead of degrading with fragmentation. */
+ * merge.  Absorbed header and footer words are zeroed so no stale tag survives
+ * as interior payload for the boundary-tag and free-list checks to misread.  A
+ * free block otherwise keeps its payload (sr_newlib_free); handing out zeroed
+ * payload is the job of sr_newlib_malloc's reuse clear and sr_newlib_realloc's
+ * growth clear.  The caller must have marked hdr and prepared its payload.
+ * Because merging keeps the free list short, the first-fit allocation scan
+ * stays O(small) instead of degrading with fragmentation. */
 static void sr_heap_free_block(uint32_t hdr, uint32_t size) {
     /* Forward: absorb the next physical block if it is a valid free block. */
     uint32_t next_hdr = hdr + size;
@@ -888,14 +891,33 @@ static void sr_heap_free_block(uint32_t hdr, uint32_t size) {
     sr_heap_set_free_state(hdr, 1);
 }
 
+/* Zero guest [from, to), a word-aligned span of the heap arena (plain main RAM).
+ * With no store instrumentation armed (sr_store_plain) each MEM_W32 is a plain
+ * host write, so one bulk fill writes the same bytes; with any watch armed every
+ * word still passes the store hooks it always did. */
+static void sr_heap_zero_span(uint32_t from, uint32_t to) {
+    if (to <= from) return;
+    if (sr_store_plain() && sr_guest_fill(from, 0u, to - from)) return;
+    for (uint32_t a = from; a < to; a += 4u) MEM_W32(a, 0u);
+}
+
+/* Copy guest [src, src+size) to [dst, dst+size), two distinct heap blocks, with the
+ * same plain-store shortcut as sr_heap_zero_span. */
+static void sr_heap_copy_span(uint32_t dst, uint32_t src, uint32_t size) {
+    if (sr_store_plain() && sr_guest_memmove(dst, src, size)) return;
+    uint32_t off = 0u;
+    for (; off + 4u <= size; off += 4u)
+        MEM_W32(dst + off, MEM_R32(src + off));
+    for (; off < size; ++off)
+        MEM_W8(dst + off, MEM_R8(src + off));
+}
+
 /* Insert one already-partitioned block into the host free list.  Callers write
  * and mark the header before exposing the block as free so SR_HEAP_WATCH does
  * not mistake allocator-owned metadata initialization for a guest overwrite. */
 static void sr_heap_link_free_block(uint32_t hdr, uint32_t size, int clear_payload) {
     sr_heap_mark_header(hdr);
-    if (clear_payload) {
-        for (uint32_t off = 8u; off < size; off += 4u) MEM_W32(hdr + off, 0u);
-    }
+    if (clear_payload) sr_heap_zero_span(hdr + 8u, hdr + size);
     sr_heap_free_block(hdr, size);
 }
 
@@ -983,10 +1005,7 @@ uint32_t sr_newlib_malloc(uint32_t size, uint32_t guest_ra) {
             /* A freed block keeps its last occupant's bytes (sr_newlib_free). Clear the
              * part this allocation takes, so a reused block starts as clean as a fresh one;
              * a split-off remainder is cleared when it is handed out in turn. */
-            {
-                uint32_t used = remainder >= 16u ? alloc : block_size;
-                for (uint32_t off = 8u; off < used; off += 4u) MEM_W32(cur + off, 0u);
-            }
+            sr_heap_zero_span(cur + 8u, cur + (remainder >= 16u ? alloc : block_size));
             if (remainder >= 16u) {
                 MEM_W32(cur + 4u, alloc | 1u);
                 uint32_t new_block = cur + alloc;
@@ -1198,10 +1217,7 @@ uint32_t sr_newlib_realloc(uint32_t ptr, uint32_t size, uint32_t guest_ra) {
                 uint32_t trailing = combined - wanted_total;
                 /* The absorbed successor still holds its last occupant's bytes; the
                  * grown part of the allocation starts clean. */
-                {
-                    uint32_t grown_end = hdr + (trailing >= 16u ? wanted_total : combined);
-                    for (uint32_t a = next_hdr + 8u; a < grown_end; a += 4u) MEM_W32(a, 0u);
-                }
+                sr_heap_zero_span(next_hdr + 8u, hdr + (trailing >= 16u ? wanted_total : combined));
                 if (trailing >= 16u) {
                     MEM_W32(hdr + 4u, wanted_total | 1u);
                     sr_heap_link_free_block(hdr + wanted_total, trailing, 1);
@@ -1217,11 +1233,7 @@ uint32_t sr_newlib_realloc(uint32_t ptr, uint32_t size, uint32_t guest_ra) {
     if (replacement == 0u) return 0u;  /* realloc leaves the old allocation intact */
     uint32_t copy_size = old_total - 8u;
     if (copy_size > size) copy_size = size;
-    uint32_t off = 0u;
-    for (; off + 4u <= copy_size; off += 4u)
-        MEM_W32(replacement + off, MEM_R32(ptr + off));
-    for (; off < copy_size; ++off)
-        MEM_W8(replacement + off, MEM_R8(ptr + off));
+    sr_heap_copy_span(replacement, ptr, copy_size);
     sr_newlib_free(ptr, guest_ra);
     return replacement;
 }
@@ -1269,7 +1281,9 @@ void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {
     /* Production behavior: unsupported raw MIPS syscall is explicit/fatal/diagnostic. */
     fprintf(stderr, "Fatal error: unsupported raw MIPS syscall 0x%" PRIx32 " at pc=0x%08" PRIx32 "\n", code, pc);
     sr_flight_fatal(SR_FLIGHT_KIND_FATAL_RAW_SYSCALL, pc, code, 0u);
-    abort();
+    /* A named stop, not a host crash (AGENTS.md section 6). */
+    fflush(stderr);
+    exit(1);
 }
 #endif
 
@@ -1642,7 +1656,8 @@ RecompFn sr_lookup(uint32_t addr) {
     RecompFn module_fn = sr_module_code_lookup(addr, &in_bound_module);
     if (in_bound_module) return module_fn;
     RecompFn fn = (RecompFn)sr_dtab_lookup(&g_dtab, addr);
-    return fn && sr_exec_span_owns_fetch(addr) ? fn : NULL;
+    /* Outside every bound image, so only the static spans can own the fetch. */
+    return fn && sr_exec_span_owns_static_fetch(addr) ? fn : NULL;
 }
 
 /* Registered once from sr_register_all() before any guest thread runs; read-only after. */
@@ -2957,6 +2972,12 @@ static int dispatch_try_with_boundary(
         if (sr_title_config_dispatch_alias(target, &alias_target)) {
             RecompFn aliased = sr_lookup(alias_target);
             if (aliased) {
+                /* The aliased body is a registered body like any other: when the guest
+                 * has overwritten its bytes, run the live ones (TD-27, as below). */
+                if (sr_stale_block_is_stale(alias_target)) {
+                    sr_perf_interp_set_reason(SR_PERF_INTERP_STALE_BLOCK);
+                    return dispatch_run_interp(s, alias_target, call_boundary, drain);
+                }
                 dispatch_call_aot(aliased, s, alias_target, call_boundary, drain);
                 return dispatch_after_aot(s, call_boundary, drain);
             }
@@ -3635,7 +3656,9 @@ void sr_hle_call(CpuState *s, uint32_t nid) {
 void sr_unimplemented(uint32_t pc, const char *reason) {
     fprintf(stderr, "sr_unimplemented: function 0x%08" PRIx32 ": %s\n", pc, reason);
     sr_flight_fatal(SR_FLIGHT_KIND_FATAL_UNIMPLEMENTED, pc, 0u, 0u);
-    abort();
+    /* A named stop, not a host crash (AGENTS.md section 6). */
+    fflush(stderr);
+    exit(1);
 }
 
 /* ---- tracing ---- */
@@ -3646,6 +3669,10 @@ static FILE *s_fp = NULL;
 int sr_trace_active = 0;
 static uint32_t s_r[32], s_fi[32], s_vi[128], s_hi, s_lo, s_fcr31, s_pc, s_op;
 static unsigned long long s_step = 0;
+/* 1 when the instruction sr_begin_impl last saw was admitted and snapshotted. An armed
+ * window's sr_end_impl reads this instead of re-testing the window on s_pc, which still
+ * names the last ADMITTED instruction when an out-of-window one skipped the snapshot. */
+static int s_trace_admitted = 0;
 
 int sr_trace_open(const char *path, const char *target, uint32_t start_pc) {
     s_fp = fopen(path, "wb");
@@ -3667,7 +3694,9 @@ void sr_begin_impl(CpuState *s, uint32_t pc, uint32_t op) {
     /* An armed SR_TRACE_PC window gates the snapshot, not the other way round: the
      * gate costs one range compare per guest instruction and the snapshot runs only
      * for in-window instructions. With no window this test is a single load. */
+    s_trace_admitted = 0;
     if (sr_trace_window_armed() && !sr_trace_window_begin_instruction(pc)) return;
+    s_trace_admitted = 1;
     memcpy(s_r, s->r, sizeof(s_r));
     memcpy(s_fi, s->fi, sizeof(s_fi));
     memcpy(s_vi, s->v, sizeof(s_vi));
@@ -3677,7 +3706,9 @@ void sr_begin_impl(CpuState *s, uint32_t pc, uint32_t op) {
 
 void sr_end_impl(CpuState *s, uint32_t mem_addr, int mem_size) {
     if (!s_fp) return;
-    if (sr_trace_window_armed() && !sr_trace_window_begin_instruction(s_pc)) return;
+    /* Not cleared here: an import stub's sr_end follows no sr_begin of its own and
+     * records the handler's register writes against the instruction begun last. */
+    if (sr_trace_window_armed() && !s_trace_admitted) return;
     char line[4096];
     size_t n = 0;
     n = sr_buf_append(line, sizeof(line), n, "%llu pc=0x%08" PRIx32 " op=0x%08" PRIx32,

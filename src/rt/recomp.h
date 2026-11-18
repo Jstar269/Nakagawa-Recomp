@@ -1436,6 +1436,9 @@ static inline const char *sr_guest_symbol_format(const SrGuestSymbol *sym, uint3
 void     sr_exec_span_reset(void);
 int      sr_exec_span_register(uint32_t start, uint32_t end);
 int      sr_exec_span_owns_fetch(uint32_t pc);
+/* The static spans only, with no runtime-module authority query: for a caller that
+ * has already found pc outside every bound module image. */
+int      sr_exec_span_owns_static_fetch(uint32_t pc);
 
 /* ---- Runtime-placed guest modules (issue #704) -------------------------------
  * A guest module translated with `tools/codegen.py --extra-elf=<module>@runtime` is

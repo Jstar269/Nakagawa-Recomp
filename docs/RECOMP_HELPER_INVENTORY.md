@@ -36,9 +36,9 @@ does not make this file stale. `--details` prints them to stdout.
 
 ## Summary
 
-- helpers: **531** (declared in `recomp.h`: 454)
-- reach class: emitter-reached 96, production-runtime-only 394, selftest-only 0, address-only 8, none 33
-- provenance class of the home definition: declared-only 1, project_authored_attested 40, upstream_derived 490
+- helpers: **540** (declared in `recomp.h`: 455)
+- reach class: emitter-reached 96, production-runtime-only 403, selftest-only 0, address-only 8, none 33
+- provenance class of the home definition: declared-only 1, project_authored_attested 41, upstream_derived 498
 
 ## Helpers
 
@@ -310,6 +310,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_enhancement_update_waits` | `rt/hle_route.c` | yes | production-runtime-only | `rt/hle_route.c`: upstream_derived |
 | `sr_enhancement_widen_clip_x` | `rt/ge.c` | yes | emitter-reached (direct) | `rt/ge.c`: upstream_derived |
 | `sr_exec_span_owns_fetch` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
+| `sr_exec_span_owns_static_fetch` | `rt/guest_interp.c` | yes | production-runtime-only | `rt/guest_interp.c`: project_authored_attested |
 | `sr_exec_span_register` | `rt/guest_interp.c` | yes | emitter-reached (direct) | `rt/guest_interp.c`: project_authored_attested |
 | `sr_exec_span_reset` | `rt/guest_interp.c` | yes | emitter-reached (direct) | `rt/guest_interp.c`: project_authored_attested |
 | `sr_exit_request_expired` | `rt/hle.c` | yes | production-runtime-only | `rt/hle.c`: upstream_derived |
@@ -350,6 +351,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_guest_vram_write_prepare_bytes` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_gui_request_launcher_foreground_once` | `rt/recomp.h` | yes | production-runtime-only | `rt/recomp.h`: upstream_derived |
 | `sr_heap_allocation_size` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_heap_copy_span` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_dump_failure` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_free_block` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_free_list_valid` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
@@ -359,15 +361,22 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_heap_freelist_unlink` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_header_slot` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_is_header` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_heap_is_listed` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_is_unreported_free` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_link_free_block` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_heap_live_extent_valid` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_mark_header` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_note_bulk_write` | `rt/ge_replay.c`, `rt/recomp.c` | yes | production-runtime-only | `rt/ge_replay.c`: project_authored_attested; `rt/recomp.c`: upstream_derived |
 | `sr_heap_note_write` | `rt/ge_replay.c`, `rt/recomp.c` | yes | production-runtime-only | `rt/ge_replay.c`: project_authored_attested; `rt/recomp.c`: upstream_derived |
 | `sr_heap_note_write_impl` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_heap_quarantine_list` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_heap_report_live_smash` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_heap_reset` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_set_free_state` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_heap_set_listed` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_stats` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_unmark_header` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
+| `sr_heap_zero_span` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_hle_advance_time` | `rt/sched.c` | yes | none | `rt/sched.c`: upstream_derived |
 | `sr_hle_call` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
 | `sr_hle_init` | `rt/hle.c` | yes | production-runtime-only | `rt/hle.c`: upstream_derived |

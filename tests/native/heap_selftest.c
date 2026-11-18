@@ -28,6 +28,8 @@
  *     allocator's guarantee that a block it hands out starts zeroed, across the
  *     absorbed metadata words;
  *   - free() keeps a freed block's payload until the block is handed out again;
+ *   - memalign hands back an aligned, zeroed payload, returns its leading and
+ *     trailing pieces to the free list, and its free coalesces them back;
  *   - randomized alloc/free churn leaves metadata valid and the free list finite;
  *   - the free-list guard costs a bounded number of node checks per allocation, not
  *     the whole list; every node an allocation uses is validated on that same call;
@@ -1115,6 +1117,76 @@ static void test_mem_reset_empties_the_heap(void) {
     free(full);
 }
 
+/* ---- memalign: the leading and trailing split (emitter-reached _memalign_r) ---------- */
+
+static int on_free_list(uint32_t hdr) {
+    uint32_t n = 0u;
+    for (uint32_t cur = s_heap_free_list; cur != 0u && n < 1000000u; cur = MEM_R32(cur + 0u), n++)
+        if (cur == hdr) return 1;
+    return 0;
+}
+
+/* One cell: memalign carves an aligned block out of a malloc'd one, from the bump
+ * pointer or from a dirty reused block. The payload is aligned and zeroed, the header
+ * names exactly the requested size, the leading and trailing pieces are listed free
+ * blocks, metadata stays walkable, and freeing the aligned pointer coalesces every
+ * piece back into one free block. */
+static void check_memalign_cell(uint32_t alignment, int reused) {
+    const uint32_t size = 100u;
+    const uint32_t wanted_total = (size + 8u + 15u) & ~15u;
+    uint32_t fence = 0u;
+    heap_reset();
+    if (reused) {
+        uint32_t dirty = sr_newlib_malloc(4u * alignment + 256u, 0u);
+        fence = sr_newlib_malloc(16u, 0u);
+        CHECK(dirty && fence, "align %u: setup mallocs failed", alignment);
+        for (uint32_t off = 0; off < 4u * alignment + 256u; off += 4u)
+            MEM_W32(dirty + off, 0xA5A5A5A5u);
+        sr_newlib_free(dirty, 0u);
+    }
+    uint32_t p = sr_newlib_memalign(alignment, size, 0u);
+    CHECK(p != 0u && (p & (alignment - 1u)) == 0u,
+          "align %u reused=%d: payload 0x%08x is not aligned", alignment, reused, p);
+    if (p == 0u) return;
+    int nonzero = 0;
+    for (uint32_t off = 0; off < size; off += 4u) if (MEM_R32(p + off) != 0u) nonzero++;
+    CHECK(nonzero == 0, "align %u reused=%d: %d non-zero payload words", alignment, reused, nonzero);
+    uint32_t hdr = p - 8u;
+    CHECK(sr_heap_is_header(hdr) && MEM_R32(hdr + 4u) == (wanted_total | 1u),
+          "align %u reused=%d: aligned header size word 0x%08x, want 0x%08x",
+          alignment, reused, MEM_R32(hdr + 4u), wanted_total | 1u);
+    /* The leading piece starts at the raw block's header: the arena start in both cells. */
+    CHECK(hdr > SR_HEAP_BASE && on_free_list(SR_HEAP_BASE) &&
+              (MEM_R32(SR_HEAP_BASE + 4u) & ~1u) == hdr - SR_HEAP_BASE &&
+              (MEM_R32(SR_HEAP_BASE + 4u) & 1u) == 0u,
+          "align %u reused=%d: the leading piece is not a listed free block of 0x%x bytes",
+          alignment, reused, hdr - SR_HEAP_BASE);
+    uint32_t trailing = hdr + wanted_total;
+    uint32_t tail_end = reused ? fence - 8u : s_heap_bump_ptr;
+    CHECK(trailing < tail_end && on_free_list(trailing) &&
+              MEM_R32(trailing + 4u) == tail_end - trailing,
+          "align %u reused=%d: the trailing piece at 0x%08x is not a listed free block "
+          "reaching 0x%08x (size word 0x%08x)", alignment, reused, trailing, tail_end,
+          MEM_R32(trailing + 4u));
+    SrHeapStats st = sr_heap_stats();
+    CHECK(st.metadata_valid && st.free_blocks == 2u,
+          "align %u reused=%d: metadata %s, %u free blocks after memalign",
+          alignment, reused, st.metadata_valid ? "valid" : "INVALID", st.free_blocks);
+    sr_newlib_free(p, 0u);
+    st = sr_heap_stats();
+    CHECK(st.metadata_valid && st.free_blocks == 1u && st.largest_free == tail_end - SR_HEAP_BASE,
+          "align %u reused=%d: free did not coalesce into one block (free=%u largest=0x%x want 0x%x)",
+          alignment, reused, st.free_blocks, st.largest_free, tail_end - SR_HEAP_BASE);
+}
+
+static void test_memalign_splits_and_coalesces(void) {
+    static const uint32_t alignments[] = { 32u, 64u, 4096u };
+    for (size_t i = 0; i < sizeof alignments / sizeof alignments[0]; i++) {
+        check_memalign_cell(alignments[i], 0);
+        check_memalign_cell(alignments[i], 1);
+    }
+}
+
 int main(void) {
     /* 64 MB host arena. g_mem maps guest 0x08000000 -> arena[0], so the heap
      * region [0x0a000008,0x0c000000) lands inside arena[0x02000008,0x04000000). */
@@ -1150,6 +1222,7 @@ int main(void) {
     test_free_does_not_fold_into_an_orphan();
     test_free_and_realloc_refuse_a_smashed_size_word();
     test_mem_reset_empties_the_heap();
+    test_memalign_splits_and_coalesces();
 
     if (g_failures) {
         fprintf(stderr, "heap selftest: %d FAILURE(S)\n", g_failures);
