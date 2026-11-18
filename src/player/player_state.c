@@ -4979,6 +4979,9 @@ static const struct { const char *code; const char *badge; } k_error_badges[] = 
     {"PREREQUISITE_BUNDLE_INVALID", "Build tools damaged"},
     {"TOOLS_IN_USE", "Build tools busy"},
     {"TOOLS_REMOVE_FAILED", "Not removed"},
+    /* Removing the downloaded tools names it when <data root>/prerequisites does not fit
+       (package_builder_remove_downloaded_tools). */
+    {"PATH_TOO_LONG", "Path too long"},
     {"REMOVE_FAILED", "Not removed"},
     {"SAVES_ADD_FAILED", "Save not added"},
     {"SAVES_BACKUP_FAILED", "Not backed up"},

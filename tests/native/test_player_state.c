@@ -682,13 +682,27 @@ static bool get_working_directory(char *out, size_t size) {
 /* Repository cleanliness gate (#511): the launch runs must not change any
  * repository-tracked file. Uses the shell's redirection because the platform
  * spawn API offers no stdout capture; reports false when git is unavailable
- * so the caller can print an explicit SKIP rather than a silent pass. */
-static bool git_status_snapshot(const char *out_path) {
-    char command[1200];
-    int written = snprintf(command, sizeof(command),
-                           "git status --porcelain > \"%s\" 2>&1", out_path);
+ * so the caller can name the check NOT_RUN rather than pass silently. The
+ * snapshot holds the status and the working tree's diff against the index:
+ * the status alone reads " M file" before and after for a tracked file that
+ * was already modified, whatever a run then writes into it. repo NULL is the
+ * current folder. */
+static bool git_status_snapshot_in(const char *repo, const char *out_path) {
+    char where[NATIVE_TEST_PATH_MAX + 16];
+    char command[2 * NATIVE_TEST_PATH_MAX + 2 * sizeof(where) + 256];
+    int written = repo ? snprintf(where, sizeof(where), "-C \"%s\" ", repo)
+                       : snprintf(where, sizeof(where), "%s", "");
+    if (written < 0 || (size_t)written >= sizeof(where)) return false;
+    written = snprintf(command, sizeof(command),
+                       "git %sstatus --porcelain > \"%s\" 2>&1 && "
+                       "git %sdiff --binary >> \"%s\" 2>&1",
+                       where, out_path, where, out_path);
     if (written <= 0 || (size_t)written >= sizeof(command)) return false;
     return system(command) == 0;
+}
+
+static bool git_status_snapshot(const char *out_path) {
+    return git_status_snapshot_in(NULL, out_path);
 }
 
 /* Reads a small file whole into out. Returns its length, or -1 when it cannot be read or
@@ -2278,6 +2292,27 @@ static void test_report_this_game(void) {
         assert(player_report_discussion_url(&named, RP_HOME, user, url, sizeof(url)));
         assert(strstr(url, "Synthetic") == NULL);
         assert(strstr(url, "%3Cuser%3E%20Tennis") != NULL);
+        /* The fields the link does read: a profile path in the problem or the title goes out
+           as "~", in the title and in the body, never as the folder or the user name. */
+        {
+#if defined(_WIN32) || defined(_WIN64)
+#define RP_SEP_ENCODED "%5C"
+#else
+#define RP_SEP_ENCODED "%2F"
+#endif
+            PlayerReportFacts pathy = from_card;
+            pathy.problem = "stopped at " RP_HOME RP_SEP "x";
+            pathy.title_name = RP_HOME RP_SEP "Game";
+            assert(player_report_discussion_url(&pathy, RP_HOME, user, url, sizeof(url)));
+            const char *first = strstr(url, "~" RP_SEP_ENCODED "x");
+            assert(first != NULL && strstr(first + 1, "~" RP_SEP_ENCODED "x") != NULL);
+            first = strstr(url, "~" RP_SEP_ENCODED "Game");
+            assert(first != NULL && strstr(first + 1, "~" RP_SEP_ENCODED "Game") != NULL);
+            assert(strstr(url, "Synthetic") == NULL && strstr(url, "synthetic") == NULL);
+            assert(strstr(url, "path") == NULL && strstr(url, "%2Fsrv") == NULL);
+            assert(strstr(url, "%3Cuser%3E") == NULL);
+#undef RP_SEP_ENCODED
+        }
 
         /* The known cause: the card links issue 308; the copied details name
            the boundary, the renderer and the known issue. Paths show as "~",
@@ -2559,6 +2594,41 @@ static void test_library_writes_keep_titles_another_writer_added(void) {
     remove(path);
     free(app);
     printf("[PLAYER_STATE_TEST] library writes keep titles another writer added PASS\n");
+}
+
+/* The second defect this file pins (header): an add whose library could not be written reported
+ * success, and the title was gone on the next start. Here the library file's folder is a regular
+ * file, so no lock or library can be written under it: the add reports failure and no library
+ * file holds the title. */
+static void test_add_game_reports_an_unwritable_library(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: an add whose library cannot be written reports failure\n");
+    char cache[512];
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache, sizeof(cache)));
+    const char sep = nk_platform_path_separator();
+    char blocker[1024];
+    char path[1100];
+    snprintf(blocker, sizeof(blocker), "%s%cunwritable_library_folder", cache, sep);
+    snprintf(path, sizeof(path), "%s%clibrary.json", blocker, sep);
+    write_text_file(blocker, "a regular file where the library's folder would be\n");
+
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    assert(strlen(path) < sizeof(app->library.library_path));
+    strcpy(app->library.library_path, path);
+    GameRecord game;
+    seed_entry(&game, "TEST00061", "Synthetic Unsaved Title");
+    assert(player_app_add_game(app, &game) == false);
+    assert(!nk_platform_file_exists(path));
+
+    static NkLibrary loaded;  /* too large for the stack (NK_MAX_GAMES) */
+    nk_library_init(&loaded);
+    (void)nk_library_load(&loaded, path);
+    assert(nk_library_find_by_disc_id(&loaded, "TEST00061") == NULL);
+
+    assert(remove(blocker) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] an add whose library cannot be written reports failure PASS\n");
 }
 
 /* Disc verification after an add. main.c's worker runs nk_disc_verify_image on
@@ -3214,7 +3284,7 @@ static void test_every_error_code_has_a_friendly_card(void) {
         "DISC_IMAGE_TRUNCATED", "PBP_PACKAGE_UNSUPPORTED", "PREREQUISITE_FETCH_START_FAILED",
         "PYTHON_BOOTSTRAP_FAILED", "DISK_FULL", "OFFLINE_OR_NETWORK_ERROR", "HASH_MISMATCH",
         "ENHANCEMENT_UNAVAILABLE", "PACKAGE_REBUILD_NOT_INCOMPATIBLE", "LAUNCH_DETAILS_UNAVAILABLE",
-        "TEXTURE_PACK_REFUSED",
+        "TEXTURE_PACK_REFUSED", "PATH_TOO_LONG",
     };
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     assert(app != NULL);
@@ -3224,6 +3294,23 @@ static void test_every_error_code_has_a_friendly_card(void) {
         assert(strcmp(player_error_badge(&app->last_error), "Problem") != 0);
         assert(player_error_leads_with_message(&app->last_error));
         assert(strstr(player_error_badge(&app->last_error), "_") == NULL);
+    }
+    /* Remove downloaded tools raises the code the package builder returns (player_state.c), so a
+       code the builder writes gets a badge too: a data root whose prerequisites folder does not
+       fit is named PATH_TOO_LONG before anything is touched. */
+    {
+        char long_root[NK_MAX_PATH];
+        char code[48];
+        char message[512];
+        memset(long_root, 'a', sizeof(long_root) - 8u);
+        long_root[sizeof(long_root) - 8u] = '\0';
+        assert(!package_builder_remove_downloaded_tools(long_root, code, sizeof(code), message,
+                                                        sizeof(message)));
+        assert(strcmp(code, "PATH_TOO_LONG") == 0);
+        player_app_set_error(app, code, "Downloaded build tools could not be removed", message,
+                             "Back to settings", VIEW_SETTINGS);
+        assert(strcmp(player_error_badge(&app->last_error), "Problem") != 0);
+        assert(player_error_leads_with_message(&app->last_error));
     }
     /* A failed build tools download names whatever code the downloader chose. */
     player_app_set_error(app, "SOMETHING_NEW_FROM_THE_FETCHER", "Title", "x", "Retry",
@@ -3560,7 +3647,20 @@ static void test_error_cards_are_plain(void) {
     assert(strstr(report, "Game: Plain Card Fixture\n") != NULL);
     assert(strstr(report, "Disc ID: TEST00042\n") != NULL);
     assert(strstr(report, "Reason: Stopped at unsupported-import-scenetadhocinit") != NULL);
-    assert(strstr(report, "Log file: " SR_SELFTEST_BUILD_ROOT "/player_state_report_TEST00042-last.txt\n") != NULL);
+    {
+        /* The log's path as Copy details shows it: an absolute build root (CMake's binary tree, or
+           a BUILD_ROOT under the profile) goes through the same "~" and "<user>" rewrite. */
+        char shown_home[NATIVE_TEST_PATH_MAX + 128];
+        char shown[NATIVE_TEST_PATH_MAX + 128];
+        char expected[NATIVE_TEST_PATH_MAX + 160];
+        (void)player_display_text_with_home(report_run_log, nk_platform_env_home_dir(), shown_home,
+                                            sizeof(shown_home));
+        assert(player_dev_log_redact(shown_home, NULL, nk_platform_env_user_name(), shown,
+                                     sizeof(shown)));
+        snprintf(expected, sizeof(expected), "Log file: %s\n", shown);
+        assert(strstr(report, expected) != NULL);
+        assert(strstr(report, "/player_state_report_TEST00042-last.txt\n") != NULL);
+    }
     assert(strstr(report, "Last boot events:\n"
                           "  BOOT_EVENT phase=boot reason=entry entry=0x08804000\n"
                           "  BOOT_EVENT phase=stop") != NULL);
@@ -4442,6 +4542,51 @@ static void test_build_outcome_is_shown_once_per_session(void) {
 
 /* Set when test_package_build_lifecycle skips its package rebuild steps (Android only). */
 static bool s_package_rebuild_skipped = false;
+
+/* Cases this host could not run (a junction cmd could not make, a git that does not answer): each
+   prints a NOT_RUN line naming itself, and the run then ends in exit 77 rather than ALL PASSED,
+   so a case that did not run is never counted as a pass. */
+static int s_cases_not_run = 0;
+static void note_case_not_run(const char *what) {
+    printf("[PLAYER_STATE_TEST] NOT_RUN: %s\n", what);
+    fflush(stdout);
+    s_cases_not_run++;
+}
+
+/* The #511 git-clean gate (subtest 20) sees a write into a tracked file that was already modified
+   before the run: in a scratch repository, a file modified once and then again gives the same
+   status line both times, and the snapshots must still differ. */
+static void test_git_snapshot_sees_a_second_change(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the git-clean snapshot sees a change to a dirty file\n");
+    const char sep = nk_platform_path_separator();
+    char repo[NATIVE_TEST_PATH_MAX];
+    char file[NATIVE_TEST_PATH_MAX + 32];
+    char before[NATIVE_TEST_PATH_MAX + 32];
+    char after[NATIVE_TEST_PATH_MAX + 32];
+    char command[NATIVE_TEST_PATH_MAX + 128];
+    snprintf(repo, sizeof(repo), "%s%cgit-snapshot-repo", native_test_get_root(), sep);
+    snprintf(file, sizeof(file), "%s%ctracked.txt", repo, sep);
+    snprintf(before, sizeof(before), "%s%cgit-snapshot-before.txt", native_test_get_root(), sep);
+    snprintf(after, sizeof(after), "%s%cgit-snapshot-after.txt", native_test_get_root(), sep);
+    assert(nk_platform_mkdir_p(repo));
+    snprintf(command, sizeof(command), "git -C \"%s\" init -q", repo);
+    if (system(command) != 0) {
+        note_case_not_run("the git-clean snapshot check: `git init` is unavailable here");
+        return;
+    }
+    write_text_file(file, "tracked\n");
+    snprintf(command, sizeof(command), "git -C \"%s\" add tracked.txt", repo);
+    assert(system(command) == 0);
+    write_text_file(file, "modified before the run\n");
+    assert(git_status_snapshot_in(repo, before));
+    write_text_file(file, "modified again during the run\n");
+    assert(git_status_snapshot_in(repo, after));
+    assert(!files_identical(before, after));
+    /* An unchanged tree gives the same snapshot twice. */
+    assert(git_status_snapshot_in(repo, before));
+    assert(files_identical(before, after));
+    printf("[PLAYER_STATE_TEST] the git-clean snapshot sees a change to a dirty file PASS\n");
+}
 
 static void test_package_build_lifecycle(const char *self_executable) {
     assert(self_executable && self_executable[0]);
@@ -5822,7 +5967,6 @@ static void test_saves_backup_refuses_what_it_cannot_hold(void) {
         assert(saves_test_has_text(data_bin, "linked bytes"));
         assert(fchmod(locked_fd, 0700) == 0);
         assert(close(locked_fd) == 0);
-        linked = true;
     }
 #endif
     remove(app->library.library_path);
@@ -6404,7 +6548,15 @@ static void psn_test_refused(const char *path, const char *want_code, const char
    <file>.v<n>.bak before the first save replaces it; a newer one is refused by name and
    never replaced (src/core/nk_user_data_schema.h). */
 
-#define VERSIONED_DATA_ROOT SR_SELFTEST_BUILD_ROOT "/versioned_user_data"
+/* This run's own folder (native_test_get_root, #735), set by test_versioned_user_data: a run that
+   stops part way leaves its backups where no later run looks, and two runs never share them. */
+static char s_versioned_root[NATIVE_TEST_PATH_MAX];
+
+static void versioned_path(char *out, size_t out_size, const char *name) {
+    int written = snprintf(out, out_size, "%s%c%s", s_versioned_root,
+                           nk_platform_path_separator(), name);
+    assert(s_versioned_root[0] && written > 0 && (size_t)written < out_size);
+}
 
 static void versioned_copy_fixture(const char *fixture, const char *destination) {
     char *bytes = read_text_file(fixture);
@@ -6427,9 +6579,14 @@ static void versioned_remove(const char *path) {
 }
 
 static void test_versioned_settings(PlayerApp *app) {
-    const char *path = VERSIONED_DATA_ROOT "/settings.json";
-    const char *v1_backup = VERSIONED_DATA_ROOT "/settings.json.v1.bak";
-    const char *v2_backup = VERSIONED_DATA_ROOT "/settings.json.v2.bak";
+    char path[NATIVE_TEST_PATH_MAX + 64];
+    char v1_backup[NATIVE_TEST_PATH_MAX + 64];
+    char v2_backup[NATIVE_TEST_PATH_MAX + 64];
+    char v3_backup[NATIVE_TEST_PATH_MAX + 64];
+    versioned_path(path, sizeof(path), "settings.json");
+    versioned_path(v1_backup, sizeof(v1_backup), "settings.json.v1.bak");
+    versioned_path(v2_backup, sizeof(v2_backup), "settings.json.v2.bak");
+    versioned_path(v3_backup, sizeof(v3_backup), "settings.json.v3.bak");
 
     /* v0.0.1 wrote schema 2: every value loads as it was saved, and a save
        writes the same version again with no backup. */
@@ -6500,7 +6657,7 @@ static void test_versioned_settings(PlayerApp *app) {
         assert(strcmp(kept, newer) == 0);
         free(kept);
     }
-    assert(!nk_platform_file_exists(VERSIONED_DATA_ROOT "/settings.json.v3.bak"));
+    assert(!nk_platform_file_exists(v3_backup));
     versioned_remove(v1_backup);
     versioned_remove(path);
     printf("[PLAYER_STATE_TEST] settings.json: v0.0.1 and schema 1 load and migrate, "
@@ -6510,8 +6667,12 @@ static void test_versioned_settings(PlayerApp *app) {
 static void test_versioned_library(PlayerApp *app) {
     static NkLibrary library;
     static NkLibrary reloaded;
-    const char *path = VERSIONED_DATA_ROOT "/library.json";
-    const char *bak = VERSIONED_DATA_ROOT "/library.json.bak";
+    char path[NATIVE_TEST_PATH_MAX + 64];
+    char bak[NATIVE_TEST_PATH_MAX + 64];
+    char v1_backup[NATIVE_TEST_PATH_MAX + 64];
+    versioned_path(path, sizeof(path), "library.json");
+    versioned_path(bak, sizeof(bak), "library.json.bak");
+    versioned_path(v1_backup, sizeof(v1_backup), "library.json.v1.bak");
 
     /* v0.0.1's library.json (schema 1) loads whole and round-trips. */
     versioned_copy_fixture("tests/fixtures/user_data/v0.0.1/library.json", path);
@@ -6534,7 +6695,7 @@ static void test_versioned_library(PlayerApp *app) {
     assert(strcmp(two->title_name, "Synthetic Two \xE6\x97\xA5\xE6\x9C\xAC") == 0);
     assert(two->is_experimental && two->status == NK_STATUS_IDENTIFIED);
     assert(nk_library_save(&library, path) == NK_OK);
-    assert(!nk_platform_file_exists(VERSIONED_DATA_ROOT "/library.json.v1.bak"));
+    assert(!nk_platform_file_exists(v1_backup));
     assert(nk_library_load(&reloaded, path) == NK_OK);
     assert(reloaded.count == 2);
     assert(memcmp(reloaded.entries, library.entries,
@@ -6584,7 +6745,10 @@ static void test_versioned_library(PlayerApp *app) {
 static void test_versioned_user_data(void) {
     assert(nk_platform_file_exists("tests/fixtures/user_data/v0.0.1/library.json") &&
            "run from the repository root");
-    assert(nk_platform_mkdir_p(VERSIONED_DATA_ROOT));
+    int written = snprintf(s_versioned_root, sizeof(s_versioned_root), "%s%cversioned_user_data",
+                           native_test_get_root(), nk_platform_path_separator());
+    assert(written > 0 && (size_t)written < sizeof(s_versioned_root));
+    assert(nk_platform_mkdir_p(s_versioned_root));
     PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
     assert(app != NULL);
     test_versioned_settings(app);
@@ -7408,7 +7572,8 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                     psn_test_refused(alias_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
                     assert(RemoveDirectoryA(alias_dir));
                 } else {
-                    printf("[PLAYER_STATE_TEST] NOT_RUN: mklink /J is unavailable here\n");
+                    note_case_not_run("the HOMEBREW_ALREADY_ADDED junction alias case: mklink /J "
+                                      "is unavailable here");
                 }
             }
 #endif
@@ -7824,7 +7989,7 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             psn_test_refused(program_path, "HOMEBREW_FOLDER_UNSUPPORTED", "a junction");
             assert(RemoveDirectoryA(entry));
         } else {
-            printf("[PLAYER_STATE_TEST] NOT_RUN: mklink /J is unavailable here\n");
+            note_case_not_run("the 'a junction' refusal case: mklink /J is unavailable here");
         }
     }
 #endif
@@ -11422,6 +11587,23 @@ static void expect_line_parses_in_runtime(const PlayerPlayResolved *r) {
     assert(c.smart2d == r->part[PLAYER_PART_SMART2D]);
     /* Late pad sampling (11.3.9) reaches the runtime only from an Ace launch with the part on. */
     assert(c.pad == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_PAD] == 1 ? 1 : 0));
+    /* Finer patches reach the runtime at the part's own factor, in either tier. */
+    assert(c.tess == r->part[PLAYER_PART_TESS]);
+    /* Supersampling and unclipped sound are Enhanced parts: the resolved factor, and limit when on. */
+    assert(c.ssaa == r->part[PLAYER_PART_SSAA]);
+    assert(c.peak == (r->part[PLAYER_PART_PEAK] == 1 ? 1 : 0));
+    /* Host-built mip chains: mips=on only when the part is on. */
+    assert(c.mips == (r->part[PLAYER_PART_MIPS] == 1 ? 1 : 0));
+    /* Wider culling, short loads and soft shadows are Ace items: on only in an Ace launch. */
+    assert(c.cull == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_CULL] == 1 ? 1 : 0));
+    assert(c.load == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_LOAD] == 1 ? 1 : 0));
+    assert(c.shadow == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_SHADOW] == 1
+                            ? ACE_SHADOW_SOFT : ACE_SHADOW_OFF));
+    /* The stick remap is an Ace item that carries the title's declared dead zone, not the part's
+       word: off for a title that declares none. */
+    assert(c.stick == (r->mode == PLAYER_PLAY_ACE && r->part[PLAYER_PART_STICK] == 1 &&
+                       r->stick_counts >= 1 && r->stick_counts <= ACE_STICK_COUNTS_MAX
+                           ? r->stick_counts : 0));
     assert(ace_format(&c, canonical, sizeof(canonical)) && strcmp(canonical, line) == 0);
 }
 
@@ -13322,6 +13504,7 @@ int main(int argc, char **argv) {
 #endif
     test_single_instance_per_data_folder();
     test_build_identity_matches_the_python_digest();
+    test_git_snapshot_sees_a_second_change();
     test_package_build_lifecycle(self_executable);
     test_bundled_prerequisite_build(self_executable);
     test_error_cards_are_plain();
@@ -13366,6 +13549,7 @@ int main(int argc, char **argv) {
      * root is the temporary one. */
     test_sample_entries_never_reach_library_json();
     test_library_writes_keep_titles_another_writer_added();
+    test_add_game_reports_an_unwritable_library();
     test_disc_check_after_add();
 
     /* PlayerApp holds 64 game records twice over; keep it off the stack. */
@@ -17595,8 +17779,7 @@ int main(int argc, char **argv) {
 
         bool git_available = git_status_snapshot(git_before);
         if (!git_available) {
-            printf("[PLAYER_STATE_TEST] SKIP git-clean check: `git status` is unavailable here.\n");
-            fflush(stdout);
+            note_case_not_run("the #511 git-clean check: `git status` is unavailable here");
         }
 
         char memstick1[NK_MAX_PATH];
@@ -19270,6 +19453,11 @@ int main(int argc, char **argv) {
     if (s_package_rebuild_skipped) {
         printf("[PLAYER_STATE_TEST] SKIP: every subtest ran except the package rebuild steps "
                "(exit 77, #360)\n");
+        return 77;
+    }
+    if (s_cases_not_run > 0) {
+        printf("[PLAYER_STATE_TEST] SKIP: %d case(s) did not run on this host, each named by a "
+               "NOT_RUN line above (exit 77)\n", s_cases_not_run);
         return 77;
     }
     printf("[PLAYER_STATE_TEST] ALL PLAYER STATE TESTS PASSED!\n");

@@ -272,10 +272,23 @@ add_executable(test_player_state
     src/player/iso_reader.c
     src/player/package_builder.c
     src/player/setup_staging.c
+    # The white-box seams (subtest 19b, the member-path and whole-backup tests) are compiled into
+    # this test's own copies of the two core files that hold them, as the Makefile's
+    # PLAYER_STATE_TEST_BIN_CMD does. Their symbols resolve here first, so the static
+    # nakagawa_core never contributes its seam-free copies of these two objects.
+    src/core/nk_title_manifest.c
+    src/core/nk_zip.c
 )
 target_include_directories(test_player_state PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/src/player
+)
+# The seams, for the test and the two core files above, and scratch paths built on
+# SR_SELFTEST_BUILD_ROOT in the binary tree, like the other tests'.
+target_compile_definitions(test_player_state PRIVATE
+    NK_TITLE_MANIFEST_TEST_SEAMS
+    NK_SAVES_TEST_SEAMS
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
 )
 target_link_libraries(test_player_state PRIVATE nakagawa_core)
 if(WIN32)
@@ -289,12 +302,11 @@ add_test(NAME player_state_test COMMAND test_player_state)
 set_tests_properties(player_state_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     ENVIRONMENT "NK_TEST_SCRATCH_DIR=${CMAKE_CURRENT_BINARY_DIR}/build")
-if(ANDROID)
-    # On Android the package rebuild steps need a libnk_python.so in the app's native library
-    # folder, which the test folder does not have (#360); the test runs everything else and
-    # exits 77.
-    set_tests_properties(player_state_test PROPERTIES SKIP_RETURN_CODE 77)
-endif()
+# Exit 77 is a skip, never a pass: on Android the package rebuild steps need a libnk_python.so in
+# the app's native library folder, which the test folder does not have (#360), and on any host a
+# case it cannot run there (a junction, a git that does not answer) is named by a NOT_RUN line.
+# The test runs everything else and exits 77.
+set_tests_properties(player_state_test PROPERTIES SKIP_RETURN_CODE 77)
 
 # The console nickname rule (src/core/nk_nickname.h) is header-only; its test needs no library.
 add_executable(test_nk_nickname tests/native/test_nk_nickname.c)
