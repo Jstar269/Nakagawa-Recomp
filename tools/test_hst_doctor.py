@@ -1339,7 +1339,7 @@ class LongPathDiagnosticTests(unittest.TestCase):
                 output: list[str] = []
                 with (
                     mock.patch.object(nk_doctor, "check_runtime_package_cache") as cache_check,
-                    mock.patch("builtins.print", side_effect=lambda value: output.append(value)),
+                    mock.patch("builtins.print", side_effect=output.append),
                 ):
                     returned = nk_doctor.main([
                         "--root", str(root), "--scope", scope, "--user-data-root",

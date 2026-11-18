@@ -6554,7 +6554,7 @@ def _bringup_make_safe_captures(captures: list[Path]) -> list[Path]:
     """``captures`` named so the Make recipes can carry them.
 
     CODEGEN_USER_ARGS reaches the codegen recipe unquoted (mk/pipeline.mk), so a capture
-    folder under a data root with a space (a Windows profile such as ``C:/Users/A B/...``)
+    folder under a data root with a space (a Windows profile folder whose user name has a space)
     would be split into a truncated path and a stray argument. Such a folder is named by its
     Windows 8.3 short form, as the planner names a spaced input directory it reads in place;
     with no safe form it is refused by name (title_codegen_plan.PackageRouteError,
