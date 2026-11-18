@@ -160,35 +160,47 @@ static uint32_t h_UmdWaitDriveStatWithTimer(CpuState *s) {
     return umd_wait_drive_stat(A0, A1);   /* 0 is an untimed wait */
 }
 
+/* A callback notify wakes the waiter with no result; once its callbacks have run, the drive
+ * state is read again, as umd_wait_drive_stat does, and a wait it does not satisfy blocks again
+ * for the time left (or untimed for timeout 0). */
 static uint32_t h_UmdWaitDriveStatCB(CpuState *s) {
-    uint32_t self = sched_current_uid();
-    uint32_t refused = umd_wait_precheck(A0);
+    const uint32_t self = sched_current_uid();
+    const uint32_t want = A0;
+    uint32_t refused = umd_wait_precheck(want);
     if (refused) return refused;
     if (sr_thread_has_pending_callbacks(self))
         sr_thread_dispatch_callbacks();
 
-    if ((s_umd_drive_stat & A0) == A0) return 0;
+    if ((s_umd_drive_stat & want) == want) return 0;
 
-    sched_set_current_cb_wait(1);
-    int timed_out = 0;
-    if (A1 == 0u) {
-        /* api.expected "Zero timeout": 0 waits until cancelled or the drive is ready. */
-        if (self == 0u) timed_out = 1;
-        else sched_block_on(0x554D44u);
-    } else {
-        timed_out = sched_block_on_timeout(0x554D44u, umd_round_timeout(A1));
+    const uint32_t timeout = A1 ? umd_round_timeout(A1) : 0u;
+    const uint64_t deadline = timeout ? sched_vtime_deadline_after(timeout) : 0u;
+    uint32_t wait_us = timeout;
+    for (;;) {
+        sched_set_current_cb_wait(1);
+        int timed_out = 0;
+        if (timeout == 0u) {
+            /* api.expected "Zero timeout": 0 waits until cancelled or the drive is ready. */
+            if (self == 0u) timed_out = 1;
+            else sched_block_on(0x554D44u);
+        } else {
+            timed_out = sched_block_on_timeout(0x554D44u, wait_us);
+        }
+        sched_set_current_cb_wait(0);
+
+        /* Taken before callbacks run: a callback that blocks would replace it. */
+        uint32_t result = 0u;
+        int has_result = sched_take_wake_result(&result);
+
+        if (sr_thread_has_pending_callbacks(self))
+            sr_thread_dispatch_callbacks();
+
+        if (has_result) return result;
+        if ((s_umd_drive_stat & want) == want) return 0u;
+        const uint64_t now = sched_vtime_us();
+        if (timed_out || (timeout && now >= deadline)) return 0x800201A8u;
+        if (timeout) wait_us = (uint32_t)(deadline - now);
     }
-    sched_set_current_cb_wait(0);
-
-    /* Taken before callbacks run: a callback that blocks would replace it. */
-    uint32_t result = 0u;
-    int has_result = sched_take_wake_result(&result);
-
-    if (sr_thread_has_pending_callbacks(self))
-        sr_thread_dispatch_callbacks();
-
-    if (has_result) return result;
-    return timed_out ? 0x800201A8u : 0u;
 }
 
 /* sceUmdCancelWaitDriveStat(): resume every thread waiting on the drive with

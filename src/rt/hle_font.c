@@ -237,6 +237,9 @@ static int fontlib_snapshot(uint32_t handle, SrFontLib *out) {
     hle_unlock();
     return found;
 }
+/* The PGF an opened handle is bound to, with a reference the caller releases. Handle identity
+ * is preserved: a missing glyph is reported by pgf.c rather than silently switching to another
+ * registry font. */
 static const PGF *font_acquire(uint32_t handle, SrFont **record) {
     const PGF *pgf = NULL;
     if (record) *record = NULL;
@@ -265,17 +268,10 @@ static void font_release(SrFont *f) {
     hle_unlock();
     if (destroy) pgf_close(destroy);
 }
-/* Resolve the PGF for a character through its opened handle. Handle identity is preserved: a
- * missing glyph is reported by pgf.c rather than silently switching to another registry font. */
-static const PGF *font_pgf_for(uint32_t handle, int cc, SrFont **record) {
-    const PGF *p = font_acquire(handle, record);
-    (void)cc;
-    return p; /* An opened handle is permanently bound to its PGF; fallback stays inside pgf.c. */
-}
 
-/* Allocate size bytes of guest memory for a font handle. When the lib was created with a real
- * allocFunc, call it (PSP ABI) so the block comes from the game's Fpl pool; otherwise fall back
- * to the private bump heap. */
+/* Allocate size bytes of guest memory for a font handle by calling the library's allocFunc (PSP
+ * ABI), so the block comes from the game's own pool. There is no fallback heap: without an
+ * allocFunc the answer is 0, which the callers report as OOM. */
 static uint32_t font_call_alloc(CpuState *s, uint32_t allocFn, uint32_t userData, uint32_t size) {
     if (allocFn) return ge_call_guest_rv(s, allocFn, userData, size, 0);
     return 0;
@@ -609,8 +605,7 @@ static uint32_t h_FontOpenUserMemory(CpuState *s) {
     if (A1 && A2 >= 16 && A2 <= 16u * 1024u * 1024u && sr_guest_span_readable(A1, A2)) {
         uint8_t *copy = (uint8_t *)malloc(A2);
         if (copy) {
-            for (uint32_t i = 0; i < A2; i++) copy[i] = MEM_R8(A1 + i);
-            owned = pgf_open_memory(copy, A2);
+            if (sr_guest_copy_in(copy, A1, A2)) owned = pgf_open_memory(copy, A2);
             free(copy);
         }
     }
@@ -620,10 +615,10 @@ static uint32_t h_FontOpenUserMemory(CpuState *s) {
     return fh;
 }
 static uint32_t h_FontClose(CpuState *s) {
-    /* sceFontClose(a0=font): retire the native font record. The guest struct's pool memory is
-     * retained for the library's lifetime (the game frees the whole Fpl pool at teardown); we do
-     * not replay the guest freeFunc here to avoid dispatching guest code from a Close reachable
-     * on the save-icon render path. */
+    /* sceFontClose(a0=font): retire the native font record. A close that is not the handle's
+     * last open only drops the open count. The final close hands the font block back through
+     * the library's guest freeFunc (freeFunc(userData, font), PSP ABI), after the native record
+     * is retired and the lock is released, so the guest code runs with no HLE lock held. */
     PGF *destroy = NULL; uint32_t lib = 0; int found = 0; SrFontLib owner; memset(&owner, 0, sizeof(owner));
     hle_lock();
     for (size_t i = 0; i < sizeof(s_fonts) / sizeof(s_fonts[0]); i++) {
@@ -741,7 +736,7 @@ uint32_t h_FontGetCharInfo(CpuState *s) {
     /* CharInfo is 0x3c bytes; the whole output span must be guest memory before any write. */
     uint32_t ci = A2; if (!ci || !sr_guest_span_writable(ci, 0x3cu)) return SR_FONT_ERROR_INVALID_ARG;
     uint32_t cc = A1 & 0xffff;
-    SrFont *f = NULL; const PGF *p = font_pgf_for(A0, (int)cc, &f);
+    SrFont *f = NULL; const PGF *p = font_acquire(A0, &f);
     if (p) { pgf_get_char_info(p, (int)cc, font_alt_char_for(f), ci); font_release(f); return 0; }
     font_release(f);
     return SR_FONT_ERROR_INVALID_ARG;
@@ -765,7 +760,7 @@ static uint32_t font_glyph_image_stop(const char *name, uint32_t gi, PgfDrawStat
 uint32_t h_FontGetCharGlyphImage(CpuState *s) {
     uint32_t cc = A1 & 0xffff, gi = A2;
     if (!gi) return SR_FONT_ERROR_INVALID_ARG;
-    SrFont *f = NULL; const PGF *p = font_pgf_for(A0, (int)cc, &f);
+    SrFont *f = NULL; const PGF *p = font_acquire(A0, &f);
     if (!p) { font_release(f); return SR_FONT_ERROR_INVALID_ARG; }
     PgfDrawStatus drawn = pgf_draw_glyph_status(p, (int)cc, font_alt_char_for(f), gi);
     font_release(f);
@@ -1030,7 +1025,9 @@ static uint32_t h_FontGetFontList(CpuState *s) {
     for (uint32_t i = 0; i < count; i++) font_write_style(A1 + i * style_size, &info[i]);
     return 0;
 }
-/* Read an entire user font through the descriptor's actual backing, including ISO and archives. */
+/* Read an entire user font through the descriptor's actual backing, in the order io_read_now
+ * serves it: an enhancement package's rewritten bytes first, then an archive, a host file, or
+ * the ISO extent. */
 static uint32_t font_read_user_file(uint32_t guest_path, uint8_t **bytes, uint32_t *size) {
     char path[512];
     if (io_guest_path(guest_path, path, sizeof(path)) != 0u) return SR_FONT_ERROR_INVALID_ARG;
@@ -1041,6 +1038,7 @@ static uint32_t font_read_user_file(uint32_t guest_path, uint8_t **bytes, uint32
     uint8_t *data = NULL;
     if (f->kind != FD_KIND_FILE || n < 16u || n > 16u * 1024u * 1024u) error = SR_FONT_ERROR_INVALID_DATA;
     else if (!(data = (uint8_t *)malloc(n))) error = SR_FONT_ERROR_OOM;
+    else if (f->enhancement_data) memcpy(data, f->enhancement_data, n);
     else if (f->archive_vfs) {
         SrArchiveFile file = { f->archive_mount, f->archive_entry, f->size, -1 };
         size_t got = 0;

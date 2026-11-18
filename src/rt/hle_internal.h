@@ -1454,6 +1454,7 @@ extern uint8_t s_ge_free_slots[GE_LIST_MAX];
 extern unsigned s_ge_free_head, s_ge_free_count;
 extern uint64_t s_ge_list_order;
 void ge_free_rebuild(void);
+unsigned ge_lists_reset(void);
 void ge_free_push(int slot);
 uint64_t ge_slot_bit(int slot);
 void ge_list_completed(int slot);

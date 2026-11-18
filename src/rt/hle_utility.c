@@ -1146,6 +1146,12 @@ void sr_hle_loadexec_reset_guest_state(void) {
     s_psmfplayer_lib_version = 0u;
     atomic_store_explicit(&s_prx_started_count, 0, memory_order_release);
     ge_finish_masked_reset_for_loadexec();
+    /* A list the old program left stalled or paused would stay the GE queue's head, and every
+     * list the next program enqueued would wait behind it for good. */
+    const unsigned ge_lists_dropped = ge_lists_reset();
+    if (ge_lists_dropped)
+        fprintf(stderr, "GE_LIST: %u lists the old program left on the GE dropped at LoadExec\n",
+                ge_lists_dropped);
     /* The old program's sceGeSetCallback slots name its own code addresses; the next program
      * starts with every slot free, so its callback IDs start at 0 again. */
     memset(s_ge_cb, 0, sizeof(s_ge_cb));

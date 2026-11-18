@@ -16815,8 +16815,13 @@ static void test_loadexec_drops_umd_and_ge_callbacks(void) {
         NID_UMD_UNREGISTER_CALLBACK = 0xbd2bde07u,
         NID_GE_SET_CALLBACK = 0xa4fc06a4u,
         NID_GE_UNSET_CALLBACK = 0x05db22ceu,
+        NID_GE_LIST_ENQUEUE = 0xab49e76au,
+        NID_GE_LIST_SYNC = 0x03444eb4u,
+        NID_GE_DRAW_SYNC = 0xb287bd61u,
     };
+    extern void sr_hle_test_ge_lists_reset(void);
     const uint32_t ge_info = 0x09034000u;
+    const uint32_t ge_list = 0x09035000u;
     int saved_oracle_mode = s_oracle_mode;
     int saved_callback_calls = s_oracle_callback_calls;
     reset_fixture();
@@ -16849,6 +16854,18 @@ static void test_loadexec_drops_umd_and_ge_callbacks(void) {
     cpu.r[4] = ge_info;
     const uint32_t old_ge = sr_syscall(&cpu, NID_GE_SET_CALLBACK);
     expect(old_ge < 16u, "LoadExec fixture: the old program registers a GE callback");
+    /* The old program also leaves a ring-buffer list stalled at its start on the GE. */
+    sr_hle_test_ge_lists_reset();
+    MEM_W32(ge_list + 0u, 0x0f000000u);                   /* FINISH */
+    MEM_W32(ge_list + 4u, 0x0c000000u);                   /* END */
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_list;
+    cpu.r[5] = ge_list;                                   /* empty ring: stalled */
+    const uint32_t old_list = sr_syscall(&cpu, NID_GE_LIST_ENQUEUE);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect((old_list & 0xff000000u) == 0x35000000u && sr_syscall(&cpu, NID_GE_DRAW_SYNC) == 3u,
+           "LoadExec fixture: the old program leaves a list stalled on the GE");
 
     sr_hle_loadexec_reset_guest_state();
 
@@ -16871,6 +16888,21 @@ static void test_loadexec_drops_umd_and_ge_callbacks(void) {
     cpu.r[4] = old_cb;
     expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == 0x80010016u,
            "after LoadExec the old program's UMD registration is gone");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_GE_DRAW_SYNC) == 0u,
+           "after LoadExec the GE is idle: the old program's stalled list is gone");
+    MEM_W32(ge_list + 0u, 0x0f000000u);                   /* FINISH */
+    MEM_W32(ge_list + 4u, 0x0c000000u);                   /* END */
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_list;
+    const uint32_t new_list = sr_syscall(&cpu, NID_GE_LIST_ENQUEUE);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = new_list;
+    cpu.r[5] = 1u;
+    expect((new_list & 0xff000000u) == 0x35000000u && sr_syscall(&cpu, NID_GE_LIST_SYNC) == 0u,
+           "after LoadExec the next program's first list runs to completion instead of queueing "
+           "behind the old program's stalled list");
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = ge_info;
     const uint32_t new_ge = sr_syscall(&cpu, NID_GE_SET_CALLBACK);
@@ -45914,7 +45946,7 @@ static void check_coroutine_lifecycle(void) {
         extern int s_msgpipe_parks;
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 4 /* wc waiters */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
         char msg[1024];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
@@ -45922,7 +45954,8 @@ static void check_coroutine_lifecycle(void) {
                  "+ 3 cancel/release waiters + 5 UMD cancel waiters + 3 second-round waiters + 6 liveness waiters "
                  "+ 1 issue #339 joiner + 1 completed sysclock delay body "
                  "(the terminated full-range delay body never parks) + 2 vblank CB waiters "
-                 "+ 2 w-hle-c waiters (a cancelled UMD wait, a WaitVblankStartCB) "
+                 "+ 4 w-hle-c waiters (three cancelled UMD waits, two of them CB waits a callback woke first, "
+                 "a WaitVblankStartCB) "
                  "+ 1 vblank multi waiter + 1 zero-period vblank waiter body "
                  "+ 1 ReferSemaStatus waiter "
                  "+ 3 rotate peers + 2 suspended-waiter bodies + 5 released-wait bodies "
@@ -52549,6 +52582,51 @@ static void test_wc_umd_wait_drive_stat(void) {
             waiter->coro = NULL;
         }
     }
+
+    /* A callback notify wakes a CB wait with no result (sched_wake_callbacks). The drive still
+     * lacks the bit, so once the callbacks have run the wait blocks again, untimed for timeout 0
+     * and to its first deadline otherwise; it does not answer success. */
+    static const uint32_t cb_timeouts[2] = { 0u, 1000u };
+    for (int k = 0; k < 2; k++) {
+        reset_fixture();
+        sr_hle_init();
+        sr_hle_test_umd_reset();
+        TCB *own = fixture_thread(0x2c04u, TH_RUNNING, 32);
+        own->started = 1;
+        TCB *waiter = fixture_thread(0x2c05u, TH_READY, 40);
+        waiter->started = 1;
+        WcUmdWaitCtx ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.nid = NID_WAIT_CB;
+        ctx.a0 = 0x08u;                 /* a bit the active drive does not hold */
+        ctx.a1 = cb_timeouts[k];
+        waiter->coro = sr_coro_create(wc_umd_waiter_body, &ctx, (size_t)4 << 20);
+        s_cur = (int)(waiter - s_tcb);
+        if (waiter->coro) sr_coro_switch(waiter->coro);
+        const uint64_t first_wake = waiter->wake;
+        expect(waiter->state == TH_WAIT_OBJ && waiter->wait_obj == UMD_OBJ && !ctx.returned,
+               "wc umd wait: the unsatisfied CB wait blocks on the UMD object");
+        s_cur = (int)(own - s_tcb);
+        sched_wake_callbacks(waiter->uid);
+        expect(waiter->state == TH_READY, "wc umd wait: a callback notify wakes the CB wait");
+        s_cur = (int)(waiter - s_tcb);
+        if (waiter->coro) sr_coro_switch(waiter->coro);
+        expect(!ctx.returned && waiter->state == TH_WAIT_OBJ && waiter->wait_obj == UMD_OBJ &&
+                   waiter->wake == first_wake,
+               "wc umd wait: a callback wake with the drive still unsatisfied blocks again until "
+               "the first deadline, not a success");
+        s_cur = (int)(own - s_tcb);
+        memset(&cpu, 0, sizeof(cpu));
+        (void)sr_syscall(&cpu, NID_CANCEL);
+        s_cur = (int)(waiter - s_tcb);
+        if (waiter->coro && !ctx.returned) sr_coro_switch(waiter->coro);
+        expect(ctx.returned && ctx.ret == 0x800201a9u,
+               "wc umd wait: the CB wait blocked again after the callback wake is cancelled");
+        if (waiter->coro) {
+            sr_coro_destroy(waiter->coro);
+            waiter->coro = NULL;
+        }
+    }
     s_cur = -1;
 }
 
@@ -55186,6 +55264,60 @@ static void test_font_lib_lifecycle(uint32_t served_index) {
         for (size_t i = 0; i <= strlen(missing); i++) MEM_W8(path_addr + (uint32_t)i, missing[i]);
         expect(flt_call(0x57fcb733u, FLT_LIB_A, path_addr, 1u, FLT_ERR) == 0u && MEM_R32(FLT_ERR) == 0x80460005u,
                "user file reports a missing VFS file");
+
+        /* An enhancement package that rewrites a user font: sceFontOpenUserFile reads the
+         * rewritten bytes the descriptor serves, as sceIoRead does, not the stock file behind
+         * it. The stock file is shorter than the rewrite and is not a PGF. */
+        {
+            enum { FLT_COPY = 0x09100000u, FLT_COPY_CHUNK = 0x10000u, FLT_COPY_MAX = 0x100000u };
+            extern int sr_hle_test_io_open_enhanced(const char *path, uint32_t *fd);
+            extern void sr_hle_test_enhancement_files_reset(void);
+            static uint8_t pgf_bytes[FLT_COPY_MAX];
+            static const uint8_t stock[] = "stock bytes that are not a PGF font";
+            static const char guest[] = "ms0:/NKENH/USERFONT.PGF";
+            uint32_t pgf_size = 0u, fd = 0u;
+            CpuState io;
+            (void)sr_hle_test_io_open_enhanced(path, &fd);
+            for (;;) {
+                memset(&io, 0, sizeof(io));
+                io.r[4] = fd; io.r[5] = FLT_COPY; io.r[6] = FLT_COPY_CHUNK;
+                uint32_t got = sr_hle_test_io_read(&io);
+                if (got == 0u || got > FLT_COPY_CHUNK || pgf_size + got > FLT_COPY_MAX) break;
+                for (uint32_t i = 0; i < got; i++) pgf_bytes[pgf_size + i] = MEM_R8(FLT_COPY + i);
+                pgf_size += got;
+            }
+            memset(&io, 0, sizeof(io));
+            io.r[4] = fd;
+            (void)sr_hle_test_io_close(&io);
+            expect(pgf_size > sizeof(stock), "the served Latin font is read for the enhancement fixture");
+            char *saved_ms = hle_test_env_save("SR_MEMSTICK");
+            hle_test_setenv("SR_MEMSTICK", HLE_BUILD_ROOT "/hle_fd_namespace_ms");
+            nk_platform_mkdir_p(HLE_BUILD_ROOT "/hle_fd_namespace_ms/NKENH");
+            char host[256];
+            fd_host_path(host, sizeof(host), guest);
+            FILE *fixture = fopen(host, "wb");
+            if (fixture) {
+                fwrite(stock, 1, sizeof(stock) - 1u, fixture);
+                fclose(fixture);
+            }
+            uint8_t digest[32];
+            sr_vfpu_sha256(stock, sizeof(stock) - 1u, digest);
+            sr_hle_test_enhancement_files_reset();
+            expect(fixture != NULL &&
+                       sr_enhancement_file_register("NKENH/USERFONT.PGF", digest, pgf_bytes, pgf_size) == 1,
+                   "the enhancement fixture registers a rewritten user font");
+            for (size_t i = 0; i <= strlen(guest); i++) MEM_W8(path_addr + (uint32_t)i, guest[i]);
+            s_flt_alloc_ret = FLT_FONT;
+            MEM_W32(FLT_ERR, 0xdeadbeefu);
+            uint32_t enhanced_font = flt_call(0x57fcb733u, FLT_LIB_A, path_addr, 1u, FLT_ERR);
+            expect(enhanced_font == FLT_FONT && MEM_R32(FLT_ERR) == 0u,
+                   "sceFontOpenUserFile reads an enhancement package's rewritten font, not the stock "
+                   "file behind it");
+            if (enhanced_font) (void)flt_call(FLT_NID_CLOSE, enhanced_font, 0u, 0u, 0u);
+            sr_hle_test_enhancement_files_reset();
+            nk_remove_utf8(host);
+            hle_test_env_restore("SR_MEMSTICK", saved_ms);
+        }
     }
 
     s_flt_alloc_ret = FLT_LIB_A + 0x20u;
