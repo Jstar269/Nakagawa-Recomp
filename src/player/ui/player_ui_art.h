@@ -50,8 +50,8 @@ typedef void (*PlayerUiArtReader)(const char *iso_path, unsigned wanted,
 
 typedef struct PlayerUiArt PlayerUiArt;
 
-/* NULL reader: the ISO reader (nk_iso_read_game_art). Returns NULL when out of
-   memory. */
+/* A reader is required: a NULL reader is refused (returns NULL), as is a
+   creation that runs out of memory. The player passes its ISO reader. */
 PlayerUiArt *player_ui_art_create(PlayerUiArtReader reader);
 /* Waits for a running read, then frees every image. */
 void player_ui_art_destroy(PlayerUiArt *art);
@@ -83,6 +83,13 @@ bool player_ui_art_reading_cover(const PlayerUiArt *art);
 
 /* True while a read runs or one is waiting to start (tests wait on it). */
 bool player_ui_art_busy(const PlayerUiArt *art);
+
+/* The host loop's wait, at most wait_ms: while the loader is busy, about one
+   60 Hz frame (PLAYER_UI_ART_POLL_MS), so each finished read is collected and
+   the next disc's read started on the next frame instead of at the idle wake;
+   otherwise wait_ms. */
+#define PLAYER_UI_ART_POLL_MS 16u
+uint32_t player_ui_art_wait_ms(const PlayerUiArt *art, uint32_t wait_ms);
 
 #ifdef __cplusplus
 }

@@ -17,6 +17,16 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with FFmpeg; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ *
+ * Modified 2026-11-17 for the Nakagawa Recomp project (LOCAL DELTA against FFmpeg n4.4):
+ * two FFmpeg release/4.4 fixes are applied, each marked LOCAL DELTA below.
+ *  - 6d57428858 "avcodec/h264_slice: reject slice_num >= 0xFFFF" (cherry-pick of
+ *    39e1969303): h264_slice_init refuses a picture's slice 65535 so slice_num never
+ *    equals the uint16_t slice_table sentinel 0xFFFF.
+ *  - bf87bdd3f6 "avcodec/h264_slice: clear old slice POC values on parsing failure":
+ *    h264_slice_header_parse zeroes poc_lsb, delta_poc_bottom and delta_poc[] before
+ *    reading them, so a failed header cannot leave them to the next slice.
+ * See src/rt/h264_ffmpeg_sub/PROVENANCE.md.
  */
 
 /**
@@ -1831,6 +1841,9 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
     if (nal->type == H264_NAL_IDR_SLICE)
         get_ue_golomb_long(&sl->gb); /* idr_pic_id */
 
+    /* LOCAL DELTA: upstream bf87bdd3f6 (release/4.4), see the file header. */
+    sl->poc_lsb = 0;
+    sl->delta_poc_bottom = 0;
     if (sps->poc_type == 0) {
         sl->poc_lsb = get_bits(&sl->gb, sps->log2_max_poc_lsb);
 
@@ -1838,6 +1851,7 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
             sl->delta_poc_bottom = get_se_golomb(&sl->gb);
     }
 
+    sl->delta_poc[0] = sl->delta_poc[1] = 0;
     if (sps->poc_type == 1 && !sps->delta_pic_order_always_zero_flag) {
         sl->delta_poc[0] = get_se_golomb(&sl->gb);
 
@@ -2016,6 +2030,13 @@ static int h264_slice_init(H264Context *h, H264SliceContext *sl,
                           h->ps.pps->chroma_qp_index_offset[0],
                           h->ps.pps->chroma_qp_index_offset[1]) +
                    6 * (h->ps.sps->bit_depth_luma - 8);
+
+    /* LOCAL DELTA: upstream 6d57428858 (release/4.4), see the file header.
+     * slice_table is uint16_t initialized to 0xFFFF as a sentinel. */
+    if (h->current_slice >= 0xFFFE) {
+        av_log(h->avctx, AV_LOG_ERROR, "Too many slices (%d)\n", h->current_slice + 1);
+        return AVERROR_PATCHWELCOME;
+    }
 
     sl->slice_num       = ++h->current_slice;
 

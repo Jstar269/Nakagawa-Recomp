@@ -102,9 +102,10 @@ def verify_upstream_api(manifest: dict) -> list[str]:
     Git blob ids are content-addressed identically across repositories, so a blob
     id that matches upstream at the pinned commit proves the file is byte-for-byte
     identical -- without cloning the (multi-GB) source repository. Requires the
-    `gh` CLI and network access; a clear, single "skipped" error is returned when
-    either is missing so this never silently passes and never hard-fails a
-    hermetic build that opted in by mistake.
+    `gh` CLI and network access. When either is missing, one clear "upstream-api
+    skipped" error is returned so the check never silently passes; main() reports
+    it as an error and exits 1, so `--upstream-api` without `gh` or network fails
+    closed. Omit `--upstream-api` on a hermetic build.
     """
     repo = _upstream_repo(manifest)
     commit = manifest["source_commit"]

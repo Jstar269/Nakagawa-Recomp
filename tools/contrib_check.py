@@ -67,13 +67,16 @@ STRICT_C_FLAGS = (
     # of the sources that need it: CFLAGS (`src/rt`, `src/core`), PLAYER_INCLUDES
     # (`src/player`, `src/player/ui`, `src/ui`, `third_party/clay`,
     # `src/core/generated`), RT_NK_UI_FLAGS (`src/rt/overlay`), the Ed25519
-    # selftest (`third_party/monocypher`) and HLE_INCLUDES (the ATRAC3+ subset).
+    # selftest (`third_party/monocypher`), HLE_INCLUDES (the ATRAC3+ subset) and
+    # the achievements build (`third_party/rcheevos/include`, which rcheevos's own
+    # sources and every caller include by bare name).
     # A `tests/native/*.c` unit lives outside `src/`, so a bare include of a
     # player or UI header resolves only with that directory on the path.
     "-Isrc/rt", "-Isrc/core",
     "-Isrc/player", "-Isrc/player/ui", "-Isrc/ui", "-Isrc/rt/overlay",
     "-Isrc/core/generated", "-Ithird_party/clay", "-Ithird_party/monocypher",
     "-Isrc/rt/atrac3p", "-Isrc/rt/atrac3p/libavcodec", "-Isrc/rt/atrac3p/libavutil",
+    "-Ithird_party/rcheevos/include",
 )
 
 
@@ -207,11 +210,22 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
             ),
         ),
     ),
+    # The CHD reader and its test include libchdr's headers, which only the
+    # recipes that link libchdr put on the path ($(LIBCHDR_INC)).
+    "src/core/nk_disc_chd.c": StrictUnit(
+        recipes=("native-core-tests",),
+        includes=("third_party/libchdr/include",),
+    ),
+    "tests/native/test_disc_expand.c": StrictUnit(
+        recipes=("native-core-tests",),
+        includes=("third_party/libchdr/include",),
+    ),
     # The texture-pack selftest counts sort comparisons and inflater builds;
-    # nk_zip.h declares those counters only under these defines.
+    # nk_zip.h declares those counters only under these defines. It also
+    # swaps a pack's ZIP through texrepl.c's NK_TEXREPL_TEST_HOOKS seam.
     "tests/native/texrepl_selftest.c": StrictUnit(
         recipes=("texrepl-selftest",),
-        defines=("NK_SORT_COUNT_COMPARES", "NK_INFLATE_COUNT_BUILDS"),
+        defines=("NK_SORT_COUNT_COMPARES", "NK_INFLATE_COUNT_BUILDS", "NK_TEXREPL_TEST_HOOKS"),
     ),
 }
 

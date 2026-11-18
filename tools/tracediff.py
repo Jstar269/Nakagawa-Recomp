@@ -106,16 +106,23 @@ def fail(msg):
 def load(path):
     steps = []
     header = None
-    with open(path, "r", encoding="utf-8") as handle:
-        for lineno, raw in enumerate(handle, start=1):
-            line = raw.rstrip("\r\n")
-            if line.strip() == "":
-                continue
-            if line.startswith("#"):
-                if header is None:
-                    header = line
-                continue
-            steps.append(parse_step_line(line, lineno, path))
+    try:
+        handle = open(path, "r", encoding="utf-8")
+    except OSError as exc:
+        fail(f"{path}: cannot read trace: {exc}")
+    with handle:
+        try:
+            for lineno, raw in enumerate(handle, start=1):
+                line = raw.rstrip("\r\n")
+                if line.strip() == "":
+                    continue
+                if line.startswith("#"):
+                    if header is None:
+                        header = line
+                    continue
+                steps.append(parse_step_line(line, lineno, path))
+        except UnicodeDecodeError as exc:
+            fail(f"{path}: trace is not valid UTF-8 text: {exc}")
     if header is None:
         fail(f"{path}: missing required '# psp-recomp trace' header line")
     return header, steps
@@ -232,14 +239,16 @@ def _parse_hardware_step(line, path, lineno):
     return step, pc, op, writes
 
 
-def _decode_trace_lines(handle, path):
-    """Yield stripped trace lines, turning a decode failure into a contract error."""
+def _decode_trace_lines(handle, path, error=None):
+    """Yield stripped trace lines, turning a decode failure into the caller's contract error
+    (``_hardware_error`` unless a lane passes its own, such as ``_local_error``)."""
 
+    error = _hardware_error if error is None else error
     try:
         for lineno, raw in enumerate(handle, start=1):
             yield lineno, raw.rstrip("\r\n")
     except UnicodeDecodeError as exc:
-        _hardware_error(path, None, f"trace is not valid UTF-8 text: {exc}")
+        error(path, None, f"trace is not valid UTF-8 text: {exc}")
 
 
 def read_source_tier(path):
@@ -312,12 +321,6 @@ def _load_hardware(path):
             header_line,
             f"stream is truncated: header declares {declared_steps} steps, captured {len(steps)}",
         )
-    if len(steps) > declared_steps:
-        _hardware_error(
-            path,
-            header_line,
-            f"stream exceeds its step budget: header declares {declared_steps} steps, captured {len(steps)}",
-        )
     for expected, record in enumerate(steps):
         if record[0] != expected:
             _hardware_error(
@@ -361,19 +364,10 @@ def strict_hardware_diff(path_a, path_b):
     # _load_hardware already proved each record's step index equals its
     # position and both headers declare the same step count, so records are
     # compared by position; a step-index difference cannot reach this loop.
-    n = len(a)
-    for i in range(n):
-        _, pc_a, op_a, writes_a = a[i]
-        _, pc_b, op_b, writes_b = b[i]
-        if pc_a != pc_b:
-            return (i, pc_a, f"pc {pc_a} vs {pc_b}")
-        if op_a != op_b:
-            return (i, pc_a, f"op {op_a} vs {op_b}")
-        if writes_a != writes_b:
-            only_a = {k: v for k, v in writes_a.items() if writes_b.get(k) != v}
-            only_b = {k: v for k, v in writes_b.items() if writes_a.get(k) != v}
-            detail = f"writes differ: A[{describe_writes(only_a)}] B[{describe_writes(only_b)}]"
-            return (i, pc_a, detail)
+    for i in range(len(a)):
+        divergence = _compare_records(i, a[i], b[i])
+        if divergence is not None:
+            return divergence
     return None
 
 
@@ -381,25 +375,39 @@ def describe_writes(writes):
     return " ".join(f"{name}={writes[name]}" for name in sorted(writes))
 
 
+def _compare_records(index, record_a, record_b):
+    """The pc, op or writes divergence of two records at ``index``, or None."""
+    _, pc_a, op_a, writes_a = record_a
+    _, pc_b, op_b, writes_b = record_b
+    if pc_a != pc_b:
+        return (index, pc_a, f"pc {pc_a} vs {pc_b}")
+    if op_a != op_b:
+        return (index, pc_a, f"op {op_a} vs {op_b}")
+    if writes_a != writes_b:
+        only_a = {k: v for k, v in writes_a.items() if writes_b.get(k) != v}
+        only_b = {k: v for k, v in writes_b.items() if writes_a.get(k) != v}
+        detail = f"writes differ: A[{describe_writes(only_a)}] B[{describe_writes(only_b)}]"
+        return (index, pc_a, detail)
+    return None
+
+
 def diff(path_a, path_b):
     """Informational legacy equality mode: v1 loader, pairwise and length compare."""
     _, a = load(path_a)
     _, b = load(path_b)
+    return _diff_loaded(path_a, path_b, a, b)
+
+
+def _diff_loaded(path_a, path_b, a, b):
+    """diff() over records already loaded with load()."""
     n = min(len(a), len(b))
     for i in range(n):
-        step_a, pc_a, op_a, w_a = a[i]
-        step_b, pc_b, op_b, w_b = b[i]
+        step_a, step_b = a[i][0], b[i][0]
         if step_a != step_b:
-            return (i, pc_a, f"step index {step_a} vs {step_b}")
-        if pc_a != pc_b:
-            return (i, pc_a, f"pc {pc_a} vs {pc_b}")
-        if op_a != op_b:
-            return (i, pc_a, f"op {op_a} vs {op_b}")
-        if w_a != w_b:
-            only_a = {k: v for k, v in w_a.items() if w_b.get(k) != v}
-            only_b = {k: v for k, v in w_b.items() if w_a.get(k) != v}
-            detail = f"writes differ: A[{describe_writes(only_a)}] B[{describe_writes(only_b)}]"
-            return (i, pc_a, detail)
+            return (i, a[i][1], f"step index {step_a} vs {step_b}")
+        divergence = _compare_records(i, a[i], b[i])
+        if divergence is not None:
+            return divergence
     if len(a) != len(b):
         shorter, longer = (path_a, path_b) if len(a) < len(b) else (path_b, path_a)
         at = a[n - 1] if n else None
@@ -413,12 +421,50 @@ def _header_field(header, name, default):
     return match.group(1) if match else default
 
 
+_MEMORY_TOKEN_RE = re.compile(r"m(8|16|32)\[0x([0-9a-fA-F]+)\]")
+
+
+def _memory_span(name):
+    """(address, byte count) of a memory write token, or None for a register."""
+    match = _MEMORY_TOKEN_RE.fullmatch(name)
+    if match is None:
+        return None
+    return int(match.group(2), 16), int(match.group(1), 10) // 8
+
+
+def _hex_value(name, value):
+    try:
+        return int(value, 16)
+    except ValueError:
+        fail(f"start state: {name} has a non-hex value {value!r}")
+
+
 def _start_state_tokens(steps, end):
     """The register and memory values the first `end` records wrote, in token order: what a
-    focused regression must set before it runs from record `end`."""
+    focused regression must set before it runs from record `end`.
+
+    Memory writes are applied in record order. A write that overlaps an earlier one of
+    another width replaces the bytes it covers; the earlier write's other bytes stay, as m8
+    tokens (little-endian). The memory tokens left never overlap, so their address order is
+    the final state.
+    """
     state = {}
     for _step, _pc, _op, writes in steps[:end]:
-        state.update(writes)
+        for name, value in writes.items():
+            span = _memory_span(name)
+            if span is not None:
+                start, size = span
+                for other in [n for n in state if n != name and _memory_span(n) is not None]:
+                    other_start, other_size = _memory_span(other)
+                    if other_start >= start + size or start >= other_start + other_size:
+                        continue
+                    other_value = _hex_value(other, state.pop(other))
+                    for offset in range(other_size):
+                        address = other_start + offset
+                        if not start <= address < start + size:
+                            byte = (other_value >> (8 * offset)) & 0xFF
+                            state[f"m8[0x{address:08x}]"] = f"0x{byte:02x}"
+            state[name] = value
     registers = [name for name in state if not name.startswith("m")]
     memory = sorted((name for name in state if name.startswith("m")),
                     key=lambda name: (name[name.index("[") + 1:], name))
@@ -443,12 +489,12 @@ def shrink(path_a, path_b, out_dir, context=8):
     """
     import os
 
-    result = diff(path_a, path_b)
+    header_a, a = load(path_a)
+    header_b, b = load(path_b)
+    result = _diff_loaded(path_a, path_b, a, b)
     if result is None:
         return None
     step, pc, detail = result
-    header_a, a = load(path_a)
-    header_b, b = load(path_b)
     start = max(0, step - max(0, int(context)))
     state = _start_state_tokens(a, start)
     for name in ("a", "b"):
@@ -465,7 +511,9 @@ def shrink(path_a, path_b, out_dir, context=8):
             handle.write(f"# psp-recomp trace v1 target=shrunk "
                          f"oracle={_header_field(header, 'oracle', 'shrunk')} "
                          f"start_pc={first_pc} steps={len(window)}\n")
-            handle.write(f"# shrunk from {path} records {start}..{step} "
+            # The file name only: a shrunk trace is a regression seed that may be committed,
+            # and a local path would carry a user name or private folder into it.
+            handle.write(f"# shrunk from {os.path.basename(path)} records {start}..{step} "
                          f"(first divergence at record {step}, pc {pc}: {detail})\n")
             handle.write("# start-state" + "".join(f" {token}" for token in state) + "\n")
             handle.write("# state the earlier records never wrote is the original run's "
@@ -492,7 +540,7 @@ def _main_shrink(args):
         return 2
     try:
         result = shrink(args[0], args[1], args[2], context)
-    except FileExistsError as exc:
+    except OSError as exc:  # FileExistsError included: --shrink never overwrites
         sys.stderr.write(f"{exc}\n")
         return 2
     if result is None:
@@ -550,7 +598,7 @@ def _load_local(path, expect_steps=None):
     except OSError as exc:
         _local_error(path, None, f"cannot read trace: {exc}")
     with handle:
-        for lineno, line in _decode_trace_lines(handle, path):
+        for lineno, line in _decode_trace_lines(handle, path, _local_error):
             if line.strip() == "":
                 continue
             if line.startswith("#"):
@@ -616,17 +664,9 @@ def strict_local_diff(path_a, path_b, expect_steps=None):
         _local_error(path_b, None,
                      f"step count differs: A has {len(a)} records, B has {len(b)}")
     for i in range(len(a)):
-        _, pc_a, op_a, writes_a = a[i]
-        _, pc_b, op_b, writes_b = b[i]
-        if pc_a != pc_b:
-            return (i, pc_a, f"pc {pc_a} vs {pc_b}")
-        if op_a != op_b:
-            return (i, pc_a, f"op {op_a} vs {op_b}")
-        if writes_a != writes_b:
-            only_a = {k: v for k, v in writes_a.items() if writes_b.get(k) != v}
-            only_b = {k: v for k, v in writes_b.items() if writes_a.get(k) != v}
-            detail = f"writes differ: A[{describe_writes(only_a)}] B[{describe_writes(only_b)}]"
-            return (i, pc_a, detail)
+        divergence = _compare_records(i, a[i], b[i])
+        if divergence is not None:
+            return divergence
     return None
 
 
@@ -659,9 +699,10 @@ def main(argv):
             "       tracediff.py --shrink <trace-a> <trace-b> <out-dir> [--context N]\n"
         )
         return 2
-    result = diff(argv[1], argv[2])
+    _, a = load(argv[1])
+    _, b = load(argv[2])
+    result = _diff_loaded(argv[1], argv[2], a, b)
     if result is None:
-        _, a = load(argv[1])
         print(f"OK: traces identical, {len(a)} steps, zero divergences")
         return 0
     step, pc, detail = result

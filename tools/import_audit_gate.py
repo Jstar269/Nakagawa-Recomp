@@ -87,6 +87,7 @@ MALFORMED_FIXTURES = (
 MIXED_EXPECTED = {
     ("ThreadManForUser", 0x446D8DE6): "dedicated",           # sceKernelCreateThread
     ("ThreadManForUser", 0x349D6D6C): "dedicated",           # sceKernelCheckCallback
+    ("sceAtrac3plus", 0xB3B5D042): "fake_success",           # sceAtracGetOutputChannel
     ("scePsmfPlayer", 0x46F61F8B): "dedicated",              # scePsmfPlayerGetVideoData
     ("sceSasCore", 0x4AA9EAD6): "controlled_unsupported",    # __sceSasSetVoiceATRAC3
     ("SynthLibA", 0x00C0FFEE): "missing",
@@ -168,6 +169,11 @@ def check_fixtures(manifest: dict) -> None:
     table = sectioned
     got = {}
     report = classify_imports(table.funcs, manifest)
+    if len(report["imports"]) != len(MIXED_EXPECTED) or report["summary"]["total"] != len(MIXED_EXPECTED):
+        fail(
+            f"mixed fixture import count mismatch: got {len(report['imports'])} rows "
+            f"(summary total {report['summary']['total']}), expected {len(MIXED_EXPECTED)}"
+        )
     for row in report["imports"]:
         got[(row["lib"], int(row["nid"], 16))] = row["classification"]
     if got != MIXED_EXPECTED:

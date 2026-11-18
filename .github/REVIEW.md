@@ -86,7 +86,8 @@ runtime, an interpreter floor, and HLE, moving toward low-level emulation.
   linkage valid.
 - Interpreter: `cosim-mutants` still kills every mutant. A changed pattern count means
   update the mutant, not weaken the gate.
-- Docs: the docs row of `AGENTS.md` section 9, and resolved links, paths, flags, and Make
+- Docs: the docs and agent policy row of the
+  [full gates](../CONTRIBUTING.md#the-full-gates), and resolved links, paths, flags, and Make
   targets.
 - Report skipped or blocked gates as such. Never imply an unrun gate passed.
 

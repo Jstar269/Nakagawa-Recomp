@@ -16,6 +16,7 @@
 
 #include "osk_overlay_paint.h"
 
+#include <SDL3/SDL_error.h>
 #include <SDL3/SDL_pixels.h>
 #include <SDL3/SDL_surface.h>
 #include <stdio.h>
@@ -139,6 +140,55 @@ static void test_outline_and_caret(void) {
     osk_overlay_paint(&o, s_frame, W, H);
     /* The field border is drawn on its top edge. */
     CHECK(px(200, 24) == rgb(90, 120, 180), "the text field has its outline");
+    /* The caret is an underscore in the text colour in the cell after the last character:
+     * 'x' fills x = 20..27, so the caret's cell is x = 28..35, y = 32..39. The empty cell
+     * after it shows only the field colour. */
+    int caret = 0, after = 0;
+    for (int y = 32; y < 40; y++) {
+        for (int x = 28; x < 36; x++) caret += px(x, y) == rgb(240, 244, 250);
+        for (int x = 36; x < 44; x++) after += px(x, y) != rgb(30, 36, 50);
+    }
+    CHECK(caret > 0, "the text field draws the caret after the last character");
+    CHECK(px(28, 32) == rgb(30, 36, 50), "the caret is an underscore, not a filled cell");
+    CHECK(after == 0, "nothing is drawn in the field past the caret");
+}
+
+/* Text-colour pixels in columns [x0, x1) of the field's text row (y = 32..39) of a frame w wide. */
+static int text_pixels(const uint32_t *frame, int w, int x0, int x1) {
+    int n = 0;
+    for (int y = 32; y < 40; y++)
+        for (int x = x0; x < x1; x++) n += frame[y * w + x] == rgb(240, 244, 250);
+    return n;
+}
+
+static void test_field_scrolls_to_the_end(void) {
+    /* At W = 480 the field holds field_max = (480 - 40) / 8 - 1 = 54 characters and the caret.
+     * Sixty characters: six '#' that must scroll out of view, 53 spaces, and an 'x' that must be
+     * the last visible glyph, in column 53 (x = 444..451), with the caret after it (452..459). */
+    OskOverlay o;
+    uint16_t initial[61];
+    for (int i = 0; i < 60; i++) initial[i] = (uint16_t)(i < 6 ? '#' : (i == 59 ? 'x' : ' '));
+    initial[60] = 0;
+    osk_overlay_reset(&o);
+    osk_overlay_open(&o, NULL, initial, 100, 0);
+    CHECK(o.len == 60, "the long initial text is held whole");
+    make_background();
+    osk_overlay_paint(&o, s_frame, W, H);
+    CHECK(text_pixels(s_frame, W, 20, 444) == 0,
+          "the field shows only the last 54 characters: the leading '#' are scrolled out");
+    CHECK(text_pixels(s_frame, W, 444, 452) > 0, "the last character is drawn in the field's last column");
+    CHECK(text_pixels(s_frame, W, 452, 460) > 0 && px(452, 32) == rgb(30, 36, 50),
+          "the caret underscore follows the last visible character");
+    CHECK(text_pixels(s_frame, W, 460, 468) == 0, "nothing is drawn in the field past the caret");
+
+    /* A frame too narrow for one character (field_max would be -1): the field shows no text and
+     * the caret sits at the field's first column (x = 20..27), not left of it. */
+    enum { NW = 40 };
+    static uint32_t narrow[NW * H];
+    for (int i = 0; i < NW * H; i++) narrow[i] = 0x00606060u;
+    osk_overlay_paint(&o, narrow, NW, H);
+    CHECK(text_pixels(narrow, NW, 12, 20) == 0 && text_pixels(narrow, NW, 20, 28) > 0,
+          "a field with no room for text draws only the caret, at its first column");
 }
 
 /* Stderr goes to a temporary file while the painter runs, so the selftest can count the lines
@@ -219,14 +269,20 @@ static void test_creation_failure_fails_closed(void) {
 
 int main(int argc, char **argv) {
     const char *bmp_path = argc > 1 ? argv[1] : NULL;
+    /* Every build of this selftest links SDL3, which always carries the software renderer,
+     * so a failed probe is a probe regression, and the runtime painter would draw nothing
+     * (osk_overlay_paint returns at the same check). It fails; it never skips. */
     if (!osk_overlay_paint_available()) {
-        printf("osk_overlay_paint_selftest: SKIP (SDL cannot draw a software renderer here)\n");
-        return 0;
+        fprintf(stderr, "FAIL: SDL cannot make a software renderer on a frame surface (%s)\n",
+                SDL_GetError());
+        printf("osk_overlay_paint_selftest: 1 checks, 1 failures\n");
+        return 1;
     }
     test_closed_keyboard_draws_nothing();
     test_open_keyboard(bmp_path);
     test_input_type_dims_keys();
     test_outline_and_caret();
+    test_field_scrolls_to_the_end();
     test_creation_failure_fails_closed();
     printf("osk_overlay_paint_selftest: %d checks, %d failures\n", s_checks, s_failures);
     return s_failures ? 1 : 0;

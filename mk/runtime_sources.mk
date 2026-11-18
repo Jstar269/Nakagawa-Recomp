@@ -311,9 +311,10 @@ endif
 ifneq ($(strip $(SOURCE_DATE_EPOCH)),)
 # Transported through the environment (see the guest-input transport above) so
 # no operator value reaches a command interpreter as syntax. Fail closed on a
-# non-decimal value: flight_recorder.c emits it as a JSON number.
+# non-decimal value, or one with a leading zero: flight_recorder.c emits it as a
+# JSON number, and JSON numbers have no leading zeros.
 export SOURCE_DATE_EPOCH
-SR_SOURCE_DATE_EPOCH := $(shell "$(PYTHON)" -c "import os; v = os.environ.get('SOURCE_DATE_EPOCH', ''); print(v if v.isdigit() else '')")
+SR_SOURCE_DATE_EPOCH := $(shell "$(PYTHON)" -c "import os; v = os.environ.get('SOURCE_DATE_EPOCH', ''); print(v if v.isascii() and v.isdigit() and (v == '0' or v[0] != '0') else '')")
 ifeq ($(strip $(SR_SOURCE_DATE_EPOCH)),)
 $(error SOURCE_DATE_EPOCH must be a decimal Unix timestamp (reproducible-builds.org), got "$(SOURCE_DATE_EPOCH)")
 endif
