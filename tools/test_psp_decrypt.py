@@ -744,6 +744,8 @@ class TestSyntheticEndToEnd(unittest.TestCase):
     """A source-owned encrypted fixture is
     unwrapped end-to-end by the production boundary."""
 
+    tmp: ClassVar[Path]
+    exe: ClassVar[Path]
     elf: ClassVar[bytes]
 
     @classmethod
@@ -1947,7 +1949,7 @@ class TestKeystoreTextErasure(unittest.TestCase):
         keyfile.write_bytes(payload)
         out = subprocess.run([str(self.exe), str(keyfile)], capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        report = json.loads(out.stdout)
+        report: dict = json.loads(out.stdout)
         # The scanner sees an unwiped block, every tracked block came back, and
         # nothing outside the tracker was released through it.
         self.assertGreater(report["control_hits"], 0, report)
