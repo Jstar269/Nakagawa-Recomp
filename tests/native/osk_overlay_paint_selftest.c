@@ -153,6 +153,44 @@ static void test_outline_and_caret(void) {
     CHECK(after == 0, "nothing is drawn in the field past the caret");
 }
 
+/* Text-colour pixels in columns [x0, x1) of the field's text row (y = 32..39) of a frame w wide. */
+static int text_pixels(const uint32_t *frame, int w, int x0, int x1) {
+    int n = 0;
+    for (int y = 32; y < 40; y++)
+        for (int x = x0; x < x1; x++) n += frame[y * w + x] == rgb(240, 244, 250);
+    return n;
+}
+
+static void test_field_scrolls_to_the_end(void) {
+    /* At W = 480 the field holds field_max = (480 - 40) / 8 - 1 = 54 characters and the caret.
+     * Sixty characters: six '#' that must scroll out of view, 53 spaces, and an 'x' that must be
+     * the last visible glyph, in column 53 (x = 444..451), with the caret after it (452..459). */
+    OskOverlay o;
+    uint16_t initial[61];
+    for (int i = 0; i < 60; i++) initial[i] = (uint16_t)(i < 6 ? '#' : (i == 59 ? 'x' : ' '));
+    initial[60] = 0;
+    osk_overlay_reset(&o);
+    osk_overlay_open(&o, NULL, initial, 100, 0);
+    CHECK(o.len == 60, "the long initial text is held whole");
+    make_background();
+    osk_overlay_paint(&o, s_frame, W, H);
+    CHECK(text_pixels(s_frame, W, 20, 444) == 0,
+          "the field shows only the last 54 characters: the leading '#' are scrolled out");
+    CHECK(text_pixels(s_frame, W, 444, 452) > 0, "the last character is drawn in the field's last column");
+    CHECK(text_pixels(s_frame, W, 452, 460) > 0 && px(452, 32) == rgb(30, 36, 50),
+          "the caret underscore follows the last visible character");
+    CHECK(text_pixels(s_frame, W, 460, 468) == 0, "nothing is drawn in the field past the caret");
+
+    /* A frame too narrow for one character (field_max would be -1): the field shows no text and
+     * the caret sits at the field's first column (x = 20..27), not left of it. */
+    enum { NW = 40 };
+    static uint32_t narrow[NW * H];
+    for (int i = 0; i < NW * H; i++) narrow[i] = 0x00606060u;
+    osk_overlay_paint(&o, narrow, NW, H);
+    CHECK(text_pixels(narrow, NW, 12, 20) == 0 && text_pixels(narrow, NW, 20, 28) > 0,
+          "a field with no room for text draws only the caret, at its first column");
+}
+
 /* Stderr goes to a temporary file while the painter runs, so the selftest can count the lines
  * it writes. Returns 0 when the capture could not start; stderr is then left as it was. */
 static int capture_begin(FILE **capture, int *saved) {
@@ -244,6 +282,7 @@ int main(int argc, char **argv) {
     test_open_keyboard(bmp_path);
     test_input_type_dims_keys();
     test_outline_and_caret();
+    test_field_scrolls_to_the_end();
     test_creation_failure_fails_closed();
     printf("osk_overlay_paint_selftest: %d checks, %d failures\n", s_checks, s_failures);
     return s_failures ? 1 : 0;

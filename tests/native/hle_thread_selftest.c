@@ -8442,6 +8442,24 @@ static void test_sysreg_virtual_registry(void) {
                "sceRegOpenRegistry serves 512 handles and refuses the 513th with NO_MEMORY");
         for (uint32_t i = 0; i < opened; i++) (void)sysreg_call(NID_SCE_REG_CLOSE_REGISTRY, handles[i], 0u, 0u, 0u, 0u);
     }
+    /* LoadExec reboots the kernel: the old program's registry and category handles go with it,
+     * and the registry itself (its nodes) stays. */
+    {
+        const uint32_t old_reg = sysreg_open_registry(1u, &r);
+        expect(r == 0u && old_reg != 0u, "LoadExec fixture: the old program opens the registry");
+        const uint32_t old_cat = sysreg_open_category(old_reg, "/CONFIG/SYSTEM", 1u, &r);
+        expect(r == 0u && old_cat != 0u, "LoadExec fixture: the old program opens /CONFIG/SYSTEM");
+        sr_hle_loadexec_reset_guest_state();
+        expect(sysreg_call(NID_SCE_REG_CLOSE_CATEGORY, old_cat, 0u, 0u, 0u, 0u) == SYSREG_E_BAD_HANDLE &&
+                   sysreg_call(NID_SCE_REG_CLOSE_REGISTRY, old_reg, 0u, 0u, 0u, 0u) == SYSREG_E_BAD_HANDLE,
+               "after LoadExec the old program's registry and category handles are refused");
+        const uint32_t next_reg = sysreg_open_registry(1u, &r);
+        const uint32_t next_cat = next_reg ? sysreg_open_category(next_reg, "/CONFIG/SYSTEM", 1u, &r) : 0u;
+        expect(next_reg != 0u && next_cat != 0u,
+               "after LoadExec the next program opens the registry and its categories again");
+        if (next_cat) (void)sysreg_call(NID_SCE_REG_CLOSE_CATEGORY, next_cat, 0u, 0u, 0u, 0u);
+        if (next_reg) (void)sysreg_call(NID_SCE_REG_CLOSE_REGISTRY, next_reg, 0u, 0u, 0u, 0u);
+    }
     expect(!sysreg_file_exists(SYSREG_SCRATCH_FILE), "nothing reaches the overlay file without a flush");
     sysreg_restart();
 }
@@ -9219,6 +9237,7 @@ static void test_net_core_without_network(void) {
     extern void hle_net_reset(void);
     extern int sr_hle_test_net_inited(void);
     extern uint32_t sr_hle_test_net_pool_uid(void);
+    extern void sr_hle_test_net_note_reset(void);
     extern uint32_t block_addr(uint32_t uid);
     extern uint32_t alloc_block(uint32_t size);
     extern uint32_t free_block(uint32_t uid);
@@ -9228,6 +9247,12 @@ static void test_net_core_without_network(void) {
     sr_hle_test_partition_reset();
     sr_hle_init();
     hle_net_reset();
+    sr_hle_test_net_note_reset();
+    /* Section 7: each PPSSPP-derived sceNetInit cell logs its label the first time it answers. */
+    static char net_log[4096];
+    FILE *net_capture = NULL;
+    int net_saved_fd = -1;
+    int net_capturing = hle_data_stderr_capture_begin(&net_capture, &net_saved_fd);
 
     memset(SR_HOST(MAC_ADDR), 0xcc, 6u);
     expect(net_call(NID_NET_LOCAL_ETHER, MAC_ADDR, 0, 0, 0, 0) == 0x80410180u,
@@ -9236,6 +9261,11 @@ static void test_net_core_without_network(void) {
 
     expect(net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
            "sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000) returns 0, as on a PSP");
+    net_log[0] = '\0';
+    if (net_capturing) hle_data_stderr_capture_end(net_capture, net_saved_fd, net_log, sizeof(net_log));
+    expect(net_capturing && strstr(net_log, "PPSSPP-derived") == NULL,
+           "the PSP-recorded sceNetInit logs no PPSSPP-derived note");
+    net_capturing = hle_data_stderr_capture_begin(&net_capture, &net_saved_fd);
     const uint32_t pool_uid = sr_hle_test_net_pool_uid();
     const uint32_t pool_addr = block_addr(pool_uid);
     expect(sr_hle_test_net_inited() && pool_addr != 0u &&
@@ -9275,6 +9305,23 @@ static void test_net_core_without_network(void) {
                net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x78u, 0x1000u) == 0x80020193u &&
                !sr_hle_test_net_inited(),
            "sceNetInit with a thread priority outside 0x08-0x77: ILLEGAL_PRIORITY (PPSSPP; UNMEASURED)");
+    expect(net_call(NID_NET_INIT, 0u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0x800201b7u,
+           "sceNetInit with pool size 0 again: still ILLEGAL_MEMSIZE");
+    net_log[0] = '\0';
+    if (net_capturing) hle_data_stderr_capture_end(net_capture, net_saved_fd, net_log, sizeof(net_log));
+    {
+        const char *memsize = strstr(net_log, "PPSSPP-derived, not PSP-measured: sceNetInit (NID 0x39af39a6) "
+                                              "refuses pool size 0");
+        const char *memsize_cell = memsize ? strstr(memsize, "refuses pool size 0") : NULL;
+        expect(net_capturing && memsize_cell && !strstr(memsize_cell + 1, "refuses pool size 0"),
+               "sceNetInit's derived ILLEGAL_MEMSIZE cell logs its label once per run");
+        expect(strstr(net_log, "PPSSPP-derived, not PSP-measured: sceNetInit (NID 0x39af39a6) "
+                               "refuses a thread priority") != NULL,
+               "sceNetInit's derived ILLEGAL_PRIORITY cell logs its label");
+        expect(strstr(net_log, "PPSSPP-derived, not PSP-measured: sceNetInit (NID 0x39af39a6) "
+                               "again without sceNetTerm") != NULL,
+               "sceNetInit's derived re-init cell logs its label");
+    }
 
     /* A pool size within 255 of 4 GB has no 256-byte-rounded slot. With a small free block in the
      * partition the rounding must not wrap to a 256-byte slot that the free block satisfies. */
@@ -9299,8 +9346,14 @@ static void test_net_core_without_network(void) {
            "the switch-off overlay is written");
     sysreg_restart();
     expect(profile_call(0xd7763699u, 0u) == 0u, "the profile's WLAN switch reads off");
+    net_capturing = hle_data_stderr_capture_begin(&net_capture, &net_saved_fd);
     expect(net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u && sr_hle_test_net_inited(),
            "sceNetInit with the WLAN switch off returns 0 (UNMEASURED; the switch-on result is kept)");
+    net_log[0] = '\0';
+    if (net_capturing) hle_data_stderr_capture_end(net_capture, net_saved_fd, net_log, sizeof(net_log));
+    expect(net_capturing && strstr(net_log, "PPSSPP-derived, not PSP-measured: sceNetInit (NID 0x39af39a6) "
+                                            "returns 0 with the WLAN switch off") != NULL,
+           "sceNetInit with the WLAN switch off logs its PPSSPP-derived label");
     expect(net_call(NID_NET_LOCAL_ETHER, MAC_ADDR, 0, 0, 0, 0) == 0x80410180u &&
                net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u,
            "with the switch off there is still no local address, and sceNetTerm returns 0");
@@ -27679,8 +27732,23 @@ static void test_ctrl_read_buffer_contract(void) {
     ctrl_drain(&cpu);
     ctrl_tick(4u);
     ctrl_fill_guest(CTRL_TAIL_BUF, CTRL_SAMPLE_BYTES, 0xa5a5a5a5u);
-    expect(ctrl_dispatch(&cpu, CTRL_TAIL_BUF, 2u) == 0u,
-           "a span crossing the end of the guest arena reports nothing written");
+    {
+        /* PPSSPP's 0 for a destination it cannot write is labelled and logged once per run
+         * (AGENTS.md section 7), so a run that takes it is told apart from a measured answer. */
+        extern void sr_hle_test_ctrl_bad_span_note_reset(void);
+        static char ctrl_log[1024];
+        FILE *ctrl_capture = NULL;
+        int ctrl_saved_fd = -1;
+        sr_hle_test_ctrl_bad_span_note_reset();
+        const int ctrl_capturing = hle_data_stderr_capture_begin(&ctrl_capture, &ctrl_saved_fd);
+        const uint32_t ctrl_rc = ctrl_dispatch(&cpu, CTRL_TAIL_BUF, 2u);
+        ctrl_log[0] = '\0';
+        if (ctrl_capturing) hle_data_stderr_capture_end(ctrl_capture, ctrl_saved_fd, ctrl_log, sizeof(ctrl_log));
+        expect(ctrl_rc == 0u, "a span crossing the end of the guest arena reports nothing written");
+        expect(ctrl_capturing && strstr(ctrl_log, "HLE: PPSSPP-derived, not PSP-measured: sceCtrlReadBufferPositive "
+                                                  "into 0x0bfffff0") != NULL,
+               "a read into an unwritable span logs its PPSSPP-derived label");
+    }
     expect(ctrl_guest_all(CTRL_TAIL_BUF, CTRL_SAMPLE_BYTES, 0xa5a5a5a5u),
            "a rejected tail span leaves even its writable leading sample untouched");
 

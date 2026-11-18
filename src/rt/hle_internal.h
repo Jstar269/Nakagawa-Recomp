@@ -1158,6 +1158,8 @@ int guest_cstr(uint32_t addr, char *out, int max);
 uint32_t free_block(uint32_t uid);
 /* sceNet core library state (hle_network.c): reset at LoadExec and by the self-tests. */
 void hle_net_reset(void);
+/* sceReg handles (hle_system.c): closed at LoadExec; the registry stays. */
+void hle_sysreg_loadexec_reset(void);
 void sr_hle_umd_loadexec_reset(void);  /* LoadExec: drop the UMD callback, drive at entry state */
 void hle_font_loadexec_reset(void);    /* LoadExec: drop the old program's sceFont libraries and fonts */
 int sr_hle_test_net_inited(void);

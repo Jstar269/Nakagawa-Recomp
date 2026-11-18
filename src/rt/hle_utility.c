@@ -1179,6 +1179,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     memset(s_utility_module_loaded, 0, sizeof(s_utility_module_loaded));
     s_utility_usb_loaded = 0u;
     hle_net_reset();                     /* the new program starts with sceNet uninitialized */
+    hle_sysreg_loadexec_reset();         /* no sceReg handle of the old program */
     s_volatile_locked = 0;
     g_sdk_version = 0u;
     s_loadexec_boot_uid = 0u;

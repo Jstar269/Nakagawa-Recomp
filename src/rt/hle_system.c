@@ -102,6 +102,13 @@
 SregRegSlot s_sreg_reg[SREG_REG_SLOTS];
 SregCatSlot s_sreg_cat[SREG_CAT_SLOTS];
 
+/* LoadExec reboots the kernel, so every registry and category handle the old program held is
+ * gone. The registry itself (its nodes, and changes not yet flushed) persists. */
+void hle_sysreg_loadexec_reset(void) {
+    memset(s_sreg_reg, 0, sizeof(s_sreg_reg));
+    memset(s_sreg_cat, 0, sizeof(s_sreg_cat));
+}
+
 static int sreg_has_entries(int cat) {
     for (uint32_t i = 0; i < SREG_MAX_NODES; i++)
         if (s_sreg_nodes[i].id && s_sreg_nodes[i].parent == cat) return 1;
