@@ -196,19 +196,33 @@ static size_t read_rule_cases(RuleCase *cases, size_t cap) {
     CHECK(f != NULL, "read the rule table from nk_data_migrate.h");
     if (!f) return 0u;
     char line[256];
-    bool inside = false, header = true;
+    bool inside = false, header = true, ended = false, fits = true;
     size_t count = 0u;
-    while (fgets(line, sizeof(line), f) && count < cap) {
+    while (fgets(line, sizeof(line), f)) {
         if (strstr(line, "BEGIN DATA FOLDER RULE CASES")) {
             inside = true;
             continue;
         }
-        if (strstr(line, "END DATA FOLDER RULE CASES")) break;
+        if (strstr(line, "END DATA FOLDER RULE CASES")) {
+            ended = true;
+            break;
+        }
         if (!inside) continue;
+        /* Every row between the markers is a case of exactly five fields: one that does
+           not parse is a broken case, not one to skip. */
+        const char *rest = line + strspn(line, " \t");
+        if (*rest == '*') ++rest;
+        if (rest[strspn(rest, " \t\r\n")] == '\0') continue; /* a blank comment line */
         RuleCase c;
+        int end = -1;
         memset(&c, 0, sizeof(c));
-        if (sscanf(line, " * %63s %15s %15s %15s %15s", c.name, c.new_state, c.old_state, c.layout,
-                   c.notice) != 5) {
+        bool parsed = sscanf(line, " * %63s %15s %15s %15s %15s%n", c.name, c.new_state,
+                             c.old_state, c.layout, c.notice, &end) == 5 &&
+                      end > 0 && line[strspn(line + end, " \t\r\n") + (size_t)end] == '\0';
+        if (!parsed) {
+            char what[320];
+            snprintf(what, sizeof(what), "a rule row has exactly five fields: %s", line);
+            CHECK(false, what);
             continue;
         }
         if (header) {
@@ -216,9 +230,15 @@ static size_t read_rule_cases(RuleCase *cases, size_t cap) {
             header = false;
             continue;
         }
+        if (count == cap) {
+            fits = false;
+            continue;
+        }
         cases[count++] = c;
     }
     fclose(f);
+    CHECK(inside && ended, "the rule table has its BEGIN and END markers");
+    CHECK(fits, "every rule case fits the test's table");
     return count;
 }
 

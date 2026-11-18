@@ -1490,11 +1490,15 @@ static void test_hostile_documents_fail_closed(void) {
         expect_accepted("over-long name_hint", s_hostile_doc, len, &doc);
         assert(strlen(doc.global.name_hint) == NK_INPUT_NAME_HINT_MAX_LEN - 1);
 
-        /* A field that decides what the parser does is refused instead. */
+        /* With no name_hint the guid is bounded the same way and the hint falls back. */
         snprintf(member, sizeof(member), "\"device\": { \"guid\": \"%s\" }", field);
         len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), member, NULL, NULL, NULL);
         expect_accepted("over-long guid with no name_hint", s_hostile_doc, len, &doc);
+        assert(strlen(doc.global.guid) == NK_INPUT_GUID_MAX_LEN - 1);
+        assert(doc.global.guid[NK_INPUT_GUID_MAX_LEN - 2] == 'A');
+        assert(strcmp(doc.global.name_hint, "Generic Controller") == 0);
 
+        /* A field that decides what the parser does is refused instead. */
         snprintf(member, sizeof(member), "\"psp_bindings\": [ { \"control\": \"%s\","
                  " \"primary\": \"south\" } ]", field);
         len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), NULL, NULL, member, NULL);
@@ -1951,13 +1955,26 @@ static void test_hostile_profile_file_loader(void) {
         assert(strcmp(doc.title_disc_id[0], "UCUS98701") == 0);
     }
 
-    /* The size cap: one byte past 1 MiB is refused before anything is parsed,
-     * and exactly 1 MiB is read and then refused as a malformed document. */
-    fill_repeat(s_hostile_big, sizeof(s_hostile_big), 'A', 1024 * 1024);
-    write_bytes(path, s_hostile_big, 1024 * 1024);
-    expect_load_refused("file of exactly 1 MiB", path, NULL);
-    write_bytes(path, s_hostile_big, 1024 * 1024 + 1);
-    expect_load_refused("file one byte past 1 MiB", path, "exceeds 1 MB");
+    /* The size cap: a whole document padded to exactly 1 MiB loads, and the same
+     * document one byte longer is refused for its size before anything is parsed. */
+    {
+        char entries[1024];
+        const size_t cap = (size_t)NK_INPUT_PROFILE_MAX_FILE_BYTES;
+        size_t doc_len;
+        (void)render_entry(entries, sizeof(entries), "\"UCUS98701\"", NULL);
+        doc_len = render_per_title_doc(s_hostile_big, sizeof(s_hostile_big), "2", entries);
+        assert(doc_len > 0 && doc_len < cap && cap + 1 <= sizeof(s_hostile_big));
+        memset(s_hostile_big + doc_len, '\n', cap + 1 - doc_len);
+        write_bytes(path, s_hostile_big, cap);
+        if (nk_input_profile_file_load(&doc, path, why, sizeof(why)) != NK_OK) {
+            printf("  file of exactly 1 MiB: expected it to load, got diag='%s'\n", why);
+            assert(0 && "a document of exactly the size cap was refused");
+        }
+        assert(doc.title_count == 1);
+        assert(strcmp(doc.title_disc_id[0], "UCUS98701") == 0);
+        write_bytes(path, s_hostile_big, cap + 1);
+        expect_load_refused("file one byte past 1 MiB", path, "exceeds 1 MB");
+    }
     remove(path);
 
     /* A path that is a directory, a path that is empty, and a path that is not

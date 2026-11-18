@@ -215,9 +215,10 @@ static void test_reused_session_restarts_the_clock(void) {
 
     char log_dir[NK_MAX_PATH];
     char user_data_root[NK_MAX_PATH];
-    const char *probe = getenv("TMPDIR");
-    if (!probe || !probe[0]) probe = getenv("TEMP");
-    if (!probe || !probe[0]) probe = ".";
+    /* Inside the run's own root, which main() made, so a start that makes its folders
+     * before the spawn fails leaves nothing in the system temp folder or the checkout. */
+    const char *probe = native_test_get_root();
+    assert(probe != NULL && probe[0] != '\0');
     snprintf(log_dir, sizeof(log_dir), "%s%cnk_pkg_reuse_logs", probe,
              nk_platform_path_separator());
     snprintf(user_data_root, sizeof(user_data_root), "%s%cnk_pkg_reuse_data",
@@ -239,6 +240,9 @@ static void test_reused_session_restarts_the_clock(void) {
     /* Reap a child accepted by the POSIX spawn backend. The clock's poll
      * behavior is exercised separately by test_elapsed_time_advances_while_building. */
     if (result == NK_OK) package_builder_cancel(&session);
+    assert(native_test_remove_tree(log_dir));
+    assert(native_test_remove_tree(user_data_root));
+    assert(nk_platform_path_missing(log_dir) && nk_platform_path_missing(user_data_root));
 }
 
 static void test_state_machine_transitions(void) {
