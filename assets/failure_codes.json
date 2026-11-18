@@ -1128,6 +1128,12 @@
         "player"
       ]
     },
+    "DISC_PATH_TOO_LONG": {
+      "stage": "host",
+      "in": [
+        "player"
+      ]
+    },
     "DISK_FULL": {
       "stage": "host",
       "in": [

@@ -618,7 +618,7 @@ static NkJsonNode *parse_value(JsonParser *p, int depth) {
          * another digit ("01", "-007") is refused, as Python's json refuses it. */
         if (p->src[p->pos] == '0' && p->pos + 1 < p->len &&
             isdigit((unsigned char)p->src[p->pos + 1])) {
-            set_error(p, "Invalid number: leading zero");
+            set_error(p, "Invalid number: leading zeros are forbidden");
             return NULL;
         }
         while (p->pos < p->len && isdigit((unsigned char)p->src[p->pos])) p->pos++;

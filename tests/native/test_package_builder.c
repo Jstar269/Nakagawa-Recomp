@@ -664,36 +664,34 @@ static void test_cli_search_order_and_guidance(void) {
     printf("[PACKAGE_BUILDER_TEST] Subtest 6: CLI search order and not-found guidance\n");
     char cands[PACKAGE_BUILDER_CLI_MAX_CANDIDATES][NK_MAX_PATH];
 
-    /* Documented order: override, exe dir, exe parent, release layout, cwd, cwd parent. */
+    /* Documented order: override, exe dir, exe parent, release layout. The working
+     * directory and its parent are not candidates (audit 2026-11-17). */
     int n = package_builder_cli_candidate_paths("C:/rel/bin", "D:/ovr", cands,
                                                 PACKAGE_BUILDER_CLI_MAX_CANDIDATES);
-    assert(n == 6);
+    assert(n == 4);
     assert(strcmp(cands[0], "D:/ovr/tools/nk_cli.py") == 0);
     assert(strcmp(cands[1], "C:/rel/bin/tools/nk_cli.py") == 0);
     assert(strcmp(cands[2], "C:/rel/bin/../tools/nk_cli.py") == 0);
     assert(strcmp(cands[3], "C:/rel/bin/../source/tools/nk_cli.py") == 0);
-    assert(strcmp(cands[4], "tools/nk_cli.py") == 0);
-    assert(strcmp(cands[5], "../tools/nk_cli.py") == 0);
 
     /* No override: the executable folder leads. */
     n = package_builder_cli_candidate_paths("C:/rel/bin", NULL, cands,
                                             PACKAGE_BUILDER_CLI_MAX_CANDIDATES);
-    assert(n == 5);
+    assert(n == 3);
     assert(strcmp(cands[0], "C:/rel/bin/tools/nk_cli.py") == 0);
 
     /* Trailing separators never double up. */
     n = package_builder_cli_candidate_paths("C:/rel/bin/", "D:/ovr/", cands,
                                             PACKAGE_BUILDER_CLI_MAX_CANDIDATES);
-    assert(n == 6);
+    assert(n == 4);
     assert(strcmp(cands[0], "D:/ovr/tools/nk_cli.py") == 0);
     assert(strcmp(cands[1], "C:/rel/bin/tools/nk_cli.py") == 0);
 
-    /* Unknown executable folder: the working-directory pair still applies. */
+    /* Unknown executable folder and no override: nothing relative to the working
+     * directory is searched. */
     n = package_builder_cli_candidate_paths("", "", cands,
                                             PACKAGE_BUILDER_CLI_MAX_CANDIDATES);
-    assert(n == 2);
-    assert(strcmp(cands[0], "tools/nk_cli.py") == 0);
-    assert(strcmp(cands[1], "../tools/nk_cli.py") == 0);
+    assert(n == 0);
 
     /* The not-found card names every searched location and every fix. */
     char msg[512];
@@ -725,6 +723,32 @@ static void test_cli_search_order_and_guidance(void) {
 
     char found[NK_MAX_PATH];
     assert(!package_builder_find_cli(probe_dir, found, sizeof(found)));
+
+    /* Audit 2026-11-17: a tools/nk_cli.py planted in the working directory was found
+     * (and then run by BUILD PACKAGE) when the install-root candidates were absent.
+     * Failing before: find_cli returned the planted cwd/tools/nk_cli.py. */
+    {
+        char planted_dir[NK_MAX_PATH + 96];
+        char planted[NK_MAX_PATH + 128];
+        char exe_dir[NK_MAX_PATH + 96];
+        snprintf(planted_dir, sizeof(planted_dir), "%s%ctools", probe_dir,
+                 nk_platform_path_separator());
+        snprintf(exe_dir, sizeof(exe_dir), "%s%cbin%cdeep", probe_dir,
+                 nk_platform_path_separator(), nk_platform_path_separator());
+        assert(nk_platform_mkdir_p(planted_dir));
+        assert(nk_platform_mkdir_p(exe_dir));
+        snprintf(planted, sizeof(planted), "%s%cnk_cli.py", planted_dir,
+                 nk_platform_path_separator());
+        FILE *pf = nk_fopen_utf8(planted, "wb");
+        assert(pf != NULL);
+        fputs("# planted\n", pf);
+        fclose(pf);
+        assert(!package_builder_find_cli(exe_dir, found, sizeof(found)));
+        assert(!package_builder_find_cli("", found, sizeof(found)));
+        assert(!package_builder_find_cli(NULL, found, sizeof(found)));
+        assert(found[0] == '\0');
+        (void)nk_remove_utf8(planted);
+    }
 
     nk_tb_set_env("NK_INSTALL_ROOT", saved_cwd);
     assert(package_builder_find_cli(probe_dir, found, sizeof(found)));
@@ -1020,7 +1044,7 @@ static void test_pinned_prerequisite_manifest(void) {
     char cli_path[NK_MAX_PATH];
     char error[256];
     PackagePrerequisiteList list;
-    assert(package_builder_find_cli(NULL, cli_path, sizeof(cli_path)));
+    assert(package_builder_find_cli(".", cli_path, sizeof(cli_path)));
     assert(package_builder_load_prerequisites(cli_path, &list, error, sizeof(error)));
     assert(list.count == 35);
     assert(list.total_bytes == UINT64_C(101892265));
@@ -1597,10 +1621,199 @@ static int run_build_speed_probe(int argc, char *argv[]) {
     if (fclose(f) != 0) return 4;
     return released ? 0 : 5;
 }
+/* Audit 2026-11-17: nk_cli.py reports the package PASS line before it has finished (it
+ * still records the title's input identity and closes its reporter), and the child can
+ * still fail after it. The session then ended both complete and failed, and the launcher's
+ * completion branch, which read is_complete alone, adopted the build while the failure card
+ * opened too. Failing before: is_complete stayed set after the non-zero exit. Complete now
+ * means the PASS line and a clean exit. The child is this test binary with --child-exit-three. */
+static void test_pass_then_failed_exit_is_not_complete(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: package PASS then a failed exit\n");
+    assert(s_self_executable && s_self_executable[0]);
+    const char *child_argv[] = { s_self_executable, "--child-exit-three", NULL };
+
+    PackageBuildSession session;
+    package_builder_init_session(&session, "TEST80007", "Pass Then Fail Fixture");
+    int n = snprintf(session.progress_file_path, sizeof(session.progress_file_path),
+                     "%s%cpass-then-fail.progress", native_test_get_root(),
+                     nk_platform_path_separator());
+    assert(n > 0 && (size_t)n < sizeof(session.progress_file_path));
+    FILE *progress = nk_fopen_utf8(session.progress_file_path, "wb");
+    assert(progress != NULL);
+    fputs("{\"stage\": \"package\", \"status\": \"PASS\", "
+          "\"message\": \"Runtime package cached\"}\n", progress);
+    fclose(progress);
+    session.is_building = true;
+    session.start_time_ms = 0;
+    bool spawned = nk_platform_spawn_tool(s_self_executable, child_argv, NULL, NULL,
+                                          NULL, &session.process);
+    assert(spawned);
+
+    uint64_t deadline = route_now_ms() + 30000u;
+    while (session.is_building && route_now_ms() < deadline) {
+        package_builder_poll(&session, route_now_ms());
+        if (session.is_building) route_pause_ms(10);
+    }
+    assert(!session.is_building);
+    assert(session.exit_code == 3);
+    assert(session.is_failed);
+    assert(!session.is_complete);
+    assert(session.current_stage == PACKAGE_BUILD_STAGE_FAILED);
+    (void)nk_remove_utf8(session.progress_file_path);
+}
+
+/* Audit 2026-11-17: the build tools' fetch runs on the build session, and its
+ * install-complete event was read as a package PASS. When the build that follows the
+ * install stopped in its own preflight (before it reset the session), the launcher's
+ * completion branch took the fetch for a finished build of the title. Failing before:
+ * is_complete was set by install-complete. The install is now its own result, and a
+ * clean exit after it is not a failure. The child is this test binary with
+ * --child-exit-zero. */
+static void test_install_complete_is_not_a_package_build(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: build tools install-complete is no package PASS\n");
+    assert(s_self_executable && s_self_executable[0]);
+    const char *child_argv[] = { s_self_executable, "--child-exit-zero", NULL };
+
+    PackageBuildSession session;
+    package_builder_init_session(&session, "TEST80008", "Build Tools Fixture");
+    int n = snprintf(session.progress_file_path, sizeof(session.progress_file_path),
+                     "%s%cinstall-complete.progress", native_test_get_root(),
+                     nk_platform_path_separator());
+    assert(n > 0 && (size_t)n < sizeof(session.progress_file_path));
+    FILE *progress = nk_fopen_utf8(session.progress_file_path, "wb");
+    assert(progress != NULL);
+    fputs("{\"event\": \"install-complete\"}\n", progress);
+    fclose(progress);
+    session.is_building = true;
+    session.start_time_ms = 0;
+    bool spawned = nk_platform_spawn_tool(s_self_executable, child_argv, NULL, NULL,
+                                          NULL, &session.process);
+    assert(spawned);
+
+    uint64_t deadline = route_now_ms() + 30000u;
+    while (session.is_building && route_now_ms() < deadline) {
+        package_builder_poll(&session, route_now_ms());
+        if (session.is_building) route_pause_ms(10);
+    }
+    assert(!session.is_building);
+    assert(session.exit_code == 0);
+    assert(session.prerequisite_install_complete);
+    assert(!session.is_complete);
+    assert(!session.is_failed);
+    assert(session.current_stage != PACKAGE_BUILD_STAGE_COMPLETE);
+    (void)nk_remove_utf8(session.progress_file_path);
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+static DWORD WINAPI wait_for_release(void *context) {
+    WaitForSingleObject((HANDLE)context, INFINITE);
+    return 0;
+}
+
+/* Audit 2026-11-17: a second Python install started on a session whose worker was still
+ * running zeroed the session under it, lost its handle, and set two workers on one
+ * python.pending folder. Failing before: start wiped the session and returned true. A
+ * running worker now refuses the start; a finished one is joined, then the start goes
+ * ahead. The item has no size, so the new worker stops at its manifest check offline. */
+static void test_bootstrap_start_refuses_a_running_worker(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: Python install refuses a session in use\n");
+    PackagePrerequisite item;
+    memset(&item, 0, sizeof(item));
+    snprintf(item.id, sizeof(item.id), "cpython-embed-amd64");
+    snprintf(item.filename, sizeof(item.filename), "python-embed.zip");
+
+    static PackageBootstrapSession session;
+    memset(&session, 0, sizeof(session));
+    HANDLE release = CreateEventA(NULL, TRUE, FALSE, NULL);
+    assert(release != NULL);
+    HANDLE worker = CreateThread(NULL, 0, wait_for_release, release, 0, NULL);
+    assert(worker != NULL);
+    session.thread_handle = worker;
+    snprintf(session.staging_path, sizeof(session.staging_path), "worker-in-use");
+
+    assert(!package_builder_bootstrap_python_start(&session, &item, native_test_get_root()));
+    assert(session.thread_handle == worker);
+    assert(strcmp(session.staging_path, "worker-in-use") == 0);
+
+    /* Audit 2026-11-17: poll copied the worker's result strings before done was set,
+     * while the worker could be writing them. Failing before: a poll of the running
+     * worker returned the half-written code and message. They are read only once the
+     * worker has published done. */
+    {
+        snprintf(session.error_code, sizeof(session.error_code), "IN_PROGRESS_WRITE");
+        snprintf(session.error_message, sizeof(session.error_message), "partial");
+        bool running_finished = true;
+        char running_code[48] = "x";
+        char running_message[64] = "x";
+        assert(package_builder_bootstrap_python_poll(&session, NULL, &running_finished, NULL,
+                                                     running_code, sizeof(running_code),
+                                                     running_message,
+                                                     sizeof(running_message)));
+        assert(!running_finished);
+        assert(running_code[0] == '\0');
+        assert(running_message[0] == '\0');
+        session.error_code[0] = '\0';
+        session.error_message[0] = '\0';
+    }
+
+    /* The worker finishes; the next start joins it and runs a new one. */
+    assert(SetEvent(release));
+    assert(WaitForSingleObject(worker, 30000) == WAIT_OBJECT_0);
+    session.done = 1;
+    assert(package_builder_bootstrap_python_start(&session, &item, native_test_get_root()));
+    /* (Windows may hand the closed handle's value to the new thread.) */
+    assert(session.thread_handle != NULL);
+
+    bool finished = false;
+    bool succeeded = true;
+    char code[48] = "";
+    char message[512] = "";
+    uint64_t deadline = route_now_ms() + 30000u;
+    while (!finished && route_now_ms() < deadline) {
+        assert(package_builder_bootstrap_python_poll(&session, NULL, &finished, &succeeded,
+                                                     code, sizeof(code),
+                                                     message, sizeof(message)));
+        if (!finished) route_pause_ms(10);
+    }
+    assert(finished && !succeeded);
+    package_builder_bootstrap_python_close(&session);
+    assert(session.thread_handle == NULL);
+    CloseHandle(release);
+}
+#endif
 
 /* Settings > Build speed reaches the build child: nk_cli.py gets --build-speed with the
  * setting's key, and a Background child runs below normal while Balanced keeps the
  * player's priority. */
+/* Audit 2026-11-17: the player's shutdown waits for a cancelled build tools download with
+ * nk_platform_wait_process between polls. When the child exits inside that wait, the wait
+ * reaps it and clears process.is_active. Failing before: the next poll returned at the
+ * is_active check, so is_building never cleared and the shutdown loop spun forever. A
+ * child some other caller already reaped now ends the session like any other exit. */
+static void test_poll_ends_a_session_whose_child_was_already_reaped(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: a child reaped by a wait ends the session\n");
+    assert(s_self_executable && s_self_executable[0]);
+    const char *child_argv[] = { s_self_executable, "--child-exit-zero", NULL };
+
+    PackageBuildSession session;
+    package_builder_init_session(&session, "TEST80006", "Reaped Child Fixture");
+    session.is_building = true;
+    session.start_time_ms = 0;
+    bool spawned = nk_platform_spawn_tool(s_self_executable, child_argv, NULL, NULL,
+                                          NULL, &session.process);
+    assert(spawned);
+    /* The shutdown loop's wait: it returns once the child has exited, reaping it. */
+    int waited = nk_platform_wait_process(&session.process, 30000);
+    assert(waited == 0);
+    assert(!session.process.is_active);
+
+    package_builder_poll(&session, route_now_ms());
+    assert(!session.is_building);
+    assert(session.is_failed);   /* a clean exit without a package event is a failure */
+    assert(session.current_stage == PACKAGE_BUILD_STAGE_FAILED);
+    assert(session.process.native_handle == NULL);
+}
+
 static void test_build_speed_reaches_the_child(void) {
     printf("[PACKAGE_BUILDER_TEST] Subtest: build speed reaches the child\n");
     static const PackageBuildSpeed speeds[] = {
@@ -1694,8 +1907,123 @@ static void test_build_speed_reaches_the_child(void) {
     }
 }
 
+static bool session_output_has(const PackageBuildSession *session, const char *needle) {
+    for (int i = 0; i < PACKAGE_BUILD_MAX_OUTPUT_LINES; i++) {
+        if (strstr(session->output_lines[i], needle) != NULL) return true;
+    }
+    return false;
+}
+
+/* Audit 2026-11-17: the progress reader used a 1 KiB fgets buffer and took any longer
+ * line for one still being written, so it stopped on it at every poll: a FAIL with a long
+ * detail never set the failure, and every later event (a PASS included) was lost. Failing
+ * before: failure_boundary stayed empty and current_message never reached "after giant".
+ * A long line is now read whole, one over the reader's cap is skipped with a visible
+ * PROGRESS_LINE_TOO_LONG note, and only an unterminated line waits for the next poll. */
+static void test_long_progress_lines_are_consumed(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: progress lines over 1 KiB are consumed\n");
+    PackageBuildSession session;
+    package_builder_init_session(&session, "TEST80010", "Long Progress Fixture");
+    int n = snprintf(session.progress_file_path, sizeof(session.progress_file_path),
+                     "%s%clong-lines.progress", native_test_get_root(),
+                     nk_platform_path_separator());
+    assert(n > 0 && (size_t)n < sizeof(session.progress_file_path));
+    FILE *progress = nk_fopen_utf8(session.progress_file_path, "wb");
+    assert(progress != NULL);
+    fputs("{\"stage\": \"compile\", \"status\": \"FAIL\", \"message\": \"BOUNDARY_LONG: ", progress);
+    for (int i = 0; i < 1500; i++) fputc('d', progress);
+    fputs("\", \"detail\": \"", progress);
+    for (int i = 0; i < 1500; i++) fputc('e', progress);
+    fputs("\"}\n", progress);
+    /* Over the reader's cap: skipped by name, not parsed. */
+    fputs("{\"stage\": \"compile\", \"status\": \"RUNNING\", \"message\": \"", progress);
+    for (int i = 0; i < 300 * 1024; i++) fputc('g', progress);
+    fputs("\"}\n", progress);
+    fputs("{\"stage\": \"compile\", \"status\": \"RUNNING\", \"message\": \"after giant\"}\n",
+          progress);
+    const char *partial = "{\"stage\": \"package\", \"status\": \"PASS\", ";
+    fputs(partial, progress);
+    assert(fclose(progress) == 0);
+    int64_t size = nk_platform_get_file_size(session.progress_file_path);
+    assert(size > 0);
+
+    session.is_building = true;
+    package_builder_poll(&session, 1000u);
+    assert(session.is_failed);
+    assert(strncmp(session.failure_boundary, "BOUNDARY_LONG: ddd", 18) == 0);
+    assert(strcmp(session.current_message, "after giant") == 0);
+    assert(session_output_has(&session, "PROGRESS_LINE_TOO_LONG"));
+    /* The unterminated line is left for the next poll. */
+    assert(session.progress_file_offset == size - (int64_t)strlen(partial));
+
+    progress = nk_fopen_utf8(session.progress_file_path, "ab");
+    assert(progress != NULL);
+    fputs("\"message\": \"Runtime package cached\"}\n", progress);
+    assert(fclose(progress) == 0);
+    package_builder_poll(&session, 1100u);
+    assert(strcmp(session.current_message, "Runtime package cached") == 0);
+    assert(session.progress_file_offset ==
+           nk_platform_get_file_size(session.progress_file_path));
+    (void)nk_remove_utf8(session.progress_file_path);
+}
+
+/* Audit 2026-11-17: allowed_hosts that join to more than the 256-byte field made the
+ * manifest load fail with an empty error, so callers showed "Out of memory." or a
+ * generic text. Failing before: error stayed empty. The failure now names the manifest
+ * problem. */
+static void test_allowed_hosts_overflow_is_named(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: allow-listed hosts overflow is named\n");
+    char root[NATIVE_TEST_PATH_MAX];
+    int n = snprintf(root, sizeof(root), "%s%chosts_overflow", native_test_get_root(),
+                     nk_platform_path_separator());
+    assert(n > 0 && (size_t)n < sizeof(root));
+    bundle_test_write(root, "source/tools/nk_cli.py", "# synthetic CLI\n");
+    char host[101];
+    memset(host, 'h', 96);
+    memcpy(host + 96, ".org", 5);
+    char manifest[2048];
+    n = snprintf(manifest, sizeof(manifest),
+        "{\"schema_version\": 1, \"total_download_bytes\": 100, \"artifacts\": [\n"
+        " {\"id\": \"cpython-embed-amd64\", \"name\": \"Synthetic CPython\", \"version\": \"3.15.1\",\n"
+        "  \"url\": \"https://www.python.org/ftp/synthetic.zip\",\n"
+        "  \"allowed_hosts\": [\"www.python.org\", \"%s\", \"%s\", \"%s\"],\n"
+        "  \"filename\": \"synthetic.zip\", \"size_bytes\": 100,\n"
+        "  \"sha256\": \"1111111111111111111111111111111111111111111111111111111111111111\",\n"
+        "  \"license\": \"PSF-2.0\", \"status\": \"ready\"}\n"
+        "]}\n", host, host, host);
+    assert(n > 0 && (size_t)n < sizeof(manifest));
+    bundle_test_write(root, "source/assets/prereq_manifest.json", manifest);
+    char cli_path[NATIVE_TEST_PATH_MAX];
+    bundle_test_path(cli_path, sizeof(cli_path), root, "source/tools/nk_cli.py");
+    static PackagePrerequisiteList list;
+    char error[256] = "";
+    assert(!package_builder_load_prerequisites(cli_path, &list, error, sizeof(error)));
+    printf("   error=%s\n", error);
+    assert(strcmp(error, "PREREQUISITE_MANIFEST_INVALID: the allow-listed hosts are too long.") == 0);
+}
+
+/* Audit 2026-11-17: the build tools' fetch start reset a running session and spawned
+ * into its process slot, orphaning the live child, where package_builder_start refuses.
+ * Failing before: the start cleared is_building and returned a manifest error. It now
+ * refuses a running session and leaves it untouched. */
+static void test_prerequisite_fetch_refuses_a_running_session(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: build tools fetch refuses a running session\n");
+    PackageBuildSession session;
+    package_builder_init_session(&session, "TEST80011", "Running Session Fixture");
+    session.is_building = true;
+    snprintf(session.current_message, sizeof(session.current_message), "child running");
+    NkResult result = package_builder_start_prerequisite_fetch(
+        &session, "missing-python", "missing/tools/nk_cli.py", native_test_get_root(),
+        native_test_get_root(), false);
+    assert(result == NK_ERROR_ALREADY_EXISTS);
+    assert(session.is_building);
+    assert(strcmp(session.current_message, "child running") == 0);
+    assert(session.failure_code[0] == '\0');
+}
+
 int main(int argc, char *argv[]) {
     if (argc == 2 && strcmp(argv[1], "--child-exit-zero") == 0) return 0;
+    if (argc == 2 && strcmp(argv[1], "--child-exit-three") == 0) return 3;
     if (argc > 2 && strcmp(argv[1], "--build-speed-probe") == 0) {
         return run_build_speed_probe(argc, argv);
     }
@@ -1736,6 +2064,15 @@ int main(int argc, char *argv[]) {
     test_reused_session_restarts_the_clock();
     test_state_machine_transitions();
     test_clean_exit_without_completion_is_a_failure();
+    test_poll_ends_a_session_whose_child_was_already_reaped();
+    test_pass_then_failed_exit_is_not_complete();
+    test_install_complete_is_not_a_package_build();
+    test_long_progress_lines_are_consumed();
+    test_allowed_hosts_overflow_is_named();
+    test_prerequisite_fetch_refuses_a_running_session();
+#if defined(_WIN32) || defined(_WIN64)
+    test_bootstrap_start_refuses_a_running_worker();
+#endif
     test_build_speed_reaches_the_child();
     test_output_line_circular_buffer();
     test_python_candidate_validation();

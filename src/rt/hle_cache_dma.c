@@ -30,15 +30,20 @@ static int stale_mem_read(uint32_t addr, uint32_t *word_out, void *ctx) {
     return 1;
 }
 
+/* The detector found a translated span whose bytes changed: record it and stop. */
+__attribute__((noreturn, cold)) static void stale_code_stop(uint32_t pc, uint32_t bad,
+                                                            uint32_t aux) {
+    fflush(stderr);
+    sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, pc, bad, aux);
+    abort();
+}
+
 static uint32_t h_cache_invalidate_all_common(CpuState *s) {
     (void)s;
     if (sr_stale_enabled()) {
         uint32_t bad = 0u, exp = 0u, act = 0u;
-        if (sr_stale_check_all(stale_mem_read, NULL, &bad, &exp, &act)) {
-            fflush(stderr);
-            sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, s->pc, bad, 0u);
-            abort();
-        }
+        if (sr_stale_check_all(stale_mem_read, NULL, &bad, &exp, &act))
+            stale_code_stop(s->pc, bad, 0u);
     }
     return 0;
 }
@@ -95,11 +100,8 @@ static uint32_t h_cache_invalidate_range_common(CpuState *s) {
     /* PSP range signature: a0 = address, a1 = length. */
     if (sr_stale_enabled()) {
         uint32_t bad = 0u, exp = 0u, act = 0u;
-        if (sr_stale_check_range(A0, A1, stale_mem_read, NULL, &bad, &exp, &act)) {
-            fflush(stderr);
-            sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, s->pc, bad, A0);
-            abort();
-        }
+        if (sr_stale_check_range(A0, A1, stale_mem_read, NULL, &bad, &exp, &act))
+            stale_code_stop(s->pc, bad, A0);
     }
     return 0;
 }
@@ -152,11 +154,8 @@ void sr_stale_note_cache_op(uint32_t addr) {
     }
     {
         uint32_t bad = 0u, exp = 0u, act = 0u;
-        if (sr_stale_check_range(addr, 4u, stale_mem_read, NULL, &bad, &exp, &act)) {
-            fflush(stderr);
-            sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, bad, addr);
-            abort();
-        }
+        if (sr_stale_check_range(addr, 4u, stale_mem_read, NULL, &bad, &exp, &act))
+            stale_code_stop(0u, bad, addr);
     }
 }
 /* ---- sceDmacMemcpy / sceDmacTryMemcpy ---------------------------------------
@@ -337,12 +336,16 @@ static void dmac_copy_through_bounce(uint32_t dst, uint32_t src, uint32_t n) {
     if (g_sr_heap_watch) sr_heap_note_bulk_write(dst, n, 0u);
 }
 
+/* The source is brought up to date here, at the copy, not only at validation: a blocking
+ * call can wait for the channel first, and a guest thread that runs in that wait can render
+ * into a VRAM source (the bounce path's sr_guest_copy_in does the same per piece). */
 static void dmac_copy(uint32_t dst, uint32_t src, uint32_t n) {
     if (n == 0u) return;
     if (dmac_src_crosses_vram_mirror(dst, src, n)) {
         dmac_copy_through_bounce(dst, src, n);
         return;
     }
+    sr_guest_vram_read_prepare_bytes(src, n);
     sr_guest_vram_write_prepare_bytes(dst, n);
     memmove(SR_HOST(dst), SR_HOST(src), n);
     sr_guest_vram_write_commit_bytes(dst, n);

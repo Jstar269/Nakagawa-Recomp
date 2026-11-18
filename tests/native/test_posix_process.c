@@ -44,6 +44,10 @@ int main(void) {
 #include "nk_launch.h"
 #include "nk_platform.h"
 
+/* The checks below spawn and wait inside assert(): keep them in every build. */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
@@ -228,9 +232,14 @@ static void touch(const char *path) {
 static void tool_dir_rule_subtest(void) {
     printf("[POSIX_PROCESS_TEST] Subtest 9: the bundled-tool folder rule\n");
     fflush(stdout);
+    /* Inside the run's scratch BUILD_ROOT, never the host's shared TMPDIR, so a failed run
+       leaves its tree only there. Absolute, so the links below resolve from any folder. */
     char root[NK_MAX_PATH];
-    snprintf(root, sizeof(root), "%s/nk-tool-rule-XXXXXX",
-             getenv("TMPDIR") && getenv("TMPDIR")[0] ? getenv("TMPDIR") : "/tmp");
+    char *scratch = realpath(SR_SELFTEST_BUILD_ROOT, NULL);
+    assert(scratch != NULL);
+    int root_len = snprintf(root, sizeof(root), "%s/nk-tool-rule-XXXXXX", scratch);
+    free(scratch);
+    assert(root_len > 0 && (size_t)root_len < sizeof(root));
     assert(mkdtemp(root) != NULL);
     char tools[NK_MAX_PATH + 8], other[NK_MAX_PATH + 8], nested[NK_MAX_PATH + 8];
     char tool[NK_MAX_PATH + 32], outside[NK_MAX_PATH + 32], deep[NK_MAX_PATH + 32];
