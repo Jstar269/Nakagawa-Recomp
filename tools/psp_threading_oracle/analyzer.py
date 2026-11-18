@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     for idx, text in enumerate(texts):
         try:
             parsed = parse_threading_output(text)
-            # No out-of-band context supplied via CLI -> remains UNVERIFIED or SYNTHETIC
+            # No out-of-band context supplied via CLI -> UNVERIFIED_CAPTURE
             label = evidence_label(parsed, evidence_context=None, raw_text=text)
             table += f"\n# Input {idx}: {label} ({args.inputs[idx]})"
         except Exception as exc:  # noqa: BLE001
@@ -46,7 +46,10 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(table, encoding="utf-8")
     else:
         sys.stdout.write(table)
-    # Exit 2 if missing cases or unstable? For now 0 always; harness decides.
+    # Exit 1 when a launch mixes launch groups or repetitions are uneven;
+    # missing cases and variable results are reported for the harness to judge.
+    if analysis["launch_group_issues"] or analysis["repetition_issues"]:
+        return 1
     return 0
 
 if __name__ == "__main__":

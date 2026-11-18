@@ -354,7 +354,8 @@ class EvidenceModelTests(unittest.TestCase):
     def test_synthetic_never_mislabeled_as_hardware(self) -> None:
         text = valid_campaign_text()
         parsed = parse_threading_output(text)
-        self.assertEqual(evidence_label(parsed, raw_text=text), SYNTHETIC_TEST_ONLY)
+        # Placeholder metadata does not select a label: no context -> UNVERIFIED_CAPTURE.
+        self.assertEqual(evidence_label(parsed, raw_text=text), UNVERIFIED_CAPTURE)
         ctx_syn = SyntheticCaptureContext()
         self.assertEqual(evidence_label(parsed, evidence_context=ctx_syn, raw_text=text), SYNTHETIC_TEST_ONLY)
         # Even synthetic with hardware context that doesn't bind correctly stays not hardware
@@ -640,7 +641,7 @@ class MutantTests(unittest.TestCase):
         text = valid_campaign_text()
         lines = [l for l in text.splitlines() if "CT-C05" not in l]
         text2 = "\n".join(lines) + "\n"
-        analysis = analyze_runs([text2])
+        analysis = analyze_runs([text2], scope="full")
         self.assertIn("CT-C05", analysis["missing_cases"])
 
     def test_m4_remove_c06_from_full_fails(self) -> None:
@@ -648,7 +649,7 @@ class MutantTests(unittest.TestCase):
         text = valid_campaign_text()
         lines = [l for l in text.splitlines() if "CT-C06" not in l]
         text2 = "\n".join(lines) + "\n"
-        analysis = analyze_runs([text2])
+        analysis = analyze_runs([text2], scope="full")
         self.assertIn("CT-C06", analysis["missing_cases"])
 
     def test_m5_unknown_field_outside_namespace_accepted_fails(self) -> None:
@@ -801,6 +802,245 @@ class MutantTests(unittest.TestCase):
         # If mutant altered, out4 would be 0xdddddddd (xor), not raw
         self.assertEqual(vals["out4"], "0x22222222")
         self.assertNotEqual(vals["out4"], "0xdddddddd")
+
+GATING_LAUNCHES = ("L1", "L2", "L3", "L4", "L5")
+
+
+def phase_run_text(launch: str, run_id: int, *, meta: str | None = None,
+                   statuses: dict[str, str] | None = None,
+                   attempt: int = 0) -> str:
+    """One single-phase launch (Makefile CASE=<phase>) without the full-only cases."""
+    lines = [meta if meta is not None else synth_meta(run_id)]
+    for case in MATRIX["cases"]:
+        if case["launch"] != launch or case["expected_classification"] == "FULL_ONLY_HYPOTHESIS":
+            continue
+        status = (statuses or {}).get(case["case_id"], "PASS")
+        lines.append(synth_record(case["case_id"], status=status, attempt=attempt))
+    return "\n".join(lines) + "\n"
+
+
+def gating_campaign(first_run_id: int = 0x100) -> list[str]:
+    return [phase_run_text(launch, first_run_id + idx) for idx, launch in enumerate(GATING_LAUNCHES)]
+
+
+class AuditGatingScopeTests(unittest.TestCase):
+    """Audit 2026-11-17: the gating minimum is 28 cases; CT-C05/CT-C06 are full-only."""
+
+    def test_complete_gating_campaign_is_complete(self) -> None:
+        analysis = analyze_runs(gating_campaign())
+        self.assertEqual(len(analysis["required_cases"]), MATRIX["launch_plan"]["gating"]["unique_cases"])
+        self.assertEqual(analysis["missing_cases"], [])
+        self.assertTrue(analysis["all_required_observed"])
+        self.assertEqual(analysis["launch_group_issues"], [])
+        self.assertEqual(analysis["repetition_issues"], [])
+        from psp_threading_oracle.parser import human_table
+        table = human_table(analysis)
+        self.assertIn("required=28", table)
+        self.assertNotIn("Missing:", table)
+
+    def test_full_scope_still_requires_full_only_cases(self) -> None:
+        analysis = analyze_runs(gating_campaign(), scope="full")
+        self.assertEqual(analysis["missing_cases"], ["CT-C05", "CT-C06"])
+        self.assertFalse(analysis["all_required_observed"])
+
+    def test_full_only_cases_observed_in_gating_scope_are_reported_not_missing(self) -> None:
+        analysis = analyze_runs([valid_campaign_text()])
+        self.assertEqual(analysis["missing_cases"], [])
+        self.assertEqual(analysis["optional_cases_observed"], ["CT-C05", "CT-C06"])
+        self.assertIn("CT-C05", {r["case_id"] for r in analysis["case_reports"]})
+
+    def test_unknown_scope_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            analyze_runs(gating_campaign(), scope="partial")
+
+
+class AuditHardwareBindingTests(unittest.TestCase):
+    """Audit 2026-11-17: the hardware context must agree with what the capture claims."""
+
+    def _ctx(self, text: str, **overrides: str | None) -> HardwareCaptureContext:
+        fields: dict[str, str | None] = {
+            "raw_capture_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "binary_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "source_commit": SOURCE_COMMIT,
+            "model": "PSP-3001",
+            "firmware": "6.61",
+            "capture_timestamp": "2026-08-31T00:00:00Z",
+            "run_id": "0xabcdef12",
+            "runner": "psplink-runner",
+        }
+        fields.update(overrides)
+        return HardwareCaptureContext(**fields)  # type: ignore[arg-type]
+
+    def test_metadata_that_names_another_build_is_not_hardware(self) -> None:
+        text = valid_campaign_text_plausible(run_id=0xabcdef12)
+        parsed = parse_threading_output(text)
+        for field, value in (
+            ("binary_sha256", "f" * 64),
+            ("source_commit", "b" * 40),
+            ("model", "PSP-1001"),
+            ("firmware", "5.00"),
+        ):
+            with self.subTest(field=field):
+                ctx = self._ctx(text, **{field: value})
+                self.assertTrue(ctx.is_bound())
+                self.assertEqual(evidence_label(parsed, evidence_context=ctx, raw_text=text),
+                                 UNVERIFIED_CAPTURE)
+
+    def test_placeholder_metadata_is_bound_by_the_context(self) -> None:
+        # thread_oracle.c emit_meta writes placeholders; the runner's context supplies the values.
+        text = valid_campaign_text(run_id=0xabcdef12)
+        parsed = parse_threading_output(text)
+        self.assertEqual(evidence_label(parsed, evidence_context=self._ctx(text), raw_text=text),
+                         HARDWARE_MEASURED)
+
+    def test_context_without_runner_is_not_bound(self) -> None:
+        text = valid_campaign_text_plausible(run_id=0xabcdef12)
+        parsed = parse_threading_output(text)
+        for runner in (None, ""):
+            with self.subTest(runner=runner):
+                ctx = self._ctx(text, runner=runner)
+                self.assertFalse(ctx.is_bound())
+                self.assertEqual(evidence_label(parsed, evidence_context=ctx, raw_text=text),
+                                 UNVERIFIED_CAPTURE)
+
+
+class AuditDefaultLabelTests(unittest.TestCase):
+    """Audit 2026-11-17: without a context every capture is UNVERIFIED_CAPTURE."""
+
+    def test_real_emitter_metadata_is_unverified_without_context(self) -> None:
+        text = valid_campaign_text()  # the placeholders thread_oracle.c emit_meta writes
+        self.assertEqual(evidence_label(parse_threading_output(text), raw_text=text), UNVERIFIED_CAPTURE)
+
+    def test_emulator_streams_are_unverified_without_context(self) -> None:
+        for source in ("nakagawa", "ppsspp"):
+            with self.subTest(source=source):
+                text = valid_campaign_text_plausible().replace("source=psp", f"source={source}", 1)
+                self.assertEqual(evidence_label(parse_threading_output(text), raw_text=text),
+                                 UNVERIFIED_CAPTURE)
+
+    def test_analyzer_cli_labels_capture_unverified(self) -> None:
+        import contextlib
+        import io
+        import tempfile
+        from psp_threading_oracle import analyzer
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for idx, text in enumerate(gating_campaign()):
+                path = pathlib.Path(tmp) / f"launch{idx}.txt"
+                path.write_text(text, encoding="utf-8")
+                paths.append(str(path))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = analyzer.main(paths)
+        self.assertEqual(code, 0)
+        self.assertIn(f"# Input 0: {UNVERIFIED_CAPTURE}", out.getvalue())
+        self.assertNotIn(SYNTHETIC_TEST_ONLY, out.getvalue())
+
+
+class AuditLaunchAndRepetitionTests(unittest.TestCase):
+    """Audit 2026-11-17: launch groups and repetitions are validated, not only recorded."""
+
+    def test_mixed_launch_run_is_flagged(self) -> None:
+        mixed = "\n".join(phase_run_text("L1", 0x200).splitlines()
+                          + phase_run_text("L3", 0x200).splitlines()[1:]) + "\n"
+        runs = [mixed, phase_run_text("L2", 0x201), phase_run_text("L4", 0x202), phase_run_text("L5", 0x203)]
+        analysis = analyze_runs(runs)
+        self.assertEqual(len(analysis["launch_group_issues"]), 1)
+        self.assertIn("L1", analysis["launch_group_issues"][0])
+        self.assertIn("L3", analysis["launch_group_issues"][0])
+        self.assertFalse(analysis["campaign_valid"])
+
+    def test_case_all_build_is_one_valid_launch(self) -> None:
+        analysis = analyze_runs([valid_campaign_text()])
+        self.assertEqual(analysis["launch_group_issues"], [])
+        self.assertTrue(analysis["campaign_valid"])
+
+    def test_uneven_repetition_is_flagged(self) -> None:
+        runs = gating_campaign(0x300) + [phase_run_text("L1", 0x400)]
+        analysis = analyze_runs(runs)
+        self.assertEqual(len(analysis["repetition_issues"]), 1)
+        self.assertFalse(analysis["campaign_valid"])
+
+    def test_full_repeat_campaign_meets_the_repeat_plan(self) -> None:
+        analysis = analyze_runs(gating_campaign(0x300) + gating_campaign(0x400))
+        self.assertEqual(analysis["launch_count"], MATRIX["launch_plan"]["gating"]["repeat"]["launches"])
+        self.assertEqual(analysis["repetitions"], 2)
+        self.assertEqual(analysis["record_count"], MATRIX["launch_plan"]["gating"]["repeat"]["records"])
+        self.assertEqual(analysis["repetition_issues"], [])
+        self.assertTrue(analysis["campaign_valid"])
+
+    def test_analyzer_cli_fails_on_validation_issue(self) -> None:
+        import contextlib
+        import io
+        import tempfile
+        from psp_threading_oracle import analyzer
+        runs = gating_campaign(0x300) + [phase_run_text("L1", 0x400)]
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for idx, text in enumerate(runs):
+                path = pathlib.Path(tmp) / f"launch{idx}.txt"
+                path.write_text(text, encoding="utf-8")
+                paths.append(str(path))
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = analyzer.main(paths)
+        self.assertNotEqual(code, 0)
+
+
+class AuditStabilityAndTableTests(unittest.TestCase):
+    """Audit 2026-11-17: status is part of stability, and only PASS reads MEASURED."""
+
+    def test_pass_then_fail_with_same_values_is_variable(self) -> None:
+        first = gating_campaign(0x500)
+        second = gating_campaign(0x600)
+        second[2] = phase_run_text("L3", 0x602, statuses={"ST-SA02": "FAIL"})
+        analysis = analyze_runs(first + second)
+        rep = next(r for r in analysis["case_reports"] if r["case_id"] == "ST-SA02")
+        self.assertFalse(rep["stable"])
+        self.assertTrue(rep["variable"])
+
+    def test_attempt_identity_is_not_a_measurement(self) -> None:
+        runs = gating_campaign(0x500)
+        runs += [phase_run_text(launch, 0x600 + idx, attempt=1) for idx, launch in enumerate(GATING_LAUNCHES)]
+        analysis = analyze_runs(runs)
+        self.assertTrue(all(r["stable"] for r in analysis["case_reports"]))
+
+    def _row(self, table: str, case_id: str) -> str:
+        return next(line for line in table.splitlines() if line.startswith(case_id))
+
+    def test_fail_and_skip_records_are_not_measured(self) -> None:
+        from psp_threading_oracle.parser import human_table
+        runs = gating_campaign(0x700)
+        runs[2] = phase_run_text("L3", 0x702, statuses={"ST-SA02": "FAIL", "ST-SA03": "SKIP"})
+        table = human_table(analyze_runs(runs))
+        self.assertTrue(self._row(table, "ST-SA02").endswith("ERROR"))
+        self.assertTrue(self._row(table, "ST-SA03").endswith("NOT_MEASURABLE"))
+        self.assertTrue(self._row(table, "ST-SA01").endswith("MEASURED"))
+        self.assertFalse(self._row(table, "ST-SA01").endswith("NOT_MEASURED"))
+
+    def test_result_column_lists_every_status(self) -> None:
+        from psp_threading_oracle.parser import human_table
+        first = gating_campaign(0x500)
+        second = gating_campaign(0x600)
+        second[2] = phase_run_text("L3", 0x602, statuses={"ST-SA02": "FAIL"})
+        row = self._row(human_table(analyze_runs(first + second)), "ST-SA02")
+        self.assertIn("FAIL/PASS", row)
+        self.assertTrue(row.endswith("MIXED"))
+
+
+class AuditImportSideEffectTests(unittest.TestCase):
+    def test_import_does_not_prepend_tools_to_sys_path(self) -> None:
+        import subprocess
+        probe = (
+            "import sys\n"
+            "sys.path.append(sys.argv[1])\n"
+            "before = list(sys.path)\n"
+            "import psp_threading_oracle.parser\n"
+            "sys.exit(0 if sys.path == before else 1)\n"
+        )
+        done = subprocess.run([sys.executable, "-I", "-c", probe, str(ROOT / "tools")],
+                              check=False, timeout=60)
+        self.assertEqual(done.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

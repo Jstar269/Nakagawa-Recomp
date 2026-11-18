@@ -21,7 +21,7 @@ REQUIRED_BEFORE_HARDWARE`.
   - L4 `ST-LIFE+RET` 6 cases: `ST-SL01 ST-SL02 ST-SL04 ST-SR01 ST-SR02 ST-SR03`
   - L5 `ST-SCHED` 3 cases: `ST-SP01 ST-SP02 ST-SP03`
   - `CT-C05` (`KERNEL 1`) and `CT-C06` (genuine block UID) are **full-campaign only** (`PSP_THREADING_FULL=1`) – valuable option experiments beyond the 28-case gating minimum (partition-ID primary vs block-UID competing hypothesis). Full accounting from research note (59 unique / 71 records / 13 launches) remains unchanged as consolidated.
-- Repeat target: 56 records / 10 launches (one full repeat). Each record includes `CAMPAIGN_VERSION`, `RUN_ID`, `CASE_ID`, `result` (raw return code), `attempt=0x…`, bounded `out*` scalars, and `canary=0xA5A5A5A5`. Host parser rejects truncated, unknown version, duplicate, malformed, bad-canary, or unknown-field streams. A synthetic stream with placeholder `model=unknown` etc. is `SYNTHETIC_TEST_ONLY`; only a real PSP capture bound via explicit `HardwareCaptureContext` (raw_capture_sha256, binary_sha256, source_commit, model, firmware, timestamp/run_id, runner) validates as `HARDWARE_MEASURED`. Raw capture text never self-promotes.
+- Repeat target: 56 records / 10 launches (one full repeat). Each record includes `CAMPAIGN_VERSION`, `RUN_ID`, `CASE_ID`, `result` (raw return code), `attempt=0x…`, bounded `out*` scalars, and `canary=0xA5A5A5A5`. Host parser rejects truncated, unknown version, duplicate, malformed, bad-canary, or unknown-field streams. Without a context every stream, placeholder `model=unknown` metadata included, is `UNVERIFIED_CAPTURE`; host fixtures are `SYNTHETIC_TEST_ONLY` only through `SyntheticCaptureContext`, and only a real PSP capture bound via explicit `HardwareCaptureContext` (raw_capture_sha256, binary_sha256, source_commit, model, firmware, timestamp/run_id, runner) validates as `HARDWARE_MEASURED`. Raw capture text never self-promotes.
 
 For every case the matrix encodes `CASE_ID`, `OPERATION`, `INPUTS`, `CONTROL_GROUP`, `MEASUREMENT_FIELDS`, `REQUIRED_OUT_FIELDS`, `OPTIONAL_OUT_FIELDS`, `LAUNCH`/`PHASE`, and `EXPECTED_CLASSIFICATION`. The parser enforces per-case required fields, rejects missing/misspelled/unknown-hex fields (fail-closed; only `future_` namespace allowed, grammar `future_[A-Za-z0-9][A-Za-z0-9_]*`), checks `canary`, `result`, `attempt`, oversized `probe_len` (>64), duplicate `run/case/attempt`, and incompatible `campaign_version`. Unknown hardware outcomes are never stored as expected constants.
 
@@ -37,7 +37,7 @@ For every case the matrix encodes `CASE_ID`, `OPERATION`, `INPUTS`, `CONTROL_GRO
 `PARSED_CAPTURE` (via `parse_threading_output(text)`) carries no authority by default (`UNVERIFIED_CAPTURE`). `EVIDENCE PROVENANCE` is out-of-band:
 
 - `SYNTHETIC_TEST_ONLY` via `SyntheticCaptureContext` for host fixtures
-- `HARDWARE_MEASURED` via `HardwareCaptureContext` binding `raw_capture_sha256`, `binary_sha256`, `source_commit`, `model`, `firmware`, `capture_timestamp`/`run_id`, `runner`
+- `HARDWARE_MEASURED` via `HardwareCaptureContext` binding `raw_capture_sha256`, `binary_sha256`, `source_commit`, `model`, `firmware`, `capture_timestamp`/`run_id`, `runner`; a measured `binary_sha256`, `source_commit`, `model` or `firmware` in the stream must equal the context's value (the emitter's placeholders are filled by the context)
 
 A hand-edited file with plausible `model=PSP-3001 firmware=6.61 binary_sha256=…` remains `UNVERIFIED_CAPTURE` even if every field looks real. Classification is an explicit provenance claim from the capture workflow, not text self-assertion.
 
@@ -47,7 +47,7 @@ A hand-edited file with plausible `model=PSP-3001 firmware=6.61 binary_sha256=�
 
 ## Run/attempt identity (Stage 6)
 
-Every observation carries validated `run_id` (hex, from `NAKAGAWA_PSP_META`), `attempt` (hex, per-record, sane 0..255), `case_id`. Analyzer validates: syntactic `run_id`, duplicate `run/case/attempt` impossible, expected repetitions present, case belongs to expected launch group, divergent observations preserved, `run_id` uniqueness across launches (not derived from list position).
+Every observation carries validated `run_id` (hex, from `NAKAGAWA_PSP_META`), `attempt` (hex, per-record, sane 0..255), `case_id`. Analyzer validates: syntactic `run_id`, duplicate `run/case/attempt` impossible, expected repetitions present (every case observed equally often; `repetition_issues`), case belongs to expected launch group (each launch is one group or a `CASE=all` build carrying every gating case; `launch_group_issues`), divergent observations preserved (status and values, `attempt` excluded), `run_id` uniqueness across launches (not derived from list position). The required set is the 28-case gating minimum by default (`scope="gating"`); `scope="full"` also requires `CT-C05`/`CT-C06`. `analyzer.py` exits 1 on a launch-group or repetition issue.
 
 ## Stack/memory probe safety (Stage 7)
 

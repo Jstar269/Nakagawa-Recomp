@@ -46,13 +46,19 @@ from dataclasses import dataclass
 from typing import Any
 
 import sys
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from psp_oracle.protocol import (
+
+try:
+    import psp_oracle.protocol  # noqa: F401  (tools/ already importable)
+except ImportError:
+    # Direct use without tools/ on sys.path: append, never shadow the stdlib.
+    sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+from psp_oracle.protocol import (  # noqa: E402
+    _ALL_ZERO_RE,
     ProtocolError,
     _HEX_RE,
     is_unmeasured,
     parse_output,
-)  # noqa: E402
+)
 
 CAMPAIGN_VERSION = "psp-threading-v1"
 EXPECTED_TEST_ID = "PSP-THREAD-001"
@@ -67,9 +73,30 @@ def load_matrix(path: pathlib.Path | None = None) -> dict[str, Any]:
     returned: dict[str, Any] = json.loads(p.read_text(encoding="utf-8"))
     return returned
 
-def expected_case_ids(matrix: dict[str, Any] | None = None) -> set[str]:
+GATING_SCOPE = "gating"
+FULL_SCOPE = "full"
+FULL_ONLY_CLASSIFICATION = "FULL_ONLY_HYPOTHESIS"
+
+
+def expected_case_ids(matrix: dict[str, Any] | None = None, scope: str = GATING_SCOPE) -> set[str]:
+    """Cases a campaign of ``scope`` must observe.
+
+    The gating minimum leaves out the full-campaign-only cases, which the PSP
+    side emits only when built with ``PSP_THREADING_FULL``.
+    """
     m = matrix or load_matrix()
-    return {c["case_id"] for c in m["cases"]}
+    if scope == FULL_SCOPE:
+        return {c["case_id"] for c in m["cases"]}
+    if scope != GATING_SCOPE:
+        raise ValueError(f"unknown campaign scope {scope!r}; expected {GATING_SCOPE!r} or {FULL_SCOPE!r}")
+    gating = {
+        c["case_id"] for c in m["cases"]
+        if c.get("expected_classification") != FULL_ONLY_CLASSIFICATION
+    }
+    planned = m["launch_plan"]["gating"]["unique_cases"]
+    if len(gating) != planned:
+        raise ProtocolError(f"matrix has {len(gating)} gating cases but launch_plan.gating.unique_cases is {planned}")
+    return gating
 
 STACK_PROBE_MAX_BYTES = 64
 # Optional extension namespace: identifier-style future_ fields only.
@@ -117,6 +144,8 @@ class HardwareCaptureContext:
             return False
         if not self.capture_timestamp:
             return False
+        if not self.runner:
+            return False
         if not _HEX_RE.fullmatch(self.run_id):
             return False
         # binary all-zero is placeholder, not hardware
@@ -138,16 +167,13 @@ def evidence_label(parsed: Any, evidence_context: Any | None = None, raw_text: s
 
     - evidence_context is None -> UNVERIFIED_CAPTURE (default for raw parse)
     - SyntheticCaptureContext -> SYNTHETIC_TEST_ONLY
-    - HardwareCaptureContext with valid binding and matching raw hash -> HARDWARE_MEASURED
-      else UNVERIFIED_CAPTURE
-    For backwards compatibility, if evidence_context is None and the metadata
-    contains placeholder blockers (unknown/zeros), return SYNTHETIC_TEST_ONLY;
-    this matches synthetic fixtures generated on host. But plausible metadata
-    alone still returns UNVERIFIED_CAPTURE, not HARDWARE_MEASURED.
+    - HardwareCaptureContext with valid binding, matching raw hash and run_id,
+      source=psp, and no stream metadata value that contradicts the context
+      -> HARDWARE_MEASURED; else UNVERIFIED_CAPTURE
+    The stream's own metadata never selects a label: placeholder metadata
+    without a context is UNVERIFIED_CAPTURE like any other capture.
     """
     meta = dict(parsed.metadata)
-    from psp_oracle.protocol import provenance_issues
-    blockers = provenance_issues(meta)
 
     # Explicit synthetic context always -> synthetic
     if isinstance(evidence_context, SyntheticCaptureContext):
@@ -163,27 +189,33 @@ def evidence_label(parsed: Any, evidence_context: Any | None = None, raw_text: s
         # Also require metadata run_id matches context run_id
         if meta.get("run_id", "").lower() != evidence_context.run_id.lower():
             return UNVERIFIED_CAPTURE
-        # Require source_commit / binary_sha binding matches metadata if present?
-        # We check that context's binary/source match claimed provenance? At minimum
-        # they are not placeholders; full match not required but we check they are measured
-        # and that metadata source is psp
         if meta.get("source") != "psp":
+            return UNVERIFIED_CAPTURE
+        if _metadata_contradicts(meta, evidence_context):
             return UNVERIFIED_CAPTURE
         return HARDWARE_MEASURED
 
-    # No explicit context: never self-promote to hardware
-    # If blockers present -> synthetic (host fixture)
-    if blockers:
-        return SYNTHETIC_TEST_ONLY
-    # If source != psp -> synthetic
-    if meta.get("source") != "psp":
-        return SYNTHETIC_TEST_ONLY
-    # Otherwise plausible but unverified – hand-edited file with plausible fields
-    # must remain UNVERIFIED_CAPTURE
+    # No explicit context: never self-promote, whatever the metadata says.
     return UNVERIFIED_CAPTURE
 
-# Backwards-compat alias for older callers that assumed self-promotion.
-# New code should use evidence_label with context.
+
+def _metadata_contradicts(meta: dict[str, str], context: HardwareCaptureContext) -> bool:
+    """True when the stream names a build or device other than the context's.
+
+    The PSP emitter writes placeholders (``unknown``, all-zero digests) that the
+    runner's context supplies; a measured value in the stream must equal it.
+    """
+    for field in ("binary_sha256", "source_commit"):
+        value = meta.get(field)
+        if value is not None and not _ALL_ZERO_RE.fullmatch(value):
+            if value.lower() != getattr(context, field).lower():
+                return True
+    for field in ("model", "firmware"):
+        value = meta.get(field)
+        if value is not None and not is_unmeasured(value):
+            if value != getattr(context, field):
+                return True
+    return False
 
 def _build_required_map(matrix: dict[str, Any]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
@@ -325,22 +357,64 @@ def parse_threading_output(text: str, *, require_metadata: bool = True) -> Any:
                     pass
     return parsed
 
-def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None) -> dict[str, Any]:
+# Per-record identity fields: they say which launch/attempt produced a record,
+# not what the PSP did, so they never enter the stability comparison.
+_IDENTITY_FIELDS = frozenset({"attempt"})
+
+
+def _stability_key(result: dict[str, Any]) -> str:
+    values = {k: v for k, v in result["values"].items() if k not in _IDENTITY_FIELDS}
+    return json.dumps({"status": result["status"], "values": values}, sort_keys=True)
+
+
+def _launch_group_issues(runs: list[Any], run_ids: list[str],
+                         required_map: dict[str, dict[str, Any]], gating: set[str]) -> list[str]:
+    """A launch is one phase build (one launch group) or a CASE=all build that
+    carries every gating case; anything else mixes launch groups."""
+    issues: list[str] = []
+    for idx, parsed in enumerate(runs):
+        cases = {r.case_id for r in parsed.results}
+        groups = sorted({str(required_map[c]["launch"]) for c in cases})
+        if len(groups) > 1 and not gating <= cases:
+            issues.append(
+                f"run {idx} ({run_ids[idx]}) mixes launch groups {', '.join(groups)} "
+                "without carrying every gating case (CASE=all)"
+            )
+    return issues
+
+
+def _repetition_issues(counts: dict[str, int]) -> list[str]:
+    observed = {cid: n for cid, n in counts.items() if n}
+    if len(set(observed.values())) <= 1:
+        return []
+    most = max(observed.values())
+    short = sorted(f"{cid} x{n}" for cid, n in observed.items() if n != most)
+    return [f"uneven repetitions: most cases observed {most} times, but {', '.join(short)}"]
+
+
+def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None,
+                 scope: str = GATING_SCOPE) -> dict[str, Any]:
     """Analyze one or more runs (for repetition handling).
 
     Each text is one launch's output. The analyzer validates run/attempt
     identity explicitly via metadata run_id and per-record attempt, not list
     position. Divergent observations are retained.
 
+    ``scope`` selects the required case set: ``"gating"`` (the 28-case
+    minimum) or ``"full"`` (every matrix case, PSP_THREADING_FULL builds).
+    Each launch must be one launch group or a CASE=all build, and every
+    observed case must be observed equally often; violations are listed in
+    ``launch_group_issues`` / ``repetition_issues`` and clear ``campaign_valid``.
+
     evidence_contexts, if provided, must align 1:1 with texts and are used
     to label each run's evidence; default is UNVERIFIED_CAPTURE per run.
     """
     matrix = load_matrix()
-    required = expected_case_ids(matrix)
-    # Build required map for launch validation
+    required = expected_case_ids(matrix, scope)
+    gating = expected_case_ids(matrix, GATING_SCOPE)
+    matrix_cases = expected_case_ids(matrix, FULL_SCOPE)
     required_map = _build_required_map(matrix)
     runs: list[Any] = []
-    parsed_list: list[Any] = []
     run_ids: list[str] = []
     for idx, text in enumerate(texts):
         parsed = parse_threading_output(text)
@@ -349,19 +423,16 @@ def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None) -
         if run_id is None or not _HEX_RE.fullmatch(run_id):
             raise ProtocolError(f"run {idx} has invalid run_id {run_id!r}")
         runs.append(parsed)
-        parsed_list.append(parsed)
         run_ids.append(run_id.lower())
-    # Validate duplicate run_ids: duplicate run_id is impossible (each launch must be distinct)
+    # Each launch must be distinct: a duplicate run_id is impossible.
     if len(set(run_ids)) != len(run_ids):
         raise ProtocolError(f"duplicate run_id detected: {run_ids}")
-    # Validate per-case per-run attempt identity
-    # Collect observations keyed by (run_id, attempt, case_id)
+    # Observations keyed by (run_id, attempt, case_id).
     from collections import defaultdict
     per_case: dict[str, list[dict[str, Any]]] = defaultdict(list)
     seen_triples: set[tuple[str, str, str]] = set()
     for run_idx, parsed in enumerate(runs):
-        meta = dict(parsed.metadata)
-        run_id = meta["run_id"].lower()
+        run_id = run_ids[run_idx]
         for r in parsed.results:
             vals = dict(r.values)
             attempt = vals.get("attempt", "0x00000000").lower()
@@ -369,28 +440,24 @@ def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None) -
             if triple in seen_triples:
                 raise ProtocolError(f"duplicate run/case/attempt triple {triple!r}")
             seen_triples.add(triple)
-            # Validate case belongs to expected launch group if known
-            # If matrix defines launch, we could also validate that the run's set of cases matches launch group
-            # For now ensure case is in required set (already checked), but extra validation: if run contains mix of launches, that's allowed for CASE=all multi-launch builds; but for single-launch builds we expect all cases in run belong to same launch group? We will not strictly enforce launch mixing, but we record it.
             per_case[r.case_id].append({
                 "run": run_idx,
                 "run_id": run_id,
                 "attempt": attempt,
                 "result": r.as_dict(),
             })
-    # Also validate expected repetitions: for gating, each case should appear expected times
-    # launch_plan gating repeat launches =10 means each case should appear 2 times if repeat campaign? But analyzer should report missing repetition.
-    # We will not raise error for missing repetition, just report.
-    # Determine stability
+    observed = set(per_case.keys())
+    optional_observed = sorted((observed & matrix_cases) - required)
+    reported = required | set(optional_observed)
     case_reports: list[dict[str, Any]] = []
-    for case_id in sorted(required):
+    for case_id in sorted(reported):
         obs = per_case.get(case_id, [])
+        expected_launch = required_map.get(case_id, {}).get("launch")
         if not obs:
-            case_reports.append({"case_id": case_id, "observed": False, "stable": False, "runs": [], "variable": False, "run_count": 0, "expected_launch": required_map.get(case_id, {}).get("launch")})
+            case_reports.append({"case_id": case_id, "observed": False, "stable": False, "runs": [], "variable": False, "run_count": 0, "expected_launch": expected_launch, "required": True})
             continue
-        # Compare result values across runs (preserve divergent observations)
-        # Use json dump of values for stability
-        stable = len({json.dumps(o["result"]["values"], sort_keys=True) for o in obs}) == 1
+        # Divergent observations are preserved; status is part of the comparison.
+        stable = len({_stability_key(o["result"]) for o in obs}) == 1
         case_reports.append({
             "case_id": case_id,
             "observed": True,
@@ -398,30 +465,37 @@ def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None) -
             "variable": not stable,
             "observations": obs,
             "run_count": len(obs),
-            "expected_launch": required_map.get(case_id, {}).get("launch"),
+            "expected_launch": expected_launch,
+            "required": case_id in required,
         })
-    missing = sorted(required - set(per_case.keys()))
-    extra = sorted(set(per_case.keys()) - required)
-    # Evidence labels per run if contexts provided
+    missing = sorted(required - observed)
+    extra = sorted(observed - matrix_cases)
+    launch_group_issues = _launch_group_issues(runs, run_ids, required_map, gating)
+    counts = {cid: len(per_case.get(cid, [])) for cid in reported}
+    repetition_issues = _repetition_issues(counts)
     evidence_labels: list[str] = []
     if evidence_contexts is not None:
         if len(evidence_contexts) != len(texts):
             raise ProtocolError("evidence_contexts length must match texts")
         for text, ctx, parsed in zip(texts, evidence_contexts, runs, strict=True):
-            label = evidence_label(parsed, evidence_context=ctx, raw_text=text)
-            evidence_labels.append(label)
+            evidence_labels.append(evidence_label(parsed, evidence_context=ctx, raw_text=text))
     else:
         for text, parsed in zip(texts, runs, strict=True):
-            label = evidence_label(parsed, evidence_context=None, raw_text=text)
-            evidence_labels.append(label)
+            evidence_labels.append(evidence_label(parsed, evidence_context=None, raw_text=text))
 
     return {
         "campaign_version": CAMPAIGN_VERSION,
+        "scope": scope,
         "required_cases": sorted(required),
         "case_reports": case_reports,
         "missing_cases": missing,
         "extra_cases": extra,
+        "optional_cases_observed": optional_observed,
         "all_required_observed": not missing,
+        "launch_group_issues": launch_group_issues,
+        "repetition_issues": repetition_issues,
+        "repetitions": min(counts[cid] for cid in required),
+        "campaign_valid": not missing and not launch_group_issues and not repetition_issues,
         "launch_count": len(runs),
         "run_ids": run_ids,
         "expected_launches_gating": matrix["launch_plan"]["gating"]["launches"],
@@ -430,6 +504,19 @@ def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None) -
         "evidence_labels": evidence_labels,
         "required_map": {k: {"required": sorted(v["required"]), "launch": v["launch"]} for k,v in required_map.items()},
     }
+
+# Status semantics (module docstring): only PASS is a measurement.
+_STATUS_COLUMN = {"PASS": "MEASURED", "FAIL": "ERROR", "SKIP": "NOT_MEASURABLE"}
+
+
+def _measured_column(statuses: set[str]) -> str:
+    if not statuses:
+        return "NOT_MEASURED"
+    if len(statuses) > 1:
+        return "MIXED"
+    (status,) = statuses
+    return _STATUS_COLUMN.get(status, status)
+
 
 def human_table(analysis: dict[str, Any]) -> str:
     lines: list[str] = []
@@ -443,15 +530,15 @@ def human_table(analysis: dict[str, Any]) -> str:
         info = by_id.get(cid, {})
         inputs = str(info.get("inputs", ""))[:20]
         status = "MISSING" if not rep["observed"] else ("STABLE" if rep["stable"] else "VARIABLE")
-        measured = "MEASURED" if rep["observed"] else "NOT_MEASURED"
-        result = ""
-        if rep["observed"] and rep["observations"]:
-            result = rep["observations"][0]["result"]["status"]
-        lines.append(f"{cid:12} {inputs:20} {result:12} {status:8} {measured}")
+        statuses = {o["result"]["status"] for o in rep.get("observations", [])}
+        result = "/".join(sorted(statuses))
+        lines.append(f"{cid:12} {inputs:20} {result:12} {status:8} {_measured_column(statuses)}")
     if analysis["missing_cases"]:
         lines.append(f"Missing: {', '.join(analysis['missing_cases'])}")
     if analysis["extra_cases"]:
         lines.append(f"Extra: {', '.join(analysis['extra_cases'])}")
+    for issue in analysis.get("launch_group_issues", []) + analysis.get("repetition_issues", []):
+        lines.append(f"Invalid: {issue}")
     if "evidence_labels" in analysis:
         lines.append(f"Evidence: {', '.join(analysis['evidence_labels'])}")
     return "\n".join(lines) + "\n"
