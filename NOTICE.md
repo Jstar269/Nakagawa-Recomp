@@ -89,13 +89,17 @@ We aim to respond promptly and will remove material where appropriate.
 - **Portable Snippets `safe-math`** — `CC0-1.0` (public domain dedication). The
   byte-identical header, upstream `COPYING.md`, pinned source manifest, and
   SHA-256 values are under `third_party/portable-snippets/`. It is compiled into
-  the native player through `src/core/nk_iso.c` and `src/core/nk_xb.c`.
+  the native player through `src/core/nk_iso.c` and `src/core/nk_xb.c`, and into
+  every title runtime through `src/core/nk_xb.c` (`mk/runtime_sources.mk`).
 - **dr_libs `dr_wav`** — the Unlicense (public domain), elected from upstream's
   Unlicense or `MIT-0` choice; both texts are kept. The byte-identical header,
   upstream `LICENSE`, pinned source manifest, and SHA-256 values are under
   `third_party/dr_libs/`. Only selftests compile it; it is not in the player or
   the runtime.
-- **libchdr** — `BSD-3-Clause`, Copyright Romain Tisserand. The CHD reader, pinned at
+- **libchdr** — `BSD-3-Clause`, Copyright Romain Tisserand; the MAME-derived CHD, CD-ROM,
+  Huffman, bitstream, FLAC and A/V Huffman sources are Copyright Aaron Giles, under the
+  BSD-3-Clause text at the top of `third_party/libchdr/src/libchdr_chd.c`. The CHD reader,
+  pinned at
   `47d794151b2b64f6aba60304e6480f4f5a2bc24b`, with the codecs it carries: miniz 3.1.2
   (`MIT`), the Zstandard 1.5.7 single-file decompressor (`BSD-3-Clause`, elected from
   upstream's `BSD-3-Clause OR GPL-2.0-only`), the LZMA SDK decoder (public domain) and
@@ -246,7 +250,7 @@ license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
 | `SDL3.dll` | Zlib | `third_party/licenses/sdl3/LICENSE.txt` |
 | `SDL3_ttf.dll` | Zlib | `third_party/licenses/SDL3_ttf.txt` |
 | `libfreetype-6.dll` | FTL | `third_party/licenses/FreeType-FTL.txt` |
-| `libharfbuzz-0.dll` | MIT | `third_party/licenses/HarfBuzz.txt` |
+| `libharfbuzz-0.dll` | MIT-Modern-Variant | `third_party/licenses/HarfBuzz.txt` |
 | `libgraphite2.dll` | MIT (chosen) | `third_party/licenses/Graphite2.txt` |
 | `libpng16-16.dll` | libpng-2.0 | `third_party/licenses/libpng.txt` |
 | `zlib1.dll` | Zlib | `third_party/licenses/zlib.txt` |
