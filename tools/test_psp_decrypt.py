@@ -1400,6 +1400,18 @@ class TestMatchedTypeDiagnosis(unittest.TestCase):
         )
         self.assertNotIn("kirk.ecdsa", combined)
 
+    def test_zero_padded_keyvault_name_is_refused_when_the_file_loads(self):
+        """A slot has one spelling. kirk.keyvault.067 used to load cleanly and then
+        never be found, so the decrypt asked for kirk.keyvault.67, which the user
+        believed was present. The key file is refused by the padded name instead."""
+        container, entries = self._sealed()
+        entries[f"kirk.keyvault.0{SYNTH_CODE}"] = entries.pop(f"kirk.keyvault.{SYNTH_CODE}")
+        out, dst, combined = self._decrypt("diag_padded", container, entries)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse(dst.exists())
+        self.assertIn(f"unknown key entry name 'kirk.keyvault.0{SYNTH_CODE}'", combined)
+        self.assertNotIn("KEY_REQUIRED", combined)
+
     def test_container_matching_no_type_reports_format_failure(self):
         """A ~PSP container whose header no type's selector matches is a
         format failure that says so, not a key request."""
@@ -1696,6 +1708,267 @@ class TestKeystoreErasure(unittest.TestCase):
         report = self._report(self._run(_ERASE_KEYFILE_JSON))
         self.assertEqual(report["pre_free_matches"], 3)
         self.assertGreater(report["post_wipe_scan_bytes"], 0)
+
+
+# The key file's text form is the other copy of the keys: the JSON reader holds
+# every hex value in its own heap strings (and their growth buffers) until the
+# tree is freed. This harness compiles the production nk_json.c and
+# nk_psp_keystore.c into itself with malloc/calloc/realloc/free routed through a
+# tracker, and scans every block those two files release, at the moment of
+# release, for the keys in text and in binary form. realloc is modelled as
+# always moving, the case where the allocator leaves the old block behind. No
+# allocator behaviour is assumed and no freed memory is read.
+_ERASE_TAG144_MATERIAL = bytes(((i * 37) + 0x41) & 0xFF for i in range(144))
+
+_TEXT_ERASE_HARNESS_C = r"""
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#endif
+#include <ctype.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "nk_json.h"
+#include "nk_platform.h"
+#include "nk_psp_builtin_keys.h"
+#include "nk_psp_crypto.h"
+#include "nk_psp_keystore.h"
+
+#define TRACK_MAX 65536
+static struct { void *ptr; size_t size; } g_live[TRACK_MAX];
+static unsigned char g_needles[6][32];
+static size_t g_needle_len[6];
+static size_t g_needle_count;
+static size_t g_hits, g_released, g_untracked;
+static int g_overflow;
+
+static void track_add(void *ptr, size_t size)
+{
+    for (size_t i = 0; i < TRACK_MAX; i++) {
+        if (g_live[i].ptr == NULL) { g_live[i].ptr = ptr; g_live[i].size = size; return; }
+    }
+    g_overflow = 1;
+}
+
+static int track_take(void *ptr, size_t *size)
+{
+    for (size_t i = 0; i < TRACK_MAX; i++) {
+        if (g_live[i].ptr == ptr) { *size = g_live[i].size; g_live[i].ptr = NULL; return 1; }
+    }
+    return 0;
+}
+
+static size_t live_blocks(void)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < TRACK_MAX; i++) n += g_live[i].ptr != NULL;
+    return n;
+}
+
+static void scan_released(const unsigned char *block, size_t size)
+{
+    g_released++;
+    for (size_t k = 0; k < g_needle_count; k++) {
+        size_t len = g_needle_len[k];
+        for (size_t i = 0; i + len <= size; i++) {
+            if (memcmp(block + i, g_needles[k], len) == 0) g_hits++;
+        }
+    }
+}
+
+static void *tracked_malloc(size_t size)
+{
+    void *ptr = malloc(size ? size : 1);
+    if (ptr) track_add(ptr, size);
+    return ptr;
+}
+
+static void *tracked_calloc(size_t count, size_t size)
+{
+    void *ptr = calloc(count ? count : 1, size ? size : 1);
+    if (ptr) track_add(ptr, count * size);
+    return ptr;
+}
+
+static void tracked_free(void *ptr)
+{
+    size_t size = 0;
+    if (ptr == NULL) return;
+    if (track_take(ptr, &size)) scan_released((const unsigned char *)ptr, size);
+    else g_untracked++;
+    free(ptr);
+}
+
+static void *tracked_realloc(void *ptr, size_t size)
+{
+    size_t old = 0;
+    void *moved;
+    if (ptr == NULL) return tracked_malloc(size);
+    if (!track_take(ptr, &old)) { g_untracked++; return NULL; }
+    moved = malloc(size ? size : 1);
+    if (moved == NULL) { track_add(ptr, old); return NULL; }
+    memcpy(moved, ptr, old < size ? old : size);
+    scan_released((const unsigned char *)ptr, old);
+    free(ptr);
+    track_add(moved, size);
+    return moved;
+}
+
+#define malloc(n) tracked_malloc(n)
+#define calloc(c, n) tracked_calloc((c), (n))
+#define realloc(p, n) tracked_realloc((p), (n))
+#define free(p) tracked_free(p)
+#include "nk_json.c"
+#include "nk_psp_keystore.c"
+#undef malloc
+#undef calloc
+#undef realloc
+#undef free
+
+static void add_needle(const unsigned char *bytes, size_t len)
+{
+    static const char hex[] = "0123456789abcdef";
+    memcpy(g_needles[g_needle_count], bytes, len);
+    g_needle_len[g_needle_count++] = len;
+    for (size_t i = 0; i < 16; i++) {
+        g_needles[g_needle_count][2 * i] = (unsigned char)hex[bytes[i] >> 4];
+        g_needles[g_needle_count][2 * i + 1] = (unsigned char)hex[bytes[i] & 15];
+    }
+    g_needle_len[g_needle_count++] = 32;
+}
+
+int main(int argc, char **argv)
+{
+    unsigned char flat[16], tag[16], tag144[144];
+    char err[512];
+    size_t control_hits;
+    int status, read_back = 0;
+    NkKeystore *ks;
+    if (argc < 2) return 2;
+    for (size_t i = 0; i < 16; i++) { flat[i] = (unsigned char)(0x10 + i); tag[i] = (unsigned char)(0x80 + i); }
+    for (size_t i = 0; i < 144; i++) tag144[i] = (unsigned char)((i * 37u + 0x41u) & 0xFFu);
+    add_needle(flat, 16);
+    add_needle(tag, 16);
+    add_needle(tag144, 16);
+
+    /* Positive control: an unwiped block holding the text form is seen. */
+    {
+        char *copy = (char *)tracked_malloc(64);
+        if (copy == NULL) return 2;
+        memset(copy, 0, 64);
+        memcpy(copy, g_needles[1], 32);
+        tracked_free(copy);
+        control_hits = g_hits;
+        g_hits = 0;
+        g_released = 0;
+    }
+
+    ks = nk_keystore_create();
+    if (ks == NULL) return 2;
+    status = nk_keystore_load_file(ks, argv[1], err, sizeof(err));
+    if (status == 0) {
+        const uint8_t *got = NULL;
+        size_t got_len = 0;
+        NkPrxTagEntry entry;
+        if (nk_keystore_get(ks, "kirk.cmd1.key", &got, &got_len) == 0 &&
+            got_len == 16 && memcmp(got, flat, 16) == 0) read_back++;
+        memset(&entry, 0, sizeof(entry));
+        if (nk_keystore_get_prx_tag(ks, 0x0BADC0DEu, &entry) == 0 && entry.key != NULL &&
+            memcmp(entry.key, tag, 16) == 0) read_back++;
+        memset(&entry, 0, sizeof(entry));
+        if (nk_keystore_get_prx_tag(ks, 0x0BADC0DFu, &entry) == 0 && entry.key144 != NULL &&
+            memcmp(entry.key144, tag144, 144) == 0) read_back++;
+    }
+    nk_keystore_free(ks);
+    printf("{\"control_hits\": %zu, \"status\": %d, \"read_back\": %d, \"released\": %zu, "
+           "\"hits\": %zu, \"live\": %zu, \"untracked\": %zu, \"overflow\": %d}\n",
+           control_hits, status, read_back, g_released, g_hits, live_blocks(),
+           g_untracked, g_overflow);
+    return 0;
+}
+"""
+
+
+def _text_erase_keyfile(tail: bytes = b"", trailer: bytes = b"") -> bytes:
+    return (
+        b'{"format": "nakagawa-psp-keystore-1", "entries": {'
+        b'"kirk.cmd1.key": "' + _ERASE_FLAT_KEY.hex().encode() + b'", '
+        b'"prx.tag.0x0BADC0DE": {"code": 1, "key": "' + _ERASE_TAG_KEY.hex().encode() + b'"}, '
+        b'"prx.tag.0x0BADC0DF": {"code": 2, "key144": "' + _ERASE_TAG144_MATERIAL.hex().encode()
+        + b'"}' + tail + b'}}' + trailer
+    )
+
+
+@unittest.skipUnless(CC, "no C compiler on PATH")
+class TestKeystoreTextErasure(unittest.TestCase):
+    """The key file's hex text must not outlive a load, on success or failure.
+
+    TestKeystoreErasure scans the entry arrays for the binary keys. This suite
+    covers the copies the JSON reader makes: every block nk_json.c and
+    nk_psp_keystore.c release is scanned as it is released, so a hit is a
+    released block that still held a key, in hex text or in binary.
+    """
+
+    tmp: ClassVar[Path]
+    exe: ClassVar[Path]
+
+    @classmethod
+    def setUpClass(cls):
+        from tools.nk_core import decrypt_tool
+
+        cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_text_erase_"))
+        source = cls.tmp / "text_erase_harness.c"
+        source.write_text(_TEXT_ERASE_HARNESS_C, encoding="utf-8")
+        cls.exe = cls.tmp / "text_erase_harness.exe"
+        excluded = ("nk_decrypt_main.c", "nk_json.c", "nk_psp_keystore.c")
+        cmd = [cast(str, CC), "-std=c99", "-O2", "-Wall", "-Wextra",
+               "-I", str(ROOT / "src" / "core"), str(source)]
+        cmd.extend(str(ROOT / rel) for rel in decrypt_tool.SOURCES
+                   if not rel.endswith(excluded))
+        cmd.extend(["-o", str(cls.exe)])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+            raise AssertionError(
+                f"keystore text erasure harness did not build:\n{proc.stdout}{proc.stderr}")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _report(self, payload: bytes) -> dict:
+        keyfile = require_scratch_path(self.tmp / f"keys_{os.urandom(6).hex()}.json")
+        keyfile.write_bytes(payload)
+        out = subprocess.run([str(self.exe), str(keyfile)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        report = json.loads(out.stdout)
+        # The scanner sees an unwiped block, every tracked block came back, and
+        # nothing outside the tracker was released through it.
+        self.assertGreater(report["control_hits"], 0, report)
+        self.assertEqual((report["live"], report["untracked"], report["overflow"]), (0, 0, 0), report)
+        self.assertGreater(report["released"], 0, report)
+        return report
+
+    def test_a_successful_load_leaves_no_key_text_in_released_blocks(self):
+        report = self._report(_text_erase_keyfile())
+        self.assertEqual((report["status"], report["read_back"]), (0, 3), report)
+        self.assertEqual(report["hits"], 0, report)
+
+    def test_a_load_refused_after_the_keys_leaves_no_key_text(self):
+        report = self._report(_text_erase_keyfile(tail=b', "bogus.entry": "00"'))
+        self.assertNotEqual(report["status"], 0, report)
+        self.assertEqual(report["hits"], 0, report)
+
+    def test_a_parse_failure_after_the_keys_leaves_no_key_text(self):
+        report = self._report(_text_erase_keyfile(trailer=b" trailing"))
+        self.assertNotEqual(report["status"], 0, report)
+        self.assertEqual(report["hits"], 0, report)
 
 
 # ---------------------------------------------------------------------------

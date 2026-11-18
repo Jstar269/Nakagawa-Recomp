@@ -41,7 +41,9 @@
       (upstream assumed well-formed sizes);
     - key generation (0x0C), PRNG (0x0E), signing (0x10) and content
       encryption (0x00) refuse fail-closed because they would require
-      private material this boundary never holds.
+      private material this boundary never holds;
+    - 2026-11-18: kirk4 and kirk7 refuse an empty pass as well as an
+      unaligned one.
 */
 
 #include <stdio.h>
@@ -301,9 +303,11 @@ int kirk4(NkPspCtx *ctx, u8 *outbuff, const u8 *inbuff, size_t size, int keyId)
     AES_ctx aesKey;
     if (kirk_keyvault_key(ctx, keyId, key) != KIRK_OPERATION_SUCCESS)
         return KIRK_INVALID_SEED_CODE;
-    if ((size & 15u) != 0) {
+    /* An empty pass is refused with the unaligned ones: the CBC routines
+     * handle one block before they look at the length. */
+    if (size == 0 || (size & 15u) != 0) {
         return (int)nk_psp_fail(ctx, NK_PSP_ERR_INTERNAL, NULL,
-                                "unaligned KIRK pass (%u bytes)",
+                                "empty or unaligned KIRK pass (%u bytes)",
                                 (unsigned)size);
     }
     AES_set_key(&aesKey, key, 128);
@@ -317,9 +321,11 @@ int kirk7(NkPspCtx *ctx, u8 *outbuff, const u8 *inbuff, size_t size, int keyId)
     AES_ctx aesKey;
     if (kirk_keyvault_key(ctx, keyId, key) != KIRK_OPERATION_SUCCESS)
         return KIRK_INVALID_SEED_CODE;
-    if ((size & 15u) != 0) {
+    /* An empty pass is refused with the unaligned ones: the CBC routines
+     * handle one block before they look at the length. */
+    if (size == 0 || (size & 15u) != 0) {
         return (int)nk_psp_fail(ctx, NK_PSP_ERR_INTERNAL, NULL,
-                                "unaligned KIRK pass (%u bytes)",
+                                "empty or unaligned KIRK pass (%u bytes)",
                                 (unsigned)size);
     }
     AES_set_key(&aesKey, key, 128);

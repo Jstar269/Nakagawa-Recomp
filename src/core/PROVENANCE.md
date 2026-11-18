@@ -63,6 +63,10 @@ Every derived file below is labelled `derived-translated` in the trusted provena
 - LOCAL DELTA: portable C99; every embedded key, tag table and PSAR constant removed (recipes come from the KeyStore,
   which the built-in tables above fill); KIRK operations thread a context so a missing entry fails closed by name. Each
   file header lists its own changes. The 2026-10-27 restoration changed only `nk_psp_prx.c`'s missing-recipe message.
+- LOCAL DELTA, 2026-11-18: `nk_psp_kle.c` takes its probability contexts from the output offset and the
+  `copyCountBitsProbs` index instead of the low bits of host pointers, and drops a pointer comparison that could never
+  be true; `nk_psp_aes.c`'s `AES_cbc_decrypt` returns at once for an empty run; `nk_psp_kirk.c`'s `kirk4`/`kirk7`
+  refuse an empty pass. Each file header records its change.
 - Licence note: a GPL-3.0-only file can be combined with the project's GPL-3.0-or-later files; the player and
   `nk_decrypt`, which link them, are conveyed under the GNU GPL version 3 (`NOTICE.md`).
 
@@ -82,7 +86,8 @@ it; the phase-1 disc route then runs unchanged.
   the engine's `kirk4`/`kirk7` and the constants come from the KeyStore, so a missing one fails closed by name; the
   fuse-ID types (MAC type 2, cipher type 2, KIRK commands 5 and 8) fail `CONTEXT_REQUIRED` instead of running with a
   default fuse ID; local bounded buffers; a cipher run that is not a multiple of 16 derives its last keystream block in
-  full; a MAC update that leaves only the previous full pad block chains it instead of dropping it. Not ported:
+  full; a MAC update that leaves only the previous full pad block chains it instead of dropping it; since 2026-11-18
+  the cipher's counter base is derived once per `sceDrmBBCipherInit` instead of once per 2 KiB chunk. Not ported:
   `sceDrmBBMacFinal2`, `sceNpDrmGetFixedKey`, the PGD functions and the encrypt direction.
 - `nk_psp_lzrc.c/.h` from `Core/FileSystems/tlzrc.cpp` (SHA-256
   `ccf084593f0de93154597d47a470a7b539d4ca0cfa4773fddfd91c9a9e8a026a`), "based on benhur's code, rewrite by tpu",
@@ -104,8 +109,9 @@ it; the phase-1 disc route then runs unchanged.
 Every file except the built-in tables comes from this repository's own public history: the tree before PR #1187, at
 commit `8ca38e6399064e1d76f9670ed4722d521fd21a9a^`. No code, table or key value came from any other tool.
 
-- Byte-identical to those bytes: `nk_psp_aes.c/.h`, `nk_psp_sha1.c/.h`, `nk_psp_kirk.c/.h`, `nk_psp_kle.c/.h`,
-  `nk_psp_ec.c/.h`, `nk_psp_inflate.c/.h` and `nk_psp_prx.h`. The AES and SHA-1 ports keep their upstream layout and
+- Byte-identical to those bytes when restored: `nk_psp_aes.c/.h`, `nk_psp_sha1.c/.h`, `nk_psp_kirk.c/.h`,
+  `nk_psp_kle.c/.h`, `nk_psp_ec.c/.h`, `nk_psp_inflate.c/.h` and `nk_psp_prx.h`. Later changes are dated above and in
+  each file's header. The AES and SHA-1 ports keep their upstream layout and
   stay excluded from the trailing-whitespace hook (`.pre-commit-config.yaml`), as before PR #1187.
 - Changed on restoration (each file's header or this manifest says how): `nk_psp_prx.c`, `nk_psp_container.c/.h`,
   `nk_psp_crypto.c/.h`, `nk_psp_keystore.c/.h`, `nk_decrypt_main.c`, `tools/nk_core/decrypt_tool.py` and

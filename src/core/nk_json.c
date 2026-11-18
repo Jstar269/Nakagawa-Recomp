@@ -52,10 +52,34 @@ bool nk_json_validate_utf8(const uint8_t *s, size_t len) {
  * AST Deallocation
  * -------------------------------------------------------------------------- */
 
+/* Every string this reader allocates (keys, values and the scratch buffers they
+ * grow in) is zeroed before it goes back to the heap. Some documents carry
+ * secrets as text, the user's PSP key file among them (nk_psp_keystore.c), and
+ * free() alone leaves that text readable in freed memory. The stores go through
+ * a volatile lvalue so the compiler cannot drop them as dead before free(). */
+static void json_wipe(void *ptr, size_t len) {
+    volatile unsigned char *v = (volatile unsigned char *)ptr;
+    for (size_t i = 0; i < len; i++) v[i] = 0;
+}
+
+/* A finished string: its bytes after the first NUL were wiped when it was read
+ * (parse_json_string), so strlen covers everything it still holds. */
+static void json_free_string(char *s) {
+    if (!s) return;
+    json_wipe(s, strlen(s));
+    free(s);
+}
+
+/* A scratch string buffer holding len bytes read so far. */
+static void json_discard_buffer(char *buf, size_t len) {
+    json_wipe(buf, len);
+    free(buf);
+}
+
 void nk_json_free(NkJsonNode *node) {
     if (!node) return;
     if (node->type == NK_JSON_STRING) {
-        free(node->u.str_val);
+        json_free_string(node->u.str_val);
     } else if (node->type == NK_JSON_ARRAY) {
         for (size_t i = 0; i < node->u.arr.count; i++) {
             nk_json_free(node->u.arr.items[i]);
@@ -63,7 +87,7 @@ void nk_json_free(NkJsonNode *node) {
         free(node->u.arr.items);
     } else if (node->type == NK_JSON_OBJECT) {
         for (size_t i = 0; i < node->u.obj.count; i++) {
-            free(node->u.obj.members[i].key);
+            json_free_string(node->u.obj.members[i].key);
             nk_json_free(node->u.obj.members[i].val);
         }
         free(node->u.obj.members);
@@ -217,15 +241,19 @@ static char *parse_json_string(JsonParser *p, bool is_key) {
     }
     size_t out_len = 0;
 
+    /* Grown by copy rather than realloc, so the old block is wiped before it
+     * is released instead of keeping the text read so far. */
     #define APPEND_CHAR(ch) do { \
         if (out_len + 1 >= cap) { \
             size_t new_cap = cap * 2; \
-            char *new_buf = (char *)realloc(buf, new_cap); \
+            char *new_buf = (char *)malloc(new_cap); \
             if (!new_buf) { \
-                free(buf); \
+                json_discard_buffer(buf, out_len); \
                 set_error(p, "Out of memory expanding string buffer"); \
                 return NULL; \
             } \
+            memcpy(new_buf, buf, out_len); \
+            json_discard_buffer(buf, out_len); \
             buf = new_buf; \
             cap = new_cap; \
         } \
@@ -236,17 +264,21 @@ static char *parse_json_string(JsonParser *p, bool is_key) {
         char c = p->src[p->pos++];
         if (c == '"') {
             APPEND_CHAR('\0');
+            /* A value holding \u0000 ends at the NUL. What follows it can never
+             * be read back, so it is wiped now and strlen bounds the later wipe. */
+            size_t visible = strlen(buf);
+            if (visible + 1 < out_len) json_wipe(buf + visible + 1, out_len - visible - 1);
             return buf;
         }
         if ((unsigned char)c < 0x20) {
             set_error(p, "Unescaped control character in string");
-            free(buf);
+            json_discard_buffer(buf, out_len);
             return NULL;
         }
         if (c == '\\') {
             if (p->pos >= p->len) {
                 set_error(p, "Unterminated escape sequence");
-                free(buf);
+                json_discard_buffer(buf, out_len);
                 return NULL;
             }
             uint32_t cp = 0;
@@ -255,7 +287,7 @@ static char *parse_json_string(JsonParser *p, bool is_key) {
                 p->src + p->pos, p->len - p->pos, &cp, &used);
             if (escape_error) {
                 set_error(p, escape_error);
-                free(buf);
+                json_discard_buffer(buf, out_len);
                 return NULL;
             }
             /* Keys are NUL-terminated C strings, so a decoded U+0000 would cut
@@ -264,7 +296,7 @@ static char *parse_json_string(JsonParser *p, bool is_key) {
              * string value keeps the documented rule: it ends at the NUL (nk_json.h). */
             if (cp == 0 && is_key) {
                 set_error(p, "\\u0000 is not supported in a JSON object key");
-                free(buf);
+                json_discard_buffer(buf, out_len);
                 return NULL;
             }
             p->pos += used;
@@ -279,7 +311,7 @@ static char *parse_json_string(JsonParser *p, bool is_key) {
     #undef APPEND_CHAR
 
     set_error(p, "Unterminated string literal");
-    free(buf);
+    json_discard_buffer(buf, out_len);
     return NULL;
 }
 
@@ -398,14 +430,14 @@ static NkJsonNode *parse_object_members(JsonParser *p, int depth, JsonKeySet *ke
             } else {
                 set_error(p, "Out of memory checking object keys");
             }
-            free(key);
+            json_free_string(key);
             nk_json_free(node);
             return NULL;
         }
 
         if (peek_char(p) != ':') {
             set_error(p, "Expected ':' after object key");
-            free(key);
+            json_free_string(key);
             nk_json_free(node);
             return NULL;
         }
@@ -413,7 +445,7 @@ static NkJsonNode *parse_object_members(JsonParser *p, int depth, JsonKeySet *ke
 
         NkJsonNode *val = parse_value(p, depth + 1);
         if (!val) {
-            free(key);
+            json_free_string(key);
             nk_json_free(node);
             return NULL;
         }
@@ -422,7 +454,7 @@ static NkJsonNode *parse_object_members(JsonParser *p, int depth, JsonKeySet *ke
             size_t new_cap = node->u.obj.capacity ? node->u.obj.capacity * 2 : 8;
             NkJsonMember *new_mem = (NkJsonMember *)realloc(node->u.obj.members, new_cap * sizeof(NkJsonMember));
             if (!new_mem) {
-                free(key);
+                json_free_string(key);
                 nk_json_free(val);
                 nk_json_free(node);
                 set_error(p, "Out of memory expanding object members");
@@ -531,7 +563,7 @@ static NkJsonNode *parse_value(JsonParser *p, int depth) {
         if (!str) return NULL;
         NkJsonNode *node = (NkJsonNode *)calloc(1, sizeof(NkJsonNode));
         if (!node) {
-            free(str);
+            json_free_string(str);
             set_error(p, "Out of memory allocating string node");
             return NULL;
         }

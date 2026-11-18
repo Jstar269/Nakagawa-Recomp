@@ -72,6 +72,9 @@ static void test_default_unchanged(void) {
        leaves the platform root alone, too. */
     assert(nk_portable_apply(&res) == NK_PORTABLE_ABSENT);
     assert(!nk_portable_in_use());
+    /* A caller that wants only the state may pass no result. */
+    assert(nk_portable_apply(NULL) == NK_PORTABLE_ABSENT);
+    assert(!nk_portable_in_use());
     assert(nk_platform_resolve_app_data_dir(after, sizeof(after)));
     assert(strcmp(before, after) == 0);
     /* A path without a folder part has no portable mode. */

@@ -2932,6 +2932,35 @@ static void test_fuzz_kirk(unsigned iters) {
     fflush(stdout);
 }
 
+/* A KIRK pass of zero bytes is refused and touches neither buffer. The CBC
+ * decrypt handled its first block before checking the length, so kirk7 with
+ * size 0 (a multiple of 16) read and wrote 16 bytes past both buffers. */
+static void test_kirk_pass_of_zero_bytes_is_refused(void) {
+    printf("[KIRK] Testing that an empty KIRK pass is refused...\n");
+    fflush(stdout);
+    char json[1024];
+    size_t json_len = build_keystore_json(json, sizeof(json));
+    NkKeystore *ks = nk_keystore_create();
+    char err[256];
+    assert(ks != NULL);
+    assert(nk_keystore_load_json(ks, json, json_len, err, sizeof(err)) == NK_PSP_OK);
+    uint8_t in[16], out[16];
+    memset(in, 0x5A, sizeof(in));
+    memset(out, FUZZ_CANARY, sizeof(out));
+    NkPspCtx ctx;
+    nk_psp_ctx_init(&ctx, ks);
+    assert(kirk7(&ctx, out, in, 0, FUZZ_PSP_CODE) != KIRK_OPERATION_SUCCESS);
+    nk_psp_ctx_init(&ctx, ks);
+    assert(kirk4(&ctx, out, in, 0, FUZZ_PSP_CODE) != KIRK_OPERATION_SUCCESS);
+    for (size_t i = 0; i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+    /* A one-block pass still runs. */
+    nk_psp_ctx_init(&ctx, ks);
+    assert(kirk7(&ctx, out, in, 16, FUZZ_PSP_CODE) == KIRK_OPERATION_SUCCESS);
+    nk_keystore_free(ks);
+    printf("[KIRK] Empty KIRK passes refused\n");
+    fflush(stdout);
+}
+
 /* ---- KL4E / KL3E decoder ---------------------------------------------- */
 
 static void test_fuzz_kle(unsigned iters) {
@@ -3015,6 +3044,54 @@ static void test_fuzz_kle(unsigned iters) {
     }
     free(out);
     printf("[FUZZ] KL4E/KL3E completed: %u/%u decoded, 0 crashes\n", decoded, iters);
+    fflush(stdout);
+}
+
+/* The arithmetic-coded form picks its probability contexts from the output
+ * position. The decoder took those bits from the host address of the output
+ * cursor (and of a stack table), so the same stream decoded into a buffer at
+ * another alignment gave other bytes or another result. Every stream here
+ * decodes identically, result and bytes, at each offset from 1 to 7 bytes past
+ * an aligned buffer. Shift 7 makes the literal context read the output
+ * position; the streams are deterministic pseudo-random bytes, decoded until
+ * they end or fail, which the original decoder told apart by alignment in
+ * about one case in sixteen. */
+static void test_kle_decoding_ignores_host_alignment(void) {
+    printf("[KLE] Testing that KL4E/KL3E output does not depend on buffer alignment...\n");
+    fflush(stdout);
+    enum { KLE_OUT = 0x800u, KLE_IN = 0x400u, KLE_STREAMS = 256u };
+    uint8_t *base = (uint8_t *)malloc(KLE_OUT + 32u);
+    uint8_t *reference = (uint8_t *)malloc(KLE_OUT);
+    uint8_t in[KLE_IN];
+    assert(base != NULL && reference != NULL);
+    uint8_t *aligned = base + (16u - ((uintptr_t)base & 15u)) % 16u;
+    size_t produced = 0;
+    for (unsigned stream = 0; stream < KLE_STREAMS; stream++) {
+        uint32_t state = 0x9E3779B9u * (stream + 1u);
+        for (unsigned i = 0; i < KLE_IN; i++) {
+            state = state * 1664525u + 1013904223u;
+            in[i] = (uint8_t)(state >> 24);
+        }
+        in[0] = (uint8_t)(0x07u | ((stream & 3u) << 3)); /* coded form, shift 7 */
+        int is_kl4e = (int)(stream & 1u);
+        memset(aligned, 0, KLE_OUT);
+        int rc0 = decompress_kle(aligned, (int)KLE_OUT, in, (int)KLE_IN, NULL, is_kl4e);
+        memcpy(reference, aligned, KLE_OUT);
+        for (size_t i = 0; i < KLE_OUT; i++) produced += reference[i] != 0;
+        for (unsigned offset = 1; offset < 8u; offset++) {
+            uint8_t *shifted = aligned + offset;
+            memset(shifted, 0, KLE_OUT);
+            int rc = decompress_kle(shifted, (int)KLE_OUT, in, (int)KLE_IN, NULL, is_kl4e);
+            assert(rc == rc0);
+            assert(memcmp(shifted, reference, KLE_OUT) == 0);
+        }
+    }
+    /* The streams decoded real output, so the contexts were exercised. */
+    assert(produced >= 1024u);
+    free(reference);
+    free(base);
+    printf("[KLE] %u streams (%zu output bytes) decode identically at every alignment\n",
+           (unsigned)KLE_STREAMS, produced);
     fflush(stdout);
 }
 
@@ -3109,6 +3186,72 @@ static void test_ec_verify(void) {
     }
 
     printf("[EC] ECDSA verification nk_ec_verify tests PASSED!\n");
+    fflush(stdout);
+}
+
+/* out = a + b over 20 big-endian bytes; the caller keeps the sum below 2^160. */
+static void ec_test_add20(const uint8_t a[NK_EC_BYTES], const uint8_t b[NK_EC_BYTES],
+                          uint8_t out[NK_EC_BYTES]) {
+    unsigned carry = 0;
+    for (int i = NK_EC_BYTES - 1; i >= 0; i--) {
+        unsigned sum = (unsigned)a[i] + (unsigned)b[i] + carry;
+        out[i] = (uint8_t)sum;
+        carry = sum >> 8;
+    }
+    assert(carry == 0);
+}
+
+/* SEC 1 3.2.2.1: a public point's coordinates lie in [0, p). On a field small
+ * enough that y + p still fits 160 bits, (x, y + p) satisfies the curve
+ * equation modulo p, but the field arithmetic assumes reduced inputs, so the
+ * point is refused instead of multiplied. The curve is synthetic: y^2 = x^3 + 7
+ * over the largest prime below 2^158 that is 3 mod 4, with the point x = 6, and
+ * the expected 0x1234567 * P worked out independently in affine coordinates. */
+static void test_ec_unreduced_coordinates_are_refused(void) {
+    printf("[EC] Testing that point coordinates at or above p are refused...\n");
+    fflush(stdout);
+    NkEcParams params;
+    memset(&params, 0, sizeof(params));
+    static const uint8_t p[20] = {0x3f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                                  0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x2b};
+    static const uint8_t px[20] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06};
+    static const uint8_t py[20] = {0x36, 0x0a, 0x33, 0xaa, 0x72, 0xbe, 0x29, 0xc2, 0x9f, 0xc0,
+                                   0x74, 0xd9, 0x63, 0x56, 0x44, 0x87, 0x6d, 0x7b, 0x14, 0xc1};
+    static const uint8_t rx[20] = {0x0f, 0x4d, 0xc9, 0xb9, 0x61, 0x6a, 0x48, 0x60, 0xc3, 0x67,
+                                   0xf8, 0x0b, 0x69, 0x15, 0x9d, 0x18, 0x32, 0xbd, 0x9b, 0xd6};
+    static const uint8_t ry[20] = {0x3a, 0x6f, 0x99, 0x2f, 0x3e, 0xf5, 0x55, 0x52, 0x7f, 0x25,
+                                   0x4b, 0x00, 0x70, 0xfb, 0xef, 0x4e, 0x6c, 0x71, 0x55, 0xdb};
+    memcpy(params.p, p, sizeof(p));
+    params.b[19] = 7;
+    memcpy(params.n, p, sizeof(p)); /* only bounds the scalar here */
+    memcpy(params.gx, px, sizeof(px));
+    memcpy(params.gy, py, sizeof(py));
+    uint8_t k[20] = {0};
+    k[16] = 0x01; k[17] = 0x23; k[18] = 0x45; k[19] = 0x67;
+    uint8_t outx[20], outy[20];
+
+    /* The reduced point multiplies to the independently computed result. */
+    assert(nk_ec_point_mul(&params, k, px, py, outx, outy) == 0);
+    assert(memcmp(outx, rx, 20) == 0 && memcmp(outy, ry, 20) == 0);
+
+    /* The same point with y + p or x + p is refused. */
+    uint8_t y_plus_p[20], x_plus_p[20];
+    ec_test_add20(py, p, y_plus_p);
+    ec_test_add20(px, p, x_plus_p);
+    assert(nk_ec_point_mul(&params, k, px, y_plus_p, outx, outy) == -1);
+    assert(nk_ec_point_mul(&params, k, x_plus_p, py, outx, outy) == -1);
+    assert(nk_ec_point_mul(&params, k, px, p, outx, outy) == -1); /* y == p */
+
+    /* Verification refuses an unreduced public point, and an unreduced
+     * generator, before any arithmetic. */
+    uint8_t one[20] = {0};
+    one[19] = 1;
+    assert(nk_ec_verify(&params, px, y_plus_p, one, one, one) == -1);
+    NkEcParams unreduced_g = params;
+    memcpy(unreduced_g.gy, y_plus_p, 20);
+    assert(nk_ec_verify(&unreduced_g, px, py, one, one, one) == -1);
+    printf("[EC] Unreduced point coordinates refused\n");
     fflush(stdout);
 }
 
@@ -4103,6 +4246,9 @@ int main(int argc, char **argv) {
     test_kirk_ecdsa_curve_names();
     test_ec_mod_n_is_bounded(iters > 2000 ? 2000 : iters);
     test_ec_verify();
+    test_ec_unreduced_coordinates_are_refused();
+    test_kle_decoding_ignores_host_alignment();
+    test_kirk_pass_of_zero_bytes_is_refused();
 
     printf("=================================================================\n");
     printf("ALL DETERMINISTIC PARSER FUZZ HARNESSES PASSED SUCCESSFULLY!\n");
