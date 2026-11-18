@@ -59,15 +59,34 @@ def is_tracked(rel_posix: str) -> bool:
     return rel_posix in tracked_paths(rel_posix)
 
 
-def plant_untracked_manifest(case: unittest.TestCase, name: str, manifest: dict) -> Path:
-    """Put an untracked manifest in the checkout's assets/titles for one test.
+#: Suffix of every manifest these tests plant in the checkout. ``.gitignore`` ignores
+#: ``/assets/titles/*.nk-test-planted.json``, so a planted file never shows in ``git status``
+#: as an untracked candidate, even while a test runs or after it is killed.
+PLANTED_SUFFIX = ".nk-test-planted.json"
 
-    The exclusion tests are vacuous unless the file they must ignore exists. A file of
-    that name already on disk (a developer's own) is used as it is and never removed;
-    otherwise the planted file is removed when the test ends.
+
+def is_ignored(rel_posix: str) -> bool:
+    """True when Git's ignore rules cover the path (``git check-ignore``)."""
+    probe = subprocess.run(["git", "check-ignore", "--quiet", "--no-index", "--", rel_posix],
+                           cwd=str(ROOT), capture_output=True, text=True)
+    if probe.returncode not in (0, 1):
+        raise AssertionError(f"git check-ignore failed for {rel_posix}: {probe.stderr}")
+    return probe.returncode == 0
+
+
+def plant_untracked_manifest(case: unittest.TestCase, name: str, manifest: dict) -> Path:
+    """Put an untracked, Git-ignored manifest in the checkout's assets/titles for one test.
+
+    The exclusion tests are vacuous unless the file they must ignore exists. ``name`` must end
+    in ``PLANTED_SUFFIX``, which ``.gitignore`` covers, so the planted file is ignored by Git
+    and never appears as an untracked candidate. A file of that name already on disk is used
+    as it is and never removed; otherwise the planted file is removed when the test ends.
     """
-    path = ROOT / "assets" / "titles" / name
-    case.assertFalse(is_tracked(f"assets/titles/{name}"), f"{name} must stay untracked")
+    rel = f"assets/titles/{name}"
+    path = ROOT / rel
+    case.assertTrue(name.endswith(PLANTED_SUFFIX), f"{name} must end in {PLANTED_SUFFIX}")
+    case.assertFalse(is_tracked(rel), f"{name} must stay untracked")
+    case.assertTrue(is_ignored(rel), f"{name} must be ignored by .gitignore")
     try:
         with path.open("x", encoding="utf-8", newline="\n") as stream:
             json.dump(manifest, stream, indent=2)
@@ -406,7 +425,8 @@ class PublicTitleIsolationTests(unittest.TestCase):
             "kind": "retail",
             "disc": {"id": UNCATALOGUED_RETAIL_DISC_ID, "region": "EU", "revision_policy": "exact-disc-id"}
         }
-        overlay_path = plant_untracked_manifest(self, "private-overlay-lookalike.json", fake_overlay)
+        overlay_path = plant_untracked_manifest(
+            self, "private-overlay-lookalike" + PLANTED_SUFFIX, fake_overlay)
         self.assertTrue(overlay_path.is_file())
 
         proc2 = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
@@ -465,7 +485,7 @@ class PublicTitleIsolationTests(unittest.TestCase):
 
 # A retail-looking manifest the policy never classified. It is the stand-in for
 # any developer's private title manifest now that the HST manifest is public.
-PRIVATE_LOOKALIKE_NAME = "private-retail-lookalike.json"
+PRIVATE_LOOKALIKE_NAME = "private-retail-lookalike" + PLANTED_SUFFIX
 PRIVATE_LOOKALIKE_REL = f"assets/titles/{PRIVATE_LOOKALIKE_NAME}"
 
 SYNTHETIC_LOOKALIKE = {

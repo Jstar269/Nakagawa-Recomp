@@ -1623,7 +1623,8 @@ python tools/soak_audit.py --perf logs/perf.csv --proc proc.csv --stderr logs/st
 Output is one `SOAK_CHECK:` line per assertion plus a `SOAK_AUDIT:` verdict line, and the exit
 status is non-zero if any assertion failed. Two rules keep it honest: an input it was not
 given reports `SKIP` with the reason rather than passing, and a quantity the runtime does not
-publish is reported as absent.
+publish is reported as absent. When every check is `SKIP` (no input judged anything), the
+verdict is `SKIP` and the exit status is 2, never a pass.
 
 **Audio drift** is the one that was unmeasurable until the telemetry published it. The runtime
 reads the queue depth the blocking output paces against in `src/rt/hle_audio.c`

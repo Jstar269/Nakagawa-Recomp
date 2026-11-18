@@ -1694,9 +1694,12 @@ class ExpectedDataFileCountTests(unittest.TestCase):
             title_manifest.validate_manifest(m)
         self.assertIn("must be in range", str(caught.exception))
 
-    def test_mismatch_remains_failure_not_silent_disable(self) -> None:
-        # The failure is in hle.c data_validate_index, not in the validator, but the
-        # accessor must return the configured count so the check is not bypassed.
+    def test_configured_count_reaches_the_runtime_header(self) -> None:
+        # This pins only the hand-off: the configured count reaches the generated header the
+        # runtime accessor reads, so the census is not silently disabled. The mismatch itself
+        # is refused in src/rt/hle_data.c (data_validate_index, data_validate_archive_index);
+        # tools.test_hle_title_config_behavior's configured run executes that refusal for a
+        # loose root and an archive (TITLE_CONFIG_DATA_CENSUS ... loose=refused archive=refused).
         m = json.loads(FIXTURE_A.read_text(encoding="utf-8"))
         m["runtime_bindings"] = {"schema_version": 1, "expected_data_file_count": 56672}
         cfg = title_runtime_config.bindings_from_manifest(m)

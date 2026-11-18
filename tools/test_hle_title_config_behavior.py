@@ -260,6 +260,12 @@ class HleTitleConfigBehaviorTests(unittest.TestCase):
         self.assertIn("hle_title_production_selftest:", output)
         self.assertIn("0 failures", output)
         self.assertIn("DISPLAY_SET_MODE: mode=0 480x272", output)
+        # The configured census (12345) is enforced on the production preparation path: a
+        # two-file loose root and a four-member archive are both refused by name, never
+        # indexed. The generic and fixture profiles run the same case and index both roots.
+        self.assertIn("TITLE_CONFIG_DATA_CENSUS: census=12345 loose=refused archive=refused", output)
+        self.assertIn("host_data: expected 12345 files but enumerated 2; refusing index", output)
+        self.assertIn("host_data: expected 12345 archive members but indexed 4; refusing index", output)
         for retired in ("replaying title display-driver init", "runtime sync callbacks",
                         "seeded frame latch", "GE_FINISH_LATCH_ASSIST"):
             self.assertNotIn(retired, output)

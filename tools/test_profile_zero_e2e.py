@@ -868,8 +868,12 @@ class ProfileZeroManifestTests(unittest.TestCase):
 
         def run_probe(required: bool) -> unittest.TestResult:
             result = unittest.TestResult()
-            with mock.patch.dict(os.environ),                     mock.patch.object(module, "_pspdev_backend", return_value=None),                     mock.patch.object(module, "_runtime_build_environment",
-                                      return_value=({}, "make")),                     mock.patch.object(module, "_fixture_bytes_present", return_value=False):
+            with (
+                mock.patch.dict(os.environ),
+                mock.patch.object(module, "_pspdev_backend", return_value=None),
+                mock.patch.object(module, "_runtime_build_environment", return_value=({}, "make")),
+                mock.patch.object(module, "_fixture_bytes_present", return_value=False),
+            ):
                 os.environ.pop(PROFILE_ZERO_REQUIRED, None)
                 if required:
                     os.environ[PROFILE_ZERO_REQUIRED] = "1"

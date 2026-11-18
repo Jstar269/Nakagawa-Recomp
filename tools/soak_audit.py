@@ -30,7 +30,10 @@ Machine-readable output, one line per assertion, then one summary::
     SOAK_AUDIT: verdict=PASS checks=7 failures=0 presenting_s=458/460
 
 Exit status is 0 only when every enabled assertion passed. A missing input is reported as
-``SKIP`` with the reason, never as a pass: an absent artifact is not a healthy run.
+``SKIP`` with the reason, never as a pass: an absent artifact is not a healthy run. When no
+assertion could be judged at all (every check is ``SKIP``), the verdict is ``SKIP`` and the exit
+status is 2, so a run that produced no telemetry never reads as a passing soak. A ``SKIP`` among
+judged checks leaves the verdict to those checks; its own ``SOAK_CHECK`` line names the reason.
 """
 
 from __future__ import annotations
@@ -117,8 +120,18 @@ class Report:
     def failures(self) -> int:
         return sum(1 for c in self.checks if c.status == "FAIL")
 
+    @property
+    def judged(self) -> int:
+        return sum(1 for c in self.checks if c.status in ("PASS", "FAIL"))
+
     def verdict(self) -> str:
-        return "FAIL" if self.failures else "PASS"
+        if self.failures:
+            return "FAIL"
+        return "PASS" if self.judged else "SKIP"
+
+    def exit_code(self) -> int:
+        """0 for PASS, 1 for FAIL, 2 when nothing could be judged (an all-SKIP report)."""
+        return {"PASS": 0, "FAIL": 1}.get(self.verdict(), 2)
 
     def render(self) -> str:
         lines = [c.line() for c in self.checks]
@@ -459,7 +472,7 @@ def main(argv: list[str] | None = None) -> int:
     print(report.render())
     if args.json:
         print(report.as_json())
-    return 1 if report.failures else 0
+    return report.exit_code()
 
 
 if __name__ == "__main__":

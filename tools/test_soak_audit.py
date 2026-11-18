@@ -428,12 +428,19 @@ class SoakAuditTests(unittest.TestCase):
     # -- inputs -------------------------------------------------------------
     def test_missing_inputs_skip_with_a_reason_and_never_pass_silently(self) -> None:
         code, out = self._run()
-        self.assertEqual(code, 0, out)
+        # Nothing was judged: the verdict is SKIP with its own exit status, never a pass.
+        self.assertEqual(code, 2, out)
         self.assertNotIn("verdict=FAIL", out)
+        self.assertNotIn("verdict=PASS", out)
         for name in ("presenting", "cadence", "memory_working_set", "handles", "fatal", "route",
                      "compat_patches"):
             self.assertIn(f"SOAK_CHECK: {name} SKIP", out)
-        self.assertIn("SOAK_AUDIT: verdict=PASS", out)
+        self.assertIn("SOAK_AUDIT: verdict=SKIP", out)
+
+    def test_all_skip_json_verdict_is_skip(self) -> None:
+        code, out = self._run("--json")
+        self.assertEqual(code, 2, out)
+        self.assertIn('"verdict": "SKIP"', out)
 
     def test_json_output_carries_the_same_verdict(self) -> None:
         perf = self._write("perf.csv", _perf([(28.0, 40.0)] * 40))

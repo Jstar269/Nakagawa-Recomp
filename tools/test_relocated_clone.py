@@ -257,7 +257,7 @@ class SetUpClassGuardTests(unittest.TestCase):
             raise AssertionError("the tree was enumerated without a git binary")
 
         for owner in (RelocatedCloneTests, TwoCheckoutIsolationTests):
-            probe = type(f"{owner.__name__}Probe", (owner,), {})
+            probe: type[unittest.TestCase] = type(f"{owner.__name__}Probe", (owner,), {})
             with self.subTest(owner=owner.__name__), \
                  mock.patch.object(shutil, "which", self._which("git")), \
                  mock.patch.object(sys.modules[__name__], "copy_tracked_tree", no_copy), \
@@ -279,7 +279,7 @@ class SetUpClassGuardTests(unittest.TestCase):
             (clone / "partial.txt").write_text("partial\n", encoding="utf-8")
             raise OSError("copy failed part way")
 
-        probe = type("RelocatedCloneProbe", (RelocatedCloneTests,), {})
+        probe: type[RelocatedCloneTests] = type("RelocatedCloneProbe", (RelocatedCloneTests,), {})
         with mock.patch.object(shutil, "which", self._which("")), \
              mock.patch.object(tempfile, "mkdtemp", make_base), \
              mock.patch.object(sys.modules[__name__], "copy_tracked_tree", failed_copy):

@@ -1325,6 +1325,8 @@ static void test_guest_module_load_binding(void);
  * production sceDisplaySetMode keeps its PSP success result and dispatches no guest body,
  * and LoadModule writes no readiness word. The display bring-up replay, runtime-sync
  * seeding and frame-latch assist that a configured title used to receive are retired. */
+static void test_title_config_data_census(void);
+
 static void test_title_config_hle_bindings(void) {
     const SrTitleRuntimeConfig *cfg = sr_title_config();
     const char *expected_diagnostics = getenv("SR_EXPECT_HLE_DIAGNOSTICS");
@@ -1384,6 +1386,7 @@ static void test_title_config_hle_bindings(void) {
     expect(MEM_R32(0x08906010u) == 0u,
            "LoadModule does not write a migrated compat flag");
     test_guest_module_load_binding();
+    test_title_config_data_census();
 }
 
 /* Test-only access to the real PRX parser.  The wrapper is compiled only for this executable;
@@ -18944,6 +18947,113 @@ static size_t hle_data_stderr_capture_end(FILE *capture, int saved_fd,
     }
     fclose(capture);
     return length;
+}
+
+/* One production preparation of SR_DATAROOT=root, its stderr captured, then echoed so the
+ * run log keeps it. Returns the terminal data state. */
+static int hle_census_prepare(const char *root, char *captured, size_t captured_size) {
+    hle_archive_route_set_env("SR_DATAROOT", root);
+    sr_hle_test_data_reset(0);
+    FILE *capture = NULL;
+    int saved_stderr = -1;
+    int capture_ready = hle_data_stderr_capture_begin(&capture, &saved_stderr);
+    int state = sr_host_data_prepare();
+    captured[0] = '\0';
+    if (capture_ready)
+        (void)hle_data_stderr_capture_end(capture, saved_stderr, captured, captured_size);
+    expect(capture_ready, "the census verdict can be captured");
+    fputs(captured, stderr);
+    return state;
+}
+
+/* The extracted-data census (runtime_bindings.expected_data_file_count) through the
+ * production preparation path, for the title configuration this executable was built
+ * with. A profile that declares a census refuses a loose root and an archive whose
+ * counts differ from it and names both counts; a profile that declares none indexes the
+ * same two roots, so a refusal is the census's and not the fixture's.
+ * tools/test_hle_title_config_behavior.py builds this under a configured census and
+ * checks the TITLE_CONFIG_DATA_CENSUS line and both refusals. */
+static void test_title_config_data_census(void) {
+    enum { LOOSE_FILES = 2, ARCHIVE_MEMBERS = 4 };
+    const uint32_t census = sr_title_config_expected_data_file_count();
+    char *old_data = hle_archive_route_env_copy(getenv("SR_DATAROOT"));
+    char *old_loose = hle_archive_route_env_copy(getenv("SR_LOOSE_CONTENT_ROOTS"));
+    hle_archive_route_set_env("SR_LOOSE_CONTENT_ROOTS", NULL);
+    expect(census != LOOSE_FILES && census != ARCHIVE_MEMBERS,
+           "the census fixtures' counts differ from the configured census");
+
+    char scratch[MAX_PATH] = {0};
+    char loose_root[MAX_PATH] = {0};
+    char loose_files[LOOSE_FILES][MAX_PATH + 32];
+    memset(loose_files, 0, sizeof(loose_files));
+    int loose_ok = hle_scratch_root(scratch, sizeof(scratch)) &&
+                   snprintf(loose_root, sizeof(loose_root), "%s/census_loose_%lu",
+                            scratch, (unsigned long)getpid()) > 0 &&
+                   hle_make_directory(loose_root);
+    for (int i = 0; loose_ok && i < LOOSE_FILES; i++) {
+        snprintf(loose_files[i], sizeof(loose_files[i]), "%s/census_%d.bin", loose_root, i);
+        FILE *file = fopen(loose_files[i], "wb");
+        loose_ok = file != NULL && fputs("census", file) >= 0;
+        if (file && fclose(file) != 0) loose_ok = 0;
+    }
+    expect(loose_ok, "the census loose-root fixture was created");
+    const char *loose_verdict = "not-run";
+    char captured[4096];
+    if (loose_ok) {
+        int state = hle_census_prepare(loose_root, captured, sizeof(captured));
+        if (census == 0u) {
+            expect(state == SR_DATA_TEST_STATE_READY &&
+                       sr_hle_test_data_entry_count() == LOOSE_FILES,
+                   "without a census the two-file loose root is indexed");
+            loose_verdict = state == SR_DATA_TEST_STATE_READY ? "indexed" : "failed";
+        } else {
+            char want[128];
+            snprintf(want, sizeof(want), "host_data: expected %u files but enumerated %d; refusing index",
+                     (unsigned)census, (int)LOOSE_FILES);
+            expect(state == SR_DATA_TEST_STATE_FAILED,
+                   "a loose root whose file count differs from the census is refused");
+            expect(strstr(captured, want) != NULL,
+                   "the loose refusal names the census and the enumerated count");
+            loose_verdict = state == SR_DATA_TEST_STATE_FAILED && strstr(captured, want) ? "refused"
+                                                                                       : "accepted";
+        }
+    }
+
+    char archive_root[MAX_PATH] = {0};
+    int archive_ok = hle_archive_fixture_make(archive_root, sizeof(archive_root));
+    expect(archive_ok, "the census archive fixture was created");
+    const char *archive_verdict = "not-run";
+    if (archive_ok) {
+        int state = hle_census_prepare(archive_root, captured, sizeof(captured));
+        if (census == 0u) {
+            expect(state == SR_DATA_TEST_STATE_READY,
+                   "without a census the four-member archive is indexed");
+            archive_verdict = state == SR_DATA_TEST_STATE_READY ? "indexed" : "failed";
+        } else {
+            char want[128];
+            snprintf(want, sizeof(want),
+                     "host_data: expected %u archive members but indexed %d; refusing index",
+                     (unsigned)census, (int)ARCHIVE_MEMBERS);
+            expect(state == SR_DATA_TEST_STATE_FAILED,
+                   "an archive whose member count differs from the census is refused");
+            expect(strstr(captured, want) != NULL,
+                   "the archive refusal names the census and the indexed count");
+            archive_verdict = state == SR_DATA_TEST_STATE_FAILED && strstr(captured, want)
+                                  ? "refused" : "accepted";
+        }
+    }
+    fprintf(stderr, "TITLE_CONFIG_DATA_CENSUS: census=%u loose=%s archive=%s\n",
+            (unsigned)census, loose_verdict, archive_verdict);
+
+    sr_hle_test_data_reset(0);
+    hle_archive_route_set_env("SR_DATAROOT", old_data);
+    hle_archive_route_set_env("SR_LOOSE_CONTENT_ROOTS", old_loose);
+    free(old_data);
+    free(old_loose);
+    if (archive_root[0]) hle_archive_fixture_remove(archive_root);
+    for (int i = 0; i < LOOSE_FILES; i++)
+        if (loose_files[i][0]) nk_remove_utf8(loose_files[i]);
+    if (loose_root[0]) rmdir(loose_root);
 }
 
 static void test_archive_mode_preserves_loose_routes(void) {

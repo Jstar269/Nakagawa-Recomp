@@ -407,10 +407,10 @@ class TestPlayerPackageDeterminism(unittest.TestCase):
         if all(binary.is_file() for binary in required):
             return
         lines = (built.stdout + built.stderr).splitlines()
-        reason = next((line for line in lines
-                       if "sdl3 dependency is missing" in line.lower()), None)
-        if reason is not None:
-            raise unittest.SkipTest(reason.strip())
+        build_reason = next((line for line in lines
+                             if "sdl3 dependency is missing" in line.lower()), None)
+        if build_reason is not None:
+            raise unittest.SkipTest(build_reason.strip())
         # Every tool the route needs is present, so a failed build is the project's
         # own failure (a compile or link error), never a reason to skip the class.
         raise AssertionError(

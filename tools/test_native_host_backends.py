@@ -667,7 +667,7 @@ class NativeHostSetupGuardTests(unittest.TestCase):
             (objects / object_name).write_bytes(b"")
             raise AssertionError(f"compiling {source} failed")
 
-        probe = type("NativeHostBackendProbe", (NativeHostBackendTests,), {})
+        probe: type[NativeHostBackendTests] = type("NativeHostBackendProbe", (NativeHostBackendTests,), {})
         with mock.patch.object(shutil, "which", lambda name, *_args, **_kwargs: f"/usr/bin/{name}"), \
              mock.patch.object(tempfile, "mkdtemp", make_objects), \
              mock.patch.object(sys.modules[__name__], "_compile_object", failed_compile):
