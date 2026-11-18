@@ -1032,11 +1032,29 @@ static uint32_t h_DisplayWaitVblankCB(CpuState *s) {
     int result = sched_wait_vblank_cb(0);
     return result < 0 ? SCE_KERNEL_ERROR_CAN_NOT_WAIT : (uint32_t)result;
 }
+/* JPCSP-derived, not PSP-measured (jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414,
+ * src/jpcsp/HLE/modules/sceDisplay.java sceDisplayGetMode, whose three outputs are
+ * @CanBeNull TPointer32, and src/jpcsp/Allegrex/compiler/CompilerContext.java loadParameter):
+ * a non-null output that is not valid guest memory answers ERROR_INVALID_POINTER (0x80000103)
+ * before the function runs, so no output is written. PPSSPP 3bc60270 skips such an output and
+ * returns 0 instead; no PSP measurement settles which. Noted once per run. */
+static int s_display_get_mode_bad_span_noted;
+void sr_hle_test_display_get_mode_note_reset(void) { s_display_get_mode_bad_span_noted = 0; }
+static uint32_t display_get_mode_bad_span(uint32_t addr) {
+    if (!s_display_get_mode_bad_span_noted) {
+        s_display_get_mode_bad_span_noted = 1;
+        fprintf(stderr, "HLE: JPCSP-derived, not PSP-measured: sceDisplayGetMode output 0x%08x is not "
+                        "4 writable bytes of guest memory, answers 0x80000103 and writes no output\n",
+                addr);
+    }
+    return 0x80000103u;
+}
+
 static uint32_t h_DisplayGetMode(CpuState *s) {
-    /* Every output is checked before any is written, as in h_DisplayGetFrameBuf. */
-    if (A0 && !sr_guest_span_writable(A0, 4u)) return 0x80000103u;
-    if (A1 && !sr_guest_span_writable(A1, 4u)) return 0x80000103u;
-    if (A2 && !sr_guest_span_writable(A2, 4u)) return 0x80000103u;
+    /* Every output is checked before any is written. */
+    if (A0 && !sr_guest_span_writable(A0, 4u)) return display_get_mode_bad_span(A0);
+    if (A1 && !sr_guest_span_writable(A1, 4u)) return display_get_mode_bad_span(A1);
+    if (A2 && !sr_guest_span_writable(A2, 4u)) return display_get_mode_bad_span(A2);
     if (A0) MEM_W32(A0, 0);  /* mode 0 */
     if (A1) MEM_W32(A1, 480); /* width */
     if (A2) MEM_W32(A2, 272); /* height */

@@ -2792,6 +2792,17 @@ uint32_t io_ioctl_async_complete(uint32_t fd, uint32_t cmd, uint32_t in,
     return io_ioctl_args_mode(fd, cmd, in, inlen, out, outlen, 1);
 }
 
+/* The PPSSPP-derived sceIoIoctl seek cells, each noted once per run (Section 7). */
+enum { IO_SEEK_NOTE_RECORD, IO_SEEK_NOTE_WHENCE, IO_SEEK_NOTE_COUNT };
+static int s_io_seek_noted[IO_SEEK_NOTE_COUNT];
+static void io_seek_derived_note(int cell, int asynchronous, const char *what) {
+    if (s_io_seek_noted[cell]) return;
+    s_io_seek_noted[cell] = 1;
+    fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: %s seek (0x01010005) %s\n",
+            asynchronous ? "sceIoIoctlAsync" : "sceIoIoctl", what);
+}
+void sr_hle_test_io_seek_note_reset(void) { memset(s_io_seek_noted, 0, sizeof(s_io_seek_noted)); }
+
 static uint32_t io_ioctl_args_mode(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inlen,
                                    uint32_t out, uint32_t outlen, int asynchronous) {
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD)
@@ -2818,14 +2829,26 @@ static uint32_t io_ioctl_args_mode(uint32_t fd, uint32_t cmd, uint32_t in, uint3
         MEM_W32(out, f->off);
         return 0;
     case 0x01010005: { /* seek: indata = { u64 offset; u32 unk; u32 whence } */
-        /* PPSSPP-derived, not PSP-measured (PPSSPP 3bc60270, Core/HLE/sceIo.cpp
-         * __IoIoctl 0x01010005 and __IoLseekDest): an inlen of 4 or more still reads the whole
-         * 16-byte record, so the record must be readable guest memory (else EINVAL), a whence
-         * other than 0-2 answers the I/O error, and the destination stays inside [0, size]. */
-        if (!in || inlen < 4 || !sr_guest_span_readable(in, 16u)) return 0x80010016;
+        /* PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+         * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceIo.cpp, __IoIoctl 0x01010005 and
+         * __IoLseekDest): an inlen of 4 or more still reads the whole 16-byte record, so the
+         * record must be readable guest memory (else EINVAL), a whence other than 0-2 answers
+         * the I/O error, and the destination stays inside [0, size]. The two derived answers
+         * are each noted once per run. */
+        if (!in || inlen < 4) return 0x80010016;
+        if (!sr_guest_span_readable(in, 16u)) {
+            io_seek_derived_note(IO_SEEK_NOTE_RECORD, asynchronous,
+                                 "answers EINVAL (0x80010016) for a 16-byte record that is not "
+                                 "readable guest memory");
+            return 0x80010016;
+        }
         int64_t off = (int64_t)(((uint64_t)MEM_R32(in + 4) << 32) | MEM_R32(in));
         uint32_t whence = MEM_R32(in + 12);
-        if (whence > 2u) return 0x80010005;
+        if (whence > 2u) {
+            io_seek_derived_note(IO_SEEK_NOTE_WHENCE, asynchronous,
+                                 "answers the I/O error (0x80010005) for a whence above 2");
+            return 0x80010005;
+        }
         int64_t base = whence == 1 ? f->off : (whence == 2 ? f->size : 0);
         /* Compare against the bounds, so base + off is never formed out of range. */
         if (off < -base || off > (int64_t)f->size - base)

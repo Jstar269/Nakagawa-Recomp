@@ -255,10 +255,8 @@ static void route_fail(const char *fmt, ...) {
         sr_perf_shutdown();
         sr_profile_dump_final();
         SR_VERIFY_REPORT_NOW();
-        /* _Exit flushes no stdio stream, and the buffered tail of the SR_SAMPLE_OUT rows and of
-         * the SR_TRACE file is the evidence closest to the failure. */
-        hle_state_sample_close();
-        sr_trace_close();
+        hle_state_sample_close();   /* _Exit flushes no stdio stream: land the SR_SAMPLE_OUT tail */
+        sr_trace_close();           /* and the SR_TRACE tail, the evidence closest to the failure */
         _Exit(ROUTE_FAIL_EXIT);
     }
 }

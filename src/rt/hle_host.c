@@ -771,10 +771,11 @@ int sr_wide_configured_root_wide_alloc(const wchar_t *value, wchar_t **out) {
         return 0;
     }
     /* '.' and '..' are collapsed first, as the Win32 layer does through GetFullPathNameW, so a
-     * value such as /opt/nk/../data names the same root on both hosts. */
+     * value such as /opt/nk/../data names the same root on both hosts. The value is already known
+     * absolute, so the lexical collapse runs directly and the working directory is never read. */
     if (sr_wide_has_dot_component(wide)) {
         wchar_t *canonical = NULL;
-        if (!sr_wide_full_path_alloc(wide, &canonical)) {
+        if (!sr_wide_lexical_canonical_alloc(wide, &canonical)) {
             free(wide);
             return 0;
         }

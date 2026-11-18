@@ -5396,14 +5396,36 @@ static void test_fd_namespace(void) {
             MEM_W32(record + 8u, 0u); MEM_W32(record + 12u, 0u);
             expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0u && IOCTL_TELL_NOW() == 2u,
                    "the ioctl seek moves to a SEEK_SET destination");
+            /* Section 7: each PPSSPP-derived seek answer logs its label once per run. */
+            extern void sr_hle_test_io_seek_note_reset(void);
+            sr_hle_test_io_seek_note_reset();
+            static char seek_log[2048];
+            FILE *seek_capture = NULL;
+            int seek_saved_fd = -1;
+            int seek_capturing = hle_data_stderr_capture_begin(&seek_capture, &seek_saved_fd);
             MEM_W32(short_record + 0u, 6u); MEM_W32(short_record + 4u, 0u);
             expect(IOCTL_CALL(IOCTL_SEEK, short_record, 4u, 0u, 0u) == 0x80010016u &&
                        IOCTL_TELL_NOW() == 2u,
                    "an ioctl seek record that ends past guest memory is EINVAL and moves nothing");
+            expect(IOCTL_CALL(IOCTL_SEEK, short_record, 4u, 0u, 0u) == 0x80010016u,
+                   "a second unreadable ioctl seek record is EINVAL again");
             MEM_W32(record + 0u, 6u); MEM_W32(record + 12u, 3u);
             expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0x80010005u &&
                        IOCTL_TELL_NOW() == 2u,
                    "an ioctl seek with whence 3 is the I/O error and moves nothing");
+            expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0x80010005u,
+                   "a second ioctl seek with whence 3 is the I/O error again");
+            seek_log[0] = '\0';
+            if (seek_capturing)
+                hle_data_stderr_capture_end(seek_capture, seek_saved_fd, seek_log, sizeof(seek_log));
+            expect(seek_capturing &&
+                       count_occurrences(seek_log, "HLE: PPSSPP-derived, not PSP-measured: sceIoIoctl seek "
+                                                   "(0x01010005) answers EINVAL (0x80010016)") == 1,
+                   "the derived unreadable-record seek answer is noted once per run");
+            expect(seek_capturing &&
+                       count_occurrences(seek_log, "HLE: PPSSPP-derived, not PSP-measured: sceIoIoctl seek "
+                                                   "(0x01010005) answers the I/O error (0x80010005)") == 1,
+                   "the derived whence-above-2 seek answer is noted once per run");
             MEM_W32(record + 0u, 0xffffffffu); MEM_W32(record + 4u, 0x7fffffffu);
             MEM_W32(record + 12u, 1u);
             expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0x80010005u &&
@@ -35453,11 +35475,18 @@ static void test_display_narrow_stride_span(void) {
     s_test_gui_on = 0;
 }
 
-/* sceDisplayGetMode checks each output pointer before it writes any of them, as GetFrameBuf
- * does: one unwritable output refuses the call with ILLEGAL_ADDR and leaves the others alone. */
+/* sceDisplayGetMode checks each output pointer before it writes any of them: one unwritable
+ * output refuses the call with 0x80000103 and leaves the others alone. That answer is
+ * JPCSP-derived, so the refusal names its label once per run (Section 7). */
 static void test_display_get_mode_span(void) {
+    extern void sr_hle_test_display_get_mode_note_reset(void);
     reset_fixture();
     sr_hle_init();
+    sr_hle_test_display_get_mode_note_reset();
+    static char mode_log[2048];
+    FILE *mode_capture = NULL;
+    int mode_saved_fd = -1;
+    int mode_capturing = hle_data_stderr_capture_begin(&mode_capture, &mode_saved_fd);
     const uint32_t mode_out = 0x09000000u, width_out = mode_out + 4u, height_out = mode_out + 8u;
     MEM_W32(mode_out, 0xa5a5a5a5u);
     MEM_W32(width_out, 0xa5a5a5a5u);
@@ -35469,6 +35498,18 @@ static void test_display_get_mode_span(void) {
            "GetMode refuses an unwritable width pointer with ILLEGAL_ADDR");
     expect(MEM_R32(mode_out) == 0xa5a5a5a5u && MEM_R32(height_out) == 0xa5a5a5a5u,
            "GetMode writes no output when one of them is unwritable");
+    s_cpu->r[4] = 0x0c000000u;
+    s_cpu->r[5] = width_out;
+    s_cpu->r[6] = height_out;
+    expect(sr_syscall(s_cpu, 0xdea197d4u) == 0x80000103u,
+           "GetMode refuses an unwritable mode pointer with 0x80000103 again");
+    mode_log[0] = '\0';
+    if (mode_capturing)
+        hle_data_stderr_capture_end(mode_capture, mode_saved_fd, mode_log, sizeof(mode_log));
+    expect(mode_capturing &&
+               count_occurrences(mode_log, "HLE: JPCSP-derived, not PSP-measured: sceDisplayGetMode output "
+                                           "0x0c000000 is not 4 writable bytes") == 1,
+           "the derived GetMode refusal is noted once per run");
     s_cpu->r[4] = mode_out;
     s_cpu->r[5] = width_out;
     s_cpu->r[6] = height_out;
