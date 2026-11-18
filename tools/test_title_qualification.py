@@ -792,16 +792,22 @@ class PublicSmokeTests(unittest.TestCase):
 
     def test_display_fixture_presents_a_first_checkpoint_and_exits_cleanly(self):
         # The run uses the real build root, where the player finds the fixture's staged folder and data. A report
-        # or log left by an earlier run must not pass for this one, so both are removed first and must come back.
+        # or log left by an earlier run must not pass for this one, so each must be written again by this run
+        # (the test never deletes inside the checkout; it compares modification times instead).
         output_dir = ROOT / "build" / TITLE_ID / "title-qualification"
         report_path = output_dir / tq.REPORT_NAME
         log_path = output_dir / tq.OUTPUT_LOG_NAME
-        report_path.unlink(missing_ok=True)
-        log_path.unlink(missing_ok=True)
+
+        def _mtime(path):
+            return path.stat().st_mtime_ns if path.is_file() else None
+
+        report_before, log_before = _mtime(report_path), _mtime(log_path)
         with contextlib.redirect_stdout(io.StringIO()):
             code = tq.main(["smoke", "--manifest", str(DISPLAY_SMOKE)])
         self.assertTrue(report_path.is_file(), "the run did not write its report")
         self.assertTrue(log_path.is_file(), "the run did not write its log")
+        self.assertNotEqual(_mtime(report_path), report_before, "the report is left over from an earlier run")
+        self.assertNotEqual(_mtime(log_path), log_before, "the log is left over from an earlier run")
         report = json.loads(report_path.read_text(encoding="utf-8"))
         nk_cli.validate_bringup_report(report)
         self.assertEqual(code, 0, report)
