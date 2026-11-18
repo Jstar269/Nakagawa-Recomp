@@ -13,6 +13,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 /* The fixture paths are short temporary-folder names; the compiler can only assume the longest
  * a buffer allows, and every path is checked by the calls that use it. */
@@ -557,7 +562,7 @@ static void test_accounts_and_add_for_account(void) {
     free(data);
     snprintf(vdf, sizeof(vdf), "%s/userdata/30001/config/shortcuts.vdf", steam);
     CHECK(nk_platform_path_missing(vdf), "no other account was touched");
-#ifndef _WIN32
+#if !defined(_WIN32) && !(defined(__linux__) && !defined(__ANDROID__))
     CHECK_STATUS(nk_steam_add_for_account(steam, "30001", &kPlayer, NULL, "20261106-120000",
                                           backup, sizeof(backup), NULL), NK_STEAM_ERR_UNSUPPORTED,
                  "off Windows, without a probe of its own, nothing is written");
@@ -566,6 +571,101 @@ static void test_accounts_and_add_for_account(void) {
                  "off Windows, Steam is not found by itself");
 #endif
 }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+static void test_linux_steam_paths_and_pid(void) {
+    char home[NATIVE_TEST_PATH_MAX], path[NATIVE_TEST_PATH_MAX], root[NK_MAX_PATH];
+    char original_home[NK_MAX_PATH];
+    int have_original_home = nk_platform_env_utf8("HOME", original_home,
+                                                   sizeof(original_home)) > 0;
+    path_in(home, sizeof(home), "steam-home");
+    native_test_set_env("HOME", home);
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_ERR_NOT_FOUND,
+                 "no Steam root in temporary HOME");
+    snprintf(path, sizeof(path), "%s/.local/share/Steam", home);
+    CHECK(nk_platform_mkdir_p(path), "create standard Linux Steam root");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "find the standard Linux Steam root");
+    CHECK(strcmp(root, path) == 0, "use the standard Steam root");
+
+    snprintf(path, sizeof(path), "%s/.steam", home);
+    CHECK(nk_platform_mkdir_p(path), "create legacy .steam folder");
+    snprintf(path, sizeof(path), "%s/.steam/steam", home);
+    CHECK(nk_platform_mkdir_p(path), "create legacy Steam root");
+    /* The standard location takes precedence when both exist. */
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "find Steam when both roots exist");
+    CHECK(strstr(root, "/.local/share/Steam") != NULL, "prefer the standard root");
+    snprintf(path, sizeof(path), "%s/.local/share/Steam", home);
+    CHECK(rmdir(path) == 0, "remove standard root to check the alternate layout");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "find the alternate Linux Steam root");
+    CHECK(strstr(root, "/.steam/steam") != NULL, "use the alternate Steam root");
+    snprintf(path, sizeof(path), "%s/.local/share/Steam", home);
+    CHECK(nk_platform_mkdir_p(path), "restore standard Steam root for account fixture");
+    CHECK_STATUS(nk_steam_find_root(root, sizeof(root)), NK_STEAM_OK,
+                 "prefer standard root after restoring it");
+
+    snprintf(path, sizeof(path), "%s/.steam/steam.pid", home);
+    CHECK(!nk_steam_client_running(), "missing PID file means Steam is closed");
+    CHECK(write_bytes(path, (const uint8_t *)"not-a-pid\n", 10u), "write malformed PID");
+    CHECK(nk_steam_client_running(), "malformed PID fails closed");
+    CHECK(nk_remove_utf8(path) == 0, "remove malformed PID");
+    CHECK(write_bytes(path, (const uint8_t *)"123\n", 4u), "write PID for unreadable file test");
+    if (chmod(path, 0000) == 0 && geteuid() != 0) {
+        CHECK(nk_steam_client_running(), "unreadable PID file fails closed");
+    }
+    (void)chmod(path, 0600);
+    CHECK(nk_remove_utf8(path) == 0, "remove unreadable PID fixture");
+    pid_t child = fork();
+    CHECK(child >= 0, "fork a process for stale PID test");
+    if (child == 0) _exit(0);
+    if (child > 0) {
+        int child_status = 0;
+        CHECK(waitpid(child, &child_status, 0) == child, "reap stale PID fixture process");
+        char stale_pid[32];
+        snprintf(stale_pid, sizeof(stale_pid), "%ld\n", (long)child);
+        CHECK(write_bytes(path, (const uint8_t *)stale_pid, strlen(stale_pid)),
+              "write exited process PID");
+    }
+    CHECK(!nk_steam_client_running(), "a PID for a nonexistent process means closed");
+    CHECK(nk_remove_utf8(path) == 0, "remove stale PID");
+    char pid[32];
+    snprintf(pid, sizeof(pid), "%ld\n", (long)getpid());
+    CHECK(write_bytes(path, (const uint8_t *)pid, strlen(pid)), "write current process PID");
+    CHECK(nk_steam_client_running(), "a live PID means Steam may be running");
+    CHECK(nk_remove_utf8(path) == 0, "remove live PID");
+    CHECK(nk_platform_mkdir_p(path), "a non-file PID path is treated as unreadable");
+    CHECK(nk_steam_client_running(), "a non-regular PID path fails closed");
+    CHECK(rmdir(path) == 0, "remove PID directory");
+
+    snprintf(path, sizeof(path), "%s/.local/share/Steam/userdata/345", home);
+    CHECK(nk_platform_mkdir_p(path), "create Steam account fixture");
+    char backup[NK_MAX_PATH];
+    CHECK_STATUS(nk_steam_add_for_account(root, "345", &kPlayer, NULL, "20261106-120000",
+                                          backup, sizeof(backup), NULL), NK_STEAM_OK,
+                 "without PID file, default probe permits writing");
+    snprintf(path, sizeof(path), "%s/userdata/345/config/shortcuts.vdf", root);
+    size_t prior_size = 0u;
+    uint8_t *prior = read_bytes(path, &prior_size);
+    CHECK(prior != NULL, "read shortcut before running-PID refusal");
+    snprintf(path, sizeof(path), "%s/.steam/steam.pid", home);
+    char pidtext[32];
+    snprintf(pidtext, sizeof(pidtext), "%ld\n", (long)getpid());
+    CHECK(write_bytes(path, (const uint8_t *)pidtext, strlen(pidtext)), "seed running PID");
+    CHECK_STATUS(nk_steam_add_for_account(root, "345", &kPlayer, NULL, "20261106-120001",
+                                          backup, sizeof(backup), NULL), NK_STEAM_ERR_STEAM_RUNNING,
+                 "default probe blocks writes while a PID is live");
+    snprintf(path, sizeof(path), "%s/userdata/345/config/shortcuts.vdf", root);
+    size_t after_size = 0u;
+    uint8_t *after = read_bytes(path, &after_size);
+    CHECK(prior && after && prior_size == after_size && memcmp(prior, after, prior_size) == 0,
+          "running Steam leaves shortcuts.vdf byte for byte unchanged");
+    free(prior);
+    free(after);
+    if (have_original_home) native_test_set_env("HOME", original_home);
+}
+#endif
 
 /* ---- One shortcut per game (#2152) ---- */
 
@@ -1522,6 +1622,9 @@ int main(void) {
     test_a_failed_backup_writes_nothing();
     test_bad_stamp();
     test_accounts_and_add_for_account();
+#if defined(__linux__) && !defined(__ANDROID__)
+    test_linux_steam_paths_and_pid();
+#endif
     test_each_game_is_its_own_shortcut();
     test_a_moved_folder_updates_its_own_entry();
     test_file_update_is_backed_up();

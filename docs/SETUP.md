@@ -306,17 +306,20 @@ button. The ZIP itself writes no shortcut.
 
 **Add to Steam** ([#2152](https://github.com/Jstar269/nakagawa-recomp/issues/2152)). To start a game from Steam
 (for Steam Input, Big Picture or a handheld), exit Steam, open the game's page in the player, and choose
-**Add to Steam**. Choose the Steam account if more than one has signed in on this PC, then **Add to Steam** again.
-The shortcut starts `nakagawa_player.exe --launch-title=<disc ID>` from the player's own folder, which starts that
-game without the launcher window and waits for it to end, so Steam shows it as running. When two images in your
+**Add to Steam**. Choose the Steam account if more than one has signed in on this system, then **Add to Steam**
+again. The shortcut starts the player executable with `--launch-title=<disc ID>` from the player's own folder, which
+starts that game without the launcher window and waits for it to end, so Steam shows it as running. When two images in your
 library share a disc ID (a retail disc and its translation), the value also names the image, `<disc ID>:<SHA-1>`; a
 player started with `--user-data-root` passes that folder on too. Start Steam afterwards to find the game in your
 library; no restart is needed.
 
-It works on your PC only and makes no network call or download. Steam's folder comes from the current user's own
-registry setting (Windows only; on other systems the dialog says it is unsupported and writes nothing), and the
-account names come from Steam's own `config\loginusers.vdf`. It edits the binary `shortcuts.vdf` in that
-account's `userdata\<account>\config` folder. Before it writes, it copies the file to
+This works on your system only and makes no network call or download. On Windows, Steam's folder comes from the
+current user's registry setting. On Linux, it checks `$HOME/.local/share/Steam` and `$HOME/.steam/steam`; it does not
+require Steam to be installed through the system package manager. The account names come from Steam's own
+`config/loginusers.vdf`. It edits the binary `shortcuts.vdf` in that account's `userdata/<account>/config` folder.
+On Linux, Steam must be closed: Nakagawa checks `$HOME/.steam/steam.pid`; a missing file means Steam is closed,
+while a live PID or an unreadable or malformed file means it may be running, so the write is refused. Before it
+writes, it copies the file to
 `shortcuts.vdf.nakagawa-backup-<date>-<time>` and reads the copy back; if that fails it writes nothing. It writes a
 temporary file and renames it over the original. Steam rewrites this file when it exits, so while Steam runs
 nothing is written: exit Steam first (Nakagawa never closes it). Entries Nakagawa did not write are copied byte for

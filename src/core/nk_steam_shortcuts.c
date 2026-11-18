@@ -8,6 +8,7 @@
 #include "nk_platform.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,13 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#elif defined(__linux__) && !defined(__ANDROID__)
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #endif
 
 #define VDF_MAP 0x00
@@ -918,6 +926,66 @@ bool nk_steam_client_running(void) {
     return alive;
 }
 
+#elif defined(__linux__) && !defined(__ANDROID__)
+
+NkSteamStatus nk_steam_find_root(char *root, size_t root_cap) {
+    char home[NK_MAX_PATH];
+    static const char *const suffixes[] = {"/.local/share/Steam", "/.steam/steam"};
+    if (!root || root_cap == 0u) return NK_STEAM_ERR_ARGUMENT;
+    root[0] = '\0';
+    if (nk_platform_env_utf8("HOME", home, sizeof(home)) <= 0 || home[0] != '/') {
+        return NK_STEAM_ERR_NOT_FOUND;
+    }
+    for (size_t i = 0u; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
+        int n = snprintf(root, root_cap, "%s%s", home, suffixes[i]);
+        if (n < 0 || (size_t)n >= root_cap) {
+            root[0] = '\0';
+            continue;
+        }
+        if (nk_platform_dir_exists(root)) return NK_STEAM_OK;
+    }
+    root[0] = '\0';
+    return NK_STEAM_ERR_NOT_FOUND;
+}
+
+bool nk_steam_client_running(void) {
+    char home[NK_MAX_PATH], path[NK_MAX_PATH], contents[64];
+    struct stat info;
+    int fd;
+    ssize_t length;
+    unsigned long value = 0u;
+    if (nk_platform_env_utf8("HOME", home, sizeof(home)) <= 0 || home[0] != '/') return true;
+    int n = snprintf(path, sizeof(path), "%s/.steam/steam.pid", home);
+    if (n < 0 || (size_t)n >= sizeof(path)) return true;
+    fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return errno != ENOENT && errno != ENOTDIR;
+    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode)) {
+        close(fd);
+        return true;
+    }
+    length = read(fd, contents, sizeof(contents));
+    if (length < 0 || length == (ssize_t)sizeof(contents)) {
+        close(fd);
+        return true;
+    }
+    close(fd);
+    if (length > 0 && contents[length - 1] == '\n') {
+        --length;
+        if (length > 0 && contents[length - 1] == '\r') --length;
+    }
+    if (length <= 0) return true;
+    for (ssize_t i = 0; i < length; ++i) {
+        unsigned digit;
+        if (contents[i] < '0' || contents[i] > '9') return true;
+        digit = (unsigned)(contents[i] - '0');
+        if (value > ((unsigned long)INT_MAX - digit) / 10u) return true;
+        value = value * 10u + digit;
+    }
+    if (value == 0u) return true;
+    if (kill((pid_t)value, 0) == 0) return true;
+    return errno != ESRCH;
+}
+
 #else
 
 NkSteamStatus nk_steam_find_root(char *root, size_t root_cap) {
@@ -940,7 +1008,7 @@ static NkSteamStatus add_for_account(const char *root, const char *account_id,
         strcmp(account_id, "0") == 0 || strlen(account_id) >= sizeof(((NkSteamAccount *)0)->id)) {
         return NK_STEAM_ERR_ARGUMENT;
     }
-#ifndef _WIN32
+#if !defined(_WIN32) && !(defined(__linux__) && !defined(__ANDROID__))
     /* Without a probe of its own, a host that cannot see Steam's process cannot promise that
      * Steam is closed, so it writes nothing. */
     if (!running) return NK_STEAM_ERR_UNSUPPORTED;
