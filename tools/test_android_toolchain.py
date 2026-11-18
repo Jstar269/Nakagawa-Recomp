@@ -1071,7 +1071,8 @@ class StageOutputTests(unittest.TestCase):
                 mock.patch.object(toolchain, "read_pinned", lambda *args: b"notice"), \
                 mock.patch.object(toolchain, "third_party_notices", lambda src: "notices\n"), \
                 mock.patch.object(package_notices, "source_reference", lambda: reference):
-            return toolchain.stage_output(cfg, out)
+            staged: dict[str, str] = toolchain.stage_output(cfg, out)
+        return staged
 
     def test_files_an_earlier_run_left_are_neither_shipped_nor_listed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:

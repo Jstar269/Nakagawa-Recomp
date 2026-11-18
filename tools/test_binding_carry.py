@@ -185,7 +185,8 @@ class MaskingTests(unittest.TestCase):
         module.imports = {}
         module.function = {BASE: {"entry": BASE, "addresses": [BASE + 4 * i for i in range(len(words))],
                                   "words": words, "calls": []}}
-        return module._tokens(BASE)
+        tokens: list = module._tokens(BASE)
+        return tokens
 
     def test_vfpu_compute_words_keep_their_low_bits_when_bits_21_to_25_read_as_gp(self):
         # vfim S000, <half float>: op 0x37 with bits 23-25 = 111 and vt's top bits 00, so bits 21-25
