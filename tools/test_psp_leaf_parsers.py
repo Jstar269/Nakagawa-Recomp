@@ -21,6 +21,8 @@ from psp_oracle.parse_golden import (
     AUDIO_SPEC,
     CACHE_SPEC,
     IO_SPEC,
+    CACHE_OUT_COUNTS,
+    IO_OUT_COUNTS,
     MBX_DELETE_WAIT_EXPECTED_FIELDS,
     MBX_DELETE_WAIT_SPEC,
     AUDIO_OUT_COUNTS,
@@ -72,9 +74,13 @@ def line(spec: StreamSpec, case_id: str, status: str = "PASS", *, out0: int | No
             f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={case_id} "
             f"status={status} result=0x00000000 {outputs}\n"
         )
+    counts = IO_OUT_COUNTS if spec == IO_SPEC else CACHE_OUT_COUNTS
+    outputs = " ".join(
+        f"out{i}=0x{i + 1:08x}" for i in range(counts[case_id])
+    )
     return (
         f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={case_id} "
-        f"status={status} result=0x00000000 out0=0x00000001 out1=0x00000002\n"
+        f"status={status} result=0x00000000 {outputs}\n"
     )
 
 
@@ -204,6 +210,30 @@ class TestGoldenStreams(unittest.TestCase):
                     report = parse(text)
                     self.assertTrue(report.complete)
                     self.assertFalse(report.all_passed)
+
+    def test_cache_record_requires_every_declared_output(self) -> None:
+        cache_rows = [line(CACHE_SPEC, case) for case in CACHE_SPEC.ordered_cases]
+        cache_rows[2] = cache_rows[2].replace(" out1=0x00000002", "", 1)
+        with self.assertRaisesRegex(ProtocolError, "cache-inval-contrast fields"):
+            parse_cache_alias_output(META + "".join(cache_rows))
+
+    def test_io_record_requires_every_declared_output(self) -> None:
+        io_rows = [line(IO_SPEC, case) for case in IO_SPEC.ordered_cases]
+        io_rows[0] = io_rows[0].replace(" out0=0x00000001", "", 1)
+        with self.assertRaisesRegex(ProtocolError, "io-open-create fields"):
+            parse_io_matrix_output(META + "".join(io_rows))
+
+    def test_io_failure_shapes_allow_only_probe_omitted_outputs(self) -> None:
+        rows = [line(IO_SPEC, case) for case in IO_SPEC.ordered_cases]
+        rows[2] = line(IO_SPEC, "io-read-verify", "FAIL").replace(
+            " out1=0x00000002", "", 1
+        )
+        rows[4] = line(IO_SPEC, "io-append", "FAIL").replace(
+            " out1=0x00000002", "", 1
+        )
+        report = parse_io_matrix_output(META + "".join(rows))
+        self.assertTrue(report.complete)
+        self.assertFalse(report.all_passed)
 
 
 class TestTruncationNeverPasses(unittest.TestCase):

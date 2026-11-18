@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -324,6 +325,48 @@ class PspOracleProtocolTests(unittest.TestCase):
         self.assertEqual(stored_envelope["SOFTWARE_MODEL_RAW_VALUE"], "0x03")
         self.assertEqual(fields["INTERPRETED_MODEL_FAMILY"], "UNKNOWN")
         self.assertEqual(fields["MODEL_IDENTITY_AGREEMENT"], "UNKNOWN")
+
+    def test_campaign_registration_rejects_unpaired_cases_and_supports_ordered_rows(self) -> None:
+        probe_case = "u09-registration-test"
+        with self.assertRaisesRegex(ValueError, "out_counts keys must match"):
+            parse_golden._register_campaign_probe(
+                probe_case, "PSP-TEST-001", ("first", "second"), {"first": 1}
+            )
+        self.assertNotIn(probe_case, parse_golden.CAMPAIGN_PROBE_CASES)
+        parse_golden._register_campaign_probe(
+            probe_case, "PSP-TEST-001", (("first", 2), ("second", 1)),
+            terminal_case="done",
+        )
+        spec, counts = parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+        self.assertEqual(spec.semantic_cases, ("first", "second"))
+        self.assertEqual(counts, {"first": 2, "second": 1, "done": 1})
+        del parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+        parse_golden._register_campaign_probe(
+            probe_case, "PSP-TEST-001", {"first": 2, "second": 1, "done": 1},
+            terminal_case="done",
+        )
+        spec, counts = parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+        self.assertEqual(spec.semantic_cases, ("first", "second"))
+        self.assertEqual(counts, {"first": 2, "second": 1, "done": 1})
+        del parse_golden.CAMPAIGN_PROBE_CASES[probe_case]
+
+    def test_vcodec_failure_fields_are_declared_per_case(self) -> None:
+        spec, counts = parse_golden.CAMPAIGN_PROBE_CASES["vcodec-words"]
+        self.assertEqual(
+            dict(spec.fail_optional_fields)["vc-csc-struct"], frozenset({"result"})
+        )
+        fields = " ".join(f"out{index}=0x0" for index in range(counts["vc-csc-struct"]))
+        raw = META.format(
+            source="psp", model="PSP-3000", firmware="6.61-ARK",
+            binary=MEASURED_SHA, commit=MEASURED_COMMIT,
+        ) + (
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VCODEC-001 "
+            f"case_id=vc-csc-struct status=FAIL {fields}\n"
+        )
+        parsed = parse_golden.parse_campaign_probe_output(
+            raw, "vcodec-words", require_complete=False
+        )
+        self.assertIn("vc-csc-struct", parsed.results)
 
     def test_parser_requires_metadata_and_orders_records(self) -> None:
         parsed = parse_output(stream("psp"))
@@ -890,6 +933,30 @@ class NewProbeResultParserTests(unittest.TestCase):
         moved = rows[:2] + rows[4:6] + rows[2:4] + rows[6:]
         with self.assertRaises(ProtocolError):
             parse_registry_readonly_output(self._stream(moved))
+
+    def test_registry_non_strict_mode_accepts_one_record_header_prefix(self) -> None:
+        first = self._row("PSP-REGISTRY-001", "registry-open", 2)
+        report = parse_registry_readonly_output(self._stream([first]), require_complete=False)
+        self.assertFalse(report.complete)
+        self.assertEqual(report.categories, ())
+        self.assertEqual(report.keys, ())
+
+    def test_hle_intr_failed_vblank_register_without_result_is_protocol_error(self) -> None:
+        raw = self._stream([
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-HLE-INTR-001 "
+            "case_id=vbl-register status=FAIL out0=0xffffffff out1=0x0\n"
+        ])
+        with self.assertRaisesRegex(ProtocolError, "vbl-register FAIL has no result"):
+            parse_hle_intr_cells_output(raw, require_complete=False)
+
+    def test_vram_integer_reads_reuse_the_parsed_value_map(self) -> None:
+        record = parse_output(self._stream([
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VRAM-MIRROR-001 "
+            "case_id=vram-info status=PASS result=0x0 out0=0x00001000 out1=0x00000002\n"
+        ])).results[0]
+        first = parse_golden._vram_mirror_values(record)
+        self.assertIs(first, parse_golden._vram_mirror_values(record))
+        self.assertEqual(parse_golden._vram_mirror_integer(record, "out0"), 0x1000)
 
 
 class GeCorpusGateTests(unittest.TestCase):
@@ -2479,14 +2546,92 @@ class PspOracleRunnerTests(unittest.TestCase):
         self.assertIn('TOOLS / "codegen.py"', text)
         self.assertIn("nakagawa_psp_oracle_sum_u32", text)
         self.assertNotIn("NAKAGAWA_PSP_TEST", text)
-        from psp_oracle import build_nakagawa_smoke, run_psplink  # noqa: PLC0415
 
-        self.assertIs(build_nakagawa_smoke._host_binary_sha256, run_psplink._host_binary_sha256)
+    def test_smoke_builder_looks_up_symbols_through_analyze_elf(self) -> None:
+        from psp_oracle import build_nakagawa_smoke  # noqa: PLC0415
+
+        strings = b"\0target\0"
+        def fake_elf(addresses):
+            symbols = bytearray(16 * (len(addresses) + 1))
+            for index, address in enumerate(addresses, 1):
+                struct.pack_into("<IIIBBH", symbols, 16 * index, 1, address, 4, 0x12, 0, 1)
+            data = bytes(symbols) + strings
+
+            class FakeElf:
+                def __init__(self, _path):
+                    self.data = data
+
+                def sec(self, name):
+                    return {
+                        ".symtab": {"off": 0, "size": len(symbols), "entsz": 16},
+                        ".strtab": {"off": len(symbols), "size": len(strings)},
+                    }.get(name)
+
+            return FakeElf(Path("synthetic.elf"))
+
+        with patch.object(build_nakagawa_smoke.analyze, "Elf", side_effect=[
+            fake_elf([0x08801234]), fake_elf([0x08801234, 0x08805678])
+        ]):
+            self.assertEqual(
+                build_nakagawa_smoke._symbol_address(Path("synthetic.elf"), "target"),
+                0x08801234,
+            )
+            with self.assertRaisesRegex(ValueError, "expected one target function, found 2"):
+                build_nakagawa_smoke._symbol_address(Path("synthetic.elf"), "target")
+
+    def test_smoke_builder_does_not_write_unused_absolute_path_manifest(self) -> None:
+        from psp_oracle import build_nakagawa_smoke  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory(prefix="smoke-builder-") as scratch:
+            root = Path(scratch)
+            elf = root / "guest.elf"
+            elf.write_bytes(b"synthetic source ELF")
+            out_dir = root / "out"
+
+            def build_chunks(command, **_kwargs):
+                base = Path(command[3])
+                base.with_name("smoke_recomp_funcs.h").write_text(
+                    "void f_08800000(CpuState *s);\n", encoding="utf-8"
+                )
+                base.with_name("smoke_recomp_0.c").write_text("/* synthetic */\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch.object(build_nakagawa_smoke, "_symbol_address", return_value=0x08800000), \
+                 patch.object(build_nakagawa_smoke.subprocess, "run", side_effect=build_chunks):
+                self.assertEqual(
+                    build_nakagawa_smoke.main(["--elf", str(elf), "--out-dir", str(out_dir)]),
+                    0,
+                )
+            self.assertFalse((out_dir / "smoke_manifest.json").exists())
 
     def test_oracle_capture_launcher_preserves_child_stdout(self) -> None:
         launcher = Path(__file__).resolve().parent / "psp_oracle" / "run_nakagawa.py"
         self.assertTrue(launcher.is_file())
         self.assertIn("stdout=subprocess.PIPE", launcher.read_text(encoding="utf-8"))
+
+    def test_oracle_capture_launchers_report_timeout_and_preserve_partial_stdout(self) -> None:
+        from psp_oracle import run_nakagawa, run_nakagawa_vfpu  # noqa: PLC0415
+
+        for launcher in (run_nakagawa, run_nakagawa_vfpu):
+            with self.subTest(launcher=launcher.__name__), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                exe = root / "synthetic.exe"
+                exe.write_bytes(b"synthetic executable")
+                output = root / "partial.txt"
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.object(sys, "argv", [
+                    launcher.__name__, "--executable", str(exe), "--output", str(output),
+                    "--timeout", "3", "--", "arg",
+                ]), patch.object(
+                    launcher.subprocess, "run",
+                    side_effect=subprocess.TimeoutExpired(
+                        "synthetic.exe", 3, output=b"partial record\n"
+                    ),
+                ) as run, redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(launcher.main(), 124)
+                self.assertEqual(output.read_bytes(), b"partial record\n")
+                self.assertIn("TIMEOUT", stderr.getvalue())
+                self.assertEqual(run.call_args.kwargs["timeout"], 3.0)
 
 
 class PspLinkTeardownSnapshotTests(unittest.TestCase):
@@ -4199,10 +4344,10 @@ class PspDmacProbeTests(unittest.TestCase):
         """`status` stays probe-source prose; the hardware tier comes from the cited run."""
         manifest = self._oracle_manifest()
         by_id = {entry["id"]: entry for entry in manifest["tests"]}
-        for test_id in ("PSP-FPU-001", "PSP-CACHE-001"):
+        for test_id in ("PSP-FPU-001", "PSP-GE-001", "PSP-MUTEX-001", "PSP-CACHE-001"):
             self.assertEqual(
                 by_id[test_id]["status"],
-                "implemented" if test_id == "PSP-CACHE-001" else "planned",
+                "implemented",
             )
             self.assertEqual(by_id[test_id]["hardware_evidence"], "MEASURED")
             self.assertEqual(
@@ -4530,7 +4675,7 @@ class PspDmacProbeTests(unittest.TestCase):
                 if test_id in {"PSP-AUDIO-001", "PSP-GE-001"}:
                     self.assertEqual(
                         entry["status"],
-                        "implemented" if test_id == "PSP-AUDIO-001" else "planned",
+                        "implemented",
                     )
                     self.assertEqual(entry["hardware_evidence"], "MEASURED")
                     self.assertEqual(entry["evidence_cases"], entry["case_ids"])
@@ -4960,6 +5105,23 @@ class UserModeImportGateTests(unittest.TestCase):
         status, out, _err = self._run_main(data)
         self.assertEqual(status, user_mode_imports.EXIT_OK)
         self.assertIn("kernel-mode module (SceModuleInfo attribute 0x1000)", out)
+
+    def test_kernel_mode_registry_driver_import_fails_closed(self) -> None:
+        data = build_import_elf(
+            [("sceReg_driver", [0x17768E14])],
+            module_attributes=user_mode_imports.PSP_MODULE_KERNEL,
+        )
+        result = user_mode_imports.check_module(data)
+        self.assertFalse(result.passed)
+        self.assertEqual(
+            [(violation.library, violation.nids) for violation in result.violations],
+            [("sceReg_driver", (0x17768E14,))],
+        )
+        status, out, err = self._run_main(data)
+        self.assertEqual(status, user_mode_imports.EXIT_KERNEL_IMPORT)
+        self.assertEqual(out, "")
+        self.assertIn("sceReg_driver", err)
+        self.assertIn("sceRegSetKeyValue", err)
 
     def test_unattributed_stub_slots_fail_closed(self) -> None:
         user_shape = [(name.replace("ForKernel", "ForUser"), first, count)

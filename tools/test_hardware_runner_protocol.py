@@ -79,8 +79,10 @@ from psp_oracle.run_psplink import (
 from psp_oracle import run_psplink as run_psplink_module
 from psp_oracle.parse_golden import (
     DMAC_INVALID_CASES,
+    CACHE_OUT_COUNTS,
     CACHE_SPEC,
     EXPECTED_CELLS as FPU_EXPECTED_CELLS,
+    IO_OUT_COUNTS,
     IO_SPEC,
     MBX_DELETE_WAIT_EXPECTED_FIELDS,
     MBX_DELETE_WAIT_SPEC,
@@ -192,14 +194,15 @@ def _campaign_fpu_line(case_id: str) -> str:
 def _campaign_spec_line(spec, case_id: str) -> str:
     if case_id == spec.terminal_case:
         out0 = spec.terminal_count
+        outputs = f"out0=0x{out0:08x}"
     else:
-        out0 = 1
-    suffix = f"out0=0x{out0:08x}"
-    if case_id != spec.terminal_case:
-        suffix += " out1=0x00000002"
+        counts = CACHE_OUT_COUNTS if spec == CACHE_SPEC else IO_OUT_COUNTS
+        outputs = " ".join(
+            f"out{index}=0x{index + 1:08x}" for index in range(counts[case_id])
+        )
     return (
         f"NAKAGAWA_PSP_TEST schema=1 test_id={spec.test_id} case_id={case_id} "
-        f"status=PASS result=0x00000000 {suffix}\n"
+        f"status=PASS result=0x00000000 {outputs}\n"
     )
 
 

@@ -409,6 +409,7 @@ class StreamSpec:
     semantic_cases: tuple[str, ...]
     terminal_case: str
     inspection_optional_cases: frozenset[str] = frozenset()
+    fail_optional_fields: tuple[tuple[str, frozenset[str]], ...] = ()
 
     @property
     def ordered_cases(self) -> tuple[str, ...]:
