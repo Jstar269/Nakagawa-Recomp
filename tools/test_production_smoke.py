@@ -3657,6 +3657,17 @@ class TestSanitizedBringup(unittest.TestCase):
                 {"executable": {"path": "runtime.exe"}, "runtime": None})},
             "replaced-after-build": {},
         }
+        # An executable path that leaves the package folder is refused before it runs, even
+        # when the program it names exists (audit 2026-11-17).
+        outside = self.root / "outside-runtime.exe"
+        outside.write_bytes(b"synthetic program outside the package")
+        for label, path in (("absolute", str(outside)),
+                            ("parent", "../../../../../outside-runtime.exe")):
+            cases[f"escaping-executable-{label}"] = {"package_document": json.dumps({
+                "executable": {"path": path},
+                "runtime": {"run_entry": "0x08800100"},
+                "required_local_assets": [{"path": "data"}],
+            })}
         real_stub_report = nk_cli._packaged_stub_report
 
         def replace_after_build(package_dir):
@@ -4027,6 +4038,18 @@ class TestBringupCaptureRounds(unittest.TestCase):
         for value in ("0", str(nk_cli.BRINGUP_CAPTURE_ROUNDS_MAX + 1), "two"):
             with self.assertRaises(argparse.ArgumentTypeError):
                 nk_cli._capture_rounds_argument(value)
+
+    def test_a_launch_timeout_outside_its_range_is_refused_not_clamped(self):
+        # It used to run 600 as 120 and 0 as 1 without a word (audit 2026-11-17).
+        for value in ("0", "-5", str(nk_cli.BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS + 1), "600"):
+            argv = ["nk_cli.py", "bringup", "x.iso", "--launch-timeout", value]
+            with self.subTest(value=value), mock.patch.object(sys, "argv", argv):
+                with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    with self.assertRaises(SystemExit) as raised:
+                        nk_cli.main()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(f"must be 1..{nk_cli.BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS}", stderr.getvalue())
+        self.assertEqual(nk_cli._launch_timeout_argument("120"), 120)
 
 
 class TestBringupReportOpcodeNames(unittest.TestCase):

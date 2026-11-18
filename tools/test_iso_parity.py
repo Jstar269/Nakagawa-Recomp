@@ -1736,6 +1736,31 @@ int main(int argc, char **argv) {{
         self.assertIsNotNone(output)
         self.assertEqual((output / "manifest-sdk.prx").read_bytes(), module_bytes)
 
+    def test_copy_optional_modules_keeps_only_the_modules_the_manifest_requires(self) -> None:
+        # The cache's modules/ persists between builds and the package ships every file in
+        # it, so a module an earlier manifest required and a leftover partial copy are
+        # removed before this build's copies (audit 2026-11-17).
+        iso_file = self.temp_dir / "current-modules.iso"
+        module_bytes = build_plain_mips_elf(0xFFA0)
+        create_test_iso_with_modules(
+            iso_file, build_plain_mips_elf(),
+            sysdir_modules={"libfont.prx": module_bytes},
+            usrdir_modules={},
+        )
+        cache = self.temp_dir / "persistent-module-package"
+        (cache / "modules").mkdir(parents=True)
+        (cache / "modules" / "earlier.prx").write_bytes(build_plain_mips_elf(0xFFB0))
+        (cache / "modules" / "libfont.prx.tmp").write_bytes(b"partial")
+        (cache / "modules" / "keep-dir").mkdir()
+        manifest = {"modules": [{"name": "libfont.prx", "role": "guest-prx", "required": True}]}
+        output = nk_cli._copy_optional_modules(iso_file, manifest, cache, None)
+        self.assertIsNotNone(output)
+        assert output is not None
+        self.assertEqual(
+            sorted(path.name for path in output.iterdir() if path.is_file()), ["libfont.prx"]
+        )
+        self.assertEqual((output / "libfont.prx").read_bytes(), module_bytes)
+
     def test_a_disc_module_whose_copy_fails_leaves_no_partial_copy(self) -> None:
         iso_file = self.temp_dir / "failed-module-copy.iso"
         create_test_iso_with_modules(

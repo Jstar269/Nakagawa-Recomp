@@ -773,31 +773,59 @@ def check_worktree_accumulation(
         )
 
 
-def _shader_provenance_errors(root: Path) -> list[str]:
-    shader_root = root / "src" / "rt" / "gpu_sdl3vk"
-    manifest = shader_root / "shader_manifest.json"
-    try:
-        from shader_embed import verify as verify_shader_provenance
+# The GLSL shader sets `shader_embed.py verify` checks, as (set name, directory the
+# manifest's paths are relative to, manifest, shader_embed attribute naming the set).
+# The FSR 3 sets are DXC-built and pinned separately; glslc regenerates neither.
+_GLSL_SHADER_SETS = (
+    ("psp", Path("src/rt/gpu_sdl3vk"), Path("src/rt/gpu_sdl3vk/shader_manifest.json"), "SHADERS"),
+    ("ui", Path("src/ui"), Path("src/ui/shaders/shader_manifest.json"), "UI_SHADERS"),
+)
 
-        returned: list[str] = verify_shader_provenance(shader_root, manifest)
-        return returned
-    except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
-        return [f"shader verification error: {exc}"]
+
+def _shader_set_errors(root: Path) -> list[tuple[str, Path, list[str]]]:
+    """Return (set name, manifest, errors) for each GLSL shader set that fails verification."""
+    failures: list[tuple[str, Path, list[str]]] = []
+    for name, directory, manifest, shaders_attr in _GLSL_SHADER_SETS:
+        manifest_path = root / manifest
+        try:
+            import shader_embed
+
+            errors: list[str] = shader_embed.verify(
+                root / directory, manifest_path, shaders=getattr(shader_embed, shaders_attr),
+            )
+        except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            errors = [f"shader verification error: {exc}"]
+        if errors:
+            failures.append((name, manifest_path, errors))
+    return failures
+
+
+def _shader_failure_details(root: Path, failures: list[tuple[str, Path, list[str]]]) -> list[str]:
+    return [
+        f"{manifest.relative_to(root).as_posix()}: {error}"
+        for _name, manifest, errors in failures
+        for error in errors
+    ]
 
 
 def check_shader_provenance(report: Report, root: Path, vulkan_sdk: Path | None) -> None:
-    errors = _shader_provenance_errors(root)
-    if not errors:
+    failures = _shader_set_errors(root)
+    if not failures:
         report.info("GLSLC", "glslc is not required; checked-in shader provenance is valid")
         return
 
-    shader_root = root / "src" / "rt" / "gpu_sdl3vk"
+    commands = [
+        "`python tools/shader_embed.py regenerate --glslc glslc`"
+        if name == "psp"
+        else f"`python tools/shader_embed.py regenerate --shader-set {name} --glslc glslc`"
+        for name, _manifest, _errors in failures
+    ]
     report.fail(
         "SHADER_PROVENANCE",
         "Checked-in shader provenance is invalid; regeneration is required",
-        path=shader_root / "shader_manifest.json",
-        detail="; ".join(errors),
-        remediation="Run `python tools/shader_embed.py regenerate --glslc glslc`, then verify the checked-in shader embeddings.",
+        path=failures[0][1],
+        detail="; ".join(_shader_failure_details(root, failures)),
+        remediation=f"Run {' and '.join(commands)}, then verify the checked-in shader embeddings.",
     )
     glslc_dir = vulkan_sdk / "Bin" if vulkan_sdk else None
     glslc = _find_executable(("glslc.exe", "glslc"), glslc_dir)
@@ -920,11 +948,14 @@ def discover_sdl3_provider(
         version = extract_sdl3_version(found_inc) or "unknown"
         arch = "unknown"
         if found_dll:
+            # Refuse a DLL that is not x86-64, as the automatic MSYS2 branch below does:
+            # the build would link against it and fail only when the player loads it.
             ok, pe_info = _validate_pe_x64(found_dll)
-            if ok:
-                arch = "x86_64"
-            else:
-                arch = pe_info
+            if not ok:
+                raise Sdl3ProviderError(
+                    f"Explicit SDL3 path has an SDL3.dll that is not a valid x86-64 PE: {found_dll}: {pe_info}"
+                )
+            arch = "x86_64"
 
         prov_name = "explicit"
         if "ucrt64" in str(cand).lower() or (cand / "lib" / "libSDL3.dll.a").is_file():
@@ -1531,6 +1562,8 @@ class TitleDiagnosticContext:
     requires_psp_header: bool
     requires_iso: bool
     requires_assets: bool
+    # Why a declared filesystem.disc_image was refused, when it was; disc_image is None then.
+    disc_image_error: str | None = None
 
 
 _BUILD_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$", re.IGNORECASE)
@@ -1543,6 +1576,24 @@ def _safe_manifest_path(root: Path, value: object) -> Path | None:
     if not isinstance(value, str) or not _MANIFEST_PATH_RE.fullmatch(value):
         return None
     return root.joinpath(*value.split("/"))
+
+
+def _safe_disc_image_path(root: Path, value: object) -> tuple[Path | None, str | None]:
+    """Resolve filesystem.disc_image by the manifest loader's own rule.
+
+    Disc-image names may carry spaces, parentheses and Unicode (ordinary dump names), so
+    the narrow rule for the paths make consumes does not apply. Returns (path, None), or
+    (None, reason) for a declared value the loader refuses, or (None, None) when absent.
+    """
+    if value is None:
+        return None, None
+    import title_manifest
+
+    try:
+        relative = title_manifest.disc_image_path(value, "filesystem.disc_image")
+    except title_manifest.TitleManifestError as exc:
+        return None, str(exc)
+    return root.joinpath(*relative.split("/")), None
 
 
 def _has_loose_files_beside_data_root(data_root: Path, limit: int = 100_000) -> bool:
@@ -1633,7 +1684,7 @@ def title_diagnostic_context(
     declared_data_root = _safe_manifest_path(root, filesystem.get("data_root"))
     declared_module_dir = _safe_manifest_path(root, filesystem.get("module_dir"))
     declared_psp_header = _safe_manifest_path(root, filesystem.get("psp_header"))
-    declared_disc_image = _safe_manifest_path(root, filesystem.get("disc_image"))
+    declared_disc_image, disc_image_error = _safe_disc_image_path(root, filesystem.get("disc_image"))
     raw_loose_roots = filesystem.get("loose_content_roots")
     has_loose_content_roots = isinstance(raw_loose_roots, list) and bool(raw_loose_roots)
 
@@ -1670,7 +1721,7 @@ def title_diagnostic_context(
                 if module.get("required") is True and isinstance(name, str) and _MODULE_NAME_RE.fullmatch(name):
                     required_modules.append(name)
     requires_psp_header = executable.get("bss_metadata_source") == "psp-header"
-    requires_iso = kind == "retail" or declared_disc_image is not None
+    requires_iso = kind == "retail" or declared_disc_image is not None or disc_image_error is not None
     requires_assets = kind == "retail" or data_root is not None
     return TitleDiagnosticContext(
         kind=kind,
@@ -1688,6 +1739,7 @@ def title_diagnostic_context(
         requires_psp_header=requires_psp_header,
         requires_iso=requires_iso,
         requires_assets=requires_assets,
+        disc_image_error=disc_image_error,
     )
 
 
@@ -1800,7 +1852,14 @@ def check_private_inputs(
 
     if need_iso and context.requires_iso:
         selected = context.disc_image
-        if selected is None:
+        if selected is None and context.disc_image_error is not None:
+            report.fail(
+                "INPUT_ISO",
+                "The selected title manifest's filesystem.disc_image is not a valid relative path",
+                detail=context.disc_image_error,
+                remediation="Declare the local ISO as a relative POSIX-style path in the title manifest.",
+            )
+        elif selected is None:
             report.fail(
                 "INPUT_ISO",
                 "The selected title manifest does not declare filesystem.disc_image",

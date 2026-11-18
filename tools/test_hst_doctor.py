@@ -31,6 +31,23 @@ from makefile_text import read_makefile  # noqa: E402
 _CHECKS_MODULE = nk_doctor_checks
 
 
+def _copy_glsl_shader_sets(root: Path) -> Path:
+    """Copy the checked-in psp and UI shader sets into a synthetic root; return the psp dir."""
+    gpu_dir = root / "src" / "rt" / "gpu_sdl3vk"
+    (gpu_dir / "shaders").mkdir(parents=True)
+    shutil.copy2(shader_embed.MANIFEST, gpu_dir / "shader_manifest.json")
+    for _, source, embedded in shader_embed.SHADERS:
+        shutil.copy2(shader_embed.GPU_DIR / source, gpu_dir / source)
+        shutil.copy2(shader_embed.GPU_DIR / embedded, gpu_dir / embedded)
+    ui_dir = root / "src" / "ui"
+    (ui_dir / "shaders").mkdir(parents=True)
+    shutil.copy2(shader_embed.UI_MANIFEST, ui_dir / "shaders" / "shader_manifest.json")
+    for _, source, embedded in shader_embed.UI_SHADERS:
+        shutil.copy2(shader_embed.UI_DIR / source, ui_dir / source)
+        shutil.copy2(shader_embed.UI_DIR / embedded, ui_dir / embedded)
+    return gpu_dir
+
+
 class DataDirectoryTests(unittest.TestCase):
     def test_doctor_reports_resolved_root_and_legacy_location(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -290,6 +307,37 @@ class PrivateInputTests(unittest.TestCase):
             matches = [result for result in report.results if result.code == "INPUT_ISO"]
             self.assertEqual(matches[-1].status, "PASS")
             self.assertIn("hst.iso", matches[-1].path or "")
+
+    def test_declared_iso_name_with_spaces_and_parentheses_is_checked(self) -> None:
+        # The loader accepts ordinary dump names; the doctor resolves them by the same rule
+        # instead of reporting the image as undeclared (audit 2026-11-17).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_valid_inputs(root)
+            write_iso(root / "place_game_here" / "ISO" / "My Game (USA).iso")
+            manifest = self.retail_manifest()
+            manifest["filesystem"]["disc_image"] = "place_game_here/ISO/My Game (USA).iso"  # type: ignore[index]
+            context = nk_doctor_checks.title_diagnostic_context(root, manifest)
+            self.assertEqual(context.disc_image, root / "place_game_here" / "ISO" / "My Game (USA).iso")
+            report = nk_doctor.Report(root, "inputs")
+            self.check_inputs(root, report, need_iso=True, need_assets=False, context_manifest=manifest)
+            matches = [result for result in report.results if result.code == "INPUT_ISO"]
+            self.assertEqual([result.status for result in matches if result.status == "FAIL"], [])
+            self.assertEqual(matches[-1].status, "PASS")
+            self.assertIn("My Game (USA).iso", matches[-1].path or "")
+
+    def test_declared_but_invalid_iso_path_is_named_as_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_valid_inputs(root)
+            manifest = self.retail_manifest()
+            manifest["filesystem"]["disc_image"] = "../outside.iso"  # type: ignore[index]
+            report = nk_doctor.Report(root, "inputs")
+            self.check_inputs(root, report, need_iso=True, need_assets=False, context_manifest=manifest)
+            iso = next(result for result in report.results if result.code == "INPUT_ISO")
+            self.assertEqual(iso.status, "FAIL")
+            self.assertIn("is not a valid relative path", iso.summary)
+            self.assertIn("'..'", iso.detail or "")
 
     def test_empty_asset_tree_is_not_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -927,12 +975,7 @@ class EnvironmentContractTests(unittest.TestCase):
     def test_shader_mtime_does_not_require_glslc_when_provenance_is_valid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            gpu_dir = root / "src" / "rt" / "gpu_sdl3vk"
-            (gpu_dir / "shaders").mkdir(parents=True)
-            shutil.copy2(shader_embed.MANIFEST, gpu_dir / "shader_manifest.json")
-            for _, source, embedded in shader_embed.SHADERS:
-                shutil.copy2(shader_embed.GPU_DIR / source, gpu_dir / source)
-                shutil.copy2(shader_embed.GPU_DIR / embedded, gpu_dir / embedded)
+            gpu_dir = _copy_glsl_shader_sets(root)
 
             source = gpu_dir / "shaders" / "psp.vert"
             newer = max(path.stat().st_mtime for path in gpu_dir.rglob("*")) + 3600
@@ -952,12 +995,7 @@ class EnvironmentContractTests(unittest.TestCase):
     def test_invalid_shader_provenance_is_attributed_and_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            gpu_dir = root / "src" / "rt" / "gpu_sdl3vk"
-            (gpu_dir / "shaders").mkdir(parents=True)
-            shutil.copy2(shader_embed.MANIFEST, gpu_dir / "shader_manifest.json")
-            for _, source, embedded in shader_embed.SHADERS:
-                shutil.copy2(shader_embed.GPU_DIR / source, gpu_dir / source)
-                shutil.copy2(shader_embed.GPU_DIR / embedded, gpu_dir / embedded)
+            gpu_dir = _copy_glsl_shader_sets(root)
             source = gpu_dir / "shaders" / "psp.frag"
             source.write_text(source.read_text(encoding="utf-8") + "\n// stale test\n", encoding="utf-8")
 
@@ -969,6 +1007,25 @@ class EnvironmentContractTests(unittest.TestCase):
             self.assertEqual(provenance.status, "FAIL")
             self.assertIn("source SHA-256 mismatch", provenance.detail or "")
             self.assertEqual(glslc.status, "FAIL")
+
+    def test_stale_ui_shader_provenance_fails_closed(self) -> None:
+        # The all-clear covers the UI set too, not only the psp set (audit 2026-11-17).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _copy_glsl_shader_sets(root)
+            source = root / "src" / "ui" / "shaders" / "ui.frag"
+            source.write_text(source.read_text(encoding="utf-8") + "\n// stale test\n", encoding="utf-8")
+
+            report = nk_doctor.Report(root, "build")
+            with mock.patch.object(_CHECKS_MODULE, "_find_executable", return_value=None):
+                _CHECKS_MODULE.check_shader_provenance(report, root, None)
+            provenance = next(item for item in report.results if item.code == "SHADER_PROVENANCE")
+            self.assertEqual(provenance.status, "FAIL")
+            self.assertIn("src/ui/shaders/shader_manifest.json: frag: source SHA-256 mismatch", provenance.detail or "")
+            self.assertIn("--shader-set ui", provenance.remediation or "")
+            self.assertNotIn(
+                "INFO", [item.status for item in report.results if item.code == "GLSLC"],
+            )
 
 
 class SimpleFrontEndTests(unittest.TestCase):

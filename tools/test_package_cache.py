@@ -2706,6 +2706,18 @@ class DecryptedElfRefusalTests(unittest.TestCase):
         self.assertIn("the player decrypts the disc's own", message)
         self.assertNotIn("key", message.lower())
 
+    def test_a_failed_copy_leaves_no_partial_eboot_elf(self) -> None:
+        """A write or fsync error mid-copy removes EBOOT.elf.tmp from the package cache
+        (audit 2026-11-17): only the refused-ELF branch used to."""
+        with tempfile.TemporaryDirectory() as scratch:
+            source = Path(scratch) / "EBOOT.elf"
+            source.write_bytes(b"\x7fELF" + b"\0" * 4096)
+            cache = Path(scratch) / "cache"
+            with mock.patch.object(nk_cli.os, "fsync", side_effect=OSError("synthetic fsync failure")):
+                with self.assertRaisesRegex(nk_cli.PackageBuildError, "synthetic fsync failure"):
+                    nk_cli._copy_decrypted_elf(source, cache / "EBOOT.elf")
+            self.assertEqual(sorted(path.name for path in cache.iterdir()), [])
+
 
 class AnalyzerSourcesKeyTests(unittest.TestCase):
     """The analyzer cache key covers every analyzer source file, not only analyze.py (#1531)."""

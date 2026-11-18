@@ -438,6 +438,19 @@ def _write_private_file(path: Path, data: bytes) -> None:
                 pass
 
 
+def _iso_extent_blocks(stream, file_size: int, lba: int, size: int):
+    """Yield one ISO file extent in 64 KiB blocks.
+
+    _read_iso_extent refuses a span outside the image and a short read
+    (IsoInspectionError), so every block is complete.
+    """
+    offset = 0
+    while offset < size:
+        count = min(64 * 1024, size - offset)
+        yield _read_iso_extent(stream, file_size, lba, size, offset, count)
+        offset += count
+
+
 def _extract_iso_executable(iso_path: Path, selected: str, destination: Path) -> str:
     if selected not in {"EBOOT.BIN", "BOOT.BIN"}:
         raise PackageBuildError(f"Unsupported selected executable {selected!r}; broader ISO-to-Play support is in the works.")
@@ -457,15 +470,9 @@ def _extract_iso_executable(iso_path: Path, selected: str, destination: Path) ->
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             digest = hashlib.sha256()
             with temporary.open("wb") as output:
-                offset = 0
-                while offset < size:
-                    count = min(64 * 1024, size - offset)
-                    block = _read_iso_extent(source, file_size, lba, size, offset, count)
-                    if len(block) != count:
-                        raise PackageBuildError("Selected executable could not be extracted completely.")
+                for block in _iso_extent_blocks(source, file_size, lba, size):
                     output.write(block)
                     digest.update(block)
-                    offset += count
                 output.flush()
                 os.fsync(output.fileno())
             if os.name != "nt":
@@ -494,14 +501,8 @@ def _hash_iso_member(iso_path: Path, member: tuple[str, ...]) -> str | None:
             if size <= 0 or size > MAX_EXECUTABLE_BYTES:
                 raise PackageBuildError("A source-media identity member exceeds the supported size bound.")
             digest = hashlib.sha256()
-            offset = 0
-            while offset < size:
-                count = min(64 * 1024, size - offset)
-                block = _read_iso_extent(source, file_size, lba, size, offset, count)
-                if len(block) != count:
-                    raise PackageBuildError("A source-media identity member could not be read completely.")
+            for block in _iso_extent_blocks(source, file_size, lba, size):
                 digest.update(block)
-                offset += count
             return digest.hexdigest()
     except IsoInspectionError as exc:
         raise PackageBuildError(f"Source-media identity member could not be read: {exc}") from exc
@@ -973,14 +974,8 @@ def _copy_plain_iso_modules(
             temporary = destination.with_name(destination.name + ".tmp")
             try:
                 with temporary.open("wb") as output:
-                    offset = 0
-                    while offset < entry.size:
-                        count = min(64 * 1024, entry.size - offset)
-                        block = _read_iso_extent(
-                            source, file_size, entry.lba, entry.size, offset, count
-                        )
+                    for block in _iso_extent_blocks(source, file_size, entry.lba, entry.size):
                         output.write(block)
-                        offset += count
                     output.flush()
                     os.fsync(output.fileno())
                 if os.name != "nt":
@@ -1211,12 +1206,14 @@ def _experimental_build_modules(
 
 def _copy_decrypted_elf(source: Path, destination: Path) -> str:
     """Copy one bounded user ELF into the private package cache after validation."""
+    # A failed copy (the source changing underneath, a write or fsync error, a refused
+    # ELF) must not leave a partial copy of the user's executable in the package cache.
+    temporary = destination.with_name(destination.name + ".tmp")
     try:
         size = source.stat().st_size
         if size <= 0 or size > MAX_EXECUTABLE_BYTES:
             raise PackageBuildError("User-supplied decrypted EBOOT.elf exceeds the supported size bound.")
         destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temporary = destination.with_name(destination.name + ".tmp")
         digest = hashlib.sha256()
         copied = 0
         with source.open("rb") as input_stream, temporary.open("wb") as output:
@@ -1232,7 +1229,6 @@ def _copy_decrypted_elf(source: Path, destination: Path) -> str:
             output.flush()
             os.fsync(output.fileno())
         if _classify_decrypted_elf_file(temporary) != "PLAIN_MIPS_ELF32":
-            temporary.unlink(missing_ok=True)
             raise PackageBuildError(
                 "Decrypted EBOOT.elf is not a usable MIPS ELF32; replace it with a "
                 "valid decrypted EBOOT.elf from your own copy, or remove it so the "
@@ -1244,6 +1240,10 @@ def _copy_decrypted_elf(source: Path, destination: Path) -> str:
         return digest.hexdigest()
     except OSError as exc:
         raise PackageBuildError(f"Could not copy user-supplied decrypted EBOOT.elf: {exc}") from exc
+    finally:
+        # Already moved into place on success; any other exit removes the partial copy.
+        with contextlib.suppress(OSError):
+            temporary.unlink(missing_ok=True)
 
 
 def _find_public_manifest(title_id: str, user_root: Path | None = None) -> tuple[Path, dict]:
@@ -1519,6 +1519,13 @@ def _copy_optional_modules(iso_path: Path, manifest: dict, cache_dir: Path,
         return None
     output = cache_dir / "modules"
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # This folder persists between builds, and the package ships every file in it: a
+    # module an earlier manifest required, or a copy an interrupted build left, would
+    # otherwise ship too. Only the modules this manifest requires stay.
+    required_names = {module["name"] for module in modules}
+    for leftover in output.iterdir():
+        if leftover.name not in required_names and (leftover.is_file() or leftover.is_symlink()):
+            leftover.unlink()
     for module in modules:
         name = module["name"]
         # Users name a decrypted module after the file on the disc (psp_game/usrdir/
@@ -1605,14 +1612,8 @@ def _copy_optional_modules(iso_path: Path, manifest: dict, cache_dir: Path,
                     if size <= 0 or size > MAX_EXECUTABLE_BYTES:
                         break
                     with temporary.open("wb") as output_stream:
-                        offset = 0
-                        while offset < size:
-                            count = min(64 * 1024, size - offset)
-                            block = _read_iso_extent(stream, file_size, lba, size, offset, count)
-                            if len(block) != count:
-                                raise PackageBuildError(f"Could not extract required guest PRX {name} completely.")
+                        for block in _iso_extent_blocks(stream, file_size, lba, size):
                             output_stream.write(block)
-                            offset += count
                     with temporary.open("rb") as module_stream:
                         magic = module_stream.read(4)
                     if magic != b"\x7fELF" and not is_code_overlay(magic):
@@ -2682,6 +2683,42 @@ PACKAGE_BUILD_LOCKED_MESSAGE = (
 )
 
 
+def _open_user_lock_file(user_root: Path, name: str, label: str):
+    """Open ``<user data>/locks/<name>`` for an exclusive lock; ``label`` names the lock folder."""
+    lock_dir = user_root / "locks"
+    if lock_dir.is_symlink():
+        raise PackageBuildError(f"The {label.lower()} folder is a symlink; refusing to write outside per-user data.")
+    lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_dir = _require_child(user_root, lock_dir, f"{label} folder")
+    return open(lock_dir / name, "a+b")
+
+
+def _try_lock_file(handle) -> None:
+    """Take the exclusive lock on byte 0 without waiting; OSError when another process holds it."""
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(handle) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        with contextlib.suppress(OSError):
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 @contextlib.contextmanager
 def _package_build_lock(user_root: Path, disc_id: str):
     """Hold the per-title build lock; yields False when another build holds it.
@@ -2690,39 +2727,17 @@ def _package_build_lock(user_root: Path, disc_id: str):
     is refused before it starts. The OS releases the lock with its process, so a
     crashed build never leaves the title locked.
     """
-    lock_dir = user_root / "locks"
-    if lock_dir.is_symlink():
-        raise PackageBuildError("The build lock folder is a symlink; refusing to write outside per-user data.")
-    lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock_dir = _require_child(user_root, lock_dir, "Build lock folder")
-    handle = open(lock_dir / f"build-package-{disc_id}.lock", "a+b")
+    handle = _open_user_lock_file(user_root, f"build-package-{disc_id}.lock", "Build lock")
     try:
         try:
-            if os.name == "nt":
-                import msvcrt
-
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _try_lock_file(handle)
         except OSError:
             yield False
             return
         try:
             yield True
         finally:
-            if os.name == "nt":
-                import msvcrt
-
-                handle.seek(0)
-                with contextlib.suppress(OSError):
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
     finally:
         handle.close()
 
@@ -5060,25 +5075,12 @@ def _library_lock(user_root: Path, timeout_seconds: float = LIBRARY_LOCK_TIMEOUT
     each rewrites library.json from what it read, so without the lock one would drop the
     title another just added. The OS releases the lock with its process.
     """
-    lock_dir = user_root / "locks"
-    if lock_dir.is_symlink():
-        raise PackageBuildError("The library lock folder is a symlink; refusing to write outside per-user data.")
-    lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    lock_dir = _require_child(user_root, lock_dir, "Library lock folder")
-    handle = open(lock_dir / "library.lock", "a+b")
+    handle = _open_user_lock_file(user_root, "library.lock", "Library lock")
     try:
         deadline = time.monotonic() + timeout_seconds
         while True:
             try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _try_lock_file(handle)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -5090,16 +5092,7 @@ def _library_lock(user_root: Path, timeout_seconds: float = LIBRARY_LOCK_TIMEOUT
         try:
             yield
         finally:
-            if os.name == "nt":
-                import msvcrt
-
-                handle.seek(0)
-                with contextlib.suppress(OSError):
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _unlock_file(handle)
     finally:
         handle.close()
 
@@ -5582,12 +5575,11 @@ def _write_bringup_launch_log(work_dir: Path, launch_output: str | None) -> None
         print(f"bring-up: could not keep the launch log: {exc}", file=sys.stderr)
 
 
-def _flight_has_hle_import(path: Path | None) -> bool | None:
-    """Return whether the private flight bundle proves an HLE import occurred.
+def _load_flight_bundle(path: Path | None) -> tuple[list, int] | None:
+    """The private flight bundle's (events, dropped count), or None when it is unusable.
 
-    ``None`` means the bundle is missing, malformed, or its ring buffer dropped
-    events before any retained HLE import. The bundle itself is never copied
-    into the sanitized bring-up report.
+    None means the bundle is missing, malformed, or has no valid recorder drop count. The
+    bundle itself is never copied into the sanitized bring-up report.
     """
     if path is None:
         return None
@@ -5598,65 +5590,35 @@ def _flight_has_hle_import(path: Path | None) -> bool | None:
     recorder = bundle.get("recorder") if isinstance(bundle, dict) else None
     events = bundle.get("events") if isinstance(bundle, dict) else None
     dropped = recorder.get("dropped") if isinstance(recorder, dict) else None
-    if not isinstance(events, list) or isinstance(dropped, bool) or not isinstance(dropped, int) or dropped < 0:
+    if (not isinstance(events, list) or isinstance(dropped, bool)
+            or not isinstance(dropped, int) or dropped < 0):
         return None
+    return events, dropped
+
+
+def _flight_has_hle_call(bundle: tuple[list, int] | None, nids: frozenset[int] | None = None) -> bool | None:
+    """Whether a loaded flight bundle holds an HLE import event (with an ``arg0`` in ``nids``).
+
+    ``None`` means the bundle is unusable, or its ring buffer dropped events before any
+    retained match, so a missing match proves nothing.
+    """
+    if bundle is None:
+        return None
+    events, dropped = bundle
     if any(
         isinstance(event, dict) and event.get("class") == "hle" and event.get("kind") == 1
+        and (nids is None or event.get("arg0") in nids)
         for event in events
     ):
         return True
     return False if dropped == 0 else None
 
 
-def _flight_has_display_framebuffer_setup(path: Path | None) -> bool | None:
-    """Return whether the private flight bundle proves PSP framebuffer setup.
-
-    This establishes only that the guest configured a display framebuffer; it
-    does not claim that a host frame was presented or visually verified.
-    """
-    if path is None:
-        return None
-    try:
-        bundle = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    recorder = bundle.get("recorder") if isinstance(bundle, dict) else None
-    events = bundle.get("events") if isinstance(bundle, dict) else None
-    dropped = recorder.get("dropped") if isinstance(recorder, dict) else None
-    if (not isinstance(events, list) or isinstance(dropped, bool)
-            or not isinstance(dropped, int) or dropped < 0):
-        return None
-    if any(
-        isinstance(event, dict) and event.get("class") == "hle"
-        and event.get("kind") == 1 and event.get("arg0") == 0x289D82FE
-        for event in events
-    ):
-        return True
-    return False if dropped == 0 else None
-
-
-def _flight_has_module_self_unload(path: Path | None) -> bool | None:
-    """Return whether the flight bundle proves a guest module self-unload call."""
-    if path is None:
-        return None
-    try:
-        bundle = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    recorder = bundle.get("recorder") if isinstance(bundle, dict) else None
-    events = bundle.get("events") if isinstance(bundle, dict) else None
-    dropped = recorder.get("dropped") if isinstance(recorder, dict) else None
-    if (not isinstance(events, list) or isinstance(dropped, bool)
-            or not isinstance(dropped, int) or dropped < 0):
-        return None
-    self_unload_nids = {0x8F2DF740, 0xD675EBB8}
-    if any(
-        isinstance(event, dict) and event.get("class") == "hle"
-        and event.get("kind") == 1 and event.get("arg0") in self_unload_nids
-        for event in events
-    ):
-        return True
-    return False if dropped == 0 else None
+# sceDisplaySetFrameBuf: the guest configured a display framebuffer. It does not claim that
+# a host frame was presented or visually verified.
+_FLIGHT_DISPLAY_FRAMEBUFFER_NIDS = frozenset({0x289D82FE})
+# The guest module self-unload calls.
+_FLIGHT_MODULE_SELF_UNLOAD_NIDS = frozenset({0x8F2DF740, 0xD675EBB8})
 
 
 def _count_instructions(sources: list[dict]) -> int:
@@ -6284,6 +6246,24 @@ def _bringup_package(st):
         set_stage(report, "build_package", "PASS", 0)
 
 
+def _package_executable_path(package_dir: Path, value: object) -> Path:
+    """The executable package.json names, refused unless it stays inside the package.
+
+    An absolute path, a drive, a ``..`` or a link out of the folder would otherwise
+    replace package_dir and launch a program the package does not contain.
+    """
+    if not isinstance(value, str) or not value:
+        raise PackageBuildError("The generated package names no executable path.")
+    executable = package_dir / value
+    try:
+        executable.resolve(strict=False).relative_to(package_dir.resolve(strict=False))
+    except (OSError, ValueError) as exc:
+        raise PackageBuildError(
+            f"The generated package's executable path {value!r} leaves the package folder."
+        ) from exc
+    return executable
+
+
 def _bringup_launch(st):
     """Launch the built package and record the result."""
     (args, boot_path, fail_stage, iso_path, manifest, metadata, report, report_path, set_stage, staged_root, unsupported_imports, user_root, work_dir) = (
@@ -6307,7 +6287,7 @@ def _bringup_launch(st):
     package_dir = user_root / "packages" / metadata.disc_id.upper()
     try:
         package = json.loads((package_dir / "package.json").read_text(encoding="utf-8"))
-        executable = package_dir / package["executable"]["path"]
+        executable = _package_executable_path(package_dir, package["executable"]["path"])
         if not executable.is_file():
             raise PackageBuildError("The generated package executable is missing.")
         env = _bringup_child_environment(user_root)
@@ -6398,7 +6378,8 @@ def _bringup_launch(st):
             "--gui",
         ]
         env["SR_PRESENT_TRACE"] = "1"
-        timeout = max(1, min(int(args.launch_timeout), BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS))
+        # --launch-timeout is range-checked when parsed (_launch_timeout_argument).
+        timeout = int(args.launch_timeout)
         # The game's own text reaches this output and need not be UTF-8; a strict decode
         # would lose the whole output, and with it the report.
         process = subprocess.Popen(
@@ -6425,7 +6406,9 @@ def _bringup_launch(st):
             else:
                 report["exit_classification"] = "EXITED_ZERO"
             if process.returncode == 0:
-                hle_observed = _flight_has_hle_import(flight_output)
+                # Read and parse the bundle once for the three questions below.
+                flight_bundle = _load_flight_bundle(flight_output)
+                hle_observed = _flight_has_hle_call(flight_bundle)
                 if hle_observed is False:
                     # A run the budget ended is a live guest, not an exit: name the budget.
                     failure = ("RUN_BUDGET_ENDED_BEFORE_FRAMEBUFFER_SETUP" if budget_ended
@@ -6440,9 +6423,11 @@ def _bringup_launch(st):
                         int((time.perf_counter() - started) * 1000),
                     )
                 else:
-                    framebuffer_observed = _flight_has_display_framebuffer_setup(flight_output)
+                    framebuffer_observed = _flight_has_hle_call(
+                        flight_bundle, _FLIGHT_DISPLAY_FRAMEBUFFER_NIDS
+                    )
                     if framebuffer_observed is False:
-                        if _flight_has_module_self_unload(flight_output) is True:
+                        if _flight_has_hle_call(flight_bundle, _FLIGHT_MODULE_SELF_UNLOAD_NIDS) is True:
                             failure, issues = "MODULE_SELF_UNLOAD_BEFORE_FRAMEBUFFER_SETUP", [280, 308]
                         elif budget_ended:
                             failure, issues = "RUN_BUDGET_ENDED_BEFORE_FRAMEBUFFER_SETUP", [308]
@@ -6743,6 +6728,19 @@ def _capture_rounds_argument(value: str) -> int:
     return rounds
 
 
+def _launch_timeout_argument(value: str) -> int:
+    """``--launch-timeout``: 1..BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS seconds, refused outside it."""
+    try:
+        seconds = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if not 1 <= seconds <= BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"must be 1..{BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS}, not {seconds}"
+        )
+    return seconds
+
+
 def cmd_bringup(args: argparse.Namespace) -> int:
     """Run the consumer route while writing only schema-checked safe evidence."""
     st = _Bringup(args=args)
@@ -6969,7 +6967,7 @@ def main() -> int:
     p_bringup.add_argument("--user-data-root", type=Path, default=None,
                            help="Player data folder to build into, shared with other bring-ups "
                                 "(default: <work-dir>/user-data, this run's own)")
-    p_bringup.add_argument("--launch-timeout", type=int,
+    p_bringup.add_argument("--launch-timeout", type=_launch_timeout_argument,
                            default=BRINGUP_LAUNCH_TIMEOUT_DEFAULT_SECONDS,
                            help="Hard launch limit in seconds "
                                 f"(1..{BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS}; "

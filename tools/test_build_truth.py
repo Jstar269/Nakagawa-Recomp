@@ -3213,6 +3213,15 @@ class MachinePortabilityTests(unittest.TestCase):
             prov_exp = discover_sdl3_provider(explicit=str(explicit_dir), msys_path=msys, vulkan_sdk=vulkan)
             self.assertEqual(prov_exp.root_dir, explicit_dir)
 
+            # An explicit tree whose SDL3.dll is not x86-64 (here a 32-bit i386 PE) is refused,
+            # as the MSYS2 branch refuses it, not selected as a supported provider.
+            (explicit_dir / "bin").mkdir(parents=True)
+            i386_pe = b"MZ" + b"\x00" * 58 + struct.pack("<I", 64) + b"PE\0\0" + struct.pack("<H", 0x014C)
+            (explicit_dir / "bin" / "SDL3.dll").write_bytes(i386_pe)
+            with self.assertRaises(Sdl3ProviderError) as explicit_ctx:
+                discover_sdl3_provider(explicit=str(explicit_dir), msys_path=msys, vulkan_sdk=vulkan)
+            self.assertIn("not a valid x86-64 PE", str(explicit_ctx.exception))
+
     def test_sdl3_provider_follows_a_gcc_symlink_into_the_toolchain(self) -> None:
         """A gcc on PATH that links into UCRT64 (ccache's masquerade) selects that toolchain.
 
