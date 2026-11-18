@@ -218,7 +218,9 @@ snapshot-selftest-run: $(GENERIC_TITLE_CONFIG_HEADER) $(CHUNK_OBJS) $(LIBRARY_OB
 # report zero mismatches. The second uses a generated mutant of the code generator (a
 # wrapper that emits one wrong statement for addu: it reads rs after writing rd) over only
 # that form, and the check requires a MISMATCH on exactly the instances where rd is rs and
-# rs differs from rt. FORM_SWEEP_STATES and FORM_SWEEP_CAP size a deeper run
+# rs differs from rt. Between the two, the public harness must refuse malformed plans (a
+# base register outside the register file, a scratch window outside guest RAM) as input
+# errors. FORM_SWEEP_STATES and FORM_SWEEP_CAP size a deeper run
 # (`form-sweep-deep`); the pull request defaults are small and the seed is fixed.
 FORM_SWEEP_SEED   ?= 1844
 FORM_SWEEP_CAP    ?= 40
@@ -269,6 +271,9 @@ form-sweep-selftest:
 	$(MAKE) form-sweep-build FORM_SWEEP_DIR=$(FORM_SWEEP_ROOT)/public
 	"$(PYTHON)" $(FORM_SWEEP_TOOL) report --manifest $(FORM_SWEEP_ROOT)/public/fixture/manifest.json \
 		--results $(FORM_SWEEP_ROOT)/public/results.txt
+	"$(PYTHON)" $(FORM_SWEEP_TOOL) check-bad-plans --exe $(FORM_SWEEP_ROOT)/public/form_sweep.exe \
+		--image $(FORM_SWEEP_ROOT)/public/formsweep_image.bin --base $(FORM_SWEEP_BASE_ADDR) \
+		--plan $(FORM_SWEEP_ROOT)/public/fixture/plan.txt --out-dir $(FORM_SWEEP_ROOT)/public/bad-plans
 	"$(PYTHON)" $(FORM_SWEEP_TOOL) write-mutant --out $(FORM_SWEEP_ROOT)/mutant/mutant_codegen.py
 	$(MAKE) form-sweep-build FORM_SWEEP_DIR=$(FORM_SWEEP_ROOT)/mutant FORM_SWEEP_ONLY=00.21 \
 		FORM_SWEEP_CODEGEN=$(FORM_SWEEP_ROOT)/mutant/mutant_codegen.py

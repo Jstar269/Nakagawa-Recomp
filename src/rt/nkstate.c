@@ -244,8 +244,11 @@ void nkstate_file_free(NkStateFile *file) {
     memset(file, 0, sizeof *file);
 }
 
-NkStateStatus nkstate_parse(const uint8_t *data, size_t len, const NkStateExpect *expect,
-                            NkStateFile *out, char *detail, size_t detail_cap) {
+/* nkstate_parse's checks. With copy, the payloads point into an owned copy of the file;
+ * without it they borrow data, which the caller keeps alive (nkstate_restore), and
+ * out->storage stays NULL. */
+static NkStateStatus parse_checked(const uint8_t *data, size_t len, const NkStateExpect *expect,
+                                   int copy, NkStateFile *out, char *detail, size_t detail_cap) {
     NkStateFile f;
     memset(&f, 0, sizeof f);
     memset(out, 0, sizeof *out);
@@ -277,6 +280,11 @@ NkStateStatus nkstate_parse(const uint8_t *data, size_t len, const NkStateExpect
     if (format != NKSTATE_FORMAT_VERSION)
         return refuse(NKSTATE_FORMAT_VERSION_MISMATCH, detail, detail_cap, "file %u, this build reads %u",
                       format, NKSTATE_FORMAT_VERSION);
+    /* The capture-side refusal, mirrored: with no runtime identity of its own this build
+     * would accept any file whose runtime field is also empty, another build's included. */
+    if (fixed_strlen(self->runtime, NKSTATE_RUNTIME_ID_LEN) == 0u)
+        return refuse(NKSTATE_NO_RUNTIME_IDENTITY, detail, detail_cap,
+                      "this build carries no SR_BUILD_ID, so it cannot tell this file from another build's");
     if (f.identity.kind != self->kind)
         return refuse(NKSTATE_KIND_MISMATCH, detail, detail_cap, "file kind %u, expected %u",
                       f.identity.kind, self->kind);
@@ -369,22 +377,33 @@ NkStateStatus nkstate_parse(const uint8_t *data, size_t len, const NkStateExpect
             return refuse(NKSTATE_FILE_HASH, detail, detail_cap, "the header or segment table was changed");
     }
 
-    f.storage = (uint8_t *)malloc(len);
-    if (!f.storage) return refuse(NKSTATE_NO_MEMORY, detail, detail_cap, "copying %zu bytes", len);
-    memcpy(f.storage, data, len);
+    const uint8_t *base = data;
+    if (copy) {
+        f.storage = (uint8_t *)malloc(len);
+        if (!f.storage) return refuse(NKSTATE_NO_MEMORY, detail, detail_cap, "copying %zu bytes", len);
+        memcpy(f.storage, data, len);
+        base = f.storage;
+    }
     offset = NKSTATE_HEADER_SIZE + table_size;
     for (uint32_t i = 0; i < f.segment_count; i++) {
-        f.segments[i].payload = f.storage + offset;
+        f.segments[i].payload = base + offset;
         offset += (size_t)f.segments[i].length;
     }
     *out = f;
     return NKSTATE_OK;
 }
 
+NkStateStatus nkstate_parse(const uint8_t *data, size_t len, const NkStateExpect *expect,
+                            NkStateFile *out, char *detail, size_t detail_cap) {
+    return parse_checked(data, len, expect, 1, out, detail, detail_cap);
+}
+
 NkStateStatus nkstate_restore(const uint8_t *data, size_t len, const NkStateExpect *expect,
                               char *detail, size_t detail_cap) {
     NkStateFile f;
-    NkStateStatus status = nkstate_parse(data, len, expect, &f, detail, detail_cap);
+    /* The caller keeps data alive for the call, so the payloads borrow it: no copy of a
+     * file that holds all of guest memory. */
+    NkStateStatus status = parse_checked(data, len, expect, 0, &f, detail, detail_cap);
     if (status != NKSTATE_OK) return status;
     for (uint32_t i = 0; i < f.segment_count && status == NKSTATE_OK; i++) {
         const NkStateSegment *s = &f.segments[i];

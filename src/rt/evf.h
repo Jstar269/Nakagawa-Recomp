@@ -53,13 +53,16 @@ static inline uint32_t sr_evf_check_wait_args(uint32_t bits, uint32_t mode) {
     return 0;
 }
 
-/* Poll additionally rejects WAITCLEAR|WAITCLEARALL combined. */
+/* Poll additionally rejects WAITCLEAR|WAITCLEARALL combined. The order
+ * matches PPSSPP's sceKernelPollEventFlag: unknown mode bits, then the
+ * combined clear modes, and only then the all-zero pattern, so a zero
+ * pattern with both clear modes is an illegal mode, not ILPAT. */
 static inline uint32_t sr_evf_check_poll_args(uint32_t bits, uint32_t mode) {
-    uint32_t rc = sr_evf_check_wait_args(bits, mode);
-    if (rc) return rc;
+    if (mode & ~SR_EVF_WAIT_KNOWN) return SR_EVF_ERR_ILLEGAL_MODE;
     if ((mode & (SR_EVF_WAIT_CLEAR | SR_EVF_WAIT_CLEARALL)) ==
         (SR_EVF_WAIT_CLEAR | SR_EVF_WAIT_CLEARALL))
         return SR_EVF_ERR_ILLEGAL_MODE;
+    if (bits == 0)                 return SR_EVF_ERR_ILPAT;
     return 0;
 }
 

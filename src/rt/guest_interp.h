@@ -74,22 +74,33 @@ int dispatch_call_continue(CpuState *s, uint32_t target, const SrGuestInterpCall
  *
  * IMPLEMENTED INSTRUCTION SET
  * ---------------------------
- * Every form below exists because a cell in tests/fixtures/cosim executes it and its
- * result is compared against real codegen output; nothing here was added to
- * inflate coverage, and tools/test_cosim_fixture.py enforces that in both
- * directions. Anything else -- including every control-transfer form not listed
- * -- fails closed as SR_GUEST_INTERP_UNSUPPORTED rather than being decoded as
- * some unrelated arithmetic form.
+ * The authority for which forms the interpreter decodes is the decoder in
+ * guest_interp.c itself, not a list in this comment. The cosim harness probes
+ * that production decoder (run_form_census() in tests/fixtures/cosim/cosim_selftest.c)
+ * and requires the decoded set to equal the form list
+ * tests/fixtures/cosim/generate.py derives from the cells, each of which compares
+ * the interpreted result against real codegen output; tools/test_cosim_fixture.py
+ * pins that list to the declared inventory. Anything the decoder does not name --
+ * including every control-transfer form it does not decode -- fails closed as
+ * SR_GUEST_INTERP_UNSUPPORTED rather than being decoded as some unrelated
+ * arithmetic form.
  *
- *   ALU        sll srl rotr sra addu subu and or xor slt sltu / addiu ori lui
+ * The decoded families, for orientation only (the census above is the check):
+ *
+ *   ALU        shifts (sll srl rotr sra and the variable sllv srlv rotrv srav),
+ *              add addu sub subu and or xor nor slt sltu, the immediates addi
+ *              addiu slti sltiu andi ori xori lui, movz movn, clz clo, min max
  *              (rotr is the Allegrex srl with rs=1; any other nonzero rs is reserved)
- *   HI/LO      mult multu mfhi mflo
+ *   SPECIAL3   ext ins seb seh wsbh wsbw bitrev
+ *   HI/LO      mult multu div divu madd maddu msub msubu mfhi mflo mthi mtlo
  *   memory     lb lbu lh lhu lw / sb sh sw / lwl lwr swl swr / lwc1 swc1
  *   atomic     ll sc (CpuState.llbit: ll sets it; sc stores and writes 1 only
  *              while it is set, else writes 0; same width-4 alignment and span
  *              checks as lw/sw, run before the link is consulted)
- *   control    beq bne j jal jr jalr
- *   scalar FPU mfc1 mtc1 add.s mul.s cvt.w.s   (via the src/rt/fp_convert.h
+ *   control    beq bne blez bgtz bltz bgez bltzal bgezal, their branch-likely
+ *              forms, bc1f bc1t (and likely), j jal jr jalr
+ *   scalar FPU mfc1 mtc1 cfc1 ctc1, add.s sub.s mul.s div.s sqrt.s abs.s
+ *              neg.s mov.s c.cond.s cvt.s.w cvt.w.s (via the src/rt/fp_convert.h
  *              helpers the generated code also calls, so guest FCR31 selects
  *              the result in both execution lanes)
  *   LLE CPU    mfc0 mtc0 syscall break eret (src/rt/cpu_lle.h helpers, gated

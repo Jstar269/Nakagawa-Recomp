@@ -40,6 +40,7 @@ import json
 import random
 import re
 import struct
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -977,6 +978,55 @@ def check_mutant(manifest_path: Path, results_path: Path) -> int:
     return 0
 
 
+#: Guest RAM the harness's scratch window must lie inside (src/ref/snapshot_ref.h).
+GUEST_RAM_BASE = 0x08000000
+GUEST_RAM_SIZE = 0x04000000
+
+
+def bad_plans(text: str) -> dict[str, str]:
+    """Plans derived from a valid one that ``src/rt/form_sweep.c`` must refuse as input errors
+    (exit 2): a base register outside -1..31, and scratch windows below guest RAM, past its
+    end, and wrapping the 32-bit address space. Each would otherwise index past the register
+    file or form host pointers outside both RAM copies."""
+    lines = text.splitlines()
+    scratch = next(i for i, ln in enumerate(lines) if ln.startswith("scratch "))
+    based = next(i for i, ln in enumerate(lines)
+                 if ln.startswith("inst ") and int(ln.split()[4]) > 0)
+
+    def with_line(at: int, line: str) -> str:
+        out = list(lines)
+        out[at] = line
+        return "\n".join(out) + "\n"
+
+    fields = lines[based].split()
+    fields[4] = "40"
+    end = GUEST_RAM_BASE + GUEST_RAM_SIZE
+    return {
+        "base-register": with_line(based, " ".join(fields)),
+        "scratch-below-ram": with_line(scratch, f"scratch {GUEST_RAM_BASE - 0x10000:x} 100"),
+        "scratch-past-ram": with_line(scratch, f"scratch {end - 0x1000:x} 2000"),
+        "scratch-wraps": with_line(scratch, "scratch fffffff0 100"),
+    }
+
+
+def check_bad_plans(exe: Path, image: Path, base: str, plan: Path, out_dir: Path) -> int:
+    """Run the harness on every ``bad_plans`` variant and require exit 2 with a named plan error."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    failed = 0
+    for name, text in bad_plans(plan.read_text()).items():
+        path = out_dir / f"bad-{name}.txt"
+        path.write_text(text)
+        run = subprocess.run([str(exe), str(image), base, str(path)], capture_output=True,
+                             text=True, check=False)
+        if run.returncode != 2 or "form_sweep: plan " not in run.stderr:
+            print(f"form-sweep bad plan {name}: FAIL, exit {run.returncode}, "
+                  f"stderr {run.stderr.strip()[-200:]!r}")
+            failed += 1
+        else:
+            print(f"form-sweep bad plan {name}: refused ({run.stderr.strip().splitlines()[-1]})")
+    return 1 if failed else 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -992,6 +1042,12 @@ def main(argv: list[str]) -> int:
     chk = sub.add_parser("check-mutant", help="require the mutant's exact mismatch set")
     chk.add_argument("--manifest", type=Path, required=True)
     chk.add_argument("--results", type=Path, required=True)
+    bad = sub.add_parser("check-bad-plans", help="require the harness to refuse malformed plans")
+    bad.add_argument("--exe", type=Path, required=True)
+    bad.add_argument("--image", type=Path, required=True)
+    bad.add_argument("--base", required=True)
+    bad.add_argument("--plan", type=Path, required=True)
+    bad.add_argument("--out-dir", type=Path, required=True)
     rep = sub.add_parser("report", help="summarise the harness output")
     rep.add_argument("--manifest", type=Path, required=True)
     rep.add_argument("--results", type=Path, required=True)
@@ -1011,6 +1067,8 @@ def main(argv: list[str]) -> int:
         return write_mutant(args.out)
     if args.command == "check-mutant":
         return check_mutant(args.manifest, args.results)
+    if args.command == "check-bad-plans":
+        return check_bad_plans(args.exe, args.image, args.base, args.plan, args.out_dir)
     return report(args.manifest, args.results)
 
 

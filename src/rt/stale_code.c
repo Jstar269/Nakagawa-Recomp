@@ -163,18 +163,23 @@ int sr_stale_enabled(void) {
     return s_enabled;
 }
 
-uint32_t sr_stale_fnv1a(const uint32_t *words, uint32_t nwords) {
-    uint32_t h = 0x811c9dc5u;
-    uint32_t i;
+uint32_t sr_stale_fnv1a_step(uint32_t h, uint32_t word) {
     int shift;
+    for (shift = 0; shift < 32; shift += 8) {
+        h ^= (word >> shift) & 0xffu;
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+uint32_t sr_stale_fnv1a(const uint32_t *words, uint32_t nwords) {
+    uint32_t h = SR_STALE_FNV1A_BASIS;
+    uint32_t i;
     if (!words) {
         return h;
     }
     for (i = 0; i < nwords; i++) {
-        for (shift = 0; shift < 32; shift += 8) {
-            h ^= (words[i] >> shift) & 0xffu;
-            h *= 0x01000193u;
-        }
+        h = sr_stale_fnv1a_step(h, words[i]);
     }
     return h;
 }

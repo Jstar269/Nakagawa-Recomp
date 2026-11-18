@@ -499,6 +499,19 @@ static void test_refusals(void) {
         b.len = 0u;
     }
     {
+        /* A build with no runtime identity loads nothing, not even a file whose runtime
+         * field is empty too: the two empty fields would compare equal. */
+        NkStateIdentity anon = self;
+        memset(anon.runtime, 0, sizeof anon.runtime);
+        NkStateExpect anon_expect = expect;
+        anon_expect.self = &anon;
+        nkstate_buf_put(&b, good.data, good.len);
+        memset(b.data + OFF_RUNTIME, 0, NKSTATE_RUNTIME_ID_LEN);
+        rehash(&b);
+        expect_refusal("identity-less build", b.data, b.len, &anon_expect, NKSTATE_NO_RUNTIME_IDENTITY);
+        b.len = 0u;
+    }
+    {
         nkstate_buf_put(&b, good.data, good.len);
         nkstate_buf_put(&b, "x", 1u);
         expect_refusal("trailing bytes", b.data, b.len, &expect, NKSTATE_TRAILING_BYTES);

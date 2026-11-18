@@ -63,6 +63,10 @@ static void test_fnv_vectors(void) {
     CHECK(sr_stale_fnv1a(one, 1u) == 0xf5e1d3e4u, "fnv [0x61] = 0x%08x", sr_stale_fnv1a(one, 1u));
     CHECK(sr_stale_fnv1a(pair, 2u) == 0x12a02059u, "fnv pair = 0x%08x", sr_stale_fnv1a(pair, 2u));
     CHECK(sr_stale_fnv1a(trio, 3u) == 0x879f43e7u, "fnv trio = 0x%08x", sr_stale_fnv1a(trio, 3u));
+    /* The word step folds to the same digest (module bind hashes guest words in place). */
+    uint32_t h = SR_STALE_FNV1A_BASIS;
+    for (unsigned i = 0; i < 3u; i++) h = sr_stale_fnv1a_step(h, trio[i]);
+    CHECK(h == 0x879f43e7u, "fnv trio by step = 0x%08x", h);
 }
 
 #define BLOCK_A (FAKE_BASE + 0x00u)
