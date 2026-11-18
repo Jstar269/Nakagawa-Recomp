@@ -43,6 +43,43 @@ def _range(text: str, name: str) -> tuple[int, int]:
     return start, start + len(body)
 
 
+_DIRECTIVE = re.compile(r"^\s*#\s*(\w+)")
+
+
+def _blank_vram_decoder_cli(text: str) -> str:
+    """``text`` with each ``#ifdef SR_GE_VRAM_DECODER_CLI`` branch blanked, line for line.
+
+    Only the CLI branch goes: an ``#else`` or ``#elif`` at its own depth starts the production
+    branch, which stays in the census. The directive lines themselves are blanked.
+    """
+    lines = text.split(chr(10))
+    depth = 0
+    blanking = False
+    for index, line in enumerate(lines):
+        directive = _DIRECTIVE.match(line)
+        word = directive.group(1) if directive else ""
+        if depth == 0:
+            if line.strip() == "#ifdef SR_GE_VRAM_DECODER_CLI":
+                depth, blanking = 1, True
+                lines[index] = ""
+            continue
+        if word in ("if", "ifdef", "ifndef"):
+            depth += 1
+        elif word == "endif":
+            depth -= 1
+            if depth == 0:
+                blanking = False
+                lines[index] = ""
+                continue
+        elif depth == 1 and word in ("else", "elif"):
+            blanking = False
+            lines[index] = ""
+            continue
+        if blanking:
+            lines[index] = ""
+    return chr(10).join(lines)
+
+
 class TestGuestSpanRouting(unittest.TestCase):
     def test_generated_bulk_stubs_use_complete_span_helpers(self) -> None:
         # The native memcpy/memset stub bodies are data in codegen_hst_stubs.py ("@ADDR@" is the
@@ -167,6 +204,7 @@ class TestGuestSpanRouting(unittest.TestCase):
                 "movie_mutant_fold": ("sr_guest_span_readable",),
                 "sr_enhancement_widen_clip_x": ("sr_guest_span_writable_at",),
                 "cull_sweep": ("sr_guest_span_readable",),
+                "ge_read_span": ("sr_vram_cpu_aperture", "sr_guest_vram_read_prepare_bytes"),
             },
             ROOT / "src" / "rt" / "ge_capture.c": {
                 "ge_capture_begin": ("sr_guest_span_readable",),
@@ -185,22 +223,10 @@ class TestGuestSpanRouting(unittest.TestCase):
             if path.name == "ge.c":
                 # The standalone VRAM decoder CLI build reads a private captured 2 MiB
                 # image through ge_vram_cli_read8, which bounds-checks every byte; it
-                # never touches guest memory. Blank those blocks, but require the check.
+                # never touches guest memory. Blank those branches (their production #else
+                # branches stay in the census), but require the check.
                 self.assertIn("ge_vram_cli_bad_read = 1;", text)
-                lines = text.split(chr(10))
-                depth = 0
-                for index, line in enumerate(lines):
-                    stripped = line.strip()
-                    if depth == 0 and stripped == "#ifdef SR_GE_VRAM_DECODER_CLI":
-                        depth = 1
-                        lines[index] = ""
-                    elif depth:
-                        if stripped.startswith(("#if", "#ifdef", "#ifndef")):
-                            depth += 1
-                        elif stripped.startswith("#endif"):
-                            depth -= 1
-                        lines[index] = ""
-                text = chr(10).join(lines)
+                text = _blank_vram_decoder_cli(text)
             if path.name == "ge_gpu.c":
                 # Ignore the explicitly synthetic Vulkan selftest block. Production
                 # code before and after it remains in the census.
@@ -223,6 +249,41 @@ class TestGuestSpanRouting(unittest.TestCase):
                     len(containing), 1,
                     f"{path.name}:{text.count(chr(10), 0, match.start()) + 1} has an unowned direct guest host pointer",
                 )
+
+    def test_decoder_cli_blanking_keeps_the_production_else_branch(self) -> None:
+        text = chr(10).join([
+            "static const uint8_t *span(uint32_t addr) {",
+            "#ifdef SR_GE_VRAM_DECODER_CLI",
+            "    return cli_host(addr);",
+            "#if defined(CLI_NESTED)",
+            "    nested_cli();",
+            "#else",
+            "    nested_cli_else();",
+            "#endif",
+            "#else",
+            "#ifdef PRODUCTION_NESTED",
+            "    production_nested();",
+            "#endif",
+            "    return SR_HOST(addr);",
+            "#endif",
+            "}",
+            "#ifdef SR_GE_VRAM_DECODER_CLI",
+            "int cli_only;",
+            "#endif",
+            "int after;",
+        ])
+        blanked = _blank_vram_decoder_cli(text).split(chr(10))
+        self.assertEqual(len(blanked), len(text.split(chr(10))), "line numbers are kept")
+        kept = [line.strip() for line in blanked if line.strip()]
+        self.assertEqual(kept, [
+            "static const uint8_t *span(uint32_t addr) {",
+            "#ifdef PRODUCTION_NESTED",
+            "production_nested();",
+            "#endif",
+            "return SR_HOST(addr);",
+            "}",
+            "int after;",
+        ])
 
     def test_texture_hash_uses_the_checked_source_capability(self) -> None:
         text = (ROOT / "src" / "rt" / "gpu_sdl3vk" / "ge_gpu.c").read_text(encoding="utf-8")
