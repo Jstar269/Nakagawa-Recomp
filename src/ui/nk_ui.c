@@ -1273,7 +1273,8 @@ bool nk_ui_prompt_glyph_in(NkUi *ui, NkUiId id, NkUiPromptStyle style, NkUiPromp
     const NkUiImage *image = NULL;
     float width;
     if (ui == NULL || !isfinite(height) || height <= 0.0f ||
-        (unsigned)style >= (unsigned)NK_UI_PROMPT_STYLE_COUNT) {
+        (unsigned)style >= (unsigned)NK_UI_PROMPT_STYLE_COUNT ||
+        (unsigned)action >= (unsigned)NK_UI_PROMPT_ACT_COUNT) {
         return false;
     }
     if (label != NULL) {

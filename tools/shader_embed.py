@@ -199,6 +199,16 @@ def verify(
         embedded_spirv[entry.get("embedded", "")] = spirv
 
     if glslc and not errors:
+        # Name a compiler drift, so a byte mismatch from another glslc is not left unexplained.
+        recorded_version = str(manifest["compiler"]["version"]).strip()
+        try:
+            running_version = glslc_version(glslc)
+        except (OSError, subprocess.SubprocessError) as exc:
+            running_version = f"unknown ({exc})"
+        drift = (
+            f" (the manifest records glslc {recorded_version!r}; this glslc is {running_version!r})"
+            if running_version != recorded_version else ""
+        )
         with tempfile.TemporaryDirectory(prefix="nakagawa-shader-verify-") as temp_name:
             temp = Path(temp_name)
             for stage, source_rel, embedded_rel in shaders:
@@ -212,7 +222,7 @@ def verify(
                     errors.append(f"{stage}: reproducibility compile failed: {exc}")
                     continue
                 if rebuilt != embedded_spirv.get(embedded_rel.as_posix()):
-                    errors.append(f"{stage}: current glslc output differs from embedded SPIR-V")
+                    errors.append(f"{stage}: current glslc output differs from embedded SPIR-V{drift}")
     return errors
 
 

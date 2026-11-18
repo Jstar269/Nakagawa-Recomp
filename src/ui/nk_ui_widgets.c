@@ -95,6 +95,15 @@ const char *nk_ui_caps(NkUi *ui, const char *text) {
         unsigned char c = (unsigned char)text[i];
         buffer[i] = c < 0x80u ? (char)toupper(c) : (char)c;
     }
+    if (text[i] != '\0') {
+        /* Cut before a whole UTF-8 sequence, never inside one: step back over the
+           continuation bytes (at most three) to the lead byte they follow. */
+        size_t back = 0u;
+        while (i > 0u && back < 3u && ((unsigned char)text[i] & 0xC0u) == 0x80u) {
+            --i;
+            ++back;
+        }
+    }
     buffer[i] = '\0';
     return nk_ui_frame_text(ui, buffer);
 }

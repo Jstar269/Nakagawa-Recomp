@@ -280,6 +280,11 @@ size_t nk_ui_sdl_input_translate(NkUiSdlInput *state, const union SDL_Event *eve
                 state->stick_x = 0.0f;
                 state->stick_y = 0.0f;
             }
+            /* Its D-pad: a release from a pad that holds nothing is ignored. */
+            for (side = 0; side < 4; ++side) {
+                (void)nk_ui_input_button(&state->input, (NkUiInputButton)(NK_UI_BTN_UP + side),
+                                         false, device, NK_UI_PAD_NEUTRAL, now_s, out, cap);
+            }
             for (side = 0; side < 2; ++side) {
                 if (state->trigger_down[side] && state->trigger_device[side] == device) {
                     state->trigger_down[side] = false;

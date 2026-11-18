@@ -106,6 +106,41 @@ class ShaderEmbedTests(unittest.TestCase):
             )
             self.assertTrue(errors)
 
+    def test_ui_recompile_mismatch_names_a_compiler_version_drift(self) -> None:
+        """A different glslc's byte mismatch says which compiler the manifest recorded."""
+        real_version = shader_embed.glslc_version
+        real_compile = shader_embed.compile_shader
+
+        def other_compile(glslc: str, source: Path, output: Path, gpu_dir: Path,
+                          defines: tuple[str, ...] = ()) -> bytes:
+            return bytes(20)  # not the embedded module
+
+        shader_embed.glslc_version = lambda glslc: "shaderc v1999.1\nTarget: SPIR-V 1.0"
+        shader_embed.compile_shader = other_compile
+        try:
+            errors = shader_embed.verify(
+                shader_embed.UI_DIR, shader_embed.UI_MANIFEST, "glslc-under-test",
+                shader_embed.UI_SHADERS,
+            )
+            self.assertTrue(errors)
+            self.assertTrue(
+                all("current glslc output differs" in error and "shaderc v1999.1" in error
+                    and "the manifest records glslc" in error for error in errors),
+                errors,
+            )
+            # The recorded compiler itself: a mismatch names no drift.
+            recorded = json.loads(shader_embed.UI_MANIFEST.read_text(encoding="utf-8"))
+            shader_embed.glslc_version = lambda glslc: recorded["compiler"]["version"].strip()
+            errors = shader_embed.verify(
+                shader_embed.UI_DIR, shader_embed.UI_MANIFEST, "glslc-under-test",
+                shader_embed.UI_SHADERS,
+            )
+            self.assertTrue(errors)
+            self.assertFalse(any("the manifest records glslc" in error for error in errors), errors)
+        finally:
+            shader_embed.glslc_version = real_version
+            shader_embed.compile_shader = real_compile
+
 
 # ---- schema 2: the FSR 3 sets, compiled by the pinned DXC (third_party/fidelityfx_sdk) -----------
 

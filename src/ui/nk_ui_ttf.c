@@ -107,7 +107,7 @@ typedef struct {
 
 typedef struct {
     bool used;
-    unsigned char *data;
+    unsigned char *data; /* from SDL_LoadFile; freed with SDL_free */
     size_t size;
     int fallback[NK_UI_TTF_MAX_FALLBACKS];
     int fallback_count;
@@ -615,7 +615,7 @@ void nk_ui_ttf_destroy(NkUiTtf *ttf) {
         nk_ui_ttf_close_instance(ttf, &ttf->instances[i]);
     }
     for (i = 0; i < NK_UI_TTF_MAX_FONTS; ++i) {
-        free(ttf->files[i].data);
+        SDL_free(ttf->files[i].data);
     }
     if (ttf->inited) {
         ttf->api.TTF_Quit();
@@ -641,14 +641,9 @@ bool nk_ui_ttf_add_font(NkUiTtf *ttf, int font, const char *path) {
         SDL_free(data);
         return false;
     }
-    /* SDL_LoadFile memory belongs to SDL; keep a malloc copy so free() is valid. */
-    ttf->files[font].data = (unsigned char *)malloc(size);
-    if (ttf->files[font].data == NULL) {
-        SDL_free(data);
-        return false;
-    }
-    memcpy(ttf->files[font].data, data, size);
-    SDL_free(data);
+    /* Keep SDL_LoadFile's buffer itself: SDL owns it, so destroy frees it with
+       SDL_free, and no second copy can fail after the file was read. */
+    ttf->files[font].data = (unsigned char *)data;
     ttf->files[font].size = size;
     ttf->files[font].used = true;
     return true;

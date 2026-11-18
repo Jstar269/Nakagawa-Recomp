@@ -5,6 +5,7 @@
 #include "nk_ui_assets.h"
 #include "nk_ui_draw.h"
 #include "nk_ui_image.h"
+#include "nk_ui_input.h"
 #include "nk_ui_text.h"
 #include "nk_ui_theme.h"
 #include "nk_ui_waves.h"
@@ -2293,6 +2294,74 @@ static int test_undrawn_command_is_reported(void) {
     return 1;
 }
 
+/* A prompt glyph whose image rounds to no width draws nothing; the frame stays. */
+static int test_empty_prompt_glyph_keeps_the_frame(void) {
+    static NkUiPromptImages images;
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUiLayout layout;
+    NkUi *ui;
+    CHECK(nk_ui_prompt_images_load(&images) > 0u, "prompt images decode");
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create prompt-glyph context");
+    set_test_window(ui);
+    nk_ui_set_prompt_images(ui, &images);
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, 100.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIXED, 40.0f, 0.0f, 0.0f};
+    nk_ui_begin(ui, 37.0);
+    CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open prompt-glyph container");
+    /* 64 x 64 glyph at 0.4 px tall: its width rounds to 0. */
+    CHECK(nk_ui_prompt_glyph_in(ui, 2u, NK_UI_PROMPT_KEYCAPS, NK_UI_PROMPT_ACT_CONFIRM, NULL,
+                                0.4f), "the narrow glyph is laid out");
+    CHECK(!nk_ui_prompt_glyph_in(ui, 3u, NK_UI_PROMPT_KEYCAPS, NK_UI_PROMPT_ACT_COUNT, NULL,
+                                 20.0f), "an action out of range is refused when it is laid out");
+    nk_ui_label(ui, 4u, "Still here", 0, 16);
+    nk_ui_end_container(ui);
+    CHECK(nk_ui_end(ui) != NULL, "a prompt glyph with no width does not drop the frame");
+    nk_ui_destroy(ui);
+    nk_ui_prompt_images_free(&images);
+    return 1;
+}
+
+/* nk_ui_caps cuts a long label on a whole UTF-8 sequence. */
+static int test_caps_cuts_on_a_sequence(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUi *ui;
+    char text[300];
+    const char *caps;
+    size_t i;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create caps context");
+    /* 254 ASCII letters, then a three-byte kanji the 255-byte cut would split. */
+    memset(text, 'a', 254u);
+    memcpy(text + 254u, "\xe6\x97\xa5\xe6\x97\xa5", 6u);
+    text[260] = '\0';
+    nk_ui_begin(ui, 37.0);
+    caps = nk_ui_caps(ui, text);
+    CHECK(caps != NULL && strlen(caps) == 254u, "the cut drops the split kanji whole");
+    for (i = 0; i < 254u; ++i) {
+        CHECK(caps[i] == 'A', "the letters before the cut are upper-cased");
+    }
+    /* A whole kanji before the cut is kept. */
+    memset(text, 'b', 252u);
+    memcpy(text + 252u, "\xe6\x97\xa5\xe6\x97\xa5", 6u);
+    text[258] = '\0';
+    caps = nk_ui_caps(ui, text);
+    CHECK(caps != NULL && strlen(caps) == 255u &&
+          memcmp(caps + 252u, "\xe6\x97\xa5", 3u) == 0, "a sequence that fits stays");
+    (void)nk_ui_end(ui);
+    nk_ui_destroy(ui);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     char actual[32768];
     size_t actual_size;
@@ -2314,7 +2383,8 @@ int main(int argc, char **argv) {
         !test_wait_follows_motion() || !test_art_fades_in() ||
         !test_backdrop_rests_and_fades() ||
         !test_layout_debug() || !test_pointer_state_once_a_frame() ||
-        !test_undrawn_command_is_reported()) {
+        !test_undrawn_command_is_reported() || !test_empty_prompt_glyph_keeps_the_frame() ||
+        !test_caps_cuts_on_a_sequence()) {
         return 1;
     }
     if (!build_golden_output(actual, sizeof(actual))) {
