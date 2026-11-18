@@ -1958,24 +1958,40 @@ NkResult nk_input_profile_file_parse_json(
         nk_input_profile_file_init_default(doc);
         return NK_ERROR_GENERIC;
     }
-    int ver = (int)sv->u.num.num_val;
-    if (ver > NK_INPUT_PROFILE_SCHEMA_VERSION) {
-        diag_set(diag_buf, diag_buf_sz,
-                 "unsupported future schema_version %d (current version is %d): a newer "
-                 "Nakagawa saved this profile; it is kept as it is and changes here are "
-                 "not saved", ver, NK_INPUT_PROFILE_SCHEMA_VERSION);
-        json_free(root);
-        nk_input_profile_file_init_default(doc);
-        return NK_ERROR_NEWER_SCHEMA;
-    }
-    if (ver < NK_INPUT_PROFILE_MIN_SCHEMA_VERSION) {
-        diag_set(diag_buf, diag_buf_sz,
-                 "unsupported schema_version %d (supported versions are %d to %d)",
-                 ver, NK_INPUT_PROFILE_MIN_SCHEMA_VERSION, NK_INPUT_PROFILE_SCHEMA_VERSION);
+    /* The version is a whole number, compared as the parsed double before it
+     * becomes an int: 6.9 is not version 6, and a value past the int range
+     * (1e12) is a newer schema, not an undefined conversion. Every double of
+     * magnitude 2^53 or more is whole; below that the int64 round trip is exact. */
+    double version_value = sv->u.num.num_val;
+    bool version_finite = version_value == version_value && version_value - version_value == 0.0;
+    bool version_whole = version_finite &&
+        (version_value >= 9007199254740992.0 || version_value <= -9007199254740992.0 ||
+         version_value == (double)(int64_t)version_value);
+    if (!version_whole) {
+        diag_set(diag_buf, diag_buf_sz, "schema_version must be a whole number");
         json_free(root);
         nk_input_profile_file_init_default(doc);
         return NK_ERROR_GENERIC;
     }
+    if (version_value > (double)NK_INPUT_PROFILE_SCHEMA_VERSION) {
+        diag_set(diag_buf, diag_buf_sz,
+                 "unsupported future schema_version %.0f (current version is %d): a newer "
+                 "Nakagawa saved this profile; it is kept as it is and changes here are "
+                 "not saved", version_value, NK_INPUT_PROFILE_SCHEMA_VERSION);
+        json_free(root);
+        nk_input_profile_file_init_default(doc);
+        return NK_ERROR_NEWER_SCHEMA;
+    }
+    if (version_value < (double)NK_INPUT_PROFILE_MIN_SCHEMA_VERSION) {
+        diag_set(diag_buf, diag_buf_sz,
+                 "unsupported schema_version %.0f (supported versions are %d to %d)",
+                 version_value, NK_INPUT_PROFILE_MIN_SCHEMA_VERSION,
+                 NK_INPUT_PROFILE_SCHEMA_VERSION);
+        json_free(root);
+        nk_input_profile_file_init_default(doc);
+        return NK_ERROR_GENERIC;
+    }
+    int ver = (int)version_value;
 
     /* 2. The global mapping every disc inherits. */
     if (!parse_mapping_node(root, ver, &doc->global, diag_buf, diag_buf_sz)) {

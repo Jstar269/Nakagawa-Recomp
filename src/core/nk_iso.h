@@ -60,7 +60,8 @@ void nk_iso_reader_close(NkIsoReader *reader);
 
 /* Resolve a path (e.g. "PSP_GAME/PARAM.SFO") to its extent LBA and size.
  * If out_is_dir is non-NULL, sets whether it is a directory.
- * Returns 0 on success, -1 if not found.
+ * Returns 0 on success, -1 if not found or if the path is longer than the
+ * reader resolves (it is refused, never shortened).
  */
 int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lba, uint32_t *out_size, bool *out_is_dir);
 
@@ -70,7 +71,9 @@ int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lb
 int nk_iso_reader_read(NkIsoReader *reader, uint32_t lba, uint64_t offset, void *dst, uint32_t bytes);
 
 /* Return the directory entry at 0-based index in directory at dir_path.
- * Returns 1 on success, 0 on end of directory, -1 on invalid / not a directory.
+ * Returns 1 on success, 0 on end of directory, -1 on invalid / not a directory,
+ * including a record up to `index` whose both-endian fields disagree or whose
+ * extent leaves the image.
  */
 int nk_iso_reader_list(NkIsoReader *reader, const char *dir_path, uint32_t index, NkIsoDirEntry *out_entry);
 

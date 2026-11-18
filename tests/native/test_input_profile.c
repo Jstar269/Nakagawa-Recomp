@@ -457,6 +457,29 @@ static void test_future_version_refused(void) {
     assert(strstr(readback, future_field) != NULL);
 
     remove(file_path);
+
+    /* schema_version is a whole number compared before any int conversion:
+     * 6.9 is refused rather than read as 6, and 1e12 (past the int range) is a
+     * newer schema rather than an undefined cast to a negative version. */
+    {
+        const char *fraction_json = "{ \"schema_version\": 6.9 }";
+        res = nk_input_profile_parse_json(&profile, fraction_json, strlen(fraction_json),
+                                          diag, sizeof(diag));
+        assert(res == NK_ERROR_GENERIC);
+        assert(strstr(diag, "schema_version must be a whole number") != NULL);
+
+        const char *huge_json = "{ \"schema_version\": 1e12 }";
+        res = nk_input_profile_parse_json(&profile, huge_json, strlen(huge_json),
+                                          diag, sizeof(diag));
+        assert(res == NK_ERROR_NEWER_SCHEMA);
+        assert(strstr(diag, "unsupported future schema_version 1000000000000") != NULL);
+
+        const char *negative_json = "{ \"schema_version\": -1e12 }";
+        res = nk_input_profile_parse_json(&profile, negative_json, strlen(negative_json),
+                                          diag, sizeof(diag));
+        assert(res == NK_ERROR_GENERIC);
+        assert(strstr(diag, "unsupported schema_version -1000000000000") != NULL);
+    }
     printf("[INPUT_PROFILE_TEST] Subtest 4 PASSED!\n");
 }
 
