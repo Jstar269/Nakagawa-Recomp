@@ -399,6 +399,7 @@ H264_FFMPEG ?= 0
 else
 H264_FFMPEG ?= 1
 endif
+export H264_FFMPEG
 H264_SUB_DIR := src/rt/h264_ffmpeg_sub
 ifeq ($(H264_FFMPEG),1)
 override CFLAGS += -DSR_H264_FFMPEG

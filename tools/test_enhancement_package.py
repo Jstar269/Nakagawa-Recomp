@@ -588,7 +588,8 @@ class TestEnhancementPackageSchema(unittest.TestCase):
 
 
 def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
-                              sections: tuple[tuple[str, int, int, int], ...] = ()) -> bytes:
+                              sections: tuple[tuple[str, int, int, int], ...] = (),
+                              symbols: tuple[tuple[str, int, int, int, int], ...] = ()) -> bytes:
     """Write a minimal synthetic MIPS32 little-endian ET_EXEC ELF for testing.
 
     ``sections`` adds a section header table of (name, addr, size, flags) PROGBITS
@@ -619,19 +620,67 @@ def _write_synthetic_mips_elf(path: Path, words: dict[int, int], entry: int,
     struct.pack_into("<8I", blob, 52, 1, payload_off, 0, 0, filesz, filesz, 5, 4)
     for addr, word in words.items():
         struct.pack_into("<I", blob, payload_off + addr, word)
-    if sections:
-        names = b"\0.shstrtab\0" + b"".join(name.encode() + b"\0" for name, *_ in sections)
-        strtab_off = len(blob)
-        blob += names
+    if sections or symbols:
+        names = [name for name, *_ in sections]
+        if symbols:
+            names.extend((".strtab", ".symtab"))
+        section_name_offsets: dict[str, int] = {}
+        name_at = 1
+        for name in (".shstrtab", *names):
+            section_name_offsets[name] = name_at
+            name_at += len(name) + 1
+        shstr = b"\0" + b"".join(name.encode() + b"\0" for name in (".shstrtab", *names))
+
+        strtab_off = 0
+        symtab_off = 0
+        if symbols:
+            string_table = bytearray(b"\0")
+            name_offsets: dict[str, int] = {}
+            for name, *_ in symbols:
+                name_offsets[name] = len(string_table)
+                string_table.extend(name.encode("ascii") + b"\0")
+            symbol_table = bytearray(16)  # the required all-zero first symbol
+            for name, value, size, symbol_type, section_index in symbols:
+                symbol_table.extend(struct.pack(
+                    "<IIIBBH", name_offsets[name], value, size, symbol_type, 0, section_index
+                ))
+            strtab_off = len(blob)
+            blob.extend(string_table)
+            while len(blob) % 4:
+                blob.append(0)
+            symtab_off = len(blob)
+            blob.extend(symbol_table)
+            while len(blob) % 4:
+                blob.append(0)
+
+        shstr_off = len(blob)
+        blob.extend(shstr)
         while len(blob) % 4:
             blob.append(0)
         shoff = len(blob)
-        headers = [bytes(40), struct.pack("<10I", 1, 3, 0, 0, strtab_off, len(names), 0, 0, 1, 0)]
-        name_at = len(b"\0.shstrtab\0")
+        headers = [
+            bytes(40),
+            struct.pack(
+                "<10I", section_name_offsets[".shstrtab"], 3, 0, 0,
+                shstr_off, len(shstr), 0, 0, 1, 0,
+            ),
+        ]
         for name, addr, size, flags in sections:
-            headers.append(struct.pack("<10I", name_at, 1, flags, addr, payload_off + addr, size, 0, 0, 4, 0))
-            name_at += len(name) + 1
-        blob += b"".join(headers)
+            headers.append(struct.pack(
+                "<10I", section_name_offsets[name], 1, flags, addr,
+                payload_off + addr, size, 0, 0, 4, 0,
+            ))
+        if symbols:
+            strtab_index = len(headers)
+            headers.append(struct.pack(
+                "<10I", section_name_offsets[".strtab"], 3, 0, 0,
+                strtab_off, len(string_table), 0, 0, 1, 0,
+            ))
+            headers.append(struct.pack(
+                "<10I", section_name_offsets[".symtab"], 2, 0, 0,
+                symtab_off, len(symbol_table), strtab_index, 1, 4, 16,
+            ))
+        blob.extend(b"".join(headers))
         struct.pack_into("<I", blob, 32, shoff)
         struct.pack_into("<HHH", blob, 46, 40, len(headers), 1)
     raw = bytes(blob)
@@ -4649,6 +4698,50 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertIn("site_mismatch: sites[1](SYNTH_COUNT)", out_bad)
             self.assertEqual(files_bad, {})
 
+    def test_publish_refuses_data_object_names_from_the_executable_symbol_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_path = tmp / "synth.elf"
+            words = dict(self.words)
+            words[0x00002000] = struct.unpack("<I", struct.pack("<f", 0.75))[0]
+            elf_bytes = _write_synthetic_mips_elf(
+                elf_path,
+                words,
+                self.entry,
+                sections=((".text", 0x00001000, 0x700, 6), (".data", 0x00002000, 4, 3)),
+                symbols=(("synth_table", 0x00002000, 4, 1, 3),),
+            )
+            private, symbols = self._make_package_and_symbols(elf_bytes)
+            private["data_sites"] = [{
+                "id": "TABLE",
+                "symbol": "synth_table",
+                "offset": 0,
+                "type": "f32",
+                "count": 1,
+                "stock_digest": hashlib.sha256(struct.pack("<f", 0.75)).hexdigest(),
+                "transform": "retention_m_to_sqrt(m)",
+            }]
+            symbols["synth_table"] = "0x00002000"
+            private_path = tmp / "synthetic.json"
+            private_path.write_text(json.dumps(private), encoding="utf-8")
+            private_path.with_suffix(".symbols.json").write_text(
+                json.dumps(symbols), encoding="utf-8"
+            )
+            output = tmp / "published.json"
+            stderr = StringIO()
+            args = [
+                "--publish", str(private_path), "--elf", str(elf_path), "--base", "0",
+                "--disc-id", self.DISC, "--disc-version", self.VERSION,
+                "--out", str(output),
+            ]
+
+            with mock.patch("sys.stderr", new=stderr), mock.patch("sys.stdout", new=StringIO()):
+                result = enhancement_package.main(args)
+
+            self.assertEqual(result, 1)
+            self.assertIn("the executable's own symbols", stderr.getvalue())
+            self.assertFalse(output.exists())
+
     def test_resolve_refuses_another_executable_by_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)
@@ -5076,7 +5169,8 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             # A synthetic symbol table that holds one of the package's names: a string from the game.
             game_symbols = {"synth_timer_duration": int(symbols["synth_timer_duration"], 16), "other": 0x1000}
             err = StringIO()
-            with mock.patch.object(enhancement_package, "extract_elf_func_symbols", return_value=game_symbols), \
+            with mock.patch.object(
+                    enhancement_package, "extract_elf_symbol_names", return_value=set(game_symbols)), \
                     mock.patch("sys.stderr", new=err), mock.patch("sys.stdout", new=StringIO()):
                 rc = enhancement_package.main(args)
             self.assertEqual(rc, 1)
@@ -5084,7 +5178,8 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertFalse(out.exists())
             # The names resolve only through the project's map: without it, nothing is published.
             priv_path.with_suffix(".symbols.json").unlink()
-            with mock.patch.object(enhancement_package, "extract_elf_func_symbols", return_value=game_symbols), \
+            with mock.patch.object(
+                    enhancement_package, "extract_elf_symbol_names", return_value=set(game_symbols)), \
                     mock.patch("sys.stderr", new=StringIO()), mock.patch("sys.stdout", new=StringIO()):
                 self.assertNotEqual(enhancement_package.main(args), 0)
             self.assertFalse(out.exists())

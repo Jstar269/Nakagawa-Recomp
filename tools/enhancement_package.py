@@ -1309,6 +1309,31 @@ def extract_elf_func_symbols(elf: Any) -> dict[str, int]:
     return out
 
 
+def extract_elf_symbol_names(elf: Any) -> set[str]:
+    """Return every named, project-style symbol from .symtab, regardless of symbol type."""
+    symtab = elf.sec(".symtab")
+    strtab = elf.sec(".strtab")
+    if not symtab or not strtab or not symtab.get("entsz"):
+        return set()
+    data = elf.data
+    strings = data[strtab["off"]:strtab["off"] + strtab["size"]]
+    names: set[str] = set()
+    for index in range(symtab["size"] // symtab["entsz"]):
+        offset = symtab["off"] + index * symtab["entsz"]
+        if offset + 16 > len(data):
+            break
+        st_name = struct.unpack_from("<I", data, offset)[0]
+        if not st_name or st_name >= len(strings):
+            continue
+        end = strings.find(b"\x00", st_name)
+        if end <= st_name:
+            continue
+        name = strings[st_name:end].decode("ascii", "replace")
+        if SYMBOL_RE.match(name) and not is_address_literal(name):
+            names.add(name)
+    return names
+
+
 def load_symbol_map(path: Path | str) -> dict[str, int]:
     """Load an optional sidecar symbol map JSON (mapping symbolic function name -> vaddr)."""
     sym_path = Path(path)
@@ -4821,7 +4846,7 @@ def _publish_main(args: argparse.Namespace) -> int:
     elf = Elf(data, base=int(args.base, 16) if args.base else None)
     # Names come only from the project's own symbol map (a decompilation's, or names the project
     # chose), never from the executable's symbol table: those are strings copied from the game.
-    game_names = sorted(set(symbols) & set(extract_elf_func_symbols(elf)))
+    game_names = sorted(set(symbols) & extract_elf_symbol_names(elf))
     if game_names:
         print(f"publish: FAIL: {len(game_names)} name(s) in {sidecar.name} are the executable's own symbols, "
               f"such as {game_names[0]!r}; a published package names sites with project-authored names only",
