@@ -160,6 +160,11 @@ class TestNativePackageNoticesGate(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.pkg_dir = Path(self.tmpdir.name)
+        # These synthetic binaries are not PE files: the gate under test is the license
+        # record, not the import scan that stages a missing runtime DLL.
+        imports = patch.object(package_notices, "get_binary_imports", return_value=[])
+        imports.start()
+        self.addCleanup(imports.stop)
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()

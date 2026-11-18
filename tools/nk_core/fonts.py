@@ -548,19 +548,6 @@ def _inspect(data: bytes) -> Dict[str, Any]:
 
 @functools.lru_cache(maxsize=256)
 def _inspect_file_cached(path: str, size: int, modified_ns: int) -> Dict[str, Any]:
-    """Reuse the full PGF verdict while one resolved file identity is unchanged."""
-    del size, modified_ns
-    return _inspect(Path(path).read_bytes())
-
-
-def _inspect_path(path: Path) -> Dict[str, Any]:
-    resolved = path.resolve(strict=True)
-    info = resolved.stat()
-    return _inspect_file_cached(str(resolved), info.st_size, info.st_mtime_ns)
-
-
-@functools.lru_cache(maxsize=256)
-def _inspect_file_cached(path: str, size: int, modified_ns: int) -> Dict[str, Any]:
     """Reuse a PGF verdict while its resolved path, size, and modification time are unchanged."""
     del size, modified_ns
     return _inspect(Path(path).read_bytes())

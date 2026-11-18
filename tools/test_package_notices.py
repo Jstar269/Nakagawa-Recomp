@@ -27,6 +27,8 @@ class TestPackageNotices(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.pkg_dir = Path(self.tmpdir.name)
+        # Hermetic: the host's own toolchain never feeds these synthetic packages.
+        self.no_toolchain = self.pkg_dir / "missing-toolchain"
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
@@ -37,7 +39,9 @@ class TestPackageNotices(unittest.TestCase):
         (self.pkg_dir / "unlicensed_component.dll").write_bytes(b"MZ\0\0dummy")
 
         with self.assertRaises(PackageRouteError) as ctx:
-            package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+            package_notices.generate_package_notices(
+                self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+            )
 
         self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_RECORD_MISSING")
         self.assertIn("unlicensed_component.dll", str(ctx.exception))
@@ -50,7 +54,9 @@ class TestPackageNotices(unittest.TestCase):
         (self.pkg_dir / "rogue.dll").write_bytes(b"MZ\0\0dummy-rogue")
 
         with self.assertRaises(PackageRouteError) as ctx:
-            package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+            package_notices.generate_package_notices(
+                self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+            )
 
         self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_RECORD_MISSING")
         self.assertIn("rogue.dll", str(ctx.exception))
@@ -65,7 +71,9 @@ class TestPackageNotices(unittest.TestCase):
             # Deliberately do not create LICENSE.LGPLv2.1.txt
 
             with self.assertRaises(PackageRouteError) as ctx:
-                package_notices.generate_package_notices(self.pkg_dir, repo_root=fake_repo)
+                package_notices.generate_package_notices(
+                    self.pkg_dir, repo_root=fake_repo, toolchain_root=self.no_toolchain
+                )
 
             self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_TEXT_MISSING")
             self.assertIn("LICENSE_TEXT_MISSING", str(ctx.exception))
@@ -97,7 +105,7 @@ class TestPackageNotices(unittest.TestCase):
             )
             with self.assertRaises(PackageRouteError) as ctx:
                 package_notices.generate_package_notices(
-                    self.pkg_dir, repo_root=fake_repo
+                    self.pkg_dir, repo_root=fake_repo, toolchain_root=self.no_toolchain
                 )
 
         self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_TEXT_MISSING")
@@ -115,7 +123,9 @@ class TestPackageNotices(unittest.TestCase):
             with self.subTest(bad=bad), \
                     mock.patch.object(package_notices, "load_component_inventory", return_value=inventory):
                 with self.assertRaises(PackageRouteError) as ctx:
-                    package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+                    package_notices.generate_package_notices(
+                        self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+                    )
                 self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
 
     def test_notices_bundle_generation_with_in_tree_license_texts(self) -> None:
@@ -125,7 +135,9 @@ class TestPackageNotices(unittest.TestCase):
         (self.pkg_dir / "SDL3.dll").write_bytes(b"MZ\0\0sdl")
         (self.pkg_dir / "libwinpthread-1.dll").write_bytes(b"MZ\0\0pthread")
 
-        result = package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+        result = package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
 
         self.assertEqual(result["schema_version"], 1)
         self.assertEqual(result["bundle_type"], "native_package_third_party_notices")
@@ -473,7 +485,9 @@ class TestPackageNotices(unittest.TestCase):
             valid_path.write_bytes(valid_no_imports)
             self.assertEqual(package_notices.get_binary_imports(valid_path), [])
 
-    def test_notice_generation_does_not_stage_runtime_dlls(self) -> None:
+    def test_notice_generation_names_the_runtime_dll_it_stages(self) -> None:
+        # The title-package route writes notices before tools/nk_cli.py stages the
+        # runtime DLLs, so this one-level import staging is what names SDL3.dll there.
         package_dir = self.pkg_dir / "package"
         toolchain_root = self.pkg_dir / "toolchain"
         package_dir.mkdir()
@@ -482,15 +496,19 @@ class TestPackageNotices(unittest.TestCase):
         bin_dir.mkdir(parents=True)
         (bin_dir / "SDL3.dll").write_bytes(b"synthetic runtime DLL")
 
-        with mock.patch.object(
-            package_notices, "get_binary_imports", return_value=["SDL3.dll"]
-        ) as imports:
+        def imports_of(binary, _toolchain_root=None):
+            return ["SDL3.dll"] if binary.name == "synthetic.exe" else []
+
+        with mock.patch.object(package_notices, "get_binary_imports", side_effect=imports_of):
             package_notices.generate_package_notices(
                 package_dir, repo_root=ROOT, toolchain_root=toolchain_root
             )
 
-        self.assertFalse((package_dir / "SDL3.dll").exists())
-        imports.assert_not_called()
+        self.assertEqual((package_dir / "SDL3.dll").read_bytes(), b"synthetic runtime DLL")
+        index = json.loads(
+            (package_dir / "THIRD_PARTY_NOTICES" / "index.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("SDL3.dll", [component.get("binary") for component in index["components"]])
 
     def test_notice_regeneration_removes_stale_component_notices(self) -> None:
         package_dir = self.pkg_dir / "package"
@@ -563,6 +581,7 @@ class TestPackageNotices(unittest.TestCase):
         result = package_notices.generate_package_notices(
             self.pkg_dir,
             repo_root=ROOT,
+            toolchain_root=self.no_toolchain,
             custom_license_map=custom_map,
         )
         comp_names = [c["name"] for c in result["components"]]

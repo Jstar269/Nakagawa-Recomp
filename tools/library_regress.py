@@ -317,6 +317,13 @@ def record(snapshot: dict[str, Any], store: Path) -> Path:
         except FileExistsError:
             number += 1  # another record took it at the same moment
             continue
+        if any(folder.glob(f"{number:05d}-*.json")):
+            # A record that finished after this one read the folder already holds the
+            # number: its snapshot is in place before its claim is released.
+            os.close(descriptor)
+            claim.unlink()
+            number += 1
+            continue
         path = folder / f"{number:05d}-{_snapshot_name(snapshot)}"
         try:
             os.close(descriptor)

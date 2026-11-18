@@ -9,6 +9,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -226,6 +227,36 @@ class SnapshotTests(unittest.TestCase):
             recorded = library_regress.record(snapshot, store)
 
         self.assertEqual(int(recorded.name.split("-", 1)[0]), 2)
+
+    def test_record_after_a_finished_record_keeps_both_snapshots(self) -> None:
+        # The second record reads the folder before the first one starts, and claims
+        # only after the first one has written its snapshot and released its claim.
+        with tempfile.TemporaryDirectory() as temp:
+            store = Path(temp) / "store"
+            (store / "snapshots").mkdir(parents=True)
+            snapshot = {
+                "recorded_at": "2026-11-18T12:00:00Z",
+                "mode": "full",
+                "commits": [OLD],
+            }
+            real_open = os.open
+            first: list[Path] = []
+
+            def open_after_the_first_record(path, flags, *args):
+                if not first:
+                    with mock.patch.object(library_regress.os, "open", real_open):
+                        first.append(library_regress.record(dict(snapshot), store))
+                return real_open(path, flags, *args)
+
+            with mock.patch.object(library_regress.os, "open", open_after_the_first_record):
+                second = library_regress.record(dict(snapshot), store)
+
+            names = sorted(path.name for path in (store / "snapshots").glob("*.json"))
+            self.assertEqual(len(names), 2, names)
+            self.assertNotEqual(first[0], second)
+            self.assertEqual(int(first[0].name.split("-", 1)[0]), 1)
+            self.assertEqual(int(second.name.split("-", 1)[0]), 2)
+            self.assertEqual(list((store / "snapshots").glob("*.claim")), [])
 
     def test_failed_snapshot_write_removes_its_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

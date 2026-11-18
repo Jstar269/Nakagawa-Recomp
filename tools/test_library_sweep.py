@@ -1764,28 +1764,37 @@ class LibrarySweepTests(unittest.TestCase):
             ],
         })
 
+    def _write_build_report(self, path: Path, name: str, mtime_ns: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "unsupported": {"imports": [{
+                "library": "sceAudio",
+                "nid": "0x12345678",
+                "name": name,
+            }]},
+        }), encoding="utf-8")
+        os.utime(path, ns=(mtime_ns, mtime_ns))
+
     def test_empty_sidecar_recovers_nids_from_private_build_report(self) -> None:
         work_dir = self.private_dir / "work" / "synthetic"
-        output_dir = work_dir / "package"
-        output_dir.mkdir(parents=True)
+        work_dir.mkdir(parents=True)
         sidecar = work_dir / "sweep-imports.json"
         sidecar.write_text(json.dumps({
             "schema_version": 1,
             "unsupported_imports": [],
         }), encoding="utf-8")
-        (output_dir / "build-report.json").write_text(json.dumps({
-            "unsupported": {
-                "imports": [{
-                    "library": "sceAudio",
-                    "nid": "0x12345678",
-                    "name": "sceAudioInit",
-                }],
-            },
-        }), encoding="utf-8")
+        route_started_ns = 2_000_000_000_000_000_000
+        # Written in the same file-system tick as the route start, and before
+        # the sidecar: both are still this route's report.
+        self._write_build_report(
+            work_dir / "package" / "build-report.json", "sceAudioInit", route_started_ns
+        )
+        os.utime(sidecar, ns=(route_started_ns + 1, route_started_ns + 1))
 
         rows, status = library_sweep._read_private_nid_rows(
             sidecar,
             _bringup_report(),
+            route_started_ns,
         )
 
         self.assertEqual(status, "BUILD_REPORT")
@@ -1795,31 +1804,94 @@ class LibrarySweepTests(unittest.TestCase):
             "nid_name": "sceAudioInit",
         }])
 
-    def test_nid_fallback_ignores_build_reports_older_than_the_current_sidecar(self) -> None:
+    def test_nid_fallback_ignores_build_reports_older_than_the_route_start(self) -> None:
         work_dir = self.private_dir / "work" / "stale-report"
-        report_dir = work_dir / "user-data" / "packages" / "UCUS99991"
-        report_dir.mkdir(parents=True)
-        build_report = report_dir / "build-report.json"
-        build_report.write_text(json.dumps({
-            "unsupported": {"imports": [{
-                "library": "sceAudio",
-                "nid": "0x12345678",
-                "name": "staleBuildReportImport",
-            }]},
-        }), encoding="utf-8")
-        os.utime(build_report, ns=(1_000_000_000, 1_000_000_000))
+        route_started_ns = 2_000_000_000_000_000_000
+        self._write_build_report(
+            work_dir / "user-data" / "packages" / "UCUS99991" / "build-report.json",
+            "staleBuildReportImport",
+            route_started_ns - 1,
+        )
         sidecar = work_dir / "sweep-imports.json"
         sidecar.write_text(json.dumps({"schema_version": 1, "unsupported_imports": []}),
                            encoding="utf-8")
 
-        rows, status = library_sweep._read_private_nid_rows(sidecar, _bringup_report())
+        rows, status = library_sweep._read_private_nid_rows(
+            sidecar, _bringup_report(), route_started_ns
+        )
         self.assertEqual(rows, [])
         self.assertEqual(status, "UNAVAILABLE")
 
-        sidecar.unlink()
-        rows, status = library_sweep._read_private_nid_rows(sidecar, _bringup_report())
+        rows, status = library_sweep._read_private_nid_rows(sidecar, _bringup_report(), None)
         self.assertEqual(rows, [])
         self.assertEqual(status, "UNAVAILABLE")
+
+    def test_missing_sidecar_still_recovers_this_routes_build_report(self) -> None:
+        work_dir = self.private_dir / "work" / "missing-sidecar"
+        route_started_ns = 2_000_000_000_000_000_000
+        self._write_build_report(
+            work_dir / "user-data" / "packages" / "UCUS99991" / "build-report.json",
+            "currentBuildReportImport",
+            route_started_ns,
+        )
+
+        rows, status = library_sweep._read_private_nid_rows(
+            work_dir / "sweep-imports.json", _bringup_report(), route_started_ns
+        )
+
+        self.assertEqual(status, "BUILD_REPORT")
+        self.assertEqual([row["nid_name"] for row in rows], ["currentBuildReportImport"])
+
+    def test_route_reads_only_the_build_report_it_wrote(self) -> None:
+        work_dir = self.private_dir / "work" / "route-marker"
+        packages = work_dir / "user-data" / "packages"
+        self._write_build_report(
+            packages / "UCUS99991" / "build-report.json", "staleBuildReportImport", 1_000_000_000
+        )
+        iso = _write_iso(self.iso_dir, "route-marker.iso", "UCUS99991", "Marker Sentinel")
+        report_path = work_dir / "bringup.json"
+        sidecar_path = work_dir / "sweep-imports.json"
+        report_payload = json.dumps(_bringup_report())
+        test = self
+
+        class CompletedProcess:
+            returncode = 0
+
+            @staticmethod
+            def communicate(timeout=None):
+                marker = work_dir / "bringup-route-start"
+                test.assertTrue(marker.is_file())
+                fresh = packages / "UCUS99992" / "build-report.json"
+                fresh.parent.mkdir(parents=True)
+                fresh.write_text(json.dumps({
+                    "unsupported": {"imports": [{
+                        "library": "sceAudio",
+                        "nid": "0x87654321",
+                        "name": "freshBuildReportImport",
+                    }]},
+                }), encoding="utf-8")
+                # Same file-system tick as the marker: still this route's report.
+                marker_ns = marker.stat().st_mtime_ns
+                os.utime(fresh, ns=(marker_ns, marker_ns))
+                report_path.write_text(report_payload, encoding="utf-8")
+                return "", ""
+
+        with (
+            mock.patch.object(library_sweep, "_route_environment", return_value={}),
+            mock.patch.object(
+                library_sweep.subprocess, "Popen", return_value=CompletedProcess()
+            ),
+        ):
+            outcome = library_sweep._run_bringup(
+                iso, work_dir, report_path, sidecar_path, 1, 1
+            )
+
+        self.assertIsNotNone(outcome.route_started_ns)
+        rows, status = library_sweep._read_private_nid_rows(
+            sidecar_path, outcome.report, outcome.route_started_ns
+        )
+        self.assertEqual(status, "BUILD_REPORT")
+        self.assertEqual([row["nid_name"] for row in rows], ["freshBuildReportImport"])
 
     def test_unconfigured_optional_input_staging_clears_old_files(self) -> None:
         work_dir = self.private_dir / "work" / "stale-optional-inputs"
@@ -2034,6 +2106,7 @@ class LibrarySweepExternalJsonTests(unittest.TestCase):
                 "nid": "0x87654321",
                 "nid_name": "runtimeFallback",
             }]},
+            None,
         )
         self.assertEqual(status, "RUNTIME_ONLY")
         self.assertEqual(runtime_rows[0]["nid"], "0x87654321")
@@ -2076,7 +2149,7 @@ class LibrarySweepExternalJsonTests(unittest.TestCase):
         sidecar_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         self.assertGreater(sidecar_path.stat().st_size, 1024 * 1024)
 
-        rows, status = library_sweep._read_private_nid_rows(sidecar_path, None)
+        rows, status = library_sweep._read_private_nid_rows(sidecar_path, None, None)
 
         self.assertEqual(status, "CAPTURED")
         self.assertEqual(len(rows), 20000)
@@ -2225,7 +2298,9 @@ class LibrarySweepExternalJsonTests(unittest.TestCase):
             with self.subTest(reader="sidecar", limit=name), mock.patch.object(
                 library_sweep, name, limit
             ):
-                rows, status = library_sweep._read_private_nid_rows(sidecar_path, runtime_report)
+                rows, status = library_sweep._read_private_nid_rows(
+                    sidecar_path, runtime_report, None
+                )
                 self.assertEqual(status, "RUNTIME_ONLY")
                 self.assertEqual(rows[0]["nid"], "0x87654321")
 
@@ -2256,7 +2331,7 @@ class LibrarySweepExternalJsonTests(unittest.TestCase):
                 "nid": "0x87654321",
                 "nid_name": "runtimeFallback",
             }]
-        })
+        }, None)
         self.assertEqual(status, "RUNTIME_ONLY")
         self.assertEqual(rows[0]["nid"], "0x87654321")
 

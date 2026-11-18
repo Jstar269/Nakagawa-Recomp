@@ -181,8 +181,7 @@ The **Verified retail** column is the library's compatibility; modified and unkn
 | Playable start to end | not measured | not measured | not measured | not measured | not measured |
 | **Counted** | 692 | 1 | 62 | 0 | 755 |
 
-Not counted: 112 without a current package in this run (not built yet or replaced by a later
-same-ID build), and 1 copy of a disc already counted.
+Not counted: 112 not built yet in this run, and 1 copy of a disc already counted.
 
 Where they stop, by named cause ([`FAILURE_CODES.md`](FAILURE_CODES.md)):
 

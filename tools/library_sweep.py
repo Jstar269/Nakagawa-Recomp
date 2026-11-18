@@ -244,6 +244,9 @@ class RouteOutcome:
     build_diagnostic: str | None = None
     module_layout_diagnostic: str | None = None
     analyzer_diagnostic: str | None = None
+    # File-system time of a marker written just before the route started. Only
+    # build reports at or after it belong to this route (None: no fallback).
+    route_started_ns: int | None = None
 
 
 def _utc_now() -> str:
@@ -856,6 +859,23 @@ def _route_diagnostic_fields(build_log_path: Path, layout_log_path: Path) -> dic
     }
 
 
+def _mark_route_start(work_dir: Path) -> int | None:
+    """Write a fresh marker and return its file-system mtime.
+
+    The marker's time comes from the same file-system clock that stamps the
+    route's build-report.json, so a report the route writes is never older than
+    it, and a report left by an earlier route always is.
+    """
+    marker = work_dir / "bringup-route-start"
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        marker.unlink(missing_ok=True)
+        marker.write_bytes(b"")
+        return marker.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
 def _run_bringup(
     iso_path: Path,
     work_dir: Path,
@@ -872,6 +892,7 @@ def _run_bringup(
     build_log_path.unlink(missing_ok=True)
     layout_log_path = work_dir / "bringup-module-layout.log"
     layout_log_path.unlink(missing_ok=True)
+    route_started_ns = _mark_route_start(work_dir)
     command = [
         sys.executable,
         str(NK_CLI),
@@ -926,9 +947,10 @@ def _run_bringup(
             timed_out_stage_ms=active_elapsed_ms,
             stage_durations_ms=durations,
             **_route_diagnostic_fields(build_log_path, layout_log_path),
+            route_started_ns=route_started_ns,
         )
     except OSError:
-        return RouteOutcome(None)
+        return RouteOutcome(None, route_started_ns=route_started_ns)
     if not report_path.is_file():
         progress = _read_bringup_progress(progress_path)
         active_stage, active_elapsed_ms, durations = _progress_stage_details(progress)
@@ -940,6 +962,7 @@ def _run_bringup(
             timed_out_stage_ms=active_elapsed_ms,
             stage_durations_ms=durations,
             **_route_diagnostic_fields(build_log_path, layout_log_path),
+            route_started_ns=route_started_ns,
         )
     try:
         report = package_cache.read_bounded_json(
@@ -957,6 +980,7 @@ def _run_bringup(
             return_code=process.returncode,
             progress=progress,
             **_route_diagnostic_fields(build_log_path, layout_log_path),
+            route_started_ns=route_started_ns,
         )
     if not isinstance(report, dict):
         progress = _read_bringup_progress(progress_path)
@@ -965,6 +989,7 @@ def _run_bringup(
             return_code=process.returncode,
             progress=progress,
             **_route_diagnostic_fields(build_log_path, layout_log_path),
+            route_started_ns=route_started_ns,
         )
     progress = _read_bringup_progress(progress_path)
     _active_stage, _active_elapsed_ms, durations = _progress_stage_details(progress)
@@ -983,6 +1008,7 @@ def _run_bringup(
             if isinstance(analyze_stage, dict) and analyze_stage.get("status") == "FAIL"
             else None
         ),
+        route_started_ns=route_started_ns,
     )
 
 
@@ -1018,11 +1044,13 @@ def _normalize_nid_rows(values) -> list[dict]:
     return rows
 
 
-def _read_private_nid_rows(sidecar_path: Path, report: dict | None) -> tuple[list[dict], str]:
-    sidecar_mtime_ns = None
+def _read_private_nid_rows(
+    sidecar_path: Path,
+    report: dict | None,
+    route_started_ns: int | None,
+) -> tuple[list[dict], str]:
     if sidecar_path.is_file():
         try:
-            sidecar_mtime_ns = sidecar_path.stat().st_mtime_ns
             payload = package_cache.read_bounded_json(
                 sidecar_path,
                 max_bytes=_SWEEP_TITLE_JSON_MAX_BYTES,
@@ -1039,10 +1067,10 @@ def _read_private_nid_rows(sidecar_path: Path, report: dict | None) -> tuple[lis
                 return rows, "CAPTURED"
     build_report_rows = []
     for build_report_path in sorted(sidecar_path.parent.rglob("build-report.json")):
-        if sidecar_mtime_ns is None:
+        if route_started_ns is None:
             break
         try:
-            if build_report_path.stat().st_mtime_ns <= sidecar_mtime_ns:
+            if build_report_path.stat().st_mtime_ns < route_started_ns:
                 continue
         except OSError:
             continue
@@ -1979,7 +2007,9 @@ def run_sweep(
         stage_durations = outcome.stage_durations_ms or _progress_stage_details(
             outcome.progress
         )[2]
-        nid_rows, nid_status = _read_private_nid_rows(private_import_report_path, report)
+        nid_rows, nid_status = _read_private_nid_rows(
+            private_import_report_path, report, outcome.route_started_ns
+        )
         row = {
             "source_key": key,
             "source_file": iso_path.name,

@@ -99,6 +99,20 @@ class RedactionTests(unittest.TestCase):
         path = f"C:\\{USERS}\\Unlisted Profile\\AppData\\Local\\data"
         self.assertEqual(rb.redact_text(path, rb.Identity()), "~\\AppData\\Local\\data")
 
+    def test_shape_redaction_stops_at_the_end_of_the_line(self) -> None:
+        # A home folder at the end of a line must not swallow the diagnostic lines after it.
+        cases = {
+            f"log: opened /{HOMEDIR}/other\nframe 12 ok\nframe 13 ok\nend.":
+                "log: opened ~\nframe 12 ok\nframe 13 ok\nend.",
+            f"C:\\{USERS}\\Unlisted Profile\r\nnext line here\nmore\n":
+                "~\r\nnext line here\nmore\n",
+            f"C:\\{USERS}\\Unlisted Profile\tcolumn two":
+                "~\tcolumn two",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(rb.redact_text(text, rb.Identity()), expected)
+
     def test_names(self) -> None:
         self.assertEqual(self.assertClean("user=Exampleuser, USER: EXAMPLEUSER."), "user=<user>, USER: <user>.")
         self.assertEqual(self.assertClean("host EXAMPLE-HOST up"), "host <host> up")

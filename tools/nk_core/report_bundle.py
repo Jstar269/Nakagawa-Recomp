@@ -87,9 +87,12 @@ _USERS_DIR = re.compile(
     r"(?:\\\\\?\\|\\\\\.\\|file:/+)?"
     r"(?:(?:/mnt/[A-Za-z]|[A-Za-z]:))?"
     r"[\\/]+(?:Users|Documents and Settings)[\\/]+"
-    r"(?P<name>[^\\/\"'<>|:*?,;(){}\[\]]+)",
+    # Spaces belong to a profile name; line breaks and tabs end it.
+    r"(?P<name>[^\\/\"'<>|:*?,;(){}\[\]\r\n\t]+)",
     re.IGNORECASE)
-_POSIX_HOME = re.compile(r"(?<![A-Za-z0-9_.\-])(?:/var)?/(?:home|Users)/(?P<name>[^/\"'<>|:*?,;(){}\[\]]+)")
+_POSIX_HOME = re.compile(
+    r"(?<![A-Za-z0-9_.\-])(?:/var)?/(?:home|Users)/(?P<name>[^/\"'<>|:*?,;(){}\[\]\r\n\t]+)"
+)
 
 
 @dataclass(frozen=True)

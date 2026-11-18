@@ -750,6 +750,25 @@ def generate_package_notices(
         key=lambda p: p.name.lower(),
     )
 
+    # Check imports of all binaries to ensure any dependent toolchain runtime DLLs are staged if available
+    if toolchain_root:
+        bin_dir = toolchain_root / "bin"
+        if bin_dir.is_dir():
+            staged_names = packaged_dll_names()
+            for binary in list(binaries):
+                imports = get_binary_imports(binary, toolchain_root)
+                for imp in imports:
+                    imp_lower = imp.lower()
+                    if imp_lower in staged_names:
+                        dst = package_dir / imp
+                        if not dst.is_file():
+                            src = bin_dir / imp
+                            if src.is_file():
+                                shutil.copyfile(src, dst)
+                                binaries.append(dst)
+
+    binaries = sorted(set(binaries), key=lambda p: p.name.lower())
+
     # Build component license records
     components: list[dict[str, Any]] = []
     license_files_to_copy: list[tuple[str, Path, str]] = []  # (target_filename, src_path, display_name)
