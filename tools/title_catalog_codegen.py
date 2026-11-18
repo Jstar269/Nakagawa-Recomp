@@ -11,8 +11,10 @@ Emits:
   src/core/generated/nk_title_catalog.c
 
 Guarantees:
-  - Unknown, unclassified, or excluded manifests (such as hst-ucus98701.json)
-    are NEVER included in the public catalog.
+  - Unknown, unclassified, or excluded manifests (any assets/titles/*.json the
+    profile does not list in include_paths, such as a developer's untracked
+    private manifest) are NEVER included in the public catalog. The HST
+    manifest hst-ucus98701.json is tracked and included.
   - Generates an in-memory runtime overlay hook for local private testing.
 """
 
@@ -150,8 +152,17 @@ def _c_string_escape(value: str) -> str:
     then re-escape the backslash this function just introduced. The manifest
     schema permits both characters in display_name, so a name containing
     either previously emitted a broken or misinterpreted literal.
+
+    A question mark is written as the ``\\?`` escape so no two of them are
+    adjacent in the source: the catalog is compiled with -std=c99, where a
+    trigraph such as ``??!`` would become ``|`` and ``??/`` a backslash that
+    escapes the closing quote.
     """
-    return value.replace(chr(92), chr(92) * 2).replace('"', chr(92) + '"')
+    return (
+        value.replace(chr(92), chr(92) * 2)
+        .replace('"', chr(92) + '"')
+        .replace("?", chr(92) + "?")
+    )
 
 
 def _default_game_name(title_id: str) -> str:
@@ -296,8 +307,10 @@ def generate_header(digest: str, titles: List[Dict[str, Any]]) -> str:
         "#include <stdint.h>",
         "",
         "#define NK_TITLE_CATALOG_SCHEMA_VERSION 1",
-        "#define NK_TITLE_MAX_LOOSE_CONTENT_ROOTS 16",
-        "#define NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES 2",
+        # Emitted from the validator's own limits so the native catalog admits
+        # exactly what title_manifest.py admits and the two cannot drift.
+        f"#define NK_TITLE_MAX_LOOSE_CONTENT_ROOTS {title_manifest.MAX_LOOSE_CONTENT_ROOTS}",
+        f"#define NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES {title_manifest.MAX_LOOSE_CONTENT_EXCLUDES}",
         f'#define NK_TITLE_CATALOG_DIGEST "{digest}"',
         "",
         "typedef enum {",
@@ -445,7 +458,9 @@ def generate_source(digest: str, titles: List[Dict[str, Any]]) -> str:
         "",
         "#define NK_CATALOG_MAX_OVERLAYS 8",
         "#define NK_CATALOG_MAX_COMPATIBLE_DISC_IDS 16",
-        "#define NK_CATALOG_MAX_MODULES 32",
+        # A snapshot copies every module a valid manifest may list; a smaller
+        # cap made a valid title with more modules look absent from the catalog.
+        f"#define NK_CATALOG_MAX_MODULES {title_manifest.MAX_TITLE_MODULES}",
         "static const NkTitleEntry *s_private_overlay_entries[NK_CATALOG_MAX_OVERLAYS];",
         "static int s_private_overlay_count = 0;",
         "static NkOverlayStorageResetFn s_overlay_storage_reset = NULL;",

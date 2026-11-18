@@ -310,24 +310,28 @@ class XBProbeTests(unittest.TestCase):
             XBArchiveReader.from_bytes(raw, limits=XBLimits(max_total_expanded_bytes=150))
 
     def test_string_table_corruptions(self) -> None:
-        # Unterminated string table
-        raw = _make_archive([("a.bin", b"x", XBCompression.NONE)])
-        st_start = raw.find(b"\x01")
+        name = b"a.bin"
+        raw = _make_archive([(name.decode("ascii"), b"x", XBCompression.NONE)])
+        # One entry: 8-byte header, one 8-byte table entry, then the 8-byte
+        # string-section header; the first name record starts there with its
+        # length byte, then the hash byte, then the NUL-terminated name.
+        record = 8 + 8 * 1 + 8
+        self.assertEqual(raw[record : record + 2 + len(name) + 1], bytes((len(name), _sjis_hash(name))) + name + b"\0")
+        XBArchiveReader.from_bytes(raw)
+
         mutated = bytearray(raw)
-        mutated[st_start + 2] = ord("a")
-        with self.assertRaises(XBProbeError):
+        mutated[record + 2 + len(name)] = ord("a")
+        with self.assertRaisesRegex(XBProbeError, "unterminated string-table path"):
             XBArchiveReader.from_bytes(bytes(mutated))
 
-        # Name length mismatch
         mutated = bytearray(raw)
-        mutated[st_start] = 5
-        with self.assertRaises(XBProbeError):
+        mutated[record] = len(name) - 1
+        with self.assertRaisesRegex(XBProbeError, "string-table path length mismatch"):
             XBArchiveReader.from_bytes(bytes(mutated))
 
-        # Bad name hash
         mutated = bytearray(raw)
-        mutated[st_start + 1] ^= 0xFF
-        with self.assertRaises(XBProbeError):
+        mutated[record + 1] ^= 0xFF
+        with self.assertRaisesRegex(XBProbeError, "string-table path hash mismatch"):
             XBArchiveReader.from_bytes(bytes(mutated))
 
     def test_path_validation_edge_cases(self) -> None:

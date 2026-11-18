@@ -14,14 +14,15 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from makefile_text import read_makefile  # noqa: E402
+import codegen_gate  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RT = ROOT / "src" / "rt"
-GATE_STUB = ROOT / "tools" / "gate_stub.c"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 MAKEFILE = ROOT / "Makefile"
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
@@ -44,198 +45,81 @@ _CI_BUILD_TO_MAKE_TARGET = {
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestGateStubLink(unittest.TestCase):
-    def test_same_headless_runtime_link_inputs_include_stale_detector(self) -> None:
+    """Link the headless driver exactly as tools/codegen_gate.py builds it.
+
+    The source list and flags come from codegen_gate.build_traced_driver itself,
+    not from a copy here, so a TU dropped from (or a flag missing in) the real
+    gate fails this test. Only the codegen step is replaced: it writes an empty
+    registration pair instead of translating an ELF.
+    """
+
+    def _build_gate_driver(self, work: Path) -> tuple[str | None, list[str], subprocess.CompletedProcess]:
         assert CC is not None
+        link: list[tuple[list[str], subprocess.CompletedProcess]] = []
+
+        def fake_run(cmd, **kw):
+            cmd = [str(part) for part in cmd]
+            if any(Path(part).name == "codegen.py" for part in cmd):
+                gen = Path(cmd[-1])
+                gen.write_text('#include "recomp.h"\nvoid sr_register_all(void) {}\n', encoding="ascii")
+                gen.with_name(gen.stem + "_0.c").write_text(
+                    '#include "recomp.h"\nvoid sr_register_chunk_0(void) {}\n', encoding="ascii"
+                )
+                return 0
+            result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, **kw)
+            if Path(cmd[0]).name != Path(sys.executable).name:
+                link.append((cmd, result))
+            return result.returncode
+
+        overrides = {"CC": CC, "CG_EXTRA_OBJS": "", "CG_EXTRA_CFLAGS": ""}
+        with mock.patch.object(codegen_gate, "run", fake_run), mock.patch.dict(os.environ, overrides):
+            driver = codegen_gate.build_traced_driver("synthetic.elf", str(work), dict(os.environ))
+        self.assertEqual(len(link), 1, "codegen_gate must invoke the compiler exactly once")
+        argv, result = link[0]
+        return driver, argv, result
+
+    def test_same_headless_runtime_link_inputs_include_stale_detector(self) -> None:
         with tempfile.TemporaryDirectory(prefix="gate_stub_link_") as td:
             work = Path(td)
-            generated = work / "gen.c"
-            chunk = work / "gen_0.c"
-            driver = work / ("driver.exe" if os.name == "nt" else "driver")
-            generated.write_text(
-                '#include "recomp.h"\n'
-                "void sr_register_all(void) {}\n",
-                encoding="ascii",
-            )
-            chunk.write_text(
-                '#include "recomp.h"\n'
-                "void sr_register_chunk_0(void) {}\n",
-                encoding="ascii",
-            )
-            # driver.c takes its fallback entry from the generic title configuration;
-            # the headless link therefore needs the configuration TU and a generated
-            # generic (no-title) artifact for it to compile against.
-            config_dir = work / "title-config"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            config_header = config_dir / "sr_title_config.h"
-            gen_res = subprocess.run(
-                [sys.executable, str(ROOT / "tools" / "title_runtime_config.py"), "--output", str(config_header)],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(gen_res.returncode, 0, gen_res.stdout + gen_res.stderr)
-            self.assertTrue(config_header.exists())
-            self.assertIn("0 binding(s)", gen_res.stdout)
-
-            command = [
-                CC,
-                "-O0",
-                "-w",
-                "-fno-var-tracking",
-                "-D_CRT_SECURE_NO_WARNINGS",
-                "-DSR_INSTRUCTION_TRACE",
-                "-DSR_GATE_BUILD",
-                "-I",
-                str(RT),
-                "-I",
-                str(ROOT / "src" / "core"),
-                "-I",
-                str(config_dir),
-                "-o",
-                str(driver),
-                str(generated),
-                str(chunk),
-                str(RT / "recomp.c"),
-                # recomp.c's sr_lookup()/dispatch() consult the exec-span
-                # registry and interpreter floor; this gate links the real
-                # runtime, so the real guest_interp implementation belongs in
-                # the link surface exactly as production requires.
-                str(RT / "guest_interp.c"),
-                # guest_interp.c calls the COP0/exception helpers; they link
-                # from the real TU, not from gate_stub.c dead symbols.
-                str(RT / "cpu_lle.c"),
-                str(RT / "domain_mode.c"),
-                # Both dispatch tiers call the TD-27 stale-block query; the
-                # real detector links here exactly as production requires.
-                # Gate off it is one cached branch, so the headless gate
-                # stays on the AOT path with zero guest-memory touches.
-                str(RT / "stale_code.c"),
-                str(RT / "vfpu_tables.c"),
-                str(RT / "driver.c"),
-                str(ROOT / "src" / "core" / "nk_shared_helpers.c"),
-                str(RT / "ace.c"),
-                # driver.c reports how the run ended to the real run recorder.
-                str(RT / "videorec.c"),
-                str(RT / "title_config.c"),
-                str(GATE_STUB),
-                "-lm",
-            ]
-            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+            driver, argv, result = self._build_gate_driver(work)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIsNotNone(driver)
+            assert driver is not None
+            self.assertTrue(Path(driver).is_file())
+            linked = {Path(part).name for part in argv if part.endswith(".c")}
+            for unit in ("recomp.c", "guest_interp.c", "cpu_lle.c", "stale_code.c", "driver.c",
+                         "videorec.c", "title_config.c", "gate_stub.c", "gen_0.c"):
+                self.assertIn(unit, linked)
+            includes = [Path(argv[i + 1]).resolve() for i, part in enumerate(argv[:-1]) if part == "-I"]
+            self.assertIn(RT.resolve(), includes)
+            self.assertIn((work / "title-config").resolve(), includes)
 
     def test_headless_driver_link_fails_without_title_config(self) -> None:
-        """Negative control: omitting title_config.c must fail at link time with an undefined reference."""
-        assert CC is not None
+        """Negative control: the real gate argv without title_config.c fails with an undefined reference."""
         with tempfile.TemporaryDirectory(prefix="gate_stub_link_neg_") as td:
-            work = Path(td)
-            generated = work / "gen.c"
-            chunk = work / "gen_0.c"
-            driver = work / ("driver.exe" if os.name == "nt" else "driver")
-            generated.write_text(
-                '#include "recomp.h"\n'
-                "void sr_register_all(void) {}\n",
-                encoding="ascii",
-            )
-            chunk.write_text(
-                '#include "recomp.h"\n'
-                "void sr_register_chunk_0(void) {}\n",
-                encoding="ascii",
-            )
-            config_dir = work / "title-config"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            config_header = config_dir / "sr_title_config.h"
-            subprocess.run(
-                [sys.executable, str(ROOT / "tools" / "title_runtime_config.py"), "--output", str(config_header)],
-                cwd=ROOT,
-                check=True,
-            )
-            # Omit title_config.c
-            command = [
-                CC,
-                "-O0",
-                "-w",
-                "-fno-var-tracking",
-                "-D_CRT_SECURE_NO_WARNINGS",
-                "-DSR_INSTRUCTION_TRACE",
-                "-DSR_GATE_BUILD",
-                "-I",
-                str(RT),
-                "-I",
-                str(ROOT / "src" / "core"),
-                "-I",
-                str(config_dir),
-                "-o",
-                str(driver),
-                str(generated),
-                str(chunk),
-                str(RT / "recomp.c"),
-                str(RT / "guest_interp.c"),
-                str(RT / "cpu_lle.c"),
-                str(RT / "domain_mode.c"),
-                str(RT / "stale_code.c"),
-                str(RT / "vfpu_tables.c"),
-                str(RT / "driver.c"),
-                str(ROOT / "src" / "core" / "nk_shared_helpers.c"),
-                str(RT / "ace.c"),
-                str(GATE_STUB),
-                "-lm",
-            ]
-            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+            _, argv, result = self._build_gate_driver(Path(td))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            without = [part for part in argv if Path(part).name != "title_config.c"]
+            self.assertEqual(len(without), len(argv) - 1)
+            result = subprocess.run(without, cwd=ROOT, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0, "link should have failed without title_config.c")
             self.assertIn("sr_title_config_fallback_entry", result.stderr + result.stdout)
 
     def test_headless_driver_link_fails_without_config_include(self) -> None:
-        """Negative control: omitting config include dir must fail to compile title_config.c."""
-        assert CC is not None
+        """Negative control: the real gate argv without the config include dir fails to compile."""
         with tempfile.TemporaryDirectory(prefix="gate_stub_link_neg_inc_") as td:
             work = Path(td)
-            generated = work / "gen.c"
-            chunk = work / "gen_0.c"
-            driver = work / ("driver.exe" if os.name == "nt" else "driver")
-            generated.write_text(
-                '#include "recomp.h"\n'
-                "void sr_register_all(void) {}\n",
-                encoding="ascii",
+            _, argv, result = self._build_gate_driver(work)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            config_dir = (work / "title-config").resolve()
+            index = next(
+                i for i, part in enumerate(argv[:-1])
+                if part == "-I" and Path(argv[i + 1]).resolve() == config_dir
             )
-            chunk.write_text(
-                '#include "recomp.h"\n'
-                "void sr_register_chunk_0(void) {}\n",
-                encoding="ascii",
-            )
-            # Omit -I config_dir
-            command = [
-                CC,
-                "-O0",
-                "-w",
-                "-fno-var-tracking",
-                "-D_CRT_SECURE_NO_WARNINGS",
-                "-DSR_INSTRUCTION_TRACE",
-                "-DSR_GATE_BUILD",
-                "-I",
-                str(RT),
-                "-I",
-                str(ROOT / "src" / "core"),
-                "-o",
-                str(driver),
-                str(generated),
-                str(chunk),
-                str(RT / "recomp.c"),
-                str(RT / "guest_interp.c"),
-                str(RT / "cpu_lle.c"),
-                str(RT / "domain_mode.c"),
-                str(RT / "stale_code.c"),
-                str(RT / "vfpu_tables.c"),
-                str(RT / "driver.c"),
-                str(ROOT / "src" / "core" / "nk_shared_helpers.c"),
-                str(RT / "ace.c"),
-                str(RT / "title_config.c"),
-                str(GATE_STUB),
-                "-lm",
-            ]
-            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+            without = argv[:index] + argv[index + 2:]
+            result = subprocess.run(without, cwd=ROOT, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0, "compilation should have failed without sr_title_config.h")
             self.assertIn("sr_title_config.h", result.stderr + result.stdout)
-
 
 def _logical_lines(text: str) -> list[str]:
     """Join backslash-newline continuations so one command is one line."""
