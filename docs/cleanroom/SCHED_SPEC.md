@@ -1,4 +1,4 @@
-# Clean-room behaviour specification — cooperative PSP thread scheduler
+# Behaviour specification — cooperative PSP thread scheduler
 
 Status: spec — no code in this document. Written under the campaign protocol
 (`../INDEPENDENCE_CAMPAIGN.md` §5) as a **spec-session** output: the derived
@@ -340,7 +340,7 @@ PGF, PGD) beyond failing through the existing seams; title-specific
 threading quirks — a title profile describes titles, never behaviour
 [C13].
 
-## 5. Clean-room constraints for this item
+## 5. Independence constraints
 
 - Upstream text in the authoring context: the spec session read the derived
   `sched.c` and its history; the implementation session must not (allow-list

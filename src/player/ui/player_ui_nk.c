@@ -548,6 +548,20 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     player->last_view = VIEW_LIBRARY;
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     player->disc_reported_view = -1;
+    {
+        /* NK_UI_TEST_ART_WAIT_PROBE=<iso path>: the host loop's wait with the art
+           loader idle, then with a read of that image waiting to start. */
+        const char *probe = getenv("NK_UI_TEST_ART_WAIT_PROBE");
+        if (probe != NULL && probe[0] != '\0') {
+            const NkUiImage *probe_icon = NULL;
+            uint32_t idle_wait = player_ui_nk_wait_ms(player, 50u);
+            player_ui_art_get(player->art, probe, false, &probe_icon, NULL);
+            printf("[PLAYER_UI_TEST] art_wait idle_ms=%u busy=%d busy_ms=%u\n",
+                   (unsigned)idle_wait, player_ui_art_busy(player->art) ? 1 : 0,
+                   (unsigned)player_ui_nk_wait_ms(player, 50u));
+            fflush(stdout);
+        }
+    }
 #endif
     nk_ui_sdl_input_init(&player->input);
     player_ui_version_line(NK_PLAYER_VERSION, (long long)NK_PLAYER_BUILD_EPOCH,
@@ -650,13 +664,16 @@ uint32_t player_ui_nk_wait_ms(const PlayerUiNk *player, uint32_t idle_ms) {
     /* Rounded up: a frame drawn a millisecond early would find nothing due. */
     wait_s = nk_ui_wait_s(player->ui, now_s, (double)idle_ms / 1000.0);
     /* A rest still under way wakes the loop when it ends. Once it has ended the
-       picture's read is the art worker's, which the idle wake picks up: a disc with
-       no picture must not keep the loop from sleeping. */
+       picture's read is the art worker's: the loop polls about once a frame only
+       while a read runs or waits to start, so a disc with no picture never keeps
+       it from sleeping. */
     if (player->rest_index != SIZE_MAX && player->rest_index != player->backdrop_index) {
         double rest_s = player->rest_since_s + NK_UI_MOTION_ART_REST - now_s;
         if (rest_s > 0.0 && rest_s < wait_s) wait_s = rest_s;
     }
-    return (uint32_t)ceil(wait_s * 1000.0);
+    /* Each read serves one disc and is collected on a frame; without this a
+       library page filled in one card per idle wake (audit 2026-11-17). */
+    return player_ui_art_wait_ms(player->art, (uint32_t)ceil(wait_s * 1000.0));
 }
 
 static void player_ui_format_size(char *out, size_t out_size, uint64_t bytes) {

@@ -110,6 +110,20 @@ static int hle_test_setenv(const char *name, const char *value) {
 #endif
 }
 
+/* A fixture that changes a variable the caller may have set saves the caller's value first and
+ * puts it back after, so neither it nor a later test depends on the caller's environment. */
+static char *hle_test_env_save(const char *name) {
+    const char *value = getenv(name);
+    char *copy = value ? (char *)malloc(strlen(value) + 1u) : NULL;
+    if (copy) memcpy(copy, value, strlen(value) + 1u);
+    return copy;
+}
+
+static void hle_test_env_restore(const char *name, char *saved) {
+    hle_test_setenv(name, saved);
+    free(saved);
+}
+
 extern void sr_vblank_tick(void);
 void sr_ctrl_sample(void);
 extern int sr_thread_has_pending_callbacks(uint32_t thread_uid);
@@ -252,6 +266,7 @@ extern int sr_hle_test_data_state(void);
 extern size_t sr_hle_test_data_entry_count(void);
 extern int sr_hle_test_data_key_seen(const char *key_prefix);
 extern void sr_hle_test_data_reset(int pace_ms);
+extern void sr_hle_test_data_set_archive_walk_hook(void (*hook)(const wchar_t *dir));
 extern unsigned long long sr_hle_test_data_phase_ms(unsigned int phase);
 
 /* Issue #178 white-box message-pipe probes (defined in hle.c, selftest-only). */
@@ -1320,6 +1335,7 @@ static void title_hle_write_cstr(uint32_t addr, const char *text) {
 }
 
 static void test_guest_module_load_binding(void);
+static int runtime_module_path(char *out, size_t size, const char *file);
 
 /* #363: no title configuration arms an HLE display assist. For every profile the
  * production sceDisplaySetMode keeps its PSP success result and dispatches no guest body,
@@ -1660,9 +1676,7 @@ static int write_synthetic_libfont_prx(const char *path, uint32_t base) {
 
 static void test_synthetic_libfont_startup(const char *name, const char *guest_path,
                                            uint32_t base, int required) {
-    const char *root = getenv("SR_MODULE_DIR");
     char path[1024];
-    int written;
     CpuState cpu;
 
     expect(strcmp(name, "libfont.prx") == 0,
@@ -1673,10 +1687,9 @@ static void test_synthetic_libfont_startup(const char *name, const char *guest_p
            "libfont startup uses its required synthetic manifest base");
     if (base != SYNTH_LIBFONT_BASE || !guest_path || !name) return;
 
-    written = snprintf(path, sizeof(path), "%s/%s", root ? root : "", name);
-    expect(written > 0 && (size_t)written < sizeof(path),
-           "libfont startup fixture path fits the bounded test buffer");
-    if (written <= 0 || (size_t)written >= sizeof(path)) return;
+    expect(runtime_module_path(path, sizeof(path), name),
+           "libfont startup fixture path is under SR_MODULE_DIR and fits the bounded test buffer");
+    if (!path[0]) return;
     expect(write_synthetic_libfont_prx(path, base),
            "source-owned libfont PRX fixture is written");
 
@@ -2257,9 +2270,42 @@ static int runtime_module_identity(const char *path, SrModuleCode *code) {
     return 1;
 }
 
-static void runtime_module_path(char *out, size_t size, const char *file) {
+/* The guest-module fixtures write their PRX images under SR_MODULE_DIR, the scratch directory
+ * the title-config driver names. Unset or empty, the path is empty (nothing opens), never
+ * "/file" at the filesystem root. Returns 1 when the directory is named and the path fits. */
+static int runtime_module_path(char *out, size_t size, const char *file) {
     const char *root = getenv("SR_MODULE_DIR");
-    snprintf(out, size, "%s/%s", root ? root : "", file);
+    if (!size) return 0;
+    out[0] = '\0';
+    if (!root || !root[0]) return 0;
+    int written = snprintf(out, size, "%s/%s", root, file);
+    if (written <= 0 || (size_t)written >= size) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+static void test_guest_module_fixture_path_needs_its_directory(void) {
+    char *saved = hle_test_env_save("SR_MODULE_DIR");
+    char path[64];
+
+    hle_test_setenv("SR_MODULE_DIR", NULL);
+    memset(path, 'x', sizeof(path));
+    int ok = runtime_module_path(path, sizeof(path), "probe.prx");
+    expect(!ok && path[0] == '\0',
+           "guest-module fixture path: an unset SR_MODULE_DIR gives no path, not the filesystem root");
+    hle_test_setenv("SR_MODULE_DIR", "");
+    memset(path, 'x', sizeof(path));
+    ok = runtime_module_path(path, sizeof(path), "probe.prx");
+    expect(!ok && path[0] == '\0',
+           "guest-module fixture path: an empty SR_MODULE_DIR gives no path, not the filesystem root");
+    hle_test_setenv("SR_MODULE_DIR", "scratch");
+    ok = runtime_module_path(path, sizeof(path), "probe.prx");
+    expect(ok && strcmp(path, "scratch/probe.prx") == 0,
+           "guest-module fixture path: a named SR_MODULE_DIR holds the fixture");
+
+    hle_test_env_restore("SR_MODULE_DIR", saved);
 }
 
 static int s_rt_capture_fd = -1;
@@ -3391,6 +3437,11 @@ static void test_runtime_placed_modules(void) {
 static void test_guest_module_load_binding(void) {
     const char *mode = getenv("SR_TEST_GUEST_MODULE_LOAD");
     if (!mode || !mode[0]) return;
+    const char *module_dir = getenv("SR_MODULE_DIR");
+    if (!module_dir || !module_dir[0]) {
+        expect(0, "SR_MODULE_DIR names the guest-module fixture directory");
+        return;
+    }
 
     const char *name = NULL, *guest_path = NULL;
     uint32_t base = 0;
@@ -3413,12 +3464,10 @@ static void test_guest_module_load_binding(void) {
         return;
     }
     expect(required == 1, "synthetic manifest marks the guest module as required");
-    const char *root = getenv("SR_MODULE_DIR");
     char path[1024];
-    int written = snprintf(path, sizeof(path), "%s/%s", root ? root : "", name);
-    expect(written > 0 && (size_t)written < sizeof(path),
-           "synthetic guest-module path fits the test buffer");
-    if (written <= 0 || (size_t)written >= sizeof(path)) return;
+    expect(runtime_module_path(path, sizeof(path), name),
+           "synthetic guest-module path is under SR_MODULE_DIR and fits the test buffer");
+    if (!path[0]) return;
     const uint32_t sentinel = 0xA17E285Du;
     int collision = strcmp(mode, "collision") == 0;
     int missing = strcmp(mode, "missing") == 0;
@@ -4569,7 +4618,23 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     expect(ms_cell_refused_open(ms0_umd_guest, 0x0a01u) == 0x80010086u &&
                fd_host_bytes_equal(ms0_umd_host, ms0_umd_bytes, sizeof(ms0_umd_bytes)),
            "read-only CREAT|EXCL on an existing Memory Stick file stays at its unmeasured boundary");
+    /* A plain read-only open of the same name is a Memory Stick open too: it reads the
+     * Memory Stick file, and a missing one is not found, whatever the disc holds. */
+    memset(g_mem_base + MS_CELL_BACK, 0, 64u);
+    uint32_t ms0_umd_read_fd = ms_cell_path_call(MS_CELL_OPEN, ms0_umd_guest, 0x0001u);
+    expect(ms0_umd_read_fd >= 3u && ms0_umd_read_fd < 64u &&
+               ms_cell_fd_call(MS_CELL_READ, ms0_umd_read_fd, MS_CELL_BACK, 64u) ==
+                   sizeof(ms0_umd_bytes) &&
+               memcmp(g_mem_base + MS_CELL_BACK, ms0_umd_bytes, sizeof(ms0_umd_bytes)) == 0,
+           "a read-only ms0: open reads the Memory Stick file, not a same-named disc file");
+    if (ms0_umd_read_fd >= 3u && ms0_umd_read_fd < 64u)
+        (void)ms_cell_fd_call(MS_CELL_CLOSE, ms0_umd_read_fd, 0u, 0u);
     nk_remove_utf8(ms0_umd_host);
+    uint32_t ms0_umd_missing_fd = ms_cell_path_call(MS_CELL_OPEN, ms0_umd_guest, 0x0001u);
+    expect(ms0_umd_missing_fd == MS_ENOENT,
+           "a read-only ms0: open of a missing name is 0x80010002, not the disc file");
+    if (ms0_umd_missing_fd >= 3u && ms0_umd_missing_fd < 64u)
+        (void)ms_cell_fd_call(MS_CELL_CLOSE, ms0_umd_missing_fd, 0u, 0u);
     s_umd_io_ms0_alias_enabled = 0;
     s_umd_io_synthetic_enabled = 0;
 
@@ -5269,7 +5334,166 @@ static void test_fd_namespace(void) {
         expect(sr_hle_test_io_close(&cpu) == 0u &&
                    fd_host_bytes_equal(flags_host, (const uint8_t *)"", 0u),
                "TRUNC with no write ends at an empty file");
+
+        /* PSP_O_TRUNC without write access (PSP_O_RDONLY | PSP_O_TRUNC), or with PSP_O_APPEND,
+         * is no measured cell: it stops at the named boundary before any host open, and the
+         * existing file keeps its bytes instead of being emptied through a host truncation. */
+        fd_set_path(&cpu, path_addr, flags_guest);
+        uint32_t keep_fd = sr_hle_test_io_open(&cpu);
+        fd_guest_copy(payload_addr, "keep", 4u);
+        fd_set_write(&cpu, keep_fd, payload_addr, 4u);
+        expect(keep_fd < 64u && sr_hle_test_io_write(&cpu) == 4u,
+               "the unmeasured-TRUNC fixture writes its bytes");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = keep_fd;
+        (void)sr_hle_test_io_close(&cpu);
+        static const uint32_t unmeasured_trunc[] = {
+            0x0401u, 0x0502u, 0x0503u, 0x0702u  /* RDONLY|TRUNC, WRONLY|APPEND|TRUNC, RDWR, +CREAT */
+        };
+        for (size_t i = 0; i < sizeof(unmeasured_trunc) / sizeof(unmeasured_trunc[0]); i++) {
+            fd_set_path(&cpu, path_addr, flags_guest);
+            cpu.r[5] = unmeasured_trunc[i];
+            uint32_t rc = sr_hle_test_io_open(&cpu);
+            if (rc < 64u) {
+                memset(&cpu, 0, sizeof(cpu));
+                cpu.r[4] = rc;
+                (void)sr_hle_test_io_close(&cpu);
+            }
+            expect(rc == 0x80010086u &&
+                       fd_host_bytes_equal(flags_host, (const uint8_t *)"keep", 4u),
+                   "unmeasured PSP_O_TRUNC stops at the named boundary and leaves the file intact");
+        }
         remove(flags_host);
+    }
+
+    /* A guest path of 256 bytes or more keeps its device rules: the descriptor records the
+     * whole path, so a seek before the start of a Memory Stick file is the measured EINVAL
+     * (0x80010016), not the generic 0xffffffff. On Win32 a separator run (which that host
+     * collapses) keeps the host path short; the POSIX seam refuses repeated separators, so
+     * there the path runs through one 240-byte directory name. */
+    {
+        char long_guest[400];
+        char long_host[1024];
+        size_t at = (size_t)snprintf(long_guest, sizeof(long_guest), "ms0:/");
+#ifdef _WIN32
+        while (at < 300u) long_guest[at++] = '/';
+        snprintf(long_guest + at, sizeof(long_guest) - at, "NAKAGAWA_LONG_PATH.TXT");
+        fd_host_path(long_host, sizeof(long_host), "ms0:/NAKAGAWA_LONG_PATH.TXT");
+#else
+        while (at < 245u) long_guest[at++] = 'L';
+        long_guest[at] = '\0';
+        char long_dir_host[1024];
+        fd_host_path(long_dir_host, sizeof(long_dir_host), long_guest);
+        (void)mkdir(long_dir_host, 0777);
+        snprintf(long_guest + at, sizeof(long_guest) - at, "/NAKAGAWA_LONG_PATH.TXT");
+        fd_host_path(long_host, sizeof(long_host), long_guest);
+#endif
+        remove(long_host);
+        fd_set_path(&cpu, path_addr, long_guest);
+        uint32_t long_fd = sr_hle_test_io_open(&cpu);
+        expect(long_fd < 64u, "a Memory Stick file opens by a guest path longer than 255 bytes");
+        if (long_fd < 64u) {
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = long_fd;
+            cpu.r[5] = 0xffffffffu;   /* -1 */
+            cpu.r[6] = 0u;            /* SEEK_SET */
+            expect(sr_hle_test_io_lseek32(&cpu) == 0x80010016u,
+                   "a seek before the start of a long-path Memory Stick file is EINVAL");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = long_fd;
+            (void)sr_hle_test_io_close(&cpu);
+        }
+        remove(long_host);
+#ifndef _WIN32
+        (void)rmdir(long_dir_host);
+#endif
+    }
+
+    /* sceIoIoctl seek (0x01010005) and read (0x01030008) on a plain host file (fatms0:, which
+     * the ms0: ioctl rule does not cover). The seek reads a 16-byte record, so a record that
+     * ends past guest memory is EINVAL and moves nothing; a whence above 2 is the I/O error.
+     * The read checks its whole destination first: a buffer that ends past guest memory is
+     * EINVAL, writes nothing and leaves the position. */
+    {
+        static const char ioctl_guest[] = "fatms0:/NAKAGAWA_IOCTL_FILE.TXT";
+        enum { IOCTL_SEEK = 0x01010005u, IOCTL_READ = 0x01030008u, IOCTL_TELL = 0x01020004u };
+        const uint32_t record = payload_addr + 0x100u;
+        const uint32_t tell_out = payload_addr + 0x200u;
+        const uint32_t short_record = 0x0c000000u - 8u;
+        const uint32_t tail_out = 0x0c000000u - 4u;
+        char ioctl_host[256];
+        fd_host_path(ioctl_host, sizeof(ioctl_host), ioctl_guest);
+        remove(ioctl_host);
+        fd_set_path(&cpu, path_addr, ioctl_guest);
+        cpu.r[5] = 0x0603u;   /* RDWR | CREAT | TRUNC */
+        uint32_t io_fd = sr_hle_test_io_open(&cpu);
+        expect(io_fd < 64u, "the ioctl fixture opens a fatms0: file");
+        if (io_fd < 64u) {
+            fd_guest_copy(payload_addr, "abcdefgh", 8u);
+            fd_set_write(&cpu, io_fd, payload_addr, 8u);
+            expect(sr_hle_test_io_write(&cpu) == 8u, "the ioctl fixture writes eight bytes");
+#define IOCTL_CALL(cmd_, in_, inlen_, out_, outlen_)                                         \
+            (memset(&cpu, 0, sizeof(cpu)), cpu.r[4] = io_fd, cpu.r[5] = (cmd_),             \
+             cpu.r[6] = (in_), cpu.r[7] = (inlen_), cpu.r[8] = (out_), cpu.r[9] = (outlen_), \
+             sr_hle_test_io_ioctl(&cpu))
+#define IOCTL_TELL_NOW()                                                                     \
+            (IOCTL_CALL(IOCTL_TELL, 0u, 0u, tell_out, 4u) == 0u ? MEM_R32(tell_out) : UINT32_MAX)
+            MEM_W32(record + 0u, 2u); MEM_W32(record + 4u, 0u);
+            MEM_W32(record + 8u, 0u); MEM_W32(record + 12u, 0u);
+            expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0u && IOCTL_TELL_NOW() == 2u,
+                   "the ioctl seek moves to a SEEK_SET destination");
+            /* Section 7: each PPSSPP-derived seek answer logs its label once per run. */
+            extern void sr_hle_test_io_seek_note_reset(void);
+            sr_hle_test_io_seek_note_reset();
+            static char seek_log[2048];
+            FILE *seek_capture = NULL;
+            int seek_saved_fd = -1;
+            int seek_capturing = hle_data_stderr_capture_begin(&seek_capture, &seek_saved_fd);
+            MEM_W32(short_record + 0u, 6u); MEM_W32(short_record + 4u, 0u);
+            expect(IOCTL_CALL(IOCTL_SEEK, short_record, 4u, 0u, 0u) == 0x80010016u &&
+                       IOCTL_TELL_NOW() == 2u,
+                   "an ioctl seek record that ends past guest memory is EINVAL and moves nothing");
+            expect(IOCTL_CALL(IOCTL_SEEK, short_record, 4u, 0u, 0u) == 0x80010016u,
+                   "a second unreadable ioctl seek record is EINVAL again");
+            MEM_W32(record + 0u, 6u); MEM_W32(record + 12u, 3u);
+            expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0x80010005u &&
+                       IOCTL_TELL_NOW() == 2u,
+                   "an ioctl seek with whence 3 is the I/O error and moves nothing");
+            expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0x80010005u,
+                   "a second ioctl seek with whence 3 is the I/O error again");
+            seek_log[0] = '\0';
+            if (seek_capturing)
+                hle_data_stderr_capture_end(seek_capture, seek_saved_fd, seek_log, sizeof(seek_log));
+            expect(seek_capturing &&
+                       count_occurrences(seek_log, "HLE: PPSSPP-derived, not PSP-measured: sceIoIoctl seek "
+                                                   "(0x01010005) answers EINVAL (0x80010016)") == 1,
+                   "the derived unreadable-record seek answer is noted once per run");
+            expect(seek_capturing &&
+                       count_occurrences(seek_log, "HLE: PPSSPP-derived, not PSP-measured: sceIoIoctl seek "
+                                                   "(0x01010005) answers the I/O error (0x80010005)") == 1,
+                   "the derived whence-above-2 seek answer is noted once per run");
+            MEM_W32(record + 0u, 0xffffffffu); MEM_W32(record + 4u, 0x7fffffffu);
+            MEM_W32(record + 12u, 1u);
+            expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0x80010005u &&
+                       IOCTL_TELL_NOW() == 2u,
+                   "an ioctl seek by INT64_MAX from the position is the I/O error");
+            MEM_W32(record + 0u, 8u);
+            for (uint32_t i = 0; i < 4u; i++) MEM_W8(tail_out + i, 0x5au);
+            expect(IOCTL_CALL(IOCTL_READ, record, 4u, tail_out, 8u) == 0x80010016u &&
+                       MEM_R32(tail_out) == 0x5a5a5a5au && IOCTL_TELL_NOW() == 2u,
+                   "an ioctl read whose destination ends past guest memory is EINVAL and writes nothing");
+            MEM_W32(record + 0u, 4u);
+            expect(IOCTL_CALL(IOCTL_READ, record, 4u, payload_addr + 0x300u, 4u) == 4u &&
+                       MEM_R8(payload_addr + 0x300u) == 'c' &&
+                       MEM_R8(payload_addr + 0x303u) == 'f' && IOCTL_TELL_NOW() == 6u,
+                   "an ioctl read serves the file's bytes from the position");
+#undef IOCTL_TELL_NOW
+#undef IOCTL_CALL
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = io_fd;
+            (void)sr_hle_test_io_close(&cpu);
+        }
+        remove(ioctl_host);
     }
 
     /* DOS device names (join rule): create-open is not-found, matching the POSIX open
@@ -6635,6 +6859,61 @@ static void test_umd_io_console_model(void) {
     s_umd_io_synthetic_enabled = 0;
 }
 
+#ifndef _WIN32
+/* The POSIX host-path layer (hle_host.c) splits and canonicalises paths as the Win32 layer does. */
+int sr_wide_basename_alloc(const wchar_t *path, wchar_t **out);
+int sr_wide_path_alloc(const char *utf8_path, wchar_t **out);
+int sr_wide_configured_root_wide_alloc(const wchar_t *value, wchar_t **out);
+
+static int posix_wide_is(int (*fn)(const wchar_t *, wchar_t **), const wchar_t *in,
+                         const wchar_t *want) {
+    wchar_t *got = NULL;
+    int ok = fn(in, &got) == 1 && got && wcscmp(got, want) == 0;
+    free(got);
+    return ok;
+}
+
+static int posix_path_is(const char *in, const wchar_t *want) {
+    wchar_t *got = NULL;
+    int ok = sr_wide_path_alloc(in, &got) == 1 && got && wcscmp(got, want) == 0;
+    free(got);
+    return ok;
+}
+
+static void test_posix_host_path_components(void) {
+    /* A root such as SR_DATAROOT=/x/data/ is split for the primary-root skip: its name is
+     * "data", terminated, not the trailing '/' it was stripped of. */
+    expect(posix_wide_is(sr_wide_basename_alloc, L"/x/data/", L"data") &&
+               posix_wide_is(sr_wide_basename_alloc, L"/x/data//", L"data") &&
+               posix_wide_is(sr_wide_basename_alloc, L"/x/data", L"data"),
+           "the base name of a path with a trailing '/' is the terminated last component");
+
+    /* '.' and '..' are collapsed lexically, as GetFullPathNameW does on Windows, rather than
+     * refused: SR_MEMSTICK=../memstick and SR_DATAROOT=/opt/nk/../data work on both hosts. */
+    expect(posix_path_is("/a/./b/../c", L"/a/c") && posix_path_is("/a/b/..", L"/a") &&
+               posix_path_is("/..", L"/") && posix_path_is("/a//./b", L"/a/b"),
+           "an absolute path's dot components are collapsed and never climb above '/'");
+    {
+        wchar_t *plain = NULL, *dotted = NULL;
+        int ok = sr_wide_path_alloc("nk_dot_probe", &plain) == 1 &&
+                 sr_wide_path_alloc("nk_sub/../nk_dot_probe", &dotted) == 1 &&
+                 plain && dotted && wcscmp(plain, dotted) == 0;
+        free(plain);
+        free(dotted);
+        expect(ok, "a relative path with dot components resolves against the working directory");
+    }
+    expect(posix_wide_is(sr_wide_configured_root_wide_alloc, L"/opt/nk/../data", L"/opt/data") &&
+               posix_wide_is(sr_wide_configured_root_wide_alloc, L"/opt/./font", L"/opt/font"),
+           "a configured absolute root with dot components is collapsed, as on Windows");
+    {
+        wchar_t *got = NULL;
+        expect(sr_wide_configured_root_wide_alloc(L"../data", &got) == 0 && !got,
+               "a relative configured root is still refused");
+        free(got);
+    }
+}
+#endif
+
 /* Issue #334: ordinary sceIo* and savedata must share one canonical host
  * Memory Stick root and one path resolver. Fails before the unification (flat
  * fs/ vs hierarchical memstick/) and passes after. */
@@ -6867,6 +7146,37 @@ static void test_ms0_unified_namespace(void) {
         nk_remove_utf8(host);
         nk_remove_utf8(legacy_flat);
     }
+#ifndef _WIN32
+    /* --- a legacy flat import that fails part way leaves no partial copy ---
+     * On this host a directory opens as a stream and then fails its first read, so the copy
+     * stops after the destination was created. A file left there would be found by the next
+     * open, which would then never import again and serve the guest a truncated save. */
+    {
+        char legacy_dir[512];
+        snprintf(legacy_dir, sizeof legacy_dir, "%s/ms0__LEGACY_BAD.TXT", legacy_root);
+        nk_platform_mkdir_p(legacy_dir);
+        static const char bad_guest[] = "ms0:/LEGACY_BAD.TXT";
+        fd_host_path(host, sizeof(host), bad_guest);
+        nk_remove_utf8(host);
+        uint32_t before = sr_hle_test_ms0_legacy_import_count();
+        memset(&cpu, 0, sizeof cpu);
+        fd_set_path(&cpu, PATH_ADDR, bad_guest);
+        cpu.r[5] = 1u; /* O_RDONLY: import only on read miss */
+        uint32_t bfd = sr_hle_test_io_open(&cpu);
+        expect(bfd >= 64u, "a legacy flat source that cannot be read does not open");
+        if (bfd < 64u) {
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = bfd;
+            sr_hle_test_io_close(&cpu);
+        }
+        expect(sr_hle_test_ms0_legacy_import_count() == before,
+               "a failed legacy flat import is not counted as an import");
+        expect(nk_platform_path_missing(host),
+               "a failed legacy flat import leaves no partial copy under SR_MEMSTICK");
+        nk_remove_utf8(host);
+        rmdir(legacy_dir);
+    }
+#endif
 
     /* --- savedata SAVE and ordinary sceIoOpen see the same host path --- */
     {
@@ -6984,9 +7294,13 @@ static void test_ms0_unified_namespace(void) {
         snprintf(jpath, sizeof jpath, "%s%cJCT_LINK.TXT", ms_root, sep);
         nk_remove_utf8(jpath);
 #ifdef _WIN32
-        char jcmd[1200];
-        snprintf(jcmd, sizeof jcmd,
-                 "cmd /c mklink \"%s\" \"%s\" >nul 2>&1", jpath, victim);
+        /* A file symlink keeps a relative target relative to its own folder, and the victim is
+         * named relative to the working directory: name it by its full path so the link really
+         * reaches it, rather than dangling and failing every open whatever the containment. */
+        char jcmd[1400], victim_full[MAX_PATH];
+        DWORD jfull = GetFullPathNameA(victim, MAX_PATH, victim_full, NULL);
+        snprintf(jcmd, sizeof jcmd, "cmd /c mklink \"%s\" \"%s\" >nul 2>&1", jpath,
+                 jfull > 0 && jfull < MAX_PATH ? victim_full : victim);
         int made = system(jcmd) == 0 &&
 #else
         /* POSIX's planted link is a symlink; its target resolves from the link's own directory. */
@@ -6994,12 +7308,27 @@ static void test_ms0_unified_namespace(void) {
 #endif
                    !nk_platform_path_missing(jpath);
         if (made) {
+            /* The fixture is live only if the host reaches the victim through the link. */
+            char seen[sizeof(payload)] = {0};
+            FILE *lf = fopen(jpath, "rb");
+            size_t got = lf ? fread(seen, 1, sizeof(seen) - 1u, lf) : 0u;
+            if (lf) fclose(lf);
+            expect(got == sizeof(payload) - 1u && memcmp(seen, payload, got) == 0,
+                   "the planted link reaches the victim outside the unified root");
             fd_guest_copy(PATH_ADDR, "ms0:/JCT_LINK.TXT", sizeof("ms0:/JCT_LINK.TXT"));
             fd_set_path(&cpu, PATH_ADDR, "ms0:/JCT_LINK.TXT");
             cpu.r[5] = 1u;
             uint32_t jfd = sr_hle_test_io_open(&cpu);
-            expect(jfd == 0x80010002u || jfd >= 64u,
-                   "open through a reparse point outside the unified root fails closed");
+#ifdef _WIN32
+            /* The Win32 open refuses the reparse point as a missing file. */
+            const uint32_t refused = 0x80010002u;
+#else
+            /* The POSIX leaf open is O_NOFOLLOW: ELOOP is SR_CD_NOT_CONTAINED. */
+            const uint32_t refused = 0x80010016u;
+#endif
+            expect(jfd == refused,
+                   "open through a link that reaches outside the unified root is refused by "
+                   "its containment code");
             if (jfd < 64u) {
                 memset(&cpu, 0, sizeof cpu);
                 cpu.r[4] = jfd;
@@ -8181,6 +8510,24 @@ static void test_sysreg_virtual_registry(void) {
                "sceRegOpenRegistry serves 512 handles and refuses the 513th with NO_MEMORY");
         for (uint32_t i = 0; i < opened; i++) (void)sysreg_call(NID_SCE_REG_CLOSE_REGISTRY, handles[i], 0u, 0u, 0u, 0u);
     }
+    /* LoadExec reboots the kernel: the old program's registry and category handles go with it,
+     * and the registry itself (its nodes) stays. */
+    {
+        const uint32_t old_reg = sysreg_open_registry(1u, &r);
+        expect(r == 0u && old_reg != 0u, "LoadExec fixture: the old program opens the registry");
+        const uint32_t old_cat = sysreg_open_category(old_reg, "/CONFIG/SYSTEM", 1u, &r);
+        expect(r == 0u && old_cat != 0u, "LoadExec fixture: the old program opens /CONFIG/SYSTEM");
+        sr_hle_loadexec_reset_guest_state();
+        expect(sysreg_call(NID_SCE_REG_CLOSE_CATEGORY, old_cat, 0u, 0u, 0u, 0u) == SYSREG_E_BAD_HANDLE &&
+                   sysreg_call(NID_SCE_REG_CLOSE_REGISTRY, old_reg, 0u, 0u, 0u, 0u) == SYSREG_E_BAD_HANDLE,
+               "after LoadExec the old program's registry and category handles are refused");
+        const uint32_t next_reg = sysreg_open_registry(1u, &r);
+        const uint32_t next_cat = next_reg ? sysreg_open_category(next_reg, "/CONFIG/SYSTEM", 1u, &r) : 0u;
+        expect(next_reg != 0u && next_cat != 0u,
+               "after LoadExec the next program opens the registry and its categories again");
+        if (next_cat) (void)sysreg_call(NID_SCE_REG_CLOSE_CATEGORY, next_cat, 0u, 0u, 0u, 0u);
+        if (next_reg) (void)sysreg_call(NID_SCE_REG_CLOSE_REGISTRY, next_reg, 0u, 0u, 0u, 0u);
+    }
     expect(!sysreg_file_exists(SYSREG_SCRATCH_FILE), "nothing reaches the overlay file without a flush");
     sysreg_restart();
 }
@@ -8958,6 +9305,7 @@ static void test_net_core_without_network(void) {
     extern void hle_net_reset(void);
     extern int sr_hle_test_net_inited(void);
     extern uint32_t sr_hle_test_net_pool_uid(void);
+    extern void sr_hle_test_net_note_reset(void);
     extern uint32_t block_addr(uint32_t uid);
     extern uint32_t alloc_block(uint32_t size);
     extern uint32_t free_block(uint32_t uid);
@@ -8967,6 +9315,12 @@ static void test_net_core_without_network(void) {
     sr_hle_test_partition_reset();
     sr_hle_init();
     hle_net_reset();
+    sr_hle_test_net_note_reset();
+    /* Section 7: each PPSSPP-derived sceNetInit cell logs its label the first time it answers. */
+    static char net_log[4096];
+    FILE *net_capture = NULL;
+    int net_saved_fd = -1;
+    int net_capturing = hle_data_stderr_capture_begin(&net_capture, &net_saved_fd);
 
     memset(SR_HOST(MAC_ADDR), 0xcc, 6u);
     expect(net_call(NID_NET_LOCAL_ETHER, MAC_ADDR, 0, 0, 0, 0) == 0x80410180u,
@@ -8975,6 +9329,11 @@ static void test_net_core_without_network(void) {
 
     expect(net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u,
            "sceNetInit(0x20000, 0x20, 0x1000, 0x20, 0x1000) returns 0, as on a PSP");
+    net_log[0] = '\0';
+    if (net_capturing) hle_data_stderr_capture_end(net_capture, net_saved_fd, net_log, sizeof(net_log));
+    expect(net_capturing && strstr(net_log, "PPSSPP-derived") == NULL,
+           "the PSP-recorded sceNetInit logs no PPSSPP-derived note");
+    net_capturing = hle_data_stderr_capture_begin(&net_capture, &net_saved_fd);
     const uint32_t pool_uid = sr_hle_test_net_pool_uid();
     const uint32_t pool_addr = block_addr(pool_uid);
     expect(sr_hle_test_net_inited() && pool_addr != 0u &&
@@ -9014,6 +9373,23 @@ static void test_net_core_without_network(void) {
                net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x78u, 0x1000u) == 0x80020193u &&
                !sr_hle_test_net_inited(),
            "sceNetInit with a thread priority outside 0x08-0x77: ILLEGAL_PRIORITY (PPSSPP; UNMEASURED)");
+    expect(net_call(NID_NET_INIT, 0u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0x800201b7u,
+           "sceNetInit with pool size 0 again: still ILLEGAL_MEMSIZE");
+    net_log[0] = '\0';
+    if (net_capturing) hle_data_stderr_capture_end(net_capture, net_saved_fd, net_log, sizeof(net_log));
+    {
+        const char *memsize = strstr(net_log, "PPSSPP-derived, not PSP-measured: sceNetInit (NID 0x39af39a6) "
+                                              "refuses pool size 0");
+        const char *memsize_cell = memsize ? strstr(memsize, "refuses pool size 0") : NULL;
+        expect(net_capturing && memsize_cell && !strstr(memsize_cell + 1, "refuses pool size 0"),
+               "sceNetInit's derived ILLEGAL_MEMSIZE cell logs its label once per run");
+        expect(strstr(net_log, "PPSSPP-derived, not PSP-measured: sceNetInit (NID 0x39af39a6) "
+                               "refuses a thread priority") != NULL,
+               "sceNetInit's derived ILLEGAL_PRIORITY cell logs its label");
+        expect(strstr(net_log, "PPSSPP-derived, not PSP-measured: sceNetInit (NID 0x39af39a6) "
+                               "again without sceNetTerm") != NULL,
+               "sceNetInit's derived re-init cell logs its label");
+    }
 
     /* A pool size within 255 of 4 GB has no 256-byte-rounded slot. With a small free block in the
      * partition the rounding must not wrap to a 256-byte slot that the free block satisfies. */
@@ -9038,8 +9414,14 @@ static void test_net_core_without_network(void) {
            "the switch-off overlay is written");
     sysreg_restart();
     expect(profile_call(0xd7763699u, 0u) == 0u, "the profile's WLAN switch reads off");
+    net_capturing = hle_data_stderr_capture_begin(&net_capture, &net_saved_fd);
     expect(net_call(NID_NET_INIT, POOL, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u && sr_hle_test_net_inited(),
            "sceNetInit with the WLAN switch off returns 0 (UNMEASURED; the switch-on result is kept)");
+    net_log[0] = '\0';
+    if (net_capturing) hle_data_stderr_capture_end(net_capture, net_saved_fd, net_log, sizeof(net_log));
+    expect(net_capturing && strstr(net_log, "PPSSPP-derived, not PSP-measured: sceNetInit (NID 0x39af39a6) "
+                                            "returns 0 with the WLAN switch off") != NULL,
+           "sceNetInit with the WLAN switch off logs its PPSSPP-derived label");
     expect(net_call(NID_NET_LOCAL_ETHER, MAC_ADDR, 0, 0, 0, 0) == 0x80410180u &&
                net_call(NID_NET_TERM, 0, 0, 0, 0, 0) == 0u,
            "with the switch off there is still no local address, and sceNetTerm returns 0");
@@ -10385,6 +10767,31 @@ static void test_osk_scripted_answer(void) {
     (void)sr_syscall(&cpu, k_down);
     (void)osk_poll(&cpu);
 
+    /* The field's outtextlength and outtextlimit are guest words: one too large for an int is
+     * clamped to the 256 units the runtime holds, never turned into a negative capacity that
+     * leaves the person nothing to type into. */
+    {
+        static const uint32_t caps[][2] = { { 0x80000000u, 0u }, { 16u, 0x7fffffffu },
+                                            { 0xffffffffu, 0xffffffffu } };
+        for (unsigned c = 0; c < sizeof(caps) / sizeof(caps[0]); c++) {
+            osk_person_reset();
+            osk_guest_build(1, caps[c][0], caps[c][1]);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = OSK_PARAM_ADDR;
+            expect(sr_syscall(&cpu, k_init) == 0u, "a keyboard with an oversized field starts");
+            (void)osk_poll(&cpu);
+            (void)osk_poll(&cpu);
+            expect(osk_poll_past_visible(&cpu) == 3u && s_osk_requests == 1 &&
+                       MEM_R32(OSK_FIELDS_ADDR + 0x2cu) == 2u && osk_guest_out_is(0, n, 1),
+                   "an outtextlength or outtextlimit past INT_MAX still gives the person a "
+                   "field to answer, and the answer lands as UTF-16");
+            memset(&cpu, 0, sizeof(cpu));
+            (void)sr_syscall(&cpu, k_down);
+            (void)osk_poll(&cpu);
+        }
+        osk_person_reset();
+    }
+
     /* Scripted: one answer per field in order, the native box is never opened, the text
      * lands as UTF-16, and a CANCEL answer reports CANCELLED. */
     expect(osk_write_script(cancel_lines, 4), "the OSK answer script fixture is written");
@@ -10473,6 +10880,36 @@ static void test_osk_scripted_answer(void) {
     memset(&cpu, 0, sizeof(cpu));
     (void)sr_syscall(&cpu, k_down);
     (void)osk_poll(&cpu);
+
+    /* A script line longer than an answer holds (255 bytes) is refused by line number and the
+     * script ends there: it is never copied past its answer row, and its tail is never read as
+     * the next field's answer. */
+    {
+        static char long_line[301];
+        memset(long_line, 'x', 300);
+        long_line[300] = '\0';
+        static const uint16_t a[] = { 'A' };
+        const char *const long_lines[] = { "A", long_line, "B" };
+        osk_env("SR_OSK_TEXT", NULL);
+        expect(osk_write_script(long_lines, 3), "the overlong OSK answer script fixture is written");
+        osk_guest_build(3, 16u, 0u);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = OSK_PARAM_ADDR;
+        expect(sr_syscall(&cpu, k_init) == 0u, "a keyboard with an overlong script line starts");
+        (void)osk_poll(&cpu);
+        (void)osk_poll(&cpu);
+        expect(osk_poll_past_visible(&cpu) == 3u && s_osk_requests == 0 &&
+                   MEM_R32(OSK_FIELDS_ADDR + 0x2cu) == 2u && osk_guest_out_is(0, a, 1),
+               "the answers before an overlong script line are kept");
+        expect(MEM_R32(OSK_FIELDS_ADDR + 0x34u + 0x2cu) == 1u && osk_guest_out_is(1, old, 3) &&
+                   MEM_R32(OSK_FIELDS_ADDR + 2u * 0x34u + 0x2cu) == 1u &&
+                   osk_guest_out_is(2, old, 3),
+               "an overlong script line ends the script: its field and the ones after it are "
+               "CANCELLED, never answered with pieces of that line");
+        memset(&cpu, 0, sizeof(cpu));
+        (void)sr_syscall(&cpu, k_down);
+        (void)osk_poll(&cpu);
+    }
 
     /* A parameter block that is not readable is refused instead of being written into. */
     osk_guest_build(1, 16u, 0u);
@@ -11053,8 +11490,12 @@ static void test_utility_dialog_single_slot(void) {
         }
         snprintf(what, sizeof(what), "%s finishes, then winds down to NONE after ShutdownStart",
                  dialogs[i].name);
-        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status) &&
-                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
+        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status), what);
+        /* With no network behind it, netconf must not finish with result 0, which a caller reads
+         * as a connection that was made (audit 2026-11-17): it finishes CANCEL (1). */
+        expect(MEM_R32(UTILITY_OTHER_PARAM_ADDR + 0x1cu) == 1u,
+               "sceUtilityNetconf with no network finishes CANCEL, not 0 (connected)");
+        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
                    utility_status(&cpu, dialogs[i].status) == 4u &&
                    utility_status(&cpu, dialogs[i].status) == 0u,
                what);
@@ -11297,6 +11738,22 @@ static void test_msg_dialog_answer_field(void) {
     expect(MEM_R32(UTILITY_MSG_PARAM_ADDR + OPTIONS) == 0xa5a5a5a5u &&
                MEM_R32(UTILITY_MSG_PARAM_ADDR + BUTTON_PRESSED) == 0x5a5a5a5au,
            "a V1 block has no buttonPressed: nothing past its 572 bytes is written");
+
+    /* The block's version is the size InitStart proved. A V1 block whose size word the guest
+     * rewrites to V2 after InitStart still gets no write past its 572 bytes. */
+    utility_param_block(UTILITY_MSG_PARAM_ADDR, 0x2c4u);
+    MEM_W32(UTILITY_MSG_PARAM_ADDR, 0x23cu);                  /* V1: 572 bytes */
+    MEM_W32(UTILITY_MSG_PARAM_ADDR + BUTTON_PRESSED, 0x5a5a5a5au);
+    expect(utility_call(&cpu, NID_MSG_DIALOG_INIT, UTILITY_MSG_PARAM_ADDR) == 0u,
+           "a V1 message dialog starts");
+    MEM_W32(UTILITY_MSG_PARAM_ADDR, 0x244u);                  /* rewritten after InitStart */
+    expect(utility_poll_to_finished(&cpu, NID_MSG_DIALOG_UPDATE, NID_MSG_DIALOG_STATUS) &&
+               utility_call(&cpu, NID_MSG_DIALOG_SHUTDOWN, 0u) == 0u,
+           "the rewritten V1 message dialog runs to FINISHED and shuts down");
+    for (int frame = 0; frame < 4; frame++)
+        if (utility_status(&cpu, NID_MSG_DIALOG_STATUS) == 0u) break;
+    expect(MEM_R32(UTILITY_MSG_PARAM_ADDR + BUTTON_PRESSED) == 0x5a5a5a5au,
+           "a size word rewritten after InitStart does not open +0x240 to the answer");
 }
 
 static void test_savedata_older_parameter_versions(void) {
@@ -16462,6 +16919,127 @@ static void test_umd_unregister_callback(void) {
     s_oracle_callback_calls = saved_callback_calls;
 }
 
+/* sceKernelLoadExec: the next program starts with none of the old program's UMD or GE callback
+ * registrations. The callback table and its UIDs start again, so a UMD registration that
+ * survived would name whatever callback the next program creates with that UID, and a GE
+ * callback slot that survived would keep the old program's code addresses and shift the next
+ * program's callback IDs. The drive is back at its program-entry state (0x32). */
+static void test_loadexec_drops_umd_and_ge_callbacks(void) {
+    enum {
+        NID_CREATE_CALLBACK = 0xe81caf8fu,
+        NID_CHECK_CALLBACK = 0x349d6d6cu,
+        NID_DELETE_CALLBACK = 0xedba5844u,
+        NID_UMD_ACTIVATE = 0xc6183d47u,
+        NID_UMD_DEACTIVATE = 0xe83742bau,
+        NID_UMD_GET_DRIVE_STAT = 0x6b4a146cu,
+        NID_UMD_REGISTER_CALLBACK = 0xaee7404du,
+        NID_UMD_UNREGISTER_CALLBACK = 0xbd2bde07u,
+        NID_GE_SET_CALLBACK = 0xa4fc06a4u,
+        NID_GE_UNSET_CALLBACK = 0x05db22ceu,
+        NID_GE_LIST_ENQUEUE = 0xab49e76au,
+        NID_GE_LIST_SYNC = 0x03444eb4u,
+        NID_GE_DRAW_SYNC = 0xb287bd61u,
+    };
+    extern void sr_hle_test_ge_lists_reset(void);
+    const uint32_t ge_info = 0x09034000u;
+    const uint32_t ge_list = 0x09035000u;
+    int saved_oracle_mode = s_oracle_mode;
+    int saved_callback_calls = s_oracle_callback_calls;
+    reset_fixture();
+    sr_hle_init();
+    memcpy(SR_HOST(ORACLE_CALLBACK_NAME), "umd-loadexec", sizeof("umd-loadexec"));
+    s_oracle_mode = 1;
+    s_oracle_callback_calls = 0;
+    CpuState cpu;
+
+    /* The old program: a UMD callback, a deactivated drive and a GE callback. */
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ORACLE_CALLBACK_NAME;
+    cpu.r[5] = ORACLE_CALLBACK_ENTRY;
+    cpu.r[6] = 0x55u;
+    const uint32_t old_cb = sr_syscall(&cpu, NID_CREATE_CALLBACK);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = old_cb;
+    expect(sr_callback_is_valid(old_cb) && sr_syscall(&cpu, NID_UMD_REGISTER_CALLBACK) == 0u,
+           "LoadExec fixture: the old program registers a UMD callback");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_UMD_DEACTIVATE) == 0u &&
+               sr_syscall(&cpu, NID_UMD_GET_DRIVE_STAT) == 0x12u,
+           "LoadExec fixture: the old program leaves the drive deactivated");
+    (void)sr_syscall(&cpu, NID_CHECK_CALLBACK);
+    MEM_W32(ge_info + 0u, 0u);
+    MEM_W32(ge_info + 4u, 0u);
+    MEM_W32(ge_info + 8u, 0x08900000u);                   /* an old-program finish function */
+    MEM_W32(ge_info + 12u, 0u);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_info;
+    const uint32_t old_ge = sr_syscall(&cpu, NID_GE_SET_CALLBACK);
+    expect(old_ge < 16u, "LoadExec fixture: the old program registers a GE callback");
+    /* The old program also leaves a ring-buffer list stalled at its start on the GE. */
+    sr_hle_test_ge_lists_reset();
+    MEM_W32(ge_list + 0u, 0x0f000000u);                   /* FINISH */
+    MEM_W32(ge_list + 4u, 0x0c000000u);                   /* END */
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_list;
+    cpu.r[5] = ge_list;                                   /* empty ring: stalled */
+    const uint32_t old_list = sr_syscall(&cpu, NID_GE_LIST_ENQUEUE);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect((old_list & 0xff000000u) == 0x35000000u && sr_syscall(&cpu, NID_GE_DRAW_SYNC) == 3u,
+           "LoadExec fixture: the old program leaves a list stalled on the GE");
+
+    sr_hle_loadexec_reset_guest_state();
+
+    /* The next program. */
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_UMD_GET_DRIVE_STAT) == 0x32u,
+           "after LoadExec the drive reads its program-entry state 0x32, not the old program's "
+           "deactivated 0x12");
+    cpu.r[4] = ORACLE_CALLBACK_NAME;
+    cpu.r[5] = ORACLE_CALLBACK_ENTRY;
+    cpu.r[6] = 0x66u;
+    const uint32_t new_cb = sr_syscall(&cpu, NID_CREATE_CALLBACK);
+    expect(sr_callback_is_valid(new_cb), "LoadExec fixture: the next program creates a callback");
+    s_oracle_callback_calls = 0;
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_UMD_ACTIVATE) == 0u && sr_syscall(&cpu, NID_CHECK_CALLBACK) == 0u &&
+               s_oracle_callback_calls == 0,
+           "after LoadExec a drive change notifies no callback the next program did not register");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = old_cb;
+    expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == 0x80010016u,
+           "after LoadExec the old program's UMD registration is gone");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 1u;
+    expect(sr_syscall(&cpu, NID_GE_DRAW_SYNC) == 0u,
+           "after LoadExec the GE is idle: the old program's stalled list is gone");
+    MEM_W32(ge_list + 0u, 0x0f000000u);                   /* FINISH */
+    MEM_W32(ge_list + 4u, 0x0c000000u);                   /* END */
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_list;
+    const uint32_t new_list = sr_syscall(&cpu, NID_GE_LIST_ENQUEUE);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = new_list;
+    cpu.r[5] = 1u;
+    expect((new_list & 0xff000000u) == 0x35000000u && sr_syscall(&cpu, NID_GE_LIST_SYNC) == 0u,
+           "after LoadExec the next program's first list runs to completion instead of queueing "
+           "behind the old program's stalled list");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_info;
+    const uint32_t new_ge = sr_syscall(&cpu, NID_GE_SET_CALLBACK);
+    expect(new_ge == 0u,
+           "after LoadExec the next program's first GE callback takes ID 0: no old-program slot "
+           "survives");
+
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = new_ge;
+    (void)sr_syscall(&cpu, NID_GE_UNSET_CALLBACK);
+    cpu.r[4] = new_cb;
+    (void)sr_syscall(&cpu, NID_DELETE_CALLBACK);
+    s_oracle_mode = saved_oracle_mode;
+    s_oracle_callback_calls = saved_callback_calls;
+}
+
 /* sceCtrlGetSamplingMode reports the mode retained by sceCtrlSetSamplingMode through a
  * required out-pointer, and a NULL pointer is refused without a write. */
 extern void sr_hle_test_ctrl_sampling_reset(void);
@@ -18985,8 +19563,11 @@ static size_t hle_data_stderr_capture_end(FILE *capture, int saved_fd,
     output[length] = '\0';
     clearerr(capture);
     if (saved_fd >= 0) {
-        dup2(saved_fd, fileno(stderr));
+        const int restored = dup2(saved_fd, fileno(stderr)) >= 0;
         close(saved_fd);
+        /* stdout too: an unrestored stderr would swallow its own FAIL line. */
+        if (!restored) printf("FAIL: stderr could not be restored after a capture\n");
+        expect(restored, "stderr is restored after a capture");
     }
     fclose(capture);
     return length;
@@ -19152,6 +19733,31 @@ static void test_archive_mode_preserves_loose_routes(void) {
                    "excluding sibling subtrees preserves extracted-primary precedence");
         }
     }
+#ifndef _WIN32
+    /* An excluded entry is skipped whatever its type, as in the Win32 walk: an excluded
+     * symbolic link does not fail the whole walk the way an included one does. */
+    {
+        char excluded_link[MAX_PATH];
+        char link_roots[MAX_PATH + 96];
+        int link_len = snprintf(link_roots, sizeof(link_roots),
+            "%s/" "USRDIR\t\t0\t1\t2\tpacked_archives\texcluded_link\n", fixture.root);
+        int link_ok = snprintf(excluded_link, sizeof(excluded_link), "%s/USRDIR/excluded_link",
+                               fixture.root) > 0 &&
+                      link_len > 0 && (size_t)link_len < sizeof(link_roots) &&
+                      symlink("NKMISSINGTARGET", excluded_link) == 0;
+        expect(link_ok, "the excluded-link fixture is created");
+        if (link_ok) {
+            hle_archive_route_set_env("SR_LOOSE_CONTENT_ROOTS", link_roots);
+            sr_hle_test_data_reset(0);
+            expect(sr_host_data_prepare() == SR_DATA_TEST_STATE_READY,
+                   "an excluded symbolic link is skipped and the walk reaches READY");
+            unlink(excluded_link);
+            /* The checks below run with the two-exclusion manifest, as before this case. */
+            if (filtered_len > 0 && (size_t)filtered_len < sizeof(filtered_roots))
+                hle_archive_route_set_env("SR_LOOSE_CONTENT_ROOTS", filtered_roots);
+        }
+    }
+#endif
 
     char duplicate_directory[MAX_PATH];
     char duplicate_data_directory[MAX_PATH];
@@ -19634,6 +20240,83 @@ static void test_archive_discovery_skips_unpack_folders_only(void) {
         snprintf(dir, sizeof dir, "%s%s", base, s_xb_unpack_dirs[i]);
         rmdir(dir);
     }
+}
+
+/* 2d. A directory that vanishes between archive discovery pushing it and opening it (a
+ * concurrent delete) is skipped, and the walk goes on: the archives in the directories
+ * still on the stack are mounted. The test seam removes whichever of the two archive
+ * directories the walk opens first, so the result is the same in any enumeration order. */
+static char s_vanish_dirs[2][MAX_PATH];
+static char s_vanish_archives[2][MAX_PATH];
+static int s_vanish_removed = -1;
+
+static int vanish_dir_is(const wchar_t *dir, const wchar_t *name) {
+    size_t length = wcslen(dir), name_length = wcslen(name);
+    return length > name_length && wcscmp(dir + length - name_length, name) == 0 &&
+           (dir[length - name_length - 1u] == L'/' || dir[length - name_length - 1u] == L'\\');
+}
+
+static void vanish_walk_hook(const wchar_t *dir) {
+    static const wchar_t *const names[2] = { L"vanish_one", L"vanish_two" };
+    if (s_vanish_removed >= 0) return;
+    for (int i = 0; i < 2; i++) {
+        if (!vanish_dir_is(dir, names[i])) continue;
+        nk_remove_utf8(s_vanish_archives[i]);
+        rmdir(s_vanish_dirs[i]);
+        s_vanish_removed = i;
+        return;
+    }
+}
+
+static void test_archive_discovery_walks_past_a_vanished_directory(void) {
+    static const char *const names[2] = { "vanish_one", "vanish_two" };
+    static const char *const members[2] = { "data/menu/vanish_one.to", "data/menu/vanish_two.to" };
+    static const char *const bodies[2] = { "one-archive", "two-archive" };
+    static const char *const guests[2] = {
+        "disc0:/PSP_GAME/USRDIR/data/menu/vanish_one.to",
+        "disc0:/PSP_GAME/USRDIR/data/menu/vanish_two.to",
+    };
+    char scratch[MAX_PATH], base[MAX_PATH];
+    reset_fixture();
+    sr_hle_init();
+    expect(hle_scratch_root(scratch, sizeof scratch), "the vanished-directory fixture has a scratch root");
+    snprintf(base, sizeof base, "%s/xb_vanish_%lu", scratch, (unsigned long)getpid());
+    int made = nk_platform_mkdir_p(base);
+    for (int i = 0; i < 2; i++) {
+        snprintf(s_vanish_dirs[i], sizeof s_vanish_dirs[i], "%s/%s", base, names[i]);
+        snprintf(s_vanish_archives[i], sizeof s_vanish_archives[i], "%s/%s.xb", s_vanish_dirs[i],
+                 names[i]);
+        const HleXbEntry entry = { members[i], (const uint8_t *)bodies[i], strlen(bodies[i]) };
+        made = made && nk_platform_mkdir_p(s_vanish_dirs[i]) &&
+               hle_xb_write(s_vanish_archives[i], &entry, 1u);
+    }
+    expect(made, "the vanished-directory fixture was created");
+
+    hle_test_setenv("SR_DATAROOT", base);
+    hle_test_setenv("SR_LOOSE_CONTENT_ROOTS", NULL);
+    sr_hle_test_data_reset(0);
+    s_vanish_removed = -1;
+    sr_hle_test_data_set_archive_walk_hook(vanish_walk_hook);
+    int state = sr_host_data_prepare();
+    sr_hle_test_data_set_archive_walk_hook(NULL);
+    expect(s_vanish_removed >= 0, "the seam removed one archive directory before it was opened");
+    expect(state == SR_DATA_TEST_STATE_READY && sr_hle_test_data_entry_count() == 1u,
+           "discovery mounts the archive of the directory still on the stack");
+    if (s_vanish_removed >= 0) {
+        const int kept = 1 - s_vanish_removed;
+        expect(hle_archive_route_file_matches(guests[kept], bodies[kept]),
+               "the directory after a vanished one is still walked and its archive serves");
+        expect(hle_archive_route_open_result(guests[s_vanish_removed]) == 0x80010002u,
+               "the vanished directory's archive is not served");
+    }
+
+    prewarm_env_restore();
+    sr_hle_test_data_reset(0);
+    for (int i = 0; i < 2; i++) {
+        nk_remove_utf8(s_vanish_archives[i]);
+        rmdir(s_vanish_dirs[i]);
+    }
+    rmdir(base);
 }
 
 static int host_data_duplicate_write_file(const char *root, const char *relative,
@@ -23248,8 +23931,10 @@ static void test_b23_second_round(void) {
 #define NID_VPL_REFER         0x39810265u
 /* PSP-measured (docs/HARDWARE_ORACLE.md kernel-object error table, PSP-B1-01): unknown VPL id. */
 #define VPL_UNKNOWN_ID_ERR    0x8002019cu
-/* UNMEASURED: no VPL exhausted code is recorded; the value predates the FPL measurement. */
-#define VPL_EXHAUSTED_ERR     0x80020190u /* pspautotests tests/threads/vpl/try.expected */
+/* A request no free block can hold: SCE_KERNEL_ERROR_NO_MEMORY, production's VPL_NO_SPACE
+ * (pspautotests tests/threads/vpl/try.expected; the 16th allocation of PSP-HLE-KERNEL-STATUS-002
+ * on the PSP-3000). */
+#define VPL_NO_SPACE_ERR      0x80020190u
 #define VPL_INFO              0x00240a00u
 #define VPL_OUTPTR            0x00240a80u
 #define NID_TLSPL_CREATE      0x8daff657u
@@ -27751,8 +28436,23 @@ static void test_ctrl_read_buffer_contract(void) {
     ctrl_drain(&cpu);
     ctrl_tick(4u);
     ctrl_fill_guest(CTRL_TAIL_BUF, CTRL_SAMPLE_BYTES, 0xa5a5a5a5u);
-    expect(ctrl_dispatch(&cpu, CTRL_TAIL_BUF, 2u) == 0u,
-           "a span crossing the end of the guest arena reports nothing written");
+    {
+        /* PPSSPP's 0 for a destination it cannot write is labelled and logged once per run
+         * (AGENTS.md section 7), so a run that takes it is told apart from a measured answer. */
+        extern void sr_hle_test_ctrl_bad_span_note_reset(void);
+        static char ctrl_log[1024];
+        FILE *ctrl_capture = NULL;
+        int ctrl_saved_fd = -1;
+        sr_hle_test_ctrl_bad_span_note_reset();
+        const int ctrl_capturing = hle_data_stderr_capture_begin(&ctrl_capture, &ctrl_saved_fd);
+        const uint32_t ctrl_rc = ctrl_dispatch(&cpu, CTRL_TAIL_BUF, 2u);
+        ctrl_log[0] = '\0';
+        if (ctrl_capturing) hle_data_stderr_capture_end(ctrl_capture, ctrl_saved_fd, ctrl_log, sizeof(ctrl_log));
+        expect(ctrl_rc == 0u, "a span crossing the end of the guest arena reports nothing written");
+        expect(ctrl_capturing && strstr(ctrl_log, "HLE: PPSSPP-derived, not PSP-measured: sceCtrlReadBufferPositive "
+                                                  "into 0x0bfffff0") != NULL,
+               "a read into an unwritable span logs its PPSSPP-derived label");
+    }
     expect(ctrl_guest_all(CTRL_TAIL_BUF, CTRL_SAMPLE_BYTES, 0xa5a5a5a5u),
            "a rejected tail span leaves even its writable leading sample untouched");
 
@@ -28773,6 +29473,17 @@ static void test_nested_frame_depth_is_bounded_and_fails_closed(void) {
         caller.flow_target = 0u;
         expect(sr_nested_frame_exhaustions() == 1u,
                "the pool-exhaustion refusal is counted");
+        /* A GE callback (the void marshaller) that cannot get a frame does not run, and the
+         * run must not carry on as if it had: the caller is stopped by name (audit 2026-11-17). */
+        {
+            CpuState ge_caller = caller;
+            ge_caller.flow_kind = SR_FLOW_NONE;
+            cbabi_reset();
+            sr_hle_test_call_guest_void(&ge_caller, CBABI_ENTRY, 0u, 0u, 0u);
+            expect(s_cbabi_calls == 0u && ge_caller.flow_kind == SR_FLOW_FATAL &&
+                       ge_caller.flow_target == CBABI_ENTRY,
+                   "a GE callback refused for want of a frame stops the run naming the callback");
+        }
         for (i = 0; i < SR_NESTED_FRAME_SLOTS; i++)
             if (handles[i] >= 0) (void)sr_nested_frame_release(handles[i]);
         expect(sr_nested_frame_live() == 0u, "releasing every handle empties the pool");
@@ -32101,6 +32812,12 @@ static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
 
     const uint32_t drive_us = hle_io_umd_read_us((uint64_t)URW_SECTORS * 2048u);
     const uint32_t minimum_us = hle_io_umd_read_us(2048u);
+    /* The model's own values, fixed here so a change to it has to change this test on purpose:
+     * 100 bytes per microsecond, never under 100 us (hle_io.c, PPSSPP-derived, not PSP-measured). */
+    expect(hle_io_umd_read_us(0u) == 100u && minimum_us == 100u &&
+               hle_io_umd_read_us(10000u) == 100u && hle_io_umd_read_us(10100u) == 101u &&
+               drive_us == URW_SECTORS * 2048u / 100u,
+           "the UMD drive's read time is 100 bytes per microsecond with a 100 us minimum");
     /* Blocks the sound thread outputs in the drive's time, less one for where in a block the
      * read begins. */
     const uint32_t blocks = (uint32_t)((uint64_t)drive_us * 44100u / (URW_SOUND_FRAMES * 1000000ull));
@@ -33462,6 +34179,15 @@ static void test_ge_finish_callback_waits_for_interrupts(void) {
     sched_resume_interrupts(prev);
     expect(waited && s_gm.callbacks == 0u && !ge_finish_masked_pending(),
            "GE finish masked: a LoadExec drops the completions still waiting");
+    /* The LoadExec also dropped the old program's GE callback; the rest of this test is a new
+     * program that registers its own. */
+    MEM_W32(GE_TIM_INFO + 0u, 0u);
+    MEM_W32(GE_TIM_INFO + 4u, 0u);
+    MEM_W32(GE_TIM_INFO + 8u, GE_TIM_FINISH_FN);
+    MEM_W32(GE_TIM_INFO + 12u, GE_TIM_FINISH_ARG);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = GE_TIM_INFO;
+    s_ge_tim_cbid = sr_syscall(&cpu, NID_SCE_GE_SET_CALLBACK);
 
     /* SR_GE_TIMING=1: the model's completion service is the GE finish interrupt itself, so each
      * list's callback runs as that list completes: the second list is still drawing when the
@@ -33639,6 +34365,36 @@ static void test_ge_completion_timing(void) {
     expect(ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 0u &&
            ge_tim_sync(&cpu, NID_SCE_GE_DRAW_SYNC, 1u, 0u) == 0u,
            "GE timing off: the syncs read the list as complete at once");
+    /* A callback registered with finish_arg 0 gets 0, even when the list was enqueued with a
+     * SceGeListArgs block: that pointer (sceGeListEnQueue's fourth argument) is not a callback
+     * argument (audit 2026-11-17). */
+    {
+        const uint32_t list_args = GE_TIM_INFO + 0x40u;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = s_ge_tim_cbid;
+        expect(sr_syscall(&cpu, NID_SCE_GE_UNSET_CALLBACK) == 0u,
+               "GE finish: the timing callback unregisters");
+        MEM_W32(GE_TIM_INFO + 12u, 0u);                /* finish arg 0 */
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = GE_TIM_INFO;
+        s_ge_tim_cbid = sr_syscall(&cpu, NID_SCE_GE_SET_CALLBACK);
+        expect(s_ge_tim_cbid < 16u, "GE finish: the callback re-registers with finish_arg 0");
+        MEM_W32(list_args + 0u, 16u);                  /* size */
+        MEM_W32(list_args + 4u, 0u);                   /* context */
+        MEM_W32(list_args + 8u, 0u);                   /* numStacks */
+        MEM_W32(list_args + 12u, 0u);                  /* stacks */
+        ge_tim_write_list(GE_TIM_DL2, 0u);
+        s_ge_tim_calls = 0;
+        s_ge_tim_arg = 0xdeadbeefu;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = GE_TIM_DL2;
+        cpu.r[5] = 0u;
+        cpu.r[6] = s_ge_tim_cbid;
+        cpu.r[7] = list_args;
+        (void)sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+        expect(s_ge_tim_calls == 1u && s_ge_tim_arg == 0u,
+               "GE finish: a callback registered with finish_arg 0 gets 0, not the list-args pointer");
+    }
     ge_tim_teardown();
 
     /* T0 at the boot bus clock (111 MHz): an empty list is 1665 clk = 15 us. */
@@ -35031,6 +35787,112 @@ static void test_dmac_active_transfer_across_threads(void) {
     dmac_cc_run(NID_SCE_DMAC_TRY_MEMCPY, NID_SCE_DMAC_MEMCPY, 1, "concurrent-try-memcpy");
 }
 
+/* ---- sceDmacMemcpy reads VRAM the renderer wrote while the call waited ---------------------
+ *
+ * A blocking copy from VRAM that queues behind another thread's transfer copies after the
+ * wait, and other guest threads run during the wait. One of them renders into the source
+ * (the GE output lands in the renderer, and g_sr_vram_read_pending says host VRAM is behind
+ * it). The copy must bring host VRAM up to date before it reads it, as every bulk VRAM reader
+ * does, so the destination gets the rendered bytes, not the ones host VRAM held before the
+ * wait. The renderer here is a stand-in: its pending pixels reach host VRAM only through
+ * vram_read, as the real renderer's readback does. */
+enum {
+    DMAC_VR_MAIN_ENTRY = 0x08a32000u,
+    DMAC_VR_FIRST_ENTRY = 0x08a32040u,
+    DMAC_VR_FIRST_NAME = 0x08a32100u,
+    DMAC_VR_VRAM_SRC = 0x04120000u,
+    DMAC_VR_DST = 0x086a0000u,
+    DMAC_VR_SIZE = 0x1000u,
+};
+static int s_dmac_vr_render_pending;   /* the stand-in renderer holds pixels host VRAM lacks */
+static unsigned s_dmac_vr_reads;       /* readbacks that covered the rendered span */
+static uint32_t s_dmac_vr_first_ret, s_dmac_vr_main_ret, s_dmac_vr_first_uid;
+static int s_dmac_vr_first_rendered, s_dmac_vr_main_finished;
+
+static int dmac_vr_vram_read(uint32_t addr, uint32_t bytes) {
+    if (s_dmac_vr_render_pending && bytes != 0u && addr < DMAC_VR_VRAM_SRC + DMAC_VR_SIZE &&
+        DMAC_VR_VRAM_SRC < addr + bytes) {
+        memset(g_mem_base + DMAC_VR_VRAM_SRC, 0xc3, DMAC_VR_SIZE);
+        s_dmac_vr_render_pending = 0;
+        s_dmac_vr_reads++;
+    }
+    return 1;
+}
+
+static int dmac_vr_vram_pending(void) { return s_dmac_vr_render_pending; }
+
+static const GeGpuHooks s_dmac_vr_gpu_hooks = {
+    .vram_read = dmac_vr_vram_read,
+    .vram_pending = dmac_vr_vram_pending,
+};
+
+static void dmac_vr_first_fn(CpuState *cpu) {
+    s_dmac_vr_first_ret = dmac_cc_call(NID_SCE_DMAC_MEMCPY, DMAC_CC_DST_FIRST);
+    /* The main thread is queued behind this transfer now; render into its source. */
+    s_dmac_vr_render_pending = 1;
+    sr_vram_mark_renderer_pending();
+    s_dmac_vr_first_rendered = 1;
+    cpu->r[2] = 0u;
+}
+
+static void dmac_vr_main_fn(CpuState *cpu) {
+    CpuState c;
+    memset(&c, 0, sizeof c);
+    title_hle_write_cstr(DMAC_VR_FIRST_NAME, "dmac-render");
+    c.r[4] = DMAC_VR_FIRST_NAME;
+    c.r[5] = DMAC_VR_FIRST_ENTRY;
+    c.r[6] = 0x10u;
+    c.r[7] = 0x4000u;
+    s_dmac_vr_first_uid = sr_syscall(&c, NID_SCE_KERNEL_CREATE_THREAD);
+    memset(&c, 0, sizeof c);
+    c.r[4] = s_dmac_vr_first_uid;
+    (void)sr_syscall(&c, NID_SCE_KERNEL_START_THREAD);   /* the stronger thread runs at once */
+    memset(&c, 0, sizeof c);
+    c.r[4] = DMAC_VR_DST;
+    c.r[5] = DMAC_VR_VRAM_SRC;
+    c.r[6] = DMAC_VR_SIZE;
+    s_dmac_vr_main_ret = sr_syscall(&c, NID_SCE_DMAC_MEMCPY);
+    memset(&c, 0, sizeof c);
+    c.r[4] = s_dmac_vr_first_uid;
+    (void)sr_syscall(&c, hle_selftest_nid("sceKernelWaitThreadEnd"));
+    s_dmac_vr_main_finished = 1;
+    cpu->r[2] = 0u;
+}
+
+static void test_dmac_copy_after_wait_reads_current_vram(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(DMAC_VR_MAIN_ENTRY, dmac_vr_main_fn);
+    sr_test_register_guest_fn(DMAC_VR_FIRST_ENTRY, dmac_vr_first_fn);
+    s_dmac_vr_render_pending = 0;
+    s_dmac_vr_reads = 0u;
+    s_dmac_vr_first_ret = s_dmac_vr_main_ret = 0xffffffffu;
+    s_dmac_vr_first_uid = 0u;
+    s_dmac_vr_first_rendered = s_dmac_vr_main_finished = 0;
+    dmac_fill(DMAC_CC_SRC, DMAC_CC_SIZE);
+    memset(g_mem_base + DMAC_VR_VRAM_SRC, 0x5a, DMAC_VR_SIZE);   /* host VRAM before the render */
+    memset(g_mem_base + DMAC_VR_DST, 0, DMAC_VR_SIZE);
+    g_sr_vram_read_pending = 0;
+    ge_set_gpu_hooks(&s_dmac_vr_gpu_hooks);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+
+    sched_run(DMAC_VR_MAIN_ENTRY, 0u, 0u);
+
+    expect(s_dmac_vr_main_finished && s_dmac_vr_first_rendered && s_dmac_vr_first_ret == 0u &&
+               s_dmac_vr_main_ret == 0u,
+           "dmac-vram-wait: both copies return 0 and the render lands while the second waits");
+    int rendered = 1;
+    for (uint32_t i = 0; i < DMAC_VR_SIZE; i++)
+        if (g_mem_base[DMAC_VR_DST + i] != 0xc3u) { rendered = 0; break; }
+    expect(rendered && s_dmac_vr_reads == 1u,
+           "dmac-vram-wait: a VRAM copy made after the wait reads the pixels rendered during it");
+    ge_set_gpu_hooks(NULL);
+    g_sr_vram_read_pending = 0;
+    sr_test_guest_fn_reset();
+}
+
 /* ---- sceDmac channel model from the PSP-3000 dma-timing probe (#303) ---------
  *
  * PSP-DMAC-002 (three acceptance-eligible runs, boots 61-63): with a priority-0x10
@@ -35283,6 +36145,69 @@ static void test_dmac_queued_callers_are_served_in_arrival_order(void) {
            "PSP-DMAC-002 a-04-00: a 4-byte phase difference adds 0.003895 us per byte (838 us)");
     expect(s_dch[1].exit_us >= s_dch[0].deadline_us + 58u && s_dch[2].exit_us >= s_dch[1].exit_us + 58u,
            "each queued caller returns after the transfer ahead of it plus its own (58 us)");
+}
+
+/* The presenter and the capture readers take 480 pixels from each of the 272 rows, so a legal
+ * stride narrower than 480 (any multiple of 64) still reads 480 pixels on the last row. The span
+ * check must cover that extent: a stride-64 32-bit framebuffer ending exactly at the top of RAM or
+ * eDRAM passes a 272-stride check, yet its last row reads about 1.6 KiB past it. */
+static void test_display_narrow_stride_span(void) {
+    reset_fixture();
+    sr_hle_init();
+    s_test_gui_on = 1;
+    s_test_gui_present_calls = 0;
+    expect(display_set(0x04000000u, 64, 3, 1) == 0u,
+           "a latched request selects the legal stride 64");
+    expect(display_set(0x08800000u, 64, 3, 0) == 0u && s_test_gui_present_calls == 1u,
+           "a stride-64 framebuffer whose 480-pixel rows fit is presented");
+    expect(display_set(0x0bfef000u, 64, 3, 0) == 0u && s_test_gui_present_calls == 1u,
+           "a stride-64 framebuffer whose last 480-pixel row runs past RAM is not presented");
+    expect(display_set(0x041ef000u, 64, 3, 0) == 0u && s_test_gui_present_calls == 1u,
+           "a stride-64 framebuffer whose last 480-pixel row runs past eDRAM is not presented");
+    s_test_gui_on = 0;
+}
+
+/* sceDisplayGetMode checks each output pointer before it writes any of them: one unwritable
+ * output refuses the call with 0x80000103 and leaves the others alone. That answer is
+ * JPCSP-derived, so the refusal names its label once per run (Section 7). */
+static void test_display_get_mode_span(void) {
+    extern void sr_hle_test_display_get_mode_note_reset(void);
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_display_get_mode_note_reset();
+    static char mode_log[2048];
+    FILE *mode_capture = NULL;
+    int mode_saved_fd = -1;
+    int mode_capturing = hle_data_stderr_capture_begin(&mode_capture, &mode_saved_fd);
+    const uint32_t mode_out = 0x09000000u, width_out = mode_out + 4u, height_out = mode_out + 8u;
+    MEM_W32(mode_out, 0xa5a5a5a5u);
+    MEM_W32(width_out, 0xa5a5a5a5u);
+    MEM_W32(height_out, 0xa5a5a5a5u);
+    s_cpu->r[4] = mode_out;
+    s_cpu->r[5] = 0x0c000000u; /* one byte past user RAM */
+    s_cpu->r[6] = height_out;
+    expect(sr_syscall(s_cpu, 0xdea197d4u) == 0x80000103u,
+           "GetMode refuses an unwritable width pointer with ILLEGAL_ADDR");
+    expect(MEM_R32(mode_out) == 0xa5a5a5a5u && MEM_R32(height_out) == 0xa5a5a5a5u,
+           "GetMode writes no output when one of them is unwritable");
+    s_cpu->r[4] = 0x0c000000u;
+    s_cpu->r[5] = width_out;
+    s_cpu->r[6] = height_out;
+    expect(sr_syscall(s_cpu, 0xdea197d4u) == 0x80000103u,
+           "GetMode refuses an unwritable mode pointer with 0x80000103 again");
+    mode_log[0] = '\0';
+    if (mode_capturing)
+        hle_data_stderr_capture_end(mode_capture, mode_saved_fd, mode_log, sizeof(mode_log));
+    expect(mode_capturing &&
+               count_occurrences(mode_log, "HLE: JPCSP-derived, not PSP-measured: sceDisplayGetMode output "
+                                           "0x0c000000 is not 4 writable bytes") == 1,
+           "the derived GetMode refusal is noted once per run");
+    s_cpu->r[4] = mode_out;
+    s_cpu->r[5] = width_out;
+    s_cpu->r[6] = height_out;
+    expect(sr_syscall(s_cpu, 0xdea197d4u) == 0u && MEM_R32(mode_out) == 0u &&
+               MEM_R32(width_out) == 480u && MEM_R32(height_out) == 272u,
+           "GetMode fills every writable output");
 }
 
 static void test_display_framebuf_latch(void) {
@@ -39081,26 +40006,42 @@ static void test_msgpipe_safety(void) {
            "receive on an empty pipe returns MPP_EMPTY");
 
     /* --- Churn: explicit invariants under mixed send/receive --- */
+    /* Every phase sends n bytes into the empty pipe and receives them back, so each call moves
+     * all n bytes, and the ring positions advance by n and wrap past the buffer's end. */
     int invariants_ok = 1;
+    int transfers_ok = 1;
     uint32_t cap = st.capacity; /* 64 */
-    for (uint32_t phase = 0; phase < 200u && invariants_ok; phase++) {
-        /* 1..cap: a 0-length request is ILLEGAL_SIZE by contract, so churn
-         * stays on legal request sizes to exercise the FULL/EMPTY boundary. */
+    for (uint32_t phase = 0; phase < 200u && invariants_ok && transfers_ok; phase++) {
+        /* 1..cap: a 0-length request is ILLEGAL_SIZE by contract. */
         uint32_t n = 1u + (phase * 7u + 3u) % cap;
-        msgpipe_setup(&cpu, uid, GUEST_BUF, n, 1u, GUEST_OUT);
-        uint32_t rc = sr_syscall(&cpu, NID_SCE_KERNEL_TRY_SEND_MSG_PIPE);
-        expect(rc == 0u || rc == SCE_KERNEL_ERROR_MPP_FULL,
-               "churn send returns success or MPP_FULL");
-        msgpipe_setup(&cpu, uid, GUEST_OUT, n, 1u, GUEST_OUT);
-        rc = sr_syscall(&cpu, NID_SCE_KERNEL_TRY_RECEIVE_MSG_PIPE);
-        expect(rc == 0u || rc == SCE_KERNEL_ERROR_MPP_EMPTY,
-               "churn receive returns success or MPP_EMPTY");
-        if (!sr_hle_test_msgpipe_state(uid, &st) ||
-            st.count > st.capacity || st.read_pos >= st.capacity || st.write_pos >= st.capacity) {
+        for (uint32_t i = 0; i < n; i++) {
+            MEM_W8(GUEST_BUF + i, (uint8_t)(phase * 31u + i));
+            MEM_W8(GUEST_OUT + i, 0u);
+        }
+        MEM_W32(GUEST_RES, 0xffffffffu);
+        msgpipe_setup(&cpu, uid, GUEST_BUF, n, 1u, GUEST_RES);
+        uint32_t send_rc = sr_syscall(&cpu, NID_SCE_KERNEL_TRY_SEND_MSG_PIPE);
+        uint32_t sent = MEM_R32(GUEST_RES);
+        MEM_W32(GUEST_RES, 0xffffffffu);
+        msgpipe_setup(&cpu, uid, GUEST_OUT, n, 1u, GUEST_RES);
+        uint32_t recv_rc = sr_syscall(&cpu, NID_SCE_KERNEL_TRY_RECEIVE_MSG_PIPE);
+        uint32_t received = MEM_R32(GUEST_RES);
+        int bytes_ok = 1;
+        for (uint32_t i = 0; i < n; i++)
+            if (MEM_R8(GUEST_OUT + i) != (uint8_t)(phase * 31u + i)) bytes_ok = 0;
+        if (send_rc != 0u || sent != n || recv_rc != 0u || received != n || !bytes_ok) {
+            printf("  msgpipe churn phase %u: send 0x%08x (%u of %u bytes), receive 0x%08x "
+                   "(%u bytes), bytes %s\n", (unsigned)phase, (unsigned)send_rc, (unsigned)sent,
+                   (unsigned)n, (unsigned)recv_rc, (unsigned)received, bytes_ok ? "match" : "differ");
+            transfers_ok = 0;
+        }
+        if (!sr_hle_test_msgpipe_state(uid, &st) || st.count != 0u ||
+            st.read_pos >= st.capacity || st.write_pos >= st.capacity) {
             invariants_ok = 0;
         }
     }
-    expect(invariants_ok, "count <= capacity and both positions < capacity under 200-op churn");
+    expect(transfers_ok, "every churn send and receive moves all n bytes, in order, across the ring's wrap");
+    expect(invariants_ok, "the pipe is empty and both positions < capacity after every churn phase");
 
     /* --- Delete: pipe no longer usable --- */
     memset(&cpu, 0, sizeof(cpu));
@@ -43357,7 +44298,7 @@ static void test_vpl_nonblocking_roundtrip(void) {
     MEM_W32(VPL_OUTPTR, 0xfeedfaceu);
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = vpl; cpu.r[5] = 1u; cpu.r[6] = VPL_OUTPTR;
-    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == VPL_EXHAUSTED_ERR,
+    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == VPL_NO_SPACE_ERR,
            "vpl exhaustion returns the existing pool error");
     expect(MEM_R32(VPL_OUTPTR) == 0xfeedfaceu, "vpl exhaustion leaves output/state untouched");
 
@@ -43427,7 +44368,7 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
     expect(all, "vpl holds as many blocks as its bytes allow (512 of 16 bytes), not 128");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = vpl; cpu.r[5] = 1u; cpu.r[6] = VPL_OUTPTR;
-    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == VPL_EXHAUSTED_ERR,
+    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == VPL_NO_SPACE_ERR,
            "vpl is exhausted only once its bytes are used");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = vpl; cpu.r[5] = 0xfffffff8u; cpu.r[6] = VPL_OUTPTR;
@@ -44633,7 +45574,7 @@ static void test_vpl_blocking_waits(void) {
     uint32_t addr2 = MEM_R32(out2);
     expect(addr1 != addr2, "VPL: allocations return distinct addresses");
     MEM_W32(out3, 0xfeedfaceu);
-    expect(selftest_vpl_try_allocate(vpool, 64, out3) == VPL_EXHAUSTED_ERR, "VPL: pool is exhausted");
+    expect(selftest_vpl_try_allocate(vpool, 64, out3) == VPL_NO_SPACE_ERR, "VPL: pool is exhausted");
     expect(MEM_R32(out3) == 0xfeedfaceu, "VPL: exhausted try_allocate leaves outptr untouched");
 
     expect(selftest_vpl_free(0x7ffffff0u, addr1) == VPL_UNKNOWN_ID_ERR, "VPL: bad UID free is rejected");
@@ -46859,7 +47800,7 @@ static void check_coroutine_lifecycle(void) {
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
         extern int s_rv_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + 2 /* released delayers */ + s_rv_parks + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 4 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + 2 /* released delayers */ + s_rv_parks + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
         char msg[1536];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
@@ -46867,7 +47808,8 @@ static void check_coroutine_lifecycle(void) {
                  "+ 3 cancel/release waiters + 5 UMD cancel waiters + 3 second-round waiters + 6 liveness waiters "
                  "+ 1 issue #339 joiner + 1 completed sysclock delay body "
                  "(the terminated full-range delay body never parks) + 2 vblank CB waiters "
-                 "+ 2 w-hle-c waiters (a cancelled UMD wait, a WaitVblankStartCB) "
+                 "+ 4 w-hle-c waiters (three cancelled UMD waits, two of them CB waits a callback woke first, "
+                 "a WaitVblankStartCB) "
                  "+ 1 vblank multi waiter + 1 zero-period vblank waiter body "
                  "+ 1 ReferSemaStatus waiter "
                  "+ 3 rotate peers + 2 suspended-waiter bodies + 5 released-wait bodies "
@@ -47182,6 +48124,18 @@ static int oracle_setup_owner(TCB **out_owner) {
     return 1;
 }
 
+/* A production syscall under test refused the case.  That is the case's result, recorded the
+ * way tests/fixtures/psp_oracle/probe.c records it on the PSP (out0 = 0, out1 = the returned
+ * code, a FAIL record), not an undrivable fixture: ORACLE_UNAVAILABLE stays for the fixture's
+ * own setup (oracle_setup_owner, a host allocation). */
+static int oracle_case_refused(const char *case_id, const char *call, uint32_t code,
+                               uint32_t *out0, uint32_t *out1) {
+    fprintf(stderr, "psp-oracle %s: %s returned 0x%08x\n", case_id, call, code);
+    *out0 = 0u;
+    *out1 = code;
+    return 0;
+}
+
 #ifdef SR_PSP_ORACLE_SMOKE
 static int oracle_smoke_case(uint32_t *out0, uint32_t *out1,
                              uint32_t *out2, uint32_t *out3,
@@ -47204,8 +48158,10 @@ static int oracle_smoke_case(uint32_t *out0, uint32_t *out1,
 }
 #endif
 
-static int oracle_callback_case(uint32_t *out0, uint32_t *out1,
-                                uint32_t *out2, uint32_t *out3) {
+/* name_addr is the CreateCallback name the case passes: ORACLE_CALLBACK_NAME in the oracle run,
+ * a refused one in the selftest that proves a refusal is a FAIL record. */
+static int oracle_callback_case_named(uint32_t name_addr, uint32_t *out0, uint32_t *out1,
+                                      uint32_t *out2, uint32_t *out3) {
     reset_fixture();
     sr_hle_init();
     TCB *owner = NULL;
@@ -47219,11 +48175,10 @@ static int oracle_callback_case(uint32_t *out0, uint32_t *out1,
 
     CpuState *cpu = s_cpu;
     uint32_t cbid = oracle_syscall4(cpu, ORACLE_NID_CREATE_CALLBACK,
-                                    ORACLE_CALLBACK_NAME, ORACLE_CALLBACK_ENTRY, 0x55u, 0);
+                                    name_addr, ORACLE_CALLBACK_ENTRY, 0x55u, 0);
     if (cbid & 0x80000000u) {
-        fprintf(stderr, "psp-oracle callback-notify-check unavailable: CreateCallback returned 0x%08x\n", cbid);
         s_oracle_mode = 0;
-        return ORACLE_UNAVAILABLE;
+        return oracle_case_refused("callback-notify-check", "CreateCallback", cbid, out0, out1);
     }
     uint32_t notify_first = oracle_syscall4(cpu, ORACLE_NID_NOTIFY_CALLBACK, cbid, 0x1234u, 0, 0);
     uint32_t count_before = oracle_syscall4(cpu, ORACLE_NID_CALLBACK_COUNT, cbid, 0, 0, 0);
@@ -47254,19 +48209,23 @@ static int oracle_callback_case(uint32_t *out0, uint32_t *out1,
            delete_result == 0 && s_oracle_callback_calls == 1;
 }
 
-static int oracle_wait_cancel_case(uint32_t *out0, uint32_t *out1,
-                                   uint32_t *out2, uint32_t *out3) {
+static int oracle_callback_case(uint32_t *out0, uint32_t *out1,
+                                uint32_t *out2, uint32_t *out3) {
+    return oracle_callback_case_named(ORACLE_CALLBACK_NAME, out0, out1, out2, out3);
+}
+
+/* attr is the CreateSema attribute the case passes: 0 in the oracle run. */
+static int oracle_wait_cancel_case_attr(uint32_t attr, uint32_t *out0, uint32_t *out1,
+                                        uint32_t *out2, uint32_t *out3) {
     reset_fixture();
     sr_hle_init();
     TCB *owner = NULL;
     if (!oracle_setup_owner(&owner)) return ORACLE_UNAVAILABLE;
     (void)owner;
     CpuState *cpu = s_cpu;
-    uint32_t semaid = oracle_syscall4(cpu, ORACLE_NID_CREATE_SEMA, 0, 0, 0, 1);
-    if (semaid & 0x80000000u) {
-        fprintf(stderr, "psp-oracle wait-cancel unavailable: CreateSema returned 0x%08x\n", semaid);
-        return ORACLE_UNAVAILABLE;
-    }
+    uint32_t semaid = oracle_syscall4(cpu, ORACLE_NID_CREATE_SEMA, 0, attr, 0, 1);
+    if (semaid & 0x80000000u)
+        return oracle_case_refused("wait-cancel", "CreateSema", semaid, out0, out1);
     uint32_t empty = oracle_syscall4(cpu, ORACLE_NID_POLL_SEMA, semaid, 1, 0, 0);
     uint32_t signal = oracle_syscall4(cpu, ORACLE_NID_SIGNAL_SEMA, semaid, 1, 0, 0);
     uint32_t ready = oracle_syscall4(cpu, ORACLE_NID_POLL_SEMA, semaid, 1, 0, 0);
@@ -47283,25 +48242,29 @@ static int oracle_wait_cancel_case(uint32_t *out0, uint32_t *out1,
     return *out0 == 0x1fu;
 }
 
-static int oracle_thread_lifecycle_case(uint32_t *out0, uint32_t *out1,
-                                        uint32_t *out2, uint32_t *out3) {
+static int oracle_wait_cancel_case(uint32_t *out0, uint32_t *out1,
+                                   uint32_t *out2, uint32_t *out3) {
+    return oracle_wait_cancel_case_attr(0u, out0, out1, out2, out3);
+}
+
+/* priority is the CreateThread priority the case passes: 32 in the oracle run. */
+static int oracle_thread_lifecycle_case_at(uint32_t priority, uint32_t *out0, uint32_t *out1,
+                                           uint32_t *out2, uint32_t *out3) {
     reset_fixture();
     sr_hle_init();
     TCB *owner = NULL;
     if (!oracle_setup_owner(&owner)) return ORACLE_UNAVAILABLE;
     s_exit_argument = 0x42;
     uint32_t thid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
-                                    ORACLE_THREAD_ENTRY, 32, 0x4000u);
-    if (thid & 0x80000000u) {
-        fprintf(stderr, "psp-oracle thread-lifecycle unavailable: CreateThread returned 0x%08x\n", thid);
-        return ORACLE_UNAVAILABLE;
-    }
+                                    ORACLE_THREAD_ENTRY, priority, 0x4000u);
+    if (thid & 0x80000000u)
+        return oracle_case_refused("thread-lifecycle", "CreateThread", thid, out0, out1);
     uint32_t start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD, thid, 0, 0, 0);
     TCB *worker = tcb_by_uid(thid);
-    if (!worker || worker->state != TH_READY) {
-        fprintf(stderr, "psp-oracle thread-lifecycle unavailable: StartThread did not produce a READY target\n");
-        return ORACLE_UNAVAILABLE;
-    }
+    /* A refused start, or one that leaves the target not READY (out1 = 0), is the case's FAIL. */
+    if (!worker || worker->state != TH_READY)
+        return oracle_case_refused("thread-lifecycle", "StartThread (target not READY)", start,
+                                   out0, out1);
     run_worker(worker);
     s_cur = (int)(owner - s_tcb);
     owner->state = TH_RUNNING;
@@ -47318,6 +48281,11 @@ static int oracle_thread_lifecycle_case(uint32_t *out0, uint32_t *out1,
     *out3 = delete_result;
     return start == 0 && (int32_t)wait >= 0 && delete_result == 0 &&
            (int32_t)post_delete_status < 0 && exit_status == 0x42u;
+}
+
+static int oracle_thread_lifecycle_case(uint32_t *out0, uint32_t *out1,
+                                        uint32_t *out2, uint32_t *out3) {
+    return oracle_thread_lifecycle_case_at(32u, out0, out1, out2, out3);
 }
 
 static int oracle_thread_delete_case(uint32_t *out0, uint32_t *out1,
@@ -47339,7 +48307,7 @@ static int oracle_thread_delete_case(uint32_t *out0, uint32_t *out1,
     uint32_t term_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *term_target = tcb_by_uid(term_target_uid);
-    if (!term_target) return ORACLE_UNAVAILABLE;
+    if (!term_target) return oracle_case_refused("thread-delete-lifecycle", "CreateThread", term_target_uid, out0, out1);
     uint32_t term_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                           term_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -47365,7 +48333,7 @@ static int oracle_thread_delete_case(uint32_t *out0, uint32_t *out1,
     uint32_t exit_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *exit_target = tcb_by_uid(exit_target_uid);
-    if (!exit_target) return ORACLE_UNAVAILABLE;
+    if (!exit_target) return oracle_case_refused("thread-delete-lifecycle", "CreateThread", exit_target_uid, out0, out1);
     TCB *exit_joiner = fixture_thread(0x1a1u, TH_WAIT_OBJ, 32);
     exit_joiner->wait_obj = exit_target_uid;
     exit_joiner->join_target = exit_target_uid;
@@ -47430,7 +48398,7 @@ static int oracle_thread_delete_followup_case(uint32_t *out0, uint32_t *out1,
     uint32_t error_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                 ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *error_target = tcb_by_uid(error_target_uid);
-    if (!error_target) return ORACLE_UNAVAILABLE;
+    if (!error_target) return oracle_case_refused("thread-delete-followup", "CreateThread", error_target_uid, out0, out1);
     uint32_t error_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                            error_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -47463,7 +48431,7 @@ static int oracle_thread_delete_followup_case(uint32_t *out0, uint32_t *out1,
     uint32_t positive_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                    ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *positive_target = tcb_by_uid(positive_target_uid);
-    if (!positive_target) return ORACLE_UNAVAILABLE;
+    if (!positive_target) return oracle_case_refused("thread-delete-followup", "CreateThread", positive_target_uid, out0, out1);
     uint32_t positive_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                               positive_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -47568,7 +48536,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     uint32_t error_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                 ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *error_target = tcb_by_uid(error_target_uid);
-    if (!error_target) return ORACLE_UNAVAILABLE;
+    if (!error_target) return oracle_case_refused("thread-delete-exit-pair", "CreateThread", error_target_uid, out0, out1);
     uint32_t error_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                            error_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -47577,7 +48545,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     uint32_t error_joiner_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                 ORACLE_THREAD_ENTRY, 16, 0x4000u);
     TCB *error_joiner = tcb_by_uid(error_joiner_uid);
-    if (!error_joiner) return ORACLE_UNAVAILABLE;
+    if (!error_joiner) return oracle_case_refused("thread-delete-exit-pair", "CreateThread", error_joiner_uid, out0, out1);
     uint32_t error_join_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                                 error_joiner_uid, 0, 0, 0);
     error_joiner->state = TH_WAIT_OBJ;
@@ -47609,7 +48577,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     uint32_t positive_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                    ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *positive_target = tcb_by_uid(positive_target_uid);
-    if (!positive_target) return ORACLE_UNAVAILABLE;
+    if (!positive_target) return oracle_case_refused("thread-delete-exit-pair", "CreateThread", positive_target_uid, out0, out1);
     uint32_t positive_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                               positive_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -47618,7 +48586,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     uint32_t positive_joiner_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                    ORACLE_THREAD_ENTRY, 16, 0x4000u);
     TCB *positive_joiner = tcb_by_uid(positive_joiner_uid);
-    if (!positive_joiner) return ORACLE_UNAVAILABLE;
+    if (!positive_joiner) return oracle_case_refused("thread-delete-exit-pair", "CreateThread", positive_joiner_uid, out0, out1);
     uint32_t positive_join_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                                    positive_joiner_uid, 0, 0, 0);
     positive_joiner->state = TH_WAIT_OBJ;
@@ -47879,6 +48847,33 @@ static int run_psp_oracle(int argc, char **argv) {
     return rc;
 }
 
+/* A production syscall under test that refuses an oracle case is that case's FAIL record
+ * (out0 = 0, out1 = the returned code, as probe.c records it on the PSP), never the
+ * "could not be driven" fixture outcome that emits no record. */
+static void test_psp_oracle_refusal_is_a_fail_record(void) {
+    uint32_t out[4];
+    memset(out, 0xa5, sizeof out);
+    int result = oracle_callback_case_named(0u, &out[0], &out[1], &out[2], &out[3]);
+    expect(result == 0 && out[0] == 0u && out[1] == 0x80020001u,
+           "psp-oracle: a refused CreateCallback is the callback case's FAIL record with its code");
+    memset(out, 0xa5, sizeof out);
+    result = oracle_wait_cancel_case_attr(0x400u, &out[0], &out[1], &out[2], &out[3]);
+    expect(result == 0 && out[0] == 0u && out[1] == 0x80020191u,
+           "psp-oracle: a refused CreateSema is the wait-cancel case's FAIL record with its code");
+    memset(out, 0xa5, sizeof out);
+    result = oracle_thread_lifecycle_case_at(0u, &out[0], &out[1], &out[2], &out[3]);
+    expect(result == 0 && out[0] == 0u && (out[1] & 0x80000000u) != 0u,
+           "psp-oracle: a refused CreateThread is the thread-lifecycle case's FAIL record with its code");
+    /* The oracle's own arguments still drive both cases to a PASS. */
+    memset(out, 0, sizeof out);
+    expect(oracle_callback_case(&out[0], &out[1], &out[2], &out[3]) == 1,
+           "psp-oracle: the callback case passes with its own CreateCallback name");
+    memset(out, 0, sizeof out);
+    expect(oracle_wait_cancel_case(&out[0], &out[1], &out[2], &out[3]) == 1 && out[0] == 0x1fu,
+           "psp-oracle: the wait-cancel case passes with its own CreateSema attribute");
+    reset_fixture();
+}
+
 /* ---- state-qualified acceptance routes (issue #64) --------------------------------
  *
  * These exercise the production route engine in hle.c: the real parser, the real
@@ -47898,6 +48893,7 @@ int      sr_route_status(void);
 int      sr_route_sig_bytes(void);
 void     sr_route_reset(void);
 void     sr_input_test_deliver(int guest_reads);
+extern int s_route_watch_nid;   /* hle_route.c: whether every import feeds the route's NID ring */
 
 enum { RT_OFF = 0, RT_LEGACY, RT_RUNNING, RT_DONE, RT_FAILED };
 
@@ -48278,6 +49274,35 @@ static void test_route_malformed_files_are_refused(void) {
     rt_write(body);
     expect(sr_route_load(RT_PATH) == 0, "SIGGRID after a CHECKPOINT is refused");
 
+    /* A grid's size is bounded per axis: a pair whose int product wraps (65536*65536 is 0,
+     * 2147483647*2 is negative) must not pass the cell bound and size a signature larger than
+     * the ROUTE_SIG_MAX buffers route_tick and route_learn_emit sample into. */
+    sr_route_reset();
+    const int default_sig_bytes = sr_route_sig_bytes();
+    rt_write("SIGGRID 8 8\nPRESS 4000 16\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a SIGGRID within the cell bound loads");
+    expect(sr_route_sig_bytes() != default_sig_bytes, "the SIGGRID changed the signature size");
+    /* A second load with no SIGGRID gets the default grid, not the previous file's
+     * (audit 2026-11-17). */
+    rt_write("PRESS 4000 16\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1 && sr_route_sig_bytes() == default_sig_bytes,
+           "a route file without SIGGRID loads with the default grid, not the last file's");
+    {
+        static const char *const wrapping[] = {
+            "SIGGRID 65536 65536\nPRESS 4000 16\nEND\n",
+            "SIGGRID 2147483647 2\nPRESS 4000 16\nEND\n",
+            "SIGGRID 193 1\nPRESS 4000 16\nEND\n",
+            "SIGGRID 8x 8\nPRESS 4000 16\nEND\n",
+        };
+        for (size_t i = 0; i < sizeof wrapping / sizeof wrapping[0]; i++) {
+            sr_route_reset();
+            rt_write(wrapping[i]);
+            expect(sr_route_load(RT_PATH) == 0 && sr_route_sig_bytes() > 0 &&
+                       sr_route_sig_bytes() <= 576,
+                   "a SIGGRID past the cell bound, or not a number, is refused and keeps the grid");
+        }
+    }
+
     sr_route_reset();
     snprintf(body, sizeof body,
              "CHECKPOINT MAIN_MENU %s\n"
@@ -48302,6 +49327,96 @@ static void test_route_malformed_files_are_refused(void) {
     expect(sr_route_load(RT_PATH) == 0, "a file of checkpoints with no steps is refused");
     expect(sr_route_status() == RT_FAILED,
            "an unfinished route must not silently fall back to the default pad pulse");
+    remove(RT_PATH);
+}
+
+/* A count the parser cannot read, a checkpoint name no CHECKPOINT defines, an alternate that
+ * would quietly loosen its screen's tolerance, and a route file that cannot be read or holds
+ * nothing all refuse the route by name (audit 2026-11-17). Before, strtoul/atol read '-1' as
+ * a near-endless hold and 'abc' as 0, a misspelled PRESS_UNTIL name pressed until its timeout,
+ * the last alternate's default tolerance replaced an explicit tol=, and a missing or empty file
+ * left the route off, so the run fell back to the automatic START pulse. */
+static void test_route_counts_names_and_files_are_checked_at_load(void) {
+    char hexA[1024], body[4096];
+    rt_hex(hexA, 0x20);
+    static const char *const counts[] = {
+        "PRESS START -1\nEND\n",
+        "PRESS START 12x\nEND\n",
+        "PRESS START 4294967296\nEND\n",
+        "DELAY abc\nEND\n",
+        "DELAY -5\nEND\n",
+        "WAIT_NID 0x12345678 10x\nEND\n",
+        "PRESS_UNTIL_NID 0x12345678 START 8 16x 100\nEND\n",
+        "SAMPLE_EVERY 5x\nPRESS START 4\nEND\n",
+        "TOLERANCE 4x\nPRESS START 4\nEND\n",
+        "100x 0x4000 16\n",
+        "100 0x4000 -1\n",
+    };
+    for (size_t i = 0; i < sizeof counts / sizeof counts[0]; i++) {
+        char msg[160];
+        sr_route_reset();
+        rt_write(counts[i]);
+        snprintf(msg, sizeof msg, "a route count that is not a plain decimal is refused (case %u)",
+                 (unsigned)i);
+        expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED, msg);
+    }
+    static const char *const counted_with_checkpoint[] = {
+        "CHECKPOINT MAIN_MENU %s\nWAIT MAIN_MENU 10x\nEND\n",
+        "CHECKPOINT MAIN_MENU %s\nPRESS_UNTIL MAIN_MENU START 8 16 -1\nEND\n",
+        "CHECKPOINT MAIN_MENU %s\nPRESS_WHILE MAIN_MENU START 8 16x 100\nEND\n",
+        "CHECKPOINT MAIN_MENU tol=2x %s\nWAIT MAIN_MENU 10\nEND\n",
+    };
+    for (size_t i = 0; i < sizeof counted_with_checkpoint / sizeof counted_with_checkpoint[0]; i++) {
+        char msg[160];
+        sr_route_reset();
+        snprintf(body, sizeof body, counted_with_checkpoint[i], hexA);
+        rt_write(body);
+        snprintf(msg, sizeof msg, "a step count that is not a plain decimal is refused (case %u)",
+                 (unsigned)i);
+        expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED, msg);
+    }
+    sr_route_reset();
+    rt_write("PRESS START 4\nDELAY 0\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "plain decimal counts, DELAY 0 included, still load");
+
+    /* Every step that names a checkpoint is checked against the CHECKPOINT lines. */
+    static const char *const undefined[] = {
+        "CHECKPOINT MAIN_MENU %s\nPRESS_UNTIL MAIN_MENUU START 8 16 100\nEND\n",
+        "CHECKPOINT MAIN_MENU %s\nPRESS_WHILE MAIN_MENUU START 8 16 100\nEND\n",
+    };
+    for (size_t i = 0; i < sizeof undefined / sizeof undefined[0]; i++) {
+        sr_route_reset();
+        snprintf(body, sizeof body, undefined[i], hexA);
+        rt_write(body);
+        expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+               "a PRESS_UNTIL or PRESS_WHILE naming an undefined checkpoint is refused at load");
+    }
+
+    /* One checkpoint has one tolerance: an alternate recording that would change it is refused,
+     * and one that repeats it loads. */
+    sr_route_reset();
+    snprintf(body, sizeof body,
+             "CHECKPOINT MAIN_MENU tol=2 %s\nCHECKPOINT MAIN_MENU %s\nWAIT MAIN_MENU 100\nEND\n",
+             hexA, hexA);
+    rt_write(body);
+    expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+           "an alternate without tol= cannot loosen the tol=2 an earlier recording set");
+    sr_route_reset();
+    snprintf(body, sizeof body,
+             "CHECKPOINT MAIN_MENU tol=2 %s\nCHECKPOINT MAIN_MENU tol=2 %s\nWAIT MAIN_MENU 100\nEND\n",
+             hexA, hexA);
+    rt_write(body);
+    expect(sr_route_load(RT_PATH) == 1, "alternates that agree on their tolerance load");
+
+    /* A named route file that cannot be read, or that holds no step, fails the run. */
+    sr_route_reset();
+    remove(RT_PATH);
+    expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+           "a route file that cannot be opened fails the run instead of leaving the START pulse");
+    sr_route_reset();
+    rt_write("# nothing but a comment\n\n");
+    expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+           "a route file with no steps fails the run instead of leaving the START pulse");
     remove(RT_PATH);
 }
 
@@ -48432,7 +49547,9 @@ static void test_route_legacy_pad_script_is_unchanged(void) {
     sr_route_reset();
     rt_write("# comment only\n\n");
     expect(sr_route_load(RT_PATH) == 0, "an empty route file loads nothing");
-    expect(sr_route_status() == RT_OFF, "an empty route file leaves the pad unscripted");
+    /* A route file that holds nothing is refused like any unusable one (audit 2026-11-17):
+     * leaving the pad unscripted ran the title on the automatic START pulse instead. */
+    expect(sr_route_status() == RT_FAILED, "an empty route file fails the run");
     remove(RT_PATH);
     sr_route_reset();
 }
@@ -48505,6 +49622,26 @@ static void test_route_gates_on_a_guest_event_not_a_signature(void) {
     for (uint32_t v = 2; v < 55; v++) (void)sr_route_step(v, sigA);
     expect(sr_route_status() == RT_FAILED,
            "a guest that never makes the import again fails the run instead of waiting forever");
+    expect(s_route_watch_nid == 0,
+           "a route that failed on a WAIT_NID stops watching imports (audit 2026-11-17)");
+    remove(RT_PATH);
+
+    /* A route whose last step is a WAIT_NID, with no END, completes and stops watching too:
+     * the import hook does not keep feeding the ring for the rest of the run. */
+    sr_route_reset();
+    snprintf(body, sizeof body,
+             "CHECKPOINT MAIN_MENU %s\n"
+             "WAIT MAIN_MENU 100\n"
+             "WAIT_NID sceIoOpen 20\n", hexA);
+    rt_write(body);
+    expect(sr_route_load(RT_PATH) == 1, "a route ending in a WAIT_NID loads");
+    expect(sr_route_step(0, sigA) == 0u && s_route_watch_nid == 1,
+           "the WAIT_NID step watches imports while it waits");
+    sr_route_test_import(open_nid);
+    (void)sr_route_step(1, sigA);
+    (void)sr_route_step(2, sigA);
+    expect(sr_route_status() == RT_DONE && s_route_watch_nid == 0,
+           "a route that completed on its last WAIT_NID stops watching imports (audit 2026-11-17)");
     remove(RT_PATH);
 
     /* An unknown name is a load-time refusal, not a wait that can never succeed. */
@@ -51277,26 +52414,22 @@ static void test_late_prx_duplicate_base_last_reference(void) {
 
 /* The runtime's stderr is the surface a consumer actually reads, so the always-on media
  * boundary is asserted from the captured text: a counter that outlived the message would
- * pass while the product went back to a silent freeze. */
+ * pass while the product went back to a silent freeze. The capture moves the stderr descriptor
+ * to a temporary file and back (hle_data_stderr_capture_*) and never closes the stream: a
+ * freopen that failed would have closed stderr, and every later FAIL line and the summary with
+ * it. */
+static FILE *s_stderr_capture;
 static int s_stderr_saved_fd = -1;
 static int stderr_capture_begin(void) {
-    fflush(stderr);
-    s_stderr_saved_fd = dup(fileno(stderr));
-    if (s_stderr_saved_fd < 0) return 0;
-    return freopen(HLE_BUILD_ROOT "/psmf_boundary_capture.txt", "w+", stderr) != NULL;
+    return hle_data_stderr_capture_begin(&s_stderr_capture, &s_stderr_saved_fd);
 }
 static size_t stderr_capture_end(char *out, size_t capacity) {
-    fflush(stderr);
-    rewind(stderr);
-    size_t n = fread(out, 1, capacity - 1u, stderr);
-    out[n] = '\0';
-    clearerr(stderr);
-    if (s_stderr_saved_fd >= 0) {
-        dup2(s_stderr_saved_fd, fileno(stderr));
-        close(s_stderr_saved_fd);
-        s_stderr_saved_fd = -1;
-    }
-    remove(HLE_BUILD_ROOT "/psmf_boundary_capture.txt");
+    size_t n = 0u;
+    if (capacity) out[0] = '\0';
+    if (s_stderr_capture)
+        n = hle_data_stderr_capture_end(s_stderr_capture, s_stderr_saved_fd, out, capacity);
+    s_stderr_capture = NULL;
+    s_stderr_saved_fd = -1;
     return n;
 }
 static int count_occurrences(const char *haystack, const char *needle) {
@@ -53538,6 +54671,51 @@ static void test_wc_umd_wait_drive_stat(void) {
             expect(ctx.returned && ctx.ret == 0x800201a9u,
                    "wc umd wait: a cancelled untimed wait returns 0x800201a9");
         }
+        if (waiter->coro) {
+            sr_coro_destroy(waiter->coro);
+            waiter->coro = NULL;
+        }
+    }
+
+    /* A callback notify wakes a CB wait with no result (sched_wake_callbacks). The drive still
+     * lacks the bit, so once the callbacks have run the wait blocks again, untimed for timeout 0
+     * and to its first deadline otherwise; it does not answer success. */
+    static const uint32_t cb_timeouts[2] = { 0u, 1000u };
+    for (int k = 0; k < 2; k++) {
+        reset_fixture();
+        sr_hle_init();
+        sr_hle_test_umd_reset();
+        TCB *own = fixture_thread(0x2c04u, TH_RUNNING, 32);
+        own->started = 1;
+        TCB *waiter = fixture_thread(0x2c05u, TH_READY, 40);
+        waiter->started = 1;
+        WcUmdWaitCtx ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.nid = NID_WAIT_CB;
+        ctx.a0 = 0x08u;                 /* a bit the active drive does not hold */
+        ctx.a1 = cb_timeouts[k];
+        waiter->coro = sr_coro_create(wc_umd_waiter_body, &ctx, (size_t)4 << 20);
+        s_cur = (int)(waiter - s_tcb);
+        if (waiter->coro) sr_coro_switch(waiter->coro);
+        const uint64_t first_wake = waiter->wake;
+        expect(waiter->state == TH_WAIT_OBJ && waiter->wait_obj == UMD_OBJ && !ctx.returned,
+               "wc umd wait: the unsatisfied CB wait blocks on the UMD object");
+        s_cur = (int)(own - s_tcb);
+        sched_wake_callbacks(waiter->uid);
+        expect(waiter->state == TH_READY, "wc umd wait: a callback notify wakes the CB wait");
+        s_cur = (int)(waiter - s_tcb);
+        if (waiter->coro) sr_coro_switch(waiter->coro);
+        expect(!ctx.returned && waiter->state == TH_WAIT_OBJ && waiter->wait_obj == UMD_OBJ &&
+                   waiter->wake == first_wake,
+               "wc umd wait: a callback wake with the drive still unsatisfied blocks again until "
+               "the first deadline, not a success");
+        s_cur = (int)(own - s_tcb);
+        memset(&cpu, 0, sizeof(cpu));
+        (void)sr_syscall(&cpu, NID_CANCEL);
+        s_cur = (int)(waiter - s_tcb);
+        if (waiter->coro && !ctx.returned) sr_coro_switch(waiter->coro);
+        expect(ctx.returned && ctx.ret == 0x800201a9u,
+               "wc umd wait: the CB wait blocked again after the callback wake is cancelled");
         if (waiter->coro) {
             sr_coro_destroy(waiter->coro);
             waiter->coro = NULL;
@@ -56180,6 +57358,60 @@ static void test_font_lib_lifecycle(uint32_t served_index) {
         for (size_t i = 0; i <= strlen(missing); i++) MEM_W8(path_addr + (uint32_t)i, missing[i]);
         expect(flt_call(0x57fcb733u, FLT_LIB_A, path_addr, 1u, FLT_ERR) == 0u && MEM_R32(FLT_ERR) == 0x80460005u,
                "user file reports a missing VFS file");
+
+        /* An enhancement package that rewrites a user font: sceFontOpenUserFile reads the
+         * rewritten bytes the descriptor serves, as sceIoRead does, not the stock file behind
+         * it. The stock file is shorter than the rewrite and is not a PGF. */
+        {
+            enum { FLT_COPY = 0x09100000u, FLT_COPY_CHUNK = 0x10000u, FLT_COPY_MAX = 0x100000u };
+            extern int sr_hle_test_io_open_enhanced(const char *path, uint32_t *fd);
+            extern void sr_hle_test_enhancement_files_reset(void);
+            static uint8_t pgf_bytes[FLT_COPY_MAX];
+            static const uint8_t stock[] = "stock bytes that are not a PGF font";
+            static const char guest[] = "ms0:/NKENH/USERFONT.PGF";
+            uint32_t pgf_size = 0u, fd = 0u;
+            CpuState io;
+            (void)sr_hle_test_io_open_enhanced(path, &fd);
+            for (;;) {
+                memset(&io, 0, sizeof(io));
+                io.r[4] = fd; io.r[5] = FLT_COPY; io.r[6] = FLT_COPY_CHUNK;
+                uint32_t got = sr_hle_test_io_read(&io);
+                if (got == 0u || got > FLT_COPY_CHUNK || pgf_size + got > FLT_COPY_MAX) break;
+                for (uint32_t i = 0; i < got; i++) pgf_bytes[pgf_size + i] = MEM_R8(FLT_COPY + i);
+                pgf_size += got;
+            }
+            memset(&io, 0, sizeof(io));
+            io.r[4] = fd;
+            (void)sr_hle_test_io_close(&io);
+            expect(pgf_size > sizeof(stock), "the served Latin font is read for the enhancement fixture");
+            char *saved_ms = hle_test_env_save("SR_MEMSTICK");
+            hle_test_setenv("SR_MEMSTICK", HLE_BUILD_ROOT "/hle_fd_namespace_ms");
+            nk_platform_mkdir_p(HLE_BUILD_ROOT "/hle_fd_namespace_ms/NKENH");
+            char host[256];
+            fd_host_path(host, sizeof(host), guest);
+            FILE *fixture = fopen(host, "wb");
+            if (fixture) {
+                fwrite(stock, 1, sizeof(stock) - 1u, fixture);
+                fclose(fixture);
+            }
+            uint8_t digest[32];
+            sr_vfpu_sha256(stock, sizeof(stock) - 1u, digest);
+            sr_hle_test_enhancement_files_reset();
+            expect(fixture != NULL &&
+                       sr_enhancement_file_register("NKENH/USERFONT.PGF", digest, pgf_bytes, pgf_size) == 1,
+                   "the enhancement fixture registers a rewritten user font");
+            for (size_t i = 0; i <= strlen(guest); i++) MEM_W8(path_addr + (uint32_t)i, guest[i]);
+            s_flt_alloc_ret = FLT_FONT;
+            MEM_W32(FLT_ERR, 0xdeadbeefu);
+            uint32_t enhanced_font = flt_call(0x57fcb733u, FLT_LIB_A, path_addr, 1u, FLT_ERR);
+            expect(enhanced_font == FLT_FONT && MEM_R32(FLT_ERR) == 0u,
+                   "sceFontOpenUserFile reads an enhancement package's rewritten font, not the stock "
+                   "file behind it");
+            if (enhanced_font) (void)flt_call(FLT_NID_CLOSE, enhanced_font, 0u, 0u, 0u);
+            sr_hle_test_enhancement_files_reset();
+            nk_remove_utf8(host);
+            hle_test_env_restore("SR_MEMSTICK", saved_ms);
+        }
     }
 
     s_flt_alloc_ret = FLT_LIB_A + 0x20u;
@@ -56234,6 +57466,29 @@ static void test_font_lib_lifecycle(uint32_t served_index) {
                s_flt_free_calls == 1u,
            "a second sceFontDoneLib of the same library fails closed without freeing again");
     expect(flt_call(FLT_NID_DONELIB, FLT_LIB_B, 0u, 0u, 0u) == 0u, "the second library is retired");
+
+    /* LoadExec: the old program's library and font were structs in its RAM. The next program's
+     * allocator hands out the same addresses, and they must not be refused as live objects. */
+    expect(flt_new_lib(FLT_PARAMS, FLT_LIB_A) == FLT_LIB_A,
+           "LoadExec fixture: the old program opens a library");
+    s_flt_alloc_ret = FLT_FONT;
+    uint32_t old_font = flt_call(FLT_NID_OPEN, FLT_LIB_A, served_index, 0u, FLT_ERR);
+    expect(old_font == FLT_FONT, "LoadExec fixture: the old program opens a font");
+    sr_hle_loadexec_reset_guest_state();
+    sr_test_register_guest_fn(FLT_ALLOC_ENTRY, flt_alloc_fn);
+    sr_test_register_guest_fn(FLT_FREE_ENTRY, flt_free_fn);
+    expect(flt_call(FLT_NID_INFO, FLT_FONT, FLT_INFO, 0u, 0u) == FLT_ERR_INVALID_ARG &&
+               flt_call(FLT_NID_DONELIB, FLT_LIB_A, 0u, 0u, 0u) == FLT_ERR_INVALID_LIB,
+           "after LoadExec the old program's font and library handles are gone");
+    expect(flt_new_lib(FLT_PARAMS, FLT_LIB_A) == FLT_LIB_A && MEM_R32(FLT_ERR) == 0u,
+           "after LoadExec the next program's library opens at the old library's address");
+    s_flt_alloc_ret = FLT_FONT;
+    uint32_t next_font = flt_call(FLT_NID_OPEN, FLT_LIB_A, served_index, 0u, FLT_ERR);
+    expect(next_font == FLT_FONT && MEM_R32(FLT_ERR) == 0u,
+           "after LoadExec the next program's font opens at the old font's address");
+    if (next_font) (void)flt_call(FLT_NID_CLOSE, next_font, 0u, 0u, 0u);
+    expect(flt_call(FLT_NID_DONELIB, FLT_LIB_A, 0u, 0u, 0u) == 0u,
+           "the next program's library is retired");
 }
 
 /* #1384: glyph-image spans, allocator alignment and the handle lifecycle, through production
@@ -59525,10 +60780,11 @@ static int run_atrac_zero_frame_child(const char *route) {
  * Every stop that ends the run with _Exit (which skips atexit) calls sr_texdump_exit_finish before
  * it finishes a recording, and that call runs what the Vulkan GE's dump registered at its start
  * (ge_gpu.c's tex_dump_shutdown: the files land, the exit line prints; gpu-texscale-selftest's
- * dump-exit cell checks that part). Here two real stops run in a child process with a probe
- * registered in the dump's place: an unregistered NID (a fail-closed stop, status 7) and
- * SR_WATCHDOG_EXIT (status 1). The probe writes a file, so the parent sees that the stop reached
- * the dump's finish before the process ended. */
+ * dump-exit cell checks that part). Here three real stops run in a child process with a probe
+ * registered in the dump's place: an unregistered NID (a fail-closed stop, status 7),
+ * SR_WATCHDOG_EXIT (status 1) and the SR_FBDUMP capture exit after an immediate flip (status 1,
+ * since this harness's presenter publishes no capture). The probe writes a file, so the parent
+ * sees that the stop reached the dump's finish before the process ended. */
 #define TEXDUMP_STOP_CHILD "--texdump-stop-child="
 
 /* The child changes directory as it starts, so its files are named from the parent's scratch root,
@@ -59568,14 +60824,54 @@ static int run_texdump_stop_child(const char *arg) {
     } else if (strcmp(route, "watchdog") == 0) {
         hle_test_setenv("SR_WATCHDOG_EXIT", "600");   /* no new frame for 600 vblanks: status 1 */
         for (unsigned i = 0; i < 1300u; i++) { sr_display_advance_vcount(1u); sr_vblank_tick(); }
+    } else if (strcmp(route, "fbdump") == 0) {
+        /* The armed present reports its capture and the verdict exit follows it (#57). */
+        hle_test_setenv("SR_FBDUMP", "1");
+        s_test_gui_on = 1;
+        sr_display_advance_vcount(1u);
+        (void)display_set(0x04000000u, 512, 3, 0);
+    } else if (strcmp(route, "sample7") == 0 || strcmp(route, "routefail") == 0) {
+        /* sample7: a spec line with one offset more than the sampler holds is refused (status 2)
+         * before anything is stored past its arrays. routefail: a sampled run whose route fails
+         * (status 86) still lands the CSV rows written so far, because route_fail closes the
+         * sample file before _Exit, which flushes nothing itself. */
+        extern void sr_hle_test_state_sample_vblank(uint32_t vcount);
+        extern void sr_hle_test_state_sample_reset(void);
+        const int seven = route[0] == 's';
+        char spec[MAX_PATH], csv[MAX_PATH], pad[MAX_PATH];
+        const char *root = colon + 1;
+        if (snprintf(spec, sizeof(spec), "%s/texdump_stop_%s.spec", root, route) >= (int)sizeof(spec) ||
+            snprintf(csv, sizeof(csv), "%s/texdump_stop_%s.csv", root, route) >= (int)sizeof(csv) ||
+            snprintf(pad, sizeof(pad), "%s/texdump_stop_%s.pad", root, route) >= (int)sizeof(pad))
+            return 96;
+        FILE *f = fopen(spec, "w");
+        if (!f) return 96;
+        fputs(seven ? "deep u32 0x09018500 0 0 0 0 0 0 0\n" : "count u32 0x09018500\n", f);
+        fclose(f);
+        hle_test_setenv("SR_SAMPLE_SPEC", spec);
+        hle_test_setenv("SR_SAMPLE_OUT", csv);
+        hle_test_setenv("SR_ROUTE_NO_EXIT", "");
+        MEM_W32(0x09018500u, 7u);
+        sr_hle_test_state_sample_reset();
+        sr_hle_test_state_sample_vblank(1u);
+        if (!seven) {
+            f = fopen(pad, "w");
+            if (!f) return 96;
+            fputs("STEP_SIDEWAYS 3\n", f);
+            fclose(f);
+            (void)sr_route_load(pad);
+        }
     }
     return 98;   /* the stop did not end the run */
 }
 
 static void test_texdump_finished_by_run_stops(const char *self) {
-    static const struct { const char *route, *line; int status; } stops[] = {
-        { "nid", "HLE: unimplemented nid 0x0badd00d", 7 },
-        { "watchdog", "WATCHDOG: aborting after 600 vblanks", 1 },
+    static const struct { const char *route, *line; int status; const char *csv; } stops[] = {
+        { "nid", "HLE: unimplemented nid 0x0badd00d", 7, NULL },
+        { "watchdog", "WATCHDOG: aborting after 600 vblanks", 1, NULL },
+        { "fbdump", "present capture result=0", 1, NULL },
+        { "sample7", "too many offsets", 2, NULL },
+        { "routefail", "ROUTE_FAIL: route file", 86, "vblank,count\n1,7\n" },
     };
     char root[MAX_PATH];
     if (!hle_scratch_root(root, sizeof(root))) {
@@ -59606,6 +60902,19 @@ static void test_texdump_finished_by_run_stops(const char *self) {
         snprintf(msg, sizeof(msg), "the %s stop finishes the texture dump before the process ends "
                                    "(sr_texdump_exit_finish)", stops[i].route);
         expect(pf != NULL, msg);
+        if (stops[i].csv) {
+            char csv[MAX_PATH], rows[256];
+            size_t got = 0u;
+            if (snprintf(csv, sizeof(csv), "%s/texdump_stop_%s.csv", root, stops[i].route) < (int)sizeof(csv)) {
+                FILE *cf = fopen(csv, "r");   /* text mode: the sampler writes text rows */
+                got = cf ? fread(rows, 1, sizeof(rows) - 1u, cf) : 0u;
+                if (cf) fclose(cf);
+            }
+            rows[got] = '\0';
+            snprintf(msg, sizeof(msg), "the %s stop lands the SR_SAMPLE_OUT rows written before it "
+                                       "(hle_state_sample_close before _Exit)", stops[i].route);
+            expect(strcmp(rows, stops[i].csv) == 0, msg);
+        }
     }
 }
 
@@ -59643,6 +60952,9 @@ static int hle_selftest_main(int argc, char **argv) {
     }
     g_mem = g_mem_base + 0x08000000u;
     s_cpu = &s_cpu_store;
+    /* The registry tests assume no caller's nickname: the ones before a nickname fixture read the
+     * neutral default, and the fixtures leave the variable unset. No driver passes it here. */
+    hle_test_setenv("SR_NICKNAME", NULL);
     /* Every mode reads system settings through the virtual registry: point its per-user overlay
      * at a build-scoped scratch file so no test reads or writes the developer's own. */
     sysreg_env(SYSREG_SCRATCH_FILE);
@@ -59816,6 +61128,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_main_function_exports_link_from_boot();
     test_umd_io_console_model();
     test_ms0_unified_namespace();
+#ifndef _WIN32
+    test_posix_host_path_components();
+#endif
     test_utility_av_module_state();
     test_utility_usb_module_state();
     test_utility_module_table();
@@ -59990,16 +61305,20 @@ static int hle_selftest_main(int argc, char **argv) {
     test_alarm_idle_scheduler_advances_to_the_deadline();
     test_dmac_semantics();
     test_dmac_active_transfer_across_threads();
+    test_dmac_copy_after_wait_reads_current_vram();
     test_dmac_small_body_bypasses_the_channel();
     test_dmac_refused_try_copies_head_and_tail();
     test_dmac_queued_callers_are_served_in_arrival_order();
     test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
+    test_display_narrow_stride_span();
+    test_display_get_mode_span();
     test_time_domains_are_coherent();
     test_kernel_import_sweep_sysclock_conversion();
     test_unregistered_batch_sysclock_wide();
     test_kernel_usec_sysclock_conversions();
     test_umd_unregister_callback();
+    test_loadexec_drops_umd_and_ge_callbacks();
     test_umd_replace_permission_and_disc_info();
     test_psp_measured_power_battery_20261024();
     test_pinned_handlers_1814_1815_1816();
@@ -60043,6 +61362,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_extracted_data_prepares_before_guest_and_lookup_never_builds();
     test_disc_route_serves_archive_and_loose_content_in_one_namespace();
     test_archive_discovery_skips_unpack_folders_only();
+    test_archive_discovery_walks_past_a_vanished_directory();
     test_primary_extracted_archive_duplicates_match_main();
     test_direct_xb_read_precedence_and_listing();
     test_direct_xb_malformed_archive_fails_closed();
@@ -60144,6 +61464,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_msgpipe_rendezvous();
     test_msgpipe_safety();
     test_msgpipe_blocking();
+    test_psp_oracle_refusal_is_a_fail_record();
+    test_guest_module_fixture_path_needs_its_directory();
     test_msgpipe_cancel_and_refer();
     test_msgpipe_departure_reconsiders_successor();
     test_msgpipe_invocation_lifetime();
@@ -60261,6 +61583,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_route_press_until_timeout_fails_loudly();
     test_route_alternate_signatures_mask_variable_content();
     test_route_malformed_files_are_refused();
+    test_route_counts_names_and_files_are_checked_at_load();
     test_route_mask_refuses_what_it_cannot_mean();
     test_route_legacy_pad_script_is_unchanged();
     test_route_names_the_buttons_it_presses();

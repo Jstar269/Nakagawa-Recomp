@@ -5,8 +5,11 @@
  *
  * This replaces the configure-generated config.h of FFmpeg n4.4. The subset is built from the
  * generic C paths only: no assembly, no inline assembly, no threads, no hardware acceleration,
- * and no operating-system services beyond libc. Every symbol the imported sources reference is
- * listed, so a missing definition is a compile error instead of a silent zero.
+ * and no operating-system services beyond libc. Every HAVE_/ARCH_/CONFIG_ symbol the imported
+ * sources reference is listed (all were defined when checked on 2026-11-17). A missing one is a
+ * compile error only where C code uses it (`if (CONFIG_X)`); in `#if CONFIG_X` an undefined name
+ * reads as 0 with no diagnostic (the subset builds with -w, so even -Wundef stays silent), so a
+ * pin bump must re-check the list against every symbol the new sources reference.
  * See src/rt/h264_ffmpeg_sub/PROVENANCE.md.
  */
 #ifndef NK_H264_SUB_CONFIG_H

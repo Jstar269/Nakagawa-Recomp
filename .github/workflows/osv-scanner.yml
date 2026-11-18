@@ -15,6 +15,12 @@ on:
   push:
     branches: [ "main" ]
 
+# A newer push to a pull request supersedes its older scan. Every other run (a push to main, the
+# weekly schedule, a merge group) is a group of its own, so a landing never cancels a scan.
+concurrency:
+  group: osv-scanner-${{ github.event.pull_request.number || format('run-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -22,6 +28,7 @@ jobs:
   scan:
     name: OSV Vulnerability Scan
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -37,7 +37,7 @@ does not make this file stale. `--details` prints them to stdout.
 ## Summary
 
 - helpers: **533** (declared in `recomp.h`: 456)
-- reach class: emitter-reached 96, production-runtime-only 396, selftest-only 0, address-only 8, none 33
+- reach class: emitter-reached 95, production-runtime-only 397, selftest-only 0, address-only 8, none 33
 - provenance class of the home definition: declared-only 1, project_authored_attested 40, upstream_derived 492
 
 ## Helpers
@@ -371,7 +371,7 @@ does not make this file stale. `--details` prints them to stdout.
 | `sr_heap_stats` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_heap_unmark_header` | `rt/recomp.c` | no | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_hle_advance_time` | `rt/sched.c` | yes | none | `rt/sched.c`: upstream_derived |
-| `sr_hle_call` | `rt/recomp.c` | yes | emitter-reached (direct) | `rt/recomp.c`: upstream_derived |
+| `sr_hle_call` | `rt/recomp.c` | yes | production-runtime-only | `rt/recomp.c`: upstream_derived |
 | `sr_hle_init` | `rt/hle.c` | yes | production-runtime-only | `rt/hle.c`: upstream_derived |
 | `sr_hle_loadexec_boot_module` | `rt/hle.c` | yes | production-runtime-only | `rt/hle.c`: upstream_derived |
 | `sr_hle_loadexec_finish` | `rt/hle.c` | yes | production-runtime-only | `rt/hle.c`: upstream_derived |

@@ -244,10 +244,10 @@
     X("SR_TEX_SCALE_BUDGET_MB", "number", "512", "gpu_sdl3vk/tex_scale.c", "GPU memory, in MiB, the scaled texture copies may use; past it a texture is drawn unscaled.") \
     X("SR_THLOG", "flag-presence", "off", "debug.h,sched.c", "Enables scheduler and thread logging, including the sched debug class.") \
     X("SR_TRACE", "path", "logs/trace_window.txt", "flight_recorder.c", "Output file for the PC trace window; used only when SR_TRACE_PC is set.") \
-    X("SR_TRACE_F", "list", "unset", "flight_recorder.c", "Comma list of frame indices (each below 128) that open the trace window.") \
-    X("SR_TRACE_LIMIT", "number", "0 (no limit)", "flight_recorder.c", "Maximum number of records written by the trace window (strtoul, base 0).") \
+    X("SR_TRACE_F", "list", "unset", "flight_recorder.c", "Comma list of FPU register indices (0..31) whose absolute value each trace-window record carries.") \
+    X("SR_TRACE_LIMIT", "number", "0 (no limit)", "flight_recorder.c", "Records the trace window writes before it completes (base 0); a malformed count refuses the window.") \
     X("SR_TRACE_PC", "string", "unset (no trace window)", "flight_recorder.c", "PC window spec for the trace window recorder, written to the SR_TRACE path.") \
-    X("SR_TRACE_V", "list", "unset: no vblank indices", "flight_recorder.c", "Comma-separated vblank indices (below 128) in which the PC trace window records.") \
+    X("SR_TRACE_V", "list", "unset", "flight_recorder.c", "Comma list of VFPU register indices (0..127) whose absolute value each trace-window record carries.") \
     X("SR_TRACK_LAST_WRITER", "flag-nonzero", "off", "debug.c", "When set and not 0, enables tracking of the last writer of memory words.") \
     X("SR_UI_ROOT", "path", "unset (overlay default)", "gui.c", "Root directory of the overlay UI pages and fonts.") \
     X("SR_USER_DATA_ROOT", "path", "platform data directory", "hle_host.c,gpu_sdl3vk/pipeline_cache.h", "Absolute directory used as the user data root; an invalid value is refused.") \

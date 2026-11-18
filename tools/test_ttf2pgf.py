@@ -495,6 +495,76 @@ class RefusalTests(CliRefusalMixin):
             )
         self.assertEqual(caught.exception.reason, "conflicting-parameters")
 
+    def test_mac_roman_and_symbol_cmaps_are_not_accepted_as_unicode(self) -> None:
+        cmap_entry = self.entries["cmap"]
+        cmap_offset = struct.unpack_from(">I", self.data, cmap_entry + 8)[0]
+        count = struct.unpack_from(">H", self.data, cmap_offset + 2)[0]
+        for platform, encoding in ((1, 0), (3, 0)):
+            with self.subTest(platform=platform, encoding=encoding):
+                mutated = bytearray(self.data)
+                for index in range(count):
+                    rec_off = cmap_offset + 4 + 8 * index
+                    struct.pack_into(">HH", mutated, rec_off, platform, encoding)
+                with self.assertRaises(TtfConvertError) as caught:
+                    convert(bytes(mutated), input_path="crafted.ttf", output_path="out.pgf", codes=(0x41, 0x41))
+                self.assertEqual(caught.exception.reason, "malformed-cmap")
+
+    def test_metric_targets_with_embolden_y_match_written_header_ascender(self) -> None:
+        targets = ttf2pgf._MetricTargets(
+            ascender_px=10, descender_px=-2, tolerance_px=1, ppem_min=6, ppem_max=24,
+        )
+        conversion = convert(
+            self.data,
+            input_path=str(FONT),
+            output_path="out.pgf",
+            codes=(0x41, 0x48),
+            metric_targets=targets,
+            embolden_y=8,
+        )
+        self.assertEqual(
+            conversion.manifest["metric_targets"]["achieved_ascender_26_6"],
+            conversion.manifest["output"]["ascender_26_6"],
+        )
+        self.assertLessEqual(
+            abs(conversion.manifest["output"]["ascender_26_6"] / 64 - targets.ascender_px),
+            targets.tolerance_px,
+        )
+
+    def test_overlapping_cmap_segments_and_groups_are_refused(self) -> None:
+        sub4 = _format4_subtable([(0x41, 0x45, 0), (0x43, 0x46, 0), (0xFFFF, 0xFFFF, 1)])
+        with self.assertRaises(TtfConvertError) as caught:
+            ttf2pgf._parse_cmap4(sub4, 0)
+        self.assertEqual(caught.exception.reason, "malformed-cmap")
+        sub12 = struct.pack(">HHIII", 12, 0, 16 + 24, 0, 2) + struct.pack(">IIIIII", 0x41, 0x45, 1, 0x45, 0x48, 1)
+        with self.assertRaises(TtfConvertError) as caught:
+            ttf2pgf._parse_cmap12(sub12, 0)
+        self.assertEqual(caught.exception.reason, "malformed-cmap")
+
+    def test_font_type_using_camouflage_or_reserved_name_is_refused(self) -> None:
+        self.assert_cli_refused(
+            "camouflage-font-name", self.output, FONT, "--font-type", _joined("Font", "works")
+        )
+        self.assert_cli_refused(
+            "reserved-font-name", self.output, FONT, "--pin", PIN, "--font-type", "Gudea"
+        )
+
+    def test_failed_output_write_leaves_no_partial_pgf(self) -> None:
+        orig_write_bytes = Path.write_bytes
+
+        def fail_pgf_write(self_path: Path, data: bytes) -> int:
+            if self_path.name.startswith("out.pgf"):
+                self_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self_path, "wb") as handle:
+                    handle.write(data[:16])
+                raise OSError("disk full")
+            return orig_write_bytes(self_path, data)
+
+        with mock.patch.object(Path, "write_bytes", fail_pgf_write):
+            code = ttf2pgf._main([str(self.output), str(FONT), "--codes", "0x41-0x41"])
+        self.assertEqual(code, 1)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.tmp.glob("out.pgf*")), [])
+
 
 class CompositeRefusalTests(unittest.TestCase):
     """Crafted composite mutations exercise the named unsupported paths."""
@@ -742,6 +812,7 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
 
     def test_crossing_rasterizer_matches_the_rational_reference(self) -> None:
         rng = random.Random(2026)
+        large_den_cases = 0
         for case in range(400):
             # Large outlines push edge denominators past 2**16 and take the Fraction sort.
             span = 1 << (8 if case % 4 else 18)
@@ -751,15 +822,21 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
                 edges.extend((x0, y0, x1, y1) for (x0, y0), (x1, y1) in zip(points, points[1:] + points[:1], strict=True))
             xs = [x for edge in edges for x in (edge[0], edge[2])]
             ys = [y for edge in edges for y in (edge[1], edge[3])]
-            raster = ttf2pgf._Raster(
-                edges=tuple(edges), left=min(xs) // 64, bottom=min(ys) // 64,
-                right=-((-max(xs)) // 64), top=-((-max(ys)) // 64),
-            )
-            if raster.width * raster.height > 4096:
-                continue
+            left, bottom = min(xs) // 64, min(ys) // 64
+            right, top = -((-max(xs)) // 64), -((-max(ys)) // 64)
+            if (right - left) * (top - bottom) > 4096:
+                # Clip to a 16x16 pixel window around the origin so large-denominator edges run.
+                left, bottom, right, top = -8, -8, 8, 8
+            raster = ttf2pgf._Raster(edges=tuple(edges), left=left, bottom=bottom, right=right, top=top)
+            if any(
+                abs(y1 - y0) >= (1 << 16) and min(y0, y1) < top * 64 and max(y0, y1) > bottom * 64
+                for _, y0, _, y1 in edges
+            ):
+                large_den_cases += 1
             embolden = (case % 3, case % 2)
             self.assertEqual(ttf2pgf._rasterize(raster, *embolden),
                              _rasterize_rational_reference(raster, *embolden))
+        self.assertGreater(large_den_cases, 0)
 
     def test_latin_project_font_output_is_pinned(self) -> None:
         # The digest the converter has produced for the Latin project font since #1309's build;
@@ -1955,24 +2032,25 @@ class VendorFontNameScanTests(unittest.TestCase):
     def test_tracked_source_names_no_vendor_font(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git is required to enumerate the tracked tree")
-        listing = subprocess.run(
-            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, text=True, check=True,
+        raw_listing = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True,
         ).stdout
         offenders: list[str] = []
-        for entry in sorted(filter(None, listing.split("\0"))):
+        unreadable: list[str] = []
+        for raw_entry in sorted(filter(None, raw_listing.split(b"\0"))):
+            entry = raw_entry.decode("utf-8", errors="surrogateescape")
             if entry.lower().endswith(".md"):
                 continue
             try:
                 data = (ROOT / entry).read_bytes()
-            except OSError:
+            except OSError as exc:
+                unreadable.append(f"{entry}: {exc}")
                 continue
             if b"\0" in data:
                 continue
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
+            text = data.decode("utf-8", errors="replace")
             offenders.extend(f"{entry}:{number}" for number in self._hit_lines(text))
+        self.assertEqual(unreadable, [], "every tracked file must be readable by the vendor font scan")
         self.assertEqual(offenders, [], "tracked source names a vendor font; use a project-owned name")
 
 
