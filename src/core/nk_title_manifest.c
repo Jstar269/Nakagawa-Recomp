@@ -52,12 +52,14 @@ static int nk_ascii_casecmp(const char *a, const char *b) {
 }
 
 /* Mirrors MAX_TITLE_MODULES in tools/title_manifest.py: the disc module-discovery cap. */
-#define MAX_MODULES 256
-#define MAX_COMPAT_DISC_IDS 16
+/* The catalog limits come from the generated nk_title_catalog.h, so a manifest
+ * this parser accepts always fits the catalog's registry and snapshot copies. */
+#define MAX_MODULES NK_TITLE_MAX_MODULES
+#define MAX_COMPAT_DISC_IDS NK_TITLE_MAX_COMPATIBLE_DISC_IDS
 #define MAX_DISC_BUILDS 16
-#define MAX_LOOSE_CONTENT_ROOTS 16
-#define MAX_LOOSE_CONTENT_EXCLUDES 2
-#define NK_MANIFEST_MAX_OVERLAYS 8
+#define MAX_LOOSE_CONTENT_ROOTS NK_TITLE_MAX_LOOSE_CONTENT_ROOTS
+#define MAX_LOOSE_CONTENT_EXCLUDES NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES
+#define NK_MANIFEST_MAX_OVERLAYS NK_TITLE_MAX_OVERLAYS
 /* Mirrors text() in tools/title_manifest.py: limits count characters (code points). */
 #define NK_MANIFEST_DISPLAY_NAME_MAX_CHARS 128
 #define NK_MANIFEST_NOTES_MAX_CHARS 2048
@@ -1828,12 +1830,13 @@ static bool manifest_publish_slot(const OverlayStorageSlot *temp, NkTitleEntry *
     }
     if (target_slot == -1) {
         if (s_overlay_slot_count >= NK_MANIFEST_MAX_OVERLAYS) {
-            /* Every slot holds another title. Reusing one would drop that title
-               from the catalog while its registration showed this one, so the
-               new identity is refused by name and the loaded titles stay. */
+            /* Every slot holds another title (possibly a registered one). Reusing
+               one would drop that title from the catalog while its registration
+               showed this one, so the new identity is refused by name and the
+               loaded titles stay. */
             if (error_buf) {
                 snprintf(error_buf, error_buf_len,
-                    "Overlay capacity reached: %d title manifests are already loaded, "
+                    "Overlay capacity reached: at most %d title manifests are loaded, "
                     "so '%s' was not loaded",
                     NK_MANIFEST_MAX_OVERLAYS, temp->entry.id);
             }
@@ -2034,7 +2037,14 @@ bool nk_title_manifest_load_overlay_ext(
         /* Find matching slot and register with catalog */
         for (int i = 0; i < s_overlay_slot_count; i++) {
             if (strcmp(s_overlay_slots[i].entry.id, entry.id) == 0) {
-                nk_title_catalog_register_overlay_locked(&s_overlay_slots[i].entry);
+                if (!nk_title_catalog_register_overlay_locked(&s_overlay_slots[i].entry)) {
+                    ok = false;
+                    if (error_buf) {
+                        snprintf(error_buf, error_buf_len,
+                            "Overlay '%s' refused: the title catalog already holds %d overlays",
+                            s_overlay_slots[i].entry.id, NK_TITLE_MAX_OVERLAYS);
+                    }
+                }
                 break;
             }
         }

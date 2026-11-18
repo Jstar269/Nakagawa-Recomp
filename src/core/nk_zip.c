@@ -1147,15 +1147,32 @@ NkZipStatus nk_zip_reader_open_file(NkZipReader **out, const char *path, NkZipEr
 
 NkZipStatus nk_zip_reader_open_file_with(NkZipReader **out, const char *path,
                                          const NkZipReadOptions *options, NkZipError *err) {
-    NkZipReader *r;
-    int64_t size;
+    FILE *file;
     if (!out) return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
     *out = NULL;
     if (!path || !path[0]) return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
+    file = nk_fopen_utf8(path, "rb");
+    if (!file) return zip_fail(err, NK_ZIP_ERR_IO, NULL, 0);
+    return nk_zip_reader_open_stream_with(out, file, options, err);
+}
+
+NkZipStatus nk_zip_reader_open_stream_with(NkZipReader **out, FILE *file,
+                                           const NkZipReadOptions *options, NkZipError *err) {
+    NkZipReader *r;
+    int64_t size;
+    if (!out || !file) {
+        if (file) fclose(file);
+        if (out) *out = NULL;
+        return zip_fail(err, NK_ZIP_ERR_ARGUMENT, NULL, 0);
+    }
+    *out = NULL;
     r = (NkZipReader *)calloc(1, sizeof(*r));
-    if (!r) return zip_fail(err, NK_ZIP_ERR_NO_MEMORY, NULL, 0);
-    r->file = nk_fopen_utf8(path, "rb");
-    if (!r->file || nk_fseek64(r->file, 0, SEEK_END) != 0 || (size = nk_ftell64(r->file)) < 0) {
+    if (!r) {
+        fclose(file);
+        return zip_fail(err, NK_ZIP_ERR_NO_MEMORY, NULL, 0);
+    }
+    r->file = file;
+    if (nk_fseek64(r->file, 0, SEEK_END) != 0 || (size = nk_ftell64(r->file)) < 0) {
         nk_zip_reader_close(r);
         return zip_fail(err, NK_ZIP_ERR_IO, NULL, 0);
     }

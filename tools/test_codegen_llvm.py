@@ -107,10 +107,22 @@ class LoweringTests(unittest.TestCase):
         return body, module.render()
 
     def assertVerifies(self, text):
-        if llvm_tool("opt") is None:
-            return
-        result = verify(text)
-        self.assertEqual(result.returncode, 0, result.stderr + text)
+        # Without `opt` the IR is not verified: record that as a skipped
+        # subtest, so the run shows SKIP while the text assertions still run.
+        with self.subTest("opt verification"):
+            if llvm_tool("opt") is None:
+                self.skipTest("SKIP: LLVM opt is not installed; the IR was not verified")
+            result = verify(text)
+            self.assertEqual(result.returncode, 0, result.stderr + text)
+
+    def test_missing_opt_reports_skip_not_pass(self):
+        module = sys.modules[type(self).__module__]
+        result = unittest.TestResult()
+        with mock.patch.object(module, "llvm_tool", return_value=None):
+            type(self)("test_a_branchy_alu_function_lowers_and_verifies").run(result)
+        self.assertEqual(result.failures + result.errors, [])
+        self.assertEqual(len(result.skipped), 1, result.skipped)
+        self.assertIn("LLVM opt is not installed", result.skipped[0][1])
 
     def test_a_branchy_alu_function_lowers_and_verifies(self):
         words = program(addiu(4, 0, 1), beq(4, 5, 3), addu(6, 4, 5), addiu(6, 6, 1),
@@ -288,6 +300,40 @@ class LoweringTests(unittest.TestCase):
         with self.assertRaisesRegex(codegen_llvm.LLVMUnsupported, "runtime-placed"):
             self.lower(program(JR_RA, NOP))
 
+    def test_enhancement_update_boundary_stays_in_the_c_body(self):
+        start = 0x1000
+        cases = (
+            ("body", start, program(addiu(4, 0, 1), addiu(5, 0, 2), JR_RA, NOP, start=start)),
+            ("delay slot", start + 4, program(JR_RA, addiu(5, 0, 2), NOP, start=start)),
+        )
+        previous_boundary = codegen.ENHANCEMENT_UPDATE_BOUNDARY
+        previous_sites = codegen.ENHANCEMENT_SITES
+        previous_ace_sites = codegen.ENHANCEMENT_ACE_SITES
+        previous_applied = set(codegen.ENHANCEMENT_APPLIED)
+        try:
+            codegen.ADDRESS_SPACE = codegen.AddressSpace()
+            codegen.ENHANCEMENT_SITES = {}
+            codegen.ENHANCEMENT_ACE_SITES = {}
+            for name, boundary, words in cases:
+                with self.subTest(name=name):
+                    codegen.ENHANCEMENT_UPDATE_BOUNDARY = boundary
+                    codegen.ENHANCEMENT_APPLIED.clear()
+                    c_body = "\n".join(codegen.emit_function(
+                        FakeElf(words), start, [(start, start + 16)], {start}))
+                    self.assertIn("nk_enhancement_updates++", c_body)
+                    with self.assertRaisesRegex(codegen_llvm.LLVMUnsupported,
+                                                "enhancement-package update_boundary"):
+                        codegen_llvm.lower(
+                            codegen, FakeElf(words), start, [(start, start + 16)], {start},
+                            c_text=c_body,
+                        )
+        finally:
+            codegen.ENHANCEMENT_UPDATE_BOUNDARY = previous_boundary
+            codegen.ENHANCEMENT_SITES = previous_sites
+            codegen.ENHANCEMENT_ACE_SITES = previous_ace_sites
+            codegen.ENHANCEMENT_APPLIED.clear()
+            codegen.ENHANCEMENT_APPLIED.update(previous_applied)
+
     def test_a_transfer_without_its_delay_slot_is_refused_not_crashed(self):
         # A transfer the planner left without a slot used to fail with AttributeError inside the
         # lowering; it must raise LLVMUnsupported, which codegen.py's llvm_body() turns into
@@ -322,6 +368,7 @@ class LoweringTests(unittest.TestCase):
                     and (n.name == "emit_function" or n.name.startswith("_emit_"))]
         self.assertIn("emit_function", {n.name for n in emitters})
         literals = set()
+        tables = set()
         for node in (n for emit in emitters for n in ast.walk(emit)):
             if not isinstance(node, ast.If):
                 continue
@@ -329,12 +376,22 @@ class LoweringTests(unittest.TestCase):
             if "hst_profile" not in names:
                 continue
             for cmp in (n for n in ast.walk(node.test) if isinstance(n, ast.Compare)):
-                if (isinstance(cmp.left, ast.Name) and cmp.left.id == "addr"
-                        and isinstance(cmp.ops[0], ast.Eq)
-                        and isinstance(cmp.comparators[0], ast.Constant)):
+                if not (isinstance(cmp.left, ast.Name) and cmp.left.id == "addr"):
+                    continue
+                if isinstance(cmp.ops[0], ast.Eq) and isinstance(cmp.comparators[0], ast.Constant):
                     literals.add(cmp.comparators[0].value)
+                elif isinstance(cmp.ops[0], ast.In):
+                    # `hst_profile and addr in TABLE`: every address in the table is a site.
+                    table = cmp.comparators[0]
+                    self.assertIsInstance(table, ast.Name, ast.unparse(cmp))
+                    tables.add(table.id)
         self.assertEqual(literals, set(), "an HST-profile address site is back in an emitter")
-        self.assertLessEqual(literals, codegen_llvm.hst_emission_sites(codegen))
+        sites = codegen_llvm.hst_emission_sites(codegen)
+        self.assertIn("GUEST_PATCHES", tables)
+        for name in sorted(tables):
+            with self.subTest(table=name):
+                self.assertLessEqual(set(getattr(codegen, name)), sites,
+                                     f"codegen.{name} has HST sites the LLVM backend accepts")
 
 
 class CodegenIntegrationTests(unittest.TestCase):

@@ -21,8 +21,8 @@
 #ifndef NK_TEST_PSP_SEAL_FIXTURE_H
 #define NK_TEST_PSP_SEAL_FIXTURE_H
 
-#include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,6 +30,16 @@
 #include "nk_psp_amctrl.h"
 #include "nk_psp_kirk.h"
 #include "nk_psp_sha1.h"
+
+/* The fixture's own checks (capacities, allocations, crypto return codes). Unlike assert(),
+ * they hold whatever NDEBUG an includer was built with. */
+#define PSP_SEAL_REQUIRE(cond)                                                              \
+    do {                                                                                    \
+        if (!(cond)) {                                                                      \
+            fprintf(stderr, "psp_seal_fixture.h:%d: check failed: %s\n", __LINE__, #cond);  \
+            abort();                                                                        \
+        }                                                                                   \
+    } while (0)
 
 static void psp_seal_put16le(uint8_t *p, uint16_t value) {
     p[0] = (uint8_t)value;
@@ -53,7 +63,7 @@ static size_t psp_seal_type2(uint8_t *out, size_t cap, const uint8_t *payload,
     uint8_t a_key[16], c_key[16];
     uint8_t ctr[0x90], xorbuf[0x90], clear[0x40], t_kh[0x40], chain[0x60];
     uint8_t hdr_tail[0x30], metadata[0x10], digest[0x14], sha_input[0x150];
-    uint8_t *cmac_input;
+    uint8_t *cmac_input, *padded;
     size_t data_offset = 0x80u;
     size_t chk_size = (payload_len + 15u) & ~(size_t)15u;
     size_t container_size = 0x150u + chk_size;
@@ -61,7 +71,7 @@ static size_t psp_seal_type2(uint8_t *out, size_t cap, const uint8_t *payload,
     AES_ctx ctx;
     SHA_CTX sha;
 
-    assert(cap >= container_size);
+    PSP_SEAL_REQUIRE(cap >= container_size);
     for (unsigned i = 0; i < 16u; i++) {
         a_key[i] = (uint8_t)(tag_key[i] ^ 0xA5u);
         c_key[i] = (uint8_t)(tag_key[i] ^ 0x5Au);
@@ -104,11 +114,17 @@ static size_t psp_seal_type2(uint8_t *out, size_t cap, const uint8_t *payload,
     psp_seal_put32le(metadata, (uint32_t)payload_len);
     psp_seal_put32le(metadata + 4u, (uint32_t)data_offset);
 
-    /* Wrapped CMD1 pre-data: the payload under a_key, then the 0x40 block. */
+    /* Wrapped CMD1 pre-data: the payload under a_key, then the 0x40 block. The cipher reads
+     * whole 16-byte blocks, so it encrypts a zero-padded copy: the caller's buffer holds only
+     * payload_len bytes. */
+    padded = (uint8_t *)calloc(1u, chk_size ? chk_size : 1u);
+    PSP_SEAL_REQUIRE(padded != NULL);
+    memcpy(padded, payload, payload_len);
     AES_set_key(&ctx, a_key, 128);
-    AES_cbc_encrypt(&ctx, payload, out + 0x150u, (int)chk_size);
+    AES_cbc_encrypt(&ctx, padded, out + 0x150u, (int)chk_size);
+    free(padded);
     cmac_input = (uint8_t *)malloc(0x30u + 0x80u + chk_size);
-    assert(cmac_input != NULL);
+    PSP_SEAL_REQUIRE(cmac_input != NULL);
     memcpy(cmac_input, hdr_tail, 0x30u);
     memcpy(cmac_input + 0x30u, out, 0x80u);
     memcpy(cmac_input + 0xB0u, out + 0x150u, chk_size);
@@ -149,7 +165,7 @@ static size_t psp_seal_type2(uint8_t *out, size_t cap, const uint8_t *payload,
     at += 0x10u;
     memcpy(sha_input + at, out, 0x80u);
     at += 0x80u;
-    assert(at == 0x14Cu);
+    PSP_SEAL_REQUIRE(at == 0x14Cu);
     SHAInit(&sha);
     SHAUpdate(&sha, sha_input, (int)at);
     SHAFinal(digest, &sha);
@@ -191,7 +207,7 @@ static size_t psp_seal_sfo(uint8_t *out, size_t cap, const char *category,
     }
     data_start = (key_start + key_bytes + 3u) & ~(size_t)3u;
     for (unsigned i = 0; i < 3u; i++) data_bytes += (value_len[i] + 3u) & ~(size_t)3u;
-    assert(data_start + data_bytes <= cap);
+    PSP_SEAL_REQUIRE(data_start + data_bytes <= cap);
     memset(out, 0, data_start + data_bytes);
     memcpy(out, "\0PSF", 4);
     psp_seal_put32le(out + 4, 0x0101u);
@@ -226,7 +242,7 @@ static uint8_t *psp_seal_pbp(const char *category, const char *disc_id,
     size_t psp_at = (sfo_at + sfo_len + 15u) & ~(size_t)15u;
     size_t psar_at = (psp_at + 0x200u + 15u) & ~(size_t)15u;
     uint8_t *pbp = (uint8_t *)calloc(1, psar_at + psar_len);
-    assert(pbp != NULL);
+    PSP_SEAL_REQUIRE(pbp != NULL);
     memcpy(pbp, "\0PBP", 4);
     psp_seal_put32le(pbp + 4, 0x00010001u);
     psp_seal_put32le(pbp + 8, (uint32_t)sfo_at);
@@ -254,7 +270,7 @@ static uint8_t *psp_seal_npumdimg(NkPspCtx *ctx, const uint8_t *iso, size_t iso_
     MAC_KEY mkey;
     CIPHER_KEY ckey;
     int rc;
-    assert(psar != NULL && iso_len % 2048u == 0u && lbas > 0u && block_lbas > 0u);
+    PSP_SEAL_REQUIRE(psar != NULL && iso_len % 2048u == 0u && lbas > 0u && block_lbas > 0u);
     for (unsigned i = 0; i < 16u; i++) {
         version[i] = (uint8_t)(0x31u + 7u * i);
         header_key[i] = (uint8_t)(0xC5u ^ (13u * i));
@@ -267,9 +283,9 @@ static uint8_t *psp_seal_npumdimg(NkPspCtx *ctx, const uint8_t *iso, size_t iso_
         memcpy(psar + offset, iso + start, take);
         rc = sceDrmBBCipherInit(ctx, &ckey, 1, 2, header_key, version,
                                 (uint32_t)(offset >> 4));
-        assert(rc == 0);
+        PSP_SEAL_REQUIRE(rc == 0);
         rc = sceDrmBBCipherUpdate(ctx, &ckey, psar + offset, (int)block_size);
-        assert(rc == 0);
+        PSP_SEAL_REQUIRE(rc == 0);
         sceDrmBBCipherFinal(&ckey);
         for (unsigned j = 0; j < 4u; j++) w[j] = 0x4E4B0000u + (uint32_t)(b * 4u + j);
         w[4] = (uint32_t)offset ^ (w[2] ^ w[3]);
@@ -286,22 +302,22 @@ static uint8_t *psp_seal_npumdimg(NkPspCtx *ctx, const uint8_t *iso, size_t iso_
     psp_seal_put32le(psar + 0x64, (uint32_t)(lbas - 1u));
     psp_seal_put32le(psar + 0x6C, (uint32_t)table_at);
     rc = sceDrmBBCipherInit(ctx, &ckey, 1, 2, header_key, version, 0u);
-    assert(rc == 0);
+    PSP_SEAL_REQUIRE(rc == 0);
     rc = sceDrmBBCipherUpdate(ctx, &ckey, psar + 0x40, 0x60);
-    assert(rc == 0);
+    PSP_SEAL_REQUIRE(rc == 0);
     sceDrmBBCipherFinal(&ckey);
     memcpy(psar + 0xA0, header_key, 16u);
     rc = sceDrmBBMacInit(ctx, &mkey, 3);
-    assert(rc == 0);
+    PSP_SEAL_REQUIRE(rc == 0);
     rc = sceDrmBBMacUpdate(ctx, &mkey, psar, 0xC0);
-    assert(rc == 0);
+    PSP_SEAL_REQUIRE(rc == 0);
     rc = sceDrmBBMacFinal(ctx, &mkey, mac, NULL);
-    assert(rc == 0);
+    PSP_SEAL_REQUIRE(rc == 0);
     for (unsigned i = 0; i < 16u; i++) mac[i] ^= version[i];
     rc = kirk4(ctx, mac, mac, 16u, 0x38);
-    assert(rc == KIRK_OPERATION_SUCCESS);
+    PSP_SEAL_REQUIRE(rc == KIRK_OPERATION_SUCCESS);
     rc = kirk4(ctx, mac, mac, 16u, 0x63);
-    assert(rc == KIRK_OPERATION_SUCCESS);
+    PSP_SEAL_REQUIRE(rc == KIRK_OPERATION_SUCCESS);
     (void)rc;
     memcpy(psar + 0xC0, mac, 16u);
     *out_len = total;

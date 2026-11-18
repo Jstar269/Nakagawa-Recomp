@@ -186,11 +186,18 @@ NkZipStatus nk_zip_reader_read(NkZipReader *reader, size_t index, void *buf, siz
 void nk_zip_reader_close(NkZipReader *reader);
 
 #ifndef NK_ZIP_NO_HOST_IO
+#include <stdio.h>   /* FILE, for nk_zip_reader_open_stream_with */
+
 /* Opens an archive file (UTF-8 path). The file stays open until close. */
 NkZipStatus nk_zip_reader_open_file(NkZipReader **out, const char *path, NkZipError *err);
 /* The same with options (NULL: none), as nk_zip_reader_open_memory_with. */
 NkZipStatus nk_zip_reader_open_file_with(NkZipReader **out, const char *path,
                                          const NkZipReadOptions *options, NkZipError *err);
+/* The same on a file the caller has already opened (binary, read) and checked, so the archive
+   read is the file checked, not whatever the name leads to at a second open. The reader owns
+   `file` from the call on: close closes it, and so does a refusal. */
+NkZipStatus nk_zip_reader_open_stream_with(NkZipReader **out, FILE *file,
+                                           const NkZipReadOptions *options, NkZipError *err);
 /* Checks every CRC first, then writes each entry inside `folder`, which must
    exist. A file already there is refused (NK_ZIP_ERR_EXISTS), never
    overwritten. On failure part of the archive may have been written: the

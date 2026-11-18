@@ -3763,13 +3763,7 @@ void sr_hle_test_ge_timing(int on) {
 #ifdef SR_HLE_THREAD_SELFTEST
 /* Test-build-only: the GE list queue as at boot, so a blocking-sync test does not wait
  * on a list an earlier test left stalled. */
-void sr_hle_test_ge_lists_reset(void) {
-    memset(s_ge_lists, 0, sizeof(s_ge_lists));
-    s_ge_list_done_bits = UINT64_MAX;
-    s_ge_list_order = 0;
-    s_ge_timing_drawing = 0;
-    ge_free_rebuild();
-}
+void sr_hle_test_ge_lists_reset(void) { (void)ge_lists_reset(); }
 #endif
 
 /* SR_AUDIOSTAT aggregates: does the game put BGM PCM into the SAS output buffer

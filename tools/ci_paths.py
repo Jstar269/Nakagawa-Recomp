@@ -133,6 +133,22 @@ def _is_generated_public_metadata(path: str) -> bool:
     return path in GENERATED_PUBLIC_METADATA
 
 
+#: The public-export candidate path and the gates it runs (tools/build_public_export.py).
+#: A change to any of them routes ``security_publication``, which is what runs the hosted
+#: fail-closed export exercise in ci.yml's public_export job: a change that let an
+#: uncleared candidate through must meet the check written to catch it before it lands.
+PUBLIC_EXPORT_TOOLS = frozenset(
+    {
+        "tools/build_public_export.py",
+        "tools/public_export.py",
+        "tools/public_candidate.py",
+        "tools/publication_policy.py",
+        "tools/history_audit.py",
+        "tools/verify_sbom.py",
+    }
+)
+
+
 def _is_security_publication(path: str) -> bool:
     logical_path = _logical_tool_path(path) or path
     name = PurePosixPath(logical_path).name
@@ -151,6 +167,7 @@ def _is_security_publication(path: str) -> bool:
             "tools/modified_file_notice_audit.py",
             "tools/provenance_record_gap.py",
         }
+        or logical_path in PUBLIC_EXPORT_TOOLS
     )
 
 
@@ -170,6 +187,34 @@ def _public_policy() -> Policy | None:
         return returned
     except Exception:
         return None
+
+
+@lru_cache(maxsize=1)
+def _regenerated_outputs() -> frozenset[str] | None:
+    """The tracked files ``tools/regen_all.py --check`` regenerates, or ``None`` when unreadable.
+
+    Read from regen_all's own step table, so a new generator is routed without a second
+    list here. A skipped step's outputs are left out: ``--check`` never runs those, and
+    each has its own gate (its skip reason names it).
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import regen_all
+
+        return frozenset(output for step in regen_all.STEPS if not step.skip for output in step.outputs)
+    except Exception:
+        return None
+
+
+def _is_regenerated_output(path: str) -> bool:
+    """True for a file a generator writes; an unreadable step table fails closed (every path).
+
+    A hand edit to one is caught only by the generators' freshness checks, which run in the
+    quick checks of a light run and in the Python tooling job of a full run. Routing it to
+    the Python job keeps that true for a change that is otherwise documentation only.
+    """
+    outputs = _regenerated_outputs()
+    return outputs is None or path in outputs
 
 
 def _is_public_surface(path: str) -> bool:
@@ -1570,7 +1615,14 @@ def classify(
     # event (see ``PublicationCoverageInvariantTests``).  The output is exported
     # so a local readiness check can route the same decision, where no ungated
     # equivalent runs.
-    python_full = python_tools or native_without_recipe or workflow_ci or security_publication
+    #
+    # A generator's output (docs/HLE_COVERAGE.md, for one) is checked for freshness only by
+    # the quick checks of a light run and by the Python tooling job of a full one, so a
+    # change to one routes that job even when every path is documentation.
+    regenerated_output = any(_is_regenerated_output(path) for path in files)
+    python_full = (
+        python_tools or native_without_recipe or workflow_ci or security_publication or regenerated_output
+    )
     run_python = python_full or makefile_recipe_only
     # #702: when the recipe-only Makefile edit is the only reason to run Python, run
     # just the modules that can observe it, on fewer runners. Anything else that
