@@ -62,6 +62,10 @@ def find_or_build_tool(root: Union[Path, str]) -> Path:
         source = root / rel
         digest.update(rel.encode("utf-8"))
         digest.update(source.read_bytes())
+    for header in sorted((root / "src" / "core").rglob("*.h")):
+        rel = header.relative_to(root).as_posix()
+        digest.update(rel.encode("utf-8"))
+        digest.update(header.read_bytes())
     key = digest.hexdigest()
 
     if out.is_file() and stamp.is_file() and stamp.read_text(encoding="utf-8") == key:
@@ -138,6 +142,7 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
     out_dir = ii.decrypted_module_dir(user_data_root, disc_id)
     if out_dir is None:
         raise ValueError(f"{disc_id!r} is not a disc ID")
+    iso = ii._plain_iso_path(iso, user_data_root)
     if runner is None:
         if tool is None:
             raise ValueError("decrypt_disc needs the nk_decrypt tool or a runner")
@@ -167,11 +172,13 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
     if not items:
         return rows
     out_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="nk-decrypt-") as staging:
+    with tempfile.TemporaryDirectory(prefix="nk-decrypt-", dir=out_dir) as staging:
         for members, name in items:
             destination = out_dir / name
             row = {"member": "/".join(members), "name": name}
-            if destination.is_file() and destination.stat().st_size > 0:
+            if destination.is_file() and \
+                    ii._classify_decrypted_elf_file(destination, module=(name != "EBOOT.elf")) == \
+                    "PLAIN_MIPS_ELF32":
                 rows.append({**row, "status": 0, "code": None,
                              "message": "kept the decrypted copy already there"})
                 continue
@@ -180,7 +187,17 @@ def decrypt_disc(iso_path: Union[Path, str], user_data_root: Union[Path, str], d
                 blob = ii._read_iso_extent(stream, size, lba, count, 0, count)
             encrypted = Path(staging) / (name + ".enc")
             encrypted.write_bytes(blob)
-            status, message = runner(encrypted, destination)
+            staged_file = tempfile.NamedTemporaryFile(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=out_dir, delete=False
+            )
+            staged_output = Path(staged_file.name)
+            staged_file.close()
+            try:
+                status, message = runner(encrypted, staged_output)
+                if status == 0:
+                    os.replace(staged_output, destination)
+            finally:
+                staged_output.unlink(missing_ok=True)
             encrypted.unlink(missing_ok=True)
             rows.append({**row, "status": status, "code": status_code(status),
                          "message": message})

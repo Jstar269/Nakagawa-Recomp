@@ -638,6 +638,36 @@ def build_tool() -> Path:
     return decrypt_tool.find_or_build_tool(ROOT)
 
 
+class TestDecryptToolBuildCache(unittest.TestCase):
+    def test_header_only_change_rebuilds_the_decrypt_tool(self):
+        from types import SimpleNamespace
+        from tools.nk_core import decrypt_tool
+
+        with tempfile.TemporaryDirectory(prefix="nk-decrypt-cache-") as tmpdir:
+            root = Path(tmpdir)
+            for relative in decrypt_tool.SOURCES:
+                source = root / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(relative.encode("utf-8"))
+            header = root / "src" / "core" / "nk_json.h"
+            header.write_bytes(b"header revision one")
+            builds = []
+
+            def fake_compile(command, **_options):
+                builds.append(command)
+                output = Path(command[command.index("-o") + 1])
+                output.write_bytes(b"synthetic tool")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(decrypt_tool, "_compiler", return_value="synthetic-cc"), \
+                    mock.patch.object(decrypt_tool.subprocess, "run", side_effect=fake_compile):
+                decrypt_tool.find_or_build_tool(root)
+                header.write_bytes(b"header revision two")
+                decrypt_tool.find_or_build_tool(root)
+
+            self.assertEqual(len(builds), 2, "a changed included header must invalidate the cache")
+
+
 def isolated_profile_environment(root: Path) -> dict[str, str]:
     """Per-user locations that the tools and the player resolve, all under ``root``."""
     home = root / "home"

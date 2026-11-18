@@ -751,6 +751,19 @@ class FastRunTests(unittest.TestCase):
         snapshot = json.loads((self.store / "snapshots" / state["last_snapshot"]).read_text(encoding="utf-8"))
         self.assertEqual(snapshot["mode"], "fast")
 
+    def test_a_failed_fast_build_removes_its_scratch_tree(self) -> None:
+        def failed_build(command, **_options):
+            Path(command[command.index("--user-data-root") + 1]).mkdir(parents=True)
+            Path(command[command.index("--work-dir") + 1]).mkdir(parents=True)
+            return subprocess.CompletedProcess(command, 1)
+
+        result = library_regress.run_fast(
+            self.args(), run=failed_build, log=lambda _text: None
+        )
+
+        self.assertEqual(result, library_regress.EXIT_NO_VERDICT)
+        self.assertFalse(any((self.root / "scratch").iterdir()))
+
     def test_fast_run_reads_the_rotation_cursor_after_acquiring_its_slot(self) -> None:
         self.store.mkdir(parents=True)
         state_path = self.store / "fast-state.json"

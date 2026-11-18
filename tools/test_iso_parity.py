@@ -352,7 +352,8 @@ def create_test_iso_with_module_tree(
         for name, _child_path, is_directory in sorted(
             children, key=lambda child: child[0].casefold()
         ):
-            encoded = name.encode("latin-1") if is_directory else name.encode("latin-1") + b";1"
+            encoded = name.encode("latin-1", "surrogateescape") if is_directory else \
+                name.encode("latin-1", "surrogateescape") + b";1"
             placeholder.append(_dir_record(encoded, 1, sector_size, is_directory))
         directory_sizes[directory] = len(pack_records(placeholder))
 
@@ -384,7 +385,8 @@ def create_test_iso_with_module_tree(
         for name, child_path, is_directory in sorted(
             children, key=lambda child: child[0].casefold()
         ):
-            encoded = name.encode("latin-1") if is_directory else name.encode("latin-1") + b";1"
+            encoded = name.encode("latin-1", "surrogateescape") if is_directory else \
+                name.encode("latin-1", "surrogateescape") + b";1"
             records.append(_dir_record(
                 encoded,
                 directory_lbas[child_path] if is_directory else file_lbas[child_path],
@@ -4390,6 +4392,24 @@ class GuestModuleElfRuleTests(unittest.TestCase):
             "libfont.prx", build_plain_mips_elf(0xFFA0, vaddr=0, entry=0xFFFFFFFF)
         )
         self.assertEqual(_classify_decrypted_elf_file(prx, module=True), "PLAIN_MIPS_ELF32")
+
+    def test_module_lookup_round_trips_surrogateescaped_directory_bytes(self) -> None:
+        directory = b"\x83\x58".decode("ascii", "surrogateescape")
+        iso = self.temp_dir / "shift-jis-module-directory.iso"
+        create_test_iso_with_module_tree(
+            iso,
+            {f"PSP_GAME/USRDIR/{directory}/MOD.PRX": build_psp_container()},
+            disc_id="TEST00043",
+        )
+
+        candidates = list_disc_module_candidates(iso)
+        self.assertEqual(len(candidates), 1)
+        checklist = check_needed_modules(
+            iso, user_data_root=self.temp_dir / "user-data", disc_id="TEST00043",
+            modules=candidates,
+        )
+
+        self.assertEqual(checklist["results"][0]["reason"], "encrypted")
 
     def test_executables_with_entry_in_code_segment_stay_usable(self) -> None:
         for e_type in (2, 3):

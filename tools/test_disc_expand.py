@@ -35,7 +35,9 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from nk_core import disc_expand_tool, package_cache  # noqa: E402
-from nk_core.iso_inspect import IsoInspectionError, inspect_iso  # noqa: E402
+from nk_core.iso_inspect import (
+    IsoInspectionError, inspect_compatibility_preflight, inspect_iso,
+)  # noqa: E402
 from test_iso_parity import create_test_iso_with_executables  # noqa: E402
 
 SECTOR = 2048
@@ -232,6 +234,19 @@ class DiscExpandToolTests(unittest.TestCase):
                 self.assertNotIn("source_format", identity["container"])
                 expanded = data_root / "discs" / "TEST00042" / f"TEST00042.{name}.iso"
                 self.assertEqual(expanded.read_bytes(), self.iso)
+
+    def test_preflight_reads_the_expanded_iso_for_each_compressed_input(self) -> None:
+        for name, image in self.images.items():
+            with self.subTest(name=name):
+                data_root = self.root / f"preflight-{name}"
+                metadata = inspect_iso(image, user_data_root=data_root)
+                report = inspect_compatibility_preflight(
+                    image, metadata=metadata, runtime_root=data_root
+                )
+                disc_check = next(
+                    check for check in report["checks"] if check["code"] == "DISC_SFO"
+                )
+                self.assertEqual(disc_check["status"], "OK")
 
     def test_a_refused_image_keeps_its_named_boundary(self) -> None:
         bad = bytearray(self.images["cso"].read_bytes())

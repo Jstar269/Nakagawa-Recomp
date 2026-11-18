@@ -24,7 +24,9 @@ if str(TOOLS) not in sys.path:
 
 import library_build  # noqa: E402
 from nk_core import decrypt_tool, disc_verify  # noqa: E402
-from test_iso_parity import create_test_iso, create_test_iso_with_executables  # noqa: E402
+from test_iso_parity import (
+    build_plain_mips_elf, create_test_iso, create_test_iso_with_executables,
+)  # noqa: E402
 
 # A stand-in for `nk_cli.py bringup`: what it does depends on the disc file's name.
 STUB_BRINGUP = r'''
@@ -583,10 +585,11 @@ class LibraryBuildTests(unittest.TestCase):
         plain = self.discs / "plain.iso"
         create_test_iso_with_executables(plain, b"\x7fELF" + b"\0" * 60, disc_id="TEST70061")
         seen: list[bytes] = []
+        decrypted_elf = build_plain_mips_elf()
 
         def runner(source: Path, destination: Path) -> tuple[int, str]:
             seen.append(source.read_bytes()[:4])
-            destination.write_bytes(b"decrypted")
+            destination.write_bytes(decrypted_elf)
             return 0, "ok"
 
         rows = decrypt_tool.decrypt_disc(encrypted, self.data, "test70060", runner=runner)
@@ -595,7 +598,7 @@ class LibraryBuildTests(unittest.TestCase):
                           for row in rows],
                          [("PSP_GAME/SYSDIR/EBOOT.BIN", "EBOOT.elf", 0, None)])
         self.assertEqual(seen, [b"~PSP"])
-        self.assertEqual(target.read_bytes(), b"decrypted")
+        self.assertEqual(target.read_bytes(), decrypted_elf)
         again = decrypt_tool.decrypt_disc(encrypted, self.data, "TEST70060", runner=runner)
         self.assertEqual(len(seen), 1, "a decrypted copy already there is kept")
         self.assertEqual(again[0]["message"], "kept the decrypted copy already there")
@@ -613,6 +616,43 @@ class LibraryBuildTests(unittest.TestCase):
                           ("EBOOT.elf", 0, None)])
         self.assertIn("DUPLICATE_DISC_MODULE_BASENAME", rows[0]["message"])
         self.assertTrue(target.is_file())
+
+    def test_decrypt_disc_does_not_publish_a_partial_output(self) -> None:
+        encrypted = self.discs / "partial-output.iso"
+        create_test_iso_with_executables(
+            encrypted, b"~PSP" + b"\0" * 60, disc_id="TEST70063"
+        )
+        target = self.data / "titles" / "TEST70063" / "decrypted" / "EBOOT.elf"
+
+        def interrupted_runner(_source: Path, destination: Path) -> tuple[int, str]:
+            destination.write_bytes(b"partial decrypted bytes")
+            return 1, "IO_FAILURE"
+
+        rows = decrypt_tool.decrypt_disc(
+            encrypted, self.data, "TEST70063", runner=interrupted_runner
+        )
+
+        self.assertEqual(rows[0]["status"], 1)
+        self.assertFalse(target.exists(), "a failed decrypt must not leave a reusable final output")
+
+    def test_decrypt_input_staging_is_under_the_per_title_data_folder(self) -> None:
+        encrypted = self.discs / "staged-input.iso"
+        create_test_iso_with_executables(
+            encrypted, b"~PSP" + b"\0" * 60, disc_id="TEST70064"
+        )
+        output_dir = self.data / "titles" / "TEST70064" / "decrypted"
+        source_parents: list[Path] = []
+
+        def interrupted_runner(source: Path, _destination: Path) -> tuple[int, str]:
+            source_parents.append(source.parent)
+            return 1, "IO_FAILURE"
+
+        decrypt_tool.decrypt_disc(
+            encrypted, self.data, "TEST70064", runner=interrupted_runner
+        )
+
+        self.assertEqual(len(source_parents), 1)
+        self.assertTrue(source_parents[0].is_relative_to(output_dir))
 
     def test_the_manifest_names_where_each_first_launch_stopped(self) -> None:
         stages = {stage: {"status": "PASS", "duration_ms": 1} for stage in library_build.STAGES}

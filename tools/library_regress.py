@@ -789,6 +789,7 @@ def run_fast(args: argparse.Namespace, *,
         if lock is None:
             log("fast: no title slot")
             return EXIT_NO_VERDICT
+    scratch: Path | None = None
     try:
         state_path = _fast_state_path(store)
         state = _read_json(state_path) if state_path.is_file() else {"cursor": 0, "runs": 0}
@@ -823,6 +824,8 @@ def run_fast(args: argparse.Namespace, *,
                 _remove_slot_file(lock)
             except OSError as error:  # the run's result still counts; a later run reclaims the lock
                 log(f"fast: could not remove {lock}: {error}; it is reclaimed once this process is gone")
+        if scratch is not None and not args.keep_scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
     manifest_path = run_dir / "library-build.json"
     if completed.returncode != 0 or not manifest_path.is_file():
         log(f"fast: library_build.py ended {completed.returncode}; no verdict")
@@ -840,8 +843,6 @@ def run_fast(args: argparse.Namespace, *,
     state.update(runs=int(state.get("runs", 0)) + 1, last_run=run_id, last_snapshot=path.name,
                  last_verdict=result["verdict"])
     _write_json(state_path, state)
-    if not args.keep_scratch:
-        shutil.rmtree(scratch, ignore_errors=True)
     return exit_code(result)
 
 

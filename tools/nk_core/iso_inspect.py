@@ -877,6 +877,27 @@ def _reject_pbp_package(stream, size_bytes: int, header: bytes) -> None:
     )
 
 
+def _plain_iso_path(
+    iso_path: Path | str, user_data_root: Path | str | None = None
+) -> Path:
+    """Resolve a compressed image to the same bounded plain-ISO import used by inspection."""
+    path = Path(iso_path)
+    if disc_expand_tool.compressed_format(path) is None:
+        return path
+    if user_data_root is None:
+        from .prereq_fetcher import default_data_root
+
+        user_data_root = default_data_root()
+    try:
+        return disc_expand_tool.ensure_plain_iso(path, user_data_root)
+    except disc_expand_tool.DiscImageRefused as exc:
+        raise IsoInspectionError(str(exc), boundary_code=exc.code) from exc
+    except (RuntimeError, OSError) as exc:
+        raise IsoInspectionError(
+            f"The compressed disc image could not be expanded: {exc}"
+        ) from exc
+
+
 def inspect_iso(
     iso_path: Path | str,
     registry: Optional[TitleRegistry] = None,
@@ -893,20 +914,7 @@ def inspect_iso(
     # per-user data root, and the plain .iso it becomes is what is inspected.
     source_format = disc_expand_tool.compressed_format(path)
     if source_format is not None:
-        if user_data_root is not None:
-            data_root = Path(user_data_root)
-        else:
-            from .prereq_fetcher import default_data_root
-
-            data_root = default_data_root()
-        try:
-            expanded = disc_expand_tool.ensure_plain_iso(path, data_root)
-        except disc_expand_tool.DiscImageRefused as exc:
-            raise IsoInspectionError(str(exc), boundary_code=exc.code) from exc
-        except (RuntimeError, OSError) as exc:
-            raise IsoInspectionError(
-                f"The compressed disc image could not be expanded: {exc}"
-            ) from exc
+        expanded = _plain_iso_path(path, user_data_root)
         info = inspect_iso(expanded, registry, user_data_root=user_data_root)
         info.container_metadata["source_format"] = source_format
         return info
@@ -1061,10 +1069,6 @@ def write_experimental_profile(
     stored only below the caller's per-user data directory.
     """
     path = Path(iso_path)
-    info = metadata or inspect_iso(path)
-    if info.matched_profile is not None:
-        raise IsoInspectionError("catalogued titles do not need an experimental profile")
-
     user_root = Path(user_data_dir).expanduser()
     try:
         user_root = user_root.resolve(strict=False)
@@ -1074,9 +1078,12 @@ def write_experimental_profile(
     except OSError as exc:
         raise IsoInspectionError("user data directory could not be resolved") from exc
 
-    report = inspect_compatibility_preflight(
-        path, metadata=info, runtime_root=user_root
-    )
+    info = metadata or inspect_iso(path, user_data_root=user_root)
+    if info.matched_profile is not None:
+        raise IsoInspectionError("catalogued titles do not need an experimental profile")
+
+    path = _plain_iso_path(path, user_root)
+    report = inspect_compatibility_preflight(path, metadata=info, runtime_root=user_root)
     disc_check = next(check for check in report["checks"] if check["code"] == "DISC_SFO")
     if disc_check["status"] != "OK":
         raise IsoInspectionError("experimental import requires PARAM.SFO reached through the disc directory tree")
@@ -1458,7 +1465,12 @@ def _lookup_iso_file(stream, file_size: int, path: tuple[str, ...]) -> tuple[int
         if not is_dir or size == 0 or size > MAX_DIRECTORY_BYTES:
             raise IsoInspectionError("ISO path crosses a non-directory or oversized extent")
         directory = _read_iso_extent(stream, file_size, lba, size, 0, size)
-        wanted = component.upper().encode("ascii")
+        try:
+            wanted = component.encode("ascii", "surrogateescape").upper()
+        except UnicodeEncodeError as exc:
+            raise IsoInspectionError(
+                "ISO path component is not representable as directory bytes"
+            ) from exc
         found: tuple[int, int, bool] | None = None
         offset = 0
         while offset < len(directory):
@@ -1869,7 +1881,7 @@ def list_disc_module_candidates(iso_path: Path | str) -> list[dict]:
     records its member path and whether it is already plain or an encrypted
     container waiting on the boundary.
     """
-    path = Path(iso_path)
+    path = _plain_iso_path(iso_path)
     file_size = path.stat().st_size
     candidates: list[dict] = []
     seen_names: dict[str, str] = {}
@@ -1970,11 +1982,11 @@ def check_needed_modules(
     """
     root = Path(user_data_root).expanduser()
     module_dir = decrypted_module_dir(root, disc_id)
+    path = _plain_iso_path(iso_path, root)
     if modules is None:
-        needs = list_disc_module_candidates(iso_path)
+        needs = list_disc_module_candidates(path)
     else:
         needs = list(modules)
-    path = Path(iso_path)
     file_size = path.stat().st_size
     results: list[dict] = []
     ready = 0
@@ -2235,8 +2247,8 @@ def iso_executable_sha256(iso_path: Path | str, name: str) -> str | None:
     involved (#2140). None means the image has no such file, it is empty, or it
     is beyond the supported size bound.
     """
-    path = Path(iso_path)
     try:
+        path = _plain_iso_path(iso_path)
         size_bytes = path.stat().st_size
         with path.open("rb") as stream:
             entry = _lookup_iso_file(stream, size_bytes, ("PSP_GAME", "SYSDIR", name))
@@ -2261,8 +2273,8 @@ def iso_executable_sha256(iso_path: Path | str, name: str) -> str | None:
 
 def select_boot_executable_source(iso_path: Path | str) -> str | None:
     """Select an on-disc boot filename without resolving keys or decrypting files."""
-    path = Path(iso_path)
     try:
+        path = _plain_iso_path(iso_path)
         size_bytes = path.stat().st_size
         with path.open("rb") as stream:
             executables = {
@@ -2308,7 +2320,7 @@ def inspect_compatibility_preflight(
     runtime_root: Path | str,
 ) -> dict[str, Any]:
     """Return the player/CLI compatibility checks for a selected ISO."""
-    path = Path(iso_path)
+    path = _plain_iso_path(iso_path, runtime_root)
     size_bytes = path.stat().st_size
     directory_error: str | None = None
     sfo_entry: tuple[int, int] | None = None
