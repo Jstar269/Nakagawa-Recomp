@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generate_benchmarks as g  # noqa: E402
@@ -286,13 +287,16 @@ class TestGenerateReport(GenerateReportBase):
         # exercised separately below against the report-side URI reader.
         special_db = os.path.join(self.tmp.name, "dev #1.db")
         make_db(special_db, [{}])
+        with open(special_db, "rb") as f:
+            before = f.read()
         out = os.path.join(self.tmp.name, "r.md")
         self.assertTrue(g.generate_report(special_db, out))
         with open(out, encoding="utf-8") as f:
             content = f.read()
         self.assertIn("## Current Status Snapshot", content)
-        # Still read-only: the DB was not rewritten by generation.
-        self.assertIn("dev #1.db", os.listdir(self.tmp.name))
+        # Still read-only: the DB's bytes are unchanged by generation.
+        with open(special_db, "rb") as f:
+            self.assertEqual(f.read(), before)
 
     def test_uri_query_escaping_isolated(self):
         # '?' and '#' are URI-delimiter characters; the module's readonly_uri()
@@ -350,14 +354,14 @@ class TestGenerateReport(GenerateReportBase):
         self.assertNotIn(b"\xe9", content)
 
     def test_oversized_report_rejected(self):
-        g.MAX_REPORT_BYTES = 100  # shrink budget; report exceeds it
-        try:
+        original = g.MAX_REPORT_BYTES
+        # Shrink the budget so the report exceeds it; the patch restores the real limit.
+        with mock.patch.object(g, "MAX_REPORT_BYTES", 100):
             make_db(self.db, [{}])
             out = os.path.join(self.tmp.name, "r.md")
             with self.assertRaises(ValueError):
                 g.generate_report(self.db, out)
-        finally:
-            g.MAX_REPORT_BYTES = 32 * 1024 * 1024
+        self.assertEqual(g.MAX_REPORT_BYTES, original)
 
 
 class TestAtomicWrite(GenerateReportBase):
