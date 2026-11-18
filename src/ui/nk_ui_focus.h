@@ -48,7 +48,9 @@ typedef struct {
 
 /* A scroll container. viewport is its visible rect; scroll_y and content_h describe
    the current vertical scroll state (scroll_y is how far the content has moved up,
-   0 at the top). Horizontal scrolling uses scroll_x and content_w. */
+   0 at the top). Horizontal scrolling uses scroll_x and content_w; nk_ui registers
+   vertical scrollers only today (scroll_x 0, content_w the viewport width), so a
+   request's scroll_x stays 0 there and nk_ui applies scroll_y alone. */
 typedef struct {
     NkUiId id;
     NkUiRect viewport;

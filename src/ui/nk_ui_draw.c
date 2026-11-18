@@ -7,104 +7,63 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool nk_ui_reserve_vertices(NkUiDrawBuffer *buffer, uint32_t needed) {
-    uint32_t capacity;
-    NkUiVertex *grown;
-    if (needed <= buffer->vertex_capacity) {
+/* Grows an array of `size`-byte items to hold at least `needed`, doubling from
+   `initial`. *grown is the array to use; on failure the array and *capacity stay. */
+static bool nk_ui_grow(void *items, size_t size, uint32_t initial, uint32_t needed,
+                       uint32_t *capacity, void **grown) {
+    uint32_t count;
+    void *bigger;
+    *grown = items;
+    if (needed <= *capacity) {
         return true;
     }
-    capacity = buffer->vertex_capacity == 0 ? 64u : buffer->vertex_capacity;
-    while (capacity < needed) {
-        if (capacity > UINT32_MAX / 2u) {
+    count = *capacity == 0 ? initial : *capacity;
+    while (count < needed) {
+        if (count > UINT32_MAX / 2u) {
             return false;
         }
-        capacity *= 2u;
+        count *= 2u;
     }
-#if SIZE_MAX < UINT64_MAX
-    if ((size_t)capacity > SIZE_MAX / sizeof(*grown)) return false;
-#endif
-    grown = (NkUiVertex *)realloc(buffer->vertices, (size_t)capacity * sizeof(*grown));
-    if (grown == NULL) {
+    if ((size_t)count > SIZE_MAX / size) return false;
+    bigger = realloc(items, (size_t)count * size);
+    if (bigger == NULL) {
         return false;
     }
-    buffer->vertices = grown;
-    buffer->vertex_capacity = capacity;
+    *grown = bigger;
+    *capacity = count;
     return true;
+}
+
+static bool nk_ui_reserve_vertices(NkUiDrawBuffer *buffer, uint32_t needed) {
+    void *grown;
+    bool ok = nk_ui_grow(buffer->vertices, sizeof(*buffer->vertices), 64u, needed,
+                         &buffer->vertex_capacity, &grown);
+    buffer->vertices = (NkUiVertex *)grown;
+    return ok;
 }
 
 static bool nk_ui_reserve_indices(NkUiDrawBuffer *buffer, uint32_t needed) {
-    uint32_t capacity;
-    uint32_t *grown;
-    if (needed <= buffer->index_capacity) {
-        return true;
-    }
-    capacity = buffer->index_capacity == 0 ? 96u : buffer->index_capacity;
-    while (capacity < needed) {
-        if (capacity > UINT32_MAX / 2u) {
-            return false;
-        }
-        capacity *= 2u;
-    }
-#if SIZE_MAX < UINT64_MAX
-    if ((size_t)capacity > SIZE_MAX / sizeof(*grown)) return false;
-#endif
-    grown = (uint32_t *)realloc(buffer->indices, (size_t)capacity * sizeof(*grown));
-    if (grown == NULL) {
-        return false;
-    }
-    buffer->indices = grown;
-    buffer->index_capacity = capacity;
-    return true;
+    void *grown;
+    bool ok = nk_ui_grow(buffer->indices, sizeof(*buffer->indices), 96u, needed,
+                         &buffer->index_capacity, &grown);
+    buffer->indices = (uint32_t *)grown;
+    return ok;
 }
 
 static bool nk_ui_reserve_commands(NkUiDrawBuffer *buffer, uint32_t needed) {
-    uint32_t capacity;
-    NkUiDrawCmd *grown;
-    if (needed <= buffer->command_capacity) {
-        return true;
-    }
-    capacity = buffer->command_capacity == 0 ? 32u : buffer->command_capacity;
-    while (capacity < needed) {
-        if (capacity > UINT32_MAX / 2u) {
-            return false;
-        }
-        capacity *= 2u;
-    }
-#if SIZE_MAX < UINT64_MAX
-    if ((size_t)capacity > SIZE_MAX / sizeof(*grown)) return false;
-#endif
-    grown = (NkUiDrawCmd *)realloc(buffer->commands, (size_t)capacity * sizeof(*grown));
-    if (grown == NULL) {
-        return false;
-    }
-    buffer->commands = grown;
-    buffer->command_capacity = capacity;
-    return true;
+    void *grown;
+    bool ok = nk_ui_grow(buffer->commands, sizeof(*buffer->commands), 32u, needed,
+                         &buffer->command_capacity, &grown);
+    buffer->commands = (NkUiDrawCmd *)grown;
+    return ok;
 }
 
 static bool nk_ui_reserve_text_runs(NkUiDrawBuffer *buffer, uint32_t needed) {
-    uint32_t capacity;
-    NkUiTextRun **grown;
-    if (needed <= buffer->text_run_capacity) {
-        return true;
-    }
-    capacity = buffer->text_run_capacity == 0 ? 8u : buffer->text_run_capacity;
-    while (capacity < needed) {
-        if (capacity > UINT32_MAX / 2u) {
-            return false;
-        }
-        capacity *= 2u;
-    }
-#if SIZE_MAX < UINT64_MAX
-    if ((size_t)capacity > SIZE_MAX / sizeof(*grown)) return false;
-#endif
-    grown = (NkUiTextRun **)realloc(buffer->text_runs, (size_t)capacity * sizeof(*grown));
-    if (grown == NULL) {
-        return false;
-    }
-    buffer->text_runs = grown;
-    buffer->text_run_capacity = capacity;
-    return true;
+    void *grown;
+    bool ok = nk_ui_grow(buffer->text_runs, sizeof(*buffer->text_runs), 8u, needed,
+                         &buffer->text_run_capacity, &grown);
+    buffer->text_runs = (NkUiTextRun **)grown;
+    return ok;
 }
 
 static uint32_t nk_ui_premultiply(uint32_t rgba) {
@@ -137,9 +96,13 @@ static void nk_ui_clip_to_scissor(const NkUiDrawBuffer *buffer, int clip[4]) {
     if (clip[3] > scissor[3]) clip[3] = scissor[3];
 }
 
+/* Appends command; the list's views follow any array the geometry or this command
+   grew, on every path. */
 static bool nk_ui_append_command(NkUiDrawBuffer *buffer, NkUiDrawCmd command) {
-    if (buffer->list.ncmd == UINT32_MAX ||
-        !nk_ui_reserve_commands(buffer, buffer->list.ncmd + 1u)) {
+    bool reserved = buffer->list.ncmd != UINT32_MAX &&
+                    nk_ui_reserve_commands(buffer, buffer->list.ncmd + 1u);
+    nk_ui_sync_view(buffer);
+    if (!reserved) {
         return false;
     }
     if (command.kind == NK_UI_DRAW_SCISSOR_END) {
@@ -158,9 +121,6 @@ static bool nk_ui_append_command(NkUiDrawBuffer *buffer, NkUiDrawCmd command) {
         }
     }
     buffer->commands[buffer->list.ncmd++] = command;
-    buffer->list.v = buffer->vertices;
-    buffer->list.idx = buffer->indices;
-    buffer->list.cmd = buffer->commands;
     return true;
 }
 
@@ -242,7 +202,6 @@ static bool nk_ui_draw_add_pixel_rect(NkUiDrawBuffer *buffer, NkUiPixelRect rect
     command.element_id = element_id;
     command.rgba_pm = rgba_pm;
     nk_ui_set_bounds(&command, rect);
-    nk_ui_sync_view(buffer);
     return nk_ui_append_command(buffer, command);
 }
 
@@ -271,9 +230,25 @@ static float nk_ui_snap_half(float value) {
     return nk_ui_round_float(value * 2.0f) * 0.5f;
 }
 
-static void nk_ui_rounded_points(NkUiPixelRect rect, const int radius[4], float inset,
-                                 float points[NK_UI_OUTLINE_POINTS][2]) {
+/* The outline's unit vectors, NK_UI_CORNER_POINTS per corner in nk_ui_rounded_points'
+   order: one rect's inner and outer outlines share them. */
+static void nk_ui_rounded_units(float units[NK_UI_OUTLINE_POINTS][2]) {
     static const float starts[4] = {-90.0f, 0.0f, 90.0f, 180.0f};
+    unsigned corner;
+    unsigned segment;
+    for (corner = 0; corner < 4u; ++corner) {
+        for (segment = 0; segment < NK_UI_CORNER_POINTS; ++segment) {
+            float angle = (starts[corner] + 90.0f * (float)segment /
+                           (float)(NK_UI_CORNER_POINTS - 1u)) * 0.01745329251994329577f;
+            units[corner * NK_UI_CORNER_POINTS + segment][0] = cosf(angle);
+            units[corner * NK_UI_CORNER_POINTS + segment][1] = sinf(angle);
+        }
+    }
+}
+
+static void nk_ui_rounded_points(NkUiPixelRect rect, const int radius[4], float inset,
+                                 float units[NK_UI_OUTLINE_POINTS][2],
+                                 float points[NK_UI_OUTLINE_POINTS][2]) {
     /* Corner order around the outline: TR, BR, BL, TL; dx, dy point inwards. */
     static const int order[4] = {1, 2, 3, 0};
     static const float dx[4] = {-1.0f, -1.0f, 1.0f, 1.0f};
@@ -289,11 +264,9 @@ static void nk_ui_rounded_points(NkUiPixelRect rect, const int radius[4], float 
         float cx = corner_x[corner] + dx[corner] * offset;
         float cy = corner_y[corner] + dy[corner] * offset;
         for (segment = 0; segment < (int)NK_UI_CORNER_POINTS; ++segment) {
-            float angle = (starts[corner] + 90.0f * (float)segment /
-                           (float)(NK_UI_CORNER_POINTS - 1u)) * 0.01745329251994329577f;
             unsigned index = (unsigned)corner * NK_UI_CORNER_POINTS + (unsigned)segment;
-            points[index][0] = nk_ui_snap_half(cx + arc * cosf(angle));
-            points[index][1] = nk_ui_snap_half(cy + arc * sinf(angle));
+            points[index][0] = nk_ui_snap_half(cx + arc * units[index][0]);
+            points[index][1] = nk_ui_snap_half(cy + arc * units[index][1]);
         }
     }
 }
@@ -305,6 +278,7 @@ static bool nk_ui_append_rounded_geometry(NkUiDrawBuffer *buffer, NkUiPixelRect 
                                           const int radius[4], uint32_t rgba_pm,
                                           uint32_t *first_vertex, uint32_t *first_index,
                                           uint32_t *vertex_count, uint32_t *index_count) {
+    float units[NK_UI_OUTLINE_POINTS][2];
     float inner[NK_UI_OUTLINE_POINTS][2];
     float outer[NK_UI_OUTLINE_POINTS][2];
     uint32_t base = buffer->list.nv;
@@ -314,8 +288,9 @@ static bool nk_ui_append_rounded_geometry(NkUiDrawBuffer *buffer, NkUiPixelRect 
     if (rect.x1 <= rect.x0 || rect.y1 <= rect.y0) {
         return false;
     }
-    nk_ui_rounded_points(rect, radius, 0.5f, inner);
-    nk_ui_rounded_points(rect, radius, -0.5f, outer);
+    nk_ui_rounded_units(units);
+    nk_ui_rounded_points(rect, radius, 0.5f, units, inner);
+    nk_ui_rounded_points(rect, radius, -0.5f, units, outer);
 
     *first_vertex = base;
     *first_index = index_base;
@@ -363,17 +338,10 @@ static int nk_ui_radius_px(NkUiPixelRect px, float radius, float density) {
 }
 
 void nk_ui_draw_buffer_reset(NkUiDrawBuffer *buffer) {
-    uint32_t i;
     if (buffer == NULL) {
         return;
     }
-    for (i = 0; i < buffer->text_run_count; ++i) {
-        if (buffer->text_runs[i] != NULL) {
-            free((void *)buffer->text_runs[i]->text);
-            free(buffer->text_runs[i]);
-        }
-    }
-    buffer->text_run_count = 0;
+    buffer->text_run_count = 0;   /* the runs stay allocated for the next frame */
     buffer->clip_depth = 0u;
     buffer->list.nv = 0;
     buffer->list.ni = 0;
@@ -385,10 +353,15 @@ void nk_ui_draw_buffer_reset(NkUiDrawBuffer *buffer) {
 }
 
 void nk_ui_draw_buffer_destroy(NkUiDrawBuffer *buffer) {
+    uint32_t i;
     if (buffer == NULL) {
         return;
     }
     nk_ui_draw_buffer_reset(buffer);
+    for (i = 0; i < buffer->text_run_pool; ++i) {
+        free((void *)buffer->text_runs[i]->text);
+        free(buffer->text_runs[i]);
+    }
     free(buffer->vertices);
     free(buffer->indices);
     free(buffer->commands);
@@ -451,7 +424,6 @@ bool nk_ui_draw_add_rect_corners(NkUiDrawBuffer *buffer, NkUiRect rect, float de
     command.element_id = element_id;
     command.rgba_pm = rgba_pm;
     nk_ui_set_bounds(&command, px);
-    nk_ui_sync_view(buffer);
     return nk_ui_append_command(buffer, command);
 }
 
@@ -524,7 +496,6 @@ static bool nk_ui_finish_geometry(NkUiDrawBuffer *buffer, uint32_t first_index,
     command.element_id = element_id;
     command.rgba_pm = rgba_pm;
     nk_ui_set_bounds(&command, bounds);
-    nk_ui_sync_view(buffer);
     return nk_ui_append_command(buffer, command);
 }
 
@@ -777,6 +748,7 @@ bool nk_ui_draw_add_text_spaced(NkUiDrawBuffer *buffer, NkUiPixelRect bounds,
                                 uint32_t element_id) {
     NkUiTextRun *run;
     char *copy;
+    size_t text_capacity;
     NkUiDrawCmd command;
     if (buffer == NULL || (text == NULL && length != 0) || length == SIZE_MAX) {
         return false;
@@ -785,13 +757,27 @@ bool nk_ui_draw_add_text_spaced(NkUiDrawBuffer *buffer, NkUiPixelRect bounds,
         !nk_ui_reserve_commands(buffer, buffer->list.ncmd + 1u)) {
         return false;
     }
-    run = (NkUiTextRun *)calloc(1, sizeof(*run));
-    copy = (char *)malloc(length + 1u);
-    if (run == NULL || copy == NULL) {
-        free(run);
-        free(copy);
-        return false;
+    /* A run and its bytes live until the next reset, which keeps them allocated: the
+       next frame reuses them, growing a run's bytes only for a longer text. */
+    if (buffer->text_run_count == buffer->text_run_pool) {
+        run = (NkUiTextRun *)calloc(1, sizeof(*run));
+        if (run == NULL) {
+            return false;
+        }
+        buffer->text_runs[buffer->text_run_pool++] = run;
     }
+    run = buffer->text_runs[buffer->text_run_count];
+    copy = (char *)run->text;
+    text_capacity = run->text_capacity;
+    if (text_capacity < length + 1u) {
+        copy = (char *)realloc(copy, length + 1u);
+        if (copy == NULL) {
+            return false;
+        }
+        text_capacity = length + 1u;
+    }
+    memset(run, 0, sizeof(*run));
+    run->text_capacity = text_capacity;
     if (length != 0) {
         memcpy(copy, text, length);
     }

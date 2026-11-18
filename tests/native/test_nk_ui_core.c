@@ -2348,6 +2348,43 @@ static int test_draw_clips_nest(void) {
     return 1;
 }
 
+/* Text runs live one frame: a reset keeps their storage for the next frame, and a
+   reused run carries only what its new command says (its text, a longer one
+   included, and no centring left from the run before). */
+static int test_draw_text_runs_reused(void) {
+    static const NkUiPixelRect box = {0, 0, 100, 20};
+    static const char longer[] = "a much longer label than the one before it";
+    NkUiDrawBuffer buffer;
+    const NkUiTextRun *first;
+    const NkUiTextRun *second;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(nk_ui_draw_add_text_centered(&buffer, box, "ok", 2u, 0, 12, 0xFFFFFFFFu, 1u) &&
+              nk_ui_draw_add_text(&buffer, box, "two", 3u, 1, 14, 0xFFFFFFFFu, 2u),
+          "two text runs");
+    first = buffer.text_runs[0];
+    CHECK(first->center && strcmp(first->text, "ok") == 0, "the first run is centred");
+    nk_ui_draw_buffer_reset(&buffer);
+    CHECK(buffer.text_run_count == 0u && buffer.list.ncmd == 0u, "a reset empties the frame");
+    CHECK(nk_ui_draw_add_text_spaced(&buffer, box, longer, sizeof(longer) - 1u, 2, 16, 1.5f,
+                                     0xFFFFFFFFu, 3u),
+          "a longer text after the reset");
+    second = (const NkUiTextRun *)buffer.list.cmd[0].custom;
+    CHECK(second == buffer.text_runs[0] && buffer.text_run_count == 1u,
+          "the command points at the frame's run");
+    CHECK(second->length == sizeof(longer) - 1u && strcmp(second->text, longer) == 0 &&
+              second->text_capacity >= sizeof(longer),
+          "the reused run holds the whole longer text");
+    CHECK(!second->center && second->font == 2 && second->size_px == 16 &&
+              second->letter_spacing == 1.5f,
+          "the reused run keeps nothing from the run before");
+    CHECK(nk_ui_draw_add_text(&buffer, box, NULL, 0u, 0, 12, 0xFFFFFFFFu, 4u) &&
+              buffer.text_runs[1]->length == 0u && buffer.text_runs[1]->text[0] == '\0',
+          "an empty text reuses the second run");
+    nk_ui_draw_buffer_destroy(&buffer);
+    CHECK(buffer.text_runs == NULL && buffer.text_run_pool == 0u, "destroy frees every run");
+    return 1;
+}
+
 /* Every Clay error type has a name, and only the ones that leave a whole
    layout keep their frame. A type Clay adds later is fatal until it is named. */
 static int test_layout_error_kinds(void) {
@@ -2865,7 +2902,8 @@ int main(int argc, char **argv) {
         !test_display_text_rules() || !test_list_lines() || !test_layout_error_kinds() ||
         !test_layout_errors_reported() || !test_pointer_hover_and_press() ||
         !test_pointer_respects_clip() || !test_scroll_container() ||
-        !test_draw_clips_nest() || !test_modal_card_floats() || !test_focus_ring_floats() ||
+        !test_draw_clips_nest() || !test_draw_text_runs_reused() ||
+        !test_modal_card_floats() || !test_focus_ring_floats() ||
         !test_focus_ring_moves() || !test_hover_fill_eases() || !test_tab_rule_slides() ||
         !test_wait_follows_motion() || !test_art_fades_in() ||
         !test_backdrop_rests_and_fades() ||

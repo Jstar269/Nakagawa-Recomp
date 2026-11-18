@@ -404,6 +404,8 @@ bool nk_ui_focus_scroll_into_view(const NkUiFocusGraph *graph, NkUiId id,
     } else if (e->rect.x + e->rect.w > s->viewport.x + s->viewport.w) {
         nx += (e->rect.x + e->rect.w) - (s->viewport.x + s->viewport.w);
     }
+    /* nk_ui's scrollers are vertical (content_w is the viewport width), so nx clamps
+       to 0 there; the horizontal half serves hosts that register wider content. */
     max_x = s->content_w - s->viewport.w;
     max_y = s->content_h - s->viewport.h;
     if (max_x < 0.0f) max_x = 0.0f;

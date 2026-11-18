@@ -69,6 +69,7 @@ typedef struct {
     int size_px;
     float letter_spacing; /* extra device px after each glyph (CSS letter-spacing) */
     bool center;          /* centre the run across its bounds (glyph labels) */
+    size_t text_capacity; /* bytes held at text; the draw buffer reuses them */
 } NkUiTextRun;
 
 typedef struct {
@@ -82,6 +83,7 @@ typedef struct {
     NkUiTextRun **text_runs;
     uint32_t text_run_count;
     uint32_t text_run_capacity;
+    uint32_t text_run_pool;   /* runs allocated: a reset keeps them for the next frame */
     int clip_stack[NK_UI_DRAW_CLIP_DEPTH][4]; /* the scissors open now, nested */
     uint32_t clip_depth;
 } NkUiDrawBuffer;
