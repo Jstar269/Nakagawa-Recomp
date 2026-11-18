@@ -1068,7 +1068,8 @@ asset-index-selftest:
 # over damaged, foreign and other-driver files and with the switch off or refused. Two cells then
 # run alone, each in its own process: tex-evict-fail fills the texture cache and injects a failed
 # eviction drain, and submit-fail injects a failed queue submit, after which the backend records
-# nothing more.
+# nothing more. Last, init-fail runs gegpu_init with depth=32 and a failure injected after every
+# part is set up: the Ace report must find no part confirmed by the failed init.
 GPU_COHERENCE_BIN := $(BUILD_DIR)/gpu_coherence_selftest.exe
 
 $(GPU_COHERENCE_BIN): shader-verify $(RT_GE_O)
@@ -1216,6 +1217,7 @@ gpu-coherence-selftest: $(GPU_COHERENCE_BIN)
 	$(GPU_COHERENCE_BIN) --pipeline-cache $(BUILD_DIR)/pipeline_cache_test --case pipeline-cache-reject
 	$(GPU_COHERENCE_BIN) --case tex-evict-fail
 	$(GPU_COHERENCE_BIN) --case submit-fail
+	$(GPU_COHERENCE_BIN) --depth 32 --init-fail
 	@$(MAKE) --no-print-directory gpu-coherence-selftest-snapbar-mutants
 	@$(MAKE) --no-print-directory gpu-coherence-pcache-mutant
 	@$(MAKE) --no-print-directory gpu-dst-read-mutants

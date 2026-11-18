@@ -9362,6 +9362,10 @@ void gegpu_selftest_ssaa_limits(unsigned long long budget_bytes, unsigned max_di
     s_ssaa_expect = expect > 0 ? (unsigned long long)expect : 0u;
 }
 
+void gegpu_selftest_init_fail(int on) {
+    s_selftest_init_fail = on ? 1 : 0;
+}
+
 /* Signed distance, in guest pixels, from (x, y) to the triangle's diagonal edge x / 480 + y / 272 = 1,
  * and to the sliver's long edges (two lines from (40, 200) to (440, 204) and (440, 212)). */
 static double ss_edge_dist(double x, double y) {
@@ -16211,6 +16215,230 @@ static int coherence_run_tex_key_bufw(void) {
     return 1;
 }
 
+/* ---- Fallback depth key, failed targets, depth views, transfer strides, texture failures --------
+ * (audit 2026-11-17, PR01-U03)
+ *
+ * fallback-zbp-moved: zbp moves and the colour target stays; the next primitive is a point, which
+ * ge.c draws. Its depth is the new surface's from guest VRAM, and the old surface keeps its GPU
+ * depth, newer than guest VRAM. Failing before: the target's old depth was read into ge.c's
+ * buffer and labelled the new zbp, and the old surface was marked written back without being so.
+ *
+ * target-fail-handover: a sprite and a triangle the GPU cannot draw because no target can be made
+ * (a depth stride above 512) are handed to ge.c (the hook returns 0), with the target's newer GPU
+ * pixels written back first. Failing before: the hooks returned 1, so the primitive was drawn by
+ * neither.
+ *
+ * depth-view-dirty: a CPU store into a depth surface through the 0x04400000 and 0x04200000 views
+ * marks the surface CPU-written. Failing before: the commit compared the raw view address with the
+ * surface's plain-view span and never matched.
+ *
+ * xfer-stride: a block transfer whose rows pass the 480-pixel stride (which wrap into the next
+ * guest row) is left to ge.c's copy. Failing before: it was blitted image to image, the columns
+ * past the stride copied as if they were on the same row.
+ *
+ * tex-make-fail: a texture whose image memory cannot be allocated, or whose first upload fails,
+ * leaves no Vulkan object in the cache slot it was made in. Failing before: the image (and its
+ * memory, view and sampler) stayed in the slot, and the next texture's memset lost them. */
+#define AUD3_ZA 0x000B0000u   /* fallback-zbp-moved: two depth surfaces of stride 512 */
+#define AUD3_ZB 0x00100000u
+
+static void aud3_fill16(uint32_t off, uint32_t halfwords, uint16_t v) {
+    uint16_t *p = (uint16_t *)SR_HOST(0x04000000u | off);
+    for (uint32_t i = 0; i < halfwords; i++) p[i] = v;
+}
+
+static int coherence_run_fallback_zbp_moved(void) {
+    const char *name = "fallback-zbp-moved";
+    const uint32_t base = 0x04000000u | AUD_X;
+    coherence_reset_targets();
+    coherence_reset_depths();
+    GeState saved = *s_ge;
+    memset(s_ge, 0, sizeof(*s_ge));
+    coherence_fill_raw((uint8_t *)SR_HOST(base), 512u * FB_H, 4u, coherence_g1(3u));
+    aud3_fill16(AUD3_ZA, 512u * FB_H, 0x1111u);
+    aud3_fill16(AUD3_ZB, 512u * FB_H, 0x3333u);
+    s_ge->fbp = base; s_ge->fbw = 512u; s_ge->fbfmt = 3u;
+    s_ge->zbp = 0x04000000u | AUD3_ZA; s_ge->zbw = 512u;
+    int ok = begin_target() && s_cur && s_cur->dep && s_cur->dep->zba == AUD3_ZA;
+    DepthEnt *a = ok ? s_cur->dep : NULL;
+    /* the GPU drew depth 0x7777 over A: newer than guest VRAM */
+    uint16_t *dev16 = ok ? (uint16_t *)malloc((size_t)SCL_W * SCL_H * 2u) : NULL;
+    float *devf = ok && s_depth32 ? (float *)malloc((size_t)SCL_W * SCL_H * 4u) : NULL;
+    if (ok && (!dev16 || (s_depth32 && !devf))) ok = 0;
+    for (uint32_t i = 0; ok && i < SCL_W * SCL_H; i++) dev16[i] = 0x7777u;
+    for (uint32_t i = 0; ok && devf && i < SCL_W * SCL_H; i++) devf[i] = depth_unorm(0x7777u);
+    ok = ok && coherence_write_device(a->img, VK_IMAGE_ASPECT_DEPTH_BIT, &a->layout,
+                                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, DEPTH_BPP,
+                                      devf ? (const void *)devf : (const void *)dev16) &&
+         coherence_wrote_device(NULL, a);
+    free(dev16);
+    free(devf);
+    if (!ok) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup: no target over depth A\n", name);
+        *s_ge = saved; coherence_reset_depths(); return 0;
+    }
+    a->cpu_dirty = 0;
+    a->guest_dirty = 1;
+    s_ge->zbp = 0x04000000u | AUD3_ZB;   /* the depth surface moves; the colour target stays */
+    const GeVtx p = { 10.0f, 10.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
+    const int hook = hook_point(&p, 0);
+    const uint16_t *z = ge_zbuf_ptr();
+    const unsigned zv = z ? z[10u * 512u + 10u] : 0u;
+    const int a_kept = a->used && a->zba == AUD3_ZA && a->guest_dirty && !a->cpu_dirty;
+    *s_ge = saved;
+    coherence_reset_depths();
+    if (hook != 0 || zv != 0x3333u || !a_kept) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL a point after zbp moved: hook=%d (want 0), ge.c's "
+                "depth at (10, 10) %04x (want 3333, B's), A still newer than VRAM=%d%s\n", name, hook, zv, a_kept,
+                zv == 0x7777u ? " -- ge.c took A's GPU depth as B's" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s a point after zbp moved tested B's depth and left A's on the GPU\n",
+           name);
+    return 1;
+}
+
+static int coherence_run_target_fail_handover(void) {
+    const char *name = "target-fail-handover";
+    const uint32_t base = 0x04000000u | AUD_X;
+    uint32_t *g = (uint32_t *)SR_HOST(base);
+    coherence_reset_targets();
+    coherence_reset_depths();
+    coherence_fill_raw((uint8_t *)g, 512u * FB_H, 4u, coherence_g1(3u));
+    Target *t = target_color_acquire(AUD_X, 512u, 3u, 1);
+    if (!t || !t->gpu_valid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup: no GPU target\n", name);
+        coherence_reset_targets(); return 0;
+    }
+    coherence_fill_raw((uint8_t *)g, 512u * FB_H, 4u, coherence_g0(3u));
+    coherence_image_newer(t);   /* the image (g1) is newer than guest VRAM (g0) */
+    GeState saved = *s_ge;
+    memset(s_ge, 0, sizeof(*s_ge));
+    s_ge->fbp = base; s_ge->fbw = 512u; s_ge->fbfmt = 3u;
+    s_ge->zbp = 0x04000000u | AUD_Z; s_ge->zbw = 1024u;   /* no depth surface can be made */
+    const GeVtx p0 = { 10.0f, 10.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
+    const GeVtx p1 = { 20.0f, 20.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
+    const GeVtx p2 = { 10.0f, 30.0f, 1.0f, 1.0f, 0, 0, 1.0f, 255, 255, 255, 255 };
+    const int spr = hook_sprite(&p0, &p1, 0);
+    const int written = !t->gpu_valid && g[12u * 512u + 12u] == coherence_g1(3u);
+    s_tri_state.valid = 0;
+    const int tri = hook_tri(&p0, &p1, &p2, 0);
+    *s_ge = saved;
+    coherence_reset_targets();
+    if (spr != 0 || !written || tri != 0) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL primitives with no target: sprite hook=%d, triangle "
+                "hook=%d (want 0, ge.c draws), GPU pixels written back=%d%s\n", name, spr, tri, written,
+                spr == 1 || tri == 1 ? " -- the primitive was drawn by neither" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s primitives with no target went to ge.c over the written-back "
+           "pixels\n", name);
+    return 1;
+}
+
+static int coherence_run_depth_view_dirty(void) {
+    const char *name = "depth-view-dirty";
+    const uint32_t zba = 0x00100000u;
+    coherence_reset_depths();
+    GeState saved = *s_ge;
+    DepthEnt *d = aud2_depth(zba);
+    int ok = d && !d->cpu_dirty;
+    /* depth pixel (8, 4): plain offset (zba + linear) ^ 0x2040 */
+    const uint32_t plain = (zba + (4u * 512u + 8u) * 2u) ^ 0x2040u;
+    static const uint32_t view[2] = { 0x04400000u, 0x04200000u };
+    int marked[2] = { 0, 0 };
+    for (int k = 0; ok && k < 2; k++) {
+        d->cpu_dirty = 0;
+        /* through 0x04200000 a store reaches offset o ^ 0x2040 (sr_vram_cpu_address) */
+        const uint32_t addr = view[k] | (k ? plain ^ 0x2040u : plain);
+        if (sr_vram_cpu_address(addr) != (0x04000000u | plain)) { ok = 0; break; }
+        sr_ge_vram_write_commit(addr, 2u);
+        marked[k] = d->cpu_dirty;
+    }
+    *s_ge = saved;
+    coherence_reset_depths();
+    if (!ok || !marked[0] || !marked[1]) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup=%d, a CPU store into depth through 0x04400000 "
+                "marked it=%d, through 0x04200000=%d%s\n", name, ok, marked[0], marked[1],
+                ok ? " -- the GPU keeps testing against the depth from before the store" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s CPU stores into depth through the 0x044 and 0x042 views marked "
+           "the surface\n", name);
+    return 1;
+}
+
+static int coherence_run_xfer_stride(void) {
+    const char *name = "xfer-stride";
+    const uint32_t stride = 480u;
+    coherence_reset_targets();
+    coherence_reset_depths();
+    coherence_fill_raw((uint8_t *)SR_HOST(0x04000000u | AUD_X), stride * FB_H, 4u, coherence_g1(3u));
+    coherence_fill_raw((uint8_t *)SR_HOST(0x04000000u | AUD_M), stride * FB_H, 4u, coherence_g0(3u));
+    Target *a = target_color_acquire(AUD_X, stride, 3u, 1), *b = target_color_acquire(AUD_M, stride, 3u, 1);
+    if (!a || !b || !a->gpu_valid || !b->gpu_valid) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL setup: the targets could not be made\n", name);
+        coherence_reset_targets(); return 0;
+    }
+    GeState saved = *s_ge;
+    s_ge->xf_src = AUD_X; s_ge->xf_srcw = stride | (0x04u << 16);
+    s_ge->xf_dst = AUD_M; s_ge->xf_dstw = stride | (0x04u << 16);
+    s_ge->xf_size = 19u | (9u << 10);                      /* 20 x 10 */
+    int took[3];
+    static const uint32_t spos[3] = { 400u, 470u, 400u }, dpos[3] = { 400u, 400u, 470u };
+    for (int k = 0; k < 3; k++) {
+        s_ge->xf_spos = spos[k] | (20u << 10);
+        s_ge->xf_dpos = dpos[k] | (40u << 10);
+        took[k] = hook_xfer(1u);
+    }
+    *s_ge = saved;
+    coherence_reset_targets();
+    if (!took[0] || took[1] || took[2]) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL stride-480 transfers: inside the rows taken=%d (want "
+                "1), source past the stride=%d, destination past it=%d (want 0)%s\n", name, took[0], took[1],
+                took[2], took[1] || took[2] ? " -- columns past the stride were copied on the same row" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s transfers whose rows pass the stride were left to ge.c's copy\n", name);
+    return 1;
+}
+
+static int coherence_run_tex_make_fail(void) {
+    const char *name = "tex-make-fail";
+    const uint32_t addr = 0x08A00000u, bytes = 64u * 64u * 4u;
+    if (s_nbatch) (void)submit_pending();
+    GeState saved = *s_ge;
+    s_ge->tex_fmt = 3u; s_ge->tex_w = 64; s_ge->tex_h = 64;
+    s_ge->tex_swizzle = 0; s_ge->tex_filter = 0u; s_ge->tex_wrap = 0u; s_ge->tex_max_level = 0u;
+    s_ge->tex_mip_wlog2[0] = 6u; s_ge->tex_mip_hlog2[0] = 6u;
+    s_ge->tex_addr = s_ge->tex_mip_addr[0] = addr;
+    s_ge->tex_bufw = s_ge->tex_mip_bufw[0] = 64u;
+    coherence_fill_raw((uint8_t *)SR_HOST(addr), bytes / 4u, 4u, 0xFF305070u);
+    sr_gpu_vram_dirty(addr, bytes);
+    const int n0 = s_tex_n;
+    int white[2], left[2];
+    for (int k = 0; k < 2; k++) {
+        if (k) { (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME); s_cmd_failed = 1; }   /* the upload cannot record */
+        else s_selftest_alloc_fail = 1;                                          /* the image has no memory */
+        white[k] = tex_get() == s_white_set;
+        s_cmd_failed = 0;
+        s_selftest_alloc_fail = 0;
+        const TexEnt *e = &s_tex[s_tex_n];
+        left[k] = s_tex_n != n0 || e->img || e->mem || e->view || e->smp;
+    }
+    const int made = tex_get() != s_white_set && s_tex_n == n0 + 1;
+    if (s_nbatch) (void)submit_pending();
+    *s_ge = saved;
+    if (!white[0] || !white[1] || left[0] || left[1] || !made) {
+        fprintf(stderr, "gpu coherence selftest [%s]: FAIL failed textures: alloc white=%d left objects=%d, upload "
+                "white=%d left objects=%d, then made=%d%s\n", name, white[0], left[0], white[1], left[1], made,
+                left[0] || left[1] ? " -- the next texture's slot reset loses them" : "");
+        return 0;
+    }
+    printf("gpu coherence selftest: PASS %s failed textures left no Vulkan object in their slot\n", name);
+    return 1;
+}
+
 static int coherence_selftest_cases(void) {
     /* SR_GPU_COHERENCE_CASE=scaled-upload (the harness's --case) runs that case alone, as the
      * recipe does at render scales 2 and 4: the other fixtures expect 1x pixels (a filtered sample
@@ -16282,6 +16510,11 @@ static int coherence_selftest_cases(void) {
         if (strcmp(only, "fallback-refused") == 0) return coherence_run_fallback_refused();
         if (strcmp(only, "depth-init-fail") == 0) return coherence_run_depth_init_fail();
         if (strcmp(only, "tex-key-bufw") == 0) return coherence_run_tex_key_bufw();
+        if (strcmp(only, "fallback-zbp-moved") == 0) return coherence_run_fallback_zbp_moved();
+        if (strcmp(only, "target-fail-handover") == 0) return coherence_run_target_fail_handover();
+        if (strcmp(only, "depth-view-dirty") == 0) return coherence_run_depth_view_dirty();
+        if (strcmp(only, "xfer-stride") == 0) return coherence_run_xfer_stride();
+        if (strcmp(only, "tex-make-fail") == 0) return coherence_run_tex_make_fail();
         fprintf(stderr, "gpu coherence selftest: unknown SR_GPU_COHERENCE_CASE '%s'\n", only);
         return 0;
     }
@@ -16343,6 +16576,11 @@ static int coherence_selftest_cases(void) {
     if (!coherence_run_fallback_refused()) ok = 0;
     if (!coherence_run_depth_init_fail()) ok = 0;
     if (!coherence_run_tex_key_bufw()) ok = 0;
+    if (!coherence_run_fallback_zbp_moved()) ok = 0;
+    if (!coherence_run_target_fail_handover()) ok = 0;
+    if (!coherence_run_depth_view_dirty()) ok = 0;
+    if (!coherence_run_xfer_stride()) ok = 0;
+    if (!coherence_run_tex_make_fail()) ok = 0;
     if (!coherence_run_fallback_reasons()) ok = 0;
     /* Last: its chain-fallback case draws through the software fallback, which hands the
      * current depth surface to ge.c, and the fixtures above start from the depth state the
