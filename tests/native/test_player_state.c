@@ -17405,9 +17405,9 @@ int main(int argc, char **argv) {
         /* A profile folder that is the start of another folder's name is not the profile:
            the other folder's path is left whole, not cut to "%USERPROFILE%ice". */
 #if defined(_WIN32) || defined(_WIN64)
-        assert(player_dev_log_redact("copied C:\\Users\\Alice\\x.iso and C:\\Users\\Al\\y",
-                                     "C:\\Users\\Al", "Al", out, sizeof(out)));
-        assert(strcmp(out, "copied C:\\Users\\Alice\\x.iso and %USERPROFILE%\\y") == 0);
+        assert(player_dev_log_redact("copied D:\\Profiles\\Alice\\x.iso and D:\\Profiles\\Al\\y",
+                                     "D:\\Profiles\\Al", "Al", out, sizeof(out)));
+        assert(strcmp(out, "copied D:\\Profiles\\Alice\\x.iso and %USERPROFILE%\\y") == 0);
 #else
         /* A synthetic root that is not a profile path (the publication audit's
            local-path check finds nothing); the whole-component logic is the same. */
