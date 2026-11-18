@@ -515,6 +515,7 @@ shared-helpers-selftest:
 	$(BUILD_ROOT_RUN)/test_shared_helpers$(EXE_EXT)
 
 native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native-core-objects-core native-core-objects-player $(LIBCHDR_LIB) clay-layout-selftest nk-ui-core-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest nk-ui-sdlr-selftest nk-ui-vk-selftest nk-ui-focus-selftest shared-helpers-selftest
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) -std=c99 -Wall -Wextra -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" src/rt/pgf_public.c \
 		tests/native/test_pgf_public.c -o $(BUILD_ROOT)/test_pgf_public$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_pgf_public$(EXE_EXT)

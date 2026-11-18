@@ -301,7 +301,7 @@ class SchedulerGateVerdictTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="cosim_scheduler_gate_")
         self.addCleanup(self.tmp.cleanup)
-        self.source = Path(self.tmp.name) / "hle_thread.c"
+        self.source = Path(self.tmp.name) / "scheduler_mutant.c"
         self.source.write_text("/* synthetic mutant source */\n", encoding="utf-8")
 
     def run_scheduler(self, code: str):
