@@ -45,3 +45,14 @@ vendored files contain no network code and no key.
 
 None. The files build warning-free with `-std=c99 -Wall -Wextra -Wpedantic` under MinGW-w64 GCC and Linux GCC, so
 no compile flag or source edit is needed.
+
+## Upstream fixes not included
+
+- Upstream commit `55158d37f4d86a536fb807096fa9cacc7d4469db` (2026-09-30, "Fix timing leak in constant time
+  comparisons"), made after the `4.0.3` pin and in no release yet (checked 2026-11-17), rewrites `neq0`, the helper
+  behind `crypto_verify16/32/64`. Depending on compiler and target, the pinned form can be lowered to a
+  data-dependent branch that leaks whether two buffers matched. This tree keeps the pinned `neq0`
+  (`monocypher.c`). It does not affect the project's use: `nk_sig.c` only verifies public Ed25519 signatures over
+  public data and hashes public data with BLAKE2b, so nothing secret is compared. Any future use of `crypto_verify*`
+  or another Monocypher function on secret data (a MAC or key comparison) must first take that fix, by re-pinning
+  to a release that carries it or as a recorded LOCAL DELTA.

@@ -732,6 +732,64 @@ static void test_set_with_primitive_entry_fails_load(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+/* rcheevos LOCAL DELTA (src/rcheevos/alloc.c): an achievement that watches more distinct addresses
+ * than one memref list holds. A list's capacity is 16 bits; upstream at the pin sized the new list
+ * to the next power of two, so 32769 to 65536 new memrefs truncated it to 0, and the parse then
+ * put every memref in the trigger's buffer past the size it had measured (a heap overflow, which
+ * AddressSanitizer reports on the upstream bytes). The set must load and the achievement must
+ * still unlock when every watched byte reads 5. */
+#define MANY_MEMREFS 40000u
+#define MANY_BASE 0x10000u /* user RAM offset of the first watched byte */
+static void test_achievement_with_many_memrefs_loads(uint8_t *ram) {
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    static const char ach_head[] =
+        "{\"ID\":5501,\"Title\":\"Many\",\"Description\":\"Every watched byte reads 5\",\"Flags\":3,"
+        "\"Points\":5,\"MemAddr\":\"";
+    static const char ach_tail[] =
+        "\",\"Author\":\"Synthetic\",\"BadgeName\":\"00001\",\"Created\":1700000000,"
+        "\"Modified\":1700000000}],\"Leaderboards\":[]}]}";
+    const size_t cap = sizeof(SETS_HEAD SET_HEAD "\"Achievements\":[") + sizeof ach_head +
+                       sizeof ach_tail + (size_t)MANY_MEMREFS * 16u;
+    char *body = (char *)malloc(cap);
+    CHECK(body != NULL, "out of memory");
+    if (!body) return;
+    size_t len = (size_t)snprintf(body, cap, "%s%s", SETS_HEAD SET_HEAD "\"Achievements\":[", ach_head);
+    for (uint32_t i = 0; i < MANY_MEMREFS; i++)
+        len += (size_t)snprintf(body + len, cap - len, "%s0xH%06x=5", i ? "_" : "",
+                                (unsigned)(0x800000u + MANY_BASE + i));
+    len += (size_t)snprintf(body + len, cap - len, "%s", ach_tail);
+    CHECK(len < cap, "the set reply fits its buffer");
+
+    Deferred d;
+    NkAch *ach = deferred_login(ram, &d);
+    if (!ach) {
+        free(body);
+        return;
+    }
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(nk_ach_begin_load_game(ach, HASH), "load starts");
+    CHECK(deliver_n(&d, "r=achievementsets&", 200, body, len), "the set request waits for its answer");
+    CHECK(deliver(&d, "r=startsession&", 200, k_session), "the session request waits");
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const int loaded = has_event(ev, n, NK_ACH_EVENT_GAME_LOADED);
+    CHECK(loaded >= 0 && ev[loaded].count == 1u, "the set of one achievement over %u addresses loads",
+          MANY_MEMREFS);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_DISABLED) < 0, "the achievement is not turned off");
+
+    for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+    n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_UNLOCKED) < 0, "no unlock while the bytes read 0");
+    memset(ram + MANY_BASE, 5, MANY_MEMREFS);
+    nk_ach_frame(ach);
+    n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const int unlocked = has_event(ev, n, NK_ACH_EVENT_UNLOCKED);
+    CHECK(unlocked >= 0 && ev[unlocked].id == 5501u, "the achievement unlocks when all %u bytes read 5",
+          MANY_MEMREFS);
+    drain(&d);
+    nk_ach_destroy(ach);
+    free(body);
+}
+
 int main(void) {
     uint8_t *ram = (uint8_t *)calloc(1u, USER_RAM_SIZE);
     if (!ram) {
@@ -752,6 +810,7 @@ int main(void) {
     test_deep_json_is_refused(ram);
     test_array_of_primitives_is_refused();
     test_set_with_primitive_entry_fails_load(ram);
+    test_achievement_with_many_memrefs_loads(ram);
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);

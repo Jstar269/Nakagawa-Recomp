@@ -90,7 +90,11 @@
         "pacman_package": "freetype",
         "upstream_origin": "https://gitlab.freedesktop.org/freetype/freetype",
         "disposition": "copied_into_package",
-        "note": "FreeType is dual-licensed FTL or GPL-2.0-or-later; this distribution uses the FTL option, which the FSF lists as GPL-compatible.",
+        "note": "FreeType is dual-licensed FTL or GPL-2.0-or-later; this distribution uses the FTL option, which the FSF lists as GPL-compatible. The FTL requires a binary distribution's documentation to state that the software is based in part on the work of the FreeType Team; copyright_notices carries that statement into THIRD_PARTY_NOTICES.txt.",
+        "copyright_notices": [
+          "Portions of this software are copyright (C) 1996-2026 The FreeType Project (https://freetype.org). All rights reserved.",
+          "This software is based in part on the work of the FreeType Team."
+        ],
         "license_texts": [
           {
             "file": "third_party/licenses/FreeType-FTL.txt",

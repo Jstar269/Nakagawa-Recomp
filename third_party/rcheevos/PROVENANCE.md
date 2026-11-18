@@ -19,13 +19,22 @@ host's callback, so nothing here opens a connection.
   1999, 2000, 2002 Aladdin Enterprises"), under the zlib licence in their own headers, which are kept unchanged;
   rcheevos uses it to sign unlock requests. The zlib licence is compatible with GPL-3.0-or-later.
 - Import method: each file was read from a clone of the repository with `git show <commit>:<path>`. Its Git blob ID
-  matches the pinned commit's tree, and the SHA-256 values below were calculated from the local bytes. `src/rc_client.c`
-  and five `src/rapi/` files have since been changed (Local deltas below); their rows keep the upstream blob ID.
+  matches the pinned commit's tree, and the SHA-256 values below were calculated from the local bytes. `src/rc_client.c`,
+  five `src/rapi/` files and `src/rcheevos/alloc.c` have since been changed (Local deltas below); their rows keep the
+  upstream blob ID.
 - Only what rc_client needs to sign in, load a game's achievement set by its hash, evaluate it and submit unlocks is
   vendored, in the upstream layout so every `#include` resolves without an edit: the public headers, `rc_client`, the
   `rapi` request builders and parsers, the `rcheevos` runtime, and `rhash`'s MD5. Not vendored: the rest of `rhash`
-  (disc hashing; the hash is computed elsewhere), the editor API (`rc_api_editor`), RAIntegration and the external-client shim, the libretro
-  helpers, the tests, the validator and the build files.
+  (disc hashing; the hash is computed elsewhere), the editor API (`rc_api_editor`), RAIntegration's sources and the
+  external-client implementation, the libretro helpers, the tests and the build files.
+- Four vendored files have no runtime role here (corrected 2026-11-17: this paragraph said the validator and the
+  external-client shim were not vendored). `src/rcheevos/rc_validate.c` and `rc_validate.h` came with the `rcheevos`
+  runtime folder; nothing in the vendored tree, `src/` or `tests/` calls an `rc_validate_*` function (`rc_internal.h`
+  only declares `rc_validate_memrefs_for_console`), but the achievements selftest's
+  `$(wildcard third_party/rcheevos/src/rcheevos/*.c)` (`mk/native_ui_tests.mk`) still compiles `rc_validate.c`.
+  `src/rc_client_external.h` is included only under `#ifdef RC_CLIENT_SUPPORTS_EXTERNAL` (`rc_client_internal.h`),
+  which no build defines, and `src/rc_client_external_versions.h` is included by no vendored file. They are kept so
+  the upstream layout stays whole; removing them would be a maintainer admission removal.
 
 ## File manifest
 
@@ -59,7 +68,7 @@ host's callback, so nothing here opens a connection.
 | `src/rc_util.c` | `src/rc_util.c` | imported byte-identical | `3efdf04da480707da81c0a5c34f6045bbbd5a350` | `8e7a44443c9062054ee97bb9c60148ea7f14116a42d525d8abe3835a0a5c9666` |
 | `src/rc_version.c` | `src/rc_version.c` | imported byte-identical | `a29d0a5f522f6b474063056cfd926a04dd49aef8` | `210091300446cf20bcbfc8f80c747c543a5a99e143887cf6aff16ab5f5a245a3` |
 | `src/rc_version.h` | `src/rc_version.h` | imported byte-identical | `a2c0544d929e060daf2410a36efab82c653ffb0e` | `99db64703fd642b32812efe3b6fefb4843a2f1da6352aed3cb0d89cefcaafe0d` |
-| `src/rcheevos/alloc.c` | `src/rcheevos/alloc.c` | imported byte-identical | `96fb8e382511670b8bcccb3197caf9260927ce49` | `aac9433815af40f2ffaba468f251304bb446e27cf54087982ec80ad358a12829` |
+| `src/rcheevos/alloc.c` | `src/rcheevos/alloc.c` | imported + LOCAL DELTA | `96fb8e382511670b8bcccb3197caf9260927ce49` | `476da4dcbcc209aca2fd1b43bc9824c2d74b9dab88830447dd1aa18cbd2cbed1` (this tree's bytes) |
 | `src/rcheevos/condition.c` | `src/rcheevos/condition.c` | imported byte-identical | `eb57a1cba3ea6add393b6b557775f0786b6a235d` | `bf21adfc2be390f9ba5a85c4039b73645a866e4100139368541efdd654bafe90` |
 | `src/rcheevos/condset.c` | `src/rcheevos/condset.c` | imported byte-identical | `c9f984bfffd8d6bb4d248c819689165c25b020a5` | `e619f132a9a2bd62bc9d246a8e7598682806f8446eb4b197c09fb2929f65859b` |
 | `src/rcheevos/consoleinfo.c` | `src/rcheevos/consoleinfo.c` | imported byte-identical | `2acedfdec644c855c99f763f129e2649ac745ce3` | `8e2949ee957152c1989c97472634d4a12859feaaa8c89c205775434a734d006d` |
@@ -160,6 +169,25 @@ in a file not vendored, and its `rc_api_common.c` hunk is the body-length test a
   start-session `Unlocks` and `HardcoreUnlocks`, followed users, and in `rc_api_info.c` the achievement info,
   leaderboard info, games list and game titles parsers. `achievements-selftest` feeds each parser such an array and
   loads such a set through the bridge; all twelve checks fail on the previous bytes.
+
+### `src/rcheevos/alloc.c`: memref lists larger than 16 bits
+
+`src/rcheevos/alloc.c` was modified by Nakagawa Recomp contributors on 2026-11-17 (audit 2026-11-17). Its upstream
+v12.5.0 bytes have SHA-256 `aac9433815af40f2ffaba468f251304bb446e27cf54087982ec80ad358a12829`; the table gives this
+tree's. The change is marked `LOCAL DELTA` in the file.
+
+- A memref list's `capacity` is a `uint16_t`. `rc_preparse_reserve_memrefs` sized the one new list to the next power
+  of two of the memrefs still needed, so an achievement set that needed 32769 to 65536 new memrefs stored 65536 as 0.
+  The parse then placed every memref in the trigger's buffer, past the size the preparse had measured: a heap
+  overflow (AddressSanitizer reports it in `rc_alloc_memref`; the Windows selftest crashes with an access
+  violation). `rc_preparse_array_size` now never returns more than `0xFFFF`, and the reservation adds lists, each
+  linked at the end of the chain, until they hold every memref; the modified-memref lists get the same change.
+  `achievements-selftest` loads a set whose one achievement watches 40000 distinct bytes through the bridge and
+  unlocks it; it fails on the upstream bytes. Upstream fixed the same truncation after the pin by refusing more
+  than `0xFFFF` memrefs (commit `6d897b44fe8e141eac90f7c2a32f1a08a8110a48`, #568, in `src/runtime/rc_alloc.c`).
+- Not changed: the reservation still does not check its `calloc` and `malloc` results. Upstream's handling
+  (commit `e3e7e86bc8ab10295dace443addfb091d1095a0e`, #559) makes every later allocation in the parse stop after
+  an error, across nine files; a later pin that includes it supersedes this delta.
 
 The bridge builds rc_client without `RC_CLIENT_SUPPORTS_HASH`,
 `RC_CLIENT_SUPPORTS_EXTERNAL` and `RC_CLIENT_SUPPORTS_RAINTEGRATION`, rcheevos' own defaults, so the files those
