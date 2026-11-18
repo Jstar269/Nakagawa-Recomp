@@ -613,7 +613,8 @@ IMAGE_DERIVED_TABLES = {
     "dup_slot_skips": "delay slots that are also branch targets, found per function",
     "sv_points": "static-verify predictions computed from this same function",
     "impmap": "import table parsed from the primary ELF",
-    "extra_impmap": "import table parsed from an extra ELF",
+    "precomputed_stale_records": "stale-detect records computed from this image's own "
+                                 "translated functions while they were emitted",
 }
 
 #: Integer constants that reach a supported comparison shape but are *not*

@@ -2347,7 +2347,9 @@ def _seed_address_materializations(d):
                     val = (base + ((word & 0xFFFF) - (0x10000 if word & 0x8000 else 0))) & 0xFFFFFFFF
                     if rt_reg:
                         note_address_taken(val, addr)
-                        hireg.pop(rt_reg, None)
+                        # rt now holds the completed address (`la`), which a following
+                        # `sw` reads as a vtable pointer (code_pointer_evidence keeps it too).
+                        hireg[rt_reg] = val
                 elif rt_reg:
                     hireg.pop(rt_reg, None)
             elif op == 0x0D:  # ori rt, rs, imm  (la low half)
@@ -2357,7 +2359,7 @@ def _seed_address_materializations(d):
                     val = base | (word & 0xFFFF)
                     if rt_reg:
                         note_address_taken(val, addr)
-                        hireg.pop(rt_reg, None)
+                        hireg[rt_reg] = val
                 elif rt_reg:
                     hireg.pop(rt_reg, None)
             elif op == 0 and (word & 0x3F) == 0x21: # addu rd, rs, rt
@@ -2369,11 +2371,21 @@ def _seed_address_materializations(d):
                         hireg[rd_reg] = rt_value
                     elif rt_reg == 0 and rs_reg in hireg:
                         hireg[rd_reg] = rs_value
+                    elif rs_reg and isinstance(rs_value, int) and rt_reg and rt_reg not in hireg:
+                        # A table base plus an untracked index: the GAS `lw rt, sym(rs)`
+                        # expansion (`lui at, %hi(T); addu at, at, idx; lw v0, %lo(T)(at)`).
+                        # Only a following `lw` may use it, as the table address; it is
+                        # not an exact pointer for `la` or the `sw` vtable path.
+                        hireg[rd_reg] = ("indexed", rs_value)
+                    elif rt_reg and isinstance(rt_value, int) and rs_reg and rs_reg not in hireg:
+                        hireg[rd_reg] = ("indexed", rt_value)
                     else:
                         hireg.pop(rd_reg, None)
             elif op == 0x23:  # lw rt, simm(rs)
                 rs_reg, rt_reg = (word >> 21) & 0x1F, (word >> 16) & 0x1F
                 base = hireg.get(rs_reg)
+                if isinstance(base, tuple) and base[0] == "indexed":
+                    base = base[1]
                 if rt_reg and isinstance(base, int):
                     table_addr = (base + ((word & 0xFFFF) - (0x10000 if word & 0x8000 else 0))) & 0xFFFFFFFF
                     hireg[rt_reg] = ("table", table_addr)

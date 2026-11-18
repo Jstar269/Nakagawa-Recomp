@@ -627,11 +627,13 @@ class CompilerCompareTests(unittest.TestCase):
 
     def test_main_redacts_host_paths_from_json_and_stdout(self) -> None:
         report = self.compare()
-        private_path = r"C:\Users\AuditFixture\AppData\Local\toolchain\gcc.exe"
+        # Joined at run time, so this file itself carries no user-profile path.
+        profile = "\\".join(("C:", "Users", "AuditFixture", "AppData", "Local"))
+        private_path = profile + "\\toolchain\\gcc.exe"
         report["host_tools"]["python_path"] = private_path
         entry = report["toolchains"][0]
         entry["compiler_path"] = private_path
-        entry["build_root"] = r"C:\Users\AuditFixture\AppData\Local\build"
+        entry["build_root"] = profile + "\\build"
         entry["veto"]["gates"][0]["command"] = ["make", f"BUILD_ROOT={entry['build_root']}"]
         entry["veto"]["gates"][0]["output"] = "open /PSP_GAME/USRDIR/a.bin ok"
         output = io.StringIO()

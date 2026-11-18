@@ -3778,7 +3778,9 @@ def branch_target(addr, w):
     return (addr + 4 + (s16(w) << 2)) & 0xFFFFFFFF
 
 def jump_target(addr, w):
-    return ((addr & 0xF0000000) | ((w & 0x3FFFFFF) << 2)) & 0xFFFFFFFF
+    """Pseudo-direct j/jal target: the region bits of the delay-slot PC (PC+4), as
+    analyze.jump_target and emit_decoded_jump_target use."""
+    return (((addr + 4) & 0xF0000000) | ((w & 0x3FFFFFF) << 2)) & 0xFFFFFFFF
 
 def read32(elf, addr):
     b = elf.read_at_vaddr(addr, 4)
@@ -4662,7 +4664,6 @@ def _dup_slot_skips(elf, insns, labels):
 def _emit_non_control_word(ctx, out, addr, w, sv_points):
     """One word that is not a control transfer, with its static checks and continuation edge."""
     continuations = ctx.continuations
-    resumable = ctx.resumable
     line = normal_line(addr, w, options=ctx.options)
     out.append(_sp_load_check(line) if addr in ctx.sp_checks else line)
     if _is_cop0_move(w):
@@ -5946,13 +5947,15 @@ def translate_code_capture(index, image, profile=None, cfg_gate=False, options=N
     identity = [tuple(span) for span in module.overlay_check_spans]
     kept = [(fn, text) for fn, text in zip(module.functions, module.texts, strict=True)
             if in_ranges(fn[0], identity)]
-    # A translated body may contain a direct symbol call to a known function whose body
-    # stopped at an unsupported instruction. Keep that zero-word named stop stub in the C
-    # unit, even though its guest words are outside the capture identity and spans.
+    # A translated body may name a known function whose body stopped at an unsupported
+    # instruction: a direct call `mN_<addr>(s)`, or a tail transfer that passes the symbol
+    # as a value (`sr_tail_record(s, ..., mN_<addr>, ...)`). Keep that zero-word named stop
+    # stub in the C unit, even though its guest words are outside the capture identity and
+    # spans. The symbol is matched as a whole identifier, whatever follows it.
     stubbed = {address for address, _reason in module.stubbed}
-    referenced_stubs = {
-        address for address in stubbed
-        if any(f"{module.prefix}_{address:08x}(" in str(text) for _fn, text in kept)
+    symbol = re.compile(rf"\b{re.escape(module.prefix)}_([0-9a-f]{{8}})\b")
+    referenced_stubs = stubbed & {
+        int(digits, 16) for _fn, text in kept for digits in symbol.findall(str(text))
     }
     kept.extend((fn, text) for fn, text in zip(module.functions, module.texts, strict=True)
                 if fn[0] in referenced_stubs)

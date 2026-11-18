@@ -230,11 +230,8 @@ class CaptureTranslation(unittest.TestCase):
         for word in (dead, dead + 4, dead + 0x100, LOAD + WINDOW - 4):
             self.assertFalse(in_ranges(word, module.spans), f"0x{word:08x} has no authority")
 
-    def test_a_kept_body_with_untranslatable_known_callee_compiles_a_named_stub(self):
-        dead = TARGET + 0x200
-        jal_dead = 0x0C000000 | ((dead >> 2) & 0x03FFFFFF)
-        image = code_capture.group_captures([capture({TARGET + 0x08: jal_dead,
-                                                       dead: 0x4C000000})])[0]
+    def _assert_unit_compiles_with_named_stub(self, edits, dead):
+        image = code_capture.group_captures([capture(edits)])[0]
         module, err = translate(image)
         self.assertIsNone(module.unsupported_reason, err)
         self.assertTrue(any(address == dead for address, _reason in module.stubbed))
@@ -250,6 +247,22 @@ class CaptureTranslation(unittest.TestCase):
                 capture_output=True, text=True, check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_kept_body_with_untranslatable_known_callee_compiles_a_named_stub(self):
+        dead = TARGET + 0x200
+        jal_dead = 0x0C000000 | ((dead >> 2) & 0x03FFFFFF)
+        self._assert_unit_compiles_with_named_stub({TARGET + 0x08: jal_dead,
+                                                    dead: 0x4C000000}, dead)
+
+    def test_a_kept_body_tail_transferring_to_untranslatable_callee_compiles_a_named_stub(self):
+        # The only reference is a tail transfer: `j leaf` passes the stub's symbol to
+        # sr_tail_record as a value, with no `(` after it, and nothing calls it with jal.
+        # The leaf is a known function (its prologue) whose body stops at an unsupported word.
+        j_leaf = 0x08000000 | ((LEAF >> 2) & 0x03FFFFFF)
+        self._assert_unit_compiles_with_named_stub({TARGET + 0x08: 0x00000000,
+                                                    TARGET + 0x14: j_leaf,
+                                                    LEAF + 0x00: 0x27BDFFF0,
+                                                    LEAF + 0x04: 0x4C000000}, LEAF)
 
     def test_executable_authority_is_exactly_the_identity(self):
         # Every word the interpreter may run inside a bound capture is a word the runtime

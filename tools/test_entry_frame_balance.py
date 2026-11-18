@@ -742,6 +742,17 @@ class JumpRegionBoundaryTests(unittest.TestCase):
         evidence = analyze.code_pointer_evidence(call_elf, call_ranges)
         self.assertIn(target, evidence["jal"])
 
+    def test_codegen_emits_the_transfer_into_the_pc_plus_four_region(self):
+        # The analyzer traces and seeds 0x10000004 for this `j`; codegen must emit the
+        # transfer to that same function, not to 0x00000004 in the jump's own region.
+        import codegen
+        source, target = 0x0FFFFFFC, 0x10000004
+        self.assertEqual(codegen.jump_target(source, j(target)), target)
+        jump_elf, jump_ranges = image(emit(source, j(target), NOP, jr(RA), NOP))
+        text = "\n".join(codegen.emit_function(jump_elf, source, jump_ranges, {source, target}))
+        self.assertIn(f"{target:08x}", text)
+        self.assertNotIn("00000004", text)
+
 
 class TraceLookupReuseTests(unittest.TestCase):
     def test_trace_computes_stub_and_file_executable_lookups_once(self):
@@ -1031,6 +1042,37 @@ class AddressMaterializationTests(unittest.TestCase):
         analyze._seed_address_materializations(discovery)
 
         self.assertNotIn(base + 0x50, discovery.materialized)
+
+    def test_gas_switch_table_expansion_seeds_the_table_entries(self):
+        # `lw v0, T(idx)` expands to lui at, %hi(T); addu at, at, idx; lw v0, %lo(T)(at):
+        # the table address is hi + lo whatever the index holds.
+        base, table, at, index = self.BASE, self.BASE + 0x80, 1, 8
+        discovery = self.discovery({
+            base: lui(at, 0x0880),
+            base + 4: addu(at, at, index),
+            base + 8: lw(V0, at, 0x80),
+            base + 12: jr(V0),
+            table: base + 0x40,
+            table + 4: base + 0x50,
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertLessEqual({base + 0x40, base + 0x50}, discovery.hc)
+
+    def test_la_then_sw_reads_the_vtable_at_the_completed_address(self):
+        base, vtable, s0 = self.BASE, self.BASE + 0x80, 16
+        discovery = self.discovery({
+            base: lui(A0, 0x0880),
+            base + 4: addiu(A0, A0, 0x80),
+            base + 8: sw(A0, s0, 0),
+            vtable: base + 0x40,
+            vtable + 4: base + 0x50,
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertLessEqual({base + 0x40, base + 0x50}, discovery.hc)
 
     def test_materialization_scan_does_not_dump_ranges_to_stderr(self):
         discovery = self.discovery({self.BASE: lui(A0, 0x0880)})
