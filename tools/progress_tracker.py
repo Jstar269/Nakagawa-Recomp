@@ -319,8 +319,8 @@ def verify_all() -> list[Item]:
 
     # - Phase 2: Runtime RT -
     items += [
-        Item("P2.1", "alloc_block / thread tables seeded", 2, 2,
-             _check_log(last_log=latest, patterns=[r"THREAD_SEED_OK"])),
+        Item("P2.1", "alloc_block / thread tables seeded", 2, 2, "pending",
+             verified_by="no runtime record reports the seeding; not measurable from a run log"),
         Item("P2.2", "sceKernelCreateThread / StartThread logged",
              2, 2,
              _check_log(last_log=latest,
@@ -328,9 +328,9 @@ def verify_all() -> list[Item]:
         Item("P2.3", "sceDisplaySetFrameBuf triggers present",
              2, 2,
              _check_sequence(last_log=latest,
-                             ordered=[r"DISPLAY_SET_FB:", r"vkQueuePresent"])),
+                             ordered=[r"DISPLAY_SET_FB:", _PRESENT_OK_PATTERN])),
         Item("P2.4", "vkQueuePresentKHR fires", 2, 2,
-             _check_log(last_log=latest, patterns=[r"vkQueuePresent"])),
+             _check_log(last_log=latest, patterns=[_PRESENT_OK_PATTERN])),
         Item("P2.5", "UMD drive-ready callback wakes the sleeping thread",
              2, 2, _check_umd_wakeup(last_log=latest)),
         Item("P2.6", "sceFontNewLib / sceFontOpen logged",
@@ -376,9 +376,8 @@ def verify_all() -> list[Item]:
                                   r"alloc_block",
                                   r"freelist"])),
         Item("P4.2", "Hash table at MEM[0x30aa88] seeded",
-             4, 1,
-             _check_log(last_log=latest,
-                        patterns=[r"hash seed"])),
+             4, 1, "pending",
+             verified_by="no runtime record reports the seeding; not measurable from a run log"),
         Item("P4.3", "Resource-table walkers valid", 4, 2,
              _check_resource_walker(last_log=latest)),
         Item("P4.4", "main_RunGameLoop reaches VFS_AllocateHeap",
@@ -477,14 +476,18 @@ def _check_imports_toml() -> str:
 
 
 def _check_recomp_chunks() -> str:
-    """Verified only when the expected chunk count exists AND the newest chunk is at
-    least as new as codegen.py. An old chunk set surviving a generator change is not
-    evidence of the current pipeline (#181)."""
-    chunks = list(BUILD.glob("hst_recomp*.c"))
-    if len(chunks) < 9:
+    """Verified only when the expected chunk count exists AND every chunk, and the
+    monolithic hst_recomp.c when present, is at least as new as codegen.py. An old chunk
+    set surviving a generator change is not evidence of the current pipeline (#181),
+    and neither is one fresh file among stale ones: codegen writes hst_recomp.c before
+    the numbered chunks, so a run that stops in between leaves only that file fresh.
+    The monolithic file is not a chunk and is left out of the count."""
+    chunks = [p for p in BUILD.glob("hst_recomp_*.c") if re.fullmatch(r"hst_recomp_\d+\.c", p.name)]
+    if len(chunks) < 8:
         return "pending"
-    newest = max(chunks, key=lambda p: p.stat().st_mtime)
-    if not _artifact_fresh(newest, [TOOLS / "codegen.py", TOOLS / "analyze.py", TOOLS / "imports.py"]):
+    generated = chunks + [p for p in (BUILD / "hst_recomp.c",) if p.exists()]
+    sources = [TOOLS / "codegen.py", TOOLS / "analyze.py", TOOLS / "imports.py"]
+    if not all(_artifact_fresh(p, sources) for p in generated):
         return "pending"
     return "verified"
 
@@ -721,22 +724,37 @@ def _check_delay_slot() -> str:
     return "pending"
 
 
+# The VFPU fuzzer's closing summary (src/rt/vfpu_fuzz.c), and the manager's Fuzz verdict
+# (tools/nk_manager.ps1), which it prints only when the fuzzer exited 0.
+_VFPU_FUZZ_SUMMARY_RE = re.compile(
+    r"\bvfpu_fuzz: (\d+)/(\d+) distinct words tested \((\d+) not covered by interp oracle\), "
+    r"(\d+) words diverge, (\d+)/(\d+) trials mismatched\b")
+_VFPU_FUZZ_MANAGER_PASS_RE = re.compile(r"\[PASS\] vfpu_fuzz OK\.")
+
+
+def _vfpu_fuzz_passed(line: str) -> bool:
+    """True for a fuzzer summary the fuzzer itself exits 0 on: every admitted word tested,
+    none uncovered, none diverging, no trial mismatched."""
+    if _VFPU_FUZZ_MANAGER_PASS_RE.search(line):
+        return True
+    m = _VFPU_FUZZ_SUMMARY_RE.search(line)
+    if not m:
+        return False
+    tested, admitted, uncovered, diverged, mismatched, trials = (int(g) for g in m.groups())
+    return tested == admitted > 0 and uncovered == 0 and diverged == 0 and mismatched == 0 and trials > 0
+
+
 def _check_vfpu() -> str:
-    """VFPU is 'verified' only from real verification evidence — a fuzz/selftest/gate
-    pass recorded in a log — not from the mere existence of the asset directory,
-    which proves nothing about lookup/interpreter behavior (#48)."""
-    markers = (
-        r"vfpu_fuzz.*(PASS|OK|0 mismatch|no mismatch)",
-        r"VFPU[^\n]*self ?test[^\n]*(PASS|OK)",
-        r"sr_vfpu[^\n]*(PASS|OK)",
-        r"\[PASS\][^\n]*vfpu",
-    )
+    """VFPU is 'verified' only from real verification evidence — the fuzzer's own
+    passing summary, or the manager's pass verdict, recorded in a log — not from the
+    mere existence of the asset directory, which proves nothing about lookup/interpreter
+    behavior (#48). A log older than the fuzzer or the game binary describes an earlier
+    build and earns nothing (#181)."""
+    current = [BUILD / "vfpu_fuzz.exe", BUILD / "hst.exe"]
     for p in sorted(LOGS.glob("*.log")):
-        try:
-            text = p.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
+        if not _artifact_fresh(p, current):
             continue
-        if any(re.search(m, text, re.IGNORECASE) for m in markers):
+        if any(_vfpu_fuzz_passed(line) for line in _log_lines(p.name)):
             return "verified"
     return "pending"
 
@@ -857,6 +875,20 @@ _GEGPU_SUBMIT_RE = re.compile(r"GEGPU submit #\d+ batches=(\d+) verts=(\d+) ")
 _GEGPU_STATS_RE = re.compile(r"GEGPU stats: submits=(\d+) batches=(\d+) ")
 _GEGPU_BATCH_DROPPED = "gegpu: pipeline creation failed; a batch was dropped"
 
+# A frame reached the swapchain: display_present_frame's HOST_PRESENT_SUBMITTED record
+# (src/rt/hle_display.c, written under SR_PRESENT_TRACE after the presenter showed the
+# frame) or gui_present's first-GPU-frame boot event (src/rt/gui.c). The runtime prints no
+# line naming vkQueuePresent for a successful present: every such line is a failure
+# (src/rt/gpu_sdl3vk/sdl3vk.c, classify_present), so it is a negative, never credit.
+_PRESENT_OK_PATTERN = (r"(?:\bHOST_PRESENT_SUBMITTED f=\d+ buf=0x[0-9a-fA-F]{8} "
+                       r"|\bBOOT_EVENT phase=first_frame source=gpu presented=1\b)")
+_PRESENT_OK_RE = re.compile(_PRESENT_OK_PATTERN)
+_PRESENT_FAILED_RE = re.compile(r"\bvkQueuePresentKHR failed\b")
+
+
+def _present_ok(line: str) -> bool:
+    return bool(_PRESENT_OK_RE.search(line)) and "failed" not in line
+
 
 def _check_ge_list_submitted(*, last_log: str | None) -> str:
     """P5.1: sceGeListEnQueue accepted a display list (it was given a list id).
@@ -917,25 +949,17 @@ def _check_multi_draw(*, last_log: str | None) -> str:
 
 
 def _check_present_actually_fires(*, last_log: str | None) -> str:
-    """vkCmdDraw fires, but a present fires only if vkQueuePresent happens.
-    Also accept SR_FBSNAP snapshots as proof of present -- they only emit from
-    sceDisplaySetFrameBuf's snap path, which runs only after the Vulkan present chain.
-    Files: snap_*.ppm in repo root or build/, frame_*.png in build/snapshots/."""
+    """P5.3: the selected run presented a frame to the swapchain, read from the present
+    records that run wrote (_PRESENT_OK_PATTERN). A present-failure line with no
+    successful present is a regression. Snapshot files on disk are not read: nothing
+    binds a file to the selected run, so leftovers of an earlier run would be credited."""
     if not last_log:
         return "pending"
-    draws = count_pattern(last_log, r"vkCmdDraw:")
-    presents = count_pattern(last_log, r"vkQueuePresent")
-    ppms = list(REPO.glob("snap_*.ppm")) + list((BUILD.parent).glob("snap_*.ppm"))
-    ppms += list(BUILD.glob("snap_*.ppm")) + list((BUILD / "snapshots").glob("*"))
-    fbsnap_logs = count_pattern(last_log, r"FBSNAP")
-    if draws > 0 and ppms and len(ppms) >= 2:
+    lines = _log_lines(last_log)
+    if any(_present_ok(line) for line in lines):
         return "verified"
-    if draws > 0 and fbsnap_logs >= 2:
-        return "verified"
-    if draws > 0 and presents == 0:
+    if any(_PRESENT_FAILED_RE.search(line) for line in lines):
         return "regressed"
-    if presents > 0:
-        return "verified"
     return "pending"
 
 
@@ -963,8 +987,8 @@ def _check_main_loop_progression(*, last_log: str | None) -> str:
         return "pending"
     later = lines[spin_idx:]
     sets_after = sum(1 for l in later if "DISPLAY_SET_FB:" in l)
-    draws_after = sum(1 for l in later if "vkCmdDraw:" in l)
-    presents_after = sum(1 for l in later if "vkQueuePresent" in l)
+    draws_after = _recorded_draws(later) or 0
+    presents_after = sum(1 for l in later if _present_ok(l))
     if sets_after >= 2 or draws_after >= 2 or presents_after >= 1:
         return "verified"
     non_vblank_dispatch = sum(
@@ -990,18 +1014,6 @@ def _apply_regressions(items: list[Item], last_log: str | None) -> None:
             if it.id == "P6.5":
                 it.status = "regressed"
                 it.notes.append("main loop progression halted")
-
-    # vkCmdDraw≥1 but vkQueuePresent=0 -> P5.3 only stays regressed if no FBSNAP frames
-    # were captured. Snapshots can only be saved from sceDisplaySetFrameBuf, after the
-    # Vulkan present chain runs -- so their existence is proof of present.
-    has_draw = any("vkCmdDraw:" in l for l in lines)
-    has_present = any("vkQueuePresent" in l for l in lines)
-    has_snapshots = any(REPO.glob("snap_*.ppm")) or any((BUILD / "snapshots").glob("*"))
-    if has_draw and not has_present and not has_snapshots:
-        for it in items:
-            if it.id == "P5.3":
-                it.status = "regressed"
-                it.notes.append(f"draws={count_pattern(last_log, 'vkCmdDraw:')} presents=0")
 
 
 # --------------------------------------------------------------
@@ -1384,7 +1396,7 @@ def main(argv: list[str]) -> int:
             f"regressed: {result['units_regressed']}  "
             f"completion: {result['completion_pct']}%"
         )
-        return 0
+        return 1 if result["units_regressed"] > 0 else 0
     if argv[0] == "axes":
         axes = measure_all_axes()
         milestone = None
