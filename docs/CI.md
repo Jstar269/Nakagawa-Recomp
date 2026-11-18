@@ -447,7 +447,11 @@ gate runs in exactly one part with the command it had in the serial job:
   portable objects and format check, and the native core suite and its coverage upload.
 - `translation`: the HLE, scheduler and dispatch selftests, cosimulation and its mutation
   corpus, the GPU selftests on lavapipe, the interpreter, VFPU, strbuf and ATRAC3+
-  selftests, and the microtest codegen gates.
+  selftests, the microtest codegen gates, and the analysis IR module gate
+  (`tools/test_analysis_ir.py`'s `AnalysisIrModuleGateTests`). The Python shards have no
+  PSPDEV and report that gate's showcase half as `NOT_RUN`; this part builds the showcase
+  PRXs with PSPDEV and sets `NK_ANALYSIS_IR_SHOWCASE_REQUIRED=1`, so a missing PSPDEV fails
+  the step instead of skipping it.
   On the nightly schedule only, `translation` also runs `make CC=gcc selftest-repeat` after
   the single scheduler and HLE thread runs: it reruns the three `sched_selftest_*` binaries
   and `hle_thread_selftest` they built `SELFTEST_REPEAT` times (default 20), stops at the

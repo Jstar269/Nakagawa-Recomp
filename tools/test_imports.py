@@ -160,8 +160,9 @@ class MappedSpanContractTests(unittest.TestCase):
         (seg,) = [s for s in elf.segments if s["type"] == 1]
         end = seg["vaddr"] + seg["filesz"]
         self.assertGreater(len(blob), seg["off"] + seg["filesz"], "file bytes follow the segment")
-        # read_at_vaddr only places the start, so it serves the file bytes past the segment.
-        self.assertEqual(len(elf.read_at_vaddr(end - 4, 8)), 8)
+        # read_at_vaddr stops at the segment's file image: it returns the 4 bytes that are mapped,
+        # never the file bytes past the segment, and read_mapped_span refuses the short span.
+        self.assertEqual(len(elf.read_at_vaddr(end - 4, 8)), 4)
         self.assertIsNone(elf.read_mapped_span(end - 4, 8))
         self.assertIsNone(imports._read_mapped(elf, end - 4, 8))
         self.assertEqual(elf.read_mapped_span(end - 8, 8), elf.read_at_vaddr(end - 8, 8))
@@ -178,6 +179,30 @@ class MappedSpanContractTests(unittest.TestCase):
 
         self.assertEqual(imports._read_mapped(OneSpanImage(), 0x1004, 4), bytes((4, 5, 6, 7)))
         self.assertIsNone(imports._read_mapped(OneSpanImage(), 0x100C, 8))
+
+    def test_an_empty_import_table_at_an_unmapped_address_has_no_windows(self) -> None:
+        # A module that imports nothing may leave libstub == libstubend == 0; rebased to the
+        # load base, that names no mapped byte. The table reads nothing, so it is empty, not
+        # invalid; a non-empty table there is still refused.
+        class ModuleInfoOnlyImage:
+            base = 0x08A00000
+
+            def __init__(self, libstub: int, libstubend: int) -> None:
+                self.info = bytes(44) + struct.pack("<2I", libstub, libstubend)
+
+            def sec(self, name: str) -> dict[str, int] | None:
+                return {"addr": 0x08804000} if name == ".rodata.sceModuleInfo" else None
+
+            def read_at_vaddr(self, address: int, size: int) -> bytes | None:
+                # Only the module-info record is mapped; the rebased 0 is not.
+                start = address - 0x08804000
+                return self.info[start:start + size] if 0 <= start and start + size <= 52 else None
+
+        windows, variable_tables, base = imports._walk_import_windows(ModuleInfoOnlyImage(0, 0))
+        self.assertEqual((windows, variable_tables, base), ([], [], 0x08A00000))
+        with self.assertRaises(imports.ImportTableError) as raised:
+            imports._walk_import_windows(ModuleInfoOnlyImage(0, 0x14))
+        self.assertEqual(raised.exception.code, "ANALYZER_IMPORT_TABLE_INVALID")
 
 
 class RetailImportLayoutTests(unittest.TestCase):

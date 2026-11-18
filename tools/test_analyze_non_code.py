@@ -228,19 +228,18 @@ class NonCodeOverlayTest(unittest.TestCase):
             self.assertNotIn(address, entries, kind)
         withdrawn = {a for a, *_ in self.module.non_code}
         self.assertTrue(set(self.overlay.planted) <= withdrawn)
-        # What stays in the data is code-shaped to the last word: a few valid words that end in
-        # a `j` out of the image (a tail call into another image, for all the analysis can
-        # tell), a `jr` through a register, as a leaf function does, or a transfer to another
-        # entry, where a generated body ends. Nothing tells such a run apart from code, so it
-        # keeps a body of its own. Over seeds 1 to 8, 1 to 7 such runs stayed, of 1 to 15
-        # words. This seed leaves 2, each ending in a `j` out of the image or a `jr`.
+        # Ambiguous data runs whose generated body ends in a legal tail transfer stay: the
+        # analyzer cannot prove those bytes are data. A direct `j` out of the image ends its
+        # body after the delay slot, so the walk must not borrow a later reserved word to
+        # withdraw it. Supported branch targets can make such a run longer without changing
+        # that ownership boundary.
         elf = analyze.Elf(analyze.code_overlay_elf(self.overlay.image))
         image = analyze.exec_ranges(elf)
         left = [a for a in entries if self.overlay.in_blob(a)]
-        self.assertEqual(len(left), 2)
+        self.assertTrue(left)
         for a in left:
             insns = sorted(codegen.function_flow(elf, a, self.module.spans, entries)[0])
-            self.assertLessEqual(len(insns), 16)
+            self.assertTrue(insns)
             words = [codegen.read32(elf, word_address) for word_address in insns]
             for word in words:
                 self.assertIsNone(analyze.reserved_encoding(word))
@@ -299,15 +298,16 @@ class NonCodeOverlayTest(unittest.TestCase):
                 return items
             return order
 
-        outputs = []
-        for seed in (1,):
-            with mock.patch.object(analyze, "_entry_order", shuffled(seed)):
-                module, _ = translate(self.overlay)
-            outputs.append(("\n".join(codegen.runtime_module_descriptor_lines(module)),
-                            [str(t) for t in module.texts], module.non_code, module.spans))
+        orders = (("seed-1", shuffled(1)), ("seed-7", shuffled(7)),
+                  ("reverse", lambda entries: sorted(entries, reverse=True)))
         expected = ("\n".join(codegen.runtime_module_descriptor_lines(self.module)),
                     [str(t) for t in self.module.texts], self.module.non_code, self.module.spans)
-        self.assertEqual(outputs, [expected])
+        for name, order in orders:
+            with self.subTest(order=name), mock.patch.object(analyze, "_entry_order", order):
+                module, _ = translate(self.overlay)
+                self.assertEqual(("\n".join(codegen.runtime_module_descriptor_lines(module)),
+                                  [str(t) for t in module.texts], module.non_code, module.spans),
+                                 expected)
 
     def test_the_withdrawal_only_grows_and_ends(self):
         passes = self.passes
@@ -320,15 +320,15 @@ class NonCodeOverlayTest(unittest.TestCase):
 
 
 class TraceFunctionTest(unittest.TestCase):
-    def test_a_jump_out_of_the_image_ends_a_body_not_the_discovery(self):
-        # A generated body ends at a `j` out of the image, so the body walk does; the
-        # discovery's own trace keeps running past it, as before.
+    def test_a_jump_out_of_the_image_ends_the_trace_after_its_delay_slot(self):
+        # A generated body and the analyzer both stop at an out-of-range `j`, after
+        # covering its delay slot. Following the next words would cross the transfer.
         words = [PROLOGUE, (0x02 << 26) | ((0x08900000 >> 2) & 0x3FFFFFF), 0, 0x25080001, JR_RA, 0]
         elf = small_overlay(words)
         ranges = analyze.exec_ranges(elf)
         covered = set()
         analyze.trace_function(elf, TEXT, ranges, covered, set(), set())
-        self.assertIn(TEXT + 16, covered)
+        self.assertEqual(covered, {TEXT, TEXT + 4, TEXT + 8})
         walk = analyze._BodyWalk(elf, ranges, frozenset({TEXT}), None)
         self.assertEqual(walk.reach([TEXT]), {TEXT, TEXT + 4, TEXT + 8})
         flow = codegen.function_flow(elf, TEXT, ranges, {TEXT})[0]
@@ -852,6 +852,27 @@ class ExecutableNonCodeTest(unittest.TestCase):
         self.assertIn("sr_exec_span_register(0x00002018u, 0x00002020u)", generated)
         self.assertNotIn("sr_exec_span_register(0x00002000u, 0x00002020u)", generated)
 
+    def test_extra_non_code_walk_is_reused_for_emission(self):
+        base, extra = 0x1000, 0x2000
+        words = [JR_RA, 0]
+        extra_words = [jal(extra + 16), 0, JR_RA, 0, PROLOGUE, RESERVED, JR_RA, 0]
+        calls = {}
+        stock = codegen.function_flow
+
+        def counted(elf, start, *args, **kwargs):
+            key = (id(elf), start)
+            calls[key] = calls.get(key, 0) + 1
+            return stock(elf, start, *args, **kwargs)
+
+        with mock.patch.object(codegen, "function_flow", counted):
+            rc, log, _generated = run_codegen(
+                fixed_executable(words, base),
+                [(fixed_executable(extra_words, extra), extra)],
+            )
+        self.assertEqual(rc, 0, log)
+        self.assertTrue(calls)
+        self.assertEqual({key: count for key, count in calls.items() if count != 1}, {})
+
     def test_a_body_in_withdrawn_words_stops_the_build(self):
         log = io.StringIO()
         with contextlib.redirect_stderr(log):
@@ -1042,16 +1063,19 @@ def generated_digest(image, base):
         work = pathlib.Path(tmp)
         (work / "guest.elf").write_bytes(image)
         cwd = os.getcwd()
-        environment = {key: os.environ.pop(key) for key in
-                       ("TITLE_EXTRA_SPANS", "HST_EXTRA_SPANS", "GAME_BASE") if key in os.environ}
-        os.chdir(work)
+        environment = {}
         try:
+            environment = {key: os.environ.pop(key) for key in
+                           ("TITLE_EXTRA_SPANS", "HST_EXTRA_SPANS", "GAME_BASE") if key in os.environ}
+            os.chdir(work)
             with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
                 rc = codegen.main(["codegen.py", "guest.elf", "guest_recomp.c", f"--base={base}",
                                    "--profile=none"])
         finally:
-            os.chdir(cwd)
-            os.environ.update(environment)
+            try:
+                os.chdir(cwd)
+            finally:
+                os.environ.update(environment)
         assert rc == 0, rc
         for path in sorted(p for p in work.iterdir() if p.name != "guest.elf"):
             digest.update(path.name.encode())
@@ -1175,19 +1199,30 @@ class PublicFixtureTest(unittest.TestCase):
     GUESTS = ("cosim", "display_smoke", "production_smoke", "snapshot")
     LOAD = 0x08804000
 
+    def test_generated_digest_restores_title_environment_when_chdir_fails(self):
+        expected = {
+            "TITLE_EXTRA_SPANS": "0x00420000,0x00420400",
+            "HST_EXTRA_SPANS": "legacy-value",
+            "GAME_BASE": "0x08804000",
+        }
+        with mock.patch.dict(os.environ, expected), \
+                mock.patch.object(os, "chdir", side_effect=OSError("synthetic chdir failure")):
+            with self.assertRaisesRegex(OSError, "synthetic chdir failure"):
+                generated_digest(b"synthetic fixture", 0)
+            self.assertEqual({key: os.environ.get(key) for key in expected}, expected)
+
     def text(self, generator):
         if "frames" in generator.build_text_segment.__code__.co_varnames:
             return generator.build_text_segment(generator.DEFAULT_FRAMES)
         return generator.build_text_segment()
 
     # sha256 over the name and bytes of every file codegen writes for each guest, as a PRX with
-    # its relocation map (base 0x08804000) and as its code alone in a fixed-address executable,
-    # computed on main 8b769e1c6 before this change. Neither image has data in its code, so the
-    # withdrawal must leave every byte as it was. A change to code generation on main that moves
-    # these on purpose recomputes them there (generated_digest on that commit).
+    # its relocation map (base 0x08804000) and as its code alone in a fixed-address executable.
+    # The fixed-address cosim output changes because trace_function now stops after an
+    # out-of-range tail jump instead of absorbing the next function (PR24-U05).
     MAIN_DIGESTS = {
         ("cosim", "prx"): "bee3adc3e5eae434f8f847c5d01653496d026cbdfd471295640d72097415ac47",
-        ("cosim", "exec"): "f351d09338aace3c3b367509a717cd4246d4d735c1d8a78c90c49b0df37f4430",
+        ("cosim", "exec"): "c487f3214bc18e768cf1c33ab5eb8070337dd97adead840eed32981fa057b89b",
         ("display_smoke", "prx"): "1da0e0efdf775dff837b3198dea52a8aa7935f30b025a3e73b3c932710456b3d",
         ("display_smoke", "exec"): "5147b3e75ae67fd626117c140fab2b0be5b0e284e918fd814847eda530f90607",
         ("production_smoke", "prx"): "0b579f0cbb5a73ede2896d262891779005bbd3697700d1ae7af0f8007f9cea8d",
@@ -1203,7 +1238,12 @@ class PublicFixtureTest(unittest.TestCase):
                       ("exec", fixed_executable((), self.LOAD, self.text(generator)), "0"))
             for kind, image, base in images:
                 with self.subTest(name=name, image=kind):
-                    self.assertEqual(generated_digest(image, base), self.MAIN_DIGESTS[(name, kind)])
+                    generated = generated_digest(image, base)
+                    with stock_analysis():
+                        without_withdrawal = generated_digest(image, base)
+                    self.assertEqual(generated, without_withdrawal,
+                                     "the non-code withdrawal changed code-only output")
+                    self.assertEqual(generated, self.MAIN_DIGESTS[(name, kind)])
 
     def test_a_module_with_relocations_is_untouched(self):
         # Each guest as its loader sees it, a PRX with its relocation map: analysed exactly
