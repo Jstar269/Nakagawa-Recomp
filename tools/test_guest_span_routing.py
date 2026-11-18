@@ -171,6 +171,7 @@ class TestGuestSpanRouting(unittest.TestCase):
             ROOT / "src" / "rt" / "ge_capture.c": {
                 "ge_capture_begin": ("sr_guest_span_readable",),
                 "append_page": ("sr_guest_span_readable",),
+                "note_span": ("sr_guest_span_readable",),
                 "ge_capture_apply": ("sr_guest_span_writable",),
             },
             ROOT / "src" / "rt" / "gpu_sdl3vk" / "ge_gpu.c": {
