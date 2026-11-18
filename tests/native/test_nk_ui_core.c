@@ -2756,6 +2756,32 @@ static int test_own_errors_reported(void) {
     CHECK(nk_ui_end(ui) == NULL, "a frame past the scroll containers it can hold is dropped");
     CHECK(log.count == 2 && strstr(log.kinds, "SCROLL_CONTAINERS_EXCEEDED ") != NULL,
           "and the limit is named");
+    /* Each line height is its own text style in the measure cache's key; a
+       frame with more styles than the table holds is dropped by name, and the
+       next frame starts the table over. */
+    layout.scroll = false;
+    layout.direction = NK_UI_LAYOUT_COLUMN;
+    {
+        NkUiTextStyle style = nk_ui_type(NK_UI_TYPE_BODY, 0u);
+        unsigned i;
+        style.size_px = 16;
+        style.wrap = false;
+        nk_ui_begin(ui, 4.0);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open the text-style column");
+        for (i = 0u; i < 300u; ++i) {
+            style.line_height = 16.0f + (float)i;
+            nk_ui_text(ui, (NkUiId)(100u + i), "x", &style);
+        }
+        nk_ui_end_container(ui);
+        CHECK(nk_ui_end(ui) == NULL, "a frame past the text styles it can tell apart is dropped");
+        CHECK(log.count == 3 && strstr(log.kinds, "TEXT_STYLES_EXCEEDED ") != NULL,
+              "and the limit is named");
+        nk_ui_begin(ui, 5.0);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open the next text-style column");
+        nk_ui_text(ui, 100u, "x", &style);
+        nk_ui_end_container(ui);
+        CHECK(nk_ui_end(ui) != NULL, "the next frame starts the text styles over and draws");
+    }
     nk_ui_destroy(ui);
     return 1;
 }

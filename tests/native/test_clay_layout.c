@@ -258,25 +258,9 @@ int main(void)
         }
     }
 
-    /* The text-measure cache keys on the line height: two configs that differ
-       only in it measure separately, as the measure function sees both. */
-    {
-        Clay_String words = CLAY_STRING("Same words");
-        Clay_TextElementConfig tall = { .fontSize = 16, .lineHeight = 40 };
-        Clay_TextElementConfig short_line = { .fontSize = 16, .lineHeight = 20 };
-        words.isStaticallyAllocated = false;
-        if (Clay__HashStringContentsWithConfig(&words, &tall) ==
-            Clay__HashStringContentsWithConfig(&words, &short_line)) {
-            fprintf(stderr, "FAIL: the text-measure cache key ignores the line height\n");
-            free(memory);
-            return EXIT_FAILURE;
-        }
-    }
-
     free(memory);
     puts("Clay layout selftest passed: root, padding, child gap, fixed children, grow child, "
          "wrapped text kept whole in an overfull column, an oversized arena request refused, "
-         "a layout after a full element-id map, a timeless drag without momentum, and a "
-         "measure cache keyed on the line height");
+         "a layout after a full element-id map, and a timeless drag without momentum");
     return EXIT_SUCCESS;
 }

@@ -24,13 +24,13 @@ launcher, the in-game overlay and their tests lay out through it:
 
 | File | Kind | Upstream blob SHA at the pin | SHA-256 |
 | --- | --- | --- | --- |
-| `clay.h` | imported + LOCAL DELTA | `7d9cf4cc7a918d1bdd766867c180851c949a3310` | `a47c958d96c6a57d2afd2799b921c5659b4651395ed42aa68be9274dfcc999a7` |
+| `clay.h` | imported + LOCAL DELTA | `7d9cf4cc7a918d1bdd766867c180851c949a3310` | `d9e5e2b1bc2662f6a85c14a3d3d64253057d38a7241c1d870a936aca80483f83` |
 | `LICENSE.md` | imported byte-identical | `2968c61bcdc6ecbef470e02edd45b47aba1d8c44` | `5dd30f9f52093076b7574458f5efb8242fe6cbbd4669d4a2914e7616810d0df8` |
 | `PROVENANCE.md` | project-authored manifest | n/a | n/a |
 
 No generated Clay file is included. The upstream `clay.h` bytes have SHA-256
 `54aef6d5f96b14e296bebb6db4a755543e98fd7e6c188411afb2f22a4b4f7728`;
-applying the five changes below to them gives the SHA-256 in the table.
+applying the four changes below to them gives the SHA-256 in the table.
 
 ## Local deltas
 
@@ -64,11 +64,3 @@ Each change is marked `LOCAL DELTA` in the file, and
   whose clock stood still across the drag's frames): the infinite momentum pins
   the container at one end until the next scroll. The selftest drags with a
   `deltaTime` of 0 and checks the container stays where the drag left it.
-- `clay.h`, `Clay__HashStringContentsWithConfig` (added 2026-11-18): the
-  text-measure cache key also hashes the config's `lineHeight`. The measure
-  function is given the whole config, and `src/ui/nk_ui_clay.c` raises a run's
-  measured height to its line height, so a key without it let two runs that
-  differ only in line height share one cached height. Upstream at the pin
-  leaves it out, and the second run is drawn offset from its line box by half
-  the difference. The selftest checks that two configs differing only in
-  `lineHeight` get different keys.
