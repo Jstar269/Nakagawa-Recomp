@@ -2650,6 +2650,12 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
             if (translated[i].down) nk_ui_push_event(player->ui, &translated[i]);
         } else if (translated[i].type == NK_UI_EV_BACK && player_ui_nk_find_open(player)) {
             if (translated[i].down) player_ui_find_close(player);
+        } else if (translated[i].type == NK_UI_EV_BACK &&
+                   nk_ui_router_current(player->router) == PLAYER_UI_ROUTE_SAVES &&
+                   player->saves_ask != PLAYER_UI_SAVES_ASK_NONE) {
+            /* The Saves card's question answers Back with Cancel and the card
+               stays (docs/PLAYER_UI_DESIGN.md); the router would close it. */
+            if (translated[i].down) nk_ui_push_event(player->ui, &translated[i]);
         } else if (translated[i].type == NK_UI_EV_BACK) {
             nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
             (void)nk_ui_router_handle_event(player->router, &translated[i]);

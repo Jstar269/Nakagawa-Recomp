@@ -1166,6 +1166,7 @@ class NativePlayerUiTests(unittest.TestCase):
         enhancement_package_fields: dict[str, object] | None = None,
         culling_packages: dict[str, dict[str, object]] | None = None,
         cover_cache: dict[str, bytes] | None = None,
+        save_backups: dict[str, tuple[str, ...]] | None = None,
         expect_failure: bool = False,
         runtime_root_arg: str | None = None,
     ) -> dict[str, object]:
@@ -1187,6 +1188,13 @@ class NativePlayerUiTests(unittest.TestCase):
                 (data_folder / "verification").mkdir(parents=True)
                 (data_folder / "verification" / "redump.dat").write_text(disc_list,
                                                                         encoding="utf-8")
+            for disc, names in (save_backups or {}).items():
+                # A title's save backups (player_app_save_backup_folder), so Saves lists a
+                # Restore for each; only the names are read until one is restored.
+                backups = data_folder / "titles" / disc / "save-backups"
+                backups.mkdir(parents=True, exist_ok=True)
+                for name in names:
+                    (backups / name).write_bytes(b"")
             if cover_cache is not None:
                 (data_folder / "cache" / "cover-art").mkdir(parents=True, exist_ok=True)
                 for cache_name, cache_bytes in cover_cache.items():
@@ -2303,6 +2311,46 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         self.assertEqual(self.screens(from_title), [library, title, about, title, library],
                          "Back from About returns to the title page it was opened from")
+
+    def test_next_ui_saves_back_answers_the_question_first(self) -> None:
+        """Audit 2026-11-17: B or Esc while the Saves card asks Restore answers it with Cancel
+        and keeps the card (docs/PLAYER_UI_DESIGN.md); the next Back closes it. Failing-before:
+        the router closed the card on the first Back and dropped the question."""
+        header = (ROOT / "src" / "player" / "ui" / "player_ui_nk.h").read_text(encoding="utf-8")
+
+        def number(name: str) -> int:
+            found = re.search(rf"\b{name} = (0x[0-9A-Fa-f]+|\d+)u?\b", header)
+            self.assertIsNotNone(found, f"player_ui_nk.h no longer defines {name}")
+            assert found is not None
+            return int(found.group(1), 0)
+
+        title, saves = number("PLAYER_UI_ROUTE_TITLE"), number("PLAYER_UI_ROUTE_SAVES")
+        restore = number("PLAYER_UI_ID_SAVES_RESTORE_BASE")
+        cancel, add = number("PLAYER_UI_ID_SAVES_CANCEL"), number("PLAYER_UI_ID_SAVES_ADD")
+        # The library opens on TEST00005; Enter opens its page, whose focus is Saves, and Enter
+        # opens the card on Add a save (no saves yet). Down reaches the backup's Restore.
+        run = self.next_ui_run(
+            "library",
+            ("WAIT_MS=200", "KEY_RETURN", "WAIT_MS=200", "KEY_RETURN", "WAIT_MS=200",
+             "KEY_DOWN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200", "KEY_ESCAPE",
+             "WAIT_MS=200", "KEY_ESCAPE", "WAIT_MS=200"),
+            save_backups={"TEST00005": ("TEST00005-saves-20261104-140501.zip",)})
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        shown: list[tuple[int, int]] = []
+        for frame in frames:
+            if frame["selected_disc"] != "TEST00005":
+                continue
+            screen = (int(frame["next_route"]), int(frame["next_focus"]))
+            if not shown or shown[-1] != screen:
+                shown.append(screen)
+        self.assertIn((saves, restore), shown, run["stdout"])
+        asked = shown.index((saves, restore)) + 1
+        self.assertEqual(shown[asked:asked + 2], [(saves, cancel), (saves, add)],
+                         "Restore asks (Cancel focused), and Back answers it with Cancel while "
+                         f"the card stays: {shown}")
+        self.assertEqual(shown[asked + 2][0], title,
+                         f"the next Back closes the card to the title page: {shown}")
 
     def test_next_ui_settings_tab_opens_by_mouse_keyboard_and_controller(self) -> None:
         """#1281: Settings has a visible SETTINGS tab, and the menu prompt opens it."""

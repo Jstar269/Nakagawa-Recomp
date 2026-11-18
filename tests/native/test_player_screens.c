@@ -8116,6 +8116,182 @@ static void test_nickname_keyboard(void) {
           "at the design text size the whole keyboard fits the smallest window");
 }
 
+/* The launcher's display rule for these tests: a synthetic profile folder
+   shown as "~" (player_display_text's rule), never growing its input. */
+static const char k_test_home[] = "C:/Users/SyntheticPlayerName";
+
+static size_t test_display_home(const char *in, char *out, size_t out_size) {
+    size_t home = sizeof(k_test_home) - 1u;
+    size_t used = 0u;
+    if (out == NULL || out_size == 0u) return 0u;
+    while (*in != '\0' && used + 1u < out_size) {
+        if (strncmp(in, k_test_home, home) == 0 && (in[home] == '/' || in[home] == '\0')) {
+            out[used++] = '~';
+            in += home;
+        } else {
+            out[used++] = *in++;
+        }
+    }
+    out[used] = '\0';
+    return used;
+}
+
+/* One Settings > Updates frame at `step`, with the folder or error message given,
+   drawn by a context that applies test_display_home. */
+static bool dump_update_page(PlayerUiUpdateStep step, const char *folder, const char *message,
+                             char *dump, size_t cap) {
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    PlayerUiSettingsModel settings;
+    NkUi *ui;
+    size_t used = 0u;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    config.display_text = test_display_home;
+    ui = screen_ui_create(&config);
+    if (ui == NULL) return false;
+    set_test_viewport(ui, 1280, 800);
+    memset(&settings, 0, sizeof(settings));
+    settings.page = PLAYER_UI_SETTINGS_PAGE_UPDATES;
+    settings.current_version = "0.0.5";
+    settings.update_step = step;
+    settings.update_version = "0.0.6";
+    settings.update_folder = folder;
+    settings.update_failed_step = PLAYER_UI_UPDATE_INSTALLING;
+    settings.update_error_title = "Couldn't install the update";
+    settings.update_error_message = message;
+    settings.logical_width = 1280.0f;
+    settings.logical_height = 800.0f;
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_settings(ui, &settings);
+        (void)nk_ui_end(ui);
+    }
+    used = nk_ui_dump(ui, dump, cap);
+    nk_ui_destroy(ui);
+    return used > 0u;
+}
+
+/* Audit 2026-11-17: the Updates page names the update's folder whole, shows
+   no part of the user name in an error, and cuts a long word only between
+   characters. */
+static void test_update_page_folder_and_error_text(void) {
+    static char dump[CASE_DUMP_CAP];
+    /* Every word is short, so nothing is shortened: a 96-byte buffer cut the
+       version's folder name off the end with no mark. The text wraps, so the
+       checks look for the folder's own name and the word after it. */
+    static const char folder[] =
+        "~/Downloads/Nakagawa Recomp/updates/kept here for the next version/"
+        "nakagawa_recomp-0.0.6-windows-x64";
+    static const char failed[] =
+        "Nakagawa couldn't create a folder for the new version "
+        "(C:/Users/SyntheticPlayerName/Documents/Emulators/"
+        "nakagawa-recomp-0.0.6-windows-x64.staging). Nothing was changed.";
+    /* "~/" then three 3-byte characters end at byte 11: the 12-byte head
+       would end inside the fourth. */
+    static const char wide[] =
+        "It stopped at ~/\xE3\x82\xB2\xE3\x83\xBC\xE3\x83\xA0\xE3\x82\xBA/"
+        "emulators/nakagawa-recomp-0.0.6-windows-x64-with-a-long-name.staging today.";
+    CHECK(dump_update_page(PLAYER_UI_UPDATE_DOWNLOADED, folder, NULL, dump, sizeof(dump)) &&
+              strstr(dump, "nakagawa_recomp-0.0.6-windows-x64. Install") != NULL,
+          "Downloaded names the whole folder the ZIP was saved in");
+    CHECK(dump_update_page(PLAYER_UI_UPDATE_INSTALLED, folder, NULL, dump, sizeof(dump)) &&
+              strstr(dump, "nakagawa_recomp-0.0.6-windows-x64. Close") != NULL,
+          "Installed names the whole folder the new version is in");
+    CHECK(dump_update_page(PLAYER_UI_UPDATE_FAILED, NULL, failed, dump, sizeof(dump)) &&
+              strstr(dump, "SyntheticPlayerName") == NULL && strstr(dump, "C:/Users/") == NULL &&
+              strstr(dump, "(~/Documents/Emulators/nakagawa-recomp-0.0.6-windows-x64.staging)") !=
+                  NULL,
+          "an error's path shows the profile folder as ~ before any word is shortened");
+    CHECK(dump_update_page(PLAYER_UI_UPDATE_FAILED, NULL, wide, dump, sizeof(dump)) &&
+              strstr(dump, "~/\xE3\x82\xB2\xE3\x83\xBC\xE3\x83\xA0\xE2\x80\xA6") != NULL &&
+              strstr(dump, "\xA0\xE3\xE2\x80\xA6") == NULL,
+          "a long word's head ends on a whole character before the ellipsis");
+}
+
+/* Audit 2026-11-17: Back on the Saves card answers its question with Cancel and
+   keeps the card (docs/PLAYER_UI_DESIGN.md); with no question up it closes it. */
+static void test_saves_back_answers_the_question(void) {
+    static const PlayerUiSavesRow rows[] = {{"2026-11-04 14:05:01", "Backed up, 120 KB"}};
+    PlayerUiSavesModel saves;
+    PlayerUiAction result[2];
+    for (int asked = 0; asked < 2; ++asked) {
+        NkUiConfig config;
+        NkUiEvent back;
+        NkUi *ui;
+        memset(&config, 0, sizeof(config));
+        config.host = NK_UI_HOST_LAUNCHER;
+        ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create the Saves UI for Back");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 800);
+        memset(&saves, 0, sizeof(saves));
+        saves.title = "Synthetic Untested Fixture";
+        saves.title_index = 2u;
+        saves.has_saves = true;
+        saves.rows = rows;
+        saves.row_count = 1u;
+        saves.total = 1u;
+        saves.ask = asked ? PLAYER_UI_SAVES_ASK_RESTORE : PLAYER_UI_SAVES_ASK_NONE;
+        saves.logical_width = 1280.0f;
+        saves.logical_height = 800.0f;
+        memset(&back, 0, sizeof(back));
+        back.type = NK_UI_EV_BACK;
+        back.down = true;
+        nk_ui_push_event(ui, &back);
+        nk_ui_begin(ui, 0.0);
+        result[asked] = player_ui_screen_saves(ui, &saves);
+        (void)nk_ui_end(ui);
+        nk_ui_destroy(ui);
+    }
+    CHECK(saves_op(result[1]) == PLAYER_UI_SAVES_CANCEL && result[1].title_index == 2u,
+          "Back while Restore asks answers it with Cancel");
+    CHECK(result[0].kind == PLAYER_UI_ACTION_BACK && result[0].title_index == 2u,
+          "Back given to the card with no question up closes it");
+}
+
+/* Audit 2026-11-17: a refused pick clears iso_selected but leaves the last
+   disc's path, so the Game step must not show that disc as chosen in green. */
+static void test_wizard_refused_pick_is_not_chosen(void) {
+    static char dump[CASE_DUMP_CAP];
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    PlayerUiWizardModel wizard;
+    NkUi *ui;
+    char expect[96];
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the wizard UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    memset(&wizard, 0, sizeof(wizard));
+    wizard.logical_width = 1280.0f;
+    wizard.logical_height = 800.0f;
+    wizard.step = 2;
+    wizard.has_iso = true;
+    wizard.iso_selected = false;
+    wizard.iso_path = "C:/synthetic/discs/synthetic-showcase.iso";
+    wizard.iso_detail = "Size: 12.00 MB \xC2\xB7 Disc ID: TEST00007";
+    wizard.status_message = "This file isn't a PSP disc image.";
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_wizard(ui, &wizard);
+        (void)nk_ui_end(ui);
+    }
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    nk_ui_destroy(ui);
+    (void)snprintf(expect, sizeof(expect), "%08X \"This file isn't a PSP disc image.\"",
+                   (unsigned)theme->warning);
+    CHECK(strstr(dump, "synthetic-showcase.iso") == NULL &&
+              strstr(dump, "TEST00007") == NULL,
+          "a refused pick shows no disc as chosen");
+    CHECK(strstr(dump, expect) != NULL, "the refusal reads in the warning colour");
+}
+
 int main(int argc, char **argv) {
     static char library[DUMP_CAP];
     static char title[DUMP_CAP];
@@ -8161,6 +8337,9 @@ int main(int argc, char **argv) {
     test_setting_label_holds_a_long_value();
     test_remove_from_library();
     test_saves_dialog();
+    test_saves_back_answers_the_question();
+    test_update_page_folder_and_error_text();
+    test_wizard_refused_pick_is_not_chosen();
     test_add_to_steam_dialog();
     test_wizard_steps_match_the_route();
     test_outcome_lines_take_their_colour();

@@ -18,8 +18,7 @@ typedef struct {
 struct NkUiRouter {
     PlayerUiRouteEntry entries[PLAYER_UI_ROUTE_DEPTH_MAX];
     size_t depth;
-    NkUiId focus_restore;
-    bool focus_restore_pending;
+    NkUiId focus_restore; /* 0: nothing to restore */
 };
 
 NkUiRouter *nk_ui_router_create(void) {
@@ -53,7 +52,6 @@ bool nk_ui_router_replace(NkUiRouter *router, PlayerUiRoute route) {
     router->entries[0].focus = 0u;
     router->depth = 1u;
     router->focus_restore = 0u;
-    router->focus_restore_pending = false;
     return true;
 }
 
@@ -67,7 +65,6 @@ bool nk_ui_router_push(NkUiRouter *router, PlayerUiRoute route) {
     entry->route = route;
     entry->focus = 0u;
     router->focus_restore = 0u;
-    router->focus_restore_pending = false;
     return true;
 }
 
@@ -77,7 +74,6 @@ bool nk_ui_router_pop(NkUiRouter *router) {
     }
     --router->depth;
     router->focus_restore = router->entries[router->depth - 1u].focus;
-    router->focus_restore_pending = router->focus_restore != 0u;
     return true;
 }
 
@@ -106,12 +102,11 @@ void nk_ui_router_set_focus(NkUiRouter *router, NkUiId id) {
 
 NkUiId nk_ui_router_take_focus_restore(NkUiRouter *router) {
     NkUiId id;
-    if (router == NULL || !router->focus_restore_pending) {
+    if (router == NULL) {
         return 0u;
     }
     id = router->focus_restore;
     router->focus_restore = 0u;
-    router->focus_restore_pending = false;
     return id;
 }
 

@@ -224,6 +224,12 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
             }
             nk_ui_end_container(ui);
         }
+        /* Back (B or Esc) answers the question with Cancel and keeps the card:
+           player_ui_nk.c gives Back to the screen while a question is up. */
+        if (result.kind == PLAYER_UI_ACTION_NONE && nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
+            result = action(PLAYER_UI_ACTION_SAVES, model->title_index,
+                            (PlayerUiPrimaryAction)PLAYER_UI_SAVES_CANCEL);
+        }
         scr_flow_end(ui, "", prompts, 3u);
         return result;
     }
@@ -333,6 +339,11 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
             }
             nk_ui_end_container(ui);
         }
+    }
+    /* A Back given to the screen after its question closed (a game started)
+       still closes the card, as the Back button does. */
+    if (result.kind == PLAYER_UI_ACTION_NONE && nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
+        result = action(PLAYER_UI_ACTION_BACK, model->title_index, PLAYER_UI_PRIMARY_NONE);
     }
     scr_flow_end(ui, "", prompts, 3u);
     return result;
