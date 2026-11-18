@@ -2341,6 +2341,145 @@ static void test_trace_window_records_only_in_window_instructions(const char *se
           "out-of-window instructions must write none", records, in_window);
 }
 
+/* ---- an unwindowed trace that reaches its step limit closes and the run goes on ------
+ *
+ * AGENTS.md: no deliberate host crash to signal a limit. The child opens a plain trace
+ * (no SR_TRACE_PC window), stands at the 50M-step limit and traces one more instruction:
+ * the trace must close with a closing comment line, and the child must keep running and
+ * exit 0. Before, sr_end_impl called abort() there. */
+#define TRACE_CAP_STEPS 50000000ULL
+
+static int run_trace_cap_child(const char *self_path) {
+    char path[512];
+    snprintf(path, sizeof path, "%s.trace-cap.txt", self_path);
+    if (sr_trace_open(path, "selftest", TRACE_IN_PC) != 0) {
+        fprintf(stderr, "trace cap child: the trace stream did not open\n");
+        return 2;
+    }
+    s_step = TRACE_CAP_STEPS;   /* white-box: the instruction about to be traced is the last */
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    sr_begin_impl(&s, TRACE_IN_PC, STALE_ADDIU_V0(1u));
+    s.r[2] = 1u;
+    sr_end_impl(&s, 0u, 0);
+    if (sr_trace_active) {
+        fprintf(stderr, "trace cap child: the trace stayed open past its step limit\n");
+        return 3;
+    }
+    /* The run goes on untraced. */
+    sr_begin_impl(&s, TRACE_IN_PC + 4u, STALE_ADDIU_V0(2u));
+    s.r[2] = 2u;
+    sr_end_impl(&s, 0u, 0);
+    return 0;
+}
+
+static void test_trace_step_limit_closes_the_trace(const char *self_path) {
+    char path[512], line[4096], last[4096] = "";
+    snprintf(path, sizeof path, "%s.trace-cap.txt", self_path);
+    remove(path);
+    int status = run_dispatch_child(self_path, "--trace-cap-child");
+    CHECK(status == 0, "a trace reaching its step limit did not close and keep running "
+          "(child status=%d)", status);
+    FILE *fp = fopen(path, "rb");
+    CHECK(fp != NULL, "the step-limit trace file was not written");
+    unsigned records = 0u;
+    while (fp && fgets(line, sizeof line, fp)) {
+        if (line[0] != '#') records++;
+        snprintf(last, sizeof last, "%s", line);
+    }
+    if (fp) fclose(fp);
+    remove(path);
+    CHECK(records == 1u && strncmp(last, "# trace closed: ", 16) == 0,
+          "the step-limit trace holds %u record(s) and ends with '%s' (expected one record "
+          "and the closing comment)", records, last);
+}
+
+/* ---- SR_PROFILE: a dispatch credits no block to the stale s->pc ----------------------
+ *
+ * s->pc at a dispatch is the last return or yield point, not the target, and the entered
+ * body's own entry yield counts its entry. Before, the dispatch site's SR_YIELD credited a
+ * block to whatever s->pc held, creating a table entry for an unrelated address. */
+#define PROFILE_STALE_PC 0x00777000u
+
+static const SrProfEntry *profile_entry_for(uint32_t pc) {
+    for (uint32_t i = 0; i < PROF_HASH_SIZE; i++)
+        if (g_prof_table[i].used && g_prof_table[i].pc == pc) return &g_prof_table[i];
+    return NULL;
+}
+
+static void test_dispatch_profiles_no_stale_pc(void) {
+    sr_exec_span_reset();
+    own_synthetic_aot_word(PROBE_RA);
+    sr_register(PROBE_RA, interp_handoff_body);
+    memset(g_prof_table, 0, sizeof g_prof_table);
+    g_prof_enabled = 1;
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    s.pc = PROFILE_STALE_PC;
+    s.r[29] = 0x00400000u;
+    s.r[31] = PROBE_RA;
+    g_interp_handoff_hits = 0;
+    int result = dispatch_try(&s, PROBE_RA);
+    g_prof_enabled = 0;
+    const SrProfEntry *stale = profile_entry_for(PROFILE_STALE_PC);
+    const SrProfEntry *target = profile_entry_for(PROBE_RA);
+    CHECK(result == SR_GUEST_INTERP_AOT_HANDOFF && g_interp_handoff_hits == 1,
+          "the profiled dispatch did not enter its registered body (result=%d hits=%d)",
+          result, g_interp_handoff_hits);
+    CHECK(stale == NULL, "a dispatch credited %llu block(s) to the stale s->pc 0x%08x",
+          stale ? (unsigned long long)stale->block_count : 0ull, PROFILE_STALE_PC);
+    CHECK(target != NULL && target->call_count == 1u && target->block_count == 0u,
+          "the dispatched target's profile is calls=%llu blocks=%llu (expected 1 call; its "
+          "body's own entry yield counts the block)",
+          target ? (unsigned long long)target->call_count : 0ull,
+          target ? (unsigned long long)target->block_count : 0ull);
+    memset(g_prof_table, 0, sizeof g_prof_table);
+    sr_exec_span_reset();
+}
+
+/* ---- SR_MEM_WATCH: a store that overlaps a watched range is reported ------------------
+ *
+ * The match is an overlap of the store's bytes with the range, not a test of its first
+ * byte alone: a word store two bytes below the range changes two watched bytes. The watch
+ * context logger counts each reported hit at its writer pc. */
+#define MEM_WATCH_ADDR 0x08803000u
+#define MEM_WATCH_PC   0x00608100u
+
+static void test_mem_watch_reports_overlapping_stores(void) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    CpuState *saved_cpu = s_cpu;
+    s_cpu = &cpu;
+    memset(&g_sr_mem_watches[0], 0, sizeof g_sr_mem_watches[0]);
+    g_sr_mem_watches[0].start = MEM_WATCH_ADDR + 2u;
+    g_sr_mem_watches[0].end = MEM_WATCH_ADDR + 4u;
+    g_sr_mem_watches[0].label = "overlap";
+    g_sr_mem_watch_count = 1;
+    g_sr_mem_watch_context_pc = MEM_WATCH_PC;
+    g_sr_mem_watch_context_limit = 16u;
+    g_sr_mem_watch_context_count = 0u;
+    g_sr_mem_watch_context_fpr = -1;
+
+    MEM_W32_PC(MEM_WATCH_ADDR, 0x11223344u, MEM_WATCH_PC);       /* bytes +0..+3: overlaps */
+    const unsigned after_word = g_sr_mem_watch_context_count;
+    MEM_W16_PC(MEM_WATCH_ADDR, 0x5566u, MEM_WATCH_PC);           /* bytes +0..+1: beside */
+    const unsigned after_low_half = g_sr_mem_watch_context_count;
+    MEM_W16_PC(MEM_WATCH_ADDR + 1u, 0x7788u, MEM_WATCH_PC);      /* bytes +1..+2: overlaps */
+    const unsigned after_straddle = g_sr_mem_watch_context_count;
+    MEM_W8_PC(MEM_WATCH_ADDR + 4u, 0x99u, MEM_WATCH_PC);         /* byte +4: beside */
+    const unsigned after_beside = g_sr_mem_watch_context_count;
+
+    g_sr_mem_watch_count = 0;
+    g_sr_mem_watch_context_pc = 0u;
+    g_sr_mem_watch_context_limit = 0u;
+    g_sr_mem_watch_context_count = 0u;
+    s_cpu = saved_cpu;
+    CHECK(after_word == 1u, "a word store over the start of a watched range was not reported");
+    CHECK(after_low_half == 1u, "a halfword store beside the watched range was reported");
+    CHECK(after_straddle == 2u, "a halfword store straddling the range start was not reported");
+    CHECK(after_beside == 2u, "a byte store past the watched range was reported");
+}
+
 /* ---- #1375: a null code pointer vs. the offset-0 function of a zero-based image ----
  *
  * The synthetic image is based at 0: its offset-0 function is registered at guest
@@ -2434,7 +2573,12 @@ static void test_null_code_pointer_is_not_the_offset0_function(const char *self_
     g_interp_handoff_v0 = 0u;
     s = nullptr_state(PROBE_PC);
     s.r[31] = PROBE_RA;
+    const int misses_before = g_miss_count;
     dispatch_result = dispatch_try(&s, 0u);
+    /* Guest address 0 is a real miss target here, not the miss table's empty slot. */
+    CHECK(g_miss_count == misses_before + 1,
+          "the miss at span-owned address 0 was not recorded in the dispatch-miss table "
+          "(misses %d -> %d)", misses_before, g_miss_count);
     CHECK(dispatch_result != SR_GUEST_INTERP_NULL_CODE_POINTER,
           "a dispatch to span-owned address 0 with no native body was refused as a null "
           "code pointer");
@@ -2937,6 +3081,8 @@ int main(int argc, char **argv) {
         return run_stale_alias_child();
     if (argc == 2 && strcmp(argv[1], "--trace-window-child") == 0)
         return run_trace_window_child(argv[0]);
+    if (argc == 2 && strcmp(argv[1], "--trace-cap-child") == 0)
+        return run_trace_cap_child(argv[0]);
     if (argc == 2 && strcmp(argv[1], "--unimplemented-child") == 0) {
         sr_unimplemented(PROBE_PC, "synthetic unsupported form");
         return 99; /* fail-open: a named stop must never return */
@@ -2996,6 +3142,9 @@ int main(int argc, char **argv) {
     test_configured_alias_honours_stale_redirect(argv[0]);
     test_named_stops_exit_instead_of_crashing(argv[0]);
     test_trace_window_records_only_in_window_instructions(argv[0]);
+    test_trace_step_limit_closes_the_trace(argv[0]);
+    test_dispatch_profiles_no_stale_pc();
+    test_mem_watch_reports_overlapping_stores();
     test_null_code_pointer_is_not_the_offset0_function(argv[0]);
     test_host_entries_return_through_the_host_return_address(argv[0]);
 

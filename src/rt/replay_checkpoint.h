@@ -66,7 +66,10 @@ typedef enum {
 typedef struct {
     NkCkptDiff kind;
     uint64_t frame;              /* the expected checkpoint's frame */
-    char name[NK_CKPT_NAME_LEN]; /* the first differing digest (NAMES: the expected name, or "") */
+    /* The first differing digest. NAMES: the expected list's name at the first difference,
+     * or, when the expected list ends first, the actual list's extra name (as
+     * tools/nkstate.py ckpt-diff reports it). FRAME: "". */
+    char name[NK_CKPT_NAME_LEN];
 } NkCkptMismatch;
 
 /* The first difference between an expected and an actual checkpoint, in the expected

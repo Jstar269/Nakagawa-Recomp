@@ -251,6 +251,11 @@ static int ckpt_take(uint32_t vcount) {
     sched_for_each_thread_cpu(ckpt_visit_thread, &visit);
     if (visit.sched_overflow) s_ckpt.overflow = 1;
     nk_ckpt_add(&s_ckpt, "sched", visit.sched, visit.sched_len);
+    /* VRAM a renderer or the depth surface still owns is materialized first, as for every
+     * bulk VRAM reader, so the digest is the VRAM the guest would read
+     * (sr_ge_vram_read_prepare stops the run by name when it cannot be). */
+    if (g_sr_vram_read_pending)
+        sr_ge_vram_read_prepare(sr_vram_cpu_address(CKPT_VRAM_BASE), CKPT_VRAM_SIZE);
     nk_ckpt_add_chunks(&s_ckpt, "vram", CKPT_VRAM_BASE, SR_HOST_LINEAR(CKPT_VRAM_BASE), CKPT_VRAM_SIZE, CKPT_CHUNK);
     nk_ckpt_add_chunks(&s_ckpt, "ram", SR_RAM_BASE, g_mem, CKPT_RAM_SIZE, CKPT_CHUNK);
     s_ckpt_taken = 1;
@@ -687,7 +692,9 @@ static void replay_setup(const char *path) {
             static OskAnswer a;
             if (s_rep_have_end_line) refuse("after-end", line_no);
             if (!parse_answer(p + 11, &a)) refuse("malformed-answer", line_no);
-            if (a.request + 1u == s_rep_answ_count && s_rep_answ[a.request].result == ANSW_OPEN &&
+            /* In size_t: a 32-bit request + 1 wraps to 0 and matched an empty answer list. */
+            if (s_rep_answ_count != 0u && (size_t)a.request == s_rep_answ_count - 1u &&
+                s_rep_answ[a.request].result == ANSW_OPEN &&
                 a.pending >= s_rep_answ[a.request].pending) {
                 s_rep_answ[a.request] = a; /* a later line for a request still open */
             } else if (a.request == s_rep_answ_count) {

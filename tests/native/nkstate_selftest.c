@@ -43,9 +43,24 @@
 #endif
 #include <wchar.h>
 
-/* No GE renderer is linked by this harness. */
+/* No GE renderer is linked by this harness. A test may stand one in: while it holds VRAM
+ * bytes not yet written back (g_sr_vram_read_pending), a CPU read first materializes them,
+ * as ge.c's sr_ge_vram_read_prepare does. */
 volatile int g_sr_vram_read_pending;
-void sr_ge_vram_read_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
+#define TEST_RENDERER_VRAM 0x04000100u
+static const uint8_t k_test_renderer_bytes[8] = {0x5a, 0xa5, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+static int g_test_renderer_owns_vram;
+static unsigned g_test_renderer_readbacks;
+void sr_ge_vram_read_prepare(uint32_t addr, uint32_t width) {
+    if (!g_test_renderer_owns_vram) return;
+    if (addr > TEST_RENDERER_VRAM ||
+        (uint64_t)addr + width < (uint64_t)TEST_RENDERER_VRAM + sizeof k_test_renderer_bytes)
+        return;
+    memcpy(SR_HOST_LINEAR(TEST_RENDERER_VRAM), k_test_renderer_bytes, sizeof k_test_renderer_bytes);
+    g_test_renderer_owns_vram = 0;
+    g_test_renderer_readbacks++;
+    g_sr_vram_read_pending = 0;
+}
 void sr_ge_vram_write_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
 void sr_ge_vram_write_commit(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
 
@@ -829,6 +844,10 @@ static void test_checkpoints(void) {
         nk_ckpt_begin(&d, 1u);
         CHECK(nk_ckpt_compare(&c, &d, &m) == NK_CKPT_NAMES && strcmp(m.name, "abcdefghijklmnopqrstuvw") == 0,
               "a missing digest was not reported by name");
+        /* An actual list longer than the expected one: the extra digest is named from the
+         * actual list, as replay_checkpoint.h and tools/nkstate.py ckpt-diff say. */
+        CHECK(nk_ckpt_compare(&d, &c, &m) == NK_CKPT_NAMES && strcmp(m.name, "abcdefghijklmnopqrstuvw") == 0,
+              "an extra actual digest was not reported by its actual name (got '%s')", m.name);
         nk_ckpt_begin(&d, 2u);
         CHECK(nk_ckpt_compare(&c, &d, &m) == NK_CKPT_FRAME, "different frames were not reported");
     }
@@ -892,6 +911,41 @@ static void test_checkpoint_stream(void) {
     }
     CHECK(n == sizeof want_frames / sizeof want_frames[0], "the stream holds %zu checkpoints, want %zu", n,
           sizeof want_frames / sizeof want_frames[0]);
+
+    /* VRAM the renderer still owns is the VRAM the guest would read: the checkpoint
+     * materializes it before hashing, as every other bulk VRAM reader does, rather than
+     * hashing host bytes that are not yet written back. */
+    {
+        static uint8_t want_chunk[1u << 20];
+        static NkCheckpoint want;
+        memcpy(want_chunk, SR_HOST_LINEAR(0x04000000u), sizeof want_chunk);
+        memcpy(want_chunk + (TEST_RENDERER_VRAM - 0x04000000u), k_test_renderer_bytes,
+               sizeof k_test_renderer_bytes);
+        nk_ckpt_begin(&want, 10u);
+        nk_ckpt_add(&want, "vram.04000000", want_chunk, sizeof want_chunk);
+        g_test_renderer_owns_vram = 1;
+        g_test_renderer_readbacks = 0;
+        g_sr_vram_read_pending = 1;
+        g_visit_cpu = &s;
+        sr_replay_checkpoint_vblank(10u); /* window 5: a new checkpoint */
+        g_visit_cpu = NULL;
+        const int materialized = g_test_renderer_readbacks == 1u && !g_sr_vram_read_pending;
+        g_test_renderer_owns_vram = 0;
+        g_sr_vram_read_pending = 0;
+        fp = fopen(path, "rb");
+        got = fp ? fread(text, 1, sizeof text - 1u, fp) : 0u;
+        if (fp) fclose(fp);
+        text[got] = '\0';
+        char *last = NULL;
+        for (char *l = strchr(text, '\n'); l && l[1]; l = strchr(l + 1, '\n')) last = l + 1;
+        if (last && strchr(last, '\n')) *strchr(last, '\n') = '\0';
+        const int parsed = last && nk_ckpt_parse(last, &c, detail, sizeof detail);
+        CHECK(materialized, "the checkpoint did not materialize renderer-owned VRAM (readbacks=%u)",
+              g_test_renderer_readbacks);
+        CHECK(parsed && c.frame == 10u && c.count > 2u && strcmp(c.digests[2].name, "vram.04000000") == 0 &&
+                  memcmp(c.digests[2].sha256, want.digests[0].sha256, 32u) == 0,
+              "the frame-10 checkpoint's vram.04000000 digest is not the renderer's VRAM contents");
+    }
 }
 
 /* ---- recording and replay in fresh processes (SR_RECORD / SR_REPLAY) ------------------ */
@@ -1463,6 +1517,9 @@ static void test_record_replay(void) {
             {"a host-clock recording", "clock=deterministic", "clock=host", "REPLAY_REFUSED reason=clock-not-deterministic line=1\n"},
             {"an unknown line", "\nNKREC_END", "\nNKWHAT x=1\nNKREC_END", "REPLAY_REFUSED reason=unknown-line line="},
             {"a request out of order", "request=1 pending=1", "request=4 pending=1", "REPLAY_REFUSED reason=answer-order line="},
+            /* request + 1 wraps to 0 in 32 bits, which once matched an empty answer list. */
+            {"the largest request first", "call=osk request=0 ", "call=osk request=4294967295 ",
+             "REPLAY_REFUSED reason=answer-order line="},
             {"a bad answer unit", "units=00000048", "units=0000004G", "REPLAY_REFUSED reason=malformed-answer line="},
             {"a not-a-recording file", "NKREC v=1 ", "NKREX v=1 ", "REPLAY_REFUSED reason=bad-magic line=1\n"},
             {"a gap in the pad samples", "NKPAD v=1 first=0 count=", "NKPAD v=1 first=1 count=", "REPLAY_REFUSED reason=pad-order line="},

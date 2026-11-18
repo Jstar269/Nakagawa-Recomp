@@ -56,6 +56,8 @@ typedef struct {
     uint32_t pc;
     uint64_t call_count;
     uint64_t block_count;
+    /* Inclusive host wall time of each dispatched call: a body that yields or blocks is
+     * charged with the time other guest threads ran before it returned (docs/TITLE_TESTING.md). */
     uint64_t duration_ns;
     uint8_t used;
 } SrProfEntry;
@@ -1935,7 +1937,9 @@ void sr_stack_census_report(void) {
 #endif
 
 #define MISS_HASH_SIZE 128
-typedef struct { uint32_t target; uint32_t pc; uint32_t ra; } DispatchMissEntry;
+/* `used` marks a filled slot: guest address 0 is a real miss target on a zero-based image
+ * (#1375), so the target cannot double as the empty-slot sentinel. */
+typedef struct { uint32_t target; uint32_t pc; uint32_t ra; uint8_t used; } DispatchMissEntry;
 static DispatchMissEntry g_miss_table[MISS_HASH_SIZE];
 static int g_miss_count = 0;
 
@@ -1943,7 +1947,7 @@ static void dump_dispatch_misses(void) {
     if (g_miss_count == 0) return;
     fprintf(stderr, "\n--- UNIQUE DISPATCH MISSES SUMMARY (%d entries) ---\n", g_miss_count);
     for (int i = 0; i < MISS_HASH_SIZE; i++) {
-        if (g_miss_table[i].target != 0) {
+        if (g_miss_table[i].used) {
             fprintf(stderr, "  target=0x%08" PRIx32 " pc=0x%08" PRIx32 " ra=0x%08" PRIx32 "\n",
                     g_miss_table[i].target, g_miss_table[i].pc, g_miss_table[i].ra);
         }
@@ -2932,8 +2936,10 @@ static int dispatch_try_with_boundary(
      * worker thread, one for every other thread) were a defensive backstop against
      * priority inversion. Removed per Phase 1.4 — pure dispatch overhead. The launcher
      * demotion that replaced them is retired too (#363): pick_next is strict priority, and
-     * every thread keeps the priority its creator passed. */
-    SR_YIELD(s, s->pc);
+     * every thread keeps the priority its creator passed. The yield point keeps s->pc, the
+     * last return or yield point, and counts no SR_PROFILE block: s->pc is not this
+     * dispatch's target, and the entered body's own entry yield counts its block. */
+    SR_YIELD_UNPROFILED(s, s->pc);
 
     /* Record every dispatch in circular trace buffer.
      * The trace is circular by design (DISPATCH_TRACE_SIZE = 32); g_dtrace_idx wraps
@@ -3132,8 +3138,9 @@ static int dispatch_try_with_boundary(
             int found = 0;
             for (int i = 0; i < 16; i++) {
                 uint32_t idx = (h + i) & (MISS_HASH_SIZE - 1);
-                if (g_miss_table[idx].target == target) { found = 1; break; }
-                if (g_miss_table[idx].target == 0 && g_miss_count < MISS_HASH_SIZE) {
+                if (g_miss_table[idx].used && g_miss_table[idx].target == target) { found = 1; break; }
+                if (!g_miss_table[idx].used && g_miss_count < MISS_HASH_SIZE) {
+                    g_miss_table[idx].used = 1u;
                     g_miss_table[idx].target = target;
                     g_miss_table[idx].pc = s->pc;
                     g_miss_table[idx].ra = s->r[31];
@@ -3773,10 +3780,12 @@ void sr_end_impl(CpuState *s, uint32_t mem_addr, int mem_size) {
         fwrite(line, 1, n + 1, s_fp);
     }
     s_step++;
+    /* A plain trace stops growing past 50M records: the trace closes with a comment line
+     * that says so, and the run goes on untraced, as a closed SR_TRACE_PC window does. */
     if (s_step > 50000000ULL) {
-        fprintf(stderr, "sr_end: trace exceeded 50M steps\n");
+        fprintf(s_fp, "# trace closed: past 50000000 records; the run continued untraced\n");
+        fprintf(stderr, "sr_end: trace exceeded 50000000 records; trace closed, the run continues untraced\n");
         sr_trace_close();
-        abort();
     }
 }
 
