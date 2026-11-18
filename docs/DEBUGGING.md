@@ -1621,9 +1621,11 @@ python tools/soak_audit.py --perf logs/perf.csv --proc proc.csv --stderr logs/st
 | `compat_patches` | never: it names each temporary compatibility patch that fired (the runtime's `COMPAT_PATCH_REPORT`, #1274), so a defect can be traced to an active patch; `--compat-counts-only` keeps the ids out of a summary you will publish |
 
 Output is one `SOAK_CHECK:` line per assertion plus a `SOAK_AUDIT:` verdict line, and the exit
-status is non-zero if any assertion failed. Two rules keep it honest: an input it was not
-given reports `SKIP` with the reason rather than passing, and a quantity the runtime does not
-publish is reported as absent.
+status is 1 if any assertion failed. Three rules keep it honest: an input it was not
+given reports `SKIP` with the reason rather than passing, a quantity the runtime does not
+publish is reported as absent, and a run in which nothing was judged (`compat_patches` only
+reports) is `verdict=SKIP` with exit status 77, never a pass. `--compat-counts-only` also
+names only the kinds of fatal marker, not the raw line, which can carry a host path.
 
 **Audio drift** is the one that was unmeasurable until the telemetry published it. The runtime
 reads the queue depth the blocking output paces against in `src/rt/hle_audio.c`

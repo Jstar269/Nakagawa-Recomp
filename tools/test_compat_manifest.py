@@ -114,11 +114,13 @@ natural next step -- do not read their absence here as "safe to ignore."
 import ast
 import contextlib
 import io
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -145,6 +147,29 @@ def _released_notes() -> list[tuple[Path, str]] | None:
     notes = sorted((ROOT / "docs").glob("RELEASE_NOTES_v*.md"))
     return [(path, path.stem.removeprefix("RELEASE_NOTES_")) for path in notes
             if path.stem.removeprefix("RELEASE_NOTES_") in tags]
+
+
+def _missing_release_tags_failure() -> str | None:
+    """The failure for a checkout without v* tags, or None where that is allowed.
+
+    A local clone or a fork may lack the tags, and there the release-notes check is a
+    SKIP. Hosted CI checks out the tags (the python_tools job), so without them there the
+    check would skip on every run and never be evidence: it fails by name instead.
+    """
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        return ("hosted CI checked out no v* release tag, so the release-notes census check "
+                "cannot run; the python_tools checkout must fetch tags")
+    return None
+
+
+def _shipped_release_notes(tag: str, name: str) -> str | None:
+    """docs/NAME as tag TAG shipped it, or None when TAG has no such file."""
+    try:
+        shipped = subprocess.run(["git", "-C", str(ROOT), "show", f"{tag}:docs/{name}"],
+                                 capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return shipped.stdout.decode("utf-8")
 
 
 def _functions_comparing_release_notes_with_census(source: str) -> list[str]:
@@ -205,10 +230,16 @@ def _runtime_title_diagnostic_inventory() -> dict[str, set[int]]:
     return result
 
 
+#: Any C integer-constant suffix: u, U, l, L, ll, LL and their unsigned forms in either
+#: order. A bare ``u?`` left 0x...U and 0x...UL unmatched, because the closing word
+#: boundary never falls between the last hex digit and a suffix letter.
+C_INT_SUFFIX = r"(?:[uU](?:ll|LL|l|L)?|(?:ll|LL|l|L)[uU]?)?"
+_RUNTIME_HEX_LITERAL = re.compile(rf"\b0[xX]0*([0-9a-fA-F]{{1,8}}){C_INT_SUFFIX}\b")
+
+
 def _runtime_title_diagnostic_literals(source: str, addresses: set[int]) -> set[int]:
     code = _strip_c_comments_and_literals(source)
-    values = {int(match.group(1), 16) for match in
-              re.finditer(r"\b0x0*([0-9a-fA-F]{1,8})u?\b", code)}
+    values = {int(match.group(1), 16) for match in _RUNTIME_HEX_LITERAL.finditer(code)}
     return values & addresses
 
 
@@ -301,9 +332,9 @@ def extract_dispatch_hook_table(table_name: str) -> list[tuple[int, str]]:
 HLE_GUEST_ADDRESS_RE = re.compile(
     r"(?:"
     r"(?:MEM_(?:R|W)(?:8|16|32)|sr_r32|sr_w32|dispatch)"
-    r"\s*\(\s*(?:s\s*,\s*)?(?:\(uint32_t\)\s*\(\s*)?(0[xX][0-9a-fA-F]{5,8})"
+    r"\s*\(\s*(?:s\s*,\s*)?(?:\(uint32_t\)\s*\(\s*)?(0[xX][0-9a-fA-F]{1,8})"
     r"|"
-    r"ge_call_guest(?:_rv)?\s*\(\s*s\s*,\s*(0[xX][0-9a-fA-F]{5,8})"
+    r"ge_call_guest(?:_rv)?\s*\(\s*s\s*,\s*(0[xX][0-9a-fA-F]{1,8})"
     r")"
 )
 
@@ -313,7 +344,7 @@ HLE_GUEST_ADDRESS_RE = re.compile(
 VRAM_WINDOW_FIRST = 0x04000000
 VRAM_WINDOW_LAST = 0x041fffff
 
-HLE_ARCH_RETURN_RE = re.compile(r"return\s+(0[xX][0-9a-fA-F]{5,8})u?\s*;")
+HLE_ARCH_RETURN_RE = re.compile(rf"return\s+(0[xX][0-9a-fA-F]{{1,8}}){C_INT_SUFFIX}\s*;")
 
 #: A function-body opener.  Deliberately broader than the historical
 #: ``h_<name>(CpuState *s)`` pattern: the coupling that motivated the indirect
@@ -326,7 +357,9 @@ HLE_ARCH_RETURN_RE = re.compile(r"return\s+(0[xX][0-9a-fA-F]{5,8})u?\s*;")
 HLE_FUNCTION_RE = re.compile(r"^static\s+[A-Za-z_][\w\s\*]*?\b([A-Za-z_]\w*)\s*\(")
 
 #: Indirect grammar.  See SCANNER CONTRACT above for the limits these accept.
-HLE_LITERAL = r"0[xX][0-9a-fA-F]{5,8}"
+#: One to eight digits: a floor of five would be a magnitude floor of 0x10000 for an
+#: unpadded literal, which the contract above rejects.
+HLE_LITERAL = r"0[xX][0-9a-fA-F]{1,8}"
 HLE_BIND_DECL_RE = re.compile(
     rf"^\s*(?:const\s+)?uint32_t\s+([A-Za-z_]\w*)\s*=\s*({HLE_LITERAL})u?\s*;")
 HLE_BIND_ASSIGN_RE = re.compile(rf"^\s*([A-Za-z_]\w*)\s*=\s*({HLE_LITERAL})u?\s*;")
@@ -539,6 +572,13 @@ def uninventoried_hle_addresses(source: str) -> dict[int, list[int]]:
             if address not in inventoried}
 
 
+def stale_hle_inventory_entries(source: str) -> set[int]:
+    """Every address a live HLE_GUEST_ADDRESS_GROUPS group inventories that the
+    extractor no longer finds in SOURCE: the site was removed, renamed or changed
+    shape, so the inventory entry describes nothing."""
+    return hle_inventoried_addresses() - set(extract_hle_guest_addresses(source))
+
+
 def hle_title_configured_addresses() -> set[int]:
     result: set[int] = set()
     for group in getattr(compat_overrides, "HLE_TITLE_CONFIGURED_COMPAT", []):
@@ -601,10 +641,15 @@ class HleGuestAddressCoverageTests(unittest.TestCase):
         """CLASSIFICATION DRIFT: if an inventoried site disappears or materially
         changes shape (so the extractor no longer sees it), this fails instead of
         silently preserving stale metadata."""
-        found = extract_hle_guest_addresses(hle_sources.text())
-        stale = hle_retired_diagnostic_addresses() & set(found)
+        source = hle_sources.text()
+        stale = stale_hle_inventory_entries(source)
         self.assertEqual(stale, set(),
-                         f"retired HST addresses returned to hle.c: {sorted(hex(a) for a in stale)}")
+                         "HLE_GUEST_ADDRESS_GROUPS inventories address(es) the HLE sources no "
+                         f"longer use: {sorted(hex(a) for a in stale)}")
+        found = extract_hle_guest_addresses(source)
+        returned = hle_retired_diagnostic_addresses() & set(found)
+        self.assertEqual(returned, set(),
+                         f"retired HST addresses returned to hle.c: {sorted(hex(a) for a in returned)}")
 
     def test_every_hle_group_has_a_valid_category_and_bucket(self):
         for group in compat_overrides.RETIRED_HLE_DIAGNOSTIC_GROUPS:
@@ -771,11 +816,10 @@ class HleGuestAddressCoverageTests(unittest.TestCase):
         found = extract_hle_guest_addresses(ram_writes)
         self.assertIn(0x08901234, found,
                       "the repaired design must flag the high RAM write")
-        old_ceiling_result = [a for a in found if a < 0x04000000]
-        self.assertEqual(
-            old_ceiling_result, [],
-            "the original 'skip everything >= 0x04000000' rule would have returned "
-            "nothing for this fixture -- the exact blind spot this repair removes")
+        # The original 'skip everything >= 0x04000000' rule would have returned nothing
+        # for this fixture. The repaired gate reports it as uninventoried title coupling.
+        self.assertIn(0x08901234, uninventoried_hle_addresses(ram_writes),
+                      "a high RAM write must reach the inventory gate as uninventoried")
 
     def test_unclassified_new_literal_fails_closed(self):
         """FAIL-CLOSED (E): a new literal that is neither inventoried nor covered
@@ -1528,11 +1572,45 @@ class HleIndirectCouplingGrammar(unittest.TestCase):
                 self.assertNotIn(address, hle_inventoried_addresses())
 
     def test_a_stale_inventory_entry_fails_the_gate(self) -> None:
-        found = set(extract_hle_guest_addresses(self.source))
+        """FAILING-BEFORE PROOF: a live inventory group naming an address the HLE
+        sources no longer use is reported by the staleness gate. The former gate
+        only checked whether a retired address came back, and passed this."""
         invented = 0x08FEDCB0
-        self.assertNotIn(invented, found)
-        stale = (hle_inventoried_addresses() | {invented}) - found
-        self.assertEqual(stale, {invented})
+        self.assertNotIn(invented, extract_hle_guest_addresses(self.source))
+        group = {"name": "invented stale group", "addresses": [invented]}
+        with mock.patch.object(compat_overrides, "HLE_GUEST_ADDRESS_GROUPS", [group]):
+            self.assertEqual(stale_hle_inventory_entries(self.source), {invented})
+            # The same entry is not stale while its site is still in the source.
+            used = self.source + "\nstatic void h_x(CpuState *s){ MEM_W32(0x08fedcb0u, 1u); }\n"
+            self.assertEqual(stale_hle_inventory_entries(used), set())
+
+    # ---- short and suffixed literals ---------------------------------------
+    def test_an_unpadded_short_guest_address_is_extracted(self) -> None:
+        """FAILING-BEFORE PROOF: a low-based image address written without zero
+        padding is a guest address like any other; a five-digit floor dropped it."""
+        snippets = {
+            0xF538: "static void h_x(CpuState *s){ (void)MEM_R32(0xF538u); }\n",
+            0x1090: "static void h_x(CpuState *s){ ge_call_guest(s, 0x1090u, 0u); }\n",
+            0x0A1C: "static void h_x(CpuState *s){\n    uint32_t cb = 0xA1Cu;\n"
+                    "    MEM_W32(0x08800000u, cb);\n}\n",
+        }
+        for address, snippet in snippets.items():
+            with self.subTest(address=hex(address)):
+                self.assertIn(address, extract_hle_guest_addresses(snippet))
+                self.assertIn(address, uninventoried_hle_addresses(snippet))
+
+    def test_a_suffixed_title_literal_is_still_a_title_literal(self) -> None:
+        """FAILING-BEFORE PROOF: 0x...U, 0x...UL, 0x...ull and 0X... spell the same
+        constant as 0x...u, so the runtime title-literal guard must see each."""
+        for spelling in ("0x0030a000U", "0x0030a000ul", "0x0030A000UL", "0x0030a000ULL",
+                         "0x0030a000lu", "0X0030A000u", "0x0030a000"):
+            with self.subTest(spelling=spelling):
+                source = f"static void title_probe(void) {{ (void){spelling}; }}\n"
+                self.assertEqual(_runtime_title_diagnostic_literals(source, {0x0030a000}),
+                                 {0x0030a000})
+        # A longer constant that merely starts with the same digits is not the address.
+        self.assertEqual(_runtime_title_diagnostic_literals(
+            "static int x = 0x0030a0001;\n", {0x0030a000}), set())
 
     # ---- G: the grammar itself must not go silently dead --------------------
     def test_the_indirect_grammar_is_not_vacuous(self) -> None:
@@ -1832,14 +1910,43 @@ class FiredPatchReportCensusTests(unittest.TestCase):
         # A release's notes describe that release, so a retirement never rewrites them.
         released = _released_notes()
         if released is None:
+            failure = _missing_release_tags_failure()
+            if failure:
+                self.fail(failure)
             self.skipTest("no release tags in this checkout")
         for notes, tag in released:
             with self.subTest(tag=tag):
                 self.assertNotEqual(notes.resolve(), LIVE_CENSUS_DOC.resolve())
-                shipped = subprocess.run(["git", "-C", str(ROOT), "show", f"{tag}:docs/{notes.name}"],
-                                         capture_output=True, check=True).stdout.decode("utf-8")
+                shipped = _shipped_release_notes(tag, notes.name)
+                self.assertIsNotNone(shipped, f"tag {tag} has no docs/{notes.name}")
                 self.assertEqual(_CENSUS_SENTENCE.findall(notes.read_text(encoding="utf-8")),
-                                 _CENSUS_SENTENCE.findall(shipped))
+                                 _CENSUS_SENTENCE.findall(shipped or ""))
+
+    def test_a_checkout_without_release_tags_fails_in_hosted_ci(self) -> None:
+        """FAILING-BEFORE PROOF: hosted CI without tags used to skip the check above on
+        every run. There it now fails by name; elsewhere it stays a skip."""
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            self.assertIsNotNone(_missing_release_tags_failure())
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GITHUB_ACTIONS", None)
+            self.assertIsNone(_missing_release_tags_failure())
+
+    def test_the_job_that_runs_this_module_checks_out_release_tags(self) -> None:
+        """The python_tools job runs this module; its checkout must carry the v* tags,
+        or the release-notes check has nothing to compare against."""
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        job = re.search(r"^  python_tools:\n(.*?)(?=^  \w[\w-]*:\n)", workflow, re.M | re.S)
+        self.assertIsNotNone(job, "ci.yml has no python_tools job")
+        checkout = re.search(r"uses: actions/checkout@\S+[^\n]*\n((?:\s{8,}.*\n)+)",
+                             job.group(1) if job else "")
+        self.assertIsNotNone(checkout, "the python_tools job has no checkout step")
+        options = checkout.group(1) if checkout else ""
+        self.assertTrue(re.search(r"^\s+fetch-tags:\s*true\s*$", options, re.M)
+                        or re.search(r"^\s+fetch-depth:\s*0\s*$", options, re.M),
+                        "the python_tools checkout fetches no tags:\n" + options)
+
+    def test_a_tag_without_the_notes_file_is_reported_not_raised(self) -> None:
+        self.assertIsNone(_shipped_release_notes("v0.0.0-no-such-tag", "RELEASE_NOTES_v0.0.0.md"))
 
     def test_no_test_compares_release_notes_with_the_live_census(self) -> None:
         self.assertIsNone(re.match(r"RELEASE_NOTES_v", LIVE_CENSUS_DOC.name))

@@ -711,7 +711,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The v* release tags (each a depth-1 commit) let test_compat_manifest compare
+        # every release's notes with what that tag shipped; without them the check fails.
         with:
+          fetch-tags: true
           persist-credentials: false
 
       - name: Fetch the profile-zero fixture built from source
