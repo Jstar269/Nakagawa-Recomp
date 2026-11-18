@@ -616,10 +616,18 @@ class TestWebSocket(unittest.TestCase):
         return client, thread, box
 
     @staticmethod
+    def receive(server, size):
+        """recv() that ends at end of stream instead of returning b"" forever."""
+        chunk = server.recv(size)
+        if not chunk:
+            raise ConnectionError("the client closed the connection early")
+        return chunk
+
+    @staticmethod
     def read_request(server):
         data = b""
         while b"\r\n\r\n" not in data:
-            data += server.recv(4096)
+            data += TestWebSocket.receive(server, 4096)
         head = data.split(b"\r\n\r\n")[0].decode()
         headers = {k.lower(): v.strip() for k, _, v in (l.partition(":") for l in head.split("\r\n")[1:])}
         return head.split("\r\n")[0], headers
@@ -650,7 +658,7 @@ class TestWebSocket(unittest.TestCase):
         def need(n):
             buf = b""
             while len(buf) < n:
-                buf += server.recv(n - len(buf))
+                buf += TestWebSocket.receive(server, n - len(buf))
             return buf
         b0, b1 = need(2)
         assert b1 & 0x80, "client frames must be masked"
@@ -661,6 +669,27 @@ class TestWebSocket(unittest.TestCase):
             (n,) = struct.unpack("!Q", need(8))
         key = need(4)
         return b0 & 0x0F, pr.mask_payload(need(n), key)
+
+    def test_the_peer_helpers_stop_at_end_of_stream(self):
+        # A client that closes early must end the peer script, not spin it on recv() == b"".
+        for helper in (self.read_request, self.read_client_frame):
+            with self.subTest(helper=helper.__name__):
+                client, server = socket.socketpair()
+                server.settimeout(10)
+                client.close()
+                box = {}
+
+                def run(helper=helper, server=server, box=box):
+                    try:
+                        helper(server)
+                    except ConnectionError as exc:
+                        box["error"] = exc
+                thread = threading.Thread(target=run, daemon=True)
+                thread.start()
+                thread.join(10)
+                server.close()
+                self.assertFalse(thread.is_alive(), "the helper spun on end of stream")
+                self.assertIsInstance(box.get("error"), ConnectionError)
 
     def test_handshake_fragments_ping_and_large_messages(self):
         big = json.dumps({"event": "gpu.buffer.screenshot", "base64": "A" * 70000})
@@ -683,6 +712,7 @@ class TestWebSocket(unittest.TestCase):
         ws.send_text('{"event":"cpu.status","ticket":"nk1"}')
         thread.join(10)
         client.close()
+        self.assertFalse(thread.is_alive(), "the peer script did not finish")
         self.assertNotIn("error", box)
         pong, sent = box["result"]
         self.assertEqual(pong, (0xA, b"hi"))

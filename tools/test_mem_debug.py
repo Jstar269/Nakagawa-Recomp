@@ -26,6 +26,31 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import mem_debug as md
 
+REPO_MOCK_STATE = md.get_mock_state_path()
+
+
+def _stat_or_none(path):
+    """(size, mtime_ns) of ``path``, or None when it does not exist."""
+    try:
+        status = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return status.st_size, status.st_mtime_ns
+
+
+class RedirectedMockState:
+    """Every simulated debugger built by a test reads and writes a temporary mock state for
+    the whole test, never the repository's build/hst/mock_debug_state.json."""
+
+    def setUp(self):
+        super().setUp()
+        directory = tempfile.TemporaryDirectory(prefix="mem_debug_mock_")
+        self.addCleanup(directory.cleanup)
+        self.mock_state_path = os.path.join(directory.name, "mock_debug_state.json")
+        patcher = mock.patch.object(md, "get_mock_state_path", return_value=self.mock_state_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
 
 class ExecutablePathResolutionTest(unittest.TestCase):
     """The attached executable is resolved before any tool is spawned."""
@@ -376,7 +401,7 @@ class ParseUint32Test(unittest.TestCase):
             md.parse_uint32_arg("3.5")
 
 
-class MutationGateTest(unittest.TestCase):
+class MutationGateTest(RedirectedMockState, unittest.TestCase):
     """The fail-closed mutation gate, exercised without any live process."""
 
     def _dbg(self, **overrides):
@@ -395,6 +420,10 @@ class MutationGateTest(unittest.TestCase):
         for k, v in attrs.items():
             setattr(dbg, k, v)
         return dbg
+
+    def test_simulated_debuggers_use_a_temporary_mock_state(self):
+        self.assertNotEqual(os.path.normcase(os.path.abspath(md.get_mock_state_path())),
+                            os.path.normcase(os.path.abspath(REPO_MOCK_STATE)))
 
     def test_mutation_requires_flag(self):
         dbg = self._dbg(mutate_enabled=False)
@@ -441,26 +470,19 @@ class MutationGateTest(unittest.TestCase):
         self.assertIn("--mutate", reason)
 
 
-class SimulationBehaviorTest(unittest.TestCase):
-    def setUp(self):
-        # Point the mock state at a temp file so tests never touch the repo's
-        # real build/hst/mock_debug_state.json.
-        fd, self.tmp_path = tempfile.mkstemp(suffix=".json")
-        os.close(fd)
-        os.unlink(self.tmp_path)
-
-    def tearDown(self):
-        if os.path.exists(self.tmp_path):
-            os.unlink(self.tmp_path)
-
+class SimulationBehaviorTest(RedirectedMockState, unittest.TestCase):
+    # The redirect lasts the whole test: save_mock_state looks the path up on every
+    # write, so restoring it after construction sent the writes to the repository.
     def _sim(self, mutate=False):
-        orig = md.get_mock_state_path
-        md.get_mock_state_path = lambda: self.tmp_path
-        try:
-            dbg = md.MemoryDebugger(simulate=True, mutate=mutate)
-        finally:
-            md.get_mock_state_path = orig
-        return dbg
+        return md.MemoryDebugger(simulate=True, mutate=mutate)
+
+    def test_simulated_mutations_never_touch_the_repository_mock_state(self):
+        before = _stat_or_none(REPO_MOCK_STATE)
+        dbg = self._sim(mutate=True)
+        self.assertTrue(dbg.write_mem(0x08800000, "deadbeef")["success"])
+        self.assertTrue(dbg.write_cpu("r1", 1)["success"])
+        self.assertTrue(dbg.pause()["success"])
+        self.assertEqual(_stat_or_none(REPO_MOCK_STATE), before)
 
     def test_read_mem_valid_span(self):
         dbg = self._sim()
@@ -537,7 +559,7 @@ class SimulationBehaviorTest(unittest.TestCase):
         self.assertEqual(md.CPU_STATE_SIZE, 1000)
 
 
-class ResolverFailureTest(unittest.TestCase):
+class ResolverFailureTest(RedirectedMockState, unittest.TestCase):
     def test_guest_memory_resolver_rejects_bad_span(self):
         # No live process is needed: span validation runs before any g_mem read.
         dbg = md.MemoryDebugger(simulate=True, mutate=True)
@@ -555,7 +577,7 @@ class ResolverFailureTest(unittest.TestCase):
         self.assertIn("g_mem", err)
 
 
-class CpuStateAbiUpgradeTest(unittest.TestCase):
+class CpuStateAbiUpgradeTest(RedirectedMockState, unittest.TestCase):
     """ABI v2 must never be applied to state produced by a pre-v2 build."""
 
     def _header(self, abi=md.CPU_STATE_ABI_VERSION, size=md.CPU_STATE_SIZE,
@@ -659,7 +681,7 @@ class CpuStateAbiUpgradeTest(unittest.TestCase):
         self.assertIn("ABI 2", dbg._cpu_abi_check())
 
 
-class ExeOptionAndDefaultRejectionTest(unittest.TestCase):
+class ExeOptionAndDefaultRejectionTest(RedirectedMockState, unittest.TestCase):
     def test_default_without_exe_fails_clearly(self):
         """MemoryDebugger without --simulate or explicit exe must fail clearly instead of assuming HST."""
         with self.assertRaises(ValueError) as ctx:
@@ -761,7 +783,7 @@ class _FakeDll:
         self.__dict__.update(functions)
 
 
-class LiveResultTest(unittest.TestCase):
+class LiveResultTest(RedirectedMockState, unittest.TestCase):
     """What a live action reports, with the Windows calls replaced."""
 
     def setUp(self):
@@ -904,7 +926,7 @@ class LiveDiscoveryTest(unittest.TestCase):
         self.assertIsNotNone(dbg.process_started)
 
 
-class ExitArtifactStalenessTest(unittest.TestCase):
+class ExitArtifactStalenessTest(RedirectedMockState, unittest.TestCase):
     """exited.flag, paused.flag and crash_dump.bin older than the attached process are
     left over from an earlier run of the same build, never this run's state."""
 
