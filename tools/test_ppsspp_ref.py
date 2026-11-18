@@ -199,6 +199,18 @@ class TestPadScript(unittest.TestCase):
             pr.PadState(17, 0, c),
         ])
 
+    def test_same_frame_stick_rows_follow_the_runtime_tie_break(self):
+        # sr_input_from_rows keeps the stick of the later row in file order when two
+        # held rows start on the same vblank (f[i] >= f[stick_row]).
+        rows = pr.parse_padscript("100 0 10 200 128\n100 0x4000 10 50 128\n")
+        self.assertEqual(pr.pad_states(rows)[1], pr.PadState(100, 0x4000, (50, 128)))
+
+    def test_non_ascii_digits_are_refused_not_a_traceback(self):
+        for text in ("\u00b2 CROSS 4\n", "10 CROSS \u00b2\n", "10 CROSS 4 \u0661 128\n",
+                     "\u0661\u0660 CROSS 4\n"):
+            with self.assertRaises(pr.RefError, msg=text):
+                pr.parse_padscript(text)
+
     def test_analog_round_trips_through_ppsspps_conversion(self):
         def f32(v):
             return struct.unpack("<f", struct.pack("<f", v))[0]
@@ -300,6 +312,10 @@ class TestDrive(unittest.TestCase):
         self.assertEqual(shot.picture.pixels[0:3], bytes((300 & 0xFF, 300 >> 8, 0)))
         self.assertEqual(shot.picture.pixels[3:6], bytes((0, 7, 9)))
 
+    def test_a_non_numeric_debugger_pid_is_a_capture_failure(self):
+        with self.assertRaisesRegex(pr.CaptureFailed, "process"):
+            self.drive(FakePPSSPP(pid="\u00b2"))
+
     def test_an_old_ppsspp_is_not_run(self):
         for fake in (FakePPSSPP(version_has_pid=False), FakePPSSPP(has_run_until=False),
                      FakePPSSPP(has_us=False)):
@@ -395,16 +411,57 @@ class TestCaptureAndCompare(unittest.TestCase):
             pr.capture(sf, Path("ppsspp.exe"), 1, False, runner=self.fake_runner([]))
         self.assertEqual(cm.exception.reason, "no-pad")
 
+    def write_reference(self, sf, picture, **meta):
+        """A reference as capture stores it: the PNG and its sidecar."""
+        ref = self.dir / "ref" / "menu.png"
+        ref.parent.mkdir(exist_ok=True)
+        pr.write_png(ref, picture)
+        settings = {section: {k: v for k, v in kv.items() if k != "RemoteISOPort"}
+                    for section, kv in pr.effective_ini(1234, sf.ini).items()}
+        sidecar = {"tool": pr.TOOL_NAME, "tool_version": pr.TOOL_VERSION,
+                   "ppsspp_version": "v-fake", "title": sf.title, "frame": 12,
+                   "emulated_us": 0, "rtc": sf.rtc, "runs": 1, "width": picture.width,
+                   "height": picture.height,
+                   "sha256": hashlib.sha256(picture.pixels).hexdigest(), "ini": settings}
+        sidecar.update(meta)
+        Path(str(ref) + ".json").write_text(json.dumps(sidecar), encoding="utf-8")
+        return ref
+
     def compare_with(self, reference, capture, **scene):
         doc_scene = {"name": "menu", "frame": 12, "nakagawa": "nk_v12.ppm"}
         doc_scene.update(scene)
         sf = pr.load_scene_file(self.scene_file(scenes=[doc_scene]))
         (self.dir / "ref").mkdir(exist_ok=True)
         if reference is not None:
-            pr.write_png(self.dir / "ref" / "menu.png", reference)
+            self.write_reference(sf, reference)
         if capture is not None:
             write_ppm(self.dir / "nk_v12.ppm", capture)
         return pr.compare(sf, self.dir / "ref" / "diff")[0]
+
+    def test_a_reference_whose_sidecar_does_not_match_the_scene_is_stale(self):
+        base = solid((100, 100, 100))
+        write_ppm(self.dir / "nk_v12.ppm", base)
+        sf = pr.load_scene_file(self.scene_file(
+            scenes=[{"name": "menu", "frame": 12, "nakagawa": "nk_v12.ppm"}]))
+        for meta in ({"frame": 11}, {"rtc": sf.rtc + 1}, {"sha256": "0" * 64},
+                     {"ini": {"General": {}}}):
+            with self.subTest(meta=meta):
+                self.write_reference(sf, base, **meta)
+                grade = pr.compare(sf, None)[0]
+                self.assertEqual(grade.status, pr.FAIL)
+                self.assertIn("stale-reference", grade.detail)
+        ref = self.write_reference(sf, base)
+        Path(str(ref) + ".json").unlink()
+        grade = pr.compare(sf, None)[0]
+        self.assertEqual(grade.status, pr.FAIL)
+        self.assertIn("stale-reference", grade.detail)
+        self.write_reference(sf, base)
+        self.assertEqual(pr.compare(sf, None)[0].status, pr.PASS)
+
+    def test_scene_names_that_differ_only_in_case_are_refused(self):
+        with self.assertRaisesRegex(pr.RefError, "repeat"):
+            pr.load_scene_file(self.scene_file(scenes=[{"name": "Title", "frame": 1},
+                                                       {"name": "title", "frame": 2}]))
 
     def test_pass_fail_no_reference_and_not_run(self):
         base = solid((100, 100, 100))
