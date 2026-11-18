@@ -21,7 +21,7 @@ enum class StopReason {
 	kRunning,
 	kSyscall,          // hit a syscall; the HLE layer (later phases) must handle it
 	kUnimplemented,    // decoded but no semantics implemented yet -> trap, do not fake
-	kMemoryFault,      // load/store outside modeled memory
+	kMemoryFault,      // fetch/load/store outside modeled memory, or a misaligned one
 	kBreak,            // break instruction
 	kStepLimit,        // reached the caller's instruction budget
 };

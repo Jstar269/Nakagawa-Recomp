@@ -160,6 +160,112 @@ void TestUnalignedWordAccess() {
 	}
 }
 
+// A halfword or word access at an address that is not a multiple of its width, and a fetch at
+// a pc that is not a multiple of 4, raise an address error on the PSP (PSP-A3-01; the runtime
+// interpreter stops with MISALIGNED_DATA / MISALIGNED_PC). The reference stops with a memory
+// fault at that address and leaves memory untouched; it used to read or write the straddling
+// bytes as if the access were aligned.
+void TestMisalignedAccessFaults() {
+	const uint32_t code = 0x08900000;
+	const uint32_t data = 0x08A00100;
+	const struct { uint32_t op; uint16_t offset; const char *name; bool link; } cases[] = {
+		{0x21, 1, "lh odd", false},  {0x25, 3, "lhu odd", false}, {0x29, 1, "sh odd", false},
+		{0x23, 2, "lw +2", false},   {0x2B, 1, "sw +1", false},   {0x30, 2, "ll +2", false},
+		{0x38, 2, "sc +2 linked", true}, {0x38, 3, "sc +3 unlinked", false},
+		{0x31, 2, "lwc1 +2", false}, {0x39, 1, "swc1 +1", false},
+	};
+	for (const auto &c : cases) {
+		Memory mem;
+		mem.Write32(data, 0x44332211);
+		mem.Write32(data + 4, 0x88776655);
+		mem.Write32(code, I(c.op, A0, T0, c.offset));
+		ref::CpuState s;
+		s.pc = code;
+		s.r[A0] = data;
+		s.r[T0] = 0xAABBCCDD;
+		s.llbit = c.link ? 1u : 0u;
+		StepResult res = Run(&s, &mem, 1, nullptr);
+		char what[48];
+		std::snprintf(what, sizeof what, "%s stops", c.name);
+		Check(what, (uint32_t)res.reason, (uint32_t)StopReason::kMemoryFault);
+		std::snprintf(what, sizeof what, "%s fault addr", c.name);
+		Check(what, mem.fault_addr(), data + c.offset);
+		std::snprintf(what, sizeof what, "%s word 0 kept", c.name);
+		Check(what, mem.Read32(data), 0x44332211);
+		std::snprintf(what, sizeof what, "%s word 1 kept", c.name);
+		Check(what, mem.Read32(data + 4), 0x88776655);
+	}
+	// A jump to a pc that is not word aligned stops at the fetch, before anything executes.
+	Memory mem;
+	mem.Write32(code, I(0x09, ZERO, T0, 1));
+	mem.Write32(code + 4, I(0x09, ZERO, T0, 2));
+	ref::CpuState s;
+	s.pc = code + 2;
+	StepResult res = Run(&s, &mem, 4, nullptr);
+	Check("misaligned pc stops", (uint32_t)res.reason, (uint32_t)StopReason::kMemoryFault);
+	Check("misaligned pc fault addr", mem.fault_addr(), code + 2);
+	Check("misaligned pc executed", (uint32_t)res.executed, 0u);
+	Check("misaligned pc no effect", s.r[T0], 0u);
+}
+
+// A scratch file for a trace: tmpfile() where the host allows it, else a named file in the
+// temporary folder, removed by the caller through *path.
+std::FILE *OpenScratch(char *path, size_t size) {
+	path[0] = '\0';
+	if (std::FILE *f = std::tmpfile()) return f;
+	const char *dir = std::getenv("TMPDIR");
+	if (dir == nullptr) dir = std::getenv("TEMP");
+	if (dir == nullptr) dir = std::getenv("TMP");
+	std::snprintf(path, size, "%s/nk_ref_selftest_trace.txt", dir != nullptr ? dir : ".");
+	return std::fopen(path, "w+b");
+}
+
+// swl and swr write the aligned word that holds their byte; the trace records that word, as
+// the generated code records it (tools/codegen.py: "(address) & ~3u", 4). The trace used to read
+// back four bytes at the unaligned address: a different token from the generated code's, and a
+// memory fault for a completed store at the last word of RAM.
+void TestUnalignedStoreTraceRecordsTheAlignedWord() {
+	const uint32_t code = 0x08900000;
+	const struct {
+		uint32_t op; uint32_t base; const char *name; const char *token;
+	} cases[] = {
+		{0x2A, 0x08A00101, "swl +1 traced", " m32[0x08a00100]=0x4433aabb\n"},
+		{0x2E, 0x0BFFFFFD, "swr end of RAM traced", " m32[0x0bfffffc]=0xbbccdd00\n"},
+	};
+	for (const auto &c : cases) {
+		Memory mem;
+		mem.Write32(0x08A00100, 0x44332211);
+		mem.Write32(code, I(c.op, A0, T0, 0));
+		mem.Write32(code + 4, SYSCALL);
+		ref::CpuState s;
+		s.pc = code;
+		s.r[A0] = c.base;
+		s.r[T0] = 0xAABBCCDD;
+		char path[512];
+		std::FILE *out = OpenScratch(path, sizeof path);
+		if (out == nullptr) {
+			std::printf("FAIL %-28s cannot open a scratch trace file\n", c.name);
+			g_failures++;
+			continue;
+		}
+		TraceSink sink(out);
+		StepResult res = Run(&s, &mem, 4, &sink);
+		std::fflush(out);
+		std::rewind(out);
+		char text[1024] = {0};
+		const size_t got = std::fread(text, 1, sizeof text - 1, out);
+		text[got] = '\0';
+		std::fclose(out);
+		if (path[0] != '\0') std::remove(path);
+		char what[48];
+		std::snprintf(what, sizeof what, "%s stop", c.name);
+		Check(what, (uint32_t)res.reason, (uint32_t)StopReason::kSyscall);
+		const bool found = std::strstr(text, c.token) != nullptr;
+		if (!found) std::printf("     trace: %s", text);
+		Check(c.name, found ? 1u : 0u, 1u);
+	}
+}
+
 // Allegrex rotates share the SRL/SRLV encodings: rs == 1 makes srl a rotate right by sa, and
 // sa == 1 makes srlv a rotate right by the low five bits of rs. Values worked out by hand.
 void TestAllegrexRotate() {
@@ -779,6 +885,8 @@ int main() {
 	TestMulDiv();
 	TestMemory();
 	TestUnalignedWordAccess();
+	TestMisalignedAccessFaults();
+	TestUnalignedStoreTraceRecordsTheAlignedWord();
 	TestAllegrexRotate();
 	TestBranchDelaySlot();
 	TestDaybreak4GuestInterpreterOracle();

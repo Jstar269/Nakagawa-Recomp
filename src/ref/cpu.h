@@ -56,9 +56,24 @@ public:
 	// Explicitly clear the sticky fault flag so the next access can succeed.
 	void ClearFault() const { fault_ = false; fault_addr_ = 0; }
 
+	// A halfword or word access (and an instruction fetch) must be naturally aligned: the PSP
+	// raises an address error for any other address, as the runtime interpreter's floor does
+	// (src/rt/guest_interp.c, MISALIGNED_DATA and MISALIGNED_PC, PSP-A3-01). A misaligned
+	// address records the sticky fault, so the step stops as a memory fault instead of reading
+	// or writing bytes that straddle two words. An sc whose link is clear still checks it.
+	bool CheckAligned(uint32_t addr, uint32_t width) const {
+		if ((addr & (width - 1u)) == 0u)
+			return true;
+		fault_ = true;
+		fault_addr_ = addr;
+		return false;
+	}
+
 private:
 	template <typename T> T Load(uint32_t addr) const {
 		uint32_t idx;
+		if (!CheckAligned(addr, sizeof(T)))
+			return 0;
 		if (!Translate(addr, &idx) || idx + sizeof(T) > kRamSize) {
 			fault_ = true;
 			fault_addr_ = addr;
@@ -70,6 +85,8 @@ private:
 	}
 	template <typename T> void Store(uint32_t addr, T v) {
 		uint32_t idx;
+		if (!CheckAligned(addr, sizeof(T)))
+			return;
 		if (!Translate(addr, &idx) || idx + sizeof(T) > kRamSize) {
 			fault_ = true;
 			fault_addr_ = addr;

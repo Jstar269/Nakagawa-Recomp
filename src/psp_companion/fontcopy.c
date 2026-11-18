@@ -36,7 +36,6 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER);
 static FontFiles s_files;
 static FontCopyTarget s_target;
 static FontCopyView s_view;
-static const char *s_argv0; /* where the app was started from: decides ms0: or ef0: */
 
 static int fontcopy_exit_callback(int arg1, int arg2, void *common) {
     (void)arg1;
@@ -62,37 +61,21 @@ static void fontcopy_start_exit_callback(void) {
     if (thread >= 0) sceKernelStartThread(thread, 0, NULL);
 }
 
-/* The file name after " detail=", up to the next space. */
-static void fontcopy_detail(const char *line, char *out, size_t size) {
-    const char *at = strstr(line, " detail=");
-    size_t length = 0u;
-    if (at != NULL) {
-        at += strlen(" detail=");
-        while (at[length] != '\0' && at[length] != ' ' && at[length] != '\n' &&
-               length + 1u < size) {
-            out[length] = at[length];
-            length++;
-        }
-    }
-    out[length] = '\0';
-}
-
 static void fontcopy_emit(void *ctx, const char *line, size_t length) {
-    FontCopyView *view = (FontCopyView *)ctx;
     (void)length;
-    if (fontcopy_view_record(view, line)) {
-        char name[FONTFILES_NAME_MAX + 1u];
-        fontcopy_detail(line, name, sizeof(name));
-        pspDebugScreenSetXY(0, FONTCOPY_PROGRESS_ROW);
-        pspDebugScreenPrintf("Copying font %lu of %lu: %-40s",
-                             (unsigned long)(view->done + view->failed),
-                             (unsigned long)s_files.candidates, name);
-    }
+    (void)fontcopy_view_record((FontCopyView *)ctx, line);
 }
 
+/* Each copy's first step names its font before the font is read, so the line shows the font
+ * being copied while it is copied. */
 static void fontcopy_step(void *ctx, const char *step) {
-    (void)ctx;
-    (void)step;
+    const FontCopyView *view = (const FontCopyView *)ctx;
+    const char *name = fontcopy_step_font(step);
+    if (name == NULL) return;
+    pspDebugScreenSetXY(0, FONTCOPY_PROGRESS_ROW);
+    pspDebugScreenPrintf("Copying font %lu of %lu: %-40.40s",
+                         (unsigned long)(view->finished + 1u),
+                         (unsigned long)s_files.candidates, name);
 }
 
 /* Wait for one of the buttons in mask to be pressed; a button already held when the wait
@@ -132,7 +115,7 @@ static int fontcopy_run(void) {
     s_files.emit = fontcopy_emit;
     s_files.step = fontcopy_step;
     s_files.ctx = &s_view;
-    fontcopy_configure(&s_files, &s_target, s_argv0);
+    fontcopy_use_target(&s_files, &s_target);
     fontcopy_title();
     pspDebugScreenPrintf(" Reading your PSP's fonts...\n");
     fontfiles_run(&s_files);
@@ -164,6 +147,12 @@ static int fontcopy_run(void) {
                              (unsigned long)s_files.copied, (unsigned long)s_files.candidates);
         break;
     case FONTCOPY_NONE_WRITTEN:
+        if (s_view.first_fault == FONTCOPY_FAULT_READ) {
+            pspDebugScreenPrintf(" Your PSP's fonts could not be read (error 0x%08lX),\n",
+                                 (unsigned long)code);
+            pspDebugScreenPrintf(" so none was copied. Try again.\n\n");
+            break;
+        }
         pspDebugScreenPrintf(" The fonts could not be written to %s\n", s_target.folder);
         pspDebugScreenPrintf(" (error 0x%08lX). Check that the Memory Stick is in, is not\n",
                              (unsigned long)code);
@@ -173,8 +162,13 @@ static int fontcopy_run(void) {
         pspDebugScreenPrintf(" %lu of %lu fonts were copied; %lu could not be copied\n",
                              (unsigned long)s_files.copied, (unsigned long)s_files.candidates,
                              (unsigned long)(s_files.candidates - s_files.copied));
-        pspDebugScreenPrintf(" (first error 0x%08lX). Check the Memory Stick and try again.\n\n",
-                             (unsigned long)code);
+        if (s_view.first_fault == FONTCOPY_FAULT_READ) {
+            pspDebugScreenPrintf(" (first error 0x%08lX, reading your PSP's fonts). Try again.\n\n",
+                                 (unsigned long)code);
+        } else {
+            pspDebugScreenPrintf(" (first error 0x%08lX). Check the Memory Stick and try again.\n\n",
+                                 (unsigned long)code);
+        }
         break;
     }
     pspDebugScreenPrintf(" Press X to try again, or O to leave.\n");
@@ -186,8 +180,8 @@ int main(int argc, char *argv[]) {
     pspDebugScreenInit();
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_DIGITAL);
-    s_argv0 = argc > 0 ? argv[0] : NULL;
-    fontcopy_target(&s_target, s_argv0);
+    /* argv[0] is where the app was started from: it decides ms0: or ef0:, once. */
+    fontcopy_target(&s_target, argc > 0 ? argv[0] : NULL);
 
     fontcopy_intro();
     if ((fontcopy_wait(PSP_CTRL_CROSS | PSP_CTRL_CIRCLE) & PSP_CTRL_CIRCLE) == 0u) {

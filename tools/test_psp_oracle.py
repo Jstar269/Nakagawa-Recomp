@@ -16832,13 +16832,113 @@ class IoCasesHostTests(unittest.TestCase):
         many = [_entry(f"f{index:02d}.pgf", 10, 1) for index in range(65)]
         outcome = self._app_outcome(self._app(many))
         self.assertEqual((outcome["kind"], outcome["code"]), ("listing-cut", "0xffffffff"))
-        # A failing first read leaves no candidate: the shown code is that read's, not 0.
-        outcome = self._app_outcome(self._app(fonts + ["option dread-fails 0 0x80010013"]))
+        # A failing first read leaves no candidate, and none of the known names opens: the shown
+        # code is that read's, not 0.
+        unknown = [_entry(f"f{index}.pgf", 100, index + 1) for index in range(5)]
+        outcome = self._app_outcome(self._app(unknown + ["option dread-fails 0 0x80010013"]))
         self.assertEqual((outcome["kind"], outcome["code"]), ("none-found", "0x80010013"))
         # A complete listing is a success, and so is a refused listing the known names filled.
         self.assertEqual(self._app_outcome(self._app(fonts))["kind"], "all-copied")
         refused = self._app(["fontdir 0x80010002 0x80010002", _entry("ltn0.pgf", 100, 1)])
         self.assertEqual(self._app_outcome(refused)["kind"], "all-copied")
+
+    def test_font_copy_app_tries_the_known_names_when_the_listing_names_none(self) -> None:
+        # The listing opens, but its first sceIoDread fails (or ends at once, or names no .pgf
+        # file). The known names used to be tried only when sceIoDopen failed, so nothing was
+        # copied from a PSP whose fonts open by name.
+        present = {"jpn0.pgf": (5_000, 1), "ltn3.pgf": (70_000, 2)}
+        fonts = [_entry(name, size, seed) for name, (size, seed) in present.items()]
+        for listing in (["option dread-fails 0 0x80010013"], ["option dread-fails 0 0x0"],
+                        [_entry("imagefont.bin", 50, 4)]):
+            with self.subTest(listing=listing):
+                lines = fonts + listing
+                if listing[0].startswith("entry"):  # only the .bin file is listed
+                    lines = [listing[0]] + ["option dread-fails 1 0x0"] + fonts
+                run = self._app(lines)
+                self._assert_app_calls_safe(run)
+                known = [dict(record.values)["detail"] for record in run.records
+                         if record.case_id.startswith("font-known-")]
+                self.assertEqual(known, self._KNOWN)
+                self.assertEqual(run.host0, {name: (size, True)
+                                             for name, (size, _seed) in present.items()})
+                done = dict(run.records[-1].values)
+                self.assertEqual((int(done["out1"], 16), int(done["out2"], 16)), (2, 2))
+                self.assertEqual(self._app_outcome(run)["kind"], "all-copied")
+
+    def test_font_copy_app_shows_the_font_it_is_copying(self) -> None:
+        # The app draws "Copying font N of M: <name>" at a copy's first step, before the font is
+        # read. It used to draw it from the finished copy's record, so the line named the font
+        # that had just been copied, and nothing showed while the first font was copied.
+        names = ["jpn0.pgf", "ltn0.pgf", "ltn1.pgf"]
+        run = self._app([_entry(name, 1000, index + 1) for index, name in enumerate(names)])
+        progress = [index for index, line in enumerate(run.lines) if line.startswith("PROGRESS ")]
+        self.assertEqual([run.lines[index] for index in progress],
+                         [f"PROGRESS {number} of 3 {name}"
+                          for number, name in enumerate(names, start=1)])
+        copies = [index for index, line in enumerate(run.lines)
+                  if line.startswith("EMIT ") and " case_id=font-copy-" in line]
+        self.assertEqual(len(copies), 3)
+        for number, at in enumerate(progress):
+            self.assertLess(at, copies[number])
+            if number:
+                self.assertGreater(at, copies[number - 1])
+            reads = [line for line in run.lines[at:copies[number]]
+                     if line.startswith(f"CALL sceIoOpen path=flash0:/font/{names[number]} ")]
+            self.assertTrue(reads, names[number])
+
+    def test_font_copy_app_says_which_side_a_failed_copy_failed_on(self) -> None:
+        # Every copy that failed used to be reported as a Memory Stick write failure, even when
+        # the PSP's own font could not be read or read differently the second time.
+        two = [_entry("ltn0.pgf", 100, 1), _entry("ltn1.pgf", 200, 2)]
+        cases = {
+            "read error and unstable reread": (
+                ["option read-fails ltn0.pgf 0 0x80010005", "option unstable ltn1.pgf"],
+                ("none-written", "0x80010005", "read")),
+            "destination open refused": (
+                ["option host-open-fails ltn0.pgf 0x80010013",
+                 "option host-open-fails ltn1.pgf 0x80010013"],
+                ("none-written", "0x80010013", "write")),
+            "write error": (
+                ["option write-fails ltn0.pgf 0x8001001c", "option unstable ltn1.pgf"],
+                ("none-written", "0x8001001c", "write")),
+            "read back differs": (["option host-corrupt ltn1.pgf"],
+                                  ("some-copied", "0x80000106", "write")),
+            "second read differs": (["option unstable ltn1.pgf"],
+                                    ("some-copied", "0x80000106", "read")),
+            "all copied": ([], ("all-copied", "0x00000000", "none")),
+        }
+        for label, (options, want) in cases.items():
+            with self.subTest(label):
+                run = self._app(two + options)
+                self._assert_app_calls_safe(run)
+                outcome = self._app_outcome(run)
+                self.assertEqual((outcome["kind"], outcome["code"], outcome["fault"]), want)
+
+    def test_font_copy_app_retry_keeps_a_copy_that_already_matches(self) -> None:
+        # "Try again" runs the copy again. Every font used to be reopened with PSP_O_TRUNC, so a
+        # retry that failed to write destroyed a copy the earlier run had verified. A copy that
+        # matches a fresh flash0 read is now kept without being opened for writing; a partial
+        # one is copied again.
+        fonts = {"ltn0.pgf": (100, 1), "ltn1.pgf": (200, 2), "ltn2.pgf": (300, 3)}
+        lines = [_entry(name, size, seed) for name, (size, seed) in fonts.items()]
+        lines += ["option host-existing ltn0.pgf 100", "option write-fails ltn0.pgf 0x8001001c",
+                  "option host-existing ltn1.pgf 50"]
+        run = self._app(lines)
+        self._assert_app_calls_safe(run)
+        rewritten = [fields["path"] for name, fields in run.calls
+                     if name == "sceIoOpen" and fields["flags"] == "0x00000602"]
+        self.assertEqual(rewritten, [run.folder + "/ltn1.pgf", run.folder + "/ltn2.pgf"])
+        self.assertEqual(run.host0, {name: (size, True) for name, (size, _seed) in fonts.items()})
+        kept = [dict(record.values) for record in run.records
+                if record.case_id.startswith("font-kept-")]
+        self.assertEqual([(entry["detail"], entry["sha256"]) for entry in kept],
+                         [("ltn0.pgf", hashlib.sha256(_gen_bytes(100, 1)).hexdigest())])
+        done = dict(run.records[-1].values)
+        self.assertEqual((int(done["out1"], 16), int(done["out2"], 16)), (3, 3))
+        self.assertEqual(self._app_outcome(run)["kind"], "all-copied")
+        self.assertEqual([line for line in run.lines if line.startswith("PROGRESS ")],
+                         [f"PROGRESS {number} of 3 {name}"
+                          for number, name in enumerate(fonts, start=1)])
 
 
 class IoCasesSourceTests(unittest.TestCase):
@@ -16912,9 +17012,18 @@ class IoCasesSourceTests(unittest.TestCase):
         config = self._code((app_dir / "fontcopy_config.h").read_text(encoding="utf-8"))
         self.assertEqual(re.findall(r"\bsceIo\w+\s*\(", app + config), [])
         self.assertIn("fontfiles_run(&s_files);", app)
-        self.assertIn("fontcopy_configure(&s_files, &s_target, s_argv0);", app)
+        # The target is chosen once from argv[0]; each run applies it, as the harness does.
+        self.assertEqual(app.count("fontcopy_target(&s_target, "), 1)
+        self.assertIn("fontcopy_use_target(&s_files, &s_target);", app)
+        harness = self._code((self.fixture / "io_cases_host.c").read_text(encoding="utf-8"))
+        self.assertIn("fontcopy_use_target(&fonts, &target);", harness)
         self.assertIn('#define FONTCOPY_FOLDER "/NAKAGAWA/fonts"', config)
         self.assertIn("files->pgf_only = 1u;", config)
+        self.assertIn("files->keep_verified = 1u;", config)
+        # The folder always fits, so a font-dest refusal is a build error, not a screen message.
+        self.assertIn('_Static_assert(sizeof("ms0:" FONTCOPY_FOLDER) - 1u + 1u + FONTFILES_NAME_MAX'
+                      " < FONTFILES_PATH_MAX,", config)
+        self.assertNotIn("font-dest", config)
         makefile = (app_dir / "Makefile").read_text(encoding="utf-8")
         self.assertIn("IMPORT_GATE_ARGS = --forbid-library sceReg", makefile)
         pinned = next(line for line in makefile.splitlines() if "IoFileMgrForUser=" in line)

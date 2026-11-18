@@ -117,8 +117,11 @@ void StoreInfo(const CpuState *s, uint32_t op, uint32_t *addr, int *size) {
 		case 0x28: *size = 1; break;   // sb
 		case 0x29: *size = 2; break;   // sh
 		case 0x2B: *size = 4; break;   // sw
-		case 0x2A: *size = 4; break;   // swl (records the touched word)
-		case 0x2E: *size = 4; break;   // swr
+		case 0x2A:                     // swl and swr record the aligned word they merge into,
+		case 0x2E:                     // as the generated code does (tools/codegen.py)
+			*size = 4;
+			*addr = (s->r[Rs(op)] + SImm(op)) & ~3u;
+			return;
 		case 0x39: *size = 4; break;   // swc1
 		case 0x38:                     // sc writes memory only while the link is set
 			if (!s->llbit) return;
@@ -362,6 +365,7 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 		case 0x38: {  // sc: store and report 1 only while the link is set, else 0
 			uint32_t addr = s->r[Rs(op)] + SImm(op);
 			const uint32_t linked = s->llbit != 0 ? 1u : 0u;
+			if (!mem->CheckAligned(addr, 4u)) return StopReason::kRunning;  // address error
 			if (linked) mem->Write32(addr, s->r[Rt(op)]);
 			SetR(s, Rt(op), linked);
 			return StopReason::kRunning;
