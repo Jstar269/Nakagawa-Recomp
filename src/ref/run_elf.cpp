@@ -302,7 +302,9 @@ template <typename F> void ForEachStopName(F f) {
 // Process statuses. A successful exit means the observed stop matched what the
 // caller declared; unsupported execution, a memory fault and a break each get a
 // distinct nonzero status so an automation caller cannot confuse them with an
-// expected guest exit or an expected bounded run.
+// expected guest exit or an expected bounded run. A guest BREAK stops the run only
+// while SR_BREAK_FATAL is set (as for the runtime's sr_break); without it the break is
+// logged and execution continues, so kExitBreak is reachable only with the variable set.
 enum ExitStatus {
 	kExitExpected = 0,
 	kExitUnexpectedStop = 1,
@@ -311,6 +313,7 @@ enum ExitStatus {
 	kExitMemoryFault = 4,
 	kExitBreak = 5,
 	kExitTraceWrite = 6,  // the output trace could not be written completely
+	kExitNoMemory = 7,    // the host could not supply the reference RAM
 };
 
 int ExitForUnexpectedStop(StopReason r) {
@@ -426,6 +429,13 @@ int main(int argc, char **argv) {
 	}
 
 	Memory mem;
+	// Without its RAM every access faults, so the ELF load would report a false layout
+	// fault; the real cause is named here instead.
+	if (!mem.ok()) {
+		fprintf(stderr, "run_elf: cannot allocate the %u MiB reference RAM\n",
+		        static_cast<unsigned>(Memory::kRamSize >> 20));
+		return kExitNoMemory;
+	}
 	std::vector<uint8_t> elf = ReadFile(elf_path);
 	uint32_t entry = LoadElf(elf, &mem);
 

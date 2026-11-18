@@ -457,6 +457,44 @@ class TestReferenceRunnerTerminationContract(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertIn("unknown option", proc.stderr)
 
+    def test_failed_reference_ram_allocation_is_named(self) -> None:
+        """Without its 64 MiB every guest access faults, so the ELF load used to stop with
+        the false layout reason 'PT_LOAD guest range crosses modeled memory'. The runner
+        names the allocation failure instead, with its own status. The allocation is failed
+        the way src/ref/selftest.cpp fails it: a replacement non-throwing array new refuses
+        a request of the RAM's size."""
+        failalloc = self.root / "failalloc.cpp"
+        failalloc.write_text(
+            "#include <cstddef>\n#include <new>\n"
+            "void *operator new[](std::size_t size, const std::nothrow_t &) noexcept {\n"
+            "    if (size >= 0x04000000u) return nullptr;\n"
+            "    return ::operator new[](size);\n"
+            "}\n",
+            encoding="ascii",
+        )
+        exe = self.root / ("run_elf_noram.exe" if os.name == "nt" else "run_elf_noram")
+        compiled = subprocess.run(
+            [CC, "-std=c++17", "-O1", "-fno-exceptions",
+             f"-I{(ROOT / 'src' / 'ref').as_posix()}",
+             f"-I{(ROOT / 'src' / 'rt').as_posix()}",
+             str(ROOT / "src" / "ref" / "run_elf.cpp"),
+             str(ROOT / "src" / "ref" / "interp.cpp"),
+             str(failalloc),
+             "-o", str(exe)],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        elf = self.write_elf("noram.elf", [self.OPCODE_SYSCALL])
+        init = self.write_init("noram-init.trace")
+        out = self.root / "noram-out.trace"
+        env = dict(os.environ)
+        env.pop("SR_BREAK_FATAL", None)
+        proc = subprocess.run([str(exe), str(elf), str(init), str(out)],
+                              capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(proc.returncode, 7, proc.stderr)
+        self.assertIn("run_elf: cannot allocate the 64 MiB reference RAM", proc.stderr)
+        self.assertNotIn("PT_LOAD", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
