@@ -291,6 +291,80 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual((build / "SDL3.dll").read_bytes(), sdl.read_bytes())
 
+    def _generated_fonts(self, build: Path) -> None:
+        generated = build / "project-font"
+        generated.mkdir(parents=True)
+        for name in self.OUTPUTS:
+            (generated / name).write_bytes(f"synthetic project asset: {name}\n".encode("ascii"))
+
+    @staticmethod
+    def _toolchain(root: Path, imports: dict[str, str]) -> Path:
+        """A synthetic toolchain bin directory whose objdump reports ``imports`` (binary -> DLL)."""
+        gcc_bin = root / "gcc-bin"
+        gcc_bin.mkdir()
+        (gcc_bin / "gcc.exe").write_bytes(b"synthetic executable path marker")
+        lines = ["@echo off"] + [f'if /i "%~nx2"=="{binary}" echo \tDLL Name: {dll}'
+                                 for binary, dll in imports.items()]
+        (gcc_bin / "objdump.cmd").write_text("\r\n".join(lines) + "\r\n", encoding="ascii")
+        return gcc_bin
+
+    def test_a_failed_font_copy_stops_the_script(self):
+        with tempfile.TemporaryDirectory(prefix="project-font-copy-fails-") as tmp:
+            build = Path(tmp) / "build"
+            self._generated_fonts(build)
+            # A directory where a font file belongs makes that one copy fail.
+            blocker = build / "font" / "nkjpn.pgf"
+            blocker.mkdir(parents=True)
+            (blocker / "keep").write_bytes(b"synthetic\n")
+            result = self._run_copy(build)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("nkjpn.pgf", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_sdl3_import_closure_is_staged_by_the_copy_itself(self):
+        # SDL3.dll imports libiconv-2.dll. The gcc here has no share/licenses beside it, so the
+        # notice generator's own import copy cannot be what stages it.
+        with tempfile.TemporaryDirectory(prefix="project-font-sdl-closure-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
+            (gcc_bin / "SDL3.dll").write_bytes(b"synthetic SDL3 runtime")
+            iconv = gcc_bin / "libiconv-2.dll"
+            iconv.write_bytes(b"synthetic libiconv runtime")
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "libiconv-2.dll").read_bytes(), iconv.read_bytes())
+
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_a_stale_staged_runtime_dll_is_refreshed_with_its_imports(self):
+        with tempfile.TemporaryDirectory(prefix="project-font-stale-dll-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            (build / "game.exe").write_bytes(b"synthetic game executable")
+            (build / "libstdc++-6.dll").write_bytes(b"runtime from an older toolchain")
+            gcc_bin = self._toolchain(root, {"game.exe": "libstdc++-6.dll",
+                                             "libstdc++-6.dll": "libgcc_s_seh-1.dll"})
+            current = gcc_bin / "libstdc++-6.dll"
+            current.write_bytes(b"runtime from the current toolchain")
+            libgcc = gcc_bin / "libgcc_s_seh-1.dll"
+            libgcc.write_bytes(b"synthetic libgcc runtime")
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "libstdc++-6.dll").read_bytes(), current.read_bytes())
+            self.assertEqual((build / "libgcc_s_seh-1.dll").read_bytes(), libgcc.read_bytes())
+
     def test_missing_project_slot_output_fails_by_name(self):
         with tempfile.TemporaryDirectory(prefix="project-font-missing-") as tmp:
             build = Path(tmp) / "build"

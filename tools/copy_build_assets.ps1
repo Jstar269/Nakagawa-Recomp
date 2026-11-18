@@ -25,6 +25,14 @@ param(
     [string]$ProjectFontDir = ''
 )
 
+# A copy that fails (a destination locked by a running player, access denied) must stop the script
+# with a non-zero exit, not print a non-terminating error and let make report a build with missing
+# or stale assets. Windows PowerShell 5.1's Copy-Item ignores -ErrorAction Stop for some file
+# system errors, so the preference is set for the whole script. Native commands whose stderr is
+# redirected run under a local 'Continue' (5.1 turns redirected native stderr into a terminating
+# error under 'Stop').
+$ErrorActionPreference = 'Stop'
+
 New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
 
 $gccCmd = Get-Command gcc -ErrorAction SilentlyContinue
@@ -110,28 +118,49 @@ if (Test-Path -LiteralPath $generatedFontDir -PathType Container) {
     }
 }
 
-# Copy runtime DLLs from the resolved toolchain directory when imported.
-
+# Stage the toolchain runtime DLLs the build directory's binaries import, transitively: SDL3.dll
+# imports libiconv-2.dll, and libstdc++-6.dll imports libgcc_s_seh-1.dll and libwinpthread-1.dll.
+# Each pass re-reads the imports of every .exe and .dll in the build directory, so a DLL staged in
+# one pass has its own imports staged in the next; the passes end when one copies nothing, which
+# happens after at most one copy per listed DLL. A staged copy whose bytes differ from the
+# toolchain's is replaced, so a toolchain update cannot leave a stale runtime DLL beside a relinked
+# executable (the loader searches the executable's own directory first). An imported DLL that is
+# neither in the toolchain directory nor already staged is a named stop. This list is the
+# compile-asset-copy route's licence obligation in assets/third_party_components.json.
 if ($binDir) {
-    $runtimeDlls = @('libgcc_s_seh-1.dll', 'libwinpthread-1.dll', 'libstdc++-6.dll')
-    foreach ($dll in $runtimeDlls) {
-        $srcDll = Join-Path $binDir $dll
-        $dstDll = Join-Path $BuildDir $dll
-        if ((Test-Path $srcDll) -and (-not (Test-Path $dstDll))) {
-            $objdumpCmd = Get-Command objdump -ErrorAction SilentlyContinue
-            if ($objdumpCmd) {
-                $binaries = Get-ChildItem -Path $BuildDir -File | Where-Object { $_.Extension -in '.exe', '.dll' }
-                $imported = $false
-                foreach ($bin in $binaries) {
-                    $imports = & $objdumpCmd.Source -p $bin.FullName 2>$null | Select-String "DLL Name:\s*$([regex]::Escape($dll))"
-                    if ($imports) {
-                        $imported = $true
-                        break
+    $runtimeDlls = @('libgcc_s_seh-1.dll', 'libwinpthread-1.dll', 'libstdc++-6.dll', 'libiconv-2.dll')
+    $objdumpCmd = Get-Command objdump -ErrorAction SilentlyContinue
+    if ($objdumpCmd) {
+        $copiedInPass = $true
+        while ($copiedInPass) {
+            $copiedInPass = $false
+            $importer = @{}
+            $binaries = Get-ChildItem -LiteralPath $BuildDir -File | Where-Object { $_.Extension -in '.exe', '.dll' }
+            foreach ($bin in $binaries) {
+                $dump = & { $ErrorActionPreference = 'Continue'; & $objdumpCmd.Source -p $bin.FullName 2>$null }
+                foreach ($match in ($dump | Select-String -Pattern 'DLL Name:\s*(\S+)')) {
+                    $importer[$match.Matches[0].Groups[1].Value.ToLowerInvariant()] = $bin.Name
+                }
+            }
+            foreach ($dll in $runtimeDlls) {
+                $key = $dll.ToLowerInvariant()
+                if (-not $importer.ContainsKey($key)) {
+                    continue
+                }
+                $srcDll = Join-Path $binDir $dll
+                $dstDll = Join-Path $BuildDir $dll
+                $staged = Test-Path -LiteralPath $dstDll -PathType Leaf
+                if (-not (Test-Path -LiteralPath $srcDll -PathType Leaf)) {
+                    if ($staged) {
+                        continue
                     }
+                    throw "RUNTIME_DLL_UNRESOLVED: $($importer[$key]) imports $dll, which is neither in the toolchain directory $binDir nor staged in $BuildDir"
                 }
-                if ($imported) {
-                    Copy-Item $srcDll $BuildDir -Force
+                if ($staged -and ((Get-FileHash -LiteralPath $srcDll).Hash -eq (Get-FileHash -LiteralPath $dstDll).Hash)) {
+                    continue
                 }
+                Copy-Item -LiteralPath $srcDll -Destination $dstDll -Force
+                $copiedInPass = $true
             }
         }
     }

@@ -120,7 +120,6 @@ It fails when a file and algorithm pair is missing here or a row names a pair th
 
 | File | Algorithm | Purpose | Disposition |
 | --- | --- | --- | --- |
-| `tools/decompme_export.py` | SHA-1 | PSP NID derivation (`sha1(name)[0:4]`, little-endian) | Keep: the PSP defines it |
 | `tools/gen_nidnames.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
 | `tools/homebrew_corpus.py` | SHA-1 | Git blob ID of a sample file, compared with the blob ID `tests/fixtures/homebrew_corpus/corpus.json` pins for it | Keep: Git object identity |
 | `tools/nid_name_proof.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
