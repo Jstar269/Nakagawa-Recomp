@@ -117,21 +117,36 @@ static int valid_module_info(const uint8_t *mi, const SrElfPhdr *ph, unsigned ph
 /* Most stripped PRXs put the PspModuleInfo file offset in the executable PT_LOAD p_paddr.
  * A few Sony modules instead use that field for another resident-data address. Fall back to
  * the same conservative aligned scan used by the codegen analyzer, rather than interpreting
- * an export/NID table as module-info and silently publishing nothing. */
+ * an export/NID table as module-info and silently publishing nothing. Pass 0 reads the one
+ * 52-byte record at p_paddr; pass 1 scans the segment, read in windows that each hold every
+ * candidate starting in them, not with a seek and a read per 4-byte step. */
 static uint32_t find_module_info(FILE *f, const SrElfPhdr *ph, unsigned phnum,
                                  uint32_t base, size_t file_len, uint8_t mi[52]) {
+    uint8_t window[4096];
     for (unsigned pass = 0; pass < 2; pass++) {
         for (unsigned i = 0; i < phnum; i++) {
             if (ph[i].type != 1 || !(ph[i].flags & 1) || !ph[i].filesz) continue;
             uint64_t begin64 = pass == 0 ? ph[i].pa : ph[i].off;
-            uint64_t end64 = pass == 0 ? begin64 + 1u : (uint64_t)ph[i].off + ph[i].filesz;
+            uint64_t end64 = pass == 0 ? begin64 + 52u : (uint64_t)ph[i].off + ph[i].filesz;
             if (begin64 > UINT32_MAX || end64 > file_len || end64 < begin64) continue;
             uint32_t begin = (uint32_t)begin64;
             uint32_t end = (uint32_t)end64;
             if (pass == 0 && !begin) continue;
+            uint32_t win_off = 0u, win_len = 0u;
             for (uint32_t off = begin; off <= end && end - off >= 52u; ) {
-                if (!sr_off_fits_long(off, LONG_MAX) || fseek(f, (long)off, SEEK_SET) || fread(mi, 1, 52, f) != 52) break;
-                if (valid_module_info(mi, ph, phnum, base, file_len)) return off;
+                if (win_len < 52u || off - win_off > win_len - 52u) {
+                    uint32_t want = end - off;
+                    if (want > (uint32_t)sizeof(window)) want = (uint32_t)sizeof(window);
+                    if (!sr_off_fits_long(off, LONG_MAX) || fseek(f, (long)off, SEEK_SET) ||
+                        fread(window, 1, want, f) != want) break;
+                    win_off = off;
+                    win_len = want;
+                }
+                const uint8_t *candidate = window + (off - win_off);
+                if (valid_module_info(candidate, ph, phnum, base, file_len)) {
+                    memcpy(mi, candidate, 52);
+                    return off;
+                }
                 if (UINT32_MAX - off < 4u) break;
                 off += 4u;
             }
@@ -319,10 +334,13 @@ static uint32_t read_module_stop_option(uint32_t option, ModuleStopThread *threa
 
 /* module_stop is a module-manager entry, so execute it in its own guest thread. The
  * scheduler copies argp to the stop thread's stack before starting it, then this caller
- * joins and deletes the temporary thread. */
+ * joins and deletes the temporary thread. *running_out is set when the call fails with
+ * module_stop still running on its thread: the module is then neither started nor stopped,
+ * and the caller leaves it STOPPING so no second stop runs module_stop beside the first. */
 static uint32_t module_stop_thread_invoke(CpuState *caller, const LoadedModule *mod,
                                           ModuleStopThread thread, uint32_t arglen, uint32_t argp,
-                                          uint32_t *status_out) {
+                                          uint32_t *status_out, int *running_out) {
+    *running_out = 0;
     if (!caller || !mod || !mod->module_stop || sched_current_uid() == 0u) {
         fprintf(stderr, "PRX_MODULE_STOP_THREAD_UNAVAILABLE_SYNTHETIC: no running guest "
                         "thread or stop entry; refusing inline execution\n");
@@ -330,6 +348,15 @@ static uint32_t module_stop_thread_invoke(CpuState *caller, const LoadedModule *
     }
     if (arglen != 0u && (!argp || !sr_guest_span_readable(argp, arglen)))
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    /* With dispatch or interrupts suspended the join below cannot wait. Refuse before the stop
+     * thread exists, or module_stop would run later behind a module still reported started.
+     * The result is the wait's own; the PSP's StopModule return here is unmeasured. */
+    if (!sched_wait_permitted()) {
+        fprintf(stderr, "PRX_MODULE_STOP_THREAD_CAN_NOT_WAIT: dispatch or interrupts are "
+                        "suspended, so the caller cannot join a stop thread; refusing before "
+                        "module_stop starts\n");
+        return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
+    }
 
     uint32_t thread_uid = sched_create_thread_ex(mod->module_stop, thread.priority,
                                                  thread.stack_size, thread.attr, "module_stop");
@@ -348,7 +375,17 @@ static uint32_t module_stop_thread_invoke(CpuState *caller, const LoadedModule *
 
     caller->r[4] = thread_uid;
     caller->r[5] = 0u;
-    uint32_t module_status = h_WaitThreadEnd_impl(caller, 0);
+    uint32_t join_rc = h_WaitThreadEnd_impl(caller, 0);
+    /* The module's status is the stop thread's exit status, not the join's result: a join
+     * another thread released (ReleaseWaitThread) ends without the stop thread ending. */
+    uint32_t module_status = sched_thread_exit_status(thread_uid);
+    if (module_status == SCE_KERNEL_ERROR_NOT_DORMANT) {
+        *running_out = 1;
+        fprintf(stderr, "PRX_MODULE_STOP_THREAD_JOIN_INTERRUPTED: the join on stop thread "
+                        "uid=0x%x ended with 0x%08x while module_stop still runs; the module "
+                        "stays stopping\n", thread_uid, join_rc);
+        return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
+    }
     uint32_t delete_rc = sched_delete_thread(thread_uid);
     if (delete_rc != 0u) {
         fprintf(stderr, "PRX_MODULE_STOP_THREAD_JOIN_SYNTHETIC: stop thread uid=0x%x "
@@ -392,21 +429,12 @@ static int s_last_prx_host_served = 0;
 
 static const char *var_export_add(const char *lib, uint32_t nid, uint32_t addr, uint32_t owner);
 
+/* host_path is the module as staged (guest_module_root()/<file>). A path that does not open
+ * is a missing module, reported by name; the same name under another directory is never
+ * taken in its place. */
 unsigned register_prx_exports(const char *host_path, uint32_t base) {
     s_last_prx_host_served = 0;
     FILE *f = fopen(host_path, "rb");
-    if (!f) {
-        char temp_path[512];
-        snprintf(temp_path, sizeof(temp_path), "../../%s", host_path);
-        f = fopen(temp_path, "rb");
-        if (!f) {
-            snprintf(temp_path, sizeof(temp_path), "../%s", host_path);
-            f = fopen(temp_path, "rb");
-        }
-        if (f) {
-            fprintf(stderr, "register_prx_exports: resolved %s to %s\n", host_path, temp_path);
-        }
-    }
     uint8_t eh[52], mi[52];
     SrElfPhdr ph[16];
     unsigned registered = 0;
@@ -1721,10 +1749,9 @@ static uint32_t h_StopModule_Trace(CpuState *s) {
     /* libfont's translated module_start runs under the default gate (module_start_policy),
      * so its module_stop runs too. A trace-only stop here would leave the module STARTED,
      * and sceKernelUnloadModule would refuse it with ALREADY_LOADED. */
-    if (!real_module_start_enabled() &&
-        (!mod || (!mod->runtime_placed && !module_path_is(mod->path, "libfont.prx") &&
-                  mod->state == MODULE_STATE_STARTED &&
-                  mod->start_entry_ran && mod->module_stop != 0))) {
+    if (!real_module_start_enabled() && mod &&
+        !mod->runtime_placed && !module_path_is(mod->path, "libfont.prx") &&
+        mod->state == MODULE_STATE_STARTED && mod->start_entry_ran && mod->module_stop != 0) {
         uint32_t uid = sched_current_uid();
         fprintf(stderr, "TRACE_STOPMODULE: uid=0x%x pc=0x%08x ra=0x%08x modid=0x%08x\n",
                 uid, s->pc, s->r[31], s->r[4]);
@@ -1788,9 +1815,11 @@ static uint32_t h_StopModule_Trace(CpuState *s) {
     }
     mod->state = MODULE_STATE_STOPPING;
     uint32_t rv = 0u;
-    uint32_t call_rc = module_stop_thread_invoke(s, mod, stop_thread, arglen, argp, &rv);
+    int stop_running = 0;
+    uint32_t call_rc = module_stop_thread_invoke(s, mod, stop_thread, arglen, argp, &rv,
+                                                 &stop_running);
     if (call_rc != 0u) {
-        mod->state = MODULE_STATE_STARTED;
+        if (!stop_running) mod->state = MODULE_STATE_STARTED;
         return call_rc;
     }
     if (status_ptr && sr_guest_span_writable(status_ptr, 4u)) {
@@ -1803,14 +1832,6 @@ static uint32_t h_StopModule_Trace(CpuState *s) {
 static uint32_t h_UnloadModule_Trace(CpuState *s) {
     uint32_t modid = A0;
     LoadedModule *mod = find_loaded_module(modid);
-    if (!real_module_start_enabled() && !mod) {
-        uint32_t uid = sched_current_uid();
-        fprintf(stderr, "TRACE_UNLOADMODULE: uid=0x%x pc=0x%08x ra=0x%08x modid=0x%08x\n",
-                uid, s->pc, s->r[31], s->r[4]);
-        fflush(stderr);
-        return 0;
-    }
-
     fprintf(stderr, "sceKernelUnloadModule(modid=0x%x)\n", modid);
 
     if (!mod) {
@@ -1912,10 +1933,11 @@ static uint32_t h_SelfStopUnloadModule(CpuState *s) {
         if (sr_lookup(mod->module_stop) == NULL)
             return SCE_KERNEL_ERROR_CAN_NOT_STOP;
         mod->state = MODULE_STATE_STOPPING;
+        int stop_running = 0;
         uint32_t rc = module_stop_thread_invoke(s, mod, MODULE_STOP_THREAD_DEFAULT, arglen, argp,
-                                                &stop_status);
+                                                &stop_status, &stop_running);
         if (rc != 0u) {
-            mod->state = MODULE_STATE_STARTED;
+            if (!stop_running) mod->state = MODULE_STATE_STARTED;
             return rc;
         }
     } else {
@@ -2017,11 +2039,12 @@ static uint32_t h_LoadExec(CpuState *s) {
                 return SCE_KERNEL_ERROR_CAN_NOT_STOP;
             uint32_t stop_status = 0u;
             current_module->state = MODULE_STATE_STOPPING;
+            int stop_running = 0;
             uint32_t stop_rc = module_stop_thread_invoke(s, current_module,
                                                          MODULE_STOP_THREAD_DEFAULT, 0u, 0u,
-                                                         &stop_status);
+                                                         &stop_status, &stop_running);
             if (stop_rc != 0u) {
-                current_module->state = MODULE_STATE_STARTED;
+                if (!stop_running) current_module->state = MODULE_STATE_STARTED;
                 return stop_rc;
             }
             current_module->state = MODULE_STATE_STOPPED;

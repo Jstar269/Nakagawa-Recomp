@@ -1170,13 +1170,15 @@ enum {
     PT_DUE_AT_YIELD = 10u,
     PT_YIELDS = 3u * TIMESLICE
 };
-static int g_pt_waiter_priority;
+static int g_pt_waiter_priority, g_pt_by_count;
 static unsigned g_pt_yield, g_pt_waiter_ran_at, g_pt_done;
+static uint64_t g_pt_waiter_armed_ns;
 
 static void preempt_timer_body(CpuState *s) {
     if (s_tcb[s_cur].entry == PT_WAITER_ENTRY) {
         sched_delay_current(PT_DELAY_US);
         g_pt_waiter_ran_at = g_pt_yield;
+        g_pt_waiter_armed_ns = s_preempt_timer_at_ns;   /* what the timer holds for it */
         return;
     }
     uint32_t waiter = sched_create_thread(PT_WAITER_ENTRY, g_pt_waiter_priority, 0);
@@ -1185,7 +1187,8 @@ static void preempt_timer_body(CpuState *s) {
     for (g_pt_yield = 0; g_pt_yield < PT_YIELDS; g_pt_yield++) {
         if (g_pt_yield == PT_DUE_AT_YIELD) {
             set_host_us(PT_START_US + PT_DELAY_US + 1u);   /* the delay has run out */
-            sched_preempt_timer_check(host_now_ns());
+            /* by_count: the slice reaches its count before the timer thread wakes */
+            if (!g_pt_by_count) sched_preempt_timer_check(host_now_ns());
         }
         SR_YIELD(s, PT_YIELD_PC);
     }
@@ -1194,15 +1197,17 @@ static void preempt_timer_body(CpuState *s) {
 
 static int preempt_timer_stop(void) { return (int)g_pt_done; }
 
-static unsigned preempt_timer_run(int waiter_priority) {
+static unsigned preempt_timer_run(int waiter_priority, int by_count) {
     reset_sched();
     begin_clock_fixture(1, PT_START_US);
     s_preempt_timer_mode = SCHED_PREEMPT_TIMER_MANUAL;
     s_preempt_timer_at_ns = UINT64_MAX;
     s_preempt_timer_published = UINT64_MAX;
     g_pt_waiter_priority = waiter_priority;
+    g_pt_by_count = by_count;
     g_pt_yield = 0;
     g_pt_waiter_ran_at = UINT32_MAX;
+    g_pt_waiter_armed_ns = 0u;
     g_pt_done = 0;
     g_test_body = preempt_timer_body;
     sr_sched_stop_requested = preempt_timer_stop;
@@ -2026,11 +2031,20 @@ static void test_module_start_thread_create_failure_stops_by_name(void) {
 }
 
 static void test_preempt_timer_hands_cpu_to_stronger_due_thread(void) {
-    expect(preempt_timer_run(16) == PT_DUE_AT_YIELD,
+    expect(preempt_timer_run(16, 0) == PT_DUE_AT_YIELD,
            "a stronger thread whose delay ran out runs at the weak thread's next yield point");
-    const unsigned equal = preempt_timer_run(32);
+    const unsigned equal = preempt_timer_run(32, 0);
     expect(equal != UINT32_MAX && equal > PT_DUE_AT_YIELD,
            "an equal-priority waiter whose delay ran out does not take the CPU early");
+    /* The weak thread's slice ends by its count before the timer fires, and the stronger
+     * thread it switches to has no stronger waiter of its own: the weak thread's deadline is
+     * spent with the slice and must not stay armed to end the new thread's slices.
+     * MUTANT: drop the s_preempt_timer_spent test in sched_preempt_timer_publish -- the switch
+     * into the waiter publishes nothing and the timer still holds the weak thread's deadline. */
+    const unsigned by_count = preempt_timer_run(16, 1);
+    expect(by_count != UINT32_MAX && by_count > PT_DUE_AT_YIELD &&
+               g_pt_waiter_armed_ns == UINT64_MAX,
+           "a slice that ends by its count leaves no stale deadline for the next thread");
 }
 
 /* #1296: the paced scheduler's thread and the preemption timer's thread each ask for high host

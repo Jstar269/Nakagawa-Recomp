@@ -1694,15 +1694,18 @@ static uint64_t host_us(void) {
     return (pace_ns() - s_clock_epoch_ns) / 1000u;
 }
 
+/* A paced run's guest clock follows the host clock and never steps back. */
+static void vtime_take_host_sample(void) {
+    uint64_t t = host_us();
+    if (t > s_vtime_us) s_vtime_us = t;
+}
+
 /* Observe host time without manufacturing guest time in deterministic mode.  All
  * turbo-mode advancement happens at explicit scheduler/event boundaries below. */
 static void vtime_refresh(void) {
     sched_pause_assert_no_guest("vtime_refresh");
     pace_setup();
-    if (s_pace_on) {
-        uint64_t t = host_us();
-        if (t > s_vtime_us) s_vtime_us = t;
-    }
+    if (s_pace_on) vtime_take_host_sample();
     scheduler_latch_due_events();
 }
 
@@ -1714,8 +1717,7 @@ static void vtime_refresh(void) {
 static void scheduler_progress_time(void) {
     pace_setup();
     if (s_pace_on) {
-        uint64_t t = host_us();
-        if (t > s_vtime_us) s_vtime_us = t;
+        vtime_take_host_sample();
     } else {
         /* A deterministic scheduler quantum, never a clock-read side effect. Turbo charges a
          * fixed 10 ms; the deterministic clock charges the slice of PSP time its yield points
@@ -1892,10 +1894,7 @@ void sr_hle_advance_time(uint32_t us) {
  * sched.c sr_yield path already handles that, so a no-op is fine. */
 void sr_hle_refresh(void) {
     pace_setup();
-    if (s_pace_on) {
-        uint64_t t = host_us();
-        if (t > s_vtime_us) s_vtime_us = t;
-    }
+    if (s_pace_on) vtime_take_host_sample();
     scheduler_latch_due_events();
 }
 
@@ -3661,6 +3660,12 @@ static SDL_Mutex *s_preempt_timer_mutex;
 static SDL_Condition *s_preempt_timer_cond;
 static uint64_t s_preempt_timer_at_ns = UINT64_MAX;   /* host ns; under the mutex in THREAD mode */
 static uint64_t s_preempt_timer_published = UINT64_MAX;   /* the guest thread's last published value */
+/* The running slice ended (sched_preempt_timer_spend): whatever the timer still holds belongs
+ * to that slice, so the next publish writes even a value equal to the published copy. Without
+ * this a slice that ended by its count, followed by a switch into a thread with no stronger
+ * waiter, left the old deadline armed: both values read "none", and the timer ended the new
+ * thread's slices at the old thread's deadline. */
+static int s_preempt_timer_spent;
 
 /* The earliest wake deadline (guest us) of a waiting thread stronger than the running one. */
 static uint64_t sched_preempt_timer_target_us(void) {
@@ -3705,8 +3710,9 @@ static uint64_t sched_preempt_timer_host_ns(uint64_t at_us) {
 static void sched_preempt_timer_publish(int force) {
     if (s_preempt_timer_mode == SCHED_PREEMPT_TIMER_OFF) return;
     const uint64_t at_ns = sched_preempt_timer_host_ns(sched_preempt_timer_target_us());
-    if (!force && at_ns == s_preempt_timer_published) return;
+    if (!force && !s_preempt_timer_spent && at_ns == s_preempt_timer_published) return;
     const int earlier = force || at_ns < s_preempt_timer_published;
+    s_preempt_timer_spent = 0;
     s_preempt_timer_published = at_ns;
     if (s_preempt_timer_mode == SCHED_PREEMPT_TIMER_MANUAL) {
         s_preempt_timer_at_ns = at_ns;
@@ -3721,6 +3727,12 @@ static void sched_preempt_timer_publish(int force) {
 }
 
 static void sched_preempt_timer_arm(void) { sched_preempt_timer_publish(0); }
+
+/* The running slice ended, by its count or by the timer: the next arm publishes afresh. */
+static void sched_preempt_timer_spend(void) {
+    s_preempt_timer_published = UINT64_MAX;
+    s_preempt_timer_spent = 1;
+}
 
 /* A fast-forward speed change: the same guest deadline now falls at another host time. */
 static void sched_preempt_timer_rearm(void) { sched_preempt_timer_publish(1); }
@@ -3935,7 +3947,7 @@ void sr_yield(CpuState *s) {
     sr_tail_assert_empty("tail-transfer-live-at-yield");
     /* The slice ended, by its count or by the preemption timer: whatever the timer
      * held is spent, so the next arm publishes afresh. */
-    s_preempt_timer_published = UINT64_MAX;
+    sched_preempt_timer_spend();
     atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
     if (s->r[28] != 0u) {
         s_gp = s->r[28];
@@ -4003,7 +4015,6 @@ void sr_yield(CpuState *s) {
         return;                            /* not in a thread */
     }
     s_tick++;
-    if ((s_tick & 0xff) == 0) vtime_refresh(); /* observation only; time already progressed above */
     t111_trace(s);
     /* Pump messages if we are spinning/loading and not calling gui_present. */
     sched_pump_host_window();
@@ -4270,7 +4281,7 @@ void sched_preempt(void) {
 void sched_preempt_point(void) {
     atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
     if (s_cur < 0 || !s_interrupts_enabled || !s_dispatch_enabled) return;
-    s_preempt_timer_published = UINT64_MAX;
+    sched_preempt_timer_spend();
     scheduler_progress_time();
     sched_preempt();
     sched_preempt_timer_arm();

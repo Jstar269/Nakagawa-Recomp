@@ -1421,13 +1421,22 @@ static int write_synthetic_prx(const char *path, int malformed) {
     fixture_wr32(ph + 0, 1);            /* PT_LOAD */
     fixture_wr32(ph + 4, 0x80);         /* file offset */
     fixture_wr32(ph + 8, 0);            /* virtual address, base-relative */
-    fixture_wr32(ph + 12, MODOFF);     /* stripped-PRX module-info file hint */
+    /* stripped-PRX module-info file hint; variant 4 gives none, so the aligned scan finds it */
+    fixture_wr32(ph + 12, malformed == 4 ? 0u : MODOFF);
     fixture_wr32(ph + 16, 0x1a0);      /* file size: 0x80..0x220 is file-backed */
     fixture_wr32(ph + 20, 0x1a0);      /* memory size */
     fixture_wr32(ph + 24, 5);           /* executable/readable */
     fixture_wr32(ph + 28, 4);           /* alignment */
 
     fixture_wr32(image + 0x80, 0x285D00D1u); /* synthetic image marker */
+    if (malformed == 3) {
+        /* A decoy ahead of the real module info that passes its validation: a plausible
+         * name and an aligned export range (base-relative 0x60, zero-filled) inside the
+         * segment. Only the p_paddr hint tells the two apart. */
+        memcpy(image + 0x84 + 4, "decoy", 5);
+        fixture_wr32(image + 0x84 + 36, 0x60);
+        fixture_wr32(image + 0x84 + 40, 0x70);
+    }
     memcpy(image + MODOFF + 4, "synthetic", 9);
     fixture_wr32(image + MODOFF + 36, 0x100); /* export-table virtual start */
     fixture_wr32(image + MODOFF + 40, malformed == 1 ? 0x21101 : 0x110);
@@ -3471,6 +3480,43 @@ static void test_prx_export_relocation_behavior(void) {
                "overflowing export target remains unresolved");
     }
     remove(path);
+
+    /* The p_paddr hint is read before the aligned scan, so a 52-byte window ahead of the
+     * module info that happens to validate is not taken for it. */
+    int decoy_fixture = write_synthetic_prx(path, 3);
+    expect(decoy_fixture, "synthetic PRX fixture with a decoy module info was written");
+    if (decoy_fixture) {
+        expect(sr_hle_test_register_prx_exports(path, base) == 2,
+               "the p_paddr module-info hint wins over an earlier window that validates");
+    }
+    remove(path);
+    /* With no usable hint the aligned scan still finds the module info. */
+    int scan_fixture = write_synthetic_prx(path, 4);
+    expect(scan_fixture, "synthetic PRX fixture without a module-info hint was written");
+    if (scan_fixture) {
+        expect(sr_hle_test_register_prx_exports(path, base) == 2,
+               "the aligned scan finds module info when p_paddr gives no hint");
+    }
+    remove(path);
+
+    /* A module path that does not open is missing: the loader does not try the same name
+     * under ../ or ../../ of the working directory, which would register another tree's
+     * exports at this base. */
+    {
+        static const char probe[] = "nk_cwd_fallback.prx";
+        int probe_fixture = write_synthetic_prx(probe, 0);
+        int entered = probe_fixture && nk_platform_mkdir_p("nk_cwd_inner") &&
+                      chdir("nk_cwd_inner") == 0;
+        expect(entered, "cwd fallback: fixture written beside a nested working directory");
+        if (entered) {
+            unsigned substituted = sr_hle_test_register_prx_exports(probe, base);
+            expect(chdir("..") == 0, "cwd fallback: working directory restored");
+            expect(substituted == 0u,
+                   "a module path that does not open is not resolved against ../ of the cwd");
+        }
+        remove(probe);
+        rmdir("nk_cwd_inner");
+    }
 
     int malformed_fixture = write_synthetic_prx(path, 1);
     expect(malformed_fixture, "malformed synthetic PRX fixture was written");
@@ -49236,6 +49282,14 @@ static void test_real_module_start_lifecycle(void) {
     cpu.r[4] = 0x9999u;
     expect(sr_syscall(&cpu, 0x50f0c1ecu) == SCE_ERROR_MODULE_BAD_ID,
            "gate off: start of an unknown module id fails closed");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x9999u;
+    expect(sr_syscall(&cpu, 0xd1ff982au) == SCE_ERROR_MODULE_BAD_ID,
+           "gate off: stop of an unknown module id fails closed");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x9999u;
+    expect(sr_syscall(&cpu, 0x2e0911aau) == SCE_ERROR_MODULE_BAD_ID,
+           "gate off: unload of an unknown module id fails closed");
 
     MEM_W32(SYNTH_MOD_STATUS_ADDR, 0xdeadbeefu);
     memset(&cpu, 0, sizeof(cpu));
@@ -49454,6 +49508,103 @@ static void test_prx_stop_entry_boundaries(void) {
     hle_test_setenv("SR_REAL_MODULE_START", "0");
     sr_test_guest_fn_reset();
     sr_hle_test_module_reset();
+}
+
+/* A StopModule whose caller cannot join the stop thread. With dispatch suspended the join
+ * cannot wait, so the stop is refused before a stop thread starts: module_stop must not run
+ * later behind a module the caller was told is still started. When the caller's join is
+ * released while module_stop still runs on its thread, the module stays STOPPING, so a second
+ * StopModule cannot run module_stop a second time beside the first.
+ * MUTANT: drop the sched_wait_permitted() refusal in module_stop_thread_invoke -- the stop
+ *   thread starts and runs module_stop once dispatch resumes. MUTANT: restore STARTED when the
+ *   stop thread is still running -- the second StopModule runs module_stop again. */
+#define STOPJOIN_CALLER_ENTRY 0x089a0400u
+#define STOPJOIN_RELEASE_STOP 0x089a0080u
+static uint32_t s_stopjoin_uid, s_stopjoin_caller, s_stopjoin_rc[2];
+static int s_stopjoin_dispatch;
+static uint32_t s_stopjoin_release_calls;
+
+static uint32_t stopjoin_stop_call(CpuState *s) {
+    s->r[4] = s_stopjoin_uid;
+    s->r[5] = 0u;
+    s->r[6] = 0u;
+    s->r[7] = 0u;
+    s->r[8] = 0u;
+    return sr_syscall(s, 0xd1ff982au);
+}
+
+static void stopjoin_caller_body(CpuState *s) {
+    s_stopjoin_caller = sched_current_uid();
+    if (s_stopjoin_dispatch) {
+        uint32_t token = sched_suspend_dispatch();
+        s_stopjoin_rc[0] = stopjoin_stop_call(s);
+        sched_resume_dispatch(token);
+    } else {
+        s_stopjoin_rc[0] = stopjoin_stop_call(s);
+        s_stopjoin_rc[1] = stopjoin_stop_call(s);
+    }
+    sched_delay_current(50000u);   /* any stop thread still alive runs to its end here */
+}
+
+/* The first call releases its caller's join and keeps running past it. */
+static void stopjoin_release_stop_fn(CpuState *s) {
+    if (s_stopjoin_release_calls++ == 0u) {
+        s->r[4] = s_stopjoin_caller;
+        (void)sr_syscall(s, 0x2c34e053u);   /* sceKernelReleaseWaitThread */
+        sched_delay_current(10000u);
+    }
+    s->r[2] = 0x84u;
+}
+
+static void test_module_stop_join_failure_keeps_stop_single(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    hle_test_setenv("SR_REAL_MODULE_START", "1");
+    sr_test_register_guest_fn(SYNTH_MOD_START, synth_module_start_fn);
+    sr_test_register_guest_fn(SYNTH_MOD_STOP, synth_module_stop_fn);
+    sr_test_register_guest_fn(STOPJOIN_RELEASE_STOP, stopjoin_release_stop_fn);
+    sr_test_register_guest_fn(STOPJOIN_CALLER_ENTRY, stopjoin_caller_body);
+    s_synth_start_calls = 0;
+    s_synth_stop_calls = 0;
+    s_stopjoin_release_calls = 0;
+    CpuState cpu;
+
+    s_stopjoin_uid = sr_hle_test_register_module("stopjoin_dispatch.prx", SYNTH_MOD_START,
+                                                 SYNTH_MOD_STOP);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = s_stopjoin_uid;
+    expect(s_stopjoin_uid != 0u && sr_syscall(&cpu, 0x50f0c1ecu) == 0,
+           "stop join: the dispatch-suspended module starts");
+    s_stopjoin_dispatch = 1;
+    s_stopjoin_rc[0] = s_stopjoin_rc[1] = 0u;
+    sched_run(STOPJOIN_CALLER_ENTRY, 0u, 0u);
+    expect(s_stopjoin_rc[0] == SCE_KERNEL_ERROR_CAN_NOT_WAIT && s_synth_stop_calls == 0u,
+           "stop join: StopModule with dispatch suspended is refused before module_stop runs");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = s_stopjoin_uid;
+    expect(sr_syscall(&cpu, 0xd1ff982au) == 0 && s_synth_stop_calls == 1u,
+           "stop join: the refused module is still started and stops once afterwards");
+
+    s_stopjoin_uid = sr_hle_test_register_module("stopjoin_release.prx", SYNTH_MOD_START,
+                                                 STOPJOIN_RELEASE_STOP);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = s_stopjoin_uid;
+    expect(s_stopjoin_uid != 0u && sr_syscall(&cpu, 0x50f0c1ecu) == 0,
+           "stop join: the released-join module starts");
+    s_stopjoin_dispatch = 0;
+    s_stopjoin_rc[0] = s_stopjoin_rc[1] = 0u;
+    sched_run(STOPJOIN_CALLER_ENTRY, 0u, 0u);
+    expect(s_stopjoin_rc[0] != 0u && s_stopjoin_rc[1] == SCE_KERNEL_ERROR_ALREADY_STOPPING,
+           "stop join: a released join leaves the module stopping, not started");
+    expect(s_stopjoin_release_calls == 1u,
+           "stop join: module_stop runs once although the caller's join was released");
+
+    hle_test_setenv("SR_REAL_MODULE_START", "0");
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    reset_fixture();
 }
 
 /* ---- #280: real late-PRX stop/unload/reload lifecycle and export invalidation ----
@@ -59203,6 +59354,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_kernel_nested_mutex();
     test_real_module_start_lifecycle();
     test_prx_stop_entry_boundaries();
+    test_module_stop_join_failure_keeps_stop_single();
     test_late_prx_unload_reload_lifecycle();
     test_module_without_entry_runs_no_code();
     test_host_skipped_start_stop_unload_reload();
