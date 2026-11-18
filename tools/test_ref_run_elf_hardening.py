@@ -18,7 +18,7 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN_ELF = ROOT / "src" / "ref" / "run_elf.cpp"
-CC = shutil.which("g++") or shutil.which("c++") or shutil.which("clang++")
+CC = shutil.which("g++") or shutil.which("c++") or shutil.which("clang++") or ""
 
 
 @unittest.skipUnless(CC, "no C++ compiler on PATH")
