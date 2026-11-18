@@ -28,6 +28,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 import sys
@@ -4657,6 +4658,50 @@ class VendoredManifestTests(unittest.TestCase):
         )
         self.assertGreater(rows, 0, "the tree carries byte-identical imports")
         self.assertEqual([finding.as_dict() for finding in verifier._vendored_manifest_findings(blobs, blobs)], [])
+
+    @staticmethod
+    def _tracked_files() -> list[str]:
+        listed = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True).stdout
+        return [path for path in listed.decode("utf-8").split("\0") if path]
+
+    def test_every_vendored_licence_text_is_a_manifest_row(self) -> None:
+        """A manifest that declares import kinds names every licence text under it.
+
+        The byte gate checks only table rows, so a licence text named only in prose could be
+        edited or truncated with no finding (the atrac3p LGPL copy was such a file).
+        """
+        tracked = self._tracked_files()
+        manifests = {path for path in tracked if posixpath.basename(path) == verifier.VENDOR_MANIFEST_NAME}
+        licence = re.compile(r"(?i)(licen[cs]e|copying)([.-][^/]*)?")
+        missing: list[str] = []
+        for path in tracked:
+            if not licence.fullmatch(posixpath.basename(path)):
+                continue
+            directory = posixpath.dirname(path)
+            while directory and posixpath.join(directory, verifier.VENDOR_MANIFEST_NAME) not in manifests:
+                directory = posixpath.dirname(directory)
+            if not directory:
+                continue
+            manifest = posixpath.join(directory, verifier.VENDOR_MANIFEST_NAME)
+            rows = verifier._manifest_rows((ROOT / manifest).read_bytes()) or []
+            if not rows:
+                continue
+            if path not in {verifier._manifest_row_path(manifest, row.get("file", "")) for row in rows}:
+                missing.append(f"{path} (manifest {manifest})")
+        self.assertEqual(missing, [])
+
+    def test_atrac3p_local_delta_files_carry_a_dated_modification_notice(self) -> None:
+        """LGPL-2.1 section 2(a): each modified FFmpeg file of the ATRAC3 subset says so, with a date."""
+        manifest = "src/rt/atrac3p/" + verifier.VENDOR_MANIFEST_NAME
+        rows = verifier._manifest_rows((ROOT / manifest).read_bytes()) or []
+        deltas = [
+            verifier._manifest_row_path(manifest, row.get("file", ""))
+            for row in rows if "local delta" in row.get("kind", "").lower()
+        ]
+        self.assertEqual(len(deltas), 4, "atrac3.c, atrac3plus.c, atrac3plusdec.c and sinewin.c")
+        notice = re.compile(r"Modified by Nakagawa Recomp contributors, \d{4}-\d{2}-\d{2}")
+        unmarked = [path for path in deltas if path is None or not notice.search((ROOT / path).read_text("utf-8"))]
+        self.assertEqual(unmarked, [])
 
 
 class IndependentRefreshMergeTests(EphemeralGenerationTests):

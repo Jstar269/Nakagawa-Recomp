@@ -19,6 +19,9 @@
 //     (the zeroed output buffer is never written when no unit is decoded),
 //   - determinism: the same frame decodes to byte-identical PCM across
 //     instances, after reset, and after flush,
+//   - no stale PCM: a frame that ends before its channel blocks have units
+//     (the terminator frame) after a loud frame decodes to silence, not to
+//     the previous frame's planes,
 //   - destroy(NULL) no-op,
 //   - transform-path canary: a deterministic MONO channel-unit frame drives a
 //     real unit through decode_residual_spectrum() + reconstruct_frame()
@@ -140,6 +143,86 @@ static void test_terminator_decode(void)
 
     atrac3p_destroy(h1);
     atrac3p_destroy(h2);
+}
+
+/* A 16-byte mono body that a fresh decoder turns into a block that is not
+ * silence: the first xorshift32 candidate from a fixed seed, with the first
+ * byte kept to the mono channel-unit form (start bit 0, unit id 0), that
+ * decodes without error to a non-zero sample. Same search as
+ * tests/native/videocodec_selftest.c; deterministic every run. */
+static int find_loud_mono_body(uint8_t body[16])
+{
+    static int16_t pcm[ATRAC3P_FRAME_SAMPLES];
+    uint32_t state = 0x2545F491u;
+    unsigned candidate;
+    int i;
+
+    for (candidate = 0; candidate < 20000u; candidate++) {
+        Atrac3pHandle *h = NULL;
+        int samples = 0, ok;
+
+        for (i = 0; i < 16; i++) {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            body[i] = (uint8_t)state;
+        }
+        body[0] = (uint8_t)(body[0] & 0x1Fu);
+        if (atrac3p_create(1, 16, &h) != 0 || !h)
+            return 0;
+        ok = atrac3p_decode(h, body, 16, pcm, &samples) == 16 &&
+             samples == ATRAC3P_FRAME_SAMPLES;
+        atrac3p_destroy(h);
+        if (!ok)
+            continue;
+        for (i = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+            if (pcm[i] != 0)
+                return 1;
+    }
+    return 0;
+}
+
+/* No stale PCM: the unit loop writes only the planes of the channel units a
+ * frame carries, and the API converts every plane. A frame that ends at
+ * CH_UNIT_TERMINATOR before every channel block has a unit must report
+ * silence for the planes no unit wrote, not the previous frame's PCM, and
+ * reset must not bring the old PCM back. MUTANT: without the plane clear in
+ * atrac3p_decode_frame() the terminator frame repeats the loud block. */
+static void test_short_frame_does_not_repeat_pcm(void)
+{
+    static int16_t pcm[ATRAC3P_FRAME_SAMPLES];
+    uint8_t body[16];
+    Atrac3pHandle *h = NULL;
+    int ret, samples = -1, i, nonzero;
+
+    CHECK(find_loud_mono_body(body), "a loud mono body exists");
+    CHECK(atrac3p_create(1, 16, &h) == 0 && h != NULL, "create for stale-PCM check");
+    if (!h)
+        return;
+
+    ret = atrac3p_decode(h, body, 16, pcm, &samples);
+    CHECK(ret == 16 && samples == ATRAC3P_FRAME_SAMPLES, "loud body decodes");
+    for (i = 0, nonzero = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+        nonzero += pcm[i] != 0;
+    CHECK(nonzero > 0, "loud body is not silence");
+
+    ret = atrac3p_decode(h, TERMINATOR_FRAME, sizeof(TERMINATOR_FRAME), pcm, &samples);
+    CHECK(ret == (int)sizeof(TERMINATOR_FRAME) && samples == ATRAC3P_FRAME_SAMPLES,
+          "terminator frame after a loud frame decodes");
+    for (i = 0, nonzero = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+        nonzero += pcm[i] != 0;
+    CHECK(nonzero == 0, "terminator frame after a loud frame is silence, not stale PCM");
+
+    ret = atrac3p_decode(h, body, 16, pcm, &samples);
+    CHECK(ret == 16, "loud body decodes again");
+    CHECK(atrac3p_reset(h) == 0, "reset after loud body");
+    ret = atrac3p_decode(h, TERMINATOR_FRAME, sizeof(TERMINATOR_FRAME), pcm, &samples);
+    for (i = 0, nonzero = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+        nonzero += pcm[i] != 0;
+    CHECK(ret == (int)sizeof(TERMINATOR_FRAME) && nonzero == 0,
+          "terminator frame after reset is silence, not stale PCM");
+
+    atrac3p_destroy(h);
 }
 
 /* Transform-path canary: the MONO unit frame must decode through the
@@ -370,6 +453,7 @@ int main(int argc, char **argv)
     test_decode_rejection();
     test_terminator_decode();
     test_imdct_path_decode();
+    test_short_frame_does_not_repeat_pcm();
 
     if (fixture && fixture[0]) {
         if (run_fixture(fixture) != 0) {

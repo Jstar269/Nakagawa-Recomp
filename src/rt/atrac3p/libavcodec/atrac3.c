@@ -20,6 +20,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+/*
+ * Modified by Nakagawa Recomp contributors, 2026-10-20. The local changes are
+ * marked LOCAL DELTA and listed in ../PROVENANCE.md.
+ */
+
 /**
  * @file
  * ATRAC3 compatible decoder.
