@@ -204,6 +204,26 @@ class RuntimeModuleTranslation(unittest.TestCase):
                 [value for value in literals if 0x08000000 <= int(value, 16) < 0x0C000000],
                 "a module body names no absolute user-RAM address")
 
+    def test_stale_records_reuse_the_primary_emission_flow(self):
+        calls = {}
+        real_flow = codegen.function_flow
+
+        def counted_flow(elf, start, *args, **kwargs):
+            key = (id(elf), start)
+            calls[key] = calls.get(key, 0) + 1
+            return real_flow(elf, start, *args, **kwargs)
+
+        out = Path(self.tmp.name) / "stale_flow" / "g_recomp.c"
+        out.parent.mkdir()
+        with unittest.mock.patch.object(codegen, "function_flow", side_effect=counted_flow):
+            status, _stdout, err = run_codegen([
+                str(self.main), str(out), "--base=0x08940000", "--stale-detect",
+                *[f"--extra-elf={path}@runtime" for _spec, path in self.overlays],
+            ])
+        self.assertEqual(status, 0, err)
+        self.assertTrue(calls)
+        self.assertEqual({key: count for key, count in calls.items() if count != 1}, {})
+
     def test_null_page_guard_is_emitted_and_separates_shared_unit_names(self):
         module = codegen.translate_runtime_module(
             0, str(self.overlays[0][1]), shared=True,
@@ -270,6 +290,24 @@ class RuntimeModuleTranslation(unittest.TestCase):
             f'sr_unimplemented(0x{stub:08x}u, "{codegen.NO_NID_IMPORT_STUB}");', generated)
         self.assertNotIn("sr_hle_call(s, 0u);", generated)
 
+    def test_non_ascii_runtime_module_name_is_written_to_stub_report(self):
+        extra = Path(self.tmp.name) / "módulo.prx"
+        image = bytearray(self.overlays[0][1].read_bytes())
+        struct.pack_into("<I", image,
+                         ladder.OVERLAY_TEXT_FILE_OFFSET + ladder.OVERLAY_START_OFF, 0x4C000000)
+        extra.write_bytes(image)
+
+        out = Path(self.tmp.name) / "non_ascii_module" / "g_recomp.c"
+        out.parent.mkdir()
+        status, _stdout, err = run_codegen([
+            str(self.main), str(out), "--base=0x08940000",
+            f"--extra-elf={extra}@runtime",
+        ])
+        self.assertEqual(status, 0, err)
+        report = out.with_name("g_recomp_stubs.txt").read_text(encoding="utf-8")
+        self.assertIn("módulo.prx@0x", report)
+        self.assertIn("opcode 0x13", report)
+
     def test_codegen_cleanup_failure_keeps_make_targets_old_and_deletes_failed_targets(self):
         out = Path(self.tmp.name) / "cleanup_failure" / "g_recomp.c"
         out.parent.mkdir()
@@ -283,6 +321,37 @@ class RuntimeModuleTranslation(unittest.TestCase):
         self.assertEqual(out.read_text(encoding="ascii"), "old generated C\n")
         self.assertEqual(funcs.read_text(encoding="ascii"), "old generated header\n")
         self.assertIn(".DELETE_ON_ERROR:", (ROOT / "mk" / "pipeline.mk").read_text(encoding="utf-8"))
+
+    def test_main_restores_address_space_after_extra_emission_failure(self):
+        extra_base = 0x09000000
+        real_variable_sites = codegen.variable_import_sites
+        real_emit_function = codegen.emit_function
+        previous_space = codegen.ADDRESS_SPACE
+
+        def variable_sites(elf):
+            if elf.base == extra_base:
+                return (), {extra_base + 4: "word32"}
+            return real_variable_sites(elf)
+
+        def emit_function(*args, **kwargs):
+            if codegen.ADDRESS_SPACE.patched:
+                raise RuntimeError("injected extra emission failure")
+            return real_emit_function(*args, **kwargs)
+
+        out = Path(self.tmp.name) / "address_space_failure" / "g_recomp.c"
+        out.parent.mkdir()
+        try:
+            with unittest.mock.patch.object(codegen, "variable_import_sites", side_effect=variable_sites), \
+                    unittest.mock.patch.object(codegen, "emit_function", side_effect=emit_function):
+                with self.assertRaisesRegex(RuntimeError, "injected extra emission failure"):
+                    run_codegen([
+                        str(self.main), str(out), "--base=0x08940000",
+                        f"--extra-elf={self.overlays[0][1]}@{extra_base:x}",
+                    ])
+            self.assertEqual(codegen.ADDRESS_SPACE.patched, {})
+            self.assertFalse(codegen.ADDRESS_SPACE.runtime_module)
+        finally:
+            codegen.ADDRESS_SPACE = previous_space
 
     def test_a_module_compiles_from_the_same_file_in_any_game(self):
         # Another game (another name, at another index, beside other modules) writes

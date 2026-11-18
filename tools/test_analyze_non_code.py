@@ -852,6 +852,27 @@ class ExecutableNonCodeTest(unittest.TestCase):
         self.assertIn("sr_exec_span_register(0x00002018u, 0x00002020u)", generated)
         self.assertNotIn("sr_exec_span_register(0x00002000u, 0x00002020u)", generated)
 
+    def test_extra_non_code_walk_is_reused_for_emission(self):
+        base, extra = 0x1000, 0x2000
+        words = [JR_RA, 0]
+        extra_words = [jal(extra + 16), 0, JR_RA, 0, PROLOGUE, RESERVED, JR_RA, 0]
+        calls = {}
+        stock = codegen.function_flow
+
+        def counted(elf, start, *args, **kwargs):
+            key = (id(elf), start)
+            calls[key] = calls.get(key, 0) + 1
+            return stock(elf, start, *args, **kwargs)
+
+        with mock.patch.object(codegen, "function_flow", counted):
+            rc, log, _generated = run_codegen(
+                fixed_executable(words, base),
+                [(fixed_executable(extra_words, extra), extra)],
+            )
+        self.assertEqual(rc, 0, log)
+        self.assertTrue(calls)
+        self.assertEqual({key: count for key, count in calls.items() if count != 1}, {})
+
     def test_a_body_in_withdrawn_words_stops_the_build(self):
         log = io.StringIO()
         with contextlib.redirect_stderr(log):

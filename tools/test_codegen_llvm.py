@@ -288,6 +288,40 @@ class LoweringTests(unittest.TestCase):
         with self.assertRaisesRegex(codegen_llvm.LLVMUnsupported, "runtime-placed"):
             self.lower(program(JR_RA, NOP))
 
+    def test_enhancement_update_boundary_stays_in_the_c_body(self):
+        start = 0x1000
+        cases = (
+            ("body", start, program(addiu(4, 0, 1), addiu(5, 0, 2), JR_RA, NOP, start=start)),
+            ("delay slot", start + 4, program(JR_RA, addiu(5, 0, 2), NOP, start=start)),
+        )
+        previous_boundary = codegen.ENHANCEMENT_UPDATE_BOUNDARY
+        previous_sites = codegen.ENHANCEMENT_SITES
+        previous_ace_sites = codegen.ENHANCEMENT_ACE_SITES
+        previous_applied = set(codegen.ENHANCEMENT_APPLIED)
+        try:
+            codegen.ADDRESS_SPACE = codegen.AddressSpace()
+            codegen.ENHANCEMENT_SITES = {}
+            codegen.ENHANCEMENT_ACE_SITES = {}
+            for name, boundary, words in cases:
+                with self.subTest(name=name):
+                    codegen.ENHANCEMENT_UPDATE_BOUNDARY = boundary
+                    codegen.ENHANCEMENT_APPLIED.clear()
+                    c_body = "\n".join(codegen.emit_function(
+                        FakeElf(words), start, [(start, start + 16)], {start}))
+                    self.assertIn("nk_enhancement_updates++", c_body)
+                    with self.assertRaisesRegex(codegen_llvm.LLVMUnsupported,
+                                                "enhancement-package update_boundary"):
+                        codegen_llvm.lower(
+                            codegen, FakeElf(words), start, [(start, start + 16)], {start},
+                            c_text=c_body,
+                        )
+        finally:
+            codegen.ENHANCEMENT_UPDATE_BOUNDARY = previous_boundary
+            codegen.ENHANCEMENT_SITES = previous_sites
+            codegen.ENHANCEMENT_ACE_SITES = previous_ace_sites
+            codegen.ENHANCEMENT_APPLIED.clear()
+            codegen.ENHANCEMENT_APPLIED.update(previous_applied)
+
     def test_a_transfer_without_its_delay_slot_is_refused_not_crashed(self):
         # A transfer the planner left without a slot used to fail with AttributeError inside the
         # lowering; it must raise LLVMUnsupported, which codegen.py's llvm_body() turns into

@@ -20,6 +20,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import compiler_compare  # noqa: E402
 
 
+class MeasurementTrialIsolationTests(unittest.TestCase):
+    def test_reused_trial_root_drops_old_events_and_build_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            build_root = Path(temporary) / "build"
+            trial_root = build_root / "trial-1"
+            trial_root.mkdir(parents=True)
+            events_path = trial_root / "compiler_events.jsonl"
+            stale_events = (
+                {"category": "compile", "generated_c": True, "duration_s": 90.0,
+                 "peak_working_set_bytes": 900_000, "compiler": "stale",
+                 "argv": ["-O0", "-c", "old.c"]},
+                {"category": "link", "duration_s": 80.0, "compiler": "stale",
+                 "argv": ["-O0", "-o", "old.exe"]},
+            )
+            events_path.write_text("".join(json.dumps(event) + "\n" for event in stale_events),
+                                   encoding="utf-8")
+            (trial_root / "old.o").write_bytes(b"old object")
+            (trial_root / "old.exe").write_bytes(b"old executable")
+            wrote_events = False
+
+            def fake_run(command, *, env):
+                nonlocal wrote_events
+                if not wrote_events:
+                    event_path = Path(env["NK_COMPILER_COMPARE_EVENTS"])
+                    compiler_compare._append_event(event_path, {
+                        "category": "compile", "generated_c": True, "duration_s": 2.5,
+                        "peak_working_set_bytes": 12_345, "compiler": "fresh",
+                        "argv": ["-O0", "-c", "new.c"],
+                    })
+                    compiler_compare._append_event(event_path, {
+                        "category": "link", "duration_s": 0.75, "compiler": "fresh",
+                        "argv": ["-O0", "-o", "new.exe"],
+                    })
+                    root = Path(env["NK_COMPILER_COMPARE_BUILD_ROOT"])
+                    (root / "new.o").write_bytes(b"new object")
+                    (root / "new.exe").write_bytes(b"new executable")
+                    wrote_events = True
+                return compiler_compare.Outcome(0, "PASS\n", 0.001)
+
+            with mock.patch.object(compiler_compare, "_run", side_effect=fake_run), \
+                    mock.patch.object(compiler_compare, "_wrapper_cc", return_value="/fake/wrapper"):
+                trials = compiler_compare._measurement_trials(
+                    "/fake/compiler", "/fake/make", "python", {"CFLAGS": "-O0"},
+                    build_root, 1, env={},
+                )
+
+        record = trials[0]
+        self.assertEqual(record["generated_c_compile_wall_seconds"], 2.5)
+        self.assertEqual(record["link_wall_seconds"], 0.75)
+        self.assertEqual(record["peak_working_set_bytes"], 12_345)
+        self.assertEqual(record["object_bytes"], len(b"new object"))
+        self.assertEqual(record["executable_bytes"], len(b"new executable"))
+
+
+class SubprocessTimeoutTests(unittest.TestCase):
+    def test_timeout_becomes_a_named_failed_outcome_with_partial_output(self) -> None:
+        timeout = subprocess.TimeoutExpired(["fake-compiler"], 10, output=b"partial output")
+        with mock.patch.object(compiler_compare.subprocess, "run", side_effect=timeout) as run:
+            outcome = compiler_compare._run(["fake-compiler"], env={})
+        self.assertIsNone(outcome.returncode)
+        self.assertIn("timed out", outcome.output)
+        self.assertIn("partial output", outcome.output)
+        self.assertEqual(run.call_args.kwargs["timeout"],
+                         compiler_compare.COMMAND_TIMEOUT_SECONDS)
+
+
 class FakeToolchain:
     """Fake compiler, linker and Make output without executing a build."""
 
@@ -1007,6 +1073,14 @@ class CompilerCompareTests(unittest.TestCase):
             diff_text = compiler_compare._format_semantic_diff_text(diff)
             self.assertIn("acc=0x00000001ff76c43b", diff_text)
             self.assertIn("acc=0x00000001ff76c43c", diff_text)
+            with mock.patch.object(compiler_compare, "_measurement_trials", return_value=trials):
+                report = self.compare()
+            report_summary = report["toolchains"][0]["measurements"]["summary"]
+            report_summary["semantic_hash_stable"] = False
+            report_summary["semantic_diff"] = diff
+            markdown = compiler_compare.render_markdown(report)
+            self.assertIn("acc=0x00000001ff76c43b", markdown)
+            self.assertIn("acc=0x00000001ff76c43c", markdown)
 
     def test_align_first_divergence_bounds_pairing_work_on_many_differing_lines(self) -> None:
         count = 300
