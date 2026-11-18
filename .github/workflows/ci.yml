@@ -1118,6 +1118,19 @@ jobs:
         if: matrix.part == 'core'
         run: make CC=gcc native-core-tests
 
+      # tools/test_hle_title_config_behavior.py builds the production-HLE selftest for
+      # synthetic title manifests (libfont startup, module-load collisions, runtime-placed
+      # modules, the diagnostics opt-in, the data-file census binding) with make. The
+      # python_tools shards have no SDL3 or Vulkan, so there it skips; this part has both,
+      # and only unittest's bare OK passes, so a skipped case fails the step.
+      - name: Run title-configured HLE behaviour tests on Linux
+        if: matrix.part == 'core'
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/hle-title-config-behavior.log"
+          PYTHONPATH=tools python -m unittest -v test_hle_title_config_behavior 2>&1 | tee "$log"
+          tail -n 1 "$log" | grep -qx 'OK'
+
       # Compile ge.c with its optional front-end attribution path enabled. Use a
       # fresh object directory so the normal unprofiled ge.o cannot satisfy the
       # target without compiling the requested configuration.

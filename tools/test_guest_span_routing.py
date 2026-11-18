@@ -45,6 +45,11 @@ def _range(text: str, name: str) -> tuple[int, int]:
 
 _DIRECTIVE = re.compile(r"^\s*#\s*(\w+)")
 
+# Every form of a raw guest host pointer: the checked SR_HOST, the unchecked SR_HOST_LINEAR
+# (recomp.h: g_mem plus the physical offset, no range test) and plain g_mem arithmetic or
+# indexing. A bare g_mem test such as ``!g_mem`` forms no pointer and is not counted.
+_GUEST_HOST_POINTER = re.compile(r"\bSR_HOST(?:_LINEAR)?\s*\(|\bg_mem\s*[+\[]")
+
 
 def _blank_vram_decoder_cli(text: str) -> str:
     """``text`` with each ``#ifdef SR_GE_VRAM_DECODER_CLI`` branch blanked, line for line.
@@ -205,6 +210,16 @@ class TestGuestSpanRouting(unittest.TestCase):
                 "sr_enhancement_widen_clip_x": ("sr_guest_span_writable_at",),
                 "cull_sweep": ("sr_guest_span_readable",),
                 "ge_read_span": ("sr_vram_cpu_aperture", "sr_guest_vram_read_prepare_bytes"),
+                "ge_zbuf_materialize_current": ("sr_inrange_n(addr, 2u)",),
+                "ge_zbuf_prepare_current": ("sr_inrange_n(addr, 2u)",),
+                "ge_ram_span": ("phys < SR_RAM_BASE", "bytes > 0x0c000000u - phys"),
+                # The vertex readers take the linear path only while vtx_linear_begin has
+                # proven the whole vertex span through ge_ram_span.
+                "vtx_r8": ("s_vtx_linear",),
+                "vtx_r16": ("s_vtx_linear",),
+                "vtx_r32": ("s_vtx_linear",),
+                "vtx_linear_begin": ("ge_ram_span(addr, (uint32_t)v->stride)",),
+                "ge_fb_host": ("phys < SR_VRAM_CPU_BASE", "phys > 0x04200000u - width"),
             },
             ROOT / "src" / "rt" / "ge_capture.c": {
                 "ge_capture_begin": ("sr_guest_span_readable",),
@@ -216,6 +231,7 @@ class TestGuestSpanRouting(unittest.TestCase):
                 "target_upload": ("gegpu_validate_guest_fb_descriptor",),
                 "target_patch_vram_dirty": ("gegpu_validate_guest_fb_descriptor",),
                 "tex_source_ptr": ("sr_guest_span_readable",),
+                "depth_readback_to_guest": ("sr_inrange_n(addr, 2u)",),
             },
         }
         for path, owners in cases.items():
@@ -243,12 +259,25 @@ class TestGuestSpanRouting(unittest.TestCase):
                 for token in required:
                     self.assertIn(token, body, f"{path.name}:{owner} lost {token}")
 
-            for match in re.finditer(r"\bSR_HOST\s*\(", text):
+            for match in _GUEST_HOST_POINTER.finditer(text):
                 containing = [name for name, (lo, hi) in ranges.items() if lo <= match.start() < hi]
                 self.assertEqual(
                     len(containing), 1,
                     f"{path.name}:{text.count(chr(10), 0, match.start()) + 1} has an unowned direct guest host pointer",
                 )
+
+    def test_host_pointer_census_counts_every_raw_form(self) -> None:
+        text = chr(10).join([
+            "a = SR_HOST(x);",
+            "b = SR_HOST_LINEAR(x);",
+            "c = SR_HOST_LINEAR (x);",
+            "d = g_mem + off;",
+            "e = &g_mem[off];",
+            "if (!g_mem) return;",
+            "f = SR_HOSTNAME(x);",
+        ])
+        found = [text.count(chr(10), 0, m.start()) + 1 for m in _GUEST_HOST_POINTER.finditer(text)]
+        self.assertEqual(found, [1, 2, 3, 4, 5])
 
     def test_decoder_cli_blanking_keeps_the_production_else_branch(self) -> None:
         text = chr(10).join([
