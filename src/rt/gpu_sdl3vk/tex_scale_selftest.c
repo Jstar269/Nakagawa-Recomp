@@ -244,7 +244,36 @@ static void test_wrap_clamp(void) {
     CHECK(nk_tex_scale_image(tex, W, H, F, 0, 1, got), "mixed: scale failed");
     reference_crop(mixed, 3 * W, H + 2 * E, F, W, E, W, H, want);
     CHECK(memcmp(got, want, sizeof(got)) == 0, "mixed: repeat-u clamp-v copy differs");
-    if (!s_fail) printf("tex scale selftest: PASS wrap-clamp repeat, clamp and mixed edges, R/B order\n");
+
+    /* Only the kept rows are scaled: every size, factor and edge mode equals the same copy cut from
+     * a scale of the whole extended image, pad rows included. */
+    static const int sizes[][2] = { {1, 1}, {2, 3}, {5, 1}, {8, 8}, {16, 16}, {17, 6}, {3, 20} };
+    int swept = 0;
+    for (size_t si = 0; si < sizeof(sizes) / sizeof(sizes[0]); si++)
+        for (int f = 2; f <= NK_TEX_SCALE_MAX; f++)
+            for (int mode = 0; mode < 4; mode++) {
+                const int w = sizes[si][0], h = sizes[si][1], cu = mode & 1, cv = mode >> 1, P = 2;
+                uint32_t src[20 * 20], pad[24 * 24];
+                static uint32_t a[20 * 20 * 36], b[20 * 20 * 36];
+                for (int i = 0; i < w * h; i++) {
+                    static const uint32_t pal[4] = { 0xFF1020E0u, 0xFFE02010u, 0xFF20C040u, 0x80FFFFFFu };
+                    src[i] = pal[(lcg(&s) >> 5) % 4u];
+                }
+                for (int y = 0; y < h + 2 * P; y++)
+                    for (int x = 0; x < w + 2 * P; x++) {
+                        int sx = x - P, sy = y - P;
+                        sx = cu ? (sx < 0 ? 0 : (sx >= w ? w - 1 : sx)) : ((sx % w) + w) % w;
+                        sy = cv ? (sy < 0 ? 0 : (sy >= h ? h - 1 : sy)) : ((sy % h) + h) % h;
+                        pad[y * (w + 2 * P) + x] = src[sy * w + sx];
+                    }
+                const int ok = nk_tex_scale_image(src, w, h, f, cu, cv, a);
+                reference_crop(pad, w + 2 * P, h + 2 * P, f, P, P, w, h, b);
+                CHECK(ok && memcmp(a, b, sizeof(uint32_t) * (size_t)(w * f) * (size_t)(h * f)) == 0,
+                      "stripe: %dx%d at factor %d, clamp u %d v %d differs from the full-height scale", w, h, f, cu, cv);
+                swept++;
+            }
+    if (!s_fail) printf("tex scale selftest: PASS wrap-clamp repeat, clamp and mixed edges, R/B order; %d stripe "
+                        "copies equal their full-height scale\n", swept);
 }
 
 /* ---- jobs ---------------------------------------------------------------------------------- */
@@ -925,6 +954,53 @@ static int soft_row_ramp(const uint32_t *o, int ow, int row, int c0, int *levels
     return mono;
 }
 
+/* The box blur nk_tex_soften_alpha_edge is defined as: every window summed texel by texel. */
+static void soften_reference(const uint32_t *src, uint32_t w, uint32_t h, uint32_t f, uint32_t e, uint32_t *dst) {
+    const uint32_t ow = w * f, oh = h * f, d = 2u * f, dd = d * d;
+    const int32_t r = (int32_t)(e * f);
+    const uint32_t k = 2u * (uint32_t)r + 1u;
+    uint32_t *up = (uint32_t *)malloc(sizeof(uint32_t) * ow * oh), *hs = (uint32_t *)malloc(sizeof(uint32_t) * ow * oh);
+    if (!up || !hs) { free(up); free(hs); return; }
+    /* The bilinear alpha times dd and the colour come from the production pass with the narrowest
+     * blur, whose rows and columns this reference does not need: it recomputes the alpha below. */
+    for (uint32_t y = 0; y < oh; y++)
+        for (uint32_t x = 0; x < ow; x++) {
+            /* soft_axis: texel-centre mapping, as tex_scale.c computes it */
+            const int32_t ty = (int32_t)(2u * y + 1u) - (int32_t)f, tx = (int32_t)(2u * x + 1u) - (int32_t)f;
+            int32_t y0 = ty < 0 ? -1 : ty / (int32_t)d, x0 = tx < 0 ? -1 : tx / (int32_t)d;
+            const uint32_t wy = (uint32_t)(ty - y0 * (int32_t)d), wx = (uint32_t)(tx - x0 * (int32_t)d);
+            const int32_t y1 = y0 + 1 > (int32_t)h - 1 ? (int32_t)h - 1 : y0 + 1, x1 = x0 + 1 > (int32_t)w - 1 ? (int32_t)w - 1 : x0 + 1;
+            if (y0 < 0) y0 = 0;
+            if (x0 < 0) x0 = 0;
+            const uint32_t a00 = src[y0 * w + x0] >> 24, a01 = src[y0 * w + x1] >> 24;
+            const uint32_t a10 = src[y1 * w + x0] >> 24, a11 = src[y1 * w + x1] >> 24;
+            up[y * ow + x] = (d - wy) * ((d - wx) * a00 + wx * a01) + wy * ((d - wx) * a10 + wx * a11);
+        }
+    for (uint32_t y = 0; y < oh; y++)
+        for (uint32_t x = 0; x < ow; x++) {
+            uint32_t sum = 0;
+            for (int32_t i = -r; i <= r; i++) {
+                int32_t c = (int32_t)x + i;
+                c = c < 0 ? 0 : (c >= (int32_t)ow ? (int32_t)ow - 1 : c);
+                sum += up[y * ow + (uint32_t)c];
+            }
+            hs[y * ow + x] = sum;
+        }
+    const uint32_t den = dd * k * k;
+    for (uint32_t y = 0; y < oh; y++)
+        for (uint32_t x = 0; x < ow; x++) {
+            uint32_t sum = 0;
+            for (int32_t i = -r; i <= r; i++) {
+                int32_t c = (int32_t)y + i;
+                c = c < 0 ? 0 : (c >= (int32_t)oh ? (int32_t)oh - 1 : c);
+                sum += hs[(uint32_t)c * ow + x];
+            }
+            dst[y * ow + x] = (sum + den / 2u) / den;
+        }
+    free(up);
+    free(hs);
+}
+
 static void test_soften(void) {
     enum { SN = 12, BN = 40 };
     static uint32_t small[SN * SN], big[BN * BN];
@@ -1029,6 +1105,33 @@ static void test_soften(void) {
         }
     CHECK(checked_in > 0 && checked_out > 0, "soften: the interior rule checked %d inside and %d outside texels",
           checked_in, checked_out);
+    /* The blur's running sums equal the windows summed texel by texel, on random alpha at every
+     * factor and edge, the largest texture included (whose windows reach past both ends). */
+    {
+        static const uint32_t dims[][2] = { {1, 1}, {3, 7}, {12, 12}, {NK_TEX_SOFT_MAX_DIM, NK_TEX_SOFT_MAX_DIM} };
+        static uint32_t rnd[NK_TEX_SOFT_MAX_DIM * NK_TEX_SOFT_MAX_DIM];
+        static uint32_t ref[(NK_TEX_SOFT_MAX_DIM * 4) * (NK_TEX_SOFT_MAX_DIM * 4)];
+        static uint32_t got[(NK_TEX_SOFT_MAX_DIM * 4) * (NK_TEX_SOFT_MAX_DIM * 4)];
+        uint32_t seed = 4242u;
+        int windows = 0;
+        for (size_t di = 0; di < sizeof(dims) / sizeof(dims[0]); di++)
+            for (uint32_t f = NK_TEX_SOFT_FACTOR_MIN; f <= NK_TEX_SOFT_FACTOR_MAX; f++)
+                for (uint32_t e = NK_TEX_SOFT_EDGE_MIN; e <= NK_TEX_SOFT_EDGE_MAX; e++) {
+                    const uint32_t w = dims[di][0], h = dims[di][1];
+                    for (uint32_t i = 0; i < w * h; i++) rnd[i] = lcg(&seed) | ((lcg(&seed) & 0xFFu) << 24);
+                    const int ok = nk_tex_soften_alpha_edge(rnd, w, h, f, e, got);
+                    soften_reference(rnd, w, h, f, e, ref);
+                    uint32_t bad = w * f * h * f;
+                    for (uint32_t i = 0; ok && i < w * f * h * f && bad == w * f * h * f; i++)
+                        if ((got[i] >> 24) != ref[i]) bad = i;
+                    CHECK(ok && bad == w * f * h * f, "soften: %ux%u factor %u edge %u: alpha at %u is %u, the "
+                          "texel-by-texel window gives %u", w, h, f, e, bad, ok && bad < w * f * h * f ? got[bad] >> 24 : 0u,
+                          bad < w * f * h * f ? ref[bad] : 0u);
+                    windows++;
+                }
+        if (!s_fail) printf("tex scale selftest: PASS soften running sums equal the texel-by-texel windows (%d "
+                            "sizes, factors and edges)\n", windows);
+    }
     if (!s_fail)
         printf("tex scale selftest: PASS soften exact 12x12 disc, interior (%d inside, %d outside texels), mass, "
                "ramp, determinism, bounds\n", checked_in, checked_out);
@@ -1202,6 +1305,121 @@ static void test_workers(void) {
                         cpus, same);
 }
 
+/* ---- starts that fail, and a stop beside a work job that never finishes ------------------ */
+
+/* A work job that holds its worker until the test lets it go. */
+static SDL_Semaphore *s_block_started, *s_block_go, *s_block_done;
+static void work_block(void *ctx) {
+    (void)ctx;
+    SDL_SignalSemaphore(s_block_started);
+    SDL_WaitSemaphore(s_block_go);
+    SDL_SignalSemaphore(s_block_done);
+}
+static SDL_Semaphore *s_stopped;
+static int stop_thread(void *arg) {
+    (void)arg;
+    nk_tex_scale_shutdown();
+    SDL_SignalSemaphore(s_stopped);
+    return 0;
+}
+
+static void test_lifecycle(void) {
+    /* A start whose condition variable cannot be made fails, and keeps nothing it made: every
+     * later try starts clean instead of piling up mutexes and conditions. */
+    nk_tex_scale_set_start_fault(NK_TEX_SCALE_FAULT_SYNC);
+    int refused = 0;
+    for (int i = 0; i < 3; i++) refused += !nk_tex_scale_can_submit(4, 4, 2);
+    const int left = nk_tex_scale_sync_objects();
+    nk_tex_scale_set_start_fault(NK_TEX_SCALE_FAULT_NONE);
+    CHECK(refused == 3 && left == 0, "lifecycle: %d of 3 failed starts refused, %d mutexes and conditions left "
+          "behind (want 3, 0)", refused, left);
+    CHECK(nk_tex_scale_can_submit(4, 4, 2) && nk_tex_scale_sync_objects() == 3,
+          "lifecycle: the start after the fault did not make its mutex and two conditions (%d)",
+          nk_tex_scale_sync_objects());
+    nk_tex_scale_shutdown();
+    CHECK(nk_tex_scale_sync_objects() == 0, "lifecycle: %d mutexes and conditions alive after shutdown",
+          nk_tex_scale_sync_objects());
+
+    /* No worker could start: the caller scales. That fallback is the start's own; the next start
+     * that has workers queues again (a held job stays queued, not scaled on the caller). */
+    uint32_t tex[4 * 4];
+    for (int i = 0; i < 16; i++) tex[i] = 0xFF000000u | (uint32_t)(i * 0x0A0503u);
+    NkTexScaleResult r;
+    nk_tex_scale_set_start_fault(NK_TEX_SCALE_FAULT_THREAD);
+    const int fb_sub = nk_tex_scale_submit(1u, 0u, tex, 4, 4, 2, 1, 1);
+    const int fb_workers = nk_tex_scale_workers();
+    const int fb_took = nk_tex_scale_take(&r);
+    nk_tex_scale_release(&r);
+    nk_tex_scale_shutdown();
+    nk_tex_scale_set_start_fault(NK_TEX_SCALE_FAULT_NONE);
+    CHECK(fb_sub && fb_workers == 0 && fb_took, "lifecycle: with no worker the submit %d did not scale on the caller "
+          "(%d workers, taken %d)", fb_sub, fb_workers, fb_took);
+    nk_tex_scale_set_hold(1);
+    const int sub = nk_tex_scale_submit(2u, 0u, tex, 4, 4, 2, 1, 1);
+    const int held = !nk_tex_scale_take(&r);
+    nk_tex_scale_release(&r);
+    const int workers = nk_tex_scale_workers();
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    const int took = nk_tex_scale_take(&r) && r.serial == 2u;
+    nk_tex_scale_release(&r);
+    CHECK(sub && held && workers > 0 && took, "lifecycle: after a start with no worker, a start with %d workers "
+          "still scaled on the caller (queued %d, held %d, taken %d)", workers, sub, held, took);
+
+    /* The host-memory cap is broken only by a lone job: a job holding no bytes still occupies the
+     * table, so a job past the cap is refused beside it. */
+    nk_tex_scale_set_hold(1);
+    WorkProbe zero = { 0, 0, 0 }, big = { 0, 0, 0 };
+    const uint64_t over = ((uint64_t)NK_TEX_SCALE_HOST_MB << 20) + 1u;
+    const int zero_in = nk_tex_scale_submit_work(work_probe, &zero, 0u);
+    const int can_big = nk_tex_scale_can_submit_work(over);
+    const int big_in = nk_tex_scale_submit_work(work_probe, &big, over);
+    nk_tex_scale_set_hold(0);
+    nk_tex_scale_wait_idle();
+    void *ctx = NULL;
+    while (nk_tex_scale_take_work(work_probe, &ctx)) {}
+    CHECK(zero_in && !can_big && !big_in, "lifecycle: beside a 0-byte job a job past the cap was %s (can_submit %d)",
+          big_in ? "taken" : "refused", can_big);
+
+    /* A stop while a worker is inside a work job that does not finish returns without waiting for
+     * it (a texture dump's write to a stalled drive must not hold the exit); the worker finishes
+     * later on its own, and the next start runs as new. The 10 s bounds only catch a hang. */
+    nk_tex_scale_set_sync(0);   /* on workers, whatever the cells above left */
+    s_block_started = SDL_CreateSemaphore(0);
+    s_block_go = SDL_CreateSemaphore(0);
+    s_block_done = SDL_CreateSemaphore(0);
+    s_stopped = SDL_CreateSemaphore(0);
+    CHECK(s_block_started && s_block_go && s_block_done && s_stopped, "lifecycle: no semaphores");
+    const int blocked = nk_tex_scale_submit_work(work_block, NULL, 64u) &&
+                        SDL_WaitSemaphoreTimeout(s_block_started, 10000);
+    SDL_Thread *stopper = blocked ? SDL_CreateThread(stop_thread, "nk-texscale-stop", NULL) : NULL;
+    const int stop_returned = stopper && SDL_WaitSemaphoreTimeout(s_stopped, 10000);
+    SDL_SignalSemaphore(s_block_go);
+    const int job_done = SDL_WaitSemaphoreTimeout(s_block_done, 10000);
+    if (stopper) SDL_WaitThread(stopper, NULL);
+    if (!stop_returned) {
+        /* The old stop joined the worker: it has returned now that the job did; take the job. */
+        while (nk_tex_scale_take_work(work_block, &ctx)) {}
+        nk_tex_scale_shutdown();
+    }
+    NkTexScaleStats st;
+    nk_tex_scale_stats(&st);
+    CHECK(blocked && stop_returned && job_done && st.workers_left == 1u && nk_tex_scale_workers() == 0,
+          "lifecycle: the stop %s a worker inside a work job that does not finish (blocked %d, job done %d, "
+          "%llu workers left)", stop_returned ? "returned beside" : "waited for", blocked, job_done,
+          (unsigned long long)st.workers_left);
+    const int restarted = nk_tex_scale_submit(3u, 0u, tex, 4, 4, 2, 1, 1);
+    nk_tex_scale_wait_idle();
+    const int retook = nk_tex_scale_take(&r) && r.serial == 3u;
+    nk_tex_scale_release(&r);
+    CHECK(restarted && retook && nk_tex_scale_workers() > 0, "lifecycle: the start after the stop did not scale "
+          "(%d, %d)", restarted, retook);
+    nk_tex_scale_shutdown();
+    /* The stopped-on worker's semaphores stay: it may still be leaving the job when this returns. */
+    if (!s_fail) printf("tex scale selftest: PASS lifecycle failed starts keep nothing, the no-worker fallback ends "
+                        "with its start, the cap beside a 0-byte job, a stop beside a stuck job\n");
+}
+
 int main(void) {
     test_workers();
     test_soften();
@@ -1213,6 +1431,7 @@ int main(void) {
     test_host_cap();
     test_host_peak();
     test_work();
+    test_lifecycle();
     test_settings();
     test_smart2d();
     if (s_fail) return 1;

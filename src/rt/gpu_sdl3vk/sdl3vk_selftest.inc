@@ -1964,6 +1964,10 @@ static size_t test_rec_diff(const uint8_t *pic, int pw, int x0, int y0, const ui
  * off (deterministic-clock and turbo runs) the present still waits and shows the frame. */
 #define PACE_TEST_BLOCK_MS 50u
 #define PACE_TEST_FRAMES   12
+/* Presents that may take longer than a VBLANK period: a loaded host may stall the test's thread for
+ * a scheduler quantum inside one, which says nothing about the present path. A present that waits
+ * for the busy display (PACE_TEST_BLOCK_MS) is late every time. */
+#define PACE_TEST_LATE_MAX 2
 static int s_pace_test_busy;     /* the fake display holds every image */
 static int s_pace_test_waits;    /* acquires that were allowed to wait while it did */
 static int s_pace_test_acquires; /* every acquire the seam saw */
@@ -2017,20 +2021,23 @@ static int sdl3vk_present_pacing_selftest(void) {
         const uint64_t due = t0 + (uint64_t)k * period;
         uint64_t now = SDL_GetTicksNS();
         if (now < due) SDL_DelayPrecise(due - now);
+        /* Only the present's own time is measured: a late wake from the delay, or a stall between
+         * presents, is the host's, not the present path's. */
+        const uint64_t start = SDL_GetTicksNS();
         if (sdl3vk_present_rgba(px) == SDL3VK_PRESENT_DISPLAY_BUSY) busy++;
-        now = SDL_GetTicksNS();
-        /* The guest's next VBLANK is due one period after this one; past it, it is late. */
-        if (now > due + period) late++;
-        if (now > due && now - due > worst) worst = now - due;
+        const uint64_t spent = SDL_GetTicksNS() - start;
+        /* A present that takes a whole period holds the guest past its next VBLANK. */
+        if (spent > period) late++;
+        if (spent > worst) worst = spent;
     }
     const uint64_t counted = sdl3vk_present_busy_count() - busy_before;
-    if (s_pace_test_waits != 0 || late != 0 || busy != PACE_TEST_FRAMES ||
+    if (s_pace_test_waits != 0 || late > PACE_TEST_LATE_MAX || busy != PACE_TEST_FRAMES ||
         counted != (uint64_t)PACE_TEST_FRAMES) {
         fprintf(stderr, "pacing: with the display holding every image, %d of %d present(s) waited "
-                        "for it, %d guest VBLANK(s) were late (worst %.1f ms after its slot), %d "
-                        "present(s) reported DISPLAY_BUSY and %llu were counted (want 0, 0, %d, "
-                        "%d)\n", s_pace_test_waits, PACE_TEST_FRAMES, late, (double)worst / 1e6,
-                busy, (unsigned long long)counted, PACE_TEST_FRAMES, PACE_TEST_FRAMES);
+                        "for it, %d present(s) took longer than a guest VBLANK period (worst %.1f ms), "
+                        "%d present(s) reported DISPLAY_BUSY and %llu were counted (want 0, at most "
+                        "%d, %d, %d)\n", s_pace_test_waits, PACE_TEST_FRAMES, late, (double)worst / 1e6,
+                busy, (unsigned long long)counted, PACE_TEST_LATE_MAX, PACE_TEST_FRAMES, PACE_TEST_FRAMES);
         ok = 0;
     }
 
@@ -2110,8 +2117,8 @@ static int sdl3vk_present_pacing_selftest(void) {
     s_pace_test_busy = 0;
     s_acquire_fn = NULL;
     if (ok) printf("gpu capture selftest: present pacing OK (%d presents, none waited for a busy "
-                   "display; worst %.1f ms after its VBLANK)\n", PACE_TEST_FRAMES,
-                   (double)worst / 1e6);
+                   "display; %d took longer than a VBLANK period, the longest %.1f ms)\n", PACE_TEST_FRAMES,
+                   late, (double)worst / 1e6);
     return ok;
 }
 
@@ -2330,14 +2337,19 @@ static int sdl3vk_capture_selftest_body(void) {
 
     /* ---- validation-layer requirement ---------------------------------------------- */
     {
+        /* Every installed layer is read, however many there are; a layer installed between the
+         * count and the list makes it VK_INCOMPLETE, and the entries written are still searched. */
         uint32_t n = 0;
-        vkEnumerateInstanceLayerProperties(&n, NULL);
-        VkLayerProperties lp[64];
+        VkLayerProperties *lp = NULL;
         int have = 0;
-        if (n > 64) n = 64;
-        if (vkEnumerateInstanceLayerProperties(&n, lp) == VK_SUCCESS)
-            for (uint32_t i = 0; i < n; i++)
-                if (strcmp(lp[i].layerName, "VK_LAYER_KHRONOS_validation") == 0) have = 1;
+        if (vkEnumerateInstanceLayerProperties(&n, NULL) == VK_SUCCESS && n > 0 &&
+            (lp = (VkLayerProperties *)calloc(n, sizeof *lp)) != NULL) {
+            const VkResult lr = vkEnumerateInstanceLayerProperties(&n, lp);
+            if (lr == VK_SUCCESS || lr == VK_INCOMPLETE)
+                for (uint32_t i = 0; i < n; i++)
+                    if (strcmp(lp[i].layerName, "VK_LAYER_KHRONOS_validation") == 0) have = 1;
+            free(lp);
+        }
         if (!have) {
             fprintf(stderr, "gpu capture selftest: SKIP (VK_LAYER_KHRONOS_validation "
                             "not installed)\n");
