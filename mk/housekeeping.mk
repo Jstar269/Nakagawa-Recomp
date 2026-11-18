@@ -195,10 +195,12 @@ clean-all: clean clean-fixtures
 	$(REMOVE_EPHEMERAL_LOGS)
 
 # Preview-first workspace clean (issue #368): plans allowlisted output roots and
-# prints the exact file set. Deletion requires CONFIRM=1 (which passes --yes);
-# OLDER_THAN=<days> bounds the plan by file age. Existing clean targets are untouched.
+# prints the exact file set. Deletion requires CONFIRM=1 on the make command line (which
+# passes --yes; a CONFIRM inherited from the environment does not count); INCLUDE_TITLE=1
+# passes --include-title-outputs; OLDER_THAN=<days> bounds the plan by file age. Existing
+# clean targets are untouched.
 clean-preview:
-	"$(PYTHON)" tools/nk_clean.py $(if $(filter 1,$(CONFIRM)),--yes,) $(if $(strip $(OLDER_THAN)),--older-than $(OLDER_THAN),)
+	"$(PYTHON)" tools/nk_clean.py $(if $(and $(filter command line,$(origin CONFIRM)),$(filter 1,$(CONFIRM))),--yes,) $(if $(filter 1,$(INCLUDE_TITLE)),--include-title-outputs,) $(if $(strip $(OLDER_THAN)),--older-than $(OLDER_THAN),)
 
 # sched-selftest — white-box scheduler/lifecycle unit tests (tests/native/sched_selftest.c).
 # No game inputs needed; #includes sched.c for direct access to pick_next()/TCB state and

@@ -33,7 +33,9 @@ WORKSPACE_ANCHORS: tuple[str, ...] = (
     "tools/codegen.py",
 )
 
-#: Top-level components that are never scanned, selected, or pruned.
+#: Top-level components that hold source, inputs or evidence. No TREE_RULES or FILE_RULES root
+#: may start with one (test_nk_clean pins this), so nothing in them is ever scanned or
+#: selected, and empty-dir pruning never removes them.
 PROTECTED_COMPONENTS: frozenset[str] = frozenset(
     {
         ".git",
@@ -75,15 +77,28 @@ ORACLE_BUILD_RULE = "tests/fixtures/psp_oracle/build"
 ORACLE_BUILD_SUFFIXES: frozenset[str] = frozenset(
     {".o", ".d", ".a", ".c", ".exp", ".elf", ".prx", ".sfo", ".pbp", ".stamp"}
 )
+#: Families of public build/ directories the Makefile, its selftests and the public tools write:
+#: build/synthetic, build/synthetic_title2, build/test_<selftest>, build/platform-ladder,
+#: build/production-smoke(-gap), build/pspdev_phase5, build/nakagawa_player(_ui_test). A name
+#: matches a family only when it equals the prefix or continues with "_", "-" or a digit, so a
+#: title built as GAME_NAME=testdrive or GAME_NAME=production_title stays a title output.
 PUBLIC_BUILD_PREFIXES: tuple[str, ...] = (
-    "synthetic", "test", "platform-ladder", "production", "pspdev", "nakagawa_player", "psmf",
+    "synthetic", "test", "platform-ladder", "production-smoke", "production_smoke", "pspdev",
+    "nakagawa_player",
 )
-#: Logs written by running a (possibly private) title; kept unless --include-title-outputs.
-TITLE_RUN_LOGS: frozenset[str] = frozenset({"logs/stdout_run.log", "logs/stderr_run.log"})
+_PREFIX_CONTINUATIONS: frozenset[str] = frozenset("_-0123456789")
+#: The flag every kept-title-output skip reason names.
+TITLE_OPT_IN = "--include-title-outputs"
 
 
 def _is_public_build_dir(name: str) -> bool:
-    return name in PUBLIC_BUILD_DIRS or name.startswith(PUBLIC_BUILD_PREFIXES)
+    if name in PUBLIC_BUILD_DIRS:
+        return True
+    return any(
+        name == prefix
+        or (name.startswith(prefix) and name[len(prefix)] in _PREFIX_CONTINUATIONS)
+        for prefix in PUBLIC_BUILD_PREFIXES
+    )
 
 
 def _is_title_pipeline_output(name: str) -> bool:
@@ -112,11 +127,16 @@ class CleanRefusedError(Exception):
 
 @dataclass(frozen=True)
 class AllowRule:
-    """One allowlisted output root: a whole tree or a single exact file."""
+    """One allowlisted output root: a whole tree or a single exact file.
+
+    ``title_output`` marks a file a (possibly private) title run writes; it is kept unless
+    --include-title-outputs.
+    """
 
     rel: str
     category: str
     kind: str
+    title_output: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,16 +188,18 @@ FILE_RULES: tuple[AllowRule, ...] = (
     AllowRule("logs/recomp_err.log", "logs", "file"),
     AllowRule("logs/obj_err.log", "logs", "file"),
     AllowRule("logs/link_err.log", "logs", "file"),
-    AllowRule("logs/stdout_run.log", "logs", "file"),
-    AllowRule("logs/stderr_run.log", "logs", "file"),
+    AllowRule("logs/stdout_run.log", "logs", "file", title_output=True),
+    AllowRule("logs/stderr_run.log", "logs", "file", title_output=True),
     AllowRule("link_err.log", "logs", "file"),
     AllowRule("compile_commands.json", "tool scratch", "file"),
     AllowRule(".coverage", "tool scratch", "file"),
     AllowRule(".eslintcache", "tool scratch", "file"),
 )
 
-#: Directories that empty-dir pruning must never remove: protected roots,
-#: allowlisted rule roots, and the parents of the exact-file log rules.
+#: Directories that empty-dir pruning must never remove: protected roots, allowlisted rule
+#: roots, and the parents of the exact-file log rules. Pruning walks up from a deleted file and
+#: stops at its rule root first, so the protected roots and tests/fixtures here are defence in
+#: depth that no current rule reaches.
 NEVER_PRUNE: frozenset[str] = (
     frozenset(PROTECTED_COMPONENTS)
     | frozenset(rule.rel for rule in TREE_RULES)
@@ -202,16 +224,10 @@ def format_size(size: int) -> str:
     return f"{value:.1f} TiB"
 
 
-def _confirm_requested(yes: bool) -> bool:
-    if yes:
-        return True
-    return os.environ.get("CONFIRM") == "1"
-
-
 def _is_reparse_stat(st: os.stat_result) -> bool:
     if stat.S_ISLNK(st.st_mode):
         return True
-    return bool(getattr(st, "st_file_attributes", 0) & 0x400)
+    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _is_reparse(path: Path) -> bool:
@@ -240,6 +256,22 @@ def _require_within(root_real: str, candidate: str | Path) -> None:
         raise CleanRefusedError(f"cannot resolve path {candidate_text!r}: {exc}") from exc
     if not _is_within(root_real, candidate_real):
         raise CleanRefusedError(f"path escapes the workspace root: {candidate_text}")
+
+
+def _require_own_place(root_real: str, rel: str, candidate: str | Path) -> None:
+    """Prove a candidate resolves to exactly root_real/rel, or refuse.
+
+    The scan lstats only the last component of a path, so a junction or symlink on an
+    intermediate component (logs/, a multi-part rule root, a directory swapped after planning)
+    would otherwise redirect the deletion, inside the workspace or outside it.
+    """
+    _require_within(root_real, candidate)
+    candidate_real = os.path.realpath(os.path.abspath(os.fspath(candidate)))
+    expected = os.path.join(root_real, *rel.split("/"))
+    if os.path.normcase(candidate_real) != os.path.normcase(expected):
+        raise CleanRefusedError(
+            f"path does not resolve to its own place under the workspace root: {rel}"
+        )
 
 
 def _require_workspace(root: Path) -> None:
@@ -303,6 +335,11 @@ def plan_clean(
         if cutoff is not None and st.st_mtime >= cutoff:
             preview.age_excluded += 1
             preview.age_excluded_bytes += st.st_size
+            return
+        try:
+            _require_own_place(preview.root_real, rel, path)
+        except CleanRefusedError as exc:
+            preview.errors.append((rel, str(exc)))
             return
         preview.files.append(SelectedFile(rel=rel, category=category, size=st.st_size))
 
@@ -368,7 +405,7 @@ def plan_clean(
         rule_path = root_path / rule.rel
         if not os.path.lexists(rule_path):
             continue
-        if rule.rel in TITLE_RUN_LOGS and not include_title_outputs:
+        if rule.title_output and not include_title_outputs:
             preview.skipped.append(SkippedEntry(
                 rule.rel, "title run log; pass --include-title-outputs to clean it"))
             continue
@@ -379,25 +416,22 @@ def plan_clean(
 
 def _prune_empty_dirs(preview: Preview, deleted: list[Path]) -> None:
     """Remove directories emptied by this run, never rule roots or protected paths."""
-    candidates: list[Path] = []
+    # One set for the whole run: a walk stops at the first directory an earlier walk recorded,
+    # because that walk already recorded every prunable ancestor above it.
+    candidates: set[Path] = set()
     for path in deleted:
         current = path.parent
-        seen: set[Path] = set()
-        while current != preview.root and current not in seen:
-            seen.add(current)
+        while current != preview.root and current not in candidates:
             try:
                 rel = current.relative_to(preview.root).as_posix()
             except ValueError:
                 break
             if rel in NEVER_PRUNE:
                 break
-            candidates.append(current)
+            candidates.add(current)
             current = current.parent
-    unique: list[Path] = []
-    for candidate in candidates:
-        if candidate not in unique:
-            unique.append(candidate)
-    for directory in sorted(unique, key=lambda item: len(item.parts), reverse=True):
+    for directory in sorted(candidates, key=lambda item: (len(item.parts), str(item)),
+                            reverse=True):
         if not directory.is_dir() or _is_reparse(directory):
             continue
         try:
@@ -411,30 +445,50 @@ def _prune_empty_dirs(preview: Preview, deleted: list[Path]) -> None:
             continue
 
 
+#: The last failure execute() reports when its revalidation pass refuses the plan.
+NOTHING_DELETED = "refused before the first deletion; no files were deleted"
+
+
+def _revalidate(preview: Preview, selected: SelectedFile) -> str | None:
+    """Why a planned file may no longer be deleted, or None when it still may."""
+    path = preview.root / selected.rel
+    try:
+        _require_own_place(preview.root_real, selected.rel, path)
+    except CleanRefusedError as exc:
+        return str(exc)
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        return f"stat failed: {exc}"
+    if _is_reparse_stat(st):
+        return "reparse point appeared; refusing"
+    if not stat.S_ISREG(st.st_mode):
+        return "no longer a regular file"
+    if selected.rel in preview.tracked:
+        return "became git-tracked; refusing"
+    return None
+
+
 def execute(preview: Preview) -> list[str]:
-    """Delete exactly the previewed set after revalidating every path."""
+    """Delete exactly the previewed set after revalidating every path.
+
+    Every planned file is revalidated before the first unlink, so a containment or scan
+    failure deletes nothing; each file is checked once more just before its own unlink.
+    """
     failures: list[str] = []
+    for selected in preview.files:
+        problem = _revalidate(preview, selected)
+        if problem is not None:
+            failures.append(f"{selected.rel}: {problem}")
+    if failures:
+        failures.append(NOTHING_DELETED)
+        return failures
     deleted: list[Path] = []
     for selected in preview.files:
         path = preview.root / selected.rel
-        try:
-            _require_within(preview.root_real, path)
-        except CleanRefusedError as exc:
-            failures.append(f"{selected.rel}: {exc}")
-            continue
-        try:
-            st = os.lstat(path)
-        except OSError as exc:
-            failures.append(f"{selected.rel}: stat failed: {exc}")
-            continue
-        if _is_reparse_stat(st):
-            failures.append(f"{selected.rel}: reparse point appeared; refusing")
-            continue
-        if not stat.S_ISREG(st.st_mode):
-            failures.append(f"{selected.rel}: no longer a regular file")
-            continue
-        if selected.rel in preview.tracked:
-            failures.append(f"{selected.rel}: became git-tracked; refusing")
+        problem = _revalidate(preview, selected)
+        if problem is not None:
+            failures.append(f"{selected.rel}: {problem}")
             continue
         try:
             os.unlink(path)
@@ -451,14 +505,20 @@ def render(preview: Preview, *, confirm: bool) -> str:
     total = sum(selected.size for selected in preview.files)
     count = len(preview.files)
     lines: list[str] = []
-    if confirm:
+    if not preview.ok:
+        lines.append(
+            f"REFUSED: {len(preview.errors)} scan error(s); no files will be deleted "
+            f"({count} files, {format_size(total)} planned)"
+        )
+    elif confirm:
         lines.append(f"CLEAN (confirmed): {count} files, {format_size(total)} will be deleted")
     else:
         lines.append(f"DRY-RUN: {count} files, {format_size(total)} would be deleted")
     if preview.older_than_days is not None:
         lines.append(
             f"Age bound: {preview.older_than_days} day(s); "
-            f"{preview.age_excluded} newer file(s) excluded"
+            f"{preview.age_excluded} newer file(s), "
+            f"{format_size(preview.age_excluded_bytes)} excluded"
         )
     order = {category: index for index, category in enumerate(CATEGORY_ORDER)}
     ordered = sorted(
@@ -472,17 +532,28 @@ def render(preview: Preview, *, confirm: bool) -> str:
             lines.append("  (none)")
         for selected in members:
             lines.append(f"  {selected.rel}  {format_size(selected.size)}")
+    kept_title_outputs = False
     if preview.skipped:
-        lines.append(
-            f"Skipped {len(preview.skipped)} entries "
-            "(tracked, protected, reparse points, or non-regular files)"
-        )
+        lines.append(f"Skipped {len(preview.skipped)} entries:")
+        by_reason: dict[str, list[str]] = {}
+        for entry in preview.skipped:
+            by_reason.setdefault(entry.reason, []).append(entry.rel)
+        for reason, rels in by_reason.items():
+            lines.append(f"  {len(rels)} x {reason}")
+            if TITLE_OPT_IN in reason:
+                kept_title_outputs = True
+                lines.extend(f"    {rel}" for rel in rels)
     for rel, message in preview.errors:
         lines.append(f"ERROR {rel}: {message}")
-    if confirm:
+    if not preview.ok:
+        lines.append("No files were deleted: resolve the errors above and re-run.")
+    elif confirm:
         lines.append(f"{count} files selected for deletion.")
     else:
-        lines.append("No files were deleted. Re-run with --yes or CONFIRM=1 to apply.")
+        lines.append("No files were deleted. Re-run with --yes (make: CONFIRM=1) to apply.")
+    if kept_title_outputs:
+        lines.append(f"Title outputs were kept; pass {TITLE_OPT_IN} (make: INCLUDE_TITLE=1) "
+                     "to clean them too.")
     return "\n".join(lines) + "\n"
 
 
@@ -491,7 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="nk_clean.py",
         description=(
             "Preview-first workspace clean for allowlisted output roots (issue #368). "
-            "Runs as a dry-run unless --yes or CONFIRM=1 is given."
+            "Runs as a dry-run unless --yes is given."
         ),
     )
     parser.add_argument(
@@ -531,7 +602,9 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"nk_clean: git ls-files failed: {exc}", file=sys.stderr)
         return 1
-    confirm = _confirm_requested(args.yes)
+    # Only --yes confirms, so an inherited CONFIRM variable never turns the dry run into a
+    # deletion; make clean-preview turns a command-line CONFIRM=1 into --yes.
+    confirm = bool(args.yes)
     sys.stdout.write(render(preview, confirm=confirm))
     if preview.errors:
         return 1

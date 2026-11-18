@@ -13,7 +13,10 @@ same tool.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -58,6 +61,16 @@ def _plant(root: Path) -> dict[str, Path]:
     return planted
 
 
+def _run_main(root: Path, argv: list[str]) -> tuple[int, str, str]:
+    """Run the CLI entry point against a synthetic workspace with nothing git-tracked."""
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(nk_clean, "REPO_ROOT", root), \
+            mock.patch.object(nk_clean, "git_tracked", return_value=frozenset()), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = nk_clean.main(argv)
+    return code, out.getvalue(), err.getvalue()
+
+
 def _make_dir_link(link: Path, target: Path) -> bool:
     link.parent.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
@@ -93,17 +106,61 @@ class DryRunTests(unittest.TestCase):
                 self.assertTrue(path.exists(), f"dry-run touched {path}")
             self.assertTrue((root / "build" / "game.o").exists())
 
-    def test_confirm_gate_accepts_only_explicit_confirmation(self) -> None:
-        env = dict(os.environ)
-        env.pop("CONFIRM", None)
-        with mock.patch.dict(os.environ, env, clear=True):
-            self.assertFalse(nk_clean._confirm_requested(False))
-        with mock.patch.dict(os.environ, {"CONFIRM": "1"}):
-            self.assertTrue(nk_clean._confirm_requested(False))
-        with mock.patch.dict(os.environ, {"CONFIRM": "0"}):
-            self.assertFalse(nk_clean._confirm_requested(False))
-        with mock.patch.dict(os.environ, {"CONFIRM": "1"}):
-            self.assertTrue(nk_clean._confirm_requested(True))
+    def test_only_yes_confirms_and_an_inherited_confirm_variable_stays_a_dry_run(self) -> None:
+        """A shell or CI job that exports CONFIRM=1 for another tool must not turn the plain
+        invocation, which the docs present as the dry run, into a deletion."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_workspace(Path(tmp))
+            built = _write(root / "build" / "game.o", b"abcd")
+            with mock.patch.dict(os.environ, {"CONFIRM": "1"}):
+                code, out, _err = _run_main(root, [])
+            self.assertEqual(code, 0, out)
+            self.assertIn("DRY-RUN", out)
+            self.assertTrue(built.exists(), "an inherited CONFIRM=1 deleted the plan")
+            code, out, _err = _run_main(root, ["--yes"])
+            self.assertEqual(code, 0, out)
+            self.assertFalse(built.exists(), "--yes must still apply the plan")
+
+
+class RenderTests(unittest.TestCase):
+    def test_confirmed_run_with_scan_errors_says_nothing_is_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_workspace(Path(tmp))
+            _write(root / "build" / "game.o", b"abcd")
+            preview = nk_clean.plan_clean(root, tracked=frozenset())
+            preview.errors.append(("build/broken", "scan failed: denied"))
+            text = nk_clean.render(preview, confirm=True)
+            self.assertIn("REFUSED", text)
+            self.assertIn("no files will be deleted", text)
+            self.assertIn("No files were deleted", text)
+            self.assertNotIn(f"{nk_clean.format_size(4)} will be deleted", text)
+            self.assertNotIn("CLEAN (confirmed)", text)
+            self.assertNotIn("selected for deletion", text)
+
+    def test_skip_reasons_are_printed_with_the_kept_title_outputs_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_workspace(Path(tmp))
+            _write(root / "build" / "hst" / "hst_recomp.c")
+            _write(root / "logs" / "stdout_run.log")
+            _write(root / "build" / "keep_me.txt")
+            preview = nk_clean.plan_clean(root, tracked=frozenset({"build/keep_me.txt"}))
+            text = nk_clean.render(preview, confirm=False)
+            self.assertIn("1 x title output; pass --include-title-outputs to clean it", text)
+            self.assertIn("    build/hst\n", text)
+            self.assertIn("1 x title run log; pass --include-title-outputs to clean it", text)
+            self.assertIn("    logs/stdout_run.log\n", text)
+            self.assertIn("1 x git-tracked; protected", text)
+            self.assertNotIn("    build/keep_me.txt", text, "only kept title outputs are listed")
+            self.assertIn("INCLUDE_TITLE=1", text)
+
+    def test_age_bound_line_reports_the_excluded_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_workspace(Path(tmp))
+            _write(root / "build" / "fresh.o", b"x" * 2048)
+            preview = nk_clean.plan_clean(root, tracked=frozenset(), older_than_days=7)
+            self.assertEqual(preview.age_excluded_bytes, 2048)
+            text = nk_clean.render(preview, confirm=False)
+            self.assertIn(f"1 newer file(s), {nk_clean.format_size(2048)} excluded", text)
 
 
 class NeverPruneTests(unittest.TestCase):
@@ -112,6 +169,26 @@ class NeverPruneTests(unittest.TestCase):
         self.assertIn("tests/fixtures", nk_clean.NEVER_PRUNE)
         self.assertIn("tests/fixtures/psp_oracle/build", nk_clean.NEVER_PRUNE)
         self.assertNotIn("fixtures", nk_clean.NEVER_PRUNE, "the root folder the tree moved from")
+
+    def test_no_allowlist_rule_starts_in_a_protected_component(self) -> None:
+        """PROTECTED_COMPONENTS holds because no rule can scan or select inside one."""
+        for rule in nk_clean.TREE_RULES + nk_clean.FILE_RULES:
+            with self.subTest(rule=rule.rel):
+                self.assertNotIn(rule.rel.split("/", 1)[0], nk_clean.PROTECTED_COMPONENTS)
+
+    def test_pruning_removes_every_emptied_directory_and_keeps_rule_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_workspace(Path(tmp))
+            for index in range(3):
+                _write(root / "build" / "synthetic" / "b" / f"c{index}" / "f.o")
+                _write(root / "build" / "synthetic" / f"d{index}.o")
+            _write(root / "build" / "test" / "kept.txt")
+            preview = nk_clean.plan_clean(root, tracked=frozenset({"build/test/kept.txt"}))
+            self.assertEqual(len(preview.files), 6)
+            self.assertEqual(nk_clean.execute(preview), [])
+            self.assertFalse((root / "build" / "synthetic").exists())
+            self.assertTrue((root / "build" / "test" / "kept.txt").exists())
+            self.assertTrue((root / "build").is_dir())
 
 
 class SelectionTests(unittest.TestCase):
@@ -214,6 +291,29 @@ class TitleOutputTests(unittest.TestCase):
                 self.assertIn("build/mygame", {entry.rel for entry in default.skipped})
                 opted = nk_clean.plan_clean(root, tracked=frozenset(), include_title_outputs=True)
                 self.assertIn(f"build/mygame/{output}", {entry.rel for entry in opted.files})
+
+    def test_public_build_families_match_only_at_a_separator(self) -> None:
+        """A title whose name merely starts like a public build family stays a title output."""
+        for name in ("synthetic", "synthetic2", "synthetic_title2", "test", "test_nk_zip",
+                     "platform-ladder", "production-smoke", "production-smoke-gap",
+                     "production_smoke", "pspdev_phase5", "nakagawa_player",
+                     "nakagawa_player_ui_test", "cosim", "mygame"):
+            with self.subTest(public=name):
+                self.assertTrue(nk_clean._is_public_build_dir(name))
+        for name in ("testdrive", "psmfplayer", "production_title", "productionx",
+                     "syntheticworld", "pspdevil", "nakagawa_playerx"):
+            with self.subTest(title=name):
+                self.assertFalse(nk_clean._is_public_build_dir(name))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_workspace(Path(tmp))
+            _write(root / "build" / "testdrive" / "testdrive.exe")
+            default = nk_clean.plan_clean(root, tracked=frozenset())
+            self.assertNotIn("build/testdrive/testdrive.exe", {e.rel for e in default.files})
+            self.assertIn("build/testdrive", {e.rel for e in default.skipped})
+
+    def test_title_run_logs_are_marked_on_their_rules(self) -> None:
+        marked = {rule.rel for rule in nk_clean.FILE_RULES if rule.title_output}
+        self.assertEqual(marked, {"logs/stdout_run.log", "logs/stderr_run.log"})
 
     def test_title_run_frame_captures_need_opt_in(self) -> None:
         """build/snapshots holds the frames a (possibly private) title run's SR_FBSNAP wrote."""
@@ -331,6 +431,52 @@ class ContainmentTests(unittest.TestCase):
             with self.assertRaises(nk_clean.CleanRefusedError):
                 nk_clean._require_within(root_real, outside)
 
+    def test_junction_on_an_intermediate_component_refuses_the_plan_and_deletes_nothing(
+            self) -> None:
+        """logs/ redirected by a junction: the plan lstats only the log file itself, so the
+        containment check must refuse before the first unlink, wherever the junction points."""
+        for where in ("outside", "inside"):
+            with self.subTest(target=where), tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                root = _make_workspace(base)
+                built = _write(root / "build" / "game.o", b"abcd")
+                target = (base / "elsewhere") if where == "outside" else (root / "src" / "vault")
+                redirected = _write(target / "build_out_recomp.log", b"not a build log")
+                if not _make_dir_link(root / "logs", target):
+                    self.skipTest("cannot create a directory symlink/junction on this host")
+
+                preview = nk_clean.plan_clean(root, tracked=frozenset())
+                self.assertIn("logs/build_out_recomp.log", {rel for rel, _ in preview.errors})
+                self.assertNotIn("logs/build_out_recomp.log", {f.rel for f in preview.files})
+
+                code, out, _err = _run_main(root, ["--yes"])
+                self.assertEqual(code, 1, out)
+                self.assertIn("REFUSED", out)
+                self.assertTrue(built.exists(), "a containment failure still deleted build/")
+                self.assertTrue(redirected.exists(), "the redirected log was deleted")
+
+    def test_a_component_swapped_after_planning_deletes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = _make_workspace(base)
+            built = _write(root / "build" / "game.o", b"abcd")
+            _write(root / "logs" / "build_out_recomp.log", b"log")
+            preview = nk_clean.plan_clean(root, tracked=frozenset())
+            self.assertFalse(preview.errors, preview.errors)
+            self.assertIn("logs/build_out_recomp.log", {f.rel for f in preview.files})
+
+            outside = _write(base / "elsewhere" / "build_out_recomp.log", b"outside")
+            shutil.rmtree(root / "logs")
+            if not _make_dir_link(root / "logs", base / "elsewhere"):
+                self.skipTest("cannot create a directory symlink/junction on this host")
+
+            failures = nk_clean.execute(preview)
+            self.assertTrue(failures)
+            self.assertEqual(failures[-1], nk_clean.NOTHING_DELETED)
+            self.assertTrue(any(f.startswith("logs/build_out_recomp.log:") for f in failures))
+            self.assertTrue(built.exists(), "files before the refused one were deleted")
+            self.assertTrue(outside.exists())
+
 
 class CheckoutDryRunTests(unittest.TestCase):
     def test_cli_dry_run_against_this_checkout_deletes_nothing(self) -> None:
@@ -359,7 +505,33 @@ class EntryPointWiringTests(unittest.TestCase):
         )
         self.assertIn("--yes", recipe)
         self.assertIn("$(filter 1,$(CONFIRM))", recipe)
+        self.assertIn("$(filter command line,$(origin CONFIRM))", recipe)
+        self.assertIn("$(if $(filter 1,$(INCLUDE_TITLE)),--include-title-outputs,)", recipe)
         self.assertIn("--older-than", recipe)
+
+    def test_make_confirms_only_from_its_command_line(self) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if make is None:
+            self.skipTest("no make on PATH")
+        env = dict(os.environ)
+        env.pop("INCLUDE_TITLE", None)
+        env["CONFIRM"] = "1"
+        inherited = subprocess.run(
+            [make, "--no-print-directory", "-n", "clean-preview"],
+            cwd=ROOT, capture_output=True, text=True, env=env, timeout=600, check=False,
+        )
+        self.assertEqual(inherited.returncode, 0, inherited.stdout + inherited.stderr)
+        line = next(x for x in inherited.stdout.splitlines() if "tools/nk_clean.py" in x)
+        self.assertNotIn("--yes", line, "an inherited CONFIRM=1 must not confirm")
+        env.pop("CONFIRM")
+        explicit = subprocess.run(
+            [make, "--no-print-directory", "-n", "clean-preview", "CONFIRM=1", "INCLUDE_TITLE=1"],
+            cwd=ROOT, capture_output=True, text=True, env=env, timeout=600, check=False,
+        )
+        self.assertEqual(explicit.returncode, 0, explicit.stdout + explicit.stderr)
+        line = next(x for x in explicit.stdout.splitlines() if "tools/nk_clean.py" in x)
+        self.assertIn("--yes", line)
+        self.assertIn("--include-title-outputs", line)
 
     def test_frontend_exposes_clean_action(self) -> None:
         text = (ROOT / "nk.ps1").read_text(encoding="utf-8-sig")
