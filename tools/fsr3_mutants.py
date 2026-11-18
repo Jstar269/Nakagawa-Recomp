@@ -174,7 +174,7 @@ FG_MUTANTS: list[tuple[str, str, str, str, str]] = [
     ("the dispatch reads the other frame's prepare", FG_HOST,
      "const Fsr3FgHostPrepare *p = &h->prepared[d->frame_id % PROVIDER_MAX_QUEUED_FRAMES];",
      "const Fsr3FgHostPrepare *p = &h->prepared[h->shared_toggle ^ 1u];",
-     "AMD:  stage"),
+     "host: result -1"),   # the dispatch refuses a prepare that is not its frame's
     ("optical flow's level 0 kept off the shared vector", FG_HOST,
      "        if (level == 0) uav[OFB_OPTICAL_FLOW] = uav[OFB_SHARED_OPTICAL_FLOW_VECTOR];\n",
      "",

@@ -8,7 +8,11 @@ earlier PPSSPP-GPU bridge under `src/rt/gpu_vk/` was a frozen experiment and has
 
 > **AI disclosure:** this renderer was written with substantial assistance from an LLM
 > (Anthropic Claude). It is an original implementation, but it reproduces PSP/GE pixel
-> semantics derived from PPSSPP's software renderer (through `ge.c`), so it is GPL-2.0-or-later.
+> semantics derived from PPSSPP's software renderer (through `ge.c`), so the renderer itself
+> (`ge_gpu.c`, `sdl3vk.c`, their headers and selftests) is GPL-2.0-or-later. The presentation and
+> enhancement passes beside it (`ace_*`, `anime4k_*`, `fsr1_*`, `fsr3*`, `glyph_*`, `tex_scale*`,
+> `tex_mips*`, `pipeline_cache*`) are GPL-3.0-or-later, and the FSR 3 passes also carry AMD's MIT
+> notice; each file's SPDX line is authoritative.
 > See [`../../../NOTICE.md`](../../../NOTICE.md). Treat "faithfulness" claims below as
 > intent, not an audited guarantee.
 
@@ -66,7 +70,9 @@ Enabled with `SR_GPU_GE=1`. Implementation:
   doubled-alpha blend factors, min/max/absdiff blend equations, two distinct FIX
   constants, partial-byte write masks — flushes and falls back to the software
   rasterizer in correct order. Presentation/snapshot code is unchanged.
-- Not reproduced on GPU: ordered dithering (±4 LSB on 16-bit targets). Fixed-function
+- Ordered dithering is reproduced: `psp.frag` adds the GE's 4x4 matrix (the `dith` push
+  constant, enabled by flag bit 512) at the guest pixel position, after the shader blend and
+  before the 16-bit store quantization, as `ge.c` does. Fixed-function
   blends differ from the software blender's truncating integer products by at most 2 LSB
   (analytic bound: truncation of two products plus round-to-nearest). Shader blends are
   bit-exact to `ge.c` for non-overlapping primitives. Measured by the
@@ -124,7 +130,8 @@ Enabled with `SR_GPU_GE=1`. Implementation:
 - Texture cache keyed by (addr, fmt, dims, bufw, swizzle, wrap, filter) + a sparse FNV
   content hash (CLUT RAM + format word included for CLUT4/CLUT8). Decode goes through
   `ge_decode_tex_rgba()` in ge.c — the exact software sampler path — so swizzle/CLUT
-  behaviour is reference-correct by construction. 256 entries, full-drop eviction.
+  behaviour is reference-correct by construction. 1024 entries (`MAX_TEX`); when the cache is
+  full, `tex_evict_lru` evicts the least recently used quarter, oldest first.
 - Invalidation is the content hash ("hash on use", PPSSPP-style). Render-to-texture
   works because texturing from VRAM forces a flush+writeback first, then the hash
   sees the new pixels.
@@ -525,7 +532,8 @@ presents and compare with the rule.
 
 ## Environment variables
 
-- `SR_GPU_GE=1` — enable the GPU rasterizer (SDL3 build only; default off).
+- `SR_GPU_GE=1` — enable the GPU rasterizer (SDL3 build only). The runtime's default is off,
+  but the player sets it for every launch, so a player run always has it on.
 - `SR_GPU_SCALE=1..4` — the integer render scale (`SR_RESOLUTION_SCALE` is the other spelling);
   default 1. See [Render scale and render targets read as textures](#render-scale-and-render-targets-read-as-textures-2052).
 - `SR_GPU_NORTT=1` — read every render target used as a texture back through guest VRAM at 1x,

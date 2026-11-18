@@ -24,6 +24,7 @@
 
 #include "fbcap.h"
 
+#include "asset_index.h"           /* sr_asset_index_valid_utf8: the project's strict UTF-8 rule */
 #include "../core/nk_platform.h"   /* the wide-path (UTF-8) file calls: user data paths */
 
 #include <errno.h>
@@ -591,30 +592,9 @@ int sr_file_publish_new_tagged(const char *path, const void *data, size_t len, u
     return publish_new(path, data, len, &tag);
 }
 
-/* The length of the strict UTF-8 sequence at s (RFC 3629: no overlong form, no surrogate, nothing
-   past U+10FFFF), or 0. */
-static size_t texdump_utf8_at(const unsigned char *s) {
-    const unsigned char a = s[0];
-    if (a < 0x80u) return 1u;
-    if (a >= 0xc2u && a <= 0xdfu) return (s[1] & 0xc0u) == 0x80u ? 2u : 0u;
-    if (a >= 0xe0u && a <= 0xefu) {
-        const unsigned char lo = a == 0xe0u ? 0xa0u : 0x80u, hi = a == 0xedu ? 0x9fu : 0xbfu;
-        return s[1] >= lo && s[1] <= hi && (s[2] & 0xc0u) == 0x80u ? 3u : 0u;
-    }
-    if (a >= 0xf0u && a <= 0xf4u) {
-        const unsigned char lo = a == 0xf0u ? 0x90u : 0x80u, hi = a == 0xf4u ? 0x8fu : 0xbfu;
-        return s[1] >= lo && s[1] <= hi && (s[2] & 0xc0u) == 0x80u && (s[3] & 0xc0u) == 0x80u ? 4u : 0u;
-    }
-    return 0u;
-}
-
 const char *sr_texdump_folder_problem(const char *dir) {
     if (!dir || !dir[0]) return "no dump folder could be named";
-    for (const unsigned char *p = (const unsigned char *)dir; *p;) {
-        const size_t n = texdump_utf8_at(p);
-        if (!n) return "the dump folder's path is not valid UTF-8";
-        p += n;
-    }
+    if (!sr_asset_index_valid_utf8(dir)) return "the dump folder's path is not valid UTF-8";
     if (!nk_platform_path_is_absolute(dir)) return "the dump folder's path is not a full path";
     if (strlen(dir) >= SR_TEXDUMP_DIR_MAX) return "the dump folder's path is 512 characters or longer";
     if ((dir[0] == '\\' || dir[0] == '/') && (dir[1] == '\\' || dir[1] == '/') && (dir[2] == '.' || dir[2] == '?') &&

@@ -40,6 +40,8 @@
 #ifndef NAKAGAWA_RECOMP_FBCAP_POLICY_H
 #define NAKAGAWA_RECOMP_FBCAP_POLICY_H
 
+#include <stddef.h>   /* size_t */
+
 enum {
     SR_FBCAP_NONE = 0,
     SR_FBCAP_FBSNAP,

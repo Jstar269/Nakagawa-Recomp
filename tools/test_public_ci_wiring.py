@@ -387,9 +387,19 @@ class PublicCiWiringTests(unittest.TestCase):
         makefile = read_makefile(ROOT)
         self.assertIn(
             "gpu-coherence-selftest: $(GPU_COHERENCE_BIN)\n"
-            "\t$(NK_REQUIRE_POSIX_SHELL)\n\t$(GPU_COHERENCE_BIN)\n",
+            "\t$(NK_REQUIRE_POSIX_SHELL)\n\t@: > \"$(GPU_COHERENCE_SKIPS)\"\n\t$(GPU_COHERENCE_RUN)\n",
             makefile,
         )
+        # A leg the device refuses (the interlock, supersampling, the twin) prints a SKIP line and exits 0, so
+        # the exit status cannot tell it from a PASS: every leg runs through GPU_COHERENCE_RUN, which keeps its
+        # SKIP lines, and the recipe's last line names them (or says every leg ran).
+        recipe = makefile.split("gpu-coherence-selftest: $(GPU_COHERENCE_BIN)\n", 1)[1].split("\n\n", 1)[0]
+        self.assertNotRegex(recipe, r"(?m)^\t\$\(GPU_COHERENCE_BIN\) ", "a leg bypasses GPU_COHERENCE_RUN")
+        self.assertIn('grep -a "gpu coherence selftest: SKIP"', makefile)
+        last = recipe.rstrip("\n").rsplit("\n\t@if ", 1)[1]
+        self.assertIn('[ -s "$(GPU_COHERENCE_SKIPS)" ]', last)
+        self.assertIn('echo "SKIP gpu-coherence-selftest: ', last)
+        self.assertIn('echo "PASS gpu-coherence-selftest: every leg ran its path', last)
         docs = (ROOT / "docs" / "CI.md").read_text(encoding="utf-8")
         self.assertIn("`gpu-coherence-selftest`", docs)
 

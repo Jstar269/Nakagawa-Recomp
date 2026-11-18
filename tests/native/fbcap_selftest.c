@@ -29,6 +29,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#include "fbcap_policy.h" /* first: the header compiles on its own (it uses size_t) */
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +42,6 @@
 #endif
 
 #include "fbcap.h"
-#include "fbcap_policy.h" /* declares sr_fbcap_path with size_t: after <stdio.h> */
 #include "nk_platform.h"    /* wide-path (UTF-8) file calls for the non-ASCII folder */
 #include "nk_psp_inflate.h" /* the in-tree inflater the encoder is checked against */
 

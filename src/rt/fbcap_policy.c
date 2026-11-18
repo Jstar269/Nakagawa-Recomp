@@ -54,6 +54,19 @@ int sr_fbcap_exit_status(int owner, int capture_result) {
     return 1;
 }
 
+/* The disc ID's letters, digits, '-' and '_', at most 32 of them, into disc (NUL-terminated); their count. */
+static size_t disc_id_keep(const char *disc_id, char disc[33]) {
+    size_t n = 0;
+    for (const char *p = disc_id ? disc_id : ""; *p && n < 32u; p++) {
+        char c = *p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_')
+            disc[n++] = c;
+    }
+    disc[n] = '\0';
+    return n;
+}
+
 int sr_screenshot_name(const char *disc_id, int year, int month, int day, int hour, int minute,
                        int second, int seq, char *out, size_t outsz) {
     if (!out || outsz == 0u) return 0;
@@ -63,14 +76,7 @@ int sr_screenshot_name(const char *disc_id, int year, int month, int day, int ho
         seq < 1 || seq > 99)
         return 0;
     char disc[33];
-    size_t n = 0;
-    for (const char *p = disc_id ? disc_id : ""; *p && n < sizeof disc - 1u; p++) {
-        char c = *p;
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-            c == '-' || c == '_')
-            disc[n++] = c;
-    }
-    disc[n] = '\0';
+    const size_t n = disc_id_keep(disc_id, disc);
     if (n == 0u) memcpy(disc, "game", 5u);
     char suffix[4] = "";
     if (seq > 1) snprintf(suffix, sizeof suffix, "-%d", seq);
@@ -124,14 +130,7 @@ int sr_texdump_folder(const char *user_root, const char *disc_id, char *out, siz
     const char *unc = "";
     if (!user_root_plain(&user_root, &unc)) return 0;
     char disc[33];
-    size_t n = 0;
-    for (const char *p = disc_id ? disc_id : ""; *p && n < sizeof disc - 1u; p++) {
-        char c = *p;
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-            c == '-' || c == '_')
-            disc[n++] = c;
-    }
-    disc[n] = '\0';
+    const size_t n = disc_id_keep(disc_id, disc);
     if (n == 0u) return 0;
     int w = snprintf(out, outsz, "%s%s/texdump/%s", unc, user_root, disc);
     if (w < 0 || (size_t)w >= outsz) {

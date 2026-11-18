@@ -9663,12 +9663,15 @@ static int coherence_run_ssaa_edge(void) {
     if (ok && ref_path) {
         if (s_ssaa == 1) {
             FILE *f = fopen(ref_path, "w");
-            if (!f || fprintf(f, "scale=%d vram=%016llx\n", s_scale, (unsigned long long)vram) < 0) {
+            /* The line is buffered: fclose writes it, so a failed close is a reference never written. */
+            const int wrote = f && fprintf(f, "scale=%d vram=%016llx\n", s_scale, (unsigned long long)vram) >= 0;
+            if (f && fclose(f) != 0) f = NULL;
+            if (!wrote || !f) {
                 fprintf(stderr, "gpu coherence selftest [%s]: FAIL cannot write %s\n", name, ref_path);
                 ok = 0;
+            } else {
+                checked = "reference written";
             }
-            if (f) fclose(f);
-            checked = "reference written";
         } else {
             FILE *f = fopen(ref_path, "r");
             int rs = 0;
