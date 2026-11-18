@@ -55,6 +55,7 @@
 #include <string.h>
 
 #include "atrac3p/atrac3p_api.h"
+#include "atrac3p/libavutil/log.h"
 #include "vfpu_tables.h"
 
 static int g_checks = 0;
@@ -333,8 +334,13 @@ static void capture_log_line(const char *line, void *opaque)
  * reset. A frame whose first channel unit is CH_UNIT_EXTENSION (start bit 0,
  * unit id 2: 0x40) makes the decoder report the missing feature; that report
  * used to be written with no line ending, so the next stderr line was glued
- * onto it. MUTANT: ignoring the level fails the debug check; dropping the
- * newline or the prefix fails the line check. */
+ * onto it. The line ending is added in two places (internal.h's format ends
+ * in a newline, and av_vlog() appends one when a format has none), so the
+ * missing-feature check alone cannot see either one dropped; the direct
+ * av_log() calls below cover av_vlog()'s own newline. MUTANT: ignoring the
+ * level fails the debug check; dropping the prefix, or a two-call report,
+ * fails the missing-feature line check; dropping av_vlog()'s newline append
+ * fails the unterminated-format check. */
 static void test_decoder_log_lines(void)
 {
     static const uint8_t at3_wav_mono[14] = {
@@ -368,6 +374,17 @@ static void test_decoder_log_lines(void)
                  "atrac3p: Missing feature: Channel unit extension is not implemented.\n") == 0,
           "missing-feature report is one prefixed, terminated line");
     atrac3p_destroy(h);
+
+    memset(&cap, 0, sizeof(cap));
+    av_log(NULL, AV_LOG_ERROR, "x %d", 1);
+    CHECK(cap.lines == 1, "unterminated av_log format is one log call");
+    CHECK(strcmp(cap.text, "atrac3p: x 1\n") == 0,
+          "unterminated av_log format becomes one prefixed, terminated line");
+
+    memset(&cap, 0, sizeof(cap));
+    av_log(NULL, AV_LOG_ERROR, "y %d\n", 2);
+    CHECK(cap.lines == 1 && strcmp(cap.text, "atrac3p: y 2\n") == 0,
+          "terminated av_log format keeps exactly one line ending");
 
     atrac3p_set_log_sink(NULL, NULL);
 }

@@ -14,19 +14,34 @@ cores are imported from FFmpeg; thin C APIs written for this project wrap them.
   manifest below are resolved as `n4.4:<path>` against that commit's tree.
   Vintage note: the PPSSPP standalone fork era that motivated the pin is dated
   ~2021-11-19 (pre-av_tx, classic `FFTContext`). The n4.4 tree is not that
-  fork's exact vintage: FFmpeg `master` changed these codec files after the
-  n4.4 tag and before 2021-11-20 (corrected 2026-11-17, measured with
-  `git log n4.4..origin/master --until=2021-11-20`). The commits are
-  `a247ac640d` ("avcodec: Constify AVCodecs", committed 2021-04-27;
-  `atrac3.c`, `atrac3plusdec.c`), `25c8507818` ("Remove/replace some
-  unnecessary avcodec.h inclusions", 2021-07-22; `atrac.c`), `211619ad7f`
-  ("avcodec: Remove the FFT_FIXED_32 define", 2021-08-05; `fft.h`,
-  `fft_float.c`, `fft_template.c`, `fft-internal.h`, `mdct_float.c`,
-  `mdct_template.c`) and `1ea3650823` ("Replace all occurences of
+  fork's exact vintage: FFmpeg `master` holds commits to the imported files
+  that the n4.4 tag lacks (corrected 2026-11-17, measured over every
+  `imported` row of the manifest below with
+  `git log n4.4..origin/master --until=2021-11-20 -- <paths>`; dates are
+  commit dates). On the imported `libavcodec` files that is 71 commits: 62
+  touch `libavcodec/version.h` (version bumps, one of them also below), and
+  these ten touch the other codec files:
+  `e7cbbd9026` ("avcodec/put_bits: Don't set size_in_bits, fix overflow",
+  2021-03-30; `put_bits.h`), `11ff9cb5e9` ("avcodec/put_bits: Add functions
+  for amount of bytes written/left", 2021-03-30; `put_bits.h`),
+  `c197e3fe12` ("avcodec/bitstream: Remove avpriv PutBits API functions",
+  2021-04-27; `bitstream.c`, `put_bits.h`, `version.h`), `a247ac640d`
+  ("avcodec: Constify AVCodecs", 2021-04-27; `atrac3.c`,
+  `atrac3plusdec.c`), `c28823ff97` ("lavc/get_bits: avoid avcodec.h
+  dependency", 2021-06-10; `get_bits.h`), `25c8507818` ("Remove/replace
+  some unnecessary avcodec.h inclusions", 2021-07-22; `atrac.c`,
+  `bitstream.c`), `763c501432` ("avcodec/fft-internal: Remove unused
+  macros", 2021-08-05; `fft-internal.h`), `211619ad7f` ("avcodec: Remove the
+  FFT_FIXED_32 define", 2021-08-05; `fft.h`, `fft_float.c`,
+  `fft_template.c`, `fft-internal.h`, `mdct_float.c`, `mdct_template.c`),
+  `a449fb35ca` ("avcodec/fft-internal: Make it a standalone header",
+  2021-08-05; `fft-internal.h`) and `1ea3650823` ("Replace all occurences of
   av_mallocz_array() by av_calloc()", 2021-09-20; `atrac3.c`,
-  `atrac3plusdec.c`). None of them is imported here: every file is taken
-  from the n4.4 tree, and the byte verification below rests on the n4.4
-  blob SHAs alone.
+  `atrac3plusdec.c`). The imported `libavutil` files changed too: 43
+  commits in the same range touch them (`mem.c`, `common.h`, `log.h` and
+  others); they are not listed here. None of these commits is imported:
+  every file is taken from the n4.4 tree, and the byte verification below
+  rests on the n4.4 blob SHAs alone.
 - License: LGPL-2.1-or-later (see `LICENSE.LGPLv2.1.txt`, imported from
   `COPYING.LGPLv2.1` at the same pin; upstream blob
   `58af0d3787aec7d6f8d833535d64879156e7ec23`)
