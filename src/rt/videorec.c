@@ -166,6 +166,9 @@ static uint64_t vr_now_us(void) {
 static int s_test_free_set;
 static uint64_t s_test_free;
 static int s_test_audio_write_fails;
+static uint64_t s_test_wav_extra;  /* samples the finish adds for the WAV header's limit */
+static int s_test_store_fail_at;   /* the frame store's Nth allocation fails (1-based), 0: none */
+static int s_test_store_allocs;
 static const char *s_test_clear_fail_at; /* an output name whose move aside fails */
 static const char *s_test_plant_after_clear; /* an output name another program creates after the clear */
 #endif
@@ -492,8 +495,8 @@ static int vr_proc_start(VrProc *p, const char *exe, const char *const *argv, in
                              (int)(sizeof wexe / sizeof wexe[0])))
         return 0;
     HANDLE rd = NULL, wr = NULL;
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
     if (with_stdin) {
-        SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
         /* The pipe holds about two frames (1 to 64 MiB): the encoder may lag by a frame without
          * the writer waiting, and one that falls further behind makes the writes wait, which
          * encoder_write_ms counts. On the deterministic clock that wait costs wall-clock time only.
@@ -504,18 +507,55 @@ static int vr_proc_start(VrProc *p, const char *exe, const char *const *argv, in
                                                       : (DWORD)two_frames;
         if (!CreatePipe(&rd, &wr, &sa, pipe_bytes)) return 0;
         SetHandleInformation(wr, HANDLE_FLAG_INHERIT, 0);
+    } else {
+        /* The mux reads only its input files: its stdin is NUL, never the runtime's console
+         * or a harness's input (a key typed there could stop it). */
+        rd = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                         OPEN_EXISTING, 0, NULL);
+        if (rd == INVALID_HANDLE_VALUE) return 0;
     }
-    STARTUPINFOW si;
+    /* The child inherits exactly its stdin and an inheritable copy of the runtime's stderr
+     * (its stdout and stderr), never the runtime's other inheritable handles: a file the
+     * runtime closes must not stay open in FFmpeg for the rest of the recording. */
+    HANDLE err = NULL, se = GetStdHandle(STD_ERROR_HANDLE);
+    if (se && se != INVALID_HANDLE_VALUE &&
+        !DuplicateHandle(GetCurrentProcess(), se, GetCurrentProcess(), &err, 0, TRUE,
+                         DUPLICATE_SAME_ACCESS))
+        err = NULL;
+    HANDLE inherit[2];
+    DWORD n_inherit = 0;
+    inherit[n_inherit++] = rd;
+    if (err) inherit[n_inherit++] = err;
+    SIZE_T attr_bytes = 0;
+    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attr_bytes);
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs =
+        attr_bytes ? (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(GetProcessHeap(), 0, attr_bytes) : NULL;
+    BOOL ok = attrs && InitializeProcThreadAttributeList(attrs, 1, 0, &attr_bytes);
+    if (attrs && !ok) {
+        HeapFree(GetProcessHeap(), 0, attrs);
+        attrs = NULL;
+    }
+    ok = ok && UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit,
+                                         n_inherit * sizeof inherit[0], NULL, NULL);
+    STARTUPINFOEXW si;
     memset(&si, 0, sizeof si);
-    si.cb = sizeof si;
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = with_stdin ? rd : GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = GetStdHandle(STD_ERROR_HANDLE);
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = rd;
+    si.StartupInfo.hStdOutput = err;
+    si.StartupInfo.hStdError = err;
+    si.lpAttributeList = attrs;
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof pi);
-    BOOL ok = CreateProcessW(wexe, wcmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    if (rd) CloseHandle(rd);
+    ok = ok && CreateProcessW(wexe, wcmd, NULL, NULL, TRUE,
+                              CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                              &si.StartupInfo, &pi);
+    if (attrs) {
+        DeleteProcThreadAttributeList(attrs);
+        HeapFree(GetProcessHeap(), 0, attrs);
+    }
+    CloseHandle(rd);
+    if (err) CloseHandle(err);
     if (!ok) {
         if (wr) CloseHandle(wr);
         return 0;
@@ -570,6 +610,11 @@ static int vr_proc_start(VrProc *p, const char *exe, const char *const *argv, in
         ok = posix_spawn_file_actions_adddup2(&fa, fds[0], 0) == 0 &&
              posix_spawn_file_actions_addclose(&fa, fds[0]) == 0 &&
              posix_spawn_file_actions_addclose(&fa, fds[1]) == 0;
+    } else {
+        /* The mux reads only its input files: its stdin is /dev/null, never the runtime's
+         * terminal (a background job's FFmpeg touching it would be stopped by SIGTTOU/SIGTTIN,
+         * and the finish would wait for it forever) or a harness's input. */
+        ok = posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0) == 0;
     }
     ok = ok && posix_spawn_file_actions_adddup2(&fa, 2, 1) == 0;
     pid_t pid = -1;
@@ -672,9 +717,11 @@ static void vr_put_le32(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 
-static void vr_wav_header(uint8_t h[44], uint64_t samples) {
-    uint64_t bytes64 = samples * 4u;
-    uint32_t bytes = bytes64 > 0xFFFFFFD3u ? 0xFFFFFFD3u : (uint32_t)bytes64;
+/* Returns 0 when the samples do not fit the 32-bit RIFF sizes: the header is then clamped and
+ * says the file is shorter than it is, which the caller must report. */
+static int vr_wav_header(uint8_t h[44], uint64_t samples) {
+    int fits = samples <= 0xFFFFFFD3u / 4u;
+    uint32_t bytes = fits ? (uint32_t)(samples * 4u) : 0xFFFFFFD3u;
     memcpy(h, "RIFF", 4);
     vr_put_le32(h + 4, 36u + bytes);
     memcpy(h + 8, "WAVEfmt ", 8);
@@ -687,6 +734,7 @@ static void vr_wav_header(uint8_t h[44], uint64_t samples) {
     vr_put_le16(h + 34, 16u);
     memcpy(h + 36, "data", 4);
     vr_put_le32(h + 40, bytes);
+    return fits;
 }
 
 static int vr_make_dir(const char *dir) {
@@ -741,7 +789,25 @@ static int vr_clock_deterministic(void) {
 
 /* Start a recording into dir, or refuse with the reason in record.json and on stderr.
  * need_det_clock: the runtime records only on the deterministic clock (videorec.h). */
-static int vr_begin(const char *dir, const char *codec, int need_det_clock) {
+/* SR_VIDEOREC_START: unset or empty is 0 (record from the first picture); otherwise only
+ * decimal digits, at most 4294967295. Returns 0 for anything else (a sign, a space, a suffix). */
+static int vr_parse_vblank(const char *text, uint32_t *out) {
+    uint64_t v = 0;
+    *out = 0;
+    if (!text || !text[0]) return 1;
+    for (const char *p = text; *p; p++) {
+        if (*p < '0' || *p > '9') return 0;
+        v = v * 10u + (uint64_t)(*p - '0');
+        if (v > 0xFFFFFFFFu) return 0;
+    }
+    *out = (uint32_t)v;
+    return 1;
+}
+
+/* start_text: SR_VIDEOREC_START on the environment route (it sets s_start_vcount), NULL when
+ * the caller sets the start itself. */
+static int vr_begin(const char *dir, const char *codec, int need_det_clock,
+                    const char *start_text) {
     if (!dir || !dir[0] || strlen(dir) >= sizeof s_dir - 32) {
         fprintf(stderr, "VIDEOREC: not recording: SR_VIDEOREC_DIR is empty or too long\n");
         return 0;
@@ -768,6 +834,11 @@ static int vr_begin(const char *dir, const char *codec, int need_det_clock) {
                       "guest would skip VBLANKs a run without the recording keeps");
             return 0;
         }
+    }
+    if (start_text && !vr_parse_vblank(start_text, &s_start_vcount)) {
+        vr_refuse("SR_VIDEOREC_START is not a VBLANK number (decimal digits only, at most "
+                  "4294967295)");
+        return 0;
     }
     snprintf(s_codec, sizeof s_codec, "%s", codec && codec[0] ? codec : "ffv1");
     const char *probe[24];
@@ -849,10 +920,8 @@ static void vr_init_once(void) {
     s_state = VR_OFF;
     const char *dir = getenv("SR_VIDEOREC_DIR");
     if (!dir || !dir[0]) return;
-    if (!vr_begin(dir, getenv("SR_VIDEOREC_CODEC"), 1)) return;
     const char *start = getenv("SR_VIDEOREC_START");
-    unsigned long sv = start && start[0] ? strtoul(start, NULL, 10) : 0ul;
-    s_start_vcount = sv > 0xFFFFFFFFul ? 0xFFFFFFFFu : (uint32_t)sv;
+    if (!vr_begin(dir, getenv("SR_VIDEOREC_CODEC"), 1, start ? start : "")) return;
     s_state = VR_ON;
     atexit(vr_finish_at_exit);
 }
@@ -898,20 +967,41 @@ void sr_videorec_frame(const void *px, uint32_t w, uint32_t h, uint32_t row_byte
     sr_videorec_frame_filtered(px, w, h, row_bytes, order, SR_VIDEOREC_FILTER_NONE);
 }
 
+static int s_store_failed;
+
+/* One picture of the frame store: px pixels of 4 bytes, zeroed. */
+static uint8_t *vr_store_alloc(size_t px) {
+#ifdef SR_VIDEOREC_SELFTEST
+    if (s_test_store_fail_at && ++s_test_store_allocs == s_test_store_fail_at) return NULL;
+#endif
+    return (uint8_t *)calloc(px, 4u);
+}
+
 void sr_videorec_frame_filtered(const void *px, uint32_t w, uint32_t h, uint32_t row_bytes,
                                 sr_cap_order order, int filter) {
     if (!sr_videorec_wants_frames() || !px || !w || !h || row_bytes < w * 4u) return;
     if (!sr_videorec_filter_name(filter)) { vr_fail("a presenter named an unknown filter"); return; }
+    if (s_store_failed) return;  /* no frame store: the recording already failed by name */
     if (!s_buf[0]) {
         if ((uint64_t)w * h * 4u > (uint64_t)1 << 31) { vr_fail("frame too large"); return; }
-        s_buf[0] = (uint8_t *)calloc((size_t)w * h, 4u);
-        s_buf[1] = (uint8_t *)calloc((size_t)w * h, 4u);
+        s_buf[0] = vr_store_alloc((size_t)w * h);
+        s_buf[1] = vr_store_alloc((size_t)w * h);
         int ok = s_buf[0] && s_buf[1];
         for (int i = 0; i < VR_CARRY_MAX; i++) {
-            s_carry_buf[i] = (uint8_t *)calloc((size_t)w * h, 4u);
+            s_carry_buf[i] = vr_store_alloc((size_t)w * h);
             if (!s_carry_buf[i]) ok = 0;
         }
         if (!ok) {
+            /* All or nothing: a partial store would make the next present look like a picture
+             * of another size (s_w is still 0) and count it as refused. */
+            free(s_buf[0]);
+            free(s_buf[1]);
+            s_buf[0] = s_buf[1] = NULL;
+            for (int i = 0; i < VR_CARRY_MAX; i++) {
+                free(s_carry_buf[i]);
+                s_carry_buf[i] = NULL;
+            }
+            s_store_failed = 1;
             vr_fail("out of memory for the frame store");
             return;
         }
@@ -1046,6 +1136,11 @@ static void vr_stop_video(void) {
     }
 }
 
+/* The video stopped for good after a failure (the disk filling up, an encoder that died or
+ * never started): nothing more is written, audio included, so audio.wav ends where the video
+ * does and the stop really stops the files growing. */
+static int vr_video_stopped(void) { return s_started && s_failed && !s_raw && !s_enc.running; }
+
 static void vr_check_free_space(void) {
     uint64_t free_bytes = 0;
     if (!vr_free_bytes(&free_bytes)) {
@@ -1062,7 +1157,7 @@ void sr_videorec_guest_flip(void) {
 }
 
 static void vr_write_frame(uint32_t vcount, uint64_t guest_us, const char *kind) {
-    if (s_failed && !s_raw && !s_enc.running) return;
+    if (vr_video_stopped()) return;
     size_t bytes = (size_t)s_w * s_h * 4u;
     const uint8_t *px = s_buf[s_out];
     if (s_enc.running) {
@@ -1150,12 +1245,15 @@ void sr_videorec_vblank(uint32_t vcount, uint64_t guest_us) {
         vr_take_carry();
         return;
     }
+    if (vr_video_stopped()) return;  /* the finish flushes audio up to the last frame */
     if (vcount == s_last_vcount) return;  /* already written for this VBLANK */
     /* VCOUNT steps no tick was serviced for keep their place on the timeline as gap frames. */
     uint32_t steps = vcount - s_last_vcount;
     for (uint32_t i = 1; i < steps; i++) {
         s_k++;
         vr_flush_audio(sr_videorec_frame_sample(s_k));
+        /* A gap row carries the guest time of the VBLANK that wrote it: none was serviced at
+         * its own (docs/DEBUGGING.md, frames.csv). */
         vr_write_frame(s_last_vcount + i, guest_us, "gap");
         s_gap_frames++;
     }
@@ -1186,6 +1284,7 @@ void sr_videorec_audio(int ch, const int16_t *lr, int nframes, int volL, int vol
         s_audio_before_start += (uint64_t)nframes;
         return;
     }
+    if (vr_video_stopped()) return;
     /* Where this guest instant falls on the audio timeline: the start of the current frame plus
      * the guest time since its VBLANK, never past the next frame's start. */
     uint64_t base = sr_videorec_frame_sample(s_k);
@@ -1219,7 +1318,7 @@ static int vr_mux(void) {
     vr_url(out, sizeof out, "recording.mkv");
     vr_url(srt, sizeof srt, "logic.srt");
     /* The logic-rate subtitles go in as a track that is off by default. */
-    const char *argv[] = { "ffmpeg", "-hide_banner", "-loglevel", "error", "-n",
+    const char *argv[] = { "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-n",
                            "-i", video, "-i", audio, "-i", srt,
                            "-map", "0:v:0", "-map", "1:a:0", "-map", "2:s:0",
                            "-c", "copy", "-metadata:s:s:0", "title=Game frame rate",
@@ -1322,7 +1421,12 @@ int sr_videorec_finish_status(const char *run_end, int exit_status) {
         if (s_ch_seen[c] && s_ch_pos[c] > end) s_audio_trimmed += s_ch_pos[c] - end;
     if (s_wav) {
         uint8_t h[44];
-        vr_wav_header(h, s_audio_samples);
+        uint64_t wav_samples = s_audio_samples;
+#ifdef SR_VIDEOREC_SELFTEST
+        wav_samples += s_test_wav_extra;
+#endif
+        if (!vr_wav_header(h, wav_samples))
+            vr_fail("audio.wav holds more than the 4 GiB a WAV header can describe");
         if (fseek(s_wav, 0, SEEK_SET) != 0 || fwrite(h, 1, sizeof h, s_wav) != sizeof h)
             vr_fail("audio header write failed");
         vr_close_checked(&s_wav, "audio.wav could not be closed");
@@ -1374,7 +1478,7 @@ int sr_videorec_test_start(const char *dir, const char *codec) {
 int sr_videorec_test_start_at(const char *dir, const char *codec, uint32_t start_vcount) {
     sr_videorec_test_reset();
     s_state = VR_OFF;
-    if (!vr_begin(dir, codec, 0)) return 0;
+    if (!vr_begin(dir, codec, 0, NULL)) return 0;
     s_start_vcount = start_vcount;
     s_state = VR_ON;
     return 1;
@@ -1391,6 +1495,13 @@ void sr_videorec_test_set_free_bytes(uint64_t bytes) {
 }
 
 void sr_videorec_test_fail_audio_writes(int on) { s_test_audio_write_fails = on; }
+
+void sr_videorec_test_wav_extra_samples(uint64_t samples) { s_test_wav_extra = samples; }
+
+void sr_videorec_test_fail_store_alloc(int nth) {
+    s_test_store_fail_at = nth;
+    s_test_store_allocs = 0;
+}
 
 void sr_videorec_test_fail_clear_at(const char *name) { s_test_clear_fail_at = name; }
 
@@ -1444,6 +1555,9 @@ void sr_videorec_test_reset(void) {
     s_test_free_set = 1;
     s_test_free = (uint64_t)1u << 40;
     s_test_audio_write_fails = 0;
+    s_test_wav_extra = 0;
+    s_test_store_fail_at = s_test_store_allocs = 0;
+    s_store_failed = 0;
     s_test_clear_fail_at = NULL;
     s_test_plant_after_clear = NULL;
     s_ring = NULL;

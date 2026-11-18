@@ -47,11 +47,13 @@ typedef enum NkXrRefusal {
     NK_XR_REFUSE_NO_VULKAN_ENABLE2,  // runtime lacks XR_KHR_vulkan_enable2
     NK_XR_REFUSE_INSTANCE,           // instance creation (or resolving its functions) failed
     NK_XR_REFUSE_NO_HMD,             // the runtime reports no head-mounted display
-    NK_XR_REFUSE_OUT_OF_MEMORY       // host allocation failed
+    NK_XR_REFUSE_OUT_OF_MEMORY,      // host allocation failed
+    NK_XR_REFUSE_GET_SYSTEM          // xrGetSystem failed for another reason (lost instance, runtime failure)
 } NkXrRefusal;
 
 // The text of a refusal: "ok", "no OpenXR runtime", "runtime lacks
-// XR_KHR_vulkan_enable2", "instance creation failed", "no HMD", "out of memory".
+// XR_KHR_vulkan_enable2", "instance creation failed", "no HMD", "out of memory",
+// "runtime failed in xrGetSystem".
 // Never NULL; a value outside the enum gives "unknown refusal".
 const char *nk_xr_refusal_name(NkXrRefusal r);
 
@@ -81,6 +83,9 @@ typedef struct NkXrFns {
     // before a probe; nk_xr_frame_once() then submits OPAQUE.
     XrVersion api_version;
     XrEnvironmentBlendMode blend_mode;
+    // Set by nk_xr_probe() once it calls xrGetSystem: that call's XrResult, so a caller
+    // can report a NK_XR_REFUSE_GET_SYSTEM (or NK_XR_REFUSE_NO_HMD) refusal's cause.
+    XrResult get_system_result;
 } NkXrFns;
 
 // Open the loader library (`libname`, or NK_XR_LOADER_NAME when NULL) and resolve

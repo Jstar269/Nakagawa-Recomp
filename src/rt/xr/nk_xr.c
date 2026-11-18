@@ -56,6 +56,8 @@ const char *nk_xr_refusal_name(NkXrRefusal r) {
         return "no HMD";
     case NK_XR_REFUSE_OUT_OF_MEMORY:
         return "out of memory";
+    case NK_XR_REFUSE_GET_SYSTEM:
+        return "runtime failed in xrGetSystem";
     }
     return "unknown refusal";
 }
@@ -253,9 +255,18 @@ NkXrRefusal nk_xr_probe(NkXrFns *f, const char *app_name, XrInstance *instance, 
     gi.type = XR_TYPE_SYSTEM_GET_INFO;
     gi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XrSystemId sys = XR_NULL_SYSTEM_ID;
-    if (XR_FAILED(f->GetSystem(inst, &gi, &sys)) || sys == XR_NULL_SYSTEM_ID) {
+    XrResult sr = f->GetSystem(inst, &gi, &sys);
+    f->get_system_result = sr;
+    if (XR_FAILED(sr) || sys == XR_NULL_SYSTEM_ID) {
         f->DestroyInstance(inst);
-        return NK_XR_REFUSE_NO_HMD;
+        // Only these say no headset is there: the HMD form factor is not available now or
+        // not supported at all, or a success with no system. Any other failure (a lost
+        // instance, a runtime failure) is the runtime's, not a missing headset.
+        if (XR_SUCCEEDED(sr) || sr == XR_ERROR_FORM_FACTOR_UNAVAILABLE ||
+            sr == XR_ERROR_FORM_FACTOR_UNSUPPORTED) {
+            return NK_XR_REFUSE_NO_HMD;
+        }
+        return NK_XR_REFUSE_GET_SYSTEM;
     }
     XrEnvironmentBlendMode blend = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     int br = nk_xr_pick_blend_mode(f, inst, sys, &blend);
@@ -318,6 +329,11 @@ NkXrAction nk_xr_session_next(NkXrRun *run, XrSessionState new_state) {
         run->state = new_state;
         run->layers_shown = 0;
         run->running = 0;
+        if (run->session_destroyed) {
+            // A repeated or late LOSS_PENDING (after EXITING) for a session already
+            // destroyed: never a second xrDestroySession, and done stays as it was.
+            return NK_XR_ACT_NONE;
+        }
         run->may_retry = 1;
         run->session_destroyed = 1;
         return NK_XR_ACT_DESTROY_SESSION;

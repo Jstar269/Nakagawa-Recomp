@@ -349,6 +349,7 @@ static void test_refusals(void) {
     CHECK(strcmp(nk_xr_refusal_name(NK_XR_REFUSE_INSTANCE), "instance creation failed") == 0);
     CHECK(strcmp(nk_xr_refusal_name(NK_XR_REFUSE_NO_HMD), "no HMD") == 0);
     CHECK(strcmp(nk_xr_refusal_name(NK_XR_REFUSE_OUT_OF_MEMORY), "out of memory") == 0);
+    CHECK(strcmp(nk_xr_refusal_name(NK_XR_REFUSE_GET_SYSTEM), "runtime failed in xrGetSystem") == 0);
     CHECK(strcmp(nk_xr_refusal_name((NkXrRefusal)1234), "unknown refusal") == 0);
 
     // No loader: a library name that does not exist.
@@ -412,6 +413,29 @@ static void test_refusals(void) {
     CHECK(strcmp(nk_xr_refusal_name(r), "no HMD") == 0);
     CHECK(fk.n_get_system == 1 && fk.n_destroy_instance == 1);
     CHECK(inst == (XrInstance)(uintptr_t)0xdead && sys == 99);  // outputs untouched on every refusal
+    CHECK(f.get_system_result == XR_ERROR_FORM_FACTOR_UNAVAILABLE);
+
+    // A runtime that does not support the HMD form factor has no headset either.
+    fake_reset();
+    fk.get_system_result = XR_ERROR_FORM_FACTOR_UNSUPPORTED;
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    CHECK(nk_xr_probe(&f, "test", &inst, &sys) == NK_XR_REFUSE_NO_HMD);
+
+    // Any other xrGetSystem failure is the runtime's, never "no HMD", and its XrResult is
+    // kept for the caller to report; the instance is destroyed again.
+    static const XrResult runtime_failures[] = { XR_ERROR_RUNTIME_FAILURE, XR_ERROR_INSTANCE_LOST,
+                                                 XR_ERROR_VALIDATION_FAILURE };
+    for (size_t i = 0; i < sizeof(runtime_failures) / sizeof(runtime_failures[0]); i++) {
+        fake_reset();
+        fk.get_system_result = runtime_failures[i];
+        CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+        r = nk_xr_probe(&f, "test", &inst, &sys);
+        CHECK(r == NK_XR_REFUSE_GET_SYSTEM);
+        CHECK(strcmp(nk_xr_refusal_name(r), "runtime failed in xrGetSystem") == 0);
+        CHECK(f.get_system_result == runtime_failures[i]);
+        CHECK(fk.n_get_system == 1 && fk.n_destroy_instance == 1);
+        CHECK(inst == (XrInstance)(uintptr_t)0xdead && sys == 99);
+    }
 
     // Success.
     fake_reset();
@@ -562,6 +586,33 @@ static void test_loss_then_exit(void) {
     CHECK(a == NK_XR_ACT_DESTROY_AND_EXIT);
     CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
     CHECK(fk.n_destroy_session == 1);
+
+    // A repeated LOSS_PENDING for the same session never destroys it a second time.
+    fake_reset();
+    nk_xr_run_init(&run);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_READY);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_LOSS_PENDING);
+    CHECK(a == NK_XR_ACT_DESTROY_SESSION);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_LOSS_PENDING);
+    CHECK(a == NK_XR_ACT_NONE);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    CHECK(fk.n_destroy_session == 1 && run.may_retry == 1 && run.done == 0);
+
+    // A late LOSS_PENDING after EXITING destroyed the session: no second destroy, and
+    // the run stays done without also becoming retryable.
+    fake_reset();
+    nk_xr_run_init(&run);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_READY);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_EXITING);
+    CHECK(a == NK_XR_ACT_DESTROY_AND_EXIT);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    a = nk_xr_session_next(&run, XR_SESSION_STATE_LOSS_PENDING);
+    CHECK(a == NK_XR_ACT_NONE);
+    CHECK(nk_xr_do_action(&f, FAKE_SESSION, &run, a) == XR_SUCCESS);
+    CHECK(fk.n_destroy_session == 1 && run.done == 1 && run.may_retry == 0);
 }
 
 // ---------------------------------------------------------------------------
