@@ -629,6 +629,46 @@ class NativeHostBackendTests(unittest.TestCase):
         self.assertGreater(teardown, driver.index("sched_run(entry, s.r[4], s.r[5]);"),
                            "the driver must tear down after the scheduler returns")
 
+    def test_presenter_claims_and_choices_match_what_happened(self) -> None:
+        """Three presenter paths no native harness reaches (gui.c's gui_init, pause overlay and
+        release are outside gui-present-selftest), pinned in the source (audit 2026-11-17).
+        A GDI window that CreateWindowA could not make is refused, not reported ready: s_on stays
+        0 and the boot event is window_unavailable, as on a host without GDI. A choice the overlay
+        host made on a frame it then could not draw is still carried out (overlay_host.h: *action
+        is the person's choice this frame), so Resume or Quit is never lost. The presenter's
+        release destroys the overlay host (its fonts, layout core and prompt images) before SDL
+        shuts down."""
+        gui = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
+        init = _function_body(gui, "void gui_init(const char *title) {")
+        gdi = init[init.index("s_hwnd = CreateWindowA("):]
+        refusal = gdi.index("if (!s_hwnd) {")
+        self.assertLess(refusal, gdi.index("s_on = 1;"),
+                        "a GDI window that was never made is claimed (s_on = 1)")
+        block = gdi[refusal:gdi.index("return;", refusal)]
+        self.assertIn("s_on = 0;", block)
+        self.assertIn('sr_gui_boot_event("BOOT_EVENT phase=window_unavailable backend=gdi");', block)
+        self.assertNotIn("    RegisterClassA(&wc);\n", init, "the window class result is ignored")
+
+        compose = _function_body(gui, "static int gui_pause_compose(int w, int h, int rgba) {")
+        draw = compose.index("nk_overlay_host_draw(")
+        act = compose.index("gui_pause_act(action);", draw)
+        self.assertLess(act, compose.index("if (!drawn) return 0;", draw),
+                        "a choice made on a frame that could not be drawn is thrown away")
+        frame = _function_body(gui, "SrPauseFrame gui_pause_frame(void) {")
+        failed = frame[frame.index("if (!gui_pause_compose(w, h, rgba)) {"):]
+        failed = failed[:failed.index("px = s_pause_surface->pixels;")]
+        self.assertIn("return s_pause_resume ? SR_PAUSE_FRAME_RESUME : SR_PAUSE_FRAME_CONTINUE;",
+                      failed)
+
+        release = _function_body(gui, "static void gui_release_presenter(void) {")
+        destroy = release.find("nk_overlay_host_destroy(s_pause_host);")
+        self.assertNotEqual(destroy, -1, "the pause overlay host is never destroyed")
+        self.assertLess(release.index("gui_pause_free_canvas();"), destroy)
+        self.assertLess(destroy, release.index("sdl3vk_shutdown();"),
+                        "the overlay host's fonts must go before SDL shuts down")
+        self.assertIn("s_pause_host = NULL;", release)
+        self.assertIn("s_pause_host_tried = 0;", release)
+
 
 class CoroutineAsmTargetTests(unittest.TestCase):
     """The stack-switch routine in src/rt/sr_coro.c, assembled for each object format it

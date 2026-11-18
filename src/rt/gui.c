@@ -1493,7 +1493,9 @@ void gui_init(const char *title) {
     wc.hInstance = GetModuleHandleA(0);
     wc.lpszClassName = "psp_recomp";
     wc.hCursor = LoadCursor(0, IDC_ARROW);
-    RegisterClassA(&wc);
+    /* A class left by an earlier gui_init is still the one this window needs. */
+    DWORD class_error = RegisterClassA(&wc) ? 0u : GetLastError();
+    if (class_error == ERROR_CLASS_ALREADY_EXISTS) class_error = 0u;
     RECT r = {0, 0, PSP_W * 2, PSP_H * 2};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
     /* Centred on the monitor that holds the launcher window, as the SDL presenter does
@@ -1526,10 +1528,29 @@ void gui_init(const char *title) {
     s_hwnd = CreateWindowA("psp_recomp", title ? title : SR_APP_TITLE,
         WS_OVERLAPPEDWINDOW | WS_VISIBLE, win_x, win_y,
         r.right - r.left, r.bottom - r.top, 0, 0, GetModuleHandleA(0), 0);
+    if (!s_hwnd) {
+        /* No window, so none is claimed: the refusal is reported and s_on stays 0, as on a
+         * host without GDI. The guest keeps running and framebuffer capture keeps working. */
+        DWORD window_error = GetLastError();
+        if (class_error)
+            fprintf(stderr, "gui_init: the GDI window class could not be registered (Win32 error "
+                            "%lu); running without a window (framebuffer capture still works)\n",
+                    (unsigned long)class_error);
+        else
+            fprintf(stderr, "gui_init: the GDI window could not be created (Win32 error %lu); "
+                            "running without a window (framebuffer capture still works)\n",
+                    (unsigned long)window_error);
+        s_on = 0;
+#ifdef SR_SDL3VK
+        gui_texdump_at_start();   /* nor without a window: an asked-for dump is refused and said */
+#endif
+        sr_gui_boot_event("BOOT_EVENT phase=window_unavailable backend=gdi");
+        return;
+    }
     s_px = (uint32_t *)malloc(PSP_W * PSP_H * 4);
     if (!s_px) {
         fprintf(stderr, "gui_init: frame copy allocation failed\n");
-        if (s_hwnd) DestroyWindow(s_hwnd);
+        DestroyWindow(s_hwnd);
         s_hwnd = NULL;
         sr_gui_boot_event("BOOT_EVENT phase=window_unavailable backend=gdi");
         return;
@@ -1542,9 +1563,9 @@ void gui_init(const char *title) {
     s_bmi.bmiHeader.biCompression = BI_RGB;
     s_last_ns = SDL_GetTicksNS();
     s_on = 1;
-    if (s_headless_accept_requested && s_hwnd) s_headless_accept_ready = 1;
+    if (s_headless_accept_requested) s_headless_accept_ready = 1;
     sr_gui_request_launcher_foreground(
-        s_hwnd && IsWindowVisible(s_hwnd), s_hwnd,
+        IsWindowVisible(s_hwnd), s_hwnd,
         sr_gui_raise_gdi_window, "gdi");
     /* Here when SR_VIDEO=gdi asked for this window, or when Vulkan did not start. */
     gui_report_render_path(vulkan_asked, false, gpu_ge_asked, false);
@@ -1806,19 +1827,26 @@ static int gdi_blit(void) {
 }
 #endif
 
+#endif /* !SR_GUI_PRESENT_SELFTEST */
+
 /* CPU-backed presenters consume guest memory, so cross the same lazy GE read
  * barrier as the scalar accessors before converting a complete framebuffer. The
- * direct Vulkan present path bypasses this helper and keeps its target resident. */
+ * direct Vulkan present path bypasses this helper and keeps its target resident.
+ * The span is every byte convert_fb_pixels reads: PSP_W pixels on each of PSP_H rows,
+ * stride pixels apart. sceDisplaySetFrameBuf takes any stride that is a multiple of 64,
+ * so under PSP_W the rows overlap and the last one ends past stride * PSP_H; the span is
+ * then (PSP_H - 1) * stride + PSP_W pixels. */
 static int display_cpu_source_current(uint32_t fbaddr, int fmt, uint32_t stride) {
     if (fmt < 0 || fmt > 3 || stride == 0u) return 0;
-    uint32_t row_bytes, total_bytes;
+    uint32_t row_bytes, total_bytes, last_row_start, read_bytes;
     uint32_t bytes_per_pixel = fmt == 3 ? 4u : 2u;
     if (!sr_size_mul_ok(stride, bytes_per_pixel, &row_bytes) ||
-        !sr_size_mul_ok(row_bytes, PSP_H, &total_bytes)) return 0;
+        !sr_size_mul_ok(row_bytes, PSP_H, &total_bytes) ||
+        !sr_size_mul_ok(row_bytes, PSP_H - 1u, &last_row_start) ||
+        !sr_size_add_ok(last_row_start, PSP_W * bytes_per_pixel, &read_bytes)) return 0;
+    if (read_bytes > total_bytes) total_bytes = read_bytes;
     return sr_guest_span_readable_current(fbaddr, total_bytes);
 }
-
-#endif /* !SR_GUI_PRESENT_SELFTEST */
 
 #ifdef SR_GUI_INPUT_PATH
 /* The VBLANK after an in-between: its held frame goes to the screen. Nothing of the guest runs
@@ -1877,7 +1905,9 @@ int gui_present(uint32_t fbaddr, int fmt, uint32_t stride) {
         }
         convert_fb(fbaddr, fmt, stride);
         s_offscreen_frames++;
-        if (getenv("SR_PRESENT_TRACE")) {
+        static int s_present_trace = -1;   /* SR_PRESENT_TRACE, read once */
+        if (s_present_trace < 0) s_present_trace = getenv("SR_PRESENT_TRACE") != NULL;
+        if (s_present_trace) {
             sr_gui_boot_event("BOOT_EVENT phase=frame_present backend=offscreen frame=%llu",
                     (unsigned long long)s_offscreen_frames);
         }
@@ -2478,11 +2508,14 @@ static int gui_pause_compose(int w, int h, int rgba) {
                 model.profile = &s_pause_profile;
             }
         }
-        if (!nk_overlay_host_draw(s_pause_host, s_pause_ren, display_scale, pixels_per_point,
-                                  &model, &action))
-            return 0;
-        SDL_RenderPresent(s_pause_ren);
+        /* The host consumed this frame's events to make its choice, whether or not the frame
+         * could then be drawn (overlay_host.h), so the choice is carried out either way: a
+         * Resume or Quit chosen on a failed frame is never lost. */
+        bool drawn = nk_overlay_host_draw(s_pause_host, s_pause_ren, display_scale,
+                                          pixels_per_point, &model, &action);
+        if (drawn) SDL_RenderPresent(s_pause_ren);
         gui_pause_act(action);
+        if (!drawn) return 0;
     }
     return 1;
 }
@@ -2624,7 +2657,8 @@ SrPauseFrame gui_pause_frame(void) {
                         w, h, SDL_GetError());
             }
             s_pause_dirty = 1;
-            return SR_PAUSE_FRAME_CONTINUE;
+            /* A Resume chosen on the frame that failed is still carried out. */
+            return s_pause_resume ? SR_PAUSE_FRAME_RESUME : SR_PAUSE_FRAME_CONTINUE;
         }
         if (s_pause_resume) return SR_PAUSE_FRAME_RESUME;
         px = s_pause_surface->pixels;
@@ -2675,6 +2709,11 @@ static void gui_release_presenter(void) {
         if (s_pause_open) sdl3vk_set_input_claim(NULL, NULL);
         s_pause_open = 0;
         gui_pause_free_canvas();
+        /* The pages' fonts, layout core and prompt images go before SDL does; a later
+         * gui_init loads them again on its first pause. */
+        nk_overlay_host_destroy(s_pause_host);
+        s_pause_host = NULL;
+        s_pause_host_tried = 0;
         s_pause_vram.image = NULL;
         free(s_pause_vram_px);
         s_pause_vram_px = NULL;
@@ -3774,6 +3813,38 @@ static void selftest_gdi_notice(const char *argv0) {
 }
 #endif
 
+/* ---- the CPU presenters' framebuffer span (display_cpu_source_current) ------------------
+ * convert_fb_pixels reads PSP_W pixels from each of PSP_H rows, stride pixels apart. The span
+ * the presenters validate must hold all of them, also for a stride under PSP_W, which
+ * sceDisplaySetFrameBuf accepts (any multiple of 64): there the rows overlap and the last one
+ * ends (PSP_H - 1) * stride + PSP_W pixels in, past stride * PSP_H. No GE read is pending, so
+ * the lazy read barrier is never asked for. */
+volatile int g_sr_vram_read_pending = 0;
+void sr_ge_vram_read_prepare(uint32_t physical_addr, uint32_t width) {
+    (void)physical_addr;
+    (void)width;
+    abort();
+}
+
+static void selftest_cpu_source_span_covers_the_read(void) {
+    const uint32_t arena_end = 0x0c000000u;
+    /* stride 64, 8888: the read is (271 * 64 + 480) * 4 = 0x11680 bytes, more than 64 * 272 * 4. */
+    const uint32_t read64 = (271u * 64u + 480u) * 4u;
+    assert(read64 > 64u * 272u * 4u);
+    assert(display_cpu_source_current(arena_end - read64, 3, 64u));
+    assert(!display_cpu_source_current(arena_end - read64 + 4u, 3, 64u));
+    assert(!display_cpu_source_current(arena_end - 64u * 272u * 4u, 3, 64u));
+    /* The same for a 16-bit format at stride 256. */
+    const uint32_t read256 = (271u * 256u + 480u) * 2u;
+    assert(display_cpu_source_current(arena_end - read256, 0, 256u));
+    assert(!display_cpu_source_current(arena_end - 256u * 272u * 2u, 1, 256u));
+    /* At the usual stride the whole stride * PSP_H span is still required. */
+    assert(display_cpu_source_current(arena_end - 512u * 272u * 4u, 3, 512u));
+    assert(!display_cpu_source_current(arena_end - 512u * 272u * 4u + 4u, 3, 512u));
+    assert(!display_cpu_source_current(0x08000000u, 4, 512u));
+    assert(!display_cpu_source_current(0x08000000u, 3, 0u));
+}
+
 /* The unset SR_FPS_CAP default is the PSP scanout period, not a slower title-specific
  * rate: a guest may submit a framebuffer several times per scanout and every submission
  * past the next output slot is dropped rather than delaying the guest. */
@@ -3805,6 +3876,7 @@ int main(int argc, char **argv) {
     selftest_two_flips_per_scanout_present_once_per_scanout();
     selftest_burst_presents_once();
     selftest_explicit_cap_halves_scanout_flips();
+    selftest_cpu_source_span_covers_the_read();
     selftest_render_notice();
 #ifdef _WIN32
     assert(argc >= 1 && argv[0]);

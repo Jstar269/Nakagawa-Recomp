@@ -109,8 +109,13 @@ int anime4k_parse_movie_mode(const char *value) {
 int anime4k_stages_for(int w, int h, int out_w, int out_h) {
     int stages = 0;
     if (w <= 0 || h <= 0) return 0;
-    while (stages < ANIME4K_MAX_STAGES && (double)out_w > 1.2 * (double)(w << stages) &&
-           (double)out_h > 1.2 * (double)(h << stages))
+    /* A stage runs only while its doubled picture still fits the place on both axes: FSR 1
+     * takes what the stages leave to the exact size, and EASU enlarges, it is not a
+     * downscaler (sdl3vk.c keeps the window upscaler to enlargements for the same reason).
+     * The fit test also keeps Anime4K's own rule (the place more than 1.2 times the picture),
+     * since a doubling that fits leaves the place at least twice the picture before it. */
+    while (stages < ANIME4K_MAX_STAGES && (long long)out_w >= ((long long)w << (stages + 1)) &&
+           (long long)out_h >= ((long long)h << (stages + 1)))
         stages++;
     return stages;
 }

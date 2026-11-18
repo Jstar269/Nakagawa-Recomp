@@ -1799,9 +1799,11 @@ class TestPresenterContract(unittest.TestCase):
         source = (ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
         presenter = source[source.index("int gui_present("):]
         offscreen = presenter[presenter.index("if (s_offscreen)"):presenter.index("int accepted")]
+        # SR_PRESENT_TRACE is read once, on the first accepted frame, and gates every event.
         self.assertRegex(
             offscreen,
-            r'if \(getenv\("SR_PRESENT_TRACE"\)\)\s*\{\s*'
+            r'if \(s_present_trace < 0\) s_present_trace = getenv\("SR_PRESENT_TRACE"\) != NULL;\s*'
+            r'if \(s_present_trace\)\s*\{\s*'
             r'sr_gui_boot_event\("BOOT_EVENT phase=frame_present backend=offscreen',
         )
 
