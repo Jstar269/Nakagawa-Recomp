@@ -64,6 +64,10 @@ BOUNDARY_DISPOSITIONS = frozenset(
         "unsupported-encoding",
     }
 )
+# The boundary dispositions the runtime refuses outright: the AOT raised Unsupported, so no
+# path executes the word (interpreter-only words still run through sr_vfpu_interp).
+REFUSED_DISPOSITIONS = frozenset({"supported-opcode-form-unmodeled", "unsupported-encoding"})
+assert REFUSED_DISPOSITIONS <= BOUNDARY_DISPOSITIONS
 # Every emitted guest instruction carries its word literal in sr_begin().
 ROUTE_SR_BEGIN_PATTERN = re.compile(
     r"sr_begin\(\s*s\s*,\s*0x[0-9a-fA-F]{8}u\s*,\s*0x([0-9a-fA-F]{8})u\s*\)"
@@ -770,7 +774,7 @@ def _hardware_evidence(record: Record, vector_size: int | None) -> list[dict[str
 
 
 def _evidence_tier(disposition: str, differential: list[str], hardware: list[dict[str, str]]) -> str:
-    if disposition in {"unsupported-encoding", "supported-opcode-form-unmodeled", "interpreter-only"}:
+    if disposition in BOUNDARY_DISPOSITIONS:
         return "U"
     if any(item["kind"] == "semantic" for item in hardware):
         return "H"
@@ -902,7 +906,7 @@ def _make_rows(records: list[Record]) -> list[Record]:
         agreement = next(iter(agreements))
         hardware_sensitive = (
             agreement != "explicit-aot-direct-control"
-            and disposition not in {"unsupported-encoding", "supported-opcode-form-unmodeled"}
+            and disposition not in REFUSED_DISPOSITIONS
         )
         evidence_tier = _evidence_tier(disposition, differential, hardware)
         row: Record = {
@@ -923,11 +927,7 @@ def _make_rows(records: list[Record]) -> list[Record]:
             "decoder_branch": f"src/rt/vfpu_interp.c:{return_line}",
             "aot_reason": sorted({str(record["aot_reason"]) for record in group if record["aot_reason"]}),
             "agreement": agreement,
-            "boundary_issue": TRACKING_ISSUE if disposition in {
-                "unsupported-encoding",
-                "supported-opcode-form-unmodeled",
-                "interpreter-only",
-            } else None,
+            "boundary_issue": TRACKING_ISSUE if disposition in BOUNDARY_DISPOSITIONS else None,
             "differential_tests": differential,
             "hardware_measured": hardware,
             "hardware_sensitive": hardware_sensitive,
@@ -1223,11 +1223,7 @@ def build_encounter_report(path: Path) -> Record:
                 "aot": record["aot_disposition"],
                 "interpreter": record["interpreter_kind"],
                 "reason": record["aot_reason"],
-                "tracking_issue": TRACKING_ISSUE if disposition in {
-                    "interpreter-only",
-                    "supported-opcode-form-unmodeled",
-                    "unsupported-encoding",
-                } else None,
+                "tracking_issue": TRACKING_ISSUE if disposition in BOUNDARY_DISPOSITIONS else None,
                 "differential_tests": _differential_tests(record, synthetic_words),
                 **form_disposition(record),
             }
