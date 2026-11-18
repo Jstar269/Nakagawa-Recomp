@@ -266,6 +266,7 @@ extern int sr_hle_test_data_state(void);
 extern size_t sr_hle_test_data_entry_count(void);
 extern int sr_hle_test_data_key_seen(const char *key_prefix);
 extern void sr_hle_test_data_reset(int pace_ms);
+extern void sr_hle_test_data_set_archive_walk_hook(void (*hook)(const wchar_t *dir));
 extern unsigned long long sr_hle_test_data_phase_ms(unsigned int phase);
 
 /* Issue #178 white-box message-pipe probes (defined in hle.c, selftest-only). */
@@ -4571,7 +4572,23 @@ static void test_io_memory_stick_cells_through_syscall(void) {
     expect(ms_cell_refused_open(ms0_umd_guest, 0x0a01u) == 0x80010086u &&
                fd_host_bytes_equal(ms0_umd_host, ms0_umd_bytes, sizeof(ms0_umd_bytes)),
            "read-only CREAT|EXCL on an existing Memory Stick file stays at its unmeasured boundary");
+    /* A plain read-only open of the same name is a Memory Stick open too: it reads the
+     * Memory Stick file, and a missing one is not found, whatever the disc holds. */
+    memset(g_mem_base + MS_CELL_BACK, 0, 64u);
+    uint32_t ms0_umd_read_fd = ms_cell_path_call(MS_CELL_OPEN, ms0_umd_guest, 0x0001u);
+    expect(ms0_umd_read_fd >= 3u && ms0_umd_read_fd < 64u &&
+               ms_cell_fd_call(MS_CELL_READ, ms0_umd_read_fd, MS_CELL_BACK, 64u) ==
+                   sizeof(ms0_umd_bytes) &&
+               memcmp(g_mem_base + MS_CELL_BACK, ms0_umd_bytes, sizeof(ms0_umd_bytes)) == 0,
+           "a read-only ms0: open reads the Memory Stick file, not a same-named disc file");
+    if (ms0_umd_read_fd >= 3u && ms0_umd_read_fd < 64u)
+        (void)ms_cell_fd_call(MS_CELL_CLOSE, ms0_umd_read_fd, 0u, 0u);
     nk_remove_utf8(ms0_umd_host);
+    uint32_t ms0_umd_missing_fd = ms_cell_path_call(MS_CELL_OPEN, ms0_umd_guest, 0x0001u);
+    expect(ms0_umd_missing_fd == MS_ENOENT,
+           "a read-only ms0: open of a missing name is 0x80010002, not the disc file");
+    if (ms0_umd_missing_fd >= 3u && ms0_umd_missing_fd < 64u)
+        (void)ms_cell_fd_call(MS_CELL_CLOSE, ms0_umd_missing_fd, 0u, 0u);
     s_umd_io_ms0_alias_enabled = 0;
     s_umd_io_synthetic_enabled = 0;
 
@@ -19910,6 +19927,83 @@ static void test_archive_discovery_skips_unpack_folders_only(void) {
     }
 }
 
+/* 2d. A directory that vanishes between archive discovery pushing it and opening it (a
+ * concurrent delete) is skipped, and the walk goes on: the archives in the directories
+ * still on the stack are mounted. The test seam removes whichever of the two archive
+ * directories the walk opens first, so the result is the same in any enumeration order. */
+static char s_vanish_dirs[2][MAX_PATH];
+static char s_vanish_archives[2][MAX_PATH];
+static int s_vanish_removed = -1;
+
+static int vanish_dir_is(const wchar_t *dir, const wchar_t *name) {
+    size_t length = wcslen(dir), name_length = wcslen(name);
+    return length > name_length && wcscmp(dir + length - name_length, name) == 0 &&
+           (dir[length - name_length - 1u] == L'/' || dir[length - name_length - 1u] == L'\\');
+}
+
+static void vanish_walk_hook(const wchar_t *dir) {
+    static const wchar_t *const names[2] = { L"vanish_one", L"vanish_two" };
+    if (s_vanish_removed >= 0) return;
+    for (int i = 0; i < 2; i++) {
+        if (!vanish_dir_is(dir, names[i])) continue;
+        nk_remove_utf8(s_vanish_archives[i]);
+        rmdir(s_vanish_dirs[i]);
+        s_vanish_removed = i;
+        return;
+    }
+}
+
+static void test_archive_discovery_walks_past_a_vanished_directory(void) {
+    static const char *const names[2] = { "vanish_one", "vanish_two" };
+    static const char *const members[2] = { "data/menu/vanish_one.to", "data/menu/vanish_two.to" };
+    static const char *const bodies[2] = { "one-archive", "two-archive" };
+    static const char *const guests[2] = {
+        "disc0:/PSP_GAME/USRDIR/data/menu/vanish_one.to",
+        "disc0:/PSP_GAME/USRDIR/data/menu/vanish_two.to",
+    };
+    char scratch[MAX_PATH], base[MAX_PATH];
+    reset_fixture();
+    sr_hle_init();
+    expect(hle_scratch_root(scratch, sizeof scratch), "the vanished-directory fixture has a scratch root");
+    snprintf(base, sizeof base, "%s/xb_vanish_%lu", scratch, (unsigned long)getpid());
+    int made = nk_platform_mkdir_p(base);
+    for (int i = 0; i < 2; i++) {
+        snprintf(s_vanish_dirs[i], sizeof s_vanish_dirs[i], "%s/%s", base, names[i]);
+        snprintf(s_vanish_archives[i], sizeof s_vanish_archives[i], "%s/%s.xb", s_vanish_dirs[i],
+                 names[i]);
+        const HleXbEntry entry = { members[i], (const uint8_t *)bodies[i], strlen(bodies[i]) };
+        made = made && nk_platform_mkdir_p(s_vanish_dirs[i]) &&
+               hle_xb_write(s_vanish_archives[i], &entry, 1u);
+    }
+    expect(made, "the vanished-directory fixture was created");
+
+    hle_test_setenv("SR_DATAROOT", base);
+    hle_test_setenv("SR_LOOSE_CONTENT_ROOTS", NULL);
+    sr_hle_test_data_reset(0);
+    s_vanish_removed = -1;
+    sr_hle_test_data_set_archive_walk_hook(vanish_walk_hook);
+    int state = sr_host_data_prepare();
+    sr_hle_test_data_set_archive_walk_hook(NULL);
+    expect(s_vanish_removed >= 0, "the seam removed one archive directory before it was opened");
+    expect(state == SR_DATA_TEST_STATE_READY && sr_hle_test_data_entry_count() == 1u,
+           "discovery mounts the archive of the directory still on the stack");
+    if (s_vanish_removed >= 0) {
+        const int kept = 1 - s_vanish_removed;
+        expect(hle_archive_route_file_matches(guests[kept], bodies[kept]),
+               "the directory after a vanished one is still walked and its archive serves");
+        expect(hle_archive_route_open_result(guests[s_vanish_removed]) == 0x80010002u,
+               "the vanished directory's archive is not served");
+    }
+
+    prewarm_env_restore();
+    sr_hle_test_data_reset(0);
+    for (int i = 0; i < 2; i++) {
+        nk_remove_utf8(s_vanish_archives[i]);
+        rmdir(s_vanish_dirs[i]);
+    }
+    rmdir(base);
+}
+
 static int host_data_duplicate_write_file(const char *root, const char *relative,
                                           const char *body) {
     char path[MAX_PATH];
@@ -34715,6 +34809,112 @@ static void test_dmac_active_transfer_across_threads(void) {
     dmac_cc_run(NID_SCE_DMAC_MEMCPY, NID_SCE_DMAC_TRY_MEMCPY, 0, "concurrent-memcpy-try");
     dmac_cc_run(NID_SCE_DMAC_TRY_MEMCPY, NID_SCE_DMAC_TRY_MEMCPY, 0, "concurrent-try-try");
     dmac_cc_run(NID_SCE_DMAC_TRY_MEMCPY, NID_SCE_DMAC_MEMCPY, 1, "concurrent-try-memcpy");
+}
+
+/* ---- sceDmacMemcpy reads VRAM the renderer wrote while the call waited ---------------------
+ *
+ * A blocking copy from VRAM that queues behind another thread's transfer copies after the
+ * wait, and other guest threads run during the wait. One of them renders into the source
+ * (the GE output lands in the renderer, and g_sr_vram_read_pending says host VRAM is behind
+ * it). The copy must bring host VRAM up to date before it reads it, as every bulk VRAM reader
+ * does, so the destination gets the rendered bytes, not the ones host VRAM held before the
+ * wait. The renderer here is a stand-in: its pending pixels reach host VRAM only through
+ * vram_read, as the real renderer's readback does. */
+enum {
+    DMAC_VR_MAIN_ENTRY = 0x08a32000u,
+    DMAC_VR_FIRST_ENTRY = 0x08a32040u,
+    DMAC_VR_FIRST_NAME = 0x08a32100u,
+    DMAC_VR_VRAM_SRC = 0x04120000u,
+    DMAC_VR_DST = 0x086a0000u,
+    DMAC_VR_SIZE = 0x1000u,
+};
+static int s_dmac_vr_render_pending;   /* the stand-in renderer holds pixels host VRAM lacks */
+static unsigned s_dmac_vr_reads;       /* readbacks that covered the rendered span */
+static uint32_t s_dmac_vr_first_ret, s_dmac_vr_main_ret, s_dmac_vr_first_uid;
+static int s_dmac_vr_first_rendered, s_dmac_vr_main_finished;
+
+static int dmac_vr_vram_read(uint32_t addr, uint32_t bytes) {
+    if (s_dmac_vr_render_pending && bytes != 0u && addr < DMAC_VR_VRAM_SRC + DMAC_VR_SIZE &&
+        DMAC_VR_VRAM_SRC < addr + bytes) {
+        memset(g_mem_base + DMAC_VR_VRAM_SRC, 0xc3, DMAC_VR_SIZE);
+        s_dmac_vr_render_pending = 0;
+        s_dmac_vr_reads++;
+    }
+    return 1;
+}
+
+static int dmac_vr_vram_pending(void) { return s_dmac_vr_render_pending; }
+
+static const GeGpuHooks s_dmac_vr_gpu_hooks = {
+    .vram_read = dmac_vr_vram_read,
+    .vram_pending = dmac_vr_vram_pending,
+};
+
+static void dmac_vr_first_fn(CpuState *cpu) {
+    s_dmac_vr_first_ret = dmac_cc_call(NID_SCE_DMAC_MEMCPY, DMAC_CC_DST_FIRST);
+    /* The main thread is queued behind this transfer now; render into its source. */
+    s_dmac_vr_render_pending = 1;
+    sr_vram_mark_renderer_pending();
+    s_dmac_vr_first_rendered = 1;
+    cpu->r[2] = 0u;
+}
+
+static void dmac_vr_main_fn(CpuState *cpu) {
+    CpuState c;
+    memset(&c, 0, sizeof c);
+    title_hle_write_cstr(DMAC_VR_FIRST_NAME, "dmac-render");
+    c.r[4] = DMAC_VR_FIRST_NAME;
+    c.r[5] = DMAC_VR_FIRST_ENTRY;
+    c.r[6] = 0x10u;
+    c.r[7] = 0x4000u;
+    s_dmac_vr_first_uid = sr_syscall(&c, NID_SCE_KERNEL_CREATE_THREAD);
+    memset(&c, 0, sizeof c);
+    c.r[4] = s_dmac_vr_first_uid;
+    (void)sr_syscall(&c, NID_SCE_KERNEL_START_THREAD);   /* the stronger thread runs at once */
+    memset(&c, 0, sizeof c);
+    c.r[4] = DMAC_VR_DST;
+    c.r[5] = DMAC_VR_VRAM_SRC;
+    c.r[6] = DMAC_VR_SIZE;
+    s_dmac_vr_main_ret = sr_syscall(&c, NID_SCE_DMAC_MEMCPY);
+    memset(&c, 0, sizeof c);
+    c.r[4] = s_dmac_vr_first_uid;
+    (void)sr_syscall(&c, hle_selftest_nid("sceKernelWaitThreadEnd"));
+    s_dmac_vr_main_finished = 1;
+    cpu->r[2] = 0u;
+}
+
+static void test_dmac_copy_after_wait_reads_current_vram(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_test_register_guest_fn(DMAC_VR_MAIN_ENTRY, dmac_vr_main_fn);
+    sr_test_register_guest_fn(DMAC_VR_FIRST_ENTRY, dmac_vr_first_fn);
+    s_dmac_vr_render_pending = 0;
+    s_dmac_vr_reads = 0u;
+    s_dmac_vr_first_ret = s_dmac_vr_main_ret = 0xffffffffu;
+    s_dmac_vr_first_uid = 0u;
+    s_dmac_vr_first_rendered = s_dmac_vr_main_finished = 0;
+    dmac_fill(DMAC_CC_SRC, DMAC_CC_SIZE);
+    memset(g_mem_base + DMAC_VR_VRAM_SRC, 0x5a, DMAC_VR_SIZE);   /* host VRAM before the render */
+    memset(g_mem_base + DMAC_VR_DST, 0, DMAC_VR_SIZE);
+    g_sr_vram_read_pending = 0;
+    ge_set_gpu_hooks(&s_dmac_vr_gpu_hooks);
+    g_worker_uid = SR_ROLE_UID_NONE;
+    memset(s_cpu, 0, sizeof(*s_cpu));
+
+    sched_run(DMAC_VR_MAIN_ENTRY, 0u, 0u);
+
+    expect(s_dmac_vr_main_finished && s_dmac_vr_first_rendered && s_dmac_vr_first_ret == 0u &&
+               s_dmac_vr_main_ret == 0u,
+           "dmac-vram-wait: both copies return 0 and the render lands while the second waits");
+    int rendered = 1;
+    for (uint32_t i = 0; i < DMAC_VR_SIZE; i++)
+        if (g_mem_base[DMAC_VR_DST + i] != 0xc3u) { rendered = 0; break; }
+    expect(rendered && s_dmac_vr_reads == 1u,
+           "dmac-vram-wait: a VRAM copy made after the wait reads the pixels rendered during it");
+    ge_set_gpu_hooks(NULL);
+    g_sr_vram_read_pending = 0;
+    sr_test_guest_fn_reset();
 }
 
 /* ---- sceDmac channel model from the PSP-3000 dma-timing probe (#303) ---------
@@ -58692,6 +58892,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_alarm_idle_scheduler_advances_to_the_deadline();
     test_dmac_semantics();
     test_dmac_active_transfer_across_threads();
+    test_dmac_copy_after_wait_reads_current_vram();
     test_dmac_small_body_bypasses_the_channel();
     test_dmac_refused_try_copies_head_and_tail();
     test_dmac_queued_callers_are_served_in_arrival_order();
@@ -58748,6 +58949,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_extracted_data_prepares_before_guest_and_lookup_never_builds();
     test_disc_route_serves_archive_and_loose_content_in_one_namespace();
     test_archive_discovery_skips_unpack_folders_only();
+    test_archive_discovery_walks_past_a_vanished_directory();
     test_primary_extracted_archive_duplicates_match_main();
     test_direct_xb_read_precedence_and_listing();
     test_direct_xb_malformed_archive_fails_closed();

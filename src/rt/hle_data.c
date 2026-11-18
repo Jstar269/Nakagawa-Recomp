@@ -242,6 +242,9 @@ static unsigned long long s_data_test_scan_names;    /* directory entries read *
 static unsigned long long s_data_test_scan_probes;   /* per-file metadata opens */
 static int s_data_test_guest_started;
 static int s_data_test_pace_ms;                      /* per-directory pacing hook */
+/* Archive discovery calls this with each directory it is about to open, so a test can
+ * remove one between the walk pushing it and opening it, as a concurrent delete would. */
+static void (*s_data_test_archive_walk_hook)(const wchar_t *dir);
 #endif
 /* Per-phase wall time of the one-time index preparation, reported on one stderr line in
  * every build. The developer route has measured 77-270 s here on a real ~59k-file tree
@@ -1025,11 +1028,15 @@ static int archive_data_discover(const wchar_t *root, SrArchiveVfs *vfs,
     size_t candidate_count = 0, candidate_capacity = 0;
     int ok = 1;
     int found = 0;
+    int walking_root = 1;
     while (ok && stack_count != 0u) {
         DataWalkDir current = stack[--stack_count];
+        const int is_root = walking_root;
+        walking_root = 0;
 #ifdef SR_HLE_THREAD_SELFTEST
         if (s_data_test_pace_ms > 0) sr_host_sleep_ms(s_data_test_pace_ms);
         s_data_test_walk_calls++;
+        if (s_data_test_archive_walk_hook) s_data_test_archive_walk_hook(current.host);
 #endif
         wchar_t *pattern = NULL;
         if (!sr_wide_join_alloc(current.host, L"*", &pattern)) {
@@ -1042,9 +1049,12 @@ static int archive_data_discover(const wchar_t *root, SrArchiveVfs *vfs,
         DWORD first_error = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
         free(pattern);
         if (handle == INVALID_HANDLE_VALUE) {
+            /* A missing root has no archives. A directory that vanished after the walk
+             * pushed it (a concurrent delete) holds none now; the rest are still walked. */
             if (first_error == ERROR_FILE_NOT_FOUND || first_error == ERROR_PATH_NOT_FOUND) {
                 free(current.host);
-                break;
+                if (is_root) break;
+                continue;
             }
             ok = 0;
             free(current.host);
@@ -1195,11 +1205,15 @@ static int archive_data_discover(const wchar_t *root, SrArchiveVfs *vfs,
     size_t candidate_count = 0, candidate_capacity = 0;
     int ok = 1;
     int found = 0;
+    int walking_root = 1;
     while (ok && stack_count != 0u) {
         DataWalkDir current = stack[--stack_count];
+        const int is_root = walking_root;
+        walking_root = 0;
 #ifdef SR_HLE_THREAD_SELFTEST
         if (s_data_test_pace_ms > 0) sr_host_sleep_ms(s_data_test_pace_ms);
         s_data_test_walk_calls++;
+        if (s_data_test_archive_walk_hook) s_data_test_archive_walk_hook(current.host);
 #endif
         char *host_utf8 = NULL;
         if (!sr_wide_to_utf8_alloc(current.host, &host_utf8)) {
@@ -1209,7 +1223,14 @@ static int archive_data_discover(const wchar_t *root, SrArchiveVfs *vfs,
         }
         DIR *dir = opendir(host_utf8);
         if (!dir) {
-            if (errno == ENOENT) { free(current.host); break; }
+            /* A missing root has no archives. A directory that vanished after the walk
+             * pushed it (a concurrent delete) holds none now; the rest are still walked. */
+            if (errno == ENOENT) {
+                free(host_utf8);
+                free(current.host);
+                if (is_root) break;
+                continue;
+            }
             ok = 0;
             free(host_utf8);
             free(current.host);
@@ -1914,7 +1935,12 @@ void sr_hle_test_data_reset(int pace_ms) {
     s_data_test_scan_probes = 0;
     s_data_test_guest_started = 0;
     s_data_test_pace_ms = pace_ms;
+    s_data_test_archive_walk_hook = NULL;
     memset(s_data_test_phase_ms, 0, sizeof(s_data_test_phase_ms));
+}
+
+void sr_hle_test_data_set_archive_walk_hook(void (*hook)(const wchar_t *dir)) {
+    s_data_test_archive_walk_hook = hook;
 }
 #endif
 
@@ -2238,12 +2264,13 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
     sr_cd_status open_status = SR_CD_NOT_FOUND;
 #endif
     uint32_t lba, size;
-    /* The ISO lookup drops the device prefix, so an ms0: name that is also on the disc would
-     * open the disc file. The read-only PSP_O_TRUNC and PSP_O_EXCL creates are Memory Stick
-     * opens whose answer depends on the Memory Stick file alone (PSP-HLE-IO-SEEK-002); they never
-     * consult the disc. */
-    int in_iso = !read_only_create_trunc_ms0 && !read_only_create_exclusive_ms0 &&
-                 iso_lookup(path, &lba, &size) == 0;
+    /* The ISO lookup drops the device prefix, so an ms0: or fatms0: name that is also on the
+     * disc would open the disc file. A Memory Stick open never consults the disc: the read-only
+     * PSP_O_TRUNC and PSP_O_EXCL creates answer from the Memory Stick file alone
+     * (PSP-HLE-IO-SEEK-002), and a plain read never gets a same-named disc file in place of
+     * the Memory Stick file, or of the not-found answer for a missing one. */
+    const int memstick_device = strchr(path, ':') && sr_ms0_classify(path, NULL) == SR_MS0_OWNED;
+    int in_iso = !memstick_device && iso_lookup(path, &lba, &size) == 0;
 
     if (writing || creating || !in_iso) {
         /* Host-backed file (writable storage). Without CREAT the file must already exist,
