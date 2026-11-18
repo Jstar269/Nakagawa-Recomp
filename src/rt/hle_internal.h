@@ -1603,6 +1603,13 @@ static inline int hle_env_switch(int *cached, const char *name) {
     if (*cached < 0) *cached = getenv(name) != NULL;
     return *cached;
 }
+/* SR_AUDIOSTAT buffer identities: add a nonzero guest address to a set of at most `cap` distinct
+ * ones (set[0..*n)), once. The audio outputs, the SAS mix and the ATRAC decode each keep a set. */
+static inline void hle_note_buf(uint32_t *set, int *n, int cap, uint32_t buf) {
+    if (!buf) return;
+    for (int i = 0; i < *n; i++) if (set[i] == buf) return;
+    if (*n < cap) set[(*n)++] = buf;
+}
 /* Argument 5+idx of an HLE call. PSP userland is MIPS EABI: arguments 1..8 arrive in
  * a0-a3,t0-t3 (r4..r11) and only 9+ go to the stack (sp+0) -- same as PPSSPP's PARAM(n).
  * This used to read the o32 stack home slots (sp+16+), which EABI callers never write:

@@ -1301,6 +1301,89 @@ static void test_band_room(void) {
     s_fix_h_mbs = FIX_H_MBS;
 }
 
+/* A long stream (audit 2026-11-17). sceVideocodecDecode submits one access unit and then pulls
+ * every picture, so when the call returns the backend has given every queued unit to its decoder.
+ * Each unit here is a fixture picture followed by a 1 MiB filler-data NAL (type 12, which a
+ * decoder skips), read from guest memory, so a few dozen calls carry more than the backends'
+ * 64 MiB access-unit buffer. Every call is accepted and pictures keep arriving past that mark.
+ *
+ * MUTANT: ff_es_compact / es_compact return again when every queued unit has been sent -- the
+ *   buffer only grows, the 64th call's unit no longer fits, and the decode is refused with
+ *   "the H.264 backend rejected the access unit". */
+static void test_long_stream(void) {
+    static const char k_case[] = "Decode keeps decoding past 64 MiB of access units, one per call";
+    if (!sr_h264_backend_available()) { skip(k_case); return; }
+    const uint32_t G_BIG = 0x09000000u;   /* one picture plus 1 MiB of filler, inside the arena */
+    const uint32_t FILL = 1u << 20;
+    const uint64_t LIMIT = 64ull << 20, TOTAL = 72ull << 20;
+    memset(host(G_CTX), 0, 96u);
+    CHECK(call(NID_OPEN, G_CTX, 0u, 0, 0) == 0u && call(NID_GETEDRAM, G_CTX, 0u, 0, 0) == 0u &&
+              call(NID_INIT, G_CTX, 0u, 0, 0) == 0u,
+          "long stream: a context opens");
+    MEM_W32(G_CTX + 16u, G_BUF2);
+    MEM_W32(G_CTX + 44u, G_YUV);
+    MEM_W32(G_CTX + 48u, G_BUF3);
+    MEM_W32(G_CTX + 80u, G_SEI);
+    uint64_t total = 0;
+    int calls = 0, refused_at = -1, past_limit = 0;
+    for (int i = 0; total < TOTAL && refused_at < 0; i++) {
+        uint32_t len = build_au(i, host(G_BIG), 16384u);
+        uint8_t *fill = host(G_BIG + len);
+        fill[0] = 0u; fill[1] = 0u; fill[2] = 1u; fill[3] = 0x0Cu;   /* filler data NAL */
+        memset(fill + 4, 0xFF, FILL);
+        fill[4u + FILL] = 0x80u;                                       /* rbsp trailing bits */
+        len += 5u + FILL;
+        MEM_W32(G_CTX + 36u, G_BIG);
+        MEM_W32(G_CTX + 40u, len);
+        if (call(NID_DECODE, G_CTX, 0u, 0, 0) != 0u) refused_at = i;
+        else if (total > LIMIT && MEM_R32(G_BUF2 + 32u) == 1u) past_limit++;
+        total += len;
+        calls++;
+    }
+    fprintf(stderr, "videocodec: long stream: %d calls, %llu bytes, refused at call %d\n", calls,
+            (unsigned long long)total, refused_at);
+    CHECK(refused_at < 0, "long stream: every one-unit decode past 64 MiB of access units is accepted");
+    CHECK(past_limit >= 1, "long stream: pictures keep arriving after 64 MiB of access units");
+    CHECK(call(NID_DELETE, G_CTX, 0u, 0, 0) == 0u && !vc_find(G_CTX), "long stream: the context closes");
+}
+
+/* A drain behind a long picture-less run (audit 2026-11-17). 4100 queued units that produce no
+ * picture (an access-unit delimiter each) come before the one picture. The draining pull walks the
+ * whole queue and returns that picture; a pull that stops after a fixed number of rounds reports
+ * "fully drained" (0) with units still queued, and the picture is lost to the caller.
+ *
+ * MUTANT: restore the 4096-round guard in ff_pull / pull_frame -- the draining pull returns 0. */
+static void test_drain_behind_pictureless_units(void) {
+    static const char k_case[] = "A draining pull reaches a picture behind 4100 picture-less units";
+    if (!sr_h264_backend_available()) { skip(k_case); return; }
+    static const uint8_t aud[5] = { 0, 0, 1, 0x09, 0x10 };
+    static uint8_t au[16384];
+    const int dec = sr_h264_create();
+    CHECK(dec >= 0, "pictureless: a decoder opens");
+    if (dec < 0) return;
+    int accepted = 1;
+    for (int i = 0; i < 4100; i++)
+        if (sr_h264_submit_au(dec, aud, sizeof(aud)) != 0) accepted = 0;
+    const uint32_t len = build_au(0, au, sizeof(au));
+    if (sr_h264_submit_au(dec, au, len) != 0) accepted = 0;
+    CHECK(accepted, "pictureless: every unit is queued");
+    SrH264FrameTarget target;
+    SrH264FrameInfo info;
+    memset(&target, 0, sizeof(target));
+    target.kind = SR_H264_TARGET_HOST_YUV;
+    target.host_buffer = s_vc_scratch_y;
+    target.host_width = VC_MAX_WIDTH;
+    target.host_height = VC_MAX_HEIGHT;
+    target.host_stride = VC_MAX_WIDTH;
+    target.host_cb = s_vc_scratch_cb;
+    target.host_cr = s_vc_scratch_cr;
+    target.host_c_stride = VC_MAX_WIDTH / 2;
+    const int r = sr_h264_drain(dec, &target, &info);
+    CHECK(r == 1 && info.width == (int)FIX_W && info.height == (int)FIX_H,
+          "pictureless: the first draining pull returns the picture behind the run");
+    sr_h264_destroy(dec);
+}
+
 int main(void) {
     sr_mem_init();
     test_registration();
@@ -1315,6 +1398,8 @@ int main(void) {
     test_audiocodec();
     test_guest_reset();
     test_band_room();
+    test_long_stream();
+    test_drain_behind_pictureless_units();
     if (failures) {
         fprintf(stderr, "videocodec selftest: FAILED (%d of %d checks)\n", failures, checks);
         return 1;

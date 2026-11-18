@@ -508,9 +508,7 @@ int g_atrac_peak;
 uint32_t g_atrac_out_bufs[4];
 int      g_atrac_out_nbufs;
 static void audio_note_atrac_out(uint32_t buf) {
-    if (!buf) return;
-    for (int i = 0; i < g_atrac_out_nbufs; i++) if (g_atrac_out_bufs[i] == buf) return;
-    if (g_atrac_out_nbufs < 4) g_atrac_out_bufs[g_atrac_out_nbufs++] = buf;
+    hle_note_buf(g_atrac_out_bufs, &g_atrac_out_nbufs, 4, buf);
 }
 
 /* Decoder lifecycle. Plain ATRAC3 (0x1001) and ATRAC3+ (0x1000) have separate

@@ -24,11 +24,7 @@ unsigned long g_sas_no_voice, g_sas_no_voice_overwrite;
  * output targets, so the two stages can be shown to be the same memory. */
 uint32_t g_sas_bufs[4];
 int      g_sas_nbufs;
-static void audio_note_sas_buf(uint32_t buf) {
-    if (!buf) return;
-    for (int i = 0; i < g_sas_nbufs; i++) if (g_sas_bufs[i] == buf) return;
-    if (g_sas_nbufs < 4) g_sas_bufs[g_sas_nbufs++] = buf;
-}
+static void audio_note_sas_buf(uint32_t buf) { hle_note_buf(g_sas_bufs, &g_sas_nbufs, 4, buf); }
 
 /* ---- audio / control / display / GE / SAS: functional stubs ----
  * These return success and neutral data so the boot reaches and runs its main loop without an
@@ -251,6 +247,15 @@ extern void sr_audio_push_silence(int ch, int nframes);
 /* One display period in mixer frames, rounded up (736). */
 #define AUDIO_LATE_WAKE_FRAMES ((SR_DISPLAY_PERIOD_US * 44100u + 999999u) / 1000000u)
 
+/* One period of `ch` in mixer frames: the reserved sample count, converted to the 44100 Hz mixer
+ * rate (rounded up) for an SRC/Vaudio reservation at another rate. The hold, the queue the guest
+ * sees and the blocking release all count the host queue in these frames. */
+static uint32_t audio_mixer_period(uint32_t ch) {
+    const uint32_t n = s_audio_len[ch];
+    if (ch != AUDIO_OUTPUT2_CHANNEL || !s_audio_src_freq || s_audio_src_freq == 44100u) return n;
+    return (uint32_t)(((uint64_t)n * 44100u + s_audio_src_freq - 1u) / s_audio_src_freq);
+}
+
 static uint32_t audio_host_hold_frames(uint32_t n) {
     if (!n) return 0u;   /* no period reserved: nothing paces against this queue */
     const int pull = sr_audio_host_pull_frames();
@@ -286,7 +291,7 @@ int hle_audio_play_lead(int ch) {
 int hle_audio_queued(int ch) {
     const int lead = hle_audio_play_lead(ch);
     if (ch < 0 || ch > 8 || lead <= 0 || audio_vq_on(ch)) return lead;
-    const uint32_t hold = audio_host_hold_frames(s_audio_len[ch]);
+    const uint32_t hold = audio_host_hold_frames(audio_mixer_period((uint32_t)ch));
     return (uint32_t)lead > hold ? (int)((uint32_t)lead - hold) : 0;
 }
 
@@ -303,7 +308,7 @@ static int audio_vq_on(int ch) {
          * of the run waits as it would have. Not through hle_audio_queued(): the epoch is
          * recorded, so that would read this model before it is seeded. */
         const int q = sr_audio_queued(ch);
-        const uint32_t hold = audio_host_hold_frames(s_audio_len[ch]);
+        const uint32_t hold = audio_host_hold_frames(audio_mixer_period((uint32_t)ch));
         s_vq_frames[ch] = q > 0 && (uint32_t)q > hold ? (uint32_t)q - hold : 0u;
         s_vq_carry[ch] = 0u;
         s_vq_last_us[ch] = now_usec();
@@ -411,9 +416,8 @@ unsigned long sr_hle_test_audio_lead_window(int *peak, uint32_t *peak_ch,
 uint32_t g_audio_bufs[9][4];
 int      g_audio_nbufs[9];
 static void audio_note_buf(uint32_t ch, uint32_t buf) {
-    if (ch > 8u || !buf) return;
-    for (int i = 0; i < g_audio_nbufs[ch]; i++) if (g_audio_bufs[ch][i] == buf) return;
-    if (g_audio_nbufs[ch] < 4) g_audio_bufs[ch][g_audio_nbufs[ch]++] = buf;
+    if (ch > 8u) return;
+    hle_note_buf(g_audio_bufs[ch], &g_audio_nbufs[ch], 4, buf);
 }
 
 void hle_audio_guest_reset(void) {
@@ -481,6 +485,37 @@ static void audio_wait(uint32_t us) {
     sched_delay_current(us);
 }
 
+/* A blocking output's wait, after its frames were pushed: until the host queue the guest sees is
+ * back down to two periods (`period` mixer frames each). With no host queue (-1) or no period it
+ * paces open-loop, waiting out the `pushed` mixer frames it handed over (1 ms when none). */
+static void audio_block_until_two_periods(uint32_t ch, uint32_t period, uint32_t pushed) {
+    int q = hle_audio_queued((int)ch);
+    if (q < 0 || period == 0) {
+        audio_wait(pushed ? audio_frames_to_us(ch, pushed) : 1000u);
+        return;
+    }
+    /* hle_audio_queued() is signed only so the backend can report -1. Once that
+     * sentinel is excluded, keep the frame comparison/subtraction unsigned;
+     * never narrow the guest-derived frame count into the signed queue domain.
+     * This form is defense in depth, not a repaired defect: with the reserve and
+     * SetChannelDataLen size contracts, a period can no longer exceed INT_MAX, so
+     * no production dispatch distinguishes it and it has no failing-before.
+     *
+     * Release at a two-period lead, not one (#67). A delayed thread is only woken
+     * at a scheduler boundary, and a busy lower-priority runner can hold the CPU
+     * until the next one -- as much as a VBLANK period. Released with only one
+     * period queued, any wake that late drains the host ring before the next
+     * push, and the write cursor snaps past lost audio. Two periods give that
+     * boundary latency a whole period of headroom while still pacing against the
+     * device's real drain; a period is bounded by the reserve/SetChannelDataLen
+     * contracts (<= 65536 frames), so 2u * period cannot wrap. */
+    while (q >= 0 && (uint32_t)q > 2u * period) {
+        audio_wait(audio_frames_to_us(ch, (uint32_t)q - 2u * period));
+        q = hle_audio_queued((int)ch);
+    }
+    audio_note_lead((int)ch, q);
+}
+
 static const int32_t *sas_wide_for_output(uint32_t buf, uint32_t n, const int16_t *lr);
 
 /* `ch` is a regular channel the caller checked (audio_regular_output_refusal) or the
@@ -539,29 +574,7 @@ static uint32_t audio_output_mode(CpuState *s, uint32_t ch, uint32_t buf, int vo
         if (out_started) sr_perf_audio_output(out_started, n);
     }
     if (!blocking) return n;
-    int q = hle_audio_queued((int)ch);
-    if (q < 0 || n == 0) {                 /* no host audio: open-loop pacing as before */
-        audio_wait(n ? audio_frames_to_us(ch, n) : 1000u);
-        return n;
-    }
-    /* hle_audio_queued() is signed only so the backend can report -1. Once that
-     * sentinel is excluded, keep the frame comparison/subtraction unsigned;
-     * never narrow the guest-derived frame count into the signed queue domain.
-     * This form is defense in depth, not a repaired defect: with the reserve and
-     * SetChannelDataLen size contracts above, n can no longer exceed INT_MAX, so
-     * no production dispatch distinguishes it and it has no failing-before.
-     *
-     * Release at a two-period lead, not one (#67). A delayed thread is only woken
-     * at a scheduler boundary, and a busy lower-priority runner can hold the CPU
-     * until the next one -- as much as a VBLANK period. Released with only one
-     * period queued, any wake that late drains the host ring before the next
-     * push, and the write cursor snaps past lost audio. Two periods give that
-     * boundary latency a whole period of headroom while still pacing against the
-     * device's real drain; n is bounded by the reserve/SetChannelDataLen
-     * contracts (<= 65536 frames), so 2u * n cannot wrap. */
-    while ((q = hle_audio_queued((int)ch)) >= 0 && (uint32_t)q > 2u * n)
-        audio_wait(audio_frames_to_us(ch, (uint32_t)q - 2u * n));
-    audio_note_lead((int)ch, q);
+    audio_block_until_two_periods(ch, n, n);
     return n;
 }
 static uint32_t audio_output(CpuState *s, uint32_t ch, uint32_t buf, int voll, int volr) {
@@ -590,14 +603,26 @@ static uint32_t audio_regular_output_refusal(const char *call, uint32_t ch) {
     }
     return code;
 }
+/* A regular output's volume above 0xFFFF is refused before the channel is checked, nothing played.
+ * PPSSPP-derived, not PSP-measured: hrydgard/ppsspp caa91b54b53585811b0fd84405ea04aec72a952b,
+ * Core/HLE/sceAudio.cpp: sceAudioOutputBlocking and sceAudioOutputPanned compare each volume as a
+ * signed int (a negative one is taken), sceAudioOutputPannedBlocking compares the two ORed as
+ * unsigned (a negative one is refused). Corroborative only: PSPAutotests
+ * tests/audio/sceaudio/output.expected at ea71108f00933712c4662276261b39cd42249b1e records
+ * 0x8026000b for 65536 and up on all three, and for a negative volume on PannedBlocking alone. A
+ * taken volume is still masked to its low 16 bits for the mixer, as before. */
+static int audio_regular_volume_bad(uint32_t vol) { return (int32_t)vol > 0xFFFF; }
+
 static uint32_t h_AudioOutputBlocking(CpuState *s) {
     /* sceAudioOutputBlocking(ch, vol, buf) */
+    if (audio_regular_volume_bad(A1)) return SCE_AUDIO_ERROR_INVALID_VOL;
     const uint32_t refused = audio_regular_output_refusal("sceAudioOutputBlocking", A0);
     if (refused) return refused;
     return audio_output(s, A0, A2, (int)(A1 & 0xFFFF), (int)(A1 & 0xFFFF));
 }
 static uint32_t h_AudioOutputPannedBlocking(CpuState *s) {
     /* sceAudioOutputPannedBlocking(ch, leftvol, rightvol, buf) */
+    if ((A1 | A2) > 0xFFFFu) return SCE_AUDIO_ERROR_INVALID_VOL;
     const uint32_t refused = audio_regular_output_refusal("sceAudioOutputPannedBlocking", A0);
     if (refused) return refused;
     return audio_output(s, A0, A3, (int)(A1 & 0xFFFF), (int)(A2 & 0xFFFF));
@@ -606,6 +631,7 @@ static uint32_t h_AudioOutputPannedBlocking(CpuState *s) {
  * and returns the sample count at once, or refuses it as busy (audio_output_mode); it never parks
  * the calling thread. */
 static uint32_t h_AudioOutputPanned(CpuState *s) {
+    if (audio_regular_volume_bad(A1) || audio_regular_volume_bad(A2)) return SCE_AUDIO_ERROR_INVALID_VOL;
     const uint32_t refused = audio_regular_output_refusal("sceAudioOutputPanned", A0);
     if (refused) return refused;
     return audio_output_mode(s, A0, A3, (int)(A1 & 0xFFFF), (int)(A2 & 0xFFFF), 0);
@@ -720,7 +746,8 @@ static uint32_t h_AudioOutput2Rest(CpuState *s) {
  * and 4 (refused with the code measured for 4), the volume bound (SCE_AUDIO_OUTPUT2_VOLUME_MAX,
  * shared with Output2), and rates other than 44100 and 48000 (refused with the code measured for an
  * unsupported channel count, and a message). The host mixer runs at 44100 Hz; 48000 Hz SRC
- * blocks pass through a streaming band-limited converter while retaining source-rate pacing. */
+ * blocks pass through a streaming band-limited converter, and their blocking output paces against
+ * the mixer queue as audio_output does, a period counted in mixer frames (audio_mixer_period). */
 static uint32_t audio_src_reserve(int owner, uint32_t samples, uint32_t freq, uint32_t channels) {
     if (s_audio_ch[AUDIO_OUTPUT2_CHANNEL]) return SCE_AUDIO_ERROR_OUTPUT2_BUSY;
     if (samples < 17u || samples > 4111u) return SCE_AUDIO_ERROR_SRC_INVALID_SIZE;
@@ -760,9 +787,13 @@ static uint32_t audio_src_output(CpuState *s, int owner, uint32_t vol, uint32_t 
     if (s_audio_src_freq == 44100u)
         return audio_output(s, AUDIO_OUTPUT2_CHANNEL, buf, (int)vol, (int)vol);
 
-    /* Preserve the guest-rate blocking interval while forwarding converted frames to the
-     * 44100 Hz mixer. The reserve contract limits n to 4111 stereo frames. */
+    /* Forward converted frames to the 44100 Hz mixer and pace against its queue as audio_output
+     * does, one period being the reserved samples in mixer frames (audit 2026-11-17: an
+     * open-loop sleep here drifted behind the device). The reserve contract limits n to 4111
+     * stereo frames. */
     const uint32_t n = s_audio_len[AUDIO_OUTPUT2_CHANNEL];
+    const uint32_t period = audio_mixer_period(AUDIO_OUTPUT2_CHANNEL);
+    size_t converted_frames = 0u;
     uint32_t bytes = 0;
     if (buf && n > 0u &&
         (!sr_size_mul_ok(n, 4u, &bytes) || !sr_guest_span_readable(buf, bytes)))
@@ -783,9 +814,9 @@ static uint32_t audio_src_output(CpuState *s, int owner, uint32_t vol, uint32_t 
         if (!sr_audio_resampler_push(&s_audio_src_resampler, input, n))
             return HLE_KERNEL_ERROR_NO_MEMORY;
         psmf_av_audio_submit(AUDIO_OUTPUT2_CHANNEL, buf, bytes, 4u, s_audio_src_freq);
-        const size_t converted_frames = sr_audio_resampler_pull(
-            &s_audio_src_resampler, converted, 4111u);
+        converted_frames = sr_audio_resampler_pull(&s_audio_src_resampler, converted, 4111u);
         if (converted_frames > 0u) {
+            audio_host_hold_prime((int)AUDIO_OUTPUT2_CHANNEL, period);
             uint64_t out_started = sr_perf_now_ns();
             sr_videorec_audio(AUDIO_OUTPUT2_CHANNEL, converted, (int)converted_frames,
                               (int)vol, (int)vol, sched_vtime_us());
@@ -797,8 +828,8 @@ static uint32_t audio_src_output(CpuState *s, int owner, uint32_t vol, uint32_t 
                 sr_perf_audio_output(out_started, (uint32_t)converted_frames);
         }
     }
-    uint64_t us = (uint64_t)n * 1000000u / s_audio_src_freq;
-    sched_delay_current(us ? (uint32_t)us : 1u);
+    audio_block_until_two_periods(AUDIO_OUTPUT2_CHANNEL, period,
+                                  converted_frames ? (uint32_t)converted_frames : period);
     return n;
 }
 
@@ -947,8 +978,7 @@ typedef struct {
 typedef struct {
     int initialized;
     uint32_t core;
-    int grain;
-    int max_voices;
+    int grain;                    /* the voice count is s_sas_max_voices */
     int output_mode;              /* 0=interleaved stereo, 1=four planar channels */
     int sample_rate;
     int effect_type;              /* -1=off, 0..8 are the PSP effect types */
@@ -961,6 +991,10 @@ typedef struct {
 static SasVoice s_sasv[SAS_VOICES];
 static SasCoreState s_sas_core;
 static int s_sas_max_voices = SAS_VOICES;
+/* The noise voices' shared generator. A guest reset starts it again, so a program's noise does not
+ * depend on how much noise the program before it mixed (audit 2026-11-17). */
+#define SAS_NOISE_SEED 0x12345678u
+static uint32_t s_sas_noise_seed = SAS_NOISE_SEED;
 /* Ace Mode's sas=sinc for the run (sr_hle_sas_set_band_limited); 0 is authentic. */
 static int s_sas_band_limited;
 /* Nonzero while sas=sinc decodes ahead on a copy of a voice: no SR_SASLOG dumps. */
@@ -1033,6 +1067,7 @@ void hle_sas_guest_reset(void) {
     memset(&s_sas_core, 0, sizeof(s_sas_core));
     memset(s_sasv, 0, sizeof(s_sasv));
     s_sas_max_voices = SAS_VOICES;
+    s_sas_noise_seed = SAS_NOISE_SEED;
     for (int i = 0; i < SAS_WIDE_RING; i++) s_sas_wide[i].frames = 0;
     s_sas_wide_next = 0;
 }
@@ -1196,9 +1231,8 @@ static void sas_voice_data_ended(SasVoice *v) {
 
 static int sas_next_sample(SasVoice *v, int *sample) {
     if (v->type == SAS_VOICE_NOISE) {
-        static uint32_t nseed = 0x12345678;
-        nseed = nseed * 1103515245u + 12345u;
-        *sample = (int)(int16_t)(nseed >> 16);
+        s_sas_noise_seed = s_sas_noise_seed * 1103515245u + 12345u;
+        *sample = (int)(int16_t)(s_sas_noise_seed >> 16);
         return 1;
     }
     if (v->type == SAS_VOICE_PCM) {
@@ -1494,7 +1528,7 @@ static uint32_t h_SasInit(CpuState *s) {
     if (sample_rate != SAS_SAMPLE_RATE) return SAS_ERROR_INVALID_STATE;
     memset(&s_sas_core, 0, sizeof(s_sas_core));
     s_sas_core.initialized = 1; s_sas_core.core = A0; s_sas_core.grain = grain;
-    s_sas_core.max_voices = max_voices; s_sas_core.output_mode = output_mode;
+    s_sas_core.output_mode = output_mode;
     s_sas_core.sample_rate = sample_rate; s_sas_core.effect_type = -1;
     s_sas_core.effect_l = s_sas_core.effect_r = SAS_VOLUME_MAX;
     s_sas_core.effect_dry = s_sas_core.effect_wet = 1;
@@ -1517,6 +1551,22 @@ static uint32_t h_SasInit(CpuState *s) {
     return 0;
 }
 
+/* A voice's playback position and decoder state, back to the start of its source. */
+static void sas_voice_restart(SasVoice *v) {
+    v->pos = 0; v->pcm_pos = 0; v->hist1 = v->hist2 = 0; v->bufn = v->bufi = 0; v->frac = 0;
+    memset(v->rs_hist, 0, sizeof(v->rs_hist));
+}
+
+/* Before a setter gives a voice its new source: the voice stops, and no VAG, PCM or noise source,
+ * loop setting or decoder state is left from the one before. */
+static void sas_voice_clear_source(SasVoice *v) {
+    v->on = 0; v->type = SAS_VOICE_OFF;
+    v->vag = v->vag_size = 0; v->loop_requested = 0; v->loop_start = -1;
+    v->pcm = v->pcm_samples = 0; v->pcm_loop_start = -1;
+    v->noise = 0;
+    sas_voice_restart(v);
+}
+
 static uint32_t h_SasSetVoice(CpuState *s) {
     SasVoice *v; uint32_t e = sas_voice_for(A0, A1, &v);
     int32_t size = (int32_t)A3, loop = (int32_t)stack_arg(s, 0);
@@ -1524,11 +1574,8 @@ static uint32_t h_SasSetVoice(CpuState *s) {
     if (size <= 0 || (((uint32_t)size & 15u) != 0)) return SAS_ERROR_ADPCM_SIZE;
     if (loop != 0 && loop != 1) return SAS_ERROR_LOOP_MODE;
     if (!A2 || !sr_guest_span_readable(A2, (uint32_t)size)) return SAS_ERROR_ADDRESS;
-    v->on = 0; v->type = SAS_VOICE_VAG; v->vag = A2; v->vag_size = (uint32_t)size;
-    v->pos = 0; v->loop_requested = loop; v->loop_start = -1;
-    v->pcm = v->pcm_samples = v->pcm_pos = 0; v->pcm_loop_start = -1;
-    v->noise = 0; v->hist1 = v->hist2 = 0; v->bufn = v->bufi = 0; v->frac = 0;
-    memset(v->rs_hist, 0, sizeof(v->rs_hist));
+    sas_voice_clear_source(v);
+    v->type = SAS_VOICE_VAG; v->vag = A2; v->vag_size = (uint32_t)size; v->loop_requested = loop;
     return 0;
 }
 
@@ -1540,9 +1587,9 @@ static uint32_t h_SasSetVoicePCM(CpuState *s) {
     if (samples <= 0 || !sr_size_mul_ok((uint32_t)samples, 2u, &bytes)) return SAS_ERROR_ADPCM_SIZE;
     if (loop_start < -1 || loop_start >= samples) return SAS_ERROR_LOOP_MODE;
     if (!A2 || !sr_guest_span_readable(A2, bytes)) return SAS_ERROR_ADDRESS;
-    v->on = 0; v->type = SAS_VOICE_PCM; v->pcm = A2; v->pcm_samples = (uint32_t)samples;
-    v->pcm_pos = 0; v->pcm_loop_start = loop_start; v->vag = v->vag_size = v->pos = 0;
-    v->loop_requested = loop_start >= 0; v->loop_start = -1; v->noise = 0; v->bufn = v->bufi = 0;
+    sas_voice_clear_source(v);
+    v->type = SAS_VOICE_PCM; v->pcm = A2; v->pcm_samples = (uint32_t)samples;
+    v->pcm_loop_start = loop_start; v->loop_requested = loop_start >= 0;
     return 0;
 }
 
@@ -1625,9 +1672,8 @@ static uint32_t h_SasSetNoise(CpuState *s) {
     int32_t freq = (int32_t)A2;
     if (e) return e;
     if (freq < 0 || freq > SAS_NOISE_FREQ_MAX) return SAS_ERROR_NOISE_CLOCK;
-    v->on = 0; v->type = SAS_VOICE_NOISE; v->noise = freq;
-    v->vag = v->vag_size = v->pos = 0; v->pcm = v->pcm_samples = v->pcm_pos = 0;
-    v->pcm_loop_start = -1; v->loop_requested = 0; v->loop_start = -1; v->bufn = v->bufi = 0;
+    sas_voice_clear_source(v);
+    v->type = SAS_VOICE_NOISE; v->noise = freq;
     return 0;
 }
 
@@ -1645,8 +1691,7 @@ static uint32_t h_SasSetKeyOn(CpuState *s) {
     if (v->paused || v->type == SAS_VOICE_OFF ||
         (v->type == SAS_VOICE_VAG && (!v->vag || v->vag_size < 16u)) ||
         (v->type == SAS_VOICE_PCM && (!v->pcm || !v->pcm_samples))) return SAS_ERROR_INVALID_STATE;
-    v->pos = 0; v->pcm_pos = 0; v->hist1 = v->hist2 = 0; v->bufn = v->bufi = 0; v->frac = 0;
-    memset(v->rs_hist, 0, sizeof(v->rs_hist));
+    sas_voice_restart(v);
     sas_envelope_key_on(&v->envelope); v->env_level = 0; v->on = 1;
     if (sas_log_on()) {
         static uint32_t calls; calls++;

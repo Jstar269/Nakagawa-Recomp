@@ -14026,8 +14026,8 @@ static void test_audio_regular_contract_safety(void) {
     expect(s_audio_push_first_l == 1 && s_audio_push_first_r == 1 &&
                s_audio_push_last_l == 64 && s_audio_push_last_r == 64,
            "mono 0x10 expands each source sample to equal left/right samples");
-    expect(s_audio_queue_calls == 2u,
-           "a zero-lead queue is observed once before and once inside the wait");
+    expect(s_audio_queue_calls == 1u,
+           "a zero-lead queue is read once: the first reading is also the wait loop's");
 
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
            "mono fixture channel releases before the stereo span case");
@@ -14207,6 +14207,70 @@ static void test_audio_regular_output_refuses_bad_channels(void) {
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
            "Output2 releases");
 
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* Regular output volumes above 0xFFFF are refused with INVALID_VOL before the channel check and
+ * nothing is played (audit 2026-11-17). PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp); PSPAutotests
+ * tests/audio/sceaudio/output.expected at ea71108f00933712c4662276261b39cd42249b1e agrees, a
+ * negative volume refused by PannedBlocking alone. HOST_TESTED through the production NIDs.
+ *
+ * MUTANT: mask the volume to 16 bits again -- 0x18000 plays at 0x8000 and returns 64.
+ * MUTANT: compare PannedBlocking's volumes as signed -- a volume of -1 plays. */
+static void test_audio_regular_output_refuses_bad_volumes(void) {
+    enum {
+        STEREO_BUF = 0x08a00000u,
+        NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING = 0x13f592bcu,
+        NID_SCE_AUDIO_OUTPUT_PANNED = 0xe2d56b2du,
+    };
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_test_audio_wait_reset();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "volume fixture reserves a 64-frame stereo channel");
+    const uint32_t over[] = {0x10000u, 0x18000u, 0xfffffu, 0x7fffffffu};
+    for (size_t i = 0; i < sizeof(over) / sizeof(over[0]); i++) {
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, over[i], STEREO_BUF) ==
+                   SCE_AUDIO_ERROR_INVALID_VOL,
+               "AudioOutputBlocking refuses a volume above 0xFFFF with INVALID_VOL");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = 0u; cpu.r[5] = 0x8000u; cpu.r[6] = over[i]; cpu.r[7] = STEREO_BUF;
+        expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == SCE_AUDIO_ERROR_INVALID_VOL,
+               "AudioOutputPannedBlocking refuses a volume above 0xFFFF with INVALID_VOL");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = 0u; cpu.r[5] = over[i]; cpu.r[6] = 0x8000u; cpu.r[7] = STEREO_BUF;
+        expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == SCE_AUDIO_ERROR_INVALID_VOL,
+               "AudioOutputPanned refuses a volume above 0xFFFF with INVALID_VOL");
+    }
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0u; cpu.r[5] = 0xffffffffu; cpu.r[6] = 0u; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == SCE_AUDIO_ERROR_INVALID_VOL,
+           "AudioOutputPannedBlocking refuses a negative volume");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 9u, 0x10000u, STEREO_BUF) ==
+               SCE_AUDIO_ERROR_INVALID_VOL,
+           "the volume is checked before the channel");
+    expect(s_audio_push_calls == 0u && sr_hle_test_audio_wait_total_us() == 0u,
+           "a refused volume hands the host nothing and never waits");
+
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0xffffu, STEREO_BUF) == 64u &&
+               s_audio_push_calls == 1u && s_audio_push_vol_l == 0xffff,
+           "AudioOutputBlocking plays at volume 0xFFFF");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, STEREO_BUF) == 64u &&
+               s_audio_push_calls == 2u,
+           "AudioOutputBlocking takes a negative volume, as the reference does");
+    s_audio_queue_result = 0;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0u; cpu.r[5] = 0xffffffffu; cpu.r[6] = 0xffffu; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == 64u && s_audio_push_calls == 3u,
+           "AudioOutputPanned takes a negative volume, as the reference does");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
+           "volume fixture releases its channel");
     sr_hle_test_audio_reset();
     audio_fixture_reset();
     reset_fixture();
@@ -14812,7 +14876,7 @@ static void test_audio_drift_window_reports_the_pacing_value(void) {
  * guest that does nothing else, so every wait is one the blocking output asked for, against a
  * device that takes `pull` frames at a time. The regular, Output2 and 44.1 kHz SRC calls all end in
  * the same output; each is driven through its own NIDs. */
-typedef enum { AUDIO_SIM_REGULAR, AUDIO_SIM_OUTPUT2, AUDIO_SIM_SRC } AudioSimApi;
+typedef enum { AUDIO_SIM_REGULAR, AUDIO_SIM_OUTPUT2, AUDIO_SIM_SRC, AUDIO_SIM_SRC48 } AudioSimApi;
 
 typedef struct {
     unsigned long pulls, short_pulls;
@@ -14863,9 +14927,12 @@ static void audio_sim_begin(AudioSimApi api, uint32_t frames, int pull, int repo
     else if (api == AUDIO_SIM_OUTPUT2)
         expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, frames, 0u, 0u) == 0u,
                "the device fixture reserves Output2");
-    else
+    else if (api == AUDIO_SIM_SRC)
         expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, frames, 44100u, 2u) == 0u,
                "the device fixture reserves the SRC channel at 44100 Hz");
+    else
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, frames, 48000u, 2u) == 0u,
+               "the device fixture reserves the SRC channel at 48000 Hz");
     s_audio_sim_pull = pull;
     s_audio_sim_reported_pull = reported_pull;
     s_audio_sim_next_pull_us = (uint64_t)pull * 1000000u / 44100u;
@@ -14963,6 +15030,28 @@ static void test_audio_host_hold_covers_a_late_wake(void) {
         expect(r.short_pulls == 0u, "a wake one display period late does not run the channel dry");
         expect(r.max_rest <= 2u * cases[i].frames, "the guest is still shown at most its two periods");
     }
+}
+
+/* A 48000 Hz SRC channel (audit 2026-11-17) converts each block to the 44100 Hz mixer and is
+ * paced like every other blocking output: the hold is queued once as silence ahead of its first
+ * push, and each output waits, through audio_wait, until the queue the guest sees is back down to
+ * two periods counted in mixer frames (256 samples at 48000 Hz are 236 mixer frames, rounded up).
+ * With every wait one display period late, the device still never finds the channel short.
+ *
+ * MUTANT: audio_src_output sleeps n * 1e6 / 48000 through sched_delay_current again -- no wait
+ *   reaches audio_wait, the device never pulls, and no hold is queued.
+ * MUTANT: audio_mixer_period returns the 48000 Hz sample count -- the guest is shown 512 frames,
+ *   more than its two mixer periods. */
+static void test_audio_src_48k_paces_against_the_host_queue(void) {
+    AudioSimRun r;
+    audio_sim_run(AUDIO_SIM_SRC48, 256u, 1024, sr_hle_test_audio_late_wake_us(), 2000u, &r);
+    expect(r.wait_us > 0u, "the 48000 Hz SRC output waits through audio_wait");
+    expect(r.pulls >= 400u, "the device pulled throughout the 48000 Hz run");
+    expect(r.short_pulls == 0u, "a 48000 Hz SRC channel paced against the host queue never runs dry");
+    expect(r.silence_calls == 1u && r.silence_frames == 1024u + 736u - 2u * 236u,
+           "the hold is queued once, as silence ahead of the first push");
+    expect(r.max_rest <= 2u * 236u, "the guest is shown at most its two periods in mixer frames");
+    expect(r.at_once == 2u, "two outputs return at once at the channel's start, and the third waits");
 }
 
 /* A channel whose two periods already cover a pull and a display period is paced exactly as
@@ -37976,6 +38065,44 @@ static void test_sas_voice_volume_defaults(void) {
            "a voice keyed on after an explicit __sceSasSetVolume(0, 0, 0, 0) plays silently (#2135)");
 }
 
+/* A guest reset (LoadExec, hle_sas_guest_reset) starts the noise generator again (audit
+ * 2026-11-17): the same program mixes the same noise whatever the program before it mixed.
+ * HOST_TESTED; the generator itself is this model's, not PSP-measured.
+ *
+ * MUTANT: keep the seed out of hle_sas_guest_reset -- the second run continues the first run's
+ *   sequence and its grain differs. */
+static void sas_noise_grain(CpuState *cpu, uint32_t core, uint32_t out, int16_t *grain) {
+    extern void hle_sas_guest_reset(void);
+    hle_sas_guest_reset();
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    cpu->r[4] = core; cpu->r[5] = SAS_TEST_GRAIN; cpu->r[6] = 32; cpu->r[7] = 0; cpu->r[8] = 44100;
+    expect(sr_syscall(cpu, NID_SAS_INIT) == 0, "noise-seed fixture initialises the core");
+    cpu->r[4] = core; cpu->r[5] = 2; cpu->r[6] = 17;
+    expect(sr_syscall(cpu, NID_SAS_SET_NOISE) == 0, "noise-seed fixture sets a noise voice");
+    cpu->r[4] = core; cpu->r[5] = 2;
+    expect(sr_syscall(cpu, NID_SAS_SET_KEY_ON) == 0, "noise-seed fixture keys the noise voice on");
+    memset(g_mem + (out - 0x08000000u), 0, SAS_TEST_GRAIN * 4u);
+    cpu->r[4] = core; cpu->r[5] = out;
+    expect(sr_syscall(cpu, NID_SAS_CORE) == 0, "noise-seed fixture mixes one grain");
+    sas_read_pcm(out, grain, SAS_TEST_GRAIN);
+}
+
+static void test_sas_noise_restarts_on_guest_reset(void) {
+    CpuState cpu;
+    const uint32_t core = 0x08030000u, out = 0x08010000u;
+    int16_t first[SAS_TEST_GRAIN * 2], second[SAS_TEST_GRAIN * 2];
+    reset_fixture(); sr_hle_init();
+    sas_noise_grain(&cpu, core, out, first);
+    sas_noise_grain(&cpu, core, out, second);
+    int audible = 0;
+    for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++) if (first[i]) { audible = 1; break; }
+    expect(audible, "the noise voice is audible in the first run");
+    expect(memcmp(first, second, sizeof(first)) == 0,
+           "after a guest reset the same program mixes the same noise grain");
+    sr_hle_test_sas_reset();
+}
+
 /* #2135: __sceSasCoreWithMix's two volumes scale the caller's PCM already in the buffer, not the
  * SAS voice mix, and no value is refused: out = clamp_s16(in * vol >> 12 + voices). This is the
  * reference behaviour (PPSSPP, hrydgard/ppsspp 0b30638e6571: Core/HLE/sceSas.cpp
@@ -58056,6 +58183,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wait_thread_end_cb_execution();
     test_audio_regular_contract_safety();
     test_audio_regular_output_refuses_bad_channels();
+    test_audio_regular_output_refuses_bad_volumes();
     test_audio_output2_release_refuses_while_queued();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();
@@ -58064,6 +58192,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_drift_window_reports_the_pacing_value();
     test_audio_host_hold_covers_a_device_pull();
     test_audio_host_hold_covers_a_late_wake();
+    test_audio_src_48k_paces_against_the_host_queue();
     test_audio_host_hold_leaves_long_periods_alone();
     test_audio_host_hold_starts_as_the_psp_does();
     test_audio_host_hold_restarts_as_the_psp_does();
@@ -58268,6 +58397,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_state_contracts();
     test_sas_set_volume_accepts_negative();
     test_sas_voice_volume_defaults();
+    test_sas_noise_restarts_on_guest_reset();
     test_sas_core_with_mix_scales_caller_pcm();
     test_sas_band_limited_resampling();
     test_sas_end_flags_refresh_per_cycle();
