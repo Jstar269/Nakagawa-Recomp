@@ -431,6 +431,26 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             r"(?im)^[ \t-]*agents?\s+(?:may|can)\s+(?:create|edit|publish|delete).*\b(?:tag|release)",
         )
 
+    def test_ai_and_dco_guidance_never_instruct_a_history_rewrite(self):
+        # AGENTS.md Section 10 forbids stacked pull requests and rebasing or force-pushing a
+        # pushed branch. The AI and DCO guidance must never offer either as a route.
+        ai = (ROOT / "docs" / "AI_USAGE.md").read_text(encoding="utf-8")
+        dco = (ROOT / "docs" / "DCO_POLICY.md").read_text(encoding="utf-8")
+        self.assertRuleStated(
+            _blocks(ai),
+            ("never stack", "origin/main", "cherry-pick"),
+            "the no-stacked-PR rule in AI_USAGE.md",
+        )
+        for rel, text in (("docs/AI_USAGE.md", ai), ("docs/DCO_POLICY.md", dco)):
+            with self.subTest(document=rel):
+                self.assertRuleStated(
+                    _blocks(text),
+                    ("never rebase", "force-push", "pushed branch"),
+                    f"the no-history-rewrite rule in {rel}",
+                )
+                self.assertNotRegex(text, r"--force-with-lease|git rebase\b")
+        self.assertNotIn("make the stack explicit", ai)
+
     def test_documented_gate_paths_exist(self):
         for rel in (
             "tools/codegen.py",

@@ -10,7 +10,7 @@ same sense as
 > The [source-owned scalar-probe runbook](../tests/fixtures/psp_oracle/README.md), its
 > [strict result protocol](../tools/psp_oracle/protocol.py), and the shipped
 > [`tools/psp_readiness.py`](../tools/psp_readiness.py) cover the implemented subset. Read those
-> first. In particular, the `tools/hw_doctor.py` proposed in §7 is superseded by the readiness tool
+> first. In particular, the `tools/hw_doctor.py` proposed in §8 (and the struck item 4 in §9) is superseded by the readiness tool
 > — extend that tool rather than adding a second precondition checker.
 > The PSP-side v2 instruction-trace producer now exists for source-owned microprograms: the
 > `insn-trace` probe (`PSP-TRACE-001`, `tests/fixtures/psp_oracle/probe_insn_trace.c`) single-steps the
@@ -5279,8 +5279,8 @@ loop; route those to the batch path.
 
 | Artifact | Status |
 | --- | --- |
-| Homebrew module authored here + its hardware trace | Ours. Committable. |
-| VFPU fuzz corpus + hardware results | Ours. Committable. |
+| Homebrew module authored here + curated, reviewed result records | Ours. The probe source and reviewed result records are committable. Raw traces, envelopes and host0 logs stay private (AGENTS.md Section 5). |
+| VFPU fuzz corpus + curated, reviewed result records | Ours. The corpus source and reviewed result records are committable. Raw traces, envelopes and host0 logs stay private. |
 | Any trace of the **retail game** on hardware | Game-derived. Private, permanently. |
 | Frame or memory dumps from the retail title | Game-derived. Private, permanently. |
 

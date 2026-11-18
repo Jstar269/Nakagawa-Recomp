@@ -18,9 +18,12 @@ states which of them may cross the public-source boundary.
 
 ## Census rules
 
-1. A title-specific path is excluded even when it contains no obvious binary or key.
-   Names, addresses, route names and filesystem layouts can be derived from private
-   inputs and are not required by a generic source release.
+1. A title-specific path is excluded even when it contains no obvious binary or key,
+   unless the maintainer admits it by a recorded owner decision (as for
+   `assets/titles/hst-ucus98701.json` on 2026-10-27). Names, addresses, route names and
+   filesystem layouts can be derived from private inputs and are not required by a
+   generic source release; an admitted path still carries no game bytes, image names,
+   host paths or route evidence.
 2. A public tool may accept a private input locally, but the input, output, capture,
    save and oracle are not provenance for the public tree and must not be checked in.
 3. HST-specific runtime or visual acceptance remains a separate private evidence lane.
