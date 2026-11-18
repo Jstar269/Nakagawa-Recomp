@@ -122,6 +122,19 @@ def _matched(match: re.Match[str] | None) -> re.Match[str]:
     return cast(re.Match[str], match)
 
 
+def _oracle_scratch_parent() -> Path:
+    """The parent of a scratch directory a test must keep inside the repository.
+
+    run_psplink.py refuses a --results-directory outside the repository root, so these
+    tests cannot use the system temporary directory. The fixture's build directory is
+    ignored (.gitignore), so a directory a killed run leaves behind never makes the
+    checkout read as dirty to the Makefile's clean-tree guard.
+    """
+    parent = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle" / "build"
+    parent.mkdir(parents=True, exist_ok=True)
+    return parent
+
+
 #: Variables that would point a git command at another repository or index (the list
 #: tools/admit_paths.py strips for the same reason).
 GIT_REPOSITORY_VARIABLES = (
@@ -925,8 +938,7 @@ class GeCorpusGateTests(unittest.TestCase):
         command = [sys.executable, str(self.root / "tools" / "psp_oracle" / "run_psplink.py"), "--ge-corpus-gate"]
         if document is None:
             return subprocess.run(command, capture_output=True, text=True, check=False)
-        fixture_dir = self.root / "tests" / "fixtures" / "psp_oracle"
-        with tempfile.TemporaryDirectory(prefix="ge-corpus-gate-", dir=fixture_dir) as scratch:
+        with tempfile.TemporaryDirectory(prefix="ge-corpus-gate-", dir=_oracle_scratch_parent()) as scratch:
             results_dir = Path(scratch) / "results"
             results_dir.mkdir()
             for relative, text in (results or {}).items():
@@ -938,6 +950,23 @@ class GeCorpusGateTests(unittest.TestCase):
             corpus_path.write_text(json.dumps(document), encoding="utf-8")
             command.extend(["--ge-corpus", str(corpus_path)])
             return subprocess.run(command, capture_output=True, text=True, check=False)
+
+    def test_a_left_over_scratch_directory_never_reads_as_a_dirty_checkout(self) -> None:
+        # A run killed before cleanup leaves its scratch directory behind; the Makefile's
+        # clean-tree guard (git status --porcelain --untracked-files=normal) must not see it.
+        git = shutil.which("git")
+        env = {k: v for k, v in os.environ.items() if k not in GIT_REPOSITORY_VARIABLES}
+        if git is None or subprocess.run([git, "-C", str(self.root), "rev-parse", "--git-dir"],
+                                         capture_output=True, env=env, check=False).returncode:
+            self.skipTest("needs git and a git checkout")
+        with scratch_dir.TemporaryDirectory(prefix="left-over-", dir=_oracle_scratch_parent()) as scratch:
+            (Path(scratch) / "results.txt").write_text("left over\n", encoding="utf-8")
+            status = subprocess.run(
+                [git, "-C", str(self.root), "status", "--porcelain", "--untracked-files=normal",
+                 "--", scratch],
+                capture_output=True, text=True, env=env, check=True,
+            )
+        self.assertEqual(status.stdout, "")
 
     def _report(self, completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
         self.assertTrue(completed.stdout, completed.stderr)
@@ -1682,18 +1711,40 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
             "PROBE_BUILD_COMMIT could not be determined",
             missing.stdout + missing.stderr,
         )
-        # git status never lists an empty directory, so the scratch directory
-        # needs a file for the checkout to read as dirty.
-        with tempfile.TemporaryDirectory(
-            prefix="probe-build-dirty-", dir=makefile_path
-        ) as scratch:
-            (Path(scratch) / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("git is unavailable")
+        env = {k: v for k, v in os.environ.items() if k not in GIT_REPOSITORY_VARIABLES}
+        live_status = [git, "-C", str(makefile_path.parents[2]), "status", "--porcelain",
+                       "--untracked-files=normal"]
+        before = subprocess.run(live_status, capture_output=True, text=True, env=env, check=True)
+        # The dirt lives in a throwaway repository with one commit, and the Makefile's git
+        # calls are pointed at it. git status never lists an empty directory, so the
+        # repository needs a file to read as dirty.
+        with tempfile.TemporaryDirectory(prefix="probe-build-dirty-") as scratch:
+            repo = Path(scratch)
+            subprocess.run([git, "init", "-q", str(repo)], capture_output=True, env=env, check=True)
+            tree = subprocess.run([git, "-C", str(repo), "write-tree"], capture_output=True,
+                                  text=True, env=env, check=True).stdout.strip()
+            identity = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+            commit = subprocess.run([git, "-C", str(repo), "commit-tree", tree, "-m", "synthetic"],
+                                    capture_output=True, text=True, env={**env, **identity},
+                                    check=True).stdout.strip()
+            subprocess.run([git, "-C", str(repo), "update-ref", "HEAD", commit],
+                           capture_output=True, env=env, check=True)
+            (repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
             completed = subprocess.run(
                 [make, "-C", str(makefile_path)],
                 capture_output=True,
                 text=True,
+                env={**env, "GIT_DIR": str(repo / ".git"), "GIT_WORK_TREE": str(repo)},
                 check=False,
             )
+            during = subprocess.run(live_status, capture_output=True, text=True, env=env, check=True)
+        # The live checkout never carries the dirt, so a run killed here, or another run
+        # reading git status meanwhile, never sees it.
+        self.assertEqual(during.stdout, before.stdout)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("source tree is dirty", completed.stdout + completed.stderr)
 
@@ -1788,7 +1839,7 @@ class PspOracleRunnerTests(unittest.TestCase):
     def test_capture_uses_selected_scratch_results_directory(self) -> None:
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(
-            prefix="run-psplink-", dir=root / "tests" / "fixtures" / "psp_oracle"
+            prefix="run-psplink-", dir=_oracle_scratch_parent()
         ) as scratch_name:
             scratch = Path(scratch_name)
             results = scratch / "results"
@@ -1931,9 +1982,22 @@ class PspOracleRunnerTests(unittest.TestCase):
         self.assertNotIn("NAKAGAWA_PSP_TEST", text)
 
     def test_oracle_capture_launcher_preserves_child_stdout(self) -> None:
+        # The capture holds exactly the child's stdout bytes (no newline translation, no
+        # stderr), and the launcher returns the child's exit code.
         launcher = Path(__file__).resolve().parent / "psp_oracle" / "run_nakagawa.py"
-        self.assertTrue(launcher.is_file())
-        self.assertIn("stdout=subprocess.PIPE", launcher.read_text(encoding="utf-8"))
+        child = ("import sys; sys.stdout.buffer.write(b'NAKAGAWA_PSP_TEST a=1\\r\\nrow 2\\n\\x00end'); "
+                 "sys.stdout.flush(); sys.stderr.write('not a record\\n'); sys.exit(3)")
+        with tempfile.TemporaryDirectory(prefix="run-nakagawa-") as scratch:
+            output = Path(scratch) / "nested" / "capture.log"
+            completed = subprocess.run(
+                [sys.executable, str(launcher), "--executable", sys.executable,
+                 "--output", str(output), "--", "-c", child],
+                capture_output=True, check=False,
+            )
+            self.assertEqual(completed.returncode, 3, completed.stderr)
+            self.assertEqual(output.read_bytes(), b"NAKAGAWA_PSP_TEST a=1\r\nrow 2\n\x00end")
+        self.assertEqual(completed.stdout, b"")
+        self.assertIn(b"not a record", completed.stderr)
 
 
 class PspLinkTeardownSnapshotTests(unittest.TestCase):
@@ -2479,8 +2543,7 @@ int main(void) {
     return 0;
 }
 '''
-        fixture = root / "tests" / "fixtures" / "psp_oracle"
-        with scratch_dir.TemporaryDirectory(prefix="interrupt-resume-host-", dir=fixture) as scratch:
+        with scratch_dir.TemporaryDirectory(prefix="interrupt-resume-host-", dir=_oracle_scratch_parent()) as scratch:
             source_path = Path(scratch) / "interrupt_resume_host.c"
             binary_path = Path(scratch) / "interrupt_resume_host.exe"
             source_path.write_text(harness, encoding="utf-8")
@@ -2615,8 +2678,7 @@ int main(void) {
     return 0;
 }
 '''
-        fixture = root / "tests" / "fixtures" / "psp_oracle"
-        with scratch_dir.TemporaryDirectory(prefix="child-teardown-host-", dir=fixture) as scratch:
+        with scratch_dir.TemporaryDirectory(prefix="child-teardown-host-", dir=_oracle_scratch_parent()) as scratch:
             source_path = Path(scratch) / "child_teardown_host.c"
             binary_path = Path(scratch) / "child_teardown_host.exe"
             source_path.write_text(harness, encoding="utf-8")
@@ -4239,8 +4301,7 @@ int main(void) {
 }
 '''.replace("/* MAILBOX PROBE SNIPPET */", mailbox_probe)
 
-        fixture = root / "tests" / "fixtures" / "psp_oracle"
-        with scratch_dir.TemporaryDirectory(prefix="mbx-cleanup-host-", dir=fixture) as scratch:
+        with scratch_dir.TemporaryDirectory(prefix="mbx-cleanup-host-", dir=_oracle_scratch_parent()) as scratch:
             source_path = Path(scratch) / "mbx_cleanup_host.c"
             binary_path = Path(scratch) / "mbx_cleanup_host.exe"
             source_path.write_text(harness, encoding="utf-8")
@@ -4572,6 +4633,9 @@ class ProbeProgressAndBoundedWaitTests(unittest.TestCase):
         report = parse_campaign_probe_output(self._stream(rows), "ge-break-continue")
         statuses = {record.case_id: record.status for record in report.results.values()}
         self.assertEqual(statuses["ge-continue-drain"], "TIMEOUT")
+        # A TIMEOUT is a complete, measured stream, but not an all-PASS one.
+        self.assertTrue(report.complete)
+        self.assertFalse(report.all_passed)
 
     def test_ge_break_continue_resets_before_any_dequeue(self) -> None:
         # The reset cell is separable only if the sceGeBreak(1) reset cell comes before every
@@ -4594,9 +4658,17 @@ class ProbeProgressAndBoundedWaitTests(unittest.TestCase):
             if "case_id=ge-list-dequeue-stalled " in row else row
             for row in rows
         ]
+        self.assertNotEqual(busy, rows)
         report = parse_campaign_probe_output(self._stream(busy), "ge-break-continue")
-        statuses = {record.case_id: record.status for record in report.results.values()}
-        self.assertEqual(set(statuses.values()), {"PASS"})
+        spec, _ = CAMPAIGN_PROBE_CASES["ge-break-continue"]
+        # The parser keeps the measured BUSY word, keeps every cancelled cell in its place,
+        # and still finds the stream complete and eligible.
+        self.assertTrue(report.complete)
+        self.assertTrue(report.all_passed)
+        self.assertEqual(report.observed_order, tuple(spec.ordered_cases))
+        self.assertEqual(dict(report.results["ge-list-dequeue-stalled"].values)["result"], "0x80000021")
+        for cancelled in ("ge-list-sync-cancelled", "ge-draw-sync-cancelled", "ge-quiesce-after-cancel"):
+            self.assertEqual(dict(report.results[cancelled].values)["result"], "0x0")
 
     def test_campaign_specs_match_the_records_the_probe_emits(self) -> None:
         defines = {name: int(value) for name, value in
@@ -4790,8 +4862,21 @@ def _gu_teardown_problems(source: str) -> list[str]:
             cbid = re.escape(call.group(1))
             if "null_ge_drawsync_bounded(" not in body[:call.start()]:
                 problems.append(f"{name} sets its GE callback before a bounded idle check")
-            if not re.search(r"sceGeUnsetCallback\(\s*%s\s*\)" % cbid, body[call.end():]):
-                problems.append(f"{name} never unsets its GE callback ID")
+            # The unset runs on every path that registered: a statement at the function's
+            # top level, unconditional or guarded only by `<id> >= 0` (a failed set
+            # registered nothing), with no return or goto between the set and it.
+            for unset in re.finditer(r"sceGeUnsetCallback\(\s*%s\s*\)" % cbid, body[call.end():]):
+                at = call.end() + unset.start()
+                statement = body[max(body.rfind(c, 0, at) for c in ";{}") + 1:at]
+                if _c_depth(body, at) == 1 and (
+                        not re.search(r"\b(?:if|else|for|while|do|case|switch)\b|\?|&&|\|\|", statement)
+                        or re.fullmatch(r"\s*(?:const\s+)?int\s+\w+\s*=\s*%s\s*>=\s*0\s*\?\s*" % cbid,
+                                        statement)):
+                    if re.search(r"\b(?:return|goto)\b", body[call.end():at]):
+                        problems.append(f"{name} can return before it unsets its GE callback ID")
+                    break
+            else:
+                problems.append(f"{name} never unsets its GE callback ID on every path")
         return problems
 
     def reaches(name: str, body: str, start: int, pattern: str, what: str) -> int:
@@ -4906,6 +4991,32 @@ class GuTeardownContractTests(unittest.TestCase):
         for name, mutant in mutants.items():
             with self.subTest(mutant=name):
                 self.assertNotEqual(mutant, self.probe)
+                self.assertNotEqual(_gu_teardown_problems(mutant), [], name)
+
+    def test_the_callback_only_check_refuses_a_path_that_skips_the_unset(self) -> None:
+        # probe_hle_issues.c sets a GE callback without sceGuInit (null-code-registration).
+        source = (self.fixture / "probe_hle_issues.c").read_text(encoding="utf-8")
+        self.assertNotIn("sceGuInit(", _c_code(source))
+        set_block = "        ge_callback_id = sceGeSetCallback(&ge_callback);\n    }\n"
+        unset = "    const int ge_unset = ge_callback_id >= 0 ? sceGeUnsetCallback(ge_callback_id) : -1;\n"
+        for anchor in (set_block, unset):
+            self.assertEqual(source.count(anchor), 1, anchor)
+        self.assertEqual(_gu_teardown_problems(source), [])
+        mutants = {
+            "early-return": source.replace(
+                set_block, set_block + "    if (ge_callback_id >= 0) {\n        return 0;\n    }\n"),
+            "goto": source.replace(set_block, set_block + "    goto done;\n"),
+            "conditional-unset": source.replace(
+                unset, "    int ge_unset = -1;\n    if (draw_sync == 0) {\n"
+                "        ge_unset = sceGeUnsetCallback(ge_callback_id);\n    }\n"),
+            "extra-guard": source.replace(unset, unset.replace(
+                "ge_callback_id >= 0 ?", "ge_callback_id >= 0 && draw_sync == 0 ?")),
+            "other-guard": source.replace(unset, unset.replace(
+                "ge_callback_id >= 0 ?", "draw_sync_complete ?")),
+        }
+        for name, mutant in mutants.items():
+            with self.subTest(mutant=name):
+                self.assertNotEqual(mutant, source)
                 self.assertNotEqual(_gu_teardown_problems(mutant), [], name)
 
     def test_ge_nan_and_vram_mirror_record_the_teardown(self) -> None:
@@ -7341,6 +7452,27 @@ _HLE_INTR_REMOVERS = {
     "sceKernelEnableSubIntr": "sceKernelDisableSubIntr",
     "sceKernelCpuSuspendIntr": "sceKernelCpuResumeIntr",
 }
+#: The one guard a remover may sit under: the install's handle is valid. Every other remover
+#: runs directly in its function's own block.
+_HLE_INTR_REMOVER_GUARDS = {
+    "sceKernelSetAlarm": "alarm",
+    "sceKernelRegisterSubIntrHandler": "slot",
+    "sceKernelEnableSubIntr": "slot",
+}
+
+
+def _c_enclosing_brace(body: str, at: int) -> int:
+    """Index of the `{` that opens the innermost block holding index `at` of a function body."""
+    text = re.sub(r'"(?:[^"\\]|\\.)*"', lambda m: '"' + " " * (len(m.group()) - 2) + '"', body[:at])
+    depth = 0
+    for index in range(len(text) - 1, -1, -1):
+        if text[index] == "}":
+            depth += 1
+        elif text[index] == "{":
+            if depth == 0:
+                return index
+            depth -= 1
+    raise ValueError("index is outside the function body")
 
 
 def _hle_intr_cleanup_problems(probe: str) -> list[str]:
@@ -7369,11 +7501,27 @@ def _hle_intr_cleanup_problems(probe: str) -> list[str]:
         if f"{remove}(" not in body[at:]:
             problems.append(f"{owners[0]} calls {install} without a later {remove}")
             continue
-        between = body[at:body.index(f"{remove}(", at)]
-        # The install's own failure branch (`if (vt < 0) { ...; return; }`) installed nothing.
-        between = re.sub(r"if \(\w+ < 0\) \{[^{}]*\}", "", between)
-        if re.search(r"\breturn\b", between):
+        removed_at = body.index(f"{remove}(", at)
+        between = body[at:removed_at]
+        # The install's own failure branch (`if (vt < 0) { ...; return; }`) installed nothing;
+        # only the branch on the install's own result is exempt.
+        result = re.search(r"\b(\w+) = [^;]*\b%s\(" % install, body)
+        if result:
+            between = re.sub(r"if \(%s < 0\) \{[^{}]*\}" % re.escape(result.group(1)), "", between)
+        if re.search(r"\b(?:return|goto)\b", between):
             problems.append(f"{owners[0]} can return between {install} and {remove}")
+        # The remover runs on every path: a plain statement directly in the function's own
+        # block, or directly in the one block its guard allows (`if (<var> >= 0) {`).
+        statement = body[max(body.rfind(c, 0, removed_at) for c in ";{}") + 1:removed_at]
+        if re.search(r"\b(?:if|else|for|while|do|case|switch)\b|\?|&&|\|\|", statement):
+            problems.append(f"{owners[0]} calls {remove} in a conditional statement")
+            continue
+        block = _c_enclosing_brace(body, removed_at)
+        header = body[max(body.rfind(c, 0, block) for c in ";{}") + 1:block].strip()
+        guard = _HLE_INTR_REMOVER_GUARDS.get(install)
+        if block != 0 and not (guard and header == f"if ({guard} >= 0)"
+                               and _c_enclosing_brace(body, block) == 0):
+            problems.append(f"{owners[0]} calls {remove} only under `{header}`, not on every path")
     vtimer = functions.get("ic_vtimer_series", "")
     if not re.search(r"if \(vt < 0\) \{[^{}]*return;\s*\}", vtimer):
         problems.append("ic_vtimer_series has no early return for a failed create only")
@@ -7953,6 +8101,26 @@ class HleIssuesProbeTests(unittest.TestCase):
                 "(void)sceKernelStartVTimer(vt);\n    if (first_us == 0u) {\n        return;\n    }\n", 1),
             "no-resume": self.probe.replace("sceKernelCpuResumeIntr(flags);", "", 1),
         }
+        # A remover that runs only under a condition leaves the install behind on the other path.
+        for remover in ("(void)sceKernelStopVTimer(vt);", "(void)sceKernelDeleteVTimer(vt);",
+                        "sceKernelCpuResumeIntr(flags);"):
+            mutants[f"conditional-{remover}"] = self.probe.replace(
+                f"    {remover}\n", f"    if (s_ic_flag) {{\n        {remover}\n    }}\n", 1)
+        mutants["unbraced-delete"] = self.probe.replace(
+            "    (void)sceKernelDeleteVTimer(vt);\n",
+            "    if (s_ic_flag)\n        (void)sceKernelDeleteVTimer(vt);\n", 1)
+        for remover in ("const int dis = sceKernelDisableSubIntr(PSP_VBLANK_INT, slot);",
+                        "const int rel = sceKernelReleaseSubIntrHandler(PSP_VBLANK_INT, slot);"):
+            mutants[f"conditional-{remover}"] = self.probe.replace(
+                f"        {remover}\n",
+                f"        int {remover[10:13]} = 0;\n        if (s_ic_flag) {{\n"
+                f"            {remover[10:]}\n        }}\n", 1)
+        # Only the install's own failure branch is exempt from the no-return rule.
+        for install in ("(void)sceKernelStartVTimer(vt);",
+                        "const SceUID alarm = sceKernelSetAlarm(first_us, ic_alarm_handler, NULL);",
+                        "const int en = slot >= 0 ? sceKernelEnableSubIntr(PSP_VBLANK_INT, slot) : -1;"):
+            mutants[f"other-negative-return-{install}"] = self.probe.replace(
+                f"    {install}\n", f"    {install}\n    if (bogus < 0) {{\n        return 0;\n    }}\n", 1)
         for name, mutant in mutants.items():
             with self.subTest(mutant=name):
                 self.assertNotEqual(mutant, self.probe)
@@ -14780,14 +14948,50 @@ class HleNicknameLimitProbeTests(unittest.TestCase):
         self.assertNotIn("HLE_PRIVATE_STRINGS_PATH", code)
         self.assertNotRegex(code, r"\b(?:sceIo\w+|fopen|fwrite|fprintf|printf|hle_write|hle_emit"
                                   r"|snprintf)\s*\(")
-        # The buffer is handed only to the call, scanned for its NUL position and zeroed.
-        for use in re.findall(r"[^\n]*s_nick_buffer[^\n]*", code):
-            self.assertRegex(use, r"memset\(s_nick_buffer|s_nick_buffer\[j\] == 0|"
-                                  r"\(char \*\)s_nick_buffer|s_nick_buffer\[HLE_NICK_BUFFER_BYTES\]"
-                                  r"|sizeof\(s_nick_buffer\)")
+        self.assertEqual(self._nick_buffer_stray_uses(code), [])
         self.assertNotRegex(code, r"hle_(?:record|emit)\([^;]*s_nick_buffer")
         self.assertNotRegex(code, r"hle_(?:record|emit)\([^;]*s_nick_keys")
         self.assertEqual(code.count("memset(s_nick_buffer, 0, sizeof(s_nick_buffer));"), 1)
+
+    #: Every statement that may name the nickname buffer, each exactly once: the
+    #: definition, the fill, the read call, the NUL scan and the zeroing.
+    NICK_BUFFER_USES = (
+        r"static uint8_t s_nick_buffer\[HLE_NICK_BUFFER_BYTES\];",
+        r"memset\(s_nick_buffer, 0xA5, sizeof\(s_nick_buffer\)\);",
+        r"const int rc = sceUtilityGetSystemParamString\(PSP_SYSTEMPARAM_ID_STRING_NICKNAME,"
+        r"\s*\(char \*\)s_nick_buffer, length\);",
+        r"if \(s_nick_buffer\[j\] == 0\) \{",
+        r"memset\(s_nick_buffer, 0, sizeof\(s_nick_buffer\)\);",
+    )
+
+    @classmethod
+    def _nick_buffer_stray_uses(cls, code: str) -> list[str]:
+        """Lines of comment-free `code` that name s_nick_buffer outside the allowed statements.
+
+        The buffer is handed only to the read call, scanned for its NUL position and zeroed;
+        any other use (a copy, an alias, a second read) could carry a nickname byte out.
+        """
+        problems: list[str] = []
+        rest = code
+        for pattern in cls.NICK_BUFFER_USES:
+            rest, count = re.subn(pattern, "", rest)
+            if count != 1:
+                problems.append(f"{count} uses of {pattern}, not one")
+        problems.extend(line.strip() for line in re.findall(r"[^\n]*\bs_nick_buffer\b[^\n]*", rest))
+        return problems
+
+    def test_the_nickname_check_refuses_a_copy_or_an_alias(self) -> None:
+        code = _c_code(self.section)
+        zero = "memset(s_nick_buffer, 0, sizeof(s_nick_buffer));"
+        self.assertEqual(code.count(zero), 1)
+        for name, leak in {
+            "memcpy": "memcpy(out, s_nick_buffer, sizeof(s_nick_buffer));",
+            "strncpy": "strncpy((char *)out, (char *)s_nick_buffer, sizeof(out));",
+            "alias": "const char *alias = (char *)s_nick_buffer;",
+            "byte": "out[0] = s_nick_buffer[0];",
+        }.items():
+            with self.subTest(leak=name):
+                self.assertNotEqual(self._nick_buffer_stray_uses(code.replace(zero, leak + "\n" + zero)), [])
 
     def test_the_length_cells_pass_the_eight_lengths_in_order(self) -> None:
         self.assertIn("{0x10, 0x11, 0x20, 0x21, 0x40, 0x41, 0x80, 0x81}", self.section)
@@ -17650,20 +17854,50 @@ class LlscLinkProbeTests(unittest.TestCase):
                 self.assertNotIn("jal", template)
                 self.assertNotIn("break", template)
 
+    @staticmethod
+    def _llsc_window_problems(body: str) -> list[str]:
+        """How run_llsc_link's suspended spans break "the window and nothing else".
+
+        Each of the three cells suspends interrupts, runs its one llsc_window_* call and
+        resumes; no record, step, print or other call runs while interrupts are off (host
+        IO there can stall the PSPLink USB transport), and the spans do not overlap.
+        """
+        problems: list[str] = []
+        spans = list(re.finditer(r"token = sceKernelCpuSuspendIntr\(\);(.*?)sceKernelCpuResumeIntr\(token\);",
+                                 body, re.DOTALL))
+        if len(spans) != 3 or body.count("sceKernelCpuSuspendIntr(") != 3 or \
+                body.count("sceKernelCpuResumeIntr(") != 3:
+            return [f"{len(spans)} suspend/resume spans, not three"]
+        for span, window in zip(spans, ("one", "twice", "other"), strict=True):
+            if not re.fullmatch(r"\s*(?:first\[\d\] = )?llsc_window_%s\(&[^;()]*\);\s*" % window,
+                                span.group(1)):
+                problems.append(f"the llsc_window_{window} span holds more than its window: "
+                                f"{span.group(1).strip()!r}")
+        return problems
+
     def test_every_window_is_bracketed_by_suspend_and_resume_with_no_host_io_inside(self) -> None:
         body = self._run_body()
-        suspends = [m.start() for m in re.finditer(r"sceKernelCpuSuspendIntr\(\)", body)]
+        self.assertEqual(self._llsc_window_problems(body), [])
         resumes = [m.start() for m in re.finditer(r"sceKernelCpuResumeIntr\(token\)", body)]
-        calls = [body.index(name) for name in (
-            "llsc_window_one(&", "llsc_window_twice(&", "llsc_window_other(&")]
-        self.assertEqual(len(suspends), 3)
-        self.assertEqual(len(resumes), 3)
-        for suspend, call, resume in zip(suspends, calls, resumes, strict=True):
-            self.assertLess(suspend, call)
-            self.assertLess(call, resume)
         self.assertLess(resumes[-1], body.index("emit_record_extended("))
         self.assertNotIn("for (;;)", self._block())
         self.assertNotIn("while (", self._block().split("static void run_llsc_link")[1])
+
+    def test_the_window_check_refuses_host_io_or_a_second_call_inside(self) -> None:
+        body = self._run_body()
+        suspend = "    token = sceKernelCpuSuspendIntr();\n"
+        self.assertEqual(body.count(suspend), 3)
+        for name, inside in {
+            "printf": '    printf("x\\n");\n',
+            "step": '    probe_step(emulated, "llsc-link", "inside");\n',
+            "record": "    emit_record_extended(0, 0, 0, 0, 0);\n",
+            "second-window": "    (void)llsc_window_one(&s_llsc_mem[0][0], LLSC_LINK_FIRST, &loaded[0]);\n",
+        }.items():
+            for index in range(3):
+                with self.subTest(io=name, window=index):
+                    parts = body.split(suspend)
+                    parts[index + 1] = inside + parts[index + 1]
+                    self.assertNotEqual(self._llsc_window_problems(suspend.join(parts)), [])
 
     def test_each_cell_writes_its_sentinels_and_steps_before_its_window(self) -> None:
         body = self._run_body()
