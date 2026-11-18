@@ -2067,6 +2067,60 @@ done:
     return 1;
 }
 
+/* A run that ends on a thread other than the one that draws, with no file being written (audit
+ * 2026-11-17): the end must leave the dump's state alone, as it does with files in flight, since the
+ * drawing thread may be inside tex_dump_note using the names and the scratch. The drawing thread's
+ * own end then finishes the dump. Failing before: with nothing in flight the other thread's end
+ * stopped the dump, closed its names and freed the scratch under the drawing thread. */
+static int SDLCALL xst_dump_end_elsewhere(void *ctx) {
+    (void)ctx;
+    sr_texdump_exit_finish();   /* what an exit from HLE or display code calls */
+    return 0;
+}
+
+static int xst_cell_dump_thread(int f) {
+    (void)f;
+    uint32_t t[XST_W * XST_H];
+    char dir[400];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_thread");
+    xst_reset();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(1);
+    const char *why = NULL;
+    if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
+    xst_pattern(t, 801u);
+    xst_upload(t);
+    xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+    if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    if (s_dump.inflight || !s_dump.owner || !s_dump.on || !s_dump.names) {
+        why = "the drawn level was still being written, or no thread drew it";
+        goto done;
+    }
+    const void *names = s_dump.names;
+    const uint32_t *scratch = s_dumpscratch;
+    SDL_Thread *th = SDL_CreateThread(xst_dump_end_elsewhere, "xst-dump-end", NULL);
+    if (!th) { why = "the other thread could not be started"; goto done; }
+    SDL_WaitThread(th, NULL);
+    if (!s_dump.on || s_dump.names != names || s_dumpscratch != scratch) {
+        why = "an end on another thread, nothing in flight, cleared the dump's state under the drawing thread";
+        goto done;
+    }
+    tex_dump_shutdown();   /* the drawing thread's own end */
+    if (s_dump.on || s_dump.names || s_dump.starts) why = "the drawing thread's end did not finish the dump";
+
+done:
+    gegpu_texdump_stop();
+    tex_dump_collect();
+    memset(&s_dump, 0, sizeof(s_dump));
+    if (why) {
+        fprintf(stderr, "gpu texscale selftest: FAIL dump-thread: %s\n", why);
+        return 0;
+    }
+    printf("gpu texscale selftest: PASS %-12s an end on another thread left the dump to the drawing thread, "
+           "whose end finished it\n", "dump-thread");
+    return 1;
+}
+
 int gegpu_texrepl_only_prepare(const char *build_root) {
     char dir[400], path[480];
     snprintf(dir, sizeof(dir), "%s/texrepl_gpu_only_pack", build_root);
@@ -2279,11 +2333,12 @@ int gegpu_texscale_selftest(void) {
                                          xst_cell_not_ready, xst_cell_rewrite, xst_cell_clut, xst_cell_replace,
                                          xst_cell_replace_palette, xst_cell_dump, xst_cell_dump_xxh,
                                          xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_dump_async,
-                                         xst_cell_dump_exit, xst_cell_dump_stuck, xst_cell_budget,
+                                         xst_cell_dump_exit, xst_cell_dump_stuck, xst_cell_dump_thread,
+                                         xst_cell_budget,
                                          xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
     static const char *const names[] = { "scaled-draw", "large", "upload-cap", "not-ready", "rewrite", "clut",
                                          "replace", "replace-pal", "dump", "dump-xxh",
-                                         "dump-pal", "dump-mip", "dump-async", "dump-exit", "dump-stuck", "budget", "rtt", "color-test",
+                                         "dump-pal", "dump-mip", "dump-async", "dump-exit", "dump-stuck", "dump-thread", "budget", "rtt", "color-test",
                                          "onetoone" };
     /* The cells before onetoone check copies through 1:1 sprites, so they run with the 1:1 rule
      * off; onetoone turns it back on. */
