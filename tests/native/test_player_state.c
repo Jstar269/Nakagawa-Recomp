@@ -14218,8 +14218,8 @@ int main(int argc, char **argv) {
             "\"disc\":{\"id\":\"TEST00001\",\"region\":\"NA\","
             "\"revision_policy\":\"explicit-compatible-revisions\","
             "\"compatible_revisions\":[\"TEST00002\"]},"
-            "\"executable\":{\"base\":\"0x08800000\","
-            "\"entry\":\"0x08804000\",\"bss_metadata_source\":\"elf\","
+            "\"executable\":{\"base\":142606336,"
+            "\"entry\":142622720,\"bss_metadata_source\":\"elf\","
             "\"extra_executable_spans\":[]},\"modules\":[],"
             "\"filesystem\":{\"data_root\":\"data\","
             "\"memory_stick_root\":\"savedata\","
@@ -14227,7 +14227,7 @@ int main(int argc, char **argv) {
             "\"hle_profile\":\"generic\",\"feature_requirements\":[],"
             "\"verification_profile\":\"unverified\","
             "\"runtime_bindings\":{\"schema_version\":1,"
-            "\"vblank_frame_counter_addr\":\"0x08804000\"}}";
+            "\"vblank_frame_counter_addr\":142622720}}";
         write_text_file(refusal_path, refused_manifest);
         char refusal_report[2048];
         assert(nk_title_manifest_load_overlay_dir(refusal_dir, refusal_report,
@@ -17370,8 +17370,8 @@ int main(int argc, char **argv) {
             "  \"display_name\": \"Epoch Coherence Overlay\",\n"
             "  \"kind\": \"retail\",\n"
             "  \"disc\": {\"id\": \"UCUS99901\", \"region\": \"NA\", \"revision_policy\": \"exact-disc-id\"},\n"
-            "  \"executable\": {\"base\": \"0x08800000\", \"entry\": \"0x08804000\", \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
-            "  \"modules\": [{\"name\": \"epoch.prx\", \"load_address\": \"0x08900000\", \"required\": true, \"role\": \"guest-prx\"}],\n"
+            "  \"executable\": {\"base\": 142606336, \"entry\": 142622720, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
+            "  \"modules\": [{\"name\": \"epoch.prx\", \"load_address\": 143654912, \"required\": true, \"role\": \"guest-prx\"}],\n"
             "  \"filesystem\": {\"data_root\": \"data/epoch\", \"memory_stick_root\": \"ms/epoch\", \"device_prefixes\": [\"host0:\"]},\n"
             "  \"hle_profile\": \"standard\",\n"
             "  \"feature_requirements\": [\"allegrex\"],\n"

@@ -18,7 +18,7 @@
 
 #define NK_CATALOG_MAX_OVERLAYS 8
 #define NK_CATALOG_MAX_COMPATIBLE_DISC_IDS 16
-#define NK_CATALOG_MAX_MODULES 32
+#define NK_CATALOG_MAX_MODULES 256
 static const NkTitleEntry *s_private_overlay_entries[NK_CATALOG_MAX_OVERLAYS];
 static int s_private_overlay_count = 0;
 static NkOverlayStorageResetFn s_overlay_storage_reset = NULL;

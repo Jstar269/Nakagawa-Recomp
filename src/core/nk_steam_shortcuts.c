@@ -722,6 +722,27 @@ NkSteamStatus nk_steam_list_accounts(const char *root, NkSteamAccount *accounts,
     return list.count ? NK_STEAM_OK : NK_STEAM_ERR_NOT_FOUND;
 }
 
+/* One named account, found by its own folder: <root>/userdata/<id> must be a folder. The list
+ * above holds at most NK_STEAM_ACCOUNT_CAP accounts, so an add never looks its account up
+ * there. The caller has checked the ID (digits, not "0", short enough). */
+static NkSteamStatus resolve_account(const char *root, const char *account_id,
+                                     NkSteamAccount *account) {
+    char folder[NK_MAX_PATH];
+    char sep = nk_platform_path_separator();
+    if (snprintf(folder, sizeof(folder), "%s%cuserdata%c%s", root, sep, sep, account_id) >=
+            (int)sizeof(folder) ||
+        !nk_platform_dir_exists(folder)) {
+        return NK_STEAM_ERR_NOT_FOUND;
+    }
+    memcpy(account->id, account_id, strlen(account_id) + 1u);
+    if (snprintf(account->shortcuts_path, sizeof(account->shortcuts_path),
+                 "%s%cconfig%cshortcuts.vdf", folder, sep, sep) >=
+        (int)sizeof(account->shortcuts_path)) {
+        return NK_STEAM_ERR_NOT_FOUND;
+    }
+    return NK_STEAM_OK;
+}
+
 /* ---- Account names: <Steam>/config/loginusers.vdf, a text KeyValues file ---- */
 
 #define LOGIN_USERS_MAX_BYTES (1024u * 1024u)
@@ -945,17 +966,12 @@ static NkSteamStatus add_for_account(const char *root, const char *account_id,
      * Steam is closed, so it writes nothing. */
     if (!running) return NK_STEAM_ERR_UNSUPPORTED;
 #endif
-    NkSteamAccount accounts[NK_STEAM_ACCOUNT_CAP];
-    size_t count = 0;
-    NkSteamStatus status = nk_steam_list_accounts(root, accounts, NK_STEAM_ACCOUNT_CAP, &count);
+    NkSteamAccount account;
+    NkSteamStatus status = resolve_account(root, account_id, &account);
     if (status != NK_STEAM_OK) return status;
-    for (size_t i = 0; i < count; i++) {
-        if (strcmp(accounts[i].id, account_id) != 0) continue;
-        bool is_running = (running ? running : nk_steam_client_running)();
-        return add_to_file(accounts[i].shortcuts_path, shortcut, icon, is_running, stamp,
-                           backup_path, backup_cap, change);
-    }
-    return NK_STEAM_ERR_NOT_FOUND;
+    bool is_running = (running ? running : nk_steam_client_running)();
+    return add_to_file(account.shortcuts_path, shortcut, icon, is_running, stamp, backup_path,
+                       backup_cap, change);
 }
 
 NkSteamStatus nk_steam_add_for_account(const char *root, const char *account_id,
@@ -1260,6 +1276,7 @@ typedef struct {
     bool write;
     bool existed;
     bool has_orig;
+    bool staged;   /* this call wrote (or tried to write) its temporary file */
     bool promoted;
 } GridSlotPlan;
 
@@ -1403,8 +1420,14 @@ NkSteamStatus nk_steam_write_grid_art(const char *grid_dir, uint32_t app_id,
     fail_status = NK_STEAM_ERR_WRITE;
     for (size_t i = 0u; i < 3u; ++i) {
         if (!plans[i].write) continue;
-        if (nk_platform_dir_exists(plans[i].tmp) ||
-            !write_file_synced(plans[i].tmp, plans[i].data, plans[i].size) ||
+        if (nk_platform_dir_exists(plans[i].tmp)) {
+            grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].tmp);
+            grid_set_text(result->detail, sizeof(result->detail),
+                          "Could not stage and verify temporary Steam artwork");
+            goto rollback;
+        }
+        plans[i].staged = true;
+        if (!write_file_synced(plans[i].tmp, plans[i].data, plans[i].size) ||
             !grid_file_equals(plans[i].tmp, plans[i].data, plans[i].size)) {
             grid_set_text(result->failed_path, sizeof(result->failed_path), plans[i].tmp);
             grid_set_text(result->detail, sizeof(result->detail),
@@ -1444,6 +1467,7 @@ NkSteamStatus nk_steam_write_grid_art(const char *grid_dir, uint32_t app_id,
             rc = nk_rename_noreplace_utf8(plans[i].tmp, plans[i].dst);
             if (rc == 1) {
                 (void)nk_remove_utf8(plans[i].tmp);
+                plans[i].staged = false;
                 if (overwrite == NK_STEAM_GRID_KEEP_EXISTING) {
                     result->kept_mask |= (unsigned)plans[i].slot;
                     continue;
@@ -1490,7 +1514,9 @@ NkSteamStatus nk_steam_write_grid_art(const char *grid_dir, uint32_t app_id,
 
 rollback:
     for (size_t i = 0u; i < 3u; ++i) {
-        if (plans[i].tmp[0] != '\0') (void)nk_remove_utf8(plans[i].tmp);
+        /* Only a temporary file this call staged and did not promote is its own: a kept
+           slot's, or one after the failure, may belong to another run. */
+        if (plans[i].staged && !plans[i].promoted) (void)nk_remove_utf8(plans[i].tmp);
         if (plans[i].promoted) {
             if (plans[i].has_orig) {
                 (void)nk_rename_utf8(plans[i].orig, plans[i].dst);
@@ -1586,9 +1612,8 @@ NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *ac
                                                 NkSteamGridOverwrite overwrite,
                                                 NkSteamGridResult *grid_result) {
     NkSteamGridResult local_grid;
-    NkSteamAccount accounts[NK_STEAM_ACCOUNT_CAP];
+    NkSteamAccount account;
     NkSteamGridArt usable;
-    size_t count = 0u;
     const char *shortcuts_path = NULL;
     uint8_t *prior_vdf = NULL;
     size_t prior_len = 0u;
@@ -1626,15 +1651,13 @@ NkSteamStatus nk_steam_add_for_account_with_art(const char *root, const char *ac
     }
     any_art = usable.icon0_size > 0u || usable.pic1_size > 0u;
 
-    st = nk_steam_list_accounts(root, accounts, NK_STEAM_ACCOUNT_CAP, &count);
-    if (st != NK_STEAM_OK) return st;
-    for (size_t i = 0u; i < count; ++i) {
-        if (strcmp(accounts[i].id, account_id) == 0) {
-            shortcuts_path = accounts[i].shortcuts_path;
-            break;
-        }
+    if (!root[0] || !all_digits(account_id) || strcmp(account_id, "0") == 0 ||
+        strlen(account_id) >= sizeof(account.id)) {
+        return NK_STEAM_ERR_ARGUMENT;
     }
-    if (shortcuts_path == NULL) return NK_STEAM_ERR_NOT_FOUND;
+    st = resolve_account(root, account_id, &account);
+    if (st != NK_STEAM_OK) return st;
+    shortcuts_path = account.shortcuts_path;
 
     if (any_art) {
         if (!steam_build_grid_dir(shortcuts_path, grid_dir, sizeof(grid_dir))) {

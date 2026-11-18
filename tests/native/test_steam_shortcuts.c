@@ -569,6 +569,45 @@ static void test_accounts_and_add_for_account(void) {
 #endif
 }
 
+/* More numbered account folders than the account list holds: adding for any one of them still
+ * finds it, because the requested account is looked up by its own folder, not in the capped
+ * list (audit 2026-11-17). */
+static void test_add_for_account_beyond_the_list_cap(void) {
+    enum { kAccounts = (int)NK_STEAM_ACCOUNT_CAP + 4 };
+    char steam[NATIVE_TEST_PATH_MAX], steam_art[NATIVE_TEST_PATH_MAX], sub[NATIVE_TEST_PATH_MAX];
+    char id[16], backup[NK_MAX_PATH];
+    int found_plain = 0, found_art = 0;
+    path_in(steam, sizeof(steam), "steam_many_accounts");
+    path_in(steam_art, sizeof(steam_art), "steam_many_accounts_art");
+    for (int i = 0; i < kAccounts; i++) {
+        snprintf(sub, sizeof(sub), "%s/userdata/%d", steam, 100 + i);
+        CHECK(nk_platform_mkdir_p(sub), "make an account folder");
+        snprintf(sub, sizeof(sub), "%s/userdata/%d", steam_art, 100 + i);
+        CHECK(nk_platform_mkdir_p(sub), "make an account folder");
+    }
+    for (int i = 0; i < kAccounts; i++) {
+        NkSteamGridResult res;
+        NkSteamChange ch = NK_STEAM_CHANGE_NONE;
+        snprintf(id, sizeof(id), "%d", 100 + i);
+        if (nk_steam_add_for_account(steam, id, &kPlayer, is_running_no, "20261117-120000",
+                                     backup, sizeof(backup), NULL) == NK_STEAM_OK) {
+            found_plain++;
+        }
+        if (nk_steam_add_for_account_with_art(steam_art, id, &kPlayer, is_running_no,
+                                              "20261117-120000", backup, sizeof(backup), &ch,
+                                              NULL, NK_STEAM_GRID_KEEP_EXISTING,
+                                              &res) == NK_STEAM_OK &&
+            ch == NK_STEAM_CHANGE_ADDED) {
+            found_art++;
+        }
+    }
+    CHECK(found_plain == kAccounts, "every account beyond the list cap is found and written");
+    CHECK(found_art == kAccounts, "with art, every account beyond the list cap is found");
+    CHECK_STATUS(nk_steam_add_for_account(steam, "99999", &kPlayer, is_running_no,
+                                          "20261117-120000", backup, sizeof(backup), NULL),
+                 NK_STEAM_ERR_NOT_FOUND, "an account folder that is not there");
+}
+
 /* ---- One shortcut per game (#2152) ---- */
 
 static const NkSteamShortcut kGameA = {"Game A", "C:/Games/Nakagawa/bin/nakagawa_player.exe",
@@ -1164,6 +1203,35 @@ static void test_grid_invalid_pngs_and_rollback(void) {
               nk_platform_path_missing(p_wide) && nk_platform_path_missing(p_orig) &&
               file_is(p_hero, old_hero, old_len),
           "mid-batch failure names blocker, cleans temps, and keeps prior hero");
+
+    /* The rollback removes only the temporary files this call staged: a kept slot's
+       '<dst>.nakagawa-tmp' and a later slot's, never written here, are left alone. */
+    {
+        static const uint8_t foreign[] = {'f', 'o', 'r', 'e', 'i', 'g', 'n'};
+        char p_hero_tmp[NK_MAX_PATH * 2];
+        path_in(grid_dir, sizeof(grid_dir), "grid_rollback_staged_only");
+        nk_platform_mkdir_p(grid_dir);
+        grid_file_in(p_icon, sizeof(p_icon), grid_dir, app_id, "_icon.png");
+        grid_file_in(p_icon_tmp, sizeof(p_icon_tmp), grid_dir, app_id, "_icon.png.nakagawa-tmp");
+        grid_file_in(p_tmp_block, sizeof(p_tmp_block), grid_dir, app_id, ".png.nakagawa-tmp");
+        grid_file_in(p_hero_tmp, sizeof(p_hero_tmp), grid_dir, app_id, "_hero.png.nakagawa-tmp");
+        CHECK(write_bytes(p_icon, old_hero, old_len), "seed an existing icon that is kept");
+        CHECK(write_bytes(p_icon_tmp, foreign, sizeof(foreign)), "seed a kept slot's temp file");
+        CHECK(write_bytes(p_hero_tmp, foreign, sizeof(foreign)), "seed a later slot's temp file");
+        CHECK(nk_platform_mkdir_p(p_tmp_block), "plant blocking wide temp dir");
+        art.icon0_png = good;
+        art.icon0_size = good_len;
+        art.pic1_png = good;
+        art.pic1_size = good_len;
+        CHECK_STATUS(nk_steam_write_grid_art(grid_dir, app_id, &art, false,
+                                             NK_STEAM_GRID_KEEP_EXISTING, &res),
+                     NK_STEAM_ERR_WRITE, "wide staging blocker fails closed");
+        CHECK(file_is(p_icon, old_hero, old_len), "the kept icon is untouched");
+        CHECK(file_is(p_icon_tmp, foreign, sizeof(foreign)),
+              "rollback leaves a kept slot's temp file it never staged");
+        CHECK(file_is(p_hero_tmp, foreign, sizeof(foreign)),
+              "rollback leaves a later slot's temp file it never staged");
+    }
 }
 
 static void test_add_for_account_with_art_and_rollback(void) {
@@ -1535,6 +1603,7 @@ int main(void) {
     test_a_failed_backup_writes_nothing();
     test_bad_stamp();
     test_accounts_and_add_for_account();
+    test_add_for_account_beyond_the_list_cap();
     test_each_game_is_its_own_shortcut();
     test_a_moved_folder_updates_its_own_entry();
     test_file_update_is_backed_up();

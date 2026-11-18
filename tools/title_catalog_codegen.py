@@ -445,7 +445,9 @@ def generate_source(digest: str, titles: List[Dict[str, Any]]) -> str:
         "",
         "#define NK_CATALOG_MAX_OVERLAYS 8",
         "#define NK_CATALOG_MAX_COMPATIBLE_DISC_IDS 16",
-        "#define NK_CATALOG_MAX_MODULES 32",
+        # A snapshot copies as many modules as a manifest may declare:
+        # title_manifest.MAX_TITLE_MODULES, which nk_title_manifest.c MAX_MODULES mirrors.
+        f"#define NK_CATALOG_MAX_MODULES {title_manifest.MAX_TITLE_MODULES}",
         "static const NkTitleEntry *s_private_overlay_entries[NK_CATALOG_MAX_OVERLAYS];",
         "static int s_private_overlay_count = 0;",
         "static NkOverlayStorageResetFn s_overlay_storage_reset = NULL;",

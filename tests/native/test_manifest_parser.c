@@ -196,7 +196,9 @@ static void test_manifest_numbers_and_addresses(void) {
         "}\n";
     assert(!nk_title_manifest_parse_buffer(exp_entry, strlen(exp_entry), false, &entry, err, sizeof(err)));
 
-    /* 3. Valid exact 8-hex address string -> MUST ACCEPT */
+    /* 3. A well-formed "0x" plus 8-hex-digit address string -> MUST REJECT: addresses are JSON
+       integers in assets/title_manifest.schema.json and tools/title_manifest.py uint(), and the
+       native parser accepts exactly what they accept (audit 2026-11-17). */
     const char *hex_addr =
         "{\n"
         "  \"schema_version\": 1,\n"
@@ -210,9 +212,53 @@ static void test_manifest_numbers_and_addresses(void) {
         "  \"feature_requirements\": [\"allegrex\"],\n"
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
-    assert(nk_title_manifest_parse_buffer(hex_addr, strlen(hex_addr), false, &entry, err, sizeof(err)));
+    assert(!nk_title_manifest_parse_buffer(hex_addr, strlen(hex_addr), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.executable") != NULL);
+
+    /* 3b. The same addresses as integers -> MUST ACCEPT */
+    const char *int_addr =
+        "{\n"
+        "  \"schema_version\": 1,\n"
+        "  \"id\": \"int-addr-test\",\n"
+        "  \"display_name\": \"Integer Address Test\",\n"
+        "  \"kind\": \"synthetic\",\n"
+        "  \"executable\": {\"base\": 142606336, \"entry\": 142622720, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
+        "  \"modules\": [{\"name\": \"main.prx\", \"load_address\": 146800640, \"required\": true, \"role\": \"guest-prx\"}],\n"
+        "  \"filesystem\": {\"data_root\": \"data\", \"memory_stick_root\": \"ms\", \"device_prefixes\": [\"host0:\"]},\n"
+        "  \"hle_profile\": \"standard\",\n"
+        "  \"feature_requirements\": [\"allegrex\"],\n"
+        "  \"verification_profile\": \"smoke\"\n"
+        "}\n";
+    assert(nk_title_manifest_parse_buffer(int_addr, strlen(int_addr), false, &entry, err, sizeof(err)));
     assert(entry.executable_base == 0x08800000U);
     assert(entry.executable_entry == 0x08804000U);
+
+    /* 3c. Address strings are refused everywhere an address is read: a module load address, a
+       runtime binding and a dispatch alias. */
+    const char *hex_load_address =
+        "{\"schema_version\": 1, \"id\": \"hex-load-test\", \"display_name\": \"T\", \"kind\": \"synthetic\", "
+        "\"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, "
+        "\"modules\": [{\"name\": \"a.prx\", \"load_address\": \"0x08900000\", \"required\": true, \"role\": \"guest-prx\"}], "
+        "\"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, "
+        "\"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
+    assert(!nk_title_manifest_parse_buffer(hex_load_address, strlen(hex_load_address), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "load_address") != NULL);
+    const char *hex_binding =
+        "{\"schema_version\": 1, \"id\": \"hex-binding-test\", \"display_name\": \"T\", \"kind\": \"synthetic\", "
+        "\"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, "
+        "\"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, "
+        "\"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\", "
+        "\"runtime_bindings\": {\"schema_version\": 1, \"fallback_entry\": \"0x08801000\"}}";
+    assert(!nk_title_manifest_parse_buffer(hex_binding, strlen(hex_binding), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "fallback_entry") != NULL);
+    const char *hex_alias =
+        "{\"schema_version\": 1, \"id\": \"hex-alias-test\", \"display_name\": \"T\", \"kind\": \"synthetic\", "
+        "\"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, "
+        "\"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, "
+        "\"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\", "
+        "\"runtime_bindings\": {\"schema_version\": 1, \"dispatch_aliases\": [{\"from\": \"0x08802000\", \"to\": 142610432}]}}";
+    assert(!nk_title_manifest_parse_buffer(hex_alias, strlen(hex_alias), false, &entry, err, sizeof(err)));
+    assert(strstr(err, ".from") != NULL);
 
     /* 4. Overlong address string ("0x088000000" -> 9 hex digits) -> MUST REJECT */
     const char *overlong_hex =
@@ -380,7 +426,7 @@ static void test_manifest_mutations(void) {
     /* The bases must lie in user RAM: with load_address 1/2 the guest-module window rule fires
        first, so the fixture would test that rule rather than the duplicate-name comparison it
        is named for. Both parsers reject a guest-prx base of 1 for the same reason. */
-    const char *dup_mod = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [{\"name\": \"a.prx\", \"load_address\": \"0x08900000\", \"required\": true, \"role\": \"guest-prx\"}, {\"name\": \"A.PRX\", \"load_address\": \"0x08b00000\", \"required\": true, \"role\": \"guest-prx\"}], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
+    const char *dup_mod = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [{\"name\": \"a.prx\", \"load_address\": 143654912, \"required\": true, \"role\": \"guest-prx\"}, {\"name\": \"A.PRX\", \"load_address\": 145752064, \"required\": true, \"role\": \"guest-prx\"}], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(dup_mod, strlen(dup_mod), false, &entry, err, sizeof(err)));
     assert(strstr(err, "duplicate module name") != NULL);
 
@@ -405,7 +451,7 @@ static void test_manifest_mutations(void) {
     assert(strstr(err, "nesting exceeds") != NULL);
 
     /* 13. Reserved VFPU target range rejection */
-    const char *vfpu_target = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\", \"runtime_bindings\": {\"schema_version\": 1, \"dispatch_aliases\": [{\"from\": \"0x40001000\", \"to\": \"0x08801000\"}]}}";
+    const char *vfpu_target = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\", \"runtime_bindings\": {\"schema_version\": 1, \"dispatch_aliases\": [{\"from\": 1073745920, \"to\": 142610432}]}}";
     assert(!nk_title_manifest_parse_buffer(vfpu_target, strlen(vfpu_target), false, &entry, err, sizeof(err)));
     assert(strstr(err, "core VFPU dispatch-target range") != NULL);
 
@@ -442,7 +488,7 @@ static void test_manifest_mutations(void) {
      * 0x322xxxxx). The Python parser has always rejected this; the native parser accepted it,
      * which is precisely the differential-parser divergence the two implementations must not
      * have. */
-    const char *guest_base_outside_ram = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [{\"name\": \"late.prx\", \"load_address\": \"0x32200000\", \"required\": false, \"role\": \"optional-guest-prx\"}], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
+    const char *guest_base_outside_ram = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [{\"name\": \"late.prx\", \"load_address\": 840957952, \"required\": false, \"role\": \"optional-guest-prx\"}], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(guest_base_outside_ram, strlen(guest_base_outside_ram), false, &entry, err, sizeof(err)));
     assert(strstr(err, "guest module base must lie in user RAM") != NULL);
 
@@ -479,13 +525,13 @@ static void test_executable_entry_vs_fallback(void) {
         "  \"id\": \"entry-diff-test\",\n"
         "  \"display_name\": \"Entry Diff Test\",\n"
         "  \"kind\": \"synthetic\",\n"
-        "  \"executable\": {\"base\": \"0x08800000\", \"entry\": \"0x08800000\", \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
+        "  \"executable\": {\"base\": 142606336, \"entry\": 142606336, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
         "  \"modules\": [{\"name\": \"main.prx\", \"load_address\": 146800640, \"required\": true, \"role\": \"guest-prx\"}],\n"
         "  \"filesystem\": {\"data_root\": \"data\", \"memory_stick_root\": \"ms\", \"device_prefixes\": [\"host0:\"]},\n"
         "  \"hle_profile\": \"standard\",\n"
         "  \"feature_requirements\": [\"allegrex\"],\n"
         "  \"verification_profile\": \"smoke\",\n"
-        "  \"runtime_bindings\": {\"schema_version\": 1, \"fallback_entry\": \"0x08801000\"}\n"
+        "  \"runtime_bindings\": {\"schema_version\": 1, \"fallback_entry\": 142610432}\n"
         "}\n";
 
     assert(nk_title_manifest_parse_buffer(fixture, strlen(fixture), false, &entry, err, sizeof(err)));
@@ -515,8 +561,8 @@ static void test_multi_overlay_storage(void) {
         "  \"display_name\": \"Overlay Alpha Title\",\n"
         "  \"kind\": \"retail\",\n"
         "  \"disc\": {\"id\": \"UCUS99901\", \"region\": \"NA\", \"revision_policy\": \"exact-disc-id\"},\n"
-        "  \"executable\": {\"base\": \"0x08800000\", \"entry\": \"0x08804000\", \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
-        "  \"modules\": [{\"name\": \"alpha.prx\", \"load_address\": \"0x08900000\", \"required\": true, \"role\": \"guest-prx\"}],\n"
+        "  \"executable\": {\"base\": 142606336, \"entry\": 142622720, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
+        "  \"modules\": [{\"name\": \"alpha.prx\", \"load_address\": 143654912, \"required\": true, \"role\": \"guest-prx\"}],\n"
         "  \"filesystem\": {\"data_root\": \"data/alpha\", \"memory_stick_root\": \"ms/alpha\", \"device_prefixes\": [\"host0:\"]},\n"
         "  \"hle_profile\": \"standard\",\n"
         "  \"feature_requirements\": [\"allegrex\"],\n"
@@ -530,8 +576,8 @@ static void test_multi_overlay_storage(void) {
         "  \"display_name\": \"Overlay Beta Title\",\n"
         "  \"kind\": \"retail\",\n"
         "  \"disc\": {\"id\": \"UCES99902\", \"region\": \"EU\", \"revision_policy\": \"exact-disc-id\"},\n"
-        "  \"executable\": {\"base\": \"0x08a00000\", \"entry\": \"0x08a04000\", \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
-        "  \"modules\": [{\"name\": \"beta.prx\", \"load_address\": \"0x08b00000\", \"required\": true, \"role\": \"guest-prx\"}],\n"
+        "  \"executable\": {\"base\": 144703488, \"entry\": 144719872, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
+        "  \"modules\": [{\"name\": \"beta.prx\", \"load_address\": 145752064, \"required\": true, \"role\": \"guest-prx\"}],\n"
         "  \"filesystem\": {\"data_root\": \"data/beta\", \"memory_stick_root\": \"ms/beta\", \"device_prefixes\": [\"host0:\"]},\n"
         "  \"hle_profile\": \"standard\",\n"
         "  \"feature_requirements\": [\"allegrex\"],\n"
@@ -568,8 +614,8 @@ static void test_overlay_clear_releases_storage(void) {
         "  \"display_name\": \"Overlay Clear A\",\n"
         "  \"kind\": \"retail\",\n"
         "  \"disc\": {\"id\": \"UCUS99911\", \"region\": \"NA\", \"revision_policy\": \"exact-disc-id\"},\n"
-        "  \"executable\": {\"base\": \"0x08804000\", \"entry\": \"0x08808000\", \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
-        "  \"modules\": [{\"name\": \"a.prx\", \"load_address\": \"0x08900000\", \"required\": true, \"role\": \"guest-prx\"}],\n"
+        "  \"executable\": {\"base\": 142622720, \"entry\": 142639104, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
+        "  \"modules\": [{\"name\": \"a.prx\", \"load_address\": 143654912, \"required\": true, \"role\": \"guest-prx\"}],\n"
         "  \"filesystem\": {\"data_root\": \"data/a\", \"memory_stick_root\": \"ms/a\", \"device_prefixes\": [\"host0:\"]},\n"
         "  \"hle_profile\": \"standard\",\n"
         "  \"feature_requirements\": [\"allegrex\"],\n"
@@ -583,8 +629,8 @@ static void test_overlay_clear_releases_storage(void) {
         "  \"display_name\": \"Overlay Clear B\",\n"
         "  \"kind\": \"retail\",\n"
         "  \"disc\": {\"id\": \"UCUS99911\", \"region\": \"NA\", \"revision_policy\": \"exact-disc-id\"},\n"
-        "  \"executable\": {\"base\": \"0x08804000\", \"entry\": \"0x08808000\", \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
-        "  \"modules\": [{\"name\": \"b.prx\", \"load_address\": \"0x08900000\", \"required\": true, \"role\": \"guest-prx\"}],\n"
+        "  \"executable\": {\"base\": 142622720, \"entry\": 142639104, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
+        "  \"modules\": [{\"name\": \"b.prx\", \"load_address\": 143654912, \"required\": true, \"role\": \"guest-prx\"}],\n"
         "  \"filesystem\": {\"data_root\": \"data/b\", \"memory_stick_root\": \"ms/b\", \"device_prefixes\": [\"host0:\"]},\n"
         "  \"hle_profile\": \"standard\",\n"
         "  \"feature_requirements\": [\"allegrex\"],\n"
@@ -601,6 +647,9 @@ static void test_overlay_clear_releases_storage(void) {
      * the check that was still firing after a clear. */
     assert(!nk_title_manifest_parse_buffer(overlay_b, strlen(overlay_b), false, &entry, err, sizeof(err)));
     assert(strstr(err, "overlay-clear-a") != NULL);
+    /* The refusal names where the clash is: another loaded overlay, not the public catalog. */
+    assert(strstr(err, "conflicts with loaded overlay title") != NULL);
+    assert(strstr(err, "public canonical catalog") == NULL);
 
     /* Clearing the registry must release the parser's storage too. Before the
      * fix it only reset the catalog's pointer array, so B stayed blocked by an
@@ -648,6 +697,119 @@ static void test_overlay_collision_policy(void) {
     assert(strcmp(entry.id, "synthetic-allegrex-v1") == 0);
 
     printf("[MANIFEST_TEST] Overlay collision policy tests PASSED!\n");
+}
+
+/* A synthetic manifest whose display_name and optional notes are the given JSON string bodies. */
+static void text_manifest(char *out, size_t cap, const char *display_name, const char *notes) {
+    int n = snprintf(out, cap,
+        "{\"schema_version\": 1, \"id\": \"text-parity-test\", \"display_name\": \"%s\", "
+        "\"kind\": \"synthetic\", "
+        "\"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, "
+        "\"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, "
+        "\"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"%s%s%s}",
+        display_name, notes ? ", \"notes\": \"" : "", notes ? notes : "", notes ? "\"" : "");
+    assert(n > 0 && (size_t)n < cap);
+}
+
+/* `count` copies of U+65E5 (three UTF-8 bytes each). */
+static void cjk_text(char *out, size_t cap, size_t count) {
+    static const char kChar[] = "\xE6\x97\xA5";
+    assert(count * 3u < cap);
+    for (size_t i = 0; i < count; i++) memcpy(out + i * 3u, kChar, 3u);
+    out[count * 3u] = '\0';
+}
+
+/* display_name and notes follow tools/title_manifest.py text(): lengths count characters, not
+   bytes, and leading or trailing spaces and control characters are refused (audit 2026-11-17). */
+static void test_manifest_text_fields_match_python(void) {
+    printf("[MANIFEST_TEST] Testing display_name and notes character rules...\n");
+    static char json[16384];
+    static char text[8192];
+    char err[512];
+    NkTitleEntry entry;
+
+    nk_title_catalog_clear_overlay();
+    /* 43 CJK characters are 129 bytes but only 43 characters: accepted and kept whole. */
+    cjk_text(text, sizeof(text), 43u);
+    text_manifest(json, sizeof(json), text, NULL);
+    assert(nk_title_manifest_parse_buffer(json, strlen(json), false, &entry, err, sizeof(err)));
+    assert(strcmp(entry.display_name, text) == 0);
+    /* 128 characters is the limit; 129 is over it. */
+    cjk_text(text, sizeof(text), 128u);
+    text_manifest(json, sizeof(json), text, NULL);
+    assert(nk_title_manifest_parse_buffer(json, strlen(json), false, &entry, err, sizeof(err)));
+    assert(strcmp(entry.display_name, text) == 0);
+    cjk_text(text, sizeof(text), 129u);
+    text_manifest(json, sizeof(json), text, NULL);
+    assert(!nk_title_manifest_parse_buffer(json, strlen(json), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.display_name") != NULL);
+
+    static const char * const refused_names[] = {" Leading", "Trailing ", "Line\\nBreak", "Tab\\tIn", ""};
+    for (size_t i = 0; i < sizeof(refused_names) / sizeof(refused_names[0]); i++) {
+        text_manifest(json, sizeof(json), refused_names[i], NULL);
+        assert(!nk_title_manifest_parse_buffer(json, strlen(json), false, &entry, err, sizeof(err)));
+        assert(strstr(err, "$.display_name") != NULL);
+    }
+
+    /* notes: 0..2048 characters, the same whitespace and control rules. */
+    cjk_text(text, sizeof(text), 2048u);
+    text_manifest(json, sizeof(json), "Notes", text);
+    assert(nk_title_manifest_parse_buffer(json, strlen(json), false, &entry, err, sizeof(err)));
+    text_manifest(json, sizeof(json), "Notes", "");
+    assert(nk_title_manifest_parse_buffer(json, strlen(json), false, &entry, err, sizeof(err)));
+    static const char * const refused_notes[] = {"First line\\nsecond line", " padded", "padded "};
+    for (size_t i = 0; i < sizeof(refused_notes) / sizeof(refused_notes[0]); i++) {
+        text_manifest(json, sizeof(json), "Notes", refused_notes[i]);
+        assert(!nk_title_manifest_parse_buffer(json, strlen(json), false, &entry, err, sizeof(err)));
+        assert(strstr(err, "$.notes") != NULL);
+    }
+    nk_title_catalog_clear_overlay();
+    printf("[MANIFEST_TEST] display_name and notes character rules PASSED!\n");
+}
+
+/* An overlay may declare as many modules as tools/title_manifest.py MAX_TITLE_MODULES; the
+   catalog snapshot that every find_by_* lookup returns must hold them all (audit 2026-11-17). */
+static void test_overlay_with_many_modules_is_found(void) {
+    printf("[MANIFEST_TEST] Testing a 33-module overlay through the catalog snapshot...\n");
+    static char json[16384];
+    static NkTitleEntry entry;
+    char modules[8192];
+    char err[512];
+    size_t pos = 0;
+    enum { kModules = 33 };
+
+    for (int i = 0; i < kModules; i++) {
+        int n = snprintf(modules + pos, sizeof(modules) - pos,
+            "%s{\"name\": \"m%02d.prx\", \"load_address\": %u, \"required\": true, \"role\": \"guest-prx\"}",
+            i ? ", " : "", i, 0x08900000u + (unsigned)i * 0x10000u);
+        assert(n > 0 && (size_t)n < sizeof(modules) - pos);
+        pos += (size_t)n;
+    }
+    int n = snprintf(json, sizeof(json),
+        "{\"schema_version\": 1, \"id\": \"many-modules-test\", \"display_name\": \"Many Modules\", "
+        "\"kind\": \"retail\", "
+        "\"disc\": {\"id\": \"UCUS99933\", \"region\": \"NA\", \"revision_policy\": \"exact-disc-id\"}, "
+        "\"executable\": {\"base\": 142606336, \"entry\": 142622720, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []}, "
+        "\"modules\": [%s], "
+        "\"filesystem\": {\"data_root\": \"data/many\", \"memory_stick_root\": \"ms/many\", \"device_prefixes\": [\"host0:\"]}, "
+        "\"hle_profile\": \"standard\", \"feature_requirements\": [\"allegrex\"], \"verification_profile\": \"smoke\"}",
+        modules);
+    assert(n > 0 && (size_t)n < sizeof(json));
+
+    nk_title_catalog_clear_overlay();
+    assert(nk_title_manifest_parse_buffer(json, strlen(json), false, &entry, err, sizeof(err)));
+    assert(entry.module_count == kModules);
+    nk_title_catalog_register_overlay(&entry);
+
+    NkTitleEntrySnapshot snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+    assert(nk_title_catalog_find_by_disc_id("UCUS99933", &snapshot));
+    assert(strcmp(snapshot.entry.id, "many-modules-test") == 0);
+    assert(snapshot.entry.module_count == kModules);
+    assert(strcmp(snapshot.entry.modules[kModules - 1].name, "m32.prx") == 0);
+    nk_title_catalog_snapshot_release(&snapshot);
+    nk_title_catalog_clear_overlay();
+    printf("[MANIFEST_TEST] 33-module overlay snapshot PASSED!\n");
 }
 
 static int launch_loose_roots_transport(int argc, char *argv[]) {
@@ -813,6 +975,8 @@ int main(int argc, char *argv[]) {
     test_multi_overlay_storage();
     test_overlay_collision_policy();
     test_overlay_clear_releases_storage();
+    test_manifest_text_fields_match_python();
+    test_overlay_with_many_modules_is_found();
     printf("[MANIFEST_TEST] ALL NATIVE MANIFEST PARSER TESTS PASSED SUCCESSFULLY!\n");
     return 0;
 }

@@ -1638,13 +1638,13 @@ static void test_build_identity_run_entry(const char *base, char sep) {
         "\"revision_policy\":\"exact-disc-id\",\"builds\":["
         "{\"executable_sha256\":\"%s\",\"status\":\"supported\","
         "\"label\":\"Recorded fixture build\"}]},"
-        "\"executable\":{\"base\":\"0x08800000\",\"entry\":\"0x%08x\","
+        "\"executable\":{\"base\":142606336,\"entry\":%u,"
         "\"bss_metadata_source\":\"none\",\"extra_executable_spans\":[]},"
         "\"modules\":[],\"filesystem\":{\"data_root\":\"build-identity-data\","
         "\"memory_stick_root\":\"build-identity-ms\","
         "\"device_prefixes\":[\"host0:\"]},\"hle_profile\":\"standard\","
         "\"feature_requirements\":[\"allegrex\"],\"verification_profile\":\"smoke\","
-        "\"runtime_bindings\":{\"schema_version\":1,\"fallback_entry\":\"0x%08x\"}}",
+        "\"runtime_bindings\":{\"schema_version\":1,\"fallback_entry\":%u}}",
         title_id, game_name, disc_id, digest, executable_entry, fallback_entry);
     assert(written > 0 && (size_t)written < sizeof(manifest_json));
     write_file(manifest_path, manifest_json);
@@ -2751,7 +2751,7 @@ int main(int argc, char **argv) {
         "{\"schema_version\":1,\"id\":\"launch-name-test-v1\","
         "\"game_name\":\"custom-launch\",\"display_name\":\"Launch Name Test\","
         "\"kind\":\"synthetic\","
-        "\"executable\":{\"base\":\"0x08820000\",\"entry\":\"0x08820000\","
+        "\"executable\":{\"base\":142737408,\"entry\":142737408,"
         "\"bss_metadata_source\":\"elf\",\"extra_executable_spans\":[]},"
         "\"modules\":[],\"filesystem\":{\"data_root\":\"custom-data\","
         "\"memory_stick_root\":\"custom-ms\",\"device_prefixes\":[\"host0:\"],"
@@ -3338,7 +3338,7 @@ int main(int argc, char **argv) {
         "\"display_name\":\"Legacy Retail Fixture\",\"kind\":\"retail\","
         "\"disc\":{\"id\":\"UCES01402\",\"region\":\"EU\","
         "\"revision_policy\":\"exact-disc-id\"},"
-        "\"executable\":{\"base\":\"0x00000000\",\"entry\":\"0x00000000\","
+        "\"executable\":{\"base\":0,\"entry\":0,"
         "\"bss_metadata_source\":\"elf\",\"extra_executable_spans\":[]},"
         "\"modules\":[],\"filesystem\":{\"data_root\":\"legacy-data\","
         "\"memory_stick_root\":\"legacy-ms\",\"device_prefixes\":[\"host0:\"]},"

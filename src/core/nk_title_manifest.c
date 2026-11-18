@@ -57,6 +57,9 @@ static int nk_ascii_casecmp(const char *a, const char *b) {
 #define MAX_LOOSE_CONTENT_ROOTS 16
 #define MAX_LOOSE_CONTENT_EXCLUDES 2
 #define NK_MANIFEST_MAX_OVERLAYS 8
+/* Mirrors text() in tools/title_manifest.py: limits count characters (code points). */
+#define NK_MANIFEST_DISPLAY_NAME_MAX_CHARS 128
+#define NK_MANIFEST_NOTES_MAX_CHARS 2048
 
 /* The window a guest module's base must lie in: its code and data are both placed there, so a
  * base outside it lets translated code run while every data write is dropped. Mirrors
@@ -72,7 +75,7 @@ static int nk_ascii_casecmp(const char *a, const char *b) {
 typedef struct {
     char id[65];
     char game_name[65];
-    char display_name[129];
+    char display_name[NK_MANIFEST_DISPLAY_NAME_MAX_CHARS * 4 + 1];
     NkTitleKind kind;
     char primary_disc_id[17];
     char compat_ids_storage[MAX_COMPAT_DISC_IDS][17];
@@ -518,23 +521,28 @@ static bool parse_uint32(const JsonNode *node, uint32_t *out_val) {
         *out_val = (uint32_t)node->u.num.int_val;
         return true;
     }
-    if (node->type == JSON_STRING) {
-        const char *s = node->u.str_val;
-        if (!s) return false;
-        size_t slen = strlen(s);
-        if (slen == 10 && (s[0] == '0') && (s[1] == 'x' || s[1] == 'X')) {
-            for (int i = 2; i < 10; i++) {
-                if (!isxdigit((unsigned char)s[i])) return false;
-            }
-            char *end = NULL;
-            unsigned long long v = strtoull(s + 2, &end, 16);
-            if (!end || *end != '\0' || v > 0xFFFFFFFFULL) return false;
-            *out_val = (uint32_t)v;
-            return true;
-        }
-        return false;
-    }
+    /* An address is a JSON integer, as in the schema and tools/title_manifest.py uint(): a
+       "0x..." string is refused, so both parsers accept the same manifests. */
     return false;
+}
+
+/* tools/title_manifest.py text(): a string of min..max characters (UTF-8 code points; the JSON
+   parser has already validated the encoding), with no leading or trailing space and no control
+   character. Returns the reason it is refused, or NULL. */
+static const char *manifest_text_problem(const JsonNode *node, size_t min_chars, size_t max_chars) {
+    if (!node || node->type != JSON_STRING || !node->u.str_val) return "must be a string";
+    const unsigned char *s = (const unsigned char *)node->u.str_val;
+    size_t len = strlen((const char *)s);
+    size_t chars = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] < 0x20) return "must not contain control characters";
+        if ((s[i] & 0xC0u) != 0x80u) chars++;
+    }
+    if (len > 0 && (s[0] == ' ' || s[len - 1] == ' ')) {
+        return "must not have leading or trailing whitespace";
+    }
+    if (chars < min_chars || chars > max_chars) return "length is out of range";
+    return NULL;
 }
 
 static bool is_core_reserved_target(uint32_t addr) {
@@ -651,8 +659,10 @@ static bool manifest_parse_identity(ManifestParse *mp) {
 
     /* 4. display_name */
     mp->dn_node = obj_get(root, "display_name");
-    if (mp->dn_node->type != JSON_STRING || strlen(mp->dn_node->u.str_val) < 1 || strlen(mp->dn_node->u.str_val) > 128) {
-        if (error_buf) snprintf(error_buf, error_buf_len, "$.display_name: length must be in range 1..128");
+    const char *dn_problem = manifest_text_problem(mp->dn_node, 1, NK_MANIFEST_DISPLAY_NAME_MAX_CHARS);
+    if (dn_problem) {
+        if (error_buf) snprintf(error_buf, error_buf_len, "$.display_name: %s (1..%d characters)",
+                                dn_problem, NK_MANIFEST_DISPLAY_NAME_MAX_CHARS);
         return false;
     }
 
@@ -1344,8 +1354,10 @@ static bool manifest_parse_optional_fields(ManifestParse *mp) {
     /* 14. notes (optional) */
     JsonNode *notes_node = obj_get(root, "notes");
     if (notes_node) {
-        if (notes_node->type != JSON_STRING || strlen(notes_node->u.str_val) > 2048) {
-            if (error_buf) snprintf(error_buf, error_buf_len, "$.notes: must be a string <= 2048 characters");
+        const char *notes_problem = manifest_text_problem(notes_node, 0, NK_MANIFEST_NOTES_MAX_CHARS);
+        if (notes_problem) {
+            if (error_buf) snprintf(error_buf, error_buf_len, "$.notes: %s (0..%d characters)",
+                                    notes_problem, NK_MANIFEST_NOTES_MAX_CHARS);
             return false;
         }
     }
@@ -1705,6 +1717,7 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
 static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_override,
                                      char *error_buf, size_t error_buf_len) {
     bool collision = false;
+    bool collision_is_overlay = false;
     const char *collision_id = NULL;
 
     /* Check against public canonical catalog */
@@ -1767,11 +1780,6 @@ static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_
             /* Allow self-update if reloading the exact same overlay id */
             if (strcmp(ov->entry.id, temp->entry.id) == 0) continue;
 
-            if (strcmp(ov->entry.id, temp->entry.id) == 0) {
-                collision = true;
-                collision_id = ov->entry.id;
-                break;
-            }
             if (temp->entry.primary_disc_id && ov->entry.primary_disc_id) {
                 if (strcmp(ov->entry.primary_disc_id, temp->entry.primary_disc_id) == 0) {
                     collision = true;
@@ -1813,14 +1821,17 @@ static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_
                 if (collision) break;
             }
         }
+        collision_is_overlay = collision;
     }
 
     if (collision) {
         if (!allow_override) {
             if (error_buf) {
                 snprintf(error_buf, error_buf_len,
-                    "Overlay identity '%s' conflicts with public canonical catalog title '%s'; override forbidden in standard mode",
-                    temp->entry.id, collision_id);
+                    "Overlay identity '%s' conflicts with %s '%s'; override forbidden in standard mode",
+                    temp->entry.id,
+                    collision_is_overlay ? "loaded overlay title" : "public canonical catalog title",
+                    collision_id);
             }
             return false;
         } else {
