@@ -647,7 +647,7 @@ def build_prx_all(out_dir: Path) -> None:
     (out_dir / PSPSDK_LICENSE_NAME).write_bytes(license_notice)
 
 
-def _runtime_command(demo: dict[str, object], padscript: Path,
+def _runtime_command(demo: dict[str, object], padscript: Path | None,
                      pause_script: str | None = None) -> tuple[list[str], dict[str, str], Path]:
     disc_id = str(demo["disc_id"])
     package_dir = DEMO_ROOT / "packages" / disc_id
@@ -660,6 +660,7 @@ def _runtime_command(demo: dict[str, object], padscript: Path,
                meta["runtime"]["run_entry"], "none", "none", "--sched"]
     env = os.environ.copy()
     env.pop("SR_PAUSE_SCRIPT", None)
+    env.pop("SR_PADSCRIPT", None)
     env.update({
         "SR_AUDIOSTAT": "1",
         "SR_AUDIO_BACKEND": "sdl",
@@ -668,18 +669,21 @@ def _runtime_command(demo: dict[str, object], padscript: Path,
         "SR_INLOG": "1",
         "SR_NOINPUT": "1",
         "SR_EXIT_AT_VBLANK": str(SMOKE_EXIT_VBLANK),
-        "SR_PADSCRIPT": str(padscript),
         "SDL_VIDEODRIVER": "dummy",
         "SDL_AUDIODRIVER": "dummy",
         "SR_MEMSTICK": str(BUILD_ROOT / "smoke" / disc_id / "memstick"),
     })
+    # No pad script means no scripted input (SR_NOINPUT keeps the host pad out too); the
+    # runtime refuses an empty route file, so a run without presses names no script at all.
+    if padscript is not None:
+        env["SR_PADSCRIPT"] = str(padscript)
     if pause_script is not None:
         env["SR_PAUSE_SCRIPT"] = pause_script
     return command, env, package_dir
 
 
 def _headless_capture_command(
-    demo: dict[str, object], padscript: Path, pause_script: str | None = None
+    demo: dict[str, object], padscript: Path | None, pause_script: str | None = None
 ) -> tuple[list[str], dict[str, str], Path]:
     """The scripted run on the explicit headless presenter with one capture switch.
 
@@ -983,7 +987,7 @@ def _window_vblanks(pattern: str, output: str) -> set[int]:
     return {int(v) for v in re.findall(pattern, output, re.MULTILINE) if first <= int(v) <= last}
 
 
-def _smoke_headless_capture(demo: dict[str, object], padscript: Path, smoke_dir: Path,
+def _smoke_headless_capture(demo: dict[str, object], padscript: Path | None, smoke_dir: Path,
                             pause_script: str | None = None) -> list[Path]:
     """Run the demo headless and prove every frame it presented inside the capture window
     was published as a real 480x272 frame, and nothing else was."""
@@ -1238,10 +1242,8 @@ def smoke_all() -> None:
             except ShowcaseError as exc:
                 raise ShowcaseError(f"{exc}; see {refusal_log}") from exc
 
-        capture_padscript = smoke_dir / "padscript-capture.txt"
-        capture_padscript.write_text("", encoding="ascii")
-        captures = _smoke_headless_capture(
-            demo, capture_padscript, smoke_dir, HEADLESS_PAUSE_SCRIPT)
+        # The capture run presses nothing, so it names no pad script.
+        captures = _smoke_headless_capture(demo, None, smoke_dir, HEADLESS_PAUSE_SCRIPT)
         print(f"SHOWCASE_SMOKE: PASS {disc_id} frame/input/audio/pause/headless-capture; "
               f"first frame checkpoint=vblank {checkpoint.frame}; screenshot={screenshot} "
               f"captures={len(captures)} first={captures[0]}")

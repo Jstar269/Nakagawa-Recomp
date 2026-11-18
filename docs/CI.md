@@ -543,7 +543,8 @@ scan in git mode and the synthetic canary gate. The history scan passes `--diff-
 to `git log`, which otherwise prints no patch for a merge commit, so a value added while resolving
 a merge and removed later is still found; a canary pins that case. It also runs the core purity gate,
 [`tools/purity_gate.py`](../tools/purity_gate.py): a hexadecimal literal in PSP user RAM
-(`0x08800000`-`0x09ffffff`) in `src/rt/` code fails it, outside title-config files, native
+(`0x08800000`-`0x09ffffff`, or in C code its uncached and kernel segment mirrors) in
+`src/rt/` code fails it, outside title-config files, native
 self-tests, registered NIDs and the reviewed allowlist in that file (one entry per literal,
 with its reason). A fix for one game goes in its title config, not the core. Markdown linting is separate from the native and Windows jobs. Those jobs remain
 synthetic/public-input gates; no private game input is put in Actions.
