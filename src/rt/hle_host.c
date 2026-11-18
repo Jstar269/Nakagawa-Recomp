@@ -502,6 +502,11 @@ FILE *ms0_fopen_utf8(const char *host_path, const wchar_t *mode) {
     return ms0_fopen_existence_utf8(host_path, mode, MS0_OPEN_BY_MODE);
 }
 
+/* Removes a file the legacy-flat import created beneath the unified root and could not finish. */
+static int ms0_remove_import_utf8(const char *host_path) {
+    return nk_remove_utf8(host_path) == 0;
+}
+
 #else /* !_WIN32: the same host-path layer expressed with POSIX primitives ----- */
 /* The Windows layer above exists for two reasons that have no POSIX form: the
  * UTF-16 Win32 call surface, and handle-based containment verified through
@@ -667,8 +672,10 @@ static int sr_wide_is_absolute(const wchar_t *path) {
     return path && path[0] == L'/';
 }
 
-/* Same rule as the Windows layer: a '.' or '..' component is refused here
- * rather than handed to the host to resolve. */
+/* Same rule as the Windows layer: the callers collapse '.' and '..' through
+ * sr_wide_full_path_alloc first, and a dot component still present when
+ * sr_wide_extended_absolute_alloc runs is refused rather than handed to the
+ * host to resolve. */
 static int sr_wide_has_dot_component(const wchar_t *path) {
     if (!path) return 1;
     const wchar_t *p = path;
@@ -683,28 +690,58 @@ static int sr_wide_has_dot_component(const wchar_t *path) {
     return 0;
 }
 
-/* POSIX resolves '.' and '..' inside the kernel, so this only anchors a
- * relative input to the working directory and leaves the components intact. */
+/* Collapses '.' and '..' in an absolute path the way GetFullPathNameW does for
+ * the Windows layer: lexically, a '..' removing the component before it and
+ * never climbing above '/'. Symbolic links are not consulted, so a value means
+ * the same directory on both hosts. Runs of '/' collapse to one, and a trailing
+ * '/' is dropped. */
+static int sr_wide_lexical_canonical_alloc(const wchar_t *absolute, wchar_t **out) {
+    if (!absolute || !out || !sr_wide_is_absolute(absolute)) return 0;
+    *out = NULL;
+    size_t n = wcslen(absolute);
+    if (n > SIZE_MAX - 1u || n + 1u > SIZE_MAX / sizeof(wchar_t)) return 0;
+    /* Every kept component is written with the one '/' that preceded it in the
+     * input, so the result never exceeds the input's length. */
+    wchar_t *canonical = (wchar_t *)malloc((n + 1u) * sizeof(*canonical));
+    if (!canonical) return 0;
+    size_t len = 0;
+    const wchar_t *p = absolute;
+    while (*p) {
+        while (*p == L'/') p++;
+        const wchar_t *start = p;
+        while (*p && *p != L'/') p++;
+        size_t part = (size_t)(p - start);
+        if (part == 0u || (part == 1u && start[0] == L'.')) continue;
+        if (part == 2u && start[0] == L'.' && start[1] == L'.') {
+            while (len > 0u && canonical[len - 1u] != L'/') len--;
+            if (len > 0u) len--;
+            continue;
+        }
+        canonical[len++] = L'/';
+        memcpy(canonical + len, start, part * sizeof(*canonical));
+        len += part;
+    }
+    if (len == 0u) canonical[len++] = L'/';
+    canonical[len] = L'\0';
+    *out = canonical;
+    return 1;
+}
+
+/* Anchors a relative input to the working directory, then collapses its '.'
+ * and '..' components lexically, as GetFullPathNameW does on Windows. */
 static int sr_wide_full_path_alloc(const wchar_t *input, wchar_t **out) {
     if (!input || !out) return 0;
     *out = NULL;
-    if (sr_wide_is_absolute(input)) {
-        size_t n = wcslen(input);
-        if (n > SIZE_MAX - 1u || n + 1u > SIZE_MAX / sizeof(wchar_t)) return 0;
-        wchar_t *copy = (wchar_t *)malloc((n + 1u) * sizeof(*copy));
-        if (!copy) return 0;
-        memcpy(copy, input, (n + 1u) * sizeof(*copy));
-        *out = copy;
-        return 1;
-    }
+    if (sr_wide_is_absolute(input)) return sr_wide_lexical_canonical_alloc(input, out);
     wchar_t *cwd = NULL;
     if (!sr_wide_get_current_directory(&cwd)) return 0;
     wchar_t *joined = NULL;
     int ok = sr_wide_join_alloc(cwd, input, &joined);
     free(cwd);
     if (!ok) return 0;
-    *out = joined;
-    return 1;
+    ok = sr_wide_lexical_canonical_alloc(joined, out);
+    free(joined);
+    return ok;
 }
 
 static int sr_wide_extended_absolute_alloc(const wchar_t *absolute, wchar_t **out) {
@@ -732,6 +769,17 @@ int sr_wide_configured_root_wide_alloc(const wchar_t *value, wchar_t **out) {
     if (!sr_wide_is_absolute(wide)) {
         free(wide);
         return 0;
+    }
+    /* '.' and '..' are collapsed first, as the Win32 layer does through GetFullPathNameW, so a
+     * value such as /opt/nk/../data names the same root on both hosts. */
+    if (sr_wide_has_dot_component(wide)) {
+        wchar_t *canonical = NULL;
+        if (!sr_wide_full_path_alloc(wide, &canonical)) {
+            free(wide);
+            return 0;
+        }
+        free(wide);
+        wide = canonical;
     }
     int ok = sr_wide_extended_absolute_alloc(wide, out);
     free(wide);
@@ -818,9 +866,14 @@ int sr_wide_basename_alloc(const wchar_t *path, wchar_t **out) {
     if (n == 0u) return 0;
     size_t at = n;
     while (at > 0u && path[at - 1u] != L'/') at--;
-    wchar_t *name = (wchar_t *)malloc((n - at + 1u) * sizeof(*name));
+    /* path[n] is a stripped trailing '/' when the path has one, so the name is copied without
+     * it and terminated here, as the Win32 layer does. */
+    size_t len = n - at;
+    if (len + 1u > SIZE_MAX / sizeof(wchar_t)) return 0;
+    wchar_t *name = (wchar_t *)malloc((len + 1u) * sizeof(*name));
     if (!name) return 0;
-    memcpy(name, path + at, (n - at + 1u) * sizeof(*name));
+    memcpy(name, path + at, len * sizeof(*name));
+    name[len] = L'\0';
     *out = name;
     return 1;
 }
@@ -1004,6 +1057,18 @@ FILE *ms0_fopen_utf8(const char *host_path, const wchar_t *mode) {
     if (ms0_posix_host_relpath(host_path, rel, sizeof(rel)) != SR_CD_OK) return NULL;
     return ms0_fopen_rel_utf8(rel, mode, MS0_OPEN_BY_MODE, NULL);
 }
+
+/* Removes a file the legacy-flat import created beneath the unified root and could not finish,
+ * through the same descriptor-relative seam its open used. */
+static int ms0_remove_import_utf8(const char *host_path) {
+    char rel[SR_CD_REL_MAX];
+    if (ms0_posix_host_relpath(host_path, rel, sizeof(rel)) != SR_CD_OK) return 0;
+    sr_cd_root root;
+    if (ms0_posix_root_open(&root) != SR_CD_OK) return 0;
+    sr_cd_status st = sr_cd_delete_file(&root, rel);
+    sr_cd_root_close(&root);
+    return st == SR_CD_OK;
+}
 #endif /* _WIN32 */
 
 char *host_path_alloc(const char *guest) {
@@ -1072,7 +1137,15 @@ int ms0_try_legacy_flat_import(const char *guest_path, const char *host_path) {
     if (ferror(src)) ok = 0;
     fclose(src);
     if (fclose(dst) != 0) ok = 0;
-    if (!ok) return 0;
+    if (!ok) {
+        /* A partial copy left in place would be found by the next open, so the import would never
+         * run again and the guest would read a truncated save as a whole one. */
+        int removed = ms0_remove_import_utf8(host_path);
+        fprintf(stderr,
+                "ms0: legacy flat import of '%s' from SR_FSDIR failed; the partial copy %s\n",
+                guest_path, removed ? "was removed" : "could not be removed");
+        return 0;
+    }
     atomic_fetch_add_explicit(&s_ms0_legacy_import_count, 1u, memory_order_release);
     fprintf(stderr,
             "ms0: imported legacy flat file '%s' from SR_FSDIR into unified Memory Stick root\n",

@@ -1033,6 +1033,10 @@ static uint32_t h_DisplayWaitVblankCB(CpuState *s) {
     return result < 0 ? SCE_KERNEL_ERROR_CAN_NOT_WAIT : (uint32_t)result;
 }
 static uint32_t h_DisplayGetMode(CpuState *s) {
+    /* Every output is checked before any is written, as in h_DisplayGetFrameBuf. */
+    if (A0 && !sr_guest_span_writable(A0, 4u)) return 0x80000103u;
+    if (A1 && !sr_guest_span_writable(A1, 4u)) return 0x80000103u;
+    if (A2 && !sr_guest_span_writable(A2, 4u)) return 0x80000103u;
     if (A0) MEM_W32(A0, 0);  /* mode 0 */
     if (A1) MEM_W32(A1, 480); /* width */
     if (A2) MEM_W32(A2, 272); /* height */
@@ -1361,8 +1365,9 @@ void hle_register_display_setframebuf_handler(void) {
 void hle_register_display_handlers(void) {
     hle_register_display_setframebuf_handler();
     sr_hle_register(0xeeda2e54, "sceDisplayGetFrameBuf", h_DisplayGetFrameBuf);
-    /* 0x36cdfade is sceDisplayWaitVblank (issue #83); the CB variant is 0x46f186c3 and
-     * remains unregistered until the callback-aware wait transaction lands. */
+    /* The vblank waits -- 0x36cdfade sceDisplayWaitVblank (issue #83), its CB variant
+     * 0x8eb9ec49, and the Start pair 0x984c27e7 / 0x46f186c3 -- are registered in
+     * hle_register_wait_conformance_display. */
     sr_hle_register(0x0e20f177, "sceDisplaySetMode", h_DisplaySetMode);
     sr_hle_register(0x9c6eaad7, "sceDisplayGetVcount", h_DisplayGetVcount);
     sr_hle_register(0x773dd3a3, "sceDisplayGetCurrentHcount", h_DisplayGetCurrentHcount);

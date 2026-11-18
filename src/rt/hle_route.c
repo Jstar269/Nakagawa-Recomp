@@ -659,17 +659,22 @@ static int route_parse_line(char *line, int lineno, const char *path) {
     if (strcmp(tok, "SIGGRID") == 0) {
         char *c = strtok(NULL, " \t\r\n"), *r = strtok(NULL, " \t\r\n");
         if (!c || !r) { fprintf(stderr, "ROUTE_PARSE: %s:%d: SIGGRID <cols> <rows>\n", path, lineno); return -1; }
-        int cols = atoi(c), rows = atoi(r);
-        if (cols < 1 || rows < 1 || cols * rows > ROUTE_MAX_CELLS) {
-            fprintf(stderr, "ROUTE_PARSE: %s:%d: SIGGRID %dx%d out of range (cols*rows <= %d)\n",
-                    path, lineno, cols, rows, ROUTE_MAX_CELLS);
+        /* Each axis is bounded before the product is formed, so no pair of values can wrap the
+         * cols*rows check and size a grid larger than the signature buffers. */
+        char *c_end = NULL, *r_end = NULL;
+        long cols = strtol(c, &c_end, 10), rows = strtol(r, &r_end, 10);
+        if (c_end == c || *c_end != '\0' || r_end == r || *r_end != '\0' ||
+            cols < 1 || rows < 1 || cols > ROUTE_MAX_CELLS || rows > ROUTE_MAX_CELLS ||
+            cols > ROUTE_MAX_CELLS / rows) {
+            fprintf(stderr, "ROUTE_PARSE: %s:%d: SIGGRID %s %s out of range (cols*rows <= %d)\n",
+                    path, lineno, c, r, ROUTE_MAX_CELLS);
             return -1;
         }
         if (s_route_ncp > 0) {
             fprintf(stderr, "ROUTE_PARSE: %s:%d: SIGGRID must precede every CHECKPOINT\n", path, lineno);
             return -1;
         }
-        s_route_cols = cols; s_route_rows = rows;
+        s_route_cols = (int)cols; s_route_rows = (int)rows;
         return 0;
     }
     if (strcmp(tok, "SAMPLE_EVERY") == 0 || strcmp(tok, "TOLERANCE") == 0) {

@@ -6589,6 +6589,61 @@ static void test_umd_io_console_model(void) {
     s_umd_io_synthetic_enabled = 0;
 }
 
+#ifndef _WIN32
+/* The POSIX host-path layer (hle_host.c) splits and canonicalises paths as the Win32 layer does. */
+int sr_wide_basename_alloc(const wchar_t *path, wchar_t **out);
+int sr_wide_path_alloc(const char *utf8_path, wchar_t **out);
+int sr_wide_configured_root_wide_alloc(const wchar_t *value, wchar_t **out);
+
+static int posix_wide_is(int (*fn)(const wchar_t *, wchar_t **), const wchar_t *in,
+                         const wchar_t *want) {
+    wchar_t *got = NULL;
+    int ok = fn(in, &got) == 1 && got && wcscmp(got, want) == 0;
+    free(got);
+    return ok;
+}
+
+static int posix_path_is(const char *in, const wchar_t *want) {
+    wchar_t *got = NULL;
+    int ok = sr_wide_path_alloc(in, &got) == 1 && got && wcscmp(got, want) == 0;
+    free(got);
+    return ok;
+}
+
+static void test_posix_host_path_components(void) {
+    /* A root such as SR_DATAROOT=/x/data/ is split for the primary-root skip: its name is
+     * "data", terminated, not the trailing '/' it was stripped of. */
+    expect(posix_wide_is(sr_wide_basename_alloc, L"/x/data/", L"data") &&
+               posix_wide_is(sr_wide_basename_alloc, L"/x/data//", L"data") &&
+               posix_wide_is(sr_wide_basename_alloc, L"/x/data", L"data"),
+           "the base name of a path with a trailing '/' is the terminated last component");
+
+    /* '.' and '..' are collapsed lexically, as GetFullPathNameW does on Windows, rather than
+     * refused: SR_MEMSTICK=../memstick and SR_DATAROOT=/opt/nk/../data work on both hosts. */
+    expect(posix_path_is("/a/./b/../c", L"/a/c") && posix_path_is("/a/b/..", L"/a") &&
+               posix_path_is("/..", L"/") && posix_path_is("/a//./b", L"/a/b"),
+           "an absolute path's dot components are collapsed and never climb above '/'");
+    {
+        wchar_t *plain = NULL, *dotted = NULL;
+        int ok = sr_wide_path_alloc("nk_dot_probe", &plain) == 1 &&
+                 sr_wide_path_alloc("nk_sub/../nk_dot_probe", &dotted) == 1 &&
+                 plain && dotted && wcscmp(plain, dotted) == 0;
+        free(plain);
+        free(dotted);
+        expect(ok, "a relative path with dot components resolves against the working directory");
+    }
+    expect(posix_wide_is(sr_wide_configured_root_wide_alloc, L"/opt/nk/../data", L"/opt/data") &&
+               posix_wide_is(sr_wide_configured_root_wide_alloc, L"/opt/./font", L"/opt/font"),
+           "a configured absolute root with dot components is collapsed, as on Windows");
+    {
+        wchar_t *got = NULL;
+        expect(sr_wide_configured_root_wide_alloc(L"../data", &got) == 0 && !got,
+               "a relative configured root is still refused");
+        free(got);
+    }
+}
+#endif
+
 /* Issue #334: ordinary sceIo* and savedata must share one canonical host
  * Memory Stick root and one path resolver. Fails before the unification (flat
  * fs/ vs hierarchical memstick/) and passes after. */
@@ -6821,6 +6876,37 @@ static void test_ms0_unified_namespace(void) {
         nk_remove_utf8(host);
         nk_remove_utf8(legacy_flat);
     }
+#ifndef _WIN32
+    /* --- a legacy flat import that fails part way leaves no partial copy ---
+     * On this host a directory opens as a stream and then fails its first read, so the copy
+     * stops after the destination was created. A file left there would be found by the next
+     * open, which would then never import again and serve the guest a truncated save. */
+    {
+        char legacy_dir[512];
+        snprintf(legacy_dir, sizeof legacy_dir, "%s/ms0__LEGACY_BAD.TXT", legacy_root);
+        nk_platform_mkdir_p(legacy_dir);
+        static const char bad_guest[] = "ms0:/LEGACY_BAD.TXT";
+        fd_host_path(host, sizeof(host), bad_guest);
+        nk_remove_utf8(host);
+        uint32_t before = sr_hle_test_ms0_legacy_import_count();
+        memset(&cpu, 0, sizeof cpu);
+        fd_set_path(&cpu, PATH_ADDR, bad_guest);
+        cpu.r[5] = 1u; /* O_RDONLY: import only on read miss */
+        uint32_t bfd = sr_hle_test_io_open(&cpu);
+        expect(bfd >= 64u, "a legacy flat source that cannot be read does not open");
+        if (bfd < 64u) {
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = bfd;
+            sr_hle_test_io_close(&cpu);
+        }
+        expect(sr_hle_test_ms0_legacy_import_count() == before,
+               "a failed legacy flat import is not counted as an import");
+        expect(nk_platform_path_missing(host),
+               "a failed legacy flat import leaves no partial copy under SR_MEMSTICK");
+        nk_remove_utf8(host);
+        rmdir(legacy_dir);
+    }
+#endif
 
     /* --- savedata SAVE and ordinary sceIoOpen see the same host path --- */
     {
@@ -34613,6 +34699,30 @@ static void test_display_narrow_stride_span(void) {
     s_test_gui_on = 0;
 }
 
+/* sceDisplayGetMode checks each output pointer before it writes any of them, as GetFrameBuf
+ * does: one unwritable output refuses the call with ILLEGAL_ADDR and leaves the others alone. */
+static void test_display_get_mode_span(void) {
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t mode_out = 0x09000000u, width_out = mode_out + 4u, height_out = mode_out + 8u;
+    MEM_W32(mode_out, 0xa5a5a5a5u);
+    MEM_W32(width_out, 0xa5a5a5a5u);
+    MEM_W32(height_out, 0xa5a5a5a5u);
+    s_cpu->r[4] = mode_out;
+    s_cpu->r[5] = 0x0c000000u; /* one byte past user RAM */
+    s_cpu->r[6] = height_out;
+    expect(sr_syscall(s_cpu, 0xdea197d4u) == 0x80000103u,
+           "GetMode refuses an unwritable width pointer with ILLEGAL_ADDR");
+    expect(MEM_R32(mode_out) == 0xa5a5a5a5u && MEM_R32(height_out) == 0xa5a5a5a5u,
+           "GetMode writes no output when one of them is unwritable");
+    s_cpu->r[4] = mode_out;
+    s_cpu->r[5] = width_out;
+    s_cpu->r[6] = height_out;
+    expect(sr_syscall(s_cpu, 0xdea197d4u) == 0u && MEM_R32(mode_out) == 0u &&
+               MEM_R32(width_out) == 480u && MEM_R32(height_out) == 272u,
+           "GetMode fills every writable output");
+}
+
 static void test_display_framebuf_latch(void) {
     reset_fixture();
     sr_hle_init();
@@ -46551,6 +46661,28 @@ static void test_route_malformed_files_are_refused(void) {
     rt_write(body);
     expect(sr_route_load(RT_PATH) == 0, "SIGGRID after a CHECKPOINT is refused");
 
+    /* A grid's size is bounded per axis: a pair whose int product wraps (65536*65536 is 0,
+     * 2147483647*2 is negative) must not pass the cell bound and size a signature larger than
+     * the ROUTE_SIG_MAX buffers route_tick and route_learn_emit sample into. */
+    sr_route_reset();
+    rt_write("SIGGRID 8 8\nPRESS 4000 16\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "a SIGGRID within the cell bound loads");
+    {
+        static const char *const wrapping[] = {
+            "SIGGRID 65536 65536\nPRESS 4000 16\nEND\n",
+            "SIGGRID 2147483647 2\nPRESS 4000 16\nEND\n",
+            "SIGGRID 193 1\nPRESS 4000 16\nEND\n",
+            "SIGGRID 8x 8\nPRESS 4000 16\nEND\n",
+        };
+        for (size_t i = 0; i < sizeof wrapping / sizeof wrapping[0]; i++) {
+            sr_route_reset();
+            rt_write(wrapping[i]);
+            expect(sr_route_load(RT_PATH) == 0 && sr_route_sig_bytes() > 0 &&
+                       sr_route_sig_bytes() <= 576,
+                   "a SIGGRID past the cell bound, or not a number, is refused and keeps the grid");
+        }
+    }
+
     sr_route_reset();
     snprintf(body, sizeof body,
              "CHECKPOINT MAIN_MENU %s\n"
@@ -57858,6 +57990,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_main_function_exports_link_from_boot();
     test_umd_io_console_model();
     test_ms0_unified_namespace();
+#ifndef _WIN32
+    test_posix_host_path_components();
+#endif
     test_utility_av_module_state();
     test_utility_usb_module_state();
     test_utility_module_table();
@@ -58037,6 +58172,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_dmac_fifo_whatever_the_inherited_clock_phase();
     test_display_framebuf_latch();
     test_display_narrow_stride_span();
+    test_display_get_mode_span();
     test_time_domains_are_coherent();
     test_kernel_import_sweep_sysclock_conversion();
     test_unregistered_batch_sysclock_wide();
