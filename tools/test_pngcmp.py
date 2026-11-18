@@ -70,6 +70,37 @@ class PngCmpTests(unittest.TestCase):
         self.assertEqual((w, h), (W, H))
         self.assertEqual(b"".join(rows), px)
 
+    def test_a_truncated_or_foreign_ppm_is_refused_and_writes_no_png(self):
+        px = base_pixels()
+        cases = {
+            "truncated": make_ppm(px[:-5]),
+            "extra": make_ppm(px + b"\x00"),
+            "p3": b"P3\n%d %d\n255\n" % (W, H) + px,
+            "maxval": b"P6\n%d %d\n65535\n" % (W, H) + px,
+        }
+        for name, data in cases.items():
+            with self.subTest(case=name):
+                ppm = self.dir / (name + ".ppm")
+                png = self.dir / (name + ".png")
+                ppm.write_bytes(data)
+                err = io.StringIO()
+                with patch.object(sys, "argv", ["ppm2png", str(ppm), str(png)]), \
+                        contextlib.redirect_stderr(err):
+                    code = ppm2png.main()
+                self.assertEqual(code, 1)
+                self.assertIn("ppm2png:", err.getvalue())
+                self.assertFalse(png.exists())
+
+    def test_a_comment_in_the_ppm_header_still_converts(self):
+        px = base_pixels()
+        ppm = self.dir / "comment.ppm"
+        png = self.dir / "comment.png"
+        ppm.write_bytes(b"P6\n# a comment\n%d %d\n255\n" % (W, H) + px)
+        with patch.object(sys, "argv", ["ppm2png", str(ppm), str(png)]):
+            self.assertEqual(ppm2png.main(), 0)
+        w, h, rows = pngcmp.decode(png)
+        self.assertEqual(((w, h), b"".join(rows)), ((W, H), px))
+
     def test_identical_images_agree_fully(self):
         a = self.convert("a", base_pixels())
         b = self.convert("b", base_pixels())

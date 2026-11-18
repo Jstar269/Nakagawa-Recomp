@@ -153,8 +153,21 @@ class CLoaderParityTests(unittest.TestCase):
 
     def test_reason_names(self):
         names = re.findall(r'case NKSNAP_\w+: return "([a-z-]+)";', NKSNAP_C)
-        refusals = [n for n in names if n not in ("ok", "io-error", "out-of-memory")]
+        refusals = [n for n in names if n != "ok" and n not in nksnap.RUNNER_REFUSALS]
         self.assertEqual(tuple(refusals), nksnap.REASONS)
+        self.assertEqual(tuple(n for n in names if n in nksnap.RUNNER_REFUSALS), nksnap.RUNNER_REFUSALS)
+        self.assertEqual(len(names), 1 + len(nksnap.REASONS) + len(nksnap.RUNNER_REFUSALS))
+
+    def test_the_runner_refusal_line_for_every_loader_status_parses(self):
+        # snapshot_runner.c prints "REFUSED <nksnap_status_name> <detail>" for any load failure.
+        self.assertIn('printf("REFUSED %s%s%s\\n", nksnap_status_name(st)', RUNNER_C)
+        names = re.findall(r'case NKSNAP_\w+: return "([a-z-]+)";', NKSNAP_C)
+        for name in names:
+            if name == "ok":
+                continue
+            with self.subTest(reason=name):
+                verdict = nksnap.parse_verdict(f"REFUSED {name} snap.bin: detail")
+                self.assertEqual((verdict.kind, verdict.reason), ("REFUSED", name))
 
     def test_regions(self):
         regions = re.findall(r'\{ (0x[0-9a-fA-F]+)u, (0x[0-9a-fA-F]+)u, "(\w+)" \}', NKSNAP_C)

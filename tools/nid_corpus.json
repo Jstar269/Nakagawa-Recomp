@@ -6507,7 +6507,7 @@
     },
     {
       "class": "unresolved",
-      "name": "sceNpLookupAbortTransaction ",
+      "name": "sceNpLookupAbortTransaction",
       "nid": "0x4b4e4e71"
     },
     {
