@@ -76,6 +76,20 @@ int atrac3p_create(int channels, int block_align, Atrac3pHandle **out);
 int atrac3p_decode(Atrac3pHandle *h, const uint8_t *frame, int frame_size,
                    int16_t *pcm_out, int *samples_out);
 
+/* One ATRAC3+ output sample: the core's float scaled by 32768 and saturated
+ * to int16 (NaN gives 0). */
+int16_t atrac3p_pcm_sample(float v);
+
+/*
+ * Decoder diagnostics. av_log()/av_vlog() (defined in atrac3p_api.c) drop
+ * messages above AV_LOG_INFO and pass each kept call to the sink as one
+ * complete line, prefixed "atrac3p: " and ending in a newline. With no sink
+ * installed (the default, or after passing NULL) the line goes to stderr.
+ * The sink is process-wide; install it before any decoder is in use.
+ */
+typedef void (*atrac3p_log_sink)(const char *line, void *opaque);
+void atrac3p_set_log_sink(atrac3p_log_sink sink, void *opaque);
+
 /*
  * Reset all decoder history/state to the post-create state. Used when a
  * new stream is set up. Returns 0 on success.

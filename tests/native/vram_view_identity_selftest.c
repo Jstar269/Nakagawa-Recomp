@@ -21,20 +21,27 @@
  * Each frame draws into target T1, stores into it from the CPU (whole pixels, 16-bit stores
  * into the middle of a pixel, a byte store), draws T1 as a texture into T2, presents T2 with a
  * capture armed, then stores into T2 from the CPU. A run writes a digest of every presented
- * frame, the lists' return codes, and at the end guest VRAM and RAM as a guest read sees them
- * (through sr_guest_copy_in) and the GE state. The digest does not cover timing: there is no
+ * frame, the lists' return codes, and at the end all of guest VRAM (0x04000000-0x04200000) and
+ * all of the harness's guest RAM (0x08000000-0x0C000000) as a guest read sees them (through
+ * sr_guest_copy_in) and the GE state. The digest does not cover timing: there is no
  * scheduler, VBLANK counter, timer, audio or perf counter in this harness, so a viewer that
  * changed one of those would not show here.
  *
  *   --write PATH          run without the viewer and write the digest to PATH
  *   --check PATH          run again and require the same digest
- *   --view-at N           with --check: run the viewer's decodes at frame N's VBLANK, check what
- *                         they show, and require that they moved bytes into guest VRAM (so the
- *                         run is not trivially the same)
- *   --scale N             SR_GPU_SCALE, before the backend starts
+ *   --view-at N           with --check: run the viewer's decodes at frame N's VBLANK (N a whole
+ *                         number below the frame count), check what they show, and require that
+ *                         they moved bytes into guest VRAM (so the run is not trivially the same)
+ *   --scale N             SR_GPU_SCALE (a whole number from 1), before the backend starts
+ *
+ * Any other argument, or a number that does not parse whole, exits 2 with the usage line.
  *
  * Built with -DNK_VRAM_VIEW_MUTANT, the viewer also stores one byte into T1 where nothing
- * redraws it; a --check run must then fail on the frames presented after it.
+ * redraws it; a --check run must then fail on the frames presented after it. --mutant-store ADDR
+ * (mutant builds only) moves that byte to another guest address; a store no presented frame
+ * shows must then fail on the end-of-run vram or ram line. Before the audit of 2026-11-17 the
+ * digest hashed only T1 to the end of the depth buffer and the lists and vertices, so a mutant
+ * storing at 0x041F0000 passed, and "--view-at abc" ran the viewer at frame 0 and passed.
  *
  * Exit 0 pass, 1 fail, 2 usage or setup, 77 no Vulkan device.
  */
@@ -47,6 +54,7 @@
 #include "gpu_sdl3vk/sdl3vk.h"
 #include "recomp.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -117,7 +125,14 @@ uint32_t sr_get_ge_status(void) { return 0; }
 #define ZBUF     0x04110000u   /* shared by both lists */
 #define LISTS    0x08100000u   /* two lists a frame, 0x1000 bytes each */
 #define VERTS    0x08200000u   /* 0x1000 bytes a frame */
-#define RAM_END  0x08210000u
+
+/* The end-of-run digest covers all of guest VRAM (the 2 MiB of eDRAM; the mirrors above
+ * VRAM_END alias it) and every RAM address a guest read reaches in this harness's arena, so a
+ * viewer write anywhere in either shows, whether or not a later frame presents it. */
+#define VRAM_BASE 0x04000000u
+#define VRAM_END  0x04200000u
+#define RAM_BASE  0x08000000u
+#define RAM_END   0x0C000000u
 
 /* Through-mode vertex types: colour 8888 + float position, and float UV + float position. */
 #define VT_COLOR ((7u << 2) | (3u << 7) | (1u << 23))
@@ -302,6 +317,12 @@ static int file_hash(const char *path, uint64_t *out) {
 
 static uint32_t s_px[GE_VRAM_VIEW_MAX_WIDTH * GE_VRAM_VIEW_MAX_HEIGHT];
 static uint8_t s_before[ZBUF + STRIDE * PSP_H * 2u - T1];
+#ifdef NK_VRAM_VIEW_MUTANT
+/* Where the mutant viewer stores its byte: T1 where nothing redraws it, unless --mutant-store
+ * names another guest address (the recipe also uses one in VRAM past the depth buffer and one in
+ * RAM outside the lists and vertices, which no presented frame shows). */
+static uint32_t s_mutant_store = T1 + (140u * STRIDE + 420u) * 4u;
+#endif
 
 static int expect_px(const char *what, uint32_t got, uint32_t want, uint32_t mask) {
     if ((got & mask) == (want & mask)) return 1;
@@ -389,7 +410,7 @@ static int run_viewer(uint32_t f) {
     ok &= expect_px("texture", s_px[90u * 512u + 150u], c_sprite(f), rgb);
 
 #ifdef NK_VRAM_VIEW_MUTANT
-    sr_w8_pc_slow(T1 + (140u * STRIDE + 420u) * 4u, 0x77u, 0);   /* a viewer that writes */
+    sr_w8_pc_slow(s_mutant_store, 0x77u, 0);   /* a viewer that writes */
 #endif
     size_t moved = 0;
     const uint8_t *now = SR_HOST(T1);
@@ -435,6 +456,7 @@ static int run(int view_at, const char *capture_path) {
         if (shown != GEGPU_PRESENT_SHOWN || sr_capture_result() != 1 || !file_hash(capture_path, &h)) {
             fprintf(stderr, "vram view identity: FAIL frame %u present=%d capture=%d\n", f, shown,
                     sr_capture_result());
+            remove(capture_path);   /* a capture written in part does not stay beside the reference */
             return 0;
         }
         remove(capture_path);
@@ -443,13 +465,13 @@ static int run(int view_at, const char *capture_path) {
         if ((int)f == view_at && !run_viewer(f)) return 0;   /* the paused VBLANK */
     }
     uint64_t vram = 0, ram = 0;
-    if (!guest_hash(T1, ZBUF + STRIDE * PSP_H * 2u - T1, &vram) || !guest_hash(LISTS, RAM_END - LISTS, &ram)) {
+    if (!guest_hash(VRAM_BASE, VRAM_END - VRAM_BASE, &vram) || !guest_hash(RAM_BASE, RAM_END - RAM_BASE, &ram)) {
         fprintf(stderr, "vram view identity: FAIL guest memory could not be read\n");
         return 0;
     }
     line("lists %" PRIu64 " %016" PRIx64, FRAMES * 2u, codes);
-    line("vram %" PRIu64 " %016" PRIx64, ZBUF + STRIDE * PSP_H * 2u - T1, vram);
-    line("ram %" PRIu64 " %016" PRIx64, RAM_END - LISTS, ram);
+    line("vram %" PRIu64 " %016" PRIx64, VRAM_END - VRAM_BASE, vram);
+    line("ram %" PRIu64 " %016" PRIx64, RAM_END - RAM_BASE, ram);
     /* The GE state is hashed as raw bytes across processes: this relies on ge.c's GeState being
      * static (zeroed padding) and holding no pointers or timers, which holds today. */
     line("ge %" PRIu64 " %016" PRIx64, sizeof(GeState), fnv(FNV0, ge_state_ptr(), sizeof(GeState)));
@@ -494,15 +516,40 @@ static int set_env(const char *name, const char *value) {
 #endif
 }
 
+/* A whole unsigned number in the given base, from 0 to max; anything else (empty, a sign,
+ * leading space, trailing characters, out of range) is refused, so a mistyped argument is a
+ * usage error rather than a run at another frame or scale. */
+static int parse_number(const char *text, int base, unsigned long max, unsigned long *out) {
+    if (!text || text[0] < '0' || text[0] > '9') return 0;
+    char *end = NULL;
+    errno = 0;
+    const unsigned long v = strtoul(text, &end, base);
+    if (errno != 0 || end == text || *end != '\0' || v > max) return 0;
+    *out = v;
+    return 1;
+}
+
 int main(int argc, char **argv) {
     const char *write_path = NULL, *check_path = NULL;
     int view_at = -1;
+    unsigned long n = 0;
     for (int i = 1; i < argc; i++) {
         if (i + 1 >= argc) goto usage;
         if (strcmp(argv[i], "--write") == 0) write_path = argv[++i];
         else if (strcmp(argv[i], "--check") == 0) check_path = argv[++i];
-        else if (strcmp(argv[i], "--view-at") == 0) view_at = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--scale") == 0) { if (!set_env("SR_GPU_SCALE", argv[++i])) return 2; }
+        else if (strcmp(argv[i], "--view-at") == 0) {
+            if (!parse_number(argv[++i], 10, FRAMES - 1u, &n)) goto usage;
+            view_at = (int)n;
+        } else if (strcmp(argv[i], "--scale") == 0) {
+            if (!parse_number(argv[i + 1], 10, 0x7fffffffu, &n) || n == 0u) goto usage;
+            if (!set_env("SR_GPU_SCALE", argv[++i])) return 2;
+        }
+#ifdef NK_VRAM_VIEW_MUTANT
+        else if (strcmp(argv[i], "--mutant-store") == 0) {
+            if (!parse_number(argv[++i], 0, 0xffffffffu, &n) || !sr_inrange_n((uint32_t)n, 1u)) goto usage;
+            s_mutant_store = (uint32_t)n;
+        }
+#endif
         else goto usage;
     }
     if (!write_path == !check_path || (write_path && view_at >= 0) || view_at >= (int)FRAMES ||

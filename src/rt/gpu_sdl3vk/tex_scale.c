@@ -14,6 +14,7 @@
 #include "../../../third_party/xbrz/xbrz.h"
 #include "../vfpu_tables.h"   /* sr_vfpu_hmac_sha256: the soft-shadow texture digest */
 
+#include <SDL3/SDL_atomic.h>   /* a worker a stop leaves behind */
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
@@ -194,7 +195,8 @@ int nk_tex_scale_image(const uint32_t *rgba, int w, int h, int factor, int clamp
         for (int x = 0; x < pw; x++)
             src[(size_t)y * pw + x] = swap_rb(row[edge(x - PAD, w, clamp_u)]);
     }
-    int ok = nk_xbrz_scale(factor, src, big, pw, ph, NULL, 0, ph);
+    /* Only the rows kept below: xBRZ still reads the pad rows around the stripe as neighbours. */
+    int ok = nk_xbrz_scale(factor, src, big, pw, ph, NULL, PAD, PAD + h);
     if (ok) {
         const size_t bw = (size_t)pw * (size_t)factor, ow = (size_t)w * (size_t)factor;
         for (size_t y = 0; y < (size_t)h * (size_t)factor; y++) {
@@ -252,19 +254,29 @@ uint64_t nk_tex_scale_job_bytes(int w, int h, int factor) {
     return job_host_bytes(w, h, factor) + padded;
 }
 
-static void run_job(Job *j) {
-    uint64_t t0 = SDL_GetTicksNS();
-    size_t n = (size_t)j->w * (size_t)j->h * (size_t)j->factor * (size_t)j->factor;
-    j->dst = (uint32_t *)malloc(n * sizeof(uint32_t));
-    j->failed = !j->dst ||
-        !nk_tex_scale_image(j->src, j->w, j->h, j->factor, j->clamp_u, j->clamp_v, j->dst);
-    if (j->failed) {
-        free(j->dst);
-        j->dst = NULL;
+/* A scale job's work, touching no shared state (a worker runs it outside s_mx): the result, or
+ * NULL when it failed, and the time it took. */
+static uint32_t *scale_job_pixels(const Job *j, uint64_t *spent) {
+    const uint64_t t0 = SDL_GetTicksNS();
+    const size_t n = (size_t)j->w * (size_t)j->h * (size_t)j->factor * (size_t)j->factor;
+    uint32_t *dst = (uint32_t *)malloc(n * sizeof(uint32_t));
+    if (dst && !nk_tex_scale_image(j->src, j->w, j->h, j->factor, j->clamp_u, j->clamp_v, dst)) {
+        free(dst);
+        dst = NULL;
     }
+    *spent = SDL_GetTicksNS() - t0;
+    return dst;
+}
+
+/* Publish a scale job's result (NULL: it failed), under s_mx. */
+static void scale_job_done(Job *j, uint32_t *dst, uint64_t spent) {
     free(j->src);
     j->src = NULL;
-    s_stats.scale_ns += SDL_GetTicksNS() - t0;   /* the sync path holds s_mx */
+    j->dst = dst;
+    j->failed = dst == NULL;
+    j->state = JOB_DONE;
+    s_stats.scale_ns += spent;
+    if (dst) s_stats.scaled++;
 }
 
 /* The oldest slot in `state`; `scale_only` skips work jobs. */
@@ -280,38 +292,44 @@ static Job *oldest_of(int state, int scale_only) {
 
 static Job *oldest(int state) { return oldest_of(state, 0); }
 
+/* A worker's own block, which outlives the pool when a stop leaves the worker inside a work job:
+ * WORKER_IN_WORK is set under s_mx before the job runs; afterwards the worker swaps it back to
+ * WORKER_OTHER, unless the stop swapped it to WORKER_LEFT first. Then the pool, its lock and the
+ * job's slot may be gone, so the worker frees the block and returns without touching them. */
+enum { WORKER_OTHER, WORKER_IN_WORK, WORKER_LEFT };
+typedef struct {
+    SDL_AtomicInt state;
+} WorkerCtl;
+static WorkerCtl *s_ctl[NK_TEX_SCALE_WORKERS_MAX];
+
 static int worker(void *arg) {
-    (void)arg;
+    WorkerCtl *ctl = (WorkerCtl *)arg;
     SDL_LockMutex(s_mx);
     for (;;) {
         Job *j = NULL;
         while (!s_quit && (s_hold || !(j = oldest(JOB_QUEUED)))) SDL_WaitCondition(s_work_cv, s_mx);
         if (s_quit) break;
         j->state = JOB_RUNNING;
-        SDL_UnlockMutex(s_mx);
         if (j->run) {
             /* A work job: the caller's function, outside the lock, then done. */
+            SDL_SetAtomicInt(&ctl->state, WORKER_IN_WORK);
+            SDL_UnlockMutex(s_mx);
             j->run(j->ctx);
+            if (!SDL_CompareAndSwapAtomicInt(&ctl->state, WORKER_IN_WORK, WORKER_OTHER)) {
+                free(ctl);   /* left by nk_tex_scale_shutdown: nothing here is this worker's now */
+                return 0;
+            }
             SDL_LockMutex(s_mx);
             j->state = JOB_DONE;
             s_stats.work_done++;
             SDL_BroadcastCondition(s_idle_cv);
             continue;
         }
-        uint64_t t0 = SDL_GetTicksNS();
-        size_t n = (size_t)j->w * (size_t)j->h * (size_t)j->factor * (size_t)j->factor;
-        uint32_t *dst = (uint32_t *)malloc(n * sizeof(uint32_t));
-        int ok = dst && nk_tex_scale_image(j->src, j->w, j->h, j->factor, j->clamp_u, j->clamp_v, dst);
-        uint64_t spent = SDL_GetTicksNS() - t0;
+        SDL_UnlockMutex(s_mx);
+        uint64_t spent = 0;
+        uint32_t *dst = scale_job_pixels(j, &spent);
         SDL_LockMutex(s_mx);
-        free(j->src);
-        j->src = NULL;
-        if (!ok) { free(dst); dst = NULL; }
-        j->dst = dst;
-        j->failed = !ok;
-        j->state = JOB_DONE;
-        s_stats.scale_ns += spent;
-        if (ok) s_stats.scaled++;
+        scale_job_done(j, dst, spent);
         SDL_BroadcastCondition(s_idle_cv);
     }
     SDL_UnlockMutex(s_mx);
@@ -326,26 +344,54 @@ int nk_tex_scale_worker_count(int logical_cpus) {
 
 int nk_tex_scale_workers(void) { return s_started ? s_workers : 0; }
 
+static int s_start_fault;   /* nk_tex_scale_set_start_fault */
+static int s_sync_live;     /* the mutexes and conditions made here and not destroyed yet */
+/* No worker started this time: the caller runs every job (as nk_tex_scale_set_sync does), until
+ * the shutdown that ends this start. */
+static int s_no_workers;
+
+static void count_made(const void *obj) { if (obj) s_sync_live++; }
+
+/* Destroy the mutex and conditions that exist and forget them. */
+static void sync_destroy(void) {
+    if (s_work_cv) { SDL_DestroyCondition(s_work_cv); s_sync_live--; }
+    if (s_idle_cv) { SDL_DestroyCondition(s_idle_cv); s_sync_live--; }
+    if (s_mx) { SDL_DestroyMutex(s_mx); s_sync_live--; }
+    s_work_cv = s_idle_cv = NULL;
+    s_mx = NULL;
+}
+
 static int ensure_started(void) {
     if (s_started) return 1;
     s_mx = SDL_CreateMutex();
+    count_made(s_mx);
     s_work_cv = SDL_CreateCondition();
-    s_idle_cv = SDL_CreateCondition();
-    if (!s_mx || !s_work_cv || !s_idle_cv) return 0;
+    count_made(s_work_cv);
+    s_idle_cv = s_start_fault == NK_TEX_SCALE_FAULT_SYNC ? NULL : SDL_CreateCondition();
+    count_made(s_idle_cv);
+    if (!s_mx || !s_work_cv || !s_idle_cv) {
+        sync_destroy();   /* a later call tries again from nothing */
+        return 0;
+    }
     s_started = 1;
     s_quit = 0;
     s_workers = 0;
+    s_no_workers = 0;
     const int want = nk_tex_scale_worker_count(SDL_GetNumLogicalCPUCores());
     for (int i = 0; i < want; i++) {
-        s_threads[i] = SDL_CreateThread(worker, "nk-texscale", NULL);
+        WorkerCtl *ctl = (WorkerCtl *)calloc(1, sizeof(*ctl));
+        s_threads[i] = !ctl || s_start_fault == NK_TEX_SCALE_FAULT_THREAD
+                           ? NULL : SDL_CreateThread(worker, "nk-texscale", ctl);
         if (!s_threads[i]) {
             /* The workers that started run every job; with none a queued job would never run, so
              * the caller scales instead. */
-            fprintf(stderr, "TEX_SCALE: worker thread %d of %d unavailable (%s)%s\n", i + 1, want, SDL_GetError(),
-                    i ? "" : "; scaling on the renderer thread");
-            if (!i) s_sync = 1;
+            fprintf(stderr, "TEX_SCALE: worker thread %d of %d unavailable (%s)%s\n", i + 1, want,
+                    ctl ? SDL_GetError() : "no memory", i ? "" : "; scaling on the renderer thread");
+            free(ctl);
+            if (!i) s_no_workers = 1;
             break;
         }
+        s_ctl[i] = ctl;
         s_workers++;
     }
     if (s_workers > s_report_workers) s_report_workers = s_workers;
@@ -360,7 +406,10 @@ static int ensure_started(void) {
  * many workers run at once. */
 static Job *room_for(uint64_t host) {
     Job *j = oldest(JOB_FREE);
-    if (!j || (s_host_bytes && s_host_bytes + host > ((uint64_t)NK_TEX_SCALE_HOST_MB << 20))) return NULL;
+    if (!j) return NULL;
+    int empty = 1;   /* no job at all: a job of 0 host bytes still makes the table not empty */
+    for (int i = 0; i < NK_TEX_SCALE_QUEUE && empty; i++) empty = s_jobs[i].state == JOB_FREE;
+    if (!empty && s_host_bytes + host > ((uint64_t)NK_TEX_SCALE_HOST_MB << 20)) return NULL;
     return j;
 }
 
@@ -404,11 +453,11 @@ int nk_tex_scale_submit(uint64_t serial, uint64_t hash, const uint32_t *rgba, in
     j->failed = 0;
     j->seq = ++s_seq;
     s_stats.submitted++;
-    if (s_sync) {
+    if (s_sync || s_no_workers) {
         j->state = JOB_RUNNING;
-        run_job(j);
-        if (!j->failed) s_stats.scaled++;
-        j->state = JOB_DONE;
+        uint64_t spent = 0;
+        uint32_t *dst = scale_job_pixels(j, &spent);
+        scale_job_done(j, dst, spent);
     } else {
         j->state = JOB_QUEUED;
         SDL_SignalCondition(s_work_cv);
@@ -480,7 +529,7 @@ int nk_tex_scale_submit_work(NkTexScaleWorkFn run, void *ctx, uint64_t host_byte
     j->seq = ++s_seq;
     s_host_bytes += host_bytes;
     s_stats.work_submitted++;
-    if (s_sync) {
+    if (s_sync || s_no_workers) {
         /* No worker (or a test's sync mode): run it here, as a scale is run here. */
         j->state = JOB_RUNNING;
         run(ctx);
@@ -524,6 +573,7 @@ int nk_tex_scale_wait_work(NkTexScaleWorkFn run, uint32_t timeout_ms) {
     if (!s_started || !run) return 1;
     const uint64_t end = SDL_GetTicks() + timeout_ms;
     SDL_LockMutex(s_mx);
+    s_stats.waits++;
     for (;;) {
         int busy = 0;
         for (int i = 0; i < NK_TEX_SCALE_QUEUE && !busy; i++)
@@ -580,6 +630,10 @@ void nk_tex_scale_release(NkTexScaleResult *res) {
 
 void nk_tex_scale_set_sync(int on) { s_sync = on ? 1 : 0; }
 
+void nk_tex_scale_set_start_fault(int fault) { s_start_fault = fault; }
+
+int nk_tex_scale_sync_objects(void) { return s_sync_live; }
+
 void nk_tex_scale_set_hold(int on) {
     if (!ensure_started()) return;
     SDL_LockMutex(s_mx);
@@ -591,6 +645,7 @@ void nk_tex_scale_set_hold(int on) {
 void nk_tex_scale_wait_idle(void) {
     if (!s_started) return;
     SDL_LockMutex(s_mx);
+    s_stats.waits++;
     while (oldest(JOB_RUNNING) || (!s_hold && oldest(JOB_QUEUED))) SDL_WaitCondition(s_idle_cv, s_mx);
     SDL_UnlockMutex(s_mx);
 }
@@ -601,11 +656,28 @@ void nk_tex_scale_shutdown(void) {
     s_quit = 1;
     SDL_BroadcastCondition(s_work_cv);
     SDL_UnlockMutex(s_mx);
+    /* With s_quit set no worker starts another job. One inside a work job (a texture dump's write
+     * to a stalled drive) may never finish, and its owner's bounded wait has already given up on
+     * it, so it is left running, not joined: it frees its own block and touches nothing here once
+     * the job returns. A worker inside a scale, or about to stop, is joined. */
+    int left = 0;
     for (int i = 0; i < s_workers; i++) {
-        if (s_threads[i]) SDL_WaitThread(s_threads[i], NULL);
+        if (s_threads[i] && SDL_CompareAndSwapAtomicInt(&s_ctl[i]->state, WORKER_IN_WORK, WORKER_LEFT)) {
+            SDL_DetachThread(s_threads[i]);
+            left++;
+        } else {
+            if (s_threads[i]) SDL_WaitThread(s_threads[i], NULL);
+            free(s_ctl[i]);
+        }
         s_threads[i] = NULL;
+        s_ctl[i] = NULL;
     }
     s_workers = 0;
+    if (left) {
+        s_stats.workers_left += (uint64_t)left;
+        fprintf(stderr, "TEX_SCALE: shutdown left %d workers inside a work job that had not finished; they "
+                        "are not waited for\n", left);
+    }
     /* A work job's context is its owner's, which takes every one before this (the texture dump
      * does); one left here is said, never dropped in silence. */
     int untaken = 0;
@@ -617,12 +689,9 @@ void nk_tex_scale_shutdown(void) {
         free(s_jobs[i].dst);
         memset(&s_jobs[i], 0, sizeof(s_jobs[i]));
     }
-    SDL_DestroyCondition(s_work_cv);
-    SDL_DestroyCondition(s_idle_cv);
-    SDL_DestroyMutex(s_mx);
-    s_work_cv = s_idle_cv = NULL;
-    s_mx = NULL;
+    sync_destroy();
     s_started = 0;
+    s_no_workers = 0;
     s_hold = 0;
     s_host_bytes = 0;
 }
@@ -784,20 +853,32 @@ int nk_tex_soften_alpha_edge(const uint32_t *src, uint32_t w, uint32_t h, uint32
             rgb[(size_t)y * ow + x] = out;
         }
     }
-    /* The box blur of the alpha: rows, then columns, each window clamped to the image. */
-    for (uint32_t y = 0; y < oh; y++)
+    /* The box blur of the alpha: rows, then columns, each window clamped to the image. Each window
+     * is a running sum: the next one drops its first texel and adds the one past its end (both
+     * clamped), so a pass costs O(pixels) whatever the radius, with the same integer sums. */
+    for (uint32_t y = 0; y < oh; y++) {
+        const uint32_t *row = up + (size_t)y * ow;
+        uint32_t sum = 0;
+        for (int32_t i = -r; i <= r; i++) sum += row[soft_clamp(i, ow)];
         for (uint32_t x = 0; x < ow; x++) {
-            uint32_t sum = 0;
-            for (int32_t i = -r; i <= r; i++) sum += up[(size_t)y * ow + soft_clamp((int32_t)x + i, ow)];
             hs[(size_t)y * ow + x] = sum;
+            sum += row[soft_clamp((int32_t)x + r + 1, ow)] - row[soft_clamp((int32_t)x - r, ow)];
         }
+    }
     const uint32_t den = dd * k * k;
-    for (uint32_t y = 0; y < oh; y++)
+    uint32_t col[SOFT_AXIS_MAX];
+    for (uint32_t x = 0; x < ow; x++) {
+        col[x] = 0;
+        for (int32_t i = -r; i <= r; i++) col[x] += hs[(size_t)soft_clamp(i, oh) * ow + x];
+    }
+    for (uint32_t y = 0; y < oh; y++) {
+        const uint32_t *drop = hs + (size_t)soft_clamp((int32_t)y - r, oh) * ow;
+        const uint32_t *add = hs + (size_t)soft_clamp((int32_t)y + r + 1, oh) * ow;
         for (uint32_t x = 0; x < ow; x++) {
-            uint32_t sum = 0;
-            for (int32_t i = -r; i <= r; i++) sum += hs[(size_t)soft_clamp((int32_t)y + i, oh) * ow + x];
-            dst[(size_t)y * ow + x] = rgb[(size_t)y * ow + x] | (((sum + den / 2u) / den) << 24);
+            dst[(size_t)y * ow + x] = rgb[(size_t)y * ow + x] | (((col[x] + den / 2u) / den) << 24);
+            col[x] += add[x] - drop[x];
         }
+    }
     free(up);
     free(hs);
     free(rgb);
