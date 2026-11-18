@@ -7639,8 +7639,8 @@ def _hle_intr_cleanup_problems(probe: str) -> list[str]:
             continue
         block = _c_enclosing_brace(body, removed_at)
         header = body[max(body.rfind(c, 0, block) for c in ";{}") + 1:block].strip()
-        guard = _HLE_INTR_REMOVER_GUARDS.get(install)
-        if block != 0 and not (guard and header == f"if ({guard} >= 0)"
+        allowed_guard = _HLE_INTR_REMOVER_GUARDS.get(install)
+        if block != 0 and not (allowed_guard and header == f"if ({allowed_guard} >= 0)"
                                and _c_enclosing_brace(body, block) == 0):
             problems.append(f"{owners[0]} calls {remove} only under `{header}`, not on every path")
     vtimer = functions.get("ic_vtimer_series", "")

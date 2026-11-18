@@ -119,7 +119,8 @@ def value(spec: StreamSpec, case_id: str, index: int) -> int:
 
     if spec == MBX_DELETE_WAIT_SPEC:
         return index + 1
-    return (spec.ordered_cases.index(case_id) + 1) * 0x100 + index
+    position: int = spec.ordered_cases.index(case_id)
+    return (position + 1) * 0x100 + index
 
 
 def line(spec: StreamSpec, case_id: str, status: str = "PASS", *, out0: int | None = None) -> str:

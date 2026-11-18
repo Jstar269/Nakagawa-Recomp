@@ -146,13 +146,13 @@ def _child_copy_problems(source: str) -> list[str]:
         return ["no child argument copy found"]
     if source.count("(uintptr_t)child_a1") != len(copies):
         problems.append("child_a1 becomes a pointer outside a guarded copy")
-    for copy in copies:
-        length = copy.group(1)
-        guard_at = source.rfind("if (", 0, copy.start())
+    for found_copy in copies:
+        length = found_copy.group(1)
+        guard_at = source.rfind("if (", 0, found_copy.start())
         guard = source[guard_at:source.index("{", guard_at) + 1]
         if not re.fullmatch(r"if \(inside && child_a1(?: != 0)?\) \{", guard):
             problems.append(f"the {length}-byte copy is not guarded by inside: {guard}")
-        region = source[source.rfind("sceKernelCreateThread(", 0, copy.start()):copy.start()]
+        region = source[source.rfind("sceKernelCreateThread(", 0, found_copy.start()):found_copy.start()]
         sets = list(re.finditer(r"\binside\s*=\s*1\s*;", region))
         if len(sets) != 1:
             problems.append(f"the {length}-byte copy's case sets inside {len(sets)} times")
@@ -250,7 +250,7 @@ def _gating_plan_problems(matrix: dict[str, Any]) -> list[str]:
 
 def _mutant_matrix(**reclassify: str) -> dict[str, Any]:
     """A copy of MATRIX with each named case (``CT_C05="..."``) given a new classification."""
-    mutant = copy.deepcopy(MATRIX)
+    mutant: dict[str, Any] = copy.deepcopy(MATRIX)
     for case in mutant["cases"]:
         new = reclassify.get(case["case_id"].replace("-", "_"))
         if new is not None:
