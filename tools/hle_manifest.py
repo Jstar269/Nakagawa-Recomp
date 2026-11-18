@@ -294,15 +294,14 @@ def _strip_string_literals(text: str) -> str:
     return "".join(out)
 
 
-def _handler_bodies(active_src: str) -> dict[str, str]:
-    """Map handler name -> inner body text, brace-matched, strings skipped.
+def handler_spans(active_src: str) -> list[tuple[str, int, int, int]]:
+    """(name, definition offset, opening brace offset, closing brace offset) per handler.
 
-    Runs on the active view (comments and `#if 0` regions already blanked),
-    so disabled handlers never enter the census. Macro-defined handlers
-    (UTILITY_DIALOG_HANDLERS) have no `uint32_t` definition and are absent;
-    they implement real dialog state machines and correctly stay dedicated.
+    The one handler-definition grammar shared with tools/verification_ledger.py. Runs on
+    the active view (comments and `#if 0` regions already blanked) and brace-matches with
+    string and character literals skipped. An unterminated body ends at len(active_src).
     """
-    bodies: dict[str, str] = {}
+    spans: list[tuple[str, int, int, int]] = []
     for m in _MECHANICAL_HANDLER_DEF_RE.finditer(active_src):
         name = m.group(1)
         depth = 0
@@ -327,8 +326,19 @@ def _handler_bodies(active_src: str) -> dict[str, str]:
                 if depth == 0:
                     break
             j += 1
-        bodies[name] = active_src[m.end() : j]
-    return bodies
+        spans.append((name, m.start(), i, j))
+    return spans
+
+
+def _handler_bodies(active_src: str) -> dict[str, str]:
+    """Map handler name -> inner body text, brace-matched, strings skipped.
+
+    Runs on the active view (comments and `#if 0` regions already blanked),
+    so disabled handlers never enter the census. Macro-defined handlers
+    (UTILITY_DIALOG_HANDLERS) have no `uint32_t` definition and are absent;
+    they implement real dialog state machines and correctly stay dedicated.
+    """
+    return {name: active_src[opening + 1 : closing] for name, _, opening, closing in handler_spans(active_src)}
 
 
 def _has_observable_write(body_inner: str, nos: str | None = None) -> bool:

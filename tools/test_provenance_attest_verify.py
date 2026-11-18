@@ -2362,7 +2362,7 @@ class LiveRepositoryTests(unittest.TestCase):
             self.assertIn("--policy-delta-key", block)
             self.assertIn("docs/provenance/policy-deltas-v3/${v3_name}.json", block)
             # The derived name is checked before it is used, and a V3 hit passes no blessed policy.
-            self.assertLess(block.index("[ \"${#v3_name}\" -eq 64 ]"), block.index("gh api"))
+            self.assertLess(block.index("[[ \"${v3_name}\" =~ ^[0-9a-f]{64}$ ]]"), block.index("gh api"))
             v3_hit = block[:block.index("else")]
             self.assertNotIn("trusted_candidate_policy=", v3_hit)
             # Only a confirmed absence falls back to the legacy layouts; any other error stops the step.
@@ -2384,7 +2384,7 @@ class LiveRepositoryTests(unittest.TestCase):
             block = raw[raw.index(begin):raw.index(end)]
             self.assertIn("--policy-delta-key-v4", block)
             self.assertIn("docs/provenance/policy-deltas-v4/${v4_name}.json", block)
-            self.assertLess(block.index("[ \"${#v4_name}\" -eq 64 ]"), block.index("gh api"))
+            self.assertLess(block.index("[[ \"${v4_name}\" =~ ^[0-9a-f]{64}$ ]]"), block.index("gh api"))
             v4_hit, fallback = block[:block.index("else")], block[block.index("else"):]
             self.assertNotIn("trusted_candidate_policy=", v4_hit)
             # The V3 lookup runs only inside the V4 miss, after a confirmed absence.

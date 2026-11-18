@@ -687,21 +687,7 @@ static void expect_expands(const char *label, const Buf *image, const uint8_t *i
     CHECK(progress.monotonic && progress.last_done == iso_len && progress.total == iso_len);
     snprintf(part, sizeof(part), "%s.part", dst);
     CHECK(nk_platform_path_missing(part));
-    /* Disc verification hashes the expansion, so a compressed image and the
-       .iso it holds get the same SHA-1, CRC-32 and size (nk_disc_verify.h). */
-    {
-        char plain[NATIVE_TEST_PATH_MAX];
-        NkDiscDigest from_image, from_iso;
-        snprintf(name, sizeof(name), "%s-plain.iso", label);
-        path_in(plain, sizeof(plain), name);
-        write_bytes(plain, iso, iso_len);
-        CHECK(nk_disc_hash_file(dst, NULL, &from_image, &status));
-        CHECK(nk_disc_hash_file(plain, NULL, &from_iso, &status));
-        CHECK(strcmp(from_image.sha1, from_iso.sha1) == 0);
-        CHECK(strcmp(from_image.crc32, from_iso.crc32) == 0);
-        CHECK(from_image.size_bytes == iso_len && from_iso.size_bytes == iso_len);
-    }
-    printf("PASS expand %s (%s, %zu -> %zu bytes, hashes as its .iso)\n", label,
+    printf("PASS expand %s (%s, %zu -> %zu bytes)\n", label,
            nk_disc_format_extension(format), image->len, iso_len);
 }
 
@@ -907,6 +893,27 @@ static void test_import_and_reuse(void) {
     memset(&meta, 0, sizeof(meta));
     CHECK(nk_iso_inspect(result.iso_path, &meta) == NK_OK);
     CHECK(strcmp(meta.disc_id, "TEST00042") == 0 && meta.has_psp_game_folder);
+
+    /* Disc verification reads the expansion the import made (nk_disc_verify.h), so
+       the compressed image gets the SHA-1, CRC-32 and size of the .iso it holds,
+       never those of the compressed file. */
+    {
+        char plain[NATIVE_TEST_PATH_MAX];
+        NkDiscVerification from_import, from_iso, from_compressed;
+        path_in(plain, sizeof(plain), "import-plain.iso");
+        write_bytes(plain, g_iso, ISO_BYTES);
+        CHECK(nk_disc_verify_image(result.iso_path, root, NULL, result.disc_id, false, NULL,
+                                   &from_import));
+        CHECK(nk_disc_verify_image(plain, root, NULL, "TEST00042", false, NULL, &from_iso));
+        CHECK(nk_disc_verify_image(src, root, NULL, "TEST00042", false, NULL, &from_compressed));
+        CHECK(from_import.result == NK_DISC_VERIFY_HASHED);
+        CHECK(from_import.digest.size_bytes == ISO_BYTES);
+        CHECK(strcmp(from_import.digest.sha1, from_iso.digest.sha1) == 0);
+        CHECK(strcmp(from_import.digest.crc32, from_iso.digest.crc32) == 0);
+        CHECK(from_iso.digest.size_bytes == ISO_BYTES);
+        CHECK(strcmp(from_import.digest.sha1, from_compressed.digest.sha1) != 0);
+        CHECK(from_compressed.digest.size_bytes == image.len);
+    }
 
     /* The same unchanged file again: reused, nothing written. */
     CHECK(nk_disc_import(src, root, NULL, &result, &status));

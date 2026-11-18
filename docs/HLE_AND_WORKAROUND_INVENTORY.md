@@ -1635,22 +1635,22 @@ reproduced here.
 
 ---
 
-### 3.3 Remaining Fake-Success Registrations and #281 Dispositions
+### 3.3 Dispositions from #281 and Later Handlers
 
-The current registration classes and semantic statuses are in the generated census above. At the time of the #281 migration, the then-18 fake-success registrations were reclassified as 13 controlled refusals, one bounded UMD compatibility implementation, one partial `sceIoDevctl` implementation, and three named compatibility exceptions; those are historical migration counts, not the current census. Static refusal entries carry a literal PSP-visible error in `sr_hle_register_unsupported`; `sr_syscall` logs each function/NID once and emits one summary line per called function at process exit. That migration was issue #281, now closed. Unregistered NIDs still use the fatal unknown-import path.
+The current registration classes and semantic statuses are in the generated census above. At the time of the #281 migration, the then-18 fake-success registrations were reclassified as 13 controlled refusals, one bounded UMD compatibility implementation, one partial `sceIoDevctl` implementation, and three named compatibility exceptions; those are historical migration counts, not the current census. Static refusal entries carry a literal PSP-visible error in `sr_hle_register_unsupported`; `sr_syscall` logs each function/NID once and emits one summary line per called function at process exit. That migration was issue #281, now closed. Unregistered NIDs still use the fatal unknown-import path. Rows below that gained handlers after the migration are marked implemented.
 
 | API family | Registration(s) | Disposition |
 | :--- | :--- | :--- |
 | `sceAtrac3plus` | `sceAtracLowLevelDecode` (`0x0c116e1b`), `sceAtracLowLevelInitDecoder` (`0x1575d64b`), and `sceAtracStartEntry` (`0xd1f59fdb`) | Controlled refusal: `0x80630004` (`ATRAC_ERROR_INVALID_CODECTYPE`). |
-| `sceAtrac3plus` | `_sceAtracGetContextAddress` (`0x231fc6b7`) | Controlled refusal: `0x80630003` (`ATRAC_ERROR_NO_ATRACID`). |
-| `sceReg` | `sceRegCloseCategory` (`0x0cae832b`), `sceRegOpenCategory` (`0x1d8a762e`), `sceRegGetKeyValue` (`0x28a8e98a`), `sceRegOpenRegistry` (`0x92e41280`), `sceRegGetKeyInfo` (`0xd4475aa8`), and `sceRegCloseRegistry` (`0xfa8a5739`) | Controlled refusal: `0x80010086` (function not supported). The registry object model remains unimplemented. |
-| `sceUtility` | `sceUtilityLoadNetModule` (`0x1579a159`) and `sceUtilityUnloadNetModule` (`0x64d50c56`) | Controlled refusal: `0x80110001` (`SCE_ERROR_UTILITY_INVALID_STATUS`). |
-| `sceUmdUser` | `sceUmdCancelWaitDriveStat` (`0x6af9b50a`) | Controlled refusal: `0x80010086` (function not supported). Drive-wait cancellation is not modeled. |
+| `sceAtrac3plus` | `_sceAtracGetContextAddress` (`0x231fc6b7`) | Implemented: `h_AtracGetContextAddress` allocates and returns the context table; a bad AtracID keeps the `0x80630003` (`ATRAC_ERROR_NO_ATRACID`) refusal. |
+| `sceReg` | `sceRegCloseCategory` (`0x0cae832b`), `sceRegOpenCategory` (`0x1d8a762e`), `sceRegGetKeyValue` (`0x28a8e98a`), `sceRegOpenRegistry` (`0x92e41280`), `sceRegGetKeyInfo` (`0xd4475aa8`), and `sceRegCloseRegistry` (`0xfa8a5739`) | Implemented: the six NIDs dispatch to `h_Reg*` handlers over the `s_sreg_*` registry model (read/write, error codes and category creation in [#299](https://github.com/Jstar269/nakagawa-recomp/issues/299)). |
+| `sceUtility` | `sceUtilityLoadNetModule` (`0x1579a159`) and `sceUtilityUnloadNetModule` (`0x64d50c56`) | Implemented: `h_UtilityLoadNetModule` and `h_UtilityUnloadNetModule` call the shared `utility_module_load`/`utility_module_unload`, so they record the module as loaded or unloaded exactly as `sceUtilityLoadModule` does and make no connection ([#1139](https://github.com/Jstar269/nakagawa-recomp/issues/1139)). A bad module number returns `SCE_ERROR_MODULE_BAD_ID`. |
+| `sceUmdUser` | `sceUmdCancelWaitDriveStat` (`0x6af9b50a`) | Implemented: `h_UmdCancelWaitDriveStat` wakes every drive waiter with `SCE_KERNEL_ERROR_WAIT_CANCEL` and returns 0. |
 | `sceUmdUser` | `sceUmdGetErrorStat` (`0x20628e6f`) | Compatibility implementation: returns no error while the virtual ISO drive reports its modeled PRESENT/READY/READABLE state; other drive-error states are not modeled (#281). |
 | `IoFileMgrForUser` | `sceIoDevctl` (`0x54f5fb11`) | Partial Memory Stick support for `ms0:` and `fatms0:`: capacity/free-cluster geometry comes from the unified Memory Stick root shared with ordinary `sceIo*` and savedata (`SR_MEMSTICK`, default `memstick/`); inserted and ready queries write 1 and 4; registering a live callback for insert/eject events adds it to a 32-entry list and queues one notification with argument 1 (inserted), delivered on the owning thread at its next callback point; unregister removes one matching entry, an unknown UID returns `0x80010016`, and deleting a callback drops its registrations. No later insert or eject event exists ([#1378](https://github.com/Jstar269/nakagawa-recomp/issues/1378)). Other device/command pairs return `0x80010086`, log once per pair, and appear in the #281 exit summary. |
 | `sceAtrac3plus` | `sceAtracGetOutputChannel` (`0xb3b5d042`) | Compatibility exception: existing acceptance is retained while output-channel mapping is tracked by #286. |
 | `sceKernelVolatileMemUnlock` | `sceKernelVolatileMemUnlock` (`0xa569e425`) | Compatibility exception at the migration: the documented asset-loading route uses this call around the shared volatile-memory scratch buffer (#281). It now returns the PSP-measured states (#1135) and hands the lock to the oldest `sceKernelVolatileMemLock` caller blocked on it (#1383). |
-| `sceUtility` | `sceUtilityOskUpdate` (`0x4b85c861`) | Compatibility exception: the current route collects text and advances the OSK state from `sceUtilityOskGetStatus`; update keeps its no-op success while that dialog contract is unfinished (#281). |
+| `sceUtility` | `sceUtilityOskUpdate` (`0x4b85c861`) | Compatibility exception: `h_OskUpdate` follows the PSP-3000 measurements (#363): `SCE_ERROR_UTILITY_WRONG_TYPE` (`0x80110005`) before a keyboard starts, 0 in VISIBLE, and `0x80110001` in INIT, QUIT and NONE after use. FINISHED returns 0, which is not measured (#341); Update does not drive the keyboard, whose text is collected from `sceUtilityOskGetStatus` (#281); and the call is still named in the end-of-run compatibility-exception summary (`hle_success_exception_issue` in `src/rt/hle_internal.h`). |
 
 ### 3.4 Libraries in both forms: HLE handler and disc module (#2148)
 
@@ -1698,8 +1698,9 @@ report proves only that title's calls and stays private.
 
 ## 4. Workaround Elimination
 
-The workarounds that remain are the entries in section 3 that are not marked retired, and the compatibility
-exceptions in the generated census above. Each entry names the lower-level solution that removes it.
+The workarounds that remain are the section 3 entries still marked controlled refusal, no-op or compatibility
+exception; entries marked implemented or retired are not workarounds. The compatibility exceptions in the
+generated census above also remain. Each entry names the lower-level solution that removes it.
 
 ### The Invariant for Each Migration Step
 

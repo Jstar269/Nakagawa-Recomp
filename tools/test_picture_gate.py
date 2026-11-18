@@ -200,6 +200,55 @@ class AcceptTests(Base):
         # build/ is ignored by git, so it is allowed as a scratch location.
         self.assertFalse(pg._inside_checkout(pg.ROOT / "build" / "x" / "r.ppm"))
 
+    def test_accept_refuses_a_reference_inside_another_git_work_tree_or_via_link(self):
+        src = self.ppm("f.ppm", frame())
+        repo = self.dir / "other_repo"
+        repo.mkdir()
+        pg.subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        tracked_target = repo / "tracked" / "ref.ppm"
+        with self.assertRaises(pg.PictureError):
+            pg.accept(src, tracked_target, commit="x")
+        self.assertFalse(tracked_target.exists())
+        # An ignored path in another worktree is allowed.
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+        ignored_target = repo / "build" / "ref.ppm"
+        pg.accept(src, ignored_target, commit="x")
+        self.assertTrue(ignored_target.is_file())
+        # A junction or symlink into this checkout's tracked tree is resolved and refused.
+        link = self.dir / "tools_link"
+        try:
+            if os.name == "nt":
+                pg.subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(pg.ROOT / "tools")],
+                                  capture_output=True, check=True)
+            else:
+                link.symlink_to(pg.ROOT / "tools", target_is_directory=True)
+        except (OSError, pg.subprocess.SubprocessError):
+            pass
+        else:
+            self.addCleanup(lambda: link.rmdir() if os.name == "nt" and link.exists() else link.unlink(missing_ok=True))
+            via_link = link / "never-written-via-link.ppm"
+            with self.assertRaises(pg.PictureError):
+                pg.accept(src, via_link, commit="x")
+            self.assertFalse((pg.ROOT / "tools" / "never-written-via-link.ppm").exists())
+
+    def test_accept_does_not_replace_reference_when_sidecar_write_fails(self):
+        ref = self.dir / "t.ppm"
+        pg.accept(self.ppm("a.ppm", frame(1)), ref, commit="c1")
+        before_ref = ref.read_bytes()
+        before_side = pg.sidecar_path(ref).read_bytes()
+        orig_write_text = Path.write_text
+
+        def fail_sidecar_write(self_path, *args, **kwargs):
+            if str(self_path).endswith(".json") or ".json." in str(self_path):
+                raise OSError("disk full")
+            return orig_write_text(self_path, *args, **kwargs)
+
+        with patch.object(Path, "write_text", fail_sidecar_write), \
+                self.assertRaises(OSError):
+            pg.accept(self.ppm("b.ppm", frame(2)), ref, commit="c2")
+        self.assertEqual(ref.read_bytes(), before_ref)
+        self.assertEqual(pg.sidecar_path(ref).read_bytes(), before_side)
+
     def test_accept_refuses_unreadable_frames_and_non_ppm_targets(self):
         bad = self.dir / "bad.ppm"
         bad.write_bytes(b"nope")
@@ -300,6 +349,32 @@ class RouteTests(Base):
         self.assertEqual((crashed.status, crashed.detail), (pg.FAIL, "runtime-exit-3"))
         silent = self.check(self.route("noframe"))
         self.assertEqual((silent.status, silent.detail), (pg.NOT_RUN, "no-frame-captured"))
+
+    def test_corrupt_frame_published_by_zero_exit_runtime_is_a_fail(self):
+        pg.accept(self.ppm("seed.ppm", frame(5)), self.dir / "priv" / "ref.ppm", commit="c")
+        corrupt = self.dir / "corrupt.py"
+        corrupt.write_text(
+            "from pathlib import Path\n"
+            "d = Path('build/snapshots'); d.mkdir(parents=True, exist_ok=True)\n"
+            "(d / 'frame_v20.ppm').write_bytes(b'P6\\n6 4\\n255\\nshort')\n",
+            encoding="utf-8",
+        )
+        route = self.route()
+        data = json.loads(route.read_text())
+        data["command"] = [sys.executable, "-I", str(corrupt)]
+        route.write_text(json.dumps(data))
+        v = self.check(route)
+        self.assertEqual(v.status, pg.FAIL)
+        self.assertIn("unreadable-frame", v.detail)
+
+    def test_non_startable_runtime_is_not_run(self):
+        route = self.route()
+        data = json.loads(route.read_text())
+        data["command"] = [str(self.dir)]  # a directory cannot be executed
+        route.write_text(json.dumps(data))
+        v = self.check(route)
+        self.assertEqual(v.status, pg.NOT_RUN)
+        self.assertTrue(v.detail.startswith("runtime-not-startable"))
 
     def test_a_timeout_is_a_fail(self):
         route = self.route()
