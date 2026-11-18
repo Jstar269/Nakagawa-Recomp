@@ -718,6 +718,8 @@ bool nk_platform_guest_memory_channel_create(NkGuestMemoryChannel *channel,
     channel->owner = true;
     snprintf(channel->name, sizeof channel->name, "%s", name);
     memset(channel->view, 0, NK_GUEST_MEMORY_CHANNEL_CONTROL_BYTES);
+    (void)InterlockedExchange((volatile LONG *)&channel->control->notification_ring_slots,
+                              (LONG)NK_GUEST_MEMORY_NOTIFICATION_RING);
     (void)InterlockedExchange((volatile LONG *)&channel->control->owner_pid,
                               (LONG)GetCurrentProcessId());
     if (!guest_memory_channel_open_events(channel, name, true)) {
@@ -763,6 +765,8 @@ bool nk_platform_guest_memory_channel_open(NkGuestMemoryChannel *channel,
         nk_platform_guest_memory_channel_close(channel);
         return false;
     }
+    (void)InterlockedExchange((volatile LONG *)&channel->control->runtime_pid,
+                              (LONG)GetCurrentProcessId());
     return true;
 }
 
@@ -823,6 +827,11 @@ int nk_platform_guest_memory_channel_serving(NkGuestMemoryChannel *channel) {
     return (int)InterlockedCompareExchange((volatile LONG *)&channel->service_state, 0, 0);
 }
 
+bool nk_platform_guest_memory_channel_runtime_attached(const NkGuestMemoryChannel *channel) {
+    if (!channel || !channel->control) return false;
+    return InterlockedCompareExchange((volatile LONG *)&channel->control->runtime_pid, 0, 0) != 0;
+}
+
 bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel) {
     if (!channel || !channel->frame_event || !channel->ack_event || !channel->stop_event ||
         !SetEvent((HANDLE)channel->frame_event)) return false;
@@ -859,7 +868,13 @@ void nk_platform_guest_memory_channel_close(NkGuestMemoryChannel *channel) {
 bool nk_platform_guest_memory_channel_notify(NkGuestMemoryChannel *channel, const char *text) {
     if (!channel || !channel->control || !text ||
         strlen(text) >= sizeof channel->control->notification) return false;
-    snprintf(channel->control->notification, sizeof channel->control->notification, "%s", text);
+    NkGuestMemoryChannelControl *control = channel->control;
+    /* One writer, the player: message n goes to its ring slot before n is published. */
+    const uint32_t next = (uint32_t)InterlockedCompareExchange(
+                              (volatile LONG *)&control->notification_sequence, 0, 0) + 1u;
+    snprintf(control->notification_ring[next % NK_GUEST_MEMORY_NOTIFICATION_RING],
+             sizeof control->notification_ring[0], "%s", text);
+    snprintf(control->notification, sizeof control->notification, "%s", text);
     MemoryBarrier();
     (void)InterlockedIncrement((volatile LONG *)&channel->control->notification_sequence);
     return true;
@@ -869,17 +884,32 @@ bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *ch
                                                         uint32_t *seen_sequence,
                                                         char *text, size_t text_size) {
     if (!channel || !channel->control || !seen_sequence || !text || text_size == 0u) return false;
-    LONG before = InterlockedCompareExchange(
-        (volatile LONG *)&channel->control->notification_sequence, 0, 0);
-    if ((uint32_t)before == *seen_sequence) return false;
+    NkGuestMemoryChannelControl *control = channel->control;
+    const uint32_t before = (uint32_t)InterlockedCompareExchange(
+        (volatile LONG *)&control->notification_sequence, 0, 0);
+    if (before == *seen_sequence) return false;
+    const bool ring = InterlockedCompareExchange(
+        (volatile LONG *)&control->notification_ring_slots, 0, 0) ==
+        (LONG)NK_GUEST_MEMORY_NOTIFICATION_RING;
+    /* The oldest unread message the ring still holds, or the newest from a player without it. */
+    uint32_t wanted = before;
+    if (ring) {
+        wanted = *seen_sequence + 1u;
+        if (before - wanted >= NK_GUEST_MEMORY_NOTIFICATION_RING)
+            wanted = before - (NK_GUEST_MEMORY_NOTIFICATION_RING - 1u);
+    }
     char copy[NK_GUEST_MEMORY_NOTIFICATION_MAX];
-    memcpy(copy, channel->control->notification, sizeof copy);
+    memcpy(copy, ring ? control->notification_ring[wanted % NK_GUEST_MEMORY_NOTIFICATION_RING]
+                      : control->notification, sizeof copy);
     MemoryBarrier();
-    LONG after = InterlockedCompareExchange(
-        (volatile LONG *)&channel->control->notification_sequence, 0, 0);
-    if (before != after) return false;
+    const uint32_t after = (uint32_t)InterlockedCompareExchange(
+        (volatile LONG *)&control->notification_sequence, 0, 0);
+    /* Written over while it was copied: the next call reads again. */
+    if (ring ? after - wanted >= NK_GUEST_MEMORY_NOTIFICATION_RING : before != after)
+        return false;
+    copy[sizeof copy - 1u] = 0;
     snprintf(text, text_size, "%s", copy);
-    *seen_sequence = (uint32_t)after;
+    *seen_sequence = wanted;
     return true;
 }
 

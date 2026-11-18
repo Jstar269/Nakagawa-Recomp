@@ -896,7 +896,7 @@ int gui_guest_memory_channel_install(void) {
     return 1;
 }
 
-/* The player's newest short message for the in-game toast, once each. */
+/* The player's oldest unread short message for the in-game toast, once each. */
 static bool sr_host_notification(char *out, size_t out_size) {
     if (out && out_size) out[0] = '\0';
     if (!s_guest_channel_active || !out || out_size == 0u) return false;
@@ -952,8 +952,10 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     if (render_notice_shows(&s_render_notice, sr_osk_overlay_active()))
         (void)render_notice_words(s_render_notice.fallback, &f.host_notice_head, &f.host_notice,
                                   &f.host_notice_hint);
+    /* The player's messages wait their turn: the next is read once the toast shown ends. */
     char notification[NK_GUEST_MEMORY_NOTIFICATION_MAX];
-    if (sr_host_notification(notification, sizeof notification)) {
+    const bool toast_showing = s_host_toast_text[0] && now < s_host_toast_until_ns;
+    if (!toast_showing && sr_host_notification(notification, sizeof notification)) {
         snprintf(s_host_toast_text, sizeof s_host_toast_text, "%s", notification);
         s_host_toast_until_ns = now <= UINT64_MAX - HOST_TOAST_NS
                                     ? now + HOST_TOAST_NS : UINT64_MAX;

@@ -39,6 +39,18 @@ typedef struct AchPendingReplay {
 
 static bool ach_hash_ok(const char *hash);
 
+/* One request for the transport: the one it is carrying, or one waiting its turn. The strings
+ * are the bridge's own copies, kept until the transport has answered (NkAchTransport). */
+typedef struct AchOutbound {
+    struct AchOutbound *next;
+    struct NkAch *ach;
+    NkAchDone done;
+    void *done_ctx;
+    char *url;
+    char *post_data;
+    char *content_type;
+} AchOutbound;
+
 struct NkAch {
     rc_client_t *client;
     NkAchMemory mem;
@@ -72,7 +84,12 @@ struct NkAch {
     uint32_t client_generation;      /* counts the rc_clients replaced */
     bool client_replace_due;         /* a replacement failed: no sign-in until one is made */
     char session_owner[NK_ACH_ACCOUNT_TAG_SIZE]; /* the account this rc_client signed in, or "" */
-    const void *sending_call;        /* the AchCall inside ach->transport, or NULL */
+    const void *sending_call;        /* the AchCall ach_server_call is sending, or NULL */
+    /* The transport carries one request at a time (ach_send): the rest wait here, in order. */
+    AchOutbound *outbound_head;
+    AchOutbound *outbound_tail;
+    bool outbound_busy;    /* the transport holds a request it has not answered */
+    bool outbound_pumping; /* ach_outbound_pump is on the stack */
 };
 
 static void ach_enter(const NkAch *ach) {
@@ -371,6 +388,88 @@ static uint32_t RC_CCONV ach_read(uint32_t address, uint8_t *buffer, uint32_t nu
     return ach ? nk_ach_read_memory(&ach->mem, address, buffer, num_bytes) : 0u;
 }
 
+/* ---- the transport's one slot ---------------------------------------------------------- */
+
+static char *ach_copy_string(const char *text) {
+    if (!text) return NULL;
+    const size_t size = strlen(text) + 1u;
+    char *copy = (char *)malloc(size);
+    if (copy) memcpy(copy, text, size);
+    return copy;
+}
+
+static void ach_clear_free(char *text) {
+    if (!text) return;
+    volatile char *bytes = text;
+    while (*bytes) *bytes++ = '\0';
+    free(text);
+}
+
+/* A request's post data can hold a token or a password: it is cleared before it is freed. */
+static void ach_outbound_free(AchOutbound *outbound) {
+    if (!outbound) return;
+    free(outbound->url);
+    ach_clear_free(outbound->post_data);
+    free(outbound->content_type);
+    free(outbound);
+}
+
+static void ach_outbound_pump(NkAch *ach);
+
+static void ach_outbound_done(const NkAchResponse *response, void *done_ctx) {
+    AchOutbound *outbound = (AchOutbound *)done_ctx;
+    NkAch *ach = outbound->ach;
+    ach_enter(ach);
+    outbound->done(response, outbound->done_ctx);
+    ach->outbound_busy = false;
+    ach_outbound_free(outbound);
+    ach_outbound_pump(ach);
+    ach_leave(ach);
+}
+
+/* Hands the transport the oldest waiting request whenever it holds none. A transport that
+ * answers at once is answered inside this loop, which then sends the next: never deeper. */
+static void ach_outbound_pump(NkAch *ach) {
+    if (ach->outbound_pumping) return;
+    ach->outbound_pumping = true;
+    while (ach->transport && !ach->outbound_busy && ach->outbound_head) {
+        AchOutbound *outbound = ach->outbound_head;
+        ach->outbound_head = outbound->next;
+        if (!ach->outbound_head) ach->outbound_tail = NULL;
+        outbound->next = NULL;
+        ach->outbound_busy = true;
+        const NkAchRequest request = {outbound->url, outbound->post_data,
+                                      outbound->content_type};
+        ach->transport(ach->transport_ctx, &request, ach_outbound_done, outbound);
+    }
+    ach->outbound_pumping = false;
+}
+
+/* Every request reaches the transport through here, one at a time and in the order they were
+ * made: a request made while another is unanswered waits its turn instead of meeting a busy
+ * transport, whose refusal rcheevos would not retry for a game's set or a sign-in. False, with
+ * nothing sent and done not called, when the request cannot be kept. */
+static bool ach_send(NkAch *ach, const NkAchRequest *request, NkAchDone done, void *done_ctx) {
+    AchOutbound *outbound = (AchOutbound *)calloc(1u, sizeof *outbound);
+    if (!outbound) return false;
+    outbound->ach = ach;
+    outbound->done = done;
+    outbound->done_ctx = done_ctx;
+    outbound->url = ach_copy_string(request->url);
+    outbound->post_data = ach_copy_string(request->post_data);
+    outbound->content_type = ach_copy_string(request->content_type);
+    if (!outbound->url || (request->post_data && !outbound->post_data) ||
+        (request->content_type && !outbound->content_type)) {
+        ach_outbound_free(outbound);
+        return false;
+    }
+    if (ach->outbound_tail) ach->outbound_tail->next = outbound;
+    else ach->outbound_head = outbound;
+    ach->outbound_tail = outbound;
+    ach_outbound_pump(ach);
+    return true;
+}
+
 /* One request in flight: rc_client's callback, carried through the caller's transport. */
 typedef struct AchCall {
     NkAch *ach;
@@ -520,8 +619,12 @@ static void RC_CCONV ach_server_call(const rc_api_request_t *request,
     NkAchRequest out = {request->url, request->post_data, request->content_type};
     const void *outer_call = ach->sending_call;
     ach->sending_call = call;
-    ach->transport(ach->transport_ctx, &out, ach_done, call);
+    const bool kept = ach_send(ach, &out, ach_done, call);
     ach->sending_call = outer_call; /* call may be freed by now: only its address is compared */
+    if (!kept) {
+        free(call);
+        ach_refuse(callback, callback_data, "refused: out of memory");
+    }
 }
 
 static void RC_CCONV ach_event(const rc_client_event_t *event, rc_client_t *client) {
@@ -644,6 +747,17 @@ void nk_ach_destroy(NkAch *ach) {
     if (!ach) return;
     const NkAchLock lock = ach->lock;
     if (lock.enter) lock.enter(lock.context);
+    /* Requests still waiting their turn never reach the transport: each is answered as a refused
+     * client call, and anything they lead to is refused at once (no transport). */
+    ach->transport = NULL;
+    while (ach->outbound_head) {
+        AchOutbound *outbound = ach->outbound_head;
+        ach->outbound_head = outbound->next;
+        if (!ach->outbound_head) ach->outbound_tail = NULL;
+        const NkAchResponse refused = {NULL, 0u, NK_ACH_HTTP_CLIENT_ERROR};
+        outbound->done(&refused, outbound->done_ctx);
+        ach_outbound_free(outbound);
+    }
     rc_client_destroy(ach->client);
     free(ach);
     if (lock.leave) lock.leave(lock.context);
@@ -1055,8 +1169,12 @@ static void ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {
     replay->transport_request.content_type = replay->request.content_type;
     ach->pending_replay_inflight = true;
     ach->pending_replay_now_ms = now_ms;
-    ach->transport(ach->transport_ctx, &replay->transport_request,
-                   ach_pending_replay_done, replay);
+    if (!ach_send(ach, &replay->transport_request, ach_pending_replay_done, replay)) {
+        ach->pending_replay_inflight = false;
+        ach->pending_replay_after_ms = ach_replay_retry_after(now_ms);
+        rc_api_destroy_request(&replay->request);
+        free(replay);
+    }
 }
 
 void nk_ach_replay_pending_unlocks(NkAch *ach, uint64_t now_ms) {

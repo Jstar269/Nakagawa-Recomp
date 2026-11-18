@@ -1736,6 +1736,44 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         self.assertIn("player_achievements_end_account(run, removed)", action)
         self.assertNotIn("nk_ach_logout", action)
 
+    def test_achievement_account_and_channel_rules_in_the_player(self) -> None:
+        # src/player/main.c has no native harness; these read its source for the rules the
+        # audit of 2026-11-17 found broken (the bridge's side runs in achievements-selftest).
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        # A Sign out that waited for a sign-in's answer ends the account by the credential
+        # delete's own result: a token still stored keeps its account's records.
+        self.assertNotIn("(void)nk_platform_credential_delete(k_ach_credential_target)", main)
+        self.assertNotIn("player_achievements_end_account(run, true)", main)
+        self.assertEqual(main.count("nk_platform_credential_delete(k_ach_credential_target))"), 2)
+        # Turning the switch off completes a pending Sign out instead of cancelling it.
+        action = main[main.index("static void player_achievements_settings_action(PlayerRun *run, "
+                                 "PlayerUiSettingsOp op) {"):]
+        toggle_off = action[action.index("if (app->settings.achievements_enabled) {"):
+                            action.index('"RetroAchievements is off."')]
+        self.assertNotIn("run->achievements_signout_pending = false;\n            if", toggle_off)
+        self.assertNotRegex(toggle_off, r"achievements_login_pending\)\s*run->achievements_"
+                                        r"signout_pending = false")
+        self.assertLess(toggle_off.index("if (run->achievements_signout_pending) {"),
+                        toggle_off.index("player_achievements_end_account(run, removed);"))
+        # After a factory reset no queue file is written: every save goes through the guard.
+        guard = main[main.index("static bool player_achievements_queue_saves_allowed("):]
+        guard = guard[:guard.index("\n}\n")]
+        self.assertIn("!run->app.factory_reset_done", guard)
+        calls = [m.start() for m in re.finditer(r"\(void\)player_achievements_save_queue\(run\)|"
+                                                 r"player_achievements_save_queue\(run\)\)", main)]
+        self.assertEqual(len(calls), 2, "the shutdown save and save_queue_or_report")
+        for at in calls:
+            self.assertIn("player_achievements_queue_saves_allowed(run)", main[at - 200:at])
+        # A runtime that never opened the guest-memory channel by the time its window is up
+        # ends the achievements for that run, by name, instead of looking live.
+        frame = main[main.index("nk_platform_guest_memory_channel_serving(&run->guest_memory_"
+                                "channel) < 0"):]
+        frame = frame[:frame.index("player_update_poll(app);")]
+        self.assertIn("app->child_window_ready", frame)
+        self.assertIn("!nk_platform_guest_memory_channel_runtime_attached(&run->guest_memory_"
+                      "channel)", frame)
+        self.assertIn("player_achievements_stop_channel(run);", frame)
+
     def test_runtime_host_toast_has_no_retroachievements_identity(self) -> None:
         runtime = REPO_ROOT / "src" / "rt"
         shipped = [path for path in runtime.rglob("*")

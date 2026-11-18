@@ -499,6 +499,11 @@ int nk_platform_guest_memory_channel_serving(NkGuestMemoryChannel *channel) {
     return 0;
 }
 
+bool nk_platform_guest_memory_channel_runtime_attached(const NkGuestMemoryChannel *channel) {
+    (void)channel;
+    return false;
+}
+
 bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel) {
     (void)channel;
     return false;

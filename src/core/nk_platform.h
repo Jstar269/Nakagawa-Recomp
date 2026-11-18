@@ -143,11 +143,20 @@ int nk_platform_credential_prompt(const char *caption, const char *message, cons
 #define NK_GUEST_MEMORY_CHANNEL_NAME_MAX 192u
 #define NK_GUEST_MEMORY_CHANNEL_CONTROL_BYTES 4096u
 #define NK_GUEST_MEMORY_NOTIFICATION_MAX 192u
+/* The player's last messages kept for the runtime, which shows them one at a time. */
+#define NK_GUEST_MEMORY_NOTIFICATION_RING 8u
 typedef struct {
     volatile uint32_t owner_pid;
     volatile uint32_t notification_sequence;
-    char notification[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    char notification[NK_GUEST_MEMORY_NOTIFICATION_MAX]; /* the newest, for older runtimes */
+    /* NK_GUEST_MEMORY_NOTIFICATION_RING from a player that keeps the ring, else 0: message n is
+     * in notification_ring[n % NK_GUEST_MEMORY_NOTIFICATION_RING]. */
+    volatile uint32_t notification_ring_slots;
+    char notification_ring[NK_GUEST_MEMORY_NOTIFICATION_RING][NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    volatile uint32_t runtime_pid; /* set by the runtime's open; 0 until a runtime opened it */
 } NkGuestMemoryChannelControl;
+typedef char nk_guest_memory_channel_control_fits
+    [(sizeof(NkGuestMemoryChannelControl) <= NK_GUEST_MEMORY_CHANNEL_CONTROL_BYTES) ? 1 : -1];
 typedef struct {
     void *mapping_handle;
     void *view;
@@ -186,10 +195,16 @@ bool nk_platform_guest_memory_channel_serve(NkGuestMemoryChannel *channel,
 /* Parent: 1 while frames are served, 0 when serving never started or ended with a stop, -1 when
  * it ended on an OS error (the channel is then stopped, which releases the runtime). */
 int nk_platform_guest_memory_channel_serving(NkGuestMemoryChannel *channel);
+/* Parent: true once a runtime has opened the channel. A runtime that ignores it (built before
+ * the channel, or without it) never does, so its frames will never arrive. */
+bool nk_platform_guest_memory_channel_runtime_attached(const NkGuestMemoryChannel *channel);
 /* Runtime: publishes one vblank and waits until the player acknowledges it or stops. */
 bool nk_platform_guest_memory_channel_sync_vblank(NkGuestMemoryChannel *channel);
 void nk_platform_guest_memory_channel_stop(NkGuestMemoryChannel *channel);
 void nk_platform_guest_memory_channel_close(NkGuestMemoryChannel *channel);
+/* Parent: queues one short message for the runtime. Runtime: reads the oldest it has not read
+ * (seen_sequence, which starts at 0), one per call; when more than the ring holds arrived
+ * unread, the oldest of them are passed over. A player that keeps no ring gives the newest only. */
 bool nk_platform_guest_memory_channel_notify(NkGuestMemoryChannel *channel, const char *text);
 bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *channel,
                                                         uint32_t *seen_sequence,

@@ -159,6 +159,11 @@ typedef struct Fake {
     bool defer;
     NkAchDone deferred_done;
     void *deferred_ctx;
+    /* With defer, a transport with one slot, as the player's (src/player/main.c,
+     * player_ach_transport): a request that arrives while one is held is answered
+     * NK_ACH_HTTP_RETRY at once and never sent. */
+    bool one_slot;
+    int slot_refusals;
     /* The lock the bridge was given, when the test counts it (lock_enter, lock_leave). */
     int lock_depth;
     int lock_enters;
@@ -203,17 +208,8 @@ static int starts_with(const char *s, const char *prefix) {
     return s && strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
-static void fake_transport(void *ctx, const NkAchRequest *req, NkAchDone done, void *done_ctx) {
-    Fake *f = (Fake *)ctx;
-    const char *post = req->post_data ? req->post_data : "";
-    if (f->requests < 16) snprintf(f->log[f->requests], sizeof f->log[0], "%s", post);
-    f->requests++;
-    if (f->counts_lock && f->lock_depth <= 0) f->transport_calls_outside_lock++;
-    if (f->defer) {
-        f->deferred_done = done;
-        f->deferred_ctx = done_ctx;
-        return;
-    }
+/* What the server answers post when the fake answers it. */
+static NkAchResponse fake_response(Fake *f, const char *post) {
     NkAchResponse r = {k_ok, sizeof k_ok - 1u, 200};
     if (starts_with(post, "r=login2&")) {
         r.body = k_login;
@@ -238,7 +234,41 @@ static void fake_transport(void *ctx, const NkAchRequest *req, NkAchDone done, v
         }
     }
     r.body_length = strlen(r.body);
+    return r;
+}
+
+static void fake_transport(void *ctx, const NkAchRequest *req, NkAchDone done, void *done_ctx) {
+    Fake *f = (Fake *)ctx;
+    const char *post = req->post_data ? req->post_data : "";
+    if (f->defer && f->one_slot && f->deferred_done) {
+        const NkAchResponse busy = {NULL, 0u, NK_ACH_HTTP_RETRY};
+        f->slot_refusals++;
+        done(&busy, done_ctx);
+        return;
+    }
+    if (f->requests < 16) snprintf(f->log[f->requests], sizeof f->log[0], "%s", post);
+    f->requests++;
+    if (f->counts_lock && f->lock_depth <= 0) f->transport_calls_outside_lock++;
+    if (f->defer) {
+        f->deferred_done = done;
+        f->deferred_ctx = done_ctx;
+        return;
+    }
+    const NkAchResponse r = fake_response(f, post);
     done(&r, done_ctx);
+}
+
+/* Answers the request the deferring transport holds, as it would have at once, and frees its
+ * slot first, as the player's poll does. False when none is held. */
+static bool fake_answer_held(Fake *f) {
+    NkAchDone done = f->deferred_done;
+    void *done_ctx = f->deferred_ctx;
+    if (!done || f->requests < 1 || f->requests > 16) return false;
+    f->deferred_done = NULL;
+    f->deferred_ctx = NULL;
+    const NkAchResponse r = fake_response(f, f->log[f->requests - 1]);
+    done(&r, done_ctx);
+    return true;
 }
 
 static int count_requests(const Fake *f, const char *prefix) {
@@ -1385,6 +1415,52 @@ static void test_late_answer_after_sign_out_keeps_the_next_unlock(uint8_t *ram) 
     nk_ach_destroy(ach);
 }
 
+/* The player's transport carries one request at a time. A saved unlock on its way when a game
+ * starts must not cost that game its achievement set: rcheevos does not retry a set fetch, so
+ * the bridge holds each request until the one before it is answered, in the order they came. */
+static void test_requests_wait_for_the_one_transport_slot(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    const NkAchPendingUnlock saved = saved_unlock(5501u);
+    CHECK(nk_ach_restore_pending_unlock(ach, &saved, player_tag()), "restore");
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "sign in");
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+
+    fake.defer = true;
+    fake.one_slot = true;
+    nk_ach_replay_pending_unlocks(ach, 1000u);
+    CHECK(fake.deferred_done != NULL && count_requests(&fake, "r=awardachievement&") == 1,
+          "the saved unlock holds the slot");
+    CHECK(nk_ach_begin_load_game(ach, HASH), "a game starts while it is on its way");
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_GAME_FAILED) < 0 && fake.slot_refusals == 0,
+          "the set fetch waits for the slot instead of failing (%d refused by the busy "
+          "transport)", fake.slot_refusals);
+    CHECK(count_requests(&fake, "r=achievementsets&") == 0, "nothing else is sent meanwhile");
+
+    for (int answers = 0; answers < 8 && fake_answer_held(&fake); answers++) {}
+    n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(fake.slot_refusals == 0 && nk_ach_pending_unlock_count(ach) == 0u,
+          "the unlock was answered and left the queue (%d refused, %u queued)",
+          fake.slot_refusals, (unsigned)nk_ach_pending_unlock_count(ach));
+    const int award = find_request(&fake, "r=awardachievement&");
+    const int sets = find_request(&fake, "r=achievementsets&");
+    CHECK(award >= 0 && sets > award, "the set fetch left after the unlock (%d, %d)", award,
+          sets);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_GAME_LOADED) >= 0 &&
+              has_event(ev, n, NK_ACH_EVENT_GAME_FAILED) < 0,
+          "the game's set is loaded");
+    fake.defer = false;
+    nk_ach_destroy(ach);
+}
+
 /* ---- frames while the player's own loop stands still -------------------------------------- */
 
 static const char k_sets_hits[] =
@@ -1492,6 +1568,8 @@ static void test_frames_are_served_while_the_event_loop_is_stalled(void) {
     size_t n = take(service.ach, ev, NK_ACH_EVENT_QUEUE);
     CHECK(has_event(ev, n, NK_ACH_EVENT_GAME_LOADED) >= 0, "the game is loaded");
     CHECK(nk_platform_guest_memory_channel_serving(&channel) == 0, "not served yet");
+    CHECK(!nk_platform_guest_memory_channel_runtime_attached(&channel),
+          "no runtime has opened the channel yet");
     CHECK(nk_platform_guest_memory_channel_serve(&channel, serve_frame, &service),
           "the frame service starts");
     CHECK(!nk_platform_guest_memory_channel_serve(&channel, serve_frame, &service),
@@ -1503,6 +1581,9 @@ static void test_frames_are_served_while_the_event_loop_is_stalled(void) {
     CHECK(code == 0, "the runtime got all 68 frames acknowledged while the player's loop stood "
                      "still (exit %d; -1: it was still waiting after %d s)", code,
           CHILD_DEADLINE_MS / 1000);
+    CHECK(nk_platform_guest_memory_channel_runtime_attached(&channel),
+          "the runtime that opened the channel says so: a runtime that ignores the channel "
+          "can be told apart");
     CHECK(service.frames == 68, "each VBLANK was evaluated once (%d evaluations of 68)",
           service.frames);
     n = take(service.ach, ev, NK_ACH_EVENT_QUEUE);
@@ -1539,6 +1620,61 @@ static void test_frames_are_served_while_the_event_loop_is_stalled(void) {
         if (!only || strstr(#test, only)) test(ram);                                         \
     } while (0)
 
+/* Two unlocks close together are two toasts: the runtime reads the player's messages one at a
+ * time, oldest first, so a second message does not replace the first unseen. */
+static void test_notifications_are_read_in_order(void) {
+    char channel_name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
+    NkGuestMemoryChannel channel;
+    snprintf(channel_name, sizeof channel_name,
+             "Local\\NakagawaRecomp.Selftest.GuestMemoryToast.%lu", nk_platform_process_id());
+    const bool created = nk_platform_guest_memory_channel_create(&channel, channel_name,
+                                                                 CHANNEL_ARENA);
+#ifdef _WIN32
+    CHECK(created, "the guest-memory channel is created");
+#endif
+    if (!created) {
+        printf("test_nk_achievements: SKIP the notification order: this host has no "
+               "guest-memory channel\n");
+        return;
+    }
+    uint32_t seen = 0u;
+    char text[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    CHECK(nk_platform_guest_memory_channel_notify(&channel, "Achievement unlocked: First") &&
+              nk_platform_guest_memory_channel_notify(&channel, "Achievement unlocked: Second"),
+          "two messages in one frame");
+    CHECK(nk_platform_guest_memory_channel_read_notification(&channel, &seen, text,
+                                                             sizeof text) &&
+              strcmp(text, "Achievement unlocked: First") == 0,
+          "the first is read first (read \"%s\")", text);
+    CHECK(nk_platform_guest_memory_channel_read_notification(&channel, &seen, text,
+                                                             sizeof text) &&
+              strcmp(text, "Achievement unlocked: Second") == 0,
+          "then the second (read \"%s\")", text);
+    CHECK(!nk_platform_guest_memory_channel_read_notification(&channel, &seen, text,
+                                                              sizeof text),
+          "then nothing");
+
+    /* More than the ring holds while the runtime reads none: the newest ones, in order. */
+    const unsigned sent = NK_GUEST_MEMORY_NOTIFICATION_RING + 3u;
+    for (unsigned i = 0u; i < sent; i++) {
+        char message[32];
+        snprintf(message, sizeof message, "message %u", i);
+        CHECK(nk_platform_guest_memory_channel_notify(&channel, message), "notify %u", i);
+    }
+    for (unsigned i = sent - NK_GUEST_MEMORY_NOTIFICATION_RING; i < sent; i++) {
+        char expected[32];
+        snprintf(expected, sizeof expected, "message %u", i);
+        CHECK(nk_platform_guest_memory_channel_read_notification(&channel, &seen, text,
+                                                                 sizeof text) &&
+                  strcmp(text, expected) == 0,
+              "the ring keeps %s (read \"%s\")", expected, text);
+    }
+    CHECK(!nk_platform_guest_memory_channel_read_notification(&channel, &seen, text,
+                                                              sizeof text),
+          "and nothing after the newest");
+    nk_platform_guest_memory_channel_close(&channel);
+}
+
 int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--runtime-child") == 0)
         return runtime_child(argv[2], argv[3]);
@@ -1569,7 +1705,9 @@ int main(int argc, char **argv) {
     RUN_RAM(test_award_retry_keeps_its_game);
     RUN_RAM(test_refused_live_award_leaves_the_queue);
     RUN_RAM(test_late_answer_after_sign_out_keeps_the_next_unlock);
+    RUN_RAM(test_requests_wait_for_the_one_transport_slot);
     RUN(test_frames_are_served_while_the_event_loop_is_stalled);
+    RUN(test_notifications_are_read_in_order);
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);

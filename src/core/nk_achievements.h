@@ -64,7 +64,10 @@ typedef struct NkAchResponse {
 
 typedef void (*NkAchDone)(const NkAchResponse *response, void *done_ctx);
 /* Sends one request and calls done exactly once, now or later, on any thread: done takes the
- * bridge's lock (NkAchLock) itself. The request's strings are valid only until done is called. */
+ * bridge's lock (NkAchLock) itself. The request's strings are valid only until done is called.
+ * The bridge hands the transport one request at a time, in the order rc_client and the saved
+ * queue made them: the next goes only once done has been called for the last, so a transport
+ * needs one slot, and one that is busy is never asked. */
 typedef void (*NkAchTransport)(void *ctx, const NkAchRequest *request, NkAchDone done,
                                void *done_ctx);
 

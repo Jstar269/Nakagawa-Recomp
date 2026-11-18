@@ -122,12 +122,20 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   same transport. The queue holds at most 4,096 records. With no definite answer (no connection, a
   busy server) a record waits 30 seconds; a record the server refuses by its own error leaves the queue
   and is reported; a refused account keeps every record until the next sign-in. The game's title page
-  shows its core achievements and unlock toasts appear in-game.
+  shows its core achievements and unlock toasts appear in-game, one after another: two unlocks close
+  together are two toasts.
+- **One request at a time.** The player carries one RetroAchievements request at a time. A request made
+  while another is on its way (a game started while a saved unlock is being sent) waits its turn, in
+  order, instead of failing.
+- **After a factory reset** the player writes no unlock queue before it closes, so the moved-aside data
+  folder is not made again. The token stays in Windows Credential Manager until **Sign out**.
 - **The queue belongs to one account.** It names that account by a tag, the MD5 of a fixed label and the
   account name in lower case: the name itself and the token are not in the file. Only that account's
-  session sends the records. **Sign out** discards what is still waiting; records another account left
-  (a different account signs in, or the credential was changed outside the player) are discarded and
-  reported, never awarded to the account now signed in.
+  session sends the records. **Sign out** discards what is still waiting, also when it comes while a
+  sign-in is on its way or the switch is turned off before that sign-in answers; when the token cannot be
+  removed from Credential Manager, the account is still the stored one and its records stay. Records
+  another account left (a different account signs in, or the credential was changed outside the player)
+  are discarded and reported, never awarded to the account now signed in.
 - **The queue file** is `achievements/unlock-queue.bin` under the player's data folder, written through a
   private temporary file and a rename. Integers are little-endian: the 8 bytes `NKRAQ001`, a 32-bit
   format version (2), a 32-bit record count, the owner's 32-character tag (thirty-two `0` when the queue is
@@ -144,7 +152,10 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   through a local channel, and at each VBLANK the runtime waits while the achievements are evaluated once
   on that frame's memory. A thread of the player's own serves this, so a modal box or a window being
   dragged, which stop the player's event loop, do not stop the game. A runtime that is told to use a
-  channel it cannot open ends at once with `GUEST_MEMORY_CHANNEL_UNAVAILABLE` and exit status 2.
+  channel it cannot open ends at once with `GUEST_MEMORY_CHANNEL_UNAVAILABLE` and exit status 2. A
+  game whose window is up without having opened the channel (a package built before it, or without it)
+  never sends a frame: the player stops the channel and says the package must be rebuilt to track
+  achievements.
 - **UI regression runs** refuse the switch, **Sign in** and **Sign out**, and say so: they stay offline,
   open no consent or credential box and read no credential.
 - **Hardcore is unavailable.** The client starts softcore sessions only; the UI and requests do not claim

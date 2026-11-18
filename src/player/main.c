@@ -4276,6 +4276,8 @@ typedef struct PlayerRun {
     char achievements_game_hash[33];
     char achievements_disc_id[MAX_DISC_ID_LEN];
     bool guest_memory_channel_active;
+    /* The game's window is up and the runtime was asked whether it opened the channel. */
+    bool guest_memory_channel_checked;
     bool achievements_shutting_down;
     bool achievements_login_pending;
     bool achievements_signout_pending;
@@ -4468,6 +4470,8 @@ static void player_ach_transport(void *context, const NkAchRequest *request,
         done(&refusal, done_context);
         return;
     }
+    /* The bridge sends one request at a time (NkAchTransport), so the slot is free whenever it
+       calls; a busy slot would be a broken contract, answered as a retry. */
     if (run->ach_http_job) {
         refusal.http_status = NK_ACH_HTTP_RETRY;
         done(&refusal, done_context);
@@ -4573,6 +4577,12 @@ static bool player_achievements_save_queue(PlayerRun *run) {
            nk_ach_save_queue_file(run->achievements, path);
 }
 
+/* After a factory reset nothing is saved (player_shutdown): the data folder was moved aside,
+   and writing the queue would make it again with the old account's unlocks in it. */
+static bool player_achievements_queue_saves_allowed(const PlayerRun *run) {
+    return run && !run->app.factory_reset_done;
+}
+
 static void player_achievements_save_queue_or_report(PlayerRun *run);
 
 /* Reads the saved queue once, before any sign-in. Whatever could not be loaded is said in the
@@ -4645,7 +4655,8 @@ static void player_achievements_clear_list(PlayerRun *run) {
 }
 
 static void player_achievements_save_queue_or_report(PlayerRun *run) {
-    if (!run || !run->achievements || player_achievements_save_queue(run)) return;
+    if (!run || !run->achievements || !player_achievements_queue_saves_allowed(run) ||
+        player_achievements_save_queue(run)) return;
     snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
              "The offline unlock queue could not be saved to this PC.");
 }
@@ -4687,8 +4698,9 @@ static void player_achievements_collect_events(PlayerRun *run) {
             case NK_ACH_EVENT_LOGIN_OK: {
                 run->achievements_login_pending = false;
                 if (run->achievements_signout_pending) {
-                    (void)nk_platform_credential_delete(k_ach_credential_target);
-                    player_achievements_end_account(run, true);
+                    /* Tried again: an account whose token is still stored keeps its records. */
+                    player_achievements_end_account(
+                        run, nk_platform_credential_delete(k_ach_credential_target));
                     run->achievements_signout_pending = false;
                     app->achievements_signed_in = false;
                     app->achievements_account[0] = '\0';
@@ -4734,9 +4746,9 @@ static void player_achievements_collect_events(PlayerRun *run) {
             case NK_ACH_EVENT_LOGIN_UNREACHABLE:
                 run->achievements_login_pending = false;
                 if (run->achievements_signout_pending) {
-                    (void)nk_platform_credential_delete(k_ach_credential_target);
                     run->achievements_signout_pending = false;
-                    player_achievements_end_account(run, true);
+                    player_achievements_end_account(
+                        run, nk_platform_credential_delete(k_ach_credential_target));
                 } else if (event->kind == NK_ACH_EVENT_LOGIN_UNREACHABLE) {
                     /* The stored token was not refused: player_frame_begin signs in with it
                        again when the bridge says it is due. No password is asked. */
@@ -4760,13 +4772,19 @@ static void player_achievements_collect_events(PlayerRun *run) {
                 break;
             case NK_ACH_EVENT_GAME_LOADED:
                 player_achievements_refresh_list(run);
-                snprintf(app->achievements_status, sizeof app->achievements_status,
-                         "Softcore · %u achievements available.", event->count);
+                /* A channel stopped meanwhile keeps its own reason on the status line: no
+                   frame reaches these achievements. */
+                if (run->guest_memory_channel_active)
+                    snprintf(app->achievements_status, sizeof app->achievements_status,
+                             "Softcore · %u achievements available.", event->count);
                 break;
             case NK_ACH_EVENT_GAME_FAILED:
                 player_achievements_clear_list(run);
+                /* rc_client's own reason: no set for this game, or a server that could not be
+                   reached, are different things. */
                 snprintf(app->achievements_status, sizeof app->achievements_status,
-                         "No achievement set was available for this game.");
+                         "The achievement set could not be loaded: %.150s",
+                         event->message[0] ? event->message : "no reason was given.");
                 break;
             case NK_ACH_EVENT_UNLOCKED: {
                 char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
@@ -4970,7 +4988,8 @@ static void player_achievements_shutdown(PlayerRun *run) {
         player_ach_http_poll(run);
     }
     if (run->achievements) {
-        (void)player_achievements_save_queue(run);
+        if (player_achievements_queue_saves_allowed(run))
+            (void)player_achievements_save_queue(run);
         nk_ach_destroy(run->achievements);
         run->achievements = NULL;
     }
@@ -5028,6 +5047,7 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
     snprintf(work->guest_memory_channel, sizeof work->guest_memory_channel, "%s", channel_name);
     snprintf(run->achievements_game_hash, sizeof run->achievements_game_hash, "%s", hash);
     run->guest_memory_channel_active = true;
+    run->guest_memory_channel_checked = false;
     if (!nk_platform_guest_memory_channel_serve(&run->guest_memory_channel,
                                                 player_ach_serve_frame, run)) {
         player_achievements_stop_channel(run);
@@ -5078,8 +5098,18 @@ static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettings
         if (app->settings.achievements_enabled) {
             player_app_set_achievements_enabled(app, false);
             player_achievements_sync_transport(run);
-            if (run->achievements_login_pending) run->achievements_signout_pending = false;
-            if (run->achievements) nk_ach_logout(run->achievements);
+            if (run->achievements_signout_pending) {
+                /* The Sign out that waited for the sign-in's answer ends the account now. When
+                   the token is gone, nk_ach_sign_out replaced rc_client and the answer is
+                   dropped, so no sign-in is pending any more; when it is still stored, the
+                   records stay and the aborted sign-in answers as LOGIN_FAILED. */
+                run->achievements_signout_pending = false;
+                const bool removed = nk_platform_credential_delete(k_ach_credential_target);
+                player_achievements_end_account(run, removed);
+                if (removed) run->achievements_login_pending = false;
+            } else if (run->achievements) {
+                nk_ach_logout(run->achievements);
+            }
             player_achievements_stop_channel(run);
             player_achievements_clear_list(run);
             app->achievements_signed_in = false;
@@ -6296,6 +6326,21 @@ static void player_frame_begin(PlayerRun *run) {
         snprintf(app->achievements_status, sizeof app->achievements_status,
                  "The local guest-memory channel stopped; achievements are off for this run.");
         player_achievements_stop_channel(run);
+    }
+    /* The runtime opens the channel at its start, before its window exists. A game whose window
+       is up without having opened it ignores the channel (a package built before it, or
+       without it): no frame will ever arrive, so the achievements are not left looking live. */
+    if (run->guest_memory_channel_active && !run->guest_memory_channel_checked &&
+        app->is_game_running && app->child_window_ready) {
+        run->guest_memory_channel_checked = true;
+        if (!nk_platform_guest_memory_channel_runtime_attached(&run->guest_memory_channel)) {
+            fprintf(stderr, "[PLAYER] RetroAchievements: the game's runtime did not open the "
+                            "guest-memory channel\n");
+            snprintf(app->achievements_status, sizeof app->achievements_status,
+                     "This game's package does not support achievements; rebuild it to track "
+                     "them.");
+            player_achievements_stop_channel(run);
+        }
     }
     player_update_poll(app);
     player_report_poll(app);
