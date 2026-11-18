@@ -178,6 +178,19 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual(summary["unsupported_imports"], [])
         self.assertEqual(summary["launch"]["runtime_imports"], [])
 
+    def test_summarize_report_keeps_runtime_import_rows_structured_and_ordered(self) -> None:
+        first = {"library": "sceZulu", "nid_name": "sceStop", "nid": 1}
+        second = {"library": "sceAlpha", "nid_name": "sceOther", "nid": 2}
+        report = {
+            "stages": {"build_package": {"status": "PASS"}, "launch": {"status": "FAIL"}},
+            "failure_class": "UNSUPPORTED_IMPORT",
+            "runtime_imports": [first, second, first],
+        }
+
+        summary = library_build.summarize_report(report)
+
+        self.assertEqual(summary["launch"]["runtime_imports"], [first, second])
+
     def test_post_bringup_package_measurement_error_is_recorded(self) -> None:
         self.disc("ok-test70090.iso", "TEST70090")
         with mock.patch.object(

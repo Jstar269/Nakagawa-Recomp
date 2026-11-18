@@ -242,6 +242,27 @@ class TestSBOMTooling(unittest.TestCase):
         self.assertEqual([package["license"] for package in packages], ["MIT", "BSD-3-Clause"])
         license_map.assert_called_once_with()
 
+    def test_shipped_dll_inventory_caches_toolchain_root_and_package_versions(self):
+        import package_notices
+
+        with tempfile.TemporaryDirectory() as temp:
+            package_dir = Path(temp) / "package"
+            package_dir.mkdir()
+            for name in ("libgcc_s_seh-1.dll", "libstdc++-6.dll"):
+                (package_dir / name).write_bytes(b"synthetic runtime DLL")
+            toolchain_root = Path(temp) / "ucrt64"
+            with mock.patch.object(
+                package_notices, "resolve_toolchain_root", return_value=toolchain_root
+            ) as resolve_root, mock.patch.object(
+                package_notices, "installed_package_version", return_value="16.2.0-6"
+            ) as installed_version:
+                shipped = generate_sbom.resolve_shipped_dlls(package_dir=package_dir)
+
+        self.assertEqual({item["name"] for item in shipped},
+                         {"libgcc_s_seh-1.dll", "libstdc++-6.dll"})
+        resolve_root.assert_called_once_with()
+        installed_version.assert_called_once_with(toolchain_root, "gcc-libs")
+
     def test_ruff_lock_matches_pre_commit_pin(self):
         lock_text = (generate_sbom.ROOT / "tools" / "requirements-lock.txt").read_text(
             encoding="utf-8")

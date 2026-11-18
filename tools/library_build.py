@@ -221,9 +221,14 @@ def _directory_bytes(path: Path) -> int | None:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
+def _read_json_strict(path: Path) -> Any:
+    """Parse one JSON file and preserve the reader error for strict consumers."""
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _read_json(path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _read_json_strict(path)
     except (OSError, ValueError):
         return None
 
@@ -254,10 +259,14 @@ def summarize_report(report: dict) -> dict[str, Any]:
         f"{row.get('library')}:{row.get('nid_name') or '?'}"
         for row in unsupported_rows if isinstance(row, dict)
     })
-    runtime_imports = sorted({
-        json.dumps(row, sort_keys=True) if not isinstance(row, str) else row
-        for row in runtime_rows
-    })
+    runtime_imports: list[Any] = []
+    seen_runtime_imports: set[str] = set()
+    for row in runtime_rows:
+        encoded = row if isinstance(row, str) else json.dumps(row, sort_keys=True)
+        if encoded in seen_runtime_imports:
+            continue
+        seen_runtime_imports.add(encoded)
+        runtime_imports.append(dict(row) if isinstance(row, dict) else encoded)
     raw_presentation = report.get("presentation")
     presentation = raw_presentation if isinstance(raw_presentation, dict) else {}
     return {

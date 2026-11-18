@@ -698,6 +698,15 @@ def resolve_shipped_dlls(
     )
 
     shipped: dict[str, dict[str, Any]] = {}
+    toolchain_root = resolve_toolchain_root()
+    package_versions: dict[str | None, str] = {}
+
+    def package_version(record: dict[str, Any]) -> str:
+        package = record.get("pacman_package")
+        if package not in package_versions:
+            version = installed_package_version(toolchain_root, package)
+            package_versions[package] = "NOASSERTION" if version == "unknown" else version
+        return package_versions[package]
 
     def add(
         name: str,
@@ -724,7 +733,6 @@ def resolve_shipped_dlls(
 
     def add_inventory_records(*, only_present: bool) -> None:
         inventory = load_component_inventory()
-        toolchain_root = resolve_toolchain_root()
         records = dict(inventory["native"]["dlls"])
         for record in inventory["native"].get("host_resolved_components", []):
             if record.get("dll"):
@@ -732,13 +740,10 @@ def resolve_shipped_dlls(
         for dll_key, record in sorted(records.items()):
             if only_present and (package_dir is None or not (package_dir / dll_key).is_file()):
                 continue
-            version = installed_package_version(toolchain_root, record.get("pacman_package"))
-            if version == "unknown":
-                version = "NOASSERTION"
             add(
                 dll_key,
                 record["spdx_id"],
-                version,
+                package_version(record),
                 record.get("upstream_origin", "NOASSERTION"),
                 record["license_texts"][0]["file"],
             )
