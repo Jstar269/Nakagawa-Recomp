@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <vector>
 
 namespace ref {
@@ -30,19 +32,24 @@ public:
 	static constexpr uint32_t kRamSize = 0x04000000;  // 64 MB
 	static constexpr uint32_t kPhysMask = 0x1FFFFFFF;
 
-	Memory() : ram_(kRamSize, 0) {}
+	// The RAM comes from a non-throwing allocation: a host that cannot supply 64 MB leaves it
+	// null (ok() is false and every access faults), and the caller reports that by name.
+	Memory() : ram_(new (std::nothrow) uint8_t[kRamSize]()) {}
+
+	bool ok() const { return ram_ != nullptr; }
 
 	// Translate a guest virtual address to an index into the RAM buffer. Returns false for
-	// addresses outside modeled RAM so callers trap instead of corrupting host memory.
+	// addresses outside modeled RAM, or with no RAM, so callers trap instead of corrupting host
+	// memory.
 	bool Translate(uint32_t addr, uint32_t *index) const {
 		uint32_t phys = addr & kPhysMask;
-		if (phys < kRamBase || phys >= kRamBase + kRamSize)
+		if (!ram_ || phys < kRamBase || phys >= kRamBase + kRamSize)
 			return false;
 		*index = phys - kRamBase;
 		return true;
 	}
 
-	uint8_t *RamData() { return ram_.data(); }
+	uint8_t *RamData() { return ram_.get(); }
 
 	uint8_t Read8(uint32_t a) const { return Load<uint8_t>(a); }
 	uint16_t Read16(uint32_t a) const { return Load<uint16_t>(a); }
@@ -95,7 +102,7 @@ private:
 		std::memcpy(&ram_[idx], &v, sizeof(T));
 	}
 
-	std::vector<uint8_t> ram_;
+	std::unique_ptr<uint8_t[]> ram_;
 	mutable bool fault_ = false;
 	mutable uint32_t fault_addr_ = 0;
 };

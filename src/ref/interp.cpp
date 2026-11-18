@@ -524,7 +524,7 @@ StepResult Run(CpuState *s, Memory *mem, unsigned long long max_steps, TraceSink
 
 		uint32_t store_addr = 0;
 		int store_size = 0;
-		StoreInfo(s, op, &store_addr, &store_size);
+		if (sink) StoreInfo(s, op, &store_addr, &store_size);  // only the trace uses it
 
 		if (sink) sink->BeginStep(s, pc, op);
 		bool was_in_delay_slot = s->in_delay_slot;

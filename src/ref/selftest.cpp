@@ -14,11 +14,23 @@
 #include <cstring>
 #include <vector>
 #include <cstdlib>
+#include <new>
 
 #include "interp.h"
 #include "recomp.h"
+#include "snapshot_ref.h"
 
 using namespace ref;
+
+// While set, a non-throwing array allocation of the reference RAM's size (64 MiB) fails, as
+// it does on a host that cannot supply it. Every other allocation goes to the library.
+static volatile bool g_fail_ram_alloc = false;
+
+void *operator new[](std::size_t size, const std::nothrow_t &) noexcept {
+	if (g_fail_ram_alloc && size >= Memory::kRamSize)
+		return nullptr;
+	return ::operator new[](size);
+}
 
 namespace {
 
@@ -45,7 +57,10 @@ uint32_t I(uint32_t opcode, uint32_t rs, uint32_t rt, uint16_t imm) {
 const uint32_t BREAK = 0x0000000D;
 const uint32_t SYSCALL = 0x0000000C;
 
-// Load a program at base and run to completion (a syscall instruction), returning final state.
+// Load a program at base and run it to its syscall instruction, returning the final state. Every
+// program here ends in a syscall, so any other stop fails the case: a run that skips the syscall
+// (a wrong branch or jump target) runs the zero words after it as nops into the step limit.
+// Cases that expect another stop call Run directly.
 ref::CpuState RunProgram(const std::vector<uint32_t> &prog, uint32_t base) {
 	Memory mem;
 	for (size_t i = 0; i < prog.size(); i++)
@@ -54,8 +69,8 @@ ref::CpuState RunProgram(const std::vector<uint32_t> &prog, uint32_t base) {
 	s.pc = base;
 	s.r[SP] = 0x08A00000;  // a valid RAM stack pointer
 	StepResult res = Run(&s, &mem, 1000, nullptr);
-	if (res.reason != StopReason::kSyscall && res.reason != StopReason::kStepLimit) {
-		std::printf("FAIL program stopped: reason=%d pc=0x%08x op=0x%08x\n",
+	if (res.reason != StopReason::kSyscall) {
+		std::printf("FAIL program did not end at its syscall: reason=%d pc=0x%08x op=0x%08x\n",
 			(int)res.reason, res.pc, res.op);
 		g_failures++;
 	}
@@ -660,11 +675,12 @@ void TestR0IsZero() {
 void TestBreakContinues() {
 	const uint32_t base = 0x08900000;
 	// break must advance PC and continue (PPSSPP Int_Break model).
-	// A divide-by-zero guard uses break; the test verifies execution continues past it.
+	// Compilers guard a division with a separate `bnez divisor; break 7`; the div itself never
+	// traps. The explicit break below is what this case tests: execution continues past it.
 	std::vector<uint32_t> p = {
-		I(0x09, ZERO, T0, 0),         // addiu t0, zero, 0    -> divisor = 0
-		I(0x09, ZERO, T1, 42),        // addiu t1, zero, 42   -> dividend = 42
-		R(T0, T1, 0, 0, 0x1A),        // div   t0, t1         -> triggers break guard
+		I(0x09, ZERO, T0, 0),         // addiu t0, zero, 0    -> t0 = 0
+		I(0x09, ZERO, T1, 42),        // addiu t1, zero, 42   -> t1 = 42
+		R(T0, T1, 0, 0, 0x1A),        // div   t0, t1         -> 0 / 42, no trap
 		0x0000000D,                    // break (funct 0x0D)   -> must continue, not stop
 		I(0x09, ZERO, T2, 99),        // addiu t2, zero, 99   -> should execute
 		SYSCALL,
@@ -749,6 +765,8 @@ void TestBreakFatalMode() {
 	// 3. SR_BREAK_FATAL = "" / empty (should continue)
 	{
 #ifdef _WIN32
+		// The Microsoft C runtime removes a variable set to an empty value, so on Windows
+		// this case repeats case 4 (unset). The empty value itself is tested on POSIX.
 		_putenv_s("SR_BREAK_FATAL", "");
 #else
 		setenv("SR_BREAK_FATAL", "", 1);
@@ -822,6 +840,9 @@ void TestAllegrexByteBitOps() {
 		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T3 << 11) | (0x10u << 6) | 0x20u,  // seb  t3, t0
 		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T4 << 11) | (0x18u << 6) | 0x20u,  // seh  t4, t0
 		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T5 << 11) | (0x14u << 6) | 0x20u,  // bitrev t5, t0
+		I(0x0D, ZERO, T0, 0x80F0),                                                     // t0 = 0x000080F0
+		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T6 << 11) | (0x10u << 6) | 0x20u,  // seb  t6, t0
+		(0x1Fu << 26) | (0u << 21) | (T0 << 16) | (T7 << 11) | (0x18u << 6) | 0x20u,  // seh  t7, t0
 		SYSCALL,
 	};
 	ref::CpuState s = RunProgram(p, base);
@@ -830,6 +851,65 @@ void TestAllegrexByteBitOps() {
 	Check("seb  0x12345678", s.r[T3], 0x00000078u);
 	Check("seh  0x12345678", s.r[T4], 0x00005678u);
 	Check("bitrev 0x12345678", s.r[T5], 0x1E6A2C48u);
+	// Sign bits set: a zero-extending seb or seh would give 0x000000F0 and 0x000080F0.
+	Check("seb  0x000080F0", s.r[T6], 0xFFFFFFF0u);
+	Check("seh  0x000080F0", s.r[T7], 0xFFFF80F0u);
+}
+
+// nk_ref_create returns null when the 64 MiB reference RAM cannot be allocated, so the snapshot
+// runner, form sweep and verifier take their named out-of-memory stop. The RAM used to come
+// from a throwing std::vector allocation inside a nothrow new of the small wrapper, so a
+// failed allocation ended the process instead. A Memory without RAM faults on every access.
+void TestSnapshotRefCreateReportsNoMemory() {
+	g_fail_ram_alloc = true;
+	NkRef *none = nk_ref_create();
+	g_fail_ram_alloc = false;
+	Check("nk_ref_create without RAM is null", none == nullptr ? 1u : 0u, 1u);
+	if (none) nk_ref_destroy(none);
+	NkRef *some = nk_ref_create();
+	Check("nk_ref_create with RAM", some != nullptr ? 1u : 0u, 1u);
+	if (some) nk_ref_destroy(some);
+
+	g_fail_ram_alloc = true;
+	Memory mem;
+	g_fail_ram_alloc = false;
+	mem.Write32(Memory::kRamBase, 1u);
+	Check("Memory without RAM: store faults", mem.last_fault() ? 1u : 0u, 1u);
+	mem.ClearFault();
+	(void)mem.Read32(Memory::kRamBase);
+	Check("Memory without RAM: load faults", mem.last_fault() ? 1u : 0u, 1u);
+}
+
+// nk_ref_run starts a call at entry_pc outside a delay slot. A caller's state taken inside a
+// delay-slot window (the runtime keeps the branch PC in next_pc there, src/rt/cpu_lle.c) used
+// to carry over, so the reference jumped to the stale next_pc after the first instruction.
+void TestSnapshotRefRunStartsOutsideDelaySlot() {
+	const uint32_t entry = 0x08900000;
+	const uint32_t prog[] = {I(0x09, ZERO, T2, 0x111), I(0x09, ZERO, T3, 0x222), SYSCALL};
+	NkRef *r = nk_ref_create();
+	if (!r) {
+		Check("nk_ref_create for nk_ref_run", 0u, 1u);
+		return;
+	}
+	std::memcpy(nk_ref_ram(r) + (entry - NK_REF_RAM_BASE), prog, sizeof prog);
+
+	ref::CpuState s;
+	s.in_delay_slot = 1;
+	s.next_pc = entry + 0x100;  // zero words there: nops into the step limit
+	NkRefResult out;
+	nk_ref_run(r, &s, entry, 0x0BAD0000u, nullptr, 0, 64, &out);
+	Check("nk_ref_run slot state: stop", (uint32_t)out.stop, (uint32_t)NK_REF_SYSCALL);
+	Check("nk_ref_run slot state: pc", out.pc, entry + 8);
+	Check("nk_ref_run slot state: second insn", s.r[T3], 0x222u);
+
+	// The first named import stub that the next fetch reaches ends the run there.
+	ref::CpuState s2;
+	const uint32_t stubs[] = {0x08A00000u, entry + 4, entry + 4};
+	nk_ref_run(r, &s2, entry, 0x0BAD0000u, stubs, 3, 64, &out);
+	Check("nk_ref_run import: stop", (uint32_t)out.stop, (uint32_t)NK_REF_IMPORT);
+	Check("nk_ref_run import: pc", out.pc, entry + 4);
+	Check("nk_ref_run import: executed", (uint32_t)out.executed, 1u);
+	nk_ref_destroy(r);
 }
 
 void TestAllegrexExtIns() {
@@ -881,6 +961,13 @@ void TestAllegrexMaxMin() {
 }  // namespace
 
 int main() {
+	// BREAK's policy reads SR_BREAK_FATAL (interp.cpp). An inherited value must not change the
+	// break cases; TestBreakFatalMode sets it itself.
+#ifdef _WIN32
+	_putenv_s("SR_BREAK_FATAL", "");
+#else
+	unsetenv("SR_BREAK_FATAL");
+#endif
 	TestArithmetic();
 	TestMulDiv();
 	TestMemory();
@@ -903,6 +990,8 @@ int main() {
 	TestBreakFatalMode();
 	TestSyscallCodePreservation();
 	TestAllegrexByteBitOps();
+	TestSnapshotRefCreateReportsNoMemory();
+	TestSnapshotRefRunStartsOutsideDelaySlot();
 	TestAllegrexExtIns();
 	TestAllegrexMaxMin();
 	std::printf("\n%s (%d failure(s))\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures);
