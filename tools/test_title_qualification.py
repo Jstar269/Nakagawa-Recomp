@@ -86,7 +86,12 @@ class BuildEvidenceTests(unittest.TestCase):
                 artifact.write_bytes(b"fresh")
                 return mock.Mock(returncode=0)
 
-            with mock.patch.object(tq.subprocess, "check_output", return_value="a" * 40), \
+            def check_git(cmd, **kwargs):
+                if "status" in cmd:
+                    return ""
+                return "a" * 40
+
+            with mock.patch.object(tq.subprocess, "check_output", side_effect=check_git), \
                     mock.patch.object(tq.subprocess, "run", side_effect=compile_fixture), \
                     mock.patch.object(tq, "compiler_identity", return_value="gcc:" + "b" * 64), \
                     mock.patch.object(tq, "run_player", return_value=(0, _pass_output(), False, 1)):
@@ -98,6 +103,23 @@ class BuildEvidenceTests(unittest.TestCase):
             self.assertEqual(report["build_evidence"]["compile_result"], "PASS")
             self.assertEqual(report["stages"]["compile"]["status"], "PASS")
             tq.verify_build_evidence(report, root)
+
+    def test_dirty_working_tree_is_refused_by_build_smoke(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "build"
+            args = tq.build_parser().parse_args([
+                "--build-root", str(root), "build-smoke", "--player", str(root / "player")])
+
+            def dirty_git(cmd, **kwargs):
+                if "status" in cmd:
+                    return " M src/player/main.c\n"
+                return "a" * 40
+
+            out = io.StringIO()
+            with mock.patch.object(tq.subprocess, "check_output", side_effect=dirty_git), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(tq.cmd_build_smoke(args), 2)
+            self.assertIn("BUILD_SOURCE_DIRTY", out.getvalue())
 
     def test_missing_and_tampered_evidence_are_refused(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -463,6 +485,7 @@ class SandboxAndStagingTests(unittest.TestCase):
 
     def test_child_environment_points_every_user_location_into_the_sandbox(self):
         base = {"PATH": "x", "SR_FLIGHT": "ge,present", "SR_DATAROOT": "C:/elsewhere",
+                "NK_INPUT_PROFILE": "C:/outside.json", "SR_INPUT_PROFILE": "C:/outside2.json",
                 "LOCALAPPDATA": "C:/real/profile"}
         with tempfile.TemporaryDirectory(prefix="tq-env-") as temp:
             sandbox = Path(temp)
@@ -479,6 +502,8 @@ class SandboxAndStagingTests(unittest.TestCase):
             self.assertEqual(env["SDL_AUDIODRIVER"], "dummy")
             self.assertNotIn("SR_FLIGHT", env)
             self.assertNotIn("SR_DATAROOT", env)
+            self.assertNotIn("NK_INPUT_PROFILE", env)
+            self.assertNotIn("SR_INPUT_PROFILE", env)
             self.assertEqual(base["LOCALAPPDATA"], "C:/real/profile")
 
     def test_child_environment_sets_only_the_standard_sdl_names(self):
@@ -491,7 +516,7 @@ class SandboxAndStagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="tq-profile-") as temp:
             sandbox = Path(temp)
             staged = tq.stage_input_profile(sandbox, PROFILE)
-            self.assertEqual(staged, sandbox / "localappdata" / "Nakagawa" / "config" / "input_profile.json")
+            self.assertEqual(staged, sandbox / "user-data" / "config" / "input_profile.json")
             self.assertEqual(staged.read_bytes(), PROFILE.read_bytes())
 
     def test_launch_command_isolates_user_data_and_names_the_sample(self):
@@ -513,6 +538,23 @@ class LaunchProcessTests(unittest.TestCase):
         self.assertTrue(timed_out)
         self.assertIsNone(returncode)
         self.assertLess(duration_ms, 30000)
+
+    def test_second_communicate_timeout_still_returns_timed_out(self):
+        fake = mock.Mock(pid=4242, returncode=None, stdout=mock.Mock())
+        fake.communicate.side_effect = [
+            tq.subprocess.TimeoutExpired(cmd="player", timeout=2),
+            tq.subprocess.TimeoutExpired(cmd="player", timeout=10, output="partial output"),
+        ]
+        with tempfile.TemporaryDirectory(prefix="tq-hang2-") as temp, \
+                mock.patch.object(tq.subprocess, "Popen", return_value=fake), \
+                mock.patch.object(tq, "_stop_process_tree"):
+            returncode, output, timed_out, _ = tq.run_player(
+                Path("player"), Path(temp), ROOT, 1, timeout_seconds=2)
+        self.assertTrue(timed_out)
+        self.assertIsNone(returncode)
+        self.assertEqual(output, "partial output")
+        fake.kill.assert_called_once_with()
+        fake.stdout.close.assert_called_once_with()
 
 
 class PosixProcessGroupTests(unittest.TestCase):

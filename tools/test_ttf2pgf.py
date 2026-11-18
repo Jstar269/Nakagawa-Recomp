@@ -495,6 +495,76 @@ class RefusalTests(CliRefusalMixin):
             )
         self.assertEqual(caught.exception.reason, "conflicting-parameters")
 
+    def test_mac_roman_and_symbol_cmaps_are_not_accepted_as_unicode(self) -> None:
+        cmap_entry = self.entries["cmap"]
+        cmap_offset = struct.unpack_from(">I", self.data, cmap_entry + 8)[0]
+        count = struct.unpack_from(">H", self.data, cmap_offset + 2)[0]
+        for platform, encoding in ((1, 0), (3, 0)):
+            with self.subTest(platform=platform, encoding=encoding):
+                mutated = bytearray(self.data)
+                for index in range(count):
+                    rec_off = cmap_offset + 4 + 8 * index
+                    struct.pack_into(">HH", mutated, rec_off, platform, encoding)
+                with self.assertRaises(TtfConvertError) as caught:
+                    convert(bytes(mutated), input_path="crafted.ttf", output_path="out.pgf", codes=(0x41, 0x41))
+                self.assertEqual(caught.exception.reason, "malformed-cmap")
+
+    def test_metric_targets_with_embolden_y_match_written_header_ascender(self) -> None:
+        targets = ttf2pgf._MetricTargets(
+            ascender_px=10, descender_px=-2, tolerance_px=1, ppem_min=6, ppem_max=24,
+        )
+        conversion = convert(
+            self.data,
+            input_path=str(FONT),
+            output_path="out.pgf",
+            codes=(0x41, 0x48),
+            metric_targets=targets,
+            embolden_y=8,
+        )
+        self.assertEqual(
+            conversion.manifest["metric_targets"]["achieved_ascender_26_6"],
+            conversion.manifest["output"]["ascender_26_6"],
+        )
+        self.assertLessEqual(
+            abs(conversion.manifest["output"]["ascender_26_6"] / 64 - targets.ascender_px),
+            targets.tolerance_px,
+        )
+
+    def test_overlapping_cmap_segments_and_groups_are_refused(self) -> None:
+        sub4 = _format4_subtable([(0x41, 0x45, 0), (0x43, 0x46, 0), (0xFFFF, 0xFFFF, 1)])
+        with self.assertRaises(TtfConvertError) as caught:
+            ttf2pgf._parse_cmap4(sub4, 0)
+        self.assertEqual(caught.exception.reason, "malformed-cmap")
+        sub12 = struct.pack(">HHIII", 12, 0, 16 + 24, 0, 2) + struct.pack(">IIIIII", 0x41, 0x45, 1, 0x45, 0x48, 1)
+        with self.assertRaises(TtfConvertError) as caught:
+            ttf2pgf._parse_cmap12(sub12, 0)
+        self.assertEqual(caught.exception.reason, "malformed-cmap")
+
+    def test_font_type_using_camouflage_or_reserved_name_is_refused(self) -> None:
+        self.assert_cli_refused(
+            "camouflage-font-name", self.output, FONT, "--font-type", _joined("Font", "works")
+        )
+        self.assert_cli_refused(
+            "reserved-font-name", self.output, FONT, "--pin", PIN, "--font-type", "Gudea"
+        )
+
+    def test_failed_output_write_leaves_no_partial_pgf(self) -> None:
+        orig_write_bytes = Path.write_bytes
+
+        def fail_pgf_write(self_path: Path, data: bytes) -> int:
+            if self_path.name.startswith("out.pgf"):
+                self_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self_path, "wb") as handle:
+                    handle.write(data[:16])
+                raise OSError("disk full")
+            return orig_write_bytes(self_path, data)
+
+        with mock.patch.object(Path, "write_bytes", fail_pgf_write):
+            code = ttf2pgf._main([str(self.output), str(FONT), "--codes", "0x41-0x41"])
+        self.assertEqual(code, 1)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.tmp.glob("out.pgf*")), [])
+
 
 class CompositeRefusalTests(unittest.TestCase):
     """Crafted composite mutations exercise the named unsupported paths."""

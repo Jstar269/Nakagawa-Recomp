@@ -115,19 +115,9 @@ def fail(path: str, message: str) -> NoReturn:
 
 def load_public_json(path: Path) -> Any:
     """Read one public JSON document with the manifest parser's size and duplicate-key rules."""
-    if path.is_symlink():
-        raise QualificationError(f"{path}: symbolic links are not accepted")
-    if not path.is_file():
-        raise QualificationError(f"{path}: not a regular file")
     try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise QualificationError(f"{path}: unable to read: {exc}") from exc
-    if len(raw) > MAX_PUBLIC_JSON_BYTES:
-        raise QualificationError(f"{path}: exceeds the {MAX_PUBLIC_JSON_BYTES}-byte limit")
-    try:
-        return title_manifest.loads_manifest(raw.decode("utf-8"))
-    except (title_manifest.TitleManifestError, UnicodeError) as exc:
+        return title_manifest.load_manifest(path, max_bytes=MAX_PUBLIC_JSON_BYTES)
+    except title_manifest.TitleManifestError as exc:
         raise QualificationError(f"{path}: {exc}") from exc
 
 
@@ -509,7 +499,10 @@ def write_report(report: dict, path: Path) -> None:
 # Launch
 # -----------------------------------------------------------------------------
 
-_SANDBOX_DROP = ("SR_DATAROOT", "SR_FLIGHT", "SR_FLIGHT_OUTPUT", "SR_FLIGHT_RECORDER")
+_SANDBOX_DROP = (
+    "SR_DATAROOT", "SR_FLIGHT", "SR_FLIGHT_OUTPUT", "SR_FLIGHT_RECORDER",
+    "NK_INPUT_PROFILE", "SR_INPUT_PROFILE",
+)
 
 
 def child_environment(base: dict[str, str], sandbox: Path) -> dict[str, str]:
@@ -535,7 +528,7 @@ def child_environment(base: dict[str, str], sandbox: Path) -> dict[str, str]:
 
 def stage_input_profile(sandbox: Path, profile: Path) -> Path:
     """Copy the public input profile to the sandbox config folder the player reads."""
-    target = sandbox / "localappdata" / "Nakagawa" / "config" / "input_profile.json"
+    target = sandbox / "user-data" / "config" / "input_profile.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(profile, target)
     return target
@@ -594,7 +587,18 @@ def run_player(player: Path, sandbox: Path, runtime_root: Path, launch_index: in
         returncode: int | None = process.returncode
     except subprocess.TimeoutExpired:
         _stop_process_tree(process)
-        output, _ = process.communicate()
+        try:
+            output, _ = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            if process.stdout is not None:
+                process.stdout.close()
+            raw_out = exc.output
+            output = (
+                raw_out.decode("utf-8", errors="replace")
+                if isinstance(raw_out, bytes)
+                else (raw_out or "")
+            )
         timed_out = True
         returncode = None
     except KeyboardInterrupt:
@@ -769,6 +773,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_build_smoke(args: argparse.Namespace) -> int:
     try:
+        dirty = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT, text=True
+        ).strip()
+        if dirty:
+            raise QualificationError("BUILD_SOURCE_DIRTY: working tree has uncommitted changes")
         revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         compiler = compiler_identity(args.compiler, repository_root=ROOT)
         if compiler.endswith(":unavailable"):
