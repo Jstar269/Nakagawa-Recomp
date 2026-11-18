@@ -470,8 +470,12 @@ def _walk_import_windows(elf):
 
     rebase = lambda v: _rebase(v, base)  # noqa: E731
 
-    # Pass 1: walk the PspLibStubEntry window table (libstub..libstubend).
-    if libstub > libstubend or not _mapped_span(elf, libstub, libstubend - libstub):
+    # Pass 1: walk the PspLibStubEntry window table (libstub..libstubend). An empty table
+    # (a module that imports nothing) reads no bytes, so only a non-empty one must be mapped;
+    # its bounds may name an address the image does not map, such as an unset 0 after rebasing.
+    if libstub > libstubend or (
+        libstubend > libstub and not _mapped_span(elf, libstub, libstubend - libstub)
+    ):
         raise ImportTableError(
             "ANALYZER_IMPORT_TABLE_INVALID",
             f"libstub range 0x{libstub:08x}..0x{libstubend:08x} is reversed or unmapped",
