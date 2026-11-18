@@ -14,10 +14,14 @@ Status semantics (Stage 3):
          still be PASS if the experiment was measuring that outcome.
   FAIL = ERROR: the harness itself could not produce a valid measurement
          (e.g., thread creation failed before measurement, allocation failed,
-         probe not measurable). FAIL records must still carry canary/attemp
-         and any partial fields but are distinguished from raw API errors.
+         probe not measurable). FAIL records must still carry result,
+         canary and attempt, plus any partial out fields and optional
+         error/detail; they are distinguished from raw API errors.
   SKIP = NOT_MEASURABLE_WITH_CURRENT_HARNESS: bounded scalar-only or
          orientation not established; no unsafe memory read performed.
+         Like FAIL, it carries only the outs it filled, plus error/detail.
+  Only a PASS record must carry every required out field and may not carry
+  error/detail.
   Unknown PSP semantics are never encoded as expected PASS/FAIL; they are
   preserved as raw data (UNKNOWN_RESULTS_PRESERVED).
 
@@ -42,6 +46,7 @@ import hashlib
 import json
 import pathlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,7 +67,6 @@ from psp_oracle.protocol import (  # noqa: E402
 
 CAMPAIGN_VERSION = "psp-threading-v1"
 EXPECTED_TEST_ID = "PSP-THREAD-001"
-CANARY_RE = re.compile(r"^0x[0-9a-fA-F]{8}$")
 CANARY_EXPECTED = "0xa5a5a5a5"
 ATTEMPT_RE = re.compile(r"^0x[0-9a-fA-F]{1,8}$")
 
@@ -155,10 +159,23 @@ class HardwareCaptureContext:
             return False
         return True
 
-def _sha256_hex(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _sha256_hex(raw: str | bytes) -> str:
+    data = raw if isinstance(raw, bytes) else raw.encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
 
-def evidence_label(parsed: Any, evidence_context: Any | None = None, raw_text: str | None = None) -> str:
+
+def _hex_value(value: str) -> int | None:
+    """The integer a protocol hex scalar names, or None when it is not one."""
+    return int(value, 16) if _HEX_RE.fullmatch(value) else None
+
+
+def _canonical_hex(value: str) -> str:
+    """One spelling per value (the harness's ``0x%08x``) for identity keys."""
+    return f"0x{int(value, 16):08x}"
+
+
+def evidence_label(parsed: Any, evidence_context: Any | None = None,
+                   raw_text: str | bytes | None = None) -> str:
     """Return evidence provenance label for a parsed stream.
 
     Without an explicit out-of-band context, a stream is never
@@ -167,11 +184,13 @@ def evidence_label(parsed: Any, evidence_context: Any | None = None, raw_text: s
 
     - evidence_context is None -> UNVERIFIED_CAPTURE (default for raw parse)
     - SyntheticCaptureContext -> SYNTHETIC_TEST_ONLY
-    - HardwareCaptureContext with valid binding, matching raw hash and run_id,
-      source=psp, and no stream metadata value that contradicts the context
-      -> HARDWARE_MEASURED; else UNVERIFIED_CAPTURE
-    The stream's own metadata never selects a label: placeholder metadata
-    without a context is UNVERIFIED_CAPTURE like any other capture.
+    - HardwareCaptureContext with valid binding, matching raw hash and run_id
+      (compared by value), source=psp, and no stream metadata value that
+      contradicts the context -> HARDWARE_MEASURED; else UNVERIFIED_CAPTURE
+    ``raw_text`` should be the capture's exact bytes; a str is hashed as its
+    UTF-8 encoding, so it matches only text decoded without newline
+    translation. The stream's own metadata never selects a label: placeholder
+    metadata without a context is UNVERIFIED_CAPTURE like any other capture.
     """
     meta = dict(parsed.metadata)
 
@@ -186,8 +205,9 @@ def evidence_label(parsed: Any, evidence_context: Any | None = None, raw_text: s
             return UNVERIFIED_CAPTURE
         if not evidence_context.is_bound():
             return UNVERIFIED_CAPTURE
-        # Also require metadata run_id matches context run_id
-        if meta.get("run_id", "").lower() != evidence_context.run_id.lower():
+        # The metadata run_id must name the context's run_id (is_bound checked its form).
+        stream_run_id = _hex_value(meta.get("run_id", ""))
+        if stream_run_id is None or stream_run_id != int(evidence_context.run_id, 16):
             return UNVERIFIED_CAPTURE
         if meta.get("source") != "psp":
             return UNVERIFIED_CAPTURE
@@ -235,126 +255,99 @@ def _build_required_map(matrix: dict[str, Any]) -> dict[str, dict[str, Any]]:
         }
     return out
 
-def parse_threading_output(text: str, *, require_metadata: bool = True) -> Any:
+_RECORD_IDENTITY_FIELDS = frozenset({"result", "canary", "attempt"})
+# Harness-error annotations (protocol.parse_output passes them unchecked); only a
+# record that is not a measurement (FAIL/SKIP) may carry them.
+_ERROR_FIELDS = frozenset({"error", "detail"})
+# Probe-length fields: bounded by STACK_PROBE_MAX_BYTES, and accepted only on a
+# case whose matrix entry lists them in required_out_fields/optional_out_fields.
+_PROBE_LENGTH_FIELDS = frozenset({"probe_len", "stack_bytes", "window_bytes", "arg_bytes"})
+
+
+def _check_record(r: Any, spec: dict[str, Any]) -> None:
+    """Validate one record against its matrix case ``spec`` (one pass per field)."""
+    vals = dict(r.values)
+    case = r.case_id
+    if r.test_id != EXPECTED_TEST_ID:
+        raise ProtocolError(f"unexpected test_id {r.test_id!r} expected {EXPECTED_TEST_ID!r}")
+    # result (raw API return code) is mandatory; parse_output already checked it is hex.
+    if "result" not in vals:
+        raise ProtocolError(f"test {case!r} missing required field 'result' (raw return code)")
+    canary = vals.get("canary")
+    if canary is None:
+        raise ProtocolError(f"test {case!r} missing canary")
+    if canary.lower() != CANARY_EXPECTED:
+        raise ProtocolError(f"test {case!r} has invalid canary {canary!r} expected {CANARY_EXPECTED}")
+    attempt = vals.get("attempt")
+    if attempt is None:
+        raise ProtocolError(f"test {case!r} missing required field 'attempt' (run/attempt identity)")
+    if not ATTEMPT_RE.fullmatch(attempt):
+        raise ProtocolError(f"test {case!r} field attempt must be hex 0x...")
+    if int(attempt, 16) > 255:
+        raise ProtocolError(f"test {case!r} attempt out of sane range {attempt!r}")
+    measured = r.status == "PASS"
+    declared = spec["required"] | spec["optional"]
+    # Only a measurement must carry every required out; a FAIL/SKIP record
+    # carries the fields it could fill (module docstring, status semantics).
+    if measured:
+        missing = sorted(spec["required"] - vals.keys())
+        if missing:
+            raise ProtocolError(f"test {case!r} missing required fields: {', '.join(missing)}")
+    for k, v in vals.items():
+        if k in _RECORD_IDENTITY_FIELDS:
+            continue
+        if k in _ERROR_FIELDS and not measured:
+            continue
+        if k in declared:
+            # Every matrix-declared field is a protocol hex scalar.
+            if not _HEX_RE.fullmatch(v):
+                raise ProtocolError(f"test {case!r} field {k} must be hexadecimal 0x...")
+            if k in _PROBE_LENGTH_FIELDS:
+                n = int(v, 16)
+                if n > STACK_PROBE_MAX_BYTES:
+                    raise ProtocolError(f"test {case!r} field {k} oversized {n} > {STACK_PROBE_MAX_BYTES}")
+            continue
+        # Near-miss extension prefixes: bare future, future_, future__invalid.
+        if k in {"future", OPTIONAL_FIELD_PREFIX} or k.startswith("future__"):
+            raise ProtocolError(f"test {case!r} extension prefix {k!r} rejected; valid extensions are under future_<name> namespace")
+        if OPTIONAL_FIELD_RE.fullmatch(k):
+            if not _HEX_RE.fullmatch(v):
+                raise ProtocolError(f"test {case!r} optional field {k} must be hex")
+            continue
+        # Any other field is unexpected: fail closed even if hex.
+        raise ProtocolError(f"test {case!r} has unexpected field {k!r} value {v!r} (possible misspelling, unknown hex field rejected)")
+
+
+def parse_threading_output(text: str, *, require_metadata: bool = True,
+                           matrix: dict[str, Any] | None = None) -> Any:
     """Parse and validate a threading oracle stream.
 
     Extends protocol.parse_output with campaign checks, strict per-case
     schemas, and evidence separation (no self-promotion).
+    ``require_metadata=False`` only tolerates a stream without campaign
+    metadata; every record is still checked against the matrix. ``matrix``
+    lets a caller that already loaded matrix.json pass it in.
     """
     parsed = parse_output(text, require_metadata=require_metadata)
     meta = dict(parsed.metadata)
+    m = matrix if matrix is not None else load_matrix()
     if require_metadata:
         cv = meta.get("campaign_version")
         if cv is None:
             raise ProtocolError("metadata missing campaign_version")
         if cv != CAMPAIGN_VERSION:
             raise ProtocolError(f"unsupported campaign_version {cv!r}, expected {CAMPAIGN_VERSION!r}")
+        if m.get("campaign_version") != cv:
+            raise ProtocolError(f"campaign_version {cv!r} does not match matrix {m.get('campaign_version')!r}")
         run_id = meta.get("run_id")
         if run_id is None or not _HEX_RE.fullmatch(run_id):
             raise ProtocolError("run_id must be hexadecimal 0x...")
-        # run_id syntactic validity already checked, but also must be within 32-bit? allow 1..8 hex digits after 0x
-        # Schema version check vs matrix schema
-        matrix = load_matrix()
-        # Enforce campaign_version matches matrix
-        if matrix.get("campaign_version") != cv:
-            raise ProtocolError(f"campaign_version {cv!r} does not match matrix {matrix.get('campaign_version')!r}")
-        # Validate metadata fields not duplicated already done by protocol
-        # Per-case validation
-        required_map = _build_required_map(matrix)
-        # Check for unknown case_ids? Allow but later analyzer will mark extra
-        # But per strict schema, unknown case should be rejected? We reject if case not in matrix
-        # Actually we want to reject unexpected case that is not defined – but analyzer's extra_cases
-        # would handle? The spec says parser must reject missing required field/case etc.
-        # Unknown case is an unexpected case -> we will let analyzer flag, but parser should
-        # reject if record's case_id not in matrix? For strict fail-closed, we reject unknown case_ids
-        # unless they are explicitly allowed as extension. We'll reject unknown case_ids as unexpected.
-        for r in parsed.results:
-            vals = dict(r.values)
-            # Global required fields for every record
-            # result must be present (raw API return code) – not optional
-            if "result" not in vals:
-                raise ProtocolError(f"test {r.case_id!r} missing required field 'result' (raw return code)")
-            if not _HEX_RE.fullmatch(vals["result"]):
-                raise ProtocolError(f"test {r.case_id!r} field result must be hexadecimal")
-            canary = vals.get("canary")
-            if canary is None:
-                raise ProtocolError(f"test {r.case_id!r} missing canary")
-            if not CANARY_RE.fullmatch(canary) or canary.lower() != CANARY_EXPECTED:
-                raise ProtocolError(f"test {r.case_id!r} has invalid canary {canary!r} expected {CANARY_EXPECTED}")
-            if r.test_id != EXPECTED_TEST_ID:
-                raise ProtocolError(f"unexpected test_id {r.test_id!r} expected {EXPECTED_TEST_ID!r}")
-            # attempt is required per observation (Stage 6)
-            attempt = vals.get("attempt")
-            if attempt is None:
-                raise ProtocolError(f"test {r.case_id!r} missing required field 'attempt' (run/attempt identity)")
-            if not ATTEMPT_RE.fullmatch(attempt):
-                raise ProtocolError(f"test {r.case_id!r} field attempt must be hex 0x...")
-            # Validate attempt sane (0..255 etc)
-            try:
-                att_val = int(attempt, 16)
-                if att_val > 255:
-                    raise ProtocolError(f"test {r.case_id!r} attempt out of sane range {attempt!r}")
-            except ValueError as exc:
-                raise ProtocolError(f"test {r.case_id!r} field attempt must be hex") from exc
-            # Validate per-case required_out_fields
-            if r.case_id not in required_map:
-                raise ProtocolError(f"test {r.case_id!r} is not defined in matrix.json (unexpected case)")
-            req = required_map[r.case_id]["required"]
-            opt = required_map[r.case_id]["optional"]
-            # Check missing required out fields
-            missing = sorted(req - set(vals.keys()))
-            if missing:
-                raise ProtocolError(f"test {r.case_id!r} missing required fields: {', '.join(missing)}")
-            # Check for unexpected fields: allowed = required | optional | {result,canary,attempt} plus probe length fields for oversize tests
-            allowed_probe = {"probe_len", "stack_bytes", "window_bytes", "arg_bytes"}
-            allowed = set(req) | set(opt) | {"result", "canary", "attempt"} | allowed_probe
-            # Also allow future_* optional namespace under the exact prefix
-            for k, v in vals.items():
-                if k in allowed:
-                    # probe_len etc will be checked for oversize later, but still allowed
-                    if OPTIONAL_FIELD_RE.fullmatch(k):
-                        # future_* already handled but keep hex check
-                        if not _HEX_RE.fullmatch(v):
-                            raise ProtocolError(f"test {r.case_id!r} optional field {k} must be hex")
-                    continue
-                # Check near-miss extension prefix: bare future, future_, future__invalid (unless intentionally valid)
-                if k == "future" or k == "future_" or k.startswith("future__"):
-                    raise ProtocolError(f"test {r.case_id!r} extension prefix {k!r} rejected; valid extensions are under future_<name> namespace")
-                if OPTIONAL_FIELD_RE.fullmatch(k):
-                    if not _HEX_RE.fullmatch(v):
-                        raise ProtocolError(f"test {r.case_id!r} optional field {k} must be hex")
-                    continue
-                # Any other field is unexpected – fail closed even if hex
-                raise ProtocolError(f"test {r.case_id!r} has unexpected field {k!r} value {v!r} (possible misspelling, unknown hex field rejected)")
-            # Check for oversized fields: any probe length > STACK_PROBE_MAX_BYTES
-            for k, v in vals.items():
-                if k in {"probe_len", "stack_bytes", "window_bytes", "arg_bytes"}:
-                    try:
-                        n = int(v, 16)
-                    except ValueError as exc:
-                        raise ProtocolError(f"test {r.case_id!r} field {k} must be hex") from exc
-                    if n > STACK_PROBE_MAX_BYTES:
-                        raise ProtocolError(f"test {r.case_id!r} field {k} oversized {n} > {STACK_PROBE_MAX_BYTES}")
-                # For cases that involve stack probe, bound any out that might encode length
-                # ST-SA02 expects 16, ST-SA03 expects 64 – but generic out* bounds:
-                # If case is ST-SA02/ST-SA03 and any out encodes arg size, bound it
-                # We treat out* values that are >64 and not sentinel as oversized for those cases
-            # Stack probe bound for ST-SA* / CT stack cases via explicit checks on required outs
-            # Additional oversized check: if case_id in stack probe cases and any out hex >64 where it should be length
-            # Use matrix's measurement_fields to detect stack probe? Simpler: for ST-SA02, require out* hex values that represent lengths are bounded.
-            # We will check that for ST-SA02, out fields that are checksums etc are not length; skip.
-            # For CT-D00, ensure any field that claims stack size not oversized – but we already cover named fields.
-            # Also enforce that no out field is oversized beyond 64 if it is declared as length in future
-            # Generic oversize for known probe cases: if case_id.startswith(("CT-A12","CT-D00","ST-STACK")) and any k.startswith("out") with value > 0x40 where it should be canary? Not.
-            # Keep minimal: named probe_len check suffices; extra generic oversize test is handled via strict unknown rejection.
-            # Validate hex values for all out/result/canary/attempt are hex already
-            for k, v in vals.items():
-                if k.startswith("out") or k in {"result","canary","attempt"} or OPTIONAL_FIELD_RE.fullmatch(k):
-                    if not _HEX_RE.fullmatch(v):
-                        raise ProtocolError(f"test {r.case_id!r} field {k} must be hexadecimal")
-                elif k in {"error","detail"}:
-                    # those may be non-hex detail? but we already rejected unknown; detail allowed non-hex?
-                    pass
+    required_map = _build_required_map(m)
+    for r in parsed.results:
+        # A case the matrix does not define is unexpected: fail closed.
+        if r.case_id not in required_map:
+            raise ProtocolError(f"test {r.case_id!r} is not defined in matrix.json (unexpected case)")
+        _check_record(r, required_map[r.case_id])
     return parsed
 
 # Per-record identity fields: they say which launch/attempt produced a record,
@@ -392,7 +385,7 @@ def _repetition_issues(counts: dict[str, int]) -> list[str]:
     return [f"uneven repetitions: most cases observed {most} times, but {', '.join(short)}"]
 
 
-def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None,
+def analyze_runs(texts: Sequence[str | bytes], evidence_contexts: list[Any] | None = None,
                  scope: str = GATING_SCOPE) -> dict[str, Any]:
     """Analyze one or more runs (for repetition handling).
 
@@ -408,38 +401,37 @@ def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None,
 
     evidence_contexts, if provided, must align 1:1 with texts and are used
     to label each run's evidence; default is UNVERIFIED_CAPTURE per run.
+    Pass each capture's exact bytes so a context's raw_capture_sha256 can bind
+    it (bytes are decoded as UTF-8 for parsing); a str is hashed as UTF-8.
+    run_id and attempt are identities by value: ``0x1`` and ``0x00000001`` are
+    the same launch, reported in the harness's ``0x%08x`` form.
     """
     matrix = load_matrix()
     required = expected_case_ids(matrix, scope)
     gating = expected_case_ids(matrix, GATING_SCOPE)
     matrix_cases = expected_case_ids(matrix, FULL_SCOPE)
     required_map = _build_required_map(matrix)
+    inputs_by_case = {c["case_id"]: str(c.get("inputs", "")) for c in matrix["cases"]}
     runs: list[Any] = []
     run_ids: list[str] = []
-    for idx, text in enumerate(texts):
-        parsed = parse_threading_output(text)
-        meta = dict(parsed.metadata)
-        run_id = meta.get("run_id")
-        if run_id is None or not _HEX_RE.fullmatch(run_id):
-            raise ProtocolError(f"run {idx} has invalid run_id {run_id!r}")
+    for text in texts:
+        decoded = text.decode("utf-8") if isinstance(text, bytes) else text
+        # parse_threading_output requires metadata and a hex run_id.
+        parsed = parse_threading_output(decoded, matrix=matrix)
         runs.append(parsed)
-        run_ids.append(run_id.lower())
+        run_ids.append(_canonical_hex(dict(parsed.metadata)["run_id"]))
     # Each launch must be distinct: a duplicate run_id is impossible.
     if len(set(run_ids)) != len(run_ids):
         raise ProtocolError(f"duplicate run_id detected: {run_ids}")
-    # Observations keyed by (run_id, attempt, case_id).
+    # A (run_id, attempt, case_id) observation cannot repeat: run_ids are unique
+    # here, parse_output rejects a repeated case within one stream, and
+    # parse_threading_output rejects a case outside the matrix.
     from collections import defaultdict
     per_case: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    seen_triples: set[tuple[str, str, str]] = set()
     for run_idx, parsed in enumerate(runs):
         run_id = run_ids[run_idx]
         for r in parsed.results:
-            vals = dict(r.values)
-            attempt = vals.get("attempt", "0x00000000").lower()
-            triple = (run_id, attempt, r.case_id)
-            if triple in seen_triples:
-                raise ProtocolError(f"duplicate run/case/attempt triple {triple!r}")
-            seen_triples.add(triple)
+            attempt = _canonical_hex(dict(r.values)["attempt"])
             per_case[r.case_id].append({
                 "run": run_idx,
                 "run_id": run_id,
@@ -454,22 +446,24 @@ def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None,
         obs = per_case.get(case_id, [])
         expected_launch = required_map.get(case_id, {}).get("launch")
         if not obs:
-            case_reports.append({"case_id": case_id, "observed": False, "stable": False, "runs": [], "variable": False, "run_count": 0, "expected_launch": expected_launch, "required": True})
+            case_reports.append({"case_id": case_id, "observed": False, "stable": False, "runs": [], "variable": False, "run_count": 0, "expected_launch": expected_launch, "required": True, "inputs": inputs_by_case.get(case_id, "")})
             continue
         # Divergent observations are preserved; status is part of the comparison.
-        stable = len({_stability_key(o["result"]) for o in obs}) == 1
+        # One observation is not a repeat: stable is None (SINGLE), not True.
+        distinct = len({_stability_key(o["result"]) for o in obs})
+        stable: bool | None = None if len(obs) < 2 else distinct == 1
         case_reports.append({
             "case_id": case_id,
             "observed": True,
             "stable": stable,
-            "variable": not stable,
+            "variable": distinct > 1,
             "observations": obs,
             "run_count": len(obs),
             "expected_launch": expected_launch,
             "required": case_id in required,
+            "inputs": inputs_by_case.get(case_id, ""),
         })
     missing = sorted(required - observed)
-    extra = sorted(observed - matrix_cases)
     launch_group_issues = _launch_group_issues(runs, run_ids, required_map, gating)
     counts = {cid: len(per_case.get(cid, [])) for cid in reported}
     repetition_issues = _repetition_issues(counts)
@@ -489,7 +483,6 @@ def analyze_runs(texts: list[str], evidence_contexts: list[Any] | None = None,
         "required_cases": sorted(required),
         "case_reports": case_reports,
         "missing_cases": missing,
-        "extra_cases": extra,
         "optional_cases_observed": optional_observed,
         "all_required_observed": not missing,
         "launch_group_issues": launch_group_issues,
@@ -523,20 +516,20 @@ def human_table(analysis: dict[str, Any]) -> str:
     lines.append(f"Campaign {analysis['campaign_version']}  launches={analysis['launch_count']}  required={len(analysis['required_cases'])}  records={analysis['record_count']}")
     lines.append(f"{'CASE_ID':12} {'INPUT':20} {'RESULT':12} {'STABLE':8} {'MEASURED'}")
     lines.append("-"*80)
-    matrix = load_matrix()
-    by_id = {c["case_id"]: c for c in matrix["cases"]}
     for rep in analysis["case_reports"]:
         cid = rep["case_id"]
-        info = by_id.get(cid, {})
-        inputs = str(info.get("inputs", ""))[:20]
-        status = "MISSING" if not rep["observed"] else ("STABLE" if rep["stable"] else "VARIABLE")
+        inputs = rep.get("inputs", "")[:20]
+        if not rep["observed"]:
+            status = "MISSING"
+        elif rep["stable"] is None:
+            status = "SINGLE"
+        else:
+            status = "STABLE" if rep["stable"] else "VARIABLE"
         statuses = {o["result"]["status"] for o in rep.get("observations", [])}
         result = "/".join(sorted(statuses))
         lines.append(f"{cid:12} {inputs:20} {result:12} {status:8} {_measured_column(statuses)}")
     if analysis["missing_cases"]:
         lines.append(f"Missing: {', '.join(analysis['missing_cases'])}")
-    if analysis["extra_cases"]:
-        lines.append(f"Extra: {', '.join(analysis['extra_cases'])}")
     for issue in analysis.get("launch_group_issues", []) + analysis.get("repetition_issues", []):
         lines.append(f"Invalid: {issue}")
     if "evidence_labels" in analysis:

@@ -28,7 +28,7 @@ For every case the matrix encodes `CASE_ID`, `OPERATION`, `INPUTS`, `CONTROL_GRO
 ## Status semantics (Stage 3)
 
 - `PASS` = `MEASURED`: experiment completed structurally and all required measurement fields were captured. The PSP API return code remains raw in `result`; an API error (e.g., `0x800201ac`) can still be `PASS` if the experiment measured that outcome.
-- `FAIL` = `ERROR`: harness itself could not produce a valid measurement (e.g., thread creation failed before measurement, allocation failed and `NOT_MEASURABLE` could not be recorded). Distinguished from raw API errors preserved as `PASS` data.
+- `FAIL` = `ERROR`: harness itself could not produce a valid measurement (e.g., thread creation failed before measurement, allocation failed and `NOT_MEASURABLE` could not be recorded). Distinguished from raw API errors preserved as `PASS` data. A `FAIL` or `SKIP` record carries `result`, `attempt` and `canary`, the out fields it could fill and optional `error`/`detail`; only a `PASS` record must carry every required out field.
 - `SKIP` = `NOT_MEASURABLE_WITH_CURRENT_HARNESS`: bounded scalar-only, orientation not established or resource unavailable; no unsafe memory read performed.
 - `UNKNOWN_RESULTS_PRESERVED = true`: emulator/phantom expected answers are never encoded; raw values retained and divergent observations across repeats are preserved (no majority vote).
 
@@ -43,7 +43,7 @@ A hand-edited file with plausible `model=PSP-3001 firmware=6.61 binary_sha256=â€
 
 ## Strict per-case schemas (Stage 5)
 
-`matrix.json` defines for every `CASE_ID` the `required_out_fields` (e.g., `CT-A01: out0..out3`, `ST-SA02: out0..out8`), `optional_out_fields` (empty; only `future_[A-Za-z0-9][A-Za-z0-9_]*` allowed as explicit forward-compatible hex namespace under `future_` prefix), `classification`, `launch` group, and `control` relation. Parser rejects: missing required field, misspelled mandatory field, unexpected arbitrary field (including unexpected hex), near-miss extension prefix (`future`, `future_`, `future__invalid`), oversized field (`probe_len >64`, `stack_bytes` etc.), duplicate field/case, incompatible campaign version, and extension shadowing a required field. Unknown mandatory `unknown_mandatory` and typo `otu0` etc. are fail-closed. Grammar: `future_[A-Za-z0-9][A-Za-z0-9_]*` (identifier-style, not dotted).
+`matrix.json` defines for every `CASE_ID` the `required_out_fields` (e.g., `CT-A01: out0..out3`, `ST-SA02: out0..out8`), `optional_out_fields` (empty; only `future_[A-Za-z0-9][A-Za-z0-9_]*` allowed as explicit forward-compatible hex namespace under `future_` prefix), `classification`, `launch` group, and `control` relation. Parser rejects: missing required field (on a `PASS` record), misspelled mandatory field, unexpected arbitrary field (including unexpected hex), near-miss extension prefix (`future`, `future_`, `future__invalid`), a probe-length field (`probe_len`, `stack_bytes`, `window_bytes`, `arg_bytes`) on a case whose matrix entry does not list it, or one that is not `0x` hex or exceeds 64, duplicate field/case, incompatible campaign version, and extension shadowing a required field. Unknown mandatory `unknown_mandatory` and typo `otu0` etc. are fail-closed. Grammar: `future_[A-Za-z0-9][A-Za-z0-9_]*` (identifier-style, not dotted).
 
 ## Run/attempt identity (Stage 6)
 

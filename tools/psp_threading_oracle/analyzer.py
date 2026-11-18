@@ -21,27 +21,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=pathlib.Path, help="write table to file")
     ap.add_argument("--provenance", type=str, help="label provenance: synthetic vs hardware (auto per-stream)")
     args = ap.parse_args(argv)
-    texts: list[str] = []
-    for p in args.inputs:
-        texts.append(p.read_text(encoding="utf-8"))
+    # Exact file bytes (no newline translation), so a raw_capture_sha256 binds them.
+    captures = [p.read_bytes() for p in args.inputs]
     # By default without explicit evidence context, parsing is UNVERIFIED_CAPTURE.
     # Callers with trusted hardware workflow should construct HardwareCaptureContext
-    # out-of-band and call analyze_runs(texts, evidence_contexts=...) directly.
-    analysis = analyze_runs(texts)
+    # out-of-band and call analyze_runs(captures, evidence_contexts=...) directly.
+    analysis = analyze_runs(captures)
     table = human_table(analysis)
-    # Annotate provenance per input (unverified by default; never self-promotes to HARDWARE)
-    try:
-        from .parser import evidence_label, parse_threading_output
-    except ImportError:
-        from psp_threading_oracle.parser import evidence_label, parse_threading_output  # type: ignore
-    for idx, text in enumerate(texts):
-        try:
-            parsed = parse_threading_output(text)
-            # No out-of-band context supplied via CLI -> UNVERIFIED_CAPTURE
-            label = evidence_label(parsed, evidence_context=None, raw_text=text)
-            table += f"\n# Input {idx}: {label} ({args.inputs[idx]})"
-        except Exception as exc:  # noqa: BLE001
-            table += f"\n# Input {idx}: MALFORMED ({exc})"
+    # Provenance per input: no out-of-band context via the CLI, so every input
+    # is UNVERIFIED_CAPTURE (never self-promotes to HARDWARE).
+    for idx, label in enumerate(analysis["evidence_labels"]):
+        table += f"\n# Input {idx}: {label} ({args.inputs[idx]})"
     if args.out:
         args.out.write_text(table, encoding="utf-8")
     else:

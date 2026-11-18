@@ -12,6 +12,7 @@ import hashlib
 import json
 import pathlib
 import unittest
+from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 import sys
@@ -215,30 +216,16 @@ class ParserStrictTests(unittest.TestCase):
             parse_threading_output(text)
 
     def test_oversized_probe_rejected(self) -> None:
-        # probe_len oversized >64 must be rejected (M5)
-        text = synth_meta() + "\n"
-        for c in MATRIX["cases"]:
-            if c["case_id"] == "CT-A12":
-                text += synth_record("CT-A12", extra="out0=0x00000000 out1=0x00000000 out2=0x00000000 out3=0x00000000 probe_len=0x00000080 attempt=0x00000000 canary=0xA5A5A5A5".replace("attempt=0x00000000 canary","probe_len=0x00000080 attempt=0x00000000 canary")) + "\n"
-                # Actually need to add probe_len as extra field alongside required outs – but probe_len is unknown for CT-A12, should be rejected as oversized
-                # we will construct manually: required outs + probe_len oversized
-                continue
-            else:
-                text += synth_record(c["case_id"]) + "\n"
-        # Build differently: for CT-A12 add probe_len field
-        text = valid_campaign_text()
-        text2 = text.replace("case_id=CT-A12", "case_id=CT-A12", 1)
-        # inject probe_len after CT-A12 line
-        lines = text2.splitlines()
-        new_lines = []
-        for line in lines:
-            if "CT-A12" in line:
-                line = line.replace("canary=0xA5A5A5A5", "probe_len=0x00000080 canary=0xA5A5A5A5")
-            new_lines.append(line)
-        text3 = "\n".join(new_lines) + "\n"
+        # probe_len oversized >64 must be rejected (M5). Probe-length fields are
+        # accepted only on a case whose matrix entry lists them (no shipped case
+        # does), so the bound is exercised on a matrix where CT-A12 lists probe_len.
+        text = _inject(valid_campaign_text(), "CT-A12", "probe_len=0x00000080")
         with self.assertRaises(ProtocolError) as ctx:
-            parse_threading_output(text3)
+            parse_threading_output(text, matrix=_with_case_fields("CT-A12", ["probe_len"]))
         self.assertIn("oversized", str(ctx.exception).lower())
+        # Against the shipped matrix the field is unexpected on CT-A12.
+        with self.assertRaises(ProtocolError):
+            parse_threading_output(text)
 
     def test_return_code_misspelling_rejected(self) -> None:
         # misspell result as reslut
@@ -1025,6 +1012,169 @@ class AuditStabilityAndTableTests(unittest.TestCase):
         row = self._row(human_table(analyze_runs(first + second)), "ST-SA02")
         self.assertIn("FAIL/PASS", row)
         self.assertTrue(row.endswith("MIXED"))
+
+
+def _with_case_fields(case_id: str, optional: list[str]) -> dict[str, Any]:
+    """A deep copy of the matrix whose ``case_id`` lists extra optional out fields."""
+    matrix: dict[str, Any] = json.loads(json.dumps(MATRIX))
+    for case in matrix["cases"]:
+        if case["case_id"] == case_id:
+            case["optional_out_fields"] = list(optional)
+    return matrix
+
+
+def _inject(text: str, case_id: str, fields: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        if f"case_id={case_id} " in line:
+            line = line.replace("canary=0xA5A5A5A5", f"{fields} canary=0xA5A5A5A5")
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+class AuditParserContractTests(unittest.TestCase):
+    """Audit 2026-11-17 (PR21-U03): record checks, probe fields, status semantics."""
+
+    def test_require_metadata_false_keeps_record_checks(self) -> None:
+        records = valid_campaign_text().split("\n", 1)[1]  # no META line
+        self.assertEqual(len(parse_threading_output(records, require_metadata=False).results), 30)
+        for bad in (records.replace("canary=0xA5A5A5A5", "canary=0xdeadbeef", 1),
+                    records.replace("case_id=CT-A01 ", "case_id=CT-Z99 ", 1),
+                    records.replace("out0=", "otu0=", 1)):
+            with self.subTest(bad=bad.splitlines()[0][:60]):
+                with self.assertRaises(ProtocolError):
+                    parse_threading_output(bad, require_metadata=False)
+
+    def test_probe_fields_rejected_on_cases_that_do_not_list_them(self) -> None:
+        text = _inject(valid_campaign_text(), "CT-B01",
+                       "stack_bytes=0x10 window_bytes=0x1 arg_bytes=0x2 probe_len=0x3")
+        with self.assertRaises(ProtocolError) as ctx:
+            parse_threading_output(text)
+        self.assertIn("unexpected", str(ctx.exception).lower())
+
+    def test_probe_length_must_be_protocol_hex(self) -> None:
+        for value in ("-0x1000", "1_0", "+40", "40"):
+            with self.subTest(matrix="default", value=value):
+                with self.assertRaises(ProtocolError):
+                    parse_threading_output(_inject(valid_campaign_text(), "CT-A12", f"probe_len={value}"))
+        matrix = _with_case_fields("CT-A12", ["probe_len"])
+        for value in ("-0x1000", "1_0", "+40", "40"):
+            with self.subTest(matrix="lists probe_len", value=value):
+                with self.assertRaises(ProtocolError) as ctx:
+                    parse_threading_output(_inject(valid_campaign_text(), "CT-A12", f"probe_len={value}"),
+                                           matrix=matrix)
+                self.assertIn("hex", str(ctx.exception).lower())
+        parsed = parse_threading_output(_inject(valid_campaign_text(), "CT-A12", "probe_len=0x40"), matrix=matrix)
+        self.assertEqual(dict(next(r for r in parsed.results if r.case_id == "CT-A12").values)["probe_len"], "0x40")
+
+    def test_fail_and_skip_records_may_carry_partial_outs_and_error_detail(self) -> None:
+        lines = [synth_meta()]
+        for case in MATRIX["cases"]:
+            cid = case["case_id"]
+            if cid == "ST-SA02":
+                lines.append("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-THREAD-001 case_id=ST-SA02 status=FAIL "
+                             "result=0x800201ac out0=0x00000010 error=0x800201ac detail=create_failed "
+                             "attempt=0x00000000 canary=0xA5A5A5A5")
+            elif cid == "CT-A01":
+                lines.append("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-THREAD-001 case_id=CT-A01 status=SKIP "
+                             "result=0x00000000 detail=orientation_unknown attempt=0x00000000 canary=0xA5A5A5A5")
+            else:
+                lines.append(synth_record(cid))
+        parsed = parse_threading_output("\n".join(lines) + "\n")
+        fail = dict(next(r for r in parsed.results if r.case_id == "ST-SA02").values)
+        self.assertEqual(fail["detail"], "create_failed")
+        self.assertNotIn("out1", fail)
+
+    def test_pass_records_still_need_every_required_out_and_no_error(self) -> None:
+        text = valid_campaign_text()
+        with self.assertRaises(ProtocolError):
+            parse_threading_output(_inject(text, "CT-A01", "error=0x1"))
+        partial = "\n".join(line if "case_id=CT-A01 " not in line else line.replace(" out3=0x00000003", "")
+                            for line in text.splitlines()) + "\n"
+        with self.assertRaises(ProtocolError) as ctx:
+            parse_threading_output(partial)
+        self.assertIn("missing required", str(ctx.exception))
+        # A FAIL/SKIP record still rejects a field outside its case's schema.
+        failing = text.replace("case_id=CT-A01 status=PASS", "case_id=CT-A01 status=FAIL", 1)
+        with self.assertRaises(ProtocolError):
+            parse_threading_output(_inject(failing, "CT-A01", "otu9=0x1"))
+
+    def test_run_id_identity_is_numeric(self) -> None:
+        short = valid_campaign_text(run_id=0x1).replace("run_id=0x00000001", "run_id=0x1", 1)
+        with self.assertRaises(ProtocolError):
+            analyze_runs([short, valid_campaign_text(run_id=0x1)])
+        analysis = analyze_runs([short, valid_campaign_text(run_id=0x2)])
+        self.assertEqual(analysis["run_ids"], ["0x00000001", "0x00000002"])
+
+    def test_single_observation_is_not_reported_stable(self) -> None:
+        from psp_threading_oracle.parser import human_table
+        analysis = analyze_runs(gating_campaign())
+        rep = next(r for r in analysis["case_reports"] if r["case_id"] == "CT-A01")
+        self.assertEqual(rep["run_count"], 1)
+        self.assertIsNone(rep["stable"])
+        self.assertFalse(rep["variable"])
+        row = next(line for line in human_table(analysis).splitlines() if line.startswith("CT-A01"))
+        self.assertIn("SINGLE", row)
+        self.assertNotIn("STABLE", row)
+        repeated = analyze_runs(gating_campaign(0x100) + gating_campaign(0x200))
+        self.assertTrue(all(r["stable"] is True for r in repeated["case_reports"]))
+
+    def test_matrix_is_read_once_per_analysis(self) -> None:
+        import contextlib
+        import io
+        import tempfile
+        from unittest import mock
+        import psp_threading_oracle.parser as parser_mod
+        from psp_threading_oracle import analyzer
+        runs = gating_campaign()
+        with mock.patch.object(parser_mod, "load_matrix", side_effect=parser_mod.load_matrix) as spy:
+            parser_mod.human_table(analyze_runs(runs))
+        self.assertEqual(spy.call_count, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for idx, text in enumerate(runs):
+                path = pathlib.Path(tmp) / f"launch{idx}.txt"
+                path.write_text(text, encoding="utf-8")
+                paths.append(str(path))
+            with mock.patch.object(parser_mod, "load_matrix", side_effect=parser_mod.load_matrix) as spy, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(analyzer.main(paths), 0)
+        self.assertEqual(spy.call_count, 1)
+
+
+class AuditRawCaptureBindingTests(unittest.TestCase):
+    """Audit 2026-11-17 (PR21-U03): the hardware context binds the exact capture bytes and run_id value."""
+
+    def _ctx(self, raw_hash: str, run_id: str = "0xabcdef12") -> HardwareCaptureContext:
+        return HardwareCaptureContext(
+            raw_capture_sha256=raw_hash,
+            binary_sha256="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            source_commit=SOURCE_COMMIT,
+            model="PSP-3001",
+            firmware="6.61",
+            capture_timestamp="2026-08-31T00:00:00Z",
+            run_id=run_id,
+            runner="psplink-runner",
+        )
+
+    def test_crlf_capture_binds_by_its_exact_bytes(self) -> None:
+        raw = valid_campaign_text_plausible(run_id=0xabcdef12).replace("\n", "\r\n").encode("utf-8")
+        ctx = self._ctx(hashlib.sha256(raw).hexdigest())
+        parsed = parse_threading_output(raw.decode("utf-8"))
+        self.assertEqual(evidence_label(parsed, evidence_context=ctx, raw_text=raw), HARDWARE_MEASURED)
+        self.assertEqual(analyze_runs([raw], [ctx])["evidence_labels"], [HARDWARE_MEASURED])
+        # The newline-translated text is not the capture the context names.
+        translated = raw.decode("utf-8").replace("\r\n", "\n")
+        self.assertEqual(evidence_label(parsed, evidence_context=ctx, raw_text=translated), UNVERIFIED_CAPTURE)
+
+    def test_context_run_id_is_compared_by_value(self) -> None:
+        text = valid_campaign_text_plausible(run_id=0x1234)
+        parsed = parse_threading_output(text)
+        raw_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self.assertEqual(evidence_label(parsed, evidence_context=self._ctx(raw_hash, "0x1234"), raw_text=text),
+                         HARDWARE_MEASURED)
+        self.assertEqual(evidence_label(parsed, evidence_context=self._ctx(raw_hash, "0x1235"), raw_text=text),
+                         UNVERIFIED_CAPTURE)
 
 
 class AuditImportSideEffectTests(unittest.TestCase):
