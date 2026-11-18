@@ -11,7 +11,9 @@
 #include "nk_shared_helpers.h"
 #include "nk_xb.h"
 
+#include <limits.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +35,7 @@
 
 #if defined(_MSC_VER)
 #define strcasecmp _stricmp
+#define strncasecmp _strnicmp
 #endif
 
 #define PLAYER_STAGE_MAX_PRX_BYTES (256u * 1024u * 1024u)
@@ -195,13 +198,19 @@ static void stage_emit(PlayerStageContext *context, const char *path,
                                    context->callbacks.userdata);
 }
 
+/* ".xb" and ".xb<N>", the archive names the runtime asset index reads back as
+   <archive>.d (sr_asset_index_key_from_rel): any decimal variant up to INT_MAX. */
 static bool has_xb_suffix(const char *path) {
     if (!path) return false;
     const char *suffix = strrchr(path, '.');
-    if (!suffix) return false;
-    return strcasecmp(suffix, ".xb") == 0 || strcasecmp(suffix, ".xb0") == 0 ||
-           strcasecmp(suffix, ".xb1") == 0 || strcasecmp(suffix, ".xb2") == 0 ||
-           strcasecmp(suffix, ".xb3") == 0;
+    if (!suffix || strncasecmp(suffix, ".xb", 3) != 0) return false;
+    uint64_t variant = 0;
+    for (const char *digit = suffix + 3; *digit != '\0'; digit++) {
+        if (*digit < '0' || *digit > '9') return false;
+        variant = variant * 10u + (uint64_t)(*digit - '0');
+        if (variant > (uint64_t)INT_MAX) return false;
+    }
+    return true;
 }
 
 static bool make_staged_path(const char *root, const char *relative,

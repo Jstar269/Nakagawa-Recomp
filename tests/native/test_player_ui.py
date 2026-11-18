@@ -704,6 +704,9 @@ def compute_effective_timeout(
       - WAIT_REPORT=<phase>,<timeout_ms>: waits for the Problem report phase number.
       - WAIT_MUSIC=<state>,<timeout_ms>: waits until the launcher music is in <state>, by
         its "music=" name (loading, playing, fading_out, paused, stopped, missing, ...).
+      - WAIT_PACKAGE_FAILURE=<disc>,<failures>,<timeout_ms>: waits until that title's
+        package worker failed to start <failures> times; the run fails when timeout_ms
+        passes first.
 
     When explicit_timeout is None, sums all wait event bounds and adds
     TIMEOUT_BUFFER_SECONDS over DEFAULT_BASE_TIMEOUT_SECONDS to ensure slow
@@ -723,7 +726,8 @@ def compute_effective_timeout(
                 effective += int(ev.split(",", 1)[1]) / 1000.0
             except ValueError:
                 pass
-        elif ev.startswith(("WAIT_PACKAGE_STATUS=", "WAIT_UPDATE=")) and "," in ev:
+        elif ev.startswith(("WAIT_PACKAGE_STATUS=", "WAIT_UPDATE=",
+                            "WAIT_PACKAGE_FAILURE=")) and "," in ev:
             try:
                 effective += int(ev.rsplit(",", 1)[1]) / 1000.0
             except ValueError:
@@ -4206,11 +4210,47 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("result=PASS", run["stdout"])
         for step in ("WAIT_UPDATE=nonsense,1000", "WAIT_UPDATE=installed",
                      "WAIT_UPDATE=,1000", "WAIT_UPDATE=installed,0",
-                     "WAIT_UPDATE=installed,-5", "WAIT_UPDATE=installed,4294967296"):
+                     "WAIT_UPDATE=installed,-5", "WAIT_UPDATE=installed,4294967296",
+                     # Digits only: a sign or a leading space is not a number.
+                     "WAIT_UPDATE=installed,+300", "WAIT_UPDATE=installed, 300"):
             with self.subTest(step=step):
                 run = self.next_ui_run("library", (step,), expect_failure=True, timeout=60)
                 self.assertIn("Invalid synthetic event script", run["stderr"], run["stdout"])
                 self.assertNotIn("wait_update target=", run["stdout"])
+
+    def test_wait_package_failure_fails_on_timeout_and_refuses_bad_steps(self) -> None:
+        """WAIT_PACKAGE_FAILURE is a ceiling like every other wait: a count that never comes
+        fails the run by name instead of blocking it until the outer timeout, and a step
+        with no timeout, or for a title the failure list does not name, is refused."""
+        fail_for = {"NK_UI_TEST_FAIL_PACKAGE_STATUS_THREAD_CREATE_FOR": "TEST00005"}
+        run = self.run_player("library", ("WAIT_PACKAGE_FAILURE=TEST00005,1000,300",),
+                              env_extra=fail_for, expect_failure=True, timeout=60)
+        self.assertIn("[PLAYER_UI_TEST] wait_package_failure result=FAIL disc=TEST00005 "
+                      "target=1000", run["stderr"], run["stdout"])
+        self.assertNotIn("wait_package_failure disc=TEST00005 target=1000 result=PASS",
+                         run["stdout"])
+        for step in ("WAIT_PACKAGE_FAILURE=TEST00005,1",
+                     "WAIT_PACKAGE_FAILURE=TEST00006,1,1000",
+                     "WAIT_PACKAGE_FAILURE=TEST00005,0,1000",
+                     "WAIT_PACKAGE_FAILURE=TEST00005,1,0",
+                     "WAIT_PACKAGE_FAILURE=,1,1000"):
+            with self.subTest(step=step):
+                run = self.run_player("library", (step,), env_extra=fail_for,
+                                      expect_failure=True, timeout=60)
+                self.assertIn("Invalid synthetic event script", run["stderr"], run["stdout"])
+                self.assertNotIn("wait_package_failure disc=", run["stdout"])
+
+    def test_view_steps_take_every_view_name_the_frame_record_prints(self) -> None:
+        """WAIT_VIEW and ASSERT_VIEW read the names the frame record prints, so a view the
+        record can report (wizard, controller, developer_log, ...) can be waited for."""
+        names = ("inspecting", "wizard", "controller", "online_settings", "developer_log",
+                 "library")
+        run = self.run_player("library", ("WAIT_VIEW=" + "|".join(names) + ",2000",))
+        self.assertIn("[PLAYER_UI_TEST] wait_view actual=library result=PASS", run["stdout"],
+                      run["stderr"])
+        panel = self.run_player("developer-log", ("ASSERT_VIEW=developer_log", "KEY_F12"))
+        self.assertIn("[PLAYER_UI_TEST] assert_view result=PASS actual=developer_log",
+                      panel["stdout"], panel["stderr"])
 
     def test_update_check_at_start_is_off_by_default_and_quiet_when_offline(self) -> None:
         """No setting, no request: the player is offline by default (AGENTS.md section 5)."""
@@ -4877,7 +4917,7 @@ class NativePlayerUiTests(unittest.TestCase):
             "library",
             events=(
                 "START_SYNTHETIC_BUILD=1",
-                "WAIT_PACKAGE_FAILURE=TEST00005,1",
+                "WAIT_PACKAGE_FAILURE=TEST00005,1,10000",
                 "START_SYNTHETIC_BUILD=2",
                 "WAIT_VIEW=ready_library,10000",
                 "START_SYNTHETIC_BUILD=2",
@@ -4926,9 +4966,9 @@ class NativePlayerUiTests(unittest.TestCase):
             "library",
             events=(
                 "START_SYNTHETIC_BUILD=2",
-                "WAIT_PACKAGE_FAILURE=TEST00006,1",
+                "WAIT_PACKAGE_FAILURE=TEST00006,1,10000",
                 "START_SYNTHETIC_BUILD=1",
-                "WAIT_PACKAGE_FAILURE=TEST00005,1",
+                "WAIT_PACKAGE_FAILURE=TEST00005,1,10000",
                 # Select B, open its title, then RETRY PACKAGE CHECK.
                 "WAIT_MS=100",
                 "KEY_RIGHT",
@@ -4936,7 +4976,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 "KEY_RETURN",
                 "WAIT_MS=300",
                 "KEY_RETURN",
-                "WAIT_PACKAGE_FAILURE=TEST00006,2",
+                "WAIT_PACKAGE_FAILURE=TEST00006,2,10000",
                 "QUIT",
             ),
             runtime_ready=True,
@@ -6282,6 +6322,51 @@ class NativePlayerUiTests(unittest.TestCase):
                            str(run["stdout"]), re.M)
         self.assertTrue(lines, run["stdout"])
         return lines[-1]
+
+    def test_a_result_for_another_build_of_the_title_is_not_counted_as_its_check(
+            self) -> None:
+        """The frame record's titles_* counts use the player's own package key, the build
+        variant included (player_runtime_package_cache_entry_is_for): turning Wider culling
+        off in the library's Settings > Enhanced changes which build the Ace title launches,
+        and the result checked for the culling build does not answer for the build without
+        it. Counted by disc, title and executable alone, the stale result read as checked."""
+        settings = {"enhanced": dict(self.EVERY_PART_ON),
+                    "title_play": {"TEST00006": {"mode": "authentic"}}}
+        culling = {"id": "fixture-cull", "target_title_id": "display-smoke-v1",
+                   "category": "guest_memory_code_hook"}
+        run = self.next_ui_run(
+            "ready",
+            # Open the title and step its Play mode to Enhanced, then Ace (with culling),
+            # and let that build's check finish.
+            ("WAIT_MS=300", "KEY_RETURN", "WAIT_MS=300", *self.DOWN_TO_PLAY_MODE,
+             "KEY_RETURN", "WAIT_MS=200", "KEY_RETURN", "WAIT_MS=800",
+             # Back to the library, Settings (F1), its Play mode row opens the library's
+             # Settings > Enhanced, and Down to Wider culling turns it off.
+             "KEY_ESCAPE", "WAIT_MS=200", "KEY_F1", "WAIT_MS=200", *("KEY_DOWN",) * 5,
+             "KEY_RETURN", "WAIT_MS=200", *("KEY_DOWN", "WAIT_MS=50") * 9, "KEY_RETURN",
+             "WAIT_MS=300"),
+            post_build_ready=True, wait_background=True, settings=settings,
+            enhancement_packages={"TEST00006": "display-smoke-v1"},
+            culling_packages={"TEST00006": culling})
+        play_lines = re.findall(r"next_ui_title_play_line disc=TEST00006 line=(.+?)\r?$",
+                                str(run["stdout"]), re.M)
+        self.assertTrue(play_lines and play_lines[-1].startswith("Ace for this game: ") and
+                        "wider culling" in play_lines[-1], play_lines)
+        # The first frame drawn with Wider culling off is the one the switch happened in.
+        toggled = None
+        seen_off = False
+        for line in str(run["stdout"]).splitlines():
+            if (line.startswith("[PLAYER_UI_TEST] next_ui_enhanced_page title=library") and
+                    "|cull=Off|" in line):
+                seen_off = True
+            elif seen_off and line.startswith("[PLAYER_UI_TEST] frame="):
+                toggled = parse_frames(line)[0]
+                break
+        self.assertIsNotNone(toggled, "Wider culling was not turned off: " + str(run["stdout"]))
+        assert toggled is not None
+        self.assertEqual(toggled["selected_disc"], "TEST00006", toggled)
+        self.assertGreaterEqual(int(toggled["titles_pending"]) + int(toggled["titles_unclaimed"]),
+                                1, f"the culling build's result counted as checked: {toggled}")
 
     def test_next_ui_play_line_names_an_unusable_culling_package(self) -> None:
         """Contract 11.3.6 (#2302): with Wider culling on in an Ace launch, a culling package the

@@ -31,22 +31,9 @@ bool g_ui_test_waiting_for_package_failure;
 char g_ui_test_wait_package_failure_disc[MAX_DISC_ID_LEN];
 unsigned g_ui_test_wait_package_failure_target;
 
+/* A view's name is the one the frame record prints (player_ui_test_view_name),
+   so every view a record can report can be waited for or asserted. */
 static bool player_ui_test_parse_views(char *names, uint32_t *mask) {
-    static const struct { const char *name; PlayerView view; } views[] = {
-        { "library", VIEW_LIBRARY }, { "ready_library", PLAYER_VIEW_READY_LIBRARY },
-        { "supported", VIEW_SUPPORTED_TITLE }, { "experimental", VIEW_EXPERIMENTAL_TITLE },
-        { "unsupported", VIEW_UNSUPPORTED_TITLE }, { "settings", VIEW_SETTINGS },
-        { "building_package", VIEW_BUILDING_PACKAGE }, { "error", VIEW_ERROR },
-        { "prereq_consent", VIEW_PREREQ_CONSENT },
-        { "prereq_progress", VIEW_PREREQ_PROGRESS },
-        { "prereq_about", VIEW_PREREQ_ABOUT },
-        { "confirm_remove_tools", VIEW_CONFIRM_REMOVE_TOOLS },
-        { "build_cache", VIEW_BUILD_CACHE },
-        { "psp_fonts", VIEW_PSP_FONTS }, { "updates", VIEW_UPDATES },
-        { "confirm_factory_reset", VIEW_CONFIRM_FACTORY_RESET },
-        { "accessibility_settings", VIEW_ACCESSIBILITY_SETTINGS },
-        { "ace_settings", VIEW_ACE_SETTINGS }, { "problem_report", VIEW_PROBLEM_REPORT }
-    };
     if (!names || !names[0] || !mask) return false;
     uint32_t parsed_mask = 0;
     char *name = names;
@@ -55,10 +42,10 @@ static bool player_ui_test_parse_views(char *names, uint32_t *mask) {
         if (next) *next++ = '\0';
         if (!name[0]) return false;
         bool found = false;
-        for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); i++) {
-            if (strcmp(name, views[i].name) == 0) {
-                if ((unsigned)views[i].view >= 32) return false;
-                parsed_mask |= UINT32_C(1) << (unsigned)views[i].view;
+        for (int view = VIEW_LIBRARY; view <= VIEW_PROBLEM_REPORT; view++) {
+            if (strcmp(name, player_ui_test_view_name((PlayerView)view)) == 0) {
+                if ((unsigned)view >= 32) return false;
+                parsed_mask |= UINT32_C(1) << (unsigned)view;
                 found = true;
                 break;
             }
@@ -71,7 +58,9 @@ static bool player_ui_test_parse_views(char *names, uint32_t *mask) {
 }
 
 bool player_ui_test_parse_positive_u64(const char *text, uint64_t *value) {
-    if (!text || !text[0] || text[0] == '-' || !value) return false;
+    /* Digits only: strtoull alone would skip leading space and take a sign, so
+       " -1" would wrap to 2^64-1 and "+5" read as 5. */
+    if (!text || text[0] < '0' || text[0] > '9' || !value) return false;
     char *end = NULL;
     unsigned long long parsed = strtoull(text, &end, 10);
     if (end == text || !end || *end != '\0' || parsed == 0) return false;
@@ -357,19 +346,29 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
         return 1;
     }
     if (strncmp(token, "WAIT_PACKAGE_FAILURE=", 21) == 0) {
+        /* <disc>,<failures>,<timeout ms>: a ceiling like every other wait. The
+           disc must be one NK_UI_TEST_FAIL_PACKAGE_STATUS_THREAD_CREATE_FOR
+           fails, or no failure could ever be counted for it. */
         char *comma = strchr(token + 21, ',');
+        char *timeout_comma = comma ? strchr(comma + 1, ',') : NULL;
         uint64_t target = 0;
-        if (!comma) return -1;
+        uint64_t timeout = 0;
+        if (!comma || !timeout_comma) return -1;
         *comma = '\0';
+        *timeout_comma = '\0';
         if (!token[21] || strlen(token + 21) >= MAX_DISC_ID_LEN ||
+            player_ui_test_fail_title_index(token + 21) < 0 ||
             !player_ui_test_parse_positive_u64(comma + 1, &target) ||
-            target > UINT_MAX) return -1;
+            target > UINT_MAX ||
+            !player_ui_test_parse_positive_u64(timeout_comma + 1, &timeout) ||
+            timeout > UINT32_MAX) return -1;
         snprintf(g_ui_test_wait_package_failure_disc,
                  sizeof(g_ui_test_wait_package_failure_disc),
                  "%s", token + 21);
         g_ui_test_wait_package_failure_target = (unsigned)target;
         event->type = SDL_EVENT_USER;
         event->user.code = PLAYER_UI_TEST_ACTION_WAIT_PACKAGE_FAILURE;
+        event->user.timestamp = timeout;
         return 1;
     }
     if (strcmp(token, "INVALIDATE_PACKAGE_CACHE") == 0) {
@@ -634,10 +633,9 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
         const PlayerRuntimePackageCacheEntry *cached =
             &app->runtime_package_cache[i];
         const GameRecord *cached_game = &app->games[i];
-        bool same_game = strcmp(cached->disc_id, cached_game->disc_id) == 0 &&
-                         strcmp(cached->title_id, cached_game->title_id) == 0 &&
-                         strcmp(cached->selected_executable,
-                                cached_game->selected_executable) == 0;
+        /* The player's own package key, the variant included: the authentic
+           package's result never answers for the enhanced build. */
+        bool same_game = player_runtime_package_cache_entry_is_for(cached, cached_game);
         if (same_game && cached->status_valid) continue;
         if (same_game && cached->validation_pending) {
             titles_pending++;
@@ -1348,6 +1346,15 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
                    g_ui_test_wait_package_failure_disc,
                    g_ui_test_wait_package_failure_target);
             g_ui_test_waiting_for_package_failure = false;
+        } else if (ui_test_now >= t->wait_deadline) {
+            fprintf(stderr, "[PLAYER_UI_TEST] wait_package_failure result=FAIL disc=%s "
+                    "target=%u actual=%u\n",
+                    g_ui_test_wait_package_failure_disc,
+                    g_ui_test_wait_package_failure_target, completed);
+            g_ui_test_waiting_for_package_failure = false;
+            t->failed = true;
+            t->quit_queued = true;
+            *running = false;
         } else {
             ui_test_block_script = true;
         }
@@ -1372,6 +1379,7 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
         } else if (scripted_event.type == SDL_EVENT_USER &&
             scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_PACKAGE_FAILURE) {
             g_ui_test_waiting_for_package_failure = true;
+            t->wait_deadline = ui_test_now + scripted_event.user.timestamp;
             printf("[PLAYER_UI_TEST] wait_package_failure disc=%s "
                    "target=%u started\n",
                    g_ui_test_wait_package_failure_disc,
@@ -1913,13 +1921,34 @@ static void player_update_test_close(void *context) {
     free(response);
 }
 
+/* A response that streams the file at path as the answer to url (the update and
+   cover-art transports both answer from files); false, nothing open, when the
+   file cannot be read. */
+static bool player_ui_test_file_response(const char *path, const char *url,
+                                         PackageHttpResponse *out) {
+    int64_t size = nk_platform_get_file_size(path);
+    PlayerUpdateTestResponse *response =
+        (PlayerUpdateTestResponse *)calloc(1u, sizeof(*response));
+    if (!response || size < 0 || !(response->file = nk_fopen_utf8(path, "rb"))) {
+        free(response);
+        return false;
+    }
+    snprintf(response->final_url, sizeof(response->final_url), "%s", url);
+    memset(out, 0, sizeof(*out));
+    out->final_url = response->final_url;
+    out->has_content_length = true;
+    out->content_length = (uint64_t)size;
+    out->context = response;
+    out->read = player_update_test_read;
+    out->close = player_update_test_close;
+    return true;
+}
+
 static bool player_update_test_open(void *context, const char *url, const char *allowed_hosts,
                                     PackageHttpResponse *out) {
     const char *dir = getenv("NK_UI_TEST_UPDATE_DIR");
     const char *name = strrchr(url, '/');
     char path[NK_MAX_PATH];
-    PlayerUpdateTestResponse *response;
-    int64_t size;
     (void)context;
     (void)allowed_hosts;
     if (!dir || !name) return false;
@@ -1944,21 +1973,7 @@ static bool player_update_test_open(void *context, const char *url, const char *
     }
     printf("[PLAYER_UI_TEST] update_request=%s\n", url);
     fflush(stdout);
-    size = nk_platform_get_file_size(path);
-    response = (PlayerUpdateTestResponse *)calloc(1, sizeof(*response));
-    if (!response || size < 0 || !(response->file = nk_fopen_utf8(path, "rb"))) {
-        free(response);
-        return false;
-    }
-    snprintf(response->final_url, sizeof(response->final_url), "%s", url);
-    memset(out, 0, sizeof(*out));
-    out->final_url = response->final_url;
-    out->has_content_length = true;
-    out->content_length = (uint64_t)size;
-    out->context = response;
-    out->read = player_update_test_read;
-    out->close = player_update_test_close;
-    return true;
+    return player_ui_test_file_response(path, url, out);
 }
 
 PackageHttpOpen player_ui_test_update_transport(void) {
@@ -2005,8 +2020,6 @@ static bool player_cover_art_test_open(void *context, const char *url, const cha
     const char *dir = getenv("NK_UI_TEST_COVER_ART_DIR");
     char decoded_name[512];
     char path[NK_MAX_PATH];
-    PlayerUpdateTestResponse *response;
-    int64_t size;
     (void)context;
     if (!url || strncmp(url, kPrefix, sizeof(kPrefix) - 1u) != 0) return false;
     if (!allowed_hosts || strcmp(allowed_hosts, NK_COVER_ART_HOST) != 0) return false;
@@ -2021,21 +2034,7 @@ static bool player_cover_art_test_open(void *context, const char *url, const cha
                  decoded_name) >= (int)sizeof(path)) {
         return false;
     }
-    size = nk_platform_get_file_size(path);
-    response = (PlayerUpdateTestResponse *)calloc(1u, sizeof(*response));
-    if (!response || size < 0 || !(response->file = nk_fopen_utf8(path, "rb"))) {
-        free(response);
-        return false;
-    }
-    snprintf(response->final_url, sizeof(response->final_url), "%s", url);
-    memset(out, 0, sizeof(*out));
-    out->final_url = response->final_url;
-    out->has_content_length = true;
-    out->content_length = (uint64_t)size;
-    out->context = response;
-    out->read = player_update_test_read;
-    out->close = player_update_test_close;
-    return true;
+    return player_ui_test_file_response(path, url, out);
 }
 
 PackageHttpOpen player_ui_test_cover_art_transport(void) {

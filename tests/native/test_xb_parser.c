@@ -1278,6 +1278,91 @@ static void test_iso_to_native_staging_pipeline(void) {
     printf("[XB_TEST] ISO EBOOT + xbdata native staging pipeline PASSED\n");
 }
 
+/* Staging unpacks every archive the runtime asset index reads back: ".xb" and
+   ".xb<N>" for any decimal N (sr_asset_index_key_from_rel), not only .xb0-.xb3.
+   A name that only starts like one (".xbx") is a plain file. */
+static void test_staging_unpacks_every_xb_variant(void) {
+    static const uint8_t member[] = "variant member";
+    const FixtureEntry entries[] = {
+        { "data/member.bin", member, sizeof(member) - 1, NK_XB_COMPRESSION_NONE }
+    };
+    ByteBuffer xb = make_archive(entries, 1, false);
+    assert(xb.size < 2048);
+    const char *iso_path = SR_SELFTEST_BUILD_ROOT "/test_xb_variants.iso";
+    const char *stage_root = SR_SELFTEST_BUILD_ROOT "/.staging_xb_variants";
+    /* No PPSSPP dump folder answers for this run's support-module lookup. */
+    const char *no_ppsspp = SR_SELFTEST_BUILD_ROOT "/test_xb_variants_no_ppsspp";
+    char old_appdata[4096];
+    char old_userprofile[4096];
+    bool had_appdata;
+    bool had_userprofile;
+    capture_environment_value("APPDATA", old_appdata, sizeof(old_appdata), &had_appdata);
+    capture_environment_value("USERPROFILE", old_userprofile, sizeof(old_userprofile),
+                              &had_userprofile);
+    set_environment_value("APPDATA", no_ppsspp);
+    set_environment_value("USERPROFILE", no_ppsspp);
+
+    const size_t image_size = 32u * 2048u;
+    uint8_t *image = (uint8_t *)calloc(1, image_size);
+    assert(image != NULL);
+    uint8_t *pvd = image + 16 * 2048;
+    pvd[0] = 1;
+    memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1;
+    const uint8_t root_name = 0;
+    iso_record(pvd + 156, 17, 2048, 2, &root_name, 1);
+    const IsoFixtureChild root_children[] = { { "PSP_GAME", 18, 2048, 2 } };
+    const IsoFixtureChild psp_children[] = {
+        { "SYSDIR", 19, 2048, 2 },
+        { "USRDIR", 20, 2048, 2 }
+    };
+    const IsoFixtureChild sys_children[] = { { "EBOOT.BIN", 21, 4, 0 } };
+    const IsoFixtureChild usr_children[] = { { "xbdata", 22, 2048, 2 } };
+    const IsoFixtureChild xb_children[] = {
+        { "a.xb4", 23, (uint32_t)xb.size, 0 },
+        { "b.XB12", 24, (uint32_t)xb.size, 0 },
+        { "c.xbx", 25, (uint32_t)xb.size, 0 }
+    };
+    iso_directory(image + 17 * 2048, 17, 17, root_children, 1);
+    iso_directory(image + 18 * 2048, 18, 17, psp_children, 2);
+    iso_directory(image + 19 * 2048, 19, 18, sys_children, 1);
+    iso_directory(image + 20 * 2048, 20, 18, usr_children, 1);
+    iso_directory(image + 22 * 2048, 22, 20, xb_children, 3);
+    memcpy(image + 21 * 2048, "BOOT", 4);
+    for (uint32_t lba = 23; lba <= 25; lba++) memcpy(image + lba * 2048u, xb.data, xb.size);
+    write_file_bytes(iso_path, image, image_size);
+    free(image);
+    free(xb.data);
+
+    PlayerStageCallbacks callbacks = { NULL, staging_progress, NULL };
+    PlayerStageSummary summary;
+    char error[256];
+    static const char *const loose_content_roots[] = { "xbdata" };
+    (void)player_stage_discard(stage_root);
+    NkResult result = player_stage_game_with_summary(iso_path, stage_root,
+                                                     loose_content_roots, 1, &callbacks,
+                                                     &summary, error, sizeof(error));
+    if (result != NK_OK) {
+        fprintf(stderr, "[XB_TEST] variant staging failed (%d): %s\n", (int)result, error);
+    }
+    assert(result == NK_OK);
+    assert(summary.extracted_asset_count == 2);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/xbdata/a.xb4.d/data/member.bin", stage_root);
+    assert(nk_platform_file_exists(path));
+    snprintf(path, sizeof(path), "%s/xbdata/b.XB12.d/data/member.bin", stage_root);
+    assert(nk_platform_file_exists(path));
+    snprintf(path, sizeof(path), "%s/xbdata/c.xbx", stage_root);
+    assert(nk_platform_file_exists(path));
+    snprintf(path, sizeof(path), "%s/xbdata/c.xbx.d", stage_root);
+    assert(!nk_platform_dir_exists(path));
+    assert(player_stage_discard(stage_root));
+    remove(iso_path);
+    restore_environment_value("APPDATA", old_appdata, had_appdata);
+    restore_environment_value("USERPROFILE", old_userprofile, had_userprofile);
+    printf("[XB_TEST] every .xb<N> archive variant is unpacked PASSED\n");
+}
+
 static int archive_list_has(const SrVfsDirList *list, const char *name) {
     for (size_t i = 0; i < list->count; i++) {
         if (strcmp(list->entries[i].name, name) == 0) return 1;
@@ -2054,6 +2139,7 @@ int main(void) {
     test_staging_cleanup_boundary();
     test_staging_discard_reparse_boundary();
     test_iso_to_native_staging_pipeline();
+    test_staging_unpacks_every_xb_variant();
     test_title_staging_transaction();
     test_title_staging_names_a_long_data_folder();
     printf("[XB_TEST] ALL NATIVE XB PARSER TESTS PASSED\n");
