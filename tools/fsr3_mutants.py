@@ -372,6 +372,15 @@ PASS_MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "d.flags = FSR3_HOST_ENABLE_DEPTH_INVERTED | FSR3_HOST_ENABLE_DEPTH_INFINITE;",
      "d.flags = FSR3_HOST_ENABLE_DEPTH_INFINITE;",
      "F-D", "the shaders are built for inverted depth"),
+    ("P-L: the probe matches a linear binding's own name, not the image it resolves to", PASS,
+     "                fsr3_host_resolve(&h, bd, &resource, &mip);",
+     "                resource = bd->id;\n                (void)mip;",
+     "P-L", "was accepted"),
+    ("P-H: a failed image create's output stored", PASS,
+     "    if (p->CreateImage(p->dev, &ii, NULL, &image) != VK_SUCCESS) return 0;\n    im->image = image;",
+     "    const VkResult made = p->CreateImage(p->dev, &ii, NULL, &image);\n    im->image = image;\n"
+     "    if (made != VK_SUCCESS) return 0;",
+     "P-H", "was destroyed"),
 ]
 
 # Run and recorded, never counted as a kill: design 2.5 asks for the result either way.
@@ -460,6 +469,11 @@ FG_PASS_MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "            if (!h->fi.Reset)\n"
      "            p->CmdCopyImage(cmd, j->resource == FSR3FG_RES_PRESENT_COLOR ? v->present_image : v->hudless_image,",
      "G-C", "after it"),
+    ("G-F: a failed image create's output stored", FG_PASS,
+     "    if (p->CreateImage(p->dev, &ii, NULL, &image) != VK_SUCCESS) return 0;\n    im->image = image;",
+     "    const VkResult made = p->CreateImage(p->dev, &ii, NULL, &image);\n    im->image = image;\n"
+     "    if (made != VK_SUCCESS) return 0;",
+     "G-F", "was destroyed"),
 ]
 FG_PASS_RECORDED: list[tuple[str, str, str, str, str]] = []
 FG_PASS_SOURCES = [FG_PASS, FG_PASS_SELFTEST, FG_HOST]

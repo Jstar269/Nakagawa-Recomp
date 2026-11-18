@@ -19,6 +19,8 @@
  *        without, and the pan around it is interpolated
  *   G-C  a cut with a reset: the generated frames keep nothing of the old scene, and the one at the
  *        reset is the new frame (the same cut without the reset is printed, not checked)
+ *   G-F  a failed image or shader-module create that leaves a non-null value in its output never
+ *        has that value destroyed, and the creation is refused
  *
  * The bars beside each cell were measured on an RTX 3080 and set between the unmutated values and
  * the nearest of tools/fsr3_mutants.py --fg-pass's defects.
@@ -642,11 +644,86 @@ static Fsr3FgHostDesc desc_for(uint32_t rw, uint32_t rh, uint32_t dw, uint32_t d
     return d;
 }
 
+/* A failed vkCreateImage or vkCreateShaderModule that leaves a non-null value in its output, as
+ * Vulkan allows (a failed command's output is undefined): the create whose turn it is fails and
+ * writes JUNK there; the destroy wrappers count JUNK instead of passing it on. Wrapped through the
+ * init's proc-addr hook, so the pass has no test seam. */
+#define JUNK_IMAGE ((VkImage)(uintptr_t)0x5EED0001u)
+#define JUNK_MODULE ((VkShaderModule)(uintptr_t)0x5EED0002u)
+static PFN_vkGetDeviceProcAddr s_real_dev_addr;
+static PFN_vkCreateImage s_real_create_image;
+static PFN_vkDestroyImage s_real_destroy_image;
+static PFN_vkCreateShaderModule s_real_create_module;
+static PFN_vkDestroyShaderModule s_real_destroy_module;
+static int s_image_fails_at = -1, s_module_fails_at = -1; /* the call that fails, counting from 0 */
+static unsigned s_junk_destroyed;
+
+static VKAPI_ATTR VkResult VKAPI_CALL junk_create_image(VkDevice device, const VkImageCreateInfo *info,
+                                                        const VkAllocationCallbacks *alloc, VkImage *image) {
+    if (s_image_fails_at >= 0 && s_image_fails_at-- == 0) {
+        *image = JUNK_IMAGE;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return s_real_create_image(device, info, alloc, image);
+}
+
+static VKAPI_ATTR void VKAPI_CALL junk_destroy_image(VkDevice device, VkImage image, const VkAllocationCallbacks *alloc) {
+    if (image == JUNK_IMAGE) { s_junk_destroyed++; return; }
+    s_real_destroy_image(device, image, alloc);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL junk_create_module(VkDevice device, const VkShaderModuleCreateInfo *info,
+                                                         const VkAllocationCallbacks *alloc, VkShaderModule *module) {
+    if (s_module_fails_at >= 0 && s_module_fails_at-- == 0) {
+        *module = JUNK_MODULE;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return s_real_create_module(device, info, alloc, module);
+}
+
+static VKAPI_ATTR void VKAPI_CALL junk_destroy_module(VkDevice device, VkShaderModule module,
+                                                      const VkAllocationCallbacks *alloc) {
+    if (module == JUNK_MODULE) { s_junk_destroyed++; return; }
+    s_real_destroy_module(device, module, alloc);
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL junk_dev_addr(VkDevice device, const char *name) {
+    PFN_vkVoidFunction fn = s_real_dev_addr(device, name);
+    if (!strcmp(name, "vkCreateImage")) {
+        s_real_create_image = (PFN_vkCreateImage)fn;
+        return (PFN_vkVoidFunction)junk_create_image;
+    }
+    if (!strcmp(name, "vkDestroyImage")) {
+        s_real_destroy_image = (PFN_vkDestroyImage)fn;
+        return (PFN_vkVoidFunction)junk_destroy_image;
+    }
+    if (!strcmp(name, "vkCreateShaderModule")) {
+        s_real_create_module = (PFN_vkCreateShaderModule)fn;
+        return (PFN_vkVoidFunction)junk_create_module;
+    }
+    if (!strcmp(name, "vkDestroyShaderModule")) {
+        s_real_destroy_module = (PFN_vkDestroyShaderModule)fn;
+        return (PFN_vkVoidFunction)junk_destroy_module;
+    }
+    return fn;
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL junk_gipa(VkInstance instance, const char *name) {
+    PFN_vkVoidFunction fn = g.gipa(instance, name);
+    if (!strcmp(name, "vkGetDeviceProcAddr")) {
+        s_real_dev_addr = (PFN_vkGetDeviceProcAddr)fn;
+        return (PFN_vkVoidFunction)junk_dev_addr;
+    }
+    return fn;
+}
+
+static PFN_vkGetInstanceProcAddr s_pass_gipa; /* pass_new's hook; NULL is counting_gipa */
+
 static Fsr3FgPass *pass_new(Fsr3FgHostDesc desc, uint32_t frames, const Fsr3FgDeviceFacts *facts, int enabled,
                             char *err, size_t cap) {
     Fsr3FgPassInit init;
     memset(&init, 0, sizeof(init));
-    init.get_instance_proc_addr = counting_gipa;
+    init.get_instance_proc_addr = s_pass_gipa ? s_pass_gipa : counting_gipa;
     init.instance = g.instance;
     init.physical_device = g.physical;
     init.device = g.device;
@@ -1454,6 +1531,34 @@ static void cell_gc(void) {
                share_no_reset[0], share_no_reset[1]);
 }
 
+/* ---- G-F ------------------------------------------------------------------------------------- */
+
+static void cell_gf(void) {
+    if (g.refusal) {
+        printf("SKIP G-F (the pass refuses this device: %s)\n", g.refusal);
+        s_skip = 1;
+        return;
+    }
+    static const struct {
+        const char *what;
+        int image, module;
+    } k_fail[] = { { "the third image", 2, -1 }, { "the fourth shader module", -1, 3 } };
+    for (unsigned i = 0; i < sizeof(k_fail) / sizeof(k_fail[0]); i++) {
+        char err[200] = "";
+        s_junk_destroyed = 0;
+        s_image_fails_at = k_fail[i].image;
+        s_module_fails_at = k_fail[i].module;
+        s_pass_gipa = junk_gipa;
+        Fsr3FgPass *p = pass_new(desc_for(480, 272, 960, 544), 1, &g.facts, g.features_enabled, err, sizeof(err));
+        s_pass_gipa = NULL;
+        s_image_fails_at = s_module_fails_at = -1;
+        CHECK(p == NULL, "G-F: the pass was made although %s failed", k_fail[i].what);
+        fsr3_fg_pass_destroy(p);
+        CHECK(s_junk_destroyed == 0, "G-F: the undefined output of a failed create (%s) was destroyed %u time(s)",
+              k_fail[i].what, s_junk_destroyed);
+    }
+}
+
 /* ---- main ------------------------------------------------------------------------------------ */
 
 static const struct {
@@ -1461,7 +1566,7 @@ static const struct {
     void (*run)(void);
 } k_cells[] = {
     { "G-R", cell_gr }, { "G-0", cell_g0 }, { "G-M", cell_gm }, { "G-D", cell_gd }, { "G-H", cell_gh },
-    { "G-C", cell_gc },
+    { "G-C", cell_gc }, { "G-F", cell_gf },
 };
 #define CELL_COUNT (sizeof(k_cells) / sizeof(k_cells[0]))
 

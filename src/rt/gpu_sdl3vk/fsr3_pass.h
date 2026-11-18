@@ -64,7 +64,11 @@ typedef struct {
 } Fsr3PassFrame;
 
 /* Records one FSR 3 dispatch. 0, or -1 with nothing recorded when the frame is refused (a missing
- * view, a bad slot or layout, or sizes fsr3_host_dispatch refuses). */
+ * view, a bad slot or layout, or sizes fsr3_host_dispatch refuses). A call that returns 0 has
+ * advanced the context (the frame count and its ping-pong images) and, the first time, recorded the
+ * definition of every internal image; neither is recorded again, so the command buffer of every call
+ * that returns 0 must be submitted. Dropping one leaves the pass in a state it cannot recover from:
+ * destroy it and create a new one. */
 int fsr3_pass_record(Fsr3Pass *p, VkCommandBuffer cmd, const Fsr3PassFrame *f);
 
 /* The plan behind the last recorded dispatch, for tests. */

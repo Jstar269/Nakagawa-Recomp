@@ -552,8 +552,9 @@ static void cell_limiter(Fsr1Pass *p) {
     image_free(&src);
 }
 
-/* size-fail: a size past the device's image limit gives no image, is said once, and is not tried
- * again (no device wait on every later present); a size that fits still works after it. */
+/* size-fail: a size past the device's image limit gives no image, is said once, and is refused
+ * before anything is built (no device wait, and the last good size's images stay); going back to
+ * that good size rebuilds nothing, and a new size that fits still works after it. */
 static void cell_size_fail(Fsr1Pass *p) {
     VkPhysicalDeviceProperties props;
     GetPhysicalDeviceProperties(g.physical, &props);
@@ -563,16 +564,22 @@ static void cell_size_fail(Fsr1Pass *p) {
     if (!image_make(&src, w, h, VK_FORMAT_R8G8B8A8_UNORM)) { CHECK(0, "source image"); return; }
     for (int i = 0; i < w * h; i++) g.map[i] = grey(128u);
     source_fill(&src, w, h, 1);
+    CHECK(upscale(p, &src, w, h, 128, 96, FSR1_SHARPNESS_DEFAULT) != VK_NULL_HANDLE,
+          "the good size before the refusal gave no image");
     unsigned before = fsr1_size_builds(p);
     CHECK(upscale(p, &src, w, h, big, 96, FSR1_SHARPNESS_DEFAULT) == VK_NULL_HANDLE,
           "a size past the device limit (%d) gave an image", big);
     CHECK(upscale(p, &src, w, h, big, 96, FSR1_SHARPNESS_DEFAULT) == VK_NULL_HANDLE,
           "the failed size gave an image the second time");
-    CHECK(fsr1_size_builds(p) == before + 1u,
-          "the failed size was rebuilt %u times, not once (a device wait per present)",
+    CHECK(fsr1_size_builds(p) == before,
+          "the size past the limit was built %u time(s): the good size's images were freed first",
           fsr1_size_builds(p) - before);
     CHECK(upscale(p, &src, w, h, 128, 96, FSR1_SHARPNESS_DEFAULT) != VK_NULL_HANDLE,
-          "a size that fits failed after a size that did not");
+          "the good size failed after a size that did not fit");
+    CHECK(fsr1_size_builds(p) == before,
+          "going back to the good size rebuilt its images %u time(s)", fsr1_size_builds(p) - before);
+    CHECK(upscale(p, &src, w, h, 160, 96, FSR1_SHARPNESS_DEFAULT) != VK_NULL_HANDLE,
+          "a new size that fits failed after a size that did not");
     image_free(&src);
 }
 

@@ -530,14 +530,20 @@ static int make_image(Fsr3FgPass *p, const ImageSpec *s) {
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     ii.usage = s->usage;
-    if (p->CreateImage(p->dev, &ii, NULL, &im->image) != VK_SUCCESS) return 0;
+    /* Each handle is stored only once its create succeeded: Vulkan leaves a failed create's output
+       undefined, and the destroy path frees whatever is stored. */
+    VkImage image = VK_NULL_HANDLE;
+    if (p->CreateImage(p->dev, &ii, NULL, &image) != VK_SUCCESS) return 0;
+    im->image = image;
     VkMemoryRequirements mr;
     p->GetImageMemoryRequirements(p->dev, im->image, &mr);
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
                                  memory_type(p, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
-    if (mai.memoryTypeIndex == UINT32_MAX || p->AllocateMemory(p->dev, &mai, NULL, &im->memory) != VK_SUCCESS ||
-        p->BindImageMemory(p->dev, im->image, im->memory, 0) != VK_SUCCESS)
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    if (mai.memoryTypeIndex == UINT32_MAX || p->AllocateMemory(p->dev, &mai, NULL, &memory) != VK_SUCCESS)
         return 0;
+    im->memory = memory;
+    if (p->BindImageMemory(p->dev, im->image, im->memory, 0) != VK_SUCCESS) return 0;
     p->memory_bytes += mr.size;
     im->view = make_view(p, im->image, im->format, 0, im->mips);
     if (!im->view) return 0;
@@ -557,14 +563,19 @@ static int make_counters(Fsr3FgPass *p) {
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = COUNTERS_BYTES;
     bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    if (p->CreateBuffer(p->dev, &bi, NULL, &p->counters) != VK_SUCCESS) return 0;
+    VkBuffer counters = VK_NULL_HANDLE;
+    if (p->CreateBuffer(p->dev, &bi, NULL, &counters) != VK_SUCCESS) return 0;
+    p->counters = counters;
     VkMemoryRequirements mr;
     p->GetBufferMemoryRequirements(p->dev, p->counters, &mr);
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
                                  memory_type(p, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
-    if (mai.memoryTypeIndex == UINT32_MAX || p->AllocateMemory(p->dev, &mai, NULL, &p->counters_memory) != VK_SUCCESS ||
-        p->BindBufferMemory(p->dev, p->counters, p->counters_memory, 0) != VK_SUCCESS)
+    VkDeviceMemory counters_memory = VK_NULL_HANDLE;
+    if (mai.memoryTypeIndex == UINT32_MAX ||
+        p->AllocateMemory(p->dev, &mai, NULL, &counters_memory) != VK_SUCCESS)
         return 0;
+    p->counters_memory = counters_memory;
+    if (p->BindBufferMemory(p->dev, p->counters, p->counters_memory, 0) != VK_SUCCESS) return 0;
     p->memory_bytes += mr.size;
     return 1;
 }
@@ -582,19 +593,25 @@ static int make_pipe(Fsr3FgPass *p, uint32_t pass) {
         b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo dci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, l->count, b };
-    if (p->CreateDescriptorSetLayout(p->dev, &dci, NULL, &pp->dsl) != VK_SUCCESS) return 0;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    if (p->CreateDescriptorSetLayout(p->dev, &dci, NULL, &dsl) != VK_SUCCESS) return 0;
+    pp->dsl = dsl;
     VkPipelineLayoutCreateInfo lci;
     memset(&lci, 0, sizeof(lci));
     lci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     lci.setLayoutCount = 1;
     lci.pSetLayouts = &pp->dsl;
-    if (p->CreatePipelineLayout(p->dev, &lci, NULL, &pp->layout) != VK_SUCCESS) return 0;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (p->CreatePipelineLayout(p->dev, &lci, NULL, &layout) != VK_SUCCESS) return 0;
+    pp->layout = layout;
     VkShaderModuleCreateInfo mi;
     memset(&mi, 0, sizeof(mi));
     mi.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     mi.codeSize = k_spv[pass].bytes;
     mi.pCode = k_spv[pass].code;
-    if (p->CreateShaderModule(p->dev, &mi, NULL, &pp->module) != VK_SUCCESS) return 0;
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (p->CreateShaderModule(p->dev, &mi, NULL, &module) != VK_SUCCESS) return 0;
+    pp->module = module;
     /* The search's wave sums are written for 32 lanes, all of them active. */
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rs;
     memset(&rs, 0, sizeof(rs));
@@ -612,7 +629,10 @@ static int make_pipe(Fsr3FgPass *p, uint32_t pass) {
         ci.stage.flags = VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
     }
     ci.layout = pp->layout;
-    return p->CreateComputePipelines(p->dev, VK_NULL_HANDLE, 1, &ci, NULL, &pp->pipeline) == VK_SUCCESS;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (p->CreateComputePipelines(p->dev, VK_NULL_HANDLE, 1, &ci, NULL, &pipeline) != VK_SUCCESS) return 0;
+    pp->pipeline = pipeline;
+    return 1;
 }
 
 static int make_constants(Fsr3FgPass *p) {
@@ -626,15 +646,21 @@ static int make_constants(Fsr3FgPass *p) {
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = p->constants_stride * FSR3FG_MAX_STAGES * CALLS * p->init.frames_in_flight;
     bi.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-    if (p->CreateBuffer(p->dev, &bi, NULL, &p->constants) != VK_SUCCESS) return 0;
+    VkBuffer constants = VK_NULL_HANDLE;
+    if (p->CreateBuffer(p->dev, &bi, NULL, &constants) != VK_SUCCESS) return 0;
+    p->constants = constants;
     VkMemoryRequirements mr;
     p->GetBufferMemoryRequirements(p->dev, p->constants, &mr);
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
                                  memory_type(p, mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
     void *map = NULL;
-    if (mai.memoryTypeIndex == UINT32_MAX || p->AllocateMemory(p->dev, &mai, NULL, &p->constants_memory) != VK_SUCCESS ||
-        p->BindBufferMemory(p->dev, p->constants, p->constants_memory, 0) != VK_SUCCESS ||
+    VkDeviceMemory constants_memory = VK_NULL_HANDLE;
+    if (mai.memoryTypeIndex == UINT32_MAX ||
+        p->AllocateMemory(p->dev, &mai, NULL, &constants_memory) != VK_SUCCESS)
+        return 0;
+    p->constants_memory = constants_memory;
+    if (p->BindBufferMemory(p->dev, p->constants, p->constants_memory, 0) != VK_SUCCESS ||
         p->MapMemory(p->dev, p->constants_memory, 0, VK_WHOLE_SIZE, 0, &map) != VK_SUCCESS)
         return 0;
     p->constants_map = map;
@@ -662,7 +688,9 @@ static int make_sets(Fsr3FgPass *p) {
     pci.maxSets = slots * p->sets_per_slot;
     pci.poolSizeCount = DK_COUNT;
     pci.pPoolSizes = sizes;
-    if (p->CreateDescriptorPool(p->dev, &pci, NULL, &p->pool) != VK_SUCCESS) return 0;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (p->CreateDescriptorPool(p->dev, &pci, NULL, &pool) != VK_SUCCESS) return 0;
+    p->pool = pool;
     p->sets = calloc((size_t)slots * p->sets_per_slot, sizeof(*p->sets));
     if (!p->sets) return 0;
     for (uint32_t s = 0; s < slots; s++)
@@ -688,7 +716,9 @@ static int make_samplers(Fsr3FgPass *p) {
         si.minLod = 0.0f;
         si.maxLod = VK_LOD_CLAMP_NONE;
         si.borderColor = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
-        if (p->CreateSampler(p->dev, &si, NULL, &p->samplers[k]) != VK_SUCCESS) return 0;
+        VkSampler sampler = VK_NULL_HANDLE;
+        if (p->CreateSampler(p->dev, &si, NULL, &sampler) != VK_SUCCESS) return 0;
+        p->samplers[k] = sampler;
     }
     return 1;
 }
