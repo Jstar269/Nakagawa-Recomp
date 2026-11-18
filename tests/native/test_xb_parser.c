@@ -2345,7 +2345,13 @@ static void test_title_staging_reuses_past_a_stuck_leftover(void) {
     CloseHandle(holder);
     bool stuck = true;
 #else
-    assert(chmod(path, 0700) == 0);
+    /* A superuser (a root container) reads past the permission and removes
+     * the leftover, so the folder may be gone; anyone else finds it kept. */
+    if (nk_platform_dir_exists(path)) {
+        assert(chmod(path, 0700) == 0);
+    } else {
+        assert(!stuck);
+    }
 #endif
     assert(result == NK_OK);
     assert(outcome == PLAYER_STAGE_TITLE_REUSED);
