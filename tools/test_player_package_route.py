@@ -669,7 +669,7 @@ class TestReleaseDocumentation(unittest.TestCase):
         upload = workflow[workflow.index("- name: Upload the attested candidate bundle"):]
         upload = upload.split("\n      - name:", 1)[0]
         self.assertIn("include-hidden-files: true", upload)
-        self.assertIn("'^\\.(iso|prx|elf|eboot|sav|key|pgf|pgd)$'", preview)
+        self.assertIn("'^\\.(iso|prx|elf|pbp|cso|sfo|bin|edat|pmf|at3|vag|gim|psar|chd|dax|sav|key|pgf|pgd)$'", preview)
         self.assertIn("$relative -notmatch '^bin/font/nk[^/]*\\.pgf$'", preview)
         self.assertIn("$relative -notlike 'bin/demos/*'", preview)
         self.assertEqual(preview.count("$relative -not"), 2)
