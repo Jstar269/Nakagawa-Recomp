@@ -135,6 +135,51 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+class TreeListingExitTests(unittest.TestCase):
+    """The ls-tree reader judges git by its exit status, not by when it exits (audit 2026-11-17).
+
+    git closes its stdout before its exit work, so the reader can reach EOF while git is
+    still running. Killing it then made a complete listing fail on Windows (TerminateProcess
+    leaves exit status 1) and hid a real failure on POSIX (a kill reads as -9, which was
+    accepted).
+    """
+
+    #: Stands in for ``git ls-tree``: one valid entry, stdout closed, then a pause before
+    #: the exit status given on the command line, as git's own exit work takes.
+    STUB = (
+        "import os, sys, time\n"
+        "sys.stdout.buffer.write(b'100644 blob ' + b'a' * 40 + b'\\tREADME.md\\0')\n"
+        "sys.stdout.buffer.flush()\n"
+        "os.close(1)\n"
+        "time.sleep(0.5)\n"
+        "sys.exit(int(sys.argv[1]))\n"
+    )
+
+    def _listing(self, status: int) -> list[tuple[str, str]]:
+        real_popen = subprocess.Popen
+
+        def stub_popen(args, *rest, **kwargs):
+            if list(args[:2]) == ["git", "ls-tree"]:
+                args = [sys.executable, "-I", "-c", self.STUB, str(status)]
+            return real_popen(args, *rest, **kwargs)
+
+        with tempfile.TemporaryDirectory() as root:
+            original = verifier.subprocess.Popen
+            verifier.subprocess.Popen = stub_popen  # type: ignore[misc]
+            try:
+                return list(verifier._stream_tree_entries(Path(root), "0" * 40))
+            finally:
+                verifier.subprocess.Popen = original  # type: ignore[misc]
+
+    def test_a_listing_whose_git_exits_after_eof_succeeds(self) -> None:
+        self.assertEqual(self._listing(0), [("README.md", "a" * 40)])
+
+    def test_a_git_failure_after_eof_is_reported(self) -> None:
+        with self.assertRaises(verifier.VerifyError) as caught:
+            self._listing(3)
+        self.assertEqual(caught.exception.code, "GIT_ERROR")
+
+
 class Repository:
     """A throwaway Git repository whose trees are the verifier's input."""
 
@@ -1423,6 +1468,55 @@ class TrustedScopeTests(GateCase):
         head = self.repo.commit("exclude my own new source")
         self.assertFatal(self.run_verify(head), "TRUSTED_SCOPE_VIOLATION")
 
+    def test_a_candidate_authored_exclusion_cannot_hide_other_source_languages(self) -> None:
+        """Java, Gradle/Kotlin scripts, assembly and shaders are implementation too (audit 2026-11-17)."""
+        sources = (
+            "android/app/src/main/java/example/Payload.java",
+            "android/app/build2.gradle.kts",
+            "android/app/extra.gradle",
+            "android/app/src/main/kotlin/Payload.kt",
+            "tests/fixtures/probe/payload.S",
+            "assets/payload.asm",
+            "assets/shaders/payload.comp",
+            "assets/shaders/payload.frag",
+            "assets/shaders/payload.vert",
+            "assets/shaders/payload.glsl",
+            "assets/shaders/payload.hlsl",
+        )
+        for path in sources:
+            with self.subTest(path=path):
+                self.repo.branch(f"attack-{abs(hash(path))}", self.base)
+                self.repo.write(path, b"payload\n")
+                document = dict(POLICY)
+                document["include_paths"] = sorted(
+                    set(self.FILES) | {TRUSTED_WORKFLOW, verifier.LEDGER_PATH, verifier.EXPORT_PATH}
+                )
+                document["exclude_paths"] = sorted(set(POLICY["exclude_paths"]) | {path})
+                self.repo.write(verifier.POLICY_PATH, json.dumps(document, indent=2) + "\n")
+                head = self.repo.commit(f"exclude my own new {path}")
+                verdict = self.run_verify(head)
+                self.assertIn(("TRUSTED_SCOPE_VIOLATION", path), {
+                    (item["code"], item["path"]) for item in verdict["findings"] if item["fatal"]
+                })
+
+    def test_narrowing_scope_is_reported_as_the_authors_to_fix(self) -> None:
+        """Only a new-path scope finding is a maintainer's admission (audit 2026-11-17).
+
+        Dropping a published path from include_paths is the author's change. The per-finding
+        flag says so, and the guidance must not override it from the code name alone.
+        """
+        verdict = self.run_verify(self._drop_from_scope(self.BACKED, change_bytes=False))
+        scope = [item for item in verdict["findings"] if item["code"] == "TRUSTED_SCOPE_VIOLATION"]
+        self.assertTrue(scope)
+        self.assertFalse(any(item["maintainer_action"] for item in scope))
+        for render in (verifier._print_guidance, verifier._print_contributor_summary):
+            with self.subTest(render=render.__name__):
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    render(verdict)
+                self.assertNotIn("nothing for you to do", buffer.getvalue())
+                self.assertNotIn("maintainer will admit", buffer.getvalue())
+
     def test_widening_scope_is_allowed(self) -> None:
         """Coverage may grow; the new path just has to satisfy provenance."""
         self.repo.branch("work", self.base)
@@ -2165,6 +2259,47 @@ class MergePathTamperTests(GateCase):
         )
         head = self._commit_workflow(".github/workflows/spoof.yml", raw)
         self.assertFatal(self.run_verify(head), "CI_CONTEXT_COLLISION")
+
+    def test_a_reserved_context_spelled_another_static_yaml_way_is_refused(self) -> None:
+        """YAML resolves escapes and folding before GitHub reads the job name (audit 2026-11-17).
+
+        None of these files holds the reserved context as one byte run, yet each
+        names the job exactly that once parsed, so a byte search let them through.
+        """
+        spellings = {
+            "hex escape": b'    name: "Trusted provenance\\x20attestation"\n',
+            "unicode escape": b'    name: "Trusted\\u0020provenance attestation"\n',
+            "escaped line break": b'    name: "Trusted provenance at\\\n      testation"\n',
+            "folded block scalar": b"    name: >-\n      Trusted provenance\n      attestation\n",
+            "plain multi-line scalar": b"    name: Trusted provenance\n      attestation\n",
+            "other letter case": b"    name: trusted Provenance ATTESTATION\n",
+        }
+        for label, name_line in spellings.items():
+            with self.subTest(spelling=label):
+                raw = (
+                    b"on: [pull_request]\njobs:\n  spoof:\n" + name_line
+                    + b"    steps:\n      - run: exit 0\n"
+                )
+                self.assertNotIn(RESERVED_CONTEXT.encode("utf-8"), raw)
+                findings = verifier._ci_findings({".github/workflows/spoof.yml": raw}, {})
+                self.assertIn(
+                    ("CI_CONTEXT_COLLISION", ".github/workflows/spoof.yml"),
+                    {(item.code, item.path) for item in findings if item.fatal},
+                )
+        raw = (
+            b"on: [pull_request]\njobs:\n  spoof:\n" + spellings["folded block scalar"]
+            + b"    steps:\n      - run: exit 0\n"
+        )
+        head = self._commit_workflow(".github/workflows/spoof.yml", raw)
+        self.assertFatal(self.run_verify(head), "CI_CONTEXT_COLLISION")
+
+    def test_an_unrelated_job_name_is_not_a_context_collision(self) -> None:
+        raw = (
+            b"on: [pull_request]\njobs:\n  build:\n    name: >-\n      Trusted build\n"
+            b"      provenance notes\n    steps:\n      - run: echo attestation\n"
+        )
+        findings = verifier._ci_findings({".github/workflows/build.yml": raw}, {})
+        self.assertNotIn("CI_CONTEXT_COLLISION", {item.code for item in findings})
 
     def test_deleting_the_trusted_workflow_is_refused(self) -> None:
         self.repo.branch("attack", self.base)
@@ -3053,6 +3188,47 @@ class EphemeralGenerationBehaviorTests(EphemeralGenerationTests):
                     finding["code"] for finding in verdict["findings"] if finding["fatal"]
                 })
 
+    def test_content_under_an_unbacked_claim_fails_without_a_committed_ledger(self) -> None:
+        """The claim checks read the generated ledger when the candidate commits none (audit 2026-11-17).
+
+        README.md inherits a claim the trusted authority does not support. Changing it is
+        CONTENT_UNATTESTED with the committed ledger present; deleting that ledger must
+        not turn the same change into a pass.
+        """
+        self.repo.branch("without-ledger-changed-claim", self.base)
+        self.repo.remove(verifier.LEDGER_PATH)
+        self.repo.remove(verifier.EXPORT_PATH)
+        self.repo.write("README.md", b"# fixture, rewritten under an inherited claim\n")
+        head = self.repo.commit("change a path under an unbacked claim without the ledger")
+
+        verdict = self.run_ephemeral(head)
+
+        self.assertEqual(verdict["verdict"], "fail")
+        self.assertIn(("CONTENT_UNATTESTED", "README.md"), {
+            (finding["code"], finding["path"]) for finding in verdict["findings"] if finding["fatal"]
+        })
+
+    def test_frozen_debt_is_reported_without_a_committed_ledger(self) -> None:
+        self.repo.branch("without-ledger-frozen", self.base)
+        self.repo.remove(verifier.LEDGER_PATH)
+        self.repo.remove(verifier.EXPORT_PATH)
+        head = self.repo.commit("remove legacy controls only")
+
+        verdict = self.run_ephemeral(head)
+
+        self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+        self.assertIn("README.md", {item["path"] for item in verdict["grandfathered_debt"]})
+
+    def test_the_ephemeral_verdict_never_discloses_a_private_record_id(self) -> None:
+        """verify() withholds a record id the public ledger does not name; so must ephemeral mode."""
+        verdict = self.run_ephemeral(self.base)
+
+        self.assertNotIn("private-only-record", json.dumps(verdict))
+        entry = next(item for item in verdict["grandfathered_debt"] if item["path"] == "README.md")
+        self.assertEqual(entry["trusted_record_id"], verifier.WITHHELD)
+        core = [item for item in verdict["grandfathered_debt"] if item["path"] == "src/rt/core.c"]
+        self.assertEqual(core, [], "core.c agrees with the trusted authority and is not debt")
+
     def test_controls_are_generated_outside_the_candidate_tree(self) -> None:
         self.repo.branch("without-legacy-controls", self.base)
         self.repo.remove(verifier.LEDGER_PATH)
@@ -3509,6 +3685,49 @@ class EphemeralGenerationBehaviorTests(EphemeralGenerationTests):
 
         self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
         self.assertEqual(verdict["policy_delta"]["rule_changes"], ["exclude_rationale"])
+
+    def test_a_v2_delta_authorizes_removing_an_exclusion_glob_or_prefix(self) -> None:
+        """A trusted exclusion rule may go with an authority bound to both values (audit 2026-11-17)."""
+        for key in ("exclude_globs", "exclude_prefixes"):
+            with self.subTest(key=key):
+                self.repo.branch(f"drop-{key}", self.base)
+                policy_path = self.repo.root / verifier.POLICY_PATH
+                baseline_raw = policy_path.read_bytes()
+                baseline = json.loads(baseline_raw.decode("utf-8"))
+                candidate = dict(baseline, **{key: []})
+                self.assertTrue(baseline[key])
+                candidate_raw = _canonical(candidate)
+                self.repo.write(verifier.POLICY_PATH, candidate_raw)
+                head = self.repo.commit(f"drop the trusted {key}")
+                bound = {
+                    "key": key,
+                    "baseline_sha256": provenance_ledger.policy_rule_value_sha256(baseline, key),
+                    "candidate_sha256": provenance_ledger.policy_rule_value_sha256(candidate, key),
+                }
+                blessed_policy, authority = self._rule_authority(baseline_raw, candidate_raw, [bound])
+
+                verdict = self.run_ephemeral(
+                    head, trusted_candidate_policy=blessed_policy, policy_delta_authority=authority,
+                )
+
+                self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
+                self.assertNotIn("POLICY_SUBSTITUTION", {item["code"] for item in verdict["findings"]})
+
+    def test_an_exclusion_rule_change_without_its_authority_is_still_refused(self) -> None:
+        trusted = load_policy(self.repo.root / verifier.POLICY_PATH)
+        self.repo.write(verifier.POLICY_PATH, _canonical(dict(
+            json.loads((self.repo.root / verifier.POLICY_PATH).read_text(encoding="utf-8")),
+            exclude_globs=[], exclude_prefixes=[],
+        )))
+        candidate = load_policy(self.repo.root / verifier.POLICY_PATH)
+        for authorized in (None, {"exclude_removed": [], "rule_changes": ["exclude_rationale"]}):
+            with self.subTest(authorized=authorized):
+                findings = verifier._policy_findings(candidate, trusted, authorized_delta=authorized)
+                self.assertEqual(
+                    sorted(item.detail for item in findings if item.code == "POLICY_SUBSTITUTION"),
+                    ["candidate policy removes the trusted exclude_globs entry *.iso",
+                     "candidate policy removes the trusted exclude_prefixes entry private/"],
+                )
 
     def test_a_v2_delta_refuses_a_rule_change_bound_to_another_value(self) -> None:
         head, baseline_raw, candidate_raw, baseline, _candidate = self._rule_change_head()
@@ -4164,6 +4383,30 @@ class PolicyDeltaV4Tests(_PolicyDeltaV4Fixture):
                                 "--policy-delta-key-v4"])
         self.assertEqual(rc, 2)
         self.assertIn("POLICY_DELTA_EMPTY", err.getvalue())
+
+    def test_policy_delta_keys_read_the_profiles_without_the_whole_base_tree(self) -> None:
+        head = self._change("pr-a", self.base, {self.NEW_A: b"# a\n"}, include=[self.NEW_A])
+        expected_v4 = self._v4(self.base, head).stem.split("-", 1)[1]
+        expected_v3 = verifier.policy_delta_key(repo=self.repo.root, base_rev=self.base, candidate_rev=head)
+        whole_tree = verifier.read_tree
+        with mock.patch.object(verifier, "read_tree", side_effect=whole_tree) as reads:
+            self.assertEqual(
+                verifier.policy_delta_key_v4(repo=self.repo.root, base_rev=self.base, candidate_rev=head),
+                expected_v4)
+            self.assertEqual(reads.call_count, 0)
+            self.assertEqual(
+                verifier.policy_delta_key(repo=self.repo.root, base_rev=self.base, candidate_rev=head),
+                expected_v3)
+            # The candidate's hashes are part of a V3 document; the base gives its profile alone.
+            self.assertEqual(reads.call_count, 1)
+
+        tree = verifier._rev_tree(self.repo.root, head)
+        profile = whole_tree(self.repo.root, tree)[verifier.POLICY_PATH]
+        self.assertEqual(verifier.read_tree_file(self.repo.root, tree, verifier.POLICY_PATH), profile)
+        self.assertIsNone(verifier.read_tree_file(self.repo.root, tree, "no/such/file.json"))
+        with self.assertRaises(verifier.VerifyError) as raised:
+            verifier.read_tree_file(self.repo.root, tree, verifier.POLICY_PATH, limit=len(profile) - 1)
+        self.assertEqual(raised.exception.code, "TREE_TOO_LARGE")
 
     # -- byte-identical imports after landing -----------------------------------
 

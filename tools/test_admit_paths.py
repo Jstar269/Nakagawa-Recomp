@@ -1937,7 +1937,8 @@ class HookCheckTest(unittest.TestCase):
         self.enterContext(mock.patch.object(admit_paths, "_identify_filename_tags", return_value=set()))
 
         def findings(data: bytes) -> dict[str, str]:
-            return admit_paths.rewriting_hook_findings(data, "notes")
+            found: dict[str, str] = admit_paths.rewriting_hook_findings(data, "notes")
+            return found
 
         self.assertEqual(findings(b""), {})
         self.assertEqual(findings(b"clean\ntext\n"), {})

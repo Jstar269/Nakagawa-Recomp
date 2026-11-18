@@ -171,9 +171,10 @@ def audit(root: Path, manifest_relative: Path, tracked_only: bool) -> tuple[list
             source = record.get("generated_from")
             if data is None:
                 _add(findings, f"generated output is missing: {path}")
-            if _repository_path(source) is None:
+            source_path = _repository_path(source)
+            if source_path is None:
                 _add(findings, f"manifest generated_from escapes repository scope for {path}: {source}")
-            elif _read(root, source, tracked_only) is None:
+            elif _read(root, source_path, tracked_only) is None:
                 _add(findings, f"generated source is missing for {path}: {source}")
             continue
         checked_text += 1
@@ -231,10 +232,11 @@ def audit(root: Path, manifest_relative: Path, tracked_only: bool) -> tuple[list
             _add(findings, f"{path}: expected SPDX identifier is absent")
         if LINEAGE_HEADER not in text:
             _add(findings, f"{path}: immediate sal063 attribution is absent")
-        notice = record.get("modified_notice")
-        if not isinstance(notice, str) or not notice.startswith("Modified by Nakagawa Recomp contributors"):
+        recorded_notice = record.get("modified_notice")
+        if not isinstance(recorded_notice, str) or not recorded_notice.startswith(
+                "Modified by Nakagawa Recomp contributors"):
             _add(findings, f"{path}: manifest does not record the file's modified-file notice")
-        elif notice not in text:
+        elif recorded_notice not in text:
             _add(findings, f"{path}: explicit modified-file notice is absent")
         pointer = record.get("pointer")
         if not isinstance(pointer, str) or pointer not in text:

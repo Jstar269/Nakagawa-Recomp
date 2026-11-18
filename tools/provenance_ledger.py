@@ -95,12 +95,14 @@ try:
     from .nk_core.git_isolation import isolated_git_env
     from .public_export import build_control_document as _build_control_document
     from .public_export import build_document as _build_export_document
+    from .public_export import index_files as _index_files
     from .public_export import write_document as _write_json_document
     from .publication_policy import load_policy as _load_publication_policy
 except ImportError:
     from nk_core.git_isolation import isolated_git_env  # type: ignore[no-redef]
     from public_export import build_control_document as _build_control_document  # type: ignore[no-redef]
     from public_export import build_document as _build_export_document  # type: ignore[no-redef]
+    from public_export import index_files as _index_files  # type: ignore[no-redef]
     from public_export import write_document as _write_json_document  # type: ignore[no-redef]
     from publication_policy import load_policy as _load_publication_policy  # type: ignore[no-redef]
 
@@ -1152,36 +1154,14 @@ def _tracked_paths() -> list[str]:
 
 
 def _index_blobs() -> dict[str, bytes]:
-    """Read every index blob in one batch, avoiding a process per file."""
-    raw = _git("ls-files", "-s", "-z")
-    requests: list[tuple[str, str]] = []
-    for item in raw.split("\0"):
-        parts = item.split(None, 3)
-        if len(parts) == 4:
-            requests.append((parts[3], parts[1]))
-    if not requests:
-        return {}
-    proc = subprocess.Popen(
-        ["git", "cat-file", "--batch"], cwd=ROOT,
-        env=isolated_git_env(root=ROOT),
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-    )
-    assert proc.stdin and proc.stdout
-    stdout, _ = proc.communicate(("".join(f"{sha}\n" for _, sha in requests)).encode("ascii"))
-    blobs: dict[str, bytes] = {}
-    pos = 0
-    for path, _ in requests:
-        header_end = stdout.find(b"\n", pos)
-        if header_end < 0:
-            break
-        header = stdout[pos:header_end].split()
-        pos = header_end + 1
-        if len(header) < 3 or header[1] != b"blob":
-            continue
-        size = int(header[2])
-        blobs[path] = stdout[pos:pos + size]
-        pos += size + 1
-    return blobs
+    """Read every index blob in one batch, avoiding a process per file.
+
+    This is the reader the export is computed over: each ``ls-files -s`` record
+    is split at its tab (a leading space stays in the path), only blob modes are
+    read (a gitlink names a commit, not content of this tree), and a short,
+    mismatched or failed ``cat-file`` response raises instead of skipping a path.
+    """
+    return dict(_index_files(ROOT))
 
 
 def _implementation_records(implementation_ledger: Path = IMPLEMENTATION_LEDGER) -> dict[str, dict]:

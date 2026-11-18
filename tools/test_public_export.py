@@ -871,8 +871,8 @@ class TestIndexFilesReadsTheWholeIndex(unittest.TestCase):
         _git(["init", "-q"], root)
 
     def _stage_blob(self, root: Path, path: str, data: bytes) -> str:
-        sha = run_git(["hash-object", "-w", "--stdin"], cwd=root, check=True,
-                      capture_output=True, input=data).stdout.decode("ascii").strip()
+        sha: str = run_git(["hash-object", "-w", "--stdin"], cwd=root, check=True,
+                           capture_output=True, input=data).stdout.decode("ascii").strip()
         _git(["update-index", "--add", "--cacheinfo", f"100644,{sha},{path}"], root)
         return sha
 

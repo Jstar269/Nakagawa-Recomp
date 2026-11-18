@@ -290,7 +290,7 @@ class ProvenanceRefreshApplyPolicyRollbackTests(unittest.TestCase):
         self.ledger.write_text('{"records": []}\n', encoding="utf-8")
 
     def _index_entry(self) -> str:
-        return _git(self.root, "ls-files", "-s", "--", POLICY).stdout
+        return str(_git(self.root, "ls-files", "-s", "--", POLICY).stdout)
 
     def test_a_refused_refresh_restores_the_profile_and_its_index_entry(self) -> None:
         before_bytes = (self.root / POLICY).read_bytes()

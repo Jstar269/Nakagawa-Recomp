@@ -647,6 +647,46 @@ class ProvenanceFailClosedTest(unittest.TestCase):
         self.assertEqual(document["entries"][0]["sha256"],
                          hashlib.sha256(b"# synthetic fixture\n").hexdigest())
 
+    def _stage_blob(self, repo: Path, path: str, content: bytes) -> None:
+        """Put ``path`` in the index only, so its name never meets a host filesystem."""
+        sha = run_git(["hash-object", "-w", "--stdin"], cwd=repo, input=content,
+                      check=True, capture_output=True).stdout.decode("ascii").strip()
+        run_git(["update-index", "--add", "--cacheinfo", f"100644,{sha},{path}"],
+                cwd=repo, check=True, capture_output=True)
+
+    def test_a_tracked_path_with_a_leading_space_is_hashed_under_its_own_name(self) -> None:
+        """FAILING_BEFORE: ``split(None, 3)`` stripped the leading space, so the blob was
+        keyed ``docs/lead.md`` and build_ledger stopped with 'tracked path has no index
+        blob: " docs/lead.md"'."""
+        name = " docs/lead.md"
+        repo, policy = self._hermetic_repo({}, [name])
+        self._stage_blob(repo, name, b"# synthetic fixture\n")
+        output = repo.parent / "out" / "public_provenance_ledger.json"
+        document = self._run_build_ledger(repo, policy, self._detailed_ledger(repo, []), output)
+        self.assertEqual([entry["path"] for entry in document["entries"]], [name])
+        self.assertEqual(document["entries"][0]["sha256"],
+                         hashlib.sha256(b"# synthetic fixture\n").hexdigest())
+
+    def test_a_gitlink_in_the_index_does_not_shift_later_paths(self) -> None:
+        """FAILING_BEFORE: a non-blob header was skipped without its payload, so the
+        commit's body was read as the next path's header and build_ledger stopped with
+        'tracked path has no index blob: tools/z.md'."""
+        repo, policy = self._hermetic_repo(
+            {"docs/a.md": "# synthetic fixture a\n", "tools/z.md": "# synthetic fixture z\n"},
+            ["docs/a.md", "tools/z.md"],
+        )
+        head = run_git(["rev-parse", "HEAD"], cwd=repo, check=True,
+                       capture_output=True).stdout.decode("ascii").strip()
+        run_git(["update-index", "--add", "--cacheinfo", f"160000,{head},sub"],
+                cwd=repo, check=True, capture_output=True)
+        output = repo.parent / "out" / "public_provenance_ledger.json"
+        document = self._run_build_ledger(repo, policy, self._detailed_ledger(repo, []), output)
+        by_path = {entry["path"]: entry["sha256"] for entry in document["entries"]}
+        self.assertEqual(by_path, {
+            "docs/a.md": hashlib.sha256(b"# synthetic fixture a\n").hexdigest(),
+            "tools/z.md": hashlib.sha256(b"# synthetic fixture z\n").hexdigest(),
+        })
+
     def test_assembled_probes_and_compiled_scripts_need_implementation_authority(self) -> None:
         """A path-rule class never covers source the build assembles or compiles.
 
