@@ -66,7 +66,9 @@ Every derived file below is labelled `derived-translated` in the trusted provena
 - LOCAL DELTA, 2026-11-18: `nk_psp_kle.c` takes its probability contexts from the output offset and the
   `copyCountBitsProbs` index instead of the low bits of host pointers, and drops a pointer comparison that could never
   be true; `nk_psp_aes.c`'s `AES_cbc_decrypt` returns at once for an empty run; `nk_psp_kirk.c`'s `kirk4`/`kirk7`
-  refuse an empty pass. Each file header records its change.
+  refuse an empty pass. In `nk_psp_kirk.c/.h` the CMD1 wrapping key is read from the caller's context for each
+  command instead of a process-wide AES schedule, and CMD1, CMD4, CMD7 and CMD11 refuse an output size smaller than
+  what they write. Each file header records its change.
 - Licence note: a GPL-3.0-only file can be combined with the project's GPL-3.0-or-later files; the player and
   `nk_decrypt`, which link them, are conveyed under the GNU GPL version 3 (`NOTICE.md`).
 

@@ -2510,6 +2510,21 @@ static void test_nk_psp_inflate_unit(void) {
         free(out); out = NULL; out_len = 0;
     }
 
+    /* A zlib header whose body fails, and whose raw retry fails differently:
+     * the zlib attempt reads 07 (final block of the reserved type 3, FORMAT)
+     * and the raw retry a stored block of 0x79C bytes cut after one
+     * (TRUNCATED). The code returned is the zlib attempt's, so the message is
+     * its own; it used to carry the raw retry's "truncated stored block". */
+    {
+        static const uint8_t zlib_bad_body[6] = {0x78u, 0x9Cu, 0x07u, 0x63u, 0xF8u, 0x00u};
+        err[0] = '\0';
+        assert(nk_psp_inflate(zlib_bad_body, sizeof(zlib_bad_body), &out, &out_len, 0,
+                              FUZZ_INFLATE_CAP, err, sizeof(err)) == NK_INFLATE_ERR_FORMAT);
+        assert(out == NULL && out_len == 0u);
+        assert(strstr(err, "invalid deflate block type") != NULL);
+        assert(strstr(err, "truncated") == NULL);
+    }
+
     /* Raw DEFLATE beginning 08 3C: the zlib header test passes and the FDICT
      * bit (byte 1, bit 5) is set, but the bytes are valid raw DEFLATE: a
      * non-final stored block of 60 bytes, then an empty final stored block.
@@ -2958,6 +2973,179 @@ static void test_kirk_pass_of_zero_bytes_is_refused(void) {
     assert(kirk7(&ctx, out, in, 16, FUZZ_PSP_CODE) == KIRK_OPERATION_SUCCESS);
     nk_keystore_free(ks);
     printf("[KIRK] Empty KIRK passes refused\n");
+    fflush(stdout);
+}
+
+/* A CMD1 block of data_size bytes (a multiple of 16, at data_offset 0x10)
+ * sealed under cmd1_key the way kirk_CMD10 checks it: the header keys are
+ * CBC-wrapped under cmd1_key, the body CBC-encrypted under the AES key, and
+ * both CMACs taken under the CMAC key. Synthetic keys and bytes only. */
+enum { KIRK_TEST_DATA = 0x40u, KIRK_TEST_CMD1_SIZE = 0x90u + 0x10u + 0x40u };
+static void build_kirk_cmd1(uint8_t in[KIRK_TEST_CMD1_SIZE], const uint8_t cmd1_key[16],
+                            const uint8_t plain[KIRK_TEST_DATA]) {
+    uint8_t keys[32];
+    AES_ctx k;
+    memset(in, 0, KIRK_TEST_CMD1_SIZE);
+    fuzz_fake_key(keys, 7u);
+    fuzz_fake_key(keys + 16, 8u);
+    put32le(in + 0x60, 1u);               /* KIRK_MODE_CMD1 */
+    put32le(in + 0x70, KIRK_TEST_DATA);   /* data_size */
+    put32le(in + 0x74, 0x10u);            /* data_offset */
+    AES_set_key(&k, keys, 128);
+    AES_cbc_encrypt(&k, plain, in + 0x90 + 0x10, (int)KIRK_TEST_DATA);
+    AES_set_key(&k, keys + 16, 128);
+    AES_CMAC(&k, in + 0x60, 0x30, in + 0x20);
+    AES_CMAC(&k, in + 0x60, 0x30 + 0x10 + (int)KIRK_TEST_DATA, in + 0x30);
+    AES_set_key(&k, cmd1_key, 128);
+    AES_cbc_encrypt(&k, keys, in, 32);
+}
+
+static NkKeystore *kirk_test_keystore(int with_cmd1, unsigned cmd1_id) {
+    uint8_t cmd1[16], vault[16];
+    char cmd1_hex[33], vault_hex[33], json[512];
+    fuzz_fake_key(cmd1, cmd1_id);
+    fuzz_fake_key(vault, 2u);
+    fuzz_hex_encode(cmd1, sizeof(cmd1), cmd1_hex);
+    fuzz_hex_encode(vault, sizeof(vault), vault_hex);
+    int n = with_cmd1
+        ? snprintf(json, sizeof(json),
+                   "{\"format\":\"" FUZZ_KEYSTORE_FORMAT "\",\"entries\":{"
+                   "\"kirk.cmd1.key\":\"%s\",\"kirk.keyvault.%d\":\"%s\"}}",
+                   cmd1_hex, FUZZ_PSP_CODE, vault_hex)
+        : snprintf(json, sizeof(json),
+                   "{\"format\":\"" FUZZ_KEYSTORE_FORMAT "\",\"entries\":{"
+                   "\"kirk.keyvault.%d\":\"%s\"}}", FUZZ_PSP_CODE, vault_hex);
+    assert(n > 0 && (size_t)n < sizeof(json));
+    NkKeystore *ks = nk_keystore_create();
+    char err[256];
+    assert(ks != NULL);
+    assert(nk_keystore_load_json(ks, json, (size_t)n, err, sizeof(err)) == NK_PSP_OK);
+    return ks;
+}
+
+/* The CMD1 wrapping key is the one in the KeyStore of the context passed to
+ * the command. It used to live in one process-wide AES schedule that
+ * kirk_init rewrote, so a block sealed under key store A failed once key
+ * store B had been initialised, and a context with no CMD1 key decrypted
+ * with whichever key was initialised last. */
+static void test_kirk_cmd1_key_comes_from_the_callers_ctx(void) {
+    printf("[KIRK] Testing that CMD1 uses the caller's key store...\n");
+    fflush(stdout);
+    uint8_t cmd1_a[16], plain[KIRK_TEST_DATA], in[KIRK_TEST_CMD1_SIZE], out[KIRK_TEST_CMD1_SIZE];
+    fuzz_fake_key(cmd1_a, 1u);
+    for (unsigned i = 0; i < KIRK_TEST_DATA; i++) plain[i] = (uint8_t)(0xA0u ^ (i * 11u));
+    build_kirk_cmd1(in, cmd1_a, plain);
+    NkKeystore *ks_a = kirk_test_keystore(1, 1u);
+    NkKeystore *ks_b = kirk_test_keystore(1, 9u);
+    NkKeystore *ks_none = kirk_test_keystore(0, 0u);
+    NkPspCtx ctx_a, ctx_b, ctx_none;
+
+    nk_psp_ctx_init(&ctx_a, ks_a);
+    nk_psp_ctx_init(&ctx_b, ks_b);
+    assert(kirk_init(&ctx_a) == KIRK_OPERATION_SUCCESS);
+    assert(kirk_init(&ctx_b) == KIRK_OPERATION_SUCCESS);
+    memset(out, FUZZ_CANARY, sizeof(out));
+    nk_psp_ctx_init(&ctx_a, ks_a);
+    assert(sceUtilsBufferCopyWithRange(&ctx_a, out, (int)sizeof(out), in, (int)sizeof(in),
+                                       KIRK_CMD_DECRYPT_PRIVATE) == KIRK_OPERATION_SUCCESS);
+    assert(memcmp(out, plain, sizeof(plain)) == 0);
+    nk_psp_ctx_init(&ctx_b, ks_b);
+    assert(sceUtilsBufferCopyWithRange(&ctx_b, out, (int)sizeof(out), in, (int)sizeof(in),
+                                       KIRK_CMD_DECRYPT_PRIVATE) != KIRK_OPERATION_SUCCESS);
+
+    nk_psp_ctx_init(&ctx_a, ks_a);
+    assert(kirk_init(&ctx_a) == KIRK_OPERATION_SUCCESS);
+    memset(out, FUZZ_CANARY, sizeof(out));
+    nk_psp_ctx_init(&ctx_none, ks_none);
+    assert(sceUtilsBufferCopyWithRange(&ctx_none, out, (int)sizeof(out), in, (int)sizeof(in),
+                                       KIRK_CMD_DECRYPT_PRIVATE) != KIRK_OPERATION_SUCCESS);
+    assert(strcmp(ctx_none.missing_entry, "kirk.cmd1.key") == 0);
+    for (size_t i = 0; i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+    nk_psp_ctx_init(&ctx_none, ks_none);
+    assert(sceUtilsBufferCopyWithRange(&ctx_none, NULL, 0, in, (int)sizeof(in),
+                                       KIRK_CMD_PRIV_SIGN_CHECK) != KIRK_OPERATION_SUCCESS);
+    assert(strcmp(ctx_none.missing_entry, "kirk.cmd1.key") == 0);
+
+    nk_keystore_free(ks_a);
+    nk_keystore_free(ks_b);
+    nk_keystore_free(ks_none);
+    printf("[KIRK] CMD1 keys follow the caller's key store\n");
+    fflush(stdout);
+}
+
+/* Every KIRK command that writes output refuses an output size smaller than
+ * what it would write, and writes nothing. The dispatcher used to drop
+ * outsize for CMD1, CMD4, CMD7 and CMD11, which wrote data_size (or the
+ * 20-byte digest) whatever the caller's buffer held. */
+static void test_kirk_commands_respect_outsize(void) {
+    printf("[KIRK] Testing that KIRK commands respect the output size...\n");
+    fflush(stdout);
+    enum { GUARD = 64 };
+    uint8_t cmd1_a[16], plain[KIRK_TEST_DATA], in[KIRK_TEST_CMD1_SIZE];
+    uint8_t out[KIRK_TEST_CMD1_SIZE + GUARD];
+    fuzz_fake_key(cmd1_a, 1u);
+    for (unsigned i = 0; i < KIRK_TEST_DATA; i++) plain[i] = (uint8_t)(i * 5u + 1u);
+    build_kirk_cmd1(in, cmd1_a, plain);
+    NkKeystore *ks = kirk_test_keystore(1, 1u);
+    NkPspCtx ctx;
+    nk_psp_ctx_init(&ctx, ks);
+    assert(kirk_init(&ctx) == KIRK_OPERATION_SUCCESS);
+
+    /* CMD1 writes data_size (0x40) bytes. */
+    memset(out, FUZZ_CANARY, sizeof(out));
+    nk_psp_ctx_init(&ctx, ks);
+    assert(sceUtilsBufferCopyWithRange(&ctx, out, (int)KIRK_TEST_DATA - 16, in, (int)sizeof(in),
+                                       KIRK_CMD_DECRYPT_PRIVATE) == KIRK_INVALID_SIZE);
+    for (size_t i = 0; i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+    nk_psp_ctx_init(&ctx, ks);
+    assert(sceUtilsBufferCopyWithRange(&ctx, out, (int)KIRK_TEST_DATA, in, (int)sizeof(in),
+                                       KIRK_CMD_DECRYPT_PRIVATE) == KIRK_OPERATION_SUCCESS);
+    assert(memcmp(out, plain, sizeof(plain)) == 0);
+    for (size_t i = KIRK_TEST_DATA; i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+
+    /* CMD7 writes data_size bytes at 0; CMD4 writes them after the 0x14 header. */
+    uint8_t cbc[0x14 + KIRK_TEST_DATA];
+    memset(cbc, 0x3C, sizeof(cbc));
+    put32le(cbc, 5u);                      /* KIRK_MODE_DECRYPT_CBC */
+    put32le(cbc + 0x0C, FUZZ_PSP_CODE);    /* keyvault slot */
+    put32le(cbc + 0x10, KIRK_TEST_DATA);   /* data_size */
+    memset(out, FUZZ_CANARY, sizeof(out));
+    nk_psp_ctx_init(&ctx, ks);
+    assert(sceUtilsBufferCopyWithRange(&ctx, out, (int)KIRK_TEST_DATA - 16, cbc, (int)sizeof(cbc),
+                                       KIRK_CMD_DECRYPT_IV_0) == KIRK_INVALID_SIZE);
+    for (size_t i = 0; i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+    nk_psp_ctx_init(&ctx, ks);
+    assert(sceUtilsBufferCopyWithRange(&ctx, out, (int)KIRK_TEST_DATA, cbc, (int)sizeof(cbc),
+                                       KIRK_CMD_DECRYPT_IV_0) == KIRK_OPERATION_SUCCESS);
+    for (size_t i = KIRK_TEST_DATA; i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+
+    put32le(cbc, 4u);                      /* KIRK_MODE_ENCRYPT_CBC */
+    memset(out, FUZZ_CANARY, sizeof(out));
+    nk_psp_ctx_init(&ctx, ks);
+    assert(sceUtilsBufferCopyWithRange(&ctx, out, (int)sizeof(cbc) - 16, cbc, (int)sizeof(cbc),
+                                       KIRK_CMD_ENCRYPT_IV_0) == KIRK_INVALID_SIZE);
+    for (size_t i = 0; i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+    nk_psp_ctx_init(&ctx, ks);
+    assert(sceUtilsBufferCopyWithRange(&ctx, out, (int)sizeof(cbc), cbc, (int)sizeof(cbc),
+                                       KIRK_CMD_ENCRYPT_IV_0) == KIRK_OPERATION_SUCCESS);
+    for (size_t i = sizeof(cbc); i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+
+    /* CMD11 writes a 20-byte SHA-1 digest. */
+    uint8_t sha_in[4 + 8];
+    memset(sha_in, 0x61, sizeof(sha_in));
+    put32le(sha_in, 8u);
+    memset(out, FUZZ_CANARY, sizeof(out));
+    nk_psp_ctx_init(&ctx, ks);
+    assert(sceUtilsBufferCopyWithRange(&ctx, out, 19, sha_in, (int)sizeof(sha_in),
+                                       KIRK_CMD_SHA1_HASH) == KIRK_INVALID_SIZE);
+    for (size_t i = 0; i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+    nk_psp_ctx_init(&ctx, ks);
+    assert(sceUtilsBufferCopyWithRange(&ctx, out, 20, sha_in, (int)sizeof(sha_in),
+                                       KIRK_CMD_SHA1_HASH) == KIRK_OPERATION_SUCCESS);
+    for (size_t i = 20; i < sizeof(out); i++) assert(out[i] == FUZZ_CANARY);
+
+    nk_keystore_free(ks);
+    printf("[KIRK] KIRK commands respect the output size\n");
     fflush(stdout);
 }
 
@@ -4249,6 +4437,8 @@ int main(int argc, char **argv) {
     test_ec_unreduced_coordinates_are_refused();
     test_kle_decoding_ignores_host_alignment();
     test_kirk_pass_of_zero_bytes_is_refused();
+    test_kirk_cmd1_key_comes_from_the_callers_ctx();
+    test_kirk_commands_respect_outsize();
 
     printf("=================================================================\n");
     printf("ALL DETERMINISTIC PARSER FUZZ HARNESSES PASSED SUCCESSFULLY!\n");

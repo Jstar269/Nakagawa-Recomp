@@ -860,7 +860,9 @@ static int nk_inflate_run(const uint8_t *src, size_t srclen, uint8_t **out,
         if (rc != NK_INFLATE_OK) {
             /*
              * The leading bytes may have been raw DEFLATE that merely
-             * resembled a zlib header: retry as raw before failing.
+             * resembled a zlib header: retry as raw before failing. A
+             * failed retry returns the zlib attempt's code, so it keeps
+             * that attempt's message too: the retry reports into nothing.
              */
             Bits b2;
             OutBuf o2;
@@ -875,7 +877,7 @@ static int nk_inflate_run(const uint8_t *src, size_t srclen, uint8_t **out,
                 set_err(err, err_len, "inflate: out of memory");
                 return NK_INFLATE_ERR_MEMORY;
             }
-            if (decode_and_check(&b2, &o2, err, err_len) == NK_INFLATE_OK) {
+            if (decode_and_check(&b2, &o2, NULL, 0u) == NK_INFLATE_OK) {
                 *out = o2.data;
                 *outlen = o2.len;
                 return NK_INFLATE_OK;
