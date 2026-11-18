@@ -652,7 +652,7 @@ class ProgramImageTests(unittest.TestCase):
         flag_bits, type_bits, seg_bits = 2, 2, 1
         header = bytes([0, 0, flag_bits, type_bits, 3, 0x00, 0x01, 3, 0, 2])
         set_base = (0 << (seg_bits + flag_bits)) | (0 << flag_bits) | 1
-        reloc = (0 << (type_bits + seg_bits + flag_bits)) | (1 << (seg_bits + flag_bits)) | (0 << flag_bits) | 2
+        reloc = (0 << (type_bits + seg_bits + flag_bits)) | (2 << (seg_bits + flag_bits)) | (0 << flag_bits) | 2
         packed_table = header + struct.pack("<HH", set_base, reloc)
 
         phoff = 52
@@ -676,8 +676,12 @@ class ProgramImageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = self.write_blob(Path(td), "packed.prx", blob)
             image = prxload.load_program_image(path, base=0x1000)
+            legacy_packed = prxload.Prx(str(path), 0x1000)
+            applied_packed = legacy_packed.relocate()
         self.assertEqual(len(image.relocations), 1)
         self.assertEqual(image.relocations[0].relocation_type, 0x700000A1)
+        self.assertEqual(applied_packed, 1)
+        self.assertEqual(legacy_packed.r32(0x1000), 0x1000)
 
         # 2. Stripped PRX (shnum == 0) with a 0x700000A0 relocation phdr.
         stripped = bytearray(payload_off + 0x28)
@@ -691,6 +695,26 @@ class ProgramImageTests(unittest.TestCase):
             image_stripped = prxload.load_program_image(path, base=0x1000)
         self.assertEqual(len(image_stripped.relocations), 1)
         self.assertEqual(image_stripped.relocations[0].target_address, 0x1000)
+
+        # 3. Sectioned PRX where 0x700000A1 lives in a phdr AND sections are present (no 0x700000A1 shdr).
+        phdr_only_packed = bytearray(blob)
+        struct.pack_into("<H", phdr_only_packed, 48, 2)  # shnum = 2 (drop the .reloc section header)
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_blob(Path(td), "phdr-only-packed.prx", phdr_only_packed)
+            legacy_phdr_packed = prxload.Prx(str(path), 0x1000)
+            self.assertEqual(legacy_phdr_packed.relocate(), 1)
+            self.assertEqual(legacy_phdr_packed.r32(0x1000), 0x1000)
+
+        # 4. Fixed-address ET_EXEC at its link-time base with non-empty relocation records must raise.
+        fixed_base = 0x08804000
+        fixed_with_reloc = bytearray(stripped)
+        struct.pack_into("<H", fixed_with_reloc, 16, 2)  # ET_EXEC
+        struct.pack_into("<II", fixed_with_reloc, phoff + 8, fixed_base, fixed_base)  # vaddr, paddr
+        with tempfile.TemporaryDirectory() as td:
+            path = self.write_blob(Path(td), "fixed-with-reloc.elf", fixed_with_reloc)
+            legacy_fixed = prxload.Prx(str(path), fixed_base)
+            with self.assertRaisesRegex(ValueError, "fixed-address module carries relocation records"):
+                legacy_fixed.relocate()
 
 
 class FakeCodeImage:

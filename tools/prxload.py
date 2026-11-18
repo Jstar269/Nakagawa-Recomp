@@ -1330,7 +1330,8 @@ class Prx:
         loads = [s for s in self.segments if s["type"] == 1]
         if not loads:
             raise ValueError(f"{path}: ELF has no PT_LOAD segments")
-        self.address_bias = _image_address_bias(envelope["e_type"], base, loads)
+        self.e_type = envelope["e_type"]
+        self.address_bias = _image_address_bias(self.e_type, base, loads)
 
         self.psp_bss_size = 0
         self.psp_segment_sizes = None
@@ -1383,19 +1384,23 @@ class Prx:
             self.mem[dst : dst + s["filesz"]] = payload
 
         self.sections = []
+        has_program_format_a = False
+        for seg in self.segments:
+            if seg["type"] in (0x700000a0, 0x700000a1):
+                if seg["type"] == 0x700000a0:
+                    has_program_format_a = True
+                self.sections.append(dict(typ=seg["type"], off=seg["off"], size=seg["filesz"], seg_idx=seg["idx"]))
         if self.shnum > 0 and self.shentsize > 0:
             for section in envelope["shdrs"]:
                 typ, off, size = section["typ"], section["off"], section["size"]
+                if typ == 0x700000a1 or (typ == 0x700000a0 and has_program_format_a):
+                    continue
                 seg_idx = -1
                 for seg in self.segments:
                     if seg["off"] <= off < seg["off"] + seg["filesz"]:
                         seg_idx = seg["idx"]
                         break
                 self.sections.append(dict(typ=typ, off=off, size=size, seg_idx=seg_idx))
-        else:
-            for seg in self.segments:
-                if seg["type"] in (0x700000a0, 0x700000a1):
-                    self.sections.append(dict(typ=seg["type"], off=seg["off"], size=seg["filesz"], seg_idx=seg["idx"]))
         # Every word relocate() rewrites, by the field it rewrites: "word32", "jump26", "hi16"
         # or "lo16" (R_MIPS_16 and LO16 both rewrite the low half). The analyzer reads it as
         # the module's address evidence (analyze._relocated_words).
@@ -1412,6 +1417,14 @@ class Prx:
         self.mem[o:o + 4] = struct.pack("<I", val & 0xFFFFFFFF)
 
     def relocate(self):
+        if getattr(self, "e_type", None) == 2 and getattr(self, "base", 0) != 0 and getattr(self, "address_bias", 0) == 0:
+            for sec in self.sections:
+                if sec["typ"] in (0x700000a0, 0x700000a1) and sec["size"] > 0:
+                    raise ValueError(
+                        "a fixed-address module carries relocation records; its image "
+                        "would not match its link-time words"
+                    )
+            return 0
         d = self.data
         total = 0
         for sec in self.sections:
@@ -1439,13 +1452,14 @@ class Prx:
         checked_span(len(d), buf_offset, filesz, "packed relocation table")
         if filesz < 4:
             raise ValueError("packed relocation table is truncated")
+        if d[buf_offset] != 0 or d[buf_offset + 1] != 0:
+            raise ValueError("packed relocation header bytes 0-1 are not zero")
 
         flag_bits = d[buf_offset + 2]
         type_bits = d[buf_offset + 3]
 
-        seg_bits = 1
-        while (1 << seg_bits) < rel_seg_idx:
-            seg_bits += 1
+        nseg = len(self.seg_vaddr)
+        seg_bits = 2 if nseg >= 3 else 1
 
         if not (1 <= flag_bits <= 8 and 1 <= type_bits <= 8) or flag_bits + type_bits + seg_bits > 16:
             raise ValueError("packed relocation bit widths are invalid")
@@ -1471,8 +1485,6 @@ class Prx:
         rcount = 0
         relocated = self.__dict__.setdefault("relocated", {})
 
-        nseg = len(self.seg_vaddr)
-
         while o < end_offset:
             checked_span(end_offset, o, 2, "packed relocation command")
             cmd = struct.unpack("<H", d[o:o + 2])[0]
@@ -1480,18 +1492,17 @@ class Prx:
 
             flag_idx = (cmd << (16 - flag_bits)) & 0xFFFF
             flag_idx = flag_idx >> (16 - flag_bits)
-            if flag_idx >= flag_table_size:
+            if flag_idx == 0 or flag_idx >= flag_table_size:
                 raise ValueError("packed relocation flag index is out of range")
             flag = d[buf_offset + 4 + flag_idx]
 
             seg_val = (cmd << (16 - seg_bits - flag_bits)) & 0xFFFF
             seg_val = seg_val >> (16 - seg_bits)
+            if seg_val >= nseg:
+                raise ValueError("packed relocation segment index is out of range")
 
             type_idx = (cmd << (16 - type_bits - seg_bits - flag_bits)) & 0xFFFF
             type_idx = type_idx >> (16 - type_bits)
-            if type_idx >= type_table_size:
-                raise ValueError("packed relocation type index is out of range")
-            rtype = d[buf_offset + 4 + flag_table_size + type_idx]
 
             if (flag & 0x01) == 0:
                 off_seg = seg_val
@@ -1502,14 +1513,15 @@ class Prx:
                     rel_base = struct.unpack("<I", d[o:o+4])[0]
                     o += 4
                 else:
-                    rel_base = 0
+                    raise ValueError("packed relocation set-offset form is invalid")
             else:
+                if type_idx == 0 or type_idx >= type_table_size:
+                    raise ValueError("packed relocation type index is out of range")
+                rtype = d[buf_offset + 4 + flag_table_size + type_idx]
                 addr_seg = seg_val
-                # The packed PSP stream encodes all program-header segment
-                # slots, including non-load relocation metadata.  Those slots
-                # deliberately contribute no guest address; keep the mapping
-                # bounded instead of indexing past the PT_LOAD table.
-                relocate_to = self.seg_vaddr[addr_seg] if addr_seg < nseg else 0
+                if off_seg >= nseg:
+                    raise ValueError("packed relocation segment index is out of range")
+                relocate_to = self.seg_vaddr[addr_seg]
 
                 if (flag & 0x06) == 0x00:
                     rel_offset = cmd
@@ -1536,8 +1548,10 @@ class Prx:
                     checked_span(end_offset, o, 4, "packed relocation absolute base")
                     rel_base = struct.unpack("<I", d[o:o+4])[0]
                     o += 4
+                else:
+                    raise ValueError("packed relocation relocate-offset form is invalid")
 
-                off_seg_vaddr = self.seg_vaddr[off_seg] if off_seg < nseg else 0
+                off_seg_vaddr = self.seg_vaddr[off_seg]
                 rel_offset_addr = (rel_base + off_seg_vaddr) & 0xFFFFFFFF
 
                 if (flag & 0x38) == 0x00:
@@ -1552,6 +1566,8 @@ class Prx:
                         lo16 |= 0xFFFF0000
                         lo16 -= 0x100000000
                     o += 2
+                else:
+                    raise ValueError("packed relocation addend form is invalid")
 
                 op = self.r32(rel_offset_addr)
                 last_type = rtype
@@ -1573,6 +1589,8 @@ class Prx:
                     op = (op & 0xFFFF0000) | ((addr >> 16) & 0xFFFF)
                 elif rtype in (1, 5):
                     op = (op & 0xFFFF0000) | (((op & 0xFFFF) + relocate_to) & 0xFFFF)
+                else:
+                    raise ValueError(f"unsupported packed relocation type 0x{rtype:x}")
 
                 kind = _PACKED_RELOCATION_FIELD.get(rtype)
                 if kind is not None:
@@ -1608,7 +1626,7 @@ class Prx:
             op = self.r32(addr)
 
             if rtype in _TYPE_A_NOOP_TYPES:
-                # NONE and GPREL16 are deliberate no-ops in this loader.
+                # NONE is a deliberate no-op in this loader.
                 continue
             elif rtype in _TYPE_A_SPECIAL_TYPES:
                 # The PSP's R_MIPS_LITERAL (8) is a recognized,
@@ -1620,34 +1638,28 @@ class Prx:
             elif rtype == R_MIPS_26:
                 op = (op & 0xFC000000) | (((op & 0x03FFFFFF) + (relocate_to >> 2)) & 0x03FFFFFF)
             elif rtype == R_MIPS_HI16:
-                # A HI16 relocation's addend comes from the LOW half at its paired LO16
-                # (or the PSP's R_MIPS_16 alternative) record, which the ELF convention
-                # places somewhere after this HI16 in table order (possibly after more
-                # HI16es sharing the same pairing, per the "multiple HI16 share one LO16"
-                # rule below). Any OTHER relocation type sitting between them (R_MIPS_32,
-                # R_MIPS_26, R_MIPS_GPREL16, ...) is unrelated and must be skipped, not
-                # mistaken for the low half -- treating it as the pair partner reads a
-                # different instruction's bits as the low addend and corrupts this HI16.
+                # Per PRX_LOADER_SPEC.md section 3.6 and apply_format_a in
+                # src/rt/prx_loader.c, a HI16 run pairs with the first non-HI16
+                # record that follows it in table order, whatever its kind; a
+                # HI16 run reaching the end of the table with no partner fails
+                # closed.
                 cur = (op & 0xFFFF) << 16
                 for t in range(r + 1, n):
                     t_type = rels[t][1] & 0xF
                     if t_type == R_MIPS_HI16:
                         continue
-                    if t_type not in (R_MIPS_LO16, R_MIPS_16):
-                        continue
-                    lo_op = self.r32(rels[t][0] + self.seg_vaddr[(rels[t][1] >> 8) & 0xFF])
+                    t_ofs_seg = (rels[t][1] >> 8) & 0xFF
+                    t_addr_seg = (rels[t][1] >> 16) & 0xFF
+                    if t_ofs_seg >= nseg or t_addr_seg >= nseg:
+                        raise ValueError("type-A relocation segment index is out of range")
+                    lo_op = self.r32(rels[t][0] + self.seg_vaddr[t_ofs_seg])
                     s16 = (lo_op & 0xFFFF) - 0x10000 if (lo_op & 0x8000) else (lo_op & 0xFFFF)
                     cur = (cur + s16 + relocate_to) & 0xFFFFFFFF
                     hi = ((cur >> 16) + (1 if (cur & 0x8000) else 0)) & 0xFFFF
                     op = (op & 0xFFFF0000) | hi
                     break
                 else:
-                    # No paired LO16/R_MIPS_16 found for this HI16 (malformed/unpaired
-                    # input) -- apply the segment delta alone with a zero low addend
-                    # rather than silently using an unrelated relocation's bits.
-                    cur = (cur + relocate_to) & 0xFFFFFFFF
-                    hi = ((cur >> 16) + (1 if (cur & 0x8000) else 0)) & 0xFFFF
-                    op = (op & 0xFFFF0000) | hi
+                    raise ValueError("format A HI16 run without partner")
             elif rtype == R_MIPS_LO16:
                 op = (op & 0xFFFF0000) | (((op & 0xFFFF) + relocate_to) & 0xFFFF)
             elif rtype == R_MIPS_16:
