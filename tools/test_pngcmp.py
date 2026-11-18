@@ -114,6 +114,26 @@ class PngCmpTests(unittest.TestCase):
                     pngcmp.decode(path)
                 self.assertIn(str(path), str(ctx.exception))
 
+    def test_image_data_that_does_not_match_the_header_is_rejected(self):
+        def png(w, h, raw):
+            return (b"\x89PNG\r\n\x1a\n"
+                    + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                    + chunk(b"IDAT", zlib.compress(raw))
+                    + chunk(b"IEND", b""))
+        cases = {
+            "short": png(2, 1, b"\x00\x01\x02\x03"),
+            "short_row": png(2, 2, b"\x00" + bytes(6) + b"\x00" + bytes(4)),
+            "long": png(1, 1, b"\x00" + bytes(3) + b"\x00"),
+            "empty": png(0, 0, b""),
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                path = self.dir / (name + ".png")
+                path.write_bytes(data)
+                with self.assertRaises(SystemExit) as ctx:
+                    pngcmp.decode(path)
+                self.assertIn(str(path), str(ctx.exception))
+
     def test_size_mismatch_and_empty_crop_exit(self):
         a = self.convert("a", base_pixels())
         b = self.convert("b", bytes(2 * 2 * 3), 2, 2)

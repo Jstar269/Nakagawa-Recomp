@@ -79,7 +79,16 @@ GP = 28
 _BRANCH_OPS = frozenset({0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17})
 _REGIMM_BRANCH_RT = frozenset({0x00, 0x01, 0x02, 0x03, 0x10, 0x11, 0x12, 0x13})
 _ADDRESS_ARITHMETIC_OPS = frozenset({0x08, 0x09, 0x0D})
-_FIRST_MEMORY_OP = 0x20
+#: Primary opcodes whose rs field is a base register and whose low 16 bits are its offset: the
+#: integer loads and stores, cache, ll/sc, the FPU and the VFPU loads and stores. The VFPU
+#: compute groups 0x34, 0x37, 0x3C and 0x3F are not here: their bits 21-25 name no base
+#: register, and their low 16 bits hold VFPU registers or an immediate.
+_BASE_OFFSET_OPS = frozenset({
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26,
+    0x28, 0x29, 0x2A, 0x2B, 0x2E, 0x2F,
+    0x30, 0x31, 0x32, 0x35, 0x36,
+    0x38, 0x39, 0x3A, 0x3D, 0x3E,
+})
 
 
 class BindingCarryError(ValueError):
@@ -165,7 +174,7 @@ class Module:
                 tokens.append(("b", word) if entry <= target < end else ("b-out", word & 0xFFFF0000))
             elif op == 0x0F:
                 tokens.append(("lui", rt))
-            elif (op in _ADDRESS_ARITHMETIC_OPS or op >= _FIRST_MEMORY_OP) and (rs in high or rs == GP):
+            elif (op in _ADDRESS_ARITHMETIC_OPS or op in _BASE_OFFSET_OPS) and (rs in high or rs == GP):
                 tokens.append(("addr", word >> 16))
             else:
                 tokens.append(("w", word))

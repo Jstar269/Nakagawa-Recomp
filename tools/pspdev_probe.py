@@ -27,6 +27,7 @@ DEFAULT_OUT = ROOT / "build" / "audit" / "pspdev-tool-probe.json"
 MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
 PROBE_TIMEOUT_SECONDS = 5.0
+DRAIN_TIMEOUT_SECONDS = 2.0
 
 TOOL_ARGS: dict[str, tuple[str, ...]] = {
     "psp-config": ("--pspsdk-path",),
@@ -49,17 +50,23 @@ class ProbeError(RuntimeError):
     """A local executable could not be safely fingerprinted."""
 
 
+# Each pattern runs to the end of its line: a path may contain spaces (a profile folder such as
+# "Jane Doe"), so stopping at whitespace would leave the rest of the path in a report that says
+# it carries no absolute paths.
 ABSOLUTE_PATH_PATTERNS = (
-    re.compile(r"[A-Za-z]:[\\/][^\s\r\n]+"),
-    re.compile(r"\\\\[^\s\r\n]+"),
-    re.compile(r"(?<![:A-Za-z0-9])/(?:[^\s\r\n]+)"),
+    re.compile(r"[A-Za-z]:[\\/][^\r\n]*"),
+    re.compile(r"\\\\[^\r\n]*"),
+    re.compile(r"(?<![:A-Za-z0-9])/[^\r\n]*"),
 )
 
 
 def _sanitize_output(text: str, *, include_paths: bool, resolved: Path) -> str:
     if include_paths:
         return text
-    sanitized = text.replace(str(resolved), "<redacted-path>")
+    sanitized = text
+    for root in (str(resolved), str(resolved.parent)):
+        for form in (root, root.replace("\\", "/"), root.replace("/", "\\")):
+            sanitized = sanitized.replace(form, "<redacted-path>")
     for pattern in ABSOLUTE_PATH_PATTERNS:
         sanitized = pattern.sub("<redacted-path>", sanitized)
     return sanitized
@@ -144,6 +151,11 @@ def _run_bounded_process(
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=2.0)
+    if status == "completed":
+        # The child exited on its own: let the readers drain what it wrote before the pipes
+        # close, or a reader the scheduler has not run yet loses the tail of the output.
+        for thread in threads:
+            thread.join(timeout=DRAIN_TIMEOUT_SECONDS)
     for stream in streams:
         if stream is not None:
             try:
@@ -205,7 +217,6 @@ def _probe_identity(
         "name": name,
         "status": status,
         "resolved_name": resolved.name,
-        "path_sha256": hashlib.sha256(str(resolved).encode("utf-8")).hexdigest(),
         "binary_sha256": binary_sha256,
         "size": size,
         "command_args": list(args),
@@ -356,7 +367,7 @@ def probe_tools(
                 {"name": name, "status": "probe_error", "error": _safe_error(exc)}
             )
     return {
-        "schema": 1,
+        "schema": 2,
         "host": {
             "system": platform.system(),
             "machine": platform.machine(),
@@ -364,7 +375,7 @@ def probe_tools(
         },
         "privacy": {
             "absolute_paths_included": include_paths,
-            "default_path_representation": "basename plus SHA-256 of canonical path",
+            "default_path_representation": "basename only",
         },
         "limits": {
             "executable_bytes": MAX_EXECUTABLE_BYTES,

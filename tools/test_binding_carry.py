@@ -177,6 +177,33 @@ class CarryTests(Revisions, unittest.TestCase):
         self.assertNotEqual(matcher.status(self.old["U2"])["new"], matcher.status(self.old["U3"])["new"])
 
 
+class MaskingTests(unittest.TestCase):
+    @staticmethod
+    def tokens(words: list) -> list:
+        module = object.__new__(binding_carry.Module)
+        module.imports = {}
+        module.function = {BASE: {"entry": BASE, "addresses": [BASE + 4 * i for i in range(len(words))],
+                                  "words": words, "calls": []}}
+        return module._tokens(BASE)
+
+    def test_vfpu_compute_words_keep_their_low_bits_when_bits_21_to_25_read_as_gp(self):
+        # vfim S000, <half float>: op 0x37 with bits 23-25 = 111 and vt's top bits 00, so bits 21-25
+        # read as 28 ($gp). The low 16 bits are the immediate, not an offset, so they must stay.
+        one, two = 0xDF803C00, 0xDF804000
+        self.assertEqual((one >> 21) & 31, binding_carry.GP)
+        self.assertNotEqual(self.tokens([one, JR_RA, NOP]), self.tokens([two, JR_RA, NOP]))
+        for op in (0x34, 0x37, 0x3C, 0x3F):
+            word = (op << 26) | (binding_carry.GP << 21) | 0x1234
+            with self.subTest(op=hex(op)):
+                self.assertEqual(self.tokens([word])[0], ("w", word))
+
+    def test_gp_relative_loads_and_stores_still_drop_their_offset(self):
+        for word in (LW_GP, 0xAF820010, 0xDB800010, 0xFB800010):  # lw, sw, lv.q, sv.q off $gp
+            with self.subTest(word=hex(word)):
+                self.assertEqual(self.tokens([word])[0], ("addr", word >> 16))
+        self.assertEqual(self.tokens([LUI_A0, ADDIU_A0])[1], ("addr", ADDIU_A0 >> 16))
+
+
 class ManifestTests(Revisions, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
