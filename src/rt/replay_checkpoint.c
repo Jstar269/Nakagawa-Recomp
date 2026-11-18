@@ -837,11 +837,15 @@ static void rr_vblank(uint32_t vcount) {
         const size_t index = s_rep_ckpt_next;
         if (!nk_ckpt_parse(s_rep_ckpt[index], &s_rep_expect, detail, sizeof detail))
             refuse("malformed-checkpoint", 0);
-        if (!ckpt_take(vcount)) die("REPLAY_MISMATCH reason=checkpoint-overflow");
-        const NkCkptDiff diff = nk_ckpt_compare(&s_rep_expect, &s_ckpt, &m);
-        if (diff != NK_CKPT_SAME) {
+        /* A replay checkpoint that does not fit (more threads than a checkpoint holds)
+         * means the run has diverged from the recording here: this checkpoint's mismatch,
+         * kind=overflow, in the one documented verdict shape. */
+        const int taken = ckpt_take(vcount);
+        const NkCkptDiff diff = taken ? nk_ckpt_compare(&s_rep_expect, &s_ckpt, &m) : NK_CKPT_SAME;
+        if (!taken || diff != NK_CKPT_SAME) {
             fprintf(stderr, "REPLAY_MISMATCH frame=%" PRIu32 " index=%zu kind=%s digest=%s\n", vcount, index,
-                    nk_ckpt_diff_name(diff), diff == NK_CKPT_FRAME ? "-" : m.name);
+                    taken ? nk_ckpt_diff_name(diff) : "overflow",
+                    !taken || diff == NK_CKPT_FRAME ? "-" : m.name);
             flight_divergence();
             fflush(stderr);
             s_rr = RR_OFF;

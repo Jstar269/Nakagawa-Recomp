@@ -381,7 +381,12 @@ static int vr_is_absolute(const char *p) {
 #define VR_PATH_SEP ';'
 #define VR_EXE_NAME "ffmpeg.exe"
 #else
-static int vr_file_exists(const char *path) { return access(path, X_OK) == 0; }
+/* A regular file the process may execute: access(X_OK) alone also accepts a searchable
+ * directory, which would stop the PATH search early and reach posix_spawn as the encoder. */
+static int vr_file_exists(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && access(path, X_OK) == 0;
+}
 static int vr_is_absolute(const char *p) { return p[0] == '/'; }
 #define VR_PATH_SEP ':'
 #define VR_EXE_NAME "ffmpeg"
@@ -477,8 +482,14 @@ static int vr_proc_start(VrProc *p, const char *exe, const char *const *argv, in
     cmd[0] = '\0';
     for (int i = 0; argv[i]; i++)
         if (!vr_append_arg(cmd, sizeof cmd, argv[i])) return 0;
-    if (!MultiByteToWideChar(CP_UTF8, 0, cmd, -1, wcmd, (int)(sizeof wcmd / sizeof wcmd[0])) ||
-        !MultiByteToWideChar(CP_UTF8, 0, exe, -1, wexe, (int)(sizeof wexe / sizeof wexe[0])))
+    /* The paths in cmd and exe came from getenv and were checked and used through the
+     * ANSI file APIs (GetFileAttributesA, _open, MoveFileExA), so they are in the ANSI code
+     * page: widen them from that, not from UTF-8, and refuse a byte that does not convert
+     * rather than hand FFmpeg a different path. */
+    if (!MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, cmd, -1, wcmd,
+                             (int)(sizeof wcmd / sizeof wcmd[0])) ||
+        !MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, exe, -1, wexe,
+                             (int)(sizeof wexe / sizeof wexe[0])))
         return 0;
     HANDLE rd = NULL, wr = NULL;
     if (with_stdin) {

@@ -1503,6 +1503,12 @@ static SrGuestInterpResult execute_noncontrol(
                     set_fault(fault, pc, opcode, pc, 1);
                     return SR_GUEST_INTERP_UNSUPPORTED;
                 }
+                if (vfpu_rc == SR_VFPU_ACCESS_REFUSED) {
+                    /* Out-of-range span, as for a scalar store: nothing was accessed. */
+                    set_fault(fault, pc, opcode,
+                              read_gpr(s, rs) + sign_extend_16(opcode & 0xFFFCu), 1);
+                    return SR_GUEST_INTERP_MEMORY_FAULT;
+                }
                 if (primary == 0x3au) {
                     *store_address = read_gpr(s, rs) + sign_extend_16(opcode & 0xFFFCu);
                     *store_size = 4;

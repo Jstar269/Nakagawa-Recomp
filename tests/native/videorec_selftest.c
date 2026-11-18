@@ -943,6 +943,88 @@ static void test_encoder_failures(const char *root, const char *self) {
     set_env("NK_VIDEOREC_FAKE_FFMPEG", NULL);
 }
 
+/* A directory is not an encoder. SR_VIDEOREC_FFMPEG naming one refuses the recording with the
+ * earlier run's output left in place, and the PATH search walks past an entry whose "ffmpeg" is
+ * a directory instead of stopping there. The folders sit beside the selftest binary, so their
+ * paths are absolute as the recorder requires. */
+static void test_ffmpeg_directory(const char *root, const char *self) {
+    char base[1024], fake[1100], exe_dir[1200], dir[600], p[700];
+    snprintf(base, sizeof base, "%s", self);
+    char *cut = strrchr(base, '/');
+    char *bs = strrchr(base, '\\');
+    if (bs && (!cut || bs > cut)) cut = bs;
+    CHECK(cut != NULL, "the selftest path has a folder");
+    if (!cut) return;
+    cut[0] = 0;
+    snprintf(fake, sizeof fake, "%s/videorec-ffmpeg-dir", base);
+    make_dir(fake);
+#ifdef _WIN32
+    snprintf(exe_dir, sizeof exe_dir, "%s/ffmpeg.exe", fake);
+#else
+    snprintf(exe_dir, sizeof exe_dir, "%s/ffmpeg", fake);
+#endif
+    make_dir(exe_dir);
+    snprintf(dir, sizeof dir, "%s/ffmpeg-dir", root);
+    set_env("SR_VIDEOREC_DIR", dir);
+    set_env("SR_VIDEOREC_CODEC", "raw");
+    set_env("SR_VIDEOREC_FFMPEG", NULL);
+    set_env("SR_DETERMINISTIC_CLOCK", "1");
+    CHECK(sr_videorec_test_start_from_env() && record_ten() == 1 && record_says(dir, "PASS", NULL),
+          "the earlier raw recording finishes PASS");
+    set_env("SR_VIDEOREC_CODEC", "ffv1");
+    set_env("SR_VIDEOREC_FFMPEG", exe_dir);
+    CHECK(!sr_videorec_test_start_from_env(), "an SR_VIDEOREC_FFMPEG that names a directory refuses");
+    CHECK(record_says(dir, "REFUSED", "is not an executable file"), "and says so");
+    path_in(p, sizeof p, dir, "video.bgr0");
+    CHECK(file_size(p) == (long)(10u * W * H * 4u),
+          "the refusal leaves the earlier run's video as it was");
+    sr_videorec_test_reset();
+    set_env("SR_VIDEOREC_FFMPEG", NULL);
+    const char *saved = getenv("PATH");
+    char *path_copy = saved ? strdup(saved) : NULL;
+    set_env("PATH", fake);
+    CHECK(!sr_videorec_test_start_from_env(),
+          "a PATH entry whose ffmpeg is a directory does not count as FFmpeg on PATH");
+    CHECK(record_says(dir, "REFUSED", "is not in any absolute PATH entry"), "and says so");
+    sr_videorec_test_reset();
+    set_env("PATH", path_copy);
+    free(path_copy);
+    set_env("SR_VIDEOREC_DIR", NULL);
+    set_env("SR_VIDEOREC_CODEC", NULL);
+    set_env("SR_DETERMINISTIC_CLOCK", NULL);
+}
+
+#ifdef _WIN32
+/* A recording folder whose name is not ASCII: SR_VIDEOREC_DIR arrives in the ANSI code page and
+ * the recorder's own file calls use it so, so FFmpeg's command line must carry the same folder.
+ * Widened as UTF-8, a byte such as 0xE9 (e-acute in code page 1252) became U+FFFD and FFmpeg was
+ * told to write somewhere else. The fake FFmpeg opens exactly the paths it is given. */
+static void test_ansi_folder(const char *root, const char *self) {
+    char name[64], dir[700], p[800];
+    BOOL lossy = FALSE;
+    const UINT acp = GetACP();
+    static const wchar_t wide[] = { L'v', L'i', L'd', 0x00E9, L'o', L's', 0 };
+    const int n = acp == CP_UTF8
+                      ? WideCharToMultiByte(CP_UTF8, 0, wide, -1, name, (int)sizeof name, NULL, NULL)
+                      : WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, wide, -1, name,
+                                            (int)sizeof name, NULL, &lossy);
+    if (n <= 0 || lossy) {
+        printf("videorec_selftest: non-ASCII folder: SKIP (code page %u has no e-acute)\n", (unsigned)acp);
+        return;
+    }
+    snprintf(dir, sizeof dir, "%s/%s", root, name);
+    set_env("SR_VIDEOREC_FFMPEG", self);
+    set_env("NK_VIDEOREC_FAKE_FFMPEG", "enc=ok;mux=ok");
+    CHECK(sr_videorec_test_start(dir, "ffv1"), "a non-ASCII recording folder starts");
+    CHECK(record_ten() == 1 && record_says(dir, "PASS", NULL),
+          "FFmpeg is given the same non-ASCII folder the recorder writes, and the recording passes");
+    path_in(p, sizeof p, dir, "recording.mkv");
+    CHECK(file_size(p) == (long)(10u * W * H * 4u), "the mux in the non-ASCII folder holds every frame");
+    set_env("SR_VIDEOREC_FFMPEG", NULL);
+    set_env("NK_VIDEOREC_FAKE_FFMPEG", NULL);
+}
+#endif
+
 /* Audio that runs more than the ring ahead, and samples that never reach audio.wav, FAIL. */
 static void test_audio_failures(const char *root) {
     char dir[600];
@@ -1151,6 +1233,10 @@ int main(int argc, char **argv) {
     char self[1024];
     CHECK(self_path(self, sizeof self), "the selftest finds its own path for the fake FFmpeg");
     test_encoder_failures(root, self);
+    test_ffmpeg_directory(root, self);
+#ifdef _WIN32
+    test_ansi_folder(root, self);
+#endif
     test_fatal_stop(root, self);
     sr_videorec_test_reset();
     if (s_failures) {

@@ -126,7 +126,10 @@ void sr_replay_checkpoint_vblank(uint32_t vcount);
  *
  *   REPLAY_REFUSED reason=<name> line=<n>             exit 1, before the guest runs
  *   REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>
- *                                                     exit 1, at the first differing checkpoint;
+ *                                                     exit 1, at the first differing checkpoint
+ *                                                     (kind=frame, names or digest; kind=overflow
+ *                                                     digest=- when the replay's own checkpoint
+ *                                                     holds more threads than one can);
  *                                                     under SR_FLIGHT it first arms the flight
  *                                                     recorder (sr_flight_replay_divergence)
  *   REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>

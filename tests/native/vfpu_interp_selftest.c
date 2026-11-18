@@ -9,8 +9,9 @@
 // its shape:
 //
 //   * quad loads/stores are all-or-nothing: a span that is not entirely
-//     guest-readable/writable rejects the whole op BEFORE any destination lane
-//     or guest word is committed (destination and guest state verified
+//     guest-readable/writable rejects the whole op, as SR_VFPU_ACCESS_REFUSED
+//     and never as an unknown encoding (SR_VFPU_OTHER), BEFORE any destination
+//     lane or guest word is committed (destination and guest state verified
 //     unchanged), including exact-end, one-lane-short, first-byte-invalid and
 //     wrapped-address cases;
 //   * the left/right merge forms preflight their exact sub-span (which always
@@ -319,7 +320,7 @@ static int check_quad_memops(void) {
         s.r[4] = ARENA_END - 12u;
         fill_vi(&s, 0);
         const CpuState before = s;
-        CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0)) == SR_VFPU_OTHER,
+        CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0)) == SR_VFPU_ACCESS_REFUSED,
               "lv.q straddling the arena end is rejected");
         CHECK(vi_unchanged(&s, 0, 0xA5A5A500u),
               "lv.q rejection leaves every destination lane unchanged");
@@ -332,7 +333,7 @@ static int check_quad_memops(void) {
     setup_state(&s);
     s.r[4] = ARENA_END - 8u;
     fill_vi(&s, 0);
-    CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0)) == SR_VFPU_OTHER,
+    CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0)) == SR_VFPU_ACCESS_REFUSED,
           "lv.q with only half the span in range is rejected");
     CHECK(vi_unchanged(&s, 0, 0xA5A5A500u), "half-in-range lv.q leaves destination unchanged");
 
@@ -340,7 +341,7 @@ static int check_quad_memops(void) {
     setup_state(&s);
     s.r[4] = ARENA_END;
     fill_vi(&s, 0);
-    CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0)) == SR_VFPU_OTHER,
+    CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0)) == SR_VFPU_ACCESS_REFUSED,
           "lv.q starting at the arena end is rejected");
 
     /* 6. Wrapped 32-bit address: base near UINT32_MAX with a negative offset
@@ -348,7 +349,7 @@ static int check_quad_memops(void) {
     setup_state(&s);
     s.r[4] = 0xFFFFFFFFu;
     fill_vi(&s, 0);
-    CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0x8000u)) == SR_VFPU_OTHER,
+    CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0x8000u)) == SR_VFPU_ACCESS_REFUSED,
           "lv.q with a wrapped OOR address is rejected");
     CHECK(vi_unchanged(&s, 0, 0xA5A5A500u), "wrapped lv.q leaves destination unchanged");
 
@@ -367,7 +368,7 @@ static int check_quad_memops(void) {
     setup_state(&s);
     s.r[4] = 0x2BFFFFF4u;  /* window [0x0BFFFFF4, 0x0C000004): crosses the end */
     fill_vi(&s, 0);
-    CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0)) == SR_VFPU_OTHER && vi_unchanged(&s, 0, 0xA5A5A500u),
+    CHECK(sr_vfpu_interp(&s, lvq(4, 0, 0)) == SR_VFPU_ACCESS_REFUSED && vi_unchanged(&s, 0, 0xA5A5A500u),
           "lv.q through the phys alias crossing the arena end is rejected");
 
     /* 7. sv.q rejection must not mutate ANY guest word (pre-#184 wrote the
@@ -376,7 +377,7 @@ static int check_quad_memops(void) {
     s.r[4] = ARENA_END - 12u;  /* crossing span */
     for (int i = 0; i < 4; i++) s.vi[i] = 0x0bad0000u + (uint32_t)i;
     for (int i = 0; i < 4; i++) MEM_W32(ARENA_END - 12u + (uint32_t)i * 4u, 0xCAFE0000u + (uint32_t)i);
-    CHECK(sr_vfpu_interp(&s, svq(4, 0, 0)) == SR_VFPU_OTHER,
+    CHECK(sr_vfpu_interp(&s, svq(4, 0, 0)) == SR_VFPU_ACCESS_REFUSED,
           "sv.q straddling the arena end is rejected");
     CHECK(MEM_R32(ARENA_END - 12u) == 0xCAFE0000u && MEM_R32(ARENA_END - 8u) == 0xCAFE0001u &&
           MEM_R32(ARENA_END - 4u) == 0xCAFE0002u,
@@ -418,7 +419,7 @@ static int check_quad_memops(void) {
         s.r[4] = ARENA_END;
         fill_vi(&s, 0);
         const CpuState before = s;
-        CHECK(sr_vfpu_interp(&s, lvlq(4, 0, 0) | 2u) == SR_VFPU_OTHER && vi_unchanged(&s, 0, 0xA5A5A500u),
+        CHECK(sr_vfpu_interp(&s, lvlq(4, 0, 0) | 2u) == SR_VFPU_ACCESS_REFUSED && vi_unchanged(&s, 0, 0xA5A5A500u),
               "lvr.q at the first OOR window is rejected without destination change");
         CHECKB(bad, memcmp(&s, &before, sizeof(s)) == 0,
                "lvr.q rejection leaves the whole CpuState (incl. prefixes) unchanged");
@@ -427,7 +428,7 @@ static int check_quad_memops(void) {
     setup_state(&s);
     s.r[4] = ARENA_END;
     for (int i = 0; i < 4; i++) s.vi[i] = 0x0bad0000u + (uint32_t)i;
-    CHECK(sr_vfpu_interp(&s, svlq(4, 0, 0)) == SR_VFPU_OTHER,
+    CHECK(sr_vfpu_interp(&s, svlq(4, 0, 0)) == SR_VFPU_ACCESS_REFUSED,
           "svl.q at the first OOR window is rejected");
 
     return bad;
@@ -495,6 +496,38 @@ static int check_vrot_overlap(void) {
     CHECK(sr_vfpu_interp(&s, w) == SR_VFPU_COMPUTE &&
           s.v[5] == sr_vfpu_cos(sr_vfpu_sin(0.5f)) && s.v[4] == sr_vfpu_sin(0.5f),
           "vrot.p recomputes cosine from the written sine lane when vs is an active dest lane");
+
+    /* The cosine lane drops its D-prefix saturation, bits 2*cl..2*cl+1 (lane i's field, as
+     * sr_vwrite reads it), not bits cl..cl+1; every other lane keeps its own. vrot.q,
+     * vd=0 (matrix 0), vs=4 (matrix 1, no overlap), sine lane 0, cosine lane cl. */
+    {
+        uint8_t di[4], ai[1];
+        vreg_idx(0, 4, di);
+        vreg_idx(4, 1, ai);
+        CHECKB(bad, sr_vfpu_cos(1.5f) < 0.0f && sr_vfpu_sin(1.5f) > 0.0f,
+               "vrot prefix case: cos(1.5) is negative and sin(1.5) positive");
+        for (unsigned cl = 1; cl <= 3; cl++) {
+            /* Every lane sat 3 ([-1, 1]) and a negated sine: lane 0 keeps the negative sine.
+             * A mask at bits cl..cl+1 turned lane 0's sat 3 into sat 1 ([0, 1]) at cl = 1. */
+            setup_identity_compute(&s);
+            s.v[ai[0]] = 0.5f;
+            s.vfpuCtrl[2] = 0xFFu;
+            w = vrot | (1u << 15) | (1u << 7) | ((0x10u | cl) << 16) | (4u << 8) | 0u;
+            CHECKB(bad, sr_vfpu_interp(&s, w) == SR_VFPU_COMPUTE &&
+                            s.v[di[0]] == -sr_vfpu_sin(0.5f) && s.v[di[cl]] == sr_vfpu_cos(0.5f),
+                   "vrot.q under a sat-3 D prefix keeps the negative sine lane");
+            /* Every lane sat 1 ([0, 1]) and a negative cosine: the cosine lane is not
+             * saturated. A mask at bits cl..cl+1 left the cosine lane's field set at cl = 2, 3. */
+            setup_identity_compute(&s);
+            s.v[ai[0]] = 1.5f;
+            s.vfpuCtrl[2] = 0x55u;
+            w = vrot | (1u << 15) | (1u << 7) | (cl << 16) | (4u << 8) | 0u;
+            CHECKB(bad, sr_vfpu_interp(&s, w) == SR_VFPU_COMPUTE &&
+                            s.v[di[cl]] == sr_vfpu_cos(1.5f) && s.v[di[0]] == sr_vfpu_sin(1.5f) &&
+                            s.vfpuCtrl[2] == 0u,
+                   "vrot.q leaves the cosine lane unsaturated under a sat-1 D prefix");
+        }
+    }
     return bad;
 }
 

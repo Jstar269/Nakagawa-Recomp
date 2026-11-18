@@ -94,10 +94,14 @@ void sr_yield(CpuState *s) { (void)s; }
 int sr_vfpu_interp(CpuState *s, uint32_t op) { (void)s; (void)op; return 0; }
 uint64_t SDL_GetTicksNS(void) { return 0u; }
 
-/* The scheduler side of the checkpoint stream: one thread, the test machine. */
+/* The scheduler side of the checkpoint stream: one thread, the test machine, plus
+ * g_visit_crowd more that share its state (the child's crowd=<frame> option). */
 static CpuState *g_visit_cpu;
+static unsigned g_visit_crowd;
 void sched_for_each_thread_cpu(SrSchedThreadVisit visit, void *ctx) {
-    if (g_visit_cpu) visit(ctx, 1u, 2, 0x20, 0u, g_visit_cpu);
+    if (!g_visit_cpu) return;
+    visit(ctx, 1u, 2, 0x20, 0u, g_visit_cpu);
+    for (unsigned i = 0; i < g_visit_crowd; i++) visit(ctx, 0x100u + i, 2, 0x20, 0u, g_visit_cpu);
 }
 uint64_t sched_vtime_us(void) { return 1234u; }
 static int g_child_host_clock; /* the record/replay child's host-clock case */
@@ -901,7 +905,8 @@ static void test_checkpoint_stream(void) {
  * requested.
  * Each answer is folded into guest memory, so it decides the rest of the run. Test-only
  * options: perturb=<frame> writes one guest word after that frame; hostclock reports the host
- * clock; hardexit=<frame> stops with _Exit after that frame's VBLANK.
+ * clock; hardexit=<frame> stops with _Exit after that frame's VBLANK; crowd=<frame> makes the
+ * scheduler report 300 more threads after that frame, more than a checkpoint holds.
  * At a normal end it prints CHILD_FINAL with the machine's state and the live keyboard calls. */
 
 #define RR_SCRATCH (DATA_BASE + 0x3000u)
@@ -915,9 +920,10 @@ typedef struct {
     char text[16];
     unsigned pad_seed;
     int pause;
+    int crowd;
 } ChildOptions;
 
-static ChildOptions g_child = {24u, -1, -1, 0, "HELLO", 1u, -1};
+static ChildOptions g_child = {24u, -1, -1, 0, "HELLO", 1u, -1, -1};
 
 /* "--rr-child" alone, or followed by ":" and comma-separated options. Returns 0 on a bad one. */
 static int parse_child_options(const char *arg) {
@@ -936,6 +942,7 @@ static int parse_child_options(const char *arg) {
         if (strncmp(opt, "frames=", 7) == 0) g_child.frames = (unsigned)atoi(opt + 7);
         else if (strncmp(opt, "perturb=", 8) == 0) g_child.perturb = atoi(opt + 8);
         else if (strncmp(opt, "hardexit=", 9) == 0) g_child.hard_exit = atoi(opt + 9);
+        else if (strncmp(opt, "crowd=", 6) == 0) g_child.crowd = atoi(opt + 6);
         else if (strcmp(opt, "extra") == 0) g_child.osk_extra = 1;
         else if (strncmp(opt, "pad=", 4) == 0) g_child.pad_seed = (unsigned)atoi(opt + 4);
         else if (strncmp(opt, "pause=", 6) == 0) g_child.pause = atoi(opt + 6);
@@ -1008,6 +1015,7 @@ static int rr_child(void) {
          * replay mismatch freezes. It reads nothing and changes no guest state. */
         sr_flight_record(SR_FLIGHT_CLASS_SCHED, SR_FLIGHT_KIND_SCHED_PICK, f, 0u, 0u, 0u);
         if ((int)f == perturb) MEM_W32(RR_PERTURB, 0xDEADBEEFu);
+        if ((int)f == g_child.crowd) g_visit_crowd = 300u;
         wchar_t out[64] = L"init";
         if ((request == 0u && f >= 2u) || (request == 1u && f >= 9u)) {
             const int r = sr_replay_osk_poll(L"name", L"init", out, 64, 0u, fake_live);
@@ -1411,6 +1419,18 @@ static void test_record_replay(void) {
           "a mismatch did not stop the run with one verdict: %.300s", log);
     free(log);
     test_replay_mismatch_flight();
+
+    /* 300 more threads after frame 6: the frame-8 checkpoint cannot hold them. The verdict
+     * keeps the documented shape, with the frame and index where the replay stopped. */
+    rr_env("", RR_REC);
+    rr_opt("crowd=6");
+    log = rr_run(&st);
+    CHECK(st == 1 && strstr(log, "REPLAY_MISMATCH frame=8 index=2 kind=overflow digest=-\n") != NULL,
+          "overflowing replay checkpoint: exit %d: %.300s", st, log);
+    CHECK(strstr(log, "reason=checkpoint-overflow") == NULL && strstr(log, "REPLAY_NOT_RUN") == NULL &&
+              strstr(log, "CHILD_FINAL") == NULL,
+          "an overflowing replay checkpoint did not stop with one documented verdict: %.300s", log);
+    free(log);
 
     /* The guest polls a request the recording abandoned. */
     rr_env("", RR_REC);

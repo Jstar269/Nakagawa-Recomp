@@ -2901,6 +2901,13 @@ static int dispatch_try_with_boundary(
                     pc, op, target, s->pc, s->r[31], s->r[29], s->r[4], s->r[5], s->r[6]);
             sr_unimplemented(pc,"VFPU runtime interpreter returned SR_VFPU_OTHER");
         }
+        if (vfpu_result==SR_VFPU_ACCESS_REFUSED) {
+            /* A known VFPU load or store whose guest span is out of range: named as that,
+             * not as a missing encoding. Nothing was read or written. */
+            fprintf(stderr, "VFPU_ACCESS_OUT_OF_RANGE: pc=0x%08" PRIx32 " op=0x%08" PRIx32 " addr=0x%08" PRIx32 "\n",
+                    pc, op, s->r[(op >> 21) & 0x1Fu] + (uint32_t)(int32_t)(int16_t)(op & 0xFFFCu));
+            sr_unimplemented(pc,"VFPU load or store outside guest memory");
+        }
         s->pc=pc+4;
         return SR_GUEST_INTERP_AOT_HANDOFF;
     }

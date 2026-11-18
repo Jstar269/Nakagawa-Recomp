@@ -1519,7 +1519,7 @@ reaches it and writes exactly one verdict to stderr:
 | Verdict | Meaning |
 | --- | --- |
 | `REPLAY_REFUSED reason=<name> line=<n>` | exit 1 before the guest runs: another executable, disc, `CpuState` ABI or clock, or a line it cannot read |
-| `REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>` | exit 1 at the first checkpoint that differs, naming the thread, scheduler or memory chunk |
+| `REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>` | exit 1 at the first checkpoint that differs, naming the thread, scheduler or memory chunk. `kind=overflow digest=-` means the replay's own checkpoint did not fit (more threads than a checkpoint holds), so the run diverged there |
 | `REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>` | exit 1: the guest asked for an answer the recording does not hold. Nothing is made up |
 | `REPLAY_COMPLETE frame=<f> checkpoints=<n> answers=<k>` | every checkpoint matched. Input recorded after the last one is still served; the pad and the keyboard each go live when the recording runs out |
 | `REPLAY_NOT_RUN reached=<f> end=<f> checkpoints=<i>/<n>` | at exit, when the run stopped before the recording was used up. This is never a pass |

@@ -1248,10 +1248,14 @@ float sr_vfpu_exp2(float x);
 
 /* Single-instruction VFPU interpreter (src/rt/vfpu_interp.c). Returns SR_VFPU_COMPUTE for a
  * value-producing op (compare v[]/f[] to the reference trace), SR_VFPU_STATE for a prefix,
- * control, or store op, or SR_VFPU_OTHER for an instruction it cannot execute. */
+ * control, or store op, SR_VFPU_OTHER for an instruction it cannot execute, or
+ * SR_VFPU_ACCESS_REFUSED for a known VFPU load or store whose guest span is not wholly
+ * readable (loads) or writable (stores): nothing was read or written and no prefix was
+ * consumed. A caller stops a refused access by that name, never as a missing encoding. */
 #define SR_VFPU_OTHER   0
 #define SR_VFPU_COMPUTE 1
 #define SR_VFPU_STATE   2
+#define SR_VFPU_ACCESS_REFUSED 3
 int sr_vfpu_interp(CpuState *s, uint32_t op);
 
 /* Unverified VFPU forms in the run log (#1877; patterns generated into hle_evidence.h from
