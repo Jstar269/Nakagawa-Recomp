@@ -25,6 +25,13 @@ static PGF *s_pgf_latin_index[NK_FONT_LATIN_INDEX_COUNT];
 static Flash0Sources s_pgf_sources;
 static atomic_int s_pgf_state;
 
+/* The SR_FONTLOG switch, read once (hle_env_switch): sceFontNewLib and the opens test it on
+ * every call. */
+static int font_log_on(void) {
+    static int enabled = -1;
+    return hle_env_switch(&enabled, "SR_FONTLOG");
+}
+
 static PGF *font_open_host_path(const char *path, const char *label, const char *source) {
 #ifdef _WIN32
     /* Host paths are UTF-8 (the asset-index convention); Windows opens them wide. */
@@ -114,7 +121,7 @@ static void font_load(void) {
         }
         s_pgf_latin_index[index] = pgf;
     }
-    if (getenv("SR_FONTLOG"))
+    if (font_log_on())
         fprintf(stderr, "font_load: japanese=%s legacy-latin=%s korean=%s\n",
                 s_pgf_slot_source[NK_FONT_SLOT_JAPANESE], s_pgf_slot_source[NK_FONT_SLOT_LATIN],
                 s_pgf_slot_source[NK_FONT_SLOT_KOREAN]);
@@ -200,6 +207,23 @@ typedef struct {
 } SrFont;
 static SrFontLib s_fontlibs[32];
 static SrFont s_fonts[64];
+
+/* LoadExec: the old program's libraries and fonts were structs in its own RAM, which the next
+ * program reuses. Their records go, so a new library's block at the same address is not taken
+ * for a live object and the 32 library slots start free; the PGF copies sceFontOpenUserMemory
+ * and sceFontOpenUserFile made are closed. The loaded system fonts stay cached. No guest code
+ * runs during the reset, so no font is held (refs) across it. */
+void hle_font_loadexec_reset(void) {
+    PGF *owned[sizeof(s_fonts) / sizeof(s_fonts[0])];
+    size_t owned_count = 0;
+    hle_lock();
+    for (size_t i = 0; i < sizeof(s_fonts) / sizeof(s_fonts[0]); i++)
+        if (s_fonts[i].ownedPgf) owned[owned_count++] = s_fonts[i].ownedPgf;
+    memset(s_fontlibs, 0, sizeof(s_fontlibs));
+    memset(s_fonts, 0, sizeof(s_fonts));
+    hle_unlock();
+    for (size_t i = 0; i < owned_count; i++) pgf_close(owned[i]);
+}
 
 static int fontlib_snapshot(uint32_t handle, SrFontLib *out) {
     int found = 0;
@@ -436,7 +460,7 @@ static uint32_t h_FontNewLib(CpuState *s) {
         hle_unlock();
     }
     if (errPtr) MEM_W32(errPtr, lib ? 0 : SR_FONT_ERROR_OOM);
-    if (getenv("SR_FONTLOG"))
+    if (font_log_on())
         fprintf(stderr, "h_FontNewLib: params=0x%08x numFonts=%d alloc=0x%08x free=0x%08x -> lib=0x%08x\n",
                 params, numFonts, allocFn, freeFn, lib);
     return lib;
@@ -557,7 +581,7 @@ static uint32_t h_FontOpen(CpuState *s) {
         return 0;
     }
     uint32_t fh = font_open_common(s, A0, A1, A2, pgf, NULL, &info, A3);
-    if (getenv("SR_FONTLOG"))
+    if (font_log_on())
         fprintf(stderr, "h_FontOpen: lib=0x%08x index=%u mode=%u -> font=0x%08x\n", A0, A1, A2, fh);
     return fh;
 }
@@ -591,7 +615,7 @@ static uint32_t h_FontOpenUserMemory(CpuState *s) {
         }
     }
     uint32_t fh = font_open_common(s, A0, 0, 4, owned, owned, NULL, A3);
-    if (getenv("SR_FONTLOG"))
+    if (font_log_on())
         fprintf(stderr, "h_FontOpenUserMemory: lib=0x%08x mem=0x%08x len=%u -> font=0x%08x\n", A0, A1, A2, fh);
     return fh;
 }

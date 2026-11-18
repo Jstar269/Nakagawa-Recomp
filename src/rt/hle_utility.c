@@ -1179,6 +1179,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     s_main_module_uid = 0u;
     sr_hle_power_loadexec_reset();
     sr_hle_umd_loadexec_reset();         /* no UMD callback; the drive at its entry state */
+    hle_font_loadexec_reset();           /* no sceFont library or font of the old program */
 
     hle_fd_init();
     memset(s_io_cwds, 0, sizeof(s_io_cwds));

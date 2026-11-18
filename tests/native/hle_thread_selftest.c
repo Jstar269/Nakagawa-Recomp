@@ -5288,7 +5288,144 @@ static void test_fd_namespace(void) {
         expect(sr_hle_test_io_close(&cpu) == 0u &&
                    fd_host_bytes_equal(flags_host, (const uint8_t *)"", 0u),
                "TRUNC with no write ends at an empty file");
+
+        /* PSP_O_TRUNC without write access (PSP_O_RDONLY | PSP_O_TRUNC), or with PSP_O_APPEND,
+         * is no measured cell: it stops at the named boundary before any host open, and the
+         * existing file keeps its bytes instead of being emptied through a host truncation. */
+        fd_set_path(&cpu, path_addr, flags_guest);
+        uint32_t keep_fd = sr_hle_test_io_open(&cpu);
+        fd_guest_copy(payload_addr, "keep", 4u);
+        fd_set_write(&cpu, keep_fd, payload_addr, 4u);
+        expect(keep_fd < 64u && sr_hle_test_io_write(&cpu) == 4u,
+               "the unmeasured-TRUNC fixture writes its bytes");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = keep_fd;
+        (void)sr_hle_test_io_close(&cpu);
+        static const uint32_t unmeasured_trunc[] = {
+            0x0401u, 0x0502u, 0x0503u, 0x0702u  /* RDONLY|TRUNC, WRONLY|APPEND|TRUNC, RDWR, +CREAT */
+        };
+        for (size_t i = 0; i < sizeof(unmeasured_trunc) / sizeof(unmeasured_trunc[0]); i++) {
+            fd_set_path(&cpu, path_addr, flags_guest);
+            cpu.r[5] = unmeasured_trunc[i];
+            uint32_t rc = sr_hle_test_io_open(&cpu);
+            if (rc < 64u) {
+                memset(&cpu, 0, sizeof(cpu));
+                cpu.r[4] = rc;
+                (void)sr_hle_test_io_close(&cpu);
+            }
+            expect(rc == 0x80010086u &&
+                       fd_host_bytes_equal(flags_host, (const uint8_t *)"keep", 4u),
+                   "unmeasured PSP_O_TRUNC stops at the named boundary and leaves the file intact");
+        }
         remove(flags_host);
+    }
+
+    /* A guest path of 256 bytes or more keeps its device rules: the descriptor records the
+     * whole path, so a seek before the start of a Memory Stick file is the measured EINVAL
+     * (0x80010016), not the generic 0xffffffff. On Win32 a separator run (which that host
+     * collapses) keeps the host path short; the POSIX seam refuses repeated separators, so
+     * there the path runs through one 240-byte directory name. */
+    {
+        char long_guest[400];
+        char long_host[1024];
+        size_t at = (size_t)snprintf(long_guest, sizeof(long_guest), "ms0:/");
+#ifdef _WIN32
+        while (at < 300u) long_guest[at++] = '/';
+        snprintf(long_guest + at, sizeof(long_guest) - at, "NAKAGAWA_LONG_PATH.TXT");
+        fd_host_path(long_host, sizeof(long_host), "ms0:/NAKAGAWA_LONG_PATH.TXT");
+#else
+        while (at < 245u) long_guest[at++] = 'L';
+        long_guest[at] = '\0';
+        char long_dir_host[1024];
+        fd_host_path(long_dir_host, sizeof(long_dir_host), long_guest);
+        (void)mkdir(long_dir_host, 0777);
+        snprintf(long_guest + at, sizeof(long_guest) - at, "/NAKAGAWA_LONG_PATH.TXT");
+        fd_host_path(long_host, sizeof(long_host), long_guest);
+#endif
+        remove(long_host);
+        fd_set_path(&cpu, path_addr, long_guest);
+        uint32_t long_fd = sr_hle_test_io_open(&cpu);
+        expect(long_fd < 64u, "a Memory Stick file opens by a guest path longer than 255 bytes");
+        if (long_fd < 64u) {
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = long_fd;
+            cpu.r[5] = 0xffffffffu;   /* -1 */
+            cpu.r[6] = 0u;            /* SEEK_SET */
+            expect(sr_hle_test_io_lseek32(&cpu) == 0x80010016u,
+                   "a seek before the start of a long-path Memory Stick file is EINVAL");
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = long_fd;
+            (void)sr_hle_test_io_close(&cpu);
+        }
+        remove(long_host);
+#ifndef _WIN32
+        (void)rmdir(long_dir_host);
+#endif
+    }
+
+    /* sceIoIoctl seek (0x01010005) and read (0x01030008) on a plain host file (fatms0:, which
+     * the ms0: ioctl rule does not cover). The seek reads a 16-byte record, so a record that
+     * ends past guest memory is EINVAL and moves nothing; a whence above 2 is the I/O error.
+     * The read checks its whole destination first: a buffer that ends past guest memory is
+     * EINVAL, writes nothing and leaves the position. */
+    {
+        static const char ioctl_guest[] = "fatms0:/NAKAGAWA_IOCTL_FILE.TXT";
+        enum { IOCTL_SEEK = 0x01010005u, IOCTL_READ = 0x01030008u, IOCTL_TELL = 0x01020004u };
+        const uint32_t record = payload_addr + 0x100u;
+        const uint32_t tell_out = payload_addr + 0x200u;
+        const uint32_t short_record = 0x0c000000u - 8u;
+        const uint32_t tail_out = 0x0c000000u - 4u;
+        char ioctl_host[256];
+        fd_host_path(ioctl_host, sizeof(ioctl_host), ioctl_guest);
+        remove(ioctl_host);
+        fd_set_path(&cpu, path_addr, ioctl_guest);
+        cpu.r[5] = 0x0603u;   /* RDWR | CREAT | TRUNC */
+        uint32_t io_fd = sr_hle_test_io_open(&cpu);
+        expect(io_fd < 64u, "the ioctl fixture opens a fatms0: file");
+        if (io_fd < 64u) {
+            fd_guest_copy(payload_addr, "abcdefgh", 8u);
+            fd_set_write(&cpu, io_fd, payload_addr, 8u);
+            expect(sr_hle_test_io_write(&cpu) == 8u, "the ioctl fixture writes eight bytes");
+#define IOCTL_CALL(cmd_, in_, inlen_, out_, outlen_)                                         \
+            (memset(&cpu, 0, sizeof(cpu)), cpu.r[4] = io_fd, cpu.r[5] = (cmd_),             \
+             cpu.r[6] = (in_), cpu.r[7] = (inlen_), cpu.r[8] = (out_), cpu.r[9] = (outlen_), \
+             sr_hle_test_io_ioctl(&cpu))
+#define IOCTL_TELL_NOW()                                                                     \
+            (IOCTL_CALL(IOCTL_TELL, 0u, 0u, tell_out, 4u) == 0u ? MEM_R32(tell_out) : UINT32_MAX)
+            MEM_W32(record + 0u, 2u); MEM_W32(record + 4u, 0u);
+            MEM_W32(record + 8u, 0u); MEM_W32(record + 12u, 0u);
+            expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0u && IOCTL_TELL_NOW() == 2u,
+                   "the ioctl seek moves to a SEEK_SET destination");
+            MEM_W32(short_record + 0u, 6u); MEM_W32(short_record + 4u, 0u);
+            expect(IOCTL_CALL(IOCTL_SEEK, short_record, 4u, 0u, 0u) == 0x80010016u &&
+                       IOCTL_TELL_NOW() == 2u,
+                   "an ioctl seek record that ends past guest memory is EINVAL and moves nothing");
+            MEM_W32(record + 0u, 6u); MEM_W32(record + 12u, 3u);
+            expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0x80010005u &&
+                       IOCTL_TELL_NOW() == 2u,
+                   "an ioctl seek with whence 3 is the I/O error and moves nothing");
+            MEM_W32(record + 0u, 0xffffffffu); MEM_W32(record + 4u, 0x7fffffffu);
+            MEM_W32(record + 12u, 1u);
+            expect(IOCTL_CALL(IOCTL_SEEK, record, 16u, 0u, 0u) == 0x80010005u &&
+                       IOCTL_TELL_NOW() == 2u,
+                   "an ioctl seek by INT64_MAX from the position is the I/O error");
+            MEM_W32(record + 0u, 8u);
+            for (uint32_t i = 0; i < 4u; i++) MEM_W8(tail_out + i, 0x5au);
+            expect(IOCTL_CALL(IOCTL_READ, record, 4u, tail_out, 8u) == 0x80010016u &&
+                       MEM_R32(tail_out) == 0x5a5a5a5au && IOCTL_TELL_NOW() == 2u,
+                   "an ioctl read whose destination ends past guest memory is EINVAL and writes nothing");
+            MEM_W32(record + 0u, 4u);
+            expect(IOCTL_CALL(IOCTL_READ, record, 4u, payload_addr + 0x300u, 4u) == 4u &&
+                       MEM_R8(payload_addr + 0x300u) == 'c' &&
+                       MEM_R8(payload_addr + 0x303u) == 'f' && IOCTL_TELL_NOW() == 6u,
+                   "an ioctl read serves the file's bytes from the position");
+#undef IOCTL_TELL_NOW
+#undef IOCTL_CALL
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = io_fd;
+            (void)sr_hle_test_io_close(&cpu);
+        }
+        remove(ioctl_host);
     }
 
     /* DOS device names (join rule): create-open is not-found, matching the POSIX open
@@ -19443,6 +19580,31 @@ static void test_archive_mode_preserves_loose_routes(void) {
                    "excluding sibling subtrees preserves extracted-primary precedence");
         }
     }
+#ifndef _WIN32
+    /* An excluded entry is skipped whatever its type, as in the Win32 walk: an excluded
+     * symbolic link does not fail the whole walk the way an included one does. */
+    {
+        char excluded_link[MAX_PATH];
+        char link_roots[MAX_PATH + 96];
+        int link_len = snprintf(link_roots, sizeof(link_roots),
+            "%s/" "USRDIR\t\t0\t1\t2\tpacked_archives\texcluded_link\n", fixture.root);
+        int link_ok = snprintf(excluded_link, sizeof(excluded_link), "%s/USRDIR/excluded_link",
+                               fixture.root) > 0 &&
+                      link_len > 0 && (size_t)link_len < sizeof(link_roots) &&
+                      symlink("NKMISSINGTARGET", excluded_link) == 0;
+        expect(link_ok, "the excluded-link fixture is created");
+        if (link_ok) {
+            hle_archive_route_set_env("SR_LOOSE_CONTENT_ROOTS", link_roots);
+            sr_hle_test_data_reset(0);
+            expect(sr_host_data_prepare() == SR_DATA_TEST_STATE_READY,
+                   "an excluded symbolic link is skipped and the walk reaches READY");
+            unlink(excluded_link);
+            /* The checks below run with the two-exclusion manifest, as before this case. */
+            if (filtered_len > 0 && (size_t)filtered_len < sizeof(filtered_roots))
+                hle_archive_route_set_env("SR_LOOSE_CONTENT_ROOTS", filtered_roots);
+        }
+    }
+#endif
 
     char duplicate_directory[MAX_PATH];
     char duplicate_data_directory[MAX_PATH];
@@ -55078,6 +55240,29 @@ static void test_font_lib_lifecycle(uint32_t served_index) {
                s_flt_free_calls == 1u,
            "a second sceFontDoneLib of the same library fails closed without freeing again");
     expect(flt_call(FLT_NID_DONELIB, FLT_LIB_B, 0u, 0u, 0u) == 0u, "the second library is retired");
+
+    /* LoadExec: the old program's library and font were structs in its RAM. The next program's
+     * allocator hands out the same addresses, and they must not be refused as live objects. */
+    expect(flt_new_lib(FLT_PARAMS, FLT_LIB_A) == FLT_LIB_A,
+           "LoadExec fixture: the old program opens a library");
+    s_flt_alloc_ret = FLT_FONT;
+    uint32_t old_font = flt_call(FLT_NID_OPEN, FLT_LIB_A, served_index, 0u, FLT_ERR);
+    expect(old_font == FLT_FONT, "LoadExec fixture: the old program opens a font");
+    sr_hle_loadexec_reset_guest_state();
+    sr_test_register_guest_fn(FLT_ALLOC_ENTRY, flt_alloc_fn);
+    sr_test_register_guest_fn(FLT_FREE_ENTRY, flt_free_fn);
+    expect(flt_call(FLT_NID_INFO, FLT_FONT, FLT_INFO, 0u, 0u) == FLT_ERR_INVALID_ARG &&
+               flt_call(FLT_NID_DONELIB, FLT_LIB_A, 0u, 0u, 0u) == FLT_ERR_INVALID_LIB,
+           "after LoadExec the old program's font and library handles are gone");
+    expect(flt_new_lib(FLT_PARAMS, FLT_LIB_A) == FLT_LIB_A && MEM_R32(FLT_ERR) == 0u,
+           "after LoadExec the next program's library opens at the old library's address");
+    s_flt_alloc_ret = FLT_FONT;
+    uint32_t next_font = flt_call(FLT_NID_OPEN, FLT_LIB_A, served_index, 0u, FLT_ERR);
+    expect(next_font == FLT_FONT && MEM_R32(FLT_ERR) == 0u,
+           "after LoadExec the next program's font opens at the old font's address");
+    if (next_font) (void)flt_call(FLT_NID_CLOSE, next_font, 0u, 0u, 0u);
+    expect(flt_call(FLT_NID_DONELIB, FLT_LIB_A, 0u, 0u, 0u) == 0u,
+           "the next program's library is retired");
 }
 
 /* #1384: glyph-image spans, allocator alignment and the handle lifecycle, through production

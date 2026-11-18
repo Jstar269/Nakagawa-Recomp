@@ -774,7 +774,10 @@ typedef struct {
     size_t archive_mount;
     size_t archive_entry;
     const uint8_t *enhancement_data; /* rewritten bytes of an enhancement data file, or NULL */
-    char guest_path[256];        /* the path the guest opened it with ("" if too long) */
+    /* The path the guest opened it with. As large as the io_guest_path buffer sceIoOpen
+     * reads into, so the device rules (disc0: seek bounds, ms0: EINVAL and ioctl refusals)
+     * see every accepted path; "" only for a longer path from another caller. */
+    char guest_path[512];
 } Fd;
 
 typedef struct {
@@ -1156,6 +1159,7 @@ uint32_t free_block(uint32_t uid);
 /* sceNet core library state (hle_network.c): reset at LoadExec and by the self-tests. */
 void hle_net_reset(void);
 void sr_hle_umd_loadexec_reset(void);  /* LoadExec: drop the UMD callback, drive at entry state */
+void hle_font_loadexec_reset(void);    /* LoadExec: drop the old program's sceFont libraries and fonts */
 int sr_hle_test_net_inited(void);
 uint32_t sr_hle_test_net_pool_uid(void);
 extern FplPool s_fpls[FPL_MAX];
