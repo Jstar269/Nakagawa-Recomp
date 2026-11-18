@@ -92,9 +92,10 @@ PRIVATE_OPERATIONAL_VOCABULARY = re.compile(
     re.IGNORECASE,
 )
 SUSPICIOUS_ENCODED = re.compile(r"^[A-Za-z0-9+/]{256,}={0,2}$")
-# A C0 control character other than TAB, LF and CR marks a blob as binary. One
-# search per blob replaces a Python-level scan of every character of every text blob.
-BINARY_CONTROL_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+#: A NUL-free blob that is not valid UTF-8 is still scanned as text when at most one
+#: decoded character in this many is a replacement character (U+FFFD).
+MIN_CHARACTERS_PER_REPLACEMENT = 20
+REPLACEMENT_CHARACTER = chr(0xFFFD)
 
 
 # Literal prefilters for the content signatures. Each helper returns exactly the verdict
@@ -206,6 +207,47 @@ def _object_listing(repo_root: Path) -> list[str]:
     return _git(["rev-list", "--objects", "--all"], repo_root=repo_root).splitlines()
 
 
+#: A gitlink (submodule) entry names a commit, not a blob.
+GITLINK_MODE = "160000"
+
+
+def _path_listing(repo_root: Path) -> list[tuple[str, str, str]]:
+    """Every ``(mode, object id, path)`` entry any reachable commit's tree holds, each once.
+
+    ``rev-list --objects`` names each object once, under the first path it meets, so a blob
+    whose bytes also sit at an innocent path (an empty file, a copy) never shows its
+    forbidden one. Every entry of a reachable commit's tree is either new against the
+    commit's first parent or already in that parent's tree, and a root commit adds its
+    whole tree; so the first-parent raw diffs of all reachable commits name every
+    ``(path, object)`` pair at least once.
+    """
+    output = _git(
+        ["log", "--all", "--root", "--diff-merges=first-parent", "--raw", "--no-renames",
+         "--no-abbrev", "-z", "--format="],
+        repo_root=repo_root,
+    )
+    entries: dict[tuple[str, str], str] = {}
+    tokens = output.split("\0")
+    index = 0
+    while index < len(tokens):
+        header = tokens[index].lstrip("\n")
+        index += 1
+        if not header.startswith(":"):
+            continue
+        if index >= len(tokens):
+            raise RuntimeError(f"git log --raw: entry without a path: {header!r}")
+        path = tokens[index]
+        index += 1
+        fields = header[1:].split()
+        if len(fields) != 5:
+            raise RuntimeError(f"git log --raw: malformed entry header {header!r}")
+        _, new_mode, _, new_id, _status = fields
+        if set(new_id) == {"0"}:
+            continue  # a deletion: the old entry was introduced, and listed, earlier
+        entries.setdefault((new_id, path), new_mode)
+    return [(mode, object_id, path) for (object_id, path), mode in entries.items()]
+
+
 def get_repository_baseline(repo_root: Path = ROOT, raw_objects: list[str] | None = None) -> dict:
     commit_count = int(_git(["rev-list", "--count", "--all"], repo_root=repo_root).strip())
     if raw_objects is None:
@@ -228,32 +270,25 @@ def get_repository_baseline(repo_root: Path = ROOT, raw_objects: list[str] | Non
     }
 
 
-def _path_finding_id(obj_sha: str, repo_root: Path) -> str:
+def _path_finding_id(obj_sha: str, mode: str) -> str:
     """The identity a path finding reports for its object.
 
     A blob carries the same identity as the content findings ("blob:" plus 12 hex), so one
     reviewed blob entry (exact bytes, code and path) can accept every finding on those
-    bytes. A tree keeps its short object id.
+    bytes. A gitlink keeps its short object id. The tree entry's mode says which it is, so
+    no git process runs per finding.
     """
-    try:
-        kind = _git(["cat-file", "-t", obj_sha], repo_root=repo_root).strip()
-    except Exception:
-        return obj_sha[:8]
-    return "blob:" + obj_sha[:12] if kind == "blob" else obj_sha[:8]
+    return obj_sha[:8] if mode == GITLINK_MODE else "blob:" + obj_sha[:12]
 
 
 def audit_history_tree_paths(repo_root: Path = ROOT,
-                             raw_objects: list[str] | None = None) -> list[HistoryFinding]:
+                             path_entries: list[tuple[str, str, str]] | None = None) -> list[HistoryFinding]:
     """Pass 1: Audit all historical tree entry paths across every reachable commit."""
     findings: list[HistoryFinding] = []
-    if raw_objects is None:
-        raw_objects = _object_listing(repo_root)
+    if path_entries is None:
+        path_entries = _path_listing(repo_root)
 
-    for line in raw_objects:
-        parts = line.strip().split(None, 1)
-        if len(parts) != 2:
-            continue
-        obj_sha, rel_path = parts
+    for mode, obj_sha, rel_path in path_entries:
         rel_path_clean = rel_path
         while rel_path_clean.startswith("./"):
             rel_path_clean = rel_path_clean[2:]
@@ -265,7 +300,7 @@ def audit_history_tree_paths(repo_root: Path = ROOT,
                 findings.append(HistoryFinding(
                     category="PROPRIETARY_ARTIFACT",
                     code="HISTORICAL_PATH_PREFIX",
-                    commit=_path_finding_id(obj_sha, repo_root),
+                    commit=_path_finding_id(obj_sha, mode),
                     path=rel_path_clean,
                     detail=f"Reachable historical object under private/proprietary prefix '{prefix}'",
                 ))
@@ -277,7 +312,7 @@ def audit_history_tree_paths(repo_root: Path = ROOT,
             findings.append(HistoryFinding(
                 category="PROPRIETARY_ARTIFACT",
                 code="HISTORICAL_GAME_ARTIFACT",
-                commit=_path_finding_id(obj_sha, repo_root),
+                commit=_path_finding_id(obj_sha, mode),
                 path=rel_path_clean,
                 detail=f"Reachable historical game-derived file '{name}'",
             ))
@@ -288,7 +323,7 @@ def audit_history_tree_paths(repo_root: Path = ROOT,
             findings.append(HistoryFinding(
                 category="PROPRIETARY_ARTIFACT",
                 code="HISTORICAL_PROHIBITED_EXTENSION",
-                commit=_path_finding_id(obj_sha, repo_root),
+                commit=_path_finding_id(obj_sha, mode),
                 path=rel_path_clean,
                 detail=f"Reachable historical blob with prohibited binary extension '{ext}'",
             ))
@@ -296,11 +331,8 @@ def audit_history_tree_paths(repo_root: Path = ROOT,
     return findings
 
 
-def _reachable_blob_ids(repo_root: Path,
-                        raw_objects: list[str] | None = None) -> dict[str, str]:
-    """Return each reachable blob object exactly once, with one observed path."""
-    if raw_objects is None:
-        raw_objects = _object_listing(repo_root)
+def _named_objects(raw_objects: list[str]) -> dict[str, str]:
+    """Each object of a ``rev-list --objects`` listing that has a path, with that path."""
     candidates: dict[str, str] = {}
     for line in raw_objects:
         parts = line.strip().split(None, 1)
@@ -308,19 +340,53 @@ def _reachable_blob_ids(repo_root: Path,
             continue
         object_id, path = parts
         candidates.setdefault(object_id, path)
-    if not candidates:
+    return candidates
+
+
+def _object_info(repo_root: Path, ids: list[str]) -> dict[str, tuple[str, int]]:
+    """Type and size of every object in ``ids``, from one ``cat-file --batch-check``.
+
+    A reachable object git cannot read (a corrupt loose object or pack, a promisor object
+    absent from a partial clone) is reported as ``missing`` with exit status 0. The audit
+    raises on it, and on any id without its line: an object it cannot read is an object
+    it has not scanned, so the gate must not report OK.
+    """
+    if not ids:
         return {}
-    ids = list(candidates)
-    checked = subprocess.run(
+    proc = subprocess.run(
         ["git", "cat-file", "--batch-check"], cwd=repo_root,
         env=isolated_git_env(root=repo_root),
         input=("".join(f"{object_id}\n" for object_id in ids)).encode("ascii"),
-        capture_output=True, check=True,
-    ).stdout.decode("ascii", errors="replace").splitlines()
+        capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git cat-file --batch-check failed: {err}")
+    lines = proc.stdout.decode("ascii", errors="replace").splitlines()
+    if len(lines) != len(ids):
+        raise RuntimeError(f"git cat-file --batch-check answered {len(lines)} of {len(ids)} objects")
+    info: dict[str, tuple[str, int]] = {}
+    for object_id, line in zip(ids, lines, strict=True):
+        fields = line.split()
+        if len(fields) != 3 or fields[0] != object_id or not fields[2].isdigit():
+            raise RuntimeError(f"reachable object {object_id} cannot be read: {line.strip()!r}")
+        info[object_id] = (fields[1], int(fields[2]))
+    return info
+
+
+def _reachable_blob_ids(repo_root: Path,
+                        raw_objects: list[str] | None = None,
+                        object_info: dict[str, tuple[str, int]] | None = None) -> dict[str, str]:
+    """Return each reachable blob object exactly once, with one observed path."""
+    if raw_objects is None:
+        raw_objects = _object_listing(repo_root)
+    candidates = _named_objects(raw_objects)
+    if object_info is None:
+        object_info = _object_info(repo_root, list(candidates))
     return {
-        line.split()[0]: candidates[line.split()[0]]
-        for line in checked
-        if len(line.split()) == 3 and line.split()[1] == "blob"
+        object_id: path
+        for object_id, path in candidates.items()
+        if object_info[object_id][0] == "blob"
     }
 
 
@@ -340,66 +406,141 @@ def _binary_magic(data: bytes) -> str | None:
     return None
 
 
-def audit_history_blob_contents(repo_root: Path = ROOT,
-                                raw_objects: list[str] | None = None) -> list[HistoryFinding]:
-    """Pass 2: scan every reachable blob's content once, not just its path."""
-    findings: list[HistoryFinding] = []
-    blobs = _reachable_blob_ids(repo_root, raw_objects)
-    if not blobs:
-        return findings
+def _read_blobs(repo_root: Path, blobs: dict[str, str]):
+    """Yield ``(object id, path, bytes)`` for every blob, or raise if git could not read all.
+
+    ``git cat-file --batch`` that dies partway (a corrupt object, a failed pack read)
+    leaves short output. A scan that stopped there and reported OK would pass a history it
+    never read, so the exit status, every header and every byte count are checked.
+    """
+    ids = list(blobs)
     proc = subprocess.Popen(
         ["git", "cat-file", "--batch"], cwd=repo_root,
         env=isolated_git_env(root=repo_root),
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    assert proc.stdin and proc.stdout
-    output, _ = proc.communicate(("".join(f"{object_id}\n" for object_id in blobs)).encode("ascii"))
+    output, errors = proc.communicate(("".join(f"{object_id}\n" for object_id in ids)).encode("ascii"))
+    if proc.returncode != 0:
+        err = errors.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git cat-file --batch failed: {err}")
     pos = 0
-    for object_id, path in blobs.items():
+    for object_id in ids:
         end = output.find(b"\n", pos)
-        if end < 0:
-            break
-        header = output[pos:end].split()
-        pos = end + 1
-        if len(header) < 3 or header[1] != b"blob":
-            continue
+        header = output[pos:end].split() if end >= 0 else []
+        if (len(header) != 3 or header[0].decode("ascii", errors="replace") != object_id
+                or header[1] != b"blob" or not header[2].isdigit()):
+            shown = output[pos:end if end >= 0 else pos + 80]
+            raise RuntimeError(f"git cat-file --batch did not return blob {object_id}: {shown!r}")
         size = int(header[2])
+        pos = end + 1
         data = output[pos:pos + size]
+        if len(data) != size or output[pos + size:pos + size + 1] != b"\n":
+            raise RuntimeError(f"git cat-file --batch returned {len(data)} of {size} bytes of {object_id}")
         pos += size + 1
-        commit = f"blob:{object_id[:12]}"
-        # Do not run text signatures over arbitrary binary blobs.  Replacement
-        # decoding turns random bytes (for example public lookup tables) into
-        # plausible path/token text and creates false positives.  Strict UTF-8
-        # plus a NUL/control-byte check is conservative for source, JSON and
-        # documentation while preserving the separate binary-magic checks.
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            text = None
-        if text is not None and (
-            b"\0" in data
-            or BINARY_CONTROL_CHARACTER.search(text) is not None
-        ):
-            text = None
+        yield object_id, blobs[object_id], data
+    if pos != len(output):
+        raise RuntimeError("git cat-file --batch returned output past the last requested blob")
 
-        lowered = text.lower() if text is not None else ""
-        if text is not None and (PEM_KEY_MATERIAL.search(text) or _has_api_token(text)):
+
+def _has_secret(text: str) -> bool:
+    return PEM_KEY_MATERIAL.search(text) is not None or _has_api_token(text)
+
+
+def _has_local_path(text: str, lowered: str) -> bool:
+    """A user, share, cloud-folder or temp path.
+
+    POSIX_USER_PATH also matches wherever MAC_USER_PATH or WSL_USER_PATH would (each of
+    their matches contains a macOS user-folder segment that POSIX_USER_PATH covers), so
+    those two are not searched again.
+    """
+    return bool(
+        _has_windows_user_path(text) or POSIX_USER_PATH.search(text) or UNC_PATH.search(text)
+        or _has_onedrive_path(text, lowered) or _has_temp_path(text, lowered)
+    )
+
+
+def private_root_patterns(roots: tuple[str, ...]) -> list[re.Pattern[str]]:
+    """One case-insensitive pattern per distinct private root, in every separator form.
+
+    A root's slash and backslash spellings are one root: each separator matches a slash or a
+    run of backslashes (the doubled form JSON, C and Python literals store). The root must
+    stand alone, so an escaped newline in source such as ``spec:`` + backslash + ``nkind``,
+    or a longer name that only starts with the root, is not a match.
+    """
+    separator = r"(?:/|\\+)"
+    patterns: dict[str, re.Pattern[str]] = {}
+    for root in roots:
+        parts = [re.escape(part) for part in re.split(r"[\\/]+", root) if part]
+        if not parts:
+            continue
+        body = separator.join(parts)
+        body = (separator if root[0] in "/\\" else r"(?<![A-Za-z0-9_])") + body + r"(?![A-Za-z0-9_])"
+        patterns.setdefault(body, re.compile(body, re.IGNORECASE))
+    return list(patterns.values())
+
+
+def audit_history_blob_contents(repo_root: Path = ROOT,
+                                raw_objects: list[str] | None = None,
+                                private_roots: tuple[str, ...] | None = None,
+                                object_info: dict[str, tuple[str, int]] | None = None) -> list[HistoryFinding]:
+    """Pass 2: scan every reachable blob's content once, not just its path.
+
+    ``private_roots`` defaults to the canonical policy's; the policy file itself is the
+    one blob allowed to name them.
+    """
+    findings: list[HistoryFinding] = []
+    roots = policy_private_roots(repo_root) if private_roots is None else private_roots
+    root_patterns = private_root_patterns(roots)
+    policy_path = POLICY_PATH.as_posix()
+    blobs = _reachable_blob_ids(repo_root, raw_objects, object_info)
+    if not blobs:
+        return findings
+    for object_id, path, data in _read_blobs(repo_root, blobs):
+        size = len(data)
+        commit = f"blob:{object_id[:12]}"
+        magic = _binary_magic(data)
+        # Path, root, repository and vocabulary signatures are not run over binary blobs:
+        # replacement decoding turns random bytes (for example public lookup tables)
+        # into plausible path text. A NUL byte marks a blob as binary, and so do bytes
+        # that are not UTF-8 when they carry a binary signature or are not mostly text
+        # (a NUL-free lookup table decodes to a replacement character in about one
+        # character of seven). A control character (an ANSI colour code in a log, a
+        # form feed in source) or a stray byte that is not UTF-8 (a cp1252 accent) does
+        # not make a text binary: it is scanned, through a replacement decoding where
+        # needed, or a private path in a coloured log would pass the gate.
+        text: str | None = None
+        if b"\0" not in data:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                replaced = data.decode("utf-8", errors="replace")
+                if magic is None and replaced.count(REPLACEMENT_CHARACTER) * MIN_CHARACTERS_PER_REPLACEMENT <= len(replaced):
+                    text = replaced
+        # Key armour and token prefixes are anchored ASCII signatures that random bytes
+        # do not produce, so they are searched in every blob, binary ones included.
+        if _has_secret(text if text is not None else data.decode("latin-1")):
             findings.append(HistoryFinding("DEFINITE_SECRET", "HISTORICAL_BLOB_SECRET", commit, path,
                                            "reachable blob contains a private-key or API-token signature [REDACTED]"))
-        if text is not None and (_has_windows_user_path(text) or POSIX_USER_PATH.search(text) or MAC_USER_PATH.search(text) or WSL_USER_PATH.search(text) or UNC_PATH.search(text) or _has_onedrive_path(text, lowered) or _has_temp_path(text, lowered)):
+        lowered = text.lower() if text is not None else ""
+        if text is not None and _has_local_path(text, lowered):
             findings.append(HistoryFinding("PRIVACY_METADATA", "HISTORICAL_BLOB_LOCAL_PATH", commit, path,
                                            "reachable blob contains a private local path [REDACTED]"))
+        if (text is not None and path != policy_path
+                and any(pattern.search(text) for pattern in root_patterns)):
+            findings.append(HistoryFinding("PRIVACY_METADATA", "HISTORICAL_BLOB_PRIVATE_ROOT", commit, path,
+                                           "reachable blob names a configured private root [REDACTED]"))
         if text is not None and _has_private_repo_url(text):
             findings.append(HistoryFinding("PRIVACY_METADATA", "HISTORICAL_BLOB_PRIVATE_REPO", commit, path,
                                            "reachable blob names a private repository [REDACTED]"))
         if text is not None and _has_private_operational_vocabulary(text, lowered):
             findings.append(HistoryFinding("PROPRIETARY_ARTIFACT", "HISTORICAL_BLOB_PRIVATE_VOCABULARY", commit, path,
                                            "reachable blob contains private/game-derived operational vocabulary [REDACTED]"))
-        magic = _binary_magic(data)
         if magic:
             findings.append(HistoryFinding("PROPRIETARY_ARTIFACT", "HISTORICAL_BLOB_MAGIC", commit, path,
                                            f"reachable blob contains forbidden/proprietary magic: {magic}"))
-        if text is not None and size >= 1024 * 1024 and SUSPICIOUS_ENCODED.fullmatch(text.strip()):
+        # Base64 tools wrap their output (76 columns for MIME and encodebytes), so the
+        # payload is matched with its line breaks and other whitespace removed.
+        if text is not None and size >= 1024 * 1024 and SUSPICIOUS_ENCODED.fullmatch("".join(text.split())):
             findings.append(HistoryFinding("PROPRIETARY_ARTIFACT", "HISTORICAL_BLOB_ENCODED_PAYLOAD", commit, path,
                                            "large reachable blob is a suspicious encoded payload"))
     return findings
@@ -434,8 +575,11 @@ def audit_history_commit_metadata(repo_root: Path = ROOT,
         if not separator:
             continue
         commit_id = commit_sha[:12]
+        message_lower = message.lower()
 
-        if WINDOWS_USER_PATH.search(message) or POSIX_USER_PATH.search(message) or ONEDRIVE_PATH.search(message):
+        # The same local-path, repository and vocabulary signatures as the blob pass: a
+        # squash merge copies a pull-request body into history as surely as a file.
+        if _has_local_path(message, message_lower):
             findings.append(HistoryFinding(
                 category="PRIVACY_METADATA",
                 code="COMMIT_LOG_LOCAL_PATH",
@@ -444,7 +588,24 @@ def audit_history_commit_metadata(repo_root: Path = ROOT,
                 detail="Commit message contains local path or directory fragment",
             ))
 
-        message_lower = message.lower()
+        if _has_private_repo_url(message):
+            findings.append(HistoryFinding(
+                category="PRIVACY_METADATA",
+                code="COMMIT_LOG_PRIVATE_REPO",
+                commit=commit_id,
+                path="<commit_message>",
+                detail="Commit message names a private repository [REDACTED]",
+            ))
+
+        if _has_private_operational_vocabulary(message, message_lower):
+            findings.append(HistoryFinding(
+                category="PROPRIETARY_ARTIFACT",
+                code="COMMIT_LOG_PRIVATE_VOCABULARY",
+                commit=commit_id,
+                path="<commit_message>",
+                detail="Commit message contains private/game-derived operational vocabulary [REDACTED]",
+            ))
+
         if any(root in message_lower for root in roots_lower):
             findings.append(HistoryFinding(
                 category="PRIVACY_METADATA",
@@ -454,7 +615,7 @@ def audit_history_commit_metadata(repo_root: Path = ROOT,
                 detail="Commit message names a configured private root [REDACTED]",
             ))
 
-        if PEM_KEY_MATERIAL.search(message) or API_TOKEN_PATTERN.search(message):
+        if _has_secret(message):
             findings.append(HistoryFinding(
                 category="DEFINITE_SECRET",
                 code="COMMIT_LOG_SECRET",
@@ -467,8 +628,13 @@ def audit_history_commit_metadata(repo_root: Path = ROOT,
 
 
 def audit_large_blobs(repo_root: Path = ROOT, size_threshold: int = 500 * 1024,
-                      raw_objects: list[str] | None = None) -> list[dict]:
-    """Pass 3: Inventory large objects in history packfiles."""
+                      raw_objects: list[str] | None = None,
+                      object_info: dict[str, tuple[str, int]] | None = None) -> list[dict]:
+    """Pass 3: Inventory large objects in history packfiles.
+
+    ``object_info`` is the report's one ``cat-file --batch-check`` answer for the same
+    listing; without it this pass asks git itself.
+    """
     large_blobs: list[dict] = []
     if raw_objects is None:
         raw_objects = _object_listing(repo_root)
@@ -479,6 +645,14 @@ def audit_large_blobs(repo_root: Path = ROOT, size_threshold: int = 500 * 1024,
         parts = line.strip().split(None, 1)
         if len(parts) == 2:
             sha_to_path[parts[0]] = parts[1]
+
+    if object_info is not None:
+        large_blobs = [
+            {"sha": sha, "size": object_info[sha][1], "path": path}
+            for sha, path in sha_to_path.items()
+            if object_info[sha][0] == "blob" and object_info[sha][1] >= size_threshold
+        ]
+        return sorted(large_blobs, key=lambda b: b["size"], reverse=True)
 
     # Query cat-file for object sizes
     try:
@@ -555,14 +729,17 @@ def _is_reviewed(finding: HistoryFinding, reviewed: list[dict]) -> dict | None:
 
 def generate_full_history_audit_report(repo_root: Path = ROOT,
                                        reviewed_path: Path = REVIEWED_FINDINGS_PATH) -> dict:
-    # One object listing serves every pass: the report reads one consistent
-    # snapshot of history instead of four separate rev-list runs.
+    # One object listing serves the baseline, blob and size passes instead of three
+    # separate rev-list runs, and one batch-check answers their type and size
+    # questions. The path pass reads every commit's tree entries instead, because
+    # the object listing names each object under one path only.
     raw_objects = _object_listing(repo_root)
+    object_info = _object_info(repo_root, list(_named_objects(raw_objects)))
     baseline = get_repository_baseline(repo_root, raw_objects)
-    tree_findings = audit_history_tree_paths(repo_root, raw_objects)
+    tree_findings = audit_history_tree_paths(repo_root)
     metadata_findings = audit_history_commit_metadata(repo_root)
-    blob_findings = audit_history_blob_contents(repo_root, raw_objects)
-    large_blobs = audit_large_blobs(repo_root, raw_objects=raw_objects)
+    blob_findings = audit_history_blob_contents(repo_root, raw_objects, object_info=object_info)
+    large_blobs = audit_large_blobs(repo_root, raw_objects=raw_objects, object_info=object_info)
     reviewed = load_reviewed_findings(reviewed_path)
 
     all_findings: list[HistoryFinding] = []
