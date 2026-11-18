@@ -489,13 +489,17 @@ def _check_recomp_chunks() -> str:
     return "verified"
 
 
+#: The smallest hst.exe that can be a real link of the whole title; smaller is a stub.
+HST_EXE_MIN_BYTES = 100_000_000
+
+
 def _check_hst_exe() -> str:
     """Verified only when the binary exists, is large enough to be a real link, and is
     bound to the current build by the manager's logs/build_manifest.json executable hash.
     A surviving binary without a matching fresh build manifest is 'unknown', not success
     (#181; the manager writes build_manifest.json after every known-zero build)."""
     exe = BUILD / "hst.exe"
-    if not (exe.exists() and exe.stat().st_size > 100_000_000):
+    if not (exe.exists() and exe.stat().st_size > HST_EXE_MIN_BYTES):
         return "pending"
     manifest = LOGS / "build_manifest.json"
     if not _artifact_fresh(manifest, [exe]):
@@ -504,11 +508,9 @@ def _check_hst_exe() -> str:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except Exception:
         return "pending"
-    try:
-        current_hash = hashlib.sha256(exe.read_bytes()).hexdigest().upper()
-    except Exception:
-        return "pending"
-    if data.get("exe_sha256") != current_hash:
+    # Read in blocks: a 100 MB binary is never held whole. An unreadable file is None.
+    current_hash = _sha256_file(exe)
+    if current_hash is None or data.get("exe_sha256") != current_hash.upper():
         return "pending"
     return "verified"
 
@@ -746,24 +748,28 @@ def _check_split_function() -> str:
     The mis-split function contains exactly: 0x03e00008 (jr ra), 0x00801021 (move at, v0),
     and nothing else — that is 8 bytes of real MIPS, suggesting an artifact of the split.
     An EMPTY chunk set proves nothing: the absence of a mis-split in a directory with no
-    generated output is not evidence the generator is correct (#181)."""
+    generated output is not evidence the generator is correct (#181), and neither is a
+    chunk set with no generated function in it (an empty, truncated or stray file)."""
     chunks = list(BUILD.glob("hst_recomp*.c"))
-    if not chunks:
-        return "pending"
+    generated = False
     for c in chunks:
         text = c.read_text(encoding="utf-8", errors="ignore")
-        # Loose check: body of f_0005a648 contains only jr ra + move v0, a0
-        m = re.search(
-            r"void f_0005a648\(CpuState \*s\)\s*\{"
-            r"[\s\S]*?"
-            r"0x00801021u"
-            r"[\s\S]*?"
-            r"return;\s*\}",
-            text,
-        )
-        if m:
+        generated = generated or _GENERATED_FUNCTION.search(text) is not None
+        # Loose check: body of f_0005a648 contains only jr ra + move v0, a0. The body
+        # ends at the generator's column-0 closing brace, so a later function's
+        # instructions are never read as this one's.
+        m = _MISSPLIT_FUNCTION.search(text)
+        if m and "0x00801021u" in m.group("body") and re.search(r"return;\s*$", m.group("body")):
             return "regressed"
-    return "verified"
+    return "verified" if generated else "pending"
+
+
+#: A generated function definition, as tools/codegen.py writes each one (f_ or a resume
+#: owner's r_, with an optional symbol-name suffix).
+_GENERATED_FUNCTION = re.compile(r"^void [fr]_[0-9a-f]{8}\w*\(CpuState \*s\)\s*\{", re.MULTILINE)
+#: f_0005a648's body, up to the column-0 brace that closes it.
+_MISSPLIT_FUNCTION = re.compile(
+    r"^void f_0005a648\(CpuState \*s\)\s*\{(?P<body>.*?)^\}", re.MULTILINE | re.DOTALL)
 
 
 def _check_stack_frame() -> str:

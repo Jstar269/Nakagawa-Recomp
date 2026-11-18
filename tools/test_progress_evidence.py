@@ -65,8 +65,28 @@ class SplitFunctionEvidenceTests(EvidenceBase):
         # The old behavior scanned zero chunks, fell through and returned "verified".
         self.assertEqual(pt._check_split_function(), "pending")
 
-    def test_missing_missplit_in_real_chunks_verifies(self) -> None:
+    def _chunk(self, text: str) -> None:
+        self.touch(self.build / "hst_recomp_0.c").write_text(text, encoding="utf-8")
+
+    def test_chunk_without_generated_functions_is_pending(self) -> None:
+        # A one-byte or truncated file proves nothing about the generator.
         self.touch(self.build / "hst_recomp_0.c")
+        self.assertEqual(pt._check_split_function(), "pending")
+
+    def test_missing_missplit_in_real_chunks_verifies(self) -> None:
+        self._chunk("void f_0005a640(CpuState *s) {\n    s->r[2] = s->r[4];\n    return;\n}\n")
+        self.assertEqual(pt._check_split_function(), "verified")
+
+    def test_missplit_body_is_regressed(self) -> None:
+        self._chunk("void f_0005a648(CpuState *s) {\n    /* 0x03e00008u jr ra */\n"
+                    "    /* 0x00801021u move v0, a0 */\n    s->r[2] = s->r[4];\n    return;\n}\n")
+        self.assertEqual(pt._check_split_function(), "regressed")
+
+    def test_later_function_is_not_read_as_the_missplit_body(self) -> None:
+        # A whole f_0005a648 that ends normally, then another function that happens to
+        # carry the same instruction word: only f_0005a648's own body counts.
+        self._chunk("void f_0005a648(CpuState *s) {\n    s->r[3] = 1;\n    dispatch_call(s);\n}\n\n"
+                    "void f_0005a650(CpuState *s) {\n    /* 0x00801021u */\n    return;\n}\n")
         self.assertEqual(pt._check_split_function(), "verified")
 
 
@@ -113,14 +133,29 @@ class UmdWakeupEvidenceTests(EvidenceBase):
 
 
 class HstExeEvidenceTests(EvidenceBase):
+    """The size floor is patched to 16 bytes, so no test writes a 100 MB binary."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        saved = pt.HST_EXE_MIN_BYTES
+        pt.HST_EXE_MIN_BYTES = 16
+        self.addCleanup(setattr, pt, "HST_EXE_MIN_BYTES", saved)
+
+    def test_exe_at_the_size_floor_is_pending(self) -> None:
+        exe = self.touch(self.build / "hst.exe")
+        exe.write_bytes(b"b" * 16)  # a stub, not a real link
+        digest = hashlib.sha256(exe.read_bytes()).hexdigest().upper()
+        (self.logs / "build_manifest.json").write_text(json.dumps({"exe_sha256": digest}), encoding="utf-8")
+        self.assertEqual(pt._check_hst_exe(), "pending")
+
     def test_stale_exe_without_build_manifest_is_pending(self) -> None:
         exe = self.touch(self.build / "hst.exe")
-        exe.write_bytes(b"b" * (100_000_001))  # large enough to be a "real link"
+        exe.write_bytes(b"b" * 17)  # over the floor: large enough to be a "real link"
         self.assertEqual(pt._check_hst_exe(), "pending")
 
     def test_exe_bound_to_fresh_manifest_hash_verifies(self) -> None:
         exe = self.touch(self.build / "hst.exe")
-        exe.write_bytes(b"b" * (100_000_001))
+        exe.write_bytes(b"b" * 17)
         digest = hashlib.sha256(exe.read_bytes()).hexdigest().upper()
         manifest = self.logs / "build_manifest.json"
         manifest.write_text(json.dumps({"exe_sha256": digest}), encoding="utf-8")
@@ -128,7 +163,7 @@ class HstExeEvidenceTests(EvidenceBase):
 
     def test_exe_with_mismatched_manifest_hash_is_pending(self) -> None:
         exe = self.touch(self.build / "hst.exe")
-        exe.write_bytes(b"b" * (100_000_001))
+        exe.write_bytes(b"b" * 17)
         manifest = self.logs / "build_manifest.json"
         manifest.write_text(json.dumps({"exe_sha256": "0" * 64}), encoding="utf-8")
         self.assertEqual(pt._check_hst_exe(), "pending")

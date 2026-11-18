@@ -58,6 +58,25 @@ def is_tracked(rel_posix: str) -> bool:
     return rel_posix in tracked_paths(rel_posix)
 
 
+def plant_untracked_manifest(case: unittest.TestCase, name: str, manifest: dict) -> Path:
+    """Put an untracked manifest in the checkout's assets/titles for one test.
+
+    The exclusion tests are vacuous unless the file they must ignore exists. A file of
+    that name already on disk (a developer's own) is used as it is and never removed;
+    otherwise the planted file is removed when the test ends.
+    """
+    path = ROOT / "assets" / "titles" / name
+    case.assertFalse(is_tracked(f"assets/titles/{name}"), f"{name} must stay untracked")
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(manifest, stream, indent=2)
+            stream.write("\n")
+    except FileExistsError:
+        return path
+    case.addCleanup(path.unlink, missing_ok=True)
+    return path
+
+
 PRIVATE_TITLE_TESTS_ENV = "NK_PRIVATE_TITLE_TESTS"
 
 #: The one retail manifest the public tree carries.
@@ -347,32 +366,30 @@ class PublicTitleIsolationTests(unittest.TestCase):
                 )
 
     def test_private_overlay_has_zero_effect_on_verify(self) -> None:
-        """External private manifest overlays must have zero effect on catalog verify."""
+        """An untracked private manifest in assets/titles must have zero effect on catalog verify."""
         # 1. Clean verify must succeed
         cmd = [sys.executable, str(ROOT / "tools" / "title_catalog_codegen.py"), "--verify"]
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
         self.assertEqual(proc.returncode, 0, f"--verify failed on baseline: {proc.stderr}")
 
-        # 2. Simulate private overlay existing outside public assets
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            fake_overlay = {
-                "schema_version": 1,
-                "id": "private-retail-lookalike-v1",
-                "display_name": "Private Retail Overlay",
-                "kind": "retail",
-                "disc": {"id": UNCATALOGUED_RETAIL_DISC_ID, "region": "EU", "revision_policy": "exact-disc-id"}
-            }
-            json.dump(fake_overlay, f)
-            overlay_path = Path(f.name)
+        # 2. A private overlay where --verify reads manifests: the checkout's assets/titles,
+        # untracked. Were it read, its id would change the digest and fail the verify.
+        fake_overlay = {
+            "schema_version": 1,
+            "id": "private-retail-lookalike-v1",
+            "display_name": "Private Retail Overlay",
+            "kind": "retail",
+            "disc": {"id": UNCATALOGUED_RETAIL_DISC_ID, "region": "EU", "revision_policy": "exact-disc-id"}
+        }
+        overlay_path = plant_untracked_manifest(self, "private-overlay-lookalike.json", fake_overlay)
+        self.assertTrue(overlay_path.is_file())
 
-        try:
-            # Re-run verify; external overlay must not touch or alter verification
-            proc2 = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
-            self.assertEqual(proc2.returncode, 0, f"--verify failed with external overlay present: {proc2.stderr}")
-            self.assertIn("is up to date", proc2.stdout)
-        finally:
-            if overlay_path.is_file():
-                overlay_path.unlink()
+        proc2 = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
+        self.assertEqual(proc2.returncode, 0, f"--verify failed with a private overlay present: {proc2.stderr}")
+        self.assertIn("is up to date", proc2.stdout)
+        self.assertEqual(proc2.stdout, proc.stdout, "the overlay changed the verified catalog")
+        catalog = (ROOT / "src" / "core" / "generated" / "nk_title_catalog.c").read_text(encoding="utf-8")
+        self.assertNotIn("private-retail-lookalike-v1", catalog)
 
     def test_overlay_collision_policy(self) -> None:
         """Section 4: Conflicting overlay on canonical public title must fail closed unless overridden."""
@@ -526,6 +543,8 @@ class CollectorHermeticityTests(unittest.TestCase):
         self.assertEqual(ids, sorted(set(ids)), "collector output must be deterministic")
 
     def test_registry_policy_filter_ignores_lookalike(self):
+        lookalike = plant_untracked_manifest(self, PRIVATE_LOOKALIKE_NAME, SYNTHETIC_LOOKALIKE)
+        self.assertTrue(lookalike.is_file())
         registry = TitleRegistry(include_defaults=False)
         registry.load_from_directory(ROOT / "assets" / "titles")
         ids = {p.id for p in registry.all_profiles()}
@@ -640,6 +659,8 @@ class PublicationEnforcementTests(unittest.TestCase):
     """Untracked/ignored material stays invisible; staged material must fail."""
 
     def test_publication_audit_ignores_untracked_ignored_lookalike(self):
+        lookalike = plant_untracked_manifest(self, PRIVATE_LOOKALIKE_NAME, SYNTHETIC_LOOKALIKE)
+        self.assertTrue(lookalike.is_file())
         proc = subprocess.run(
             [sys.executable, "tools/publish_audit.py", "--tracked-only",
              "--public-scope", "--provenance-self-consistency"],

@@ -599,6 +599,43 @@ class TestHomebrewPrebuilt(unittest.TestCase):
             self._route_toolchain({HOMEBREW_REQUIRED: "0"})
 
 
+class TestRouteToolchainProbe(unittest.TestCase):
+    """skip_if_toolchain_unavailable skips only for a host that cannot build the player."""
+
+    def _probe(self, build_output: str) -> None:
+        scratch = tempfile.TemporaryDirectory(prefix="nk-route-probe-")
+        self.addCleanup(scratch.cleanup)
+        # A bare instance: the probe needs only the binary paths, not setUp's fixture.
+        route = TestPlayerPackageRoute("test_homebrew_finds_its_own_files_in_its_memory_stick_folder")
+        binary_dir = Path(scratch.name)
+        route.player = binary_dir / "nakagawa_player"
+        route.harness = binary_dir / "test_package_builder"
+        route.validator = binary_dir / "test_player_state"
+
+        def make(command, **_kwargs):
+            # The SDL3 probe passes; the player build exits 2 and leaves no binary.
+            if "sdl3-check" in command:
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return subprocess.CompletedProcess(command, 2, "", build_output)
+
+        # binary_dir is the class's shared build root; patch it for this probe only.
+        with patch.object(TestPlayerPackageRoute, "binary_dir", binary_dir, create=True), \
+                patch("shutil.which", return_value="tool"), patch("subprocess.run", side_effect=make):
+            route.skip_if_toolchain_unavailable()
+
+    def test_player_build_failure_fails_the_route(self) -> None:
+        with self.assertRaisesRegex(AssertionError, r"^the player package route needs nakagawa_player; "
+                                                    r"build failed \(exit 2\):\nplayer\.c:1: error"):
+            try:
+                self._probe("player.c:1: error: expected ';'")
+            except unittest.SkipTest as skipped:
+                self.fail(f"a player that does not build was reported as SKIP: {skipped}")
+
+    def test_missing_sdl3_still_skips(self) -> None:
+        with self.assertRaisesRegex(unittest.SkipTest, "SDL3 dependency is missing"):
+            self._probe("error: the SDL3 dependency is missing; install it")
+
+
 class TestReleaseDocumentation(unittest.TestCase):
     def test_release_docs_match_current_player_boundaries(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -980,11 +1017,14 @@ class TestPlayerPackageRoute(unittest.TestCase):
                 )
                 self.skip_if_toolchain_unusable(built)
                 if not binary.is_file():
-                    # The build's own last lines, so a run that must not skip (hosted CI's
-                    # homebrew routes, NK_HOMEBREW_E2E_REQUIRED=1) says why it failed.
+                    # The tools are present and SDL3 was found, so a build that leaves a
+                    # binary missing is a regression in the player, not an unusable host:
+                    # fail with the build's own last lines rather than skip (AGENTS.md
+                    # section 9: SKIP is not a pass).
                     tail = "\n".join((built.stdout + built.stderr).splitlines()[-25:])
-                    self.skipTest(f"the player package route needs {binary.name}; build failed "
-                                  f"(exit {built.returncode}):\n{tail}")
+                    raise AssertionError(
+                        f"the player package route needs {binary.name}; build failed "
+                        f"(exit {built.returncode}):\n{tail}")
 
     def require_homebrew_toolchain(self) -> None:
         """skip_if_toolchain_unavailable, but a failure under NK_HOMEBREW_E2E_REQUIRED=1.
