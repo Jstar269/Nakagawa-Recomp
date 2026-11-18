@@ -10,6 +10,7 @@
  * within a row, and between rows by the nearest key under the cursor's centre.
  */
 #include "osk_overlay.h"
+#include "../core/nk_input_profile.h"   /* the PSP button bits */
 
 #include <stdlib.h>
 #include <string.h>
@@ -25,17 +26,6 @@
 #define LATIN_LOWER     OSK_INPUT_LATIN_LOWERCASE
 #define LATIN_UPPER     OSK_INPUT_LATIN_UPPERCASE
 #define LATIN_ALL       (LATIN_DIGIT | LATIN_SYMBOL | LATIN_LOWER | LATIN_UPPER)
-
-/* PSP button bits (src/core/nk_input_profile.h). */
-#define PSP_BTN_START    0x0008u
-#define PSP_BTN_UP       0x0010u
-#define PSP_BTN_RIGHT    0x0020u
-#define PSP_BTN_DOWN     0x0040u
-#define PSP_BTN_LEFT     0x0080u
-#define PSP_BTN_LTRIG    0x0100u
-#define PSP_BTN_RTRIG    0x0200u
-#define PSP_BTN_CIRCLE   0x2000u
-#define PSP_BTN_CROSS    0x4000u
 
 static const char s_grid[GRID_ROWS][GRID_ROW_KEYS + 1] = {
     "1234567890",
@@ -72,17 +62,7 @@ static char cell_char(int i) {
     return i < WIDE_FIRST ? s_grid[i / GRID_ROW_KEYS][i % GRID_ROW_KEYS] : '\0';
 }
 
-/* First and last cell index of the row that holds cell i. */
-static void row_bounds(int i, int *first, int *last) {
-    if (i < WIDE_FIRST) {
-        *first = (i / GRID_ROW_KEYS) * GRID_ROW_KEYS;
-        *last = *first + GRID_ROW_KEYS - 1;
-    } else {
-        *first = WIDE_FIRST;
-        *last = WIDE_FIRST + WIDE_KEYS - 1;
-    }
-}
-
+/* First and last cell index of row `row` (GRID_ROWS is the wide row). */
 static void row_bounds_of(int row, int *first, int *last) {
     if (row < GRID_ROWS) {
         *first = row * GRID_ROW_KEYS;
@@ -91,6 +71,13 @@ static void row_bounds_of(int row, int *first, int *last) {
         *first = WIDE_FIRST;
         *last = WIDE_FIRST + WIDE_KEYS - 1;
     }
+}
+
+/* First and last cell index of the row that holds cell i. */
+static void row_bounds(int i, int *first, int *last) {
+    int row, start, span;
+    cell_geom(i, &row, &start, &span);
+    row_bounds_of(row, first, last);
 }
 
 /* ---- input type -----------------------------------------------------------------------------
@@ -317,11 +304,11 @@ int osk_overlay_type(OskOverlay *o, uint32_t cp) {
 
 void osk_overlay_pad(OskOverlay *o, uint32_t scripted, uint32_t pulses) {
     static const struct { uint32_t bit; OskKey key; } map[] = {
-        { PSP_BTN_UP, OSK_KEY_UP },       { PSP_BTN_DOWN, OSK_KEY_DOWN },
-        { PSP_BTN_LEFT, OSK_KEY_LEFT },   { PSP_BTN_RIGHT, OSK_KEY_RIGHT },
-        { PSP_BTN_CROSS, OSK_KEY_SELECT }, { PSP_BTN_CIRCLE, OSK_KEY_CANCEL },
-        { PSP_BTN_START, OSK_KEY_CONFIRM }, { PSP_BTN_LTRIG, OSK_KEY_CASE },
-        { PSP_BTN_RTRIG, OSK_KEY_CASE },
+        { NK_PSP_BTN_UP_BIT, OSK_KEY_UP },       { NK_PSP_BTN_DOWN_BIT, OSK_KEY_DOWN },
+        { NK_PSP_BTN_LEFT_BIT, OSK_KEY_LEFT },   { NK_PSP_BTN_RIGHT_BIT, OSK_KEY_RIGHT },
+        { NK_PSP_BTN_CROSS_BIT, OSK_KEY_SELECT }, { NK_PSP_BTN_CIRCLE_BIT, OSK_KEY_CANCEL },
+        { NK_PSP_BTN_START_BIT, OSK_KEY_CONFIRM }, { NK_PSP_BTN_LTRIGGER_BIT, OSK_KEY_CASE },
+        { NK_PSP_BTN_RTRIGGER_BIT, OSK_KEY_CASE },
     };
     uint32_t rising = (scripted & ~o->pad_prev) | pulses;
     o->pad_prev = scripted;

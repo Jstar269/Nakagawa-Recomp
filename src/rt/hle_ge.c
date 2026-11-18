@@ -185,6 +185,18 @@ void ge_free_rebuild(void) {
     s_ge_free_ready = 1;
 }
 
+/* The list queue as at boot; returns how many lists were still in use (a slot is in use from
+ * its enqueue until it rejoins the free FIFO). LoadExec and the test harness reset with it. */
+unsigned ge_lists_reset(void) {
+    const unsigned live = s_ge_free_ready ? GE_LIST_MAX - s_ge_free_count : 0u;
+    memset(s_ge_lists, 0, sizeof(s_ge_lists));
+    s_ge_list_done_bits = UINT64_MAX;
+    s_ge_list_order = 0;
+    s_ge_timing_drawing = 0;
+    ge_free_rebuild();
+    return live;
+}
+
 static int ge_free_pop(void) {
     if (!s_ge_free_ready) ge_free_rebuild();
     if (s_ge_free_count == 0u) return -1;
@@ -631,16 +643,12 @@ static uint32_t h_GeListSync(CpuState *s) {
     }
 }
 
-static int ge_unset_log_on(void) {
-    return ge_log_on();
-}
-
 static uint32_t h_GeUnsetCallback(CpuState *s) {
     uint32_t cbid = A0;
     if (cbid < (uint32_t)(sizeof(s_ge_cb) / sizeof(s_ge_cb[0]))) {
         s_ge_cb[cbid].used = 0;
     }
-    if (ge_unset_log_on()) {
+    if (ge_log_on()) {
         fprintf(stderr, "sceGeUnsetCallback: cbid=%u\n", cbid);
     }
     return 0;
