@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import re
 import subprocess
@@ -654,6 +656,24 @@ class FlightBundleTests(unittest.TestCase):
             "0123456789abcdef0123456789abcdef01234567",
         )
         flight_diff.validate_bundle(bundle)
+
+    def test_schema_pattern_matches_the_whole_string(self):
+        # "$" in a search also matches before a trailing newline; a pattern must cover all of it.
+        bundle = make_bundle([event(1, "sched", version=3)], version=3)
+        bundle["build"]["build_id"] = "0123456789abcdef\n"
+        with self.assertRaisesRegex(flight_diff.FlightDiffError, "schema pattern"):
+            flight_diff.validate_bundle(bundle)
+
+    def test_schema_is_read_once_per_process(self):
+        bundle = make_bundle([event(1, "sched", version=3)], version=3)
+        flight_diff.validate_bundle(bundle)
+        original = flight_diff.SCHEMA_PATH
+        flight_diff.SCHEMA_PATH = Path(tempfile.gettempdir()) / "flight-diff-missing-schema.json"
+        try:
+            flight_diff.validate_bundle(bundle)
+            flight_diff.diff_bundles(bundle, copy.deepcopy(bundle), "sequence")
+        finally:
+            flight_diff.SCHEMA_PATH = original
 
     def test_schema_v3_rejects_compiled_clock_fields(self):
         bundle = make_bundle([event(1, "sched", version=3)], version=3)
@@ -1399,6 +1419,39 @@ class TriggerPolicySchemaTests(unittest.TestCase):
         wrong_occurrence["terminal"]["arg0"] = 1
         with self.assertRaisesRegex(flight_diff.FlightDiffError, "fires at the armed occurrence"):
             flight_diff.validate_bundle(wrong_occurrence)
+
+    def test_a_shorter_checkpoint_window_is_a_divergence_not_a_match(self):
+        # A run that ends inside the post-trigger window keeps the trigger terminal, so the
+        # terminals agree; the event missing from the shorter window is the divergence.
+        events = [event(index, "sched", kind=3 if index % 2 else 4, version=7)
+                  for index in range(1, 6)]
+        checkpoint = {"kind": 3, "occurrence": 2, "after": 2}
+        baseline = v7_bundle(events, triggers=v7_triggers("checkpoint", checkpoint=checkpoint, fired=1),
+                             reason="trigger", sequence=3, kind=3, arg0=2, classes=["sched"])
+        candidate = copy.deepcopy(baseline)
+        candidate["events"].pop()
+        candidate["recorder"]["recorded"] = 4
+        flight_diff.validate_bundle(candidate)
+        divergence = flight_diff.diff_bundles(baseline, candidate, "sequence")
+        self.assertIsNotNone(divergence)
+        self.assertEqual(divergence[0], "sequence 5")
+        self.assertEqual(divergence[1]["sequence"], 5)
+        self.assertIsNone(divergence[2])
+        divergence = flight_diff.diff_bundles(baseline, candidate, "class")
+        self.assertIsNotNone(divergence)
+        self.assertEqual(divergence[0], "class sched occurrence 4")
+        self.assertIsNone(divergence[2])
+        with tempfile.TemporaryDirectory() as directory:
+            left = Path(directory) / "baseline.json"
+            right = Path(directory) / "candidate.json"
+            left.write_text(json.dumps(baseline), encoding="utf-8")
+            right.write_text(json.dumps(candidate), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = flight_diff.main([str(left), str(right)])
+            self.assertEqual(status, flight_diff.EXIT_DIVERGENCE)
+            self.assertIn("DIVERGENCE: sequence 5", output.getvalue())
+            self.assertIn("candidate event: <absent>", output.getvalue())
 
     def test_ge_draw_trigger_fires_at_its_ordinal(self):
         events = [event(1, "ge", kind=20, version=7), event(2, "ge", kind=25, arg3=3, version=7),
