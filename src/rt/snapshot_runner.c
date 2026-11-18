@@ -272,9 +272,15 @@ typedef struct {
     uint32_t count;
 } Regions;
 
-static int in_regions(const Regions *r, uint32_t addr) {
-    for (uint32_t i = 0; i < r->count; i++)
-        if (addr >= r->first[i] && addr < r->end[i]) return 1;
+/* 1 when addr lies in a known region, with *region_end set to that region's end, so a scan
+ * can step past every byte the region covers at once; 0 otherwise. */
+static int in_regions(const Regions *r, uint32_t addr, uint32_t *region_end) {
+    for (uint32_t i = 0; i < r->count; i++) {
+        if (addr >= r->first[i] && addr < r->end[i]) {
+            *region_end = r->end[i];
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -401,11 +407,14 @@ static int compare(const Options *o, const NkRefResult *rr, const uint8_t *ref_r
     for (;;) {
         uint32_t at = first_difference(arena, baseline, from, ARENA_SIZE);
         if (at >= ARENA_SIZE) break;
-        if (!in_regions(known, at)) {
+        uint32_t region_end = 0u;
+        if (!in_regions(known, at, &region_end)) {
             printf("NOT_CHECKED write-outside-snapshot addr=0x%08" PRIx32 " side=both\n", at);
             return 3;
         }
-        from = at + 1u;
+        /* Every byte in [at, region_end) is in a known region, so none of them is a write
+         * outside the snapshot; region_end > at, so the scan always advances. */
+        from = region_end;
     }
     printf("MATCH\n");
     return 0;
