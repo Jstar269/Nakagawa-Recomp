@@ -37,7 +37,7 @@
     X("SR_ACE_SHADOW_CANDIDATES", "string", "off (nothing listed)", "gpu_sdl3vk/ge_gpu.c", "Exactly 1, with shadow=soft declared, prints a SOFT_SHADOW: candidate line (size, keyed digest) per distinct texture hashed.") \
     X("SR_ACE_SMOOTH_DEPTH", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the GE's depth for its in-betweens.") \
     X("SR_ACE_SMOOTH_HUD", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the HUD mask of through-mode draws for its in-betweens.") \
-    X("SR_ALLOC_GUARD", "flag-nonzero", "on (guard enabled when unset)", "hle.c", "Allocator guard stays on unless set with a value starting with 0, which disables it.") \
+    X("SR_ALLOC_GUARD", "flag-nonzero", "on (refusal lines printed when unset)", "hle.c", "A value starting with 0 silences the allocator's refusal lines; a request the user partition cannot hold is refused either way.") \
     X("SR_ALLOC_MAX", "number", "0xFFFFFFFF (no extra cap)", "hle.c", "Hexadecimal optional stricter cap on the size of a user-partition allocation request.") \
     X("SR_ALLOC_TRACE", "flag-presence", "off", "hle.c,recomp.c", "When set, prints a trace line for guest memory allocations and partition frees to stderr.") \
     X("SR_ARGLOG", "flag-presence", "off", "sched.c", "Logs a THREAD_ARG_COPY line to stderr when a started thread's argument block is copied.") \

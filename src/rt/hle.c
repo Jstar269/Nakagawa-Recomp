@@ -53,6 +53,26 @@ static uint32_t h_ControlledUnsupported(CpuState *s);
 #define HLE_CAP 1024
 static HleEntry s_hle[HLE_CAP];
 static int s_hle_n = 0;
+/* s_hle's indices sorted by NID, so a lookup is a binary search instead of a walk of every
+ * handler on each syscall. s_hle itself keeps registration order. Guarded by hle_lock. */
+static uint16_t s_hle_by_nid[HLE_CAP];
+
+/* The first position in s_hle_by_nid whose NID is not below nid. The caller holds hle_lock. */
+static int hle_nid_lower_bound(uint32_t nid) {
+    int lo = 0, hi = s_hle_n;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (s_hle[s_hle_by_nid[mid]].nid < nid) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* The registered entry for nid, or NULL. The caller holds hle_lock. */
+static HleEntry *hle_find_locked(uint32_t nid) {
+    int pos = hle_nid_lower_bound(nid);
+    return pos < s_hle_n && s_hle[s_hle_by_nid[pos]].nid == nid ? &s_hle[s_hle_by_nid[pos]] : NULL;
+}
 static atomic_uint s_hle_unsupported_summary_registered;
 
 static void hle_unsupported_summary(void);
@@ -176,23 +196,32 @@ void hle_lock(void) {
 }
 void hle_unlock(void) { atomic_flag_clear_explicit(&s_hle_lock, memory_order_release); }
 
-uint32_t sr_hle_resolve_late_import(uint32_t nid) {
-    uint32_t result = 0;
-    sr_hle_init();
-    hle_lock();
+/* The guest address a loaded image exports for nid, or 0. The caller holds hle_lock. */
+static uint32_t late_import_target_locked(uint32_t nid) {
     unsigned lo = 0, hi = s_late_import_n;
     while (lo < hi) {
         unsigned mid = lo + (hi - lo) / 2;
         if (s_late_imports[mid].nid < nid) lo = mid + 1;
         else hi = mid;
     }
-    if (lo < s_late_import_n && s_late_imports[lo].nid == nid)
-        result = s_late_imports[lo].target;
-    if (!result) {
-        for (int i = 0; i < s_hle_n; i++) {
-            if (s_hle[i].nid == nid) { result = SR_HLE_LATE_BUILTIN; break; }
-        }
-    }
+    return lo < s_late_import_n && s_late_imports[lo].nid == nid ? s_late_imports[lo].target : 0u;
+}
+
+uint32_t sr_hle_resolve_late_import(uint32_t nid) {
+    sr_hle_init();
+    hle_lock();
+    uint32_t result = late_import_target_locked(nid);
+    if (!result && hle_find_locked(nid)) result = SR_HLE_LATE_BUILTIN;
+    hle_unlock();
+    return result;
+}
+
+/* sr_hle_resolve_late_import without the built-in fallback, for a caller that wants only a
+ * loaded image's export. */
+static uint32_t late_import_target(uint32_t nid) {
+    sr_hle_init();
+    hle_lock();
+    uint32_t result = late_import_target_locked(nid);
     hle_unlock();
     return result;
 }
@@ -224,15 +253,16 @@ static void sr_hle_register_entry(uint32_t nid, const char *name, HleFn fn,
      * 0xf919f628) were removed at the source. This guard stays as
      * a diagnostic backstop against future accidental duplicates, not a live workaround. */
     hle_lock();
-    for (int i = 0; i < s_hle_n; i++) {
-        if (s_hle[i].nid == nid) {
-            fprintf(stderr, "HLE: duplicate NID 0x%08x (%s) rejected; first was %s\n",
-                    nid, name, s_hle[i].name);
-            hle_unlock();
-            return;
-        }
+    const int pos = hle_nid_lower_bound(nid);
+    if (pos < s_hle_n && s_hle[s_hle_by_nid[pos]].nid == nid) {
+        fprintf(stderr, "HLE: duplicate NID 0x%08x (%s) rejected; first was %s\n",
+                nid, name, s_hle[s_hle_by_nid[pos]].name);
+        hle_unlock();
+        return;
     }
     if (s_hle_n < HLE_CAP) {
+        for (int j = s_hle_n; j > pos; j--) s_hle_by_nid[j] = s_hle_by_nid[j - 1];
+        s_hle_by_nid[pos] = (uint16_t)s_hle_n;
         HleEntry *e = &s_hle[s_hle_n++];
         e->nid = nid;
         e->name = name;
@@ -261,9 +291,8 @@ void sr_hle_register_unsupported(uint32_t nid, const char *name, uint32_t error)
 }
 
 HleEntry *hle_find(uint32_t nid) {
-    HleEntry *result = NULL;
     hle_lock();
-    for (int i = 0; i < s_hle_n; i++) if (s_hle[i].nid == nid) { result = &s_hle[i]; break; }
+    HleEntry *result = hle_find_locked(nid);
     hle_unlock();
     return result;
 }
@@ -498,17 +527,25 @@ static void partition_arena_released(uint32_t base, uint32_t size) {
     }
 }
 
+/* SR_ALLOC_GUARD and SR_ALLOC_MAX, read once. SR_ALLOC_GUARD=0 only silences the refusal lines:
+ * a request the partition cannot hold is refused either way. */
+static int s_alloc_guard = -1;
+static uint32_t s_alloc_max_req = 0;
+#ifdef SR_HLE_THREAD_SELFTEST
+void sr_hle_test_alloc_env_reset(void) { s_alloc_guard = -1; s_alloc_max_req = 0; }
+#endif
+
 uint32_t alloc_block(uint32_t size) {
-    static int trace = -1, guard = -1;
-    static uint32_t max_req = 0;
-    if (trace < 0) trace = getenv("SR_ALLOC_TRACE") ? 1 : 0;
-    if (guard < 0) guard = getenv("SR_ALLOC_GUARD") ? (getenv("SR_ALLOC_GUARD")[0]!='0'?1:0) : 1;
-    if (!max_req) {
+    if (s_alloc_guard < 0)
+        s_alloc_guard = getenv("SR_ALLOC_GUARD") ? (getenv("SR_ALLOC_GUARD")[0] != '0' ? 1 : 0) : 1;
+    const int guard = s_alloc_guard;
+    if (!s_alloc_max_req) {
         const char *em = getenv("SR_ALLOC_MAX");
         /* Retail requests 0x01340000 bytes for UserSbrk. Partition bounds are
          * the default authority; SR_ALLOC_MAX is only an optional stricter cap. */
-        max_req = em ? (uint32_t)strtoul(em, NULL, 16) : 0xFFFFFFFFu;
+        s_alloc_max_req = em ? (uint32_t)strtoul(em, NULL, 16) : 0xFFFFFFFFu;
     }
+    const uint32_t max_req = s_alloc_max_req;
     user_partition_init();
 
     if (size == 0 || size > max_req) {
@@ -532,39 +569,84 @@ uint32_t alloc_block(uint32_t size) {
     }
     uint32_t needed_slot = (size + 0xFFu) & ~0xFFu;
 
+    /* The block's record slot comes first: with every slot live the request is refused before
+     * any memory is taken, as alloc_block_high and sr_alloc_block_at refuse it, rather than
+     * handing out a UID with no record (whose head address would read 0). */
+    int slot = -1;
+    for (int i = 0; i < s_nblocks; i++) {
+        if (s_blocks[i].uid == 0u) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        if (s_nblocks >= HLE_MAX_PARTITION_BLOCKS) {
+            fprintf(stderr, "ALLOC_BLOCK_REJECT: size=%u (0x%x): all %d partition block records are "
+                    "live\n", size, size, HLE_MAX_PARTITION_BLOCKS);
+            fflush(stderr);
+            return 0xFFFFFFFFu;
+        }
+        slot = s_nblocks;
+    }
+
     uint32_t addr = 0;
     uint32_t slot_size = 0;
     int found_fb = -1;
 
-    /* First-fit search across sorted free list (PSP_SMEM_Low policy). */
+    /* First-fit search across sorted free list (PSP_SMEM_Low policy). A free block can start
+     * unaligned (sr_alloc_block_at keeps a fixed block's exact bounds), and a Low block starts on
+     * a 256-byte boundary like the bump path's: the block is placed at the first such boundary
+     * inside the free block, whose head below it stays free. */
     for (int i = 0; i < s_nfree_blocks; i++) {
-        if (s_free_blocks[i].size >= needed_slot) {
-            found_fb = i;
-            break;
-        }
+        const uint32_t f_addr = s_free_blocks[i].addr;
+        const uint32_t f_size = s_free_blocks[i].size;
+        const uint32_t a = (f_addr + 0xFFu) & ~0xFFu;
+        if (a < f_addr) continue;                           /* the rounding wrapped */
+        const uint32_t lead = a - f_addr;
+        if (f_size < lead || f_size - lead < needed_slot) continue;
+        /* Keeping both the head and the tail free needs one more free-list entry. */
+        if (lead != 0u && f_size - lead != needed_slot && s_nfree_blocks >= HLE_MAX_FREE_BLOCKS)
+            continue;
+        found_fb = i;
+        addr = a;
+        break;
     }
 
     if (found_fb >= 0) {
-        addr = s_free_blocks[found_fb].addr;
+        const uint32_t f_addr = s_free_blocks[found_fb].addr;
+        const uint32_t f_end = f_addr + s_free_blocks[found_fb].size;
+        const uint32_t end = addr + needed_slot;
+        const int head = addr > f_addr, tail = end < f_end;
         slot_size = needed_slot;
-        if (s_free_blocks[found_fb].size == needed_slot) {
+        if (head && tail) {
+            for (int j = s_nfree_blocks; j > found_fb + 1; j--) s_free_blocks[j] = s_free_blocks[j - 1];
+            s_free_blocks[found_fb + 1].addr = end;
+            s_free_blocks[found_fb + 1].size = f_end - end;
+            s_nfree_blocks++;
+            s_free_blocks[found_fb].size = addr - f_addr;
+        } else if (head) {
+            s_free_blocks[found_fb].size = addr - f_addr;
+        } else if (tail) {
+            s_free_blocks[found_fb].addr = end;
+            s_free_blocks[found_fb].size = f_end - end;
+        } else {
             for (int j = found_fb; j < s_nfree_blocks - 1; j++) {
                 s_free_blocks[j] = s_free_blocks[j + 1];
             }
             s_nfree_blocks--;
-        } else {
-            s_free_blocks[found_fb].addr += needed_slot;
-            s_free_blocks[found_fb].size -= needed_slot;
         }
     } else {
-        /* Bump allocation from s_heap. */
+        /* Bump allocation from s_heap. A request that wraps or passes the partition top is
+         * refused whatever SR_ALLOC_GUARD says: that switch only silences the line. */
         uint32_t aligned = (s_heap + 0xFFu) & ~0xFFu;
         uint32_t top = user_partition_top();
-        int overflow = (aligned + size < aligned) || (aligned + size > top);
-        if (overflow && guard) {
-            fprintf(stderr, "ALLOC_BLOCK_REJECT: size=%u (0x%x) heap=0x%08x top=0x%08x max=0x%08x\n",
-                    size, size, s_heap, user_partition_top(), max_req);
-            fflush(stderr);
+        int overflow = (aligned < s_heap) || (aligned + size < aligned) || (aligned + size > top);
+        if (overflow) {
+            if (guard) {
+                fprintf(stderr, "ALLOC_BLOCK_REJECT: size=%u (0x%x) heap=0x%08x top=0x%08x max=0x%08x\n",
+                        size, size, s_heap, user_partition_top(), max_req);
+                fflush(stderr);
+            }
             return 0xFFFFFFFFu;  /* PSP alloc-failure sentinel */
         }
         addr = aligned;   /* 256-byte align */
@@ -587,27 +669,15 @@ uint32_t alloc_block(uint32_t size) {
     }
 
     uint32_t uid = sr_alloc_uid();
-    /* Record in s_blocks, reusing an empty slot if possible. */
-    int slot = -1;
-    for (int i = 0; i < s_nblocks; i++) {
-        if (s_blocks[i].uid == 0u) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0 && s_nblocks < HLE_MAX_PARTITION_BLOCKS) {
-        slot = s_nblocks++;
-    }
-    if (slot >= 0) {
-        s_blocks[slot].uid       = uid;
-        s_blocks[slot].addr      = addr;
-        s_blocks[slot].size      = size;
-        s_blocks[slot].slot_size = slot_size;
-        s_blocks[slot].prev      = prev;
-        s_blocks[slot].next      = next;
-        s_blocks[slot].high      = 0;
-        s_blocks[slot].part5     = 0;
-    }
+    if (slot == s_nblocks) s_nblocks++;
+    s_blocks[slot].uid       = uid;
+    s_blocks[slot].addr      = addr;
+    s_blocks[slot].size      = size;
+    s_blocks[slot].slot_size = slot_size;
+    s_blocks[slot].prev      = prev;
+    s_blocks[slot].next      = next;
+    s_blocks[slot].high      = 0;
+    s_blocks[slot].part5     = 0;
 
     return uid;
 }
@@ -2477,8 +2547,8 @@ static uint32_t started_module_export(uint32_t nid) {
     uint32_t main_export = main_func_export(nid);
     if (main_export) return main_export;
     if (atomic_load_explicit(&s_prx_started_count, memory_order_acquire) == 0) return 0;
-    uint32_t t = sr_hle_resolve_late_import(nid);
-    if (!t || t == SR_HLE_LATE_BUILTIN) return 0;
+    uint32_t t = late_import_target(nid);
+    if (!t) return 0;
     for (unsigned i = 0; i < s_prx_image_count; i++)
         if (s_prx_images[i].started && t >= s_prx_images[i].base && t < s_prx_images[i].end) return t;
     return 0;
@@ -3147,11 +3217,10 @@ int hle_dispatch_guest_scoped(CpuState *s, uint32_t fn,
     return 0;
 }
 
-/* Returns 1 if any registered entry was dispatched (used as a one-shot for engine latches).
- *
- * The scheduler calls this once per delivered vblank after the sub-interrupt handler.
- * Slots run in stable registration/slot order.  Each slot is re-read immediately before
- * dispatch so callbacks may safely unregister themselves or a later callback.
+/* A deliberate no-op that always returns 0: the VBLANK interrupt dispatches no callbacks.
+ * The scheduler still calls it once per delivered vblank after the sub-interrupt handler, and
+ * callbacks run only where a thread waits callback-aware or calls sceKernelCheckCallback
+ * (sr_thread_dispatch_callbacks; see h_CreateNotifyCallback in hle_kernel_thread.c).
  * The SR_LATCH_BYPASS force-write of MEM[0x30ab8c]=1 was removed: 0x30ab8c is the engine's
  * "streaming I/O busy" flag (decomp 54073/26731), and pinning it =1 made the poweroff
  * watchdog never drain. */
@@ -3704,8 +3773,13 @@ uint32_t ge_call_guest_gp_rv(CpuState *s, uint32_t fn, uint32_t gp,
     int frame = -1;
     if (!fn) { fprintf(stderr, "GE_CALL_GUEST_RV: fn=0x0 (null, skipping)\n"); return 0; }
     if (!sr_nested_frame_acquire(sched_current_uid(), &frame_sp, &frame)) {
+        /* The guest function cannot run, so there is no result to return: the run stops here
+         * by name, as vtimer_call_handler stops, rather than handing the caller a 0 it would
+         * read as the function's answer (a NULL allocation, a free that never ran). */
         fprintf(stderr, "GE_CALL_GUEST_RV: fn=0x%08x refused -- no nested guest-call frame "
-                        "available (cur_uid=0x%x)\n", fn, sched_current_uid());
+                        "available (cur_uid=0x%x); the run stops here\n", fn, sched_current_uid());
+        s->flow_kind = SR_FLOW_FATAL;
+        s->flow_target = fn;
         return 0;
     }
     if (ge_log_on())

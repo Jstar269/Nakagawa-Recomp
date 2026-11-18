@@ -28055,6 +28055,10 @@ static void test_nested_frame_depth_is_bounded_and_fails_closed(void) {
            "the owner's depth returns to zero after the nest unwinds");
     expect(sr_nested_frame_lifo_violations() == 0u,
            "the nest released its frames innermost-first");
+    expect(caller.flow_kind == SR_FLOW_FATAL,
+           "the depth refusal stops the run, and the stop reaches the outermost caller");
+    caller.flow_kind = 0u;
+    caller.flow_target = 0u;
 
     /* Pool exhaustion is a separate limit from per-owner depth: hold every slot
      * under other owners, then a call from a fresh owner must be refused rather
@@ -28077,6 +28081,12 @@ static void test_nested_frame_depth_is_bounded_and_fails_closed(void) {
                "a nested call with the pool exhausted returns zero");
         expect(s_cbabi_calls == 0u,
                "a nested call with the pool exhausted dispatches nothing");
+        /* Audit 2026-11-17 (F-04751dae): the refusal has no result to give, so it stops the
+         * run by name instead of answering a 0 the caller reads as the function's v0. */
+        expect(caller.flow_kind == SR_FLOW_FATAL && caller.flow_target == CBABI_ENTRY,
+               "a nested call refused for want of a frame stops the run at its target");
+        caller.flow_kind = 0u;
+        caller.flow_target = 0u;
         expect(sr_nested_frame_exhaustions() == 1u,
                "the pool-exhaustion refusal is counted");
         for (i = 0; i < SR_NESTED_FRAME_SLOTS; i++)
@@ -44271,6 +44281,142 @@ static void test_partition_alloc_size_zero_refused(void) {
     }
 }
 
+/* Audit 2026-11-17 (F-6f7cbaae, F-9331313c): with every partition block record live, a Low
+ * request used to take its memory and return a UID it never recorded, whose head address read 0
+ * (an FPL or VPL built on it sat at guest address 0). It is now refused before any memory is
+ * taken, and every UID handed out names a real block. */
+static void test_partition_low_refused_when_block_records_full(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_partition_free_block_count(void);
+    extern uint32_t sr_hle_test_partition_heap_ptr(void);
+    const uint32_t NID_ALLOC_PART = 0x237dbd4fu, NID_GET_HEAD = 0x9d9a5ba1u,
+                   NID_FREE_PART = 0xb6d61d02u;
+    static uint32_t uids[600];
+    int n = 0, headless = 0;
+    uint32_t refused = 0u, heap_before = 0u;
+    int free_before = 0;
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    for (int i = 0; i < 600; i++) {
+        heap_before = sr_hle_test_partition_heap_ptr();
+        free_before = sr_hle_test_partition_free_block_count();
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
+        uint32_t uid = sr_syscall(&cpu, NID_ALLOC_PART);
+        if (uid >= 0x80000000u) { refused = uid; break; }
+        uids[n++] = uid;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = uid;
+        if (sr_syscall(&cpu, NID_GET_HEAD) == 0u) headless++;
+    }
+    expect(headless == 0, "every partition block UID handed out has a real head address");
+    expect(refused == 0x800200d9u,
+           "a Low block past the last free block record is MEMBLOCK_ALLOC_FAILED, not a UID");
+    expect(sr_hle_test_partition_heap_ptr() == heap_before &&
+               sr_hle_test_partition_free_block_count() == free_before,
+           "the refused request takes no partition memory");
+    for (int i = 0; i < n; i++) {
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = uids[i];
+        (void)sr_syscall(&cpu, NID_FREE_PART);
+    }
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
+    uint32_t again = sr_syscall(&cpu, NID_ALLOC_PART);
+    expect(again < 0x80000000u, "a Low block allocates again once the records are freed");
+    if (again < 0x80000000u) {
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = again;
+        (void)sr_syscall(&cpu, NID_FREE_PART);
+    }
+}
+
+/* Audit 2026-11-17 (F-87e96d5e): an Addr block keeps its exact, unaligned bounds, so the free
+ * block left beside it can start unaligned. A Low block taken from that free block used to start
+ * there; it now starts on the next 256-byte boundary, as a bump allocation does, and the head
+ * below it stays free. */
+static void test_partition_low_from_unaligned_free_block_is_aligned(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_partition_free_block_count(void);
+    extern int sr_hle_test_partition_get_free_block(int idx, uint32_t *addr_out, uint32_t *size_out);
+    const uint32_t NID_ALLOC_PART = 0x237dbd4fu, NID_GET_HEAD = 0x9d9a5ba1u,
+                   NID_FREE_PART = 0xb6d61d02u;
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    uint32_t uid[2], head[2];
+    for (int i = 0; i < 2; i++) {
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x1000u;
+        uid[i] = sr_syscall(&cpu, NID_ALLOC_PART);
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = uid[i];
+        head[i] = sr_syscall(&cpu, NID_GET_HEAD);
+    }
+    expect(uid[0] < 0x80000000u && uid[1] < 0x80000000u && head[1] == head[0] + 0x1000u,
+           "two adjacent Low blocks allocate");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid[0];
+    expect(sr_syscall(&cpu, NID_FREE_PART) == 0u, "the first Low block is freed");
+    /* An Addr block of 0x234 bytes at the freed block's start leaves [+0x234, +0x1000) free. */
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 2u; cpu.r[7] = 0x234u; cpu.r[8] = head[0];
+    const uint32_t fixed = sr_syscall(&cpu, NID_ALLOC_PART);
+    expect(fixed < 0x80000000u, "an unaligned Addr block fits in the freed span");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
+    const uint32_t low = sr_syscall(&cpu, NID_ALLOC_PART);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = low;
+    const uint32_t low_head = sr_syscall(&cpu, NID_GET_HEAD);
+    char msg[160];
+    snprintf(msg, sizeof msg, "a Low block from the unaligned free block starts 256-byte aligned "
+             "(0x%08x, want 0x%08x)", low_head, head[0] + 0x300u);
+    expect(low < 0x80000000u && low_head == head[0] + 0x300u, msg);
+    /* Freeing both returns the whole span as one free block. */
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = low;
+    expect(sr_syscall(&cpu, NID_FREE_PART) == 0u, "the aligned Low block is freed");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = fixed;
+    expect(sr_syscall(&cpu, NID_FREE_PART) == 0u, "the Addr block is freed");
+    uint32_t fb_addr = 0u, fb_size = 0u;
+    expect(sr_hle_test_partition_free_block_count() == 1 &&
+               sr_hle_test_partition_get_free_block(0, &fb_addr, &fb_size) &&
+               fb_addr == head[0] && fb_size == 0x1000u,
+           "the head left free below the aligned block coalesces back into the whole span");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid[1];
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+}
+
+/* Audit 2026-11-17 (F-83135ccc): SR_ALLOC_GUARD=0 used to turn off the bump path's bounds check,
+ * so a Low request past the partition top succeeded over live memory. The switch now silences
+ * only the refusal line. */
+static void test_partition_alloc_guard_off_still_refuses(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_heap_ptr(void);
+    extern uint32_t sr_hle_test_partition_bump_top(void);
+    extern void sr_hle_test_alloc_env_reset(void);
+    extern uint32_t alloc_block(uint32_t size);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    hle_test_setenv("SR_ALLOC_GUARD", "0");
+    sr_hle_test_alloc_env_reset();
+    const uint32_t heap = sr_hle_test_partition_heap_ptr();
+    const uint32_t room = sr_hle_test_partition_bump_top() - ((heap + 0xffu) & ~0xffu);
+    expect(alloc_block(room + 0x100u) == 0xffffffffu,
+           "with SR_ALLOC_GUARD=0 a Low request past the partition top is still refused");
+    expect(sr_hle_test_partition_heap_ptr() == heap, "the refused request leaves the bump pointer");
+    hle_test_setenv("SR_ALLOC_GUARD", NULL);
+    sr_hle_test_alloc_env_reset();
+    sr_hle_test_partition_reset();
+}
+
 /* Audit 2026-11-17 (F-3bf27c21): a PSP limits FPL and VPL creation only by memory and UIDs. The
  * runtime's tables held 16 pools each, and the 17th create returned an unmeasured 0x800200D9. A
  * VPL the partition cannot hold is NO_MEMORY (pspautotests tests/threads/vpl/create.expected at
@@ -58744,6 +58890,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_pool_released_waiter_leaves_queue();
     test_pool_uids_come_from_the_shared_pool();
     test_partition_alloc_size_zero_refused();
+    test_partition_low_refused_when_block_records_full();
+    test_partition_low_from_unaligned_free_block_is_aligned();
+    test_partition_alloc_guard_off_still_refuses();
     test_fpl_free_bounds_do_not_wrap();
     test_pools_past_the_old_table();
     test_delete_unknown_fpl();

@@ -2174,9 +2174,9 @@ static void deliver_vblank(void) {
             fflush(stderr);
         }
     }
-    /* Deliver every active callback slot in stable slot/registration order.  A callback
-     * may delete itself or another slot; the HLE walker snapshots each slot immediately
-     * before dispatch, so later slots observe that change on this same VBLANK. */
+    /* The VBLANK callback hook. sr_vblank_dispatch_registered() is a deliberate no-op (the
+     * vblank interrupt dispatches no callbacks); its return-boundary scope stays so that a
+     * future hook running guest code is bounded the same way as the handlers above. */
     SrAotReturnBoundaryScope callback_scope;
     sr_aot_return_boundary_scope_begin(&callback_scope);
     sr_vblank_dispatch_registered();
