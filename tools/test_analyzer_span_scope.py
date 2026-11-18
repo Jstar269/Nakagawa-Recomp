@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 import unittest
 from unittest import mock
@@ -1675,10 +1676,8 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         findings = analyze.canonical_cfg_gate(report)
         self.assertTrue(any(item["code"] == "executable-coverage-gap" for item in findings))
 
-    def test_codegen_cli_scans_only_the_ranges_it_was_given(self) -> None:
-        # codegen reports the ranges it actually scanned, which is the externally
-        # visible statement of what the analyzer decided. Without a span it must be
-        # the segment alone; with one, exactly the segment plus that span.
+    def test_codegen_cli_accepts_explicit_ranges_without_debug_dump(self) -> None:
+        # The analyzer applies the supplied span, but never dumps its internal range list.
         out_c = self.root / "scan.c"
         argv = [
             sys.executable, str(TOOLS / "codegen.py"), str(self.elf), str(out_c),
@@ -1688,20 +1687,13 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
             argv, cwd=ROOT, env=self._clean_env(), capture_output=True, text=True, check=False,
         )
         self.assertEqual(bare.returncode, 0, bare.stdout + bare.stderr)
-        self.assertIn(
-            f"SCANNING RANGES: [({PRIMARY_BASE}, {PRIMARY_BASE + 8})]",
-            bare.stdout + bare.stderr,
-        )
+        self.assertNotIn("SCANNING RANGES", bare.stdout + bare.stderr)
         spanned = subprocess.run(
             argv + [f"--extra-span={FOREIGN_SPAN_TEXT}"],
             cwd=ROOT, env=self._clean_env(), capture_output=True, text=True, check=False,
         )
         self.assertEqual(spanned.returncode, 0, spanned.stdout + spanned.stderr)
-        self.assertIn(
-            f"SCANNING RANGES: [({PRIMARY_BASE}, {PRIMARY_BASE + 8}), "
-            f"({FOREIGN_SPAN[0]}, {FOREIGN_SPAN[1]})]",
-            spanned.stdout + spanned.stderr,
-        )
+        self.assertNotIn("SCANNING RANGES", spanned.stdout + spanned.stderr)
 
     def test_codegen_primary_span_does_not_reach_a_rebased_extra_module(self) -> None:
         # The manager exports the span across the make spawn. codegen must apply it to
@@ -2326,6 +2318,19 @@ class FuncSymbolEntrySizeTests(unittest.TestCase):
             for addr in range(-2, 122):
                 self.assertEqual(analyze.in_ranges(addr, ranges),
                                  any(lo <= addr < hi for lo, hi in ranges))
+
+
+class LastWordSeedSweepTests(unittest.TestCase):
+    def test_prologue_sweep_checks_the_last_file_word(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "last-word.elf"
+            write_elf(path, load_addr=PRIMARY_BASE, words=(0x27BDFFE0,))
+            elf = analyze.Elf(str(path), base=0)
+        state = SimpleNamespace(elf=elf, ranges=analyze.exec_ranges(elf), shadow=frozenset(), noisy=set())
+
+        analyze._seed_prologues_and_terminators(state)
+
+        self.assertIn(PRIMARY_BASE, state.noisy)
 
 
 def _sectioned_exec(sections, *, base=0x08804000, gap=b""):

@@ -12,6 +12,8 @@ jump-table landing pads, and ordinary ``jalr`` targets.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import struct
 import sys
 from types import SimpleNamespace
@@ -726,6 +728,80 @@ class DirectJumpAuditTests(unittest.TestCase):
         )
 
 
+class JumpRegionBoundaryTests(unittest.TestCase):
+    def test_trace_edge_census_and_call_evidence_use_the_pc_plus_four_region(self):
+        source, target = 0x0FFFFFFC, 0x10000004
+        jump_elf, jump_ranges = image(emit(source, j(target), NOP, jr(RA), NOP))
+
+        covered = set()
+        analyze.trace_function(jump_elf, source, jump_ranges, covered, set(), set())
+        self.assertIn(target, covered)
+        self.assertEqual(analyze.direct_j_edges(jump_elf, jump_ranges), {target: (source,)})
+
+        call_elf, call_ranges = image(emit(source, jal(target), NOP, jr(RA), NOP))
+        evidence = analyze.code_pointer_evidence(call_elf, call_ranges)
+        self.assertIn(target, evidence["jal"])
+
+
+class TraceLookupReuseTests(unittest.TestCase):
+    def test_trace_computes_stub_and_file_executable_lookups_once(self):
+        words = emit(
+            0x1000,
+            jal(0x3000), NOP,
+            jal(0x3004), NOP,
+            bne(A0, 0, 2), NOP,
+            j(0x1028), NOP,
+            j(0x1030), NOP,
+            NOP, NOP,
+            jr(RA), NOP,
+            jr(RA), NOP,
+        )
+        elf, ranges = image(words)
+        sec_calls = []
+        real_sec = elf.sec
+
+        def counted_sec(name):
+            sec_calls.append(name)
+            return real_sec(name)
+
+        elf.sec = counted_sec
+        file_range_calls = []
+        real_file_ranges = analyze._file_backed_exec_ranges
+
+        def counted_file_ranges(image):
+            file_range_calls.append(image)
+            return real_file_ranges(image)
+
+        with unittest.mock.patch.object(analyze, "_file_backed_exec_ranges",
+                                        side_effect=counted_file_ranges):
+            analyze.trace_function(elf, 0x1000, ranges, set(), set(), set())
+
+        self.assertEqual(
+            {"stub-section lookups": sec_calls, "file-range lookups": file_range_calls},
+            {"stub-section lookups": [".sceStub.text"], "file-range lookups": [elf]},
+        )
+
+
+class DataSectionSeedTests(unittest.TestCase):
+    def test_pointer_table_seed_does_not_run_the_code_word_census(self):
+        elf, ranges = image(emit(0x1000, jr(RA), NOP), data_pointers=(0x1000,))
+        discovery = SimpleNamespace(
+            elf=elf,
+            ranges=ranges,
+            file_exec_ranges=[],
+            relocated=None,
+            hc=set(),
+            in_text=lambda address: analyze.in_ranges(address, ranges),
+        )
+        read_words = analyze._iter_code_words
+
+        with unittest.mock.patch.object(analyze, "_iter_code_words", wraps=read_words) as census:
+            analyze._seed_function_pointer_tables(discovery, None)
+
+        self.assertEqual(census.call_count, 0)
+        self.assertIn(0x1000, discovery.hc)
+
+
 class TraceFunctionTerminatorTests(unittest.TestCase):
     def test_direct_jump_outside_ranges_stops_after_its_delay_slot(self):
         words = emit(0x1000, j(0x2000), NOP, addiu(SP, SP, -0x20), jr(RA), NOP)
@@ -955,6 +1031,15 @@ class AddressMaterializationTests(unittest.TestCase):
         analyze._seed_address_materializations(discovery)
 
         self.assertNotIn(base + 0x50, discovery.materialized)
+
+    def test_materialization_scan_does_not_dump_ranges_to_stderr(self):
+        discovery = self.discovery({self.BASE: lui(A0, 0x0880)})
+        output = io.StringIO()
+
+        with contextlib.redirect_stderr(output):
+            analyze._seed_address_materializations(discovery)
+
+        self.assertEqual(output.getvalue(), "")
 
 
 class ScWriteTests(unittest.TestCase):

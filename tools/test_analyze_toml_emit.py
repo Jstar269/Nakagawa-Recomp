@@ -47,6 +47,35 @@ class TestTomlEmit(unittest.TestCase):
         parsed = tomllib.loads(f"note = {rendered}\n")
         self.assertEqual(parsed["note"], value)
 
+    def test_emit_toml_roundtrips_printable_unicode(self):
+        import tempfile
+
+        from analyze import emit_toml, load_toml
+
+        model = {
+            "module": "módulo",
+            "entry": 0x1000,
+            "functions": [{"addr": 0x1000, "kind": "function", "name": "Écran",
+                           "note": "日本語"}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "functions.toml"
+            emit_toml(model, path)
+            self.assertEqual(load_toml(path), model)
+
+    def test_roundtrip_check_handles_zero_or_one_function(self):
+        import tempfile
+
+        from analyze import roundtrip_check
+
+        for functions in ([], [{"addr": 0x1000, "kind": "function"}]):
+            with self.subTest(function_count=len(functions)), tempfile.TemporaryDirectory() as directory:
+                ok, _path = roundtrip_check(
+                    {"module": "elf", "entry": 0x1000, "functions": functions},
+                    directory,
+                )
+                self.assertTrue(ok)
+
 
     def test_emit_toml_insertion_order_determinism(self):
         import tempfile
