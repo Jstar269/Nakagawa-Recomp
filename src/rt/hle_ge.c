@@ -289,6 +289,14 @@ static void (*s_ge_test_preempt_hook)(uint32_t list_id);
 void sr_hle_test_ge_preempt_hook(void (*hook)(uint32_t list_id)) { s_ge_test_preempt_hook = hook; }
 #endif
 
+/* The signal function of the callback `cbid` names, or 0 when it names none: a negative id
+ * (the SDK's -1), one past the table, a slot no sceGeSetCallback holds, or a callback
+ * registered with a NULL signal function (PSP-GE-SIGNAL-001 registered such an id 2). */
+static uint32_t ge_list_signal_func(uint32_t cbid) {
+    if ((int32_t)cbid < 0 || cbid >= (uint32_t)(sizeof(s_ge_cb) / sizeof(s_ge_cb[0]))) return 0;
+    return s_ge_cb[cbid].used ? s_ge_cb[cbid].signal_func : 0u;
+}
+
 /* Run the list in `slot` from `pc` until it stalls or reaches its END, and give *next_pc what
  * ge_run_list returned; or return 0 when another caller took the list over.
  *
@@ -302,14 +310,6 @@ void sr_hle_test_ge_preempt_hook(void (*hook)(uint32_t list_id)) { s_ge_test_pre
  * The stronger thread may also drive this list: advance its stall address or run it on, pause it,
  * or reset the GE and reuse the slot. So the state is read again after the switch; whoever ran the
  * list to its END has done everything that follows the END. */
-/* The signal function of the callback `cbid` names, or 0 when it names none: a negative id
- * (the SDK's -1), one past the table, a slot no sceGeSetCallback holds, or a callback
- * registered with a NULL signal function (PSP-GE-SIGNAL-001 registered such an id 2). */
-static uint32_t ge_list_signal_func(uint32_t cbid) {
-    if ((int32_t)cbid < 0 || cbid >= (uint32_t)(sizeof(s_ge_cb) / sizeof(s_ge_cb[0]))) return 0;
-    return s_ge_cb[cbid].used ? s_ge_cb[cbid].signal_func : 0u;
-}
-
 static int ge_list_run(int slot, uint32_t pc, int resume, uint32_t *next_pc) {
     GeListInfo *l = &s_ge_lists[slot];
     const uint64_t order = l->order;
