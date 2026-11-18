@@ -157,6 +157,30 @@ class TestSearchVerdicts(unittest.TestCase):
         self.assertIs(verdict, vks.Verdict.FOUND)
         self.assertIsNone(error)
 
+    def test_found_when_value_is_introduced_only_by_a_merge(self):
+        # An "evil merge": neither parent holds the value; only the merge
+        # commit's own resolution adds it. Pickaxe without -m builds no diff
+        # for a merge, so the value would be reported clean while it sits in
+        # the tip tree.
+        repo = self.repo
+        assert _run_git(repo, "checkout", "-b", "side").returncode == 0
+        (repo / "side.txt").write_text("side\n", encoding="utf-8")
+        assert _run_git(repo, "add", "-A").returncode == 0
+        assert _run_git(repo, "commit", "-m", "side").returncode == 0
+        assert _run_git(repo, "checkout", "main").returncode == 0
+        (repo / "main.txt").write_text("main\n", encoding="utf-8")
+        assert _run_git(repo, "add", "-A").returncode == 0
+        assert _run_git(repo, "commit", "-m", "main").returncode == 0
+        merge = _run_git(repo, "merge", "--no-ff", "--no-commit", "side")
+        assert merge.returncode == 0, merge.stderr
+        (repo / "resolved.txt").write_text(f"leaked = {SAMPLE.hex()}\n", encoding="utf-8")
+        assert _run_git(repo, "add", "-A").returncode == 0
+        assert _run_git(repo, "commit", "-m", "merge side").returncode == 0
+        with _chdir(repo):
+            verdict, error = vks.search_history(SAMPLE.hex(), [SAMPLE.hex()])
+        self.assertIsNone(error)
+        self.assertIs(verdict, vks.Verdict.FOUND)
+
     def test_error_when_git_log_fails(self):
         needle = SAMPLE.hex()
         with mock.patch.object(vks.subprocess, "run", side_effect=subprocess.CalledProcessError(128, "git")):

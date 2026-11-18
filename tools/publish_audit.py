@@ -36,6 +36,7 @@ from publication_policy import (  # noqa: E402
     load_policy,
 )
 from provenance_ledger import claims_ledger_bytes, is_claims_ledger  # noqa: E402
+from public_export import content_digest as export_content_digest  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -340,11 +341,6 @@ def parse_secret_scan_report(report_path: Path) -> list[Finding]:
     except Exception as exc:
         findings.append(Finding("SECRET_SCAN_PARSE", str(report_path), f"failed to parse secret scanner report: {exc}"))
     return findings
-
-
-def parse_gitleaks_report(report_path: Path) -> list[Finding]:
-    """Backward-compatible alias for integrations using the old function name."""
-    return parse_secret_scan_report(report_path)
 
 
 def isolated_git_env(root: Path | None = None) -> dict[str, str]:
@@ -1270,19 +1266,7 @@ def is_keystore_content(rel: str, text: str | None) -> bool:
     return PurePosixPath(rel).suffix.lower() not in KEYSTORE_MARKER_TEXT_EXEMPT
 
 
-def _magic_kind(path_or_bytes: Path | bytes | None, path: str = "") -> str | None:
-    if path_or_bytes is None:
-        return None
-    data: bytes | None = None
-    if isinstance(path_or_bytes, Path):
-        try:
-            with path_or_bytes.open("rb") as stream:
-                data = stream.read(65536)
-        except OSError:
-            return "unreadable file"
-    else:
-        data = path_or_bytes
-
+def _magic_kind(data: bytes | None, path: str = "") -> str | None:
     if not data:
         return None
     if data.startswith(b"\x7fELF"):
@@ -1558,7 +1542,11 @@ SPDX_BYTE_EXACT_IMPORT_TREES = (
     # third_party/libchdr/PROVENANCE.md records every upstream blob).
     "third_party/libchdr/",
     # AMD FidelityFX SDK headers (MIT): the notice is in each header comment, without an SPDX
-    # line upstream; imported byte-identical (third_party/fidelityfx_sdk/PROVENANCE.md).
+    # line upstream. Imported byte-identical except three LOCAL DELTA headers (the FSR3 upscaler,
+    # frame-interpolation and optical-flow ``*_callbacks_hlsl.h``), which keep AMD's notice and
+    # carry a modification note; third_party/fidelityfx_sdk/PROVENANCE.md lists every file. The
+    # prefix also exempts any later edit or file under the tree, so a new LOCAL DELTA there must
+    # keep the upstream notice and add its modification note by hand.
     "third_party/fidelityfx_sdk/",
     # rcheevos 12.5.0 (MIT; its MD5 is zlib): the notices are in LICENSE and each header comment,
     # without SPDX lines upstream; imported byte-identical (third_party/rcheevos/PROVENANCE.md).
@@ -2263,9 +2251,11 @@ def check_collisions(paths: list[str]) -> list[Finding]:
             findings.append(Finding("PATH_DANGEROUS_UNICODE", p, "path contains dangerous bidi override, zero-width, or BOM formatting character"))
 
         pure = PurePosixPath(p)
-        stem_lower = pure.stem.lower()
-        if stem_lower in RESERVED_WIN_NAMES:
-            findings.append(Finding("FILENAME_RESERVED", p, f"filename stem uses Windows reserved device name '{pure.stem}'"))
+        # Windows reads a reserved base name before ANY extension as the device (NUL.tar.gz is
+        # NUL), and ignores spaces before the first dot, so the base is cut at the first dot.
+        base_name = pure.name.split(".", 1)[0].rstrip(" ")
+        if base_name.lower() in RESERVED_WIN_NAMES:
+            findings.append(Finding("FILENAME_RESERVED", p, f"filename stem uses Windows reserved device name '{base_name}'"))
 
         name = pure.name
         if name.endswith(" ") or name.endswith("."):
@@ -2289,59 +2279,13 @@ def check_collisions(paths: list[str]) -> list[Finding]:
 
 
 def load_release_manifest(manifest_path: Path) -> tuple[dict[str, dict], list[Finding]]:
-    findings: list[Finding] = []
-    manifest_entries: dict[str, dict] = {}
+    """Parse a manifest file named on the command line; the parsing is load_release_manifest_bytes'."""
     if not manifest_path.is_file():
-        findings.append(Finding("MANIFEST_ERROR", str(manifest_path), "release manifest file is missing or unreadable"))
-        return manifest_entries, findings
-
+        return {}, [Finding("MANIFEST_ERROR", str(manifest_path), "release manifest file is missing or unreadable")]
     try:
-        with manifest_path.open("r", encoding="utf-8") as stream:
-            data = json.load(stream)
-            if not isinstance(data, dict) or "components" not in data or not isinstance(data["components"], list):
-                findings.append(Finding("MANIFEST_ERROR", str(manifest_path), "manifest missing valid 'components' array"))
-                return manifest_entries, findings
-
-            for comp in data["components"]:
-                if not isinstance(comp, dict):
-                    continue
-                sp = comp.get("source_path") or comp.get("provenance_path")
-                if sp:
-                    if sp in manifest_entries:
-                        findings.append(Finding("MANIFEST_DUPLICATE_PATH", sp, f"duplicate manifest entry for path {sp}"))
-                    manifest_entries[sp] = comp
-            for excluded in data.get("excluded_paths", []):
-                if isinstance(excluded, str):
-                    sp = excluded
-                    comp = {
-                        "id": f"policy-exclusion:{sp}",
-                        "source_path": sp,
-                        "type": "documentation",
-                        "presence": "excluded_from_public_profile",
-                        "disposition": "excluded_by_publication_policy",
-                        "public_scope_included": False,
-                    }
-                elif isinstance(excluded, dict):
-                    sp = excluded.get("path") or excluded.get("source_path")
-                    comp = {
-                        "id": excluded.get("id", f"policy-exclusion:{sp}"),
-                        "source_path": sp,
-                        "type": excluded.get("type", "documentation"),
-                        "presence": "excluded_from_public_profile",
-                        "disposition": excluded.get("disposition", "excluded_by_publication_policy"),
-                        "public_scope_included": False,
-                        "comment": excluded.get("comment", ""),
-                    }
-                else:
-                    continue
-                if isinstance(sp, str) and sp:
-                    if sp in manifest_entries:
-                        continue
-                    manifest_entries[sp] = comp
+        return load_release_manifest_bytes(manifest_path.read_bytes(), str(manifest_path))
     except Exception as exc:
-        findings.append(Finding("MANIFEST_ERROR", str(manifest_path), f"failed to load/parse manifest: {exc}"))
-
-    return manifest_entries, findings
+        return {}, [Finding("MANIFEST_ERROR", str(manifest_path), f"failed to load/parse manifest: {exc}")]
 
 
 def load_release_manifest_bytes(raw: bytes | None, display_path: str) -> tuple[dict[str, dict], list[Finding]]:
@@ -2429,7 +2373,7 @@ def _default_provenance(
     # Metadata-only classification below. Every branch returns ``policy_public``
     # for the publication flag: these prefixes describe what a file *is*, never
     # whether it may be published. Only the canonical policy decides that.
-    if rel_path in REQUIRED_PATHS or rel_path in ("NOTICE.md", "LICENSE", "README.md", "AGENTS.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "DEDICATION.md", "SECURITY.md", "TODO.md"):
+    if rel_path in ("NOTICE.md", "LICENSE", "README.md", "AGENTS.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "DEDICATION.md", "SECURITY.md", "TODO.md"):
         return "notice_doc", "GPL-3.0-or-later", rel_path if rel_path in ("LICENSE", "NOTICE.md") else "NOTICE.md", "documentation", "included", policy_public
 
     if rel_path.startswith("third_party/licenses/") and rel_path.count("/") == 2:
@@ -2450,7 +2394,7 @@ def _default_provenance(
     if rel_path.startswith("assets/vfpu/"):
         return "ppsspp_derived", "GPL-2.0-or-later", "NOTICE.md", "data", "included", policy_public
 
-    if rel_path.startswith(".github/") or rel_path.startswith(".") or rel_path in (".gitignore", ".gitattributes", ".clang-format", ".editorconfig", ".markdownlint-cli2.jsonc", ".pre-commit-config.yaml"):
+    if rel_path.startswith("."):
         return "project_authored", "GPL-2.0-or-later", "NOTICE.md", "configuration", "included", policy_public
 
     # android/ is the Android host target (#360): Gradle, NDK, Java and manifest
@@ -2813,12 +2757,14 @@ def _export_content_findings(
     findings: list[Finding] = []
     included_all = [e for e in entries if policy.resolve(e.path).disposition == INCLUDED]
     included = [e for e in included_all if e.path != "PUBLIC_EXPORT.json"]
-    digest = hashlib.sha256()
-    for entry in sorted(included, key=lambda item: item.path):
+    # The generator's own digest over the bytes this audit read: one implementation, not two.
+    audited_files: list[tuple[str, bytes]] = []
+    for entry in included:
         raw, error = _source_control_bytes(entry.path, entries, content_map, content_source, repo_root)
         if raw is None or error:
             continue
-        digest.update(entry.path.encode("utf-8") + b"\0" + hashlib.sha256(raw).hexdigest().encode("ascii") + b"\n")
+        audited_files.append((entry.path, raw))
+    included_digest = export_content_digest(audited_files)
     # The tree-derived fields are optional in the committed control: they are
     # recomputed HERE from the exact bytes this audit read, which is the only
     # value that can be trusted, and committing them is what used to make every
@@ -2826,7 +2772,7 @@ def _export_content_findings(
     # against this recomputation, so a stale or forged one is still refused --
     # absence removes a conflict, not a check.
     recorded = export_document.get("included_content_sha256")
-    if recorded is not None and recorded != digest.hexdigest():
+    if recorded is not None and recorded != included_digest:
         findings.append(Finding("POLICY_EXPORT_STALE", "PUBLIC_EXPORT.json", "included-content digest does not match the audited bytes"))
     recorded_included = export_document.get("included_file_count", export_document.get("exported_file_count"))
     if recorded_included is not None and recorded_included != len(included_all):
@@ -3099,16 +3045,7 @@ def audit_entries_with_semantics(
             canonical_manifest = manifest_path.resolve() == (repo_root / "assets" / "release_manifest.json").resolve()
         except OSError:
             canonical_manifest = manifest_path.as_posix().endswith("assets/release_manifest.json")
-        if content_source == CONTENT_INDEX and canonical_manifest:
-            manifest_raw, manifest_error = _source_control_bytes(
-                "assets/release_manifest.json", entries, content_map, content_source, repo_root
-            )
-            manifest_map, manifest_findings = load_release_manifest_bytes(
-                manifest_raw, "assets/release_manifest.json"
-            )
-            if manifest_error:
-                manifest_findings.append(Finding("MANIFEST_ERROR", "assets/release_manifest.json", manifest_error))
-        elif content_source in (CONTENT_WORKTREE, CONTENT_CANDIDATE, CONTENT_COMMITTED) and canonical_manifest:
+        if canonical_manifest:
             manifest_raw, manifest_error = _source_control_bytes(
                 "assets/release_manifest.json", entries, content_map, content_source, repo_root
             )
@@ -3188,10 +3125,7 @@ def audit_entries_with_semantics(
         rel = entry.path
         entry_findings: list[Finding] = []
 
-        if content_source in (CONTENT_CANDIDATE, CONTENT_COMMITTED):
-            raw_bytes, read_err = read_candidate_file(entry, repo_root)
-        else:
-            raw_bytes, read_err = content_map.get(rel, (None, "file missing or unreadable"))
+        raw_bytes, read_err = content_map.get(rel, (None, "file missing or unreadable"))
 
         if read_err and entry.kind not in ("symlink", "gitlink"):
             f = Finding("UNREADABLE", rel, read_err)
@@ -3405,7 +3339,6 @@ def audit_entries_with_semantics(
             if (
                 WINDOWS_USER_PATH.search(leak_text)
                 or POSIX_USER_PATH.search(leak_text)
-                or MAC_USER_PATH.search(leak_text)
                 or WSL_USER_PATH.search(leak_text)
                 or (leak_text_is_text and UNC_PATH.search(leak_text))
                 or ONEDRIVE_PATH.search(leak_text)
@@ -3511,11 +3444,6 @@ def audit_entries(
         trusted_waiver_base=trusted_waiver_base,
     )
     return findings
-
-
-def audit(paths: list[str]) -> list[Finding]:
-    entries = [GitEntry(mode="100644", sha="", stage="0", path=p, kind="file", working_mode="100644") for p in paths]
-    return audit_entries(entries)
 
 
 def generate_manifest_report(

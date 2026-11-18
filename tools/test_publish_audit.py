@@ -502,6 +502,18 @@ class TestPublishAudit(unittest.TestCase):
         findings_dot = publish_audit.check_collisions([trailing_dot_path])
         self.assertTrue(any(f.code == "FILENAME_TRAILING" for f in findings_dot))
 
+    def test_windows_reserved_device_name_before_any_extension(self):
+        # Windows reads the base name before the FIRST dot (NUL.tar.gz is the NUL device), so a
+        # check on the last-suffix stem ("nul.tar") let these through.
+        for reserved_path in ("docs/nul.tar.gz", "src/aux.c.orig", "docs/COM1.part.txt", "docs/con .txt"):
+            with self.subTest(path=reserved_path):
+                findings = publish_audit.check_collisions([reserved_path])
+                self.assertTrue(any(f.code == "FILENAME_RESERVED" for f in findings), findings)
+        for ordinary_path in ("docs/console.txt", "docs/nul_notes.tar.gz", "docs/.nul", "src/auxiliary.c"):
+            with self.subTest(path=ordinary_path):
+                findings = publish_audit.check_collisions([ordinary_path])
+                self.assertFalse(any(f.code == "FILENAME_RESERVED" for f in findings), findings)
+
     def test_cross_platform_local_paths(self):
         slash = chr(92)
         windows_text = "path = " + "C:" + slash + "Us" + "ers" + slash + "alice" + slash + "repo\n"

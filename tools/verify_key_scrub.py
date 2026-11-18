@@ -13,7 +13,8 @@ NOT sufficient, because it never matches the `{0x12,0x46,...}` byte-array form.
 The verifier fails closed (#377): a history search that did not *complete* is never
 reported as clean. Repository preconditions (inside a Git work tree or bare
 repository, not shallow, refs with reachable history) are validated once up front,
-and every `git log` pickaxe invocation must exit 0 to count as a completed search.
+and every `git log -m` pickaxe invocation (merges diffed against each parent) must exit
+0 to count as a completed search.
 An empty/no-ref repository is unverifiable (exit 2), not clean.
 
 Exit 0  -> every configured constant was searched in every encoding, every search
@@ -195,10 +196,13 @@ def search_history(needle: str, redact_needles: Sequence[str]) -> tuple[Verdict,
     (ERROR, SearchError); ERROR never reads as "clean" (#377), though a
     definitive exposure still outranks it in the final verdict.
     """
-    operation = "git log --all -S <needle redacted> --oneline --source"
+    # `-m` diffs every merge against each parent: without it pickaxe builds no
+    # diff for a merge commit, so a value added only by a merge's own
+    # resolution (an "evil merge") would never be found.
+    operation = "git log --all -m -S <needle redacted> --oneline --source"
     try:
         result = subprocess.run(
-            ["git", "log", "--all", "-S", needle, "--oneline", "--source"],
+            ["git", "log", "--all", "-m", "-S", needle, "--oneline", "--source"],
             env=isolated_git_env(),
             capture_output=True,
             text=True,
