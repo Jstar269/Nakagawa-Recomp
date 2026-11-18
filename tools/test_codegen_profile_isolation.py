@@ -108,11 +108,10 @@ def _addiu_sp(imm: int) -> int:
 # followed on 2026-11-08 (#363): RETIRED_HST_ADDRESSES below holds them.
 # 0x000011B0, 0x0000260C, 0x0000FE3C, 0x00015EA0 and 0x000149A8 left this list when their
 # stubs were retired (#363): each now translates as written in both profiles. 0x000143B0
-# (the native sprintf) followed on 2026-11-11.
-HST_CUSTOM_STUBS = (
-    0x0000F538, 0x000101C4, 0x00010738, 0x00013524,
-    0x00011090, 0x000110DC, 0x000114A8, 0x000114C0,
-)
+# (the native sprintf) followed on 2026-11-11.  The inventory is read from
+# codegen_hst_stubs, so a stub added there joins BODY_COUPLED and the differential
+# below, which then fails until the specimen exercises it.
+HST_CUSTOM_STUBS = tuple(sorted(codegen.HST_CUSTOM_STUBS))
 HST_GUEST_PATCHES = tuple(sorted(codegen.GUEST_PATCHES))
 HST_SIMPLE_STUB_ADDRS = tuple(sorted(HST_SIMPLE_STUBS))
 
@@ -860,6 +859,8 @@ class GateInventoryTests(unittest.TestCase):
             self.assertIn(addr, COVERED, f"_SV_SPECIAL 0x{addr:08x} uncovered")
         for addr in HST_SIMPLE_STUBS:
             self.assertIn(addr, COVERED, f"HST_SIMPLE_STUBS 0x{addr:08x} uncovered")
+        for addr in codegen.HST_CUSTOM_STUBS:
+            self.assertIn(addr, COVERED, f"HST_CUSTOM_STUBS 0x{addr:08x} uncovered")
         for resume, owner in codegen.HST_RESUME_OWNERS.items():
             self.assertIn(resume, COVERED)
             self.assertIn(owner, COVERED)

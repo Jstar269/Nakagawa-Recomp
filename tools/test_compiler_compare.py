@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import compiler_compare  # noqa: E402
@@ -140,6 +140,8 @@ class FakeToolchain:
         self.available = available
         self.failing_gate = failing_gate
         self.workload_status = compiler_compare.GATE_PASS
+        # (compiler path, trial index) -> semantic_sha256; every trial agrees by default.
+        self.semantic_hash: Callable[[str, int], str] = lambda _compiler, _index: "a" * 64
         self.gate_calls: list[str] = []
         self.measurement_calls: list[tuple[str, Path]] = []
         self.workload_calls: list[dict[str, Any]] = []
@@ -209,7 +211,7 @@ class FakeToolchain:
                 "link_wall_seconds": 0.5 + index / 10,
                 "object_bytes": 1000,
                 "executable_bytes": 4000,
-                "semantic_sha256": "a" * 64,
+                "semantic_sha256": self.semantic_hash(compiler, index),
                 "generated_c_commands": [{"compiler": compiler, "argv": ["-O0", "-c", "fixture_recomp_0.c"]}],
                 "link_commands": [{"compiler": compiler, "argv": ["-O0", "-o", "fixture.exe"]}],
             }
@@ -460,6 +462,28 @@ class CompilerCompareTests(unittest.TestCase):
         self.assertEqual(report["semantic_hash_comparison"]["status"], "MATCH")
         clang_settings = report["toolchains"][1]["build_settings"]
         self.assertEqual(clang_settings["RECOMP_CC_IS_CLANG_OVERRIDE"], "clang")
+
+    def test_hashes_that_differ_across_compiler_rows_are_reported_different(self) -> None:
+        self.fake.semantic_hash = lambda compiler, _index: (
+            "c" * 64 if "clang" in compiler else "a" * 64)
+        report = self.compare(compilers=["gcc", "clang"])
+        comparison = report["semantic_hash_comparison"]
+        self.assertEqual(comparison["status"], "DIFFERENT")
+        self.assertEqual(sorted(comparison["sha256_by_toolchain"].values()), ["a" * 64, "c" * 64])
+
+    def test_a_row_without_measurements_makes_the_comparison_incomplete(self) -> None:
+        self.fake.available = ("gcc",)
+        report = self.compare(compilers=["gcc", "clang"])
+        statuses = [entry["status"] for entry in report["toolchains"]]
+        self.assertEqual(statuses, [compiler_compare.STATUS_MEASURED,
+                                    compiler_compare.STATUS_NOT_AVAILABLE])
+        self.assertEqual(report["semantic_hash_comparison"]["status"], "INCOMPLETE")
+
+    def test_a_row_with_unstable_hashes_makes_the_comparison_unstable(self) -> None:
+        self.fake.semantic_hash = lambda compiler, index: (
+            f"{index:064x}" if "clang" in compiler else "a" * 64)
+        report = self.compare(compilers=["gcc", "clang"])
+        self.assertEqual(report["semantic_hash_comparison"]["status"], "UNSTABLE")
 
     def test_minimum_median_and_hash_stability_are_reported(self) -> None:
         report = self.compare()

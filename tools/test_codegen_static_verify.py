@@ -65,6 +65,11 @@ class StaticVerifyTests(unittest.TestCase):
         pts = codegen.sv_plan(elf, insns, labels, options=self.options)
         self.assertNotIn(0x300C, pts)
         self.assertNotIn(0x3008, pts)
+        # The same words with no label: only the branch and delay-slot resets can
+        # keep the pre-branch ori from joining 0x300C in one two-instruction run.
+        elf, insns, labels = _mk(words)
+        pts = codegen.sv_plan(elf, insns, labels, options=self.options)
+        self.assertEqual(pts, {})
 
     def test_sra_and_slt_are_signed(self):
         # lui $t0, 0x8000 ; sra $t1, $t0, 4 -> 0xF8000000 ; slt $t2, $t0, $zero -> 1
