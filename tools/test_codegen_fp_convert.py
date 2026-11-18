@@ -1045,6 +1045,8 @@ class X87MathFailsClosedTests(unittest.TestCase):
               "float f(float a, float b, uint32_t c) { return sr_fpu_add_s(a, b, c); }\n")
 
     def _compile(self, *flags: str) -> subprocess.CompletedProcess:
+        if CC is None:  # the class's skipUnless already requires an x86 gcc
+            self.skipTest("an x86 gcc is required for the x87-math gate")
         with scratch_dir.TemporaryDirectory(prefix="fp_x87_") as tmp:
             src = Path(tmp) / "x87.c"
             src.write_text(self.SOURCE, encoding="utf-8")
