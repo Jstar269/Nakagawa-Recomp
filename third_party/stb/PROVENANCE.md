@@ -56,4 +56,10 @@ without being decoded.
 `STB_VORBIS_NO_PUSHDATA_API` (only the pull API is used), and silences, around the include only, the warnings the
 project's flags raise in the upstream code. It is compiled into the player and its tests, nowhere else. A stream is
 decoded only when it is mono or stereo at 8 to 192 kHz and declares 1 frame to 600 seconds, so the decoded buffer has
-a fixed upper size.
+a fixed upper size. The declared length is the 64-bit `stb_vorbis_stream_length_in_samples64`, checked before it is
+narrowed: the 32-bit `stb_vorbis_stream_length_in_samples` keeps only the low 32 bits of a last-page granule of 2^63
+or more, which is a negative length to the decoder. The decoder is opened with an `stb_vorbis_alloc` arena of
+`PLAYER_UI_VORBIS_ARENA_BYTES` (8 MB; the shipped track needs about 0.25 MB), so every allocation stb_vorbis makes
+comes from it: a setup header that declares many large codebooks (each at most 2^18 entries, `CODEBOOK_LIMIT`) runs
+out of the arena and is refused instead of allocating up to about 0.9 GB. `tests/native/test_player_ui_music.c`
+checks both refusals.

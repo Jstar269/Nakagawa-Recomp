@@ -20,7 +20,7 @@ extern "C" {
 typedef enum {
     PLAYER_UI_VORBIS_OK = 0,
     PLAYER_UI_VORBIS_NOT_VORBIS,   /* not an Ogg Vorbis stream stb_vorbis can open */
-    PLAYER_UI_VORBIS_UNSUPPORTED,  /* channels, rate or length outside what the launcher plays */
+    PLAYER_UI_VORBIS_UNSUPPORTED,  /* channels, rate, length or decoder size the launcher refuses */
     PLAYER_UI_VORBIS_INCOMPLETE,   /* fewer frames decoded than the stream declares */
     PLAYER_UI_VORBIS_NO_MEMORY,
     PLAYER_UI_VORBIS_CANCELLED,
@@ -37,6 +37,12 @@ typedef struct {
 
 /* The longest stream decoded: the launcher keeps the whole track in memory. */
 #define PLAYER_UI_VORBIS_MAX_SECONDS 600u
+
+/* The memory stb_vorbis may use for its decoder (codebooks, floors, residues,
+   windows and its scratch space), allocated once per decode. The shipped track
+   needs about 0.25 MB; a stream that needs more than this is refused
+   (PLAYER_UI_VORBIS_UNSUPPORTED). */
+#define PLAYER_UI_VORBIS_ARENA_BYTES (8u * 1024u * 1024u)
 
 /* Returns true when the decode should stop (the music was turned off or the
    launcher is closing). May be NULL. */

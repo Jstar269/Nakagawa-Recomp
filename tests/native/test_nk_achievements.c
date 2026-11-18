@@ -8,8 +8,12 @@
 
 #include "nk_achievements.h"
 
+#include "rc_api_info.h"
+#include "rc_api_runtime.h"
+#include "rc_api_user.h"
 #include "rc_client.h"
 #include "rc_consoles.h"
+#include "rc_error.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -590,6 +594,144 @@ static void test_empty_body_reads_nothing(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+/* ---- arrays that hold a non-object (rcheevos LOCAL DELTA, upstream c0a3ebdd #553) ---------- */
+
+static rc_api_server_response_t reply(const char *body) {
+    rc_api_server_response_t r;
+    memset(&r, 0, sizeof r);
+    r.body = body;
+    r.body_length = strlen(body);
+    r.http_status_code = 200;
+    return r;
+}
+
+#define SETS_HEAD                                                                              \
+    "{\"Success\":true,\"GameId\":1234,\"Title\":\"Synthetic Game\",\"ConsoleId\":41,"         \
+    "\"ImageIconUrl\":\"\",\"Sets\":"
+#define SET_HEAD                                                                               \
+    "[{\"AchievementSetId\":1111,\"GameId\":1234,\"Title\":\"Core\",\"Type\":\"core\","        \
+    "\"ImageIconUrl\":\"\","
+#define ONE_ACH                                                                                \
+    "{\"ID\":5501,\"Title\":\"Five\",\"Description\":\"The watched byte reads 5\",\"Flags\":3," \
+    "\"Points\":5,\"MemAddr\":\"0xH800100=5\",\"Author\":\"Synthetic\",\"BadgeName\":\"00001\","  \
+    "\"Created\":1700000000,\"Modified\":1700000000}"
+#define ONE_LB                                                                                 \
+    "{\"ID\":7701,\"Title\":\"Score\",\"Description\":\"The watched byte\","                  \
+    "\"Mem\":\"STA:0xH800100=1::CAN:0xH800100=2::SUB:0xH800100=3::VAL:0xH800100\","             \
+    "\"Format\":\"VALUE\"}"
+
+/* The rapi parsers count every element of an array, but fill only the objects up to the first
+ * entry that is not one. Upstream at the pin returned RC_OK with the rest of the count left as
+ * uninitialized memory, which rc_client then read as pointers (rc_client_copy_achievements). Each
+ * parser rc_client calls on such a reply now refuses it, with the count cut to what was filled. */
+static void test_array_of_primitives_is_refused(void) {
+    rc_api_server_response_t r;
+    int res;
+
+    rc_api_fetch_game_sets_response_t sets;
+    r = reply(SETS_HEAD SET_HEAD "\"Achievements\":[" ONE_ACH "],\"Leaderboards\":[" ONE_LB "]}]}");
+    res = rc_api_process_fetch_game_sets_server_response(&sets, &r);
+    CHECK(res == RC_OK && sets.num_sets == 1 && sets.sets[0].num_achievements == 1 &&
+              sets.sets[0].num_leaderboards == 1,
+          "a well-formed set still loads (%d)", res);
+    rc_api_destroy_fetch_game_sets_response(&sets);
+
+    r = reply(SETS_HEAD "[1]}");
+    res = rc_api_process_fetch_game_sets_server_response(&sets, &r);
+    CHECK(res == RC_INVALID_VALUE && sets.num_sets == 0, "\"Sets\":[1] is refused (%d, %u sets)", res,
+          (unsigned)sets.num_sets);
+    rc_api_destroy_fetch_game_sets_response(&sets);
+
+    r = reply(SETS_HEAD SET_HEAD "\"Achievements\":[" ONE_ACH ",1],\"Leaderboards\":[]}]}");
+    res = rc_api_process_fetch_game_sets_server_response(&sets, &r);
+    CHECK(res == RC_INVALID_VALUE && sets.sets[0].num_achievements == 1,
+          "\"Achievements\":[{...},1] is refused (%d)", res);
+    rc_api_destroy_fetch_game_sets_response(&sets);
+
+    r = reply(SETS_HEAD SET_HEAD "\"Achievements\":[],\"Leaderboards\":[" ONE_LB ",1]}]}");
+    res = rc_api_process_fetch_game_sets_server_response(&sets, &r);
+    CHECK(res == RC_INVALID_VALUE && sets.sets[0].num_leaderboards == 1,
+          "\"Leaderboards\":[{...},1] is refused (%d)", res);
+    rc_api_destroy_fetch_game_sets_response(&sets);
+
+    rc_api_start_session_response_t session;
+    r = reply("{\"Success\":true,\"HardcoreUnlocks\":[111,112,113],"
+              "\"Unlocks\":[{\"ID\":114,\"When\":1234567840}],\"ServerNow\":1234577777}");
+    res = rc_api_process_start_session_server_response(&session, &r);
+    CHECK(res == RC_INVALID_VALUE && session.num_unlocks == 1 && session.num_hardcore_unlocks == 0,
+          "\"HardcoreUnlocks\":[111,...] is refused (%d, %u hardcore)", res,
+          (unsigned)session.num_hardcore_unlocks);
+    rc_api_destroy_start_session_response(&session);
+
+    r = reply("{\"Success\":true,\"Unlocks\":[{\"ID\":114,\"When\":1234567840},7]}");
+    res = rc_api_process_start_session_server_response(&session, &r);
+    CHECK(res == RC_INVALID_VALUE && session.num_unlocks == 1, "\"Unlocks\":[{...},7] is refused (%d)", res);
+    rc_api_destroy_start_session_response(&session);
+
+    rc_api_submit_lboard_entry_response_t lboard;
+    r = reply("{\"Success\":true,\"Response\":{\"Score\":5,\"BestScore\":5,"
+              "\"RankInfo\":{\"Rank\":1,\"NumEntries\":\"2\"},"
+              "\"TopEntries\":[{\"User\":\"Player\",\"Rank\":1,\"Score\":5},1]}}");
+    res = rc_api_process_submit_lboard_entry_server_response(&lboard, &r);
+    CHECK(res == RC_INVALID_VALUE && lboard.num_top_entries == 1, "\"TopEntries\":[{...},1] is refused (%d)",
+          res);
+    rc_api_destroy_submit_lboard_entry_response(&lboard);
+
+    rc_api_fetch_followed_users_response_t users;
+    r = reply("{\"Success\":true,\"Friends\":[1]}");
+    res = rc_api_process_fetch_followed_users_server_response(&users, &r);
+    CHECK(res == RC_INVALID_VALUE && users.num_users == 0, "\"Friends\":[1] is refused (%d)", res);
+    rc_api_destroy_fetch_followed_users_response(&users);
+
+    rc_api_fetch_games_list_response_t games;
+    r = reply("{\"Success\":true,\"Response\":[1]}");
+    res = rc_api_process_fetch_games_list_server_response(&games, &r);
+    CHECK(res == RC_INVALID_VALUE && games.num_entries == 0, "a games list of [1] is refused (%d)", res);
+    rc_api_destroy_fetch_games_list_response(&games);
+
+    rc_api_fetch_game_titles_response_t titles;
+    res = rc_api_process_fetch_game_titles_server_response(&titles, &r);
+    CHECK(res == RC_INVALID_VALUE && titles.num_entries == 0, "a game title list of [1] is refused (%d)", res);
+    rc_api_destroy_fetch_game_titles_response(&titles);
+
+    rc_api_fetch_leaderboard_info_response_t info;
+    r = reply("{\"Success\":true,\"LeaderboardData\":{\"LBID\":7701,\"LBFormat\":\"VALUE\","
+              "\"LowerIsBetter\":0,\"LBTitle\":\"Score\",\"LBDesc\":\"d\",\"LBMem\":\"m\",\"GameID\":1234,"
+              "\"LBAuthor\":\"Synthetic\",\"LBCreated\":\"2023-11-14 22:13:20\","
+              "\"LBUpdated\":\"2023-11-14 22:13:20\",\"TotalEntries\":1,\"Entries\":[1]}}");
+    res = rc_api_process_fetch_leaderboard_info_server_response(&info, &r);
+    CHECK(res == RC_INVALID_VALUE && info.num_entries == 0, "leaderboard \"Entries\":[1] is refused (%d)", res);
+    rc_api_destroy_fetch_leaderboard_info_response(&info);
+
+    rc_api_fetch_achievement_info_response_t ach_info;
+    r = reply("{\"Success\":true,\"AchievementID\":5501,\"Response\":{\"NumEarned\":1,"
+              "\"TotalPlayers\":1,\"GameID\":1234,\"RecentWinner\":[1]}}");
+    res = rc_api_process_fetch_achievement_info_server_response(&ach_info, &r);
+    CHECK(res == RC_INVALID_VALUE && ach_info.num_recently_awarded == 0,
+          "\"RecentWinner\":[1] is refused (%d)", res);
+    rc_api_destroy_fetch_achievement_info_response(&ach_info);
+}
+
+/* The same through the bridge: a set reply whose achievement array holds a number fails the load
+ * by name. Upstream at the pin loaded it and copied the second achievement from uninitialized
+ * memory. */
+static void test_set_with_primitive_entry_fails_load(uint8_t *ram) {
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    Deferred d;
+    NkAch *ach = deferred_login(ram, &d);
+    if (!ach) return;
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(nk_ach_begin_load_game(ach, HASH), "load starts");
+    CHECK(deliver(&d, "r=achievementsets&", 200,
+                  SETS_HEAD SET_HEAD "\"Achievements\":[" ONE_ACH ",1],\"Leaderboards\":[]}]}"),
+          "the set request waits for its answer");
+    const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_GAME_FAILED) >= 0, "a set whose achievements hold a number fails the load");
+    CHECK(!nk_ach_game_loaded(ach), "no game loaded");
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
 int main(void) {
     uint8_t *ram = (uint8_t *)calloc(1u, USER_RAM_SIZE);
     if (!ram) {
@@ -608,6 +750,8 @@ int main(void) {
     test_null_required_string(ram);
     test_empty_body_reads_nothing(ram);
     test_deep_json_is_refused(ram);
+    test_array_of_primitives_is_refused();
+    test_set_with_primitive_entry_fails_load(ram);
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);

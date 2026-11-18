@@ -38,7 +38,7 @@ not linked into the runtime, which never reads a CHD.
 | `deps/miniz-3.1.2/` | miniz (inflate only) | 3.1.2 | MIT | 2013-2014 RAD Game Tools and Valve Software; 2010-2014 Rich Geldreich and Tenacious Software LLC |
 | `deps/zstd-1.5.7/` | Zstandard single-file decompressor | 1.5.7 | BSD-3-Clause (upstream also offers GPL-2.0-only; the project uses BSD-3-Clause) | Meta Platforms, Inc. and affiliates |
 | `deps/lzma-26.02/` | LZMA SDK decoder | 26.02 (`LzmaDec.c` dated 2023-04-07) | public domain (SPDX `LZMA-SDK-9.22` text) | Igor Pavlov |
-| `include/dr_libs/` | dr_flac | v0.13.4 | Unlicense or MIT-0; the project elects the Unlicense, as for `third_party/dr_libs/` | David Reid |
+| `include/dr_libs/` | dr_flac | v0.13.4 development snapshot (the header reads `v0.13.4 - TBD`), as libchdr carries it at the pin; no dr_libs commit is recorded | Unlicense or MIT-0; the project elects the Unlicense, as for `third_party/dr_libs/` | David Reid |
 
 The codec sources are the copies in libchdr's `deps/` and `include/dr_libs/`
 at the pin. libchdr does not carry the miniz and Zstandard licence files, so
@@ -53,6 +53,12 @@ miniz one with its CRLF line endings normalised, as above):
 Both were downloaded from `raw.githubusercontent.com` at those commits; the
 downloaded bytes' Git blob IDs match the files the GitHub contents API reports
 at those commits (the IDs in the manifest).
+
+libchdr carries no dr_flac licence file either. The text shipped for dr_flac is
+`third_party/dr_libs/LICENSE.txt`, the dr_libs project licence imported with
+dr_wav: the same two alternatives as the end of `dr_flac.h`, except that its
+MIT-0 copyright line reads "Copyright 2020 David Reid" where `dr_flac.h` reads
+"Copyright 2023 David Reid".
 
 ## What is built, and how
 

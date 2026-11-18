@@ -20,7 +20,7 @@ host's callback, so nothing here opens a connection.
   rcheevos uses it to sign unlock requests. The zlib licence is compatible with GPL-3.0-or-later.
 - Import method: each file was read from a clone of the repository with `git show <commit>:<path>`. Its Git blob ID
   matches the pinned commit's tree, and the SHA-256 values below were calculated from the local bytes. `src/rc_client.c`
-  and four `src/rapi/` files have since been changed (Local deltas below); their rows keep the upstream blob ID.
+  and five `src/rapi/` files have since been changed (Local deltas below); their rows keep the upstream blob ID.
 - Only what rc_client needs to sign in, load a game's achievement set by its hash, evaluate it and submit unlocks is
   vendored, in the upstream layout so every `#include` resolves without an edit: the public headers, `rc_client`, the
   `rapi` request builders and parsers, the `rcheevos` runtime, and `rhash`'s MD5. Not vendored: the rest of `rhash`
@@ -47,9 +47,9 @@ host's callback, so nothing here opens a connection.
 | `include/rcheevos.h` | `include/rcheevos.h` | imported byte-identical | `0d96002148b69653ba6d49c1b66c503a985a2f43` | `0264f2a35a7f79f144263384d5378976c4c1062fa7477a281ed6fe2d64eba760` |
 | `src/rapi/rc_api_common.c` | `src/rapi/rc_api_common.c` | imported + LOCAL DELTA | `3b3528605b225e3d1dc14515b2dbc4190d4507f5` | `5bbc766bd0954edb4391b8fa954873e10f83b352503c3263f110fa0e1674a32a` (this tree's bytes) |
 | `src/rapi/rc_api_common.h` | `src/rapi/rc_api_common.h` | imported + LOCAL DELTA | `06a7485da35a1121c703d9f460564cd8391c6db6` | `4d94c16793a44b53efda51a270a6f89c8410d1eb8712181f115243c40a6afb7a` (this tree's bytes) |
-| `src/rapi/rc_api_info.c` | `src/rapi/rc_api_info.c` | imported + LOCAL DELTA | `327a6dff3fc8f775f0bf369205c11482e43f9638` | `b5eefc507a3428a89480636c05eabfc1b3213a5442ea12a47fded75162cdc0f6` (this tree's bytes) |
-| `src/rapi/rc_api_runtime.c` | `src/rapi/rc_api_runtime.c` | imported + LOCAL DELTA | `261741d55aeebf4323b126f993dbf53483529c83` | `eddd2f110f3f7a0f130da1386d57d0e5a6bd2fa1488880d89960ff76ad141cfb` (this tree's bytes) |
-| `src/rapi/rc_api_user.c` | `src/rapi/rc_api_user.c` | imported byte-identical | `6943c98c443d647070e637758184fc4c09bec499` | `2430718f9fce10d4aa9f887b3cafdb817c37164291983fc345c19dac8c2ccfe2` |
+| `src/rapi/rc_api_info.c` | `src/rapi/rc_api_info.c` | imported + LOCAL DELTA | `327a6dff3fc8f775f0bf369205c11482e43f9638` | `f036a31dc0d8c0db8cea3ee78a3746a218369e7f10c3c2183751a0c72cf78bfc` (this tree's bytes) |
+| `src/rapi/rc_api_runtime.c` | `src/rapi/rc_api_runtime.c` | imported + LOCAL DELTA | `261741d55aeebf4323b126f993dbf53483529c83` | `2580e58f67b20b020be0d2d29d5cf0e93383b930fe5d2b2613b103be14f569c7` (this tree's bytes) |
+| `src/rapi/rc_api_user.c` | `src/rapi/rc_api_user.c` | imported + LOCAL DELTA | `6943c98c443d647070e637758184fc4c09bec499` | `f8816573734c4b35f8ad9c15636ed6630dd4b6fc4d2199da57aa638947ae8260` (this tree's bytes) |
 | `src/rc_client.c` | `src/rc_client.c` | imported + LOCAL DELTA | `7a7399580ebe48fd92b84d3a198f51b6675a23fd` | `093f7159a99354bf57628798cc2801051e3a15c321fed55ddfa0a15683e717f9` (this tree's bytes) |
 | `src/rc_client_external.h` | `src/rc_client_external.h` | imported byte-identical | `b3c0e5eba9bfa12f32cc54bf6150bf67d67b6da9` | `dbca667b2ec79cc74347d234085b7c9fb3bd931e22bc2d598fb0af9931edc3ba` |
 | `src/rc_client_external_versions.h` | `src/rc_client_external_versions.h` | imported byte-identical | `90f6f689604498d8d9ec61f6126c6c13f7f7328d` | `47c3a1975907b4d77ae7f427257f15cead2a9eef95c32b6034ebd3c048a330f1` |
@@ -81,7 +81,7 @@ host's callback, so nothing here opens a connection.
 
 ## Local deltas
 
-Five files are modified. The `src/rapi/` changes are listed after the `src/rc_client.c` ones.
+Six files are modified. The `src/rapi/` changes are listed after the `src/rc_client.c` ones.
 
 ### `src/rc_client.c`
 
@@ -134,11 +134,32 @@ bytes for the first three. The first two and the caller changes are upstream com
 - `rc_json_parse_server_response` treats a body of length 0 as empty whatever its pointer points at. Upstream
   reads `body[0]` without checking `body_length`, a read past the given length; a 504 whose zero-length body
   pointed at a non-NUL byte was parsed as an HTML error ("Invalid JSON") instead of reporting "Request has timed
-  out.". This change is not upstream. The selftest checks the timeout message.
+  out.". Upstream commit `c0a3ebdd95c51e53ac0b70a9c1728936df178f59` (#553, below) makes the same test, replacing
+  the `*body` test where this tree keeps both. The selftest checks the timeout message.
 - The callers where `null` is a real answer read the field as optional, as #577 does: an achievement's `Author`
   and a subset's `Title` (`rc_api_runtime.c`), a leaderboard's `LBAuthor` and a game title's `ImageIcon`
   (`rc_api_info.c`). The selftest loads a set whose achievement author is `null`, and its synthetic set has a
   `null` subset title, so it fails without the `rc_api_runtime.c` change.
+
+### `src/rapi/rc_api_runtime.c`, `rc_api_user.c`, `rc_api_info.c`: arrays that hold a non-object
+
+Modified by Nakagawa Recomp contributors on 2026-11-17 (audit 2026-11-17), on top of the changes above. The upstream
+v12.5.0 SHA-256 of `rc_api_user.c` is `2430718f9fce10d4aa9f887b3cafdb817c37164291983fc345c19dac8c2ccfe2`; the
+other two files' upstream values are in the section above, and the table gives this tree's bytes. The change is
+upstream commit `c0a3ebdd95c51e53ac0b70a9c1728936df178f59` ("return RC_INVALID_VALUE if expecting array of objects
+and got array of primitives", #553), applied to the three vendored files it touches (its `rc_api_editor.c` hunk is
+in a file not vendored, and its `rc_api_common.c` hunk is the body-length test above); each site is marked
+`LOCAL DELTA`, and a later pin that includes that commit drops it.
+
+- The parsers count every element of an array (`rc_json_get_required_array` returns `array_size`), allocate that
+  many entries without zeroing them, and fill only the objects up to the first element that is not one. Upstream at
+  the pin then returned `RC_OK`, so a set reply such as `"Sets":[1]` or `"Achievements":[{...},1]` left entries
+  uninitialized that `rc_client_copy_achievements` read as pointers (title, badge, definition). Each loop now
+  returns `RC_INVALID_VALUE` with the count cut to the entries filled: achievements, leaderboards and subsets
+  (`rc_api_process_fetch_game_sets_server_response`, also the game-data parser), leaderboard `TopEntries`, the
+  start-session `Unlocks` and `HardcoreUnlocks`, followed users, and in `rc_api_info.c` the achievement info,
+  leaderboard info, games list and game titles parsers. `achievements-selftest` feeds each parser such an array and
+  loads such a set through the bridge; all twelve checks fail on the previous bytes.
 
 The bridge builds rc_client without `RC_CLIENT_SUPPORTS_HASH`,
 `RC_CLIENT_SUPPORTS_EXTERNAL` and `RC_CLIENT_SUPPORTS_RAINTEGRATION`, rcheevos' own defaults, so the files those

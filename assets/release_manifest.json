@@ -176,15 +176,25 @@
       "revision": "v12.5.0 / 1433173220a7eaede6a9ed7a18e94117be1821e0",
       "notice_path": "third_party/rcheevos/LICENSE",
       "evidence_path": "third_party/rcheevos/PROVENANCE.md",
-      "disposition": "vendored_source; MIT, with L. Peter Deutsch's MD5 under zlib; byte-identical; opt-in RetroAchievements support (#1316)"
+      "disposition": "vendored_source; MIT, with L. Peter Deutsch's MD5 under zlib; imported with LOCAL DELTA fixes in src/rc_client.c and src/rapi/ (see the manifest); opt-in RetroAchievements support (#1316)"
     },
     {
-      "id": "kenney-ui-assets",
-      "name": "Kenney Input Prompts 1.5 and Interface Sounds 1.0",
+      "id": "kenney-input-prompts",
+      "name": "Kenney Input Prompts 1.5",
       "license": "CC0-1.0",
       "origin": "https://kenney.nl/assets/input-prompts",
-      "revision": "kenney_input-prompts_1.5.zip ac2fcf599080b0f3ba2d174c9474db6df1a0e96ff0662580e2da79a122ab78a1; kenney_interface-sounds.zip f2193d072726d6758a5f7871b2dcc54dcce0d5c35c6f0a62f92549b327c81232",
+      "revision": "kenney_input-prompts_1.5.zip ac2fcf599080b0f3ba2d174c9474db6df1a0e96ff0662580e2da79a122ab78a1",
       "notice_path": "third_party/kenney/input-prompts/License.txt",
+      "evidence_path": "third_party/kenney/PROVENANCE.md",
+      "disposition": "vendored_assets; embedded in the player by tools/gen_ui_assets.py"
+    },
+    {
+      "id": "kenney-interface-sounds",
+      "name": "Kenney Interface Sounds 1.0",
+      "license": "CC0-1.0",
+      "origin": "https://kenney.nl/assets/interface-sounds",
+      "revision": "kenney_interface-sounds.zip f2193d072726d6758a5f7871b2dcc54dcce0d5c35c6f0a62f92549b327c81232",
+      "notice_path": "third_party/kenney/interface-sounds/License.txt",
       "evidence_path": "third_party/kenney/PROVENANCE.md",
       "disposition": "vendored_assets; embedded in the player by tools/gen_ui_assets.py"
     },

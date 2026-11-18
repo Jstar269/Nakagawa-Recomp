@@ -528,7 +528,7 @@
         "name": "dr_flac (carried by libchdr)",
         "spdx_id": "Unlicense",
         "upstream_origin": "https://github.com/mackron/dr_libs",
-        "upstream_revision": "dr_flac v0.13.4 (libchdr include/dr_libs/dr_flac.h at 47d794151b2b64f6aba60304e6480f4f5a2bc24b)",
+        "upstream_revision": "dr_flac v0.13.4 development snapshot (header 'v0.13.4 - TBD'; libchdr include/dr_libs/dr_flac.h at 47d794151b2b64f6aba60304e6480f4f5a2bc24b)",
         "disposition": "statically_linked_subset",
         "notice_file": "libchdr-dr-flac.txt",
         "copyright_notices": [
@@ -538,7 +538,7 @@
         "license_texts": [
           {
             "file": "third_party/dr_libs/LICENSE.txt",
-            "copied_from": "dr_libs LICENSE (third_party/dr_libs/PROVENANCE.md); the same two alternatives dr_flac.h carries at its end",
+            "copied_from": "dr_libs LICENSE (third_party/dr_libs/PROVENANCE.md); the same two alternatives dr_flac.h carries at its end, except that its MIT-0 copyright line reads 2020 where dr_flac.h reads 2023",
             "sha256": "dd1c647e6f767f8ff4b2dfae0fed314726600a01e0cf1ef556afddd5fa96ff15"
           }
         ]
