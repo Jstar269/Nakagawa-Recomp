@@ -2265,6 +2265,34 @@ static void test_fuzz_decrypt_boundary(unsigned iters) {
         free(out);
     }
 
+    /* The sealer reads only the payload_len bytes it is given: a payload that is not a whole
+     * number of 16-byte blocks (116 bytes here) seals to the same container whatever follows
+     * it in the caller's buffer, and that container still opens to the payload. */
+    {
+        uint8_t zero_tail[128], noisy_tail[128];
+        uint8_t sealed_zero[0x150u + 128u], sealed_noisy[0x150u + 128u];
+        NkPspCtx ctx;
+        uint8_t *out = NULL;
+        size_t out_size = 0;
+        assert(elf_len % 16u != 0u && elf_len <= sizeof(zero_tail));
+        memset(zero_tail, 0x00, sizeof(zero_tail));
+        memset(noisy_tail, 0xA5, sizeof(noisy_tail));
+        memcpy(zero_tail, elf, elf_len);
+        memcpy(noisy_tail, elf, elf_len);
+        size_t zero_len = seal_type2_psp(sealed_zero, sizeof(sealed_zero), zero_tail, elf_len, 0,
+                                         (uint32_t)elf_len);
+        size_t noisy_len = seal_type2_psp(sealed_noisy, sizeof(sealed_noisy), noisy_tail, elf_len,
+                                          0, (uint32_t)elf_len);
+        assert(zero_len == noisy_len && zero_len == sealed_len);
+        assert(memcmp(sealed_zero, sealed_noisy, zero_len) == 0);
+        nk_psp_ctx_init(&ctx, ks);
+        assert(nk_container_decrypt(&ctx, sealed_noisy, noisy_len, &out, &out_size) ==
+               NK_PSP_OK);
+        assert(out != NULL && out_size == elf_len);
+        assert(memcmp(out, elf, elf_len) == 0);
+        free(out);
+    }
+
     /* Declared-extent checks in validate_psp: the probe must refuse each
      * malformed segment table before any decrypt work. The aggregate case
      * passes the per-segment cap but overflows the 256 MiB total. */
@@ -3288,6 +3316,36 @@ static void test_fuzz_npumdimg(unsigned iters) {
     memset(image, 0, sizeof(image));
     assert(fuzz_npumdimg_walk(ks, seed, seed_len, image, sizeof(image)) == NK_PSP_OK);
     assert(memcmp(image, iso, sizeof(iso)) == 0);
+
+    /* Known answers: the round trip above seals and opens with the same DRM BB code, so a
+     * seed, key-row or MAC defect applied both ways would pass it. These bytes come from the
+     * independent Python sealer (tools/test_psp_decrypt.py bb_cipher_type1 and bb_mac_type3)
+     * under the same fake keys and layout: the first data block (at 0x1C0, seed 0x1C), the
+     * encrypted header region (0x40) and the header MAC (0xC0). */
+    {
+        static const uint8_t block0_head[32] = {
+            0x7Cu, 0x8Bu, 0x47u, 0xC4u, 0xF5u, 0xD3u, 0x70u, 0xCCu, 0x7Au, 0x31u, 0x64u,
+            0x79u, 0x7Du, 0x4Fu, 0x1Fu, 0x2Cu, 0xABu, 0x13u, 0x59u, 0x37u, 0x67u, 0xC7u,
+            0xB3u, 0xE3u, 0x99u, 0x30u, 0x09u, 0xF3u, 0xC6u, 0x46u, 0x1Fu, 0xEFu };
+        static const uint8_t block0_tail[16] = {
+            0x90u, 0x1Cu, 0x2Bu, 0xD8u, 0x57u, 0x6Cu, 0x29u, 0x07u, 0x67u, 0xB8u, 0x78u,
+            0x6Cu, 0xBFu, 0x10u, 0xF7u, 0x8Eu };
+        static const uint8_t header_region[16] = {
+            0xA1u, 0x1Eu, 0xEBu, 0x03u, 0x0Du, 0x67u, 0x56u, 0x68u, 0xA5u, 0xA8u, 0x81u,
+            0x80u, 0x57u, 0x2Eu, 0x64u, 0x71u };
+        static const uint8_t header_mac[16] = {
+            0x27u, 0x64u, 0x5Du, 0xAEu, 0xF6u, 0x9Bu, 0x8Au, 0x41u, 0x6Fu, 0x98u, 0x18u,
+            0x5Fu, 0x0Au, 0x44u, 0x8Eu, 0xC3u };
+        const size_t block_bytes = 4u * 2048u;
+        size_t kat_psar = (size_t)seed[0x24] | ((size_t)seed[0x25] << 8) |
+                          ((size_t)seed[0x26] << 16) | ((size_t)seed[0x27] << 24);
+        assert(kat_psar <= seed_len && seed_len - kat_psar >= 0x1C0u + block_bytes);
+        const uint8_t *psar = seed + kat_psar;
+        assert(memcmp(psar + 0x1C0u, block0_head, sizeof(block0_head)) == 0);
+        assert(memcmp(psar + 0x1C0u + block_bytes - 16u, block0_tail, sizeof(block0_tail)) == 0);
+        assert(memcmp(psar + 0x40u, header_region, sizeof(header_region)) == 0);
+        assert(memcmp(psar + 0xC0u, header_mac, sizeof(header_mac)) == 0);
+    }
 
     uint8_t *work = (uint8_t *)malloc(seed_len);
     assert(work != NULL);
