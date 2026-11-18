@@ -174,10 +174,13 @@ class DiscDecryption:
 
     def __init__(self) -> None:
         self.tool: Path | None = None
+        self._tool_lock = threading.Lock()
 
     def __call__(self, iso: Path, user_data_root: Path, disc_id: str) -> list[dict]:
         if self.tool is None:
-            self.tool = decrypt_tool.find_or_build_tool(ROOT)
+            with self._tool_lock:
+                if self.tool is None:
+                    self.tool = decrypt_tool.find_or_build_tool(ROOT)
         returned: list[dict[str, Any]] = decrypt_tool.decrypt_disc(iso, user_data_root, disc_id, self.tool)
         return returned
 
@@ -401,6 +404,9 @@ class LibraryBuild:
             record = self.records.get(key)
             unchanged = (record is not None and record.get("size_bytes") == stat.st_size
                          and record.get("mtime_ns") == stat.st_mtime_ns)
+            needs_identification = (
+                record is None or not unchanged or bool(record.get("identify_error"))
+            )
             if record is None or not unchanged:
                 record = {
                     "source_key": key,
@@ -409,6 +415,7 @@ class LibraryBuild:
                     "mtime_ns": stat.st_mtime_ns,
                     "outcome": "PENDING",
                 }
+            if needs_identification:
                 try:
                     record.update(self.identify_disc(path))
                     record["identify_error"] = None
@@ -449,10 +456,11 @@ class LibraryBuild:
             if self.verify_only or (outcome in FINAL_OUTCOMES
                                     and not (self.retry_failed and outcome in RETRY_OUTCOMES)):
                 continue
-            record["outcome"] = "PENDING"
             todo.append(record)
         if self.limit is not None:
             todo = todo[:self.limit]
+        for record in todo:
+            record["outcome"] = "PENDING"
         return todo
 
     # -- verification --------------------------------------------------------------------
@@ -571,16 +579,25 @@ class LibraryBuild:
         return_code: int | None = None
         try:
             with open(work_dir / "bringup-stdout.log", "wb") as output:
-                process = subprocess.Popen(
-                    command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL, creationflags=_creation_flags(self.priority),
-                    preexec_fn=_preexec(self.priority),
-                )
+                popen_options = {
+                    "cwd": ROOT,
+                    "stdout": output,
+                    "stderr": subprocess.STDOUT,
+                    "stdin": subprocess.DEVNULL,
+                    "creationflags": _creation_flags(self.priority),
+                    "preexec_fn": _preexec(self.priority),
+                }
+                if os.name != "nt":
+                    popen_options["start_new_session"] = True
+                process = subprocess.Popen(command, **popen_options)
                 try:
                     return_code = process.wait(timeout=self.title_timeout_seconds)
                 except subprocess.TimeoutExpired:
                     timed_out = True
-                    _terminate_process_tree(process)
+                    if os.name != "nt":
+                        _terminate_process_tree(process, process_group=True)
+                    else:
+                        _terminate_process_tree(process)
         except OSError as exc:
             result: dict[str, Any] = {"outcome": "NO_REPORT", "failure_class": None,
                                       "error": f"{type(exc).__name__}: {exc}"}

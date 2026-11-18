@@ -198,6 +198,26 @@ class LibrarySweepTests(unittest.TestCase):
         self.assertEqual(observed_timeouts, [7])
         terminate.assert_called_once_with(process)
 
+    def test_posix_timeout_terminates_the_entire_process_group(self) -> None:
+        process = mock.Mock()
+        process.pid = 9003
+        process.wait.side_effect = [subprocess.TimeoutExpired("nk_cli", 5), None]
+
+        with (
+            mock.patch.object(library_sweep.os, "killpg", create=True) as killpg,
+            mock.patch.object(library_sweep.os, "name", "posix"),
+            mock.patch.object(library_sweep.signal, "SIGTERM", 15, create=True),
+            mock.patch.object(library_sweep.signal, "SIGKILL", 9, create=True),
+        ):
+            expected_signals = [library_sweep.signal.SIGTERM, library_sweep.signal.SIGKILL]
+            library_sweep._terminate_process_tree(process, process_group=True)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(9003, expected_signals[0]), mock.call(9003, expected_signals[1])],
+        )
+        process.kill.assert_not_called()
+
     def _bringup_launch_argument(self, time_budget: int, launch_timeout: int) -> str:
         """The --launch-timeout value one title's bring-up command line carries."""
         work_dir = self.private_dir / "work"

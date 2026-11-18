@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import statistics
 import struct
 import subprocess
@@ -655,7 +656,7 @@ def _stage_title_manifests(
     return copied, "DIRECT_MATCH" if copied else "NO_MATCH"
 
 
-def _terminate_process_tree(process: subprocess.Popen) -> None:
+def _terminate_process_tree(process: subprocess.Popen, *, process_group: bool = False) -> None:
     if os.name == "nt" and getattr(process, "pid", None) is not None:
         try:
             subprocess.run(
@@ -667,6 +668,28 @@ def _terminate_process_tree(process: subprocess.Popen) -> None:
             )
         except (OSError, subprocess.TimeoutExpired):
             pass
+    elif process_group and getattr(process, "pid", None) is not None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired as exc:
+                raise OSError("process group disappeared while its leader remained active") from exc
+            return
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            raise OSError("process group remained active after SIGKILL") from exc
+        return
     try:
         process.wait(timeout=5)
     except (OSError, subprocess.TimeoutExpired):

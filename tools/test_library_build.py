@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -336,6 +338,23 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual(sorted(self.calls()[4:]), ["fail-test70021", "ok-test70020"])
         self.assertEqual(self.manifest()["counts"], {"BUILD_FAILED": 1, "BUILT": 2})
 
+    def test_retry_failed_limit_preserves_unselected_failure_outcomes(self) -> None:
+        for index in range(3):
+            self.disc(f"fail-test7008{index}.iso", f"TEST7008{index}")
+        self.build(jobs=1).run()
+        self.work.mkdir(parents=True, exist_ok=True)
+        (self.work / "STOP").write_text("", encoding="utf-8")
+
+        result = self.build(jobs=1, retry_failed=True, limit=1).run()
+
+        records = self.by_source(result)
+        selected = sorted(records)[0]
+        self.assertEqual(records[selected]["outcome"], "PENDING")
+        self.assertEqual(
+            {source: record["outcome"] for source, record in records.items() if source != selected},
+            {source: "BUILD_FAILED" for source in records if source != selected},
+        )
+
     def test_a_title_over_its_time_budget_is_stopped_and_recorded(self) -> None:
         self.disc("slow-test70030.iso", "TEST70030")
         self.disc("ok-test70031.iso", "TEST70031")
@@ -347,6 +366,21 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual((slow["outcome"], slow["failed_stage"], slow["failure_class"]),
                          ("TIMED_OUT", "compile", "TITLE_TIME_BUDGET"))
         self.assertEqual(records["ok-test70031.iso"]["outcome"], "BUILT")
+
+    def test_posix_title_bringup_starts_in_a_process_session(self) -> None:
+        self.disc("ok-test70032.iso", "TEST70032")
+        process = mock.Mock()
+        process.pid = 70032
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(library_build.os, "name", "posix"),
+            mock.patch.object(library_build, "_preexec", return_value=None),
+            mock.patch.object(library_build.subprocess, "Popen", return_value=process) as popen,
+        ):
+            self.build(jobs=1).run()
+
+        self.assertIs(popen.call_args.kwargs.get("start_new_session"), True)
 
     def test_stop_ends_the_run_and_pause_holds_new_titles(self) -> None:
         for index in range(3):
@@ -369,6 +403,26 @@ class LibraryBuildTests(unittest.TestCase):
         (self.work / "PAUSE").unlink()
         runner.join(timeout=60)
         self.assertEqual(finished[0]["counts"], {"BUILT": 3})
+
+    def test_a_failed_disc_identification_is_retried_for_an_unchanged_image(self) -> None:
+        self.disc("ok-test70080.iso", "TEST70080")
+
+        def fail_identification(_path: Path) -> dict:
+            raise PermissionError("synthetic transient read failure")
+
+        self.build(identify_disc=fail_identification, verify_only=True).run()
+        identify_again = mock.Mock(return_value={
+            "disc_id": "TEST70080",
+            "title": "Title TEST70080",
+            "disc_version": None,
+        })
+        result = self.build(identify_disc=identify_again, verify_only=True).run()
+
+        identify_again.assert_called_once()
+        record = self.by_source(result)["ok-test70080.iso"]
+        self.assertEqual(record["disc_id"], "TEST70080")
+        self.assertIsNone(record["identify_error"])
+        self.assertEqual(record["outcome"], "PENDING")
 
     def test_the_disc_check_decrypts_before_the_bringup_and_never_stops_it(self) -> None:
         self.disc("ok-test70050.iso", "TEST70050")
@@ -398,6 +452,38 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual(records["ok-test70051.iso"]["decrypt_step"]["first_failure_code"],
                          "INTERNAL_ERROR")
         self.assertEqual(result["counts"], {"BUILT": 2})
+
+    def test_disc_decryptor_builds_its_tool_once_under_concurrent_first_calls(self) -> None:
+        decryptor = library_build.DiscDecryption()
+        rendezvous = threading.Barrier(2)
+        count_lock = threading.Lock()
+        build_calls = 0
+
+        def find_or_build_tool(_root: Path) -> Path:
+            nonlocal build_calls
+            with count_lock:
+                build_calls += 1
+            try:
+                rendezvous.wait(timeout=1)
+            except threading.BrokenBarrierError:
+                pass
+            return self.root / "synthetic-decrypt-tool"
+
+        with (
+            mock.patch.object(library_build.decrypt_tool, "find_or_build_tool",
+                              side_effect=find_or_build_tool),
+            mock.patch.object(library_build.decrypt_tool, "decrypt_disc", return_value=[]),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            futures = [
+                pool.submit(decryptor, self.discs / f"synthetic-{index}.iso",
+                            self.data, f"TEST{index:04d}")
+                for index in range(2)
+            ]
+            for future in futures:
+                future.result(timeout=5)
+
+        self.assertEqual(build_calls, 1)
 
     def test_decrypt_disc_writes_the_executable_where_the_player_reads_it(self) -> None:
         encrypted = self.discs / "encrypted.iso"

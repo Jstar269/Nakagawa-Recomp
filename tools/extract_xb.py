@@ -96,6 +96,10 @@ XB_EXTENSIONS = (".xb", ".xb0", ".xb2", ".xb3")
 GIM_MAX_DIMENSION = 4096
 GIM_MAX_PIXELS = 16 * 1024 * 1024
 GIM_MAX_RAW_BYTES = 64 * 1024 * 1024
+GIM_HEADER_SIZE = 16
+GIM_BLOCK_HEADER_SIZE = 16
+GIM_CONTENT_HEADER_SIZE = 36
+GIM_SUPPORTED_IMAGE_FORMATS = frozenset((0, 1, 2, 3, 4, 5))
 GIM_MAX_BLOCKS = 1 << 20
 GIM_MAX_NESTING = 32
 
@@ -708,14 +712,20 @@ def unswizzle(src, pitch, height):
     dst = bytearray(len(src))
     rowblocks = pitch // 16
     for y in range(height):
-        for x in range(pitch):
-            bx, by = x // 16, y // 8
-            px, py = x % 16, y % 8
-            block_idx = bx + by * rowblocks
-            src_off = block_idx * 128 + py * 16 + px
-            dst_off = y * pitch + x
-            if src_off < len(src) and dst_off < len(dst):
-                dst[dst_off] = src[src_off]
+        block_row = (y // 8) * rowblocks
+        tile_row_offset = (y % 8) * 16
+        for bx in range(rowblocks):
+            block_idx = bx + block_row
+            src_off = block_idx * 128 + tile_row_offset
+            dst_off = y * pitch + bx * 16
+            if dst_off >= len(dst):
+                continue
+            row = src[src_off:src_off + 16]
+            if len(row) == 16 and dst_off + 16 <= len(dst):
+                dst[dst_off:dst_off + 16] = row
+            elif row:
+                copy_size = min(len(row), len(dst) - dst_off)
+                dst[dst_off:dst_off + copy_size] = row[:copy_size]
     return bytes(dst)
 
 
@@ -723,7 +733,7 @@ def decode_gim_data(data):
     """Decode GIM data to RGBA pixels (width, height, pixels_bytes)."""
     if not isinstance(data, (bytes, bytearray, memoryview)):
         return None
-    if len(data) < 16 or data[0:11] != b'MIG.00.1PSP':
+    if len(data) < GIM_HEADER_SIZE or data[0:11] != GIM_MAGIC:
         return None
 
     image_block = None
@@ -744,14 +754,15 @@ def decode_gim_data(data):
             malformed = True
             return False
         while offset < limit:
-            if limit - offset < 16:
+            if limit - offset < GIM_BLOCK_HEADER_SIZE:
                 malformed = True
                 return False
             block_id = struct.unpack_from('<H', data, offset)[0]
             block_size = struct.unpack_from('<I', data, offset + 4)[0]
             hdr_size = struct.unpack_from('<I', data, offset + 12)[0]
             block_end = checked_range(offset, block_size, limit)
-            if block_size < 16 or hdr_size < 16 or hdr_size > block_size or block_end is None:
+            if (block_size < GIM_BLOCK_HEADER_SIZE or hdr_size < GIM_BLOCK_HEADER_SIZE or
+                hdr_size > block_size or block_end is None):
                 malformed = True
                 return False
             content = offset + hdr_size
@@ -761,7 +772,7 @@ def decode_gim_data(data):
                 malformed = True
                 return False
             if block_id == 0x0004:
-                if content_limit - content < 36:
+                if content_limit - content < GIM_CONTENT_HEADER_SIZE:
                     malformed = True
                     return False
                 fmt = struct.unpack_from('<H', data, content + 4)[0]
@@ -788,7 +799,7 @@ def decode_gim_data(data):
                     malformed = True
                     return False
                 palette_block_seen = True
-                if content_limit - content < 36:
+                if content_limit - content < GIM_CONTENT_HEADER_SIZE:
                     malformed = True
                     return False
                 palette_fmt = struct.unpack_from('<H', data, content + 4)[0]
@@ -805,7 +816,7 @@ def decode_gim_data(data):
             offset = block_end
         return True
 
-    if not scan_blocks(16, len(data)) or malformed or image_block is None:
+    if not scan_blocks(GIM_HEADER_SIZE, len(data)) or malformed or image_block is None:
         return None
 
     fmt, swiz, w, h, pitch_align, height_align, pix_data = image_block
@@ -850,6 +861,8 @@ def decode_gim_data(data):
         return None
 
     # Determine the row size before applying GIM's row and swizzle alignment.
+    if fmt not in GIM_SUPPORTED_IMAGE_FORMATS:
+        return None
     bpp_map = {0: 2, 1: 2, 2: 2, 3: 4, 4: 0, 5: 1}
     bpp = bpp_map.get(fmt)
     if bpp is None:
@@ -883,15 +896,11 @@ def decode_gim_data(data):
     pixels = bytearray(pixel_size)
 
     if fmt == 3:  # RGBA8888 direct
+        row_bytes = w * 4
         for y in range(h):
-            for x in range(w):
-                si = y * pitch + x * 4
-                di = (y * w + x) * 4
-                if si + 4 <= len(pix_data) and di + 4 <= len(pixels):
-                    pixels[di] = pix_data[si] # R
-                    pixels[di+1] = pix_data[si+1] # G
-                    pixels[di+2] = pix_data[si+2] # B
-                    pixels[di+3] = pix_data[si+3] # A
+            si = y * pitch
+            di = y * row_bytes
+            pixels[di:di + row_bytes] = pix_data[si:si + row_bytes]
 
     elif fmt == 5:  # T8 indexed
         if clut:
@@ -993,10 +1002,12 @@ def process_extracted_directory(dest_dir, overwrite=False, max_gim_bytes=MAX_GIM
         "rejected": []
     }
 
-    for dirpath, _, filenames in os.walk(dest_dir, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(dest_dir, followlinks=False):
+        dirnames.sort()
+        filenames.sort()
         for fn in filenames:
             fpath = os.path.join(dirpath, fn)
-            rel_fpath = os.path.relpath(fpath, dest_dir)
+            rel_fpath = os.path.relpath(fpath, dest_dir).replace(os.sep, "/")
             if _is_reparse_point(fpath):
                 inventory["rejected"].append({
                     "name": fn,
@@ -1005,10 +1016,6 @@ def process_extracted_directory(dest_dir, overwrite=False, max_gim_bytes=MAX_GIM
                 })
                 continue
             sz = os.path.getsize(fpath)
-
-            # Skip generated pngs themselves
-            if fn.lower().endswith(".png"):
-                continue
 
             is_gim = fn.lower().endswith(".gim")
             if not is_gim:
@@ -1023,7 +1030,7 @@ def process_extracted_directory(dest_dir, overwrite=False, max_gim_bytes=MAX_GIM
             if is_gim:
                 png_fn = os.path.splitext(fn)[0] + ".png"
                 png_path = os.path.join(dirpath, png_fn)
-                rel_png_path = os.path.relpath(png_path, dest_dir)
+                rel_png_path = os.path.relpath(png_path, dest_dir).replace(os.sep, "/")
                 try:
                     # read_bounded checks the size on the same handle used for
                     # the bounded read, so an oversized candidate never reaches

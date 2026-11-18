@@ -1133,6 +1133,44 @@ class ResourceLimitTests(unittest.TestCase):
             )
             self.assertFalse(any(Path(dest).glob("*.png")))
 
+    def test_inventory_order_and_relative_paths_are_host_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as dest:
+            Path(dest, "a").mkdir()
+            Path(dest, "z").mkdir()
+            Path(dest, "a.bin").write_bytes(b"a")
+            Path(dest, "z.bin").write_bytes(b"z")
+            Path(dest, "a", "texture.gim").write_bytes(
+                gim(
+                    image_block(fmt=5, width=1, height=1, raw=bytes(16)),
+                    palette_block(fmt=3, raw=b"\x12\x34\x56\xff"),
+                )
+            )
+            Path(dest, "z", "z.bin").write_bytes(b"nested")
+
+            original_walk = extract_xb.os.walk
+
+            def reverse_walk(root, *, followlinks=False):
+                directories = ["z", "a"]
+                yield root, directories, ["z.bin", "a.bin"]
+                for directory in directories:
+                    if directory == "a":
+                        yield os.path.join(root, directory), [], ["texture.gim"]
+                    else:
+                        yield os.path.join(root, directory), [], ["z.bin"]
+
+            extract_xb.os.walk = reverse_walk
+            try:
+                inventory = process_extracted_directory(dest)
+            finally:
+                extract_xb.os.walk = original_walk
+
+            self.assertEqual(
+                [entry["path"] for entry in inventory["other"]],
+                ["a.bin", "z.bin", "z/z.bin"],
+            )
+            self.assertEqual(inventory["textures"][0]["path"], "a/texture.gim")
+            self.assertEqual(inventory["textures"][0]["png_path"], "a/texture.png")
+
     def test_default_worker_count_is_capped_below_the_cpu_count(self) -> None:
         default = resolve_workers(None)
         self.assertGreaterEqual(default, 1)
@@ -1217,6 +1255,17 @@ class OverwriteTests(unittest.TestCase):
             self.assertEqual(
                 Path(dest, "tex.png").read_bytes(),
                 b"member that already owns this name",
+            )
+
+    def test_png_archive_members_are_included_in_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as dest:
+            Path(dest, "archive-image.png").write_bytes(b"synthetic archive PNG member")
+
+            inventory = process_extracted_directory(dest)
+
+            self.assertEqual(
+                [entry["path"] for entry in inventory["other"]],
+                ["archive-image.png"],
             )
 
 

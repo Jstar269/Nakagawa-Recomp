@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from extract_xb import decode_gim_data  # noqa: E402
+from extract_xb import decode_gim_data, unswizzle  # noqa: E402
 
 
 def block(block_id: int, content: bytes, *, header_size: int = 16, size: int | None = None) -> bytes:
@@ -63,6 +63,20 @@ def swizzle(data: bytes, pitch: int, height: int) -> bytes:
             linear_offset = y * pitch + x
             result[source_offset] = data[linear_offset]
     return bytes(result)
+
+
+class _CountingBytes(bytes):
+    def __new__(cls, payload: bytes, accesses: dict[str, int]):
+        value = super().__new__(cls, payload)
+        value.accesses = accesses
+        return value
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            self.accesses["slices"] += 1
+            return _CountingBytes(super().__getitem__(key), self.accesses)
+        self.accesses["scalars"] += 1
+        return super().__getitem__(key)
 
 
 class TestGimBounds(unittest.TestCase):
@@ -163,6 +177,27 @@ class TestGimBounds(unittest.TestCase):
         assert decoded is not None
         expected_rgba = b"".join(rgba1 if value else rgba0 for value in expected)
         self.assertEqual(decoded[2], expected_rgba)
+
+    def test_unswizzle_copies_tile_rows_without_per_byte_reads(self) -> None:
+        pitch, height = 32, 16
+        linear = bytes(index % 256 for index in range(pitch * height))
+        accesses = {"slices": 0, "scalars": 0}
+        decoded = unswizzle(_CountingBytes(swizzle(linear, pitch, height), accesses), pitch, height)
+
+        self.assertEqual(decoded, linear)
+        self.assertEqual(accesses["scalars"], 0)
+        self.assertEqual(accesses["slices"], height * (pitch // 16))
+
+    def test_rgba8888_conversion_reads_whole_rows(self) -> None:
+        rgba = bytes((0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0))
+        source = gim(image_block(fmt=3, width=2, height=1, raw=rgba + bytes(8)))
+        accesses = {"slices": 0, "scalars": 0}
+        decoded = decode_gim_data(_CountingBytes(source, accesses))
+
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertEqual(decoded[2], rgba)
+        self.assertEqual(accesses["scalars"], 0)
 
     def test_valid_t8_fixture_decodes(self) -> None:
         raw = image_block(raw=bytes(32))
