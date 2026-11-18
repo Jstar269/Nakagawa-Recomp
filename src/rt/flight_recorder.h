@@ -255,6 +255,24 @@ typedef struct {
     uint8_t f[SR_TRACE_WINDOW_MAX_INDEX]; /* FPU indices */
 } SrTraceWindowIndices;
 
+/* Replay divergence (#2147): a position in the record that the checkpoint mode can name: the
+ * newest recorded event is the occurrence-th event of its kind. after is the longest window the
+ * ring holds (limit - 1). One declaration serves both branches below, so a host that does not
+ * link the recorder gets the same layout as replay_checkpoint.c. */
+typedef struct {
+    uint32_t kind;
+    uint32_t occurrence;
+    uint32_t after;
+    uint64_t sequence;
+} SrFlightMark;
+
+enum {
+    SR_FLIGHT_DIVERGENCE_OFF = 0,   /* SR_FLIGHT is unset: there is no record */
+    SR_FLIGHT_DIVERGENCE_FROZE = 1, /* armed at the newest event and frozen there; *at names it */
+    SR_FLIGHT_DIVERGENCE_MODE = 2,  /* an SR_FLIGHT_TRIGGER mode is armed and stays in charge */
+    SR_FLIGHT_DIVERGENCE_NONE = 3   /* the record had stopped or held no event: nothing armed */
+};
+
 #if defined(SR_FLIGHT_RECORDER_LINKED) && !defined(SR_FLIGHT_RECORDER_STANDALONE)
 
 void sr_trace_window_configure(void);   /* lazy env probe; host start and vblank hooks */
@@ -324,26 +342,13 @@ int sr_flight_event_at(uint32_t index, SrFlightEvent *out);
 void sr_flight_set_thread_source(SrFlightThreadSource source);
 
 /* ---- Replay divergence (#2147) ----
- * A position in the record that the checkpoint mode can name: the newest recorded event is the
- * occurrence-th event of its kind. after is the longest window the ring holds (limit - 1). */
-typedef struct {
-    uint32_t kind;
-    uint32_t occurrence;
-    uint32_t after;
-    uint64_t sequence;
-} SrFlightMark;
+ * SrFlightMark and the SR_FLIGHT_DIVERGENCE_* results are declared once, above the linkage
+ * branches. */
 
 /* The newest recorded event as a mark. Returns 1, or 0 when the recorder is off, has recorded
  * nothing, has stopped recording (a terminal, or a mode that froze), or the count is past
  * 32 bits. Reading it changes nothing. */
 int sr_flight_mark(SrFlightMark *out);
-
-enum {
-    SR_FLIGHT_DIVERGENCE_OFF = 0,   /* SR_FLIGHT is unset: there is no record */
-    SR_FLIGHT_DIVERGENCE_FROZE = 1, /* armed at the newest event and frozen there; *at names it */
-    SR_FLIGHT_DIVERGENCE_MODE = 2,  /* an SR_FLIGHT_TRIGGER mode is armed and stays in charge */
-    SR_FLIGHT_DIVERGENCE_NONE = 3   /* the record had stopped or held no event: nothing armed */
-};
 
 /* A replay reached its first divergent checkpoint (replay_checkpoint.c). With no mode armed,
  * this arms the checkpoint mode at the newest recorded event, as SR_FLIGHT_TRIGGER=
@@ -496,18 +501,6 @@ static inline int sr_flight_event_at(uint32_t index, SrFlightEvent *out) {
 static inline void sr_flight_set_thread_source(SrFlightThreadSource source) {
     (void)source;
 }
-typedef struct {
-    uint32_t kind;
-    uint32_t occurrence;
-    uint32_t after;
-    uint64_t sequence;
-} SrFlightMark;
-enum {
-    SR_FLIGHT_DIVERGENCE_OFF = 0,
-    SR_FLIGHT_DIVERGENCE_FROZE = 1,
-    SR_FLIGHT_DIVERGENCE_MODE = 2,
-    SR_FLIGHT_DIVERGENCE_NONE = 3
-};
 static inline int sr_flight_mark(SrFlightMark *out) {
     (void)out;
     return 0;
