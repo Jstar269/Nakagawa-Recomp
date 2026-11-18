@@ -236,6 +236,7 @@ void hle_exit_close_audio_dump(void) {
 static void route_fail(const char *fmt, ...) {
     va_list ap;
     s_route_state = ROUTE_FAILED;
+    route_nid_watch(0);
     route_until_nid_arm(0, 0u);
     fputs("ROUTE_FAIL: ", stderr);
     va_start(ap, fmt);
@@ -920,6 +921,17 @@ static int route_parse_line(char *line, int lineno, const char *path) {
     return 0;
 }
 
+/* The settings a route file may set (SIGGRID, TOLERANCE, SAMPLE_EVERY), the NID watch and the
+ * last screen seen, back at their defaults: a route file that leaves one unset gets the default,
+ * never the value a previously loaded file chose. */
+static void route_file_settings_reset(void) {
+    s_route_cols = 12; s_route_rows = 8;
+    s_route_tol = 12;
+    s_route_sample_every = 20;
+    route_nid_watch(0);
+    snprintf(s_route_seen, sizeof s_route_seen, "no screen was observed at all");
+}
+
 /* Discard every loaded route. Only the executable regression tests call this; a run loads
  * its route once. */
 void sr_route_reset(void) {
@@ -928,9 +940,7 @@ void sr_route_reset(void) {
     s_route_step_start = 0;
     s_route_step_started = 0;
     s_route_state = ROUTE_OFF;
-    s_route_cols = 12; s_route_rows = 8;
-    s_route_tol = 12;
-    s_route_sample_every = 20;
+    route_file_settings_reset();
     s_route_widths_reads = 0;
     s_route_widths_set = 0;
     s_route_keys = 0;
@@ -938,9 +948,7 @@ void sr_route_reset(void) {
     s_route_while_seen = 0;
     s_route_last_attempt = 0;
     s_route_have_attempt = 0;
-    route_nid_watch(0);
     route_until_nid_arm(0, 0u);
-    snprintf(s_route_seen, sizeof s_route_seen, "no screen was observed at all");
     s_route_loaded = 0;
     sr_input_reset(&s_input);
     s_route_legacy_nseg = s_route_legacy_pos = s_route_legacy_reported = 0;
@@ -956,6 +964,7 @@ int sr_route_load(const char *path) {
     s_route_ncp = s_route_nsteps = s_route_nlegacy = 0;
     s_route_pc = 0;
     s_route_step_started = 0;
+    route_file_settings_reset();
     route_until_nid_arm(0, 0u);
     s_route_keys = 0;
     s_route_stick_digital_noted = 0;
@@ -1189,6 +1198,8 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
     for (int guard = 0; guard <= ROUTE_MAX_STEPS; guard++) {
         if (s_route_pc >= s_route_nsteps) {
             s_route_state = ROUTE_DONE;
+            route_nid_watch(0);
+            route_until_nid_arm(0, 0u);
             fprintf(stderr, "ROUTE_OK: %d steps completed by vblank %u\n", s_route_nsteps, v);
             return keys;
         }
@@ -1365,6 +1376,8 @@ uint32_t sr_route_step(uint32_t v, const uint8_t *sig) {
         }
         case ROUTE_OP_END:
             s_route_state = ROUTE_DONE;
+            route_nid_watch(0);
+            route_until_nid_arm(0, 0u);
             fprintf(stderr, "ROUTE_OK: %d steps completed by vblank %u\n", s_route_pc + 1, v);
             return keys;
         default:
@@ -2083,8 +2096,12 @@ static void ge_call_guest(CpuState *s, uint32_t fn, uint32_t a0, uint32_t a1, ui
      * there is no correct stack to hand the callee, and dispatching onto a frame
      * another owner holds is the defect this replaced. */
     if (!sr_nested_frame_acquire(sched_current_uid(), &frame_sp, &frame)) {
+        /* The callback cannot run, and the guest may be waiting on what it would have done; a
+         * run that carried on would hang or drop a frame with nothing to say why. Stop by name. */
         fprintf(stderr, "GE_CALL_GUEST: fn=0x%08x refused -- no nested guest-call frame "
-                        "available (cur_uid=0x%x)\n", fn, sched_current_uid());
+                        "available (cur_uid=0x%x); stopping the run\n", fn, sched_current_uid());
+        s->flow_kind = SR_FLOW_FATAL;
+        s->flow_target = fn;
         return;
     }
     if (ge_log_on())
@@ -2191,8 +2208,12 @@ static void ge_finish_callback_run(CpuState *s, uint32_t cbid, uint32_t finish_i
     }
     if (ge_log_on())
         fprintf(stderr, "GE_FINISH_CB: cbid=%u id=0x%04x fn=0x%08x arg=0x%08x\n",
-                cbid, finish_id, cb->finish_func, cb->finish_arg ? cb->finish_arg : user_arg);
-    ge_call_guest(s, cb->finish_func, finish_id, cb->finish_arg ? cb->finish_arg : user_arg, cbid);
+                cbid, finish_id, cb->finish_func, cb->finish_arg);
+    /* The callback gets the argument it was registered with (sceGeSetCallback's finish_arg),
+     * 0 included. user_arg is sceGeListEnQueue's optional SceGeListArgs pointer: it is not a
+     * callback argument, and handing it on gave a callback registered with 0 an address. */
+    (void)user_arg;
+    ge_call_guest(s, cb->finish_func, finish_id, cb->finish_arg, cbid);
     if (ge_log_on())
         fprintf(stderr, "GE_FINISH_CB: callback fn=0x%08x returned\n", cb->finish_func);
 }

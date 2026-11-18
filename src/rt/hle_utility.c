@@ -585,6 +585,16 @@ static uint32_t utility_dialog_update(UtilityDialog *d) {
             result = sr_savedata_prepare_utility(SR_UTILITY_STORAGE_GAMEDATA);
         else if (kind == UTILITY_GAMESHARING)
             result = sr_savedata_prepare_utility(SR_UTILITY_STORAGE_GAMESHARING);
+        /* There is no network behind netconf (the runtime is offline and network HLE is
+         * fail-closed), so the dialog never connects: it finishes the way a person backing out
+         * of it does, CANCEL, never 0, which a caller reads as a connection that was made. A PSP
+         * with no access point kept the dialog RUNNING until the person acted (PSP-HLE-UTILITY-
+         * DIALOG-001 captures, not acceptance-eligible); the result it then writes is UNMEASURED. */
+        else if (kind == UTILITY_NETCONF) {
+            result = UTILITY_DIALOG_RESULT_CANCEL;
+            fprintf(stderr, "sceUtilityNetconf: no network; the dialog finishes CANCELLED "
+                    "(result %u, UNMEASURED)\n", (unsigned)result);
+        }
         /* The message dialog answers with its default button (msg_dialog_default_answer). The
          * answer goes to buttonPressed at +0x240, which exists from the 580-byte (V2) parameter
          * block on; +0x23c is the caller's options word (YES/NO, default NO, ...) and is

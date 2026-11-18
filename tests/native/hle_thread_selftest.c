@@ -11093,8 +11093,12 @@ static void test_utility_dialog_single_slot(void) {
         }
         snprintf(what, sizeof(what), "%s finishes, then winds down to NONE after ShutdownStart",
                  dialogs[i].name);
-        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status) &&
-                   utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
+        expect(utility_poll_to_finished(&cpu, dialogs[i].update, dialogs[i].status), what);
+        /* With no network behind it, netconf must not finish with result 0, which a caller reads
+         * as a connection that was made (audit 2026-11-17): it finishes CANCEL (1). */
+        expect(MEM_R32(UTILITY_OTHER_PARAM_ADDR + 0x1cu) == 1u,
+               "sceUtilityNetconf with no network finishes CANCEL, not 0 (connected)");
+        expect(utility_call(&cpu, dialogs[i].shutdown, 0u) == 0u &&
                    utility_status(&cpu, dialogs[i].status) == 4u &&
                    utility_status(&cpu, dialogs[i].status) == 0u,
                what);
@@ -28167,6 +28171,17 @@ static void test_nested_frame_depth_is_bounded_and_fails_closed(void) {
                "a nested call with the pool exhausted dispatches nothing");
         expect(sr_nested_frame_exhaustions() == 1u,
                "the pool-exhaustion refusal is counted");
+        /* A GE callback (the void marshaller) that cannot get a frame does not run, and the
+         * run must not carry on as if it had: the caller is stopped by name (audit 2026-11-17). */
+        {
+            CpuState ge_caller = caller;
+            ge_caller.flow_kind = SR_FLOW_NONE;
+            cbabi_reset();
+            sr_hle_test_call_guest_void(&ge_caller, CBABI_ENTRY, 0u, 0u, 0u);
+            expect(s_cbabi_calls == 0u && ge_caller.flow_kind == SR_FLOW_FATAL &&
+                       ge_caller.flow_target == CBABI_ENTRY,
+                   "a GE callback refused for want of a frame stops the run naming the callback");
+        }
         for (i = 0; i < SR_NESTED_FRAME_SLOTS; i++)
             if (handles[i] >= 0) (void)sr_nested_frame_release(handles[i]);
         expect(sr_nested_frame_live() == 0u, "releasing every handle empties the pool");
@@ -33033,6 +33048,36 @@ static void test_ge_completion_timing(void) {
     expect(ge_tim_sync(&cpu, NID_SCE_GE_LIST_SYNC, qid, 1u) == 0u &&
            ge_tim_sync(&cpu, NID_SCE_GE_DRAW_SYNC, 1u, 0u) == 0u,
            "GE timing off: the syncs read the list as complete at once");
+    /* A callback registered with finish_arg 0 gets 0, even when the list was enqueued with a
+     * SceGeListArgs block: that pointer (sceGeListEnQueue's fourth argument) is not a callback
+     * argument (audit 2026-11-17). */
+    {
+        const uint32_t list_args = GE_TIM_INFO + 0x40u;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = s_ge_tim_cbid;
+        expect(sr_syscall(&cpu, NID_SCE_GE_UNSET_CALLBACK) == 0u,
+               "GE finish: the timing callback unregisters");
+        MEM_W32(GE_TIM_INFO + 12u, 0u);                /* finish arg 0 */
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = GE_TIM_INFO;
+        s_ge_tim_cbid = sr_syscall(&cpu, NID_SCE_GE_SET_CALLBACK);
+        expect(s_ge_tim_cbid < 16u, "GE finish: the callback re-registers with finish_arg 0");
+        MEM_W32(list_args + 0u, 16u);                  /* size */
+        MEM_W32(list_args + 4u, 0u);                   /* context */
+        MEM_W32(list_args + 8u, 0u);                   /* numStacks */
+        MEM_W32(list_args + 12u, 0u);                  /* stacks */
+        ge_tim_write_list(GE_TIM_DL2, 0u);
+        s_ge_tim_calls = 0;
+        s_ge_tim_arg = 0xdeadbeefu;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = GE_TIM_DL2;
+        cpu.r[5] = 0u;
+        cpu.r[6] = s_ge_tim_cbid;
+        cpu.r[7] = list_args;
+        (void)sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+        expect(s_ge_tim_calls == 1u && s_ge_tim_arg == 0u,
+               "GE finish: a callback registered with finish_arg 0 gets 0, not the list-args pointer");
+    }
     ge_tim_teardown();
 
     /* T0 at the boot bus clock (111 MHz): an empty list is 1665 clk = 15 us. */
@@ -46281,6 +46326,7 @@ int      sr_route_status(void);
 int      sr_route_sig_bytes(void);
 void     sr_route_reset(void);
 void     sr_input_test_deliver(int guest_reads);
+extern int s_route_watch_nid;   /* hle_route.c: whether every import feeds the route's NID ring */
 
 enum { RT_OFF = 0, RT_LEGACY, RT_RUNNING, RT_DONE, RT_FAILED };
 
@@ -46665,8 +46711,15 @@ static void test_route_malformed_files_are_refused(void) {
      * 2147483647*2 is negative) must not pass the cell bound and size a signature larger than
      * the ROUTE_SIG_MAX buffers route_tick and route_learn_emit sample into. */
     sr_route_reset();
+    const int default_sig_bytes = sr_route_sig_bytes();
     rt_write("SIGGRID 8 8\nPRESS 4000 16\nEND\n");
     expect(sr_route_load(RT_PATH) == 1, "a SIGGRID within the cell bound loads");
+    expect(sr_route_sig_bytes() != default_sig_bytes, "the SIGGRID changed the signature size");
+    /* A second load with no SIGGRID gets the default grid, not the previous file's
+     * (audit 2026-11-17). */
+    rt_write("PRESS 4000 16\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1 && sr_route_sig_bytes() == default_sig_bytes,
+           "a route file without SIGGRID loads with the default grid, not the last file's");
     {
         static const char *const wrapping[] = {
             "SIGGRID 65536 65536\nPRESS 4000 16\nEND\n",
@@ -47002,6 +47055,26 @@ static void test_route_gates_on_a_guest_event_not_a_signature(void) {
     for (uint32_t v = 2; v < 55; v++) (void)sr_route_step(v, sigA);
     expect(sr_route_status() == RT_FAILED,
            "a guest that never makes the import again fails the run instead of waiting forever");
+    expect(s_route_watch_nid == 0,
+           "a route that failed on a WAIT_NID stops watching imports (audit 2026-11-17)");
+    remove(RT_PATH);
+
+    /* A route whose last step is a WAIT_NID, with no END, completes and stops watching too:
+     * the import hook does not keep feeding the ring for the rest of the run. */
+    sr_route_reset();
+    snprintf(body, sizeof body,
+             "CHECKPOINT MAIN_MENU %s\n"
+             "WAIT MAIN_MENU 100\n"
+             "WAIT_NID sceIoOpen 20\n", hexA);
+    rt_write(body);
+    expect(sr_route_load(RT_PATH) == 1, "a route ending in a WAIT_NID loads");
+    expect(sr_route_step(0, sigA) == 0u && s_route_watch_nid == 1,
+           "the WAIT_NID step watches imports while it waits");
+    sr_route_test_import(open_nid);
+    (void)sr_route_step(1, sigA);
+    (void)sr_route_step(2, sigA);
+    expect(sr_route_status() == RT_DONE && s_route_watch_nid == 0,
+           "a route that completed on its last WAIT_NID stops watching imports (audit 2026-11-17)");
     remove(RT_PATH);
 
     /* An unknown name is a load-time refusal, not a wait that can never succeed. */
