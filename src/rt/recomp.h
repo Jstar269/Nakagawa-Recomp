@@ -2997,7 +2997,10 @@ uint32_t sched_thread_exit_status(uint32_t uid);
 uint32_t sched_thread_stack_free_size(uint32_t uid);  /* sceKernelGetThreadStackFreeSize */
 /* The calling thread's user-visible stack range (sceKernelCheckThreadStack); 0 with no thread. */
 int      sched_current_thread_stack_range(uint32_t *base_out, uint32_t *size_out);
-/* High user-partition blocks, carved from the top of the thread-stack arena (sched.c). */
+/* High user-partition blocks, carved from the top of the thread-stack arena (sched.c). At most
+ * SR_SCHED_ARENA_HIGH_BLOCK_MAX are live at once (hle_internal.h HLE_MAX_PARTITION_BLOCKS); the
+ * arena's free-range table is sized from it. */
+#define SR_SCHED_ARENA_HIGH_BLOCK_MAX 256
 int      sched_partition_alloc_high(uint32_t size, uint32_t ceiling, uint32_t *base_out);
 void     sched_partition_release_high(uint32_t base, uint32_t size);
 /* Whether an address inside the thread-stack arena is free there; *end_out bounds the answer. */

@@ -143,7 +143,11 @@ _Static_assert(SR_NESTED_FRAME_END <= SR_STACK_ARENA_FLOOR,
                "the runtime's stacks must lie below the thread-stack arena");
 _Static_assert(SR_VBLANK_STACK_TOP == SR_NESTED_FRAME_BASE,
                "the VBLANK reservation must end exactly at the nested-frame region base");
-#define SR_STACK_RANGE_MAX   (MAXTHREADS + 1)
+/* The arena's free ranges are disjoint and coalesced, so a live extent separates any two of them:
+ * there is at most one more range than live extents. The extents are the thread stacks (one per
+ * TCB, MAXTHREADS) and the user partition's High blocks (sched_partition_alloc_high, at most
+ * SR_SCHED_ARENA_HIGH_BLOCK_MAX live, recomp.h), so neither a release nor a split finds it full. */
+#define SR_STACK_RANGE_MAX   (MAXTHREADS + SR_SCHED_ARENA_HIGH_BLOCK_MAX + 1)
 
 typedef struct {
     uint32_t base;
@@ -609,9 +613,10 @@ static uint32_t resolve_thread_uid(uint32_t uid) {
 
 /* Guest stacks live in a descending arena, but deletion must return the exact
  * range rather than permanently consuming the high-water mark.  A small
- * first-fit range list is sufficient here: there are at most MAXTHREADS live
- * kernel objects, and every release coalesces adjacent ranges before another
- * allocation can split them.  The allocator owns only the synthetic PSP stack
+ * first-fit range list is sufficient here: there are at most MAXTHREADS thread
+ * stacks and SR_SCHED_ARENA_HIGH_BLOCK_MAX High blocks live (SR_STACK_RANGE_MAX),
+ * and every release coalesces adjacent ranges before another allocation can
+ * split them.  The allocator owns only the synthetic PSP stack
  * plus TLS reservation; the host coroutine stack is released by sr_coro_destroy. */
 static void stack_ranges_update_top(void) {
     uint32_t top = SR_STACK_ARENA_FLOOR;
@@ -718,36 +723,31 @@ static void stack_range_return(uint32_t base, uint32_t size) {
     }
     int pos = 0;
     while (pos < s_stack_free_count && s_stack_free[pos].base < base) pos++;
-    if (s_stack_free_count >= SR_STACK_RANGE_MAX) {
-        fprintf(stderr, "FATAL: guest stack range table exhausted while releasing [0x%08x,0x%08x)\n",
-                base, base + size);
-        abort();
-    }
-    for (int j = s_stack_free_count; j > pos; j--)
-        s_stack_free[j] = s_stack_free[j - 1];
-    s_stack_free[pos] = (StackRange){base, size};
-    s_stack_free_count++;
-
-    if (pos > 0) {
-        StackRange *prev = &s_stack_free[pos - 1];
-        StackRange *cur = &s_stack_free[pos];
-        if (prev->base + prev->size == cur->base) {
-            prev->size += cur->size;
-            for (int j = pos + 1; j < s_stack_free_count; j++)
-                s_stack_free[j - 1] = s_stack_free[j];
-            s_stack_free_count--;
-            pos--;
+    /* Coalesce first: a release that touches a free neighbour never needs a new slot. */
+    const int joins_prev = pos > 0 &&
+                           s_stack_free[pos - 1].base + s_stack_free[pos - 1].size == base;
+    const int joins_next = pos < s_stack_free_count && base + size == s_stack_free[pos].base;
+    if (joins_prev && joins_next) {
+        s_stack_free[pos - 1].size += size + s_stack_free[pos].size;
+        for (int j = pos + 1; j < s_stack_free_count; j++)
+            s_stack_free[j - 1] = s_stack_free[j];
+        s_stack_free_count--;
+    } else if (joins_prev) {
+        s_stack_free[pos - 1].size += size;
+    } else if (joins_next) {
+        s_stack_free[pos].base = base;
+        s_stack_free[pos].size += size;
+    } else {
+        /* Unreachable while SR_STACK_RANGE_MAX bounds the live extents: a broken invariant. */
+        if (s_stack_free_count >= SR_STACK_RANGE_MAX) {
+            fprintf(stderr, "FATAL: guest stack range table exhausted while releasing "
+                            "[0x%08x,0x%08x)\n", base, base + size);
+            abort();
         }
-    }
-    if (pos + 1 < s_stack_free_count) {
-        StackRange *cur = &s_stack_free[pos];
-        StackRange *next = &s_stack_free[pos + 1];
-        if (cur->base + cur->size == next->base) {
-            cur->size += next->size;
-            for (int j = pos + 2; j < s_stack_free_count; j++)
-                s_stack_free[j - 1] = s_stack_free[j];
-            s_stack_free_count--;
-        }
+        for (int j = s_stack_free_count; j > pos; j--)
+            s_stack_free[j] = s_stack_free[j - 1];
+        s_stack_free[pos] = (StackRange){base, size};
+        s_stack_free_count++;
     }
     stack_ranges_update_top();
 }
@@ -2572,12 +2572,14 @@ static void scheduler_service_pending(void) {
         s_pending_vblanks = 0;
         for (uint32_t i = 0; i < episodes; i++) {
             /* The handler itself can mask interrupts.  The episodes it never took
-             * stay owed -- they elapsed with the I-bit set -- and a batch that ends
-             * exactly on the mask point hands the window's own coalesced episode to
-             * the next resume. */
+             * stay owed -- they elapsed with the I-bit set -- and the next resume
+             * delivers them. */
             if (!s_interrupts_enabled) {
-                s_pending_vblanks = episodes - i - 1u;
-                if (!s_pending_vblanks) s_vblank_masked_pending = 1;
+                /* episodes - i were not delivered. The latch already credited VCOUNT for each
+                 * of them, so they are owed as episodes, not as a masked-window period: the
+                 * coalesced flag (one more episode and one more VCOUNT at resume) is left to a
+                 * period that comes due under the mask. */
+                s_pending_vblanks = episodes - i;
                 episodes = i;      /* what the guest actually received */
                 break;
             }
@@ -2714,11 +2716,14 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
  * termination release the callback and wait state, while DeleteThread also
  * returns the guest stack range.  The flags live on the TCB so a repeated
  * lifecycle call is an observable no-op instead of a second teardown. */
+static void sched_transfer_forget(uint32_t uid);
+
 static void sched_release_thread_resources(TCB *t) {
     unsigned stranded;
     if (!t || t->resources_released) return;
     sr_callback_unregister_owner(t->uid);
     sched_wait_abandon_owner(t);
+    sched_transfer_forget(t->uid);
     sr_hle_release_thread_resources(t->uid);
     /* Last net under this thread's nested host->guest call frames.  Every normal
      * and error return releases its own frame, and the coro_body unwind path
@@ -2962,6 +2967,7 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
         t->state = TH_DORMANT;
         t->entry = 0;
         t->started = 0;
+        t->deleted = 1;   /* a reused slot below the tail: nobody holds its UID, reclaim it */
         if (t == &s_tcb[s_ntcb - 1]) s_ntcb--;
         return 0;
     }
@@ -3018,6 +3024,9 @@ static uint32_t sched_create_thread_finish(TCB *t, uint32_t entry, int priority,
         t->state = TH_DORMANT;
         t->entry = 0;
         t->started = 0;
+        /* No UID was handed out. A reused slot below the tail (the MAXTHREADS reclaim) stays a
+         * deleted, reclaimable slot no lookup or id list sees; the tail slot is released. */
+        t->deleted = 1;
         if (t == &s_tcb[s_ntcb - 1]) s_ntcb--;   /* tail slot: fully release it */
         return 0;
     }
@@ -3292,6 +3301,18 @@ static void sched_transfer_hand_off(void) {
         return;
     }
     sched_transfer_reset();
+}
+
+/* A thread that exits, is terminated or is deleted gives up its place in the channel: it leaves
+ * the queue, and a reservation it holds passes on. A restart reuses the UID, so a stale entry would
+ * otherwise hand the channel to a thread that no longer waits for it, and the reservation would
+ * never end. A window it opened runs to its deadline (sched_transfer_window_step). */
+static void sched_transfer_forget(uint32_t uid) {
+    int kept = 0;
+    for (int i = 0; i < s_xfer_queued; i++)
+        if (s_xfer_queue[i] != uid) s_xfer_queue[kept++] = s_xfer_queue[i];
+    s_xfer_queued = kept;
+    if (s_xfer_obj != 0u && s_xfer_reserved && s_xfer_owner_uid == uid) sched_transfer_hand_off();
 }
 
 /* Part of every scheduling decision, like an expired deadline: an open window whose
@@ -5980,9 +6001,11 @@ void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {
                 } else if (soonest > s_vtime_us) {
                     s_vtime_us = soonest;
                 }
-                /* The jump may have reached an alarm deadline: its handler is what readies
-                 * the waiter, and it only runs from an interrupt-service step. */
-                if (s_alarm_live || sched_ge_next_deadline() != SCHED_WAIT_FOREVER)
+                /* The jump may have reached an alarm, GE or VTimer deadline (the timer sources
+                 * sched_classify_idle counted): its handler is what readies the waiter, and it
+                 * only runs from an interrupt-service step. */
+                if (s_alarm_live || sched_ge_next_deadline() != SCHED_WAIT_FOREVER ||
+                    scheduler_vtimer_due())
                     scheduler_service_pending();
                 idx = pick_next();
                 if (idx < 0) {

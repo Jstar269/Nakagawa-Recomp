@@ -128,6 +128,9 @@ typedef struct { uint32_t nid, target; } LateImportEntry;
 /* `part5` marks a block of partition 5, the volatile region (volatile_part_alloc). */
 typedef struct { uint32_t uid, addr, size, slot_size, prev, next; int high, part5; } Block;
 #define HLE_MAX_PARTITION_BLOCKS 256
+_Static_assert(HLE_MAX_PARTITION_BLOCKS <= SR_SCHED_ARENA_HIGH_BLOCK_MAX,
+               "the scheduler's arena range table (sched.c SR_STACK_RANGE_MAX) must hold a range "
+               "per live High block");
 
 typedef struct { uint32_t uid, backing_uid; } HleMemoryBlock;
 #define HLE_MAX_MEMORY_BLOCKS 256

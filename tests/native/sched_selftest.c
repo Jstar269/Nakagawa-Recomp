@@ -177,6 +177,7 @@ static uint32_t g_test_vblank_handler;
 static unsigned g_test_handler_calls;
 static int g_test_handler_raise_ge;
 static uint32_t g_test_handler_wake_obj;
+static unsigned g_test_handler_mask_at;   /* the handler call that masks interrupts; 0 = none */
 static CpuState g_test_handler_seen;
 static uint32_t g_test_vblank_no, g_test_vblank_arg;
 /* An optional second sub-interrupt, for a title that keeps two VBLANK handlers at once. */
@@ -318,6 +319,9 @@ void dispatch(CpuState *s, uint32_t target) {
             sched_wake(g_test_handler_wake_obj);
             g_test_handler_wake_obj = 0;
         }
+        /* A handler that returns with the I-bit clear (CpuSuspendIntr, no resume). */
+        if (g_test_handler_mask_at && g_test_handler_calls == g_test_handler_mask_at)
+            (void)sched_suspend_interrupts();
         /* Prove that a handler's register mutations are discarded with its frame. */
         s->r[16] = 0xdeadbeefu;
         s->pc = 0xfeedfaceu;
@@ -401,6 +405,7 @@ static void reset_sched(void) {
     g_test_handler_calls = 0;
     g_test_handler_raise_ge = 0;
     g_test_handler_wake_obj = 0;
+    g_test_handler_mask_at = 0;
     memset(&g_test_handler_seen, 0, sizeof(g_test_handler_seen));
     s_test_uid_next = 0x110u;
     g_test_body = NULL;
@@ -1023,6 +1028,66 @@ static void test_transfer_queue_is_arrival_order(void) {
            "its window ends after its own duration and the next waiter is woken too");
     expect(sched_transfer_pending(0xD0Au, &who) && who == 0x202u,
            "the next queued waiter now holds the channel");
+}
+
+/* A thread terminated and restarted while it waited for the channel gives up its place: a
+ * queued entry or a reservation under its UID would hand the channel to a thread, restarted at its
+ * entry, that no longer waits for it, and the reservation would never end.
+ * MUTANT: drop sched_transfer_forget from sched_release_thread_resources -- the channel passes to
+ * the restarted thread and the later blocking caller is never granted it. */
+static void test_transfer_forgets_a_terminated_waiter(void) {
+    /* Queued behind an open window. */
+    reset_sched();
+    s_vtime_us = 0u;
+    int owner = mk(0x200, TH_RUNNING, 16);
+    uint32_t a_uid = sched_create_thread(0x9300u, 20, 0x1000u);
+    expect(a_uid != 0u && sched_start_thread(a_uid, 0u, 0u) == 0u, "the waiter thread is started");
+    int a = index_of_uid(a_uid);
+    int b = mk(0x202, TH_RUNNING, 24);
+    s_cur = owner;
+    expect(sched_transfer_begin(0xD0Au, 100u), "the owner opens the window");
+    s_tcb[owner].state = TH_WAIT_OBJ;
+    s_tcb[owner].wait_obj = 0xD0Au;
+    s_tcb[a].state = TH_RUNNING;
+    s_cur = a;
+    expect(sched_transfer_enqueue(0xD0Au), "the first blocking caller joins the queue");
+    s_tcb[a].state = TH_WAIT_OBJ;
+    s_tcb[a].wait_obj = 0xD0Au;
+    s_cur = -1;
+    expect(sched_terminate_thread(a_uid) == 0u, "another thread terminates the queued caller");
+    expect(sched_start_thread(a_uid, 0u, 0u) == 0u, "and starts it again at its entry");
+    s_cur = b;
+    expect(sched_transfer_enqueue(0xD0Au), "a second blocking caller joins the queue");
+    s_tcb[b].state = TH_WAIT_OBJ;
+    s_tcb[b].wait_obj = 0xD0Au;
+    s_cur = -1;
+    s_vtime_us = 100u;
+    (void)pick_next();
+    uint32_t who = 0u;
+    expect(sched_transfer_pending(0xD0Au, &who) && who == 0x202u,
+           "at the deadline the channel passes to the caller still waiting, not the restarted one");
+    expect(s_tcb[b].state == TH_READY, "the caller that now holds the channel is woken");
+
+    /* Holding the reservation. */
+    reset_sched();
+    s_vtime_us = 0u;
+    a_uid = sched_create_thread(0x9304u, 20, 0x1000u);
+    expect(a_uid != 0u && sched_start_thread(a_uid, 0u, 0u) == 0u, "the holder thread is started");
+    a = index_of_uid(a_uid);
+    b = mk(0x212, TH_RUNNING, 24);
+    s_tcb[a].state = TH_RUNNING;
+    s_cur = a;
+    expect(sched_transfer_enqueue(0xD0Au) && sched_transfer_granted(0xD0Au),
+           "an idle channel is reserved for its first caller at once");
+    s_cur = -1;
+    expect(sched_terminate_thread(a_uid) == 0u, "another thread terminates the holder");
+    expect(sched_start_thread(a_uid, 0u, 0u) == 0u, "and starts it again at its entry");
+    (void)pick_next();
+    s_cur = b;
+    expect(sched_transfer_enqueue(0xD0Au) && sched_transfer_granted(0xD0Au),
+           "the terminated holder's reservation ended: the next caller is granted the channel");
+    expect(sched_transfer_begin(0xD0Au, 10u), "and begins its transfer");
+    s_cur = -1;
 }
 
 static void test_dormant_excluded(void) {
@@ -2688,6 +2753,57 @@ static void test_stack_exhaustion_fails_create(void) {
     expect(s_stack_top < top0, "successful create consumes arena");
 }
 
+/* The arena's free-range table holds a range per live extent, High blocks included: threads and
+ * High blocks freed out of order leave more holes than MAXTHREADS + 1, and every one of those frees
+ * succeeds on a PSP. A split that needs a slot in the fragmented table still fits, and a release
+ * that touches a free neighbour coalesces without one.
+ * MUTANT: size SR_STACK_RANGE_MAX as MAXTHREADS + 1 -- the 129th isolated free aborts the run. */
+static void test_arena_range_table_holds_high_blocks_and_stacks(void) {
+    enum { HB_N = 256, HB_SIZE = 0x100 };
+    static uint32_t high[HB_N], stack[MAXTHREADS];
+    reset_sched();
+    int ok = 1;
+    for (int i = 0; i < HB_N; i++) {   /* from the top: H S H S ... (MAXTHREADS pairs), then H H ... */
+        ok &= sched_partition_alloc_high(HB_SIZE, SR_STACK_ARENA_CEIL, &high[i]);
+        if (i < MAXTHREADS) ok &= stack_range_alloc(HB_SIZE, &stack[i]);
+    }
+    expect(ok && s_stack_free_count == 1, "256 High blocks and 128 stacks are carved from one range");
+    for (int i = 0; i < MAXTHREADS; i++) sched_partition_release_high(high[i], HB_SIZE);
+    for (int i = MAXTHREADS; i < HB_N; i += 2) sched_partition_release_high(high[i], HB_SIZE);
+    expect(s_stack_free_count == 1 + MAXTHREADS + (HB_N - MAXTHREADS) / 2,
+           "every isolated free is a range of its own: 193, more than MAXTHREADS + 1");
+    uint32_t mid = 0u;
+    expect(sched_partition_alloc_high(HB_SIZE, SR_STACK_ARENA_FLOOR + 0x10000u, &mid) &&
+               mid == SR_STACK_ARENA_FLOOR + 0x10000u - HB_SIZE,
+           "a High block that splits a range still gets a slot in the fragmented table");
+    const int count_split = s_stack_free_count;
+    sched_partition_release_high(mid, HB_SIZE);
+    expect(s_stack_free_count == count_split - 1, "a release between two free ranges joins both");
+    for (int i = 0; i < MAXTHREADS; i++) stack_range_return(stack[i], HB_SIZE);
+    for (int i = MAXTHREADS + 1; i < HB_N; i += 2) sched_partition_release_high(high[i], HB_SIZE);
+    expect(s_stack_free_count == 1 && s_stack_free[0].base == SR_STACK_ARENA_FLOOR &&
+               s_stack_free[0].size == SR_STACK_ARENA_CEIL - SR_STACK_ARENA_FLOOR,
+           "with every extent back the arena is one range again");
+}
+
+/* A create that fails on the MAXTHREADS reclaim path leaves the reused slot reclaimable: no UID
+ * was handed out, so no lookup may find it and the next create can take it again.
+ * MUTANT: drop `t->deleted = 1` from the stack-failure path of sched_create_thread_finish -- the
+ * slot stays a live DORMANT thread and the next create finds no slot. */
+static void test_failed_create_on_a_reused_slot_frees_it(void) {
+    reset_sched();
+    for (int i = 0; i < MAXTHREADS; i++) (void)mk(0x400u + (uint32_t)i, TH_READY, 32);
+    s_tcb[5].deleted = 1;
+    s_tcb[5].state = TH_DORMANT;
+    fprintf(stderr, "(expected: one 'exceeds available free guest stack ranges' line follows)\n");
+    expect(sched_create_thread(0x9400u, 32, 0x10000000u) == 0u,
+           "an oversized stack fails the create on the reuse path");
+    expect(s_tcb[5].deleted && s_ntcb == MAXTHREADS,
+           "the reused slot is deleted again, not a phantom DORMANT thread");
+    uint32_t again = sched_create_thread(0x9404u, 32, 0x1000u);
+    expect(again != 0u && index_of_uid(again) == 5, "the next create reclaims the same slot");
+}
+
 /* Thread stacks and the user partition share PSP user RAM. The partition ends at the
  * lowest live stack (sched_guest_stack_floor), and a stack the arena would place over
  * live partition memory fails the create instead of overlapping it. */
@@ -4004,6 +4120,33 @@ static void test_masked_window_keeps_the_enabled_backlog(void) {
     expect(sched_display_is_vblank(),
            "the coalesced masked edge keeps its resume delivery anchor");
     s_host_ns_fn = NULL;
+}
+
+/* A VBLANK handler that returns with interrupts masked cuts its batch short. The episodes it did
+ * not take were each credited to VCOUNT when they were latched, so they stay owed as episodes and
+ * resume delivers every one of them, with no second VCOUNT credit.
+ * MUTANT: restore `s_pending_vblanks = episodes - i - 1u` with the masked flag for a zero rest --
+ * N=3 delivers two episodes, N=2 credits VCOUNT three. */
+static void test_handler_mask_mid_batch_keeps_the_rest_owed(void) {
+    for (uint32_t n = 2u; n <= 3u; n++) {
+        reset_sched();
+        s_pace_on = 0;
+        disable_vblank_sources();
+        s_cur = mk(0x41cu, TH_RUNNING, 40);
+        g_test_vblank_handler = 0x00001234u;
+        g_test_vblank_no = 0u;
+        s_pending_vblanks = n;          /* as the latch leaves n elapsed periods... */
+        g_test_vcount = n;              /* ...each one credited to VCOUNT */
+        g_test_handler_mask_at = 1u;    /* the first episode's handler masks */
+        scheduler_service_pending();
+        expect(g_test_handler_calls == 1u && !s_interrupts_enabled,
+               "mid-batch mask: the batch stops after the handler that masked");
+        expect(s_pending_vblanks == n - 1u && !s_vblank_masked_pending,
+               "mid-batch mask: the episodes not taken stay owed as episodes");
+        sched_resume_interrupts(1u);
+        expect(g_test_handler_calls == n, "mid-batch mask: resume delivers every owed episode");
+        expect(g_test_vcount == n, "mid-batch mask: VCOUNT is not credited twice for a period");
+    }
 }
 
 /* An unrepresentable elapsed-period count is a named collapse, not a replay storm.
@@ -5755,6 +5898,44 @@ static void test_ge_timing_completion_is_an_idle_wake_source(void) {
            "GE timing: with no hooks registered the scheduler is unchanged");
 }
 
+/* Turbo idle jump to a VTimer deadline: the jump reaches it and the handler, which releases the
+ * only waiter, runs from the service step; the run does not end as a deadlock. The deadline lies
+ * beyond the next VBLANK, so the idle wait steps a display period first and the jump in sched_run
+ * is what reaches it.
+ * MUTANT: drop scheduler_vtimer_due() from the service guard after the turbo jump in sched_run --
+ * the run stops with 'no runnable threads left after time jump' and the waiter never resumes. */
+enum { VTJ_ENTRY = 0x09360000u, VTJ_OBJ = 0x5300a001u };
+static uint64_t g_vtj_deadline = SCHED_WAIT_FOREVER;
+static unsigned g_vtj_calls;
+static int g_vtj_resumed;
+static uint64_t vtj_next_deadline(void) { return g_vtj_deadline; }
+static void vtj_service_one(void) {
+    g_vtj_calls++;
+    g_vtj_deadline = SCHED_WAIT_FOREVER;
+    sched_wake(VTJ_OBJ);
+}
+static void vtimer_jump_body(CpuState *s) {
+    (void)s;
+    g_vtj_deadline = s_vtime_us + 50000u;   /* three display periods ahead */
+    sched_block_on(VTJ_OBJ);
+    g_vtj_resumed = 1;
+}
+
+static void test_turbo_jump_services_a_vtimer_deadline(void) {
+    reset_sched();
+    begin_clock_fixture(0, 0u);   /* turbo, with the VBLANK source live */
+    g_vtj_deadline = SCHED_WAIT_FOREVER;
+    g_vtj_calls = 0;
+    g_vtj_resumed = 0;
+    sched_set_vtimer_hooks(vtj_next_deadline, vtj_service_one);
+    g_test_body = vtimer_jump_body;
+    sched_run(VTJ_ENTRY, 0u, 0u);
+    sched_set_vtimer_hooks(NULL, NULL);
+    s_host_ns_fn = NULL;
+    expect(g_vtj_calls == 1u, "turbo jump: the VTimer handler runs at its deadline");
+    expect(g_vtj_resumed, "turbo jump: the waiter it released resumes instead of a deadlock stop");
+}
+
 static void test_alarm_table_capacity_and_reset(void) {
     alarm_fixture();
     uint32_t uids[SCHED_ALARM_MAX];
@@ -6714,6 +6895,7 @@ int main(int argc, char **argv) {
     test_blocked_excluded_until_wake();
     test_transfer_window_lasts_its_duration();
     test_transfer_queue_is_arrival_order();
+    test_transfer_forgets_a_terminated_waiter();
     test_dormant_excluded();
     test_current_becomes_nonrunnable();
     test_timed_wait_promotion();
@@ -6745,6 +6927,8 @@ int main(int argc, char **argv) {
     test_stack_exhaustion_fails_create();
     test_stack_floor_and_partition_overlap();
     test_stack_placement_prefers_the_highest_free_block();
+    test_arena_range_table_holds_high_blocks_and_stacks();
+    test_failed_create_on_a_reused_slot_frees_it();
     test_libc_thread_relocation();
     test_coro_self_switch_and_park();
     test_service_thread_waits_calls_and_ends();
@@ -6786,6 +6970,7 @@ int main(int argc, char **argv) {
     test_paced_vblank_has_one_authority();
     test_busy_guest_observes_every_display_period();
     test_masked_window_keeps_the_enabled_backlog();
+    test_handler_mask_mid_batch_keeps_the_rest_owed();
     test_threads_that_never_idle_still_reach_the_next_vblank();
     test_saturated_source_owes_one_deliverable_episode();
     test_expired_timed_wait_enters_strict_priority();
@@ -6829,6 +7014,7 @@ int main(int argc, char **argv) {
     test_ge_timing_completion_is_an_interrupt_source();
     test_ge_timing_completion_is_an_idle_wake_source();
     test_alarm_table_capacity_and_reset();
+    test_turbo_jump_services_a_vtimer_deadline();
 
     /* Player pause: each case maps to the mutation in the reviewed contract. */
     test_pause_s1_frozen_system_time();
