@@ -6013,6 +6013,241 @@ static void test_saves_change_nothing_without_a_whole_backup(void) {
 }
 #endif /* NK_SAVES_TEST_SEAMS */
 
+/* Audit 2026-11-17: Remove game and data listed one enhanced build, the timing
+ * package's, and only while that package was available. The culling builds
+ * (<DISC>-enhanced-<timing>+<hook> and <DISC>-enhanced-<hook>), and a timing build
+ * whose package went away, stayed on the disk, and the size shown left them out.
+ *
+ * Failing before: the plan's package bytes were the plain package's alone (3000)
+ * and the three enhanced folders were still there after the removal. */
+static void test_removal_takes_every_enhanced_build(void) {
+    RemovalFixture f;
+    PlayerRemovalPlan plan;
+    char error[NK_MAX_PATH + 128];
+    char packages[NK_MAX_PATH * 2];
+    char path[NK_MAX_PATH * 3];
+    static const char *const builds[] = {
+        "RMVE01306-enhanced-timing", "RMVE01306-enhanced-timing+cullhook",
+        "RMVE01306-enhanced-cullhook"
+    };
+    /* Not this title's enhanced builds: another disc's, a name no variant has, and a
+       folder that is not an enhanced build. */
+    static const char *const others[] = {
+        "RMVE01307-enhanced-timing", "RMVE01306-enhanced-Not_A_Variant", "RMVE01306-other"
+    };
+    removal_fixture_make(&f, "RMVE01306");
+    PlayerApp *app = removal_test_app(&f, "RMVE01306");
+    assert(!app->title_enhancements[0].available);
+    removal_test_path(packages, sizeof(packages), f.build_root, "packages", NULL, NULL);
+    for (size_t i = 0; i < 3u; ++i) {
+        removal_test_path(path, sizeof(path), packages, builds[i], NULL, NULL);
+        removal_test_tree(path, "package.json", 100u * (i + 1u));
+        removal_test_path(path, sizeof(path), packages, others[i], NULL, NULL);
+        removal_test_tree(path, "package.json", 7);
+    }
+    assert(player_app_plan_game_removal(app, 0, &plan));
+    assert(plan.kind_bytes[PLAYER_REMOVAL_PACKAGE] == 3000u + 100u + 200u + 300u);
+    assert(player_app_remove_game_and_data(app, 0, 0u, error, sizeof(error)));
+    assert(!nk_platform_dir_exists(f.package));
+    for (size_t i = 0; i < 3u; ++i) {
+        removal_test_path(path, sizeof(path), packages, builds[i], NULL, NULL);
+        assert(!nk_platform_dir_exists(path));
+        removal_test_path(path, sizeof(path), packages, others[i], NULL, NULL);
+        assert(nk_platform_dir_exists(path));
+        assert(nk_platform_remove_tree(path, NULL));
+    }
+    remove(app->library.library_path);
+    free(app);
+    printf("PASS: remove game and data takes every enhanced build of the title\n");
+}
+
+/* Audit 2026-11-17: Remove game and data deleted the folders, then took the card
+ * out of the library; when library.json could not be written that failed with an
+ * empty reason, and the card read "The game was not removed" over deleted files.
+ * Here the library's temporary file is a folder, so the write fails.
+ *
+ * Failing before: the error was empty. */
+static void test_removal_says_when_the_card_stays(void) {
+    RemovalFixture f;
+    char error[NK_MAX_PATH + 256];
+    char blocker[NK_MAX_PATH + 16];
+    removal_fixture_make(&f, "RMVE01308");
+    PlayerApp *app = removal_test_app(&f, "RMVE01308");
+    assert(nk_library_save(&app->library, app->library.library_path) == NK_OK);
+    snprintf(blocker, sizeof(blocker), "%s.tmp", app->library.library_path);
+    assert(nk_platform_mkdir_p(blocker));
+    assert(!player_app_remove_game_and_data(app, 0, 0u, error, sizeof(error)));
+    assert(strstr(error, "files were deleted") != NULL);
+    assert(strstr(error, "could not be taken out of the library") != NULL);
+    assert(!nk_platform_dir_exists(f.package));
+    assert(nk_platform_remove_tree(blocker, NULL));
+    remove(app->library.library_path);
+    free(app);
+    printf("PASS: remove game and data says when the card could not be removed\n");
+}
+
+/* Audit 2026-11-17: Restart game, Try again and the report found the card by its
+ * disc ID alone, the first card with it, though two images can share one (a retail
+ * disc beside its fan translation).
+ *
+ * Failing before: Restart game selected the first card and the report named its
+ * title, for a stop of the second card's image. */
+static void test_error_card_names_its_own_image(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: an error card names its own image\n");
+    static char report[PLAYER_ERROR_DETAILS_MAX + 4096];
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    for (int i = 0; i < 2; ++i) {
+        snprintf(app->games[i].disc_id, sizeof(app->games[i].disc_id), "TEST00071");
+        snprintf(app->games[i].iso_path, sizeof(app->games[i].iso_path),
+                 "%s%cimage-%d.iso", native_test_get_root(), nk_platform_path_separator(), i);
+    }
+    snprintf(app->games[0].title_name, sizeof(app->games[0].title_name), "Synthetic Retail");
+    snprintf(app->games[1].title_name, sizeof(app->games[1].title_name), "Synthetic Translation");
+    app->game_count = 2;
+
+    /* The second image ran and stopped. */
+    snprintf(app->launch_session.disc_id, sizeof(app->launch_session.disc_id), "TEST00071");
+    snprintf(app->running_iso_path, sizeof(app->running_iso_path), "%s", app->games[1].iso_path);
+    player_app_set_game_stop_error(app, "RUNTIME_ERROR_EXIT", NULL, 0, 1, 9000u, "TEST00071",
+                                   NULL);
+    assert(player_app_error_subject_index(app, &app->last_error) == 1);
+    assert(player_app_format_error_report_for(app, "v0.0.0-test", NULL, NULL, report,
+                                              sizeof(report)) > 0);
+    assert(strstr(report, "Game: Synthetic Translation\n") != NULL);
+    assert(strstr(report, "Synthetic Retail") == NULL);
+    app->selected_game_index = 0;
+    (void)player_app_retry_from_error(app);
+    assert(app->selected_game_index == 1);
+
+    /* A build of the second image that failed. */
+    snprintf(app->build_session.disc_id, sizeof(app->build_session.disc_id), "TEST00071");
+    snprintf(app->build_session.iso_path, sizeof(app->build_session.iso_path), "%s",
+             app->games[1].iso_path);
+    player_app_set_build_error(app, "synthetic-stage", "synthetic reason", NULL);
+    assert(app->last_error.retry == PLAYER_ERROR_RETRY_BUILD);
+    assert(player_app_error_subject_index(app, &app->last_error) == 1);
+
+    /* A card that does not name its image, beside another image of the disc ID,
+       picks neither. */
+    app->last_error.subject_iso_path[0] = '\0';
+    assert(player_app_error_subject_index(app, &app->last_error) == -1);
+    free(app);
+    printf("[PLAYER_STATE_TEST] an error card names its own image PASS\n");
+}
+
+/* Audit 2026-11-17: the boot-event file was deleted with the narrow remove(), which
+ * reads a UTF-8 path in the ANSI code page on Windows, so under a cache folder whose
+ * name is outside ASCII the file was never deleted.
+ *
+ * Failing before (Windows): the file under "boot-caf\xc3\xa9" was still there after a
+ * launch that could not start. */
+static void test_boot_event_file_is_deleted_under_non_ascii_folder(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the boot-event file is deleted under a non-ASCII folder\n");
+    char sep = nk_platform_path_separator();
+    char root[256];
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerLaunchWork *work = (PlayerLaunchWork *)calloc(1, sizeof(PlayerLaunchWork));
+    assert(app != NULL && work != NULL);
+    nk_library_init(&app->library);
+    int n = snprintf(root, sizeof(root), "%s%cboot-caf\xc3\xa9", native_test_get_root(), sep);
+    assert(n > 0 && (size_t)n < sizeof(root));
+    assert(nk_platform_mkdir_p(root));
+    assert(sizeof(root) + 16u < sizeof(app->boot_event_file_path));
+    snprintf(app->boot_event_file_path, sizeof(app->boot_event_file_path), "%s%cboot.txt",
+             root, sep);
+    FILE *f = nk_fopen_utf8(app->boot_event_file_path, "wb");
+    assert(f != NULL);
+    fputs("runtime output\n", f);
+    assert(fclose(f) == 0);
+    work->game_index = -1;
+    work->failed_step = PLAYER_LAUNCH_STEP_START;
+    work->result = NK_ERROR_PROCESS_SPAWN;
+    work->session.process.spawn_error = 2;
+    assert(!player_app_launch_finish(app, work));
+    assert(strcmp(app->last_error.error_code, "PROCESS_SPAWN_FAILED") == 0);
+    assert(nk_platform_path_missing(app->boot_event_file_path));
+    assert(nk_platform_remove_tree(root, NULL));
+    free(work);
+    free(app);
+    printf("[PLAYER_STATE_TEST] the boot-event file is deleted under a non-ASCII folder PASS\n");
+}
+
+/* Audit 2026-11-17: the developer log, Copy details and the "~" rewrite read the
+ * profile folder and the user name with the narrow getenv, which gives ANSI
+ * code-page bytes on Windows. A UTF-8 path under a profile named outside ASCII never
+ * matched, so the full path and the name reached the log and the report.
+ *
+ * Failing before (Windows): the log line and the report kept "Jos\xc3\xa9 Synth". */
+static void test_user_identity_is_redacted_in_utf8(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the profile and user name are redacted in UTF-8\n");
+    char sep = nk_platform_path_separator();
+    static const char user[] = "Jos\xc3\xa9 Synth";
+    char home[256];
+    char text[512];
+    char shown[512];
+    static char report[PLAYER_ERROR_DETAILS_MAX + 4096];
+#if defined(_WIN32) || defined(_WIN64)
+    static const wchar_t *const names[] = {L"USERPROFILE", L"USERNAME"};
+    static const wchar_t *const values[] = {L"C:\\path\\Jos\u00e9 Synth", L"Jos\u00e9 Synth"};
+    static wchar_t kept[2][1024];
+    bool had[2];
+    for (int i = 0; i < 2; ++i) {
+        const wchar_t *was = _wgetenv(names[i]);
+        had[i] = was != NULL;
+        if (was) {
+            assert(wcslen(was) < 1024u);
+            wcscpy(kept[i], was);
+        }
+        assert(_wputenv_s(names[i], values[i]) == 0);
+    }
+    snprintf(home, sizeof(home), "C:\\path\\%s", user);
+#else
+    static const char *const names[] = {"HOME", "USER"};
+    static char kept[2][1024];
+    bool had[2];
+    snprintf(home, sizeof(home), "/srv/%s", user);
+    for (int i = 0; i < 2; ++i) {
+        const char *was = getenv(names[i]);
+        had[i] = was != NULL;
+        if (was) {
+            assert(strlen(was) < 1024u);
+            strcpy(kept[i], was);
+        }
+        assert(setenv(names[i], i == 0 ? home : user, 1) == 0);
+    }
+#endif
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    player_app_init(app);
+    player_dev_log_add(app, "test", "opened %s%cAppData%cx.log for %s", home, sep, sep, user);
+    const char *line = player_dev_log_line(app, player_dev_log_count(app) - 1u);
+    assert(strstr(line, "Jos") == NULL);
+    assert(strstr(line, "%USERPROFILE%") != NULL && strstr(line, "<user>") != NULL);
+
+    snprintf(text, sizeof(text), "%s%csaves", home, sep);
+    assert(player_display_text(text, shown, sizeof(shown)) > 0);
+    assert(shown[0] == '~' && strstr(shown, "Jos") == NULL);
+
+    player_app_set_error(app, "SYNTHETIC_ERROR", "Synthetic", "m", "Back", VIEW_LIBRARY);
+    snprintf(app->last_error.details, sizeof(app->last_error.details), "Seen in %s%cAppData by %s",
+             home, sep, user);
+    assert(player_app_format_error_report(app, "v0.0.0-test", report, sizeof(report)) > 0);
+    assert(strstr(report, "Jos") == NULL);
+    free(app);
+
+#if defined(_WIN32) || defined(_WIN64)
+    for (int i = 0; i < 2; ++i) assert(_wputenv_s(names[i], had[i] ? kept[i] : L"") == 0);
+#else
+    for (int i = 0; i < 2; ++i) {
+        if (had[i]) assert(setenv(names[i], kept[i], 1) == 0);
+        else assert(unsetenv(names[i]) == 0);
+    }
+#endif
+    printf("[PLAYER_STATE_TEST] the profile and user name are redacted in UTF-8 PASS\n");
+}
+
 static void test_remove_from_library_deletes_what_nakagawa_built(void) {
     RemovalFixture f;
     PlayerRemovalPlan plan;
@@ -13308,6 +13543,11 @@ int main(int argc, char **argv) {
     test_remove_tree_deeper_than_max_path();
 #endif
     test_remove_from_library_deletes_what_nakagawa_built();
+    test_removal_takes_every_enhanced_build();
+    test_removal_says_when_the_card_stays();
+    test_error_card_names_its_own_image();
+    test_boot_event_file_is_deleted_under_non_ascii_folder();
+    test_user_identity_is_redacted_in_utf8();
     test_saves_back_up_restore_and_add();
     test_launch_title_names_one_game();
     test_add_to_steam_outcomes();
@@ -19052,10 +19292,25 @@ int main(int argc, char **argv) {
         PlayerApp *reset = (PlayerApp *)calloc(1, sizeof(PlayerApp));
         assert(reset != NULL);
         nk_library_init(&reset->library);
+        /* Audit 2026-11-17: a runtime root (--runtime-root, a checkout in the developer
+           route) is never moved: only the per-user folders are. Failing before: the
+           checkout was listed and renamed to "<checkout>-backup-<stamp>". */
+        char checkout[NK_MAX_PATH];
+        char checkout_mark[NK_MAX_PATH + 32];
+        snprintf(checkout, sizeof(checkout), "%s%creset-checkout", native_test_get_root(), sep);
+        snprintf(checkout_mark, sizeof(checkout_mark), "%s%cAGENTS.md", checkout, sep);
+        assert(nk_platform_mkdir_p(checkout));
+        write_text_file(checkout_mark, "checkout\n");
+        assert(strlen(checkout) < sizeof(reset->runtime_root));
+        snprintf(reset->runtime_root, sizeof(reset->runtime_root), "%s", checkout);
         char folders[PLAYER_FACTORY_RESET_FOLDERS][NK_MAX_PATH];
         size_t folder_count =
             player_app_factory_reset_folders(reset, folders, PLAYER_FACTORY_RESET_FOLDERS);
         assert(folder_count >= 1u && folder_count <= 4u);
+        for (size_t i = 0; i < folder_count; ++i) {
+            assert(!native_test_path_within(folders[i], checkout) &&
+                   !native_test_path_within(checkout, folders[i]));
+        }
         for (size_t i = 0; i < folder_count; ++i) {
             for (size_t j = 0; j < folder_count; ++j) {
                 if (i != j) assert(strncmp(folders[i], folders[j], strlen(folders[j])) != 0 ||
@@ -19149,6 +19404,7 @@ int main(int argc, char **argv) {
             assert(found);
         }
         assert(nk_platform_dir_exists(logs_dir));
+        assert(nk_platform_file_exists(checkout_mark));
 
         /* A second reset in the same second keeps the first backup's name. */
         reset->factory_reset_done = false;
@@ -19177,6 +19433,8 @@ int main(int argc, char **argv) {
             assert(nk_rename_utf8(moved, folders[i]) == 0);
         }
         for (size_t i = 0; i < 4u; ++i) remove(marks[i]);
+        assert(nk_platform_file_exists(checkout_mark));
+        assert(nk_platform_remove_tree(checkout, NULL));
         free(reset);
         printf("[PLAYER_STATE_TEST] factory reset PASSED\n");
     }

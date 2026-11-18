@@ -878,15 +878,21 @@ size_t player_display_text_with_home(const char *in, const char *home,
     return used;
 }
 
+/* The user's profile folder (`home`) or account name in UTF-8, the encoding of every path
+   the player shows, logs and reports; "" when unset or too long. On Windows the narrow
+   getenv behind nk_platform_env_home_dir gives ANSI code-page bytes, which never match the
+   UTF-8 path of a profile or name outside ASCII, so the wide environment is read
+   (nk_platform_env_utf8; audit 2026-11-17). The names are nk_platform_env_home_dir's. */
+static void player_user_env_utf8(bool home, char *out, size_t out_size) {
+    bool windows = nk_platform_host_kind() == NK_HOST_WINDOWS;
+    const char *name = home ? (windows ? "USERPROFILE" : "HOME")
+                            : (windows ? "USERNAME" : "USER");
+    if (nk_platform_env_utf8(name, out, out_size) != 1) out[0] = '\0';
+}
+
 size_t player_display_text(const char *in, char *out, size_t out_size) {
-    static char home[MAX_PATH_LEN];
-    static bool home_ready;
-    if (!home_ready) {
-        const char *value = nk_platform_env_home_dir();
-        if (value) snprintf(home, sizeof(home), "%s", value);
-        else home[0] = '\0';
-        home_ready = true;
-    }
+    char home[MAX_PATH_LEN];
+    player_user_env_utf8(true, home, sizeof(home));
     return player_display_text_with_home(in, home, out, out_size);
 }
 
@@ -975,6 +981,11 @@ int player_app_find_built_game(const PlayerApp *app, const char *disc_id,
         index = player_app_find_game_by_disc_id(app, disc_id);
     }
     return index;
+}
+
+int player_app_error_subject_index(const PlayerApp *app, const ErrorState *error) {
+    if (!app || !error || !error->subject_disc_id[0]) return -1;
+    return player_app_find_built_game(app, error->subject_disc_id, error->subject_iso_path);
 }
 
 int player_app_find_package_card(const PlayerApp *app, const GameRecord *game) {
@@ -2885,7 +2896,7 @@ static bool player_monitor_game_start(PlayerApp *app, uint64_t now_ms) {
         if (nk_launch_keep_run_log(app->boot_event_file_path, disc_id,
                                    kept_log, sizeof(kept_log))) {
             player_dev_log_add(app, "runtime", "game output kept in %s", kept_log);
-            remove(app->boot_event_file_path);
+            (void)nk_remove_utf8(app->boot_event_file_path);
         } else {
             player_dev_log_add(app, "runtime", "game output could not be kept in the logs folder");
         }
@@ -4151,9 +4162,19 @@ bool player_dev_log_redact(const char *in, const char *profile, const char *user
     return fits;
 }
 
-static void player_dev_log_identity(const char **profile, const char **user) {
-    *profile = nk_platform_env_home_dir();
-    *user = nk_platform_env_user_name();
+/* The profile folder and user name the redaction takes out, read in UTF-8 as the text it
+   searches is (player_user_env_utf8), into the caller's buffers; NULL for one unset. */
+typedef struct {
+    char profile[MAX_PATH_LEN];
+    char user[256];
+} PlayerUserIdentity;
+
+static void player_dev_log_identity(PlayerUserIdentity *identity, const char **profile,
+                                    const char **user) {
+    player_user_env_utf8(true, identity->profile, sizeof(identity->profile));
+    player_user_env_utf8(false, identity->user, sizeof(identity->user));
+    *profile = identity->profile[0] ? identity->profile : NULL;
+    *user = identity->user[0] ? identity->user : NULL;
 }
 
 void player_dev_log_add(PlayerApp *app, const char *source, const char *fmt, ...) {
@@ -4177,7 +4198,8 @@ void player_dev_log_add(PlayerApp *app, const char *source, const char *fmt, ...
     for (char *c = raw; *c; ++c) {
         if (*c == '\r' || *c == '\n' || *c == '\t') *c = ' ';
     }
-    player_dev_log_identity(&profile, &user);
+    PlayerUserIdentity identity;
+    player_dev_log_identity(&identity, &profile, &user);
     (void)player_dev_log_redact(raw, profile, user, text, sizeof(text));
     if (app->dev_log.count < PLAYER_DEV_LOG_LINES) {
         slot = (app->dev_log.head + app->dev_log.count) % PLAYER_DEV_LOG_LINES;
@@ -4246,7 +4268,8 @@ bool player_dev_log_save(PlayerApp *app) {
     if (file && fclose(file) != 0) ok = false;
     if (ok) {
         char shown[sizeof(app->dev_log.notice)];
-        player_dev_log_identity(&profile, &user);
+        PlayerUserIdentity identity;
+        player_dev_log_identity(&identity, &profile, &user);
         (void)player_dev_log_redact(path, profile, user, shown, sizeof(shown));
         snprintf(app->dev_log.notice, sizeof(app->dev_log.notice), "Saved to %.200s", shown);
     } else {
@@ -4405,6 +4428,27 @@ static bool player_removal_add(PlayerRemovalPlan *plan, PlayerRemovalKind kind,
     return true;
 }
 
+/* Lists packages/ for one title's enhanced builds: the folders named prefix
+   ("<DISC>-enhanced-") and a valid variant. */
+typedef struct {
+    PlayerRemovalPlan *plan;
+    const char *build_root;
+    char prefix[NK_MAX_DISC_ID_LEN + 16];
+    size_t prefix_length;
+    bool ok;
+} PlayerRemovalVariantScan;
+
+static bool player_removal_variant_entry(const char *name, bool is_dir, void *ctx) {
+    PlayerRemovalVariantScan *scan = (PlayerRemovalVariantScan *)ctx;
+    if (!is_dir || strncmp(name, scan->prefix, scan->prefix_length) != 0 ||
+        !nk_title_manifest_enhancement_variant_valid(name + scan->prefix_length)) {
+        return true;
+    }
+    scan->ok = player_removal_add(scan->plan, PLAYER_REMOVAL_PACKAGE, PLAYER_REMOVAL_ALWAYS,
+                                  NULL, scan->build_root, "packages", name, NULL) && scan->ok;
+    return true;
+}
+
 bool player_app_plan_game_removal(const PlayerApp *app, int game_index,
                                   PlayerRemovalPlan *plan) {
     if (!plan) return false;
@@ -4432,14 +4476,28 @@ bool player_app_plan_game_removal(const PlayerApp *app, int game_index,
     if (have_build) {
         ok = player_removal_add(plan, PLAYER_REMOVAL_PACKAGE, PLAYER_REMOVAL_ALWAYS, NULL,
                                 build_root, "packages", disc, NULL) && ok;
-        /* The title's enhanced build, when its enhancement package names one. */
-        const PlayerTitleEnhancement *enhancement = &app->title_enhancements[game_index];
-        char enhanced_folder[NK_MAX_DISC_ID_LEN + NK_MAX_ENHANCEMENT_PACKAGE_ID + 16];
-        if (enhancement->available &&
-            nk_title_manifest_package_dir_name(disc, enhancement->package_id, enhanced_folder,
-                                               sizeof(enhanced_folder))) {
-            ok = player_removal_add(plan, PLAYER_REMOVAL_PACKAGE, PLAYER_REMOVAL_ALWAYS, NULL,
-                                    build_root, "packages", enhanced_folder, NULL) && ok;
+        /* Every enhanced build of the title: the timing, culling and timing+culling
+           variants, and one left from a package since removed or replaced. Each is a
+           packages/<DISC>-enhanced-<variant> folder (nk_title_manifest_package_dir_name),
+           so the folder is listed rather than the variants the title offers now, which
+           left the culling builds behind (audit 2026-11-17). */
+        /* A disc ID that is not a PSP one (a homebrew key) has no enhanced build. */
+        char packages_dir[NK_MAX_PATH];
+        PlayerRemovalVariantScan scan = {plan, build_root, "", 0u, true};
+        int n = snprintf(packages_dir, sizeof(packages_dir), "%s%cpackages", build_root,
+                         nk_platform_path_separator());
+        if (n <= 0 || (size_t)n >= sizeof(packages_dir)) {
+            ok = false;
+        } else if (nk_title_manifest_package_dir_name(disc, NULL, scan.prefix,
+                                                      sizeof(scan.prefix))) {
+            size_t used = strlen(scan.prefix);
+            snprintf(scan.prefix + used, sizeof(scan.prefix) - used, "-enhanced-");
+            scan.prefix_length = strlen(scan.prefix);
+            if (nk_platform_dir_exists(packages_dir) &&
+                !nk_platform_list_dir(packages_dir, player_removal_variant_entry, &scan)) {
+                ok = false;
+            }
+            ok = scan.ok && ok;
         }
         ok = player_removal_add(plan, PLAYER_REMOVAL_BUILD_CACHE, PLAYER_REMOVAL_ALWAYS, NULL,
                                 build_root, "cache", "packages", disc) && ok;
@@ -4605,6 +4663,7 @@ bool player_app_remove_game_and_data(PlayerApp *app, int game_index, unsigned al
     }
     /* Saves first when they go, so a kept Memory Stick folder never holds up
        the extracted files around it. */
+    size_t deleted = 0;
     for (int pass = 0; pass < 2; ++pass) {
         for (size_t i = 0; i < plan.path_count; ++i) {
             const PlayerRemovalPath *entry = &plan.paths[i];
@@ -4620,10 +4679,23 @@ bool player_app_remove_game_and_data(PlayerApp *app, int game_index, unsigned al
                 if (locked) nk_platform_file_lock_release(&lock);
                 return false;
             }
+            ++deleted;
         }
     }
     if (locked) nk_platform_file_lock_release(&lock);
-    return player_app_remove_game(app, game_index);
+    /* A card the library file then does not let go of (read-only, locked or a
+       full disk) says so, and says whether its folders are already gone, instead
+       of a failure with no reason that reads as if nothing was removed
+       (audit 2026-11-17). */
+    if (!player_app_remove_game(app, game_index)) {
+        if (error && error_size) {
+            snprintf(error, error_size, "%s the game could not be taken out of the library "
+                     "because the library file could not be updated. Try Remove again.",
+                     deleted > 0 ? "The game's files were deleted, but" : "Nothing was deleted, and");
+        }
+        return false;
+    }
+    return true;
 }
 
 void player_app_set_view(PlayerApp *app, PlayerView view) {
@@ -4789,6 +4861,7 @@ void player_app_set_error(PlayerApp *app, const char *code, const char *title, c
     app->last_error.boundary_text[0] = '\0';
     app->last_error.log_file_path[0] = '\0';
     app->last_error.subject_disc_id[0] = '\0';
+    app->last_error.subject_iso_path[0] = '\0';
     app->last_error.retry = PLAYER_ERROR_RETRY_NONE;
     app->last_error.details_copied = false;
     app->last_error.stop_boundary[0] = '\0';
@@ -5063,7 +5136,9 @@ bool player_app_retry_from_error(PlayerApp *app) {
     if (app->last_error.retry == PLAYER_ERROR_RETRY_DELETE_KEPT) {
         return player_app_delete_kept_from_error(app);
     }
-    int index = player_app_find_game_by_disc_id(app, app->last_error.subject_disc_id);
+    /* The card's own image: by the disc ID alone a retry could start the other
+       image of it (audit 2026-11-17). */
+    int index = player_app_error_subject_index(app, &app->last_error);
     if (index < 0) return false;
     PlayerErrorRetry retry = app->last_error.retry;
     player_dev_log_add(app, "error", "%s: %s for %s", app->last_error.error_code,
@@ -5131,7 +5206,8 @@ size_t player_app_format_error_report(const PlayerApp *app, const char *version,
                                       char *out, size_t out_size) {
     const char *profile = NULL;
     const char *user = NULL;
-    player_dev_log_identity(&profile, &user);
+    PlayerUserIdentity identity;
+    player_dev_log_identity(&identity, &profile, &user);
     return player_app_format_error_report_for(app, version, profile, user, out, out_size);
 }
 
@@ -5151,8 +5227,7 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
     player_report_append(raw, sizeof(raw), &used, "System: ", player_platform_name());
     player_report_append(raw, sizeof(raw), &used, "Problem: ", error->title);
     player_report_append(raw, sizeof(raw), &used, "Code: ", error->error_code);
-    int index = error->subject_disc_id[0]
-        ? player_app_find_game_by_disc_id(app, error->subject_disc_id) : -1;
+    int index = player_app_error_subject_index(app, error);
     if (index >= 0) {
         player_report_append(raw, sizeof(raw), &used, "Game: ", app->games[index].title_name);
     }
@@ -5492,7 +5567,8 @@ bool player_app_report_url(const PlayerApp *app, int game_index, const ErrorStat
         game->title_name, game->disc_id, game->disc_version, version,
         player_platform_name(), problem
     };
-    player_dev_log_identity(&profile, &user);
+    PlayerUserIdentity identity;
+    player_dev_log_identity(&identity, &profile, &user);
     return player_report_discussion_url(&facts, profile, user, out, out_size);
 }
 
@@ -5643,6 +5719,11 @@ void player_app_set_game_stop_error(PlayerApp *app, const char *code,
     if (disc_id && disc_id[0]) {
         snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id),
                  "%s", disc_id);
+        /* The image that ran, when this stop is the running game's. */
+        if (strcmp(disc_id, app->launch_session.disc_id) == 0) {
+            snprintf(app->last_error.subject_iso_path, sizeof(app->last_error.subject_iso_path),
+                     "%s", app->running_iso_path);
+        }
         app->last_error.retry = PLAYER_ERROR_RETRY_RESTART_GAME;
     }
     /* What Report this game names: the boundary only in the alphabet the
@@ -5791,13 +5872,15 @@ static bool player_prepare_boot_event_file(PlayerApp *app) {
         return false;
     }
 
-    int removal_result = remove(app->boot_event_file_path);
-    /* An absent marker is the only expected remove() failure. Any other
+    /* The path is UTF-8 under the cache folder: the narrow remove() misreads a
+       folder name outside the ANSI code page on Windows (audit 2026-11-17). */
+    int removal_result = nk_remove_utf8(app->boot_event_file_path);
+    /* An absent marker is the only expected removal failure. Any other
        filesystem error leaves the handoff path unproven and must not let a
        stale readable marker authorize launcher minimization. Recheck both
        regular-file and directory paths so a concurrent replacement also
        fails closed. */
-    if ((removal_result != 0 && errno != ENOENT) ||
+    if ((removal_result != 0 && !nk_platform_path_missing(app->boot_event_file_path)) ||
         nk_platform_file_exists(app->boot_event_file_path) ||
         nk_platform_dir_exists(app->boot_event_file_path)) {
         app->boot_event_file_path[0] = '\0';
@@ -5877,6 +5960,8 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
             if (have_key) {
                 snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id),
                          "%s", game->disc_id);
+                snprintf(app->last_error.subject_iso_path,
+                         sizeof(app->last_error.subject_iso_path), "%s", game->iso_path);
                 app->last_error.retry = PLAYER_ERROR_RETRY_WITHOUT_PACK;
             }
             return false;
@@ -6071,7 +6156,7 @@ bool player_app_launch_finish(PlayerApp *app, PlayerLaunchWork *work) {
        when the launch prepared app->launch_session in place. */
     app->launch_session = work->session;
     if (work->failed_step == PLAYER_LAUNCH_STEP_PREPARE) {
-        if (app->boot_event_file_path[0]) remove(app->boot_event_file_path);
+        if (app->boot_event_file_path[0]) (void)nk_remove_utf8(app->boot_event_file_path);
         const char *err_code = "RUNTIME_NOT_FOUND";
         const char *err_title = "Recompiled game not available";
         if (work->result == NK_ERROR_INVALID_EXECUTABLE) {
@@ -6095,7 +6180,7 @@ bool player_app_launch_finish(PlayerApp *app, PlayerLaunchWork *work) {
         return false;
     }
     if (work->failed_step == PLAYER_LAUNCH_STEP_START) {
-        if (app->boot_event_file_path[0]) remove(app->boot_event_file_path);
+        if (app->boot_event_file_path[0]) (void)nk_remove_utf8(app->boot_event_file_path);
         /* Windows Security or a policy refused the game's program: say so, and
            name what Windows reported, instead of a generic launch failure. */
         NkSpawnBlockReport block;
@@ -6124,12 +6209,15 @@ bool player_app_launch_finish(PlayerApp *app, PlayerLaunchWork *work) {
     /* What Discord status shows while it runs (#2259): the title from the disc's own
        metadata, the play mode and the start time; nothing else about the game or the PC. */
     snprintf(app->running_title, sizeof(app->running_title), "%s", work->game.title_name);
+    snprintf(app->running_iso_path, sizeof(app->running_iso_path), "%s", work->game.iso_path);
     app->running_play_mode = work->play_mode;
     app->running_start_ms = (int64_t)time(NULL) * 1000;
     /* The library may have changed while the work ran: find the game again. */
     if (game_index < 0 || game_index >= app->game_count ||
-        strcmp(app->games[game_index].disc_id, work->game.disc_id) != 0) {
-        game_index = player_app_find_game_by_disc_id(app, work->game.disc_id);
+        strcmp(app->games[game_index].disc_id, work->game.disc_id) != 0 ||
+        strcmp(app->games[game_index].iso_path, work->game.iso_path) != 0) {
+        /* Its own image: another card can have the same disc ID (audit 2026-11-17). */
+        game_index = player_app_find_built_game(app, work->game.disc_id, work->game.iso_path);
     }
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
@@ -6320,7 +6408,7 @@ void player_app_stop_game(PlayerApp *app) {
                                    kept_log, sizeof(kept_log))) {
             player_dev_log_add(app, "runtime", "game output kept in %s", kept_log);
         }
-        remove(app->boot_event_file_path);
+        (void)nk_remove_utf8(app->boot_event_file_path);
     }
 }
 
@@ -6349,7 +6437,7 @@ void player_app_stop_stalled_game(PlayerApp *app) {
         if (nk_launch_keep_run_log(app->boot_event_file_path, disc_id,
                                    kept_log, sizeof(kept_log))) {
             player_dev_log_add(app, "runtime", "game output kept in %s", kept_log);
-            remove(app->boot_event_file_path);
+            (void)nk_remove_utf8(app->boot_event_file_path);
         } else {
             player_dev_log_add(app, "runtime",
                                "game output could not be kept in the logs folder");
@@ -6812,7 +6900,7 @@ bool player_app_monitor_game_session(PlayerApp *app, uint64_t now_ms) {
         }
     }
     if (app->boot_event_file_path[0] && (kept_log[0] || !runtime_failed)) {
-        remove(app->boot_event_file_path);
+        (void)nk_remove_utf8(app->boot_event_file_path);
     }
     const char *run_log = kept_log[0] ? kept_log : app->boot_event_file_path;
     printf("[PLAYER] Game process exited with code %d (ran for %llu ms)\n", code,
@@ -7335,13 +7423,12 @@ size_t player_app_factory_reset_folders(const PlayerApp *app, char out[][NK_MAX_
             ++count;
         }
     }
-    if (app && app->runtime_root[0] && nk_platform_dir_exists(app->runtime_root) &&
-        strlen(app->runtime_root) < sizeof(found[count])) {
-        snprintf(found[count], sizeof(found[count]), "%s", app->runtime_root);
-        ++count;
-    }
+    /* A runtime root (--runtime-root) is not one of them: it can be a checkout or an
+       install folder, whose own files a reset must never move. One inside these
+       folders goes with them (audit 2026-11-17). */
+    (void)app;
     /* Only the outermost folders move: a folder inside another (saves inside
-       data on Linux, a runtime root inside the data folder) goes with it. */
+       data on Linux) goes with it. */
     size_t kept = 0;
     for (size_t i = 0; i < count; ++i) {
         bool inner = false;
@@ -8412,6 +8499,8 @@ void player_app_set_build_error(
     if (app->build_session.disc_id[0]) {
         snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id),
                  "%s", app->build_session.disc_id);
+        snprintf(app->last_error.subject_iso_path, sizeof(app->last_error.subject_iso_path),
+                 "%s", app->build_session.iso_path);
         app->last_error.retry = PLAYER_ERROR_RETRY_BUILD;
     }
     if (failed_stage) {
@@ -8446,6 +8535,8 @@ void player_app_set_package_revalidation_error(PlayerApp *app, const char *reaso
     if (app->build_session.disc_id[0]) {
         snprintf(app->last_error.subject_disc_id, sizeof(app->last_error.subject_disc_id),
                  "%s", app->build_session.disc_id);
+        snprintf(app->last_error.subject_iso_path, sizeof(app->last_error.subject_iso_path),
+                 "%s", app->build_session.iso_path);
         app->last_error.retry = PLAYER_ERROR_RETRY_BUILD;
     }
     if (log_file_path) {

@@ -568,6 +568,9 @@ typedef struct {
     char log_file_path[MAX_PATH_LEN];
     /* The game the card is about, for its retry action; "" for none. */
     char subject_disc_id[32];
+    /* That card's own image when it is known, "" otherwise: two images can
+       share a disc ID (player_app_error_subject_index). */
+    char subject_iso_path[MAX_PATH_LEN];
     PlayerErrorRetry retry;
     /* Copy details has put this card's report on the clipboard. */
     bool details_copied;
@@ -1178,6 +1181,9 @@ struct PlayerApp {
     /* The added images waiting for their disc check, and the one running. */
     PlayerDiscCheckState disc_check;
 
+    /* The library image the running game was started from (its card's iso_path):
+       a card raised when it stops names that image, not only its disc ID. */
+    char running_iso_path[NK_MAX_PATH];
     /* Discord status (#2259): what the running game shows, set when it starts, and the
        client that sends it (player_app_discord_tick). */
     char running_title[NK_MAX_TITLE_LEN];
@@ -1255,7 +1261,9 @@ typedef enum {
     PLAYER_REMOVAL_KIND_COUNT
 } PlayerRemovalKind;
 
-#define PLAYER_REMOVAL_PATH_CAP 16
+/* The fixed folders (eleven at most) and the title's enhanced builds, one folder
+   per variant left in packages/. */
+#define PLAYER_REMOVAL_PATH_CAP 32
 
 typedef struct {
     char path[NK_MAX_PATH];
@@ -2028,6 +2036,10 @@ int player_app_find_added_game(const PlayerApp *app, const GameRecord *game);
    when two images share the disc ID and neither names the file. */
 int player_app_find_built_game(const PlayerApp *app, const char *disc_id,
                                const char *iso_path);
+/* The card an error card is about (subject_disc_id, and subject_iso_path when
+   the card set it), by player_app_find_built_game's rule; -1 for none, or when
+   two images share the disc ID and the card does not name its image. */
+int player_app_error_subject_index(const PlayerApp *app, const ErrorState *error);
 /* The card a package check of game is for: the same package and image, or else
    the first card of that package. Two images of a disc ID share its package
    folder, and each card's check lands on its own card. */
@@ -2497,8 +2509,9 @@ void player_app_remove_prerequisites(PlayerApp *app);
 /* Factory reset: the player goes back to a first run by
  * moving its user data aside, never by deleting it. The folders that move are
  * the config, data, cache and saves folders (library, settings, saves,
- * imported PSP fonts, keys, built games and downloaded build tools), and the
- * runtime root when one is set; a folder inside another one moves with it.
+ * imported PSP fonts, keys, built games and downloaded build tools); a folder
+ * inside another one moves with it. A runtime root (--runtime-root) does not
+ * move: it can be a checkout or an install folder.
  * Each is renamed in place to
  * "<folder>-backup-<stamp>", so the move is a rename on the same disk and the
  * user can move it back. Logs stay: the player is writing to them.

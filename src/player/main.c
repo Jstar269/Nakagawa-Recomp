@@ -2184,7 +2184,7 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         if (player_error_offers_report(&app->last_error)) {
             player_ui_open_report_link(
                 app, action->kind,
-                player_app_find_game_by_disc_id(app, app->last_error.subject_disc_id),
+                player_app_error_subject_index(app, &app->last_error),
                 &app->last_error);
         }
         return;
