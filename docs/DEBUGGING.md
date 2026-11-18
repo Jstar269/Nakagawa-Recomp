@@ -1003,6 +1003,15 @@ keeps the original behaviour exactly, and a file mixing the two is refused.
 | `STICK <lx> <ly> <step>` | Hold the left stick at `lx`, `ly` (decimal 0-255, 128 centred) while that `PRESS`, `PRESS_UNTIL`, `PRESS_WHILE` or `PRESS_UNTIL_NID` presses; comes before `READS` / `VBLANKS` ([below](#holding-the-left-stick)) |
 | `END` | Route complete |
 
+Every count (widths, periods, timeouts, `DELAY`, `SAMPLE_EVERY`, `TOLERANCE`, `tol=` and the
+legacy row's frame and width) is plain decimal digits and nothing else: `-1`, `12x` or `abc` refuses
+the file at load rather than becoming a near-endless hold, `12` or `0`. Every step that names a
+checkpoint (`WAIT`, `EXPECT`, `PRESS_UNTIL`, `PRESS_WHILE`) must name one a `CHECKPOINT` line
+defines. All recordings of one checkpoint share one tolerance, so an alternate whose tolerance
+(its `tol=`, or `TOLERANCE` without one) differs from an earlier recording's is refused. A route
+file `SR_PADSCRIPT` names that cannot be opened, or that holds no step, fails the run with
+`ROUTE_FAIL:` and status 86 instead of running unscripted on the automatic START pulse.
+
 A mask is either a button name (see [Naming the buttons a route presses](#naming-the-buttons-a-route-presses))
 or a hex literal of at most eight digits with an optional `0x` prefix. Anything else refuses
 the file at load, naming the line and the token, in `PRESS`, `PRESS_UNTIL`, `PRESS_WHILE` and
