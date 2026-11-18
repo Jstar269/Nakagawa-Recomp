@@ -131,14 +131,26 @@ uint32_t psmf_av_texture_bytes(uint32_t bufw, uint32_t h, uint32_t fmt) {
 /* Issue #279: the media fixture asserts the exact published counter line -- the same bytes
  * a run writes on stderr -- without scraping a shared stream.  psmf_log_summary() records
  * the last line it printed here and counts them, so a test can tell a fresh line from a
- * stale one.  Test-only; the production build carries neither the buffer nor the count. */
+ * stale one.  It also keeps the most recent PSMF_SUMMARY_LINE_HISTORY lines by publish
+ * number, so a sampler that runs after several getter calls checks every line they
+ * published, not only the newest.  Test-only; the production build carries neither the
+ * buffers nor the count. */
 #define PSMF_SUMMARY_LINE_CAPACITY 4096u
+#define PSMF_SUMMARY_LINE_HISTORY 16u
 #define PSMF_REJECTION_LINE_CAPACITY 512u
 static char s_psmf_last_summary[PSMF_SUMMARY_LINE_CAPACITY];
+static char s_psmf_summary_history[PSMF_SUMMARY_LINE_HISTORY][PSMF_SUMMARY_LINE_CAPACITY];
 static uint32_t s_psmf_summary_count;
 static char s_psmf_last_rejection[PSMF_REJECTION_LINE_CAPACITY];
 const char *sr_hle_test_psmf_last_summary(void) { return s_psmf_last_summary; }
 uint32_t sr_hle_test_psmf_summary_count(void) { return s_psmf_summary_count; }
+/* The line published as number `seq` (0 is the first line of the process), or NULL when it
+ * was not published yet or has already left the history. */
+const char *sr_hle_test_psmf_summary_line(uint32_t seq) {
+    if (seq >= s_psmf_summary_count || s_psmf_summary_count - seq > PSMF_SUMMARY_LINE_HISTORY)
+        return NULL;
+    return s_psmf_summary_history[seq % PSMF_SUMMARY_LINE_HISTORY];
+}
 #else
 #define PSMF_SUMMARY_LINE_CAPACITY 4096u
 #endif
@@ -234,6 +246,8 @@ static void psmf_log_summary(SrPsmfPlayer *p) {
     fputs(line, stderr);
 #ifdef SR_MPEG_MEDIA_SELFTEST
     memcpy(s_psmf_last_summary, line, (size_t)formatted + 1u);
+    memcpy(s_psmf_summary_history[s_psmf_summary_count % PSMF_SUMMARY_LINE_HISTORY], line,
+           (size_t)formatted + 1u);
     s_psmf_summary_count++;
 #endif
 }

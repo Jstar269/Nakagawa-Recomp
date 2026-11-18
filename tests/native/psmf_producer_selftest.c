@@ -234,8 +234,11 @@ static const uint8_t k_picture3_body[2] = {0x33, 0x33};
 static const uint8_t k_aud[4] = {0, 0, 1, 0x09};
 static const uint8_t k_sps[6] = {0, 0, 1, 0x67, 0x4d, 0x40};
 
+/* Bytes of the incomplete third ATRAC frame that ends the fixture's audio stream. */
+#define FIXTURE_AUDIO_TAIL 20u
+
 /* Build a 4-picture annex-B stream split over three video PES packets, plus two
- * ATRAC frames spread over two audio PES packets. */
+ * ATRAC frames and a truncated third one spread over two audio PES packets. */
 static uint8_t *fixture(uint32_t *size_out, int variant) {
     Buf b;
     b.cap = variant == 7 ? 131072u : 65536u;
@@ -310,6 +313,10 @@ static uint8_t *fixture(uint32_t *size_out, int variant) {
     Buf aes = { abuf, 0, sizeof(abuf), 0 };
     audio_frame(&aes, 0x28, 6, 0xa5);      /* 64 bytes total */
     audio_frame(&aes, 0x28, 7, 0x5a);      /* 72 bytes total */
+    /* The truncated tail: a frame header that declares 64 bytes, then only 12 of its 56
+     * data bytes before the stream ends (FIXTURE_AUDIO_TAIL bytes in all). */
+    raw(&aes, (const uint8_t[]){0x0f, 0xd0, 0x28, 6, 0, 0, 0, 0}, 8);
+    bytes(&aes, 0xc3, FIXTURE_AUDIO_TAIL - 8u);
     CHECK(!aes.overflow, "fixture audio ES fits its buffer");
 
     add_pack(&b);
@@ -494,6 +501,9 @@ static void test_access_unit_formation(void) {
     CHECK(au.data && au.data[8] == 0x5a, "straddling frame body survives the PES cut");
     sr_psmf_au_release(&au);
     CHECK(sr_psmf_producer_pop(p, SR_PSMF_AU_AUDIO, &au) == 0, "truncated trailing frame is not emitted");
+    SrPsmfProducerStats tail; sr_psmf_producer_stats(p, &tail);
+    CHECK(tail.audio_aus == 2 && tail.audio_buffered == FIXTURE_AUDIO_TAIL,
+          "the truncated trailing frame stays buffered, never formed into an access unit");
     /* Picture 2's starting packet has no PTS, picture 3's delimiter begins in that same
      * packet, and the second ATRAC frame starts in the PTS-less audio packet. */
     CHECK(st.aus_without_pts == 3, "PTS-less access units are counted, not invented");
@@ -1030,7 +1040,10 @@ static void test_lifecycle_and_source_failure(void) {
         mem.fail = 1;
         sr_psmf_producer_pump(p, 20);
         sr_psmf_producer_stats(p, &st);
-        CHECK(st.source_failures > 0 || st.parser_failures > 0, "source failure is observable");
+        /* The read error itself must land in source_failures; the parse it stops is also
+         * counted as a parser stop, so parser_failures alone never proves a source failure. */
+        CHECK(st.source_failures > 0 && st.failed,
+              "source failure is observable as a source failure that stops the stream");
         sr_psmf_producer_close(p);
     }
     free(bytes);
@@ -1826,6 +1839,13 @@ static void psmf_drain(SrPsmfProducer *producer) {
         sr_psmf_au_release(&au);
 }
 
+/* Floors that keep the seeded campaign from passing while it exercises nothing.  Measured
+ * from this seed: about 34 % of all iterations open a producer (a third use the refused
+ * INT64_MIN base) and about 11 % reach a clean EOF, at 100, 5000 and 100000 iterations.
+ * Below MUTATION_FLOOR_MIN_ITERATIONS the shares are too noisy to bound. */
+#define MUTATION_OPEN_FLOOR_PERCENT 25u
+#define MUTATION_FLOOR_MIN_ITERATIONS 100u
+
 static void test_seeded_mutation(unsigned iterations) {
     psmf_fuzz_state = 0x319503A11F00D123ULL;
     uint32_t seed_size = 0;
@@ -1882,6 +1902,11 @@ static void test_seeded_mutation(unsigned iterations) {
     free(seed);
     printf("PSMF seeded mutation: %u iterations, %u opened, %u completed, 0 crashes\n",
            iterations, opened, completed);
+    if (iterations >= MUTATION_FLOOR_MIN_ITERATIONS) {
+        CHECK((uint64_t)opened * 100u >= (uint64_t)iterations * MUTATION_OPEN_FLOOR_PERCENT,
+              "mutation campaign opens a producer for its measured share of mutants");
+        CHECK(completed > 0, "mutation campaign drives some mutant to a clean EOF");
+    }
 }
 
 static void test_conformance_corpus(void) {
@@ -2099,14 +2124,28 @@ static void test_pts_advance_no_drift_over_long_run(void) {
 }
 
 int main(int argc, char **argv) {
+    /* --fuzz-iters N: 0 (the make default) runs no seeded mutation; 1-100000 runs that many.
+     * A value that is missing, malformed or out of range, or an unknown argument, is
+     * refused: a mistyped fuzz request must not pass as a run that never fuzzed. */
     unsigned fuzz_iterations = 0;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--fuzz-iters") == 0 && i + 1 < argc) {
-            char *end = NULL;
-            unsigned long value = strtoul(argv[++i], &end, 10);
-            if (end && *end == '\0' && value > 0 && value <= 100000ul) {
-                fuzz_iterations = (unsigned)value;
+        if (strcmp(argv[i], "--fuzz-iters") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "psmf_producer_selftest: --fuzz-iters needs a count (0-100000)\n");
+                return 2;
             }
+            const char *text = argv[++i];
+            char *end = NULL;
+            unsigned long value = strtoul(text, &end, 10);
+            if (text[0] < '0' || text[0] > '9' || !end || *end != '\0' || value > 100000ul) {
+                fprintf(stderr, "psmf_producer_selftest: --fuzz-iters %s is not a count from 0 to 100000\n",
+                        text);
+                return 2;
+            }
+            fuzz_iterations = (unsigned)value;
+        } else {
+            fprintf(stderr, "psmf_producer_selftest: unknown argument %s\n", argv[i]);
+            return 2;
         }
     }
     test_access_unit_formation();

@@ -64,6 +64,7 @@ static void media_skip(const char *what) {
  * fresh line from a stale one. */
 const char *sr_hle_test_psmf_last_summary(void);
 uint32_t sr_hle_test_psmf_summary_count(void);
+const char *sr_hle_test_psmf_summary_line(uint32_t seq);
 int sr_hle_test_psmf_summary_rejects_truncation(void);
 void sr_hle_test_psmf_log_tick(uint32_t guest);
 void sr_hle_test_psmf_log_release(uint32_t guest);
@@ -896,9 +897,18 @@ static void test_media_disposition_conservation(void) {
     sr_psmf_producer_stats(p, &st);
     CHECK(st.video_warmup_held == 1 && st.audio_warmup_held == 1,
           "warm-up outputs remain explicitly accounted while held");
+    const uint64_t held_vout = st.video_delivered, held_aout = st.audio_delivered;
     for (int call = 0; call < 3; call++) {
-        /* The first three synthetic getter calls return NO_DATA without changing a held output. */
-        CHECK(st.video_warmup_held == 1 && st.audio_warmup_held == 1,
+        /* Three NO_DATA getter rounds on the drained stream: a pump at EOS and a pop of each
+         * empty queue produce nothing and must leave both held outputs where they are. */
+        SrPsmfAu none;
+        CHECK(sr_psmf_producer_pump(p, 4) == 0 &&
+                  !sr_psmf_producer_pop(p, SR_PSMF_AU_VIDEO, &none) &&
+                  !sr_psmf_producer_pop(p, SR_PSMF_AU_AUDIO, &none),
+              "a warm-up getter round on the drained stream returns no data");
+        sr_psmf_producer_stats(p, &st);
+        CHECK(st.video_warmup_held == 1 && st.audio_warmup_held == 1 &&
+                  st.video_delivered == held_vout && st.audio_delivered == held_aout,
               "warm-up getter keeps decoded outputs held");
     }
     CHECK(sr_psmf_producer_resolve_warmup_hold(p, SR_PSMF_AU_VIDEO,
@@ -1613,8 +1623,10 @@ static void demux_fuzz_mutate(uint8_t *data, size_t size) {
     }
 }
 
-static void test_legacy_demux_mutations(unsigned iterations) {
-    if (iterations > 128u) iterations = 128u;
+static void test_legacy_demux_mutations(unsigned requested) {
+    /* Each iteration creates a real decoder, so the campaign stops at 128; the summary line
+     * names both the request and the count that ran. */
+    unsigned iterations = requested > 128u ? 128u : requested;
     demux_fuzz_state = 0x3194844345584D58ULL;
     uint32_t au_off[FIX_PICTURES], au_len[FIX_PICTURES];
     uint32_t size = 0;
@@ -1651,8 +1663,8 @@ static void test_legacy_demux_mutations(unsigned iterations) {
     }
     free(mutated);
     free(bytes);
-    printf("Legacy MPEG-PS/H.264 mutation: %u iterations, %u executed, 0 crashes\n",
-           iterations, attempted);
+    printf("Legacy MPEG-PS/H.264 mutation: %u iterations (requested %u, capped at 128), "
+           "%u executed, 0 crashes\n", iterations, requested, attempted);
 }
 
 /* A malformed audio track must leave the video track alone. */
@@ -3998,15 +4010,23 @@ static int s_av_ckpt_n;
 static int s_av_eof_seen;
 static uint32_t s_av_seen_summaries;
 
-/* Read every counter line published since the previous sample and run the issue #279
- * acceptance checks on it: conservation of both disposition censuses at a production
- * snapshot, the ring-loss invariant, and both presentation clocks against the authored
- * timelines at the guest-getter boundary. */
+static void av_check_summary_line(const char *line);
+
+/* Read every counter line published since the previous sample, oldest first, and run the
+ * issue #279 acceptance checks on each: conservation of both disposition censuses at a
+ * production snapshot, the ring-loss invariant, and both presentation clocks against the
+ * authored timelines at the guest-getter boundary.  A line that left the seam's history
+ * before it was read is a failure, never a line that silently goes unchecked. */
 static void av_sample_summaries(void) {
     uint32_t count = sr_hle_test_psmf_summary_count();
-    if (count == s_av_seen_summaries) return;
-    s_av_seen_summaries = count;
-    const char *line = sr_hle_test_psmf_last_summary();
+    for (; s_av_seen_summaries != count; s_av_seen_summaries++) {
+        const char *line = sr_hle_test_psmf_summary_line(s_av_seen_summaries);
+        CHECK(line != NULL, "every published counter line is still readable when it is sampled");
+        if (line) av_check_summary_line(line);
+    }
+}
+
+static void av_check_summary_line(const char *line) {
     long long vsub = 0, vdec = 0, vout = 0, vhold = 0, veos = 0, vrej = 0;
     long long asub = 0, adec = 0, aout = 0, ahold = 0, aeos = 0, arej = 0;
     long long frames = 0, eof = 0, failed = 0, vts = 0, ats = 0;
@@ -6677,8 +6697,9 @@ static void test_atrac_channel_count_refusal(void) {
     }
 }
 
-static void test_atrac_riff_mutations(unsigned iterations) {
-    if (iterations > 20000u) iterations = 20000u;
+static void test_atrac_riff_mutations(unsigned requested) {
+    /* The campaign stops at 20000; its summary line names both the request and the count that ran. */
+    unsigned iterations = requested > 20000u ? 20000u : requested;
     atrac_fuzz_state = 0x41545241435249FFULL;
     uint8_t *track_bytes = (uint8_t *)SR_HOST(ATRAC_FUZZ_TRACK);
     unsigned seeds_accepted = 0, accepted = 0, driven_intact = 0;
@@ -6741,8 +6762,9 @@ static void test_atrac_riff_mutations(unsigned iterations) {
     }
     CHECK(seeds_accepted == iterations, "atrac-fuzz: every unmutated seed track is accepted");
     CHECK(driven_intact == accepted, "atrac-fuzz: no call writes outside the guest words it returns");
-    printf("ATRAC RIFF mutation: %u iterations, %u/%u seeds accepted, %u tracks "
-           "accepted and driven, 0 crashes\n", iterations, seeds_accepted, iterations, accepted);
+    printf("ATRAC RIFF mutation: %u iterations (requested %u, capped at 20000), %u/%u seeds "
+           "accepted, %u tracks accepted and driven, 0 crashes\n",
+           iterations, requested, seeds_accepted, iterations, accepted);
 }
 
 /* ---- the recorder's production audio hooks (#1273, #2080 review) ------------------------
@@ -6835,7 +6857,14 @@ static int videorec_audio_hooks(const char *dir, const char *which) {
         fclose(f);
     }
     CHECK(samples > 0, "videorec-audio: audio.wav holds the recording's samples");
-    CHECK(matching >= 1000, "videorec-audio: the guest's block reached audio.wav through the hook");
+    /* Both PB_FRAMES blocks reach audio.wav: 4096 matching frames on the 44.1 kHz paths
+     * (measured exactly), and on the SRC path their 48 kHz -> 44.1 kHz resampling, about 3763,
+     * less the resampler's edges (3702 measured).  A dropped or duplicated block misses this
+     * window by about 1900 frames. */
+    const long expected = src ? (long)(2u * PB_FRAMES) * 44100L / 48000L : (long)(2u * PB_FRAMES);
+    const long margin = 128;
+    CHECK(matching >= expected - margin && matching <= expected + margin,
+          "videorec-audio: both of the guest's blocks reached audio.wav through the hook, once each");
     printf("videorec-audio %s: samples=%ld matching=%ld\n", which, samples, matching);
     return failures ? 1 : 0;
 }
@@ -6843,21 +6872,37 @@ static int videorec_audio_hooks(const char *dir, const char *which) {
 int main(int argc, char **argv) {
     sr_perf_init();
     sr_flight_init();
+    /* --fuzz-iters N: 0 (the make default) runs no legacy demux fuzz and 100 ATRAC
+     * mutations; 1-100000 runs both campaigns, each up to its own cap.  A value that is
+     * missing, malformed or out of range, or an unknown argument, is refused: a mistyped
+     * fuzz request must not pass as a run that never fuzzed. */
     unsigned fuzz_iterations = 0;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--fuzz-iters") == 0 && i + 1 < argc) {
-            char *end = NULL;
-            unsigned long value = strtoul(argv[++i], &end, 10);
-            if (end && *end == '\0' && value > 0 && value <= 100000ul) {
-                fuzz_iterations = (unsigned)value;
+    const int videorec_run = argc == 4 && strcmp(argv[1], "--videorec-audio") == 0;
+    for (int i = 1; i < argc && !videorec_run; i++) {
+        if (strcmp(argv[i], "--fuzz-iters") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "psmf_media_selftest: --fuzz-iters needs a count (0-100000)\n");
+                return 2;
             }
+            const char *text = argv[++i];
+            char *end = NULL;
+            unsigned long value = strtoul(text, &end, 10);
+            if (text[0] < '0' || text[0] > '9' || !end || *end != '\0' || value > 100000ul) {
+                fprintf(stderr, "psmf_media_selftest: --fuzz-iters %s is not a count from 0 to 100000\n",
+                        text);
+                return 2;
+            }
+            fuzz_iterations = (unsigned)value;
+        } else {
+            fprintf(stderr, "psmf_media_selftest: unknown argument %s\n", argv[i]);
+            return 2;
         }
     }
     static uint8_t arena[GUEST_VRAM_PREFIX_BYTES + ARENA_BYTES];
     /* SR_HOST maps VRAM at g_mem - 0x04000000, so reserve that prefix in the fixture arena. */
     g_mem = arena + GUEST_VRAM_PREFIX_BYTES;
     memset(arena, 0, sizeof(arena));
-    if (argc == 4 && strcmp(argv[1], "--videorec-audio") == 0)
+    if (videorec_run)
         return videorec_audio_hooks(argv[2], argv[3]);
 
     test_mpeg_log_switch_is_cached();
@@ -6953,12 +6998,21 @@ int main(int argc, char **argv) {
     if (media_skips)
         fprintf(stderr, "note: %d decode cell(s) reported SKIP in an SR_H264_FFMPEG build\n", media_skips);
     CHECK(media_skips == 0, "an SR_H264_FFMPEG build runs every decode cell (no SKIP)");
+#elif defined(_WIN32)
+    /* The Windows build decodes through Media Foundation (h264_mf.c), which every supported
+     * Windows has: a cell that found no decoder there is a regression in decoder creation,
+     * not missing evidence, so it fails here as it fails the hosted Windows step. */
+    if (media_skips)
+        fprintf(stderr, "note: %d decode cell(s) reported SKIP in a Media Foundation build\n", media_skips);
+    CHECK(media_skips == 0, "a Media Foundation build runs every decode cell (no SKIP)");
 #endif
 
     if (failures) {
-        fprintf(stderr, "psmf_media_selftest: %d checks, %d FAILURES\n", checks, failures);
+        fprintf(stderr, "psmf_media_selftest: %d checks, %d FAILURES, %d skipped\n", checks,
+                failures, media_skips);
         return 1;
     }
-    printf("psmf_media_selftest: %d checks, 0 failures\n", checks);
+    /* SKIP is not a pass: the summary names the skipped decode cells next to the checks. */
+    printf("psmf_media_selftest: %d checks, 0 failures, %d skipped\n", checks, media_skips);
     return 0;
 }
