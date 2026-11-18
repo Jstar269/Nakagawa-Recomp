@@ -5138,9 +5138,11 @@ bool nk_title_manifest_identify_build(const char *disc_id, const char *iso_path,
         return true;
     }
     snprintf(out->executable, sizeof(out->executable), "%s", executable_name ? executable_name : "");
-    if (!iso_path || !executable_name ||
-        !iso_executable_sha256_hex(iso_path, executable_name, out->sha256)) {
+    if (!iso_path || !executable_name) {
         out->sha256[0] = '\0';
+    } else if (!iso_executable_sha256_hex(iso_path, executable_name, out->sha256)) {
+        out->sha256[0] = '\0';
+        out->unreadable = true;
     }
     for (int b = 0; b < count; b++) {
         if (strcmp(rows[b].status, "supported") == 0) {
@@ -5175,6 +5177,15 @@ void nk_title_manifest_describe_build(const NkBuildIdentity *id, char *out, size
         snprintf(out, out_size, "Build: %s (refused). %s", id->label, id->reason);
         break;
     case NK_BUILD_UNLISTED:
+        if (id->unreadable) {
+            snprintf(out, out_size,
+                     "This copy's executable PSP_GAME/SYSDIR/%s could not be found or read in "
+                     "the disc image, so its build is unknown; it runs as experimental and the "
+                     "game's recorded runtime bindings are not applied.%s%s",
+                     id->executable, id->supported[0] ? " Supported build: " : "",
+                     id->supported);
+            break;
+        }
         snprintf(out, out_size,
                  "This copy's executable is not a build Nakagawa has recorded for this game, "
                  "so it runs as experimental and the game's recorded runtime bindings are not applied.%s%s",
@@ -5242,8 +5253,9 @@ static bool package_validate_variant(const JsonNode *package,
     return true;
 }
 
-/* A validation the host cancelled fails with that reason, whatever check the
-   abandoned hash fell through to. Only a valid package is ever cached. */
+/* A validation the host cancelled fails with that reason and
+   NK_RUNTIME_PACKAGE_UNKNOWN, whatever check the abandoned hash fell through
+   to: it says nothing about the package. Only a valid package is ever cached. */
 static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
     const char *user_data_root,
     const char *disc_id,
@@ -5283,6 +5295,7 @@ NkRuntimePackageStatus nk_title_manifest_validate_aot_package(
         if (reason && reason_size) {
             snprintf(reason, reason_size, "Package validation was cancelled.");
         }
+        return NK_RUNTIME_PACKAGE_UNKNOWN;
     }
     return status;
 }
@@ -5434,7 +5447,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         if (out_info) *out_info = resolved_info;
         if (reason && reason_size) {
             snprintf(reason, reason_size,
-                     "Runtime package v2 is valid for %s.", normalized);
+                     "Runtime package is valid for %s.", normalized);
         }
         return NK_RUNTIME_PACKAGE_OK;
     }
@@ -5520,7 +5533,9 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         }
     }
 
-    char resolved_executable[NK_MAX_PATH];
+    /* Resolved under the package root's own bound, so a path past the player's
+       limit is reported as that below, not as a missing or escaping file. */
+    char resolved_executable[NK_MAX_PATH * 2];
     if (!package_direct_file(package_root, exe_relative, resolved_executable,
                               sizeof(resolved_executable))) {
         package_rebuild_reason(reason, reason_size,
@@ -5535,7 +5550,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         ? (size_t)(extension - exe_relative) : strlen(exe_relative);
     int image_name_length = snprintf(image_relative, sizeof(image_relative),
                                      "%.*s_image.bin", (int)stem_length, exe_relative);
-    char resolved_image[NK_MAX_PATH];
+    char resolved_image[NK_MAX_PATH * 2];
     if (image_name_length <= 0 || (size_t)image_name_length >= sizeof(image_relative) ||
         !package_direct_file(package_root, image_relative, resolved_image,
                              sizeof(resolved_image))) {
@@ -5545,7 +5560,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         return NK_RUNTIME_PACKAGE_MISSING;
     }
 
-    char report_path[NK_MAX_PATH];
+    char report_path[NK_MAX_PATH * 2];
     char *report_text = NULL;
     size_t report_length = 0;
     bool report_exceeds_limit = false;
@@ -5623,7 +5638,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         }
     }
     if (out_info) *out_info = resolved_info;
-    if (reason && reason_size) snprintf(reason, reason_size, "Runtime package v1 is valid for %s.", normalized);
+    if (reason && reason_size) snprintf(reason, reason_size, "Runtime package is valid for %s.", normalized);
     return NK_RUNTIME_PACKAGE_OK;
 }
 

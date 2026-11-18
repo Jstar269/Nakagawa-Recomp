@@ -25,6 +25,7 @@ void sr_oor(uint32_t address, uint32_t value, int store) {
 
 #include "nk_input_profile.h"
 #include "nk_platform.h"
+#include "nk_user_data_schema.h"
 
 /* Scratch root for the files this test writes: the checkout's build/ by default, or
  * the BUILD_ROOT the Makefile passes as -DSR_SELFTEST_BUILD_ROOT, so a scratch run never
@@ -3548,7 +3549,58 @@ static void test_versioned_profile_files(void) {
     char *kept = versioned_read(path);
     assert(kept != NULL && strcmp(kept, newer) == 0);
     free(kept);
+
+    /* A profile that is there but cannot be read is never replaced: its version is
+     * unknown and may be a newer player's. No memory to read it into, and (on
+     * Windows) a sharing violation on open, stand in for a failed open or read. */
+    long found = 0;
+    assert(nk_user_data_prepare_replace(path, NK_INPUT_PROFILE_SCHEMA_VERSION,
+                                        SIZE_MAX / 2u, &found) == NK_ERROR_IO);
+    assert(found == NK_USER_DATA_VERSION_IO_FAILED);
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE locked = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(locked != INVALID_HANDLE_VALUE);
+    found = 0;
+    assert(nk_user_data_prepare_replace(path, NK_INPUT_PROFILE_SCHEMA_VERSION,
+                                        NK_INPUT_PROFILE_MAX_FILE_BYTES, &found) ==
+           NK_ERROR_IO);
+    assert(found == NK_USER_DATA_VERSION_IO_FAILED);
+    assert(CloseHandle(locked));
+#endif
+    kept = versioned_read(path);
+    assert(kept != NULL && strcmp(kept, newer) == 0);
+    free(kept);
     remove(path);
+
+    /* A newer profile over this build's size bound (a later player may allow a
+     * larger one) is kept byte for byte as .unreadable.bak before a save replaces it. */
+    {
+        const char *large_path = VERSIONED_PROFILE_ROOT "/profile_oversize.json";
+        const char *large_backup =
+            VERSIONED_PROFILE_ROOT "/profile_oversize.json.unreadable.bak";
+        size_t padding = (size_t)NK_INPUT_PROFILE_MAX_FILE_BYTES + 64u;
+        char *large = (char *)malloc(padding + 128u);
+        assert(large != NULL);
+        int head = snprintf(large, 128u, "{\"schema_version\": %d, \"padding\": \"",
+                            NK_INPUT_PROFILE_SCHEMA_VERSION + 1);
+        assert(head > 0 && head < 100);
+        memset(large + head, 'x', padding);
+        memcpy(large + (size_t)head + padding, "\"}\n", 4u);
+        remove(large_backup);
+        versioned_write(large_path, large);
+        nk_input_profile_file_init_default(&doc);
+        assert(nk_input_profile_file_save(&doc, large_path, diag, sizeof(diag)) == NK_OK);
+        char *backed_up = versioned_read(large_backup);
+        assert(backed_up != NULL && strcmp(backed_up, large) == 0);
+        char *replaced = versioned_read(large_path);
+        assert(replaced != NULL && strstr(replaced, "\"schema_version\": 6,") != NULL);
+        free(backed_up);
+        free(replaced);
+        free(large);
+        remove(large_backup);
+        remove(large_path);
+    }
     printf("[INPUT_PROFILE_TEST] Versioned files PASSED!\n");
 }
 

@@ -575,6 +575,12 @@ one rule (`src/core/nk_user_data_schema.h`) governs each writer:
   replaced: the session runs on defaults, the screen says why, and every save
   over it is refused with `NK_ERROR_NEWER_SCHEMA`. Returning to the newer player
   finds the file as it left it.
+* A file that is there but cannot be opened or read (another program holds it, a
+  read error) is never replaced: its version is unknown, so the save is refused
+  with `NK_ERROR_IO` and the file is left as it is.
+* A file over the size bound the reader holds it to is first copied, byte for
+  byte, to `<file>.unreadable.bak` (a later player may allow a larger file), and
+  the save does not write when that copy fails.
 * A file with no readable version (empty, damaged, not JSON) is reported, and the
   reader falls back as before (`library.json` to its `.bak`, the others to defaults).
 

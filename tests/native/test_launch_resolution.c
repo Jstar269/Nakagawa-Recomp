@@ -1680,6 +1680,18 @@ static void test_build_identity_run_entry(const char *base, char sep) {
     assert(nk_launch_prepare_session(&session, &game, base) == NK_OK);
     assert(session.entry_point == executable_entry);
 
+    /* An executable the image does not hold is not reported as another build:
+       the card names the read failure, and the recorded bindings stay off. */
+    {
+        char described[512];
+        assert(nk_title_manifest_identify_build(disc_id, listed_iso, "BOOT.BIN", &identity));
+        assert(identity.status == NK_BUILD_UNLISTED && identity.sha256[0] == '\0');
+        nk_title_manifest_describe_build(&identity, described, sizeof(described));
+        assert(strstr(described, "PSP_GAME/SYSDIR/BOOT.BIN could not be found or read") != NULL);
+        assert(strstr(described, "not a build Nakagawa has recorded") == NULL);
+        assert(strstr(described, "Supported build: Recorded fixture build") != NULL);
+    }
+
     nk_title_catalog_clear_overlay();
     remove(manifest_path);
     remove(listed_iso);

@@ -17188,20 +17188,28 @@ int main(int argc, char **argv) {
            it. The cancelled result says so and is never cached: the next
            validation hashes the package again and passes. */
         nk_title_manifest_set_cancel_check(test_cancel_always, NULL);
+        /* A cancelled validation says nothing about the package: UNKNOWN, not
+           the STALE or MISSING its abandoned hash fell through to. */
         assert(nk_launch_validate_runtime_package(
-                   validation_root, &game, &first_info, reason, sizeof(reason)) !=
-               NK_RUNTIME_PACKAGE_OK);
+                   validation_root, &game, &first_info, reason, sizeof(reason)) ==
+               NK_RUNTIME_PACKAGE_UNKNOWN);
         assert(strcmp(reason, "Package validation was cancelled.") == 0);
         assert(!first_info.validation_cache_hit && first_info.package_root[0] == '\0');
         nk_title_manifest_set_cancel_check(NULL, NULL);
+        char full_reason[1024];
         assert(nk_launch_validate_runtime_package(
-                   validation_root, &game, &first_info, reason, sizeof(reason)) ==
-               NK_RUNTIME_PACKAGE_OK);
+                   validation_root, &game, &first_info, full_reason,
+                   sizeof(full_reason)) == NK_RUNTIME_PACKAGE_OK);
         assert(!first_info.validation_cache_hit);
         assert(nk_launch_validate_runtime_package(
                    validation_root, &game, &cached_info, reason, sizeof(reason)) ==
                NK_RUNTIME_PACKAGE_OK);
         assert(cached_info.validation_cache_hit);
+        /* The full check and the cache hit report the same thing, and neither
+           names a package schema the package may not have. */
+        assert(strncmp(full_reason, "Runtime package is valid for ",
+                       strlen("Runtime package is valid for ")) == 0);
+        assert(strcmp(full_reason, reason) == 0);
         assert(strcmp(first_info.package_root, cached_info.package_root) == 0);
         assert(strcmp(first_info.executable_path, cached_info.executable_path) == 0);
         assert(strcmp(first_info.image_path, cached_info.image_path) == 0);

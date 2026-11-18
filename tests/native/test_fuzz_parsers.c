@@ -1565,20 +1565,23 @@ static int fuzz_package_completion(char *out, size_t cap, const char *package_pa
     return length;
 }
 
-static void test_fuzz_package(unsigned iters) {
+/* `over_path_limit`: `root` puts the package's executable past the player's
+ * NK_MAX_PATH while the package root itself fits, and the validator must say
+ * the paths exceed the player's limit rather than that the executable is
+ * missing or escapes its package. */
+static void test_fuzz_package_at(const char *root, unsigned iters, bool over_path_limit) {
     static const char fixture_sha[] =
         "f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d";
     static const char disc_id[] = "TEST00001";
     static const char title_id[] = "synthetic-allegrex-v1";
     static const char executable_name[] = "synthetic-allegrex-v1.exe";
-    const char *root = SR_SELFTEST_BUILD_ROOT "/fuzz_package_root";
-    char package_dir[512], package_path[640], report_path[640];
-    char executable_path[768], image_path[768], absolute_root[1024];
+    char package_dir[1024], package_path[1100], report_path[1100];
+    char executable_path[1100], image_path[1100], absolute_root[1024];
     char package_json[8192], package_v3_json[8192], report_json[8192];
     char cache_json[4096], cache_key_json[3072];
     char aot_components_json[1024], generated_components_json[1024], native_components_json[512];
     char aot_digest[65], generated_code_digest[65], native_digest[65];
-    char completion_json[4096], completion_path[768];
+    char completion_json[4096], completion_path[1100];
     char reason[512];
 
     snprintf(package_dir, sizeof(package_dir), "%s%cpackages%c%s", root,
@@ -1714,6 +1717,22 @@ static void test_fuzz_package(unsigned iters) {
     NkRuntimePackageStatus initial_status = nk_title_manifest_validate_aot_package(
         absolute_root, disc_id, NULL, title_id, false, "EBOOT.BIN", NULL, NULL, 2,
         &info, reason, sizeof(reason));
+    if (over_path_limit) {
+        if (initial_status != NK_RUNTIME_PACKAGE_INCOMPATIBLE ||
+            strstr(reason, "Package paths exceed the player path limit.") == NULL) {
+            fprintf(stderr, "[FUZZ] long-path package (%d): %s\n", (int)initial_status, reason);
+        }
+        assert(initial_status == NK_RUNTIME_PACKAGE_INCOMPATIBLE);
+        assert(strstr(reason, "Package paths exceed the player path limit.") != NULL);
+        assert(info.package_root[0] == '\0');
+        remove(package_path);
+        remove(report_path);
+        remove(completion_path);
+        remove(executable_path);
+        remove(image_path);
+        printf("[FUZZ] Package past the player path limit is named as that\n");
+        return;
+    }
     if (initial_status != NK_RUNTIME_PACKAGE_OK) {
         fprintf(stderr, "[FUZZ] package v2 seed rejected (%d): %s\n",
                 (int)initial_status, reason);
@@ -1815,6 +1834,35 @@ static void test_fuzz_package(unsigned iters) {
     printf("[FUZZ] Package v2 JSON completed: %u/%u accepted, %u distinct refusal reasons, "
            "0 crashes\n", accepted, iters, reasons.count);
     fflush(stdout);
+}
+
+static void test_fuzz_package(unsigned iters) {
+    test_fuzz_package_at(SR_SELFTEST_BUILD_ROOT "/fuzz_package_root", iters, false);
+
+    /* A user data root long enough that <root>/packages/TEST00001 fits the
+       player's NK_MAX_PATH and the executable inside it does not. */
+    char long_root[1024];
+    assert(nk_platform_mkdir_p(SR_SELFTEST_BUILD_ROOT "/fuzz_package_long"));
+    assert(nk_platform_absolute_path(SR_SELFTEST_BUILD_ROOT "/fuzz_package_long", long_root,
+                                     sizeof(long_root)));
+    const size_t root_length = 480u;
+    assert(strlen(long_root) + 16u < root_length);
+    while (strlen(long_root) < root_length) {
+        size_t used = strlen(long_root);
+        size_t segment = root_length - used - 1u;
+        if (segment > 120u) segment = 120u;
+        long_root[used] = nk_platform_path_separator();
+        memset(long_root + used + 1u, 'p', segment);
+        long_root[used + 1u + segment] = '\0';
+    }
+    char long_package_dir[1100];
+    snprintf(long_package_dir, sizeof(long_package_dir), "%s%cpackages%cTEST00001", long_root,
+             nk_platform_path_separator(), nk_platform_path_separator());
+    if (nk_platform_path_exceeds_limit(long_package_dir, true)) {
+        printf("[FUZZ] Package path-limit case NOT_RUN: this host limits paths to MAX_PATH\n");
+        return;
+    }
+    test_fuzz_package_at(long_root, 0u, true);
 }
 
 /* -----------------------------------------------------------------------------
