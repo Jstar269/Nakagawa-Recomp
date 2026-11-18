@@ -170,11 +170,30 @@ class FpMutationVerdictTests(unittest.TestCase):
     kills; the real mutant tests below supply the compiler-side evidence.
     """
 
+    def setUp(self) -> None:
+        # The staging tests mock subprocess.run, so the compiler only needs a name; without one,
+        # _build_mutated_selftest's `assert CC is not None` fires on a host with no gcc on PATH.
+        patcher = mock.patch.object(sys.modules[__name__], "CC", CC or "gcc")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _staged(self, **kwargs) -> StagedRun:
         fields = dict(build_rc=0, build_output="", run_rc=1,
                       run_output="FAIL: guest rounding wrong\n")
         fields.update(kwargs)
         return StagedRun(**fields)
+
+    def test_the_mocked_staging_tests_run_on_a_host_without_gcc(self):
+        """The verdict tests mock the compiler, so a host with no gcc on PATH still runs them."""
+        names = ("test_mocked_compiler_failure_never_reaches_execution",
+                 "test_mocked_launch_failure_after_clean_build_is_invalid",
+                 "test_mocked_run_timeout_is_invalid_not_a_kill")
+        result = unittest.TestResult()
+        with mock.patch.object(sys.modules[__name__], "CC", None):
+            for name in names:
+                type(self)(name).run(result)
+        self.assertEqual([str(test) for test, _ in result.errors + result.failures], [])
+        self.assertEqual(result.testsRun, len(names))
 
     def test_build_failure_is_never_a_semantic_kill(self):
         staged = self._staged(build_rc=1, build_output="error: 'sr_rm_to' undeclared",

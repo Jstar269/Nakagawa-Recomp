@@ -809,8 +809,11 @@ class Flash0FontDirRefusalNativeTests(unittest.TestCase):
         project = self.tmp / "project"
         project.mkdir(parents=True, exist_ok=True)
         result = self.run_case(self.tmp, str(project))
-        self.assertIn("project", result["project"] or "")
-        self.assertIn("project", result["again"] or "")
+        # Exactly the configured directory, not any path that happens to contain the word.
+        self.assertTrue(result["project"], result["stderr"])
+        self.assertEqual(Path(result["project"]).resolve(), project.resolve())
+        self.assertTrue(result["again"], result["stderr"])
+        self.assertEqual(Path(result["again"]).resolve(), project.resolve())
         self.assertFalse([text for text in result["stderr"].splitlines() if text.startswith("flash0: SR_FONTDIR")])
 
 
