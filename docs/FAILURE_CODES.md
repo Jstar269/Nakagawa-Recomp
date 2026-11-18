@@ -261,7 +261,7 @@ The **Where** column of each table names the places a code can appear:
 | `CACHE_CLEAR_FAILED` | player | Some files in the shared-library cache could not be removed. |
 | `CANCELLED` | decrypt, disc, player | The operation was cancelled; nothing was kept. |
 | `CLI_NOT_FOUND` | player | The bundled tools folder could not be found. |
-| `DATA_DIR_UNAVAILABLE` | player | Nakagawa's data folder is not available. |
+| `DATA_DIR_UNAVAILABLE` | route, player | Nakagawa's data folder is not available. |
 | `DESTINATION_WRITE_FAILED` | player | A verified download could not be moved into place, or its downloads folder could not be prepared. |
 | `DISK_FULL` | player | The disk is full. |
 | `DISK_WRITE_FAILED` | player | The Python runtime's staging folder could not be prepared, or its files could not be moved into app data. |
