@@ -373,7 +373,7 @@ class TestPackageNotices(unittest.TestCase):
         """A single-string glob (which cannot reach the per-library subdirectories) is a named failure."""
         (self.pkg_dir / "game.exe").write_bytes(b"MZ\0\0exe")
         real = package_notices.load_component_inventory()
-        cases = (
+        cases: tuple[tuple[str, object], ...] = (
             ("object_glob", "build/*/atrac3p_*.o"),
             ("object_globs", "build/*/atrac3p_*.o"),
             ("object_globs", []),
