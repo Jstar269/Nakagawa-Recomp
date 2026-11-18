@@ -425,6 +425,15 @@ def _display_path(path: str, extracted_dir: str) -> str:
     return path if rel.startswith("..") else rel
 
 
+def _reference_prefix(rel_inv_dir: str) -> str:
+    """The prefix every reference key of the inventory in ``rel_inv_dir`` starts with.
+
+    Built the way the keys are (``os.path.join(rel_inv_dir, item path)``, forward
+    slashes), so it matches exactly the keys that inventory would list.
+    """
+    return os.path.join(rel_inv_dir, "").replace("\\", "/")
+
+
 def main():
     parser = argparse.ArgumentParser(description="HST Asset Regression and Verification Suite")
     parser.add_argument("--dir", default="place_game_here/EXTRACTED/PSP_GAME/USRDIR/xbdata_extracted", help="Directory of extracted assets containing inventory_map.json files")
@@ -497,6 +506,9 @@ def main():
     inventory_failures = []
     # Every reference key a parsed inventory still lists, whether or not it is on disk.
     listed_keys = set()
+    # Reference-key prefixes of inventories that failed to load or validate: their
+    # entries were not examined, so their absence from listed_keys proves nothing.
+    failed_prefixes = []
     inventories_discovered = len(inventories)
     inventories_parsed = 0
     total_checked = 0
@@ -509,6 +521,7 @@ def main():
         except InventoryError as e:
             print(f"Error reading index {_display_path(inv_path, extracted_dir)}: {e}")
             inventory_failures.append((inv_path, str(e)))
+            failed_prefixes.append(_reference_prefix(rel_inv_dir))
             continue
 
         shape_problems = validate_inventory_shape(inv)
@@ -518,6 +531,7 @@ def main():
                 summary += f" (and {len(shape_problems) - 5} more)"
             print(f"Error reading index {_display_path(inv_path, extracted_dir)}: schema violations: {summary}")
             inventory_failures.append((inv_path, f"schema violations: {summary}"))
+            failed_prefixes.append(_reference_prefix(rel_inv_dir))
             continue
 
         inventories_parsed += 1
@@ -568,8 +582,17 @@ def main():
                         stream_failures.append((db_key, msg))
 
     # Golden-reference entries no inventory lists any more: the asset left the tree
-    # together with its inventory entry, or its whole inventory is gone.
-    missing_from_tree = [] if args.bootstrap else sorted(set(ref_hashes) - listed_keys)
+    # together with its inventory entry, or its whole inventory is gone.  An entry
+    # under an inventory that failed is not examined: the failure is reported as the
+    # cause, not every key it would have listed as missing.
+    missing_from_tree = []
+    not_examined = []
+    if not args.bootstrap:
+        for key in sorted(set(ref_hashes) - listed_keys):
+            if any(key.startswith(prefix) for prefix in failed_prefixes):
+                not_examined.append(key)
+            else:
+                missing_from_tree.append(key)
 
     # Summary and execution outcomes
     print("\n--- Asset Validation Summary ---")
@@ -582,6 +605,7 @@ def main():
     print(f"Sound link failures:    {len(stream_failures)}")
     print(f"Missing from golden:    {len(missing_from_golden)}")
     print(f"Missing from tree:      {len(missing_from_tree)}")
+    print(f"Not examined:           {len(not_examined)} (golden entries under a failed inventory)")
 
     if args.bootstrap and inventory_failures:
         print(

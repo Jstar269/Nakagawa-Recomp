@@ -564,6 +564,24 @@ class GoldenHashTests(ValidatorCliBase):
         self.assertEqual(_count(out, "Missing from tree"), 0)
 
 
+    def test_a_failed_inventory_does_not_report_its_assets_missing_from_tree(self) -> None:
+        # The assets are still on disk and still listed; only the inventory failed
+        # to load.  The failure is the cause, and its keys were not examined.
+        archive = _clean_tree(self.tree)
+        ref = self.base / "bootstrapped_hashes.json"
+        self.assertEqual(_run_validator(self.tree, ref, "--bootstrap").returncode, 0)
+        (archive / "inventory_map.json").write_bytes(b"{not json at all")
+        proc = _run_validator(self.tree, ref)
+
+        self.assertEqual(proc.returncode, 1, _combined(proc))
+        out = _combined(proc)
+        self.assertEqual(_count(out, "Inventories failed"), 1)
+        self.assertIn("Inventory Index Failures", out)
+        self.assertEqual(_count(out, "Missing from tree"), 0)
+        self.assertNotIn("missing from tree)", out)
+        self.assertEqual(_count(out, "Not examined"), 3)
+        self.assertNotIn("Verification SUCCESS", out)
+
 class BootstrapIntegrityTests(ValidatorCliBase):
     def test_bootstrap_with_a_bad_inventory_fails_and_writes_no_manifest(self) -> None:
         _clean_tree(self.tree)

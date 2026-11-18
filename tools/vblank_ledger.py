@@ -25,7 +25,9 @@ Checks, each with a number:
 
     presenting   the window judged: seconds that presented a frame, and its wall
                  time.  The pre-presentation index scan, and any later second
-                 that presented nothing, is excluded on both sides.
+                 that presented nothing, is excluded on both sides.  It is
+                 ``INFO``, not a check: it describes the window the rate is judged
+                 over and does not count towards a verdict on its own.
     identity     owed + coalesced == delivered + dropped + in_flight, from the
                  runtime's own ledger.  A mismatch is a bookkeeping bug, reported
                  as such rather than absorbed into a rate.
@@ -72,9 +74,16 @@ OWED_ROW = re.compile(
 @dataclass
 class Report:
     checks: list[tuple[str, bool | None, str]] = field(default_factory=list)
+    #: Names recorded with :meth:`note`: reported with their numbers, never judged.
+    informational: set[str] = field(default_factory=set)
 
     def add(self, name: str, ok: bool | None, detail: str) -> None:
         self.checks.append((name, ok, detail))
+
+    def note(self, name: str, detail: str) -> None:
+        """Record a line that describes the run but judges nothing, so it is not a check."""
+        self.informational.add(name)
+        self.checks.append((name, None, detail))
 
     @property
     def failures(self) -> int:
@@ -85,7 +94,10 @@ class Report:
         return sum(1 for _, ok, _ in self.checks if ok is not None)
 
     def line(self, name: str, ok: bool | None, detail: str) -> str:
-        status = "SKIP" if ok is None else ("PASS" if ok else "FAIL")
+        if ok is None:
+            status = "INFO" if name in self.informational else "SKIP"
+        else:
+            status = "PASS" if ok else "FAIL"
         return f"VBLANK_CHECK: {name} {status} {detail}"
 
     def render(self) -> str:
@@ -176,9 +188,8 @@ def check_presenting(report: Report, cadence: Cadence | None) -> None:
     if cadence is None:
         report.add("presenting", None, "no perf.csv second presented a frame")
         return
-    report.add(
+    report.note(
         "presenting",
-        True,
         f"presenting_s={cadence.presenting_s} wall_s={cadence.wall_s:.3f} "
         f"source_periods={cadence.source_periods:.1f} delivered={cadence.delivered}",
     )

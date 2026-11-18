@@ -195,6 +195,28 @@ class VblankLedgerTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("verdict=NOT_RUN", out.getvalue())
 
+    def test_presenting_alone_is_not_a_verdict(self) -> None:
+        # Seconds that presented, with no wall time: the rate cannot be judged and,
+        # without --stderr, neither can the ledger.  Counting the presenting window
+        # would turn a run where nothing was judged into a PASS.
+        import contextlib
+
+        for wall in ("", "0"):
+            with self.subTest(wall_ms=wall):
+                lines = [PERF_HEADER.rstrip("\n")]
+                for second in range(1, 4):
+                    lines.append(f"{second * 60},{wall},28.000,35.750,59.970,47.0,0.2,7.2,945.0")
+                perf_path = self.write("perf.csv", "\n".join(lines) + "\n")
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = vblank_ledger.main(["--perf", str(perf_path)])
+                text = out.getvalue()
+                self.assertIn("VBLANK_CHECK: presenting INFO presenting_s=3", text)
+                self.assertIn("VBLANK_CHECK: rate SKIP", text)
+                self.assertIn("verdict=NOT_RUN", text)
+                self.assertNotIn("verdict=PASS", text)
+                self.assertEqual(code, 1, text)
+
     def test_the_index_scan_is_excluded_from_both_sides(self) -> None:
         # 120 leading seconds of scan, then 300 presenting seconds.  Including the
         # scan's wall time would report a large deficit.
@@ -270,16 +292,19 @@ class VblankLedgerTest(unittest.TestCase):
 class LedgerReportShapeTest(unittest.TestCase):
     def test_every_check_line_names_a_status_and_a_number(self) -> None:
         report = vblank_ledger.Report()
-        report.add("presenting", True, "presenting_s=3")
+        report.note("presenting", "presenting_s=3")
         report.add("identity", None, "no ledger")
         report.add("rate", False, "ratio=1.020")
+        report.add("masked", True, "credit=+0")
         text = report.render().splitlines()
-        self.assertEqual(len(text), 4)
-        self.assertTrue(text[0].startswith("VBLANK_CHECK: presenting PASS presenting_s=3"))
+        self.assertEqual(len(text), 5)
+        self.assertTrue(text[0].startswith("VBLANK_CHECK: presenting INFO presenting_s=3"))
         self.assertIn("SKIP", text[1])
         self.assertIn("FAIL", text[2])
-        self.assertIn("verdict=FAIL", text[3])
+        self.assertIn("PASS", text[3])
+        self.assertIn("verdict=FAIL checks=2 failures=1", text[4])
         self.assertEqual(report.failures, 1)
+        # The informational line is reported but is not a judged check.
         self.assertEqual(report.judged, 2)
 
 
