@@ -96,15 +96,24 @@ def materialize(ref: str, destination: Path, profile_path: Path) -> dict:
         copied: list[str] = []
         with zipfile.ZipFile(archive) as source_zip:
             for info in source_zip.infolist():
-                relative = PurePosixPath(info.filename)
-                if relative.is_absolute() or ".." in relative.parts:
+                name = info.filename[:-1] if info.is_dir() else info.filename
+                parts = name.split("/")
+                # The same refusals as publish_audit._committed_tree_entries: a tree
+                # made on another system can carry a drive letter ("D:"), a backslash
+                # or an empty or dot part, which a Windows path join would read as a
+                # location outside the destination.
+                if (name.startswith("/") or "\\" in name or ":" in name
+                        or any(part in ("", ".", "..") for part in parts)):
                     raise ValueError(f"unsafe archive path: {info.filename}")
+                relative = PurePosixPath(name)
                 if info.is_dir() or is_excluded(relative.as_posix(), profile):
                     continue
                 unix_mode = info.external_attr >> 16
                 if stat.S_ISLNK(unix_mode):
                     raise ValueError(f"candidate archive contains symlink: {info.filename}")
-                target = destination.joinpath(*relative.parts)
+                target = destination.joinpath(*parts)
+                if not target.resolve().is_relative_to(destination):
+                    raise ValueError(f"unsafe archive path: {info.filename}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with source_zip.open(info) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
@@ -123,13 +132,24 @@ def materialize(ref: str, destination: Path, profile_path: Path) -> dict:
     return metadata
 
 
-def audit_candidate(destination: Path, provenance_ledger: Path | None = None) -> list[publish_audit.Finding]:
+def audit_candidate(
+    destination: Path, provenance_ledger: Path | None = None, profile_path: Path = DEFAULT_PROFILE,
+) -> list[publish_audit.Finding]:
+    """Audit the materialized tree as a candidate root, judged by the profile that selected it.
+
+    The same mode as ``publish_audit.py --candidate-root --candidate-tree --public-scope
+    --policy <profile>``: the bytes are the directory's, the audit is exhaustive, and the
+    policy is the one ``materialize`` filtered with, never the checkout's default.
+    """
     entries = publish_audit._get_filesystem_entries(destination)
     return publish_audit.audit_entries(
         entries,
         manifest_path=destination / "assets" / "release_manifest.json",
         public_scope=True,
         repo_root=destination,
+        exhaustive=True,
+        is_candidate_root=True,
+        policy_path=profile_path,
         provenance_ledger_path=provenance_ledger,
     )
 
@@ -156,8 +176,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     try:
-        metadata = materialize(args.ref, args.destination, args.profile.resolve())
-        findings = audit_candidate(args.destination.absolute(), args.provenance_ledger.resolve())
+        profile_path = args.profile.resolve()
+        metadata = materialize(args.ref, args.destination, profile_path)
+        findings = audit_candidate(args.destination.absolute(), args.provenance_ledger.resolve(), profile_path)
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as error:
         print(f"public candidate: FAIL: {error}")
         return 2

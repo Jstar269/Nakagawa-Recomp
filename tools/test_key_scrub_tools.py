@@ -129,7 +129,11 @@ class TestEncodings(unittest.TestCase):
                 encoding="utf-8",
             )
             values = vks.key_values(str(p))
+            parsed, unparsed = vks.parse_key_file(str(p))
         self.assertEqual(values, {"foo": SAMPLE})
+        # The malformed entry is reported by name, never silently dropped.
+        self.assertEqual(parsed, {"foo": SAMPLE})
+        self.assertEqual(unparsed, ["bad"])
 
 
 class TestSearchVerdicts(unittest.TestCase):
@@ -218,6 +222,22 @@ class TestSearchVerdicts(unittest.TestCase):
         self.assertNotIn(needle, error.detail)
         self.assertIn("[redacted]", error.detail)
 
+    def test_regex_search_passes_pickaxe_regex_and_redacts_the_pattern(self):
+        pattern = vks.history_pattern(SAMPLE)
+        seen: list[list[str]] = []
+
+        def failing_run(command, *_args, **kwargs):
+            seen.append(command)
+            self.assertEqual(kwargs["timeout"], vks.REGEX_GIT_TIMEOUT_SECONDS)
+            return subprocess.CompletedProcess(args=[], returncode=128, stdout="", stderr=f"fatal: bad regex {pattern}")
+
+        with mock.patch.object(vks.subprocess, "run", side_effect=failing_run):
+            verdict, error = vks.search_history(pattern, [pattern], regex=True)
+        self.assertIs(verdict, vks.Verdict.ERROR)
+        self.assertIn("--pickaxe-regex", seen[0])
+        self.assertNotIn(pattern, error.detail)
+        self.assertNotIn(pattern, error.operation)
+
 
 class TestRepositoryPreconditions(unittest.TestCase):
     def test_valid_repo_with_history_passes(self):
@@ -304,6 +324,66 @@ class TestCliVerdicts(unittest.TestCase):
             with self._capture() as (_out, _err):
                 rc = self._main_in(repo, keys)
         self.assertEqual(rc, 3)
+
+    def test_unparseable_key_entry_makes_the_run_unverifiable(self):
+        """A key-file entry that is not 16 bytes of hex is never searched, so no clean verdict covers it."""
+        repo = _init_repo()
+        other = bytes(range(16, 32))
+        with tempfile.TemporaryDirectory() as d:
+            keys = Path(d) / "keys.txt"
+            keys.write_text(f"k = {SAMPLE.hex()}\nprefixed = 0x{other.hex()}\n", encoding="utf-8")
+            with self._capture() as (out, err):
+                rc = self._main_in(repo, keys)
+        self.assertEqual(rc, 2)
+        self.assertIn("did not parse", err.getvalue())
+        self.assertIn("prefixed", err.getvalue())
+        combined = out.getvalue() + err.getvalue()
+        self.assertNotIn(other.hex(), combined)
+        self.assertNotIn("History is clean", combined)
+
+    def _assert_spelling_reachable(self, spelling: str) -> None:
+        repo = _init_repo()
+        _commit_secret(repo, spelling)
+        with tempfile.TemporaryDirectory() as d:
+            keys = _write_keys(Path(d), {"k": SAMPLE})
+            with self._capture() as (out, _err):
+                rc = self._main_in(repo, keys)
+        self.assertEqual(rc, 3, spelling)
+        self.assertIn("k: REACHABLE", out.getvalue())
+
+    def test_byte_array_wrapped_over_lines_with_tabs_is_reachable(self):
+        first, second = SAMPLE[:8], SAMPLE[8:]
+        self._assert_spelling_reachable(
+            "{\n\t" + ",\t".join(f"0x{b:02x}" for b in first) + ",\n\t"
+            + ",\t".join(f"0X{b:X}" for b in second) + "\n}"
+        )
+
+    def test_decimal_array_without_spaces_is_reachable(self):
+        self._assert_spelling_reachable("bytes([" + ",".join(str(b) for b in SAMPLE) + "])")
+
+    def test_escaped_string_split_over_lines_is_reachable(self):
+        first, second = SAMPLE[:8], SAMPLE[8:]
+        self._assert_spelling_reachable(
+            'b"' + "".join(f"\\x{b:02x}" for b in first) + '"\n    b"'
+            + "".join(f"\\x{b:02X}" for b in second) + '"'
+        )
+
+    def test_space_separated_hex_wrapped_over_lines_is_reachable(self):
+        spelled = " ".join(f"{b:02x}" for b in SAMPLE)
+        self._assert_spelling_reachable(spelled[:24] + "\n" + spelled[24:])
+
+    def test_tolerant_pattern_does_not_match_a_different_value(self):
+        """Negative control: a wrapped array of a value that differs in one byte stays clean."""
+        near = SAMPLE[:-1] + bytes([SAMPLE[-1] ^ 0x01])
+        repo = _init_repo()
+        _commit_secret(repo, ",\n".join(f"0x{b:02x}" for b in near))
+        with tempfile.TemporaryDirectory() as d:
+            keys = _write_keys(Path(d), {"k": SAMPLE})
+            with self._capture() as (out, _err):
+                rc = self._main_in(repo, keys)
+        self.assertEqual(rc, 0)
+        self.assertIn("k: clean", out.getvalue())
+        self.assertIn("spellings searched", out.getvalue())
 
     def test_exit_two_outside_git_repository(self):
         with tempfile.TemporaryDirectory() as d:
