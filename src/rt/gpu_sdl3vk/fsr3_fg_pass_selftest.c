@@ -758,6 +758,13 @@ static Fsr3FgDeviceFacts good_facts(void) {
 }
 
 static void cell_gr(void) {
+    {
+        /* No init at all: refused by name, not dereferenced. */
+        char err[160] = "";
+        Fsr3FgPass *none = fsr3_fg_pass_create(NULL, err, sizeof(err));
+        CHECK(none == NULL && strstr(err, "no init"), "G-R: a NULL init was not refused by name (%s)", err);
+        fsr3_fg_pass_destroy(none);
+    }
     /* The table: each fact alone, against the reason it must give. */
     static const struct {
         const char *name;

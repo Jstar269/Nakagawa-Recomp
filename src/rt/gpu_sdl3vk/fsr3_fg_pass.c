@@ -724,6 +724,10 @@ static int make_samplers(Fsr3FgPass *p) {
 }
 
 Fsr3FgPass *fsr3_fg_pass_create(const Fsr3FgPassInit *init, char *error, size_t error_size) {
+    if (!init) {
+        set_error(error, error_size, "FSR3 FG: no init");
+        return NULL;
+    }
     if (!init->get_instance_proc_addr || !init->device || !init->frames_in_flight || !init->facts) {
         set_error(error, error_size, "FSR3 FG: incomplete init");
         return NULL;

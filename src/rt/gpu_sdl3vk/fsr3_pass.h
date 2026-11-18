@@ -30,6 +30,8 @@ typedef struct {
     /* Descriptor sets and constants are kept per slot; a slot is reused once its last use finished. */
     uint32_t frames_in_flight;
     /* The flags must include FSR3_HOST_ENABLE_DEPTH_INVERTED: the shaders are built for inverted depth.
+     * Only DEPTH_INFINITE and AUTO_EXPOSURE may join it; the shaders are not built for HDR colour,
+     * display-resolution or jittered motion vectors, and those flags are refused by name.
      * The maximum render size must be at least 2 x 2 (AMD's half-size images). */
     Fsr3HostDesc desc;
 } Fsr3PassInit;

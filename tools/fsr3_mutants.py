@@ -381,6 +381,10 @@ PASS_MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "    const VkResult made = p->CreateImage(p->dev, &ii, NULL, &image);\n    im->image = image;\n"
      "    if (made != VK_SUCCESS) return 0;",
      "P-H", "was destroyed"),
+    ("P-0: a flag no shader is built for accepted", PASS,
+     "        if (d->flags & unbuilt[i].flag) {",
+     "        if (0 && (d->flags & unbuilt[i].flag)) {",
+     "P-0", "no shader is built for it"),
 ]
 
 # Run and recorded, never counted as a kill: design 2.5 asks for the result either way.

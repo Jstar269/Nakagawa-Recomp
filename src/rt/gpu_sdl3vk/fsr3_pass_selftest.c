@@ -1055,6 +1055,32 @@ static double mae(const Run *r, const float *alt, const Scene *s, int t, Region 
 /* ---- P-0 ------------------------------------------------------------------------------------- */
 
 static void cell_p0(void) {
+    /* Refusals that make no Vulkan object, so they run with or without the layer: no init at all,
+     * and each creation flag the one embedded permutation was not compiled for (LDR colour,
+     * render-resolution and unjittered vectors). Depth infinite and auto exposure are host-side. */
+    {
+        char err[160] = "";
+        Fsr3Pass *none = fsr3_pass_create(NULL, err, sizeof(err));
+        CHECK(none == NULL && strstr(err, "no init"), "P-0: a NULL init was not refused by name (%s)", err);
+        fsr3_pass_destroy(none);
+        static const struct {
+            uint32_t flag;
+            const char *name;
+        } unbuilt[] = {
+            { FSR3_HOST_ENABLE_HIGH_DYNAMIC_RANGE, "HIGH_DYNAMIC_RANGE" },
+            { FSR3_HOST_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS, "DISPLAY_RESOLUTION_MOTION_VECTORS" },
+            { FSR3_HOST_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION, "MOTION_VECTORS_JITTER_CANCELLATION" },
+        };
+        for (unsigned i = 0; i < sizeof(unbuilt) / sizeof(unbuilt[0]); i++) {
+            Fsr3HostDesc d = desc_for(960, 544);
+            d.flags |= unbuilt[i].flag;
+            err[0] = 0;
+            Fsr3Pass *p = pass_new(d, 1, err, sizeof(err));
+            CHECK(p == NULL && strstr(err, unbuilt[i].name), "P-0: flag %s accepted, though no shader is built for it (%s)",
+                  unbuilt[i].name, err);
+            fsr3_pass_destroy(p);
+        }
+    }
     if (!g.validation) {
         printf("SKIP P-0 (no validation layer: pipeline creation is not checked)\n");
         s_skip = 1;

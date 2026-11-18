@@ -460,6 +460,10 @@ static int make_sets(Fsr3Pass *p) {
 }
 
 Fsr3Pass *fsr3_pass_create(const Fsr3PassInit *init, char *error, size_t error_size) {
+    if (!init) {
+        set_error(error, error_size, "FSR3: no init");
+        return NULL;
+    }
     const Fsr3HostDesc *d = &init->desc;
     if (!init->get_instance_proc_addr || !init->device || !init->frames_in_flight) {
         set_error(error, error_size, "FSR3: incomplete init");
@@ -467,6 +471,29 @@ Fsr3Pass *fsr3_pass_create(const Fsr3PassInit *init, char *error, size_t error_s
     }
     if (!(d->flags & FSR3_HOST_ENABLE_DEPTH_INVERTED)) {
         set_error(error, error_size, "FSR3: the shaders are built for inverted depth");
+        return NULL;
+    }
+    /* The embedded shaders are one permutation (fsr3_shader_manifest.json): LDR colour, render-
+     * resolution and unjittered motion vectors. A flag for another permutation would make the host
+     * build constants the shaders do not read, so it is refused by name. */
+    static const struct {
+        uint32_t flag;
+        const char *name;
+    } unbuilt[] = {
+        { FSR3_HOST_ENABLE_HIGH_DYNAMIC_RANGE, "HIGH_DYNAMIC_RANGE" },
+        { FSR3_HOST_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS, "DISPLAY_RESOLUTION_MOTION_VECTORS" },
+        { FSR3_HOST_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION, "MOTION_VECTORS_JITTER_CANCELLATION" },
+    };
+    for (size_t i = 0; i < sizeof(unbuilt) / sizeof(unbuilt[0]); i++)
+        if (d->flags & unbuilt[i].flag) {
+            if (error && error_size)
+                snprintf(error, error_size, "FSR3: no shader is built for FSR3_HOST_ENABLE_%s", unbuilt[i].name);
+            return NULL;
+        }
+    const uint32_t accepted =
+        FSR3_HOST_ENABLE_DEPTH_INVERTED | FSR3_HOST_ENABLE_DEPTH_INFINITE | FSR3_HOST_ENABLE_AUTO_EXPOSURE;
+    if (d->flags & ~accepted) {
+        if (error && error_size) snprintf(error, error_size, "FSR3: unknown flags 0x%x", (unsigned)(d->flags & ~accepted));
         return NULL;
     }
     if (d->max_render_width < 2 || d->max_render_height < 2 || d->max_upscale_width < 1 || d->max_upscale_height < 1) {
