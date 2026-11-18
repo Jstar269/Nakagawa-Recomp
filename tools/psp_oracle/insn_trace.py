@@ -59,6 +59,7 @@ TRACE_STATE_NAMES = tuple(
 RECORD_WORDS = 2 + len(TRACE_STATE_NAMES) + 2   # pc, op, selected state, store address/value
 STORE_BITS = {0x28: 8, 0x29: 16, 0x2B: 32}     # sb, sh, sw: the store width follows from the op
 END_REACHED = 0
+LOCAL_TRACE_TIMEOUT_SECONDS = 5.0
 
 
 class InsnTraceError(ValueError):
@@ -255,8 +256,19 @@ def local_records(fixture: dict, consts: dict, workdir: Path, mutate=None) -> li
     # generated code ran to the end address rather than stopping anywhere else.
     marker = workdir / "exit-reached.ppm"
     env = dict(env, SR_PPM_DUMP=str(marker))
-    proc = subprocess.run([drv, str(elf), str(init), str(out)], capture_output=True, text=True,
-                          env=env, check=False)
+    try:
+        proc = subprocess.run(
+            [drv, str(elf), str(init), str(out)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=LOCAL_TRACE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise InsnTraceError(
+            f"{fixture['id']}: traced driver timed out after {LOCAL_TRACE_TIMEOUT_SECONDS:g}s"
+        ) from exc
     if proc.returncode != 0 or not out.exists():
         raise InsnTraceError(f"{fixture['id']}: the traced driver failed ({proc.returncode})")
     if not marker.exists():
@@ -355,23 +367,41 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.command == "local":
+        fixture_ids = {fixture["id"] for fixture in data["fixtures"]}
+        unknown = sorted(set(args.fixture or ()) - fixture_ids)
+        if unknown:
+            print(f"REJECTED: unknown fixture id(s): {', '.join(unknown)}", file=sys.stderr)
+            return 2
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     try:
         if args.command == "psp":
+            for stale in out.glob("*.psp.trace"):
+                stale.unlink()
             text = Path(args.log).read_text(encoding="utf-8")
+            converted: list[tuple[dict, list[str], str]] = []
             for fixture in data["fixtures"]:
                 lines, commit = psp_records(text, fixture, data["consts"])
+                converted.append((fixture, lines, commit))
+            for fixture, lines, commit in converted:
                 header = v2_header("PSP_HARDWARE", fixture, len(lines), source_commit=commit,
                                    model=args.model, firmware=args.firmware)
                 write_trace(out / f"{fixture['id']}.psp.trace", header, lines)
                 print(f"{fixture['id']}: {len(lines)} PSP_HARDWARE records")
             return 0
-        for fixture in data["fixtures"]:
-            if args.fixture and fixture["id"] not in args.fixture:
-                continue
+        selected = [
+            fixture for fixture in data["fixtures"]
+            if not args.fixture or fixture["id"] in args.fixture
+        ]
+        for fixture in selected:
+            (out / f"{fixture['id']}.local.trace").unlink(missing_ok=True)
+        converted_local: list[tuple[dict, list[str]]] = []
+        for fixture in selected:
             with tempfile.TemporaryDirectory(dir=os.environ.get("NK_INSN_TRACE_TMP")) as tmp:
                 lines = local_records(fixture, data["consts"], Path(tmp))
+            converted_local.append((fixture, lines))
+        for fixture, lines in converted_local:
             header = v2_header("LOCAL_COSIM", fixture, len(lines), source_commit=args.source_commit,
                                model=args.model, firmware=args.firmware)
             write_trace(out / f"{fixture['id']}.local.trace", header, lines)

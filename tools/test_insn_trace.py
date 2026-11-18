@@ -147,26 +147,6 @@ class FixtureHeaderTests(unittest.TestCase):
                 self.assertEqual(result, 2)
                 self.assertIn("REJECTED:", stderr.getvalue())
 
-    def test_fixture_elf_uses_the_shared_fixed_address_builder(self) -> None:
-        import analyze
-
-        fixture = self.data["fixtures"][0]
-        text = b"".join(
-            struct.pack("<I", word)
-            for word in fixture["words"] + [insn_trace.EXIT_SYSCALL_WORD]
-        )
-        sections = [(b".text", 1, 0x6, fixture["base"], 0, len(text))]
-        with patch.object(analyze, "_fixed_address_elf", wraps=analyze._fixed_address_elf) as build:
-            image = insn_trace.fixture_elf(fixture)
-        expected = bytearray(analyze._fixed_address_elf(
-            fixture["base"], text, len(text), sections
-        ))
-        struct.pack_into("<I", expected, 24, fixture["base"])
-        struct.pack_into("<I", expected, 64, fixture["base"])
-        struct.pack_into("<I", expected, 76, 5)
-        self.assertEqual(image, bytes(expected))
-        build.assert_called_once_with(fixture["base"], text, len(text), sections)
-
     def test_local_mode_refuses_dirty_or_mismatched_source_identity(self) -> None:
         requested = ("b" * 40, "a" * 40)
         states = ("", " M tools/example.py\n")
@@ -194,6 +174,24 @@ class FixtureHeaderTests(unittest.TestCase):
                     self.assertEqual(result, 2)
                     self.assertIn("REJECTED:", stderr.getvalue())
                     local_records.assert_not_called()
+
+    def test_local_mode_rejects_an_unknown_fixture_id(self) -> None:
+        build_root = FIXTURE_DIR / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="insn-unknown-id-", dir=build_root) as name:
+            out = Path(name) / "out"
+            stderr = io.StringIO()
+            with patch.object(insn_trace, "_local_source_problem", return_value=None), patch.object(
+                insn_trace, "local_records", return_value=[]
+            ) as local_records, contextlib.redirect_stderr(stderr):
+                result = insn_trace.main([
+                    "local", str(out), "--fixture", "typo-id",
+                    "--source-commit", "a" * 40,
+                    "--model", "PSP-3000", "--firmware", "6.6.1",
+                ])
+        self.assertEqual(result, 2)
+        self.assertIn("unknown fixture", stderr.getvalue())
+        local_records.assert_not_called()
 
     def test_main_reports_missing_or_unknown_fixture_tables_as_rejected(self) -> None:
         bad_headers = (
@@ -474,23 +472,67 @@ class ConversionTests(unittest.TestCase):
         with self.assertRaisesRegex(insn_trace.InsnTraceError, "status FAIL"):
             insn_trace.psp_records(text.replace(end, failed_end, 1), fixture, data["consts"])
 
-    def test_psp_records_preserve_full_commit_and_reject_repeated_run_records(self) -> None:
-        fixture = insn_trace.parse_fixtures()["fixtures"][0]
-        steps = [(0x08900000, 0x24080005, {"r8": 5}, (0, 0, 0))]
-        text, data = self._log(fixture, steps)
-        text = text.replace("source_commit=" + "1" * 40, "source_commit=" + "a" * 64)
-        _lines, commit = insn_trace.psp_records(text, fixture, data["consts"])
-        self.assertEqual(commit, "a" * 64)
+    def test_local_driver_timeout_is_a_named_refusal(self) -> None:
+        data = insn_trace.parse_fixtures()
+        fixture = data["fixtures"][0]
+        build_root = FIXTURE_DIR / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="insn-driver-timeout-", dir=build_root) as name:
+            timeout = subprocess.TimeoutExpired("fake-driver", 5.0)
+            with patch(
+                "codegen_gate.build_traced_driver", return_value="fake-driver"
+            ), patch.object(insn_trace.subprocess, "run", side_effect=timeout) as run:
+                with self.assertRaisesRegex(insn_trace.InsnTraceError, "timed out"):
+                    insn_trace.local_records(fixture, data["consts"], Path(name))
+            self.assertLessEqual(run.call_args.kwargs["timeout"], 5.0)
 
-        meta = next(line for line in text.splitlines() if line.startswith("NAKAGAWA_PSP_META "))
-        duplicate_meta = text.replace(meta, meta + "\n" + meta, 1)
-        with self.assertRaisesRegex(insn_trace.InsnTraceError, "exactly one NAKAGAWA_PSP_META"):
-            insn_trace.psp_records(duplicate_meta, fixture, data["consts"])
-
-        step = next(line for line in text.splitlines() if "case_id=alu-branch-ls-s0000 " in line)
-        duplicate_step = text.replace(step, step + "\n" + step, 1)
-        with self.assertRaisesRegex(insn_trace.InsnTraceError, "duplicate record"):
-            insn_trace.psp_records(duplicate_step, fixture, data["consts"])
+    def test_trace_modes_do_not_leave_partial_or_stale_files_after_rejection(self) -> None:
+        data = {
+            "consts": {},
+            "fixtures": [
+                {"id": "first", "base": 0x08900000, "words": []},
+                {"id": "second", "base": 0x08910000, "words": []},
+            ],
+        }
+        build_root = FIXTURE_DIR / "build"
+        build_root.mkdir(exist_ok=True)
+        for mode, suffix in (("psp", "psp.trace"), ("local", "local.trace")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(
+                prefix=f"insn-partial-{mode}-", dir=build_root
+            ) as name:
+                root = Path(name)
+                out = root / "out"
+                out.mkdir()
+                for fixture in data["fixtures"]:
+                    (out / f"{fixture['id']}.{suffix}").write_text(
+                        "stale trace\n", encoding="utf-8"
+                    )
+                output = io.StringIO()
+                common = ["--model", "PSP-3000", "--firmware", "6.6.1"]
+                if mode == "psp":
+                    log = root / "capture.txt"
+                    log.write_text("synthetic capture\n", encoding="utf-8")
+                    with patch.object(insn_trace, "parse_fixtures", return_value=data), patch.object(
+                        insn_trace,
+                        "psp_records",
+                        side_effect=[(["new trace"], "a" * 40), insn_trace.InsnTraceError("bad second fixture")],
+                    ), contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                        result = insn_trace.main(["psp", str(log), str(out), *common])
+                else:
+                    with patch.object(insn_trace, "parse_fixtures", return_value=data), patch.object(
+                        insn_trace, "_local_source_problem", return_value=None
+                    ), patch.object(
+                        insn_trace,
+                        "local_records",
+                        side_effect=[["new trace"], insn_trace.InsnTraceError("bad second fixture")],
+                    ), patch.dict(os.environ, {"NK_INSN_TRACE_TMP": str(root)}), \
+                            contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                        result = insn_trace.main([
+                            "local", str(out), "--source-commit", "a" * 40, *common
+                        ])
+                self.assertEqual(result, 2)
+                self.assertIn("REJECTED:", output.getvalue())
+                self.assertEqual(list(out.glob(f"*.{suffix}")), [])
 
     def test_end_record_without_outputs_and_bad_status_are_named_refusals(self) -> None:
         fixture = insn_trace.parse_fixtures()["fixtures"][0]

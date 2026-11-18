@@ -42,6 +42,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import shutil
 import subprocess
 import sys
@@ -173,6 +174,24 @@ def _resolve_under(base: Path, value: object, name: str) -> Path:
     return path
 
 
+def _is_git_ignored(path: Path, repo_root: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", "--", relative],
+            cwd=repo_root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
 def load_plan(path: Path, *, repo_root: Path = ROOT) -> MatrixPlan:
     """Read and validate a schema 1 matrix plan; refuse anything the runner would refuse later."""
 
@@ -196,14 +215,33 @@ def load_plan(path: Path, *, repo_root: Path = ROOT) -> MatrixPlan:
     model = raw["console_model"]
     if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,48}", model):
         raise MatrixError("console_model must be a non-identifying model label")
+    if not isinstance(raw["expected_firmware"], str):
+        raise MatrixError("expected_firmware must be a PSPLink firmware string")
     firmware_problem = _runner._expected_firmware_problem(raw["expected_firmware"])
     if firmware_problem:
         raise MatrixError(f"expected_firmware: {firmware_problem}")
 
     repo_root = Path(repo_root).resolve()
     plan_dir = path.parent
-    host0_root = _resolve_under(repo_root / "tests" / "fixtures" / "psp_oracle", raw["host0_root"], "host0_root")
+    fixture_root = repo_root / "tests" / "fixtures" / "psp_oracle"
+    host0_root = _resolve_under(fixture_root, raw["host0_root"], "host0_root")
+    build_root = (fixture_root / "build").resolve()
+    try:
+        host0_root.relative_to(build_root)
+    except ValueError as exc:
+        raise MatrixError(
+            "host0_root must stay under tests/fixtures/psp_oracle/build"
+        ) from exc
     evidence_dir = _resolve_under(plan_dir, raw["evidence_dir"], "evidence_dir")
+    try:
+        evidence_dir.relative_to(repo_root)
+    except ValueError:
+        pass
+    else:
+        if not _is_git_ignored(evidence_dir, repo_root):
+            raise MatrixError(
+                "evidence_dir must stay outside repo_root or be Git-ignored"
+            )
 
     raw_cases = raw["cases"]
     if not isinstance(raw_cases, list) or not raw_cases:
@@ -449,23 +487,31 @@ class CaseOutcome:
 def _probe_command_report(stdout: str) -> dict[str, object] | None:
     """The JSON object a guarded probe command prints last (Nakagawa Link's probe report), if any."""
 
-    start = stdout.find("{")
-    if start < 0:
-        return None
-    try:
-        value = json.loads(stdout[start:])
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, dict) else None
+    decoder = json.JSONDecoder()
+    last: dict[str, object] | None = None
+    for start, char in enumerate(stdout):
+        if char != "{":
+            continue
+        try:
+            value, end = decoder.raw_decode(stdout, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and not stdout[end:].strip():
+            last = value
+    return last
 
 
-def _boots(report: dict[str, object] | None) -> list[int]:
+def _boots(report: dict[str, object] | None) -> list[int] | None:
     if report is None:
-        return []
+        return None
     boots = report.get("boots")
-    if not isinstance(boots, list):
-        return []
-    return [boot for boot in boots if isinstance(boot, int) and not isinstance(boot, bool)]
+    if (
+        not isinstance(boots, list)
+        or not boots
+        or any(not isinstance(boot, int) or isinstance(boot, bool) or boot < 0 for boot in boots)
+    ):
+        return None
+    return boots
 
 
 def classify_launch(
@@ -485,7 +531,8 @@ def classify_launch(
     outcome = CaseOutcome(case.case_id, NOT_ELIGIBLE, boot=epoch_boot, probe_exit=probe_exit,
                           report=runner_report_path.name)
     command_report = _probe_command_report(probe_stdout)
-    outcome.boots_seen = _boots(command_report)
+    reported_boots = _boots(command_report)
+    outcome.boots_seen = [] if reported_boots is None else list(reported_boots)
     if probe_exit is None:
         outcome.status = INTERVENTION
         outcome.reasons.append("probe command exceeded its wall-clock bound and was stopped; device state unknown")
@@ -496,17 +543,26 @@ def classify_launch(
         outcome.reasons.append("probe command could not recover the device"
                                + (f": {detail}" if isinstance(detail, str) and detail else ""))
         return outcome
-    rebooted = [boot for boot in outcome.boots_seen if boot != epoch_boot]
-    if probe_exit == 4 or rebooted:
+    if probe_exit == 4:
         outcome.status = CONTAINED
-        if probe_exit == 4:
-            outcome.reasons.append("the probe failed and the device had to be recovered")
-        if rebooted:
-            outcome.reasons.append(f"the device rebooted during the launch (boot {epoch_boot} -> "
-                                   f"{', '.join(str(boot) for boot in rebooted)})")
+        outcome.reasons.append("the probe failed and the device had to be recovered")
         return outcome
     if probe_exit not in (0, 2):
         outcome.reasons.append(f"probe command exited {probe_exit}")
+        return outcome
+    if reported_boots is None:
+        outcome.reasons.append("probe command report has no valid boots list; reboot state is unknown")
+        return outcome
+    if epoch_boot not in reported_boots:
+        outcome.reasons.append(
+            f"probe command boots list does not include launch boot {epoch_boot}; reboot state is unknown"
+        )
+        return outcome
+    rebooted = [boot for boot in reported_boots if boot != epoch_boot]
+    if rebooted:
+        outcome.status = CONTAINED
+        outcome.reasons.append(f"the device rebooted during the launch (boot {epoch_boot} -> "
+                               f"{', '.join(str(boot) for boot in rebooted)})")
         return outcome
 
     try:
@@ -582,23 +638,91 @@ def classify_launch(
 CommandRunner = Callable[[list[str], float, "str | None"], tuple[int | None, str, str]]
 
 
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> bool:
+    """Stop the timed-out command and its descendants, returning whether the tree was stopped."""
+
+    if os.name == "nt":
+        taskkill = shutil.which("taskkill")
+        if taskkill is not None:
+            try:
+                result = subprocess.run(
+                    [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=2.0,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.SubprocessError):
+                result = None
+            if result is not None and result.returncode == 0:
+                return True
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            pass
+
+    try:
+        process.kill()
+    except OSError:
+        return False
+    return False
+
+
 def run_command(argv: list[str], timeout: float, stdin: str | None = None) -> tuple[int | None, str, str]:
     """Run one bounded host command without a shell; ``None`` means it was stopped at its timeout."""
 
-    def text(value: bytes | None) -> str:
+    def text(value: bytes | str | None) -> str:
+        if isinstance(value, str):
+            return value
         return (value or b"").decode("utf-8", "replace")
 
     env = {**os.environ, "MSYS_NO_PATHCONV": "1"}
+    process_options: dict[str, object] = {}
+    if os.name == "nt":
+        process_options["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+    else:
+        process_options["start_new_session"] = True
     try:
-        # Bytes, not text mode: on Windows text mode would turn the script's LF line ends into CRLF, which
-        # bash then reads as part of each command.
-        result = subprocess.run(argv, input=None if stdin is None else stdin.encode("utf-8"),
-                                capture_output=True, timeout=timeout, check=False, env=env)
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            **process_options,
+        )
     except subprocess.TimeoutExpired as exc:
-        return None, text(exc.stdout), text(exc.stderr)  # type: ignore[arg-type]
+        return None, text(exc.stdout), text(exc.stderr)
     except OSError as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
-    return result.returncode, text(result.stdout), text(result.stderr)
+    try:
+        stdout, stderr = process.communicate(
+            input=None if stdin is None else stdin.encode("utf-8"),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stopped_tree = _terminate_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=2.0)
+        except subprocess.TimeoutExpired as reap_exc:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            stdout = reap_exc.stdout if reap_exc.stdout is not None else exc.stdout
+            stderr = reap_exc.stderr if reap_exc.stderr is not None else exc.stderr
+            detail = "command process did not reap after process-tree termination"
+            if not stopped_tree:
+                detail = "process-tree termination was not confirmed; " + detail
+            stderr_text = text(stderr)
+            return None, text(stdout), (stderr_text + "\n" + detail).strip()
+        return None, text(stdout), text(stderr)
+    return process.returncode, text(stdout), text(stderr)
 
 
 class MatrixRunner:
@@ -782,7 +906,7 @@ class MatrixRunner:
         plan.evidence_dir.mkdir(parents=True, exist_ok=True)
         (plan.evidence_dir / f"{plan.matrix_id}-{tag}.probe-command.txt").write_text(
             f"exit {code}\n--- stdout\n{stdout}\n--- stderr\n{err[-4000:]}\n", encoding="utf-8")
-        return classify_launch(
+        outcome = classify_launch(
             case=case,
             epoch_boot=boot,
             probe_exit=code,
@@ -793,6 +917,27 @@ class MatrixRunner:
             source_commit=plan.source_commit,
             expected_firmware=plan.expected_firmware,
         )
+        try:
+            post_boot, post_status = attested_boot(
+                _read_lock(self.lock_path), plan.session_id
+            )
+        except MatrixError as exc:
+            post_boot, post_status = None, str(exc)
+        if post_boot is None:
+            if outcome.status not in {INTERVENTION, REJECTED}:
+                outcome.status = NOT_ELIGIBLE
+            outcome.reasons.append(
+                f"post-launch device state is unknown ({post_status})"
+            )
+        elif post_boot != boot:
+            if post_boot not in outcome.boots_seen:
+                outcome.boots_seen.append(post_boot)
+            if outcome.status != INTERVENTION:
+                outcome.status = CONTAINED
+            reboot_reason = f"the device rebooted during the launch (boot {boot} -> {post_boot})"
+            if reboot_reason not in outcome.reasons:
+                outcome.reasons.append(reboot_reason)
+        return outcome
 
     # -- the whole matrix
     def execute(self, *, build_only: bool = False) -> tuple[int, dict[str, Any]]:

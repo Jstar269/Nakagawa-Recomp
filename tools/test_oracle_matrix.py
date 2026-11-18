@@ -115,6 +115,11 @@ class FakeDevice:
         if behaviour == "refused":
             return 2, json.dumps({"verdict": "refused", "boots": []}), ""
         boots = [boot]
+        omit_boots = behaviour == "no-boots"
+        if behaviour == "reboot-no-boots":
+            self.boot += 1                           # a reboot that the probe command fails to report
+            self.attest()
+            omit_boots = True
         if behaviour == "reboot-ok":
             self.boot += 1                           # the runner's own L2 reset rebooted the PSP mid-launch
             self.attest()
@@ -136,7 +141,10 @@ class FakeDevice:
         if behaviour == "wrong-commit":
             envelopes[1]["SOURCE_COMMIT"] = "f" * 40
         out.write_text(json.dumps({"envelopes": envelopes, "terminal_reason": None}), encoding="utf-8")
-        return 0, json.dumps({"verdict": "ok", "boots": boots}), ""
+        command_report = {"verdict": "ok"}
+        if not omit_boots:
+            command_report["boots"] = boots
+        return 0, json.dumps(command_report), ""
 
 
 class MatrixTestCase(unittest.TestCase):
@@ -197,6 +205,41 @@ class MatrixTestCase(unittest.TestCase):
     def lock(self) -> dict[str, Any]:
         return cast(dict[str, Any], json.loads(self.lock_path.read_text(encoding="utf-8")))
 
+    def test_timeout_stops_descendants_that_inherit_the_capture_pipes(self) -> None:
+        fixture_build = om.ROOT / "tests" / "fixtures" / "psp_oracle" / "build"
+        fixture_build.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="matrix-timeout-tree-", dir=fixture_build) as name:
+            marker = Path(name) / "descendant-finished.txt"
+            child = (
+                "import pathlib,sys,time; time.sleep(1.25); "
+                "pathlib.Path(sys.argv[1]).write_text('finished')"
+            )
+            parent = (
+                "import subprocess,sys,time; "
+                "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]], "
+                "stdout=sys.stdout,stderr=sys.stderr); "
+                "time.sleep(10)"
+            )
+            started = time.monotonic()
+            code, _stdout, _stderr = om.run_command(
+                [sys.executable, "-c", parent, child, str(marker)], 0.05
+            )
+            elapsed = time.monotonic() - started
+        self.assertIsNone(code)
+        self.assertLess(elapsed, 1.0)
+        self.assertFalse(marker.exists())
+
+    def test_probe_command_report_uses_the_last_trailing_json_object(self) -> None:
+        report = om._probe_command_report(
+            'wrapper {not-json}\n{"verdict":"old","boots":[70]}\n'
+            '{"verdict":"last","boots":[71,72]}\n'
+        )
+        self.assertEqual(report, {"verdict": "last", "boots": [71, 72]})
+
+    def test_probe_command_report_without_a_valid_boot_list_is_unknown(self) -> None:
+        self.assertIsNone(om._boots({"verdict": "ok"}))
+        self.assertIsNone(om._boots({"verdict": "ok", "boots": [70, "bad"]}))
+
 
 class PlanValidationTests(MatrixTestCase):
     def refuses(self, pattern: str, cases=None, **extra) -> None:
@@ -229,6 +272,19 @@ class PlanValidationTests(MatrixTestCase):
         with self.assertRaisesRegex(om.MatrixError, "evidence_dir must stay under"):
             om.load_plan(self.write_plan(plan), repo_root=self.repo)
 
+    def test_refuses_host0_outside_build_and_visible_evidence_inside_repo(self) -> None:
+        self.refuses("host0_root must stay under.*build", host0_root="host0")
+        plan_dir = self.repo / "plans"
+        plan_dir.mkdir()
+        plan_path = plan_dir / "visible-plan.json"
+        plan = self.plan_dict(
+            [{"case_id": "delay-zero", "timeout_seconds": 60}],
+            evidence_dir="evidence",
+        )
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        with self.assertRaisesRegex(om.MatrixError, "evidence_dir.*ignored"):
+            om.load_plan(plan_path, repo_root=self.repo)
+
     def test_prebuilt_prx_needs_a_pinned_digest_inside_the_plan_directory(self) -> None:
         self.refuses("needs its lowercase sha256 pinned", [{"case_id": "nk-hang", "timeout_seconds": 60,
                                                              "prebuilt_prx": "nk_test_hang.prx"}])
@@ -249,6 +305,13 @@ class PlanValidationTests(MatrixTestCase):
         self.refuses("watchdog_deadline_seconds", watchdog_deadline_seconds=5)
         self.refuses("max_contained_failures", max_contained_failures=9)
         self.refuses("expected_firmware", expected_firmware="6.61")
+
+    def test_null_expected_firmware_is_refused_during_plan_load(self) -> None:
+        with self.assertRaisesRegex(om.MatrixError, "expected_firmware"):
+            self.load(
+                [{"case_id": "delay-zero", "timeout_seconds": 60}],
+                expected_firmware=None,
+            )
 
     def test_render_refuses_a_placeholder_without_a_value(self) -> None:
         self.assertEqual(om.render_argv(["a{x}b"], {"x": "1"}), ["a1b"])
@@ -338,8 +401,40 @@ class MatrixExecutionTests(MatrixTestCase):
         self.assertEqual(report["state"], "COMPLETE")
         notes = self.lock()["probes_run"]
         self.assertEqual(len(notes), 6)
-        self.assertIn("boot 71, launching transport-write + delay-zero", notes[0])
-        self.assertIn("delay-zero on boot 71: ACCEPTED", notes[1])
+
+    def test_runner_without_boot_report_cannot_accept_a_launch(self) -> None:
+        plan = self.load(self.CASES[:1], matrix_id="no-boots")
+        device = self.device(**{"delay-zero": "no-boots"})
+        code, report = self.runner(plan, device).execute()
+        self.assertEqual(code, 2)
+        self.assertEqual(report["outcomes"][0]["status"], om.NOT_ELIGIBLE)
+        self.assertNotIn("delay-zero", report["accepted"])
+
+    def test_attested_reboot_during_a_bootless_probe_report_is_contained(self) -> None:
+        plan = self.load(self.CASES[:1], matrix_id="reboot-no-boots")
+        device = self.device(**{"delay-zero": "reboot-no-boots"})
+        code, report = self.runner(plan, device).execute()
+        self.assertEqual(code, 2)
+        outcome = report["outcomes"][0]
+        self.assertEqual(outcome["status"], om.CONTAINED)
+        self.assertIn("rebooted during the launch", " ".join(outcome["reasons"]))
+        self.assertNotIn("delay-zero", report["accepted"])
+
+    def test_missing_boot_list_is_not_accepted_and_attested_reboot_is_contained(self) -> None:
+        plan = self.load(self.CASES[:1], matrix_id="missing-boots")
+        device = self.device(**{"delay-zero": "reboot-no-boots"})
+        code, report = self.runner(plan, device).execute()
+        self.assertEqual(code, 2)
+        outcome = report["outcomes"][0]
+        self.assertEqual(outcome["status"], om.CONTAINED)
+        self.assertIn("rebooted during the launch", " ".join(outcome["reasons"]))
+        self.assertNotIn("delay-zero", report["accepted"])
+
+        plan = self.load(self.CASES[:1], matrix_id="no-boots")
+        device = self.device(**{"delay-zero": "no-boots"})
+        code, report = self.runner(plan, device).execute()
+        self.assertEqual(code, 2)
+        self.assertEqual(report["outcomes"][0]["status"], om.NOT_ELIGIBLE)
         saved = json.loads(plan.report_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["accepted"], report["accepted"])
 
@@ -446,7 +541,7 @@ class MatrixExecutionTests(MatrixTestCase):
         self.assertEqual(first["status"], om.NOT_ELIGIBLE)
         self.assertIn("did not pass", " ".join(first["reasons"]))
         self.assertEqual(second["status"], om.NOT_ELIGIBLE)
-        self.assertIn("wrote no report", " ".join(second["reasons"]))
+        self.assertIn("no valid boots list", " ".join(second["reasons"]))
 
     def test_lock_held_by_another_session_refuses_before_touching_the_device(self) -> None:
         plan = self.load(self.CASES)
