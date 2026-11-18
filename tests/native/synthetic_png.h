@@ -31,21 +31,24 @@ static uint32_t synpng_crc32(uint32_t crc, const uint8_t *d, size_t n) {
 static void synpng_put32(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
 }
-static void synpng_chunk(FILE *f, const char *type, const uint8_t *data, size_t n) {
+/* Returns 1 when every byte of the chunk was written. */
+static int synpng_chunk(FILE *f, const char *type, const uint8_t *data, size_t n) {
     uint8_t head[8];
     synpng_put32(head, (uint32_t)n);
     memcpy(head + 4, type, 4);
-    fwrite(head, 1, 8, f);
-    if (n) fwrite(data, 1, n, f);
+    int ok = fwrite(head, 1, 8, f) == 8u;
+    if (n) ok &= fwrite(data, 1, n, f) == n;
     uint32_t crc = synpng_crc32(0, (const uint8_t *)type, 4);
     crc = synpng_crc32(crc, data, n);
     uint8_t tail[4];
     synpng_put32(tail, crc);
-    fwrite(tail, 1, 4, f);
+    ok &= fwrite(tail, 1, 4, f) == 4u;
+    return ok;
 }
 
 /* An RGBA8 PNG with stored (uncompressed) deflate blocks. `rgba` is w*h pixels, R in the low byte.
- * Returns 1 on success, 0 when the file cannot be written. */
+ * Returns 1 on success, 0 when the file cannot be written: it cannot be opened, a write comes up
+ * short, or closing it fails (a full disk often shows only when the buffer is flushed). */
 static int synpng_write(const char *path, int w, int h, const uint32_t *rgba) {
     static int inited;
     if (!inited) { synpng_crc_init(); inited = 1; }
@@ -77,17 +80,17 @@ static int synpng_write(const char *path, int w, int h, const uint32_t *rgba) {
     FILE *f = nk_fopen_utf8(path, "wb");
     if (!f) { free(raw); free(z); return 0; }
     static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
-    fwrite(sig, 1, 8, f);
+    int ok = fwrite(sig, 1, 8, f) == 8u;
     uint8_t ihdr[13];
     synpng_put32(ihdr, (uint32_t)w); synpng_put32(ihdr + 4, (uint32_t)h);
     ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
-    synpng_chunk(f, "IHDR", ihdr, 13);
-    synpng_chunk(f, "IDAT", z, zn);
-    synpng_chunk(f, "IEND", NULL, 0);
-    fclose(f);
+    ok &= synpng_chunk(f, "IHDR", ihdr, 13);
+    ok &= synpng_chunk(f, "IDAT", z, zn);
+    ok &= synpng_chunk(f, "IEND", NULL, 0);
+    ok &= fclose(f) == 0;
     free(raw);
     free(z);
-    return 1;
+    return ok;
 }
 
 #endif

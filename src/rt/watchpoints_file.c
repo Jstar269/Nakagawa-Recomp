@@ -57,6 +57,9 @@ static int sr_wp_parse_string(const char **pp, char *out, size_t out_cap) {
                         else return -1;
                     }
                     if (code > 0x7f) return -1; /* outside canonical charset */
+                    /* \u0000 would end the decoded C string early, so a label or key
+                     * would be checked only up to it ("ok\u0000$$" passing as "ok"). */
+                    if (code == 0) return -1;
                     c = (char)code;
                     s += 4;
                     break;
@@ -219,12 +222,10 @@ static int sr_wp_parse_array(const char **pp, SrWatchpointEntry *out, int out_ca
     return count;
 }
 
-int sr_parse_watchpoints_buffer(const char *json, SrWatchpointEntry *out, int out_cap,
+/* Parse a whole document into `out` (a scratch array the caller discards on failure).
+ * Returns the watchpoint count, or -1 with errbuf set; every error path returns -1. */
+static int sr_wp_parse_document(const char *json, SrWatchpointEntry *out, int out_cap,
                                 char *errbuf, size_t errbuf_size) {
-    if (!json || !out || out_cap <= 0) {
-        sr_wp_error(errbuf, errbuf_size, "invalid parser arguments");
-        return -1;
-    }
     const char *s = sr_wp_skip_ws(json);
     if (*s == '[') {
         /* Legacy bare array (pre-#188 writer output).
@@ -246,7 +247,7 @@ int sr_parse_watchpoints_buffer(const char *json, SrWatchpointEntry *out, int ou
     /* Envelope: walk key/value pairs; require format + version; read watchpoints. */
     s++;
     int saw_format = 0, saw_version = 0, saw_watchpoints = 0;
-    int result = -1;
+    int count = 0;
     for (;;) {
         s = sr_wp_skip_ws(s);
         if (*s == '}') {
@@ -255,19 +256,26 @@ int sr_parse_watchpoints_buffer(const char *json, SrWatchpointEntry *out, int ou
         }
         if (*s != '"') {
             sr_wp_error(errbuf, errbuf_size, "malformed envelope");
-            goto done;
+            return -1;
         }
         char key[32];
         if (sr_wp_parse_string(&s, key, sizeof(key)) != 0) {
             sr_wp_error(errbuf, errbuf_size, "malformed envelope key");
-            goto done;
+            return -1;
         }
         s = sr_wp_skip_ws(s);
         if (*s != ':') {
             sr_wp_error(errbuf, errbuf_size, "malformed envelope");
-            goto done;
+            return -1;
         }
         s = sr_wp_skip_ws(s + 1);
+        if ((strcmp(key, "format") == 0 && saw_format) ||
+            (strcmp(key, "version") == 0 && saw_version) ||
+            (strcmp(key, "watchpoints") == 0 && saw_watchpoints)) {
+            /* A repeated key would let a later value silently replace an earlier one. */
+            sr_wp_error(errbuf, errbuf_size, "duplicate envelope key");
+            return -1;
+        }
         if (strcmp(key, "format") == 0) {
             char fmt[32];
             /* Retirement policy: "hst-watchpoints" is accepted for legacy read-only
@@ -276,20 +284,20 @@ int sr_parse_watchpoints_buffer(const char *json, SrWatchpointEntry *out, int ou
                 (strcmp(fmt, SR_WATCHPOINTS_FILE_FORMAT) != 0 &&
                  strcmp(fmt, SR_WATCHPOINTS_LEGACY_FILE_FORMAT) != 0)) {
                 sr_wp_error(errbuf, errbuf_size, "unexpected watchpoints file format");
-                goto done;
+                return -1;
             }
             saw_format = 1;
         } else if (strcmp(key, "version") == 0) {
             uint32_t version = 0;
             if (sr_wp_parse_uint(&s, &version) != 0 || version != SR_WATCHPOINTS_FILE_VERSION) {
                 sr_wp_error(errbuf, errbuf_size, "unsupported watchpoints file version");
-                goto done;
+                return -1;
             }
             saw_version = 1;
         } else if (strcmp(key, "watchpoints") == 0) {
             int n = sr_wp_parse_array(&s, out, out_cap, errbuf, errbuf_size);
-            if (n < 0) goto done;
-            result = n;
+            if (n < 0) return -1;
+            count = n;
             saw_watchpoints = 1;
         } else {
             /* profileId / source / writtenAt / contentHash: skip any scalar. */
@@ -297,17 +305,17 @@ int sr_parse_watchpoints_buffer(const char *json, SrWatchpointEntry *out, int ou
                 char ignored[128]; /* contentHash is 64 hex chars + NUL */
                 if (sr_wp_parse_string(&s, ignored, sizeof(ignored)) != 0) {
                     sr_wp_error(errbuf, errbuf_size, "malformed envelope field");
-                    goto done;
+                    return -1;
                 }
             } else if (*s == 'n') {
                 if (strncmp(s, "null", 4) != 0) {
                     sr_wp_error(errbuf, errbuf_size, "malformed envelope field");
-                    goto done;
+                    return -1;
                 }
                 s += 4;
             } else {
                 sr_wp_error(errbuf, errbuf_size, "malformed envelope field");
-                goto done;
+                return -1;
             }
         }
         s = sr_wp_skip_ws(s);
@@ -320,23 +328,39 @@ int sr_parse_watchpoints_buffer(const char *json, SrWatchpointEntry *out, int ou
             break;
         }
         sr_wp_error(errbuf, errbuf_size, "malformed envelope");
-        goto done;
+        return -1;
     }
     if (!saw_format || !saw_version || !saw_watchpoints) {
         sr_wp_error(errbuf, errbuf_size, "envelope missing format, version or watchpoints");
-        result = -1;
-        goto done;
+        return -1;
     }
     {
         const char *tail = sr_wp_skip_ws(s);
         if (*tail != '\0') {
             sr_wp_error(errbuf, errbuf_size, "trailing data after envelope");
-            result = -1;
-            goto done;
+            return -1;
         }
     }
-done:
-    return result;
+    return count;
+}
+
+int sr_parse_watchpoints_buffer(const char *json, SrWatchpointEntry *out, int out_cap,
+                                char *errbuf, size_t errbuf_size) {
+    if (!json || !out || out_cap <= 0) {
+        sr_wp_error(errbuf, errbuf_size, "invalid parser arguments");
+        return -1;
+    }
+    /* Parse into scratch and copy only a fully valid document, so a file rejected after
+     * some entries parsed never leaves them in `out` (the header's no-partial-fill rule). */
+    SrWatchpointEntry *scratch = (SrWatchpointEntry *)calloc((size_t)out_cap, sizeof(*scratch));
+    if (!scratch) {
+        sr_wp_error(errbuf, errbuf_size, "out of memory parsing watchpoints");
+        return -1;
+    }
+    int n = sr_wp_parse_document(json, scratch, out_cap, errbuf, errbuf_size);
+    if (n > 0) memcpy(out, scratch, (size_t)n * sizeof(*scratch));
+    free(scratch);
+    return n;
 }
 
 int sr_parse_watchpoints_file(const char *path, SrWatchpointEntry *out, int out_cap,
@@ -372,6 +396,14 @@ int sr_parse_watchpoints_file(const char *path, SrWatchpointEntry *out, int out_
         return -1;
     }
     buf[sz] = '\0';
+    /* The parser reads a C string, so bytes after an embedded NUL would never be checked
+     * and would pass the trailing-data rule unseen. */
+    if (memchr(buf, '\0', (size_t)sz) != NULL) {
+        free(buf);
+        fclose(f);
+        sr_wp_error(errbuf, errbuf_size, "watchpoints.json contains a NUL byte");
+        return -1;
+    }
     int rc = sr_parse_watchpoints_buffer(buf, out, out_cap, errbuf, errbuf_size);
     free(buf);
     fclose(f);

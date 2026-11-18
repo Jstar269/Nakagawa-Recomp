@@ -313,10 +313,7 @@ jobs:
           base_policy_sha="$(git show "${BASE_SHA}:assets/public_source_profile.json" | sha256sum | cut -d' ' -f1)"
           candidate_policy_sha="$(git show "${HEAD_SHA}:assets/public_source_profile.json" | sha256sum | cut -d' ' -f1)"
           for value in "${base_policy_sha}" "${candidate_policy_sha}"; do
-            case "${value}" in
-              [0-9a-f]*) [ "${#value}" -eq 64 ] || { echo "policy sha malformed" >&2; exit 1; } ;;
-              *) echo "policy sha malformed" >&2; exit 1 ;;
-            esac
+            [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || { echo "policy sha malformed" >&2; exit 1; }
           done
           echo "base policy sha256 ${base_policy_sha}"
           echo "candidate policy sha256 ${candidate_policy_sha}"
@@ -331,10 +328,7 @@ jobs:
             # requires the fetched bytes to equal it exactly. A failed derivation fails this step.
             v4_name="$(python tools/provenance_attest_verify.py --repo "${GITHUB_WORKSPACE}" \
               --base "${BASE_SHA}" --candidate "${HEAD_SHA}" --policy-delta-key-v4)"
-            case "${v4_name}" in
-              [0-9a-f]*) [ "${#v4_name}" -eq 64 ] || { echo "V4 policy delta name malformed" >&2; exit 1; } ;;
-              *) echo "V4 policy delta name malformed" >&2; exit 1 ;;
-            esac
+            [[ "${v4_name}" =~ ^[0-9a-f]{64}$ ]] || { echo "V4 policy delta name malformed" >&2; exit 1; }
             if gh api \
               -H "Accept: application/vnd.github.raw" \
               "repos/${TRUSTED_REPO}/contents/docs/provenance/policy-deltas-v4/${v4_name}.json?ref=${authority_sha}" \
@@ -360,10 +354,7 @@ jobs:
               # exactly. A failed derivation fails this step.
               v3_name="$(python tools/provenance_attest_verify.py --repo "${GITHUB_WORKSPACE}" \
                 --base "${BASE_SHA}" --candidate "${HEAD_SHA}" --policy-delta-key)"
-              case "${v3_name}" in
-                [0-9a-f]*) [ "${#v3_name}" -eq 64 ] || { echo "V3 policy delta name malformed" >&2; exit 1; } ;;
-                *) echo "V3 policy delta name malformed" >&2; exit 1 ;;
-              esac
+              [[ "${v3_name}" =~ ^[0-9a-f]{64}$ ]] || { echo "V3 policy delta name malformed" >&2; exit 1; }
               if gh api \
                 -H "Accept: application/vnd.github.raw" \
                 "repos/${TRUSTED_REPO}/contents/docs/provenance/policy-deltas-v3/${v3_name}.json?ref=${authority_sha}" \
@@ -381,16 +372,28 @@ jobs:
                 # both profile digests (nested), or by the candidate digest alone (flat). The
                 # verifier accepts such a record only for a change that adds no path.
                 rm -f "${RUNNER_TEMP}/trusted/policy-delta-authority.json"
+                # legacy-policy-delta-lookup:begin
                 nested_policy_dir="docs/provenance/policy-deltas/${candidate_policy_sha}/${base_policy_sha}"
                 flat_policy_dir="docs/provenance/policy-deltas/${candidate_policy_sha}"
-                if gh api \
+                # Only a confirmed absence of the nested record falls back to the flat layout; any other
+                # lookup error fails this step, as for V4 and V3. An empty nested record falls back too.
+                nested_found=true
+                if ! gh api \
                   -H "Accept: application/vnd.github.raw" \
                   "repos/${TRUSTED_REPO}/contents/${nested_policy_dir}/candidate-policy.json?ref=${authority_sha}" \
-                  > "${RUNNER_TEMP}/trusted/candidate-policy.json" && \
-                  gh api \
+                  > "${RUNNER_TEMP}/trusted/candidate-policy.json" 2> "${RUNNER_TEMP}/trusted/nested-lookup.err" || \
+                  ! gh api \
                     -H "Accept: application/vnd.github.raw" \
                     "repos/${TRUSTED_REPO}/contents/${nested_policy_dir}/policy-delta-authority.json?ref=${authority_sha}" \
-                    > "${RUNNER_TEMP}/trusted/policy-delta-authority.json" && \
+                    > "${RUNNER_TEMP}/trusted/policy-delta-authority.json" 2> "${RUNNER_TEMP}/trusted/nested-lookup.err"; then
+                  if ! grep -q "HTTP 404" "${RUNNER_TEMP}/trusted/nested-lookup.err"; then
+                    cat "${RUNNER_TEMP}/trusted/nested-lookup.err" >&2
+                    echo "the nested policy delta lookup failed for a reason other than its absence" >&2
+                    exit 1
+                  fi
+                  nested_found=false
+                fi
+                if [ "${nested_found}" = true ] && \
                   test -s "${RUNNER_TEMP}/trusted/candidate-policy.json" && \
                   test -s "${RUNNER_TEMP}/trusted/policy-delta-authority.json"; then
                   policy_dir="${nested_policy_dir}"
@@ -410,6 +413,7 @@ jobs:
                 echo "policy delta authority materialized from ${policy_dir}"
                 echo "trusted_candidate_policy=${RUNNER_TEMP}/trusted/candidate-policy.json" >> "${GITHUB_OUTPUT}"
                 echo "policy_delta_authority=${RUNNER_TEMP}/trusted/policy-delta-authority.json" >> "${GITHUB_OUTPUT}"
+                # legacy-policy-delta-lookup:end
               fi
               # v3-policy-delta-lookup:end
             fi

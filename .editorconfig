@@ -30,3 +30,67 @@ insert_final_newline = unset
 end_of_line = unset
 trim_trailing_whitespace = unset
 insert_final_newline = unset
+
+# Vendored imports pin their upstream bytes: some upstream lines end in spaces, and
+# .gitattributes and the pre-commit whitespace hooks exempt these files so their blob IDs
+# stay the pinned ones. An EditorConfig-aware save must not normalise what git and
+# pre-commit then refuse to normalise. Only the imported files are exempt: the
+# project-authored files in the same directories (PROVENANCE.md manifests, API layers and
+# configure stand-ins, as each PROVENANCE.md marks them AUTHORED) keep the normal rules.
+[third_party/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[src/rt/atrac3p/{libavcodec,libavutil}/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[src/rt/h264_ffmpeg_sub/{libavcodec,libavutil,compat}/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[src/rt/{atrac3p,h264_ffmpeg_sub}/LICENSE.LGPLv2.1.txt]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[src/rt/minimp3/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[src/rt/xr/openxr/**]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+# Byte-identical libkirk imports (src/core/PROVENANCE.md) and the imported Gudea font licence.
+[src/core/{nk_psp_aes,nk_psp_sha1}.{c,h}]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[tests/fixtures/fonts/gudea/OFL.txt]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+# Project-authored files inside the import trees keep the normal rules.
+[third_party/**/PROVENANCE.md]
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[src/rt/{atrac3p,h264_ffmpeg_sub,minimp3,xr/openxr}/PROVENANCE.md]
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[src/rt/atrac3p/libavcodec/{avcodec.h,config.h,internal.h}]
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[src/rt/atrac3p/libavutil/{avconfig.h,avutil.h,config.h,libm.h,mathematics.h,thread.h}]
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[src/rt/h264_ffmpeg_sub/libavcodec/{bsf_list.c,codec_list.c}]
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[src/rt/h264_ffmpeg_sub/libavutil/{avconfig.h,ffversion.h}]
+trim_trailing_whitespace = true
+insert_final_newline = true
