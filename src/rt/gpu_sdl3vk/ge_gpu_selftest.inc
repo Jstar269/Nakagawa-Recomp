@@ -15865,7 +15865,7 @@ static int coherence_run_batch_state_elision(void) {
  * (injected VK_ERROR_OUT_OF_HOST_MEMORY) closes the open recording and starts no new one. Failing
  * before: s_cmd_slot and s_cmd stayed live, so the next flush ended the same buffer again and
  * every later submit failed on it. */
-#define AUD_TEX  0x08800000u   /* tex-evict-fail: 8 x 8 8888 textures, 256 bytes each */
+#define AUD_TEX  0x08700000u   /* tex-evict-fail: 8 x 8 8888 textures, 256 bytes each */
 #define AUD_LIST 0x00104000u
 #define AUD_VTX  0x00104800u
 #define AUD_X    0x00020000u   /* VRAM offsets: 8888 targets of stride 512 (0x88000 bytes) */
@@ -16258,7 +16258,7 @@ static int coherence_run_submit_fail(void) {
  * acquire returned the never-seeded image (layout UNDEFINED) as the surface.
  *
  * tex-key-bufw: two textures whose cache keys collide (the key XORs the buffer width into the
- * address bits: 0x08400000 at width 64 and 0x08800000 at width 128) get an entry each. Failing
+ * address bits: 0x08640000 at width 64 and 0x08440000 at width 96) get an entry each. Failing
  * before: the second updated the first's entry in place, which kept the first's address and
  * source ranges, so CPU writes to the second were watched at the first's bytes. */
 #define AUD2_T0  0x00040000u   /* target-keep-unsynced: nine 8888 targets of stride 128 */
@@ -16428,7 +16428,7 @@ static int coherence_run_depth_init_fail(void) {
 
 static int coherence_run_tex_key_bufw(void) {
     const char *name = "tex-key-bufw";
-    static const uint32_t addr[2] = { 0x08400000u, 0x08800000u }, bufw[2] = { 64u, 128u };
+    static const uint32_t addr[2] = { 0x08640000u, 0x08440000u }, bufw[2] = { 64u, 96u };
     if (s_nbatch) (void)submit_pending();
     GeState saved = *s_ge;
     s_ge->tex_fmt = 3u; s_ge->tex_w = 64; s_ge->tex_h = 64;
@@ -16649,7 +16649,7 @@ static int coherence_run_xfer_stride(void) {
 
 static int coherence_run_tex_make_fail(void) {
     const char *name = "tex-make-fail";
-    const uint32_t addr = 0x08A00000u, bytes = 64u * 64u * 4u;
+    const uint32_t addr = 0x08780000u, bytes = 64u * 64u * 4u;
     if (s_nbatch) (void)submit_pending();
     GeState saved = *s_ge;
     s_ge->tex_fmt = 3u; s_ge->tex_w = 64; s_ge->tex_h = 64;

@@ -68,8 +68,8 @@ static int cap_dir_ready(const char *dir) {
 static int cap_path_sep(int extended, char c) { return extended ? c == '\\' : cap_is_sep(c); }
 
 /* The length of the root `dir` starts with, which always exists and is never created or probed:
- * a drive ("C:"), a UNC share ("\\server\share"), or their extended forms ("\\?\C:",
- * "\\?\UNC\server\share"); any other extended root keeps its first component ("\\?\Volume{...}").
+ * a drive ("C:"), a UNC share ("\\<server>\<share>"), or their extended forms ("\\?\C:",
+ * "\\?\UNC\<server>\<share>"); any other extended root keeps its first component ("\\?\Volume{...}").
  * The UNC and extended forms are Windows' alone. 0 for a path from "/" or a relative path. */
 static size_t cap_root_len(const char *dir, int extended) {
 #ifndef _WIN32
