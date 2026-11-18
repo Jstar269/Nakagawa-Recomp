@@ -224,6 +224,22 @@ uint32_t nk_ach_read_memory(const NkAchMemory *mem, uint32_t ra_address, uint8_t
     return 0u;
 }
 
+/* Copies text into out[0..size): whole when it fits, else cut at a character. RetroAchievements'
+ * titles, descriptions and messages are UTF-8, and a cut inside a multi-byte sequence would hand
+ * the toast and the launcher invalid text. NULL text copies as empty. */
+static void ach_copy_text(char *out, size_t size, const char *text) {
+    if (!out || size == 0u) return;
+    size_t length = 0u;
+    if (text) {
+        while (length < size - 1u && text[length]) length++;
+        /* Cut: back up past the continuation bytes of a character that does not fit. */
+        if (text[length])
+            while (length > 0u && ((unsigned char)text[length] & 0xC0u) == 0x80u) length--;
+        memcpy(out, text, length);
+    }
+    out[length] = '\0';
+}
+
 static void ach_push(NkAch *ach, NkAchEventKind kind, uint32_t id, uint32_t points,
                      uint32_t count, const char *title, const char *message) {
     if (ach->event_count == NK_ACH_EVENT_QUEUE) {
@@ -237,8 +253,8 @@ static void ach_push(NkAch *ach, NkAchEventKind kind, uint32_t id, uint32_t poin
     e->id = id;
     e->points = points;
     e->count = count;
-    if (title) snprintf(e->title, sizeof e->title, "%s", title);
-    if (message) snprintf(e->message, sizeof e->message, "%s", message);
+    if (title) ach_copy_text(e->title, sizeof e->title, title);
+    if (message) ach_copy_text(e->message, sizeof e->message, message);
     ach->event_count++;
 }
 
@@ -377,7 +393,7 @@ static AchReplayOutcome ach_replay_outcome(const NkAchResponse *response, uint32
     }
     if (outcome != ACH_REPLAY_AWARDED && message && message_size &&
         parsed.response.error_message)
-        snprintf(message, message_size, "%s", parsed.response.error_message);
+        ach_copy_text(message, message_size, parsed.response.error_message);
     rc_api_destroy_award_achievement_response(&parsed);
     return outcome;
 }
@@ -798,7 +814,8 @@ static void RC_CCONV ach_login_done(int result, const char *error_message,
                  user ? user->display_name : NULL, NULL);
         /* Records another account left end here, before anything can send them. */
         (void)ach_queue_claim(ach);
-    } else if (userdata == &k_token_login && ach->response_unreachable) {
+    } else if (userdata == &k_token_login && ach->response_unreachable &&
+               result != RC_ABORTED) {
         /* The server gave no answer, so the stored token was not refused: it is tried again
          * (nk_ach_token_login_due), each wait twice the last. */
         const uint64_t wait = ach->token_retry_wait_ms == 0u
@@ -809,6 +826,8 @@ static void RC_CCONV ach_login_done(int result, const char *error_message,
         ach_push(ach, NK_ACH_EVENT_LOGIN_UNREACHABLE, 0u, 0u, 0u, NULL,
                  error_message ? error_message : rc_error_str(result));
     } else {
+        /* Refused, or RC_ABORTED: a logout (the feature turned off) ended the sign-in before
+         * its answer came, so nothing is tried again whatever that answer was. */
         ach_token_retry_end(ach);
         ach_push(ach, NK_ACH_EVENT_LOGIN_FAILED, 0u, 0u, 0u, NULL,
                  error_message ? error_message : rc_error_str(result));
@@ -1200,10 +1219,10 @@ static size_t ach_copy_achievement_list(const NkAch *ach, NkAchAchievement *out,
             if (out && copied < max) {
                 NkAchAchievement *entry = &out[copied++];
                 memset(entry, 0, sizeof(*entry));
-                snprintf(entry->title, sizeof entry->title, "%s",
-                         achievement->title ? achievement->title : "Untitled achievement");
-                snprintf(entry->description, sizeof entry->description, "%s",
-                         achievement->description ? achievement->description : "");
+                ach_copy_text(entry->title, sizeof entry->title,
+                              achievement->title ? achievement->title : "Untitled achievement");
+                ach_copy_text(entry->description, sizeof entry->description,
+                              achievement->description);
                 entry->points = achievement->points;
                 entry->unlocked_softcore =
                     (achievement->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE) != 0u;

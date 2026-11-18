@@ -142,6 +142,10 @@ int nk_platform_credential_prompt(const char *caption, const char *message, cons
  * platforms return false, leaving ordinary runtime memory allocation in use. */
 #define NK_GUEST_MEMORY_CHANNEL_NAME_MAX 192u
 #define NK_GUEST_MEMORY_CHANNEL_CONTROL_BYTES 4096u
+/* The arena the player creates and the runtime adopts: guest physical [0, 0x0c000000). It is the
+ * runtime's SR_GUEST_ARENA_SIZE (src/rt/recomp.h), which src/rt/gui.c asserts equal; the runtime
+ * refuses a channel of any other size. */
+#define NK_GUEST_MEMORY_ARENA_SIZE 0x0c000000u
 #define NK_GUEST_MEMORY_NOTIFICATION_MAX 192u
 /* The player's last messages kept for the runtime, which shows them one at a time. */
 #define NK_GUEST_MEMORY_NOTIFICATION_RING 8u

@@ -50,12 +50,14 @@
 #include "nk_json.h"
 #include "player_host.h"
 #include "nk_achievements.h"
+#include "nk_psp_keystore.h"
 
 typedef struct PlayerRun PlayerRun;
 typedef struct PlayerAchHttpJob PlayerAchHttpJob;
 static void player_achievements_settings_action(PlayerRun *run, PlayerUiSettingsOp op);
 static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork *work);
 static void player_achievements_stop_channel(PlayerRun *run);
+static void player_achievements_end_frames(PlayerRun *run);
 
 static const char k_invalid_disc_message[] = "This file isn't a PSP disc image.";
 static const char k_ach_credential_target[] = "NakagawaRecomp/RetroAchievements";
@@ -4326,12 +4328,15 @@ struct PlayerAchHttpJob {
    the process's exit code. */
 #define PLAYER_RUN_CONTINUE INT_MIN
 
-static void player_secure_clear(void *data, size_t size) {
-    volatile unsigned char *bytes = (volatile unsigned char *)data;
-    while (bytes && size > 0u) {
-        *bytes++ = 0u;
-        size--;
-    }
+/* The bytes of text that fit in max_bytes, for "%.*s": all of it when it fits, else cut at a
+   UTF-8 character, never inside one (RetroAchievements' text is UTF-8). */
+static int player_utf8_fit(const char *text, size_t max_bytes) {
+    size_t length = 0u;
+    if (!text) return 0;
+    while (length < max_bytes && text[length]) length++;
+    if (text[length])
+        while (length > 0u && ((unsigned char)text[length] & 0xC0u) == 0x80u) length--;
+    return length > (size_t)INT_MAX ? INT_MAX : (int)length;
 }
 
 static bool player_ach_response_append(PlayerAchHttpJob *job, const unsigned char *data,
@@ -4429,10 +4434,6 @@ static int SDLCALL player_ach_http_thread_main(void *userdata) {
     }
     response.close(response.context);
     if (!body_ok) job->response_status = NK_ACH_HTTP_RETRY;
-    if (!job->response_body) {
-        job->response_body = (char *)calloc(1u, 1u);
-        if (!job->response_body) job->response_status = NK_ACH_HTTP_CLIENT_ERROR;
-    }
 
 finished:
     if (!job->response_body) {
@@ -4512,7 +4513,7 @@ static void player_ach_transport(void *context, const NkAchRequest *request,
     job->thread = SDL_CreateThread(player_ach_http_thread_main, "ra-http", job);
     if (!job->thread) {
         run->ach_http_job = NULL;
-        player_secure_clear(job->post_data, job->post_data_size);
+        nk_secure_zero(job->post_data, job->post_data_size);
         free(job->post_data);
         free(job);
         refusal.http_status = NK_ACH_HTTP_RETRY;
@@ -4530,8 +4531,8 @@ static void player_ach_http_poll(PlayerRun *run) {
         NkAchResponse response = {job->response_body, job->response_body_size,
                                   job->response_status};
         if (job->done_callback) job->done_callback(&response, job->done_context);
-        player_secure_clear(job->post_data, job->post_data_size);
-        player_secure_clear(job->response_body, job->response_body_size);
+        nk_secure_zero(job->post_data, job->post_data_size);
+        nk_secure_zero(job->response_body, job->response_body_size);
         free(job->post_data);
         free(job->response_body);
         free(job);
@@ -4636,9 +4637,9 @@ static void player_achievements_refresh_list(PlayerRun *run) {
              "%s", run->achievements_disc_id);
     for (size_t i = 0u; i < count; i++) {
         snprintf(app->achievements_list_lines[i], sizeof app->achievements_list_lines[i],
-                 "%s \xC2\xB7 %u points \xC2\xB7 %.128s",
+                 "%s \xC2\xB7 %u points \xC2\xB7 %.*s",
                  entries[i].unlocked_softcore ? "Unlocked (softcore)" : "Locked",
-                 entries[i].points, entries[i].title);
+                 entries[i].points, player_utf8_fit(entries[i].title, 128u), entries[i].title);
     }
     for (size_t i = count; i < PLAYER_ACHIEVEMENTS_LIST_MAX; i++)
         app->achievements_list_lines[i][0] = '\0';
@@ -4722,7 +4723,7 @@ static void player_achievements_collect_events(PlayerRun *run) {
                                                                 sizeof token);
                 const bool stored = have_user && have_token &&
                     nk_platform_credential_write(k_ach_credential_target, username, token);
-                player_secure_clear(token, sizeof token);
+                nk_secure_zero(token, sizeof token);
                 if (!stored) {
                     nk_ach_logout(run->achievements);
                     app->achievements_signed_in = false;
@@ -4739,7 +4740,7 @@ static void player_achievements_collect_events(PlayerRun *run) {
                                  : "Signed in. Softcore only.");
                     nk_ach_replay_pending_unlocks(run->achievements, SDL_GetTicks());
                 }
-                player_secure_clear(username, sizeof username);
+                nk_secure_zero(username, sizeof username);
                 break;
             }
             case NK_ACH_EVENT_LOGIN_FAILED:
@@ -4749,6 +4750,10 @@ static void player_achievements_collect_events(PlayerRun *run) {
                     run->achievements_signout_pending = false;
                     player_achievements_end_account(
                         run, nk_platform_credential_delete(k_ach_credential_target));
+                } else if (!app->settings.achievements_enabled) {
+                    /* The switch was turned off while this sign-in was on its way (its
+                       nk_ach_logout aborted it): "RetroAchievements is off." stays, and the
+                       bridge tries nothing again. */
                 } else if (event->kind == NK_ACH_EVENT_LOGIN_UNREACHABLE) {
                     /* The stored token was not refused: player_frame_begin signs in with it
                        again when the bridge says it is due. No password is asked. */
@@ -4778,23 +4783,30 @@ static void player_achievements_collect_events(PlayerRun *run) {
                     snprintf(app->achievements_status, sizeof app->achievements_status,
                              "Softcore · %u achievements available.", event->count);
                 break;
-            case NK_ACH_EVENT_GAME_FAILED:
+            case NK_ACH_EVENT_GAME_FAILED: {
                 player_achievements_clear_list(run);
+                /* No set, so nothing to evaluate: the guest stops waiting for this player at
+                   each VBLANK. */
+                player_achievements_end_frames(run);
                 /* rc_client's own reason: no set for this game, or a server that could not be
                    reached, are different things. */
+                const char *reason = event->message[0] ? event->message : "no reason was given.";
                 snprintf(app->achievements_status, sizeof app->achievements_status,
-                         "The achievement set could not be loaded: %.150s",
-                         event->message[0] ? event->message : "no reason was given.");
+                         "The achievement set could not be loaded: %.*s",
+                         player_utf8_fit(reason, 150u), reason);
                 break;
+            }
             case NK_ACH_EVENT_UNLOCKED: {
                 char toast[NK_GUEST_MEMORY_NOTIFICATION_MAX];
-                snprintf(toast, sizeof toast, "Achievement unlocked: %.150s", event->title);
+                snprintf(toast, sizeof toast, "Achievement unlocked: %.*s",
+                         player_utf8_fit(event->title, 150u), event->title);
                 if (run->guest_memory_channel_active) {
                     (void)nk_platform_guest_memory_channel_notify(&run->guest_memory_channel,
                                                                   toast);
                 }
                 snprintf(app->achievements_status, sizeof app->achievements_status,
-                         "Unlocked: %.150s · Softcore", event->title);
+                         "Unlocked: %.*s · Softcore", player_utf8_fit(event->title, 150u),
+                         event->title);
                 player_achievements_refresh_list(run);
                 player_achievements_save_queue_or_report(run);
                 break;
@@ -4853,8 +4865,8 @@ static void player_achievements_sign_in_stored(PlayerRun *run) {
     app->achievements_signed_in = false;
     run->achievements_login_pending =
         nk_ach_begin_login(run->achievements, username, token);
-    player_secure_clear(token, sizeof token);
-    player_secure_clear(username, sizeof username);
+    nk_secure_zero(token, sizeof token);
+    nk_secure_zero(username, sizeof username);
     snprintf(app->achievements_status, sizeof app->achievements_status,
              run->achievements_login_pending ? "Signing in. Softcore only."
                                              : "Sign-in could not start.");
@@ -4931,18 +4943,18 @@ static bool player_achievements_prompt_sign_in(PlayerRun *run) {
         "The password is used once to obtain a token and is not stored.",
         NK_ACH_HOST, username, sizeof username, password, sizeof password);
     if (prompt != 1) {
-        player_secure_clear(password, sizeof password);
+        nk_secure_zero(password, sizeof password);
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
                  prompt == 0 ? "Sign-in cancelled." : "Credential prompt failed.");
         return false;
     }
     if (!nk_ach_begin_login_with_password(run->achievements, username, password)) {
-        player_secure_clear(password, sizeof password);
+        nk_secure_zero(password, sizeof password);
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
                  "Sign-in could not start.");
         return false;
     }
-    player_secure_clear(password, sizeof password);
+    nk_secure_zero(password, sizeof password);
     run->achievements_login_pending = true;
     run->achievements_signout_pending = false;
     snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
@@ -4967,6 +4979,19 @@ static void player_achievements_stop_channel(PlayerRun *run) {
         nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
         nk_platform_guest_memory_channel_close(&run->guest_memory_channel);
     }
+    if (run->achievements) nk_ach_set_memory(run->achievements, NULL);
+    run->guest_memory_channel_active = false;
+    run->achievements_game_hash[0] = '\0';
+}
+
+/* Ends the frame service but keeps the arena mapped. The runtime may not have opened the channel
+   yet, and a section already gone then would end the game's start
+   (GUEST_MEMORY_CHANNEL_UNAVAILABLE). Its next VBLANK sees the stop and turns its hook off; the
+   mapping is closed by player_achievements_stop_channel once the game has exited, at the next
+   launch or at shutdown, which also waits for the service thread. */
+static void player_achievements_end_frames(PlayerRun *run) {
+    if (!run || !run->guest_memory_channel_active) return;
+    nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);
     if (run->achievements) nk_ach_set_memory(run->achievements, NULL);
     run->guest_memory_channel_active = false;
     run->achievements_game_hash[0] = '\0';
@@ -5027,7 +5052,7 @@ static void player_achievements_prepare_launch(PlayerRun *run, PlayerLaunchWork 
                                  (unsigned long long)nonce);
     if (written <= 0 || (size_t)written >= sizeof channel_name ||
         !nk_platform_guest_memory_channel_create(&run->guest_memory_channel, channel_name,
-                                                  0x0c000000u)) {
+                                                  NK_GUEST_MEMORY_ARENA_SIZE)) {
         snprintf(run->app.achievements_status, sizeof run->app.achievements_status,
                  "The local guest-memory channel is unavailable; achievements are off for this run.");
         return;
@@ -6711,7 +6736,8 @@ static void player_frame_game_session(PlayerRun *run) {
             child_exited = player_app_monitor_game_session(app, SDL_GetTicks());
     }
     (void)child_exited;
-    if (!app->is_game_running && !app->launch_pending && run->guest_memory_channel_active) {
+    if (!app->is_game_running && !app->launch_pending &&
+        (run->guest_memory_channel_active || run->guest_memory_channel.view)) {
         player_achievements_stop_channel(run);
     }
     /* Discord status (#2259), when the user turned it on: shows the running game and

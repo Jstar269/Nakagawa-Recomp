@@ -147,7 +147,8 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
 - **Sign-in at start** uses the stored token. When the server gives no answer (no connection, a 5xx, 408 or
   429), the token was not refused: the player tries it again after 30 seconds, then after twice as long
   each time, up to ten minutes, with no password asked. A refusal by the server ends that, as do the
-  switch turned off and **Sign out**. A password is never kept, so a password sign-in is not retried.
+  switch turned off (also while a sign-in is on its way: the status stays "RetroAchievements is off.")
+  and **Sign out**. A password is never kept, so a password sign-in is not retried.
 - **Frames.** For a game started with achievements on, the runtime and the player share the guest memory
   through a local channel, and at each VBLANK the runtime waits while the achievements are evaluated once
   on that frame's memory. A thread of the player's own serves this, so a modal box or a window being
@@ -155,7 +156,8 @@ Built for v0.1.0 (#1316): an opt-in, softcore-only client using the MIT-licensed
   channel it cannot open ends at once with `GUEST_MEMORY_CHANNEL_UNAVAILABLE` and exit status 2. A
   game whose window is up without having opened the channel (a package built before it, or without it)
   never sends a frame: the player stops the channel and says the package must be rebuilt to track
-  achievements.
+  achievements. When the game's achievement set cannot be loaded, the player stops serving frames, so
+  the runtime's next VBLANK stops waiting for it; the shared memory stays mapped until the game exits.
 - **UI regression runs** refuse the switch, **Sign in** and **Sign out**, and say so: they stay offline,
   open no consent or credential box and read no credential.
 - **Hardcore is unavailable.** The client starts softcore sessions only; the UI and requests do not claim

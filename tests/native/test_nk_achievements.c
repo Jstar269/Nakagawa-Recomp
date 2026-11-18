@@ -1461,6 +1461,103 @@ static void test_requests_wait_for_the_one_transport_slot(uint8_t *ram) {
     nk_ach_destroy(ach);
 }
 
+/* Turning the feature off while a token sign-in is on its way: rc_client answers it as
+ * aborted once the server's reply arrives. A reply that found no server must not arm the token
+ * sign-in's retry for a feature that is now off. */
+static void test_sign_in_ended_by_logout_is_not_tried_again(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.defer = true;
+    fake.login_status = NK_ACH_HTTP_RETRY;
+    fake.login_body = "";
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "the token sign-in starts");
+    CHECK(fake.deferred_done != NULL, "the sign-in is on its way");
+    nk_ach_logout(ach);
+    CHECK(fake_answer_held(&fake), "the reply, which found no server, arrives after the logout");
+    const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const int failed = has_event(ev, n, NK_ACH_EVENT_LOGIN_FAILED);
+    CHECK(failed >= 0 && has_event(ev, n, NK_ACH_EVENT_LOGIN_UNREACHABLE) < 0 &&
+              !nk_ach_logged_in(ach),
+          "an aborted sign-in ends as failed, not unreachable (failed at %d)", failed);
+    CHECK(!nk_ach_token_login_due(ach, 1000u) && !nk_ach_token_login_due(ach, 100000u) &&
+              !nk_ach_token_login_due(ach, 2000000u),
+          "an aborted sign-in is not tried again");
+    fake.defer = false;
+    nk_ach_destroy(ach);
+}
+
+/* True when text[0..length) ends on a UTF-8 character boundary: its last lead byte starts a
+ * sequence whose continuation bytes are all there. */
+static bool utf8_ends_whole(const char *text) {
+    const size_t length = strlen(text);
+    size_t lead = length;
+    while (lead > 0u && ((unsigned char)text[lead - 1u] & 0xC0u) == 0x80u) lead--;
+    if (lead == 0u) return length == 0u;
+    const unsigned char first = (unsigned char)text[lead - 1u];
+    const size_t want = first < 0x80u ? 1u : first >= 0xF0u ? 4u : first >= 0xE0u ? 3u : 2u;
+    return length - (lead - 1u) == want;
+}
+
+/* RetroAchievements titles are UTF-8. One longer than the bridge's event or list field is cut
+ * at a character, never inside one, so the toast and the launcher get valid text. */
+static void test_long_titles_are_cut_at_a_character(uint8_t *ram) {
+    static char sets[4096];
+    char title[64 * 3 + 1] = "";
+    char description[80 * 3 + 1] = "";
+    for (int i = 0; i < 64; i++) memcpy(title + i * 3, "\xE3\x81\x82", 4u);
+    for (int i = 0; i < 80; i++) memcpy(description + i * 3, "\xE3\x81\x84", 4u);
+    snprintf(sets, sizeof sets,
+             "{\"Success\":true,\"GameId\":1234,\"Title\":\"Synthetic Game\",\"ConsoleId\":41,"
+             "\"ImageIconUrl\":\"\",\"RichPresenceGameId\":1234,\"RichPresencePatch\":\"\","
+             "\"Sets\":[{\"AchievementSetId\":1111,\"GameId\":1234,\"Title\":null,"
+             "\"Type\":\"core\",\"ImageIconUrl\":\"\",\"Achievements\":["
+             "{\"ID\":5501,\"Title\":\"%s\",\"Description\":\"%s\","
+             "\"Flags\":3,\"Points\":5,\"MemAddr\":\"0xH800100=5\",\"Author\":\"Synthetic\","
+             "\"BadgeName\":\"00001\",\"Created\":1700000000,\"Modified\":1700000000}"
+             "],\"Leaderboards\":[]}]}", title, description);
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    fake.sets_body = sets;
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "sign in");
+    CHECK(nk_ach_begin_load_game(ach, HASH), "load");
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_GAME_LOADED) >= 0, "the set with long titles loads");
+    NkAchAchievement list[2];
+    size_t total = 0u;
+    const size_t count = nk_ach_copy_achievement_list(ach, list, 2u, &total);
+    CHECK(count == 1u, "one achievement listed (%u)", (unsigned)count);
+    if (count == 1u) {
+        CHECK(strlen(list[0].title) > 0u && utf8_ends_whole(list[0].title),
+              "the list title ends on a character (%u bytes)", (unsigned)strlen(list[0].title));
+        CHECK(strlen(list[0].description) > 0u && utf8_ends_whole(list[0].description),
+              "the description ends on a character (%u bytes)",
+              (unsigned)strlen(list[0].description));
+    }
+    for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+    ram[ACH_ADDR] = 5;
+    nk_ach_frame(ach);
+    n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const int unlocked = has_event(ev, n, NK_ACH_EVENT_UNLOCKED);
+    CHECK(unlocked >= 0, "the achievement unlocks");
+    if (unlocked >= 0)
+        CHECK(strlen(ev[unlocked].title) > 0u && utf8_ends_whole(ev[unlocked].title),
+              "the unlock event's title ends on a character (%u bytes)",
+              (unsigned)strlen(ev[unlocked].title));
+    nk_ach_destroy(ach);
+}
+
 /* ---- frames while the player's own loop stands still -------------------------------------- */
 
 static const char k_sets_hits[] =
@@ -1706,6 +1803,8 @@ int main(int argc, char **argv) {
     RUN_RAM(test_refused_live_award_leaves_the_queue);
     RUN_RAM(test_late_answer_after_sign_out_keeps_the_next_unlock);
     RUN_RAM(test_requests_wait_for_the_one_transport_slot);
+    RUN_RAM(test_sign_in_ended_by_logout_is_not_tried_again);
+    RUN_RAM(test_long_titles_are_cut_at_a_character);
     RUN(test_frames_are_served_while_the_event_loop_is_stalled);
     RUN(test_notifications_are_read_in_order);
     free(ram);

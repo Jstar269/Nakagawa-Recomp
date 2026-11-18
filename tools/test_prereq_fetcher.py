@@ -1774,6 +1774,69 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
                       "channel)", frame)
         self.assertIn("player_achievements_stop_channel(run);", frame)
 
+    def test_achievement_status_wipes_and_channel_end_in_the_player(self) -> None:
+        # src/player/main.c has no native harness; these read its source for the rules the
+        # second pass of the audit of 2026-11-17 found broken (the bridge's side of the aborted
+        # sign-in and of the UTF-8 cuts runs in achievements-selftest).
+        main = (REPO_ROOT / "src" / "player" / "main.c").read_text(encoding="utf-8")
+        events = main[main.index("static void player_achievements_collect_events(PlayerRun *run) {"):]
+        events = events[:events.index("\n}\n")]
+        # Secrets are wiped by the one shared helper, never a second loop of the player's own.
+        self.assertIn('#include "nk_psp_keystore.h"', main)
+        self.assertNotIn("player_secure_clear", main)
+        self.assertGreaterEqual(main.count("nk_secure_zero("), 10)
+        # An empty answer gets its one-byte body in one place, under finished:.
+        self.assertEqual(main.count("job->response_body = (char *)calloc(1u, 1u);"), 1)
+        # A sign-in that the switch turned off aborted keeps "RetroAchievements is off.".
+        failed = events[events.index("case NK_ACH_EVENT_LOGIN_FAILED:"):]
+        failed = failed[:failed.index("break;")]
+        self.assertLess(failed.index("} else if (!app->settings.achievements_enabled) {"),
+                        failed.index("event->kind == NK_ACH_EVENT_LOGIN_UNREACHABLE"))
+        # A game whose set did not load stops the frame service, and keeps the arena mapped
+        # for a runtime that may not have opened it yet; the game's exit closes it.
+        game_failed = events[events.index("case NK_ACH_EVENT_GAME_FAILED:"):]
+        game_failed = game_failed[:game_failed.index("break;")]
+        self.assertIn("player_achievements_end_frames(run);", game_failed)
+        end_frames = main[main.index("static void player_achievements_end_frames(PlayerRun *run) {"):]
+        end_frames = end_frames[:end_frames.index("\n}\n")]
+        self.assertIn("nk_platform_guest_memory_channel_stop(&run->guest_memory_channel);",
+                      end_frames)
+        self.assertNotIn("nk_platform_guest_memory_channel_close", end_frames)
+        self.assertIn("(run->guest_memory_channel_active || run->guest_memory_channel.view)) {\n"
+                      "        player_achievements_stop_channel(run);", main)
+        # RetroAchievements text is cut at a UTF-8 character, never by a bare byte count.
+        ra = main[main.index("static int player_utf8_fit("):
+                  main.index("static void player_achievements_sign_in_stored(")]
+        self.assertIsNone(re.search(r"%\.[0-9]+s", ra), "a byte-count cut of RA text")
+        self.assertEqual(ra.count("player_utf8_fit("), 5, "the helper, the list, three events")
+        # The arena's size is one constant, the runtime's SR_GUEST_ARENA_SIZE, asserted equal.
+        platform = (REPO_ROOT / "src" / "core" / "nk_platform.h").read_text(encoding="utf-8")
+        recomp = (REPO_ROOT / "src" / "rt" / "recomp.h").read_text(encoding="utf-8")
+        gui = (REPO_ROOT / "src" / "rt" / "gui.c").read_text(encoding="utf-8")
+        platform_size = re.search(r"#define NK_GUEST_MEMORY_ARENA_SIZE (0x[0-9a-fA-F]+)u", platform)
+        runtime_size = re.search(r"#define SR_GUEST_ARENA_SIZE (0x[0-9a-fA-F]+)u", recomp)
+        self.assertIsNotNone(platform_size)
+        self.assertIsNotNone(runtime_size)
+        self.assertEqual(int(platform_size.group(1), 16), int(runtime_size.group(1), 16))
+        self.assertIn("_Static_assert(SR_GUEST_ARENA_SIZE == NK_GUEST_MEMORY_ARENA_SIZE,", gui)
+        self.assertIn("NK_GUEST_MEMORY_ARENA_SIZE)) {", main)
+        self.assertNotIn("0x0c000000u", main)
+
+    def test_achievements_selftest_declares_rcheevos_libc_on_linux(self) -> None:
+        # The selftest builds the vendored rcheevos with the core's strict -std=c99. glibc then
+        # declares no strdup, strcasecmp or strncasecmp; GCC 13 only warns and takes strdup to
+        # return int, cutting its pointer on 64-bit hosts. Linux gets the declarations, as the
+        # CMake player build does, and an implicit declaration fails the gate everywhere.
+        mk = (REPO_ROOT / "mk" / "native_ui_tests.mk").read_text(encoding="utf-8")
+        recipe = mk[mk.index("define ACHIEVEMENTS_SELFTEST_CMD"):]
+        recipe = recipe[:recipe.index("endef")]
+        self.assertIn("-Werror=implicit-function-declaration", recipe)
+        self.assertIn("$(ACHIEVEMENTS_SELFTEST_LIBC_FLAGS)", recipe)
+        self.assertRegex(mk, r"ifeq \(\$\(OS\),Windows_NT\)\nACHIEVEMENTS_SELFTEST_LIBC_FLAGS :=\n"
+                             r"else\nACHIEVEMENTS_SELFTEST_LIBC_FLAGS := -D_DEFAULT_SOURCE "
+                             r"-include strings\.h\nendif\n")
+        self.assertNotIn("gnu99, not c99", mk)
+
     def test_runtime_host_toast_has_no_retroachievements_identity(self) -> None:
         runtime = REPO_ROOT / "src" / "rt"
         shipped = [path for path in runtime.rglob("*")

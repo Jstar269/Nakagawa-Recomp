@@ -886,6 +886,11 @@ static void gui_guest_memory_channel_vblank(void) {
     }
 }
 
+/* The player creates the arena with the platform's size; one constant changed alone would make
+ * every channel open refuse the launch. */
+_Static_assert(SR_GUEST_ARENA_SIZE == NK_GUEST_MEMORY_ARENA_SIZE,
+               "the runtime's guest arena and the player's channel arena differ");
+
 int gui_guest_memory_channel_install(void) {
     const char *name = getenv("SR_GUEST_MEMORY_CHANNEL");
     if (!name || !name[0]) return 1;
