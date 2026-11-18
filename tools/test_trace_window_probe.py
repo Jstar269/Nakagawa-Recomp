@@ -279,8 +279,9 @@ int main(void) {
 def _find_compiler() -> str:
     for candidate in (os.environ.get("CC", ""), "gcc", "cc", "clang"):
         word = candidate.split()[0] if candidate.strip() else ""
-        if word and shutil.which(word):
-            return shutil.which(word)
+        path = shutil.which(word) if word else None
+        if path:
+            return path
     return ""
 
 
