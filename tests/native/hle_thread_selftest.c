@@ -46710,6 +46710,96 @@ static void test_route_malformed_files_are_refused(void) {
     remove(RT_PATH);
 }
 
+/* A count the parser cannot read, a checkpoint name no CHECKPOINT defines, an alternate that
+ * would quietly loosen its screen's tolerance, and a route file that cannot be read or holds
+ * nothing all refuse the route by name (audit 2026-11-17). Before, strtoul/atol read '-1' as
+ * a near-endless hold and 'abc' as 0, a misspelled PRESS_UNTIL name pressed until its timeout,
+ * the last alternate's default tolerance replaced an explicit tol=, and a missing or empty file
+ * left the route off, so the run fell back to the automatic START pulse. */
+static void test_route_counts_names_and_files_are_checked_at_load(void) {
+    char hexA[1024], body[4096];
+    rt_hex(hexA, 0x20);
+    static const char *const counts[] = {
+        "PRESS START -1\nEND\n",
+        "PRESS START 12x\nEND\n",
+        "PRESS START 4294967296\nEND\n",
+        "DELAY abc\nEND\n",
+        "DELAY -5\nEND\n",
+        "WAIT_NID 0x12345678 10x\nEND\n",
+        "PRESS_UNTIL_NID 0x12345678 START 8 16x 100\nEND\n",
+        "SAMPLE_EVERY 5x\nPRESS START 4\nEND\n",
+        "TOLERANCE 4x\nPRESS START 4\nEND\n",
+        "100x 0x4000 16\n",
+        "100 0x4000 -1\n",
+    };
+    for (size_t i = 0; i < sizeof counts / sizeof counts[0]; i++) {
+        char msg[160];
+        sr_route_reset();
+        rt_write(counts[i]);
+        snprintf(msg, sizeof msg, "a route count that is not a plain decimal is refused (case %u)",
+                 (unsigned)i);
+        expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED, msg);
+    }
+    static const char *const counted_with_checkpoint[] = {
+        "CHECKPOINT MAIN_MENU %s\nWAIT MAIN_MENU 10x\nEND\n",
+        "CHECKPOINT MAIN_MENU %s\nPRESS_UNTIL MAIN_MENU START 8 16 -1\nEND\n",
+        "CHECKPOINT MAIN_MENU %s\nPRESS_WHILE MAIN_MENU START 8 16x 100\nEND\n",
+        "CHECKPOINT MAIN_MENU tol=2x %s\nWAIT MAIN_MENU 10\nEND\n",
+    };
+    for (size_t i = 0; i < sizeof counted_with_checkpoint / sizeof counted_with_checkpoint[0]; i++) {
+        char msg[160];
+        sr_route_reset();
+        snprintf(body, sizeof body, counted_with_checkpoint[i], hexA);
+        rt_write(body);
+        snprintf(msg, sizeof msg, "a step count that is not a plain decimal is refused (case %u)",
+                 (unsigned)i);
+        expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED, msg);
+    }
+    sr_route_reset();
+    rt_write("PRESS START 4\nDELAY 0\nEND\n");
+    expect(sr_route_load(RT_PATH) == 1, "plain decimal counts, DELAY 0 included, still load");
+
+    /* Every step that names a checkpoint is checked against the CHECKPOINT lines. */
+    static const char *const undefined[] = {
+        "CHECKPOINT MAIN_MENU %s\nPRESS_UNTIL MAIN_MENUU START 8 16 100\nEND\n",
+        "CHECKPOINT MAIN_MENU %s\nPRESS_WHILE MAIN_MENUU START 8 16 100\nEND\n",
+    };
+    for (size_t i = 0; i < sizeof undefined / sizeof undefined[0]; i++) {
+        sr_route_reset();
+        snprintf(body, sizeof body, undefined[i], hexA);
+        rt_write(body);
+        expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+               "a PRESS_UNTIL or PRESS_WHILE naming an undefined checkpoint is refused at load");
+    }
+
+    /* One checkpoint has one tolerance: an alternate recording that would change it is refused,
+     * and one that repeats it loads. */
+    sr_route_reset();
+    snprintf(body, sizeof body,
+             "CHECKPOINT MAIN_MENU tol=2 %s\nCHECKPOINT MAIN_MENU %s\nWAIT MAIN_MENU 100\nEND\n",
+             hexA, hexA);
+    rt_write(body);
+    expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+           "an alternate without tol= cannot loosen the tol=2 an earlier recording set");
+    sr_route_reset();
+    snprintf(body, sizeof body,
+             "CHECKPOINT MAIN_MENU tol=2 %s\nCHECKPOINT MAIN_MENU tol=2 %s\nWAIT MAIN_MENU 100\nEND\n",
+             hexA, hexA);
+    rt_write(body);
+    expect(sr_route_load(RT_PATH) == 1, "alternates that agree on their tolerance load");
+
+    /* A named route file that cannot be read, or that holds no step, fails the run. */
+    sr_route_reset();
+    remove(RT_PATH);
+    expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+           "a route file that cannot be opened fails the run instead of leaving the START pulse");
+    sr_route_reset();
+    rt_write("# nothing but a comment\n\n");
+    expect(sr_route_load(RT_PATH) == 0 && sr_route_status() == RT_FAILED,
+           "a route file with no steps fails the run instead of leaving the START pulse");
+    remove(RT_PATH);
+}
+
 /* A mask the parser cannot read must refuse the route, not press nothing.
  *
  * The failure this pins down is invisible from outside a run: `strtoul` reports no error,
@@ -46837,7 +46927,9 @@ static void test_route_legacy_pad_script_is_unchanged(void) {
     sr_route_reset();
     rt_write("# comment only\n\n");
     expect(sr_route_load(RT_PATH) == 0, "an empty route file loads nothing");
-    expect(sr_route_status() == RT_OFF, "an empty route file leaves the pad unscripted");
+    /* A route file that holds nothing is refused like any unusable one (audit 2026-11-17):
+     * leaving the pad unscripted ran the title on the automatic START pulse instead. */
+    expect(sr_route_status() == RT_FAILED, "an empty route file fails the run");
     remove(RT_PATH);
     sr_route_reset();
 }
@@ -57742,15 +57834,48 @@ static int run_texdump_stop_child(const char *arg) {
         s_test_gui_on = 1;
         sr_display_advance_vcount(1u);
         (void)display_set(0x04000000u, 512, 3, 0);
+    } else if (strcmp(route, "sample7") == 0 || strcmp(route, "routefail") == 0) {
+        /* sample7: a spec line with one offset more than the sampler holds is refused (status 2)
+         * before anything is stored past its arrays. routefail: a sampled run whose route fails
+         * (status 86) still lands the CSV rows written so far, because route_fail closes the
+         * sample file before _Exit, which flushes nothing itself. */
+        extern void sr_hle_test_state_sample_vblank(uint32_t vcount);
+        extern void sr_hle_test_state_sample_reset(void);
+        const int seven = route[0] == 's';
+        char spec[MAX_PATH], csv[MAX_PATH], pad[MAX_PATH];
+        const char *root = colon + 1;
+        if (snprintf(spec, sizeof(spec), "%s/texdump_stop_%s.spec", root, route) >= (int)sizeof(spec) ||
+            snprintf(csv, sizeof(csv), "%s/texdump_stop_%s.csv", root, route) >= (int)sizeof(csv) ||
+            snprintf(pad, sizeof(pad), "%s/texdump_stop_%s.pad", root, route) >= (int)sizeof(pad))
+            return 96;
+        FILE *f = fopen(spec, "w");
+        if (!f) return 96;
+        fputs(seven ? "deep u32 0x09018500 0 0 0 0 0 0 0\n" : "count u32 0x09018500\n", f);
+        fclose(f);
+        hle_test_setenv("SR_SAMPLE_SPEC", spec);
+        hle_test_setenv("SR_SAMPLE_OUT", csv);
+        hle_test_setenv("SR_ROUTE_NO_EXIT", "");
+        MEM_W32(0x09018500u, 7u);
+        sr_hle_test_state_sample_reset();
+        sr_hle_test_state_sample_vblank(1u);
+        if (!seven) {
+            f = fopen(pad, "w");
+            if (!f) return 96;
+            fputs("STEP_SIDEWAYS 3\n", f);
+            fclose(f);
+            (void)sr_route_load(pad);
+        }
     }
     return 98;   /* the stop did not end the run */
 }
 
 static void test_texdump_finished_by_run_stops(const char *self) {
-    static const struct { const char *route, *line; int status; } stops[] = {
-        { "nid", "HLE: unimplemented nid 0x0badd00d", 7 },
-        { "watchdog", "WATCHDOG: aborting after 600 vblanks", 1 },
-        { "fbdump", "present capture result=0", 1 },
+    static const struct { const char *route, *line; int status; const char *csv; } stops[] = {
+        { "nid", "HLE: unimplemented nid 0x0badd00d", 7, NULL },
+        { "watchdog", "WATCHDOG: aborting after 600 vblanks", 1, NULL },
+        { "fbdump", "present capture result=0", 1, NULL },
+        { "sample7", "too many offsets", 2, NULL },
+        { "routefail", "ROUTE_FAIL: route file", 86, "vblank,count\n1,7\n" },
     };
     char root[MAX_PATH];
     if (!hle_scratch_root(root, sizeof(root))) {
@@ -57781,6 +57906,19 @@ static void test_texdump_finished_by_run_stops(const char *self) {
         snprintf(msg, sizeof(msg), "the %s stop finishes the texture dump before the process ends "
                                    "(sr_texdump_exit_finish)", stops[i].route);
         expect(pf != NULL, msg);
+        if (stops[i].csv) {
+            char csv[MAX_PATH], rows[256];
+            size_t got = 0u;
+            if (snprintf(csv, sizeof(csv), "%s/texdump_stop_%s.csv", root, stops[i].route) < (int)sizeof(csv)) {
+                FILE *cf = fopen(csv, "r");   /* text mode: the sampler writes text rows */
+                got = cf ? fread(rows, 1, sizeof(rows) - 1u, cf) : 0u;
+                if (cf) fclose(cf);
+            }
+            rows[got] = '\0';
+            snprintf(msg, sizeof(msg), "the %s stop lands the SR_SAMPLE_OUT rows written before it "
+                                       "(hle_state_sample_close before _Exit)", stops[i].route);
+            expect(strcmp(rows, stops[i].csv) == 0, msg);
+        }
     }
 }
 
@@ -58414,6 +58552,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_route_press_until_timeout_fails_loudly();
     test_route_alternate_signatures_mask_variable_content();
     test_route_malformed_files_are_refused();
+    test_route_counts_names_and_files_are_checked_at_load();
     test_route_mask_refuses_what_it_cannot_mean();
     test_route_legacy_pad_script_is_unchanged();
     test_route_names_the_buttons_it_presses();
