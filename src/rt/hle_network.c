@@ -362,7 +362,8 @@ static int adhocctl_inited(void) { return s_adhocctl.inited; }
 /* A request already in flight. BUSY is recorded only for these pairs, each with valid arguments:
  * Scan and Create during a Create (ctlinit.expected:24, 29; a Create after a refused Disconnect,
  * abandon.expected:30), and Disconnect during a Create or a Connect (abandon.expected:6, 12).
- * Every other request while one is in flight is UNMEASURED and stops. Whether a PSP checks a
+ * Every other request while one is in flight is UNMEASURED and stops offline; the online tier
+ * answers BUSY for each, as PPSSPP does (below). Whether a PSP checks a
  * request's arguments or its busy state first is UNMEASURED too: adhocctl_start checks the
  * group name first, and an invalid name while a request is in flight stops by name instead of
  * answering BUSY or INVALID_ARG. Returns 1 when the call must answer `*out`. */
@@ -373,6 +374,15 @@ static int adhocctl_pending(const char *name, int request, uint32_t *out) {
          (request == ADHOCCTL_REQ_SCAN || request == ADHOCCTL_REQ_CREATE ||
           request == ADHOCCTL_REQ_DISCONNECT)) ||
         (pending == ADHOCCTL_REQ_CONNECT && request == ADHOCCTL_REQ_DISCONNECT)) {
+        *out = ADHOCCTL_ERROR_BUSY;
+        return 1;
+    }
+    if (s_adhocctl.online_active) {
+        /* Online tier, PPSSPP-derived, not PSP-measured (rev 3bc60270, Core/HLE/sceNetAdhoc.cpp):
+         * while isAdhocctlBusy, Scan (2789, 2817), Create and Connect (NetAdhocctl_Create 3267,
+         * 3308) and Disconnect (NetAdhocctl_Disconnect 2967-2974) answer BUSY and the request in
+         * flight goes on. An online request stays in flight until the lobby answers, so a game
+         * that cancels a search meets this cell in ordinary play. */
         *out = ADHOCCTL_ERROR_BUSY;
         return 1;
     }
@@ -440,7 +450,37 @@ static AdhocPeerEntry *adhoc_find_peer(const uint8_t mac[6]) {
 
 static void adhoc_upsert_peer(const NkLobbyEvent *ev) {
     if (!ev || is_zero_mac(ev->mac)) return;
+    /* The lobby codec passes these fields on unchecked (nk_adhoc_relay.c); a member's MAC is a
+     * unicast address, so the all-ones and group MACs a hostile or broken server may send are
+     * refused before they reach the peer list or the broadcast fan-out. */
+    if (ev->mac[0] & 1u) {
+        static int group_mac_logged;
+        if (!group_mac_logged) {
+            group_mac_logged = 1;
+            fprintf(stderr, "HLE: adhocctl refused a lobby CONNECT with group MAC "
+                            "%02x:%02x:%02x:%02x:%02x:%02x\n", ev->mac[0], ev->mac[1], ev->mac[2],
+                    ev->mac[3], ev->mac[4], ev->mac[5]);
+        }
+        return;
+    }
     if (console_profile_identity() && is_mac_match(s_console.mac, ev->mac)) return;
+    /* A peer id names one member: a CONNECT that gives a held id to another MAC takes the id
+     * over and the older holder leaves, as a DISCONNECT of the id would make it, so one
+     * DISCONNECT removes one peer. */
+    for (int i = 0; i < ADHOC_MAX_PEERS; i++) {
+        if (s_adhoc_peers[i].active && s_adhoc_peers[i].peer_id == ev->peer_id &&
+            !is_mac_match(s_adhoc_peers[i].mac, ev->mac)) {
+            static int dup_id_logged;
+            if (!dup_id_logged) {
+                dup_id_logged = 1;
+                fprintf(stderr, "HLE: adhocctl lobby CONNECT repeats peer id %u for another MAC; "
+                                "the older entry leaves\n", (unsigned)ev->peer_id);
+            }
+            s_adhoc_peers[i].active = 0; /* as a DISCONNECT of that id leaves it */
+            s_adhoc_peers[i].left_at = sched_vtime_us();
+            if (s_adhoc_peers[i].left_at == 0u) s_adhoc_peers[i].left_at = 1u;
+        }
+    }
     AdhocPeerEntry *slot = NULL;
     for (int i = 0; i < ADHOC_MAX_PEERS; i++) {
         if (s_adhoc_peers[i].in_list && is_mac_match(s_adhoc_peers[i].mac, ev->mac)) {
@@ -1442,7 +1482,9 @@ typedef struct AdhocSockSlot {
     uint32_t gen;
     int type; /* ADHOC_SOCK_PDP / ADHOC_SOCK_PTP */
     int transport_handle;
-    int transport_lost; /* 1 after adhoc_release_transport detached transport_handle */
+    int transport_lost; /* 1 after adhoc_release_transport detached transport_handle, or once
+                           the relay's PDP stream for it answered DEAD */
+    int bcast_drop_logged; /* a broadcast's first undelivered peer was logged */
     int flags;         /* ADHOC_F_ALERT* */
     int alerted_flags;
     uint32_t bufsize;
@@ -1506,6 +1548,16 @@ static void adhoc_pdp_queue_datagram(AdhocSockSlot *sk, const uint8_t mac[6], ui
     sk->queued_bytes += len;
 }
 
+/* The relay closed or broke this socket's PDP stream: nothing more arrives or leaves on it.
+ * PdpRecv and PdpSend then answer DISCONNECTED and PollSocket raises DISCONNECT, and the log
+ * names the socket once. */
+static void adhoc_pdp_mark_lost(AdhocSockSlot *sk, const char *what) {
+    if (sk->transport_lost) return;
+    sk->transport_lost = 1;
+    fprintf(stderr, "HLE: ad hoc PDP socket on port %u lost its relay stream (%s answered DEAD); "
+                    "it answers DISCONNECTED from now on\n", (unsigned)sk->lport, what);
+}
+
 static void adhoc_pdp_fill_queue(AdhocSockSlot *sk) {
     if (!sk || !sk->used || sk->type != ADHOC_SOCK_PDP ||
         sk->transport_lost || sk->transport_handle < 0)
@@ -1537,6 +1589,7 @@ static void adhoc_pdp_fill_queue(AdhocSockSlot *sk) {
         }
         if (rc != NK_NET_OK) {
             free(heap_buf);
+            if (rc == NK_NET_DEAD) adhoc_pdp_mark_lost(sk, "receive");
             break;
         }
         adhoc_pdp_queue_datagram(sk, smac, sport, dst, got);
@@ -1696,9 +1749,32 @@ static uint32_t adhoc_pdp_send_raw(int id, const uint8_t dst_mac[6], uint16_t dp
     NkAdhocTransport *t = s_adhoc_active_transport;
     if (!t || !t->ops || !t->ops->pdp_send) return SCE_NET_ERROR_INTERNAL;
     if (is_broadcast_mac(dst_mac)) {
+        /* Every transport carries at most NK_RELAY_PDP_MAX bytes a datagram, and a unicast over
+         * it answers INVALID_DATALEN below; a broadcast reaches no peer either, so it answers
+         * the same instead of 0. */
+        if (len > NK_RELAY_PDP_MAX) return SCE_NET_ADHOC_ERROR_INVALID_DATALEN;
         for (int i = 0; i < ADHOC_MAX_PEERS; i++) {
             if (!s_adhoc_peers[i].active) continue;
-            (void)t->ops->pdp_send(t, sk->transport_handle, s_adhoc_peers[i].mac, dport, data, len);
+            const int brc = t->ops->pdp_send(t, sk->transport_handle, s_adhoc_peers[i].mac, dport,
+                                             data, len);
+            if (brc == NK_NET_DEAD) {
+                /* One stream carries the socket's datagrams to every peer. */
+                adhoc_pdp_mark_lost(sk, "broadcast send");
+                return SCE_NET_ADHOC_ERROR_DISCONNECTED;
+            }
+            if (brc != NK_NET_OK && brc != NK_NET_NOT_IN_GROUP) {
+                /* PPSSPP-derived, not PSP-measured (rev 3bc60270, Core/HLE/sceNetAdhoc.cpp
+                 * sceNetAdhocPdpSend: "Broadcast never fails"): a peer the datagram could not
+                 * reach does not fail the broadcast, and the log names the first per socket. */
+                if (!sk->bcast_drop_logged) {
+                    sk->bcast_drop_logged = 1;
+                    fprintf(stderr, "HLE: ad hoc PDP broadcast from port %u did not reach peer "
+                                    "%02x:%02x:%02x:%02x:%02x:%02x (transport result %d)\n",
+                            (unsigned)sk->lport, s_adhoc_peers[i].mac[0], s_adhoc_peers[i].mac[1],
+                            s_adhoc_peers[i].mac[2], s_adhoc_peers[i].mac[3], s_adhoc_peers[i].mac[4],
+                            s_adhoc_peers[i].mac[5], brc);
+                }
+            }
         }
         return 0u;
     }
@@ -1708,6 +1784,10 @@ static uint32_t adhoc_pdp_send_raw(int id, const uint8_t dst_mac[6], uint16_t dp
     const int rc = t->ops->pdp_send(t, sk->transport_handle, target, dport, data, len);
     if (rc == NK_NET_TOO_BIG) return SCE_NET_ADHOC_ERROR_INVALID_DATALEN;
     if (rc == NK_NET_AGAIN) return SCE_NET_ADHOC_ERROR_WOULD_BLOCK;
+    if (rc == NK_NET_DEAD) {
+        adhoc_pdp_mark_lost(sk, "send");
+        return SCE_NET_ADHOC_ERROR_DISCONNECTED;
+    }
     if (rc < 0 && rc != NK_NET_NOT_IN_GROUP) return SCE_NET_ERROR_INTERNAL;
     return 0u;
 }
@@ -3451,11 +3531,32 @@ static uint32_t h_NetAdhocMatchingGetMembers(CpuState *s) {
     if (!parent_first) {
         memcpy(macs[count++], ctx->self_mac, 6u);
     }
-    for (int i = 0; i < MATCH_MAX_PEERS && count < MATCH_MAX_PEERS; i++) {
-        const MatchPeer *p = &ctx->peers[i];
-        if (!p->used) continue;
-        if (p->state == MATCH_PEER_PARENT || p->state == MATCH_PEER_CHILD || p->state == MATCH_PEER_P2P)
-            memcpy(macs[count++], p->mac, 6u);
+    if (ctx->mode == 2) {
+        /* A child lists the parent next, then the siblings in peer order; once parent-first
+         * applies it lists the console itself among them, at the MATCH_PEER_SELF entry the
+         * ACCEPT added after the siblings, and at the end when that entry is missing (PPSSPP
+         * 3bc60270 sceNetAdhocMatchingGetMembers, countConnectedPeers: self always counts). */
+        const MatchPeer *parent = match_find_by_state(ctx, MATCH_PEER_PARENT);
+        int self_listed = !parent_first;
+        if (parent) memcpy(macs[count++], parent->mac, 6u);
+        for (int i = 0; i < MATCH_MAX_PEERS && count < MATCH_MAX_PEERS; i++) {
+            const MatchPeer *p = &ctx->peers[i];
+            if (!p->used) continue;
+            if (p->state == MATCH_PEER_CHILD) {
+                memcpy(macs[count++], p->mac, 6u);
+            } else if (parent_first && p->state == MATCH_PEER_SELF && !self_listed) {
+                memcpy(macs[count++], ctx->self_mac, 6u);
+                self_listed = 1;
+            }
+        }
+        if (!self_listed && count < MATCH_MAX_PEERS) memcpy(macs[count++], ctx->self_mac, 6u);
+    } else {
+        for (int i = 0; i < MATCH_MAX_PEERS && count < MATCH_MAX_PEERS; i++) {
+            const MatchPeer *p = &ctx->peers[i];
+            if (!p->used) continue;
+            if (p->state == MATCH_PEER_PARENT || p->state == MATCH_PEER_CHILD || p->state == MATCH_PEER_P2P)
+                memcpy(macs[count++], p->mac, 6u);
+        }
     }
     if (!A2) {
         MEM_W32(A1, (uint32_t)count * 12u);

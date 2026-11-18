@@ -10274,6 +10274,410 @@ static void test_adhoc_online_loopnet_e2e(void) {
     s_adh_p2_net = NULL;
 }
 
+/* ---- Audit 2026-11-17 regressions over a shim transport ------------------------------------
+ * The shim forwards every call to a loopnet console and can add lobby events a hostile server
+ * could send, answer pdp_recv with NK_NET_DEAD (a relay PDP stream that closed), or answer
+ * pdp_send with a fixed result. */
+typedef struct {
+    NkAdhocTransport base; /* first, so the HLE layer's pointer is the shim's */
+    NkAdhocTransport *inner;
+    NkLobbyEvent inject[8];
+    size_t inject_count;
+    int pdp_recv_dead;
+    int pdp_send_force; /* nonzero: pdp_send answers this NkNetResult */
+} AdhAuditShim;
+static AdhAuditShim s_adh_shim;
+
+#define SHIM_IN(t) (((AdhAuditShim *)(t))->inner)
+static void shim_pump(NkAdhocTransport *t) {
+    if (SHIM_IN(t)->ops->pump) SHIM_IN(t)->ops->pump(SHIM_IN(t));
+}
+static int shim_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], const char *nickname,
+                      const char *product) {
+    return SHIM_IN(t)->ops->login(SHIM_IN(t), mac, nickname, product);
+}
+static int shim_logout(NkAdhocTransport *t) { return SHIM_IN(t)->ops->logout(SHIM_IN(t)); }
+static int shim_connect(NkAdhocTransport *t, const uint8_t group[NK_RELAY_GROUP_LEN]) {
+    return SHIM_IN(t)->ops->connect(SHIM_IN(t), group);
+}
+static int shim_disconnect(NkAdhocTransport *t) { return SHIM_IN(t)->ops->disconnect(SHIM_IN(t)); }
+static int shim_scan(NkAdhocTransport *t) { return SHIM_IN(t)->ops->scan(SHIM_IN(t)); }
+static size_t shim_take_events(NkAdhocTransport *t, NkLobbyEvent *out, size_t max) {
+    AdhAuditShim *sh = (AdhAuditShim *)t;
+    size_t n = sh->inner->ops->take_events(sh->inner, out, max);
+    size_t k = 0u;
+    while (k < sh->inject_count && n < max) out[n++] = sh->inject[k++];
+    if (k) {
+        memmove(sh->inject, sh->inject + k, (sh->inject_count - k) * sizeof(sh->inject[0]));
+        sh->inject_count -= k;
+    }
+    return n;
+}
+static uint32_t shim_events_dropped(const NkAdhocTransport *t) {
+    const AdhAuditShim *sh = (const AdhAuditShim *)t;
+    return sh->inner->ops->events_dropped(sh->inner);
+}
+static int shim_pdp_open(NkAdhocTransport *t, uint16_t port) {
+    return SHIM_IN(t)->ops->pdp_open(SHIM_IN(t), port);
+}
+static int shim_pdp_send(NkAdhocTransport *t, int handle, const uint8_t mac[NK_RELAY_MAC_LEN],
+                         uint16_t port, const void *data, uint32_t len) {
+    if (((AdhAuditShim *)t)->pdp_send_force) return ((AdhAuditShim *)t)->pdp_send_force;
+    return SHIM_IN(t)->ops->pdp_send(SHIM_IN(t), handle, mac, port, data, len);
+}
+static int shim_pdp_recv(NkAdhocTransport *t, int handle, uint8_t mac[NK_RELAY_MAC_LEN],
+                         uint16_t *port, void *buf, uint32_t cap, uint32_t *len) {
+    if (((AdhAuditShim *)t)->pdp_recv_dead) return NK_NET_DEAD;
+    return SHIM_IN(t)->ops->pdp_recv(SHIM_IN(t), handle, mac, port, buf, cap, len);
+}
+static uint32_t shim_pdp_peek(NkAdhocTransport *t, int handle) {
+    if (((AdhAuditShim *)t)->pdp_recv_dead) return 0u;
+    return SHIM_IN(t)->ops->pdp_peek(SHIM_IN(t), handle);
+}
+static int shim_pdp_close(NkAdhocTransport *t, int handle) {
+    return SHIM_IN(t)->ops->pdp_close(SHIM_IN(t), handle);
+}
+static uint32_t shim_pdp_dropped(const NkAdhocTransport *t) {
+    const AdhAuditShim *sh = (const AdhAuditShim *)t;
+    return sh->inner->ops->pdp_dropped(sh->inner);
+}
+static int shim_ptp_listen(NkAdhocTransport *t, uint16_t sport, int backlog) {
+    return SHIM_IN(t)->ops->ptp_listen(SHIM_IN(t), sport, backlog);
+}
+static bool shim_ptp_accept_pending(const NkAdhocTransport *t, int listen_handle) {
+    const AdhAuditShim *sh = (const AdhAuditShim *)t;
+    return sh->inner->ops->ptp_accept_pending(sh->inner, listen_handle);
+}
+static int shim_ptp_accept(NkAdhocTransport *t, int listen_handle, uint8_t peer_mac[NK_RELAY_MAC_LEN],
+                           uint16_t *peer_port) {
+    return SHIM_IN(t)->ops->ptp_accept(SHIM_IN(t), listen_handle, peer_mac, peer_port);
+}
+static int shim_ptp_open(NkAdhocTransport *t, uint16_t sport, const uint8_t dst[NK_RELAY_MAC_LEN],
+                         uint16_t dport) {
+    return SHIM_IN(t)->ops->ptp_open(SHIM_IN(t), sport, dst, dport);
+}
+static int shim_ptp_connect_poll(NkAdhocTransport *t, int handle) {
+    return SHIM_IN(t)->ops->ptp_connect_poll(SHIM_IN(t), handle);
+}
+static int shim_ptp_send(NkAdhocTransport *t, int handle, const void *data, uint32_t len, uint32_t *sent) {
+    return SHIM_IN(t)->ops->ptp_send(SHIM_IN(t), handle, data, len, sent);
+}
+static int shim_ptp_recv(NkAdhocTransport *t, int handle, void *buf, uint32_t cap, uint32_t *len) {
+    return SHIM_IN(t)->ops->ptp_recv(SHIM_IN(t), handle, buf, cap, len);
+}
+static uint32_t shim_ptp_peek(NkAdhocTransport *t, int handle) {
+    return SHIM_IN(t)->ops->ptp_peek(SHIM_IN(t), handle);
+}
+static bool shim_ptp_is_dead(const NkAdhocTransport *t, int handle) {
+    const AdhAuditShim *sh = (const AdhAuditShim *)t;
+    return sh->inner->ops->ptp_is_dead(sh->inner, handle);
+}
+static int shim_ptp_close(NkAdhocTransport *t, int handle) {
+    return SHIM_IN(t)->ops->ptp_close(SHIM_IN(t), handle);
+}
+#undef SHIM_IN
+static const NkAdhocTransportOps s_adh_shim_ops = {
+    "audit-shim", shim_pump, shim_login, shim_logout, shim_connect, shim_disconnect, shim_scan,
+    shim_take_events, shim_events_dropped, shim_pdp_open, shim_pdp_send, shim_pdp_recv, shim_pdp_peek,
+    shim_pdp_close, shim_pdp_dropped, shim_ptp_listen, shim_ptp_accept_pending, shim_ptp_accept,
+    shim_ptp_open, shim_ptp_connect_poll, shim_ptp_send, shim_ptp_recv, shim_ptp_peek, shim_ptp_is_dead,
+    shim_ptp_close};
+
+static void adh_shim_inject_connect(const uint8_t mac[6], uint32_t peer_id, const char *nick) {
+    if (s_adh_shim.inject_count >= sizeof(s_adh_shim.inject) / sizeof(s_adh_shim.inject[0])) return;
+    NkLobbyEvent *ev = &s_adh_shim.inject[s_adh_shim.inject_count++];
+    memset(ev, 0, sizeof(*ev));
+    ev->kind = NK_LOBBY_CONNECT;
+    memcpy(ev->mac, mac, 6u);
+    snprintf(ev->nickname, sizeof(ev->nickname), "%s", nick);
+    ev->peer_id = peer_id;
+}
+
+static void adh_shim_inject_disconnect(uint32_t peer_id) {
+    if (s_adh_shim.inject_count >= sizeof(s_adh_shim.inject) / sizeof(s_adh_shim.inject[0])) return;
+    NkLobbyEvent *ev = &s_adh_shim.inject[s_adh_shim.inject_count++];
+    memset(ev, 0, sizeof(*ev));
+    ev->kind = NK_LOBBY_DISCONNECT;
+    ev->peer_id = peer_id;
+}
+
+static void adh_audit_delay(CpuState *cpu, uint32_t us) {
+    cpu->r[4] = us;
+    (void)sr_syscall(cpu, NID_SCE_KERNEL_DELAY_THREAD);
+}
+
+/* 1 when GetPeerList lists exactly want[0..n) in some order. */
+static int adh_audit_peer_list_is(const uint8_t (*want)[6], int n) {
+    MEM_W32(ADH_P2_LEN, 2048u);
+    if (adh(ADH_NID_PEER_LIST, ADH_P2_LEN, ADH_P2_BUF, 0u) != 0u) return 0;
+    if (MEM_R32(ADH_P2_LEN) != (uint32_t)n * 152u) return 0;
+    for (int k = 0; k < n; k++) {
+        int found = 0;
+        for (int e = 0; e < n && !found; e++) {
+            int same = 1;
+            for (uint32_t b = 0u; b < 6u; b++)
+                if (MEM_R8(ADH_P2_BUF + (uint32_t)e * 152u + 132u + b) != want[k][b]) same = 0;
+            found = same;
+        }
+        if (!found) return 0;
+    }
+    return 1;
+}
+
+/* 1 when GetMembers answers exactly want[0..n), in that order. */
+static int adh_audit_members_are(int32_t mid, const uint8_t (*want)[6], int n) {
+    MEM_W32(ADH_P2_LEN, 120u);
+    if (adh(0xc58bcd9eu /* GetMembers */, (uint32_t)mid, ADH_P2_LEN, ADH_P2_BUF) != 0u) return 0;
+    if (MEM_R32(ADH_P2_LEN) != (uint32_t)n * 12u) {
+        fprintf(stderr, "  GetMembers: %u bytes, want %u\n", MEM_R32(ADH_P2_LEN), (unsigned)n * 12u);
+        return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        for (uint32_t b = 0u; b < 6u; b++) {
+            if (MEM_R8(ADH_P2_BUF + (uint32_t)i * 12u + 4u + b) != want[i][b]) {
+                fprintf(stderr, "  GetMembers: entry %d byte %u is 0x%02x, want 0x%02x\n", i, b,
+                        MEM_R8(ADH_P2_BUF + (uint32_t)i * 12u + 4u + b), want[i][b]);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int s_adh_audit_done;
+
+static void adh_audit_main_fn(CpuState *cpu) {
+    static const uint8_t p0_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u};
+    static const uint8_t c2_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u};
+    static const uint8_t bcast[6] = {0xffu, 0xffu, 0xffu, 0xffu, 0xffu, 0xffu};
+    static const uint8_t group_mac[6] = {0x03u, 0x00u, 0x5eu, 0x00u, 0x00u, 0x01u};
+    static const uint8_t dup_a[6] = {0x02u, 0xaau, 0xbbu, 0xccu, 0xddu, 0x01u};
+    static const uint8_t dup_b[6] = {0x02u, 0xaau, 0xbbu, 0xccu, 0xddu, 0x02u};
+    const uint8_t grp[8] = {'N', 'K', 'A', 'U', 'D', 'I', 'T', '1'};
+    NkAdhocTransport *t0 = nk_loopnet_console(s_adh_p2_net, 0);
+    NkAdhocTransport *t2 = nk_loopnet_console(s_adh_p2_net, 2);
+    expect(t0->ops->login(t0, p0_mac, "PeerZero", "TEST00001") == NK_NET_OK &&
+           t0->ops->connect(t0, grp) == NK_NET_OK &&
+           t2->ops->login(t2, c2_mac, "PeerTwo", "TEST00001") == NK_NET_OK &&
+           t2->ops->connect(t2, grp) == NK_NET_OK,
+           "adhoc audit: peers 0 and 2 join NKAUDIT1");
+    const int p0_mpdp = t0->ops->pdp_open(t0, 0x5101u);
+    const int c2_mpdp = t2->ops->pdp_open(t2, 0x5101u);
+    expect(p0_mpdp >= 0 && c2_mpdp >= 0, "adhoc audit: peer matching PDP sockets open");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+           adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+           adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+           adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhoc audit: Net/Adhocctl init");
+    uint8_t self_mac[6];
+    for (uint32_t i = 0u; i < 6u; i++) self_mac[i] = MEM_R8(ADH_P2_SELF_MAC + i);
+
+    /* F-ff8afa6a: in the online tier a request while another is in flight answers BUSY, as
+     * PPSSPP does, instead of the offline tier's UNMEASURED named stop. */
+    const uint32_t stops0 = sr_hle_test_unmodelled_stops();
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "adhoc audit: online Scan starts");
+    const uint32_t disc_rc = adh(ADH_NID_DISCONNECT, 0u, 0u, 0u);
+    const uint32_t create_rc = adh(ADH_NID_CREATE, adh_name(0, "NKAUDIT1"), 0u, 0u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit: Disconnect and Create during an online Scan answer BUSY "
+                 "(got 0x%08x, 0x%08x; stops %u)", disc_rc, create_rc,
+                 sr_hle_test_unmodelled_stops() - stops0);
+        expect(disc_rc == 0x80410b10u && create_rc == 0x80410b10u &&
+               sr_hle_test_unmodelled_stops() == stops0, msg);
+    }
+    adh_p2_wait_state(cpu, 0u, 1u);
+    expect(adh_state() == 0u && s_adh_events == 1u && ADH_AT(0).event == 3,
+           "adhoc audit: the online Scan still completes");
+    expect(adh(ADH_NID_CONNECT, adh_name(0, "NKAUDIT1"), 0u, 0u) == 0u, "adhoc audit: online Connect starts");
+    const uint32_t scan_rc = adh(ADH_NID_SCAN, 0u, 0u, 0u);
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhoc audit: Scan during an online Connect answers BUSY (got 0x%08x)",
+                 scan_rc);
+        expect(scan_rc == 0x80410b10u && sr_hle_test_unmodelled_stops() == stops0, msg);
+    }
+    adh_p2_wait_state(cpu, 1u, 2u);
+    expect(adh_state() == 1u, "adhoc audit: online Connect reaches CONNECTED");
+    {
+        const uint8_t want[2][6] = {{0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u}};
+        expect(adh_audit_peer_list_is(want, 2), "adhoc audit: GetPeerList lists peers 0 and 2");
+    }
+
+    /* F-b8c3084d: a CONNECT with the all-ones or a group MAC is refused, and a CONNECT that
+     * repeats a peer id replaces the entry holding it, so one DISCONNECT removes one peer. */
+    adh_shim_inject_connect(bcast, 40u, "Bcast");
+    adh_shim_inject_connect(group_mac, 41u, "Group");
+    adh_shim_inject_connect(dup_a, 50u, "DupA");
+    adh_shim_inject_connect(dup_b, 50u, "DupB");
+    adh_audit_delay(cpu, 50000u);
+    {
+        const uint8_t want[3][6] = {{0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u},
+                                    {0x02u, 0xaau, 0xbbu, 0xccu, 0xddu, 0x02u}};
+        char msg[192];
+        const int ok = adh_audit_peer_list_is(want, 3);
+        snprintf(msg, sizeof(msg), "adhoc audit: group-MAC CONNECTs are refused and a repeated peer id "
+                 "replaces its holder (GetPeerList %u bytes)", MEM_R32(ADH_P2_LEN));
+        expect(ok, msg);
+    }
+    adh_shim_inject_disconnect(50u);
+    adh_audit_delay(cpu, 50000u);
+    {
+        const uint8_t want[2][6] = {{0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u}};
+        expect(adh_audit_peer_list_is(want, 2), "adhoc audit: DISCONNECT of the repeated id removes one peer");
+    }
+
+    /* F-d8c53678: a child's member list. Peer 2 says HELLO first, so it holds the lower slot;
+     * peer 0 is the parent, peer 2 its other child. Before parent-first applies the list is self,
+     * parent, siblings; after it the parent, then the siblings and self (PPSSPP 3bc60270
+     * sceNetAdhocMatchingGetMembers). */
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u &&
+           adh(0x2a2a1e07u /* MatchingInit */, 0x20000u, 0u, 0u) == 0u,
+           "adhoc audit: AdhocInit + MatchingInit");
+    sr_test_register_guest_fn(ADH_P2_MATCH_CB, adh_p2_match_cb_fn);
+    memset(&s_adh_p2_match, 0, sizeof(s_adh_p2_match));
+    const uint32_t saved_sp0 = MEM_R32(cpu->r[29]);
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    const int32_t mid = (int32_t)adh_call_full(0xca5eda6fu /* MatchingCreate */, cpu->r[29],
+                                               2u /* CHILD */, 4u, 0x5101u, 0x1000u,
+                                               200000u, 200000u, 5u, 50000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid > 0, "adhoc audit: child MatchingCreate");
+    expect(adh_call_full(0x93ef3843u /* MatchingStart */, cpu->r[29], (uint32_t)mid,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 0u, 0u, 0u) == 0u,
+           "adhoc audit: child MatchingStart");
+    const uint8_t hello_pkt[5] = {1u, 0u, 0u, 0u, 0u};
+    expect(t2->ops->pdp_send(t2, c2_mpdp, self_mac, 0x5101u, hello_pkt, sizeof(hello_pkt)) == NK_NET_OK,
+           "adhoc audit: peer 2 sends HELLO");
+    adh_audit_delay(cpu, 20000u);
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5101u, hello_pkt, sizeof(hello_pkt)) == NK_NET_OK,
+           "adhoc audit: peer 0 sends HELLO");
+    adh_audit_delay(cpu, 20000u);
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, p0_mac[i]);
+    expect(adh_call5(0x5e3d4b79u /* SelectTarget */, (uint32_t)mid, ADH_P2_PEER_MAC, 0u, 0u, 0u) == 0u,
+           "adhoc audit: child SelectTarget sends JOIN to peer 0");
+    uint8_t acc_pkt[21] = {3u, 0u, 0u, 0u, 0u, 2u, 0u, 0u, 0u};
+    memcpy(acc_pkt + 9, c2_mac, 6u);
+    memcpy(acc_pkt + 15, self_mac, 6u);
+    expect(t0->ops->pdp_send(t0, p0_mpdp, self_mac, 0x5101u, acc_pkt, sizeof(acc_pkt)) == NK_NET_OK,
+           "adhoc audit: peer 0 ACCEPTs with siblings peer 2 and the child");
+    adh_audit_delay(cpu, 30000u);
+    {
+        const uint8_t want[3][6] = {{self_mac[0], self_mac[1], self_mac[2], self_mac[3], self_mac[4], self_mac[5]},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u}};
+        expect(adh_audit_members_are(mid, want, 3),
+               "adhoc audit: child GetMembers before parent-first is self, parent, sibling");
+    }
+    adh_audit_delay(cpu, 250000u);
+    {
+        const uint8_t want[3][6] = {{0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x61u},
+                                    {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x62u},
+                                    {self_mac[0], self_mac[1], self_mac[2], self_mac[3], self_mac[4], self_mac[5]}};
+        expect(adh_audit_members_are(mid, want, 3),
+               "adhoc audit: child GetMembers after parent-first is parent, sibling, self (self kept)");
+    }
+    expect(adh(0x32b156b3u /* MatchingStop */, (uint32_t)mid, 0u, 0u) == 0u &&
+           adh(0xf16eaf4fu /* MatchingDelete */, (uint32_t)mid, 0u, 0u) == 0u &&
+           adh(0x7945ecdau /* MatchingTerm */, 0u, 0u, 0u) == 0u,
+           "adhoc audit: Matching Stop/Delete/Term");
+
+    /* F-f03893f0: a broadcast the relay cannot carry answers INVALID_DATALEN, as unicast does. */
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_FLIP_MAC + i, 0xffu);
+    const int32_t pdp_a = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x3101u, 0x4000u);
+    expect(pdp_a > 0, "adhoc audit: PdpCreate A");
+    const uint32_t big_rc = adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp_a,
+                                          ADH_P2_FLIP_MAC, 0x3101u, ADH_P2_BUF, 12u * 1024u, 0u, 1u, 0u);
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhoc audit: a 12 KiB broadcast answers INVALID_DATALEN (got 0x%08x)",
+                 big_rc);
+        expect(big_rc == 0x80410705u, msg);
+    }
+
+    /* F-772e6da0: a PDP stream the relay closed is reported: PdpRecv answers DISCONNECTED and
+     * PollSocket raises DISCONNECT, instead of WOULD_BLOCK forever. */
+    s_adh_shim.pdp_recv_dead = 1;
+    MEM_W32(ADH_P2_LEN, 64u);
+    const uint32_t dead_rc = adh_call_full(0xdfe53e03u /* PdpRecv */, cpu->r[29], (uint32_t)pdp_a,
+                                           ADH_P2_BUF + 64u, ADH_P2_PORT, ADH_P2_BUF, ADH_P2_LEN, 0u,
+                                           1u /* NONBLOCK */, 0u);
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhoc audit: PdpRecv on a dead relay stream answers DISCONNECTED "
+                 "(got 0x%08x)", dead_rc);
+        expect(dead_rc == 0x8041070cu, msg);
+    }
+    MEM_W32(ADH_P2_SDS, (uint32_t)pdp_a);
+    MEM_W32(ADH_P2_SDS + 4u, 0x0002u /* ADHOC_EV_RECV */);
+    MEM_W32(ADH_P2_SDS + 8u, 0u);
+    const uint32_t poll_rc = adh(0x7a662d6bu /* PollSocket */, ADH_P2_SDS, 1u, 100000u);
+    {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "adhoc audit: PollSocket raises DISCONNECT for the dead PDP stream "
+                 "(got 0x%08x, revents 0x%04x)", poll_rc, MEM_R32(ADH_P2_SDS + 8u));
+        expect(poll_rc == 0x80410717u /* EXCEPTION_EVENT */ && (MEM_R32(ADH_P2_SDS + 8u) & 0x0800u) != 0u,
+               msg);
+    }
+    s_adh_shim.pdp_recv_dead = 0;
+
+    /* F-f03893f0 / F-772e6da0: a broadcast on a dead stream answers DISCONNECTED, not 0. */
+    const int32_t pdp_b = (int32_t)adh(0x6f92741bu /* PdpCreate */, ADH_P2_SELF_MAC, 0x3102u, 0x4000u);
+    expect(pdp_b > 0, "adhoc audit: PdpCreate B");
+    s_adh_shim.pdp_send_force = NK_NET_DEAD;
+    const uint32_t bdead_rc = adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp_b,
+                                            ADH_P2_FLIP_MAC, 0x3102u, ADH_P2_BUF, 8u, 0u, 1u, 0u);
+    s_adh_shim.pdp_send_force = 0;
+    const uint32_t after_rc = adh_call_full(0xabed3790u /* PdpSend */, cpu->r[29], (uint32_t)pdp_b,
+                                            ADH_P2_PEER_MAC, 0x3102u, ADH_P2_BUF, 8u, 0u, 1u, 0u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit: a broadcast on a dead stream answers DISCONNECTED and the "
+                 "socket stays lost (got 0x%08x, then 0x%08x)", bdead_rc, after_rc);
+        expect(bdead_rc == 0x8041070cu && after_rc == 0x8041070cu, msg);
+    }
+
+    expect(adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp_a, 0u, 0u) == 0u &&
+           adh(0x7f27bb5eu /* PdpDelete */, (uint32_t)pdp_b, 0u, 0u) == 0u &&
+           adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+           adh(ADH_NID_DISCONNECT, 0u, 0u, 0u) == 0u,
+           "adhoc audit: PdpDelete + AdhocTerm + Disconnect");
+    adh_p2_wait_state(cpu, 0u, 3u);
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "adhoc audit: AdhocctlTerm + NetTerm");
+    (void)t0->ops->pdp_close(t0, p0_mpdp);
+    (void)t2->ops->pdp_close(t2, c2_mpdp);
+    s_adh_audit_done = 1;
+}
+
+static void test_adhoc_audit_20261117_shim(void) {
+    extern void sr_hle_test_set_adhoc_transport(NkAdhocTransport *t);
+    s_adh_p2_net = nk_loopnet_create();
+    expect(s_adh_p2_net != NULL, "adhoc audit: create NkAdhocLoopNet");
+    if (!s_adh_p2_net) return;
+    memset(&s_adh_shim, 0, sizeof(s_adh_shim));
+    s_adh_shim.base.ops = &s_adh_shim_ops;
+    s_adh_shim.inner = nk_loopnet_console(s_adh_p2_net, 1);
+    s_adh_audit_done = 0;
+    const uint32_t loaded_end = adh_fixture_begin();
+    sr_hle_test_set_adhoc_transport(&s_adh_shim.base);
+    adh_run(ADH_P2_MAIN, adh_audit_main_fn);
+    expect(s_adh_audit_done == 1, "adhoc audit: shim regression flow completed");
+    hle_net_reset();
+    sr_hle_test_set_adhoc_transport(NULL);
+    adh_fixture_end(loaded_end);
+    nk_loopnet_destroy(s_adh_p2_net);
+    s_adh_p2_net = NULL;
+}
+
 #ifdef _WIN32
 typedef SOCKET adh_p2_sock_t;
 #define ADH_P2_BAD_SOCK INVALID_SOCKET
@@ -59966,6 +60370,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhoc_online_play_init_contract();
         test_adhoc_offline_refusal_stays_closed();
         test_adhoc_online_loopnet_e2e();
+        test_adhoc_audit_20261117_shim();
         test_adhoc_online_real_tcp_loopback_e2e();
         test_adhoc_d2_d12_regressions();
         test_adhoc_d1_lifetime_across_term();
@@ -60125,6 +60530,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_online_play_init_contract();
     test_adhoc_offline_refusal_stays_closed();
     test_adhoc_online_loopnet_e2e();
+    test_adhoc_audit_20261117_shim();
     test_adhoc_online_real_tcp_loopback_e2e();
     test_adhoc_d2_d12_regressions();
     test_adhoc_d1_lifetime_across_term();

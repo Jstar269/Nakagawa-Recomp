@@ -627,7 +627,7 @@ a title that translates none has generated code unchanged.
 | `0xc45c99cc` | `sceMpegQueryUserdataEsSize` | mpeg | `ppsspp-derived` | sceMpeg banner: wrappers over the PPSSPP sceMpeg port in src/rt/mpeg.c; registry notes name PPSSPP |
 | `0xc492f751` | `sceUtilityGameSharingInitStart` | utility | `synthetic` | HLE selftest dispatch |
 | `0xc5768d02` | `sceRegGetKeyInfoByName` | system | `synthetic` | HLE selftest dispatch |
-| `0xc58bcd9e` | `sceNetAdhocMatchingGetMembers` | network | `ppsspp-derived` | sceNetAdhocMatching block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
+| `0xc58bcd9e` | `sceNetAdhocMatchingGetMembers` | network | `ppsspp-derived` | handler comment names PPSSPP; sceNetAdhocMatching block (#1139): derived-translated from PPSSPP rev 3bc60270 (fail-closed offline); registry notes name PPSSPP |
 | `0xc6183d47` | `sceUmdActivate` | umd | `ppsspp-derived` | registry notes name PPSSPP |
 | `0xc629af26` | `sceUtilityLoadAvModule` | utility | `synthetic` | HLE selftest dispatch |
 | `0xc68d9437` | `sceKernelStartVTimer` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-VTIMER-001, PSP-HLE-VTIMER-002, PSP-HLE-VTIMER-003, PSP-HLE-TIMER-ORDER-001 |
