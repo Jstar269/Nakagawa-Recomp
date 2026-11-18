@@ -160,8 +160,9 @@ class MappedSpanContractTests(unittest.TestCase):
         (seg,) = [s for s in elf.segments if s["type"] == 1]
         end = seg["vaddr"] + seg["filesz"]
         self.assertGreater(len(blob), seg["off"] + seg["filesz"], "file bytes follow the segment")
-        # read_at_vaddr only places the start, so it serves the file bytes past the segment.
-        self.assertEqual(len(elf.read_at_vaddr(end - 4, 8)), 8)
+        # read_at_vaddr stops at the segment's file image: it returns the 4 bytes that are mapped,
+        # never the file bytes past the segment, and read_mapped_span refuses the short span.
+        self.assertEqual(len(elf.read_at_vaddr(end - 4, 8)), 4)
         self.assertIsNone(elf.read_mapped_span(end - 4, 8))
         self.assertIsNone(imports._read_mapped(elf, end - 4, 8))
         self.assertEqual(elf.read_mapped_span(end - 8, 8), elf.read_at_vaddr(end - 8, 8))
