@@ -1543,7 +1543,7 @@ static uint32_t h_SynthReal(CpuState *s) {
              for r in manifest["registrations"] if r["name"] == "sceUmdGetErrorStat"],
             [("0x20628e6f", "sceUmdGetErrorStat", "dedicated", "compatibility")],
         )
-        self.assertEqual(len(fake), 4, "expected 4 fake_success registrations in the live census")
+        self.assertEqual(len(fake), 3, "expected 3 fake_success registrations in the live census")
 
 
 class ControlledRefusalDiagnosticTests(unittest.TestCase):
