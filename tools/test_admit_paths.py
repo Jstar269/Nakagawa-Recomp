@@ -2039,13 +2039,25 @@ class HookCheckTest(unittest.TestCase):
 
     def test_nothing_from_the_pull_request_is_executed(self) -> None:
         marker = (self.tmp / "executed").as_posix()
-        payload = f"open({marker!r}, 'w').write('ran')\n".encode()
+        source = f"open({marker!r}, 'w').write('ran')"
+        payload = f"{source}\n".encode()
+        command = shlex.join([Path(sys.executable).as_posix(), "-c", source])
+        # A JSON string is a valid YAML double-quoted scalar, so the candidate
+        # configuration parses and its hook would really run if anything ran it.
         candidate_config = (
             "repos:\n  - repo: local\n    hooks:\n      - id: trailing-whitespace\n"
             "        name: trailing-whitespace\n"
-            f'        entry: "{shlex.join([Path(sys.executable).as_posix(), "-c", payload.decode()])}"\n'
+            f"        entry: {json.dumps(command)}\n"
             "        language: system\n"
         ).encode()
+        # Control: the entry reads back as the command, and the command writes the
+        # marker, so the canary can fire. Without this a broken hook would never run
+        # and the final assertion would pass for the wrong reason.
+        (entry_line,) = [line for line in candidate_config.decode().splitlines() if "entry:" in line]
+        self.assertEqual(json.loads(entry_line.split("entry:", 1)[1]), command)
+        subprocess.run(shlex.split(command), check=True)
+        self.assertTrue(Path(marker).exists(), "the canary command does not write its marker")
+        Path(marker).unlink()
         repo, base, head = self._repo(
             {"README": b"base\n"},
             {

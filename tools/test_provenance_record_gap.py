@@ -169,6 +169,60 @@ class TestInventoryShape(unittest.TestCase):
         self.assertEqual(metadata["owner"], "G10")
         self.assertEqual(metadata["disposition"], "bounded-exclusion")
 
+    def test_a_group_verdict_is_read_from_its_own_heading(self) -> None:
+        """A ``(c)`` or ``(a)`` in passing, or the prose after the list, never sets a verdict."""
+        plan = "\n".join([
+            "- **G1 loader → (a), late.** Rewritten from the format; the vendored",
+            "  header keeps its Copyright (c) notice, unlike the (c) groups.",
+            "- **G2 HLE core → (b), staged.** The host-boundary handlers",
+            "  get an (a) rewrite.",
+            "- **G3 interim → (a), late.** Interim disposition is bounded-(c):",
+            "  the comparison path only.",
+            "- **G4 PGD → (c) keep excluded.** No code work.",
+            "- **G5 media → split.** `a.c` → (b); `b.c` → (a) rewrite.",
+            "- **G6 transport → evidence, not rewrite.** Validate with its selftest.",
+            "",
+            "Later prose: entries carrying a bounded-(c) disposition (G3, G4) and (a) rewrites.",
+        ])
+        self.assertEqual(gap._campaign_targets(plan), {
+            "G1": "clean-room-rewrite",
+            "G2": "LLE-replacement",
+            "G3": "bounded-exclusion",
+            "G4": "bounded-exclusion",
+            "G5": "clean-room-rewrite",
+            "G6": "evidence-hardening",
+        })
+        live = gap._campaign_targets((ROOT / gap.INDEPENDENCE_PLAN_PATH).read_text(encoding="utf-8"))
+        self.assertEqual(live["G9"], "LLE-replacement", "G9's heading names (b)")
+        self.assertEqual(live["G23"], "evidence-hardening", "the last item does not run to the end of the file")
+
+    def test_the_campaign_is_read_once_per_inventory(self) -> None:
+        from unittest import mock
+
+        with mock.patch.object(gap, "_campaign_targets", wraps=gap._campaign_targets) as targets:
+            gap.record_gaps(covered=set())
+            gap.disposition_gaps(repo=ROOT)
+        self.assertEqual(targets.call_count, 2)
+
+    def test_trusted_classification_names_the_inventory_class(self) -> None:
+        """With ``--trusted-ledger`` the inventory reports the authority's class, not the public one."""
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        covered, victims = constructed_gap()
+        victim = sorted(victims)[0]
+        public_class = gap.public_classifications(LEDGER)[victim]
+        trusted_class = "derived_data" if public_class != "derived_data" else "upstream_derived"
+        buffer = io.StringIO()
+        with mock.patch.object(gap, "exact_paths_from_trusted_ledger", return_value=covered), \
+                mock.patch.object(gap, "classifications_from_trusted_ledger",
+                                  return_value={victim: trusted_class}), \
+                redirect_stdout(buffer):
+            gap.main(["--repo", str(ROOT), "--json", "--trusted-ledger", str(LEDGER)])
+        reported = {item["path"]: item for item in json.loads(buffer.getvalue())["paths"]}
+        self.assertEqual(reported[victim]["deterministic_class"], trusted_class)
+
 
 class TestAgreementWithTheGate(unittest.TestCase):
     """The decisive property: the inventory predicts the gate exactly."""

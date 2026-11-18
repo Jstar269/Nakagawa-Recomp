@@ -714,6 +714,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Fetch the real-history parity commits
+        # RealHistoryParityTests (tools/test_provenance_attest_verify.py) replays two fixed
+        # commits that the depth-1 checkout lacks, and fails rather than skips here when they
+        # are missing. The candidate is #183's head and its grandparent is the base, so a
+        # depth-3 fetch brings both with the ancestry the verifier checks.
+        run: git fetch --no-tags --depth=3 origin 70a4aec365bd5ffceda504c7c003e4b38db432c2
+
       - name: Fetch the profile-zero fixture built from source
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

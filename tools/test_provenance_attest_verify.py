@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -34,6 +35,7 @@ import sys
 import tempfile
 import unicodedata
 import unittest
+from unittest import mock
 from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -2373,11 +2375,31 @@ class MergePathTamperTests(GateCase):
         self.assertIn("TRUSTED_WORKFLOW_MODIFIED", self.codes(verdict, fatal_only=False))
 
 
+def _workflow_files(directory: Path) -> list[Path]:
+    """Every workflow GitHub would run from ``directory``: it reads both YAML suffixes."""
+    return sorted(path for path in directory.iterdir() if path.suffix in (".yml", ".yaml"))
+
+
+#: Event fields whose text the pull request author or a branch pusher chooses.  None
+#: may reach an expression in the job that holds the authority token.
+_UNTRUSTED_EVENT_TEXT = re.compile(
+    r"\.(title|body|message|head\.ref|head\.label|head\.repo|head_ref|head_branch"
+    r"|display_title|head_commit|pull_requests)\b"
+)
+
+
 class LiveRepositoryTests(unittest.TestCase):
     """Guard the real repository's own invariants that need no private input."""
 
+    def test_workflow_files_include_both_yaml_suffixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name in ("a.yml", "spoof.yaml", "notes.md"):
+                (directory / name).write_text("x\n", encoding="utf-8")
+            self.assertEqual([path.name for path in _workflow_files(directory)], ["a.yml", "spoof.yaml"])
+
     def test_the_reserved_context_appears_in_exactly_one_workflow(self) -> None:
-        workflows = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+        workflows = _workflow_files(ROOT / ".github" / "workflows")
         self.assertTrue(workflows, "no workflows found")
         naming = [
             path for path in workflows
@@ -2507,9 +2529,28 @@ class LiveRepositoryTests(unittest.TestCase):
         raw = (ROOT / TRUSTED_WORKFLOW).read_text(encoding="utf-8")
         for expression in re.findall(r"\$\{\{(.+?)\}\}", raw):
             self.assertNotRegex(
-                expression, r"\.(title|body|head\.ref|head\.label|head\.repo)",
+                expression, _UNTRUSTED_EVENT_TEXT,
                 msg=f"attacker-authored text interpolated: {expression.strip()}",
             )
+
+    def test_the_untrusted_text_guard_names_every_author_chosen_field(self) -> None:
+        for expression in (
+            "github.event.pull_request.title", "github.event.pull_request.body",
+            "github.event.pull_request.head.ref", "github.event.pull_request.head.label",
+            "github.event.pull_request.head.repo.full_name", "github.head_ref",
+            "github.event.workflow_run.head_branch", "github.event.workflow_run.display_title",
+            "github.event.workflow_run.head_commit.message", "github.event.workflow_run.pull_requests[0].head.ref",
+            "github.event.head_commit.message",
+        ):
+            with self.subTest(expression=expression):
+                self.assertRegex(f" {expression} ", _UNTRUSTED_EVENT_TEXT)
+        for expression in (
+            "github.event.workflow_run.head_sha", "github.event.pull_request.head.sha",
+            "github.event.pull_request.base.sha", "github.event.pull_request.number",
+            "github.event.repository.default_branch", "inputs.head_sha", "github.event_name",
+        ):
+            with self.subTest(expression=expression):
+                self.assertNotRegex(f" {expression} ", _UNTRUSTED_EVENT_TEXT)
 
     def test_the_trusted_workflow_judges_immutable_revisions(self) -> None:
         """Branch names are moving targets; the verdict must name exact SHAs."""
@@ -4864,8 +4905,40 @@ class RealHistoryParityTests(unittest.TestCase):
                 cwd=ROOT,
                 capture_output=True,
             )
-            if present.returncode != 0:
-                self.skipTest(f"real-history commit unavailable in this checkout: {revision}")
+            if present.returncode == 0:
+                continue
+            # Hosted CI fetches both commits (ci.yml, python_tools), so a missing one there
+            # is a broken fetch and must not turn this parity check into a silent skip.
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                self.fail(f"real-history commit missing from the hosted checkout: {revision}")
+            self.skipTest(f"real-history commit unavailable in this checkout: {revision}")
+
+    def test_hosted_ci_fails_instead_of_skipping_without_the_history(self) -> None:
+        probe = RealHistoryParityTests("test_real_history_modes_agree_on_recordless_changed_test_fatal")
+        probe.BASE = "0" * 40
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}):
+            with self.assertRaises(self.failureException):
+                probe._require_history()
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}):
+            with self.assertRaises(unittest.SkipTest):
+                probe._require_history()
+
+    def test_the_hosted_python_job_fetches_both_commits(self) -> None:
+        """The python_tools checkout is shallow; without the fetch step the parity check never runs."""
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        start = workflow.index("\n  python_tools:\n")
+        following = re.search(r"\n  [a-z0-9_]+:\n", workflow[start + 1:])
+        job = workflow[start:start + 1 + following.start()] if following else workflow[start:]
+        fetches = [line for line in job.splitlines() if "git fetch" in line and not line.lstrip().startswith("#")]
+        self.assertTrue(fetches, "the python_tools job fetches no history")
+        fetched = " ".join(fetches)
+        self.assertIn(self.CANDIDATE, fetched)
+        # The base is the candidate's grandparent, so a depth-3 fetch of the candidate brings both
+        # and keeps the ancestry the verifier checks.
+        depth = re.search(r"--depth[= ](\d+)", fetched)
+        if depth is None:
+            self.fail("the fetch must name its depth")
+        self.assertGreaterEqual(int(depth.group(1)), 3)
 
     def _test_authority(self, candidate_ledger: dict, base_ledger: dict) -> dict:
         """Build a disclosure-safe test authority for already-public claims."""

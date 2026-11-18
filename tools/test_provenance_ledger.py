@@ -115,6 +115,16 @@ def load_ledger() -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(PUBLIC_LEDGER.read_text(encoding="utf-8")))
 
 
+#: The checks below that read only the detailed ledger have no public fallback, so without
+#: that private input they are counted as skipped, never reported as passing.
+PRIVATE_LEDGER_SKIP = "PRIVATE_INPUT: detailed implementation ledger not present"
+PRIVATE_LEDGER_ONLY_TESTS = (
+    "test_replacement_states_are_known",
+    "test_named_upstream_carries_a_license",
+    "test_derived_headers_are_not_called_independent",
+)
+
+
 class ProvenanceLedgerTest(unittest.TestCase):
     ledger: ClassVar[dict[str, Any]]
     public_only: ClassVar[bool]
@@ -127,6 +137,18 @@ class ProvenanceLedgerTest(unittest.TestCase):
         cls.public_only = not LEDGER.is_file()
         cls.records = cls.ledger.get("records", [])
         cls.public_entries = cls.ledger.get("entries", [])
+
+    def test_private_ledger_checks_skip_by_name_without_the_ledger(self) -> None:
+        result = unittest.TestResult()
+        with mock.patch.object(type(self), "public_only", True):
+            for name in PRIVATE_LEDGER_ONLY_TESTS:
+                type(self)(name).run(result)
+        self.assertEqual(result.testsRun, len(PRIVATE_LEDGER_ONLY_TESTS))
+        self.assertEqual(result.failures + result.errors, [])
+        self.assertEqual(
+            sorted((case._testMethodName, reason) for case, reason in result.skipped),
+            sorted((name, PRIVATE_LEDGER_SKIP) for name in PRIVATE_LEDGER_ONLY_TESTS),
+        )
 
     def test_vocabulary_matches_model(self) -> None:
         if self.public_only:
@@ -170,7 +192,7 @@ class ProvenanceLedgerTest(unittest.TestCase):
 
     def test_replacement_states_are_known(self) -> None:
         if self.public_only:
-            return
+            self.skipTest(PRIVATE_LEDGER_SKIP)
         for rec in self.records:
             self.assertIn(
                 rec["replacement_state"],
@@ -180,7 +202,7 @@ class ProvenanceLedgerTest(unittest.TestCase):
 
     def test_named_upstream_carries_a_license(self) -> None:
         if self.public_only:
-            return
+            self.skipTest(PRIVATE_LEDGER_SKIP)
         for rec in self.records:
             if rec.get("upstream"):
                 self.assertIn(
@@ -268,7 +290,7 @@ class ProvenanceLedgerTest(unittest.TestCase):
     def test_derived_headers_are_not_called_independent(self) -> None:
         """A file that says it is derived may not sit in an 'independent' record."""
         if self.public_only:
-            return
+            self.skipTest(PRIVATE_LEDGER_SKIP)
         by_path = {}
         for rec in self.records:
             for path in rec["paths"]:
