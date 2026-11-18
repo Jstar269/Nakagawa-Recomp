@@ -1256,32 +1256,67 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
             encoding="utf-8",
             newline="\n",
         )
-        exe = self.root / "analyzer_mutation_harness.exe"
         assert CC is not None
-        compiled = subprocess.run(
+
+        def build_harness(generated_c: Path, label: str) -> Path:
+            exe = self.root / f"analyzer_mutation_harness_{label}.exe"
+            compiled = subprocess.run(
+                [
+                    CC, "-std=c11", "-O0", "-fno-strict-aliasing", "-Wall", "-Wextra",
+                    "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
+                    "-I", str(self.root), "-I", str(ROOT / "src" / "rt"),
+                    "-I", str(ROOT / "tests" / "native"),
+                    str(harness), str(generated_c),
+                    str(generated_c.with_name(f"{generated_c.stem}_0.c")),
+                    str(ROOT / "src" / "rt" / "guest_interp.c"),
+                    str(ROOT / "src" / "rt" / "perf.c"),
+                    str(ROOT / "src" / "rt" / "sr_coro.c"),
+                    str(ROOT / "src" / "rt" / "cpu_lle.c"),
+                    str(ROOT / "src" / "rt" / "domain_mode.c"),
+                    str(ROOT / "src" / "rt" / "stale_code.c"),
+                    str(ROOT / "src" / "rt" / "title_config.c"),
+                    str(ROOT / "src" / "rt" / "vfpu_tables.c"),
+                    "-lm", "-o", str(exe),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            return exe
+
+        # Control: the same harness over the unmutated analyzer's output
+        # registers 0x1010, so exit 17 below can only come from the mutation.
+        control_dir = self.root / "control_output"
+        control_dir.mkdir()
+        control_c = control_dir / "control.c"
+        control_generated = subprocess.run(
             [
-                CC, "-std=c11", "-O0", "-fno-strict-aliasing", "-Wall", "-Wextra",
-                "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
-                "-I", str(self.root), "-I", str(ROOT / "src" / "rt"), "-I", str(ROOT / "tests" / "native"),
-                str(harness), str(out_c), str(out_dir / "mutant_0.c"),
-                str(ROOT / "src" / "rt" / "guest_interp.c"),
-                str(ROOT / "src" / "rt" / "perf.c"),
-                str(ROOT / "src" / "rt" / "sr_coro.c"),
-                str(ROOT / "src" / "rt" / "cpu_lle.c"),
-                str(ROOT / "src" / "rt" / "domain_mode.c"),
-                str(ROOT / "src" / "rt" / "stale_code.c"),
-                str(ROOT / "src" / "rt" / "title_config.c"),
-                str(ROOT / "src" / "rt" / "vfpu_tables.c"),
-                "-lm", "-o", str(exe),
+                sys.executable, str(TOOLS / "codegen.py"),
+                str(elf_path), str(control_c), "--base=0", "--profile=none",
+                "--funcs-per-chunk=2000",
             ],
             cwd=ROOT,
+            env=self._clean_env(),
             capture_output=True,
             text=True,
             check=False,
         )
-        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        self.assertEqual(
+            control_generated.returncode, 0,
+            control_generated.stdout + control_generated.stderr,
+        )
+        control_run = subprocess.run(
+            [str(build_harness(control_c, "control"))],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(control_run.returncode, 0, control_run.stdout + control_run.stderr)
+        self.assertNotIn("ANALYZER_MUTANT_DROPPED_CALL_TARGET", control_run.stderr)
+
         mutated_run = subprocess.run(
-            [str(exe)], cwd=ROOT, capture_output=True, text=True, check=False
+            [str(build_harness(out_c, "mutant"))],
+            cwd=ROOT, capture_output=True, text=True, check=False,
         )
         self.assertEqual(mutated_run.returncode, 17, mutated_run.stdout + mutated_run.stderr)
         self.assertIn("ANALYZER_MUTANT_DROPPED_CALL_TARGET", mutated_run.stderr)
@@ -1762,8 +1797,11 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
     def test_paths_with_spaces_and_shell_metacharacters_are_not_interpreted(self) -> None:
         # codegen receives paths as argv entries, never through a shell. A directory
         # whose name contains spaces and shell metacharacters must be treated as a
-        # literal path, and no part of it may be executed.
-        hostile = self.root / "a dir; echo pwned & $(id) `id`"
+        # literal path, and no part of it may be executed. Every metacharacter form
+        # below would create the marker file if a shell ever ran the path.
+        marker = "NK_PWNED_MARKER"
+        hostile = self.root / f"a dir; touch {marker} & $(touch {marker}) `touch {marker}`"
+        self.assertFalse((ROOT / marker).exists())
         hostile.mkdir()
         elf = hostile / "in put.elf"
         write_elf(elf)
@@ -1781,7 +1819,8 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         # literal path back: nothing was word-split, expanded, or executed.
         self.assertTrue(out_c.is_file())
         self.assertIn(str(out_c), proc.stdout)
-        self.assertFalse(any(self.root.glob("uid=*")))
+        for directory in (self.root, hostile, ROOT, ROOT / "tools"):
+            self.assertFalse((directory / marker).exists(), directory)
 
     # --- deterministic byte-budget chunking ------------------------------
 

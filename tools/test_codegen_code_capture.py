@@ -292,8 +292,8 @@ class CodegenCodeCaptureOption(unittest.TestCase):
         self.elf = self.root / "main.elf"
         self.elf.write_bytes(_elf(_text()))
 
-    def run_codegen(self, *options):
-        out_c = self.root / "game_recomp.c"
+    def run_codegen(self, *options, out_dir=None):
+        out_c = (out_dir or self.root) / "game_recomp.c"
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             status = codegen.main(["codegen.py", str(self.elf), str(out_c), *options])
@@ -316,9 +316,25 @@ class CodegenCodeCaptureOption(unittest.TestCase):
                          "a capture is reached through its descriptor only")
 
     def test_without_captures_the_output_is_unchanged(self):
-        status, err, out_c = self.run_codegen()
-        self.assertEqual(status, 0, err)
-        self.assertNotIn("code_capture_", out_c.read_text(encoding="ascii"))
+        # With no capture, the emitted main file and every chunk are byte-equal
+        # to a run given an empty capture folder: the option adds nothing.
+        empty = self.root / "empty-captures"
+        empty.mkdir()
+        outputs = []
+        for label, options in (("plain", ()), ("empty", (f"--code-capture={empty}",))):
+            out_dir = self.root / label
+            out_dir.mkdir()
+            status, err, out_c = self.run_codegen(*options, out_dir=out_dir)
+            self.assertEqual(status, 0, err)
+            self.assertNotIn("code_capture_", out_c.read_text(encoding="ascii"))
+            files = {path.name: path.read_bytes()
+                     for path in sorted(out_dir.glob("game_recomp*.c"))}
+            self.assertIn("game_recomp.c", files)
+            self.assertTrue(any(name != "game_recomp.c" for name in files), files.keys())
+            outputs.append(files)
+        self.assertEqual(outputs[0].keys(), outputs[1].keys())
+        for name in outputs[0]:
+            self.assertEqual(outputs[0][name], outputs[1][name], name)
 
     def test_codegen_refuses_a_malformed_capture(self):
         bad = self.root / "bad.nkcap"

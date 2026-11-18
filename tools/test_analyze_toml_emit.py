@@ -83,19 +83,34 @@ class TestTomlEmit(unittest.TestCase):
 
         fn_a = {"addr": 0x8000, "kind": "function", "z_extra": "value_z", "a_extra": "value_a"}
         fn_b = {"addr": 0x8004, "kind": "function", "a_extra": "value_a", "z_extra": "value_z"}
+        # The second model holds copies whose keys were inserted in the
+        # reverse order, so each function's dict order differs between the
+        # two emits, as does the function list order.
+        fn_a_reversed = dict(reversed(list(fn_a.items())))
+        fn_b_reversed = dict(reversed(list(fn_b.items())))
+        self.assertNotEqual(list(fn_a), list(fn_a_reversed))
 
         model1 = {"module": "elf", "entry": 0x8000, "functions": [fn_b, fn_a]}
-        model2 = {"module": "elf", "entry": 0x8000, "functions": [fn_a, fn_b]}
+        model2 = {"module": "elf", "entry": 0x8000, "functions": [fn_a_reversed, fn_b_reversed]}
 
-        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as f1, tempfile.NamedTemporaryFile(mode="w+", delete=False) as f2:
-            emit_toml(model1, f1.name)
-            emit_toml(model2, f2.name)
-            out1 = Path(f1.name).read_text(encoding="ascii")
-            out2 = Path(f2.name).read_text(encoding="ascii")
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first.toml"
+            second = Path(directory) / "second.toml"
+            emit_toml(model1, first)
+            emit_toml(model2, second)
+            out1 = first.read_text(encoding="ascii")
+            out2 = second.read_text(encoding="ascii")
 
         self.assertEqual(out1, out2)
+        # Known keys keep their schema order and extra keys follow, sorted.
+        tables = out1.split("[[function]]\n")[1:]
+        self.assertEqual(len(tables), 2)
+        for table in tables:
+            keys = [line.split(" = ", 1)[0] for line in table.splitlines() if line]
+            self.assertEqual(keys, ["addr", "kind", "a_extra", "z_extra"])
 
     def test_cfg_edge_serializer_order_determinism(self):
+        from analyze import canonical_cfg_report
         from test_elf_bounds import _canonical_cfg_report_reference
 
         class FakeImage:
@@ -114,9 +129,18 @@ class TestTomlEmit(unittest.TestCase):
                 return None
 
         img = FakeImage()
-        rep1 = _canonical_cfg_report_reference(img, ranges=[(0x1000, 0x1008), (0x2000, 0x2004)], entries=[0x1000])
-        rep2 = _canonical_cfg_report_reference(img, ranges=[(0x2000, 0x2004), (0x1000, 0x1008)], entries=[0x1000])
+        forward = [(0x1000, 0x1008), (0x2000, 0x2004)]
+        backward = [(0x2000, 0x2004), (0x1000, 0x1008)]
+        # The production serializer (codegen --cfg-report) must not depend on
+        # the order of its ranges.
+        rep1 = canonical_cfg_report(img, ranges=forward, entries=[0x1000])
+        rep2 = canonical_cfg_report(img, ranges=backward, entries=[0x1000])
         self.assertEqual(rep1, rep2)
+        self.assertTrue(rep1["call_edges"])
+        # Cross-check against the test-side reference implementation.
+        self.assertEqual(
+            rep1, _canonical_cfg_report_reference(img, ranges=backward, entries=[0x1000])
+        )
 
 
     def test_cfg_edge_serializer_detail_order_determinism(self):
