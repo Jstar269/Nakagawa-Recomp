@@ -102,6 +102,16 @@ class SplitItemsTests(unittest.TestCase):
         kinds = {item.names[0]: hle_sources.is_object_definition(item) for item in hle_sources.split_items(source)}
         self.assertEqual(kinds, {"a": True, "b": True, "c": False, "f": False, "T": False, "S": False})
 
+    def test_repeated_lookups_reuse_every_parsed_source(self) -> None:
+        # Each lookup walks every source and header in order; a cache smaller than that
+        # cycle evicts each file before it returns, so a second walk would parse all again.
+        units = len(hle_sources.sources(headers=True))
+        hle_sources._items_of.cache_clear()
+        hle_sources.definitions()
+        hle_sources.definitions()
+        info = hle_sources._items_of.cache_info()
+        self.assertEqual((info.misses, info.hits), (units, units))
+
     def test_every_live_source_round_trips(self) -> None:
         for relative, body in hle_sources.sources(headers=True):
             with self.subTest(path=relative):
