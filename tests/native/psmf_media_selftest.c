@@ -6630,9 +6630,43 @@ static void mutate_atrac_track(uint8_t *t, AtracFuzzTrack *track) {
     }
 }
 
+/* A handler that meets an input the runtime does not model stops the run by name
+ * (hle_unmodelled_stop, #308): one UNSUPPORTED_IMPORT line, then a longjmp to g_hle_jmp, the
+ * driver's run boundary. Mutated tracks reach such stops on purpose (a fed prefix that ends
+ * before the 'data' chunk, #322), so each fuzz call is its own run boundary: a stop ends that
+ * iteration's run, is counted with the import that raised it, and the context is released.
+ * Once a run has stopped no further call is made in it (each returns NOTIMP unissued) until the
+ * iteration ends the run with atrac_fuzz_end_run(); the context is released after that. */
+static unsigned atrac_fuzz_named_stops;
+static unsigned atrac_fuzz_foreign_stops;   /* stops raised by an import other than the one called */
+static int atrac_fuzz_stopped;              /* the current run ended in a named stop */
+static int atrac_fuzz_end_run(void) {
+    int stopped = atrac_fuzz_stopped;
+    atrac_fuzz_stopped = 0;
+    return stopped;
+}
 static uint32_t atrac_fuzz_call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2,
                                 uint32_t a3, uint32_t t0) {
-    return guest_mpeg_import(nid, a0, a1, a2, a3, t0);
+    if (atrac_fuzz_stopped) return 0x80020002u;   /* the run has ended: no call is made */
+    jmp_buf outer;
+    memcpy(outer, g_hle_jmp, sizeof(outer));
+    /* sr_syscall restores these as it returns; a stop leaves through the longjmp instead. */
+    const int rt_phase = sr_rt_phase, import_active = sr_import_active;
+    const uint32_t import_nid = sr_import_nid;
+    volatile uint32_t ret = 0u;
+    if (setjmp(g_hle_jmp) == 0) {
+        ret = guest_mpeg_import(nid, a0, a1, a2, a3, t0);
+    } else {
+        sr_rt_phase = rt_phase;
+        sr_import_active = import_active;
+        sr_import_nid = import_nid;
+        atrac_fuzz_stopped = 1;
+        atrac_fuzz_named_stops++;
+        if (sr_last_nid != nid) atrac_fuzz_foreign_stops++;
+        ret = 0x80020002u;   /* SCE_KERNEL_ERROR_NOTIMP, the selftest harness's stop answer */
+    }
+    memcpy(g_hle_jmp, outer, sizeof(outer));
+    return ret;
 }
 
 /* 1 when the guard bytes on both sides of [base, base + length) are untouched; otherwise
@@ -6659,11 +6693,12 @@ static void atrac_guard_arm(uint32_t base, uint32_t length) {
 }
 
 /* Drive an accepted context. Output words live at ATRAC_FUZZ_WORDS (eight words, guarded),
- * decoded samples at ATRAC_FUZZ_OUT (one stereo frame, guarded). */
+ * decoded samples at ATRAC_FUZZ_OUT (one stereo frame, guarded). A named stop ends the drive:
+ * the run ends there, so no later call is made on that context. */
 static int atrac_fuzz_drive(uint32_t id, uint32_t track_size, uint32_t buffer_size) {
     const uint32_t w = ATRAC_FUZZ_WORDS;
     int intact = 1;
-    for (unsigned step = 0; step < 24u; step++) {
+    for (unsigned step = 0; step < 24u && !atrac_fuzz_stopped; step++) {
         atrac_guard_arm(w, 32u);
         atrac_guard_arm(ATRAC_FUZZ_OUT, ATRAC_FUZZ_FRAME_BYTES);
         unsigned kind = atrac_fuzz_rand() % 12u;
@@ -6770,11 +6805,14 @@ static void test_atrac_riff_mutations(unsigned requested) {
     unsigned iterations = requested > 20000u ? 20000u : requested;
     atrac_fuzz_state = 0x41545241435249FFULL;
     uint8_t *track_bytes = (uint8_t *)SR_HOST(ATRAC_FUZZ_TRACK);
-    unsigned seeds_accepted = 0, accepted = 0, driven_intact = 0;
+    unsigned seeds_accepted = 0, accepted = 0, driven_intact = 0, stopped_runs = 0;
+    atrac_fuzz_named_stops = 0;
+    atrac_fuzz_foreign_stops = 0;
     for (unsigned i = 0; i < iterations; i++) {
         AtracFuzzTrack track;
         build_atrac_track(track_bytes, &track, (int)(atrac_fuzz_rand() & 1u));
         uint32_t seed_id = atrac_fuzz_call(NID_ATRAC_SET_DATA_AND_GET_ID, ATRAC_FUZZ_TRACK, track.size, 0u, 0u, 0u);
+        if (atrac_fuzz_end_run()) stopped_runs++;   /* the seed check below then fails */
         if (seed_id < 8u) {
             seeds_accepted++;
             (void)atrac_fuzz_call(NID_ATRAC_RELEASE_ID, seed_id, 0u, 0u, 0u, 0u);
@@ -6808,15 +6846,21 @@ static void test_atrac_riff_mutations(unsigned requested) {
                     ? atrac_fuzz_call(NID_ATRAC_SET_DATA, id, ATRAC_FUZZ_TRACK, fed, 0u, 0u)
                     : atrac_fuzz_call(NID_ATRAC_SET_HALFWAY, id, ATRAC_FUZZ_TRACK, fed, buffer_size, 0u);
                 if (rc != 0u) {
+                    if (atrac_fuzz_end_run()) stopped_runs++;
                     (void)atrac_fuzz_call(NID_ATRAC_RELEASE_ID, id, 0u, 0u, 0u, 0u);
                     id = rc;
                 }
             }
             break;
         }
-        if (id >= 8u) continue;
+        if (id >= 8u) {
+            if (atrac_fuzz_end_run()) stopped_runs++;
+            continue;
+        }
         accepted++;
-        if (atrac_fuzz_drive(id, track.size, buffer_size)) {
+        int intact = atrac_fuzz_drive(id, track.size, buffer_size);
+        if (atrac_fuzz_end_run()) stopped_runs++;
+        if (intact) {
             driven_intact++;
         } else {
             const uint8_t *fmt = track_bytes + track.fmt_at;
@@ -6830,9 +6874,12 @@ static void test_atrac_riff_mutations(unsigned requested) {
     }
     CHECK(seeds_accepted == iterations, "atrac-fuzz: every unmutated seed track is accepted");
     CHECK(driven_intact == accepted, "atrac-fuzz: no call writes outside the guest words it returns");
+    CHECK(atrac_fuzz_foreign_stops == 0u,
+          "atrac-fuzz: every named stop is raised by the ATRAC import the iteration called");
+    CHECK(atrac_fuzz_named_stops == stopped_runs, "atrac-fuzz: each stopped run made one named stop");
     printf("ATRAC RIFF mutation: %u iterations (requested %u, capped at 20000), %u/%u seeds "
-           "accepted, %u tracks accepted and driven, 0 crashes\n",
-           iterations, requested, seeds_accepted, iterations, accepted);
+           "accepted, %u tracks accepted and driven, %u runs ended at a named stop, 0 crashes\n",
+           iterations, requested, seeds_accepted, iterations, accepted, stopped_runs);
 }
 
 /* ---- the recorder's production audio hooks (#1273, #2080 review) ------------------------
@@ -6970,6 +7017,15 @@ int main(int argc, char **argv) {
     /* SR_HOST maps VRAM at g_mem - 0x04000000, so reserve that prefix in the fixture arena. */
     g_mem = arena + GUEST_VRAM_PREFIX_BYTES;
     memset(arena, 0, sizeof(arena));
+    /* A named stop leaves through g_hle_jmp (hle_unmodelled_stop, #308), the driver's run
+     * boundary. A test that reaches one on purpose sets its own boundary (atrac_fuzz_call); a
+     * stop anywhere else ends the selftest here as a failure, not as a jump through an unset
+     * buffer. */
+    if (setjmp(g_hle_jmp) != 0) {
+        fprintf(stderr, "psmf_media_selftest: a named stop outside a test's boundary ended the "
+                        "run after %d checks\n", checks);
+        return 1;
+    }
     if (videorec_run)
         return videorec_audio_hooks(argv[2], argv[3]);
 
