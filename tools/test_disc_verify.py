@@ -156,6 +156,29 @@ class TierTests(unittest.TestCase):
         self.assertEqual(classify("TEST70001", digest(RETAIL), None), disc_verify.NOT_CHECKED)
         self.assertEqual(classify("TEST70001", None, self.dat), disc_verify.NOT_CHECKED)
 
+    def test_classify_uses_an_existing_known_id_set_without_rebuilding_it(self) -> None:
+        from collections.abc import Set
+
+        class MembershipOnlySet(Set):
+            def __init__(self) -> None:
+                self.values = {"TEST70009"}
+
+            def __iter__(self):
+                raise AssertionError("known retail set was rebuilt")
+
+            def __contains__(self, value) -> bool:
+                return value in self.values
+
+            def __len__(self) -> int:
+                return len(self.values)
+
+        known = MembershipOnlySet()
+
+        self.assertEqual(
+            disc_verify.classify("TEST70009", digest(OTHER), self.dat, known),
+            disc_verify.MODIFIED,
+        )
+
     def test_a_matching_sha1_with_another_crc_or_size_is_not_verified(self) -> None:
         good = digest(RETAIL)
         bent_crc = disc_verify.DiscDigest(good.sha1, "00000000", good.size_bytes)
@@ -782,6 +805,28 @@ class BundledListTests(unittest.TestCase):
             # Neither list: None, so the tier is Not checked.
             self.assertIsNone(disc_verify.load_verification_dat(
                 Path(folder) / "empty", bundled=Path(folder) / "missing.zip"))
+
+    def test_import_date_comparison_reads_only_the_bundled_zip_header(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data_root = root / "data"
+            imported = root / "imported.dat"
+            imported.write_text(datafile(), encoding="utf-8")
+            disc_verify.import_dat(imported, data_root)
+
+            bundled = root / "synthetic-bundled.zip"
+            header = (
+                b"<datafile><header><name>Synthetic</name>"
+                b"<date>2027-01-02</date></header>"
+            )
+            with zipfile.ZipFile(bundled, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("synthetic.dat", header + b"\0" * (1024 * 1024))
+
+            result = disc_verify.load_verification_dat(data_root, bundled=bundled)
+
+        assert result is not None
+        self.assertEqual(result.source, disc_verify.LIST_IMPORTED)
+        self.assertEqual(result.newer_bundled_date, "2027-01-02")
 
     def test_bringup_says_which_list_it_used(self) -> None:
         import nk_cli

@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 import json
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -96,6 +98,49 @@ def _existing_schema_version(path: Path) -> Optional[int]:
     return version if type(version) is int else None
 
 
+@contextmanager
+def _library_file_lock(user_data_root: Path):
+    """Hold the same per-user library lock used by the player's library writer."""
+    root = user_data_root.resolve(strict=False)
+    lock_dir = root / "locks"
+    if lock_dir.is_symlink() or getattr(lock_dir, "is_junction", lambda: False)():
+        raise ValueError("The library lock folder is a link; refusing to write outside user data.")
+    lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        lock_dir.resolve(strict=True).relative_to(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("The library lock folder is outside user data.") from exc
+    lock_path = lock_dir / "library.lock"
+    if lock_path.is_symlink() or getattr(lock_path, "is_junction", lambda: False)():
+        raise ValueError("The library lock file is a link; refusing to write outside user data.")
+    with lock_path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 @dataclass
 class LibraryGameRecord:
     disc_id: str
@@ -109,12 +154,16 @@ class LibraryGameRecord:
     extracted_visual_count: int = 0
     extracted_layout_count: int = 0
     disc_version: str = "1.00"
-    last_played: Optional[float] = None
+    last_played: Optional[float | str] = None
     play_count: int = 0
     settings_override: Dict[str, Any] = field(default_factory=dict)
+    extra_fields: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        record = asdict(self)
+        extra_fields = record.pop("extra_fields")
+        record.update(extra_fields)
+        return record
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "LibraryGameRecord":
@@ -126,11 +175,7 @@ class LibraryGameRecord:
         """
         if not isinstance(data, dict):
             raise ValueError("game record must be a JSON object")
-        unknown = set(data) - _GAME_RECORD_FIELDS
-        if unknown:
-            raise ValueError(
-                "game record has unsupported fields: " + bounded_echo_fields(unknown)
-            )
+        extra_fields = {key: value for key, value in data.items() if key not in _GAME_RECORD_FIELDS}
 
         disc_id = data.get("disc_id")
         if not isinstance(disc_id, str) or not disc_id.strip():
@@ -164,8 +209,10 @@ class LibraryGameRecord:
         if not isinstance(disc_version, str) or len(disc_version) > 32:
             raise ValueError("game record disc_version must be a string of at most 32 characters")
         last_played = data.get("last_played")
-        if last_played is not None and type(last_played) not in (int, float):
-            raise ValueError("game record last_played must be a timestamp or null")
+        if last_played is not None and type(last_played) not in (int, float) and not isinstance(last_played, str):
+            raise ValueError("game record last_played must be a timestamp, string, or null")
+        if isinstance(last_played, str) and len(last_played) > 64:
+            raise ValueError("game record last_played string exceeds 64 characters")
         settings_override = data.get("settings_override", {})
         if not isinstance(settings_override, dict) or any(
             not isinstance(key, str) for key in settings_override
@@ -187,6 +234,7 @@ class LibraryGameRecord:
             last_played=last_played,
             play_count=counts["play_count"],
             settings_override=dict(settings_override),
+            extra_fields=extra_fields,
         )
 
     def is_source_available(self) -> bool:
@@ -207,9 +255,12 @@ class GameLibrary:
     def __init__(self, storage_file: Optional[Path | str] = None) -> None:
         self.storage_file = Path(storage_file).resolve() if storage_file else None
         self._games: Dict[str, LibraryGameRecord] = {}
+        self._removed: set[str] = set()
 
     def add_or_update_game(self, record: LibraryGameRecord) -> None:
-        self._games[_library_key(record.disc_id)] = record
+        key = _library_key(record.disc_id)
+        self._removed.discard(key)
+        self._games[key] = record
 
     def get_game(self, disc_id: str) -> Optional[LibraryGameRecord]:
         return self._games.get(_library_key(disc_id))
@@ -218,6 +269,7 @@ class GameLibrary:
         key = _library_key(disc_id)
         if key in self._games:
             del self._games[key]
+            self._removed.add(key)
             return True
         return False
 
@@ -235,48 +287,49 @@ class GameLibrary:
         out_file = Path(target_file).resolve() if target_file else self.storage_file
         if not out_file:
             raise ValueError("No storage file path specified for GameLibrary.")
-        if len(self._games) > MAX_LIBRARY_GAMES:
-            raise ValueError(
-                f"library holds {len(self._games)} games, over the {MAX_LIBRARY_GAMES}-record limit"
-            )
-
-        # A library a newer player wrote is never replaced, as the native writer
-        # refuses it (src/core/nk_user_data_schema.h): rewriting it as this
-        # schema would drop whatever the newer one added.
-        existing = _existing_schema_version(out_file)
-        if existing is not None and existing > LIBRARY_SCHEMA_VERSION:
-            raise ValueError(
-                f"{out_file}: library schema_version {existing} was written by a newer "
-                f"Nakagawa; this build writes version {LIBRARY_SCHEMA_VERSION} and left "
-                "the file as it is"
-            )
-
         out_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp_file: Optional[Path] = None
+        with _library_file_lock(out_file.parent):
+            # A library a newer player wrote is never replaced, as the native writer
+            # refuses it (src/core/nk_user_data_schema.h).
+            existing_version = _existing_schema_version(out_file)
+            if existing_version is not None and existing_version > LIBRARY_SCHEMA_VERSION:
+                raise ValueError(
+                    f"{out_file}: library schema_version {existing_version} was written by a newer "
+                    f"Nakagawa; this build writes version {LIBRARY_SCHEMA_VERSION} and left "
+                    "the file as it is"
+                )
 
-        payload = {
-            "schema_version": LIBRARY_SCHEMA_VERSION,
-            "updated_at": time.time(),
-            "games": [record.to_dict() for record in self._games.values()],
-        }
+            merged = GameLibrary()
+            if existing_version == LIBRARY_SCHEMA_VERSION:
+                merged = GameLibrary.load(out_file)
+            for key in self._removed:
+                merged._games.pop(key, None)
+            merged._games.update(self._games)
+            if len(merged._games) > MAX_LIBRARY_GAMES:
+                raise ValueError(
+                    f"library holds {len(merged._games)} games, over the {MAX_LIBRARY_GAMES}-record limit"
+                )
 
-        try:
-            # Each writer owns its temporary file. Overlapping saves must not
-            # overwrite or unlink another writer's in-flight output.
-            with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=out_file.parent,
-                prefix=f".{out_file.name}.", suffix=".tmp", delete=False,
-            ) as handle:
-                tmp_file = Path(handle.name)
-                json.dump(payload, handle, indent=2, ensure_ascii=False)
-            # Validate with the exact reader before replacing a working library.
-            # Oversized settings or invalid in-memory records must never install
-            # a file that this same loader cannot read back.
-            GameLibrary.load(tmp_file)
-            tmp_file.replace(out_file)
-        finally:
-            if tmp_file is not None:
-                tmp_file.unlink(missing_ok=True)
+            payload = {
+                "schema_version": LIBRARY_SCHEMA_VERSION,
+                "updated_at": time.time(),
+                "games": [record.to_dict() for record in merged._games.values()],
+            }
+            tmp_file: Optional[Path] = None
+            try:
+                # Each writer owns its temporary file; merge under the same OS lock
+                # as the player's library writer to preserve concurrent additions.
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=out_file.parent,
+                    prefix=f".{out_file.name}.", suffix=".tmp", delete=False,
+                ) as handle:
+                    tmp_file = Path(handle.name)
+                    json.dump(payload, handle, indent=2, ensure_ascii=False)
+                GameLibrary.load(tmp_file)
+                tmp_file.replace(out_file)
+            finally:
+                if tmp_file is not None:
+                    tmp_file.unlink(missing_ok=True)
 
     @classmethod
     def load(cls, file_path: Path | str) -> "GameLibrary":

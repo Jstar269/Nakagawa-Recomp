@@ -135,6 +135,7 @@ from __future__ import annotations
 
 import codecs
 import dataclasses
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 import hashlib
 import os
@@ -142,6 +143,7 @@ from pathlib import Path
 import re
 import tempfile
 from typing import Callable, Iterable, Mapping, Optional
+import zipfile
 import zlib
 
 VERIFIED_RETAIL = "VERIFIED_RETAIL"
@@ -372,9 +374,10 @@ class _DatScanner:
     the cost of any input to a fixed multiple of its length.
     """
 
-    def __init__(self, data: bytes, start: int = 0) -> None:
+    def __init__(self, data: bytes, start: int = 0, *, require_roms: bool = True) -> None:
         self.data = data
         self.start = start
+        self.require_roms = require_roms
         self.examined: int = 0
 
     def _offset(self, at: int) -> int:
@@ -596,7 +599,7 @@ class _DatScanner:
         if not closed:
             raise _not_datafile(_CUT_SHORT if root else _NO_ROOT)
         dat.serials = frozenset(serials)
-        if not dat.roms_by_sha1:
+        if self.require_roms and not dat.roms_by_sha1:
             raise DiscVerifyError(_EMPTY, boundary_code="DISC_DAT_EMPTY")
         return dat
 
@@ -787,6 +790,52 @@ def _dat_text(data: bytes) -> bytes:
     return _dat_from_zip(data) if data.startswith(_ZIP_MAGIC) else data
 
 
+def _read_header_stamp(stream) -> str:
+    """Read only through ``</header>`` and parse its date/version fields."""
+    prefix = bytearray()
+    closing_header = b"</header>"
+    while len(prefix) <= MAX_DAT_BYTES:
+        chunk = stream.read(min(4096, MAX_DAT_BYTES + 1 - len(prefix)))
+        if not chunk:
+            return ""
+        prefix.extend(chunk)
+        end = prefix.find(closing_header)
+        if end >= 0:
+            data = bytes(prefix[:end + len(closing_header)])
+            start = len(_BOM) if data.startswith(_BOM) else 0
+            try:
+                _check_text(data, start)
+                header = _DatScanner(
+                    data + b"</datafile>", start, require_roms=False
+                ).parse()
+            except DiscVerifyError:
+                return ""
+            return header.stamp()
+    return ""
+
+
+def _bundled_header_stamp(path: Path) -> str:
+    """The bundled date/version without inflating and parsing its full Redump list."""
+    try:
+        with path.open("rb") as stream:
+            signature = stream.read(len(_ZIP_MAGIC))
+            if signature != _ZIP_MAGIC:
+                stream.seek(0)
+                return _read_header_stamp(stream)
+        with zipfile.ZipFile(path) as package:
+            members = [
+                member for member in package.infolist()
+                if not member.is_dir() and member.filename.endswith(".dat")
+            ]
+            if len(members) != 1:
+                return ""
+            with package.open(members[0]) as stream:
+                return _read_header_stamp(stream)
+    except (OSError, ValueError, RuntimeError, EOFError, KeyError,
+            zipfile.BadZipFile, zlib.error):
+        return ""
+
+
 def dat_from_bytes(data: bytes) -> RedumpDat:
     """Read a datafile, or the zip Redump serves, from its bytes: the whole format (rules 1-10).
     ``src/core/nk_disc_verify.c``'s nk_disc_dat_read is the same reader."""
@@ -874,12 +923,9 @@ def load_verification_dat(user_data_root: Path | str, *,
         raise
     if imported is not None:
         # The user's choice stands, but an import older than the bundled list is named as such.
-        try:
-            bundled_dat = load_dat(path) if path.is_file() else None
-        except DiscVerifyError:
-            bundled_dat = None
-        if bundled_dat is not None and list_date_is_older(imported.stamp(), bundled_dat.stamp()):
-            imported.newer_bundled_date = bundled_dat.stamp()
+        bundled_stamp = _bundled_header_stamp(path) if path.is_file() else ""
+        if bundled_stamp and list_date_is_older(imported.stamp(), bundled_stamp):
+            imported.newer_bundled_date = bundled_stamp
         return imported
     if not path.is_file():
         return None
@@ -939,7 +985,12 @@ def classify(disc_id: Optional[str], digest: Optional[DiscDigest], dat: Optional
     if rom is not None and rom.crc32 == digest.crc32.lower() and rom.size_bytes == digest.size_bytes:
         return VERIFIED_RETAIL
     disc_id = _ascii_upper(disc_id or "")
-    if disc_id and (disc_id in dat.serials or disc_id in set(known_retail_ids)):
+    known_ids = (
+        known_retail_ids
+        if isinstance(known_retail_ids, AbstractSet)
+        else set(known_retail_ids)
+    )
+    if disc_id and (disc_id in dat.serials or disc_id in known_ids):
         return MODIFIED
     return UNKNOWN
 

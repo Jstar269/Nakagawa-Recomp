@@ -14,11 +14,15 @@ Nothing here reads keys, decrypts, or uploads. The user brings their own font fi
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import functools
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
+import tempfile
+import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .prereq_fetcher import default_data_root as default_user_data_root
@@ -33,6 +37,7 @@ READER_VERSION = 1
 PROJECT_SUBDIR = "font"
 PGF_MAX_BYTES = 16 * 1024 * 1024
 IMPORT_MAX_FILES = 64
+_FONT_IMPORT_LOCK = threading.RLock()
 
 #: Slot ids in NkFontSlot order. Each slot's cache file is its served project name.
 SLOTS: Tuple[str, ...] = ("japanese", "latin", "korean")
@@ -541,6 +546,32 @@ def _inspect(data: bytes) -> Dict[str, Any]:
     return result
 
 
+@functools.lru_cache(maxsize=256)
+def _inspect_file_cached(path: str, size: int, modified_ns: int) -> Dict[str, Any]:
+    """Reuse the full PGF verdict while one resolved file identity is unchanged."""
+    del size, modified_ns
+    return _inspect(Path(path).read_bytes())
+
+
+def _inspect_path(path: Path) -> Dict[str, Any]:
+    resolved = path.resolve(strict=True)
+    info = resolved.stat()
+    return _inspect_file_cached(str(resolved), info.st_size, info.st_mtime_ns)
+
+
+@functools.lru_cache(maxsize=256)
+def _inspect_file_cached(path: str, size: int, modified_ns: int) -> Dict[str, Any]:
+    """Reuse a PGF verdict while its resolved path, size, and modification time are unchanged."""
+    del size, modified_ns
+    return _inspect(Path(path).read_bytes())
+
+
+def _inspect_path(path: Path) -> Dict[str, Any]:
+    resolved = path.resolve(strict=True)
+    info = resolved.stat()
+    return _inspect_file_cached(str(resolved), info.st_size, info.st_mtime_ns)
+
+
 # --- Public validation -----------------------------------------------------------------
 
 
@@ -608,13 +639,12 @@ def _reject_duplicate_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
     return result
 
 
-def _load_manifest(cache_dir: Path) -> Tuple[str, str, Dict[str, Dict[str, Any]]]:
+def _load_manifest_uncached(path: Path) -> Tuple[str, str, Dict[str, Dict[str, Any]]]:
     """Return (status, message, entries) with entries keyed by slot id.
 
     Status is MISSING (no manifest), INVALID (malformed, or an entry this build does not
     accept), or OK. The entries are the manifest's own values; file checks are separate.
     """
-    path = cache_dir / MANIFEST_NAME
     if not path.is_file():
         return "MISSING", "No imported PSP font.", {}
     try:
@@ -683,16 +713,38 @@ def _load_manifest(cache_dir: Path) -> Tuple[str, str, Dict[str, Dict[str, Any]]
     return "OK", "Imported PSP fonts are listed in the manifest.", entries
 
 
+@functools.lru_cache(maxsize=64)
+def _load_manifest_cached(path: str, size: int, modified_ns: int
+                          ) -> Tuple[str, str, Dict[str, Dict[str, Any]]]:
+    del size, modified_ns
+    return _load_manifest_uncached(Path(path))
+
+
+def _load_manifest(cache_dir: Path) -> Tuple[str, str, Dict[str, Dict[str, Any]]]:
+    """Load one manifest version, reusing parsing until its file identity changes."""
+    path = cache_dir / MANIFEST_NAME
+    if not path.is_file():
+        return "MISSING", "No imported PSP font.", {}
+    try:
+        resolved = path.resolve(strict=True)
+        info = resolved.stat()
+        status, message, entries = _load_manifest_cached(
+            str(resolved), info.st_size, info.st_mtime_ns
+        )
+    except (OSError, RuntimeError):
+        return "INVALID", "PSP font manifest is malformed; run fonts import <folder>.", {}
+    return status, message, {key: dict(entry) for key, entry in entries.items()}
+
+
 def _check_slot_file(cache_dir: Path, slot: str, entry: Dict[str, Any]) -> Tuple[bool, str]:
     """Check a manifest entry against its file: present, size and SHA-256, accepted, right slot."""
     path = cache_dir / SLOT_FILES[slot]
     if not path.is_file():
         return False, "its file is missing"
     try:
-        data = path.read_bytes()
-    except OSError as exc:
+        info = _inspect_path(path)
+    except (OSError, RuntimeError) as exc:
         return False, f"its file cannot be read ({exc.strerror or exc})"
-    info = _inspect(data)
     if not info["accepted"]:
         return False, f"the reader refused it: {info['refusal']}"
     if info["slot"] != slot:
@@ -708,10 +760,9 @@ def _check_latin_index_file(cache_dir: Path, index: int, entry: Dict[str, Any]) 
     if not path.is_file():
         return False, "its file is missing"
     try:
-        data = path.read_bytes()
-    except OSError as exc:
+        info = _inspect_path(path)
+    except (OSError, RuntimeError) as exc:
         return False, f"its file cannot be read ({exc.strerror or exc})"
-    info = _inspect(data)
     if not info["accepted"]:
         return False, f"the reader refused it: {info['refusal']}"
     if info["slot"] != "latin":
@@ -778,8 +829,8 @@ def slot_states(
             project_path = Path(project_root) / PROJECT_SUBDIR / SLOT_FILES[slot]
             if project_path.is_file():
                 try:
-                    info = _inspect(project_path.read_bytes())
-                except OSError:
+                    info = _inspect_path(project_path)
+                except (OSError, RuntimeError):
                     info = {"accepted": False}
                 if info.get("accepted") and info.get("slot") == slot:
                     states[slot] = {"source": "project", "detail": f"{role}: project font."}
@@ -835,8 +886,8 @@ def resolve_latin_index(
                             (SLOT_FILES["latin"], 0)):
             project_path = Path(project_font_dir) / name
             try:
-                info = _inspect(project_path.read_bytes()) if project_path.is_file() else {"accepted": False}
-            except OSError:
+                info = _inspect_path(project_path) if project_path.is_file() else {"accepted": False}
+            except (OSError, RuntimeError):
                 info = {"accepted": False}
             if info.get("accepted") and info.get("slot") == "latin":
                 return {"source": "project", "served_index": -1, "project_file": name,
@@ -941,12 +992,70 @@ def _write_manifest(cache_dir: Path, entries: Dict[str, Dict[str, Any]]) -> None
         "latin_indices": latin_indices,
     }
     target = cache_dir / MANIFEST_NAME
-    staged = cache_dir / (MANIFEST_NAME + ".tmp")
-    staged.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    os.replace(staged, target)
+    staged: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=cache_dir,
+            prefix=f".{MANIFEST_NAME}.", suffix=".tmp", delete=False,
+        ) as stream:
+            staged = Path(stream.name)
+            json.dump(manifest, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(staged, target)
+        staged = None
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+    _load_manifest_cached.cache_clear()
 
 
-def import_fonts(
+def _stage_font_bytes(cache_dir: Path, target: Path, data: bytes) -> Path:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=cache_dir, prefix=f".{target.name}.",
+            suffix=".tmp", delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return temporary
+    except OSError:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise
+
+
+def _backup_font_file(target: Path, backup_dir: Path) -> Path | None:
+    if not target.exists():
+        return None
+    if not target.is_file():
+        raise FontImportError(f"Cached font path '{target.name}' is not a file.")
+    backup = backup_dir / target.name
+    with target.open("rb") as source, backup.open("wb") as destination:
+        shutil.copyfileobj(source, destination)
+        destination.flush()
+        os.fsync(destination.fileno())
+    return backup
+
+
+def _restore_font_file(target: Path, backup: Path | None) -> None:
+    if backup is None:
+        target.unlink(missing_ok=True)
+        return
+    temporary = _stage_font_bytes(target.parent, target, backup.read_bytes())
+    try:
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _import_fonts_unlocked(
     source_folder: Path,
     user_data_root: Optional[Path] = None,
     choose: Optional[Dict[str, str]] = None,
@@ -1053,8 +1162,7 @@ def import_fonts(
                     f"The chosen {SLOT_ROLES[slot]} file changed or failed its check; try again."
                 )
             target = cache_dir / SLOT_FILES[slot]
-            tmp = cache_dir / (SLOT_FILES[slot] + ".tmp")
-            tmp.write_bytes(data)
+            tmp = _stage_font_bytes(cache_dir, target, data)
             staged.append((tmp, target))
         for latin_index, index in selected_latin.items():
             source_path = source_folder / files[index]["name"]
@@ -1066,8 +1174,7 @@ def import_fonts(
                     f"The Latin index {latin_index + 1} file changed or failed its check; try again."
                 )
             target = cache_dir / LATIN_INDEX_FILES[latin_index]
-            tmp = cache_dir / (LATIN_INDEX_FILES[latin_index] + ".tmp")
-            tmp.write_bytes(data)
+            tmp = _stage_font_bytes(cache_dir, target, data)
             staged.append((tmp, target))
     except OSError as exc:
         for tmp, _ in staged:
@@ -1079,25 +1186,59 @@ def import_fonts(
         raise
 
     entries = {slot: dict(entry) for slot, entry in previous.items()}
+    backups: Dict[Path, Path | None] = {}
+    replaced: List[Path] = []
     try:
-        for tmp, target in staged:
-            os.replace(tmp, target)
-        for slot, index in selected.items():
-            info = checked[files[index]["name"]]
-            entries[slot] = {"size": info["size"], "sha256": info["sha256"]}
-            files[index]["imported"] = True
-            files[index]["detail"] = f"imported as the {SLOT_ROLES[slot]} font"
-        for latin_index, index in selected_latin.items():
-            info = checked[files[index]["name"]]
-            entries[f"latin_index_{latin_index}"] = {
-                "index": latin_index, "size": info["size"], "sha256": info["sha256"]
-            }
-            files[index]["imported"] = True
-            files[index]["detail"] = f"imported as Latin index {latin_index + 1}"
-        if selected or selected_latin:
-            _write_manifest(cache_dir, entries)
+        with tempfile.TemporaryDirectory(
+            prefix=".font-import-backup-", dir=cache_dir
+        ) as backup_name:
+            backup_dir = Path(backup_name)
+            for _tmp, target in staged:
+                backups[target] = _backup_font_file(target, backup_dir)
+            try:
+                for tmp, target in staged:
+                    os.replace(tmp, target)
+                    replaced.append(target)
+                for slot, index in selected.items():
+                    info = checked[files[index]["name"]]
+                    entries[slot] = {"size": info["size"], "sha256": info["sha256"]}
+                    files[index]["imported"] = True
+                    files[index]["detail"] = f"imported as the {SLOT_ROLES[slot]} font"
+                for latin_index, index in selected_latin.items():
+                    info = checked[files[index]["name"]]
+                    entries[f"latin_index_{latin_index}"] = {
+                        "index": latin_index, "size": info["size"], "sha256": info["sha256"]
+                    }
+                    files[index]["imported"] = True
+                    files[index]["detail"] = f"imported as Latin index {latin_index + 1}"
+                if selected or selected_latin:
+                    _write_manifest(cache_dir, entries)
+            except OSError as exc:
+                rollback_error: OSError | None = None
+                for target in reversed(replaced):
+                    try:
+                        _restore_font_file(target, backups[target])
+                    except OSError as restore_exc:
+                        rollback_error = restore_exc
+                _inspect_file_cached.cache_clear()
+                if rollback_error is not None:
+                    raise FontImportError(
+                        "Font import failed and the previous cache could not be fully restored."
+                    ) from rollback_error
+                raise FontImportError(
+                    f"Failed to stage imported fonts into cache: {exc}"
+                ) from exc
     except OSError as exc:
+        for tmp, _target in staged:
+            tmp.unlink(missing_ok=True)
+        _inspect_file_cached.cache_clear()
         raise FontImportError(f"Failed to stage imported fonts into cache: {exc}") from exc
+    except FontImportError:
+        for tmp, _target in staged:
+            tmp.unlink(missing_ok=True)
+        raise
+
+    _inspect_file_cached.cache_clear()
 
     return {
         "status": "OK" if selected or selected_latin else "NONE",
@@ -1115,6 +1256,16 @@ def import_fonts(
         },
         "outcomes": files,
     }
+
+
+def import_fonts(
+    source_folder: Path,
+    user_data_root: Optional[Path] = None,
+    choose: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Import fonts serially in this process so manifests and selected slots commit together."""
+    with _FONT_IMPORT_LOCK:
+        return _import_fonts_unlocked(source_folder, user_data_root, choose)
 
 
 def remove_imports(user_data_root: Optional[Path] = None, slots: Optional[Iterable[str]] = None) -> int:
@@ -1180,11 +1331,15 @@ def remove_imports(user_data_root: Optional[Path] = None, slots: Optional[Iterab
     if status != "OK":
         if not failures and manifest_path.is_file():
             manifest_path.unlink()
+            _load_manifest_cached.cache_clear()
     elif dropped:
         if entries:
             _write_manifest(cache_dir, entries)
         else:
             manifest_path.unlink(missing_ok=True)
+            _load_manifest_cached.cache_clear()
+    if removed:
+        _inspect_file_cached.cache_clear()
     if failures:
         if removed:
             failures.append(f"Removed {removed} other imported font file(s).")
