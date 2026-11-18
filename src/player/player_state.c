@@ -1230,89 +1230,89 @@ static const char *const k_part_texscale_words[] = {"2", "3", "4", "5", "6", "of
 static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"af", "Texture filtering",
      "Keeps slanted surfaces sharp. Save pictures keep the filtering.",
-     5, k_part_af_values, k_part_af_labels, k_part_af_words, 16},
+     5, k_part_af_values, k_part_af_labels, k_part_af_words, 16, false},
     {"text", "Crisp system text",
      "Draws the on-screen keyboard at your screen's resolution.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 1},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 1, false},
     {"readout", "Speed readout",
      "The game's speed and frame rate in a corner, over its HUD.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
     {"notice", "Game badge",
      "Names the mode for a few seconds when a game starts.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 1},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 1, false},
     /* Host-only (contract 10.8): what a game reads is unchanged. Objects a game skips as off
        screen are missing from the sides until that title has its own culling item. */
     {"wide", "Widescreen",
      "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth motion disables it.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_wide_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_wide_words, 0, false},
     {"smooth", "Smooth motion",
      "Smooths steady 30 FPS scenes only where it can follow the motion. Adds about 17 ms of delay.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_smooth_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_smooth_words, 0, false},
     /* A guest-visible item (contract 11.3.1): off by default until its "nothing worse" runs
        exist (11.2 item 4), with its own off switch in the library and each title (item 2). */
     {"sas", "Clean pitched sound",
      "Resamples pitched effects without aliasing. The game receives changed samples.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_sas_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_sas_words, 0, false},
     /* A guest-visible item (contract 11.3.7) that alters GE timing (SR_GE_TIMING): off by default
        and in no preset, with its own off switch in the library and each title. */
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
-     4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
+     4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0, false},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
      "Ace only, with Widescreen, in games that have a culling build. The game's memory changes.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, true},
     /* Presentation only (contract section 2.2): the window and its recording, never the guest. */
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
-     2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+     2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0, false},
     /* A guest-visible item (contract 11.3.11): off by default; it acts only for a title whose
        catalog entry declares the stick dead zone the game ignores. */
     {"stick", "Stick dead zone",
      "Ace only, in games that ignore part of the stick. Small pushes count; the feel changes.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, true},
     /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
        preset; it matters only for a title whose own package declares a load part, and only in Ace. */
     {"load", "Short loads",
      "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0, true},
     {"twin", "Full 32-bit colour",
      "Shows 16-bit games in full colour, without dither. Uses more memory.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
     /* Host presentation only (contract 10.21): the picture the window shows, never guest memory.
        Off by default and in every preset: it multiplies the GPU's work by 4 or 16. At a render
        scale of 3x or 4x the row warns and plain 4x runs at 2x (player_ssaa_sentence). */
     {"ssaa", "Supersampling",
      "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times.",
-     4, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0},
+     4, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0, false},
     /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
        as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
        with its own off switch in the library and each title (item 2). */
     {"mips", "Smooth far textures",
      "Slightly less shimmer on far textures. Uses CPU; may stutter on new textures.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
     /* A guest-visible item (contract 11.3.4): off by default, in no preset, and in effect only for
        a title with a pack of the player's own chosen on its page. */
     {"texpack", "Texture pack",
      "Draws the texture pack chosen on a game's page. The game receives changed pictures.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
     /* A guest-visible item (contract 11.3.9): it moves when each logic update starts, so it is off
        by default, in no preset, and matters only for a title running its 60 FPS game logic package. */
     {"pad", "Late pad sampling",
      "Ace only, with 60 FPS logic. Reads the pad later in each frame; the game's timing changes.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_pad_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_pad_words, 0, true},
     /* A guest-visible item (contract 11.3.13): off by default and in no preset; it matters only for a
        title whose own package declares its shadow textures, and only in Ace. The softened shadows
        reach the frame the game reads. */
     {"shadow", "Soft shadows",
      "Ace only, in games whose package names their shadows. Changes what the frame shows.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0, true},
     /* Host sound only (contract 10.22, #2137): the guest's SAS buffer keeps the PSP's saturated
        bytes. Off by default and in every preset; the limiter's output is 71 frames (1.6 ms) late. */
     {"peak", "Unclipped sound",
      "Softens loud sound that the PSP clips. Changes only what you hear; sound plays 1.6 ms later.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_peak_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_peak_words, 0, false},
     /* Guest-visible items (contract 10.10 and 11.3.3): every present commits the frame, scaled copies
        and nearest 2D draws included, to guest VRAM. Off by default and in no preset until their
        "nothing worse" runs exist (11.2 item 4), each with its own off switch in the library and each
@@ -1321,10 +1321,10 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
        every row's sentence under its button (scr_wizard_column). */
     {"texscale", "Texture scaling",
      "Redraws textures with xBRZ. Uses GPU memory; the game receives changed pictures.",
-     6, k_part_texscale_values, k_part_texscale_labels, k_part_texscale_words, 0},
+     6, k_part_texscale_values, k_part_texscale_labels, k_part_texscale_words, 0, false},
     {"smart2d", "Smart 2D filter",
      "Sharp HUD art above 1x, but blocky soft text. The game receives changed pictures.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {

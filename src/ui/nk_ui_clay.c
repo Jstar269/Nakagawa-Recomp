@@ -216,18 +216,20 @@ static size_t nk_ui_clay_codepoints(const char *text, size_t length) {
    a line that starts its paragraph, and within a pixel for a line that starts later, whose
    first word also carries the fraction of the space before it. A line break starts a new
    line, and in a long line the measuring starts at a word on a grid of half
-   NK_UI_CLAY_MEASURE_CONTEXT bytes, so that no word is measured with more than that much
-   text before it and neighbouring words share their start. With a backend whose measure is
-   a sum of its characters (nk_ui_text_fixed) the result is the word's own measure, as
-   before. */
+   NK_UI_CLAY_MEASURE_CONTEXT bytes from the start of the run, so that no word is measured
+   with more than that much text before it and neighbouring words share their start. The grid
+   is the run's, not the line's, so finding where to start reads at most
+   NK_UI_CLAY_MEASURE_CONTEXT bytes back, never back to the start of a long paragraph for
+   every word (audit 2026-11-17, F-a2c8c85a). `alone` is the slice's own measure, which the
+   caller has made already. With a backend whose measure is a sum of its characters
+   (nk_ui_text_fixed) the result is the word's own measure, as before. */
 static float nk_ui_clay_word_width(const NkUiClay *clay, int font, int device_px,
-                                   Clay_StringSlice text) {
+                                   Clay_StringSlice text, float alone) {
     const char *word = text.chars;
     const size_t length = (size_t)text.length;
-    const float alone = clay->text.measure(clay->text.user, font, device_px, word, length).width;
     const size_t step = NK_UI_CLAY_MEASURE_CONTEXT / 2u;
-    const char *line = word;
-    const char *from;
+    const char *from = word;
+    size_t back = 0u;
     float before = 0.0f;
     float through;
     float space;
@@ -235,10 +237,14 @@ static float nk_ui_clay_word_width(const NkUiClay *clay, int font, int device_px
     if (text.baseChars == NULL || word <= text.baseChars || word[-1] != ' ' || length == 0u) {
         return alone;
     }
-    while (line > text.baseChars && line[-1] != '\n') --line;
-    from = line;
-    if ((size_t)(word - line) > NK_UI_CLAY_MEASURE_CONTEXT) {
-        from = line + (((size_t)(word - line) - step) / step) * step;
+    /* The line's start when it is no more than the context back; past that, a grid point. */
+    while (from > text.baseChars && from[-1] != '\n' && back <= NK_UI_CLAY_MEASURE_CONTEXT) {
+        --from;
+        ++back;
+    }
+    if (back > NK_UI_CLAY_MEASURE_CONTEXT) {
+        /* Less than the context back, so no line break lies between it and the word. */
+        from = text.baseChars + (((size_t)(word - text.baseChars) - step) / step) * step;
         while (from < word && from[-1] != ' ') ++from;
         if (from >= word) return alone;
     }
@@ -278,7 +284,8 @@ static Clay_Dimensions nk_ui_clay_measure(Clay_StringSlice text,
                                                    text.chars, (size_t)text.length);
         if (isfinite(measured.width) && measured.width > 0.0f) {
             /* Clay measures a run in word slices: each is counted as it adds to its line. */
-            result.width = nk_ui_clay_word_width(clay, font, device_px, text) / clay->density;
+            result.width = nk_ui_clay_word_width(clay, font, device_px, text,
+                                                 measured.width) / clay->density;
             /* As CSS letter-spacing: the gap follows every character,
                the last one too, snapped to whole device pixels as the
                renderer snaps it. The per-character rule keeps the slices'

@@ -406,6 +406,105 @@ static int test_wrapped_lines_fit_their_box(void) {
     return 1;
 }
 
+/* Each measure the layout asks of the backend, in order (audit 2026-11-17). */
+#define MEASURE_LOG_CAP 4096
+static struct {
+    const char *text;
+    size_t length;
+} g_measure_log[MEASURE_LOG_CAP];
+static size_t g_measure_count;
+
+static NkUiTextSize logging_measure(void *user, int font, int px, const char *text,
+                                    size_t length) {
+    if (g_measure_count < MEASURE_LOG_CAP) {
+        g_measure_log[g_measure_count].text = text;
+        g_measure_log[g_measure_count].length = length;
+    }
+    ++g_measure_count;
+    return whole_pixel_measure(user, font, px, text, length);
+}
+
+/* The word measure of a long paragraph after a line break (audit 2026-11-17). F-5843d890: a
+   word slice was measured twice in a row, once to test its width and once more as the word
+   alone. F-a2c8c85a: to place the grid its measuring starts on, every word read back to the
+   start of its paragraph, so a long paragraph cost its length for each of its words; the grid
+   is now the run's, found within the measuring context. Here the run starts with a short line,
+   so the paragraph's grid and the run's differ: a word starts at byte 129 of the run, just
+   after the run's grid point 128 and before the paragraph's, 132. Every measure of text that
+   holds a space starts at the start of a line, or at the first word at or after a point of
+   the run's 128-byte grid. */
+static int test_word_measure_reads_a_bounded_context(void) {
+    char text[640];
+    NkUiConfig config;
+    NkUiTextBackend logging = nk_ui_text_fixed();
+    NkUi *ui;
+    const char *base = NULL;
+    size_t used;
+    size_t gridded = 0u;
+    memcpy(text, "Hi.\n", 4u);
+    used = 4u;
+    /* Words of seven letters and a space start at 4 + 8k; one of four letters at byte 124
+       puts the next word start at 129, and the rest at 129 + 8k. */
+    while (used < 600u) {
+        const char *word = used == 124u ? "abcd " : "abcdefg ";
+        memcpy(text + used, word, strlen(word));
+        used += strlen(word);
+    }
+    text[used - 1u] = '.';
+    text[used] = '\0';
+    CHECK(text[128] == ' ' && text[129] != ' ', "a word of the paragraph starts at byte 129");
+    logging.measure = logging_measure;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &logging;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create a context that logs its measures");
+    g_measure_count = 0u;
+    CHECK(wrapped_lines_frame(ui, text, 300.0f) != NULL, "lay out the two-line run");
+    CHECK(g_measure_count > 0u && g_measure_count <= MEASURE_LOG_CAP, "the measures fit the log");
+    for (size_t i = 0u; i < g_measure_count; ++i) {
+        if (g_measure_log[i].length >= 3u && memcmp(g_measure_log[i].text, "Hi.", 3u) == 0 &&
+            (base == NULL || g_measure_log[i].text < base)) {
+            base = g_measure_log[i].text;
+        }
+    }
+    CHECK(base != NULL, "the run's first word is measured from its start");
+    for (size_t i = 0u; i < g_measure_count; ++i) {
+        const char *start = g_measure_log[i].text;
+        size_t offset;
+        size_t grid;
+        bool first_word = true;
+        if (i > 0u && start == g_measure_log[i - 1u].text &&
+            g_measure_log[i].length == g_measure_log[i - 1u].length && start >= base &&
+            start < base + used && g_measure_log[i].length > 1u) {
+            fprintf(stderr, "FAIL: the slice at byte %zu is measured twice in a row\n",
+                    (size_t)(start - base));
+            nk_ui_destroy(ui);
+            return 0;
+        }
+        if (start < base || start >= base + used ||
+            memchr(start, ' ', g_measure_log[i].length) == NULL ||
+            start == base || start[-1] == '\n') {
+            continue;
+        }
+        offset = (size_t)(start - base);
+        grid = offset / 128u * 128u;
+        for (size_t t = grid; t < offset; ++t) {
+            if (t > 0u && base[t - 1u] == ' ') first_word = false;
+        }
+        if (start[-1] != ' ' || !first_word) {
+            fprintf(stderr, "FAIL: a measure starts at byte %zu, not at the first word after "
+                    "the run's grid point %zu\n", offset, grid);
+            nk_ui_destroy(ui);
+            return 0;
+        }
+        ++gridded;
+    }
+    CHECK(gridded > 0u, "words past the context are measured from a grid point");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
 /* The text size scales type only: the glyphs, their measured width, the line
    boxes and the wrapping grow, while the density, the padding, the gaps and a
    fixed box stay. A one-line component keeps its height while its text fits
@@ -2472,7 +2571,7 @@ int main(int argc, char **argv) {
     size_t actual_size;
     if (!test_no_platform_headers() || !test_theme_tokens() || !test_scale_model() ||
         !test_text_size_scales_type_only() ||
-        !test_wrapped_lines_fit_their_box() ||
+        !test_wrapped_lines_fit_their_box() || !test_word_measure_reads_a_bounded_context() ||
         !test_explicit_ui_scale_values() || !test_typed_prefs_and_events() ||
         !test_theme_access() || !test_overlay_rejects_waves() ||
         !test_container_return_contract() || !test_backend_declarations() ||

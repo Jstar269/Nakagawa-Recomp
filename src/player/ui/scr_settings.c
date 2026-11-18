@@ -1612,8 +1612,7 @@ static void settings_ace(NkUi *ui, const PlayerUiSettingsModel *model, float inn
                 }
                 nk_ui_divider(ui, SET_ID_ENHANCED_TABS + 1u, true);
                 if (chosen >= 0 && chosen < PLAYER_UI_ENHANCED_GROUP_COUNT) {
-                    *result = settings_op(PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB);
-                    result->title_index = (size_t)chosen;
+                    if (model->enhanced_tab_chosen != NULL) *model->enhanced_tab_chosen = chosen;
                     nk_ui_focus(ui, active_tabs[chosen].id);
                 }
             }

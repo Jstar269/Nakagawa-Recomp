@@ -21,7 +21,9 @@ void nk_ui_register_button(NkUi *ui, NkUiId id, uint32_t flags);
 /* The same, naming where an up and a down move from `id` land (0: the nearest control that
    way, as usual). A full-width row beside a strip of small controls names the one it means,
    such as a tab strip's active tab, because the nearest by position may be another. A named
-   control that is not on screen, or cannot take focus, is ignored. */
+   control is taken even when its container has it scrolled out of view (it is then scrolled
+   into view); it is ignored, and the move goes by position, only when it is missing,
+   disabled, pointer-only or in another focus scope. */
 void nk_ui_register_button_between(NkUi *ui, NkUiId id, uint32_t flags, NkUiId up,
                                    NkUiId down);
 bool nk_ui_button_focused(const NkUi *ui, NkUiId id);

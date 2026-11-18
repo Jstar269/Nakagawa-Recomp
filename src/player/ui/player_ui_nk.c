@@ -980,17 +980,10 @@ static int player_ui_enhanced_value_index(int part, int value) {
     return 0;
 }
 
+/* The part table says which parts act only in Ace (PlayerEnhancedPartInfo.ace_only). */
 static const char *player_ui_enhanced_tag(int part) {
-    switch (part) {
-    case PLAYER_PART_CULL:
-    case PLAYER_PART_STICK:
-    case PLAYER_PART_LOAD:
-    case PLAYER_PART_PAD:
-    case PLAYER_PART_SHADOW:
-        return "Ace only";
-    default:
-        return NULL;
-    }
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
+    return info != NULL && info->ace_only ? "Ace only" : NULL;
 }
 
 /* Settings > Enhanced (#2055): the library's page, or one title's
@@ -1012,9 +1005,10 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
     model->enhanced_mode_count = 2;
     bool logic_60 = false;
     bool smooth_on = player_settings_library_part(settings, PLAYER_PART_SMOOTH) != 0;
+    PlayerPlayMode chosen = PLAYER_PLAY_LIBRARY;
     if (title >= 0) {
         const GameRecord *game = &app->games[title];
-        PlayerPlayMode chosen = player_app_title_play_mode(app, title);
+        chosen = player_app_title_play_mode(app, title);
         PlayerPlayResolved play;
         player_play_resolve(settings, game->disc_id, &play);
         /* What its launch runs (player_launch_work_run): with its 60 FPS game logic, smooth
@@ -1156,8 +1150,7 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
             row->disabled = true;
             row->disabled_reason = "Play mode is Authentic.";
         } else if (title >= 0 && row->tag != NULL &&
-                   (strcmp(model->enhanced_mode, "Ace") != 0 ||
-                    !app->title_enhancements[title].available)) {
+                   (chosen != PLAYER_PLAY_ACE || !app->title_enhancements[title].available)) {
             /* A saved Ace whose package has gone is no Ace: its Ace-only rows stay dimmed. */
             row->disabled = true;
             row->disabled_reason = app->title_enhancements[title].available
@@ -1477,13 +1470,14 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
     model.logical_width = scale.logical_w;
     model.logical_height = scale.logical_h;
     {
-        PlayerUiAction action = player_ui_screen_settings(player->ui, &model);
-        if (action.kind == PLAYER_UI_ACTION_SETTINGS &&
-            action.primary == (PlayerUiPrimaryAction)PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB) {
-            if (action.title_index < PLAYER_UI_ENHANCED_GROUP_COUNT)
-                player->enhanced_tab = (int)action.title_index;
-            action.kind = PLAYER_UI_ACTION_NONE;
-        }
+        /* The tab is the page's session state: the screen hands a chosen one back here, apart
+           from the frame's action. */
+        int chosen_tab = -1;
+        PlayerUiAction action;
+        model.enhanced_tab_chosen = &chosen_tab;
+        action = player_ui_screen_settings(player->ui, &model);
+        if (chosen_tab >= 0 && chosen_tab < PLAYER_UI_ENHANCED_GROUP_COUNT)
+            player->enhanced_tab = chosen_tab;
         return action;
     }
 }
@@ -2149,9 +2143,8 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 break;
             case VIEW_ONLINE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_ONLINE_MODE; break;
             case VIEW_ACCESSIBILITY_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE; break;
-            case VIEW_ACE_SETTINGS:
-                focus = NK_UI_ID(NK_UI_ID_SCREEN_SETTINGS, 0x000300u);
-                break;
+            /* Settings > Enhanced, the library's or a game's, opens on its first row. */
+            case VIEW_ACE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_PRESET; break;
             case VIEW_PREREQ_ABOUT:
             case VIEW_CONFIRM_REMOVE_TOOLS:
             /* The safe answer, Keep everything, has the focus. */

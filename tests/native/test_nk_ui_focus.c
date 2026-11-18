@@ -280,7 +280,7 @@ static int test_pointer_only_and_named_neighbours(void) {
     CHECK(nk_ui_focus_set(g, 13u), "focus a tab");
     CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 23u, "down from the strip takes a row on screen");
     CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 22u, "inside the list, up reaches a hidden row");
-    /* A named neighbour that is not on screen is ignored: the move is by position. */
+    /* A named neighbour that is missing is ignored: the move is by position. */
     nk_ui_focus_begin_frame(g);
     reg_between(g, 1u, 0.0f, 0.0f, 600.0f, 44.0f, 0u, 0u, 99u);
     reg(g, 21u, 0.0f, 110.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
@@ -447,6 +447,70 @@ static int test_scroller_showing_no_control(void) {
     CHECK(nk_ui_focus_set(g, 1u), "focus the tab again");
     CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 32u,
           "down takes the control the body shows");
+    nk_ui_focus_graph_destroy(g);
+    return 1;
+}
+
+/* A list (scroller 90) nested in a page body (scroller 200) under a top bar, with the body
+   scrolled so the whole list is above its edge while the list itself shows its first rows,
+   and a Back button the body shows (Settings > Enhanced at Larger text in a small window).
+   The rows lie in their own list's view but not on screen: from the top bar, outside both
+   containers, Up finds no target, as a row only the list clips would not be one (audit
+   2026-11-17, F-142b3475: only the row's own container was checked, and Up jumped to a row
+   the body had out of view). From inside the body or the list, the rows are reached and
+   scrolled into view as before. */
+static void nested_hidden_frame(NkUiFocusGraph *g, bool back) {
+    NkUiFocusScroller body;
+    NkUiFocusScroller list;
+    nk_ui_focus_begin_frame(g);
+    body.id = 200u;
+    body.viewport = (NkUiRect){0.0f, 60.0f, 600.0f, 300.0f};
+    body.scroll_x = 0.0f;
+    body.scroll_y = 300.0f;
+    body.content_w = 600.0f;
+    body.content_h = 800.0f;
+    body.parent = 0u;
+    list.id = 90u;
+    list.viewport = (NkUiRect){0.0f, -240.0f, 600.0f, 100.0f};
+    list.scroll_x = 0.0f;
+    list.scroll_y = 0.0f;
+    list.content_w = 600.0f;
+    list.content_h = 300.0f;
+    list.parent = 200u;
+    if (!nk_ui_focus_register_scroller(g, &body) || !nk_ui_focus_register_scroller(g, &list)) {
+        exit(2);
+    }
+    reg(g, 1u, 0.0f, 0.0f, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    reg(g, 21u, 0.0f, -240.0f, 600.0f, 50.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 22u, 0.0f, -190.0f, 600.0f, 50.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    if (back) {
+        reg(g, 50u, 0.0f, 160.0f, 100.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 200u);
+    }
+    nk_ui_focus_end_frame(g);
+}
+
+static int test_nested_scroller_hides_its_list(void) {
+    NkUiFocusGraph *g = nk_ui_focus_graph_create();
+    NkUiFocusScrollRequest r;
+    CHECK(g != NULL, "create graph");
+    nested_hidden_frame(g, true);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the top bar");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 0u && nk_ui_focus_current(g) == 1u,
+          "from outside both containers, a row the body has out of view is no target");
+    CHECK(nk_ui_focus_set(g, 50u), "focus Back, in the body");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 1u,
+          "up from Back, in the body, reaches the top bar, the nearer control");
+    nk_ui_focus_graph_destroy(g);
+    g = nk_ui_focus_graph_create();
+    CHECK(g != NULL, "create graph again");
+    /* The body shows none of its controls: its clipped ones are targets, and the one a move
+       lands on is brought into view. */
+    nested_hidden_frame(g, false);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the top bar again");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 22u,
+          "with nothing of the body on screen, up reaches the nearer row");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u,
+          "and the body scrolls it into view");
     nk_ui_focus_graph_destroy(g);
     return 1;
 }
@@ -1815,7 +1879,7 @@ int main(int argc, char **argv) {
         !test_pointer_only_and_named_neighbours() ||
         !test_ragged_row() || !test_scroll_into_view() || !test_place_follows_the_layout() ||
         !test_nested_scrollers() || !test_scroller_showing_no_control() ||
-        !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
+        !test_nested_scroller_hides_its_list() || !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
         !test_repeat_timing() || !test_stick_hysteresis() || !test_event_construction() ||
         !test_prompt_style_follows_device() ||
         !test_utf8() || !test_label_table() || !test_prompt_bounds() ||

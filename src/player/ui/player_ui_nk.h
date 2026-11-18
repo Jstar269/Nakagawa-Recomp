@@ -649,7 +649,6 @@ typedef enum {
     PLAYER_UI_SETTINGS_SET_ENHANCED_PART,    /* Left, Right or a clicked value: title_index is the
                                                 part; choice_index is its value, -1 the library's
                                                 on a title's page */
-    PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB,  /* title_index is the session tab index */
     PLAYER_UI_SETTINGS_OPEN_PROBLEM_REPORT,  /* Settings > Problem report: lists the files */
     PLAYER_UI_SETTINGS_CREATE_REPORT,        /* write the bundle on this PC */
     PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER,
@@ -799,6 +798,10 @@ typedef struct {
     int enhanced_row_count;
     PlayerUiEnhancedRow enhanced_rows[PLAYER_UI_ENHANCED_ROWS];
     int enhanced_tab;                /* session UI state, not a saved settings value */
+    int *enhanced_tab_chosen;        /* where the page writes the tab chosen this frame (a click,
+                                        Enter or a shoulder), else leaves it alone; NULL: nowhere.
+                                        The tab is not an action, so a step on a row in the same
+                                        frame keeps the frame's one action (audit 2026-11-17) */
     /* A title's page only (texpack_row): the Texture pack folder row, its pack's name and texture
        count or "None", and, with a pack chosen, a Remove row. */
     bool texpack_row;

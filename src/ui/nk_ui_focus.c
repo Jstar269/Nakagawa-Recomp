@@ -125,31 +125,43 @@ static bool nk_ui_focus_in_viewport(NkUiRect rect, const NkUiFocusScroller *s) {
    that scrolls reaches the button under the list, though the page has it out of view. A
    container that shows none of its controls (a page body scrolled to a stretch of text) has
    nothing on screen to enter by, so there its clipped controls are targets as they were
-   before, and the one a move lands on is scrolled into view. */
+   before, and the one a move lands on is scrolled into view. Each container around the
+   entry is judged the same way, out to the first one that holds `from`: a row its list
+   shows is still not on screen when the page the list sits in has the whole list out of
+   view. */
 static bool nk_ui_focus_on_screen_for(const NkUiFocusEntry *entries, size_t count,
                                       const NkUiFocusEntry *from, const NkUiFocusEntry *cand,
                                       const NkUiFocusScroller *scrollers,
                                       size_t scroller_count) {
-    const NkUiFocusScroller *s;
-    size_t i;
-    if (cand->scroller == 0u || scrollers == NULL ||
-        nk_ui_focus_scroller_inside(scrollers, scroller_count, from->scroller,
-                                    cand->scroller)) {
+    NkUiId container = cand->scroller;
+    int depth;
+    if (scrollers == NULL) {
         return true;
     }
-    s = nk_ui_focus_scroller(scrollers, scroller_count, cand->scroller);
-    if (s == NULL || nk_ui_focus_in_viewport(cand->rect, s)) {
-        return true;
-    }
-    for (i = 0; i < count; ++i) {
-        const NkUiFocusEntry *e = &entries[i];
-        if (e != from && nk_ui_focus_enabled(e) && e->scope == cand->scope &&
-            (e->flags & NK_UI_FOCUS_POINTER_ONLY) == 0u &&
-            nk_ui_focus_scroller_inside(scrollers, scroller_count, e->scroller,
-                                        cand->scroller) &&
-            nk_ui_focus_in_viewport(e->rect, s)) {
-            return false;
+    for (depth = 0; container != 0u && depth < NK_UI_FOCUS_SCROLL_DEPTH; ++depth) {
+        const NkUiFocusScroller *s;
+        size_t i;
+        if (nk_ui_focus_scroller_inside(scrollers, scroller_count, from->scroller,
+                                        container)) {
+            return true;
         }
+        s = nk_ui_focus_scroller(scrollers, scroller_count, container);
+        if (s == NULL) {
+            return true;
+        }
+        if (!nk_ui_focus_in_viewport(cand->rect, s)) {
+            for (i = 0; i < count; ++i) {
+                const NkUiFocusEntry *e = &entries[i];
+                if (e != from && nk_ui_focus_enabled(e) && e->scope == cand->scope &&
+                    (e->flags & NK_UI_FOCUS_POINTER_ONLY) == 0u &&
+                    nk_ui_focus_scroller_inside(scrollers, scroller_count, e->scroller,
+                                                container) &&
+                    nk_ui_focus_in_viewport(e->rect, s)) {
+                    return false;
+                }
+            }
+        }
+        container = s->parent;
     }
     return true;
 }

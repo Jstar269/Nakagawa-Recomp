@@ -1802,7 +1802,6 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             if (arg < (size_t)PLAYER_PART_COUNT)
                 player_app_enhanced_page_set_part(app, (int)arg, choice_index);
             break;
-        case PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB: break; /* consumed by PlayerUiNk */
         case PLAYER_UI_SETTINGS_CYCLE_HIGH_CONTRAST: player_app_cycle_high_contrast_focus(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_REDUCE_MOTION: player_app_cycle_reduce_motion(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_FULLSCREEN:

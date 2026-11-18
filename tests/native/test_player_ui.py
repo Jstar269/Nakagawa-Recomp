@@ -3417,6 +3417,73 @@ class NativePlayerUiTests(unittest.TestCase):
                                       for disc, value in self.title_play(run).items()},
                                      expected_modes, f"{label}: title mode is unchanged")
 
+    def test_next_ui_enhanced_dimmed_rows_ignore_left_right_and_select(self) -> None:
+        """Audit 2026-11-17 F-1a749510: a dimmed row takes focus but no value. On the library's
+        page under Authentic (Texture filtering), on Widescreen chosen on while Smooth motion
+        is on (it shows Off; Widescreen chosen off is no dimmed row, and Right chooses it), and
+        on a game's page in Enhanced on an Ace-only row (Wider culling), Right, Left and Select
+        change neither the row the page draws nor a byte of settings.json."""
+        library = {"fps_cap": -1, "graphics_preset": "custom",
+                   "enhanced": {"default": "authentic", "af": "16"}}
+        smooth = {"fps_cap": -1, "graphics_preset": "custom",
+                  "enhanced": {"default": "enhanced", "af": "16", "wide": "fill",
+                               "smooth": "x2"}}
+        title = {"fps_cap": -1, "graphics_preset": "custom",
+                 "enhanced": {"default": "enhanced", "cull": "off"},
+                 "title_play": {"TEST00005": {"mode": "enhanced"}}}
+        down = ("PAD_DPAD_DOWN", "WAIT_MS=50")
+        to_play_mode = ("KEY_TAB", "WAIT_MS=80") * 3
+        title_open = (*self.OPEN_FIRST, *to_play_mode, "KEY_TAB", "WAIT_MS=80",
+                      "KEY_RETURN", "WAIT_MS=250")
+        # From Graphics preset: Play mode, the tab, then the tab's rows from the top.
+        cases = (
+            ("Authentic", "settings", self.OPEN_ENHANCED + down * 3, library, {}, 0, "af"),
+            ("Smooth motion", "settings", self.OPEN_ENHANCED + down * 4, smooth, {}, 4, "wide"),
+            ("Ace only", "library",
+             title_open + ("PAD_RIGHT_SHOULDER", "WAIT_MS=80") * 5 + down * 2, title,
+             {"wait_background": True}, 8, "cull"),
+        )
+        presses = ("PAD_DPAD_RIGHT", "WAIT_MS=80", "PAD_DPAD_LEFT", "WAIT_MS=80",
+                   "PAD_DPAD_LEFT", "WAIT_MS=80", "PAD_SOUTH", "WAIT_MS=100")
+        leave = ("KEY_ESCAPE", "WAIT_MS=120")
+        for label, view, opening, settings, kwargs, part, key in cases:
+            with self.subTest(row=label):
+                untouched = self.next_ui_run(view, opening + leave, settings=settings,
+                                             **kwargs)
+                run = self.next_ui_run(view, opening + presses + leave, settings=settings,
+                                       **kwargs)
+                row = self.enhanced_row_focus(part)
+                self.assertIn(row, self.focus_trail(untouched), f"{label}: the row takes focus")
+                self.assertEqual(self.focus_trail(run)[-2], row,
+                                 f"{label}: the presses are on the dimmed row")
+                values = {page[key] for page in self.enhanced_pages(run)}
+                self.assertEqual(len(values), 1, f"{label}: the row keeps its value: {values}")
+                self.assertIsInstance(untouched["settings_json"], bytes, untouched["stdout"])
+                self.assertEqual(run["settings_json"], untouched["settings_json"],
+                                 f"{label}: settings.json keeps its bytes")
+
+    def test_next_ui_enhanced_opens_focused_on_graphics_preset(self) -> None:
+        """Audit 2026-11-17 F-0c428884: Settings > Enhanced opens with Graphics preset focused
+        from its first frame, so Enter pressed on that frame takes the preset's next value.
+        Failing-before: the page asked to focus an id no control registers, no control had the
+        focus on its first frame, and that Enter did nothing."""
+        focus = self.SETTINGS_FOCUS
+        settings = {"graphics_preset": "custom",
+                    "enhanced": {"default": "enhanced", "af": "16"}}
+        run = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100",) + ("KEY_DOWN",) * 4 +
+            ("KEY_RETURN", "KEY_RETURN", "WAIT_MS=150", "KEY_ESCAPE", "WAIT_MS=120"),
+            settings=settings,
+        )
+        trail = self.focus_trail(run)
+        self.assertEqual(trail[-3:], [focus["ace_open"], focus["preset"], focus["ace_open"]],
+                         "the page opens on Graphics preset")
+        saved = run["settings"]
+        assert isinstance(saved, dict), run["stdout"]
+        self.assertEqual(saved.get("graphics_preset"), "low",
+                         "Enter on the page's first frame steps the focused preset")
+
     def test_next_ui_enhanced_tabs_leave_settings_bytes_unchanged(self) -> None:
         """Switching categories changes only session UI state, not settings.json bytes."""
         settings = {

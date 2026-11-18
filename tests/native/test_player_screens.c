@@ -111,6 +111,7 @@ static const char *g_enhanced_mode;
 static const char *g_enhanced_title_name;
 static int g_enhanced_mode_count;
 static int g_enhanced_tab;
+static int g_enhanced_tab_chosen = -1; /* the tab the page last handed back */
 static NkUiId g_enhanced_focus_id;
 /* A graphics preset's note for Settings > Enhanced (NULL: Medium, with no note set). */
 static const char *g_enhanced_preset_note;
@@ -504,6 +505,7 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
                   : "The default for every game; each game's page can choose its own.";
         settings.enhanced_row_count = PLAYER_PART_COUNT;
         settings.enhanced_tab = g_enhanced_tab;
+        settings.enhanced_tab_chosen = &g_enhanced_tab_chosen;
         settings.texpack_row = title;
         settings.texpack_chosen = false;
         settings.texpack_value = "None";
@@ -3357,9 +3359,10 @@ static int enhanced_tab_of(int part) {
     return -1;
 }
 
+/* A part that acts only in Ace says so first in its sentence; test_player_state checks the
+   shipped table's ace_only against the same words. */
 static bool enhanced_part_is_ace_only(int part) {
-    return part == PLAYER_PART_CULL || part == PLAYER_PART_STICK || part == PLAYER_PART_LOAD ||
-           part == PLAYER_PART_PAD || part == PLAYER_PART_SHADOW;
+    return strncmp(k_enhanced_parts[part].sentence, "Ace only", 8) == 0;
 }
 
 /* Whether the active tab's rows scroll inside their list in a window of this size. */
@@ -3377,6 +3380,51 @@ static bool enhanced_list_scrolls(FlowCase which, int width, int height) {
 /* Settings > Enhanced in a 1280 x 1600 window, where every row of a tab is on screen: the
    page is laid out, then `id` is focused, one event is sent, and the action the page
    returns for it is the result. dir is read for NK_UI_EV_NAV. */
+/* Focuses `id` on Settings > Enhanced, then sends a step (`dir`) and a tab move (`tab_dir`)
+   in one frame, as a press of Left or Right and a shoulder arriving together (audit
+   2026-11-17, F-2e253594). */
+static PlayerUiAction enhanced_send_step_and_tab(FlowCase which, NkUiId id, NkUiNavDir dir,
+                                                 NkUiNavDir tab_dir) {
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    NkUiViewport viewport = launcher_viewport(1280, 1600, 1.0f);
+    NkUiScale scale = nk_ui_scale_for_viewport(&viewport);
+    NkUiEvent event;
+    NkUi *ui;
+    PlayerUiAction result = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    if (ui == NULL) return result;
+    nk_ui_set_viewport(ui, &viewport);
+    g_flow_width = scale.logical_w;
+    g_flow_height = scale.logical_h;
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)draw_flow_case(ui, which);
+        (void)nk_ui_end(ui);
+        if (frame == 0) nk_ui_focus(ui, id);
+    }
+    memset(&event, 0, sizeof(event));
+    event.type = NK_UI_EV_NAV;
+    event.dir = dir;
+    event.down = true;
+    nk_ui_push_event(ui, &event);
+    memset(&event, 0, sizeof(event));
+    event.type = NK_UI_EV_TAB;
+    event.dir = tab_dir;
+    event.down = true;
+    nk_ui_push_event(ui, &event);
+    nk_ui_begin(ui, 0.0);
+    result = draw_flow_case(ui, which);
+    (void)nk_ui_end(ui);
+    g_flow_width = 1280.0f;
+    g_flow_height = 800.0f;
+    nk_ui_destroy(ui);
+    return result;
+}
+
 static PlayerUiAction enhanced_send(FlowCase which, NkUiId id, NkUiEventType type,
                                     NkUiNavDir dir) {
     NkUiConfig config;
@@ -4102,10 +4150,24 @@ static void test_settings_pages(void) {
         g_enhanced_focus_id = 0u;
         g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
     }
+    g_enhanced_tab_chosen = -1;
     CHECK(activate_flow_button(ENHANCED_TEST_TAB_ID(PLAYER_UI_ENHANCED_GROUP_MOTION),
-                               FLOW_SETTINGS_ACE).primary ==
-              (PlayerUiPrimaryAction)PLAYER_UI_SETTINGS_SELECT_ENHANCED_TAB,
+                               FLOW_SETTINGS_ACE).kind == PLAYER_UI_ACTION_NONE &&
+              g_enhanced_tab_chosen == PLAYER_UI_ENHANCED_GROUP_MOTION,
           "a category tab is a focusable control that selects its tab");
+    /* Audit 2026-11-17, F-2e253594: a step on Graphics preset and a shoulder in one frame are
+       both kept; the tab choice no longer takes the frame's one action. */
+    {
+        PlayerUiAction both;
+        g_enhanced_tab_chosen = -1;
+        both = enhanced_send_step_and_tab(FLOW_SETTINGS_ACE, PLAYER_UI_ID_SETTINGS_PRESET,
+                                          NK_UI_DIR_RIGHT, NK_UI_DIR_RIGHT);
+        CHECK(settings_op_is(both, PLAYER_UI_SETTINGS_CYCLE_PRESET) && both.choice_index > 0,
+              "Right on Graphics preset with a shoulder in the same frame still steps it");
+        CHECK(g_enhanced_tab_chosen == PLAYER_UI_ENHANCED_GROUP_MOTION,
+              "and the shoulder still moves to the next tab");
+        g_enhanced_tab_chosen = -1;
+    }
     /* The two rows by name, each read from the row that owns the value (review of #2644: a
        "16x" found anywhere on the page proved nothing about Texture filtering). */
     CHECK(enhanced_row_shows(FLOW_SETTINGS_ACE_OFF, PLAYER_UI_ID_SETTINGS_ACE_MODE, -1,

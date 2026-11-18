@@ -308,6 +308,8 @@ typedef struct {
     const char *const *labels;  /* the row's word for each value: "16x", "On", "Off" */
     const char *const *words;   /* the SR_ACE and settings.json word for each value */
     int fresh;                  /* the value a new settings file starts with */
+    bool ace_only;              /* acts only in Ace: a game's page tags its row "Ace only" and
+                                   dims it outside Ace */
 } PlayerEnhancedPartInfo;
 
 /* The library's choice. The parts' values are kept while the default is Authentic. */
