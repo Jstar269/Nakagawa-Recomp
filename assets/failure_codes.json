@@ -135,6 +135,13 @@
         "player"
       ]
     },
+    "DISC_IMAGE_IMPORT_BUSY": {
+      "stage": "inspect",
+      "in": [
+        "disc",
+        "player"
+      ]
+    },
     "DISC_IMAGE_INDEX_INVALID": {
       "stage": "inspect",
       "in": [

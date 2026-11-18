@@ -1097,6 +1097,26 @@ int nk_font_own_font_count(const char *user_data_root, const char *project_root)
     return own;
 }
 
+static void font_append_text(char *out, size_t out_len, const char *text);
+
+/* Remove every staged slot and Latin index file an import may have left in the cache. */
+static void font_remove_staged(const char *cache_dir) {
+    for (int slot = 0; slot < NK_FONT_SLOT_COUNT; slot++) {
+        char target[NK_MAX_PATH * 2];
+        char staged[NK_MAX_PATH * 2];
+        font_join(target, sizeof(target), cache_dir, kSlotFile[slot]);
+        font_staging_name(staged, sizeof(staged), target);
+        if (staged[0] != '\0') nk_remove_utf8(staged);
+    }
+    for (int index = 0; index < NK_FONT_LATIN_INDEX_COUNT; index++) {
+        char target[NK_MAX_PATH * 2];
+        char staged[NK_MAX_PATH * 2];
+        font_join(target, sizeof(target), cache_dir, kLatinIndexFile[index]);
+        font_staging_name(staged, sizeof(staged), target);
+        if (staged[0] != '\0') nk_remove_utf8(staged);
+    }
+}
+
 bool nk_font_import_folder(const char *user_data_root, const char *folder,
                            const char *const choose[NK_FONT_SLOT_COUNT],
                            NkFontImportResult *result, char *out_error, size_t error_len) {
@@ -1328,69 +1348,68 @@ bool nk_font_import_folder(const char *user_data_root, const char *folder,
             return false;
         }
     }
-    for (int slot = 0; slot < NK_FONT_SLOT_COUNT; slot++) {
-        char target[NK_MAX_PATH * 2];
-        char staged[NK_MAX_PATH * 2];
-        if (selected[slot] < 0) continue;
-        font_join(target, sizeof(target), cache_dir, kSlotFile[slot]);
-        font_staging_name(staged, sizeof(staged), target);
-        if (nk_rename_utf8(staged, target) != 0) {
-            nk_remove_utf8(staged);
-            for (int i = 0; i < NK_FONT_LATIN_INDEX_COUNT; i++) {
-                char target_path[NK_MAX_PATH * 2];
-                char left[NK_MAX_PATH * 2];
-                font_join(target_path, sizeof(target_path), cache_dir, kLatinIndexFile[i]);
-                font_staging_name(left, sizeof(left), target_path);
-                nk_remove_utf8(left);
+    /* Commit: each staged file is renamed over its target and recorded in the manifest as it
+       lands. A rename that fails (a target another program holds open) stops the commit, but the
+       files already renamed hold their new bytes, so the manifest is still written for them:
+       left as it was, it would name the old bytes and the whole cache would read as invalid.
+       Every staged file that was not committed is removed. */
+    {
+        const char *commit_error = NULL;
+        bool manifest_written;
+        for (int slot = 0; slot < NK_FONT_SLOT_COUNT && !commit_error; slot++) {
+            char target[NK_MAX_PATH * 2];
+            char staged[NK_MAX_PATH * 2];
+            if (selected[slot] < 0) continue;
+            font_join(target, sizeof(target), cache_dir, kSlotFile[slot]);
+            font_staging_name(staged, sizeof(staged), target);
+            if (nk_rename_utf8(staged, target) != 0) {
+                commit_error = "the font could not be committed to the cache";
+                break;
             }
-            font_copy_text(out_error, error_len, "the font could not be committed to the cache");
-            for (int s = 0; s < NK_FONT_SLOT_COUNT; s++) free(bytes_for_slot[s]);
+            manifest.present[slot] = true;
+            manifest.size[slot] = inspections[selected[slot]].size;
+            snprintf(manifest.sha256[slot], sizeof(manifest.sha256[slot]), "%s", inspections[selected[slot]].sha256);
+            result->slot_imported[slot] = true;
+            result->imported_count++;
+            result->files[selected[slot]].imported = true;
+            snprintf(result->files[selected[slot]].detail, sizeof(result->files[selected[slot]].detail),
+                     "imported as the %s font", kSlotRole[slot]);
+        }
+        for (int index = 0; index < NK_FONT_LATIN_INDEX_COUNT && !commit_error; index++) {
+            char target[NK_MAX_PATH * 2];
+            char staged[NK_MAX_PATH * 2];
+            if (latin_selected[index] < 0) continue;
+            font_join(target, sizeof(target), cache_dir, kLatinIndexFile[index]);
+            font_staging_name(staged, sizeof(staged), target);
+            if (nk_rename_utf8(staged, target) != 0) {
+                commit_error = "the indexed Latin font could not be committed to the cache";
+                break;
+            }
+            manifest.latin_index_present[index] = true;
+            manifest.latin_index_size[index] = inspections[latin_selected[index]].size;
+            snprintf(manifest.latin_index_sha256[index], sizeof(manifest.latin_index_sha256[index]),
+                     "%s", inspections[latin_selected[index]].sha256);
+            result->latin_index_imported[index] = true;
+            result->imported_count++;
+            result->files[latin_selected[index]].imported = true;
+            snprintf(result->files[latin_selected[index]].detail,
+                     sizeof(result->files[latin_selected[index]].detail),
+                     "imported as Latin index %d", index + 1);
+        }
+        for (int s = 0; s < NK_FONT_SLOT_COUNT; s++) free(bytes_for_slot[s]);
+        if (commit_error) font_remove_staged(cache_dir);
+        manifest_written = result->imported_count == 0 || font_write_manifest(cache_dir, &manifest);
+        if (commit_error) {
+            font_copy_text(out_error, error_len, commit_error);
+            if (!manifest_written) {
+                font_append_text(out_error, error_len, ", and the font manifest could not be written");
+            }
             return false;
         }
-        manifest.present[slot] = true;
-        manifest.size[slot] = inspections[selected[slot]].size;
-        snprintf(manifest.sha256[slot], sizeof(manifest.sha256[slot]), "%s", inspections[selected[slot]].sha256);
-        result->slot_imported[slot] = true;
-        result->imported_count++;
-        result->files[selected[slot]].imported = true;
-        snprintf(result->files[selected[slot]].detail, sizeof(result->files[selected[slot]].detail),
-                 "imported as the %s font", kSlotRole[slot]);
-    }
-    for (int index = 0; index < NK_FONT_LATIN_INDEX_COUNT; index++) {
-        char target[NK_MAX_PATH * 2];
-        char staged[NK_MAX_PATH * 2];
-        if (latin_selected[index] < 0) continue;
-        font_join(target, sizeof(target), cache_dir, kLatinIndexFile[index]);
-        font_staging_name(staged, sizeof(staged), target);
-        if (nk_rename_utf8(staged, target) != 0) {
-            nk_remove_utf8(staged);
-            for (int i = index + 1; i < NK_FONT_LATIN_INDEX_COUNT; i++) {
-                char target_path[NK_MAX_PATH * 2];
-                char left[NK_MAX_PATH * 2];
-                font_join(target_path, sizeof(target_path), cache_dir, kLatinIndexFile[i]);
-                font_staging_name(left, sizeof(left), target_path);
-                nk_remove_utf8(left);
-            }
-            font_copy_text(out_error, error_len,
-                           "the indexed Latin font could not be committed to the cache");
-            for (int s = 0; s < NK_FONT_SLOT_COUNT; s++) free(bytes_for_slot[s]);
+        if (!manifest_written) {
+            font_copy_text(out_error, error_len, "the font manifest could not be written");
             return false;
         }
-        manifest.latin_index_present[index] = true;
-        manifest.latin_index_size[index] = inspections[latin_selected[index]].size;
-        snprintf(manifest.latin_index_sha256[index], sizeof(manifest.latin_index_sha256[index]),
-                 "%s", inspections[latin_selected[index]].sha256);
-        result->latin_index_imported[index] = true;
-        result->imported_count++;
-        result->files[latin_selected[index]].imported = true;
-        snprintf(result->files[latin_selected[index]].detail,
-                 sizeof(result->files[latin_selected[index]].detail),
-                 "imported as Latin index %d", index + 1);
-    }
-    for (int s = 0; s < NK_FONT_SLOT_COUNT; s++) free(bytes_for_slot[s]);
-    if (result->imported_count > 0 && !font_write_manifest(cache_dir, &manifest)) {
-        font_copy_text(out_error, error_len, "the font manifest could not be written");
-        return false;
     }
     return true;
 }

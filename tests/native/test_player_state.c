@@ -15242,6 +15242,33 @@ int main(int argc, char **argv) {
             assert(nk_font_check_cache(font_root, msg, sizeof(msg)) == NK_FONT_STATUS_MISSING);
         }
 
+        /* 14j: the Latin file's target is blocked, so the commit stops after the Japanese file is
+           renamed into place. The manifest still names the Japanese file it now holds (the cache
+           stays valid and serves it), and the Korean file staged for the same import is not left
+           behind. */
+        {
+            char blocker[NATIVE_TEST_PATH_MAX + 32];
+            snprintf(path, sizeof(path), "%s%cfonts%cv2%cnkltn.pgf", font_root, sep, sep, sep);
+            assert(nk_platform_mkdir_p(path));
+            snprintf(blocker, sizeof(blocker), "%s%cblock.txt", path, sep);
+            write_text_file(blocker, "a directory is not replaced by a rename");
+            memset(&result, 0, sizeof(result));
+            assert(!nk_font_import_folder(font_root, source_dir, no_choice, &result, err, sizeof(err)));
+            assert(strstr(err, "could not be committed") != NULL);
+            assert(result.slot_imported[NK_FONT_SLOT_JAPANESE]);
+            assert(!result.slot_imported[NK_FONT_SLOT_LATIN]);
+            assert(!result.slot_imported[NK_FONT_SLOT_KOREAN]);
+            assert(nk_font_check_cache(font_root, msg, sizeof(msg)) == NK_FONT_STATUS_OK);
+            nk_font_slot_states(font_root, font_root, states);
+            assert(states[NK_FONT_SLOT_JAPANESE].source == NK_FONT_SOURCE_USER);
+            snprintf(path, sizeof(path), "%s%cfonts%cv2%cnkkr.pgf.tmp", font_root, sep, sep, sep);
+            assert(!nk_platform_file_exists(path));
+            snprintf(path, sizeof(path), "%s%cfonts%cv2%cnkltn.pgf", font_root, sep, sep, sep);
+            assert(test_remove_tree(path));
+            assert(nk_font_remove_imports(font_root, remove_all, err, sizeof(err)) == 1);
+            assert(nk_font_check_cache(font_root, msg, sizeof(msg)) == NK_FONT_STATUS_MISSING);
+        }
+
         /* A corrupt manifest is INVALID, and the preflight names the issue (#313). */
         snprintf(path, sizeof(path), "%s%cfonts%cv2", font_root, sep, sep);
         assert(nk_platform_mkdir_p(path));

@@ -755,11 +755,15 @@ A PSN release of a UMD game (an `EBOOT.PBP` whose `DATA.PSAR` is an NPUMDIMG dis
 
 The player also takes a compressed disc image: a `.cso` (CISO, versions 1 and 2), a `.zso` (ZISO) or a `.chd`
 made with `chdman createdvd`. It expands the image once, when you add it, into a plain `.iso` at
-`<user data>/discs/<DISC_ID>/<DISC_ID>.<cso|zso|chd>.iso`, and every later step reads that `.iso` exactly as it
-reads one you added yourself. This needs free space for the whole `.iso` (up to 1.8 GB for a UMD) beside the
-compressed file, which you can keep or move. The expansion runs on a background worker with progress and cancel;
-it is written beside its final name, its size is checked, and then it is renamed into place, so a cancelled or
-failed expansion leaves nothing behind. Adding the same unchanged file again reuses the expansion. The library
+`<user data>/discs/<DISC_ID>/<DISC_ID>.<fingerprint>.<cso|zso|chd>.iso`, and every later step reads that `.iso`
+exactly as it reads one you added yourself. The fingerprint (16 hexadecimal digits) names the compressed file, so
+two different images of one disc, such as a retail dump and a fan translation, keep two expansions. This needs
+free space for the whole `.iso` (up to 1.8 GB for a UMD) beside the compressed file, which you can keep or move.
+The expansion runs on a background worker with progress and cancel; it is written beside its final name, its size
+is checked, and then it is renamed into place, so a cancelled or failed expansion leaves nothing behind. A CHD
+whose header records the SHA-1 of its data (every `chdman` image does) is checked against it, and a mismatch stops
+the import as damaged. Adding the same unchanged file again reuses the expansion; adding the same file from a
+second window or tool while the first is still expanding it is refused as `DISC_IMAGE_IMPORT_BUSY`. The library
 keeps the expanded `.iso` for the build and shows the file you picked.
 
 A file it can't use stops with a named result: `DISC_IMAGE_TRUNCATED`, `DISC_IMAGE_HEADER_INVALID`,
