@@ -23,6 +23,7 @@ import sys
 import struct
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -35,10 +36,14 @@ from import_fixtures import (
     DATA_FILE_OFF,
     INTERLEAVED_NIDS,
     INTERLEAVED_SHAPE,
+    SYSLIB_EXPORT,
+    build_import_elf,
     build_import_layout_elf,
     build_interleaved_import_elf,
+    build_module_elf,
     build_stripped_module_elf,
 )
+import import_audit_gate
 
 PRIMARY = [
     ("SynthAlpha", [0x22000001, 0x22000002, 0x22000003]),
@@ -128,6 +133,76 @@ class CodegenImportCompatibilityTests(unittest.TestCase):
         stubs, _findings = self._parse(bytes(blob))
 
         self.assertEqual(list(stubs.values()), [("SynthAlpha", nid)])
+
+    def test_cli_env_elf_with_space_separated_toml_and_missing_toml_value(self) -> None:
+        blob = build_interleaved_import_elf(INTERLEAVED_SHAPE, INTERLEAVED_NIDS)
+        with tempfile.TemporaryDirectory(prefix="imports-cli-") as tmp:
+            elf_path = Path(tmp) / "fixture.elf"
+            toml_path = Path(tmp) / "out.toml"
+            elf_path.write_bytes(blob)
+            import os
+            with unittest.mock.patch.dict(os.environ, {"GAME_ELF": str(elf_path)}):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    rc = imports.main(["imports.py", "--env-elf", "0x0", "--toml", str(toml_path)])
+                self.assertEqual(rc, 0)
+                self.assertTrue(toml_path.exists())
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    rc_missing = imports.main(["imports.py", "--env-elf", "0x0", "--toml"])
+                self.assertEqual(rc_missing, 2)
+
+
+class MappedSpanContractTests(unittest.TestCase):
+    """Import-table spans are bounded by the image's read contract, not its internals."""
+
+    def test_a_span_past_the_segment_file_image_is_unmapped(self) -> None:
+        blob = build_import_elf(PRIMARY)
+        elf = Elf(blob, base=0)
+        (seg,) = [s for s in elf.segments if s["type"] == 1]
+        end = seg["vaddr"] + seg["filesz"]
+        self.assertGreater(len(blob), seg["off"] + seg["filesz"], "file bytes follow the segment")
+        # read_at_vaddr stops at the segment's file image: it returns the 4 bytes that are mapped,
+        # never the file bytes past the segment, and read_mapped_span refuses the short span.
+        self.assertEqual(len(elf.read_at_vaddr(end - 4, 8)), 4)
+        self.assertIsNone(elf.read_mapped_span(end - 4, 8))
+        self.assertIsNone(imports._read_mapped(elf, end - 4, 8))
+        self.assertEqual(elf.read_mapped_span(end - 8, 8), elf.read_at_vaddr(end - 8, 8))
+        self.assertEqual(imports._read_mapped(elf, end - 8, 8), elf.read_at_vaddr(end - 8, 8))
+        self.assertEqual(elf.read_mapped_span(end, 0), b"")
+
+    def test_an_image_with_only_the_read_contract_is_bounded_by_it(self) -> None:
+        class OneSpanImage:
+            """Serves exactly one span's bytes; no analyze.Elf attributes."""
+
+            def read_at_vaddr(self, address: int, size: int) -> bytes | None:
+                start = address - 0x1000
+                return bytes(range(16))[start:start + size] if 0 <= start and start + size <= 16 else None
+
+        self.assertEqual(imports._read_mapped(OneSpanImage(), 0x1004, 4), bytes((4, 5, 6, 7)))
+        self.assertIsNone(imports._read_mapped(OneSpanImage(), 0x100C, 8))
+
+    def test_an_empty_import_table_at_an_unmapped_address_has_no_windows(self) -> None:
+        # A module that imports nothing may leave libstub == libstubend == 0; rebased to the
+        # load base, that names no mapped byte. The table reads nothing, so it is empty, not
+        # invalid; a non-empty table there is still refused.
+        class ModuleInfoOnlyImage:
+            base = 0x08A00000
+
+            def __init__(self, libstub: int, libstubend: int) -> None:
+                self.info = bytes(44) + struct.pack("<2I", libstub, libstubend)
+
+            def sec(self, name: str) -> dict[str, int] | None:
+                return {"addr": 0x08804000} if name == ".rodata.sceModuleInfo" else None
+
+            def read_at_vaddr(self, address: int, size: int) -> bytes | None:
+                # Only the module-info record is mapped; the rebased 0 is not.
+                start = address - 0x08804000
+                return self.info[start:start + size] if 0 <= start and start + size <= 52 else None
+
+        windows, variable_tables, base = imports._walk_import_windows(ModuleInfoOnlyImage(0, 0))
+        self.assertEqual((windows, variable_tables, base), ([], [], 0x08A00000))
+        with self.assertRaises(imports.ImportTableError) as raised:
+            imports._walk_import_windows(ModuleInfoOnlyImage(0, 0x14))
+        self.assertEqual(raised.exception.code, "ANALYZER_IMPORT_TABLE_INVALID")
 
 
 class RetailImportLayoutTests(unittest.TestCase):
@@ -498,6 +573,24 @@ class AuditAnalyzerParityTests(unittest.TestCase):
         }
         for label, case in cases.items():
             self.assertParity(case, accepted=False, label=label)
+
+    def test_all_malformed_fixtures_are_refused_by_both(self) -> None:
+        libs = [("LibOne", [0x11111111, 0x22222222])]
+        for corrupt in import_audit_gate.MALFORMED_FIXTURES:
+            if corrupt == "sectionless_bad_paddr":
+                continue  # covered by test_module_info_scan_fallback_is_analyzer_only
+            for sectionless in (False, True):
+                blob = build_import_elf(libs, corrupt=corrupt, sectionless=sectionless)
+                self.assertParity(
+                    blob, accepted=False,
+                    label=f"malformed={corrupt}, sectionless={sectionless}",
+                )
+
+    def test_unterminated_export_library_name_raises_import_table_error(self) -> None:
+        blob = build_module_elf([SYSLIB_EXPORT, ("A" * 1100, 0x4001, [0x51000001], [])])
+        elf = Elf(blob, base=0)
+        with self.assertRaises(imports.ImportTableError):
+            imports.function_exports(elf, {})
 
     def test_variable_imports_map_the_same_functions_in_both(self) -> None:
         # The interleaved builder emits a variable-only entry (numVars 1, six words)

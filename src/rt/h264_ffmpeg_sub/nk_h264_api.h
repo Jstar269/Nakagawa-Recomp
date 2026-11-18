@@ -5,8 +5,10 @@
  *
  * The runtime backend (src/rt/h264_ffmpeg.c) sees only this header: no FFmpeg type, macro or
  * header leaks out of the subset. The decoder is the unmodified libavcodec H.264 decoder driven
- * through its send/receive packet interface with one thread, low-delay output and generic C DSP
- * code. Access units are Annex-B byte streams. Nothing here touches guest memory.
+ * through its send/receive packet interface with one thread and generic C DSP code. Output order
+ * follows the stream's reorder depth (the SPS num_reorder_frames, or the decoder's heuristics), so
+ * a picture can come out one or more access units after its packet. Access units are Annex-B byte
+ * streams. Nothing here touches guest memory.
  */
 #ifndef NK_H264_API_H
 #define NK_H264_API_H

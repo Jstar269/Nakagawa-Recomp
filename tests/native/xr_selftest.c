@@ -8,6 +8,7 @@
 // producer sees, and the layout maths.
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -43,6 +44,68 @@ static int g_failures;
 #define FAKE_INSTANCE ((XrInstance)(uintptr_t)0x1001)
 #define FAKE_SESSION ((XrSession)(uintptr_t)0x2002)
 #define FAKE_SYSTEM ((XrSystemId)7)
+#define FAKE_PERIOD ((XrTime)11111111)  // 90 Hz, in nanoseconds
+
+// A one-shot gate: one thread opens it, another blocks until it is open. The waiting
+// thread sleeps in the OS; nothing polls.
+typedef struct Gate {
+#ifdef _WIN32
+    HANDLE ev;
+#else
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int open;
+#endif
+} Gate;
+
+static int gate_init(Gate *g) {
+#ifdef _WIN32
+    g->ev = CreateEventA(NULL, TRUE, FALSE, NULL);
+    return g->ev != NULL;
+#else
+    g->open = 0;
+    if (pthread_mutex_init(&g->mu, NULL) != 0) {
+        return 0;
+    }
+    if (pthread_cond_init(&g->cv, NULL) != 0) {
+        pthread_mutex_destroy(&g->mu);
+        return 0;
+    }
+    return 1;
+#endif
+}
+
+static void gate_open(Gate *g) {
+#ifdef _WIN32
+    SetEvent(g->ev);
+#else
+    pthread_mutex_lock(&g->mu);
+    g->open = 1;
+    pthread_cond_broadcast(&g->cv);
+    pthread_mutex_unlock(&g->mu);
+#endif
+}
+
+static void gate_wait(Gate *g) {
+#ifdef _WIN32
+    WaitForSingleObject(g->ev, INFINITE);
+#else
+    pthread_mutex_lock(&g->mu);
+    while (!g->open) {
+        pthread_cond_wait(&g->cv, &g->mu);
+    }
+    pthread_mutex_unlock(&g->mu);
+#endif
+}
+
+static void gate_destroy(Gate *g) {
+#ifdef _WIN32
+    CloseHandle(g->ev);
+#else
+    pthread_cond_destroy(&g->cv);
+    pthread_mutex_destroy(&g->mu);
+#endif
+}
 
 typedef struct Fake {
     // Scripted results.
@@ -67,7 +130,11 @@ typedef struct Fake {
     int n_enum, n_create, n_destroy_instance, n_get_system;
     int n_begin_session, n_end_session, n_destroy_session;
     int n_wait, n_begin_frame, n_end_frame;
-    uint64_t stall;  // grows by a large step in every xrWaitFrame (a long wait)
+    // When set, xrWaitFrame opens wait_entered and then really blocks until wait_release
+    // opens: a runtime that holds the frame loop for as long as the test chooses.
+    Gate *wait_entered;
+    Gate *wait_release;
+    XrTime last_end_display_time;
     uint32_t last_end_layer_count;
     const void *last_end_layers;
     char order[64];  // W, B, E in call order
@@ -244,9 +311,12 @@ static XrResult XRAPI_CALL fake_WaitFrame(XrSession session, const XrFrameWaitIn
                                           XrFrameState *frameState) {
     fk.n_wait++;
     fake_log('W');
-    // A long wait for the next headset frame: the fake does not sleep, it records
-    // that the call "took" a large amount of time.
-    fk.stall += 1000000u;
+    // A long wait for the next headset frame, when the test asks for one: the call
+    // blocks until the test releases it.
+    if (fk.wait_entered != NULL && fk.wait_release != NULL) {
+        gate_open(fk.wait_entered);
+        gate_wait(fk.wait_release);
+    }
     if (session != FAKE_SESSION || frameWaitInfo == NULL || frameWaitInfo->type != XR_TYPE_FRAME_WAIT_INFO ||
         frameState == NULL || frameState->type != XR_TYPE_FRAME_STATE) {
         fk.bad_args++;
@@ -255,8 +325,8 @@ static XrResult XRAPI_CALL fake_WaitFrame(XrSession session, const XrFrameWaitIn
     if (XR_FAILED(fk.wait_result)) {
         return fk.wait_result;
     }
-    frameState->predictedDisplayTime = (XrTime)(fk.n_wait * 11111111);
-    frameState->predictedDisplayPeriod = 11111111;
+    frameState->predictedDisplayTime = (XrTime)fk.n_wait * FAKE_PERIOD;  // 64-bit: no int overflow
+    frameState->predictedDisplayPeriod = FAKE_PERIOD;
     frameState->shouldRender = fk.should_render;
     return XR_SUCCESS;
 }
@@ -277,6 +347,7 @@ static XrResult XRAPI_CALL fake_EndFrame(XrSession session, const XrFrameEndInfo
         fk.bad_args++;
         return XR_ERROR_VALIDATION_FAILURE;
     }
+    fk.last_end_display_time = frameEndInfo->displayTime;
     fk.last_end_layer_count = frameEndInfo->layerCount;
     fk.last_end_layers = frameEndInfo->layers;
     fk.last_end_blend = frameEndInfo->environmentBlendMode;
@@ -821,17 +892,23 @@ static void test_mailbox_producer_never_waits(void) {
 // Two real threads. The producer fills the whole slot with a per-frame pattern and
 // publishes; the consumer acquires and checks that every word of the slot it holds
 // matches the frame id acquire returned, and that frame ids never go backwards. The
-// producer never waits and the consumer stops once it has seen the last frame.
+// producer never waits; after its last publish it sets `done`. The consumer stops at the
+// last frame, or at the first acquire it starts after seeing `done`: that acquire comes
+// after the last publish, so a mailbox that lost the last frame fails the final CHECK
+// instead of spinning forever.
 //
 // NOTE: x86 is strongly ordered, so this test cannot catch a mutant that weakens the
-// acq_rel exchanges in nk_xr_mailbox.c to relaxed here. It is a smoke test on x86 and
-// a strong guard on weakly ordered CPUs (ARM64 builds, Android #360).
+// acq_rel exchanges in nk_xr_mailbox.c to relaxed here. It could catch one on a weakly
+// ordered CPU (ARM64), but no hosted CI job runs xr-selftest on one today: the only
+// ARM64 job builds the Android launcher and runs no native selftest. Until one does, the
+// memory orders rest on review, and this test is a smoke test wherever it runs.
 enum { STRESS_FRAMES = 200000, STRESS_WORDS = 64 };
 
 typedef struct Stress {
     NkXrMailbox mb;
     uint64_t slots[NK_XR_MAILBOX_SLOTS][STRESS_WORDS];
     uint64_t torn, backwards, acquires, distinct, last_seen;
+    atomic_int done;  // set (release) by the producer after its last publish
 } Stress;
 
 static uint64_t stress_word(uint64_t id, int i) {
@@ -846,6 +923,7 @@ static void stress_produce(Stress *s) {
         }
         nk_xr_mailbox_publish(&s->mb, id);
     }
+    atomic_store_explicit(&s->done, 1, memory_order_release);
 }
 
 #ifdef _WIN32
@@ -863,6 +941,7 @@ static void *stress_thread(void *arg) {
 static void test_mailbox_two_threads(void) {
     static Stress s;
     memset(&s, 0, sizeof(s));
+    atomic_init(&s.done, 0);
     nk_xr_mailbox_init(&s.mb);
 #ifdef _WIN32
     HANDLE th = CreateThread(NULL, 0, stress_thread, &s, 0, NULL);
@@ -878,7 +957,9 @@ static void test_mailbox_two_threads(void) {
         return;
     }
 #endif
-    while (s.last_seen != STRESS_FRAMES) {
+    for (int producer_done = 0; !producer_done && s.last_seen != STRESS_FRAMES;) {
+        // Read before the acquire: when it is set, this acquire starts after the last publish.
+        producer_done = atomic_load_explicit(&s.done, memory_order_acquire);
         uint64_t id = 0;
         int slot = nk_xr_mailbox_acquire(&s.mb, &id);
         s.acquires++;
@@ -927,6 +1008,82 @@ static void produce(NkXrMailbox *m, ProducerLog *log, uint64_t *data, uint64_t i
         data[s] = id;
     }
     nk_xr_mailbox_publish(m, id);
+}
+
+// One nk_xr_frame_once pass on its own thread, as the VR frame loop runs it.
+typedef struct FrameLoopPass {
+    const NkXrFns *f;
+    const NkXrRun *run;
+    NkXrMailbox *m;
+    NkXrFrame fr;
+    XrResult r;
+} FrameLoopPass;
+
+static void frame_loop_pass(FrameLoopPass *p) {
+    p->r = nk_xr_frame_once(p->f, FAKE_SESSION, p->run, p->m, &p->fr);
+}
+
+#ifdef _WIN32
+static DWORD WINAPI frame_loop_thread(LPVOID arg) {
+    frame_loop_pass((FrameLoopPass *)arg);
+    return 0;
+}
+#else
+static void *frame_loop_thread(void *arg) {
+    frame_loop_pass((FrameLoopPass *)arg);
+    return NULL;
+}
+#endif
+
+// The frame loop blocks in xrWaitFrame on its own thread while this thread produces
+// `frames` frames after frame 1, which the loop holds. Returns 0 when a thread or gate
+// could not be made (a CHECK has already failed).
+static int decoupled_run(const NkXrFns *f, const NkXrRun *run, NkXrMailbox *m, uint64_t *data, int frames,
+                         int held, ProducerLog *log, int *held_intact, FrameLoopPass *pass) {
+    Gate entered, release;
+    if (!gate_init(&entered)) {
+        CHECK(!"gate");
+        return 0;
+    }
+    if (!gate_init(&release)) {
+        gate_destroy(&entered);
+        CHECK(!"gate");
+        return 0;
+    }
+    memset(pass, 0, sizeof(*pass));
+    pass->f = f;
+    pass->run = run;
+    pass->m = m;
+    fk.wait_entered = &entered;
+    fk.wait_release = &release;
+    int started = 0;
+#ifdef _WIN32
+    HANDLE th = CreateThread(NULL, 0, frame_loop_thread, pass, 0, NULL);
+    started = th != NULL;
+#else
+    pthread_t th;
+    started = pthread_create(&th, NULL, frame_loop_thread, pass) == 0;
+#endif
+    CHECK(started);
+    if (started) {
+        gate_wait(&entered);  // the frame loop is now inside xrWaitFrame, and stays there
+        for (int i = 0; i < frames; i++) {
+            produce(m, log, data, (uint64_t)i + 2u, held);
+        }
+        *held_intact = data[held] == 1;
+        gate_open(&release);
+#ifdef _WIN32
+        WaitForSingleObject(th, INFINITE);
+        CloseHandle(th);
+#else
+        pthread_join(th, NULL);
+#endif
+    }
+    fk.wait_entered = NULL;
+    fk.wait_release = NULL;
+    gate_destroy(&release);
+    gate_destroy(&entered);
+    return started;
 }
 
 static void test_frame_loop(void) {
@@ -985,19 +1142,10 @@ static void test_frame_loop(void) {
     CHECK(nk_xr_frame_once(&f, FAKE_SESSION, &run, &m, &fr) == XR_ERROR_LAYER_INVALID);
     CHECK(strcmp(fk.order, "WBE") == 0);
 
-    // Decoupling. The producer publishes 1000 frames. In run A nobody runs the frame
-    // loop. In run B the frame loop runs every 10 frames and every xrWaitFrame stalls
-    // (the fake records a long wait). The producer makes the same number of calls and
-    // is never refused a slot, never gets the consumer's slot, and the stalls only show
-    // up in the fake's own counter.
+    // Interleaved: the producer publishes 1000 frames and the frame loop runs every 10.
+    // The producer is never refused a slot and never gets the slot the loop holds, and
+    // each pass shows the frame published just before it.
     enum { FRAMES = 1000, EVERY = 10 };
-    ProducerLog a = {0, 0};
-    nk_xr_mailbox_init(&m);
-    for (uint64_t i = 1; i <= FRAMES; i++) {
-        produce(&m, &a, data, i, -1);
-    }
-    CHECK(a.calls == FRAMES && a.bad == 0);
-
     fake_reset();
     ProducerLog b = {0, 0};
     int consumer_slot = -1;
@@ -1013,11 +1161,45 @@ static void test_frame_loop(void) {
             consumer_slot = fr.slot;
         }
     }
-    CHECK(b.calls == a.calls && b.bad == 0);
+    CHECK(b.bad == 0);
     CHECK(loop_passes == FRAMES / EVERY && loop_ok);
-    CHECK(fk.n_wait == FRAMES / EVERY && fk.stall == (uint64_t)(FRAMES / EVERY) * 1000000u);
-    CHECK(fk.n_begin_frame == fk.n_wait && fk.n_end_frame == fk.n_wait);
+    CHECK(fk.n_wait == FRAMES / EVERY && fk.n_begin_frame == fk.n_wait && fk.n_end_frame == fk.n_wait);
     CHECK(fk.bad_args == 0);
+
+    // Decoupled: the loop holds frame 1, then runs on its own thread and its xrWaitFrame
+    // really blocks. While it is blocked the producer, on this thread, publishes 1000
+    // more frames: every publish completes, none is refused a slot or handed the slot
+    // the loop holds, and that slot keeps frame 1. Released, the loop shows the newest
+    // frame published during its wait, not a frame it took before waiting.
+    fake_reset();
+    nk_xr_mailbox_init(&m);
+    ProducerLog c = {0, 0};
+    produce(&m, &c, data, 1, -1);
+    CHECK(nk_xr_frame_once(&f, FAKE_SESSION, &run, &m, &fr) == XR_SUCCESS && fr.slot >= 0 && fr.frame_id == 1);
+    if (fr.slot >= 0) {
+        const int held = fr.slot;
+        int held_intact = 0;
+        FrameLoopPass pass;
+        if (decoupled_run(&f, &run, &m, data, FRAMES, held, &c, &held_intact, &pass)) {
+            CHECK(c.calls == FRAMES + 1 && c.bad == 0 && held_intact);
+            CHECK(pass.r == XR_SUCCESS && pass.fr.slot >= 0 && pass.fr.frame_id == (uint64_t)FRAMES + 1u &&
+                  data[pass.fr.slot] == (uint64_t)FRAMES + 1u);
+            CHECK(strcmp(fk.order, "WBEWBE") == 0 && fk.bad_args == 0);
+        }
+    }
+
+    // Display times pass through as the runtime predicts them: the frame state's time
+    // reaches the frame and xrEndFrame, past the waits where frame count times period
+    // leaves 32 bits (more than 193).
+    enum { LONG_RUN = 300 };
+    fake_reset();
+    XrResult lr = XR_SUCCESS;
+    for (int i = 0; i < LONG_RUN && lr == XR_SUCCESS; i++) {
+        lr = nk_xr_frame_once(&f, FAKE_SESSION, &run, &m, &fr);
+    }
+    CHECK(lr == XR_SUCCESS && fk.n_wait == LONG_RUN);
+    CHECK(fr.display_time == (XrTime)LONG_RUN * FAKE_PERIOD && fr.display_period == FAKE_PERIOD);
+    CHECK(fk.last_end_display_time == fr.display_time);
 }
 
 // ---------------------------------------------------------------------------

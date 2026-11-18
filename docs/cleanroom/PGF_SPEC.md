@@ -1,4 +1,4 @@
-# Clean-room behaviour specification — runtime PSP PGF reader
+# Behaviour specification — runtime PSP PGF reader
 
 Status: spec — no code in this document. Written under the campaign protocol
 (`../INDEPENDENCE_CAMPAIGN.md` §5) as a **spec-session** output for rewrite unit
@@ -812,11 +812,12 @@ be *bx*, and let *aw* be the addressable width derived from *bpl*. Within each
 intersecting row, the dirty interval has exclusive endpoints
 `max(0,bx)` and `min(aw,bx+ow)`; the early check guarantees it is nonempty.
 This clips only to *aw*, not to *bufWidth*, intentionally permitting
-notification of row padding that received no pixel. Let the addressable-unit
-size in bytes be 1 for formats 0 and 1, and respectively 1, 3, and 4 for
-formats 2–4. The reported row span starts at
-`bufferPtr + y × bpl + floor(start ÷ unit)` and has
-`(ceil(end ÷ unit) − floor(start ÷ unit)) × unit` bytes. A valid request with
+notification of row padding that received no pixel. Let *ppu* be the pixels per
+addressable unit: 2 for formats 0 and 1, and 1 for formats 2–4. Let *unit* be
+the addressable-unit size in bytes: 1 for formats 0–2, 3 for format 3, and 4
+for format 4. The reported row span starts at
+`bufferPtr + y × bpl + floor(start ÷ ppu) × unit` and has
+`(ceil(end ÷ ppu) − floor(start ÷ ppu)) × unit` bytes. A valid request with
 no intersecting vertical rows sends no notification. No notification is sent
 for a failed request. A composite reports each component's spans in component
 order, so one composite can produce up to three sets of row spans; a component
@@ -858,7 +859,7 @@ are the open questions in §7. See
 | Guest font integration | “Guest `libfont.prx` font loading and text layout are in the works.” | #299 |
 | Pairwise kerning | The seam exposes per-glyph advances only; “pairwise kerning is in the works with guest text layout.” | #299 |
 | Composite row-order-3 glyphs | Rendered through the public draw seam from the record's own three-code payload (§§3.6, 3.10), with the overlay rule a named project decision. “Physical-PSP composite placement and combination confirmation is in the works”; a composite whose payload, components, or reference graph is invalid is rejected at open by name. | #521 |
-| Revision and shadow-width extensions | An empty shadow map that declares the documented 16-bit width, and a revision-3 font with no 412-byte extension, are now decoded. The remaining variants stay refused by name: “additional PGF revision/map variants are in the works”, covering the revision-3 subcharmap reference semantics and any non-16 shadow-map width. | [#521](https://github.com/Jstar269/nakagawa-recomp/issues/521) |
+| Revision and shadow-width extensions | The first revision-3 subcharmap index is decoded per §3.2, the second table is skipped (O-20), and an empty shadow map that declares the documented 16-bit width and a revision-3 font with no 412-byte extension are decoded. The remaining variants stay refused by name: “additional PGF revision/map variants are in the works”, covering any non-16 shadow-map width. | [#521](https://github.com/Jstar269/nakagawa-recomp/issues/521) |
 | Shadow drawing | This seam reports shadow identity/row state but exposes no shadow-image draw call; “shadow-image drawing is in the works with guest font integration.” | #299 |
 | Per-open reason reporting | The current open API returns only null; “named PGF rejection diagnostics are in the works.” §3.7 fixes the semantic classes meanwhile. | #349 |
 | Metric hardware confirmation | Source-owned tests establish this contract; “physical-PSP PGF metric confirmation is in the works.” | #349 |
@@ -870,7 +871,7 @@ adjustment fields are decoded because the ABI exposes them, but vertical
 typesetting remains the consumer's responsibility. The reader never modifies
 the input image, consults a title name, or chooses a different file after open.
 
-## 5. Clean-room implementation constraints
+## 5. Independence constraints
 
 - The implementation session receives only the §0 allow-list, this
   specification, and the public citations needed to interpret it. It must not

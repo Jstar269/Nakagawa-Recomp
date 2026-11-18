@@ -43,7 +43,7 @@ class PurityGateTests(unittest.TestCase):
             self.assertTrue(entry.path.startswith("src/rt/"), entry)
             self.assertGreater(len(entry.reason), 20, entry)
             self.assertGreater(entry.count, 0, entry)
-            self.assertTrue(purity_gate.USER_RAM_FIRST <= entry.value <= purity_gate.USER_RAM_LAST, entry)
+            self.assertTrue(purity_gate.in_user_ram(entry.value), entry)
 
     def test_game_address_in_core_fails(self):
         self.write("src/rt/hle.c", "static const uint32_t k = 0x0891A2B4u;\n")
@@ -57,6 +57,19 @@ class PurityGateTests(unittest.TestCase):
                                  "e = 0x88000000; f = 0x8800000;\n")
         values = sorted(int(m.split("literal 0x", 1)[1][:8], 16) for m in purity_gate.scan(self.root, ()))
         self.assertEqual(values, [0x08800000, 0x08800000, 0x09FFFFFF])
+
+    def test_uncached_and_kernel_mirrors_of_user_ram_fail(self):
+        """0x48A12340 and 0x88A12340 name the same byte as 0x08A12340; the gate read only the last."""
+        self.write("src/rt/hle.c", "a = 0x48A12340u; b = 0x88A12340u; c = 0xA8A12340u;\n"
+                                   "d = 0xC8A12340u; e = 0x48000000u; f = 0x1408A12340ull;\n")
+        values = sorted(int(m.split("literal 0x", 1)[1][:8], 16) for m in purity_gate.scan(self.root, ()))
+        self.assertEqual(values, [0x48A12340, 0x88A12340, 0xA8A12340])
+
+    def test_spirv_blobs_are_checked_against_the_cached_range_only(self):
+        self.write("src/rt/gpu_sdl3vk/shader.inc", "{0x496e6f69,0x08a12340}\n")
+        messages = purity_gate.scan(self.root, ())
+        self.assertEqual(len(messages), 1)
+        self.assertIn("0x08a12340", messages[0])
 
     def test_subdirectories_and_headers_are_scanned(self):
         self.write("src/rt/gpu_sdl3vk/x.h", "#define BASE 0x09000000u\n")
@@ -77,8 +90,20 @@ class PurityGateTests(unittest.TestCase):
         body = "uint32_t a = 0x08A00000u;\n"
         self.write("src/rt/title_config.c", body)
         self.write("src/rt/title_config.h", body)
-        self.write("tests/native/sched_selftest.c", body)
+        self.write("src/rt/sched_selftest.c", body)
+        self.write("src/rt/sched_selftest.h", body)
+        self.write("src/rt/nid_names.h", body)
         self.assertEqual(purity_gate.scan(self.root, ()), [])
+
+    def test_selftest_exemption_is_only_the_selftest_name(self):
+        """A file that merely starts like a self-test is scanned; a nested self-test is exempt."""
+        body = "uint32_t a = 0x08A00000u;\n"
+        self.write("src/rt/sched_selftest_helper.c", body)
+        self.write("src/rt/sched_selftest.inc", body)
+        self.write("src/rt/sub/x_selftest.c", body)
+        messages = purity_gate.scan(self.root, ())
+        self.assertEqual(sorted(m.split(":", 1)[0] for m in messages),
+                         ["src/rt/sched_selftest.inc", "src/rt/sched_selftest_helper.c"])
 
     def test_registered_nids_are_not_addresses(self):
         self.write("src/rt/nid_names.h", "    {0x092968f4u, \"sceKernelCpuSuspendIntr\"},\n")

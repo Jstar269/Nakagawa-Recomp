@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 import unittest
 from unittest import mock
@@ -1255,32 +1256,67 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
             encoding="utf-8",
             newline="\n",
         )
-        exe = self.root / "analyzer_mutation_harness.exe"
         assert CC is not None
-        compiled = subprocess.run(
+
+        def build_harness(generated_c: Path, label: str) -> Path:
+            exe = self.root / f"analyzer_mutation_harness_{label}.exe"
+            compiled = subprocess.run(
+                [
+                    CC, "-std=c11", "-O0", "-fno-strict-aliasing", "-Wall", "-Wextra",
+                    "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
+                    "-I", str(self.root), "-I", str(ROOT / "src" / "rt"),
+                    "-I", str(ROOT / "tests" / "native"),
+                    str(harness), str(generated_c),
+                    str(generated_c.with_name(f"{generated_c.stem}_0.c")),
+                    str(ROOT / "src" / "rt" / "guest_interp.c"),
+                    str(ROOT / "src" / "rt" / "perf.c"),
+                    str(ROOT / "src" / "rt" / "sr_coro.c"),
+                    str(ROOT / "src" / "rt" / "cpu_lle.c"),
+                    str(ROOT / "src" / "rt" / "domain_mode.c"),
+                    str(ROOT / "src" / "rt" / "stale_code.c"),
+                    str(ROOT / "src" / "rt" / "title_config.c"),
+                    str(ROOT / "src" / "rt" / "vfpu_tables.c"),
+                    "-lm", "-o", str(exe),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+            return exe
+
+        # Control: the same harness over the unmutated analyzer's output
+        # registers 0x1010, so exit 17 below can only come from the mutation.
+        control_dir = self.root / "control_output"
+        control_dir.mkdir()
+        control_c = control_dir / "control.c"
+        control_generated = subprocess.run(
             [
-                CC, "-std=c11", "-O0", "-fno-strict-aliasing", "-Wall", "-Wextra",
-                "-DSR_SDL3VK", "-D_CRT_SECURE_NO_WARNINGS",
-                "-I", str(self.root), "-I", str(ROOT / "src" / "rt"), "-I", str(ROOT / "tests" / "native"),
-                str(harness), str(out_c), str(out_dir / "mutant_0.c"),
-                str(ROOT / "src" / "rt" / "guest_interp.c"),
-                str(ROOT / "src" / "rt" / "perf.c"),
-                str(ROOT / "src" / "rt" / "sr_coro.c"),
-                str(ROOT / "src" / "rt" / "cpu_lle.c"),
-                str(ROOT / "src" / "rt" / "domain_mode.c"),
-                str(ROOT / "src" / "rt" / "stale_code.c"),
-                str(ROOT / "src" / "rt" / "title_config.c"),
-                str(ROOT / "src" / "rt" / "vfpu_tables.c"),
-                "-lm", "-o", str(exe),
+                sys.executable, str(TOOLS / "codegen.py"),
+                str(elf_path), str(control_c), "--base=0", "--profile=none",
+                "--funcs-per-chunk=2000",
             ],
             cwd=ROOT,
+            env=self._clean_env(),
             capture_output=True,
             text=True,
             check=False,
         )
-        self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+        self.assertEqual(
+            control_generated.returncode, 0,
+            control_generated.stdout + control_generated.stderr,
+        )
+        control_run = subprocess.run(
+            [str(build_harness(control_c, "control"))],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(control_run.returncode, 0, control_run.stdout + control_run.stderr)
+        self.assertNotIn("ANALYZER_MUTANT_DROPPED_CALL_TARGET", control_run.stderr)
+
         mutated_run = subprocess.run(
-            [str(exe)], cwd=ROOT, capture_output=True, text=True, check=False
+            [str(build_harness(out_c, "mutant"))],
+            cwd=ROOT, capture_output=True, text=True, check=False,
         )
         self.assertEqual(mutated_run.returncode, 17, mutated_run.stdout + mutated_run.stderr)
         self.assertIn("ANALYZER_MUTANT_DROPPED_CALL_TARGET", mutated_run.stderr)
@@ -1675,10 +1711,8 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         findings = analyze.canonical_cfg_gate(report)
         self.assertTrue(any(item["code"] == "executable-coverage-gap" for item in findings))
 
-    def test_codegen_cli_scans_only_the_ranges_it_was_given(self) -> None:
-        # codegen reports the ranges it actually scanned, which is the externally
-        # visible statement of what the analyzer decided. Without a span it must be
-        # the segment alone; with one, exactly the segment plus that span.
+    def test_codegen_cli_accepts_explicit_ranges_without_debug_dump(self) -> None:
+        # The analyzer applies the supplied span, but never dumps its internal range list.
         out_c = self.root / "scan.c"
         argv = [
             sys.executable, str(TOOLS / "codegen.py"), str(self.elf), str(out_c),
@@ -1688,20 +1722,13 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
             argv, cwd=ROOT, env=self._clean_env(), capture_output=True, text=True, check=False,
         )
         self.assertEqual(bare.returncode, 0, bare.stdout + bare.stderr)
-        self.assertIn(
-            f"SCANNING RANGES: [({PRIMARY_BASE}, {PRIMARY_BASE + 8})]",
-            bare.stdout + bare.stderr,
-        )
+        self.assertNotIn("SCANNING RANGES", bare.stdout + bare.stderr)
         spanned = subprocess.run(
             argv + [f"--extra-span={FOREIGN_SPAN_TEXT}"],
             cwd=ROOT, env=self._clean_env(), capture_output=True, text=True, check=False,
         )
         self.assertEqual(spanned.returncode, 0, spanned.stdout + spanned.stderr)
-        self.assertIn(
-            f"SCANNING RANGES: [({PRIMARY_BASE}, {PRIMARY_BASE + 8}), "
-            f"({FOREIGN_SPAN[0]}, {FOREIGN_SPAN[1]})]",
-            spanned.stdout + spanned.stderr,
-        )
+        self.assertNotIn("SCANNING RANGES", spanned.stdout + spanned.stderr)
 
     def test_codegen_primary_span_does_not_reach_a_rebased_extra_module(self) -> None:
         # The manager exports the span across the make spawn. codegen must apply it to
@@ -1770,8 +1797,11 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
     def test_paths_with_spaces_and_shell_metacharacters_are_not_interpreted(self) -> None:
         # codegen receives paths as argv entries, never through a shell. A directory
         # whose name contains spaces and shell metacharacters must be treated as a
-        # literal path, and no part of it may be executed.
-        hostile = self.root / "a dir; echo pwned & $(id) `id`"
+        # literal path, and no part of it may be executed. Every metacharacter form
+        # below would create the marker file if a shell ever ran the path.
+        marker = "NK_PWNED_MARKER"
+        hostile = self.root / f"a dir; touch {marker} & $(touch {marker}) `touch {marker}`"
+        self.assertFalse((ROOT / marker).exists())
         hostile.mkdir()
         elf = hostile / "in put.elf"
         write_elf(elf)
@@ -1789,7 +1819,8 @@ class AnalyzerSpanScopeTests(unittest.TestCase):
         # literal path back: nothing was word-split, expanded, or executed.
         self.assertTrue(out_c.is_file())
         self.assertIn(str(out_c), proc.stdout)
-        self.assertFalse(any(self.root.glob("uid=*")))
+        for directory in (self.root, hostile, ROOT, ROOT / "tools"):
+            self.assertFalse((directory / marker).exists(), directory)
 
     # --- deterministic byte-budget chunking ------------------------------
 
@@ -2229,6 +2260,27 @@ def overlapping_segments_elf() -> tuple[bytes, list[tuple[int, int, int, int]]]:
 class ElfLoadSpanTests(unittest.TestCase):
     """read_at_vaddr serves the first PT_LOAD in header order that holds the address on file."""
 
+    def test_bulk_instruction_walk_does_not_join_file_bytes_at_a_segment_boundary(self) -> None:
+        image_bytes, _headers = overlapping_segments_elf()
+        image = analyze.Elf(image_bytes, base=0)
+        start = PRIMARY_BASE + 0x3C
+        ranges = [(start, start + 8)]
+
+        expected = []
+        for address in range(start, start + 8, 4):
+            raw = image.read_at_vaddr(address, 4)
+            if raw is not None and len(raw) == 4:
+                expected.append((address, int.from_bytes(raw, "little")))
+
+        self.assertEqual(list(analyze._iter_code_words(image, ranges)), expected)
+
+    def test_read_clips_to_the_file_segment_end(self) -> None:
+        image_bytes, _headers = overlapping_segments_elf()
+        image = analyze.Elf(image_bytes, base=0)
+        raw = image.read_at_vaddr(PRIMARY_BASE + 0x10E, 4)
+        self.assertIsNotNone(raw)
+        self.assertEqual(len(raw), 2)
+
     def test_reads_match_a_walk_over_the_program_headers(self) -> None:
         image_bytes, headers = overlapping_segments_elf()
         image = analyze.Elf(image_bytes, base=0)
@@ -2236,7 +2288,8 @@ class ElfLoadSpanTests(unittest.TestCase):
         def reference(vaddr: int, n: int):
             for p_type, off, lo, filesz in headers:
                 if p_type == 1 and lo <= vaddr < lo + filesz:
-                    return image_bytes[off + vaddr - lo:off + vaddr - lo + n]
+                    start = off + vaddr - lo
+                    return image_bytes[start:start + min(n, lo + filesz - vaddr)]
             return None
 
         probes: set[int] = set()
@@ -2253,6 +2306,49 @@ class ElfLoadSpanTests(unittest.TestCase):
                          image_bytes[first[1] + 0x20:first[1] + 0x21])
         self.assertIsNone(image.read_at_vaddr(PRIMARY_BASE + 0x110, 4))
 
+
+class ModuleInfoScanBoundaryTests(unittest.TestCase):
+    def test_fallback_scan_checks_the_last_record_ending_at_segment_end(self) -> None:
+        table = bytearray(20)
+        table[8] = 5  # one well-formed five-word import-table record
+        code = bytearray(56)
+        module_info_offset = 4
+        struct.pack_into("<H", code, module_info_offset, 0x1007)
+        code[module_info_offset + 4:module_info_offset + 32] = b"Synthetic\0".ljust(28, b"\0")
+        struct.pack_into("<5I", code, module_info_offset + 32,
+                         0, 0, 0, 0x2000, 0x2014)
+        data = bytes(table + code)
+        segments = [
+            {"type": 1, "off": 0, "vaddr": 0x2000, "filesz": 20, "memsz": 20},
+            {"type": 1, "off": 20, "vaddr": 0x1000, "filesz": 56, "memsz": 56},
+        ]
+
+        result = analyze._scan_module_info(segments, data, data[20:])
+
+        self.assertEqual(result, (4, 0, 0, 0x2000, 0x2014))
+
+
+class FuncSymbolEntrySizeTests(unittest.TestCase):
+    def elf_with_symtab(self, entsize: int, size: int = 16):
+        blob, _addresses = _sectioned_exec([
+            (".text", 6, _words(0x03E00008, 0)),
+            (".symtab", 0, bytes(16)),
+            (".strtab", 0, b"\0symbol\0"),
+        ])
+        blob = bytearray(blob)
+        shoff = struct.unpack_from("<I", blob, 32)[0]
+        symtab_header = shoff + 2 * 40
+        struct.pack_into("<I", blob, symtab_header + 4, 2)  # SHT_SYMTAB
+        struct.pack_into("<I", blob, symtab_header + 20, size)
+        struct.pack_into("<I", blob, symtab_header + 24, 3)  # .strtab
+        struct.pack_into("<I", blob, symtab_header + 36, entsize)
+        return analyze.Elf(bytes(blob), base=0)
+
+    def test_malformed_symbol_entry_sizes_are_ignored_without_crashing(self) -> None:
+        for entsize, size in ((0, 16), (8, 16), (16, 17)):
+            with self.subTest(entsize=entsize, size=size):
+                self.assertIsNone(self.elf_with_symtab(entsize, size).func_symbols())
+
     def test_in_ranges_matches_any_over_random_range_lists(self) -> None:
         rng = random.Random(1296)
         for _ in range(500):
@@ -2261,6 +2357,19 @@ class ElfLoadSpanTests(unittest.TestCase):
             for addr in range(-2, 122):
                 self.assertEqual(analyze.in_ranges(addr, ranges),
                                  any(lo <= addr < hi for lo, hi in ranges))
+
+
+class LastWordSeedSweepTests(unittest.TestCase):
+    def test_prologue_sweep_checks_the_last_file_word(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "last-word.elf"
+            write_elf(path, load_addr=PRIMARY_BASE, words=(0x27BDFFE0,))
+            elf = analyze.Elf(str(path), base=0)
+        state = SimpleNamespace(elf=elf, ranges=analyze.exec_ranges(elf), shadow=frozenset(), noisy=set())
+
+        analyze._seed_prologues_and_terminators(state)
+
+        self.assertIn(PRIMARY_BASE, state.noisy)
 
 
 def _sectioned_exec(sections, *, base=0x08804000, gap=b""):

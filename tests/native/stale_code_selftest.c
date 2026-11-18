@@ -10,7 +10,7 @@
 // sr_stale_block_is_stale() query through a modeled AOT-vs-interpreter tier
 // branch. No title data, no image, no guest input.
 //
-// Two modes, selected by the SR_STALE_DETECT environment gate itself:
+// Two modes, selected by the SR_STALE_DETECT environment variable; the gate must agree:
 //   gate off (unset): register + overwrite + check must stay SILENT (the
 //                     opt-in contract: off by default, off the hot path).
 //   gate on  (=1):    the full matrix below; exit code 0 means every
@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int g_failed = 0;
 
@@ -294,8 +295,24 @@ static void test_forget_range(void) {
     sr_stale_reset();
 }
 
+/* The mode the environment asks for, read here with the gate's documented rule (set, not empty
+ * and not "0" turns it on) and the literal variable name, so the mode is not chosen by the code
+ * under test: a gate reader that never turns on must fail the SR_STALE_DETECT=1 run, not pass
+ * it as a gate-off run. */
+static int expected_gate_on(void) {
+    const char *e = getenv("SR_STALE_DETECT");
+    return e != NULL && e[0] != '\0' && strcmp(e, "0") != 0;
+}
+
 int main(void) {
-    if (!sr_stale_enabled()) {
+    int expected = expected_gate_on();
+    if (sr_stale_enabled() != expected) {
+        fprintf(stderr, "stale_code selftest: FAILED (SR_STALE_DETECT asks for the gate %s, "
+                        "sr_stale_enabled() reads %d)\n",
+                expected ? "on" : "off", sr_stale_enabled());
+        return 1;
+    }
+    if (!expected) {
         test_gate_off_is_silent();
         test_forget_range();
         if (g_failed) {
