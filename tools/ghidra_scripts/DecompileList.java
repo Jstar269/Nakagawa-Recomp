@@ -37,10 +37,9 @@ public class DecompileList extends GhidraScript {
             for (int i = 1; i < args.length; i++) {
                 long a = Long.decode(args[i]);
                 Address addr = toAddr(a);
-                Function f = getFunctionAt(addr);
-                if (f == null) {
-                    f = getFunctionContaining(addr);
-                }
+                // Function bodies never overlap and contain their entry, so
+                // this also returns the function whose entry is addr.
+                Function f = getFunctionContaining(addr);
                 String tag = String.format("0x%08x", a);
                 PrintWriter w = new PrintWriter(new File(outDir, tag + ".c"), "UTF-8");
                 if (f == null) {
