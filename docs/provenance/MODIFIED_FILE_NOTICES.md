@@ -76,6 +76,13 @@ the manifest, required license/notice files, SPDX lines, immediate upstream
 attribution, explicit modification sentences, generated-source presence, and
 the exact notice pointer.
 
+Files split out of inherited ones after this campaign (the `mk/*.mk` build
+files and the runtime and tool files split out later) carry the same sal063
+header without an exact counterpart at the pinned revision. The manifest lists
+them under `lineage_header_files` with the notices they carry, and the gate
+fails for any tracked file whose header names sal063 but is listed neither
+there nor in the inventory.
+
 ## Non-goals
 
 This campaign does not resolve PGF/JPCSP licensing (#98), replacement-font

@@ -109,6 +109,7 @@ from collections.abc import Callable
 import datetime
 import functools
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -144,8 +145,10 @@ PRE_COMMIT_CONFIG = ".pre-commit-config.yaml"
 #: paths before anything is read or pinned (``check_rewriting_hooks``). Nothing from the pull
 #: request runs: its hook definitions and any module it ships are never executed.
 REWRITING_HOOKS = ("trailing-whitespace", "end-of-file-fixer", "mixed-line-ending", "fix-byte-order-marker")
-#: The bytes ``identify`` (pre-commit's file typing) accepts as text; a file whose first 1024
-#: bytes hold any other byte is binary, and the text hooks leave it alone.
+#: The bytes ``identify`` (pre-commit's file typing) accepts as text in its content test. That
+#: test decides only when the file name gives no ``text`` or ``binary`` tag: a ``.txt`` file is
+#: text, and the text hooks rewrite it, whatever its first 1024 bytes hold
+#: (``hook_file_is_text``).
 _TEXT_BYTES = bytes(sorted({7, 8, 9, 10, 11, 12, 13, 27} | set(range(0x20, 0x100)) - {0x7F}))
 #: The exclusion of a hook that is declared without one.
 _NO_EXCLUSION = re.compile(r"(?!)")
@@ -343,15 +346,55 @@ def rewriting_hook_exclusions(config: str) -> tuple[re.Pattern[str] | None, dict
     return top, hooks
 
 
-def rewriting_hook_findings(data: bytes) -> dict[str, str]:
-    """What each ``REWRITING_HOOKS`` hook would change in ``data``, by hook (empty: nothing).
+def _identify_filename_tags(path: str) -> set[str] | None:
+    """``identify.identify.tags_from_filename(path)``, or ``None`` when ``identify`` is not installed.
+
+    ``identify`` is the pre-commit dependency that types files for the hooks (CI pins it with
+    pre-commit). It is the operator's installed package, never anything from the pull request.
+    """
+    try:
+        module = importlib.import_module("identify.identify")
+    except ImportError:
+        return None
+    tags: set[str] = set(module.tags_from_filename(PurePosixPath(path).name))
+    return tags
+
+
+def hook_file_is_text(path: str, data: bytes) -> bool:
+    """Whether pre-commit types ``path`` (with blob ``data``) as text, so the ``types: [text]`` hooks run on it.
+
+    As ``identify.tags_from_path`` does: the tags from the file name first (``.txt``, ``.c`` and
+    ``.json`` are text, ``.png`` is binary), and the content test on the first 1024 bytes only
+    when the name gives neither. Without ``identify`` installed a text-looking file is checked
+    as text, which can only refuse more, and a binary-looking one is refused by name
+    (``ADMIT_HOOKS_TYPING_UNAVAILABLE``): its name could still make the hooks rewrite it.
+    """
+    looks_text = not data[:1024].translate(None, _TEXT_BYTES)
+    tags = _identify_filename_tags(path)
+    if tags is None:
+        if looks_text:
+            return True
+        raise AdmitError(
+            "ADMIT_HOOKS_TYPING_UNAVAILABLE",
+            f"{path} looks binary, but pre-commit types files by name first and `identify` (the "
+            "pre-commit dependency that does it) is not installed; install pre-commit, then admit",
+        )
+    if "text" in tags:
+        return True
+    if "binary" in tags:
+        return False
+    return looks_text
+
+
+def rewriting_hook_findings(data: bytes, path: str) -> dict[str, str]:
+    """What each ``REWRITING_HOOKS`` hook would change in ``data`` at ``path``, by hook (empty: nothing).
 
     The same rules as the pinned pre-commit-hooks: trailing whitespace (``bytes.rstrip()``
     before each line ending), exactly one line ending at the end of a non-empty file, LF
     line endings only (``.gitattributes`` stores text as LF), and no UTF-8 byte-order mark.
-    A binary file, as ``identify`` would type it, is left alone.
+    A file pre-commit types as binary (``hook_file_is_text``) is left alone.
     """
-    if data[:1024].translate(None, _TEXT_BYTES):
+    if not hook_file_is_text(path, data):
         return {}
     found: dict[str, str] = {}
     for number, line in enumerate(data.split(b"\n"), 1):
@@ -378,9 +421,11 @@ def rewriting_hook_findings(data: bytes) -> dict[str, str]:
 def check_rewriting_hooks(pr: Path, base: str, head: str, paths: list[str]) -> list[str]:
     """Refuse unless the byte-rewriting hooks would leave every committed path unchanged.
 
-    The four ``REWRITING_HOOKS`` rules run in pure Python on each path's blob at ``head``,
-    honouring the exclusions in the trusted ``base``'s ``.pre-commit-config.yaml`` (top-level
-    and per hook; none when the base has no configuration). Nothing is checked out and nothing
+    The ``REWRITING_HOOKS`` rules run in pure Python on each path's blob at ``head``, honouring
+    the trusted ``base``'s ``.pre-commit-config.yaml``: only the hooks it declares, with their
+    exclusions (top-level and per hook), plus the LF rule for a path the base's
+    ``.gitattributes`` stores as text. When the base has no configuration, all four rules apply
+    with no exclusion. Nothing is checked out and nothing
     from the pull request is executed: a candidate ``.pre-commit-config.yaml``, a planted
     ``pre_commit`` module or a redefined local hook has no effect. Returns the hooks checked.
     """
@@ -405,20 +450,27 @@ def check_rewriting_hooks(pr: Path, base: str, head: str, paths: list[str]) -> l
     for path in paths:
         if top is not None and top.search(path):
             continue
-        findings = rewriting_hook_findings(_git(pr, "cat-file", "blob", f"{head}:{path}"))
+        findings = rewriting_hook_findings(_git(pr, "cat-file", "blob", f"{head}:{path}"), path)
         for hook, problem in findings.items():
             if hook in excluded and excluded[hook].search(path):
                 continue
             if hook == "mixed-line-ending" and hook not in excluded and path in verbatim:
                 continue
+            # A hook the trusted configuration does not declare never runs. CRLF in a text path
+            # stays refused without one: Git's text normalization rewrites those bytes itself.
+            if config and hook not in excluded:
+                if hook != "mixed-line-ending":
+                    continue
+                problems.append(f"{path}: {problem} (Git text normalization; convert it to LF)")
+                continue
             problems.append(f"{path}: {problem} ({hook})")
     if problems:
         raise AdmitError(
             "ADMIT_HOOKS_WOULD_REWRITE",
-            "the next commit's pre-commit hooks would rewrite these committed files, so an admission "
-            "now would not survive it:\n  " + "\n  ".join(problems) + "\nFix them on the pull request "
-            f"branch (its author can run `python -m pre_commit run --files {' '.join(paths)}`), "
-            "commit, then admit",
+            "the next commit's pre-commit hooks or Git's line-ending normalization would rewrite these "
+            "committed files, so an admission now would not survive it:\n  " + "\n  ".join(problems)
+            + "\nFix them on the pull request branch (its author can run "
+            f"`python -m pre_commit run --files {' '.join(paths)}`), commit, then admit",
         )
     return list(REWRITING_HOOKS)
 
@@ -902,10 +954,23 @@ def _write_authority_commit(
         relative: (authority_root / relative).read_bytes()
         for relative in records if (authority_root / relative).is_file()
     }
+    private_commit = _text(authority_root, "rev-parse", "HEAD")
     try:
         for relative, raw in sorted(records.items()):
             _write_record(authority_root / relative, raw, created, replace=relative in replaceable)
+        if created:
+            paths = sorted(target.relative_to(authority_root).as_posix() for target in created)
+            _git(authority_root, "add", "--", *paths)
+            private_commit = _commit(authority_root, message, assisted_by, *paths)
     except BaseException:
+        # Nothing was committed (a refused commit-msg hook, signing or identity): unstage and
+        # restore every record, so the next run does not stop at AUTHORITY_DIRTY.
+        if created:
+            try:
+                _git(authority_root, "reset", "-q", "--",
+                     *(target.relative_to(authority_root).as_posix() for target in created))
+            except AdmitError:
+                pass
         for target in created:
             relative = target.relative_to(authority_root).as_posix()
             if relative in originals:
@@ -913,11 +978,6 @@ def _write_authority_commit(
             else:
                 target.unlink(missing_ok=True)
         raise
-    private_commit = _text(authority_root, "rev-parse", "HEAD")
-    if created:
-        paths = sorted(target.relative_to(authority_root).as_posix() for target in created)
-        _git(authority_root, "add", "--", *paths)
-        private_commit = _commit(authority_root, message, assisted_by, *paths)
     pushed = False
     if push:
         _git(authority_root, "push", "-q", "origin", "HEAD:main")
@@ -975,12 +1035,25 @@ def admit(
                 f"{len(plan['paths'])} new path(s) to their origin claims, {bytes_bound} of them also to "
                 "their exact SHA-256 as byte-identical imports."
             ),
-            assisted_by=assisted_by, push=push, replaceable=plan["replaceable"],
+            assisted_by=assisted_by, push=False, replaceable=plan["replaceable"],
         )
     except AdmitError:
         # Nothing was recorded, so the admission branch this run created describes no decision.
         _remove_created_branches([plan])
         raise
+    if push:
+        # The private commit holds the decision now: a failed push keeps the admission branch
+        # and says what is left, as admit_batch does.
+        try:
+            _git(authority_root, "push", "-q", "origin", "HEAD:main")
+        except AdmitError as error:
+            raise AdmitError(
+                "PRIVATE_PUSH_FAILED",
+                f"the private records are committed at {private_commit[:12]} and the admission branch "
+                f"{plan['admit_branch']} is kept, but the push failed ({error}); push with "
+                f'`git -C "{authority_root}" push origin main`, then continue with the remaining steps',
+            ) from None
+        pushed = True
     plan.update(records=record_paths, private_commit=private_commit, pushed=pushed)
     return plan
 
@@ -1149,6 +1222,11 @@ def issue_policy_delta(
     head = _text(repo, "rev-parse", "--verify", "HEAD")
     resolved_base = _text(repo, "rev-parse", "--verify", f"{base}^{{commit}}") if base else \
         _text(repo, "merge-base", "HEAD", "origin/main")
+    # A base the branch does not contain would read paths main admitted since as removed by it.
+    try:
+        _git(repo, "merge-base", "--is-ancestor", resolved_base, head)
+    except AdmitError:
+        raise AdmitError("TRUSTED_BASE_NOT_ANCESTOR", f"base {resolved_base[:12]} is not an ancestor of HEAD") from None
     baseline_policy = _git(repo, "cat-file", "blob", f"{resolved_base}:{POLICY}")
     candidate_policy = _git(repo, "cat-file", "blob", f"{head}:{POLICY}")
     try:
@@ -1593,9 +1671,25 @@ def merge_profile(worktree: Path) -> dict:
     if export_unmerged:
         writes[EXPORT] = _control_export(repo, profile_raw)
     targets = {path: _control_target(repo, path) for path in writes}
-    for path, raw in writes.items():
-        targets[path].write_bytes(raw)
-        _git(repo, "add", "--", path)
+    # Write every control, then stage them in one `git add`: a failed write (a locked file) or
+    # a failed add (a held index.lock) restores the written files and stages nothing.
+    originals = {path: target.read_bytes() for path, target in targets.items() if target.is_file()}
+    written: list[str] = []
+    try:
+        for path, raw in writes.items():
+            written.append(path)
+            targets[path].write_bytes(raw)
+        _git(repo, "add", "--", *writes)
+    except BaseException:
+        for path in written:
+            try:
+                if path in originals:
+                    targets[path].write_bytes(originals[path])
+                else:
+                    targets[path].unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
     for path, key in ((POLICY, "profile"), (LEDGER, "ledger"), (EXPORT, "export")):
         result[key] = targets.get(path)
     return result

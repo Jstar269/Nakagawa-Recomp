@@ -712,9 +712,14 @@ python tools/admit_paths.py <pr-worktree> <path> [<path> ...] --approval-basis "
 It first checks each path's blob at `HEAD` against the rules of the byte-rewriting pre-commit hooks:
 trailing whitespace, exactly one final line ending, LF line endings, and no UTF-8 byte-order mark. The check is
 pure Python and runs nothing from the pull request. It never runs `pre-commit`, a hook the pull request defines,
-or a module it ships. The exclusions come from the trusted base's `.pre-commit-config.yaml` (top-level and per
-hook); none apply when the base has none. The line-ending rule also skips a file that the base's
-`.gitattributes` marks `-text`. If a hook would change a byte, it refuses with `ADMIT_HOOKS_WOULD_REWRITE` and
+or a module it ships. The rules and their exclusions come from the trusted base's `.pre-commit-config.yaml`: only
+the hooks it declares apply, with their exclusions (top-level and per hook). CRLF in a text path is refused even
+without `mixed-line-ending`, because Git's text normalization rewrites those bytes; when the base has no
+configuration, all four rules apply with no exclusion. The line-ending rule skips a file that the base's
+`.gitattributes` marks `-text`. A file is typed as pre-commit types it: by its name first (a `.txt` file is text
+whatever its first bytes hold), by its content only when the name says neither. That takes the installed
+`identify` package (a pre-commit dependency); without it, a file whose content looks binary is refused by name
+(`ADMIT_HOOKS_TYPING_UNAVAILABLE`). If a hook would change a byte, it refuses with `ADMIT_HOOKS_WOULD_REWRITE` and
 names each path and rule. Fix them on the pull request branch first, so the next commit cannot reshape what was
 just admitted. A base configuration this reader cannot parse is refused (`ADMIT_HOOKS_CONFIG_INVALID`). Then it
 reads each path's committed bytes

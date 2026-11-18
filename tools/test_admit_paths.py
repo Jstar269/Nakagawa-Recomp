@@ -20,7 +20,7 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import subprocess
@@ -349,6 +349,45 @@ class AdmitPathsTest(unittest.TestCase):
         self.assertTrue(result["pushed"])
         self.assertEqual(fixture.remote_main(), result["private_commit"])
         self.assertNotIn("push origin main", " ".join(admit_paths.remaining_steps(result)))
+
+    def test_a_refused_private_commit_leaves_the_authority_clean(self) -> None:
+        """A commit-msg hook that refuses the private commit leaves nothing written or staged (audit F-54c608e5)."""
+        fixture = _Fixture(self)
+        fixture.add("docs/new-page.md", "# New page\n")
+        hooks = fixture.tmp / "refusing-hooks"
+        hooks.mkdir()
+        hook = hooks / "commit-msg"
+        hook.write_text("#!/bin/sh\necho 'refused by the test hook' >&2\nexit 1\n", encoding="utf-8", newline="\n")
+        os.chmod(hook, 0o755)
+        git(fixture.authority, "config", "core.hooksPath", hooks.as_posix())
+        before = git(fixture.authority, "rev-parse", "HEAD")
+        with self.assertRaises(AdmitError) as caught:
+            fixture.admit("docs/new-page.md")
+        self.assertEqual(caught.exception.code, "GIT_ERROR")
+        self.assertEqual(git(fixture.authority, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(fixture.authority, "status", "--porcelain", "--untracked-files=all"), "",
+                         "no record is left written or staged")
+        self.assertEqual(git(fixture.pr, "branch", "--list", "admit/*"), "")
+
+        git(fixture.authority, "config", "--unset", "core.hooksPath")
+        result = fixture.admit("docs/new-page.md")
+        self.assertNotEqual(result["private_commit"], before, "the next run is not stopped by AUTHORITY_DIRTY")
+
+    def test_a_failed_push_keeps_the_committed_admission_and_its_branch(self) -> None:
+        """The private commit exists once the push runs, so a push failure removes nothing (audit F-81f277c0)."""
+        fixture = _Fixture(self)
+        fixture.add("docs/new-page.md", "# New page\n")
+        git(fixture.authority, "remote", "set-url", "origin", (fixture.tmp / "missing.git").as_posix())
+        before = git(fixture.authority, "rev-parse", "HEAD")
+        with self.assertRaises(AdmitError) as caught:
+            fixture.admit("docs/new-page.md", push=True)
+        self.assertEqual(caught.exception.code, "PRIVATE_PUSH_FAILED")
+        committed = git(fixture.authority, "rev-parse", "HEAD")
+        self.assertNotEqual(committed, before, "the private records are committed")
+        self.assertIn(committed[:12], str(caught.exception))
+        branches = git(fixture.pr, "branch", "--list", "admit/*")
+        self.assertNotEqual(branches, "", "the admission branch is kept")
+        self.assertIn(branches.strip(" *+"), str(caught.exception))
 
     def test_implementation_path_needs_an_existing_record(self) -> None:
         fixture = _Fixture(self)
@@ -880,6 +919,47 @@ class BatchAdmitPathsTest(unittest.TestCase):
         self.assertEqual(git(ours, "ls-files", "--unmerged"), unmerged_before)
         git(ours, "merge", "--abort")
 
+    def test_merge_profile_stages_nothing_when_a_later_write_fails(self) -> None:
+        """A failed ledger write (a locked file) leaves the profile unmerged and unwritten too (audit F-4a576128)."""
+        fixture = _Fixture(self)
+        git(fixture.pr, "checkout", "-q", "main")
+        write(fixture.pr, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(
+            self._claims(("docs/guide.md", "reviewed_documentation"))).decode("utf-8"))
+        git(fixture.pr, "add", admit_paths.LEDGER)
+        git(fixture.pr, "commit", "-qm", "a claims ledger on the base")
+        fixture.base = git(fixture.pr, "rev-parse", "HEAD")
+        git(fixture.pr, "update-ref", "refs/remotes/origin/main", fixture.base)
+        sides = {}
+        for side in ("ours", "theirs"):
+            worktree = sides[side] = fixture.worktree(f"ledger-{side}")
+            fixture.add_pr_path(worktree, f"docs/{side}.md", f"# {side}\n")
+            write(worktree, admit_paths.LEDGER, admit_paths.provenance_ledger.claims_ledger_bytes(self._claims(
+                ("docs/guide.md", "reviewed_documentation"), (f"docs/{side}.md", "reviewed_documentation"),
+            )).decode("utf-8"))
+            git(worktree, "add", admit_paths.LEDGER)
+            git(worktree, "commit", "-qm", f"{side} records its page")
+        ours = sides["ours"]
+        subprocess.run(["git", "merge", "--no-commit", "--no-ff", git(sides["theirs"], "rev-parse", "HEAD")],
+                       cwd=ours, env={**os.environ, **GIT_ENV}, capture_output=True, check=False)
+        unmerged_before = git(ours, "ls-files", "--unmerged")
+        self.assertIn(admit_paths.POLICY, unmerged_before)
+        self.assertIn(admit_paths.LEDGER, unmerged_before)
+        profile_before = (ours / admit_paths.POLICY).read_bytes()
+        real_write = Path.write_bytes
+
+        def locked_ledger(path: Path, data: bytes) -> int:
+            if path.name == PurePosixPath(admit_paths.LEDGER).name:
+                raise PermissionError(13, "locked by another process", str(path))
+            return real_write(path, data)
+
+        with mock.patch.object(Path, "write_bytes", locked_ledger), self.assertRaises(PermissionError):
+            admit_paths.merge_profile(ours)
+        self.assertEqual(git(ours, "ls-files", "--unmerged"), unmerged_before, "nothing was staged")
+        self.assertEqual((ours / admit_paths.POLICY).read_bytes(), profile_before, "the profile is restored")
+        admit_paths.merge_profile(ours)
+        self.assertEqual(git(ours, "ls-files", "--unmerged"), "")
+        git(ours, "merge", "--abort")
+
     @staticmethod
     def _ledger_sides(*documents: dict) -> list:
         raws = [(json.dumps(document, indent=2) + "\n").encode("utf-8") for document in documents]
@@ -1207,6 +1287,21 @@ class PolicyDeltaIssueTest(unittest.TestCase):
         self.assertEqual(path.stem, hashlib.sha256(provenance_ledger.policy_delta_v3_bytes(selector)).hexdigest(),
                          "a V4 delta is named after its selector")
         return path, document
+
+    def test_an_explicit_base_must_be_an_ancestor(self) -> None:
+        """A base the branch has not merged would read main's new paths as removed (audit F-af8a5e9b)."""
+        fixture = _Fixture(self)
+        self._commit_profile(fixture, lambda policy: policy["include_paths"].remove("docs/guide.md"))
+        git(fixture.pr, "checkout", "-q", "main")
+        fixture.add("docs/other.md", "# Elsewhere\n")
+        unrelated = git(fixture.pr, "rev-parse", "HEAD")
+        git(fixture.pr, "checkout", "-q", "docs/new-pages-20261022")
+        before = git(fixture.authority, "rev-parse", "HEAD")
+        with self.assertRaises(AdmitError) as caught:
+            self._issue(fixture, base=unrelated)
+        self.assertEqual(caught.exception.code, "TRUSTED_BASE_NOT_ANCESTOR")
+        self.assertEqual(git(fixture.authority, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(fixture.authority, "status", "--porcelain"), "")
 
     def test_rule_change_issues_a_v4_delta_the_gate_reads(self) -> None:
         fixture = _Fixture(self)
@@ -1838,7 +1933,12 @@ class HookCheckTest(unittest.TestCase):
         self.assertEqual(statement["sha256"], digest)
 
     def test_each_rule_matches_the_hook_it_stands_for(self) -> None:
-        findings = admit_paths.rewriting_hook_findings
+        # identify gives a name without an extension no tag, so its content test decides.
+        self.enterContext(mock.patch.object(admit_paths, "_identify_filename_tags", return_value=set()))
+
+        def findings(data: bytes) -> dict[str, str]:
+            return admit_paths.rewriting_hook_findings(data, "notes")
+
         self.assertEqual(findings(b""), {})
         self.assertEqual(findings(b"clean\ntext\n"), {})
         self.assertEqual(set(findings(b"a \nb\n")), {"trailing-whitespace"})
@@ -1850,6 +1950,51 @@ class HookCheckTest(unittest.TestCase):
         self.assertEqual(set(findings(b"a\rb\n")), {"mixed-line-ending"})
         self.assertEqual(set(findings(b"\xef\xbb\xbfa\n")), {"fix-byte-order-marker"})
         self.assertEqual(findings(b"\x00\x01binary \r\n\n\n"), {}, "binary files are left alone, as identify types them")
+
+    @unittest.skipUnless(admit_paths._identify_filename_tags("x.txt") is not None, "identify is not installed")
+    def test_the_file_name_types_a_file_before_its_content_as_identify_does(self) -> None:
+        """A ``.txt`` file with a NUL is text to pre-commit, so the text hooks rewrite it (audit F-1dbfd4f7)."""
+        findings = admit_paths.rewriting_hook_findings
+        self.assertEqual(set(findings(b"\x00 data \nno end", "tests/fixtures/sample.txt")),
+                         {"trailing-whitespace", "end-of-file-fixer"})
+        self.assertEqual(findings(b"text only \n", "assets/logo.png"), {}, "a .png is binary by name")
+        self.assertEqual(findings(b"\x00 data \n", "assets/table.bin2"), {}, "no tag from the name: content decides")
+        repo, base, head = self._repo({"README": b"base\n"}, {"tests/fixtures/sample.txt": b"\x00head \n"})
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.check_rewriting_hooks(repo, base, head, ["tests/fixtures/sample.txt"])
+        self.assertEqual(caught.exception.code, "ADMIT_HOOKS_WOULD_REWRITE")
+        self.assertIn("tests/fixtures/sample.txt: trailing whitespace on line 1", str(caught.exception))
+
+    def test_without_identify_a_binary_looking_file_is_refused_by_name(self) -> None:
+        self.enterContext(mock.patch.object(admit_paths, "_identify_filename_tags", return_value=None))
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.rewriting_hook_findings(b"\x00 data \n", "tests/fixtures/sample.txt")
+        self.assertEqual(caught.exception.code, "ADMIT_HOOKS_TYPING_UNAVAILABLE")
+        self.assertIn("tests/fixtures/sample.txt", str(caught.exception))
+        self.assertEqual(set(admit_paths.rewriting_hook_findings(b"text \n", "assets/logo.png")),
+                         {"trailing-whitespace"}, "a text-looking file is checked as text")
+
+    def test_hooks_the_trusted_base_does_not_declare_are_not_applied(self) -> None:
+        """No configured hook removes a byte-order mark; CRLF in a text path stays refused (audit F-f76b74f6)."""
+        declared = (
+            b"repos:\n  - repo: https://github.com/pre-commit/pre-commit-hooks\n    rev: v6.0.0\n    hooks:\n"
+            b"      - id: trailing-whitespace\n      - id: end-of-file-fixer\n"
+        )
+        head_files = {"docs/bom.md": b"\xef\xbb\xbf# Imported\n", "docs/crlf.md": b"a\r\nb\r\n"}
+        repo, base, head = self._repo({admit_paths.PRE_COMMIT_CONFIG: declared}, head_files)
+        admit_paths.check_rewriting_hooks(repo, base, head, ["docs/bom.md"])
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.check_rewriting_hooks(repo, base, head, ["docs/crlf.md"])
+        self.assertIn("docs/crlf.md: CRLF", str(caught.exception))
+        self.assertIn("(Git text normalization; convert it to LF)", str(caught.exception),
+                      "no configured hook is named for a rewrite no hook makes (audit F-b51af626)")
+
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="nakagawa-admit-hooks-test-")))
+        bom_declared = declared + b"      - id: fix-byte-order-marker\n"
+        repo, base, head = self._repo({admit_paths.PRE_COMMIT_CONFIG: bom_declared}, head_files)
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.check_rewriting_hooks(repo, base, head, ["docs/bom.md"])
+        self.assertIn("docs/bom.md: a UTF-8 byte-order mark (fix-byte-order-marker)", str(caught.exception))
 
     def test_exclusions_come_from_the_trusted_base_not_the_pull_request(self) -> None:
         base_config = (
@@ -1952,7 +2097,7 @@ class HookCheckTest(unittest.TestCase):
         self.assertFalse(hooks["trailing-whitespace"].search("tests/fixtures/fonts/gudea/PIN.json"))
         self.assertFalse(hooks["trailing-whitespace"].search("fixtures/fonts/gudea/OFL.txt"))
         data = (ROOT / "tests" / "fixtures" / "fonts" / "gudea" / "OFL.txt").read_bytes()
-        self.assertIn("trailing-whitespace", admit_paths.rewriting_hook_findings(data),
+        self.assertIn("trailing-whitespace", admit_paths.rewriting_hook_findings(data, "tests/fixtures/fonts/gudea/OFL.txt"),
                       "the exclusion is only needed while the text has trailing whitespace")
 
     def test_no_rewriting_hook_exclusion_names_a_path_the_top_level_exclusion_already_removes(self) -> None:
