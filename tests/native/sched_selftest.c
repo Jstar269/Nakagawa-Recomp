@@ -878,6 +878,16 @@ static void test_rotate_ready_queue_moves_head_behind_peers(void) {
 
     /* A queue with no ready thread, and no caller at all, are successful no-ops. */
     expect(sched_rotate_thread_ready_queue(99) == 0u, "rotating an empty priority succeeds");
+    /* A named priority outside the user range is refused (PSP-THREAD-003 thread-rotate-range).
+     * MUTANT: drop the range check in sched_rotate_thread_ready_queue -- 0xff answers 0. */
+    expect(sched_rotate_thread_ready_queue(0xff) == SCE_KERNEL_ERROR_ILLEGAL_PRIORITY,
+           "PSP-THREAD-003 thread-rotate-range: RotateThreadReadyQueue(0xff) answers 0x80020193");
+    expect(sched_rotate_thread_ready_queue(-1) == SCE_KERNEL_ERROR_ILLEGAL_PRIORITY &&
+               sched_rotate_thread_ready_queue(7) == SCE_KERNEL_ERROR_ILLEGAL_PRIORITY &&
+               sched_rotate_thread_ready_queue(0x78) == SCE_KERNEL_ERROR_ILLEGAL_PRIORITY,
+           "RotateThreadReadyQueue refuses -1, 7 and 0x78 as thread creation does");
+    expect(sched_rotate_thread_ready_queue(8) == 0u && sched_rotate_thread_ready_queue(0x77) == 0u,
+           "RotateThreadReadyQueue accepts the user range's ends");
     s_cur = -1;
     expect(sched_rotate_thread_ready_queue(0) == 0u, "priority 0 with no calling thread is a no-op");
 
@@ -2004,6 +2014,17 @@ static void test_module_start_thread_uses_declared_parameters(void) {
            "with no module record the module-start thread keeps priority 32 and the 256 KiB stack");
 }
 
+/* A module record whose start thread cannot be created (a stack no free range holds) stops the
+ * run by name before any thread runs.
+ * MUTANT: drop the t0 check in sched_run -- the NULL TCB is written and the selftest crashes. */
+static void test_module_start_thread_create_failure_stops_by_name(void) {
+    sched_set_module_start_thread(32, 0x10000000u, 0u, NULL, 0u);   /* 256 MiB */
+    run_module_start_thread();
+    expect(g_mst_done == 0 && s_ntcb == 0 && s_cur == -1,
+           "a module-start thread that cannot be created stops the run with no thread");
+    sched_set_module_start_thread(32, 0u, 0u, NULL, 0u);
+}
+
 static void test_preempt_timer_hands_cpu_to_stronger_due_thread(void) {
     expect(preempt_timer_run(16) == PT_DUE_AT_YIELD,
            "a stronger thread whose delay ran out runs at the weak thread's next yield point");
@@ -2751,6 +2772,80 @@ static void test_stack_exhaustion_fails_create(void) {
     uint32_t ok = sched_create_thread(0x2000u, 32, 0x4000u);
     expect(ok != 0, "a fitting request still succeeds after a failed one");
     expect(s_stack_top < top0, "successful create consumes arena");
+}
+
+/* A thread that exited inside an HLE call (sr_hle_call raises g_hle_depth) and is started again
+ * begins its new body inside no call: its saved HLE depth, runtime phase and execution tier are
+ * the creation values, not the ones its exit left.
+ * MUTANT: drop the hle_depth reset in sched_start_thread's restart block -- the restarted body
+ *   runs with g_hle_depth 1. */
+enum { RH_ROOT = 0x09380000u, RH_WORKER = 0x09380100u };
+static int g_rh_runs, g_rh_done, g_rh_depth_at_entry;
+static int g_rh_saved_depth, g_rh_saved_phase, g_rh_saved_tier;
+static void restart_hle_depth_body(CpuState *s) {
+    (void)s;
+    if (s_tcb[s_cur].entry == RH_WORKER) {
+        if (g_rh_runs++ == 0) {
+            g_hle_depth = 1;                    /* inside a late-import call */
+            sr_rt_phase = SR_RT_PHASE_SYSCALL;
+            sr_exec_tier = 1;
+            sched_exit_current(0);
+            return;
+        }
+        g_rh_depth_at_entry = g_hle_depth;
+        return;
+    }
+    uint32_t worker = sched_create_thread(RH_WORKER, 20, 0);
+    sched_start_thread(worker, 0, 0);
+    sched_delay_current(100u);                  /* the stronger worker runs and exits */
+    expect(sched_start_thread(worker, 0, 0) == 0u, "restart: the exited worker starts again");
+    const TCB *t = tcb_by_uid(worker);
+    g_rh_saved_depth = t ? t->hle_depth : -1;
+    g_rh_saved_phase = t ? t->rt_phase : -1;
+    g_rh_saved_tier = t ? t->exec_tier : -1;
+    sched_delay_current(100u);                  /* the restarted worker runs */
+    g_rh_done = 1;
+}
+static int restart_hle_depth_stop(void) { return g_rh_done; }
+
+static void test_restart_resets_the_saved_call_state(void) {
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    disable_vblank_sources();
+    g_rh_runs = 0;
+    g_rh_done = 0;
+    g_rh_depth_at_entry = -1;
+    g_rh_saved_depth = g_rh_saved_phase = g_rh_saved_tier = -1;
+    g_test_body = restart_hle_depth_body;
+    sr_sched_stop_requested = restart_hle_depth_stop;
+    sched_run(RH_ROOT, 0u, 0u);
+    sr_sched_stop_requested = NULL;
+    s_host_ns_fn = NULL;
+    g_hle_depth = 0;
+    sr_exec_tier = 0;
+    expect(g_rh_runs == 2, "restart: the worker ran twice");
+    expect(g_rh_saved_depth == 0 && g_rh_saved_phase == SR_RT_PHASE_OTHER &&
+               g_rh_saved_tier == SR_EXEC_TIER_NONE,
+           "restart: the saved HLE depth, phase and tier are the creation values");
+    expect(g_rh_depth_at_entry == 0, "restart: the new body runs inside no HLE call");
+}
+
+/* The argument block is copied as scalar loads at argp see it: through the swizzled 0x042 VRAM
+ * view, a block that crosses a 64-byte swizzle block takes its second half from another place in
+ * physical VRAM than a linear copy from the first byte would.
+ * MUTANT: copy with one memmove from SR_HOST(argp) again -- the bytes past 0x04200040 differ. */
+static void test_start_thread_copies_arguments_through_a_vram_mirror(void) {
+    reset_sched();
+    for (uint32_t i = 0; i < 0x4000u; i++) *SR_HOST(0x04000000u + i) = (uint8_t)(i ^ (i >> 8));
+    const uint32_t argp = 0x04200030u, len = 0x20u;
+    uint32_t uid = sched_create_thread(0x2000u, 32, 0x4000u);
+    expect(uid != 0u && sched_start_thread(uid, len, argp) == 0u,
+           "argument copy: the thread starts with a VRAM-mirror argument block");
+    const TCB *t = tcb_by_uid(uid);
+    int same = t && t->argp != 0u && t->arglen == len;
+    for (uint32_t i = 0; same && i < len; i++)
+        same = *SR_HOST(t->argp + i) == *SR_HOST(argp + i);
+    expect(same, "argument copy: the thread's block holds the bytes scalar loads at argp return");
 }
 
 /* The arena's free-range table holds a range per live extent, High blocks included: threads and
@@ -5936,6 +6031,43 @@ static void test_turbo_jump_services_a_vtimer_deadline(void) {
     expect(g_vtj_resumed, "turbo jump: the waiter it released resumes instead of a deadlock stop");
 }
 
+/* sr_yield's turbo jump for a lone runner stops at a GE completion as it does at an alarm, a
+ * VTimer or a transfer: with a sleeper 100 ms out and a list finishing 15 ms out, guest time goes
+ * to the completion, not past it.
+ * MUTANT: leave the GE deadline out of the jump in sr_yield -- the completion is delivered at the
+ *   sleeper's deadline, about 85 ms late. */
+enum { GJ_ROOT = 0x09370000u, GJ_SLEEPER = 0x09370100u, GJ_GE_AHEAD_US = 15000u };
+static int g_gj_done;
+static uint64_t g_gj_from;
+static void ge_yield_jump_body(CpuState *s) {
+    if (s_tcb[s_cur].entry == GJ_SLEEPER) {
+        while (!g_gj_done) sched_delay_current(100000u);
+        return;
+    }
+    uint32_t sleeper = sched_create_thread(GJ_SLEEPER, 20, 0);
+    sched_start_thread(sleeper, 0, 0);
+    sr_yield(s);                                /* the stronger sleeper runs and parks */
+    g_gj_from = s_vtime_us;
+    g_ge_fake_deadline = s_vtime_us + GJ_GE_AHEAD_US;
+    sr_yield(s);                                /* alone: the turbo jump */
+    g_gj_done = 1;
+}
+static int ge_yield_jump_stop(void) { return g_gj_done; }
+
+static void test_turbo_yield_jump_stops_at_a_ge_completion(void) {
+    ge_timing_fixture();                        /* turbo, VBLANK sources off */
+    g_gj_done = 0;
+    g_gj_from = 0;
+    g_test_body = ge_yield_jump_body;
+    sr_sched_stop_requested = ge_yield_jump_stop;
+    sched_run(GJ_ROOT, 0u, 0u);
+    sr_sched_stop_requested = NULL;
+    sched_set_ge_timing_hooks(NULL, NULL);
+    s_host_ns_fn = NULL;
+    expect(g_ge_fake_calls == 1u && g_ge_fake_seen_time == g_gj_from + GJ_GE_AHEAD_US,
+           "turbo jump: a lone runner's yield takes guest time to the GE completion, not past it");
+}
+
 static void test_alarm_table_capacity_and_reset(void) {
     alarm_fixture();
     uint32_t uids[SCHED_ALARM_MAX];
@@ -6845,6 +6977,45 @@ static void test_fast_forward_paces_the_guest_clock(void) {
     g_ace_on = ace_was;
 }
 
+/* The preemption timer compares its deadline with the host clock, so what it is handed is the
+ * host time of the stronger waiter's guest deadline. After a fast-forward span the paced clock
+ * runs ahead of the host clock, and while fast forward is on a paced interval takes a share of
+ * host time.
+ * MUTANT: publish s_clock_epoch_ns + wake_us * 1000 again -- after 10 ms of fast forward the
+ *   deadline is 20 ms of host time late. MUTANT: drop sched_preempt_timer_rearm() from
+ *   pace_set_speed -- at the speed change the deadline keeps its host time at the old speed. */
+static void test_preempt_timer_deadline_is_a_host_time_after_fast_forward(void) {
+    reset_sched();
+    ff_reset();
+    begin_clock_fixture(1, 1000u);
+    disable_vblank_sources();
+    s_preempt_timer_mode = SCHED_PREEMPT_TIMER_MANUAL;
+    s_preempt_timer_at_ns = UINT64_MAX;
+    s_preempt_timer_published = UINT64_MAX;
+    pace_set_speed(SCHED_FAST_FORWARD_SPEED);   /* 10 ms of host time in fast forward */
+    set_host_us(11000u);
+    pace_set_speed(1u);
+    expect(pace_ns() - g_test_host_ns == 10000000ull * (SCHED_FAST_FORWARD_SPEED - 1u),
+           "preempt timer: after the span the paced clock is ahead of the host clock");
+    const int runner = mk(0x3a0u, TH_RUNNING, 32);
+    const int waiter = mk(0x3a1u, TH_WAIT_DELAY, 16);
+    s_cur = runner;
+    s_tcb[waiter].wake = host_us() + 5000u;
+    sched_preempt_timer_arm();
+    expect(s_preempt_timer_at_ns == g_test_host_ns + 5000000u,
+           "preempt timer: a deadline 5 ms of guest time away is 5 ms of host time away");
+    pace_set_speed(SCHED_FAST_FORWARD_SPEED);
+    expect(s_preempt_timer_at_ns == g_test_host_ns + 5000000u / SCHED_FAST_FORWARD_SPEED,
+           "preempt timer: in fast forward the same deadline is re-armed at its share of host time");
+    pace_set_speed(1u);
+    s_preempt_timer_mode = SCHED_PREEMPT_TIMER_OFF;
+    s_preempt_timer_at_ns = UINT64_MAX;
+    s_preempt_timer_published = UINT64_MAX;
+    s_cur = -1;
+    ff_reset();
+    s_host_ns_fn = NULL;
+}
+
 int main(int argc, char **argv) {
     g_self_path = argv[0];
     if (argc > 1 && strcmp(argv[1], "--test-pace-setup") == 0) {
@@ -6925,6 +7096,8 @@ int main(int argc, char **argv) {
     test_root_capture_without_a_historical_default();
     test_uid_zero_is_never_a_role();
     test_stack_exhaustion_fails_create();
+    test_restart_resets_the_saved_call_state();
+    test_start_thread_copies_arguments_through_a_vram_mirror();
     test_stack_floor_and_partition_overlap();
     test_stack_placement_prefers_the_highest_free_block();
     test_arena_range_table_holds_high_blocks_and_stacks();
@@ -6961,9 +7134,11 @@ int main(int argc, char **argv) {
     test_deterministic_clock_environment_is_validated();
     test_stop_raised_in_a_pause_resumes_no_thread();
     test_module_start_thread_uses_declared_parameters();
+    test_module_start_thread_create_failure_stops_by_name();
     test_module_start_thread_is_deleted_on_return();
     test_paced_vtime_is_host_anchored();
     test_fast_forward_paces_the_guest_clock();
+    test_preempt_timer_deadline_is_a_host_time_after_fast_forward();
     test_idle_wait_runs_a_wait_that_came_due();
     test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank();
     test_host_work_runs_off_the_scheduler_thread();
@@ -7015,6 +7190,7 @@ int main(int argc, char **argv) {
     test_ge_timing_completion_is_an_idle_wake_source();
     test_alarm_table_capacity_and_reset();
     test_turbo_jump_services_a_vtimer_deadline();
+    test_turbo_yield_jump_stops_at_a_ge_completion();
 
     /* Player pause: each case maps to the mutation in the reviewed contract. */
     test_pause_s1_frozen_system_time();

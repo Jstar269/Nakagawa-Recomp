@@ -21568,6 +21568,25 @@ static void wcr_waiter_body_evf(void *arg) {
     selftest_park_on_scheduler();
 }
 
+/* A sleeper: SleepThread or SleepThreadCB, which only a wakeup or a release ends. */
+static void wcr_waiter_body_sleep(void *arg) {
+    (void)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    s_wcr_ret = sr_syscall(&cpu, NID_SCE_KERNEL_SLEEP_THREAD);
+    s_wcr_returned = 1;
+    selftest_park_on_scheduler();
+}
+
+static void wcr_waiter_body_sleep_cb(void *arg) {
+    (void)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    s_wcr_ret = sr_syscall(&cpu, NID_CNW_SLEEP_THREAD_CB);
+    s_wcr_returned = 1;
+    selftest_park_on_scheduler();
+}
+
 /* One waiter blocked on `obj` (created through `create_nid`), waiting via
  * `body`. The fixture thread holds the CPU. */
 static TCB *wcr_begin_waiter(void (*body)(void *), uint32_t *obj, uint32_t create_nid) {
@@ -21862,6 +21881,33 @@ static void test_cancel_release_wake_results(void) {
         expect(s_wcr_returned == 1, "ReleaseWaitThread: the released waiter resumed");
         expect(s_wcr_ret == WCR_WAIT_RELEASE,
                "PSP-B3-01: the released waiter receives 0x800201AA");
+        wcr_finish(waiter, s_wcr_obj);
+    }
+
+    /* ---- ReleaseWaitThread on a sleeper: the sleep ends with WAIT_RELEASE ---
+     * MUTANT: leave t->sleeping set in sched_wake_one_object_waiter_with_result -- SleepThreadCB
+     *   blocks again and swallows the release. MUTANT: return 0 from sched_thread_sleep after
+     *   the switch -- SleepThread hides the release result. */
+    for (int cb = 0; cb <= 1; cb++) {
+        waiter = wcr_begin_waiter(cb ? wcr_waiter_body_sleep_cb : wcr_waiter_body_sleep,
+                                  &s_wcr_obj, NID_CNW_CREATE_SEMA);
+        if (!waiter) continue;
+        const char *k = cb ? "SleepThreadCB" : "SleepThread";
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: the %s caller is asleep", k);
+        expect(waiter->state == TH_WAIT_OBJ && waiter->sleeping, msg);
+        uint32_t waiter_uid = waiter->uid;
+        s_cur = (int)(waiter - s_tcb) - 1;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = waiter_uid;
+        snprintf(msg, sizeof msg, "ReleaseWaitThread of a %s caller returns 0", k);
+        expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0u, msg);
+        s_cur = (int)(waiter - s_tcb);
+        waiter->state = TH_RUNNING;
+        sr_coro_switch(waiter->coro);
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: the released %s caller resumes", k);
+        expect(s_wcr_returned == 1, msg);
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: %s returns 0x800201AA and is no longer asleep", k);
+        expect(s_wcr_ret == WCR_WAIT_RELEASE && !waiter->sleeping, msg);
         wcr_finish(waiter, s_wcr_obj);
     }
 
@@ -46055,7 +46101,7 @@ static void check_coroutine_lifecycle(void) {
         extern int s_msgpipe_parks;
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
         char msg[1536];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
@@ -46072,7 +46118,7 @@ static void check_coroutine_lifecycle(void) {
                  "+ 3 event-flag set/cancel waiters "
                  "+ 3 flight thread-snapshot waiters "
                  "+ 6 semaphore service-order waiters + 1 released LwMutex waiter "
-                 "+ 4 unwritable-timeout call bodies "
+                 "+ 4 unwritable-timeout call bodies + 2 released sleepers "
                  "+ %d returned conformance legs + %d mutex legs + %d pool legs + %d mailbox legs "
                  "+ %d Message Pipe waiter/owner legs + %d volatile-memory Lock waiters "
                  "+ %d controller read waiters = %d, observed %lu)",

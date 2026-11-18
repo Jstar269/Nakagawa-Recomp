@@ -339,8 +339,7 @@ static uint32_t h_SleepThread(CpuState *s) {
     }
     if (!sched_current_has_pending_wakeup() && !sched_wait_permitted())
         return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
-    sched_thread_sleep();
-    return 0;
+    return sched_thread_sleep();   /* 0, or WAIT_RELEASE from ReleaseWaitThread */
 }
 static uint32_t h_SleepThreadCB(CpuState *s) {
     (void)s;
@@ -351,8 +350,7 @@ static uint32_t h_SleepThreadCB(CpuState *s) {
     }
     if (!sched_current_has_pending_wakeup() && !sched_wait_permitted())
         return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
-    sched_thread_sleep_cb();
-    return 0;
+    return sched_thread_sleep_cb();   /* 0, or WAIT_RELEASE from ReleaseWaitThread */
 }
 static uint32_t h_WakeupThread(CpuState *s) {
     if (hle_wakelog_on()) { static int n=0; if (n++<8) fprintf(stderr, "WAKEUP target=0x%x (from 0x%x)\n", A0, sched_current_uid()); }

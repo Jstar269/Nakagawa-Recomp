@@ -2898,8 +2898,8 @@ static inline int sr_vcount_window_crossed(uint32_t vcount, uint32_t period,
 }
 void     sched_set_current_cb_wait(int cb_wait);    /* mark running thread as callback-waiting */
 void     sched_wake_callbacks(uint32_t thread_uid); /* wake thread waiting in CB-wait */
-void     sched_thread_sleep(void);                  /* sceKernelSleepThread (wakeup-count) */
-void     sched_thread_sleep_cb(void);               /* sceKernelSleepThreadCB (wakeup-count) */
+uint32_t sched_thread_sleep(void);                  /* sceKernelSleepThread (wakeup-count); 0 or a release result */
+uint32_t sched_thread_sleep_cb(void);               /* sceKernelSleepThreadCB (wakeup-count); 0 or a release result */
 uint32_t sched_thread_wakeup(uint32_t uid);         /* sceKernelWakeupThread (banks if not asleep) */
 uint32_t sched_set_priority(uint32_t uid, int priority);   /* sceKernelChangeThreadPriority */
 uint32_t sched_change_current_thread_attr(uint32_t clear_mask, uint32_t set_mask); /* sceKernelChangeCurrentThreadAttr */
