@@ -16,6 +16,15 @@ Tracks #
 - [ ] No game files, decrypted data, traces, private paths or proprietary assets are in this change.
 - [ ] If this changes the launcher or documentation: it follows [ACCESSIBILITY.md](https://github.com/Jstar269/nakagawa-recomp/blob/main/ACCESSIBILITY.md#contributing-accessibly), or this change does not touch them.
 
+## Scope and status
+
+<!-- One line each; write N/A where a line does not apply. Never paste private data, paths or captures. -->
+
+- Base and head SHAs: <!-- the main commit you branched from, and the head commit you checked -->
+- Scope and uncertainty: <!-- what this covers, what it does not, and what you are unsure of -->
+- Private inputs and PSP hardware: <!-- whether a game or a PSP was used or is needed, and what ran on it -->
+- Blockers: <!-- anything that stops this from landing, or none -->
+
 ## Only if it applies
 
 <!-- Delete what does not apply. Adding a file? A maintainer admits each new path; your PR may show a red

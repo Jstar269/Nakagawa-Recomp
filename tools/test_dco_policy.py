@@ -453,6 +453,34 @@ class TestGovernanceSurfaces(RuleStatementAssertions):
             with self.subTest(path=rel):
                 self.assertTrue((ROOT / rel).is_file(), f"documented gate path missing: {rel}")
 
+    def test_review_cites_the_documentation_gates_where_they_are_listed(self):
+        # AGENTS.md section 9 is a bullet list that points onward, with no table and so no
+        # "docs row"; the documentation gates are the CONTRIBUTING.md full-gates row.
+        agents_section_9 = _section((ROOT / "AGENTS.md").read_text(encoding="utf-8"), 9)
+        self.assertNotRegex(agents_section_9, r"(?m)^\|")
+        review = (ROOT / ".github" / "REVIEW.md").read_text(encoding="utf-8")
+        docs_bullet = next((block for block in _blocks(review) if block.startswith("- Docs:")), "")
+        self.assertNotIn("row of `AGENTS.md` section 9", docs_bullet)
+        self.assertIn("(../CONTRIBUTING.md#the-full-gates)", docs_bullet)
+        self.assertIn("docs and agent policy", docs_bullet)
+        contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        self.assertRegex(contributing, r"(?m)^### The full gates$")
+        self.assertRegex(contributing, r"(?m)^\| docs and agent policy \|")
+
+    def test_pull_request_template_asks_for_what_agents_md_says_it_carries(self):
+        # "What a good pull request looks like": the filled-in template carries the exact base
+        # and head SHAs, scope, uncertainty, private-input and hardware status, and blockers.
+        agents = " ".join((ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
+        self.assertIn(
+            "the exact base and head SHAs, scope, uncertainty, private-input and hardware status, blockers",
+            agents,
+        )
+        template = (ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+        for field in ("- Base and head SHAs:", "- Scope and uncertainty:",
+                      "- Private inputs and PSP hardware:", "- Blockers:"):
+            with self.subTest(field=field):
+                self.assertRegex(template, rf"(?m)^{re.escape(field)}")
+
     def test_single_pull_request_template_is_canonical(self):
         template = ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
         template_dir = ROOT / ".github" / "PULL_REQUEST_TEMPLATE"

@@ -1876,6 +1876,21 @@ class CodeqlWorkflowCategoryTests(unittest.TestCase):
         # The per-run group it replaced would let every superseded head run to a refused upload.
         self.assertNotIn("github.event.workflow_run.id", codeql)
 
+    def test_codeql_main_pushes_and_the_schedule_never_cancel_each_other(self) -> None:
+        """A push to main or the schedule has no wake fields, so it falls through to the last term.
+
+        Keyed on the ref, every main run shared one cancel-in-progress group: a landing during an
+        analysis cancelled the previous main commit's analysis, and the weekly run with it. Only a
+        superseded wake head (or a repeated dispatch for one pull request) may cancel a run.
+        """
+        codeql = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "codeql.yml").read_text(
+            encoding="utf-8")
+        group = next(line.strip() for line in codeql.splitlines() if line.strip().startswith("group: codeql-"))
+        self.assertTrue(
+            group.endswith("|| github.event.inputs.pull_request_number || format('run-{0}', github.run_id) }}"),
+            group)
+        self.assertNotIn("github.ref", group)
+
     def test_codeql_wake_workflow_is_signal_only(self) -> None:
         """codeql-wake.yml emits a signal: no checkout, no secrets, no permissions, no repo code."""
         wake = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "codeql-wake.yml").read_text(

@@ -370,7 +370,9 @@ class PublicCiWiringTests(unittest.TestCase):
         """ge_gpu.c's coherence selftest ran on no hosted job, so a #1481 regression went unseen.
 
         It needs a Vulkan device and a window: the step selects lavapipe and runs under Xvfb as
-        the capture selftest does, and a Make failure (an exit 77 skip included) fails it.
+        the capture selftest does, and a Make failure fails it. An exit 77 from a plain run fails
+        it too, but the recipe itself passes three kinds of SKIP, which the step's comment and
+        docs/CI.md must name rather than promise that every skip fails.
         """
         native_tools = _ci_job_blocks()["native_tools"]
         step_name = "Run GPU coherence selftest on lavapipe"
@@ -379,8 +381,7 @@ class PublicCiWiringTests(unittest.TestCase):
         assert step is not None
         text = "\n".join(step)
         self.assertIn("set -euo pipefail", text)
-        self.assertIn("-name 'lvp_icd*.json'", text)
-        self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
+        self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text)
         self.assertIn('xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11', text)
         # The VRAM viewer identity test (#314) needs the same device and window, so it runs in
         # this step, after the coherence selftest.
@@ -401,6 +402,57 @@ class PublicCiWiringTests(unittest.TestCase):
         )
         docs = (ROOT / "docs" / "CI.md").read_text(encoding="utf-8")
         self.assertIn("`gpu-coherence-selftest`", docs)
+        # The recipe turns these exits 77 into SKIP lines and carries on with status 0.
+        self.assertIn('echo "SKIP gpu-coherence-selftest gpu-timestamps (exit 77', makefile)
+        self.assertIn('echo "SKIP gpu-coherence-selftest twin gpu-timestamps (exit 77', makefile)
+        self.assertIn("ge-first-bad-draw-selftest GE_FBD_SKIP_STATUS=0", makefile)
+        self.assertIn("a device that refuses the interlock prints a SKIP line", makefile)
+        lines = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8").splitlines()
+        at = lines.index(f"      - name: {step_name}")
+        start = at
+        while lines[start - 1].lstrip().startswith("#"):
+            start -= 1
+        comment = " ".join(line.strip().lstrip("#").strip() for line in lines[start:at])
+        flat_docs = " ".join(docs.split())
+        for where, text in (("ci.yml comment", comment), ("docs/CI.md", flat_docs)):
+            with self.subTest(where=where):
+                self.assertNotIn("an exit 77 skip fails the step like the capture selftest's", text)
+                self.assertNotIn("blend cases against the software GE, where an exit 77 skip also fails", text)
+                for named in ("gpu-timestamps", "interlock", "ge-first-bad-draw-selftest"):
+                    self.assertIn(named, text)
+
+    def test_lavapipe_is_found_once_per_job_and_every_vulkan_step_selects_it(self) -> None:
+        """The find / fail-if-missing / export block was pasted into seven steps.
+
+        One setup step per job finds the ICD the apt step installed, fails the job if it is
+        missing and records the path; each Vulkan step exports VK_ICD_FILENAMES from it, so no
+        other step's Vulkan loader sees a changed environment, and an unset value fails the step.
+        """
+        select = "Select the lavapipe Vulkan ICD"
+        blocks = _ci_job_blocks()
+        for job in ("native_tools", "c_coverage"):
+            with self.subTest(job=job):
+                block = blocks[job]
+                self.assertEqual("\n".join(block).count("-name 'lvp_icd*.json'"), 1,
+                                 f"{job} must find the lavapipe ICD in one step")
+                step = _uncommented("\n".join(_ci_step(block, select) or []))
+                self.assertIn("set -euo pipefail", step)
+                self.assertIn(
+                    "lvp_icd=\"$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' "
+                    "-print -quit)\"", step)
+                self.assertIn("mesa-vulkan-drivers did not install a lavapipe ICD", step)
+                self.assertIn('echo "NK_LAVAPIPE_ICD=$lvp_icd" >> "$GITHUB_ENV"', step)
+                self.assertNotIn("if:", step)
+                names = [line.strip()[len("- name: "):] for line in block
+                         if line.startswith("      - name: ")]
+                vulkan = [name for name in names
+                          if "VK_ICD_FILENAMES" in _uncommented("\n".join(_ci_step(block, name) or []))]
+                self.assertTrue(vulkan, f"{job} runs no Vulkan step")
+                for name in vulkan:
+                    text = _uncommented("\n".join(_ci_step(block, name) or []))
+                    self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text, name)
+                    self.assertIn("set -euo pipefail", text, name)
+                    self.assertLess(_ci_step_index(block, select), _ci_step_index(block, name), name)
 
     def test_fsr3_pass_selftest_runs_on_lavapipe_and_a_skip_fails(self) -> None:
         """The FSR 3 passes run under the validation layer on lavapipe; a skip must not pass."""
@@ -410,7 +462,7 @@ class PublicCiWiringTests(unittest.TestCase):
         assert step is not None
         text = "\n".join(step)
         self.assertIn("set -euo pipefail", text)
-        self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
+        self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text)
         self.assertRegex(text, r"(?m)^\s+NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest$")
         self.assertNotIn("continue-on-error", text)
 
@@ -422,7 +474,7 @@ class PublicCiWiringTests(unittest.TestCase):
         assert step is not None
         text = "\n".join(step)
         self.assertIn("set -euo pipefail", text)
-        self.assertIn('export VK_ICD_FILENAMES="$lvp_icd"', text)
+        self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text)
         self.assertRegex(
             text, r'(?m)^\s+NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"$')
         self.assertNotIn("continue-on-error", text)
@@ -1190,6 +1242,7 @@ _NATIVE_EVERY_PART = (
     "Restore the pinned SDL3_ttf install",
     "Install and verify pinned SDL3_ttf and shaping libraries",
     "Install PSPDEV from the checked-in lock",
+    "Select the lavapipe Vulkan ICD",
     "Create build directory",
 )
 # Steps with their own condition: the cache-miss library builds (every part) and the
@@ -2262,6 +2315,7 @@ class CoverageWiringTests(unittest.TestCase):
         "Build pinned SDL3_ttf with vendored FreeType and HarfBuzz",
         "Install and verify pinned SDL3_ttf and shaping libraries",
         "Install PSPDEV from the checked-in lock",
+        "Select the lavapipe Vulkan ICD",
     )
     #: Every native_tools gate is either measured or named here with the reason it is not, so a
     #: gate added later fails this test until it is classified (docs/CI.md, "Coverage").

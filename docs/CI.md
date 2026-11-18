@@ -639,8 +639,10 @@ SDL3 build. `vulkaninfo --summary` selects the lavapipe ICD and must list llvmpi
 terminal present-fault cases each get a fresh process, because the renderer must not reuse a
 device after a terminal failure; an exit 77 skip fails the gate. A separate step runs
 `gpu-coherence-selftest` the same way on lavapipe: the Vulkan backend's render-target coherence,
-texture cache, per-draw state template, filtering and blend cases against the software GE, where
-an exit 77 skip also fails. Its scaled-upload case then runs alone at render scales 2 and 4, where
+texture cache, per-draw state template, filtering and blend cases against the software GE. A plain
+run's exit 77 also fails it, but the recipe passes three kinds of SKIP with the step still green: the
+gpu-timestamps legs (its own and the twin's), the interlock dst-read and stencil-once cells on a
+device that refuses the interlock, and `ge-first-bad-draw-selftest` (`GE_FBD_SKIP_STATUS=0`). Its scaled-upload case then runs alone at render scales 2 and 4, where
 every device pixel of an uploaded target must hold its guest pixel, and so does its mip-lod case,
 where the shader's per-fragment mip level must not change with the render scale, and so does its
 readback-rows case, where guest memory must get the top-left device pixel of each cell while the
@@ -1423,6 +1425,8 @@ analyse another commit or repository, run its own code in that context, or suppl
 the required check's evidence. Its trusted-run concurrency group is the head
 repository and branch, so a newer head of a branch cancels the analysis of the
 older one; repositories never share a group, so forks cannot cancel one another.
+A push to `main` and the weekly schedule each run in a group of their own, so a landing
+never cancels the analysis of the previous `main` commit.
 The wake workflow's name is part of the trust path: `codeql.yml` names it in
 `workflows:`, and `tools/test_public_ci_wiring.py` pins that the two agree.
 

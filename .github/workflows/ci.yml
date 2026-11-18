@@ -1105,6 +1105,19 @@ jobs:
           echo "/usr/local/pspdev/bin" >> "$GITHUB_PATH"
           echo "PSPDEV=/usr/local/pspdev" >> "$GITHUB_ENV"
 
+      # Every Vulkan step selects lavapipe from here: this one step finds the ICD the apt step
+      # installed and fails the job if it is missing. The Vulkan steps export VK_ICD_FILENAMES
+      # themselves, so no other step's Vulkan loader sees a changed environment.
+      - name: Select the lavapipe Vulkan ICD
+        run: |
+          set -euo pipefail
+          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
+          test -n "$lvp_icd" || {
+            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
+            exit 1
+          }
+          echo "NK_LAVAPIPE_ICD=$lvp_icd" >> "$GITHUB_ENV"
+
       - name: Run import-coverage and fake-success audit gate
         if: matrix.part == 'core'
         # Public gate for issue #71: manifest extraction from src/rt/hle.c,
@@ -1212,12 +1225,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 make CC=gcc -j4 gpu-snapsync-selftest
 
       - name: Run host present pacing selftest (links SDL3)
@@ -1238,12 +1246,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           vulkaninfo --summary | tee "$RUNNER_TEMP/vulkan-summary.txt"
           grep -qi llvmpipe "$RUNNER_TEMP/vulkan-summary.txt"
           # Report only: whether lavapipe offers the interlock destination-read path (#2109).
@@ -1256,17 +1259,15 @@ jobs:
       # The Vulkan backend's coherence selftest (src/rt/gpu_sdl3vk/ge_gpu.c): render-target
       # coherence, the texture cache, the per-draw state template, filtering and blend parity
       # against the software GE. It ran on no hosted job, so a regression from #1481 went
-      # unseen; an exit 77 skip fails the step like the capture selftest's.
+      # unseen. A plain run's exit 77 fails the step, as for the capture selftest, but the recipe
+      # (mk/selftests.mk) passes three kinds of SKIP: the gpu-timestamps legs (its own and the
+      # twin's), the interlock dst-read and stencil-once cells on a device that refuses the
+      # interlock, and ge-first-bad-draw-selftest (GE_FBD_SKIP_STATUS=0). Those stay green here.
       - name: Run GPU coherence selftest on lavapipe
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-coherence-selftest vram-view-identity-selftest
 
@@ -1277,12 +1278,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
             make CC=gcc gpu-texscale-selftest gpu-texscale-mutant 2>&1 | tee "$RUNNER_TEMP/texscale.log"
           if grep -q '^SKIP gpu-texscale' "$RUNNER_TEMP/texscale.log"; then
@@ -1297,12 +1293,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest
 
       # FSR 3 frame generation's device refusal (G-R in src/rt/gpu_sdl3vk/fsr3_fg_pass_selftest.c) on
@@ -1313,12 +1304,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"
 
       # The embedded FSR 3 SPIR-V must be what the pinned DirectXShaderCompiler release makes of AMD's
@@ -1948,6 +1934,19 @@ jobs:
           echo "/usr/local/pspdev/bin" >> "$GITHUB_PATH"
           echo "PSPDEV=/usr/local/pspdev" >> "$GITHUB_ENV"
 
+      # Every Vulkan step selects lavapipe from here: this one step finds the ICD the apt step
+      # installed and fails the job if it is missing. The Vulkan steps export VK_ICD_FILENAMES
+      # themselves, so no other step's Vulkan loader sees a changed environment.
+      - name: Select the lavapipe Vulkan ICD
+        run: |
+          set -euo pipefail
+          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
+          test -n "$lvp_icd" || {
+            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
+            exit 1
+          }
+          echo "NK_LAVAPIPE_ICD=$lvp_icd" >> "$GITHUB_ENV"
+
       # Every `gcc` and `g++` the steps below run, from make, the Python tools and the
       # selftest commands alike, is this wrapper: the real compiler with `--coverage` added.
       # The measuring steps then run the gates' commands (only an isolated build root or
@@ -2130,12 +2129,7 @@ jobs:
       - name: Measure the GPU selftests on lavapipe
         run: |
           set -euo pipefail
-          lvp_icd="$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' -print -quit)"
-          test -n "$lvp_icd" || {
-            echo "mesa-vulkan-drivers did not install a lavapipe ICD" >&2
-            exit 1
-          }
-          export VK_ICD_FILENAMES="$lvp_icd"
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
           # A software device that is not lavapipe, or a skipped texture scaling selftest,
           # would shrink the number without failing: both fail the step, as in native_tools.
           vulkaninfo --summary | tee "$RUNNER_TEMP/vulkan-summary.txt"
