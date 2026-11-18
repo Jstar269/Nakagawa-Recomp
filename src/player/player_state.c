@@ -523,6 +523,15 @@ size_t player_incompatible_reason_line(const char *reason, char *out, size_t out
     return (size_t)written < out_size ? (size_t)written : out_size - 1;
 }
 
+/* The reason package discovery stops with no data folder, in this host's words
+   (player_data_dir_unavailable_text): a Linux, macOS or Android user is not told to
+   set Windows variables (audit 2026-11-17). */
+static void player_package_discovery_unavailable(char *reason, size_t reason_size) {
+    if (!reason || reason_size == 0) return;
+    snprintf(reason, reason_size, "DATA_DIR_UNAVAILABLE: %s; package discovery cannot run.",
+             player_data_dir_unavailable_text(nk_platform_host_kind()));
+}
+
 NkRuntimePackageStatus player_app_validate_runtime_package(
     const PlayerApp *app,
     const GameRecord *game,
@@ -537,8 +546,7 @@ NkRuntimePackageStatus player_app_validate_runtime_package(
     const char *root = player_package_root(app, game);
     if (!root) {
         if (!nk_platform_get_app_data_dir(default_root, sizeof(default_root))) {
-            if (reason && reason_size) snprintf(reason, reason_size,
-                "DATA_DIR_UNAVAILABLE: the Windows Local AppData known folder, LOCALAPPDATA, or APPDATA could not be resolved; package discovery cannot run.");
+            player_package_discovery_unavailable(reason, reason_size);
             return NK_RUNTIME_PACKAGE_MISSING;
         }
         root = default_root;
@@ -877,6 +885,14 @@ size_t player_display_text(const char *in, char *out, size_t out_size) {
     return player_display_text_with_home(in, home, out, out_size);
 }
 
+/* Puts the library back as it was before a change library.json did not take. A
+   newer file the commit found is still noted (nk_library_commit_fresh). */
+static void player_library_restore(NkLibrary *lib, const NkLibrary *before) {
+    long newer_schema_version = lib->newer_schema_version;
+    memcpy(lib, before, sizeof(*lib));
+    lib->newer_schema_version = newer_schema_version;
+}
+
 bool player_app_add_game(PlayerApp *app, const GameRecord *game) {
     if (!app || !game || game->disc_id[0] == '\0') return false;
     /* A sample is shown, never added to the user's library. */
@@ -897,8 +913,15 @@ bool player_app_add_game(PlayerApp *app, const GameRecord *game) {
        happened instead. */
     /* A fresh add: the record's earlier hashes and tier go until the check below
        ends, since the file may hold other bytes now. */
+    /* The add changes the library in memory before the file. When the file
+       cannot be written, the library goes back to what it was, so no card shows
+       a title library.json does not hold (audit 2026-11-17). */
+    NkLibrary *before = (NkLibrary *)malloc(sizeof(*before));
+    if (!before) return false;
+    memcpy(before, &app->library, sizeof(*before));
     NkResult add_res = nk_library_add_fresh(&app->library, game);
     if (add_res != NK_OK) {
+        free(before);
         player_app_sync_library(app);
         return false;
     }
@@ -907,6 +930,8 @@ bool player_app_add_game(PlayerApp *app, const GameRecord *game) {
        another writer (a bring-up building into this data folder) added since the
        library was loaded is kept (#1768). */
     NkResult save_res = nk_library_commit_fresh(&app->library, game, NULL);
+    if (save_res != NK_OK) player_library_restore(&app->library, before);
+    free(before);
     player_app_sync_library(app);
     /* Its image is hashed after the add, on main.c's worker, every time it is
        added: a file can change in place. So is any other image of its disc ID
@@ -1903,6 +1928,7 @@ static const char *player_settings_target(const PlayerApp *app, const char *file
 NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
     if (!app) return NK_ERROR_GENERIC;
     app->settings_newer_schema = false;
+    app->settings_unreadable = false;
     int packs_dropped = 0;   /* "texture_packs" members not kept (texture_packs_read) */
 
     char resolved_path[MAX_PATH_LEN];
@@ -1923,19 +1949,30 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
     /* Settings, decrypted-module and font paths all come from the
      * per-user data directory, which is UTF-8 and may hold non-ASCII
      * characters; the narrow CRT would misread them on Windows. */
+    /* A file that is there but cannot be opened or read in full is not a corrupt
+       one: it is kept, and this session does not save over it (settings_unreadable). */
     FILE *f = nk_fopen_utf8(target, "rb");
     if (!f) {
         player_app_settings_init_default(&app->settings);
+        app->settings_unreadable = true;
         snprintf(app->settings_notice, sizeof(app->settings_notice),
-                 "Could not open settings file; defaults restored.");
+                 "Could not open the settings file; this session uses the defaults, and "
+                 "changes here are not saved.");
         return NK_ERROR_IO;
     }
 
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    long sz = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
+    if (sz < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        player_app_settings_init_default(&app->settings);
+        app->settings_unreadable = true;
+        snprintf(app->settings_notice, sizeof(app->settings_notice),
+                 "Could not read the settings file; this session uses the defaults, and "
+                 "changes here are not saved.");
+        return NK_ERROR_IO;
+    }
 
-    if (sz <= 0 || sz > PLAYER_SETTINGS_MAX_BYTES) {
+    if (sz == 0 || sz > PLAYER_SETTINGS_MAX_BYTES) {
         fclose(f);
         player_app_settings_init_default(&app->settings);
         snprintf(app->settings_notice, sizeof(app->settings_notice),
@@ -1951,7 +1988,17 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
     }
 
     size_t got = fread(buf, 1, (size_t)sz, f);
+    bool read_failed = got != (size_t)sz || ferror(f);
     fclose(f);
+    if (read_failed) {
+        free(buf);
+        player_app_settings_init_default(&app->settings);
+        app->settings_unreadable = true;
+        snprintf(app->settings_notice, sizeof(app->settings_notice),
+                 "Could not read the settings file; this session uses the defaults, and "
+                 "changes here are not saved.");
+        return NK_ERROR_IO;
+    }
     buf[got] = '\0';
 
     char err_buf[256] = {0};
@@ -2338,6 +2385,12 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
                                                 sizeof(resolved_path));
     if (!target) return NK_ERROR_IO;
 
+    /* The settings file this session could not read is never replaced by the
+       defaults it fell back to (settings_unreadable). */
+    if (app->settings_unreadable && strcmp(target, app->settings_path) == 0) {
+        return NK_ERROR_IO;
+    }
+
     /* Settings a newer player wrote are never replaced, and an older file is kept
        as settings.json.v<n>.bak before this one replaces it. */
     NkResult guard = nk_user_data_prepare_replace(target, NK_PLAYER_SETTINGS_SCHEMA_VERSION,
@@ -2429,16 +2482,17 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
     fprintf(f, "  \"master_volume\": %d\n", app->settings.master_volume);
     fprintf(f, "}\n");
 
-    if (fflush(f) != 0) {
-        fclose(f);
+    /* The durable replace is nk_platform's: the bytes put on the disk, then the file moved
+       over settings.json (nk_platform_sync_file, nk_rename_utf8). A write, sync or close
+       that failed leaves settings.json as it was: a short or unsynced temporary file is
+       never renamed over it (audit 2026-11-17). */
+    bool written = !ferror(f) && fflush(f) == 0;
+    if (written) written = nk_platform_sync_file(f);
+    if (fclose(f) != 0) written = false;
+    if (!written) {
         nk_remove_utf8(tmp_path);
         return NK_ERROR_IO;
     }
-
-    /* The durable replace is nk_platform's: the bytes put on the disk, then the file moved
-       over settings.json (nk_platform_sync_file, nk_rename_utf8). */
-    (void)nk_platform_sync_file(f);
-    fclose(f);
 
     if (nk_rename_utf8(tmp_path, target) != 0) {
         nk_remove_utf8(tmp_path);
@@ -2774,30 +2828,16 @@ bool player_app_boot_event_is_window_ready(const char *line) {
                     strstr(line, "BOOT_EVENT phase=first_frame") != NULL);
 }
 
+static void player_monitor_stalled_game_events(PlayerApp *app);
+
 bool player_app_child_window_ready(PlayerApp *app) {
     if (!app || app->child_window_ready || !app->boot_event_file_path[0]) {
         return app && app->child_window_ready;
     }
-
-    FILE *file = nk_fopen_utf8(app->boot_event_file_path, "rb");
-    if (!file) return false;
-
-    char events[8192];
-    size_t length = fread(events, 1, sizeof(events) - 1, file);
-    fclose(file);
-    events[length] = '\0';
-
-    char *line = events;
-    while (*line) {
-        char *next = strchr(line, '\n');
-        if (next) *next = '\0';
-        if (player_app_boot_event_is_window_ready(line)) {
-            app->child_window_ready = true;
-            break;
-        }
-        if (!next) break;
-        line = next + 1;
-    }
+    /* The runtime's own output shares the session file and can come first, so
+       the marker is looked for in every line the incremental reader takes, not
+       only in the file's first few kilobytes (audit 2026-11-17). */
+    player_monitor_stalled_game_events(app);
     return app->child_window_ready;
 }
 
@@ -3763,7 +3803,8 @@ bool player_ace_last_session_line(const char *user_root, const char *disc_id, ch
     if (!out || cap == 0) return false;
     out[0] = '\0';
     if (!player_ace_report_path(user_root, disc_id, path, sizeof(path))) return false;
-    FILE *f = fopen(path, "rb");
+    /* The path is UTF-8, as every user-data path is (the narrow CRT misreads it). */
+    FILE *f = nk_fopen_utf8(path, "rb");
     if (!f) return false;
     size_t len = fread(text, 1, sizeof(text) - 1u, f);
     fclose(f);
@@ -4122,7 +4163,7 @@ bool player_dev_log_redact(const char *in, const char *profile, const char *user
         const char *put = NULL;
         size_t skip = 0;
         /* The profile folder as whole path components only: a profile that is the start
-           of another folder's name ("C:\Users\Al" in "C:\Users\Alice") is not it
+           of another folder's name (a profile folder "Al" beside a folder "Alice") is not it
            (player_display_home_matches; audit 2026-11-17). */
         if (profile_len >= 3 && player_display_home_matches(p, profile, profile_len)) {
             skip = profile_len;
@@ -4322,17 +4363,28 @@ bool player_app_remove_game(PlayerApp *app, int game_index) {
     /* Only the library entry is removed. The user's ISO file on disk is
      * never touched. */
     bool by_file = !sha1[0] && iso[0];
+    /* As for an add: a removal the file did not take is undone in memory too,
+       so the card stays while library.json keeps the title (audit 2026-11-17). */
+    NkLibrary *before = (NkLibrary *)malloc(sizeof(*before));
+    if (!before) return false;
+    memcpy(before, &app->library, sizeof(*before));
     NkResult removed = by_file ? nk_library_remove_by_file(&app->library, disc_id, iso)
                                : nk_library_remove_by_key(&app->library, disc_id, sha1);
-    if (removed != NK_OK) return false;
+    if (removed != NK_OK) {
+        free(before);
+        return false;
+    }
     /* Under the library lock, from what the file holds now (#1768). */
     NkResult committed = by_file
         ? nk_library_commit_remove_by_file(&app->library, disc_id, iso, NULL)
         : nk_library_commit_remove_by_key(&app->library, disc_id, sha1, NULL);
     if (committed != NK_OK) {
+        player_library_restore(&app->library, before);
+        free(before);
         player_app_sync_library(app);
         return false;
     }
+    free(before);
     player_app_sync_library(app);
     if (app->game_count <= 0) {
         app->selected_game_index = -1;
@@ -6059,8 +6111,8 @@ void player_launch_work_run(PlayerLaunchWork *work) {
         if (nk_platform_get_app_data_dir(default_root, sizeof(default_root))) {
             package_root = default_root;
         } else {
-            snprintf(work->package_error, sizeof(work->package_error), "%s",
-                "DATA_DIR_UNAVAILABLE: the Windows Local AppData known folder, LOCALAPPDATA, or APPDATA could not be resolved; package discovery cannot run.");
+            player_package_discovery_unavailable(work->package_error,
+                                                 sizeof(work->package_error));
         }
     }
     NkRuntimePackageStatus package_status = package_root
@@ -6879,6 +6931,9 @@ static void player_monitor_stalled_game_events(PlayerApp *app) {
                 line[used] = '\0';
                 player_consume_stall_event_line(app, line);
                 player_app_consume_render_path_line(app, line);
+                if (player_app_boot_event_is_window_ready(line)) {
+                    app->child_window_ready = true;
+                }
             }
             app->boot_event_read_offset = offset;
             used = 0u;

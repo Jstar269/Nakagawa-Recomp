@@ -1021,7 +1021,12 @@ static void player_ui_open_save_folder(PlayerApp *app, size_t title_index) {
 static int player_ui_wizard_save_title(PlayerApp *app) {
     int idx;
     if (app->inspecting_game.disc_id[0] == '\0') return -1;
-    player_app_add_game(app, &app->inspecting_game);
+    /* A title library.json did not take is not added: say so, as the other
+       add buttons do (audit 2026-11-17). */
+    if (!player_app_add_game(app, &app->inspecting_game)) {
+        player_app_set_library_write_error(app);
+        return -1;
+    }
     idx = player_app_find_added_game(app, &app->inspecting_game);
     if (idx >= 0) app->selected_game_index = idx;
     return idx;
@@ -1088,12 +1093,12 @@ static void player_ui_wizard_apply(PlayerApp *app, PlayerUiWizardOp op) {
             bool runtime_ready = app->inspecting_game.is_prepared;
             int idx = player_ui_wizard_save_title(app);
             if (idx >= 0 && runtime_ready) player_app_request_launch(app, idx);
-            player_app_set_view(app, VIEW_LIBRARY);
+            if (app->active_view != VIEW_ERROR) player_app_set_view(app, VIEW_LIBRARY);
             break;
         }
         case PLAYER_UI_WIZARD_GO_TO_LIBRARY:
             (void)player_ui_wizard_save_title(app);
-            player_app_wizard_cancel(app);
+            if (app->active_view != VIEW_ERROR) player_app_wizard_cancel(app);
             break;
         case PLAYER_UI_WIZARD_TOGGLE_ONLINE:
             player_app_set_online_mode(app, !app->settings.online_mode);

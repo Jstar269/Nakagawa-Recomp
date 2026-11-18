@@ -1137,6 +1137,12 @@ def update_report(stdout: str) -> tuple[list[dict[str, str]], list[str]]:
 
 
 class NativePlayerUiTests(unittest.TestCase):
+    # The executable runs from a sandbox folder under build/, where none of the folders
+    # beside it holds tools/nk_cli.py, and the working folder is never searched
+    # (package_builder_cli_candidate_paths). A test that needs the CLI (the problem
+    # report, a package rebuild) names the checkout as the install root with this.
+    CLI_INSTALL_ROOT = {"NK_INSTALL_ROOT": str(ROOT)}
+
     def run_player(
         self,
         view: str,
@@ -1176,6 +1182,7 @@ class NativePlayerUiTests(unittest.TestCase):
         culling_packages: dict[str, dict[str, object]] | None = None,
         cover_cache: dict[str, bytes] | None = None,
         expect_failure: bool = False,
+        library_unwritable: bool = False,
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
@@ -1191,8 +1198,13 @@ class NativePlayerUiTests(unittest.TestCase):
             # a disc list the user imported (nk_disc_verify.h).
             data_folder = (localappdata / "Nakagawa" / "data" if os.name == "nt"
                            else userprofile / "data" / "Nakagawa" / "data")
+            if library_unwritable:
+                # library.json loads (there is none) but is never written: its temporary
+                # file's name is taken by a folder that is not empty (nk_library_save).
+                (data_folder / "library.json.tmp").mkdir(parents=True)
+                (data_folder / "library.json.tmp" / "keep").write_text("x", encoding="utf-8")
             if disc_list is not None:
-                (data_folder / "verification").mkdir(parents=True)
+                (data_folder / "verification").mkdir(parents=True, exist_ok=True)
                 (data_folder / "verification" / "redump.dat").write_text(disc_list,
                                                                         encoding="utf-8")
             if cover_cache is not None:
@@ -1401,13 +1413,12 @@ class NativePlayerUiTests(unittest.TestCase):
                     "XDG_DATA_HOME": str(userprofile / "data"),
                     "XDG_CACHE_HOME": str(userprofile / "cache"),
                     "NK_INPUT_PROFILE": str(profile),
-                    # The executable runs from a sandbox folder under build/, where none of
-                    # the folders beside it holds tools/nk_cli.py, and the working folder
-                    # is never searched (package_builder_cli_candidate_paths): name the
-                    # checkout as the install root. A test's env_extra may name another.
-                    "NK_INSTALL_ROOT": str(ROOT),
                 }
             )
+            # No install root unless the test names one (env_extra, CLI_INSTALL_ROOT): a
+            # player that finds tools/nk_cli.py starts its CLI-backed startup work, which a
+            # test of something else must not wait on.
+            env.pop("NK_INSTALL_ROOT", None)
             if env_extra:
                 env.update(env_extra)
             if incompatible_package:
@@ -1619,6 +1630,33 @@ class NativePlayerUiTests(unittest.TestCase):
         assert isinstance(font_frames, list)
         self.assertEqual(font_frames[1]["wizard_step"], "ready_launch")
         self.assertEqual(font_frames[1]["font_confirmed"], "1")
+
+    def test_wizard_ready_step_buttons_report_a_title_not_saved(self) -> None:
+        """Audit 2026-11-17 (F-e7f8730a): the Ready step's Play / Save to library and Go to
+        library buttons ignored player_app_add_game's result, then showed the library or
+        closed the wizard, so a title library.json did not take vanished with no card.
+
+        Failing before: both buttons ended on the library. Now each raises the
+        LIBRARY_WRITE_FAILED card; with a library that can be written, both still end on
+        the library."""
+        presses = {
+            "Save to library": ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100"),
+            "Go to library": ("WAIT_MS=100", "KEY_RIGHT", "KEY_RETURN", "WAIT_MS=100"),
+        }
+        for button, events in presses.items():
+            with self.subTest(button=button, library="not writable"):
+                run = self.next_ui_run("wizard5", events, library_unwritable=True)
+                frames = run["frames"]
+                assert isinstance(frames, list)
+                self.assertEqual(frames[0]["wizard_step"], "ready_launch")
+                self.assertEqual(frames[-1]["view"], "error", run["stdout"])
+                self.assertEqual(frames[-1]["error"], "LIBRARY_WRITE_FAILED")
+            with self.subTest(button=button, library="writable"):
+                run = self.next_ui_run("wizard5", events)
+                frames = run["frames"]
+                assert isinstance(frames, list)
+                self.assertEqual(frames[-1]["view"], "library", run["stdout"])
+                self.assertNotIn("LIBRARY_WRITE_FAILED", [frame["error"] for frame in frames])
 
     def test_developer_log_panel_needs_developer_mode(self) -> None:
         panel = self.run_player("developer-log", ("KEY_F12",))
@@ -2112,6 +2150,24 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertLess(trail.index(str(0x452B)), trail.index(str(0x451E)), trail)
         back = self.run_player("psp-fonts", ("WAIT_MS=100", "KEY_ESCAPE", "WAIT_MS=100"))
         self.assertEqual(self.screens(back)[-1][0], "settings", "Esc goes back to Settings")
+
+    @unittest.skipUnless(sys.platform == "win32", "the Windows shell's Open folder (player_host.c)")
+    def test_open_folder_reports_a_folder_the_shell_could_not_open(self) -> None:
+        """Audit 2026-11-17: Open folder handed the UTF-8 path to ShellExecuteA, which reads
+        the ANSI code page, threw its result away and returned true, so a folder the shell
+        could not open (a non-ASCII profile path read wrong, or a missing folder) never
+        reached player_app_set_folder_open_error.
+
+        Failing before: a missing folder read as opened (ok=1). The host now converts the
+        path to UTF-16 for ShellExecuteW and reports the shell's failure."""
+        with tempfile.TemporaryDirectory(prefix=".open-folder-", dir=ROOT) as tmp:
+            missing = Path(tmp) / "never-made" / "saves"
+            run = self.run_player(
+                "library", ("WAIT_MS=50",),
+                env_extra={"NK_UI_TEST_OPEN_FOLDER": str(missing)})
+        stdout = str(run["stdout"])
+        self.assertIn("[PLAYER_UI_TEST] open_folder ok=0 ", stdout)
+        self.assertIn("Windows could not open the folder (shell error", stdout)
 
     def test_picked_disc_and_fonts_are_taken_on_the_main_thread(self) -> None:
         """Audit 2026-11-17: SDL may call a file picker's callback on a thread of its own
@@ -3328,8 +3384,10 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[-1]["online_mode"], "0",
                          "online mode has no switch until the feature exists (#2007)")
 
+        # The notices page is opened through tools/nk_cli.py (CLI_INSTALL_ROOT).
         notices = self.next_ui_run(
             "settings", ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS + ("KEY_RETURN", "WAIT_MS=100"),
+            env_extra=self.CLI_INSTALL_ROOT,
         )
         self.assertEqual([view for view, _ in self.screens(notices)],
                          ["settings", "prereq_about"])
@@ -4073,7 +4131,7 @@ class NativePlayerUiTests(unittest.TestCase):
         # The report tool refuses a data folder inside the repository, where the
         # sandbox lies, so the regression build writes under a folder outside it.
         with tempfile.TemporaryDirectory(prefix="nk-report-test-") as tmp:
-            env = {"NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            env = {**self.CLI_INSTALL_ROOT, "NK_UI_TEST_REPORT_DATA_ROOT": tmp}
             # Wait for the previewed phase (2), press Create, then wait for done (4); 6 is
             # the no-Python page, which ends either wait and skips the test below.
             run = self.next_ui_run(
@@ -4108,7 +4166,7 @@ class NativePlayerUiTests(unittest.TestCase):
         (fopen, remove), which reads the UTF-8 path in the ANSI code page, so the file the tool
         wrote was never found and the page showed a failed report."""
         with tempfile.TemporaryDirectory(prefix="nk-report-test-José-") as tmp:
-            env = {"NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            env = {**self.CLI_INSTALL_ROOT, "NK_UI_TEST_REPORT_DATA_ROOT": tmp}
             run = self.next_ui_run(
                 "problem-report", ("WAIT_REPORT=2|5|6,60000",), env_extra=env)
             stdout = run["stdout"]
@@ -4131,7 +4189,7 @@ class NativePlayerUiTests(unittest.TestCase):
         Failing before: the preview of such a title ended in the failed phase (5) with
         'Run this in a terminal'. The name now travels as one --title-name=<name> argument."""
         with tempfile.TemporaryDirectory(prefix="nk-report-test-") as tmp:
-            env = {"NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            env = {**self.CLI_INSTALL_ROOT, "NK_UI_TEST_REPORT_DATA_ROOT": tmp}
             run = self.next_ui_run(
                 "problem-report", ("WAIT_REPORT=2|5|6,60000",), env_extra=env,
                 library_titles=1, library_first_title_name="-=Demo=-")
@@ -5855,6 +5913,8 @@ class NativePlayerUiTests(unittest.TestCase):
              "KEY_ESCAPE", "WAIT_MS=2000"),          # Play anyway
             post_build_ready=True, wait_background=True,
             package_built_by="v0.0.1",
+            # This flow needs tools/nk_cli.py (CLI_INSTALL_ROOT).
+            env_extra=self.CLI_INSTALL_ROOT,
         )
         if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")

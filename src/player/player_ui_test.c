@@ -991,6 +991,15 @@ void player_ui_test_check_environment(PlayerUiTest *t) {
            event loop. */
         s_ui_test_drop_worker_event = true;
     }
+    /* NK_UI_TEST_OPEN_FOLDER=<path>: the host's Open folder on that path, once,
+       and what it reported (a missing folder must not read as opened). */
+    const char *open_folder = getenv("NK_UI_TEST_OPEN_FOLDER");
+    if (t->mode && open_folder && open_folder[0]) {
+        bool opened = player_host_open_folder(open_folder);
+        printf("[PLAYER_UI_TEST] open_folder ok=%d error=%s\n", opened ? 1 : 0,
+               opened ? "" : SDL_GetError());
+        fflush(stdout);
+    }
     if ((s_ui_test_catalog_reload_count > 0) !=
         (s_ui_test_catalog_reload_path &&
          s_ui_test_catalog_reload_path[0])) {

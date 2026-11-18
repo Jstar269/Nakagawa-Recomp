@@ -1076,6 +1076,11 @@ struct PlayerApp {
      * session runs on the defaults, and settings_notice says so on every
      * Settings page (player_app_load_settings). */
     bool settings_newer_schema;
+    /* settings.json is there but could not be opened or read in full (another
+     * program holding it, an I/O error): it is kept as it is, this session runs
+     * on the defaults, and player_app_save_settings does not replace it, so a
+     * passing failure never costs the user their settings (audit 2026-11-17). */
+    bool settings_unreadable;
     /* This run keeps the first-launch nickname prompt down (#2197): a --screenshot, --view
        or scripted run shows the page it names. Memory only: nickname_asked and settings.json
        are left as they are. */

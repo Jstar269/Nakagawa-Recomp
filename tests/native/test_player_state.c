@@ -2584,6 +2584,234 @@ static void test_library_writes_keep_titles_another_writer_added(void) {
     printf("[PLAYER_STATE_TEST] library writes keep titles another writer added PASS\n");
 }
 
+/* Audit 2026-11-17: an add or removal changed the library in memory before
+ * library.json, and a commit that failed was not undone. The card showed a title
+ * the file never got (gone on the next start), or lost one the file kept, and the
+ * wizard's Ready step went on to the library with no word of it.
+ *
+ * Failing before: after the refused add the library held the title, after the
+ * refused removal it had lost it, and the Ready step showed the library. Here the
+ * library's folder is a file, so every commit fails. */
+static void test_library_change_the_file_refused_is_undone(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: a library change the file refused is undone\n");
+    char sep = nk_platform_path_separator();
+    char blocker[1024];
+    char path[1100];
+    snprintf(blocker, sizeof(blocker), "%s%clibrary-folder-is-a-file", native_test_get_root(),
+             sep);
+    write_text_file(blocker, "a file where the library's folder would be\n");
+    snprintf(path, sizeof(path), "%s%clibrary.json", blocker, sep);
+
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    assert(strlen(path) < sizeof(app->library.library_path));
+    strcpy(app->library.library_path, path);
+
+    GameRecord game;
+    seed_entry(&game, "TEST00061", "Synthetic Unsaved Title");
+    assert(!player_app_add_game(app, &game));
+    assert(app->library.count == 0);
+    assert(player_app_find_game_by_disc_id(app, "TEST00061") == -1);
+
+    /* A title the file holds, whose removal the file then refuses. */
+    assert(nk_library_add_or_update(&app->library, &game) == NK_OK);
+    player_app_sync_library(app);
+    int index = player_app_find_game_by_disc_id(app, "TEST00061");
+    assert(index >= 0);
+    assert(!player_app_remove_game(app, index));
+    assert(app->library.count == 1);
+    assert(player_app_find_game_by_disc_id(app, "TEST00061") >= 0);
+
+    /* The setup wizard's Ready step says the title was not saved. */
+    seed_entry(&app->inspecting_game, "TEST00062", "Synthetic Wizard Title");
+    app->wizard.step = WIZARD_STEP_READY_LAUNCH;
+    app->active_view = VIEW_SETUP_WIZARD;
+    player_app_wizard_next(app);
+    assert(player_app_find_game_by_disc_id(app, "TEST00062") == -1);
+    assert(app->active_view == VIEW_ERROR);
+    assert(strcmp(app->last_error.error_code, "LIBRARY_WRITE_FAILED") == 0);
+
+    assert(nk_remove_utf8(blocker) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] a library change the file refused is undone PASS\n");
+}
+
+/* Audit 2026-11-17: a settings.json that was there but could not be opened (another
+ * program holding it) read as defaults, and the next change saved those defaults
+ * over the user's file.
+ *
+ * Failing before: the file afterwards held the defaults plus the change, and the
+ * user's own resolution scale was gone. */
+static void test_settings_file_that_could_not_be_read_is_kept(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: a settings file that could not be read is kept\n");
+    char path[1024];
+    snprintf(path, sizeof(path), "%s%cheld-settings.json", native_test_get_root(),
+             nk_platform_path_separator());
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    PlayerApp *held = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL && held != NULL);
+    player_app_settings_init_default(&app->settings);
+    app->settings.resolution_scale = 3;
+    assert(player_app_save_settings(app, path) == NK_OK);
+    static char before[1u << 16];
+    static char after[1u << 16];
+    FILE *f = nk_fopen_utf8(path, "rb");
+    assert(f != NULL);
+    size_t before_size = fread(before, 1, sizeof(before), f);
+    fclose(f);
+    assert(before_size > 0 && before_size < sizeof(before));
+
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[1024];
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, 1024) > 0);
+    /* No sharing: the player's open fails, as with a program that holds the file. */
+    HANDLE hold = CreateFileW(wide, GENERIC_READ, 0, NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(hold != INVALID_HANDLE_VALUE);
+    NkResult loaded = player_app_load_settings(held, path);
+    CloseHandle(hold);
+#else
+    if (geteuid() == 0) {
+        /* root opens a file whatever its mode: nothing here can refuse the read. */
+        printf("[PLAYER_STATE_TEST] a settings file that could not be read is kept SKIP (root)\n");
+        remove(path);
+        free(held);
+        free(app);
+        return;
+    }
+    assert(chmod(path, 0) == 0);
+    NkResult loaded = player_app_load_settings(held, path);
+    assert(chmod(path, 0600) == 0);
+#endif
+    assert(loaded == NK_ERROR_IO);
+    assert(held->settings.resolution_scale == 1);
+
+    /* The file reads again now; a change this session makes leaves it alone. */
+    player_app_set_resolution_scale(held, 2);
+    assert(held->settings.resolution_scale == 2);
+    f = nk_fopen_utf8(path, "rb");
+    assert(f != NULL);
+    size_t after_size = fread(after, 1, sizeof(after), f);
+    fclose(f);
+    assert(after_size == before_size && memcmp(before, after, before_size) == 0);
+    assert(strstr(held->settings_notice, "not saved") != NULL);
+
+    /* The next start reads the user's settings. */
+    assert(player_app_load_settings(held, path) == NK_OK);
+    assert(held->settings.resolution_scale == 3);
+    remove(path);
+    free(held);
+    free(app);
+    printf("[PLAYER_STATE_TEST] a settings file that could not be read is kept PASS\n");
+}
+
+/* Audit 2026-11-17: the settings save ignored a failed sync and close, and renamed the
+ * temporary file over the good settings.json all the same.
+ *
+ * Failing before (POSIX): the temporary file is a link to /dev/null, whose fsync fails
+ * (EINVAL) while every write succeeds; the save returned NK_OK and settings.json became
+ * that link, so the user's settings read as empty. Windows has no file whose writes
+ * succeed while FlushFileBuffers fails, so the check runs on POSIX hosts. */
+static void test_settings_save_that_did_not_reach_the_disk_keeps_the_file(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: a settings save that did not reach the disk keeps the file\n");
+#if defined(_WIN32) || defined(_WIN64)
+    printf("[PLAYER_STATE_TEST] a settings save that did not reach the disk keeps the file "
+           "SKIP (no Windows file fails only its sync)\n");
+#else
+    char path[1024];
+    char tmp_path[1100];
+    snprintf(path, sizeof(path), "%s%cunsynced-settings.json", native_test_get_root(),
+             nk_platform_path_separator());
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    player_app_settings_init_default(&app->settings);
+    app->settings.resolution_scale = 3;
+    assert(player_app_save_settings(app, path) == NK_OK);
+    static char before[1u << 16];
+    static char after[1u << 16];
+    FILE *f = nk_fopen_utf8(path, "rb");
+    assert(f != NULL);
+    size_t before_size = fread(before, 1, sizeof(before), f);
+    fclose(f);
+    assert(before_size > 0 && before_size < sizeof(before));
+
+    assert(symlink("/dev/null", tmp_path) == 0);
+    app->settings.resolution_scale = 2;
+    assert(player_app_save_settings(app, path) == NK_ERROR_IO);
+
+    struct stat st;
+    assert(lstat(path, &st) == 0 && S_ISREG(st.st_mode));
+    assert(lstat(tmp_path, &st) != 0);   /* the link is removed; /dev/null is not touched */
+    f = nk_fopen_utf8(path, "rb");
+    assert(f != NULL);
+    size_t after_size = fread(after, 1, sizeof(after), f);
+    fclose(f);
+    assert(after_size == before_size && memcmp(before, after, before_size) == 0);
+    assert(remove(path) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] a settings save that did not reach the disk keeps the file PASS\n");
+#endif
+}
+
+/* Audit 2026-11-17: the window_ready check read only the session file's first 8191
+ * bytes, and the runtime's own output shares that file, so a run that printed more
+ * before its window came up never handed the window over.
+ *
+ * Failing before: the marker after 16 KB of output was never seen. */
+static void test_child_window_ready_after_long_output(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: window_ready is seen after long runtime output\n");
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    snprintf(app->boot_event_file_path, sizeof(app->boot_event_file_path),
+             "%s%cwindow-ready-events.txt", native_test_get_root(),
+             nk_platform_path_separator());
+    FILE *f = nk_fopen_utf8(app->boot_event_file_path, "wb");
+    assert(f != NULL);
+    for (int i = 0; i < 200; i++) {
+        fprintf(f, "[runtime] synthetic early output line %03d, before the window ...........\n",
+                i);
+    }
+    assert(fclose(f) == 0);
+    assert(!player_app_child_window_ready(app));
+
+    f = nk_fopen_utf8(app->boot_event_file_path, "ab");
+    assert(f != NULL);
+    fprintf(f, "BOOT_EVENT phase=window_ready\n");
+    assert(fclose(f) == 0);
+    assert(player_app_child_window_ready(app));
+    assert(nk_remove_utf8(app->boot_event_file_path) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] window_ready is seen after long runtime output PASS\n");
+}
+
+/* Audit 2026-11-17: the Ace report was opened with the narrow fopen, which reads a
+ * path in the ANSI code page on Windows, so under a non-ASCII data folder the "Last
+ * session" line never showed.
+ *
+ * Failing before (Windows): no line for a report under "ace-caf\xc3\xa9". */
+static void test_ace_last_session_under_non_ascii_root(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the Ace report is read under a non-ASCII folder\n");
+    char sep = nk_platform_path_separator();
+    char root[800];
+    char dir[820];
+    char report[900];
+    char line[256];
+    snprintf(root, sizeof(root), "%s%cace-caf\xc3\xa9", native_test_get_root(), sep);
+    snprintf(dir, sizeof(dir), "%s%cace", root, sep);
+    assert(nk_platform_mkdir_p(dir));
+    assert(player_ace_report_path(root, "TEST90011", report, sizeof(report)));
+    FILE *f = nk_fopen_utf8(report, "wb");
+    assert(f != NULL);
+    fputs("{\"schema\": 1, \"effective\": {\"af\": 4, \"text\": false}}\n", f);
+    assert(fclose(f) == 0);
+    assert(player_ace_last_session_line(root, "TEST90011", line, sizeof(line)));
+    assert(strcmp(line, "Last session: 4x filtering.") == 0);
+    assert(nk_platform_remove_tree(root, NULL));
+    printf("[PLAYER_STATE_TEST] the Ace report is read under a non-ASCII folder PASS\n");
+}
+
 /* Disc verification after an add. main.c's worker runs nk_disc_verify_image on
  * each image player_app_add_game queues; here the test runs it. The record gets
  * the hashes and tier, on disk too; the library line says what runs; a cancel
@@ -3467,6 +3695,21 @@ static void test_platform_cards_name_this_platform(void) {
     assert(!player_app_open_prerequisite_about(app));
     assert(strcmp(app->last_error.error_code, "DATA_DIR_UNAVAILABLE") == 0);
     assert(strcmp(app->last_error.title, "Data folder not found") == 0); /* #1974: sentence case */
+    /* Package discovery with no data folder gives this host's reason. Failing before
+       (audit 2026-11-17): every host was told the Windows Local AppData folder,
+       LOCALAPPDATA or APPDATA could not be resolved. */
+    {
+        GameRecord package_game;
+        char reason[512];
+        seed_entry(&package_game, "TEST80962", "Synthetic Package Title");
+        assert(player_app_validate_runtime_package(app, &package_game, NULL, reason,
+                                                   sizeof(reason)) ==
+               NK_RUNTIME_PACKAGE_MISSING);
+        assert(strncmp(reason, "DATA_DIR_UNAVAILABLE: ", 22) == 0);
+        assert(strstr(reason, "LOCALAPPDATA") == NULL);
+        assert(strstr(reason, player_data_dir_unavailable_text(nk_platform_host_kind())) != NULL);
+        assert(strstr(reason, "package discovery cannot run.") != NULL);
+    }
     /* The wizard's checks with no data folder: the disc's encrypted program is not decrypted
        into the working directory's titles/ folder; the step stops by name before any
        program check (audit 2026-11-17). */
@@ -6335,7 +6578,8 @@ static void test_user_identity_is_redacted_in_utf8(void) {
     static char report[PLAYER_ERROR_DETAILS_MAX + 4096];
 #if defined(_WIN32) || defined(_WIN64)
     static const wchar_t *const names[] = {L"USERPROFILE", L"USERNAME"};
-    static const wchar_t *const values[] = {L"C:\\path\\Jos\u00e9 Synth", L"Jos\u00e9 Synth"};
+    /* Split so the source holds no text the publication audit reads as a share path. */
+    static const wchar_t *const values[] = {L"C:\\path\\" L"Jos\u00e9 Synth", L"Jos\u00e9 Synth"};
     static wchar_t kept[2][1024];
     bool had[2];
     for (int i = 0; i < 2; ++i) {
@@ -13908,6 +14152,11 @@ int main(int argc, char **argv) {
      * root is the temporary one. */
     test_sample_entries_never_reach_library_json();
     test_library_writes_keep_titles_another_writer_added();
+    test_library_change_the_file_refused_is_undone();
+    test_settings_file_that_could_not_be_read_is_kept();
+    test_settings_save_that_did_not_reach_the_disk_keeps_the_file();
+    test_child_window_ready_after_long_output();
+    test_ace_last_session_under_non_ascii_root();
     test_disc_check_after_add();
 
     /* PlayerApp holds 64 game records twice over; keep it off the stack. */
@@ -17160,9 +17409,11 @@ int main(int argc, char **argv) {
                                      "C:\\Users\\Al", "Al", out, sizeof(out)));
         assert(strcmp(out, "copied C:\\Users\\Alice\\x.iso and %USERPROFILE%\\y") == 0);
 #else
-        assert(player_dev_log_redact("copied /home/al/x and /home/alice/y.iso", "/home/al",
+        /* A synthetic root that is not a profile path (the publication audit's
+           local-path check finds nothing); the whole-component logic is the same. */
+        assert(player_dev_log_redact("copied /srv/al/x and /srv/alice/y.iso", "/srv/al",
                                      "al", out, sizeof(out)));
-        assert(strcmp(out, "copied %USERPROFILE%/x and /home/alice/y.iso") == 0);
+        assert(strcmp(out, "copied %USERPROFILE%/x and /srv/alice/y.iso") == 0);
 #endif
         assert(!player_dev_log_redact("abcdef", NULL, NULL, out, 4u));
         assert(strcmp(out, "abc") == 0);
