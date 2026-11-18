@@ -554,6 +554,9 @@ int       ge_patch_tess_init(int factor);
 int       ge_patch_tess_set(int factor);
 void      ge_patch_tess_counts(unsigned long long *quads, unsigned long long *capped);
 void      ge_patch_tess_exit_report(void);
+/* Patch draws (BEZIER, SPLINE) that drew nothing because their working buffers could not be
+ * allocated, since the run started; ge.c names the first. */
+unsigned long long ge_patch_alloc_failures(void);
 /* The specular and powered-diffuse power light_vertex uses: 0 (the default) the C library's
  * powf, 1 ge_powf, the integer power psp_tnl.vert repeats bit for bit, which also lets the GPU
  * T&L take those lights. The selftest seams give ge_powf and its 64 x 64-bit high product
@@ -748,6 +751,10 @@ void      ge_clut_load_extent(uint32_t *last_bytes, uint32_t *max_bytes);
  * directly call it to say how much they loaded). */
 void      ge_clut_note_load(uint32_t bytes);
 void      ge_replay_restore(const GeState *state, const uint16_t *zbuf);
+/* The colour target `state` draws to, as ge.c's software renderer addresses it: a VRAM view
+ * (an offset below 2 MiB or any 0x?4xxxxxx address) folded onto 0x04000000 | (fbp & 0x1FFFFF),
+ * a main-RAM target (render-to-RAM) kept as it is, masked to 28 bits. */
+uint32_t  ge_fb_addr_of(const GeState *state);
 void      ge_cpu_profile_reset(void);
 void      ge_cpu_profile_get(GeCpuProfileStats *out);
 /* The software GE's per-draw transformed-vertex cache (SR_GE_VERTEX_CACHE_DISABLE): triangle
