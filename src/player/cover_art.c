@@ -374,6 +374,12 @@ NkCoverArtStatus nk_cover_art_fetch_url(PackageHttpOpen transport, void *transpo
         status = NK_COVER_ART_CANCELLED;
         goto cleanup;
     }
+    /* A body that ended before its declared length is a broken download, not a picture:
+       the header check reads only its first 33 bytes, and the cache keeps what it is given. */
+    if (response.has_content_length && (uint64_t)used != response.content_length) {
+        status = NK_COVER_ART_NOT_FOUND;
+        goto cleanup;
+    }
     if (!nk_cover_art_validate_png_header(buffer, used, NK_COVER_ART_MAX_SIDE, NULL, NULL)) {
         status = NK_COVER_ART_INVALID_PNG;
         goto cleanup;

@@ -579,6 +579,9 @@ one rule (`src/core/nk_user_data_schema.h`) governs each writer:
   finds the file as it left it.
 * A file with no readable version (empty, damaged, not JSON) is reported, and the
   reader falls back as before (`library.json` to its `.bak`, the others to defaults).
+  A controls file that does not load for this or any other reason except a newer
+  version is moved to `input_profile.json.unreadable.bak` by the first save, which
+  does not write when that move fails, and the Controls page names the copy.
 
 The folders are the per-user ones of [`SETUP.md`](SETUP.md) (on Windows
 `%LOCALAPPDATA%\Nakagawa\data` and `...\config`, plus the saves folder).

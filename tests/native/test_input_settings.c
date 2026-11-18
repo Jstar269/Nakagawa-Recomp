@@ -88,6 +88,14 @@ static void test_default_load(void) {
         input_settings_format_binding(&state, i, binding_str, sizeof(binding_str));
         assert(strlen(binding_str) > 0);
     }
+    /* Audit 2026-11-17: the stick's four directions have keys only. Failing before: their
+     * indices 15-18 read psp_buttons[15..18], past its 14 entries, and printed whatever
+     * lay there (the menu navigation bindings). */
+    for (int i = INPUT_CONTROL_STICK_UP; i <= INPUT_CONTROL_STICK_RIGHT; i++) {
+        char binding_str[128] = {0};
+        input_settings_format_binding(&state, i, binding_str, sizeof(binding_str));
+        assert(strcmp(binding_str, "None") == 0);
+    }
 
     printf("[INPUT_SETTINGS_TEST] Subtest 1 PASSED!\n");
 }
@@ -234,6 +242,44 @@ static void test_bind_rebind_and_capture(void) {
     printf("[INPUT_SETTINGS_TEST] Subtest 3 PASSED!\n");
 }
 
+/* Audit 2026-11-17: SDL3 numbers gamepad buttons past NK_HOST_BUTTON_COUNT (MISC2 to MISC6
+ * on paddle and third-party pads), and the player hands a captured press over as SDL's raw
+ * index. Failing before: the out-of-range button became the control's binding (shown as
+ * unknown), the control that held it lost its input, and the profile then refused to save.
+ * Now the press is refused with a note and nothing changes. */
+static void test_capture_refuses_a_button_outside_the_profile(void) {
+    printf("[INPUT_SETTINGS_TEST] Subtest: a captured button outside the profile is refused\n");
+    InputSettingsState state;
+    input_settings_init(&state);
+    const NkDigitalBinding before = state.profile.psp_buttons[INPUT_CONTROL_BTN_CROSS];
+    const NkInputProfile profile_before = state.profile;
+    char diag[256];
+
+    assert(input_settings_start_capture(&state, INPUT_CONTROL_BTN_CROSS));
+    NkBindingSource extra = { NK_BINDING_HOST_BUTTON, NK_HOST_BUTTON_COUNT, 0 };
+    assert(!input_settings_feed_capture_source(&state, extra));
+    assert(!input_settings_is_capturing(&state));
+    assert(memcmp(&state.profile.psp_buttons[INPUT_CONTROL_BTN_CROSS], &before,
+                  sizeof(before)) == 0);
+    assert(memcmp(&state.profile, &profile_before, sizeof(profile_before)) == 0);
+    assert(state.note_error && state.note[0] != '\0');
+    assert(nk_input_profile_validate(&state.profile, diag, sizeof(diag)) == NK_OK);
+
+    /* A negative index and an axis past the host's axes are refused the same way. */
+    NkBindingSource negative = { NK_BINDING_HOST_BUTTON, -1, 0 };
+    assert(!input_settings_assign_binding(&state, INPUT_CONTROL_BTN_CROSS, negative));
+    NkBindingSource axis = { NK_BINDING_HOST_AXIS_POS, NK_HOST_AXIS_COUNT, 0 };
+    assert(!input_settings_assign_binding(&state, INPUT_CONTROL_BTN_CROSS, axis));
+    assert(memcmp(&state.profile, &profile_before, sizeof(profile_before)) == 0);
+
+    /* The last button the profile knows still binds. */
+    NkBindingSource last = { NK_BINDING_HOST_BUTTON, NK_HOST_BUTTON_COUNT - 1, 0 };
+    assert(input_settings_assign_binding(&state, INPUT_CONTROL_BTN_CROSS, last));
+    assert(state.profile.psp_buttons[INPUT_CONTROL_BTN_CROSS].primary.index ==
+           NK_HOST_BUTTON_COUNT - 1);
+    assert(!state.note_error);
+}
+
 /* -----------------------------------------------------------------------------
  * 4. A taken input swaps, and the note names the other control (#1299)
  * -------------------------------------------------------------------------- */
@@ -285,6 +331,23 @@ static void test_conflict_detection(void) {
     assert(!input_settings_is_control_conflicted(&state, INPUT_CONTROL_BTN_TRIANGLE));
     const char *summary = input_settings_get_conflict_summary(&state);
     assert(strstr(summary, "Square") != NULL && strstr(summary, "Home") != NULL);
+
+    /* Audit 2026-11-17: one control's first input as a later control's second input is a
+     * conflict too. Failing before: the pair (i's first, j's second) was never compared,
+     * so Select's input on Cross's second slot went unmarked. */
+    InputSettingsState crossed;
+    input_settings_init(&crossed);
+    const NkBindingSource select_input =
+        crossed.profile.psp_buttons[INPUT_CONTROL_BTN_SELECT].primary;
+    assert(select_input.type != NK_BINDING_NONE);
+    crossed.profile.psp_buttons[INPUT_CONTROL_BTN_CROSS].secondary = select_input;
+    input_settings_refresh_conflicts(&crossed);
+    assert(input_settings_get_conflict_count(&crossed) == 1);
+    assert(input_settings_is_control_conflicted(&crossed, INPUT_CONTROL_BTN_SELECT));
+    assert(input_settings_is_control_conflicted(&crossed, INPUT_CONTROL_BTN_CROSS));
+    assert(!input_settings_is_control_conflicted(&crossed, INPUT_CONTROL_BTN_CIRCLE));
+    summary = input_settings_get_conflict_summary(&crossed);
+    assert(strstr(summary, "Select") != NULL && strstr(summary, "Cross") != NULL);
 
     printf("[INPUT_SETTINGS_TEST] Subtest 4 PASSED!\n");
 }
@@ -1154,6 +1217,10 @@ static void test_hostile_profile_files(void) {
         if (i == 0 || i == 2) {
             assert(input_settings_save(&state, path) == NK_OK);
             assert(!state.has_save_diagnostic);
+            char aside[NK_MAX_PATH + 32];
+            snprintf(aside, sizeof(aside), "%s.unreadable.bak", path);
+            assert(nk_platform_file_exists(aside));
+            assert(remove(aside) == 0);
             InputSettingsState reloaded;
             assert(input_settings_load(&reloaded, path) == NK_OK);
             assert(!reloaded.has_load_diagnostic);
@@ -1196,6 +1263,93 @@ static void test_hostile_profile_files(void) {
 
     remove(path);
     printf("[INPUT_SETTINGS_TEST] Subtest 11 PASSED!\n");
+}
+
+/* -----------------------------------------------------------------------------
+ * 11b. A profile that does not load is kept, never written over (audit 2026-11-17)
+ * A JSON typo in a current-version file left the player on the defaults, and the first
+ * edit saved them over the file: the global mapping and every per-title one were gone,
+ * with no backup. Failing before: no .unreadable.bak existed after that save.
+ * -------------------------------------------------------------------------- */
+static size_t read_whole_file(const char *path, char *buf, size_t cap) {
+    FILE *f = fopen(path, "rb");
+    assert(f != NULL);
+    size_t n = fread(buf, 1, cap, f);
+    assert(fclose(f) == 0);
+    return n;
+}
+
+static void test_unreadable_profile_is_kept(void) {
+    printf("[INPUT_SETTINGS_TEST] Subtest 11b: an unreadable profile is kept before a save...\n");
+    const char *path = SR_SELFTEST_BUILD_ROOT "/test_unreadable_kept.json";
+    char aside[NK_MAX_PATH + 32];
+    snprintf(aside, sizeof(aside), "%s.unreadable.bak", path);
+    (void)remove(aside);
+    assert(nk_platform_mkdir_p(SR_SELFTEST_BUILD_ROOT));
+
+    /* A saved mapping of the user's, then its closing brace lost. */
+    InputSettingsState first;
+    input_settings_init(&first);
+    assert(input_settings_set_deadzone(&first, NK_PSP_AXIS_ANALOG_X, 12345));
+    assert(input_settings_save(&first, path) == NK_OK);
+    static char broken[65536];
+    size_t broken_len = read_whole_file(path, broken, sizeof(broken));
+    assert(broken_len > 2 && broken_len < sizeof(broken));
+    while (broken_len > 0 && broken[broken_len - 1] != '}') broken_len--;
+    assert(broken_len > 0);
+    broken_len--;
+    FILE *f = fopen(path, "wb");
+    assert(f != NULL);
+    assert(fwrite(broken, 1, broken_len, f) == broken_len);
+    assert(fclose(f) == 0);
+
+    /* The aside name is taken by a folder: the save is refused and the file stays. */
+    {
+        InputSettingsState blocked;
+        assert(input_settings_load(&blocked, path) != NK_OK);
+        assert(blocked.has_load_diagnostic && blocked.keep_unreadable);
+#if defined(_WIN32) || defined(_WIN64)
+        assert(CreateDirectoryA(aside, NULL) != 0);
+#else
+        assert(mkdir(aside, 0777) == 0);
+#endif
+        assert(input_settings_set_deadzone(&blocked, NK_PSP_AXIS_ANALOG_X, 2000));
+        assert(input_settings_save_if_dirty(&blocked) != NK_OK);
+        assert(blocked.has_save_diagnostic && blocked.unsaved);
+        assert(strstr(blocked.save_diagnostic, "unreadable.bak") != NULL);
+        static char after[65536];
+        assert(read_whole_file(path, after, sizeof(after)) == broken_len);
+        assert(memcmp(after, broken, broken_len) == 0);
+        assert(test_rmdir(aside) == 0);
+    }
+
+    /* The first edit's save moves the file aside, then writes the mapping. */
+    InputSettingsState state;
+    assert(input_settings_load(&state, path) != NK_OK);
+    assert(state.has_load_diagnostic && state.keep_unreadable);
+    assert(input_settings_set_deadzone(&state, NK_PSP_AXIS_ANALOG_X, 2000));
+    assert(input_settings_save_if_dirty(&state) == NK_OK);
+    assert(!state.has_save_diagnostic && !state.keep_unreadable);
+    assert(nk_platform_file_exists(aside));
+    static char kept[65536];
+    assert(read_whole_file(aside, kept, sizeof(kept)) == broken_len);
+    assert(memcmp(kept, broken, broken_len) == 0);
+    /* The Controls page says where it went. */
+    assert(state.has_load_diagnostic);
+    assert(strstr(state.load_diagnostic, "test_unreadable_kept.json.unreadable.bak") != NULL);
+
+    InputSettingsState reloaded;
+    assert(input_settings_load(&reloaded, path) == NK_OK && !reloaded.keep_unreadable);
+    assert(reloaded.profile.axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner == 2000);
+
+    /* Later saves write as usual and leave nothing more aside. */
+    assert(remove(aside) == 0);
+    assert(input_settings_set_deadzone(&state, NK_PSP_AXIS_ANALOG_X, 3000));
+    assert(input_settings_save_if_dirty(&state) == NK_OK);
+    assert(!nk_platform_file_exists(aside));
+
+    remove(path);
+    printf("[INPUT_SETTINGS_TEST] Subtest 11b PASSED!\n");
 }
 
 /* -----------------------------------------------------------------------------
@@ -1603,6 +1757,7 @@ int main(void) {
     test_binding_words_fit();
     test_corrupt_file_load_diagnostic();
     test_bind_rebind_and_capture();
+    test_capture_refuses_a_button_outside_the_profile();
     test_conflict_detection();
     test_deadzone_and_trigger_bounds();
     test_reset_to_defaults();
@@ -1614,6 +1769,7 @@ int main(void) {
     test_guided_calibration_and_resting_extremes();
     test_per_title_scope_and_atomic_save();
     test_hostile_profile_files();
+    test_unreadable_profile_is_kept();
     test_keyboard_keys();
     test_stick_keys_and_saving();
     test_per_title_rebind_persists();

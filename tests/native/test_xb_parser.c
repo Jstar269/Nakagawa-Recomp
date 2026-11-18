@@ -35,6 +35,8 @@
 #else
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #define test_rmdir rmdir
@@ -850,6 +852,77 @@ static void test_staging_cleanup_boundary(void) {
     printf("[XB_TEST] Staging cleanup boundary and safe basename check PASSED\n");
 }
 
+/* Another program (an antivirus scanner, an indexer) may hold a just-extracted
+ * file open with delete sharing. Discarding the tree still removes it: the file
+ * leaves the folder at once, so its parent folders can go too. */
+static void test_staging_discard_with_a_shared_open_file(void) {
+    const char *root = SR_SELFTEST_BUILD_ROOT "/.staging_xb_shared_handle";
+    const char *nested = SR_SELFTEST_BUILD_ROOT "/.staging_xb_shared_handle/nested";
+    const char *file_path = SR_SELFTEST_BUILD_ROOT "/.staging_xb_shared_handle/nested/held.bin";
+    (void)player_stage_discard(root);
+    assert(nk_platform_mkdir_p(nested));
+    static const uint8_t data[] = "held by another program";
+    write_file_bytes(file_path, data, sizeof(data) - 1);
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE holder = CreateFileA(file_path, GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(holder != INVALID_HANDLE_VALUE);
+#else
+    int holder = open(file_path, O_RDONLY);
+    assert(holder >= 0);
+#endif
+    bool discarded = player_stage_discard(root);
+    bool root_left = nk_platform_dir_exists(root);
+#if defined(_WIN32) || defined(_WIN64)
+    CloseHandle(holder);
+#else
+    close(holder);
+#endif
+    if (!discarded || root_left) {
+        fprintf(stderr, "[XB_TEST] discard with a shared open file: discarded=%d left=%d\n",
+                (int)discarded, (int)root_left);
+        (void)player_stage_discard(root);
+    }
+    assert(discarded);
+    assert(!root_left);
+    printf("[XB_TEST] Staging discard with another program's open file PASSED\n");
+}
+
+/* The user, a backup tool or a sync client may mark a file or folder in a
+ * staging tree read-only. Discarding the tree still removes it, as
+ * nk_platform_remove_tree does; otherwise every later staging of the title
+ * stops on a cleanup that closing programs cannot fix (audit 2026-11-17). */
+static void test_staging_discard_with_read_only_entries(void) {
+    const char *root = SR_SELFTEST_BUILD_ROOT "/.staging_xb_read_only";
+    const char *nested = SR_SELFTEST_BUILD_ROOT "/.staging_xb_read_only/nested";
+    const char *file_path = SR_SELFTEST_BUILD_ROOT "/.staging_xb_read_only/nested/locked.bin";
+    (void)player_stage_discard(root);
+    assert(nk_platform_mkdir_p(nested));
+    static const uint8_t data[] = "read-only member";
+    write_file_bytes(file_path, data, sizeof(data) - 1);
+#if defined(_WIN32) || defined(_WIN64)
+    assert(SetFileAttributesA(file_path, FILE_ATTRIBUTE_READONLY));
+    assert(SetFileAttributesA(nested, FILE_ATTRIBUTE_READONLY));
+#else
+    assert(chmod(file_path, 0444) == 0);
+#endif
+    bool discarded = player_stage_discard(root);
+    bool root_left = nk_platform_dir_exists(root);
+    if (!discarded || root_left) {
+        fprintf(stderr, "[XB_TEST] discard with read-only entries: discarded=%d left=%d\n",
+                (int)discarded, (int)root_left);
+#if defined(_WIN32) || defined(_WIN64)
+        (void)SetFileAttributesA(file_path, FILE_ATTRIBUTE_NORMAL);
+        (void)SetFileAttributesA(nested, FILE_ATTRIBUTE_NORMAL);
+#endif
+        (void)player_stage_discard(root);
+    }
+    assert(discarded);
+    assert(!root_left);
+    printf("[XB_TEST] Staging discard with read-only entries PASSED\n");
+}
+
 static void test_staging_discard_reparse_boundary(void) {
 #if defined(_WIN32) || defined(_WIN64)
     const char *root = SR_SELFTEST_BUILD_ROOT "/.staging_reparse_boundary";
@@ -1278,6 +1351,91 @@ static void test_iso_to_native_staging_pipeline(void) {
     printf("[XB_TEST] ISO EBOOT + xbdata native staging pipeline PASSED\n");
 }
 
+/* Staging unpacks every archive the runtime asset index reads back: ".xb" and
+   ".xb<N>" for any decimal N (sr_asset_index_key_from_rel), not only .xb0-.xb3.
+   A name that only starts like one (".xbx") is a plain file. */
+static void test_staging_unpacks_every_xb_variant(void) {
+    static const uint8_t member[] = "variant member";
+    const FixtureEntry entries[] = {
+        { "data/member.bin", member, sizeof(member) - 1, NK_XB_COMPRESSION_NONE }
+    };
+    ByteBuffer xb = make_archive(entries, 1, false);
+    assert(xb.size < 2048);
+    const char *iso_path = SR_SELFTEST_BUILD_ROOT "/test_xb_variants.iso";
+    const char *stage_root = SR_SELFTEST_BUILD_ROOT "/.staging_xb_variants";
+    /* No PPSSPP dump folder answers for this run's support-module lookup. */
+    const char *no_ppsspp = SR_SELFTEST_BUILD_ROOT "/test_xb_variants_no_ppsspp";
+    char old_appdata[4096];
+    char old_userprofile[4096];
+    bool had_appdata;
+    bool had_userprofile;
+    capture_environment_value("APPDATA", old_appdata, sizeof(old_appdata), &had_appdata);
+    capture_environment_value("USERPROFILE", old_userprofile, sizeof(old_userprofile),
+                              &had_userprofile);
+    set_environment_value("APPDATA", no_ppsspp);
+    set_environment_value("USERPROFILE", no_ppsspp);
+
+    const size_t image_size = 32u * 2048u;
+    uint8_t *image = (uint8_t *)calloc(1, image_size);
+    assert(image != NULL);
+    uint8_t *pvd = image + 16 * 2048;
+    pvd[0] = 1;
+    memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1;
+    const uint8_t root_name = 0;
+    iso_record(pvd + 156, 17, 2048, 2, &root_name, 1);
+    const IsoFixtureChild root_children[] = { { "PSP_GAME", 18, 2048, 2 } };
+    const IsoFixtureChild psp_children[] = {
+        { "SYSDIR", 19, 2048, 2 },
+        { "USRDIR", 20, 2048, 2 }
+    };
+    const IsoFixtureChild sys_children[] = { { "EBOOT.BIN", 21, 4, 0 } };
+    const IsoFixtureChild usr_children[] = { { "xbdata", 22, 2048, 2 } };
+    const IsoFixtureChild xb_children[] = {
+        { "a.xb4", 23, (uint32_t)xb.size, 0 },
+        { "b.XB12", 24, (uint32_t)xb.size, 0 },
+        { "c.xbx", 25, (uint32_t)xb.size, 0 }
+    };
+    iso_directory(image + 17 * 2048, 17, 17, root_children, 1);
+    iso_directory(image + 18 * 2048, 18, 17, psp_children, 2);
+    iso_directory(image + 19 * 2048, 19, 18, sys_children, 1);
+    iso_directory(image + 20 * 2048, 20, 18, usr_children, 1);
+    iso_directory(image + 22 * 2048, 22, 20, xb_children, 3);
+    memcpy(image + 21 * 2048, "BOOT", 4);
+    for (uint32_t lba = 23; lba <= 25; lba++) memcpy(image + lba * 2048u, xb.data, xb.size);
+    write_file_bytes(iso_path, image, image_size);
+    free(image);
+    free(xb.data);
+
+    PlayerStageCallbacks callbacks = { NULL, staging_progress, NULL };
+    PlayerStageSummary summary;
+    char error[256];
+    static const char *const loose_content_roots[] = { "xbdata" };
+    (void)player_stage_discard(stage_root);
+    NkResult result = player_stage_game_with_summary(iso_path, stage_root,
+                                                     loose_content_roots, 1, &callbacks,
+                                                     &summary, error, sizeof(error));
+    if (result != NK_OK) {
+        fprintf(stderr, "[XB_TEST] variant staging failed (%d): %s\n", (int)result, error);
+    }
+    assert(result == NK_OK);
+    assert(summary.extracted_asset_count == 2);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/xbdata/a.xb4.d/data/member.bin", stage_root);
+    assert(nk_platform_file_exists(path));
+    snprintf(path, sizeof(path), "%s/xbdata/b.XB12.d/data/member.bin", stage_root);
+    assert(nk_platform_file_exists(path));
+    snprintf(path, sizeof(path), "%s/xbdata/c.xbx", stage_root);
+    assert(nk_platform_file_exists(path));
+    snprintf(path, sizeof(path), "%s/xbdata/c.xbx.d", stage_root);
+    assert(!nk_platform_dir_exists(path));
+    assert(player_stage_discard(stage_root));
+    remove(iso_path);
+    restore_environment_value("APPDATA", old_appdata, had_appdata);
+    restore_environment_value("USERPROFILE", old_userprofile, had_userprofile);
+    printf("[XB_TEST] every .xb<N> archive variant is unpacked PASSED\n");
+}
+
 static int archive_list_has(const SrVfsDirList *list, const char *name) {
     for (size_t i = 0; i < list->count; i++) {
         if (strcmp(list->entries[i].name, name) == 0) return 1;
@@ -1686,8 +1844,8 @@ static void capture_title_stage_progress(const char *current_path, int percent,
 }
 
 #if !defined(_WIN32) && !defined(_WIN64)
-/* fcntl record locks never conflict inside one process, so a second process
- * holds the title's lock for the busy case. */
+/* A second process holds the title's lock for the busy case; the nested
+ * staging below covers a second staging inside this process. */
 static pid_t hold_lock_in_child(const char *lock_path, int *release_fd) {
     int ready[2];
     int release[2];
@@ -1698,11 +1856,7 @@ static pid_t hold_lock_in_child(const char *lock_path, int *release_fd) {
         close(ready[0]);
         close(release[1]);
         int fd = open(lock_path, O_RDWR | O_CREAT, 0600);
-        struct flock region;
-        memset(&region, 0, sizeof(region));
-        region.l_type = F_WRLCK;
-        region.l_whence = SEEK_SET;
-        char status = (fd >= 0 && fcntl(fd, F_SETLK, &region) == 0) ? 'L' : 'F';
+        char status = (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0) ? 'L' : 'F';
         if (write(ready[1], &status, 1) != 1) _exit(2);
         char ignored;
         ssize_t got = read(release[0], &ignored, 1);
@@ -1718,6 +1872,31 @@ static pid_t hold_lock_in_child(const char *lock_path, int *release_fd) {
     return child;
 }
 #endif
+
+/* A staging of the same title started while one is running in this process
+ * (from its progress callback, so the lock is held) must be refused as busy,
+ * not allowed to share and discard the running staging's tree. */
+typedef struct {
+    const PlayerStageTitleRequest *request;
+    bool ran;
+    NkResult result;
+    char message[1024];
+} NestedTitleStage;
+
+static void nested_title_stage_progress(const char *current_path, int percent,
+                                        size_t files_extracted, size_t total_files,
+                                        void *userdata) {
+    (void)current_path; (void)percent; (void)files_extracted; (void)total_files;
+    NestedTitleStage *nested = (NestedTitleStage *)userdata;
+    if (nested->ran) return;
+    nested->ran = true;
+    PlayerStageSummary summary;
+    PlayerStageTitleOutcome outcome;
+    char prepared_root[NK_MAX_PATH];
+    nested->result = run_title_stage(nested->request, NULL, &summary, &outcome,
+                                     prepared_root, sizeof(prepared_root),
+                                     nested->message, sizeof(nested->message));
+}
 
 static void test_title_staging_transaction(void) {
     native_test_create_root("xb-title-stage");
@@ -1901,6 +2080,34 @@ static void test_title_staging_transaction(void) {
     assert(outcome == PLAYER_STAGE_TITLE_REUSED);
     assert(!nk_platform_dir_exists(paths.staging_root));
 
+    /* 5b. A second staging of the same title inside this process, while the
+     * first holds the lock, is refused the same way (audit 2026-11-17). */
+    {
+        PlayerStageTitleRequest nested_request = request;
+        nested_request.disc_id = "TEST90005";
+        TitleStagePaths nested_paths;
+        title_stage_paths(user_data_root, nested_request.disc_id, &nested_paths);
+        NestedTitleStage nested;
+        memset(&nested, 0, sizeof(nested));
+        nested.request = &nested_request;
+        PlayerStageCallbacks nesting = { NULL, nested_title_stage_progress, &nested };
+        NkResult outer = run_title_stage(&nested_request, &nesting, &summary, &outcome,
+                                         prepared_root, sizeof(prepared_root),
+                                         message, sizeof(message));
+        if (!nested.ran || nested.result != NK_ERROR_ALREADY_EXISTS ||
+            strstr(nested.message, "[STAGE_BUSY]") == NULL) {
+            fprintf(stderr, "[XB_TEST] nested staging of a running title: ran=%d result=%d %s\n",
+                    (int)nested.ran, (int)nested.result, nested.message);
+        }
+        assert(nested.ran);
+        assert(nested.result == NK_ERROR_ALREADY_EXISTS);
+        assert(strstr(nested.message, "[STAGE_BUSY]") != NULL);
+        assert(outer == NK_OK);
+        assert(outcome == PLAYER_STAGE_TITLE_STAGED);
+        assert(nk_platform_dir_exists(nested_paths.final_root));
+        assert(!nk_platform_dir_exists(nested_paths.staging_root));
+    }
+
     /* 6. A disc without the title's data folder is refused before anything
      * is promoted. */
     PlayerStageTitleRequest missing = request;
@@ -2026,6 +2233,186 @@ static void test_title_staging_names_a_long_data_folder(void) {
     printf("[XB_TEST] A too-long data folder path is named, not blamed on the disc PASSED\n");
 }
 
+/* A title request in its own data root, staged from a fresh archive-layout disc. */
+typedef struct {
+    char iso_path[NATIVE_TEST_PATH_MAX];
+    char user_data_root[NATIVE_TEST_PATH_MAX];
+    PlayerStageTitleRequest request;
+    TitleStagePaths paths;
+} TitleStageFixture;
+
+static void title_stage_fixture(TitleStageFixture *fixture, const char *disc_id) {
+    static const uint8_t raw_data[] = "staged native XB data";
+    static const char *const whole_usrdir[] = { "." };
+    const FixtureEntry entries[] = {
+        { "data/raw.bin", raw_data, sizeof(raw_data) - 1, NK_XB_COMPRESSION_NONE }
+    };
+    char name[96];
+    memset(fixture, 0, sizeof(*fixture));
+    ByteBuffer xb = make_archive(entries, 1, false);
+    snprintf(name, sizeof(name), "%s.iso", disc_id);
+    title_join(fixture->iso_path, sizeof(fixture->iso_path), native_test_get_root(), name);
+    snprintf(name, sizeof(name), "user-data-%s", disc_id);
+    title_join(fixture->user_data_root, sizeof(fixture->user_data_root),
+               native_test_get_root(), name);
+    write_title_fixture_iso(fixture->iso_path, true, &xb);
+    free(xb.data);
+    fixture->request.iso_path = fixture->iso_path;
+    fixture->request.user_data_root = fixture->user_data_root;
+    fixture->request.disc_id = disc_id;
+    fixture->request.disc_version = "1.00";
+    fixture->request.loose_content_roots = whole_usrdir;
+    fixture->request.loose_content_root_count = 1;
+    fixture->request.data_root = "xbdata";
+    title_stage_paths(fixture->user_data_root, disc_id, &fixture->paths);
+}
+
+/* The support-PRX copy from the user's PPSSPP dump folder is optional: a
+ * module that cannot be copied (here an empty libfont.prx, as an interrupted
+ * dump leaves) is left out and the title is still set up. Run after
+ * test_title_staging_transaction, whose root is APPDATA and HOME. */
+static void test_title_staging_skips_a_broken_support_prx(void) {
+    TitleStageFixture fixture;
+    title_stage_fixture(&fixture, "TEST90011");
+    char dump[NATIVE_TEST_PATH_MAX];
+    char empty_prx[NATIVE_TEST_PATH_MAX];
+    char good_prx[NATIVE_TEST_PATH_MAX];
+    char path[NATIVE_TEST_PATH_MAX];
+    title_join(dump, sizeof(dump), native_test_get_root(), "PPSSPP/PSP/SYSTEM/DUMP");
+    assert(nk_platform_mkdir_p(dump));
+    title_join(empty_prx, sizeof(empty_prx), dump, "libfont.prx");
+    title_join(good_prx, sizeof(good_prx), dump, "scePsmf_library.prx");
+    write_file_bytes(empty_prx, "", 0);
+    write_file_bytes(good_prx, "synthetic psmf", 14);
+
+    PlayerStageSummary summary;
+    PlayerStageTitleOutcome outcome;
+    char prepared_root[NK_MAX_PATH];
+    char message[1024];
+    NkResult result = run_title_stage(&fixture.request, NULL, &summary, &outcome,
+                                      prepared_root, sizeof(prepared_root),
+                                      message, sizeof(message));
+    remove(empty_prx);
+    remove(good_prx);
+    assert(result == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_STAGED);
+    title_join(path, sizeof(path), fixture.paths.final_root, "EXTRACTED/decrypted/libfont.prx");
+    assert(!nk_platform_file_exists(path));
+    title_join(path, sizeof(path), fixture.paths.final_root,
+               "EXTRACTED/decrypted/scePsmf_library.prx");
+    assert(nk_platform_file_exists(path));
+    printf("[XB_TEST] A support PRX that cannot be copied is left out, not fatal PASSED\n");
+}
+
+/* A leftover that cannot be removed yet (a program still holds a file in it)
+ * does not stop a title whose complete, matching tree is already in place. */
+static void test_title_staging_reuses_past_a_stuck_leftover(void) {
+    TitleStageFixture fixture;
+    title_stage_fixture(&fixture, "TEST90012");
+    PlayerStageSummary summary;
+    PlayerStageTitleOutcome outcome;
+    char prepared_root[NK_MAX_PATH];
+    char message[1024];
+    char path[NATIVE_TEST_PATH_MAX];
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_STAGED);
+
+#if defined(_WIN32) || defined(_WIN64)
+    assert(nk_platform_mkdir_p(fixture.paths.retired_root));
+    title_join(path, sizeof(path), fixture.paths.retired_root, "held.bin");
+    write_file_bytes(path, "held", 4);
+    /* No delete sharing: nothing can remove the file while this is open. */
+    HANDLE holder = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(holder != INVALID_HANDLE_VALUE);
+#else
+    title_join(path, sizeof(path), fixture.paths.retired_root, "held");
+    assert(nk_platform_mkdir_p(path));
+    char held_file[NATIVE_TEST_PATH_MAX];
+    title_join(held_file, sizeof(held_file), path, "held.bin");
+    write_file_bytes(held_file, "held", 4);
+    /* A folder nobody may list stands in for a file a program holds. A
+     * superuser bypasses the permission, so the leftover would just go. */
+    assert(chmod(path, 0) == 0);
+    bool stuck = geteuid() != 0;
+#endif
+    NkResult result = run_title_stage(&fixture.request, NULL, &summary, &outcome,
+                                      prepared_root, sizeof(prepared_root),
+                                      message, sizeof(message));
+    bool leftover_kept = nk_platform_dir_exists(fixture.paths.retired_root);
+#if defined(_WIN32) || defined(_WIN64)
+    CloseHandle(holder);
+    bool stuck = true;
+#else
+    /* A superuser (a root container) reads past the permission and removes
+     * the leftover, so the folder may be gone; anyone else finds it kept. */
+    if (nk_platform_dir_exists(path)) {
+        assert(chmod(path, 0700) == 0);
+    } else {
+        assert(!stuck);
+    }
+#endif
+    assert(result == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_REUSED);
+    assert(strcmp(prepared_root, fixture.paths.final_root) == 0);
+    if (stuck) assert(leftover_kept);
+
+    /* Once nothing holds it, the next staging of the title clears it. */
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_REUSED);
+    assert(!nk_platform_dir_exists(fixture.paths.retired_root));
+    printf("[XB_TEST] A stuck leftover does not block a matching staged tree PASSED\n");
+}
+
+/* Replacing a tree takes two renames. An interruption between them leaves no
+ * games/<disc>: the previous tree in .retired and, when the new one was
+ * complete, the new tree with its staging record in .staging. The next staging
+ * puts one of them back in place instead of discarding both. */
+static void test_title_staging_recovers_an_interrupted_promotion(void) {
+    TitleStageFixture fixture;
+    title_stage_fixture(&fixture, "TEST90013");
+    PlayerStageSummary summary;
+    PlayerStageTitleOutcome outcome;
+    char prepared_root[NK_MAX_PATH];
+    char message[1024];
+    char path[NATIVE_TEST_PATH_MAX];
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_STAGED);
+
+    /* Only the previous tree survived, under .retired: it comes back. */
+    title_join(path, sizeof(path), fixture.paths.final_root, "previous-marker.bin");
+    write_file_bytes(path, "previous", 8);
+    assert(rename(fixture.paths.final_root, fixture.paths.retired_root) == 0);
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_REUSED);
+    assert(nk_platform_file_exists(path));
+    assert(!nk_platform_dir_exists(fixture.paths.retired_root));
+    assert(!nk_platform_dir_exists(fixture.paths.staging_root));
+
+    /* The new complete tree waits under .staging and the previous one under
+     * .retired: the new one is promoted and the previous one removed. */
+    remove(path);
+    title_join(path, sizeof(path), fixture.paths.final_root, "new-marker.bin");
+    write_file_bytes(path, "new", 3);
+    assert(rename(fixture.paths.final_root, fixture.paths.staging_root) == 0);
+    char older[NATIVE_TEST_PATH_MAX];
+    assert(nk_platform_mkdir_p(fixture.paths.retired_root));
+    title_join(older, sizeof(older), fixture.paths.retired_root, "EBOOT.BIN");
+    write_file_bytes(older, "OLD!", 4);
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_REUSED);
+    assert(nk_platform_file_exists(path));
+    assert(summary.extracted_asset_count == 1);
+    assert(!nk_platform_dir_exists(fixture.paths.retired_root));
+    assert(!nk_platform_dir_exists(fixture.paths.staging_root));
+    printf("[XB_TEST] An interrupted promotion is recovered, not discarded PASSED\n");
+}
+
 /* nk_xb_unpack writes a file-backed archive's members under one destination
  * tree: nested member folders are made, each member holds its own bytes, and
  * the progress callback sees one call per written member carrying the
@@ -2147,10 +2534,16 @@ int main(void) {
     test_archive_vfs_mount_scaling();
     test_archive_vfs_keeps_one_open_handle();
     test_staging_cleanup_boundary();
+    test_staging_discard_with_a_shared_open_file();
+    test_staging_discard_with_read_only_entries();
     test_staging_discard_reparse_boundary();
     test_iso_to_native_staging_pipeline();
+    test_staging_unpacks_every_xb_variant();
     test_title_staging_transaction();
     test_title_staging_names_a_long_data_folder();
+    test_title_staging_skips_a_broken_support_prx();
+    test_title_staging_reuses_past_a_stuck_leftover();
+    test_title_staging_recovers_an_interrupted_promotion();
     test_nk_xb_unpack();
     printf("[XB_TEST] ALL NATIVE XB PARSER TESTS PASSED\n");
     return 0;
