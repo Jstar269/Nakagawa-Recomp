@@ -2357,6 +2357,9 @@ void player_app_outdated_scan_finish(PlayerApp *app, const PlayerOutdatedScan *s
                                      const char *player_version);
 /* The source tree a build would use: the folder above tools/nk_cli.py. */
 bool player_app_build_source_root(const PlayerApp *app, char *out, size_t out_size);
+/* That folder for the nk_cli.py path cli: "." for a relative tools/nk_cli.py, and the root
+   itself ("/", "C:\") for a tree at a filesystem or drive root. */
+bool player_source_root_from_cli(const char *cli, char *out, size_t out_size);
 
 bool player_app_game_is_outdated(const PlayerApp *app, const GameRecord *game);
 int player_app_outdated_count(const PlayerApp *app);

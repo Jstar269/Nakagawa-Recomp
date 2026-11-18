@@ -4349,18 +4349,24 @@ bool player_app_remove_game(PlayerApp *app, int game_index) {
     return true;
 }
 
-/* A disc ID used as a folder name: letters, digits, '-' and '_' only, so it
-   can never name a parent, a separator or a drive. */
-static bool player_removal_disc_id_ok(const char *disc_id) {
-    if (!disc_id || !disc_id[0] || strlen(disc_id) >= NK_MAX_DISC_ID_LEN) return false;
-    for (const char *p = disc_id; *p; ++p) {
-        char c = *p;
+/* The first length bytes of disc_id as a disc ID that fits the ID buffer: ASCII letters,
+   digits, '-' and '_' only, so it can never name a parent, a separator or a drive. The one
+   rule for removal, the rebuild queue and the launch title value (audit 2026-11-17). */
+static bool player_disc_id_text_ok(const char *disc_id, size_t length) {
+    if (!disc_id || length == 0u || length >= NK_MAX_DISC_ID_LEN) return false;
+    for (size_t i = 0u; i < length; ++i) {
+        char c = disc_id[i];
         if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
               c == '-' || c == '_')) {
             return false;
         }
     }
     return true;
+}
+
+/* A disc ID used as a folder name. */
+static bool player_removal_disc_id_ok(const char *disc_id) {
+    return disc_id && player_disc_id_text_ok(disc_id, strlen(disc_id));
 }
 
 bool player_app_logs_dir(char *out, size_t out_size) {
@@ -4614,7 +4620,16 @@ bool player_app_remove_game_and_data(PlayerApp *app, int game_index, unsigned al
     char library_path[NK_MAX_PATH];
     NkFileLock lock;
     bool locked = false;
-    if (plan.path_count > 0 && player_library_file_path(app, library_path, sizeof(library_path))) {
+    if (plan.path_count > 0) {
+        /* A library file that cannot be named cannot be read again either: as with
+           one that cannot be read, nothing is deleted (audit 2026-11-17). */
+        if (!player_library_file_path(app, library_path, sizeof(library_path))) {
+            if (error && error_size) {
+                snprintf(error, error_size, "The library file could not be read, so nothing "
+                         "was removed or deleted.");
+            }
+            return false;
+        }
         if (nk_library_lock_acquire(&lock, library_path, NK_LIBRARY_LOCK_TIMEOUT_MS) != NK_OK) {
             if (error && error_size) {
                 snprintf(error, error_size, "The library is in use by another program. "
@@ -4755,7 +4770,7 @@ void player_app_drop_add(PlayerApp *app, const char *path) {
 
 static const char *player_path_base_name(const char *path) {
     const char *name = path;
-    for (const char *p = path; *p; p++) {
+    for (const char *p = path; p && *p; p++) {
         if (*p == '/' || *p == '\\') name = p + 1;
     }
     return name;
@@ -5473,6 +5488,26 @@ static void player_report_copy_text(char *out, size_t out_size, const char *in,
     out[n] = '\0';
 }
 
+/* The redacted text, then at most max_bytes of it: a user name or profile path cut at the
+   limit would no longer match the redaction and would reach the link (audit 2026-11-17).
+   A replacement is at most five times what it replaces ("<user>" for a two-letter name). */
+static void player_report_redacted_text(char *out, size_t out_size, const char *in,
+                                        const char *profile, const char *user,
+                                        size_t max_bytes) {
+    size_t n = in ? strlen(in) : 0u;
+    char *scratch;
+    size_t scratch_size;
+    if (out_size == 0) return;
+    out[0] = '\0';
+    if (n > (SIZE_MAX - 64u) / 5u) return;
+    scratch_size = n * 5u + 64u;
+    scratch = (char *)malloc(scratch_size);
+    if (!scratch) return;
+    player_report_redact(in ? in : "", profile, user, scratch, scratch_size);
+    player_report_copy_text(out, out_size, scratch, max_bytes);
+    free(scratch);
+}
+
 bool player_report_discussion_url(const PlayerReportFacts *facts, const char *profile,
                                   const char *user, char *out, size_t out_size) {
     /* The free text each field may take; with these the whole link stays near
@@ -5490,8 +5525,8 @@ bool player_report_discussion_url(const PlayerReportFacts *facts, const char *pr
     size_t used = 0;
     if (!facts || !out || out_size == 0) return false;
     out[0] = '\0';
-    player_report_copy_text(name, sizeof(name), facts->title_name, 96u);
-    player_report_copy_text(problem, sizeof(problem), facts->problem, 96u);
+    player_report_redacted_text(name, sizeof(name), facts->title_name, profile, user, 96u);
+    player_report_redacted_text(problem, sizeof(problem), facts->problem, profile, user, 96u);
     player_report_copy_text(disc_id, sizeof(disc_id), facts->disc_id, 31u);
     player_report_copy_text(disc_version, sizeof(disc_version), facts->disc_version, 23u);
     player_report_copy_text(version, sizeof(version), facts->version, 63u);
@@ -6225,9 +6260,18 @@ bool player_app_launch_finish(PlayerApp *app, PlayerLaunchWork *work) {
         /* A bundled demo or sample that ran is not a library title: its last-played
          * time stays in memory and the library file is left as the user made it. */
         if (app->library.library_path[0] && !app->games[game_index].is_sample) {
-            nk_library_add_or_update(&app->library, &app->games[game_index]);
-            nk_library_commit_entry(&app->library, &app->games[game_index],
-                                    app->library.library_path);
+            /* A last-played time the library file did not take is said in the
+               developer log, not dropped (audit 2026-11-17). */
+            NkResult saved = nk_library_add_or_update(&app->library, &app->games[game_index]);
+            if (saved == NK_OK) {
+                saved = nk_library_commit_entry(&app->library, &app->games[game_index],
+                                                app->library.library_path);
+            }
+            if (saved != NK_OK) {
+                player_dev_log_add(app, "library",
+                                   "%s: the last-played time could not be saved to the "
+                                   "library file (%d)", work->game.disc_id, (int)saved);
+            }
         }
     }
     printf("[PLAYER] Game started successfully (PID: %d)!\n", app->launch_session.process.process_id);
@@ -6405,8 +6449,13 @@ void player_app_stop_game(PlayerApp *app) {
         if (nk_launch_keep_run_log(app->boot_event_file_path, app->launch_session.disc_id,
                                    kept_log, sizeof(kept_log))) {
             player_dev_log_add(app, "runtime", "game output kept in %s", kept_log);
+            (void)nk_remove_utf8(app->boot_event_file_path);
+        } else {
+            /* The cache file is then the run's only output: it stays, as on the
+               other stop paths (audit 2026-11-17). */
+            player_dev_log_add(app, "runtime",
+                               "game output could not be kept in the logs folder");
         }
-        (void)nk_remove_utf8(app->boot_event_file_path);
     }
 }
 
@@ -6529,7 +6578,15 @@ static bool player_read_semantic_stop(const char *path, char *boundary,
     if (!events) return false;
     char line[512];
     bool found = false;
+    /* Only a line's start is read as an event: the guest's and the runtime's own
+       output share the file, and a later chunk of a long line is not a line
+       (audit 2026-11-17). */
+    bool at_line_start = true;
     while (fgets(line, sizeof(line), events)) {
+        size_t chunk_len = strlen(line);
+        bool chunk_at_start = at_line_start;
+        at_line_start = chunk_len > 0 && line[chunk_len - 1u] == '\n';
+        if (!chunk_at_start) continue;
         if (strncmp(line, prefix, sizeof(prefix) - 1u) != 0) continue;
         const char *start = line + sizeof(prefix) - 1u;
         const char *separator = strchr(start, ' ');
@@ -6791,11 +6848,13 @@ static void player_monitor_stalled_game_events(PlayerApp *app) {
     if (!app || !app->boot_event_file_path[0]) return;
     FILE *events = nk_fopen_utf8(app->boot_event_file_path, "rb");
     if (!events) return;
-    if (fseek(events, 0, SEEK_END) != 0) {
+    /* 64-bit offsets: a long run's session file passes 2 GiB, beyond a Windows
+       long (audit 2026-11-17). */
+    if (nk_fseek64(events, 0, SEEK_END) != 0) {
         fclose(events);
         return;
     }
-    long file_end = ftell(events);
+    int64_t file_end = nk_ftell64(events);
     if (file_end < 0) {
         fclose(events);
         return;
@@ -6803,7 +6862,7 @@ static void player_monitor_stalled_game_events(PlayerApp *app) {
     if (app->boot_event_read_offset > (uint64_t)file_end) {
         app->boot_event_read_offset = 0;
     }
-    if (fseek(events, (long)app->boot_event_read_offset, SEEK_SET) != 0) {
+    if (nk_fseek64(events, (int64_t)app->boot_event_read_offset, SEEK_SET) != 0) {
         fclose(events);
         return;
     }
@@ -9174,10 +9233,13 @@ static bool player_is_usable_mips_elf32(const char *path, bool module) {
    then renamed into place, so a failed or interrupted run leaves nothing.
    Firmware is refused by the boundary before any key is read. Returns the
    named result (nk_psp_status_name, or VALIDATION_FAILURE, OUTPUT_EXISTS,
-   RESOURCE_LIMIT); "VALIDATED_DECRYPTED" means the file is in place. */
+   RESOURCE_LIMIT); "VALIDATED_DECRYPTED" means the file is in place. shared_keys, when
+   not NULL, is a keystore already holding the built-in tables, so a module check loads
+   them once rather than once per module (audit 2026-11-17); else the call loads its own. */
 static const char *player_decrypt_disc_file(const char *iso_path, uint32_t lba,
                                             uint32_t size, const char *directory,
                                             const char *destination, bool module,
+                                            const NkKeystore *shared_keys,
                                             char *detail, size_t detail_size) {
     char staged[NK_MAX_PATH * 2 + 340];
     char key_error[160];
@@ -9185,7 +9247,7 @@ static const char *player_decrypt_disc_file(const char *iso_path, uint32_t lba,
     uint8_t *plain = NULL;
     size_t plain_size = 0;
     NkIsoReader *reader;
-    NkKeystore *keys;
+    NkKeystore *keys = NULL;
     NkPspCtx ctx;
     FILE *out;
     int rc;
@@ -9208,15 +9270,17 @@ static const char *player_decrypt_disc_file(const char *iso_path, uint32_t lba,
         return "IO_FAILURE";
     }
     nk_iso_reader_close(reader);
-    keys = nk_keystore_create();
-    if (keys == NULL ||
-        nk_keystore_load_builtin(keys, key_error, sizeof(key_error)) != NK_PSP_OK) {
-        nk_keystore_free(keys);
-        free(input);
-        if (detail && detail_size) snprintf(detail, detail_size, "%s", keys ? key_error : "out of memory");
-        return "INTERNAL_ERROR";
+    if (shared_keys == NULL) {
+        keys = nk_keystore_create();
+        if (keys == NULL ||
+            nk_keystore_load_builtin(keys, key_error, sizeof(key_error)) != NK_PSP_OK) {
+            nk_keystore_free(keys);
+            free(input);
+            if (detail && detail_size) snprintf(detail, detail_size, "%s", keys ? key_error : "out of memory");
+            return "INTERNAL_ERROR";
+        }
     }
-    nk_psp_ctx_init(&ctx, keys);
+    nk_psp_ctx_init(&ctx, shared_keys ? shared_keys : keys);
     rc = nk_container_decrypt(&ctx, input, size, &plain, &plain_size);
     nk_keystore_free(keys);
     free(input);
@@ -9299,7 +9363,7 @@ static const char *player_decrypt_disc_eboot(const char *iso_path, const char *d
         if (detail && detail_size) snprintf(detail, detail_size, "EBOOT.BIN could not be found on the disc");
         return "IO_FAILURE";
     }
-    return player_decrypt_disc_file(iso_path, lba, size, directory, elf_path, false,
+    return player_decrypt_disc_file(iso_path, lba, size, directory, elf_path, false, NULL,
                                     detail, detail_size);
 }
 
@@ -9609,9 +9673,10 @@ bool player_app_delete_kept_homebrew(PlayerApp *app, const char *key, char *erro
         return false;
     }
     /* Another player may have added the title since this library was read: the file is read
-       again under the library lock, held while the files are deleted. */
-    if (player_library_file_path(app, library_path, sizeof(library_path)) &&
-        !nk_platform_path_missing(library_path)) {
+       again under the library lock, held while the files are deleted. The lock is taken even
+       while there is no library file yet, since another player can make one with this title
+       in it (audit 2026-11-17). */
+    if (player_library_file_path(app, library_path, sizeof(library_path))) {
         GameRecord *probe = (GameRecord *)calloc(1, sizeof(*probe));
         PlayerLibraryFileImages images = PLAYER_LIBRARY_FILE_UNREADABLE;
         if (nk_library_lock_acquire(&lock, library_path, NK_LIBRARY_LOCK_TIMEOUT_MS) != NK_OK) {
@@ -9625,7 +9690,9 @@ bool player_app_delete_kept_homebrew(PlayerApp *app, const char *key, char *erro
         locked = true;
         if (probe) {
             snprintf(probe->disc_id, sizeof(probe->disc_id), "%s", key);
-            images = player_library_file_other_image(probe, library_path);
+            images = nk_platform_path_missing(library_path)
+                ? PLAYER_LIBRARY_FILE_NO_OTHER_IMAGE
+                : player_library_file_other_image(probe, library_path);
             free(probe);
         }
         if (images != PLAYER_LIBRARY_FILE_NO_OTHER_IMAGE) {
@@ -10157,15 +10224,6 @@ bool player_disc_image_expand(PlayerPsnPackage *package,
     return true;
 }
 
-/* The last component of a path, for the progress line. */
-static const char *player_path_file_name(const char *path) {
-    const char *name = path;
-    for (const char *p = path; p && *p; p++) {
-        if (*p == '/' || *p == '\\') name = p + 1;
-    }
-    return name;
-}
-
 void player_app_psn_conversion_begin(PlayerApp *app, const PlayerPsnPackage *package) {
     if (app == NULL || package == NULL) return;
     app->psn_package = *package;
@@ -10186,7 +10244,7 @@ void player_app_psn_conversion_begin(PlayerApp *app, const PlayerPsnPackage *pac
     app->wizard.is_extracting = true;
     app->wizard.total_files = 1;
     if (package->disc_format != NK_DISC_FORMAT_NONE) {
-        const char *name = player_path_file_name(package->pbp_path);
+        const char *name = player_path_base_name(package->pbp_path);
         snprintf(app->wizard.extraction_current_file,
                  sizeof(app->wizard.extraction_current_file), "%.200s", name);
         snprintf(app->wizard.status_message, sizeof(app->wizard.status_message),
@@ -10637,6 +10695,8 @@ static bool player_check_guest_modules(const GameRecord *game,
     const char *first_status = "";
     PlayerModuleScanStatus scan_status;
     bool listed = true;
+    NkKeystore *module_keys = NULL;
+    bool module_keys_tried = false;
     if (!game || !game->iso_path[0] || !game->disc_id[0]) {
         return true;
     }
@@ -10723,9 +10783,22 @@ static bool player_check_guest_modules(const GameRecord *game,
          * the built-in tables. It stays not ready only when that stops. */
         {
             char decrypt_detail[320];
+            /* The built-in tables, loaded on the first module that needs them. One
+               that cannot be loaded leaves each call to load (and report) its own. */
+            if (!module_keys_tried) {
+                char key_error[160];
+                module_keys_tried = true;
+                module_keys = nk_keystore_create();
+                if (module_keys != NULL &&
+                    nk_keystore_load_builtin(module_keys, key_error, sizeof(key_error)) !=
+                        NK_PSP_OK) {
+                    nk_keystore_free(module_keys);
+                    module_keys = NULL;
+                }
+            }
             const char *status = player_decrypt_disc_file(
                 game->iso_path, module->lba, module->size, decrypted_dir,
-                module_path, true, decrypt_detail, sizeof(decrypt_detail));
+                module_path, true, module_keys, decrypt_detail, sizeof(decrypt_detail));
             if (strcmp(status, "VALIDATED_DECRYPTED") == 0) {
                 input->encrypted_ready++;
                 ready++;
@@ -10744,6 +10817,7 @@ static bool player_check_guest_modules(const GameRecord *game,
             }
         }
     }
+    nk_keystore_free(module_keys);
     if (not_ready == 0) {
         if (decrypted > 0) {
             snprintf(message, sizeof(message),
@@ -11599,17 +11673,25 @@ static bool player_package_preflight_input_unchanged(
     return memcmp(sizes, preflight->input_file_sizes, sizeof(sizes)) == 0;
 }
 
-static bool player_package_preflight_cache_matches(
-    const PlayerPackageBuildPreflight *preflight, const GameRecord *game,
-    const char *runtime_root, int64_t source_size, int64_t profile_size,
-    int64_t decrypted_size) {
+/* Whether the preflight was made for this card: the same disc, title, image and
+   executable, in the same experimental mode. One check for the cache and both getters, so
+   they cannot drift apart (audit 2026-11-17). */
+static bool player_package_preflight_is_for(const PlayerPackageBuildPreflight *preflight,
+                                            const GameRecord *game) {
     return preflight && game && preflight->checked &&
            preflight->is_experimental == game->is_experimental &&
            strcmp(preflight->disc_id, game->disc_id) == 0 &&
            strcmp(preflight->title_id, game->title_id) == 0 &&
            strcmp(preflight->iso_path, game->iso_path) == 0 &&
+           strcmp(preflight->selected_executable, game->selected_executable) == 0;
+}
+
+static bool player_package_preflight_cache_matches(
+    const PlayerPackageBuildPreflight *preflight, const GameRecord *game,
+    const char *runtime_root, int64_t source_size, int64_t profile_size,
+    int64_t decrypted_size) {
+    return player_package_preflight_is_for(preflight, game) &&
            strcmp(preflight->runtime_root, runtime_root ? runtime_root : "") == 0 &&
-           strcmp(preflight->selected_executable, game->selected_executable) == 0 &&
            preflight->source_size_bytes == source_size &&
            preflight->profile_size_bytes == profile_size &&
            preflight->decrypted_executable_size_bytes == decrypted_size &&
@@ -11820,14 +11902,7 @@ const PlayerInputReport *player_app_package_build_input(const PlayerApp *app,
     if (!app || game_index < 0 || game_index >= app->game_count) return NULL;
     preflight = &app->package_build_preflight;
     game = &app->games[game_index];
-    if (!preflight->checked ||
-        preflight->is_experimental != game->is_experimental ||
-        strcmp(preflight->disc_id, game->disc_id) != 0 ||
-        strcmp(preflight->title_id, game->title_id) != 0 ||
-        strcmp(preflight->iso_path, game->iso_path) != 0 ||
-        strcmp(preflight->selected_executable, game->selected_executable) != 0) {
-        return NULL;
-    }
+    if (!player_package_preflight_is_for(preflight, game)) return NULL;
     return &preflight->input;
 }
 
@@ -11838,14 +11913,7 @@ const PlayerPreflightCheck *player_app_package_build_preflight_blocker(
     if (!app || game_index < 0 || game_index >= app->game_count) return NULL;
     preflight = &app->package_build_preflight;
     game = &app->games[game_index];
-    if (!preflight->checked ||
-        preflight->is_experimental != game->is_experimental ||
-        strcmp(preflight->disc_id, game->disc_id) != 0 ||
-        strcmp(preflight->title_id, game->title_id) != 0 ||
-        strcmp(preflight->iso_path, game->iso_path) != 0 ||
-        strcmp(preflight->selected_executable, game->selected_executable) != 0) {
-        return NULL;
-    }
+    if (!player_package_preflight_is_for(preflight, game)) return NULL;
     return preflight->passed ? NULL : &preflight->blocker;
 }
 
@@ -11889,6 +11957,13 @@ bool player_app_build_source_root(const PlayerApp *app, char *out, size_t out_si
     if (!out || out_size == 0) return false;
     out[0] = '\0';
     if (!app || !package_builder_find_cli(app->install_root, cli, sizeof(cli))) return false;
+    return player_source_root_from_cli(cli, out, out_size);
+}
+
+bool player_source_root_from_cli(const char *cli, char *out, size_t out_size) {
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    if (!cli || !cli[0]) return false;
     /* <root>/tools/nk_cli.py: the root is two names up. A bare relative
        "tools/nk_cli.py" is the working directory's. */
     size_t length = strlen(cli);
@@ -11896,6 +11971,15 @@ bool player_app_build_source_root(const PlayerApp *app, char *out, size_t out_si
         while (length > 0 && cli[length - 1] != '/' && cli[length - 1] != '\\') length--;
         if (length == 0) break;
         length--;
+    }
+    /* A tree at a filesystem or drive root keeps that root ("/", "C:\"), never the
+       working directory or the drive's current folder (audit 2026-11-17). */
+    if (length == 0 && (cli[0] == '/' || cli[0] == '\\')) {
+        length = 1;
+    } else if (length == 2 && cli[1] == ':' &&
+               ((cli[0] >= 'A' && cli[0] <= 'Z') || (cli[0] >= 'a' && cli[0] <= 'z')) &&
+               (cli[2] == '\\' || cli[2] == '/')) {
+        length = 3;
     }
     if (length == 0) {
         if (out_size < 2) return false;
@@ -12265,13 +12349,7 @@ static bool player_queue_kind_from_name(const char *name, PlayerQueueKind *out) 
 }
 
 static bool player_rebuild_disc_id_valid(const char *disc_id) {
-    size_t length = disc_id ? strlen(disc_id) : 0u;
-    if (length == 0 || length >= MAX_DISC_ID_LEN) return false;
-    for (size_t i = 0; i < length; i++) {
-        unsigned char c = (unsigned char)disc_id[i];
-        if (!isalnum(c) && c != '-' && c != '_') return false;
-    }
-    return true;
+    return disc_id && player_disc_id_text_ok(disc_id, strlen(disc_id));
 }
 
 bool player_app_rebuild_queue_save(const PlayerApp *app) {
@@ -12833,12 +12911,7 @@ bool player_app_set_nickname(PlayerApp *app, const char *nickname) {
 
 /* A disc ID a command line can carry as it is: letters, digits, '-' and '_'. */
 static bool launch_title_disc_ok(const char *disc_id, size_t length) {
-    if (length == 0u || length >= NK_MAX_DISC_ID_LEN) return false;
-    for (size_t i = 0u; i < length; ++i) {
-        unsigned char c = (unsigned char)disc_id[i];
-        if (!isalnum(c) && c != '-' && c != '_') return false;
-    }
-    return true;
+    return player_disc_id_text_ok(disc_id, length);
 }
 
 static bool launch_title_sha1_ok(const char *text) {

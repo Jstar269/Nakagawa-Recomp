@@ -67,8 +67,10 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <direct.h>
+#include <io.h>
 #include <process.h>
 #include <windows.h>
+#include <winioctl.h>
 #include <wchar.h>
 #define test_rmdir _rmdir
 #define nk_ps_chdir _chdir
@@ -1925,6 +1927,16 @@ static bool dev_log_contains(const PlayerApp *app, const char *needle) {
     return false;
 }
 
+/* How many developer log lines hold `needle`. */
+static size_t dev_log_count(const PlayerApp *app, const char *needle) {
+    size_t count = 0u;
+    for (size_t i = 0; i < player_dev_log_count(app); i++) {
+        const char *line = player_dev_log_line(app, i);
+        if (line && strstr(line, needle)) count++;
+    }
+    return count;
+}
+
 /* Launch through the player-owned session path, let the child reach a
  * bounded exit, then settle the session at `settle_tick`. Pins the repeat
  * contract: identical save root, no stuck running state, no retained child
@@ -2275,6 +2287,20 @@ static void test_report_this_game(void) {
         assert(player_report_discussion_url(&named, RP_HOME, user, url, sizeof(url)));
         assert(strstr(url, "Synthetic") == NULL);
         assert(strstr(url, "%3Cuser%3E%20Tennis") != NULL);
+        /* A user name across the 96-byte limit of the title and the problem is redacted
+           before the cut, so no part of it reaches the link (audit 2026-11-17). */
+        {
+            char straddle[160];
+            memset(straddle, 'a', 90u);
+            snprintf(straddle + 90, sizeof(straddle) - 90u, " %s Tennis", user);
+            PlayerReportFacts cut = from_card;
+            cut.title_name = straddle;
+            cut.problem = straddle;
+            assert(player_report_discussion_url(&cut, RP_HOME, user, url, sizeof(url)));
+            assert(strstr(url, "Synth") == NULL);
+            assert(report_query_value(url, "title", value, sizeof(value)));
+            assert(report_utf8_valid(value));
+        }
 
         /* The known cause: the card links issue 308; the copied details name
            the boundary, the renderer and the known issue. Paths show as "~",
@@ -4165,6 +4191,23 @@ static void test_outdated_packages_rebuild(PlayerApp *app, const char *user_root
     char text[256];
     bool offers = false;
     PlayerRebuildCard card;
+
+    /* The source tree is the folder above tools/: a tree at a filesystem or drive root is
+       that root, never the working directory (audit 2026-11-17). */
+    {
+        char root[64];
+        assert(player_source_root_from_cli("/tools/nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, "/") == 0);
+        assert(player_source_root_from_cli("C:\\tools\\nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, "C:\\") == 0);
+        assert(player_source_root_from_cli("/srv/tree/tools/nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, "/srv/tree") == 0);
+        assert(player_source_root_from_cli("C:\\tree\\tools\\nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, "C:\\tree") == 0);
+        assert(player_source_root_from_cli("tools/nk_cli.py", root, sizeof(root)));
+        assert(strcmp(root, ".") == 0);
+        assert(!player_source_root_from_cli("C:\\tree\\tools\\nk_cli.py", root, 3u));
+    }
 
     write_tree_file(install_root, "tools/analyze.py", "analyzer, this version\n");
     write_tree_file(install_root, "tools/analyze_cfg.py", "analyzer cfg, this version\n");
@@ -6109,6 +6152,85 @@ static void test_removal_says_when_the_card_stays(void) {
     printf("PASS: remove game and data says when the card could not be removed\n");
 }
 
+/* Audit 2026-11-17: with no library path of its own and a data folder that cannot be
+ * named, Remove took no lock and did not read the library file again, so a second image
+ * of the disc ID another player had added lost its folders. Nothing is deleted now.
+ *
+ * Failing before: the package folder was deleted, then the card stayed for a library
+ * file that could not be updated. */
+static void test_removal_without_a_library_file_deletes_nothing(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    static const char variable[] = "LOCALAPPDATA";
+    static const char start[] = "C:\\";
+#elif defined(__linux__) && !defined(__ANDROID__)
+    static const char variable[] = "XDG_DATA_HOME";
+    static const char start[] = "/";
+#else
+    printf("SKIP: removal without a library file path (no data-folder variable here)\n");
+    return;
+#endif
+#if defined(_WIN32) || defined(_WIN64) || (defined(__linux__) && !defined(__ANDROID__))
+    RemovalFixture f;
+    char error[NK_MAX_PATH + 256];
+    char probe[NK_MAX_PATH];
+    char long_base[NK_MAX_PATH + 16];
+    char kept_library[sizeof(((NkLibrary *)0)->library_path)];
+    bool was_set = false;
+    bool data_unresolved;
+    removal_fixture_make(&f, "RMVL01768");
+    PlayerApp *app = removal_test_app(&f, "RMVL01768");
+    memcpy(kept_library, app->library.library_path, sizeof(kept_library));
+    app->library.library_path[0] = '\0';
+    /* An absolute data base too long for the data folder under it. */
+    memset(long_base, 'a', sizeof(long_base) - 1u);
+    memcpy(long_base, start, strlen(start));
+    long_base[sizeof(long_base) - 1u] = '\0';
+    char *old_value = capture_environment_value(variable, &was_set);
+    set_environment_value(variable, long_base);
+    data_unresolved = !nk_platform_get_app_data_dir(probe, sizeof(probe));
+    if (data_unresolved) {
+        assert(!player_app_remove_game_and_data(app, 0, 0u, error, sizeof(error)));
+        assert(strstr(error, "library file could not be read") != NULL);
+        assert(nk_platform_dir_exists(f.package));
+        assert(app->game_count == 2);
+    }
+    restore_environment_value(variable, old_value, was_set);
+    free(old_value);
+    assert(data_unresolved);
+    /* With its library path back, the same removal goes ahead. */
+    memcpy(app->library.library_path, kept_library, sizeof(kept_library));
+    assert(player_app_remove_game_and_data(app, 0, 0u, error, sizeof(error)));
+    assert(!nk_platform_dir_exists(f.package));
+    remove(app->library.library_path);
+    free(app);
+    printf("PASS: remove game and data deletes nothing without a library file to read\n");
+#endif
+}
+
+/* A sparse file holding `event` at byte `at`, past what a 32-bit offset reaches, that
+ * takes no disk space. False when this folder cannot hold a sparse file. */
+static bool write_sparse_event_file(const char *path, uint64_t at, const char *event) {
+    bool sparse = true;
+    FILE *file = nk_fopen_utf8(path, "wb");
+    assert(file != NULL);
+#if defined(_WIN32) || defined(_WIN64)
+    {
+        DWORD returned = 0;
+        sparse = DeviceIoControl((HANDLE)_get_osfhandle(_fileno(file)), FSCTL_SET_SPARSE, NULL,
+                                 0, NULL, 0, &returned, NULL) != 0;
+    }
+#endif
+    if (!sparse) {
+        fclose(file);
+        (void)nk_remove_utf8(path);
+        return false;
+    }
+    assert(nk_fseek64(file, (int64_t)at, SEEK_SET) == 0);
+    assert(fputs(event, file) >= 0);
+    assert(fclose(file) == 0);
+    return true;
+}
+
 /* Audit 2026-11-17: Restart game, Try again and the report found the card by its
  * disc ID alone, the first card with it, though two images can share one (a retail
  * disc beside its fan translation).
@@ -7821,11 +7943,28 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
                 assert(strstr(report, "MYHB") == NULL && strstr(report, base) == NULL);
             }
 
-            /* Delete kept copy: the image, the folder copy and the records go; the stick stays. */
+            /* Delete kept copy: the image, the folder copy and the records go; the stick stays.
+               With no library file yet, the library lock is still taken while they go, since
+               another player can make the file with this title in it meanwhile (audit
+               2026-11-17): the lock file it leaves shows it was taken. */
+            char hb_lock_file[NATIVE_TEST_PATH_MAX + 128];
+            snprintf(hb_lock_file, sizeof(hb_lock_file), "%s%clocks%clibrary.lock", base, sep,
+                     sep);
+            assert(remove(lib->library.library_path) == 0);
+            (void)remove(hb_lock_file);
+            assert(nk_platform_path_missing(hb_lock_file));
             assert(player_app_retry_from_error(lib));
             assert(lib->active_view == VIEW_LIBRARY && strstr(lib->library_notice, "deleted"));
             assert(nk_platform_path_missing(again.iso_path) && nk_platform_path_missing(view_root));
             assert(nk_platform_path_missing(record_path));
+            assert(nk_platform_file_exists(hb_lock_file));
+            {
+                NkLibrary *empty = (NkLibrary *)calloc(1, sizeof(NkLibrary));
+                assert(empty != NULL);
+                nk_library_init(empty);
+                assert(nk_library_save(empty, lib->library.library_path) == NK_OK);
+                free(empty);
+            }
             after = psn_test_read_file(stick_file, &after_len);
             assert(after != NULL && after_len == 22u &&
                    memcmp(after, "written by the program", 22u) == 0);
@@ -13674,6 +13813,7 @@ int main(int argc, char **argv) {
     test_remove_from_library_deletes_what_nakagawa_built();
     test_removal_takes_every_enhanced_build();
     test_removal_says_when_the_card_stays();
+    test_removal_without_a_library_file_deletes_nothing();
     test_error_card_names_its_own_image();
     test_boot_event_file_is_deleted_under_non_ascii_folder();
     test_user_identity_is_redacted_in_utf8();
@@ -17878,6 +18018,8 @@ int main(int argc, char **argv) {
     (void)run_log_contains;
     (void)append_runtime_event;
     (void)repeat_launch_and_settle;
+    (void)dev_log_count;
+    (void)write_sparse_event_file;
 #else
     printf("[PLAYER_STATE_TEST] Subtest 20: repeat launch through the player session path\n");
     fflush(stdout);
@@ -18385,6 +18527,75 @@ int main(int argc, char **argv) {
         assert_session_released(&rep->launch_session);
         set_environment_value("NK_REPEAT_LAUNCH_STOP_REASON", "");
 
+        /* Audit 2026-11-17: Stop game deleted the cache file even when its copy to the
+           logs folder failed, losing the run's only output. A folder where the copy is
+           written makes the keep fail here; the cache file stays and the developer log
+           says so. */
+        {
+            static const char not_kept[] = "game output could not be kept in the logs folder";
+            char part_blocker[NK_MAX_PATH + 80];
+            size_t not_kept_before = dev_log_count(rep, not_kept);
+            snprintf(part_blocker, sizeof(part_blocker), "%s.part", run_log_last);
+            assert(nk_platform_mkdir_p(part_blocker));
+            assert(player_app_launch_game(rep, 0));
+            assert(rep->is_game_running);
+            snprintf(hold_event_path, sizeof(hold_event_path), "%s", rep->boot_event_file_path);
+            player_app_stop_game(rep);
+            assert(!rep->is_game_running);
+            assert_session_released(&rep->launch_session);
+            assert(nk_platform_file_exists(hold_event_path));
+            assert(dev_log_count(rep, not_kept) == not_kept_before + 1u);
+            assert(nk_platform_remove_tree(part_blocker, NULL));
+            (void)nk_remove_utf8(hold_event_path);
+        }
+
+        /* Audit 2026-11-17: a last-played time the library file does not take was
+           dropped without a word. The library file's folder is a file here, so its
+           commit fails; the developer log names it. */
+        {
+            static const char not_saved[] = "the last-played time could not be saved";
+            static const char leaf[] = "library.json";
+            size_t root_length = strlen(iso_path);
+            size_t not_saved_before = dev_log_count(rep, not_saved);
+            assert(rep->library.library_path[0] == '\0');
+            assert(root_length + 1u + sizeof(leaf) <= sizeof(rep->library.library_path));
+            memcpy(rep->library.library_path, iso_path, root_length);
+            rep->library.library_path[root_length] = sep;
+            memcpy(rep->library.library_path + root_length + 1u, leaf, sizeof(leaf));
+            assert(player_app_launch_game(rep, 0));
+            assert(rep->is_game_running);
+            assert(rep->games[0].last_played[0] != '\0');
+            assert(dev_log_count(rep, not_saved) == not_saved_before + 1u);
+            player_app_stop_game(rep);
+            assert(!rep->is_game_running);
+            assert_session_released(&rep->launch_session);
+            rep->library.library_path[0] = '\0';
+        }
+
+        /* Audit 2026-11-17: the stop reader took any 511-byte chunk of the session file
+           for a line, so a long output line whose later part reads like a stop event
+           was shown as a semantic stop. Only a line's start is an event. */
+        {
+            char long_line[511 + 128];
+            char error_before[48];
+            memset(long_line, 'x', 511u);
+            snprintf(long_line + 511, sizeof(long_line) - 511u, "%s",
+                     "BOOT_EVENT phase=stop reason=semantic-boundary boundary=fake-stop "
+                     "issue=12\n");
+            snprintf(error_before, sizeof(error_before), "%s", rep->last_error.error_code);
+            set_environment_value("NK_REPEAT_LAUNCH_EXIT_CODE", "0");
+            assert(player_app_launch_game(rep, 0));
+            assert(rep->is_game_running);
+            snprintf(hold_event_path, sizeof(hold_event_path), "%s", rep->boot_event_file_path);
+            rep->launch_time_ms = 50000;
+            assert(nk_launch_wait(&rep->launch_session, 10000) == 0);
+            assert(append_runtime_event(hold_event_path, long_line));
+            assert(player_app_monitor_game_session(rep, 51000));
+            assert(!rep->is_game_running);
+            assert_session_released(&rep->launch_session);
+            assert(strcmp(rep->last_error.error_code, error_before) == 0);
+        }
+
         /* Two titles in a row. The owner's ModNation Racers report listed
            LocoRoco 2's boot events: the report read them from the developer
            log, which spans every launch and keeps only each run's first 48
@@ -18479,10 +18690,51 @@ int main(int argc, char **argv) {
         bool warning_card_has_details = false;
         bool scheduler_summary_kept = false;
         char stall_events_path[NK_MAX_PATH] = "";
+        bool past_2_gib_read = false;
+        bool past_2_gib_skipped = false;
         if (events_ok) {
             snprintf(stall_events_path, sizeof(stall_events_path), "%s",
                      rep->boot_event_file_path);
             (void)player_app_monitor_game_session(rep, 13000);
+            /* Audit 2026-11-17: the session file's reader kept its offsets in a long, 32
+               bits on Windows, so once a long run's output passed 2 GiB no stall, render or
+               window event was read again. While the game runs, its session file is swapped
+               for a sparse one whose event sits past 2 GiB: the reader takes that whole line
+               and moves past it. */
+            {
+                static const char ready_event[] =
+                    "BOOT_EVENT phase=display_flip source=synthetic\n";
+                const uint64_t at = (uint64_t)0x90000000u;
+                char big_path[sizeof(scratch) + 32];
+                snprintf(big_path, sizeof(big_path), "%s%csession-past-2gib.txt", scratch, sep);
+                if (write_sparse_event_file(big_path, at, ready_event)) {
+                    char kept_path[sizeof(rep->boot_event_file_path)];
+                    uint64_t kept_offset = rep->boot_event_read_offset;
+                    bool kept_ready = rep->child_window_ready;
+                    bool kept_seen = rep->child_boot_event_seen;
+                    size_t big_length = strlen(big_path);
+                    memcpy(kept_path, rep->boot_event_file_path, sizeof(kept_path));
+                    assert(big_length < sizeof(rep->boot_event_file_path));
+                    memcpy(rep->boot_event_file_path, big_path, big_length + 1u);
+                    rep->boot_event_read_offset = at;
+                    rep->child_window_ready = false;
+                    /* The start check reads from the top; it is past here. */
+                    rep->child_boot_event_seen = true;
+                    (void)player_app_monitor_game_session(rep, 13000);
+                    past_2_gib_read = rep->is_game_running &&
+                        rep->boot_event_read_offset ==
+                            at + (uint64_t)(sizeof(ready_event) - 1u);
+                    memcpy(rep->boot_event_file_path, kept_path, sizeof(kept_path));
+                    rep->boot_event_read_offset = kept_offset;
+                    rep->child_window_ready = kept_ready;
+                    rep->child_boot_event_seen = kept_seen;
+                    (void)nk_remove_utf8(big_path);
+                } else {
+                    past_2_gib_skipped = true;
+                    printf("[PLAYER_STATE_TEST] SKIP session events past 2 GiB: this folder "
+                           "holds no sparse file\n");
+                }
+            }
             no_early_notice = !rep->stalled_game_notice_visible;
             events_ok = append_runtime_event(
                 stall_events_path,
@@ -18560,6 +18812,7 @@ int main(int argc, char **argv) {
             run_log_contains(run_log_last, "BOOT_EVENT phase=stalled") &&
             run_log_contains(run_log_last, "ready=1 delay=2 wait=3 spin=4");
         assert(events_ok);
+        assert(past_2_gib_read || past_2_gib_skipped);
         assert(no_early_notice);
         assert(warning_appeared);
         assert(warning_raise_requested);
