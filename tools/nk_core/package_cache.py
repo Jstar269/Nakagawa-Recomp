@@ -591,6 +591,24 @@ def _json_nonfinite(_text: str) -> None:
     raise BoundedJsonError("JSON number must be finite; NaN and Infinity are unsupported")
 
 
+def validate_bounded_json_text(
+    text: str,
+    *,
+    max_depth: int = MAX_CACHE_JSON_DEPTH,
+    max_members: int = MAX_CACHE_JSON_MEMBERS,
+    max_items: int = MAX_CACHE_JSON_ITEMS,
+    max_nodes: int = MAX_CACHE_JSON_NODES,
+) -> None:
+    """Check JSON structural ceilings without constructing a parsed object."""
+    _bounded_json_scan(
+        text,
+        max_depth=max_depth,
+        max_members=max_members,
+        max_items=max_items,
+        max_nodes=max_nodes,
+    )
+
+
 def bounded_json_loads(
     text: str,
     *,
@@ -600,7 +618,7 @@ def bounded_json_loads(
     max_nodes: int = MAX_CACHE_JSON_NODES,
 ) -> Any:
     """Parse JSON text under the cache-artifact ceilings with named errors."""
-    _bounded_json_scan(
+    validate_bounded_json_text(
         text,
         max_depth=max_depth,
         max_members=max_members,
@@ -947,6 +965,8 @@ def prune_aot_stages(
 # FidelityFX SDK headers). The player (src/player) is not part of a package, so a
 # change there leaves every package as it is. tools/test_package_cache.py checks that
 # every third_party directory these sources include, or the runtime flags name, is listed.
+# Embedded shader blobs and their GLSL sources are also runtime inputs, including .inc files
+# included by the C sources.
 RUNTIME_SOURCE_DIRECTORIES: tuple[str, ...] = (
     "src/rt",
     "src/core",
@@ -957,6 +977,9 @@ RUNTIME_SOURCE_DIRECTORIES: tuple[str, ...] = (
     "third_party/stb",
     "third_party/xbrz",
 )
+RUNTIME_SOURCE_SUFFIXES = frozenset({
+    ".c", ".h", ".cpp", ".hpp", ".inc", ".comp", ".vert", ".frag",
+})
 # The build rules: the Makefile and the fragments it includes (mk/nk_ui.mk lists the
 # overlay's UI sources).
 RUNTIME_BUILD_RULE_GLOBS: tuple[str, ...] = ("Makefile", "mk/*.mk")
@@ -977,7 +1000,8 @@ def source_tree_digest(
         if not base.is_dir():
             continue
         for path in base.rglob("*"):
-            if path.is_file() and not path.is_symlink() and path.suffix.lower() in {".c", ".h", ".cpp", ".hpp"}:
+            if (path.is_file() and not path.is_symlink()
+                    and path.suffix.lower() in RUNTIME_SOURCE_SUFFIXES):
                 entries.append((path.relative_to(root).as_posix(), path))
     assets_root = root / "assets" / "vfpu"
     if assets_root.is_dir() and not assets_root.is_symlink():
@@ -1101,21 +1125,7 @@ def compiler_target(
     executable = _compiler_executable(selected, env, repository_root)
     if executable is None:
         return f"{selected}:unavailable"
-    try:
-        completed = subprocess.run(
-            [executable, "-dumpmachine"],
-            env=dict(env),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return f"{selected}:unavailable"
-    machine = completed.stdout.strip()
-    if completed.returncode != 0 or not machine:
-        return f"{selected}:unavailable"
-    return machine
+    return _compiler_query(executable, "-dumpmachine", env) or f"{selected}:unavailable"
 
 
 # What a package build compiles with when its caller sets no optimization (#1296, #1730).

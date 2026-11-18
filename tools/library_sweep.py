@@ -256,13 +256,20 @@ def _json_document_bytes(payload: dict) -> bytes:
     ).encode("utf-8")
 
 
+def _is_commit_sha(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(
+        char in "0123456789abcdef" for char in value
+    )
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        char in "0123456789abcdef" for char in value
+    )
+
+
 def _atomic_json_bytes(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_bytes(content)
-    if os.name != "nt":
-        temporary.chmod(0o600)
-    os.replace(temporary, path)
+    package_cache._atomic_write(path, content)
 
 
 def _atomic_json(path: Path, payload: dict) -> None:
@@ -281,7 +288,7 @@ def _source_commit() -> str:
         timeout=10,
     )
     commit = result.stdout.strip()
-    if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+    if not _is_commit_sha(commit):
         raise RuntimeError("Git did not return a full source commit")
     return commit
 
@@ -604,16 +611,34 @@ def _copy_plain_decrypted_file(source: Path, target_dir: Path, name: str, source
     return True
 
 
+def _clear_staged_directory(work_dir: Path, target_dir: Path) -> None:
+    work_root = work_dir.resolve(strict=False)
+    target_real = target_dir.resolve(strict=False)
+    if target_real == work_root or not target_real.is_relative_to(work_root):
+        raise ValueError("optional input staging path escapes the per-title work directory")
+    if not os.path.lexists(target_dir):
+        return
+    is_junction = getattr(target_dir, "is_junction", lambda: False)()
+    if target_dir.is_symlink() or is_junction or not target_dir.is_dir():
+        raise ValueError("optional input staging target is not a real directory")
+    shutil.rmtree(target_dir)
+
+
 def _stage_decrypted_inputs(
     decrypted_titles: Path | None,
     disc_id: str | None,
     work_dir: Path,
 ) -> tuple[int, str]:
     """Stage user-decrypted inputs from <decrypted-titles>/<DISC_ID>/decrypted/."""
+    titles_dir = work_dir / "user-data" / "titles"
+    if disc_id is None:
+        _clear_staged_directory(work_dir, titles_dir)
+    else:
+        user_dir = titles_dir / disc_id / "decrypted"
+        _clear_staged_directory(work_dir, user_dir)
     if decrypted_titles is None or disc_id is None:
         return 0, "NOT_CONFIGURED"
     source_root = decrypted_titles.resolve(strict=False)
-    user_dir = work_dir / "user-data" / "titles" / disc_id / "decrypted"
     direct_dir = source_root / disc_id / "decrypted"
     if direct_dir.is_dir():
         try:
@@ -641,12 +666,13 @@ def _stage_title_manifests(
     archives on the disc) is recognized, and its files are set up, only when
     its manifest is there. Only manifests naming this disc ID are copied.
     """
+    target_dir = work_dir / "user-data" / "manifests"
+    _clear_staged_directory(work_dir, target_dir)
     if title_manifests is None or disc_id is None:
         return 0, "NOT_CONFIGURED"
     source_root = title_manifests.resolve(strict=False)
     if not source_root.is_dir():
         return 0, "NO_MATCH"
-    target_dir = work_dir / "user-data" / "manifests"
     wanted = disc_id.upper()
     copied = 0
     for source in sorted(source_root.glob("*.json"), key=lambda path: path.name.casefold()):
@@ -822,6 +848,14 @@ def _first_module_layout_diagnostic(log_path: Path) -> str | None:
     return None
 
 
+def _route_diagnostic_fields(build_log_path: Path, layout_log_path: Path) -> dict[str, Any]:
+    return {
+        "build_log_path": str(build_log_path),
+        "build_diagnostic": _first_build_diagnostic(build_log_path),
+        "module_layout_diagnostic": _first_module_layout_diagnostic(layout_log_path),
+    }
+
+
 def _run_bringup(
     iso_path: Path,
     work_dir: Path,
@@ -891,9 +925,7 @@ def _run_bringup(
             timed_out_stage=active_stage,
             timed_out_stage_ms=active_elapsed_ms,
             stage_durations_ms=durations,
-            build_log_path=str(build_log_path),
-            build_diagnostic=_first_build_diagnostic(build_log_path),
-            module_layout_diagnostic=_first_module_layout_diagnostic(layout_log_path),
+            **_route_diagnostic_fields(build_log_path, layout_log_path),
         )
     except OSError:
         return RouteOutcome(None)
@@ -907,9 +939,7 @@ def _run_bringup(
             timed_out_stage=active_stage,
             timed_out_stage_ms=active_elapsed_ms,
             stage_durations_ms=durations,
-            build_log_path=str(build_log_path),
-            build_diagnostic=_first_build_diagnostic(build_log_path),
-            module_layout_diagnostic=_first_module_layout_diagnostic(layout_log_path),
+            **_route_diagnostic_fields(build_log_path, layout_log_path),
         )
     try:
         report = package_cache.read_bounded_json(
@@ -921,20 +951,20 @@ def _run_bringup(
             max_nodes=_SWEEP_TITLE_JSON_MAX_NODES,
         )
     except (OSError, ValueError):
+        progress = _read_bringup_progress(progress_path)
         return RouteOutcome(
             None,
             return_code=process.returncode,
-            build_log_path=str(build_log_path),
-            build_diagnostic=_first_build_diagnostic(build_log_path),
-            module_layout_diagnostic=_first_module_layout_diagnostic(layout_log_path),
+            progress=progress,
+            **_route_diagnostic_fields(build_log_path, layout_log_path),
         )
     if not isinstance(report, dict):
+        progress = _read_bringup_progress(progress_path)
         return RouteOutcome(
             None,
             return_code=process.returncode,
-            build_log_path=str(build_log_path),
-            build_diagnostic=_first_build_diagnostic(build_log_path),
-            module_layout_diagnostic=_first_module_layout_diagnostic(layout_log_path),
+            progress=progress,
+            **_route_diagnostic_fields(build_log_path, layout_log_path),
         )
     progress = _read_bringup_progress(progress_path)
     _active_stage, _active_elapsed_ms, durations = _progress_stage_details(progress)
@@ -947,9 +977,7 @@ def _run_bringup(
         return_code=process.returncode,
         progress=progress,
         stage_durations_ms=durations,
-        build_log_path=str(build_log_path),
-        build_diagnostic=_first_build_diagnostic(build_log_path),
-        module_layout_diagnostic=_first_module_layout_diagnostic(layout_log_path),
+        **_route_diagnostic_fields(build_log_path, layout_log_path),
         analyzer_diagnostic=(
             _read_private_analyzer_diagnostic(private_import_report_path)
             if isinstance(analyze_stage, dict) and analyze_stage.get("status") == "FAIL"
@@ -991,8 +1019,10 @@ def _normalize_nid_rows(values) -> list[dict]:
 
 
 def _read_private_nid_rows(sidecar_path: Path, report: dict | None) -> tuple[list[dict], str]:
+    sidecar_mtime_ns = None
     if sidecar_path.is_file():
         try:
+            sidecar_mtime_ns = sidecar_path.stat().st_mtime_ns
             payload = package_cache.read_bounded_json(
                 sidecar_path,
                 max_bytes=_SWEEP_TITLE_JSON_MAX_BYTES,
@@ -1009,6 +1039,13 @@ def _read_private_nid_rows(sidecar_path: Path, report: dict | None) -> tuple[lis
                 return rows, "CAPTURED"
     build_report_rows = []
     for build_report_path in sorted(sidecar_path.parent.rglob("build-report.json")):
+        if sidecar_mtime_ns is None:
+            break
+        try:
+            if build_report_path.stat().st_mtime_ns <= sidecar_mtime_ns:
+                continue
+        except OSError:
+            continue
         try:
             build_report = package_cache.read_build_report_json(build_report_path)
         except (OSError, ValueError):
@@ -1063,10 +1100,16 @@ def _furthest_stage(report: dict | None, progress: dict | None = None) -> str:
         if isinstance(presentation, dict) and presentation.get("frame_submissions", 0) > 0:
             stage = "first presented frame"
     if isinstance(progress, dict):
-        for report_stage, detail in progress.get("stages", {}).items():
-            if detail.get("status") == "RUNNING":
-                stage = _PROGRESS_STAGE_TO_SWEEP_STAGE[report_stage]
-                break
+        progress_stages = progress.get("stages", {})
+        if isinstance(progress_stages, dict):
+            for report_stage, sweep_stage in _PROGRESS_STAGE_TO_SWEEP_STAGE.items():
+                detail = progress_stages.get(report_stage, {})
+                status = detail.get("status") if isinstance(detail, dict) else None
+                if report is None and status in {"PASS", "FAIL", "TIMED_OUT", "RUNNING"}:
+                    stage = sweep_stage
+                elif status == "RUNNING":
+                    stage = sweep_stage
+                    break
     return stage
 
 
@@ -1131,18 +1174,10 @@ def _validate_public_aggregate(payload: object) -> dict:
         raise ValueError("public aggregate contains unrecognized fields")
 
     source_commit = payload["source_commit"]
-    if (
-        not isinstance(source_commit, str)
-        or len(source_commit) != 40
-        or any(char not in "0123456789abcdef" for char in source_commit)
-    ):
+    if not _is_commit_sha(source_commit):
         raise ValueError("public aggregate source_commit is invalid")
     source_fingerprint = payload["source_fingerprint"]
-    if (
-        not isinstance(source_fingerprint, str)
-        or len(source_fingerprint) != 64
-        or any(char not in "0123456789abcdef" for char in source_fingerprint)
-    ):
+    if not _is_sha256(source_fingerprint):
         raise ValueError("public aggregate source_fingerprint is invalid")
     time_budget = payload["time_budget_seconds"]
     if not isinstance(time_budget, int) or isinstance(time_budget, bool) or time_budget < 1:
@@ -1575,10 +1610,13 @@ def _public_aggregate(
     *,
     previous_aggregate: dict | None = None,
     comparison_identity: dict | None = None,
+    rows_validated: bool = False,
+    previous_aggregate_validated: bool = False,
 ) -> dict:
     if comparison_identity is None:
         comparison_identity = _default_comparison_identity()
-    _validate_sweep_rows(rows)
+    if not rows_validated:
+        _validate_sweep_rows(rows)
     if not isinstance(total_isos, int) or isinstance(total_isos, bool) or total_isos < len(rows):
         raise ValueError("public aggregate total ISO count is smaller than the number of recorded rows")
     stage_counts = Counter(row.get("furthest_stage", "identify") for row in rows)
@@ -1655,7 +1693,7 @@ def _public_aggregate(
         "input_responsiveness": "NOT_MEASURED_BY_HEADLESS_BRINGUP",
     }
 
-    if previous_aggregate is not None:
+    if previous_aggregate is not None and not previous_aggregate_validated:
         # The CLI loader already validates its file input. Keep this check so direct
         # callers of _public_aggregate cannot bypass the previous-output contract.
         previous_aggregate = _validate_public_aggregate(previous_aggregate)
@@ -1746,10 +1784,14 @@ def _write_outputs(
     previous_aggregate: dict | None = None,
     comparison_identity: dict | None = None,
     optional_input_fingerprints: dict | None = None,
+    rows_validated: bool = False,
+    previous_aggregate_validated: bool = False,
 ) -> None:
     if comparison_identity is None:
         comparison_identity = _default_comparison_identity()
-    _validate_sweep_rows(rows)
+    if not rows_validated:
+        _validate_sweep_rows(rows)
+        rows_validated = True
     private_payload = {
         "schema_version": 2,
         "source_commit": source_commit,
@@ -1776,12 +1818,14 @@ def _write_outputs(
         total_isos,
         previous_aggregate=previous_aggregate,
         comparison_identity=comparison_identity,
+        rows_validated=rows_validated,
+        previous_aggregate_validated=previous_aggregate_validated,
     )
     private_document = _json_document_bytes(private_payload)
     if len(private_document) > _SWEEP_RESUME_JSON_MAX_BYTES:
         raise ValueError("private sweep report exceeds its configured byte budget")
     try:
-        package_cache.bounded_json_loads(
+        package_cache.validate_bounded_json_text(
             private_document.decode("utf-8"),
             max_depth=_SWEEP_RESUME_JSON_MAX_DEPTH,
             max_members=_SWEEP_RESUME_JSON_MAX_MEMBERS,
@@ -1819,7 +1863,7 @@ def run_sweep(
     paths = _iso_files(iso_root)
     source_commit = source_commit or _source_commit()
     source_fingerprint = _source_fingerprint()
-    if len(source_commit) != 40 or any(char not in "0123456789abcdef" for char in source_commit):
+    if not _is_commit_sha(source_commit):
         raise ValueError("source commit must be a full lowercase Git SHA")
     private_dir.mkdir(parents=True, exist_ok=True)
     private_path = private_dir / "library-sweep.json"
@@ -1852,8 +1896,12 @@ def run_sweep(
         resumed_this_invocation=previous_rows, previous_aggregate=previous_aggregate,
         comparison_identity=comparison_identity,
         optional_input_fingerprints=optional_input_fingerprints,
+        rows_validated=True,
+        previous_aggregate_validated=True,
     )
+    last_iteration_wrote = False
     for index, iso_path in enumerate(paths, start=1):
+        last_iteration_wrote = False
         key = _source_key(iso_path, iso_root)
         stat = iso_path.stat()
         existing = rows_by_key.get(key)
@@ -1990,6 +2038,7 @@ def run_sweep(
                 and outcome.analyzer_diagnostic
             ):
                 row["analyzer_diagnostic"] = outcome.analyzer_diagnostic
+        _validate_sweep_rows([row])
         rows_by_key[key] = row
         run_count += 1
         _write_outputs(
@@ -1998,7 +2047,10 @@ def run_sweep(
             resumed_this_invocation=resumed_count, previous_aggregate=previous_aggregate,
             comparison_identity=comparison_identity,
             optional_input_fingerprints=optional_input_fingerprints,
+            rows_validated=True,
+            previous_aggregate_validated=True,
         )
+        last_iteration_wrote = True
         print(f"[{index}/{len(paths)}] {row['furthest_stage']} ({run_status})")
 
     result = {
@@ -2011,13 +2063,16 @@ def run_sweep(
         "resumed_this_invocation": resumed_count,
         "rows": list(rows_by_key.values()),
     }
-    _write_outputs(
-        private_path, public_output, source_commit, source_fingerprint, time_budget_seconds,
-        list(rows_by_key.values()), total_isos=len(paths), ran_this_invocation=run_count,
-        resumed_this_invocation=resumed_count, previous_aggregate=previous_aggregate,
-        comparison_identity=comparison_identity,
-        optional_input_fingerprints=optional_input_fingerprints,
-    )
+    if not last_iteration_wrote:
+        _write_outputs(
+            private_path, public_output, source_commit, source_fingerprint, time_budget_seconds,
+            list(rows_by_key.values()), total_isos=len(paths), ran_this_invocation=run_count,
+            resumed_this_invocation=resumed_count, previous_aggregate=previous_aggregate,
+            comparison_identity=comparison_identity,
+            optional_input_fingerprints=optional_input_fingerprints,
+            rows_validated=True,
+            previous_aggregate_validated=True,
+        )
     return result
 
 
@@ -2079,14 +2134,7 @@ def _read_private_report_for_merge(path: Path) -> dict:
         raise ValueError(f"private shard report {report_file} has an unsupported schema")
     source_commit = payload.get("source_commit")
     source_fingerprint = payload.get("source_fingerprint")
-    if (
-        not isinstance(source_commit, str)
-        or len(source_commit) != 40
-        or any(char not in "0123456789abcdef" for char in source_commit)
-        or not isinstance(source_fingerprint, str)
-        or len(source_fingerprint) != 64
-        or any(char not in "0123456789abcdef" for char in source_fingerprint)
-    ):
+    if not _is_commit_sha(source_commit) or not _is_sha256(source_fingerprint):
         raise ValueError(f"private shard report {report_file} source identity is invalid")
     time_budget = payload.get("time_budget_seconds")
     if type(time_budget) is not int or time_budget < 1:

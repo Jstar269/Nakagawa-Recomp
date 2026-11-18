@@ -5643,7 +5643,9 @@ static bool package_source_push(char ***items, size_t *count, size_t *capacity, 
  * starts nor ends the name, compared without case as source_tree_digest's
  * suffix.lower() does. */
 static bool package_source_suffix_counts(const char *name) {
-    static const char * const suffixes[] = {".c", ".h", ".cpp", ".hpp", NULL};
+    static const char * const suffixes[] = {
+        ".c", ".h", ".cpp", ".hpp", ".inc", ".comp", ".vert", ".frag", NULL
+    };
     const char *dot = strrchr(name, '.');
     if (!dot || dot == name || dot[1] == '\0') return false;
     for (size_t i = 0; suffixes[i]; i++) {

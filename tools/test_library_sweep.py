@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -124,6 +125,50 @@ class LibrarySweepTests(unittest.TestCase):
         self.assertEqual(lower_key, "game.iso")
         self.assertNotEqual(upper_key, lower_key)
 
+    def test_completed_route_avoids_repeat_validation_and_final_checkpoint_write(self) -> None:
+        _write_iso(self.iso_dir, "one-route.iso", "UCUS99989", "One Route Sentinel")
+        original_write = library_sweep._write_outputs
+        original_validate = library_sweep._validate_sweep_rows
+        original_bounded_loads = library_sweep.package_cache.bounded_json_loads
+        write_count = 0
+        validated_nonempty_sizes: list[int] = []
+        bounded_load_count = 0
+
+        def counted_write(*args, **kwargs):
+            nonlocal write_count
+            write_count += 1
+            return original_write(*args, **kwargs)
+
+        def counted_validate(rows):
+            if rows:
+                validated_nonempty_sizes.append(len(rows))
+            return original_validate(rows)
+
+        def counted_bounded_loads(*args, **kwargs):
+            nonlocal bounded_load_count
+            bounded_load_count += 1
+            return original_bounded_loads(*args, **kwargs)
+
+        with (
+            mock.patch.object(
+                library_sweep, "_run_bringup", return_value=library_sweep.RouteOutcome(_bringup_report())
+            ),
+            mock.patch.object(library_sweep, "_write_outputs", side_effect=counted_write),
+            mock.patch.object(library_sweep, "_validate_sweep_rows", side_effect=counted_validate),
+            mock.patch.object(
+                library_sweep.package_cache,
+                "bounded_json_loads",
+                side_effect=counted_bounded_loads,
+            ),
+        ):
+            library_sweep.run_sweep(
+                self.iso_dir, self.private_dir, self.public_output, **self._run_kwargs()
+            )
+
+        self.assertEqual(write_count, 2)  # initial checkpoint and after the route
+        self.assertEqual(validated_nonempty_sizes, [1])
+        self.assertEqual(bounded_load_count, 0)
+
     def _run_kwargs(self) -> dict:
         return {
             "source_commit": SOURCE_COMMIT,
@@ -132,6 +177,34 @@ class LibrarySweepTests(unittest.TestCase):
             "poll_seconds": 1,
             "max_wait_seconds": 0,
         }
+
+    def test_source_identity_sha_validators_cover_the_full_formats(self) -> None:
+        self.assertTrue(library_sweep._is_commit_sha("a" * 40))
+        self.assertFalse(library_sweep._is_commit_sha("g" * 40))
+        self.assertFalse(library_sweep._is_commit_sha("a" * 39))
+        self.assertTrue(library_sweep._is_sha256("b" * 64))
+        self.assertFalse(library_sweep._is_sha256("b" * 63))
+        self.assertFalse(library_sweep._is_sha256("z" * 64))
+
+    def test_route_diagnostic_fields_keep_their_existing_values(self) -> None:
+        build_log = self.root / "build.log"
+        layout_log = self.root / "layout.log"
+        build_log.write_text("synthetic error: build failure\nsecond line\n", encoding="utf-8")
+        layout_log.write_text("synthetic module layout diagnostic\n", encoding="utf-8")
+
+        fields = library_sweep._route_diagnostic_fields(build_log, layout_log)
+
+        self.assertEqual(fields["build_log_path"], str(build_log))
+        self.assertEqual(fields["build_diagnostic"], "synthetic error: build failure")
+        self.assertEqual(fields["module_layout_diagnostic"], "synthetic module layout diagnostic")
+
+    def test_atomic_json_writer_reuses_package_cache_atomic_write(self) -> None:
+        target = self.root / "atomic-report.json"
+        payload = b"synthetic checkpoint bytes"
+        with mock.patch.object(library_sweep.package_cache, "_atomic_write") as atomic_write:
+            library_sweep._atomic_json_bytes(target, payload)
+
+        atomic_write.assert_called_once_with(target, payload)
 
     def test_identify_refusals_are_source_backed_sweep_blocker_codes(self) -> None:
         # A PlayStation Store package is refused at identify by name. The sweep
@@ -288,6 +361,60 @@ class LibrarySweepTests(unittest.TestCase):
             [mock.call(9003, expected_signals[0]), mock.call(9003, expected_signals[1])],
         )
         process.kill.assert_not_called()
+
+    def test_furthest_stage_uses_finished_progress_when_report_is_missing(self) -> None:
+        progress = {"stages": {
+            "inspect": {"status": "PASS"},
+            "analyze": {"status": "PASS"},
+            "codegen": {"status": "FAIL"},
+        }}
+
+        self.assertEqual(library_sweep._furthest_stage(None, progress), "codegen")
+
+    def test_unparseable_report_keeps_progress_for_the_stage_summary(self) -> None:
+        work_dir = self.private_dir / "unparseable-report-work"
+        work_dir.mkdir(parents=True)
+        iso = _write_iso(self.iso_dir, "unparseable-report.iso", "UCUS99990", "Report Sentinel")
+
+        class UnparseableReportProcess:
+            returncode = 0
+
+            def __init__(self, command, **_kwargs):
+                self.command = command
+
+            def communicate(self, timeout=None):
+                report_path = Path(self.command[self.command.index("--report") + 1])
+                report_path.write_text("[]", encoding="utf-8")
+                progress_path = Path(
+                    self.command[self.command.index("--sweep-progress-report") + 1]
+                )
+                now_ms = int(library_sweep.time.time() * 1000)
+                progress_path.write_text(json.dumps({
+                    "schema_version": 1,
+                    "stages": {
+                        name: {
+                            "status": "PASS",
+                            "started_at_unix_ms": now_ms - 2,
+                            "finished_at_unix_ms": now_ms - 1,
+                            "duration_ms": 1,
+                        }
+                        for name in ("inspect", "prepare_import", "analyze", "codegen")
+                    },
+                }), encoding="utf-8")
+                return "", ""
+
+        with mock.patch.object(library_sweep.subprocess, "Popen", UnparseableReportProcess):
+            outcome = library_sweep._run_bringup(
+                iso,
+                work_dir,
+                work_dir / "bringup.json",
+                work_dir / "sweep-imports.json",
+                7,
+                7,
+            )
+
+        self.assertIsNone(outcome.report)
+        self.assertEqual(library_sweep._furthest_stage(outcome.report, outcome.progress), "codegen")
 
     def _bringup_launch_argument(self, time_budget: int, launch_timeout: int) -> str:
         """The --launch-timeout value one title's bring-up command line carries."""
@@ -1667,6 +1794,59 @@ class LibrarySweepTests(unittest.TestCase):
             "nid": "0x12345678",
             "nid_name": "sceAudioInit",
         }])
+
+    def test_nid_fallback_ignores_build_reports_older_than_the_current_sidecar(self) -> None:
+        work_dir = self.private_dir / "work" / "stale-report"
+        report_dir = work_dir / "user-data" / "packages" / "UCUS99991"
+        report_dir.mkdir(parents=True)
+        build_report = report_dir / "build-report.json"
+        build_report.write_text(json.dumps({
+            "unsupported": {"imports": [{
+                "library": "sceAudio",
+                "nid": "0x12345678",
+                "name": "staleBuildReportImport",
+            }]},
+        }), encoding="utf-8")
+        os.utime(build_report, ns=(1_000_000_000, 1_000_000_000))
+        sidecar = work_dir / "sweep-imports.json"
+        sidecar.write_text(json.dumps({"schema_version": 1, "unsupported_imports": []}),
+                           encoding="utf-8")
+
+        rows, status = library_sweep._read_private_nid_rows(sidecar, _bringup_report())
+        self.assertEqual(rows, [])
+        self.assertEqual(status, "UNAVAILABLE")
+
+        sidecar.unlink()
+        rows, status = library_sweep._read_private_nid_rows(sidecar, _bringup_report())
+        self.assertEqual(rows, [])
+        self.assertEqual(status, "UNAVAILABLE")
+
+    def test_unconfigured_optional_input_staging_clears_old_files(self) -> None:
+        work_dir = self.private_dir / "work" / "stale-optional-inputs"
+        old_decrypted = (
+            work_dir / "user-data" / "titles" / "UCUS99991" / "decrypted" / "old.elf"
+        )
+        old_decrypted.parent.mkdir(parents=True)
+        old_decrypted.write_bytes(b"synthetic old decrypted input")
+        old_manifest = work_dir / "user-data" / "manifests" / "old.json"
+        old_manifest.parent.mkdir(parents=True)
+        old_manifest.write_text("{}", encoding="utf-8")
+
+        decrypted = library_sweep._stage_decrypted_inputs(None, "UCUS99991", work_dir)
+        manifests = library_sweep._stage_title_manifests(None, "UCUS99991", work_dir)
+
+        self.assertEqual(decrypted, (0, "NOT_CONFIGURED"))
+        self.assertEqual(manifests, (0, "NOT_CONFIGURED"))
+        self.assertFalse(old_decrypted.exists())
+        self.assertFalse(old_manifest.exists())
+
+        unknown_disc_input = (
+            work_dir / "user-data" / "titles" / "PREVIOUS_ID" / "decrypted" / "old.prx"
+        )
+        unknown_disc_input.parent.mkdir(parents=True)
+        unknown_disc_input.write_bytes(b"synthetic stale input for previous ID")
+        library_sweep._stage_decrypted_inputs(None, None, work_dir)
+        self.assertFalse(unknown_disc_input.exists())
 
     def test_decrypted_inputs_are_staged_from_the_disc_id_folder(self) -> None:
         decrypted_root = self.root / "decrypted-titles"
