@@ -177,13 +177,24 @@ NkStateStatus nkstate_capture(const NkStateIdentity *self,
                           required[i].name ? required[i].name : "?", required[i].tag,
                           !e ? "exporter" : (!e->save ? "save function" : "load function"));
     }
-    for (size_t i = 0; i < exporter_count; i++) {
+    for (size_t i = 0; i < exporter_count; i++)
         if (!exporters[i].save || !exporters[i].load)
             return refuse(NKSTATE_MISSING_EXPORTER, detail, detail_cap,
                           "subsystem '%s' (segment '%.4s') has no %s function",
                           exporters[i].name ? exporters[i].name : "?", exporters[i].tag,
                           !exporters[i].save ? "save" : "load");
-        order[n++] = &exporters[i];
+    /* The table order is the load order: required subsystems first, in required[] order,
+     * then every other exporter in exporters[] order. Each exporter appears once. */
+    for (size_t i = 0; i < required_count; i++) {
+        const NkStateExporter *e = find_exporter(exporters, exporter_count, required[i].tag);
+        int seen = 0;
+        for (size_t j = 0; j < n; j++) seen |= order[j] == e;
+        if (!seen) order[n++] = e;
+    }
+    for (size_t i = 0; i < exporter_count; i++) {
+        int seen = 0;
+        for (size_t j = 0; j < n; j++) seen |= order[j] == &exporters[i];
+        if (!seen) order[n++] = &exporters[i];
     }
 
     memset(payloads, 0, sizeof payloads);

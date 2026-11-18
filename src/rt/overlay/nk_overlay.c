@@ -103,15 +103,15 @@ float nk_overlay_page_begin(NkUi *ui, const NkOverlayModel *model, float card_wi
     /* The containers are open now, so the inner width returned below must stay positive: a
        page reads 0 or less as "nothing was opened" and would leave them open. A window just
        past the 80 px floor keeps a card one inner pixel wide instead. */
-    if (card < 57.0f) card = 57.0f;
+    if (card < NK_UI_DIALOG_PAD_LEFT + NK_UI_DIALOG_PAD_RIGHT + 1.0f)
+        card = NK_UI_DIALOG_PAD_LEFT + NK_UI_DIALOG_PAD_RIGHT + 1.0f;
     /* Scrolling is the last resort: a page that fits its room does not move. */
     if (!nk_ui_dialog_begin_scroll(ui, OVERLAY_ID_CARD, card, nk_overlay_card_room(model))) {
         nk_ui_end_container(ui);
         nk_ui_end_container(ui);
         return 0.0f;
     }
-    /* The dialog card's padding is 28 px on each side. */
-    return card - 56.0f;
+    return card - (NK_UI_DIALOG_PAD_LEFT + NK_UI_DIALOG_PAD_RIGHT);
 }
 
 void nk_overlay_page_end(NkUi *ui, const char *hint, const NkUiPromptItem *prompts,

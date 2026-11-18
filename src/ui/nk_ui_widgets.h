@@ -200,8 +200,14 @@ void nk_ui_prompt_bar(NkUi *ui, NkUiId id, const char *hint,
 const char *nk_ui_input_label(NkUiPromptStyle style);
 
 /* ---- Dialogs and progress ---------------------------------------------------------- */
-/* A dialog card: raised surface, strong edge, dialog radius, 26/28/22 px
-   padding, 14 px between blocks. Close it with nk_ui_end_container. */
+/* A dialog card: raised surface, strong edge, dialog radius, the padding and gap
+   below. Close it with nk_ui_end_container. A page that sizes its content to the
+   card reads these instead of copying them. */
+#define NK_UI_DIALOG_PAD_TOP 26.0f
+#define NK_UI_DIALOG_PAD_RIGHT 28.0f
+#define NK_UI_DIALOG_PAD_BOTTOM 22.0f
+#define NK_UI_DIALOG_PAD_LEFT 28.0f
+#define NK_UI_DIALOG_GAP 14.0f /* between the card's blocks */
 bool nk_ui_dialog_begin(NkUi *ui, NkUiId id, float width);
 /* The same card at most max_height px tall (0: no limit); content past that
    scrolls inside it, and a control that takes focus there scrolls into view. */

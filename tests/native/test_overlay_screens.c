@@ -563,6 +563,102 @@ static void test_controls(void) {
     nk_ui_destroy(ui);
 }
 
+/* The union of element `id`'s draw commands of `kind` in `list`. */
+static bool list_union(const NkUiDrawList *list, NkUiId id, int kind, int out[4]) {
+    bool found = false;
+    for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &list->cmd[i];
+        if (cmd->element_id != id || (int)cmd->kind != kind) continue;
+        if (!found) {
+            for (int k = 0; k < 4; ++k) out[k] = cmd->bounds[k];
+        } else {
+            if (cmd->bounds[0] < out[0]) out[0] = cmd->bounds[0];
+            if (cmd->bounds[1] < out[1]) out[1] = cmd->bounds[1];
+            if (cmd->bounds[2] > out[2]) out[2] = cmd->bounds[2];
+            if (cmd->bounds[3] > out[3]) out[3] = cmd->bounds[3];
+        }
+        found = true;
+    }
+    return found;
+}
+
+/* A remapped profile's long bindings stay in their cells: the keyboard and controller
+   text of every row is cut to its cell, ending in an ellipsis, and never runs into the
+   next column or past the card, in the one-table layout and in the two tables a short
+   window splits the list into. */
+static void test_controls_long_bindings_fit_their_cells(void) {
+    static const char *const keyboard = "Right Ctrl / Left Click / Left Arrow / Down Arrow / "
+                                        "Right Alt / Page Down / Backspace / Up Arrow";
+    static const char *const controller = "Left paddle 1 / Left paddle 2 / Right shoulder / "
+                                          "Left shoulder / Right stick press";
+    static NkOverlayControlRow rows[10];
+    char what[192];
+    static const int sizes[2][2] = {{1280, 800}, {960, 600}};
+    const NkUiId table = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x003010u);
+    const NkUiId card_id = NK_UI_ID(NK_UI_ID_SCREEN_OVERLAY, 0x000003u);
+    for (size_t r = 0; r < 10u; ++r) {
+        rows[r].psp = k_controls[r].psp;
+        rows[r].keyboard = keyboard;
+        rows[r].controller = controller;
+    }
+    for (int s = 0; s < 2; ++s) {
+        NkUi *ui = overlay_ui(sizes[s][0], sizes[s][1], 1.0f);
+        NkOverlayModel model = base_model((float)sizes[s][0], (float)sizes[s][1]);
+        NkOverlayState state;
+        const NkUiDrawList *list;
+        static char dump[TEXT_DUMP_CAP];
+        bool split = s == 1;
+        size_t first = split ? 5u : 10u;
+        int card[4];
+        if (ui == NULL) return;
+        model.controls = rows;
+        model.control_count = 10u;
+        nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+        nk_overlay_go(&state, NK_OVERLAY_SCREEN_CONTROLS, 0u);
+        (void)settle(ui, &state, &model);
+        nk_ui_begin(ui, 0.0);
+        (void)nk_overlay_frame(ui, &state, &model);
+        list = nk_ui_end(ui);
+        snprintf(what, sizeof what, "%dx%d: the controls card is drawn", sizes[s][0], sizes[s][1]);
+        CHECK(list_union(list, card_id, NK_UI_DRAW_RECTANGLE, card), what);
+        for (size_t t = 0; t < (split ? 2u : 1u); ++t) {
+            const NkUiId base = (NkUiId)(table + (NkUiId)t * 0x100u);
+            size_t count = t == 0u ? first : 10u - first;
+            for (size_t i = 1u; i <= count; ++i) {
+                const NkUiId row_id = (NkUiId)(base + 1u + (NkUiId)i * 8u);
+                int keys[4];
+                int pad[4];
+                int edge = card[2] - (int)NK_UI_DIALOG_PAD_RIGHT;
+                int next[4];
+                bool have = list_union(list, (NkUiId)(row_id + 5u), NK_UI_DRAW_TEXT, keys) &&
+                            list_union(list, (NkUiId)(row_id + 6u), NK_UI_DRAW_TEXT, pad);
+                snprintf(what, sizeof what, "%dx%d table %zu row %zu: both binding cells are drawn",
+                         sizes[s][0], sizes[s][1], t, i);
+                CHECK(have, what);
+                if (!have) continue;
+                if (split && t == 0u &&
+                    list_union(list, (NkUiId)(table + 0x100u + 1u + (NkUiId)i * 8u + 4u),
+                               NK_UI_DRAW_TEXT, next)) {
+                    edge = next[0];
+                }
+                snprintf(what, sizeof what, "%dx%d table %zu row %zu: the keyboard text (right %d) "
+                         "stays left of the controller column (left %d)", sizes[s][0], sizes[s][1],
+                         t, i, keys[2], pad[0]);
+                CHECK(keys[2] <= pad[0], what);
+                snprintf(what, sizeof what, "%dx%d table %zu row %zu: the controller text (right %d) "
+                         "stays inside its table (edge %d)", sizes[s][0], sizes[s][1], t, i, pad[2], edge);
+                CHECK(pad[2] <= edge, what);
+            }
+        }
+        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        snprintf(what, sizeof what, "%dx%d: a binding too long for its cell ends in an ellipsis",
+                 sizes[s][0], sizes[s][1]);
+        CHECK(strstr(dump, "Right Ctrl") != NULL && strstr(dump, "\xE2\x80\xA6") != NULL &&
+                  strstr(dump, "Up Arrow\"") == NULL, what);
+        nk_ui_destroy(ui);
+    }
+}
+
 static void test_quit(void) {
     NkUi *ui = overlay_ui(1280, 800, 1.0f);
     NkOverlayModel model = base_model(1280.0f, 800.0f);
@@ -2036,6 +2132,7 @@ int main(int argc, char **argv) {
     test_ace();
     test_display_rows();
     test_controls();
+    test_controls_long_bindings_fit_their_cells();
     test_quit();
     test_pad_lost();
     test_fits_every_window();

@@ -2231,6 +2231,9 @@ _Static_assert((int)GE_VRAM_VIEW_DISPLAY == (int)NK_OVERLAY_VRAM_DISPLAY &&
                "the GE's VRAM view sources are the overlay page's, index for index");
 _Static_assert(GE_VRAM_CAPTURE_MAX == NK_OVERLAY_VRAM_CAPTURES,
                "the overlay's Capture row lists every capture ge.c records");
+_Static_assert(NK_OVERLAY_VRAM_MAX_SIDE == GE_VRAM_VIEW_MAX_WIDTH &&
+                   NK_OVERLAY_VRAM_MAX_SIDE == GE_VRAM_VIEW_MAX_HEIGHT,
+               "the overlay clamps a window to the largest one ge.c decodes");
 static void gui_pause_copy_vram_sources(const GeVramSources *sources,
                                         NkOverlayVramSurface *out, bool *present,
                                         bool *swizzled) {

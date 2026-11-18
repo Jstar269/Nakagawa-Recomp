@@ -46,8 +46,8 @@ static const char *nonempty(const char *text) {
 
 /* The dialog card's padding above and below its content and the gap between its
    children (nk_ui_dialog_begin_scroll). */
-#define MENU_CARD_PAD_Y (26.0f + 22.0f)
-#define MENU_CARD_GAP 14.0f
+#define MENU_CARD_PAD_Y (NK_UI_DIALOG_PAD_TOP + NK_UI_DIALOG_PAD_BOTTOM)
+#define MENU_CARD_GAP NK_UI_DIALOG_GAP
 
 /* How many lines Ace Mode's caption takes at `inner`: one when it fits there as
    it is, else its words as a list wrapped between its items (nk_ui_list_line). */
@@ -205,11 +205,19 @@ NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOv
     return result;
 }
 
-/* One mapping table: a header row and one row per control, hairlines between. */
+/* The PSP column's width and the gap between a controls row's cells. */
+#define CONTROLS_PSP_WIDTH 96.0f
+#define CONTROLS_CELL_GAP NK_UI_SPACE_3
+
+/* One mapping table `table_width` px wide: a header row and one row per control,
+   hairlines between. The keyboard and controller cells share what the PSP column
+   leaves; their text does not wrap, so it is cut to that share, never past it. */
 static void controls_table(NkUi *ui, NkUiId id, const NkOverlayControlRow *rows, size_t count,
-                           float row_height, NkUiSizing width) {
+                           float row_height, float table_width) {
     const NkUiTheme *theme = nk_ui_theme(ui);
-    NkUiLayout table = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, width, nk_overlay_fit(), 0.0f);
+    NkUiLayout table = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(), nk_overlay_fit(),
+                                         0.0f);
+    float cell_width = (table_width - CONTROLS_PSP_WIDTH - 2.0f * CONTROLS_CELL_GAP) / 2.0f;
     static const char *const heads[3] = {"PSP", "Keyboard", "Controller"};
     size_t i;
     if (!nk_ui_begin_container(ui, id, &table, NULL)) return;
@@ -217,7 +225,7 @@ static void controls_table(NkUi *ui, NkUiId id, const NkOverlayControlRow *rows,
         NkUiId row_id = (NkUiId)(id + 1u + (NkUiId)i * 8u);
         NkUiLayout row = nk_overlay_layout(NK_UI_LAYOUT_ROW, nk_overlay_grow(),
                                            nk_overlay_fixed(i == 0u ? 30.0f : row_height),
-                                           NK_UI_SPACE_3);
+                                           CONTROLS_CELL_GAP);
         const char *cells[3];
         int c;
         row.align_y = NK_UI_ALIGN_CENTER;
@@ -235,7 +243,7 @@ static void controls_table(NkUi *ui, NkUiId id, const NkOverlayControlRow *rows,
         if (!nk_ui_begin_container(ui, row_id, &row, NULL)) continue;
         for (c = 0; c < 3; ++c) {
             NkUiLayout cell = nk_overlay_layout(NK_UI_LAYOUT_ROW,
-                                                c == 0 ? nk_overlay_fixed(96.0f)
+                                                c == 0 ? nk_overlay_fixed(CONTROLS_PSP_WIDTH)
                                                        : nk_overlay_grow(),
                                                 nk_overlay_fit(), 0.0f);
             if (!nk_ui_begin_container(ui, (NkUiId)(row_id + 1u + (NkUiId)c), &cell, NULL)) {
@@ -250,7 +258,7 @@ static void controls_table(NkUi *ui, NkUiId id, const NkOverlayControlRow *rows,
                 NkUiTextStyle data = nk_ui_type(NK_UI_TYPE_DATA,
                                                 c == 1 ? theme->muted : theme->paper);
                 nk_ui_text(ui, (NkUiId)(row_id + 4u + (NkUiId)c),
-                           nk_ui_text_clamp(ui, cells[c], &data, 400.0f, 1), &data);
+                           nk_ui_text_clamp(ui, cells[c], &data, cell_width, 1), &data);
             }
             nk_ui_end_container(ui);
         }
@@ -286,15 +294,14 @@ NkOverlayAction nk_overlay_page_controls(NkUi *ui, NkOverlayState *state,
                                               nk_overlay_fit(), NK_UI_SPACE_6);
         size_t first = (count + 1u) / 2u;
         if (nk_ui_begin_container(ui, CONTROLS_ID_TABLES, &tables, NULL)) {
-            controls_table(ui, CONTROLS_ID_TABLE, model->controls, first, row_height,
-                           nk_overlay_grow());
+            float half = (inner - NK_UI_SPACE_6) / 2.0f;
+            controls_table(ui, CONTROLS_ID_TABLE, model->controls, first, row_height, half);
             controls_table(ui, CONTROLS_ID_TABLE + 0x100u, model->controls + first,
-                           count - first, row_height, nk_overlay_grow());
+                           count - first, row_height, half);
             nk_ui_end_container(ui);
         }
     } else {
-        controls_table(ui, CONTROLS_ID_TABLE, model->controls, count, row_height,
-                       nk_overlay_grow());
+        controls_table(ui, CONTROLS_ID_TABLE, model->controls, count, row_height, inner);
     }
     {
         NkUiTextStyle foot = nk_ui_type(NK_UI_TYPE_FOOTNOTE, theme->dim);
