@@ -121,6 +121,29 @@ class DryRunTests(unittest.TestCase):
             self.assertEqual(code, 0, out)
             self.assertFalse(built.exists(), "--yes must still apply the plan")
 
+    def test_a_planning_failure_is_not_reported_as_a_git_failure(self) -> None:
+        """git ls-files and the plan fail for different reasons; each says its own."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_workspace(Path(tmp))
+            built = _write(root / "build" / "game.o", b"abcd")
+            with mock.patch.object(nk_clean.os.path, "realpath",
+                                   side_effect=PermissionError(13, "denied")):
+                code, out, err = _run_main(root, ["--yes"])
+            self.assertEqual(code, 1, out)
+            self.assertIn("nk_clean: cannot plan the clean:", err)
+            self.assertNotIn("git ls-files", err)
+            self.assertTrue(built.exists())
+
+            with mock.patch.object(nk_clean, "REPO_ROOT", root), \
+                    mock.patch.object(nk_clean, "git_tracked",
+                                      side_effect=OSError("not a git repository")), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()) as git_err:
+                self.assertEqual(nk_clean.main(["--yes"]), 1)
+            self.assertIn("nk_clean: git ls-files failed: not a git repository",
+                          git_err.getvalue())
+            self.assertTrue(built.exists())
+
 
 class RenderTests(unittest.TestCase):
     def test_confirmed_run_with_scan_errors_says_nothing_is_deleted(self) -> None:

@@ -2644,6 +2644,13 @@ class TestSanitizedBringup(unittest.TestCase):
 
         def fake_package_build(build_args, stage_observer=None):
             self.last_build_module_dir = build_args.module_dir
+            # The bring-up removes its staged module copies when it ends: keep what
+            # the package build was given.
+            self.last_build_module_files = (
+                {path.name: path.read_bytes()
+                 for path in Path(build_args.module_dir).iterdir()}
+                if build_args.module_dir is not None else None
+            )
             stage_observer("codegen", "START", 0)
             stage_observer("codegen", "PASS", 1)
             build_args.aot_stage_result = {"status": "REUSED", "reason": "NONE"}
@@ -2748,12 +2755,10 @@ class TestSanitizedBringup(unittest.TestCase):
         profile_dir = (
             work_root / "work" / "user-data" / "experimental" / "ULUS99998"
         )
-        module_dirs = list(profile_dir.glob("module-stage-*"))
-        self.assertEqual(len(module_dirs), 1)
-        self.assertEqual(
-            sorted(path.name for path in module_dirs[0].iterdir()),
-            ["alpha.prx", "beta.elf"],
-        )
+        self.assertEqual(Path(self.last_build_module_dir).parent, profile_dir)
+        self.assertEqual(sorted(self.last_build_module_files), ["alpha.prx", "beta.elf"])
+        # The staged copies are removed when the bring-up ends.
+        self.assertEqual(list(profile_dir.glob("module-stage-*")), [])
         profile = json.loads((profile_dir / "profile.json").read_text(encoding="utf-8"))
         modules = profile["manifest"]["modules"]
         self.assertEqual([module["name"] for module in modules], ["alpha.prx", "beta.elf"])
@@ -2763,6 +2768,27 @@ class TestSanitizedBringup(unittest.TestCase):
         self.assertTrue(all("load_address" not in module for module in modules))
         self.assertTrue(all(module["required"] and module["role"] == "guest-prx" for module in modules))
         nk_cli.validate_bringup_report(report)
+
+    def test_a_module_layout_failure_leaves_no_staged_module_copies(self):
+        work_root = self.root / "module-layout-failure-case"
+        work_root.mkdir(parents=True)
+        iso_path = work_root / "multi-module.iso"
+        create_test_iso_with_modules(
+            iso_path,
+            bytes(build_synthetic_iso_elf()),
+            sysdir_modules={"alpha.prx": build_synthetic_decrypted_prx()},
+            usrdir_modules={},
+            disc_id="ULUS99998",
+            title="Synthetic Module Layout Failure",
+        )
+        with mock.patch.object(nk_cli, "plan_guest_module_layout",
+                               side_effect=OSError("synthetic layout failure")):
+            status, report = self._run_module_fixture(iso_path, work_root)
+        self.assertEqual(status, 1, report)
+        self.assertEqual(report["failure_class"],
+                         "GUEST_MODULE_LOAD_ADDRESS_LAYOUT_UNAVAILABLE")
+        profile_dir = work_root / "work" / "user-data" / "experimental" / "ULUS99998"
+        self.assertEqual(list(profile_dir.glob("module-stage-*")), [])
 
     def test_disc_whose_modules_the_runtime_serves_translates_no_guest_module(self):
         """A disc module the runtime replaces completely is left out of translation.
@@ -3146,11 +3172,7 @@ class TestSanitizedBringup(unittest.TestCase):
         self.assertEqual(report["failure_class"], "NONE")
         self.assertEqual(report["counts"]["modules"], 2)
         self.assertEqual(report["counts"]["encrypted_modules"], 1)
-        module_stage = next(
-            (work_root / "work" / "user-data" / "experimental" / "ULUS99998")
-            .glob("module-stage-*"),
-        )
-        self.assertEqual((module_stage / "encrypted.prx").read_bytes(), bytes(module_bytes))
+        self.assertEqual(self.last_build_module_files["encrypted.prx"], bytes(module_bytes))
         profile = json.loads(
             (work_root / "work" / "user-data" / "experimental" / "ULUS99998" / "profile.json")
             .read_text(encoding="utf-8")

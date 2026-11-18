@@ -363,10 +363,10 @@ def default_user_data_root() -> Path:
         raise PackageBuildError(str(exc)) from exc
 
 
-def _user_data_root(value: Path | None) -> Path:
+def _user_data_root(value: Path | None, what: str = "Package outputs") -> Path:
     root = (value or default_user_data_root()).expanduser().resolve(strict=False)
     if ROOT == root or ROOT in root.parents:
-        raise PackageBuildError("Package outputs must stay in per-user data, outside the repository.")
+        raise PackageBuildError(f"{what} must stay in per-user data, outside the repository.")
     return root
 
 
@@ -912,6 +912,29 @@ def _stage_iso_modules(
     )
     profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     module_dir = Path(tempfile.mkdtemp(prefix="module-stage-", dir=profile_dir))
+    try:
+        _copy_plain_iso_modules(iso_path, user_root, module_dir, candidates)
+    except BaseException:
+        # A partial copy of the title's modules is not left in the profile folder.
+        _remove_module_stage(module_dir)
+        raise
+    return module_dir
+
+
+def _remove_module_stage(module_dir: Path) -> None:
+    """Remove a folder _stage_iso_modules made, and say so when it stays."""
+    try:
+        shutil.rmtree(module_dir)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"warning: the staged copies of the game's modules could not be removed: {exc}",
+              file=sys.stderr)
+
+
+def _copy_plain_iso_modules(
+    iso_path: Path, user_root: Path, module_dir: Path, candidates: list[dict]
+) -> None:
     file_size = iso_path.stat().st_size
     with iso_path.open("rb") as source:
         for candidate in candidates:
@@ -940,7 +963,6 @@ def _stage_iso_modules(
             except (OSError, IsoInspectionError):
                 temporary.unlink(missing_ok=True)
                 raise
-    return module_dir
 
 
 class ExperimentalModuleIntakeError(PackageBuildError):
@@ -1056,11 +1078,18 @@ def _declare_experimental_disc_modules(
             iso_path, user_root, disc_id,
             [candidate for candidate, source, _copy in module_sources if source == "iso"],
         )
+    except (OSError, IsoInspectionError, PackageBuildError) as exc:
+        raise ExperimentalModuleIntakeError("GUEST_MODULE_STAGE_FAILED", str(exc)) from exc
+    # From here every failure removes the staged folder before it stops by name.
+    try:
         for candidate, source, folder_copy in module_sources:
             if source == "folder" and folder_copy is not None:
                 _write_private_file(module_dir / candidate["name"], folder_copy.read_bytes())
-    except (OSError, IsoInspectionError, PackageBuildError) as exc:
-        raise ExperimentalModuleIntakeError("GUEST_MODULE_STAGE_FAILED", str(exc)) from exc
+    except BaseException as exc:
+        _remove_module_stage(module_dir)
+        if isinstance(exc, (OSError, PackageBuildError)):
+            raise ExperimentalModuleIntakeError("GUEST_MODULE_STAGE_FAILED", str(exc)) from exc
+        raise
     try:
         module_inputs = [
             (
@@ -1072,7 +1101,10 @@ def _declare_experimental_disc_modules(
         ]
         bindings, deferred = plan_guest_module_layout(selected_elf, module_inputs)
         deferred = kernel_left_out + deferred
-    except (IsoInspectionError, OSError) as exc:
+    except BaseException as exc:
+        _remove_module_stage(module_dir)
+        if not isinstance(exc, (IsoInspectionError, OSError)):
+            raise
         boundary_code = (
             getattr(exc, "boundary_code", None)
             or "GUEST_MODULE_LOAD_ADDRESS_LAYOUT_UNAVAILABLE"
@@ -1133,7 +1165,7 @@ def _experimental_build_modules(
     if staged is not None:
         # The plain copies were staged only to plan them; the package cache takes
         # its own copies from the same sources (_copy_optional_modules).
-        shutil.rmtree(staged, ignore_errors=True)
+        _remove_module_stage(staged)
     for item in deferred:
         print(f"DEFERRED_MODULE {item['name']}: {item['reason']}", file=sys.stderr)
     try:
@@ -1773,8 +1805,9 @@ def _stage_runtime_assets(package_dir: Path) -> None:
     if _windows_host():
         # The SDL3_ttf readable-font closure (#421), through the same mechanical
         # step the Makefile's player target uses. The prerequisite installer
-        # (#324) does not provide it yet, so a package without it still builds:
-        # the player then draws with its bitmap fallback and logs why. A staging
+        # (#324) does not provide it yet, so a package without it still builds.
+        # There is no bitmap fallback font: without it the title runs with its
+        # in-game UI (Ace text, readout, notices) turned off and says why. A staging
         # collision is not that case: a damaged staging target refuses the build.
         stager = _runtime_dll_stager()
         try:
@@ -1783,7 +1816,9 @@ def _stage_runtime_assets(package_dir: Path) -> None:
             raise PackageBuildError(str(exc)) from exc
         except stager.StageError as exc:
             print(f"warning: the readable UI font runtime was not staged: {exc}. "
-                  "The player will use its bitmap fallback font.", file=sys.stderr)
+                  "This package runs without its in-game UI (Ace text, readout and "
+                  "notices). Install the MSYS2 UCRT64 sdl3-ttf package, then build "
+                  "again.", file=sys.stderr)
 
 
 def _installed_package_cache_references(
@@ -2027,19 +2062,23 @@ def _replace_package_folder(source: Path, target: Path, *, sleeper=None,
 def _restore_interrupted_swap(target_dir: Path, cache_dir: Path) -> Path | None:
     """Put back the package an interrupted swap left aside, and return where it was.
 
-    _swap_in_package_folder moves the old package to ``cache_dir/previous-<ns>``
-    before it moves the new one in. A build stopped between the two renames (a
-    cancel, a closed player, a Windows lock that outlasted its retries and then
-    the process) leaves no package in place. The next build of the title puts
-    the newest one back before it decides anything, so a stopped rebuild costs
-    the user no package that played.
+    _swap_in_package_folder moves the old package to
+    ``cache_dir/previous-<target name>-<ns>`` before it moves the new one in. A
+    build stopped between the two renames (a cancel, a closed player, a Windows
+    lock that outlasted its retries and then the process) leaves no package in
+    place. The next build of that package puts its newest backup back before it
+    decides anything, so a stopped rebuild costs the user no package that played.
+    Every variant of a disc (the authentic package, an enhanced one, a code-hook
+    one) shares one cache folder, so only the backups named for this target are
+    looked at: another variant's package is never moved into this one's folder.
     """
     if target_dir.exists() or target_dir.is_symlink() or not cache_dir.is_dir():
         return None
+    prefix = _swap_backup_prefix(target_dir)
     try:
         backups = [
             path for path in cache_dir.iterdir()
-            if path.name.startswith("previous-") and path.name[len("previous-"):].isdigit()
+            if path.name.startswith(prefix) and path.name[len(prefix):].isdigit()
             and path.is_dir() and not path.is_symlink()
         ]
     except OSError as exc:
@@ -2049,12 +2088,17 @@ def _restore_interrupted_swap(target_dir: Path, cache_dir: Path) -> Path | None:
         ) from exc
     if not backups:
         return None
-    newest = max(backups, key=lambda path: int(path.name[len("previous-"):]))
+    newest = max(backups, key=lambda path: int(path.name[len(prefix):]))
     # The backup was renamed out of target_dir's parent, so the two share a file system
     # and the rename back needs no copy; the parent itself may have been removed since.
     target_dir.parent.mkdir(parents=True, exist_ok=True)
     _replace_package_folder(newest, target_dir)
     return newest
+
+
+def _swap_backup_prefix(target_dir: Path) -> str:
+    """The name prefix of the backups _swap_in_package_folder parks for target_dir."""
+    return f"previous-{target_dir.name}-"
 
 
 def _swap_in_package_folder(staging: Path, target_dir: Path, cache_dir: Path) -> Path | None:
@@ -2066,7 +2110,8 @@ def _swap_in_package_folder(staging: Path, target_dir: Path, cache_dir: Path) ->
     """
     if target_dir.exists() and target_dir.is_symlink():
         raise PackageBuildError("Existing package destination is a symlink; refusing to replace it.")
-    backup = cache_dir / f"previous-{time.time_ns()}" if target_dir.exists() else None
+    backup = (cache_dir / f"{_swap_backup_prefix(target_dir)}{time.time_ns()}"
+              if target_dir.exists() else None)
     if backup is not None:
         _replace_package_folder(target_dir, backup)
     try:
@@ -4141,8 +4186,11 @@ def cmd_fonts_import(args: argparse.Namespace) -> int:
     try:
         from nk_core.fonts import FontImportError, FontValidationError, import_fonts
 
+        # The user's own console fonts are never written into the checkout (AGENTS.md
+        # Section 5), where they could be staged and committed.
+        user_root = _user_data_root(args.user_data_root, "Imported fonts")
         result = import_fonts(
-            args.folder, user_data_root=args.user_data_root, choose=_font_choices(args.choose)
+            args.folder, user_data_root=user_root, choose=_font_choices(args.choose)
         )
         if args.json:
             print(json.dumps(result, indent=2))
@@ -4155,7 +4203,8 @@ def cmd_fonts_import(args: argparse.Namespace) -> int:
             sys.stderr.write("Font import error: no font slot was imported.\n")
             return 1
         return 0
-    except (FontValidationError, FontImportError, OSError, ValueError) as exc:
+    except (FontValidationError, FontImportError, PackageBuildError, OSError,
+            ValueError) as exc:
         sys.stderr.write(f"Font import error: {exc}\n")
         return 1
 
@@ -4214,8 +4263,13 @@ def cmd_redump_import(args: argparse.Namespace) -> int:
 def cmd_fonts_status(args: argparse.Namespace) -> int:
     from nk_core.fonts import SLOTS, latin_index_states, slot_states
 
-    states = slot_states(user_data_root=args.user_data_root, project_root=args.project_root)
-    latin = latin_index_states(user_data_root=args.user_data_root, project_root=args.project_root)
+    try:
+        user_root = _user_data_root(args.user_data_root, "Imported fonts")
+    except PackageBuildError as exc:
+        sys.stderr.write(f"Font status error: {exc}\n")
+        return 1
+    states = slot_states(user_data_root=user_root, project_root=args.project_root)
+    latin = latin_index_states(user_data_root=user_root, project_root=args.project_root)
     if args.json:
         result = {slot: states[slot] for slot in SLOTS if slot != "latin"}
         result["latin_indices"] = {str(index + 1): latin[index] for index in range(len(latin))}
@@ -4237,8 +4291,9 @@ def cmd_fonts_remove(args: argparse.Namespace) -> int:
         sys.stderr.write("Font remove error: name a slot with --slot, or pass --all.\n")
         return 1
     try:
-        removed = remove_imports(user_data_root=args.user_data_root, slots=slots)
-    except (FontImportError, OSError) as exc:
+        user_root = _user_data_root(args.user_data_root, "Imported fonts")
+        removed = remove_imports(user_data_root=user_root, slots=slots)
+    except (FontImportError, PackageBuildError, OSError) as exc:
         sys.stderr.write(f"Font remove error: {exc}\n")
         return 1
     print(f"Removed {removed} imported font file(s).")
@@ -5111,16 +5166,24 @@ def _write_bringup_library_locked(user_root: Path, iso_path: Path, metadata, tit
         games = list(payload["games"])
     dat = _verification_dat(user_root) if digest is not None else None
     replaced = _library_record_to_replace(games, metadata.disc_id.upper(), digest, iso_path, dat)
+    # The player's own fields (prepared_root, is_prepared, assets_staged, status, the
+    # executable and extraction counts, last_played) describe the image a record holds.
+    # They are kept when the replaced record is shown to hold this same image (its
+    # SHA-1 matches); a record of other or unhashed bytes starts again.
+    record: dict[str, Any] = {}
     if replaced is not None:
-        del games[replaced]
-    record = {
+        old = games.pop(replaced)
+        if digest is not None and digest.sha1 and \
+                isinstance(old, dict) and _library_content_sha1(old) == digest.sha1:
+            record = dict(old)
+    record.update({
         "disc_id": metadata.disc_id.upper(),
         "title_id": title_id,
         "iso_path": str(iso_path),
         "selected_executable": selected,
         "boot_executable": boot_executable,
         "is_experimental": is_experimental,
-    }
+    })
     # The player keeps a record's hashes on a re-add only while the size matches.
     size = digest.size_bytes if digest is not None else (
         iso_path.stat().st_size if iso_path.is_file() else None)
@@ -5621,6 +5684,7 @@ class _Bringup:
     manifest: Any = None
     metadata: Any = None
     module_dir: Any = None
+    module_stage_dir: Any = None
     preflight: Any = None
     private_sweep_import_report: Any = None
     progress: Any = None
@@ -5890,6 +5954,9 @@ def _bringup_prepare_import(st):
                         iso_path, user_root, metadata.disc_id, module_candidates,
                         selected_elf, preflight.get("module_decryption") or {},
                     )
+                # cmd_bringup removes the staged copies when the bring-up ends, on
+                # every path; the package build takes its own copies of them.
+                st.module_stage_dir = module_dir
             except ExperimentalModuleIntakeError as exc:
                 for line in exc.lines:
                     print(line)
@@ -6617,6 +6684,16 @@ def cmd_bringup(args: argparse.Namespace) -> int:
     st.report = report
     st.report_path = report_path
     st.set_stage = set_stage
+    try:
+        return _bringup_stages(st)
+    finally:
+        # Each bring-up stages the title's plain modules in a new module-stage-*
+        # folder, so a rerun must not leave another copy beside the last one.
+        if st.module_stage_dir is not None:
+            _remove_module_stage(st.module_stage_dir)
+
+
+def _bringup_stages(st: _Bringup) -> int:
     rc: int | None = _bringup_open(st)
     if rc is not None:
         return rc

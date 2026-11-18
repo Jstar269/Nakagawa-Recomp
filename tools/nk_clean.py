@@ -464,8 +464,6 @@ def _revalidate(preview: Preview, selected: SelectedFile) -> str | None:
         return "reparse point appeared; refusing"
     if not stat.S_ISREG(st.st_mode):
         return "no longer a regular file"
-    if selected.rel in preview.tracked:
-        return "became git-tracked; refusing"
     return None
 
 
@@ -592,6 +590,10 @@ def main(argv: list[str] | None = None) -> int:
     root = REPO_ROOT
     try:
         tracked = git_tracked(root)
+    except OSError as exc:
+        print(f"nk_clean: git ls-files failed: {exc}", file=sys.stderr)
+        return 1
+    try:
         preview = plan_clean(
             root, tracked=tracked, older_than_days=args.older_than,
             include_title_outputs=args.include_title_outputs,
@@ -600,7 +602,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"nk_clean: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:
-        print(f"nk_clean: git ls-files failed: {exc}", file=sys.stderr)
+        print(f"nk_clean: cannot plan the clean: {exc}", file=sys.stderr)
         return 1
     # Only --yes confirms, so an inherited CONFIRM variable never turns the dry run into a
     # deletion; make clean-preview turns a command-line CONFIRM=1 into --yes.

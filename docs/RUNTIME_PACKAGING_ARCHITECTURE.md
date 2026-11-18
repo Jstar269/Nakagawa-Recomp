@@ -515,8 +515,11 @@ validated again, and only then swapped in, with the old package moved back if
 the swap fails (`_promote_cache_entry` in `tools/nk_cli.py`). A failed or
 cancelled build therefore leaves the old package in place and launchable. The
 one gap is a build stopped between the swap's two renames, which leaves the old
-package in `cache/packages/<DISC_ID>/previous-<n>`: the next build of that
-title moves it back before anything else (`_restore_interrupted_swap`).
+package in `cache/packages/<DISC_ID>/previous-<package folder>-<n>`: the next
+build of that package moves it back before anything else
+(`_restore_interrupted_swap`). Every package of a disc (the authentic one, an
+enhanced one, a code-hook one) shares that cache folder, so a backup is named
+for its own package folder and is only ever moved back into it.
 Saves live outside the package and are not touched, and the cache keeps its
 reuse: when only the runtime changed, the generated C is kept and only the
 native objects are rebuilt.
