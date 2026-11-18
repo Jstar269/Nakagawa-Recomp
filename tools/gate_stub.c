@@ -157,9 +157,10 @@ int sr_audio_pause_script_ready(void) { return 1; }
 int sr_audio_init(void) { return -1; }
 /* No audio backend: Ace Mode's peak=limit is refused, so driver.c never confirms it. */
 int sr_audio_set_true_peak_limiter(int on) { (void)on; return 0; }
-void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
-                              double *min_gain) {
+int sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                             double *min_gain) {
     (void)pushes_wide; (void)frames_wide; (void)frames_limited; (void)min_gain;
+    return 0;
 }
 CpuState *sr_cpu_for_callbacks(void) { return NULL; }
 int     sr_vblank_quantum_due(void) { return 0; }

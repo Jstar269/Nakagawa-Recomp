@@ -56,6 +56,7 @@ uint32_t sr_hle_test_psmf_summary_count(void);
 int sr_hle_test_psmf_summary_rejects_truncation(void);
 void sr_hle_test_psmf_log_tick(uint32_t guest);
 void sr_hle_test_psmf_log_release(uint32_t guest);
+void sr_hle_test_psmf_release_slot(unsigned i);
 void sr_hle_test_register_mpeg_ring_handlers(void);
 int sr_hle_test_psmf_stream_contract(const uint8_t *data, uint32_t size,
                                     uint32_t fragment_bytes,
@@ -3503,6 +3504,25 @@ static int lc_play_first_picture(uint32_t player) {
     return 0;
 }
 
+/* The LoadExec reset releases all four player slots (sr_hle_loadexec_reset_guest_state).  A slot
+ * no player ever used is still zero-filled, so its decoder field reads 0, a live instance id; its
+ * release used to destroy decoder 0 under the owner that holds it.  main runs this before any
+ * player claims a slot, so every slot is as the program loaded it. */
+static void test_unused_player_slot_release_keeps_decoder_zero(void) {
+    if (!sr_h264_backend_available()) {
+        fprintf(stderr, "SKIP: unused-slot release needs an H.264 backend\n");
+        return;
+    }
+    const int owned = sr_h264_create();
+    CHECK(owned == 0, "psmf-unused-slot: the first decoder is instance 0");
+    for (unsigned i = 0; i < 4u; i++) sr_hle_test_psmf_release_slot(i);
+    const int next = sr_h264_create();
+    CHECK(owned >= 0 && next >= 0 && next != owned,
+          "psmf-unused-slot: releasing never-used slots leaves instance 0 with its owner");
+    if (next >= 0) sr_h264_destroy(next);
+    if (owned >= 0) sr_h264_destroy(owned);
+}
+
 /* A backend has a fixed number of decoder instances (four for Media Foundation and for
  * FFmpeg).  scePsmfPlayerDelete used to reset the player's decoder and then forget its id,
  * and creating over a live control block forgot it too, so each movie kept one instance for
@@ -3529,6 +3549,29 @@ static void test_player_lifecycle_releases_what_it_acquired(void) {
           "psmf-lifecycle: refused creates leave every player slot free");
     CHECK(guest_mpeg_import(AV_NID_DELETE, LC_PLAYERS + 16u, 0, 0, 0, 0) == 0,
           "psmf-lifecycle: the probe player is deleted");
+
+    /* A refused create over a live control block clears its handle word, so it gives the old
+     * player's slot back too: nothing could reach that player to delete it.  Both refusals, the
+     * buffer size and the priority, then all four slots are free for new players. */
+    for (int refusal = 0; refusal < 2; refusal++) {
+        CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) == 0 &&
+                  MEM_R32(AV_PLAYER) != 0u,
+              "psmf-lifecycle: a live player before the refused re-create");
+        if (refusal == 0) MEM_W32(AV_CREATE + 4, 0x1000u);
+        else MEM_W32(AV_CREATE + 8, 0x7fu);
+        CHECK(guest_mpeg_import(AV_NID_CREATE, AV_PLAYER, AV_CREATE, 0, 0, 0) ==
+                      (refusal == 0 ? 0x80616005u : 0x80616008u) &&
+                  MEM_R32(AV_PLAYER) == 0u,
+              "psmf-lifecycle: a re-create over a live player is refused and clears its word");
+        MEM_W32(AV_CREATE + 4, 0x00285800u);
+        MEM_W32(AV_CREATE + 8, 0x30u);
+    }
+    for (uint32_t i = 0; i < 4u; i++)
+        CHECK(guest_mpeg_import(AV_NID_CREATE, LC_PLAYERS + i * 4u, AV_CREATE, 0, 0, 0) == 0,
+              "psmf-lifecycle: after refused re-creates every player slot is free");
+    for (uint32_t i = 0; i < 4u; i++)
+        CHECK(guest_mpeg_import(AV_NID_DELETE, LC_PLAYERS + i * 4u, 0, 0, 0, 0) == 0,
+              "psmf-lifecycle: the four probe players are deleted");
 
     if (!sr_h264_backend_available()) {
         fprintf(stderr, "SKIP: decoder-instance lifecycle needs an H.264 backend\n");
@@ -5822,6 +5865,16 @@ static void test_mpeg_get_avc_au_refusals(void) {
     MEM_W32(GA_DESC, GA_DATA + 0x30u);   /* the deleted context's handle */
     CHECK(guest_mpeg_import(0x4571cc64u, GA_DESC, 0u, 0u, 0u, 0u) == 0xffffffffu,
           "mpeg-avc-au: AvcDecodeFlush on a handle no context has returns -1");
+    /* sceMpegFlushAllStream too: the deleted context's words still name its ring, and the
+     * handler used to follow them, zero that ring's counters and return 0. */
+    CHECK(MEM_R32(GA_DATA + 0x30u + 16u) == GA_RING, "mpeg-avc-au: the stale handle still names the ring");
+    MEM_W32(GA_RING + 4u, 11u);
+    MEM_W32(GA_RING + 8u, 21u);
+    MEM_W32(GA_RING + 12u, 31u);
+    CHECK(guest_mpeg_import(0x707b7629u, GA_DESC, 0u, 0u, 0u, 0u) == 0xffffffffu,
+          "mpeg-avc-au: FlushAllStream on a handle no context has returns -1");
+    CHECK(MEM_R32(GA_RING + 4u) == 11u && MEM_R32(GA_RING + 8u) == 21u && MEM_R32(GA_RING + 12u) == 31u,
+          "mpeg-avc-au: FlushAllStream on a handle no context has writes no ring");
 }
 
 /* Every context's H.264 instance goes back to the backend's pool when the context is deleted or
@@ -6806,6 +6859,7 @@ int main(int argc, char **argv) {
     CHECK(sr_h264_backend_available(), "the explicitly selected FFmpeg backend is available");
 #endif
 
+    test_unused_player_slot_release_keeps_decoder_zero();   /* first: no slot used yet */
     test_demux_and_au_contract();
     test_media_disposition_conservation();
     test_multistream_selection();

@@ -151,9 +151,10 @@ void sr_audio_pause_leave(void) {{}}
 int sr_audio_pause_script_ready(void) {{ return 1; }}
 /* No audio backend in this harness: Ace Mode's peak=limit is refused (driver.c never confirms it). */
 int sr_audio_set_true_peak_limiter(int on) {{ (void)on; return 0; }}
-void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
-                              double *min_gain) {{
+int sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                             double *min_gain) {{
     (void)pushes_wide; (void)frames_wide; (void)frames_limited; (void)min_gain;
+    return 0;
 }}
 /* Host audio seam (audio_sdl3.c, #2361): counts the opens. HARNESS_AUDIO_OPEN_FAILS=1 answers
  * -1, as sr_audio_init does on a host with no audio device; the driver discards the answer. */

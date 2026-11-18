@@ -36660,18 +36660,20 @@ static void test_td24d_hle_batch(void) {
                MEM_R32(TD24D_RB_ADDR + 12u) == 0u,
            "sceMpegRingbufferDestruct clears packet counters");
 
-    /* FlushAllStream clears packet counters via mpeg struct */
+    /* FlushAllStream's ring reset belongs to mpeg.c, which this harness does not link: here the
+     * handler only checks the descriptor, and never reaches a ring through a layout of its own
+     * (the psmf-media-selftest checks the reset and the refusal of a handle no context has). */
     MEM_W32(TD24D_MPEG_DESC, TD24D_MPEG_H);
     MEM_W32(TD24D_MPEG_H + 16u, TD24D_RB_ADDR);
     MEM_W32(TD24D_RB_ADDR + 4u, 11u);
     MEM_W32(TD24D_RB_ADDR + 8u, 21u);
     MEM_W32(TD24D_RB_ADDR + 12u, 31u);
     expect(td24b_dispatch4(NID_SCE_MPEG_FLUSH_ALL_STREAM, TD24D_MPEG_DESC, 0u, 0u, 0u) == 0u,
-           "sceMpegFlushAllStream succeeds on valid MPEG descriptor");
-    expect(MEM_R32(TD24D_RB_ADDR + 4u) == 0u &&
-               MEM_R32(TD24D_RB_ADDR + 8u) == 0u &&
-               MEM_R32(TD24D_RB_ADDR + 12u) == 0u,
-           "sceMpegFlushAllStream flushes ring packet counters");
+           "sceMpegFlushAllStream accepts a readable MPEG descriptor");
+    expect(MEM_R32(TD24D_RB_ADDR + 4u) == 11u &&
+               MEM_R32(TD24D_RB_ADDR + 8u) == 21u &&
+               MEM_R32(TD24D_RB_ADDR + 12u) == 31u,
+           "sceMpegFlushAllStream writes no ring through a guessed descriptor layout");
 
     /* AvcDecodeFlush flushes the video decoder and leaves the ring alone (#286): a guest PSMF
      * player fills the ring, calls it, and expects the packets to still be there. Only
