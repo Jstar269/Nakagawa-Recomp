@@ -223,6 +223,31 @@ static void test_nk_library_save_load_escaping_and_samples(void) {
     assert(nk_library_find_by_disc_id(&loaded, "TEST00002") == NULL);
 }
 
+/* F-c01f8c97: last_played is escaped like every other string field. The loader
+   decodes escapes, so a value read from a hand-edited or tool-written library can
+   hold a quote, a backslash or a control character. Failing before: the value was
+   written raw, the saved file was not JSON, and the next load refused it. */
+static void test_nk_library_last_played_escaped(void) {
+    printf("[NATIVE_TEST] Testing that last_played is escaped on save...\n");
+    char path[NATIVE_TEST_PATH_MAX];
+    snprintf(path, sizeof(path), "%s%clibrary_last_played.json", native_test_get_root(),
+             nk_platform_path_separator());
+    static NkLibrary lib;
+    nk_library_init(&lib);
+    NkGameEntry g;
+    seed_game_entry(&g, "TEST00003", "Last Played");
+    snprintf(g.last_played, sizeof(g.last_played), "a\"b\\c\x01" "d");
+    assert(nk_library_add_or_update(&lib, &g) == NK_OK);
+    assert(nk_library_save(&lib, path) == NK_OK);
+
+    static NkLibrary loaded;
+    nk_library_init(&loaded);
+    assert(nk_library_load(&loaded, path) == NK_OK);
+    const NkGameEntry *got = nk_library_find_by_disc_id(&loaded, "TEST00003");
+    assert(got != NULL);
+    assert(strcmp(got->last_played, g.last_played) == 0);
+}
+
 /* A full library (NK_MAX_GAMES titles, the tools' record limit) saves and
    loads whole; one title more is refused, never truncated. The player held 64
    titles before, and the first library of a whole collection loaded as empty. */
@@ -808,6 +833,7 @@ int main(void) {
     test_nk_library_init_and_null_guards();
     test_nk_library_add_update_remove_bounds();
     test_nk_library_save_load_escaping_and_samples();
+    test_nk_library_last_played_escaped();
     test_nk_library_full_library_round_trip();
     test_nk_library_null_path_default_routing();
     test_nk_library_corrupt_load_and_backup_recovery();

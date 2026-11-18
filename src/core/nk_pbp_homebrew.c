@@ -666,11 +666,52 @@ typedef struct {
     char real[HB_PATH_MAX];
 } HbSource;
 
+/* The package's absolute path as picked. Win32's nk_platform_absolute_path
+   (GetFullPathNameW) resolves no link, but POSIX's is realpath, which would give
+   the program's folder its link target's name (a folder Cool linked to cool-v2
+   became cool-v2), and a linked EBOOT.PBP its target's folder. So on POSIX only
+   the folder's parent is resolved and the folder and file names are kept as
+   picked. A folder spelled ".", ".." or not at all has no name of its own here
+   and is resolved whole. */
+static bool hb_picked_absolute(const char *pbp_path, char *out, size_t out_size)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    return nk_platform_absolute_path(pbp_path, out, out_size);
+#else
+    size_t file_at = strlen(pbp_path), name_end, name_at;
+    char parent[HB_PATH_MAX];
+    char resolved[HB_PATH_MAX];
+    while (file_at > 0u && !hb_is_separator(pbp_path[file_at - 1u])) --file_at;
+    name_end = file_at;
+    while (name_end > 0u && hb_is_separator(pbp_path[name_end - 1u])) --name_end;
+    name_at = name_end;
+    while (name_at > 0u && !hb_is_separator(pbp_path[name_at - 1u])) --name_at;
+    const size_t name_length = name_end - name_at;
+    if (pbp_path[file_at] == '\0' || name_length == 0u ||
+        (name_length == 1u && pbp_path[name_at] == '.') ||
+        (name_length == 2u && pbp_path[name_at] == '.' && pbp_path[name_at + 1u] == '.'))
+        return nk_platform_absolute_path(pbp_path, out, out_size);
+    if (name_at == 0u) {
+        memcpy(parent, ".", 2u);
+    } else {
+        if (name_at >= sizeof(parent)) return false;
+        memcpy(parent, pbp_path, name_at);   /* keeps its separator, so "/" stays "/" */
+        parent[name_at] = '\0';
+    }
+    if (!nk_platform_absolute_path(parent, resolved, sizeof(resolved))) return false;
+    const size_t used = strlen(resolved);
+    const bool joined = used > 0u && hb_is_separator(resolved[used - 1u]);
+    const int written = snprintf(out, out_size, "%s%s%.*s/%s", resolved, joined ? "" : "/",
+                                 (int)name_length, pbp_path + name_at, pbp_path + file_at);
+    return written > 0 && (size_t)written < out_size;
+#endif
+}
+
 static bool hb_source(const char *pbp_path, HbSource *source)
 {
     char absolute[HB_PATH_MAX];
     size_t end, start;
-    if (pbp_path == NULL || !nk_platform_absolute_path(pbp_path, absolute, sizeof(absolute)))
+    if (pbp_path == NULL || !hb_picked_absolute(pbp_path, absolute, sizeof(absolute)))
         return false;
     end = strlen(absolute);
     while (end > 0u && !hb_is_separator(absolute[end - 1u])) --end;  /* drop the file name */

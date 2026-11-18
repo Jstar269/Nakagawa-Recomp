@@ -2816,6 +2816,56 @@ static void test_launcher_display_choice(void) {
     }
 }
 
+/* F-5eb8ea69: the program's Memory Stick folder is named as picked, not after a
+   link's target. Failing before (POSIX): the picked path went through realpath, so
+   a folder Cool linked to cool-v2 was named cool-v2, and a linked EBOOT.PBP named
+   the folder its target sits in. Windows (a junction) named it Cool already. */
+static void test_homebrew_folder_named_as_picked(const char *base) {
+    printf("[LAUNCH_TEST] Homebrew folder named as picked through a link\n");
+    fflush(stdout);
+    const char sep = nk_platform_path_separator();
+    char game[700], target[700], link_path[800], pbp[900], name[128], problem[512];
+    snprintf(game, sizeof(game), "%s%chb-picked%cGAME", base, sep, sep);
+    snprintf(target, sizeof(target), "%s%chb-picked%ccool-v2", base, sep, sep);
+    snprintf(link_path, sizeof(link_path), "%s%cCool", game, sep);
+    assert(nk_platform_mkdir_p(game));
+    assert(nk_platform_mkdir_p(target));
+    snprintf(pbp, sizeof(pbp), "%s%cEBOOT.PBP", target, sep);
+    write_file(pbp, "PBP program");
+    if (!nk_platform_dir_exists(link_path) && !make_folder_link(link_path, target)) {
+        printf("SKIP: this host cannot make a folder link\n");
+        return;
+    }
+    snprintf(pbp, sizeof(pbp), "%s%cEBOOT.PBP", link_path, sep);
+    assert(nk_pbp_homebrew_folder_name(pbp, name, sizeof(name), problem, sizeof(problem)));
+    assert(strcmp(name, "Cool") == 0);
+    {
+        /* A pick relative to the working folder keeps the name too. */
+        char saved_cwd[1024];
+        char relative[64];
+        test_get_cwd(saved_cwd, sizeof(saved_cwd));
+        test_set_cwd(game);
+        snprintf(relative, sizeof(relative), "Cool%cEBOOT.PBP", sep);
+        const bool named = nk_pbp_homebrew_folder_name(relative, name, sizeof(name), problem,
+                                                       sizeof(problem));
+        test_set_cwd(saved_cwd);
+        assert(named);
+        assert(strcmp(name, "Cool") == 0);
+    }
+#if !defined(_WIN32) && !defined(_WIN64)
+    /* An EBOOT.PBP that is itself a link names the folder it was picked in. */
+    char linked_folder[800], linked_pbp[900];
+    snprintf(linked_folder, sizeof(linked_folder), "%s%cLinked", game, sep);
+    assert(nk_platform_mkdir_p(linked_folder));
+    snprintf(linked_pbp, sizeof(linked_pbp), "%s%cEBOOT.PBP", linked_folder, sep);
+    snprintf(pbp, sizeof(pbp), "%s%cEBOOT.PBP", target, sep);
+    if (!nk_platform_file_exists(linked_pbp)) assert(symlink(pbp, linked_pbp) == 0);
+    assert(nk_pbp_homebrew_folder_name(linked_pbp, name, sizeof(name), problem,
+                                       sizeof(problem)));
+    assert(strcmp(name, "Linked") == 0);
+#endif
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return write_launch_environment_probe();
@@ -2839,6 +2889,7 @@ int main(int argc, char **argv) {
     char base[600];
     snprintf(base, sizeof(base), "%s%claunch_resolution_tests", cache_dir, sep);
     assert(nk_platform_mkdir_p(base));
+    test_homebrew_folder_named_as_picked(base);
 
     char iso_path[700];
     snprintf(iso_path, sizeof(iso_path), "%s%cgame.iso", base, sep);

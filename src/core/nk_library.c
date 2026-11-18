@@ -252,11 +252,12 @@ NkResult nk_library_remove_by_key(NkLibrary *lib, const char *disc_id,
     return NK_OK;
 }
 
-/* Writes `"key": "value",` with the value escaped for JSON. Every control
+/* Writes `"key": "value",` with the value escaped for JSON, without the comma
+ * when last is true (the object's final member). Every control
  * character is escaped, so the reader (which refuses raw control characters)
  * reads back what was written. The value is streamed, so no escape ever cuts it
  * to fit a buffer: a field of quotes or control characters is written whole. */
-static void write_json_string_field(FILE *f, const char *key, const char *src) {
+static void write_json_string_value(FILE *f, const char *key, const char *src, bool last) {
     fprintf(f, "      \"%s\": \"", key);
     for (size_t i = 0; src && src[i]; i++) {
         unsigned char c = (unsigned char)src[i];
@@ -275,7 +276,11 @@ static void write_json_string_field(FILE *f, const char *key, const char *src) {
             fputc((int)c, f);
         }
     }
-    fputs("\",\n", f);
+    fputs(last ? "\"\n" : "\",\n", f);
+}
+
+static void write_json_string_field(FILE *f, const char *key, const char *src) {
+    write_json_string_value(f, key, src, false);
 }
 
 NkResult nk_library_save(const NkLibrary *lib, const char *file_path) {
@@ -367,7 +372,7 @@ NkResult nk_library_save(const NkLibrary *lib, const char *file_path) {
         fprintf(f, "      \"extracted_audio_count\": %u,\n", (unsigned)g->extracted_audio_count);
         fprintf(f, "      \"extracted_visual_count\": %u,\n", (unsigned)g->extracted_visual_count);
         fprintf(f, "      \"extracted_layout_count\": %u,\n", (unsigned)g->extracted_layout_count);
-        fprintf(f, "      \"last_played\": \"%s\"\n", g->last_played);
+        write_json_string_value(f, "last_played", g->last_played, true);
         fprintf(f, "    }%s\n", (persisted_index + 1 < persisted_total) ? "," : "");
         persisted_index++;
     }
@@ -380,14 +385,7 @@ NkResult nk_library_save(const NkLibrary *lib, const char *file_path) {
     bool written_whole = !ferror(f) && nk_platform_sync_file(f);
     if (fclose(f) != 0) written_whole = false;
     if (!written_whole) {
-#if defined(_WIN32) || defined(_WIN64)
-        WCHAR wtmp[32768];
-        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, tmp_path, -1, wtmp, 32768) > 0) {
-            DeleteFileW(wtmp);
-        }
-#else
-        remove(tmp_path);
-#endif
+        (void)nk_remove_utf8(tmp_path);
         return NK_ERROR_IO;
     }
 
@@ -428,9 +426,9 @@ NkResult nk_library_save(const NkLibrary *lib, const char *file_path) {
         char bak_tmp[NK_MAX_PATH + 16];
         int bak_tmp_len = snprintf(bak_tmp, sizeof(bak_tmp), "%s.new", bak_path);
         if (bak_tmp_len > 0 && (size_t)bak_tmp_len < sizeof(bak_tmp)) {
-            FILE *src = fopen(target, "rb");
+            FILE *src = nk_fopen_utf8(target, "rb");
             if (src) {
-                FILE *dst = fopen(bak_tmp, "wb");
+                FILE *dst = nk_fopen_utf8(bak_tmp, "wb");
                 bool copied = false;
                 if (dst) {
                     char copy_buf[4096];
@@ -447,17 +445,17 @@ NkResult nk_library_save(const NkLibrary *lib, const char *file_path) {
                 }
                 if (ferror(src)) copied = false;
                 fclose(src);
-                if (copied && rename(bak_tmp, bak_path) == 0) {
+                if (copied && nk_rename_utf8(bak_tmp, bak_path) == 0) {
                     /* The new backup is in place. */
                 } else {
-                    remove(bak_tmp);
+                    (void)nk_remove_utf8(bak_tmp);
                 }
             }
         }
     }
 
-    if (rename(tmp_path, target) != 0) {
-        remove(tmp_path);
+    if (nk_rename_utf8(tmp_path, target) != 0) {
+        (void)nk_remove_utf8(tmp_path);
         return NK_ERROR_IO;
     }
 #endif

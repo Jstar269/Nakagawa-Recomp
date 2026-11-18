@@ -799,6 +799,37 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(dst.read_bytes(), self.elf)
 
+    def _decrypt_top_level(self, name: str, data: bytes):
+        src = self.tmp / f"{name}.gz"
+        dst = self.tmp / f"{name}.out"
+        src.write_bytes(data)
+        dst.unlink(missing_ok=True)
+        out = subprocess.run(
+            [str(self.exe), "decrypt", "--key-file", str(self.tmp / "absent.json"),
+             "--in", str(src), "--out", str(dst)],
+            capture_output=True, text=True,
+        )
+        return out, dst
+
+    def test_top_level_gzip_of_an_elf_decrypts(self):
+        out, dst = self._decrypt_top_level("top_gzip_elf", gzip_payload(self.elf))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("DECRYPT_OK", out.stdout)
+        self.assertEqual(dst.read_bytes(), self.elf)
+
+    def test_top_level_gzip_that_is_not_an_elf_is_refused(self):
+        """F-ce7d22cc: the gzip path checks the ELF magic, as the ~PSP path does.
+
+        Failing before: a gzip of non-ELF bytes was written out and reported as
+        DECRYPT_OK, a validated decryption of something that is not a module.
+        """
+        out, dst = self._decrypt_top_level(
+            "top_gzip_png", gzip_payload(b"\x89PNG\r\n\x1a\n" + bytes(64)))
+        self.assertNotEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("DECRYPT_OK", out.stdout)
+        self.assertIn("not an ELF image", out.stdout + out.stderr)
+        self.assertFalse(dst.exists())
+
     def test_gzip_payload_with_stored_blocks_between_huffman_blocks(self):
         """A gzip payload that switches between Huffman and stored blocks decrypts.
 
