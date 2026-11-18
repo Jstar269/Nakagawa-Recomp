@@ -251,8 +251,15 @@ def _binding_source(value: object, path: str) -> None:
             fail(path, f"unknown host axis {value[len('trigger:'):]!r}")
         return
     if value[0] in "+-":
-        if value[1:].casefold() not in HOST_AXES:
-            fail(path, f"unknown host axis {value[1:]!r}")
+        axis_part = value[1:]
+        if "@" in axis_part:
+            axis_name, thresh_str = axis_part.split("@", 1)
+            if not thresh_str.isascii() or not thresh_str.isdigit() or not 1 <= int(thresh_str) <= INT16_MAX:
+                fail(path, f"binding {value!r} needs a threshold from 1 to {INT16_MAX} after '@'")
+        else:
+            axis_name = axis_part
+        if axis_name.casefold() not in HOST_AXES:
+            fail(path, f"unknown host axis {axis_name!r}")
         return
     if value.casefold() in HOST_BUTTONS:
         return
@@ -304,6 +311,10 @@ def _axis(value: object, path: str) -> None:
         fail(f"{path}.inverted", "must be a boolean")
     for key in ("rest", "min_val", "max_val"):
         _int_in(axis.get(key), f"{path}.{key}", INT16_MIN, INT16_MAX)
+    if axis["min_val"] >= axis["max_val"]:
+        fail(f"{path}.min_val", f"min_val ({axis['min_val']}) must be less than max_val ({axis['max_val']})")
+    if not axis["min_val"] <= axis["rest"] <= axis["max_val"]:
+        fail(f"{path}.rest", f"rest ({axis['rest']}) out of range [{axis['min_val']}, {axis['max_val']}]")
 
 
 def validate_input_profile(document: object) -> dict:
@@ -331,22 +342,42 @@ def validate_input_profile(document: object) -> dict:
         if axis not in calibration:
             fail(f"$.calibration.{axis}", "is required")
         _axis(calibration[axis], f"$.calibration.{axis}")
+    if calibration["analog_x"]["host_axis"] == calibration["analog_y"]["host_axis"]:
+        fail("$.calibration.analog_y.host_axis",
+             f"host axis {calibration['analog_x']['host_axis']!r} is bound to both 'analog_x' and 'analog_y'")
     psp = _bindings(root.get("psp_bindings"), "$.psp_bindings", "control", PSP_CONTROLS)
-    _reject_shared_host_sources(psp)
-    _bindings(root.get("navigation_bindings"), "$.navigation_bindings", "action", NAV_ACTIONS)
+    _reject_shared_host_sources(psp, "$.psp_bindings")
+    nav = _bindings(root.get("navigation_bindings"), "$.navigation_bindings", "action", NAV_ACTIONS)
+    _reject_shared_host_sources(nav, "$.navigation_bindings")
     return root
 
 
-def _reject_shared_host_sources(psp: dict[str, dict[str, str]]) -> None:
-    """A host input may drive one PSP control. Two owners would be a conflict the runtime refuses."""
-    owners: dict[str, str] = {}
-    for control, sources in psp.items():
+def _normalize_binding_source(source: str) -> tuple[str, str]:
+    """Normalize a validated binding source to (kind, casefolded host identifier)."""
+    if source.startswith("button:"):
+        return ("button", source[len("button:"):].casefold())
+    if source.startswith("trigger:"):
+        return ("trigger", source[len("trigger:"):].casefold())
+    if source[0] in "+-":
+        axis_name = source[1:].split("@", 1)[0].casefold()
+        return (f"axis{source[0]}", axis_name)
+    lowered = source.casefold()
+    if lowered in TRIGGER_AXES:
+        return ("trigger", lowered)
+    return ("button", lowered)
+
+
+def _reject_shared_host_sources(bindings: dict[str, dict[str, str]], path: str = "$.psp_bindings") -> None:
+    """A host input may drive one control or action. Two owners would be a conflict the runtime refuses."""
+    owners: dict[tuple[str, str], str] = {}
+    for control, sources in bindings.items():
         for source in sources.values():
             if source.casefold() == "none":
                 continue
-            if source in owners and owners[source] != control:
-                fail("$.psp_bindings", f"{source!r} is bound to both {owners[source]!r} and {control!r}")
-            owners[source] = control
+            key = _normalize_binding_source(source)
+            if key in owners and owners[key] != control:
+                fail(path, f"{source!r} is bound to both {owners[key]!r} and {control!r}")
+            owners[key] = control
 
 
 # -----------------------------------------------------------------------------

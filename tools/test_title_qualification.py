@@ -227,6 +227,58 @@ class InputProfileVocabularyTests(unittest.TestCase):
         document["per_title"] = [{"disc_id": "TEST00006", "profile": {}}]
         self._refused(document, "is not a field of the public input profile")
 
+    def test_accepts_and_refuses_stick_threshold_bindings(self):
+        document = copy.deepcopy(self.valid)
+        document["psp_bindings"][2]["secondary"] = "+rightx@20000"
+        document["psp_bindings"][3]["secondary"] = "-righty@1"
+        tq.validate_input_profile(document)
+        for bad in ("+rightx@0", "+rightx@32768", "+rightx@", "+rightx@-5", "+rightx@20000x", "+bogus@100"):
+            with self.subTest(bad=bad):
+                doc = copy.deepcopy(self.valid)
+                doc["psp_bindings"][2]["secondary"] = bad
+                with self.assertRaises(tq.QualificationError):
+                    tq.validate_input_profile(doc)
+
+    def test_refuses_equivalent_shared_psp_sources_and_navigation_sources(self):
+        # button:south and bare south
+        doc = copy.deepcopy(self.valid)
+        doc["psp_bindings"][0]["primary"] = "button:south"
+        self._refused(doc, "bound to both 'select' and 'cross'")
+        # case-insensitive match: SOUTH and south
+        doc = copy.deepcopy(self.valid)
+        doc["psp_bindings"][0]["primary"] = "SOUTH"
+        self._refused(doc, "bound to both 'select' and 'cross'")
+        # bare trigger and trigger: prefix
+        doc = copy.deepcopy(self.valid)
+        doc["psp_bindings"][0]["primary"] = "trigger:left_trigger"
+        self._refused(doc, "bound to both 'select' and 'ltrigger'")
+        # +axis@threshold and +axis share the same positive axis source
+        doc = copy.deepcopy(self.valid)
+        doc["psp_bindings"][0]["primary"] = "+rightx@20000"
+        doc["psp_bindings"][1]["primary"] = "+rightx"
+        self._refused(doc, "bound to both 'select' and 'start'")
+        # navigation_bindings shared source
+        doc = copy.deepcopy(self.valid)
+        doc["navigation_bindings"][0]["primary"] = "east"  # cancel already uses east
+        self._refused(doc, "bound to both 'confirm' and 'cancel'")
+
+    def test_refuses_axis_calibration_range_and_duplicate_host_axis(self):
+        # min_val >= max_val
+        doc = copy.deepcopy(self.valid)
+        doc["calibration"]["analog_x"]["min_val"] = 100
+        doc["calibration"]["analog_x"]["max_val"] = 100
+        self._refused(doc, "min_val")
+        # rest outside [min_val, max_val]
+        doc = copy.deepcopy(self.valid)
+        doc["calibration"]["analog_x"]["min_val"] = -1000
+        doc["calibration"]["analog_x"]["max_val"] = 1000
+        doc["calibration"]["analog_x"]["rest"] = 2000
+        self._refused(doc, "rest")
+        # analog_x and analog_y on the same host_axis
+        doc = copy.deepcopy(self.valid)
+        doc["calibration"]["analog_y"]["host_axis"] = doc["calibration"]["analog_x"]["host_axis"]
+        self._refused(doc, "bound to both 'analog_x' and 'analog_y'")
+
 
 class ManifestContractTests(unittest.TestCase):
 
