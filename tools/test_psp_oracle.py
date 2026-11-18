@@ -1673,6 +1673,36 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
 
 
 class PspOracleRunnerTests(unittest.TestCase):
+    def test_unknown_campaign_contract_refuses_direct_record_parsing(self) -> None:
+        text = META.format(
+            source="psp",
+            model="synthetic",
+            firmware="test",
+            binary="0" * 64,
+            commit="0" * 40,
+        ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+        with self.assertRaisesRegex(ProtocolError, "no registered completion contract"):
+            _parse_campaign_records(text, "unregistered-synthetic-case")
+
+    def test_campaign_completeness_contract_tracks_parser_registries(self) -> None:
+        text = META.format(
+            source="psp",
+            model="synthetic",
+            firmware="test",
+            binary="0" * 64,
+            commit="0" * 40,
+        ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+        with patch.dict(
+            "psp_oracle.run_psplink._COMPLETE_CAMPAIGN_PARSERS",
+            {"new-complete-case": lambda _text, *, require_complete: None},
+        ):
+            self.assertTrue(_campaign_stream_complete(text, "new-complete-case"))
+        with patch.dict(
+            "psp_oracle.run_psplink._SINGLE_RECORD_CAMPAIGN_CASES",
+            {"new-single-case": ("SMOKE", "one")},
+        ):
+            self.assertTrue(_campaign_stream_complete(text, "new-single-case"))
+
     def _compare_output_report(
         self,
         source: str,
@@ -1861,6 +1891,26 @@ class PspOracleRunnerTests(unittest.TestCase):
             self.assertTrue(kept_going)
             verify_roundtrip.assert_called_once_with()
             self.assertFalse(roundtrip.exists())
+
+    def test_campaign_plan_exprint_status_reports_the_command_status(self) -> None:
+        before = PsplinkSnapshot(
+            threads=frozenset({("0x00000001", "PspLink")}),
+            memory_free_bytes=(),
+            modules=frozenset({("0x00000003", "PspLink")}),
+        )
+        report = evaluate_teardown_snapshots(
+            before,
+            before,
+            before,
+            "0x00000008",
+            frozenset(),
+            unload_confirmed=True,
+            sentinel_status="PASS",
+            shell_qualified=True,
+            host0_roundtrip=True,
+            exprint_command_status="PROCESS_EXITED",
+        )
+        self.assertEqual(report["exprint_status"], "PROCESS_EXITED")
 
     def test_dmac_host0_capture_uses_the_runner_validation_path(self) -> None:
         args = SimpleNamespace(
@@ -2363,7 +2413,7 @@ class PspLinkTeardownSnapshotTests(unittest.TestCase):
             exprint_command_status="PROCESS_EXITED",
         )
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(report["exprint_status"], "NOT_RUN")
+        self.assertEqual(report["exprint_status"], "PROCESS_EXITED")
         self.assertEqual(report["exprint_command_status"], "PROCESS_EXITED")
 
     def test_three_snapshot_check_reports_allocator_drift_without_failing_teardown(self) -> None:
@@ -7371,22 +7421,25 @@ class HleSingleLaunchProbeTests(unittest.TestCase):
                 self.assertNotIn("NULL is the only invalid pointer", other["risk"])
 
     def test_manual_campaign_refuses_retired_null_out_case(self) -> None:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(self.h.root / "tools" / "psp_oracle" / "run_psplink.py"),
-                "--campaign-case", f"{self.NULL_CASE}=not-present.prx",
-                "--source-commit", "0" * 40,
-                "--model", "PSP-3000",
-                "--firmware", "6.6.1",
-                "--host0-root", str(self.h.fixture),
-                "--session-id", "test-retired-case",
-            ],
-            cwd=self.h.root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        build_root = self.h.fixture / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="retired-case-", dir=build_root) as scratch:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(self.h.root / "tools" / "psp_oracle" / "run_psplink.py"),
+                    "--campaign-case", f"{self.NULL_CASE}=not-present.prx",
+                    "--source-commit", "0" * 40,
+                    "--model", "PSP-3000",
+                    "--firmware", "6.6.1",
+                    "--host0-root", scratch,
+                    "--session-id", "test-retired-case",
+                ],
+                cwd=self.h.root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("retired and cannot be scheduled", completed.stderr)
         self.assertNotIn("campaign PRX is missing", completed.stderr)

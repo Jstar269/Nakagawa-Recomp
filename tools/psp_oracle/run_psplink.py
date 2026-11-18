@@ -28,136 +28,55 @@ import sys
 import threading
 import time
 import traceback
-from typing import TYPE_CHECKING, Any, Callable, TypeGuard, cast
+from typing import Any, Callable, TypeGuard, cast
 
 _PACKAGE_PARENT = str(Path(__file__).resolve().parents[1])
 if _PACKAGE_PARENT not in sys.path:
     sys.path.insert(0, _PACKAGE_PARENT)
 
-if TYPE_CHECKING:
-    from .protocol import (
-        ParsedOutput,
-        ProtocolError,
-        compare_texts,
-        decode_psp_model_code,
-        dump_json,
-        ge_corpus_report,
-        model_identity_fields,
-        parse_output,
-        parse_progress,
-        provenance_issues,
-        validate_dmac_size_matrix,
-        validate_dmac_size_matrix_size,
-    )
-    from .parse_golden import (
-        CAMPAIGN_PROBE_CASES,
-        GE_CORPUS_PROBES,
-        DMAC_INVALID_CASES,
-        ge_corpus_cells,
-        parse_cache_alias_output,
-        parse_campaign_probe_output,
-        parse_audio_query_output,
-        parse_delay_zero_output,
-        parse_dmac_cells_output,
-        parse_dmac_invalid_tail_output,
-        parse_fpu_vector_output,
-        parse_ge_nan_output,
-        parse_hle_intr_cells_output,
-        parse_io_matrix_output,
-        parse_mbx_delete_wait_output,
-        parse_font_files_output,
-        parse_registry_font_output,
-        parse_registry_readonly_output,
-        parse_umd_io_output,
-        parse_umd_raw_read_output,
-        parse_vram_mirror_output,
-        validate_hle_edram_restore,
-        validate_hle_savedata_getsize_absent,
-    )
-else:
-    try:
-        from .protocol import (
-            ParsedOutput,
-            ProtocolError,
-            compare_texts,
-            decode_psp_model_code,
-            dump_json,
-            ge_corpus_report,
-            model_identity_fields,
-            parse_output,
-            parse_progress,
-            provenance_issues,
-            validate_dmac_size_matrix,
-            validate_dmac_size_matrix_size,
-        )
-    except ImportError:  # direct ``python tools/psp_oracle/run_psplink.py`` invocation
-        from psp_oracle.protocol import (
-            ParsedOutput,
-            ProtocolError,
-            compare_texts,
-            decode_psp_model_code,
-            dump_json,
-            ge_corpus_report,
-            model_identity_fields,
-            parse_output,
-            parse_progress,
-            provenance_issues,
-            validate_dmac_size_matrix,
-            validate_dmac_size_matrix_size,
-        )
+try:
+    from . import parse_golden as _parse_golden
+    from . import protocol as _protocol
+except ImportError:  # direct ``python tools/psp_oracle/run_psplink.py`` invocation
+    from psp_oracle import parse_golden as _parse_golden
+    from psp_oracle import protocol as _protocol
 
-    try:
-        from .parse_golden import (
-            CAMPAIGN_PROBE_CASES,
-            GE_CORPUS_PROBES,
-            DMAC_INVALID_CASES,
-            ge_corpus_cells,
-            parse_cache_alias_output,
-            parse_campaign_probe_output,
-            parse_audio_query_output,
-            parse_delay_zero_output,
-            parse_dmac_cells_output,
-            parse_dmac_invalid_tail_output,
-            parse_fpu_vector_output,
-            parse_ge_nan_output,
-            parse_hle_intr_cells_output,
-            parse_io_matrix_output,
-            parse_mbx_delete_wait_output,
-            parse_font_files_output,
-            parse_registry_font_output,
-            parse_registry_readonly_output,
-            parse_umd_io_output,
-            parse_umd_raw_read_output,
-            parse_vram_mirror_output,
-            validate_hle_edram_restore,
-            validate_hle_savedata_getsize_absent,
-        )
-    except ImportError:  # direct ``python tools/psp_oracle/run_psplink.py`` invocation
-        from psp_oracle.parse_golden import (
-            CAMPAIGN_PROBE_CASES,
-            GE_CORPUS_PROBES,
-            DMAC_INVALID_CASES,
-            ge_corpus_cells,
-            parse_cache_alias_output,
-            parse_campaign_probe_output,
-            parse_audio_query_output,
-            parse_delay_zero_output,
-            parse_dmac_cells_output,
-            parse_dmac_invalid_tail_output,
-            parse_fpu_vector_output,
-            parse_ge_nan_output,
-            parse_hle_intr_cells_output,
-            parse_io_matrix_output,
-            parse_mbx_delete_wait_output,
-            parse_font_files_output,
-            parse_registry_font_output,
-            parse_registry_readonly_output,
-            parse_umd_io_output,
-            parse_umd_raw_read_output,
-            parse_vram_mirror_output,
-            validate_hle_edram_restore,
-            validate_hle_savedata_getsize_absent,
-        )
+ParsedOutput = _protocol.ParsedOutput
+ProtocolError = _protocol.ProtocolError
+compare_texts = _protocol.compare_texts
+decode_psp_model_code = _protocol.decode_psp_model_code
+dump_json = _protocol.dump_json
+ge_corpus_report = _protocol.ge_corpus_report
+model_identity_fields = _protocol.model_identity_fields
+parse_output = _protocol.parse_output
+parse_progress = _protocol.parse_progress
+provenance_issues = _protocol.provenance_issues
+validate_dmac_size_matrix = _protocol.validate_dmac_size_matrix
+validate_dmac_size_matrix_size = _protocol.validate_dmac_size_matrix_size
+
+CAMPAIGN_PROBE_CASES = _parse_golden.CAMPAIGN_PROBE_CASES
+GE_CORPUS_PROBES = _parse_golden.GE_CORPUS_PROBES
+DMAC_INVALID_CASES = _parse_golden.DMAC_INVALID_CASES
+ge_corpus_cells = _parse_golden.ge_corpus_cells
+parse_cache_alias_output = _parse_golden.parse_cache_alias_output
+parse_campaign_probe_output = _parse_golden.parse_campaign_probe_output
+parse_audio_query_output = _parse_golden.parse_audio_query_output
+parse_delay_zero_output = _parse_golden.parse_delay_zero_output
+parse_dmac_cells_output = _parse_golden.parse_dmac_cells_output
+parse_dmac_invalid_tail_output = _parse_golden.parse_dmac_invalid_tail_output
+parse_fpu_vector_output = _parse_golden.parse_fpu_vector_output
+parse_ge_nan_output = _parse_golden.parse_ge_nan_output
+parse_hle_intr_cells_output = _parse_golden.parse_hle_intr_cells_output
+parse_io_matrix_output = _parse_golden.parse_io_matrix_output
+parse_mbx_delete_wait_output = _parse_golden.parse_mbx_delete_wait_output
+parse_font_files_output = _parse_golden.parse_font_files_output
+parse_registry_font_output = _parse_golden.parse_registry_font_output
+parse_registry_readonly_output = _parse_golden.parse_registry_readonly_output
+parse_umd_io_output = _parse_golden.parse_umd_io_output
+parse_umd_raw_read_output = _parse_golden.parse_umd_raw_read_output
+parse_vram_mirror_output = _parse_golden.parse_vram_mirror_output
+validate_hle_edram_restore = _parse_golden.validate_hle_edram_restore
+validate_hle_savedata_getsize_absent = _parse_golden.validate_hle_savedata_getsize_absent
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -680,7 +599,7 @@ def evaluate_teardown_snapshots(
         "module_uid": uid,
         "memory_free_deltas_bytes": memory_deltas,
         "memory_free_deltas_diagnostic_only": True,
-        "exprint_status": "NOT_RUN",
+        "exprint_status": exprint_command_status or "NOT_RUN",
         "exprint_command_status": exprint_command_status,
         "exprint_reply": exprint_reply,
     }
@@ -1012,16 +931,8 @@ def _validate_campaign_contract(text: str, case_id: str) -> None:
         validate_hle_savedata_getsize_absent(text)
     elif case_id in CAMPAIGN_PROBE_CASES:
         parse_campaign_probe_output(text, case_id, require_complete=True)
-    elif case_id == "registry-readonly":
-        parse_registry_readonly_output(text, require_complete=True)
-    elif case_id == "registry-font":
-        parse_registry_font_output(text, require_complete=True)
-    elif case_id == "umd-io":
-        parse_umd_io_output(text, require_complete=True)
-    elif case_id == "umd-raw-read":
-        parse_umd_raw_read_output(text, require_complete=True)
-    elif case_id == "font-files":
-        parse_font_files_output(text, require_complete=True)
+    elif case_id in _GOLDEN_CAMPAIGN_PARSERS:
+        _GOLDEN_CAMPAIGN_PARSERS[case_id](text, require_complete=True)
     elif case_id in _FIXED_CAMPAIGN_CASES:
         _parse_fixed_campaign_records(text, case_id)
     elif case_id in _COMPLETE_CAMPAIGN_PARSERS:
@@ -1033,8 +944,17 @@ def _validate_campaign_contract(text: str, case_id: str) -> None:
             raise ProtocolError(f"{case_id} stream must contain exactly one result record")
         if (parsed.results[0].test_id, parsed.results[0].case_id) != expected:
             raise ProtocolError(f"{case_id} stream must contain {expected[0]}/{expected[1]}")
+    else:
+        raise ProtocolError(f"{case_id}: no registered completion contract")
 
 
+_GOLDEN_CAMPAIGN_PARSERS = {
+    "registry-readonly": parse_registry_readonly_output,
+    "registry-font": parse_registry_font_output,
+    "umd-io": parse_umd_io_output,
+    "umd-raw-read": parse_umd_raw_read_output,
+    "font-files": parse_font_files_output,
+}
 _COMPLETE_CAMPAIGN_PARSERS = {
     "audio-query": parse_audio_query_output,
     "fpu-vector": parse_fpu_vector_output,
@@ -1136,9 +1056,11 @@ def _normalise_unbound_identity_fields(text: str) -> str:
 
 
 def _campaign_completeness_contract(case_id: str) -> str:
-    if case_id in CAMPAIGN_PROBE_CASES or case_id in {
-        "registry-readonly", "registry-font", "umd-io", "umd-raw-read", "font-files",
-    }:
+    if (
+        case_id in CAMPAIGN_PROBE_CASES
+        or case_id in _GOLDEN_CAMPAIGN_PARSERS
+        or case_id in _COMPLETE_CAMPAIGN_PARSERS
+    ):
         return "strict-golden-sequence"
     if case_id in _FIXED_CAMPAIGN_CASES:
         return "strict-fixed-record-sequence"
@@ -1146,13 +1068,9 @@ def _campaign_completeness_contract(case_id: str) -> str:
         r"dmac-size-matrix-size-0x[0-9a-f]{8}", case_id
     ):
         return "strict-dmac-sequence"
-    if case_id in {"audio-query", "fpu-vector", "cache-alias", "io-matrix",
-                   "mbx-delete-wait", "ge-nan", "vram-mirror", "dma-cells",
-                   "delay-zero", "hle-intr-cells"}:
-        return "strict-golden-sequence"
     if case_id in DMAC_INVALID_CASES:
         return "strict-dmac-invalid-cell-records"
-    if case_id in {"transport-write", "model-profile"}:
+    if case_id in _SINGLE_RECORD_CAMPAIGN_CASES:
         return "exactly-one-known-record"
     return "unregistered-no-completion-contract"
 
@@ -2044,6 +1962,15 @@ class PsplinkCampaignRunner:
         self.state = "SESSION_WEDGED"
         self.terminal_reason = "PHYSICAL_INTERVENTION_REQUIRED"
 
+    def _checkpoint_write_failed(self) -> None:
+        self.recovery_events.append(
+            "CHECKPOINT_WRITE_FAILED: campaign checkpoint could not be persisted"
+        )
+        if self.terminal_reason == "PHYSICAL_INTERVENTION_REQUIRED":
+            return
+        self.state = "STOPPED"
+        self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
+
     def _hardware_lock_held(self, stage: str) -> bool:
         """Re-read the hardware lock; stop before touching the PSP when it is not held."""
 
@@ -2341,6 +2268,14 @@ class PsplinkCampaignRunner:
         }
         canonical = host0_record_text
         parsed_ok = False
+        def parse_case_records(text: str) -> ParsedOutput:
+            if (
+                _campaign_completeness_contract(case.case_id)
+                == "unregistered-no-completion-contract"
+            ):
+                return parse_output(text)
+            return _parse_campaign_records(text, case.case_id)
+
         if host0_text:
             metadata_args = argparse.Namespace(
                 binary=case.binary,
@@ -2352,13 +2287,13 @@ class PsplinkCampaignRunner:
             identity = _device_identity(host0_text, metadata_args)
             blockers.extend(cast(list[str], identity["DEVICE_IDENTITY_BLOCKERS"]))
             try:
-                host0_parsed = _parse_campaign_records(
-                    _normalise_unbound_identity_fields(host0_record_text), case.case_id
+                host0_parsed = parse_case_records(
+                    _normalise_unbound_identity_fields(host0_record_text)
                 )
                 device_model_raw_value = _model_profile_raw_value(host0_parsed)
                 _validate_model_code_expectation(device_model_raw_value, self.model_code)
                 canonical = _canonicalize_psp(host0_record_text, metadata_args)
-                canonical_parsed = _parse_campaign_records(canonical, case.case_id)
+                canonical_parsed = parse_case_records(canonical)
                 parsed_ok = bool(canonical_parsed.results) and all(
                     item.status == "PASS" for item in canonical_parsed.results
                 )
@@ -2384,8 +2319,8 @@ class PsplinkCampaignRunner:
 
         if stdout_record_text:
             try:
-                stdout_parsed = _parse_campaign_records(
-                    _normalise_unbound_identity_fields(stdout_record_text), case.case_id
+                stdout_parsed = parse_case_records(
+                    _normalise_unbound_identity_fields(stdout_record_text)
                 )
             except ProtocolError:
                 disqualify("stdout schema records failed strict protocol validation")
@@ -2810,7 +2745,7 @@ class PsplinkCampaignRunner:
                 try:
                     on_case_complete(case_index, envelope)
                 except (OSError, ValueError, TypeError):
-                    self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
+                    self._checkpoint_write_failed()
             return False
 
         after_probe, s1_problem = self._take_snapshot()
@@ -2938,8 +2873,7 @@ class PsplinkCampaignRunner:
             try:
                 on_case_complete(case_index, envelope)
             except (OSError, ValueError, TypeError):
-                self.state = "STOPPED"
-                self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
+                self._checkpoint_write_failed()
         if self.terminal_reason:
             return False
         self.state = "READY"
@@ -3444,6 +3378,14 @@ def _checkpoint_after_run(
 
     if terminal_reason is None and not running:
         if position == case_count:
+            if state.get("failed_case_id") is not None:
+                return {
+                    **state,
+                    "state": "IN_PROGRESS",
+                    "active_case_index": None,
+                    "active_case_id": None,
+                    "phase": None,
+                }
             return {
                 **state,
                 "state": "COMPLETE",
@@ -3496,6 +3438,9 @@ def _checkpoint_resume(
         ),
         "host0_qualified": checkpoint.get("host0_qualified") is True,
     }
+    failed_case_id = checkpoint.get("failed_case_id")
+    if isinstance(failed_case_id, str) and failed_case_id:
+        carried["failed_case_id"] = failed_case_id
     state = checkpoint.get("state")
     start_index: object
     if state == "COMPLETE":
@@ -3518,6 +3463,14 @@ def _checkpoint_resume(
                 "interrupted_boot_number": interrupted_boot,
                 "qualified_boot_number": _attested_boot_number(device_state),
             }
+        if phase == "CASE_ACTIVE":
+            active_case_id = checkpoint.get("active_case_id")
+            if not isinstance(active_case_id, str) or not active_case_id:
+                return {"status": "REFUSED", "reason": "invalid active case id"}
+            interrupted_cases = cast(list[object], carried["interrupted_cases"])
+            if active_case_id not in interrupted_cases:
+                interrupted_cases.append(active_case_id)
+            carried["failed_case_id"] = active_case_id
         start_index = active_index + 1 if phase == "CASE_ACTIVE" else active_index
     elif state == "WAITING_FOR_NEW_QUALIFIED_BOOT":
         interrupted_boot = checkpoint.get("interrupted_boot_number")
@@ -3639,6 +3592,35 @@ def run_campaign_plan(
         return (0 if resume.get("status") == "COMPLETE" else 2), {**resume, **summary}
     start_index, carried = resume
     if start_index >= len(cases):
+        failed_case_id = carried.get("failed_case_id")
+        if failed_case_id is not None:
+            state = {
+                "schema": 2,
+                "campaign_id": plan["campaign_id"],
+                "source_commit": plan["source_commit"],
+                "session_id": plan["session_id"],
+                "queue": list(CAMPAIGN_QUEUE_CASES),
+                "state": "IN_PROGRESS",
+                **carried,
+                "next_case_index": start_index,
+                "active_case_index": None,
+                "active_case_id": None,
+                "active_case_boot_number": None,
+                "phase": None,
+                "failed_case_id": failed_case_id,
+            }
+            _write_campaign_json(checkpoint_path, state)
+            report = {
+                "status": "INCOMPLETE",
+                "campaign_id": plan["campaign_id"],
+                "case_count": len(cases),
+                "completed_cases": carried["completed_cases"],
+                "interrupted_cases": carried["interrupted_cases"],
+                "failed_case_id": failed_case_id,
+                **summary,
+            }
+            _write_campaign_json(paths["report_path"], report)
+            return 2, report
         return 0, {"status": "COMPLETE", "case_count": len(cases), **summary}
 
     state: dict[str, object] = {
@@ -3655,7 +3637,9 @@ def run_campaign_plan(
         "phase": None,
         "failed_case_id": None,
     }
+    state["failed_case_id"] = carried.get("failed_case_id")
     _write_campaign_json(checkpoint_path, state)
+    pending_checkpoint_state: dict[str, object] | None = None
     transport = cast(PsplinkProcessTransport, (transport_factory or PsplinkProcessTransport)(
         pspsh_argv=pspsh_argv,
         usbhostfs_argv=usbhostfs_argv,
@@ -3674,17 +3658,20 @@ def run_campaign_plan(
 
     def record_start(index: int, case: CampaignCase, phase: str) -> None:
         current_device_state = require_hardware_lock(plan["session_id"])
-        state.update(_checkpoint_case_started(
+        next_state = _checkpoint_case_started(
             state,
             index,
             case.case_id,
             phase,
             device_boot_number=int(cast(str | int, current_device_state["boot_number"])),
-        ))
-        _write_campaign_json(checkpoint_path, state)
+        )
+        _write_campaign_json(checkpoint_path, next_state)
+        state.clear()
+        state.update(next_state)
 
     def record_complete(index: int, envelope: dict[str, object]) -> None:
-        state.update(_checkpoint_case_finished(
+        nonlocal pending_checkpoint_state
+        next_state = _checkpoint_case_finished(
             state,
             index,
             str(envelope["CASE_ID"]),
@@ -3692,8 +3679,14 @@ def run_campaign_plan(
             resume_case_index=runner.resume_case_index,
             host0_qualified=runner.host0_qualified,
             power_cycle_required=runner.intervention_requires_power_cycle,
-        ))
-        _write_campaign_json(checkpoint_path, state)
+        )
+        try:
+            _write_campaign_json(checkpoint_path, next_state)
+        except (OSError, ValueError, TypeError):
+            pending_checkpoint_state = next_state
+            raise
+        state.clear()
+        state.update(next_state)
 
     try:
         report = runner.run(
@@ -3716,16 +3709,17 @@ def run_campaign_plan(
         if runner.terminal_reason != "PHYSICAL_INTERVENTION_REQUIRED":
             runner.terminal_reason = "HOST_ERROR"
         report = runner._report()
+    state_before_finalization = pending_checkpoint_state or state
     final_state = _checkpoint_after_run(
-        state,
+        state_before_finalization,
         terminal_reason=cast(str | None, report.get("terminal_reason")),
         intervention_case_id=runner.intervention_case_id,
         resume_case_index=runner.resume_case_index,
         case_count=len(cases),
     )
-    if final_state != state:
-        state = final_state
-        _write_campaign_json(checkpoint_path, state)
+    _write_campaign_json(checkpoint_path, final_state)
+    state.clear()
+    state.update(final_state)
 
     report.update({
         "campaign_id": plan["campaign_id"],
@@ -3733,6 +3727,9 @@ def run_campaign_plan(
         "start_case_index": start_index,
         "checkpoint_state": state.get("state"),
         "checkpoint_next_case_index": state.get("next_case_index"),
+        "completed_cases": list(cast(Iterable[object], state.get("completed_cases", []))),
+        "interrupted_cases": list(cast(Iterable[object], state.get("interrupted_cases", []))),
+        "failed_case_id": state.get("failed_case_id"),
         **summary,
     })
     _write_campaign_json(paths["report_path"], report)
@@ -4530,10 +4527,26 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--shell-verification-timeout must be finite and positive")
         host0_root = args.host0_root.resolve()
         fixture_root = (ROOT / "tests" / "fixtures" / "psp_oracle").resolve()
+        ignored_root = (fixture_root / "build").resolve()
         try:
-            host0_root.relative_to(fixture_root)
+            host0_root.relative_to(ignored_root)
         except ValueError:
-            parser.error("--host0-root must be a scratch directory under tests/fixtures/psp_oracle")
+            parser.error(
+                "--host0-root must be inside the ignored tests/fixtures/psp_oracle/build directory"
+            )
+        try:
+            ignored_path = host0_root.relative_to(ROOT.resolve()).as_posix()
+            ignore_check = subprocess.run(
+                ["git", "check-ignore", "-q", "--", ignored_path],
+                cwd=ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            parser.error("--host0-root could not be verified as ignored by Git")
+        if ignore_check.returncode != 0:
+            parser.error("--host0-root must be ignored by Git to keep captures private")
         if not host0_root.is_dir():
             parser.error("--host0-root must be an existing scratch directory")
         cases: list[CampaignCase] = []
