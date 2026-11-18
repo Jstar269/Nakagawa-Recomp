@@ -11833,6 +11833,17 @@
       }
     },
     {
+      "path": "tests/fixtures/psp_oracle/kernel_library_tls_imports.S",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "oracle_safe_scalar_tls_imports_2640_20261116",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
       "path": "tests/fixtures/psp_oracle/libfont_imports.S",
       "classification": "project_authored_attested",
       "evidence": {

@@ -151,15 +151,25 @@ int hle_wakelog_on(void) {
 /* Display-list tracing is extremely verbose (several writes per presented
  * frame).  Keep Standard mode quiet; Diagnostics enables SR_GEDUMP, and the
  * public SR_DEBUG GE bit (0x08) remains an equivalent opt-in. */
+static int s_ge_log_enabled = -1;
+#ifdef SR_HLE_THREAD_SELFTEST
+static unsigned s_ge_log_env_reads; /* times ge_log_on() consulted the environment */
+#endif
 int ge_log_on(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
+    if (s_ge_log_enabled < 0) {
+#ifdef SR_HLE_THREAD_SELFTEST
+        s_ge_log_env_reads++;
+#endif
         const char *debug = getenv("SR_DEBUG");
-        enabled = getenv("SR_GEDUMP") != NULL || getenv("SR_GELOG") != NULL ||
-                  (debug != NULL && (strtoul(debug, NULL, 0) & 0x08u) != 0u);
+        s_ge_log_enabled = getenv("SR_GEDUMP") != NULL || getenv("SR_GELOG") != NULL ||
+                           (debug != NULL && (strtoul(debug, NULL, 0) & 0x08u) != 0u);
     }
-    return enabled;
+    return s_ge_log_enabled;
 }
+#ifdef SR_HLE_THREAD_SELFTEST
+void sr_hle_test_ge_log_reset(void) { s_ge_log_enabled = -1; s_ge_log_env_reads = 0; }
+unsigned sr_hle_test_ge_log_env_reads(void) { return s_ge_log_env_reads; }
+#endif
 
 void hle_lock(void) {
     while (atomic_flag_test_and_set_explicit(&s_hle_lock, memory_order_acquire)) { }
@@ -618,9 +628,12 @@ static uint32_t partition_high_floor_above(uint32_t addr) {
  * (2ed7c9c5) records two consecutive placement-1 blocks 0x100 apart for sizes 1 to 0x100, 0x200
  * for 0x101, 0x1100 for 0x1001 and 0x10100 for 0x10001, the second below the first. Returns the
  * block UID, or 0xFFFFFFFFu when no range holds it. */
-/* High blocks come from the stack arena, which lies above kernel RAM; a partition based below the
- * runtime's stacks (an image linked low) ends under that arena, so it has no modelled High region
- * and its callers stop by name. */
+/* High blocks come from the stack arena, which spans a PSP's user partition, [0x08800000,
+ * 0x0a000000), wherever the image is linked. A partition based below the runtime's stacks (an
+ * image linked low) has a bump region that ends under those stacks, so there a High block lies
+ * above the bump region, as that layout's thread stacks do, and the free sizes, which measure the
+ * bump region, count neither (#2640). A module image placed High in such a partition is the one
+ * High request still not modelled: this is 0 there, and the module loader stops by name. */
 int partition_high_modelled(void) {
     user_partition_init();
     return s_heap_base >= SR_NESTED_FRAME_END;
@@ -689,7 +702,6 @@ static void partition_hole_release(uint32_t base, uint32_t size) { partition_fre
 
 uint32_t alloc_block_high(uint32_t size) {
     user_partition_init();
-    if (!partition_high_modelled()) return 0xFFFFFFFFu;
     if (size == 0u || size > UINT32_MAX - 0xffu) return 0xFFFFFFFFu;
     uint32_t slot_size = (size + 0xffu) & ~0xffu;
     int slot = -1;

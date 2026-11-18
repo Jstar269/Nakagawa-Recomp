@@ -1466,6 +1466,130 @@ One console is one data point; see §11. Nothing here closes issue #70
     (every index the cells mask is below the offset). The software sampler (`clut_index` in `src/rt/ge.c`)
     reads t at every level of a T32 texture, as for T16, and adds the offset after the mask.
 
+- **PSP-3000 single-case run of `safe-scalar` (2026-11-17 UTC)**: one PSP-3000, XMB context, one launch on its
+  own boot (boot 221) after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware
+  identity: console PSP-3000 (operator-recorded label); system software 6.61 (operator-declared, as in the
+  2026-11-11 entry below); PSPLink `pspver` printed `0x06060010` ("6.6.0") in the XMB context on this boot, before
+  and after the launch, which the runner records as 6.6.0; custom firmware ARK-5, version 5.2.0
+  (operator-declared, not read by a tool); PSPLink v3.2.1 as its `ver` command printed. `safe-scalar` (case 141,
+  `tests/fixtures/psp_oracle/probe_kernel_semantics.c`) at `86279e852`, 49 records and the done record. Both
+  envelopes of the runner's report (`transport-write` and `safe-scalar`) are acceptance-eligible with 0 blockers
+  (evidence class `PSP_HARDWARE`, source commit binding `MATCH` on a clean committed tree, teardown check PASS,
+  the runner's state `READY` with no terminal reason), every record is PASS with no SKIP, the stream ends
+  COMPLETE PASS, and the PSP answered as qualified on boot 221 before the launch and at two requalifications after
+  it. The stream's own meta line gives the model and firmware as unknown and a zero binary digest, as every probe
+  does; the envelope adds the operator-recorded model, the firmware the runner read and the staged PRX digest
+  (binary binding `PLACEHOLDER`, device identity `PARTIAL`, 0 identity blockers).
+
+  What this record rests on, and what it lacks: the private host wrapper that starts the runner and arms the
+  console's watchdog printed no verdict for this launch. After the runner had written its report, the wrapper's
+  own post-run device-state attestation was refused, because the USBHostFS link had lost sync and no fresh
+  heartbeat arrived; the wrapper exited without its report, so the runner's exit code was not printed. The record
+  rests on the runner's report, the complete host0 stream (its records equal the envelope's) and the two later
+  requalifications on the same boot. `tools/psp_oracle/oracle_matrix.py` would not have named a launch `ACCEPTED`
+  whose probe command exited non-zero; this was a single launch outside the matrix. The raw envelope and host0
+  log stay in the private campaign directory.
+
+  | Evidence id | Cells cited | Not cited | Outcome (2026-11-17) |
+  | --- | --- | --- | --- |
+  | `PSP-SAFE-SCALAR-001` | the 49 rows of the table below and `safe-scalar-done` (boot 221) | any other date, list class, pool shape, partition or context; any address (the stream records only differences) | MEASURED: 49 records and the done record, all PASS |
+
+  The records, as the runner's strict parser reads them from the envelope (`tools/psp_oracle/parse_golden.py`,
+  `SAFE_SCALAR_ROWS`, gives each row's word count; a word of `0xa5a5a5a5` is the probe's preset, left unwritten):
+
+  | Case id | Status | Result | Output words (out0 onward) |
+  | --- | --- | --- | --- |
+  | `rtc-valid-day-0` | PASS | `0xfffffffd` | `0x000007e8` `0x00000001` `0x00000000` `0x00000000` |
+  | `rtc-valid-feb-29-2023` | PASS | `0xfffffffd` | `0x000007e7` `0x00000002` `0x0000001d` `0x00000000` |
+  | `rtc-valid-feb-29-1900` | PASS | `0xfffffffd` | `0x0000076c` `0x00000002` `0x0000001d` `0x00000000` |
+  | `rtc-valid-feb-30-2024` | PASS | `0xfffffffd` | `0x000007e8` `0x00000002` `0x0000001e` `0x00000000` |
+  | `rtc-valid-feb-31-2024` | PASS | `0xfffffffd` | `0x000007e8` `0x00000002` `0x0000001f` `0x00000000` |
+  | `rtc-valid-apr-31-2024` | PASS | `0xfffffffd` | `0x000007e8` `0x00000004` `0x0000001f` `0x00000000` |
+  | `rtc-valid-day-0-hour-24` | PASS | `0xfffffffd` | `0x000007e8` `0x00000001` `0x00000000` `0x00000018` |
+  | `rtc-dow-month-0` | PASS | `0x00000006` | `0x000007ea` `0x00000000` `0x00000001` |
+  | `rtc-dow-month-13` | PASS | `0x00000005` | `0x000007ea` `0x0000000d` `0x00000001` |
+  | `rtc-dow-month-13-again` | PASS | `0x00000005` | `0x000007ea` `0x0000000d` `0x00000001` |
+  | `rtc-dow-month-14` | PASS | `0x00000001` | `0x000007ea` `0x0000000e` `0x0000000f` |
+  | `rtc-dow-month-24` | PASS | `0x00000006` | `0x000007ea` `0x00000018` `0x00000001` |
+  | `rtc-dow-year-0` | PASS | `0x00000000` | `0x00000000` `0x00000001` `0x00000001` |
+  | `rtc-dow-year-10000` | PASS | `0x00000006` | `0x00002710` `0x00000001` `0x00000001` |
+  | `rtc-dow-day-1000001` | PASS | `0x00000005` | `0x000007ea` `0x00000001` `0x000f4241` |
+  | `rtc-dow-day-max` | PASS | `0x00000000` | `0x000007ea` `0x00000001` `0x7fffffff` |
+  | `rtc-time-1969` | PASS | `0x800001fe` | `0x00000000` `0xa5a5a5a5` |
+  | `rtc-time-1601` | PASS | `0x800001fe` | `0x00000000` `0xa5a5a5a5` |
+  | `rtc-time-2106-past` | PASS | `0x800001fe` | `0x7fffffff` `0xa5a5a5a5` |
+  | `rtc-time-9999` | PASS | `0x800001fe` | `0x7fffffff` `0xa5a5a5a5` |
+  | `rtc-time-month-0` | PASS | `0x00000000` | `0x659dde00` `0xa5a5a5a5` |
+  | `rtc-time-month-13` | PASS | `0x00000000` | `0x674ba700` `0xa5a5a5a5` |
+  | `rtc-time-day-0` | PASS | `0x00000000` | `0x6590af00` `0xa5a5a5a5` |
+  | `rtc-time-day-32` | PASS | `0x00000000` | `0x65badf00` `0xa5a5a5a5` |
+  | `rtc-time-feb-30` | PASS | `0x00000000` | `0x65e11a80` `0xa5a5a5a5` |
+  | `rtc-time-hour-24` | PASS | `0x00000000` | `0x65935200` `0xa5a5a5a5` |
+  | `rtc-time-second-60` | PASS | `0x00000000` | `0x659200bc` `0xa5a5a5a5` |
+  | `rtc-addyears-y10000-plus-0` | PASS | `0x00000000` | `0xa5a5a5a5` `0xa5a5a5a5` `0x00000000` |
+  | `rtc-addyears-y10000-plus-1` | PASS | `0x00000000` | `0xa5a5a5a5` `0xa5a5a5a5` `0x00000001` |
+  | `rtc-addyears-y10000-minus-1` | PASS | `0x00000000` | `0x3f8b4000` `0x0460e75d` `0xffffffff` |
+  | `rtc-addyears-y10001-minus-2` | PASS | `0x00000000` | `0x3f8b4000` `0x0460e75d` `0xfffffffe` |
+  | `tmid-9-list` | PASS | `0x00000000` | `0x00000000` `0x00000000` |
+  | `tmid-10-list` | PASS | `0x00000000` | `0x00000000` `0x00000000` |
+  | `tls-fragmentation` | PASS | `0x00000000` | `0x0008b600` |
+  | `tls-brackets` | PASS | `0x00000000` | `0x00000001` `0x00000001` `0x016ff200` `0x00000000` `0x00000000` `0x00000200` `0x00000100` |
+  | `tls-create-normal` | PASS | `0x00000001` | `0x00000400` `0x00000400` |
+  | `tls-place-normal` | PASS | `0x00000000` | `0x00000001` `0x00000001` `0x00000500` `0x00000100` `0x00000000` `0x00000000` |
+  | `tls-addr-normal` | PASS | `0x00000000` | `0x00000001` `0x00000100` `0x016ff100` `0x00000000` `0x00000001` `0xa5a5a5a5` |
+  | `tls-status-normal` | PASS | `0x00000000` | `0x0000003c` `0x00000000` `0x00000000` `0x00000100` `0x00000004` `0x00000003` `0x00000000` `0xa5a5a5a5` |
+  | `tls-create-high` | PASS | `0x00000001` | `0x00000400` `0x00000000` |
+  | `tls-place-high` | PASS | `0x00000000` | `0x00000001` `0x00000001` `0x00000500` `0x00000500` `0x00000000` `0x00000000` |
+  | `tls-addr-high` | PASS | `0x00000000` | `0x00000001` `0x016fee00` `0x00000400` `0x00000000` `0x00000001` `0x016fed00` |
+  | `tls-status-high` | PASS | `0x00000000` | `0x0000003c` `0x00004000` `0x00000001` `0x00000100` `0x00000004` `0x00000003` `0x00000000` `0xa5a5a5a5` |
+  | `tls-create-high-2` | PASS | `0x00000001` | `0x00000400` `0x00000000` |
+  | `tls-addr-high-2` | PASS | `0x00000000` | `0x00000001` `0x016fea00` `0x00000800` `0x00000000` `0x00000001` `0xfffffc00` |
+  | `tls-thread` | PASS | `0x00000000` | `0x00000001` `0x00000000` `0x00000100` `0x00000100` `0x00000000` `0x00000000` |
+  | `tls-free` | PASS | `0x00000000` | `0x00000000` `0x00000000` `0x00000000` |
+  | `tls-delete` | PASS | `0x00000000` | `0x00000000` `0x00000000` `0x00000000` |
+  | `tls-cleanup` | PASS | `0x00000000` | `0x00000000` `0x00000000` `0x00000000` `0x00000000` |
+  | `safe-scalar-done` | PASS | `0x00000000` | `0x00000031` |
+
+  What the cells establish, for the exact arguments named (`0x800001fe` is the runtime's `RTC_INVALID_VALUE`):
+  - *`sceRtcCheckValid`.* All seven dates return `0xfffffffd` (-3, the day): 2024-01-00, 2023-02-29, 1900-02-29,
+    2024-02-30, 2024-02-31, 2024-04-31, and 2024-01-00 with an hour of 24, so the day is judged before the hour.
+  - *`sceRtcGetDayOfWeek`* (0 is Sunday; arguments year, month, day). (2026, 0, 1) is 6; (2026, 13, 1) is 5, on
+    both calls; (2026, 14, 15) is 1; (2026, 24, 1) is 6; (0, 1, 1) is 0; (10000, 1, 1) is 6; (2026, 1, 1000001)
+    is 5; (2026, 1, `0x7fffffff`) is 0. Months 13 and 14 answer as 2027-01-01 and 2027-02-15 do, but month 0 does
+    not answer as 2025-12-01 (a Monday) and month 24 does not answer as 2027-12-01 (a Wednesday). Year 10000 and
+    day 1000001 answer as a linear carry does; day `0x7fffffff` does not (a linear carry gives 4).
+  - *`sceRtcGetTime_t`.* The call writes one 32-bit word; the word after it is untouched in all eleven rows.
+    1969-12-31 23:59:59 and 1601-01-01 00:00:00 return `0x800001fe` and write 0. 2106-02-07 06:28:16 (the first
+    second past 32 bits) and 9999-12-31 23:59:59 return `0x800001fe` and write `0x7fffffff`. A date with one
+    field out of range returns 0: 2024-00-10 writes `0x659dde00` (the seconds of 2024-01-10 00:00:00), 2024-13-01
+    `0x674ba700` (2024-12-01), 2024-01-00 `0x6590af00` (2023-12-31), 2024-01-32 `0x65badf00` (2024-02-01),
+    2024-02-30 `0x65e11a80` (2024-03-01), 2024-01-01 24:00:00 `0x65935200` (2024-01-02 00:00:00) and 2024-01-01
+    00:00:60 `0x659200bc` (00:01:00). Where between 2038-01-19 03:14:08 and 2106-02-07 06:28:15 the refusal
+    begins is not measured.
+  - *`sceRtcTickAddYears`.* From the tick of 10000-01-01 00:00:00 (315537897600000000), adding 0 or 1 returns 0
+    and leaves the destination unwritten; adding -1 returns 0 and writes `0x0460e75d3f8b4000`, the tick of
+    9999-01-01 00:00:00. From the tick of 10001-01-01 00:00:00 (315569520000000000), adding -2 returns 0 and
+    writes the same tick.
+  - *`sceKernelGetThreadmanIdList`.* For type 9 (thread event handlers) and type 10 (alarms), with a 16-slot
+    buffer and none of either class created by the probe, the call returns 0, stores a count of 0 and writes no
+    slot.
+  - *TLS pools* (partition 2, four `0x100`-byte blocks, NULL options; read as in
+    [Reading the safe-scalar TLS rows](#reading-the-safe-scalar-tls-rows)). `tls-fragmentation` is `0x0008b600`,
+    not 0: the free memory was several runs, so the `tls-addr-*` rows decide the placement and the `tls-place-*`
+    rows are a cross-check, which agrees. Both `0x100` brackets were obtained, their heads `0x100`-aligned and
+    `0x016ff200` apart; the total free size fell by `0x200` and the largest free block by `0x100`. The pool
+    without the attribute was created (total free size down `0x400`): the main thread's block is `0x100` above
+    the low bracket's head, directly after that bracket, and a fresh Low block then lands `0x500` above it, after
+    the pool, while a fresh High block stays `0x100` below the high bracket. The pool with attribute `0x4000` was
+    created (total free size down `0x400`): the main thread's block is `0x400` below the high bracket's head, so
+    the `0x400`-byte pool lies directly below that bracket with the thread's block lowest in it, and a fresh High
+    block then lands `0x500` below the bracket, below the pool, while a fresh Low block does not move. The second
+    attribute `0x4000` pool lies `0x400` below the first (`0x800` below the bracket). A second call for the same
+    thread returns the same address in each pool. The second thread's block is `0x100` above the main thread's
+    in the pool without the attribute and in the first pool with it. `sceKernelReferTlsplStatus` reads a size
+    word of `0x3c`, the attribute (0, then `0x4000`), index 0 then 1, block size `0x100`, 4 blocks, 3 free and 0
+    waiting threads, and leaves the word after its 60 bytes untouched. Every free and delete returns 0, and the
+    total and the largest free size end where they began.
 - **PSP-3000 single-case run of `hle-io-seek-edges` (2026-11-11 UTC)**: one PSP-3000, XMB context, one launch on
   its own boot (boot 192) after the `transport-write` preflight (PSP-TRANSPORT-001 is not re-cited). Firmware
   identity: console PSP-3000; system software 6.61 (operator-declared; `flash0:/vsh/etc/version.txt` read
@@ -3950,6 +4074,7 @@ not expected PSP values.
 | `kernel-semantics` | `PSP-KERNEL-SEM-001` | `MEASURED` (2026-10-31, `0c3cf0da`, boot 84; single launch, not in the campaign queue) | #1287, #1390, #1383, #1380, #1382: VBLANK sub-interrupt delivery order, controller read consumption, peek counts, analog by sampling mode and cycle spacing, volatile-lock types and partition-5 allocations, Memory Stick exclusive create and seeks past 4 GiB in a probe-owned directory, WLAN switch and power state; never the MAC or OpenPSID |
 | `io-seek-eof` | `PSP-IO-EOF-001` | `MEASURED` (2026-11-02, `f484ef58`, boot 100; single launch, not in the campaign queue) | #1380: Memory Stick opens of a missing file without `PSP_O_CREAT`, seeks before the start from each whence and through `sceIoLseek32`, a write after a seek past the end (sizes, position, tail) and a read past the end, in a probe-owned directory; the gap bytes stay private |
 | `io-umd-eof` | `PSP-IO-EOF-002` | `MEASURED` (2026-11-04, `999f3ce3`, boot 116; single launch, not in the campaign queue) | #1380: read-only, a game disc in the drive: seeks past the end and before the start of two `disc0:` files and of the raw device `umd0:` through `sceIoLseek` and `sceIoLseek32`, each with the position after it, reads across and at the end (count, bytes changed, position), and the UMD state before and after; sizes, the last sector's number and the bytes read stay private |
+| `safe-scalar` | `PSP-SAFE-SCALAR-001` | `MEASURED` (2026-11-17 UTC, PSP-3000, boot 221, XMB context, `86279e852`; 49 records and the done record, all PASS, acceptance-eligible; built as case 141; single launch, not in the campaign queue) | #2640: cells the runtime stops at by name or answers from an emulator, with no device, dialog, GE or radio call and no handler installed: `sceRtcCheckValid` for a day of 0 or past the month's length; `sceRtcGetDayOfWeek` for a month of 0 or 13 to 24, a year of 0 or 10000 and a day past 1000000; `sceRtcGetTime_t` before 1970, past 32 bits and with one field out of range; `sceRtcTickAddYears` from a tick past year 9999; `sceKernelGetThreadmanIdList` for the thread event handler and alarm classes; and where `sceKernelCreateTlspl` places a pool without and with attribute `0x4000`, each address recorded only as a difference from a block the probe allocated; the first TLS row records whether the free memory was one run ([how to read the TLS rows](#reading-the-safe-scalar-tls-rows)). 49 records. See the [2026-11-17 `safe-scalar` bullet](#measured-to-date-index--exact-cells-only-do-not-generalize). |
 | `hle-utility-none` | `PSP-HLE-UTILITY-NONE-001` | `MEASURED` (2026-11-04, `999f3ce3`, boot 115, XMB context; single launch, not in the campaign queue) | #1386: `GetStatus`, `Update(1)` and `ShutdownStart` of savedata, the message dialog, netconf, gamedata install and game sharing with no `InitStart`; no dialog is started |
 | `ge-sample` | `PSP-GE-SAMPLE-001` | `MEASURED` (2026-10-28, `86e55611`; single launch, not in the campaign queue) | #282: the raw 8888 pixels of a 16x16 window after 48 through-mode draws (triangle pair and sprite, nearest and bilinear, two parity textures) over 1:1, +0.5-texel, 2x-magnified and 20-to-12 mappings with float and 16-bit vertex words. 816 result records. |
 | `dma-timing` | `PSP-DMAC-002` | `MEASURED` (2026-10-29, `0e40e7d3`, `281a21a4` and `1310e632`; single launches, not in the campaign queue) | #303: `sceDmacMemcpy` / `sceDmacTryMemcpy` per-call duration by size (0x10 to 0x100000) and main-RAM/VRAM pair, relative-alignment cost, BUSY against the NULL and zero-size checks, what a refused Try copies, the order of queued callers, the busy window, and the sizes a pending transfer lets through. 202 result records in the last build. |
@@ -3990,6 +4115,41 @@ not expected PSP values.
 | `vfpu-wider-ops` | `PSP-VFPU-WIDEROPS-001` | `MEASURED` (2026-11-10, PSP-3000, boot 176, `9426722a`; 223 records) | #326: vdiv.p/.t/.q, vsin/vcos/vrcp .p/.t/.q, vrsq.q, vsqrt.q, vocp.s/.q, the .p/.t dot and matrix forms over finite order-sensitive, NaN, inf and denormal cells, and vidt.q/.p into every column and row register of one matrix. |
 | `vfpu-reserved-widths` | `PSP-VFPU-RESERVED-001` | `MEASURED` (2026-11-10, PSP-3000, boot 182, `c6abab53`; 9 records; POWER RISK: reserved encodings; owner present) | #326: hand-encoded vus2i.t/.q and vs2i.t/.q words (refused by psp-as) over a sentinel image, M200 and C000 recorded. No word raised an exception; at .t and .q each form wrote what its .p form writes, four lanes from two source words. |
 | `mpeg-ycbcr` | `PSP-MPEG-YCBCR-001` | `NOT_RUN` (not registered; captured three times, PSP-3000, firmware 6.6.1: 2026-11-07 boot 145, 2026-11-08 boot 152 and 2026-11-12 boot 202 in the game context; rerun required; the probe prints `test_id=PSP-MPEG-001` and the cell is registered here as `PSP-MPEG-YCBCR-001`) | Each mode begins from a fresh stream, ringbuffer and MPEG context. The capture measured mode 2 (query 128, a 128-byte header after a decode, a CSC of zero pixels), the CSC y and h refusals and the 16-bit CSC output (#302). Mode 3's second decode never returned on boot 145 and again on boot 152 (the first returned 0 and left a 16-byte header over a black 4:2:0 frame); the probe now bounds each mode 2 and 3 decode with a 3 s helper thread and stops making MPEG calls after a block. On boot 202, at `3872796c` with that bound, mode 3's first decode returned 0 and the second again did not return: the bound recorded `0x800201a8`, and the CSC and decode-stop cells were not called. That envelope is not acceptance-eligible either: the probe still prints the earlier `RC` status, its completion contract is unregistered and its module was not proven unloaded. The console powered off during the Nakagawa Link reset that followed it. |
+
+### Reading the safe-scalar TLS rows
+
+`safe-scalar` (`PSP-SAFE-SCALAR-001`) ran on 2026-11-17 (the bullet in the measured index gives its records).
+This is how its sixteen TLS rows are read. Every word is a size, a return value or the difference of two addresses, never an address; a SKIP row has
+its words at `0xA5A5A5A5` and measures nothing.
+
+1. `tls-fragmentation`: out0 is the user partition's total free size minus its largest free block, before the
+   probe allocates anything. `0` means the free memory is one run, so the two brackets of the next row are its
+   two ends. Any other value means several free runs (or that the two calls round differently).
+2. `tls-brackets`: out0 and out1 are 1 when the low and the high bracket (`0x100` bytes each) were obtained;
+   out2 is the high bracket's head minus the low bracket's; out5 and out6 are how far the total and the largest
+   free size fell (`0x200` each when both brackets came out of one run).
+3. `tls-create-normal`, `tls-create-high`, `tls-create-high-2`: the result is 1 when the pool was created,
+   else the error; out0 is the pool's footprint in the total free size.
+4. `tls-place-normal`, `tls-place-high`: out2 is a fresh low block's head minus the low bracket's, out3 the high
+   bracket's head minus a fresh high block's. When row 1 is `0`, a distance of `0x100` means nothing new lies at
+   that end and a larger one means a pool does, the excess being its footprint (`tls-place-high` includes the
+   first pool). When row 1 is not `0` these two rows are a cross-check only: a block asked from an end takes
+   the first hole it fits, so a pool can lie at an end and still leave the distance at `0x100`.
+5. `tls-addr-normal`, `tls-addr-high`, `tls-addr-high-2` decide the placement in every case: out1 is the
+   thread's TLS block address minus the low bracket's head, out2 the high bracket's head minus that address.
+   The two differ by about the size of the free memory, so the smaller one names the end the pool lies at. out5
+   is the distance from the previous pool's block.
+6. `tls-thread`: out2 and out3 are the second thread's block minus the main thread's in each of the first two
+   pools.
+7. `tls-free`, `tls-delete`: return values. `tls-cleanup`: out2 and out3 are the total and the largest free
+   size at the start minus the same at the end, `0` and `0` when nothing leaked.
+
+The runtime places a pool with attribute `0x4000` at the top of the partition, a rule it took from PPSSPP. On
+2026-11-17 row 1 was not `0`, so rows 5 decided: the pool with the attribute lies directly below the high
+bracket and the second one directly below the first, and the pool without it directly above the low bracket.
+For the pool shape the probe used (partition 2, attribute exactly `0x4000`, four `0x100`-byte blocks, no options)
+the runtime's rule is therefore PSP-measured; for every other pool with the attribute, partition 6 among them,
+it stays PPSSPP-derived and is logged as such.
 
 ### PSP-HLE-UTILITY-DIALOG-001 captures 2026-11-12
 

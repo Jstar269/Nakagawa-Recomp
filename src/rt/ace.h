@@ -221,6 +221,11 @@ void ace_set_exit_report(AceFeature feature, void (*report)(void));
  * confirmed is reported unavailable (its renderer or presenter did not start), so the report
  * never claims what did not happen. */
 void ace_confirm(AceFeature feature);
+/* The longest reason ace_feature_unavailable keeps, NUL included: the stderr line and the report carry it whole. */
+#define ACE_UNAVAILABLE_REASON_CAP 160u
+/* The reason a cull run with matrix uses left alone reports (gui.c, contract 11.3.6). */
+#define ACE_CULL_PARTIAL_REASON \
+    "partial: more than 4096 widened matrices were in guest memory at once, later matrices were left alone"
 /* Matrix uses the culling hook left alone (its table was full): the report's cull_untracked. */
 void ace_set_cull_untracked(unsigned long n);
 /* ---- soft shadows: the package's declaration (contract sections 10.23 and 11.3.13) ----------- */
