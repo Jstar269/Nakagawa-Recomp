@@ -11,7 +11,9 @@
 #include "nk_shared_helpers.h"
 #include "nk_xb.h"
 
+#include <limits.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +35,7 @@
 
 #if defined(_MSC_VER)
 #define strcasecmp _stricmp
+#define strncasecmp _strnicmp
 #endif
 
 #define PLAYER_STAGE_MAX_PRX_BYTES (256u * 1024u * 1024u)
@@ -65,15 +68,7 @@ static bool stage_path_suffix_ci(const char *path, const char *suffix) {
     size_t path_len = strlen(path);
     size_t suffix_len = strlen(suffix);
     if (path_len < suffix_len) return false;
-    path += path_len - suffix_len;
-    for (size_t i = 0; i < suffix_len; i++) {
-        unsigned char a = (unsigned char)path[i];
-        unsigned char b = (unsigned char)suffix[i];
-        if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + ('a' - 'A'));
-        if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + ('a' - 'A'));
-        if (a != b) return false;
-    }
-    return true;
+    return strcasecmp(path + path_len - suffix_len, suffix) == 0;
 }
 
 static bool stage_path_contains_ci(const char *path, const char *needle) {
@@ -195,13 +190,19 @@ static void stage_emit(PlayerStageContext *context, const char *path,
                                    context->callbacks.userdata);
 }
 
+/* ".xb" and ".xb<N>", the archive names the runtime asset index reads back as
+   <archive>.d (sr_asset_index_key_from_rel): any decimal variant up to INT_MAX. */
 static bool has_xb_suffix(const char *path) {
     if (!path) return false;
     const char *suffix = strrchr(path, '.');
-    if (!suffix) return false;
-    return strcasecmp(suffix, ".xb") == 0 || strcasecmp(suffix, ".xb0") == 0 ||
-           strcasecmp(suffix, ".xb1") == 0 || strcasecmp(suffix, ".xb2") == 0 ||
-           strcasecmp(suffix, ".xb3") == 0;
+    if (!suffix || strncasecmp(suffix, ".xb", 3) != 0) return false;
+    uint64_t variant = 0;
+    for (const char *digit = suffix + 3; *digit != '\0'; digit++) {
+        if (*digit < '0' || *digit > '9') return false;
+        variant = variant * 10u + (uint64_t)(*digit - '0');
+        if (variant > (uint64_t)INT_MAX) return false;
+    }
+    return true;
 }
 
 static bool make_staged_path(const char *root, const char *relative,
@@ -238,28 +239,86 @@ static HANDLE discard_open_wide(const WCHAR *path) {
 
     /* GENERIC_READ supplies FILE_LIST_DIRECTORY for ordinary directories. A
      * reparse point may only grant attribute/delete access, so retry with the
-     * narrower request; the handle is still the object that will be deleted. */
-    HANDLE handle = CreateFileW(path, GENERIC_READ | DELETE, share, NULL,
-                                OPEN_EXISTING, flags, NULL);
-    if (handle != INVALID_HANDLE_VALUE) return handle;
-    return CreateFileW(path, FILE_READ_ATTRIBUTES | DELETE, share, NULL,
-                       OPEN_EXISTING, flags, NULL);
+     * narrower request; the handle is still the object that will be deleted.
+     * FILE_WRITE_ATTRIBUTES lets discard_delete_handle_wide clear a read-only
+     * attribute where the delete cannot ignore it; an object that refuses it
+     * is opened without it. */
+    static const DWORD access[] = {
+        GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES,
+        GENERIC_READ | DELETE,
+        FILE_READ_ATTRIBUTES | DELETE | FILE_WRITE_ATTRIBUTES,
+        FILE_READ_ATTRIBUTES | DELETE,
+    };
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    for (size_t i = 0; i < sizeof(access) / sizeof(access[0]); i++) {
+        handle = CreateFileW(path, access[i], share, NULL, OPEN_EXISTING, flags, NULL);
+        if (handle != INVALID_HANDLE_VALUE) break;
+    }
+    return handle;
 }
 
-static bool discard_file_id_wide(HANDLE handle, ULONGLONG *file_id) {
-    BY_HANDLE_FILE_INFORMATION info;
-    if (!file_id || !GetFileInformationByHandle(handle, &info)) return false;
-    *file_id = ((ULONGLONG)info.nFileIndexHigh << 32) |
-               (ULONGLONG)info.nFileIndexLow;
-    return true;
-}
+/* FileDispositionInfoEx and its flags (Windows 10 1607 and later; the
+ * read-only flag from 1809), spelled out so older SDK headers still build
+ * this file. */
+#define DISCARD_FILE_DISPOSITION_INFO_EX ((FILE_INFO_BY_HANDLE_CLASS)21)
+#define DISCARD_DISPOSITION_FLAG_DELETE 0x00000001u
+#define DISCARD_DISPOSITION_FLAG_POSIX_SEMANTICS 0x00000002u
+#define DISCARD_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE 0x00000010u
+
+typedef struct {
+    DWORD Flags;
+} DiscardDispositionInfoEx;
 
 static bool discard_delete_handle_wide(HANDLE handle) {
-    FILE_DISPOSITION_INFO disposition;
-    disposition.DeleteFile = TRUE;
-    bool deleted = SetFileInformationByHandle(handle, FileDispositionInfo,
-                                              &disposition, sizeof(disposition)) != 0;
-    DWORD error = deleted ? ERROR_SUCCESS : GetLastError();
+    /* POSIX semantics take the name out of its folder at once, even while
+     * another program (an antivirus scanner, an indexer) still holds the file
+     * open with delete sharing, so the folder above it can be removed next.
+     * The legacy disposition below leaves such a file delete-pending, and its
+     * folder then refuses to go as not empty. File systems and Windows
+     * versions without POSIX deletes refuse the request; they keep the
+     * legacy disposition.
+     *
+     * A read-only attribute (set by the user, a backup tool or a sync client)
+     * makes a delete fail with access denied, and every later staging of the
+     * title would then stop on a cleanup that closing programs cannot fix.
+     * The first request ignores the attribute; where that flag is refused,
+     * the attribute is cleared before the legacy disposition, as
+     * nk_platform_remove_tree does. */
+    static const DWORD ex_flags[] = {
+        DISCARD_DISPOSITION_FLAG_DELETE | DISCARD_DISPOSITION_FLAG_POSIX_SEMANTICS |
+            DISCARD_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        DISCARD_DISPOSITION_FLAG_DELETE | DISCARD_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    bool deleted = false;
+    DWORD error = ERROR_SUCCESS;
+    for (size_t i = 0; i < sizeof(ex_flags) / sizeof(ex_flags[0]); i++) {
+        DiscardDispositionInfoEx posix_disposition;
+        posix_disposition.Flags = ex_flags[i];
+        deleted = SetFileInformationByHandle(handle, DISCARD_FILE_DISPOSITION_INFO_EX,
+                                             &posix_disposition,
+                                             sizeof(posix_disposition)) != 0;
+        error = deleted ? ERROR_SUCCESS : GetLastError();
+        if (deleted || discard_missing_error_wide(error)) break;
+    }
+    if (!deleted && !discard_missing_error_wide(error)) {
+        FILE_BASIC_INFO basic;
+        if (GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) &&
+            (basic.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0) {
+            /* Zero times leave the timestamps as they are. */
+            basic.CreationTime.QuadPart = 0;
+            basic.LastAccessTime.QuadPart = 0;
+            basic.LastWriteTime.QuadPart = 0;
+            basic.ChangeTime.QuadPart = 0;
+            basic.FileAttributes &= ~(DWORD)FILE_ATTRIBUTE_READONLY;
+            if (basic.FileAttributes == 0) basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+            (void)SetFileInformationByHandle(handle, FileBasicInfo, &basic, sizeof(basic));
+        }
+        FILE_DISPOSITION_INFO disposition;
+        disposition.DeleteFile = TRUE;
+        deleted = SetFileInformationByHandle(handle, FileDispositionInfo,
+                                             &disposition, sizeof(disposition)) != 0;
+        error = deleted ? ERROR_SUCCESS : GetLastError();
+    }
     CloseHandle(handle);
     return deleted || discard_missing_error_wide(error);
 }
@@ -295,10 +354,16 @@ static bool discard_entry_wide(const WCHAR *directory_path,
      * On the stack those were 128 KiB per level, so an archive disc's
      * thirteen-level staging tree overflowed the 1 MiB thread stack
      * (0xC00000FD) while the staging transaction discarded it. */
-    WCHAR *child_path = (WCHAR *)malloc(32768u * sizeof(WCHAR));
+    /* Sized for this entry (parent, separator, name, terminator) and capped
+     * at the 32767-character Win32 path limit. */
+    size_t parent_length = wcslen(directory_path);
+    if (parent_length > 32767u || name_length > 32767u - parent_length) return false;
+    size_t child_count = parent_length + 1u + name_length + 1u;
+    if (child_count > 32768u) child_count = 32768u;
+    WCHAR *child_path = (WCHAR *)malloc(child_count * sizeof(WCHAR));
     if (!child_path) return false;
     if (!discard_child_path_wide(directory_path, entry->FileName, name_length,
-                                 child_path, 32768u)) {
+                                 child_path, child_count)) {
         free(child_path);
         return false;
     }
@@ -315,15 +380,14 @@ static bool discard_entry_path_wide(const WCHAR *child_path,
      * the enumerated object before inspecting or deleting it. */
     HANDLE child = discard_open_wide(child_path);
     if (child == INVALID_HANDLE_VALUE) return discard_missing_error_wide(GetLastError());
-    ULONGLONG actual_id;
-    ULONGLONG enumerated_id = (ULONGLONG)entry->FileId.QuadPart;
-    if (!discard_file_id_wide(child, &actual_id) || actual_id != enumerated_id) {
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(child, &info)) {
         CloseHandle(child);
         return false;
     }
-
-    BY_HANDLE_FILE_INFORMATION info;
-    if (!GetFileInformationByHandle(child, &info)) {
+    ULONGLONG actual_id = ((ULONGLONG)info.nFileIndexHigh << 32) |
+                          (ULONGLONG)info.nFileIndexLow;
+    if (actual_id != (ULONGLONG)entry->FileId.QuadPart) {
         CloseHandle(child);
         return false;
     }
@@ -602,6 +666,17 @@ static bool copy_prx_file(PlayerStageContext *context, const char *source_path,
     return true;
 }
 
+/* The support PRXs are an optional local bridge: one that cannot be copied
+ * (an empty or oversized dump, a locked file, a path that does not fit) is
+ * left out with a named note, and setup goes on without it. */
+static void stage_skip_support_prx(PlayerStageContext *context, const char *name,
+                                   const char *reason) {
+    fprintf(stderr, "[STAGE_SUPPORT_PRX_SKIPPED] %s from the PPSSPP dump folder was not "
+                    "copied (%s); setup continues without it.\n", name, reason);
+    context->callback_result = NK_OK;
+    context->error_message[0] = '\0';
+}
+
 static bool discover_prx_for_stage(PlayerStageContext *context) {
     if (!context || !context->staging_root) return false;
     const char *names[] = {
@@ -625,8 +700,17 @@ static bool discover_prx_for_stage(PlayerStageContext *context) {
         }
         char destination_path[4096];
         if (!make_staged_path(context->staging_root, relative_destination,
-                              destination_path, sizeof(destination_path)) ||
-            !copy_prx_file(context, source_path, destination_path)) return false;
+                              destination_path, sizeof(destination_path))) {
+            stage_skip_support_prx(context, names[i], "its staged path is too long");
+            continue;
+        }
+        if (!copy_prx_file(context, source_path, destination_path)) {
+            if (context->callback_result == NK_ERROR_CANCELLED) return false;
+            nk_remove_utf8(destination_path);
+            stage_skip_support_prx(context, names[i], context->error_message[0]
+                                       ? context->error_message : "it could not be copied");
+            continue;
+        }
         discovered++;
         if (context->callbacks.on_progress) {
             int percent = 95 + (int)((discovered * 5u) / 3u);
@@ -785,18 +869,6 @@ NkResult player_stage_game_with_summary(const char *iso_path,
     return result;
 }
 
-NkResult player_stage_game(const char *iso_path, const char *staging_root,
-                           const char *const *loose_content_roots,
-                           size_t loose_content_root_count,
-                           const PlayerStageCallbacks *callbacks,
-                           char *error_message, size_t error_message_size) {
-    return player_stage_game_with_summary(iso_path, staging_root,
-                                          loose_content_roots,
-                                          loose_content_root_count,
-                                          callbacks, NULL, error_message,
-                                          error_message_size);
-}
-
 /* ------------------------------------------------------------------------- */
 /* Title staging transaction                                                  */
 /* ------------------------------------------------------------------------- */
@@ -914,7 +986,7 @@ static int stage_lock_acquire(const char *games_root, const char *path,
     lock->handle = handle;
 #else
     /* Hold the games-directory flock only while opening or removing the
-     * per-title lock. Without this short guard, unlinking a held fcntl lock
+     * per-title lock. Without this short guard, unlinking a held lock file
      * would let another process lock a new inode at the same pathname. */
     int games_fd = open(games_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (games_fd < 0) return -1;
@@ -928,18 +1000,16 @@ static int stage_lock_acquire(const char *games_root, const char *path,
         close(games_fd);
         return -1;
     }
-    struct flock region;
-    memset(&region, 0, sizeof(region));
-    region.l_type = F_WRLCK;
-    region.l_whence = SEEK_SET;
-    /* fcntl record locks belong to the process: the player runs at most one
-     * staging job at a time, and separate processes exclude each other. */
-    if (fcntl(fd, F_SETLK, &region) != 0) {
+    /* flock, not an fcntl record lock: an fcntl lock belongs to the process,
+     * so a second staging of this title in the same process would take it
+     * again and share the tree. A flock belongs to this open file, so every
+     * other open of the lock file is refused, in this process or another. */
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
         int error = errno;
         close(fd);
         flock(games_fd, LOCK_UN);
         close(games_fd);
-        return (error == EACCES || error == EAGAIN) ? 0 : -1;
+        return (error == EWOULDBLOCK || error == EAGAIN) ? 0 : -1;
     }
     if (flock(games_fd, LOCK_UN) != 0) {
         close(fd);
@@ -971,8 +1041,12 @@ static void stage_lock_release(PlayerStageLock *lock) {
     lock->held = false;
 }
 
-/* Move a directory to a name that must not exist yet, flushing the rename
- * before returning. */
+/* Move a directory to a name that must not exist yet. The rename is not
+ * flushed to disk before returning: MOVEFILE_WRITE_THROUGH only applies when
+ * a move is done as a copy across volumes, and the POSIX rename has no fsync
+ * of the games folder. A power loss soon after may leave the earlier names;
+ * the next player_stage_title then puts back the tree an interrupted
+ * replacement set aside, or stages the disc again. */
 static bool stage_rename_directory(const char *from, const char *to) {
     if (!from || !to || nk_platform_dir_exists(to) || nk_platform_file_exists(to)) return false;
 #if defined(_WIN32) || defined(_WIN64)
@@ -1168,11 +1242,23 @@ static bool stage_title_cancelled(const PlayerStageCallbacks *callbacks) {
            callbacks->is_cancelled(callbacks->userdata);
 }
 
+/* Discards a transaction tree, its staging record first: a discard that stops
+ * part way (a file another program holds) then leaves a tree that no later
+ * staging takes for a complete one. */
+static bool stage_tree_discard(const char *tree) {
+    char record_path[PLAYER_STAGE_PATH_MAX];
+    if (stage_title_join(record_path, sizeof(record_path), tree,
+                         PLAYER_STAGE_RECORD_RELATIVE)) {
+        nk_remove_utf8(record_path);
+    }
+    return player_stage_discard(tree);
+}
+
 /* Ends a failed transaction: the unpromoted tree goes, the lock is released,
  * and no counts are reported for work that did not land. */
 static NkResult stage_title_fail(PlayerStageLock *lock, const char *staging_root,
                                  PlayerStageSummary *summary, NkResult result) {
-    if (staging_root) (void)player_stage_discard(staging_root);
+    if (staging_root) (void)stage_tree_discard(staging_root);
     stage_lock_release(lock);
     memset(summary, 0, sizeof(*summary));
     return result;
@@ -1288,21 +1374,42 @@ NkResult player_stage_title(const PlayerStageTitleRequest *request,
         return NK_ERROR_IO;
     }
 
-    /* Whatever an interrupted attempt left behind is never promoted: an
-     * unpromoted extraction is redone, and a replaced tree is finished off. */
-    if ((nk_platform_dir_exists(paths.staging_root) &&
-         !player_stage_discard(paths.staging_root)) ||
-        (nk_platform_dir_exists(paths.retired_root) &&
-         !player_stage_discard(paths.retired_root))) {
-        stage_title_message(message, message_size, "%s",
-            "[STAGE_CLEANUP_BLOCKED] An unfinished earlier setup of this game could not be cleared. Close any program that is using the game's folder, then try again.");
-        return stage_title_fail(&lock, NULL, summary, NK_ERROR_IO);
+    /* An interruption between the two promotion renames below leaves no
+     * games/<disc>: the previous tree waits in .retired and, when the new one
+     * was complete, the new tree with its staging record in .staging. Put one
+     * of them back before anything is discarded: the new tree when its record
+     * matches this request, otherwise the previous tree. */
+    if (!nk_platform_dir_exists(paths.final_root) &&
+        !nk_platform_file_exists(paths.final_root)) {
+        PlayerStageSummary recovered;
+        const char *survivor = NULL;
+        if (nk_platform_dir_exists(paths.staging_root) &&
+            stage_record_matches(paths.staging_root, identity, &recovered) &&
+            !stage_tree_missing_entry(paths.staging_root, request)) {
+            survivor = paths.staging_root;
+        } else if (nk_platform_dir_exists(paths.retired_root)) {
+            survivor = paths.retired_root;
+        }
+        if (survivor && !stage_rename_directory(survivor, paths.final_root)) {
+            stage_title_message(message, message_size, "%s",
+                "[STAGE_CLEANUP_BLOCKED] An unfinished earlier setup of this game could not be put back in place. Close any program that is using the game's folder, then try again.");
+            return stage_title_fail(&lock, NULL, summary, NK_ERROR_IO);
+        }
     }
 
     bool replace_existing = false;
     if (nk_platform_dir_exists(paths.final_root)) {
         if (stage_record_matches(paths.final_root, identity, summary) &&
             !stage_tree_missing_entry(paths.final_root, request)) {
+            /* The complete tree is in place, so a leftover beside it is only
+             * tidied up here; one that cannot go yet blocks nothing and is
+             * tried again by the next staging. */
+            if (nk_platform_dir_exists(paths.staging_root)) {
+                (void)stage_tree_discard(paths.staging_root);
+            }
+            if (nk_platform_dir_exists(paths.retired_root)) {
+                (void)stage_tree_discard(paths.retired_root);
+            }
             snprintf(prepared_root, prepared_root_size, "%s", paths.final_root);
             if (outcome) *outcome = PLAYER_STAGE_TITLE_REUSED;
             stage_lock_release(&lock);
@@ -1314,6 +1421,21 @@ NkResult player_stage_title(const PlayerStageTitleRequest *request,
         stage_title_message(message, message_size, "%s",
             "[STAGE_PATH_BLOCKED] A file is in the way of this game's folder in Nakagawa's data folder. Move that file elsewhere, then try again.");
         return stage_title_fail(&lock, NULL, summary, NK_ERROR_ALREADY_EXISTS);
+    }
+
+    /* Whatever an interrupted attempt left behind is never promoted from here
+     * on: an unpromoted extraction is redone, and a replaced tree is finished
+     * off. Both names are needed for the extraction and the replacement, so a
+     * leftover that cannot be cleared stops this staging. A .retired tree is
+     * reached here only while games/<disc> exists (the recovery above put it
+     * back otherwise), so the last complete tree is never the one discarded. */
+    if ((nk_platform_dir_exists(paths.staging_root) &&
+         !stage_tree_discard(paths.staging_root)) ||
+        (nk_platform_dir_exists(paths.retired_root) &&
+         !stage_tree_discard(paths.retired_root))) {
+        stage_title_message(message, message_size, "%s",
+            "[STAGE_CLEANUP_BLOCKED] An unfinished earlier setup of this game could not be cleared. Close any program that is using the game's folder, then try again.");
+        return stage_title_fail(&lock, NULL, summary, NK_ERROR_IO);
     }
 
     /* A data folder the disc does not have cannot appear by copying it, so say
@@ -1372,7 +1494,7 @@ NkResult player_stage_title(const PlayerStageTitleRequest *request,
     }
     /* A replaced tree that cannot be removed now is removed by the next
      * staging of this title; the new tree is already complete and in place. */
-    if (replace_existing) (void)player_stage_discard(paths.retired_root);
+    if (replace_existing) (void)stage_tree_discard(paths.retired_root);
 
     snprintf(prepared_root, prepared_root_size, "%s", paths.final_root);
     stage_lock_release(&lock);
