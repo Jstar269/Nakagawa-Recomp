@@ -19,6 +19,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <wchar.h>
+#include <windows.h>   /* the report path cells open UTF-8 paths as UTF-16 */
+#endif
 
 static int s_fail;
 
@@ -2438,6 +2442,115 @@ static void cell_report(const char *dir) {
           "a run without smooth motion reported its inputs");
 }
 
+/* Each part's report key is the one for its AceFeature: the key table is in enum order. */
+static void cell_feature_keys(void) {
+    static const struct { AceFeature f; const char *key; } want[] = {
+        { ACE_FEATURE_AF, "af" }, { ACE_FEATURE_TEXT, "text" }, { ACE_FEATURE_READOUT, "readout" },
+        { ACE_FEATURE_NOTICE, "notice" }, { ACE_FEATURE_WIDE, "wide" }, { ACE_FEATURE_SMOOTH, "smooth" },
+        { ACE_FEATURE_SAS, "sas" }, { ACE_FEATURE_TESS, "tess" }, { ACE_FEATURE_STICK, "stick" },
+        { ACE_FEATURE_LOAD, "load" }, { ACE_FEATURE_CULL, "cull" }, { ACE_FEATURE_DEPTH, "depth" },
+        { ACE_FEATURE_TWIN, "twin" }, { ACE_FEATURE_SSAA, "ssaa" }, { ACE_FEATURE_PEAK, "peak" },
+        { ACE_FEATURE_GLYPHS, "glyphs" }, { ACE_FEATURE_MIPS, "mips" }, { ACE_FEATURE_TEXPACK, "texpack" },
+        { ACE_FEATURE_PAD, "pad" }, { ACE_FEATURE_SHADOW, "shadow" }, { ACE_FEATURE_TEXSCALE, "texscale" },
+        { ACE_FEATURE_SMART2D, "smart2d" },
+    };
+    CHECK(sizeof(want) / sizeof(want[0]) == ACE_FEATURE_COUNT, "feature-keys: the test lacks a part");
+    static char json[ACE_REPORT_MAX];
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        char probe[64];
+        (void)ace_init_spec(k_good, NULL);
+        ace_feature_unavailable(want[i].f, "probe");
+        snprintf(probe, sizeof(probe), "\"unavailable\": {\"%s\": \"probe\"}", want[i].key);
+        CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, probe) != NULL,
+              "feature-keys: part %d is not reported as %s", (int)want[i].f, want[i].key);
+    }
+}
+
+/* A UTF-8 path opened as the report writer must open it: as UTF-16 on Windows. */
+static FILE *open_utf8(const char *path, const char *mode) {
+#if defined(_WIN32)
+    wchar_t wpath[1200], wmode[8];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, 1200) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, mode, -1, wmode, 8) <= 0) return NULL;
+    return _wfopen(wpath, wmode);
+#else
+    return fopen(path, mode);
+#endif
+}
+
+static void remove_utf8(const char *path) {
+#if defined(_WIN32)
+    wchar_t wpath[1200];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, 1200) > 0) (void)DeleteFileW(wpath);
+#else
+    (void)remove(path);
+#endif
+}
+
+/* A short run with the report on, ended: what ace_finish wrote at `path`, or 0 bytes. */
+static size_t report_run_read(const char *path, char *back, size_t cap) {
+    for (uint32_t vc = 1; vc <= 20; vc++) {
+        ace_note_target_draw(0x0u);
+        (void)ace_flip(0x0u, 0x22000u, vc, vc * 16683333ull);
+    }
+    ace_finish();
+    memset(back, 0, cap);
+    FILE *f = open_utf8(path, "rb");
+    size_t got = f ? fread(back, 1, cap - 1, f) : 0;
+    if (f) fclose(f);
+    return got;
+}
+
+/* The report's path: a user-data root under a profile whose name is outside the
+ * ANSI code page is written whole, given directly or through SR_ACE_REPORT; a path longer than
+ * the run keeps is refused, never cut short into another file's name. */
+static void cell_report_paths(const char *dir) {
+    const char *d = dir ? dir : ".";
+    char path[512], back[ACE_REPORT_MAX];
+    /* "ace_selftest_report_" then e-acute and a CJK ideograph, in UTF-8. */
+    snprintf(path, sizeof(path), "%s/ace_selftest_report_\xC3\xA9\xE6\x97\xA5.json", d);
+    remove_utf8(path);
+    (void)ace_init_spec(k_good, path);
+    size_t got = report_run_read(path, back, sizeof(back));
+    CHECK(got > 0 && strncmp(back, "{\n  \"schema\": 1", 15) == 0,
+          "report-utf8: no report at a UTF-8 path outside the ANSI code page (%zu bytes)", got);
+    remove_utf8(path);
+#if defined(_WIN32)
+    /* The player hands the path in the (wide) environment; the run must not read it narrowed. */
+    wchar_t wenv[700] = L"SR_ACE_REPORT=", wspec[600] = L"SR_ACE=";
+    size_t at = wcslen(wenv), at_spec = wcslen(wspec);
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wenv + at, (int)(700 - at)) > 0 &&
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, k_good, -1, wspec + at_spec, (int)(600 - at_spec)) > 0 &&
+        _wputenv(wenv) == 0 && _wputenv(wspec) == 0) {
+        (void)ace_init_from_env();
+        got = report_run_read(path, back, sizeof(back));
+        CHECK(got > 0 && strncmp(back, "{\n  \"schema\": 1", 15) == 0,
+              "report-utf8: SR_ACE_REPORT outside the ANSI code page wrote no report (%zu bytes)", got);
+        remove_utf8(path);
+        (void)_wputenv(L"SR_ACE_REPORT=");
+        (void)_wputenv(L"SR_ACE=");
+    } else {
+        CHECK(0, "report-utf8: the environment could not be set");
+    }
+#endif
+    /* Longer than the 1023 bytes kept: "./" steps make it long, and the cut would land inside
+     * the file's name, naming a shorter file in the same folder. */
+    static char longp[1400], cut[1100];
+    const char *tail = "ace_selftest_cut_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy.json";
+    int n = snprintf(longp, sizeof(longp), "%s/", d);
+    int steps = (1023 - n - 20) / 2;
+    for (int i = 0; i < steps && n + 2 < (int)sizeof(longp); i++) { longp[n++] = '.'; longp[n++] = '/'; }
+    snprintf(longp + n, sizeof(longp) - (size_t)n, "%s", tail);
+    CHECK(strlen(longp) > 1023u, "report-long: the test path is only %zu bytes", strlen(longp));
+    memcpy(cut, longp, 1023);
+    cut[1023] = '\0';
+    remove_utf8(cut);
+    (void)ace_init_spec(k_good, longp);
+    got = report_run_read(cut, back, sizeof(back));
+    CHECK(got == 0, "report-long: a path too long was cut short and the report written to another file");
+    remove_utf8(cut);
+}
+
 /* The report's worst case fits ACE_REPORT_MAX: every block present, the spec and every reason at
  * their longest, and every number as wide as one can be. A count is a uint64_t, at most 20 digits;
  * the widest other number is a rate's seconds, a uint64_t VBLANK count over 59.94 with one decimal,
@@ -2679,6 +2792,27 @@ static void cell_pace(void) {
     ace_pace_flip(&p, 1, ACE_RATE_K2, 1, 300u);
     CHECK(!ace_pace_vblank(&p, 15u) && p.superseded == 1u, "a later flip replaces the held frame");
     (void)ace_pace_take(&p);
+    /* A take whose present failed before its submission is undone (ace_pace_untake): the pass
+     * holds the frame before it, so the next new frame is not paired across the gap; it is kept
+     * as itself and counted unpaired. A REAL take, or a second untake, changes nothing. */
+    {
+        AcePace u;
+        ace_pace_reset(&u);
+        ace_pace_flip(&u, 1, ACE_RATE_K2, 1, 100u);
+        CHECK(ace_pace_take(&u) != ACE_SHOW_REAL, "untake: the first frame is not kept");
+        ace_pace_flip(&u, 1, ACE_RATE_K2, 1, 133u);
+        CHECK(ace_pace_take(&u) == ACE_SHOW_BETWEEN, "untake: the second frame is not interpolated");
+        ace_pace_untake(&u);
+        ace_pace_untake(&u);
+        CHECK(ace_pace_take(&u) == ACE_SHOW_REAL, "untake: the verdict came back");
+        ace_pace_untake(&u);
+        ace_pace_flip(&u, 1, ACE_RATE_K2, 1, 166u);
+        CHECK(ace_pace_take(&u) == ACE_SHOW_KEEP && u.unpaired == 1u,
+              "untake: a frame was paired with one the pass never recorded (unpaired %llu)",
+              (unsigned long long)u.unpaired);
+        ace_pace_flip(&u, 1, ACE_RATE_K2, 1, 200u);
+        CHECK(ace_pace_take(&u) == ACE_SHOW_BETWEEN && u.unpaired == 1u, "untake: in-betweens did not resume");
+    }
     /* Every other class shows its frames as they come and keeps a copy. */
     static const AceRate others[] = { ACE_RATE_NONE, ACE_RATE_K1, ACE_RATE_K3, ACE_RATE_K4,
                                       ACE_RATE_STATIC, ACE_RATE_VARIABLE };
@@ -3018,6 +3152,8 @@ int main(int argc, char **argv) {
     cell_fast_forward_smooth();
     cell_fast_forward_owed();
     cell_report(argc > 1 ? argv[1] : NULL);
+    cell_report_paths(argc > 1 ? argv[1] : NULL);
+    cell_feature_keys();
     cell_report_worst();
     cell_room();
     if (s_fail) {

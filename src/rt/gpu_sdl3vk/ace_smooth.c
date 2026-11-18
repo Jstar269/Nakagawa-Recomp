@@ -88,6 +88,18 @@ typedef struct {
     VkImageLayout layout;
 } Img;
 
+/* What a show pass changes on the host (ace_smooth_begin), kept so that a pass whose command
+ * buffer is never submitted can be undone (ace_smooth_discard): which frame is newest, what each
+ * frame has, the layouts the images are tracked in, the pair counts and the serial. */
+typedef struct {
+    int valid;
+    uint32_t epoch;                /* AceBetween.epoch when the images part was kept */
+    int cur;
+    int have[2], have_mask[2], have_depth[2];
+    VkImageLayout frame[2], depth[2], field[LEVELS], out;
+    uint64_t pairs, pairs_mask, pairs_depth, depth_refused, serial;
+} AceUndo;
+
 struct AceBetween {
     AceSmoothInit init;
     VkDevice dev;
@@ -117,6 +129,8 @@ struct AceBetween {
     VkDeviceMemory motion_memory;
     const volatile uint32_t *motion_map;
     uint64_t serial;               /* the newest in-between's, 0 before the first */
+    uint32_t epoch;                /* counts sized_free: the sized images were freed (or remade) */
+    AceUndo undo;
     VkSampler linear, nearest;
     VkDescriptorSetLayout dsl;
     VkDescriptorPool pool;
@@ -282,6 +296,23 @@ static void sized_free(AceBetween *s) {
     img_free(s, &s->out);
     buf_free(s, &s->zstage, &s->zstage_memory);
     s->w = s->h = 0;
+    s->epoch++;
+}
+
+/* Keeps what the sized images are tracked as, for ace_smooth_discard. */
+static void undo_keep_images(AceBetween *s) {
+    AceUndo *u = &s->undo;
+    u->epoch = s->epoch;
+    u->cur = s->cur;
+    for (int i = 0; i < 2; i++) {
+        u->have[i] = s->have[i];
+        u->have_mask[i] = s->have_mask[i];
+        u->have_depth[i] = s->have_depth[i];
+        u->frame[i] = s->frame[i].layout;
+        u->depth[i] = s->depth[i].layout;
+    }
+    for (int i = 0; i < LEVELS; i++) u->field[i] = s->field[i].layout;
+    u->out = s->out.layout;
 }
 
 static void write_sets(AceBetween *s) {
@@ -362,6 +393,8 @@ static int sized_make(AceBetween *s, int w, int h) {
     s->h = h;
     s->cur = 0;
     write_sets(s);
+    /* Remade inside a show pass: nothing the pass records reached these images before now. */
+    if (s->undo.valid) undo_keep_images(s);
     return 1;
 }
 
@@ -700,6 +733,41 @@ void ace_smooth_unrecord(AceBetween *s) {
     if (!s || !s->have[!s->cur]) return;
     s->have[s->cur] = 0;
     s->cur = !s->cur;
+}
+
+void ace_smooth_begin(AceBetween *s) {
+    if (!s) return;
+    AceUndo *u = &s->undo;
+    u->valid = 1;
+    u->pairs = s->pairs;
+    u->pairs_mask = s->pairs_mask;
+    u->pairs_depth = s->pairs_depth;
+    u->depth_refused = s->depth_refused;
+    u->serial = s->serial;
+    undo_keep_images(s);
+}
+
+void ace_smooth_discard(AceBetween *s) {
+    if (!s || !s->undo.valid) return;
+    const AceUndo *u = &s->undo;
+    s->undo.valid = 0;
+    s->pairs = u->pairs;
+    s->pairs_mask = u->pairs_mask;
+    s->pairs_depth = u->pairs_depth;
+    s->depth_refused = u->depth_refused;
+    s->serial = u->serial;
+    /* The images were freed since (a size that could not be made): they hold nothing to undo. */
+    if (u->epoch != s->epoch) return;
+    s->cur = u->cur;
+    for (int i = 0; i < 2; i++) {
+        s->have[i] = u->have[i];
+        s->have_mask[i] = u->have_mask[i];
+        s->have_depth[i] = u->have_depth[i];
+        s->frame[i].layout = u->frame[i];
+        s->depth[i].layout = u->depth[i];
+    }
+    for (int i = 0; i < LEVELS; i++) s->field[i].layout = u->field[i];
+    s->out.layout = u->out;
 }
 
 void ace_smooth_size(const AceBetween *s, int *w, int *h) {

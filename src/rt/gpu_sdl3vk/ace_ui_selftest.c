@@ -622,8 +622,9 @@ static int gpu_open(char *why, size_t cap, int w, int h) {
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     if (CreateDevice(g.physical, &dci, NULL, &g.device) != VK_SUCCESS) {
+        /* A device with the queue is there, and could not be made: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDevice failed");
-        return 0;
+        return -1;
     }
 #define DEV(name) name = (PFN_vk##name)GetDeviceProcAddr(g.device, "vk" #name)
     DEV(DestroyDevice); DEV(GetDeviceQueue); DEV(CreateCommandPool); DEV(DestroyCommandPool);
@@ -1045,7 +1046,7 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
             printf("ace-ui-selftest: gpu SKIP (%s)\n", why);
             return 77;
         }
-        CHECK(0, "the headless device could not be set up");
+        CHECK(0, "the headless device could not be set up (%s)", why[0] ? why : "no reason given");
         return 1;
     }
     const NkUiTextBackend *text = &k_blocks;

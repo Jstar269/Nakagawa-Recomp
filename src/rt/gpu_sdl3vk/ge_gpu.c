@@ -4134,6 +4134,8 @@ static void twin_pc(const Batch *b, PushPC *out) {
 
 static void target_destroy(Target *t) {
     if (!t->used) return;
+    /* Ace smooth motion's HUD boxes are per slot: a target made later in this one starts with none. */
+    ace_hud_forget((int)(t - s_tgts));
     (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
     /* Retire only submissions that actually reference this image. */
     (void)readback_wait_target(t, 0);

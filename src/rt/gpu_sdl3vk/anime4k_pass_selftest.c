@@ -18,7 +18,7 @@
  *   cost            a 480x272 frame through two stages and FSR 1 to 3811x2160, by timestamps
  *
  * --mutant PASS FILE runs line-art with another shader for one pass; it must then fail.
- * Exit 77 (SKIP) without a Vulkan loader or device.
+ * Exit 77 (SKIP) without a Vulkan loader or device; exit 1 when a device is there and cannot be made.
  */
 #include "anime4k_pass.h"
 #include "fsr1_pass.h"
@@ -141,8 +141,9 @@ static int gpu_open(char *why, size_t cap) {
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     if (CreateDevice(g.physical, &dci, NULL, &g.device) != VK_SUCCESS) {
+        /* A device with the queue is there, and could not be made: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDevice failed");
-        return 0;
+        return -1;
     }
 #define DEV(name) name = (PFN_vk##name)GetDeviceProcAddr(g.device, "vk" #name)
     DEV(DestroyDevice); DEV(GetDeviceQueue); DEV(CreateCommandPool); DEV(DestroyCommandPool);
@@ -696,7 +697,8 @@ int main(int argc, char **argv) {
     cell_stages();
     int up = gpu_open(why, sizeof(why));
     if (up <= 0) {
-        printf("SKIP anime4k-selftest: %s\n", why[0] ? why : "the device could not be set up");
+        printf("%s anime4k-selftest: %s\n", up == 0 ? "SKIP" : "FAIL",
+               why[0] ? why : "the device could not be set up");
         gpu_close();
         free(mutant);
         return up == 0 ? 77 : 1;
