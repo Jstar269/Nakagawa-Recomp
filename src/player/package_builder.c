@@ -199,12 +199,18 @@ bool package_builder_load_prerequisites(const char *cli_path,
             normalized[host_len] = '\0';
             if (h > 0) {
                 size_t used = strlen(entry->allowed_hosts);
-                if (used + 1 >= sizeof(entry->allowed_hosts)) goto done;
+                if (used + 1 >= sizeof(entry->allowed_hosts)) {
+                    if (error && error_size) snprintf(error, error_size, "PREREQUISITE_MANIFEST_INVALID: the allow-listed hosts are too long.");
+                    goto done;
+                }
                 entry->allowed_hosts[used++] = ';';
                 entry->allowed_hosts[used] = '\0';
             }
             size_t used = strlen(entry->allowed_hosts);
-            if (used + host_len >= sizeof(entry->allowed_hosts)) goto done;
+            if (used + host_len >= sizeof(entry->allowed_hosts)) {
+                if (error && error_size) snprintf(error, error_size, "PREREQUISITE_MANIFEST_INVALID: the allow-listed hosts are too long.");
+                goto done;
+            }
             memcpy(entry->allowed_hosts + used, normalized, host_len + 1);
             if (strcmp(normalized, url_host) == 0) {
                 snprintf(entry->host, sizeof(entry->host), "%s", normalized);
@@ -1329,8 +1335,14 @@ bool package_builder_bootstrap_python_poll(PackageBootstrapSession *session,
     bool is_done = InterlockedCompareExchange((volatile LONG *)&session->done, 0, 0) != 0;
     if (finished) *finished = is_done;
     if (succeeded) *succeeded = is_done && session->succeeded;
-    if (error_code && error_code_size) snprintf(error_code, error_code_size, "%s", session->error_code);
-    if (error_message && error_message_size) snprintf(error_message, error_message_size, "%s", session->error_message);
+    /* The worker writes its result strings just before it publishes done, so they are
+     * read only after done is seen; reading them earlier raced with those writes. */
+    if (error_code && error_code_size) {
+        snprintf(error_code, error_code_size, "%s", is_done ? session->error_code : "");
+    }
+    if (error_message && error_message_size) {
+        snprintf(error_message, error_message_size, "%s", is_done ? session->error_message : "");
+    }
     return true;
 #else
     if (received_bytes) *received_bytes = 0;
@@ -1366,6 +1378,9 @@ NkResult package_builder_start_prerequisite_fetch(
     PackageBuildSession *session, const char *python_path, const char *cli_path,
     const char *data_root, const char *log_dir, bool bootstrapped_python) {
     if (!session || !python_path || !cli_path || !data_root || !data_root[0]) return NK_ERROR_GENERIC;
+    /* The session owns its child and progress files, as in package_builder_start: a
+     * start on a running session would orphan that child. */
+    if (session->is_building) return NK_ERROR_ALREADY_EXISTS;
     (void)bootstrapped_python;
     session->current_stage = PACKAGE_BUILD_STAGE_IDLE;
     session->current_stage_name[0] = '\0';
@@ -1473,11 +1488,9 @@ NkResult package_builder_start_prerequisite_fetch(
     session->current_stage = PACKAGE_BUILD_STAGE_PREFLIGHT;
     safe_str_copy(session->current_stage_name, sizeof(session->current_stage_name), "preflight");
     safe_str_copy(session->current_message, sizeof(session->current_message), "Preparing the build tools…");
+    /* The outcome fields were cleared at the top, and only the failure returns
+     * before this point change them. */
     session->is_building = true;
-    session->is_complete = false;
-    session->is_failed = false;
-    session->is_cancelled = false;
-    session->exit_code = -1;
     session->start_time_ms = 0;
     return NK_OK;
 }
@@ -1817,37 +1830,31 @@ void package_builder_apply_event(
     }
 }
 
-/* Scan PATH for the first of names that exists as a file. Shared by the
- * interpreter and toolchain lookups: both must see exactly the PATH a spawned
- * build child would see, with no hidden fallback location. */
-static bool scan_path_for_names(const char *const *names, size_t name_count,
-                                char *out_path, size_t out_size) {
+/* Called with each "<PATH entry>/<name>" candidate; true ends the walk. */
+typedef bool (*PathCandidateFn)(const char *candidate, void *context);
+
+/* The one PATH walk: every entry in order, each name in order, until accept takes a
+ * candidate. A PATH entry too long for a candidate path cannot name a usable tool. */
+static bool walk_path_candidates(const char *const *names, size_t name_count,
+                                 PathCandidateFn accept, void *context) {
     const char *path_env = getenv("PATH");
     if (!path_env || !path_env[0]) return false;
 
     char path_copy[32768];
     safe_str_copy(path_copy, sizeof(path_copy), path_env);
-
-#if defined(_WIN32) || defined(_WIN64)
-    const char sep = ';';
-#else
-    const char sep = ':';
-#endif
+    const char sep = nk_platform_path_list_separator();
     char *dir = path_copy;
     while (dir) {
         char *next = strchr(dir, sep);
         if (next) *next++ = '\0';
-        /* A PATH entry too long for a candidate path cannot name a usable tool. */
         if (dir[0] && strlen(dir) < NK_MAX_PATH) {
             for (size_t i = 0; i < name_count; i++) {
                 char candidate[NK_MAX_PATH * 2];
-                snprintf(candidate, sizeof(candidate), "%.*s%c%s", NK_MAX_PATH - 1, dir,
-                         nk_platform_path_separator(), names[i]);
-                if (nk_platform_file_exists(candidate)) {
-                    if (nk_platform_absolute_path(candidate, out_path, out_size)) {
-                        return true;
-                    }
-                    safe_str_copy(out_path, out_size, candidate);
+                int written = snprintf(candidate, sizeof(candidate), "%.*s%c%s",
+                                       NK_MAX_PATH - 1, dir,
+                                       nk_platform_path_separator(), names[i]);
+                if (written > 0 && (size_t)written < sizeof(candidate) &&
+                    accept(candidate, context)) {
                     return true;
                 }
             }
@@ -1855,6 +1862,30 @@ static bool scan_path_for_names(const char *const *names, size_t name_count,
         dir = next;
     }
     return false;
+}
+
+typedef struct {
+    char *out_path;
+    size_t out_size;
+    bool only_315;
+} PathScanOutput;
+
+static bool accept_existing_candidate(const char *candidate, void *context) {
+    PathScanOutput *out = (PathScanOutput *)context;
+    if (!nk_platform_file_exists(candidate)) return false;
+    if (!nk_platform_absolute_path(candidate, out->out_path, out->out_size)) {
+        safe_str_copy(out->out_path, out->out_size, candidate);
+    }
+    return true;
+}
+
+/* Scan PATH for the first of names that exists as a file. Shared by the
+ * interpreter and toolchain lookups: both must see exactly the PATH a spawned
+ * build child would see, with no hidden fallback location. */
+static bool scan_path_for_names(const char *const *names, size_t name_count,
+                                char *out_path, size_t out_size) {
+    PathScanOutput out = { out_path, out_size, false };
+    return walk_path_candidates(names, name_count, accept_existing_candidate, &out);
 }
 
 /* The native test build sets a shorter bound: its hung-wrapper case then proves the
@@ -1920,40 +1951,22 @@ static bool accept_python_candidate(const char *candidate, bool only_315,
     return true;
 }
 
-/* Unlike the shared file-existence scan above, Python discovery must keep
- * walking PATH after an unusable entry (including the Windows Store alias). */
-static bool scan_path_for_python(bool only_315, char *out_path, size_t out_size) {
-    const char *path_env = getenv("PATH");
-    if (!path_env || !path_env[0]) return false;
+static bool accept_python_path_candidate(const char *candidate, void *context) {
+    PathScanOutput *out = (PathScanOutput *)context;
+    return accept_python_candidate(candidate, out->only_315, out->out_path, out->out_size);
+}
 
-    char path_copy[32768];
-    safe_str_copy(path_copy, sizeof(path_copy), path_env);
+/* Unlike the file-existence scan above, Python discovery keeps walking PATH after an
+ * unusable entry (including the Windows Store alias). */
+static bool scan_path_for_python(bool only_315, char *out_path, size_t out_size) {
 #if defined(_WIN32) || defined(_WIN64)
-    const char sep = ';';
-    static const char *kPathNames[] = { "python3.exe", "python.exe" };
+    static const char *const kPathNames[] = { "python3.exe", "python.exe" };
 #else
-    const char sep = ':';
-    static const char *kPathNames[] = { "python3", "python" };
+    static const char *const kPathNames[] = { "python3", "python" };
 #endif
-    char *dir = path_copy;
-    while (dir) {
-        char *next = strchr(dir, sep);
-        if (next) *next++ = '\0';
-        if (dir[0] && strlen(dir) < NK_MAX_PATH) {
-            for (size_t i = 0; i < sizeof(kPathNames) / sizeof(kPathNames[0]); i++) {
-                char candidate[NK_MAX_PATH * 2];
-                int written = snprintf(candidate, sizeof(candidate), "%.*s%c%s",
-                                       NK_MAX_PATH - 1, dir,
-                                       nk_platform_path_separator(), kPathNames[i]);
-                if (written > 0 && (size_t)written < sizeof(candidate) &&
-                    accept_python_candidate(candidate, only_315, out_path, out_size)) {
-                    return true;
-                }
-            }
-        }
-        dir = next;
-    }
-    return false;
+    PathScanOutput out = { out_path, out_size, only_315 };
+    return walk_path_candidates(kPathNames, sizeof(kPathNames) / sizeof(kPathNames[0]),
+                                accept_python_path_candidate, &out);
 }
 
 /* One search over PYTHON, the MSYS2 locations, PATH and the POSIX fallbacks,
@@ -2081,12 +2094,10 @@ int package_builder_cli_candidate_paths(
     /* 4. The documented v0.0.1 release layout: bin/ beside source/, and the
      *    public source export carries tools/nk_cli.py. */
     cli_add_rooted(out, &count, max_out, install_root, "../source/tools/nk_cli.py");
-    /* 5-6. The working directory and its parent, unchanged from before. */
-    static const char *kRelatives[] = { "tools/nk_cli.py", "../tools/nk_cli.py" };
-    for (size_t i = 0; i < sizeof(kRelatives) / sizeof(kRelatives[0]) && count < max_out; i++) {
-        snprintf(out[count], NK_MAX_PATH, "%s", kRelatives[i]);
-        count++;
-    }
+    /* The working directory is never searched: the player is started from shortcuts,
+     * file associations and terminals in any folder, and a tools/nk_cli.py planted
+     * there would run as Python code (audit 2026-11-17, like the DLL search
+     * hardening in main). */
     return count;
 }
 
@@ -2125,8 +2136,8 @@ void package_builder_describe_cli_not_found(const char *install_root,
     snprintf(out, out_size,
              "tools/nk_cli.py was not found. Searched, in order: the NK_INSTALL_ROOT "
              "environment variable, %s/tools, %s/../tools, %s/../source/tools (the "
-             "release layout), the working directory and its parent. Fix: run the player "
-             "from a Nakagawa Recomp source checkout, keep a tools folder beside "
+             "release layout). Fix: run the player built in a Nakagawa Recomp source "
+             "checkout (its build folder), keep a tools folder beside "
              "nakagawa_player.exe, or set NK_INSTALL_ROOT to the folder that contains "
              "tools/ (for example the release's source folder).",
              root, root, root);
@@ -2638,13 +2649,9 @@ NkResult package_builder_start(
         return NK_ERROR_PROCESS_SPAWN;
     }
 
+    /* package_builder_reset_run_state cleared the outcome and the clock above, and
+     * only the failure returns before this point change them. */
     session->is_building = true;
-    session->is_complete = false;
-    session->is_failed = false;
-    session->is_cancelled = false;
-    session->exit_code = -1;
-    session->start_time_ms = 0;
-    session->elapsed_ms = 0;
     session->current_stage = PACKAGE_BUILD_STAGE_PREFLIGHT;
     safe_str_copy(session->current_stage_name, sizeof(session->current_stage_name), "preflight");
     safe_str_copy(session->current_message, sizeof(session->current_message), "Starting package build…");
@@ -2658,6 +2665,9 @@ NkResult package_builder_start(
     return NK_OK;
 }
 
+/* The longest progress JSON line the reader parses; a longer one is skipped by name. */
+#define PACKAGE_PROGRESS_LINE_MAX ((size_t)256u * 1024u)
+
 static void read_new_progress_lines(PackageBuildSession *session) {
     if (!session || !session->progress_file_path[0]) return;
     FILE *f = nk_fopen_utf8(session->progress_file_path, "rb");
@@ -2670,21 +2680,73 @@ static void read_new_progress_lines(PackageBuildSession *session) {
         }
     }
 
-    char line_buf[1024];
-    while (fgets(line_buf, sizeof(line_buf), f)) {
-        size_t len = strlen(line_buf);
-        if (len > 0 && line_buf[len - 1] == '\n') {
-            session->progress_file_offset = ftell(f);
-            PackageProgressEvent ev;
-            if (package_builder_parse_progress_line(line_buf, len, &ev)) {
-                package_builder_apply_event(session, &ev);
+    /* A line is read whole, in chunks, into a buffer that grows up to
+     * PACKAGE_PROGRESS_LINE_MAX. A fixed 1 KiB buffer took a longer line (a FAIL with a
+     * long detail) for an incomplete one and stopped on it at every poll, so that event
+     * and every later one were lost. A line over the cap is skipped with a visible note;
+     * only a line not yet ended by '\n' (still being written) is read again later. */
+    size_t cap = 1024u;
+    char *line = (char *)malloc(cap);
+    if (!line) {
+        fclose(f);
+        return;
+    }
+    for (;;) {
+        char chunk[1024];
+        size_t len = 0;
+        bool too_long = false;
+        bool ended = false;
+        line[0] = '\0';
+        while (fgets(chunk, sizeof(chunk), f)) {
+            size_t n = strlen(chunk);
+            if (!too_long) {
+                if (n >= PACKAGE_PROGRESS_LINE_MAX - len) {
+                    too_long = true;
+                } else {
+                    if (len + n + 1u > cap) {
+                        size_t want = cap;
+                        while (want < len + n + 1u) want *= 2u;
+                        if (want > PACKAGE_PROGRESS_LINE_MAX) want = PACKAGE_PROGRESS_LINE_MAX;
+                        char *grown = (char *)realloc(line, want);
+                        if (!grown) {
+                            free(line);
+                            fseek(f, (long)session->progress_file_offset, SEEK_SET);
+                            fclose(f);
+                            return;
+                        }
+                        line = grown;
+                        cap = want;
+                    }
+                    memcpy(line + len, chunk, n + 1u);
+                    len += n;
+                }
             }
-        } else {
+            if (n > 0 && chunk[n - 1] == '\n') {
+                ended = true;
+                break;
+            }
+        }
+        if (!ended) {
             /* Incomplete line: rewind to before this partial read */
             fseek(f, (long)session->progress_file_offset, SEEK_SET);
             break;
         }
+        session->progress_file_offset = ftell(f);
+        if (too_long) {
+            char note[PACKAGE_BUILD_LINE_LEN];
+            snprintf(note, sizeof(note),
+                     "[build] NOTE: PROGRESS_LINE_TOO_LONG: a progress line over %u bytes "
+                     "was skipped.",
+                     (unsigned)PACKAGE_PROGRESS_LINE_MAX);
+            package_builder_add_output_line(session, note);
+            continue;
+        }
+        PackageProgressEvent ev;
+        if (package_builder_parse_progress_line(line, len, &ev)) {
+            package_builder_apply_event(session, &ev);
+        }
     }
+    free(line);
     fclose(f);
 }
 

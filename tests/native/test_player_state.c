@@ -18648,8 +18648,8 @@ int main(int argc, char **argv) {
         /* The card repeats the install root three times in a 512-byte message.
            The per-run temporary root makes the absolute probe path longer than
            the cache path this subtest used to get, which pushed the checkout
-           hint past that limit. A relative root keeps the whole message while
-           discovery still searches the working directory and its parent. */
+           hint past that limit. A relative root keeps the whole message, and from
+           the probe folder it names no tools folder. */
         assert(nk_ps_chdir(probe) == 0);
         snprintf(capp->install_root, sizeof(capp->install_root), "%s", ".");
 
