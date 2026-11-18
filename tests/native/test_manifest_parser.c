@@ -508,9 +508,9 @@ static void test_multi_overlay_storage(void) {
 
     /* Overlay storage is a process-lifetime pool of NK_MANIFEST_MAX_OVERLAYS slots and every
        accepted parse_buffer() call takes one, so this test must start from a released pool: it
-       needs two slots that stay independent, and once the pool is full the parser deliberately
-       replaces the last slot instead. Without this the test silently depended on fewer than
-       MAX_OVERLAYS accepted parses having happened before it. */
+       needs two slots that stay independent, and once the pool is full the parser refuses
+       a new title. Without this the test silently depended on fewer than MAX_OVERLAYS
+       accepted parses having happened before it. */
     nk_title_catalog_clear_overlay();
 
     const char *manifest_alpha =
@@ -618,6 +618,57 @@ static void test_overlay_clear_releases_storage(void) {
 
     nk_title_catalog_clear_overlay();
     printf("[MANIFEST_TEST] Overlay clear/storage release test PASSED!\n");
+}
+
+static int overlay_capacity_manifest(char *out, size_t out_size, int index) {
+    return snprintf(out, out_size,
+        "{\"schema_version\":1,\"id\":\"overlay-capacity-%d\","
+        "\"display_name\":\"Overlay Capacity %d\",\"kind\":\"retail\","
+        "\"disc\":{\"id\":\"ULUS9984%d\",\"region\":\"NA\","
+        "\"revision_policy\":\"exact-disc-id\"},"
+        "\"executable\":{\"base\":0,\"entry\":0,\"bss_metadata_source\":\"none\","
+        "\"extra_executable_spans\":[]},\"modules\":[],"
+        "\"filesystem\":{\"data_root\":\"data\",\"memory_stick_root\":\"savedata\","
+        "\"device_prefixes\":[\"disc0:\",\"ms0:\"]},\"hle_profile\":\"generic\","
+        "\"feature_requirements\":[],\"verification_profile\":\"smoke\"}\n",
+        index, index, index);
+}
+
+static void test_overlay_capacity_refuses_new_title(void) {
+    printf("[MANIFEST_TEST] Testing that a full overlay pool refuses a new title...\n");
+    char err[512];
+    char json[1024];
+    NkTitleEntry entries[NK_TITLE_MAX_OVERLAYS + 1];
+
+    nk_title_catalog_clear_overlay();
+    for (int i = 0; i < NK_TITLE_MAX_OVERLAYS; i++) {
+        int length = overlay_capacity_manifest(json, sizeof(json), i);
+        assert(length > 0 && (size_t)length < sizeof(json));
+        assert(nk_title_manifest_parse_buffer(json, (size_t)length, false, &entries[i], err, sizeof(err)));
+    }
+
+    /* A ninth distinct title is refused by name. Before the fix it overwrote the
+       last slot, so the eighth title's entry (and any registration pointing at
+       that slot) silently became the ninth title. */
+    int length = overlay_capacity_manifest(json, sizeof(json), NK_TITLE_MAX_OVERLAYS);
+    assert(length > 0 && (size_t)length < sizeof(json));
+    err[0] = '\0';
+    assert(!nk_title_manifest_parse_buffer(json, (size_t)length, false,
+                                           &entries[NK_TITLE_MAX_OVERLAYS], err, sizeof(err)));
+    assert(strstr(err, "at most 8 title manifests") != NULL);
+    for (int i = 0; i < NK_TITLE_MAX_OVERLAYS; i++) {
+        char id[32];
+        snprintf(id, sizeof(id), "overlay-capacity-%d", i);
+        assert(strcmp(entries[i].id, id) == 0);
+    }
+
+    /* Reloading a title already in the pool still updates its own slot. */
+    length = overlay_capacity_manifest(json, sizeof(json), 3);
+    assert(nk_title_manifest_parse_buffer(json, (size_t)length, false, &entries[3], err, sizeof(err)));
+    assert(strcmp(entries[3].id, "overlay-capacity-3") == 0);
+
+    nk_title_catalog_clear_overlay();
+    printf("[MANIFEST_TEST] Overlay capacity refusal test PASSED!\n");
 }
 
 static void test_overlay_collision_policy(void) {
@@ -818,6 +869,7 @@ int main(int argc, char *argv[]) {
     test_multi_overlay_storage();
     test_overlay_collision_policy();
     test_overlay_clear_releases_storage();
+    test_overlay_capacity_refuses_new_title();
     printf("[MANIFEST_TEST] ALL NATIVE MANIFEST PARSER TESTS PASSED SUCCESSFULLY!\n");
     return 0;
 }
