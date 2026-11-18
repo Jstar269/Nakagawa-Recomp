@@ -539,8 +539,13 @@ class EntryPointWiringTests(unittest.TestCase):
         env = dict(os.environ)
         env.pop("INCLUDE_TITLE", None)
         env["CONFIRM"] = "1"
+        # A scratch BUILD_ROOT: even a dry run's parse writes the SDL3 discovery fragment
+        # beneath BUILD_ROOT, which must not be the checkout's build/.
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        build_root = Path(scratch.name).as_posix()
         inherited = subprocess.run(
-            [make, "--no-print-directory", "-n", "clean-preview"],
+            [make, "--no-print-directory", "-n", "clean-preview", f"BUILD_ROOT={build_root}"],
             cwd=ROOT, capture_output=True, text=True, env=env, timeout=600, check=False,
         )
         self.assertEqual(inherited.returncode, 0, inherited.stdout + inherited.stderr)
@@ -548,7 +553,8 @@ class EntryPointWiringTests(unittest.TestCase):
         self.assertNotIn("--yes", line, "an inherited CONFIRM=1 must not confirm")
         env.pop("CONFIRM")
         explicit = subprocess.run(
-            [make, "--no-print-directory", "-n", "clean-preview", "CONFIRM=1", "INCLUDE_TITLE=1"],
+            [make, "--no-print-directory", "-n", "clean-preview", f"BUILD_ROOT={build_root}",
+             "CONFIRM=1", "INCLUDE_TITLE=1"],
             cwd=ROOT, capture_output=True, text=True, env=env, timeout=600, check=False,
         )
         self.assertEqual(explicit.returncode, 0, explicit.stdout + explicit.stderr)

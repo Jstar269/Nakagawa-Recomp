@@ -479,6 +479,15 @@ else
 H264_SUB_SRCS :=
 endif
 
+# GAME_NAME names one title's directory beneath BUILD_ROOT and the stem of its output
+# files, so it must be a single path component. The default BUILD_DIR below is
+# BUILD_ROOT/GAME_NAME and gets no scope check of its own, and `make clean` deletes it
+# wholesale: `GAME_NAME=..` would name the checkout itself and `GAME_NAME=../src` its
+# sources. A separator, a drive colon, or a name made only of dots is refused while Make
+# parses, before any directory is created or any recipe runs.
+ifneq ($(or $(findstring /,$(GAME_NAME)),$(findstring \,$(GAME_NAME)),$(findstring :,$(GAME_NAME)),$(if $(GAME_NAME),$(if $(subst .,,$(GAME_NAME)),,dots))),)
+$(error GAME_NAME '$(GAME_NAME)' is not a title name: it must be one directory name with no '/', '\', or ':' and not only dots, because the build directory is BUILD_ROOT/GAME_NAME and clean deletes it)
+endif
 BUILD_DIR  ?= $(BUILD_ROOT)/$(GAME_NAME)
 # An overridden BUILD_DIR gets the BUILD_ROOT scope refusal. `make clean` deletes it and
 # every build writes its outputs into it, so `BUILD_DIR=.` or `BUILD_DIR=src` must stop
@@ -716,11 +725,13 @@ RECOMP_LLVM_ENTRY_ARG := $(if $(RECOMP_LLVM_PROFILE_ENTRY),--entry "$(RECOMP_LLV
 # nothing. Both halves are carried into the codegen and recompiler profile
 # hashes, so flipping the option regenerates rather than reusing stale objects.
 # At run time SR_NAN_TRAP_LIMIT (default 20) bounds how many reports print.
+# Both appends use `override`: a plain += is ignored when the gates' sub-makes pass
+# CODEGEN_USER_ARGS on their command line, which would drop the codegen half alone.
 NAN_TRAP ?= 0
 NAN_TRAP_CFLAG :=
 ifeq ($(NAN_TRAP),1)
 NAN_TRAP_CFLAG := -DSR_NAN_TRAP
-CODEGEN_USER_ARGS += --nan-trap
+override CODEGEN_USER_ARGS += --nan-trap
 override CFLAGS += -DSR_NAN_TRAP
 endif
 

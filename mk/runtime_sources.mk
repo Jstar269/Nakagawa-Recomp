@@ -236,20 +236,25 @@ SDL3VK_SRCS := src/rt/gpu_sdl3vk/sdl3vk.c src/rt/gpu_sdl3vk/fsr1_pass.c src/rt/f
                src/core/nk_shared_helpers.c src/core/nk_input_profile.c src/core/nk_json.c $(PLAYER_PLATFORM_SRC)
 
 $(BUILD_DIR)/atrac3p_%.o: src/rt/atrac3p/%.c src/rt/recomp.h $(RUNTIME_PROFILE_STAMP)
-	$(CC) $(CFLAGS) -Isrc/rt/atrac3p -Isrc/rt/atrac3p/libavcodec \
-		-Isrc/rt/atrac3p/libavutil $(DEPFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(HLE_INCLUDES) $(DEPFLAGS) -c $< -o $@
 
 # Imported FFmpeg n4.4 H.264 subset TUs. -w: upstream code, kept byte-identical, is not held to the
 # project warning set. HAVE_AV_CONFIG_H and the feature-test macros are what FFmpeg's own build
 # passes; nk_h264_symbols.h renames the few symbols shared with the ATRAC3+ subset.
+H264_SUB_BUILD_FLAGS = -std=c11 -DHAVE_AV_CONFIG_H -D_ISOC99_SOURCE -D_FILE_OFFSET_BITS=64 \
+	-D_LARGEFILE_SOURCE -D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600 \
+	-include $(H264_SUB_DIR)/nk_h264_symbols.h
 $(BUILD_DIR)/h264sub_%.o: src/rt/h264_ffmpeg_sub/%.c src/rt/recomp.h $(RUNTIME_PROFILE_STAMP)
-	$(CC) -I$(H264_SUB_DIR) $(CFLAGS) -w -std=c11 -DHAVE_AV_CONFIG_H -D_ISOC99_SOURCE -D_FILE_OFFSET_BITS=64 \
-		-D_LARGEFILE_SOURCE -D_POSIX_C_SOURCE=200112 -D_XOPEN_SOURCE=600 \
-		-include $(H264_SUB_DIR)/nk_h264_symbols.h $(DEPFLAGS) -c $< -o $@
+	$(CC) -I$(H264_SUB_DIR) $(CFLAGS) -w $(H264_SUB_BUILD_FLAGS) $(DEPFLAGS) -c $< -o $@
+
+# nk_h264_api.c is the project's own wrapper over that subset (PROVENANCE.md: AUTHORED API
+# layer), so it is held to the project warning set: the same flags without -w. An explicit
+# rule takes precedence over the pattern rule above.
+$(BUILD_DIR)/h264sub_nk_h264_api.o: src/rt/h264_ffmpeg_sub/nk_h264_api.c src/rt/recomp.h $(RUNTIME_PROFILE_STAMP)
+	$(CC) -I$(H264_SUB_DIR) $(CFLAGS) $(H264_SUB_BUILD_FLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/atrac3p_bridge.o: src/rt/atrac3p_bridge.c src/rt/atrac3p_bridge.h src/rt/recomp.h $(RUNTIME_PROFILE_STAMP)
-	$(CC) $(CFLAGS) -Isrc/rt/atrac3p -Isrc/rt/atrac3p/libavcodec \
-		-Isrc/rt/atrac3p/libavutil $(DEPFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(HLE_INCLUDES) $(DEPFLAGS) -c $< -o $@
 
 # Host-neutral translation units that can be compiled on Linux without SDL3, Vulkan, game
 # inputs, or generated code. This is deliberately an object-only portability gate, not a
@@ -309,12 +314,14 @@ ifneq ($(strip $(SR_SOURCE_COMMIT)),)
 FLIGHT_IDENTITY_DEFS += -DSR_BUILD_ID=\"$(SR_SOURCE_COMMIT)\"
 endif
 ifneq ($(strip $(SOURCE_DATE_EPOCH)),)
-# Transported through the environment (see the guest-input transport above) so
-# no operator value reaches a command interpreter as syntax. Fail closed on a
-# non-decimal value: flight_recorder.c emits it as a JSON number.
+# Checked inside Make, so no operator value reaches a command interpreter as syntax and
+# no environment round trip is needed: GNU Make before 4.4 (the Linux runners' 4.3) does
+# not hand exported variables to $(shell), which refused a valid value given on the make
+# command line. Fail closed on anything but one run of ASCII digits: flight_recorder.c
+# emits it as a JSON number. It stays exported for the recipes that read it.
 export SOURCE_DATE_EPOCH
-SR_SOURCE_DATE_EPOCH := $(shell "$(PYTHON)" -c "import os; v = os.environ.get('SOURCE_DATE_EPOCH', ''); print(v if v.isdigit() else '')")
-ifeq ($(strip $(SR_SOURCE_DATE_EPOCH)),)
+SR_SOURCE_DATE_EPOCH := $(strip $(SOURCE_DATE_EPOCH))
+ifneq ($(words $(SR_SOURCE_DATE_EPOCH))$(subst 0,,$(subst 1,,$(subst 2,,$(subst 3,,$(subst 4,,$(subst 5,,$(subst 6,,$(subst 7,,$(subst 8,,$(subst 9,,$(SR_SOURCE_DATE_EPOCH))))))))))),1)
 $(error SOURCE_DATE_EPOCH must be a decimal Unix timestamp (reproducible-builds.org), got "$(SOURCE_DATE_EPOCH)")
 endif
 FLIGHT_IDENTITY_DEFS += -DSR_SOURCE_DATE_EPOCH=$(SR_SOURCE_DATE_EPOCH)

@@ -7878,8 +7878,6 @@ def _translate(argv):
         main_out.append("")
         main_out.append("/* --backend=llvm (#330): the CpuState offsets the generated IR uses. */")
         main_out.extend(codegen_llvm.layout_asserts())
-    with open(out_c, "w", encoding="ascii", newline="\n") as f:
-        f.write(rename_generated_entries("\n".join(main_out), renames))
 
     llvm_manifest_path = _write_chunks(base_name, boundaries, renames, backend, llvm_lowered,
                                        llvm_fallbacks, options=options)
@@ -7897,6 +7895,19 @@ def _translate(argv):
             output.write(canonical_cfg_json(cfg_report))
 
     _remove_stale_chunks(base_name, num_files)
+
+    # The registration file is Make's target for this whole run, so it is written last and
+    # whole: a run that fails anywhere above (a chunk that cannot be written, a lowering
+    # error) leaves the previous file, older than the input that started the run, and the
+    # next make runs codegen again instead of compiling the chunks it left half-written.
+    out_c_partial = f"{out_c}.partial"
+    try:
+        with open(out_c_partial, "w", encoding="ascii", newline="\n") as f:
+            f.write(rename_generated_entries("\n".join(main_out), renames))
+        os.replace(out_c_partial, out_c)
+    finally:
+        if os.path.exists(out_c_partial):
+            os.remove(out_c_partial)
 
     _print_summary(out_c, base_name, num_files, funcs_per_chunk, chunk_target_bytes, emitted, resume_owners,
                    stubbed, backend, llvm_lowered, llvm_fallbacks, llvm_manifest_path, options=options)

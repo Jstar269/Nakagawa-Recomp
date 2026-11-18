@@ -107,6 +107,25 @@ class AndroidRuntimeInventoryTests(unittest.TestCase):
             for source in _cmake_list(self.cmake, name):
                 self.assertTrue((ROOT / source).is_file(), f"{name}: {source} does not exist")
 
+    def test_only_the_imported_h264_units_are_compiled_with_w(self) -> None:
+        # nk_h264_api.c is project-authored (src/rt/h264_ffmpeg_sub/PROVENANCE.md), so, as in
+        # the Makefile's h264sub_nk_h264_api.o rule, it keeps the project warning set; only
+        # the imported FFmpeg units, kept byte-identical, take -w.
+        def options(name: str) -> list[str]:
+            match = re.search(r"target_compile_options\(\$\{target\}_" + name + r" PRIVATE(.*?)\)",
+                              self.cmake, re.S)
+            self.assertIsNotNone(match, f"no compile options for ${{target}}_{name}")
+            assert match is not None
+            return match.group(1).split()
+        for line in ('list(FILTER h264sub EXCLUDE REGEX "/nk_h264_api[.]c$")',
+                     'list(FILTER h264api INCLUDE REGEX "/nk_h264_api[.]c$")',
+                     "add_library(${target}_h264_api OBJECT ${h264api})",
+                     "$<TARGET_OBJECTS:${target}_h264_api>"):
+            self.assertTrue(line in self.cmake, f"CMakeLists.txt lacks {line}")
+        self.assertIn("-w", options("h264"))
+        self.assertNotIn("-w", options("h264_api"))
+        self.assertIn("-Wall", options("h264_api"))
+
 
 class AndroidAppContractTests(unittest.TestCase):
     def test_sdl_pins_match_hosted_ci(self) -> None:

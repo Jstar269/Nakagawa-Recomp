@@ -158,6 +158,7 @@ $script:TitleManagerPlan = $null
 $script:TitleManagerMakeArgs = $null
 $script:TitleManagerSpans = $null
 $script:TitleManagerRunEntry = $null
+$script:TitleManagerRunBase = $null
 $script:LastBuildInfo = $null
 # The manager lives in tools/, so the workspace root is the parent of its own folder.
 $ManagerRoot = Split-Path -Parent $PSScriptRoot
@@ -418,6 +419,7 @@ try {
             $script:TitleManagerMakeArgs = @($boundPlan.MakeArgs)
             $script:TitleManagerSpans = $boundPlan.Environment.TITLE_EXTRA_SPANS
             $script:TitleManagerRunEntry = $boundPlan.RunEntry
+            $script:TitleManagerRunBase = $script:TitleManagerPlan.make.game_base
         } else {
             $modules = @($script:TitleManagerPlan.required_guest_modules)
             $extra = ""
@@ -443,6 +445,7 @@ try {
             $script:TitleManagerMakeArgs = $mArgs
             $script:TitleManagerSpans = $script:TitleManagerPlan.environment.TITLE_EXTRA_SPANS
             $script:TitleManagerRunEntry = $script:TitleManagerPlan.run_entry
+            $script:TitleManagerRunBase = $script:TitleManagerPlan.make.game_base
         }
         Write-Host "Using title manifest: $($script:TitleManagerPlan.title_manifest_id) (target: $GameName)" -ForegroundColor DarkGray
     }
@@ -450,6 +453,15 @@ try {
     function Get-NkRunEntry {
         if ($script:TitleManagerRunEntry) { return $script:TitleManagerRunEntry }
         throw "No run entry point resolved by the active title manifest."
+    }
+
+    # The guest address of the image's first byte: the build writes the image at the
+    # plan's GAME_BASE (prxload --env-elf), so a launch must name the same base.
+    function Get-NkRunBase {
+        if ($null -ne $script:TitleManagerRunBase -and "$($script:TitleManagerRunBase)" -ne "") {
+            return "$($script:TitleManagerRunBase)"
+        }
+        throw "No image base address resolved by the active title manifest."
     }
 
     function Get-NkMakeBaseArgs {
@@ -937,12 +949,18 @@ try {
             return $false
         }
 
-        $env:SR_PADSCRIPT     = (Resolve-Path $Route).Path
-        $env:SR_NOINPUT       = "1"
-        $env:SR_EXIT_AT_VBLANK = "$ExitAtVblank"
-        if ($SnapEvery -gt 0) { $env:SR_FBSNAP = "$SnapEvery" } else { $env:SR_FBSNAP = $null }
-        if ($SnapAfter -gt 0) { $env:SR_FBSNAP_AFTER = "$SnapAfter" } else { $env:SR_FBSNAP_AFTER = $null }
-        if ($SnapWindows) { $env:SR_FBSNAP_WINDOWS = $SnapWindows } else { $env:SR_FBSNAP_WINDOWS = $null }
+        # The route and capture variables belong to this oracle run only. The manager runs
+        # in the caller's process (nk.ps1 calls it with `&`), so they are restored once
+        # the run ends: a later Run in the same shell must not replay this route with live
+        # input off and stop at this oracle's vblank.
+        $oracleEnvironment = [ordered]@{
+            SR_PADSCRIPT      = (Resolve-Path $Route).Path
+            SR_NOINPUT        = "1"
+            SR_EXIT_AT_VBLANK = "$ExitAtVblank"
+            SR_FBSNAP         = $(if ($SnapEvery -gt 0) { "$SnapEvery" } else { $null })
+            SR_FBSNAP_AFTER   = $(if ($SnapAfter -gt 0) { "$SnapAfter" } else { $null })
+            SR_FBSNAP_WINDOWS = $(if ($SnapWindows) { $SnapWindows } else { $null })
+        }
 
         $exeHash   = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
         $routeHash = (Get-FileHash -LiteralPath $Route  -Algorithm SHA256).Hash
@@ -962,7 +980,18 @@ try {
         Write-Host "VisualOracle: route=$Route exit_at_vblank=$ExitAtVblank snap_every=$SnapEvery snap_after=$SnapAfter snap_windows=$SnapWindows profile=$RunProfile" -ForegroundColor Cyan
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $backstop = [int][math]::Max(180, [math]::Ceiling($ExitAtVblank / 10.0))
-        Run-NkEngine -Profile $RunProfile -RunDuration $backstop
+        $callerEnvironment = @{}
+        foreach ($name in $oracleEnvironment.Keys) {
+            $callerEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
+            [Environment]::SetEnvironmentVariable($name, $oracleEnvironment[$name])
+        }
+        try {
+            Run-NkEngine -Profile $RunProfile -RunDuration $backstop
+        } finally {
+            foreach ($name in $callerEnvironment.Keys) {
+                [Environment]::SetEnvironmentVariable($name, $callerEnvironment[$name])
+            }
+        }
         $sw.Stop()
         $runResult = $script:LastRunResult
 
@@ -1124,7 +1153,7 @@ try {
         }
         Write-Host "DiffFunc: target=0x$addr oracle=$Oracle step=$Step" -ForegroundColor Cyan
         $imagePath = $ImagePath
-        $args = @("--image", $imagePath, "0", (Get-NkRunEntry), $outTrace, "none",
+        $args = @("--image", $imagePath, (Get-NkRunBase), (Get-NkRunEntry), $outTrace, "none",
                   "--diff-func=0x$addr", "--diff-oracle=$Oracle", "--diff-step=$Step")
         $resolvedDataRoot = $null
         if ($script:TitleDataRoot) {
@@ -1514,7 +1543,7 @@ try {
 
         $entryAddr = Get-NkRunEntry
         $imagePath = $ImagePath
-        $args = @("--image", $imagePath, "0", (Get-NkRunEntry), "none", "none")
+        $args = @("--image", $imagePath, (Get-NkRunBase), (Get-NkRunEntry), "none", "none")
         if (-not $NoGui) {
             $args += "--gui"
         } else {

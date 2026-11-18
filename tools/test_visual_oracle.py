@@ -190,6 +190,56 @@ function Get-NkRunEntry { "0x08804000" }
 """
 
 
+class VisualOracleEnvironmentScopeTests(unittest.TestCase):
+    """The manager runs in the caller's process (nk.ps1 calls it with `&`), so an
+    environment variable one action sets outlives it. The real manager functions are
+    taken from tools/nk_manager.ps1 and run with their collaborators stubbed."""
+
+    def _run(self, functions: str, body: str) -> subprocess.CompletedProcess:
+        return _run_manager_functions(self, functions, body)
+
+    def test_oracle_route_variables_do_not_outlive_the_oracle_run(self) -> None:
+        body = r"""
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("nk-oracle-env-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $tmp | Out-Null
+try {
+    Set-Location -LiteralPath $tmp
+    $script:RepoRoot = $tmp
+    $script:LogDir = $tmp
+    $ExePath = Join-Path $tmp "title.exe"; Set-Content -LiteralPath $ExePath -Value "stub"
+    $route = Join-Path $tmp "route_probe.pad"; Set-Content -LiteralPath $route -Value "stub"
+    function Assert-TitleManagerPrivateBindings { param([switch]$Runtime) }
+    function Test-SafeComponentName { param($Name) $true }
+    function Test-NkRunPreconditions { $true }
+    function Reset-OracleArchive { param($Path, $AllowedRoot, [switch]$Overwrite) New-Item -ItemType Directory -Path $Path -Force | Out-Null; $true }
+    function Read-RouteOutcome { param($StderrPath) [pscustomobject]@{ Kind = "none"; Checkpoints = @(); FailReason = $null } }
+    function Get-OracleVerdict { param($ReachedExit, $TimedOut, $ExitCode, $CaptureCount, $RequestedVblank, $ObservedVblank, $RouteKind, $RouteFailReason) [pscustomobject]@{ Complete = $true; Reasons = @() } }
+    function Run-NkEngine {
+        param($Profile, $RunDuration)
+        $script:During = "$env:SR_NOINPUT|$env:SR_EXIT_AT_VBLANK|$env:SR_FBSNAP"
+        $script:LastRunResult = [pscustomobject]@{ TimedOut = $false; ExitCode = 0 }
+    }
+    $env:SR_NOINPUT = $null
+    $env:SR_EXIT_AT_VBLANK = $null
+    $env:SR_FBSNAP = "caller"
+    $env:SR_PADSCRIPT = $null
+    $ok = Invoke-VisualOracle -Route $route -ExitAtVblank 5 -SnapEvery 2 -OracleName probe
+    Write-Output "OK=$ok"
+    Write-Output "DURING=$script:During"
+    Write-Output "AFTER=[$env:SR_NOINPUT]|[$env:SR_EXIT_AT_VBLANK]|[$env:SR_FBSNAP]|[$env:SR_PADSCRIPT]"
+} finally {
+    Set-Location -LiteralPath ([System.IO.Path]::GetTempPath())
+    Remove-Item -LiteralPath $tmp -Recurse -Force
+}
+"""
+        proc = self._run("Invoke-VisualOracle", body)
+        blob = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, blob)
+        self.assertIn("OK=True", proc.stdout, blob)
+        self.assertIn("DURING=1|5|2", proc.stdout, blob)
+        self.assertIn("AFTER=[]|[]|[caller]|[]", proc.stdout, blob)
+
+
 class ManagerLaunchGuardTests(unittest.TestCase):
     """Run, VisualOracle and DiffFunc refuse or fail visibly instead of acting on a
     launch that cannot happen or a result that was not produced. The real manager

@@ -1072,9 +1072,10 @@ class SimpleFrontEndTests(unittest.TestCase):
 
     def test_frontend_consumes_child_output_before_returning_status(self) -> None:
         self.assertIn('& python @arguments | Out-Host', self.frontend)
-        self.assertIn('$arguments = @("-Action", $ManagerAction, "-MsysPath", $MsysPath)', self.frontend)
+        self.assertIn('$arguments = @{ MsysPath = $MsysPath }', self.frontend)
+        self.assertIn('$arguments.Action = $ManagerAction', self.frontend)
         self.assertIn('& $Manager @arguments | Out-Host', self.frontend)
-        self.assertIn('$exitCode = [int]$LASTEXITCODE', self.frontend)
+        self.assertIn('$exitCode = [int]$global:LASTEXITCODE', self.frontend)
         self.assertIn('return ($exitCode -eq 0)', self.frontend)
         self.assertNotIn('return $?', self.frontend)
 

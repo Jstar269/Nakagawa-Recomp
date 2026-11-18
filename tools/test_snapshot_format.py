@@ -276,6 +276,7 @@ class MutantChunkLookupTests(unittest.TestCase):
                 driver.write_text(_COUNTING_DRIVER, encoding="utf-8")
                 proc = subprocess.run(
                     [make, "-n", "--no-print-directory", goal, "GAME_NAME=snapshot",
+                     f"BUILD_ROOT={(work / 'build-root').as_posix()}",
                      f"BUILD_DIR={(work / 'build').as_posix()}",
                      f"SNAPSHOT_DRIVER={driver.as_posix()}", f"VERIFY_DRIVER={driver.as_posix()}"],
                     cwd=ROOT, capture_output=True, text=True, check=False,

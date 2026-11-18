@@ -97,3 +97,20 @@ def discover_vulkan_sdk(
         "No usable Vulkan SDK found. Pass --vulkan-sdk <path> or set VULKAN_SDK to a current "
         "SDK containing Include/vulkan/vulkan.h and Lib/vulkan-1.lib."
     )
+
+
+def vulkan_sdk_build_error(value: str) -> str:
+    """Return why the build's VULKAN_SDK is unusable, or "" when it is usable.
+
+    The Windows player build calls this before its compile. An explicit VULKAN_SDK
+    skips discovery, so without this check a stale value reaches the compiler as a
+    missing vulkan/vulkan.h. The reason is the one discovery gives for the same value.
+    """
+
+    if not value.strip():
+        return "No usable Vulkan SDK found; set VULKAN_SDK to the SDK root."
+    try:
+        discover_vulkan_sdk(environment=value)
+    except VulkanSdkError as exc:
+        return str(exc)
+    return ""

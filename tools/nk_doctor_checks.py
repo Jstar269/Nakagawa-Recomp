@@ -1528,6 +1528,8 @@ class TitleDiagnosticContext:
     requires_assets: bool
     # Why a declared filesystem.disc_image was refused, when it was; disc_image is None then.
     disc_image_error: str | None = None
+    # Why a declared filesystem.module_dir was refused, when it was; module_dir is None then.
+    module_dir_error: str | None = None
 
 
 # The codegen planner's contract (title_codegen_plan.GAME_NAME_RE): lower case only.
@@ -1647,7 +1649,15 @@ def title_diagnostic_context(
     filesystem = filesystem if isinstance(filesystem, dict) else {}
 
     declared_data_root = _safe_manifest_path(root, filesystem.get("data_root"))
-    declared_module_dir = _safe_manifest_path(root, filesystem.get("module_dir"))
+    raw_module_dir = filesystem.get("module_dir")
+    declared_module_dir = _safe_manifest_path(root, raw_module_dir)
+    module_dir_error = None
+    if raw_module_dir is not None and declared_module_dir is None:
+        # Declared, but not in the form make consumes: say so, rather than "not declared".
+        module_dir_error = (
+            f"filesystem.module_dir {raw_module_dir!r} is not a relative path of letters, "
+            "digits, '.', '_' and '-' joined by '/'"
+        )
     declared_psp_header = _safe_manifest_path(root, filesystem.get("psp_header"))
     declared_disc_image, disc_image_error = _safe_disc_image_path(root, filesystem.get("disc_image"))
     raw_loose_roots = filesystem.get("loose_content_roots")
@@ -1705,6 +1715,7 @@ def title_diagnostic_context(
         requires_iso=requires_iso,
         requires_assets=requires_assets,
         disc_image_error=disc_image_error,
+        module_dir_error=module_dir_error,
     )
 
 
@@ -1798,7 +1809,14 @@ def check_private_inputs(
 
     if context.requires_module_dir:
         module_dir = context.module_dir or (root / "modules")
-        if context.module_dir is None:
+        if context.module_dir is None and context.module_dir_error is not None:
+            report.fail(
+                "INPUT_MODULE_DIR",
+                "The title manifest's filesystem.module_dir is not a valid relative directory path",
+                detail=context.module_dir_error,
+                remediation="Declare filesystem.module_dir as a relative POSIX-style directory path.",
+            )
+        elif context.module_dir is None:
             # The manager refuses this manifest the same way before it builds.
             report.fail(
                 "INPUT_MODULE_DIR",

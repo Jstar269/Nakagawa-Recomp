@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import struct
 import subprocess
 import sys
@@ -545,8 +544,10 @@ class FontProvisioningTests(unittest.TestCase):
     def test_cli_refuses_a_user_data_root_inside_the_checkout(self) -> None:
         """The user's console fonts are never written where they could be committed."""
         source = self._folder("cli_inside", {"one.pgf": latin_pgf()})
+        # A path that does not exist yet: the refusal comes before anything is created, so
+        # the test creates nothing in the checkout and has nothing there to clean up.
         inside = ROOT / "build" / f"font-guard-{os.getpid()}-{self.temp_path.name}"
-        self.addCleanup(shutil.rmtree, inside, True)
+        self.assertFalse(inside.exists())
         for args in (("import", str(source)), ("status",), ("remove", "--all")):
             with self.subTest(command=args[0]):
                 res = self._cli(*args, "--user-data-root", str(inside))

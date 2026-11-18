@@ -215,6 +215,33 @@ class VulkanSdkMakefileWiringTests(unittest.TestCase):
             if os.name == "nt":
                 self.assertIn(f'-I"{root}/', blob)
 
+    @unittest.skipUnless(os.name == "nt", "the Vulkan SDK check runs only in the Windows build")
+    def test_unusable_explicit_vulkan_sdk_stops_the_player_by_name(self) -> None:
+        # An explicit VULKAN_SDK skips discovery, so a stale one must still stop the
+        # player before its compile with the same named reason discovery gives,
+        # rather than a missing vulkan/vulkan.h from the compiler. The check runs
+        # as the player's order-only prerequisite, probed alone so nothing compiles.
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required")
+        build_root = _scratch_build_root(self, "vulkan-sdk-stale")
+        stale = (build_root.parent / "stale-sdk").as_posix()
+        good = self.make_sdk(build_root.parent, "9.9.9.9").as_posix()
+        env = dict(os.environ)
+        env.pop("VULKAN_SDK", None)
+        results = {}
+        for label, value in (("stale", stale), ("good", good)):
+            results[label] = subprocess.run(
+                [make, "--no-print-directory", "player-vulkan-check", f"VULKAN_SDK={value}",
+                 f"PYTHON={Path(sys.executable).as_posix()}", f"BUILD_ROOT={build_root.as_posix()}"],
+                capture_output=True, text=True, env=env, check=False, cwd=str(ROOT),
+            )
+        stale_blob = results["stale"].stdout + results["stale"].stderr
+        self.assertNotEqual(results["stale"].returncode, 0, stale_blob)
+        self.assertIn(f"VULKAN_SDK points to an unusable Vulkan SDK: {stale}", stale_blob)
+        self.assertEqual(results["good"].returncode, 0,
+                         results["good"].stdout + results["good"].stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

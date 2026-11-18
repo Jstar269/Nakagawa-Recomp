@@ -276,9 +276,52 @@ class ManagerExitPropagationHardeningTests(unittest.TestCase):
         frontend = (ROOT / "nk.ps1").read_text(encoding="utf-8-sig")
         self.assertNotIn("Invoke-ManagerBuild", frontend)
         self.assertNotIn("Get-HstProductBackupPath", frontend)
-        self.assertIn("$LASTEXITCODE = 0", frontend)
-        self.assertIn("$exitCode = [int]$LASTEXITCODE", frontend)
+        self.assertIn("$global:LASTEXITCODE = 0", frontend)
+        self.assertIn("$exitCode = [int]$global:LASTEXITCODE", frontend)
         self.assertIn('DoctorScope "products"', frontend)
+
+    def test_frontend_reports_a_failed_manager_action(self) -> None:
+        # The front end runs the manager in its own process (`& $Manager`), and the
+        # manager reports a failed action only through `exit <code>`, which sets the
+        # global $LASTEXITCODE. A function-local $LASTEXITCODE would hide it, so
+        # Verify would pass and Build or Play would go on after a failed build.
+        # A stub manager and doctor beside a copy of nk.ps1 run the real front end.
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell 7 (pwsh) is required")
+        with tempfile.TemporaryDirectory(prefix="nk-frontend-exit-") as tmp:
+            root = Path(tmp)
+            (root / "tools").mkdir()
+            shutil.copyfile(ROOT / "nk.ps1", root / "nk.ps1")
+            (root / "tools" / "nk_doctor.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+            manager = root / "tools" / "nk_manager.ps1"
+            env = dict(os.environ)
+            env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
+            # The stub declares its parameters as the manager does (Action first, with a
+            # ValidateSet), so the front end must bind them by name.
+            param_block = (
+                'Param(\n'
+                '    [ValidateSet("BuildFull", "BuildFast", "Run", "Verify")]\n'
+                '    [string]$Action,\n'
+                '    [string]$MsysPath = "",\n'
+                '    [string]$VulkanSdk = "",\n'
+                '    [string]$TitleManifest = "",\n'
+                '    [string]$GameName = ""\n'
+                ')\n'
+                'Write-Host "stub $Action msys=$MsysPath game=$GameName"\n'
+            )
+            cases = {"fails": (param_block + "exit 3\n", 1), "passes": (param_block, 0)}
+            for label, (body, expected) in cases.items():
+                with self.subTest(manager=label):
+                    manager.write_text(body, encoding="utf-8")
+                    proc = subprocess.run(
+                        [pwsh, "-NoProfile", "-NonInteractive", "-File", str(root / "nk.ps1"), "Verify",
+                         "-MsysPath", "msys-probe", "-GameName", "probe"],
+                        capture_output=True, text=True, env=env, check=False,
+                    )
+                    self.assertIn("stub Verify msys=msys-probe game=probe", proc.stdout,
+                                  proc.stdout + proc.stderr)
+                    self.assertEqual(proc.returncode, expected, proc.stdout + proc.stderr)
 
 
 class SetupMatrixScenariosTests(unittest.TestCase):
@@ -881,6 +924,17 @@ class OptionalGuestModuleDirectoryTests(unittest.TestCase):
             results = self._results(Path(tmp), {})
         self.assertEqual([result.status for result in results], ["FAIL"], results)
         self.assertIn("filesystem.module_dir", results[0].summary)
+
+    def test_a_declared_but_invalid_module_dir_is_named_as_invalid(self) -> None:
+        # Declared, so the failure must not say "no filesystem.module_dir": it names the
+        # value and why it was refused, as an invalid disc_image does.
+        for value in ("guest modules", "C:/modules", "/modules", 7):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                results = self._results(Path(tmp), {"module_dir": value})
+                self.assertEqual([result.status for result in results], ["FAIL"], results)
+                self.assertIn("is not a valid relative directory path", results[0].summary)
+                self.assertNotIn("no filesystem.module_dir", results[0].summary)
+                self.assertIn(repr(value), results[0].detail or "")
 
     def test_a_missing_module_dir_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1193,14 +1193,27 @@ function(nk_add_title_runtime target package_dir title_id)
     target_compile_definitions(${target}_atrac PRIVATE ${rt_defs})
     target_link_libraries(${target}_atrac PRIVATE SDL3::SDL3)
 
-    # The FFmpeg H.264 subset: the Makefile's h264sub_% rule (upstream code, warnings off).
+    # The FFmpeg H.264 subset: the Makefile's h264sub_% rule (upstream code, warnings off), and
+    # the project's own wrapper over it (nk_h264_api.c, the Makefile's h264sub_nk_h264_api.o
+    # rule), which keeps the project warning set (-Wall -Wextra) without -Werror, as the runtime.
+    set(h264api "${h264sub}")
+    list(FILTER h264api INCLUDE REGEX "/nk_h264_api[.]c$")
+    list(FILTER h264sub EXCLUDE REGEX "/nk_h264_api[.]c$")
+    set(h264_defs ${rt_defs} HAVE_AV_CONFIG_H _ISOC99_SOURCE _FILE_OFFSET_BITS=64
+        _LARGEFILE_SOURCE _POSIX_C_SOURCE=200112 _XOPEN_SOURCE=600)
+    set(h264_symbols -include "${root}/src/rt/h264_ffmpeg_sub/nk_h264_symbols.h")
     add_library(${target}_h264 OBJECT ${h264sub})
     target_include_directories(${target}_h264 PRIVATE "${root}/src/rt/h264_ffmpeg_sub"
         "${root}/src/rt")
     target_compile_options(${target}_h264 PRIVATE -O2 -fno-strict-aliasing -w -std=c11
-        -include "${root}/src/rt/h264_ffmpeg_sub/nk_h264_symbols.h")
-    target_compile_definitions(${target}_h264 PRIVATE ${rt_defs} HAVE_AV_CONFIG_H _ISOC99_SOURCE
-        _FILE_OFFSET_BITS=64 _LARGEFILE_SOURCE _POSIX_C_SOURCE=200112 _XOPEN_SOURCE=600)
+        ${h264_symbols})
+    target_compile_definitions(${target}_h264 PRIVATE ${h264_defs})
+    add_library(${target}_h264_api OBJECT ${h264api})
+    target_include_directories(${target}_h264_api PRIVATE "${root}/src/rt/h264_ffmpeg_sub"
+        "${root}/src/rt")
+    target_compile_options(${target}_h264_api PRIVATE -O2 -fno-strict-aliasing -Wall -Wextra
+        -Wno-error -std=c11 ${h264_symbols})
+    target_compile_definitions(${target}_h264_api PRIVATE ${h264_defs})
 
     # Generated C: RECOMP_FLAGS (-O0 -w), with the package directory on the include path.
     add_library(${target}_gen OBJECT ${generated})
@@ -1211,7 +1224,7 @@ function(nk_add_title_runtime target package_dir title_id)
     add_library(${target} SHARED
         $<TARGET_OBJECTS:${target}_rt> $<TARGET_OBJECTS:${target}_ge>
         $<TARGET_OBJECTS:${target}_atrac> $<TARGET_OBJECTS:${target}_h264>
-        $<TARGET_OBJECTS:${target}_gen>)
+        $<TARGET_OBJECTS:${target}_h264_api> $<TARGET_OBJECTS:${target}_gen>)
     target_link_libraries(${target} PRIVATE SDL3::SDL3 vulkan m)
     if(ANDROID)
         target_link_libraries(${target} PRIVATE log android)
