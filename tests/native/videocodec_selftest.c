@@ -534,6 +534,12 @@ static void test_packet_copy(void) {
     put_packet(G_PKT + 16u, G_SRC, s_edram + 0xB00u, G_PKT, 8u);
     CHECK(call(NID_PESCOPY, G_PKT, 0, 0, 0) == VC_ERR_GUEST_ADDRESS && s_me_ram[off + 0xB00u] == 0u,
           "pescopy: a list that loops back is refused and copies nothing");
+    /* A packet whose copy writes its own next link: the checked list had one packet, so the copy
+     * that turns it into a loop is refused instead of walking the new link forever. */
+    MEM_W32(G_SRC + 0x1F0u, G_PKT);
+    put_packet(G_PKT, G_SRC + 0x1F0u, G_PKT + 8u, 0u, 4u);
+    CHECK(call(NID_PESCOPY, G_PKT, 0, 0, 0) == VC_ERR_GUEST_ADDRESS && MEM_R32(G_PKT + 8u) == G_PKT,
+          "pescopy: a list its own copies loop back on is refused after the checked packets");
     memset(s_me_ram + off, 0, 0x1000u);
 }
 

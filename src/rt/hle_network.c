@@ -62,9 +62,11 @@ static uint32_t h_NetEtherNtostr(CpuState *s) {
  *
  * So sceNetInit and sceNetTerm keep the library's state and its pool, and the calls that need a
  * network answer as a PSP with no group and no access point connection does. Nothing here reaches a
- * host network API. UNMEASURED, from PPSSPP Core/HLE/sceNet.cpp (commit 3bc60270, a behaviour
- * reference): the argument checks, the pool taken from the user partition, and sceNetTerm before
- * sceNetInit (0). A second sceNetInit without Term starts over with one pool; PPSSPP terminates
+ * host network API. PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceNet.cpp, sceNetInit and sceNetTerm): the
+ * argument checks, the pool taken from the user partition, and sceNetTerm before sceNetInit (0).
+ * Each derived cell below logs one "HLE: PPSSPP-derived, not PSP-measured" note the first time it
+ * answers in a run. A second sceNetInit without Term starts over with one pool; PPSSPP terminates
  * before it checks the arguments, while here the arguments are checked first, so an invalid second
  * call leaves the first pool in place (the PSP's order is UNMEASURED). The library's two threads
  * (SceNetCallout, SceNetNetintr) are not created.
@@ -80,12 +82,31 @@ static struct {
 
 #define NET_POOL_NONE 0xffffffffu
 
+/* The PPSSPP-derived sceNetInit cells, each noted once per run. */
+enum { NET_NOTE_MEMSIZE, NET_NOTE_PRIORITY, NET_NOTE_REINIT, NET_NOTE_SWITCH_OFF, NET_NOTE_COUNT };
+static int s_net_noted[NET_NOTE_COUNT];
+static void net_derived_note(int cell, const char *what) {
+    if (s_net_noted[cell]) return;
+    s_net_noted[cell] = 1;
+    fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceNetInit (NID 0x39af39a6) %s\n", what);
+}
+void sr_hle_test_net_note_reset(void) { memset(s_net_noted, 0, sizeof(s_net_noted)); }
+
 /* sceNetInit(poolSize, calloutPri, calloutStack, netintrPri, netintrStack). */
 static uint32_t h_NetInit(CpuState *s) {
     const uint32_t pool_size = A0, callout_pri = A1, netintr_pri = A3;
-    if (pool_size == 0u) return 0x800201b7u;               /* SCE_KERNEL_ERROR_ILLEGAL_MEMSIZE */
-    if (callout_pri < 0x08u || callout_pri > 0x77u || netintr_pri < 0x08u || netintr_pri > 0x77u)
+    if (pool_size == 0u) {
+        net_derived_note(NET_NOTE_MEMSIZE, "refuses pool size 0 with ILLEGAL_MEMSIZE");
+        return 0x800201b7u;                                /* SCE_KERNEL_ERROR_ILLEGAL_MEMSIZE */
+    }
+    if (callout_pri < 0x08u || callout_pri > 0x77u || netintr_pri < 0x08u || netintr_pri > 0x77u) {
+        net_derived_note(NET_NOTE_PRIORITY, "refuses a thread priority outside 0x08-0x77 with ILLEGAL_PRIORITY");
         return SCE_KERNEL_ERROR_ILLEGAL_PRIORITY;
+    }
+    if (s_netlib.inited) net_derived_note(NET_NOTE_REINIT, "again without sceNetTerm starts over with one pool");
+    sreg_ensure_loaded();
+    if (s_console.wlan_switch_set && !s_console.wlan_switch)
+        net_derived_note(NET_NOTE_SWITCH_OFF, "returns 0 with the WLAN switch off (PPSSPP does not consult it)");
     if (s_netlib.inited && s_netlib.pool_uid != NET_POOL_NONE) free_block(s_netlib.pool_uid);
     s_netlib.inited = 0;
     s_netlib.pool_uid = alloc_block(pool_size);
