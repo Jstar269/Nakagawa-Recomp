@@ -278,7 +278,9 @@ go on decides the transition:
 - An armed capture's readback buffer is made before the acquire, so a failure to make it fails
   the capture and nothing else.
 - The present that turns the renderer terminal prints one line naming why
-  (`sdl3vk: <reason>; the renderer is terminal`).
+  (`sdl3vk: <reason>; the renderer is terminal`): the line of the step that failed (a fence
+  wait with its `VkResult`, a swapchain rebuild step), or the present's own reason when no step
+  below it printed one. The lifecycle and terminal-fault cells count these lines.
 - Only `sdl3vk_shutdown` leaves the terminal state, and a later `sdl3vk_init` starts afresh.
 
 `sdl3vk_lifecycle_selftest` (inside `gpu-capture-selftest`) checks two kinds of fault with the

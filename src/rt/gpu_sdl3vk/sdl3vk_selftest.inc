@@ -1627,14 +1627,18 @@ static int sdl3vk_lifecycle_selftest(void) {
         int terminal = sdl3vk_renderer_terminal();
         int reported = s_terminal_reported;
         int after = sdl3vk_present_rgba(px);
+        /* One line names the transition, whichever step printed it; the refused present after
+         * it prints none. */
+        unsigned lines = s_terminal_lines;
         sdl3vk_shutdown();
         int live = lifecycle_live_objects();
         if (!warm || !reached || got != pcases[i].want || terminal != pcases[i].terminal ||
-            reported != terminal || after != (pcases[i].terminal ? -1 : 1) || live != 0) {
+            reported != terminal || lines != (unsigned)terminal ||
+            after != (pcases[i].terminal ? -1 : 1) || live != 0) {
             fprintf(stderr, "lifecycle: present fault '%s': warm=%d reached=%d present=%d (want %d) "
-                            "terminal=%d (want %d, named %d) next present=%d, %d object(s) alive "
-                            "after shutdown\n", pcases[i].name, warm, reached, got, pcases[i].want,
-                    terminal, pcases[i].terminal, reported, after, live);
+                            "terminal=%d (want %d, named %d in %u line(s)) next present=%d, %d "
+                            "object(s) alive after shutdown\n", pcases[i].name, warm, reached, got,
+                    pcases[i].want, terminal, pcases[i].terminal, reported, lines, after, live);
             ok = 0;
         }
     }
@@ -1732,19 +1736,21 @@ static int sdl3vk_lifecycle_selftest(void) {
         const uint64_t timed = s_pts_timed - timed_before;
         const int ts_left = f->ts_written;
         const int after = sdl3vk_present_rgba(px);
+        /* The failed capture wait prints the one line naming the transition (#1377). */
+        const unsigned lines = s_terminal_lines;
         sdl3vk_shutdown();
         remove("selftest_lifecycle.ppm");
         const int live = lifecycle_live_objects();
         const int want_capture = c == 0 ? 1 : -1;
         const uint64_t want_timed = c == 0 && pool ? 1u : 0u;
         if (!warm || !armed || !reached || got != 1 || capture != want_capture ||
-            terminal != c || reported != c || after != (c ? -1 : 1) ||
+            terminal != c || reported != c || lines != (unsigned)c || after != (c ? -1 : 1) ||
             (c == 0 && (timed != want_timed || ts_left)) || live != 0) {
             fprintf(stderr, "lifecycle: present case '%s': warm=%d armed=%d reached=%d present=%d "
-                            "(want 1) capture=%d (want %d) terminal=%d named %d (want %d) next "
-                            "present=%d, GPU times read %llu (want %llu, pool %d, left %d), %d "
-                            "object(s) alive after shutdown\n", name, warm, armed, reached, got,
-                    capture, want_capture, terminal, reported, c, after,
+                            "(want 1) capture=%d (want %d) terminal=%d named %d in %u line(s) "
+                            "(want %d) next present=%d, GPU times read %llu (want %llu, pool %d, "
+                            "left %d), %d object(s) alive after shutdown\n", name, warm, armed,
+                    reached, got, capture, want_capture, terminal, reported, lines, c, after,
                     (unsigned long long)timed, (unsigned long long)want_timed, pool, ts_left, live);
             ok = 0;
         }
@@ -2494,9 +2500,10 @@ static int sdl3vk_capture_selftest_body(void) {
                             terminal_fault);
                     ok = 0;
                 }
-                if (!s_terminal_reported) {
-                    fprintf(stderr, "terminal fault %s: the renderer turned terminal without a "
-                                    "line naming why\n", terminal_fault);
+                if (!s_terminal_reported || s_terminal_lines != 1u) {
+                    fprintf(stderr, "terminal fault %s: the renderer turned terminal with %u "
+                                    "line(s) naming why (want 1)\n", terminal_fault,
+                            s_terminal_lines);
                     ok = 0;
                 }
                 if (sdl3vk_frame_semaphore_generation() != sem0) {

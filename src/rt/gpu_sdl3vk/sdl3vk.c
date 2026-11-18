@@ -36,6 +36,7 @@
 #include <vulkan/vulkan.h>
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -119,8 +120,10 @@ static VkFence        s_swap_img_fence[8];
 static VkSemaphore    s_swap_sem_done[8];
 
 static int      s_renderer_terminal = 0;
-/* Set once a failed present has named why the renderer turned terminal on stderr. */
+/* Set once a line has named why the renderer turned terminal on stderr (terminal_line), and the
+ * count of those lines, which the lifecycle selftest checks is one per terminal transition. */
 static int      s_terminal_reported = 0;
+static unsigned s_terminal_lines = 0;
 static int      s_denorm_preserve_f32 = 0;   /* see sdl3vk_init: VK_KHR_shader_float_controls */
 static int      s_dst_read = SDL3VK_DST_READ_SNAPSHOT;   /* see sdl3vk_init: SR_GPU_DST_READ */
 static uint32_t s_dev_extensions = 0;        /* what vkCreateDevice was given (sdl3vk_get_vk) */
@@ -188,6 +191,19 @@ uint64_t sdl3vk_present_busy_count(void) { return s_present_busy_image + s_prese
 
 int sdl3vk_renderer_terminal(void) {
     return s_renderer_terminal;
+}
+
+/* Prints a line ending "; the renderer is terminal" and records that the transition is named.
+ * The step that failed (a fence wait, a swapchain rebuild) prints its own line with its
+ * VkResult; present_common's exit prints one only when no step below it named the transition,
+ * so a terminal transition prints one line. */
+static void terminal_line(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    s_terminal_reported = 1;
+    s_terminal_lines++;
 }
 
 void sdl3vk_present_fault_inject(int vk_result) {
@@ -382,8 +398,8 @@ static int wait_present_frame(PresentFrame *f) {
         sr_perf_present_wait(wait_started);
     }
     if (r != VK_SUCCESS) {
-        fprintf(stderr, "sdl3vk: present frame fence wait failed: %d; the renderer is terminal\n",
-                (int)r);
+        terminal_line("sdl3vk: present frame fence wait failed: %d; the renderer is terminal\n",
+                      (int)r);
         s_renderer_terminal = 1;
         return 0;
     }
@@ -417,8 +433,8 @@ static int poll_present_frame(PresentFrame *f) {
                                    : vkGetFenceStatus(s_dev, f->fence);
     if (r == VK_NOT_READY) return 0;
     if (r != VK_SUCCESS) {
-        fprintf(stderr, "sdl3vk: present frame fence status failed: %d; the renderer is terminal\n",
-                (int)r);
+        terminal_line("sdl3vk: present frame fence status failed: %d; the renderer is terminal\n",
+                      (int)r);
         s_renderer_terminal = 1;
         return -1;
     }
@@ -563,8 +579,8 @@ static int create_swapchain(void) {
         /* The old swapchain is retired even when the new one is not created (vkCreateSwapchainKHR,
          * oldSwapchain), so it can present nothing more; its images are unused (waited above).
          * It is destroyed and the renderer is terminal (#1377). */
-        fprintf(stderr, "sdl3vk: vkCreateSwapchainKHR failed: %d; the renderer is terminal\n",
-                (int)cr);
+        terminal_line("sdl3vk: vkCreateSwapchainKHR failed: %d; the renderer is terminal\n",
+                      (int)cr);
         if (old) vkDestroySwapchainKHR(s_dev, old, NULL);
         destroy_present_semaphores();
         s_swap = VK_NULL_HANDLE;
@@ -586,8 +602,8 @@ static int create_swapchain(void) {
     VkResult ir = vkGetSwapchainImagesKHR(s_dev, s_swap, &n_img, s_swap_img);
     if (ir != VK_SUCCESS) {
         /* The new swapchain exists and the old one is gone, but its images are unknown. */
-        fprintf(stderr, "sdl3vk: vkGetSwapchainImagesKHR failed: %d; the renderer is terminal\n",
-                (int)ir);
+        terminal_line("sdl3vk: vkGetSwapchainImagesKHR failed: %d; the renderer is terminal\n",
+                      (int)ir);
         s_swap_n = 0;
         memset(s_swap_img_fence, 0, sizeof(s_swap_img_fence));
         s_renderer_terminal = 1;
@@ -601,8 +617,8 @@ static int create_swapchain(void) {
         if (sr != VK_SUCCESS) {
             /* Those already made are destroyed with the swapchain, by the next creation or
              * by shutdown. */
-            fprintf(stderr, "sdl3vk: vkCreateSemaphore for swapchain image %u failed: %d; "
-                            "the renderer is terminal\n", (unsigned)i, (int)sr);
+            terminal_line("sdl3vk: vkCreateSemaphore for swapchain image %u failed: %d; "
+                          "the renderer is terminal\n", (unsigned)i, (int)sr);
             s_swap_sem_done[i] = VK_NULL_HANDLE;
             s_swap_n = 0;
             memset(s_swap_img_fence, 0, sizeof(s_swap_img_fence));
@@ -3054,14 +3070,11 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
          * capture resolves as attempted-and-failed (-1) inside fbcap.c, never as a
          * fabricated success. The wait is the present's own (wait_present_frame), so the
          * frame's GPU time is read and a failed wait leaves the renderer terminal: the copy
-         * into s_cap may still be running, and no later capture may free or regrow it. */
-        if (!wait_present_frame(f)) {
-            if (!s_terminal_reported) {
-                s_terminal_reported = 1;
-                fprintf(stderr, "sdl3vk: capture fence wait failed; the renderer is terminal\n");
-            }
+         * into s_cap may still be running, and no later capture may free or regrow it. The
+         * failed wait printed the line naming that (terminal_line). */
+        if (!wait_present_frame(f))
             sr_capture_fail("capture fence wait failed");
-        } else if (!cap_invalidate_readback(&s_cap))
+        else if (!cap_invalidate_readback(&s_cap))
             sr_capture_fail("capture readback invalidate failed");
         else
             sr_capture_publish_recorded(s_cap.map, s_cap_w * 4u, s_cap_order);
@@ -3083,11 +3096,11 @@ fail:
     /* One exit for every failure above: the armed capture resolves as failed, never as
      * an invented success, and a show pass learns its picture was not shown. A failure that
      * turned the renderer terminal (a lost device or surface, an unclassified present result,
-     * a step after the acquire) names why once, since every later present is refused. */
-    if (s_renderer_terminal && !s_terminal_reported) {
-        s_terminal_reported = 1;
-        fprintf(stderr, "sdl3vk: %s; the renderer is terminal\n", why ? why : "present failed");
-    }
+     * a step after the acquire) is named here unless the step that failed below (a fence wait,
+     * a swapchain rebuild) printed its own line, so it has one line; every later present is
+     * refused. */
+    if (s_renderer_terminal && !s_terminal_reported)
+        terminal_line("sdl3vk: %s; the renderer is terminal\n", why ? why : "present failed");
     sr_capture_fail(why);
     if (pass_ran && s_show_done) s_show_done(-1, pass_submission);
     return -1;
@@ -3588,6 +3601,7 @@ void sdl3vk_shutdown(void) {
     }
     s_renderer_terminal = 0;
     s_terminal_reported = 0;
+    s_terminal_lines = 0;
     s_swap_extent_zero_fault = 0;
     s_denorm_preserve_f32 = 0;
     s_quit_requested = 0;
