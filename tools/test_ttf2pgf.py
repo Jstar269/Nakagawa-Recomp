@@ -812,6 +812,7 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
 
     def test_crossing_rasterizer_matches_the_rational_reference(self) -> None:
         rng = random.Random(2026)
+        large_den_cases = 0
         for case in range(400):
             # Large outlines push edge denominators past 2**16 and take the Fraction sort.
             span = 1 << (8 if case % 4 else 18)
@@ -821,15 +822,21 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
                 edges.extend((x0, y0, x1, y1) for (x0, y0), (x1, y1) in zip(points, points[1:] + points[:1], strict=True))
             xs = [x for edge in edges for x in (edge[0], edge[2])]
             ys = [y for edge in edges for y in (edge[1], edge[3])]
-            raster = ttf2pgf._Raster(
-                edges=tuple(edges), left=min(xs) // 64, bottom=min(ys) // 64,
-                right=-((-max(xs)) // 64), top=-((-max(ys)) // 64),
-            )
-            if raster.width * raster.height > 4096:
-                continue
+            left, bottom = min(xs) // 64, min(ys) // 64
+            right, top = -((-max(xs)) // 64), -((-max(ys)) // 64)
+            if (right - left) * (top - bottom) > 4096:
+                # Clip to a 16x16 pixel window around the origin so large-denominator edges run.
+                left, bottom, right, top = -8, -8, 8, 8
+            raster = ttf2pgf._Raster(edges=tuple(edges), left=left, bottom=bottom, right=right, top=top)
+            if any(
+                abs(y1 - y0) >= (1 << 16) and min(y0, y1) < top * 64 and max(y0, y1) > bottom * 64
+                for _, y0, _, y1 in edges
+            ):
+                large_den_cases += 1
             embolden = (case % 3, case % 2)
             self.assertEqual(ttf2pgf._rasterize(raster, *embolden),
                              _rasterize_rational_reference(raster, *embolden))
+        self.assertGreater(large_den_cases, 0)
 
     def test_latin_project_font_output_is_pinned(self) -> None:
         # The digest the converter has produced for the Latin project font since #1309's build;
@@ -2025,24 +2032,25 @@ class VendorFontNameScanTests(unittest.TestCase):
     def test_tracked_source_names_no_vendor_font(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git is required to enumerate the tracked tree")
-        listing = subprocess.run(
-            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, text=True, check=True,
+        raw_listing = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True,
         ).stdout
         offenders: list[str] = []
-        for entry in sorted(filter(None, listing.split("\0"))):
+        unreadable: list[str] = []
+        for raw_entry in sorted(filter(None, raw_listing.split(b"\0"))):
+            entry = raw_entry.decode("utf-8", errors="surrogateescape")
             if entry.lower().endswith(".md"):
                 continue
             try:
                 data = (ROOT / entry).read_bytes()
-            except OSError:
+            except OSError as exc:
+                unreadable.append(f"{entry}: {exc}")
                 continue
             if b"\0" in data:
                 continue
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
+            text = data.decode("utf-8", errors="replace")
             offenders.extend(f"{entry}:{number}" for number in self._hit_lines(text))
+        self.assertEqual(unreadable, [], "every tracked file must be readable by the vendor font scan")
         self.assertEqual(offenders, [], "tracked source names a vendor font; use a project-owned name")
 
 

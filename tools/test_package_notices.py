@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -313,11 +314,28 @@ class TestPackageNotices(unittest.TestCase):
         """RELINK.md lists exactly the ATRAC3+ objects the Makefile builds, plus the bridge."""
         objects = package_notices.atrac3p_object_names(ROOT)
         makefile = read_makefile(ROOT)
-        self.assertGreater(len(objects), 1)
-        for obj in objects[:-1]:
-            source = "src/rt/atrac3p/" + obj[len("$(BUILD_DIR)/atrac3p_"):-2] + ".c"
-            self.assertIn(source, makefile)
-        self.assertEqual(objects[-1], "$(BUILD_DIR)/atrac3p_bridge.o")
+        runtime_mk = (ROOT / "mk" / "runtime_sources.mk").read_text(encoding="utf-8")
+        pat_match = re.search(
+            r"^ATRAC3P_OBJS\s*:=\s*\$\(patsubst\s+([^,]+),([^,]+),\$\(ATRAC3P_SRCS\)\)",
+            runtime_mk,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(pat_match)
+        assert pat_match is not None
+        src_pat, obj_pat = pat_match.group(1).strip(), pat_match.group(2).strip()
+        src_prefix, src_suffix = src_pat.split("%", 1)
+        obj_prefix, obj_suffix = obj_pat.split("%", 1)
+        srcs_match = re.search(r"^ATRAC3P_SRCS\s*:?=\s*((?:.*\\\n)*.*)$", makefile, re.MULTILINE)
+        self.assertIsNotNone(srcs_match)
+        assert srcs_match is not None
+        srcs = srcs_match.group(1).replace("\\\n", " ").split()
+        expected = [
+            obj_prefix + src[len(src_prefix):-len(src_suffix)] + obj_suffix
+            for src in srcs
+            if src.startswith(src_prefix) and src.endswith(src_suffix)
+        ] + ["$(BUILD_DIR)/atrac3p_bridge.o"]
+        self.assertGreater(len(expected), 1)
+        self.assertEqual(objects, expected)
 
     def test_installed_package_version_reads_pacman_database(self) -> None:
         """Component versions come from the toolchain's package database, never a literal."""

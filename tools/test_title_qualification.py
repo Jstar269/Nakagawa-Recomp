@@ -791,22 +791,32 @@ class PublicSmokeTests(unittest.TestCase):
     """Load, stage and run the public display fixture through the native player, in a sandbox."""
 
     def test_display_fixture_presents_a_first_checkpoint_and_exits_cleanly(self):
-        output_dir = ROOT / "build" / TITLE_ID / "title-qualification"
-        with contextlib.redirect_stdout(io.StringIO()):
-            code = tq.main(["smoke", "--manifest", str(DISPLAY_SMOKE)])
-        report_path = output_dir / tq.REPORT_NAME
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        nk_cli.validate_bringup_report(report)
-        self.assertEqual(code, 0, report)
-        self.assertEqual(report["failure_class"], "NONE")
-        self.assertEqual(report["presentation"]["status"], "FRAME_SUBMITTED")
-        self.assertGreater(report["presentation"]["frame_submissions"], 0)
-        self.assertEqual(report["exit_classification"], "EXITED_ZERO")
-        self.assertEqual(library_sweep._furthest_stage(report), "first presented frame")
-        log = (output_dir / tq.OUTPUT_LOG_NAME).read_text(encoding="utf-8")
-        self.assertIn("phase=first_frame source=cpu", log)
-        leftovers = [p.name for p in output_dir.iterdir() if p.name.startswith("title-qualification-")]
-        self.assertEqual(leftovers, [], "the sandbox must be removed after the run")
+        with tempfile.TemporaryDirectory(prefix="tq-public-smoke-") as temp:
+            build_root = Path(temp) / "build"
+            src_exe = tq.staged_executable(ROOT / "build", TITLE_ID)
+            dst_exe = build_root / TITLE_ID / src_exe.name
+            dst_exe.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_exe, dst_exe)
+            output_dir = build_root / TITLE_ID / "title-qualification"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = tq.main([
+                    "--build-root", str(build_root),
+                    "smoke", "--manifest", str(DISPLAY_SMOKE),
+                    "--player", str(ROOT / "build" / tq.PLAYER_NAME),
+                ])
+            report_path = output_dir / tq.REPORT_NAME
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            nk_cli.validate_bringup_report(report)
+            self.assertEqual(code, 0, report)
+            self.assertEqual(report["failure_class"], "NONE")
+            self.assertEqual(report["presentation"]["status"], "FRAME_SUBMITTED")
+            self.assertGreater(report["presentation"]["frame_submissions"], 0)
+            self.assertEqual(report["exit_classification"], "EXITED_ZERO")
+            self.assertEqual(library_sweep._furthest_stage(report), "first presented frame")
+            log = (output_dir / tq.OUTPUT_LOG_NAME).read_text(encoding="utf-8")
+            self.assertIn("phase=first_frame source=cpu", log)
+            leftovers = [p.name for p in output_dir.iterdir() if p.name.startswith("title-qualification-")]
+            self.assertEqual(leftovers, [], "the sandbox must be removed after the run")
 
 
 if __name__ == "__main__":
