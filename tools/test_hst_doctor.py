@@ -25,10 +25,28 @@ import nk_doctor_checks  # noqa: E402
 import nk_doctor_core  # noqa: E402
 import shader_embed  # noqa: E402
 from hst_test_fixtures import write_elf, write_iso, write_psp_header  # noqa: E402
+from nk_core.git_isolation import run_git  # noqa: E402
 from nk_core.prereq_fetcher import PrerequisiteFetchError  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
 _CHECKS_MODULE = nk_doctor_checks
+
+# The doctor reads these from the caller's environment, and a developer shell or the
+# documented Make route may export them. Every test here starts without them, so none
+# validates or probes the caller's real title manifest, data root or Memory Stick
+# folder; a test that needs one sets it inside its own mock.patch.dict.
+CALLER_INPUT_VARIABLES = ("TITLE_MANIFEST", "SR_DATAROOT", "SR_MEMSTICK")
+_caller_environment = mock.patch.dict(os.environ)
+
+
+def setUpModule() -> None:
+    _caller_environment.start()
+    for name in CALLER_INPUT_VARIABLES:
+        os.environ.pop(name, None)
+
+
+def tearDownModule() -> None:
+    _caller_environment.stop()
 
 
 class DataDirectoryTests(unittest.TestCase):
@@ -707,6 +725,7 @@ class DatarootAndSaveRootCheckTests(unittest.TestCase):
             nk_doctor_checks.check_save_root(report, root)
             res = next(r for r in report.results if r.code == "SAVE_ROOT")
             self.assertEqual(res.status, "PASS")
+            self.assertEqual(Path(res.path), Path("memstick"), "the default branch ran")
 
             # SR_MEMSTICK pointing to a regular file fails
             bad_file = root / "save_file.bin"
@@ -1184,12 +1203,12 @@ class LongPathDiagnosticTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             self.assertIsNone(nk_doctor_checks.longest_tracked_relative_path(root))
-            subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+            run_git(["init", "-q"], root, check=True, capture_output=True)
             deepest = Path("src") / "deep" / ("x" * 150) / "file.c"
             target = root / deepest
             target.parent.mkdir(parents=True)
             target.write_text("int x;\n", encoding="ascii")
-            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+            run_git(["add", "-A"], root, check=True, capture_output=True)
             found = nk_doctor_checks.longest_tracked_relative_path(root)
             self.assertIsNotNone(found)
             self.assertEqual(found.as_posix(), deepest.as_posix())

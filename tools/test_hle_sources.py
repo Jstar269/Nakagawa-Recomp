@@ -25,6 +25,7 @@ import hle_manifest  # noqa: E402
 import hle_sources  # noqa: E402
 from hle_sources import HleSourcesError  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
+from nk_core.git_isolation import run_git  # noqa: E402
 
 ROOT = hle_sources.ROOT
 
@@ -389,9 +390,38 @@ class NoOtherReaderTests(unittest.TestCase):
         "tools/test_purity_gate.py": "a synthetic tree",
     }
 
+    @staticmethod
+    def _tracked_python_files(root: Path) -> list[Path]:
+        """The tracked tools/ and tests/fixtures/ Python files present in ``root``.
+
+        Untracked scratch files are a developer's own and absent from hosted CI, so
+        the guard reads what Git tracks, not what the working tree happens to hold.
+        """
+        listed = run_git(
+            ["ls-files", "-z", "--", "tools/*.py", "tests/fixtures/*.py"],
+            root,
+            check=True,
+            capture_output=True,
+        )
+        names = [name for name in listed.stdout.decode("utf-8").split("\0") if name]
+        return sorted(path for path in (root / name for name in names) if path.is_file())
+
+    def test_guard_reads_tracked_files_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tools" / "sub").mkdir(parents=True)
+            (root / "tests" / "fixtures").mkdir(parents=True)
+            for relative in ("tools/kept.py", "tools/sub/nested.py", "tests/fixtures/fx.py"):
+                (root / relative).write_text("x = 1\n", encoding="utf-8")
+            run_git(["init", "-q"], root, check=True, capture_output=True)
+            run_git(["add", "--", "tools", "tests"], root, check=True, capture_output=True)
+            (root / "tools" / "scratch.py").write_text('P = "src/rt/hle_x.c"\n', encoding="utf-8")
+            listed = [path.relative_to(root).as_posix() for path in self._tracked_python_files(root)]
+        self.assertEqual(listed, ["tests/fixtures/fx.py", "tools/kept.py", "tools/sub/nested.py"])
+
     def test_no_tool_names_an_hle_source(self) -> None:
         found: dict[str, list[tuple[int, str]]] = {}
-        for path in sorted([*(ROOT / "tools").rglob("*.py"), *(ROOT / "tests" / "fixtures").rglob("*.py")]):
+        for path in self._tracked_python_files(ROOT):
             relative = path.relative_to(ROOT).as_posix()
             hits = hle_sources.hle_source_path_constants(path.read_text(encoding="utf-8"), relative)
             if hits:
