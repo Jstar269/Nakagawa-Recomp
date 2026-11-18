@@ -83,7 +83,8 @@ it; the phase-1 disc route then runs unchanged.
   `ccf084593f0de93154597d47a470a7b539d4ca0cfa4773fddfd91c9a9e8a026a`), "based on benhur's code, rewrite by tpu",
   Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later, kept GPL-2.0-or-later with its notice. LOCAL DELTA: C99 with
   `size_t` lengths bounded at 64 MiB; a match distance decoded in 64 bits; a match copy and a literal stop at the first
-  byte that does not fit; a literal-context shift past the byte width selects context 0.
+  byte that does not fit; a literal-context shift past the byte width selects context 0; a stored stream whose
+  declared size passes the output or its input fails instead of being truncated (2026-11-18).
 - `nk_psp_npumdimg.c/.h` from `Core/FileSystems/BlockDevices.cpp` (SHA-256
   `d29e6d39dce987f2f88183bb0fe15112b1cba4fc09507be7a822e7bb4fb01029`, `NPDRMDemoBlockDevice`) and the `table_info`
   layout in `BlockDevices.h` (SHA-256 `8253d1c6f18b17d9c6023e59067e9e5a22b997b7703b67deb401f785f4a00fe5`),
@@ -99,12 +100,15 @@ it; the phase-1 disc route then runs unchanged.
 Every file except the built-in tables comes from this repository's own public history: the tree before PR #1187, at
 commit `8ca38e6399064e1d76f9670ed4722d521fd21a9a^`. No code, table or key value came from any other tool.
 
-- Byte-identical to those bytes: `nk_psp_aes.c/.h`, `nk_psp_sha1.c/.h`, `nk_psp_kirk.c/.h`, `nk_psp_kle.c/.h`,
+- Byte-identical to those bytes: `nk_psp_aes.c/.h`, `nk_psp_sha1.h`, `nk_psp_kirk.c/.h`, `nk_psp_kle.c`,
   `nk_psp_ec.c/.h`, `nk_psp_inflate.c/.h` and `nk_psp_prx.h`. The AES and SHA-1 ports keep their upstream layout and
   stay excluded from the trailing-whitespace hook (`.pre-commit-config.yaml`), as before PR #1187.
 - Changed on restoration (each file's header or this manifest says how): `nk_psp_prx.c`, `nk_psp_container.c/.h`,
   `nk_psp_crypto.c/.h`, `nk_psp_keystore.c/.h`, `nk_decrypt_main.c`, `tools/nk_core/decrypt_tool.py` and
   `tools/test_psp_decrypt.py`.
+- Changed after restoration (2026-11-18, each file's header says how): `nk_psp_sha1.c` (`SHAFinal` clears the
+  whole context, not `sizeof(pointer)` bytes of it) and `nk_psp_kle.h` (the `decompress_kle` comment states its
+  real return values).
 
 ## Project-authored files
 

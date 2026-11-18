@@ -638,8 +638,11 @@ static bool manifest_parse_identity(ManifestParse *mp) {
 
     /* 3. id: valid identifier */
     mp->id_node = obj_get(root, "id");
-    if (mp->id_node->type != JSON_STRING || !is_valid_identifier(mp->id_node->u.str_val)) {
-        if (error_buf) snprintf(error_buf, error_buf_len, "$.id: must match ^[a-z0-9][a-z0-9._-]{0,63}$");
+    /* A title id is one character shorter than the other identifiers: the player's
+     * title_id buffers hold NK_TITLE_ID_MAX_CHARS and a terminator. */
+    if (mp->id_node->type != JSON_STRING || !is_valid_identifier(mp->id_node->u.str_val) ||
+        strlen(mp->id_node->u.str_val) > NK_TITLE_ID_MAX_CHARS) {
+        if (error_buf) snprintf(error_buf, error_buf_len, "$.id: must match ^[a-z0-9][a-z0-9._-]{0,62}$");
         return false;
     }
 
@@ -3118,7 +3121,7 @@ typedef struct {
     uint32_t player_abi_version;
     char package_root[NK_MAX_PATH];
     char disc_id[NK_MAX_DISC_ID_LEN];
-    char title_id[64];
+    char title_id[NK_TITLE_ID_MAX_CHARS + 1u];
     char identity_digest[65];
     char status_identity_digest[65];
     char current_input_identity_digest[65];

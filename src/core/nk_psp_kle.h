@@ -10,6 +10,7 @@
  *
  * Modified for this project: header guard, SPDX/attribution, and an
  * include of the shared crypto contract for the u8 type alias.
+ * 2026-11-18: the comment on decompress_kle states its real return values.
  */
 
 #ifndef NK_PSP_KLE_H
@@ -26,8 +27,12 @@ extern "C" {
  * ("KL4E"/"KL3E") and inSize is how many compressed bytes are readable
  * from there; the decoder is fail-closed and never reads past inBuf +
  * inSize, so a truncated or malformed stream cannot read out of bounds.
- * isKl4e selects the variant.  On success returns 0 and sets *end to the
- * end of the consumed input; returns non-zero on a malformed stream.
+ * isKl4e selects the variant.  On success returns the number of decoded
+ * bytes (> 0) and sets *end to the end of the consumed input.  On a
+ * malformed or truncated stream returns a negative SCE error
+ * (0x80000104 SCE_ERROR_INVALID_SIZE or 0x80000108
+ * SCE_ERROR_INVALID_FORMAT).  An empty stored stream returns 0, which
+ * callers treat as a failure.
  */
 int decompress_kle(u8 *outBuf, int outSize, u8 *inBuf, int inSize,
                    void **end, int isKl4e);

@@ -738,6 +738,39 @@ class TestKnownAnswers(unittest.TestCase):
         got = json.loads(out.stdout)
         self.assertEqual(got["digest"], SHA1_ABC_DIGEST.hex())
 
+    def test_sha1_final_clears_the_whole_context(self):
+        """SHAFinal zeroises its context: every byte of SHA_CTX, not only the first
+        sizeof(pointer) bytes, so no digest state of a hashed key stays behind."""
+        harness = self.tmp / "sha1_zero.c"
+        harness.write_text(r"""
+#include <stdio.h>
+#include <string.h>
+#include "nk_psp_sha1.h"
+int main(void) {
+    SHA_CTX ctx;
+    BYTE digest[20];
+    BYTE msg[3] = { 'a', 'b', 'c' };
+    size_t left = 0;
+    SHAInit(&ctx);
+    SHAUpdate(&ctx, msg, 3);
+    SHAFinal(digest, &ctx);
+    for (size_t i = 0; i < sizeof(ctx); i++) left += ((unsigned char *)&ctx)[i] != 0;
+    printf("left %u digest ", (unsigned)left);
+    for (size_t i = 0; i < sizeof(digest); i++) printf("%02x", digest[i]);
+    printf("\n");
+    return 0;
+}
+""", encoding="utf-8")
+        exe = self.tmp / "sha1_zero.exe"
+        proc = subprocess.run([CC, "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+                               str(harness), str(ROOT / "src" / "core" / "nk_psp_sha1.c"),
+                               "-o", str(exe)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(out.stdout.split(),
+                         ["left", "0", "digest", SHA1_ABC_DIGEST.hex()])
+
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestSyntheticEndToEnd(unittest.TestCase):
@@ -2175,6 +2208,45 @@ int main(int argc, char **argv) {
         out = subprocess.run([str(exe), str(stream), str(len(clear) - 1), str(result)],
                              capture_output=True)
         self.assertEqual(out.returncode, 1, out.stdout)
+
+    def test_stored_stream_that_overstates_its_size_fails(self):
+        """A stored (plain-text) stream is a 0x80 flag byte, a big-endian length and the
+        bytes. One whose length passes its input or the output is refused, never cut
+        short and returned as a decoded block."""
+        harness = self.tmp / "lzrc_stored.c"
+        harness.write_text(r"""
+#include <stdio.h>
+#include <string.h>
+#include "nk_psp_lzrc.h"
+static int run(unsigned declared, size_t body, size_t out_len) {
+    static unsigned char in[5 + 256], out[256];
+    in[0] = 0x80;
+    in[1] = (unsigned char)(declared >> 24); in[2] = (unsigned char)(declared >> 16);
+    in[3] = (unsigned char)(declared >> 8);  in[4] = (unsigned char)declared;
+    for (size_t i = 0; i < body; i++) in[5 + i] = (unsigned char)(i * 7u + 1u);
+    memset(out, 0, sizeof(out));
+    int got = nk_psp_lzrc_decompress(out, out_len, in, 5 + body);
+    if (got > 0 && memcmp(out, in + 5, (size_t)got) != 0) return -2;
+    return got;
+}
+int main(void) {
+    printf("exact %d\n", run(100, 100, 100));
+    printf("short_input %d\n", run(200, 100, 256));
+    printf("short_output %d\n", run(100, 100, 64));
+    return 0;
+}
+""", encoding="utf-8")
+        exe = self.tmp / "lzrc_stored.exe"
+        proc = subprocess.run([CC, "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+                               str(harness), str(ROOT / "src" / "core" / "nk_psp_lzrc.c"),
+                               "-o", str(exe)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        got = dict(line.split(" ", 1) for line in out.stdout.splitlines())
+        self.assertEqual(got["exact"], "100")
+        self.assertEqual(got["short_input"], "-1")
+        self.assertEqual(got["short_output"], "-1")
 
 
 if __name__ == "__main__":

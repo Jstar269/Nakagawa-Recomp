@@ -782,6 +782,9 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memset(&meta, 0, sizeof(meta));
     assert(nk_iso_inspect(fpath, &meta) == NK_OK);
     assert(strcmp(meta.volume_id, "ENDIAN_TEST_VOL") == 0);
+    /* The disagreeing record is skipped: neither its LE nor its BE extent is trusted, so no
+     * PSP_GAME folder is found. Following LE sector 18 would set the flag. */
+    assert(!meta.has_psp_game_folder);
 
     /* 8. Duplicate SFO keys */
     printf("[HOSTILE_TEST] Subtest 8a: conflicting duplicate SFO keys (must reject as ambiguous)\n"); fflush(stdout);

@@ -55,6 +55,10 @@ typedef struct {
 
 static void write_file_bytes(const char *path, const void *data, size_t size);
 
+/* Adversarial cases this host could not run. A run with any of them reports SKIP in its
+ * summary instead of ALL ... PASSED, so a missing case is never counted as a pass. */
+static unsigned g_skipped_cases;
+
 static void capture_environment_value(const char *name, char *value,
                                       size_t value_size, bool *was_set) {
     const char *current = getenv(name);
@@ -1023,10 +1027,25 @@ static void test_deterministic_mutation_fuzz(void) {
         if (nk_xb_open_memory(mutated, seed.size, "mutated.xb", false, NULL,
                               &archive, error, sizeof(error)) == NK_OK) {
             for (size_t i = 0; i < archive.entry_count; i++) {
-                uint8_t output[128];
+                /* The decoder gets the first 128 bytes; the guard bytes after them must
+                 * stay untouched, so an overrun that does not crash still fails here. */
+                enum { OUTPUT_CAPACITY = 128, GUARD_BYTES = 64 };
+                uint8_t output[OUTPUT_CAPACITY + GUARD_BYTES];
+                memset(output, 0xA5, sizeof(output));
                 size_t output_size = 0;
-                (void)nk_xb_read_entry(&archive, i, output, sizeof(output),
-                                       &output_size, error, sizeof(error));
+                error[0] = '\0';
+                NkResult read = nk_xb_read_entry(&archive, i, output, OUTPUT_CAPACITY,
+                                                 &output_size, error, sizeof(error));
+                for (size_t g = OUTPUT_CAPACITY; g < sizeof(output); g++) {
+                    assert(output[g] == 0xA5);
+                }
+                if (read == NK_OK) {
+                    assert(output_size <= OUTPUT_CAPACITY);
+                    assert((uint64_t)output_size == archive.entries[i].expanded_size);
+                } else {
+                    /* A refused member is named, never a silent failure. */
+                    assert(error[0] != '\0');
+                }
             }
             nk_xb_close(&archive);
         }
@@ -1088,7 +1107,18 @@ static void test_staging_cleanup_boundary(void) {
     const char *root = SR_SELFTEST_BUILD_ROOT "/.staging_xb_cleanup";
     const char *nested = SR_SELFTEST_BUILD_ROOT "/.staging_xb_cleanup/nested";
     const char *file_path = SR_SELFTEST_BUILD_ROOT "/.staging_xb_cleanup/nested/member.bin";
-    assert(!player_stage_discard(SR_SELFTEST_BUILD_ROOT));
+    /* The refusal of a name without the ".staging_" prefix is probed on a disposable
+     * folder, never on the build root itself: if the guard regressed, the recursive
+     * discard would delete only this probe, and the kept sentinel shows the refusal. */
+    const char *probe = SR_SELFTEST_BUILD_ROOT "/xb_discard_probe";
+    const char *probe_file = SR_SELFTEST_BUILD_ROOT "/xb_discard_probe/sentinel.bin";
+    static const uint8_t sentinel[] = "keep";
+    assert(nk_platform_mkdir_p(probe));
+    write_file_bytes(probe_file, sentinel, sizeof(sentinel) - 1);
+    assert(!player_stage_discard(probe));
+    assert(nk_platform_file_exists(probe_file));
+    assert(remove(probe_file) == 0);
+    test_rmdir(probe);
     (void)player_stage_discard(root);
     assert(nk_platform_mkdir_p(nested));
     static const uint8_t data[] = "cleanup";
@@ -1126,6 +1156,7 @@ static void test_staging_discard_reparse_boundary(void) {
         (void)player_stage_discard(root);
         if (error == ERROR_ACCESS_DENIED || error == ERROR_PRIVILEGE_NOT_HELD) {
             printf("[XB_TEST] Windows reparse-point discard regression SKIP (symlink creation unavailable)\n");
+            g_skipped_cases++;
             return;
         }
         assert(!"CreateSymbolicLinkW failed unexpectedly");
@@ -1159,6 +1190,7 @@ static void test_staging_discard_reparse_boundary(void) {
         test_rmdir(outside);
         if (error == EACCES || error == EPERM || error == ENOSYS) {
             printf("[XB_TEST] POSIX symlink discard regression SKIP (symlink creation unavailable)\n");
+            g_skipped_cases++;
             return;
         }
         assert(!"symlink failed unexpectedly");
@@ -1280,6 +1312,24 @@ static void test_iso_to_native_staging_pipeline(void) {
     capture_environment_value("USERPROFILE", old_userprofile, sizeof(old_userprofile), &had_userprofile);
     set_environment_value("APPDATA", appdata_root);
     set_environment_value("USERPROFILE", userprofile_root);
+#if !defined(_WIN32) && !defined(_WIN64)
+    /* POSIX PRX discovery checks the XDG folders and HOME layouts before APPDATA and
+     * USERPROFILE. Point them at an empty folder so only the synthetic trees above can
+     * supply the modules, never a PPSSPP profile on the developer's machine. */
+    const char *empty_home = SR_SELFTEST_BUILD_ROOT "/test_ppsspp_empty_home";
+    assert(nk_platform_mkdir_p(empty_home));
+    static const char *const posix_profile_variables[] = {
+        "HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"
+    };
+    enum { POSIX_PROFILE_VARIABLES = 3 };
+    char old_profile[POSIX_PROFILE_VARIABLES][4096];
+    bool had_profile[POSIX_PROFILE_VARIABLES];
+    for (size_t i = 0; i < POSIX_PROFILE_VARIABLES; i++) {
+        capture_environment_value(posix_profile_variables[i], old_profile[i],
+                                  sizeof(old_profile[i]), &had_profile[i]);
+        set_environment_value(posix_profile_variables[i], empty_home);
+    }
+#endif
     remove(iso_path);
     char eboot_path[256];
     char archive_path[256];
@@ -1524,6 +1574,12 @@ static void test_iso_to_native_staging_pipeline(void) {
     test_rmdir(userprofile_root);
     restore_environment_value("APPDATA", old_appdata, had_appdata);
     restore_environment_value("USERPROFILE", old_userprofile, had_userprofile);
+#if !defined(_WIN32) && !defined(_WIN64)
+    for (size_t i = 0; i < POSIX_PROFILE_VARIABLES; i++) {
+        restore_environment_value(posix_profile_variables[i], old_profile[i], had_profile[i]);
+    }
+    test_rmdir(empty_home);
+#endif
     printf("[XB_TEST] ISO EBOOT + xbdata native staging pipeline PASSED\n");
 }
 
@@ -2270,7 +2326,13 @@ static void test_title_staging_names_a_long_data_folder(void) {
         assert(!nk_platform_dir_exists(paths.final_root));
         assert(!nk_platform_dir_exists(paths.staging_root));
     } else {
+        /* This host's path limit is not reached, so only the successful stage is checked;
+           the [STAGE_PATH_TOO_LONG] report did not run here. */
         assert(result == NK_OK);
+        printf("[XB_TEST] A too-long data folder path is named, not blamed on the disc SKIP "
+               "(this host's path limit is not reached; the staged copy succeeded)\n");
+        g_skipped_cases++;
+        return;
     }
     printf("[XB_TEST] A too-long data folder path is named, not blamed on the disc PASSED\n");
 }
@@ -2310,6 +2372,11 @@ int main(void) {
     test_iso_to_native_staging_pipeline();
     test_title_staging_transaction();
     test_title_staging_names_a_long_data_folder();
+    if (g_skipped_cases != 0u) {
+        printf("[XB_TEST] NATIVE XB PARSER TESTS PASSED WITH %u SKIP (see the SKIP lines above)\n",
+               g_skipped_cases);
+        return 0;
+    }
     printf("[XB_TEST] ALL NATIVE XB PARSER TESTS PASSED\n");
     return 0;
 }

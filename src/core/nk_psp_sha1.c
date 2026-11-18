@@ -5,6 +5,9 @@
  * Services Pty Limited; upstream notices below are retained verbatim) at
  * John-K/pspdecrypt commit c156627db7634d395c380c0a9589130f603307fc,
  * whose repository LICENSE.TXT is the GNU GPL version 3.
+ *
+ * Modified for this project, 2026-11-18: SHAFinal zeroises the whole
+ * context (sizeof(*shsInfo)), not only sizeof(pointer) bytes of it.
  */
 
 /* sha1.c : Implementation of the Secure Hash Algorithm */
@@ -365,7 +368,7 @@ void SHAFinal(BYTE *output, SHA_CTX *shsInfo)
 	SHAtoByte(output, shsInfo->digest, SHS_DIGESTSIZE);
 
 	/* Zeroise sensitive stuff */
-	memset((POINTER)shsInfo, 0, sizeof(shsInfo));
+	memset((POINTER)shsInfo, 0, sizeof(*shsInfo));
 }
 
 static void SHAtoByte(BYTE *output, UINT4 *input, unsigned int len)

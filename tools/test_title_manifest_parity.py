@@ -628,6 +628,16 @@ class TitleManifestParityTests(unittest.TestCase):
             c_wide_ok, c_msg = self._run_native(wide_mf)
             self.assertTrue(py_wide_ok, f"Python rejected a 128-character display_name: {py_msg}")
             self.assertTrue(c_wide_ok, f"Native rejected a 128-character display_name: {c_msg}")
+            # A title id of 63 characters, the player's title_id limit, is accepted by both
+            # (a 64-character one is a hostile mutation below; audit 2026-11-17).
+            longest = json.loads(json.dumps(valid_json))
+            longest["id"] = "t" * 63
+            longest_mf = Path(tmpdir) / "longest_id.json"
+            longest_mf.write_text(json.dumps(longest), encoding="utf-8")
+            py_long_ok, py_msg = self._run_python(longest_mf)
+            c_long_ok, c_msg = self._run_native(longest_mf)
+            self.assertTrue(py_long_ok, f"Python rejected a 63-character id: {py_msg}")
+            self.assertTrue(c_long_ok, f"Native rejected a 63-character id: {c_msg}")
 
         mutations = [
             # 1. Unknown field
@@ -694,6 +704,8 @@ class TitleManifestParityTests(unittest.TestCase):
             (lambda d: d.update({"display_name": "Line\nbreak"}), "display_name control character"),
             # 30. display_name over 128 characters
             (lambda d: d.update({"display_name": "\u65e5" * 129}), "display_name 129 characters"),
+            # 31. A title id longer than the player's 63-character title_id buffers
+            (lambda d: d.update({"id": "t" * 64}), "id of 64 characters"),
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
