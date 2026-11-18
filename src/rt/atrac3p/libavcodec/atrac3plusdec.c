@@ -20,6 +20,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+/*
+ * Modified by Nakagawa Recomp contributors, 2026-08-11 and 2026-11-17. The
+ * local changes are marked LOCAL DELTA and listed in ../PROVENANCE.md.
+ */
+
 /**
  * @file
  * Sony ATRAC3+ compatible decoder.
@@ -357,10 +362,13 @@ static void reconstruct_frame(ATRAC3PContext *ctx, Atrac3pChanUnitCtx *ch_unit,
  * ../atrac3p_api.h. The upstream n4.4 signature takes AVFrame/AVPacket and
  * calls ff_get_buffer(); this subset writes planar float PCM into caller
  * buffers. *nb_samples is zeroed on entry and set to ATRAC3P_FRAME_SAMPLES
- * only on success, mirroring the PPSSPP hardening (PPSSPP commit
- * 39b884cfb357: "set nb_samples to zero on entry, set to 2048 on success"),
- * implemented independently here. Returns the number of bytes consumed or a
- * negative AVERROR. */
+ * only on success. This entry-point shape (plane output, *nb_samples zeroed
+ * on entry and set to ATRAC3P_FRAME_SAMPLES in place of *got_frame_ptr, and
+ * FFMIN(block_align, buf_size) returned) follows PPSSPP commit
+ * 39b884cfb35724ecd977901ecf6921f120e06573 ("Atrac3/3+: Improve error
+ * handling"), ext/at3_standalone/atrac3plusdec.cpp. Planes that no channel
+ * unit of the frame wrote are cleared (2026-11-17). Returns the number of
+ * bytes consumed or a negative AVERROR. */
 int atrac3p_decode_frame(AVCodecContext *avctx, float *out[ATRAC3P_MAX_CHANNELS],
                          int *nb_samples, const uint8_t *buf, int buf_size)
 {
@@ -411,6 +419,14 @@ int atrac3p_decode_frame(AVCodecContext *avctx, float *out[ATRAC3P_MAX_CHANNELS]
         ch_block++;
         out_ch_index += channels_to_process;
     }
+
+    /* LOCAL DELTA (Nakagawa recomp, 2026-11-17): a frame may end at
+     * CH_UNIT_TERMINATOR before every channel block has a unit. The loop above
+     * writes only the planes of the units it decoded, so clear the rest: they
+     * report silence instead of whatever the caller's buffers last held (the
+     * previous frame's PCM). */
+    for (i = out_ch_index; i < avctx->channels; i++)
+        memset(out[i], 0, ATRAC3P_FRAME_SAMPLES * sizeof(float));
 
     *nb_samples = ATRAC3P_FRAME_SAMPLES;
 

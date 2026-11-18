@@ -69,8 +69,10 @@ We aim to respond promptly and will remove material where appropriate.
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `third_party/licenses/PSPSDK.txt` and `assets/upstream/`.
 - **FFmpeg n4.4 ATRAC3 and ATRAC3+ subsets** — LGPL-2.1-or-later. The imported
-  decoders and their license/provenance file are under `src/rt/atrac3p/`; the project wrapper
-  remains separately identified in the ledger. Two byte-identical imports,
+  decoders, the project-authored API layer over them (`atrac3p_api.c`/`.h`) and their
+  license/provenance file are under `src/rt/atrac3p/`. The provenance ledger lists all of
+  these under the FFmpeg decoder-import record; the HLE bridge that drives them,
+  `src/rt/atrac3p_bridge.c`, has its own project-authored record. Two byte-identical imports,
   `libavcodec/fft_init_table.c` and `libavcodec/fft_table.h`, also carry a MIPS
   Technologies, Inc. BSD-3-Clause notice. Its verbatim text is in
   `third_party/licenses/FFMPEG_MIPS_FFT.txt` and is included in the generated
@@ -123,7 +125,9 @@ We aim to respond promptly and will remove material where appropriate.
 - **FFmpeg n4.4 H.264 decoder subset** — LGPL-2.1-or-later, the same pin as the ATRAC3+
   subset. The imported libavcodec/libavutil files (generic C only, no `--enable-gpl` or
   `--enable-nonfree` component), their license text and the byte-exact manifest are under
-  `src/rt/h264_ffmpeg_sub/`; the project API layer and configuration stand-ins there are
+  `src/rt/h264_ffmpeg_sub/`. One imported file, `libavcodec/h264_slice.c`, is modified: it
+  carries two upstream FFmpeg `release/4.4` fixes as a dated LOCAL DELTA, recorded in the
+  file header and the manifest; the project API layer and configuration stand-ins there are
   identified in `src/rt/h264_ffmpeg_sub/PROVENANCE.md`. It is the default H.264 decoder where no platform decoder
   exists (`H264_FFMPEG=1`, the default off Windows); Windows uses Media Foundation, an operating
   system component, and links none of it. Build notes are in `docs/PLATFORM_PORTABILITY.md`.
