@@ -201,6 +201,17 @@ class TestEnhancementPackageSchema(unittest.TestCase):
             with self.assertRaises(EnhancementPackageError):
                 load_package(array_json_path)
 
+    def test_symbol_map_string_addresses_require_a_hex_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "synthetic.symbols.json"
+            path.write_text(json.dumps({"synth_entry": "0x08804000"}), encoding="utf-8")
+            self.assertEqual(
+                enhancement_package.load_symbol_map(path), {"synth_entry": 0x08804000}
+            )
+            path.write_text(json.dumps({"synth_entry": "08804000"}), encoding="utf-8")
+            with self.assertRaisesRegex(EnhancementPackageError, "0x-prefixed hex"):
+                enhancement_package.load_symbol_map(path)
+
     def test_valid_synthetic_packages_pass_validation(self) -> None:
         """Standard synthetic packages across categories must validate cleanly."""
         validated_pres = validate_package(self.valid_presentation_pkg)
@@ -2088,6 +2099,17 @@ class TestEnhancementDataTransforms(unittest.TestCase):
             with self.subTest(transform=transform, dtype=dtype), self.assertRaises(ValueError):
                 plan_data_value(transform, dtype, raw)
 
+    def test_f32_data_overflow_is_reported_as_a_rescale_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "overflows when rescaled"):
+            plan_data_value("count_x2", "f32", struct.pack("<f", 3.0e38))
+
+    def test_f32_float_pair_overflow_is_a_named_refusal(self) -> None:
+        bits = struct.unpack("<I", struct.pack("<f", 3.0e38))[0]
+        lui = 0x3C020000 | (bits >> 16)
+        ori = 0x34420000 | (bits & 0xFFFF)
+        with self.assertRaisesRegex(EnhancementPackageError, "overflows when rescaled"):
+            plan_float_pair_rewrite({"id": "PAIR", "transform": "count_x2"}, lui, ori)
+
     def test_data_sites_resolve_fail_closed(self) -> None:
         stock = struct.pack("<2i", 15, 45)
         pkg: dict[str, Any] = {
@@ -2492,6 +2514,27 @@ class TestEnhancementDraft(unittest.TestCase):
                          0x1300: [_jal(0x1200), _NOP, _JR_RA, _NOP],          # frame body
                          0x1400: [_jal(0x1300), _NOP, _JR_RA, _NOP]})         # main loop
 
+    def test_draft_json_and_symbol_map_use_lf_newlines(self) -> None:
+        words = self._counter_title()
+        with tempfile.TemporaryDirectory() as temp:
+            executable = Path(temp) / "synthetic.elf"
+            executable.write_bytes(b"synthetic executable placeholder")
+            output = Path(temp) / "synth-60hz.json"
+            with mock.patch.object(
+                enhancement_package,
+                "_executable_view",
+                return_value=(words, self.IMPORTS, [], "a" * 64),
+            ), mock.patch("sys.stdout", new=StringIO()):
+                result = enhancement_package.main([
+                    "--draft", str(executable), "--title-id", "synthetic-allegrex-v1",
+                    "--id", "synth-60hz", "--game-version", "1.00", "--out", str(output),
+                ])
+
+            self.assertEqual(result, 0)
+            sidecar = output.with_name("synth-60hz.symbols.json")
+            self.assertNotIn(b"\r\n", output.read_bytes())
+            self.assertNotIn(b"\r\n", sidecar.read_bytes())
+
     def test_counter_poll_through_a_registration_wrapper(self) -> None:
         for wrapper in (True, False):
             with self.subTest(wrapper=wrapper):
@@ -2505,6 +2548,23 @@ class TestEnhancementDraft(unittest.TestCase):
                 self.assertTrue(site["handler_registered"])
                 self.assertEqual(draft["boundary_candidates"], [{"function": 0x1300, "calls": [0x1300]}])
                 self.assertEqual(draft["unexplained_waits"], [])   # the poll's own one-VBLANK wait
+
+    def test_intervening_call_clobbers_the_registered_handler_argument(self) -> None:
+        words = self._counter_title(wrapper=False)
+        words.update(_program({
+            0x1100: [
+                _i(0x0F, 0, _A2, 0),
+                _i(0x09, _A2, _A2, 0x1000),
+                _jal(0x1180), _NOP,
+                _i(0x09, _ZERO, _A0, 30),
+                _jal(self.STUB_REG), _NOP, _JR_RA, _NOP,
+            ],
+            0x1180: [_i(0x09, _ZERO, _A2, 0), _JR_RA, _NOP],
+        }))
+
+        draft = draft_timing_package(words, self.IMPORTS)
+
+        self.assertFalse(draft["pacing_sites"][0]["handler_registered"])
 
     def test_package_validates_and_rewrites_the_poll(self) -> None:
         words = self._counter_title()
@@ -3011,6 +3071,11 @@ class TestEnhancementRateComparison(unittest.TestCase):
             rc = enhancement_package.main(["--compare-rates", str(self.tmp / "stock.csv"), str(self.tmp / "enh.csv"),
                                            "--json", str(self.tmp / "r.json"), *extra])
         return rc, out.getvalue(), json.loads((self.tmp / "r.json").read_text(encoding="utf-8"))
+
+    def test_json_report_uses_lf_newlines(self) -> None:
+        self._run({"serves": lambda n, v: str(n // 45)},
+                  {"serves": lambda n, v: str(n // 90)})
+        self.assertNotIn(b"\r\n", (self.tmp / "r.json").read_bytes())
 
     def test_rescaled_events_match_and_pass(self) -> None:
         # One serve every 45 stock updates; the package doubles the count, so every 90 enhanced updates.
@@ -3928,6 +3993,99 @@ class TestAltGateStaticChecks(unittest.TestCase):
         0x1000, 0x2000, 0x3000, 0x4000, 0x4100, 0x4200, 0x4300, 0x4400)
     SITE = 0x100C
 
+    def test_reserved_blez_rt_encoding_is_refused_by_the_instruction_graph(self) -> None:
+        import analyze
+
+        start = 0x1000
+        reserved_blez = 0x18010001  # blez with reserved rt=1
+        self.assertIsNone(analyze.branch_target(start, reserved_blez))
+        words = {
+            start: reserved_blez,
+            start + 4: 0,
+            start + 8: 0x03E00008,
+            start + 12: 0,
+        }
+        read_words = lambda address, count: [
+            words[address + 4 * index]
+            for index in range(count)
+            if address + 4 * index in words
+        ]
+
+        with self.assertRaisesRegex(EnhancementPackageError, "reserved branch encoding"):
+            enhancement_package._Graph(
+                start, start + 16, read_words, "synthetic target", "sites[0](SYNTH)"
+            )
+
+    def test_function_start_queries_use_the_sorted_sequence_without_materializing_it(self) -> None:
+        class SortedStarts:
+            values = (0x1000, 0x5000)
+
+            def __len__(self):
+                return len(self.values)
+
+            def __getitem__(self, index):
+                return self.values[index]
+
+            def __iter__(self):
+                raise AssertionError("sorted starts must not be copied into a new set")
+
+            def __contains__(self, _value):
+                raise AssertionError("sorted starts must not use linear membership")
+
+        target = 0x1000 + 4 * enhancement_package.ALT_GATE_MAX_FUNCTION_WORDS + 0x100
+        starts = SortedStarts()
+        starts.values = (0x1000, target)
+        self.assertEqual(
+            enhancement_package._function_end(0x1000, starts, "synthetic function", "site"),
+            0x1000 + 4 * enhancement_package.ALT_GATE_MAX_FUNCTION_WORDS,
+        )
+        words = {
+            0x1000: 0x08000000 | (target >> 2),
+            0x1004: 0,
+            target: 0x03E00008,
+            target + 4: 0,
+        }
+        read_words = lambda address, count: [
+            words[address + 4 * index]
+            for index in range(count)
+            if address + 4 * index in words
+        ]
+        graph = enhancement_package._Graph(
+            0x1000, 0x1010, read_words, "synthetic function", "site", starts
+        )
+        self.assertEqual(graph.calls[0x1004], target)
+        self.assertEqual(
+            enhancement_package._direct_call_tree("site", 0x1000, read_words, starts),
+            {0x1000, target},
+        )
+
+    def test_jump_table_names_an_unreadable_word(self) -> None:
+        words = {
+            0x1000: (0x0B << 26) | (8 << 16) | 2,  # sltiu t0, zero, 2
+            0x1004: (0x04 << 26) | (8 << 21) | 1,  # beq t0, zero, +1
+            0x1008: NOP,
+            0x100C: NOP,
+            0x1010: NOP,
+            0x1018: NOP,
+            0x101C: NOP,
+        }
+
+        def read_words(address: int, count: int):
+            return [words[address + 4 * index] for index in range(count)
+                    if address + 4 * index in words]
+
+        lazy_words = enhancement_package._LazyWords(read_words)
+        with self.assertRaisesRegex(EnhancementPackageError, "cannot be read at 0x00001014"):
+            enhancement_package._jump_table(
+                0x1020,
+                (8 << 21) | 0x08,
+                0x1000,
+                lazy_words,
+                read_words,
+                "synthetic switch",
+                "sites[0](SWITCH)",
+            )
+
     def _caller(self) -> list[int]:
         return [_addiu(SP, SP, -8), _sw(RA, 4, SP), _addiu(A0, ZERO, 0x40), _jal(self.TARGET), NOP,
                 _i(0x0F, 0, V0, 1), _jal(self.OTHER), NOP, _lw(RA, 4, SP), JR_RA, _addiu(SP, SP, 8)]
@@ -4742,6 +4900,86 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertIn("the executable's own symbols", stderr.getvalue())
             self.assertFalse(output.exists())
 
+    def test_publish_accepts_an_unaligned_byte_data_symbol(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            words = dict(self.words)
+            words[0x00002000] = 0x00001E00  # the byte at 0x2001 is 30
+            elf_bytes = _write_synthetic_mips_elf(
+                tmp / "synth.elf",
+                words,
+                self.entry,
+                sections=((".text", 0x00001000, 0x700, 6), (".data", 0x00002000, 4, 3)),
+                symbols=(("synth_byte_table", 0x00002001, 1, 1, 3),),
+            )
+            private, symbols = self._make_package_and_symbols(elf_bytes)
+            private["data_sites"] = [{
+                "id": "BYTE_TABLE",
+                "symbol": "synth_byte_table",
+                "offset": 0,
+                "type": "u8",
+                "count": 1,
+                "stock_digest": hashlib.sha256(bytes((30,))).hexdigest(),
+                "transform": "count_x2",
+            }]
+            symbols["synth_byte_table"] = "0x00002001"
+            read_words, read_data = self._readers(elf_bytes)
+
+            published = enhancement_package.publish_package(
+                private,
+                {name: int(address, 16) for name, address in symbols.items()},
+                executable=elf_bytes,
+                disc_id=self.DISC,
+                disc_version=self.VERSION,
+                read_words_fn=read_words,
+                read_data_fn=read_data,
+            )
+
+        self.assertEqual(published["site_map"]["synth_byte_table"], "0x00002001")
+
+    def test_publish_walks_the_extracted_data_tree_once_for_multiple_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            elf_bytes = _write_synthetic_mips_elf(tmp / "synth.elf", self.words, self.entry)
+            private, symbols = self._make_package_and_symbols(elf_bytes)
+            data_root = tmp / "data"
+            files = (
+                ("PSP_GAME/TUNE.CSV", b"name,frames\nidle,30\n"),
+                ("PSP_GAME/alternate/TUNE.CSV", b"name,frames\nmenu,60\n"),
+            )
+            entries = []
+            for index, (relative, contents) in enumerate(files):
+                path = data_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+                entries.append({
+                    "id": f"TUNE{index}",
+                    "path": relative,
+                    "sha256": hashlib.sha256(contents).hexdigest(),
+                    "format": "csv",
+                    "header_row": 0,
+                    "first_data_row": 1,
+                    "cells": [{"column": "frames", "transform": "count_x2"}],
+                })
+            private["data_files"] = entries
+            read_words, read_data = self._readers(elf_bytes)
+
+            real_walk = os.walk
+            with mock.patch.object(enhancement_package.os, "walk", wraps=real_walk) as walk:
+                published = enhancement_package.publish_package(
+                    private,
+                    {name: int(address, 16) for name, address in symbols.items()},
+                    executable=elf_bytes,
+                    disc_id=self.DISC,
+                    disc_version=self.VERSION,
+                    read_words_fn=read_words,
+                    read_data_fn=read_data,
+                    data_root=data_root,
+                )
+
+        self.assertEqual(len(published["data_files"]), 2)
+        self.assertEqual(walk.call_count, 1)
+
     def test_resolve_refuses_another_executable_by_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             elf_bytes = _write_synthetic_mips_elf(Path(tmp_dir) / "synth.elf", self.words, self.entry)
@@ -5002,7 +5240,7 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             "extra address": (broken(site_map=dict(site_map, synth_other="0x00004000")), "no site uses"),
             "address-literal name": (broken(site_map=dict(site_map, sub_00001200="0x00001200")), "Address-literal"),
             "misaligned address": (broken(site_map=dict(site_map, synth_timer_duration="0x00001202")), "aligned"),
-            "decimal address": (broken(site_map=dict(site_map, synth_timer_duration=4608)), "aligned"),
+            "decimal address": (broken(site_map=dict(site_map, synth_timer_duration=4608)), "hex string"),
             "digest scheme": (broken(digest_scheme="sha256"), "digest_scheme"),
             "disc id": (broken(disc_id="ulus99999"), "disc_id"),
             "disc version": (broken(disc_version="1"), "disc_version"),
@@ -5111,6 +5349,8 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             "function name stem": renamed("fn_" + hexes[:64]),
             "nine hex digits in a name": renamed("synth_" + hexes[:9]),
             "base64 run": with_field(("display_name",), "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY"),
+            "short disassembly in a free-text field": with_field(
+                ("rng_policy", "reason"), "lw ra, 0x1c(sp); addiu sp, sp, -0x20"),
             "escaped byte": with_field(("rng_policy", "reason"), "Same odds: \\x1e per update."),
             # Instruction words written as separated 8-hex tokens, as a disassembly paste would be.
             "separated words in a reason": with_field(
@@ -6088,7 +6328,8 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         self.assertEqual(enhancement_package.phase_runs(huge), ((0, 1, 0.0, huge, huge),))
         self.assertEqual(enhancement_package.phase_of_time(huge, huge), 1)
         self.assertIsNone(enhancement_package.phase_of_time(float("inf"), huge))
-        for bad in (0.0, -half, float("inf"), float("nan"), 1.0e-46, half * (1 + 2.0 ** -30)):
+        for bad in (0.0, -half, float("inf"), float("nan"), 1.0e-46, 1.0e100,
+                    half * (1 + 2.0 ** -30)):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "is not a positive float32"):
                 enhancement_package.phase_runs(bad)
 

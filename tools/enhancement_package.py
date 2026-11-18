@@ -1354,8 +1354,13 @@ def load_symbol_map(path: Path | str) -> dict[str, int]:
         if isinstance(v, int) and not isinstance(v, bool):
             out[k] = v & 0xFFFFFFFF
         elif isinstance(v, str):
+            if not v.lower().startswith("0x"):
+                raise EnhancementPackageError(
+                    f"Invalid address {v!r} for symbol {k!r} in {sym_path}: "
+                    "string addresses must be 0x-prefixed hex"
+                )
             try:
-                out[k] = int(v, 16 if v.lower().startswith("0x") else 10) & 0xFFFFFFFF
+                out[k] = int(v, 16) & 0xFFFFFFFF
             except ValueError as exc:
                 raise EnhancementPackageError(
                     f"Invalid address {v!r} for symbol {k!r} in {sym_path}"
@@ -1407,7 +1412,14 @@ _PUBLISHED_DIGEST_SLOTS = frozenset({"executable_sha256", "stock_digest", "low_s
                                      "texture_digest"})
 _PUBLISHED_DIGEST_LISTS = frozenset({"stock_value_digests"})
 _PUBLISHED_TEXT_REFUSED = (
-    (re.compile(r"0[xX][0-9a-fA-F]{5,}"), "an address literal"),
+    (re.compile(r"0[xX][0-9a-fA-F]+"), "an address or immediate literal"),
+    (re.compile(
+        r"\b(?:addiu?|addu|subu|and|andi|or|ori|xor|xori|nor|lui|lw|sw|lb|lbu|lh|lhu|sb|sh|"
+        r"sll|srl|sra|slt|sltiu?|beq|bne|beql|bnel|blez|bgtz|blezl|bgtzl|bltz|bgez|"
+        r"bltzal|bgezal|bltzall|bgezall|j|jal|jr|jalr|mult|multu|div|divu|mfhi|mflo|"
+        r"mthi|mtlo|mfc0|mtc0|lwc1|swc1)\s+\$?(?:zero|at|v[01]|a[0-3]|t[0-9]|s[0-8]|k[01]|gp|sp|fp|ra)\b",
+        re.IGNORECASE,
+    ), "MIPS instruction text"),
     (re.compile(r"[0-9a-fA-F]{9,}"), "a run of more than 8 hex digits"),
     (re.compile(r"[A-Za-z0-9+/]{32,}={0,2}"), "a base64-like run of 32 or more characters"),
     (re.compile(r"\\x[0-9a-fA-F]{2}"), "an escaped byte"),
@@ -1462,8 +1474,8 @@ def ace_part_sites(data: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]
     return out
 
 
-def _published_names(data: Mapping[str, Any]) -> set[str]:
-    """Every symbolic name a declaration resolves: the names its site map must hold."""
+def _published_function_names(data: Mapping[str, Any]) -> set[str]:
+    """Names that resolve to executable functions and therefore require word alignment."""
     names: set[str] = set()
     for site in data.get("sites", ()):
         names.add(site["function"])
@@ -1472,10 +1484,16 @@ def _published_names(data: Mapping[str, Any]) -> set[str]:
         names.add(site["function"])
     if "update_boundary" in data:
         names.add(data["update_boundary"]["function"])
-    for site in data.get("data_sites", ()):
-        names.add(site["symbol"])
     for hook in data.get("hooks", ()):
         names.add(hook["symbol"])
+    return names
+
+
+def _published_names(data: Mapping[str, Any]) -> set[str]:
+    """Every symbolic name a declaration resolves: the names its site map must hold."""
+    names = _published_function_names(data)
+    for site in data.get("data_sites", ()):
+        names.add(site["symbol"])
     return names
 
 
@@ -1511,13 +1529,16 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
     site_map = data["site_map"]
     if not isinstance(site_map, dict) or not site_map:
         fail("site_map", "site_map must be a non-empty object of symbolic name -> address")
+    function_names = _published_function_names(declaration)
     # Two names may share an address (the decomp's name and a site's own): that publishes no other address.
     for name, address in site_map.items():
         check_not_address_literal(name, f"site_map.{name}", "site map name")
         if not SYMBOL_RE.match(name):
             fail(f"site_map.{name}", f"site map name {name!r} does not match required pattern {SYMBOL_RE.pattern}")
-        if not isinstance(address, str) or not SITE_MAP_ADDRESS_RE.match(address) or int(address, 16) % 4:
-            fail(f"site_map.{name}", f"address {address!r} must be a 4-byte-aligned 0x%08x hex string")
+        if not isinstance(address, str) or not SITE_MAP_ADDRESS_RE.match(address):
+            fail(f"site_map.{name}", f"address {address!r} must be a 0x%08x hex string")
+        if name in function_names and int(address, 16) % 4:
+            fail(f"site_map.{name}", f"function address {address!r} must be 4-byte aligned")
         # A project-assigned name for a function without a decompilation name ends in its own address
         # (hst_fn_0001ea64): an 8-hex suffix is that name's address and no other value.
         suffix = ADDRESS_SUFFIX_RE.search(name)
@@ -1582,24 +1603,39 @@ def _published_strings(value: Any, where: str, slot: str = "") -> Iterator[tuple
             yield from _published_strings(item, f"{where}[{idx}]", slot)
 
 
-def _find_data_file_bytes(entry: Mapping[str, Any], data_root: Path | str,
-                          matches: Callable[[bytes], bool], digest_text: str) -> bytes:
+def _index_data_root(data_root: Path | str) -> dict[str, list[tuple[tuple[str, ...], Path]]]:
+    """Walk an extracted tree once, indexing each file by lowercased basename and path parts."""
+    root = Path(data_root)
+    indexed: dict[str, list[tuple[tuple[str, ...], Path]]] = {}
+    for folder, directories, files in os.walk(root):
+        directories.sort()
+        for name in sorted(files):
+            path = Path(folder) / name
+            parts = tuple(part.lower() for part in path.relative_to(root).parts)
+            indexed.setdefault(name.lower(), []).append((parts, path))
+    for candidates in indexed.values():
+        candidates.sort(key=lambda candidate: candidate[0])
+    return indexed
+
+
+def _find_data_file_bytes(
+    entry: Mapping[str, Any],
+    data_root: Path | str,
+    matches: Callable[[bytes], bool],
+    digest_text: str,
+    *,
+    data_index: Mapping[str, Sequence[tuple[tuple[str, ...], Path]]] | None = None,
+) -> bytes:
     """The bytes of the data file at the entry's disc path whose bytes ``matches`` accepts."""
     root = Path(data_root)
-    want = entry["path"].lower().split("/")
-    # Walk by hand: a glob matches names with the host's case rules, and the extracted
-    # tree keeps the disc's case on a case-sensitive host.
-    for folder, _dirs, files in sorted(os.walk(root)):
-        for name in sorted(files):
-            if name.lower() != want[-1]:
-                continue
-            candidate = Path(folder) / name
-            parts = [p.lower() for p in candidate.relative_to(root).parts]
-            if parts[-len(want):] != want:
-                continue
-            data = candidate.read_bytes()
-            if matches(data):
-                return data
+    want = tuple(part.lower() for part in entry["path"].split("/"))
+    index = data_index if data_index is not None else _index_data_root(root)
+    for parts, candidate in index.get(want[-1], ()):
+        if len(parts) < len(want) or parts[-len(want):] != want:
+            continue
+        data = candidate.read_bytes()
+        if matches(data):
+            return data
     fail(f"data_files({entry['id']})",
          f"No file {entry['path']} with {digest_text} under the title's data (fail-closed refusal)")
 
@@ -1718,6 +1754,10 @@ def resolve_published_package(
     key = published_digest_key(executable)
     symbols = {name: int(address, 16) for name, address in validated["site_map"].items()}
     declaration = {k: v for k, v in validated.items() if k not in PUBLISHED_KEYS}
+    data_index = (
+        _index_data_root(data_root)
+        if data_root is not None and declaration.get("data_files") else None
+    )
 
     for path, owner, field, vaddr, count in _stock_locations(declaration, symbols):
         words = read_words_fn(vaddr, count)
@@ -1743,7 +1783,10 @@ def resolve_published_package(
         if data_root is None:
             fail(f"data_files({entry['id']})", "data_files need the title's extracted files (fail-closed refusal)")
         want = entry["sha256"]
-        stock = _find_data_file_bytes(entry, data_root, _keyed_matcher(key, want), "its keyed digest")
+        stock = _find_data_file_bytes(
+            entry, data_root, _keyed_matcher(key, want), "its keyed digest",
+            data_index=data_index,
+        )
         entry["sha256"] = hashlib.sha256(stock).hexdigest()
 
     return validate_package(declaration), symbols
@@ -1831,11 +1874,18 @@ def publish_package(
         if stock is None or len(stock) != length or hashlib.sha256(bytes(stock)).hexdigest() != site["stock_digest"]:
             fail(path, "the stock_digest does not match the executable's data at its site")
         site["stock_digest"] = keyed_stock_digest(key, bytes(stock))
+    data_index = (
+        _index_data_root(data_root)
+        if data_root is not None and declaration.get("data_files") else None
+    )
     for entry in declaration.get("data_files", ()):
         if data_root is None:
             fail(f"data_files({entry['id']})", "data_files need the title's extracted files")
         want = entry["sha256"]
-        stock = _find_data_file_bytes(entry, data_root, _sha256_matcher(want), f"sha256 {want}")
+        stock = _find_data_file_bytes(
+            entry, data_root, _sha256_matcher(want), f"sha256 {want}",
+            data_index=data_index,
+        )
         entry["sha256"] = keyed_stock_digest(key, stock)
 
     published = dict(declaration)
@@ -1858,25 +1908,32 @@ _LOAD_OPS = frozenset((0x20, 0x21, 0x23, 0x24, 0x25))  # lb, lh, lw, lbu, lhu
 HOLD_CALLEE_MAX_WORDS = 256
 EVEN_COUNTER_SCAN_WORDS = 16
 _JR_RA = 0x03E00008
+_ANALYZE_BRANCH_TARGET: Any = None
+
+
+def _is_reserved_zero_branch(word: int) -> bool:
+    op, rt = word >> 26, (word >> 16) & 31
+    return op in (0x06, 0x07, 0x16, 0x17) and rt != 0
 
 
 def _branch_target(w: int, pc: int) -> int | None:
-    """The target of a conditional branch (likely forms included) at ``pc``, else None."""
-    op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
-    is_branch = (op in (0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17)
-                 or (op == 0x01 and rt in (0x00, 0x01, 0x02, 0x03))
-                 or (op in (0x11, 0x12) and rs == 0x08))  # bc1*, the VFPU's bvf/bvt
-    if not is_branch:
-        return None
-    simm16 = w & 0xFFFF
-    if simm16 & 0x8000:
-        simm16 -= 0x10000
-    return (pc + 4 + (simm16 << 2)) & 0xFFFFFFFF
+    """The target of an analyzer-recognized conditional branch at ``pc``, else None."""
+    global _ANALYZE_BRANCH_TARGET
+    if _ANALYZE_BRANCH_TARGET is None:
+        tools_dir = str(Path(__file__).resolve().parent)
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from analyze import branch_target  # noqa: PLC0415 - lazy to keep package loading light
+
+        _ANALYZE_BRANCH_TARGET = branch_target
+    return _ANALYZE_BRANCH_TARGET(pc, w)
 
 
 def _leaf_refusal(w: int) -> str | None:
     """Why ``w`` cannot appear in a callee whose call may be skipped, or None."""
     op, rs, rt, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 0x3F
+    if _is_reserved_zero_branch(w):
+        return "has a reserved branch encoding"
     if op in (0x02, 0x03):
         return "jumps or calls"
     if op == 0x00 and fn == 0x09:
@@ -2050,7 +2107,7 @@ def _check_even_counter(site_path: str, fn_addr: int, site_addr: int, word: int,
         if written == -1:
             fail(site_path, f"count_x2_even cannot tell whether 0x{w:08x} at 0x{pc:08x} writes the counter "
                             f"${rs} (fail-closed refusal)")
-        if _branch_target(w, pc) is not None or _is_jump(w):
+        if _branch_target(w, pc) is not None or _is_reserved_zero_branch(w) or _is_jump(w):
             break
         pc -= 4
     fail(site_path, f"count_x2_even's counter ${rs} is not loaded from memory in the straight-line code "
@@ -2192,13 +2249,18 @@ def _uses(w: int) -> tuple[frozenset[int], frozenset[int]] | None:
     return None
 
 
+def _is_known_function_start(known_sorted: Sequence[int], address: int) -> bool:
+    index = bisect.bisect_left(known_sorted, address)
+    return index < len(known_sorted) and known_sorted[index] == address
+
+
 def _function_end(fn_addr: int, known_sorted: Sequence[int], where: str, site_path: str) -> int:
     """The end of the window a function's code is read in: ALT_GATE_MAX_FUNCTION_WORDS from its entry.
 
     A body is the code reachable from its entry, not the run up to the next known start: codegen's
     known starts include entries inside a function (the arms of its table switches), and its own
     bodies run through them."""
-    if fn_addr not in known_sorted:
+    if not _is_known_function_start(known_sorted, fn_addr):
         fail(site_path, f"{where} is not a known function start (fail-closed refusal)")
     return fn_addr + 4 * ALT_GATE_MAX_FUNCTION_WORDS
 
@@ -2247,15 +2309,21 @@ def _jump_table(pc: int, w: int, fn_addr: int, words: Mapping[int, int], read_wo
     if start is None:
         fail(site_path, f"{where} jumps through ${reg} at 0x{pc:08x} with no bounded table switch before it "
                         f"(fail-closed refusal)")
-    sltiu = words[start]
+    sltiu = words.get(start)
+    branch = words.get(start + 4)
+    if sltiu is None or branch is None:
+        address = start if sltiu is None else start + 4
+        fail(site_path, f"{where} cannot be read at 0x{address:08x} (fail-closed refusal)")
     index, count = (sltiu >> 21) & 31, sltiu & 0xFFFF
     if not 0 < count <= ALT_GATE_MAX_TABLE_ENTRIES:
         fail(site_path, f"{where} has a table switch of {count} entries at 0x{pc:08x} (fail-closed refusal)")
     val: dict[int, tuple[str, int]] = {index: ("index", 0)}
     # A beql's slot runs only on the out-of-range path; a beq's slot runs on the path to the table too.
-    first = start + 12 if (words[start + 4] >> 26) == 0x14 else start + 8
+    first = start + 12 if (branch >> 26) == 0x14 else start + 8
     for q in range(first, pc, 4):
-        x = words[q]
+        x = words.get(q)
+        if x is None:
+            fail(site_path, f"{where} cannot be read at 0x{q:08x} (fail-closed refusal)")
         op, rs, rt, rd, fn = x >> 26, (x >> 21) & 31, (x >> 16) & 31, (x >> 11) & 31, x & 0x3F
         simm = (x & 0xFFFF) - 0x10000 if x & 0x8000 else x & 0xFFFF
         dest, new = None, None
@@ -2296,7 +2364,6 @@ class _Graph:
     def __init__(self, fn_addr: int, end: int, read_words_fn: Any, where: str, site_path: str,
                  known_sorted: Sequence[int] = ()) -> None:
         self.fn, self.end, self.where = fn_addr, end, where
-        starts = frozenset(known_sorted)
         self.words = _LazyWords(read_words_fn)
         if self.words.get(fn_addr) is None:
             fail(site_path, f"{where} cannot be read (fail-closed refusal)")
@@ -2321,6 +2388,9 @@ class _Graph:
             w = self.words.get(pc)
             if w is None:
                 fail(site_path, f"{where} cannot be read at 0x{pc:08x} (fail-closed refusal)")
+            if _is_reserved_zero_branch(w):
+                fail(site_path, f"{where} has a reserved branch encoding at 0x{pc:08x} "
+                                f"(fail-closed refusal)")
             op, rs, rt, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 0x3F
             slot = pc + 4
             branch = _branch_target(w, pc)
@@ -2335,7 +2405,7 @@ class _Graph:
             s = self.words.get(slot)
             if s is None:
                 fail(site_path, f"{where} cannot be read at 0x{slot:08x} (fail-closed refusal)")
-            if _branch_target(s, slot) is not None or _is_jump(s):
+            if _branch_target(s, slot) is not None or _is_reserved_zero_branch(s) or _is_jump(s):
                 fail(site_path, f"{where} has a transfer in a delay slot at 0x{slot:08x} (fail-closed refusal)")
             self.slots.add(slot)
             likely = _is_likely_branch(w)
@@ -2346,7 +2416,7 @@ class _Graph:
             elif op == 0x02:
                 dest = ((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
                 self.succ[pc] = [slot]
-                if not fn_addr <= dest < end and dest in starts:
+                if not fn_addr <= dest < end and _is_known_function_start(known_sorted, dest):
                     self.calls[slot] = dest  # a tail call: the callee returns for this function
                     self.succ[slot] = [_EXIT]
                 else:
@@ -2578,7 +2648,6 @@ def _direct_call_tree(site_path: str, root: int, read_words_fn: Any, known_sorte
     through branches, jumps and fall-through; after a ``jr`` through a register that is not a table
     switch this check can read, every word up to the next known start is taken as reachable, and
     calls through a register are not followed."""
-    starts = sorted(set(known_sorted))
     tree: set[int] = set()
     todo = [root]
     while todo:
@@ -2604,6 +2673,9 @@ def _direct_call_tree(site_path: str, root: int, read_words_fn: Any, known_sorte
             w = words.get(pc)
             if w is None:
                 fail(site_path, f"{where} cannot be read at 0x{pc:08x} (fail-closed refusal)")
+            if _is_reserved_zero_branch(w):
+                fail(site_path, f"{where} has a reserved branch encoding at 0x{pc:08x} "
+                                f"(fail-closed refusal)")
             seen.add(pc)
             op, rs, fnc = w >> 26, (w >> 21) & 31, w & 0x3F
             dest = ((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
@@ -2615,7 +2687,7 @@ def _direct_call_tree(site_path: str, root: int, read_words_fn: Any, known_sorte
                 todo.append(dest)
                 pcs.append(pc + 8)
             elif op == 0x02:
-                if dest in starts and not fn <= dest < end:
+                if _is_known_function_start(known_sorted, dest) and not fn <= dest < end:
                     todo.append(dest)
                 else:
                     pcs.append(dest)
@@ -2628,8 +2700,8 @@ def _direct_call_tree(site_path: str, root: int, read_words_fn: Any, known_sorte
                     try:
                         pcs += _jump_table(pc, w, fn, words, read_words_fn, where, site_path)
                     except EnhancementPackageError:
-                        nxt = bisect.bisect_right(starts, pc)
-                        stop = starts[nxt] if nxt < len(starts) else end
+                        nxt = bisect.bisect_right(known_sorted, pc)
+                        stop = known_sorted[nxt] if nxt < len(known_sorted) else end
                         pcs += range(pc + 8, min(stop, end), 4)
             elif not (op == 0x00 and fnc == 0x0D):
                 pcs.append(pc + 4)
@@ -2702,7 +2774,7 @@ def _falls_through(w: int, pc: int) -> bool:
     """A conditional branch that is not a likely form and not always taken: on the path that falls
     through it, its delay slot and the code before it have both run."""
     op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
-    if _branch_target(w, pc) is None or _is_likely_branch(w):
+    if _is_reserved_zero_branch(w) or _branch_target(w, pc) is None or _is_likely_branch(w):
         return False
     return not ((op == 0x04 and rs == rt) or (op == 0x01 and rt == 0x01 and rs == 0))
 
@@ -2737,7 +2809,7 @@ def _loaded_float_address(path: str, name: str, fn_addr: int, site_addr: int, wo
         if w is None:
             break
         op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
-        transfer = _branch_target(w, pc) is not None or _is_jump(w)
+        transfer = _branch_target(w, pc) is not None or _is_reserved_zero_branch(w) or _is_jump(w)
         if transfer and pc != site_addr - 4 and not _falls_through(w, pc):
             break
         written = _gpr_destination(w)
@@ -2746,7 +2818,8 @@ def _loaded_float_address(path: str, name: str, fn_addr: int, site_addr: int, wo
                        f"register of its load (fail-closed refusal)")
         if written == base:
             prev = _read_word(read_words_fn, pc - 4) if pc > fn_addr else None
-            if (prev is not None and (_branch_target(prev, pc - 4) is not None or _is_jump(prev))
+            if (prev is not None and (_branch_target(prev, pc - 4) is not None
+                                      or _is_reserved_zero_branch(prev) or _is_jump(prev))
                     and not _falls_through(prev, pc - 4)):
                 break  # the slot of a jump, a call or a branch-likely: not run on the way to the load
             if op == 0x0F:
@@ -2776,6 +2849,9 @@ def _refuse_second_path(path: str, name: str, lo: int, built: tuple[int, ...], s
         w = _read_word(read_words_fn, pc)
         if w is None:
             continue
+        if _is_reserved_zero_branch(w):
+            fail(path, f"site {name!r}: reserved branch encoding at 0x{pc:08x} "
+                       f"(fail-closed refusal)")
         target = _branch_target(w, pc)
         if target is None and w >> 26 == 0x02:
             target = ((pc + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2)
@@ -2877,7 +2953,8 @@ def _check_straight_line_site(site_path: str, fn_addr: int, site_addr: int, read
                               what: str) -> None:
     """The site is not the delay slot of a branch, a jump or a call."""
     prev = _read_word(read_words_fn, site_addr - 4) if site_addr > fn_addr else None
-    if prev is not None and (_branch_target(prev, site_addr - 4) is not None or _is_jump(prev)):
+    if prev is not None and (_branch_target(prev, site_addr - 4) is not None
+                             or _is_reserved_zero_branch(prev) or _is_jump(prev)):
         fail(site_path, f"{what} is in the delay slot of 0x{prev:08x} at 0x{site_addr - 4:08x} "
                         f"(fail-closed refusal)")
 
@@ -2942,7 +3019,7 @@ def _check_phase_compare(site_path: str, graph: _Graph, site_addr: int) -> None:
         op, rs, fn = w >> 26, (w >> 21) & 31, w & 0x3F
         if op == 0x11 and rs == 0x08:
             return
-        if _is_jump(w) or _branch_target(w, pc) is not None:
+        if _is_jump(w) or _branch_target(w, pc) is not None or _is_reserved_zero_branch(w):
             fail(site_path, f"a call, jump or branch at 0x{pc:08x} follows the compare before any bc1f or bc1t "
                             f"reads its flag (fail-closed refusal)")
         if op == 0x11 and (rs == 0x06 or (rs in (0x10, 0x14) and fn >= 0x30)):
@@ -3013,7 +3090,7 @@ def _check_gated_load(site_path: str, graph: _Graph, site_addr: int, rewrite: Ma
             return  # the register holds another value from here on
         if last is not None:
             return  # that was the delay slot of the first transfer
-        if _branch_target(w, pc) is not None or _is_jump(w):
+        if _branch_target(w, pc) is not None or _is_reserved_zero_branch(w) or _is_jump(w):
             last = pc
         pc, left = pc + 4, left - 1
 
@@ -3398,7 +3475,10 @@ def plan_data_value(transform: str, dtype: str, raw: bytes) -> bytes:
         if not math.isfinite(value):
             raise ValueError(f"float {value!r} is not finite")
         scaled = _scale_value(transform, value)
-        out = struct.pack(fmt, scaled)
+        try:
+            out = struct.pack(fmt, scaled)
+        except OverflowError as exc:
+            raise ValueError(f"float {value!r} overflows when rescaled") from exc
         if not math.isfinite(struct.unpack(fmt, out)[0]):
             raise ValueError(f"float {value!r} overflows when rescaled")
         return out
@@ -3657,7 +3737,10 @@ def plan_float_pair_rewrite(site: Mapping[str, Any], w0: int, w1: int,
             new_value = _scale_value(tf, value)
         except ValueError as exc:
             _refuse(site, w0, str(exc))
-    bits = _f32_bits(new_value)
+    try:
+        bits = _f32_bits(new_value)
+    except OverflowError:
+        _refuse(site, w0, f"float constant {value!r} overflows when rescaled")
     if not math.isfinite(_f32(bits)):
         _refuse(site, w0, f"float constant {value!r} overflows when rescaled")
     return [
@@ -3775,7 +3858,11 @@ def phase_runs(half_step: float) -> tuple[tuple[int, int, float, float, float], 
     cannot move a phase: it is part of the model. Raises ValueError unless ``half_step`` is a
     positive float32."""
     d = float(half_step)
-    if not (math.isfinite(d) and d > 0.0 and _f32(_f32_bits(d)) == d):
+    try:
+        is_float32 = _f32(_f32_bits(d)) == d
+    except OverflowError:
+        is_float32 = False
+    if not (math.isfinite(d) and d > 0.0 and is_float32):
         raise ValueError(f"half the stock step, {d!r}, is not a positive float32 a state's time can count")
 
     def after(a: float) -> float:
@@ -4239,6 +4326,15 @@ def _is_move(w: int) -> bool:
     return w >> 26 == 0x00 and w & 0x3F in (0x21, 0x25) and (w >> 16) & 31 == 0
 
 
+_CALLER_SAVED_GPRS = frozenset((*range(1, 16), 24, 25, 31))
+
+
+def _is_linking_call(w: int) -> bool:
+    op, rt, funct = w >> 26, (w >> 16) & 31, w & 0x3F
+    return (op == 0x03 or (op == 0x00 and funct == 0x09)
+            or (op == 0x01 and rt in (0x10, 0x11, 0x12, 0x13)))
+
+
 def _register_values(
     words: Mapping[int, int],
     addr: int,
@@ -4253,6 +4349,9 @@ def _register_values(
     low = None
     start = entry(addr)
     pc = addr - 4
+    current_call = addr - 8
+    current_call_word = words.get(current_call)
+    skip_call_clobber_at = current_call if current_call_word is not None and _is_linking_call(current_call_word) else None
     # Without a known entry, read a short window: the value is not followed into callers.
     lowest = start if start is not None else addr - 4 * 4 * _LOOKBACK
     while pc >= lowest:
@@ -4260,13 +4359,19 @@ def _register_values(
         if w is None:
             return set()
         op = w >> 26
+        written = _gpr_destination(w)
+        if written == -1:
+            return set()
+        if (reg in _CALLER_SAVED_GPRS and _is_linking_call(w)
+                and pc != skip_call_clobber_at):
+            return set()
         if op in (0x09, 0x0D) and (w >> 16) & 31 == reg and (w >> 21) & 31 == reg and low is None:
             low = _sx16(w & 0xFFFF) if op == 0x09 else w & 0xFFFF
         elif op == 0x0F and (w >> 16) & 31 == reg:
             return {(((w & 0xFFFF) << 16) + (low or 0)) & 0xFFFFFFFF}
         elif _is_move(w) and (w >> 11) & 31 == reg and low is None:
             reg = (w >> 21) & 31
-        elif _gpr_written(w) == reg:
+        elif written == reg:
             return set()
         pc -= 4
     if start is None or low is not None or not 4 <= reg <= 11 or depth == 0:
@@ -4779,7 +4884,7 @@ def _rates_main(args: argparse.Namespace) -> int:
               f"{run['duplicate_rows']} repeated row(s) skipped; steps without a value: {empty or 'none'}")
     if args.json is not None:
         Path(args.json).write_text(json.dumps({"stock": stock, "enhanced": enhanced, "report": report},
-                                              indent=2) + "\n", encoding="utf-8")
+                                              indent=2) + "\n", encoding="utf-8", newline="\n")
     whole = report["phases"][0]
     unjudged = sum(c["verdict"] == "NOT_JUDGED" for c in whole["events"])
     # Judged per phase: a phase with no updates at all (a loading screen) lowers the whole run's
@@ -4828,8 +4933,10 @@ def _draft_main(args: argparse.Namespace) -> int:
         print(f"draft: FAIL: {exc}", file=sys.stderr)
         return 1
     out = Path(args.out)
-    out.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
-    out.with_name(out.stem + ".symbols.json").write_text(json.dumps(symbols, indent=2) + "\n", encoding="utf-8")
+    out.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8", newline="\n")
+    out.with_name(out.stem + ".symbols.json").write_text(
+        json.dumps(symbols, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
     print(f"draft: wrote {out} ({len(package['sites'])} pacing site(s), "
           f"update boundary {'set' if 'update_boundary' in package else 'not chosen'})")
     return 0
