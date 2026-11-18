@@ -124,6 +124,9 @@ enum {
     SDP_fileList  = 0x5f8,
     SDP_sizeInfo  = 0x5fc,
 };
+/* rd_cstr bound for fileName: the field's 13 bytes and a terminator, so a name that fills the
+ * field never takes the padding after it. */
+#define SDP_FILENAME_CAP 14
 
 /* SceUtilitySavedataType (PPSSPP SavedataParam.h). The MAKEDATA/READDATA/WRITEDATA/ERASE
  * family (13-21) is the no-dialog "secure" API many games use for the actual save IO after
@@ -357,9 +360,11 @@ static int save_rel(char *out, size_t cap, const char *game, const char *save) {
 
 static int sdlog(void) { static int v = -1; if (v < 0) v = getenv("SR_DLGLOG") ? 1 : 0; return v; }
 
+/* Up to `cap` bytes of a member into `data` (a non-empty buffer), *size the bytes read. A caller
+ * that needs a whole file and its size from one open uses host_read_exact. */
 static int host_read_file(const char *dir, const char *name, uint8_t *data, uint32_t cap,
                           uint32_t *size) {
-    if (!path_sanitize(name)) { errno = EINVAL; return 0; }
+    if (!data || !cap || !path_sanitize(name)) { errno = EINVAL; return 0; }
 #ifdef _WIN32
     char path[PATH_MAX];
     if (!path_join(path, sizeof(path), dir, name)) return 0;
@@ -371,19 +376,7 @@ static int host_read_file(const char *dir, const char *name, uint8_t *data, uint
                                     OPEN_EXISTING, canonical_root, &h))
         return 0;
     DWORD bytes_read = 0;
-    BOOL ok = TRUE;
-    if (data && cap > 0) {
-        ok = ReadFile(h, data, (DWORD)cap, &bytes_read, NULL);
-    } else {
-        /* Size probe (data == NULL): report the verified object's real size. */
-        LARGE_INTEGER sz;
-        if (GetFileSizeEx(h, &sz)) {
-            if (sz.QuadPart >= 0 && sz.QuadPart <= UINT32_MAX) bytes_read = (DWORD)sz.QuadPart;
-            else ok = FALSE;
-        } else {
-            ok = FALSE;
-        }
-    }
+    BOOL ok = ReadFile(h, data, (DWORD)cap, &bytes_read, NULL);
     CloseHandle(h);
     if (size) *size = (uint32_t)bytes_read;
     return ok ? 1 : 0;
@@ -397,22 +390,8 @@ static int host_read_file(const char *dir, const char *name, uint8_t *data, uint
     sr_cd_status st = sr_cd_open_file(&root, rel, name, SR_CD_FILE_READ, &f);
     sr_cd_root_close(&root);
     if (st != SR_CD_OK || !f) return 0;
-    uint32_t n = 0;
-    int ok = 1;
-    if (data && cap) {
-        n = (uint32_t)fread(data, 1, cap, f);
-        ok = !ferror(f);
-    } else {
-        /* Size probe: callers pass a NULL buffer to learn the verified file's
-         * real size before a bounded second read. */
-        long sz = -1;
-        if (fseek(f, 0, SEEK_END) == 0) {
-            sz = ftell(f);
-            if (fseek(f, 0, SEEK_SET) != 0) sz = -1;
-        }
-        ok = sz >= 0;
-        if (ok) n = (uint32_t)sz;
-    }
+    uint32_t n = (uint32_t)fread(data, 1, cap, f);
+    int ok = !ferror(f);
     if (fclose(f) != 0) ok = 0;
     if (size) *size = n;
     return ok;
@@ -669,7 +648,8 @@ static int savedata_sorted_names(const char *dir, char ***names_out, size_t *cou
     return 1;
 }
 
-/* A save directory's time (see "save times"): its PARAM.SFO's modification time, else its own. */
+/* A save directory's time (see "save times"): its PARAM.SFO's modification time, else its own.
+ * Callers pass only a directory dir_exists accepted (contained, not a link). */
 static int64_t savedata_save_time(const char *dir) {
     int64_t when = 0;
     if (host_file_stat(dir, "PARAM.SFO", NULL, &when)) return when;
@@ -1525,7 +1505,8 @@ static int savedata_recover_settled(const char *dir) { return savedata_recover_d
 /* ---- the root lock --------------------------------------------------------------------------
  * One savedata operation at a time per Memory Stick root, across processes too: two players
  * sharing a root must never run one save directory's recovery against the other's live SAVE.
- * Taken once per top-level operation (sr_savedata_execute_sized) and held for all of it.
+ * Taken once per top-level operation (sr_savedata_execute_sized) and held for all of it; that
+ * function refuses a second operation while one is in flight, so the lock is never nested.
  * Win32: PSP/SAVEDATA/.nakagawa-savedata-lock opened with no sharing and deleted when closed.
  * POSIX: flock on the PSP/SAVEDATA directory itself (sr_cd_lock_dir). */
 #ifdef _WIN32
@@ -1533,14 +1514,12 @@ static HANDLE s_sd_lock = NULL;
 #else
 static int s_sd_lock_fd = -1;
 #endif
-static int s_sd_lock_depth;
 
 enum { SD_LOCK_HELD = 1, SD_LOCK_NONE = 0, SD_LOCK_BUSY = -1 };
 
 /* create: make PSP/SAVEDATA first when it is missing (a SAVE); otherwise a missing PSP/SAVEDATA
  * means there is no save data at all and nothing to lock (SD_LOCK_NONE). */
 static int savedata_lock(int create) {
-    if (s_sd_lock_depth > 0) { s_sd_lock_depth++; return SD_LOCK_HELD; }
     char root[PATH_MAX];
     snprintf(root, sizeof(root), "%s/PSP/SAVEDATA", ms_root());
     if (!dir_exists(root)) {
@@ -1594,12 +1573,11 @@ static int savedata_lock(int create) {
 #else
     return SD_LOCK_BUSY;
 #endif
-    s_sd_lock_depth = 1;
     return SD_LOCK_HELD;
 }
 
 static void savedata_unlock(int held) {
-    if (held != SD_LOCK_HELD || s_sd_lock_depth <= 0 || --s_sd_lock_depth > 0) return;
+    if (held != SD_LOCK_HELD) return;
 #ifdef _WIN32
     if (s_sd_lock) CloseHandle(s_sd_lock);
     s_sd_lock = NULL;
@@ -1778,20 +1756,20 @@ static void wr_guest_bytes(uint32_t addr, const uint8_t *v, uint32_t len, uint32
     for (uint32_t i = len; i < cap; i++) MEM_W8(addr + i, 0);
 }
 
-/* A save's PARAM.SFO, read whole through the storage boundary so it gets exactly the same
- * containment verification as guest data files. Returns the bytes (the caller frees them) with
- * the index table already checked against the file size, or NULL when there is no usable SFO.
- * The index table is a file envelope of its own: it is rejected before any entry is read, so
- * a forged count cannot make a parser walk a truncated table. */
+/* A save's PARAM.SFO, read whole through one contained open (host_read_exact, the containment
+ * verification guest data files get), so the size checked is the size of the bytes read: a
+ * file larger than SFO_READ_MAX, or than 4 GiB, is refused on every host, never read as a
+ * prefix. Returns the bytes (the caller frees them) with the index table already checked
+ * against the file size, or NULL when there is no usable SFO. The index table is a file
+ * envelope of its own: it is rejected before any entry is read, so a forged count cannot make
+ * a parser walk a truncated table. */
+#define SFO_READ_MAX (1u << 20)
 static uint8_t *sfo_read(const char *dir, uint32_t *size_out) {
     uint32_t n = 0;
-    if (!s_storage.read(dir, "PARAM.SFO", NULL, 0, &n)) return NULL;
-    if (n <= 20 || n > (1 << 20)) return NULL;
-    uint8_t *b = (uint8_t *)malloc((size_t)n);
+    uint8_t *b = (uint8_t *)malloc(SFO_READ_MAX);
     if (!b) return NULL;
-    uint32_t actual_read = 0;
     uint32_t keyStart, dataStart, cnt;
-    if (!s_storage.read(dir, "PARAM.SFO", b, n, &actual_read) || actual_read != n ||
+    if (host_read_exact(dir, "PARAM.SFO", b, SFO_READ_MAX, &n) != 1 || n <= 20 ||
         memcmp(b, "\0PSF", 4) != 0) {
         free(b);
         return NULL;
@@ -1805,26 +1783,50 @@ static uint8_t *sfo_read(const char *dir, uint32_t *size_out) {
     return b;
 }
 
-/* Find `key` in an SFO sfo_read returned. */
+/* Index entry `i` of an SFO sfo_read returned: 1 with its key, format and value when the key and
+ * the value both lie inside the file and the key is terminated there, else 0 (the entry is
+ * skipped). The one bounds check every SFO reader here goes through. */
+static int sfo_index_entry(const uint8_t *b, uint32_t n, uint32_t i, const char **key_out,
+                           uint16_t *fmt_out, const uint8_t **val_out, uint32_t *len_out) {
+    uint32_t keyStart, dataStart;
+    memcpy(&keyStart, b + 8, 4); memcpy(&dataStart, b + 12, 4);
+    const uint8_t *ix = b + 20 + 16 * i;
+    uint16_t keyOff, fmt; uint32_t len, dataOff;
+    memcpy(&keyOff, ix + 0, 2); memcpy(&fmt, ix + 2, 2);
+    memcpy(&len, ix + 4, 4); memcpy(&dataOff, ix + 12, 4);
+    uint64_t keyPos = (uint64_t)keyStart + keyOff;
+    uint64_t dataPos = (uint64_t)dataStart + dataOff;
+    if (keyPos >= (uint64_t)n || dataPos > (uint64_t)n ||
+        (uint64_t)len > (uint64_t)n - dataPos) return 0;
+    const uint8_t *keyBytes = b + (size_t)keyPos;
+    size_t keyRemain = (size_t)((uint64_t)n - keyPos), keyLen = 0;
+    while (keyLen < keyRemain && keyBytes[keyLen] != '\0') keyLen++;
+    if (keyLen == keyRemain) return 0;  /* unterminated key */
+    *key_out = (const char *)keyBytes;
+    *fmt_out = fmt;
+    *val_out = b + (size_t)dataPos;
+    *len_out = len;
+    return 1;
+}
+
+static uint32_t sfo_index_count(const uint8_t *b) {
+    uint32_t cnt;
+    memcpy(&cnt, b + 16, 4);
+    return cnt;
+}
+
+/* Find `key` in an SFO sfo_read returned: the first entry of that name. */
 static int sfo_find(const uint8_t *b, uint32_t n, const char *key, uint16_t *fmt_out,
                     const uint8_t **val_out, uint32_t *len_out) {
-    uint32_t keyStart, dataStart, cnt;
-    memcpy(&keyStart, b + 8, 4); memcpy(&dataStart, b + 12, 4); memcpy(&cnt, b + 16, 4);
+    const uint32_t cnt = sfo_index_count(b);
     for (uint32_t i = 0; i < cnt; i++) {
-        const uint8_t *ix = b + 20 + 16 * i;
-        uint16_t keyOff, fmt; uint32_t len, dataOff;
-        memcpy(&keyOff, ix + 0, 2); memcpy(&fmt, ix + 2, 2);
-        memcpy(&len, ix + 4, 4); memcpy(&dataOff, ix + 12, 4);
-        uint64_t keyPos = (uint64_t)keyStart + keyOff;
-        uint64_t dataPos = (uint64_t)dataStart + dataOff;
-        if (keyPos >= (uint64_t)n || dataPos > (uint64_t)n ||
-            (uint64_t)len > (uint64_t)n - dataPos) continue;
-        const uint8_t *keyBytes = b + (size_t)keyPos;
-        size_t keyRemain = (size_t)((uint64_t)n - keyPos), keyLen = 0;
-        while (keyLen < keyRemain && keyBytes[keyLen] != '\0') keyLen++;
-        if (keyLen == keyRemain || strcmp((const char *)keyBytes, key) != 0) continue;
+        const char *k;
+        uint16_t fmt;
+        const uint8_t *val;
+        uint32_t len;
+        if (!sfo_index_entry(b, n, i, &k, &fmt, &val, &len) || strcmp(k, key) != 0) continue;
         *fmt_out = fmt;
-        *val_out = b + (size_t)dataPos;
+        *val_out = val;
         *len_out = len;
         return 1;
     }
@@ -1902,24 +1904,14 @@ static void load_sfo_param(uint32_t param, const char *dir) {
     uint32_t n = 0;
     uint8_t *b = sfo_read(dir, &n);
     if (!b) return;
-    uint32_t keyStart, dataStart, cnt;
-    memcpy(&keyStart, b + 8, 4); memcpy(&dataStart, b + 12, 4); memcpy(&cnt, b + 16, 4);
+    /* Every entry in index order, so of two entries with one key the later one is handed back. */
+    const uint32_t cnt = sfo_index_count(b);
     for (uint32_t i = 0; i < cnt; i++) {
-        const uint8_t *ix = b + 20 + 16 * i;
-        uint16_t keyOff, fmt; uint32_t len, dataOff;
-        memcpy(&keyOff, ix + 0, 2); memcpy(&fmt, ix + 2, 2);
-        memcpy(&len, ix + 4, 4); memcpy(&dataOff, ix + 12, 4);
-        uint64_t keyPos = (uint64_t)keyStart + keyOff;
-        uint64_t dataPos = (uint64_t)dataStart + dataOff;
-        if (keyPos >= (uint64_t)n || dataPos > (uint64_t)n ||
-            (uint64_t)len > (uint64_t)n - dataPos) continue;
-        const uint8_t *keyBytes = b + (size_t)keyPos;
-        size_t keyRemain = (size_t)((uint64_t)n - keyPos);
-        size_t keyLen = 0;
-        while (keyLen < keyRemain && keyBytes[keyLen] != '\0') keyLen++;
-        if (keyLen == keyRemain) continue;  /* unterminated key */
-        const char *key = (const char *)keyBytes;
-        const uint8_t *val = b + (size_t)dataPos;
+        const char *key;
+        uint16_t fmt;
+        const uint8_t *val;
+        uint32_t len;
+        if (!sfo_index_entry(b, n, i, &key, &fmt, &val, &len)) continue;
         if (fmt == 0x0204 && !strcmp(key, "TITLE"))
             wr_guest_bytes(param + SDP_sfoTitle, val, len, 128);
         else if (fmt == 0x0204 && !strcmp(key, "SAVEDATA_TITLE"))
@@ -2058,7 +2050,7 @@ int sr_savedata_stop_deferred(uint64_t now_us) {
  * version it replaces under K names (resolve_save). */
 static uint32_t do_save(uint32_t param, const char *game, const char *save, int keep_previous) {
     char dir[PATH_MAX], fileName[16], title[128], saveTitle[128], detail[1024], saveDir[64];
-    rd_cstr(param + SDP_fileName, fileName, sizeof(fileName));
+    rd_cstr(param + SDP_fileName, fileName, SDP_FILENAME_CAP);
     uint32_t dataBuf = MEM_R32(param + SDP_dataBuf);
     uint32_t dataSize = MEM_R32(param + SDP_dataSize);
 
@@ -2267,7 +2259,7 @@ static void load_filedata(const char *dir, const char *name, uint32_t fd) {
 /* rw: READDATA or READDATASECURE, whose damaged-save code is the RW family's. */
 static uint32_t do_load(uint32_t param, const char *game, const char *save, int rw) {
     char dir[PATH_MAX], fileName[16];
-    rd_cstr(param + SDP_fileName, fileName, sizeof(fileName));
+    rd_cstr(param + SDP_fileName, fileName, SDP_FILENAME_CAP);
     uint32_t dataBuf = MEM_R32(param + SDP_dataBuf);
     uint32_t cap = MEM_R32(param + SDP_dataBufSize);
 
@@ -2397,7 +2389,7 @@ static uint32_t do_delete(const char *game, const char *save) {
 /* ERASE/ERASESECURE: remove just the named data file inside the save dir (PPSSPP DeleteData). */
 static uint32_t do_erase(uint32_t param, const char *game, const char *save) {
     char rel[SR_CD_REL_MAX], dir[PATH_MAX], fileName[16];
-    rd_cstr(param + SDP_fileName, fileName, sizeof(fileName));
+    rd_cstr(param + SDP_fileName, fileName, SDP_FILENAME_CAP);
     if (!fileName[0] || !path_sanitize(fileName) || savedata_is_reserved_name(fileName))
         return ERR_RW_NO_DATA;
     if (!save_rel(rel, sizeof(rel), game, save) || !save_dir(dir, sizeof(dir), game, save))
@@ -2507,10 +2499,9 @@ static uint32_t do_list(uint32_t param, uint32_t size, const char *game) {
          * component rules apply before anything is opened or listed. */
         if (!path_sanitize(name)) continue;
         if (!path_join(path, sizeof(path), root, name)) continue;
-#ifdef _WIN32
-        if (!sr_vfs_dir_is_contained(path, canonical_root)) continue;
-#endif
-        if (!sd_host_is_dir(path)) continue;
+        /* Contained on every host: a link to a folder outside the Memory Stick is no save, so
+         * it is not listed and its target's time is never read (savedata_save_time). */
+        if (!dir_exists(path)) continue;
         (void)savedata_recover(path);     /* settle an unfinished SAVE before its time is read */
         rows[found] = name;
         times[found] = savedata_save_time(path);
@@ -2735,18 +2726,21 @@ static uint32_t do_sizes(uint32_t param, uint32_t size, const char *game) {
         }
     }
     if (ud) {
-        uint32_t total = CLUSTER + CLUSTER;                 /* directory record + SFO */
+        /* 64-bit: each size is the guest's and may be near 4 GiB, so neither the rounding nor
+         * the sum may wrap. Five sizes below 4 GiB and two clusters total under 21 GiB, whose
+         * count in clusters and in KB both fit the 32-bit fields. */
+        uint64_t total = CLUSTER + CLUSTER;                 /* directory record + SFO */
         if (MEM_R8(param + SDP_fileName) != 0) {
-            uint32_t ds = MEM_R32(param + SDP_dataSize);
+            uint64_t ds = MEM_R32(param + SDP_dataSize);
             total += ((ds + CLUSTER - 1) / CLUSTER) * CLUSTER;
         }
-        uint32_t sizes[4] = { MEM_R32(param + SDP_icon0 + 8), MEM_R32(param + SDP_icon1 + 8),
+        uint64_t sizes[4] = { MEM_R32(param + SDP_icon0 + 8), MEM_R32(param + SDP_icon1 + 8),
                               MEM_R32(param + SDP_pic1 + 8), MEM_R32(param + SDP_snd0 + 8) };
         for (int i = 0; i < 4; i++) total += ((sizes[i] + CLUSTER - 1) / CLUSTER) * CLUSTER;
-        MEM_W32(ud + 0, total / CLUSTER);
-        MEM_W32(ud + 4, total / 0x400);
+        MEM_W32(ud + 0, (uint32_t)(total / CLUSTER));
+        MEM_W32(ud + 4, (uint32_t)(total / 0x400));
         wr_fixed(ud + 8, "", 8);
-        MEM_W32(ud + 16, total / 0x400);
+        MEM_W32(ud + 16, (uint32_t)(total / 0x400));
         wr_fixed(ud + 20, "", 8);
     }
     return sizes_no_data ? ERR_SIZES_NO_DATA : 0;

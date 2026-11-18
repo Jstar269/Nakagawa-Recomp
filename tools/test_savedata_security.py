@@ -1304,6 +1304,85 @@ static void check_edge_cases(const char *base) {
 #endif
 }
 
+/* Guest-controlled bounds (audit 2026-11-17): a fileName that fills its 13-byte field, SIZES
+ * sizes near 4 GiB, a LIST entry that is a link out of the Memory Stick, and a PARAM.SFO larger
+ * than 4 GiB. */
+#define BOUNDS_USED 0x08b00000u
+#define BOUNDS_IDLIST 0x08b01000u
+#define BOUNDS_ENTRIES 0x08b02000u
+static void check_bounds_cases(const char *base) {
+#if defined(SR_CD_BACKEND_POSIX_AT)
+    char root[512], slot[600], path[700], outside[512], link[700];
+
+    /* fileName is char[13]: a name that fills the field and is followed by non-zero padding
+     * names the 13-byte file, not one that runs into the padding. */
+    snprintf(root, sizeof(root), "%s/name13", base);
+    snprintf(slot, sizeof(slot), "%s/PSP/SAVEDATA/ULUS99999SLOT00", root);
+    set_save_request(root, SD_SAVE, "ABCDEFGHI.BIN");
+    sr_w8(PARAM + SDP_fileName + 13u, 'X');
+    sr_w8(PARAM + SDP_fileName + 14u, 'Y');
+    sr_w32(PARAM + SDP_dataSize, 4u);
+    for (uint32_t i = 0; i < 4u; i++) sr_w8(DATA + i, (uint8_t)"NAME"[i]);
+    uint32_t result = sr_savedata_execute(PARAM);
+    CHECK(result == 0, "a SAVE whose fileName fills its field must succeed, got 0x%08x",
+          (unsigned)result);
+    snprintf(path, sizeof(path), "%s/ABCDEFGHI.BIN", slot);
+    CHECK(exists_no_follow(path), "the SAVE must write the 13-byte name the field holds");
+    snprintf(path, sizeof(path), "%s/ABCDEFGHI.BINXY", slot);
+    CHECK(!exists_no_follow(path), "the SAVE must not take the padding after fileName");
+
+    /* SIZES rounds each guest size to clusters without wrapping: a data size just under 4 GiB
+     * needs 0x20000 clusters, plus the directory record and the SFO. */
+    set_save_request(root, SD_SIZES, "DATA.BIN");
+    sr_w32(PARAM + SDP_dataSize, 0xFFFF9000u);
+    sr_w32(PARAM + SDP_usedData, BOUNDS_USED);
+    result = sr_savedata_execute(PARAM);
+    CHECK(result == 0, "SIZES with only usedData must succeed, got 0x%08x", (unsigned)result);
+    CHECK(MEM_R32(BOUNDS_USED + 0) == 0x20002u && MEM_R32(BOUNDS_USED + 4) == 0x400040u &&
+              MEM_R32(BOUNDS_USED + 16) == 0x400040u,
+          "SIZES usedData for a 0xFFFF9000-byte save must be 0x20002 clusters, 0x400040 KB "
+          "(got 0x%x clusters, 0x%x KB)", (unsigned)MEM_R32(BOUNDS_USED + 0),
+          (unsigned)MEM_R32(BOUNDS_USED + 4));
+
+    /* LIST: a game-prefixed entry that is a link to a folder outside the Memory Stick is no
+     * save, so it is not listed beside the real one. */
+    snprintf(root, sizeof(root), "%s/listlink", base);
+    snprintf(outside, sizeof(outside), "%s/outside-dir", base);
+    snprintf(link, sizeof(link), "%s/PSP/SAVEDATA/ULUS99999LINK", root);
+    CHECK(run_save(root, "DATA.BIN", "REAL") == 0 && make_dir(outside) &&
+              symlink(outside, link) == 0,
+          "LIST link fixture");
+    set_save_request(root, SD_LIST, "");
+    sr_w32(PARAM + SDP_idList, BOUNDS_IDLIST);
+    sr_w32(BOUNDS_IDLIST + 0u, 4u);
+    sr_w32(BOUNDS_IDLIST + 8u, BOUNDS_ENTRIES);
+    result = sr_savedata_execute(PARAM);
+    CHECK(result == 0 && MEM_R32(BOUNDS_IDLIST + 4u) == 1u &&
+              MEM_R8(BOUNDS_ENTRIES + 52u) == 'S',
+          "LIST must list only the contained save, not the link out (0x%08x, %u rows)",
+          (unsigned)result, (unsigned)MEM_R32(BOUNDS_IDLIST + 4u));
+
+    /* A PARAM.SFO larger than 4 GiB whose first bytes are a whole SFO is not read as that
+     * prefix (sparse: no disk space is used). */
+    snprintf(root, sizeof(root), "%s/bigsfo", base);
+    snprintf(slot, sizeof(slot), "%s/PSP/SAVEDATA/ULUS99999SLOT00", root);
+    snprintf(path, sizeof(path), "%s/PARAM.SFO", slot);
+    struct stat st;
+    CHECK(run_save(root, "DATA.BIN", "BIG") == 0 && stat(path, &st) == 0 &&
+              truncate(path, (off_t)0x100000000ll + st.st_size) == 0,
+          "large PARAM.SFO fixture");
+    setenv("SR_MEMSTICK", root, 1);
+    uint32_t sfo_n = 0;
+    uint8_t *sfo = sfo_read(slot, &sfo_n);
+    CHECK(sfo == NULL, "a PARAM.SFO larger than 4 GiB must be refused, not read as %u bytes",
+          (unsigned)sfo_n);
+    free(sfo);
+#else
+    (void)base;
+    printf("SKIP: savedata bounds cases require the POSIX descriptor backend\n");
+#endif
+}
+
 static void check_unsupported_host(void) {
     reset_guest();
     sr_w32(PARAM + SDP_mode, SD_SAVE);
@@ -1322,6 +1401,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "preempt") && argc == 3) check_preempt_cases(argv[2]);
     else if (!strcmp(argv[1], "inject") && argc == 3) check_inject_cases(argv[2]);
     else if (!strcmp(argv[1], "edges") && argc == 3) check_edge_cases(argv[2]);
+    else if (!strcmp(argv[1], "bounds") && argc == 3) check_bounds_cases(argv[2]);
     else if (!strcmp(argv[1], "getsize")) check_getsize_cases();
     else if (!strcmp(argv[1], "unsupported")) check_unsupported_host();
     else { free(arena); return 2; }
@@ -1706,6 +1786,18 @@ class TestSavedataSecurityProduction(unittest.TestCase):
             self.assertIn("savedata: DELETE PSP/SAVEDATA/ULUS99999SLOT00 " + backend, run.stderr)
             self.assertIn("savedata: ERASE PSP/SAVEDATA/ULUS99999SLOT00/DATA.BIN " + backend,
                           run.stderr)
+
+    @unittest.skipIf(os.name == "nt", "the POSIX savedata bounds cases run in the WSL POSIX lane")
+    def test_guest_bounds_name_sizes_list_links_and_large_sfo(self):
+        """fileName stops at its 13-byte field, SIZES does not wrap near 4 GiB, LIST leaves out a
+        link to a folder outside the Memory Stick, and a PARAM.SFO over 4 GiB is refused."""
+        with scratch_dir.TemporaryDirectory(prefix="savedata_bounds_") as tmp:
+            exe = _build(tmp)
+            run = _run(exe, "bounds", tmp)
+            self.assertIsNotNone(run, "savedata bounds selftest timed out")
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("security_selftest: OK", run.stdout)
+            self.assertNotIn("SKIP", run.stdout)
 
     @unittest.skipIf(os.name == "nt", "GETSIZE production harness runs in the WSL POSIX lane")
     def test_getsize_regressions(self):
