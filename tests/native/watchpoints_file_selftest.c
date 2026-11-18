@@ -328,8 +328,11 @@ int main(int argc, char **argv) {
     expect_parse("{\"format\":\"hst-watchpoints\",\"version\":1,\"watchpoints\":[]}",
                  0, "empty watchpoints list (legacy)");
 
-    /* 11. File-level behavior: missing file and bounded read. */
+    /* 11. File-level behavior: missing file and bounded read. The earlier calls that used
+     * errbuf all succeeded and left it unwritten, so clear it here: the message check below
+     * must see what the failing call wrote, never leftover stack bytes. */
     {
+        errbuf[0] = '\0';
         int n = sr_parse_watchpoints_file(
             "watchpoints_selftest_does_not_exist.json", out, 16, errbuf, sizeof(errbuf));
         CHECK(n == -1, "missing file rejected");
