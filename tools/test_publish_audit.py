@@ -28,6 +28,30 @@ UTF16LE = bytes([0xFF, 0xFE])
 UTF16BE = bytes([0xFE, 0xFF])
 
 
+def _communicate_all(commands: dict[str, list[str]]) -> dict[str, subprocess.CompletedProcess]:
+    """Run every command side by side and reap each child, even when a later start fails.
+
+    A child left running holds its pipes and its handles into a scratch directory, so a
+    failed start kills and waits for the children already started before it propagates.
+    """
+    running: dict[str, subprocess.Popen] = {}
+    results: dict[str, subprocess.CompletedProcess] = {}
+    try:
+        for name, argv in commands.items():
+            running[name] = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace")
+        for name, process in running.items():
+            out, err = process.communicate()
+            results[name] = subprocess.CompletedProcess(process.args, process.returncode, out, err)
+    finally:
+        for process in running.values():
+            if process.returncode is None:
+                process.kill()
+                process.communicate()
+    return results
+
+
 
 def hermetic_policy(repo: Path, include_paths, exclude_paths=(), exclude_globs=()) -> tuple[Path, Path]:
     """Write a valid canonical policy + matching export for a hermetic fixture repo.
@@ -1597,13 +1621,28 @@ class TestPublishAudit(unittest.TestCase):
                 self.assertNotIn(str(private), finding.detail)
                 self.assertNotIn("private-inputs", finding.detail)
 
-            # A real symlink is the contrasting case: its target text is the
-            # blob Git stores, so it stays readable and stays analysed.
+    @unittest.skipUnless(
+        os.name == "nt" and hasattr(os.path, "isjunction"),
+        "NTFS junction regression requires Windows junction support",
+    )
+    def test_escaping_symlink_stays_readable_and_its_target_is_not_rendered(self):
+        """The contrast to the junction case: a real symlink's target text is its Git blob.
+
+        It stays readable and analysed, and the SYMLINK_ESCAPE finding still does not
+        render the host target. Without symlink privilege this is a SKIP, not a pass.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir_raw:
+            temp_root = Path(tmp_dir_raw).resolve()
+            candidate = temp_root / "candidate"
+            private = temp_root / "private-inputs"
+            candidate.mkdir()
+            private.mkdir()
+            (private / "secret.txt").write_text("secret", encoding="utf-8")
             link = candidate / "plain.txt"
             try:
                 link.symlink_to(private / "secret.txt")
             except (OSError, NotImplementedError):
-                return
+                self.skipTest("Symlinks not supported on this platform/privilege level")
             plain = publish_audit.GitEntry("120000", "", "0", "plain.txt", "symlink")
             text, text_error = publish_audit.read_candidate_file(plain, candidate)
             self.assertIsNone(text_error)
@@ -2591,6 +2630,27 @@ class TestPrivateRootDetection(unittest.TestCase):
                     policy_path=policy_file, export_path=export_file,
                 )
                 self.assertTrue(any(f.code == "LOCAL_PATH" and "out-of-band private root" in f.detail for f in findings_wt))
+
+                # Index mode (the pre-commit and --tracked-only route): the staged blob
+                # names the root, the working copy no longer does, so the finding can
+                # only come from the indexed bytes.
+                run_git(["init", "-q"], cwd=repo, check=True, capture_output=True)
+                run_git(["-c", "core.autocrlf=false", "add", "src/app.py"],
+                        cwd=repo, check=True, capture_output=True)
+                app.write_text("# SPDX-License-Identifier: GPL-2.0-or-later\n", encoding="utf-8", newline="\n")
+                index_entries = [
+                    entry for entry in publish_audit._get_git_entries(
+                        tracked_only=True, repo_root=repo, content_source=publish_audit.CONTENT_INDEX)
+                    if entry.path == "src/app.py"
+                ]
+                self.assertEqual(len(index_entries), 1)
+                findings_index = publish_audit.audit_entries(
+                    index_entries, repo_root=repo, content_source=publish_audit.CONTENT_INDEX,
+                    policy_path=policy_file, export_path=export_file,
+                )
+                self.assertTrue(any(
+                    f.code == "LOCAL_PATH" and "out-of-band private root" in f.detail
+                    for f in findings_index), findings_index)
 
     def test_debt_budgets_pass_on_current_repo(self):
         """Finding 11 (O-11): all current debt surfaces meet non-increasing budgets."""
@@ -3791,22 +3851,20 @@ class TrustedTreeAuditTests(unittest.TestCase):
             "relabelled": commit({cls.approved: cls.OPAQUE, "assets/release_manifest.json": relabelled}),
             "table": commit({cls.table: cls.OPAQUE}),
         }
-        running = {}
+        # Every policy is written before any audit starts, so nothing in this loop can
+        # raise once a child is running; _communicate_all reaps the children it starts.
+        commands = {}
         for name, sha in candidates.items():
             policy = Path(scratch.name) / f"{name}.profile.json"
             policy.write_bytes(subprocess.run(
                 ["git", "cat-file", "blob", f"{sha}:assets/public_source_profile.json"], cwd=repo, check=True,
                 capture_output=True, env=isolated_git_env(root=repo)).stdout)
             # The command of the workflow step "Audit the candidate tree with the trusted publication audit".
-            running[name] = subprocess.Popen(
-                [sys.executable, "-c", cls.WRAPPER, str(Path(publish_audit.__file__)),
-                 "--repo-root", str(repo), "--committed-tree", sha, "--trusted-base", head,
-                 "--policy", str(policy), "--public-scope", "--provenance-self-consistency"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
-        cls.results = {}
-        for name, process in running.items():
-            out, err = process.communicate()
-            cls.results[name] = subprocess.CompletedProcess(process.args, process.returncode, out, err)
+            commands[name] = [
+                sys.executable, "-c", cls.WRAPPER, str(Path(publish_audit.__file__)),
+                "--repo-root", str(repo), "--committed-tree", sha, "--trusted-base", head,
+                "--policy", str(policy), "--public-scope", "--provenance-self-consistency"]
+        cls.results = _communicate_all(commands)
 
     def _findings(self, name: str, path: str = "EBOOT.PBP") -> set[str]:
         result = self.results[name]
@@ -3864,6 +3922,34 @@ class TrustedTreeAuditTests(unittest.TestCase):
         tree = {path: "x" for path in loaded}
         protected = ci_trust_verdict.protected_paths(tree, tree, texts)
         self.assertEqual(sorted(loaded - protected), [])
+
+
+class CommunicateAllTests(unittest.TestCase):
+    def test_a_failed_start_reaps_the_children_already_running(self):
+        """The trusted-tree setup starts seven audits and reads them afterwards.
+
+        Failing-before: a start that raised partway left the earlier children running,
+        blocked on a full stdout pipe nobody drained, holding the scratch directory.
+        """
+        started: list[subprocess.Popen] = []
+        real_popen = subprocess.Popen
+
+        def popen(*args, **kwargs):
+            if started:
+                raise OSError("injected start failure")
+            process = real_popen(*args, **kwargs)
+            started.append(process)
+            return process
+
+        # The first child writes more than a pipe buffer holds, so it cannot exit
+        # on its own until something reads its output.
+        filler = [sys.executable, "-c", "import sys; sys.stdout.write('x' * (1 << 22))"]
+        with mock.patch.object(subprocess, "Popen", popen):
+            with self.assertRaisesRegex(OSError, "injected start failure"):
+                _communicate_all({"first": filler, "second": filler})
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(started[0].returncode, "the started child was left running")
+        self.assertTrue(started[0].stdout.closed)
 
 
 if __name__ == "__main__":

@@ -149,7 +149,70 @@ class TestPublicCandidate(unittest.TestCase):
                     with mock.patch.object(public_candidate, "_git", fake_git):
                         with self.assertRaisesRegex(ValueError, "unsafe archive path"):
                             public_candidate.materialize("HEAD", destination, public_candidate.DEFAULT_PROFILE)
-                    self.assertEqual(list(destination.rglob("*")), [])
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(list(Path(temp_raw).iterdir()), [])
+
+    def test_failure_partway_leaves_no_destination_and_a_rerun_succeeds(self):
+        """A refusal after some files were written must not leave a half-written tree.
+
+        Before the fix the destination was created first and filled in place, so a
+        symlink entry after a good file left ``docs/example.md`` behind and the next
+        run failed with FileExistsError until the user deleted the tree by hand.
+        """
+        def archive_with(entries):
+            def fake_git(*args):
+                if args[0] == "rev-parse":
+                    return "0" * 40
+                output = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--output="))
+                with zipfile.ZipFile(output, "w") as archive:
+                    for info, payload in entries:
+                        archive.writestr(info, payload)
+                return ""
+            return fake_git
+
+        link = zipfile.ZipInfo("docs/link.md")
+        link.external_attr = (0o120777 << 16)
+        with tempfile.TemporaryDirectory() as temp_raw:
+            destination = Path(temp_raw) / "candidate"
+            with mock.patch.object(public_candidate, "_git", archive_with(
+                    [("docs/example.md", "# example\n"), (link, "elsewhere")])):
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    public_candidate.materialize("HEAD", destination, public_candidate.DEFAULT_PROFILE)
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(Path(temp_raw).iterdir()), [])
+
+            with mock.patch.object(public_candidate, "_git", archive_with(
+                    [("docs/example.md", "# example\n")])):
+                metadata = public_candidate.materialize(
+                    "HEAD", destination, public_candidate.DEFAULT_PROFILE)
+            self.assertEqual(metadata["file_count"], 1)
+            self.assertTrue((destination / "docs" / "example.md").is_file())
+
+    def test_manifest_records_the_exported_refs_own_profile(self):
+        """The filter profile and the profile the exported ref carries are both named."""
+        import hashlib
+
+        ref_profile = b'{"name": "an-older-profile"}\n'
+
+        def fake_git(*args):
+            if args[0] == "rev-parse":
+                return "0" * 40
+            output = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--output="))
+            with zipfile.ZipFile(output, "w") as archive:
+                archive.writestr("docs/example.md", "# example\n")
+                archive.writestr("assets/public_source_profile.json", ref_profile)
+            return ""
+
+        with tempfile.TemporaryDirectory() as temp_raw:
+            destination = Path(temp_raw) / "candidate"
+            with mock.patch.object(public_candidate, "_git", fake_git):
+                metadata = public_candidate.materialize(
+                    "HEAD", destination, public_candidate.DEFAULT_PROFILE)
+        self.assertEqual(metadata["ref_profile_sha256"], hashlib.sha256(ref_profile).hexdigest())
+        self.assertEqual(
+            metadata["profile_sha256"],
+            hashlib.sha256(public_candidate.DEFAULT_PROFILE.read_bytes()).hexdigest(),
+        )
 
     def test_candidate_audit_uses_the_profile_that_selected_the_tree(self):
         """audit_candidate judges the tree by the --profile materialize used, in candidate-root mode."""

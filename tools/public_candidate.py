@@ -89,11 +89,21 @@ def materialize(ref: str, destination: Path, profile_path: Path) -> dict:
 
     profile = load_profile(profile_path)
     commit = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
-    with tempfile.TemporaryDirectory(prefix="nakagawa-public-candidate-") as temp_raw:
+    # The tree is built in a sibling staging directory and renamed to the
+    # destination only once every entry is written. A refused entry or an OSError
+    # partway leaves no half-written destination to block the next run: the
+    # staging directory goes with its context.
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="nakagawa-public-candidate-") as temp_raw, \
+            tempfile.TemporaryDirectory(
+                prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent,
+            ) as staging_raw:
         archive = Path(temp_raw) / "source.zip"
         _git("archive", "--format=zip", f"--output={archive}", commit)
-        destination.mkdir(parents=True)
+        staging = Path(staging_raw).resolve() / "tree"
+        staging.mkdir()
         copied: list[str] = []
+        ref_profile_sha256: str | None = None
         with zipfile.ZipFile(archive) as source_zip:
             for info in source_zip.infolist():
                 name = info.filename[:-1] if info.is_dir() else info.filename
@@ -106,23 +116,29 @@ def materialize(ref: str, destination: Path, profile_path: Path) -> dict:
                         or any(part in ("", ".", "..") for part in parts)):
                     raise ValueError(f"unsafe archive path: {info.filename}")
                 relative = PurePosixPath(name)
+                if not info.is_dir() and relative.as_posix() == "assets/public_source_profile.json":
+                    ref_profile_sha256 = hashlib.sha256(source_zip.read(info)).hexdigest()
                 if info.is_dir() or is_excluded(relative.as_posix(), profile):
                     continue
                 unix_mode = info.external_attr >> 16
                 if stat.S_ISLNK(unix_mode):
                     raise ValueError(f"candidate archive contains symlink: {info.filename}")
-                target = destination.joinpath(*parts)
-                if not target.resolve().is_relative_to(destination):
+                target = staging.joinpath(*parts)
+                if not target.resolve().is_relative_to(staging):
                     raise ValueError(f"unsafe archive path: {info.filename}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with source_zip.open(info) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
                 copied.append(relative.as_posix())
+        staging.rename(destination)
 
     metadata = {
         "profile": profile["name"],
         "source_commit": commit,
+        # The profile that filtered the tree, and the one the exported ref itself
+        # carries (None when the ref has none); the two differ for an older --ref.
         "profile_sha256": hashlib.sha256(profile_path.read_bytes()).hexdigest(),
+        "ref_profile_sha256": ref_profile_sha256,
         "file_count": len(copied),
     }
     manifest = destination.parent / f"{destination.name}.PUBLIC_CANDIDATE.json"

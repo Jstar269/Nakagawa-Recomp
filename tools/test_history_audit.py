@@ -18,10 +18,27 @@ from typing import Any
 class TestHistoryAudit(unittest.TestCase):
     def test_repository_baseline(self):
         baseline = history_audit.get_repository_baseline(history_audit.ROOT)
-        self.assertIn("git_commit_main", baseline)
+        # The key is always present ("unknown" when neither ref resolves), so the
+        # value is what is checked: a full object name.
+        self.assertRegex(baseline["git_commit_main"], r"\A[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
         self.assertGreater(baseline["total_commits"], 0)
         self.assertGreater(baseline["total_objects"], 0)
         self.assertGreater(baseline["total_refs"], 0)
+
+    def test_repository_baseline_names_the_head_of_a_repository_without_origin(self):
+        """Hermetic: with no origin/main the baseline names HEAD, independent of this clone's refs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_git(["init", "-q"], cwd=root, check=True, capture_output=True)
+            (root / "note.md").write_bytes(b"note\n")
+            run_git(["add", "note.md"], cwd=root, check=True, capture_output=True)
+            run_git(["commit", "-qm", "fixture"], cwd=root, check=True, capture_output=True)
+            head = run_git(["rev-parse", "HEAD"], cwd=root, check=True,
+                           capture_output=True, text=True).stdout.strip()
+            baseline = history_audit.get_repository_baseline(root)
+        self.assertEqual(baseline["git_commit_main"], head)
+        self.assertEqual(baseline["total_commits"], 1)
+        self.assertEqual(baseline["total_objects"], 3)
 
     def test_code_capture_is_a_forbidden_extension(self):
         # A .nkcap holds bytes of the user's own game RAM (#1933); history must flag it too.
@@ -52,6 +69,17 @@ class TestHistoryAudit(unittest.TestCase):
         self.assertIn("summary", report)
         self.assertIn("large_blobs", report)
         self.assertIn("findings", report)
+        # This is a smoke test of the report on this checkout's refs, not the gate:
+        # the publication gate is build_public_export.history_audit_gate_result in the
+        # public_export job. What is checked here is that the report's verdict, its
+        # findings and that gate agree, so a FAIL report can never read as a pass.
+        import build_public_export
+
+        self.assertIn(report["status"], ("OK", "FAIL"))
+        self.assertEqual(report["status"] == "FAIL", bool(report["findings"]))
+        self.assertEqual(report["summary"]["total_findings"], len(report["findings"]))
+        self.assertEqual(build_public_export.history_audit_gate_result(report).passed,
+                         report["status"] == "OK")
 
     def _blob_findings(self, content: str) -> list:
         """Commit ``content`` into a throwaway repository and scan it."""
