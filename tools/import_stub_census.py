@@ -41,7 +41,6 @@ import argparse
 import glob
 import json
 import os
-import re
 import struct
 import sys
 import time
@@ -222,7 +221,9 @@ def manifest_images(manifest_path, title_dir):
     is analyzed at its manifest load address, and each runtime-placed module at base 0 (its
     link space, since the manifest gives it no address). Neither takes an extra span: a
     module's own title configuration never reaches another module. A module file the title
-    directory lacks is returned with path None, so the census names it rather than skipping it.
+    directory lacks is returned with path None, so the census names it rather than skipping it;
+    an optional one (role optional-guest-prx or required false) also carries base
+    OPTIONAL_NOT_STAGED, and the census records it as a non-blocking skipped note.
     """
     with open(manifest_path, encoding="utf-8") as handle:
         manifest = json.load(handle)
@@ -265,6 +266,8 @@ def manifest_images(manifest_path, title_dir):
         placement = module.get("placement", "fixed")
         path = resolve_file(name.lower())
         if path is None and (role == "optional-guest-prx" or module.get("required") is False):
+            # Named, not dropped: the census output says this module was never examined.
+            images.append((None, f"{disc}/{name}", OPTIONAL_NOT_STAGED, None))
             continue
         if placement == "fixed":
             images.append((path, f"{disc}/{name}", int(module["load_address"]), None))
@@ -282,6 +285,15 @@ def manifest_images(manifest_path, title_dir):
         else:
             raise ValueError(f"module {name}: unsupported module placement {placement!r}")
     return images
+
+
+#: manifest_images' base for an optional module the title directory does not stage.
+OPTIONAL_NOT_STAGED = "optional module not staged"
+
+
+def skipped_record(label, detail):
+    """A census record for an image the census did not examine: a note, not a failure."""
+    return _empty_record(label, status="skipped", detail=detail)
 
 
 def unlocated_record(label, detail):
@@ -307,6 +319,9 @@ def summarize(records):
     totals = Counter()
     reasons = Counter()
     for rec in records:
+        if rec["status"] == "skipped":
+            totals["images_skipped"] += 1
+            continue
         totals["images"] += 1
         totals["stubs"] += rec["stubs"]
         totals["handled"] += rec["handled"]
@@ -337,7 +352,8 @@ def render_markdown(records, title="Import-stub census"):
     lines = [f"# {title}", "",
              f"Images: {totals.get('images', 0)}; stubs: {totals.get('stubs', 0)}; "
              f"missing: {totals.get('missing', 0)}; runtime-only misses: "
-             f"{totals.get('runtime_missing', 0)}; images not ok: {totals.get('images_not_ok', 0)}.",
+             f"{totals.get('runtime_missing', 0)}; images not ok: {totals.get('images_not_ok', 0)}; "
+             f"optional modules not staged: {totals.get('images_skipped', 0)}.",
              f"HLE handler: {totals.get('handled', 0)}; unknown-NID trap: {totals.get('trapped', 0)}.",
              "", "## Missing by reason", "", "| reason | count |", "| --- | ---: |"]
     for reason in REASONS:
@@ -348,7 +364,8 @@ def render_markdown(records, title="Import-stub census"):
         if rec["missing"] or rec["runtime_missing"] or rec["status"] != "ok":
             lines.append(f"| {rec['image']} | {rec['stubs']} | {len(rec['missing'])} | "
                          f"{len(rec['runtime_missing'])} | {rec['status']}"
-                         f"{(': ' + rec['refusal']) if rec['refusal'] else ''} |")
+                         f"{(': ' + rec['refusal']) if rec['refusal'] else ''}"
+                         f"{(': ' + rec['detail']) if rec['status'] == 'skipped' else ''} |")
     lines += ["", "## Missing entries by reason", ""]
     for reason in REASONS:
         entries = [(rec["image"], m) for rec in records for m in rec["missing"]
@@ -396,6 +413,14 @@ def main(argv=None):
     out = open(args.out, "w", encoding="utf-8") if args.out else None
     try:
         for path, label, base, spans in images:
+            if path is None and base == OPTIONAL_NOT_STAGED:
+                rec = skipped_record(label, OPTIONAL_NOT_STAGED)
+                records.append(rec)
+                if out is not None:
+                    out.write(json.dumps(rec, sort_keys=True) + "\n")
+                    out.flush()
+                print(f"{label} skipped {OPTIONAL_NOT_STAGED}", flush=True)
+                continue
             if path is None:
                 rec = unlocated_record(label, "guest module file not found in the title directory")
                 records.append(rec)

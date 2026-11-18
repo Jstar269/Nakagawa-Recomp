@@ -68,6 +68,8 @@ _DEFINITION_RE = re.compile(r"\bvoid\s+(sr_hle_register(?:_unsupported|_entry)?)
 _WRAPPER_ENTRY_CALL_RE = re.compile(
     r"\bsr_hle_register_entry\(\s*nid\s*,\s*name\s*,\s*(?:fn\s*,\s*0u|h_ControlledUnsupported\s*,\s*error)\s*\)\s*;"
 )
+#: The registration wrappers whose bodies forward to sr_hle_register_entry (hle.c).
+_WRAPPER_FUNCTIONS = frozenset({"sr_hle_register", "sr_hle_register_unsupported"})
 _SAS_LOOP_RE = re.compile(r"sr_hle_register\(\s*sas_ok\[i\]\s*,\s*\"([^\"]+)\"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*;")
 _SAS_ARRAY_RE = re.compile(r"\bsas_ok\[\]\s*=\s*\{([^}]*)\}\s*;", re.DOTALL)
 _HANDLER_DEF_RE = re.compile(r"\b(?:static\s+)?uint32_t\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*CpuState\s*\*")
@@ -258,7 +260,7 @@ _MECHANICAL_CONTROL_WORDS = frozenset(
 _MECHANICAL_SINGLE_EQ = r"(?<![=!<>+\-*/%&|^])=(?!=)"
 
 _MECHANICAL_RETURN_ZERO_RE = re.compile(
-    r"\breturn\s+(?:\(uint32_t\))?\s*(?:0(?:[xX]0+)?[uU]?|SCE_OK)\s*;"
+    r"\breturn\s+(?:\(uint32_t\))?\s*0(?:[xX]0+)?[uU]?\s*;"
 )
 _MECHANICAL_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _MECHANICAL_HANDLER_DEF_RE = re.compile(
@@ -457,8 +459,15 @@ def extract_registrations(raw_source: str, sources: list[tuple[str, str]] | None
 
     for m in _DEFINITION_RE.finditer(source):
         accounted.add(m.start(1))
-    for m in _WRAPPER_ENTRY_CALL_RE.finditer(source):
-        accounted.add(m.start())
+    # The one forwarding call in each wrapper body. The same text in any other
+    # function is a registration the census cannot attribute, so it stays unaccounted.
+    wrapper_matches = list(_WRAPPER_ENTRY_CALL_RE.finditer(source))
+    if wrapper_matches:
+        line_starts = _line_starts(source)
+        owners = enclosing_functions(source, line_starts)
+        for m in wrapper_matches:
+            if owners[bisect.bisect_right(line_starts, m.start()) - 1] in _WRAPPER_FUNCTIONS:
+                accounted.add(m.start())
 
     sas_loops = list(_SAS_LOOP_RE.finditer(source))
     if sas_loops:
@@ -1127,7 +1136,8 @@ def _blank_literals(stripped: str) -> str:
     Run on comment-free text. A name inside a string (an ``expect`` message, a log
     line) is then not a use, and a brace inside one cannot unbalance a function body.
     """
-    return hle_sources.blank_comments_and_literals(stripped)
+    blanked: str = hle_sources.blank_comments_and_literals(stripped)
+    return blanked
 
 
 #: A top-level function definition: a column-0 head up to its opening brace.
@@ -1154,6 +1164,14 @@ _SELFTEST_ANY_DEFINE_RE = re.compile(
 _C_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _C_LITERAL_NID_RE = re.compile(r"0x(?P<nid>[0-9a-fA-F]{1,8})[uU]?")
 _C_LEADING_CAST_RE = re.compile(r"^\(\s*(?:const\s+)?(?:uint32_t|unsigned(?:\s+int)?|u32)\s*\)\s*")
+#: `name = value` (not `==`, `.name =` or `->name =`).
+_C_ASSIGNMENT_RE = re.compile(r"(?<![\w.>])(?P<sym>[A-Za-z_][A-Za-z0-9_]*)[ \t]*=(?!=)")
+#: `name[...] = {` -- an array declaration with an initializer.
+_C_TABLE_DECL_RE = re.compile(r"\b(?P<sym>[A-Za-z_][A-Za-z0-9_]*)[ \t]*\[[^\]\[;{}]*\][ \t\r\n]*=[ \t\r\n]*\{")
+#: `table[i]` or `table[i].nid` -- one element (or one member of one row) of an initializer table.
+_SELFTEST_TABLE_ELEMENT_RE = re.compile(
+    r"(?P<table>[A-Za-z_][A-Za-z0-9_]*)\s*\[[^\[\]]+\](?:\s*\.\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*))?"
+)
 
 
 def _split_call_args(text: str, open_paren: int) -> list[str]:
@@ -1177,22 +1195,64 @@ def _split_call_args(text: str, open_paren: int) -> list[str]:
     return args
 
 
+def _strip_outer_parens(expr: str) -> str:
+    """``expr`` without parentheses that wrap all of it (and any cast just inside them)."""
+    while expr.startswith("(") and expr.endswith(")"):
+        depth, close = 0, -1
+        for i, c in enumerate(expr):
+            depth += c == "("
+            depth -= c == ")"
+            if depth == 0:
+                close = i
+                break
+        if close != len(expr) - 1:
+            break
+        expr = _C_LEADING_CAST_RE.sub("", expr[1:-1].strip()).strip()
+    return expr
+
+
+def _split_ternary(expr: str) -> tuple[str, str] | None:
+    """The two arms of a top-level ``cond ? a : b``, or ``None``."""
+    depth, question, nested = 0, -1, 0
+    for i, c in enumerate(expr):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and c == "?":
+            if question < 0:
+                question = i
+            else:
+                nested += 1
+        elif depth == 0 and c == ":" and question >= 0:
+            if nested:
+                nested -= 1
+            else:
+                return expr[question + 1 : i], expr[i + 1 :]
+    return None
+
+
 def selftest_dispatched_nids(selftest_text: str) -> set[int]:
     """NIDs the executable HLE selftest enters through ``sr_syscall``.
 
     A NID counts when one of these holds:
 
-    * a top-level ``#define NID_*`` constant that is referenced elsewhere in the
-      file (the original rule; a define that is never referenced does not count);
     * a literal NID handed to ``sr_syscall`` or to a dispatch helper;
     * a named constant (``#define``, ``enum`` member or ``const`` integer) handed
       to ``sr_syscall`` or to a dispatch helper, resolved in the enclosing function
-      first and the file second.
+      first and the file second;
+    * an entry of an initializer table that the dispatching function iterates:
+      ``sr_syscall(&cpu, nids[i])`` credits every element of ``nids[] = {...}``, and
+      ``sr_syscall(&cpu, rows[i].nid)`` credits the ``nid`` member of every row of a
+      table whose inline ``struct { ... }`` names that member. The table is the one
+      declared in the dispatching function before the call, else at file scope;
+      each entry resolves as a literal or a named constant, as above.
 
     A dispatch helper is a function that passes one of its own parameters to
     ``sr_syscall`` or to another dispatch helper as the NID, found to a fixed
     point. Naming a constant anywhere else (``sr_hle_test_is_registered``, a
-    comment, a string, a table) is not a dispatch and credits nothing.
+    comment, a string, a table no dispatch reads) is not a dispatch and credits
+    nothing.
     """
     nids: set[int] = set()
     text = hle_sources.blank_comments_and_literals(selftest_text)
@@ -1264,17 +1324,141 @@ def selftest_dispatched_nids(selftest_text: str) -> set[int]:
                     dispatch.setdefault(fn_name, set()).add(params.index(arg))
                     changed = True
 
+    # One pass each: every `name = ...` and every `name[...] = {` in the file, by name.
+    assignments: dict[str, list[re.Match[str]]] = {}
+    for m in _C_ASSIGNMENT_RE.finditer(text):
+        assignments.setdefault(m.group("sym"), []).append(m)
+    tables: dict[str, list[re.Match[str]]] = {}
+    for m in _C_TABLE_DECL_RE.finditer(text):
+        tables.setdefault(m.group("sym"), []).append(m)
+
+    def assigned_values(scope: int | None, ident: str) -> list[tuple[int | None, str]]:
+        """``(scope, value)`` of each ``ident = value`` in ``scope``, or anywhere for a file-scope name."""
+        found: list[tuple[int | None, str]] = []
+        for m in assignments.get(ident, []):
+            depth, end = 0, len(text)
+            for i in range(m.end(), len(text)):
+                c = text[i]
+                if c in "([{":
+                    depth += 1
+                elif c in ")]}":
+                    depth -= 1
+                    if depth < 0:
+                        end = i
+                        break
+                elif c in ";," and depth == 0:
+                    end = i
+                    break
+            found.append((owner(m.start()), text[m.end() : end]))
+        if any(where is None for where, _ in found):
+            return found
+        return [(where, value) for where, value in found if where == scope]
+
+    def resolve(scope: int | None, value: str, seen: frozenset[tuple[int | None, str]] = frozenset()) -> set[int]:
+        """The NIDs ``value`` can hold where ``scope`` dispatches it.
+
+        A literal; a named constant, resolved in ``scope`` first and the file second; both
+        arms of a ``cond ? a : b``; or a variable, through every value assigned to it in
+        ``scope`` (in any function, when the variable is declared at file scope).
+        """
+        value = _strip_outer_parens(_C_LEADING_CAST_RE.sub("", value.strip()).strip())
+        literal = _C_LITERAL_NID_RE.fullmatch(value)
+        if literal:
+            return {int(literal.group("nid"), 16)}
+        arms = _split_ternary(value)
+        if arms is not None:
+            return resolve(scope, arms[0], seen) | resolve(scope, arms[1], seen)
+        if not _C_IDENT_RE.fullmatch(value):
+            return set()
+        named = consts.get(scope, {}).get(value) or consts.get(None, {}).get(value)
+        if named:
+            return set(named)
+        if (scope, value) in seen:
+            return set()
+        out: set[int] = set()
+        for where, assigned in assigned_values(scope, value):
+            out |= resolve(where, assigned, seen | {(scope, value)})
+        return out
+
+    def table_column(fn: int | None, offset: int, table: str, field: str | None) -> set[int]:
+        """The NIDs one column of the initializer table ``table`` holds.
+
+        The table is the array declaration with an initializer in the dispatching
+        function (the last one before the call) or, failing that, at file scope. A
+        ``table[i].field`` dispatch reads the one member the table's inline struct
+        names; a declaration this cannot resolve exactly credits nothing.
+        """
+        found = None
+        for m in tables.get(table, []):
+            where = owner(m.start())
+            if where == fn and fn is not None and m.start() < offset:
+                found = m
+            elif where is None and found is None:
+                found = m
+        if found is None:
+            return set()
+        rows = _split_call_args(text, found.end() - 1)
+        scope = owner(found.start())
+        if field is None:
+            return set().union(*(resolve(scope, row) for row in rows)) if rows else set()
+        head = text[max(0, found.start() - 2048) : found.start()]
+        inline = re.search(r"\bstruct[ \t\r\n]*\{(?P<body>[^{}]*)\}[ \t\r\n]*$", head)
+        if inline is not None:
+            body = inline.group("body")
+        else:
+            # `static const Row rows[] = ...` or `struct Row rows[] = ...`: the member list
+            # of the one `typedef struct [Tag] { ... } Row;` or `struct Row { ... };`.
+            named = re.search(r"\b(?P<type>[A-Za-z_][A-Za-z0-9_]*)[ \t\r\n]*$", head)
+            if named is None:
+                return set()
+            kind = re.escape(named.group("type"))
+            bodies = [
+                m.group("body") if m.group("body") is not None else m.group("tagbody")
+                for m in re.finditer(
+                    r"\btypedef[ \t\r\n]+struct[ \t\r\n]*(?:[A-Za-z_][A-Za-z0-9_]*[ \t\r\n]*)?"
+                    r"\{(?P<body>[^{}]*)\}[ \t\r\n]*" + kind + r"[ \t\r\n]*;"
+                    r"|\bstruct[ \t\r\n]+" + kind + r"[ \t\r\n]*\{(?P<tagbody>[^{}]*)\}[ \t\r\n]*;",
+                    text,
+                )
+            ]
+            if len(bodies) != 1:
+                return set()
+            body = bodies[0]
+        members: list[str] = []
+        for decl in body.split(";"):
+            for k, declarator in enumerate(decl.split(",")):
+                idents = _C_IDENT_RE.findall(declarator.split("[", 1)[0])
+                if idents:
+                    members.append(idents[-1] if k == 0 else idents[0])
+        if field not in members:
+            return set()
+        column = members.index(field)
+        out: set[int] = set()
+        for row in rows:
+            if not row.startswith("{"):
+                continue
+            cells = _split_call_args(row, 0)
+            designated = [c for c in cells if c.startswith(".")]
+            if designated:
+                for cell in designated:
+                    name, _, value = cell[1:].partition("=")
+                    if name.strip() == field:
+                        out |= resolve(scope, value)
+            elif column < len(cells):
+                out |= resolve(scope, cells[column])
+        return out
+
     for offset, name, args in find_calls():
         fn = owner(offset)
         for index in dispatch[name]:
             if index >= len(args):
                 continue
             arg = _C_LEADING_CAST_RE.sub("", args[index]).strip()
-            literal = _C_LITERAL_NID_RE.fullmatch(arg)
-            if literal:
-                nids.add(int(literal.group("nid"), 16))
-            elif _C_IDENT_RE.fullmatch(arg):
-                nids.update(consts.get(fn, {}).get(arg) or consts.get(None, {}).get(arg) or set())
+            subscript = _SELFTEST_TABLE_ELEMENT_RE.fullmatch(arg)
+            if subscript:
+                nids |= table_column(fn, offset, subscript.group("table"), subscript.group("field"))
+            else:
+                nids |= resolve(fn, arg)
     return nids
 
 

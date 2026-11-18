@@ -19,7 +19,9 @@ import io
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from typing import Any, ClassVar, cast
 from unittest import mock
@@ -142,6 +144,29 @@ static void init(void) {
         with self.assertRaises(ManifestError) as ctx:
             extract_registrations(src)
         self.assertIn("cannot account for", str(ctx.exception))
+
+    def test_wrapper_forwarding_text_outside_the_wrappers_fails_closed(self) -> None:
+        wrappers = (
+            "\nvoid sr_hle_register(uint32_t nid, const char *name, HleFn fn) {\n"
+            "    sr_hle_register_entry(nid, name, fn, 0u);\n"
+            "}\n"
+            "void sr_hle_register_unsupported(uint32_t nid, const char *name, uint32_t error) {\n"
+            "    sr_hle_register_entry(nid, name, h_ControlledUnsupported, error);\n"
+            "}\n"
+        )
+        extract_registrations(SYNTH_SOURCE + wrappers)
+        for copied in (
+            "static void helper(uint32_t nid, const char *name, HleFn fn) {\n"
+            "    sr_hle_register_entry(nid, name, fn, 0u);\n"
+            "}\n",
+            "static void helper(uint32_t nid, const char *name, uint32_t error) {\n"
+            "    sr_hle_register_entry(nid, name, h_ControlledUnsupported, error);\n"
+            "}\n",
+        ):
+            with self.subTest(copied=copied.splitlines()[1].strip()):
+                with self.assertRaises(ManifestError) as ctx:
+                    extract_registrations(SYNTH_SOURCE + wrappers + copied)
+                self.assertIn("cannot account for", str(ctx.exception))
 
     def test_duplicate_nid_fails(self) -> None:
         src = SYNTH_SOURCE.replace('0x00000020, "synthBeta"', '0x00000010, "synthBeta"')
@@ -379,19 +404,31 @@ class RegistrationOwnerFileTests(unittest.TestCase):
 
     def test_live_production_tree_registers_only_from_composed_sources(self) -> None:
         composed = [path for path, _ in hle_manifest.runtime_hle_sources()]
-        untracked = ROOT / "src" / "rt" / "_untracked_audit_probe.c"
-        untracked.write_text(
-            'static void probe(void) { sr_hle_register(0x00000099u, "probe", h_Probe); }\n',
-            encoding="utf-8",
-        )
-        try:
-            files = {
-                p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8")
-                for p in sorted(hle_manifest.tracked_src_c_files())
-            }
-        finally:
-            untracked.unlink(missing_ok=True)
+        files = {
+            p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8")
+            for p in sorted(hle_manifest.tracked_src_c_files())
+        }
         self.assertEqual(hle_manifest.registration_calls_outside(files, composed), [])
+
+    def test_tracked_src_c_files_excludes_untracked_files(self) -> None:
+        """A local untracked .c file is not part of the tree the census checks.
+
+        Built in a throwaway repository, so the run never writes into the checkout.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "src" / "rt").mkdir(parents=True)
+            (repo / "src" / "rt" / "tracked.c").write_text("int tracked;\n", encoding="utf-8")
+            (repo / "src" / "rt" / "notes.h").write_text("int header;\n", encoding="utf-8")
+            (repo / "src" / "rt" / "untracked.c").write_text(
+                'static void probe(void) { sr_hle_register(0x00000099u, "probe", h_Probe); }\n',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "src/rt/tracked.c", "src/rt/notes.h"], cwd=repo, check=True)
+            with mock.patch.object(hle_manifest, "ROOT", repo):
+                found = hle_manifest.tracked_src_c_files()
+            self.assertEqual(found, [repo / "src" / "rt" / "tracked.c"])
 
     def test_nid_registered_from_two_runtime_units_is_rejected(self) -> None:
         a = (
@@ -1395,11 +1432,14 @@ static uint32_t h_SynthReal(CpuState *s) {
             "static uint32_t h_HexZero(CpuState *s) { (void)s; return 0x0; }\n"
             "static uint32_t h_HexZeroU(CpuState *s) { (void)s; return (uint32_t)0x00000000U; }\n"
             "static uint32_t h_NonZero(CpuState *s) { (void)s; return 0x10; }\n"
+            "static uint32_t h_NamedOk(CpuState *s) { (void)s; return SCE_OK; }\n"
         )
         stubs = hle_manifest.mechanical_stub_handlers(src)
         self.assertIn("h_HexZero", stubs)
         self.assertIn("h_HexZeroU", stubs)
         self.assertNotIn("h_NonZero", stubs)
+        # No runtime source defines SCE_OK, so it is not a zero spelling the census may assume.
+        self.assertNotIn("h_NamedOk", stubs)
 
     def test_mechanical_stubs_classify_as_fake_success(self) -> None:
         stubs = hle_manifest.mechanical_stub_handlers(self.SYNTH_STUB_SOURCE)
@@ -1815,6 +1855,72 @@ class ConformanceJoinTests(unittest.TestCase):
         self.assertIn(0x2E2E2E2E, found)
         self.assertNotIn(0x1D1D1D1D, found)
 
+    def test_selftest_dispatch_credits_an_iterated_initializer_table(self) -> None:
+        """`sr_syscall(&cpu, rows[i].nid)` over a `{NID_X, error}` table dispatches every row's NID."""
+        source = (
+            "#define NID_ROW_A 0x0a0a0a0au\n"
+            "#define NID_ROW_B 0x0b0b0b0bu\n"
+            "#define NID_TYPED 0x0c0c0c0cu\n"
+            "#define NID_PLAIN 0x0d0d0d0du\n"
+            "#define NID_ERR_ONLY 0x0e0e0e0eu\n"
+            "#define NID_UNREAD 0x0f0f0f0fu\n"
+            "#define NID_REG_ONLY 0x1a1a1a1au\n"
+            "typedef struct Row { const char *name; uint32_t init, update; } Row;\n"
+            "static const uint32_t s_file_nids[2] = { NID_PLAIN, 0x1b1b1b1bu };\n"
+            "static uint32_t call(uint32_t nid) { CpuState cpu; return sr_syscall(&cpu, nid); }\n"
+            "static void test_rows(void) {\n"
+            "    static const struct { uint32_t nid; uint32_t error; const char *name; } refused[] = {\n"
+            "        {NID_ROW_A, NID_ERR_ONLY, \"a, b\"},\n"
+            "        {NID_ROW_B, 0x80020002u, \"b\"},\n"
+            "    };\n"
+            "    static const Row rows[] = { { \"x\", NID_REG_ONLY, NID_TYPED } };\n"
+            "    static const uint32_t unread[] = { NID_UNREAD };\n"
+            "    CpuState cpu;\n"
+            "    for (size_t i = 0; i < 2; i++) {\n"
+            "        expect(sr_hle_test_is_registered(rows[i].init), \"registered\");\n"
+            "        expect(sr_syscall(&cpu, refused[i].nid) == refused[i].error, \"refused\");\n"
+            "        expect(call(rows[i].update) == 0u, \"typedef row through a helper\");\n"
+            "        expect(sr_syscall(&cpu, s_file_nids[i]) == 0u, \"file-scope table\");\n"
+            "    }\n"
+            "    (void)unread;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            hle_manifest.selftest_dispatched_nids(source),
+            {0x0A0A0A0A, 0x0B0B0B0B, 0x0C0C0C0C, 0x0D0D0D0D, 0x1B1B1B1B},
+            "only the dispatched column of an iterated table counts: not the error column, "
+            "not a column only checked for registration, and not a table no dispatch reads",
+        )
+
+    def test_selftest_dispatch_credits_both_arms_and_assigned_variables(self) -> None:
+        source = (
+            "#define NID_RECV 0x21212121u\n"
+            "#define NID_RECV_CB 0x22222222u\n"
+            "#define NID_DELAY 0x23232323u\n"
+            "#define NID_DELAY_CB 0x24242424u\n"
+            "#define NID_ALIASED 0x25252525u\n"
+            "static uint32_t s_delay_nid = NID_DELAY;\n"
+            "static void delay_entry(void) { CpuState cpu; (void)sr_syscall(&cpu, s_delay_nid); }\n"
+            "static void test_g(int cb) {\n"
+            "    CpuState cpu;\n"
+            "    const uint32_t alias = NID_ALIASED, other = 0u;\n"
+            "    s_delay_nid = NID_DELAY_CB;\n"
+            "    (void)sr_syscall(&cpu, cb ? NID_RECV_CB : NID_RECV);\n"
+            "    (void)sr_syscall(&cpu, alias);\n"
+            "    (void)other;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            hle_manifest.selftest_dispatched_nids(source),
+            {0x21212121, 0x22222222, 0x23232323, 0x24242424, 0x25252525},
+        )
+
+    def test_live_selftest_table_dispatches_are_credited(self) -> None:
+        """The kernel import sweep dispatches sceGeSaveContext and sceGeRestoreContext from a table."""
+        found = hle_manifest.selftest_dispatched_nids(hle_manifest._read_optional(hle_manifest.SELFTEST_C))
+        self.assertIn(0x438A385A, found)  # sceGeSaveContext
+        self.assertIn(0x0BF608FB, found)  # sceGeRestoreContext
+
 
 class EvidenceTierTests(unittest.TestCase):
     @staticmethod
@@ -2181,10 +2287,6 @@ class LiveEvidenceChainTests(unittest.TestCase):
                 entry = next(e for e in self.chain["entries"] if e["canonical_name"] == api)
                 self.assertEqual(entry["exercised"]["psp_oracle_probes"], probes)
         self.assertGreater(len(matched), 0, "at least one hardware-probe API must join a registration")
-        fake_entries = [dict(e, canonical_name=f"broken::{e['canonical_name']}") for e in self.chain["entries"]]
-        fake_registered = {e["canonical_name"] for e in fake_entries}
-        self.assertEqual([api for api in apis if api in fake_registered], [])
-
 
 
 class ProfileZeroImportGateTests(unittest.TestCase):

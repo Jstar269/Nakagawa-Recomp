@@ -431,6 +431,37 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(report["imports"][0]["classification"], "missing")
         self.assertEqual(report["imports"][0]["name"], "sceNpCommerce2GetProductInfoStart")
 
+    def test_unusable_nid_corpus_fails_visibly(self) -> None:
+        """A missing or corrupt corpus is a named error, never an empty name map."""
+        import contextlib
+        import io
+        import tempfile
+        from unittest import mock
+
+        import gen_nidnames
+
+        table = parse_import_table(build_import_elf([("sceNpCommerce2", [0x005B5F20])]))
+        with tempfile.TemporaryDirectory() as td:
+            corrupt = Path(td) / "nid_corpus.json"
+            corrupt.write_text("{not json", encoding="ascii")
+            elf = Path(td) / "fixture.bin"
+            elf.write_bytes(build_import_elf([("sceNpCommerce2", [0x005B5F20])]))
+            manifest = Path(td) / "manifest.json"
+            manifest.write_text(json.dumps(SYNTH_MANIFEST), encoding="ascii")
+            for label, path in (("missing", Path(td) / "absent.json"), ("corrupt", corrupt)):
+                with self.subTest(corpus=label), mock.patch.object(gen_nidnames, "CORPUS", path):
+                    import_audit._corpus_nid_names.cache_clear()
+                    try:
+                        with self.assertRaises(import_audit.NidCorpusError):
+                            import_audit.classify_imports(table.funcs, SYNTH_MANIFEST)
+                        err = io.StringIO()
+                        with contextlib.redirect_stderr(err):
+                            rc = import_audit.main(["--elf", str(elf), "--manifest", str(manifest)])
+                        self.assertEqual(rc, 1)
+                        self.assertIn("import_audit: NID corpus unusable:", err.getvalue())
+                    finally:
+                        import_audit._corpus_nid_names.cache_clear()
+
     def test_cross_library_duplicate_nids_reported(self) -> None:
         table = parse_import_table(build_import_elf(MIXED_FIXTURE_LIBS))
         report = import_audit.classify_imports(table.funcs, SYNTH_MANIFEST)

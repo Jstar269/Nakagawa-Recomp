@@ -74,14 +74,19 @@ def load_imports(path):
 
 
 def _stub_runs(imp):
-    """Contiguous stub runs from `imp`, bridging small gaps (<= 64 bytes) inside one stub table."""
+    """The stub regions of `imp`: runs of strictly contiguous 8-byte slots.
+
+    tools/imports.py emits every slot of every stub region (a slot no window claims
+    carries the unattributed marker), so a gap between two mapped slots is not stub
+    text, and a `jr $ra` there is an ordinary function return.
+    """
     if not imp:
         return ()
     ordered = sorted(imp)
     runs = []
     lo = hi = ordered[0]
     for s in ordered[1:]:
-        if s - hi <= 64:
+        if s - hi == 8:
             hi = s
         else:
             runs.append((lo, hi + 8))

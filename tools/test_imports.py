@@ -23,6 +23,7 @@ import sys
 import struct
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -148,6 +149,35 @@ class CodegenImportCompatibilityTests(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     rc_missing = imports.main(["imports.py", "--env-elf", "0x0", "--toml"])
                 self.assertEqual(rc_missing, 2)
+
+
+class MappedSpanContractTests(unittest.TestCase):
+    """Import-table spans are bounded by the image's read contract, not its internals."""
+
+    def test_a_span_past_the_segment_file_image_is_unmapped(self) -> None:
+        blob = build_import_elf(PRIMARY)
+        elf = Elf(blob, base=0)
+        (seg,) = [s for s in elf.segments if s["type"] == 1]
+        end = seg["vaddr"] + seg["filesz"]
+        self.assertGreater(len(blob), seg["off"] + seg["filesz"], "file bytes follow the segment")
+        # read_at_vaddr only places the start, so it serves the file bytes past the segment.
+        self.assertEqual(len(elf.read_at_vaddr(end - 4, 8)), 8)
+        self.assertIsNone(elf.read_mapped_span(end - 4, 8))
+        self.assertIsNone(imports._read_mapped(elf, end - 4, 8))
+        self.assertEqual(elf.read_mapped_span(end - 8, 8), elf.read_at_vaddr(end - 8, 8))
+        self.assertEqual(imports._read_mapped(elf, end - 8, 8), elf.read_at_vaddr(end - 8, 8))
+        self.assertEqual(elf.read_mapped_span(end, 0), b"")
+
+    def test_an_image_with_only_the_read_contract_is_bounded_by_it(self) -> None:
+        class OneSpanImage:
+            """Serves exactly one span's bytes; no analyze.Elf attributes."""
+
+            def read_at_vaddr(self, address: int, size: int) -> bytes | None:
+                start = address - 0x1000
+                return bytes(range(16))[start:start + size] if 0 <= start and start + size <= 16 else None
+
+        self.assertEqual(imports._read_mapped(OneSpanImage(), 0x1004, 4), bytes((4, 5, 6, 7)))
+        self.assertIsNone(imports._read_mapped(OneSpanImage(), 0x100C, 8))
 
 
 class RetailImportLayoutTests(unittest.TestCase):

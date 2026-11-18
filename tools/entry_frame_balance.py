@@ -133,8 +133,8 @@ def sp_effect(word):
         return 0, True  # ALU immediates, loads, lwl/lwr, ll/sc writing $sp
     if op == 0x11 and rs in (0x00, 0x02) and rt == SP:
         return 0, True  # mfc1, cfc1 writing $sp
-    if op == 0x12 and rs in (0x03, 0x07) and rt == SP:
-        return 0, True  # mfv, mfvc writing $sp
+    if op == 0x12 and rs == 0x03 and rt == SP:
+        return 0, True  # mfv, mfvc (rs 3, bit 7 set) writing $sp; mtv/mtvc (rs 7) write no GPR
     if op == 0x1F:
         if fn in (0x00, 0x04) and rt == SP:
             return 0, True  # ext, ins writing $sp

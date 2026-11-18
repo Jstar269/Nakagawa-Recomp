@@ -59,13 +59,29 @@ _FINDING_ADDR_RE = re.compile(r"0x[0-9a-fA-F]{8}")
 _MANIFEST_ROW_FIELDS = ("nid", "name", "handler", "origin", "classification", "status")
 
 
+class NidCorpusError(Exception):
+    """The tracked NID corpus cannot be read or parsed. Message is one line."""
+
+
 @functools.lru_cache(maxsize=1)
 def _corpus_nid_names() -> dict[int, str]:
+    """Names for unregistered NIDs, from the tracked tools/nid_corpus.json.
+
+    A missing or corrupt corpus is an error, never an empty map: an empty map would
+    silently report every missing import without its name.
+    """
     try:
         corpus = json.loads(gen_nidnames.CORPUS.read_text(encoding="utf-8"))
-        return gen_nidnames.nid_names(corpus)
-    except (OSError, json.JSONDecodeError, gen_nidnames.CorpusError):
-        return {}
+        names: dict[int, str] = gen_nidnames.nid_names(corpus)
+    except OSError as e:
+        raise NidCorpusError(f"cannot read {gen_nidnames.CORPUS.name}: {e.strerror}") from e
+    except json.JSONDecodeError as e:
+        raise NidCorpusError(
+            f"{gen_nidnames.CORPUS.name} is not valid JSON: {e.msg} at line {e.lineno}"
+        ) from e
+    except gen_nidnames.CorpusError as e:
+        raise NidCorpusError(f"{gen_nidnames.CORPUS.name} is not a usable NID corpus: {e}") from e
+    return names
 
 
 class ManifestValidationError(Exception):
@@ -303,9 +319,13 @@ def main(argv: list[str]) -> int:
         print(f"import_audit: malformed input: {e}", file=sys.stderr)
         return 1
 
-    report = classify_imports(
-        table.funcs, manifest, with_addresses=args.with_addresses, findings=table.findings
-    )
+    try:
+        report = classify_imports(
+            table.funcs, manifest, with_addresses=args.with_addresses, findings=table.findings
+        )
+    except NidCorpusError as e:
+        print(f"import_audit: NID corpus unusable: {e}", file=sys.stderr)
+        return 1
     text = render_text(report)
     if args.out:
         _dump(report, args.out)

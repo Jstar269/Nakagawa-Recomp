@@ -599,6 +599,29 @@ class Elf:
     def sec(self, name):
         return next((s for s in self.sections if s.get("nm") == name), None)
 
+    def read_mapped_span(self, vaddr, n):
+        """The ``n`` bytes at ``vaddr`` when one mapped span holds all of them, else None.
+
+        read_at_vaddr only places the start: it serves file bytes from there on, which can
+        run past the segment's file image. Table parsers that bound a guest-supplied span
+        read through this instead (the relocated image for a PRX, else one PT_LOAD's file
+        bytes).
+        """
+        if type(vaddr) is not int or type(n) is not int or vaddr < 0 or n < 0 or vaddr + n > 0x100000000:
+            return None
+        if self.reloc is not None:
+            lo, hi = self.reloc.lo, self.reloc.lo + len(self.reloc.mem)
+            spans = ((lo, hi),)
+        else:
+            spans = tuple((seg["vaddr"], seg["vaddr"] + seg["filesz"]) for seg in self.segments if seg["type"] == 1)
+        for lo, hi in spans:
+            if lo <= vaddr and vaddr + n <= hi:
+                if n == 0:
+                    return b""
+                blob = self.read_at_vaddr(vaddr, n)
+                return blob if blob is not None and len(blob) == n else None
+        return None
+
     def read_at_vaddr(self, vaddr, n):
         # For a relocated PRX, serve the rebased+relocated image directly.
         if self.reloc is not None:

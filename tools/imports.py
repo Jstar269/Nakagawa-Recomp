@@ -63,6 +63,7 @@ from psp_import_table import (
     ImportWindow,
     MAX_STUB_ENTRY_WORDS,
     MIN_STUB_ENTRY_WORDS,
+    U32_MAX,
     layout_import_windows,
 )
 from psp_import_table import ImportTableError as LayoutImportError
@@ -110,28 +111,27 @@ def _rebase(v, base):
     return v + base if v and base != 0 and v < base else v
 
 
-def _mapped_span(elf, addr, size):
-    """True when [addr, addr + size) lies wholly inside one mapped span of ``elf``."""
-    if size < 0 or addr < 0 or addr + size > 0x100000000:
-        return False
-    if getattr(elf, "reloc", None) is not None:
-        lo = elf.reloc.lo
-        hi = lo + len(elf.reloc.mem)
-        return lo <= addr and addr + size <= hi
-    return any(
-        seg["type"] == 1 and seg["vaddr"] <= addr and addr + size <= seg["vaddr"] + seg["filesz"]
-        for seg in getattr(elf, "segments", ())
-    )
-
-
 def _read_mapped(elf, addr, size):
-    """Read ``size`` bytes from ``addr`` only when the complete span is mapped."""
-    if not _mapped_span(elf, addr, size):
+    """The ``size`` bytes at ``addr`` when the image maps the whole span, else None.
+
+    The image read contract: ``read_at_vaddr(addr, n)`` serves the bytes of one mapped
+    span or None (prxload.ProgramImage, the synthetic test images). An image whose
+    ``read_at_vaddr`` only places the start, as analyze.Elf's does, also offers
+    ``read_mapped_span``, which holds the whole span to one mapped span; that is used
+    when present. Either way a short read is unmapped.
+    """
+    if size < 0 or addr < 0 or addr + size > 0x100000000:
         return None
-    blob = elf.read_at_vaddr(addr, size)
+    reader = getattr(elf, "read_mapped_span", None) or elf.read_at_vaddr
+    blob = reader(addr, size)
     if blob is None or len(blob) != size:
         return None
-    return blob
+    return bytes(blob)
+
+
+def _mapped_span(elf, addr, size):
+    """True when the image maps all of [addr, addr + size) (see _read_mapped)."""
+    return _read_mapped(elf, addr, size) is not None
 def _variable_import_table(elf, pos, entry_bytes, size_words, library, count, rebase):
     """Validate and record one entry's variable-import declaration.
 
@@ -520,6 +520,13 @@ def _walk_import_windows(elf):
             variable_tables.append(
                 _variable_import_table(elf, pos, e, size, libname, numVars, rebase))
         if numFuncs > 0:
+            # The layout's named arithmetic boundary first, so a wrapping window reads as
+            # that rather than as an unmapped span.
+            if firstSym + numFuncs * 8 > U32_MAX or nidData + numFuncs * 4 > U32_MAX:
+                raise ImportTableError(
+                    "ANALYZER_IMPORT_TABLE_INVALID",
+                    "import table address arithmetic exceeds 32-bit guest space",
+                )
             if not _mapped_span(elf, nidData, numFuncs * 4):
                 raise ImportTableError(
                     "ANALYZER_IMPORT_TABLE_INVALID",

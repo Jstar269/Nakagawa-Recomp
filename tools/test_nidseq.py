@@ -233,21 +233,21 @@ class TestNidseqFailClosed(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("VERIFIED: import sequences identical (1 imports)", out)
 
-    def test_two_different_unmapped_stubs_diverge(self):
-        # STUBS[0] and STUBS[3] are mapped, so the stub range also covers the unmapped
-        # STUBS[1] and STUBS[2]. Unmapped stubs are keyed by PC, so two different ones diverge.
+    def test_a_return_in_a_small_gap_between_stub_runs_is_not_an_import(self):
+        # imports.py emits every slot of every stub region (unclaimed slots under the
+        # unattributed marker), so a gap in the map is not stub text: STUBS[0] and
+        # STUBS[3] are two one-slot runs, and a jr $ra at STUBS[1] or STUBS[2] (8 and
+        # 16 bytes past the first run) is an ordinary function return.
         toml = self.toml_with([0, 3])
-        rc, out = run_tool([toml, self.trace([STUBS[1]]), self.trace([STUBS[2]])])
-        self.assertEqual(rc, 1, out)
-        self.assertIn("DIVERGE at import 0: recomp=?.0x08a00008 oracle=?.0x08a00010", out)
-        self.assertIn("FAILED: import sequences diverge", out)
-        self.assertNotIn("VERIFIED", out)
-
-    def test_same_unmapped_stub_still_verifies(self):
-        toml = self.toml_with([0, 3])
-        rc, out = run_tool([toml, self.trace([STUBS[1]]), self.trace([STUBS[1]])])
+        for gap_pc in (STUBS[1], STUBS[2]):
+            with self.subTest(pc=hex(gap_pc)):
+                rc, out = run_tool([toml, self.trace([gap_pc]), self.trace([gap_pc])])
+                self.assertEqual(rc, 1, out)
+                self.assertIn("FAIL: zero imports compared", out)
+                self.assertNotIn("VERIFIED", out)
+        rc, out = run_tool([toml, self.trace([STUBS[0], STUBS[1], STUBS[3]]), self.trace([STUBS[0], STUBS[3]])])
         self.assertEqual(rc, 0, out)
-        self.assertIn("VERIFIED: import sequences identical (1 imports)", out)
+        self.assertIn("VERIFIED: import sequences identical (2 imports)", out)
 
     def test_duplicate_stub_address_fails(self):
         toml = self.write_imports([(STUBS[0], NIDS[0])])
@@ -305,6 +305,12 @@ class TestNidseqUnit(unittest.TestCase):
         import nidseq as m
 
         cls.m = m
+
+    def test_stub_runs_are_strictly_contiguous_slots(self):
+        imp = {STUBS[0]: ("l", 1), STUBS[1]: ("l", 2), STUBS[3]: ("l", 4)}
+        self.assertEqual(
+            self.m._stub_runs(imp), ((STUBS[0], STUBS[1] + 8), (STUBS[3], STUBS[3] + 8))
+        )
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

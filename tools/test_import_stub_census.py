@@ -16,6 +16,8 @@ such stubs (analyze._import_stub_is_file_executable) does not change that: the c
 rule of the late passes keeps a directly called stub, so the census stays clean.
 """
 
+import contextlib
+import io
 import json
 import os
 import struct
@@ -393,7 +395,26 @@ class ManifestImages(unittest.TestCase):
                     ],
                 }, fh)
             images = census.manifest_images(manifest_path, title_dir)
-        self.assertEqual([img[1] for img in images], ["TESTDISC/EBOOT.elf"])
+            self.assertEqual(
+                [(img[1], img[2]) for img in images[1:]],
+                [("TESTDISC/opt.prx", census.OPTIONAL_NOT_STAGED)],
+                "the unstaged optional module stays in the census as a note; the HLE capability does not",
+            )
+            out_path = os.path.join(root, "census.jsonl")
+            markdown_path = os.path.join(root, "census.md")
+            with mock.patch.object(census, "handled_nids", return_value=frozenset()),                     contextlib.redirect_stdout(io.StringIO()):
+                census.main(["--manifest", manifest_path, "--title-dir", title_dir,
+                             "--out", out_path, "--markdown", markdown_path])
+            with open(out_path, encoding="utf-8") as fh:
+                records = [json.loads(line) for line in fh]
+            with open(markdown_path, encoding="utf-8") as fh:
+                markdown = fh.read()
+        self.assertEqual([r["image"] for r in records], ["TESTDISC/EBOOT.elf", "TESTDISC/opt.prx"])
+        note = records[1]
+        self.assertEqual((note["status"], note["detail"]), ("skipped", "optional module not staged"))
+        self.assertEqual(census.check_failures([note]), [], "an unstaged optional module never blocks the gate")
+        self.assertEqual(census.summarize([note])["totals"], {"images_skipped": 1})
+        self.assertIn("| TESTDISC/opt.prx | 0 | 0 | 0 | skipped: optional module not staged |", markdown)
 
     def test_duplicate_module_filenames_in_title_dir_prefer_decrypted_or_refuse(self):
         with tempfile.TemporaryDirectory() as root:

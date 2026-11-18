@@ -417,10 +417,19 @@ class FrameBalanceBasicsTests(unittest.TestCase):
             ("mfc1 $sp", (0x11 << 26) | (0x00 << 21) | (SP << 16)),
             ("cfc1 $sp", (0x11 << 26) | (0x02 << 21) | (SP << 16)),
             ("mfv $sp", (0x12 << 26) | (0x03 << 21) | (SP << 16)),
-            ("mfvc $sp", (0x12 << 26) | (0x07 << 21) | (SP << 16)),
+            ("mfvc $sp", (0x12 << 26) | (0x03 << 21) | (SP << 16) | 0x80),
         ):
             with self.subTest(form=label):
                 self.assertEqual(efb.sp_effect(word), (0, True), label)
+
+    def test_vfpu_moves_to_the_vfpu_leave_sp_untouched(self):
+        """mtv and mtvc (COP2 rs 7) read rt and write no general register."""
+        for label, word in (
+            ("mtv $sp", (0x12 << 26) | (0x07 << 21) | (SP << 16)),
+            ("mtvc $sp", (0x12 << 26) | (0x07 << 21) | (SP << 16) | 0x80),
+        ):
+            with self.subTest(form=label):
+                self.assertEqual(efb.sp_effect(word), (0, False), label)
 
     def test_unconditional_branch_synonyms_do_not_invent_fallthrough(self):
         """beql $0,$0 and bgez/bgezl $0 have no fall-through path."""
