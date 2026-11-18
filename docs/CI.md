@@ -1500,7 +1500,10 @@ the trusted run. Serialising CodeQL after `CI`, by a `workflow_run` of the merge
 alternative is not used.
 
 **Provenance on a group.** `.github/workflows/provenance-attestation-merge-group.yml`
-observes each group commit with the default-branch provenance verifier. It runs as a
+observes each group commit with the default-branch provenance verifier, then audits the
+group tree with the default-branch publication audit (`tools/publish_audit.py
+--committed-tree`, the same step as the pull-request attestation), so the tree that
+combines the queued pull requests is checked as a whole. It runs as a
 `workflow_run` of the group's `CI` run, filtered to `merge_group` runs of this
 repository's `gh-readonly-queue/` branches, and reads the group commit as data only,
 without checking it out. Its verdict base is the merge base of the group with the

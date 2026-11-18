@@ -4998,6 +4998,201 @@ class PolicyDeltaLookupWiringTests(unittest.TestCase):
                 self.assertIn('test -s "${RUNNER_TEMP}/trusted/candidate-policy.json"', text)
                 self.assertIn('test -s "${RUNNER_TEMP}/trusted/policy-delta-authority.json"', text)
 
+    # The stand-in for `gh api`: it answers each nested (both digests) or flat (candidate digest
+    # only) record with its content, nothing, or gh's own error line for an HTTP status.
+    GH_STUB = (
+        '#!/bin/bash\nfor url; do :; done\necho "$url" >> "$NK_TEST_LOG"\n'
+        'case "$url" in\n'
+        '  *"/$NK_TEST_BASE/"*candidate-policy.json*) answer="$NK_TEST_NESTED_CANDIDATE" ;;\n'
+        '  *"/$NK_TEST_BASE/"*) answer="$NK_TEST_NESTED_AUTHORITY" ;;\n'
+        '  *) answer="$NK_TEST_FLAT" ;;\n'
+        'esac\n'
+        'case "$answer" in\n'
+        '  ok) echo "{\\"record\\": \\"$url\\"}" ;;\n'
+        '  empty) ;;\n'
+        '  *) echo "gh: request failed (HTTP $answer)" >&2; exit 1 ;;\n'
+        'esac\n'
+    )
+
+    def _legacy_lookup(self, nested_candidate: str, nested_authority: str,
+                       flat: str) -> tuple[int, str, list[str], str]:
+        """Run the workflows' own V1/V2 lookup against the stub; return its status, outputs, URLs and stderr."""
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        snippets = set()
+        for name in self.WORKFLOWS:
+            text = _workflow_text(name)
+            begin, end = "# legacy-policy-delta-lookup:begin", "# legacy-policy-delta-lookup:end"
+            self.assertEqual((text.count(begin), text.count(end)), (1, 1), name)
+            snippets.add(textwrap.dedent(text[text.index(begin):text.index(end)]))
+        self.assertEqual(len(snippets), 1, "the two lookups must not drift apart")
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        scratch = Path(holder.name)
+        (scratch / "bin").mkdir()
+        (scratch / "trusted").mkdir()
+        stub = scratch / "bin" / "gh"
+        stub.write_bytes(self.GH_STUB.encode("utf-8"))
+        stub.chmod(0o755)
+        for name in ("log", "output"):
+            (scratch / name).write_text("", encoding="utf-8")
+        env = {
+            **os.environ,
+            "NK_TEST_STUBS": _bash_path(scratch / "bin"), "NK_TEST_LOG": _bash_path(scratch / "log"),
+            "NK_TEST_BASE": "b" * 64, "NK_TEST_NESTED_CANDIDATE": nested_candidate,
+            "NK_TEST_NESTED_AUTHORITY": nested_authority, "NK_TEST_FLAT": flat,
+            "RUNNER_TEMP": _bash_path(scratch), "GITHUB_OUTPUT": _bash_path(scratch / "output"),
+            "TRUSTED_REPO": "example/authority", "authority_sha": "a" * 40,
+            "candidate_policy_sha": "c" * 64, "base_policy_sha": "b" * 64,
+        }
+        script = 'export PATH="$NK_TEST_STUBS:$PATH"\nset -euo pipefail\n' + snippets.pop()
+        done = subprocess.run([bash, "-c", script], capture_output=True, text=True, env=env, timeout=60, check=False)
+        return (done.returncode, (scratch / "output").read_text(encoding="utf-8"),
+                (scratch / "log").read_text(encoding="utf-8").splitlines(), done.stderr)
+
+    def test_only_a_confirmed_absence_of_the_nested_record_takes_the_flat_layout(self) -> None:
+        """Failing-before (audit 2026-11-17 F-324e15c6): any error on a nested fetch (a 5xx, a rate-limit 403,
+        a network failure) fell through to the flat record, so a transient error fetched a different record
+        and the job reported a misleading verdict instead of the lookup error. V4 and V3 already fell back
+        on a 404 alone."""
+        nested = "docs/provenance/policy-deltas/" + "c" * 64 + "/" + "b" * 64 + "/"
+        flat = "docs/provenance/policy-deltas/" + "c" * 64 + "/"
+        for answers, took in ((("ok", "ok", "404"), nested), (("404", "ok", "ok"), flat),
+                              (("ok", "404", "ok"), flat), (("empty", "empty", "ok"), flat)):
+            with self.subTest(answers=answers):
+                code, output, urls, err = self._legacy_lookup(*answers)
+                self.assertEqual(code, 0, err)
+                self.assertTrue(urls[-1].startswith(f"repos/example/authority/contents/{took}"), urls)
+                self.assertIn("trusted_candidate_policy=", output)
+                self.assertIn("policy_delta_authority=", output)
+        for answers in (("502", "ok", "ok"), ("403", "ok", "ok"), ("ok", "500", "ok"), ("ok", "403", "ok")):
+            with self.subTest(answers=answers):
+                code, output, urls, err = self._legacy_lookup(*answers)
+                self.assertEqual(code, 1)
+                self.assertEqual(output, "")
+                self.assertIn(f"(HTTP {next(answer for answer in answers if answer != 'ok')})", err)
+                self.assertIn("failed for a reason other than its absence", err)
+                self.assertEqual([url for url in urls if not url.count("b" * 64)], [], "the flat layout was read")
+        # No record in either layout: the step fails on the flat fetch, as before.
+        self.assertEqual(self._legacy_lookup("404", "ok", "404")[0], 1)
+
+
+class WorkflowJobLimitsTests(unittest.TestCase):
+    """Every job carries its own time limit, and a newer push to a pull request stops its older scan."""
+
+    def test_every_job_sets_a_time_limit(self) -> None:
+        # Failing-before (audit 2026-11-17 F-63908bf6): the OSV-Scanner and Scorecard jobs had none, so a hung
+        # scan held a runner for GitHub's six-hour default. A job that calls a reusable workflow takes the
+        # limits of that workflow's own jobs.
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+            for job, block in _workflow_job_blocks(path.name).items():
+                with self.subTest(workflow=path.name, job=job):
+                    self.assertTrue(any(re.match(r"^ {4}(timeout-minutes|uses):", line) for line in block))
+
+    def test_a_newer_pull_request_push_cancels_its_older_osv_scan(self) -> None:
+        # Failing-before: no concurrency group, so every push started another scan while the older ones ran on.
+        # Every run that is not a pull request's is a group of its own, so a landing never cancels a scan.
+        code = _uncommented(_workflow_text("osv-scanner.yml"))
+        self.assertIn("\nconcurrency:\n"
+                      "  group: osv-scanner-${{ github.event.pull_request.number || format('run-{0}', github.run_id) }}\n"
+                      "  cancel-in-progress: true\n", code)
+
+
+class WorkflowDigestGuardTests(unittest.TestCase):
+    """A SHA or digest a workflow puts into a ref, a URL or a path is exactly that many lowercase hex digits."""
+
+    #: Each value checked before it is used: (workflow, variable, hex digits).
+    GUARDED = (
+        ("codeql.yml", "TARGET_SHA", 40), ("codeql.yml", "tree_sha", 40),
+        ("provenance-attestation-merge-group.yml", "HEAD_SHA", 40),
+        ("provenance-attestation-merge-group.yml", "base_sha", 40),
+        ("provenance-attestation-merge-group.yml", "authority_sha", 40),
+        ("provenance-attestation-merge-group.yml", "value", 64),
+        ("provenance-attestation-merge-group.yml", "v4_name", 64),
+        ("provenance-attestation-merge-group.yml", "v3_name", 64),
+        ("provenance-attestation.yml", "value", 64),
+        ("provenance-attestation.yml", "v4_name", 64),
+        ("provenance-attestation.yml", "v3_name", 64),
+    )
+    # The strict form, and the case-glob form it replaced: [0-9a-f]* matches a hex digit followed by anything.
+    STRICT = re.compile(r'(?m)^ *\[\[ "\$\{(\w+)\}" =~ \^\[0-9a-f\]\{(\d+)\}\$ \]\] \|\| \{ echo "[^"]*" >&2; exit 1; \}$')
+    CASE = re.compile(r'(?m)^ *case "\$\{(\w+)\}" in\n *\[0-9a-f\]\*\) \[ "\$\{#\1\}" -eq (\d+) \].*\n.*\n *esac$')
+
+    def _guards(self, name: str) -> list[tuple[str, int, str]]:
+        code = _uncommented(_workflow_text(name))
+        return [(match.group(1), int(match.group(2)), textwrap.dedent(match.group(0)))
+                for pattern in (self.STRICT, self.CASE) for match in pattern.finditer(code)]
+
+    def test_no_workflow_takes_a_leading_hex_digit_for_a_hex_string(self) -> None:
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+            with self.subTest(workflow=path.name):
+                self.assertNotIn("[0-9a-f]*)", _uncommented(path.read_text(encoding="utf-8")))
+
+    def test_each_guard_refuses_a_value_that_is_not_all_hex_when_run(self) -> None:
+        """Failing-before (audit 2026-11-17 F-2acbba1c): each of these accepted ``a`` followed by any characters
+        of the right length, '/', '?', '&' and spaces included, although the names go into refs and URLs."""
+        bash, reason = _step_bash()
+        if bash is None:
+            self.skipTest(reason)
+        for name, variable, digits in self.GUARDED:
+            guards = [script for found, length, script in self._guards(name) if (found, length) == (variable, digits)]
+            with self.subTest(workflow=name, variable=variable):
+                self.assertTrue(guards, "no guard for this value")
+            cases = (("a" * digits, True), (("0123456789abcdef" * 4)[:digits], True),
+                     ("a" + "/" * (digits - 1), False), (("a" + "x?& " * digits)[:digits], False),
+                     ("A" * digits, False), ("a" * (digits - 1), False), ("a" * (digits + 1), False), ("", False))
+            for script in guards:
+                for value, accepted in cases:
+                    with self.subTest(workflow=name, variable=variable, value=value):
+                        done = subprocess.run([bash, "-c", "set -euo pipefail\n" + script], capture_output=True,
+                                              text=True, env={**os.environ, variable: value}, timeout=60,
+                                              check=False)
+                        self.assertEqual(done.returncode == 0, accepted, done.stderr)
+
+
+class MergeGroupTrustedAuditTests(unittest.TestCase):
+    """The merge-group observation audits the group tree with the same trusted publication audit."""
+
+    STEP = "Audit the candidate tree with the trusted publication audit"
+
+    def test_the_group_commit_gets_the_trusted_publication_audit(self) -> None:
+        """Failing-before (audit 2026-11-17 F-63173426): only the pull-request attestation ran the default
+        branch's publication audit, so a group commit combining queued pull requests, and its binary waivers
+        against the group's base, was never audited by the trusted copy."""
+        pull_request = "\n".join(_workflow_job_blocks("provenance-attestation.yml")["attest"])
+        group = "\n".join(_workflow_job_blocks("provenance-attestation-merge-group.yml")["attest-merge-group"])
+        self.assertIn(f"      - name: {self.STEP}", group)
+        step = _named_step(group, self.STEP)
+        self.assertEqual(_step_script(step), _step_script(_named_step(pull_request, self.STEP)))
+        self.assertIn("          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}\n", step)
+        self.assertIn("          BASE_SHA: ${{ steps.base.outputs.base_sha }}\n", step)
+        self.assertNotIn("        if:", step)
+        self.assertLess(group.index("      - name: Generate and verify ephemeral provenance controls"),
+                        group.index(f"      - name: {self.STEP}"))
+        explain = _named_step(group, "Explain the verdict in plain words")
+        self.assertIn('&& [ ! -e "${RUNNER_TEMP}/tree-audit/passed" ]; then\n', explain)
+        self.assertIn("### Trusted publication audit: FAIL", explain)
+
+
+class PagesReferenceRuleTests(unittest.TestCase):
+    """The site's local-reference rule lives in tools/test_site_mobile.py alone."""
+
+    def test_the_pages_build_runs_the_one_reference_rule_before_the_browser_install(self) -> None:
+        # Failing-before (audit 2026-11-17 F-59f5ade6): the workflow grepped the page with its own copy of the
+        # rule, which LOCAL_REF mirrored by hand, and the same job ran the Python rule again.
+        job = "\n".join(_workflow_job_blocks("pages.yml")["build"])
+        self.assertNotIn("grep -oE", job)
+        step = _named_step(job, "Check that every local reference resolves")
+        self.assertIn("          NK_SITE_DIR: _site\n", step)
+        self.assertIn("python -m unittest -v tools.test_site_mobile.SiteStaticTests.test_every_local_reference_is_"
+                      "published\n", step)
+        # Still before the browser download, so a missing file fails in seconds.
+        self.assertLess(job.index("      - name: Set up Python"),
+                        job.index("      - name: Check that every local reference resolves"))
+        self.assertLess(job.index("      - name: Check that every local reference resolves"),
+                        job.index("      - name: Install Playwright and its headless Chromium"))
+
 
 class MainRulesetClaimsTests(unittest.TestCase):
     """The written claims about main's required checks, and the aggregate behind them, must match the snapshot."""

@@ -249,10 +249,7 @@ jobs:
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
         run: |
           set -euo pipefail
-          case "${TARGET_SHA}" in
-            [0-9a-f]*) [ "${#TARGET_SHA}" -eq 40 ] || { echo "target SHA malformed" >&2; exit 1; } ;;
-            *) echo "target SHA malformed" >&2; exit 1 ;;
-          esac
+          [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "target SHA malformed" >&2; exit 1; }
 
           if [ "${TARGET_KIND}" = "pull-request" ]; then
             case "${PR_NUMBER}" in
@@ -287,10 +284,7 @@ jobs:
           fi
 
           tree_sha="$(git rev-parse "${TARGET_SHA}^{tree}")"
-          case "${tree_sha}" in
-            [0-9a-f]*) [ "${#tree_sha}" -eq 40 ] || { echo "tree SHA malformed" >&2; exit 1; } ;;
-            *) echo "tree SHA malformed" >&2; exit 1 ;;
-          esac
+          [[ "${tree_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "tree SHA malformed" >&2; exit 1; }
           echo "tree_sha=${tree_sha}" >> "${GITHUB_OUTPUT}"
           export TREE_SHA="${tree_sha}"
 
