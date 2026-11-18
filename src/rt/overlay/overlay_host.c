@@ -70,19 +70,40 @@ static bool join(const char *root, const char *relative, char *out, size_t size)
    base path, the launcher's SR_UI_ROOT), so the probe reads them as UTF-8, as SDL_LoadFile
    does; a narrow fopen would read them in the ANSI code page and miss a non-ASCII folder.
    Every face falls back to Geist for Latin and to Noto Sans JP for Japanese names, as in
-   the player. */
-static bool register_fonts(NkUiTtf *ttf, const char *const *roots, size_t root_count) {
+   the player. False with the reason in `error`: a face no folder has is missing, but one
+   that is there and cannot be read (empty, truncated, too large) is named by its path, so a
+   damaged install is not reported as a missing one. */
+static bool register_fonts(NkUiTtf *ttf, const char *const *roots, size_t root_count,
+                           char *error, size_t error_size) {
     int font;
     for (font = 0; font < NK_UI_FONT_COUNT; ++font) {
         const char *relative = nk_ui_font_path(font);
         char path[OVERLAY_PATH_MAX];
+        char unreadable[OVERLAY_PATH_MAX];
         bool added = false;
         size_t r;
-        for (r = 0; r < root_count && !added; ++r) {
-            added = join(roots[r], relative, path, sizeof(path)) && nk_platform_file_exists(path) &&
-                    nk_ui_ttf_add_font(ttf, font, path);
+        unreadable[0] = '\0';
+        for (r = 0; r <= root_count && !added; ++r) {
+            const char *candidate = path;
+            if (r == root_count) {
+                candidate = relative;
+            } else if (!join(roots[r], relative, path, sizeof(path))) {
+                continue;
+            }
+            if (!nk_platform_file_exists(candidate)) continue;
+            added = nk_ui_ttf_add_font(ttf, font, candidate);
+            if (!added && unreadable[0] == '\0') {
+                snprintf(unreadable, sizeof(unreadable), "%s", candidate);
+            }
         }
-        if (!added && !(nk_platform_file_exists(relative) && nk_ui_ttf_add_font(ttf, font, relative))) {
+        if (!added) {
+            char message[OVERLAY_PATH_MAX + 64];
+            if (unreadable[0] != '\0') {
+                snprintf(message, sizeof(message), "the UI font %s could not be read", unreadable);
+            } else {
+                snprintf(message, sizeof(message), "the bundled UI font %s was not found", relative);
+            }
+            host_error(error, error_size, message);
             return false;
         }
     }
@@ -90,6 +111,7 @@ static bool register_fonts(NkUiTtf *ttf, const char *const *roots, size_t root_c
         if (font == NK_UI_FONT_CJK) continue;
         if ((font != NK_UI_FONT_BODY && !nk_ui_ttf_set_fallback(ttf, font, NK_UI_FONT_BODY)) ||
             !nk_ui_ttf_set_fallback(ttf, font, NK_UI_FONT_CJK)) {
+            host_error(error, error_size, "the UI fonts' fallback chain could not be set");
             return false;
         }
     }
@@ -125,8 +147,7 @@ static NkUiTtf *open_fonts(const char *ui_root, char *error, size_t error_size) 
         host_error(error, error_size, nk_ui_ttf_last_error());
         return NULL;
     }
-    if (!register_fonts(ttf, roots, root_count)) {
-        host_error(error, error_size, "the bundled UI fonts (assets/fonts/ui) were not found");
+    if (!register_fonts(ttf, roots, root_count, error, error_size)) {
         nk_ui_ttf_destroy(ttf);
         return NULL;
     }
@@ -335,7 +356,6 @@ bool nk_overlay_host_draw(NkOverlayHost *host, SDL_Renderer *renderer, float dis
     } else if (host->page_frames < 2) {
         ++host->page_frames;
     }
-    if (host->state.restore_focus != 0u && host->page_frames >= 2) host->page_frames = 1;
     if (list == NULL) return false;
     return nk_ui_sdlr_render(host->backend, list);
 }

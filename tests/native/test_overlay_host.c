@@ -322,6 +322,57 @@ static void test_fonts_from_a_utf8_folder(const char *root) {
     CHECK(test_chdir(saved) == 0, "utf-8 fonts: the working directory comes back");
 }
 
+/* Audit 2026-11-17: a face that is there but cannot be read (empty, truncated, too large) is
+   reported as unreadable, by its path, not as missing. The folder holds every face but an empty
+   Geist; the build folder, the working directory here, has none to fall back to. */
+static void test_unreadable_font_is_not_reported_missing(const char *root) {
+    const char *build = SR_SELFTEST_BUILD_ROOT;
+    bool absolute = build[0] == '/' || build[0] == '\\' || (build[0] != '\0' && build[1] == ':');
+    const char *body = nk_ui_font_path(NK_UI_FONT_BODY);
+    char *cwd = SDL_GetCurrentDirectory();
+    char saved[1024];
+    char folder[1024];
+    char empty[1200];
+    char build_abs[1024];
+    char error[256];
+    NkOverlayHost *host;
+    bool copied = true;
+    if (cwd == NULL || test_getcwd(saved, (int)sizeof(saved)) == NULL) {
+        CHECK(false, "unreadable font: the working directory is known");
+        SDL_free(cwd);
+        return;
+    }
+    if (snprintf(build_abs, sizeof(build_abs), "%s%s", absolute ? "" : cwd, build) >=
+            (int)sizeof(build_abs) ||
+        snprintf(folder, sizeof(folder), "%s/overlay-host-empty-font", build_abs) >=
+            (int)sizeof(folder) ||
+        snprintf(empty, sizeof(empty), "%s/%s", folder, body) >= (int)sizeof(empty)) {
+        CHECK(false, "unreadable font: the fixture paths fit");
+        SDL_free(cwd);
+        return;
+    }
+    SDL_free(cwd);
+    for (int font = 0; font < NK_UI_FONT_COUNT && copied; ++font) {
+        copied = copy_font(root, folder, nk_ui_font_path(font));
+    }
+    copied = copied && SDL_SaveFile(empty, "", 0u);
+    CHECK(copied, "unreadable font: the fonts are copied and Geist is emptied");
+    if (!copied) return;
+    if (test_chdir(build_abs) != 0) {
+        CHECK(false, "unreadable font: the build folder becomes the working directory");
+        return;
+    }
+    error[0] = '\0';
+    host = nk_overlay_host_create(folder, error, sizeof(error));
+    CHECK(host == NULL, "unreadable font: an empty face fails the host");
+    if (strstr(error, "could not be read") == NULL || strstr(error, body) == NULL) {
+        CHECK(false, "unreadable font: the error names the unreadable face, not a missing one");
+        fprintf(stderr, "  (%s)\n", error);
+    }
+    nk_overlay_host_destroy(host);
+    CHECK(test_chdir(saved) == 0, "unreadable font: the working directory comes back");
+}
+
 int main(int argc, char **argv) {
     char error[256];
     const char *root = argc > 1 ? argv[1] : ".";
@@ -343,6 +394,7 @@ int main(int argc, char **argv) {
     CHECK(g_host != NULL, "create: a folder without fonts falls back to the working directory");
     nk_overlay_host_destroy(g_host);
     test_fonts_from_a_utf8_folder(root);
+    test_unreadable_font_is_not_reported_missing(root);
     g_host = nk_overlay_host_create(root, error, sizeof(error));
     if (g_host == NULL) {
         fprintf(stderr, "FAIL: create the host from %s: %s\n", root, error);

@@ -193,6 +193,7 @@ typedef struct SrPerfTransitionEntry {
     uint32_t pc;
     uint32_t reason;
     uint64_t count;
+    uint64_t overcount;
 } SrPerfTransitionEntry;
 
 typedef struct SrPerfState {
@@ -463,15 +464,21 @@ static void record_transition(unsigned direction, uint32_t pc, uint32_t reason) 
             table[i].pc = pc;
             table[i].reason = reason;
             table[i].count = 1;
+            table[i].overcount = 0;
             return;
         }
     }
+    /* Space-Saving: the newcomer takes the lowest slot and inherits its count, so a hot spot
+     * first seen after the table filled still climbs past the one-offs instead of trading the
+     * slot with them at 1. The inherited part is its overcount: the true count lies in
+     * [count - overcount, count]. */
     unsigned lowest = 0;
     for (unsigned i = 1; i < SR_PERF_TOP_N; i++)
         if (table[i].count < table[lowest].count) lowest = i;
     table[lowest].pc = pc;
     table[lowest].reason = reason;
-    table[lowest].count = 1;
+    table[lowest].overcount = table[lowest].count;
+    table[lowest].count++;
 }
 
 static SrPerfVfpuFamily vfpu_family(uint32_t opcode) {
@@ -679,9 +686,10 @@ static void json_top_pcs(FILE *json, unsigned direction) {
     fputc('[', json);
     for (unsigned i = 0; i < count; i++) {
         if (i) fputc(',', json);
-        fprintf(json, "{\"pc\":\"0x%08" PRIx32 "\",\"reason\":\"%s\",\"count\":%llu}",
+        fprintf(json, "{\"pc\":\"0x%08" PRIx32 "\",\"reason\":\"%s\",\"count\":%llu,"
+                      "\"overcount\":%llu}",
                 entries[i].pc, interp_reason_name(entries[i].reason),
-                (unsigned long long)entries[i].count);
+                (unsigned long long)entries[i].count, (unsigned long long)entries[i].overcount);
     }
     fputc(']', json);
 }
@@ -1336,8 +1344,14 @@ void sr_exec_share_report(void) {
     fclose(out);
 }
 
+/* The summary beside the CSV: its extension, a dot in the file name and not in a folder's,
+ * becomes ".json". Windows separates folders with either slash. */
 static void make_summary_path(const char *csv_path, char *out, size_t out_size) {
     const char *slash = strrchr(csv_path, '/');
+#ifdef _WIN32
+    const char *backslash = strrchr(csv_path, '\\');
+    if (backslash && (!slash || backslash > slash)) slash = backslash;
+#endif
     const char *dot = strrchr(csv_path, '.');
     size_t length = strlen(csv_path);
     if (length + sizeof(".json") > out_size) {
@@ -1358,9 +1372,10 @@ void sr_perf_shutdown(void) {
     sr_process_end_reports();
     sr_exec_share_report();
     if (!s_perf.enabled || !s_perf.initialized || s_perf.shutdown) return;
+    /* The final attribution totals go first: the report writes nothing once shut down. */
+    sr_perf_phase_report(1);
     s_perf.shutdown = 1;
     sr_perf_enabled = 0;
-    sr_perf_phase_report(1);
     uint64_t now = raw_now_ns();
     stop_timers(now);
     uint64_t wall_ns = s_perf.run_start_ns && now > s_perf.run_start_ns
@@ -1460,6 +1475,10 @@ void sr_perf_test_reinit(void) {
     s_perf.initialized = 0;
     s_perf_files_only = 0;
     sr_perf_init();
+}
+
+void sr_perf_test_summary_path(const char *csv_path, char *out, size_t out_size) {
+    make_summary_path(csv_path, out, out_size);
 }
 #endif
 
@@ -2232,6 +2251,7 @@ unsigned sr_perf_top_transitions(unsigned direction, SrPerfTopPc *out, unsigned 
     for (unsigned i = 0; i < count; i++) {
         out[i].pc = entries[i].pc;
         out[i].count = entries[i].count;
+        out[i].overcount = entries[i].overcount;
         out[i].reason = interp_reason_name(entries[i].reason);
     }
     return count;
