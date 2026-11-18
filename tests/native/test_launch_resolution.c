@@ -920,6 +920,10 @@ static void test_no_iso_child_environment(const char *test_executable,
         write_bytes(session.executable_path, block, sizeof(block));
         assert(!nk_launch_runtime_reads_cheats(session.executable_path));
         assert(nk_launch_runtime_reads_cheats("no-such-package-executable"));
+        /* A read that fails (audit 2026-11-17): a folder opens on POSIX and its first read
+           fails, which is an executable that cannot be read, not an older runtime. Windows
+           refuses to open it, the same answer. */
+        assert(nk_launch_runtime_reads_cheats("."));
         assert(remove(session.executable_path) == 0 && rename(kept, session.executable_path) == 0);
     }
     /* A file the session names (the player's --cheats-file) is the one exported, while cheats

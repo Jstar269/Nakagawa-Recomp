@@ -101,6 +101,9 @@ bool nk_launch_runtime_reads_cheats(const char *executable_path) {
         kept = have < marker_len - 1u ? have : marker_len - 1u;
         memmove(block, block + have - kept, kept);
     }
+    /* A read that failed part way (a lock, a drive that went away) is an executable that
+       cannot be read, not one whose runtime predates cheats. */
+    if (!found && ferror(f)) found = true;
     free(block);
     fclose(f);
     return found;

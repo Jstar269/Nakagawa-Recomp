@@ -1240,7 +1240,9 @@ somewhere else and so are the heap and the stacks, so:
   everywhere;
 - a cheat with an address anywhere else (memory the game allocates while it runs) is refused by
   name, because where that memory is in such a run is not known and a cheat is never applied to a
-  guess.
+  guess;
+- a pointer cheat whose pointer is still null (before the game has set it up) is held, as on a
+  PSP: null plus an offset would land on the image's own bytes there.
 
 The log says so at the start, on a line that begins `CHEATS: this game's image is at`. If the game
 starts another program (a launcher that loads the real game, for example), cheats stop from there

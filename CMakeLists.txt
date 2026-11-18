@@ -307,6 +307,10 @@ add_test(NAME nk_nickname_test COMMAND test_nk_nickname)
 # Cheat files (src/core/nk_cheats.h, #2639): the reader, the checks and the applier.
 add_executable(test_nk_cheats tests/native/test_nk_cheats.c)
 target_link_libraries(test_nk_cheats PRIVATE nakagawa_core)
+# The file reader's test (nk_cheats_load_file) needs the scratch directory, as the Makefile gives it.
+target_compile_definitions(test_nk_cheats PRIVATE
+    SR_SELFTEST_BUILD_ROOT="${NK_TEST_BUILD_ROOT}"
+)
 add_test(NAME nk_cheats_test COMMAND test_nk_cheats)
 
 # The nk_ui core and its C3a reserved stubs stay SDL and Vulkan free. Keep this

@@ -110,7 +110,8 @@ void sr_cheats_marker_unavailable(const char *why);
  * the cheats for the rest of the run, with one line: none is applied unmarked. */
 void sr_cheats_marker_drawn(int drawn);
 /* The end of the run: for each cheat that was held on some VBLANK, how many it was held on and
- * how many it applied on (the hold lines themselves are said once per cause). */
+ * how many it applied on (the hold lines themselves are said once per cause). Called at main's
+ * end (driver.c) and at sceKernelExitGame, which ends the process without it; said once a run. */
 void sr_cheats_run_end(void);
 /* The RetroAchievements hardcore seam: nonzero refuses cheats until it is cleared. */
 void sr_cheats_set_hardcore(int on);

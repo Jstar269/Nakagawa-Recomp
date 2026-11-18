@@ -120,7 +120,7 @@ typedef struct {
     uint32_t file_line;
 } CodeLine;
 
-typedef enum { HOLD_NONE = 0, HOLD_SPAN, HOLD_CODE, HOLD_UNDO } HoldWhy;
+typedef enum { HOLD_NONE = 0, HOLD_SPAN, HOLD_CODE, HOLD_UNDO, HOLD_NULL } HoldWhy;
 
 typedef struct {
     char name[NK_CHEATS_NAME_MAX];
@@ -1208,13 +1208,23 @@ static bool run_cheat(Frame *f, const Cheat *c, uint32_t *held_line) {
             break;
         }
         case OP_POINTER: {
+            /* In a run whose image is not where a PSP has it (NkCheatConfig), a null pointer plus
+             * an offset can land on the game's own bytes: an image placed at 0 starts there. On
+             * a PSP the same address is below user memory and the cheat is held, so a pointer
+             * that is null holds it here too. */
+            const bool moved = set->image_size != 0u;
             uint32_t pointer = load(f, op->addr, 4u);
             uint32_t target;
+            if (moved && pointer == 0u) ok = hold(f, HOLD_NULL, op->addr);
             for (uint32_t n = 0u; ok && n < op->count; n++) {
                 const CheatWalk *w = &c->walks[op->step + n];
                 uint32_t at = user_address(w->negative ? pointer - w->offset : pointer + w->offset);
-                if (!span_in_user_memory(set, at, 4u)) ok = hold(f, HOLD_SPAN, at);
-                else pointer = load(f, at, 4u);
+                if (!span_in_user_memory(set, at, 4u)) {
+                    ok = hold(f, HOLD_SPAN, at);
+                } else {
+                    pointer = load(f, at, 4u);
+                    if (moved && pointer == 0u) ok = hold(f, HOLD_NULL, at);
+                }
             }
             if (!ok) break;
             target = user_address(op->negate ? pointer - op->other : pointer + op->other);
@@ -1251,6 +1261,8 @@ static void report_hold(const Frame *f, const Cheat *c) {
     } else if (f->why == HOLD_SPAN) {
         snprintf(why, sizeof(why), "its pointer leads to 0x%08lX, outside user memory",
                  (unsigned long)f->why_addr);
+    } else if (f->why == HOLD_NULL) {
+        snprintf(why, sizeof(why), "the pointer it follows at 0x%08lX is null", (unsigned long)f->why_addr);
     } else {
         snprintf(why, sizeof(why), "it needs more undo space than was counted for it");
     }

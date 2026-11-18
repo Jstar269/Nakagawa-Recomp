@@ -35,7 +35,13 @@ static int s_no_marker;
 static int s_program_gone; /* the program the file was read for is no longer the one running */
 static uint32_t s_image_base, s_image_end;   /* the host-loaded image the file was read for */
 static int s_origin_said;  /* this run has said where the code forms' meaning comes from */
+static int s_run_ended;    /* sr_cheats_run_end has given the counts */
+/* The marker's words, and what the thread that presents is given (sr_cheats_marker): s_marker
+ * while the marker shows, else NULL. The words are written only when the counts they say
+ * change, which is when a file is read, never while a presenter may hold them; stopping the
+ * cheats only takes the pointer back. */
 static char s_marker[SR_CHEATS_MARKER_MAX];
+static _Atomic(const char *) s_marker_shown;
 /* Set by the thread that presents (sr_cheats_marker_drawn), read at the next VBLANK on the
  * scheduler's thread, which is the only one that changes what is applied. */
 static atomic_int s_marker_lost;
@@ -69,20 +75,30 @@ static const NkCheatHost k_host = { NULL, host_read, host_write, host_is_code, h
 
 static void cheats_update(void) {
     const int stopped = s_hardcore || s_no_marker || s_program_gone;
+    char words[SR_CHEATS_MARKER_MAX];
     s_status.applying = s_set && !stopped && s_status.on > 0u;
-    s_marker[0] = '\0';
-    if (!s_set || stopped || (s_status.on == 0u && s_status.refused == 0u)) return;
+    if (!s_set || stopped || (s_status.on == 0u && s_status.refused == 0u)) {
+        atomic_store_explicit(&s_marker_shown, NULL, memory_order_release);
+        return;
+    }
     if (s_status.refused > 0u) {
-        snprintf(s_marker, sizeof(s_marker), "Cheats on: %lu (%lu refused)", (unsigned long)s_status.on,
+        snprintf(words, sizeof(words), "Cheats on: %lu (%lu refused)", (unsigned long)s_status.on,
                  (unsigned long)s_status.refused);
     } else {
-        snprintf(s_marker, sizeof(s_marker), "Cheats on: %lu", (unsigned long)s_status.on);
+        snprintf(words, sizeof(words), "Cheats on: %lu", (unsigned long)s_status.on);
     }
+    if (strcmp(words, s_marker) != 0) {
+        atomic_store_explicit(&s_marker_shown, NULL, memory_order_release);
+        memcpy(s_marker, words, sizeof(words));
+    }
+    atomic_store_explicit(&s_marker_shown, (const char *)s_marker, memory_order_release);
 }
 
 void sr_cheats_run_end(void) {
-    /* The counts behind the hold lines, each of which is said once (nk_cheats.h). */
-    if (s_set) nk_cheats_report_holds(s_set, &k_host);
+    /* The counts behind the hold lines, each of which is said once (nk_cheats.h), and once per
+     * run: main's end (driver.c) and sceKernelExitGame (hle_kernel_module.c) both ask. */
+    if (s_set && !s_run_ended) nk_cheats_report_holds(s_set, &k_host);
+    s_run_ended = 1;
 }
 
 void sr_cheats_reset(void) {
@@ -94,6 +110,8 @@ void sr_cheats_reset(void) {
     s_program_gone = 0;
     s_image_base = s_image_end = 0u;
     s_origin_said = 0;
+    s_run_ended = 0;
+    atomic_store_explicit(&s_marker_shown, NULL, memory_order_release);
     s_marker[0] = '\0';
     atomic_store_explicit(&s_marker_lost, 0, memory_order_release);
 }
@@ -276,7 +294,7 @@ void sr_cheats_vblank(void) {
 }
 
 const char *sr_cheats_marker(void) {
-    return s_marker[0] ? s_marker : NULL;
+    return atomic_load_explicit(&s_marker_shown, memory_order_acquire);
 }
 
 void sr_cheats_marker_unavailable(const char *why) {

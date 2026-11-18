@@ -12,6 +12,7 @@
 
 #include "hle_internal.h"
 #include "ge_scene.h"
+#include "cheats.h"            /* the cheats' end-of-run counts at sceKernelExitGame (#2639) */
 
 /* Register or replace an export discovered while loading a PRX. The target is a guest address,
  * never a host function pointer. This makes module loading repeatable and keeps host ASLR out of
@@ -1485,6 +1486,7 @@ static uint32_t h_ExitGame(CpuState *s) {
     fputc('\n', stderr);
     fflush(stderr);
     sr_flight_exit(0u);
+    sr_cheats_run_end();        /* the counts behind the cheats' hold lines (cheats.h) */
     sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
     (void)sr_videorec_finish_status("the game exited (sceKernelExitGame)", code);
 

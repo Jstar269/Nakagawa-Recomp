@@ -878,6 +878,17 @@ static void test_moved_image(void) {
     CHECK(nk_cheats_apply(set, &k_host) == 3u && r8(0x9FFFu) == 0xAAu && r8(0xA000u) == 0u,
           "and the byte just below that memory is the game's");
     nk_cheats_free(set);
+    /* A pointer that is null (audit 2026-11-17): null plus the offset is this run's memory, the
+     * moved image's bytes where an image is placed at 0, but below user memory on a PSP. */
+    set = load_as("_C1 through a null pointer\n_L 0x60004100 0x000000AA\n_L 0x00000001 0x08805000\n",
+                  &moved, &k_host);
+    w32(0x3100u, 0u);
+    g_report_count = 0;
+    CHECK(set && nk_cheats_info(set, 0u, &info) && info.state == NK_CHEAT_ON && nk_cheats_apply(set, &k_host) == 0u &&
+              r8(0x5000u) == 0u && g_report_count == 1 &&
+              strstr(g_reports[0], "is held: line 2: the pointer it follows at 0x08803100 is null"),
+          "a null pointer in a moved image holds its cheat, by name, and writes nothing at null plus the offset");
+    nk_cheats_free(set);
     {
         const NkCheatConfig bad_hole = { .disc_id = NULL, .user_base = T_BASE, .user_end = T_END,
                                          .hole_base = T_BASE + 2u, .hole_end = T_BASE + 1u };

@@ -190,7 +190,9 @@ typedef struct {
  * image_base + image_size) in this run. Then a span a code names must lie whole inside the PSP's
  * image and is moved with it; a code that names any other address refuses its cheat, because
  * where the rest of a PSP's memory (its heap, its stacks) lives in such a run is not known. A
- * pointer a code follows is the game's own, read from this run's memory, and is used as it is. */
+ * pointer a code follows is the game's own, read from this run's memory, and is used as it is;
+ * one that is null holds its cheat, because a null pointer plus an offset can land on the moved
+ * image's own bytes where a PSP has no user memory. */
 typedef struct {
     const char *disc_id;
     uint32_t user_base;

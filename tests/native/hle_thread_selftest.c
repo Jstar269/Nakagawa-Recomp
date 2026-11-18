@@ -47194,6 +47194,9 @@ static void exit_game_reentered_guest_fn(CpuState *cpu) {
 
 static void exit_game_atexit_probe(void) { _Exit(EXITGAME_ATEXIT); }
 
+#define EXITGAME_NO_CHEATS 94  /* the child could not start a held cheat (SR_TEST_EXITGAME_CHEATS) */
+static int exit_game_cheats_held(const char *log_path);   /* with the cheats tests below */
+
 static int run_exit_game_poisoned(void) {
     if (getenv("SR_TEST_EXITGAME_ATEXIT")) atexit(exit_game_atexit_probe);
     CpuState cpu;
@@ -47222,6 +47225,10 @@ static int run_exit_game_poisoned(void) {
     cpu.r[5] = EXITGAME_POISON;   /* $a1 */
     cpu.r[6] = EXITGAME_POISON;   /* $a2 */
     cpu.r[7] = EXITGAME_POISON;   /* $a3 */
+    {
+        const char *cheats_log = getenv("SR_TEST_EXITGAME_CHEATS");
+        if (cheats_log && cheats_log[0] && !exit_game_cheats_held(cheats_log)) return EXITGAME_NO_CHEATS;
+    }
     (void)sr_syscall(&cpu, 0x05572a5fu);
     return EXITGAME_RETURNED;
 }
@@ -57197,6 +57204,14 @@ static void test_cheats_on_an_image_below_psp_memory(void) {
     expect(MEM_R8(0x04000008u) == 0u &&
            strstr(s_cheat_log, "is held: line 8: its pointer leads to 0x04000008, outside user memory") != NULL,
            "cheats base 0: a pointer into the VRAM window holds its cheat");
+    /* A pointer the game has not set yet is null (audit 2026-11-17). On a PSP null plus the
+     * offset is below user memory and the cheat is held; here it is the image's own byte. */
+    MEM_W32(0x001FC010u, 0u);
+    MEM_W8(0x00000008u, 0x11u);
+    cheats_tick(1);
+    expect(MEM_R8(0x00000008u) == 0x11u &&
+           strstr(s_cheat_log, "is held: line 8: the pointer it follows at 0x001FC010 is null") != NULL,
+           "cheats base 0: a null pointer holds its cheat, and null plus the offset is not written");
     cheats_end(path);
 }
 
@@ -57266,11 +57281,15 @@ static void test_cheats_stop_when_the_marker_stops_being_drawn(void) {
     reset_fixture();
     expect(cheats_file_write(path, sizeof(path), "drawn", "_C1 Write\n_L 0x00000100 0x000000AB\n"),
            "cheats drawn: the cheat file is written");
+    const char *shown;
     cheats_start("1", path);
     sr_cheats_marker_drawn(1);
     cheats_tick(1);
     expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu && cheats_marker_is("Cheats on: 1"),
            "cheats drawn: while the marker is drawn the cheats apply");
+    /* What the presenting thread was handed (audit 2026-11-17): the stop below runs on the
+     * scheduler's thread and takes the marker back without writing over the words. */
+    shown = sr_cheats_marker();
     MEM_W8(CHEAT_BASE + 0x100u, 0u);
     sr_cheats_marker_drawn(0);
     sr_cheats_marker_drawn(1);   /* a later present that draws does not bring them back */
@@ -57278,6 +57297,8 @@ static void test_cheats_stop_when_the_marker_stops_being_drawn(void) {
     sr_cheats_status(&status);
     expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && !status.applying && cheats_marker_is(NULL),
            "cheats drawn: after a present that did not draw the marker, nothing is applied");
+    expect(shown != NULL && strcmp(shown, "Cheats on: 1") == 0,
+           "cheats drawn: the words a presenter already holds are not rewritten when the cheats stop");
     expect(cheats_log_count("CHEATS: refused: the window cannot show the cheats marker (the in-game UI stopped "
                             "drawing)") == 1u,
            "cheats drawn: and one line says so");
@@ -57286,6 +57307,66 @@ static void test_cheats_stop_when_the_marker_stops_being_drawn(void) {
     expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && cheats_log_count("CHEATS") == 0u,
            "cheats drawn: it is said once");
     cheats_end(path);
+}
+
+/* The child of the ExitGame test below: its stderr goes to log_path, it starts a cheat whose
+ * pointer is null, and one VBLANK holds it. */
+static int exit_game_cheats_held(const char *log_path) {
+    static const char text[] = "_C1 Held\n_L 0x60000200 0x00000001\n_L 0x00000001 0x00000000\n";
+    char ini[MAX_PATH + 8];
+    SrCheatsStatus status;
+    FILE *f;
+    int written;
+    if (snprintf(ini, sizeof(ini), "%s.ini", log_path) >= (int)sizeof(ini)) return 0;
+    f = fopen(ini, "wb");
+    if (!f) return 0;
+    written = fwrite(text, 1u, sizeof(text) - 1u, f) == sizeof(text) - 1u;
+    if (fclose(f) != 0 || !written) return 0;
+    if (!freopen(log_path, "w", stderr)) return 0;
+    hle_test_setenv("SR_CHEATS", "1");
+    hle_test_setenv("SR_CHEATS_FILE", ini);
+    s_fixture_loaded_base = CHEAT_BASE + 0x4000u;
+    s_fixture_loaded_end = CHEAT_BASE + 0x8000u;
+    sr_cheats_init();
+    sr_cheats_status(&status);
+    if (!status.applying) return 0;
+    sr_cheats_vblank();
+    return 1;
+}
+
+/* sceKernelExitGame ends the process without main's end (driver.c), so it gives the cheats'
+ * hold counts itself (audit 2026-11-17). A child holds a cheat on one VBLANK and exits. */
+static void test_cheats_counts_at_exit_game(const char *self) {
+    char scratch[MAX_PATH];
+    char log_path[MAX_PATH + 64];
+    char ini[MAX_PATH + 72];
+    char text[8192];
+    FILE *f;
+    intptr_t rc;
+    if (!self || !hle_scratch_root(scratch, sizeof(scratch))) {
+        expect(0, "cheats exit: the test knows its executable and its scratch folder");
+        return;
+    }
+    snprintf(log_path, sizeof(log_path), "%s/cheats_exitgame_%lu.log", scratch, (unsigned long)getpid());
+    snprintf(ini, sizeof(ini), "%s.ini", log_path);
+    hle_test_setenv("SR_TEST_EXITGAME_CHEATS", log_path);
+    rc = exit_game_spawn_child(self);
+    hle_test_setenv("SR_TEST_EXITGAME_CHEATS", NULL);
+    text[0] = '\0';
+    f = fopen(log_path, "rb");
+    if (f) {
+        size_t got = fread(text, 1u, sizeof(text) - 1u, f);
+        text[got] = '\0';
+        fclose(f);
+    }
+    expect(rc == 0, "cheats exit: the child holds a cheat and ends through sceKernelExitGame");
+    expect(strstr(text, "CHEATS: cheat \"Held\" is held: line 2: its pointer leads to 0x00000000, outside user "
+                        "memory") != NULL,
+           "cheats exit: the child's VBLANK held the cheat");
+    expect(strstr(text, "CHEATS: cheat \"Held\" was held on 1 frame(s) and applied on 0") != NULL,
+           "cheats exit: sceKernelExitGame gives the hold counts that main's end would");
+    remove(log_path);
+    remove(ini);
 }
 
 /* Review of #2652, defect 10: a button condition tests the pad as the VBLANK latched it. Ace
@@ -58198,6 +58279,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_cheats_stop_when_the_marker_stops_being_drawn();
     test_cheats_button_condition_reads_the_vblank_latch();
     test_cheats_bounds_and_late_code();
+    test_cheats_counts_at_exit_game(argc > 0 ? argv[0] : NULL);
     test_pad_vblank_deadline();
     test_pad_late_through_the_boundary();
     test_pad_latency_charges_reads_to_new_frames();
