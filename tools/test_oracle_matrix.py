@@ -209,7 +209,7 @@ class MatrixTestCase(unittest.TestCase):
 
 class LockHelperTests(MatrixTestCase):
     def test_note_launch_removes_temporary_lock_after_replace_failure(self) -> None:
-        temporary = self.lock_path.with_name(f".{self.lock_path.name}.{os.getpid()}.matrix.tmp")
+        temporary = self.lock_path.with_name(f".{self.lock_path.name}.{os.getpid()}.tmp")
         with patch.object(om.os, "replace", side_effect=PermissionError("lock file is busy")):
             with self.assertRaisesRegex(PermissionError, "busy"):
                 om.note_launch(self.lock_path, SESSION, "test note")
@@ -220,6 +220,36 @@ class LockHelperTests(MatrixTestCase):
         boot, status = om.attested_boot(self.lock_path, SESSION)
         self.assertEqual(boot, 70)
         self.assertEqual(status, "HELD_AND_QUALIFIED")
+
+    def test_note_launch_merges_a_lock_update_between_its_reads(self) -> None:
+        self.device()
+        original_read = Path.read_text
+        original_write = Path.write_text
+        injected = False
+
+        def update_between_reads(path, *args, **kwargs):
+            nonlocal injected
+            text = original_read(path, *args, **kwargs)
+            if path == self.lock_path and not injected:
+                changed = json.loads(text)
+                changed["device_state_attestation"]["watchdog_state"]["remaining_s"] = 17
+                original_write(path, json.dumps(changed), encoding="utf-8")
+                injected = True
+            return text
+
+        with patch.object(Path, "read_text", autospec=True, side_effect=update_between_reads):
+            om.note_launch(self.lock_path, SESSION, "concurrent writer test")
+        final = json.loads(original_read(self.lock_path, encoding="utf-8"))
+        self.assertEqual(final["device_state_attestation"]["watchdog_state"]["remaining_s"], 17)
+        self.assertIn("concurrent writer test", final["probes_run"][-1])
+
+    def test_note_launch_uses_the_runner_atomic_json_writer(self) -> None:
+        self.device()
+        writer = om._runner._write_campaign_json
+        with patch.object(om._runner, "_write_campaign_json", wraps=writer) as shared_writer:
+            om.note_launch(self.lock_path, SESSION, "shared writer test")
+        shared_writer.assert_called_once()
+        self.assertEqual(shared_writer.call_args.args[0], self.lock_path)
 
     def test_timeout_stops_descendants_that_inherit_the_capture_pipes(self) -> None:
         fixture_build = om.ROOT / "tests" / "fixtures" / "psp_oracle" / "build"
@@ -268,6 +298,11 @@ class PlanValidationTests(MatrixTestCase):
         self.assertEqual(plan.evidence_dir, (self.private / "evidence").resolve())
         self.assertEqual(plan.max_contained_failures, 1)
         self.assertEqual(plan.cases[0].staged_name, "delay_zero.prx")
+
+    def test_matrix_case_uses_the_shared_staged_name_rule(self) -> None:
+        shared = om._staged_name
+        self.assertEqual(shared("transport-write"), "transport_write.prx")
+        self.assertEqual(om.MatrixCase("delay-zero", 60).staged_name, shared("delay-zero"))
 
     def test_refuses_listing_the_preflight(self) -> None:
         self.refuses("transport-write runs before every case", [{"case_id": "transport-write", "timeout_seconds": 60}])
@@ -449,6 +484,19 @@ class BuildTests(MatrixTestCase):
         self.assertEqual(list(staged), ["transport-write", "delay-zero"])
         self.assertGreaterEqual(shared.call_count, 2)
 
+    def test_build_wraps_staged_prx_read_errors_as_matrix_errors(self) -> None:
+        plan = self.load([{"case_id": "delay-zero", "timeout_seconds": 60}])
+        runner = self.runner(plan, self.device())
+
+        def missing_preflight(path):
+            if path.name == "transport_write.prx":
+                raise FileNotFoundError("staged PRX disappeared")
+            return om._runner._host_binary_sha256(path)
+
+        with patch.object(om._runner, "_host_binary_sha256", side_effect=missing_preflight):
+            with self.assertRaisesRegex(om.MatrixError, "transport-write: staged PRX is unavailable"):
+                runner.build()
+
 
 class MatrixExecutionTests(MatrixTestCase):
     CASES = [{"case_id": "delay-zero", "timeout_seconds": 60}, {"case_id": "ge-nan", "timeout_seconds": 60},
@@ -465,6 +513,44 @@ class MatrixExecutionTests(MatrixTestCase):
         self.assertEqual(report["state"], "COMPLETE")
         notes = self.lock()["probes_run"]
         self.assertEqual(len(notes), 6)
+
+    def test_changed_staged_prx_is_refused_before_the_next_reset(self) -> None:
+        plan = self.load(self.CASES[:2])
+        device = self.device()
+        runner = self.runner(plan, device)
+        original_launch = runner.launch
+
+        def launch_then_swap(case, boot, index, staged):
+            outcome = original_launch(case, boot, index, staged)
+            if case.case_id == "delay-zero":
+                (plan.host0_root / "ge_nan.prx").write_bytes(b"replacement after first case")
+            return outcome
+
+        runner.launch = launch_then_swap  # type: ignore[method-assign]
+        code, report = runner.execute()
+        self.assertEqual(code, 2)
+        self.assertEqual(report["state"], om.REJECTED)
+        self.assertEqual(report["accepted"], ["delay-zero"])
+        self.assertEqual([item["case_id"] for item in report["not_run"]], ["ge-nan"])
+        self.assertEqual(device.launched, [("delay-zero", 71)])
+        self.assertEqual(device.calls.count("fake-reset"), 1)
+
+    def test_build_only_on_completed_checkpoint_preserves_its_terminal_state(self) -> None:
+        plan = self.load(self.CASES[:1])
+        runner = self.runner(plan, self.device())
+        self.assertEqual(runner.execute()[0], 0)
+        code, report = runner.execute(build_only=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["state"], "COMPLETE")
+        saved = json.loads(plan.report_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["state"], "COMPLETE")
+
+    def test_last_contained_case_over_budget_reports_exhausted_state(self) -> None:
+        plan = self.load(self.CASES[:1], max_contained_failures=0)
+        code, report = self.runner(plan, self.device(delay_zero="crash")).execute()
+        self.assertEqual(code, 2)
+        self.assertEqual(report["outcomes"][0]["status"], om.CONTAINED)
+        self.assertEqual(report["state"], om.CONTAINED_BUDGET_EXHAUSTED)
 
     def test_lock_lost_mid_matrix_writes_a_report_of_prior_hardware_results(self) -> None:
         plan = self.load(self.CASES[:2])

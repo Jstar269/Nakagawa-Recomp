@@ -105,6 +105,7 @@ class TestSpecsMatchProbeSource(unittest.TestCase):
                 "io-errors",
             ),
         )
+        self.assertEqual(IO_SPEC.inspection_optional_cases, {"io-write", "io-lseek"})
 
     def test_audio_contract(self) -> None:
         self.assertEqual(AUDIO_SPEC.test_id, "PSP-AUDIO-001")
@@ -231,6 +232,10 @@ class TestTruncationNeverPasses(unittest.TestCase):
                     )
                     with self.assertRaises(ProtocolError):
                         parse(text, require_complete=True)
+                    if spec == IO_SPEC:
+                        with self.assertRaisesRegex(ProtocolError, "terminal count mismatch"):
+                            parse(text, require_complete=False)
+                        continue
                     report = parse(text, require_complete=False)
                     self.assertTrue(report.terminal_present)
                     self.assertFalse(report.complete)
@@ -245,6 +250,10 @@ class TestTruncationNeverPasses(unittest.TestCase):
                     )
                     with self.assertRaises(ProtocolError):
                         parse(text, require_complete=True)
+                    if spec == IO_SPEC:
+                        with self.assertRaisesRegex(ProtocolError, "terminal count mismatch"):
+                            parse(text, require_complete=False)
+                        continue
                     report = parse(text, require_complete=False)
                     self.assertTrue(report.terminal_present)
                     self.assertFalse(report.complete)
@@ -363,6 +372,31 @@ class TestTerminalCountIsLoadBearing(unittest.TestCase):
                     with self.assertRaises(ProtocolError) as ctx:
                         parse(text, require_complete=strict)
                     self.assertIn("out0", str(ctx.exception))
+
+    def test_io_inspection_accepts_only_the_probe_conditional_short_shape(self) -> None:
+        conditional = {"io-write", "io-lseek"}
+        observed = [case for case in IO_SPEC.semantic_cases if case not in conditional]
+        failed_cells = {"io-open-create", "io-read-verify", "io-append", "io-errors"}
+        text = META + "".join(
+            line(IO_SPEC, case, "FAIL" if case in failed_cells else "PASS")
+            for case in observed
+        )
+        text += line(IO_SPEC, IO_SPEC.terminal_case, out0=len(observed))
+        report = parse_io_matrix_output(text, require_complete=False)
+        self.assertFalse(report.complete)
+        self.assertFalse(report.all_passed)
+        self.assertEqual(
+            report.sequence.incomplete_reason,
+            "conditional cells not emitted: io-write, io-lseek",
+        )
+        with self.assertRaisesRegex(ProtocolError, "stream incomplete"):
+            parse_io_matrix_output(text, require_complete=True)
+
+        required_missing = [case for case in IO_SPEC.semantic_cases if case != "io-read-verify"]
+        malformed_shape = META + "".join(line(IO_SPEC, case) for case in required_missing)
+        malformed_shape += line(IO_SPEC, IO_SPEC.terminal_case, out0=len(required_missing))
+        with self.assertRaisesRegex(ProtocolError, "terminal count mismatch"):
+            parse_io_matrix_output(malformed_shape, require_complete=False)
 
 
 class TestStaleLogContaminationIsRejected(unittest.TestCase):

@@ -4959,6 +4959,7 @@ IO_SPEC = StreamSpec(
     test_id=IO_EXPECTED_TEST_ID,
     semantic_cases=IO_SEMANTIC_CASES,
     terminal_case=IO_TERMINAL_CASE,
+    inspection_optional_cases=frozenset({"io-write", "io-lseek"}),
 )
 IO_EXPECTED_CASES = IO_SPEC.ordered_cases
 IO_EXPECTED_TERMINAL_COUNT = IO_SPEC.terminal_count
@@ -4981,6 +4982,10 @@ class IoMatrixReport:
     @property
     def all_passed(self) -> bool:
         return self.sequence.all_passed
+
+    @property
+    def incomplete_reason(self) -> str | None:
+        return self.sequence.incomplete_reason
 
     @property
     def record_count(self) -> int:

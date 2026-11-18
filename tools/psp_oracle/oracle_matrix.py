@@ -104,6 +104,10 @@ class MatrixError(ValueError):
     """The plan, the staged inputs or the checkpoint cannot be used; nothing touched the PSP."""
 
 
+def _staged_name(case_id: str) -> str:
+    return case_id.replace("-", "_") + ".prx"
+
+
 @dataclass(frozen=True)
 class MatrixCase:
     case_id: str
@@ -113,7 +117,7 @@ class MatrixCase:
 
     @property
     def staged_name(self) -> str:
-        return self.case_id.replace("-", "_") + ".prx"
+        return _staged_name(self.case_id)
 
 
 @dataclass(frozen=True)
@@ -461,20 +465,22 @@ def attested_boot(path: Path, session_id: str) -> tuple[int | None, str]:
 
 
 def note_launch(path: Path, session_id: str, text: str) -> None:
-    """Append one ``probes_run`` line to the lock this session holds (atomic replace)."""
+    """Append one session-owned probe note while retaining the latest lock fields."""
 
     lock = _read_lock(path)
     problem = lock_holder_problem(lock, session_id)
     if problem:
         raise MatrixError(problem)
-    runs = lock.get("probes_run")
-    lock["probes_run"] = [*(runs if isinstance(runs, list) else []), f"{session_id} {_utc_now()}: {text}"]
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.matrix.tmp")
-    try:
-        temporary.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    latest = _read_lock(path)
+    problem = lock_holder_problem(latest, session_id)
+    if problem:
+        raise MatrixError(problem)
+    runs = latest.get("probes_run")
+    latest["probes_run"] = [
+        *(runs if isinstance(runs, list) else []),
+        f"{session_id} {_utc_now()}: {text}",
+    ]
+    _runner._write_campaign_json(path, latest)
 
 
 # --------------------------------------------------------------------------------- launch classification
@@ -792,7 +798,12 @@ class MatrixRunner:
             raise MatrixError(f"build shell exited {code}: {err.strip()[-200:]}")
         staged: dict[str, str] = {}
         for case in to_build:
-            digest = _runner._host_binary_sha256(plan.host0_root / case.staged_name)
+            try:
+                digest = _runner._host_binary_sha256(plan.host0_root / case.staged_name)
+            except OSError as exc:
+                raise MatrixError(
+                    f"{case.case_id}: staged PRX is unavailable after build ({type(exc).__name__})"
+                ) from exc
             if digest != reported[case.case_id]:
                 raise MatrixError(f"{case.case_id}: staged PRX digest differs from the one the build reported")
             staged[case.case_id] = digest
@@ -805,10 +816,15 @@ class MatrixRunner:
                 raise MatrixError(f"{case.case_id}: prebuilt PRX unreadable ({type(exc).__name__})") from exc
             if digest != case.sha256:
                 raise MatrixError(f"{case.case_id}: prebuilt PRX digest is not the pinned one")
-            shutil.copyfile(case.prebuilt, plan.host0_root / case.staged_name)
-            staged[case.case_id] = _runner._host_binary_sha256(
-                plan.host0_root / case.staged_name
-            )
+            try:
+                shutil.copyfile(case.prebuilt, plan.host0_root / case.staged_name)
+                staged[case.case_id] = _runner._host_binary_sha256(
+                    plan.host0_root / case.staged_name
+                )
+            except OSError as exc:
+                raise MatrixError(
+                    f"{case.case_id}: staged prebuilt PRX is unavailable ({type(exc).__name__})"
+                ) from exc
             if staged[case.case_id] != case.sha256:
                 raise MatrixError(f"{case.case_id}: staged copy differs from the pinned prebuilt PRX")
         required_ids = [PREFLIGHT_CASE, *(case.case_id for case in plan.cases)]
@@ -817,7 +833,7 @@ class MatrixRunner:
 
     def verify_staged(self, staged: dict[str, str]) -> None:
         for name, digest in staged.items():
-            path = self.plan.host0_root / (name.replace("-", "_") + ".prx")
+            path = self.plan.host0_root / _staged_name(name)
             try:
                 current = _runner._host_binary_sha256(path)
             except OSError as exc:
@@ -909,7 +925,6 @@ class MatrixRunner:
             return None, detail, None, terminal
         before = _runner._attested_boot_number(before_state)
         assert before is not None
-        self._gate("before the soft reset")
         argv = render_argv(self.plan.commands["reset_argv"], self._values())
         code, _out, _err = self.run(argv, RESET_COMMAND_TIMEOUT_SECONDS, None)
         self.events.append(f"PSPLink soft reset from boot {before}: command exit {code} (a timeout is expected)")
@@ -939,12 +954,11 @@ class MatrixRunner:
             "--host0-root", str(plan.host0_root),
             "--pspsh-argv-json", json.dumps(plan.commands["pspsh_argv"]),
             "--usbhostfs-argv-json", json.dumps(plan.commands["usbhostfs_argv"]),
-            "--campaign-case", f"{PREFLIGHT_CASE}={plan.host0_root / 'transport_write.prx'}",
+            "--campaign-case", f"{PREFLIGHT_CASE}={plan.host0_root / _staged_name(PREFLIGHT_CASE)}",
             "--campaign-case", f"{case.case_id}={plan.host0_root / case.staged_name}",
             "--out", str(out),
         ]
         out.unlink(missing_ok=True)
-        self._gate(f"before launching {case.case_id}")
         note_launch(self.lock_path, plan.session_id,
                     f"matrix {plan.matrix_id} case {index + 1}/{len(plan.cases)}: boot {boot}, launching "
                     f"transport-write + {case.case_id} ({plan.source_commit[:8]}, PRX sha256 "
@@ -1008,7 +1022,7 @@ class MatrixRunner:
         staged = dict(cast(dict[str, str], state["staged"]))
         self.verify_staged(staged)
         if build_only:
-            return 0, self._report(state, "BUILT")
+            return 0, self._report(state, str(state.get("state") or "BUILT"))
         outcomes: list[dict[str, object]] = list(
             cast(list[dict[str, object]], state["outcomes"])
         )
@@ -1020,6 +1034,29 @@ class MatrixRunner:
             case = plan.cases[index]
             if contained > plan.max_contained_failures:
                 terminal = CONTAINED_BUDGET_EXHAUSTED
+                break
+            required_names = [PREFLIGHT_CASE, case.case_id]
+            companion = COMPANION_CASES.get(case.case_id)
+            if companion is not None:
+                required_names.append(companion)
+            try:
+                case_staged: dict[str, str] = {}
+                for name in dict.fromkeys(required_names):
+                    digest = staged.get(name)
+                    if not isinstance(digest, str):
+                        raise MatrixError(f"{name}: staged PRX digest is missing from the checkpoint")
+                    case_staged[name] = digest
+                self.verify_staged(case_staged)
+            except MatrixError as exc:
+                if not hardware_started:
+                    raise
+                terminal = REJECTED
+                state["stopped_before"] = {
+                    "case_id": case.case_id,
+                    "state": terminal,
+                    "reason": f"staged PRX verification failed before reset: {exc}",
+                }
+                self.events.append(f"matrix stopped before {case.case_id}: staged input verification failed")
                 break
             state["state"] = "IN_PROGRESS"
             try:
@@ -1067,6 +1104,8 @@ class MatrixRunner:
                     used_boots.append(seen)
             if outcome.status == CONTAINED:
                 contained += 1
+                if contained > plan.max_contained_failures:
+                    terminal = CONTAINED_BUDGET_EXHAUSTED
             if outcome.status == INTERVENTION:
                 terminal = INTERVENTION
             outcomes.append(outcome.as_dict())

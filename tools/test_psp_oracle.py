@@ -297,6 +297,19 @@ class PspOracleProtocolTests(unittest.TestCase):
         self.assertEqual(fields["MODEL_INTERPRETATION_RULE"], PSP_MODEL_INTERPRETATION_RULE)
         self.assertEqual(fields["MODEL_IDENTITY_AGREEMENT"], "AGREES")
 
+    def test_model_identity_accepts_retail_region_suffixes(self) -> None:
+        for label, raw_code, expected in (
+            ("PSP-3001", "3", "PSP-3000"),
+            ("PSP-1004", "0", "PSP-1000"),
+            ("PSP-2001", "1", "PSP-2000"),
+            ("PSP-3004", "3", "PSP-3000"),
+            ("PSP-N1001", "4", "PSP-N1000"),
+        ):
+            with self.subTest(label=label):
+                fields = model_identity_fields(label, raw_code)
+                self.assertEqual(fields["INTERPRETED_MODEL_FAMILY"], expected)
+                self.assertEqual(fields["MODEL_IDENTITY_AGREEMENT"], "AGREES")
+
     def test_unknown_model_rule_leaves_the_raw_value_untouched(self) -> None:
         stored_envelope = {
             "PHYSICAL_MODEL_LABEL": "PSP-3000",
@@ -939,6 +952,16 @@ class GeCorpusGateTests(unittest.TestCase):
         self.assertEqual(report["status"], "REFUSED")
         self.assertIn("minium", report["cases"][0]["reason"])
 
+    def test_ref_with_an_enforced_sibling_keyword_is_refused(self) -> None:
+        schema = self._schema()
+        schema["$defs"]["probe_run"]["properties"]["evidence_envelope"]["required"] = [
+            "unvalidated_sibling"
+        ]
+        report = ge_corpus_report(self.corpus, schema)
+        self.assertEqual(report["status"], "REFUSED")
+        self.assertIn("$ref", report["cases"][0]["reason"])
+        self.assertIn("sibling", report["cases"][0]["reason"])
+
     def test_packed_pixel_values_must_fit_the_declared_format(self) -> None:
         document = json.loads(json.dumps(self.corpus))
         case = document["cases"][0]
@@ -1069,6 +1092,109 @@ class GeCorpusGateTests(unittest.TestCase):
             },
         }
         return document
+
+    def _measured_case_record(
+        self,
+        *,
+        metadata: dict[str, str] | None = None,
+        envelope_case_id: str | None = None,
+        record_framebuffer_sha256: str | None = None,
+        pixels: dict[tuple[int, int], int | str] | None = None,
+        omitted_pixels: set[tuple[int, int]] | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        document: dict[str, Any] = json.loads(json.dumps(self.corpus))
+        case = document["cases"][0]
+        case["source_tier"] = "PSP_HARDWARE"
+        framebuffer_sha = "a" * 64
+        case["framebuffer_sha256"] = framebuffer_sha
+        for pixel in case["selected_pixels"]:
+            pixel["pixel_value"] = 0
+        identity = {
+            "source": "psp",
+            "model": "PSP-3000",
+            "firmware": "6.61-ARK",
+            "binary": MEASURED_SHA,
+            "commit": MEASURED_COMMIT,
+            **(metadata or {}),
+        }
+        case_id = case["case_id"]
+        fields = [f"framebuffer_sha256={record_framebuffer_sha256 or framebuffer_sha}"]
+        for pixel in case["selected_pixels"]:
+            coordinates = (pixel["x"], pixel["y"])
+            if coordinates in (omitted_pixels or set()):
+                continue
+            value = (pixels or {}).get(coordinates, pixel["pixel_value"])
+            formatted = value if isinstance(value, str) else f"0x{value:08x}"
+            fields.append(f"pixel_{pixel['x']}_{pixel['y']}={formatted}")
+        raw = META.format(**identity) + (
+            f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-GE-001 case_id={case_id} "
+            "status=PASS " + " ".join(fields) + "\n"
+        )
+        case["evidence_envelope"] = {
+            "EVIDENCE_CLASS": "PSP_HARDWARE",
+            "ACCEPTANCE_ELIGIBLE": True,
+            "CASE_ID": envelope_case_id or case_id,
+            "CONSOLE_MODEL": "PSP-3000",
+            "FW": "6.61-ARK",
+            "SOURCE_COMMIT": MEASURED_COMMIT,
+            "BINARY_SHA256": MEASURED_SHA,
+            "RESULT_RECORD": {
+                "path": "ge/run.txt",
+                "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            },
+        }
+        return document, raw
+
+    def test_measured_hardware_case_rederives_identity_digest_case_and_pixels(self) -> None:
+        document, raw = self._measured_case_record()
+        completed = self._run_gate(document, {"ge/run.txt": raw})
+        measured = self._report(completed)["cases"][0]
+        self.assertEqual(measured["status"], "MEASURED")
+        self.assertIn("matches this case and its pixel results", measured["reason"])
+
+        identity_failures = (
+            ({"model": "PSP-2000"}, "model does not match CONSOLE_MODEL"),
+            ({"firmware": "6.60-ARK"}, "firmware does not match FW"),
+            ({"commit": "c" * 40}, "source_commit does not match SOURCE_COMMIT"),
+            ({"binary": "c" * 64}, "binary_sha256 does not match BINARY_SHA256"),
+        )
+        for metadata, reason in identity_failures:
+            with self.subTest(metadata=tuple(metadata)):
+                document, raw = self._measured_case_record(metadata=metadata)
+                completed = self._run_gate(document, {"ge/run.txt": raw})
+                refused = self._report(completed)["cases"][0]
+                self.assertEqual(refused["status"], "REFUSED")
+                self.assertIn(reason, refused["reason"])
+
+        with self.subTest(boundary="CASE_ID"):
+            document, raw = self._measured_case_record(envelope_case_id="another-case")
+            completed = self._run_gate(document, {"ge/run.txt": raw})
+            refused = self._report(completed)["cases"][0]
+            self.assertEqual(refused["status"], "REFUSED")
+            self.assertIn("oracle CASE_ID does not match", refused["reason"])
+
+        first_pixel = self.corpus["cases"][0]["selected_pixels"][0]
+        coordinates = (first_pixel["x"], first_pixel["y"])
+        pixel_key = f"pixel_{coordinates[0]}_{coordinates[1]}"
+        pixel_failures = (
+            ({"omitted_pixels": {coordinates}}, f"missing a valid {pixel_key}"),
+            ({"pixels": {coordinates: "not-a-pixel"}}, f"missing a valid {pixel_key}"),
+            ({"pixels": {coordinates: 1}}, f"{pixel_key} does not match the case pixel vector"),
+        )
+        for options, reason in pixel_failures:
+            with self.subTest(pixel_case=tuple(options)):
+                document, raw = self._measured_case_record(**options)
+                completed = self._run_gate(document, {"ge/run.txt": raw})
+                refused = self._report(completed)["cases"][0]
+                self.assertEqual(refused["status"], "REFUSED")
+                self.assertIn(reason, refused["reason"])
+
+        with self.subTest(boundary="framebuffer digest"):
+            document, raw = self._measured_case_record(record_framebuffer_sha256="b" * 64)
+            completed = self._run_gate(document, {"ge/run.txt": raw})
+            refused = self._report(completed)["cases"][0]
+            self.assertEqual(refused["status"], "REFUSED")
+            self.assertIn("framebuffer_sha256 does not match the case digest", refused["reason"])
 
     def test_hardware_claim_without_a_results_directory_is_not_run(self) -> None:
         document = self._hardware_case(stream("psp"))
@@ -1258,6 +1384,13 @@ class GeCorpusGateTests(unittest.TestCase):
                 "path": f"ge-corpus/PSP-GE-RTT-001-{MEASURED_COMMIT[:12]}.txt",
                 "sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest()})
             self.assertEqual((results / record_ref["path"]).read_text(encoding="utf-8"), raw)
+            wrong_identity = json.loads(json.dumps(written))
+            wrong_identity["probe_runs"][0]["evidence_envelope"]["FW"] = "6.60"
+            refused_identity = ge_corpus_report(
+                wrong_identity, self._schema(), results
+            )["probe_runs"][0]
+            self.assertEqual(refused_identity["status"], "REFUSED")
+            self.assertIn("raw result firmware does not match FW", refused_identity["reason"])
             self.assertEqual(run["cells"][0]["records"][0]["words"],
                              " ".join(f"{(1 * 0x10001 + i * 0x101):08x}" for i in range(16)))
             # A corpus row that is not the record's, with its digest made consistent, is refused.
