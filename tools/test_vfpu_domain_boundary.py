@@ -101,7 +101,8 @@ class ReproducedCorpusTests(unittest.TestCase):
     def test_the_documented_endpoint_is_not_out_of_domain(self) -> None:
         # `|x| = 1.0` is the largest in-domain magnitude; the corpus must not
         # swallow it, or the pinned branch would be off by one ULP.
-        self.assertEqual(DOMAIN_LIMIT_WORD & 0x7FFFFFFF, DOMAIN_LIMIT_WORD)
+        self.assertNotIn(DOMAIN_LIMIT_WORD, REPRODUCED_ARGUMENTS)
+        self.assertNotIn(DOMAIN_LIMIT_WORD | 0x80000000, REPRODUCED_ARGUMENTS)
 
 
 class MeasuredResultTests(unittest.TestCase):

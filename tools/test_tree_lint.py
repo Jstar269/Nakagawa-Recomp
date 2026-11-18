@@ -124,6 +124,34 @@ class TreeLintTests(unittest.TestCase):
         })
         self.assertNotIn("docs/provenance/HST_PUBLIC_CENSUS.md", statuses)
 
+    def test_file_named_only_by_a_dot_relative_reference_is_not_reported(self) -> None:
+        statuses = self._statuses({
+            "guides/INDEX.md": "see [ci](../docs/CI_GUIDE.md) and run ./tools/run_me.py\n",
+            "docs/CI_GUIDE.md": "ci\n",
+            "tools/run_me.py": "print('run')\n",
+        })
+        self.assertNotIn("docs/CI_GUIDE.md", statuses)
+        self.assertNotIn("tools/run_me.py", statuses)
+
+    def test_a_non_ascii_tracked_name_is_listed_as_its_real_path(self) -> None:
+        # git C-quotes such a name in plain `ls-files` output; the quoted text
+        # names no file, so the scan would fail for the whole tree.
+        # The scan reads every tracked file, so it must complete and report the
+        # file by its real path (TOKEN_RE does not match the name, so it stays
+        # unreferenced -- the documented character-class limit).
+        holder = self._repo({
+            "docs/café.md": "menu\n",
+            "README.md": "readme\n",
+        })
+        root = pathlib.Path(holder.name)
+        tracked = tree_lint.tracked_files(root)
+        self.assertEqual(sorted(tracked), ["README.md", "docs/café.md"])
+        statuses = {
+            str(entry["path"]): str(entry["status"])
+            for entry in tree_lint.unreferenced(root, tracked, {})
+        }
+        self.assertEqual(statuses.get("docs/café.md"), tree_lint.UNREFERENCED)
+
     def test_file_named_with_sentence_period_is_not_reported(self) -> None:
         statuses = self._statuses({
             "docs/PIPELINE.md": "Run tools/codegen.py. Then proceed.\nSee `tools/helper.py.`\n",

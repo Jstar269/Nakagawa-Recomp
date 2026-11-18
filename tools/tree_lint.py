@@ -125,10 +125,13 @@ class TreeLintError(RuntimeError):
 
 def tracked_files(root: Path) -> list[str]:
     """Every path the index knows about, in git's own order."""
-    result = run_git(["ls-files"], cwd=root, capture_output=True, text=True, check=False)
+    # -z: without it git C-quotes a path with a non-ASCII or special byte
+    # ("docs/caf\303\251.md"), which names no file on disk.
+    result = run_git(["ls-files", "-z"], cwd=root, capture_output=True, check=False)
     if result.returncode != 0:
-        raise TreeLintError(f"git ls-files failed in {root}: {result.stderr.strip() or result.returncode}")
-    return [line for line in result.stdout.splitlines() if line.strip()]
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise TreeLintError(f"git ls-files failed in {root}: {stderr or result.returncode}")
+    return [path for path in result.stdout.decode("utf-8").split("\0") if path]
 
 
 def _is_scannable(blob: bytes) -> bool:
@@ -238,6 +241,10 @@ def build_reference_index(
             text = _without_section(text, INDEX_SECTIONS[source])
         for raw_token in TOKEN_RE.findall(text):
             token = raw_token.rstrip(".")
+            # A relative link or command (`../docs/CI.md`, `./tools/x.py`) arrives
+            # as one token; its leading dot segments are not part of any spelling.
+            while token.startswith(("./", "../")):
+                token = token.split("/", 1)[1]
             if not token:
                 continue
             named_by = paths_by_spelling.get(token)

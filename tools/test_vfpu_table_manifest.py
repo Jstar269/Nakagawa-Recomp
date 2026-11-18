@@ -138,6 +138,27 @@ class VfpuTableManifestTests(unittest.TestCase):
             )
             self.assertEqual(spec["bytes"] % spec["elem"], 0)
 
+    def test_domain_bounds_match_manifest_and_header(self):
+        # The invariant tests below use these bounds; they must be the sizes the
+        # embedded manifest and the C validator actually use, not stale copies.
+        embedded = parse_embedded_manifest()
+        expected = {
+            "vfpu_asin_lut_indices.dat": ASIN_INDICES_ENTRIES,
+            "vfpu_asin_lut_deltas.dat": ASIN_DELTAS_ENTRIES,
+            "vfpu_sin_lut_interval_delta.dat": SIN_INTERVAL_ENTRIES,
+            "vfpu_sin_lut_exceptions.dat": SIN_EXCEPTIONS_BYTES,
+        }
+        for name, entries in expected.items():
+            spec = embedded[name]
+            self.assertEqual(spec["bytes"] // spec["elem"], entries, name)
+        header = (ROOT / "src" / "rt" / "vfpu_tables.h").read_text(encoding="utf-8")
+        defines = dict(
+            (name, int(value))
+            for name, value in re.findall(r"^#define\s+(SR_VFPU_\w+)\s+(\d+)u\b", header, re.MULTILINE)
+        )
+        self.assertEqual(defines.get("SR_VFPU_ASIN_DELTAS_ENTRIES"), ASIN_DELTAS_ENTRIES)
+        self.assertEqual(defines.get("SR_VFPU_SIN_EXCEPTIONS_BYTES"), SIN_EXCEPTIONS_BYTES)
+
     def test_genuine_asin_indices_respect_deltas_domain(self):
         data = (ASSETS / "vfpu_asin_lut_indices.dat").read_bytes()
         self.assertEqual(len(data), ASIN_INDICES_ENTRIES * 2)
@@ -156,6 +177,7 @@ class VfpuTableManifestTests(unittest.TestCase):
             hi = ((169 * (k + 1)) >> 7) + delta[k + 1] + 16384
             # The C validator's invariant: 0 <= lo <= hi <= exception_count
             # (inclusive upper bound; m = (lo+hi)/2 < hi keeps reads in bounds).
+            self.assertGreaterEqual(lo, 0)
             self.assertLessEqual(lo, hi)
             self.assertLessEqual(hi, SIN_EXCEPTIONS_BYTES)
             if lo < hi:

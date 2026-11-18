@@ -323,6 +323,10 @@ def loads_manifest(raw: str) -> dict[str, Any]:
         raise
     except json.JSONDecodeError as exc:
         raise TitleManifestError(f"$: invalid JSON: {exc}") from exc
+    except RecursionError as exc:
+        # Nesting deep enough to exhaust the decoder's stack fits under the byte
+        # cap; it is the same named depth failure depth() reports below.
+        raise TitleManifestError(f"$: JSON nesting exceeds {MAX_JSON_DEPTH}") from exc
     if not isinstance(value, dict):
         fail("$", "must be an object")
     depth(value)

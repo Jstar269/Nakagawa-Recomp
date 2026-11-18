@@ -37,10 +37,31 @@ class VfpuCoverageCensusTests(unittest.TestCase):
         self.assertEqual(self.census["schema"], census.CENSUS_SCHEMA)
         self.assertGreater(self.census["systematic_space"]["words_visited"], 50000)
         source = (ROOT / "src" / "rt" / "vfpu_interp.c").read_text(encoding="utf-8")
+        # Count the decoder's return sites without the module's own regex, so a
+        # wrong RETURN_PATTERN cannot agree with itself.
+        independent_sites = sum(
+            " ".join(line.split()).count(f"return SR_VFPU_{kind};")
+            for line in source.splitlines()
+            for kind in ("OTHER", "COMPUTE", "STATE")
+        )
+        self.assertGreater(independent_sites, 0)
         self.assertEqual(
             self.census["systematic_space"]["production_decoder_return_sites"],
-            len(census.RETURN_PATTERN.findall(source)),
+            independent_sites,
         )
+
+    def test_return_pattern_matches_only_decoder_return_sites(self):
+        for line, expected in (
+            ("    return SR_VFPU_OTHER;", ["SR_VFPU_OTHER"]),
+            ("return SR_VFPU_COMPUTE;", ["SR_VFPU_COMPUTE"]),
+            ("return\tSR_VFPU_STATE;", ["SR_VFPU_STATE"]),
+            ("return SR_VFPU_NONE;", []),
+            ("return SR_VFPU_OTHERWISE;", []),
+            ("return SR_VFPU_OTHER ;", []),
+            ("x = SR_VFPU_OTHER;", []),
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(census.RETURN_PATTERN.findall(line), expected)
         self.assertIn("0x18", self.census["systematic_space"]["opcode_families"])
         self.assertIn("0x3c", self.census["systematic_space"]["opcode_families"])
 
@@ -246,9 +267,6 @@ class VfpuCoverageCensusTests(unittest.TestCase):
         gate = self.census["acceleration_gate"]
         self.assertEqual(gate["accelerated_forms"], [])
         self.assertEqual(gate["violations"], [])
-        by_id = self.rows
-        for form_id in gate["accelerated_forms"]:
-            self.assertTrue(by_id[form_id]["sufficiently_verified_for_acceleration"])
         row = copy.deepcopy(next(row for row in self.census["rows"] if row["differential_tests"]))
         row["hardware_sensitive"] = True
         row["evidence_tier"] = "D"

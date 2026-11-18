@@ -25,6 +25,10 @@ import shutil
 import subprocess
 import sys
 import unittest
+
+# `python -m unittest tools.test_vfs_contained` runs from the repository root,
+# where tools/ is not on sys.path yet.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hle_sources  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -223,8 +227,11 @@ int main(int argc, char **argv) {
     uint32_t lba = 0, sz = 0;
     IsoDirEntry de;
 
-    /* Valid lookup works */
+    /* Valid lookups work: these are the files the traversals below reach
+     * if '..' is resolved, so each refusal comes from the '..' rule. */
     if (iso_lookup("disc0:/PSP_GAME/SYSDIR/EBOOT.BIN", &lba, &sz) != 0) return 1;
+    if (iso_lookup("disc0:/PSP_GAME/PARAM.SFO", &lba, &sz) != 0) return 1;
+    if (iso_lookup("disc0:\\PSP_GAME\\SYSDIR\\EBOOT.BIN", &lba, &sz) != 0) return 1;
 
     /* Containment tests: all parent traversals must be refused */
     const char *bad_lookups[] = {
@@ -238,6 +245,11 @@ int main(int argc, char **argv) {
         "disc0:/PSP_GAME/USRDIR/../../..",
         "disc0:\\..\\EBOOT.BIN",
         "disc0:/PSP_GAME\\..\\SYSDIR\\EBOOT.BIN",
+        /* These name existing files if '..' is honoured. */
+        "disc0:/PSP_GAME/USRDIR/../SYSDIR/EBOOT.BIN",
+        "disc0:/PSP_GAME/SYSDIR/../PARAM.SFO",
+        "disc0:/PSP_GAME\\USRDIR\\..\\SYSDIR\\EBOOT.BIN",
+        "disc0:\\PSP_GAME\\SYSDIR\\..\\PARAM.SFO",
         NULL
     };
     for (int i = 0; bad_lookups[i]; i++) {

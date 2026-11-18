@@ -68,6 +68,19 @@ class VulkanSdkDiscoveryTests(unittest.TestCase):
                 (root / "1.9.0.0").resolve(),
             )
 
+    def test_scan_orders_complete_versions_numerically_not_by_name(self) -> None:
+        # 1.10 sorts before 1.9 as a string; both are complete, so only numeric
+        # ordering picks 1.10.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_sdk(root, "1.9.0.0")
+            self.make_sdk(root, "1.10.0.0")
+            self.make_sdk(root, "1.8.0.0")
+            self.assertEqual(
+                discover_vulkan_sdk(environment="", install_root=root),
+                (root / "1.10.0.0").resolve(),
+            )
+
     def test_incomplete_and_malformed_installations_are_not_usable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -142,11 +155,14 @@ class VulkanSdkMakefileWiringTests(unittest.TestCase):
         compiler at a pinned version directory.
         """
         makefile = read_makefile(Path(__file__).resolve().parents[1])
+        # Every non-comment line, not only continuation lines that start with a
+        # flag: an assignment such as `CFLAGS += -IC:/VulkanSDK/1.3.296.0/Include`
+        # or a pinned token appended to PLAYER_VULKAN_INC must fail too.
         for line in makefile.splitlines():
             text = line.strip()
-            if text.startswith("-I") or text.startswith("-L"):
-                self.assertNotIn("VulkanSDK/1.", text, line)
-                self.assertNotRegex(text, r"VulkanSDK/(\d+\.){2,}\d+", line)
+            if text.startswith("#"):
+                continue
+            self.assertNotRegex(text, r"(?i)VulkanSDK[/\\]+(\d+\.){2,}\d+", line)
 
     def test_player_flags_derive_from_vulkan_sdk(self) -> None:
         # The Vulkan include/library group is platform-conditional: on Windows
