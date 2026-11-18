@@ -37,10 +37,14 @@ PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # Windows forbids in file names, and control characters, stay rejected.
 DISC_PATH_COMPONENT_RE = re.compile(r'^[^<>:"/\\|?*\x00-\x1f\x7f]+$')
 DEVICE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,15}:$")
+# Windows device names, the same set as manifest_reserved_device in
+# src/core/nk_title_manifest.c and zip_reserved_device in src/core/nk_zip.c: COM and
+# LPT followed by a superscript one, two or three (U+00B9, U+00B2, U+00B3) are devices too.
 WINDOWS_RESERVED = {
-    "CON", "PRN", "AUX", "NUL",
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
+    *(f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "¹²³"),
 }
 
 ROOT_KEYS = {

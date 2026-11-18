@@ -682,6 +682,10 @@ class TitleManifestParityTests(unittest.TestCase):
             (lambda d: d["filesystem"].update({"disc_image": " lead/trail."}), "disc-image leading space"),
             # 26. Disc image rejects reserved Windows device names
             (lambda d: d["filesystem"].update({"disc_image": "CON .iso"}), "disc-image reserved name"),
+            # 26b. Superscript COM/LPT device names are reserved too (audit 2026-11-17)
+            (lambda d: d["filesystem"].update({"disc_image": "COM¹.iso"}), "disc-image superscript COM device"),
+            (lambda d: d["filesystem"].update({"disc_image": "dumps/lpt² .iso"}), "disc-image superscript LPT device"),
+            (lambda d: d["filesystem"].update({"disc_image": "CONIN$.iso"}), "disc-image console device"),
             # 27. A well-formed hex string is still not an integer address (audit 2026-11-17)
             (lambda d: d["executable"].update({"entry": "0x08804000"}), "well-formed hex string entry"),
             # 28. display_name with a leading space

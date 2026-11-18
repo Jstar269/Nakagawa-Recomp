@@ -13,6 +13,7 @@
 #include "nk_shared_helpers.h"
 #include <ctype.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -336,6 +337,34 @@ static bool manifest_parse_disc_builds(const JsonNode *builds, char *error_buf, 
     return true;
 }
 
+/* A Windows device name, alone or before an extension ("NUL", "con.txt"), with
+ * the blanks Windows drops before the extension ignored ("CON .iso" is CON):
+ * CON, PRN, AUX, NUL, CONIN$, CONOUT$, COM1-COM9, LPT1-LPT9, and COM and LPT
+ * followed by a superscript one, two or three (U+00B9, U+00B2, U+00B3). The
+ * same rule as zip_reserved_device in nk_zip.c and WINDOWS_RESERVED in
+ * tools/title_manifest.py. seg holds n bytes of one path component. */
+static bool manifest_reserved_device(const char *seg, size_t n) {
+    static const char * const names[] = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"};
+    char stem[8];
+    size_t len = 0;
+    while (len < n && seg[len] != '.') ++len;
+    while (len > 0 && seg[len - 1] == ' ') --len;
+    if (len < 3 || len > 7) return false;
+    for (size_t i = 0; i < len; ++i) {
+        char c = seg[i];
+        stem[i] = (c >= 'a' && c <= 'z') ? (char)(c - ('a' - 'A')) : c;
+    }
+    stem[len] = '\0';
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        if (strcmp(stem, names[i]) == 0) return true;
+    }
+    if (memcmp(stem, "COM", 3) != 0 && memcmp(stem, "LPT", 3) != 0) return false;
+    if (len == 4) return stem[3] >= '1' && stem[3] <= '9';
+    return len == 5 && (unsigned char)stem[3] == 0xC2u &&
+           ((unsigned char)stem[4] == 0xB9u || (unsigned char)stem[4] == 0xB2u ||
+            (unsigned char)stem[4] == 0xB3u);
+}
+
 static bool is_valid_filename(const char *s) {
     if (!s || !*s) return false;
     size_t len = strlen(s);
@@ -349,21 +378,7 @@ static bool is_valid_filename(const char *s) {
     if (s[len - 1] == '.') return false;
 
     /* Check Windows reserved names */
-    static const char * const reserved[] = {
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", NULL
-    };
-    char base[16];
-    size_t blen = 0;
-    while (blen < sizeof(base) - 1 && s[blen] && s[blen] != '.') {
-        base[blen] = (char)toupper((unsigned char)s[blen]);
-        blen++;
-    }
-    base[blen] = '\0';
-    for (int r = 0; reserved[r]; r++) {
-        if (strcmp(base, reserved[r]) == 0) return false;
-    }
+    if (manifest_reserved_device(s, len)) return false;
     return true;
 }
 
@@ -395,21 +410,7 @@ static bool is_valid_relative_path(const char *s, bool allow_plus) {
                 !(allow_plus && c == '+')) return false;
         }
         /* Check Windows reserved */
-        char base[16];
-        size_t blen = 0;
-        while (blen < sizeof(base) - 1 && token[blen] && token[blen] != '.') {
-            base[blen] = (char)toupper((unsigned char)token[blen]);
-            blen++;
-        }
-        base[blen] = '\0';
-        static const char * const reserved[] = {
-            "CON", "PRN", "AUX", "NUL",
-            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", NULL
-        };
-        for (int r = 0; reserved[r]; r++) {
-            if (strcmp(base, reserved[r]) == 0) return false;
-        }
+        if (manifest_reserved_device(token, tlen)) return false;
         token = slash ? slash + 1 : NULL;
     }
     return true;
@@ -468,22 +469,7 @@ static bool is_valid_disc_image_path(const char *s) {
             if (c < 0x20 || c == 0x7f || strchr("<>:\"\\|?*", (int)c) != NULL) return false;
         }
         /* Reserved device name: the text before the first '.', trailing spaces removed. */
-        size_t pre = 0;
-        while (pre < plen && part[pre] != '.') pre++;
-        while (pre > 0 && part[pre - 1] == ' ') pre--;
-        if (pre <= 4) {
-            char base[5];
-            for (size_t i = 0; i < pre; i++) base[i] = (char)toupper((unsigned char)part[i]);
-            base[pre] = '\0';
-            static const char * const reserved[] = {
-                "CON", "PRN", "AUX", "NUL",
-                "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-                "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", NULL
-            };
-            for (int r = 0; reserved[r]; r++) {
-                if (strcmp(base, reserved[r]) == 0) return false;
-            }
-        }
+        if (manifest_reserved_device(part, plen)) return false;
         part = end ? end + 1 : part + plen;
     }
     return true;
@@ -1687,30 +1673,7 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
         out->modules[i].required = (req && req->type == JSON_BOOL) ? req->u.bool_val : false;
     }
 
-    out->entry.id = out->id;
-    out->entry.game_name = out->game_name;
-    out->entry.display_name = out->display_name;
-    out->entry.kind = out->kind;
-    out->entry.primary_disc_id = out->primary_disc_id[0] ? out->primary_disc_id : NULL;
-    out->entry.compatible_disc_ids = out->compat_id_ptrs[0] ? out->compat_id_ptrs : NULL;
-    out->entry.executable_base = out->executable_base;
-    out->entry.executable_entry = out->executable_entry;
-    out->entry.has_executable_base = out->has_executable_base;
-    out->entry.has_executable_entry = out->has_executable_entry;
-    out->entry.run_entry = out->run_entry;
-    out->entry.bss_metadata_source = out->bss_metadata_source;
-    out->entry.data_root = out->data_root;
-    out->entry.loose_content_roots = out->loose_root_count ? out->loose_roots : NULL;
-    out->entry.loose_content_root_count = (int)out->loose_root_count;
-    out->entry.memory_stick_root = out->memory_stick_root;
-    out->entry.hle_profile = out->hle_profile;
-    out->entry.codegen_profile = out->codegen_profile;
-    out->entry.expected_data_file_count = out->expected_data_file_count;
-    out->entry.requires_font_firmware = out->requires_font_firmware;
-    out->entry.requires_psmf = out->requires_psmf;
-    out->entry.analog_dead_zone_counts = out->analog_dead_zone_counts;
-    out->entry.modules = out->modules;
-    out->entry.module_count = out->module_count;
+    overlay_slot_anchor(out);
 }
 
 /* Check the new identities against the public catalog and the loaded overlays (check 17). */
@@ -1843,7 +1806,8 @@ static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_
 
 /* Store the accepted manifest in the caller slot, or publish it as a catalog generation (#670). */
 static bool manifest_publish_slot(const OverlayStorageSlot *temp, NkTitleEntry *out_entry,
-                                  OverlayStorageSlot *validate_into) {
+                                  OverlayStorageSlot *validate_into,
+                                  char *error_buf, size_t error_buf_len) {
     if (validate_into) {
         *validate_into = *temp;
         overlay_slot_anchor(validate_into);
@@ -1860,11 +1824,19 @@ static bool manifest_publish_slot(const OverlayStorageSlot *temp, NkTitleEntry *
         }
     }
     if (target_slot == -1) {
-        if (s_overlay_slot_count < NK_MANIFEST_MAX_OVERLAYS) {
-            target_slot = s_overlay_slot_count++;
-        } else {
-            target_slot = NK_MANIFEST_MAX_OVERLAYS - 1; /* bounded replacement of last slot */
+        if (s_overlay_slot_count >= NK_MANIFEST_MAX_OVERLAYS) {
+            /* Every slot holds another title. Reusing one would drop that title
+               from the catalog while its registration showed this one, so the
+               new identity is refused by name and the loaded titles stay. */
+            if (error_buf) {
+                snprintf(error_buf, error_buf_len,
+                    "Overlay capacity reached: %d title manifests are already loaded, "
+                    "so '%s' was not loaded",
+                    NK_MANIFEST_MAX_OVERLAYS, temp->entry.id);
+            }
+            return false;
         }
+        target_slot = s_overlay_slot_count++;
     }
 
     nk_title_catalog_set_overlay_storage_reset_locked(nk_manifest_reset_overlay_storage);
@@ -1936,7 +1908,8 @@ static bool nk_manifest_parse_locked(
         OverlayStorageSlot temp;
         manifest_build_slot(&mp, &temp);
         ok = manifest_check_collision(&temp, allow_override, error_buf, error_buf_len) &&
-             manifest_publish_slot(&temp, out_entry, validate_into);
+             manifest_publish_slot(&temp, out_entry, validate_into,
+                                   error_buf, error_buf_len);
     }
     json_free(root);
     return ok;
@@ -2067,30 +2040,58 @@ bool nk_title_manifest_load_overlay_ext(
     return ok;
 }
 
+/* Every *.json name in the folder. The list grows as the folder is read, so
+   which manifests load depends only on the names, never on the order the host
+   lists them in, and no name is too long to be listed. */
 typedef struct {
-    char names[NK_MANIFEST_MAX_OVERLAYS * 4][256];
-    int count;
-    bool truncated;
+    char **names;
+    size_t count;
+    size_t capacity;
+    bool out_of_memory;
 } OverlayDirListing;
 
 static bool overlay_dir_collect(const char *name, void *ctx) {
     OverlayDirListing *listing = (OverlayDirListing *)ctx;
     size_t len = strlen(name);
-    if (len < 6 || len >= sizeof(listing->names[0])) return true;
+    if (len < 6) return true;
     const char *ext = name + len - 5;
     if (!(tolower((unsigned char)ext[0]) == '.' && tolower((unsigned char)ext[1]) == 'j' &&
           tolower((unsigned char)ext[2]) == 's' && tolower((unsigned char)ext[3]) == 'o' &&
           tolower((unsigned char)ext[4]) == 'n')) return true;
-    if (listing->count >= (int)(sizeof(listing->names) / sizeof(listing->names[0]))) {
-        listing->truncated = true;
+    if (listing->count == listing->capacity) {
+        size_t capacity = listing->capacity ? listing->capacity * 2u : 32u;
+        if (capacity < listing->capacity ||
+            capacity > SIZE_MAX / sizeof(listing->names[0])) {
+            listing->out_of_memory = true;
+            return false;
+        }
+        char **names = (char **)realloc(listing->names, capacity * sizeof(listing->names[0]));
+        if (!names) {
+            listing->out_of_memory = true;
+            return false;
+        }
+        listing->names = names;
+        listing->capacity = capacity;
+    }
+    char *copy = (char *)malloc(len + 1u);
+    if (!copy) {
+        listing->out_of_memory = true;
         return false;
     }
-    memcpy(listing->names[listing->count++], name, len + 1);
+    memcpy(copy, name, len + 1u);
+    listing->names[listing->count++] = copy;
     return true;
 }
 
+static void overlay_dir_listing_free(OverlayDirListing *listing) {
+    for (size_t i = 0; i < listing->count; i++) free(listing->names[i]);
+    free(listing->names);
+    listing->names = NULL;
+    listing->count = listing->capacity = 0;
+}
+
 static int overlay_name_compare(const void *a, const void *b) {
-    return strcmp((const char *)a, (const char *)b);
+    return strcmp(*(const char * const *)a, *(const char * const *)b);
 }
 
 static void overlay_report_line(char *report, size_t report_len, const char *line) {
@@ -2183,30 +2184,39 @@ static size_t overlay_declared_disc_ids(
 int nk_title_manifest_load_overlay_dir(const char *dir, char *report, size_t report_len) {
     if (report && report_len) report[0] = '\0';
     if (!dir || !*dir || !nk_platform_dir_exists(dir)) return 0;
-    OverlayDirListing *listing = (OverlayDirListing *)calloc(1, sizeof(*listing));
-    if (!listing) {
+    OverlayDirListing listing = {0};
+    bool listed = nk_platform_list_files(dir, overlay_dir_collect, &listing);
+    if (listing.out_of_memory) {
         overlay_report_line(report, report_len, "manifests: out of memory listing the folder");
+        overlay_dir_listing_free(&listing);
         return 0;
     }
-    if (!nk_platform_list_files(dir, overlay_dir_collect, listing)) {
+    if (!listed) {
         overlay_report_line(report, report_len, "manifests: the folder could not be read");
-        free(listing);
+        overlay_dir_listing_free(&listing);
         return 0;
     }
-    qsort(listing->names, (size_t)listing->count, sizeof(listing->names[0]), overlay_name_compare);
+    if (listing.count > 1) {
+        qsort(listing.names, listing.count, sizeof(listing.names[0]), overlay_name_compare);
+    }
     int loaded = 0;
     char line[1024];
-    for (int i = 0; i < listing->count; i++) {
+    for (size_t i = 0; i < listing.count; i++) {
+        const char *name = listing.names[i];
         if (loaded >= NK_MANIFEST_MAX_OVERLAYS) {
             snprintf(line, sizeof(line), "%s: skipped, at most %d title manifests are loaded",
-                     listing->names[i], NK_MANIFEST_MAX_OVERLAYS);
+                     name, NK_MANIFEST_MAX_OVERLAYS);
             overlay_report_line(report, report_len, line);
             continue;
         }
         char path[4096];
         int written = snprintf(path, sizeof(path), "%s%c%s", dir, nk_platform_path_separator(),
-                               listing->names[i]);
-        if (written < 0 || (size_t)written >= sizeof(path)) continue;
+                               name);
+        if (written < 0 || (size_t)written >= sizeof(path)) {
+            snprintf(line, sizeof(line), "%s: skipped, the path is too long", name);
+            overlay_report_line(report, report_len, line);
+            continue;
+        }
         char error[512];
         if (nk_title_manifest_load_overlay(path, error, sizeof(error))) {
             loaded++;
@@ -2217,19 +2227,16 @@ int nk_title_manifest_load_overlay_dir(const char *dir, char *report, size_t rep
             if (refused_count != 0) {
                 for (size_t disc = 0; disc < refused_count; disc++) {
                     snprintf(line, sizeof(line), "%s (disc %s): %s",
-                             listing->names[i], refused_disc_ids[disc], error);
+                             name, refused_disc_ids[disc], error);
                     overlay_report_line(report, report_len, line);
                 }
             } else {
-                snprintf(line, sizeof(line), "%s: %s", listing->names[i], error);
+                snprintf(line, sizeof(line), "%s: %s", name, error);
                 overlay_report_line(report, report_len, line);
             }
         }
     }
-    if (listing->truncated) {
-        overlay_report_line(report, report_len, "manifests: too many files; the rest were not read");
-    }
-    free(listing);
+    overlay_dir_listing_free(&listing);
     return loaded;
 }
 
@@ -2257,6 +2264,14 @@ static bool nk_manifest_normalize_disc_id(const char *source, char out[10]) {
     }
     out[9] = '\0';
     return true;
+}
+
+/* The experimental profile id of a normalized disc ID: "experimental-" and the
+   disc ID in lower case, 22 characters. out must hold 23 bytes. */
+static void experimental_profile_id(const char normalized[10], char out[23]) {
+    memcpy(out, "experimental-", 13);
+    for (size_t i = 0; i < 9; i++) out[13 + i] = (char)tolower((unsigned char)normalized[i]);
+    out[22] = '\0';
 }
 
 bool nk_title_manifest_enhancement_id_valid(const char *id) {
@@ -2481,9 +2496,7 @@ bool nk_title_manifest_write_experimental_profile(
         return false;
     }
     char profile_id[64];
-    for (size_t i = 0; i < 9; i++) profile_id[13 + i] = (char)tolower((unsigned char)normalized_id[i]);
-    memcpy(profile_id, "experimental-", 13);
-    profile_id[22] = '\0';
+    experimental_profile_id(normalized_id, profile_id);
     if (!out_profile_id || out_profile_id_len <= strlen(profile_id)) {
         if (error_buf && error_buf_len) snprintf(error_buf, error_buf_len, "Profile ID output buffer is too small.");
         return false;
@@ -2733,13 +2746,23 @@ static bool json_writer_node(NkJsonWriter *writer, const JsonNode *node,
 static bool json_writer_canonical_node(NkJsonWriter *writer, const JsonNode *node,
                                        unsigned int depth) {
     if (!writer || !node || depth > NK_MANIFEST_MAX_JSON_DEPTH) return false;
+    if (node->type == JSON_ARRAY) {
+        /* Objects inside an array are canonical too, as json.dumps(sort_keys=True)
+           writes them. */
+        if (!json_writer_append(writer, "[")) return false;
+        for (size_t i = 0; i < node->u.arr.count; i++) {
+            if (i && !json_writer_append(writer, ",")) return false;
+            if (!json_writer_canonical_node(writer, node->u.arr.items[i], depth + 1)) return false;
+        }
+        return json_writer_append(writer, "]");
+    }
     if (node->type != JSON_OBJECT) return json_writer_node(writer, node, depth);
     size_t *order = NULL;
     if (node->u.obj.count > 1) {
         order = malloc(node->u.obj.count * sizeof(*order));
         if (!order) return false;
         for (size_t i = 0; i < node->u.obj.count; i++) order[i] = i;
-        for (size_t i = 1; i < node->u.obj.count; i++) {
+        for (size_t i = 0; i + 1 < node->u.obj.count; i++) {
             size_t selected = i;
             for (size_t j = i + 1; j < node->u.obj.count; j++) {
                 if (strcmp(node->u.obj.members[order[j]].key,
@@ -2973,10 +2996,18 @@ static bool package_path_is_within(const char *root, const char *path) {
            (abs_root[root_length - 1] == '/' || abs_root[root_length - 1] == '\\')) {
         abs_root[--root_length] = '\0';
     }
+#if defined(_WIN32) || defined(_WIN64)
+    /* NTFS names fold case: GetFinalPathNameByHandleW gives one spelling of
+       the root, and a path under it may differ from that only in case. */
     for (size_t i = 0; i < root_length; i++) {
         if (nk_ascii_lower((unsigned char)abs_root[i]) !=
             nk_ascii_lower((unsigned char)abs_path[i])) return false;
     }
+#else
+    /* realpath() names on a case-sensitive file system: a sibling that differs
+       from the root only in case is a different folder, outside the package. */
+    if (strncmp(abs_root, abs_path, root_length) != 0) return false;
+#endif
     return abs_path[root_length] == '/' || abs_path[root_length] == '\\';
 }
 
@@ -4806,9 +4837,7 @@ static bool nk_title_manifest_read_experimental_profile_impl(
         return false;
     }
     char expected_id[64];
-    for (size_t i = 0; i < 9; i++) expected_id[13 + i] = (char)tolower((unsigned char)normalized[i]);
-    memcpy(expected_id, "experimental-", 13);
-    expected_id[22] = '\0';
+    experimental_profile_id(normalized, expected_id);
     if (!title_id || strcmp(title_id, expected_id) != 0) {
         if (error_buf && error_buf_len) snprintf(error_buf, error_buf_len, "Experimental title identity does not match disc %s.", normalized);
         return false;
@@ -5294,9 +5323,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         catalog_epoch = nk_title_catalog_epoch_locked();
         nk_title_catalog_unlock();
         char profile_id[64];
-        for (size_t i = 0; i < 9; i++) profile_id[13 + i] = (char)tolower((unsigned char)normalized[i]);
-        memcpy(profile_id, "experimental-", 13);
-        profile_id[22] = '\0';
+        experimental_profile_id(normalized, profile_id);
         if (strcmp(title_id, profile_id) != 0) {
             package_rebuild_reason(reason, reason_size,
                 "Experimental package identity does not match the disc.");

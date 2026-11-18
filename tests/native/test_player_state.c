@@ -1331,6 +1331,12 @@ static const char *g_fixture_report_extra = "";
 /* The generated-code epoch a fixture records: the current one but for the case that
    writes a package from before it. */
 static int g_fixture_generated_code_abi_epoch = NK_AOT_GENERATED_CODE_ABI_EPOCH;
+/* codegen_options the next fixture package writes as this text (any key order),
+   with its digest taken over g_fixture_codegen_options_canonical, the form
+   canonical_json() in tools/nk_core/package_cache.py hashes. NULL: the usual
+   options. */
+static const char *g_fixture_codegen_options_written = NULL;
+static const char *g_fixture_codegen_options_canonical = NULL;
 
 /* `folder_enhancement_id` names the package folder (NULL: the authentic
    packages/<disc_id>, else packages/<disc_id>-enhanced-<id>), and
@@ -1398,6 +1404,18 @@ static void write_runtime_package_fixture_variant(
         assert(used > 0 && (size_t)used < sizeof(codegen_options_json));
         int options_hash_length = snprintf(options_hash_input, sizeof(options_hash_input),
                                            "%s\n", codegen_options_json);
+        assert(options_hash_length > 0 &&
+               (size_t)options_hash_length < sizeof(options_hash_input));
+        fixture_sha_bytes(options_hash_input, (size_t)options_hash_length,
+                          codegen_options_digest);
+    }
+    if (g_fixture_codegen_options_written) {
+        char options_hash_input[sizeof(codegen_options_json) + 2];
+        int written = snprintf(codegen_options_json, sizeof(codegen_options_json), "%s",
+                               g_fixture_codegen_options_written);
+        int options_hash_length = snprintf(options_hash_input, sizeof(options_hash_input),
+                                           "%s\n", g_fixture_codegen_options_canonical);
+        assert(written > 0 && (size_t)written < sizeof(codegen_options_json));
         assert(options_hash_length > 0 &&
                (size_t)options_hash_length < sizeof(options_hash_input));
         fixture_sha_bytes(options_hash_input, (size_t)options_hash_length,
@@ -12322,6 +12340,155 @@ static void test_enhanced_package_variants(void) {
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
 }
 
+/* A package's cache digests are taken over canonical JSON (sorted keys at every
+ * level, objects inside arrays included), as canonical_json() in
+ * tools/nk_core/package_cache.py computes them, so the same content in another
+ * key order still validates. The native writer used to leave an object's first
+ * key in place and never sorted objects inside arrays, so such a package was
+ * refused as incompatible (audit 2026-11-17). */
+static void test_package_cache_digest_ignores_key_order(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700];
+    char disc_id[MAX_DISC_ID_LEN];
+    NkTitleEntrySnapshot snapshot = {0};
+    assert(nk_title_catalog_find_by_id("synthetic-allegrex-v1", &snapshot));
+    assert(snapshot.entry.primary_disc_id);
+    snprintf(disc_id, sizeof(disc_id), "%s", snapshot.entry.primary_disc_id);
+    nk_title_catalog_snapshot_release(&snapshot);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%ccache_key_order_probe", cache_root, sep);
+
+    NkGameEntry stock;
+    memset(&stock, 0, sizeof(stock));
+    snprintf(stock.disc_id, sizeof(stock.disc_id), "%s", disc_id);
+    snprintf(stock.title_id, sizeof(stock.title_id), "synthetic-allegrex-v1");
+    snprintf(stock.selected_executable, sizeof(stock.selected_executable), "EBOOT.BIN");
+    NkRuntimePackageInfo info;
+    char reason[1024];
+
+    static const struct {
+        const char *written;
+        const char *canonical;
+        bool valid;
+    } cases[] = {
+        /* The first key sorts after the second. */
+        {"{\"zz_probe\":0,\"aa_probe\":1}", "{\"aa_probe\":1,\"zz_probe\":0}", true},
+        /* An object inside an array, keys unsorted. */
+        {"{\"aa_probe\":[{\"zz\":1,\"aa\":2}]}", "{\"aa_probe\":[{\"aa\":2,\"zz\":1}]}", true},
+        /* Other content is still refused. */
+        {"{\"aa_probe\":1}", "{\"aa_probe\":2}", false},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+        g_fixture_codegen_options_written = cases[i].written;
+        g_fixture_codegen_options_canonical = cases[i].canonical;
+        write_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1",
+                                      SR_CPUSTATE_ABI_VERSION, "synthetic-allegrex-v1.exe",
+                                      FIXTURE_SHA256, NULL);
+        g_fixture_codegen_options_written = NULL;
+        g_fixture_codegen_options_canonical = NULL;
+        reason[0] = '\0';
+        NkRuntimePackageStatus status = nk_launch_validate_runtime_package(
+            root, &stock, &info, reason, sizeof(reason));
+        if ((status == NK_RUNTIME_PACKAGE_OK) != cases[i].valid) {
+            fprintf(stderr, "codegen_options %s: status=%d reason=%s\n", cases[i].written,
+                    (int)status, reason);
+        }
+        assert((status == NK_RUNTIME_PACKAGE_OK) == cases[i].valid);
+        if (!cases[i].valid) {
+            assert(strstr(reason, "package cache AOT key is invalid or incompatible") != NULL);
+        }
+    }
+    remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+    printf("[PLAYER_STATE_TEST] package cache digests ignore key order PASS\n");
+}
+
+/* On a case-sensitive file system a folder whose name differs from the package
+ * folder only in letter case is another folder. A symlinked directory inside
+ * the package that leads there is outside the package, so its executable and
+ * image are refused. The containment check used to fold case on every host and
+ * took them as inside (audit 2026-11-17). Windows folds case in NTFS names, so
+ * the check runs only where names are case-sensitive. */
+static void test_package_case_sibling_is_outside(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    printf("[PLAYER_STATE_TEST] SKIP package case-sibling containment: NTFS names fold case\n");
+#else
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], package_dir[900], sibling[900], link[960];
+    char disc_id[MAX_DISC_ID_LEN], lower_disc_id[MAX_DISC_ID_LEN];
+    NkTitleEntrySnapshot snapshot = {0};
+    assert(nk_title_catalog_find_by_id("synthetic-allegrex-v1", &snapshot));
+    assert(snapshot.entry.primary_disc_id);
+    snprintf(disc_id, sizeof(disc_id), "%s", snapshot.entry.primary_disc_id);
+    nk_title_catalog_snapshot_release(&snapshot);
+    for (size_t i = 0; i < sizeof(lower_disc_id); i++) {
+        lower_disc_id[i] = (char)tolower((unsigned char)disc_id[i]);
+        if (!disc_id[i]) break;
+    }
+    assert(strcmp(lower_disc_id, disc_id) != 0);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cpackage_case_sibling_probe", cache_root, sep);
+    snprintf(package_dir, sizeof(package_dir), "%s%cpackages%c%s", root, sep, sep, disc_id);
+    snprintf(sibling, sizeof(sibling), "%s%cpackages%c%s", root, sep, sep, lower_disc_id);
+    snprintf(link, sizeof(link), "%s%csub", package_dir, sep);
+
+    NkGameEntry stock;
+    memset(&stock, 0, sizeof(stock));
+    snprintf(stock.disc_id, sizeof(stock.disc_id), "%s", disc_id);
+    snprintf(stock.title_id, sizeof(stock.title_id), "synthetic-allegrex-v1");
+    snprintf(stock.selected_executable, sizeof(stock.selected_executable), "EBOOT.BIN");
+    NkRuntimePackageInfo info;
+    char reason[1024];
+    static const char *const moved[] = {
+        "synthetic-allegrex-v1.exe", "synthetic-allegrex-v1_image.bin"
+    };
+    char from[1100], to[1100];
+
+    /* The package records sub/<executable>; sub links to the case sibling. */
+    (void)unlink(link);
+    remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+    write_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1",
+                                  SR_CPUSTATE_ABI_VERSION, "sub/synthetic-allegrex-v1.exe",
+                                  FIXTURE_SHA256, NULL);
+    assert(nk_platform_mkdir_p(sibling));
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        snprintf(from, sizeof(from), "%s%c%s", package_dir, sep, moved[i]);
+        snprintf(to, sizeof(to), "%s%c%s", sibling, sep, moved[i]);
+        assert(rename(from, to) == 0);
+    }
+    char target[64];
+    snprintf(target, sizeof(target), "..%c%s", sep, lower_disc_id);
+    assert(symlink(target, link) == 0);
+    NkRuntimePackageStatus status = nk_launch_validate_runtime_package(
+        root, &stock, &info, reason, sizeof(reason));
+    if (status == NK_RUNTIME_PACKAGE_OK) {
+        fprintf(stderr, "case-sibling package accepted: %s\n", info.executable_path);
+    }
+    assert(status != NK_RUNTIME_PACKAGE_OK);
+
+    /* The same files in a real folder inside the package validate. */
+    assert(unlink(link) == 0);
+    assert(nk_platform_mkdir_p(link));
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        snprintf(from, sizeof(from), "%s%c%s", sibling, sep, moved[i]);
+        snprintf(to, sizeof(to), "%s%c%s", link, sep, moved[i]);
+        assert(rename(from, to) == 0);
+    }
+    status = nk_launch_validate_runtime_package(root, &stock, &info, reason, sizeof(reason));
+    if (status != NK_RUNTIME_PACKAGE_OK) fprintf(stderr, "in-package folder: %s\n", reason);
+    assert(status == NK_RUNTIME_PACKAGE_OK);
+
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        snprintf(to, sizeof(to), "%s%c%s", link, sep, moved[i]);
+        assert(remove(to) == 0);
+    }
+    assert(test_rmdir(link) == 0);
+    assert(test_rmdir(sibling) == 0);
+    remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+    printf("[PLAYER_STATE_TEST] package case-sibling containment PASS\n");
+#endif
+}
+
 /* The console nickname (#2197): "Player" until the user chooses one, and never the PC's user
  * name; the first-launch prompt shows until it is answered, and Skip keeps "Player" and is not
  * asked again after a reload; Settings saves a new nickname that a reload reads back; and a
@@ -13336,6 +13503,8 @@ int main(int argc, char **argv) {
     test_license_folder_request();
     test_library_card_status_text();
     test_enhanced_package_variants();
+    test_package_cache_digest_ignores_key_order();
+    test_package_case_sibling_is_outside();
     test_play_mode_settings();
     test_play_mode_settings_mapping();
     test_play_mode_smooth_motion();
