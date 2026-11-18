@@ -3819,6 +3819,9 @@ typedef struct {
     char path[FUZZ_VFS_PATH];
     uint8_t payload[96];
     size_t payload_len;
+    /* Stored under the LZS tag with a compressed size of 0: the reader decodes it into a
+     * fresh buffer, which the archive cache then holds. */
+    bool lzs_stored;
 } FuzzVfsMember;
 
 typedef struct {
@@ -3853,8 +3856,13 @@ static FuzzByteBuffer make_xb_members(const FuzzVfsMember *members, size_t count
     for (size_t i = 0; i < count; i++) {
         size_t offset = data_start + body.size;
         assert((offset & 3u) == 0u);
+        NkXbCompression tag = members[i].lzs_stored ? NK_XB_COMPRESSION_LZS : NK_XB_COMPRESSION_NONE;
         bb_u32(&fst, (uint32_t)members[i].payload_len, be);
-        bb_u32(&fst, ((uint32_t)NK_XB_COMPRESSION_NONE << 28) | (uint32_t)(offset / 4u), be);
+        bb_u32(&fst, ((uint32_t)tag << 28) | (uint32_t)(offset / 4u), be);
+        if (members[i].lzs_stored) {
+            bb_u32(&body, (uint32_t)members[i].payload_len, be); /* expanded size */
+            bb_u32(&body, 0u, be);                               /* stored: no compressed size */
+        }
         bb_append(&body, members[i].payload, members[i].payload_len);
         bb_pad4(&body);
     }
@@ -4018,6 +4026,7 @@ static void test_fuzz_archive_vfs(unsigned iters) {
     fflush(stdout);
 
     unsigned mounted_total = 0, mutated_mounted = 0, lookups = 0, refused_names = 0;
+    unsigned cached_runs = 0;
     for (unsigned i = 0; i < iters; i++) {
         FuzzVfsMount mounts[FUZZ_VFS_MOUNTS];
         FuzzByteBuffer images[FUZZ_VFS_MOUNTS];
@@ -4029,8 +4038,12 @@ static void test_fuzz_archive_vfs(unsigned iters) {
 
         SrArchiveVfs vfs;
         sr_archive_vfs_init(&vfs);
+        size_t cache_bytes_cap = SR_ARCHIVE_VFS_DEFAULT_CACHE_BYTES;
+        size_t cache_entries_cap = SR_ARCHIVE_VFS_DEFAULT_CACHE_ENTRIES;
         if (fuzz_rand32() & 1u) {
-            assert(sr_archive_vfs_configure(&vfs, fuzz_pick(0u, 256u), fuzz_pick(0u, 4u)));
+            cache_bytes_cap = fuzz_pick(0u, 256u);
+            cache_entries_cap = fuzz_pick(0u, 4u);
+            assert(sr_archive_vfs_configure(&vfs, cache_bytes_cap, cache_entries_cap));
         }
         size_t slot = 0;
         for (size_t m = 0; m < mount_count; m++) {
@@ -4056,6 +4069,7 @@ static void test_fuzz_archive_vfs(unsigned iters) {
                 for (size_t b = 0; b < member->payload_len; b++) {
                     member->payload[b] = (uint8_t)fuzz_rand32();
                 }
+                member->lzs_stored = (fuzz_rand32() & 1u) != 0u;
             }
             images[m] = make_xb_members(mount->members, mount->member_count, be);
             bool names_fold = true;
@@ -4122,13 +4136,19 @@ static void test_fuzz_archive_vfs(unsigned iters) {
             fuzz_vfs_walk(&vfs, dir, wanted == -2 ? SR_ARCHIVE_VARIANT_AUTO : wanted);
         }
         fuzz_vfs_walk(&vfs, "", SR_ARCHIVE_VARIANT_AUTO);
-        assert(sr_archive_vfs_cache_bytes(&vfs) <= SR_ARCHIVE_VFS_DEFAULT_CACHE_BYTES);
+        /* The cache stays within the limits this run configured, not only the defaults. */
+        assert(sr_archive_vfs_cache_bytes(&vfs) <= cache_bytes_cap);
+        assert(sr_archive_vfs_cache_entry_count(&vfs) <= cache_entries_cap);
+        if (sr_archive_vfs_cache_entry_count(&vfs) > 0u) cached_runs++;
         sr_archive_vfs_destroy(&vfs);
         for (size_t m = 0; m < mount_count; m++) free(images[m].data);
     }
+    /* Decoded members fill the cache in most runs; a run of a few iterations may not. */
+    assert(iters < 20u || cached_runs > 0u);
     printf("[FUZZ] Archive VFS completed: %u archives mounted (%u of them mutated), "
            "%u lookups checked against the model, %u archives refused for a keyless name, "
-           "0 crashes\n", mounted_total, mutated_mounted, lookups, refused_names);
+           "%u runs ended with a filled cache, 0 crashes\n", mounted_total, mutated_mounted,
+           lookups, refused_names, cached_runs);
     fflush(stdout);
 }
 
@@ -4153,34 +4173,58 @@ int main(int argc, char **argv) {
 
     assert(nk_platform_mkdir_p(SR_SELFTEST_BUILD_ROOT));
 
+    /* The slower stages run at most a fixed number of iterations. Each cap is stated up
+     * front and in the final line, so a deep run never reads as deeper than it was. */
+    enum { STAGE_COUNT = 13 };
+    static const struct { const char *name; unsigned cap; } stages[STAGE_COUNT] = {
+        {"iso", 1000u}, {"elf", 1000u}, {"package", 1000u}, {"library", 500u}, {"pgf", 4000u},
+        {"archive", 4000u}, {"decrypt", 4000u}, {"keystore", 1000u}, {"inflate", 2000u},
+        {"kirk", 2000u}, {"kle", 2000u}, {"npumdimg", 2000u}, {"ec", 2000u}};
+    unsigned run[STAGE_COUNT];
+    char capped[512] = "";
+    for (unsigned s = 0; s < STAGE_COUNT; s++) {
+        run[s] = iters > stages[s].cap ? stages[s].cap : iters;
+        if (run[s] < iters) {
+            size_t used = strlen(capped);
+            snprintf(capped + used, sizeof(capped) - used, "%s%s=%u", used ? ", " : "",
+                     stages[s].name, run[s]);
+        }
+    }
+
     printf("=================================================================\n");
     printf("Starting Nakagawa deterministic parser fuzz suite (iters=%u)\n", iters);
+    if (capped[0]) printf("Stages capped below iters: %s\n", capped);
     printf("=================================================================\n");
     fflush(stdout);
 
     test_fuzz_param_sfo(iters);
-    test_fuzz_iso(iters > 1000 ? 1000 : iters);
-    test_fuzz_elf_classifier(iters > 1000 ? 1000 : iters);
+    test_fuzz_iso(run[0]);
+    test_fuzz_elf_classifier(run[1]);
     test_fuzz_xb(iters);
     test_fuzz_prx(iters);
     test_fuzz_manifest(iters);
     test_fuzz_input_profile(iters);
-    test_fuzz_package(iters > 1000 ? 1000 : iters);
-    test_fuzz_library(iters > 500 ? 500 : iters);
-    test_fuzz_pgf(iters > 4000 ? 4000 : iters);
-    test_fuzz_archive_vfs(iters > 4000 ? 4000 : iters);
-    test_fuzz_decrypt_boundary(iters > 4000 ? 4000 : iters);
-    test_fuzz_keystore(iters > 1000 ? 1000 : iters);
-    test_fuzz_inflate(iters > 2000 ? 2000 : iters);
-    test_fuzz_kirk(iters > 2000 ? 2000 : iters);
-    test_fuzz_kle(iters > 2000 ? 2000 : iters);
-    test_fuzz_npumdimg(iters > 2000 ? 2000 : iters);
+    test_fuzz_package(run[2]);
+    test_fuzz_library(run[3]);
+    test_fuzz_pgf(run[4]);
+    test_fuzz_archive_vfs(run[5]);
+    test_fuzz_decrypt_boundary(run[6]);
+    test_fuzz_keystore(run[7]);
+    test_fuzz_inflate(run[8]);
+    test_fuzz_kirk(run[9]);
+    test_fuzz_kle(run[10]);
+    test_fuzz_npumdimg(run[11]);
     test_kirk_ecdsa_curve_names();
-    test_ec_mod_n_is_bounded(iters > 2000 ? 2000 : iters);
+    test_ec_mod_n_is_bounded(run[12]);
     test_ec_verify();
 
     printf("=================================================================\n");
     printf("ALL DETERMINISTIC PARSER FUZZ HARNESSES PASSED SUCCESSFULLY!\n");
+    if (capped[0]) {
+        printf("(iters=%u; stages capped below it: %s)\n", iters, capped);
+    } else {
+        printf("(iters=%u in every stage)\n", iters);
+    }
     printf("=================================================================\n");
     return 0;
 }
