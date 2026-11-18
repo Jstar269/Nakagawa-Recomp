@@ -22,10 +22,15 @@
 // The decode cases run wherever the build links a real H.264 backend (Media Foundation on
 // Windows, the FFmpeg subset where H264_FFMPEG=1). Without one, each decode case prints
 // "SKIP: videocodec decode: <case>" and is not counted as passed; the fail-closed refusal of a
-// decode without a backend runs on every build.
+// decode without a backend runs on every build. In a build that compiles a backend, a decode case
+// that does not run (SR_NOH264 set, or too few pictures for the case) is a FAIL, never a SKIP, so
+// the exit status cannot count an unrun decode as passed.
 //
 // Failing-before evidence: on the base tree src/rt/hle_videocodec.c and the videocodec-selftest
-// target do not exist, so this file does not build.
+// target do not exist, so this file does not build. Before the audit of 2026-11-17, SR_NOH264=1 on
+// a Windows build exited 0 with 11 decode cases SKIP, and a scratch hle_videocodec.c whose
+// CscAvcRange zeroed frame_count and closed the decoder after the decode cases still passed,
+// because Stop's expected result was read from the context it then checked.
 //
 // The ATRAC3plus cases build PSMF audio frames around synthetic bodies (the terminator frame of
 // tests/native/atrac3p_bridge_selftest.c, and the first xorshift-generated mono body that decodes
@@ -94,7 +99,19 @@ uint64_t SDL_GetTicksNS(void) { return 0u; }
 
 static int checks, failures, skips;
 #define CHECK(x, text) do { checks++; if (!(x)) { failures++; fprintf(stderr, "FAIL: %s\n", text); } } while (0)
+#if defined(_WIN32) || defined(SR_H264_FFMPEG)
+#define VC_BUILD_HAS_BACKEND 1   /* h264_null.c's platform_backend() is not NULL in this build */
+#else
+#define VC_BUILD_HAS_BACKEND 0
+#endif
 static void skip(const char *name) {
+    if (VC_BUILD_HAS_BACKEND) {
+        checks++;
+        failures++;
+        fprintf(stderr, "FAIL: videocodec decode: %s did not run in a build that carries an H.264 backend "
+                        "(SR_NOH264 set, or too few pictures decoded)\n", name);
+        return;
+    }
     skips++;
     fprintf(stderr, "SKIP: videocodec decode: %s\n", name);
 }
@@ -924,9 +941,9 @@ static void test_copy_range(void) {
 }
 
 static void test_teardown(void) {
-    /* Without an H.264 backend no access unit decoded, and Stop answers as before any decode. */
-    const uint32_t stop_want = vc_find(G_CTX) && vc_find(G_CTX)->frame_count == 0u && vc_find(G_CTX)->h264 < 0
-                                   ? VC_ERR_STATE : 0u;
+    /* Without an H.264 backend no access unit decoded, and Stop answers as before any decode. The
+     * expectation comes from what this test decoded, not from the context's own fields. */
+    const uint32_t stop_want = s_have_picture ? 0u : VC_ERR_STATE;
     CHECK(call(NID_STOP, G_CTX, 0u, 0, 0) == stop_want && vc_find(G_CTX) && vc_find(G_CTX)->h264 < 0,
           "stop: the host decoder is released");
     const int allocs = s_me_alloc_count;
