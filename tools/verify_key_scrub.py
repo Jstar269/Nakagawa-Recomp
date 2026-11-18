@@ -161,7 +161,7 @@ def history_pattern(raw: bytes) -> str:
     """
     hex_tokens = [_hex_digit_class(b >> 4) + _hex_digit_class(b & 0xF) for b in raw]
     array_tokens = []
-    for b, token in zip(raw, hex_tokens):
+    for b, token in zip(raw, hex_tokens, strict=True):
         # 0x0c, 0xc, 0x00c and decimal 12 all spell the byte 0x0c.
         prefixed = "0[xX]0*" + (token if b >= 16 else _hex_digit_class(b))
         array_tokens.append(f"({prefixed}|{b})")
