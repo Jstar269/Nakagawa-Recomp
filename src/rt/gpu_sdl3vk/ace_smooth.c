@@ -92,6 +92,8 @@ struct AceBetween {
     AceSmoothInit init;
     VkDevice dev;
     int w, h, mips;
+    int fail_w, fail_h;      /* the size whose images could not be made: not tried again */
+    uint32_t max_dim;        /* the device's maxImageDimension2D */
     int cur;                 /* the newest frame */
     int have[2];
     Img frame[2];
@@ -175,14 +177,20 @@ static int img_make(AceBetween *s, Img *im, VkFormat format, int w, int h, int m
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     ii.usage = usage;
-    if (s->CreateImage(s->dev, &ii, NULL, &im->image) != VK_SUCCESS) return 0;
+    /* Each handle is stored only once its create succeeded: Vulkan leaves a failed create's output
+       undefined, and img_free destroys whatever is stored. */
+    VkImage image = VK_NULL_HANDLE;
+    if (s->CreateImage(s->dev, &ii, NULL, &image) != VK_SUCCESS) return 0;
+    im->image = image;
     VkMemoryRequirements mr;
     s->GetImageMemoryRequirements(s->dev, im->image, &mr);
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
                                  memory_type(s, mr.memoryTypeBits) };
+    VkDeviceMemory memory = VK_NULL_HANDLE;
     if (mai.memoryTypeIndex == UINT32_MAX ||
-        s->AllocateMemory(s->dev, &mai, NULL, &im->memory) != VK_SUCCESS ||
-        s->BindImageMemory(s->dev, im->image, im->memory, 0) != VK_SUCCESS) return 0;
+        s->AllocateMemory(s->dev, &mai, NULL, &memory) != VK_SUCCESS) return 0;
+    im->memory = memory;
+    if (s->BindImageMemory(s->dev, im->image, im->memory, 0) != VK_SUCCESS) return 0;
     VkImageViewCreateInfo vi;
     memset(&vi, 0, sizeof(vi));
     vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -193,7 +201,10 @@ static int img_make(AceBetween *s, Img *im, VkFormat format, int w, int h, int m
     vi.subresourceRange.levelCount = (uint32_t)mips;
     vi.subresourceRange.layerCount = 1;
     im->layout = VK_IMAGE_LAYOUT_UNDEFINED;
-    return s->CreateImageView(s->dev, &vi, NULL, &im->view) == VK_SUCCESS;
+    VkImageView view = VK_NULL_HANDLE;
+    if (s->CreateImageView(s->dev, &vi, NULL, &view) != VK_SUCCESS) return 0;
+    im->view = view;
+    return 1;
 }
 
 static void img_free(AceBetween *s, Img *im) {
@@ -210,14 +221,19 @@ static int buf_make(AceBetween *s, VkBuffer *buf, VkDeviceMemory *mem, VkDeviceS
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = size;
     bi.usage = usage;
-    if (s->CreateBuffer(s->dev, &bi, NULL, buf) != VK_SUCCESS) return 0;
+    /* Stored only once made, as img_make stores its handles. */
+    VkBuffer made = VK_NULL_HANDLE;
+    if (s->CreateBuffer(s->dev, &bi, NULL, &made) != VK_SUCCESS) return 0;
+    *buf = made;
     VkMemoryRequirements mr;
     s->GetBufferMemoryRequirements(s->dev, *buf, &mr);
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
                                  memory_type(s, mr.memoryTypeBits) };
-    return mai.memoryTypeIndex != UINT32_MAX &&
-           s->AllocateMemory(s->dev, &mai, NULL, mem) == VK_SUCCESS &&
-           s->BindBufferMemory(s->dev, *buf, *mem, 0) == VK_SUCCESS;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    if (mai.memoryTypeIndex == UINT32_MAX ||
+        s->AllocateMemory(s->dev, &mai, NULL, &memory) != VK_SUCCESS) return 0;
+    *mem = memory;
+    return s->BindBufferMemory(s->dev, *buf, *mem, 0) == VK_SUCCESS;
 }
 
 /* The motion ring, host-visible and coherent, mapped for good, and zeroed: no record carries a
@@ -229,16 +245,20 @@ static int motion_make(AceBetween *s) {
     bi.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bi.size = size;
     bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    if (s->CreateBuffer(s->dev, &bi, NULL, &s->motion) != VK_SUCCESS) return 0;
+    VkBuffer motion = VK_NULL_HANDLE;   /* stored only once made, as buf_make's */
+    if (s->CreateBuffer(s->dev, &bi, NULL, &motion) != VK_SUCCESS) return 0;
+    s->motion = motion;
     VkMemoryRequirements mr;
     s->GetBufferMemoryRequirements(s->dev, s->motion, &mr);
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL, mr.size,
                                  memory_type_with(s, mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                                                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
     void *map = NULL;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
     if (mai.memoryTypeIndex == UINT32_MAX ||
-        s->AllocateMemory(s->dev, &mai, NULL, &s->motion_memory) != VK_SUCCESS ||
-        s->BindBufferMemory(s->dev, s->motion, s->motion_memory, 0) != VK_SUCCESS ||
+        s->AllocateMemory(s->dev, &mai, NULL, &memory) != VK_SUCCESS) return 0;
+    s->motion_memory = memory;
+    if (s->BindBufferMemory(s->dev, s->motion, s->motion_memory, 0) != VK_SUCCESS ||
         s->MapMemory(s->dev, s->motion_memory, 0, VK_WHOLE_SIZE, 0, &map) != VK_SUCCESS) return 0;
     memset(map, 0, (size_t)size);
     s->motion_map = (const volatile uint32_t *)map;
@@ -315,6 +335,7 @@ static void write_sets(AceBetween *s) {
 static int sized_make(AceBetween *s, int w, int h) {
     s->DeviceWaitIdle(s->dev);
     sized_free(s);
+    if ((uint32_t)w > s->max_dim || (uint32_t)h > s->max_dim) return 0;   /* past the device's limit */
     /* Mips down to the coarsest level's sample size, from the source's own size. */
     int mips = 1;
     while ((w >> (mips - 1)) > SEARCH_W / k_level[0].down && mips < 8) mips++;
@@ -533,9 +554,18 @@ VkImage ace_smooth_record(AceBetween *s, VkCommandBuffer cmd, VkImage src, int w
 VkImage ace_smooth_record_aux(AceBetween *s, VkCommandBuffer cmd, VkImage src, int w, int h, int between,
                               const AceSmoothAux *aux) {
     if (!s || !cmd || !src || w <= 0 || h <= 0) return VK_NULL_HANDLE;
-    if ((w != s->w || h != s->h) && !sized_make(s, w, h)) {
-        sized_free(s);
-        return VK_NULL_HANDLE;
+    if (w != s->w || h != s->h) {
+        /* A size whose images could not be made is not tried again: no device wait per present. */
+        if (w == s->fail_w && h == s->fail_h) return VK_NULL_HANDLE;
+        if (!sized_make(s, w, h)) {
+            sized_free(s);
+            s->fail_w = w;
+            s->fail_h = h;
+            fprintf(stderr, "sdl3vk: Ace smooth motion cannot make its images for %dx%d (past the "
+                            "device's limit of %u, or out of memory); no in-between frames at this size\n",
+                    w, h, s->max_dim);
+            return VK_NULL_HANDLE;
+        }
     }
     int old = s->cur;
     int cur = !old;
@@ -729,9 +759,15 @@ static int fixed_make(AceBetween *s) {
     si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     si.maxLod = 16.0f;
-    if (s->CreateSampler(s->dev, &si, NULL, &s->linear) != VK_SUCCESS) return 0;
+    /* Every handle here is stored only once made, as img_make's: ace_smooth_destroy destroys
+       whatever is stored, and Vulkan leaves a failed create's output undefined. */
+    VkSampler sampler = VK_NULL_HANDLE;
+    if (s->CreateSampler(s->dev, &si, NULL, &sampler) != VK_SUCCESS) return 0;
+    s->linear = sampler;
     si.magFilter = si.minFilter = VK_FILTER_NEAREST;
-    if (s->CreateSampler(s->dev, &si, NULL, &s->nearest) != VK_SUCCESS) return 0;
+    sampler = VK_NULL_HANDLE;
+    if (s->CreateSampler(s->dev, &si, NULL, &sampler) != VK_SUCCESS) return 0;
+    s->nearest = sampler;
 
     if (!buf_make(s, &s->stats, &s->stats_memory, 16,
                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)) return 0;
@@ -759,21 +795,30 @@ static int fixed_make(AceBetween *s) {
     dl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     dl.bindingCount = 11;
     dl.pBindings = b;
-    if (s->CreateDescriptorSetLayout(s->dev, &dl, NULL, &s->dsl) != VK_SUCCESS) return 0;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    if (s->CreateDescriptorSetLayout(s->dev, &dl, NULL, &dsl) != VK_SUCCESS) return 0;
+    s->dsl = dsl;
 
+    /* A set takes a descriptor for every binding of its layout, written or not, so the pool holds
+       each type as many times as the layout has it, for every set. */
     uint32_t sets = 2u * (LEVELS + 1u);
     VkDescriptorPoolSize sizes[3] = {
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, sets * 5u },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, sets },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets * 4u },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0u },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 0u },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 0u },
     };
+    for (uint32_t i = 0; i < 11; i++)
+        for (uint32_t t = 0; t < 3; t++)
+            if (sizes[t].type == b[i].descriptorType) sizes[t].descriptorCount += b[i].descriptorCount * sets;
     VkDescriptorPoolCreateInfo dp;
     memset(&dp, 0, sizeof(dp));
     dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dp.maxSets = sets;
     dp.poolSizeCount = 3;
     dp.pPoolSizes = sizes;
-    if (s->CreateDescriptorPool(s->dev, &dp, NULL, &s->pool) != VK_SUCCESS) return 0;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (s->CreateDescriptorPool(s->dev, &dp, NULL, &pool) != VK_SUCCESS) return 0;
+    s->pool = pool;
     VkDescriptorSetLayout layouts[2 * (LEVELS + 1)];
     for (uint32_t i = 0; i < sets; i++) layouts[i] = s->dsl;
     VkDescriptorSetAllocateInfo ai;
@@ -792,7 +837,9 @@ static int fixed_make(AceBetween *s) {
     pl.pSetLayouts = &s->dsl;
     pl.pushConstantRangeCount = 1;
     pl.pPushConstantRanges = &range;
-    if (s->CreatePipelineLayout(s->dev, &pl, NULL, &s->layout) != VK_SUCCESS) return 0;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (s->CreatePipelineLayout(s->dev, &pl, NULL, &layout) != VK_SUCCESS) return 0;
+    s->layout = layout;
     s->match_mod = shader_make(s, k_match_spv, sizeof(k_match_spv));
     s->compose_mod = shader_make(s, k_compose_spv, sizeof(k_compose_spv));
     s->measure_mod = shader_make(s, k_measure_spv, sizeof(k_measure_spv));
@@ -833,6 +880,14 @@ AceBetween *ace_smooth_create(const AceSmoothInit *init, char *error, size_t err
     s->dev = init->device;
     s->GetPhysicalDeviceMemoryProperties = (PFN_vkGetPhysicalDeviceMemoryProperties)
         init->get_instance_proc_addr(init->instance, "vkGetPhysicalDeviceMemoryProperties");
+    PFN_vkGetPhysicalDeviceProperties props_fn = (PFN_vkGetPhysicalDeviceProperties)
+        init->get_instance_proc_addr(init->instance, "vkGetPhysicalDeviceProperties");
+    if (props_fn) {
+        VkPhysicalDeviceProperties props;
+        props_fn(init->physical_device, &props);
+        s->max_dim = props.limits.maxImageDimension2D;
+    }
+    if (!s->max_dim) s->max_dim = 4096u;  /* Vulkan's required minimum */
 #define DEV(name) s->name = (PFN_vk##name)dev_addr(s->dev, "vk" #name)
     DEV(CreateImage); DEV(DestroyImage); DEV(GetImageMemoryRequirements); DEV(AllocateMemory);
     DEV(FreeMemory); DEV(BindImageMemory); DEV(BindBufferMemory); DEV(CreateImageView);

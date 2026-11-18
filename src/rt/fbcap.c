@@ -62,27 +62,65 @@ static int cap_dir_ready(const char *dir) {
     return nk_platform_mkdir_p(dir) ? 1 : 0;
 }
 
+/* A separator of `path`: in Windows' extended form (\\?\...) only '\' is one; '/' is a literal
+ * character of a name there. */
+static int cap_path_sep(int extended, char c) { return extended ? c == '\\' : cap_is_sep(c); }
+
+/* The length of the root `dir` starts with, which always exists and is never created or probed:
+ * a drive ("C:"), a UNC share ("\\server\share"), or their extended forms ("\\?\C:",
+ * "\\?\UNC\server\share"); any other extended root keeps its first component ("\\?\Volume{...}").
+ * The UNC and extended forms are Windows' alone. 0 for a path from "/" or a relative path. */
+static size_t cap_root_len(const char *dir, int extended) {
+#ifndef _WIN32
+    (void)extended;   /* POSIX has no UNC or extended form: "//x" is a path from "/" */
+    return dir[0] && dir[1] == ':' ? 2u : 0u;
+#else
+    size_t at, parts;
+    if (extended && strncmp(dir, "\\\\?\\UNC\\", 8) == 0) {
+        at = 8u;
+        parts = 2u;
+    } else if (extended) {
+        at = 4u;
+        parts = 1u;
+    } else if (cap_is_sep(dir[0]) && cap_is_sep(dir[1])) {
+        at = 2u;
+        parts = 2u;
+    } else {
+        return dir[0] && dir[1] == ':' ? 2u : 0u;
+    }
+    for (; parts; parts--) {
+        while (dir[at] && !cap_path_sep(extended, dir[at])) at++;
+        if (parts > 1u && dir[at]) at++;
+    }
+    return at;
+#endif
+}
+
 /* Create the parent directory of `path` (mkdir -p on the directory component only). FBSNAP
  * publishes under build/snapshots/, which no build step creates. Every prefix is checked
- * without a trailing separator; a root ("/", or a drive root such as "C:/") always exists
- * and is never created. Relative and absolute paths, with either separator, behave alike. */
+ * without a trailing separator; a root ("/", a drive root such as "C:/", a UNC share, or the
+ * extended form of either) always exists and is never created or probed. Relative and absolute
+ * paths, with either separator, behave alike. */
 static int cap_ensure_parent_dir(const char *path) {
     char dir[1024];
     size_t n = strlen(path);
     if (!n || n >= sizeof dir) return 0;
     memcpy(dir, path, n + 1);
+#ifdef _WIN32
+    const int extended = strncmp(dir, "\\\\?\\", 4) == 0;
+#else
+    const int extended = 0;
+#endif
     char *sep = NULL;
     for (char *q = dir; *q; q++)
-        if (cap_is_sep(*q)) sep = q;
+        if (cap_path_sep(extended, *q)) sep = q;
     if (!sep) return 1;                          /* bare file name: the current directory */
-    while (sep > dir && cap_is_sep(sep[-1])) sep--;  /* "a//file" names directory "a" */
+    while (sep > dir && cap_path_sep(extended, sep[-1])) sep--;  /* "a//file" names directory "a" */
+    const size_t root = cap_root_len(dir, extended);
+    if ((size_t)(sep - dir) <= root) return 1;   /* a file directly under "/" or a root */
     *sep = '\0';
-    n = (size_t)(sep - dir);
-    if (n == 0 || (n == 2 && dir[1] == ':')) return 1;   /* a file directly under "/" or a drive root */
-    for (char *q = dir + 1; *q; q++) {
-        if (!cap_is_sep(*q) || cap_is_sep(q[-1])) continue;
-        size_t len = (size_t)(q - dir);
-        if (len == 2 && dir[1] == ':') continue;          /* drive root */
+    for (char *q = dir + root + 1u; *q; q++) {
+        if (!cap_path_sep(extended, *q) || cap_path_sep(extended, q[-1])) continue;
         char save = *q;
         *q = '\0';
         int ready = cap_dir_ready(dir);
@@ -594,12 +632,25 @@ static int cap_write_file(const uint8_t *px, uint32_t row_bytes, sr_cap_order or
     if (!cap_ensure_parent_dir(s_path)) return 0;
     static unsigned long s_tmp_seq;
     char tmp[1024 + 64];
-    if (snprintf(tmp, sizeof tmp, "%s.tmp%lu", s_path, ++s_tmp_seq) >= (int)sizeof tmp)
-        return 0;
+    /* The temp name carries this process's id and is created only where no file is ("x"), as
+       publish_new's are: another run capturing to the same path, or a name left behind, is never
+       truncated or written through. A taken name costs one more try, up to CAP_TEMP_TRIES. */
+    enum { CAP_TEMP_TRIES = 16 };
+    FILE *f = NULL;
+    for (int attempt = 0; attempt < CAP_TEMP_TRIES && !f; attempt++) {
+        const int n = snprintf(tmp, sizeof tmp, "%s.tmp%lu.%lu", s_path, nk_platform_process_id(), ++s_tmp_seq);
+        if (n < 0 || n >= (int)sizeof tmp) return 0;
+        errno = 0;
+        f = nk_fopen_utf8(tmp, "wbx");
+        if (!f && errno != EEXIST) return 0;   /* a failure, not a taken name */
+    }
+    if (!f) return 0;
     unsigned char *rgb = (unsigned char *)malloc((size_t)s_w * 3u);
-    if (!rgb) return 0;
-    FILE *f = nk_fopen_utf8(tmp, "wb");
-    if (!f) { free(rgb); return 0; }
+    if (!rgb) {
+        fclose(f);
+        nk_remove_utf8(tmp);
+        return 0;
+    }
     const int png = cap_path_is_png(s_path);
     PngOut z;
     int ok = png ? png_begin(&z, f, s_w, s_h, 3u) : fprintf(f, "P6\n%u %u\n255\n", s_w, s_h) > 0;

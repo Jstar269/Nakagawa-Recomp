@@ -554,8 +554,8 @@ static void screenshot_arm_for_present(const DisplayFrameState *fb, int framebuf
         if (!sr_screenshot_name(getenv("SR_DISC_ID"), t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
                                 t.tm_hour, t.tm_min, t.tm_sec, seq, name, sizeof name))
             break;
-        int n = snprintf(s_shot_path, sizeof s_shot_path, "%s/screenshots/%s", root, name);
-        if (n < 0 || (size_t)n >= sizeof s_shot_path || shot_file_exists(s_shot_path))
+        if (!sr_screenshot_path(root, name, s_shot_path, sizeof s_shot_path) ||
+            shot_file_exists(s_shot_path))
             s_shot_path[0] = '\0';
     }
     if (!s_shot_path[0]) {

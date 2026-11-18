@@ -86,6 +86,13 @@ void sr_screenshot_clear(void);
 int sr_screenshot_name(const char *disc_id, int year, int month, int day, int hour, int minute,
                        int second, int seq, char *out, size_t outsz);
 
+/* Path of a screenshot named `name` (sr_screenshot_name): "<user_root>/screenshots/<name>". A root
+ * in Windows' extended form (\\?\ and a drive, or \\?\UNC\server\share\...), where '/' is not a
+ * separator, is written in its plain form, as sr_texdump_folder writes it. Returns 1 when it fits in
+ * outsz, else 0 with out empty; an empty root or name, or an extended root with no plain spelling,
+ * also returns 0. */
+int sr_screenshot_path(const char *user_root, const char *name, char *out, size_t outsz);
+
 /* Folder of the texture dump (ge_gpu.h, gegpu_texdump_start): "<user_root>/texdump/<disc>", the
  * disc ID kept to A-Z, a-z, 0-9, '-' and '_' and at most 32 of them, as a screenshot's name keeps
  * it. Returns 1 when it fits in outsz, else 0 with out empty; an empty user_root, or a disc ID
