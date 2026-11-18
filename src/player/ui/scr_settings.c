@@ -47,7 +47,7 @@ static const char *settings_widest_value(NkUi *ui, const char *name, const char 
                                          const char *library_value, const char *other_value) {
     const char *widest = value;
     float widest_width = -1.0f;
-    char label[96];
+    char label[SCR_WIZARD_LABEL_MAX];
     for (int i = -3; i < other_count; i++) {
         const char *candidate = i == -3 ? value
                                 : i == -2 ? library_value

@@ -3774,9 +3774,10 @@ static void player_launch_job_spawn(PlayerLaunchJob *job, bool launcher_audio_cl
     }
 }
 
-/* `launcher_audio_closed`: the launcher holds no music stream. Otherwise the job
-   waits, launch_pending, while the music fades out, and player_launch_job_poll
-   starts the worker once the music has let go of the device. */
+/* `launcher_audio_closed`: the launcher holds no audio stream (music or UI sounds).
+   Otherwise the job waits, launch_pending, while the music fades out and the sounds
+   close, and player_launch_job_poll starts the worker once both have let go of the
+   device. */
 static PlayerLaunchJob *player_launch_job_start(PlayerApp *app, int game_index,
                                                 bool launcher_audio_closed) {
     if (!app || app->launch_pending || app->is_game_running ||

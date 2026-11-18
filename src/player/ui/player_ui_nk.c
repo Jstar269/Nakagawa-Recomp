@@ -2587,6 +2587,27 @@ bool player_ui_nk_find_open(const PlayerUiNk *player) {
            nk_ui_router_current(player->router) == PLAYER_UI_ROUTE_LIBRARY;
 }
 
+/* A text box (the find box, the nickname editor) takes what is typed: SDL's text
+   input brings the characters, Backspace deletes one, and a printable key is not
+   also a shortcut (D, Q, E). Returns true when the event was the box's. */
+static bool player_ui_take_typing(PlayerUiNk *player, const SDL_Event *event,
+                                  void (*type)(PlayerUiNk *, const char *),
+                                  void (*erase)(PlayerUiNk *)) {
+    if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
+        type(player, event->text.text);
+        return true;
+    }
+    if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
+        bool control = (event->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0;
+        if (event->key.key == SDLK_BACKSPACE) {
+            if (event->type == SDL_EVENT_KEY_DOWN) erase(player);
+            return true;
+        }
+        if (!control && event->key.key >= 0x20u && event->key.key < 0x7Fu) return true;
+    }
+    return false;
+}
+
 bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     NkUiEvent translated[8];
     size_t count;
@@ -2594,35 +2615,16 @@ bool player_ui_nk_handle_event(PlayerUiNk *player, const SDL_Event *event) {
     if (player == NULL || !player->ready || event == NULL) return false;
     now_s = player_ui_nk_now_s(player);
     if (player->nickname_open) {
-        /* The nickname editor takes what is typed as the find box does, below;
-           Esc or the pad's B is its Skip or Cancel. */
-        if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
-            player_ui_nickname_type(player, event->text.text);
+        /* The nickname editor takes what is typed as the find box does; Esc or the
+           pad's B is its Skip or Cancel, below. */
+        if (player_ui_take_typing(player, event, player_ui_nickname_type,
+                                  player_ui_nickname_delete)) {
             return true;
-        }
-        if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
-            bool control = (event->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0;
-            if (event->key.key == SDLK_BACKSPACE) {
-                if (event->type == SDL_EVENT_KEY_DOWN) player_ui_nickname_delete(player);
-                return true;
-            }
-            if (!control && event->key.key >= 0x20u && event->key.key < 0x7Fu) return true;
         }
     } else if (player_ui_nk_find_open(player)) {
-        /* The box takes what is typed: SDL's text input brings the characters,
-           Backspace deletes one, and a printable key is not also a shortcut
-           (D, Q, E). Esc or the pad's B clears and closes it, below. */
-        if (event->type == SDL_EVENT_TEXT_INPUT && event->text.text != NULL) {
-            player_ui_find_type(player, event->text.text);
+        /* Esc or the pad's B clears and closes the find box, below. */
+        if (player_ui_take_typing(player, event, player_ui_find_type, player_ui_find_delete)) {
             return true;
-        }
-        if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
-            bool control = (event->key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) != 0;
-            if (event->key.key == SDLK_BACKSPACE) {
-                if (event->type == SDL_EVENT_KEY_DOWN) player_ui_find_delete(player);
-                return true;
-            }
-            if (!control && event->key.key >= 0x20u && event->key.key < 0x7Fu) return true;
         }
     } else if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat &&
                nk_ui_router_current(player->router) == PLAYER_UI_ROUTE_LIBRARY &&
@@ -2663,10 +2665,21 @@ void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused) {
     player->window_unfocused = !focused;
 }
 
+/* Sounds follow the setting, and stay closed while a game starts or runs so its own
+   audio is left alone: the launch starts the game's process only once they have let
+   go of the device (player_ui_nk_launcher_audio_closed). */
+static void player_ui_nk_follow_sounds(PlayerUiNk *player, const PlayerApp *app) {
+    player_ui_sounds_set_enabled(player->sounds, app->settings.ui_sounds &&
+                                                     !app->is_game_running &&
+                                                     !app->launch_pending);
+}
+
 void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
     PlayerUiMusicRequest request;
     PlayerUiMusicState state;
     if (player == NULL || app == NULL) return;
+    /* The launch waits on the sounds as on the music, so they follow it here too. */
+    player_ui_nk_follow_sounds(player, app);
     request.enabled = app->settings.launcher_music;
     /* A game that is starting counts as running: the music fades out and lets go
        of the audio device before the launch starts the game's process. */
@@ -2700,7 +2713,12 @@ void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app) {
 
 bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player) {
     return player == NULL || (!player_ui_music_holds_audio(player->music) &&
-                              !player_ui_music_decoding(player->music));
+                              !player_ui_music_decoding(player->music) &&
+                              !player_ui_sounds_hold_audio(player->sounds));
+}
+
+bool player_ui_nk_ui_sounds_hold_audio(const PlayerUiNk *player) {
+    return player != NULL && player_ui_sounds_hold_audio(player->sounds);
 }
 
 bool player_ui_nk_music_decoding(const PlayerUiNk *player) {
@@ -2782,16 +2800,6 @@ static const char *player_ui_compatibility_words(const GameRecord *game, const c
     }
 }
 
-static const char *player_ui_compatibility(const GameRecord *game, const char **expect,
-                                           const char **known_issues, PlayerUiTier *tier) {
-    PlayerUiTier record_tier;
-    const char *category =
-        player_ui_compatibility_words(game, expect, known_issues, &record_tier);
-    *tier = record_tier != PLAYER_UI_TIER_NONE ? record_tier
-                                               : player_ui_tier_for_category(category);
-    return category;
-}
-
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
 void player_ui_nk_test_report_compatibility(void) {
     for (size_t i = 0u;
@@ -2827,10 +2835,12 @@ static bool player_ui_unrecorded_experimental(const GameRecord *game) {
     return record_tier == PLAYER_UI_TIER_NONE;
 }
 
+/* `unrecorded`: the title is an experimental entry nobody has recorded a result for
+   (player_ui_unrecorded_experimental), looked up once per title. */
 static const char *player_ui_library_status_word(const GameRecord *game,
-                                                 bool package_ready) {
+                                                 bool package_ready, bool unrecorded) {
     if (package_ready) return "Ready";
-    if (player_ui_unrecorded_experimental(game)) {
+    if (unrecorded) {
         return player_ui_has_seen_boot(game) ? "Experimental" : "Untested";
     }
     return "Needs setup";
@@ -2838,10 +2848,9 @@ static const char *player_ui_library_status_word(const GameRecord *game,
 
 /* Status colours follow the design system: Ready teal, experimental and
    untested info blue (with their own shapes), needs setup warning gold. */
-static uint32_t player_ui_library_status_color(const GameRecord *game,
-                                              bool package_ready) {
+static uint32_t player_ui_library_status_color(bool package_ready, bool unrecorded) {
     if (package_ready) return PLAYER_UI_READY;
-    if (player_ui_unrecorded_experimental(game)) return PLAYER_UI_INFO;
+    if (unrecorded) return PLAYER_UI_INFO;
     return PLAYER_UI_WARNING;
 }
 
@@ -2854,9 +2863,9 @@ static unsigned player_ui_art_kind(const GameRecord *game) {
 }
 
 static const char *player_ui_library_status_marker(const GameRecord *game,
-                                                   bool package_ready) {
+                                                   bool package_ready, bool unrecorded) {
     if (package_ready) return "●";
-    if (player_ui_unrecorded_experimental(game)) {
+    if (unrecorded) {
         return player_ui_has_seen_boot(game) ? "◆" : "?";
     }
     return "▲";
@@ -2995,12 +3004,20 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
     bool starting;
     bool running;
     const PlayerPreflightCheck *build_blocker;
+    const char *compatibility_category;
+    PlayerUiTier record_tier;
+    bool unrecorded;
     PlayerUiPrimaryAction primary = PLAYER_UI_PRIMARY_NONE;
     if (player == NULL || app == NULL || out == NULL || index < 0 ||
         index >= app->game_count || index >= (int)PLAYER_UI_TITLE_CAP) {
         return primary;
     }
     game = &app->games[index];
+    /* One compatibility lookup for the title: its words and tier, and whether it is
+       an experimental entry nobody has recorded (player_ui_unrecorded_experimental). */
+    compatibility_category = player_ui_compatibility_words(
+        game, &out->compatibility_expect, &out->compatibility_known_issues, &record_tier);
+    unrecorded = game->is_experimental && record_tier == PLAYER_UI_TIER_NONE;
     package_status = player_app_cached_runtime_package_status(app, game);
     package_ready = player_app_cached_game_has_runtime(app, game);
     checking = player_app_runtime_package_check_pending(app, game);
@@ -3022,7 +3039,7 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
                                sizeof(player->status_text[index]));
     out->title = game->title_name;
     out->disc_id = game->disc_id;
-    out->library_status = player_ui_library_status_word(game, package_ready);
+    out->library_status = player_ui_library_status_word(game, package_ready, unrecorded);
     out->library_status_detail = package_ready || checking
         ? "" : player->status_text[index];
     /* The package card's text follows the package, not the primary action
@@ -3054,9 +3071,9 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         ? player_preflight_plain_message(build_blocker) : "";
     out->build_preflight_folder = build_blocker
         ? app->package_build_preflight.action_folder : "";
-    out->compatibility_category = player_ui_compatibility(
-        game, &out->compatibility_expect, &out->compatibility_known_issues,
-        &out->compatibility_tier);
+    out->compatibility_category = compatibility_category;
+    out->compatibility_tier = record_tier != PLAYER_UI_TIER_NONE
+        ? record_tier : player_ui_tier_for_category(compatibility_category);
     if (!app->settings.developer_mode) out->compatibility_category = NULL;
     /* The disc's executable is encrypted: the player decrypts it from the
        disc (#295). The title screen shows this only while the package still
@@ -3066,14 +3083,13 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
         game->executable_selection == NK_ISO_EXEC_SELECTION_NONE
             ? "Nakagawa decrypts this game's program from your own disc, on this PC."
             : "";
-    out->status_rgba = player_ui_library_status_color(game, package_ready);
-    out->status_marker = player_ui_library_status_marker(game, package_ready);
+    out->status_rgba = player_ui_library_status_color(package_ready, unrecorded);
+    out->status_marker = player_ui_library_status_marker(game, package_ready, unrecorded);
     if (starting) {
         out->library_status = "Starting";
         out->status_rgba = PLAYER_UI_INFO;
         out->status_marker = "◆";
-    } else if (out->package_state == PLAYER_UI_PACKAGE_CHECKING &&
-               !player_ui_unrecorded_experimental(game)) {
+    } else if (out->package_state == PLAYER_UI_PACKAGE_CHECKING && !unrecorded) {
         /* Launcher review B4: until the background check has looked at the
            package, the card does not know it needs setup. */
         out->library_status = "Checking";
@@ -3579,10 +3595,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         nk_ui_push_event(player->ui, &repeats[i]);
     }
     player_ui_art_pump(player->art);
-    /* Sounds follow the setting, and stay closed while a game runs so its own
-       audio is left alone. */
-    player_ui_sounds_set_enabled(player->sounds,
-                                 app->settings.ui_sounds && !app->is_game_running);
+    player_ui_nk_follow_sounds(player, app);
     {
         /* The owner's first run: one click on COPY FILES AND CONTINUE swapped
            in the copy screen, whose CANCEL sits where the button was, and the
@@ -4294,6 +4307,13 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     }
     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
     draw_list = nk_ui_end(player->ui);
+    /* The inspector's own close button turns it off in Clay; the setting follows, so the
+       next frame does not turn the panel on again. */
+    if (app->settings.developer_mode && app->dev_log.inspect_layout &&
+        !nk_ui_layout_debug(player->ui)) {
+        app->dev_log.inspect_layout = false;
+        player_dev_log_add(app, "ui", "layout inspector off (closed from its panel)");
+    }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     /* Stands in for a frame nk_ui could not finish, on the frame that confirms
        Remove from library. */

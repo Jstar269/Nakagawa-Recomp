@@ -744,7 +744,7 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            "rebuild_queue_paused=%d prompt_version=%s "
            "input_class=%s input_files=%zu next_input_class=%s next_input_files=%zu "
            "backdrop=%d backdrop_shown=%d disc_check=%d drop_pending=%zu drop_notice=%s "
-           "music=%s\n",
+           "music=%s inspect_layout=%d\n",
            frame_number, (unsigned long long)SDL_GetTicks(),
            player_ui_test_view_name(app->active_view),
            app->selected_game_index,
@@ -826,7 +826,8 @@ void player_ui_test_report_frame(int frame_number, const PlayerApp *app,
            app->drop_count > app->drop_next ? app->drop_count - app->drop_next : (size_t)0,
            !app->drop_notice[0] ? "none"
                : strstr(app->drop_notice, "being set up") ? "busy" : "summary",
-           player_ui_nk_music_state_name(g_ui_test_next_ui));
+           player_ui_nk_music_state_name(g_ui_test_next_ui),
+           app->dev_log.inspect_layout ? 1 : 0);
 
     if (g_ui_test_next_ui != NULL) {
         /* The nickname editor (#2197) while it is open: what it holds, in hex so a
@@ -1788,10 +1789,12 @@ void player_ui_test_slow_start(const PlayerUiTestLaunch *launch) {
 }
 
 void player_ui_test_report_launch_worker(bool launcher_audio_closed) {
-    printf("[PLAYER_UI_TEST] launch_worker_start launcher_audio=%s music=%s decoder=%s\n",
+    printf("[PLAYER_UI_TEST] launch_worker_start launcher_audio=%s music=%s decoder=%s "
+           "sounds=%s\n",
            launcher_audio_closed ? "closed" : "open",
            player_ui_nk_music_state_name(g_ui_test_next_ui),
-           player_ui_nk_music_decoding(g_ui_test_next_ui) ? "running" : "idle");
+           player_ui_nk_music_decoding(g_ui_test_next_ui) ? "running" : "idle",
+           player_ui_nk_ui_sounds_hold_audio(g_ui_test_next_ui) ? "open" : "closed");
 }
 
 /* The headless regression cannot open a modal box, so it reads the dialog

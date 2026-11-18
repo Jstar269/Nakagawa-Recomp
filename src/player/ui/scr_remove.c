@@ -71,6 +71,14 @@ PlayerUiAction player_ui_screen_remove(NkUi *ui, const PlayerUiRemoveModel *mode
             }
             nk_ui_end_container(ui);
         }
+    }
+    /* What Remove frees: the built files listed, and the decrypted files and disc copy
+       while their box is ticked. Saves are backed up before they go, so they free
+       nothing. */
+    if (model->delete_disc_copy && model->has_disc_copy && !model->files_shared) {
+        total += model->disc_copy_bytes;
+    }
+    if (shown > 0u || total > 0ull) {
         scr_flow_bytes(size, sizeof(size), total);
         (void)snprintf(text, sizeof(text), "Frees %s", size);
         nk_ui_text_role(ui, FLOW_ID_TOTAL, nk_ui_caps(ui, text), NK_UI_TYPE_LABEL_S,

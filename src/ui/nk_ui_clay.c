@@ -808,6 +808,21 @@ void nk_ui_clay_set_debug(void *opaque_clay, bool enabled) {
     Clay_SetCurrentContext(restore);
 }
 
+/* Whether the inspector is on: the panel's own close button turns it off. */
+bool nk_ui_clay_debug(void *opaque_clay) {
+    NkUiClay *clay = (NkUiClay *)opaque_clay;
+    Clay_Context *restore;
+    bool enabled;
+    if (clay == NULL || clay->context == NULL) {
+        return false;
+    }
+    restore = Clay_GetCurrentContext();
+    Clay_SetCurrentContext(clay->context);
+    enabled = Clay_IsDebugModeEnabled();
+    Clay_SetCurrentContext(restore);
+    return enabled;
+}
+
 /* Runs Clay's scrolling for this frame, between frames as its lifecycle asks:
    the wheel (wheel_px, positive towards the top), a drag or touch with the
    pointer held, and the momentum a drag leaves. Returns how far, in logical px,

@@ -540,6 +540,10 @@ bool nk_ui_laid_out(const NkUi *ui);
    a screen sized from the window's own width runs on under the panel. Set
    between frames. */
 void nk_ui_set_layout_debug(NkUi *ui, bool enabled);
+/* Whether the inspector is on. Its panel has its own close button, which turns
+   it off in the frame it is clicked; a host that asks for the inspector reads
+   this after nk_ui_end, so it does not turn the panel on again. */
+bool nk_ui_layout_debug(const NkUi *ui);
 NkUiId nk_ui_focused(const NkUi *ui);
 /* Focuses control id. Id 0 drops the focus, and what the active scope
    remembers, so the frame ends on the scope's default control. */

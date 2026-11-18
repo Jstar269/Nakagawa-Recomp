@@ -6423,6 +6423,94 @@ static PlayerUiAction activate_remove_button(NkUiId id, const PlayerUiRemoveMode
     return result;
 }
 
+/* The quoted text of the dump's first run that starts with `start`, copied into out. */
+static bool dump_quoted_run(const char *dump, const char *start, char *out, size_t cap) {
+    char needle[96];
+    const char *at;
+    const char *end;
+    (void)snprintf(needle, sizeof(needle), "\"%s", start);
+    at = strstr(dump, needle);
+    if (at == NULL) return false;
+    ++at;
+    end = strstr(at, "\"\n");
+    if (end == NULL || (size_t)(end - at) >= cap) return false;
+    memcpy(out, at, (size_t)(end - at));
+    out[end - at] = '\0';
+    return true;
+}
+
+static bool utf8_whole(const char *text) {
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p != 0u) {
+        size_t follow = *p < 0x80u ? 0u : (*p & 0xE0u) == 0xC0u ? 1u
+                      : (*p & 0xF0u) == 0xE0u ? 2u : (*p & 0xF8u) == 0xF0u ? 3u : 4u;
+        if (follow == 4u) return false;
+        ++p;
+        for (size_t i = 0u; i < follow; ++i, ++p) {
+            if ((*p & 0xC0u) != 0x80u) return false;
+        }
+    }
+    return true;
+}
+
+/* One setting row drawn alone in a box `width` px across; returns its dump. */
+static void draw_setting_row(NkUi *ui, const char *name, const char *value, float width,
+                             char *dump, size_t cap) {
+    NkUiLayout box = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(width), sizing_fit(), 0.0f);
+    nk_ui_begin(ui, 0.0);
+    if (nk_ui_begin_container(ui, 0x7E000100u, &box, NULL)) {
+        (void)scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE, 0x7E000110u, name,
+                               value, "Chooses the folder.", true, width, NULL);
+        nk_ui_end_container(ui);
+    }
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, cap);
+}
+
+/* Audit F-3b26bca1: a setting button's "name: value" was formatted into 48 bytes, so a
+   texture pack's folder and count were cut short with no ellipsis, a cut could split a
+   character, and the column was measured on the cut text. Failing-before: the first
+   two checks read "... 1520 T" and a lone 0xC2. */
+static void test_setting_label_holds_a_long_value(void) {
+    static char dump[CASE_DUMP_CAP];
+    char shown[512];
+    char value[200];
+    NkUiConfig config;
+    NkUi *ui;
+    NkUiTextBackend text = screen_test_text_backend();
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the setting row UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    draw_setting_row(ui, "Texture pack folder", "HotShotsTennisHD \xC2\xB7 1520 textures",
+                     1000.0f, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"TEXTURE PACK FOLDER: HOTSHOTSTENNISHD \xC2\xB7 1520 TEXTURES\"") !=
+              NULL,
+          "a pack's folder and count show whole");
+    draw_setting_row(ui, "Texture pack folder", "ABCDEFGHIJKLMNOPQRSTUVWX \xC2\xB7 3 textures",
+                     1000.0f, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"TEXTURE PACK FOLDER: ABCDEFGHIJKLMNOPQRSTUVWX \xC2\xB7 3 TEXTURES\"") !=
+              NULL,
+          "a 24-byte folder name keeps its middle dot whole");
+    /* A folder name far wider than its row ends in an ellipsis on a whole character, and
+       the button fits the row. */
+    value[0] = '\0';
+    for (int i = 0; i < 20; ++i) (void)strcat(value, "\xE3\x83\x97\xE3\x83\xAC ");
+    (void)strcat(value, "\xC2\xB7 9 textures");
+    draw_setting_row(ui, "Texture pack folder", value, 400.0f, dump, sizeof(dump));
+    CHECK(dump_quoted_run(dump, "TEXTURE PACK FOLDER: ", shown, sizeof(shown)) &&
+              utf8_whole(shown) && strlen(shown) >= 3u &&
+              strcmp(shown + strlen(shown) - 3u, "\xE2\x80\xA6") == 0,
+          "a label wider than its row ends in an ellipsis on a whole character");
+    nk_ui_begin(ui, 0.0);
+    CHECK(nk_ui_button_width(ui, shown, 0u) <= 400.0f, "and its button fits the row");
+    (void)nk_ui_end(ui);
+    nk_ui_destroy(ui);
+}
+
 /* #1304: Remove from library sits on a disc's title page, never a showcase
    demo's, and asks first: the dialog lists what Nakagawa built with sizes,
    says the disc image stays, and keeps the saves unless their box is ticked. */
@@ -6531,6 +6619,18 @@ static void test_remove_from_library(void) {
     CHECK(strstr(dump, "They go too, with any decrypted files you added yourself.") != NULL &&
               strstr(dump, "Your disc image stays.") != NULL,
           "a ticked disc copy box says what goes and that the disc image stays");
+    /* Audit F-7ec512c1: the ticked disc copy (5.0 MB) is freed too, so the total counts
+       it. Failing-before: the total stayed at the built files' 43.5 MB. */
+    CHECK(strstr(dump, "FREES 48.5 MB") != NULL && strstr(dump, "FREES 43.5 MB") == NULL,
+          "the total counts the ticked disc copy");
+    remove.item_count = 0u;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_remove(ui, &remove);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "FREES 5.0 MB") != NULL,
+          "with nothing built, a ticked disc copy still says what it frees");
+    remove.item_count = sizeof(items) / sizeof(items[0]);
     action = activate_remove_button(PLAYER_UI_ID_REMOVE_CONFIRM, &remove);
     CHECK(action.kind == PLAYER_UI_ACTION_REMOVE_CONFIRM &&
               (unsigned)action.primary == PLAYER_UI_REMOVE_ALSO_DISC_COPY,
@@ -8058,6 +8158,7 @@ int main(int argc, char **argv) {
     test_stalled_game_offers_stop_once();
     test_default_focus_lands_on_the_main_action();
     test_tier_table_matches_the_docs();
+    test_setting_label_holds_a_long_value();
     test_remove_from_library();
     test_saves_dialog();
     test_add_to_steam_dialog();

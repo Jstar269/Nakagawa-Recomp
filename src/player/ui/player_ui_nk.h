@@ -1580,9 +1580,11 @@ void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused);
 /* Once per loop, whatever view shows: the launcher music follows its setting,
    whether a game is starting or running, and the window's focus (#2207). */
 void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app);
-/* True when the launcher music holds no audio stream and no worker is decoding
-   the track: a game may start. True for a NULL player. */
+/* True when neither the launcher music nor the UI sounds hold an audio stream and
+   no worker is decoding the track: a game may start. True for a NULL player. */
 bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player);
+/* Whether the UI sounds hold an audio stream, for reports. */
+bool player_ui_nk_ui_sounds_hold_audio(const PlayerUiNk *player);
 /* The launcher music's state (PlayerUiMusicState) and its name, for reports. */
 int player_ui_nk_music_state(const PlayerUiNk *player);
 /* Whether the launcher music's worker is reading or decoding the track. */

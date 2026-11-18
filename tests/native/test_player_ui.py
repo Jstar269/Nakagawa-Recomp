@@ -3015,7 +3015,7 @@ class NativePlayerUiTests(unittest.TestCase):
         workers = [line for line in stdout.splitlines()
                    if line.startswith(LAUNCH_WORKER_START)]
         self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
-                                   "music=stopped decoder=idle"], stdout)
+                                   "music=stopped decoder=idle sounds=closed"], stdout)
         # The frames between PLAY and the worker's start: after the press frame the music
         # fades and stops, and it never plays again before the game's process starts.
         lines = stdout.splitlines()
@@ -3081,12 +3081,31 @@ class NativePlayerUiTests(unittest.TestCase):
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
         workers = self.music_workers(stdout)
         self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
-                                   "music=off decoder=idle"], stdout)
+                                   "music=off decoder=idle sounds=closed"], stdout)
         lines = stdout.splitlines()
         before = parse_frames("\n".join(lines[:lines.index(workers[0])]))
         self.assertTrue(before, stdout)
         self.assertNotIn("1", {frame["launch_pending"] for frame in before},
                          "no frame waited for the music")
+
+    def test_launch_waits_for_the_ui_sounds_to_close(self) -> None:
+        """Audit F-a027d10e, F-fa0d42d8: with the UI sounds on, the sounds' audio stream
+        (opened by the chime that opened the title page) closes once the launch is pending,
+        and the launch worker, which starts the game's process, starts only once it has:
+        the launcher holds no audio stream then. Failing-before: the sounds closed only once
+        the game ran, the launch's gate looked at the music alone, and the worker started
+        with the sounds' stream open (sounds=open)."""
+        run = self.run_player(
+            "ready", (*self.PLAY_READY_TITLE, "KEY_RETURN", "WAIT_VIEW=error,30000"),
+            post_build_ready=True, wait_background=True, settings={"ui_sounds": True},
+            env_extra=self.MUSIC_AUDIO,
+        )
+        stdout = str(run["stdout"])
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assertEqual(self.music_workers(stdout),
+                         ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
+                          "music=off decoder=idle sounds=closed"], stdout)
 
     def test_launcher_music_waits_for_focus_at_start(self) -> None:
         """#2207: a launcher window that never had input focus (here the hidden test window,
@@ -3120,7 +3139,7 @@ class NativePlayerUiTests(unittest.TestCase):
             self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
         workers = self.music_workers(stdout)
         self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
-                                   "music=stopped decoder=idle"], stdout)
+                                   "music=stopped decoder=idle sounds=closed"], stdout)
         lines = stdout.splitlines()
         worker_at = lines.index(workers[0])
         before = parse_frames("\n".join(lines[:worker_at]))
@@ -3158,7 +3177,7 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertGreaterEqual(int(match.group(1)), 750)
         self.assertEqual(self.music_workers(stdout),
                          ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
-                          "music=stopped decoder=idle"], stdout)
+                          "music=stopped decoder=idle sounds=closed"], stdout)
 
     def test_launcher_music_names_no_sound_device(self) -> None:
         """#2207: with no audio device the music is a named state and one named line."""
@@ -3989,6 +4008,24 @@ class NativePlayerUiTests(unittest.TestCase):
         )
         self.assertEqual(self.focus_trail(copied)[-1], str(0x4701))
         self.assertEqual([view for view, _ in self.screens(copied)], ["developer_log"])
+
+    def test_next_ui_layout_inspector_closes_from_its_own_button(self) -> None:
+        """Audit F-0ce70310: the layout inspector's own close button (the x at the top
+        right of Clay's panel, which sits on the right 400 px of the 1280 px window) turns
+        the inspector off, and the developer log's setting follows it, so the next frame
+        does not turn the panel on again. Failing-before: the setting stayed on and every
+        frame turned the panel back on (inspect_layout=1 to the end)."""
+        run = self.next_ui_run(
+            "developer-log",
+            ("WAIT_MS=100", "KEY_LEFT", "KEY_RETURN", "WAIT_MS=200", "MOUSE_MOVE=1260,15",
+             "WAIT_MS=100", "MOUSE_DOWN", "WAIT_MS=50", "MOUSE_UP", "WAIT_MS=200"),
+        )
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        states = [frame["inspect_layout"] for frame in frames]
+        self.assertIn("1", states, "Inspect turns the inspector on")
+        self.assertEqual(states[-1], "0", "its close button turns it off, and it stays off")
+        self.assertEqual([view for view, _ in self.screens(run)], ["developer_log"])
 
     def test_next_ui_title_detail_and_mapping_follow_the_chosen_title(self) -> None:
         """The second card's Title detail, and the game's own mapping chosen from

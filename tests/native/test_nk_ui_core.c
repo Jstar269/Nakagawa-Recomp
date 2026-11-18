@@ -1694,6 +1694,18 @@ static int test_layout_debug(void) {
     CHECK(nk_ui_dump(ui, dump, sizeof(dump)) < sizeof(dump) &&
               strstr(dump, "nk_ui.container") != NULL,
           "the inspector lists the layout's elements");
+    CHECK(nk_ui_layout_debug(ui), "the inspector reads on");
+    /* Audit F-0ce70310: the panel's own close button (its x, 20 px square, 10 px in
+       from the window's top right corner) turns it off, and the host can read that. */
+    push_pointer(ui, 620.0f, 15.0f, false);
+    (void)draw_button_pair(ui, 10u, 0u);
+    push_pointer(ui, 620.0f, 15.0f, true);
+    (void)draw_button_pair(ui, 10u, 0u);
+    push_pointer(ui, 620.0f, 15.0f, false);
+    (void)draw_button_pair(ui, 10u, 0u);
+    CHECK(!nk_ui_layout_debug(ui), "the panel's close button turns the inspector off");
+    nk_ui_set_layout_debug(ui, true);
+    for (frame = 0; frame < 2; ++frame) (void)draw_button_pair(ui, 10u, 0u);
     nk_ui_set_layout_debug(ui, false);
     for (frame = 0; frame < 2; ++frame) (void)draw_button_pair(ui, 10u, 0u);
     (void)nk_ui_dump(ui, dump, sizeof(dump));

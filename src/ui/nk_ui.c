@@ -210,6 +210,7 @@ bool nk_ui_clay_transitioning(void *clay);
 /* Container `id`, open in this frame, was not in the last frame's layout. */
 bool nk_ui_clay_appeared(void *clay, NkUiId id);
 void nk_ui_clay_set_debug(void *clay, bool enabled);
+bool nk_ui_clay_debug(void *clay);
 float nk_ui_clay_update_scroll(void *clay, const NkUiId *ids, size_t count, float wheel_px,
                                float delta_s);
 NkUiId nk_ui_clay_pointer_target(void *clay, bool (*accept)(void *user, NkUiId id), void *user);
@@ -1982,6 +1983,10 @@ void nk_ui_set_layout_debug(NkUi *ui, bool enabled) {
     if (ui != NULL && !ui->frame_open) {
         nk_ui_clay_set_debug(ui->clay, enabled);
     }
+}
+
+bool nk_ui_layout_debug(const NkUi *ui) {
+    return ui != NULL && nk_ui_clay_debug(ui->clay);
 }
 
 void nk_ui_scroll_to(NkUi *ui, NkUiId id, float offset) {
