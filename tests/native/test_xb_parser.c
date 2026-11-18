@@ -35,6 +35,7 @@
 #else
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #define test_rmdir rmdir
@@ -848,6 +849,43 @@ static void test_staging_cleanup_boundary(void) {
     assert(player_stage_discard(root));
     assert(!nk_platform_dir_exists(root));
     printf("[XB_TEST] Staging cleanup boundary and safe basename check PASSED\n");
+}
+
+/* Another program (an antivirus scanner, an indexer) may hold a just-extracted
+ * file open with delete sharing. Discarding the tree still removes it: the file
+ * leaves the folder at once, so its parent folders can go too. */
+static void test_staging_discard_with_a_shared_open_file(void) {
+    const char *root = SR_SELFTEST_BUILD_ROOT "/.staging_xb_shared_handle";
+    const char *nested = SR_SELFTEST_BUILD_ROOT "/.staging_xb_shared_handle/nested";
+    const char *file_path = SR_SELFTEST_BUILD_ROOT "/.staging_xb_shared_handle/nested/held.bin";
+    (void)player_stage_discard(root);
+    assert(nk_platform_mkdir_p(nested));
+    static const uint8_t data[] = "held by another program";
+    write_file_bytes(file_path, data, sizeof(data) - 1);
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE holder = CreateFileA(file_path, GENERIC_READ,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(holder != INVALID_HANDLE_VALUE);
+#else
+    int holder = open(file_path, O_RDONLY);
+    assert(holder >= 0);
+#endif
+    bool discarded = player_stage_discard(root);
+    bool root_left = nk_platform_dir_exists(root);
+#if defined(_WIN32) || defined(_WIN64)
+    CloseHandle(holder);
+#else
+    close(holder);
+#endif
+    if (!discarded || root_left) {
+        fprintf(stderr, "[XB_TEST] discard with a shared open file: discarded=%d left=%d\n",
+                (int)discarded, (int)root_left);
+        (void)player_stage_discard(root);
+    }
+    assert(discarded);
+    assert(!root_left);
+    printf("[XB_TEST] Staging discard with another program's open file PASSED\n");
 }
 
 static void test_staging_discard_reparse_boundary(void) {
@@ -2111,6 +2149,180 @@ static void test_title_staging_names_a_long_data_folder(void) {
     printf("[XB_TEST] A too-long data folder path is named, not blamed on the disc PASSED\n");
 }
 
+/* A title request in its own data root, staged from a fresh archive-layout disc. */
+typedef struct {
+    char iso_path[NATIVE_TEST_PATH_MAX];
+    char user_data_root[NATIVE_TEST_PATH_MAX];
+    PlayerStageTitleRequest request;
+    TitleStagePaths paths;
+} TitleStageFixture;
+
+static void title_stage_fixture(TitleStageFixture *fixture, const char *disc_id) {
+    static const uint8_t raw_data[] = "staged native XB data";
+    static const char *const whole_usrdir[] = { "." };
+    const FixtureEntry entries[] = {
+        { "data/raw.bin", raw_data, sizeof(raw_data) - 1, NK_XB_COMPRESSION_NONE }
+    };
+    char name[96];
+    memset(fixture, 0, sizeof(*fixture));
+    ByteBuffer xb = make_archive(entries, 1, false);
+    snprintf(name, sizeof(name), "%s.iso", disc_id);
+    title_join(fixture->iso_path, sizeof(fixture->iso_path), native_test_get_root(), name);
+    snprintf(name, sizeof(name), "user-data-%s", disc_id);
+    title_join(fixture->user_data_root, sizeof(fixture->user_data_root),
+               native_test_get_root(), name);
+    write_title_fixture_iso(fixture->iso_path, true, &xb);
+    free(xb.data);
+    fixture->request.iso_path = fixture->iso_path;
+    fixture->request.user_data_root = fixture->user_data_root;
+    fixture->request.disc_id = disc_id;
+    fixture->request.disc_version = "1.00";
+    fixture->request.loose_content_roots = whole_usrdir;
+    fixture->request.loose_content_root_count = 1;
+    fixture->request.data_root = "xbdata";
+    title_stage_paths(fixture->user_data_root, disc_id, &fixture->paths);
+}
+
+/* The support-PRX copy from the user's PPSSPP dump folder is optional: a
+ * module that cannot be copied (here an empty libfont.prx, as an interrupted
+ * dump leaves) is left out and the title is still set up. Run after
+ * test_title_staging_transaction, whose root is APPDATA and HOME. */
+static void test_title_staging_skips_a_broken_support_prx(void) {
+    TitleStageFixture fixture;
+    title_stage_fixture(&fixture, "TEST90011");
+    char dump[NATIVE_TEST_PATH_MAX];
+    char empty_prx[NATIVE_TEST_PATH_MAX];
+    char good_prx[NATIVE_TEST_PATH_MAX];
+    char path[NATIVE_TEST_PATH_MAX];
+    title_join(dump, sizeof(dump), native_test_get_root(), "PPSSPP/PSP/SYSTEM/DUMP");
+    assert(nk_platform_mkdir_p(dump));
+    title_join(empty_prx, sizeof(empty_prx), dump, "libfont.prx");
+    title_join(good_prx, sizeof(good_prx), dump, "scePsmf_library.prx");
+    write_file_bytes(empty_prx, "", 0);
+    write_file_bytes(good_prx, "synthetic psmf", 14);
+
+    PlayerStageSummary summary;
+    PlayerStageTitleOutcome outcome;
+    char prepared_root[NK_MAX_PATH];
+    char message[1024];
+    NkResult result = run_title_stage(&fixture.request, NULL, &summary, &outcome,
+                                      prepared_root, sizeof(prepared_root),
+                                      message, sizeof(message));
+    remove(empty_prx);
+    remove(good_prx);
+    assert(result == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_STAGED);
+    title_join(path, sizeof(path), fixture.paths.final_root, "EXTRACTED/decrypted/libfont.prx");
+    assert(!nk_platform_file_exists(path));
+    title_join(path, sizeof(path), fixture.paths.final_root,
+               "EXTRACTED/decrypted/scePsmf_library.prx");
+    assert(nk_platform_file_exists(path));
+    printf("[XB_TEST] A support PRX that cannot be copied is left out, not fatal PASSED\n");
+}
+
+/* A leftover that cannot be removed yet (a program still holds a file in it)
+ * does not stop a title whose complete, matching tree is already in place. */
+static void test_title_staging_reuses_past_a_stuck_leftover(void) {
+    TitleStageFixture fixture;
+    title_stage_fixture(&fixture, "TEST90012");
+    PlayerStageSummary summary;
+    PlayerStageTitleOutcome outcome;
+    char prepared_root[NK_MAX_PATH];
+    char message[1024];
+    char path[NATIVE_TEST_PATH_MAX];
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_STAGED);
+
+#if defined(_WIN32) || defined(_WIN64)
+    assert(nk_platform_mkdir_p(fixture.paths.retired_root));
+    title_join(path, sizeof(path), fixture.paths.retired_root, "held.bin");
+    write_file_bytes(path, "held", 4);
+    /* No delete sharing: nothing can remove the file while this is open. */
+    HANDLE holder = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(holder != INVALID_HANDLE_VALUE);
+#else
+    title_join(path, sizeof(path), fixture.paths.retired_root, "held");
+    assert(nk_platform_mkdir_p(path));
+    char held_file[NATIVE_TEST_PATH_MAX];
+    title_join(held_file, sizeof(held_file), path, "held.bin");
+    write_file_bytes(held_file, "held", 4);
+    /* A folder nobody may list stands in for a file a program holds. A
+     * superuser bypasses the permission, so the leftover would just go. */
+    assert(chmod(path, 0) == 0);
+    bool stuck = geteuid() != 0;
+#endif
+    NkResult result = run_title_stage(&fixture.request, NULL, &summary, &outcome,
+                                      prepared_root, sizeof(prepared_root),
+                                      message, sizeof(message));
+    bool leftover_kept = nk_platform_dir_exists(fixture.paths.retired_root);
+#if defined(_WIN32) || defined(_WIN64)
+    CloseHandle(holder);
+    bool stuck = true;
+#else
+    assert(chmod(path, 0700) == 0);
+#endif
+    assert(result == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_REUSED);
+    assert(strcmp(prepared_root, fixture.paths.final_root) == 0);
+    if (stuck) assert(leftover_kept);
+
+    /* Once nothing holds it, the next staging of the title clears it. */
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_REUSED);
+    assert(!nk_platform_dir_exists(fixture.paths.retired_root));
+    printf("[XB_TEST] A stuck leftover does not block a matching staged tree PASSED\n");
+}
+
+/* Replacing a tree takes two renames. An interruption between them leaves no
+ * games/<disc>: the previous tree in .retired and, when the new one was
+ * complete, the new tree with its staging record in .staging. The next staging
+ * puts one of them back in place instead of discarding both. */
+static void test_title_staging_recovers_an_interrupted_promotion(void) {
+    TitleStageFixture fixture;
+    title_stage_fixture(&fixture, "TEST90013");
+    PlayerStageSummary summary;
+    PlayerStageTitleOutcome outcome;
+    char prepared_root[NK_MAX_PATH];
+    char message[1024];
+    char path[NATIVE_TEST_PATH_MAX];
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_STAGED);
+
+    /* Only the previous tree survived, under .retired: it comes back. */
+    title_join(path, sizeof(path), fixture.paths.final_root, "previous-marker.bin");
+    write_file_bytes(path, "previous", 8);
+    assert(rename(fixture.paths.final_root, fixture.paths.retired_root) == 0);
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_REUSED);
+    assert(nk_platform_file_exists(path));
+    assert(!nk_platform_dir_exists(fixture.paths.retired_root));
+    assert(!nk_platform_dir_exists(fixture.paths.staging_root));
+
+    /* The new complete tree waits under .staging and the previous one under
+     * .retired: the new one is promoted and the previous one removed. */
+    remove(path);
+    title_join(path, sizeof(path), fixture.paths.final_root, "new-marker.bin");
+    write_file_bytes(path, "new", 3);
+    assert(rename(fixture.paths.final_root, fixture.paths.staging_root) == 0);
+    char older[NATIVE_TEST_PATH_MAX];
+    assert(nk_platform_mkdir_p(fixture.paths.retired_root));
+    title_join(older, sizeof(older), fixture.paths.retired_root, "EBOOT.BIN");
+    write_file_bytes(older, "OLD!", 4);
+    assert(run_title_stage(&fixture.request, NULL, &summary, &outcome, prepared_root,
+                           sizeof(prepared_root), message, sizeof(message)) == NK_OK);
+    assert(outcome == PLAYER_STAGE_TITLE_REUSED);
+    assert(nk_platform_file_exists(path));
+    assert(summary.extracted_asset_count == 1);
+    assert(!nk_platform_dir_exists(fixture.paths.retired_root));
+    assert(!nk_platform_dir_exists(fixture.paths.staging_root));
+    printf("[XB_TEST] An interrupted promotion is recovered, not discarded PASSED\n");
+}
+
 int main(void) {
     printf("[XB_TEST] Starting native clean-room XB parser tests...\n");
     test_roundtrip_all_compression_modes();
@@ -2137,11 +2349,15 @@ int main(void) {
     test_archive_vfs_mount_scaling();
     test_archive_vfs_keeps_one_open_handle();
     test_staging_cleanup_boundary();
+    test_staging_discard_with_a_shared_open_file();
     test_staging_discard_reparse_boundary();
     test_iso_to_native_staging_pipeline();
     test_staging_unpacks_every_xb_variant();
     test_title_staging_transaction();
     test_title_staging_names_a_long_data_folder();
+    test_title_staging_skips_a_broken_support_prx();
+    test_title_staging_reuses_past_a_stuck_leftover();
+    test_title_staging_recovers_an_interrupted_promotion();
     printf("[XB_TEST] ALL NATIVE XB PARSER TESTS PASSED\n");
     return 0;
 }

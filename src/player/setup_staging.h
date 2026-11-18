@@ -102,18 +102,23 @@ typedef enum {
  *
  *   1. take the title's staging lock (a second staging of the same title, in
  *      this or another process, is refused rather than allowed to share files);
- *   2. clear what an interrupted earlier attempt left behind (its unpromoted
- *      `.staging_<disc>` tree or a replaced tree it did not finish removing);
+ *   2. when `games/<disc>` is missing, put back the tree an interrupted
+ *      replacement set aside: the new complete tree when its staging record
+ *      matches this request, otherwise the previous tree;
  *   3. reuse an existing `games/<disc>` tree when its staging record matches
- *      this request and every required folder is present;
- *   4. otherwise extract into `.staging_<disc>`, validate it, write its staging
- *      record, and promote it with one directory rename. An older or
+ *      this request and every required folder is present (a leftover beside
+ *      it is removed when it can be, and never blocks the reuse);
+ *   4. otherwise clear what an interrupted earlier attempt left behind (its
+ *      unpromoted `.staging_<disc>` tree or a replaced tree it did not finish
+ *      removing), extract into `.staging_<disc>`, validate it, write its
+ *      staging record, and promote it with one directory rename. An older or
  *      incomplete tree is replaced only after the new one is complete, and is
  *      restored if the replacing rename fails.
  *
  * An interruption at any point leaves either the previous tree or the new
- * complete tree at `games/<disc>`, never a partial one; the next call finishes
- * the cleanup and stages again. On success `prepared_root` receives the
+ * complete tree, never a partial one, at `games/<disc>` or set aside for the
+ * next call to put back there; that call finishes the cleanup and stages
+ * again when it must. On success `prepared_root` receives the
  * promoted directory and `summary` the extracted counts (restored from the
  * staging record when the tree was reused). On failure `message` holds a
  * bracketed boundary code, a plain sentence, and what to do next. */
