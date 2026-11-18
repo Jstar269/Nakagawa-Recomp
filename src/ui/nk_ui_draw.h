@@ -144,4 +144,11 @@ bool nk_ui_draw_add_image(NkUiDrawBuffer *buffer, const NkUiImage *image,
 bool nk_ui_draw_add_scissor(NkUiDrawBuffer *buffer, bool start,
                             NkUiPixelRect bounds, uint32_t element_id);
 
+/* Whether a list is well formed, as the producer above builds every list: its
+   arrays are present for their counts, every index names a vertex, every
+   rectangle and border range lies inside the index buffer, and scissors nest
+   no deeper than NK_UI_DRAW_CLIP_DEPTH, with no end before its start. Both
+   backends check a list with it before drawing any of it. */
+bool nk_ui_draw_list_valid(const NkUiDrawList *list);
+
 #endif /* NK_UI_DRAW_H */

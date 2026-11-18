@@ -877,3 +877,36 @@ bool nk_ui_draw_add_scissor(NkUiDrawBuffer *buffer, bool start,
     nk_ui_set_bounds(&command, bounds);
     return nk_ui_append_command(buffer, command);
 }
+
+bool nk_ui_draw_list_valid(const NkUiDrawList *list) {
+    uint32_t depth = 0;
+    uint32_t i;
+    if (list == NULL || (list->nv > 0 && list->v == NULL) ||
+        (list->ni > 0 && list->idx == NULL) || (list->ncmd > 0 && list->cmd == NULL)) {
+        return false;
+    }
+    for (i = 0; i < list->ni; ++i) {
+        if (list->idx[i] >= list->nv) {
+            return false;
+        }
+    }
+    for (i = 0; i < list->ncmd; ++i) {
+        const NkUiDrawCmd *cmd = &list->cmd[i];
+        if (cmd->kind == NK_UI_DRAW_RECTANGLE || cmd->kind == NK_UI_DRAW_BORDER) {
+            if (cmd->first > list->ni || cmd->count > list->ni - cmd->first) {
+                return false;
+            }
+        } else if (cmd->kind == NK_UI_DRAW_SCISSOR_START) {
+            if (depth == NK_UI_DRAW_CLIP_DEPTH) {
+                return false;
+            }
+            ++depth;
+        } else if (cmd->kind == NK_UI_DRAW_SCISSOR_END) {
+            if (depth == 0) {
+                return false;
+            }
+            --depth;
+        }
+    }
+    return true;
+}

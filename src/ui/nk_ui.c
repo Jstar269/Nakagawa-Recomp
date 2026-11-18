@@ -383,7 +383,7 @@ static int nk_ui_clamp_edge(double value) {
     return (int)value;
 }
 
-static int nk_ui_round_edge(float position, float density) {
+int nk_ui_round_edge(float position, float density) {
     double scaled;
     if (!isfinite(position) || !isfinite(density)) {
         return 0;

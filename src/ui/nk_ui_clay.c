@@ -80,16 +80,6 @@ static Clay_ElementId nk_ui_clay_container_id(NkUiId id) {
     return Clay_GetElementIdWithIndex(CLAY_STRING("nk_ui.container"), id);
 }
 
-static int nk_ui_clay_clamp_int(double value) {
-    if (value <= (double)INT_MIN + 2.0) {
-        return INT_MIN + 2;
-    }
-    if (value >= (double)INT_MAX - 2.0) {
-        return INT_MAX - 2;
-    }
-    return (int)value;
-}
-
 static NkUiPixelRect nk_ui_clay_round_box(Clay_BoundingBox box, float density) {
     NkUiRect rect = {box.x, box.y, box.width, box.height};
     return nk_ui_round_rect(rect, density);
@@ -101,10 +91,10 @@ static NkUiPixelRect nk_ui_clay_round_box(Clay_BoundingBox box, float density) {
    the bar beside it. */
 static NkUiPixelRect nk_ui_clay_round_scissor(Clay_BoundingBox box, float density) {
     NkUiPixelRect rect;
-    rect.x0 = nk_ui_clay_clamp_int(floor((double)box.x * (double)density + 0.5));
-    rect.y0 = nk_ui_clay_clamp_int(floor((double)box.y * (double)density + 0.5));
-    rect.x1 = nk_ui_clay_clamp_int(floor((double)(box.x + box.width) * (double)density + 0.5));
-    rect.y1 = nk_ui_clay_clamp_int(floor((double)(box.y + box.height) * (double)density + 0.5));
+    rect.x0 = nk_ui_round_edge(box.x, density);
+    rect.y0 = nk_ui_round_edge(box.y, density);
+    rect.x1 = nk_ui_round_edge(box.x + box.width, density);
+    rect.y1 = nk_ui_round_edge(box.y + box.height, density);
     return rect;
 }
 

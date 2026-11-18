@@ -897,41 +897,12 @@ static bool nk_ui_sdlr_draw_waves(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
     return SDL_RenderTexture(r->renderer, r->waves_texture, NULL, &dst);
 }
 
-/* A list is well formed when every index and command range lies inside it and
-   scissors nest no deeper than NK_UI_DRAW_CLIP_DEPTH, with no end before its
-   start (as nk_ui_vk_list_valid checks). */
+/* A list the SDL renderer can draw: well formed (nk_ui_draw_list_valid, the
+   check the Vulkan backend makes too), and with vertex and index counts that
+   fit SDL_RenderGeometryRaw's int counts. */
 static bool nk_ui_sdlr_list_valid(const NkUiDrawList *list) {
-    uint32_t depth = 0;
-    uint32_t i;
-    if (list->nv > (uint32_t)INT_MAX || list->ni > (uint32_t)INT_MAX ||
-        (list->nv > 0 && list->v == NULL) || (list->ni > 0 && list->idx == NULL) ||
-        (list->ncmd > 0 && list->cmd == NULL)) {
-        return false;
-    }
-    for (i = 0; i < list->ni; ++i) {
-        if (list->idx[i] >= list->nv) {
-            return false;
-        }
-    }
-    for (i = 0; i < list->ncmd; ++i) {
-        const NkUiDrawCmd *cmd = &list->cmd[i];
-        if (cmd->kind == NK_UI_DRAW_RECTANGLE || cmd->kind == NK_UI_DRAW_BORDER) {
-            if (cmd->first > list->ni || cmd->count > list->ni - cmd->first) {
-                return false;
-            }
-        } else if (cmd->kind == NK_UI_DRAW_SCISSOR_START) {
-            if (depth == NK_UI_DRAW_CLIP_DEPTH) {
-                return false;
-            }
-            ++depth;
-        } else if (cmd->kind == NK_UI_DRAW_SCISSOR_END) {
-            if (depth == 0) {
-                return false;
-            }
-            --depth;
-        }
-    }
-    return true;
+    return list->nv <= (uint32_t)INT_MAX && list->ni <= (uint32_t)INT_MAX &&
+           nk_ui_draw_list_valid(list);
 }
 
 /* False when SDL refuses the geometry. */

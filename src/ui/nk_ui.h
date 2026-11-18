@@ -383,6 +383,10 @@ enum {
 NkUiScale nk_ui_scale_for_viewport(const NkUiViewport *viewport);
 float nk_ui_text_scale_for_viewport(const NkUiViewport *viewport);
 NkUiPixelRect nk_ui_round_rect(NkUiRect rect, float density);
+/* One edge at a logical position, rounded to the nearest device pixel as
+   nk_ui_round_rect rounds each edge: 0 for a non-finite position or density,
+   and clamped two short of the int range. */
+int nk_ui_round_edge(float position, float density);
 
 NkUi *nk_ui_create(const NkUiConfig *config);
 void nk_ui_destroy(NkUi *ui);

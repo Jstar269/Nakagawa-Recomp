@@ -44,11 +44,7 @@ void scr_input_guide_box(NkUi *ui, NkUiId base, const PlayerUiInputGuide *guide,
     bool compact = max_rows > 0u && max_rows <= 2u;
     if (!scr_input_guide_present(guide)) return;
     if (inner < 120.0f) inner = 120.0f;
-    memset(&style, 0, sizeof(style));
-    style.fill_rgba = theme->surface;
-    style.border_rgba = theme->line;
-    style.border_width = NK_UI_BORDER_HAIRLINE;
-    style.corner_radius = 10.0f;
+    style = scr_flow_box_style(theme, theme->surface);
     box.padding_top = box.padding_bottom = compact ? 8.0f : 12.0f;
     box.padding_left = box.padding_right = 14.0f;
     if (compact) box.gap = 4.0f;

@@ -114,6 +114,15 @@ static int test_theme_tokens(void) {
     CHECK(theme->warning == 0xDBB024FFu, "warning gold token");
     CHECK(theme->ink == 0x10151CFFu && theme->paper == 0xF5F7FAFFu,
           "N1 ink and paper tokens");
+    /* The type scale lists only tracking the measure and the draw apply: they
+       drop a negative letter spacing, so TITLE_XL's design value is 0
+       (docs/PLAYER_UI_DESIGN.md), not the -0.01 em that was never drawn. */
+    for (int role = 0; role < (int)NK_UI_TYPE_COUNT; ++role) {
+        CHECK(nk_ui_type((NkUiTypeRole)role, 0u).letter_spacing >= 0.0f,
+              "no type role lists a negative letter spacing");
+    }
+    CHECK(nk_ui_type(NK_UI_TYPE_TITLE_XL, 0u).letter_spacing == 0.0f,
+          "TITLE_XL has no tracking, as the design table says");
     return 1;
 }
 
@@ -1811,6 +1820,199 @@ static size_t png_header_only(uint8_t *out, uint32_t w, uint32_t h) {
     return 33u;
 }
 
+/* PNG building for the decoder bounds: chunks with their CRC, and zlib streams
+   (stored, or fixed-Huffman runs of one repeated byte) with their Adler-32. */
+static uint32_t png_crc(const uint8_t *data, size_t length, uint32_t crc) {
+    size_t i;
+    int bit;
+    for (i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (bit = 0; bit < 8; ++bit) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return crc;
+}
+
+static size_t png_put_be32(uint8_t *out, uint32_t value) {
+    out[0] = (uint8_t)(value >> 24); out[1] = (uint8_t)(value >> 16);
+    out[2] = (uint8_t)(value >> 8); out[3] = (uint8_t)value;
+    return 4u;
+}
+
+static size_t png_chunk(uint8_t *out, const char *type, const uint8_t *data, uint32_t length) {
+    uint32_t crc;
+    png_put_be32(out, length);
+    memcpy(out + 4, type, 4u);
+    if (length != 0u) memcpy(out + 8, data, length);
+    crc = png_crc(out + 4, (size_t)length + 4u, 0xFFFFFFFFu) ^ 0xFFFFFFFFu;
+    png_put_be32(out + 8 + length, crc);
+    return (size_t)length + 12u;
+}
+
+static size_t png_start(uint8_t *out, uint32_t w, uint32_t h, uint8_t depth, uint8_t color,
+                        uint8_t interlace) {
+    static const uint8_t signature[8] = {0x89u, 'P', 'N', 'G', '\r', '\n', 0x1Au, '\n'};
+    uint8_t ihdr[13];
+    memcpy(out, signature, sizeof(signature));
+    png_put_be32(ihdr, w);
+    png_put_be32(ihdr + 4, h);
+    ihdr[8] = depth; ihdr[9] = color; ihdr[10] = 0u; ihdr[11] = 0u; ihdr[12] = interlace;
+    return 8u + png_chunk(out + 8, "IHDR", ihdr, 13u);
+}
+
+static uint32_t png_adler(const uint8_t *data, size_t length) {
+    uint32_t a = 1u;
+    uint32_t b = 0u;
+    size_t i;
+    for (i = 0; i < length; ++i) {
+        a = (a + data[i]) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    return (b << 16) | a;
+}
+
+/* A zlib stream holding raw in one stored block (raw under 64 KiB). */
+static size_t png_zlib_stored(uint8_t *out, const uint8_t *raw, uint16_t length) {
+    out[0] = 0x78u; out[1] = 0x01u;
+    out[2] = 0x01u; /* final stored block */
+    out[3] = (uint8_t)length; out[4] = (uint8_t)(length >> 8);
+    out[5] = (uint8_t)~length; out[6] = (uint8_t)(~length >> 8);
+    memcpy(out + 7, raw, length);
+    return 7u + length + png_put_be32(out + 7 + length, png_adler(raw, length));
+}
+
+typedef struct {
+    uint8_t *out;
+    size_t bytes;
+    unsigned bit;
+} PngBits;
+
+/* Huffman codes go most significant bit first into the LSB-first stream. */
+static void png_bits_code(PngBits *bits, uint32_t code, unsigned length) {
+    while (length-- > 0u) {
+        if (bits->bit == 0u) bits->out[bits->bytes] = 0u;
+        if ((code >> length) & 1u) bits->out[bits->bytes] |= (uint8_t)(1u << bits->bit);
+        if (++bits->bit == 8u) {
+            bits->bit = 0u;
+            ++bits->bytes;
+        }
+    }
+}
+
+/* A zlib stream that inflates to 1 + 258 * runs zero bytes: a literal zero,
+   then `runs` fixed-Huffman copies of length 258 at distance 1. Each copy is
+   13 bits, so the stream grows about 1 byte for every 160 it inflates to. */
+static size_t png_zlib_zero_runs(uint8_t *out, uint32_t runs) {
+    PngBits bits;
+    uint64_t inflated = 1u + 258u * (uint64_t)runs;
+    uint32_t i;
+    out[0] = 0x78u; out[1] = 0x01u;
+    bits.out = out + 2;
+    bits.bytes = 0u;
+    bits.bit = 0u;
+    png_bits_code(&bits, 1u, 1u);       /* BFINAL */
+    png_bits_code(&bits, 1u, 1u);       /* BTYPE 01, fixed Huffman, LSB first */
+    png_bits_code(&bits, 0u, 1u);
+    png_bits_code(&bits, 0x30u, 8u);    /* literal 0 */
+    for (i = 0; i < runs; ++i) {
+        png_bits_code(&bits, 0xC5u, 8u); /* length code 285: 258 bytes */
+        png_bits_code(&bits, 0u, 5u);    /* distance code 0: distance 1 */
+    }
+    png_bits_code(&bits, 0u, 7u);       /* end of block */
+    if (bits.bit != 0u) ++bits.bytes;
+    /* Adler-32 of `inflated` zero bytes: a stays 1, b adds it once a byte. */
+    return 2u + bits.bytes +
+           png_put_be32(out + 2 + bits.bytes, (uint32_t)((inflated % 65521u) << 16) | 1u);
+}
+
+/* The decoder's memory follows the PNG's own size, not its inflated data:
+   image data that inflates far past what the header's image needs is refused
+   before stb_image grows its buffer to match, a zero-length first IDAT never
+   reaches stb_image (which copies into a NULL buffer for it), and genuine
+   small and interlaced images still decode. */
+static int test_image_decode_bounds(void) {
+    enum { RUNS = 65536 };
+    NkUiImageLimits limits = {1024u * 1024u, 256u, 256u};
+    NkUiImage image;
+    uint8_t *png = (uint8_t *)malloc(256u * 1024u);
+    uint8_t *zlib = (uint8_t *)malloc(256u * 1024u);
+    uint8_t raw[16];
+    size_t zlib_size;
+    size_t size;
+    CHECK(png != NULL && zlib != NULL, "PNG build buffers");
+
+    /* One opaque red RGBA pixel: filter byte 0, then the pixel. */
+    raw[0] = 0u; raw[1] = 255u; raw[2] = 0u; raw[3] = 0u; raw[4] = 255u;
+    zlib_size = png_zlib_stored(zlib, raw, 5u);
+    size = png_start(png, 1u, 1u, 8u, 6u, 0u);
+    size += png_chunk(png + size, "IDAT", zlib, (uint32_t)zlib_size);
+    size += png_chunk(png + size, "IEND", NULL, 0u);
+    CHECK(nk_ui_image_decode_png(png, size, &limits, &image) == NK_UI_IMAGE_OK &&
+              image.width == 1u && image.height == 1u &&
+              memcmp(image.rgba_pm, "\xFF\x00\x00\xFF", 4u) == 0,
+          "a built 1 x 1 PNG decodes");
+    nk_ui_image_free(&image);
+
+    /* An 8 x 1 one-bit grey image, Adam7: four passes of one row, 8 bytes of
+       image data where the plain image needs 2. */
+    {
+        static const uint8_t passes[8] = {0u, 0x80u, 0u, 0x80u, 0u, 0xC0u, 0u, 0xF0u};
+        zlib_size = png_zlib_stored(zlib, passes, 8u);
+        size = png_start(png, 8u, 1u, 1u, 0u, 1u);
+        size += png_chunk(png + size, "IDAT", zlib, (uint32_t)zlib_size);
+        size += png_chunk(png + size, "IEND", NULL, 0u);
+        CHECK(nk_ui_image_decode_png(png, size, &limits, &image) == NK_UI_IMAGE_OK &&
+                  image.width == 8u && image.height == 1u && image.rgba_pm[0] == 255u &&
+                  image.rgba_pm[4] == 255u, "an interlaced one-bit image decodes");
+        nk_ui_image_free(&image);
+    }
+
+    /* A 1 x 1 image whose data inflates to about 17 MB. */
+    zlib_size = png_zlib_zero_runs(zlib, RUNS);
+    CHECK(zlib_size < 200u * 1024u, "the inflate bomb stream is small");
+    size = png_start(png, 1u, 1u, 8u, 6u, 0u);
+    size += png_chunk(png + size, "IDAT", zlib, (uint32_t)zlib_size);
+    size += png_chunk(png + size, "IEND", NULL, 0u);
+    CHECK(nk_ui_image_decode_png(png, size, &limits, &image) == NK_UI_IMAGE_DECODE_FAILED &&
+              image.rgba_pm == NULL,
+          "image data inflating far past a 1 x 1 image is refused");
+
+    /* A zero-length IDAT before the data. */
+    zlib_size = png_zlib_stored(zlib, raw, 5u);
+    size = png_start(png, 1u, 1u, 8u, 6u, 0u);
+    size += png_chunk(png + size, "IDAT", NULL, 0u);
+    size += png_chunk(png + size, "IDAT", zlib, (uint32_t)zlib_size);
+    size += png_chunk(png + size, "IEND", NULL, 0u);
+    CHECK(nk_ui_image_decode_png(png, size, &limits, &image) == NK_UI_IMAGE_DECODE_FAILED &&
+              image.rgba_pm == NULL, "a zero-length first IDAT is refused before stb_image");
+    free(zlib);
+    free(png);
+    return 1;
+}
+
+/* A destination pixel averaging more source pixels than a 32-bit channel sum
+   holds (16.8 M of value 255): 4105 x 4105 opaque white drawn at 1 x 1 is
+   still opaque white. A 32-bit sum wrapped and gave a near-black pixel. */
+static int test_image_resample_wide_average(void) {
+    enum { SIDE = 4105 };
+    NkUiImage source;
+    uint8_t one[4] = {0u, 0u, 0u, 0u};
+    size_t bytes = (size_t)SIDE * SIDE * 4u;
+    memset(&source, 0, sizeof(source));
+    source.width = SIDE;
+    source.height = SIDE;
+    source.rgba_pm = (uint8_t *)malloc(bytes);
+    source.serial = 1u;
+    CHECK(source.rgba_pm != NULL, "allocate the 4105 x 4105 source");
+    memset(source.rgba_pm, 0xFF, bytes);
+    CHECK(nk_ui_image_resample(&source, 1u, 1u, one), "resample to one pixel");
+    free(source.rgba_pm);
+    CHECK(one[0] == 255u && one[1] == 255u && one[2] == 255u && one[3] == 255u,
+          "16.85 M white pixels average to white");
+    return 1;
+}
+
 /* The decoder: limits are applied before decoding, failures own nothing, and
    pixels come back premultiplied. */
 static int test_image_decode(void) {
@@ -2588,6 +2790,64 @@ static int test_clamp_cuts_long_text(void) {
     return 1;
 }
 
+/* Two runs of the same words, face, size and spacing that differ only in
+   their line height each draw in their own line box. The measured height
+   includes the line height, so Clay's text-measure cache must key on it: when
+   it did not, the second run reused the first run's 40 px height and was drawn
+   10 px above its 20 px box. */
+static int test_line_height_keys_the_measure_cache(void) {
+    NkUiTextBackend fixed = nk_ui_text_fixed();
+    NkUiConfig config;
+    NkUiViewport viewport;
+    NkUiLayout layout;
+    NkUiTextStyle tall = nk_ui_type(NK_UI_TYPE_BODY, 0u);
+    NkUiTextStyle short_line;
+    const NkUiDrawList *list;
+    const NkUiDrawCmd *first;
+    const NkUiDrawCmd *second;
+    NkUi *ui;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &fixed;
+    memset(&layout, 0, sizeof(layout));
+    layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, 400.0f, 0.0f, 0.0f};
+    layout.height = (NkUiSizing){NK_UI_SIZE_FIXED, 200.0f, 0.0f, 0.0f};
+    layout.direction = NK_UI_LAYOUT_COLUMN;
+    tall.size_px = 16;
+    tall.letter_spacing = 0.0f;
+    tall.wrap = false;
+    tall.line_height = 40.0f;
+    short_line = tall;
+    short_line.line_height = 20.0f;
+    memset(&viewport, 0, sizeof(viewport));
+    viewport.pixel_w = 640;
+    viewport.pixel_h = 400;
+    viewport.display_scale = 1.0f;
+    viewport.ui_scale_pct = 100;
+    viewport.text_size_pct = 100;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create the line-height context");
+    nk_ui_set_viewport(ui, &viewport);
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 1.0 + frame);
+        CHECK(nk_ui_begin_container(ui, 1u, &layout, NULL), "open the line-height column");
+        nk_ui_text(ui, 2u, "Same words", &tall);
+        nk_ui_text(ui, 3u, "Same words", &short_line);
+        nk_ui_end_container(ui);
+        list = nk_ui_end(ui);
+        CHECK(list != NULL, "lay out the line-height frame");
+    }
+    first = text_size_command(list, 2u, NK_UI_DRAW_TEXT);
+    second = text_size_command(list, 3u, NK_UI_DRAW_TEXT);
+    CHECK(first != NULL && second != NULL, "both runs draw");
+    CHECK(first->bounds[1] == 0 && text_size_height(first) == 40,
+          "the 40 px run fills its own line box");
+    CHECK(second->bounds[1] == 40 && text_size_height(second) == 20,
+          "the 20 px run draws in its own box, not offset by the 40 px run's height");
+    nk_ui_destroy(ui);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     char actual[32768];
     size_t actual_size;
@@ -2600,7 +2860,8 @@ int main(int argc, char **argv) {
         !test_input_waits_for_a_new_screen_layout() ||
         !test_click_needs_press_and_release_on_one_control() ||
         !test_control_owns_horizontal() || !test_wave_caps() ||
-        !test_image_decode() || !test_image_command() || !test_app_icon() ||
+        !test_image_decode() || !test_image_decode_bounds() ||
+        !test_image_resample_wide_average() || !test_image_command() || !test_app_icon() ||
         !test_display_text_rules() || !test_list_lines() || !test_layout_error_kinds() ||
         !test_layout_errors_reported() || !test_pointer_hover_and_press() ||
         !test_pointer_respects_clip() || !test_scroll_container() ||
@@ -2612,7 +2873,8 @@ int main(int argc, char **argv) {
         !test_undrawn_command_is_reported() || !test_frame_text_grows() ||
         !test_activation_belongs_to_its_focus() || !test_focus_zero_returns_to_default() ||
         !test_full_queue_keeps_pointer_edges() || !test_own_errors_reported() ||
-        !test_label_copies_text() || !test_clamp_cuts_long_text()) {
+        !test_label_copies_text() || !test_clamp_cuts_long_text() ||
+        !test_line_height_keys_the_measure_cache()) {
         return 1;
     }
     if (!build_golden_output(actual, sizeof(actual))) {

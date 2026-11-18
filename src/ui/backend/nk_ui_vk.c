@@ -1271,42 +1271,6 @@ static bool nk_ui_vk_prepare_waves(NkUiVk *vk, const NkUiDrawCmd *cmd) {
     return true;
 }
 
-/* Every index names a vertex, every geometry command's range is inside the
-   index buffer, and scissors nest no deeper than NK_UI_DRAW_CLIP_DEPTH, with
-   no end before its start. */
-static bool nk_ui_vk_list_valid(const NkUiDrawList *list) {
-    uint32_t depth = 0;
-    uint32_t i;
-    if ((list->nv > 0 && list->v == NULL) || (list->ni > 0 && list->idx == NULL) ||
-        (list->ncmd > 0 && list->cmd == NULL)) {
-        return false;
-    }
-    for (i = 0; i < list->ni; ++i) {
-        if (list->idx[i] >= list->nv) {
-            return false;
-        }
-    }
-    for (i = 0; i < list->ncmd; ++i) {
-        const NkUiDrawCmd *cmd = &list->cmd[i];
-        if (cmd->kind == NK_UI_DRAW_RECTANGLE || cmd->kind == NK_UI_DRAW_BORDER) {
-            if (cmd->first > list->ni || cmd->count > list->ni - cmd->first) {
-                return false;
-            }
-        } else if (cmd->kind == NK_UI_DRAW_SCISSOR_START) {
-            if (depth == NK_UI_DRAW_CLIP_DEPTH) {
-                return false;
-            }
-            ++depth;
-        } else if (cmd->kind == NK_UI_DRAW_SCISSOR_END) {
-            if (depth == 0) {
-                return false;
-            }
-            --depth;
-        }
-    }
-    return true;
-}
-
 /* Undoes what a failed prepare left half done. Nothing was recorded, so every
    texture it created or queued an upload for is either dropped or marked to be
    uploaded again. */
@@ -1574,7 +1538,7 @@ bool nk_ui_vk_prepare(NkUiVk *vk, const NkUiDrawList *list,
     frame = &vk->frames[frame_slot];
     nk_ui_vk_collect(vk, frame);
     vk->retire_slot = (int)frame_slot;
-    if (!nk_ui_vk_list_valid(list)) {
+    if (!nk_ui_draw_list_valid(list)) {
         ++vk->stats.frames_failed;
         return false;
     }

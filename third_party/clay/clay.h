@@ -1616,6 +1616,14 @@ uint32_t Clay__HashStringContentsWithConfig(Clay_String *text, Clay_TextElementC
     hash += (hash << 10);
     hash ^= (hash >> 6);
 
+    /* LOCAL DELTA (Nakagawa Recomp): the measure function is given the whole text config, line height
+     * included, and its result is cached under this key. Upstream leaves lineHeight out, so two runs that
+     * differ only in line height share one measured height, and the second is drawn offset by the
+     * difference between the two (half of it, above or below its line box). */
+    hash += config->lineHeight;
+    hash += (hash << 10);
+    hash ^= (hash >> 6);
+
     hash += (hash << 3);
     hash ^= (hash >> 11);
     hash += (hash << 15);
