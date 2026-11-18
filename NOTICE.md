@@ -259,7 +259,7 @@ License choices and combination notes:
 - **FreeType** is dual-licensed FTL or GPL-2.0-or-later; this distribution uses
   the **FTL** option, which the FSF lists as GPL-compatible. As the FTL asks of
   a binary distribution: portions of this software are copyright (C) 1996-2026
-  The FreeType Project (https://freetype.org), and this software is based in
+  The FreeType Project (<https://freetype.org>), and this software is based in
   part on the work of the FreeType Team. The package's `THIRD_PARTY_NOTICES.txt`
   repeats that statement.
 - **Graphite2** is granted under four licenses (LGPL-2.1+, MPL-2.0, GPL-2.0+,
