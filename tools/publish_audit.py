@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
+import posixpath
 import fnmatch
 from pathlib import Path, PurePosixPath
 import re
@@ -310,14 +311,32 @@ def parse_secret_scan_report(report_path: Path) -> list[Finding]:
     try:
         with report_path.open("r", encoding="utf-8") as stream:
             leaks = json.load(stream)
-            if isinstance(leaks, list):
-                for leak in leaks:
-                    rule_id = leak.get("RuleID", leak.get("ruleID", "unknown-rule"))
-                    file_p = leak.get("File", leak.get("file", "unknown-file"))
-                    start_line = leak.get("StartLine", leak.get("startLine", 0))
-                    commit_val = leak.get("Commit", leak.get("commit", "uncommitted"))
-                    detail = f"Rule: {rule_id}; Line: {start_line}; Commit: {commit_val} [REDACTED]"
-                    findings.append(Finding("SECRET_SCAN_LEAK", file_p, detail))
+        if not isinstance(leaks, list):
+            # A crashed scanner, a format change or a SARIF/object report would otherwise read as
+            # a clean scan: only a JSON list of leak objects is a report this gate understands.
+            return [
+                Finding(
+                    "SECRET_SCAN_PARSE",
+                    str(report_path),
+                    f"secret scanner report root is {type(leaks).__name__}, not a JSON list of leaks",
+                )
+            ]
+        for index, leak in enumerate(leaks):
+            if not isinstance(leak, dict):
+                findings.append(
+                    Finding(
+                        "SECRET_SCAN_PARSE",
+                        str(report_path),
+                        f"secret scanner report entry {index} is {type(leak).__name__}, not a JSON object",
+                    )
+                )
+                continue
+            rule_id = leak.get("RuleID", leak.get("ruleID", "unknown-rule"))
+            file_p = str(leak.get("File", leak.get("file", "unknown-file")))
+            start_line = leak.get("StartLine", leak.get("startLine", 0))
+            commit_val = leak.get("Commit", leak.get("commit", "uncommitted"))
+            detail = f"Rule: {rule_id}; Line: {start_line}; Commit: {commit_val} [REDACTED]"
+            findings.append(Finding("SECRET_SCAN_LEAK", file_p, detail))
     except Exception as exc:
         findings.append(Finding("SECRET_SCAN_PARSE", str(report_path), f"failed to parse secret scanner report: {exc}"))
     return findings
@@ -731,18 +750,30 @@ def _committed_entries(audit_root: Path, tree_entries: list[tuple[str, str, str]
     return sorted(entries, key=lambda entry: entry.path.lower())
 
 
+# Tool caches a candidate walk may skip. The candidate's own ignore rules alone never remove a
+# file: an exported file its .gitignore matches (``git add .`` leaves it untracked in the export
+# repository) is still release content and must be audited.
+CANDIDATE_TOOL_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+
+
+def _is_tool_cache_path(rel_path: str) -> bool:
+    return any(part in CANDIDATE_TOOL_CACHE_DIRS for part in rel_path.split("/")[:-1])
+
+
 def _prune_gitignored_untracked(entries: list[GitEntry], repo_root: Path) -> list[GitEntry]:
-    """Drop untracked files the candidate's own .gitignore excludes.
+    """Drop untracked tool-cache files the candidate's own .gitignore excludes.
 
     A materialized candidate is itself a working tree (the export generator
     initializes a fresh Git repository in it), so contributor tooling can
     leave gitignored scaffolding behind (e.g. ``.ruff_cache/`` after running
-    pre-commit). Such files are not release content; the candidate walk must
-    honor the tree's own ignore rules instead of reporting them as unknown
-    binaries. Tracked files are never pruned, even if a pattern happens to
-    match them.
+    pre-commit). Such files are not release content; the candidate walk
+    skips them instead of reporting their binary internals as unknown.
+    Only files below a ``CANDIDATE_TOOL_CACHE_DIRS`` directory are pruned,
+    and only when untracked and ignored: any other ignored file stays in the
+    audit, since the candidate's .gitignore is candidate-controlled. Tracked
+    files are never pruned, even if a pattern happens to match them.
     """
-    if not entries:
+    if not any(_is_tool_cache_path(entry.path) for entry in entries):
         return entries
     try:
         tracked = subprocess.run(
@@ -758,7 +789,7 @@ def _prune_gitignored_untracked(entries: list[GitEntry], repo_root: Path) -> lis
     if tracked.returncode != 0:
         return entries
     tracked_paths = {p.decode("utf-8", errors="replace") for p in tracked.stdout.split(b"\x00") if p}
-    candidates = [e for e in entries if e.path not in tracked_paths]
+    candidates = [e for e in entries if e.path not in tracked_paths and _is_tool_cache_path(e.path)]
     if not candidates:
         return entries
     stdin_data = "\n".join(e.path for e in candidates).encode("utf-8")
@@ -1006,6 +1037,33 @@ def _decode_text_safe(data: bytes | None) -> str | None:
 
 #: C0 control bytes other than tab, line feed and carriage return.
 _NON_PRINTABLE_CONTROL_BYTES = bytes(byte for byte in range(32) if byte not in b"\t\n\r")
+
+
+def _leak_scan_text(data: bytes) -> tuple[str, bool]:
+    """A lossy text view of bytes the text checks do not read, for the leak scans only.
+
+    A coloured console capture, BOM-less UTF-16 (Windows PowerShell redirection), Latin-1 text
+    or a binary-suffixed dump is classed as binary or undecodable, yet it can hold a user path
+    as plain characters. UTF-16 is decoded as UTF-16 (with a BOM, or when every second byte of
+    its first 512 is NUL); anything else as UTF-8 with replacement characters, which keeps
+    every ASCII run intact. The flag says whether the bytes are text in some encoding (UTF-16,
+    or NUL-free valid UTF-8 that only the control-byte heuristic called binary) rather than
+    opaque bytes: only text spells a key literal, and the literal parser is far too slow for
+    megabytes of binary.
+    """
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace"), True
+    head = data[:512]
+    if len(head) >= 4:
+        even, odd = head[0::2], head[1::2]
+        if odd.count(0) == len(odd) and even.count(0) == 0:
+            return data.decode("utf-16-le", errors="replace"), True
+        if even.count(0) == len(even) and odd.count(0) == 0:
+            return data.decode("utf-16-be", errors="replace"), True
+    try:
+        return data.decode("utf-8"), b"\x00" not in data
+    except UnicodeDecodeError:
+        return data.decode("utf-8", errors="replace"), False
 
 
 def _is_binary_bytes(data: bytes) -> bool:
@@ -1824,9 +1882,61 @@ def _text(path: Path) -> str | None:
         return None
 
 
-def _notice_link_findings(repo_root: Path = ROOT) -> list[Finding]:
+class _IndexView:
+    """The staged tree an index audit publishes: its paths and their exact blob bytes.
+
+    An index audit checks what the commit would hold, so the whole-tree checks (required files,
+    NOTICE links, workflow action pins, debt budgets) read the index here instead of the
+    worktree, whose copies may differ from the staged blobs or exist only on disk. The audited
+    entries count too: an index audit that includes untracked files audits their disk bytes.
+    Outside a Git repository (a plain directory audited as untracked entries) there is no
+    index, and the view is exactly the audited entries.
+    """
+
+    def __init__(self, repo_root: Path, entries: list[GitEntry]) -> None:
+        self.repo_root = repo_root
+        self.content_map: dict[str, tuple[bytes | None, str | None]] = {}
+        try:
+            listed = _git_output(["ls-files", "-z", "--cached"], repo_root=repo_root)
+        except (OSError, RuntimeError):
+            listed = ""
+        self.paths = {path for path in listed.split("\x00") if path}
+        self.paths.update(entry.path for entry in entries)
+        self.dirs = {parent.as_posix() for path in self.paths for parent in PurePosixPath(path).parents}
+
+    def is_file(self, rel: str) -> bool:
+        return rel in self.paths
+
+    def exists(self, rel: str) -> bool:
+        rel = posixpath.normpath(rel)
+        return rel in self.paths or rel in self.dirs
+
+    def text(self, rel: str) -> str | None:
+        raw: bytes | None
+        if rel in self.content_map:
+            raw, _error = self.content_map[rel]
+        elif rel in self.paths:
+            proc = subprocess.run(
+                ["git", "cat-file", "blob", f":{rel}"],
+                cwd=self.repo_root,
+                env=isolated_git_env(root=self.repo_root),
+                capture_output=True,
+                check=False,
+            )
+            raw = proc.stdout if proc.returncode == 0 else None
+        else:
+            raw = None
+        if raw is None:
+            return None
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+
+def _notice_link_findings(repo_root: Path = ROOT, index_view: _IndexView | None = None) -> list[Finding]:
     notice = repo_root / "NOTICE.md"
-    text = _text(notice)
+    text = index_view.text("NOTICE.md") if index_view is not None else _text(notice)
     if text is None:
         return [Finding("NOTICE", "NOTICE.md", "missing or unreadable")]
     findings = []
@@ -1834,30 +1944,54 @@ def _notice_link_findings(repo_root: Path = ROOT) -> list[Finding]:
         if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE) or target.startswith("#"):
             continue
         target_path = target.split("#", 1)[0]
-        if target_path and not (notice.parent / target_path).exists():
+        if not target_path:
+            continue
+        if index_view is not None:
+            present = index_view.exists(target_path)
+        else:
+            present = (notice.parent / target_path).exists()
+        if not present:
             findings.append(Finding("NOTICE_LINK", "NOTICE.md", f"missing link target: {target_path}"))
     return findings
 
 
-def _action_pin_findings(repo_root: Path = ROOT, audited_paths: set[str] | None = None) -> list[Finding]:
+def _action_pin_findings(
+    repo_root: Path = ROOT,
+    audited_paths: set[str] | None = None,
+    index_view: _IndexView | None = None,
+) -> list[Finding]:
     findings = []
-    workflow_dir = repo_root / ".github" / "workflows"
-    if workflow_dir.is_dir():
-        for path in sorted(workflow_dir.glob("*.y*ml")):
-            rel = path.relative_to(repo_root).as_posix()
-            if audited_paths is not None and rel not in audited_paths:
-                continue
+    workflows: list[tuple[str, Path | None]] = []
+    if index_view is not None:
+        for rel in sorted(index_view.paths):
+            pure = PurePosixPath(rel)
+            if pure.parent.as_posix() == ".github/workflows" and fnmatch.fnmatchcase(pure.name, "*.y*ml"):
+                workflows.append((rel, None))
+    else:
+        workflow_dir = repo_root / ".github" / "workflows"
+        if workflow_dir.is_dir():
+            workflows = [(path.relative_to(repo_root).as_posix(), path) for path in sorted(workflow_dir.glob("*.y*ml"))]
+    for rel, path in workflows:
+        if audited_paths is not None and rel not in audited_paths:
+            continue
+        if path is not None:
             text = _text(path) or ""
-            for match in ACTION_USE.finditer(text):
-                use = match.group(1).strip("'\"")
-                if use.startswith(("./", "docker://")):
-                    continue
-                if not FULL_SHA_ACTION.fullmatch(use):
-                    findings.append(Finding("ACTION_PIN", rel, f"action is not pinned to a full SHA: {use}"))
+        else:
+            text = (index_view.text(rel) if index_view is not None else None) or ""
+        for match in ACTION_USE.finditer(text):
+            use = match.group(1).strip("'\"")
+            if use.startswith(("./", "docker://")):
+                continue
+            if not FULL_SHA_ACTION.fullmatch(use):
+                findings.append(Finding("ACTION_PIN", rel, f"action is not pinned to a full SHA: {use}"))
     return findings
 
 
-def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None) -> list[Finding]:
+def _debt_budget_findings(
+    repo_root: Path = ROOT,
+    paths: list[str] | None = None,
+    index_view: _IndexView | None = None,
+) -> list[Finding]:
     """Audit unmanaged debt surfaces against non-increasing budgets (Finding 11 O-11).
 
     Fails when any of the three measured surfaces (ruff select families,
@@ -1866,9 +2000,14 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
     findings: list[Finding] = []
 
     # 1. Ruff select rule families (pyproject.toml)
-    pyproject = repo_root / "pyproject.toml"
-    if pyproject.is_file():
-        text = _text(pyproject) or ""
+    def present(rel: str) -> bool:
+        return index_view.is_file(rel) if index_view is not None else (repo_root / rel).is_file()
+
+    def read(rel: str) -> str | None:
+        return index_view.text(rel) if index_view is not None else _text(repo_root / rel)
+
+    if present("pyproject.toml"):
+        text = read("pyproject.toml") or ""
         m = re.search(r"select\s*=\s*\[(.*?)\]", text, re.DOTALL)
         if m:
             items = re.findall(r'["\']([a-zA-Z0-9_-]+)["\']', m.group(1))
@@ -1909,10 +2048,9 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
     for rel in all_paths:
         if any(rel.startswith(p) for p in excluded_prefixes):
             continue
-        full_path = repo_root / rel
-        if not full_path.is_file():
+        if not present(rel):
             continue
-        file_text = _text(full_path)
+        file_text = read(rel)
         if file_text is None:
             continue
         for line in file_text.splitlines():
@@ -1931,10 +2069,9 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
     for rel in all_paths:
         if not rel.endswith(".ps1"):
             continue
-        full_path = repo_root / rel
-        if not full_path.is_file():
+        if not present(rel):
             continue
-        script_text = _text(full_path)
+        script_text = read(rel)
         if script_text is None:
             continue
         script_count = len(ps_pat.findall(script_text))
@@ -2297,6 +2434,18 @@ def _default_provenance(
 
     if rel_path.startswith("third_party/licenses/") and rel_path.count("/") == 2:
         return "notice_doc", "BSD-3-Clause", rel_path, "documentation", "included", policy_public
+
+    # A vendored component the release manifest does not list is not project-authored and not
+    # under the project's licence: its origin and licence are recorded in the component's own
+    # PROVENANCE.md manifest (AGENTS.md Section 4), which is the notice this metadata names.
+    if (
+        len(pure.parts) >= 3
+        and pure.parts[0] == "third_party"
+        and pure.parts[1] != "licenses"
+    ):
+        gen_kind = "documentation" if ext == ".md" else ("data" if ext in (".json", ".jsonc", ".dat") else "source")
+        notice = f"third_party/{pure.parts[1]}/PROVENANCE.md"
+        return "third_party_vendored", "NOASSERTION", notice, gen_kind, "included", policy_public
 
     if rel_path.startswith("assets/vfpu/"):
         return "ppsspp_derived", "GPL-2.0-or-later", "NOTICE.md", "data", "included", policy_public
@@ -2882,17 +3031,22 @@ def audit_entries_with_semantics(
     except PolicyError as error:
         findings.append(Finding("POLICY_UNREADABLE", str(resolved_policy_path), str(error)))
 
-    # The canonical public-safe profile requires the full control set. A
-    # materialized candidate using a synthetic policy is also strict when the
-    # policy explicitly declares the same control paths; this keeps the
-    # hermetic fail-closed tests meaningful without making selected-file helper
-    # calls pretend to be release audits.
+    # The canonical public-safe profile requires the full control set, and so
+    # does any policy that declares the control paths: the profile's own name is
+    # candidate-controlled, so renaming it must not switch the control checks
+    # off. A materialized candidate whose policy declares the control paths is
+    # strict even for a selected-file audit; this keeps the hermetic fail-closed
+    # tests meaningful without making selected-file helper calls pretend to be
+    # release audits.
     control_paths = {"PUBLIC_EXPORT.json", "assets/public_source_profile.json", PROVENANCE_LEDGER_REL}
     controls_declared = policy is not None and control_paths.issubset(set(policy.include_paths))
     strict_controls = (
         policy is not None
         and (
-            (policy.name == "public-safe-v1" and (exhaustive or bool(control_paths.intersection(paths))))
+            (
+                (policy.name == "public-safe-v1" or controls_declared)
+                and (exhaustive or bool(control_paths.intersection(paths)))
+            )
             or (is_candidate_root and controls_declared)
         )
     )
@@ -2908,8 +3062,15 @@ def audit_entries_with_semantics(
     ))
     findings.extend(_untracked_tree_binding_findings(entries, expected_tree_sha, content_source))
 
+    # An index audit publishes the staged tree: a file kept on disk after `git rm --cached` is not
+    # in it, and a whole-tree check that read the disk would pass bytes the commit does not hold.
+    index_view = _IndexView(repo_root, entries) if content_source == CONTENT_INDEX else None
     for required in REQUIRED_PATHS:
-        if not (repo_root / required).is_file():
+        if index_view is not None:
+            present = index_view.is_file(required)
+        else:
+            present = (repo_root / required).is_file()
+        if not present:
             findings.append(Finding("REQUIRED", required, "required publication file is missing"))
 
     findings.extend(check_collisions(paths))
@@ -2920,6 +3081,8 @@ def audit_entries_with_semantics(
     content_map: dict[str, tuple[bytes | None, str | None]] = {}
     if content_source == CONTENT_INDEX:
         content_map = read_indexed_blobs_batch(entries, repo_root)
+        if index_view is not None:
+            index_view.content_map = content_map
     elif content_source == CONTENT_WORKTREE:
         content_map = read_worktree_blobs(entries, repo_root)
     elif content_source in (CONTENT_CANDIDATE, CONTENT_COMMITTED):
@@ -3217,29 +3380,40 @@ def audit_entries_with_semantics(
             if _spdx_required(rel) and "SPDX-License-Identifier:" not in "\n".join(text_str.splitlines()[:8]):
                 entry_findings.append(Finding("SPDX", rel, "missing SPDX identifier in first eight lines"))
 
+        # The leak scans read every file: bytes the text checks class as binary or cannot decode
+        # are scanned through a lossy decode, so a capture is not cleared by its encoding.
+        leak_text = text_str if (text_str and not is_binary) else None
+        leak_text_is_text = leak_text is not None
+        if leak_text is None and raw_bytes and entry.kind not in ("symlink", "gitlink"):
+            leak_text, leak_text_is_text = _leak_scan_text(raw_bytes)
+        if leak_text:
             # Every text file: a key literal outside the reviewed table fails whatever the
             # suffix (C syntax for C-like sources, the parser fallback for the rest).
-            for line in private_key_literal_lines(rel, text_str):
-                entry_findings.append(Finding("PRIVATE_KEY", rel, f"direct 16-byte key literal at line {line}"))
+            if leak_text_is_text:
+                for line in private_key_literal_lines(rel, leak_text):
+                    entry_findings.append(Finding("PRIVATE_KEY", rel, f"direct 16-byte key literal at line {line}"))
 
-            if is_keystore_content(rel, text_str):
+            if is_keystore_content(rel, leak_text):
                 entry_findings.append(Finding(
                     "KEYFILE_CONTENT", rel,
                     "local-only KeyStore content (issue #295); key files must never be tracked or packaged",
                 ))
 
+            # Opaque bytes skip only the UNC shape: two backslashes and two short names is a
+            # chance match in a font or a lookup table, while the other shapes need a literal
+            # profile, mount or temp-directory name.
             if (
-                WINDOWS_USER_PATH.search(text_str)
-                or POSIX_USER_PATH.search(text_str)
-                or MAC_USER_PATH.search(text_str)
-                or WSL_USER_PATH.search(text_str)
-                or UNC_PATH.search(text_str)
-                or ONEDRIVE_PATH.search(text_str)
-                or TEMP_PATH.search(text_str)
+                WINDOWS_USER_PATH.search(leak_text)
+                or POSIX_USER_PATH.search(leak_text)
+                or MAC_USER_PATH.search(leak_text)
+                or WSL_USER_PATH.search(leak_text)
+                or (leak_text_is_text and UNC_PATH.search(leak_text))
+                or ONEDRIVE_PATH.search(leak_text)
+                or TEMP_PATH.search(leak_text)
             ):
                 entry_findings.append(Finding("LOCAL_PATH", rel, "contains an absolute user-profile or local path"))
             elif policy and policy.private_roots and rel != "assets/public_source_profile.json":
-                text_lower = text_str.lower()
+                text_lower = leak_text.lower()
                 for root_str in policy.private_roots:
                     # Also the escaped spelling a JSON, C or Python literal stores.
                     spellings = (root_str.lower(), root_str.lower().replace("\\", "\\\\"))
@@ -3251,7 +3425,7 @@ def audit_entries_with_semantics(
 
             if rel != "assets/public_source_profile.json" and all_private_root_patterns:
                 for pat in all_private_root_patterns:
-                    if pat.search(text_str):
+                    if pat.search(leak_text):
                         entry_findings.append(
                             Finding("LOCAL_PATH", rel, "contains configured out-of-band private root")
                         )
@@ -3287,10 +3461,10 @@ def audit_entries_with_semantics(
         )
 
     audited_paths = {e.path for e in entries}
-    findings.extend(_notice_link_findings(repo_root))
-    findings.extend(_action_pin_findings(repo_root, audited_paths))
+    findings.extend(_notice_link_findings(repo_root, index_view))
+    findings.extend(_action_pin_findings(repo_root, audited_paths, index_view))
     if public_scope or exhaustive:
-        findings.extend(_debt_budget_findings(repo_root, paths))
+        findings.extend(_debt_budget_findings(repo_root, paths, index_view))
 
     sorted_findings = sorted(findings, key=lambda item: (item.path.lower(), item.code, item.detail))
     sorted_semantics = sorted(semantics_list, key=lambda s: s.path.lower())
@@ -3707,8 +3881,8 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
         default="public-safe-v1",
         help=(
             "Report label for the policy profile. This does NOT select policy: the "
-            "canonical policy is always read from --policy (see below). The label is "
-            "cross-checked against the policy's own name."
+            "canonical policy is always read from --policy (see below), and the label "
+            "only names it in the reports."
         ),
     )
     parser.add_argument(
