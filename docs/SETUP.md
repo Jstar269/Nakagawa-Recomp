@@ -1198,8 +1198,9 @@ it needs all of the following:
 - `tools/nk_cli.py` reachable. The player searches, in order: the `NK_INSTALL_ROOT`
   environment variable (a folder containing `tools/`), `<player exe>/tools`,
   `<player exe>/../tools`, `<player exe>/../source/tools` (the v0.0.1 release
-  layout), the working directory, and its parent. Running the player from the
-  repository root or from `build/` finds it automatically.
+  layout). The working directory is never searched, so a `tools/nk_cli.py` in the
+  folder the player starts from is never run. A player built in a checkout's
+  `build/` finds it automatically.
 - `python`, `gcc`, and `mingw32-make` from either the current environment or the
   player's per-user downloaded build tools. The player changes `PATH` only for
   the build child; it never edits system `PATH` or the registry.
