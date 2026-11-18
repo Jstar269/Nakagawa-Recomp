@@ -31747,6 +31747,117 @@ static void test_ge_signal_jump_call_ret(void) {
     sr_hle_test_ge_lists_reset();
 }
 
+/* The list's own CALL and RET, and a run that does not reach its END. A CALL past the call
+ * stack's 32 levels and a RET with an empty stack have no modelled result, so each stops the
+ * run by name at that command, as a refused SIGNAL does. Before, both were skipped and the
+ * list ran on into the words after them. A list that runs 2^20 commands in one run used to
+ * end that run as a stall nobody asked for, with nothing reported: a list without a stall
+ * address never reached its END. Now the run stops and resumes there, as at a preemption,
+ * and a run that cannot resume stops by name. */
+static void test_ge_list_call_ret_faults_and_long_runs(void) {
+    const uint32_t cl = 0x08946000u, rl = 0x08946100u, fog = 0x08946200u;
+    const uint32_t ll = 0x09000000u, long_nops = (1u << 20) + 8u;
+    char fault[160];
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_preempt_hook(NULL);
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    MEM_W32(fog, 0xcd000000u);                  /* FOG1 0 */
+    MEM_W32(fog + 4u, 0x0c000000u);
+
+    /* A CALL to itself: the 33rd CALL finds the stack full. */
+    MEM_W32(cl, 0x13000000u);                   /* OFFSETADDR 0 */
+    MEM_W32(cl + 4u, 0x10080000u);              /* BASE 0x08 */
+    MEM_W32(cl + 8u, 0x0a000000u | ((cl + 8u) & 0x00ffffffu));   /* CALL itself */
+    MEM_W32(cl + 12u, 0xcd0000bbu);             /* FOG1: reached only if the CALL runs on */
+    MEM_W32(cl + 16u, 0x0f000000u);             /* FINISH */
+    MEM_W32(cl + 20u, 0x0c000000u);             /* END */
+    (void)ge_run_list(fog, 0);
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    uint32_t id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, cl, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) != 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0u,
+           "a CALL with the GE call stack full stops the run by name, and the list does not run on");
+    sr_hle_test_ge_lists_reset();
+    (void)ge_take_signal_fault(NULL, 0);
+    expect(ge_run_list(cl, 0) == cl + 8u && ge_take_signal_fault(fault, sizeof fault) &&
+               strstr(fault, "CALL with the call stack full") != NULL,
+           "the full-stack CALL is named at its own address");
+
+    /* A RET with nothing called. */
+    MEM_W32(rl, 0x0b000000u);                   /* RET */
+    MEM_W32(rl + 4u, 0xcd0000bbu);              /* FOG1: reached only if the RET runs on */
+    MEM_W32(rl + 8u, 0x0f000000u);
+    MEM_W32(rl + 12u, 0x0c000000u);
+    (void)ge_run_list(fog, 0);
+    stops = sr_hle_test_unmodelled_stops();
+    id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, rl, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) != 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0u,
+           "a RET with an empty GE call stack stops the run by name, and the list does not run on");
+    sr_hle_test_ge_lists_reset();
+    (void)ge_take_signal_fault(NULL, 0);
+    expect(ge_run_list(rl, 0) == rl && ge_take_signal_fault(fault, sizeof fault) &&
+               strstr(fault, "RET with an empty call stack") != NULL,
+           "the empty-stack RET is named at its own address");
+
+    /* A list of 2^20 + 8 NOPs, then FOG1, FINISH and END, with no stall address. */
+    for (uint32_t i = 0; i < long_nops; i++) MEM_W32(ll + i * 4u, 0u);
+    MEM_W32(ll + long_nops * 4u, 0xcd0000ccu);
+    MEM_W32(ll + long_nops * 4u + 4u, 0x0f000000u);
+    MEM_W32(ll + long_nops * 4u + 8u, 0x0c000000u);
+    (void)ge_run_list(fog, 0);
+    stops = sr_hle_test_unmodelled_stops();
+    id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, ll, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0xccu,
+           "a list of more than 2^20 commands with no stall address runs on to its END");
+    sr_hle_test_ge_lists_reset();
+    (void)ge_take_signal_fault(NULL, 0);
+    expect(ge_run_list(ll, 0) == ll + (1u << 20) * 4u &&
+               ge_take_signal_fault(fault, sizeof fault) &&
+               strstr(fault, "1048576 commands") != NULL,
+           "a run with no stop flag to resume through stops by name after 2^20 commands");
+    sr_hle_test_ge_lists_reset();
+}
+
+/* A list whose run stops early and resumes (a preemption, ge_list_run) publishes the whole
+ * list's primitive count and signature at its END, as a run that never stopped does. Before,
+ * each resumed run started counting again, so the count covered only the last run. */
+static void test_ge_stopped_run_keeps_the_list_totals(void) {
+    gpp_setup();
+    sr_hle_test_ge_lists_reset();
+    MEM_W32(GPP_LIST, 0x04030000u);             /* PRIM: triangles, no vertices */
+    MEM_W32(GPP_LIST + 4u, 0x04030000u);
+    MEM_W32(GPP_LIST + 8u, 0u);
+    MEM_W32(GPP_LIST + 12u, 0u);
+    MEM_W32(GPP_LIST + 16u, GPP_FINISH_OP);
+    MEM_W32(GPP_LIST + 20u, GPP_END_OP);
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    sr_hle_test_ge_preempt_hook(NULL);
+    uint32_t id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, GPP_LIST, 0u, 0xffffffffu, 0u);
+    const unsigned long whole_prims = g_ge_prim_count, whole_sig = g_ge_list_sig;
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) == 0u && whole_prims == 2ul,
+           "control: a run that never stops counts the list's two primitives");
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_preempt_hook(gpp_hook);
+    s_gpp_mode = GPP_STOP_EVERY;
+    s_gpp_stops = s_gpp_finishes = 0u;
+    gpp_stop_again();
+    id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, GPP_LIST, 0u, 0xffffffffu, 0u);
+    expect(s_gpp_stops == 5u && gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) == 0u,
+           "control: the run stopped after every command and reached its END");
+    expect(g_ge_prim_count == whole_prims && g_ge_list_sig == whole_sig,
+           "a list whose run stopped and resumed publishes the whole list's primitive count "
+           "and signature");
+    sr_hle_test_ge_preempt_hook(NULL);
+    sr_hle_test_ge_lists_reset();
+}
+
 /* The SIGNAL list-control cases that need a caller inside a hardware CALL, the origin forms,
  * the address error, the BASE a RET restores, and a stall between a SIGNAL and its END. */
 static void test_ge_signal_depth_origin_stall(void) {
@@ -31756,9 +31867,10 @@ static void test_ge_signal_depth_origin_stall(void) {
     sr_hle_test_ge_lists_reset();
     sr_hle_test_set_compiled_sdk_version(0u);   /* before SDK 2.00: 32 stack entries */
 
-    /* A SIGNAL CALL made one hardware CALL deep. The callee's unpaired hardware RET can't pop
-     * the caller's entry, and the callee's own hardware CALL, left open at its SIGNAL RET, is
-     * dropped: the RET restores the caller's depth, so the caller's RET returns to m3. */
+    /* A SIGNAL CALL made one hardware CALL deep. The callee's own hardware CALL, left open at
+     * its SIGNAL RET, is dropped: the RET restores the caller's depth, so the caller's RET
+     * returns to m3. (An unpaired hardware RET in the callee can't pop the caller's entry: it
+     * stops the run by name, below.) */
     MEM_W32(m3, 0x10080000u);                   /* BASE 0x08 */
     MEM_W32(m3 + 4u, 0x13000000u);              /* OFFSETADDR 0 */
     MEM_W32(m3 + 8u, 0x0a000000u | (h3 & 0x00ffffffu));   /* hardware CALL h3 */
@@ -31768,7 +31880,7 @@ static void test_ge_signal_depth_origin_stall(void) {
     ge_signal_pair(h3, 0x11u, c3);              /* SIGNAL CALL c3, at hardware depth 1 */
     MEM_W32(h3 + 8u, 0xce000088u);
     MEM_W32(h3 + 12u, 0x0b000000u);             /* hardware RET to m3 */
-    MEM_W32(c3, 0x0b000000u);                   /* unpaired hardware RET: ignored */
+    MEM_W32(c3, 0u);                            /* NOP; the RET case below */
     MEM_W32(c3 + 4u, 0x0a000000u | (x3 & 0x00ffffffu));   /* hardware CALL x3, never returned */
     MEM_W32(c3 + 8u, 0xcd0000eeu);              /* reached only by a wrong RET */
     MEM_W32(c3 + 12u, 0x0f000000u);
@@ -31782,8 +31894,22 @@ static void test_ge_signal_depth_origin_stall(void) {
                gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x99u &&
                gsw_call(NID_SCE_GE_GET_CMD, 0xceu, 0u, 0u, 0u) == 0x88u &&
                gsw_call(NID_SCE_GE_GET_CMD, 0xcfu, 0u, 0u, 0u) == 0x77u,
-           "a SIGNAL CALL one hardware CALL deep: the callee's RET keeps off the caller's "
-           "entry, and SIGNAL RET restores the caller's depth");
+           "a SIGNAL CALL one hardware CALL deep: SIGNAL RET restores the caller's depth");
+
+    /* The same lists with an unpaired hardware RET first in the callee: the callee's stack is
+     * empty above the SIGNAL CALL's floor, so the RET has nothing to return to and stops the
+     * run by name. It neither pops the caller's entry nor runs on into the callee. */
+    MEM_W32(c3, 0x0b000000u);                   /* unpaired hardware RET */
+    MEM_W32(0x08928000u, 0xcd000000u);          /* FOG1 0 */
+    MEM_W32(0x08928004u, 0x0c000000u);
+    (void)ge_run_list(0x08928000u, 0);
+    stops = sr_hle_test_unmodelled_stops();
+    const uint32_t a2 = gsw_call(NID_SCE_GE_LIST_ENQUEUE, m3, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a2, 1u, 0u, 0u) != 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0u,
+           "an unpaired hardware RET at a SIGNAL CALL's floor stops the run by name");
+    sr_hle_test_ge_lists_reset();
 
     /* OCALL and OJUMP add the offset register (OFFSETADDR or ORIGIN), not BASE. BASE is
      * 0x09 here, so a target that also added it would land outside these lists. */
@@ -58069,6 +58195,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_umd_read_parks_its_thread_for_the_drives_time();
     test_ge_sync_ids_match_psp();
     test_ge_signal_jump_call_ret();
+    test_ge_list_call_ret_faults_and_long_runs();
+    test_ge_stopped_run_keeps_the_list_totals();
     test_ge_signal_depth_origin_stall();
     test_ge_break_continue();
     test_ge_completion_timing();

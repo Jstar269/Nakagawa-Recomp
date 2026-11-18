@@ -1976,6 +1976,7 @@ static struct {
     unsigned long skin, bonew;                  /* skinned (weighted) 3D prims, bone matrix writes */
     unsigned long deg3d;                        /* zero-area 3D triangles (zeroed/missing vertex data) */
     unsigned long nonfinite;                    /* primitives dropped for a non-finite position */
+    unsigned long unrepresentable;              /* ... for a position past GE_RASTER_COORD_LIMIT */
     unsigned long gpuprim;                      /* primitives the GPU backend took (SR_GPU_GE) */
     unsigned long line3d;                       /* 3D line segments submitted (wireframe map etc.) */
 } s_stat;
@@ -2377,8 +2378,8 @@ void ge_set_frame(uint32_t frame) {
         vcache_misses_last = g_ge_vertex_cache_misses;
         vcache_bypasses_last = g_ge_vertex_cache_bypasses;
         fprintf(stderr,
-            "GESTAT+ f=%" PRIu32 " blk3d=%lu skin=%lu bonew=%lu deg3d=%lu line3d=%lu nonfinite=%lu gpuprim=%lu vcache_hits=%lu vcache_misses=%lu vcache_bypasses=%lu zrange=%lu zr=[%" PRIu32 ",%" PRIu32 "] fmt=%" PRIu32 " zbp=0x%08" PRIx32 " fb=[0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu]\n",
-            frame, s_stat.blk3d, s_stat.skin, s_stat.bonew, s_stat.deg3d, s_stat.line3d, s_stat.nonfinite, s_stat.gpuprim,
+            "GESTAT+ f=%" PRIu32 " blk3d=%lu skin=%lu bonew=%lu deg3d=%lu line3d=%lu nonfinite=%lu unrepresentable=%lu gpuprim=%lu vcache_hits=%lu vcache_misses=%lu vcache_bypasses=%lu zrange=%lu zr=[%" PRIu32 ",%" PRIu32 "] fmt=%" PRIu32 " zbp=0x%08" PRIx32 " fb=[0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu 0x%08" PRIx32 ":%lu]\n",
+            frame, s_stat.blk3d, s_stat.skin, s_stat.bonew, s_stat.deg3d, s_stat.line3d, s_stat.nonfinite, s_stat.unrepresentable, s_stat.gpuprim,
             vcache_hits, vcache_misses, vcache_bypasses, s_stat.zrange, ge.minz, ge.maxz, ge.fbfmt, ge.zbp,
             s_stat.fbs[0], s_stat.fbn[0], s_stat.fbs[1], s_stat.fbn[1],
             s_stat.fbs[2], s_stat.fbn[2], s_stat.fbs[3], s_stat.fbn[3]);
@@ -2824,6 +2825,19 @@ static uint32_t ge_depth16_gray(uint16_t z) {
     return gray | (gray << 8) | (gray << 16) | 0xFF000000u;
 }
 
+/* Where the GE stored the depth pixel whose linear address is `linear` (base + 2 * (y *
+ * stride + x)): at that address XOR 0x2040 in VRAM, measured on a PSP-3000
+ * (PSP-VRAM-MIRROR-001; ge_zbuf_guest_address), given here through the identity 0x040 view.
+ * Any VRAM view of the window names the same surface; a VRAM offset below 2 MiB is a zbp. An
+ * address outside VRAM is read as given. The XOR moves an address only inside its 16 KiB
+ * block, so it never leaves the 2 MiB. */
+static uint32_t ge_depth16_pixel_address(uint32_t linear) {
+    uint32_t phys = SR_PHYS(linear);
+    if (phys < 0x00200000u) phys += SR_VRAM_CPU_BASE;
+    if (!sr_vram_cpu_aperture(phys)) return linear;
+    return (SR_VRAM_CPU_BASE | (phys & 0x001FFFFFu)) ^ 0x2040u;
+}
+
 int ge_vram_decode_surface(uint32_t addr, uint32_t width, uint32_t height, uint32_t stride,
                            uint32_t format, uint32_t *out) {
     uint8_t row[GE_VRAM_VIEW_MAX_WIDTH * 4u];
@@ -2836,19 +2850,39 @@ int ge_vram_decode_surface(uint32_t addr, uint32_t width, uint32_t height, uint3
     if (!sr_guest_rect_readable(addr, 0u, 0u, stride, width, height, bpp, &source) ||
         !sr_guest_span_readable_current(source.first, source.total_bytes))
         return 0;
+    if (format == 11u) {
+        /* Depth is read pixel by pixel where the GE stored it (ge_depth16_pixel_address), so
+         * every address those reads reach is checked readable now, the same way. */
+        uint32_t span_first = source.first, span_bytes = source.total_bytes;
+        uint32_t phys = SR_PHYS(source.first);
+        if (phys < 0x00200000u) phys += SR_VRAM_CPU_BASE;
+        if (sr_vram_cpu_aperture(phys)) {
+            const uint64_t lo = SR_VRAM_CPU_BASE | (phys & 0x001FFFFFu);
+            const uint64_t hi = lo + source.total_bytes - 1u;
+            uint64_t min_addr, max_addr;
+            if (hi >= SR_VRAM_CPU_BASE + 0x00200000u) return 0;   /* runs past the 2 MiB */
+            ge_xor_range_extremes(lo, hi, 0x2040u, &min_addr, &max_addr);
+            span_first = (uint32_t)min_addr;
+            span_bytes = (uint32_t)(max_addr - min_addr + 1u);
+        }
+        if (!sr_guest_span_readable_current(span_first, span_bytes)) return 0;
+        for (uint32_t y = 0; y < height; y++) {
+            uint32_t *dst = out + (size_t)y * width;
+            for (uint32_t x = 0; x < width; x++) {
+                uint16_t z;
+                if (!sr_guest_copy_in(&z, ge_depth16_pixel_address(
+                                              source.first + y * source.row_pitch + x * 2u), 2u))
+                    return 0;
+                dst[x] = ge_depth16_gray(z);
+            }
+        }
+        return 1;
+    }
     for (uint32_t y = 0; y < height; y++) {
         uint32_t *dst = out + (size_t)y * width;
         if (!sr_guest_copy_in(row, source.first + y * source.row_pitch, source.row_bytes))
             return 0;
-        for (uint32_t x = 0; x < width; x++) {
-            if (format == 11u) {
-                uint16_t z;
-                memcpy(&z, row + (size_t)x * 2u, 2u);
-                dst[x] = ge_depth16_gray(z);
-            } else {
-                dst[x] = ge_direct_texel(row, x, format);
-            }
-        }
+        for (uint32_t x = 0; x < width; x++) dst[x] = ge_direct_texel(row, x, format);
     }
     return 1;
 }
@@ -3761,13 +3795,29 @@ static void who_init(void) {
  *   - a clip-created vertex whose interpolation overflowed.
  * A NaN here is fatal to the rasterizer: the acceptance tests all compare false against it
  * and the edge functions become unbounded, and on the GPU a NaN gl_Position has an
- * undefined fixed-function clipper verdict. Returns 1 (and counts the dropped primitive)
- * when any of the given vertices is non-finite; pass NULL for the unused corners. */
+ * undefined fixed-function clipper verdict.
+ * The same gate drops a finite vertex whose screen x or y lies past GE_RASTER_COORD_LIMIT.
+ * Only through mode and patch output can carry one (a transform-mode vertex past the
+ * 4096 grid is dropped upstream): the software rasterizers convert positions to int and
+ * form 64-bit edge products of 28.4 coordinates, and past that limit a conversion or a
+ * product leaves the range C defines, so the coverage would be whatever the host made of
+ * it. What the PSP's GE does with such a vertex is NOT_MEASURED either, so it is dropped
+ * before both paths and counted apart. Returns 1 (and counts the dropped primitive) when
+ * any of the given vertices fails; pass NULL for the unused corners. */
+#define GE_RASTER_COORD_LIMIT 16777216.0f   /* 2^24 pixels; past it a float skips whole pixels */
+static int vtx_unrepresentable(const Vtx *v) {
+    return v && (fabsf(v->x) > GE_RASTER_COORD_LIMIT || fabsf(v->y) > GE_RASTER_COORD_LIMIT);
+}
 static int vtx_nonfinite(const Vtx *a, const Vtx *b, const Vtx *c) {
-    if ((!a || ge_vtx_finite(a)) && (!b || ge_vtx_finite(b)) && (!c || ge_vtx_finite(c)))
-        return 0;
-    s_stat.nonfinite++;   /* counted apart from nearclip: a separate rejection reason */
-    return 1;
+    if (!((!a || ge_vtx_finite(a)) && (!b || ge_vtx_finite(b)) && (!c || ge_vtx_finite(c)))) {
+        s_stat.nonfinite++;   /* counted apart from nearclip: a separate rejection reason */
+        return 1;
+    }
+    if (vtx_unrepresentable(a) || vtx_unrepresentable(b) || vtx_unrepresentable(c)) {
+        s_stat.unrepresentable++;
+        return 1;
+    }
+    return 0;
 }
 
 /* ---- GE time model (opt-in, SR_GE_TIMING=1; issue #1296) ---------------------------------
@@ -8533,9 +8583,11 @@ static int ge_signal_end(uint32_t signal_op, uint32_t end_data, uint32_t addr, u
 }
 
 /* The list's END (no pending SIGNAL): flush the backend, finish the capture and publish the
- * list's signature and primitive count. */
-static void ge_list_end(uint32_t list_addr, unsigned long sig, unsigned long prims, int snap,
-                        unsigned long start_nz) {
+ * list's signature and primitive count. `prims` is this run's count, which the capture adds
+ * as every earlier run of the list added its own; `list_prims` and `sig` cover the whole
+ * list, every run since it started. */
+static void ge_list_end(uint32_t list_addr, unsigned long sig, unsigned long prims,
+                        unsigned long list_prims, int snap, unsigned long start_nz) {
     extern unsigned long g_tex_nonzero;
     s_ge_run_tail_words++;
     if (s_gpu && s_gpu->flush) {
@@ -8546,10 +8598,10 @@ static void ge_list_end(uint32_t list_addr, unsigned long sig, unsigned long pri
     }
     if (ge_capture_active()) s_capture_total_prims += prims;
     if (snap && g_tex_nonzero>start_nz) ge_snapshot("fb_content.ppm");
-    g_ge_list_sig=sig; g_ge_prim_count=prims;
+    g_ge_list_sig=sig; g_ge_prim_count=list_prims;
     if (s_gewatch > 0 && s_ge_frame >= (uint32_t)s_gewatch_after)
         fprintf(stderr, "GELIST f=%" PRIu32 " list=0x%08" PRIx32 " fbp=0x%08" PRIx32 " prims=%lu writes=%lu nonblack=%lu clearpx=%lu\n",
-                s_ge_frame, list_addr, ge_fb_addr(), prims,
+                s_ge_frame, list_addr, ge_fb_addr(), list_prims,
                 g_list_writes, g_list_nonblack, g_list_clearpx);
 }
 
@@ -8590,6 +8642,32 @@ static int ge_draw_observed(uint32_t op, uint32_t cmd_addr, uint32_t list_addr) 
     return 0;
 }
 
+/* The signature and primitive count of the list's earlier runs: a list that stalls or stops
+ * early resumes in a later run, and its END publishes the whole list's totals. */
+static unsigned long s_list_sig, s_list_prims;
+
+/* A run that ends before the list's END: the capture counts this run's primitives now (the
+ * resumed run counts only its own), and the list's totals carry them to its END. */
+static void ge_run_close(unsigned long sig, unsigned long prims) {
+    if (ge_capture_active()) s_capture_total_prims += prims;
+    s_list_sig = sig;
+    s_list_prims += prims;
+}
+
+/* A fault in the list's own flow (a CALL past the stack, a RET below it, a run that cannot
+ * stop to resume): the same named stop as a SIGNAL the driver refuses (ge_signal_fail),
+ * which hle_ge.c reports through ge_take_signal_fault; the list stays at `pc`. */
+static void ge_list_fail(uint32_t list_addr, uint32_t pc, const char *why) {
+    snprintf(s_ge_signal_fault, sizeof(s_ge_signal_fault),
+             "GE list 0x%08" PRIx32 " at 0x%08" PRIx32 ": %s", list_addr, pc, why);
+}
+
+/* Commands one run executes before it stops at a command boundary and resumes, as a
+ * preemption does (ge_run_list_until), so a long list runs on to its END instead of stalling
+ * where the guest asked for no stall. A run with no stop flag to resume through stops there
+ * by name. */
+#define GE_RUN_SLICE_COMMANDS (1ul << 20)
+
 static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
     if (!s_ge_inited) ge_state_init();
     if (!resume) {
@@ -8599,17 +8677,19 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
         s_stalled_signal = 0;
         s_ge_signal_fault[0] = '\0';
         s_bbox_visible = 1;
+        s_list_sig = 0;
+        s_list_prims = 0;
     }
     static int snap=-1; if(snap<0) snap=(getenv("SR_FBDUMP")||getenv("SR_GEDUMP"))?1:0;
     uint32_t list_addr=addr;
     const int flight_ge_enabled = sr_flight_class_enabled(SR_FLIGHT_CLASS_GE);
     ge_list_begin(list_addr, resume);
     extern unsigned long g_tex_nonzero; unsigned long start_nz=g_tex_nonzero;
-    unsigned long sig=0; unsigned long prims=0;
+    unsigned long sig=s_list_sig; unsigned long prims=0;   /* prims: this run's */
     int pending_signal=s_stalled_signal;
     uint32_t pending_signal_op=s_stalled_signal ? s_stalled_signal_op : 0u;
     s_stalled_signal=0;
-    for (int guard=0; guard<(1<<20); guard++) {
+    for (unsigned long guard=0;; guard++) {
         /* Compare 28-bit addresses. The list pointer and sceGeListUpdateStallAddr value may use
          * the uncached mirror (0x4xxxxxxx), while CALL/JUMP/RET targets are masked to 28 bits,
          * so one guest word can arrive under either spelling. A zero stall address still means
@@ -8622,7 +8702,7 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
             }
             /* A list streamed through stall updates reaches its END in a later run, which
              * counts only its own primitives: count these toward the capture now. */
-            if (ge_capture_active()) s_capture_total_prims += prims;
+            ge_run_close(sig, prims);
             s_stalled_signal = pending_signal;
             s_stalled_signal_op = pending_signal_op;
             return addr;
@@ -8631,8 +8711,16 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
          * every word before addr has run. The first command always runs, so a stop makes
          * progress and a fresh list has its stack reset; a SIGNAL stays with its END. */
         if (s_ge_run_stop && guard != 0 && !pending_signal &&
-            atomic_load_explicit(s_ge_run_stop, memory_order_relaxed)) {
+            (guard >= GE_RUN_SLICE_COMMANDS ||
+             atomic_load_explicit(s_ge_run_stop, memory_order_relaxed))) {
+            ge_run_close(sig, prims);
             s_ge_run_stopped = 1;
+            return addr;
+        }
+        if (!s_ge_run_stop && guard >= GE_RUN_SLICE_COMMANDS && !pending_signal) {
+            ge_run_close(sig, prims);
+            ge_list_fail(list_addr, addr, "the list ran 1048576 commands in one run without "
+                         "reaching its END or a stall, and this run cannot stop to resume");
             return addr;
         }
         uint32_t op=MEM_R32(addr);
@@ -8671,14 +8759,25 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
                 if (!s_bbox_visible) addr=ge_rel_addr(data&0x00FFFFFCu);
                 break;
             case GE_BOUNDINGBOX: s_bbox_visible = ge_bounding_box_visible(data & 0xFFFFu); break;
+            /* A CALL past the stack's depth, or a RET with nothing to return to (an empty
+             * stack, or the floor a SIGNAL CALL set), has no modelled result: the list stops
+             * there by name instead of running on into the words after it. */
             case GE_CALL:
-                if (s_sp<(int)(sizeof(s_stack_pc)/sizeof(s_stack_pc[0]))) {
-                    s_stack_pc[s_sp]=addr; s_stack_offset[s_sp]=ge.offset; s_sp++;
-                    addr=ge_rel_addr(data&0x00FFFFFCu);
+                if (s_sp>=(int)(sizeof(s_stack_pc)/sizeof(s_stack_pc[0]))) {
+                    ge_run_close(sig, prims);
+                    ge_list_fail(list_addr, addr - 4u, "CALL with the call stack full (32 levels)");
+                    return addr - 4u;
                 }
+                s_stack_pc[s_sp]=addr; s_stack_offset[s_sp]=ge.offset; s_sp++;
+                addr=ge_rel_addr(data&0x00FFFFFCu);
                 break;
             case GE_RET:
-                if (s_sp>s_hw_floor) { s_sp--; addr=s_stack_pc[s_sp]&0x0FFFFFFFu; ge.offset=s_stack_offset[s_sp]; }
+                if (s_sp<=s_hw_floor) {
+                    ge_run_close(sig, prims);
+                    ge_list_fail(list_addr, addr - 4u, "RET with an empty call stack");
+                    return addr - 4u;
+                }
+                s_sp--; addr=s_stack_pc[s_sp]&0x0FFFFFFFu; ge.offset=s_stack_offset[s_sp];
                 break;
             case GE_SIGNAL:
                 /* SIGNAL semantics are selected by bits 16..23 and completed by the following
@@ -8700,20 +8799,22 @@ static uint32_t ge_run_list_inner(uint32_t addr, int resume) {
                     uint32_t signal_next = 0;
                     int flow = ge_signal_end(pending_signal_op, data, addr, &signal_next);
                     pending_signal=0; pending_signal_op=0;
-                    if (flow < 0) return addr - 8u;   /* stop at the SIGNAL: a named fault */
+                    if (flow < 0) {                  /* stop at the SIGNAL: a named fault */
+                        ge_run_close(sig, prims);
+                        return addr - 8u;
+                    }
                     if (flow > 0) addr = signal_next;
                     break;
                 }
-                ge_list_end(list_addr, sig, prims, snap, start_nz);
+                ge_list_end(list_addr, sig, prims, s_list_prims + prims, snap, start_nz);
+                s_list_sig = 0;
+                s_list_prims = 0;
                 return 0;
             default:
                 if (!ge_exec_state_cmd(cmd, data, addr)) ge_note_unhandled_cmd(cmd, op);
                 break;
         }
     }
-    s_stalled_signal = pending_signal;
-    s_stalled_signal_op = pending_signal_op;
-    return addr;
 }
 
 uint32_t ge_framebuffer(void) { return ge_fb_addr(); }
@@ -8844,6 +8945,9 @@ static void ge_vramdump_surface(FILE *file, int *first, const char *name,
             ge_vramdump_format_name(format), format,
             (unsigned long long)ge_vramdump_surface_size(width, height, stride, format),
             swizzled ? "true" : "false");
+    /* The GE stores a depth pixel at its linear address XOR 0x2040 (ge_depth16_pixel_address),
+     * which is not the texture swizzle "swizzled" names; the decoders apply it. */
+    if (format == 11u) fputs(",\"address_xor\":\"0x2040\"", file);
     if (data) {
         fputs(",\"data_hex\":\"", file);
         for (size_t i = 0; i < data_size; i++) fprintf(file, "%02x", data[i]);
@@ -8948,7 +9052,7 @@ int ge_vramdump_write(const char *directory, uint32_t vblank,
     fprintf(sidecar,
             "\"depth_buffer\":{\"addr\":\"0x%08" PRIx32 "\",\"width\":480,"
             "\"height\":272,\"stride\":%" PRIu32 ",\"format\":\"DEPTH16\","
-            "\"format_code\":11,\"swizzled\":false},",
+            "\"format_code\":11,\"swizzled\":false,\"address_xor\":\"0x2040\"},",
             ge.zbp, ge.zbw ? ge.zbw : (ge.fbw ? ge.fbw : 512u));
     fprintf(sidecar, "\"texture_enabled\":%s,\"texture_levels\":[",
             ge.tex_enable ? "true" : "false");
@@ -9111,8 +9215,11 @@ int ge_vram_capture_decode(unsigned index, int texture, const GeVramWindow *wind
         uint32_t *dst = out + (size_t)y * window->width;
         for (uint32_t x = 0; x < window->width; x++) {
             if (window->format == GE_VRAM_VIEW_DEPTH16) {
+                /* Where the GE stored the pixel: its offset XOR 0x2040, inside the same 16 KiB
+                 * block, so inside the image (ge_depth16_pixel_address). */
+                const uint32_t at = (offset + (y * window->stride + x) * 2u) ^ 0x2040u;
                 uint16_t z;
-                memcpy(&z, row + (size_t)x * 2u, 2u);
+                memcpy(&z, image + at, 2u);
                 dst[x] = ge_depth16_gray(z);
             } else {
                 dst[x] = ge_direct_texel(row, x, window->format) | 0xFF000000u;
@@ -9152,7 +9259,8 @@ int ge_vram_cli_decode(uint32_t addr, uint32_t width, uint32_t height, uint32_t 
     if (format == 11u) {
         for (uint32_t y = 0; y < height; y++) {
             for (uint32_t x = 0; x < width; x++) {
-                pixels[y * width + x] = ge_depth16_gray(MEM_R16(addr + (y * stride + x) * 2u));
+                pixels[y * width + x] = ge_depth16_gray(
+                    MEM_R16(ge_depth16_pixel_address(addr + (y * stride + x) * 2u)));
             }
         }
     } else {

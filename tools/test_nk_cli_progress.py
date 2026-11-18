@@ -725,7 +725,11 @@ class NkCliVramTests(unittest.TestCase):
             (255, 0, 0, 255), (0, 255, 0, 255),
             (0, 0, 255, 255), (255, 255, 255, 255),
         ], swizzled=True)
-        struct.pack_into("<H", image, 112, 0x7F00)
+        # The GE stores depth pixel (x, y) at (base + 2 * (y * stride + x)) ^ 0x2040
+        # (PSP-VRAM-MIRROR-001); the linear address holds another value, which a decoder that
+        # read depth linearly would show.
+        struct.pack_into("<H", image, 112 ^ 0x2040, 0x7F00)
+        struct.pack_into("<H", image, 112, 0xFF00)
         add("depth", 112, 1, 1, 1, "DEPTH16", [(127, 127, 127, 255)], kind="depth")
         palette_hex = palette.hex()
         surfaces.append({
