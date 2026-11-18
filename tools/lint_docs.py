@@ -984,8 +984,12 @@ PAGES_SITE_PATH = "Nakagawa-Recomp"
 PAGES_SITE_SEARCH = r"github[.]io/nakagawa-recomp"
 
 
-def lint_pages_url_case(repo_root: pathlib.Path = ROOT) -> list[str]:
-    """GitHub Pages paths are case-sensitive: `/nakagawa-recomp/` is a 404, `/Nakagawa-Recomp/` is the site."""
+def lint_pages_url_case(repo_root: pathlib.Path = ROOT, skips: list[str] | None = None) -> list[str]:
+    """GitHub Pages paths are case-sensitive: `/nakagawa-recomp/` is a 404, `/Nakagawa-Recomp/` is the site.
+
+    Without Git there are no tracked files to check: the lint returns no errors and appends a
+    named note to *skips*, which ``main`` prints as a SKIP line (a skip is not a pass).
+    """
     try:
         result = subprocess.run(
             ["git", "grep", "-n", "-o", "-I", "-i", "-e", PAGES_SITE_SEARCH],
@@ -997,12 +1001,14 @@ def lint_pages_url_case(repo_root: pathlib.Path = ROOT) -> list[str]:
             errors="replace",
             check=False,
         )
-    except OSError:
+    except OSError as exc:
+        _note_skip(skips, f"lint_pages_url_case: git is not available ({exc})")
         return []
     if result.returncode not in (0, 1):  # 1: no match
         stderr = (result.stderr or "").strip()
         if "not a git repository" in stderr.lower():
-            return []  # no tracked files to check here, as the other git-based lints skip
+            _note_skip(skips, "lint_pages_url_case: not a git repository, so no tracked files were checked")
+            return []
         return [f"lint_pages_url_case: git grep failed (exit {result.returncode}): {stderr}"]
     errors: list[str] = []
     for line in result.stdout.splitlines():
@@ -1015,10 +1021,20 @@ def lint_pages_url_case(repo_root: pathlib.Path = ROOT) -> list[str]:
     return errors
 
 
-def run_all_doc_lints(repo_root: pathlib.Path = ROOT) -> list[str]:
+def _note_skip(skips: list[str] | None, note: str) -> None:
+    """Record a check that could not run here, for ``main`` to print as a SKIP line."""
+    if skips is not None:
+        skips.append(note)
+
+
+def run_all_doc_lints(repo_root: pathlib.Path = ROOT, skips: list[str] | None = None) -> list[str]:
+    """Return every documentation lint error; checks that cannot run here are appended to *skips*."""
     errors = lint_readme(repo_root / "README.md")
     md_files = get_tracked_markdown_files(repo_root)
     hst_tracked = _is_hst_manifest_tracked(repo_root)
+    if hst_tracked is None:
+        _note_skip(skips, f"lint_doc_truth HST manifest wording: Git could not report whether "
+                          f"{TITLES_DIR}/hst-ucus98701.json is tracked")
     index_statuses = docs_index_statuses(repo_root)
     for md_file in md_files:
         errors.extend(lint_doc_links_and_topology(md_file, repo_root))
@@ -1028,7 +1044,7 @@ def run_all_doc_lints(repo_root: pathlib.Path = ROOT) -> list[str]:
     errors.extend(lint_toolchain_baseline_marker(repo_root))
     errors.extend(lint_capability_disposition_table(repo_root))
     errors.extend(lint_docs_index_completeness(repo_root))
-    errors.extend(lint_pages_url_case(repo_root))
+    errors.extend(lint_pages_url_case(repo_root, skips))
     return errors
 
 
@@ -1100,14 +1116,20 @@ def main() -> int:
         sys.stdout.write(render_tools_index(tools_index_rows(args.repo_root)))
         return 0
 
-    errors = run_all_doc_lints(args.repo_root)
+    skips: list[str] = []
+    errors = run_all_doc_lints(args.repo_root, skips)
+    for note in skips:
+        print(f"SKIP: {note}")
     if errors:
         print("Documentation Freshness Linter: FAIL", file=sys.stderr)
         for error in errors:
             print(f"  {error}", file=sys.stderr)
         return 1
 
-    print("Documentation Freshness Linter: OK")
+    if skips:
+        print(f"Documentation Freshness Linter: OK, with {len(skips)} check(s) skipped (SKIP is not a pass)")
+    else:
+        print("Documentation Freshness Linter: OK")
     return 0
 
 

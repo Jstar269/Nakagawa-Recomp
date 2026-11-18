@@ -537,7 +537,31 @@ class TestStrictCompileOnUnchangedMain(unittest.TestCase):
         for source in self.SOURCES:
             with self.subTest(source=source):
                 gate = contrib_check.c_gate([source])
-                self.assertNotEqual(gate.status, contrib_check.FAIL, gate.detail)
+                if gate.status in (contrib_check.SKIP, contrib_check.NOT_RUN):
+                    # Not compiled here: a skipped subtest, never a pass (AGENTS.md section 9).
+                    self.skipTest(f"{gate.status}: {gate.detail}")
+                self.assertEqual(gate.status, contrib_check.PASS, gate.detail)
+
+    def test_an_uncompiled_source_is_reported_skipped_not_passed(self) -> None:
+        """Failing-before: the test asserted only `!= FAIL`, so a source the gate never compiled
+        (an absent SDK or generated header) counted as a pass."""
+        for status in (contrib_check.SKIP, contrib_check.NOT_RUN):
+            with self.subTest(status=status):
+                inner = TestStrictCompileOnUnchangedMain("test_no_unchanged_source_fails_the_strict_compile")
+                result = unittest.TestResult()
+                with mock.patch.object(contrib_check, "find_tool", return_value="gcc"), \
+                        mock.patch.object(contrib_check, "c_gate",
+                                          return_value=contrib_check.Gate("C", status, "not compiled")):
+                    inner.run(result)
+                self.assertEqual(len(result.skipped), len(self.SOURCES), result.skipped)
+                self.assertEqual(result.failures + result.errors, [])
+        inner = TestStrictCompileOnUnchangedMain("test_no_unchanged_source_fails_the_strict_compile")
+        result = unittest.TestResult()
+        with mock.patch.object(contrib_check, "find_tool", return_value="gcc"), \
+                mock.patch.object(contrib_check, "c_gate",
+                                  return_value=contrib_check.Gate("C", "BLOCKED", "odd")):
+            inner.run(result)
+        self.assertEqual(len(result.failures), len(self.SOURCES))
 
 
 class TestPublicationGateSplit(unittest.TestCase):

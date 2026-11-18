@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -253,16 +254,23 @@ class TestReleaseManifest(unittest.TestCase):
 
     def test_manifest_integrity_all_entries_and_git_tracking(self):
         data = load_manifest()
+        git_tracked: set[str] | None
+        try:
+            git_ls = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
+            git_tracked = set(git_ls)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            # No Git evidence here (git missing, a refused or corrupt repository, an export tree
+            # without .git): the tracking assertions are a visible skipped subtest, never a pass.
+            git_tracked = None
+            with self.subTest(check="git tracking"):
+                self.skipTest(f"git ls-files unavailable ({exc}); tracking assertions not run")
+        self._check_manifest_integrity(data, git_tracked)
+
+    def _check_manifest_integrity(self, data: dict, git_tracked: set[str] | None) -> None:
         # A materialized public-safe export keeps the full manifest but not the
         # profile-excluded component files; skip exactly those entries and hold
         # every remaining component to the same presence/tracking/hash contract.
         excluded = public_safe_excluded_paths(ROOT)
-
-        try:
-            git_ls = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
-            git_tracked = set(git_ls)
-        except Exception:
-            git_tracked = None
 
         for comp in data.get("components", []):
             comp_id = comp["id"]
@@ -296,6 +304,35 @@ class TestReleaseManifest(unittest.TestCase):
                 self.assertEqual(declared_sha.lower(), actual_sha.lower(),
                                 f"Component {comp_id} declared sha256 does not match actual file bytes")
 
+            elif presence == "required":
+                src_p = comp.get("source_path")
+                self.assertIsNotNone(src_p, f"Component {comp_id} missing source_path")
+                if comp.get("type") == "library" and comp.get("relationship") == "DEPENDS_ON":
+                    # A runtime library the build depends on (SDL3.dll) is staged from outside the
+                    # tree, as publish_audit's orphan check also treats it; it pins no bytes here.
+                    self.assertNotIn("sha256", comp.get("hashes", {}),
+                                     f"External library {comp_id} must not pin bytes the tree does not hold")
+                    continue
+                if src_p in excluded or _policy_excluded(src_p):
+                    continue
+                full_src = ROOT / src_p
+                self.assertTrue(full_src.is_file(), f"Component {comp_id} source_path {src_p} does not exist on disk")
+                if git_tracked is not None:
+                    self.assertIn(src_p, git_tracked, f"Component {comp_id} source_path {src_p} must be tracked in Git")
+                declared_sha = comp.get("hashes", {}).get("sha256")
+                if declared_sha is not None:
+                    self.assertEqual(declared_sha.lower(), sha256_of(full_src),
+                                     f"Component {comp_id} declared sha256 does not match actual file bytes")
+
+            elif presence == "excluded_from_public_profile":
+                src_p = comp.get("source_path")
+                self.assertIsNotNone(src_p, f"Component {comp_id} missing source_path")
+                self.assertTrue(src_p in excluded or _policy_excluded(src_p),
+                                f"Component {comp_id} claims exclusion, but the policy does not exclude {src_p}")
+                self.assertIs(comp.get("public_scope_included"), False,
+                              f"Excluded component {comp_id} must declare public_scope_included false")
+                self.assertTrue(comp.get("optional", False), f"Excluded component {comp_id} must be marked optional")
+
             elif presence == "tracked_collection":
                 prov_p = comp.get("provenance_path")
                 self.assertIsNotNone(prov_p, f"Component {comp_id} missing provenance_path")
@@ -309,6 +346,50 @@ class TestReleaseManifest(unittest.TestCase):
 
             elif presence == "optional_local_or_external":
                 self.assertTrue(comp.get("optional", False), f"External runtime library {comp_id} must be marked optional")
+
+            else:
+                self.fail(f"Component {comp_id} has unknown presence {presence!r}")
+
+    def test_integrity_check_covers_every_presence_value(self):
+        """Failing-before: only four presence values had a branch, so a 'required' file that was
+        deleted, untracked or re-pinned, a wrong exclusion claim and a misspelled presence all passed."""
+        tracked = set(subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True,
+                                     check=True).stdout.splitlines())
+        base = {"notice_path": "NOTICE.md", "type": "source", "relationship": "CONTAINS"}
+        real = "tools/test_release_manifest.py"
+        cases: dict[str, tuple[dict, set[str]]] = {
+            "unknown presence": ({"presence": "requird", "source_path": real}, tracked),
+            "required file missing": ({"presence": "required", "source_path": "tools/no_such_component.py"}, tracked),
+            "required file untracked": ({"presence": "required", "source_path": real}, tracked - {real}),
+            "required stale pin": ({"presence": "required", "source_path": real,
+                                    "hashes": {"sha256": "0" * 64}}, tracked),
+            "exclusion not in policy": ({"presence": "excluded_from_public_profile", "source_path": real,
+                                         "public_scope_included": False, "optional": True}, tracked),
+        }
+        for name, (fields, git) in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(AssertionError):
+                    self._check_manifest_integrity({"components": [{"id": name, **base, **fields}]}, git)
+        good = {"id": "good", **base, "presence": "required", "source_path": real,
+                "hashes": {"sha256": sha256_of(ROOT / real)}}
+        self._check_manifest_integrity({"components": [good]}, tracked)
+
+    def test_git_failure_is_a_visible_skip_not_a_pass(self):
+        """Failing-before: a bare `except Exception` turned every tracking assertion off silently."""
+        for error in (FileNotFoundError("git"), subprocess.CalledProcessError(128, ["git", "ls-files"])):
+            with self.subTest(error=type(error).__name__):
+                inner = TestReleaseManifest("test_manifest_integrity_all_entries_and_git_tracking")
+                result = unittest.TestResult()
+                with mock.patch.object(subprocess, "run", side_effect=error):
+                    inner.run(result)
+                self.assertEqual(result.failures + result.errors, [])
+                self.assertEqual(len(result.skipped), 1, result.skipped)
+                self.assertIn("tracking assertions not run", result.skipped[0][1])
+        inner = TestReleaseManifest("test_manifest_integrity_all_entries_and_git_tracking")
+        result = unittest.TestResult()
+        with mock.patch.object(subprocess, "run", side_effect=ValueError("not a git failure")):
+            inner.run(result)
+        self.assertEqual(len(result.errors), 1, "an unexpected error must not be swallowed")
 
     def test_vfpu_collection_has_no_fake_provenance_checksum(self):
         data = load_manifest()

@@ -3,6 +3,8 @@
 
 """Offline deterministic tests for tools/lint_docs.py and the tools/README.md index."""
 
+from contextlib import redirect_stdout
+import io
 import os
 import pathlib
 import re
@@ -258,10 +260,33 @@ class TestPagesUrlCase(unittest.TestCase):
         self.assertIn("git grep failed (exit 2): fatal: boom", errors[0])
 
     def test_outside_a_git_repository_the_lint_skips(self) -> None:
+        """Failing-before: the lint returned a clean [] with no note, so a run without Git passed."""
         result = subprocess.CompletedProcess(args=["git", "grep"], returncode=128, stdout="",
                                              stderr="fatal: not a git repository (or any of the parent directories): .git")
+        skips: list[str] = []
         with patch("tools.lint_docs.subprocess.run", return_value=result):
-            self.assertEqual(lint_pages_url_case(ROOT), [])
+            self.assertEqual(lint_pages_url_case(ROOT, skips), [])
+        self.assertEqual(skips, ["lint_pages_url_case: not a git repository, so no tracked files were checked"])
+        skips.clear()
+        with patch("tools.lint_docs.subprocess.run", side_effect=OSError("git missing")):
+            self.assertEqual(lint_pages_url_case(ROOT, skips), [])
+        self.assertEqual(len(skips), 1)
+        self.assertIn("lint_pages_url_case: git is not available", skips[0])
+
+    def test_main_prints_each_skip_and_never_a_bare_ok(self) -> None:
+        notes = ["lint_pages_url_case: not a git repository, so no tracked files were checked"]
+
+        def fake_run_all(repo_root: pathlib.Path, skips: list[str] | None = None) -> list[str]:
+            assert skips is not None
+            skips.extend(notes)
+            return []
+
+        out = io.StringIO()
+        with patch.object(lint_docs, "run_all_doc_lints", side_effect=fake_run_all), \
+                patch.object(sys, "argv", ["lint_docs.py"]), redirect_stdout(out):
+            self.assertEqual(lint_docs.main(), 0)
+        self.assertIn(f"SKIP: {notes[0]}", out.getvalue())
+        self.assertIn("1 check(s) skipped (SKIP is not a pass)", out.getvalue())
 
     def test_published_case_is_allowed(self) -> None:
         self.assertEqual(self._lint(f"README.md:13:{self.HOST}Nakagawa-Recomp\n"), [])
@@ -360,6 +385,18 @@ class TestDocTruthInvariants(unittest.TestCase):
                 "The manager accepts only the checked-in HST manifest.\n",
             )
             self.assertEqual(lint_doc_truth(doc, root, hst_manifest_tracked=None), [])
+
+    def test_unknown_manifest_tracking_is_reported_as_a_skip(self) -> None:
+        """Failing-before: run_all_doc_lints dropped the manifest wording checks without a note."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            (root / "README.md").write_text("# Readme\n", encoding="utf-8")
+            skips: list[str] = []
+            with patch.object(lint_docs, "_is_hst_manifest_tracked", return_value=None), \
+                    patch.object(lint_docs, "get_tracked_markdown_files", return_value=[]):
+                lint_docs.run_all_doc_lints(root, skips)
+        self.assertTrue(any(note.startswith("lint_doc_truth HST manifest wording: Git could not report")
+                            for note in skips), skips)
 
     def test_frozen_hle_census_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1583,6 +1620,11 @@ DIGEST_CONSTANT_PATS = (
     (re.compile(r"(?<![\w.])(?:16777619|0x0*1000193)[uUlL]*\b", re.IGNORECASE), "FNV-32"),
     (re.compile(r"(?<![\w.])(?:1099511628211|0x0*100000001b3)[uUlL]*\b", re.IGNORECASE), "FNV-64"),
     (re.compile(r"(?<![\w.])0x(?:edb88320|04c11db7)[uUlL]*\b", re.IGNORECASE), "CRC-32"),
+    # Hand-rolled SHA-1 and MD5, named by constants no other common digest shares: SHA-1's
+    # fifth initial word and last round constant (MD4, MD5 and SHA-1 share 0x67452301 and
+    # 0xefcdab89, and MD4 shares 0x5a827999 and 0x6ed9eba1), and MD5's first sine constant.
+    (re.compile(r"(?<![\w.])0x0*(?:c3d2e1f0|ca62c1d6)[uUlL]*\b", re.IGNORECASE), "SHA-1"),
+    (re.compile(r"(?<![\w.])0x0*d76aa478[uUlL]*\b", re.IGNORECASE), "MD5"),
 )
 DIGEST_ROW_PAT = re.compile(r"^\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|")
 
@@ -1683,6 +1725,16 @@ class TestDigestInventory(unittest.TestCase):
             "SHA-1": 1, "MD5": 2, "SHA-256": 3, "hashlib.sha512": 4, "hashlib.blake2b": 5,
             "hashlib.new(dynamic)": 6, "CRC-32": 7, "Adler-32": 8, "FNV-32": 9, "FNV-64": 11,
         })
+
+    def test_detects_hand_rolled_sha1_and_md5(self) -> None:
+        """Failing-before: only hashlib calls named SHA-1 and MD5, so a C implementation passed."""
+        self.assertEqual(digest_uses_in_text("#define h4init  0xC3D2E1F0L\n"), {"SHA-1": 1})
+        self.assertEqual(digest_uses_in_text("            k = 0xCA62C1D6u;\n"), {"SHA-1": 1})
+        self.assertEqual(digest_uses_in_text("    a = b + ((a + F(b,c,d) + x[0] + 0xd76aa478) << 7);\n"),
+                         {"MD5": 1})
+        # The words MD4, MD5 and SHA-1 share do not name one of them.
+        self.assertEqual(digest_uses_in_text("s[0] = 0x67452301; s[1] = 0xefcdab89; k = 0x5a827999;\n"), {})
+        self.assertEqual(digest_uses_in_text("x = 0xc3d2e1f01; v_0xd76aa478 = 1\n"), {})
 
     def test_ignores_lookalike_numbers(self) -> None:
         # The constants must stand alone: longer numbers, decimals and identifiers are not uses.
