@@ -139,6 +139,7 @@ static void test_manifest_unicode_and_surrogates(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(lone_high, strlen(lone_high), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "unpaired high surrogate") != NULL);
 
     /* 4. Lone low surrogate -> MUST REJECT */
     const char *lone_low =
@@ -155,6 +156,7 @@ static void test_manifest_unicode_and_surrogates(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(lone_low, strlen(lone_low), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "unpaired low surrogate") != NULL);
 
     printf("[MANIFEST_TEST] Unicode and surrogate tests PASSED!\n");
 }
@@ -179,6 +181,7 @@ static void test_manifest_numbers_and_addresses(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(float_entry, strlen(float_entry), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.schema_version: only schema version 1 is supported") != NULL);
 
     /* 2. Number with exponent (1e5) for integer field -> MUST REJECT */
     const char *exp_entry =
@@ -195,6 +198,7 @@ static void test_manifest_numbers_and_addresses(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(exp_entry, strlen(exp_entry), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.schema_version: only schema version 1 is supported") != NULL);
 
     /* 3. Valid exact 8-hex address string -> MUST ACCEPT */
     const char *hex_addr =
@@ -229,6 +233,7 @@ static void test_manifest_numbers_and_addresses(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(overlong_hex, strlen(overlong_hex), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.executable.entry: invalid entry address") != NULL);
 
     /* 5. Short address string ("0x1") -> MUST REJECT */
     const char *short_hex =
@@ -245,6 +250,7 @@ static void test_manifest_numbers_and_addresses(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(short_hex, strlen(short_hex), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.executable.entry: invalid entry address") != NULL);
 
     printf("[MANIFEST_TEST] Numbers and addresses tests PASSED!\n");
 }
@@ -269,6 +275,7 @@ static void test_manifest_identifiers_and_disc_ids(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(upper_id, strlen(upper_id), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.id: must match") != NULL);
 
     /* 2. Identifier starting with symbol -> MUST REJECT */
     const char *sym_id =
@@ -285,6 +292,7 @@ static void test_manifest_identifiers_and_disc_ids(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(sym_id, strlen(sym_id), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.id: must match") != NULL);
 
     /* 3. Valid lowercase identifier with digits, '.', '_', '-' -> MUST ACCEPT */
     const char *valid_id =
@@ -319,6 +327,7 @@ static void test_manifest_identifiers_and_disc_ids(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(bad_disc, strlen(bad_disc), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.disc.id: must match") != NULL);
 
     /* 5. Retail disc ID with compatible_revisions containing primary disc ID -> MUST REJECT */
     const char *compat_dup_primary =
@@ -336,6 +345,7 @@ static void test_manifest_identifiers_and_disc_ids(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(compat_dup_primary, strlen(compat_dup_primary), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.disc.compatible_revisions[0]: must be a distinct PSP disc ID from primary") != NULL);
 
     printf("[MANIFEST_TEST] Identifiers and disc ID tests PASSED!\n");
 }
@@ -363,18 +373,22 @@ static void test_manifest_mutations(void) {
     /* 4. Wrong type for schema_version */
     const char *wrong_type = "{\"schema_version\": \"1\", \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(wrong_type, strlen(wrong_type), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.schema_version: only schema version 1 is supported") != NULL);
 
     /* 5. Unsupported schema_version */
     const char *bad_sv = "{\"schema_version\": 2, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(bad_sv, strlen(bad_sv), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.schema_version: only schema version 1 is supported") != NULL);
 
     /* 6. Negative/overflow integer */
     const char *neg_entry = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": -5, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(neg_entry, strlen(neg_entry), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.executable.entry: invalid entry address") != NULL);
 
     /* 7. Malformed hex */
     const char *bad_hex = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": \"0xZZZZ\", \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(bad_hex, strlen(bad_hex), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.executable.entry: invalid entry address") != NULL);
 
     /* 8. Duplicate module binding */
     /* The bases must lie in user RAM: with load_address 1/2 the guest-module window rule fires

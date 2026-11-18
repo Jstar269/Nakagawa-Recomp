@@ -7,7 +7,10 @@
  * that follows the old folders being moved away, a start that creates nothing outside the layout
  * it uses, and a real-profile guard that watches both layouts' settings folders. Every folder is made
  * in a temporary root on the
- * real file system; the real profile is never touched. Windows has one layout and decides nothing. */
+ * real file system; the real profile is never touched. Windows has one layout and decides nothing.
+ * On every host the guard (native_test_isolation.c) is checked to watch every file of the settings
+ * folder by content; on Windows also to watch the folder the production resolver names, and the
+ * per-run tree remover to clear a read-only file and to name a file it cannot remove. */
 
 #if !defined(_WIN32) && !defined(_WIN64)
 #define _XOPEN_SOURCE 700
@@ -22,8 +25,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if !defined(_WIN32) && !defined(_WIN64)
+#if defined(_WIN32) || defined(_WIN64)
+#include <io.h>
+#include <windows.h>
+#else
+#include <time.h>
 #include <unistd.h>
+#include <utime.h>
 #endif
 
 #if defined(__GNUC__)
@@ -433,9 +441,228 @@ static void test_guard_watches_both_layouts(void) {
 
 #endif
 
+/* A file's last-write time set to one fixed instant, so a rewrite can keep it. */
+static bool set_fixed_mtime(const char *path) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, NATIVE_TEST_PATH_MAX) <= 0) {
+        return false;
+    }
+    HANDLE file = CreateFileW(wide, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    FILETIME fixed;
+    fixed.dwLowDateTime = 0x12345600u;
+    fixed.dwHighDateTime = 0x01d9a000u;
+    bool ok = SetFileTime(file, NULL, NULL, &fixed) != 0;
+    CloseHandle(file);
+    return ok;
+#else
+    struct utimbuf fixed;
+    fixed.actime = (time_t)1700000000;
+    fixed.modtime = (time_t)1700000000;
+    return utime(path, &fixed) == 0;
+#endif
+}
+
+static bool write_text(const char *path, const char *text) {
+    FILE *f = nk_fopen_utf8(path, "wb");
+    if (!f) return false;
+    size_t length = strlen(text);
+    bool ok = fwrite(text, 1, length, f) == length;
+    return fclose(f) == 0 && ok;
+}
+
+/* Points the per-user variables at a fresh stand-in profile under the temporary root and returns
+   the settings folder the production resolver names for it. */
+static bool stand_in_profile(const char *name, char *config, size_t cap) {
+    char dir[NATIVE_TEST_PATH_MAX];
+#if defined(_WIN32) || defined(_WIN64)
+    snprintf(dir, sizeof(dir), "%s%c%s", native_test_get_root(), nk_platform_path_separator(), name);
+    if (!nk_platform_mkdir_p(dir)) return false;
+    native_test_set_env("LOCALAPPDATA", dir);
+#else
+    (void)name;
+    new_case(dir, sizeof(dir));
+#endif
+    return nk_platform_resolve_path(NK_PATH_CONFIG, config, cap);
+}
+
+/* True when path names root itself or something below it. Windows compares without case and
+   takes '/' and '\\' as the same separator. */
+static bool path_is_under(const char *path, const char *root) {
+    size_t length = strlen(root);
+    while (length > 0 && (root[length - 1] == '/' || root[length - 1] == '\\')) length--;
+    if (length == 0) return false;
+    for (size_t i = 0; i < length; i++) {
+        char a = path[i], b = root[i];
+        if (a == '\0') return false;
+#if defined(_WIN32) || defined(_WIN64)
+        if (a == '/') a = '\\';
+        if (b == '/') b = '\\';
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+#endif
+        if (a != b) return false;
+    }
+    char next = path[length];
+#if defined(_WIN32) || defined(_WIN64)
+    return next == '\0' || next == '/' || next == '\\';
+#else
+    return next == '\0' || next == '/';
+#endif
+}
+
+/* The containment check the guard test relies on before it writes anything. */
+static void test_path_is_under(void) {
+    CHECK(path_is_under("/scratch/nk-root/a/config", "/scratch/nk-root"), "a folder below the root");
+    CHECK(path_is_under("/scratch/nk-root", "/scratch/nk-root/"), "the root itself, trailing separator");
+    CHECK(!path_is_under("/scratch/nk-root-other/config", "/scratch/nk-root"), "a sibling with the root as prefix");
+    CHECK(!path_is_under("/scratch/nk", "/scratch/nk-root"), "a shorter path");
+    CHECK(!path_is_under("/srv/profile/.config/nakagawa", "/scratch/nk-root"), "a folder outside the root");
+    CHECK(!path_is_under("/scratch/nk-root", ""), "an empty root contains nothing");
+#if defined(_WIN32) || defined(_WIN64)
+    CHECK(path_is_under("c:/Temp/NK-Root\\a", "C:\\temp\\nk-root"), "Windows: case and separators");
+#else
+    CHECK(!path_is_under("/scratch/NK-ROOT/a", "/scratch/nk-root"), "POSIX: case matters");
+#endif
+}
+
+/* The real-profile guard watches every file of the settings folder by content: a rewrite of any
+   file that keeps its size and its timestamp trips it, settings.json as well as the disc profile.
+   Checked on a stand-in profile in the temporary root, never the real one. */
+static void test_guard_watches_every_file(void) {
+    char config[NK_MAX_PATH], profiles[NK_MAX_PATH], settings[NK_MAX_PATH], disc[NK_MAX_PATH];
+    char problem[2 * NATIVE_TEST_PATH_MAX + 64];
+    char sep = nk_platform_path_separator();
+    memset(config, 0, sizeof(config));
+    /* Nothing below is written unless the resolver names a folder inside the temporary root: a
+       failed stand-in could otherwise leave it naming the real settings folder. */
+    if (!stand_in_profile("guard-files", config, sizeof(config))) {
+        CHECK(false, "GUARD_STAND_IN_FAILED: a stand-in settings folder");
+        return;
+    }
+    if (!path_is_under(config, native_test_get_root())) {
+        fprintf(stderr, "GUARD_STAND_IN_OUTSIDE_ROOT: the resolver names %s, not a folder under %s\n",
+                config, native_test_get_root());
+        CHECK(false, "GUARD_STAND_IN_OUTSIDE_ROOT: the stand-in settings folder is inside the test root");
+        return;
+    }
+    snprintf(profiles, sizeof(profiles), "%s%cinput_profiles", config, sep);
+    snprintf(settings, sizeof(settings), "%s%csettings.json", config, sep);
+    snprintf(disc, sizeof(disc), "%s%cUCUS98701.json", profiles, sep);
+    CHECK(nk_platform_mkdir_p(profiles), "make the stand-in input profiles folder");
+    CHECK(write_text(settings, "{\"a\":1}") && write_text(disc, "{\"b\":1}") &&
+              set_fixed_mtime(settings) && set_fixed_mtime(disc),
+          "write the stand-in settings and disc profile with a fixed timestamp");
+    native_test_recapture_real_config_probe();
+    CHECK(strcmp(native_test_get_real_config_probe(), config) == 0,
+          "the guard watches the settings folder the resolver names");
+    CHECK(native_test_real_config_unchanged(problem, sizeof(problem)), "nothing touched yet");
+
+    CHECK(write_text(settings, "{\"a\":2}") && set_fixed_mtime(settings),
+          "rewrite settings.json, same size, same timestamp");
+    CHECK(!native_test_real_config_unchanged(problem, sizeof(problem)) &&
+              strstr(problem, config) != NULL,
+          "the guard trips on a rewritten settings.json");
+
+    native_test_recapture_real_config_probe();
+    CHECK(native_test_real_config_unchanged(problem, sizeof(problem)), "a fresh capture is clean");
+    CHECK(write_text(disc, "{\"b\":2}") && set_fixed_mtime(disc),
+          "rewrite the disc profile, same size, same timestamp");
+    CHECK(!native_test_real_config_unchanged(problem, sizeof(problem)),
+          "the guard trips on a disc profile rewritten within the same second");
+}
+
+#if defined(_WIN32) || defined(_WIN64)
+/* Sets a variable through the wide CRT and Win32 environments only, as a process started with it
+   sees it: the narrow CRT copy is then in the active code page, not UTF-8. */
+static void set_env_wide(const WCHAR *name, const WCHAR *value) {
+    CHECK(_wputenv_s(name, value ? value : L"") == 0, "set the wide CRT variable");
+    SetEnvironmentVariableW(name, value && value[0] ? value : NULL);
+}
+
+/* The guard on Windows watches the folder the production resolver names: a LOCALAPPDATA that is
+   not ASCII, and the Known Folder when LOCALAPPDATA is unset (never roaming APPDATA). */
+static void test_guard_follows_the_windows_resolver(void) {
+    char config[NK_MAX_PATH], stand_in[NATIVE_TEST_PATH_MAX];
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    snprintf(stand_in, sizeof(stand_in), "%s%cguard-Jos\xC3\xA9", native_test_get_root(), '\\');
+    CHECK(nk_platform_mkdir_p(stand_in), "make a stand-in profile with a non-ASCII name");
+    CHECK(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, stand_in, -1, wide, NATIVE_TEST_PATH_MAX) > 0,
+          "the stand-in name is UTF-8");
+    set_env_wide(L"LOCALAPPDATA", wide);
+    native_test_recapture_real_config_probe();
+    CHECK(nk_platform_resolve_path(NK_PATH_CONFIG, config, sizeof(config)) &&
+              strcmp(native_test_get_real_config_probe(), config) == 0,
+          "a non-ASCII LOCALAPPDATA: the guard watches the resolver's settings folder");
+
+    native_test_set_env("LOCALAPPDATA", NULL);
+    native_test_set_env("APPDATA", stand_in);
+    native_test_recapture_real_config_probe();
+    CHECK(nk_platform_resolve_path(NK_PATH_CONFIG, config, sizeof(config)) &&
+              strcmp(native_test_get_real_config_probe(), config) == 0,
+          "LOCALAPPDATA unset: the guard watches the Known Folder the resolver uses, not APPDATA");
+}
+
+/* Reads a whole small file into out; returns its length or -1. */
+static long read_small(const char *path, char *out, size_t cap) {
+    FILE *f = nk_fopen_utf8(path, "rb");
+    if (!f) return -1;
+    size_t n = fread(out, 1, cap - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    return (long)n;
+}
+
+/* The tree remover clears a read-only file, and a file it cannot remove is named on stderr. */
+static void test_remove_tree_read_only_and_locked(void) {
+    char dir[NATIVE_TEST_PATH_MAX], file[NATIVE_TEST_PATH_MAX], log[NATIVE_TEST_PATH_MAX];
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s\\remove-read-only", native_test_get_root());
+    snprintf(file, sizeof(file), "%s\\disc.iso", dir);
+    CHECK(nk_platform_mkdir_p(dir) && write_text(file, "x"), "make a file to remove");
+    CHECK(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, file, -1, wide, NATIVE_TEST_PATH_MAX) > 0 &&
+              SetFileAttributesW(wide, FILE_ATTRIBUTE_READONLY),
+          "make the file read-only");
+    CHECK(native_test_remove_tree(dir) && !nk_platform_dir_exists(dir),
+          "the remover removes a tree that holds a read-only file");
+
+    snprintf(dir, sizeof(dir), "%s\\remove-locked", native_test_get_root());
+    snprintf(file, sizeof(file), "%s\\held-open.bin", dir);
+    snprintf(log, sizeof(log), "%s\\remove-locked.log", native_test_get_root());
+    CHECK(nk_platform_mkdir_p(dir) && write_text(file, "x"), "make a file to hold open");
+    CHECK(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, file, -1, wide, NATIVE_TEST_PATH_MAX) > 0,
+          "the held file's name is UTF-8");
+    HANDLE held = CreateFileW(wide, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(held != INVALID_HANDLE_VALUE, "hold the file open with no sharing");
+    fflush(stderr);
+    int saved = _dup(_fileno(stderr));
+    FILE *capture = nk_fopen_utf8(log, "wb");
+    CHECK(saved >= 0 && capture != NULL, "capture stderr");
+    bool removed = true;
+    if (saved >= 0 && capture) {
+        _dup2(_fileno(capture), _fileno(stderr));
+        removed = native_test_remove_tree(dir);
+        fflush(stderr);
+        _dup2(saved, _fileno(stderr));
+    }
+    if (capture) fclose(capture);
+    if (saved >= 0) _close(saved);
+    char text[4096];
+    CHECK(!removed, "a file held open is not removed");
+    CHECK(read_small(log, text, sizeof(text)) > 0 && strstr(text, "NATIVE_TEST_ERROR") != NULL &&
+              strstr(text, "held-open.bin") != NULL,
+          "the remover names the file it could not remove");
+    if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+    CHECK(native_test_remove_tree(dir), "once closed, the tree is removed");
+}
+#endif
+
 int main(void) {
     native_test_create_root("data_migrate");
     test_notice();
+    test_path_is_under();
 #if !defined(_WIN32) && !defined(_WIN64)
     snprintf(g_base, sizeof(g_base), "%s", native_test_get_root());
     test_rule_table();
@@ -444,12 +671,16 @@ int main(void) {
     test_variables();
     test_override();
     test_guard_watches_both_layouts();
+    test_guard_watches_every_file();
 #else
     {
         static NkUserDataLayout layout;
         CHECK(!nk_platform_user_data_layout(&layout) && !layout.old_in_use,
               "Windows has one layout and decides nothing");
     }
+    test_guard_watches_every_file();
+    test_guard_follows_the_windows_resolver();
+    test_remove_tree_read_only_and_locked();
 #endif
     if (g_failures) {
         fprintf(stderr, "test_data_migrate: %d of %d checks failed\n", g_failures, g_checks);

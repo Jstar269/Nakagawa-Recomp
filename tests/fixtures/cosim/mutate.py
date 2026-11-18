@@ -40,6 +40,7 @@ import argparse
 from concurrent.futures import Future, ThreadPoolExecutor
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -826,6 +827,9 @@ def make_command(source: Path, target: str,
 # separate runtime budget. A timeout is neither PASS nor a semantic kill.
 GATE_TIMEOUT_S = int(os.environ.get("COSIM_GATE_TIMEOUT_S", "3600"))
 TERMINATE_GRACE_S = 30
+#: The AOT-boundary selftest's summary line (tests/native/hle_thread_selftest.c).
+SCHEDULER_SUMMARY = re.compile(r"^aot-return-boundary-selftest: (\d+) checks, (\d+) failures\s*$",
+                               re.MULTILINE)
 
 
 def _terminate_process_tree(process: subprocess.Popen) -> None:
@@ -933,12 +937,13 @@ def run_gate(source: Path, target: str = "interpreter",
     code = process.returncode
 
     if target == "scheduler":
-        result_marker = "aot-return-boundary-selftest:"
-        if code == 0 and result_marker in output and "0 failures" in output:
+        # The selftest's own summary, read as numbers: "11 failures" is not "1 failures".
+        summaries = SCHEDULER_SUMMARY.findall(output)
+        failures = int(summaries[-1][1]) if len(summaries) == 1 else None
+        if code == 0 and failures == 0:
             return "ok", "aot-return-boundary-selftest passed"
         if (code != 0 and accepted_boundary and accepted_boundary in output and
-                result_marker in output and "FAIL: AOT boundary isolation:" in output and
-                "1 failures" in output):
+                failures == 1 and "FAIL: AOT boundary isolation:" in output):
             for line in output.splitlines():
                 if line.startswith("SEMANTIC_BOUNDARY:") and accepted_boundary in line:
                     return "fail", line.strip()
