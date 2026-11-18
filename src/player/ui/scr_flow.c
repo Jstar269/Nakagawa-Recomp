@@ -177,13 +177,19 @@ NkUiStyle scr_flow_box_style(const NkUiTheme *theme, uint32_t fill) {
 }
 
 void scr_flow_bytes(char *out, size_t cap, unsigned long long bytes) {
-    if (bytes >= 1024ull * 1024ull * 1024ull) {
-        (void)snprintf(out, cap, "%.1f GB", (double)bytes / (1024.0 * 1024.0 * 1024.0));
-    } else if (bytes >= 1024ull * 1024ull) {
-        (void)snprintf(out, cap, "%.1f MB", (double)bytes / (1024.0 * 1024.0));
-    } else if (bytes >= 1024ull) {
-        (void)snprintf(out, cap, "%.1f KB", (double)bytes / 1024.0);
-    } else {
+    static const char *const units[] = {"KB", "MB", "GB"};
+    const size_t last = sizeof(units) / sizeof(units[0]) - 1u;
+    double value = (double)bytes / 1024.0;
+    size_t unit = 0u;
+    if (bytes < 1024ull) {
         (void)snprintf(out, cap, "%llu bytes", bytes);
+        return;
     }
+    /* The unit follows the figure as shown: from 1023.95, which %.1f rounds to
+       1024.0, a size reads 1.0 of the next unit. */
+    while (unit < last && value >= 1023.95) {
+        value /= 1024.0;
+        ++unit;
+    }
+    (void)snprintf(out, cap, "%.1f %s", value, units[unit]);
 }

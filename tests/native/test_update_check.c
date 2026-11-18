@@ -363,6 +363,15 @@ static void test_synthetic_release_lists(void) {
     assert(!nk_update_is_release_page("https://github.com/other/nakagawa-recomp/releases/tag/v1"));
     assert(!nk_update_is_release_page("https://github.com/Jstar269/Nakagawa-Recomp"));
     assert(!nk_update_is_release_page(NULL));
+    /* Audit 2026-11-17: what follows the prefix is a tag, as the release list's own
+       check reads one: no path, query, fragment, space or quote. */
+    assert(nk_update_is_release_page(PAGE "v1.0.0-rc.1+build.5"));
+    assert(!nk_update_is_release_page(PAGE "../../../../other/repo"));
+    assert(!nk_update_is_release_page(PAGE "v1.0.0/extra"));
+    assert(!nk_update_is_release_page(PAGE "v1.0.0?x=y"));
+    assert(!nk_update_is_release_page(PAGE "v1.0.0#top"));
+    assert(!nk_update_is_release_page(PAGE "v1 0"));
+    assert(!nk_update_is_release_page(PAGE "v1\"0"));
     /* Pages and files outside this repository fail closed. */
     assert(!parse("[{\"tag_name\":\"v1.0.0\",\"html_url\":\"https://github.com/other/"
                   "nakagawa-recomp/releases/tag/v1.0.0\"}]", &release, &error));
@@ -418,6 +427,40 @@ static void test_short_notes(void) {
     assert(strcmp(notes, "A long sentence that is cut…") == 0);
     nk_update_short_notes(NULL, notes, sizeof(notes));
     assert(notes[0] == '\0');
+    /* Audit 2026-11-17: a comment over several lines and a fenced code block are not
+       notes; the card shows the prose around them. */
+    nk_update_short_notes("<!--\nMaintainer note: keep this short\n-->\nWhat's new.", notes,
+                          sizeof(notes));
+    assert(strcmp(notes, "What's new.") == 0);
+    nk_update_short_notes("<!-- one line --> \nFirst.\n<!-- a\nb -->\nSecond.", notes,
+                          sizeof(notes));
+    assert(strcmp(notes, "First. Second.") == 0);
+    nk_update_short_notes("Run:\n```powershell\nInvoke-WebRequest x\n```\nThen play.\n~~~\n"
+                          "code\n~~~\nDone.", notes, sizeof(notes));
+    assert(strcmp(notes, "Run: Then play.") == 0);
+    /* Audit 2026-11-17: a room too small for the ellipsis cuts the text, whole
+       characters only, and never writes past it. */
+    {
+        char small[8];
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hello world", small, 1);
+        assert(small[0] == '\0' && small[1] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hello world", small, 2);
+        assert(strcmp(small, "H") == 0 && small[2] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hello world", small, 3);
+        assert(strcmp(small, "He") == 0 && small[3] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("\xC3\xA9t\xC3\xA9", small, 2);
+        assert(small[0] == '\0' && small[2] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hello world", small, 4);
+        assert(strcmp(small, "\xE2\x80\xA6") == 0 && small[4] == 'X');
+        memset(small, 'X', sizeof(small));
+        nk_update_short_notes("Hi", small, 3);
+        assert(strcmp(small, "Hi") == 0);
+    }
     printf("[UPDATE_CHECK_TEST] short notes: PASS\n");
 }
 

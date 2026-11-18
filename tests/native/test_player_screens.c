@@ -8082,6 +8082,36 @@ static void test_nickname_keyboard(void) {
                   memcmp(label->bounds, dimmed, sizeof(dimmed)) == 0,
               "a key that can type again has its outline back, in the same place and size");
     }
+    {
+        /* Audit 2026-11-17: Space is a key that types, so it follows the same rule. With
+           room left it is an outlined button; with the text full it is dimmed and loses
+           its outline, keeps its label where it was, and keeps its focus stop. */
+        const NkUiId space = key + UI_KEYBOARD_KEY_SPACE;
+        const NkUiDrawCmd *label;
+        int usable[4] = {0, 0, 0, 0};
+        bool outlined;
+        (void)nickname_frame(ui, &model, &draw);
+        label = find_command(draw, space, NK_UI_DRAW_TEXT, 0u);
+        outlined = find_command(draw, space, NK_UI_DRAW_BORDER, 0u) != NULL;
+        if (label != NULL) memcpy(usable, label->bounds, sizeof(usable));
+        CHECK(label != NULL && label->rgba_pm != theme->muted && outlined,
+              "Space with room left is drawn as an outlined key");
+        typed[31] = 'z';
+        typed[32] = '\0';
+        (void)nickname_frame(ui, &model, &draw);
+        label = find_command(draw, space, NK_UI_DRAW_TEXT, theme->muted);
+        outlined = find_command(draw, space, NK_UI_DRAW_BORDER, 0u) != NULL;
+        CHECK(label != NULL && !outlined && memcmp(label->bounds, usable, sizeof(usable)) == 0,
+              "a full text dims Space and drops its outline, in the same place and size");
+        CHECK(nickname_dump_has(ui, &model, "\"SPACE\""), "the dimmed Space keeps its label");
+        nk_ui_focus(ui, space);
+        (void)nickname_frame(ui, &model, NULL);
+        (void)nickname_frame(ui, &model, NULL);
+        CHECK(nk_ui_focused(ui) == space, "the dimmed Space keeps its focus stop");
+        action = nickname_press(ui, &model, space);
+        CHECK(action.kind == PLAYER_UI_ACTION_NONE && strlen(typed) == 32u,
+              "the dimmed Space does nothing");
+    }
     (void)snprintf(typed, sizeof(typed), "%s", "abcdefghijklmnopqrstuvwxyz01234");
     CHECK(!ui_keyboard_type(&keyboard, "\xC3\xA9") && strlen(typed) == 31u,
           "a 2-byte character does not fit in the last byte");
@@ -8125,6 +8155,84 @@ static void test_nickname_keyboard(void) {
               flow_case_shows(FLOW_NICKNAME_REFUSED, 853, 480, "DONE") &&
               flow_case_shows(FLOW_NICKNAME_FIRST, 960, 540, "SKIP"),
           "at the design text size the whole keyboard fits the smallest window");
+}
+
+/* Audit 2026-11-17: a keyboard whose key block cannot open (here, the container
+   nesting is full) still takes the pad's shortcuts, so none reaches the screen drawn
+   under it, and still answers Back. */
+static void test_keyboard_takes_the_pad_when_its_block_cannot_open(void) {
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    NkUi *ui;
+    char typed[NK_NICKNAME_MAX_BYTES + 1u] = "ab";
+    UiKeyboard keyboard;
+    UiKeyboardView view;
+    UiKeyboardResult result;
+    NkUiEvent event;
+    unsigned depth = 0u;
+    bool left_queued;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create a context for the keyboard's pad");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 720);
+    ui_keyboard_init(&keyboard, typed, NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts, NULL);
+    memset(&view, 0, sizeof(view));
+    view.key_base = PLAYER_UI_ID_NICKNAME_KEY_BASE;
+    view.part_base = FLOW_ID_NICKNAME_KEYS;
+    view.done_id = PLAYER_UI_ID_NICKNAME_SAVE;
+    view.cancel_id = PLAYER_UI_ID_NICKNAME_SKIP;
+    memset(&event, 0, sizeof(event));
+    event.type = NK_UI_EV_BACK;
+    event.down = true;
+    nk_ui_push_event(ui, &event);
+    nk_ui_begin(ui, 0.0);
+    for (;;) {
+        NkUiLayout layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(), 0.0f);
+        if (!nk_ui_begin_container(ui, NK_UI_ID(NK_UI_ID_SCREEN_FLOW, 0x7000u + depth), &layout,
+                                   NULL)) {
+            break;
+        }
+        ++depth;
+    }
+    result = ui_keyboard_draw(ui, &keyboard, &view);
+    left_queued = nk_ui_take_event(ui, NK_UI_EV_BACK, NULL);
+    while (depth-- > 0u) nk_ui_end_container(ui);
+    (void)nk_ui_end(ui);
+    CHECK(result == UI_KEYBOARD_CANCEL && !left_queued && strcmp(typed, "ab") == 0,
+          "a keyboard that cannot draw its keys still takes Back, and answers it as Cancel");
+    nk_ui_destroy(ui);
+}
+
+/* Audit 2026-11-17: a size is shown in the unit its rounded figure fits, so just
+   under 1 MiB reads 1.0 MB, never 1024.0 KB. */
+static void test_flow_bytes_unit_boundaries(void) {
+    static const struct {
+        unsigned long long bytes;
+        const char *shown;
+    } cases[] = {
+        {0ull, "0 bytes"},
+        {1023ull, "1023 bytes"},
+        {1024ull, "1.0 KB"},
+        {1048524ull, "1023.9 KB"},
+        {1048525ull, "1.0 MB"},
+        {1048575ull, "1.0 MB"},
+        {1048576ull, "1.0 MB"},
+        {1073689395ull, "1023.9 MB"},
+        {1073741823ull, "1.0 GB"},
+        {1073741824ull, "1.0 GB"},
+        {3221225472ull, "3.0 GB"},
+    };
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        char shown[32];
+        char message[96];
+        scr_flow_bytes(shown, sizeof(shown), cases[i].bytes);
+        (void)snprintf(message, sizeof(message), "%llu bytes read \"%s\" (got \"%s\")",
+                       cases[i].bytes, cases[i].shown, shown);
+        CHECK(strcmp(shown, cases[i].shown) == 0, message);
+    }
 }
 
 /* The launcher's display rule for these tests: a synthetic profile folder
@@ -8369,6 +8477,8 @@ int main(int argc, char **argv) {
     test_library_find_box_fits();
     test_library_find_filter_and_cap();
     test_nickname_keyboard();
+    test_keyboard_takes_the_pad_when_its_block_cannot_open();
+    test_flow_bytes_unit_boundaries();
     test_texture_scaling_rows();
     test_ssaa_warning_rows();
     CHECK(build_library_golden(library, sizeof(library), &library_size),

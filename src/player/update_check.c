@@ -201,12 +201,23 @@ static void append_plain(char *out, size_t out_size, size_t *used, const char *l
     append_inline(out, out_size, used, line, length);
 }
 
+/* Whether the `length` bytes at `text` hold `needle`. */
+static bool contains(const char *text, size_t length, const char *needle) {
+    size_t n = strlen(needle);
+    for (size_t i = 0; i + n <= length; i++) {
+        if (memcmp(text + i, needle, n) == 0) return true;
+    }
+    return false;
+}
+
 void nk_update_short_notes(const char *markdown, char *out, size_t out_size) {
     /* Room for a short card: the first two paragraphs, cut at a word. */
     size_t used = 0;
     int paragraphs = 0;
     bool in_paragraph = false;
     bool cut = false;
+    bool in_comment = false;
+    char fence = '\0';  /* the open code fence's mark, ` or ~ */
     char text[2048];
     const char *p = markdown;
     if (!out || out_size == 0) return;
@@ -224,13 +235,29 @@ void nk_update_short_notes(const char *markdown, char *out, size_t out_size) {
             length--;
         }
         while (length > 0 && (line[length - 1] == ' ' || line[length - 1] == '\t')) length--;
+        /* An HTML comment and a fenced code block are not notes, over however many
+           lines they run: each ends the paragraph before it, as a heading does. */
+        if (in_comment || (length >= 4 && strncmp(line, "<!--", 4) == 0)) {
+            size_t from = in_comment ? 0 : 4;
+            in_comment = !contains(line + from, length - from, "-->");
+            if (in_paragraph) paragraphs++;
+            in_paragraph = false;
+            continue;
+        }
+        if (length >= 3 && (line[0] == '`' || line[0] == '~') && line[1] == line[0] &&
+            line[2] == line[0] && (fence == '\0' || fence == line[0])) {
+            fence = fence == '\0' ? line[0] : '\0';  /* a fence closes on its own mark */
+            if (in_paragraph) paragraphs++;
+            in_paragraph = false;
+            continue;
+        }
+        if (fence != '\0') continue;
         if (length == 0) {
             if (in_paragraph) paragraphs++;
             in_paragraph = false;
             continue;
         }
-        if (line[0] == '#' || (length >= 2 && line[0] == '[' && line[1] == '!') ||
-            (length >= 4 && strncmp(line, "<!--", 4) == 0)) {
+        if (line[0] == '#' || (length >= 2 && line[0] == '[' && line[1] == '!')) {
             if (in_paragraph) paragraphs++;
             in_paragraph = false;
             continue;
@@ -242,7 +269,13 @@ void nk_update_short_notes(const char *markdown, char *out, size_t out_size) {
         append_plain(text, sizeof(text), &used, line, length);
         in_paragraph = true;
     }
-    if (strlen(text) >= out_size) {
+    if (strlen(text) >= out_size && out_size < 4) {
+        /* No room for the ellipsis (3 bytes and the NUL): the text alone, cut at a
+           whole character. */
+        size_t limit = out_size - 1;
+        while (limit > 0 && ((unsigned char)text[limit] & 0xC0) == 0x80) limit--;
+        text[limit] = '\0';
+    } else if (strlen(text) >= out_size) {
         size_t limit = out_size - 4;
         while (limit > 0 && text[limit] != ' ') limit--;
         if (limit == 0) limit = out_size - 4;
@@ -301,9 +334,12 @@ static bool exact_url(const char *url, const char *prefix, const char *tag, cons
 bool nk_update_is_release_page(const char *url) {
     static const char page_prefix[] = NK_UPDATE_RELEASE_PAGE_PREFIX;
     const size_t prefix = sizeof(page_prefix) - 1;
+    /* What follows the prefix is a tag as the release list reads one (safe_tag): no
+       path, query, fragment, space or quote reaches the link opener. */
     return names_this_repository(url) && strlen(url) > prefix &&
            strncmp(url + REPOSITORY_URL_LENGTH, page_prefix + REPOSITORY_URL_LENGTH,
-                   prefix - REPOSITORY_URL_LENGTH) == 0;
+                   prefix - REPOSITORY_URL_LENGTH) == 0 &&
+           safe_tag(url + prefix);
 }
 
 static bool hex64(const char *text) {
