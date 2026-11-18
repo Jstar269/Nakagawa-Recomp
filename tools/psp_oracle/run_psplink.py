@@ -734,14 +734,19 @@ def _run_command(command: list[str], timeout: float) -> tuple[int | None, str, s
     except subprocess.TimeoutExpired as exc:
         return (
             None,
-            output_text(exc.stdout)[-65536:],
-            output_text(exc.stderr)[-65536:],
+            output_text(exc.stdout),
+            output_text(exc.stderr),
             "TIMEOUT",
         )
     except OSError as exc:
         return None, "", type(exc).__name__, "ERROR"
     status = "PROCESS_EXITED"
-    return completed.returncode, completed.stdout[-65536:], completed.stderr[-65536:], status
+    return (
+        completed.returncode,
+        output_text(completed.stdout),
+        output_text(completed.stderr),
+        status,
+    )
 
 
 def _verify_psplink_shell(
@@ -2584,7 +2589,7 @@ class PsplinkCampaignRunner:
 
         if not self._hardware_lock_held(f"before case {case.case_id}"):
             return False
-        if reset_between_cases and local_index > 0:
+        if reset_between_cases and case_index > 0:
             if on_case_start is not None:
                 try:
                     on_case_start(case_index, case, "RESET_BEFORE_CASE")
@@ -2830,11 +2835,7 @@ class PsplinkCampaignRunner:
         after_unload, s2_problem = self._take_snapshot()
         shell_qualified = self._shell_qualified()
         exprint = self._request("exprint", self.cleanup_timeout)
-        host0_roundtrip_ok = (
-            self._verify_host0_roundtrip()
-            if case.case_id == "transport-write" or not reset_between_cases
-            else self.host0_qualified
-        )
+        host0_roundtrip_ok = self._verify_host0_roundtrip()
         probe_succeeded = self._probe_case_succeeded(
             case,
             result,
@@ -4160,8 +4161,9 @@ def _canonicalize_psp(text: str, args: argparse.Namespace) -> str:
             else reported_digest or ""
         )
 
+    source = device.get("source") or "unknown"
     metadata = (
-        "NAKAGAWA_PSP_META schema=1 source=psp "
+        f"NAKAGAWA_PSP_META schema=1 source={source} "
         f"{model_fields} firmware={firmware} "
         f"binary_sha256={binary_sha256} source_commit={source_commit}"
     )
@@ -4703,10 +4705,24 @@ def main(argv: list[str] | None = None) -> int:
     report["test_record_count"] = record_count
     capture_ok = True
     if args.psp_output and args.nakagawa_output:
-        report["comparison"] = compare_texts(
-            _canonicalize_psp(args.psp_output.read_text(encoding="utf-8"), args),
+        raw_psp_text = args.psp_output.read_text(encoding="utf-8")
+        comparison = compare_texts(
+            _canonicalize_psp(raw_psp_text, args),
             args.nakagawa_output.read_text(encoding="utf-8"),
         )
+        if any(getattr(args, flag, None) for flag in PROVENANCE_FLAGS):
+            identity = _device_identity(raw_psp_text, args)
+            identity_blockers = cast(
+                list[str], identity["DEVICE_IDENTITY_BLOCKERS"]
+            )
+            comparison.update(identity)
+            if identity_blockers:
+                comparison["acceptance_blockers"] = [
+                    *cast(list[str], comparison["acceptance_blockers"]),
+                    *identity_blockers,
+                ]
+                comparison["acceptance_eligible"] = False
+        report["comparison"] = comparison
     elif args.psp_output or args.nakagawa_output:
         report["comparison"] = {
             "classification": "INCONCLUSIVE",

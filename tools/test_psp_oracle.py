@@ -55,6 +55,7 @@ from psp_oracle.run_psplink import (
     CAMPAIGN_QUEUE_CASES,
     PsplinkCampaignRunner,
     PsplinkSnapshot,
+    _run_command,
     _campaign_completeness_contract,
     _campaign_host0_log_path,
     _campaign_stream_complete,
@@ -1672,6 +1673,195 @@ class PspOracleDeviceIdentityTests(unittest.TestCase):
 
 
 class PspOracleRunnerTests(unittest.TestCase):
+    def _compare_output_report(
+        self,
+        source: str,
+        *,
+        device_binary_sha: str | None = None,
+        device_source_commit: str | None = None,
+    ) -> dict[str, Any]:
+        root = Path(__file__).resolve().parents[1]
+        fixture_root = root / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(
+            prefix="compare-output-", dir=fixture_root
+        ) as name:
+            scratch = Path(name)
+            binary = scratch / "probe.prx"
+            binary.write_bytes(STAGED_PRX)
+            digest = hashlib.sha256(STAGED_PRX).hexdigest()
+            psp_text = META.format(
+                source=source,
+                model="PSP-3000",
+                firmware="6.61-ARK",
+                binary=device_binary_sha or digest,
+                commit=device_source_commit or MEASURED_COMMIT,
+            ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+            nakagawa_text = META.format(
+                source="nakagawa",
+                model="PSP-3000",
+                firmware="6.61-ARK",
+                binary=digest,
+                commit=MEASURED_COMMIT,
+            ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
+            psp_path = scratch / "psp.txt"
+            nakagawa_path = scratch / "nakagawa.txt"
+            results = scratch / "results"
+            report_path = scratch / "report.json"
+            psp_path.write_text(psp_text, encoding="utf-8")
+            nakagawa_path.write_text(nakagawa_text, encoding="utf-8")
+            with patch(
+                "psp_oracle.run_psplink.require_hardware_lock",
+                return_value={"boot_number": 42},
+            ), patch(
+                "psp_oracle.run_psplink._run_command",
+                return_value=(0, "synthetic capture\n", "", "PROCESS_EXITED"),
+            ):
+                code = run_psplink_main([
+                    "--command", "fake-pspsh",
+                    "--session-id", "synthetic-session",
+                    "--results-directory", str(results),
+                    "--out", str(report_path),
+                    "--psp-output", str(psp_path),
+                    "--nakagawa-output", str(nakagawa_path),
+                    "--binary", str(binary),
+                    "--source-commit", MEASURED_COMMIT,
+                    "--model", "PSP-3000",
+                    "--firmware", "6.61-ARK",
+                ])
+            self.assertEqual(code, 0)
+            return cast(dict[str, Any], json.loads(report_path.read_text(encoding="utf-8")))
+
+    def test_compare_cli_preserves_emulator_source_for_acceptance_gate(self) -> None:
+        comparison = self._compare_output_report("ppsspp")["comparison"]
+        self.assertEqual(comparison["classification"], "MATCH")
+        self.assertFalse(comparison["acceptance_eligible"])
+        self.assertIn(
+            "psp: stream declares source='ppsspp', not 'psp'",
+            comparison["acceptance_blockers"],
+        )
+
+    def test_compare_cli_closes_acceptance_for_placeholder_device_identity(self) -> None:
+        comparison = self._compare_output_report(
+            "psp", device_binary_sha="0" * 64, device_source_commit="0" * 40
+        )["comparison"]
+        self.assertFalse(comparison["acceptance_eligible"])
+        self.assertEqual(comparison["SOURCE_COMMIT_BINDING"], "PLACEHOLDER")
+        self.assertIn("IDENTITY_NOT_BOUND", " | ".join(comparison["DEVICE_IDENTITY_BLOCKERS"]))
+
+    def test_run_command_retains_stdout_beyond_64k_on_exit_and_timeout(self) -> None:
+        large_stdout = "x" * 65536 + "NAKAGAWA_PSP_META schema=1 source=psp\n"
+        large_stderr = "e" * 65536 + "final diagnostic\n"
+        with patch(
+            "psp_oracle.run_psplink.subprocess.run",
+            return_value=SimpleNamespace(
+                returncode=0, stdout=large_stdout, stderr=large_stderr
+            ),
+        ):
+            code, stdout, stderr, status = _run_command(["synthetic"], 1)
+        self.assertEqual((code, status), (0, "PROCESS_EXITED"))
+        self.assertEqual(stdout, large_stdout)
+        self.assertEqual(stderr, large_stderr)
+
+        timeout = subprocess.TimeoutExpired(
+            ["synthetic"], 1, output=large_stdout.encode(), stderr=large_stderr.encode()
+        )
+        with patch("psp_oracle.run_psplink.subprocess.run", side_effect=timeout):
+            code, stdout, stderr, status = _run_command(["synthetic"], 1)
+        self.assertEqual((code, status), (None, "TIMEOUT"))
+        self.assertEqual(stdout, large_stdout)
+        self.assertEqual(stderr, large_stderr)
+
+    def test_resumed_campaign_case_resets_before_first_launch(self) -> None:
+        runner = PsplinkCampaignRunner(
+            SimpleNamespace(), console_model="synthetic", source_commit="0" * 40
+        )
+        case = SimpleNamespace(case_id="resumed-case", binary=Path("resumed.prx"), timeout=1.0)
+        phases: list[str] = []
+        with patch.object(runner, "_hardware_lock_held", return_value=True), patch.object(
+            runner, "_reset_once", return_value=False
+        ) as reset:
+            runner._run_case(
+                case,
+                case_index=1,
+                local_index=0,
+                cases=[case],
+                host0_path=None,
+                progress=SimpleNamespace(),
+                reset_between_cases=True,
+                stop_on_incomplete=True,
+                on_case_start=lambda _index, _case, phase: phases.append(phase),
+                on_case_complete=None,
+            )
+        reset.assert_called_once_with("campaign soft reset before resumed-case")
+        self.assertEqual(phases, ["RESET_BEFORE_CASE"])
+
+    def test_reset_campaign_case_verifies_and_removes_host0_roundtrip_file(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(
+            prefix="campaign-roundtrip-", dir=root / "tests" / "fixtures" / "psp_oracle"
+        ) as name:
+            host0_root = Path(name)
+            binary = host0_root / "later.prx"
+            binary.write_bytes(STAGED_PRX)
+            roundtrip = host0_root / "nakagawa_transport_write.bin"
+            roundtrip.write_bytes(bytes(
+                (0x5A ^ (index * 0x25 + (index >> 3))) & 0xFF
+                for index in range(64)
+            ))
+            prior = SimpleNamespace(case_id="prior-case", binary=binary, timeout=1.0)
+            case = SimpleNamespace(case_id="later-case", binary=binary, timeout=1.0)
+            runner = PsplinkCampaignRunner(
+                SimpleNamespace(host0_root=host0_root),
+                console_model="synthetic",
+                source_commit="0" * 40,
+            )
+            host0_text = "NAKAGAWA_PSP_COMPLETE schema=1 status=PASS\n"
+            with patch.object(runner, "_hardware_lock_held", return_value=True), patch.object(
+                runner, "_reset_once", return_value=True
+            ), patch.object(runner, "_take_baseline", return_value=(object(), None)), patch.object(
+                runner, "_take_snapshot", return_value=(object(), None)
+            ), patch.object(
+                runner, "_request", side_effect=[
+                    (0, "UID: 0x00000008", "", "PROCESS_EXITED"),
+                    (0, "", "", "PROCESS_EXITED"),
+                ]
+            ), patch.object(
+                runner, "_module_threads", return_value=(frozenset(), None)
+            ), patch.object(
+                runner, "_unload_status", return_value="PASS"
+            ), patch.object(
+                runner, "_settle_after_unload", return_value=("PASS", 1)
+            ), patch.object(
+                runner, "_shell_qualified", return_value=True
+            ), patch.object(
+                runner, "_probe_case_succeeded", return_value=True
+            ), patch(
+                "psp_oracle.run_psplink._wait_for_host0_output",
+                return_value=(host0_text, time.time_ns()),
+            ), patch(
+                "psp_oracle.run_psplink.evaluate_teardown_snapshots",
+                return_value={"status": "PASS", "issues": [], "recovery_eligible": False},
+            ), patch.object(
+                runner, "_envelope", return_value={"CASE_ID": "later-case"}
+            ), patch.object(
+                runner, "_verify_host0_roundtrip", wraps=runner._verify_host0_roundtrip
+            ) as verify_roundtrip:
+                kept_going = runner._run_case(
+                    case,
+                    case_index=1,
+                    local_index=1,
+                    cases=[prior, case],
+                    host0_path=host0_root,
+                    progress=SimpleNamespace(),
+                    reset_between_cases=True,
+                    stop_on_incomplete=True,
+                    on_case_start=None,
+                    on_case_complete=None,
+                )
+            self.assertTrue(kept_going)
+            verify_roundtrip.assert_called_once_with()
+            self.assertFalse(roundtrip.exists())
+
     def test_dmac_host0_capture_uses_the_runner_validation_path(self) -> None:
         args = SimpleNamespace(
             validate_dmac_size_matrix=True,
