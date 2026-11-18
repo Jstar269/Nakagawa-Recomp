@@ -377,8 +377,8 @@ def ownership_parity(ir: dict, report: dict) -> list[dict]:
     for entry, kind in sorted(observed - expected):
         findings.append({"code": "function-extra", "address": entry, "kind": kind})
     report_owners = {row["address"]: sorted(row.get("owners") or ()) for row in report["instructions"]}
-    block_owners = {}
-    owner_blocks = {}
+    block_owners: dict[Any, Any] = {}
+    owner_blocks: dict[Any, set[Any]] = {}
     for block in ir["blocks"]:
         start, owners = block["start"], block["owners"]
         block_owners[start] = owners

@@ -1592,6 +1592,8 @@ _PROCESS_APIS: tuple[Any, Any] | None = None
 def _process_apis() -> tuple[Any, Any]:
     """Load and bind the process-sampling APIs once, on the first Windows sample."""
     global _PROCESS_APIS
+    if sys.platform != "win32":
+        raise OSError("process sampling through kernel32 and psapi is implemented for Windows only")
     if _PROCESS_APIS is None:
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         psapi = ctypes.WinDLL("psapi", use_last_error=True)
