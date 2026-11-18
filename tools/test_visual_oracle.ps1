@@ -47,11 +47,11 @@ function Start-SleeperProcess {
         -PassThru -WindowStyle Hidden
 }
 
-# The live processes whose parent is `$ProcessId`.
+# The live processes whose parent is `$ProcessId` (Win32_Process lists only running
+# processes, so no second liveness filter is needed).
 function Get-LiveChildProcess {
     param([int]$ProcessId)
-    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" |
-        Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId")
 }
 
 # --- Wait-ProcessOrKill: early exit -------------------------------------------------
