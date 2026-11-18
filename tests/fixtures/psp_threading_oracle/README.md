@@ -47,7 +47,7 @@ A hand-edited file with plausible `model=PSP-3001 firmware=6.61 binary_sha256=â€
 
 ## Run/attempt identity (Stage 6)
 
-Every observation carries validated `run_id` (hex, from `NAKAGAWA_PSP_META`), `attempt` (hex, per-record, sane 0..255), `case_id`. Analyzer validates: syntactic `run_id`, duplicate `run/case/attempt` impossible, expected repetitions present, case belongs to expected launch group, divergent observations preserved, `run_id` uniqueness across launches (not derived from list position).
+Every observation carries validated `run_id` (hex, from `NAKAGAWA_PSP_META`), `attempt` (hex, per-record, sane 0..255), and `case_id`. The parser rejects invalid or duplicate `run/case/attempt` identities. The analyzer reports missing required cases and variable observations, records each case's expected launch group, and returns nonzero for missing or variable results. It does not enforce repetition counts or reject a capture that combines launch groups.
 
 ## Stack/memory probe safety (Stage 7)
 
@@ -117,7 +117,7 @@ All reads/writes bounded and checked, every created thread/block cleaned up wher
 2. Acquire global hardware lock (per `docs/HARDWARE_ORACLE.md`).
 3. Build the desired phase: `make -C tests/fixtures/psp_threading_oracle CASE=ct-attr EBOOT.PBP`.
 4. Launch via PSPLink and capture with `tools/psp_oracle/run_psplink.py` plus provenance flags; runner constructs `HardwareCaptureContext` binding `raw_capture_sha256`.
-5. Parse with `python -m psp_threading_oracle.parser` or `python tools/psp_threading_oracle/analyzer.py` with explicit evidence context.
+5. Analyze with `python tools/psp_threading_oracle/analyzer.py capture-1.txt ...`. The CLI labels inputs `UNVERIFIED_CAPTURE` by default (or `SYNTHETIC_TEST_ONLY` for placeholder metadata), prints each input basename and the SHA-256 of its original bytes, and returns nonzero for missing required cases or variable observations. The CLI does not accept evidence-context flags or promote captures to `HARDWARE_MEASURED`; a trusted caller must use the Python API with an explicit `HardwareCaptureContext`.
 6. Repeat for all 5 phases (10-launch repeat target); retain every capture, report stability. Until execution, results remain `NOT RUN` and no `HARDWARE_MEASURED` label is valid.
 
 `REGISTER_CAPTURE_BUILD_VALIDATION = REQUIRED_BEFORE_HARDWARE`.
