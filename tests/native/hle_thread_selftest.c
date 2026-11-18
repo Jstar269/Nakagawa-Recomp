@@ -23584,6 +23584,40 @@ static TCB *fixture_thread(uint32_t uid, int state, int priority) {
  * handler behavior. */
 #include "intr_conformance.h"
 
+/* A conformance fixture whose object create fails is SETUP_FAILED, not a probe run with the
+ * error code as its uid. sceKernelCreateFpl never returns 0 (it fails with NO_MEMORY or, with
+ * every pool slot taken, 0x800200d9), so a check against 0 alone took the error for a pool. */
+static void test_intr_conformance_create_failure_is_setup_failure(void) {
+    const IcProbe *probe = NULL;
+    for (int i = 0; i < IC_MATRIX_N && !probe; i++) {
+        if (kIcMatrix[i].group == ICG_FPL && kIcMatrix[i].variant == 1) probe = &kIcMatrix[i];
+    }
+    expect(probe != NULL, "the conformance matrix has a valid-pool FPL probe");
+    if (!probe) return;
+
+    reset_fixture(); sr_hle_init();
+    /* Take every free pool slot (s_fpls[] holds 16; reset_fixture() does not clear it, so
+     * some may already be taken), remembering each pool to give it back. */
+    uint32_t made[64];
+    int nmade = 0;
+    uint32_t refused = 0u;
+    while (nmade < (int)(sizeof made / sizeof made[0])) {
+        CpuState setup;
+        memset(&setup, 0, sizeof setup);
+        setup.r[4] = IC_NAMEBUF; setup.r[7] = 0x100u; setup.r[8] = 0x10u;
+        uint32_t uid = sr_syscall(&setup, NID_IC_CREATE_FPL);
+        if (uid & 0x80000000u) { refused = uid; break; }
+        made[nmade++] = uid;
+    }
+    expect(refused == FPL_UNMEASURED_NO_SPACE_ERR,
+           "with every pool slot taken sceKernelCreateFpl refuses the next create");
+    CpuState cpu;
+    expect(ic_arrange(probe, &cpu) == 0,
+           "a conformance fixture whose FPL create fails reports SETUP_FAILED, not an error uid");
+    for (int i = 0; i < nmade; i++) fpl_free_pool(made[i]);
+    reset_fixture(); sr_hle_init();
+}
+
 /* sceMpegCreate inside an interrupt handler. pspautotests tests/intr/delays
  * measured it on a PSP: from a VBLANK sub-interrupt handler it returns
  * 0x80618008 (delays.expected:24), while the same call on a thread returns 0
@@ -58207,6 +58241,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
     test_intr_context_conformance();
+    test_intr_conformance_create_failure_is_setup_failure();
     test_mpeg_create_refused_in_interrupt();
     test_psp_mutex();
     test_kernel_nested_join();

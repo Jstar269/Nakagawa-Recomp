@@ -2238,8 +2238,8 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
     sr_cd_status open_status = SR_CD_NOT_FOUND;
 #endif
     uint32_t lba, size;
-    /* The ISO lookup drops the device prefix, so an ms0: name that is also on the disc would
-     * open the disc file. The read-only PSP_O_TRUNC and PSP_O_EXCL creates are Memory Stick
+    /* The ISO lookup answers only names on a disc device (disc0:, umd0:, umd1:, umd:) or on
+     * none; an ms0: name is never a disc file. The read-only PSP_O_TRUNC and PSP_O_EXCL creates are Memory Stick
      * opens whose answer depends on the Memory Stick file alone (PSP-HLE-IO-SEEK-002); they never
      * consult the disc. */
     int in_iso = !read_only_create_trunc_ms0 && !read_only_create_exclusive_ms0 &&

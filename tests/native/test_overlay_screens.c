@@ -1052,6 +1052,30 @@ static void test_fits_every_window(void) {
     }
 }
 
+/* A runtime window has no minimum size, so its logical width can fall just past the 80 px
+   floor nk_overlay_page_begin falls back below. There the card's inner width is at most zero,
+   and a page that took that as "nothing was opened" left the page frame open: every frame
+   failed, nothing drew over the paused game and Back did nothing. Every page still completes. */
+static void test_narrow_window_pages_complete(void) {
+    for (int width = 81; width <= 90; ++width) {
+        NkUi *ui = overlay_ui(width, 600, 1.0f);
+        NkOverlayModel model = base_model((float)width, 600.0f);
+        if (ui == NULL) continue;
+        for (int screen = 0; screen < NK_OVERLAY_SCREEN_COUNT; ++screen) {
+            NkOverlayState state;
+            const NkUiDrawList *list;
+            nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
+            state.screen = (NkOverlayScreen)screen;
+            nk_ui_begin(ui, 0.0);
+            (void)nk_overlay_frame(ui, &state, &model);
+            list = nk_ui_end(ui);
+            if (list == NULL) fprintf(stderr, "  page %d at logical width %d fails\n", screen, width);
+            CHECK(list != NULL, "every page completes in a window just past the width floor");
+        }
+        nk_ui_destroy(ui);
+    }
+}
+
 /* ---- Developer pages (#314) ---------------------------------------------------------- */
 
 static uint8_t g_pixels[4u * 4u * 4u];
@@ -1917,6 +1941,7 @@ int main(int argc, char **argv) {
     test_quit();
     test_pad_lost();
     test_fits_every_window();
+    test_narrow_window_pages_complete();
     test_menu_fits_small_windows();
     test_menu_height_sweep();
     test_ace_caption_every_part();
