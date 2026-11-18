@@ -366,6 +366,55 @@ class TestPublishAudit(unittest.TestCase):
         c_macro_neg = '#define TABLE_DIGEST "0123456789abcdef0123456789abcdef"\n'
         self.assertEqual(publish_audit.private_key_assignment_lines(c_macro_neg, "src/pgd.h"), [])
 
+    def test_c_key_literal_with_integer_suffixes_or_in_a_nested_table_is_detected(self):
+        # int("0x00u", 16) raised, so a suffixed byte rejected the whole array, and the
+        # initializer was read only up to the first closing brace, so a [N][16] table's
+        # first token was "{0x00".
+        row = ", ".join("0x%02Xu" % i for i in range(16))
+        plain = ", ".join("0x%02X" % i for i in range(16))
+        suffixed = "static const unsigned char kirk_key[16] = {%s};\n" % row
+        self.assertEqual(publish_audit.private_key_assignment_lines(suffixed, "src/x.c"), [1])
+        decimal = "static const u8 pgd_seed[16] = {%s};\n" % ", ".join("%dU" % i for i in range(16))
+        self.assertEqual(publish_audit.private_key_assignment_lines(decimal, "src/x.c"), [1])
+        nested = ("static const u8 kirk_keys[2][16] = {\n"
+                  "    {%s},\n    {%s},\n};\n" % (plain, plain))
+        self.assertEqual(publish_audit.private_key_assignment_lines(nested, "src/x.c"), [1])
+        struct_table = ('static const struct { const char *name; u8 v[16]; } amctrl_table[] = {\n'
+                        '    { "first", { %s } },\n};\n' % plain)
+        self.assertEqual(publish_audit.private_key_assignment_lines(struct_table, "src/x.c"), [1])
+        # A nested table of another shape, or under an unrelated name, is not a key.
+        short = "static const u8 kirk_keys[2][4] = {{1, 2, 3, 4}, {5, 6, 7, 8}};\n"
+        self.assertEqual(publish_audit.private_key_assignment_lines(short, "src/x.c"), [])
+        lut = "static const u8 lut_rows[2][16] = {{%s}, {%s}};\n" % (plain, plain)
+        self.assertEqual(publish_audit.private_key_assignment_lines(lut, "src/x.c"), [])
+
+    def test_key_literal_in_any_tracked_text_file_fails_the_audit(self):
+        # Only .c/.h/.py/.json reached the key-literal scan, so a key array in an .inc,
+        # .cpp or any other text file passed the gate.
+        c_key = "static const u8 kirk_key[16] = {%s};\n" % ", ".join(
+            "0x%02X" % i for i in range(16))
+        for rel in ("src/rt/table.inc", "src/rt/x.cpp", "src/rt/x.hpp", "src/rt/x.cc",
+                    "docs/notes.txt"):
+            with self.subTest(rel=rel):
+                self.assertEqual(publish_audit.private_key_literal_lines(rel, c_key), [1])
+        with tempfile.TemporaryDirectory() as tmp_dir_raw:
+            repo = Path(tmp_dir_raw).resolve()
+            _make_publication_fixture_repo(repo)
+            policy_file = repo / "assets" / "public_source_profile.json"
+            export_file = repo / "PUBLIC_EXPORT.json"
+            target = repo / "src" / "table.inc"
+            target.write_text("// SPDX-License-Identifier: GPL-3.0-or-later\n" + c_key,
+                              encoding="utf-8", newline="\n")
+            run_git(["add", "-A"], cwd=repo, check=True, capture_output=True)
+            entries = publish_audit._get_git_entries(
+                tracked_only=True, repo_root=repo, content_source=publish_audit.CONTENT_WORKTREE
+            )
+            findings = publish_audit.audit_entries(
+                entries, repo_root=repo, content_source=publish_audit.CONTENT_WORKTREE,
+                policy_path=policy_file, export_path=export_file,
+            )
+        self.assertIn(("PRIVATE_KEY", "src/table.inc"), [(f.code, f.path) for f in findings])
+
     def test_only_the_reviewed_game_key_table_may_hold_key_literals(self):
         # Policy: one exact path carries the public game
         # tables; the same bytes anywhere else still fail.
@@ -466,6 +515,17 @@ class TestPublishAudit(unittest.TestCase):
 
         unc_text = "path = '\\\\" + "server\\share\\data'\n"
         self.assertTrue(bool(publish_audit.UNC_PATH.search(unc_text)))
+
+    def test_escaped_windows_user_and_temp_paths_are_local_paths(self):
+        # JSON, C and Python literals double every backslash; the single-backslash
+        # patterns matched none of these, so an admitted file edited to hold one passed.
+        escaped = chr(92) * 2
+        user = '{"p": "C:' + escaped + "Us" + "ers" + escaped + "someone" + escaped + 'game.iso"}'
+        legacy = '"D:' + escaped + "Documents and Settings" + escaped + 'someone"'
+        self.assertIsNotNone(publish_audit.WINDOWS_USER_PATH.search(user))
+        self.assertIsNotNone(publish_audit.WINDOWS_USER_PATH.search(legacy))
+        temp = '"C:' + escaped + "Windows" + escaped + "Te" + "mp" + escaped + 'build1"'
+        self.assertIsNotNone(publish_audit.TEMP_PATH.search(temp))
 
     def test_onedrive_and_temp_local_paths(self):
         slash = chr(92)
@@ -2272,6 +2332,19 @@ class TestPrivateRootDetection(unittest.TestCase):
             self.assertTrue(any(f.code == "LOCAL_PATH" for f in findings_bs))
             self.assertTrue(any(("contains configured private root '" + "C:" + "\\" + "\\nk'") in f.detail for f in findings_bs))
 
+            # 6. Escaped backslash form (a JSON, C or Python literal doubles each one)
+            target.write_text(
+                "# SPDX-License-Identifier: GPL-2.0-or-later\n"
+                '# path = "' + "C:" + "\\\\" + "nk" + "\\\\" + 'private"\n',
+                encoding="utf-8", newline="\n",
+            )
+            findings_escaped = publish_audit.audit_entries(
+                entries, repo_root=repo, content_source=publish_audit.CONTENT_WORKTREE,
+                policy_path=policy_file, export_path=export_file,
+            )
+            self.assertTrue(any(("contains configured private root '" + "C:" + "\\" + "\\nk'") in f.detail
+                                for f in findings_escaped))
+
     def test_clean_repo_contains_no_configured_private_roots(self):
         policy = publication_policy.load_policy(publish_audit.ROOT / "assets" / "public_source_profile.json")
         self.assertTrue(len(policy.private_roots) > 0)
@@ -2312,6 +2385,8 @@ class TestPrivateRootDetection(unittest.TestCase):
                 f"# Reference: {test_root}/sub/file.txt\n",
                 f"# Reference: {test_root.replace('/', chr(92))}" + chr(92) + "sub" + chr(92) + "file.txt\n",
                 f"# Reference: `{test_root}`\n",
+                # The escaped spelling a JSON, C or Python literal stores.
+                '{"p": "' + test_root.replace("/", chr(92) * 2) + chr(92) * 2 + 'sub"}\n',
             ]
             for text in matching_texts:
                 with self.subTest(text=text):

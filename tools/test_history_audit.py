@@ -369,6 +369,37 @@ class TestHistoryAudit(unittest.TestCase):
             report = history_audit.generate_full_history_audit_report(root, reviewed)
             self.assertEqual(report["status"], "FAIL")
 
+    def test_reviewed_commit_accepts_a_gitlink_path_finding(self):
+        """A gitlink under a forbidden prefix took an 8-hex id that no review entry (a
+        40-hex commit compared on 12 hex) could ever equal, so it stayed a finding."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            root.mkdir()
+            run_git(("init", "-q"), cwd=root, check=True, capture_output=True)
+            (root / "safe.txt").write_text("safe\n", encoding="utf-8")
+            run_git(["add", "safe.txt"], cwd=root, check=True)
+            run_git(["commit", "-qm", "safe"], cwd=root, check=True)
+            linked = run_git(["rev-parse", "HEAD"], cwd=root, check=True,
+                             capture_output=True, text=True).stdout.strip()
+            run_git(["update-index", "--add", "--cacheinfo", f"160000,{linked},build/sub"],
+                    cwd=root, check=True)
+            run_git(["commit", "-qm", "gitlink"], cwd=root, check=True)
+            findings = [f for f in history_audit.audit_history_tree_paths(root)
+                        if f.code == "HISTORICAL_PATH_PREFIX"]
+            self.assertEqual([(f.commit, f.path) for f in findings], [(linked[:12], "build/sub")])
+            reviewed = Path(tmp) / "reviewed.json"
+            self._write_reviewed(reviewed, [{
+                "commit": linked, "code": "HISTORICAL_PATH_PREFIX",
+                "path": "build/sub", "reason": "synthetic fixture"}])
+            report = history_audit.generate_full_history_audit_report(root, reviewed)
+            self.assertEqual(report["status"], "OK")
+            self.assertEqual(report["summary"]["reviewed_findings"], 1)
+            self._write_reviewed(reviewed, [{
+                "commit": "0" * 40, "code": "HISTORICAL_PATH_PREFIX",
+                "path": "build/sub", "reason": "different commit"}])
+            report = history_audit.generate_full_history_audit_report(root, reviewed)
+            self.assertEqual(report["status"], "FAIL")
+
     def test_review_of_one_blob_never_excuses_other_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
@@ -589,6 +620,26 @@ class TestHistoryAudit(unittest.TestCase):
                 history_audit.audit_history_blob_contents(root)
             with self.assertRaises(RuntimeError):
                 history_audit.generate_full_history_audit_report(root, root / "absent.json")
+
+    def test_large_blob_inventory_raises_instead_of_reporting_none(self):
+        # Asked without the report's batch-check answer, the size pass swallowed every
+        # error and an unreadable object, and reported no large blobs.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_git(("init", "-q"), cwd=root, check=True, capture_output=True)
+            for name in ("a.txt", "b.txt"):
+                (root / name).write_text(name + " synthetic\n", encoding="utf-8")
+            run_git(["add", "-A"], cwd=root, check=True)
+            run_git(["commit", "-qm", "fixture"], cwd=root, check=True)
+            self.assertEqual(len(history_audit.audit_large_blobs(root, size_threshold=1)), 2)
+            self._corrupt_loose_blob(root, "b.txt")
+            with self.assertRaisesRegex(RuntimeError, "cannot be read"):
+                history_audit.audit_large_blobs(root, size_threshold=1)
+            listing = history_audit._object_listing(root)
+            with mock.patch.object(history_audit.subprocess, "run",
+                                   return_value=mock.Mock(returncode=128, stdout=b"", stderr=b"fatal")):
+                with self.assertRaisesRegex(RuntimeError, "batch-check failed"):
+                    history_audit.audit_large_blobs(root, size_threshold=1, raw_objects=listing)
 
     def test_short_cat_file_output_fails_the_audit(self):
         # A cat-file --batch that dies partway leaves short output; the scan stopped

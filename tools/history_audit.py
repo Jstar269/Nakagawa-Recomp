@@ -275,10 +275,12 @@ def _path_finding_id(obj_sha: str, mode: str) -> str:
 
     A blob carries the same identity as the content findings ("blob:" plus 12 hex), so one
     reviewed blob entry (exact bytes, code and path) can accept every finding on those
-    bytes. A gitlink keeps its short object id. The tree entry's mode says which it is, so
-    no git process runs per finding.
+    bytes. A gitlink names a commit, so it carries a reviewed commit entry's identity (12
+    hex) and a ``commit`` review entry can accept it. The tree entry's mode says which it
+    is, so no git process runs per finding. The path listing names blobs and gitlinks
+    only, never a tree.
     """
-    return obj_sha[:8] if mode == GITLINK_MODE else "blob:" + obj_sha[:12]
+    return obj_sha[:12] if mode == GITLINK_MODE else "blob:" + obj_sha[:12]
 
 
 def audit_history_tree_paths(repo_root: Path = ROOT,
@@ -646,39 +648,16 @@ def audit_large_blobs(repo_root: Path = ROOT, size_threshold: int = 500 * 1024,
         if len(parts) == 2:
             sha_to_path[parts[0]] = parts[1]
 
-    if object_info is not None:
-        large_blobs = [
-            {"sha": sha, "size": object_info[sha][1], "path": path}
-            for sha, path in sha_to_path.items()
-            if object_info[sha][0] == "blob" and object_info[sha][1] >= size_threshold
-        ]
-        return sorted(large_blobs, key=lambda b: b["size"], reverse=True)
+    if object_info is None:
+        # The same checked batch-check as the other passes: a git failure or an object it
+        # cannot read raises instead of reporting no large blobs.
+        object_info = _object_info(repo_root, list(sha_to_path))
 
-    # Query cat-file for object sizes
-    try:
-        proc = subprocess.Popen(
-            ["git", "cat-file", "--batch-check"], cwd=repo_root,
-            env=isolated_git_env(root=repo_root),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        )
-        assert proc.stdin and proc.stdout
-        stdin_text = "\n".join(sha_to_path.keys()) + "\n"
-        stdout_data, _ = proc.communicate(input=stdin_text.encode("utf-8"))
-
-        for line in stdout_data.decode("utf-8", errors="replace").splitlines():
-            parts = line.split()
-            if len(parts) == 3 and parts[1] == "blob" and parts[2].isdigit():
-                sha, obj_type, size_str = parts
-                size = int(size_str)
-                if size >= size_threshold:
-                    large_blobs.append({
-                        "sha": sha,
-                        "size": size,
-                        "path": sha_to_path.get(sha, "unknown"),
-                    })
-    except Exception:
-        pass
-
+    large_blobs = [
+        {"sha": sha, "size": object_info[sha][1], "path": path}
+        for sha, path in sha_to_path.items()
+        if object_info[sha][0] == "blob" and object_info[sha][1] >= size_threshold
+    ]
     return sorted(large_blobs, key=lambda b: b["size"], reverse=True)
 
 

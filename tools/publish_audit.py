@@ -165,8 +165,12 @@ KEYSTORE_CONTENT_MARKER = "nakagawa-psp-keystore"
 #: Source and prose files may legitimately name the KeyStore format itself.
 KEYSTORE_MARKER_TEXT_EXEMPT = {".c", ".h", ".py", ".md"}
 
+# A drive path's separator is one backslash or a run of them: JSON, C and Python string
+# literals store each separator doubled, and that is the form a path takes in a committed
+# manifest or settings file. A UNC path is matched in its plain form only: tracked native
+# tests spell synthetic shares and named-pipe device paths as escaped C literals.
 WINDOWS_USER_PATH = re.compile(
-    r"[a-zA-Z]:\\(?:" + r"Us" + r"ers|Documents and Settings)\\[^\s\\/]+",
+    r"[a-zA-Z]:\\+(?:" + r"Us" + r"ers|Documents and Settings)\\+[^\s\\/]+",
     re.IGNORECASE,
 )
 POSIX_USER_PATH = re.compile(r"/(?:" + r"ho" + r"me|Us" + r"ers)/[^\s/]+")
@@ -178,9 +182,19 @@ ONEDRIVE_PATH = re.compile(
     re.IGNORECASE,
 )
 TEMP_PATH = re.compile(
-    r"(?:/tm" + r"p/|/var/tm" + r"p/|[a-zA-Z]:\\(?:[^\s\\/]+\\)*(?:Windows\\Te" + r"mp|AppData\\Local\\Te" + r"mp)\\)[a-zA-Z0-9_.-]+",
+    r"(?:/tm" + r"p/|/var/tm" + r"p/|[a-zA-Z]:\\+(?:[^\s\\/]+\\+)*(?:Windows\\+Te" + r"mp|AppData\\+Local\\+Te" + r"mp)\\+)[a-zA-Z0-9_.-]+",
     re.IGNORECASE,
 )
+
+
+def _private_root_spellings(root: str) -> set[str]:
+    """A private root in its slash, backslash and escaped-backslash spellings.
+
+    JSON, C and Python literals store each backslash doubled, so a root named in a
+    committed manifest or settings file appears with doubled separators.
+    """
+    backslashed = root.replace("/", "\\")
+    return {root, root.replace("\\", "/"), backslashed, backslashed.replace("\\", "\\\\")}
 
 #: Technical debt management ceilings (Finding 11 O-11).
 #: Ceilings are non-increasing: counts must not rise without explicit budget edit and rationale.
@@ -1269,8 +1283,15 @@ def _assigned_literal(node: ast.AST | None) -> str | None:
     return None
 
 
+#: Sources whose key literals take C syntax (an ``.inc`` holds C included by a ``.c``).
+C_LIKE_SUFFIXES = frozenset({".c", ".h", ".inc", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".m", ".mm"})
+
+#: A C integer constant's suffix (``0x00u``, ``255UL``); no hex digit is a suffix letter.
+_C_INTEGER_SUFFIX = re.compile(r"[uUlL]+$")
+
+
 def _is_16_byte_array_text(body: str) -> bool:
-    tokens = [t.strip() for t in body.split(",") if t.strip()]
+    tokens = [_C_INTEGER_SUFFIX.sub("", t.strip()) for t in body.split(",") if t.strip()]
     if len(tokens) != 16:
         return False
     for t in tokens:
@@ -1328,24 +1349,44 @@ def _c_key_assignment_lines(code: str) -> list[int]:
             elif array_val and _is_16_byte_array_text(array_val):
                 lines.append(clean[: m.start()].count("\n") + 1)
 
-    # 2. Variable declarations/assignments:
+    # 2. Variable declarations/assignments. A key table (``k[2][16] = {{...}, {...}}``) or
+    # a struct initializer nests its byte groups, so every innermost brace group of the
+    # initializer is checked, not only the text up to the first closing brace.
     var_pat = re.compile(
-        r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\[[^\]]*\])?\s*=\s*(?:(?:"
+        r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\[[^\]]*\])*\s*=\s*(?:(?:"
         r'"([0-9a-fA-F]{32})"'
-        r")|\{([^}]+)\})",
+        r")|(\{))",
         re.MULTILINE,
     )
     for m in var_pat.finditer(clean):
-        name = m.group(1)
-        hex_val = m.group(2)
-        array_val = m.group(3)
-        if KEY_NAME.search(name):
-            if hex_val:
-                lines.append(clean[: m.start()].count("\n") + 1)
-            elif array_val and _is_16_byte_array_text(array_val):
-                lines.append(clean[: m.start()].count("\n") + 1)
+        if not KEY_NAME.search(m.group(1)):
+            continue
+        if m.group(2) or any(
+            _is_16_byte_array_text(group) for group in _innermost_brace_groups(clean, m.start(3))
+        ):
+            lines.append(clean[: m.start()].count("\n") + 1)
 
     return sorted(set(lines))
+
+
+def _innermost_brace_groups(text: str, open_index: int) -> list[str]:
+    """The body of every brace group with no brace group inside it, in the balanced
+    initializer that opens at ``text[open_index]``."""
+    groups: list[str] = []
+    stack: list[list[int]] = []  # [start, holds a nested group]
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if char == "{":
+            if stack:
+                stack[-1][1] = 1
+            stack.append([index, 0])
+        elif char == "}":
+            start, nested = stack.pop()
+            if not nested:
+                groups.append(text[start + 1:index])
+            if not stack:
+                break
+    return groups
 
 
 def _json_key_assignment_lines(text: str) -> list[int]:
@@ -1418,7 +1459,7 @@ def private_key_assignment_lines(text: str, filename: str = "") -> list[int]:
     ext = ""
     if filename:
         ext = PurePosixPath(filename).suffix.lower()
-    if ext in {".c", ".h"}:
+    if ext in C_LIKE_SUFFIXES:
         return _c_key_assignment_lines(text)
     if ext == ".json":
         return _json_key_assignment_lines(text)
@@ -2824,7 +2865,7 @@ def audit_entries_with_semantics(
                 raw_roots.append(root)
 
     for r in raw_roots:
-        for variant in {r, r.replace("\\", "/"), r.replace("/", "\\")}:
+        for variant in _private_root_spellings(r):
             all_private_root_patterns.append(
                 re.compile(re.escape(variant) + r"(?![A-Za-z0-9_.\-])", re.IGNORECASE)
             )
@@ -3176,9 +3217,10 @@ def audit_entries_with_semantics(
             if _spdx_required(rel) and "SPDX-License-Identifier:" not in "\n".join(text_str.splitlines()[:8]):
                 entry_findings.append(Finding("SPDX", rel, "missing SPDX identifier in first eight lines"))
 
-            if PurePosixPath(rel).suffix.lower() in {".c", ".h", ".py", ".json"}:
-                for line in private_key_literal_lines(rel, text_str):
-                    entry_findings.append(Finding("PRIVATE_KEY", rel, f"direct 16-byte key literal at line {line}"))
+            # Every text file: a key literal outside the reviewed table fails whatever the
+            # suffix (C syntax for C-like sources, the parser fallback for the rest).
+            for line in private_key_literal_lines(rel, text_str):
+                entry_findings.append(Finding("PRIVATE_KEY", rel, f"direct 16-byte key literal at line {line}"))
 
             if is_keystore_content(rel, text_str):
                 entry_findings.append(Finding(
@@ -3199,7 +3241,9 @@ def audit_entries_with_semantics(
             elif policy and policy.private_roots and rel != "assets/public_source_profile.json":
                 text_lower = text_str.lower()
                 for root_str in policy.private_roots:
-                    if root_str.lower() in text_lower:
+                    # Also the escaped spelling a JSON, C or Python literal stores.
+                    spellings = (root_str.lower(), root_str.lower().replace("\\", "\\\\"))
+                    if any(spelling in text_lower for spelling in spellings):
                         entry_findings.append(
                             Finding("LOCAL_PATH", rel, f"contains configured private root {root_str!r}")
                         )
