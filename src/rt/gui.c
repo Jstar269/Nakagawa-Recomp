@@ -48,7 +48,7 @@
 #include "nk_ui_theme.h"         /* the pause overlay's scrim token */
 #include "overlay/overlay_host.h" /* the pause overlay's pages (C9c) */
 #include "gpu_sdl3vk/ace_ui.h"   /* Ace Mode's in-game UI: notice, readout, crisp keyboard */
-#include "nk_platform.h"         /* the system's Reduce motion, for the Ace UI */
+#include "nk_platform.h"         /* the system's Reduce motion, and SR_UI_ROOT in UTF-8 */
 #include <SDL3/SDL_events.h>
 #include <SDL3/SDL_render.h>
 #endif
@@ -933,16 +933,24 @@ static void gui_ace_ui_off(const char *why) {
     if (ace_effective()->notice) ace_feature_unavailable(ACE_FEATURE_NOTICE, reason);
 }
 
+/* The launcher's SR_UI_ROOT (the player's folder) in UTF-8, or NULL when it is unset or does not
+ * fit: the narrow getenv gives ANSI code-page bytes on Win32, which miss a non-ASCII folder. */
+static const char *gui_ui_root(char *out, size_t cap) {
+    return nk_platform_env_utf8("SR_UI_ROOT", out, cap) == 1 ? out : NULL;
+}
+
 /* The UI's fonts and renderer, and its pass registered with the presenter: 1, or 0 with the
  * reason. Shared by an Ace run's UI and the render notice (#2151); it confirms no Ace feature. */
 static int gui_ui_create(char *error, size_t error_size) {
     Sdl3VkInfo vi;
+    char ui_root[1024];
     memset(&vi, 0, sizeof(vi));
     if (!sdl3vk_get_vk(&vi) || !vi.get_instance_proc_addr) {
         snprintf(error, error_size, "no Vulkan device");
         return 0;
     }
-    s_ace_fonts = nk_overlay_fonts_create(getenv("SR_UI_ROOT"), error, error_size);
+    s_ace_fonts = nk_overlay_fonts_create(gui_ui_root(ui_root, sizeof(ui_root)), error,
+                                          error_size);
     if (s_ace_fonts) {
         AceUiInit init;
         memset(&init, 0, sizeof(init));
@@ -2605,8 +2613,10 @@ void gui_pause_enter(void) {
      * folder. Without them the pause shows the frozen frame alone, and says why once. */
     if (!s_pause_host && !s_pause_host_tried) {
         char error[256];
+        char ui_root[1024];
         s_pause_host_tried = 1;
-        s_pause_host = nk_overlay_host_create(getenv("SR_UI_ROOT"), error, sizeof(error));
+        s_pause_host = nk_overlay_host_create(gui_ui_root(ui_root, sizeof(ui_root)), error,
+                                              sizeof(error));
         if (!s_pause_host)
             fprintf(stderr, "SR_PAUSE: the overlay pages are unavailable (%s); the pause shows the "
                             "frozen frame only\n", error);

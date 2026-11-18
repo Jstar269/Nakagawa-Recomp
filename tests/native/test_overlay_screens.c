@@ -1194,6 +1194,28 @@ static void test_developer_gate(void) {
           "profile: Back returns to the menu");
     (void)settle(ui, &state, &model);
     CHECK(nk_ui_focused(ui) == NK_OVERLAY_ID_PROFILE, "profile: the menu comes back on PROFILE");
+    {
+        /* Audit 2026-11-17: parts that add up to 1 but round up one by one (14 + 14 + 14 + 7
+           of 48 px) stay inside the 48 px bar; so do parts that add up to more than 1. */
+        static const float shares[2][NK_OVERLAY_PROFILE_PART_COUNT] = {
+            {0.2813f, 0.2813f, 0.2813f, 0.1561f}, {0.9f, 0.5f, 0.3f, 0.2f}
+        };
+        for (int s = 0; s < 2; ++s) {
+            int total = 0;
+            memcpy(profile.bars[0], shares[s], sizeof(shares[s]));
+            nk_overlay_go(&state, NK_OVERLAY_SCREEN_PROFILE, 0u);
+            (void)settle(ui, &state, &model);
+            for (int p = 0; p < NK_OVERLAY_PROFILE_PART_COUNT; ++p) {
+                int piece[4];
+                if (frame_bounds(ui, &state, &model, NK_OVERLAY_ID(0x007201u + (uint32_t)p),
+                                 NK_UI_DRAW_RECTANGLE, piece)) {
+                    total += piece[3] - piece[1];
+                }
+            }
+            CHECK(total == 48, "profile: a bar's stacked parts fill its 48 px and stay inside it");
+        }
+        nk_overlay_go(&state, NK_OVERLAY_SCREEN_MENU, NK_OVERLAY_ID_PROFILE);
+    }
     model.profile = NULL;
     nk_overlay_go(&state, NK_OVERLAY_SCREEN_PROFILE, 0u);
     CHECK(frame_has_text(ui, &state, &model, "No interval has closed yet."),
@@ -1293,6 +1315,18 @@ static void test_vram_page(void) {
           "vram: Back returns to the menu");
     nk_overlay_open(&state, NK_OVERLAY_OPEN_USER);
     CHECK(!state.vram.chosen, "vram: a new pause starts the viewer afresh");
+    /* Audit 2026-11-17: when the GE state names only the bound texture, the first entry lands
+       on it and keeps its own main-RAM address, CLUT8 format and size, as choosing it through
+       the Source row does; it is not clamped into a VRAM window. */
+    vram.present[NK_OVERLAY_VRAM_DISPLAY] = false;
+    vram.present[NK_OVERLAY_VRAM_DRAW] = false;
+    vram.present[NK_OVERLAY_VRAM_DEPTH] = false;
+    nk_overlay_go(&state, NK_OVERLAY_SCREEN_VRAM, 0u);
+    action = frame_with(ui, &state, &model, -1, NK_UI_DIR_NONE);
+    CHECK(action.kind == NK_OVERLAY_ACT_VRAM_VIEW && state.vram.source == NK_OVERLAY_VRAM_TEXTURE &&
+              state.vram.view.addr == 0x08A00000u && state.vram.view.format == 5u &&
+              state.vram.view.width == 128u && state.vram.view.height == 64u,
+          "vram: a first entry on the texture keeps its own address, format and size");
     nk_ui_destroy(ui);
 }
 
@@ -1923,6 +1957,70 @@ static int capture_overlay(const char *directory) {
 }
 #endif
 
+static bool utf8_whole(const char *text, size_t length) {
+    size_t i = 0u;
+    while (i < length) {
+        unsigned char c = (unsigned char)text[i];
+        size_t need = c < 0x80u ? 0u : (c & 0xE0u) == 0xC0u ? 1u : (c & 0xF0u) == 0xE0u ? 2u :
+                      (c & 0xF8u) == 0xF0u ? 3u : 4u;
+        if (need == 4u || length - i - 1u < need) return false;
+        for (size_t k = 1u; k <= need; ++k) {
+            if (((unsigned char)text[i + k] & 0xC0u) != 0x80u) return false;
+        }
+        i += need + 1u;
+    }
+    return true;
+}
+
+/* Every byte the eyebrow `id` draws, joined, in `out`; its length, or -1 when none is drawn. */
+static int eyebrow_drawn(NkUi *ui, NkUiId id, const char *marker, const char *text, char *out,
+                         size_t cap) {
+    const NkUiDrawList *list;
+    size_t used = 0u;
+    bool found = false;
+    nk_ui_begin(ui, 0.0);
+    nk_overlay_eyebrow(ui, id, marker, text, nk_ui_theme(ui)->muted);
+    list = nk_ui_end(ui);
+    for (uint32_t i = 0u; list != NULL && i < list->ncmd; ++i) {
+        const NkUiTextRun *run;
+        if (list->cmd[i].element_id != id || list->cmd[i].kind != NK_UI_DRAW_TEXT) continue;
+        run = (const NkUiTextRun *)list->cmd[i].custom;
+        for (size_t k = 0u; k < run->length && used + 1u < cap; ++k) out[used++] = run->text[k];
+        found = true;
+    }
+    out[used] = '\0';
+    return found ? (int)used : -1;
+}
+
+/* Audit 2026-11-17: an eyebrow longer than its 159 bytes is cut on a whole UTF-8 sequence, and
+   a marker of any length is cut to the line, never past it. */
+static void test_eyebrow_cut(void) {
+    NkUi *ui = overlay_ui(1280, 800, 1.0f);
+    const NkUiId id = NK_OVERLAY_ID(0x00F001u);
+    char text[256];
+    char marker[200];
+    char drawn[512];
+    size_t at = 0u;
+    int length;
+    if (ui == NULL) return;
+    /* "ab" and then two-byte letters: the 155 bytes left after the marker end inside one. */
+    text[at++] = 'a';
+    text[at++] = 'b';
+    while (at + 2u < sizeof(text)) {
+        text[at++] = (char)0xC3;
+        text[at++] = (char)0xA9;
+    }
+    text[at] = '\0';
+    length = eyebrow_drawn(ui, id, "\xE2\x96\xB8", text, drawn, sizeof(drawn));
+    CHECK(length > 0 && length <= 159 && utf8_whole(drawn, (size_t)length),
+          "eyebrow: a long text is cut on a whole UTF-8 sequence");
+    memset(marker, 'x', sizeof(marker) - 1u);
+    marker[sizeof(marker) - 1u] = '\0';
+    length = eyebrow_drawn(ui, id, marker, "MARK", drawn, sizeof(drawn));
+    CHECK(length > 0 && length <= 159, "eyebrow: a marker longer than the line is cut to it");
+    nk_ui_destroy(ui);
+}
+
 int main(int argc, char **argv) {
     static char golden[DUMP_CAP];
     size_t golden_size = 0u;
@@ -1951,6 +2049,7 @@ int main(int argc, char **argv) {
     test_vram_clamp();
     test_developer_pages_fit();
     test_describe_controls();
+    test_eyebrow_cut();
     CHECK(build_golden(golden, sizeof(golden), &golden_size), "build the overlay golden");
     if (write) {
         CHECK(write_golden(GOLDEN_PATH, golden, golden_size), "write the overlay golden");

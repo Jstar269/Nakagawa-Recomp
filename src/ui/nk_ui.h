@@ -373,6 +373,9 @@ void nk_ui_destroy(NkUi *ui);
 void nk_ui_set_viewport(NkUi *ui, const NkUiViewport *viewport);
 void nk_ui_set_prefs(NkUi *ui, const NkUiPrefs *prefs);
 void nk_ui_push_event(NkUi *ui, const NkUiEvent *event);
+/* Drops every queued event, the input a screen's first frame held for its laid-out graph
+   included (nk_ui_end puts that back in the queue). Called between frames. */
+void nk_ui_drop_input(NkUi *ui);
 /* A pointer press activates nothing by itself: the release does, when it lands
    on the control the press landed on. A host calls this when its screen changes,
    so the rest of a click that began on the old screen activates nothing on the

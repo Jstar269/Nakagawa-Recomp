@@ -65,16 +65,12 @@ static bool join(const char *root, const char *relative, char *out, size_t size)
     return written > 0 && (size_t)written < size;
 }
 
-static bool file_exists(const char *path) {
-    FILE *file = fopen(path, "rb");
-    if (file == NULL) return false;
-    fclose(file);
-    return true;
-}
-
 /* The design system's eight font slots, from the first folder that has the face:
-   the player's, the runtime's own, then the working directory. Every face falls
-   back to Geist for Latin and to Noto Sans JP for Japanese names, as in the player. */
+   the player's, the runtime's own, then the working directory. The roots are UTF-8 (SDL's
+   base path, the launcher's SR_UI_ROOT), so the probe reads them as UTF-8, as SDL_LoadFile
+   does; a narrow fopen would read them in the ANSI code page and miss a non-ASCII folder.
+   Every face falls back to Geist for Latin and to Noto Sans JP for Japanese names, as in
+   the player. */
 static bool register_fonts(NkUiTtf *ttf, const char *const *roots, size_t root_count) {
     int font;
     for (font = 0; font < NK_UI_FONT_COUNT; ++font) {
@@ -83,10 +79,10 @@ static bool register_fonts(NkUiTtf *ttf, const char *const *roots, size_t root_c
         bool added = false;
         size_t r;
         for (r = 0; r < root_count && !added; ++r) {
-            added = join(roots[r], relative, path, sizeof(path)) && file_exists(path) &&
+            added = join(roots[r], relative, path, sizeof(path)) && nk_platform_file_exists(path) &&
                     nk_ui_ttf_add_font(ttf, font, path);
         }
-        if (!added && !(file_exists(relative) && nk_ui_ttf_add_font(ttf, font, relative))) {
+        if (!added && !(nk_platform_file_exists(relative) && nk_ui_ttf_add_font(ttf, font, relative))) {
             return false;
         }
     }
@@ -239,10 +235,12 @@ void nk_overlay_host_close(NkOverlayHost *host) {
     if (host == NULL) return;
     nk_overlay_close(&host->state);
     host->page_frames = 0;
-    /* An empty frame drops what is still queued and the focus it had: the next
-       pause starts on its page's default. */
+    /* An empty frame drops the focus it had, and then the queue goes, held input
+       included (a page's first frame holds a move for its laid-out graph, and the
+       empty frame would put it back): the next pause starts on its page's default. */
     nk_ui_begin(host->ui, (double)SDL_GetTicksNS() / 1e9);
     (void)nk_ui_end(host->ui);
+    nk_ui_drop_input(host->ui);
 }
 
 bool nk_overlay_host_is_open(const NkOverlayHost *host) {

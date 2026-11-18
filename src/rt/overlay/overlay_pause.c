@@ -126,7 +126,7 @@ NkOverlayAction nk_overlay_page_menu(NkUi *ui, NkOverlayState *state, const NkOv
         NkUiLayout head = nk_overlay_layout(NK_UI_LAYOUT_COLUMN, nk_overlay_grow(),
                                             nk_overlay_fit(), compact ? 0.0f : NK_UI_SPACE_1);
         if (nk_ui_begin_container(ui, MENU_ID_HEAD, &head, NULL)) {
-            nk_overlay_eyebrow(ui, MENU_ID_EYEBROW, NULL, "Game paused", theme->muted);
+            nk_ui_eyebrow(ui, MENU_ID_EYEBROW, "Game paused");
             if (nonempty(model->title_name) != NULL) {
                 NkUiTextStyle title = nk_ui_type(NK_UI_TYPE_TITLE, theme->paper);
                 title.wrap = true;
@@ -276,7 +276,7 @@ NkOverlayAction nk_overlay_page_controls(NkUi *ui, NkOverlayState *state,
     if (count > NK_OVERLAY_MAX_CONTROL_ROWS) count = NK_OVERLAY_MAX_CONTROL_ROWS;
     inner = nk_overlay_page_begin(ui, model, split ? 880.0f : 640.0f);
     if (inner <= 0.0f) return result;
-    nk_overlay_eyebrow(ui, CONTROLS_ID_EYEBROW, NULL, "Game paused \xC2\xB7 Controls", theme->muted);
+    nk_ui_eyebrow(ui, CONTROLS_ID_EYEBROW, "Game paused \xC2\xB7 Controls");
     nk_ui_text_role(ui, CONTROLS_ID_TITLE, "Controls", NK_UI_TYPE_TITLE, theme->paper);
     if (count == 0u) {
         nk_ui_text_role(ui, CONTROLS_ID_NOTE, "No controls are mapped for this game.",
