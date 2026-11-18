@@ -37,6 +37,10 @@
 #include <unistd.h>
 #endif
 
+/* A case the host could not run: main then exits 77, which the Makefile reports as
+   SKIP, never as a pass. */
+static int g_skipped = 0;
+
 #define RECORDED_ZIP_SHA256 "032afce5b9b4713e6c4fa065c299f72ab732f59967624cffc25484f83516ab9f"
 /* The v0.0.1 ZIP's published .sha256 asset, byte for byte. */
 static const char k_recorded_checksum[] =
@@ -1029,7 +1033,8 @@ static void write_file(const char *path) {
 }
 
 /* A directory link at link to target: a junction on Windows (no privilege needed), a
-   symlink elsewhere. False when the host will not make one; the caller says SKIP. */
+   symlink elsewhere. False when the host will not make one: on Windows the caller says
+   SKIP; elsewhere symlink() must work and a failure fails the test. */
 static bool make_dir_link(const char *link, const char *target) {
 #if defined(_WIN32) || defined(_WIN64)
     char cmd[2 * NATIVE_TEST_PATH_MAX + 64];
@@ -1217,8 +1222,13 @@ static void test_interrupted_install_staging(void) {
         assert(nk_platform_mkdir_p(outside));
         write_file(outside_file);
         /* The leftover is marked (the claim above made it). */
-        if (!make_dir_link(inner_link, outside)) {
+        bool linked = make_dir_link(inner_link, outside);
+#if !defined(_WIN32) && !defined(_WIN64)
+        assert(linked);
+#endif
+        if (!linked) {
             printf("[UPDATE_CHECK_TEST] SKIP links: this host would not make a directory link\n");
+            g_skipped++;
         } else {
             assert(nk_update_claim_staging(staging, &error));
             assert(nk_platform_path_missing(inner_link));
@@ -1391,6 +1401,10 @@ int main(void) {
 #if defined(_WIN32) || defined(_WIN64)
     test_install_listed_names();
 #endif
+    if (g_skipped) {
+        printf("[UPDATE_CHECK_TEST] all others: PASS, %d case(s) SKIPPED\n", g_skipped);
+        return 77;
+    }
     printf("[UPDATE_CHECK_TEST] all: PASS\n");
     return 0;
 }

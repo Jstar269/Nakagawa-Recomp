@@ -45,12 +45,14 @@ typedef struct {
 
 typedef struct NkRef NkRef;
 
+/* NULL when the reference RAM cannot be allocated. */
 NkRef *nk_ref_create(void);
 void nk_ref_destroy(NkRef *ref);
 /* The NK_REF_RAM_SIZE bytes of reference RAM, guest address NK_REF_RAM_BASE first. */
 uint8_t *nk_ref_ram(NkRef *ref);
 
-/* Run from cpu (NK_REF_CPUSTATE_SIZE bytes, updated in place) starting at entry_pc. */
+/* Run from cpu (NK_REF_CPUSTATE_SIZE bytes, updated in place) starting at entry_pc. The run
+ * starts outside a delay slot: cpu's next_pc and in_delay_slot are not read. */
 void nk_ref_run(NkRef *ref, void *cpu, uint32_t entry_pc, uint32_t return_pc,
                 const uint32_t *import_stubs, uint32_t import_count,
                 uint64_t max_steps, NkRefResult *out);

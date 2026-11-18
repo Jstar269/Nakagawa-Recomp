@@ -16,6 +16,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+/*
+ * Modified by Nakagawa Recomp contributors, 2026-08-11. The local changes are
+ * marked LOCAL DELTA and listed in ../PROVENANCE.md.
+ */
+
 #include "sinewin.h"
 /* LOCAL DELTA (Nakagawa recomp): MinGW-w64 UCRT <math.h> never exposes M_PI
  * even with -D_USE_MATH_DEFINES (FFmpeg configure adds that define only for

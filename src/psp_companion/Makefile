@@ -47,6 +47,27 @@ IMPORT_GATE_ARGS += --exact-library IoFileMgrForUser=0x109F50BC,0x6A638D83,0x42E
 # As in tests/fixtures/psp_oracle/Makefile: keep psp-fixup-imports' output, and fail closed when it
 # reports out-of-order stubs (it exits 0 then), before the import gate runs.
 FIXUP = bash -c 'out=$$(psp-fixup-imports "$$1" 2>&1); rc=$$?; test -n "$$out" && echo "$$out"; echo "$$out" | grep -q "stubs out of order" && exit 1; test $$rc -eq 0 || exit $$rc; exec "$(PYTHON)" "$(IMPORT_GATE)" $(IMPORT_GATE_ARGS) "$$1"' --
+# The SDK link rule writes the ELF before FIXUP runs: .DELETE_ON_ERROR removes an ELF the gate
+# rejected, so a later make cannot take it as up to date and package it.
+.DELETE_ON_ERROR:
+
+# Make judges staleness by file times alone, and the SDK's ELF and PARAM.SFO rules depend on no
+# setting. The stamp holds the settings the build uses (the import gate's policy among them) and
+# the FORCE rule rewrites it only when its content changes, so a changed setting rebuilds the
+# object, and with it the ELF that FIXUP gates again, and PARAM.SFO. The gate script is an object
+# prerequisite for the same reason. Neither is an ELF prerequisite: the SDK link rule passes $^
+# to the linker.
+BUILD_CONFIG = CFLAGS=$(CFLAGS) LIBS=$(LIBS) PSP_FW_VERSION=$(PSP_FW_VERSION) BUILD_PRX=$(BUILD_PRX) IMPORT_GATE_ARGS=$(IMPORT_GATE_ARGS) SFOFLAGS=$(SFOFLAGS) PSP_EBOOT_TITLE=$(PSP_EBOOT_TITLE)
+BUILD_CONFIG_STAMP = $(BUILD_DIR)/build-config.stamp
+EXTRA_CLEAN += $(BUILD_CONFIG_STAMP)
+$(OBJS) $(PSP_EBOOT_SFO): $(BUILD_CONFIG_STAMP)
+$(OBJS): $(IMPORT_GATE)
+$(BUILD_CONFIG_STAMP): FORCE
+	@printf '%s\n' '$(subst ','\'',$(BUILD_CONFIG))' > $@.tmp; \
+	if cmp -s $@.tmp $@; then rm -f $@.tmp; \
+	else echo "build configuration changed: rebuilding"; mv -f $@.tmp $@; fi
+.PHONY: FORCE
+FORCE:
 
 $(BUILD_DIR)/fontcopy.o: fontcopy.c fontcopy_config.h ../../tests/fixtures/psp_oracle/font_files.h
 	$(CC) $(CFLAGS) -c $< -o $@

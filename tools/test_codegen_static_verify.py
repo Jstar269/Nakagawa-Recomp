@@ -65,6 +65,11 @@ class StaticVerifyTests(unittest.TestCase):
         pts = codegen.sv_plan(elf, insns, labels, options=self.options)
         self.assertNotIn(0x300C, pts)
         self.assertNotIn(0x3008, pts)
+        # The same words with no label: only the branch and delay-slot resets can
+        # keep the pre-branch ori from joining 0x300C in one two-instruction run.
+        elf, insns, labels = _mk(words)
+        pts = codegen.sv_plan(elf, insns, labels, options=self.options)
+        self.assertEqual(pts, {})
 
     def test_sra_and_slt_are_signed(self):
         # lui $t0, 0x8000 ; sra $t1, $t0, 4 -> 0xF8000000 ; slt $t2, $t0, $zero -> 1
@@ -76,6 +81,23 @@ class StaticVerifyTests(unittest.TestCase):
         elf, insns, labels = _mk(words)
         pts = codegen.sv_plan(elf, insns, labels, options=self.options)
         self.assertEqual(pts, {0x4008: [(8, 0x80000000), (9, 0xF8000000), (10, 1)]})
+
+    def test_max_min_and_unmodeled_special_do_not_keep_stale_destinations(self):
+        for funct, expected in ((0x2C, 5), (0x2D, 3), (0x3F, None)):
+            with self.subTest(funct=funct):
+                words = {
+                    0x4800: (0x0F << 26) | (8 << 16) | 0x1234,  # lui t0, 0x1234
+                    0x4804: (0x09 << 26) | (4 << 16) | 5,       # addiu a0, zero, 5
+                    0x4808: (0x09 << 26) | (5 << 16) | 3,       # addiu a1, zero, 3
+                    0x480C: (4 << 21) | (5 << 16) | (8 << 11) | funct,
+                    0x4810: (0x0D << 26) | (9 << 16) | 7,      # ori t1, zero, 7
+                }
+                elf, insns, labels = _mk(words)
+                checks = dict(codegen.sv_plan(elf, insns, labels, options=self.options)[0x4810])
+                if expected is None:
+                    self.assertNotIn(8, checks)
+                else:
+                    self.assertEqual(checks[8], expected)
 
     def test_syscall_resets_lattice(self):
         # ori $a0,$zero,1 ; syscall ; ori $a1,$zero,2 : only a1 asserted... and the

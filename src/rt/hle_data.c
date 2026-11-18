@@ -13,6 +13,17 @@
 #include "hle_internal.h"
 #include "ge_scene.h"
 
+/* The SR_IOLOG and SR_FONTLOG switches, read once (hle_env_switch): sceIoOpen and sceIoIoctl
+ * test them on every call. */
+static int data_io_log_on(void) {
+    static int enabled = -1;
+    return hle_env_switch(&enabled, "SR_IOLOG");
+}
+static int data_font_log_on(void) {
+    static int enabled = -1;
+    return hle_env_switch(&enabled, "SR_FONTLOG");
+}
+
 #define SREG_OVERLAY_MAX_BYTES (1024u * 1024u)
 
 static int sreg_add_font_int(int cat, const char *name, uint32_t value) {
@@ -76,7 +87,7 @@ void sreg_build_font_registry(void) {
             }
             continue;
         }
-        if (getenv("SR_FONTLOG"))
+        if (data_font_log_on())
             fprintf(stderr, "sceReg: font index %u is served from the %s source as %s%s%s\n", index,
                     info.source, info.file_name,
                     info.served_as_regular ? " (its measured bold or italic style is served as regular)" : "",
@@ -242,6 +253,9 @@ static unsigned long long s_data_test_scan_names;    /* directory entries read *
 static unsigned long long s_data_test_scan_probes;   /* per-file metadata opens */
 static int s_data_test_guest_started;
 static int s_data_test_pace_ms;                      /* per-directory pacing hook */
+/* Archive discovery calls this with each directory it is about to open, so a test can
+ * remove one between the walk pushing it and opening it, as a concurrent delete would. */
+static void (*s_data_test_archive_walk_hook)(const wchar_t *dir);
 #endif
 /* Per-phase wall time of the one-time index preparation, reported on one stderr line in
  * every build. The developer route has measured 77-270 s here on a real ~59k-file tree
@@ -840,6 +854,11 @@ static int data_walk(const wchar_t *root, const char *mount,
                 if (fstatat(dirfd(dir), entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
                     fprintf(stderr, "host_data: entry could not be classified (errno=%d)\n", errno);
                     ok = 0;
+                } else if (data_loose_path_excluded(child_rel, exclude_paths,
+                                                    exclude_count)) {
+                    /* An excluded entry, of any type, is neither entered, indexed nor
+                     * opened, as in the Win32 walk, which tests exclusion before its
+                     * reparse-point refusals. */
                 } else if (S_ISLNK(st.st_mode)) {
                     /* This host's reparse point: a link can redirect the walk
                      * outside the root, so it is refused, not followed. */
@@ -850,9 +869,6 @@ static int data_walk(const wchar_t *root, const char *mount,
                         sr_wide_stricmp(name, skip_top_name) == 0) {
                         /* Already enumerated from its own root; do not pay for
                          * it twice. */
-                    } else if (data_loose_path_excluded(child_rel, exclude_paths,
-                                                        exclude_count)) {
-                        /* Excluded directories are never pushed onto the walk stack. */
                     } else if (!data_walk_push(&stack, &stack_count, &stack_capacity,
                                                child_host, child_rel)) {
                         fprintf(stderr, "host_data: directory-stack allocation failed\n");
@@ -864,9 +880,6 @@ static int data_walk(const wchar_t *root, const char *mount,
                 } else if (!S_ISREG(st.st_mode)) {
                     fprintf(stderr, "host_data: refusing non-regular entry %s\n", child_utf8);
                     ok = 0;
-                } else if (data_loose_path_excluded(child_rel, exclude_paths,
-                                                    exclude_count)) {
-                    /* An excluded file is not indexed or opened. */
                 } else {
 #ifdef SR_HLE_THREAD_SELFTEST
                     s_data_test_scan_probes++;
@@ -1025,11 +1038,15 @@ static int archive_data_discover(const wchar_t *root, SrArchiveVfs *vfs,
     size_t candidate_count = 0, candidate_capacity = 0;
     int ok = 1;
     int found = 0;
+    int walking_root = 1;
     while (ok && stack_count != 0u) {
         DataWalkDir current = stack[--stack_count];
+        const int is_root = walking_root;
+        walking_root = 0;
 #ifdef SR_HLE_THREAD_SELFTEST
         if (s_data_test_pace_ms > 0) sr_host_sleep_ms(s_data_test_pace_ms);
         s_data_test_walk_calls++;
+        if (s_data_test_archive_walk_hook) s_data_test_archive_walk_hook(current.host);
 #endif
         wchar_t *pattern = NULL;
         if (!sr_wide_join_alloc(current.host, L"*", &pattern)) {
@@ -1042,9 +1059,12 @@ static int archive_data_discover(const wchar_t *root, SrArchiveVfs *vfs,
         DWORD first_error = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
         free(pattern);
         if (handle == INVALID_HANDLE_VALUE) {
+            /* A missing root has no archives. A directory that vanished after the walk
+             * pushed it (a concurrent delete) holds none now; the rest are still walked. */
             if (first_error == ERROR_FILE_NOT_FOUND || first_error == ERROR_PATH_NOT_FOUND) {
                 free(current.host);
-                break;
+                if (is_root) break;
+                continue;
             }
             ok = 0;
             free(current.host);
@@ -1195,11 +1215,15 @@ static int archive_data_discover(const wchar_t *root, SrArchiveVfs *vfs,
     size_t candidate_count = 0, candidate_capacity = 0;
     int ok = 1;
     int found = 0;
+    int walking_root = 1;
     while (ok && stack_count != 0u) {
         DataWalkDir current = stack[--stack_count];
+        const int is_root = walking_root;
+        walking_root = 0;
 #ifdef SR_HLE_THREAD_SELFTEST
         if (s_data_test_pace_ms > 0) sr_host_sleep_ms(s_data_test_pace_ms);
         s_data_test_walk_calls++;
+        if (s_data_test_archive_walk_hook) s_data_test_archive_walk_hook(current.host);
 #endif
         char *host_utf8 = NULL;
         if (!sr_wide_to_utf8_alloc(current.host, &host_utf8)) {
@@ -1209,7 +1233,14 @@ static int archive_data_discover(const wchar_t *root, SrArchiveVfs *vfs,
         }
         DIR *dir = opendir(host_utf8);
         if (!dir) {
-            if (errno == ENOENT) { free(current.host); break; }
+            /* A missing root has no archives. A directory that vanished after the walk
+             * pushed it (a concurrent delete) holds none now; the rest are still walked. */
+            if (errno == ENOENT) {
+                free(host_utf8);
+                free(current.host);
+                if (is_root) break;
+                continue;
+            }
             ok = 0;
             free(host_utf8);
             free(current.host);
@@ -1914,7 +1945,12 @@ void sr_hle_test_data_reset(int pace_ms) {
     s_data_test_scan_probes = 0;
     s_data_test_guest_started = 0;
     s_data_test_pace_ms = pace_ms;
+    s_data_test_archive_walk_hook = NULL;
     memset(s_data_test_phase_ms, 0, sizeof(s_data_test_phase_ms));
+}
+
+void sr_hle_test_data_set_archive_walk_hook(void (*hook)(const wchar_t *dir)) {
+    s_data_test_archive_walk_hook = hook;
 }
 #endif
 
@@ -2058,7 +2094,7 @@ int data_archive_guest_path_allowed(const char *guest_path) {
  * Memory Stick by PSP-KERNEL-SEM-001 io-excl-existing (2026-10-31, probe 0c3cf0da), with and
  * without PSP_O_TRUNC. PSP_O_EXCL without PSP_O_CREAT opens the existing file. */
 static uint32_t io_open_exclusive_existing(const char *path) {
-    if (getenv("SR_IOLOG"))
+    if (data_io_log_on())
         fprintf(stderr, "sceIoOpen: %s exists; PSP_O_CREAT|PSP_O_EXCL answers EEXIST\n", path);
     return 0x80010011u;
 }
@@ -2131,6 +2167,22 @@ static uint32_t io_open_read_only_create_boundary(const char *path) {
     return 0x80010086u;
 }
 
+/* sceIoOpen with PSP_O_TRUNC on a Memory Stick file, without write access (no PSP_O_CREAT)
+ * or together with PSP_O_APPEND. No PSP cell measures either: #1892 measured PSP_O_TRUNC with
+ * write access and without PSP_O_APPEND (the kept-bytes rule in io_truncate_keeping_bytes),
+ * and the read-only PSP_O_CREAT | PSP_O_TRUNC cell (PSP-HLE-IO-SEEK-002) answers 0x80010016
+ * without truncating. A plain host truncation would empty the file on disk, so nothing is
+ * opened or cut. */
+static uint32_t io_open_trunc_boundary(const char *path) {
+    static atomic_flag reported = ATOMIC_FLAG_INIT;
+    if (!atomic_flag_test_and_set_explicit(&reported, memory_order_acq_rel))
+        fprintf(stderr,
+                "SEMANTIC_BOUNDARY: IO_OPEN_TRUNC_UNMEASURED: sceIoOpen(%s) with PSP_O_TRUNC "
+                "without write access or with PSP_O_APPEND, in a case no PSP cell measures, is "
+                "not supported yet (0x80010086)\n", path);
+    return 0x80010086u;
+}
+
 /* Whether the directory that would hold host file hp exists. */
 static int io_host_parent_dir_exists(const char *hp) {
     char parent[1024];
@@ -2148,7 +2200,7 @@ static int io_host_parent_dir_exists(const char *hp) {
 static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int forced_slot) {
     /* PSP flags: WRONLY=2, RDWR=3, APPEND=0x100, CREAT=0x200, TRUNC=0x400. */
     if (!path) return 0x80010016u;
-    if (getenv("SR_IOLOG"))
+    if (data_io_log_on())
         fprintf(stderr, "HLE_IoOpen: opening '%s' flags=0x%x\n", path, flags);
     IoRawDevicePath raw_device = io_raw_device_path(path);
     if (raw_device != IO_RAW_DEVICE_NONE && flags != 0x00000001u &&
@@ -2238,12 +2290,18 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
     sr_cd_status open_status = SR_CD_NOT_FOUND;
 #endif
     uint32_t lba, size;
-    /* The ISO lookup drops the device prefix, so an ms0: name that is also on the disc would
-     * open the disc file. The read-only PSP_O_TRUNC and PSP_O_EXCL creates are Memory Stick
-     * opens whose answer depends on the Memory Stick file alone (PSP-HLE-IO-SEEK-002); they never
-     * consult the disc. */
-    int in_iso = !read_only_create_trunc_ms0 && !read_only_create_exclusive_ms0 &&
-                 iso_lookup(path, &lba, &size) == 0;
+    /* The ISO lookup drops the device prefix, so an ms0: or fatms0: name that is also on the
+     * disc would open the disc file. A Memory Stick open never consults the disc: the read-only
+     * PSP_O_TRUNC and PSP_O_EXCL creates answer from the Memory Stick file alone
+     * (PSP-HLE-IO-SEEK-002), and a plain read never gets a same-named disc file in place of
+     * the Memory Stick file, or of the not-found answer for a missing one. */
+    const int memstick_device = strchr(path, ':') && sr_ms0_classify(path, NULL) == SR_MS0_OWNED;
+    /* Only the Memory Stick reaches a host file. PSP_O_TRUNC that would cut an existing file
+     * outside the measured kept-bytes rule stops before any host open. */
+    if (memstick_device && (flags & 0x0400u) && !exclusive &&
+        (!writing || (flags & 0x0100u)))
+        return io_open_trunc_boundary(path);
+    int in_iso = !memstick_device && iso_lookup(path, &lba, &size) == 0;
 
     if (writing || creating || !in_iso) {
         /* Host-backed file (writable storage). Without CREAT the file must already exist,
@@ -2351,7 +2409,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
                         s_fds[slot].size = loose_size; s_fds[slot].off = 0;
                         s_fds[slot].writable = writing || creating;
                         s_fds[slot].on_umd = 1;
-                        if (getenv("SR_IOLOG")) fprintf(stderr, "Open(%s) -> loose archive override size=%u\n",
+                        if (data_io_log_on()) fprintf(stderr, "Open(%s) -> loose archive override size=%u\n",
                                                         path, (unsigned)loose_size);
                         free(key);
                         return (uint32_t)slot;
@@ -2373,7 +2431,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
                         fclose(dfp);
                         return 0x80010005;
                     }
-                    if (getenv("SR_IOLOG")) fprintf(stderr, "Open(%s) -> data-root %s size=%u\n",
+                    if (data_io_log_on()) fprintf(stderr, "Open(%s) -> data-root %s size=%u\n",
                                                     path, entry->host, (unsigned)actual_size);
                     s_fds[slot].used = 1; s_fds[slot].host = dfp; s_fds[slot].lba = 0;
                     s_fds[slot].size = actual_size;
@@ -2404,7 +2462,7 @@ static uint32_t h_io_open_path_stock(const char *path, uint32_t flags, int force
                         s_fds[slot].archive_mount = archive_file.mount_index;
                         s_fds[slot].archive_entry = archive_file.entry_index;
                         s_fds[slot].on_umd = 1;
-                        if (getenv("SR_IOLOG")) fprintf(stderr, "Open(%s) -> XB member size=%u\n",
+                        if (data_io_log_on()) fprintf(stderr, "Open(%s) -> XB member size=%u\n",
                                                         path, (unsigned)archive_file.size);
                         free(key);
                         return (uint32_t)slot;
@@ -2561,7 +2619,7 @@ static int hle_enhancement_attach(int slot, const char *path, uint32_t flags) {
         f->size = entry->size;
         f->off = 0;
         entry->served = 1;
-        if (getenv("SR_IOLOG"))
+        if (data_io_log_on())
             fprintf(stderr, "Open(%s) -> enhancement data file size=%u\n", path, entry->size);
         free(key);
         return 1;
@@ -2734,6 +2792,17 @@ uint32_t io_ioctl_async_complete(uint32_t fd, uint32_t cmd, uint32_t in,
     return io_ioctl_args_mode(fd, cmd, in, inlen, out, outlen, 1);
 }
 
+/* The PPSSPP-derived sceIoIoctl seek cells, each noted once per run (Section 7). */
+enum { IO_SEEK_NOTE_RECORD, IO_SEEK_NOTE_WHENCE, IO_SEEK_NOTE_COUNT };
+static int s_io_seek_noted[IO_SEEK_NOTE_COUNT];
+static void io_seek_derived_note(int cell, int asynchronous, const char *what) {
+    if (s_io_seek_noted[cell]) return;
+    s_io_seek_noted[cell] = 1;
+    fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: %s seek (0x01010005) %s\n",
+            asynchronous ? "sceIoIoctlAsync" : "sceIoIoctl", what);
+}
+void sr_hle_test_io_seek_note_reset(void) { memset(s_io_seek_noted, 0, sizeof(s_io_seek_noted)); }
+
 static uint32_t io_ioctl_args_mode(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inlen,
                                    uint32_t out, uint32_t outlen, int asynchronous) {
     if (fd < 3 && s_fds[fd].used && s_fds[fd].kind == FD_KIND_STD)
@@ -2747,7 +2816,7 @@ static uint32_t io_ioctl_args_mode(uint32_t fd, uint32_t cmd, uint32_t in, uint3
     int ms_rule = io_ms0_file_ioctl_rule(f, cmd, in, inlen, out, outlen);
     if (ms_rule == IO_MS_IOCTL_REFUSED) return 0x80020325u;
     if (ms_rule == IO_MS_IOCTL_BOUNDARY) return io_ms0_file_ioctl_boundary(cmd, asynchronous);
-    if (getenv("SR_IOLOG"))
+    if (data_io_log_on())
         fprintf(stderr, "Ioctl fd=%u cmd=0x%08x in=0x%08x/%u out=0x%08x/%u\n",
                 fd, cmd, in, inlen, out, outlen);
     switch (cmd) {
@@ -2760,13 +2829,31 @@ static uint32_t io_ioctl_args_mode(uint32_t fd, uint32_t cmd, uint32_t in, uint3
         MEM_W32(out, f->off);
         return 0;
     case 0x01010005: { /* seek: indata = { u64 offset; u32 unk; u32 whence } */
+        /* PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+         * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceIo.cpp, __IoIoctl 0x01010005 and
+         * __IoLseekDest): an inlen of 4 or more still reads the whole 16-byte record, so the
+         * record must be readable guest memory (else EINVAL), a whence other than 0-2 answers
+         * the I/O error, and the destination stays inside [0, size]. The two derived answers
+         * are each noted once per run. */
         if (!in || inlen < 4) return 0x80010016;
+        if (!sr_guest_span_readable(in, 16u)) {
+            io_seek_derived_note(IO_SEEK_NOTE_RECORD, asynchronous,
+                                 "answers EINVAL (0x80010016) for a 16-byte record that is not "
+                                 "readable guest memory");
+            return 0x80010016;
+        }
         int64_t off = (int64_t)(((uint64_t)MEM_R32(in + 4) << 32) | MEM_R32(in));
         uint32_t whence = MEM_R32(in + 12);
+        if (whence > 2u) {
+            io_seek_derived_note(IO_SEEK_NOTE_WHENCE, asynchronous,
+                                 "answers the I/O error (0x80010005) for a whence above 2");
+            return 0x80010005;
+        }
         int64_t base = whence == 1 ? f->off : (whence == 2 ? f->size : 0);
-        int64_t np = base + off;
-        if (np < 0 || np > f->size) return 0x80010005;  /* can't seek past EOF here */
-        f->off = (uint32_t)np;
+        /* Compare against the bounds, so base + off is never formed out of range. */
+        if (off < -base || off > (int64_t)f->size - base)
+            return 0x80010005;  /* can't seek past EOF here */
+        f->off = (uint32_t)(base + off);
         return 0;
     }
     case 0x01020006:  /* get start sector (ISO-backed fds; host files report 0) */
@@ -2784,56 +2871,17 @@ static uint32_t io_ioctl_args_mode(uint32_t fd, uint32_t cmd, uint32_t in, uint3
         if (!out || count > outlen) return 0x80010016;
         if (f->off >= f->size) return 0u;
         if (count > f->size - f->off) count = f->size - f->off;
-        uint64_t perf_started = sr_perf_now_ns();
-        if (f->enhancement_data) {
-            if (!sr_guest_span_writable(out, count)) return 0x80010016u;
-            for (uint32_t i = 0; i < count; i++) MEM_W8(out + i, f->enhancement_data[f->off + i]);
-            f->off += count;
-            return count;
-        }
-        if (f->archive_vfs) {
-            if (!out || !sr_guest_span_writable(out, count)) return 0x80010016u;
-            uint8_t archive_tmp[4096];
-            uint32_t archive_done = 0;
-            SrArchiveFile archive_file = {
-                f->archive_mount, f->archive_entry, f->size, -1
-            };
-            while (archive_done < count) {
-                uint32_t amount = count - archive_done;
-                if (amount > sizeof(archive_tmp)) amount = (uint32_t)sizeof(archive_tmp);
-                size_t got = 0;
-                NkResult result = sr_archive_vfs_read(
-                    f->archive_vfs, &archive_file, f->off + archive_done,
-                    archive_tmp, amount, &got);
-                if (result != NK_OK || got == 0u || got > amount) return 0x80010005u;
-                for (uint32_t i = 0; i < got; i++)
-                    MEM_W8(out + archive_done + i, archive_tmp[i]);
-                archive_done += (uint32_t)got;
-            }
-            f->off += archive_done;
-            if (perf_started)
-                sr_perf_storage_read(SR_PERF_STORAGE_VFS, archive_done, perf_started,
-                                     archive_done == count);
-            return archive_done;
-        }
-        uint8_t tmp[4096];
-        uint32_t done = 0;
-        if (f->host && io_host_seek(f->host, f->off) != 0) return 0x80010005u;
-        while (done < count) {
-            uint32_t n = count - done; if (n > sizeof(tmp)) n = sizeof(tmp);
-            if (f->host) { size_t got = fread(tmp, 1, n, f->host); if (got < n) n = (uint32_t)got; }
-            else {
-                int got = iso_read(f->lba, f->off + done, tmp, n);
-                n = got > 0 ? (uint32_t)got : 0;
-            }
-            for (uint32_t k = 0; k < n; k++) MEM_W8(out + done + k, tmp[k]);
-            done += n;
-            if (n == 0) break;
-        }
-        if (f->host && perf_started)
-            sr_perf_storage_read(SR_PERF_STORAGE_VFS, done, perf_started, done == count);
-        f->off += done;
-        return done;
+        /* The whole destination is checked before any byte moves, so a bad buffer is EINVAL
+         * and not a partial write reported as complete. The read itself is sceIoRead's
+         * (io_read_now), as in PPSSPP 3bc60270 __IoIoctl 0x01030008: a PGD descriptor is
+         * decrypted through the same blocks, never served as its raw ciphertext. */
+        if (!sr_guest_span_writable(out, count)) return 0x80010016u;
+        CpuState read_cpu;
+        memset(&read_cpu, 0, sizeof(read_cpu));
+        read_cpu.r[4] = fd;
+        read_cpu.r[5] = out;
+        read_cpu.r[6] = count;
+        return io_read_now(&read_cpu);
     }
     case 0x01d20001:  /* tell (PPSSPP writes the raw seek position here too) */
         if (!out || outlen < 4) return 0x80010016;

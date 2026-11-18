@@ -1198,8 +1198,9 @@ it needs all of the following:
 - `tools/nk_cli.py` reachable. The player searches, in order: the `NK_INSTALL_ROOT`
   environment variable (a folder containing `tools/`), `<player exe>/tools`,
   `<player exe>/../tools`, `<player exe>/../source/tools` (the v0.0.1 release
-  layout), the working directory, and its parent. Running the player from the
-  repository root or from `build/` finds it automatically.
+  layout). The working directory is never searched, so a `tools/nk_cli.py` in the
+  folder the player starts from is never run. A player built in a checkout's
+  `build/` finds it automatically.
 - `python`, `gcc`, and `mingw32-make` from either the current environment or the
   player's per-user downloaded build tools. The player changes `PATH` only for
   the build child; it never edits system `PATH` or the registry.
@@ -1474,7 +1475,7 @@ the issue #1391 import/VFPU scope. Before this work, the full `tools/` scan used
 `python -m mypy --no-incremental --no-error-summary --no-pretty --python-version 3.15 --platform linux --explicit-package-bases tools`
 and reported 353 errors in 120 modules. The full-tree per-module ratchet remains in
 `tools/mypy_baseline.json`; its entries outside the clean scope are existing typing debt, not
-suppressed errors. The current full-tree residual is 246 errors in 92 modules; their per-module
+suppressed errors. The current full-tree residual is 133 errors in 48 modules; their per-module
 counts are listed in `tools/mypy_baseline.json` and remain guarded by that ratchet. The clean scope
 directly checks `tools/verify_vfpu_provenance.py`,
 `tools/hle_manifest.py`, `tools/psp_import_table.py`, `tools/import_audit_gate.py`,

@@ -235,6 +235,13 @@ CASE_ID = 161
 # 166: #1386's netconf and game sharing dialog cells of 161 only (no savedata, no gamedata install).
 else ifeq ($(CASE),hle-utility-netconf-sharing)
 CASE_ID = 166
+# 189-191: #1386's attended dialog runs, one dialog type per launch, dismissed by a person.
+else ifeq ($(CASE),hle-utility-attended-netconf)
+CASE_ID = 189
+else ifeq ($(CASE),hle-utility-attended-sharing)
+CASE_ID = 190
+else ifeq ($(CASE),hle-utility-attended-gamedata)
+CASE_ID = 191
 # 162: #1380's flash0:/ms0:/disc0: seek cells and sceIoIoctl file commands (probe_hle_measure.c).
 else ifeq ($(CASE),hle-io-seek)
 CASE_ID = 162
@@ -674,6 +681,15 @@ OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(
 else ifeq ($(CASE),hle-utility-netconf-sharing)
 TARGET = $(BUILD_DIR)/hle_utility_netconf_sharing
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-utility-attended-netconf)
+TARGET = $(BUILD_DIR)/hle_utility_attended_netconf
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-utility-attended-sharing)
+TARGET = $(BUILD_DIR)/hle_utility_attended_sharing
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
+else ifeq ($(CASE),hle-utility-attended-gamedata)
+TARGET = $(BUILD_DIR)/hle_utility_attended_gamedata
+OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o $(BUILD_DIR)/hle_utility_imports.o
 else ifeq ($(CASE),hle-io-seek)
 TARGET = $(BUILD_DIR)/hle_io_seek
 OBJS = $(BUILD_DIR)/probe_hle_measure.o $(BUILD_DIR)/threadman_user_imports.o
@@ -1063,6 +1079,46 @@ USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
 USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceUmdUser
+endif
+# hle-utility-attended-netconf (189): netconf's four calls, the net module pair, and from sceNet,
+# sceNetInet and sceNetApctl only their Init and Term calls (sceNetInet with the libc glue's four,
+# as for 161). No ad hoc library, UMD call or other dialog can be linked.
+ifeq ($(CASE),hle-utility-attended-netconf)
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x4DB1E739,0x6332AA39,0x91E70E35,0xF88155F6,0x1579A159,0x64D50C56
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNet=0x39AF39A6,0x281928A9
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetInet=0x17943399,0xA9ED66B9,0x8D7284EA,0xCDA85C99,0x7AA671BC,0xFBABE411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetApctl=0xE2F91F9B,0xB3EDD0EC
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhoc --forbid-library sceNetAdhocctl
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceUmdUser
+endif
+# hle-utility-attended-sharing (190): game sharing's four calls, the net module pair, and from
+# sceNet, sceNetAdhoc and sceNetAdhocctl only their Init and Term calls. No apctl, UMD or other
+# dialog call can be linked.
+ifeq ($(CASE),hle-utility-attended-sharing)
+LIBS += -lpspnet_adhocctl -lpspnet_adhoc
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0xC492F751,0x946963F3,0x7853182D,0xEFC6F80F,0x1579A159,0x64D50C56
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNet=0x39AF39A6,0x281928A9
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetInet=0x8D7284EA,0xCDA85C99,0x7AA671BC,0xFBABE411
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhoc=0xE1D621D7,0xA62C6F57
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetAdhocctl=0xE26F226E,0x9D689E13
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetApctl
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceUmdUser
+endif
+# hle-utility-attended-gamedata (191): the gamedata install dialog's four calls, the UMD presence
+# check of its precheck, and no net call or other dialog.
+ifeq ($(CASE),hle-utility-attended-gamedata)
+LIBS += -lpspumd
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUtility=0xA5DA2406,0x34B78343,0x24AC31EB,0xB57E95D9,0x4AECD179,0x32E32DCB
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceUmdUser=0x46EBB729
+USER_MODE_IMPORT_GATE_ARGS += --exact-library sceNetInet=0x8D7284EA,0xCDA85C99,0x7AA671BC,0xFBABE411
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNet --forbid-library sceNetApctl
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhoc --forbid-library sceNetAdhocctl
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceNetAdhocMatching --forbid-library sceNetResolver
+USER_MODE_IMPORT_GATE_ARGS += --forbid-library sceHttp --forbid-library sceSsl --forbid-library sceReg
 endif
 ifeq ($(CASE),cpu-timing)
 # The shared probe cleanup checks interrupt state; cpu-timing also calls the
