@@ -95,12 +95,17 @@ static size_t nk_ui_sdl_trigger(NkUiSdlInput *state, const SDL_GamepadAxisEvent 
                                 double now_s, NkUiEvent *out, size_t cap) {
     int side = axis->axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? 0 : 1;
     float value = nk_ui_sdl_axis(axis->value);
-    bool down = state->trigger_down[side] ? value >= NK_UI_STICK_RELEASE
-                                          : value > NK_UI_STICK_ENGAGE;
+    bool down;
+    if (state->trigger_down[side] && (int)axis->which != state->trigger_device[side]) {
+        return 0u; /* another pad holds this trigger; a resting pad cannot release it */
+    }
+    down = state->trigger_down[side] ? value >= NK_UI_STICK_RELEASE
+                                     : value > NK_UI_STICK_ENGAGE;
     if (down == state->trigger_down[side]) {
         return 0u;
     }
     state->trigger_down[side] = down;
+    state->trigger_device[side] = (int)axis->which;
     return nk_ui_input_button(&state->input,
                               side == 0 ? NK_UI_BTN_PAGE_PREV : NK_UI_BTN_PAGE_NEXT, down,
                               (int)axis->which, nk_ui_sdl_family(axis->which), now_s,
@@ -225,15 +230,28 @@ size_t nk_ui_sdl_input_translate(NkUiSdlInput *state, const union SDL_Event *eve
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
         return nk_ui_sdl_pad_button(state, &event->gbutton, now_s, out, cap);
     case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        if (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
+            event->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
+            return nk_ui_sdl_trigger(state, &event->gaxis, now_s, out, cap);
+        }
+        if (event->gaxis.axis != SDL_GAMEPAD_AXIS_LEFTX &&
+            event->gaxis.axis != SDL_GAMEPAD_AXIS_LEFTY) {
+            return 0u;
+        }
+        /* The stick direction belongs to the pad that pressed it: another pad's axis
+           events neither release nor re-press it. A new pad starts from its own centre. */
+        if ((int)event->gaxis.which != state->stick_device) {
+            if (state->input.stick_dir != NK_UI_DIR_NONE) {
+                return 0u;
+            }
+            state->stick_device = (int)event->gaxis.which;
+            state->stick_x = 0.0f;
+            state->stick_y = 0.0f;
+        }
         if (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX) {
             state->stick_x = nk_ui_sdl_axis(event->gaxis.value);
-        } else if (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
-            state->stick_y = nk_ui_sdl_axis(event->gaxis.value);
-        } else if (event->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER ||
-                   event->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) {
-            return nk_ui_sdl_trigger(state, &event->gaxis, now_s, out, cap);
         } else {
-            return 0u;
+            state->stick_y = nk_ui_sdl_axis(event->gaxis.value);
         }
         return nk_ui_input_stick(&state->input, state->stick_x, state->stick_y,
                                  (int)event->gaxis.which, nk_ui_sdl_family(event->gaxis.which),
@@ -246,12 +264,30 @@ size_t nk_ui_sdl_input_translate(NkUiSdlInput *state, const union SDL_Event *eve
         NkUiPadFamily family = nk_ui_input_last_device(&state->input) == device
                                    ? nk_ui_input_last_family(&state->input)
                                    : NK_UI_PAD_NEUTRAL;
+        int side;
         if (nk_ui_input_last_device(&state->input) == device) {
             nk_ui_input_reset(&state->input);
             state->stick_x = 0.0f;
             state->stick_y = 0.0f;
             state->trigger_down[0] = false;
             state->trigger_down[1] = false;
+        } else {
+            /* Another device was used last, so the rest stays held; still let go of what
+               this pad held itself, without relying on SDL recentering it first. */
+            if (state->stick_device == device) {
+                (void)nk_ui_input_stick(&state->input, 0.0f, 0.0f, device, NK_UI_PAD_NEUTRAL,
+                                        now_s, out, cap);
+                state->stick_x = 0.0f;
+                state->stick_y = 0.0f;
+            }
+            for (side = 0; side < 2; ++side) {
+                if (state->trigger_down[side] && state->trigger_device[side] == device) {
+                    state->trigger_down[side] = false;
+                    (void)nk_ui_input_button(&state->input,
+                                             side == 0 ? NK_UI_BTN_PAGE_PREV : NK_UI_BTN_PAGE_NEXT,
+                                             false, device, NK_UI_PAD_NEUTRAL, now_s, out, cap);
+                }
+            }
         }
         return nk_ui_input_device_change(&state->input, device, family, false, out, cap);
     }

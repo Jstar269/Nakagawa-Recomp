@@ -117,6 +117,41 @@ PLAYER_UI_SHARD_ENV = "NAKAGAWA_PLAYER_UI_SHARD"
 # repeat check can see the player's markers (UI_NEXT_ACTIVE) on passing runs too.
 PLAYER_UI_ECHO_ENV = "NAKAGAWA_PLAYER_UI_ECHO"
 
+# The check package_builder.c's python_candidate_runs_required_version runs on a candidate
+# when no 3.15 is found first: CPython 3.14 or 3.15, and not an MSYS2 mingw build.
+PLAYER_PYTHON_PROBE = (
+    "import sys, sysconfig; sys.exit(sys.implementation.name != 'cpython' or "
+    "sysconfig.get_platform().startswith('mingw') or "
+    "not ((3, 14) <= sys.version_info[:2] <= (3, 15)))"
+)
+
+
+def player_accepted_python() -> str | None:
+    """An interpreter the player's own search (package_builder_find_python) should accept,
+    found here without the player: PYTHON, MSYS2's UCRT64 paths on Windows, python3 and
+    python on PATH, then the POSIX fallbacks. None when this host has none."""
+    windows = os.name == "nt"
+    candidates = [os.environ["PYTHON"]] if os.environ.get("PYTHON") else []
+    if windows:
+        candidates += ["C:/msys64/ucrt64/bin/python3.exe", "C:/msys64/ucrt64/bin/python.exe"]
+    names = ("python3.exe", "python.exe") if windows else ("python3", "python")
+    for directory in os.environ.get("PATH", "").split(";" if windows else ":"):
+        if directory:
+            candidates += [os.path.join(directory, name) for name in names]
+    if not windows:
+        candidates += ["/usr/bin/python3", "/usr/local/bin/python3", "/usr/bin/python"]
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            probe = subprocess.run([candidate, "-c", PLAYER_PYTHON_PROBE], capture_output=True,
+                                   timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            return candidate
+    return None
+
 
 def parse_shard(spec: str) -> tuple[int, int]:
     match = re.fullmatch(r"(0|[1-9][0-9]{0,3})/([1-9][0-9]{0,3})", spec)
@@ -4050,6 +4085,12 @@ class NativePlayerUiTests(unittest.TestCase):
             steps, names = self.problem_report_steps(stdout)
             phases = [int(step["problem_report"]) for step in steps]
             if 6 in phases:
+                # The page's no-Python answer is a skip only when this host really has no
+                # interpreter the player accepts; otherwise the player's search missed it.
+                accepted = player_accepted_python()
+                if accepted is not None:
+                    self.fail(f"the page says no Python, but {accepted} is a CPython 3.14 or "
+                              f"3.15 the player's search accepts:\n{stdout}")
                 self.skipTest("no Python interpreter on this host, so the page shows the command")
             # 1 is listing, 2 previewed, 4 done (PlayerReportPhase).
             self.assertEqual(phases[:1], [1], stdout)
@@ -6976,10 +7017,6 @@ class ScreenshotDeterminismTests(unittest.TestCase):
                               f"--view={view}: the two captures differ")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PlayerVersionIdentityTests(unittest.TestCase):
     """The About page's build date comes from SOURCE_DATE_EPOCH when it is set.
 
@@ -7046,3 +7083,7 @@ class PlayerVersionIdentityTests(unittest.TestCase):
         self.assertIn("-DNK_PLAYER_BUILD_EPOCH=1792713600LL", defines)
         again = self._player_defines({"SOURCE_DATE_EPOCH": "1792713600"})
         self.assertEqual(defines, again, "the same epoch gives the same defines")
+
+
+if __name__ == "__main__":
+    unittest.main()

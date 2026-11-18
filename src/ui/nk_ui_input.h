@@ -258,9 +258,11 @@ union SDL_Event;
 typedef struct {
     NkUiInput input;
     float event_scale;        /* window-event units to logical UI pixels */
-    float stick_x;
+    float stick_x;            /* the left stick of stick_device */
     float stick_y;
+    int stick_device;         /* the pad whose stick values these are; it owns a held direction */
     bool trigger_down[2];     /* left, right: pressed past the stick thresholds */
+    int trigger_device[2];    /* the pad holding each trigger while trigger_down is set */
     float wheel_acc_x;
     float wheel_acc_y;
 } NkUiSdlInput;

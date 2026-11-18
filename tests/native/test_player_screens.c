@@ -434,6 +434,9 @@ static const char *const k_settings_tools[] = {
 
 static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     PlayerUiSettingsModel settings;
+    /* The game page's "Library (...)" values: player_ui_screen_settings reads them at the
+       end of this function, so they live as long as `settings` does. */
+    char followed[PLAYER_PART_COUNT][48];
     memset(&settings, 0, sizeof(settings));
     settings.page = which == FLOW_SETTINGS_ONLINE || which == FLOW_SETTINGS_ONLINE_ON ||
                     which == FLOW_SETTINGS_ONLINE_DISCORD_ON ||
@@ -457,7 +460,6 @@ static PlayerUiAction draw_settings_case(NkUi *ui, FlowCase which) {
     /* Settings > Enhanced (#2055): the library's default Enhanced (Authentic for its off
        case) with the fresh parts; the title case is one game's page, following it. */
     {
-        char followed[PLAYER_PART_COUNT][48];
         bool title = which == FLOW_SETTINGS_ACE_TITLE;
         settings.enhanced_library_on = which != FLOW_SETTINGS_ACE_OFF;
         settings.enhanced_on = settings.enhanced_library_on;
@@ -5676,10 +5678,11 @@ static int capture_screens(const char *directory) {
     CaptureRig rig;
     bool ok = false;
 
+    /* --capture-dir asks for the captures, so a run that cannot write them fails. */
     if (SDL_Init(SDL_INIT_VIDEO) == false) {
-        fprintf(stderr, "SKIP: SDL video is unavailable for screen captures: %s\n",
+        fprintf(stderr, "FAIL: SDL video is unavailable for screen captures: %s\n",
                 SDL_GetError());
-        return 77;
+        return 1;
     }
     surface = SDL_CreateSurface(1280, 800, SDL_PIXELFORMAT_RGBA32);
     if (surface == NULL) goto done;
@@ -5687,7 +5690,7 @@ static int capture_screens(const char *directory) {
     if (renderer == NULL) goto done;
     ttf = nk_ui_ttf_create(NULL, 0u);
     if (ttf == NULL) {
-        fprintf(stderr, "SKIP: SDL3_ttf is unavailable for screen captures: %s\n",
+        fprintf(stderr, "FAIL: SDL3_ttf is unavailable for screen captures: %s\n",
                 nk_ui_ttf_last_error());
         ok = false;
         goto done;
@@ -6028,8 +6031,9 @@ done:
 #else
 static int capture_screens(const char *directory) {
     (void)directory;
-    puts("SKIP: screen captures need SDL3 and SDL3_ttf headers");
-    return 77;
+    fputs("FAIL: --capture-dir needs a build with SDL3 and SDL3_ttf "
+          "(make nk-ui-player-screens-capture)\n", stderr);
+    return 1;
 }
 #endif
 
@@ -8075,8 +8079,7 @@ int main(int argc, char **argv) {
         compare_golden("tests/fixtures/nk_ui/title.golden", title, title_size);
     }
     if (capture_dir != NULL && failures == 0) {
-        int capture_result = capture_screens(capture_dir);
-        if (capture_result != 0 && capture_result != 77) ++failures;
+        if (capture_screens(capture_dir) != 0) ++failures;
     }
     if (failures != 0) return 1;
     puts("player screen snapshots and router focus tests passed");
