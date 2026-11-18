@@ -17,6 +17,7 @@ explicit test/example, or a documented platform convention.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shutil
@@ -54,6 +55,20 @@ def _make_workspace(base: Path) -> Path:
     return root
 
 
+def _isolated_git_env() -> dict[str, str]:
+    """The environment for a temporary fixture repository, free of the host's Git setup.
+
+    The host's global and system configuration (a core.hooksPath commit-msg hook, an
+    init.templateDir, a commit template) and inherited GIT_* variables (GIT_DIR or
+    GIT_INDEX_FILE from a hook run, GIT_CONFIG_PARAMETERS) would otherwise reach the fixture
+    and fail or redirect its commands for reasons unrelated to the code under test.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(
         [
@@ -67,6 +82,7 @@ def _git(cwd: Path, *args: str) -> None:
             *args,
         ],
         cwd=cwd,
+        env=_isolated_git_env(),
         capture_output=True,
         text=True,
         check=True,
@@ -202,6 +218,18 @@ class DoctorWorktreeAccumulationTests(unittest.TestCase):
     def _warnings(report: nk_doctor.Report) -> dict[str, nk_doctor_core.Result]:
         return {r.code: r for r in report.results if r.status == "WARN"}
 
+    def test_fixture_repository_ignores_the_hosts_global_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hooks = Path(tmp) / "host-hooks"
+            hook = _write(hooks / "commit-msg",
+                          b"#!/bin/sh\necho 'rejected by host policy' >&2\nexit 1\n")
+            hook.chmod(0o755)
+            config = _write(Path(tmp) / "host-gitconfig",
+                            f"[core]\n\thooksPath = {hooks.as_posix()}\n".encode("utf-8"))
+            with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)}):
+                repo = self._repo(Path(tmp))
+            self.assertTrue((repo / ".git").is_dir())
+
     def test_single_checkout_passes_without_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._repo(Path(tmp))
@@ -309,9 +337,22 @@ class ExtractXbPathUtilityTests(unittest.TestCase):
                 extract_xb.contained_path(root_real, "../escape.bin")
 
 
+def _remove_tree(path: Path) -> None:
+    """Remove a fixture tree, including a path longer than MAX_PATH on Windows."""
+    target = os.path.abspath(path)
+    if os.name == "nt":
+        target = "\\\\?\\" + target
+    shutil.rmtree(target)
+
+
 class CleanWorkspacePathTests(unittest.TestCase):
+    def _temp_root(self, prefix: str) -> Path:
+        root = Path(tempfile.mkdtemp(prefix=prefix))
+        self.addCleanup(_remove_tree, root)
+        return root
+
     def test_plan_and_delete_under_space_and_unicode_root(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="nk clean 試験 "))
+        root = self._temp_root("nk clean 試験 ")
         for marker in nk_clean.WORKSPACE_ANCHORS:
             _write(root / marker)
         doomed = _write(root / "build" / "サブ ディレクトリ" / "オブジェクト.o", b"obj")
@@ -330,7 +371,7 @@ class CleanWorkspacePathTests(unittest.TestCase):
         self.assertTrue(keep.exists())
 
     def test_long_path_under_build_is_selected_or_clearly_refused(self) -> None:
-        root = Path(tempfile.mkdtemp(prefix="nk clean long "))
+        root = self._temp_root("nk clean long ")
         for marker in nk_clean.WORKSPACE_ANCHORS:
             _write(root / marker)
         shallow = _write(root / "build" / "shallow.o", b"obj")
@@ -349,9 +390,16 @@ class CleanWorkspacePathTests(unittest.TestCase):
         scan_errors = [message for _, message in preview.errors]
         if created:
             long_rel = deep_file.relative_to(root).as_posix()
+            # The refusal must name the long path or a folder above it; an error about some
+            # other path does not account for a long file missing from the preview.
+            refused = any(
+                rel == long_rel or long_rel.startswith(rel.rstrip("/") + "/")
+                for rel, _ in preview.errors
+            )
             self.assertTrue(
-                long_rel in selected or scan_errors,
-                "a >260-char path must be either selected or reported as a scan refusal",
+                long_rel in selected or refused,
+                "a >260-char path must be either selected or reported as a scan refusal "
+                f"(errors={preview.errors})",
             )
         else:
             self.assertTrue(
@@ -444,10 +492,19 @@ class TrackedMachinePathTests(unittest.TestCase):
             "Nakagawa workspace root",
         ),
         (re.compile(r"/(?:home|Users)/[^\s/]+"), "POSIX user-home path"),
-        (re.compile(r"/mnt/[a-z]/(?:Users|nk)(?:[\\/]|(?![A-Za-z0-9_]))"), "WSL user/workspace root"),
+        # drvfs is case-insensitive, so a lowercase users folder or an uppercase drive letter
+        # or workspace name reaches the same folders.
+        (
+            re.compile(r"/mnt/[a-z]/(?:users|nk)(?:[\\/]|(?![A-Za-z0-9_]))", re.IGNORECASE),
+            "WSL user/workspace root",
+        ),
     )
 
     DRIVE_TOKEN = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/][A-Za-z0-9_./\\-]*")
+    #: What a drive-rooted path can still hold after DRIVE_TOKEN's ASCII run stops (a
+    #: non-ASCII or punctuation folder name), so `C:\` followed by such a name is compared
+    #: whole and never passes as the bare drive root.
+    DRIVE_TOKEN_CONTINUATION = re.compile(r"[^\s\"'`<>|),;\]}]+")
 
     #: Documented platform conventions and example placeholders, by normalised
     #: lower-case prefix. Every reason naming docs/SETUP.md must stay true there.
@@ -489,26 +546,38 @@ class TrackedMachinePathTests(unittest.TestCase):
             return True
         return False
 
-    def _tracked_texts(self) -> list[tuple[str, str]]:
-        if shutil.which("git") is None:
-            self.skipTest("git is required to enumerate tracked first-party files")
+    def _ls_files(self, root: Path, *options: str) -> list[str]:
         try:
-            listing = subprocess.run(
-                ["git", "-C", str(ROOT), "ls-files", "-z"],
+            raw = subprocess.run(
+                ["git", "-C", str(root), "ls-files", "-z", *options],
                 capture_output=True,
-                text=True,
                 check=True,
             ).stdout
         except (OSError, subprocess.CalledProcessError) as exc:
             self.fail(f"git ls-files failed to enumerate tracked files: {exc}")
+        # Git prints path bytes as stored; os.fsdecode maps them back to the names the file
+        # system uses (UTF-8 on Windows, surrogateescape elsewhere), whatever the locale is.
+        return [os.fsdecode(entry) for entry in raw.split(b"\0") if entry]
+
+    def _tracked_texts(self, root: Path = ROOT) -> list[tuple[str, str]]:
+        if shutil.which("git") is None:
+            self.skipTest("git is required to enumerate tracked first-party files")
         texts: list[tuple[str, str]] = []
-        for rel in (entry for entry in listing.split("\0") if entry):
+        unreadable: list[str] = []
+        deleted: set[str] | None = None
+        for rel in self._ls_files(root):
             if rel.startswith(self.THIRD_PARTY_PREFIXES):
                 continue
-            path = ROOT / rel
+            path = root / rel
             try:
                 data = path.read_bytes()
-            except OSError:
+            except OSError as exc:
+                if deleted is None:
+                    deleted = set(self._ls_files(root, "--deleted"))
+                # A tracked file deleted in the worktree has no bytes to publish; any other
+                # read failure would leave the file unchecked, so it is reported.
+                if rel not in deleted or path.exists():
+                    unreadable.append(f"{rel}: {exc}")
                 continue
             if len(data) > 8 * 1024 * 1024 or publish_audit._is_binary_bytes(data):
                 continue
@@ -516,22 +585,96 @@ class TrackedMachinePathTests(unittest.TestCase):
             if text is None:
                 continue
             texts.append((rel, text))
+        self.assertEqual(unreadable, [], "these tracked files could not be read, so the path "
+                         "scan would pass without checking them")
         return texts
 
     @staticmethod
     def _line_of(text: str, offset: int) -> int:
         return text.count("\n", 0, offset) + 1
 
+    def _root_violations(self, rel: str, text: str) -> list[str]:
+        return [
+            f"{rel}:{self._line_of(text, match.start())}: {kind}: {match.group(0)!r}"
+            for pattern, kind in self.USER_OR_WORKSPACE_ROOTS
+            for match in pattern.finditer(text)
+        ]
+
+    def _drive_violations(self, rel: str, text: str) -> list[str]:
+        violations: list[str] = []
+        for match in self.DRIVE_TOKEN.finditer(text):
+            whole = match.group(0)
+            rest = self.DRIVE_TOKEN_CONTINUATION.match(text, match.end())
+            if rest:
+                whole += rest.group(0)
+            token = self._collapse_backslashes(whole).lower()
+            if token in self.ALLOWED_DRIVE_TOKENS:
+                continue
+            if any(token.startswith(prefix) for prefix in self.ALLOWED_DRIVE_PREFIXES):
+                continue
+            violations.append(f"{rel}:{self._line_of(text, match.start())}: {whole!r}")
+        return violations
+
+    def test_lowercase_and_uppercase_wsl_roots_are_flagged(self) -> None:
+        # Built from pieces so this file's own text names no such root.
+        for sample in ("/mnt/c/" + "users/someone/x", "/mnt/C/" + "Users/someone",
+                       "/mnt/c/" + "NK/main", "/mnt/d/" + "nk"):
+            with self.subTest(sample=sample):
+                self.assertTrue(self._root_violations("sample.txt", f"see {sample} here"))
+
+    def test_drive_root_followed_by_a_non_ascii_or_punctuation_folder_is_not_bare(self) -> None:
+        for folder in ("作業\\nakagawa\\build", "~me\\x", "(private)\\a", "作業/nakagawa"):
+            sample = "C:" + ("/" if "/" in folder else "\\") + folder
+            with self.subTest(sample=sample):
+                self.assertTrue(self._drive_violations("sample.txt", f"path {sample} end"))
+        for allowed in ("C:\\", "C:/", "C:\\msys64\\ucrt64\\bin", "C:/path/to/作業"):
+            with self.subTest(allowed=allowed):
+                self.assertEqual(self._drive_violations("sample.txt", f'"{allowed}" end'), [])
+
+    def test_tracked_path_scan_reads_non_ascii_names_under_any_locale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "-b", "main")
+            _write(repo / "試験 notes.txt", b"plain text\n")
+            _git(repo, "add", "試験 notes.txt")
+            # A legacy (non-UTF-8) locale decode is where a name would turn into mojibake.
+            env = dict(os.environ, PYTHONUTF8="0", PYTHONIOENCODING="utf-8")
+            child = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]);"
+                 "import test_workspace_paths as t;"
+                 "case = t.TrackedMachinePathTests('test_drive_rooted_tokens_are_documented_or_explicit');"
+                 "print(ascii([rel for rel, _ in case._tracked_texts(Path(sys.argv[2]))]))",
+                 str(TOOLS), str(repo)],
+                cwd=tmp, env=env, capture_output=True, text=True, encoding="utf-8", timeout=120)
+            self.assertEqual(child.returncode, 0, child.stderr)
+            self.assertEqual(child.stdout.strip(), ascii(["試験 notes.txt"]))
+
+    def test_tracked_path_scan_reports_an_unreadable_tracked_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "-b", "main")
+            _write(repo / "kept.txt", b"kept\n")
+            _write(repo / "removed.txt", b"removed\n")
+            _write(repo / "replaced.txt", b"replaced\n")
+            _git(repo, "add", "kept.txt", "removed.txt", "replaced.txt")
+            (repo / "removed.txt").unlink()
+            self.assertEqual([rel for rel, _ in self._tracked_texts(repo)],
+                             ["kept.txt", "replaced.txt"])
+            (repo / "replaced.txt").unlink()
+            (repo / "replaced.txt").mkdir()
+            with self.assertRaises(AssertionError) as ctx:
+                self._tracked_texts(repo)
+            self.assertIn("replaced.txt", str(ctx.exception))
+
     def test_tracked_files_name_no_user_profile_or_workspace_root(self) -> None:
         violations: list[str] = []
         for rel, text in self._tracked_texts():
             if rel in self.ROOT_PATH_EXCEPTIONS:
                 continue
-            for pattern, kind in self.USER_OR_WORKSPACE_ROOTS:
-                for match in pattern.finditer(text):
-                    violations.append(
-                        f"{rel}:{self._line_of(text, match.start())}: {kind}: {match.group(0)!r}"
-                    )
+            violations += self._root_violations(rel, text)
         self.assertEqual(
             violations,
             [],
@@ -545,15 +688,7 @@ class TrackedMachinePathTests(unittest.TestCase):
         for rel, text in self._tracked_texts():
             if rel in self.ROOT_PATH_EXCEPTIONS or self._is_explicit_test_or_fixture(rel):
                 continue
-            for match in self.DRIVE_TOKEN.finditer(text):
-                token = self._collapse_backslashes(match.group(0)).lower()
-                if token in self.ALLOWED_DRIVE_TOKENS:
-                    continue
-                if any(token.startswith(prefix) for prefix in self.ALLOWED_DRIVE_PREFIXES):
-                    continue
-                violations.append(
-                    f"{rel}:{self._line_of(text, match.start())}: {match.group(0)!r}"
-                )
+            violations += self._drive_violations(rel, text)
         self.assertEqual(
             violations,
             [],
@@ -642,16 +777,22 @@ class ArtifactIgnoreTests(unittest.TestCase):
         )
 
 
-def _check_ignored(paths: list[str]) -> set[str]:
+def _check_ignored(paths: list[str], cwd: Path = ROOT) -> set[str]:
     """Return the subset of ``paths`` the checkout's ignore rules exclude."""
     # Bytes stdin for the same reason as ArtifactIgnoreTests above.
     proc = subprocess.run(
         ["git", "check-ignore", "--no-index", "--stdin"],
         input=("\n".join(paths) + "\n").encode("utf-8"),
-        cwd=ROOT,
+        cwd=cwd,
         capture_output=True,
         check=False,
     )
+    # 0: some path is ignored, 1: none is. Anything else (128: not a repository, a
+    # safe.directory refusal) means git evaluated no rule, which is not "nothing ignored".
+    if proc.returncode not in (0, 1):
+        raise AssertionError(
+            f"git check-ignore failed (exit {proc.returncode}), so no ignore rule was "
+            f"evaluated: {proc.stderr.decode('utf-8', 'replace').strip()}")
     return {line for line in proc.stdout.decode("utf-8", "replace").splitlines() if line}
 
 
@@ -817,10 +958,60 @@ class OutsideOutputRootInventoryTests(unittest.TestCase):
                 source = ROOT / tool
                 self.assertTrue(source.is_file(), f"{tool} does not exist")
                 text = source.read_text(encoding="utf-8")
-                words = [word for word in re.split(r"[\\/%.]", path) if len(word) >= 3]
-                self.assertTrue(words)
-                self.assertEqual([word for word in words if word not in text], [],
-                                 f"{tool} never names these parts of {path}")
+                self.assertTrue(self._tool_code_names_path(text, path),
+                                f"{tool} has no code that names {path}")
+
+    @staticmethod
+    def _tool_code_names_path(source: str, path: str) -> bool:
+        """True when the tool's code, not its comments or docstrings, spells ``path``.
+
+        The path's folder names must appear in order, as string literals (or path pieces
+        of one) on a single line of code, so the line that builds the path is found. A
+        `%NAME%` component is the environment variable the code reads: a literal NAME.
+        """
+        tree = ast.parse(source)
+        docstrings = {id(node.value) for node in ast.walk(tree)
+                      if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
+        pieces_by_line: dict[int, list[str]] = {}
+        literals: set[str] = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and id(node) not in docstrings):
+                literals.add(node.value)
+                pieces = [piece for piece in re.split(r"[\\/]", node.value) if piece]
+                pieces_by_line.setdefault(node.lineno, []).extend(pieces)
+        parts = [part for part in re.split(r"[\\/]", path) if part]
+        def is_env(part: str) -> bool:
+            return len(part) > 2 and part[0] == part[-1] == "%"
+
+        env = [part[1:-1] for part in parts if is_env(part)]
+        rest = [part for part in parts if not is_env(part)]
+        if any(name not in literals for name in env):
+            return False
+        if not rest:
+            return bool(env)
+        for pieces in pieces_by_line.values():
+            for start in range(len(pieces) - len(rest) + 1):
+                if pieces[start:start + len(rest)] == rest:
+                    return True
+        return False
+
+    def test_tool_path_check_needs_code_not_comments(self) -> None:
+        names = self._tool_code_names_path
+        path = "third_party/ghidra/exports"
+        prose = ('"""Writes third_party/ghidra/exports."""\n'
+                 "# the exports folder under third_party/ghidra\n"
+                 'HELP = "ghidra"\nOTHER = "third_party"\nLAST = "exports.txt"\n')
+        self.assertFalse(names(prose, path))
+        self.assertTrue(names('EXPORT_DIR = os.path.join(ROOT, "third_party", "ghidra", "exports")\n',
+                              path))
+        self.assertTrue(names('OUT = REPO / "progress.json"\n', "progress.json"))
+        self.assertFalse(names('OUT = REPO / "progress.jsonl"\n', "progress.json"))
+        appdata = "%LOCALAPPDATA%\\Nakagawa"
+        self.assertTrue(names('local = os.environ.get("LOCALAPPDATA")\n'
+                              'root = Path(local) / "Nakagawa"\n', appdata))
+        self.assertFalse(names('"""Uses %LOCALAPPDATA%\\\\Nakagawa."""\n'
+                               'root = Path(local) / "Nakagawa"\n', appdata))
 
     def test_written_paths_in_the_checkout_are_gitignored(self) -> None:
         written = [path for path, row in self._first_spans(self.RUNTIME_HEADER).items()
@@ -886,6 +1077,15 @@ class KeyFileIgnoreTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIsNone(publish_audit._forbidden_path(path))
         self.assertEqual(sorted(_check_ignored(sources)), [])
+
+    def test_a_git_failure_is_not_read_as_nothing_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp)
+            with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(outside.parent),
+                                              "GIT_DIR": str(outside / "no-such-repository")}):
+                with self.assertRaises(AssertionError) as ctx:
+                    _check_ignored(["src/core/nk_psp_keystore.c"], cwd=outside)
+        self.assertIn("git check-ignore failed", str(ctx.exception))
 
 
 if __name__ == "__main__":

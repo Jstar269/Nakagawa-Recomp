@@ -36,6 +36,7 @@ import compat_overrides  # noqa: E402
 import title_manifest  # noqa: E402
 import hle_sources  # noqa: E402
 import title_runtime_config  # noqa: E402
+import test_public_title_isolation  # noqa: E402
 from makefile_text import read_makefile  # noqa: E402
 
 FIXTURE_A = ROOT / "assets" / "titles" / "pspdev-phase5.json"
@@ -947,6 +948,16 @@ class TitleDeclaredDispatchBindings(unittest.TestCase):
         declared: list[dict[str, int]] = bindings.get("dispatch_aliases", [])
         return declared
 
+    @staticmethod
+    def title_manifests() -> list[Path]:
+        """Tracked title manifests that are not binding fixtures.
+
+        An untracked manifest in assets/titles/ (a private development title) is not in the
+        public tree, so it must neither fail nor satisfy the inventory checks locally.
+        """
+        return [path for path in test_public_title_isolation.tracked_titles()
+                if path.name not in BINDING_FIXTURES]
+
     def test_hot_shots_tennis_declares_no_dispatch_alias(self) -> None:
         self.assertEqual(self.aliases(HST_MANIFEST), [])
         manifest = json.loads(HST_MANIFEST.read_text(encoding="utf-8"))
@@ -961,8 +972,7 @@ class TitleDeclaredDispatchBindings(unittest.TestCase):
 
     def test_every_alias_a_title_declares_is_inventoried(self) -> None:
         inventoried = {int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
-        titles = [path for path in sorted((ROOT / "assets" / "titles").glob("*.json"))
-                  if path.name not in BINDING_FIXTURES]
+        titles = self.title_manifests()
         self.assertIn(HST_MANIFEST, titles)
         for path in titles:
             with self.subTest(manifest=path.name):
@@ -987,8 +997,7 @@ class TitleDeclaredDispatchBindings(unittest.TestCase):
         # alias source. A second collection needs its own comparison here.
         self.assertEqual(set(title_manifest.RUNTIME_BINDING_COLLECTIONS), {"dispatch_aliases"})
         declared = {alias["from"]
-                    for path in (ROOT / "assets" / "titles").glob("*.json")
-                    if path.name not in BINDING_FIXTURES
+                    for path in self.title_manifests()
                     for alias in self.aliases(path)}
         inventoried = {int(o["address"]) for o in compat_overrides.TITLE_CONFIGURED_DISPATCH}
         self.assertEqual(inventoried - declared, set(),
