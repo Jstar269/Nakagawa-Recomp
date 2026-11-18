@@ -603,6 +603,54 @@ class ProvenanceFailClosedTest(unittest.TestCase):
         ).hexdigest()
         self.assertEqual(by_path["src/new_widget.c"]["sha256"], expected_hash)
 
+    def test_a_non_ascii_tracked_path_keeps_its_ledger_entry(self) -> None:
+        """FAILING_BEFORE: ls-files C-quoted the name, so it matched no policy path and
+        build_ledger dropped the entry without an error."""
+        name = "docs/café.md"
+        repo, policy = self._hermetic_repo({name: "# synthetic fixture\n"}, [name])
+        output = repo.parent / "out" / "public_provenance_ledger.json"
+        document = self._run_build_ledger(repo, policy, self._detailed_ledger(repo, []), output)
+        self.assertEqual([entry["path"] for entry in document["entries"]], [name])
+        self.assertEqual(document["entries"][0]["sha256"],
+                         hashlib.sha256(b"# synthetic fixture\n").hexdigest())
+
+    def test_a_tracked_file_missing_from_the_worktree_is_hashed_from_the_index(self) -> None:
+        """FAILING_BEFORE: the ``dict.get`` default read the worktree copy first, so a
+        tracked file deleted from the worktree raised FileNotFoundError."""
+        repo, policy = self._hermetic_repo(
+            {"docs/guide.md": "# synthetic fixture\n"}, ["docs/guide.md"])
+        (repo / "docs" / "guide.md").unlink()
+        output = repo.parent / "out" / "public_provenance_ledger.json"
+        document = self._run_build_ledger(repo, policy, self._detailed_ledger(repo, []), output)
+        self.assertEqual(document["entries"][0]["sha256"],
+                         hashlib.sha256(b"# synthetic fixture\n").hexdigest())
+
+    def test_assembled_probes_and_compiled_scripts_need_implementation_authority(self) -> None:
+        """A path-rule class never covers source the build assembles or compiles.
+
+        FAILING_BEFORE: ``tests/fixtures/*.S`` (PSP probe assembly the fixture Makefiles
+        build and run), Java/Kotlin, shaders, the installer script and the Windows
+        resource script needed no exact record, so their bytes could change under the
+        ``synthetic_fixture`` or a deterministic class with no trusted record.
+        """
+        for path in (
+            "tests/fixtures/psp_oracle/mutex_imports.S",
+            "tests/fixtures/probe/payload.s",
+            "tests/fixtures/probe/payload.asm",
+            "android/app/src/main/java/example/Main.java",
+            "android/app/src/main/kotlin/example/Main.kt",
+            "android/app/build.gradle.kts",
+            "shaders/blit.hlsl",
+            "shaders/blit.glsl",
+            "assets/installer/nakagawa.iss",
+            "assets/brand/nakagawa.rc",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(provenance_ledger._admission_requires_implementation(path))
+        for path in ("tests/fixtures/probe/expected.json", "docs/guide.md", "README.md"):
+            with self.subTest(path=path):
+                self.assertFalse(provenance_ledger._admission_requires_implementation(path))
+
     # -- validation ----------------------------------------------------------
 
     def test_validate_ledger_rejects_stale_or_missing_hashes(self) -> None:

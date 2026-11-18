@@ -151,6 +151,7 @@ printed and never written to the JSON verdict.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import dataclass
 import hashlib
 import json
@@ -2591,6 +2592,21 @@ def verify(
         )
     if not trusted_ledger.is_file():
         raise VerifyError("TRUSTED_INPUT_MISSING", "the trusted detailed ledger is unavailable")
+    # The scratch holds candidate-controlled policy bytes, so it gets the same two guards as
+    # the ephemeral scratch: never inside the tree under verification, and never over the
+    # trusted input it is verified against.
+    workdir = workdir.resolve()
+    if _path_is_within(workdir, repo):
+        raise VerifyError(
+            "OUTPUT_CANDIDATE_CONTROLLED",
+            "provenance scratch must live outside the repository under verification",
+        )
+    for name in ("trusted_policy.json", "candidate_policy.json"):
+        if (workdir / name).resolve() == trusted_ledger:
+            raise VerifyError(
+                "OUTPUT_TRUSTED_INPUT_COLLISION",
+                f"provenance scratch would overwrite trusted input: {trusted_ledger}",
+            )
 
     candidate_commit = _rev_commit(repo, candidate_rev)
     base_commit = _rev_commit(repo, base_rev)
@@ -3290,18 +3306,22 @@ def main(argv: list[str] | None = None) -> int:
                 require_exact_blob_approvals=args.require_reviewed_blobs,
             )
         else:
-            workdir = args.workdir or args.trusted_ledger.resolve().parent
-            workdir.mkdir(parents=True, exist_ok=True)
-            verdict = verify(
-                repo=args.repo,
-                candidate_rev=args.candidate,
-                base_rev=args.base,
-                trusted_ledger=args.trusted_ledger,
-                workdir=workdir,
-                require_immutable_revisions=args.require_immutable_revisions,
-                authority_revision=args.authority_revision,
-                require_exact_blob_approvals=args.require_reviewed_blobs,
-            )
+            # Without --workdir the scratch is a temporary directory, never the trusted
+            # ledger's own folder: it holds candidate policy bytes that must not be left
+            # beside the private authority.
+            with contextlib.ExitStack() as scratch:
+                workdir = args.workdir or Path(
+                    scratch.enter_context(tempfile.TemporaryDirectory(prefix="nakagawa-provenance-")))
+                verdict = verify(
+                    repo=args.repo,
+                    candidate_rev=args.candidate,
+                    base_rev=args.base,
+                    trusted_ledger=args.trusted_ledger,
+                    workdir=workdir,
+                    require_immutable_revisions=args.require_immutable_revisions,
+                    authority_revision=args.authority_revision,
+                    require_exact_blob_approvals=args.require_reviewed_blobs,
+                )
     except VerifyError as error:
         print(f"trusted provenance attestation: {error.code}: {error}", file=sys.stderr)
         return 2

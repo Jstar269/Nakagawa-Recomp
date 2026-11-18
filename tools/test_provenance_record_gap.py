@@ -29,6 +29,29 @@ import provenance_record_gap as gap  # noqa: E402
 
 LEDGER = ROOT / "assets" / "public_provenance_ledger.json"
 
+#: A record that the gate accepts for any path: it classifies as implementation-grade.
+QUALIFYING_RECORD = {"id": "PROV-TEST", "classification": "project-authored-independent",
+                     "evidence_tier": "S"}
+
+
+def constructed_gap() -> tuple[set[str], set[str]]:
+    """The committed coverage with a sample of the paths the gate asks about removed.
+
+    The live repository may have no gaps at all once every path is admitted, and a
+    comparison of two empty lists proves nothing, so the agreement tests run on this
+    constructed gap instead.  Returns ``(covered, victims)``; neither is empty.
+    """
+    covered = gap.exact_paths_from_public_ledger(LEDGER)
+    policy = gap.load_policy(ROOT / gap.POLICY_PATH)
+    asked = sorted(
+        path for path in covered
+        if policy.resolve(path).disposition == "included"
+        and provenance_ledger.admission_requires_implementation(path)
+    )
+    victims = set(asked[:: max(1, len(asked) // 10)])
+    assert victims, "the gate asks about no covered path, which means it stopped asking"
+    return covered - victims, victims
+
 
 class TestInventoryShape(unittest.TestCase):
     def test_the_ledger_is_the_source_of_the_default_answer(self) -> None:
@@ -42,10 +65,12 @@ class TestInventoryShape(unittest.TestCase):
             self.assertEqual(listed, expected, entry["path"])
 
     def test_the_inventory_is_deterministic_and_sorted(self) -> None:
-        first = gap.record_gaps()
-        second = gap.record_gaps()
+        covered, victims = constructed_gap()
+        first = gap.record_gaps(covered=covered)
+        second = gap.record_gaps(covered=covered)
         self.assertEqual(first, second)
         paths = [item["path"] for item in first]
+        self.assertLessEqual(victims, set(paths))
         self.assertEqual(paths, sorted(paths))
         self.assertEqual(len(paths), len(set(paths)))
 
@@ -55,26 +80,41 @@ class TestInventoryShape(unittest.TestCase):
         self.assertEqual(reported & covered, set())
 
     def test_documentation_and_configuration_that_need_no_record_are_not_reported(self) -> None:
-        """A path the gate never asks about must not become a maintainer chore."""
-        reported = {item["path"] for item in gap.record_gaps()}
+        """A path the gate never asks about must not become a maintainer chore.
+
+        With nothing covered every path the gate asks about is reported, so these
+        paths stay out only because the classifier exempts them, which is pinned
+        here on its own and not through the inventory's filter."""
+        reported = {item["path"] for item in gap.record_gaps(covered=set())}
+        self.assertTrue(reported)
         for path in ("README.md", "LICENSE", "docs/CI.md", "docs/SETUP.md"):
-            if path in reported:
-                self.assertTrue(
-                    provenance_ledger._admission_requires_implementation(path),
-                    f"{path} is reported but the gate would never ask for a record",
-                )
+            with self.subTest(path=path):
+                self.assertFalse(provenance_ledger._admission_requires_implementation(path))
+                self.assertIsNone(verifier._exact_record_finding_for_change(
+                    path, base_blobs={path: b"old"}, candidate_blobs={path: b"new"},
+                    exact_records={},
+                ))
+                self.assertNotIn(path, reported)
 
     def test_every_uncovered_path_the_gate_asks_about_is_reported(self) -> None:
-        """The complement: nothing the gate would ask about is left out."""
-        covered = gap.exact_paths_from_public_ledger(LEDGER)
+        """The complement: nothing the gate would ask about is left out.
+
+        The expectation is the gate's own answer for an edit to each public path,
+        given a record for exactly the covered paths, not a copy of the inventory's
+        filter."""
+        covered, victims = constructed_gap()
         reported = {item["path"] for item in gap.record_gaps(covered=covered)}
         policy = gap.load_policy(ROOT / gap.POLICY_PATH)
+        records = {path: dict(QUALIFYING_RECORD, paths=[path]) for path in covered}
         expected = {
             path for path in gap.tracked_paths(ROOT)
             if policy.resolve(path).disposition == "included"
-            and provenance_ledger._admission_requires_implementation(path)
-            and path not in covered
+            and verifier._exact_record_finding_for_change(
+                path, base_blobs={path: b"old"}, candidate_blobs={path: b"new"},
+                exact_records=records,
+            ) == "TRUSTED_PATH_MISSING"
         }
+        self.assertLessEqual(victims, expected)
         self.assertEqual(reported, expected)
 
     def test_a_path_the_gate_asks_about_is_reported_once_uncovered(self) -> None:
@@ -134,8 +174,10 @@ class TestAgreementWithTheGate(unittest.TestCase):
     """The decisive property: the inventory predicts the gate exactly."""
 
     def test_every_reported_path_would_fail_with_a_missing_record(self) -> None:
-        covered = gap.exact_paths_from_public_ledger(LEDGER)
-        for item in gap.record_gaps(covered=covered):
+        covered, victims = constructed_gap()
+        reported = gap.record_gaps(covered=covered)
+        self.assertLessEqual(victims, {item["path"] for item in reported})
+        for item in reported:
             path = item["path"]
             self.assertTrue(
                 provenance_ledger._admission_requires_implementation(path),
@@ -337,14 +379,19 @@ class TestOutput(unittest.TestCase):
         import io
         from contextlib import redirect_stdout
 
+        from unittest import mock
+
+        covered, victims = constructed_gap()
         buffer = io.StringIO()
-        with redirect_stdout(buffer):
+        with mock.patch.object(gap, "exact_paths_from_public_ledger", return_value=covered), \
+                redirect_stdout(buffer):
             gap.main(["--repo", str(ROOT), "--json"])
         document = json.loads(buffer.getvalue())
         self.assertEqual(document["gap_count"], len(document["paths"]))
+        self.assertLessEqual(victims, {item["path"] for item in document["paths"]})
         self.assertEqual(
             [item["path"] for item in document["paths"]],
-            [item["path"] for item in gap.record_gaps()],
+            [item["path"] for item in gap.record_gaps(covered=covered)],
         )
 
 

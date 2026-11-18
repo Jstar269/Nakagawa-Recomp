@@ -172,7 +172,18 @@ HARDENED_ADMISSION_NAMES = frozenset({
     "Makefile", "CMakeLists.txt", "meson.build",
     ".pre-commit-config.yaml", ".pre-commit-config.yml",
 })
-HARDENED_ADMISSION_SUFFIXES = frozenset({".cmd", ".bat", ".cmake", ".mk"})
+#: Besides batch and build fragments, the source languages ``is_implementation_path`` does not
+#: name: Java/Kotlin and Gradle build scripts, assembly, GPU shaders, and the installer script
+#: and Windows resource script the build compiles.  The suffix is compared lower-cased, so
+#: ``.s`` covers the preprocessed ``.S`` form too: PSP probe assembly under ``tests/fixtures/``
+#: is assembled and run, so a change to it needs an exact trusted record like any source.
+HARDENED_ADMISSION_SUFFIXES = frozenset({
+    ".cmd", ".bat", ".cmake", ".mk",
+    ".java", ".kt", ".kts", ".gradle",
+    ".s", ".asm",
+    ".glsl", ".comp", ".vert", ".frag", ".hlsl",
+    ".iss", ".rc",
+})
 
 
 def _admission_requires_implementation(path: str) -> bool:
@@ -1127,14 +1138,17 @@ def _git(*args: str) -> str:
         cwd=ROOT,
         env=isolated_git_env(root=ROOT),
         capture_output=True,
-        text=True,
+        # Git writes path names as UTF-8 bytes, whatever the host's locale encoding is.
+        encoding="utf-8",
         check=True,
     )
     return result.stdout
 
 
 def _tracked_paths() -> list[str]:
-    return sorted(path for path in _git("ls-files").splitlines() if path)
+    # NUL-separated, as in _index_blobs: the newline listing C-quotes a non-ASCII name,
+    # which then matches no policy path and drops out of the ledger without an error.
+    return sorted(path for path in _git("ls-files", "-z").split("\0") if path)
 
 
 def _index_blobs() -> dict[str, bytes]:
@@ -1362,7 +1376,11 @@ def build_ledger(
             "evidence": evidence,
         }
         if path not in ("assets/public_provenance_ledger.json", "PUBLIC_EXPORT.json"):
-            entry["sha256"] = hashlib.sha256(blobs.get(path, (ROOT / path).read_bytes())).hexdigest()
+            # The index blob is the content: a worktree file is never mixed in, and a tracked
+            # path deleted from the worktree is still hashed from the index.
+            if path not in blobs:
+                raise RuntimeError(f"tracked path has no index blob: {path}")
+            entry["sha256"] = hashlib.sha256(blobs[path]).hexdigest()
         entries.append(entry)
     unresolved = sorted(e["path"] for e in entries if e["classification"] == "unresolved")
     if unresolved:

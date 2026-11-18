@@ -1175,6 +1175,43 @@ class ExactBlobAuthorizationTests(GateCase):
         self.assertPasses(verdict)
         self.assertEqual(verdict["authority_revision"], "a" * 40)
 
+    # -- K3: the verify scratch ------------------------------------------------
+    def test_K3_default_scratch_leaves_nothing_beside_the_trusted_ledger(self) -> None:
+        """Without --workdir, no candidate policy bytes land in the authority's folder.
+
+        FAILING_BEFORE: the scratch defaulted to the trusted ledger's own folder, so
+        trusted_policy.json and candidate_policy.json were left beside it.
+        """
+        before = sorted(path.name for path in self.outside.iterdir())
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            rc = verifier.main(["--repo", str(self.repo.root), "--base", self.base,
+                                "--candidate", self.base, "--trusted-ledger", str(self.trusted_ledger)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(path.name for path in self.outside.iterdir()), before)
+
+    def test_K3_scratch_inside_the_candidate_repository_is_refused(self) -> None:
+        """FAILING_BEFORE: verify() accepted a --workdir inside --repo, against its help text."""
+        with self.assertRaises(verifier.VerifyError) as caught:
+            verifier.verify(
+                repo=self.repo.root, candidate_rev=self.base, base_rev=self.base,
+                trusted_ledger=self.trusted_ledger, workdir=self.repo.root / "scratch",
+            )
+        self.assertEqual(caught.exception.code, "OUTPUT_CANDIDATE_CONTROLLED")
+        self.assertFalse((self.repo.root / "scratch").exists())
+
+    def test_K3_scratch_never_overwrites_the_trusted_ledger(self) -> None:
+        """FAILING_BEFORE: a trusted ledger named like a scratch file was overwritten."""
+        named = self.outside / "candidate_policy.json"
+        raw = self.trusted_ledger.read_bytes()
+        named.write_bytes(raw)
+        with self.assertRaises(verifier.VerifyError) as caught:
+            verifier.verify(
+                repo=self.repo.root, candidate_rev=self.base, base_rev=self.base,
+                trusted_ledger=named, workdir=self.outside,
+            )
+        self.assertEqual(caught.exception.code, "OUTPUT_TRUSTED_INPUT_COLLISION")
+        self.assertEqual(named.read_bytes(), raw)
+
     # -- L ------------------------------------------------------------------
     def test_L_internally_perfect_candidate_still_fails_on_external_digest(self) -> None:
         """Every public artifact agrees with every other, and it is still refused."""
