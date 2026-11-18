@@ -261,7 +261,50 @@ int main(void) {
     ASSERT_INT_EQ(sr_vfs_is_dos_device_name("", 0), 0);
     ASSERT_INT_EQ(sr_vfs_is_dos_device_name(NULL, 3), 0);
 
-    /* Test 18: safe-component validator (savedata filenames). */
+    /* Test 17c: Win32 also reads COM and LPT followed by a superscript one, two or three
+     * (U+00B9, U+00B2, U+00B3) as device names, as Microsoft's file-naming rules list. In
+     * UTF-8 each superscript is two bytes, so the base is five bytes long; the pre-fix
+     * detector only knew the four-byte ASCII forms and passed these as ordinary names.
+     * Other superscripts and look-alike Latin-1 bytes stay ordinary names. */
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("COM\xC2\xB9", 5), 1);
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("com\xC2\xB2", 5), 1);
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("COM\xC2\xB3.txt", 9), 1);
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("LPT\xC2\xB9", 5), 1);
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("lpt\xC2\xB2 ", 6), 1);
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("LPT\xC2\xB3", 5), 1);
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("COM\xC2\xB4", 5), 0);       /* acute accent */
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("COM\xC2\xB0", 5), 0);       /* degree sign */
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("COM\xE2\x81\xB4", 6), 0);   /* superscript four */
+    ASSERT_INT_EQ(sr_vfs_is_dos_device_name("AUX\xC2\xB9", 5), 0);
+    ASSERT_INT_EQ(sr_vfs_is_safe_component("COM\xC2\xB9", 5), 0);
+    len = sr_ms0_resolve("fs", "ms0:/PSP/LPT\xC2\xB2/x", out, sizeof(out), '/');
+    ASSERT_INT_EQ(len, 0);
+#ifdef _WIN32
+    /* Test 17d: measured on this host. Every name that GetFullPathNameW maps into the
+     * device namespace ("\\.\") on its own must be refused by the detector. */
+    {
+        static const wchar_t *const device_probe[] = {
+            L"NUL", L"COM1", L"LPT1", L"COM\x00b9", L"COM\x00b2", L"COM\x00b3",
+            L"LPT\x00b9", L"LPT\x00b2", L"LPT\x00b3"
+        };
+        for (size_t i = 0; i < sizeof(device_probe) / sizeof(device_probe[0]); i++) {
+            wchar_t full[MAX_PATH];
+            char utf8[64];
+            DWORD n = GetFullPathNameW(device_probe[i], MAX_PATH, full, NULL);
+            if (n == 0 || n >= MAX_PATH || wcsncmp(full, L"\\\\.\\", 4) != 0) continue;
+            int un = WideCharToMultiByte(CP_UTF8, 0, device_probe[i], -1, utf8,
+                                         (int)sizeof(utf8), NULL, NULL);
+            ASSERT_INT_EQ(un > 1, 1);
+            if (un > 1 && !sr_vfs_is_dos_device_name(utf8, (size_t)un - 1u)) {
+                fprintf(stderr, "FAIL L%d: Win32 maps probe %u to a device; the detector passed it\n",
+                        __LINE__, (unsigned)i);
+                g_failed = 1;
+            }
+        }
+    }
+#endif
+
+    /* Test 18:safe-component validator (savedata filenames). */
     ASSERT_INT_EQ(sr_vfs_is_safe_component("DATA.BIN", 8), 1);
     ASSERT_INT_EQ(sr_vfs_is_safe_component("PARAM.SFO", 9), 1);
     ASSERT_INT_EQ(sr_vfs_is_safe_component("UCUS98701", 9), 1);
@@ -310,6 +353,33 @@ int main(void) {
     ASSERT_INT_EQ(len > 0, 1);
     if (len > 0) {
         ASSERT_STR_EQ(out, "fs\\PSP\\NULL ");
+    }
+    /* Test 19c: once the device prefix is gone, any other ':' is ADS syntax inside a
+     * component and is refused. sr_ms0_resolve strips "ms0:" itself; the pre-fix join then
+     * stripped again up to the next ':', so "ms0:/PSP/SAVEDATA/DATA.BIN:stream" became
+     * "<root>/stream", a root-level file the guest never named. */
+    len = sr_ms0_resolve("memstick", "ms0:/PSP/SAVEDATA/DATA.BIN:stream", out, sizeof(out), '/');
+    ASSERT_INT_EQ(len, 0);
+    len = sr_ms0_resolve("r", "ms0:/PSP/X:Y", out, sizeof(out), '/');
+    ASSERT_INT_EQ(len, 0);
+    len = sr_ms0_resolve("r", "ms0:/X:Y", out, sizeof(out), '/');
+    ASSERT_INT_EQ(len, 0);
+    len = sr_ms0_resolve("r", "fatms0:/PSP/GAME/a:b/c", out, sizeof(out), '/');
+    ASSERT_INT_EQ(len, 0);
+    len = sr_vfs_host_dir_path("root", "dir/a:b", out, sizeof(out), '/');
+    ASSERT_INT_EQ(len, 0);
+    len = sr_vfs_host_join_rel("root", "X:Y", out, sizeof(out), '/');
+    ASSERT_INT_EQ(len, 0);
+    /* The device prefix itself (a ':' before the first separator) is still stripped. */
+    len = sr_vfs_host_dir_path("root", "ms0:dir/x", out, sizeof(out), '/');
+    ASSERT_INT_EQ(len > 0, 1);
+    if (len > 0) {
+        ASSERT_STR_EQ(out, "root/dir/x");
+    }
+    len = sr_ms0_resolve("r", "ms0:/PSP/SAVEDATA/DATA.BIN", out, sizeof(out), '/');
+    ASSERT_INT_EQ(len > 0, 1);
+    if (len > 0) {
+        ASSERT_STR_EQ(out, "r/PSP/SAVEDATA/DATA.BIN");
     }
 
     /* Repeated separators must collapse rather than smuggle an UNC prefix. */
@@ -521,6 +591,19 @@ int main(void) {
                 /* Reserved device component refused. */
                 snprintf(aliased, sizeof(aliased), "%s\\NUL\\x", root2);
                 ASSERT_INT_EQ(sr_vfs_mkdirs_contained("NUL\\x", canonical2), 0);
+                /* A final component that already exists as a regular file is not a folder:
+                 * refused, as the POSIX sr_cd_mkdirs refuses it. The pre-fix walk only
+                 * checked containment, which a file passes, and reported success. */
+                char as_file[900];
+                snprintf(as_file, sizeof(as_file), "%s\\PSP\\SAVEDATA\\NOTADIR", root2);
+                FILE *ff = fopen(as_file, "wb");
+                ASSERT_INT_EQ(ff != NULL, 1);
+                if (ff) fclose(ff);
+                ASSERT_INT_EQ(sr_vfs_mkdirs_contained("PSP\\SAVEDATA\\NOTADIR", canonical2), 0);
+                attrs = GetFileAttributesA(as_file);
+                ASSERT_INT_EQ(attrs != INVALID_FILE_ATTRIBUTES &&
+                              (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0, 1);
+                DeleteFileA(as_file);
             }
 
             /* Test 23: delete-by-handle semantics inside the root. */
@@ -553,6 +636,32 @@ int main(void) {
                 was_dir = -1;
                 ASSERT_INT_EQ(sr_vfs_delete_contained_leaf(out_leaf, canonical, &was_dir), 0);
                 ASSERT_INT_EQ(GetFileAttributesA(out_leaf) != INVALID_FILE_ATTRIBUTES, 1);
+                /* A file another handle still holds (shared for delete, as the guest's own
+                 * open file or an indexer holds it) loses its name as soon as the delete
+                 * returns, so the same name can be created again at once. The pre-fix
+                 * build never compiled the POSIX-semantics disposition, and the legacy
+                 * one leaves the name delete-pending until the last handle closes: the
+                 * create then fails with ERROR_ACCESS_DENIED. */
+                char held[700];
+                snprintf(held, sizeof(held), "%s\\held.bin", test_root);
+                f2 = fopen(held, "wb");
+                ASSERT_INT_EQ(f2 != NULL, 1);
+                if (f2) {
+                    fputs("held", f2);
+                    fclose(f2);
+                }
+                HANDLE holder = CreateFileA(held, GENERIC_READ,
+                                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                            NULL, OPEN_EXISTING, 0, NULL);
+                ASSERT_INT_EQ(holder != INVALID_HANDLE_VALUE, 1);
+                was_dir = -1;
+                ASSERT_INT_EQ(sr_vfs_delete_contained_leaf(held, canonical, &was_dir), 1);
+                ASSERT_INT_EQ(was_dir, 0);
+                HANDLE again = CreateFileA(held, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
+                ASSERT_INT_EQ(again != INVALID_HANDLE_VALUE, 1);
+                if (again != INVALID_HANDLE_VALUE) CloseHandle(again);
+                if (holder != INVALID_HANDLE_VALUE) CloseHandle(holder);
+                DeleteFileA(held);
             }
         }
 

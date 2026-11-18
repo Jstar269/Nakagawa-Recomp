@@ -683,6 +683,9 @@ static inline sr_cd_status sr_cd_set_mode(const sr_cd_root *root, const char *re
     const uint32_t write_bits = 0x0080u | 0x0010u | 0x0002u;
     if (mode & write_bits) info.FileAttributes &= ~FILE_ATTRIBUTE_READONLY;
     else info.FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    /* FileBasicInfo reads FileAttributes 0 as "leave unchanged"; a file whose only
+     * attribute was READONLY needs FILE_ATTRIBUTE_NORMAL to end up with none. */
+    if (info.FileAttributes == 0) info.FileAttributes = FILE_ATTRIBUTE_NORMAL;
     int changed = SetFileInformationByHandle(handle, FileBasicInfo, &info, sizeof(info));
     CloseHandle(handle);
     return changed ? SR_CD_OK : SR_CD_IO_ERROR;

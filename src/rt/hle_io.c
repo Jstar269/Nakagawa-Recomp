@@ -1048,7 +1048,7 @@ static uint32_t vfs_overlay_merge_dir(const char *guest_path, SrVfsDirList *list
                             size_t lcap = fs_len + rel_len + 2u;
                             char *legacy = (char *)malloc(lcap);
                             if (legacy &&
-                                sr_vfs_host_dir_path(fs_dir, rel, legacy, lcap, '\\') > 0) {
+                                sr_vfs_host_join_rel(fs_dir, rel, legacy, lcap, '\\') > 0) {
                                 wchar_t *wlegacy = NULL;
                                 if (sr_wide_path_alloc(legacy, &wlegacy)) {
                                     DWORD lattrs = GetFileAttributesW(wlegacy);

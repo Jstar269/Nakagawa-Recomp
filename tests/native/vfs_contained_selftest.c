@@ -1355,6 +1355,32 @@ static void case_invalid_utf8_leaf_is_refused(void) {
     DeleteFileW(wdecoy);
     nuke(root);
 }
+
+/* sceIoChstat with a writable mode on a file whose only attribute is READONLY (ARCHIVE
+ * cleared, as a backup tool or "attrib -a" leaves it). Clearing READONLY leaves no
+ * attribute set, and FileBasicInfo reads FileAttributes 0 as "leave unchanged", so the
+ * pre-fix call reported success while the file stayed read-only. */
+static void case_set_mode_clears_lone_readonly(void) {
+    char root[1100], path[1300];
+    CHECK(build_save("t_mode", "ULUS00001DATA", SAVE_FILES, 3, root, sizeof(root)),
+          "fixture t_mode");
+    fp(path, sizeof(path), "%s/PSP/SAVEDATA/ULUS00001DATA/DATA.BIN", root);
+    CHECK(SetFileAttributesA(path, FILE_ATTRIBUTE_READONLY) != 0,
+          "fixture: READONLY is the only attribute");
+    sr_cd_root r;
+    CHECK_ST(sr_cd_root_open(root, &r), SR_CD_OK);
+    CHECK_ST(sr_cd_set_mode(&r, "PSP/SAVEDATA/ULUS00001DATA/DATA.BIN", 0x21B6u), SR_CD_OK);
+    DWORD attrs = GetFileAttributesA(path);
+    CHECK(attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY) == 0,
+          "a writable mode must clear a lone READONLY attribute");
+    CHECK_ST(sr_cd_set_mode(&r, "PSP/SAVEDATA/ULUS00001DATA/DATA.BIN", 0x2124u), SR_CD_OK);
+    attrs = GetFileAttributesA(path);
+    CHECK(attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY) != 0,
+          "a mode without write bits must set READONLY");
+    SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL);
+    sr_cd_root_close(&r);
+    nuke(root);
+}
 #endif
 
 static void case_rel_split_unit(void) {
@@ -1426,6 +1452,7 @@ int main(void) {
     case_name_discipline();
 #if defined(SR_CD_BACKEND_WINDOWS)
     case_invalid_utf8_leaf_is_refused();
+    case_set_mode_clears_lone_readonly();
 #endif
     case_final_symlink_entry(&skipped);
     case_leaf_replacement(&skipped);
