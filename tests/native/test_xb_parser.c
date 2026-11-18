@@ -2026,6 +2026,101 @@ static void test_title_staging_names_a_long_data_folder(void) {
     printf("[XB_TEST] A too-long data folder path is named, not blamed on the disc PASSED\n");
 }
 
+/* nk_xb_unpack writes a file-backed archive's members under one destination
+ * tree: nested member folders are made, each member holds its own bytes, and
+ * the progress callback sees one call per written member carrying the
+ * completed and total counts. A callback that answers false stops the loop
+ * with NK_ERROR_CANCELLED, leaving the members it had not reached unwritten. */
+typedef struct {
+    size_t call_count;
+    size_t stop_at;
+    size_t last_completed;
+    size_t last_total;
+} UnpackProgressState;
+
+static bool unpack_progress_cb(const NkXbEntry *entry, size_t completed,
+                               size_t total, void *userdata) {
+    assert(entry != NULL);
+    UnpackProgressState *state = (UnpackProgressState *)userdata;
+    assert(state != NULL);
+    state->call_count++;
+    state->last_completed = completed;
+    state->last_total = total;
+    assert(completed >= 1u && completed <= total);
+    if (state->stop_at > 0u && state->call_count >= state->stop_at) return false;
+    return true;
+}
+
+static void test_nk_xb_unpack(void) {
+    printf("[XB_TEST] Testing nk_xb_unpack on a two-member archive...\n");
+    static const uint8_t first_data[] = "unpack member 1 content";
+    static const uint8_t second_data[] = "unpack member 2 content in subfolder";
+    const FixtureEntry entries[] = {
+        { "file1.txt", first_data, sizeof(first_data) - 1u, NK_XB_COMPRESSION_NONE },
+        { "sub/file2.txt", second_data, sizeof(second_data) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    ByteBuffer archive_bytes = make_archive(entries, sizeof(entries) / sizeof(entries[0]), false);
+    const char *archive_path = SR_SELFTEST_BUILD_ROOT "/test_xb_unpack.xb";
+    const char *dest_root = SR_SELFTEST_BUILD_ROOT "/test_xb_unpack_out";
+    const char *cancel_root = SR_SELFTEST_BUILD_ROOT "/test_xb_unpack_cancel";
+    write_file_bytes(archive_path, archive_bytes.data, archive_bytes.size);
+    free(archive_bytes.data);
+
+    char error[256];
+    error[0] = '\0';
+
+    /* A missing archive or destination is refused; the empty destination string
+     * is not silently read as the process working directory. */
+    assert(nk_xb_unpack(NULL, dest_root, NULL, NULL, error, sizeof(error)) != NK_OK);
+    assert(nk_xb_unpack(archive_path, NULL, NULL, NULL, error, sizeof(error)) != NK_OK);
+    assert(nk_xb_unpack(archive_path, "", NULL, NULL, error, sizeof(error)) != NK_OK);
+    assert(nk_xb_unpack(SR_SELFTEST_BUILD_ROOT "/test_xb_unpack_missing.xb", dest_root,
+                        NULL, NULL, error, sizeof(error)) != NK_OK);
+
+    /* Both members, one nested, each with exactly its own bytes. */
+    assert(native_test_remove_tree(dest_root));
+    UnpackProgressState progress = { 0u, 0u, 0u, 0u };
+    assert(nk_xb_unpack(archive_path, dest_root, unpack_progress_cb, &progress,
+                        error, sizeof(error)) == NK_OK);
+    assert(progress.call_count == 2u);
+    assert(progress.last_completed == 2u && progress.last_total == 2u);
+
+    const char *first_path = SR_SELFTEST_BUILD_ROOT "/test_xb_unpack_out/file1.txt";
+    const char *second_path = SR_SELFTEST_BUILD_ROOT "/test_xb_unpack_out/sub/file2.txt";
+    assert(nk_platform_file_exists(first_path));
+    assert(nk_platform_file_exists(second_path));
+
+    uint8_t read_back[128];
+    FILE *handle = fopen(first_path, "rb");
+    assert(handle != NULL);
+    size_t read_size = fread(read_back, 1, sizeof(read_back), handle);
+    assert(fclose(handle) == 0);
+    assert(read_size == sizeof(first_data) - 1u);
+    assert(memcmp(read_back, first_data, read_size) == 0);
+
+    handle = fopen(second_path, "rb");
+    assert(handle != NULL);
+    read_size = fread(read_back, 1, sizeof(read_back), handle);
+    assert(fclose(handle) == 0);
+    assert(read_size == sizeof(second_data) - 1u);
+    assert(memcmp(read_back, second_data, read_size) == 0);
+
+    /* Answering false after the first member stops the loop there: the second
+     * member is never written, so the cancellation is not just a return code. */
+    assert(native_test_remove_tree(cancel_root));
+    UnpackProgressState cancelled = { 0u, 1u, 0u, 0u };
+    assert(nk_xb_unpack(archive_path, cancel_root, unpack_progress_cb, &cancelled,
+                        error, sizeof(error)) == NK_ERROR_CANCELLED);
+    assert(cancelled.call_count == 1u);
+    assert(nk_platform_file_exists(SR_SELFTEST_BUILD_ROOT "/test_xb_unpack_cancel/file1.txt"));
+    assert(!nk_platform_file_exists(SR_SELFTEST_BUILD_ROOT "/test_xb_unpack_cancel/sub/file2.txt"));
+
+    assert(native_test_remove_tree(dest_root));
+    assert(native_test_remove_tree(cancel_root));
+    assert(remove(archive_path) == 0);
+    printf("[XB_TEST] nk_xb_unpack tests PASSED\n");
+}
+
 int main(void) {
     printf("[XB_TEST] Starting native clean-room XB parser tests...\n");
     test_roundtrip_all_compression_modes();
@@ -2056,6 +2151,7 @@ int main(void) {
     test_iso_to_native_staging_pipeline();
     test_title_staging_transaction();
     test_title_staging_names_a_long_data_folder();
+    test_nk_xb_unpack();
     printf("[XB_TEST] ALL NATIVE XB PARSER TESTS PASSED\n");
     return 0;
 }
