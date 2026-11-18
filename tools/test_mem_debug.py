@@ -6,8 +6,9 @@
 These tests exercise the pure helpers (guest-span validation, region
 classification, host-offset mapping, PE image identity, process-candidate
 selection, argument parsing) and the mutation gate + simulation behavior of
-MemoryDebugger.  No test attaches to, reads, writes, or suspends a real
-process: live-process access is never exercised here.
+MemoryDebugger.  No test writes to or suspends a real process; on Windows,
+LiveDiscoveryTest discovers a child Python process this file starts and reads
+its mapped PE headers, read-only.
 """
 
 import contextlib
@@ -180,6 +181,35 @@ class PEImageIdentityTest(unittest.TestCase):
             self.assertIsNone(md.sha256_file(os.path.join(path, "missing")))
         finally:
             os.unlink(path)
+
+    @staticmethod
+    def _pe_page(image_base, *, mapped, size_of_headers=0x400, stamp=0x5F000000):
+        """One synthetic PE32+ first page: on disk, raw section data follows the headers;
+        mapped, the rest of the page is zero and the loader has rebased ImageBase."""
+        page = bytearray(md.PE_PREFIX_BYTES)
+        page[0:2] = b"MZ"
+        page[0x3C:0x40] = (0x80).to_bytes(4, "little")
+        page[0x80:0x84] = b"PE\0\0"
+        page[0x84:0x86] = (0x8664).to_bytes(2, "little")
+        page[0x88:0x8C] = stamp.to_bytes(4, "little")
+        optional = 0x80 + 24
+        page[optional:optional + 2] = (0x20B).to_bytes(2, "little")
+        page[optional + 24:optional + 32] = image_base.to_bytes(8, "little")
+        page[optional + 60:optional + 64] = size_of_headers.to_bytes(4, "little")
+        if not mapped:
+            for offset in range(size_of_headers, len(page)):
+                page[offset] = (offset * 7 + 3) & 0xFF
+        return bytes(page)
+
+    def test_identity_compares_the_mapped_headers_not_the_whole_page(self):
+        # MinGW and MSVC images use SizeOfHeaders 0x400: on disk the rest of the first
+        # page is section data, mapped it is zero, and ASLR rewrites ImageBase.
+        disk = self._pe_page(0x140000000, mapped=False)
+        memory = self._pe_page(0x7FF712340000, mapped=True)
+        self.assertTrue(md.image_identity_matches(disk, memory))
+        other_build = self._pe_page(0x7FF712340000, mapped=True, stamp=0x5F000001)
+        self.assertFalse(md.image_identity_matches(disk, other_build))
+        self.assertFalse(md.image_identity_matches(disk, b"MZ" + bytes(md.PE_PREFIX_BYTES - 2)))
 
     def test_pe_prefix_bytes(self):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".exe") as f:
@@ -644,6 +674,72 @@ class TargetDispositionTest(unittest.TestCase):
         self.assertTrue(
             md.get_mock_state_path().endswith(
                 os.path.join("build", "hst", "mock_debug_state.json")))
+
+
+@unittest.skipUnless(sys.platform == "win32", "live process discovery is the Windows backend")
+class LiveDiscoveryTest(unittest.TestCase):
+    """Discovery and the image identity check against a real child process, read-only."""
+
+    def setUp(self):
+        self.child = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(self._stop_child)
+
+    def _stop_child(self):
+        self.child.stdin.close()
+        self.child.wait(timeout=60)
+
+    def test_a_running_child_is_discovered_by_name(self):
+        import ntpath
+        candidates = md.enumerate_process_candidates(ntpath.basename(sys.executable))
+        self.assertIn(self.child.pid, [candidate["pid"] for candidate in candidates])
+
+    def test_attaching_by_pid_verifies_the_running_image(self):
+        dbg = md.MemoryDebugger(simulate=False, exe=sys.executable, pid=self.child.pid)
+        self.assertFalse(dbg.is_offline, dbg.identity_note)
+        self.assertTrue(dbg.image_verified)
+        self.assertIsNotNone(dbg.process_started)
+
+
+class ExitArtifactStalenessTest(unittest.TestCase):
+    """exited.flag, paused.flag and crash_dump.bin older than the attached process are
+    left over from an earlier run of the same build, never this run's state."""
+
+    def _attached(self, tmp_dir, started):
+        dbg = md.MemoryDebugger(simulate=True)
+        dbg.is_simulated = False
+        dbg.is_offline = False
+        dbg.pid = 4242
+        dbg.proc_info = {"pid": 4242, "exe_path": os.path.join(tmp_dir, "title.exe"),
+                         "base_address": 0}
+        dbg.process_started = started
+        return dbg
+
+    def _artifact(self, tmp_dir, name, mtime, data=b"1"):
+        path = os.path.join(tmp_dir, name)
+        Path(path).write_bytes(data)
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_an_exit_flag_from_an_earlier_run_is_not_this_runs_status(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_artifacts_") as tmp_dir:
+            started = 1_800_000_000.0
+            self._artifact(tmp_dir, "exited.flag", started - 60)
+            dbg = self._attached(tmp_dir, started)
+            self.assertEqual(dbg._run_status(), ("running", ["exited.flag"]))
+            self._artifact(tmp_dir, "paused.flag", started + 5)
+            self.assertEqual(dbg._run_status(), ("paused", ["exited.flag"]))
+            self._artifact(tmp_dir, "exited.flag", started + 10)
+            self.assertEqual(dbg._run_status(), ("exited", []))
+
+    def test_trace_exit_refuses_a_crash_dump_from_an_earlier_run(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_artifacts_") as tmp_dir:
+            started = 1_800_000_000.0
+            self._artifact(tmp_dir, "crash_dump.bin", started - 60, b"SRCD")
+            res = self._attached(tmp_dir, started).trace_exit()
+            self.assertIn("error", res)
+            self.assertIn("earlier run", res["error"])
 
 
 if __name__ == "__main__":

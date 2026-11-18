@@ -28,9 +28,13 @@ Safety contract (issue #180):
   path.  Name-
   only matches are never used.  An explicit ``--pid`` selects a specific process and
   its identity (path, image base, on-disk hash) is displayed for confirmation.
-* PE image identity.  Before any address-space mutation the running image's first
-  page is compared byte-for-byte with the on-disk executable; a stale or mismatched
-  image refuses mutation.
+* PE image identity.  Before any address-space mutation the running image's mapped
+  PE headers (the first SizeOfHeaders bytes, with the loader-rebased ImageBase
+  masked) are compared byte-for-byte with the on-disk executable's; a stale or
+  mismatched image refuses mutation.
+* Current-run artifacts.  exited.flag, paused.flag and crash_dump.bin older than the
+  attached process are left over from an earlier run and are never reported as
+  this run's state.
 * Fail-closed symbol resolution.  Address-space mutation is refused unless both
   ``g_mem``/``s_cpu`` RVAs were resolved from the attached executable itself
   (``nm``), never from the hard-coded fallback RVAs.  Reads remain permitted with
@@ -194,15 +198,49 @@ def pe_prefix_bytes(path, n=PE_PREFIX_BYTES):
         return None
 
 
+def pe_header_identity(prefix):
+    """The PE headers the loader maps, with the rebased ImageBase field masked.
+
+    Only the first SizeOfHeaders bytes of an image are mapped from the file at
+    its base; the rest of the first page is zero in memory while the file holds
+    section data there, and under ASLR the loader rewrites OptionalHeader.ImageBase.
+    Returns None when the prefix is not a whole PE32/PE32+ header.
+    """
+    if not prefix or len(prefix) < 0x40 or prefix[:2] != b"MZ":
+        return None
+    nt = int.from_bytes(prefix[0x3C:0x40], "little")
+    optional = nt + 24
+    if optional + 64 > len(prefix) or prefix[nt:nt + 4] != b"PE\0\0":
+        return None
+    magic = int.from_bytes(prefix[optional:optional + 2], "little")
+    if magic == 0x20B:
+        base_field = (optional + 24, optional + 32)
+    elif magic == 0x10B:
+        base_field = (optional + 28, optional + 32)
+    else:
+        return None
+    size_of_headers = int.from_bytes(prefix[optional + 60:optional + 64], "little")
+    if size_of_headers < optional + 64 or size_of_headers > len(prefix):
+        return None
+    headers = bytearray(prefix[:size_of_headers])
+    headers[base_field[0]:base_field[1]] = bytes(base_field[1] - base_field[0])
+    return bytes(headers)
+
+
 def image_identity_matches(disk_prefix, memory_prefix):
-    """Byte-identical comparison of the PE prefix read from disk vs the prefix
-    read from the attached process at its image base.  A mismatch means the
-    running image is stale or a different build, and mutation is refused."""
+    """Compare the PE headers read from disk with those mapped in the attached
+    process at its image base (``pe_header_identity``).  A mismatch means the
+    running image is stale or a different build, and mutation is refused.
+    Prefixes that are not PE images must be byte-identical."""
     if not disk_prefix or not memory_prefix:
         return False
-    if len(disk_prefix) != len(memory_prefix):
+    disk_headers = pe_header_identity(disk_prefix)
+    memory_headers = pe_header_identity(memory_prefix)
+    if disk_headers is None and memory_headers is None:
+        return len(disk_prefix) == len(memory_prefix) and disk_prefix == memory_prefix
+    if disk_headers is None or memory_headers is None:
         return False
-    return disk_prefix == memory_prefix
+    return disk_headers == memory_headers
 
 
 # --- Process discovery -------------------------------------------------------
@@ -293,13 +331,14 @@ def enumerate_process_candidates(expected_name=None):
         if not h:
             continue
         try:
-            name_buf = (ctypes.c_char * 260)()
-            if not psapi.GetModuleBaseNameA(h, None, ctypes.byref(name_buf), 260):
+            # QueryFullProcessImageNameW works on a limited-rights handle;
+            # GetModuleBaseName would need PROCESS_QUERY_INFORMATION|PROCESS_VM_READ.
+            full_path = query_full_image_path(kernel32, h)
+            if not full_path:
                 continue
-            name = name_buf.value.decode("latin1", errors="replace")
+            name = ntpath.basename(full_path)
             if expected_name and name.lower() != expected_name.lower():
                 continue
-            full_path = query_full_image_path(kernel32, h)
             # EnumProcessModules needs slightly more rights; retry if limited
             # rights were insufficient.
             h2 = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
@@ -317,6 +356,29 @@ def enumerate_process_candidates(expected_name=None):
         finally:
             kernel32.CloseHandle(h)
     return candidates
+
+
+FILETIME_UNIX_EPOCH = 116444736000000000   # 1970-01-01 in 100 ns units since 1601
+
+
+def process_start_time(pid):
+    """Creation time of ``pid`` as seconds since the Unix epoch, or None."""
+    if sys.platform != "win32":
+        return None
+    try:
+        kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+    except Exception:
+        return None
+    h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return None
+    try:
+        times = [ctypes.c_ulonglong() for _ in range(4)]
+        if not kernel32.GetProcessTimes(h, *(ctypes.byref(t) for t in times)):
+            return None
+        return (times[0].value - FILETIME_UNIX_EPOCH) / 1e7
+    finally:
+        kernel32.CloseHandle(h)
 
 
 def find_repo_root():
@@ -548,6 +610,7 @@ class MemoryDebugger:
         self.image_verified = False
         self.image_sha256 = None
         self.identity_note = None
+        self.process_started = None
 
         if exe:
             resolved_exe = resolve_exe_argument(exe)
@@ -598,6 +661,7 @@ class MemoryDebugger:
         self.pid = chosen["pid"]
         self.base_address = chosen.get("base_address") or 0
         self.candidate = chosen
+        self.process_started = process_start_time(self.pid)
 
         # Resolve symbols from the ATTACHED executable path (never the fallback
         # when mutating).  For --pid the executable may live outside the build tree,
@@ -731,16 +795,9 @@ class MemoryDebugger:
         if h_process:
             kernel32.CloseHandle(h_process)
 
-        status = "running"
-        artifacts = build_artifact_dir(self.attached_exe_path())
-        status_file = os.path.join(artifacts, "paused.flag")
-        exit_file = os.path.join(artifacts, "exited.flag")
-        if os.path.exists(exit_file):
-            status = "exited"
-        elif os.path.exists(status_file):
-            status = "paused"
+        status, stale = self._run_status()
 
-        return {
+        result = {
             "online": online,
             "mode": "process",
             "pid": self.pid,
@@ -753,6 +810,40 @@ class MemoryDebugger:
             "rvas": {k: "0x%08x" % v for k, v in self.rvas.items()},
             "rva_provenance": self.rva_provenance,
         }
+        if stale:
+            result["ignored_stale_artifacts"] = stale
+        return result
+
+    def _artifact_from_this_run(self, path):
+        """False when ``path`` was written before the attached process started.
+
+        The runtime writes its exit artifacts beside the executable and nothing
+        removes them, so a later run of the same build finds the previous run's.
+        With no known start time (offline, or not Windows) the file is taken as is.
+        """
+        started = getattr(self, "process_started", None)
+        if started is None:
+            return True
+        return os.path.getmtime(path) >= started
+
+    def _run_status(self):
+        """(status, stale artifact names) from the artifacts of the attached run."""
+        artifacts = build_artifact_dir(self.attached_exe_path())
+        stale = []
+        current = {}
+        for name in ("exited.flag", "paused.flag"):
+            path = os.path.join(artifacts, name)
+            if not os.path.exists(path):
+                continue
+            if self._artifact_from_this_run(path):
+                current[name] = True
+            else:
+                stale.append(name)
+        if current.get("exited.flag"):
+            return "exited", stale
+        if current.get("paused.flag"):
+            return "paused", stale
+        return "running", stale
 
     def pause(self):
         ok, reason = self._mutation_allowed("pause", needs_rvas=False, needs_image=False)
@@ -1107,6 +1198,9 @@ class MemoryDebugger:
         dump_path = os.path.join(build_artifact_dir(self.attached_exe_path()), "crash_dump.bin")
         if not os.path.exists(dump_path):
             return {"error": "crash_dump.bin not found. Did the game exit?"}
+        if not self._artifact_from_this_run(dump_path):
+            return {"error": ("crash_dump.bin predates the attached process (pid %d); "
+                              "it is from an earlier run of this build" % self.pid)}
 
         with open(dump_path, "rb") as f:
             blob = f.read()
