@@ -433,7 +433,9 @@ def function_import_model(
 ) -> "tuple[dict[int, tuple[str, int]], list[str], tuple[VariableImportTable, ...]]":
     """Return (stubs, findings, variable_tables): parse_imports plus the windows that
     declare variables (variable_imports models those)."""
-    return _function_import_model(elf)
+    model: tuple[dict[int, tuple[str, int]], list[str], tuple[VariableImportTable, ...]]
+    model = _function_import_model(elf)
+    return model
 
 
 def function_import_windows(
