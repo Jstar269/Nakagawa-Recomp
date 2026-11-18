@@ -1932,8 +1932,10 @@ static bool dev_log_contains(const PlayerApp *app, const char *needle) {
 static void repeat_launch_and_settle(PlayerApp *app, int game_index,
                                      uint64_t launch_tick, uint64_t settle_tick,
                                      const char *expected_memstick) {
-    char error_before[48];
-    snprintf(error_before, sizeof(error_before), "%s", app->last_error.error_code);
+    /* Start from no error, back on the library: a recovery launch follows a failure,
+       and a clean exit that raised that failure's code again must not read as none. */
+    memset(&app->last_error, 0, sizeof(app->last_error));
+    if (app->active_view == VIEW_ERROR) app->active_view = VIEW_LIBRARY;
     int64_t before_ms = (int64_t)time(NULL) * 1000;
     assert(player_app_launch_game(app, game_index));
     assert(app->is_game_running);
@@ -1950,7 +1952,8 @@ static void repeat_launch_and_settle(PlayerApp *app, int game_index,
     assert(player_app_monitor_game_session(app, settle_tick));
     assert(!app->is_game_running);
     assert_session_released(&app->launch_session);
-    assert(strcmp(app->last_error.error_code, error_before) == 0);
+    assert(app->last_error.error_code[0] == '\0');
+    assert(app->active_view != VIEW_ERROR);
 }
 
 /* Catalog-epoch coherence probe (#670). Built only with the test seam macro,

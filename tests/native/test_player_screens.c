@@ -105,6 +105,34 @@ static void fail_on_duplicate_id(void *user, const NkUiLayoutError *error) {
     ++failures;
 }
 
+/* The frame a test ended last, and whether it succeeded. A failed frame (a container
+   left open, a full text arena) still leaves part of its draw list, and a dump cut at
+   its buffer's end loses its tail: "X is absent" checks on either would pass because
+   the text was dropped, so dump_frame fails the run on both. */
+static const NkUi *g_ended_ui;
+static bool g_ended_ok;
+
+static const NkUiDrawList *end_frame(NkUi *ui) {
+    const NkUiDrawList *draw = nk_ui_end(ui);
+    g_ended_ui = ui;
+    g_ended_ok = draw != NULL;
+    return draw;
+}
+
+static size_t dump_frame_at(const NkUi *ui, char *dump, size_t cap, int line) {
+    size_t used = nk_ui_dump(ui, dump, cap);
+    if (ui != g_ended_ui || !g_ended_ok) {
+        fprintf(stderr, "FAIL: the frame dumped here failed (%s:%d)\n", __FILE__, line);
+        ++failures;
+    }
+    if (used >= cap) {
+        fprintf(stderr, "FAIL: the dump is cut at %zu bytes (%s:%d)\n", cap, __FILE__, line);
+        ++failures;
+    }
+    return used;
+}
+#define dump_frame(ui, dump, cap) dump_frame_at((ui), (dump), (cap), __LINE__)
+
 static NkUi *screen_ui_create(NkUiConfig *config) {
     if (config->report_error == NULL) config->report_error = fail_on_duplicate_id;
     return nk_ui_create(config);
@@ -317,7 +345,11 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                /* Mouse aiming (#1791): its settings off and at their defaults, on with the
                   widest value every row can show, and the keyboard keys with aiming on. */
                FLOW_CONTROLLER_AIM, FLOW_CONTROLLER_AIM_ON, FLOW_CONTROLLER_KEYS_AIM_ON,
-               FLOW_COUNT } FlowCase;
+               FLOW_COUNT,
+               /* Not a screen: the build card with a container left open, so its frame
+                  fails (nk_ui_end returns NULL) after drawing most of the card. Kept past
+                  FLOW_COUNT so no sweep draws it. */
+               FLOW_FAILED_FRAME } FlowCase;
 
 /* The window size the game-found and Settings cases lay out for. */
 static float g_flow_width = 1280.0f;
@@ -1278,6 +1310,14 @@ static FlowCase g_flow_case;
 
 static PlayerUiAction draw_flow_case(NkUi *ui, FlowCase which) {
     PlayerUiAction none = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    if (which == FLOW_FAILED_FRAME) {
+        NkUiLayout open;
+        memset(&open, 0, sizeof(open));
+        (void)draw_flow_case(ui, FLOW_BUILD);
+        /* Left open on purpose: nk_ui_end closes it and fails the frame. */
+        (void)nk_ui_begin_container(ui, NK_UI_ID(NK_UI_ID_SCREEN_FLOW, 0xFFFFFFu), &open, NULL);
+        return none;
+    }
     if (which == FLOW_NICKNAME_FIRST || which == FLOW_NICKNAME_FULL ||
         which == FLOW_NICKNAME_REFUSED) {
         /* #2197: the nickname editor and its on-screen keyboard: the first-launch
@@ -1446,15 +1486,16 @@ static bool append_case(char *out, size_t cap, size_t *used,
     } else {
         (void)player_ui_screen_about(ui, g_about_case);
     }
-    draw = nk_ui_end(ui);
+    draw = end_frame(ui);
     if (draw == NULL) return false;
     dumped = nk_ui_dump(ui, dump, sizeof(dump));
+    /* A cut dump reports the length it needed, past the buffer's end. */
+    if (dumped >= sizeof(dump)) return false;
     while (dumped > 0u &&
            (dump[dumped - 1u] == '\n' || dump[dumped - 1u] == '\r')) {
         --dumped;
     }
-    if (dumped >= sizeof(dump) ||
-        !append_text(out, cap, used, dump, dumped) ||
+    if (!append_text(out, cap, used, dump, dumped) ||
         !append_text(out, cap, used, "\n", 1u)) {
         return false;
     }
@@ -1522,6 +1563,7 @@ static void test_build_bar_shows_compiled_parts(void) {
         const char *elapsed = strstr(out, "60000043 TEXT ");
         CHECK(notice != NULL && strstr(notice, "other apps may feel slower") != NULL,
               "the build card notes that other apps may feel slower");
+        CHECK(elapsed != NULL, "the build card draws its elapsed time");
         if (notice != NULL && elapsed != NULL) {
             int notice_y = 0, bar_y = 0, x0 = 0, x1 = 0;
             char notice_rgba[9] = "", elapsed_rgba[9] = "";
@@ -1560,15 +1602,18 @@ static void test_build_bar_shows_compiled_parts(void) {
             CHECK(speed_y < notice_y, "the speed line comes before the note");
         }
     }
+    /* Cleared whole: the plain card's dump is shorter, and the absence checks below must
+       not read the tail of the one above. */
+    memset(out, 0, sizeof(out));
     used = 0u;
-    out[0] = '\0';
     {
         NkUi *plain = screen_ui_create(&config);
         CHECK(plain != NULL, "create the plain build-card UI");
         if (plain != NULL) {
             set_test_viewport(plain, 1280, 800);
             g_flow_case = FLOW_BUILD;
-            CHECK(append_case(out, sizeof(out), &used, "flow-build-running", plain, NULL, NULL),
+            CHECK(append_case(out, sizeof(out), &used, "flow-build-running", plain, NULL, NULL) &&
+                      used < sizeof(out),
                   "draw the build card without a part count");
             g_flow_case = FLOW_NONE;
             nk_ui_destroy(plain);
@@ -1620,7 +1665,7 @@ static bool build_library_golden(char *out, size_t cap, size_t *used) {
     nk_ui_focus(ui, PLAYER_UI_ID_LIBRARY_ITEM(0u));
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_library(ui, &model);
-    if (nk_ui_end(ui) == NULL) {
+    if (end_frame(ui) == NULL) {
         nk_ui_destroy(ui);
         return false;
     }
@@ -1650,7 +1695,7 @@ static bool build_library_golden(char *out, size_t cap, size_t *used) {
             nk_ui_push_event(ui, &move);
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_library(ui, &model);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
             CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_LIBRARY_ITEM(expect[step]),
                   "repeated navigation keeps moving from the current card");
         }
@@ -1711,8 +1756,9 @@ static const char *library_frame_dump(NkUi *ui, const PlayerUiLibraryModel *mode
     nk_ui_begin(ui, 0.0);
     action = player_ui_screen_library(ui, model);
     if (action_out != NULL) *action_out = action;
-    if (nk_ui_end(ui) == NULL) return "";
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    /* A failed or cut frame fails the run here: its "no X" checks would pass on it. */
+    if (dump_frame(ui, dump, sizeof(dump)) >= sizeof(dump) || !g_ended_ok) return "";
     return dump;
 }
 
@@ -2149,7 +2195,7 @@ static void test_library_demos(void) {
         const NkUiDrawCmd *demo = NULL;
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_library(ui, &model);
-        draw = nk_ui_end(ui);
+        draw = end_frame(ui);
         for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
             const NkUiDrawCmd *cmd = &draw->cmd[i];
             if (cmd->kind != NK_UI_DRAW_RECTANGLE) continue;
@@ -2184,7 +2230,7 @@ static void test_library_demos(void) {
             for (int frame = 0; frame < 2; ++frame) {
                 nk_ui_begin(ui, 0.0);
                 (void)player_ui_screen_library(ui, &model);
-                draw = nk_ui_end(ui);
+                draw = end_frame(ui);
             }
             for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
                 const NkUiDrawCmd *cmd = &draw->cmd[i];
@@ -2483,7 +2529,7 @@ static PlayerUiAction activate_library_button(NkUiId id,
     nk_ui_push_event(ui, &activate);
     nk_ui_begin(ui, 0.0);
     result = player_ui_screen_library(ui, model);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_destroy(ui);
     return result;
 }
@@ -2507,7 +2553,7 @@ static PlayerUiAction activate_title_button(NkUiId id,
     nk_ui_push_event(ui, &activate);
     nk_ui_begin(ui, 0.0);
     result = player_ui_screen_title(ui, model);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_destroy(ui);
     return result;
 }
@@ -2530,7 +2576,7 @@ static PlayerUiAction activate_flow_button(NkUiId id, FlowCase which) {
     nk_ui_push_event(ui, &activate);
     nk_ui_begin(ui, 0.0);
     result = draw_flow_case(ui, which);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_destroy(ui);
     return result;
 }
@@ -2613,6 +2659,7 @@ static NkUiTextSize screen_test_wide_measure(void *user, int font, int px, const
    at six lines of a 700 px card. */
 /* The text a flow case lays out, for checks on what the card says. */
 static bool dump_flow_case(FlowCase which, char *dump, size_t cap) {
+    const NkUiDrawList *draw = NULL;
     NkUiConfig config;
     NkUiTextBackend text = screen_test_text_backend();
     NkUi *ui;
@@ -2626,11 +2673,12 @@ static bool dump_flow_case(FlowCase which, char *dump, size_t cap) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)draw_flow_case(ui, which);
-        (void)nk_ui_end(ui);
+        draw = end_frame(ui);
     }
     used = nk_ui_dump(ui, dump, cap);
     nk_ui_destroy(ui);
-    return used > 0u;
+    /* A failed frame or a cut dump is missing text the caller's checks look for. */
+    return draw != NULL && used > 0u && used < cap;
 }
 
 /* #1282, #1280, #1278: the cards' actions and words. */
@@ -2753,7 +2801,7 @@ static const NkUiDrawList *flow_case_layout(FlowCase which, int width, int heigh
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)draw_flow_case(ui, which);
-        draw = nk_ui_end(ui);
+        draw = end_frame(ui);
     }
     g_flow_width = 1280.0f;
     g_flow_height = 800.0f;
@@ -2811,7 +2859,7 @@ static bool dump_flow_case_sized(FlowCase which, int width, int height, char *du
     const NkUiDrawList *draw = flow_case_layout(which, width, height, &ui);
     size_t used = draw != NULL && ui != NULL ? nk_ui_dump(ui, dump, cap) : 0u;
     if (ui != NULL) nk_ui_destroy(ui);
-    return used > 0u;
+    return used > 0u && used < cap;
 }
 
 /* Whether a command shows anything: not a scissor, and its clip (its bounds
@@ -2861,9 +2909,31 @@ static bool flow_case_fits(FlowCase which, int width, int height, char *dump, si
             }
         }
     }
-    if (dump != NULL && ui != NULL) (void)nk_ui_dump(ui, dump, cap);
+    if (dump != NULL && ui != NULL && nk_ui_dump(ui, dump, cap) >= cap) {
+        inside = false;   /* a cut dump hides what the caller looks for */
+    }
     nk_ui_destroy(ui);
     return inside;
+}
+
+/* A dump the flow helpers hand to "X is absent" checks is a whole frame: a frame that
+   failed, or a dump cut at the buffer's end, is no dump, since the text it dropped would
+   pass every such check. */
+static void test_flow_dumps_fail_closed(void) {
+    static char dump[CASE_DUMP_CAP];
+    char small[64];
+    CHECK(dump_flow_case(FLOW_BUILD, dump, sizeof(dump)),
+          "the build card dumps whole");
+    CHECK(!dump_flow_case(FLOW_FAILED_FRAME, dump, sizeof(dump)),
+          "a frame that failed gives no dump");
+    CHECK(!dump_flow_case_sized(FLOW_FAILED_FRAME, 1280, 800, dump, sizeof(dump)),
+          "a frame that failed gives no sized dump");
+    CHECK(!dump_flow_case(FLOW_BUILD, small, sizeof(small)),
+          "a dump cut at the buffer's end is no dump");
+    CHECK(!dump_flow_case_sized(FLOW_BUILD, 1280, 800, small, sizeof(small)),
+          "a sized dump cut at the buffer's end is no dump");
+    CHECK(!flow_case_fits(FLOW_BUILD, 1280, 800, small, sizeof(small)),
+          "a fit whose dump was cut does not pass");
 }
 
 /* Whether a text run containing `needle` shows in this draw list: drawn, and
@@ -2908,14 +2978,14 @@ static bool devlog_pages(void) {
     nk_ui_push_event(ui, &page);
     nk_ui_begin(ui, 0.0);
     (void)draw_flow_case(ui, FLOW_DEVLOG);
-    draw = nk_ui_end(ui);
+    draw = end_frame(ui);
     ok = ok && draw_shows(draw, "[200] [runtime]") && draw_shows(draw, "[225] [runtime]") &&
          !draw_shows(draw, "[240] [runtime]") && !draw_shows(draw, "[190] [runtime]");
     page.dir = NK_UI_DIR_RIGHT;
     nk_ui_push_event(ui, &page);
     nk_ui_begin(ui, 0.0);
     (void)draw_flow_case(ui, FLOW_DEVLOG);
-    draw = nk_ui_end(ui);
+    draw = end_frame(ui);
     ok = ok && draw_shows(draw, "[255] [runtime]");
     nk_ui_destroy(ui);
     return ok;
@@ -3103,17 +3173,17 @@ static void test_input_guides(void) {
             for (int frame = 0; frame < 2; ++frame) {
                 nk_ui_begin(ui, 0.0);
                 (void)player_ui_screen_title(ui, &model);
-                (void)nk_ui_end(ui);
+                (void)end_frame(ui);
             }
-            (void)nk_ui_dump(ui, dump, sizeof(dump));
+            (void)dump_frame(ui, dump, sizeof(dump));
             CHECK(strstr(dump, "\"EBOOT.elf\"") != NULL && strstr(dump, "\"CHECK AGAIN\"") != NULL &&
                       strstr(dump, "TEST00007/decrypted") != NULL,
                   "the title page lists the files, the folder and Check again");
             model.input_guide.file_count = 0u;
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_title(ui, &model);
-            (void)nk_ui_end(ui);
-            (void)nk_ui_dump(ui, dump, sizeof(dump));
+            (void)end_frame(ui);
+            (void)dump_frame(ui, dump, sizeof(dump));
             CHECK(strstr(dump, "CHECK AGAIN") == NULL && strstr(dump, "\"OPEN FOLDER\"") != NULL &&
                       strstr(dump, "couldn't decrypt it.") != NULL,
                   "with no files listed the page keeps its refusal and Open folder");
@@ -3143,7 +3213,7 @@ static bool display_waves_at(const PlayerUiDisplay *display, double now_s,
     nk_ui_set_viewport(ui, &viewport);
     nk_ui_begin(ui, now_s);
     (void)nk_ui_waves_element(ui, 1u, (NkUiRect){0.0f, 0.0f, 1280.0f, 720.0f}, 0u);
-    draw = nk_ui_end(ui);
+    draw = end_frame(ui);
     for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
         if (draw->cmd[i].kind == NK_UI_DRAW_CUSTOM &&
             draw->cmd[i].custom_kind == NK_UI_CUSTOM_WAVES && draw->cmd[i].custom != NULL) {
@@ -3203,7 +3273,7 @@ static bool display_draws_black_keyline(const PlayerUiDisplay *display) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)nk_ui_button(ui, 7u, "Play", NK_UI_BUTTON_PRIMARY);
-        draw = nk_ui_end(ui);
+        draw = end_frame(ui);
     }
     for (uint32_t i = 0u; draw != NULL && i < draw->nv; ++i) {
         if (draw->v[i].rgba_pm == 0x000000FFu) black = true;
@@ -4064,13 +4134,13 @@ static NkUiId flow_focus_after_moves(FlowCase which, NkUiId from, const NkUiNavD
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)draw_flow_case(ui, which);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
     for (size_t i = 0u; i < count; ++i) {
         push_nav(ui, moves[i]);
         nk_ui_begin(ui, 0.0);
         (void)draw_flow_case(ui, which);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
     focused = nk_ui_focused(ui);
     nk_ui_destroy(ui);
@@ -4339,7 +4409,7 @@ static bool tall_title_shows(int width, int height, NkUiId focus, bool *body_scr
         for (int frame = 0; frame < 3; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)draw_flow_case(ui, FLOW_PAGE_TITLE_TALL);
-            draw = nk_ui_end(ui);
+            draw = end_frame(ui);
         }
         g_flow_width = 1280.0f;
         g_flow_height = 800.0f;
@@ -4839,7 +4909,7 @@ static bool title_end_shows_after_scroll(FlowCase which, int width, int height,
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)draw_flow_case(ui, which);
-        draw = nk_ui_end(ui);
+        draw = end_frame(ui);
     }
     g_flow_width = 1280.0f;
     g_flow_height = 800.0f;
@@ -4930,7 +5000,7 @@ static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId s
                         (int)shown, run->text + run->length - shown);
                 whole = false;
             }
-            for (size_t e = 0u; e < end_count; ++e) {
+            for (size_t e = 0u; command_shows(&draw->cmd[i]) && e < end_count; ++e) {
                 size_t n = strlen(ends[e]);
                 for (size_t at = 0u; !found[e] && at + n <= run->length; ++at) {
                     found[e] = memcmp(run->text + at, ends[e], n) == 0;
@@ -4945,7 +5015,7 @@ static bool flow_case_text_whole(FlowCase which, int width, int height, NkUiId s
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)draw_flow_case(ui, which);
-            draw = nk_ui_end(ui);
+            draw = end_frame(ui);
         }
         g_flow_width = 1280.0f;
         g_flow_height = 800.0f;
@@ -5030,7 +5100,10 @@ static void test_texture_scaling_rows(void) {
     static const FlowCase pages[] = {FLOW_SETTINGS_ACE, FLOW_SETTINGS_ACE_TITLE};
     static const struct { int w; int h; } sizes[] = {{960, 540}, {960, 544}, {1280, 720}};
     static const int text_sizes[] = {100, 125, 150};
-    static const char *const ends[] = {"xBRZ.", "GPU", "blocky", "HUD"};
+    /* Each needle is in one sentence only: Supersampling's also says GPU, and Speed
+       readout's and Widescreen's say HUD. */
+    static const char *const ends[] = {"xBRZ.", "Uses GPU memory;", "Sharp HUD",
+                                       "blocky soft text."};
     int saved = g_flow_text_size_pct;
     memset(g_enhanced_value, 0, sizeof(g_enhanced_value));
     g_enhanced_mode = NULL;
@@ -5201,7 +5274,7 @@ static void test_error_details_fit_the_minimum_window(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_error(ui, &error);
-        draw = nk_ui_end(ui);
+        draw = end_frame(ui);
     }
     CHECK(draw != NULL, "lay out the error card at the minimum window");
     if (draw != NULL) {
@@ -5250,7 +5323,7 @@ static void test_screen_actions(void) {
             nk_ui_push_event(ui, &menu);
             nk_ui_begin(ui, 0.0);
             action = player_ui_screen_library(ui, &library);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
             CHECK(action.kind == PLAYER_UI_ACTION_OPEN_SETTINGS,
                   "the Library's menu prompt opens Settings");
             nk_ui_destroy(ui);
@@ -5269,7 +5342,7 @@ static void test_screen_actions(void) {
             for (int frame = 0; frame < 2; ++frame) {
                 nk_ui_begin(ui, 0.0);
                 (void)player_ui_screen_library(ui, &library);
-                (void)nk_ui_end(ui);
+                (void)end_frame(ui);
             }
             CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_LIBRARY_EMPTY_WIZARD,
                   "the empty Library focuses START SETUP WIZARD by default");
@@ -5361,7 +5434,7 @@ static void test_design_system_layout(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 37.0);
         (void)player_ui_screen_library(ui, &library);
-        draw = nk_ui_end(ui);
+        draw = end_frame(ui);
     }
     CHECK(draw != NULL, "lay out the Library");
     {
@@ -5372,7 +5445,7 @@ static void test_design_system_layout(void) {
         const NkUiDrawCmd *ring = NULL;
         int ring_x0 = 1 << 30;
         int ring_x1 = -(1 << 30);
-        for (uint32_t i = 0u; i < draw->ncmd; ++i) {
+        for (uint32_t i = 0u; draw != NULL && i < draw->ncmd; ++i) {
             const NkUiDrawCmd *cmd = &draw->cmd[i];
             if (cmd->element_id == PLAYER_UI_ID_LIBRARY_ITEM(0u) &&
                 cmd->kind == NK_UI_DRAW_BORDER && cmd->rgba_pm == theme->focus) {
@@ -5401,7 +5474,7 @@ static void test_design_system_layout(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 37.0);
         (void)player_ui_screen_title(ui, &detail);
-        draw = nk_ui_end(ui);
+        draw = end_frame(ui);
     }
     CHECK(draw != NULL, "lay out Title detail");
     {
@@ -5463,7 +5536,7 @@ static bool capture_one(CaptureRig *rig, const char *name,
         } else {
             (void)player_ui_screen_about(rig->ui, g_about_case);
         }
-        draw = nk_ui_end(rig->ui);
+        draw = end_frame(rig->ui);
     }
     if (draw == NULL ||
         !SDL_SetRenderDrawColor(rig->renderer, 11u, 15u, 20u, 255u) ||
@@ -6070,7 +6143,7 @@ static void test_default_focus_lands_on_the_main_action(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_library(ui, &library);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
     CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_LIBRARY_ITEM(0u), "the first card has focus");
     memset(&title, 0, sizeof(title));
@@ -6080,7 +6153,7 @@ static void test_default_focus_lands_on_the_main_action(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_title(ui, &title);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
     CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY,
           "opening a title focuses PLAY, not the LIBRARY tab");
@@ -6091,7 +6164,7 @@ static void test_default_focus_lands_on_the_main_action(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_title(ui, &title);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
     CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_SAVES,
           "with BUILD PACKAGE off, focus lands on the next action, not a tab");
@@ -6110,7 +6183,7 @@ static void test_default_focus_lands_on_the_main_action(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_build(ui, &build);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
         CHECK(nk_ui_focused(ui) != PLAYER_UI_ID_BUILD_ACTION,
               "CANCEL BUILD is never the default focus");
@@ -6120,7 +6193,7 @@ static void test_default_focus_lands_on_the_main_action(void) {
         nk_ui_push_event(ui, &move);
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_build(ui, &build);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
         CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_BUILD_ACTION,
               "a move from no focus reaches CANCEL BUILD");
         build.built = true;
@@ -6128,7 +6201,7 @@ static void test_default_focus_lands_on_the_main_action(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_build(ui, &build);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
         CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_BUILD_ACTION,
               "a finished build focuses BACK TO LIBRARY");
@@ -6165,9 +6238,9 @@ static void test_stalled_game_offers_stop_once(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_title(ui, &model);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     for (const char *at = strstr(dump, "STOP GAME"); at != NULL; at = strstr(at + 1, "STOP GAME")) {
         ++stops;
     }
@@ -6179,9 +6252,9 @@ static void test_stalled_game_offers_stop_once(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_title(ui, &model);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "only a black screen") != NULL, "a dark-picture card names the black screen");
     CHECK(strstr(dump, "hasn't drawn anything new") == NULL, "a dark-picture card drops the no-frames text");
     CHECK(strstr(dump, "KEEP WAITING") != NULL, "the dark-picture card keeps Keep waiting");
@@ -6214,8 +6287,8 @@ static void test_title_enhancement_card(void) {
 
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &model);
-    CHECK(nk_ui_end(ui) != NULL, "draw a title without an enhancement package");
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(end_frame(ui) != NULL, "draw a title without an enhancement package");
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "60 FPS") == NULL && strstr(dump, "original game as released") == NULL,
           "a title without an enhancement package has no enhancement card");
 
@@ -6225,9 +6298,9 @@ static void test_title_enhancement_card(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_title(ui, &model);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "60 FPS game logic: Off") != NULL ||
               strstr(dump, "60 FPS GAME LOGIC: OFF") != NULL,
           "the card's switch says 60 FPS game logic is off");
@@ -6245,8 +6318,8 @@ static void test_title_enhancement_card(void) {
     title.enhancement_released = true;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &model);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Optional") != NULL || strstr(dump, "OPTIONAL") != NULL,
           "a released package's card is tagged optional");
     CHECK(strstr(dump, "Experimental") == NULL && strstr(dump, "EXPERIMENTAL") == NULL,
@@ -6258,7 +6331,7 @@ static void test_title_enhancement_card(void) {
         push_nav(ui, NK_UI_DIR_DOWN);
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_title(ui, &model);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
         reached = nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_60FPS;
     }
     CHECK(reached, "the pad reaches the 60 FPS switch from PLAY");
@@ -6278,8 +6351,8 @@ static void test_title_enhancement_card(void) {
     title.primary_action = PLAYER_UI_PRIMARY_NONE;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &model);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Its enhancement package is missing. Turn it off") != NULL,
           "a saved switch without its package says why and how to get the original game");
     nk_ui_destroy(ui);
@@ -6316,8 +6389,8 @@ static void test_title_with_a_running_game(void) {
     model.logical_height = 800.0f;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &model);
-    CHECK(nk_ui_end(ui) != NULL, "draw the running-game title");
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(end_frame(ui) != NULL, "draw the running-game title");
+    (void)dump_frame(ui, dump, sizeof(dump));
     {
         /* The owner: "Running" once on the page. The header badge says it; the
            package card says the package is ready and in use. */
@@ -6348,8 +6421,8 @@ static void test_title_with_a_running_game(void) {
     model.stalled_game_notice_visible = true;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &model);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "The game hasn't drawn anything new for 30 seconds. It may be stuck.") != NULL,
           "the running title displays the no-frame notice");
     CHECK(strstr(dump, "KEEP WAITING") != NULL && strstr(dump, "STOP GAME") != NULL,
@@ -6366,8 +6439,8 @@ static void test_title_with_a_running_game(void) {
     running.compatibility_tier = PLAYER_UI_TIER_NONE;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &model);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "PLAYABLE") == NULL && strstr(dump, "Playable") == NULL,
           "a title with no tier draws no tier chip");
     running.compatibility_tier = PLAYER_UI_TIER_PLAYABLE;
@@ -6376,8 +6449,8 @@ static void test_title_with_a_running_game(void) {
     running.package_state = PLAYER_UI_PACKAGE_STARTING;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &model);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Starting the game. Its window opens when it is ready.") != NULL &&
               strstr(dump, "decrypts this game's program") == NULL,
           "a starting game gets the starting card and no decryption note");
@@ -6390,15 +6463,15 @@ static void test_title_with_a_running_game(void) {
     running.library_status = "Needs setup";
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &model);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "not ready yet") != NULL && strstr(dump, "decrypts this game's program") != NULL,
           "a missing package keeps its text and the decryption note");
     running.compatibility_category = "Boots to a named boundary";
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &model);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Developer view: \\\"Boots to a named boundary\\\"") != NULL ||
               strstr(dump, "Developer view: \"Boots to a named boundary\"") != NULL,
           "the developer view still names the category");
@@ -6422,7 +6495,7 @@ static PlayerUiAction activate_remove_button(NkUiId id, const PlayerUiRemoveMode
     nk_ui_push_event(ui, &activate);
     nk_ui_begin(ui, 0.0);
     result = player_ui_screen_remove(ui, model);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_destroy(ui);
     return result;
 }
@@ -6456,8 +6529,8 @@ static void test_remove_from_library(void) {
     title.logical_height = 800.0f;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &title);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "REMOVE FROM LIBRARY") != NULL, "a disc's title page offers removal");
     action = activate_title_button(PLAYER_UI_ID_TITLE_REMOVE, &title);
     CHECK(action.kind == PLAYER_UI_ACTION_REMOVE_TITLE && action.title_index == 3u,
@@ -6465,8 +6538,8 @@ static void test_remove_from_library(void) {
     title.title = &k_titles[0];
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &title);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "REMOVE FROM LIBRARY") == NULL,
           "a showcase demo's title page offers no removal");
 
@@ -6484,8 +6557,8 @@ static void test_remove_from_library(void) {
     remove.logical_height = 800.0f;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_remove(ui, &remove);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Remove Synthetic Untested Fixture?") != NULL,
           "the dialog names the game");
     CHECK(strstr(dump, "Built package") != NULL && strstr(dump, "3.0 MB") != NULL &&
@@ -6518,8 +6591,8 @@ static void test_remove_from_library(void) {
     remove.delete_saves = true;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_remove(ui, &remove);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Your saves for this game will be deleted too.") != NULL,
           "a ticked box says the saves go too");
     action = activate_remove_button(PLAYER_UI_ID_REMOVE_CONFIRM, &remove);
@@ -6530,8 +6603,8 @@ static void test_remove_from_library(void) {
     remove.delete_disc_copy = true;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_remove(ui, &remove);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "They go too, with any decrypted files you added yourself.") != NULL &&
               strstr(dump, "Your disc image stays.") != NULL,
           "a ticked disc copy box says what goes and that the disc image stays");
@@ -6548,8 +6621,8 @@ static void test_remove_from_library(void) {
     remove.files_shared = true;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_remove(ui, &remove);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "DISC COPY") == NULL, "files another image uses offer no disc copy box");
     remove.files_shared = false;
     remove.has_disc_copy = false;
@@ -6559,8 +6632,8 @@ static void test_remove_from_library(void) {
     remove.delete_saves = false;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_remove(ui, &remove);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Nakagawa has not built anything for it yet.") != NULL &&
               strstr(dump, "This game has no saves.") != NULL &&
               strstr(dump, "The disc image on your PC is not touched.") != NULL,
@@ -6636,7 +6709,7 @@ static PlayerUiAction activate_saves_button(NkUiId id, const PlayerUiSavesModel 
     nk_ui_push_event(ui, &activate);
     nk_ui_begin(ui, 0.0);
     result = player_ui_screen_saves(ui, model);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_destroy(ui);
     return result;
 }
@@ -6677,8 +6750,8 @@ static void test_saves_dialog(void) {
     saves.logical_height = 800.0f;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_saves(ui, &saves);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Synthetic Untested Fixture") != NULL &&
               strstr(dump, "BACK UP SAVES") != NULL && strstr(dump, "ADD A SAVE") != NULL &&
               strstr(dump, "OPEN SAVE FOLDER") != NULL,
@@ -6707,8 +6780,8 @@ static void test_saves_dialog(void) {
     saves.first_row = 4u;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_saves(ui, &saves);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "BACKUPS 5-6 OF 9, NEWEST FIRST") != NULL &&
               strstr(dump, "\"NEWER\"") != NULL && strstr(dump, "\"OLDER\"") != NULL,
           "a middle page counts its backups and turns both ways");
@@ -6722,8 +6795,8 @@ static void test_saves_dialog(void) {
     saves.ask_row = 1u;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_saves(ui, &saves);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Restore the backup from 2026-11-04 13:58:44?") != NULL &&
               strstr(dump, "backed up first") != NULL && strstr(dump, "BACK UP SAVES") == NULL,
           "Restore asks first, says the saves now are kept, and holds the card");
@@ -6735,8 +6808,8 @@ static void test_saves_dialog(void) {
     saves.ask_name = "ULUS99999DATA00";
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_saves(ui, &saves);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "A save named ULUS99999DATA00 is already here. Replace it?") != NULL &&
               strstr(dump, "\"REPLACE\"") != NULL,
           "a save of the same name asks before it is replaced");
@@ -6744,8 +6817,8 @@ static void test_saves_dialog(void) {
     saves.blocked = "Stop the game first: it uses its save folder while it runs.";
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_saves(ui, &saves);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Stop the game first") != NULL, "a running game says why");
     action = activate_saves_button(PLAYER_UI_ID_SAVES_BACK_UP, &saves);
     CHECK(action.kind == PLAYER_UI_ACTION_NONE, "a running game keeps Back up saves off");
@@ -6762,8 +6835,8 @@ static void test_saves_dialog(void) {
     saves.row_count = 0u;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_saves(ui, &saves);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "No saves yet.") != NULL && strstr(dump, "NO BACKUPS YET") != NULL,
           "a game with nothing saved says so");
     action = activate_saves_button(PLAYER_UI_ID_SAVES_BACK_UP, &saves);
@@ -6788,7 +6861,7 @@ static PlayerUiAction activate_steam_button(NkUiId id, const PlayerUiSteamModel 
     nk_ui_push_event(ui, &activate);
     nk_ui_begin(ui, 0.0);
     result = player_ui_screen_steam(ui, model);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_destroy(ui);
     return result;
 }
@@ -6828,8 +6901,8 @@ static void test_add_to_steam_dialog(void) {
     title.logical_height = 800.0f;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &title);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "ADD TO STEAM") != NULL, "a disc's title page offers Add to Steam");
     action = activate_title_button(PLAYER_UI_ID_TITLE_STEAM, &title);
     CHECK(action.kind == PLAYER_UI_ACTION_ADD_TO_STEAM && action.title_index == 3u,
@@ -6837,8 +6910,8 @@ static void test_add_to_steam_dialog(void) {
     fixture.can_add_to_steam = false;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_title(ui, &title);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "ADD TO STEAM") == NULL,
           "a demo, or a disc ID a shortcut can't carry, offers no Add to Steam");
 
@@ -6852,8 +6925,8 @@ static void test_add_to_steam_dialog(void) {
     steam.logical_height = 800.0f;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_steam(ui, &steam);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Synthetic Untested Fixture") != NULL &&
               strstr(dump, "nakagawa_player.exe --launch-title=TEST00005") != NULL &&
               strstr(dump, "Synthetic Player One") != NULL,
@@ -6876,8 +6949,8 @@ static void test_add_to_steam_dialog(void) {
                    "shortcut. Nothing was changed.";
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_steam(ui, &steam);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "WHICH STEAM ACCOUNT?") != NULL &&
               strstr(dump, "CHOSEN: SYNTHETIC PLAYER TWO") != NULL &&
               strstr(dump, "CHOSEN: SYNTHETIC PLAYER ONE") == NULL,
@@ -6894,8 +6967,8 @@ static void test_add_to_steam_dialog(void) {
     steam.status = NULL;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_steam(ui, &steam);
-    (void)nk_ui_end(ui);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)end_frame(ui);
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "Steam isn't installed") != NULL &&
               strstr(dump, "WHICH STEAM ACCOUNT?") == NULL,
           "without Steam the dialog says so and offers no account");
@@ -6935,7 +7008,7 @@ static PlayerUiAction activate_stop_button(NkUiId id, const PlayerUiStopModel *m
     nk_ui_push_event(ui, &activate);
     nk_ui_begin(ui, 0.0);
     result = player_ui_screen_stop(ui, model);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_destroy(ui);
     return result;
 }
@@ -6969,9 +7042,9 @@ static void test_stop_game_asks_first(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_stop(ui, &stop);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_STOP_KEEP,
           "Keep playing has the first focus, never Stop game");
     CHECK(strstr(dump, "\"Stop Synthetic Showcase Scene?\"") != NULL &&
@@ -6997,7 +7070,7 @@ static void test_stop_game_asks_first(void) {
     back.type = NK_UI_EV_BACK;
     CHECK(nk_ui_router_handle_event(router, &back) &&
               nk_ui_router_current(router) == PLAYER_UI_ROUTE_TITLE,
-          "Back (Esc or B) closes the question and the game keeps running");
+          "Back (Esc or B) pops the question back to the title page");
     nk_ui_router_destroy(router);
 }
 
@@ -7018,7 +7091,7 @@ static PlayerUiAction activate_rebuild_button(NkUiId id, const PlayerUiRebuildMo
     nk_ui_push_event(ui, &activate);
     nk_ui_begin(ui, 0.0);
     result = player_ui_screen_rebuild(ui, model);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_destroy(ui);
     return result;
 }
@@ -7060,9 +7133,9 @@ static void test_rebuild_prompt_reminder_and_banner(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_rebuild(ui, &prompt);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "3 games were built by an older Nakagawa. Rebuild them") != NULL,
           "the prompt names the count");
     (void)snprintf(expect, sizeof(expect), "\"REBUILD ALL\"");
@@ -7085,9 +7158,9 @@ static void test_rebuild_prompt_reminder_and_banner(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_rebuild(ui, &reminder);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "\"Synthetic Outdated Fixture\"") != NULL &&
               strstr(dump, "Rebuild it for the latest fixes.") != NULL,
           "the reminder names the game and says why");
@@ -7139,9 +7212,9 @@ static void test_rebuild_prompt_reminder_and_banner(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_library(ui, &library);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         (void)snprintf(expect, sizeof(expect), "%08X \"1 game was built by an older Nakagawa.\"",
                        (unsigned)theme->warning);
         CHECK(strstr(dump, expect) != NULL, "the library says so, in the warning colour");
@@ -7152,9 +7225,9 @@ static void test_rebuild_prompt_reminder_and_banner(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_library(ui, &library);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "\"Rebuilding 2 of 5\"") != NULL &&
                   strstr(dump, "\"REBUILD ALL\"") == NULL,
               "while the queue runs the library shows its count, not Rebuild all");
@@ -7194,9 +7267,9 @@ static void test_rebuild_prompt_reminder_and_banner(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_title(ui, &detail);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "Built by an older Nakagawa. Rebuild for the latest fixes.") != NULL,
               "the package card gives the label");
         CHECK(nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY, "PLAY keeps the default focus");
@@ -7204,9 +7277,9 @@ static void test_rebuild_prompt_reminder_and_banner(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_title(ui, &detail);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "\"REBUILD\"") == NULL, "a current package offers no Rebuild");
         nk_ui_destroy(ui);
     }
@@ -7225,7 +7298,7 @@ static PlayerUiAction activate_queue_button(NkUiId id, const PlayerUiQueueModel 
     /* One frame lays the rows out, so the focus lands on a drawn button. */
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_queue(ui, model);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_focus(ui, id);
     memset(&activate, 0, sizeof(activate));
     activate.type = NK_UI_EV_ACTIVATE;
@@ -7233,7 +7306,7 @@ static PlayerUiAction activate_queue_button(NkUiId id, const PlayerUiQueueModel 
     nk_ui_push_event(ui, &activate);
     nk_ui_begin(ui, 0.0);
     result = player_ui_screen_queue(ui, model);
-    (void)nk_ui_end(ui);
+    (void)end_frame(ui);
     nk_ui_destroy(ui);
     return result;
 }
@@ -7278,9 +7351,9 @@ static void test_build_queue_screens(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_queue(ui, &queue);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "\"3 games in the queue\"") != NULL, "the queue names its count");
     {
         const char *building = strstr(dump, "\"Synthetic Showcase Scene\"");
@@ -7336,9 +7409,9 @@ static void test_build_queue_screens(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_queue(ui, &queue);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     CHECK(strstr(dump, "\"GAMES 5-7 OF 9, IN BUILD ORDER\"") != NULL,
           "a page names which games it shows");
     (void)snprintf(expect, sizeof(expect), "%08X \"Paused: a build could not start.",
@@ -7387,9 +7460,9 @@ static void test_build_queue_screens(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_library(ui, &library);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "\"Building 1 of 3\"") != NULL && strstr(dump, "\"QUEUE\"") != NULL,
               "the library line shows the queue's count and Queue");
         CHECK(strstr(dump, "\"QUEUED 2 OF 3\"") != NULL, "a queued card shows its place");
@@ -7422,9 +7495,9 @@ static void test_build_queue_screens(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_title(ui, &detail);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         {
             const char *build = strstr(dump, "\"BUILD PACKAGE\"");
             const char *add = strstr(dump, "\"ADD TO QUEUE\"");
@@ -7441,9 +7514,9 @@ static void test_build_queue_screens(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_title(ui, &detail);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "\"REMOVE FROM QUEUE\"") != NULL &&
                   strstr(dump, "\"ADD TO QUEUE\"") == NULL,
               "a game that waits offers Remove from queue");
@@ -7473,9 +7546,9 @@ static void test_build_queue_screens(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_build(ui, &build);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         (void)snprintf(expect, sizeof(expect), "%08X \"Then 2 more games from the build queue.\"",
                        (unsigned)theme->muted);
         CHECK(strstr(dump, expect) != NULL, "the build card names what the queue builds next");
@@ -7483,9 +7556,9 @@ static void test_build_queue_screens(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_build(ui, &build);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "from the build queue") == NULL,
               "a written package's card drops the queue line");
         nk_ui_destroy(ui);
@@ -7538,9 +7611,9 @@ static void test_disc_verify_line_badge_and_note(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_library(ui, &library);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     (void)snprintf(expect, sizeof(expect), "%08X \"Checking disc image: 40%%\"",
                    (unsigned)theme->muted);
     CHECK(strstr(dump, expect) != NULL, "the library shows the check's progress");
@@ -7552,9 +7625,9 @@ static void test_disc_verify_line_badge_and_note(void) {
     for (int frame = 0; frame < 2; ++frame) {
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_library(ui, &library);
-        (void)nk_ui_end(ui);
+        (void)end_frame(ui);
     }
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     (void)snprintf(expect, sizeof(expect), "%08X \"A disc image could not be checked\"",
                    (unsigned)theme->warning);
     CHECK(strstr(dump, expect) != NULL && strstr(dump, "\"CANCEL\"") == NULL,
@@ -7590,9 +7663,9 @@ static void test_disc_verify_line_badge_and_note(void) {
         for (int frame = 0; frame < 2; ++frame) {
             nk_ui_begin(ui, 0.0);
             (void)player_ui_screen_title(ui, &detail);
-            (void)nk_ui_end(ui);
+            (void)end_frame(ui);
         }
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)dump_frame(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "\"UNKNOWN DUMP\"") != NULL &&
                   strstr(dump, "That doesn't mean it's bad") != NULL,
               "the title page names the tier and what it means");
@@ -7615,8 +7688,8 @@ static void test_disc_verify_line_badge_and_note(void) {
         set_test_viewport(ui, 1280, 800);
         nk_ui_begin(ui, 0.0);
         (void)player_ui_screen_remove(ui, &remove);
-        (void)nk_ui_end(ui);
-        (void)nk_ui_dump(ui, dump, sizeof(dump));
+        (void)end_frame(ui);
+        (void)dump_frame(ui, dump, sizeof(dump));
         CHECK(strstr(dump, "image of this disc in your library uses them.") != NULL &&
                   strstr(dump, "This game has no saves.") == NULL &&
                   strstr(dump, "has not built anything") == NULL,
@@ -7660,9 +7733,9 @@ static void test_binding_labels_fit(void) {
     /* The widest label the words may take, in place of Select's binding. */
     k_pad_bindings_override = widest;
     for (size_t s = 0u; s < sizeof(sizes) / sizeof(sizes[0]); ++s) {
-        (void)flow_case_fits(FLOW_CONTROLLER, sizes[s].w, sizes[s].h, dump, sizeof(dump));
+        bool fits = flow_case_fits(FLOW_CONTROLLER, sizes[s].w, sizes[s].h, dump, sizeof(dump));
         (void)snprintf(caps, sizeof(caps), "\"%s\"", widest);
-        CHECK(strstr(dump, caps) != NULL,
+        CHECK(fits && strstr(dump, caps) != NULL,
               "a binding of PLAYER_UI_CONTROLLER_BINDING_CHARS characters shows whole");
     }
     k_pad_bindings_override = NULL;
@@ -7757,7 +7830,7 @@ static PlayerUiAction nickname_frame(NkUi *ui, const PlayerUiNicknameModel *mode
     const NkUiDrawList *list;
     nk_ui_begin(ui, 0.0);
     action = player_ui_screen_nickname(ui, model);
-    list = nk_ui_end(ui);
+    list = end_frame(ui);
     if (draw != NULL) *draw = list;
     return action;
 }
@@ -7797,7 +7870,7 @@ static bool nickname_op(PlayerUiAction action, PlayerUiNicknameOp op) {
 static bool nickname_dump_has(NkUi *ui, const PlayerUiNicknameModel *model, const char *needle) {
     static char dump[CASE_DUMP_CAP];
     (void)nickname_frame(ui, model, NULL);
-    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    (void)dump_frame(ui, dump, sizeof(dump));
     return strstr(dump, needle) != NULL;
 }
 
@@ -8006,10 +8079,12 @@ int main(int argc, char **argv) {
     static char title[DUMP_CAP];
     size_t library_size = 0u;
     size_t title_size = 0u;
-    bool write = argc > 1 && strcmp(argv[1], "--write-goldens") == 0;
+    bool write = false;
     const char *capture_dir = NULL;
     for (int i = 1; i < argc; ++i) {
-        if (strncmp(argv[i], "--capture-dir=", 14u) == 0) {
+        if (strcmp(argv[i], "--write-goldens") == 0) {
+            write = true;
+        } else if (strncmp(argv[i], "--capture-dir=", 14u) == 0) {
             capture_dir = argv[i] + 14u;
         }
     }
@@ -8026,6 +8101,7 @@ int main(int argc, char **argv) {
     test_game_page_text_is_never_cut();
     test_psp_fonts_page();
     test_wizard_actions();
+    test_flow_dumps_fail_closed();
     test_plain_cards();
     test_disc_cards();
     test_input_guides();
@@ -8074,6 +8150,8 @@ int main(int argc, char **argv) {
               "write Library screen golden");
         CHECK(write_golden("tests/fixtures/nk_ui/title.golden", title, title_size),
               "write Title detail screen golden");
+    } else if (write) {
+        fprintf(stderr, "NOTE: goldens not written: %d check(s) failed first\n", failures);
     } else if (failures == 0) {
         compare_golden("tests/fixtures/nk_ui/library.golden", library, library_size);
         compare_golden("tests/fixtures/nk_ui/title.golden", title, title_size);
