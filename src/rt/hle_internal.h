@@ -572,6 +572,7 @@ enum {
  * gamedata-install and game-sharing, which fail closed the same way. */
 typedef struct UtilityDialog {
     uint32_t param;
+    uint32_t param_size;      /* the block's size word as InitStart proved it */
     uint32_t result;
     uint32_t generation;
     int status;
@@ -1154,6 +1155,7 @@ int guest_cstr(uint32_t addr, char *out, int max);
 uint32_t free_block(uint32_t uid);
 /* sceNet core library state (hle_network.c): reset at LoadExec and by the self-tests. */
 void hle_net_reset(void);
+void sr_hle_umd_loadexec_reset(void);  /* LoadExec: drop the UMD callback, drive at entry state */
 int sr_hle_test_net_inited(void);
 uint32_t sr_hle_test_net_pool_uid(void);
 extern FplPool s_fpls[FPL_MAX];

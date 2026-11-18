@@ -7024,9 +7024,13 @@ static void test_ms0_unified_namespace(void) {
         snprintf(jpath, sizeof jpath, "%s%cJCT_LINK.TXT", ms_root, sep);
         nk_remove_utf8(jpath);
 #ifdef _WIN32
-        char jcmd[1200];
-        snprintf(jcmd, sizeof jcmd,
-                 "cmd /c mklink \"%s\" \"%s\" >nul 2>&1", jpath, victim);
+        /* A file symlink keeps a relative target relative to its own folder, and the victim is
+         * named relative to the working directory: name it by its full path so the link really
+         * reaches it, rather than dangling and failing every open whatever the containment. */
+        char jcmd[1400], victim_full[MAX_PATH];
+        DWORD jfull = GetFullPathNameA(victim, MAX_PATH, victim_full, NULL);
+        snprintf(jcmd, sizeof jcmd, "cmd /c mklink \"%s\" \"%s\" >nul 2>&1", jpath,
+                 jfull > 0 && jfull < MAX_PATH ? victim_full : victim);
         int made = system(jcmd) == 0 &&
 #else
         /* POSIX's planted link is a symlink; its target resolves from the link's own directory. */
@@ -7034,12 +7038,27 @@ static void test_ms0_unified_namespace(void) {
 #endif
                    !nk_platform_path_missing(jpath);
         if (made) {
+            /* The fixture is live only if the host reaches the victim through the link. */
+            char seen[sizeof(payload)] = {0};
+            FILE *lf = fopen(jpath, "rb");
+            size_t got = lf ? fread(seen, 1, sizeof(seen) - 1u, lf) : 0u;
+            if (lf) fclose(lf);
+            expect(got == sizeof(payload) - 1u && memcmp(seen, payload, got) == 0,
+                   "the planted link reaches the victim outside the unified root");
             fd_guest_copy(PATH_ADDR, "ms0:/JCT_LINK.TXT", sizeof("ms0:/JCT_LINK.TXT"));
             fd_set_path(&cpu, PATH_ADDR, "ms0:/JCT_LINK.TXT");
             cpu.r[5] = 1u;
             uint32_t jfd = sr_hle_test_io_open(&cpu);
-            expect(jfd == 0x80010002u || jfd >= 64u,
-                   "open through a reparse point outside the unified root fails closed");
+#ifdef _WIN32
+            /* The Win32 open refuses the reparse point as a missing file. */
+            const uint32_t refused = 0x80010002u;
+#else
+            /* The POSIX leaf open is O_NOFOLLOW: ELOOP is SR_CD_NOT_CONTAINED. */
+            const uint32_t refused = 0x80010016u;
+#endif
+            expect(jfd == refused,
+                   "open through a link that reaches outside the unified root is refused by "
+                   "its containment code");
             if (jfd < 64u) {
                 memset(&cpu, 0, sizeof cpu);
                 cpu.r[4] = jfd;
@@ -10425,6 +10444,31 @@ static void test_osk_scripted_answer(void) {
     (void)sr_syscall(&cpu, k_down);
     (void)osk_poll(&cpu);
 
+    /* The field's outtextlength and outtextlimit are guest words: one too large for an int is
+     * clamped to the 256 units the runtime holds, never turned into a negative capacity that
+     * leaves the person nothing to type into. */
+    {
+        static const uint32_t caps[][2] = { { 0x80000000u, 0u }, { 16u, 0x7fffffffu },
+                                            { 0xffffffffu, 0xffffffffu } };
+        for (unsigned c = 0; c < sizeof(caps) / sizeof(caps[0]); c++) {
+            osk_person_reset();
+            osk_guest_build(1, caps[c][0], caps[c][1]);
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = OSK_PARAM_ADDR;
+            expect(sr_syscall(&cpu, k_init) == 0u, "a keyboard with an oversized field starts");
+            (void)osk_poll(&cpu);
+            (void)osk_poll(&cpu);
+            expect(osk_poll_past_visible(&cpu) == 3u && s_osk_requests == 1 &&
+                       MEM_R32(OSK_FIELDS_ADDR + 0x2cu) == 2u && osk_guest_out_is(0, n, 1),
+                   "an outtextlength or outtextlimit past INT_MAX still gives the person a "
+                   "field to answer, and the answer lands as UTF-16");
+            memset(&cpu, 0, sizeof(cpu));
+            (void)sr_syscall(&cpu, k_down);
+            (void)osk_poll(&cpu);
+        }
+        osk_person_reset();
+    }
+
     /* Scripted: one answer per field in order, the native box is never opened, the text
      * lands as UTF-16, and a CANCEL answer reports CANCELLED. */
     expect(osk_write_script(cancel_lines, 4), "the OSK answer script fixture is written");
@@ -10513,6 +10557,36 @@ static void test_osk_scripted_answer(void) {
     memset(&cpu, 0, sizeof(cpu));
     (void)sr_syscall(&cpu, k_down);
     (void)osk_poll(&cpu);
+
+    /* A script line longer than an answer holds (255 bytes) is refused by line number and the
+     * script ends there: it is never copied past its answer row, and its tail is never read as
+     * the next field's answer. */
+    {
+        static char long_line[301];
+        memset(long_line, 'x', 300);
+        long_line[300] = '\0';
+        static const uint16_t a[] = { 'A' };
+        const char *const long_lines[] = { "A", long_line, "B" };
+        osk_env("SR_OSK_TEXT", NULL);
+        expect(osk_write_script(long_lines, 3), "the overlong OSK answer script fixture is written");
+        osk_guest_build(3, 16u, 0u);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = OSK_PARAM_ADDR;
+        expect(sr_syscall(&cpu, k_init) == 0u, "a keyboard with an overlong script line starts");
+        (void)osk_poll(&cpu);
+        (void)osk_poll(&cpu);
+        expect(osk_poll_past_visible(&cpu) == 3u && s_osk_requests == 0 &&
+                   MEM_R32(OSK_FIELDS_ADDR + 0x2cu) == 2u && osk_guest_out_is(0, a, 1),
+               "the answers before an overlong script line are kept");
+        expect(MEM_R32(OSK_FIELDS_ADDR + 0x34u + 0x2cu) == 1u && osk_guest_out_is(1, old, 3) &&
+                   MEM_R32(OSK_FIELDS_ADDR + 2u * 0x34u + 0x2cu) == 1u &&
+                   osk_guest_out_is(2, old, 3),
+               "an overlong script line ends the script: its field and the ones after it are "
+               "CANCELLED, never answered with pieces of that line");
+        memset(&cpu, 0, sizeof(cpu));
+        (void)sr_syscall(&cpu, k_down);
+        (void)osk_poll(&cpu);
+    }
 
     /* A parameter block that is not readable is refused instead of being written into. */
     osk_guest_build(1, 16u, 0u);
@@ -11341,6 +11415,22 @@ static void test_msg_dialog_answer_field(void) {
     expect(MEM_R32(UTILITY_MSG_PARAM_ADDR + OPTIONS) == 0xa5a5a5a5u &&
                MEM_R32(UTILITY_MSG_PARAM_ADDR + BUTTON_PRESSED) == 0x5a5a5a5au,
            "a V1 block has no buttonPressed: nothing past its 572 bytes is written");
+
+    /* The block's version is the size InitStart proved. A V1 block whose size word the guest
+     * rewrites to V2 after InitStart still gets no write past its 572 bytes. */
+    utility_param_block(UTILITY_MSG_PARAM_ADDR, 0x2c4u);
+    MEM_W32(UTILITY_MSG_PARAM_ADDR, 0x23cu);                  /* V1: 572 bytes */
+    MEM_W32(UTILITY_MSG_PARAM_ADDR + BUTTON_PRESSED, 0x5a5a5a5au);
+    expect(utility_call(&cpu, NID_MSG_DIALOG_INIT, UTILITY_MSG_PARAM_ADDR) == 0u,
+           "a V1 message dialog starts");
+    MEM_W32(UTILITY_MSG_PARAM_ADDR, 0x244u);                  /* rewritten after InitStart */
+    expect(utility_poll_to_finished(&cpu, NID_MSG_DIALOG_UPDATE, NID_MSG_DIALOG_STATUS) &&
+               utility_call(&cpu, NID_MSG_DIALOG_SHUTDOWN, 0u) == 0u,
+           "the rewritten V1 message dialog runs to FINISHED and shuts down");
+    for (int frame = 0; frame < 4; frame++)
+        if (utility_status(&cpu, NID_MSG_DIALOG_STATUS) == 0u) break;
+    expect(MEM_R32(UTILITY_MSG_PARAM_ADDR + BUTTON_PRESSED) == 0x5a5a5a5au,
+           "a size word rewritten after InitStart does not open +0x240 to the answer");
 }
 
 static void test_savedata_older_parameter_versions(void) {
@@ -16502,6 +16592,95 @@ static void test_umd_unregister_callback(void) {
     cpu.r[4] = cbid;
     expect(sr_syscall(&cpu, 0xedba5844u) == 0u,
            "UMD callback test deletes its production callback object");
+    s_oracle_mode = saved_oracle_mode;
+    s_oracle_callback_calls = saved_callback_calls;
+}
+
+/* sceKernelLoadExec: the next program starts with none of the old program's UMD or GE callback
+ * registrations. The callback table and its UIDs start again, so a UMD registration that
+ * survived would name whatever callback the next program creates with that UID, and a GE
+ * callback slot that survived would keep the old program's code addresses and shift the next
+ * program's callback IDs. The drive is back at its program-entry state (0x32). */
+static void test_loadexec_drops_umd_and_ge_callbacks(void) {
+    enum {
+        NID_CREATE_CALLBACK = 0xe81caf8fu,
+        NID_CHECK_CALLBACK = 0x349d6d6cu,
+        NID_DELETE_CALLBACK = 0xedba5844u,
+        NID_UMD_ACTIVATE = 0xc6183d47u,
+        NID_UMD_DEACTIVATE = 0xe83742bau,
+        NID_UMD_GET_DRIVE_STAT = 0x6b4a146cu,
+        NID_UMD_REGISTER_CALLBACK = 0xaee7404du,
+        NID_UMD_UNREGISTER_CALLBACK = 0xbd2bde07u,
+        NID_GE_SET_CALLBACK = 0xa4fc06a4u,
+        NID_GE_UNSET_CALLBACK = 0x05db22ceu,
+    };
+    const uint32_t ge_info = 0x09034000u;
+    int saved_oracle_mode = s_oracle_mode;
+    int saved_callback_calls = s_oracle_callback_calls;
+    reset_fixture();
+    sr_hle_init();
+    memcpy(SR_HOST(ORACLE_CALLBACK_NAME), "umd-loadexec", sizeof("umd-loadexec"));
+    s_oracle_mode = 1;
+    s_oracle_callback_calls = 0;
+    CpuState cpu;
+
+    /* The old program: a UMD callback, a deactivated drive and a GE callback. */
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ORACLE_CALLBACK_NAME;
+    cpu.r[5] = ORACLE_CALLBACK_ENTRY;
+    cpu.r[6] = 0x55u;
+    const uint32_t old_cb = sr_syscall(&cpu, NID_CREATE_CALLBACK);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = old_cb;
+    expect(sr_callback_is_valid(old_cb) && sr_syscall(&cpu, NID_UMD_REGISTER_CALLBACK) == 0u,
+           "LoadExec fixture: the old program registers a UMD callback");
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_UMD_DEACTIVATE) == 0u &&
+               sr_syscall(&cpu, NID_UMD_GET_DRIVE_STAT) == 0x12u,
+           "LoadExec fixture: the old program leaves the drive deactivated");
+    (void)sr_syscall(&cpu, NID_CHECK_CALLBACK);
+    MEM_W32(ge_info + 0u, 0u);
+    MEM_W32(ge_info + 4u, 0u);
+    MEM_W32(ge_info + 8u, 0x08900000u);                   /* an old-program finish function */
+    MEM_W32(ge_info + 12u, 0u);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_info;
+    const uint32_t old_ge = sr_syscall(&cpu, NID_GE_SET_CALLBACK);
+    expect(old_ge < 16u, "LoadExec fixture: the old program registers a GE callback");
+
+    sr_hle_loadexec_reset_guest_state();
+
+    /* The next program. */
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_UMD_GET_DRIVE_STAT) == 0x32u,
+           "after LoadExec the drive reads its program-entry state 0x32, not the old program's "
+           "deactivated 0x12");
+    cpu.r[4] = ORACLE_CALLBACK_NAME;
+    cpu.r[5] = ORACLE_CALLBACK_ENTRY;
+    cpu.r[6] = 0x66u;
+    const uint32_t new_cb = sr_syscall(&cpu, NID_CREATE_CALLBACK);
+    expect(sr_callback_is_valid(new_cb), "LoadExec fixture: the next program creates a callback");
+    s_oracle_callback_calls = 0;
+    memset(&cpu, 0, sizeof(cpu));
+    expect(sr_syscall(&cpu, NID_UMD_ACTIVATE) == 0u && sr_syscall(&cpu, NID_CHECK_CALLBACK) == 0u &&
+               s_oracle_callback_calls == 0,
+           "after LoadExec a drive change notifies no callback the next program did not register");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = old_cb;
+    expect(sr_syscall(&cpu, NID_UMD_UNREGISTER_CALLBACK) == 0x80010016u,
+           "after LoadExec the old program's UMD registration is gone");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = ge_info;
+    const uint32_t new_ge = sr_syscall(&cpu, NID_GE_SET_CALLBACK);
+    expect(new_ge == 0u,
+           "after LoadExec the next program's first GE callback takes ID 0: no old-program slot "
+           "survives");
+
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = new_ge;
+    (void)sr_syscall(&cpu, NID_GE_UNSET_CALLBACK);
+    cpu.r[4] = new_cb;
+    (void)sr_syscall(&cpu, NID_DELETE_CALLBACK);
     s_oracle_mode = saved_oracle_mode;
     s_oracle_callback_calls = saved_callback_calls;
 }
@@ -32871,6 +33050,15 @@ static void test_ge_finish_callback_waits_for_interrupts(void) {
     sched_resume_interrupts(prev);
     expect(waited && s_gm.callbacks == 0u && !ge_finish_masked_pending(),
            "GE finish masked: a LoadExec drops the completions still waiting");
+    /* The LoadExec also dropped the old program's GE callback; the rest of this test is a new
+     * program that registers its own. */
+    MEM_W32(GE_TIM_INFO + 0u, 0u);
+    MEM_W32(GE_TIM_INFO + 4u, 0u);
+    MEM_W32(GE_TIM_INFO + 8u, GE_TIM_FINISH_FN);
+    MEM_W32(GE_TIM_INFO + 12u, GE_TIM_FINISH_ARG);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = GE_TIM_INFO;
+    s_ge_tim_cbid = sr_syscall(&cpu, NID_SCE_GE_SET_CALLBACK);
 
     /* SR_GE_TIMING=1: the model's completion service is the GE finish interrupt itself, so each
      * list's callback runs as that list completes: the second list is still drawing when the
@@ -58389,6 +58577,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_unregistered_batch_sysclock_wide();
     test_kernel_usec_sysclock_conversions();
     test_umd_unregister_callback();
+    test_loadexec_drops_umd_and_ge_callbacks();
     test_umd_replace_permission_and_disc_info();
     test_psp_measured_power_battery_20261024();
     test_pinned_handlers_1814_1815_1816();

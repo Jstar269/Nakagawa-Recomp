@@ -59,6 +59,16 @@ static uint32_t h_UmdReplacePermit(CpuState *s) { (void)s; s_umd_replace_permitt
 uint32_t sr_hle_test_umd_replace_permitted(void) { return s_umd_replace_permitted; }
 #endif
 
+/* sceKernelLoadExec: the callback table and its UIDs start again for the next program, so the
+ * old program's UMD registration would name whatever callback the next one creates with that
+ * UID. The next program finds no registration, the drive in its measured program-entry state
+ * (0x32) and the replace permission back at its boot value. */
+void sr_hle_umd_loadexec_reset(void) {
+    s_umd_cb_uid = 0u;
+    s_umd_drive_stat = UMD_STAT_ACTIVE;
+    s_umd_replace_permitted = 0u;
+}
+
 /* sceUmdGetDiscInfo(SceUmdDiscInfo *info): info->size (u32) must be 8, then info->type
  * (u32) receives PSP_UMD_TYPE_GAME (0x10), the only medium this runtime serves.
  * A size other than 8 or an unusable pointer returns SCE_ERROR_ERRNO_EINVAL
