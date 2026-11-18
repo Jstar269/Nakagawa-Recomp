@@ -349,13 +349,42 @@ static void test_python_and_cli_discovery(void) {
         printf("   Found compatible Python at: %s\n", python_path);
     } else {
         assert(python_path[0] == '\0');
-        printf("   No runnable CPython 3.15.x found on this host.\n");
+        printf("   No runnable CPython 3.15 or 3.14 found on this host.\n");
     }
 
+    /* The Makefile runs this test from the checkout root. The search is given that root
+     * by name, with NK_INSTALL_ROOT cleared, so the CLI it finds is this checkout's own and
+     * not one an inherited override points at. */
+    char repo_root[NK_MAX_PATH];
+    char expected_cli[NK_MAX_PATH + 32];
+    char expected_abs[NK_MAX_PATH + 32];
+    assert(nk_tb_getcwd(repo_root, sizeof(repo_root)) != NULL);
+    snprintf(expected_cli, sizeof(expected_cli), "%s%ctools%cnk_cli.py", repo_root,
+             nk_platform_path_separator(), nk_platform_path_separator());
+    if (!nk_platform_file_exists(expected_cli)) {
+        fprintf(stderr, "[PACKAGE_BUILDER_TEST] Subtest 4 runs from the checkout root: "
+                        "%s is missing\n", expected_cli);
+        assert(nk_platform_file_exists(expected_cli));
+    }
+    assert(nk_platform_absolute_path(expected_cli, expected_abs, sizeof(expected_abs)));
+    /* Copy the prior value out: clearing or resetting invalidates getenv's pointer. */
+    char prior_override[1024];
+    prior_override[0] = '\0';
+    const char *live_override = getenv("NK_INSTALL_ROOT");
+    if (live_override && live_override[0]) {
+        snprintf(prior_override, sizeof(prior_override), "%s", live_override);
+    }
+    nk_tb_set_env("NK_INSTALL_ROOT", NULL);
+
     char cli_path[NK_MAX_PATH];
-    bool found_cli = package_builder_find_cli(".", cli_path, sizeof(cli_path));
+    bool found_cli = package_builder_find_cli(repo_root, cli_path, sizeof(cli_path));
+    nk_tb_set_env("NK_INSTALL_ROOT", prior_override[0] ? prior_override : NULL);
     assert(found_cli);
-    assert(strlen(cli_path) > 0);
+    if (strcmp(cli_path, expected_abs) != 0) {
+        fprintf(stderr, "[PACKAGE_BUILDER_TEST] CLI from another tree: expected '%s', got '%s'\n",
+                expected_abs, cli_path);
+        assert(strcmp(cli_path, expected_abs) == 0);
+    }
     printf("   Found CLI at: %s\n", cli_path);
 }
 
@@ -469,6 +498,8 @@ static int run_build_package_route(const char *install_root,
  * with no terminal flag, so the screen read "Building package..." forever. The
  * child is this test binary run with --child-exit-zero. */
 static const char *s_self_executable;
+/* Checks this host cannot run, named in the final summary so a skip never reads as a pass. */
+static int s_not_run_checks;
 
 static char *copy_env_value(const char *name) {
     const char *value = getenv(name);
@@ -1683,6 +1714,14 @@ static void test_build_speed_reaches_the_child(void) {
             balanced_priority = priority;
         } else if (speeds[s] == PACKAGE_BUILD_SPEED_BACKGROUND) {
             assert(priority == NK_PROCESS_PRIORITY_LOW);
+            /* A child inherits a below-normal runner's priority, so LOW here cannot
+             * show that Background lowered it: the check is not run, and says so. */
+            if (balanced_priority == NK_PROCESS_PRIORITY_LOW) {
+                printf("[PACKAGE_BUILDER_TEST] SKIP background-lowers-priority: this runner "
+                       "is itself below normal, so a Background child that kept the "
+                       "runner's priority would read LOW too (NOT_RUN on this host)\n");
+                s_not_run_checks++;
+            }
         } else {
             assert(priority == balanced_priority);
         }
@@ -1691,10 +1730,6 @@ static void test_build_speed_reaches_the_child(void) {
         nk_remove_utf8(path);
         snprintf(path, sizeof(path), "%s.release", session.progress_file_path);
         nk_remove_utf8(path);
-    }
-    if (balanced_priority == NK_PROCESS_PRIORITY_LOW) {
-        printf("[PACKAGE_BUILDER_TEST] NOTE: this runner is itself below normal, so "
-               "Balanced and Background read alike here\n");
     }
 }
 
@@ -1759,6 +1794,11 @@ int main(int argc, char *argv[]) {
 #endif
 
     native_test_assert_real_config_untouched();
-    printf("ALL PACKAGE BUILDER TESTS PASSED\n");
+    if (s_not_run_checks > 0) {
+        printf("ALL PACKAGE BUILDER TESTS PASSED, %d check(s) NOT_RUN on this host (see SKIP)\n",
+               s_not_run_checks);
+    } else {
+        printf("ALL PACKAGE BUILDER TESTS PASSED\n");
+    }
     return 0;
 }

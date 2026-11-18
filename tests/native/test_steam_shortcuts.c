@@ -525,7 +525,20 @@ static void test_accounts_and_add_for_account(void) {
     }
     size_t one = 0;
     CHECK_STATUS(nk_steam_list_accounts(steam, accounts, 2u, &one), NK_STEAM_OK, "a small cap");
-    CHECK(one <= 2u, "never more than the cap");
+    CHECK(one == 2u, "a cap below the account count fills the cap");
+    if (one == 2u) {
+        /* Which two folders fill the cap follows the directory listing; each is one of
+           the three accounts, they differ, and they come back in ascending order. */
+        static const char *const known[] = {"4", "20002", "30001"};
+        int rank[2] = {-1, -1};
+        for (size_t a = 0; a < 2u; a++) {
+            for (int k = 0; k < 3; k++) {
+                if (strcmp(accounts[a].id, known[k]) == 0) rank[a] = k;
+            }
+        }
+        CHECK(rank[0] >= 0 && rank[1] >= 0, "each capped entry is a real account");
+        CHECK(rank[0] < rank[1], "the capped entries differ and are ascending by number");
+    }
 
     char missing[NATIVE_TEST_PATH_MAX];
     path_in(missing, sizeof(missing), "no-steam-here");
@@ -946,7 +959,13 @@ static void test_grid_slot_paths_and_suffixes(void) {
           "wide slot path trims trailing slash");
     snprintf(expect_tail, sizeof(expect_tail), "%c%lu.png", nk_platform_path_separator(),
              (unsigned long)app_id);
-    CHECK(strstr(out, expect_tail) != NULL, "wide slot path ends with <appid>.png");
+    {
+        char expect_full[NK_MAX_PATH];
+        snprintf(expect_full, sizeof(expect_full), "/steam/userdata/100/config/grid%s",
+                 expect_tail);
+        CHECK(strcmp(out, expect_full) == 0,
+              "wide slot path is the trimmed folder, one separator, then <appid>.png");
+    }
 
     CHECK(nk_steam_grid_slot_path("/grid", app_id, NK_STEAM_GRID_SLOT_ICON, out, sizeof(out)),
           "icon slot path formats");
@@ -1170,6 +1189,7 @@ static void test_grid_invalid_pngs_and_rollback(void) {
     /* Oversized PNG (> NK_STEAM_GRID_MAX_BYTES) refused */
     oversized = (uint8_t *)calloc(1u, NK_STEAM_GRID_MAX_BYTES + 1u);
     CHECK(oversized != NULL, "allocate oversized buffer");
+    if (oversized == NULL) return;
     memcpy(oversized, good, good_len);
     art.icon0_png = oversized;
     art.icon0_size = NK_STEAM_GRID_MAX_BYTES + 1u;

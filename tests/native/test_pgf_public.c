@@ -661,17 +661,26 @@ static void test_open_headers_and_sections(void) {
     CHECK(test_build_font(&font, &config));
     font.size = TEST_HEADER_SIZE + 3u;
     CHECK(test_open(&font) == NULL);
+    /* The four one-entry metric tables (32 bytes) come before the revision-3 tables, so
+       the cut is one byte short of the 4-byte revision-3 table: inside table a, and then
+       inside table b, of a font that opens whole. */
     test_default_config(&config);
     config.revision = 3u;
     config.revision3_counts[0] = 1u;
     CHECK(test_build_font(&font, &config));
-    font.size = TEST_REV3_HEADER_SIZE + 3u;
+    pgf = test_open(&font);
+    CHECK(pgf != NULL);
+    pgf_close(pgf);
+    font.size = TEST_REV3_HEADER_SIZE + 32u + 4u - 1u;
     CHECK(test_open(&font) == NULL);
     test_default_config(&config);
     config.revision = 3u;
     config.revision3_counts[1] = 1u;
     CHECK(test_build_font(&font, &config));
-    font.size = TEST_REV3_HEADER_SIZE + 3u;
+    pgf = test_open(&font);
+    CHECK(pgf != NULL);
+    pgf_close(pgf);
+    font.size = TEST_REV3_HEADER_SIZE + 32u + 4u - 1u;
     CHECK(test_open(&font) == NULL);
     test_default_config(&config);
     config.char_map_count = 1u;
@@ -2237,7 +2246,8 @@ static void test_validate_memory_verdicts(void) {
         memset(&verdict, 0, sizeof(verdict));
         CHECK(pgf_validate_memory(huge, max_image + 1u, &verdict) == 0);
         CHECK(verdict.refusal == PGF_REFUSE_TOO_LARGE);
-        CHECK(pgf_validate_memory(huge, max_image, &verdict) == 1 || verdict.refusal != PGF_REFUSE_TOO_LARGE);
+        CHECK(pgf_validate_memory(huge, max_image, &verdict) == 1 &&
+              verdict.refusal == PGF_REFUSE_NONE);
         free(huge);
     }
 }
