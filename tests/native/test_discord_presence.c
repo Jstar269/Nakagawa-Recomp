@@ -489,8 +489,11 @@ static void server_expect(HANDLE pipe, uint32_t opcode, const char *json) {
     unsigned char header[8];
     char payload[2048];
     server_read_exact(pipe, header, 8);
-    uint32_t op = (uint32_t)header[0] | ((uint32_t)header[1] << 8);
-    uint32_t len = (uint32_t)header[4] | ((uint32_t)header[5] << 8);
+    /* Both header fields are little-endian uint32: all four bytes count. */
+    uint32_t op = (uint32_t)header[0] | ((uint32_t)header[1] << 8) |
+                  ((uint32_t)header[2] << 16) | ((uint32_t)header[3] << 24);
+    uint32_t len = (uint32_t)header[4] | ((uint32_t)header[5] << 8) |
+                   ((uint32_t)header[6] << 16) | ((uint32_t)header[7] << 24);
     assert(op == opcode && len < sizeof(payload));
     server_read_exact(pipe, payload, len);
     payload[len] = '\0';

@@ -33,7 +33,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Literal, overload
 import unittest
 from unittest import mock
 
@@ -77,6 +77,46 @@ from nk_core import package_cache
 
 SCHEMA_PATH = ROOT / "assets" / "enhancement_package.schema.json"
 GCC = shutil.which("gcc") or shutil.which("cc")
+SUBPROCESS_TIMEOUT_S = 120
+
+
+@overload
+def _run(*args: Any, text: Literal[True], **kwargs: Any) -> subprocess.CompletedProcess[str]: ...
+@overload
+def _run(*args: Any, text: Literal[False] = ..., **kwargs: Any) -> subprocess.CompletedProcess[bytes]: ...
+def _run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    """subprocess.run with a bound, for this module's CLI and compiled-harness calls only.
+    Text-mode calls (text=True) return CompletedProcess[str]; the rest return bytes."""
+    kwargs.setdefault("timeout", SUBPROCESS_TIMEOUT_S)
+    return subprocess.run(*args, **kwargs)
+
+
+def _exit_path_prelude(lines: list[str], line: int, column: int) -> str | None:
+    """The code of the block enclosing an exit call that runs before it: the text from the
+    block's '{' to the call, at that block's own depth only. Nested sibling blocks are skipped
+    whole, since their statements do not run on this exit's path. None when no enclosing '{'
+    exists (the call is not inside a block this scan can see)."""
+    collected: list[str] = []
+    depth = 0
+    for j in range(line, -1, -1):
+        clean = lines[j].split("//", 1)[0]
+        if j == line:
+            clean = clean[:column]
+        elif clean.lstrip().startswith(("*", "/*")):
+            continue
+        kept: list[str] = []
+        for ch in reversed(clean):
+            if ch == "}":
+                depth += 1
+            elif ch == "{":
+                if depth == 0:
+                    collected.append("".join(reversed(kept)))
+                    return "\n".join(reversed(collected))
+                depth -= 1
+            elif depth == 0:
+                kept.append(ch)
+        collected.append("".join(reversed(kept)))
+    return None
 
 
 def _f32_decay_reference(k: float) -> int:
@@ -86,6 +126,15 @@ def _f32_decay_reference(k: float) -> int:
         exact = 1 - (1 - decimal.Decimal(k)).sqrt()
     return _bits_of(float(exact))
 
+
+
+class TestSubprocessBound(unittest.TestCase):
+    """The timeout bound is local to this module: other test modules share the interpreter
+    under one unittest run, so the shared subprocess module must stay untouched."""
+
+    def test_shared_subprocess_run_is_not_replaced(self) -> None:
+        self.assertEqual(subprocess.run.__module__, "subprocess")
+        self.assertEqual(subprocess.run.__name__, "run")
 
 
 class TestEnhancementPackageSchema(unittest.TestCase):
@@ -443,7 +492,7 @@ class TestEnhancementPackageSchema(unittest.TestCase):
             invalid_path.write_text(json.dumps(bad_pkg), encoding="utf-8")
 
             # Valid file CLI run
-            res_ok = subprocess.run(
+            res_ok = _run(
                 [sys.executable, "-m", "enhancement_package", str(valid_path)],
                 cwd=ROOT / "tools",
                 capture_output=True,
@@ -453,7 +502,7 @@ class TestEnhancementPackageSchema(unittest.TestCase):
             self.assertIn("OK", res_ok.stdout)
 
             # Invalid file CLI run
-            res_bad = subprocess.run(
+            res_bad = _run(
                 [sys.executable, "-m", "enhancement_package", str(invalid_path)],
                 cwd=ROOT / "tools",
                 capture_output=True,
@@ -1050,9 +1099,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
             )
             exe = tmp / "drops.exe"
             assert GCC is not None
-            subprocess.run([GCC, "-std=c11", "-Wall", "-Werror", "-Wno-unused-function",
+            _run([GCC, "-std=c11", "-Wall", "-Werror", "-Wno-unused-function",
                             "-o", str(exe), str(harness)], check=True, capture_output=True)
-            out = subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout
+            out = _run([str(exe)], check=True, capture_output=True, text=True).stdout
             runs, alternations, begins = (int(v) for v in out.split())
             self.assertEqual(runs, 600)
             self.assertEqual(alternations, 1200)
@@ -1116,7 +1165,7 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                           f"nk_enh_file_data_0, {len(rewritten)}u)", combined)
             if GCC:
                 # The start-up block is C the runtime build compiles; check it is valid C.
-                checked = subprocess.run(
+                checked = _run(
                     [GCC, "-std=gnu11", "-fsyntax-only", "-Wall", "-Werror", "-Wno-unused-function",
                      f"-I{ROOT / 'src' / 'rt'}", f"-I{out_dir}", str(out_dir / "out.c")],
                     capture_output=True, text=True)
@@ -1143,6 +1192,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                     self.assertEqual(rc, 1, output)
                     self.assertIn(why, output)
                     self.assertEqual(files, {})
+        if not GCC:
+            # Reported last, so the refusal subtests above still run on a host without a compiler.
+            self.skipTest("needs a host C compiler for the -fsyntax-only start-up check")
 
     def test_float_pair_rewrite_scales_the_whole_constant(self) -> None:
         """lui+ori of one register names a float exactly; anything else refuses."""
@@ -1394,12 +1446,12 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 exe = tmp / f"{name}.exe"
                 # The generated call statement keeps its guards on one line, as codegen emits it.
                 assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-                built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                         "-Wno-misleading-indentation", "-Wno-unused-variable",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                run = _run([str(exe)], check=True, capture_output=True, text=True)
                 lines: list[str] = run.stdout.split("\n")
                 return lines
 
@@ -1574,13 +1626,13 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                 )
                 exe = tmp / f"{name}.exe"
                 assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-                built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                         "-Wno-misleading-indentation", "-Wno-unused-variable",
                                         "-Wno-unused-value",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                run = _run([str(exe)], check=True, capture_output=True, text=True)
                 return run.stdout.split("\n")
 
             out = program("store_gate", enhanced)
@@ -1920,9 +1972,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                             encoding="utf-8",
                         )
                         exe = tmp / "map.exe"
-                        subprocess.run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe),
+                        _run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe),
                                         str(harness), "-lm"], check=True, capture_output=True, text=True)
-                        out = subprocess.run([str(exe), str(tmp / "k.txt")], check=True, capture_output=True,
+                        out = _run([str(exe), str(tmp / "k.txt")], check=True, capture_output=True,
                                              text=True).stdout.split()
                     self.assertEqual(out.pop(), "reports=1")
                     transform = {"decay": "decay_k_to_1-sqrt(1-k)", "retention": "retention_m_to_sqrt(m)"}[kind]
@@ -1983,9 +2035,9 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                             encoding="utf-8",
                         )
                         exe = tmp / "copy.exe"
-                        subprocess.run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe),
+                        _run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe),
                                         str(harness), "-lm"], check=True, capture_output=True, text=True)
-                        out = subprocess.run([str(exe)], check=True, capture_output=True, text=True).stdout.split()
+                        out = _run([str(exe)], check=True, capture_output=True, text=True).stdout.split()
                     stock = struct.unpack("<I", struct.pack("<f", k))[0]
                     mapped = struct.unpack("<I", struct.pack("<f", _scale_value(transform, k)))[0]
                     self.assertNotEqual(mapped, stock)
@@ -3411,7 +3463,7 @@ class TestEnhancementStoreSites(unittest.TestCase):
         for on in (0, 1):
             exes[on] = tmp / f"{name}{on}.exe"
             assert GCC is not None
-            built = subprocess.run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+            built = _run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                     f"-DNK_ON={on}", f"-I{ROOT / 'src' / 'rt'}", "-o", str(exes[on]), str(src),
                                     str(ROOT / "src" / "rt" / "vfpu_tables.c"), "-lm"],
                                    capture_output=True, text=True)
@@ -3452,12 +3504,12 @@ class TestEnhancementStoreSites(unittest.TestCase):
             ]
             for on, args in runs:
                 with self.subTest(on=on, args=args):
-                    results = {name: subprocess.run([str(e[on]), *args], capture_output=True, text=True)
+                    results = {name: _run([str(e[on]), *args], capture_output=True, text=True)
                                for name, e in exes.items()}
                     self.assertEqual(
                         (results["keyed"].returncode, results["keyed"].stdout, results["keyed"].stderr),
                         (results["plain"].returncode, results["plain"].stdout, results["plain"].stderr))
-            res = subprocess.run([str(exes["keyed"][1]), "I:10"], capture_output=True, text=True)
+            res = _run([str(exes["keyed"][1]), "I:10"], capture_output=True, text=True)
             self.assertEqual(res.returncode, 1)
             self.assertIn("ENHANCEMENT_DATA_MISMATCH: site I_STORE at 0x00001200 stores 10 (0x0000000a), "
                           "not one of the package's stock values; the run stops here", res.stderr)
@@ -3536,13 +3588,13 @@ class TestEnhancementStoreSites(unittest.TestCase):
             exes = {}
             for on in (0, 1):
                 exes[on] = tmp / f"store{on}.exe"
-                subprocess.run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                _run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                 f"-DNK_ON={on}", f"-I{ROOT / 'src' / 'rt'}", "-o", str(exes[on]), str(src),
                                 str(ROOT / "src" / "rt" / "perf.c"), "-lm"],
                                check=True, capture_output=True, text=True)
 
             def run(on: int, *args: str) -> subprocess.CompletedProcess[str]:
-                return subprocess.run([str(exes[on]), *args], capture_output=True, text=True)
+                return _run([str(exes[on]), *args], capture_output=True, text=True)
 
             f30, f60, f120 = (f"0x{_f32_bits_of(v):08x}" for v in (30.0, 60.0, 120.0))
             f_unreached, i_unreached = (
@@ -3670,12 +3722,12 @@ class TestEnhancementStoreSites(unittest.TestCase):
                 src.write_text(harness, encoding="utf-8")
                 exe = tmp / "gate.exe"
                 assert GCC is not None
-                built = subprocess.run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                built = _run([str(GCC), "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                         "-Wno-misleading-indentation", f"-I{ROOT / 'src' / 'rt'}", "-o",
                                         str(exe), str(src), str(ROOT / "src" / "rt" / "perf.c"), "-lm"],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                res = subprocess.run([str(exe)], capture_output=True, text=True)
+                res = _run([str(exe)], capture_output=True, text=True)
                 self.assertEqual(res.returncode, 0, res.stderr)
                 # Stock, every update, while F_STORE has not applied; then every second update.
                 self.assertEqual(res.stdout.splitlines(), ["before 4", "after 2"])
@@ -3700,10 +3752,32 @@ class TestEnhancementStoreSites(unittest.TestCase):
                 if not exit_call.search(code) or code.lstrip().startswith(("*", "/*")):
                     continue
                 paths += 1
-                window = "\n".join(lines[max(0, n - 10):n + 1])
                 with self.subTest(path=f"{path.name}:{n + 1}"):
-                    self.assertRegex(window, report)
+                    match = exit_call.search(code)
+                    assert match is not None
+                    prelude = _exit_path_prelude(lines, n, match.start())
+                    self.assertIsNotNone(prelude, "no enclosing '{' before the exit call")
+                    assert prelude is not None
+                    self.assertRegex(prelude, report)
         self.assertGreaterEqual(paths, 12)
+
+    def test_exit_path_scan_ignores_sibling_blocks(self) -> None:
+        """The exit-path scan reads only the exit's own block: a sibling block's shutdown call
+        does not count, and an exit with no enclosing block is reported, not passed."""
+        def prelude(source: str) -> str | None:
+            lines = source.splitlines()
+            n = next(i for i, text in enumerate(lines) if "_Exit(2)" in text)
+            return _exit_path_prelude(lines, n, lines[n].index("_Exit(2)"))
+
+        sibling = prelude("void f(int a) {\nif (a) {\n sr_perf_shutdown();\n _Exit(1);\n}\n_Exit(2);\n}\n")
+        self.assertIsNotNone(sibling)
+        self.assertNotIn("sr_perf_shutdown", sibling or "")
+        same_block = prelude("void f(void) {\n sr_perf_shutdown(); if (x) { y(); }\n _Exit(2); }\n")
+        self.assertIn("sr_perf_shutdown();", same_block or "")
+        self.assertNotIn("y();", same_block or "")
+        after_call = prelude("void f(void) {\n _Exit(2); sr_perf_shutdown(); }\n")
+        self.assertNotIn("sr_perf_shutdown", after_call or "")
+        self.assertIsNone(prelude("_Exit(2);\n"))
 
     def test_package_without_store_keys_emits_no_store_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4154,12 +4228,12 @@ class TestAltGateStaticChecks(unittest.TestCase):
                 )
                 exe = tmp / f"{name}.exe"
                 assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-                built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+                built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                         "-Wno-misleading-indentation", "-Wno-unused-variable",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                run = _run([str(exe)], check=True, capture_output=True, text=True)
                 return run.stdout.splitlines()
 
             out = program("alt", alt)
@@ -5084,9 +5158,12 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertFalse(out.exists())
             # The names resolve only through the project's map: without it, nothing is published.
             priv_path.with_suffix(".symbols.json").unlink()
+            err2 = StringIO()
             with mock.patch.object(enhancement_package, "extract_elf_func_symbols", return_value=game_symbols), \
-                    mock.patch("sys.stderr", new=StringIO()), mock.patch("sys.stdout", new=StringIO()):
+                    mock.patch("sys.stderr", new=err2), mock.patch("sys.stdout", new=StringIO()):
                 self.assertNotEqual(enhancement_package.main(args), 0)
+            self.assertIn("the symbol map does not name", err2.getvalue())
+            self.assertIn("synth_timer_duration", err2.getvalue())
             self.assertFalse(out.exists())
 
 
@@ -6124,12 +6201,12 @@ class TestTwoUpdateTransforms(unittest.TestCase):
         )
         exe = tmp / f"{name}.exe"
         assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-        built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+        built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                 "-Wno-misleading-indentation", "-Wno-unused-variable", "-Wno-unused-but-set-variable",
                                 f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness), "-lm"],
                                capture_output=True, text=True)
         self.assertEqual(built.returncode, 0, built.stderr)
-        run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+        run = _run([str(exe)], check=True, capture_output=True, text=True)
         return run.stdout.splitlines(), run.stderr.splitlines()
 
     @staticmethod
@@ -6312,9 +6389,9 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                 encoding="utf-8",
             )
             exe = tmp / "scale.exe"
-            subprocess.run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe), str(harness), "-lm"],
+            _run([str(GCC), "-std=c11", "-O2", "-Wall", "-Werror", "-o", str(exe), str(harness), "-lm"],
                            check=True, capture_output=True, text=True)
-            out = subprocess.run([str(exe), str(tmp / "v.txt")], check=True, capture_output=True,
+            out = _run([str(exe), str(tmp / "v.txt")], check=True, capture_output=True,
                                  text=True).stdout.split()
         per_value = sum(len(cells) for _name, _word, _rewrite, cells in forms)
         self.assertEqual(len(out), per_value * len(values))
@@ -6482,12 +6559,12 @@ class TestTwoUpdateTransforms(unittest.TestCase):
                 )
                 exe = tmp / f"{name}.exe"
                 assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-                built = subprocess.run([GCC, "-std=gnu11", "-ffp-contract=off", "-Wall", "-Werror",
+                built = _run([GCC, "-std=gnu11", "-ffp-contract=off", "-Wall", "-Werror",
                                         "-Wno-unused-function", "-Wno-misleading-indentation", "-Wno-unused-variable",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness), "-lm"],
                                        capture_output=True, text=True)
                 self.assertEqual(built.returncode, 0, built.stderr)
-                run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+                run = _run([str(exe)], check=True, capture_output=True, text=True)
                 self.assertEqual(run.stderr, "")
                 arcs[name] = run.stdout.splitlines()
 
@@ -7314,12 +7391,12 @@ class TestAcePartsLoad(_AcePartsFixture):
             )
             exe = tmp / "gate.exe"
             assert GCC is not None, "skipUnless(GCC) runs this test only with a compiler"
-            built = subprocess.run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
+            built = _run([GCC, "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function",
                                     "-Wno-misleading-indentation", "-Wno-unused-variable",
                                     f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness)],
                                    capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stderr)
-            run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+            run = _run([str(exe)], check=True, capture_output=True, text=True)
         ra = f"0x{self.loader + 16:08x}"
         # Off: the stock call runs once and its $v0 stands. On: it never runs and $v0 is 0. Either
         # way the runtime is asked once, the delay slot ran once (a0 += 7) and $ra = site + 8.
@@ -7623,13 +7700,13 @@ class TestAcePartsSoftShadows(_AcePartsFixture):
             def build(name: str, text: str) -> tuple[subprocess.CompletedProcess[str], Path]:
                 harness, exe = tmp / f"{name}.c", tmp / f"{name}.exe"
                 harness.write_text("#include <stdio.h>\n#include \"ace.h\"\n" + text + "\n" + main, encoding="utf-8")
-                return (subprocess.run([GCC, "-std=c99", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+                return (_run([GCC, "-std=c99", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
                                         f"-I{ROOT / 'src' / 'rt'}", "-o", str(exe), str(harness),
                                         str(ROOT / "src" / "rt" / "ace.c")], capture_output=True, text=True), exe)
 
             built, exe = build("declare", block)
             self.assertEqual(built.returncode, 0, built.stderr)
-            run = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
+            run = _run([str(exe)], check=True, capture_output=True, text=True)
             # The negative control: the same unit with the emitted prototype's count widened.
             self.assertEqual(block.count("uint32_t count,"), 1)
             drifted, _exe = build("drift", block.replace("uint32_t count,", "uint64_t count,"))

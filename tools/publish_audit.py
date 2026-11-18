@@ -141,10 +141,12 @@ SPDX_PROVENANCE_SOURCE_EXTENSIONS = SOURCE_EXTENSIONS | {
 SPDX_PROVENANCE_SOURCE_NAMES = frozenset({"CMakeLists.txt", "Makefile"})
 KEY_NAME = re.compile(r"(?:kirk|amctrl|pgd|key|vkey|seed|iv|secret|token)", re.IGNORECASE)
 HEX_16_BYTES = re.compile(r"^[0-9a-fA-F]{32}$")
-#: Local-only KeyStore files (issue #295) can never be committed or packaged.
+#: Local-only KeyStore files (issue #295) can never be committed or packaged. An APK
+#: signing keystore is named for its binary format (JKS, PKCS#12) or by its role, so it
+#: gets the same class even when the file name carries no "key" vocabulary.
 KEY_FILE_NAME = re.compile(
     r"keystore|keyfile|key[_-]file|key[_-]store|psp[_-]keys?|kirk[_-]keys?|"
-    r"^keys\.(?:json|txt|bin|dat)$|\.(?:key|keys)$",
+    r"^keys\.(?:json|txt|bin|dat)$|\.(?:key|keys)$|\.(?:jks|p12|pfx|keystore)$",
     re.IGNORECASE,
 )
 #: The name class only applies to data-shaped suffixes; source and prose
@@ -152,7 +154,7 @@ KEY_FILE_NAME = re.compile(
 #: vocabulary without being a key file.
 KEY_FILE_DATA_SUFFIXES = {
     "", ".json", ".txt", ".bin", ".dat", ".cfg", ".conf", ".ini",
-    ".key", ".keys", ".pem",
+    ".key", ".keys", ".pem", ".jks", ".keystore", ".p12", ".pfx", ".properties",
 }
 #: The one reviewed table of public game-decryption keys (AGENTS.md section 5):
 #: the PPSSPP tag tables Nakagawa uses to

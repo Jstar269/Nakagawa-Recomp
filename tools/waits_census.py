@@ -81,6 +81,11 @@ def disposition_owner(row: dict) -> tuple[str, str]:
     return "implemented", OWNER_NONE
 
 
+# Rank of each owner when one API name has several registrations: fake success first,
+# then unreviewed, then everything else.
+_SEVERITY = {OWNER_FAKE_SUCCESS: 0, OWNER_UNREVIEWED: 1, OWNER_NONE: 2}
+
+
 def build_census(matrix_text: str | None = None, manifest: dict | None = None) -> dict:
     if matrix_text is None:
         matrix_text = MATRIX.read_text(encoding="utf-8")
@@ -106,8 +111,10 @@ def build_census(matrix_text: str | None = None, manifest: dict | None = None) -
                 }
             )
             continue
-        # Deterministic pick when one name maps to multiple NIDs (firmware variants).
-        reg = sorted(regs, key=lambda r: r["nid"])[0]
+        # One name can map to several NIDs (firmware variants). The row reports the most
+        # severe registration, so a fake-success NID beside a dedicated one still counts
+        # for its owner; NID order breaks ties.
+        reg = min(regs, key=lambda r: (_SEVERITY[disposition_owner(r)[1]], r["nid"]))
         disposition, owner = disposition_owner(reg)
         rows.append(
             {

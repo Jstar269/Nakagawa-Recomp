@@ -15,7 +15,11 @@ not linked into the runtime, which never reads a CHD.
 - Pin: commit `47d794151b2b64f6aba60304e6480f4f5a2bc24b` (2026-10-11, "Merge pull
   request #198 from 0x000NULL/fix-crafted-chd"), the head of the default branch
   `master` at the time of import. Upstream has no release tags.
-- License: BSD-3-Clause, `Copyright Romain Tisserand` (`LICENSE.txt`). libchdr
+- License: BSD-3-Clause, `Copyright Romain Tisserand` (`LICENSE.txt`); the
+  MAME-derived sources (`libchdr_chd.c`, `libchdr_cdrom.c`, `libchdr_huffman.c`,
+  `libchdr_bitstream.c`, `libchdr_flac.c`, `libchdr_codec_avhuff.c` and their
+  headers) are `Copyright Aaron Giles`, under the BSD-3-Clause text kept at the top
+  of `src/libchdr_chd.c`. libchdr
   carries three third-party codecs and a FLAC reader, each under its own terms
   (below); all are compatible with GPL-3.0-or-later, so they are imported under
   `AGENTS.md` section 4's import rules.

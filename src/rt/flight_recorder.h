@@ -231,10 +231,14 @@ typedef struct {
  * The full trace is one line per guest instruction, which no run of any length
  * can afford to write. SR_TRACE_PC=LO:HI keeps only the records whose guest pc
  * is inside the window and adds the ABSOLUTE value of the registers SR_TRACE_V
- * (VFPU) and SR_TRACE_F (FPU) name, because a window cannot reconstruct a value
- * written before it. SR_TRACE_LIMIT stops the stream after that many records
- * and disarms the gate, so the rest of the run executes uninstrumented. Every
- * delivered vblank is marked, which places each record on the frame timeline.
+ * (VFPU, 0..127) and SR_TRACE_F (FPU, 0..31) name, because a window cannot
+ * reconstruct a value written before it; an index outside its register file, or
+ * a bound that is not a whole number, refuses the window by name. SR_TRACE_LIMIT
+ * completes the stream after that many records: the gate stays armed and admits
+ * no instruction, so neither this stream nor the full trace records anything
+ * more. Each record is flushed as it is written, so a host crash keeps the
+ * records leading into it. Every delivered vblank is marked, which places each
+ * record on the frame timeline.
  *
  * This is a diagnostic stream, not the byte-comparable oracle trace: a record is
  * the canonical line the trace writer already rendered, followed by the absolute
@@ -250,6 +254,24 @@ typedef struct {
     uint8_t v[SR_TRACE_WINDOW_MAX_INDEX]; /* VFPU indices, physical v[] order */
     uint8_t f[SR_TRACE_WINDOW_MAX_INDEX]; /* FPU indices */
 } SrTraceWindowIndices;
+
+/* Replay divergence (#2147): a position in the record that the checkpoint mode can name: the
+ * newest recorded event is the occurrence-th event of its kind. after is the longest window the
+ * ring holds (limit - 1). One declaration serves both branches below, so a host that does not
+ * link the recorder gets the same layout as replay_checkpoint.c. */
+typedef struct {
+    uint32_t kind;
+    uint32_t occurrence;
+    uint32_t after;
+    uint64_t sequence;
+} SrFlightMark;
+
+enum {
+    SR_FLIGHT_DIVERGENCE_OFF = 0,   /* SR_FLIGHT is unset: there is no record */
+    SR_FLIGHT_DIVERGENCE_FROZE = 1, /* armed at the newest event and frozen there; *at names it */
+    SR_FLIGHT_DIVERGENCE_MODE = 2,  /* an SR_FLIGHT_TRIGGER mode is armed and stays in charge */
+    SR_FLIGHT_DIVERGENCE_NONE = 3   /* the record had stopped or held no event: nothing armed */
+};
 
 #if defined(SR_FLIGHT_RECORDER_LINKED) && !defined(SR_FLIGHT_RECORDER_STANDALONE)
 
@@ -320,26 +342,13 @@ int sr_flight_event_at(uint32_t index, SrFlightEvent *out);
 void sr_flight_set_thread_source(SrFlightThreadSource source);
 
 /* ---- Replay divergence (#2147) ----
- * A position in the record that the checkpoint mode can name: the newest recorded event is the
- * occurrence-th event of its kind. after is the longest window the ring holds (limit - 1). */
-typedef struct {
-    uint32_t kind;
-    uint32_t occurrence;
-    uint32_t after;
-    uint64_t sequence;
-} SrFlightMark;
+ * SrFlightMark and the SR_FLIGHT_DIVERGENCE_* results are declared once, above the linkage
+ * branches. */
 
 /* The newest recorded event as a mark. Returns 1, or 0 when the recorder is off, has recorded
  * nothing, has stopped recording (a terminal, or a mode that froze), or the count is past
  * 32 bits. Reading it changes nothing. */
 int sr_flight_mark(SrFlightMark *out);
-
-enum {
-    SR_FLIGHT_DIVERGENCE_OFF = 0,   /* SR_FLIGHT is unset: there is no record */
-    SR_FLIGHT_DIVERGENCE_FROZE = 1, /* armed at the newest event and frozen there; *at names it */
-    SR_FLIGHT_DIVERGENCE_MODE = 2,  /* an SR_FLIGHT_TRIGGER mode is armed and stays in charge */
-    SR_FLIGHT_DIVERGENCE_NONE = 3   /* the record had stopped or held no event: nothing armed */
-};
 
 /* A replay reached its first divergent checkpoint (replay_checkpoint.c). With no mode armed,
  * this arms the checkpoint mode at the newest recorded event, as SR_FLIGHT_TRIGGER=
@@ -492,18 +501,6 @@ static inline int sr_flight_event_at(uint32_t index, SrFlightEvent *out) {
 static inline void sr_flight_set_thread_source(SrFlightThreadSource source) {
     (void)source;
 }
-typedef struct {
-    uint32_t kind;
-    uint32_t occurrence;
-    uint32_t after;
-    uint64_t sequence;
-} SrFlightMark;
-enum {
-    SR_FLIGHT_DIVERGENCE_OFF = 0,
-    SR_FLIGHT_DIVERGENCE_FROZE = 1,
-    SR_FLIGHT_DIVERGENCE_MODE = 2,
-    SR_FLIGHT_DIVERGENCE_NONE = 3
-};
 static inline int sr_flight_mark(SrFlightMark *out) {
     (void)out;
     return 0;

@@ -416,11 +416,12 @@ def is_object_definition(item: Item) -> bool:
 # Definitions
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=64)
 def _items_of(body: str) -> tuple[Item, ...]:
     return tuple(split_items(body))
 
 
+@functools.lru_cache(maxsize=4)
 def definitions(root: Path = ROOT) -> dict[str, list[str]]:
     """Function and object name -> the runtime HLE files (and private headers) defining it.
 
