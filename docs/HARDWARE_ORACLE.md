@@ -10,7 +10,7 @@ same sense as
 > The [source-owned scalar-probe runbook](../tests/fixtures/psp_oracle/README.md), its
 > [strict result protocol](../tools/psp_oracle/protocol.py), and the shipped
 > [`tools/psp_readiness.py`](../tools/psp_readiness.py) cover the implemented subset. Read those
-> first. In particular, the `tools/hw_doctor.py` proposed in §7 is superseded by the readiness tool
+> first. In particular, the `tools/hw_doctor.py` proposed in §8 (and the struck item 4 in §9) is superseded by the readiness tool
 > — extend that tool rather than adding a second precondition checker.
 > The PSP-side v2 instruction-trace producer now exists for source-owned microprograms: the
 > `insn-trace` probe (`PSP-TRACE-001`, `tests/fixtures/psp_oracle/probe_insn_trace.c`) single-steps the
@@ -4100,6 +4100,9 @@ not expected PSP values.
 | `hle-self-stop-unload` | `PSP-HLE-SELFSTOP-001` | `MEASURED` (2026-11-08, PSP-3000, boot 165, `935f225d`; 6 records) | #341: sceKernelSelfStopUnloadModule from a helper PRX's own thread: the call does not return, module_stop runs once and the module is unloaded. |
 | `hle-utility-dialogs` | `PSP-HLE-UTILITY-DIALOG-001` | `NOT_RUN` (captured twice, PSP-3000, game context, 2026-11-12 boots 204 and 206; not acceptance-eligible) | Built #1386 dialog timing and wrong-state cells; no hardware result is claimed. A netconf dialog (boot 204) and a gamedata install dialog (boot 206) stayed RUNNING to the poll cap and the console then needed a power cycle: [captures](#psp-hle-utility-dialog-001-captures-2026-11-12). |
 | `hle-utility-netconf-sharing` | `PSP-HLE-UTILITY-DIALOG-002` | `CAPTURED` (2026-11-13 UTC, PSP-3000, boot 211, game context, `e8b9b0cd5`; game sharing stayed RUNNING to the poll cap, the netconf cells did not run, and the console needed a power cycle; not acceptance-eligible) | See [PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13](#psp-hle-utility-dialog-002-capture-2026-11-13). Built #1386 game sharing and netconf dialog cells (case 166), game sharing first and netconf last, with no savedata and no gamedata install dialog; no hardware result is claimed. POWER RISK, owner present, one launch per boot: case 161's netconf dialog stuck RUNNING on boot 204 ([captures](#psp-hle-utility-dialog-001-captures-2026-11-12)), so netconf-timing is expected to stick here too and the console to need a power cycle either way (on boot 204 it followed a net teardown that completed; case 166 tears down as case 161 does). Game context, WLAN switch on; the game sharing dialog is expected to use the PSP's ad hoc radio, and nothing is sent to an access point or any server. |
+| `hle-utility-attended-netconf` | `PSP-HLE-UTILITY-DIALOG-003` | `NOT_RUN` | Built #1386 ATTENDED netconf run (case 189): the netconf dialog alone, dismissed by hand by a person at the console within a 90-second window, so the sequence can reach FINISHED and ShutdownStart is made there; no hardware result is claimed. Game context, WLAN switch on, one launch per boot; a dialog still up at the window's end needs a power cycle. |
+| `hle-utility-attended-sharing` | `PSP-HLE-UTILITY-DIALOG-004` | `NOT_RUN` | Built #1386 ATTENDED game sharing run (case 190), dismissed by hand as for case 189; no hardware result is claimed. Game context, WLAN switch on (the dialog starts the ad hoc radio on its own), one launch per boot. |
+| `hle-utility-attended-gamedata` | `PSP-HLE-UTILITY-DIALOG-005` | `NOT_RUN` | Built #1386 ATTENDED gamedata install run (case 191), after case 161's precheck and with its cleanup, dismissed by hand as for case 189; no hardware result is claimed. Game context, no UMD, one launch per boot. |
 | `hle-io-seek` | `PSP-HLE-IO-SEEK-001` | `MEASURED` (2026-11-08, PSP-3000, boot 156, `59520eb0`; 30 records) | #1380: flash0 seeks (64- and 32-bit), sceIoIoctl file commands, and writes on read-only descriptors. |
 | `hle-io-seek-edges` | `PSP-HLE-IO-SEEK-002` | `MEASURED` (2026-11-11, PSP-3000, boot 192, `1a5157e37`; 24 records) | #1380: flash0 SEEK_CUR and past-0x100000000 seeks, and Memory Stick open-flag and async-write cells on a probe-owned file. |
 | `hle-nickname-limit` | `PSP-HLE-NICKNAME-001` | `MEASURED` (2026-11-08, PSP-3000, boot 155, `07e58170`; 16 records) | W-NET-1 (#2197): the owner_name key type and the nickname string call at eight buffer lengths; no value bytes. |
@@ -5281,8 +5284,8 @@ loop; route those to the batch path.
 
 | Artifact | Status |
 | --- | --- |
-| Homebrew module authored here + its hardware trace | Ours. Committable. |
-| VFPU fuzz corpus + hardware results | Ours. Committable. |
+| Homebrew module authored here + curated, reviewed result records | Ours. The probe source and reviewed result records are committable. Raw traces, envelopes and host0 logs stay private (AGENTS.md Section 5). |
+| VFPU fuzz corpus + curated, reviewed result records | Ours. The corpus source and reviewed result records are committable. Raw traces, envelopes and host0 logs stay private. |
 | Any trace of the **retail game** on hardware | Game-derived. Private, permanently. |
 | Frame or memory dumps from the retail title | Game-derived. Private, permanently. |
 

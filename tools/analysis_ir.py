@@ -377,7 +377,13 @@ def ownership_parity(ir: dict, report: dict) -> list[dict]:
     for entry, kind in sorted(observed - expected):
         findings.append({"code": "function-extra", "address": entry, "kind": kind})
     report_owners = {row["address"]: sorted(row.get("owners") or ()) for row in report["instructions"]}
-    block_owners = {b["start"]: b["owners"] for b in ir["blocks"]}
+    block_owners: dict[Any, Any] = {}
+    owner_blocks: dict[Any, set[Any]] = {}
+    for block in ir["blocks"]:
+        start, owners = block["start"], block["owners"]
+        block_owners[start] = owners
+        for owner in owners:
+            owner_blocks.setdefault(owner, set()).add(start)
     covered = set()
     for insn in ir["instructions"]:
         address = insn["address"]
@@ -393,8 +399,7 @@ def ownership_parity(ir: dict, report: dict) -> list[dict]:
     if ir_cont != rep_cont:
         findings.append({"code": "continuations", "address": None})
     for function in ir["functions"]:
-        owner_blocks = {b["start"] for b in ir["blocks"] if function["entry"] in b["owners"]}
-        if set(function["blocks"]) != owner_blocks:
+        if set(function["blocks"]) != owner_blocks.get(function["entry"], set()):
             findings.append({"code": "function-blocks", "address": function["entry"]})
     if ir.get("source", {}).get("cfg_report_sha256") != _sha256(report):
         findings.append({"code": "source-hash", "address": None})
@@ -426,8 +431,10 @@ def load_annotations(document) -> list[dict]:
             raise IRError("ANNOTATION_ROW", f"{where}: evidence_class must be one of {', '.join(EVIDENCE_CLASSES)}")
         if row.get("confidence") not in CONFIDENCES:
             raise IRError("ANNOTATION_ROW", f"{where}: confidence must be one of {', '.join(CONFIDENCES)}")
-        if row["kind"] == "function-name" and not isinstance(row.get("name"), str):
-            raise IRError("ANNOTATION_ROW", f"{where}: function-name needs a name")
+        if row["kind"] == "function-name":
+            name = row.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise IRError("ANNOTATION_ROW", f"{where}: function-name needs a non-empty name")
         if row["kind"] in ("indirect-targets", "switch-table"):
             targets = row.get("targets")
             if not isinstance(targets, list) or not targets or any(type(t) is not int for t in targets):
@@ -473,7 +480,10 @@ def apply_annotations(ir: dict, annotations: list[dict]) -> dict:
         elif kind == "function-name":
             if function is None:
                 verdict(disagreements, row, "no entry", "a name for an address the analyzer does not enter")
-            elif function.get("symbol") and function["symbol"].endswith(row["name"]):
+            elif function.get("symbol") and (
+                function["symbol"] == row["name"]
+                or function["symbol"].endswith("_" + row["name"])
+            ):
                 verdict(agreements, row, function["symbol"], "the emitted symbol already carries this name")
             else:
                 verdict(advisories, row, function.get("symbol"), "a name the build does not use; advice only")

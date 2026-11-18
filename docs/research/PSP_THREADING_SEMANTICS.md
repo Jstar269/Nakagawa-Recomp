@@ -90,7 +90,7 @@ The following sources are deliberately kept separate by evidence class.
 | [PSPSDK ThreadMan reference](https://pspdev.github.io/pspsdk/pspthreadman_8h.html) | Generated public API reference and cross-check. | `PUBLIC_HEADER_FACT`; generated documentation may omit implementation semantics. |
 | [PPSSPP ThreadMan implementation](https://github.com/hrydgard/ppsspp/blob/master/Core/HLE/sceKernelThread.cpp) | Open implementation comparator for thread state, stack setup, arguments, and register modeling. | `OPEN_FIRMWARE_IMPLEMENTATION`; the moving branch is not a PSP measurement. |
 | [JPCSP `ThreadManForUser`](https://github.com/jpcsp/jpcsp/blob/master/src/jpcsp/HLE/modules/ThreadManForUser.java) | Independent open implementation comparator. | `OPEN_FIRMWARE_IMPLEMENTATION`; source behavior is not a hardware oracle. |
-| [Nakagawa `src/rt/hle.c`](../../src/rt/hle.c) (live file; supersedes the `d8b0d4f` review-base snapshot, which is not in public history) | Guest ABI extraction and HLE route ownership. | `SOURCE_VERIFIED_NAKAGAWA`. |
+| [Nakagawa `src/rt/hle_internal.h`](../../src/rt/hle_internal.h) and [`src/rt/hle_kernel_thread.c`](../../src/rt/hle_kernel_thread.c) (live files; supersede the `d8b0d4f` review-base snapshot, which is not in public history) | Guest ABI extraction and ThreadMan handler ownership. | `SOURCE_VERIFIED_NAKAGAWA`. |
 | [Nakagawa `src/rt/sched.c`](../../src/rt/sched.c) (live file; supersedes the `d8b0d4f` review-base snapshot) | Current scheduler model and lifecycle implementation. | `SOURCE_VERIFIED_NAKAGAWA`; not a claim of firmware equivalence. |
 | [Nakagawa PSP oracle fixture boundary](../../tests/fixtures/psp_oracle/README.md) | Public-safe fixture protocol, scalar evidence rules, and existing bounded status notes. | Source-owned method and recorded evidence remain distinct from planned work. |
 
@@ -400,13 +400,13 @@ launch labeled lower-risk is not guaranteed harmless.
 
 ## Nakagawa source boundary
 
-At the review base, the relevant source ownership is:
+In the current source, the relevant source ownership is:
 
 | Path / route | Current source fact | Class |
 | --- | --- | --- |
-| `src/rt/hle.c` ABI helpers | `$a0` through `$a3` are register arguments and `stack_arg()` supplies later user-call arguments from `$t0` through `$t3`, then the stack. | `SOURCE_VERIFIED_NAKAGAWA` |
-| `h_CreateThread` | Extracts the HLE call arguments and routes creation to the scheduler. | `SOURCE_VERIFIED_NAKAGAWA` |
-| `h_StartThread` | Extracts the call arguments, routes start to the scheduler, and requests preemption after a successful start. | `SOURCE_VERIFIED_NAKAGAWA` |
+| `src/rt/hle_internal.h` ABI helpers | `$a0` through `$a3` are register arguments and `stack_arg()` supplies later user-call arguments from `$t0` through `$t3`, then the stack. | `SOURCE_VERIFIED_NAKAGAWA` |
+| `h_CreateThread` (`src/rt/hle_kernel_thread.c`) | Extracts the HLE call arguments and routes creation to the scheduler. | `SOURCE_VERIFIED_NAKAGAWA` |
+| `h_StartThread` (`src/rt/hle_kernel_thread.c`) | Extracts the call arguments, routes start to the scheduler, and requests preemption after a successful start. | `SOURCE_VERIFIED_NAKAGAWA` |
 | `sched_create_thread` | Current model creates a dormant thread, allocates a runtime stack, and seeds runtime state. | `SOURCE_VERIFIED_NAKAGAWA`; not firmware equivalence. |
 | `sched_start_thread` | Current model validates the UID/state, copies nonzero arguments to the child stack, re-seeds runtime state, and makes the thread ready. | `SOURCE_VERIFIED_NAKAGAWA`; not firmware equivalence. |
 

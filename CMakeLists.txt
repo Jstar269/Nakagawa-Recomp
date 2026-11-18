@@ -522,7 +522,6 @@ add_test(NAME nk_ui_vk_test COMMAND test_nk_ui_vk)
 set_tests_properties(nk_ui_vk_test PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     SKIP_RETURN_CODE 77)
-file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/build")
 # Focus graph, input model and prompt glyphs: SDL-free. The SDL_Event translation leg is
 # registered after SDL3 is resolved below, and reports SKIP (exit 77) without it.
 add_executable(test_nk_ui_focus
@@ -1210,7 +1209,7 @@ function(nk_add_title_runtime target package_dir title_id)
     add_library(${target}_ge OBJECT "${root}/${NK_RUNTIME_GE_SOURCE}")
     target_include_directories(${target}_ge PRIVATE "${root}/src/rt")
     target_compile_options(${target}_ge PRIVATE -O2 -fno-math-errno -Wno-error)
-    target_compile_definitions(${target}_ge PRIVATE SR_SDL3VK)
+    target_compile_definitions(${target}_ge PRIVATE SR_SDL3VK SR_FLIGHT_RECORDER_LINKED)
 
     # The ATRAC3+ import and its bridge: CFLAGS plus the import's include paths.
     add_library(${target}_atrac OBJECT ${atrac} "${root}/${NK_RUNTIME_ATRAC3P_BRIDGE_SOURCE}")

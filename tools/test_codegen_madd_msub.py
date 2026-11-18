@@ -99,8 +99,6 @@ class TestAllegrexMaddDecoding(unittest.TestCase):
         # PSP Allegrex madd: opcode 0, funct 0x1C
         word_psp = encode_special(4, 5, 0, 0x1C)
         stmt, _, _ = codegen.effect(0x00026BAC, word_psp)
-        # Must NOT raise Unsupported
-        self.assertNotIn("Unsupported", stmt)
         self.assertIn("_acc", stmt)
         self.assertIn("s->hi", stmt)
 
@@ -120,20 +118,17 @@ class TestAllegrexMaddDecoding(unittest.TestCase):
     def test_maddu_is_opcode0_funct1D(self):
         word = encode_special(4, 5, 0, 0x1D)
         stmt, _, _ = codegen.effect(0, word)
-        self.assertNotIn("Unsupported", stmt)
         self.assertIn("_acc", stmt)
 
     def test_msub_is_opcode0_funct2E(self):
         word = encode_special(4, 5, 0, 0x2E)
         stmt, _, _ = codegen.effect(0, word)
-        self.assertNotIn("Unsupported", stmt)
         self.assertIn("_acc", stmt)
         self.assertIn("_prod", stmt)
 
     def test_msubu_is_opcode0_funct2F(self):
         word = encode_special(4, 5, 0, 0x2F)
         stmt, _, _ = codegen.effect(0, word)
-        self.assertNotIn("Unsupported", stmt)
         self.assertIn("_acc", stmt)
 
 
@@ -322,29 +317,46 @@ class TestAllegrexEncodingsDocumented(unittest.TestCase):
     alongside the register-generated words for MADD and CLZ.
     """
 
+    # clz, clo, max and min write rd, so their words name rd=6: a write to r0
+    # is dropped and would leave nothing to check.
     CASES = (
-        ("clz", 0x16, (encode_special(4, 5, 0, 0x16), 0x01005016)),
-        ("clo", 0x17, (encode_special(4, 5, 0, 0x17),)),
+        ("clz", 0x16, (encode_special(4, 5, 6, 0x16), 0x01005016)),
+        ("clo", 0x17, (encode_special(4, 5, 6, 0x17),)),
         ("madd", 0x1C, (encode_special(4, 5, 0, 0x1C), 0x0109001C)),
         ("maddu", 0x1D, (encode_special(4, 5, 0, 0x1D),)),
-        ("max", 0x2C, (encode_special(4, 5, 0, 0x2C),)),
-        ("min", 0x2D, (encode_special(4, 5, 0, 0x2D),)),
+        ("max", 0x2C, (encode_special(4, 5, 6, 0x2C),)),
+        ("min", 0x2D, (encode_special(4, 5, 6, 0x2D),)),
         ("msub", 0x2E, (encode_special(4, 5, 0, 0x2E),)),
         ("msubu", 0x2F, (encode_special(4, 5, 0, 0x2F),)),
     )
 
+    # The operation each function's C must perform. The shapes exclude each
+    # other, so a word decoded as a sibling function (clz as clo, max as min,
+    # madd as maddu) lacks its own shape and shows the sibling's.
+    SHAPES = {
+        "clz": "__builtin_clz(s->r[",
+        "clo": "__builtin_clz(~s->r[",
+        "madd": "_acc+=_prod;",
+        "maddu": "_acc+=(uint64_t)s->r[",
+        "max": "(uint32_t)(_x>_y?_x:_y)",
+        "min": "(uint32_t)(_x<_y?_x:_y)",
+        "msub": "_acc-=_prod;",
+        "msubu": "_acc-=(uint64_t)s->r[",
+    }
+
     def test_each_psp_special_word_decodes_for_its_function(self):
+        self.assertEqual({name for name, _, _ in self.CASES}, set(self.SHAPES))
         for name, funct, words in self.CASES:
             for word in words:
                 with self.subTest(name=name, word=f"0x{word:08x}"):
                     self.assertEqual((word >> 26) & 0x3F, 0x00)
                     self.assertEqual(word & 0x3F, funct)
                     stmt, _, _ = codegen.effect(0, word)
-                    self.assertNotIn(
-                        "Unsupported",
-                        stmt,
-                        msg=f"{name} (funct 0x{funct:02x}) should be supported",
-                    )
+                    self.assertIn(self.SHAPES[name], stmt,
+                                  msg=f"{name} (funct 0x{funct:02x}) decodes as {stmt!r}")
+                    for other, shape in self.SHAPES.items():
+                        if other != name:
+                            self.assertNotIn(shape, stmt, msg=f"{name} decodes like {other}")
 
     def test_private_elf_madd_words_are_translated(self):
         """The private HST ELF contains madd at these addresses.
@@ -363,8 +375,6 @@ class TestAllegrexEncodingsDocumented(unittest.TestCase):
         for word in known_madd_words:
             with self.subTest(word=f"0x{word:08x}"):
                 stmt, _, _ = codegen.effect(0, word)
-                self.assertNotIn("Unsupported", stmt,
-                    msg=f"PSP madd word 0x{word:08x} should be translated, not fallback")
                 self.assertIn("_acc", stmt)
                 self.assertIn("s->hi", stmt)
 
@@ -378,7 +388,6 @@ class TestSyncDecoding(unittest.TestCase):
     def test_sync_word_translates_to_noop(self):
         # Canonical SYNC word: SPECIAL, all register fields and stype zero, funct 0x0f.
         stmt, saddr, width = codegen.effect(0x08804000, 0x0000000F)
-        self.assertNotIn("Unsupported", stmt)
         self.assertEqual(stmt, "(void)0;")
         self.assertIsNone(saddr)
         self.assertEqual(width, 0)

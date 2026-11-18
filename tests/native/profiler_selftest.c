@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Standalone runtime stubs for symbols referenced by uncalled paths in recomp.c and
  * guest_interp.c. GNU ld --gc-sections drops those sections before diagnosing references,
@@ -625,6 +626,24 @@ static void test_files_only_counters(void) {
 #endif
 static void spin_ns(uint64_t ns);
 
+/* Whether this host has a thread clock perf.c must read, decided here and not by the code under
+ * test: POSIX has CLOCK_THREAD_CPUTIME_ID; Windows converts thread cycles at the TSC rate, which
+ * holds only for an invariant TSC (CPUID 0x80000007, EDX bit 8), which a VM may not offer. */
+#if (defined(_WIN32) || defined(_WIN64)) && (defined(__x86_64__) || defined(__i386__)) && \
+    defined(__GNUC__)
+#include <cpuid.h>
+static int host_has_thread_clock(void) {
+    unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
+    return __get_cpuid(0x80000007u, &eax, &ebx, &ecx, &edx) && (edx & (1u << 8));
+}
+#elif defined(_WIN32) || defined(_WIN64)
+static int host_has_thread_clock(void) { return 0; }
+#elif defined(CLOCK_THREAD_CPUTIME_ID)
+static int host_has_thread_clock(void) { return 1; }
+#else
+static int host_has_thread_clock(void) { return 0; }
+#endif
+
 static void test_thread_clock(void) {
     sr_perf_test_reinit();
     spin_ns(600000000u);                         /* the Windows TSC rate needs half a second */
@@ -642,10 +661,12 @@ static void test_thread_clock(void) {
     sr_perf_test_force_report();
     double frames = csv_last("frame_work_frames");
     double work = csv_last("frame_work_ms");
-    if (frames == 0.0) {
-        printf("profiler selftest: no precise thread CPU clock on this host; frame work not measured\n");
+    if (frames == 0.0 && !host_has_thread_clock()) {
+        printf("profiler selftest: SKIP thread clock (no precise thread CPU clock on this host; frame "
+               "work not measured)\n");
         return;
     }
+    /* A host with a thread clock that measured no frame work is a failure, not a skip. */
     printf("profiler selftest: the thread clock read a 30 ms spin (%.3f ms of wall) as %.3f ms\n", wall_ms,
            work);
     CHECK(frames == 1.0 && work > 0.0 && work <= wall_ms + THREAD_CLOCK_SLACK_MS,
@@ -678,6 +699,10 @@ static void test_exec_share(void) {
 #else
     setenv("SR_EXEC_SHARE_JSON", path, 1);
 #endif
+    /* Each tier switch is bracketed by readings of the clock the tiers are timed with
+     * (sr_exec_now_ns), so the bounds below hold however long the host deschedules this thread
+     * inside a span: a preempted spin is longer in both the tier time and the brackets. */
+    uint64_t run_begin = sr_exec_now_ns();
     sr_exec_slice_begin(SR_EXEC_TIER_NONE);
     int outer = sr_exec_enter(SR_EXEC_TIER_AOT);
     CHECK(outer == SR_EXEC_TIER_NONE && sr_exec_tier == SR_EXEC_TIER_AOT, "enter AOT from none");
@@ -687,28 +712,46 @@ static void test_exec_share(void) {
     spin_ns(2000000u);
     uint64_t idle_started = sr_exec_now_ns();
     spin_ns(20000000u);
+    uint64_t idle_seen = sr_exec_now_ns();        /* sr_exec_idle reads its end after this */
     sr_exec_idle(idle_started);                   /* 20 ms of host wait: not guest work */
 
     sr_perf_interp_set_reason(SR_PERF_INTERP_STALE_BLOCK);
+    uint64_t floor_0 = sr_exec_now_ns();
     int from_aot = sr_exec_enter(SR_EXEC_TIER_INTERP);
+    uint64_t floor_1 = sr_exec_now_ns();
     sr_exec_interp_entry(0x00001000u);
     sr_exec_interp_instructions += 5u;
     spin_ns(1000000u);
+    uint64_t floor_2 = sr_exec_now_ns();
     int nested = sr_exec_enter(SR_EXEC_TIER_AOT);   /* a linked call from the floor */
+    uint64_t floor_3 = sr_exec_now_ns();
     spin_ns(10000000u);
+    uint64_t floor_4 = sr_exec_now_ns();
     sr_exec_leave(nested);
+    uint64_t floor_5 = sr_exec_now_ns();
     CHECK(sr_exec_tier == SR_EXEC_TIER_INTERP, "leaving a nested AOT call restores the floor");
     sr_exec_interp_exit(1, 0);
+    uint64_t floor_6 = sr_exec_now_ns();
     sr_exec_leave(from_aot);
+    uint64_t floor_7 = sr_exec_now_ns();
     CHECK(sr_exec_tier == SR_EXEC_TIER_AOT, "leaving the floor restores AOT");
 
+    uint64_t misses_begin = sr_exec_now_ns();
     for (unsigned i = 0; i < 2u; i++) {           /* two dispatch misses, one target twice */
         int prev = sr_exec_enter(SR_EXEC_TIER_INTERP);
         sr_exec_interp_entry(i ? 0x00002000u : 0x00001000u);
         sr_exec_interp_exit(1, 1);
         sr_exec_leave(prev);
     }
+    uint64_t misses_end = sr_exec_now_ns();
     sr_exec_leave(outer);
+    uint64_t run_end = sr_exec_now_ns();
+    /* The floor ran from a point in [floor_0, floor_1] to one in [floor_2, floor_3], and from
+     * one in [floor_4, floor_5] to one in [floor_6, floor_7]; the misses ran inside their
+     * bracket. The nested call's 10 ms spin, between floor_3 and floor_4, is in neither bound. */
+    uint64_t interp_most = (floor_3 - floor_0) + (floor_7 - floor_4) + (misses_end - misses_begin);
+    uint64_t interp_least = (floor_2 - floor_1) + (floor_6 - floor_5);
+    uint64_t aot_most = (run_end - run_begin) - (idle_seen - idle_started) - interp_least;
     int saved = sr_exec_slice_end();
     CHECK(saved == SR_EXEC_TIER_NONE, "slice ends with the tier it began with");
 
@@ -738,16 +781,21 @@ static void test_exec_share(void) {
     unsigned long long aot_ns = json_u64(json, "aot_ns");
     unsigned long long interp_ns = json_u64(json, "interp_ns");
     unsigned long long idle_ns = json_u64(json, "idle_ns");
-    /* Spins: AOT 2 ms + a 10 ms nested call, the floor 1 ms, idle 20 ms. The bounds leave
-     * room for a busy host while still telling which tier each span went to. */
-    CHECK(interp_ns >= 1000000u && interp_ns < 9000000u,
-          "floor time excludes its nested AOT call: interp_ns=%llu", interp_ns);
-    CHECK(aot_ns >= 12000000u && aot_ns < 25000000u,
-          "AOT time includes the nested call and excludes the idle wait: aot_ns=%llu", aot_ns);
-    CHECK(idle_ns >= 20000000u, "idle_ns=%llu", idle_ns);
+    /* Spins: AOT 2 ms + a 10 ms nested call, the floor 1 ms, idle 20 ms. The lower bounds are
+     * the spins; the upper bounds are the brackets above, which leave out the nested call (for
+     * the floor) and the idle wait (for AOT), so a busy host cannot fail them. */
+    CHECK(interp_ns >= 1000000u && interp_ns >= interp_least && interp_ns <= interp_most,
+          "floor time excludes its nested AOT call: interp_ns=%llu (bracketed %llu..%llu)", interp_ns,
+          (unsigned long long)interp_least, (unsigned long long)interp_most);
+    CHECK(aot_ns >= 12000000u && aot_ns <= aot_most,
+          "AOT time includes the nested call and excludes the idle wait: aot_ns=%llu (at most %llu)",
+          aot_ns, (unsigned long long)aot_most);
+    CHECK(idle_ns >= 20000000u && idle_ns >= idle_seen - idle_started, "idle_ns=%llu", idle_ns);
     const char *share = strstr(json, "\"interp_time_share\": ");
     double value = share ? strtod(share + strlen("\"interp_time_share\": "), NULL) : -1.0;
-    CHECK(value > 0.0 && value < 0.5, "interp_time_share=%f", value);
+    double expected_share = (double)interp_ns / (double)(interp_ns + aot_ns);
+    CHECK(value > 0.0 && value - expected_share < 1e-5 && expected_share - value < 1e-5,
+          "interp_time_share=%f (interp_ns over guest time: %f)", value, expected_share);
 }
 
 /* End-of-process reports (sr_at_process_end): sr_perf_shutdown() runs each registered report
@@ -931,6 +979,68 @@ static void test_per_frame_gpu_columns(void) {
     remove(path);
 }
 
+/* ---- SR_TRACE_PC window over the production trace hooks ----
+ * recomp.c's sr_begin_impl/sr_end_impl write the full trace unless an armed window gates
+ * them. When SR_TRACE_LIMIT is spent the window must complete, not disarm: a disarmed gate
+ * handed every later instruction back to the full trace, which grew without bound into the
+ * 50M-step abort. Each record must also be on disk as soon as it is written, because a host
+ * fault ends the process without flushing stdio buffers. */
+static size_t count_text(const char *text, const char *needle) {
+    size_t count = 0u;
+    for (const char *at = strstr(text, needle); at; at = strstr(at + 1, needle)) count++;
+    return count;
+}
+
+static void trace_window_step(CpuState *cpu, uint32_t pc, uint32_t value) {
+    sr_begin_impl(cpu, pc, 0x24020000u | (value & 0xffffu)); /* addiu v0, zero, value */
+    cpu->r[2] = value;
+    sr_end_impl(cpu, 0u, 0);
+}
+
+static void test_trace_window_limit_completes_the_window(const char *tmp) {
+    static CpuState cpu;
+    static char text[65536];
+    char trace_path[600], window_path[600];
+    snprintf(trace_path, sizeof trace_path, "%s/nk_profiler_selftest_trace.txt", tmp);
+    snprintf(window_path, sizeof window_path, "%s/nk_profiler_selftest_trace_window.txt", tmp);
+    set_env("SR_TRACE_PC", "0x08804000:0x08804010");
+    set_env("SR_TRACE", window_path);
+    set_env("SR_TRACE_LIMIT", "2");
+    set_env("SR_TRACE_V", NULL);
+    set_env("SR_TRACE_F", "2");
+    memset(&cpu, 0, sizeof cpu);
+    CHECK(sr_trace_open(trace_path, "selftest", 0x08804000u) == 0, "trace window: trace opens");
+    sr_trace_window_configure();
+    CHECK(sr_trace_window_armed() == 1, "trace window: SR_TRACE_PC arms the window");
+
+    trace_window_step(&cpu, 0x08803ffcu, 1u); /* below the window: no record */
+    trace_window_step(&cpu, 0x08804000u, 2u);
+    read_file(window_path, text, sizeof text);
+    CHECK(count_text(text, " pc=0x08804000") == 1u && count_text(text, " abs f2=") == 1u,
+          "trace window: the first record is on disk before the next instruction: %.300s", text);
+
+    trace_window_step(&cpu, 0x08804004u, 3u); /* the second record spends the limit */
+    for (uint32_t i = 0u; i < 8u; ++i) trace_window_step(&cpu, 0x08804008u, 4u + i);
+    trace_window_step(&cpu, 0x08800000u, 99u);
+    CHECK(sr_trace_window_armed() == 1 && sr_trace_window_begin_instruction(0x08804008u) == 0,
+          "trace window: a spent limit keeps the gate armed and admits no instruction");
+    read_file(window_path, text, sizeof text);
+    CHECK(count_text(text, " pc=0x") == 2u && strstr(text, "# window complete records=2") != NULL,
+          "trace window: exactly the two records the limit allows: %.400s", text);
+    sr_trace_close();
+    read_file(trace_path, text, sizeof text);
+    CHECK(count_text(text, " pc=0x") == 0u,
+          "trace window: no instruction reaches the full trace after the window completes: %.400s",
+          text);
+    set_env("SR_TRACE_PC", NULL);
+    set_env("SR_TRACE", NULL);
+    set_env("SR_TRACE_LIMIT", NULL);
+    set_env("SR_TRACE_F", NULL);
+    remove(trace_path);
+    /* The window stream stays open for the rest of the process by design, so its fixed-name
+     * file is overwritten by the next run rather than removed here. */
+}
+
 int main(void) {
     const char *tmp = getenv("TMPDIR");
     if (!tmp || !tmp[0]) tmp = getenv("TEMP");
@@ -939,6 +1049,7 @@ int main(void) {
              (long)sr_exec_now_ns());
     set_env("SR_PERF_CSV", s_csv_path);
     set_env("SR_HUD", NULL);
+    test_trace_window_limit_completes_the_window(tmp);
     test_exec_share();
     test_telemetry_lines_are_emitted_whole();
     test_audio_queue_line();

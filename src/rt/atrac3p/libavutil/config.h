@@ -81,6 +81,14 @@
 #endif
 #define HAVE_MEMALIGN 0
 
+/* Feature flags the imported files test with #if but that the lines above do
+ * not set (libavutil/intmath.h HAVE_FAST_CLZ, libavutil/mem.c HAVE_FAST_64BIT,
+ * libavutil/mem_internal.h HAVE_LOCAL_ALIGNED). They are 0, as an undefined
+ * name in #if already was; listing them makes the choice explicit. */
+#define HAVE_FAST_CLZ 0
+#define HAVE_FAST_64BIT 0
+#define HAVE_LOCAL_ALIGNED 0
+
 /* FF_MEMORY_POISON is used by the memory-poisoning branch of
  * libavutil/mem.c:334. Upstream n4.4 defines it only in
  * libavutil/internal.h (line 88), which mem.c does not include - an

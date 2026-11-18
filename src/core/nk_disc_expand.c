@@ -737,6 +737,19 @@ static bool disc_fingerprint(const char *path, NkDiscFormat format, uint64_t siz
     return true;
 }
 
+bool nk_disc_source_fingerprint(const char *source, char out[NK_DISC_FINGERPRINT_CHARS + 1],
+                                NkDiscExpandStatus *status) {
+    int64_t size;
+    disc_status_clear(status);
+    if (!out) return disc_fail(status, NK_DISC_INTERNAL, "No result was given.");
+    out[0] = '\0';
+    if (!source || !source[0]) return disc_fail(status, NK_DISC_INTERNAL, "No file was named.");
+    size = nk_platform_get_file_size(source);
+    if (size < 0) return disc_fail(status, NK_DISC_READ_FAILED, "The file could not be opened.");
+    /* NONE keys it apart from every compressed image's fingerprint. */
+    return disc_fingerprint(source, NK_DISC_FORMAT_NONE, (uint64_t)size, out, status);
+}
+
 /* Four capital letters and five digits: the only form used as a folder name. */
 static bool disc_id_valid(const char *id) {
     if (!id || strlen(id) != 9u) return false;
