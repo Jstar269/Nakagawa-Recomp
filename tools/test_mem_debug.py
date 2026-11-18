@@ -59,6 +59,64 @@ class ExecutablePathResolutionTest(unittest.TestCase):
                 os.path.normpath(str(exe_dir / "game.exe")),
             )
 
+    NM_SYMBOLS = "0000000010001000 B g_mem\n0000000010002000 B s_cpu\n"
+
+    def _fake_nm(self, calls, version_rc=0):
+        def fake_run(argv, **kwargs):
+            argv = [str(arg) for arg in argv]
+            calls.append(argv)
+            if "--version" in argv:
+                return subprocess.CompletedProcess(
+                    argv, version_rc, stdout="GNU nm (GNU Binutils) 2.45\n", stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout=self.NM_SYMBOLS, stderr="")
+        return fake_run
+
+    def _pe_exe(self, folder, image_base):
+        path = os.path.join(folder, "game.exe")
+        Path(path).write_bytes(PEImageIdentityTest._pe_page(image_base, mapped=False))
+        return path
+
+    def test_rvas_are_relative_to_the_executables_own_image_base(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_exe_") as tmp_dir:
+            exe = self._pe_exe(tmp_dir, 0x10000000)
+            calls = []
+            with mock.patch.dict(os.environ, {"NM": "nm-fake"}):
+                with mock.patch.object(md.subprocess, "run", side_effect=self._fake_nm(calls)):
+                    rvas, provenance = md.get_symbol_rvas(exe)
+            self.assertEqual(provenance, "nm")
+            self.assertEqual((rvas["g_mem"], rvas["s_cpu"]), (0x1000, 0x2000))
+
+    def test_an_nm_in_the_working_directory_or_on_a_relative_path_is_never_run(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_cwd_") as tmp_dir:
+            exe = self._pe_exe(tmp_dir, 0x10000000)
+            for planted in ("nm", "nm.exe"):
+                Path(tmp_dir, planted).write_bytes(b"planted")
+            env = {"PATH": tmp_dir + os.pathsep + ".",
+                   "MSYS_PATH": os.path.join(tmp_dir, "no-msys")}
+            calls = []
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(tmp_dir)
+                with mock.patch.dict(os.environ, env):
+                    os.environ.pop("NM", None)
+                    with mock.patch.object(md.subprocess, "run", side_effect=self._fake_nm(calls)):
+                        _rvas, provenance = md.get_symbol_rvas(exe)
+            finally:
+                os.chdir(previous_cwd)
+            self.assertEqual(provenance, "fallback")
+            self.assertEqual(calls, [])
+
+    def test_an_nm_that_fails_its_version_probe_is_not_trusted(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_exe_") as tmp_dir:
+            exe = self._pe_exe(tmp_dir, 0x10000000)
+            calls = []
+            with mock.patch.dict(os.environ, {"NM": "nm-fake"}):
+                with mock.patch.object(md.subprocess, "run",
+                                       side_effect=self._fake_nm(calls, version_rc=1)):
+                    _rvas, provenance = md.get_symbol_rvas(exe)
+            self.assertEqual(provenance, "fallback")
+            self.assertEqual([argv for argv in calls if "--version" not in argv], [])
+
 
 class GuestSpanValidationTest(unittest.TestCase):
     def test_valid_ram_span(self):
@@ -674,6 +732,150 @@ class TargetDispositionTest(unittest.TestCase):
         self.assertTrue(
             md.get_mock_state_path().endswith(
                 os.path.join("build", "hst", "mock_debug_state.json")))
+
+
+def _live_debugger(tmp_dir, **overrides):
+    """A debugger in the attached state, without a process: tests replace the host calls."""
+    dbg = md.MemoryDebugger(simulate=True, mutate=True)
+    attrs = {
+        "is_simulated": False,
+        "is_offline": False,
+        "pid": 4242,
+        "candidate": {"pid": 4242, "exe_path": os.path.join(tmp_dir, "title.exe"),
+                      "base_address": 0x140000000},
+        "proc_info": {"pid": 4242, "exe_path": os.path.join(tmp_dir, "title.exe"),
+                      "base_address": 0x140000000},
+        "base_address": 0x140000000,
+        "image_verified": True,
+        "rva_provenance": "nm",
+        "rvas": {"g_mem": 1, "s_cpu": 2, md.ABI_SYMBOL: 3},
+    }
+    attrs.update(overrides)
+    for k, v in attrs.items():
+        setattr(dbg, k, v)
+    return dbg
+
+
+class _FakeDll:
+    def __init__(self, **functions):
+        self.__dict__.update(functions)
+
+
+class LiveResultTest(unittest.TestCase):
+    """What a live action reports, with the Windows calls replaced."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="mem_debug_live_")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_dir = self._tmp.name
+
+    def _dlls(self, **by_name):
+        def win_dll(name, **_kwargs):
+            return by_name[name.lower()]
+        return mock.patch.object(md.ctypes, "WinDLL", side_effect=win_dll, create=True)
+
+    def test_live_reads_report_where_g_mem_came_from(self):
+        dbg = _live_debugger(self.tmp_dir, rva_provenance="fallback", image_verified=False)
+        dbg._resolve_g_mem = lambda: 0x10000000
+        dbg._read_process_bytes = lambda addr, size: bytes(size)
+        for res in (dbg.read_mem(0x08800000, 4, "hex"), dbg.read_mem(0x08800000, 4, "words"),
+                    dbg.read_mem(0x08800000, 4, "string"), dbg.read_vram()):
+            self.assertEqual(res["rva_provenance"], "fallback")
+            self.assertFalse(res["image_verified"])
+
+    def test_float_register_writes_store_the_given_bit_pattern(self):
+        dbg = _live_debugger(self.tmp_dir)
+        dbg._cpu_abi_check = lambda: None
+        dbg._resolve_cpu_state_addr = lambda: 0x1000
+        written = {}
+        dbg._write_process_bytes = lambda addr, data: written.update({addr: data}) or True
+        res = dbg.write_cpu("f2", 0x3F800000)
+        self.assertTrue(res["success"], res)
+        self.assertEqual(written[0x1000 + 140 + 2 * 4], (0x3F800000).to_bytes(4, "little"))
+        res = dbg.write_cpu("v5", 0xBF800000)
+        self.assertTrue(res["success"], res)
+        self.assertEqual(written[0x1000 + 276 + 5 * 4], (0xBF800000).to_bytes(4, "little"))
+
+    def test_simulated_float_register_writes_store_the_given_bit_pattern(self):
+        mock_path = os.path.join(self.tmp_dir, "mock_debug_state.json")
+        with mock.patch.object(md, "get_mock_state_path", return_value=mock_path):
+            dbg = md.MemoryDebugger(simulate=True, mutate=True)
+            self.assertTrue(dbg.write_cpu("f2", 0x3F800000)["success"])
+            self.assertTrue(dbg.write_cpu("v5", 0xBF800000)["success"])
+        self.assertEqual(dbg.mock["cpu"]["f"][2], 1.0)
+        self.assertEqual(dbg.mock["cpu"]["v"][5], -1.0)
+
+    def test_status_is_offline_when_the_process_cannot_be_opened(self):
+        dbg = _live_debugger(self.tmp_dir)
+        kernel32 = _FakeDll(OpenProcess=lambda *args: 0, CloseHandle=lambda handle: 1)
+        with self._dlls(**{"kernel32.dll": kernel32}):
+            self.assertFalse(dbg.get_status()["online"])
+
+    def test_a_failed_suspend_or_resume_is_reported_and_leaves_the_flag(self):
+        dbg = _live_debugger(self.tmp_dir)
+        access_denied = -0x3FFFFFDE  # NTSTATUS 0xC0000022 as the signed int ctypes returns
+        kernel32 = _FakeDll(OpenProcess=lambda *args: 5, CloseHandle=lambda handle: 1)
+        ntdll = _FakeDll(NtSuspendProcess=lambda handle: access_denied,
+                         NtResumeProcess=lambda handle: access_denied)
+        flag = os.path.join(self.tmp_dir, "paused.flag")
+        with self._dlls(**{"kernel32.dll": kernel32, "ntdll.dll": ntdll}):
+            res = dbg.pause()
+            self.assertFalse(res["success"])
+            self.assertIn("0xc0000022", res["error"])
+            self.assertFalse(os.path.exists(flag))
+            Path(flag).write_text("1")
+            res = dbg.resume()
+            self.assertFalse(res["success"])
+            self.assertIn("0xc0000022", res["error"])
+            self.assertTrue(os.path.exists(flag))
+
+    def test_a_crash_dump_over_the_read_budget_is_not_read(self):
+        dbg = _live_debugger(self.tmp_dir, process_started=None)
+        stack = bytes(4096)
+        words = (md.CRASH_DUMP_FORMAT, md.CPU_STATE_ABI_VERSION, md.CPU_STATE_SIZE, 0x09FF0000,
+                 len(stack))
+        header = md.CRASH_DUMP_MAGIC + b"".join(w.to_bytes(4, "little") for w in words)
+        Path(self.tmp_dir, "crash_dump.bin").write_bytes(header + bytes(md.CPU_STATE_SIZE) + stack)
+        with mock.patch.object(md, "MAX_READ_BYTES", 2048):
+            res = dbg.trace_exit()
+        self.assertIn("error", res)
+        self.assertIn("budget", res["error"])
+
+
+@unittest.skipUnless(sys.platform == "win32", "process enumeration is the Windows backend")
+class ProcessEnumerationTest(unittest.TestCase):
+    def test_more_processes_than_the_first_buffer_holds_are_all_seen(self):
+        import ctypes
+        target = r"C:\titles\title\title.exe"
+        pids = list(range(4, 4 + 1500 * 4, 4))
+        paths = {pid: r"C:\other\other.exe" for pid in pids}
+        paths[pids[10]] = target
+        paths[pids[1400]] = target
+
+        def enum_processes(array_ref, size, needed_ref):
+            array = array_ref._obj
+            count = min(len(pids), size // ctypes.sizeof(ctypes.c_ulong))
+            for index in range(count):
+                array[index] = pids[index]
+            needed_ref._obj.value = count * ctypes.sizeof(ctypes.c_ulong)
+            return 1
+
+        def image_name(handle, flags, buffer_ref, size_ref):
+            buffer_ref._obj.value = paths[handle]
+            return 1
+
+        kernel32 = _FakeDll(OpenProcess=lambda access, inherit, pid: pid,
+                            CloseHandle=lambda handle: 1,
+                            QueryFullProcessImageNameW=image_name)
+        psapi = _FakeDll(EnumProcesses=enum_processes, EnumProcessModules=lambda *args: 0)
+        dlls = {"kernel32.dll": kernel32, "psapi.dll": psapi}
+        with mock.patch.object(md.ctypes, "WinDLL",
+                               side_effect=lambda name, **kwargs: dlls[name.lower()]):
+            candidates = md.enumerate_process_candidates("title.exe")
+        self.assertEqual(sorted(c["pid"] for c in candidates), [pids[10], pids[1400]])
+        chosen, reason = md.select_process_candidate(candidates, target)
+        self.assertIsNone(chosen)
+        self.assertIn("ambiguous", reason)
 
 
 @unittest.skipUnless(sys.platform == "win32", "live process discovery is the Windows backend")

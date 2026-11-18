@@ -57,9 +57,7 @@ import subprocess
 import ctypes
 import hashlib
 import re
-
-# Define standard PE image base for Mingw-w64 (64-bit)
-DEFAULT_IMAGE_BASE = 0x140000000
+import struct
 
 # Cache default RVAs resolved in our analysis.  These are READ-ONLY fallbacks used
 # only when nm is unavailable; address-space MUTATION never uses them.
@@ -93,6 +91,20 @@ CRASH_DUMP_MAGIC = b"SRCD"
 CRASH_DUMP_FORMAT = 1
 CRASH_DUMP_HEADER_SIZE = 24
 ABI_SYMBOL = "sr_cpustate_abi_version"
+# One table of CpuState field offsets, used by read_cpu, write_cpu and trace_exit.
+CPU_STATE_GPR_OFFSET = 0
+CPU_STATE_GPR_COUNT = 32
+CPU_STATE_HI_OFFSET = 128
+CPU_STATE_LO_OFFSET = 132
+CPU_STATE_PC_OFFSET = 136
+CPU_STATE_FPR_OFFSET = 140
+CPU_STATE_FPR_COUNT = 32
+CPU_STATE_FCR31_OFFSET = 268
+CPU_STATE_FPCOND_OFFSET = 272
+CPU_STATE_VPR_OFFSET = 276
+CPU_STATE_VPR_COUNT = 128
+CPU_STATE_VFPU_CTRL_OFFSET = 788
+CPU_STATE_VFPU_CTRL_COUNT = 16
 CPU_STATE_COP0_OFFSET = 852
 CPU_STATE_COP0_COUNT = 32
 CPU_STATE_NEXT_PC_OFFSET = 980
@@ -206,6 +218,19 @@ def pe_header_identity(prefix):
     section data there, and under ASLR the loader rewrites OptionalHeader.ImageBase.
     Returns None when the prefix is not a whole PE32/PE32+ header.
     """
+    layout = _pe_layout(prefix)
+    if layout is None:
+        return None
+    (base_start, base_end), size_of_headers = layout
+    if size_of_headers > len(prefix):
+        return None
+    headers = bytearray(prefix[:size_of_headers])
+    headers[base_start:base_end] = bytes(base_end - base_start)
+    return bytes(headers)
+
+
+def _pe_layout(prefix):
+    """((ImageBase field start, end), SizeOfHeaders) of a PE32/PE32+ prefix, or None."""
     if not prefix or len(prefix) < 0x40 or prefix[:2] != b"MZ":
         return None
     nt = int.from_bytes(prefix[0x3C:0x40], "little")
@@ -220,11 +245,19 @@ def pe_header_identity(prefix):
     else:
         return None
     size_of_headers = int.from_bytes(prefix[optional + 60:optional + 64], "little")
-    if size_of_headers < optional + 64 or size_of_headers > len(prefix):
+    if size_of_headers < optional + 64:
         return None
-    headers = bytearray(prefix[:size_of_headers])
-    headers[base_field[0]:base_field[1]] = bytes(base_field[1] - base_field[0])
-    return bytes(headers)
+    return base_field, size_of_headers
+
+
+def pe_image_base(path):
+    """OptionalHeader.ImageBase of the PE file at ``path``, or None."""
+    prefix = pe_prefix_bytes(path)
+    layout = _pe_layout(prefix)
+    if layout is None:
+        return None
+    (start, end), _size_of_headers = layout
+    return int.from_bytes(prefix[start:end], "little")
 
 
 def image_identity_matches(disk_prefix, memory_prefix):
@@ -304,6 +337,26 @@ def query_module_base(psapi, h_process):
     return 0
 
 
+def _enum_process_ids(psapi):
+    """Every process id, or None when EnumProcesses fails.
+
+    EnumProcesses reports a full buffer when the list may not have fit, so the
+    buffer grows until it comes back with room to spare; a truncated list would
+    hide a second instance from the unique-process check.
+    """
+    entries = 1024
+    while True:
+        arr = (ctypes.c_ulong * entries)()
+        cb_needed = ctypes.c_ulong()
+        if not psapi.EnumProcesses(ctypes.byref(arr), ctypes.sizeof(arr),
+                                   ctypes.byref(cb_needed)):
+            return None
+        if cb_needed.value < ctypes.sizeof(arr):
+            count = cb_needed.value // ctypes.sizeof(ctypes.c_ulong)
+            return [arr[i] for i in range(count)]
+        entries *= 2
+
+
 def enumerate_process_candidates(expected_name=None):
     """Enumerate processes whose executable basename matches, with full image
     paths and main-module base addresses.  Read-only; never requests write or
@@ -317,14 +370,10 @@ def enumerate_process_candidates(expected_name=None):
         return []
 
     candidates = []
-    arr = (ctypes.c_ulong * 1024)()
-    cb_needed = ctypes.c_ulong()
-    if not psapi.EnumProcesses(ctypes.byref(arr), ctypes.sizeof(arr),
-                               ctypes.byref(cb_needed)):
+    pids = _enum_process_ids(psapi)
+    if pids is None:
         return []
-    count = cb_needed.value // ctypes.sizeof(ctypes.c_ulong)
-    for i in range(count):
-        pid = arr[i]
+    for pid in pids:
         if pid == 0:
             continue
         h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -451,57 +500,100 @@ def get_symbol_rvas(exe_path):
     # is not the caller's frame.
     exe_path = os.path.abspath(exe_path)
 
-    nm_candidate = os.environ.get("NM")
-    msys_bin = os.environ.get("MSYS_PATH")
-    if not msys_bin:
-        gcc_bin = shutil.which("gcc")
-        if gcc_bin and "ucrt64" in gcc_bin.lower():
-            msys_bin = os.path.dirname(gcc_bin)
-    default_msys = os.environ.get("MSYS_PATH", r"C:\msys64\ucrt64\bin")
-    nm_paths = [
-        nm_candidate,
-        shutil.which("nm"),
-        shutil.which("nm.exe"),
-        os.path.join(msys_bin, "nm.exe") if msys_bin else None,
-        os.path.join(msys_bin, "nm") if msys_bin else None,
-        os.path.join(default_msys, "nm.exe"),
-        "nm.exe",
-        "nm",
-    ]
-    nm_path = None
-    for p in nm_paths:
-        if not p:
-            continue
-        try:
-            subprocess.run([p, "--version"], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL)
-            nm_path = p
-            break
-        except Exception:
-            continue
-
+    nm_path = find_nm()
     if not nm_path:
         return rvas, "fallback"
 
     try:
         res = subprocess.run([nm_path, exe_path], stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True)
+                             stderr=subprocess.PIPE, text=True, timeout=NM_TIMEOUT_S)
         found = {}
         for line in res.stdout.splitlines():
             parts = line.split()
             if len(parts) >= 3:
                 addr_str, _sym_type, name = parts[0], parts[1], parts[2]
                 if name in ("g_mem", "s_cpu", ABI_SYMBOL):
-                    addr = int(addr_str, 16)
-                    found[name] = addr - DEFAULT_IMAGE_BASE
+                    found[name] = int(addr_str, 16)
+        if "g_mem" not in found or "s_cpu" not in found:
+            return rvas, "fallback"
+        # nm prints addresses at the file's own ImageBase, which a link option can move.
+        image_base = pe_image_base(exe_path)
+        if image_base is None:
+            return rvas, "fallback"
         for name in ("g_mem", "s_cpu", ABI_SYMBOL):
             if name in found:
-                rvas[name] = found[name]
-        if "g_mem" in found and "s_cpu" in found:
-            return rvas, "nm"
-        return rvas, "fallback"
+                rvas[name] = found[name] - image_base
+        return rvas, "nm"
     except Exception:
         return rvas, "fallback"
+
+
+NM_TIMEOUT_S = 60
+
+
+def _outside_working_tree(path):
+    """True when ``path`` is absolute and neither in the working directory nor the
+    repository, where a planted ``nm`` would otherwise run before the real one."""
+    if not path or not os.path.isabs(path):
+        return False
+    resolved = os.path.normcase(os.path.realpath(path))
+    for root in (os.getcwd(), find_repo_root()):
+        top = os.path.normcase(os.path.realpath(root))
+        if resolved == top or resolved.startswith(top.rstrip(os.sep) + os.sep):
+            return False
+    return True
+
+
+def _nm_on_path():
+    """Absolute nm executables on PATH, skipping relative, empty and '.' entries."""
+    names = ["nm.exe", "nm"] if sys.platform == "win32" else ["nm"]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if entry in ("", ".") or not os.path.isabs(entry):
+            continue
+        for name in names:
+            yield os.path.join(entry, name)
+
+
+def _nm_answers(path, banner=True):
+    """The program runs and answers --version (like GNU or LLVM nm, when ``banner``)."""
+    try:
+        probe = subprocess.run([path, "--version"], stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True, errors="replace",
+                               timeout=NM_TIMEOUT_S)
+    except Exception:
+        return False
+    if probe.returncode != 0:
+        return False
+    text = probe.stdout or ""
+    return not banner or "GNU nm" in text or "LLVM" in text
+
+
+def find_nm():
+    """The nm that resolves symbols for mutation provenance, or None.
+
+    An explicit ``NM`` is the user's own choice and only has to run and answer
+    --version. Otherwise only an absolute nm outside the working directory and
+    the repository is used, never a bare name that Windows would look up in the
+    working directory first.
+    """
+    explicit = os.environ.get("NM")
+    if explicit:
+        return explicit if _nm_answers(explicit, banner=False) else None
+    msys_bin = os.environ.get("MSYS_PATH")
+    if not msys_bin:
+        gcc_bin = shutil.which("gcc")
+        if gcc_bin and "ucrt64" in gcc_bin.lower():
+            msys_bin = os.path.dirname(gcc_bin)
+    default_msys = os.environ.get("MSYS_PATH", r"C:\msys64\ucrt64\bin")
+    candidates = list(_nm_on_path())
+    if msys_bin:
+        candidates += [os.path.join(msys_bin, "nm.exe"), os.path.join(msys_bin, "nm")]
+    candidates.append(os.path.join(default_msys, "nm.exe"))
+    for path in candidates:
+        if os.path.isfile(path) and _outside_working_tree(path) and _nm_answers(path):
+            return path
+    return None
 
 
 # --- Mock State Manager ------------------------------------------------------
@@ -587,6 +679,11 @@ def save_mock_state(state):
 
 # --- Active Execution Implementation ----------------------------------------
 MUTATING_ACTIONS = frozenset(("pause", "resume", "write_mem", "write_cpu"))
+
+
+def _ntstatus(value):
+    """An NTSTATUS return value as the signed 32-bit number (negative is an error)."""
+    return ctypes.c_int32(int(value) & 0xFFFFFFFF).value
 
 
 class MemoryDebugger:
@@ -791,7 +888,8 @@ class MemoryDebugger:
 
         kernel32 = ctypes.WinDLL('kernel32.dll', use_last_error=True)
         h_process = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, self.pid)
-        online = h_process is not None
+        # OpenProcess returns a 0 handle on failure, never None.
+        online = bool(h_process)
         if h_process:
             kernel32.CloseHandle(h_process)
 
@@ -859,8 +957,14 @@ class MemoryDebugger:
         ntdll = ctypes.WinDLL('ntdll.dll', use_last_error=True)
         h_process = kernel32.OpenProcess(0x0800, False, self.pid)
         if h_process:
-            ntdll.NtSuspendProcess(h_process)
-            kernel32.CloseHandle(h_process)
+            try:
+                status = _ntstatus(ntdll.NtSuspendProcess(h_process))
+            finally:
+                kernel32.CloseHandle(h_process)
+            if status < 0:
+                return {"success": False,
+                        "error": "NtSuspendProcess failed with NTSTATUS 0x%08x"
+                                 % (status & 0xFFFFFFFF)}
             status_file = os.path.join(build_artifact_dir(self.attached_exe_path()), "paused.flag")
             with open(status_file, "w") as f:
                 f.write("1")
@@ -881,8 +985,14 @@ class MemoryDebugger:
         ntdll = ctypes.WinDLL('ntdll.dll', use_last_error=True)
         h_process = kernel32.OpenProcess(0x0800, False, self.pid)
         if h_process:
-            ntdll.NtResumeProcess(h_process)
-            kernel32.CloseHandle(h_process)
+            try:
+                status = _ntstatus(ntdll.NtResumeProcess(h_process))
+            finally:
+                kernel32.CloseHandle(h_process)
+            if status < 0:
+                return {"success": False,
+                        "error": "NtResumeProcess failed with NTSTATUS 0x%08x"
+                                 % (status & 0xFFFFFFFF)}
             status_file = os.path.join(build_artifact_dir(self.attached_exe_path()), "paused.flag")
             if os.path.exists(status_file):
                 os.remove(status_file)
@@ -1004,7 +1114,7 @@ class MemoryDebugger:
             end = data.find(0)
             string_val = (data[:end].decode("utf-8", errors="replace")
                           if end != -1 else data.decode("utf-8", errors="replace"))
-            return {"address": "0x%08x" % addr, "string": string_val}
+            result = {"address": "0x%08x" % addr, "string": string_val}
         elif fmt == "words":
             words = []
             for idx in range(0, len(data), 4):
@@ -1012,10 +1122,19 @@ class MemoryDebugger:
                 if len(chunk) == 4:
                     val = int.from_bytes(chunk, byteorder='little')
                     words.append("0x%08x" % val)
-            return {"address": "0x%08x" % addr, "words": words}
+            result = {"address": "0x%08x" % addr, "words": words}
         else:
             hex_str = " ".join("%02x" % b for b in data)
-            return {"address": "0x%08x" % addr, "hex": hex_str, "size": len(data)}
+            result = {"address": "0x%08x" % addr, "hex": hex_str, "size": len(data)}
+        return self._with_read_provenance(result)
+
+    def _with_read_provenance(self, result):
+        """A live read names where its g_mem came from: a fallback RVA is one old
+        build's, so the bytes are only as good as that provenance."""
+        if not self.is_simulated:
+            result["rva_provenance"] = self.rva_provenance
+            result["image_verified"] = self.image_verified
+        return result
 
     def write_mem(self, addr, val_hex):
         ok_gate, gate_reason = self._mutation_allowed(
@@ -1081,7 +1200,8 @@ class MemoryDebugger:
                                  % target_addr}
 
         b64 = base64.b64encode(data).decode('ascii')
-        return {"address": "0x%08x" % addr, "size": size, "base64": b64}
+        return self._with_read_provenance(
+            {"address": "0x%08x" % addr, "size": size, "base64": b64})
 
     def read_cpu(self):
         if self.is_simulated:
@@ -1100,49 +1220,32 @@ class MemoryDebugger:
         if not cpu_bytes:
             return {"success": False, "error": "Failed to read CpuState structure"}
 
-        cpu = {}
-        cpu["r"] = [int.from_bytes(cpu_bytes[i * 4:(i + 1) * 4], byteorder='little')
-                    for i in range(32)]
-        cpu["hi"] = int.from_bytes(cpu_bytes[128:132], byteorder='little')
-        cpu["lo"] = int.from_bytes(cpu_bytes[132:136], byteorder='little')
-        cpu["pc"] = int.from_bytes(cpu_bytes[136:140], byteorder='little')
+        def word(offset):
+            return int.from_bytes(cpu_bytes[offset:offset + 4], byteorder='little')
 
-        import struct
-        cpu["f"] = [struct.unpack('<f', cpu_bytes[140 + i * 4:140 + (i + 1) * 4])[0]
-                    for i in range(32)]
-        cpu["fcr31"] = int.from_bytes(cpu_bytes[268:272], byteorder='little')
-        cpu["fpcond"] = int.from_bytes(cpu_bytes[272:276], byteorder='little')
-        cpu["v"] = [struct.unpack('<f', cpu_bytes[276 + i * 4:276 + (i + 1) * 4])[0]
-                    for i in range(128)]
-        cpu["vfpuCtrl"] = [int.from_bytes(cpu_bytes[788 + i * 4:788 + (i + 1) * 4],
-                                          byteorder='little') for i in range(16)]
-        cpu["cop0"] = [
-            int.from_bytes(
-                cpu_bytes[CPU_STATE_COP0_OFFSET + i * 4:CPU_STATE_COP0_OFFSET + (i + 1) * 4],
-                byteorder='little',
-            )
-            for i in range(CPU_STATE_COP0_COUNT)
-        ]
-        cpu["next_pc"] = int.from_bytes(
-            cpu_bytes[CPU_STATE_NEXT_PC_OFFSET:CPU_STATE_NEXT_PC_OFFSET + 4],
-            byteorder='little',
-        )
-        cpu["in_delay_slot"] = int.from_bytes(
-            cpu_bytes[CPU_STATE_DELAY_SLOT_OFFSET:CPU_STATE_DELAY_SLOT_OFFSET + 4],
-            byteorder='little',
-        )
-        cpu["flow_kind"] = int.from_bytes(
-            cpu_bytes[CPU_STATE_FLOW_KIND_OFFSET:CPU_STATE_FLOW_KIND_OFFSET + 4],
-            byteorder='little',
-        )
-        cpu["flow_target"] = int.from_bytes(
-            cpu_bytes[CPU_STATE_FLOW_TARGET_OFFSET:CPU_STATE_FLOW_TARGET_OFFSET + 4],
-            byteorder='little',
-        )
-        cpu["llbit"] = int.from_bytes(
-            cpu_bytes[CPU_STATE_LLBIT_OFFSET:CPU_STATE_LLBIT_OFFSET + 4],
-            byteorder='little',
-        )
+        def words(offset, count):
+            return [word(offset + i * 4) for i in range(count)]
+
+        def floats(offset, count):
+            return [struct.unpack('<f', cpu_bytes[offset + i * 4:offset + (i + 1) * 4])[0]
+                    for i in range(count)]
+
+        cpu = {}
+        cpu["r"] = words(CPU_STATE_GPR_OFFSET, CPU_STATE_GPR_COUNT)
+        cpu["hi"] = word(CPU_STATE_HI_OFFSET)
+        cpu["lo"] = word(CPU_STATE_LO_OFFSET)
+        cpu["pc"] = word(CPU_STATE_PC_OFFSET)
+        cpu["f"] = floats(CPU_STATE_FPR_OFFSET, CPU_STATE_FPR_COUNT)
+        cpu["fcr31"] = word(CPU_STATE_FCR31_OFFSET)
+        cpu["fpcond"] = word(CPU_STATE_FPCOND_OFFSET)
+        cpu["v"] = floats(CPU_STATE_VPR_OFFSET, CPU_STATE_VPR_COUNT)
+        cpu["vfpuCtrl"] = words(CPU_STATE_VFPU_CTRL_OFFSET, CPU_STATE_VFPU_CTRL_COUNT)
+        cpu["cop0"] = words(CPU_STATE_COP0_OFFSET, CPU_STATE_COP0_COUNT)
+        cpu["next_pc"] = word(CPU_STATE_NEXT_PC_OFFSET)
+        cpu["in_delay_slot"] = word(CPU_STATE_DELAY_SLOT_OFFSET)
+        cpu["flow_kind"] = word(CPU_STATE_FLOW_KIND_OFFSET)
+        cpu["flow_target"] = word(CPU_STATE_FLOW_TARGET_OFFSET)
+        cpu["llbit"] = word(CPU_STATE_LLBIT_OFFSET)
 
         return {"success": True, "cpu": cpu, "mode": "process"}
 
@@ -1156,14 +1259,20 @@ class MemoryDebugger:
         if offset is None:
             return {"success": False, "error": "Invalid CpuState field: %s" % field}
 
+        # The value is a uint32. CpuState holds the FPU and VFPU registers as raw
+        # IEEE-754 words (a union with the integer view), so an f/v value is the
+        # bit pattern, never an integer converted to float.
+        data = int(val).to_bytes(4, byteorder='little', signed=False)
+
         if self.is_simulated:
             assert self.mock is not None
+            as_float = struct.unpack('<f', data)[0]
             if field.startswith("r") and field[1:].isdigit():
                 self.mock["cpu"]["r"][int(field[1:])] = val
             elif field.startswith("f") and field[1:].isdigit():
-                self.mock["cpu"]["f"][int(field[1:])] = float(val)
+                self.mock["cpu"]["f"][int(field[1:])] = as_float
             elif field.startswith("v") and field[1:].isdigit():
-                self.mock["cpu"]["v"][int(field[1:])] = float(val)
+                self.mock["cpu"]["v"][int(field[1:])] = as_float
             elif field.startswith("cop0[") and field.endswith("]"):
                 self.mock["cpu"]["cop0"][int(field[5:-1])] = val
             else:
@@ -1181,12 +1290,6 @@ class MemoryDebugger:
                     "error": "s_cpu pointer is NULL or process uninitialized"}
 
         target_addr = s_cpu_val + offset
-        if is_float:
-            import struct
-            data = struct.pack('<f', float(val))
-        else:
-            data = int(val).to_bytes(4, byteorder='little', signed=False)
-
         ok = self._write_process_bytes(target_addr, data)
         if ok:
             return {"success": True, "field": field,
@@ -1202,17 +1305,29 @@ class MemoryDebugger:
             return {"error": ("crash_dump.bin predates the attached process (pid %d); "
                               "it is from an earlier run of this build" % self.pid)}
 
+        # The dump is a header, one CpuState and a stack snapshot; anything over the
+        # read budget is not one, and is refused before it is read.
+        limit = CRASH_DUMP_HEADER_SIZE + MAX_READ_BYTES
+        size = os.path.getsize(dump_path)
+        if size > limit:
+            return {"error": ("crash_dump.bin is %d bytes, over the %d-byte read budget"
+                              % (size, limit))}
         with open(dump_path, "rb") as f:
-            blob = f.read()
+            blob = f.read(limit + 1)
+        if len(blob) > limit:
+            return {"error": "crash_dump.bin grew past the %d-byte read budget" % limit}
         parsed, err = parse_crash_dump(blob)
         if err:
             return {"error": err}
         cpu_bytes, stack_base, stack_bytes = parsed
 
         cpu = {}
-        cpu["r"] = [int.from_bytes(cpu_bytes[i * 4:(i + 1) * 4], byteorder='little')
-                    for i in range(32)]
-        cpu["pc"] = int.from_bytes(cpu_bytes[136:140], byteorder='little')
+        cpu["r"] = [int.from_bytes(cpu_bytes[CPU_STATE_GPR_OFFSET + i * 4:
+                                             CPU_STATE_GPR_OFFSET + (i + 1) * 4],
+                                   byteorder='little')
+                    for i in range(CPU_STATE_GPR_COUNT)]
+        cpu["pc"] = int.from_bytes(cpu_bytes[CPU_STATE_PC_OFFSET:CPU_STATE_PC_OFFSET + 4],
+                                   byteorder='little')
 
         pc = cpu["pc"]
         sp = cpu["r"][29]
@@ -1287,18 +1402,18 @@ def _cpu_field_offset(field):
     """Map a CpuState field name to (byte offset, is_float) or (None, False)."""
     if field.startswith("r") and field[1:].isdigit():
         reg_idx = int(field[1:])
-        if 0 <= reg_idx < 32:
-            return reg_idx * 4, False
+        if 0 <= reg_idx < CPU_STATE_GPR_COUNT:
+            return CPU_STATE_GPR_OFFSET + reg_idx * 4, False
     if field == "hi":
-        return 128, False
+        return CPU_STATE_HI_OFFSET, False
     if field == "lo":
-        return 132, False
+        return CPU_STATE_LO_OFFSET, False
     if field == "pc":
-        return 136, False
+        return CPU_STATE_PC_OFFSET, False
     if field == "fcr31":
-        return 268, False
+        return CPU_STATE_FCR31_OFFSET, False
     if field == "fpcond":
-        return 272, False
+        return CPU_STATE_FPCOND_OFFSET, False
     cop0_match = re.fullmatch(r"cop0\[(\d+)\]", field)
     if cop0_match:
         cop0_idx = int(cop0_match.group(1))
@@ -1316,12 +1431,12 @@ def _cpu_field_offset(field):
         return CPU_STATE_LLBIT_OFFSET, False
     if field.startswith("f") and field[1:].isdigit():
         f_idx = int(field[1:])
-        if 0 <= f_idx < 32:
-            return 140 + f_idx * 4, True
+        if 0 <= f_idx < CPU_STATE_FPR_COUNT:
+            return CPU_STATE_FPR_OFFSET + f_idx * 4, True
     if field.startswith("v") and field[1:].isdigit():
         v_idx = int(field[1:])
-        if 0 <= v_idx < 128:
-            return 276 + v_idx * 4, True
+        if 0 <= v_idx < CPU_STATE_VPR_COUNT:
+            return CPU_STATE_VPR_OFFSET + v_idx * 4, True
     return None, False
 
 
