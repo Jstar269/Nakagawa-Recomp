@@ -15,6 +15,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "../../third_party/dr_libs/dr_wav.h"
 
@@ -144,11 +148,35 @@ static void test_dump_env(void) {
     remove(path);
 }
 
+/* A write the volume refuses only at flush time is a failure, and leaves no file. The path
+   is a symbolic link to /dev/full, which opens and buffers writes but refuses every flush
+   with ENOSPC, as a full or quota-limited volume does; removing the "partial file" removes
+   the link, never the device. Hosts without /dev/full or symbolic links skip this case by
+   name. */
+static void test_write_failure(void) {
+#if defined(_WIN32)
+    printf("test_pcm_wav_dump: SKIP full-volume write (no /dev/full on this host)\n");
+#else
+    static const char path[] = SR_SELFTEST_BUILD_ROOT "/test_pcm_wav_dump_full.wav";
+    int16_t pcm[64] = {0};
+    struct stat st;
+    remove(path);
+    if (access("/dev/full", W_OK) != 0 || symlink("/dev/full", path) != 0) {
+        printf("test_pcm_wav_dump: SKIP full-volume write (no writable /dev/full or no symlink)\n");
+        return;
+    }
+    CHECK(nk_pcm_wav_write(path, pcm, 32u, 2u, 44100u) == 0, "a write refused at flush is a failure");
+    CHECK(lstat(path, &st) != 0, "no partial file kept after a refused flush");
+    remove(path);
+#endif
+}
+
 int main(void) {
     test_round_trip();
     test_empty_mono();
     test_refusals();
     test_dump_env();
+    test_write_failure();
     if (g_failures != 0) {
         fprintf(stderr, "test_pcm_wav_dump: %d failure(s)\n", g_failures);
         return 1;

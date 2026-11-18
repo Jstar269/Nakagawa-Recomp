@@ -217,9 +217,6 @@ void sr_heap_note_bulk_write(uint32_t addr, uint32_t width, uint32_t pc) {
 }
 /* The GE status word sr_r32 serves at 0x04084000; no load here reads it. */
 uint32_t sr_get_ge_status(void) { return 0u; }
-void sr_ge_vram_read_prepare(uint32_t physical_addr, uint32_t width) {
-    (void)physical_addr; (void)width;
-}
 void sr_ge_vram_write_prepare(uint32_t physical_addr, uint32_t width) {
     if (g_prepare_n < PIECE_LOG_MAX) {
         g_prepare_addr[g_prepare_n] = physical_addr;
@@ -260,6 +257,26 @@ void sr_ge_vram_write_commit(uint32_t physical_addr, uint32_t width) {
 
 static uint8_t *vram_phys(void) {
     return g_mem - 0x08000000u + 0x04000000u;
+}
+
+/* A stand-in renderer for CPU reads (#1049). While g_renderer_vram is set, it holds the true
+ * contents of physical VRAM and the host copy is stale, as when the GE still owns rendered
+ * bytes; a read prepare materializes exactly the physical span it names, as ge.c's
+ * sr_ge_vram_read_prepare has the renderer do. A copy that reads a byte without preparing it
+ * first therefore reads the stale host byte. A prepare that names anything but physical
+ * VRAM (a CPU mirror address, say) is counted as stray and materializes nothing. */
+static uint8_t *g_renderer_vram;
+static unsigned g_read_prepare_n, g_read_prepare_stray;
+void sr_ge_vram_read_prepare(uint32_t physical_addr, uint32_t width) {
+    g_read_prepare_n++;
+    if (!g_renderer_vram) return;
+    if (physical_addr < 0x04000000u || physical_addr - 0x04000000u >= VRAM_BYTES ||
+        width > VRAM_BYTES - (physical_addr - 0x04000000u)) {
+        g_read_prepare_stray++;
+        return;
+    }
+    memcpy(vram_phys() + (physical_addr - 0x04000000u),
+           g_renderer_vram + (physical_addr - 0x04000000u), width);
 }
 
 static void test_vram_mirror_bulk_copy(void) {
@@ -311,19 +328,27 @@ static void test_vram_mirror_bulk_copy(void) {
         CHECK(memcmp(ram + (ram_dst - 0x08000000u), pattern, size) == 0,
               "view %08x: read back through the mirror differs", (unsigned)base);
 
-        /* Fill through the mirror touches exactly the measured bytes. */
+        /* Fill through the mirror touches exactly the measured bytes, and commits each one
+         * (the flags are cleared first, so the memmove's commits above do not count). */
         memset(vram, 0, VRAM_BYTES);
+        memset(g_committed, 0, VRAM_BYTES);
         sr_native_memset(guest, 0xA5u, size, 0u);
         CHECK(g_oor_calls == 0, "view %08x: memset into the mirror was refused", (unsigned)base);
         misplaced = 0;
+        uncommitted = 0;
         stray = 0;
-        for (uint32_t i = 0; i < size; i++)
-            if (vram[measured_vram_offset(view, offset + i)] != 0xA5u) misplaced++;
+        for (uint32_t i = 0; i < size; i++) {
+            const uint32_t phys = measured_vram_offset(view, offset + i);
+            if (vram[phys] != 0xA5u) misplaced++;
+            if (!g_committed[phys]) uncommitted++;
+        }
         for (uint32_t p = 0; p < VRAM_BYTES; p++)
             if (vram[p] != 0u) stray++;
         CHECK(misplaced == 0 && stray == size,
               "view %08x: memset placed %u bytes wrongly, %u nonzero bytes",
               (unsigned)base, (unsigned)misplaced, (unsigned)stray);
+        CHECK(uncommitted == 0, "view %08x: %u bytes memset through the mirror were never committed",
+              (unsigned)base, (unsigned)uncommitted);
     }
 
     /* The measured example: a store to 0x04200100 lands at physical 0x002140. */
@@ -364,6 +389,84 @@ static void test_vram_mirror_bulk_copy(void) {
         CHECK(stored == 0u, "a refused copy must not store a byte (%u changed)", stored);
     }
     memset(ram + 0x03fff800u, 0, 0x800u);
+    memset(vram, 0, VRAM_BYTES);
+}
+
+/* ---- CPU reads of renderer-owned VRAM through every view (#1049) -----------------
+ * While g_sr_vram_read_pending is set, every bulk read prepares each physical block before it
+ * reads it: the direct piece loop of sr_guest_memmove (mirror to RAM), sr_guest_copy_in, the
+ * memmove staging path (overlapping spans), and the single-prepare path of a linear view.
+ * The stand-in renderer above holds the true bytes, so a piece read unprepared, or prepared
+ * at its CPU address instead of its physical one, reads the stale zeros and shows. */
+static void test_vram_mirror_read_prepare(void) {
+    static const uint32_t views[] = {
+        0x04000000u, 0x04200000u, 0x04400000u, 0x04600000u, 0x44200000u, 0x44600000u,
+    };
+    const uint32_t offset = 0x00011F90u, size = 0x1000u, ram_dst = 0x08200000u;
+    uint8_t *vram = vram_phys();
+    uint8_t *ram = g_mem;
+    static uint8_t renderer[VRAM_BYTES];
+    static uint8_t pattern[0x1000u], host[0x1000u];
+    for (uint32_t i = 0; i < size; i++) pattern[i] = (uint8_t)(1u + (i * 5u + (i >> 9)) % 251u);
+    g_renderer_vram = renderer;
+    g_sr_vram_read_pending = 1;
+
+    for (size_t v = 0; v < sizeof views / sizeof views[0]; v++) {
+        const uint32_t base = views[v];
+        const uint32_t view = ((base & PHYS_MASK) >> 21) & 3u;
+        const uint32_t guest = base + offset;
+        memset(renderer, 0, VRAM_BYTES);
+        for (uint32_t i = 0; i < size; i++) renderer[measured_vram_offset(view, offset + i)] = pattern[i];
+
+        /* Mirror -> RAM through the generated-code entry point. */
+        memset(vram, 0, VRAM_BYTES);
+        memset(ram + (ram_dst - 0x08000000u), 0, size);
+        g_oor_calls = 0;
+        g_read_prepare_n = 0;
+        g_read_prepare_stray = 0;
+        sr_native_memmove(ram_dst, guest, size, 0u);
+        CHECK(g_oor_calls == 0, "view %08x: memmove of renderer-owned VRAM was refused", (unsigned)base);
+        CHECK(g_read_prepare_n != 0u && g_read_prepare_stray == 0u,
+              "view %08x: memmove published %u read prepares, %u not at a physical VRAM span",
+              (unsigned)base, g_read_prepare_n, g_read_prepare_stray);
+        CHECK(memcmp(ram + (ram_dst - 0x08000000u), pattern, size) == 0,
+              "view %08x: memmove read VRAM bytes it never prepared", (unsigned)base);
+
+        /* Mirror -> host through sr_guest_copy_in. */
+        memset(vram, 0, VRAM_BYTES);
+        memset(host, 0, sizeof host);
+        g_read_prepare_n = 0;
+        g_read_prepare_stray = 0;
+        CHECK(sr_guest_copy_in(host, guest, size) == 1, "view %08x: copy_in refused", (unsigned)base);
+        CHECK(g_read_prepare_n != 0u && g_read_prepare_stray == 0u,
+              "view %08x: copy_in published %u read prepares, %u not at a physical VRAM span",
+              (unsigned)base, g_read_prepare_n, g_read_prepare_stray);
+        CHECK(memcmp(host, pattern, size) == 0, "view %08x: copy_in read VRAM bytes it never prepared",
+              (unsigned)base);
+    }
+
+    /* Overlapping physical bytes take the staging path: the base-view source is read through
+     * sr_guest_copy_in before the 0x042 destination is written. */
+    {
+        const uint32_t window = 0x00010000u, src_off = window + 0x100u, dst_off = window + 0x2120u;
+        memset(renderer, 0, VRAM_BYTES);
+        for (uint32_t i = 0; i < size; i++) renderer[src_off + i] = pattern[i];
+        memset(vram, 0, VRAM_BYTES);
+        g_oor_calls = 0;
+        g_read_prepare_n = 0;
+        g_read_prepare_stray = 0;
+        sr_native_memmove(0x04200000u + dst_off, 0x04000000u + src_off, size, 0u);
+        uint32_t wrong = 0;
+        for (uint32_t i = 0; i < size; i++)
+            if (vram[measured_vram_offset(1u, dst_off + i)] != pattern[i]) wrong++;
+        CHECK(g_oor_calls == 0 && g_read_prepare_n != 0u && g_read_prepare_stray == 0u,
+              "staged memmove: refused %d time(s), %u read prepares, %u stray", g_oor_calls,
+              g_read_prepare_n, g_read_prepare_stray);
+        CHECK(wrong == 0u, "staged memmove: %u destination bytes came from unprepared VRAM", wrong);
+    }
+
+    g_renderer_vram = NULL;
+    g_sr_vram_read_pending = 0;
     memset(vram, 0, VRAM_BYTES);
 }
 
@@ -552,6 +655,28 @@ static void test_vram_mirror_write_primitives(void) {
     g_sr_vram_read_pending = 0;
 }
 
+/* Independent reference for the pointer-forming predicates (sr_guest_span_readable/
+ * writable): one host pointer covers [a, a+s) only when every byte lands at
+ * measured_phys(a) + i. measured_phys() is the identity outside the two swizzled windows,
+ * so a linear stretch is checked at its first byte and skipped; inside a swizzled window
+ * every byte is checked, and contiguity ends within one block there. Only called for a
+ * span inside the arena. */
+static int ref_span_one_host_pointer(uint32_t a, uint32_t s) {
+    const uint32_t first = measured_phys(a);
+    uint64_t i = 0;
+    while (i < s) {
+        const uint32_t g = a + (uint32_t)i;
+        if (measured_phys(g) != first + (uint32_t)i) return 0;
+        const uint32_t p = g & PHYS_MASK;
+        uint64_t step = 1u;
+        if (p < 0x04200000u) step = 0x04200000u - p;
+        else if (p >= 0x04400000u && p < 0x04600000u) step = 0x04600000u - p;
+        else if (p >= 0x04800000u) step = s - i;
+        i += step;
+    }
+    return 1;
+}
+
 static void fuzz_differential(void) {
     /* Deterministic LCG; no host RNG, so the run is reproducible. Covers the full
      * 32-bit range for both base and size, hitting near-boundary and huge values. */
@@ -559,6 +684,7 @@ static void fuzz_differential(void) {
     const int iters = 400000;
     int span_mismatch = 0, add_mismatch = 0, mul_mismatch = 0;
     int edge_accepted = 0, edge_rejected = 0, mul_fits = 0, mul_overflows = 0;
+    int mirror_one_pointer = 0, mirror_split = 0;
     for (int i = 0; i < iters; i++) {
         x = x * 1103515245u + 12345u;
         uint32_t a = x;
@@ -567,13 +693,17 @@ static void fuzz_differential(void) {
         /* Disjoint bias classes, so no class cancels another: a base within 4 KiB of
          * the arena end with a small size (both sides of the end), a RAM base with a
          * moderate size (mostly accepted), a huge size, operands whose product fits,
-         * and operands whose product straddles 2^32. The rest stay full-range. */
+         * operands whose product straddles 2^32, a short span anywhere in the VRAM CPU
+         * window (any segment), and a short span near one of the four view boundaries
+         * 0x04200000..0x04800000. The rest stay full-range. */
         switch (i & 7) {
         case 0: a = 0x0c000000u - (x & 0xFFFu); s = 1u + ((x >> 12) & 0x1FFFu); break;
         case 1: a = 0x08000000u + (x & 0x03ffffffu); s = 1u + ((x >> 8) & 0xFFFFu); break;
         case 2: s = 0xFFFFFF00u + (x & 0xFFu); break;
         case 3: a = x & 0xFFFFu; s = (x >> 16) & 0xFFFFu; break;
         case 4: a = 0x10000u + (x & 0xFFu); s = 0xFF00u + ((x >> 8) & 0xFFu); break;
+        case 5: a = (x & 0xE0000000u) | (0x04000000u + ((x >> 3) & 0x007FFFFFu)); s = 1u + (x & 0x7Fu); break;
+        case 6: a = 0x04200000u + ((x >> 30) << 21) - 0x40u + ((x >> 8) & 0x7Fu); s = 1u + (x & 0x7Fu); break;
         default: break;
         }
 
@@ -586,8 +716,16 @@ static void fuzz_differential(void) {
                 else edge_rejected++;
             }
             int gotr = sr_guest_span_readable(a, s);
-            int span_want = want && !sr_guest_span_hits_swizzled_vram_mirror(a, s);
-            if (gotr != span_want) span_mismatch++;
+            int gotw = sr_guest_span_writable(a, s);
+            int span_want = want && ref_span_one_host_pointer(a, s);
+            if (gotr != span_want || gotw != span_want) span_mismatch++;
+            if (want) {
+                const uint64_t p = a & PHYS_MASK, e = p + s;
+                if ((p < 0x04400000u && e > 0x04200000u) || (p < 0x04800000u && e > 0x04600000u)) {
+                    if (span_want) mirror_one_pointer++;
+                    else mirror_split++;
+                }
+            }
         }
 
         uint32_t out = 0;
@@ -609,6 +747,9 @@ static void fuzz_differential(void) {
           "fuzz reached the arena end %d accepted / %d rejected time(s)", edge_accepted, edge_rejected);
     CHECK(mul_fits > 1000 && mul_overflows > 1000,
           "fuzz reached a fitting product %d time(s), an overflow %d time(s)", mul_fits, mul_overflows);
+    CHECK(mirror_one_pointer > 1000 && mirror_split > 1000,
+          "fuzz reached a swizzled window %d time(s) with one host pointer, %d time(s) without",
+          mirror_one_pointer, mirror_split);
     CHECK(span_mismatch == 0, "span check disagreed with 64-bit reference %d time(s)", span_mismatch);
     CHECK(add_mismatch == 0, "checked add disagreed with reference %d time(s)", add_mismatch);
     CHECK(mul_mismatch == 0, "checked mul disagreed with reference %d time(s)", mul_mismatch);
@@ -621,15 +762,24 @@ static void test_inline_loads_match_full_bodies(void) {
         0x08000000u, 0x08001235u, 0x0bfffffcu, 0x88004000u, 0xa8004010u, 0x48004020u,
         0x04001000u, 0x04201f00u, 0x04403040u, 0x04603040u, 0x44001010u,
     };
+    /* The bytes are stored at the physical arena offsets measured_phys() names (the
+     * PSP-3000 view transforms written out in this file), not through SR_HOST, so the
+     * expected value does not share the translation the loads use. */
+    uint8_t *arena = g_mem - 0x08000000u;
     for (size_t k = 0; k < sizeof addrs / sizeof addrs[0]; k++) {
         const uint32_t a = addrs[k];
-        for (uint32_t i = 0; i < 4u; i++) SR_HOST(a + i)[0] = (uint8_t)(0x31u + 17u * i + k);
+        uint32_t want = 0u;
+        for (uint32_t i = 0; i < 4u; i++) {
+            const uint8_t b = (uint8_t)(0x31u + 17u * i + k);
+            arena[measured_phys(a + i)] = b;
+            want |= (uint32_t)b << (8u * i);
+        }
         CHECK(sr_r8(a) == sr_r8_slow(a), "sr_r8 at 0x%08x matches the full body", a);
         CHECK(sr_r16(a) == sr_r16_slow(a), "sr_r16 at 0x%08x matches the full body", a);
         CHECK(sr_r32(a) == sr_r32_slow(a), "sr_r32 at 0x%08x matches the full body", a);
-        CHECK(sr_r32(a) == ((uint32_t)SR_HOST(a)[0] | (uint32_t)SR_HOST(a + 1u)[0] << 8 |
-                            (uint32_t)SR_HOST(a + 2u)[0] << 16 | (uint32_t)SR_HOST(a + 3u)[0] << 24),
-              "sr_r32 at 0x%08x reads the bytes the view maps", a);
+        CHECK(sr_r8(a) == (want & 0xFFu), "sr_r8 at 0x%08x reads the byte the view maps", a);
+        CHECK(sr_r32(a) == want, "sr_r32 at 0x%08x reads the bytes the view maps (got %08x, want %08x)",
+              a, sr_r32(a), want);
     }
 }
 
@@ -648,6 +798,7 @@ int main(void) {
     }
     g_mem = arena + 0x08000000u;
     test_vram_mirror_bulk_copy();
+    test_vram_mirror_read_prepare();
     test_any_view_span_predicate();
     test_vram_mirror_write_primitives();
     test_inline_loads_match_full_bodies();

@@ -853,6 +853,8 @@ static void test_checkpoint_stream(void) {
     FrameTrace t;
     char detail[128];
 
+    /* No file from an earlier run may stand in for the stream this run writes. */
+    remove(path);
     set_env("SR_REPLAY_CHECKPOINTS", path);
     set_env("SR_REPLAY_CHECKPOINT_EVERY", "2");
     fresh_machine(&s);
@@ -1332,7 +1334,9 @@ static void test_record_replay(void) {
     char want[160], got[160], line[200];
     size_t rec_len = 0;
 
-    /* Record, with a pause requested at frame 11. */
+    /* Record, with a pause requested at frame 11. The file is removed first, so a recording
+     * left by an earlier run cannot stand in for one this child never wrote. */
+    remove(RR_REC);
     rr_env(RR_REC, "");
     rr_opt("pause=11");
     log = rr_run(&st);
@@ -1514,6 +1518,7 @@ static void test_record_replay(void) {
     /* A recording cut by _Exit right after the frame-16 checkpoint has no end line: it replays
      * to that checkpoint, request 2's polls before it are answered from the open line, and
      * the abandon at frame 17 is the live run's. */
+    remove(RR_CUT);
     rr_env(RR_CUT, "");
     rr_opt("hardexit=16");
     log = rr_run(&st);
