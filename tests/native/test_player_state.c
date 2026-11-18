@@ -7381,10 +7381,9 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             assert(!nk_platform_path_missing(record_path));
         }
         /* The same folder by another name (N2): a link named ALIAS to MYHB has MYHB's real
-           path. On Windows the picked path keeps the link's name, so the program's folder on
-           the Memory Stick would be ALIAS: the import stops, naming MYHB. On POSIX the
-           picked path is resolved (realpath), so ALIAS is MYHB by name too and imports as
-           the same folder. */
+           path. The picked path keeps the link's name on every host (on POSIX only the
+           folder's parent is resolved), so the program's folder on the Memory Stick would
+           be ALIAS: the import stops, naming MYHB. */
         {
             char alias_dir[NATIVE_TEST_PATH_MAX + 128];
             char alias_path[NATIVE_TEST_PATH_MAX + 160];
@@ -7392,9 +7391,7 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
             snprintf(alias_path, sizeof(alias_path), "%s%cEBOOT.PBP", alias_dir, sep);
 #ifndef _WIN32
             assert(symlink(folder_path, alias_dir) == 0);
-            assert(player_psn_package_inspect(alias_path, &second, code, sizeof(code), message,
-                                              sizeof(message)));
-            assert(second.homebrew && second.iso_ready);
+            psn_test_refused(alias_path, "HOMEBREW_ALREADY_ADDED", "MYHB");
             assert(unlink(alias_dir) == 0);
 #else
             {
