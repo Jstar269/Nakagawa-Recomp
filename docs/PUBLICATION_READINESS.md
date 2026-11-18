@@ -387,14 +387,17 @@ closed on the first hash that disagrees.
 
 For each changed or new path, use this disposition before invoking the command:
 
+This table is a manual triage vocabulary, not the set of codes the tools print. Use it to decide what to do before invoking the command; each row names the tool's own refusal code.
+
 | Disposition | Meaning |
 | --- | --- |
 | `PASS` | The path is unchanged from the trusted tree; no refresh is needed. |
-| `TRUSTED_REFRESHABLE` | The path already exists in the trusted tree and has either an exact trusted implementation record or an unchanged deterministic class. |
-| `PROVENANCE_RECORD_REQUIRED` | The path is new or implementation-bearing without an exact trusted detailed record; create or confirm that record in the trusted ledger first. |
+| `TRUSTED_REFRESHABLE` | The path already exists in the trusted tree and has either an exact trusted implementation record or an unchanged deterministic class. A tool may still refuse with `TRUSTED_RECORD_REQUIRED`, `TRUSTED_PATH_MISSING` or `TRUSTED_PATH_UNQUALIFIED`. |
+| `PROVENANCE_RECORD_REQUIRED` | The path is new or implementation-bearing without an exact trusted detailed record; create or confirm that record in the trusted ledger first, or the tool prints `TRUSTED_RECORD_REQUIRED` or `TRUSTED_PATH_MISSING`. |
 | `UNRESOLVED` | The trusted class is unresolved, substituted, or disagrees with the detailed record; stop and report the missing fact. |
 
-The command accepts only `TRUSTED_REFRESHABLE` paths. A new implementation
+The command accepts only paths triaged `TRUSTED_REFRESHABLE`; a path it cannot
+refresh fails with `REFRESH_PATH_NOT_REFRESHABLE`. A new implementation
 path is always `PROVENANCE_RECORD_REQUIRED`, even if a candidate adds a public
 ledger entry for it. Candidate-controlled ledger, policy, manifest, and export
 bytes never change these dispositions.
@@ -872,7 +875,7 @@ the pinned authority revision. Only an HTTP 404 falls back to the V3 name and th
 
 The name only selects. The verifier derives the document again from the base profile, the candidate profile, the
 candidate's blobs and the trusted records, with each path's binding taken from the fetched document. It requires
-the fetched bytes to equal the derived document exactly. Beyond the V3 refusals below, that gives two codes:
+the fetched bytes to equal the derived document exactly. Beyond the V3 refusals below, that gives five codes:
 
 | Refusal | What happened |
 | --- | --- |

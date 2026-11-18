@@ -284,7 +284,8 @@ References and diff images are game pixels: the tool refuses an output folder in
   update check, no cheats, no state loading) and the PPSSPP version go into each reference's
   `.json` sidecar.
 - **Verdicts.** `compare` prints one line per scene: `PASS`, `FAIL` (over the tolerance, a size
-  mismatch or an unreadable reference), `NO_REFERENCE` or `NOT_RUN <reason>`. It then prints a
+  mismatch, an unreadable reference, or a stale reference whose sidecar names another frame, RTC,
+  settings or picture), `NO_REFERENCE` or `NOT_RUN <reason>`. It then prints a
   summary. Any `FAIL` exits 1, and `NO_REFERENCE` or `NOT_RUN` exits 3: neither is a pass. Every scene
   that differs gets `<scene>.diff.png` in `<out>/diff`: the capture dimmed to a third, with every
   pixel over the threshold in magenta.

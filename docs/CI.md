@@ -805,10 +805,12 @@ mingw32-make --no-print-directory check
 
 `check` covers documentation and policy checks, the provenance record and
 disposition gap check, both publication-audit legs, the native host-core tests,
-and a fast Python subset. It does not replace `make readiness`: readiness
-additionally verifies the exact candidate against the external detailed ledger
-and therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is unavailable.
-`make provenance-refresh` is the single local command for regenerating the
+and a fast Python subset. Contributors run `mingw32-make contrib-check`
+(AGENTS.md Section 9), which adds the gates the change needs, before opening a
+pull request. `make readiness` is the maintainer's authority-bound aggregate:
+it additionally verifies the exact candidate against the external detailed
+ledger and therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is unavailable,
+which is expected for a fork or an outside contributor. `make provenance-refresh` is the single local command for regenerating the
 tracked public controls. It calls the same `generate_ephemeral_controls()`
 implementation as the hosted provenance attestation, reads the trusted public
 ledger from the exact base commit, and requires the external detailed ledger
@@ -840,8 +842,9 @@ V4 authority named after the change beside the trusted ledger; set
 record together with `PROVENANCE_TRUSTED_CANDIDATE_POLICY`, each naming an
 external reviewed input.
 
-Run the strict aggregate, then the Python modules for the files you changed. Treat any
-failure as blocking. Hosted CI runs the full Python suite; run it locally only when
+Maintainers run the strict aggregate, then the Python modules for the files they changed. Treat any
+failure as blocking. Contributors run `mingw32-make contrib-check`; a `BLOCKED` readiness result is
+expected for them because they have no external detailed ledger. Hosted CI runs the full Python suite; run it locally only when
 hosted CI cannot run for the change ([what hosted CI does not run](#what-hosted-ci-does-not-run)):
 
 ```bash
