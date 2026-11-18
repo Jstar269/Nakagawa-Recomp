@@ -29,6 +29,11 @@ Every judged mutant must fail for the stated reason:
 unmutated cell fails, for choosing bars on a new device; it always exits 1. --cell limits either to
 one cell.
 
+--build-dir is deleted and recreated on every run, so it must be a new or empty folder or one this
+driver made before (it carries .fsr3-mutants-workdir); the checkout, a folder holding it and its
+top-level folders (build/ included) are refused. Missing Vulkan headers make the GPU campaigns SKIP;
+with the headers found, unmutated sources that do not build FAIL.
+
 usage: python tools/fsr3_mutants.py --build-dir build/fsr3-mutants [--cc gcc]
            [--fg | --pass [--calibrate] [--cell F-R] | --fg-pass [--calibrate] [--cell G-M]]
 """
@@ -509,6 +514,71 @@ def build_and_run_pass(cc: str, work: Path, sources: dict[str, Path], tag: str, 
     return "RAN", ran.returncode, ran.stdout + ran.stderr
 
 
+def vulkan_headers_found(cc: str, includes: list[str]) -> bool:
+    """Whether <vulkan/vulkan.h> preprocesses with these include folders, as the Makefile probes it."""
+    probe = subprocess.run([cc, "-E", "-x", "c", *includes, "-"], cwd=ROOT, input="#include <vulkan/vulkan.h>\n",
+                           capture_output=True, text=True, timeout=120)
+    return probe.returncode == 0
+
+
+# The work folder is deleted and recreated on every run, so only a folder this driver made (it carries
+# the marker) or an empty one is used: a mistyped --build-dir must not delete build/ or the checkout.
+WORKDIR_MARKER = ".fsr3-mutants-workdir"
+
+
+def work_dir_refusal(work: Path) -> str | None:
+    """Why ``work`` must not be deleted and recreated, or None when it may be."""
+    work = work.resolve()
+    if work == ROOT or work in ROOT.parents:
+        return f"{work} is the checkout or a folder that holds it"
+    if work == (ROOT / "build").resolve() or (work.is_dir() and work.parent == ROOT):
+        return f"{work} is a top-level folder of the checkout; name a subfolder such as build/fsr3-mutants"
+    if not work.exists():
+        return None
+    if not work.is_dir():
+        return f"{work} is not a folder"
+    if (work / WORKDIR_MARKER).is_file() or not any(work.iterdir()):
+        return None
+    return f"{work} holds files this driver did not write (no {WORKDIR_MARKER}); name a new or empty folder"
+
+
+def prepare_work_dir(work: Path) -> Path:
+    """Delete and recreate the driver's own work folder; refuse any other."""
+    reason = work_dir_refusal(work)
+    if reason is not None:
+        raise ValueError(reason)
+    work = work.resolve()
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    (work / WORKDIR_MARKER).write_text("fsr3_mutants.py work folder, recreated on every run\n", encoding="utf-8")
+    return work
+
+
+def judge_mutant(name: str, status: str, rc: int, out: str, expect: str, measured: str | None = None) -> bool:
+    """Print a judged mutant's verdict; True when it was not killed for the stated reason.
+
+    ``measured`` (the GPU campaigns) is printed under each verdict that ran; without it the
+    WRONG_REASON line names the first failure line instead.
+    """
+    if status == "BUILD":
+        print(f"INVALID {name}: the mutant does not build\n{out}")
+        return True
+    tail = "" if measured is None else f"\n{measured}"
+    if rc == 0:
+        print(f"SURVIVED {name}{tail}")
+        return True
+    if expect not in out:
+        if measured is None:
+            first = next((line for line in out.splitlines() if "FAIL" in line or "AMD:" in line), out[:200])
+            print(f"WRONG_REASON {name}: expected {expect!r}, first failure: {first}")
+        else:
+            print(f"WRONG_REASON {name}: expected {expect!r} (exit {rc}){tail}")
+        return True
+    print(f"KILLED {name}{tail}")
+    return False
+
+
 def measurements(out: str, cell: str) -> str:
     return "\n".join(f"    {line}" for line in out.splitlines()
                      if line.startswith((cell, "FAIL", "validation:", "synchronisation", "SKIP"))
@@ -538,11 +608,16 @@ def main_pass(args: argparse.Namespace, work: Path, suite: str = "pass") -> int:
         print(f"FAIL {label}: no mutant targets the cell {args.cell!r}")
         return 1
     require = os.environ.get("NK_UI_VK_REQUIRE") == "1"
+    # Only missing headers are a SKIP; once they are found, a build failure of the unmutated
+    # sources is a real compile regression and fails the campaign.
+    if not vulkan_headers_found(args.cc, includes):
+        print(f"SKIP {label}: the Vulkan headers were not found")
+        return 1 if require else 0
     for cell in cells:
         status, rc, out = build_and_run_pass(args.cc, work, base, f"base_{cell}", cell, includes, suite)
         if status == "BUILD":
-            print(f"SKIP {label}: {Path(selftest).name} does not build here (no Vulkan headers?)\n{out}")
-            return 1 if require else 0
+            print(f"FAIL {label}: the unmutated {Path(selftest).name} does not build\n{out}")
+            return 1
         if rc == SKIP:
             print(f"SKIP {label}: the unmutated {cell} skips\n{out}")
             return 1 if require else 0
@@ -560,17 +635,7 @@ def main_pass(args: argparse.Namespace, work: Path, suite: str = "pass") -> int:
             continue
         status, rc, out = build_and_run_pass(args.cc, mutated.parent, {**base, path: mutated}, f"m{index:02d}", cell,
                                              includes, suite)
-        if status == "BUILD":
-            print(f"INVALID {name}: the mutant does not build\n{out}")
-            failures += 1
-        elif rc == 0:
-            print(f"SURVIVED {name}\n{measurements(out, cell)}")
-            failures += 1
-        elif expect not in out:
-            print(f"WRONG_REASON {name}: expected {expect!r} (exit {rc})\n{measurements(out, cell)}")
-            failures += 1
-        else:
-            print(f"KILLED {name}\n{measurements(out, cell)}")
+        failures += judge_mutant(name, status, rc, out, expect, measurements(out, cell))
     for index, (name, path, old, new, cell) in recorded:
         mutated, why = mutate(work, index, path, old, new)
         if mutated is None:
@@ -613,18 +678,7 @@ def main_fg(args: argparse.Namespace, work: Path) -> int:
             failures += 1
             continue
         status, rc, out = build_and_run_fg(path, mutated, mutated.parent, f"m{index:02d}")
-        if status == "BUILD":
-            print(f"INVALID {name}: the mutant does not build\n{out}")
-            failures += 1
-        elif rc == 0:
-            print(f"SURVIVED {name}")
-            failures += 1
-        elif expect not in out:
-            first = next((line for line in out.splitlines() if "FAIL" in line or "AMD:" in line), out[:200])
-            print(f"WRONG_REASON {name}: expected {expect!r}, first failure: {first}")
-            failures += 1
-        else:
-            print(f"KILLED {name}")
+        failures += judge_mutant(name, status, rc, out, expect)
     print(f"fsr3-fg-mutants: {len(FG_MUTANTS) - failures} of {len(FG_MUTANTS)} killed for the stated reason")
     return 1 if failures else 0
 
@@ -645,9 +699,11 @@ def main() -> int:
     parser.add_argument("--cell", help="with --pass or --fg-pass: only the mutants of this cell, for example F-R "
                                        "(never the complete result)")
     args = parser.parse_args()
-    work = args.build_dir.resolve()
-    shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True)
+    try:
+        work = prepare_work_dir(args.build_dir)
+    except ValueError as refusal:
+        print(f"FAIL fsr3-mutants: refusing --build-dir: {refusal}")
+        return 2
     if args.gpu:
         return main_pass(args, work)
     if args.fg_gpu:
@@ -669,30 +725,15 @@ def main() -> int:
                   "place, and the defect stays inside it (it runs against a UCRT build)")
             not_run += 1
             continue
-        source = (ROOT / path).read_text(encoding="utf-8")
-        if source.count(old) != 1:
-            print(f"INVALID {name}: the text to change appears {source.count(old)} times in {path}")
+        mutated, why = mutate(work, index, path, old, new)
+        if mutated is None:
+            print(f"INVALID {name}: {why}")
             failures += 1
             continue
-        lane = work / f"m{index:02d}"
-        lane.mkdir()
-        mutated = lane / Path(path).name
-        mutated.write_text(source.replace(old, new), encoding="utf-8", newline="\n")
         host = mutated if path == HOST else ROOT / HOST
         jitter = mutated if path == JITTER else ROOT / JITTER
-        status, rc, out = build_and_run(args.cc, lane, host, jitter, f"m{index:02d}")
-        if status == "BUILD":
-            print(f"INVALID {name}: the mutant does not build\n{out}")
-            failures += 1
-        elif rc == 0:
-            print(f"SURVIVED {name}")
-            failures += 1
-        elif expect not in out:
-            first = next((line for line in out.splitlines() if "FAIL" in line or "AMD:" in line), out[:200])
-            print(f"WRONG_REASON {name}: expected {expect!r}, first failure: {first}")
-            failures += 1
-        else:
-            print(f"KILLED {name}")
+        status, rc, out = build_and_run(args.cc, mutated.parent, host, jitter, f"m{index:02d}")
+        failures += judge_mutant(name, status, rc, out, expect)
     count = len(MUTANTS) - not_run
     scope = f" ({not_run} NOT_RUN on this C library)" if not_run else ""
     print(f"fsr3-mutants: {count - failures} of {count} killed for the stated reason{scope}")
