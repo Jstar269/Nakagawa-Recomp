@@ -78,18 +78,6 @@ typedef enum {
     STATUS_VERIFIED = NK_STATUS_VERIFIED
 } GameSupportStatus;
 
-typedef enum {
-    STAGE_IDLE = 0,
-    STAGE_INSPECTING_ISO,
-    STAGE_EXTRACTING_CONTAINERS,
-    STAGE_DECRYPTING_MODULES,
-    STAGE_VALIDATING_ELFS,
-    STAGE_PREPARING_VFS,
-    STAGE_READY,
-    STAGE_FAILED,
-    STAGE_CANCELLED
-} PlayerPrepStage;
-
 typedef NkGameEntry GameRecord;
 
 /* Requested client-area geometry in SDL screen/window coordinate units. */
@@ -154,18 +142,6 @@ typedef struct {
     uint32_t failure_count;
     uint64_t retry_after_ms;
 } PlayerRuntimePackageWorkerFailure;
-
-typedef struct {
-    PlayerPrepStage stage;
-    char operation[64];
-    char current_item[128];
-    int completed_items;
-    int total_items;
-    float percentage;
-    int elapsed_ms;
-    char status_message[256];
-    bool cancellable;
-} PreparationState;
 
 /* The player and runtime are offline by default (AGENTS.md section 5). Later
  * opt-in modes ("lan", "online") get their own values; a value this build does
@@ -939,7 +915,6 @@ struct PlayerApp {
     int game_count;
     int selected_game_index;
     GameRecord inspecting_game;
-    PreparationState prep_state;
     PlayerSettings settings;
     ErrorState last_error;
     SetupWizardState wizard;
@@ -1059,9 +1034,6 @@ struct PlayerApp {
        and shows the game as starting until the worker hands back. */
     bool launch_pending;
     char launch_pending_disc_id[NK_MAX_DISC_ID_LEN];
-
-    /* Navigation & Focus */
-    int active_tab;   /* for settings: 0=Display, 1=Audio, 2=Controller, 3=Logs */
 
     /* Controller settings and live input monitor (#357) */
     InputSettingsState input_settings;
@@ -1488,7 +1460,7 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
 
 /* Report this game (docs/ONLINE_FEATURES.md "Reports"). These are links the user
    opens in their own browser; the player makes no network call for them. */
-#define PLAYER_REPORT_REPO_URL "https://github.com/Jstar269/nakagawa-recomp"
+#define PLAYER_REPORT_REPO_URL NK_UPDATE_REPOSITORY_URL
 #define PLAYER_REPORT_CATEGORY "compatibility-reports"
 /* The longest report link. Windows hands a link to the browser through the
    shell, whose limit is INTERNET_MAX_URL_LENGTH (2083 characters); GitHub's

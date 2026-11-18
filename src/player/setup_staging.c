@@ -239,19 +239,31 @@ static HANDLE discard_open_wide(const WCHAR *path) {
 
     /* GENERIC_READ supplies FILE_LIST_DIRECTORY for ordinary directories. A
      * reparse point may only grant attribute/delete access, so retry with the
-     * narrower request; the handle is still the object that will be deleted. */
-    HANDLE handle = CreateFileW(path, GENERIC_READ | DELETE, share, NULL,
-                                OPEN_EXISTING, flags, NULL);
-    if (handle != INVALID_HANDLE_VALUE) return handle;
-    return CreateFileW(path, FILE_READ_ATTRIBUTES | DELETE, share, NULL,
-                       OPEN_EXISTING, flags, NULL);
+     * narrower request; the handle is still the object that will be deleted.
+     * FILE_WRITE_ATTRIBUTES lets discard_delete_handle_wide clear a read-only
+     * attribute where the delete cannot ignore it; an object that refuses it
+     * is opened without it. */
+    static const DWORD access[] = {
+        GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES,
+        GENERIC_READ | DELETE,
+        FILE_READ_ATTRIBUTES | DELETE | FILE_WRITE_ATTRIBUTES,
+        FILE_READ_ATTRIBUTES | DELETE,
+    };
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    for (size_t i = 0; i < sizeof(access) / sizeof(access[0]); i++) {
+        handle = CreateFileW(path, access[i], share, NULL, OPEN_EXISTING, flags, NULL);
+        if (handle != INVALID_HANDLE_VALUE) break;
+    }
+    return handle;
 }
 
-/* FileDispositionInfoEx and its flags (Windows 10 1607 and later), spelled
- * out so older SDK headers still build this file. */
+/* FileDispositionInfoEx and its flags (Windows 10 1607 and later; the
+ * read-only flag from 1809), spelled out so older SDK headers still build
+ * this file. */
 #define DISCARD_FILE_DISPOSITION_INFO_EX ((FILE_INFO_BY_HANDLE_CLASS)21)
 #define DISCARD_DISPOSITION_FLAG_DELETE 0x00000001u
 #define DISCARD_DISPOSITION_FLAG_POSIX_SEMANTICS 0x00000002u
+#define DISCARD_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE 0x00000010u
 
 typedef struct {
     DWORD Flags;
@@ -264,15 +276,43 @@ static bool discard_delete_handle_wide(HANDLE handle) {
      * The legacy disposition below leaves such a file delete-pending, and its
      * folder then refuses to go as not empty. File systems and Windows
      * versions without POSIX deletes refuse the request; they keep the
-     * legacy disposition. */
-    DiscardDispositionInfoEx posix_disposition;
-    posix_disposition.Flags = DISCARD_DISPOSITION_FLAG_DELETE |
-                              DISCARD_DISPOSITION_FLAG_POSIX_SEMANTICS;
-    bool deleted = SetFileInformationByHandle(handle, DISCARD_FILE_DISPOSITION_INFO_EX,
-                                              &posix_disposition,
-                                              sizeof(posix_disposition)) != 0;
-    DWORD error = deleted ? ERROR_SUCCESS : GetLastError();
+     * legacy disposition.
+     *
+     * A read-only attribute (set by the user, a backup tool or a sync client)
+     * makes a delete fail with access denied, and every later staging of the
+     * title would then stop on a cleanup that closing programs cannot fix.
+     * The first request ignores the attribute; where that flag is refused,
+     * the attribute is cleared before the legacy disposition, as
+     * nk_platform_remove_tree does. */
+    static const DWORD ex_flags[] = {
+        DISCARD_DISPOSITION_FLAG_DELETE | DISCARD_DISPOSITION_FLAG_POSIX_SEMANTICS |
+            DISCARD_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+        DISCARD_DISPOSITION_FLAG_DELETE | DISCARD_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    bool deleted = false;
+    DWORD error = ERROR_SUCCESS;
+    for (size_t i = 0; i < sizeof(ex_flags) / sizeof(ex_flags[0]); i++) {
+        DiscardDispositionInfoEx posix_disposition;
+        posix_disposition.Flags = ex_flags[i];
+        deleted = SetFileInformationByHandle(handle, DISCARD_FILE_DISPOSITION_INFO_EX,
+                                             &posix_disposition,
+                                             sizeof(posix_disposition)) != 0;
+        error = deleted ? ERROR_SUCCESS : GetLastError();
+        if (deleted || discard_missing_error_wide(error)) break;
+    }
     if (!deleted && !discard_missing_error_wide(error)) {
+        FILE_BASIC_INFO basic;
+        if (GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) &&
+            (basic.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0) {
+            /* Zero times leave the timestamps as they are. */
+            basic.CreationTime.QuadPart = 0;
+            basic.LastAccessTime.QuadPart = 0;
+            basic.LastWriteTime.QuadPart = 0;
+            basic.ChangeTime.QuadPart = 0;
+            basic.FileAttributes &= ~(DWORD)FILE_ATTRIBUTE_READONLY;
+            if (basic.FileAttributes == 0) basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+            (void)SetFileInformationByHandle(handle, FileBasicInfo, &basic, sizeof(basic));
+        }
         FILE_DISPOSITION_INFO disposition;
         disposition.DeleteFile = TRUE;
         deleted = SetFileInformationByHandle(handle, FileDispositionInfo,
@@ -829,18 +869,6 @@ NkResult player_stage_game_with_summary(const char *iso_path,
     return result;
 }
 
-NkResult player_stage_game(const char *iso_path, const char *staging_root,
-                           const char *const *loose_content_roots,
-                           size_t loose_content_root_count,
-                           const PlayerStageCallbacks *callbacks,
-                           char *error_message, size_t error_message_size) {
-    return player_stage_game_with_summary(iso_path, staging_root,
-                                          loose_content_roots,
-                                          loose_content_root_count,
-                                          callbacks, NULL, error_message,
-                                          error_message_size);
-}
-
 /* ------------------------------------------------------------------------- */
 /* Title staging transaction                                                  */
 /* ------------------------------------------------------------------------- */
@@ -958,7 +986,7 @@ static int stage_lock_acquire(const char *games_root, const char *path,
     lock->handle = handle;
 #else
     /* Hold the games-directory flock only while opening or removing the
-     * per-title lock. Without this short guard, unlinking a held fcntl lock
+     * per-title lock. Without this short guard, unlinking a held lock file
      * would let another process lock a new inode at the same pathname. */
     int games_fd = open(games_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (games_fd < 0) return -1;
@@ -972,18 +1000,16 @@ static int stage_lock_acquire(const char *games_root, const char *path,
         close(games_fd);
         return -1;
     }
-    struct flock region;
-    memset(&region, 0, sizeof(region));
-    region.l_type = F_WRLCK;
-    region.l_whence = SEEK_SET;
-    /* fcntl record locks belong to the process: the player runs at most one
-     * staging job at a time, and separate processes exclude each other. */
-    if (fcntl(fd, F_SETLK, &region) != 0) {
+    /* flock, not an fcntl record lock: an fcntl lock belongs to the process,
+     * so a second staging of this title in the same process would take it
+     * again and share the tree. A flock belongs to this open file, so every
+     * other open of the lock file is refused, in this process or another. */
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
         int error = errno;
         close(fd);
         flock(games_fd, LOCK_UN);
         close(games_fd);
-        return (error == EACCES || error == EAGAIN) ? 0 : -1;
+        return (error == EWOULDBLOCK || error == EAGAIN) ? 0 : -1;
     }
     if (flock(games_fd, LOCK_UN) != 0) {
         close(fd);
@@ -1015,8 +1041,12 @@ static void stage_lock_release(PlayerStageLock *lock) {
     lock->held = false;
 }
 
-/* Move a directory to a name that must not exist yet, flushing the rename
- * before returning. */
+/* Move a directory to a name that must not exist yet. The rename is not
+ * flushed to disk before returning: MOVEFILE_WRITE_THROUGH only applies when
+ * a move is done as a copy across volumes, and the POSIX rename has no fsync
+ * of the games folder. A power loss soon after may leave the earlier names;
+ * the next player_stage_title then puts back the tree an interrupted
+ * replacement set aside, or stages the disc again. */
 static bool stage_rename_directory(const char *from, const char *to) {
     if (!from || !to || nk_platform_dir_exists(to) || nk_platform_file_exists(to)) return false;
 #if defined(_WIN32) || defined(_WIN64)

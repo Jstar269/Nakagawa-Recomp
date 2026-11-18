@@ -44,15 +44,8 @@ typedef struct {
  * .xb/.xbN archive. If the user's standard PPSSPP dump locations contain the
  * three known already-decrypted support PRXs, they are copied into
  * `EXTRACTED/decrypted/` as an optional local bridge; no decryption is
- * performed. */
-NkResult player_stage_game(const char *iso_path, const char *staging_root,
-                           const char *const *loose_content_roots,
-                           size_t loose_content_root_count,
-                           const PlayerStageCallbacks *callbacks,
-                           char *error_message, size_t error_message_size);
-
-/* Summary-bearing variant used by the native player. The legacy entry point
- * above remains a wrapper for callers that only need the result. */
+ * performed. `summary` may be NULL. The player reaches this only through
+ * player_stage_title below; the native tests call it directly. */
 NkResult player_stage_game_with_summary(const char *iso_path,
                                         const char *staging_root,
                                         const char *const *loose_content_roots,
@@ -62,9 +55,10 @@ NkResult player_stage_game_with_summary(const char *iso_path,
                                         char *error_message,
                                         size_t error_message_size);
 
-/* Remove a staging tree created by player_stage_game after a failed or
- * cancelled attempt. The function only accepts a basename beginning with
- * `.staging_`, so callers cannot accidentally hand it a general data root. */
+/* Remove a staging tree created by player_stage_game_with_summary after a
+ * failed or cancelled attempt. The function only accepts a basename beginning
+ * with `.staging_`, so callers cannot accidentally hand it a general data
+ * root. */
 bool player_stage_discard(const char *staging_root);
 
 /* One title's staging request. Every route that installs a disc's files (the

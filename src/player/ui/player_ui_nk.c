@@ -650,13 +650,16 @@ uint32_t player_ui_nk_wait_ms(const PlayerUiNk *player, uint32_t idle_ms) {
     /* Rounded up: a frame drawn a millisecond early would find nothing due. */
     wait_s = nk_ui_wait_s(player->ui, now_s, (double)idle_ms / 1000.0);
     /* A rest still under way wakes the loop when it ends. Once it has ended the
-       picture's read is the art worker's, which the idle wake picks up: a disc with
-       no picture must not keep the loop from sleeping. */
+       picture's read is the art worker's: the loop polls about once a frame only
+       while a read runs or waits to start, so a disc with no picture never keeps
+       it from sleeping. */
     if (player->rest_index != SIZE_MAX && player->rest_index != player->backdrop_index) {
         double rest_s = player->rest_since_s + NK_UI_MOTION_ART_REST - now_s;
         if (rest_s > 0.0 && rest_s < wait_s) wait_s = rest_s;
     }
-    return (uint32_t)ceil(wait_s * 1000.0);
+    /* Each read serves one disc and is collected on a frame; without this a
+       library page filled in one card per idle wake (audit 2026-11-17). */
+    return player_ui_art_wait_ms(player->art, (uint32_t)ceil(wait_s * 1000.0));
 }
 
 static void player_ui_format_size(char *out, size_t out_size, uint64_t bytes) {

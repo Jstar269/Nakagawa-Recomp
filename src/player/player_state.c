@@ -180,11 +180,6 @@ void player_app_init(PlayerApp *app) {
     player_app_settings_init_default(&app->settings);
     player_app_load_settings(app, NULL);
 
-    /* Default preparation state */
-    app->prep_state.stage = STAGE_IDLE;
-    app->prep_state.percentage = 0.0f;
-    app->prep_state.cancellable = true;
-
     /* Initialize native library */
     nk_library_init(&app->library);
     NkResult lib_res = nk_library_load(&app->library, NULL);

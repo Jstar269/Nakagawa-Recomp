@@ -35,6 +35,7 @@
 #else
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -886,6 +887,40 @@ static void test_staging_discard_with_a_shared_open_file(void) {
     assert(discarded);
     assert(!root_left);
     printf("[XB_TEST] Staging discard with another program's open file PASSED\n");
+}
+
+/* The user, a backup tool or a sync client may mark a file or folder in a
+ * staging tree read-only. Discarding the tree still removes it, as
+ * nk_platform_remove_tree does; otherwise every later staging of the title
+ * stops on a cleanup that closing programs cannot fix (audit 2026-11-17). */
+static void test_staging_discard_with_read_only_entries(void) {
+    const char *root = SR_SELFTEST_BUILD_ROOT "/.staging_xb_read_only";
+    const char *nested = SR_SELFTEST_BUILD_ROOT "/.staging_xb_read_only/nested";
+    const char *file_path = SR_SELFTEST_BUILD_ROOT "/.staging_xb_read_only/nested/locked.bin";
+    (void)player_stage_discard(root);
+    assert(nk_platform_mkdir_p(nested));
+    static const uint8_t data[] = "read-only member";
+    write_file_bytes(file_path, data, sizeof(data) - 1);
+#if defined(_WIN32) || defined(_WIN64)
+    assert(SetFileAttributesA(file_path, FILE_ATTRIBUTE_READONLY));
+    assert(SetFileAttributesA(nested, FILE_ATTRIBUTE_READONLY));
+#else
+    assert(chmod(file_path, 0444) == 0);
+#endif
+    bool discarded = player_stage_discard(root);
+    bool root_left = nk_platform_dir_exists(root);
+    if (!discarded || root_left) {
+        fprintf(stderr, "[XB_TEST] discard with read-only entries: discarded=%d left=%d\n",
+                (int)discarded, (int)root_left);
+#if defined(_WIN32) || defined(_WIN64)
+        (void)SetFileAttributesA(file_path, FILE_ATTRIBUTE_NORMAL);
+        (void)SetFileAttributesA(nested, FILE_ATTRIBUTE_NORMAL);
+#endif
+        (void)player_stage_discard(root);
+    }
+    assert(discarded);
+    assert(!root_left);
+    printf("[XB_TEST] Staging discard with read-only entries PASSED\n");
 }
 
 static void test_staging_discard_reparse_boundary(void) {
@@ -1809,8 +1844,8 @@ static void capture_title_stage_progress(const char *current_path, int percent,
 }
 
 #if !defined(_WIN32) && !defined(_WIN64)
-/* fcntl record locks never conflict inside one process, so a second process
- * holds the title's lock for the busy case. */
+/* A second process holds the title's lock for the busy case; the nested
+ * staging below covers a second staging inside this process. */
 static pid_t hold_lock_in_child(const char *lock_path, int *release_fd) {
     int ready[2];
     int release[2];
@@ -1821,11 +1856,7 @@ static pid_t hold_lock_in_child(const char *lock_path, int *release_fd) {
         close(ready[0]);
         close(release[1]);
         int fd = open(lock_path, O_RDWR | O_CREAT, 0600);
-        struct flock region;
-        memset(&region, 0, sizeof(region));
-        region.l_type = F_WRLCK;
-        region.l_whence = SEEK_SET;
-        char status = (fd >= 0 && fcntl(fd, F_SETLK, &region) == 0) ? 'L' : 'F';
+        char status = (fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0) ? 'L' : 'F';
         if (write(ready[1], &status, 1) != 1) _exit(2);
         char ignored;
         ssize_t got = read(release[0], &ignored, 1);
@@ -1841,6 +1872,31 @@ static pid_t hold_lock_in_child(const char *lock_path, int *release_fd) {
     return child;
 }
 #endif
+
+/* A staging of the same title started while one is running in this process
+ * (from its progress callback, so the lock is held) must be refused as busy,
+ * not allowed to share and discard the running staging's tree. */
+typedef struct {
+    const PlayerStageTitleRequest *request;
+    bool ran;
+    NkResult result;
+    char message[1024];
+} NestedTitleStage;
+
+static void nested_title_stage_progress(const char *current_path, int percent,
+                                        size_t files_extracted, size_t total_files,
+                                        void *userdata) {
+    (void)current_path; (void)percent; (void)files_extracted; (void)total_files;
+    NestedTitleStage *nested = (NestedTitleStage *)userdata;
+    if (nested->ran) return;
+    nested->ran = true;
+    PlayerStageSummary summary;
+    PlayerStageTitleOutcome outcome;
+    char prepared_root[NK_MAX_PATH];
+    nested->result = run_title_stage(nested->request, NULL, &summary, &outcome,
+                                     prepared_root, sizeof(prepared_root),
+                                     nested->message, sizeof(nested->message));
+}
 
 static void test_title_staging_transaction(void) {
     native_test_create_root("xb-title-stage");
@@ -2023,6 +2079,34 @@ static void test_title_staging_transaction(void) {
                            sizeof(prepared_root), message, sizeof(message)) == NK_OK);
     assert(outcome == PLAYER_STAGE_TITLE_REUSED);
     assert(!nk_platform_dir_exists(paths.staging_root));
+
+    /* 5b. A second staging of the same title inside this process, while the
+     * first holds the lock, is refused the same way (audit 2026-11-17). */
+    {
+        PlayerStageTitleRequest nested_request = request;
+        nested_request.disc_id = "TEST90005";
+        TitleStagePaths nested_paths;
+        title_stage_paths(user_data_root, nested_request.disc_id, &nested_paths);
+        NestedTitleStage nested;
+        memset(&nested, 0, sizeof(nested));
+        nested.request = &nested_request;
+        PlayerStageCallbacks nesting = { NULL, nested_title_stage_progress, &nested };
+        NkResult outer = run_title_stage(&nested_request, &nesting, &summary, &outcome,
+                                         prepared_root, sizeof(prepared_root),
+                                         message, sizeof(message));
+        if (!nested.ran || nested.result != NK_ERROR_ALREADY_EXISTS ||
+            strstr(nested.message, "[STAGE_BUSY]") == NULL) {
+            fprintf(stderr, "[XB_TEST] nested staging of a running title: ran=%d result=%d %s\n",
+                    (int)nested.ran, (int)nested.result, nested.message);
+        }
+        assert(nested.ran);
+        assert(nested.result == NK_ERROR_ALREADY_EXISTS);
+        assert(strstr(nested.message, "[STAGE_BUSY]") != NULL);
+        assert(outer == NK_OK);
+        assert(outcome == PLAYER_STAGE_TITLE_STAGED);
+        assert(nk_platform_dir_exists(nested_paths.final_root));
+        assert(!nk_platform_dir_exists(nested_paths.staging_root));
+    }
 
     /* 6. A disc without the title's data folder is refused before anything
      * is promoted. */
@@ -2350,6 +2434,7 @@ int main(void) {
     test_archive_vfs_keeps_one_open_handle();
     test_staging_cleanup_boundary();
     test_staging_discard_with_a_shared_open_file();
+    test_staging_discard_with_read_only_entries();
     test_staging_discard_reparse_boundary();
     test_iso_to_native_staging_pipeline();
     test_staging_unpacks_every_xb_variant();
