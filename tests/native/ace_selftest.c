@@ -1491,6 +1491,18 @@ static void cell_stick_curve(void) {
                     if (hx == 0) CHECK(lx == 128u, "an axis at rest keeps its byte");
                 }
             }
+            /* The sweep's odd steps never rest an axis: a push along one axis alone leaves the
+             * other's byte at 128, on either axis. */
+            for (int h = -127; h <= 127; h++) {
+                if (h == 0) continue;
+                uint8_t lx = (uint8_t)(128 + h), ly = 128u;
+                ace_stick_remap(&lx, &ly, g, d);
+                CHECK(ly == 128u, "D=%d %d,0: the resting Y axis's byte became %u", d, h, ly);
+                lx = 128u;
+                ly = (uint8_t)(128 + h);
+                ace_stick_remap(&lx, &ly, g, d);
+                CHECK(lx == 128u, "D=%d 0,%d: the resting X axis's byte became %u", d, h, lx);
+            }
         }
     }
     /* The negative side: byte 0 is -127 (unchanged), and a push of -(D+1) is the game's -64. */
@@ -1592,6 +1604,9 @@ static void cell_stick_round_host(void) {
                       hx, hy, x, y);
                 CHECK(mx >= prev, "D=%d %d deg: the game's magnitude falls at r=%d (%d after %d)", d, deg, r,
                       mx, prev);
+                /* The 0, 90, 180 and 270 degree rays rest one axis: its byte stays 128. */
+                if (hx == 0) CHECK(lx == 128u, "D=%d %d deg r=%d: the resting X byte became %u", d, deg, r, lx);
+                if (hy == 0) CHECK(ly == 128u, "D=%d %d deg r=%d: the resting Y byte became %u", d, deg, r, ly);
                 prev = mx;
             }
         }
@@ -2106,6 +2121,18 @@ static void cell_readout_gpu_limited(void) {
  * MUTANT: ace_note_gpu_wait adds nothing -- the slow second reads PC LIMITED and the report 0.
  * MUTANT: the window keeps its GPU waits after it is judged -- the on-time second after it,
  *   with no waits of its own, still carries 300 ms and the counter grows on. */
+/* The number the report gives `key` ("key": N), or -1 when the key is not there. */
+static long long report_count(const char *json, const char *key) {
+    char want[64];
+    snprintf(want, sizeof(want), "\"%s\": ", key);
+    const char *at = strstr(json, want);
+    if (!at || at[strlen(want)] < '0' || at[strlen(want)] > '9') return -1;
+    at += strlen(want);
+    long long n = 0;
+    while (*at >= '0' && *at <= '9' && n < 1000000000ll) n = n * 10 + (*at++ - '0');
+    return n;
+}
+
 static void cell_readout_gpu_feed(void) {
     AceReadoutView v;
     AceCounters c;
@@ -2136,8 +2163,8 @@ static void cell_readout_gpu_feed(void) {
     ace_counters(&c);
     CHECK(c.gpu_wait_ns >= 20000000ull * 20u, "the counter holds the waits: %llu",
           (unsigned long long)c.gpu_wait_ns);
-    CHECK(ace_report_json(json, sizeof(json)) > 0 && strstr(json, "\"gpu_limited_seconds\": 0,") == NULL &&
-              strstr(json, "\"pc_limited_seconds\": 0\n") == NULL,
+    CHECK(ace_report_json(json, sizeof(json)) > 0 && report_count(json, "gpu_limited_seconds") > 0 &&
+              report_count(json, "pc_limited_seconds") > 0,
           "the report counts the GPU LIMITED second in both:\n%s", json);
     for (uint32_t end = vc + 150; vc < end; vc++) {    /* back on time, no waits */
         if (vc % 2 == 0) ace_note_target_draw(0x0u);
@@ -2448,9 +2475,18 @@ static void cell_report_worst(void) {
     char reason[ACE_UNAVAILABLE_REASON_CAP + 1u];
     memset(reason, 'r', sizeof(reason));
     reason[sizeof(reason) - 1] = '\0';
-    CHECK(ace_init_spec("v1;tier=ace;af=16;text=on;readout=on;notice=on;wide=fill;smooth=x2;sas=sinc;"
-                        "tess=off;twin=off;mips=on;stick=126;load=fast;depth=32;ssaa=4;peak=limit;glyphs=on;pad=late;cull=on",
-                        NULL), "the longest line was refused");
+    /* Every part on (ace_every_part_line), so a key added later brings its report block here
+     * too, with stick at its widest count. */
+    char line[2u * ACE_SPEC_MAX], rest[2u * ACE_SPEC_MAX];
+    CHECK(ace_every_part_line(line, sizeof(line)) > 0u, "every part on is not a line this build takes");
+    char *stick = strstr(line, ";stick=");
+    if (stick) {
+        const char *after = strchr(stick + 1, ';');
+        snprintf(rest, sizeof(rest), "%s", after ? after : "");
+        snprintf(stick, sizeof(line) - (size_t)(stick - line), ";stick=%d%s", ACE_STICK_COUNTS_MAX, rest);
+    }
+    CHECK(stick != NULL && ace_init_spec(line, NULL), "every part on with stick=%d was refused: %s",
+          ACE_STICK_COUNTS_MAX, line);
     ace_set_peak_stats(UINT64_MAX, UINT64_MAX, UINT64_MAX, 1e-9);
     ace_set_af_effective(8, NULL);
     ace_set_ssaa_effective(2, reason);   /* "ssaa" and "ssaa_requested" with their reason */
@@ -2484,7 +2520,9 @@ static void cell_report_worst(void) {
               strstr(json, "\"added_delay_ms\"") && strstr(json, "\"smooth_motion\"") &&
               strstr(json, "\"smooth_aux\"") && strstr(json, "\"present_interval_ms\"") &&
               strstr(json, "\"samples_remapped\"") && strstr(json, "\"load_paced\"") &&
-              strstr(json, "\"frames_limited\""),
+              strstr(json, "\"frames_limited\"") && strstr(json, "\"texpack\": ") &&
+              strstr(json, "\"shadow\": ") && strstr(json, "\"shadow_declared\": ") &&
+              strstr(json, "\"texscale\": ") && strstr(json, "\"smart2d\": "),
           "a report with every block:\n%s", json);
     if (!len) return;
     size_t worst = len;

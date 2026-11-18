@@ -65,6 +65,9 @@ typedef struct RealConfigProbe {
     bool disc_profile_existed_before;
     int64_t disc_profile_size;
     uint64_t disc_profile_mtime;
+    /* Every file and folder under the settings folder, by relative name and content. */
+    uint64_t tree_sum;
+    uint64_t tree_entries;
 } RealConfigProbe;
 
 /* The real settings folders: on Linux and macOS both layouts' (#324, nk_data_migrate.h), the one in
@@ -165,9 +168,24 @@ static bool remove_test_tree_wide(const WCHAR *dir) {
             if (is_directory && !is_link) {
                 if (!remove_test_tree_wide(child)) success = false;
             } else if (is_directory) {
-                if (!RemoveDirectoryW(child)) success = false;
+                if (!RemoveDirectoryW(child)) {
+                    fprintf(stderr, "NATIVE_TEST_ERROR: could not remove link '%ls' (error %lu)\n",
+                            child, (unsigned long)GetLastError());
+                    success = false;
+                }
             } else {
-                if (!DeleteFileW(child)) success = false;
+                BOOL deleted = DeleteFileW(child);
+                /* DeleteFileW refuses a read-only file; clear the attribute and try once more. */
+                if (!deleted && GetLastError() == ERROR_ACCESS_DENIED &&
+                    (found.dwFileAttributes & FILE_ATTRIBUTE_READONLY) != 0 &&
+                    SetFileAttributesW(child, FILE_ATTRIBUTE_NORMAL)) {
+                    deleted = DeleteFileW(child);
+                }
+                if (!deleted) {
+                    fprintf(stderr, "NATIVE_TEST_ERROR: could not remove file '%ls' (error %lu)\n",
+                            child, (unsigned long)GetLastError());
+                    success = false;
+                }
             }
         } while (FindNextFileW(handle, &found));
         FindClose(handle);
@@ -175,6 +193,8 @@ static bool remove_test_tree_wide(const WCHAR *dir) {
     if (!RemoveDirectoryW(dir)) {
         DWORD err = GetLastError();
         if (err != ERROR_FILE_NOT_FOUND && err != ERROR_PATH_NOT_FOUND) {
+            fprintf(stderr, "NATIVE_TEST_ERROR: could not remove directory '%ls' (error %lu)\n",
+                    dir, (unsigned long)err);
             success = false;
         }
     }
@@ -256,7 +276,9 @@ static void cleanup_test_root(void) {
         SetCurrentDirectoryW(temp);
     }
 #endif
-    (void)native_test_remove_tree(g_test_root);
+    if (!native_test_remove_tree(g_test_root)) {
+        fprintf(stderr, "NATIVE_TEST_WARNING: could not remove the temporary root '%s'\n", g_test_root);
+    }
 }
 
 static bool native_temp_directory(char *out, size_t max_len) {
@@ -410,6 +432,114 @@ static bool count_files_callback(const char *name, void *ctx) {
     return true;
 }
 
+/* A fingerprint of a whole folder tree: the sum of one FNV-1a 64 hash per entry, over its name
+ * relative to the folder and, for a file, its bytes. A sum does not depend on listing order. Links
+ * and reparse points are hashed by name and never followed; a file that cannot be read is hashed by
+ * name and a marker, the same way each time. */
+#define TREE_FNV_OFFSET 0xcbf29ce484222325ull
+#define TREE_FNV_PRIME 0x100000001b3ull
+
+typedef struct TreeFingerprint {
+    uint64_t sum;
+    uint64_t entries;
+} TreeFingerprint;
+
+static uint64_t tree_fnv1a(uint64_t hash, const void *data, size_t length) {
+    const unsigned char *bytes = (const unsigned char *)data;
+    for (size_t i = 0; i < length; ++i) {
+        hash ^= bytes[i];
+        hash *= TREE_FNV_PRIME;
+    }
+    return hash;
+}
+
+static void tree_add_entry(TreeFingerprint *fp, const char *full, const char *relative, char kind) {
+    uint64_t hash = tree_fnv1a(TREE_FNV_OFFSET, &kind, 1);
+    hash = tree_fnv1a(hash, relative, strlen(relative) + 1);
+    if (kind == 'f') {
+        FILE *file = full ? nk_fopen_utf8(full, "rb") : NULL;
+        if (!file) {
+            hash = tree_fnv1a(hash, "?", 1);
+        } else {
+            unsigned char buffer[4096];
+            size_t got;
+            while ((got = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+                hash = tree_fnv1a(hash, buffer, got);
+            }
+            if (ferror(file)) hash = tree_fnv1a(hash, "!", 1);
+            fclose(file);
+        }
+    }
+    fp->sum += hash;
+    fp->entries++;
+}
+
+static bool tree_join(char *out, size_t cap, const char *a, char sep, const char *b) {
+    int written = a[0] ? snprintf(out, cap, "%s%c%s", a, sep, b) : snprintf(out, cap, "%s", b);
+    return written > 0 && (size_t)written < cap;
+}
+
+static void tree_fingerprint_walk(TreeFingerprint *fp, const char *dir, const char *relative) {
+    char full[NATIVE_TEST_PATH_MAX];
+    char rel[NATIVE_TEST_PATH_MAX];
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR pattern[NATIVE_TEST_PATH_MAX];
+    char pattern_utf8[NATIVE_TEST_PATH_MAX];
+    if (!tree_join(pattern_utf8, sizeof(pattern_utf8), dir, '\\', "*") ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern_utf8, -1, pattern,
+                            (int)(sizeof(pattern) / sizeof(pattern[0]))) <= 0) {
+        tree_add_entry(fp, NULL, relative, 'x');
+        return;
+    }
+    WIN32_FIND_DATAW found;
+    HANDLE handle = FindFirstFileW(pattern, &found);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    do {
+        if (wcscmp(found.cFileName, L".") == 0 || wcscmp(found.cFileName, L"..") == 0) continue;
+        char name[NATIVE_TEST_PATH_MAX];
+        if (WideCharToMultiByte(CP_UTF8, 0, found.cFileName, -1, name, (int)sizeof(name), NULL, NULL) <= 0 ||
+            !tree_join(full, sizeof(full), dir, '\\', name) ||
+            !tree_join(rel, sizeof(rel), relative, '/', name)) {
+            tree_add_entry(fp, NULL, relative, 'x');
+            continue;
+        }
+        bool is_link = (found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        bool is_directory = (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (is_link) {
+            tree_add_entry(fp, NULL, rel, 'l');
+        } else if (is_directory) {
+            tree_add_entry(fp, NULL, rel, 'd');
+            tree_fingerprint_walk(fp, full, rel);
+        } else {
+            tree_add_entry(fp, full, rel, 'f');
+        }
+    } while (FindNextFileW(handle, &found));
+    FindClose(handle);
+#else
+    DIR *handle = opendir(dir);
+    if (!handle) return;
+    struct dirent *entry;
+    while ((entry = readdir(handle)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        struct stat st;
+        if (!tree_join(full, sizeof(full), dir, '/', entry->d_name) ||
+            !tree_join(rel, sizeof(rel), relative, '/', entry->d_name) || lstat(full, &st) != 0) {
+            tree_add_entry(fp, NULL, relative, 'x');
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            tree_add_entry(fp, NULL, rel, 'd');
+            tree_fingerprint_walk(fp, full, rel);
+        } else if (S_ISREG(st.st_mode)) {
+            tree_add_entry(fp, full, rel, 'f');
+        } else {
+            tree_add_entry(fp, NULL, rel, 'l');
+        }
+    }
+    closedir(handle);
+#endif
+}
+
 static void add_real_config_probe(const char *path) {
     if (!path || !path[0] || g_real_config_count >= REAL_CONFIG_PROBES) return;
     for (size_t i = 0; i < g_real_config_count; ++i) {
@@ -439,6 +569,10 @@ static void snapshot_real_config_probe(RealConfigProbe *real) {
     if (real->disc_profile_existed_before) {
         assert(get_file_metadata(probe, &real->disc_profile_size, &real->disc_profile_mtime));
     }
+    TreeFingerprint tree = {0, 0};
+    tree_fingerprint_walk(&tree, real->path, "");
+    real->tree_sum = tree.sum;
+    real->tree_entries = tree.entries;
 }
 
 void native_test_capture_real_config_probe(void) {
@@ -447,15 +581,10 @@ void native_test_capture_real_config_probe(void) {
     g_real_config_count = 0;
     memset(g_real_config, 0, sizeof(g_real_config));
 #if defined(_WIN32) || defined(_WIN64)
-    char sep = nk_platform_path_separator();
+    /* The production resolver names the folder, without creating it: LOCALAPPDATA read as UTF-8
+       through the wide API, then the Known Folder, then APPDATA. */
     char path[NATIVE_TEST_PATH_MAX];
-    const char *env_lad = getenv("LOCALAPPDATA");
-    const char *env_ad = getenv("APPDATA");
-    const char *base = (env_lad && env_lad[0]) ? env_lad : ((env_ad && env_ad[0]) ? env_ad : NULL);
-    if (base) {
-        snprintf(path, sizeof(path), "%s%cNakagawa%cconfig", base, sep, sep);
-        add_real_config_probe(path);
-    }
+    if (nk_platform_resolve_path(NK_PATH_CONFIG, path, sizeof(path))) add_real_config_probe(path);
 #elif defined(__ANDROID__)
     char path[NATIVE_TEST_PATH_MAX];
     const char *env_android = getenv("NK_ANDROID_DATA_DIR");
@@ -530,6 +659,16 @@ static bool real_config_probe_unchanged(const RealConfigProbe *real, char *probl
     /* The settings folder itself must not be created if absent. */
     if (!real->existed_before && nk_platform_dir_exists(real->path)) {
         snprintf(problem, problem_size, "'%s' was created", real->path);
+        return false;
+    }
+
+    /* No file or folder under it may be added, removed, renamed or rewritten, whatever its size
+     * and timestamp. */
+    TreeFingerprint tree = {0, 0};
+    tree_fingerprint_walk(&tree, real->path, "");
+    if (tree.sum != real->tree_sum || tree.entries != real->tree_entries) {
+        snprintf(problem, problem_size, "a file or folder under '%s' was added, removed or rewritten",
+                 real->path);
         return false;
     }
     return true;

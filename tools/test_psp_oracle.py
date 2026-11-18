@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
+import ast
 import hashlib
 import io
 import json
@@ -2735,7 +2736,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
         )
         # Sequential probe.c and HLE cases use distinct numbered ranges. The count and
         # the id set are exact: a probe PR bumps both, and an accidental removal fails here.
-        self.assertEqual(len(routes), 165)
+        self.assertEqual(len(routes), 168)
         names = [name for name, _ in routes]
         ids = [int(case_id) for _, case_id in routes]
         self.assertEqual(len(names), len(set(names)))
@@ -2744,7 +2745,7 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                          | {110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126,
                             127}
                          | {128, 129, 130, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141}
-                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188},
+                         | {150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191},
                          set(ids))
         self.assertNotIn("psp_b1_imports.S", self.makefile)
         self.assertNotIn("psp_b2_imports.S", self.makefile)
@@ -5562,20 +5563,63 @@ def _c_walk(name, env, functions, defines, arrays, emit, active=()):
             _c_walk(callee, inner, functions, defines, arrays, emit, active + (name,))
 
 
-_SHARED_FAMILY_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS"}
+_SHARED_FAMILY_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS",
+                           "HLE_CASE_UTILITY_ATTENDED_NETCONF": "HLE_CASE_UTILITY_DIALOGS",
+                           "HLE_CASE_UTILITY_ATTENDED_SHARING": "HLE_CASE_UTILITY_DIALOGS",
+                           "HLE_CASE_UTILITY_ATTENDED_GAMEDATA": "HLE_CASE_UTILITY_DIALOGS"}
+
+
+def _bool_expr(node: ast.expr) -> bool | None:
+    """The value of a parsed expression of True, False, not, and, or; None for anything else."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        value = _bool_expr(node.operand)
+        return None if value is None else not value
+    if isinstance(node, ast.BoolOp):
+        values = [_bool_expr(item) for item in node.values]
+        if any(value is None for value in values):
+            return None
+        return all(values) if isinstance(node.op, ast.And) else any(values)
+    return None
 
 
 def _select_case_blocks(section: str, macro: str) -> str:
     """Resolve the `#if PSP_ORACLE_CASE == X` / `#else` / `#endif` blocks inside a section that
-    two cases compile (161 and 166 share one): keep the lines `macro` builds, drop the rest.
+    several cases compile (161, 166 and 189-191 share one): keep the lines `macro` builds, drop
+    the rest.
+    A guard is resolved when it is built only from `PSP_ORACLE_CASE == X`, `!=`, `!`, `||`, `&&`,
+    parentheses and section macros defined the same way (HLE_UD_WITH_NETCONF and its kind); any
+    other #if keeps both of its branches.
     The section's own header and closing #endif are outside any block and kept as they are."""
+    guards = dict(re.findall(r"^#define (HLE_UD_[A-Z_]+) \((.*)\)$", section, re.MULTILINE))
+
+    def resolve(expr: str, depth: int = 0) -> bool | None:
+        if depth > 4:
+            return None
+        expr = re.sub(r"PSP_ORACLE_CASE (==|!=) (\w+)",
+                      lambda m: str((m.group(2) == macro) == (m.group(1) == "==")), expr)
+        for name, body in guards.items():
+            if re.search(rf"\b{name}\b", expr):
+                value = resolve(body, depth + 1)
+                if value is None:
+                    return None
+                expr = re.sub(rf"\b{name}\b", str(value), expr)
+        expr = expr.replace("||", " or ").replace("&&", " and ").replace("!", " not ")
+        try:
+            tree = ast.parse(expr.strip(), mode="eval").body
+        except SyntaxError:
+            return None
+        return _bool_expr(tree)
+
     out: list[str] = []
     stack: list[tuple[bool, bool]] = []  # (is a case block, lines kept)
     for index, line in enumerate(section.split("\n")):
         text = line.strip()
-        case = re.fullmatch(r"#if PSP_ORACLE_CASE == (\w+)", text)
-        if index > 0 and case:
-            stack.append((True, case.group(1) == macro))
+        case = re.fullmatch(r"#if (.+)", text)
+        resolved = resolve(case.group(1)) if case else None
+        if index > 0 and resolved is not None:
+            stack.append((True, resolved))
         elif index > 0 and text.startswith("#if"):
             stack.append((False, True))
         elif text == "#else" and stack and stack[-1][0]:
@@ -5722,6 +5766,16 @@ class HleMeasureProbeTests(unittest.TestCase):
         ("hle-utility-netconf-sharing", 166, "hle_utility_netconf_sharing",
          "hle_utility_imports.S", "HLE_CASE_UTILITY_NETCONF_SHARING",
          "PSP-HLE-UTILITY-DIALOG-002"),
+        # #1386's attended runs, one dialog type each, dismissed by a person at the console.
+        ("hle-utility-attended-netconf", 189, "hle_utility_attended_netconf",
+         "hle_utility_imports.S", "HLE_CASE_UTILITY_ATTENDED_NETCONF",
+         "PSP-HLE-UTILITY-DIALOG-003"),
+        ("hle-utility-attended-sharing", 190, "hle_utility_attended_sharing",
+         "hle_utility_imports.S", "HLE_CASE_UTILITY_ATTENDED_SHARING",
+         "PSP-HLE-UTILITY-DIALOG-004"),
+        ("hle-utility-attended-gamedata", 191, "hle_utility_attended_gamedata",
+         "hle_utility_imports.S", "HLE_CASE_UTILITY_ATTENDED_GAMEDATA",
+         "PSP-HLE-UTILITY-DIALOG-005"),
         ("hle-io-seek", 162, "hle_io_seek", None,
          "HLE_CASE_IO_SEEK", "PSP-HLE-IO-SEEK-001"),
         # #1380's cells hle-io-seek left open: flash0: SEEK_CUR and past-2^32 seeks, ms0: flags.
@@ -5843,6 +5897,30 @@ class HleMeasureProbeTests(unittest.TestCase):
             "nkUtilGameSharingShutdownStart": 0xEFC6F80F,
             "sceUtilityLoadNetModule": 0x1579A159,
             "sceUtilityUnloadNetModule": 0x64D50C56,
+        },
+        # The attended cases: one dialog type's four calls each, no message dialog call; the net
+        # module pair for the two radio dialogs.
+        ("hle_utility_imports.S", 189): {
+            "nkUtilNetconfInitStart": 0x4DB1E739,
+            "nkUtilNetconfGetStatus": 0x6332AA39,
+            "nkUtilNetconfUpdate": 0x91E70E35,
+            "nkUtilNetconfShutdownStart": 0xF88155F6,
+            "sceUtilityLoadNetModule": 0x1579A159,
+            "sceUtilityUnloadNetModule": 0x64D50C56,
+        },
+        ("hle_utility_imports.S", 190): {
+            "nkUtilGameSharingInitStart": 0xC492F751,
+            "nkUtilGameSharingGetStatus": 0x946963F3,
+            "nkUtilGameSharingUpdate": 0x7853182D,
+            "nkUtilGameSharingShutdownStart": 0xEFC6F80F,
+            "sceUtilityLoadNetModule": 0x1579A159,
+            "sceUtilityUnloadNetModule": 0x64D50C56,
+        },
+        ("hle_utility_imports.S", 191): {
+            "nkUtilGamedataInstallInitStart": 0x24AC31EB,
+            "nkUtilGamedataInstallGetStatus": 0xB57E95D9,
+            "nkUtilGamedataInstallUpdate": 0x4AECD179,
+            "nkUtilGamedataInstallShutdownStart": 0x32E32DCB,
         },
     }
     # Calls supplied by the SDK's default IO/audio libraries, not by the hand-written
@@ -5985,8 +6063,9 @@ class HleMeasureProbeTests(unittest.TestCase):
                       self._imports(self._block_text(block, case_id))}
         return names
 
-    # Case 166 compiles case 161's section; the cells only 161 builds sit in `#if 161` blocks.
-    SHARED_SECTIONS = {"HLE_CASE_UTILITY_NETCONF_SHARING": "HLE_CASE_UTILITY_DIALOGS"}
+    # Cases 166 and 189-191 compile case 161's section; the cells only one case builds sit in
+    # `#if PSP_ORACLE_CASE == <case>` blocks.
+    SHARED_SECTIONS = _SHARED_FAMILY_SECTIONS
 
     @classmethod
     def _family_span(cls, text: str, macro: str) -> tuple[int, int]:
@@ -6091,7 +6170,7 @@ class HleMeasureProbeTests(unittest.TestCase):
         hle-sysparam can import no savedata call."""
         block = "hle_utility_imports.S"
         self.assertEqual(re.findall(r"^#if PSP_ORACLE_CASE == (\d+)$", self._block_text(block),
-                                    re.MULTILINE), ["104", "180", "140", "161", "166"])
+                                    re.MULTILINE), ["104", "180", "140", "161", "166", "189", "190", "191"])
         self.assertIn("#define HLE_CASE_SAVEDATA_GETSIZE 104\n", self.probe)
         self.assertIn("else ifeq ($(CASE),hle-savedata-getsize)\nCASE_ID = 104\n", self.makefile)
         users = [(case, case_id) for case, case_id, _stem, linked, _macro, _test
@@ -6100,6 +6179,9 @@ class HleMeasureProbeTests(unittest.TestCase):
                                  ("hle-utility-none", 140), ("hle-savedata-nodata", 180),
                                  ("hle-utility-dialogs", 161),
                                  ("hle-utility-netconf-sharing", 166),
+                                 ("hle-utility-attended-netconf", 189),
+                                 ("hle-utility-attended-sharing", 190),
+                                 ("hle-utility-attended-gamedata", 191),
                                  ("hle-nickname-limit", 164), ("hle-io-trunc", 105)])
         for case, case_id in users:
             with self.subTest(case=case):
@@ -14240,7 +14322,10 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
         run = run[run.index("static int hle_run"):run.index("\n}\n")]
         self.assertEqual(re.findall(r"\b(hle_ud_\w+)\(", run), ["hle_ud_sharing", "hle_ud_netconf"])
         self.assertNotIn("gamedata", run)
-        # Every gamedata and savedata definition sits under the case-161-only guard.
+        # Every gamedata and savedata definition sits under a guard that leaves case 166 out: the
+        # case-161-only guard, or HLE_UD_WITH_GAMEDATA (cases 161 and 191 only).
+        self.assertIn("#define HLE_UD_WITH_GAMEDATA (PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || "
+                      "PSP_ORACLE_CASE == HLE_CASE_UTILITY_ATTENDED_GAMEDATA)\n", self.probe)
         for marker in ("static const HleUdType k_ud_gamedata = {",
                        "static uint32_t hle_ud_gamedata_precheck(void)",
                        "static void hle_ud_gamedata(void)",
@@ -14250,7 +14335,8 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
                 before = self.probe[:self.probe.index(marker)]
                 opened = before.rindex("#if ")
                 self.assertTrue(before[opened:].startswith(
-                    "#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS\n"), marker)
+                    ("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS\n",
+                     "#if HLE_UD_WITH_GAMEDATA\n")), marker)
                 self.assertNotIn("#endif", before[opened:])
 
     def test_import_set_has_no_gamedata_savedata_or_umd_call(self) -> None:
@@ -14428,6 +14514,218 @@ class HleUtilityNetconfSharingProbeTests(unittest.TestCase):
         self.assertIn("[PSP-HLE-UTILITY-DIALOG-002 capture 2026-11-13]", paragraph)
 
 
+class HleUtilityAttendedProbeTests(unittest.TestCase):
+    """CASE=hle-utility-attended-netconf, -sharing and -gamedata (189-191,
+    PSP-HLE-UTILITY-DIALOG-003 to -005): #1386's attended runs. One dialog type per launch, in case
+    161's section with its blocks, setup, teardown, precheck and cleanup; a person at the console
+    dismisses the dialog by hand within a 90-second window, so the run can reach FINISHED. These pin
+    the route, the record shapes the parser expects, that the probe still presses and cancels
+    nothing early, and the operator conditions in the manifest, README and docs rows."""
+
+    CASES = (
+        # campaign, CASE_ID, macro, test id, kind, the hle_run calls in order
+        ("hle-utility-attended-netconf", 189, "HLE_CASE_UTILITY_ATTENDED_NETCONF",
+         "PSP-HLE-UTILITY-DIALOG-003", "netconf",
+         ["hle_ud_netconf_setup", "hle_ud_attended", "hle_ud_netconf_teardown"]),
+        ("hle-utility-attended-sharing", 190, "HLE_CASE_UTILITY_ATTENDED_SHARING",
+         "PSP-HLE-UTILITY-DIALOG-004", "sharing",
+         ["hle_ud_sharing_setup", "hle_ud_attended", "hle_ud_sharing_teardown"]),
+        ("hle-utility-attended-gamedata", 191, "HLE_CASE_UTILITY_ATTENDED_GAMEDATA",
+         "PSP-HLE-UTILITY-DIALOG-005", "gamedata",
+         ["hle_ud_gamedata_precheck", "hle_ud_attended", "hle_ud_gamedata_cleanup"]),
+    )
+
+    probe: ClassVar[str]
+    makefile: ClassVar[str]
+    imports: ClassVar[str]
+    section: ClassVar[str]
+    root: ClassVar[Path]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root = Path(__file__).resolve().parents[1]
+        fixture = cls.root / "tests" / "fixtures" / "psp_oracle"
+        cls.probe = (fixture / "probe_hle_measure.c").read_text(encoding="utf-8")
+        cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
+        cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
+        start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || ")
+        cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_UTILITY_DIALOGS */")]
+
+    def _code(self, macro: str) -> str:
+        return _c_code(_select_case_blocks(self.section, macro))
+
+    @staticmethod
+    def _body(code: str, signature: str) -> str:
+        body = code[code.index(signature):]
+        return body[:body.index("\n}\n")]
+
+    def test_routes_ids_and_parser_rows(self) -> None:
+        for campaign, case_id, macro, test_id, kind, _calls in self.CASES:
+            with self.subTest(campaign=campaign):
+                self.assertIn(f"else ifeq ($(CASE),{campaign})\nCASE_ID = {case_id}\n", self.makefile)
+                self.assertIn(f"#define {macro} {case_id}\n", self.probe)
+                stem = campaign.replace("-", "_")
+                self.assertIn(f'#define HLE_CAMPAIGN_ID "{campaign}"\n#define HLE_TEST_ID "{test_id}"\n'
+                              f'#define HLE_LOG "host0:/{stem}_log.txt"', self.probe)
+                self.assertIn(f"else ifeq ($(CASE),{campaign})\nTARGET = $(BUILD_DIR)/{stem}\n",
+                              self.makefile)
+                spec, counts = CAMPAIGN_PROBE_CASES[campaign]
+                self.assertEqual(spec.test_id, test_id)
+                first = "gamedata-precheck" if kind == "gamedata" else f"{kind}-setup"
+                last = "gamedata-cleanup" if kind == "gamedata" else f"{kind}-teardown"
+                self.assertEqual(spec.ordered_cases[:-1],
+                                 (first, f"{kind}-attended", f"{kind}-attended-shutdown", last))
+                self.assertEqual(counts[f"{kind}-attended"], 24)
+                self.assertEqual(counts[f"{kind}-attended-shutdown"], 20)
+                # The setup, teardown, precheck and cleanup rows keep case 161's shapes.
+                dialogs = dict(parse_golden.HLE_UTILITY_DIALOGS_ROWS)
+                self.assertEqual((counts[first], counts[last]), (dialogs[first], dialogs[last]))
+                # The source walk yields the registry's cells in the registry's order.
+                self.assertEqual(_out_count_mismatches(self.probe, campaign, macro), [])
+
+    def test_each_run_is_one_dialog_type_with_its_setup_and_teardown(self) -> None:
+        for campaign, _case_id, macro, _test_id, kind, calls in self.CASES:
+            with self.subTest(campaign=campaign):
+                own = self.section.split(f"#if PSP_ORACLE_CASE == {macro}\n")
+                self.assertEqual(len(own), 2)
+                run = own[1][:own[1].index("#endif")]
+                self.assertEqual(re.findall(r"\b(hle_ud_\w+)\(", run), calls)
+                self.assertIn(f'hle_ud_attended("{kind}-attended", "{kind}-attended-shutdown", '
+                              f"&k_ud_{kind}, reason);", run)
+                # A net teardown runs on every path that ran its setup, a stuck dialog's included.
+                if kind != "gamedata":
+                    self.assertIn(f"hle_ud_{kind}_teardown(stage, 0u);", run)
+                code = self._code(macro)
+                # No other dialog type, no wrong-state cell and no message dialog is compiled in.
+                for other in {"netconf", "sharing", "gamedata"} - {kind}:
+                    self.assertNotIn(f"k_ud_{other} =", code)
+                for gone in ("k_ud_savedata", "hle_ud_state(", "hle_ud_timing(", "hle_ud_drive(",
+                             "nkUtilMsgDialogInitStart(s_ud_msg)", "s_ud_msg["):
+                    self.assertNotIn(gone, code)
+
+    def test_the_attended_drive_waits_for_the_person_and_cancels_nothing_early(self) -> None:
+        code = self._code("HLE_CASE_UTILITY_ATTENDED_NETCONF")
+        self.assertIn("#define HLE_UD_ATTEND_POLLS 5400u", code)
+        self.assertIn("#define HLE_UD_ATTEND_RUN_PROBE 30u", code)
+        drive = self._body(code, "static void hle_ud_attend_drive(HleUdRun *r)")
+        # Bounded: one poll per vblank, at most the attended window.
+        self.assertIn("for (uint32_t i = 0; i < HLE_UD_ATTEND_POLLS; i++) {", drive)
+        self.assertIn("(void)sceDisplayWaitVblankStart();", drive)
+        # No cancel bound ends a RUNNING or INIT dialog inside the window.
+        for gone in ("HLE_UD_CANCEL_POLLS *", "HLE_UD_INIT_CANCEL_POLLS", "HLE_UD_RUN_SHUTDOWNS"):
+            self.assertNotIn(gone, drive)
+        # Update(1) on every RUNNING poll but the one probe poll; every ShutdownStart goes through
+        # the marked helper, once in each status.
+        self.assertIn("running == HLE_UD_ATTEND_RUN_PROBE && !r->accepted", drive)
+        self.assertEqual(drive.count("r->t->update(1)"), 1)
+        self.assertNotIn("r->t->shutdown()", drive)
+        self.assertEqual(drive.count("hle_ud_attend_shutdown(r, "), 5)
+        helper = self._body(code, "static void hle_ud_attend_shutdown(HleUdRun *r, int status)")
+        self.assertLess(helper.index('hle_ud_step(r->t, "shutdown");'),
+                        helper.index("const int rc = r->t->shutdown();"))
+        self.assertLess(helper.index("const int before = r->t->get_status();"),
+                        helper.index("const int rc = r->t->shutdown();"))
+        self.assertIn("if (slot < HLE_UD_ATTEND_SLOTS && !s_ud_probe_made[slot]) {", helper)
+        # A stuck run is a failure of the launch, as in the unattended cases.
+        attended = self._body(code, "static void hle_ud_attended(")
+        self.assertIn("hle_ud_settle(&r);", attended)
+        self.assertIn('hle_record(shutdown_id, "PASS", r.sd_calls, s_ud_probe, '
+                      "HLE_UD_ATTEND_SD_WORDS);", attended)
+        header = " ".join(self.section[:self.section.index("*/")].split())
+        for term in ("ATTENDED cases 189-191", "The probe still presses nothing.",
+                     "One launch per boot, one dialog type per launch, in the game context.",
+                     "that boot then needs a power cycle"):
+            with self.subTest(term=term):
+                self.assertIn(term, header)
+
+    def test_each_build_links_only_its_own_dialog_and_libraries(self) -> None:
+        sets = {189: ("Netconf", "sceNetApctl"), 190: ("GameSharing", "sceNetAdhocctl"),
+                191: ("GamedataInstall", "sceUmdUser")}
+        for campaign, case_id, _macro, _test_id, _kind, _calls in self.CASES:
+            with self.subTest(campaign=campaign):
+                block = self.imports[self.imports.index(f"#if PSP_ORACLE_CASE == {case_id}\n"):]
+                block = block[:block.index("#endif")]
+                names = re.findall(r'IMPORT_FUNC\s+"sceUtility", 0x[0-9A-F]{8}, (\w+)', block)
+                dialog, library = sets[case_id]
+                self.assertEqual([n for n in names if n.startswith("nkUtil")],
+                                 [f"nkUtil{dialog}{call}" for call in
+                                  ("InitStart", "GetStatus", "Update", "ShutdownStart")])
+                self.assertEqual("sceUtilityLoadNetModule" in names, case_id != 191)
+                gate = self.makefile[self.makefile.index(f"\nifeq ($(CASE),{campaign})\n"):]
+                gate = gate[:gate.index("\nendif\n")]
+                self.assertIn(f"--exact-library {library}=", gate)
+                self.assertIn("--forbid-library sceReg", gate)
+                if case_id == 191:
+                    self.assertIn("--forbid-library sceNet ", gate)
+                else:
+                    self.assertIn("--forbid-library sceUmdUser", gate)
+                if case_id == 189:
+                    self.assertIn("--forbid-library sceNetAdhoc --forbid-library sceNetAdhocctl", gate)
+                if case_id == 190:
+                    self.assertIn("--forbid-library sceNetApctl", gate)
+
+    def test_an_attended_stream_parses_and_a_short_one_is_refused(self) -> None:
+        spec, counts = CAMPAIGN_PROBE_CASES["hle-utility-attended-netconf"]
+        lines = [META.format(source="psp", model="PSP-3000", firmware="6.61-ARK",
+                             binary=MEASURED_SHA, commit=MEASURED_COMMIT)]
+        for case in spec.semantic_cases:
+            outs = " ".join(f"out{i}=0x00000000" for i in range(counts[case]))
+            lines.append(f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-HLE-UTILITY-DIALOG-003 "
+                         f"case_id={case} status=PASS result=0x00000000 {outs}\n")
+        done = ("NAKAGAWA_PSP_TEST schema=1 test_id=PSP-HLE-UTILITY-DIALOG-003 "
+                "case_id=hle-utility-attended-netconf-done status=PASS result=0x00000000 "
+                f"out0=0x{len(spec.semantic_cases):08x}\n")
+        sequence = parse_golden.parse_campaign_probe_output(
+            "".join([*lines, done]), "hle-utility-attended-netconf")
+        self.assertTrue(sequence.complete)
+        self.assertEqual(sequence.observed_order[:-1], tuple(spec.semantic_cases))
+        self.assertEqual(sum(key.startswith("out") for key, _value in
+                             sequence.results["netconf-attended-shutdown"].values), 20)
+        # A stream whose shutdown row has the timing row's word count is refused.
+        short = [line.replace(" out19=0x00000000", "") if "attended-shutdown" in line else line
+                 for line in lines]
+        with self.assertRaises(ProtocolError):
+            parse_golden.parse_campaign_probe_output(
+                "".join([*short, done]), "hle-utility-attended-netconf")
+
+    def test_manifest_readme_and_docs_rows_state_the_attended_conditions(self) -> None:
+        manifest = json.loads((self.root / "tools" / "psp_oracle" / "manifest.json").read_text(
+            encoding="utf-8"))
+        rows = {t["id"]: t for t in manifest["tests"]}
+        hardware = (self.root / "docs" / "HARDWARE_ORACLE.md").read_text(encoding="utf-8")
+        readme = (self.root / "tests" / "fixtures" / "psp_oracle" / "README.md").read_text(encoding="utf-8")
+        for campaign, case_id, _macro, test_id, kind, _calls in self.CASES:
+            with self.subTest(campaign=campaign):
+                row = rows[test_id]
+                self.assertEqual(row["hardware_evidence"], "NOT_RUN")
+                self.assertEqual(row["diagnostic_case_ids"], [campaign])
+                self.assertEqual(row["case_ids"], [f"{kind}-*"])
+                self.assertEqual(row["prx"], f"{campaign.replace('-', '_')}.prx")
+                self.assertEqual(row["issues"], [1386])
+                self.assertEqual(row["source"], "tests/fixtures/psp_oracle/probe_hle_measure.c")
+                self.assertTrue(row["risk"].startswith("ATTENDED, POWER RISK: needs a person at "
+                                                       "the console to dismiss the"))
+                for term in ("Circle or Cross, whichever the dialog shows",
+                             "within about a minute", "touch nothing else",
+                             "that boot then needs a power cycle"):
+                    self.assertIn(term, row["risk"])
+                self.assertIn("RADIO: the WLAN switch on" if kind != "gamedata"
+                              else "No radio use; no UMD in the drive", row["risk"])
+                self.assertTrue(row["reset"].startswith("game context: standalone PSPLink"))
+                self.assertIn(f"one {campaign} launch per boot", row["reset"])
+                self.assertIn("a person at the console for the whole launch", row["reset"])
+                self.assertIn(f"case {case_id}", row["evidence_note"])
+                self.assertIn("NOT_RUN until measured", row["invariant"])
+                doc = next(line for line in hardware.splitlines()
+                           if line.startswith(f"| `{campaign}` |"))
+                self.assertIn(f"| `{test_id}` | `NOT_RUN` |", doc)
+                self.assertIn("one launch per boot", doc)
+                text = next(line for line in readme.splitlines()
+                            if line.startswith(f"| `{campaign}` |"))
+                self.assertIn(f"Built case {case_id} from `probe_hle_measure.c`", text)
+                self.assertIn("**NOT_RUN**", text)
+
+
 class HleUtilityDialogsProbeTests(unittest.TestCase):
     """CASE=hle-utility-dialogs (161, PSP-HLE-UTILITY-DIALOG-001) in probe_hle_measure.c: #1386's
     dialog status timing and wrong-state answers in game context. These pin the safety design:
@@ -14446,7 +14744,7 @@ class HleUtilityDialogsProbeTests(unittest.TestCase):
         cls.makefile = (fixture / "Makefile").read_text(encoding="utf-8")
         cls.imports = (fixture / "hle_utility_imports.S").read_text(encoding="utf-8")
         start = cls.probe.index("#if PSP_ORACLE_CASE == HLE_CASE_UTILITY_DIALOGS || "
-                                "PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING\n\n")
+                                "PSP_ORACLE_CASE == HLE_CASE_UTILITY_NETCONF_SHARING || ")
         cls.section = cls.probe[start:cls.probe.index("#endif /* HLE_CASE_UTILITY_DIALOGS */")]
 
     def _body(self, signature: str) -> str:
@@ -16811,6 +17109,135 @@ class IoCasesHostTests(unittest.TestCase):
         self.assertEqual(failed, {"ltn0.pgf": "0x80010013", "ltn1.pgf": "0x8001001c"})
         self.assertEqual(int(dict(run.records[-1].values)["out2"], 16), 0)
 
+    def _app_outcome(self, run: SimpleNamespace) -> dict[str, str]:
+        """The app's own verdict (fontcopy_outcome in fontcopy_config.h) on the run's records."""
+        line = next((line for line in run.lines if line.startswith("OUTCOME ")), None)
+        self.assertIsNotNone(line, "the harness reports the app's fontcopy_outcome")
+        return dict(item.split("=", 1) for item in cast(str, line).split()[1:])
+
+    def test_font_copy_app_reports_a_listing_that_stopped_early(self) -> None:
+        # sceIoDread fails after two of five .pgf entries: font_files.h copies the two it listed
+        # and closes the listing with status=FAIL and out1 = that error. The copy counts alone
+        # (two of two) made the app say "Done: all 2 fonts were copied and checked".
+        fonts = [_entry(f"ltn{index}.pgf", 100, index + 1) for index in range(5)]
+        run = self._app(fonts + ["option dread-fails 2 0x80010013"])
+        self._assert_app_calls_safe(run)
+        done = dict(run.records[-1].values)
+        self.assertEqual((int(done["out1"], 16), int(done["out2"], 16)), (2, 2))
+        outcome = self._app_outcome(run)
+        self.assertEqual((outcome["kind"], outcome["code"]), ("listing-cut", "0x80010013"))
+        # FONTFILES_ENTRIES_MAX stopping the listing is cut short as well (out1 0xffffffff).
+        many = [_entry(f"f{index:02d}.pgf", 10, 1) for index in range(65)]
+        outcome = self._app_outcome(self._app(many))
+        self.assertEqual((outcome["kind"], outcome["code"]), ("listing-cut", "0xffffffff"))
+        # A failing first read leaves no candidate, and none of the known names opens: the shown
+        # code is that read's, not 0.
+        unknown = [_entry(f"f{index}.pgf", 100, index + 1) for index in range(5)]
+        outcome = self._app_outcome(self._app(unknown + ["option dread-fails 0 0x80010013"]))
+        self.assertEqual((outcome["kind"], outcome["code"]), ("none-found", "0x80010013"))
+        # A complete listing is a success, and so is a refused listing the known names filled.
+        self.assertEqual(self._app_outcome(self._app(fonts))["kind"], "all-copied")
+        refused = self._app(["fontdir 0x80010002 0x80010002", _entry("ltn0.pgf", 100, 1)])
+        self.assertEqual(self._app_outcome(refused)["kind"], "all-copied")
+
+    def test_font_copy_app_tries_the_known_names_when_the_listing_names_none(self) -> None:
+        # The listing opens, but its first sceIoDread fails (or ends at once, or names no .pgf
+        # file). The known names used to be tried only when sceIoDopen failed, so nothing was
+        # copied from a PSP whose fonts open by name.
+        present = {"jpn0.pgf": (5_000, 1), "ltn3.pgf": (70_000, 2)}
+        fonts = [_entry(name, size, seed) for name, (size, seed) in present.items()]
+        for listing in (["option dread-fails 0 0x80010013"], ["option dread-fails 0 0x0"],
+                        [_entry("imagefont.bin", 50, 4)]):
+            with self.subTest(listing=listing):
+                lines = fonts + listing
+                if listing[0].startswith("entry"):  # only the .bin file is listed
+                    lines = [listing[0]] + ["option dread-fails 1 0x0"] + fonts
+                run = self._app(lines)
+                self._assert_app_calls_safe(run)
+                known = [dict(record.values)["detail"] for record in run.records
+                         if record.case_id.startswith("font-known-")]
+                self.assertEqual(known, self._KNOWN)
+                self.assertEqual(run.host0, {name: (size, True)
+                                             for name, (size, _seed) in present.items()})
+                done = dict(run.records[-1].values)
+                self.assertEqual((int(done["out1"], 16), int(done["out2"], 16)), (2, 2))
+                self.assertEqual(self._app_outcome(run)["kind"], "all-copied")
+
+    def test_font_copy_app_shows_the_font_it_is_copying(self) -> None:
+        # The app draws "Copying font N of M: <name>" at a copy's first step, before the font is
+        # read. It used to draw it from the finished copy's record, so the line named the font
+        # that had just been copied, and nothing showed while the first font was copied.
+        names = ["jpn0.pgf", "ltn0.pgf", "ltn1.pgf"]
+        run = self._app([_entry(name, 1000, index + 1) for index, name in enumerate(names)])
+        progress = [index for index, line in enumerate(run.lines) if line.startswith("PROGRESS ")]
+        self.assertEqual([run.lines[index] for index in progress],
+                         [f"PROGRESS {number} of 3 {name}"
+                          for number, name in enumerate(names, start=1)])
+        copies = [index for index, line in enumerate(run.lines)
+                  if line.startswith("EMIT ") and " case_id=font-copy-" in line]
+        self.assertEqual(len(copies), 3)
+        for number, at in enumerate(progress):
+            self.assertLess(at, copies[number])
+            if number:
+                self.assertGreater(at, copies[number - 1])
+            reads = [line for line in run.lines[at:copies[number]]
+                     if line.startswith(f"CALL sceIoOpen path=flash0:/font/{names[number]} ")]
+            self.assertTrue(reads, names[number])
+
+    def test_font_copy_app_says_which_side_a_failed_copy_failed_on(self) -> None:
+        # Every copy that failed used to be reported as a Memory Stick write failure, even when
+        # the PSP's own font could not be read or read differently the second time.
+        two = [_entry("ltn0.pgf", 100, 1), _entry("ltn1.pgf", 200, 2)]
+        cases = {
+            "read error and unstable reread": (
+                ["option read-fails ltn0.pgf 0 0x80010005", "option unstable ltn1.pgf"],
+                ("none-written", "0x80010005", "read")),
+            "destination open refused": (
+                ["option host-open-fails ltn0.pgf 0x80010013",
+                 "option host-open-fails ltn1.pgf 0x80010013"],
+                ("none-written", "0x80010013", "write")),
+            "write error": (
+                ["option write-fails ltn0.pgf 0x8001001c", "option unstable ltn1.pgf"],
+                ("none-written", "0x8001001c", "write")),
+            "read back differs": (["option host-corrupt ltn1.pgf"],
+                                  ("some-copied", "0x80000106", "write")),
+            "second read differs": (["option unstable ltn1.pgf"],
+                                    ("some-copied", "0x80000106", "read")),
+            "all copied": ([], ("all-copied", "0x00000000", "none")),
+        }
+        for label, (options, want) in cases.items():
+            with self.subTest(label):
+                run = self._app(two + options)
+                self._assert_app_calls_safe(run)
+                outcome = self._app_outcome(run)
+                self.assertEqual((outcome["kind"], outcome["code"], outcome["fault"]), want)
+
+    def test_font_copy_app_retry_keeps_a_copy_that_already_matches(self) -> None:
+        # "Try again" runs the copy again. Every font used to be reopened with PSP_O_TRUNC, so a
+        # retry that failed to write destroyed a copy the earlier run had verified. A copy that
+        # matches a fresh flash0 read is now kept without being opened for writing; a partial
+        # one is copied again.
+        fonts = {"ltn0.pgf": (100, 1), "ltn1.pgf": (200, 2), "ltn2.pgf": (300, 3)}
+        lines = [_entry(name, size, seed) for name, (size, seed) in fonts.items()]
+        lines += ["option host-existing ltn0.pgf 100", "option write-fails ltn0.pgf 0x8001001c",
+                  "option host-existing ltn1.pgf 50"]
+        run = self._app(lines)
+        self._assert_app_calls_safe(run)
+        rewritten = [fields["path"] for name, fields in run.calls
+                     if name == "sceIoOpen" and fields["flags"] == "0x00000602"]
+        self.assertEqual(rewritten, [run.folder + "/ltn1.pgf", run.folder + "/ltn2.pgf"])
+        self.assertEqual(run.host0, {name: (size, True) for name, (size, _seed) in fonts.items()})
+        kept = [dict(record.values) for record in run.records
+                if record.case_id.startswith("font-kept-")]
+        self.assertEqual([(entry["detail"], entry["sha256"]) for entry in kept],
+                         [("ltn0.pgf", hashlib.sha256(_gen_bytes(100, 1)).hexdigest())])
+        done = dict(run.records[-1].values)
+        self.assertEqual((int(done["out1"], 16), int(done["out2"], 16)), (3, 3))
+        self.assertEqual(self._app_outcome(run)["kind"], "all-copied")
+        self.assertEqual([line for line in run.lines if line.startswith("PROGRESS ")],
+                         [f"PROGRESS {number} of 3 {name}"
+                          for number, name in enumerate(fonts, start=1)])
+
 
 class IoCasesSourceTests(unittest.TestCase):
     """Source-level rules for the font-files and umd-io cases."""
@@ -16883,9 +17310,18 @@ class IoCasesSourceTests(unittest.TestCase):
         config = self._code((app_dir / "fontcopy_config.h").read_text(encoding="utf-8"))
         self.assertEqual(re.findall(r"\bsceIo\w+\s*\(", app + config), [])
         self.assertIn("fontfiles_run(&s_files);", app)
-        self.assertIn("fontcopy_configure(&s_files, &s_target, s_argv0);", app)
+        # The target is chosen once from argv[0]; each run applies it, as the harness does.
+        self.assertEqual(app.count("fontcopy_target(&s_target, "), 1)
+        self.assertIn("fontcopy_use_target(&s_files, &s_target);", app)
+        harness = self._code((self.fixture / "io_cases_host.c").read_text(encoding="utf-8"))
+        self.assertIn("fontcopy_use_target(&fonts, &target);", harness)
         self.assertIn('#define FONTCOPY_FOLDER "/NAKAGAWA/fonts"', config)
         self.assertIn("files->pgf_only = 1u;", config)
+        self.assertIn("files->keep_verified = 1u;", config)
+        # The folder always fits, so a font-dest refusal is a build error, not a screen message.
+        self.assertIn('_Static_assert(sizeof("ms0:" FONTCOPY_FOLDER) - 1u + 1u + FONTFILES_NAME_MAX'
+                      " < FONTFILES_PATH_MAX,", config)
+        self.assertNotIn("font-dest", config)
         makefile = (app_dir / "Makefile").read_text(encoding="utf-8")
         self.assertIn("IMPORT_GATE_ARGS = --forbid-library sceReg", makefile)
         pinned = next(line for line in makefile.splitlines() if "IoFileMgrForUser=" in line)
@@ -16899,6 +17335,10 @@ class IoCasesSourceTests(unittest.TestCase):
         self.assertNotIn("-lpspuser", libs.split())
         self.assertNotIn("-lpspkernel", libs.split())
         self.assertIn("stubs out of order", makefile)
+        # The SDK links the ELF before FIXUP gates it: a rejected ELF must not survive.
+        self.assertIn("\n.DELETE_ON_ERROR:\n", makefile)
+        self.assertIn("\n$(OBJS) $(PSP_EBOOT_SFO): $(BUILD_CONFIG_STAMP)\n", makefile)
+        self.assertIn("IMPORT_GATE_ARGS=$(IMPORT_GATE_ARGS)", makefile)
 
     def test_font_copy_build_fails_closed_on_a_fixup_warning(self) -> None:
         # Runs the app Makefile's own FIXUP command under GNU Make with a stand-in
@@ -16942,6 +17382,95 @@ class IoCasesSourceTests(unittest.TestCase):
                     self.assertEqual(marker.exists(), not fails, "the import gate ran or not")
                     if shown is not None:
                         self.assertIn(shown, run.stdout + run.stderr)
+
+    def test_font_copy_build_never_packages_a_rejected_or_stale_elf(self) -> None:
+        # Runs the app's real Makefile under GNU Make with a stub SDK whose ELF rule, like
+        # build.mak's, links and then runs $(FIXUP) $@, a stand-in compiler, psp-fixup-imports
+        # and import gate. The link writes the ELF before the gate rejects it, so without
+        # .DELETE_ON_ERROR the next make took that ELF as up to date and packaged it; and the
+        # SDK's ELF and PARAM.SFO rules depend on no setting, so a new gate policy or title
+        # was not applied until a clean.
+        if sys.platform == "win32":
+            self.skipTest("the app Makefile's recipes need a POSIX shell")
+        make = shutil.which("make")
+        if make is None or shutil.which("bash") is None or shutil.which("cmp") is None:
+            self.skipTest("GNU Make, bash and cmp are unavailable")
+        with scratch_dir.TemporaryDirectory(prefix="fontcopy-stale-") as scratch:
+            root = Path(scratch)
+            dated = time.time() - 7200
+            app = root / "src" / "psp_companion"
+            app.mkdir(parents=True)
+            fixture = root / "tests" / "fixtures" / "psp_oracle"
+            fixture.mkdir(parents=True)
+            copies = [(self.root / "src" / "psp_companion" / name, app / name)
+                      for name in ("Makefile", "fontcopy.c", "fontcopy_config.h")]
+            copies.append((self.fixture / "font_files.h", fixture / "font_files.h"))
+            gate = root / "tools" / "psp_oracle" / "user_mode_imports.py"
+            gate.parent.mkdir(parents=True)
+            gate.write_text("import sys\n"
+                            "with open(__file__ + '.log', 'a') as log:\n"
+                            "    log.write(' '.join(sys.argv[1:-1]) + '\\n')\n"
+                            "sys.exit(1 if '--reject' in sys.argv else 0)\n", encoding="utf-8")
+            for source, copy in copies:
+                shutil.copyfile(source, copy)
+            for path in [copy for _source, copy in copies] + [gate]:
+                os.utime(path, (dated, dated))
+            (root / "sdk" / "lib").mkdir(parents=True)
+            (root / "sdk" / "lib" / "build.mak").write_text(
+                "all: $(EXTRA_TARGETS)\n"
+                "$(TARGET).elf: $(OBJS)\n\t$(CC) $^ -o $@\n\t$(FIXUP) $@\n"
+                "$(PSP_EBOOT_SFO):\n\tprintf '%s\\n' '$(PSP_EBOOT_TITLE)' > $@\n"
+                "$(PSP_EBOOT): $(TARGET).elf $(PSP_EBOOT_SFO)\n\tcat $^ > $@\n",
+                encoding="utf-8")
+            compiler = root / "stand_in_cc.py"
+            compiler.write_text(
+                "import sys\n"
+                "args = sys.argv[1:]\n"
+                "kind = 'compile' if '-c' in args else 'link'\n"
+                "with open(args[args.index('-o') + 1], 'w') as out:\n"
+                "    out.write(kind + '\\n')\n"
+                "with open(sys.argv[0] + '.log', 'a') as log:\n"
+                "    log.write(kind + '\\n')\n", encoding="utf-8")
+            tools = root / "bin"
+            tools.mkdir()
+            fixup = tools / "psp-fixup-imports"
+            fixup.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fixup.chmod(0o755)
+            build = root / "build"
+            env = dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ.get('PATH', '')}")
+
+            def run(*settings: str) -> tuple[int, int, int]:
+                # Move every output an equal step back, so a rewritten stamp is clearly newer
+                # than the outputs it should rebuild and a coarse clock cannot tie them.
+                for path in build.glob("*") if build.exists() else ():
+                    stat = path.stat()
+                    os.utime(path, (stat.st_atime - 60, stat.st_mtime - 60))
+                completed = subprocess.run(
+                    [make, "--no-print-directory", "-C", str(app), f"PSPSDK={root / 'sdk'}",
+                     f"BUILD_DIR={build}", f"PYTHON={sys.executable}",
+                     f"CC={shlex.join([sys.executable, str(compiler)])}", *settings],
+                    env=env, capture_output=True, text=True, check=False)
+                log = Path(f"{gate}.log")
+                return (completed.returncode,
+                        Path(f"{compiler}.log").read_text(encoding="utf-8").count("compile\n"),
+                        log.read_text(encoding="utf-8").count("\n") if log.exists() else 0)
+
+            elf, eboot = build / "fontcopy.elf", build / "EBOOT.PBP"
+            self.assertEqual(run(), (0, 1, 1))
+            self.assertEqual(eboot.read_text(encoding="utf-8"), "link\nNakagawa Font Copy\n")
+            # Nothing changed: nothing is rebuilt and the gate does not run again.
+            self.assertEqual(run(), (0, 1, 1))
+            # A new title rebuilds PARAM.SFO (and the object, the ELF and its gate run).
+            self.assertEqual(run("PSP_EBOOT_TITLE=Other"), (0, 2, 2))
+            self.assertEqual(eboot.read_text(encoding="utf-8"), "link\nOther\n")
+            # A new gate policy relinks and gates again; the rejected ELF does not survive.
+            reject = ("PSP_EBOOT_TITLE=Other", "IMPORT_GATE_ARGS=--reject")
+            self.assertEqual(run(*reject), (2, 3, 3))
+            self.assertFalse(elf.exists(), "the rejected ELF must be deleted")
+            # The next make gates again rather than packaging the rejected ELF.
+            self.assertEqual(run(*reject), (2, 3, 4))
+            self.assertFalse(elf.exists())
+            self.assertEqual(eboot.read_text(encoding="utf-8"), "link\nOther\n")
 
     def test_device_case_reads_state_only_and_its_lists_match_the_parser(self) -> None:
         code = self._code(self.umd[:self.umd.index("#define UMDRAW_TEST_ID")])
@@ -17902,6 +18431,9 @@ class Record20261015Tests(unittest.TestCase):
             ("vcodec-words", "PSP-VCODEC-001", "NOT_RUN"),
             ("hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", "NOT_RUN"),
             ("hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002", "CAPTURED"),
+            ("hle-utility-attended-netconf", "PSP-HLE-UTILITY-DIALOG-003", "NOT_RUN"),
+            ("hle-utility-attended-sharing", "PSP-HLE-UTILITY-DIALOG-004", "NOT_RUN"),
+            ("hle-utility-attended-gamedata", "PSP-HLE-UTILITY-DIALOG-005", "NOT_RUN"),
             ("hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", "MEASURED"),
             ("ge-raster-bounds", "PSP-GE-RASTER-002", "MEASURED"),
             ("ge-depth-round", "PSP-GE-RASTER-003", "MEASURED"),

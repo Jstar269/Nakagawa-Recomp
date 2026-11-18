@@ -19,7 +19,14 @@
 //     (the zeroed output buffer is never written when no unit is decoded),
 //   - determinism: the same frame decodes to byte-identical PCM across
 //     instances, after reset, and after flush,
+//   - no stale PCM: a frame that ends before its channel blocks have units
+//     (the terminator frame) after a loud frame decodes to silence, not to
+//     the previous frame's planes,
 //   - destroy(NULL) no-op,
+//   - out-of-range float samples saturate to int16 (NaN gives 0) on both the
+//     ATRAC3+ and the plain AT3 conversion,
+//   - decoder diagnostics: debug lines are dropped, and a missing-feature
+//     report is one complete "atrac3p: "-prefixed line,
 //   - transform-path canary: a deterministic MONO channel-unit frame drives a
 //     real unit through decode_residual_spectrum() + reconstruct_frame()
 //     (IMDCT/IPQF) and must decode with the nb_samples=2048 contract and
@@ -41,12 +48,14 @@
 //
 // Exit code 0 = all public checks passed (fixture portion SKIP or passed).
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "atrac3p/atrac3p_api.h"
+#include "atrac3p/libavutil/log.h"
 #include "vfpu_tables.h"
 
 static int g_checks = 0;
@@ -142,6 +151,86 @@ static void test_terminator_decode(void)
     atrac3p_destroy(h2);
 }
 
+/* A 16-byte mono body that a fresh decoder turns into a block that is not
+ * silence: the first xorshift32 candidate from a fixed seed, with the first
+ * byte kept to the mono channel-unit form (start bit 0, unit id 0), that
+ * decodes without error to a non-zero sample. Same search as
+ * tests/native/videocodec_selftest.c; deterministic every run. */
+static int find_loud_mono_body(uint8_t body[16])
+{
+    static int16_t pcm[ATRAC3P_FRAME_SAMPLES];
+    uint32_t state = 0x2545F491u;
+    unsigned candidate;
+    int i;
+
+    for (candidate = 0; candidate < 20000u; candidate++) {
+        Atrac3pHandle *h = NULL;
+        int samples = 0, ok;
+
+        for (i = 0; i < 16; i++) {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            body[i] = (uint8_t)state;
+        }
+        body[0] = (uint8_t)(body[0] & 0x1Fu);
+        if (atrac3p_create(1, 16, &h) != 0 || !h)
+            return 0;
+        ok = atrac3p_decode(h, body, 16, pcm, &samples) == 16 &&
+             samples == ATRAC3P_FRAME_SAMPLES;
+        atrac3p_destroy(h);
+        if (!ok)
+            continue;
+        for (i = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+            if (pcm[i] != 0)
+                return 1;
+    }
+    return 0;
+}
+
+/* No stale PCM: the unit loop writes only the planes of the channel units a
+ * frame carries, and the API converts every plane. A frame that ends at
+ * CH_UNIT_TERMINATOR before every channel block has a unit must report
+ * silence for the planes no unit wrote, not the previous frame's PCM, and
+ * reset must not bring the old PCM back. MUTANT: without the plane clear in
+ * atrac3p_decode_frame() the terminator frame repeats the loud block. */
+static void test_short_frame_does_not_repeat_pcm(void)
+{
+    static int16_t pcm[ATRAC3P_FRAME_SAMPLES];
+    uint8_t body[16];
+    Atrac3pHandle *h = NULL;
+    int ret, samples = -1, i, nonzero;
+
+    CHECK(find_loud_mono_body(body), "a loud mono body exists");
+    CHECK(atrac3p_create(1, 16, &h) == 0 && h != NULL, "create for stale-PCM check");
+    if (!h)
+        return;
+
+    ret = atrac3p_decode(h, body, 16, pcm, &samples);
+    CHECK(ret == 16 && samples == ATRAC3P_FRAME_SAMPLES, "loud body decodes");
+    for (i = 0, nonzero = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+        nonzero += pcm[i] != 0;
+    CHECK(nonzero > 0, "loud body is not silence");
+
+    ret = atrac3p_decode(h, TERMINATOR_FRAME, sizeof(TERMINATOR_FRAME), pcm, &samples);
+    CHECK(ret == (int)sizeof(TERMINATOR_FRAME) && samples == ATRAC3P_FRAME_SAMPLES,
+          "terminator frame after a loud frame decodes");
+    for (i = 0, nonzero = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+        nonzero += pcm[i] != 0;
+    CHECK(nonzero == 0, "terminator frame after a loud frame is silence, not stale PCM");
+
+    ret = atrac3p_decode(h, body, 16, pcm, &samples);
+    CHECK(ret == 16, "loud body decodes again");
+    CHECK(atrac3p_reset(h) == 0, "reset after loud body");
+    ret = atrac3p_decode(h, TERMINATOR_FRAME, sizeof(TERMINATOR_FRAME), pcm, &samples);
+    for (i = 0, nonzero = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+        nonzero += pcm[i] != 0;
+    CHECK(ret == (int)sizeof(TERMINATOR_FRAME) && nonzero == 0,
+          "terminator frame after reset is silence, not stale PCM");
+
+    atrac3p_destroy(h);
+}
+
 /* Transform-path canary: the MONO unit frame must decode through the
  * production entry point (ret = frame length, samples = ATRAC3P_FRAME_SAMPLES)
  * and produce byte-identical PCM across instances, reset and flush. The
@@ -199,6 +288,105 @@ static void test_at3_pcm_polarity(void)
     CHECK(atrac3_pcm_sample(-1.0f) == 32767, "AT3 sample -1.0 saturates to +32767");
     CHECK(atrac3_pcm_sample(2.0f) == -32768, "AT3 sample +2.0 saturates to -32768");
     CHECK(atrac3_pcm_sample(0.0f) == 0, "AT3 silence stays 0");
+}
+
+/* Out-of-range core output saturates. lrintf() alone is unspecified outside
+ * the range of long (32 bits on Windows) and for inf/NaN; on MinGW
+ * atrac3_pcm_sample(-70000) used to give 0 instead of +32767. MUTANT: removing
+ * the clamp before lrintf() fails the 70000 and infinity checks. */
+static void test_pcm_saturation(void)
+{
+    CHECK(atrac3_pcm_sample(-70000.0f) == 32767, "AT3 sample -70000 saturates to +32767");
+    CHECK(atrac3_pcm_sample(-1.0e6f) == 32767, "AT3 sample -1e6 saturates to +32767");
+    CHECK(atrac3_pcm_sample(70000.0f) == -32768, "AT3 sample +70000 saturates to -32768");
+    CHECK(atrac3_pcm_sample(-INFINITY) == 32767, "AT3 sample -inf saturates to +32767");
+    CHECK(atrac3_pcm_sample(INFINITY) == -32768, "AT3 sample +inf saturates to -32768");
+    CHECK(atrac3_pcm_sample(NAN) == 0, "AT3 sample NaN is 0");
+
+    CHECK(atrac3p_pcm_sample(0.5f) == 16384, "AT3+ sample +0.5 is +16384");
+    CHECK(atrac3p_pcm_sample(-1.0f) == -32768, "AT3+ sample -1.0 is -32768");
+    CHECK(atrac3p_pcm_sample(1.0f) == 32767, "AT3+ sample +1.0 saturates to +32767");
+    CHECK(atrac3p_pcm_sample(70000.0f) == 32767, "AT3+ sample +70000 saturates to +32767");
+    CHECK(atrac3p_pcm_sample(1.0e6f) == 32767, "AT3+ sample +1e6 saturates to +32767");
+    CHECK(atrac3p_pcm_sample(-70000.0f) == -32768, "AT3+ sample -70000 saturates to -32768");
+    CHECK(atrac3p_pcm_sample(INFINITY) == 32767, "AT3+ sample +inf saturates to +32767");
+    CHECK(atrac3p_pcm_sample(-INFINITY) == -32768, "AT3+ sample -inf saturates to -32768");
+    CHECK(atrac3p_pcm_sample(NAN) == 0, "AT3+ sample NaN is 0");
+}
+
+typedef struct {
+    char text[1024];
+    int lines;
+} LogCapture;
+
+static void capture_log_line(const char *line, void *opaque)
+{
+    LogCapture *cap = opaque;
+    size_t used = strlen(cap->text);
+    cap->lines++;
+    if (used < sizeof(cap->text) - 1)
+        snprintf(cap->text + used, sizeof(cap->text) - used, "%s", line);
+}
+
+/* Decoder diagnostics through the production paths. Creating a plain AT3
+ * decoder runs FFmpeg's atrac3_decode_init(), which logs four AV_LOG_DEBUG
+ * lines for a WAV stream; they used to reach stderr on every create and
+ * reset. A frame whose first channel unit is CH_UNIT_EXTENSION (start bit 0,
+ * unit id 2: 0x40) makes the decoder report the missing feature; that report
+ * used to be written with no line ending, so the next stderr line was glued
+ * onto it. The line ending is added in two places (internal.h's format ends
+ * in a newline, and av_vlog() appends one when a format has none), so the
+ * missing-feature check alone cannot see either one dropped; the direct
+ * av_log() calls below cover av_vlog()'s own newline. MUTANT: ignoring the
+ * level fails the debug check; dropping the prefix, or a two-call report,
+ * fails the missing-feature line check; dropping av_vlog()'s newline append
+ * fails the unterminated-format check. */
+static void test_decoder_log_lines(void)
+{
+    static const uint8_t at3_wav_mono[14] = {
+        1, 0, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0
+    };
+    static const uint8_t extension_frame[] = { 0x40 };
+    LogCapture cap;
+    Atrac3Handle *at3 = NULL;
+    Atrac3pHandle *h = NULL;
+    int16_t pcm[ATRAC3P_FRAME_SAMPLES];
+    int samples = -1;
+
+    memset(&cap, 0, sizeof(cap));
+    atrac3p_set_log_sink(capture_log_line, &cap);
+
+    CHECK(atrac3_create(1, 96, at3_wav_mono, &at3) == 0, "AT3 WAV mono create");
+    CHECK(atrac3_reset(at3) == 0, "AT3 WAV mono reset");
+    CHECK(cap.lines == 0, "AT3 create/reset debug lines are not logged");
+    atrac3_destroy(at3);
+
+    memset(&cap, 0, sizeof(cap));
+    CHECK(atrac3p_create(1, 16, &h) == 0, "AT3+ mono create");
+    if (h) {
+        CHECK(atrac3p_decode(h, extension_frame, (int)sizeof(extension_frame),
+                             pcm, &samples) < 0,
+              "channel-unit extension frame is refused");
+        CHECK(samples == 0, "refused extension frame reports 0 samples");
+    }
+    CHECK(cap.lines == 1, "missing-feature report is one log call");
+    CHECK(strcmp(cap.text,
+                 "atrac3p: Missing feature: Channel unit extension is not implemented.\n") == 0,
+          "missing-feature report is one prefixed, terminated line");
+    atrac3p_destroy(h);
+
+    memset(&cap, 0, sizeof(cap));
+    av_log(NULL, AV_LOG_ERROR, "x %d", 1);
+    CHECK(cap.lines == 1, "unterminated av_log format is one log call");
+    CHECK(strcmp(cap.text, "atrac3p: x 1\n") == 0,
+          "unterminated av_log format becomes one prefixed, terminated line");
+
+    memset(&cap, 0, sizeof(cap));
+    av_log(NULL, AV_LOG_ERROR, "y %d\n", 2);
+    CHECK(cap.lines == 1 && strcmp(cap.text, "atrac3p: y 2\n") == 0,
+          "terminated av_log format keeps exactly one line ending");
+
+    atrac3p_set_log_sink(NULL, NULL);
 }
 
 static void test_create_validation(void)
@@ -366,10 +554,13 @@ int main(int argc, char **argv)
     (void)argv;
 
     test_at3_pcm_polarity();
+    test_pcm_saturation();
+    test_decoder_log_lines();
     test_create_validation();
     test_decode_rejection();
     test_terminator_decode();
     test_imdct_path_decode();
+    test_short_frame_does_not_repeat_pcm();
 
     if (fixture && fixture[0]) {
         if (run_fixture(fixture) != 0) {

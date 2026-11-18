@@ -121,10 +121,8 @@ round constant, MD5's first sine constant). A file that only calls another file'
 
 | File | Algorithm | Purpose | Disposition |
 | --- | --- | --- | --- |
-| `tools/decompme_export.py` | SHA-1 | PSP NID derivation (`sha1(name)[0:4]`, little-endian) | Keep: the PSP defines it |
-| `tools/gen_nidnames.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
 | `tools/homebrew_corpus.py` | SHA-1 | Git blob ID of a sample file, compared with the blob ID `tests/fixtures/homebrew_corpus/corpus.json` pins for it | Keep: Git object identity |
-| `tools/nid_name_proof.py` | SHA-1 | PSP NID derivation | Keep: the PSP defines it |
+| `tools/nid_name_proof.py` | SHA-1 | PSP NID derivation (`sha1(name)[0:4]`, little-endian), the one `nid_of` that `tools/gen_nidnames.py` and `tools/decompme_export.py` share | Keep: the PSP defines it |
 | `tools/ppsspp_ref.py` | SHA-1 | WebSocket handshake check of `Sec-WebSocket-Accept` (RFC 6455 section 4.2.2) | Keep: the protocol defines it |
 | `tools/provenance_attest_verify.py` | SHA-1 | Git blob ID of a file a `PROVENANCE.md` row declares imported byte-identical, compared with the row's recorded blob ID (a SHA-256 column, where present, is checked too) | Keep: Git object identity |
 | `tools/verify_vfpu_provenance.py` | SHA-1 | Git blob ID of a VFPU table against the pinned upstream tree | Keep: Git object identity |

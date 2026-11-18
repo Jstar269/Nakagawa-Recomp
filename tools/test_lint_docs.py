@@ -5,6 +5,7 @@
 
 from contextlib import redirect_stdout
 import io
+import json
 import os
 import pathlib
 import re
@@ -1803,6 +1804,27 @@ class TestDigestInventory(unittest.TestCase):
             self._make_repo(root, {}, None)
             self.assertEqual(lint_digest_inventory(root),
                              [f"{DIGEST_DOC}: missing; it holds the digest inventory"])
+
+
+class RecompListingMetadataTests(unittest.TestCase):
+    """.recomp.json is published metadata recomp.fyi consumes; its notes must say what
+    README.md's Legal section says, not deny what the player does with the user's own disc."""
+
+    def test_notes_agree_with_the_readme_legal_claims(self) -> None:
+        listing = json.loads((ROOT / ".recomp.json").read_text(encoding="utf-8"))
+        notes = " ".join(listing["notes"].split())
+        readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+        # README.md carries the wording the listing follows; both move together.
+        self.assertIn(
+            "Nakagawa decrypts your own disc locally with the public game key tables PPSSPP ships", readme)
+        self.assertIn("never decrypts firmware", readme)
+        self.assertNotIn("does not decrypt", notes)
+        self.assertIn("decrypts your own disc locally", notes)
+        self.assertIn("never decrypts firmware", notes)
+        # The key claim names the console-bound keys the project never ships, not the public
+        # game key tables src/core/nk_psp_builtin_keys.c does ship.
+        self.assertIn("console-bound keys", notes)
+        self.assertIn("no game data", notes)
 
 
 class TestMainGuard(unittest.TestCase):

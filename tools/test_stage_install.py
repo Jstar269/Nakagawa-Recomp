@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
@@ -35,6 +36,17 @@ _GIT_ENV = {
     "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
     "GIT_CONFIG_NOSYSTEM": "1",
 }
+#: Variables that would point a fixture's Git commands at another repository or index (a suite
+#: run from a Git hook inherits them); the same list as tools/admit_paths.py.
+_GIT_REPOSITORY_VARIABLES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+)
+
+
+def _fixture_git_env(**extra: str) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key not in _GIT_REPOSITORY_VARIABLES}
+    return {**env, **_GIT_ENV, **extra}
 
 
 def _fixture_repo(root: Path) -> Path:
@@ -43,11 +55,27 @@ def _fixture_repo(root: Path) -> Path:
     (repo / "tools" / "nk_cli.py").write_text("print('cli')\n", encoding="utf-8")
     (repo / "assets").mkdir()
     (repo / "assets" / "prereq_manifest.json").write_text("{}\n", encoding="utf-8")
-    env = {**os.environ, **_GIT_ENV}
+    env = _fixture_git_env()
     for command in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "fixture"]):
         subprocess.run(["git", "-C", str(repo), *command], check=True, env=env,
                        capture_output=True)
     return repo
+
+
+def _link_or_copy(source: str, destination: str) -> None:
+    try:
+        os.link(source, destination)
+    except OSError:  # another volume, or no hard links there
+        shutil.copy2(source, destination)
+
+
+def _add_player_assets(repo: Path) -> None:
+    """The committed assets the player needs beside itself, which the Linux install stages from ``repo``."""
+    for relative in (Path("assets") / "fonts" / "ui", Path("assets") / "redump"):
+        shutil.copytree(stage_install.ROOT / relative, repo / relative, copy_function=_link_or_copy)
+    track = repo / stage_runtime_dlls.LAUNCHER_MUSIC_TRACK
+    track.parent.mkdir(parents=True)
+    _link_or_copy(str(stage_install.ROOT / stage_runtime_dlls.LAUNCHER_MUSIC_TRACK), str(track))
 
 
 def _fake_stager(target: Path) -> list[str]:
@@ -61,6 +89,22 @@ def _nested_stager(target: Path) -> list[str]:
     nested = stage_runtime_dlls.stage_runtime_dlls(
         target, roots=[], search_dirs=[], notices=False, include_ui_fonts=True, repo_root=stage_install.ROOT)
     return sorted(_fake_stager(target) + nested)
+
+
+class FixtureRepoTests(unittest.TestCase):
+    def test_fixture_repo_ignores_an_inherited_git_dir_and_index(self):
+        """A suite run from a Git hook inherits GIT_DIR and GIT_INDEX_FILE; the fixture commit must still land
+        in the fixture repository, never in the repository those variables name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outer = root / "outer.git"
+            with mock.patch.dict(os.environ, {"GIT_DIR": str(outer), "GIT_INDEX_FILE": str(root / "outer.index")}):
+                repo = _fixture_repo(root)
+            self.assertFalse(outer.exists(), "the fixture's Git commands acted on the inherited GIT_DIR")
+            self.assertFalse((root / "outer.index").exists(), "the fixture wrote the inherited index")
+            head = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%s"], check=True,
+                                  env=_fixture_git_env(), capture_output=True, text=True).stdout.strip()
+            self.assertEqual(head, "fixture")
 
 
 class IconTests(unittest.TestCase):
@@ -105,6 +149,93 @@ class InstallTests(unittest.TestCase):
         self.assertFalse((dest / "bin" / "stale.txt").exists())
         self.assertEqual((dest / "bin" / "nakagawa_player.exe").read_bytes(), b"player v2")
         self.assertFalse((dest / "bin.old").exists())
+
+    def test_a_first_install_interrupted_between_its_swaps_stays_owned(self):
+        """A fresh folder that got its new bin/ but not source/ can still be staged again or uninstalled."""
+        dest = self.root / "install"
+        real = stage_install._replace_owned
+        calls = []
+
+        def second_swap_fails(staged, final, carry=()):
+            calls.append(final.name)
+            if len(calls) == 2:
+                raise stage_install.InstallError("INSTALL_IN_USE: injected for the test")
+            real(staged, final, carry)
+
+        with mock.patch.object(stage_install, "_replace_owned", second_swap_fails), \
+                self.assertRaisesRegex(stage_install.InstallError, "INSTALL_IN_USE"):
+            stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self.assertEqual(calls, ["bin", "source"])
+        self.assertTrue((dest / "bin" / "nakagawa_player.exe").is_file())
+        self.assertFalse((dest / "source").exists())
+        self.assertIn(dest / "bin", stage_install.plan_uninstall(dest)["remove"])
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self.assertTrue((dest / "source" / "tools" / "nk_cli.py").is_file())
+
+    @staticmethod
+    def _make_portable(bin_dir: Path) -> None:
+        (bin_dir / "data" / "saves").mkdir(parents=True)
+        (bin_dir / "data" / "saves" / "UCUS00000.sav").write_bytes(b"save")
+        (bin_dir / "portable.txt").write_text("", encoding="utf-8")
+
+    def _assert_portable_kept(self, dest: Path) -> None:
+        self.assertEqual((dest / "bin" / "data" / "saves" / "UCUS00000.sav").read_bytes(), b"save")
+        self.assertTrue((dest / "bin" / "portable.txt").is_file())
+        self.assertEqual((dest / "bin" / "nakagawa_player.exe").read_bytes(), b"player v2")
+        self.assertFalse((dest / "bin.old").exists())
+
+    def test_restaging_a_portable_install_keeps_its_data_and_marker(self):
+        """An update replaces the program in bin/, never the user's portable data beside it."""
+        dest = self.root / "install"
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self._make_portable(dest / "bin")
+        self.player.write_bytes(b"player v2")
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self._assert_portable_kept(dest)
+
+    def test_portable_data_a_crashed_update_left_in_bin_old_moves_into_the_new_bin(self):
+        for crash in ("between the renames", "after the swap"):
+            with self.subTest(crash=crash):
+                dest = self.root / crash.replace(" ", "-")
+                self.player.write_bytes(b"player")
+                stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+                self._make_portable(dest / "bin")
+                (dest / "bin").rename(dest / "bin.old")
+                if crash == "after the swap":
+                    (dest / "bin").mkdir()
+                    (dest / "bin" / "nakagawa_player.exe").write_bytes(b"half")
+                self.player.write_bytes(b"player v2")
+                stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+                self._assert_portable_kept(dest)
+
+    def test_two_copies_of_the_portable_data_are_refused_untouched(self):
+        dest = self.root / "install"
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self._make_portable(dest / "bin")
+        (dest / "bin.old" / "data").mkdir(parents=True)
+        (dest / "bin.old" / "data" / "other.sav").write_bytes(b"other")
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_PORTABLE_DATA_CONFLICT"):
+            stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self.assertEqual((dest / "bin" / "data" / "saves" / "UCUS00000.sav").read_bytes(), b"save")
+        self.assertEqual((dest / "bin.old" / "data" / "other.sav").read_bytes(), b"other")
+        self.assertEqual([p.name for p in dest.iterdir() if p.name.startswith(".staging")], [])
+
+    def test_a_marker_that_is_not_the_tools_own_is_refused_before_anything_is_replaced(self):
+        """Any folder can hold a file of the marker's name; staging checks it as uninstall does."""
+        for name, text in (("empty", ""), ("foreign", '{"app": "something else"}'),
+                           ("future", json.dumps({"schema_version": 99, "source_commit": "x",
+                                                  "platform": "windows", "player": "bin/a.exe"}))):
+            with self.subTest(marker=name):
+                dest = self.root / f"marker-{name}"
+                (dest / "bin").mkdir(parents=True)
+                (dest / "bin" / "keep.txt").write_text("keep", encoding="utf-8")
+                (dest / "source").mkdir()
+                (dest / stage_install.MARKER).write_text(text, encoding="utf-8")
+                before = sorted(str(path) for path in dest.rglob("*"))
+                with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_MARKER_INVALID"):
+                    stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+                self.assertEqual(sorted(str(path) for path in dest.rglob("*")), before)
+                self.assertEqual((dest / "bin" / "keep.txt").read_text(encoding="utf-8"), "keep")
 
     def test_refuses_a_folder_it_did_not_create(self):
         dest = self.root / "someone-elses"
@@ -224,6 +355,31 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(Path(stage_install.read_shortcut_target(link)),
                          (second / "bin" / "nakagawa_player.exe").resolve())
 
+    @unittest.skipUnless(os.name == "nt", "Windows shortcuts")
+    def test_a_copy_in_a_folder_with_an_accented_letter_is_read_back_exactly(self):
+        """PowerShell's redirected output was decoded in the wrong code page: the target of a copy under such a
+        folder came back garbled (or as a decoding error), so the other-copy refusal was skipped."""
+        first, second = self.root / "Caf\u00e9 \u00fc\u00df", self.root / "second"
+        for dest in (first, second):
+            (dest / "bin").mkdir(parents=True)
+            (dest / "bin" / "nakagawa_player.exe").write_bytes(b"MZ")
+            (dest / "nakagawa.ico").write_bytes(b"ico")
+        link = self.root / "Nakagawa Recomp.lnk"
+        stage_install.write_shortcut(link, first)
+        self.assertEqual(stage_install.read_shortcut_target(link),
+                         str((first / "bin" / "nakagawa_player.exe").resolve()))
+        with self.assertRaisesRegex(stage_install.InstallError, "INSTALL_SHORTCUT_OTHER_COPY"):
+            stage_install.write_shortcut(link, second)
+
+    @unittest.skipUnless(os.name == "nt", "PowerShell")
+    def test_powershell_output_is_read_as_utf8(self):
+        """The special folders (Desktop, Programs) are read through the same runner."""
+        folder = "\\".join(("C:", "Users", "Café", "Desktop"))
+        result = stage_install._run_powershell(
+            "$env:NK_PROBE", "INSTALL_TEST", {**os.environ, "NK_PROBE": folder})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), folder)
+
 
 class ShortcutRefusalThroughMainTests(unittest.TestCase):
     """main() checks every requested shortcut before it stages or writes anything (#2208)."""
@@ -265,6 +421,15 @@ class ShortcutRefusalThroughMainTests(unittest.TestCase):
         writer.assert_not_called()
         recorder.assert_not_called()
         self.assertFalse((self.root / "install").exists())
+
+    def test_a_relative_custom_shortcut_is_recorded_as_an_absolute_path(self):
+        """--uninstall accepts only an absolute recorded path, so a relative --shortcut is recorded absolute."""
+        with contextlib.chdir(self.root):
+            status, _, _, writer, recorder = self._run("--shortcut", "links/Nak.lnk")
+        self.assertEqual(status, 0)
+        expected = (self.root / "links" / "Nak.lnk").absolute()
+        self.assertEqual(writer.call_args.args[0], expected)
+        self.assertEqual(recorder.call_args.args[1], [expected])
 
     def test_each_shortcut_is_recorded_as_it_is_written(self):
         status, _, staging, writer, recorder = self._run("--desktop-shortcut", "--start-menu-shortcut")
@@ -406,6 +571,7 @@ class LinuxInstallTests(unittest.TestCase):
         self.addCleanup(self._temp.cleanup)
         self.root = Path(self._temp.name)
         self.repo = _fixture_repo(self.root)
+        _add_player_assets(self.repo)
         self.player = self.root / "nakagawa_player"
         self.player.write_bytes(b"player")
         # A space in the data home exercises quoting of every path the entry holds.
@@ -447,11 +613,27 @@ class LinuxInstallTests(unittest.TestCase):
         dest = self.root / "install"
         record = stage_install.stage_install(dest, self.player, repo=self.repo)
         self.assertEqual(record["runtime_stage"], "SKIPPED_NOT_PE")
-        self.assertEqual(record["runtime_files"], [])
+        self.assertFalse([name for name in record["runtime_files"] if name.lower().endswith(".dll")])
         self.assertEqual(record["player"], "bin/nakagawa_player")
         self.assertTrue((dest / "bin" / "nakagawa_player").is_file())
-        self.assertEqual([p.name for p in (dest / "bin").iterdir()], ["nakagawa_player"])
+        self.assertEqual(sorted(p.name for p in (dest / "bin").iterdir()), ["assets", "nakagawa_player"])
         self.assertTrue((dest / "source" / "tools" / "nk_cli.py").is_file())
+
+    def test_linux_install_carries_the_launcher_fonts_music_and_redump_list(self):
+        """The player reads its UI fonts from beside itself; without them the launcher is unavailable."""
+        dest = self.root / "install"
+        record = stage_install.stage_install(dest, self.player, repo=self.repo)
+        fonts = sorted(path.relative_to(self.repo / "assets" / "fonts" / "ui").as_posix()
+                       for path in (self.repo / "assets" / "fonts" / "ui").rglob("*") if path.is_file())
+        self.assertTrue(fonts)
+        for font in fonts:
+            self.assertTrue((dest / "bin" / "assets" / "fonts" / "ui" / font).is_file(), font)
+        self.assertTrue((dest / "bin" / stage_runtime_dlls.LAUNCHER_MUSIC_TRACK).is_file())
+        self.assertTrue((dest / "bin" / "assets" / "redump" / "redump-psp.zip").is_file())
+        self.assertIn("assets/redump/redump-psp.zip", record["runtime_files"])
+        self.assertIn(stage_runtime_dlls.LAUNCHER_MUSIC_TRACK.as_posix(), record["runtime_files"])
+        # The marker it writes still passes the uninstall checks.
+        self.assertIn(dest / "bin", stage_install.plan_uninstall(dest)["remove"])
 
     def test_desktop_entry_is_a_parsable_ini_with_quoted_exec(self):
         dest = self.root / "Nakagawa Recomp"
@@ -604,7 +786,7 @@ class PortableZipTests(unittest.TestCase):
 
     def test_epoch_comes_from_the_argument_then_the_environment_then_the_commit(self):
         repo = _fixture_repo(self.root)
-        env = {**os.environ, **_GIT_ENV, "GIT_COMMITTER_DATE": "@1790000000 +0000"}
+        env = _fixture_git_env(GIT_COMMITTER_DATE="@1790000000 +0000")
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "dated"],
                        check=True, env=env, capture_output=True)
         resolve = stage_install.resolve_source_date_epoch
@@ -970,6 +1152,52 @@ class UninstallTests(unittest.TestCase):
         stage_install.uninstall(self.dest)
         self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
         self.assertFalse(junction.exists())
+
+    @unittest.skipUnless(os.name == "nt", "directory junctions are a Windows feature")
+    def test_a_bin_old_junction_is_removed_not_searched(self):
+        """A junction is not is_symlink() on Windows; one named bin.old must not make another folder's
+        files look like a leftover bin/ whose non-portable entries are deleted."""
+        outside = self.root / "elsewhere"
+        (outside / "data").mkdir(parents=True)
+        (outside / "data" / "keep.sav").write_bytes(b"save")
+        (outside / "keep.txt").write_text("keep", encoding="utf-8")
+        junction = self.dest / "bin.old"
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+                              capture_output=True, text=True, check=False)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        stage_install.uninstall(self.dest)
+        self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
+        self.assertEqual((outside / "data" / "keep.sav").read_bytes(), b"save")
+        self.assertFalse(junction.exists() or junction.is_junction())
+
+    def _record_custom_shortcut(self, name="Nak.lnk"):
+        custom = self.shortcuts / name
+        custom.write_bytes(b"lnk")
+        stage_install.record_integration(self.dest, [custom])
+        return custom
+
+    def test_a_custom_named_shortcut_that_starts_this_install_is_removed(self):
+        """A shortcut written with --shortcut <own name> is recorded, so uninstall removes it too."""
+        custom = self._record_custom_shortcut()
+        player = str(self.dest / "bin" / "nakagawa_player.exe")
+        with mock.patch.object(stage_install, "IS_WINDOWS", True), \
+                mock.patch.object(stage_install, "read_shortcut_target", return_value=player):
+            summary = stage_install.uninstall(self.dest)
+        self.assertFalse(custom.exists())
+        self.assertIn(str(custom), summary["removed_integration"])
+        self.assertEqual(summary["skipped_integration"], [])
+
+    def test_a_custom_named_path_that_is_not_this_install_shortcut_is_kept(self):
+        other = str(self.root / "other" / "bin" / "nakagawa_player.exe")
+        custom = self._record_custom_shortcut()
+        notes = self._record_custom_shortcut("notes.txt")
+        with mock.patch.object(stage_install, "IS_WINDOWS", True), \
+                mock.patch.object(stage_install, "read_shortcut_target", return_value=other) as reader:
+            summary = stage_install.uninstall(self.dest)
+        self.assertTrue(custom.is_file())
+        self.assertTrue(notes.is_file())
+        self.assertCountEqual(summary["skipped_integration"], [str(custom), str(notes)])
+        reader.assert_called_once_with(custom)  # never asked what a file that is no .lnk starts
 
     def _rewrite_marker(self, change):
         marker = self.dest / stage_install.MARKER

@@ -264,7 +264,11 @@ def _assignments(text: str) -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     pattern = re.compile(r"^(?:override\s+)?([A-Za-z0-9_.-]+)\s*(?::=|\?=|\+=|=)\s*(.*)$", re.M)
     for name, value in pattern.findall(text):
-        found.setdefault(name, []).append(value)
+        values = found.setdefault(name, [])
+        # The same value assigned twice is one alternative; joining both copies
+        # would split a flag such as -I$(DIR)/include into "-Idir dir/include".
+        if value not in values:
+            values.append(value)
     return found
 
 
@@ -370,6 +374,25 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
         self.assertTrue(_has_flag(recipe, "-DSR_SCHED_LIVENESS_TEST"))
         self.assertFalse(_has_flag(recipe, "-DSR_SCHED_LIVENESS"))
         self.assertFalse(_has_flag(recipe, "-DSR_HLE_THREAD_SELFTEST"))
+
+    def test_sources_that_include_vendored_headers_compile_clean(self) -> None:
+        """The achievements and CHD sources find their vendored headers.
+
+        Failing before: strict-c-compile reported ``rc_client.h`` and
+        ``libchdr/chd.h`` as missing for any change to these files, a FAIL the
+        build never sees.
+        """
+        compiler = contrib_check.find_tool("gcc") or contrib_check.find_tool("cc")
+        if compiler is None:
+            self.skipTest("no C compiler on PATH")
+        for source in ("src/core/nk_achievements.c", "src/core/nk_disc_chd.c",
+                       "tests/native/test_disc_expand.c"):
+            with self.subTest(source=source):
+                command, reason = contrib_check.strict_compile_command(compiler, source, [])
+                self.assertEqual(reason, "")
+                assert command is not None
+                result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=600)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_a_selftest_is_compiled_with_its_own_defines(self) -> None:
         command, reason = contrib_check.strict_compile_command("cc", "tests/native/hle_thread_selftest.c", [])
