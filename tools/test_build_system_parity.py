@@ -280,7 +280,8 @@ class BuildSystemParityTests(unittest.TestCase):
 
     def test_readiness_workdir_is_not_shared_by_sibling_checkouts(self) -> None:
         """The attestation writes and reads back policy and ledger files in its workdir, so two
-        checkouts under one parent (C:/nk/worktrees/<a> and <b>) must not default to one folder."""
+        checkouts under one parent folder (worktrees <parent>/<a> and <parent>/<b>) must not
+        default to one folder."""
         lines = self._readiness_dry_run()
         verify = [line for line in lines if "tools/provenance_attest_verify.py" in line]
         self.assertEqual(len(verify), 1, lines)
