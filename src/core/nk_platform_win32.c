@@ -7,6 +7,7 @@
 #include "nk_data_migrate.h"
 #include "nk_types.h"
 #include <windows.h>
+#include <sddl.h>
 #include <wincred.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -664,8 +665,58 @@ static bool guest_memory_channel_size(size_t arena_size, SIZE_T *view_size) {
     return (size_t)*view_size == total;
 }
 
+/* The channel's section is the game's whole memory and its events pace every frame. The default
+ * descriptor lets any process of this user open them, and its implicit label forbids a lower
+ * integrity level only to write: such a process could read the arena. These objects allow this
+ * user alone, and their label forbids a lower level to read or write. LocalFree the result. */
+static PSECURITY_DESCRIPTOR guest_memory_channel_security(void) {
+    HANDLE token = NULL;
+    union {
+        TOKEN_USER user;
+        BYTE bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    } user;
+    union {
+        TOKEN_MANDATORY_LABEL label;
+        BYTE bytes[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+    } level;
+    DWORD got = 0u;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return NULL;
+    const bool queried =
+        GetTokenInformation(token, TokenUser, &user, sizeof user, &got) &&
+        GetTokenInformation(token, TokenIntegrityLevel, &level, sizeof level, &got);
+    CloseHandle(token);
+    if (!queried) return NULL;
+    LPWSTR user_sid = NULL, level_sid = NULL;
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    if (ConvertSidToStringSidW(user.user.User.Sid, &user_sid) &&
+        ConvertSidToStringSidW(level.label.Label.Sid, &level_sid)) {
+        WCHAR sddl[512];
+        const int length = swprintf(sddl, sizeof sddl / sizeof sddl[0],
+                                    L"D:P(A;;GA;;;%ls)S:(ML;;NWNR;;;%ls)", user_sid, level_sid);
+        if (length <= 0 || (size_t)length >= sizeof sddl / sizeof sddl[0] ||
+            !ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1,
+                                                                  &descriptor, NULL))
+            descriptor = NULL;
+    }
+    if (user_sid) LocalFree(user_sid);
+    if (level_sid) LocalFree(level_sid);
+    return descriptor;
+}
+
+/* A name another process made first is not this channel's: it could release or stall frames. */
+static HANDLE guest_memory_channel_new_event(SECURITY_ATTRIBUTES *security, BOOL manual_reset,
+                                             const WCHAR *name) {
+    SetLastError(ERROR_SUCCESS);
+    HANDLE event = CreateEventW(security, manual_reset, FALSE, name);
+    if (event && GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(event);
+        return NULL;
+    }
+    return event;
+}
+
 static bool guest_memory_channel_open_events(NkGuestMemoryChannel *channel,
-                                             const char *name, bool create) {
+                                             const char *name, SECURITY_ATTRIBUTES *create) {
     char frame_name[256], ack_name[256], stop_name[256];
     WCHAR frame_wide[256], ack_wide[256], stop_wide[256];
     if (!guest_memory_channel_names(name, frame_name, sizeof frame_name,
@@ -677,9 +728,9 @@ static bool guest_memory_channel_open_events(NkGuestMemoryChannel *channel,
         return false;
     }
     if (create) {
-        channel->frame_event = CreateEventW(NULL, FALSE, FALSE, frame_wide);
-        channel->ack_event = CreateEventW(NULL, FALSE, FALSE, ack_wide);
-        channel->stop_event = CreateEventW(NULL, TRUE, FALSE, stop_wide);
+        channel->frame_event = guest_memory_channel_new_event(create, FALSE, frame_wide);
+        channel->ack_event = guest_memory_channel_new_event(create, FALSE, ack_wide);
+        channel->stop_event = guest_memory_channel_new_event(create, TRUE, stop_wide);
     } else {
         channel->frame_event = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, frame_wide);
         channel->ack_event = OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, ack_wide);
@@ -698,17 +749,25 @@ bool nk_platform_guest_memory_channel_create(NkGuestMemoryChannel *channel,
         !guest_memory_channel_size(arena_size, &view_size) ||
         !utf8_to_wide(name, wide_name, sizeof wide_name / sizeof wide_name[0])) return false;
 
-    HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+    SECURITY_ATTRIBUTES security;
+    memset(&security, 0, sizeof security);
+    security.nLength = sizeof security;
+    security.lpSecurityDescriptor = guest_memory_channel_security();
+    security.bInheritHandle = FALSE;
+    if (!security.lpSecurityDescriptor) return false;
+    SetLastError(ERROR_SUCCESS);
+    HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE,
                                         (DWORD)((uint64_t)view_size >> 32),
                                         (DWORD)(uint64_t)view_size, wide_name);
-    if (!mapping) return false;
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(mapping);
+    if (!mapping || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (mapping) CloseHandle(mapping);
+        LocalFree(security.lpSecurityDescriptor);
         return false;
     }
     channel->mapping_handle = mapping;
     channel->view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, view_size);
     if (!channel->view) {
+        LocalFree(security.lpSecurityDescriptor);
         nk_platform_guest_memory_channel_close(channel);
         return false;
     }
@@ -722,7 +781,9 @@ bool nk_platform_guest_memory_channel_create(NkGuestMemoryChannel *channel,
                               (LONG)NK_GUEST_MEMORY_NOTIFICATION_RING);
     (void)InterlockedExchange((volatile LONG *)&channel->control->owner_pid,
                               (LONG)GetCurrentProcessId());
-    if (!guest_memory_channel_open_events(channel, name, true)) {
+    const bool events = guest_memory_channel_open_events(channel, name, &security);
+    LocalFree(security.lpSecurityDescriptor);
+    if (!events) {
         nk_platform_guest_memory_channel_close(channel);
         return false;
     }
@@ -761,7 +822,7 @@ bool nk_platform_guest_memory_channel_open(NkGuestMemoryChannel *channel,
         nk_platform_guest_memory_channel_close(channel);
         return false;
     }
-    if (!guest_memory_channel_open_events(channel, name, false)) {
+    if (!guest_memory_channel_open_events(channel, name, NULL)) {
         nk_platform_guest_memory_channel_close(channel);
         return false;
     }
@@ -891,12 +952,14 @@ bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *ch
     const bool ring = InterlockedCompareExchange(
         (volatile LONG *)&control->notification_ring_slots, 0, 0) ==
         (LONG)NK_GUEST_MEMORY_NOTIFICATION_RING;
-    /* The oldest unread message the ring still holds, or the newest from a player without it. */
+    /* The oldest unread message the ring still holds, or the newest from a player without it.
+     * The player writes message n + RING into the slot of message n while the sequence still
+     * reads n + RING - 1, so at sequence s only messages s - RING + 2 to s are whole. */
     uint32_t wanted = before;
     if (ring) {
         wanted = *seen_sequence + 1u;
-        if (before - wanted >= NK_GUEST_MEMORY_NOTIFICATION_RING)
-            wanted = before - (NK_GUEST_MEMORY_NOTIFICATION_RING - 1u);
+        if (before - wanted >= NK_GUEST_MEMORY_NOTIFICATION_RING - 1u)
+            wanted = before - (NK_GUEST_MEMORY_NOTIFICATION_RING - 2u);
     }
     char copy[NK_GUEST_MEMORY_NOTIFICATION_MAX];
     memcpy(copy, ring ? control->notification_ring[wanted % NK_GUEST_MEMORY_NOTIFICATION_RING]
@@ -905,7 +968,7 @@ bool nk_platform_guest_memory_channel_read_notification(NkGuestMemoryChannel *ch
     const uint32_t after = (uint32_t)InterlockedCompareExchange(
         (volatile LONG *)&control->notification_sequence, 0, 0);
     /* Written over while it was copied: the next call reads again. */
-    if (ring ? after - wanted >= NK_GUEST_MEMORY_NOTIFICATION_RING : before != after)
+    if (ring ? after - wanted >= NK_GUEST_MEMORY_NOTIFICATION_RING - 1u : before != after)
         return false;
     copy[sizeof copy - 1u] = 0;
     snprintf(text, text_size, "%s", copy);

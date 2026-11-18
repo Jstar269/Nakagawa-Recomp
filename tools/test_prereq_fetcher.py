@@ -1615,6 +1615,10 @@ class TestNetworkEgressAllowlist(unittest.TestCase):
         assert host is not None
         self.assertEqual(host.group(1), ACHIEVEMENTS_HOST)
         self.assertIsNotNone(prefix, "NK_ACH_URL_PREFIX must be https://NK_ACH_HOST/")
+        # docs/SETUP.md "Network use" lists the host and says the feature is off by default.
+        setup = (REPO_ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+        self.assertIn(f"`{ACHIEVEMENTS_HOST}`", setup)
+        self.assertIn("**RetroAchievements** is off by default.", setup)
         # No other host literal in the bridge: the gate is the one place a host is named.
         bridge = (REPO_ROOT / "src" / "core" / "nk_achievements.c").read_text(encoding="utf-8")
         self.assertEqual(re.findall(r"https?://[A-Za-z0-9.-]+", bridge), [])

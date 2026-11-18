@@ -17,6 +17,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <aclapi.h>
+#endif
 
 static int g_failures;
 #define CHECK(cond, ...)                                                                     \
@@ -1751,14 +1755,16 @@ static void test_notifications_are_read_in_order(void) {
                                                               sizeof text),
           "then nothing");
 
-    /* More than the ring holds while the runtime reads none: the newest ones, in order. */
+    /* More than the ring holds while the runtime reads none: the newest ones, in order. The
+     * oldest slot is the one the player writes next, so a reader that far behind keeps one
+     * message fewer than the ring has slots. */
     const unsigned sent = NK_GUEST_MEMORY_NOTIFICATION_RING + 3u;
     for (unsigned i = 0u; i < sent; i++) {
         char message[32];
         snprintf(message, sizeof message, "message %u", i);
         CHECK(nk_platform_guest_memory_channel_notify(&channel, message), "notify %u", i);
     }
-    for (unsigned i = sent - NK_GUEST_MEMORY_NOTIFICATION_RING; i < sent; i++) {
+    for (unsigned i = sent - (NK_GUEST_MEMORY_NOTIFICATION_RING - 1u); i < sent; i++) {
         char expected[32];
         snprintf(expected, sizeof expected, "message %u", i);
         CHECK(nk_platform_guest_memory_channel_read_notification(&channel, &seen, text,
@@ -1771,6 +1777,117 @@ static void test_notifications_are_read_in_order(void) {
           "and nothing after the newest");
     nk_platform_guest_memory_channel_close(&channel);
 }
+
+/* The player writes message n + 1 into its ring slot before it publishes n + 1, so while the
+ * sequence reads n that slot, the slot of message n + 1 - RING, may be half written. A runtime
+ * that fell that far behind starts at the next message: a toast is never part of one message
+ * and part of another. */
+static void test_a_message_being_written_is_not_read(void) {
+    char channel_name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
+    NkGuestMemoryChannel channel;
+    snprintf(channel_name, sizeof channel_name,
+             "Local\\NakagawaRecomp.Selftest.GuestMemoryTorn.%lu", nk_platform_process_id());
+    const bool created = nk_platform_guest_memory_channel_create(&channel, channel_name,
+                                                                 CHANNEL_ARENA);
+#ifdef _WIN32
+    CHECK(created, "the guest-memory channel is created");
+#endif
+    if (!created) {
+        printf("test_nk_achievements: SKIP the message being written: this host has no "
+               "guest-memory channel\n");
+        return;
+    }
+    uint32_t seen = 0u;
+    char text[NK_GUEST_MEMORY_NOTIFICATION_MAX];
+    for (unsigned i = 1u; i <= NK_GUEST_MEMORY_NOTIFICATION_RING; i++) {
+        char message[32];
+        snprintf(message, sizeof message, "message %u", i);
+        CHECK(nk_platform_guest_memory_channel_notify(&channel, message), "notify %u", i);
+    }
+    /* The player has begun message RING + 1 in the slot of message 1: its first bytes are in,
+     * the sequence is not yet raised. */
+    memcpy(channel.control->notification_ring[(NK_GUEST_MEMORY_NOTIFICATION_RING + 1u) %
+                                              NK_GUEST_MEMORY_NOTIFICATION_RING],
+           "TORN", 4u);
+    for (unsigned i = 2u; i <= NK_GUEST_MEMORY_NOTIFICATION_RING; i++) {
+        char expected[32];
+        snprintf(expected, sizeof expected, "message %u", i);
+        CHECK(nk_platform_guest_memory_channel_read_notification(&channel, &seen, text,
+                                                                 sizeof text) &&
+                  strcmp(text, expected) == 0,
+              "the slot being written is skipped: %s (read \"%s\")", expected, text);
+    }
+    CHECK(!nk_platform_guest_memory_channel_read_notification(&channel, &seen, text,
+                                                              sizeof text),
+          "and nothing after the newest");
+    nk_platform_guest_memory_channel_close(&channel);
+}
+
+#ifdef _WIN32
+/* The section is the game's whole memory and its events pace every frame. Only this user's
+ * processes at this integrity level or above may open them: the default descriptor's implicit
+ * label forbids a lower level only to write. A "<name>.ack" made by another process first would
+ * release or stall the runtime's frames, so a name that already exists is refused. */
+static void test_channel_objects_belong_to_this_user(void) {
+    char channel_name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX];
+    char ack_name[NK_GUEST_MEMORY_CHANNEL_NAME_MAX + 8u];
+    NkGuestMemoryChannel channel;
+    snprintf(channel_name, sizeof channel_name,
+             "Local\\NakagawaRecomp.Selftest.GuestMemorySecurity.%lu", nk_platform_process_id());
+    snprintf(ack_name, sizeof ack_name, "%s.ack", channel_name);
+    HANDLE squatter = CreateEventA(NULL, FALSE, FALSE, ack_name);
+    CHECK(squatter != NULL, "another process makes the acknowledgement event first");
+    bool created = nk_platform_guest_memory_channel_create(&channel, channel_name, CHANNEL_ARENA);
+    CHECK(!created, "a channel whose event already exists is refused");
+    if (created) nk_platform_guest_memory_channel_close(&channel);
+    if (squatter) CloseHandle(squatter);
+
+    created = nk_platform_guest_memory_channel_create(&channel, channel_name, CHANNEL_ARENA);
+    CHECK(created, "the channel is created once the name is free");
+    if (!created) return;
+    HANDLE token = NULL;
+    union {
+        TOKEN_USER user;
+        BYTE bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    } user;
+    DWORD got = 0u;
+    const bool have_user = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) &&
+                           GetTokenInformation(token, TokenUser, &user, sizeof user, &got);
+    if (token) CloseHandle(token);
+    CHECK(have_user, "this process's user");
+    void *objects[4] = {channel.mapping_handle, channel.frame_event, channel.ack_event,
+                        channel.stop_event};
+    for (unsigned i = 0u; i < 4u && have_user; i++) {
+        PSECURITY_DESCRIPTOR descriptor = NULL;
+        PACL dacl = NULL, sacl = NULL;
+        const DWORD read = GetSecurityInfo((HANDLE)objects[i], SE_KERNEL_OBJECT,
+                                           DACL_SECURITY_INFORMATION |
+                                               LABEL_SECURITY_INFORMATION,
+                                           NULL, NULL, &dacl, &sacl, &descriptor);
+        CHECK(read == ERROR_SUCCESS, "object %u: its descriptor is read", i);
+        bool no_read_up = false;
+        bool user_only = read == ERROR_SUCCESS && dacl && dacl->AceCount > 0u;
+        for (DWORD a = 0u; read == ERROR_SUCCESS && sacl && a < sacl->AceCount; a++) {
+            void *ace = NULL;
+            if (GetAce(sacl, a, &ace) &&
+                ((ACE_HEADER *)ace)->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE &&
+                (((SYSTEM_MANDATORY_LABEL_ACE *)ace)->Mask & SYSTEM_MANDATORY_LABEL_NO_READ_UP))
+                no_read_up = true;
+        }
+        for (DWORD a = 0u; user_only && a < dacl->AceCount; a++) {
+            void *ace = NULL;
+            if (!GetAce(dacl, a, &ace) ||
+                ((ACE_HEADER *)ace)->AceType != ACCESS_ALLOWED_ACE_TYPE ||
+                !EqualSid((PSID)&((ACCESS_ALLOWED_ACE *)ace)->SidStart, user.user.User.Sid))
+                user_only = false;
+        }
+        CHECK(no_read_up, "object %u: a lower integrity level cannot read it", i);
+        CHECK(user_only, "object %u: only this user's processes may open it", i);
+        if (descriptor) LocalFree(descriptor);
+    }
+    nk_platform_guest_memory_channel_close(&channel);
+}
+#endif
 
 int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--runtime-child") == 0)
@@ -1807,6 +1924,10 @@ int main(int argc, char **argv) {
     RUN_RAM(test_long_titles_are_cut_at_a_character);
     RUN(test_frames_are_served_while_the_event_loop_is_stalled);
     RUN(test_notifications_are_read_in_order);
+    RUN(test_a_message_being_written_is_not_read);
+#ifdef _WIN32
+    RUN(test_channel_objects_belong_to_this_user);
+#endif
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);
