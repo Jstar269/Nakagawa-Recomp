@@ -530,6 +530,34 @@ class HstManagerManifestTests(unittest.TestCase):
         control["make"]["build_dir"] = "bad\npath"
         assert_helper_rejects(json.dumps(control))
 
+    def test_difffunc_failures_exit_nonzero(self) -> None:
+        # A script driving DiffFunc reads its exit status: a missing argument, a missing
+        # executable or oracle, and a failed comparison are all failures, never exit 0.
+        for name, overrides in (
+            ("no target", {}),
+            ("no oracle", {"DiffTarget": "f_08804000"}),
+            ("missing oracle and executable", {"DiffTarget": "f_08804000", "DiffOracle": str(self.root / "missing.trace")}),
+        ):
+            with self.subTest(case=name):
+                proc = self.run_manager("DiffFunc", **overrides)
+                blob = proc.stdout + proc.stderr
+                self.assertNotIn("FATAL SCRIPT ERROR", blob)
+                self.assertEqual(proc.returncode, 1, blob)
+        self.assert_no_make()
+
+    def test_clean_without_a_manifest_rejects_a_game_name_that_is_a_path(self) -> None:
+        # Clean force-stops every process running build\<GameName>\<GameName>.exe, so a
+        # GameName with ..\ segments would aim it at a program outside the workspace.
+        proc = self.run_manager(
+            "Clean",
+            TitleManifest=str(self.root / "no-such-manifest.json"),
+            GameName="..\\..\\outside\\probe",
+        )
+        blob = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 1, blob)
+        self.assertIn("is not a portable build identifier", blob)
+        self.assertNotIn("Local tracking files cleared", blob)
+
     def test_nonzero_python_planner_is_rejected_without_make(self) -> None:
         # The stand-in planner must be directly executable on this host. A .cmd file is
         # not executable under PowerShell on Linux: pwsh hands it to xdg-open, which can
