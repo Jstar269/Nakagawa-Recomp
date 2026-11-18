@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import os
+import posixpath
 import fnmatch
 from pathlib import Path, PurePosixPath
 import re
@@ -35,6 +36,7 @@ from publication_policy import (  # noqa: E402
     load_policy,
 )
 from provenance_ledger import claims_ledger_bytes, is_claims_ledger  # noqa: E402
+from public_export import content_digest as export_content_digest  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -167,8 +169,12 @@ KEYSTORE_CONTENT_MARKER = "nakagawa-psp-keystore"
 #: Source and prose files may legitimately name the KeyStore format itself.
 KEYSTORE_MARKER_TEXT_EXEMPT = {".c", ".h", ".py", ".md"}
 
+# A drive path's separator is one backslash or a run of them: JSON, C and Python string
+# literals store each separator doubled, and that is the form a path takes in a committed
+# manifest or settings file. A UNC path is matched in its plain form only: tracked native
+# tests spell synthetic shares and named-pipe device paths as escaped C literals.
 WINDOWS_USER_PATH = re.compile(
-    r"[a-zA-Z]:\\(?:" + r"Us" + r"ers|Documents and Settings)\\[^\s\\/]+",
+    r"[a-zA-Z]:\\+(?:" + r"Us" + r"ers|Documents and Settings)\\+[^\s\\/]+",
     re.IGNORECASE,
 )
 POSIX_USER_PATH = re.compile(r"/(?:" + r"ho" + r"me|Us" + r"ers)/[^\s/]+")
@@ -180,9 +186,19 @@ ONEDRIVE_PATH = re.compile(
     re.IGNORECASE,
 )
 TEMP_PATH = re.compile(
-    r"(?:/tm" + r"p/|/var/tm" + r"p/|[a-zA-Z]:\\(?:[^\s\\/]+\\)*(?:Windows\\Te" + r"mp|AppData\\Local\\Te" + r"mp)\\)[a-zA-Z0-9_.-]+",
+    r"(?:/tm" + r"p/|/var/tm" + r"p/|[a-zA-Z]:\\+(?:[^\s\\/]+\\+)*(?:Windows\\+Te" + r"mp|AppData\\+Local\\+Te" + r"mp)\\+)[a-zA-Z0-9_.-]+",
     re.IGNORECASE,
 )
+
+
+def _private_root_spellings(root: str) -> set[str]:
+    """A private root in its slash, backslash and escaped-backslash spellings.
+
+    JSON, C and Python literals store each backslash doubled, so a root named in a
+    committed manifest or settings file appears with doubled separators.
+    """
+    backslashed = root.replace("/", "\\")
+    return {root, root.replace("\\", "/"), backslashed, backslashed.replace("\\", "\\\\")}
 
 #: Technical debt management ceilings (Finding 11 O-11).
 #: Ceilings are non-increasing: counts must not rise without explicit budget edit and rationale.
@@ -298,22 +314,35 @@ def parse_secret_scan_report(report_path: Path) -> list[Finding]:
     try:
         with report_path.open("r", encoding="utf-8") as stream:
             leaks = json.load(stream)
-            if isinstance(leaks, list):
-                for leak in leaks:
-                    rule_id = leak.get("RuleID", leak.get("ruleID", "unknown-rule"))
-                    file_p = leak.get("File", leak.get("file", "unknown-file"))
-                    start_line = leak.get("StartLine", leak.get("startLine", 0))
-                    commit_val = leak.get("Commit", leak.get("commit", "uncommitted"))
-                    detail = f"Rule: {rule_id}; Line: {start_line}; Commit: {commit_val} [REDACTED]"
-                    findings.append(Finding("SECRET_SCAN_LEAK", file_p, detail))
+        if not isinstance(leaks, list):
+            # A crashed scanner, a format change or a SARIF/object report would otherwise read as
+            # a clean scan: only a JSON list of leak objects is a report this gate understands.
+            return [
+                Finding(
+                    "SECRET_SCAN_PARSE",
+                    str(report_path),
+                    f"secret scanner report root is {type(leaks).__name__}, not a JSON list of leaks",
+                )
+            ]
+        for index, leak in enumerate(leaks):
+            if not isinstance(leak, dict):
+                findings.append(
+                    Finding(
+                        "SECRET_SCAN_PARSE",
+                        str(report_path),
+                        f"secret scanner report entry {index} is {type(leak).__name__}, not a JSON object",
+                    )
+                )
+                continue
+            rule_id = leak.get("RuleID", leak.get("ruleID", "unknown-rule"))
+            file_p = str(leak.get("File", leak.get("file", "unknown-file")))
+            start_line = leak.get("StartLine", leak.get("startLine", 0))
+            commit_val = leak.get("Commit", leak.get("commit", "uncommitted"))
+            detail = f"Rule: {rule_id}; Line: {start_line}; Commit: {commit_val} [REDACTED]"
+            findings.append(Finding("SECRET_SCAN_LEAK", file_p, detail))
     except Exception as exc:
         findings.append(Finding("SECRET_SCAN_PARSE", str(report_path), f"failed to parse secret scanner report: {exc}"))
     return findings
-
-
-def parse_gitleaks_report(report_path: Path) -> list[Finding]:
-    """Backward-compatible alias for integrations using the old function name."""
-    return parse_secret_scan_report(report_path)
 
 
 def isolated_git_env(root: Path | None = None) -> dict[str, str]:
@@ -719,18 +748,30 @@ def _committed_entries(audit_root: Path, tree_entries: list[tuple[str, str, str]
     return sorted(entries, key=lambda entry: entry.path.lower())
 
 
+# Tool caches a candidate walk may skip. The candidate's own ignore rules alone never remove a
+# file: an exported file its .gitignore matches (``git add .`` leaves it untracked in the export
+# repository) is still release content and must be audited.
+CANDIDATE_TOOL_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+
+
+def _is_tool_cache_path(rel_path: str) -> bool:
+    return any(part in CANDIDATE_TOOL_CACHE_DIRS for part in rel_path.split("/")[:-1])
+
+
 def _prune_gitignored_untracked(entries: list[GitEntry], repo_root: Path) -> list[GitEntry]:
-    """Drop untracked files the candidate's own .gitignore excludes.
+    """Drop untracked tool-cache files the candidate's own .gitignore excludes.
 
     A materialized candidate is itself a working tree (the export generator
     initializes a fresh Git repository in it), so contributor tooling can
     leave gitignored scaffolding behind (e.g. ``.ruff_cache/`` after running
-    pre-commit). Such files are not release content; the candidate walk must
-    honor the tree's own ignore rules instead of reporting them as unknown
-    binaries. Tracked files are never pruned, even if a pattern happens to
-    match them.
+    pre-commit). Such files are not release content; the candidate walk
+    skips them instead of reporting their binary internals as unknown.
+    Only files below a ``CANDIDATE_TOOL_CACHE_DIRS`` directory are pruned,
+    and only when untracked and ignored: any other ignored file stays in the
+    audit, since the candidate's .gitignore is candidate-controlled. Tracked
+    files are never pruned, even if a pattern happens to match them.
     """
-    if not entries:
+    if not any(_is_tool_cache_path(entry.path) for entry in entries):
         return entries
     try:
         tracked = subprocess.run(
@@ -746,7 +787,7 @@ def _prune_gitignored_untracked(entries: list[GitEntry], repo_root: Path) -> lis
     if tracked.returncode != 0:
         return entries
     tracked_paths = {p.decode("utf-8", errors="replace") for p in tracked.stdout.split(b"\x00") if p}
-    candidates = [e for e in entries if e.path not in tracked_paths]
+    candidates = [e for e in entries if e.path not in tracked_paths and _is_tool_cache_path(e.path)]
     if not candidates:
         return entries
     stdin_data = "\n".join(e.path for e in candidates).encode("utf-8")
@@ -996,6 +1037,33 @@ def _decode_text_safe(data: bytes | None) -> str | None:
 _NON_PRINTABLE_CONTROL_BYTES = bytes(byte for byte in range(32) if byte not in b"\t\n\r")
 
 
+def _leak_scan_text(data: bytes) -> tuple[str, bool]:
+    """A lossy text view of bytes the text checks do not read, for the leak scans only.
+
+    A coloured console capture, BOM-less UTF-16 (Windows PowerShell redirection), Latin-1 text
+    or a binary-suffixed dump is classed as binary or undecodable, yet it can hold a user path
+    as plain characters. UTF-16 is decoded as UTF-16 (with a BOM, or when every second byte of
+    its first 512 is NUL); anything else as UTF-8 with replacement characters, which keeps
+    every ASCII run intact. The flag says whether the bytes are text in some encoding (UTF-16,
+    or NUL-free valid UTF-8 that only the control-byte heuristic called binary) rather than
+    opaque bytes: only text spells a key literal, and the literal parser is far too slow for
+    megabytes of binary.
+    """
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace"), True
+    head = data[:512]
+    if len(head) >= 4:
+        even, odd = head[0::2], head[1::2]
+        if odd.count(0) == len(odd) and even.count(0) == 0:
+            return data.decode("utf-16-le", errors="replace"), True
+        if even.count(0) == len(even) and odd.count(0) == 0:
+            return data.decode("utf-16-be", errors="replace"), True
+    try:
+        return data.decode("utf-8"), b"\x00" not in data
+    except UnicodeDecodeError:
+        return data.decode("utf-8", errors="replace"), False
+
+
 def _is_binary_bytes(data: bytes) -> bool:
     if b"\x00" in data:
         return True
@@ -1200,19 +1268,7 @@ def is_keystore_content(rel: str, text: str | None) -> bool:
     return PurePosixPath(rel).suffix.lower() not in KEYSTORE_MARKER_TEXT_EXEMPT
 
 
-def _magic_kind(path_or_bytes: Path | bytes | None, path: str = "") -> str | None:
-    if path_or_bytes is None:
-        return None
-    data: bytes | None = None
-    if isinstance(path_or_bytes, Path):
-        try:
-            with path_or_bytes.open("rb") as stream:
-                data = stream.read(65536)
-        except OSError:
-            return "unreadable file"
-    else:
-        data = path_or_bytes
-
+def _magic_kind(data: bytes | None, path: str = "") -> str | None:
     if not data:
         return None
     if data.startswith(b"\x7fELF"):
@@ -1271,8 +1327,15 @@ def _assigned_literal(node: ast.AST | None) -> str | None:
     return None
 
 
+#: Sources whose key literals take C syntax (an ``.inc`` holds C included by a ``.c``).
+C_LIKE_SUFFIXES = frozenset({".c", ".h", ".inc", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".m", ".mm"})
+
+#: A C integer constant's suffix (``0x00u``, ``255UL``); no hex digit is a suffix letter.
+_C_INTEGER_SUFFIX = re.compile(r"[uUlL]+$")
+
+
 def _is_16_byte_array_text(body: str) -> bool:
-    tokens = [t.strip() for t in body.split(",") if t.strip()]
+    tokens = [_C_INTEGER_SUFFIX.sub("", t.strip()) for t in body.split(",") if t.strip()]
     if len(tokens) != 16:
         return False
     for t in tokens:
@@ -1330,24 +1393,44 @@ def _c_key_assignment_lines(code: str) -> list[int]:
             elif array_val and _is_16_byte_array_text(array_val):
                 lines.append(clean[: m.start()].count("\n") + 1)
 
-    # 2. Variable declarations/assignments:
+    # 2. Variable declarations/assignments. A key table (``k[2][16] = {{...}, {...}}``) or
+    # a struct initializer nests its byte groups, so every innermost brace group of the
+    # initializer is checked, not only the text up to the first closing brace.
     var_pat = re.compile(
-        r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\[[^\]]*\])?\s*=\s*(?:(?:"
+        r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\[[^\]]*\])*\s*=\s*(?:(?:"
         r'"([0-9a-fA-F]{32})"'
-        r")|\{([^}]+)\})",
+        r")|(\{))",
         re.MULTILINE,
     )
     for m in var_pat.finditer(clean):
-        name = m.group(1)
-        hex_val = m.group(2)
-        array_val = m.group(3)
-        if KEY_NAME.search(name):
-            if hex_val:
-                lines.append(clean[: m.start()].count("\n") + 1)
-            elif array_val and _is_16_byte_array_text(array_val):
-                lines.append(clean[: m.start()].count("\n") + 1)
+        if not KEY_NAME.search(m.group(1)):
+            continue
+        if m.group(2) or any(
+            _is_16_byte_array_text(group) for group in _innermost_brace_groups(clean, m.start(3))
+        ):
+            lines.append(clean[: m.start()].count("\n") + 1)
 
     return sorted(set(lines))
+
+
+def _innermost_brace_groups(text: str, open_index: int) -> list[str]:
+    """The body of every brace group with no brace group inside it, in the balanced
+    initializer that opens at ``text[open_index]``."""
+    groups: list[str] = []
+    stack: list[list[int]] = []  # [start, holds a nested group]
+    for index in range(open_index, len(text)):
+        char = text[index]
+        if char == "{":
+            if stack:
+                stack[-1][1] = 1
+            stack.append([index, 0])
+        elif char == "}":
+            start, nested = stack.pop()
+            if not nested:
+                groups.append(text[start + 1:index])
+            if not stack:
+                break
+    return groups
 
 
 def _json_key_assignment_lines(text: str) -> list[int]:
@@ -1420,7 +1503,7 @@ def private_key_assignment_lines(text: str, filename: str = "") -> list[int]:
     ext = ""
     if filename:
         ext = PurePosixPath(filename).suffix.lower()
-    if ext in {".c", ".h"}:
+    if ext in C_LIKE_SUFFIXES:
         return _c_key_assignment_lines(text)
     if ext == ".json":
         return _json_key_assignment_lines(text)
@@ -1461,7 +1544,11 @@ SPDX_BYTE_EXACT_IMPORT_TREES = (
     # third_party/libchdr/PROVENANCE.md records every upstream blob).
     "third_party/libchdr/",
     # AMD FidelityFX SDK headers (MIT): the notice is in each header comment, without an SPDX
-    # line upstream; imported byte-identical (third_party/fidelityfx_sdk/PROVENANCE.md).
+    # line upstream. Imported byte-identical except three LOCAL DELTA headers (the FSR3 upscaler,
+    # frame-interpolation and optical-flow ``*_callbacks_hlsl.h``), which keep AMD's notice and
+    # carry a modification note; third_party/fidelityfx_sdk/PROVENANCE.md lists every file. The
+    # prefix also exempts any later edit or file under the tree, so a new LOCAL DELTA there must
+    # keep the upstream notice and add its modification note by hand.
     "third_party/fidelityfx_sdk/",
     # rcheevos 12.5.0 (MIT; its MD5 is zlib): the notices are in LICENSE and each header comment,
     # without SPDX lines upstream; imported byte-identical (third_party/rcheevos/PROVENANCE.md).
@@ -1785,9 +1872,61 @@ def _text(path: Path) -> str | None:
         return None
 
 
-def _notice_link_findings(repo_root: Path = ROOT) -> list[Finding]:
+class _IndexView:
+    """The staged tree an index audit publishes: its paths and their exact blob bytes.
+
+    An index audit checks what the commit would hold, so the whole-tree checks (required files,
+    NOTICE links, workflow action pins, debt budgets) read the index here instead of the
+    worktree, whose copies may differ from the staged blobs or exist only on disk. The audited
+    entries count too: an index audit that includes untracked files audits their disk bytes.
+    Outside a Git repository (a plain directory audited as untracked entries) there is no
+    index, and the view is exactly the audited entries.
+    """
+
+    def __init__(self, repo_root: Path, entries: list[GitEntry]) -> None:
+        self.repo_root = repo_root
+        self.content_map: dict[str, tuple[bytes | None, str | None]] = {}
+        try:
+            listed = _git_output(["ls-files", "-z", "--cached"], repo_root=repo_root)
+        except (OSError, RuntimeError):
+            listed = ""
+        self.paths = {path for path in listed.split("\x00") if path}
+        self.paths.update(entry.path for entry in entries)
+        self.dirs = {parent.as_posix() for path in self.paths for parent in PurePosixPath(path).parents}
+
+    def is_file(self, rel: str) -> bool:
+        return rel in self.paths
+
+    def exists(self, rel: str) -> bool:
+        rel = posixpath.normpath(rel)
+        return rel in self.paths or rel in self.dirs
+
+    def text(self, rel: str) -> str | None:
+        raw: bytes | None
+        if rel in self.content_map:
+            raw, _error = self.content_map[rel]
+        elif rel in self.paths:
+            proc = subprocess.run(
+                ["git", "cat-file", "blob", f":{rel}"],
+                cwd=self.repo_root,
+                env=isolated_git_env(root=self.repo_root),
+                capture_output=True,
+                check=False,
+            )
+            raw = proc.stdout if proc.returncode == 0 else None
+        else:
+            raw = None
+        if raw is None:
+            return None
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+
+def _notice_link_findings(repo_root: Path = ROOT, index_view: _IndexView | None = None) -> list[Finding]:
     notice = repo_root / "NOTICE.md"
-    text = _text(notice)
+    text = index_view.text("NOTICE.md") if index_view is not None else _text(notice)
     if text is None:
         return [Finding("NOTICE", "NOTICE.md", "missing or unreadable")]
     findings = []
@@ -1795,30 +1934,54 @@ def _notice_link_findings(repo_root: Path = ROOT) -> list[Finding]:
         if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE) or target.startswith("#"):
             continue
         target_path = target.split("#", 1)[0]
-        if target_path and not (notice.parent / target_path).exists():
+        if not target_path:
+            continue
+        if index_view is not None:
+            present = index_view.exists(target_path)
+        else:
+            present = (notice.parent / target_path).exists()
+        if not present:
             findings.append(Finding("NOTICE_LINK", "NOTICE.md", f"missing link target: {target_path}"))
     return findings
 
 
-def _action_pin_findings(repo_root: Path = ROOT, audited_paths: set[str] | None = None) -> list[Finding]:
+def _action_pin_findings(
+    repo_root: Path = ROOT,
+    audited_paths: set[str] | None = None,
+    index_view: _IndexView | None = None,
+) -> list[Finding]:
     findings = []
-    workflow_dir = repo_root / ".github" / "workflows"
-    if workflow_dir.is_dir():
-        for path in sorted(workflow_dir.glob("*.y*ml")):
-            rel = path.relative_to(repo_root).as_posix()
-            if audited_paths is not None and rel not in audited_paths:
-                continue
+    workflows: list[tuple[str, Path | None]] = []
+    if index_view is not None:
+        for rel in sorted(index_view.paths):
+            pure = PurePosixPath(rel)
+            if pure.parent.as_posix() == ".github/workflows" and fnmatch.fnmatchcase(pure.name, "*.y*ml"):
+                workflows.append((rel, None))
+    else:
+        workflow_dir = repo_root / ".github" / "workflows"
+        if workflow_dir.is_dir():
+            workflows = [(path.relative_to(repo_root).as_posix(), path) for path in sorted(workflow_dir.glob("*.y*ml"))]
+    for rel, path in workflows:
+        if audited_paths is not None and rel not in audited_paths:
+            continue
+        if path is not None:
             text = _text(path) or ""
-            for match in ACTION_USE.finditer(text):
-                use = match.group(1).strip("'\"")
-                if use.startswith(("./", "docker://")):
-                    continue
-                if not FULL_SHA_ACTION.fullmatch(use):
-                    findings.append(Finding("ACTION_PIN", rel, f"action is not pinned to a full SHA: {use}"))
+        else:
+            text = (index_view.text(rel) if index_view is not None else None) or ""
+        for match in ACTION_USE.finditer(text):
+            use = match.group(1).strip("'\"")
+            if use.startswith(("./", "docker://")):
+                continue
+            if not FULL_SHA_ACTION.fullmatch(use):
+                findings.append(Finding("ACTION_PIN", rel, f"action is not pinned to a full SHA: {use}"))
     return findings
 
 
-def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None) -> list[Finding]:
+def _debt_budget_findings(
+    repo_root: Path = ROOT,
+    paths: list[str] | None = None,
+    index_view: _IndexView | None = None,
+) -> list[Finding]:
     """Audit unmanaged debt surfaces against non-increasing budgets (Finding 11 O-11).
 
     Fails when any of the three measured surfaces (ruff select families,
@@ -1827,9 +1990,14 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
     findings: list[Finding] = []
 
     # 1. Ruff select rule families (pyproject.toml)
-    pyproject = repo_root / "pyproject.toml"
-    if pyproject.is_file():
-        text = _text(pyproject) or ""
+    def present(rel: str) -> bool:
+        return index_view.is_file(rel) if index_view is not None else (repo_root / rel).is_file()
+
+    def read(rel: str) -> str | None:
+        return index_view.text(rel) if index_view is not None else _text(repo_root / rel)
+
+    if present("pyproject.toml"):
+        text = read("pyproject.toml") or ""
         m = re.search(r"select\s*=\s*\[(.*?)\]", text, re.DOTALL)
         if m:
             items = re.findall(r'["\']([a-zA-Z0-9_-]+)["\']', m.group(1))
@@ -1870,10 +2038,9 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
     for rel in all_paths:
         if any(rel.startswith(p) for p in excluded_prefixes):
             continue
-        full_path = repo_root / rel
-        if not full_path.is_file():
+        if not present(rel):
             continue
-        file_text = _text(full_path)
+        file_text = read(rel)
         if file_text is None:
             continue
         for line in file_text.splitlines():
@@ -1892,10 +2059,9 @@ def _debt_budget_findings(repo_root: Path = ROOT, paths: list[str] | None = None
     for rel in all_paths:
         if not rel.endswith(".ps1"):
             continue
-        full_path = repo_root / rel
-        if not full_path.is_file():
+        if not present(rel):
             continue
-        script_text = _text(full_path)
+        script_text = read(rel)
         if script_text is None:
             continue
         script_count = len(ps_pat.findall(script_text))
@@ -2087,9 +2253,11 @@ def check_collisions(paths: list[str]) -> list[Finding]:
             findings.append(Finding("PATH_DANGEROUS_UNICODE", p, "path contains dangerous bidi override, zero-width, or BOM formatting character"))
 
         pure = PurePosixPath(p)
-        stem_lower = pure.stem.lower()
-        if stem_lower in RESERVED_WIN_NAMES:
-            findings.append(Finding("FILENAME_RESERVED", p, f"filename stem uses Windows reserved device name '{pure.stem}'"))
+        # Windows reads a reserved base name before ANY extension as the device (NUL.tar.gz is
+        # NUL), and ignores spaces before the first dot, so the base is cut at the first dot.
+        base_name = pure.name.split(".", 1)[0].rstrip(" ")
+        if base_name.lower() in RESERVED_WIN_NAMES:
+            findings.append(Finding("FILENAME_RESERVED", p, f"filename stem uses Windows reserved device name '{base_name}'"))
 
         name = pure.name
         if name.endswith(" ") or name.endswith("."):
@@ -2113,59 +2281,13 @@ def check_collisions(paths: list[str]) -> list[Finding]:
 
 
 def load_release_manifest(manifest_path: Path) -> tuple[dict[str, dict], list[Finding]]:
-    findings: list[Finding] = []
-    manifest_entries: dict[str, dict] = {}
+    """Parse a manifest file named on the command line; the parsing is load_release_manifest_bytes'."""
     if not manifest_path.is_file():
-        findings.append(Finding("MANIFEST_ERROR", str(manifest_path), "release manifest file is missing or unreadable"))
-        return manifest_entries, findings
-
+        return {}, [Finding("MANIFEST_ERROR", str(manifest_path), "release manifest file is missing or unreadable")]
     try:
-        with manifest_path.open("r", encoding="utf-8") as stream:
-            data = json.load(stream)
-            if not isinstance(data, dict) or "components" not in data or not isinstance(data["components"], list):
-                findings.append(Finding("MANIFEST_ERROR", str(manifest_path), "manifest missing valid 'components' array"))
-                return manifest_entries, findings
-
-            for comp in data["components"]:
-                if not isinstance(comp, dict):
-                    continue
-                sp = comp.get("source_path") or comp.get("provenance_path")
-                if sp:
-                    if sp in manifest_entries:
-                        findings.append(Finding("MANIFEST_DUPLICATE_PATH", sp, f"duplicate manifest entry for path {sp}"))
-                    manifest_entries[sp] = comp
-            for excluded in data.get("excluded_paths", []):
-                if isinstance(excluded, str):
-                    sp = excluded
-                    comp = {
-                        "id": f"policy-exclusion:{sp}",
-                        "source_path": sp,
-                        "type": "documentation",
-                        "presence": "excluded_from_public_profile",
-                        "disposition": "excluded_by_publication_policy",
-                        "public_scope_included": False,
-                    }
-                elif isinstance(excluded, dict):
-                    sp = excluded.get("path") or excluded.get("source_path")
-                    comp = {
-                        "id": excluded.get("id", f"policy-exclusion:{sp}"),
-                        "source_path": sp,
-                        "type": excluded.get("type", "documentation"),
-                        "presence": "excluded_from_public_profile",
-                        "disposition": excluded.get("disposition", "excluded_by_publication_policy"),
-                        "public_scope_included": False,
-                        "comment": excluded.get("comment", ""),
-                    }
-                else:
-                    continue
-                if isinstance(sp, str) and sp:
-                    if sp in manifest_entries:
-                        continue
-                    manifest_entries[sp] = comp
+        return load_release_manifest_bytes(manifest_path.read_bytes(), str(manifest_path))
     except Exception as exc:
-        findings.append(Finding("MANIFEST_ERROR", str(manifest_path), f"failed to load/parse manifest: {exc}"))
-
-    return manifest_entries, findings
+        return {}, [Finding("MANIFEST_ERROR", str(manifest_path), f"failed to load/parse manifest: {exc}")]
 
 
 def load_release_manifest_bytes(raw: bytes | None, display_path: str) -> tuple[dict[str, dict], list[Finding]]:
@@ -2253,16 +2375,28 @@ def _default_provenance(
     # Metadata-only classification below. Every branch returns ``policy_public``
     # for the publication flag: these prefixes describe what a file *is*, never
     # whether it may be published. Only the canonical policy decides that.
-    if rel_path in REQUIRED_PATHS or rel_path in ("NOTICE.md", "LICENSE", "README.md", "AGENTS.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "DEDICATION.md", "SECURITY.md", "TODO.md"):
+    if rel_path in ("NOTICE.md", "LICENSE", "README.md", "AGENTS.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "DEDICATION.md", "SECURITY.md", "TODO.md"):
         return "notice_doc", "GPL-3.0-or-later", rel_path if rel_path in ("LICENSE", "NOTICE.md") else "NOTICE.md", "documentation", "included", policy_public
 
     if rel_path.startswith("third_party/licenses/") and rel_path.count("/") == 2:
         return "notice_doc", "BSD-3-Clause", rel_path, "documentation", "included", policy_public
 
+    # A vendored component the release manifest does not list is not project-authored and not
+    # under the project's licence: its origin and licence are recorded in the component's own
+    # PROVENANCE.md manifest (AGENTS.md Section 4), which is the notice this metadata names.
+    if (
+        len(pure.parts) >= 3
+        and pure.parts[0] == "third_party"
+        and pure.parts[1] != "licenses"
+    ):
+        gen_kind = "documentation" if ext == ".md" else ("data" if ext in (".json", ".jsonc", ".dat") else "source")
+        notice = f"third_party/{pure.parts[1]}/PROVENANCE.md"
+        return "third_party_vendored", "NOASSERTION", notice, gen_kind, "included", policy_public
+
     if rel_path.startswith("assets/vfpu/"):
         return "ppsspp_derived", "GPL-2.0-or-later", "NOTICE.md", "data", "included", policy_public
 
-    if rel_path.startswith(".github/") or rel_path.startswith(".") or rel_path in (".gitignore", ".gitattributes", ".clang-format", ".editorconfig", ".markdownlint-cli2.jsonc", ".pre-commit-config.yaml"):
+    if rel_path.startswith("."):
         return "project_authored", "GPL-2.0-or-later", "NOTICE.md", "configuration", "included", policy_public
 
     # android/ is the Android host target (#360): Gradle, NDK, Java and manifest
@@ -2625,12 +2759,14 @@ def _export_content_findings(
     findings: list[Finding] = []
     included_all = [e for e in entries if policy.resolve(e.path).disposition == INCLUDED]
     included = [e for e in included_all if e.path != "PUBLIC_EXPORT.json"]
-    digest = hashlib.sha256()
-    for entry in sorted(included, key=lambda item: item.path):
+    # The generator's own digest over the bytes this audit read: one implementation, not two.
+    audited_files: list[tuple[str, bytes]] = []
+    for entry in included:
         raw, error = _source_control_bytes(entry.path, entries, content_map, content_source, repo_root)
         if raw is None or error:
             continue
-        digest.update(entry.path.encode("utf-8") + b"\0" + hashlib.sha256(raw).hexdigest().encode("ascii") + b"\n")
+        audited_files.append((entry.path, raw))
+    included_digest = export_content_digest(audited_files)
     # The tree-derived fields are optional in the committed control: they are
     # recomputed HERE from the exact bytes this audit read, which is the only
     # value that can be trusted, and committing them is what used to make every
@@ -2638,7 +2774,7 @@ def _export_content_findings(
     # against this recomputation, so a stale or forged one is still refused --
     # absence removes a conflict, not a check.
     recorded = export_document.get("included_content_sha256")
-    if recorded is not None and recorded != digest.hexdigest():
+    if recorded is not None and recorded != included_digest:
         findings.append(Finding("POLICY_EXPORT_STALE", "PUBLIC_EXPORT.json", "included-content digest does not match the audited bytes"))
     recorded_included = export_document.get("included_file_count", export_document.get("exported_file_count"))
     if recorded_included is not None and recorded_included != len(included_all):
@@ -2826,7 +2962,7 @@ def audit_entries_with_semantics(
                 raw_roots.append(root)
 
     for r in raw_roots:
-        for variant in {r, r.replace("\\", "/"), r.replace("/", "\\")}:
+        for variant in _private_root_spellings(r):
             all_private_root_patterns.append(
                 re.compile(re.escape(variant) + r"(?![A-Za-z0-9_.\-])", re.IGNORECASE)
             )
@@ -2843,17 +2979,22 @@ def audit_entries_with_semantics(
     except PolicyError as error:
         findings.append(Finding("POLICY_UNREADABLE", str(resolved_policy_path), str(error)))
 
-    # The canonical public-safe profile requires the full control set. A
-    # materialized candidate using a synthetic policy is also strict when the
-    # policy explicitly declares the same control paths; this keeps the
-    # hermetic fail-closed tests meaningful without making selected-file helper
-    # calls pretend to be release audits.
+    # The canonical public-safe profile requires the full control set, and so
+    # does any policy that declares the control paths: the profile's own name is
+    # candidate-controlled, so renaming it must not switch the control checks
+    # off. A materialized candidate whose policy declares the control paths is
+    # strict even for a selected-file audit; this keeps the hermetic fail-closed
+    # tests meaningful without making selected-file helper calls pretend to be
+    # release audits.
     control_paths = {"PUBLIC_EXPORT.json", "assets/public_source_profile.json", PROVENANCE_LEDGER_REL}
     controls_declared = policy is not None and control_paths.issubset(set(policy.include_paths))
     strict_controls = (
         policy is not None
         and (
-            (policy.name == "public-safe-v1" and (exhaustive or bool(control_paths.intersection(paths))))
+            (
+                (policy.name == "public-safe-v1" or controls_declared)
+                and (exhaustive or bool(control_paths.intersection(paths)))
+            )
             or (is_candidate_root and controls_declared)
         )
     )
@@ -2869,8 +3010,15 @@ def audit_entries_with_semantics(
     ))
     findings.extend(_untracked_tree_binding_findings(entries, expected_tree_sha, content_source))
 
+    # An index audit publishes the staged tree: a file kept on disk after `git rm --cached` is not
+    # in it, and a whole-tree check that read the disk would pass bytes the commit does not hold.
+    index_view = _IndexView(repo_root, entries) if content_source == CONTENT_INDEX else None
     for required in REQUIRED_PATHS:
-        if not (repo_root / required).is_file():
+        if index_view is not None:
+            present = index_view.is_file(required)
+        else:
+            present = (repo_root / required).is_file()
+        if not present:
             findings.append(Finding("REQUIRED", required, "required publication file is missing"))
 
     findings.extend(check_collisions(paths))
@@ -2881,6 +3029,8 @@ def audit_entries_with_semantics(
     content_map: dict[str, tuple[bytes | None, str | None]] = {}
     if content_source == CONTENT_INDEX:
         content_map = read_indexed_blobs_batch(entries, repo_root)
+        if index_view is not None:
+            index_view.content_map = content_map
     elif content_source == CONTENT_WORKTREE:
         content_map = read_worktree_blobs(entries, repo_root)
     elif content_source in (CONTENT_CANDIDATE, CONTENT_COMMITTED):
@@ -2897,16 +3047,7 @@ def audit_entries_with_semantics(
             canonical_manifest = manifest_path.resolve() == (repo_root / "assets" / "release_manifest.json").resolve()
         except OSError:
             canonical_manifest = manifest_path.as_posix().endswith("assets/release_manifest.json")
-        if content_source == CONTENT_INDEX and canonical_manifest:
-            manifest_raw, manifest_error = _source_control_bytes(
-                "assets/release_manifest.json", entries, content_map, content_source, repo_root
-            )
-            manifest_map, manifest_findings = load_release_manifest_bytes(
-                manifest_raw, "assets/release_manifest.json"
-            )
-            if manifest_error:
-                manifest_findings.append(Finding("MANIFEST_ERROR", "assets/release_manifest.json", manifest_error))
-        elif content_source in (CONTENT_WORKTREE, CONTENT_CANDIDATE, CONTENT_COMMITTED) and canonical_manifest:
+        if canonical_manifest:
             manifest_raw, manifest_error = _source_control_bytes(
                 "assets/release_manifest.json", entries, content_map, content_source, repo_root
             )
@@ -2986,10 +3127,7 @@ def audit_entries_with_semantics(
         rel = entry.path
         entry_findings: list[Finding] = []
 
-        if content_source in (CONTENT_CANDIDATE, CONTENT_COMMITTED):
-            raw_bytes, read_err = read_candidate_file(entry, repo_root)
-        else:
-            raw_bytes, read_err = content_map.get(rel, (None, "file missing or unreadable"))
+        raw_bytes, read_err = content_map.get(rel, (None, "file missing or unreadable"))
 
         if read_err and entry.kind not in ("symlink", "gitlink"):
             f = Finding("UNREADABLE", rel, read_err)
@@ -3178,30 +3316,43 @@ def audit_entries_with_semantics(
             if _spdx_required(rel) and "SPDX-License-Identifier:" not in "\n".join(text_str.splitlines()[:8]):
                 entry_findings.append(Finding("SPDX", rel, "missing SPDX identifier in first eight lines"))
 
-            if PurePosixPath(rel).suffix.lower() in {".c", ".h", ".py", ".json"}:
-                for line in private_key_literal_lines(rel, text_str):
+        # The leak scans read every file: bytes the text checks class as binary or cannot decode
+        # are scanned through a lossy decode, so a capture is not cleared by its encoding.
+        leak_text = text_str if (text_str and not is_binary) else None
+        leak_text_is_text = leak_text is not None
+        if leak_text is None and raw_bytes and entry.kind not in ("symlink", "gitlink"):
+            leak_text, leak_text_is_text = _leak_scan_text(raw_bytes)
+        if leak_text:
+            # Every text file: a key literal outside the reviewed table fails whatever the
+            # suffix (C syntax for C-like sources, the parser fallback for the rest).
+            if leak_text_is_text:
+                for line in private_key_literal_lines(rel, leak_text):
                     entry_findings.append(Finding("PRIVATE_KEY", rel, f"direct 16-byte key literal at line {line}"))
 
-            if is_keystore_content(rel, text_str):
+            if is_keystore_content(rel, leak_text):
                 entry_findings.append(Finding(
                     "KEYFILE_CONTENT", rel,
                     "local-only KeyStore content (issue #295); key files must never be tracked or packaged",
                 ))
 
+            # Opaque bytes skip only the UNC shape: two backslashes and two short names is a
+            # chance match in a font or a lookup table, while the other shapes need a literal
+            # profile, mount or temp-directory name.
             if (
-                WINDOWS_USER_PATH.search(text_str)
-                or POSIX_USER_PATH.search(text_str)
-                or MAC_USER_PATH.search(text_str)
-                or WSL_USER_PATH.search(text_str)
-                or UNC_PATH.search(text_str)
-                or ONEDRIVE_PATH.search(text_str)
-                or TEMP_PATH.search(text_str)
+                WINDOWS_USER_PATH.search(leak_text)
+                or POSIX_USER_PATH.search(leak_text)
+                or WSL_USER_PATH.search(leak_text)
+                or (leak_text_is_text and UNC_PATH.search(leak_text))
+                or ONEDRIVE_PATH.search(leak_text)
+                or TEMP_PATH.search(leak_text)
             ):
                 entry_findings.append(Finding("LOCAL_PATH", rel, "contains an absolute user-profile or local path"))
             elif policy and policy.private_roots and rel != "assets/public_source_profile.json":
-                text_lower = text_str.lower()
+                text_lower = leak_text.lower()
                 for root_str in policy.private_roots:
-                    if root_str.lower() in text_lower:
+                    # Also the escaped spelling a JSON, C or Python literal stores.
+                    spellings = (root_str.lower(), root_str.lower().replace("\\", "\\\\"))
+                    if any(spelling in text_lower for spelling in spellings):
                         entry_findings.append(
                             Finding("LOCAL_PATH", rel, f"contains configured private root {root_str!r}")
                         )
@@ -3209,7 +3360,7 @@ def audit_entries_with_semantics(
 
             if rel != "assets/public_source_profile.json" and all_private_root_patterns:
                 for pat in all_private_root_patterns:
-                    if pat.search(text_str):
+                    if pat.search(leak_text):
                         entry_findings.append(
                             Finding("LOCAL_PATH", rel, "contains configured out-of-band private root")
                         )
@@ -3245,10 +3396,10 @@ def audit_entries_with_semantics(
         )
 
     audited_paths = {e.path for e in entries}
-    findings.extend(_notice_link_findings(repo_root))
-    findings.extend(_action_pin_findings(repo_root, audited_paths))
+    findings.extend(_notice_link_findings(repo_root, index_view))
+    findings.extend(_action_pin_findings(repo_root, audited_paths, index_view))
     if public_scope or exhaustive:
-        findings.extend(_debt_budget_findings(repo_root, paths))
+        findings.extend(_debt_budget_findings(repo_root, paths, index_view))
 
     sorted_findings = sorted(findings, key=lambda item: (item.path.lower(), item.code, item.detail))
     sorted_semantics = sorted(semantics_list, key=lambda s: s.path.lower())
@@ -3295,11 +3446,6 @@ def audit_entries(
         trusted_waiver_base=trusted_waiver_base,
     )
     return findings
-
-
-def audit(paths: list[str]) -> list[Finding]:
-    entries = [GitEntry(mode="100644", sha="", stage="0", path=p, kind="file", working_mode="100644") for p in paths]
-    return audit_entries(entries)
 
 
 def generate_manifest_report(
@@ -3665,8 +3811,8 @@ def _main(argv: list[str] | None, disposable: list[Path]) -> int:
         default="public-safe-v1",
         help=(
             "Report label for the policy profile. This does NOT select policy: the "
-            "canonical policy is always read from --policy (see below). The label is "
-            "cross-checked against the policy's own name."
+            "canonical policy is always read from --policy (see below), and the label "
+            "only names it in the reports."
         ),
     )
     parser.add_argument(
