@@ -2013,7 +2013,7 @@ ge-first-bad-draw-selftest: ge-replay
 # Requires g++ with C++17. Exit code 0 = all tests passed.
 selftest:
 	g++ -std=c++17 -O1 -Isrc/ref -Isrc/rt -o $(BUILD_DIR)/selftest.exe \
-		src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp \
+		src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp src/ref/snapshot_ref.cpp \
 		-DSR_SELFTEST_ONLY -fno-exceptions
 	$(BUILD_DIR)/selftest.exe
 	@echo "selftest passed"

@@ -180,7 +180,7 @@ RT_SRCS    := src/rt/recomp.c \
 # and its hooks into the runtime and the generated code, and links the reference interpreter
 # (src/ref) beside it. It is off by default and the default objects do not change. Run the
 # resulting player with SR_VERIFY=k and SR_VERIFY_REPORT=file (src/rt/verify.h lists the
-# settings). The reference's sr_bitrev is renamed in its own object, as for snapshot-selftest.
+# settings).
 VERIFY ?= 0
 ifeq ($(VERIFY),1)
 override CFLAGS += -DSR_VERIFY
@@ -188,9 +188,9 @@ RT_SRCS += src/rt/verify.c src/rt/nksnap.c
 override LIBS += -lstdc++
 VERIFY_REF_OBJS := $(BUILD_DIR)/verify_ref_interp.o $(BUILD_DIR)/verify_ref.o
 $(BUILD_DIR)/verify_ref_interp.o: src/ref/interp.cpp
-	$(CXX) -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -Dsr_bitrev=sr_ref_bitrev -c $< -o $@
+	$(CXX) -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -c $< -o $@
 $(BUILD_DIR)/verify_ref.o: src/ref/snapshot_ref.cpp src/ref/snapshot_ref.h
-	$(CXX) -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -Dsr_bitrev=sr_ref_bitrev -c $< -o $@
+	$(CXX) -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -c $< -o $@
 endif
 
 RT_OBJS   := $(addprefix $(BUILD_DIR)/,$(notdir $(RT_SRCS:.c=.o)))
