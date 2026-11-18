@@ -128,9 +128,17 @@ static int msg_pipe_detach_invocation(SrWaitHandle invocation, uint32_t object) 
     return notified;
 }
 
-static int msg_pipe_trace_call(uint32_t calls) {
-    return getenv("SR_MSGLOG") && (calls <= 16u || (calls & (calls - 1u)) == 0u);
+/* SR_MSGLOG is read once: the Try* paths test it on every message (HST's worker
+ * queues run through message pipes). */
+static int msg_pipe_log_on(void) {
+    static int s_msglog = -1;
+    return hle_env_switch(&s_msglog, "SR_MSGLOG");
 }
+static int msg_pipe_trace_call(uint32_t calls) {
+    return msg_pipe_log_on() && (calls <= 16u || (calls & (calls - 1u)) == 0u);
+}
+static uint32_t msg_pipe_transfer(MsgPipe *p, uint32_t buffer, uint32_t amount,
+                                 uint32_t resultp, int is_send, int *direct_wake);
 
 static uint32_t h_CreateMsgPipe(CpuState *s) {
     /* a0=name, a1=partition, a2=attr, a3=bufferSize, t0=option. */
@@ -172,7 +180,7 @@ static uint32_t h_CreateMsgPipe(CpuState *s) {
         p->capacity = A3;
         p->data = data;
         memcpy(p->name, name, sizeof(p->name));
-        if (hle_log_on() || getenv("SR_MSGLOG"))
+        if (hle_log_on() || msg_pipe_log_on())
             fprintf(stderr, "HLE: CreateMsgPipe uid=0x%x name='%s' attr=0x%x size=%u\n",
                     p->uid, p->name, p->attr, p->capacity);
         return p->uid;
@@ -183,7 +191,7 @@ static uint32_t h_CreateMsgPipe(CpuState *s) {
 static uint32_t h_DeleteMsgPipe(CpuState *s) {
     MsgPipe *p = msg_pipe_find(A0);
     if (!p) return SCE_KERNEL_ERROR_UNKNOWN_MPPID;
-    if (getenv("SR_MSGLOG"))
+    if (msg_pipe_log_on())
         fprintf(stderr, "HLE: DeleteMsgPipe uid=0x%x name='%s' queued=%u send=%u receive=%u\n",
                 p->uid, p->name, p->count, p->send_calls, p->receive_calls);
     free(p->data);
@@ -389,13 +397,9 @@ static uint32_t h_TrySendMsgPipe(CpuState *s) {
                     p->uid, sched_current_uid(), p->send_calls, A2, A1, amount);
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    uint32_t direct = msg_pipe_reserve_receiver(p, A1, amount);
-    for (uint32_t i = direct; i < amount; i++) {
-        p->data[p->write_pos] = MEM_R8(A1 + i);
-        p->write_pos = (p->write_pos + 1u) % p->capacity;
-    }
-    p->count += amount - direct;
-    if (resultp) MEM_W32(resultp, amount);
+    int direct = 0;
+    uint32_t rc = msg_pipe_transfer(p, A1, amount, resultp, 1, &direct);
+    if (rc) return rc;
     if (msg_pipe_trace_call(p->send_calls))
         fprintf(stderr, "MSGPIPE: send uid=0x%x thread=0x%x call=%u requested=%u transferred=%u queued=%u\n",
                 p->uid, sched_current_uid(), p->send_calls, A2, amount, p->count);
@@ -442,12 +446,9 @@ static uint32_t h_TryReceiveMsgPipe(CpuState *s) {
                     p->uid, sched_current_uid(), p->receive_calls, A2, A1, amount);
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     }
-    for (uint32_t i = 0; i < amount; i++) {
-        MEM_W8(A1 + i, p->data[p->read_pos]);
-        p->read_pos = (p->read_pos + 1) % p->capacity;
-    }
-    p->count -= amount;
-    if (resultp) MEM_W32(resultp, amount);
+    int direct = 0;
+    uint32_t rc = msg_pipe_transfer(p, A1, amount, resultp, 0, &direct);
+    if (rc) return rc;
     if (msg_pipe_trace_call(p->receive_calls))
         fprintf(stderr, "MSGPIPE: receive uid=0x%x thread=0x%x call=%u requested=%u transferred=%u queued=%u\n",
                 p->uid, sched_current_uid(), p->receive_calls, A2, amount, p->count);
@@ -731,7 +732,7 @@ static uint32_t h_CancelMsgPipe(CpuState *s) {
     p->count = 0u;
     p->reserved = 0u;
     p->reservation = 0;
-    if (getenv("SR_MSGLOG"))
+    if (msg_pipe_log_on())
         fprintf(stderr, "HLE: CancelMsgPipe uid=0x%x name='%s' send=%u receive=%u\n",
                 p->uid, p->name, senders, receivers);
     /* No waiter: no wake result to latch. Completing an invocation records its
@@ -1308,6 +1309,9 @@ static uint32_t h_WaitSema(CpuState *s) {
     Sync *m = NULL;
     uint32_t err = sema_wait_entry("WaitSema", uid, need, &m);
     if (err) return err;
+    /* As ReceiveMbx and LockLwMutex: an unwritable timeout word is refused before
+     * any wait (precedence after the entry checks is unmeasured). */
+    if (toptr && !sr_guest_span_writable(toptr, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (hle_log_on())
         fprintf(stderr, "HLE: WaitSema uid=0x%x count=%d need=%d (from 0x%x)\n", uid, m->count, need, sched_current_uid());
     /* The deadline is fixed by the first block; a wake that finds the count taken
@@ -1369,6 +1373,7 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
      * not sample the clock, run callbacks or write a remaining-timeout word. */
     uint32_t err = sema_wait_entry("WaitSemaCB", uid, need, &m);
     if (err) return err;
+    if (toptr && !sr_guest_span_writable(toptr, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     if (hle_log_on())
         fprintf(stderr, "HLE: WaitSemaCB uid=0x%x count=%d need=%d (from 0x%x)\n", uid, m->count, need, sched_current_uid());
 
@@ -1857,6 +1862,10 @@ static uint32_t h_lwmutex_lock_common(CpuState *s) {
     uint32_t wa = A0;
     if (!lwmutex_workarea_ok(wa)) return 0x80000103u;
     int count = (int)A1; if (count <= 0) return 0x800200d2u;  /* ILLEGAL_ARGUMENT */
+    /* pspautotests tests/threads/lwmutex/lock.expected "Lock 0 => 2": a count above 1
+     * on a non-recursive mutex is ILLEGAL_COUNT and takes nothing, as TryLock_600. */
+    if (!(MEM_R32(wa + LWMUTEX_ATTR) & LWMUTEX_ATTR_RECURSIVE) && count > 1)
+        return 0x800201bdu;   /* ILLEGAL_COUNT */
     uint32_t toptr = A2;
     if (toptr && !sr_guest_span_writable(toptr, 4)) return 0x80000103u;
     uint32_t woken = 0;
@@ -2597,6 +2606,8 @@ static uint32_t h_WaitEventFlag(CpuState *s) {
     if (!sr_evf_matches(m->pattern, bits, mode) && !(m->attr & 0x200u) &&
         sched_count_waiters(uid) > 0)
         return 0x800201b0u;
+    /* As h_WaitSema: an unwritable timeout word is refused before any wait. */
+    if (toptr && !sr_guest_span_writable(toptr, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     uint64_t wait_end = 0;      /* fixed by the first block; see h_WaitSema */
     int wait_end_set = 0;
     while (!sr_evf_matches(m->pattern, bits, mode)) {
@@ -2669,6 +2680,7 @@ static uint32_t h_WaitEventFlagCB(CpuState *s) {
     if (!sr_evf_matches(m->pattern, bits, mode) && !(m->attr & 0x200u) &&
         sched_count_waiters(uid) > 0)
         return 0x800201b0u;
+    if (toptr && !sr_guest_span_writable(toptr, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
 
     /* A CB wait services pending callbacks even when it initially matches.
      * A callback may change or delete the flag, so recheck before waiting. */
@@ -2756,20 +2768,29 @@ static uint32_t h_PollEventFlag(CpuState *s) {
     m->pattern = sr_evf_consume(m->pattern, bits, mode);
     return 0;
 }
-/* PSPAutotests refer.expected: size zero writes nothing; every nonzero
- * size, including 1, returns the complete 52-byte structure. */
+/* sceKernelReferEventFlagStatus: SceKernelEventFlagInfo is 52 bytes -- size(0),
+ * name[32](4), attr(36), initPattern(40), currPattern(44), numWaitThreads(48).
+ * Size zero writes nothing. Measured (PSP-KERNEL-STATUS-001, event-size-8 and
+ * event-size-40): any other size copies only min(size, 52) bytes of the record,
+ * whose size word is 52; pspautotests refer.expected agrees, since it reads back
+ * only the size word (0x34 for every nonzero size). */
 static uint32_t h_ReferEventFlagStatus(CpuState *s) {
     Sync *m = evf_find(A0); if (!m) return SCE_KERNEL_ERROR_UNKNOWN_EVFID;
     uint32_t info = A1;
     if (!info || !sr_guest_span_readable(info, 4u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    if (!MEM_R32(info)) return 0;
-    if (!sr_guest_span_writable(info, 52u)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
-    MEM_W32(info, 52u);
-    for (uint32_t i = 0; i < 32u; i++) MEM_W8(info + 4u + i, (uint8_t)m->name[i]);
-    MEM_W32(info + 36u, m->attr);
-    MEM_W32(info + 40u, m->init_pattern);
-    MEM_W32(info + 44u, m->pattern);
-    MEM_W32(info + 48u, (uint32_t)sched_count_waiters(A0));
+    uint32_t input_size = MEM_R32(info);
+    if (!input_size) return 0;
+    uint8_t rec[52];
+    const uint32_t write_len = input_size < (uint32_t)sizeof(rec) ? input_size : (uint32_t)sizeof(rec);
+    if (!sr_guest_span_writable(info, write_len)) return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    const uint32_t fields[5] = {
+        (uint32_t)sizeof(rec), m->attr, m->init_pattern, m->pattern,
+        (uint32_t)sched_count_waiters(A0),
+    };
+    memcpy(rec, &fields[0], 4u);
+    memcpy(rec + 4u, m->name, 32u);
+    memcpy(rec + 36u, &fields[1], 16u);
+    for (uint32_t i = 0; i < write_len; i++) MEM_W8(info + i, rec[i]);
     return 0;
 }
 

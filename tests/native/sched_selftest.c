@@ -2153,6 +2153,57 @@ static void test_terminate_thread_excluded_after(void) {
            "terminated thread reports SCE_KERNEL_ERROR_THREAD_TERMINATED");
 }
 
+/* An interrupt handler runs on the interrupted thread's coroutine with s_cur forced
+ * to -1 (deliver_vblank, the alarm/VTimer services).  TerminateThread from there
+ * must not destroy that live coroutine: it answers ILLEGAL_CONTEXT, and the
+ * running coroutine's own thread is refused as the caller in any context. */
+static SrCoro  *g_term_intr_main;
+static uint32_t g_term_intr_uid;
+static uint32_t g_term_intr_rc;
+static uint32_t g_term_intr_self_rc;
+static void term_intr_body(void *arg) {
+    (void)arg;
+    int save_cur = s_cur; s_cur = -1;       /* as deliver_vblank does */
+    s_servicing_interrupts = 1;             /* as scheduler_service_pending does */
+    g_term_intr_rc = sched_terminate_thread(g_term_intr_uid);
+    s_servicing_interrupts = 0;
+    g_term_intr_self_rc = sched_terminate_thread(g_term_intr_uid);
+    s_cur = save_cur;
+    sr_coro_switch(g_term_intr_main);
+}
+
+static void test_terminate_thread_refused_in_interrupt_context(void) {
+    reset_sched();
+    int other = mk(0x3b0u, TH_READY, 30);
+    s_servicing_interrupts = 1;
+    expect(sched_terminate_thread(s_tcb[other].uid) == 0x80020064u,
+           "TerminateThread inside an interrupt episode answers ILLEGAL_CONTEXT");
+    s_servicing_interrupts = 0;
+    expect(s_tcb[other].state == TH_READY,
+           "a refused interrupt-context TerminateThread leaves its target READY");
+
+    int idx = mk(0x3a0u, TH_RUNNING, 20);
+    TCB *t = &s_tcb[idx];
+    g_term_intr_main = sr_coro_current();
+    g_term_intr_uid = t->uid;
+    g_term_intr_rc = g_term_intr_self_rc = 0xffffffffu;
+    t->coro = sr_coro_create(term_intr_body, NULL, (size_t)1 << 20);
+    expect(t->coro != NULL, "interrupt-terminate fixture coroutine created");
+    if (!t->coro) return;
+    SrCoro *coro = t->coro;
+    s_cur = idx;
+    sr_coro_switch(coro);
+    s_cur = -1;
+    expect(g_term_intr_rc == 0x80020064u,
+           "a handler terminating the thread it interrupted answers ILLEGAL_CONTEXT");
+    expect(g_term_intr_self_rc == SCE_KERNEL_ERROR_ILLEGAL_THID,
+           "terminating the thread whose coroutine is running answers ILLEGAL_THID");
+    expect(t->coro == coro && t->state == TH_RUNNING,
+           "the interrupted thread keeps its live coroutine and state");
+    sr_coro_destroy(coro);
+    t->coro = NULL;
+}
+
 static void test_delete_and_terminate_delete_contract(void) {
     reset_sched();
     uint32_t target_uid = sched_create_thread(0x2400u, 40, 0x2000u);
@@ -6677,6 +6728,7 @@ int main(int argc, char **argv) {
     test_explicit_exit_status((uint32_t)-17, 0x800200d2u);
     test_explicit_exit_status(0x78u, 0x78u);
     test_terminate_thread_excluded_after();
+    test_terminate_thread_refused_in_interrupt_context();
     test_delete_and_terminate_delete_contract();
     test_role_uid_capture();
     test_title_config_foreign_entries_are_inert();

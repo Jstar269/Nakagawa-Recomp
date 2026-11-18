@@ -5311,10 +5311,22 @@ uint32_t sched_change_current_thread_attr(uint32_t clear_mask, uint32_t set_mask
  * TerminateDeleteThread handler composes them so a target is first reported as
  * terminated to existing joiners, then disappears as a kernel object. */
 uint32_t sched_terminate_thread(uint32_t uid) {
+    /* An interrupt handler (VBLANK, alarm, VTimer, GE finish) runs on the
+     * interrupted thread's own host coroutine with s_cur forced to -1, so the
+     * self check below cannot see that it would destroy the coroutine that is
+     * executing.  Refuse the call from interrupt context with ILLEGAL_CONTEXT,
+     * the code the sibling thread-manager calls in this runtime return there.
+     * UNMEASURED: no PSP cell records TerminateThread from an interrupt handler. */
+    if (s_servicing_interrupts) return 0x80020064u; /* SCE_KERNEL_ERROR_ILLEGAL_CONTEXT */
     uid = resolve_thread_uid(uid);
     TCB *t = tcb_by_uid(uid);
     if (!t) return SCE_KERNEL_ERROR_UNKNOWN_THID;
     if (s_cur >= 0 && s_tcb[s_cur].uid == uid) {
+        return SCE_KERNEL_ERROR_ILLEGAL_THID;
+    }
+    /* Whatever the context, a thread whose host coroutine is the one running
+     * now is the caller itself and cannot be torn down from inside. */
+    if (t->coro && t->coro == sr_coro_current()) {
         return SCE_KERNEL_ERROR_ILLEGAL_THID;
     }
     /* CONFLICT (PSP-B3-01 vs sched_selftest lifecycle contract): hardware

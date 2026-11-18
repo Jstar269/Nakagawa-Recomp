@@ -21086,6 +21086,21 @@ static void test_lwmutex_hardware_codes(void) {
     b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0x800201cau,
               "second Delete returns 800201CA");
 
+    /* pspautotests lock.expected "Lock 0 => 2": count 2 on a free non-recursive
+     * mutex is ILLEGAL_COUNT and takes nothing. */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 0u), 0u,
+              "non-recursive Create free succeeds");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 2u, 0u, 0u), 0x800201bdu,
+              "non-recursive Lock with count 2 returns 800201BD");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u,
+           "B1 refused count-2 Lock leaves the mutex free");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u,
+              "non-recursive Lock with count 1 succeeds");
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u,
+              "Unlock(1) after Lock(1) succeeds");
+    expect(MEM_R32(wa) == 0u, "B1 Lock(1)/Unlock(1) leaves the mutex free");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Delete free mutex succeeds");
+
     /* Non-recursive mutex created held by the caller. */
     b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 2u), 0x800201bdu,
               "non-recursive Create with initialCount 2 returns 800201BD");
@@ -21959,10 +21974,34 @@ static void test_evf_create_and_refer(void) {
               "event flag create rejects attribute 0x300");
     uint32_t evf = b1_call(NID_B1_CREATE_EVF, EVT_NAME, 0x222u, 0x29u, 0u);
     expect((int32_t)evf > 0, "event flag create accepts measured attribute 0x222");
+    /* PSP-KERNEL-STATUS-001 (event-size-8, event-size-40): a nonzero size copies only
+     * min(size, 52) bytes of the record; refer.expected reads the size word back as
+     * 0x34 for every nonzero size, size 1 included. */
+    for (uint32_t i = 0; i < 64u; i++) MEM_W8(EVT_INFO + i, 0xa5u);
     MEM_W32(EVT_INFO, 1u);
     b1_expect(b1_call(NID_B1_REFER_EVF, evf, EVT_INFO, 0u, 0u), 0u,
               "event flag refer accepts size 1");
+    expect(MEM_R32(EVT_INFO) == 52u, "event flag refer size 1 reads the size word back as 0x34");
+    expect(MEM_R8(EVT_INFO + 4u) == 0xa5u,
+           "event flag refer size 1 writes nothing past its first byte");
+    static const uint32_t sizes[2] = {8u, 40u};
+    for (int k = 0; k < 2; k++) {
+        for (uint32_t i = 0; i < 64u; i++) MEM_W8(EVT_INFO + i, 0xa5u);
+        MEM_W32(EVT_INFO, sizes[k]);
+        b1_expect(b1_call(NID_B1_REFER_EVF, evf, EVT_INFO, 0u, 0u), 0u,
+                  "event flag refer accepts a short size");
+        int tail_untouched = 1;
+        for (uint32_t i = sizes[k]; i < 64u; i++)
+            if (MEM_R8(EVT_INFO + i) != 0xa5u) tail_untouched = 0;
+        expect(MEM_R32(EVT_INFO) == 52u && MEM_R8(EVT_INFO + 4u) == '1' && tail_untouched,
+               "event flag refer with size 8 or 40 writes exactly that many bytes (event-size-8/40)");
+    }
+    for (uint32_t i = 0; i < 64u; i++) MEM_W8(EVT_INFO + i, 0xa5u);
+    MEM_W32(EVT_INFO, 52u);
+    b1_expect(b1_call(NID_B1_REFER_EVF, evf, EVT_INFO, 0u, 0u), 0u,
+              "event flag refer accepts the full size");
     expect(MEM_R32(EVT_INFO) == 52u, "event flag refer writes full structure size");
+    expect(MEM_R8(EVT_INFO + 52u) == 0xa5u, "event flag refer full size stops at byte 52");
     expect(MEM_R8(EVT_INFO + 4u) == '1' && MEM_R8(EVT_INFO + 34u) == '1' &&
            MEM_R8(EVT_INFO + 35u) == 0u, "event flag refer truncates name at 31 bytes");
     expect(MEM_R32(EVT_INFO + 36u) == 0x222u && MEM_R32(EVT_INFO + 40u) == 0x29u &&
@@ -21983,6 +22022,30 @@ static void test_evf_create_and_refer(void) {
  * before the table grows must still be found after it.
  * ------------------------------------------------------------------------- */
 #define SYNC_GROW_EVF_COUNT 1024
+
+/* A wait that would block reads and rewrites its timeout word, so an unwritable one is
+ * refused with ILLEGAL_ADDR before the wait, as ReceiveMbx and LockLwMutex refuse it;
+ * before, an unmapped word read as 0 and the wait timed out at once with the write lost. */
+static void test_sync_waits_refuse_unwritable_timeout(void) {
+    TCB *self = wsv_begin();
+    const int self_idx = (int)(self - s_tcb);
+    const uint32_t bad = 0x10000000u;
+    uint32_t sema = wsv_create(0, 1);
+    evt_expect_now(self_idx, 0x1f4u, NID_CNW_WAIT_SEMA, sema, 1u, bad, 0u, 0u,
+                   RSS_ILLEGAL_ADDR, "WaitSema with an unmapped timeout pointer");
+    evt_expect_now(self_idx, 0x1f5u, NID_CNW_WAIT_SEMA_CB, sema, 1u, bad, 0u, 0u,
+                   RSS_ILLEGAL_ADDR, "WaitSemaCB with an unmapped timeout pointer");
+    expect(wsv_count(sema) == 0, "the refused semaphore waits left the count at 0");
+    wsv_delete(sema);
+    uint32_t evf = b1_call(NID_B1_CREATE_EVF, WSV_NAMEBUF, 0x200u, 0u, 0u);
+    expect((int32_t)evf > 0, "bad-timeout fixture event flag created");
+    evt_expect_now(self_idx, 0x1f6u, NID_CNW_WAIT_EVF, evf, 1u, 0u, 0u, bad,
+                   RSS_ILLEGAL_ADDR, "WaitEventFlag with an unmapped timeout pointer");
+    evt_expect_now(self_idx, 0x1f7u, NID_CNW_WAIT_EVF_CB, evf, 1u, 0u, 0u, bad,
+                   RSS_ILLEGAL_ADDR, "WaitEventFlagCB with an unmapped timeout pointer");
+    (void)b1_call(NID_B1_DELETE_EVF, evf, 0u, 0u, 0u);
+    s_cur = -1;
+}
 
 size_t hle_sync_slot_count(void); /* src/rt/hle.c: slots in the grown table */
 
@@ -22519,7 +22582,9 @@ static void test_b23_second_round(void) {
         main_t->started = 1;
         uint32_t me = main_t->uid;
         memset(&cpu, 0, sizeof cpu);
-        cpu.r[4] = B23_LW_WA; cpu.r[5] = WCR_NAMEBUF; cpu.r[6] = 0u; cpu.r[7] = 0u;
+        /* Recursive (attr 0x200): the waiter asks for count 2, which lock.expected
+         * refuses on a non-recursive LwMutex ("Lock 0 => 2", 800201BD). */
+        cpu.r[4] = B23_LW_WA; cpu.r[5] = WCR_NAMEBUF; cpu.r[6] = 0x200u; cpu.r[7] = 0u;
         expect(sr_syscall(&cpu, NID_B1_CREATE_LWMUTEX) == 0u,
                "PSP-B2-01: LwMutex created for handoff");
         uint32_t muid = MEM_R32(B23_LW_WA + 0x10u);
@@ -45990,8 +46055,8 @@ static void check_coroutine_lifecycle(void) {
         extern int s_msgpipe_parks;
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
-        char msg[1024];
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        char msg[1536];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
                  "+ 1 delay body + 2 slice-C waiters + 2 nested-frame specimen threads "
@@ -46007,6 +46072,7 @@ static void check_coroutine_lifecycle(void) {
                  "+ 3 event-flag set/cancel waiters "
                  "+ 3 flight thread-snapshot waiters "
                  "+ 6 semaphore service-order waiters + 1 released LwMutex waiter "
+                 "+ 4 unwritable-timeout call bodies "
                  "+ %d returned conformance legs + %d mutex legs + %d pool legs + %d mailbox legs "
                  "+ %d Message Pipe waiter/owner legs + %d volatile-memory Lock waiters "
                  "+ %d controller read waiters = %d, observed %lu)",
@@ -58666,6 +58732,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_evf_cancel_outputs();
         test_evf_ordered_set();
         test_evf_create_and_refer();
+        test_sync_waits_refuse_unwritable_timeout();
         test_sync_objects_past_the_old_table();
         test_evf_typed_uids_and_delete();
         fprintf(stderr, "b1-kobj: %d checks, %d failures\n", s_checks, s_failures);
@@ -58985,6 +59052,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_evf_cancel_outputs();
     test_evf_ordered_set();
     test_evf_create_and_refer();
+    test_sync_waits_refuse_unwritable_timeout();
     test_sync_objects_past_the_old_table();
     test_evf_typed_uids_and_delete();
     test_wake_result_is_per_thread();
