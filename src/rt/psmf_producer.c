@@ -122,6 +122,11 @@ struct SrPsmfProducer {
     uint32_t selected_video_stream;
     uint32_t selected_audio_stream;
     int single_stream_compat;
+    /* A stream-table-less producer selects "the" audio stream, so every private-stream-1
+     * sub-stream would land in one track.  When set, only this sub-stream id is kept
+     * (sr_psmf_producer_select_audio_substream). */
+    int has_audio_substream;
+    uint8_t audio_substream;
     int streaming;
     int stream_eos;
     uint8_t *ps_input;
@@ -555,7 +560,8 @@ static int is_selected_video_stream(const SrPsmfProducer *p, uint8_t sid) {
 static int is_selected_audio_stream(const SrPsmfProducer *p, uint8_t sub_id) {
     if (p->selected_audio_stream == SR_PSMF_STREAM_NONE) return 0;
     if (p->single_stream_compat) {
-        return (p->selected_audio_stream == 0);
+        if (p->selected_audio_stream != 0) return 0;
+        return !p->has_audio_substream || sub_id == p->audio_substream;
     }
     if (p->selected_audio_stream >= p->audio_stream_count) return 0;
     const SrPsmfStreamEntry *entry = &p->audio_stream_entry[p->selected_audio_stream];
@@ -1033,6 +1039,13 @@ int sr_psmf_producer_select_streams(SrPsmfProducer *p, uint32_t vs, uint32_t as)
     p->selected_video_stream = vs;
     p->selected_audio_stream = as;
     sr_psmf_producer_reset(p);
+    return 1;
+}
+
+int sr_psmf_producer_select_audio_substream(SrPsmfProducer *p, uint8_t sub_stream_id) {
+    if (!p || !p->single_stream_compat) return 0;
+    p->has_audio_substream = 1;
+    p->audio_substream = sub_stream_id;
     return 1;
 }
 

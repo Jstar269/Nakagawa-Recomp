@@ -208,6 +208,9 @@ typedef struct {
     int audioStreamNum;          /* the registered ATRAC stream (its PS1 sub-stream id) */
     SrPsmfProducer *audioDemux;
     int audioDemuxFailed, audioDemuxEos;
+    /* This stream's first ATRAC failure, and its first dropped backlog, have been named (one line
+     * each per registration or flush, not one per process). */
+    int audioReported, audioDropReported;
     uint32_t audioFedPackets;    /* ring packets fed to the demux since it (re)started */
     struct { uint8_t *data; uint32_t bytes; } audioFifo[MPEG_ATRAC_FIFO_DEPTH];
     uint32_t audioFifoHead, audioFifoCount;
@@ -253,10 +256,19 @@ static Mpeg *mpeg_find(uint32_t mpegAddr) {
 void sr_psmf_av_note_audio_delivery(uint32_t first, uint32_t bytes, int64_t pts, int pts_valid);
 static uint32_t mpeg_contract_error(const char *api, const char *boundary, uint32_t error);
 
+#ifdef SR_MPEG_MEDIA_SELFTEST
+static unsigned s_mpeg_atrac_reports;
+unsigned sr_mpeg_test_atrac_reports(void) { return s_mpeg_atrac_reports; }
+#endif
+
 static void mpeg_audio_report(Mpeg *ctx, const char *what) {
-    static int reported;
-    if (reported) return;
-    reported = 1;
+    if (ctx) {
+        if (ctx->audioReported) return;
+        ctx->audioReported = 1;
+    }
+#ifdef SR_MPEG_MEDIA_SELFTEST
+    s_mpeg_atrac_reports++;
+#endif
     const char *why = ctx && ctx->audioDemux ? sr_psmf_producer_fail_reason(ctx->audioDemux) : NULL;
     fprintf(stderr, "MPEG_ATRAC: %s%s%s\n", what, why ? ": " : "", why ? why : "");
 }
@@ -285,16 +297,21 @@ static void mpeg_audio_close(Mpeg *ctx) {
     free(ctx->audioPcm);
     ctx->audioPcm = NULL;
     ctx->audioDemuxFailed = ctx->audioDemuxEos = 0;
+    ctx->audioReported = ctx->audioDropReported = 0;
     ctx->audioFedPackets = 0;
 }
 
-/* The registered stream's frames carry PS1 sub-stream id 0x00 + its number. */
+/* The registered stream's frames carry PS1 sub-stream id 0x00 + its number.  The demux keeps
+ * only that sub-stream: a movie with a second ATRAC stream interleaves its packets with the
+ * registered one's, and a frame that straddles two packets would otherwise take the other
+ * stream's bytes in between. */
 static void mpeg_audio_open(Mpeg *ctx, int streamNum) {
     mpeg_audio_close(ctx);
     ctx->audioStreamNum = streamNum;
     ctx->audioDemux = sr_psmf_producer_open_stream(0);
     if (streamNum < 0 || streamNum > 0x0f || !ctx->audioDemux ||
-        !sr_psmf_producer_select_streams(ctx->audioDemux, SR_PSMF_STREAM_NONE, 0)) {
+        !sr_psmf_producer_select_streams(ctx->audioDemux, SR_PSMF_STREAM_NONE, 0) ||
+        !sr_psmf_producer_select_audio_substream(ctx->audioDemux, (uint8_t)streamNum)) {
         ctx->audioDemuxFailed = 1;
         mpeg_audio_report(ctx, "the registered ATRAC stream cannot be demultiplexed");
     }
@@ -308,6 +325,7 @@ static void mpeg_audio_restart(Mpeg *ctx) {
     if (ctx->atrac) (void)atrac3p_bridge_reset(ctx->atrac);
     ctx->audioDemuxFailed = sr_psmf_producer_failed(ctx->audioDemux);
     ctx->audioDemuxEos = 0;
+    ctx->audioReported = ctx->audioDropReported = 0;
     ctx->audioFedPackets = 0;
 }
 
@@ -351,8 +369,38 @@ static void mpeg_audio_pump(Mpeg *ctx) {
     }
 }
 
+/* Bytes put into the audio demux that it has not parsed yet (it parses as far as the FIFO has
+ * room, and keeps the rest). */
+static uint64_t mpeg_audio_backlog(const Mpeg *ctx) {
+    uint64_t fed = sr_psmf_producer_stream_bytes(ctx->audioDemux);
+    uint64_t parsed = sr_psmf_producer_stream_cursor(ctx->audioDemux);
+    return fed > parsed ? fed - parsed : 0u;
+}
+
 static void mpeg_audio_feed(Mpeg *ctx, const uint8_t *bytes, uint32_t len) {
     if (!ctx->audioDemux || ctx->audioDemuxFailed || ctx->audioDemuxEos) return;
+    /* A guest that takes no ATRAC unit (the stream is in skip mode, or GetAtracAu is never
+     * called) leaves the FIFO full, and the demux then stops parsing while the video keeps the
+     * ring moving.  Before the unparsed bytes would reach the demux's buffer limit, which ends
+     * the stream for good, the oldest queued frames go (counted as skipped, named once) and the
+     * demux parses on, so the audio resumes near the video when the guest takes units again.
+     * UNMEASURED MODEL: what a PSP keeps of an untaken audio stream is not measured.  A normal
+     * movie's backlog is the ring's packets ahead of the audio, far below this bound. */
+    while (ctx->audioFifoCount && (uint64_t)len > SR_PSMF_MAX_PS_BUFFER_BYTES - mpeg_audio_backlog(ctx)) {
+        if (!ctx->audioDropReported) {
+            ctx->audioDropReported = 1;
+            fprintf(stderr, "MPEG_ATRAC: the guest takes no ATRAC unit and the stream's unparsed "
+                            "packets reached %u bytes; the oldest queued frames are dropped\n",
+                    (unsigned)SR_PSMF_MAX_PS_BUFFER_BYTES);
+        }
+        free(ctx->audioFifo[ctx->audioFifoHead].data);
+        ctx->audioFifo[ctx->audioFifoHead].data = NULL;
+        ctx->audioFifoHead = (ctx->audioFifoHead + 1u) % MPEG_ATRAC_FIFO_DEPTH;
+        ctx->audioFifoCount--;
+        ctx->audioSkipped++;
+        mpeg_audio_pump(ctx);
+        if (ctx->audioDemuxFailed) return;
+    }
     if (sr_psmf_producer_feed_stream(ctx->audioDemux, bytes, len, 0) < 0) {
         ctx->audioDemuxFailed = 1;
         mpeg_audio_report(ctx, "the ATRAC stream demux refused the fed packets");
@@ -451,13 +499,27 @@ static uint32_t mpeg_audio_decode_frame(Mpeg *ctx, const uint8_t *frame, uint32_
     return 0;
 }
 
-static uint32_t call_guest3(CpuState *s, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2) {
+/* *stopped is set when the callback did not run to a result the caller may use: no CPU state to
+ * run it on, no nested guest-call frame (nested_frames.h: "do not dispatch"), or a callback that
+ * ended the run.  Its 0 is then no answer from the guest, and the run stops by name. */
+static uint32_t call_guest3(CpuState *s, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2,
+                            int *stopped) {
     uint32_t frame_sp = 0;
     int frame = -1;
-    if (!s || !fn) return 0;
+    *stopped = 0;
+    if (!s || !fn) {
+        fprintf(stderr, "MPEG_CALL_GUEST: fn=0x%08" PRIx32 " has no CPU state to run on; "
+                        "it is not called\n", fn);
+        *stopped = 1;
+        return 0;
+    }
     if (!sr_nested_frame_acquire(sched_current_uid(), &frame_sp, &frame)) {
         fprintf(stderr, "MPEG_CALL_GUEST: fn=0x%08" PRIx32 " refused -- no nested guest-call frame "
-                        "available (cur_uid=0x%" PRIx32 ")\n", fn, sched_current_uid());
+                        "available (cur_uid=0x%" PRIx32 "); the run stops here (#308)\n",
+                fn, sched_current_uid());
+        s->flow_kind = SR_FLOW_FATAL;
+        s->flow_target = fn;
+        *stopped = 1;
         return 0;
     }
     CpuState save;
@@ -485,6 +547,7 @@ static uint32_t call_guest3(CpuState *s, uint32_t fn, uint32_t a0, uint32_t a1, 
     if (boundary_scope_failed || callback_flow_kind == SR_FLOW_FATAL) {
         s->flow_kind = SR_FLOW_FATAL;
         s->flow_target = callback_flow_target;
+        *stopped = 1;
     }
     /* Returning to the interrupted context ends any ll..sc window it had open. */
     sr_cpu_link_clear(s);
@@ -497,10 +560,11 @@ static uint32_t call_guest3(CpuState *s, uint32_t fn, uint32_t a0, uint32_t a1, 
 static uint32_t be32(uint32_t a) {
     return ((uint32_t)MEM_R8(a) << 24) | ((uint32_t)MEM_R8(a+1) << 16) | ((uint32_t)MEM_R8(a+2) << 8) | MEM_R8(a+3);
 }
-/* PSMF 6-byte timestamp (big-endian, 33-bit-ish packed as PPSSPP getMpegTimeStamp) */
+/* PSMF 6-byte timestamp: all six bytes, the low five big-endian and the first at bit 36, as
+ * PPSSPP getMpegTimeStamp and hle_mpeg.c psmf_be_timestamp read it (00 00 00 01 5F 90 is 90000). */
 static int64_t mpeg_ts(uint32_t a) {
-    return ((int64_t)MEM_R8(a) << 32) | ((int64_t)MEM_R8(a+1) << 24) | ((int64_t)MEM_R8(a+2) << 16) |
-           ((int64_t)MEM_R8(a+3) << 8) | (int64_t)MEM_R8(a+4);
+    return ((int64_t)MEM_R8(a) << 36) | ((int64_t)MEM_R8(a+1) << 32) | ((int64_t)MEM_R8(a+2) << 24) |
+           ((int64_t)MEM_R8(a+3) << 16) | ((int64_t)MEM_R8(a+4) << 8) | (int64_t)MEM_R8(a+5);
 }
 
 static uint32_t mpeg_contract_error(const char *api, const char *boundary, uint32_t error) {
@@ -821,7 +885,11 @@ uint32_t mpeg_unregist_stream(uint32_t mpegAddr, uint32_t sid) {
 
 uint32_t mpeg_ringbuffer_available_size(uint32_t ring) {
     RingState state;
-    if (!rb_read_valid(ring, &state, 0)) return 0;
+    /* A ring that fails its layout checks is refused by name with the same error sceMpegCreate
+     * gives it, not answered as a full ring (0 free) a title would poll forever. */
+    if (!rb_read_valid(ring, &state, 0))
+        return mpeg_contract_error("sceMpegRingbufferAvailableSize", "the ring fails its layout checks",
+                                   SCE_MPEG_ERROR_INVALID_VALUE);
     /* The PSP answers through the ring's sceMpeg context: once that context is deleted it returns
      * NOT_YET_INIT (pspautotests video/mpeg/ringbuffer/avail.expected:10), as PPSSPP does through
      * getMpegCtx. A ring never handed to sceMpegCreate crashes the PSP (avail.cpp); it is refused
@@ -836,7 +904,13 @@ unsigned long g_mpeg_put = 0, g_mpeg_getavc = 0, g_mpeg_avcdec = 0, g_mpeg_nodat
 uint32_t mpeg_ringbuffer_put(CpuState *s, uint32_t ring, uint32_t numPackets, uint32_t available) {
     g_mpeg_put++;
     RingState state;
-    if (!rb_read_valid(ring, &state, 1) || numPackets == 0 || available == 0) return 0;
+    /* A refusal is named and returns sceMpegCreate's error for a bad ring (PPSSPP's Put returns
+     * the same error for a ring with no packets); 0 stays the answer for a request of no packets
+     * or a full ring.  UNMEASURED: the PSP's own result for a malformed ring is not measured. */
+    if (!rb_read_valid(ring, &state, 1))
+        return mpeg_contract_error("sceMpegRingbufferPut", "the ring fails its layout checks",
+                                   SCE_MPEG_ERROR_INVALID_VALUE);
+    if (numPackets == 0 || available == 0) return 0;
     uint32_t avail = state.avail;
     uint32_t total = state.packets;
     uint32_t mpegAddr = state.mpeg;
@@ -850,7 +924,9 @@ uint32_t mpeg_ringbuffer_put(CpuState *s, uint32_t ring, uint32_t numPackets, ui
      * the callback can write any packet bytes, rather than publishing a wrapped counter later. */
     uint32_t checked;
     if (!u32_add_checked(state.packetsRead, addWanted, &checked) ||
-        (ctx && !u32_add_checked(ctx->fedPackets, addWanted, &checked))) return 0;
+        (ctx && !u32_add_checked(ctx->fedPackets, addWanted, &checked)))
+        return mpeg_contract_error("sceMpegRingbufferPut", "the ring's packet counters would overflow",
+                                   SCE_MPEG_ERROR_INVALID_VALUE);
 
     uint32_t cb = state.callback;
     uint32_t cbArg = state.callbackArgs;
@@ -877,9 +953,16 @@ uint32_t mpeg_ringbuffer_put(CpuState *s, uint32_t ring, uint32_t numPackets, ui
         if (!u32_mul_checked(writePos, packetSize, &byteOffset) ||
             !u32_mul_checked(chunk, packetSize, &chunkBytes) ||
             !u32_add_checked(state.data, byteOffset, &dst) ||
-            !sr_guest_span_writable(dst, chunkBytes))
-            return 0;
-        uint32_t got = cb ? call_guest3(s, cb, dst, chunk, cbArg) : chunk;
+            !sr_guest_span_writable(dst, chunkBytes)) {
+            uint32_t err = mpeg_contract_error("sceMpegRingbufferPut", "the next packets' span is not writable",
+                                               SCE_MPEG_ERROR_INVALID_VALUE);
+            return addedTotal ? addedTotal : err;
+        }
+        int stopped = 0;
+        uint32_t got = cb ? call_guest3(s, cb, dst, chunk, cbArg, &stopped) : chunk;
+        /* A callback that never ran, or ended the run, gave no count: nothing more is counted
+         * and the feed is not taken for one that ran short (call_guest3 named the stop). */
+        if (stopped) return addedTotal;
         if ((int32_t)got < 0) {
             if (addedTotal == 0) return got;
             break;
@@ -890,8 +973,30 @@ uint32_t mpeg_ringbuffer_put(CpuState *s, uint32_t ring, uint32_t numPackets, ui
 
         uint32_t gotBytes;
         if (!u32_mul_checked(got, packetSize, &gotBytes) ||
-            !sr_guest_span_readable_current(dst, gotBytes))
-            return 0;
+            !sr_guest_span_readable_current(dst, gotBytes)) {
+            uint32_t err = mpeg_contract_error("sceMpegRingbufferPut", "the filled packets cannot be read back",
+                                               SCE_MPEG_ERROR_INVALID_VALUE);
+            return addedTotal ? addedTotal : err;
+        }
+
+        /* The callback is guest code that another thread can preempt at any yield
+         * (nested_frames.h): a decode thread's GetAvcAu may have released packets meanwhile, or a
+         * flush zeroed the counters. Count this chunk against the ring as it reads now, as
+         * PPSSPP's PostPutAction does, never against the copy taken before the callback. A ring
+         * whose layout or write position moved, or whose context went away, no longer says where
+         * these packets are: the put stops by name and counts none of them. */
+        RingState now;
+        uint32_t nowRead = 0u, nowFed = 0u;
+        if (!rb_read_valid(ring, &now, 1) || now.packets != total || now.data != state.data ||
+            now.packetSize != packetSize || now.writePos != writePos || now.mpeg != mpegAddr ||
+            (mpegAddr ? mpeg_find(mpegAddr) : 0) != ctx || now.avail > now.packets - got ||
+            !u32_add_checked(now.packetsRead, got, &nowRead) ||
+            (ctx && !u32_add_checked(ctx->fedPackets, got, &nowFed))) {
+            fprintf(stderr, "MPEG_CONTRACT: sceMpegRingbufferPut: ring 0x%08" PRIx32 " or its context "
+                            "changed while the fill callback ran; its %" PRIu32 " packets are not counted\n",
+                    ring, got);
+            return addedTotal;
+        }
 
 #if defined(SR_SDL3VK) || defined(SR_MPEG_MEDIA_SELFTEST)
         if (ctx && got) {
@@ -905,14 +1010,11 @@ uint32_t mpeg_ringbuffer_put(CpuState *s, uint32_t ring, uint32_t numPackets, ui
 
         addedTotal += got;
         writePos = (got == total - writePos) ? 0 : writePos + got;
-        if (got < chunk) break;
-    }
-
-    if (addedTotal) {
-        rb_set(ring, RB_packetsAvail, avail + addedTotal);
-        rb_set(ring, RB_packetsRead, state.packetsRead + addedTotal);
+        rb_set(ring, RB_packetsAvail, now.avail + got);
+        rb_set(ring, RB_packetsRead, nowRead);
         rb_set(ring, RB_packetsWritePos, writePos);
-        if (ctx) ctx->fedPackets += addedTotal;
+        if (ctx) ctx->fedPackets = nowFed;
+        if (got < chunk) break;
     }
     if (ctx && callbackShort) {
         ctx->feedShort = 1;
@@ -2150,6 +2252,26 @@ uint32_t mpeg_flush_all_stream(uint32_t mpegAddr) {
     }
     /* The game refills the ring from a new position: the audio demux starts over with it. */
     mpeg_audio_restart(ctx);
+    /* So does the video: RingbufferPut feeds the H.264 demux at put time, so it still holds the
+     * packets of the old position, and the feed's end and its packet accounting belong to the
+     * old position too.  PPSSPP reloads its media engine at the first put after a flush (its
+     * packetsRead is 0 again).  The per-position counters of the pictures report start over,
+     * after a line for the position that ends (SR_MPEGAV). */
+    mpeg_pictures_report(ctx, "flush");
+#if defined(SR_SDL3VK) || defined(SR_MPEG_MEDIA_SELFTEST)
+    if (ctx->h264Init && ctx->h264 >= 0 && sr_h264_reset(ctx->h264) < 0) ctx->h264DemuxFailed = 1;
+#endif
+    ctx->fedPackets = 0;
+    ctx->streamEnded = 0;
+    ctx->videoEnd = 0;
+    ctx->videoDryAt = ctx->audioDryAt = 0;
+    ctx->auPacketsDone = 0;
+    ctx->lastAuPts = -1;
+    ctx->h264Units = ctx->h264Frames = 0;
+    ctx->ycbcrWant = ctx->ycbcrStale = 0;
+    ctx->ycbcrAuHead = ctx->ycbcrAuCount = 0u;
+    ctx->picDelivered = ctx->picSuperseded = ctx->picStale = ctx->picRejected = 0;
+    ctx->audioAusOut = ctx->audioDecoded = ctx->audioRejected = ctx->audioSkipped = 0;
     return 0;
 }
 
@@ -2177,7 +2299,7 @@ uint32_t mpeg_flush_stream(uint32_t mpegAddr, uint32_t sid) {
 uint32_t mpeg_avc_decode_flush(uint32_t mpegAddr) {
     Mpeg *ctx = mpeg_find(mpegAddr);
     if (!ctx) return (uint32_t)-1;
-    ctx->videoPts = ctx->firstTimestamp;
+    ctx->videoPts = 0;   /* an offset from firstTimestamp, as analyze() sets it */
     ctx->videoEnd = 0;
     ycbcr_drop_held(ctx);
     return 0;

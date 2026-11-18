@@ -24,10 +24,10 @@ Classes are listed strongest first. A path takes the first class whose source na
 | Class | HLE NIDs | VFPU forms |
 | --- | ---: | ---: |
 | `hardware-measured` | 64 | 73 |
-| `ppsspp-derived` | 130 | 88 |
+| `ppsspp-derived` | 131 | 88 |
 | `game-route` | 0 | 0 |
 | `synthetic` | 374 | 183 |
-| `unverified` | 143 | 22 |
+| `unverified` | 142 | 22 |
 | total | 711 | 366 |
 
 The VFPU census also lists 307 forms the runtime refuses at the
@@ -573,7 +573,7 @@ a title that translates none has generated code unchanged.
 | `0xb29ddf9c` | `sceIoDopen` | io | `synthetic` | HLE selftest dispatch; note |
 | `0xb2a628c1` | `sceIoAssign` | io | `synthetic` | HLE selftest dispatch |
 | `0xb3a59970` | `sceKernelGetVTimerBase` | kernel_time | `hardware-measured` | PSP oracle PSP-HLE-VTIMER-002 |
-| `0xb3b5d042` | `sceAtracGetOutputChannel` | audio_codec | `unverified` | generic success handler; performs none of the API contract |
+| `0xb3b5d042` | `sceAtracGetOutputChannel` | audio_codec | `ppsspp-derived` | handler comment names PPSSPP; sceAtrac block: stream bookkeeping ported from PPSSPP sceAtrac.cpp |
 | `0xb3edd801` | `scePowerVolatileMemUnlock` | power | `synthetic` | HLE selftest dispatch |
 | `0xb435dec5` | `sceKernelDcacheWritebackInvalidateAll` | cache_dma | `unverified` | no recorded evidence |
 | `0xb4432bc8` | `scePowerGetBatteryChargingStatus` | power | `synthetic` | HLE selftest dispatch; note |

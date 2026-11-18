@@ -1586,11 +1586,11 @@ uint32_t ctrl_unread_refresh_taps(void);
 
 
 /* Success-result exceptions named in the end-of-run summary. sceKernelVolatileMemUnlock is absent:
- * it returns the PSP-measured states now. sceUtilityOskUpdate stays listed for VISIBLE's measured 0
+ * it returns the PSP-measured states now, and sceAtracGetOutputChannel checks its ID and writes the
+ * channel count DecodeData interleaves. sceUtilityOskUpdate stays listed for VISIBLE's measured 0
  * (#363 comment 6331070692, attended); after-use now returns the measured 0x80110001. */
 static inline const char *hle_success_exception_issue(uint32_t nid) {
     switch (nid) {
-    case 0xb3b5d042u: return "#363, #286"; /* sceAtracGetOutputChannel */
     case 0x4b85c861u: return "#363";       /* sceUtilityOskUpdate: measured VISIBLE success */
     default: return NULL;
     }

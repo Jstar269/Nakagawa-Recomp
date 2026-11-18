@@ -1132,10 +1132,15 @@ static int atrac_decode_frame(Atrac *a, uint32_t out, int skip, int *samples_out
 #define ATRAC3_FIRST_FRAME_DECODER_DELAY 69u
 #define ATRAC3_FIRST_FRAME_MIN_DELAY 955u        /* smallest nonzero delay the first decode accepts */
 #define ATRAC3_FIRST_FRAME_MEASURED_MAX 1797u    /* largest delay measured on the accepted side */
+/* The leading samples of the first decoded frame the delay word names, whether or not the first
+ * call is then refused; sceAtracGetNextSample reports the rest of the frame for every delay. */
+static int atrac3_first_frame_drop(uint32_t delay) {
+    return (int)((delay + ATRAC3_FIRST_FRAME_DECODER_DELAY) % (uint32_t)ATRAC3_SAMPLES_PER_FRAME);
+}
 /* The leading samples the first call drops, or -1 when the first call is refused. */
 static int atrac3_first_frame_skip(uint32_t delay) {
     if (delay != 0u && delay < ATRAC3_FIRST_FRAME_MIN_DELAY) return -1;
-    return (int)((delay + ATRAC3_FIRST_FRAME_DECODER_DELAY) % (uint32_t)ATRAC3_SAMPLES_PER_FRAME);
+    return atrac3_first_frame_drop(delay);
 }
 /* Returns the first-call error for a refused delay (0 otherwise) and sets
  * *skip to the leading samples the first frame drops. */
@@ -1332,6 +1337,19 @@ static uint32_t h_AtracGetChannel(CpuState *s) {
     MEM_W32(A1, (uint32_t)(a->channels < 0 ? 0 : a->channels));
     return 0;
 }
+/* sceAtracGetOutputChannel(id, *outChannels): the channel count of the PCM DecodeData writes.
+ * Public behaviour reference: the PSPSDK ATRAC3+ interface and PPSSPP Core/HLE/sceAtrac.cpp.
+ * DecodeData here interleaves the track's own channels (atrac_decode_frame writes
+ * a->channels samples per frame position), so that is the honest answer: 2 for a stereo track,
+ * 1 for the mono track the MOut calls take. A PSP's stereo output of a mono track set without
+ * the MOut calls is not modeled, and this answer and the PCM stay consistent with each other
+ * (#286). Errors reuse the neighbouring Atrac codes. */
+static uint32_t h_AtracGetOutputChannel(CpuState *s) {
+    Atrac *a = atrac_of(A0); if (!a) return ATRAC_ERROR_BAD_ATRACID;
+    if (!A1 || !sr_guest_span_writable(A1, 4u)) return 0x80000103u;   /* ILLEGAL_ADDR */
+    MEM_W32(A1, (uint32_t)(a->channels < 0 ? 0 : a->channels));
+    return 0;
+}
 /* sceAtracGetBitrate(id, *outBitrate): stream bitrate in kbps. Public
  * behaviour reference: the PSPSDK ATRAC3+ interface and PPSSPP
  * Core/HLE/sceAtrac.cpp. The container's own declared rate is the fmt
@@ -1411,9 +1429,7 @@ static uint32_t h_AtracGetNextSample(CpuState *s) {
      * fact chunk, the next call's length is 1024 - ((delay + 69) mod 1024), for every delay
      * sceAtracSetData accepts, including those whose decode is then refused. */
     if (a->codecType == ATRAC_CODEC_AT3 && a->at3FirstFramePending && a->at3FactSize == 8u) {
-        MEM_W32(A1, (uint32_t)(ATRAC3_SAMPLES_PER_FRAME -
-                    (int)((a->at3FactDelay + ATRAC3_FIRST_FRAME_DECODER_DELAY) %
-                          (uint32_t)ATRAC3_SAMPLES_PER_FRAME)));
+        MEM_W32(A1, (uint32_t)(ATRAC3_SAMPLES_PER_FRAME - atrac3_first_frame_drop(a->at3FactDelay)));
         return 0;
     }
     int remain = a->endSample - a->posSample;
@@ -1773,8 +1789,8 @@ typedef struct Mp3Ctx {
     int64_t readPos;               /* file offset of the next byte the game adds */
     int64_t ringBase;              /* file offset that lands at the start of the first half */
     int64_t available;             /* bytes added but not yet consumed by the decoder */
-    uint8_t *src;                  /* host copy of the added, unconsumed bytes */
-    uint32_t srcLen, srcCap;
+    uint8_t *src;                  /* host copy of the added bytes; src[srcHead..] are unconsumed */
+    uint32_t srcHead, srcLen, srcCap;
     int version;                   /* MPEG version bits once sceMp3Init succeeded, else -1 */
     int channels, bitRate, samplingRate;
     uint32_t maxOutputSample;
@@ -1800,10 +1816,13 @@ static void mp3_free(Mp3Ctx *c) {
     free(c->src);
     memset(c, 0, sizeof(*c));
 }
+/* The decoder consumes from src + srcHead; the unconsumed bytes move down only when an append
+ * needs the room (h_Mp3NotifyAddStreamData), not after every frame. */
 static void mp3_drop_source(Mp3Ctx *c, uint32_t n) {
     if (n > c->srcLen) n = c->srcLen;
-    if (n) memmove(c->src, c->src + n, c->srcLen - n);
+    c->srcHead += n;
     c->srcLen -= n;
+    if (c->srcLen == 0u) c->srcHead = 0u;
     c->available -= n;
 }
 static int32_t mp3_stream_half(const Mp3Ctx *c) {
@@ -1987,7 +2006,8 @@ static uint32_t mp3_decode_half(Mp3Ctx *c, uint32_t pcmAddr) {
     int end = c->readPos - c->available >= (int64_t)c->endPos;
     while (!end && c->srcLen) {
         int consumed = 0, samples = 0;
-        int r = mp3_bridge_decode(c->dec, c->src, (int)c->srcLen, pcm, &consumed, &samples, NULL);
+        int r = mp3_bridge_decode(c->dec, c->src + c->srcHead, (int)c->srcLen, pcm, &consumed,
+                                  &samples, NULL);
         mp3_drop_source(c, (uint32_t)consumed);
         if (r == MP3_BRIDGE_OK) {
             c->sumDecodedSamples += (uint32_t)samples;
@@ -2085,8 +2105,13 @@ static uint32_t h_Mp3NotifyAddStreamData(CpuState *s) {
                     handle, size);
         } else {
             uint32_t from = c->auBuf + MP3_STREAM_WORKAREA + (uint32_t)write_offset;
+            if (c->srcHead > c->srcCap - c->srcLen - (uint32_t)size) {
+                memmove(c->src, c->src + c->srcHead, c->srcLen);
+                c->srcHead = 0u;
+            }
+            uint8_t *tail = c->src + c->srcHead + c->srcLen;
             for (int32_t i = 0; i < size; i++)
-                c->src[c->srcLen + (uint32_t)i] = (uint8_t)MEM_R8(from + (uint32_t)i);
+                tail[i] = (uint8_t)MEM_R8(from + (uint32_t)i);
             c->srcLen += (uint32_t)size;
         }
     }
@@ -2266,12 +2291,12 @@ void hle_register_atrac_handlers(void) {
      * No guest import can carry the typo, so this registration was previously
      * unreachable and a real sceAtracGetChannel call was an unhandled-NID miss.
      * TD-24 batch 3 models it with h_AtracGetChannel (parsed fmt channels);
-     * sceAtracGetOutputChannel keeps its h_ok acceptance below (#286 tracks
-     * the remaining output-mapping gap). */
+     * sceAtracGetOutputChannel reports the channels DecodeData writes (#286
+     * tracks the remaining mono-to-stereo output mapping). */
     sr_hle_register(0x31668baa, "sceAtracGetChannel", h_AtracGetChannel);
     sr_hle_register(0x36faabfb, "sceAtracGetNextSample", h_AtracGetNextSample);
     sr_hle_register(0xa554a158, "sceAtracGetBitrate", h_AtracGetBitrate);
-    sr_hle_register(0xb3b5d042, "sceAtracGetOutputChannel", h_ok);
+    sr_hle_register(0xb3b5d042, "sceAtracGetOutputChannel", h_AtracGetOutputChannel);
     sr_hle_register(0xd6a5f2f7, "sceAtracGetMaxSample", h_AtracGetMaxSample);
     sr_hle_register(0x5622b7c1, "sceAtracSetAA3DataAndGetID", h_AtracSetAA3DataAndGetID);
     sr_hle_register(0x5dd66588, "sceAtracSetAA3HalfwayBufferAndGetID", h_AtracSetAA3HalfwayBufferAndGetID);

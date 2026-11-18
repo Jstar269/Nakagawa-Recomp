@@ -437,6 +437,7 @@ extern void sr_hle_test_reset_rtc_epoch(void);
 #define NID_SCE_ATRAC_GET_REMAIN_FRAME 0x9ae849a7u
 #define NID_SCE_ATRAC_GET_MAX_SAMPLE 0xd6a5f2f7u
 #define NID_SCE_ATRAC_GET_CHANNEL 0x31668baau
+#define NID_SCE_ATRAC_GET_OUTPUT_CHANNEL 0xb3b5d042u
 #define NID_SCE_ATRAC_GET_BITRATE 0xa554a158u
 #define NID_SCE_ATRAC_GET_INTERNAL_ERROR 0xe88f759bu
 #define NID_SCE_ATRAC_IS_SECOND_BUFFER_NEEDED 0xeca32a99u
@@ -7386,8 +7387,9 @@ static void test_controlled_unsupported_registration(void) {
            "a controlled refusal returns the same visible error on each call");
 
     memset(&cpu, 0, sizeof(cpu));
-    expect(sr_syscall(&cpu, 0xb3b5d042u) == 0u,
-           "sceAtracGetOutputChannel retains its named compatibility result under #281/#286");
+    cpu.r[4] = 0x7fu;
+    expect(sr_syscall(&cpu, 0xb3b5d042u) == ATRAC_ERROR_BAD_ATRACID,
+           "sceAtracGetOutputChannel refuses an unknown ID instead of a generic success");
 }
 
 static void test_kernel_import_sweep_explicit_refusals(void) {
@@ -35586,6 +35588,9 @@ static void test_td24c_atrac_info_batch(void) {
     expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CHANNEL, 0x7fu, 0u, 0u, 0u) ==
                ATRAC_ERROR_BAD_ATRACID,
            "sceAtracGetChannel validates the id before the out-pointer");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_OUTPUT_CHANNEL, 0x7fu, TD24C_OUT, 0u, 0u) ==
+               ATRAC_ERROR_BAD_ATRACID && MEM_R32(TD24C_OUT) == TD24C_SENTINEL,
+           "sceAtracGetOutputChannel reports the bad-id error without writing");
 
     /* ---- 1. fully fed track: all-data mode ---- */
     {
@@ -35595,6 +35600,9 @@ static void test_td24c_atrac_info_batch(void) {
         expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CHANNEL, id, 0u, 0u, 0u) ==
                    SCE_KERNEL_ERROR_ILLEGAL_ADDR,
                "sceAtracGetChannel rejects a null out-pointer");
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_OUTPUT_CHANNEL, id, 0u, 0u, 0u) ==
+                   SCE_KERNEL_ERROR_ILLEGAL_ADDR,
+               "sceAtracGetOutputChannel rejects a null out-pointer");
         expect(td24b_dispatch4(NID_SCE_ATRAC_GET_BITRATE, id, 0u, 0u, 0u) ==
                    SCE_KERNEL_ERROR_ILLEGAL_ADDR,
                "sceAtracGetBitrate rejects a null out-pointer");
@@ -35612,6 +35620,10 @@ static void test_td24c_atrac_info_batch(void) {
         expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CHANNEL, id, TD24C_OUT, 0u, 0u) == 0u &&
                    MEM_R32(TD24C_OUT) == 2u,
                "sceAtracGetChannel reports the parsed fmt channel count");
+        MEM_W32(TD24C_OUT, TD24C_SENTINEL);
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_OUTPUT_CHANNEL, id, TD24C_OUT, 0u, 0u) == 0u &&
+                   MEM_R32(TD24C_OUT) == 2u,
+               "sceAtracGetOutputChannel writes the channel count DecodeData interleaves");
         MEM_W32(TD24C_OUT, TD24C_SENTINEL);
         expect(td24b_dispatch4(NID_SCE_ATRAC_GET_BITRATE, id, TD24C_OUT, 0u, 0u) == 0u &&
                    MEM_R32(TD24C_OUT) == 128u,
@@ -35899,6 +35911,10 @@ static void test_atrac_set_entry_points_1379(void) {
     expect(td24b_dispatch4(NID_SCE_ATRAC_SET_MOUT_DATA, got, AT_RINGBASE, AT_BUFSIZE, 0u) == 0u &&
                at1379_channels(got) == 1u,
            "#1379: sceAtracSetMOutData configures the given ID with a mono track");
+    MEM_W32(AT1379_OUT, 0xdeadbeefu);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_OUTPUT_CHANNEL, got, AT1379_OUT, 0u, 0u) == 0u &&
+               MEM_R32(AT1379_OUT) == 1u,
+           "#1379: sceAtracGetOutputChannel reports the MOut track's mono output");
     expect(td24b_dispatch4(NID_SCE_ATRAC_SET_MOUT_HALFWAY_BUFFER, got, AT_RINGBASE, READ, BUF) == 0u &&
                at1379_halfway_info(got, READ),
            "#1379: sceAtracSetMOutHalfwayBuffer configures the given ID as a halfway buffer");

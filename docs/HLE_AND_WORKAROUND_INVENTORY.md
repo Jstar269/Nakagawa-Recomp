@@ -46,8 +46,8 @@ names #341 on every entry and only shrinks: reviewing a handler retires its entr
 <!-- BEGIN GENERATED HLE STATUS CENSUS -->
 ### HLE Semantic Status Census
 
-Registered NIDs: **711** (dedicated **627**, fake_success **4**, controlled_unsupported **80**).
-Semantic handler census: **602** handlers across **30** API families, covering **634** handler-associated NID registrations.
+Registered NIDs: **711** (dedicated **628**, fake_success **3**, controlled_unsupported **80**).
+Semantic handler census: **603** handlers across **30** API families, covering **635** handler-associated NID registrations.
 
 | Semantic Status | Handlers | NID Registrations |
 | :--- | :---: | :---: |
@@ -55,13 +55,13 @@ Semantic handler census: **602** handlers across **30** API families, covering *
 | `partial` | 348 | 360 |
 | `compatibility` | 1 | 1 |
 | `controlled_unsupported` | 3 | 7 |
-| `unreviewed` | 236 | 243 |
+| `unreviewed` | 237 | 244 |
 
 | API Family | Complete | Partial | Compatibility | Controlled Unsupported | Unreviewed | Total Handlers | NID Registrations |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `newlib` | 0 | 0 | 0 | 0 | 1 | 1 | 1 |
 | `other` | 1 | 1 | 0 | 0 | 0 | 2 | 2 |
-| `sceAtrac` | 0 | 0 | 0 | 0 | 33 | 33 | 34 |
+| `sceAtrac` | 0 | 0 | 0 | 0 | 34 | 34 | 35 |
 | `sceAudio` | 0 | 11 | 0 | 0 | 6 | 17 | 18 |
 | `sceAudiocodec` | 0 | 5 | 0 | 0 | 0 | 5 | 5 |
 | `sceCtrl` | 0 | 12 | 0 | 0 | 0 | 12 | 12 |
@@ -89,7 +89,7 @@ Semantic handler census: **602** handlers across **30** API families, covering *
 | `sceVaudio` | 0 | 3 | 0 | 0 | 0 | 3 | 3 |
 | `sceVideocodec` | 0 | 10 | 0 | 0 | 0 | 10 | 10 |
 | `sceWlan` | 0 | 0 | 0 | 0 | 2 | 2 | 3 |
-| **Total** | **14** | **348** | **1** | **3** | **236** | **602** | **634** |
+| **Total** | **14** | **348** | **1** | **3** | **237** | **603** | **635** |
 
 #### Complete Handlers (Evidence-Backed)
 
@@ -1648,7 +1648,7 @@ The current registration classes and semantic statuses are in the generated cens
 | `sceUmdUser` | `sceUmdCancelWaitDriveStat` (`0x6af9b50a`) | Controlled refusal: `0x80010086` (function not supported). Drive-wait cancellation is not modeled. |
 | `sceUmdUser` | `sceUmdGetErrorStat` (`0x20628e6f`) | Compatibility implementation: returns no error while the virtual ISO drive reports its modeled PRESENT/READY/READABLE state; other drive-error states are not modeled (#281). |
 | `IoFileMgrForUser` | `sceIoDevctl` (`0x54f5fb11`) | Partial Memory Stick support for `ms0:` and `fatms0:`: capacity/free-cluster geometry comes from the unified Memory Stick root shared with ordinary `sceIo*` and savedata (`SR_MEMSTICK`, default `memstick/`); inserted and ready queries write 1 and 4; registering a live callback for insert/eject events adds it to a 32-entry list and queues one notification with argument 1 (inserted), delivered on the owning thread at its next callback point; unregister removes one matching entry, an unknown UID returns `0x80010016`, and deleting a callback drops its registrations. No later insert or eject event exists ([#1378](https://github.com/Jstar269/nakagawa-recomp/issues/1378)). Other device/command pairs return `0x80010086`, log once per pair, and appear in the #281 exit summary. |
-| `sceAtrac3plus` | `sceAtracGetOutputChannel` (`0xb3b5d042`) | Compatibility exception: existing acceptance is retained while output-channel mapping is tracked by #286. |
+| `sceAtrac3plus` | `sceAtracGetOutputChannel` (`0xb3b5d042`) | Compatibility exception at the migration. It now refuses an unknown ID with `0x80630005` (`ATRAC_ERROR_BAD_ATRACID`) and an unwritable output word with `0x80000103`, and writes the channel count `sceAtracDecodeData` interleaves (the track's own channels). A PSP's stereo output of a mono track set without the MOut calls is not modeled (#286). |
 | `sceKernelVolatileMemUnlock` | `sceKernelVolatileMemUnlock` (`0xa569e425`) | Compatibility exception at the migration: the documented asset-loading route uses this call around the shared volatile-memory scratch buffer (#281). It now returns the PSP-measured states (#1135) and hands the lock to the oldest `sceKernelVolatileMemLock` caller blocked on it (#1383). |
 | `sceUtility` | `sceUtilityOskUpdate` (`0x4b85c861`) | Compatibility exception: the current route collects text and advances the OSK state from `sceUtilityOskGetStatus`; update keeps its no-op success while that dialog contract is unfinished (#281). |
 

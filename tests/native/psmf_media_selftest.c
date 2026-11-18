@@ -5506,6 +5506,298 @@ static void test_mpeg_feed_end_without_stream_size(int mode) {
     free(image);
 }
 
+/* sceMpegRingbufferPut publishes the ring counters from the ring as it reads after each fill
+ * callback, not from a copy taken before it. The callback is guest code that another thread can
+ * preempt at any yield, and while it waits a decode thread's GetAvcAu releases packets by lowering
+ * packetsAvail (mpeg_get_avc_au) or sceMpegFlushAllStream zeroes the counters. A flush moves the
+ * write position, so the packets the callback wrote are no longer where the counters say: the put
+ * stops by name and counts none of them. The callback here stands in for both threads. */
+static uint32_t s_rr_release;   /* packets the decode thread releases while the callback runs */
+static int s_rr_flush;          /* the decode thread flushes the stream while the callback runs */
+static void reread_fill_callback_body(CpuState *s) {
+    const uint32_t dst = s->r[4], want = s->r[5];
+    for (uint32_t i = 0; i < want; i++) {   /* MPEG padding packets */
+        uint8_t *p = (uint8_t *)SR_HOST(dst + i * MPEG_PACKET_SIZE);
+        p[0] = 0x00; p[1] = 0x00; p[2] = 0x01; p[3] = 0xbe;
+        p[4] = (uint8_t)((MPEG_PACKET_SIZE - 6u) >> 8); p[5] = (uint8_t)(MPEG_PACKET_SIZE - 6u);
+        memset(p + 6, 0xff, MPEG_PACKET_SIZE - 6u);
+    }
+    if (s_rr_release) {
+        rb_set(EF_RING, RB_packetsAvail, rb_get(EF_RING, RB_packetsAvail) - s_rr_release);
+        s_rr_release = 0u;
+    }
+    if (s_rr_flush) {
+        s_rr_flush = 0;
+        (void)mpeg_flush_all_stream(EF_DESC);
+    }
+    s->r[2] = want;
+    SR_AOT_RETURN_CAPTURE(s, s->r[31]);
+}
+static int rr_ring_is(uint32_t avail, uint32_t read, uint32_t write_pos) {
+    return rb_get(EF_RING, RB_packetsAvail) == avail && rb_get(EF_RING, RB_packetsRead) == read &&
+           rb_get(EF_RING, RB_packetsWritePos) == write_pos;
+}
+static void test_mpeg_put_rereads_ring_after_callback(void) {
+    const uint32_t ring_packets = 16u;
+    s_rr_release = 0u;
+    s_rr_flush = 0;
+    MEM_W32(EF_CALLBACK, 0u);
+    CHECK(sr_exec_span_register(EF_CALLBACK, EF_CALLBACK + 4u), "mpeg-put-reread: the fill callback is guest code");
+    sr_register(EF_CALLBACK, reread_fill_callback_body);
+    sr_hle_test_register_mpeg_ring_handlers();
+    MEM_W32(EF_DESC, 0u);
+    CHECK(mpeg_ringbuffer_construct(EF_RING, ring_packets, EF_RING_DATA,
+                                    ring_packets * MPEG_RING_BYTES_PER_PKT, EF_CALLBACK, 0u) == 0u &&
+              mpeg_create(EF_DESC, EF_DATA, 0x10000u, EF_RING, 512u, 0u, 0u) == 0u,
+          "mpeg-put-reread: the ring with its fill callback and the context are set up");
+    CHECK(guest_mpeg_import(NID_MPEG_RINGBUFFER_PUT, EF_RING, 8u, ring_packets, 0u, 0u) == 8u &&
+              rr_ring_is(8u, 8u, 8u),
+          "mpeg-put-reread: a put with no other thread adds its packets");
+    s_rr_release = 5u;
+    CHECK(guest_mpeg_import(NID_MPEG_RINGBUFFER_PUT, EF_RING, 4u, 8u, 0u, 0u) == 4u &&
+              rr_ring_is(8u - 5u + 4u, 12u, 12u),
+          "mpeg-put-reread: packets released while the callback ran stay released");
+    s_rr_flush = 1;
+    CHECK(guest_mpeg_import(NID_MPEG_RINGBUFFER_PUT, EF_RING, 4u, 9u, 0u, 0u) == 0u &&
+              rr_ring_is(0u, 0u, 0u),
+          "mpeg-put-reread: a flush while the callback ran stays a flush; the moved packets are not counted");
+    mpeg_finish();
+}
+
+/* sceMpegRingbufferPut when the fill callback cannot run: with no nested guest-call frame left
+ * (nested_frames.h: "do not dispatch") the callback's 0 is no answer from the guest.  The run
+ * stops by name, nothing is counted, and the feed is not taken for one that ran short, which
+ * would end a movie whose stream size is unknown (#286).  A ring that fails its layout checks is
+ * refused by name with sceMpegCreate's error, not answered as 0 packets or 0 free. */
+static void test_mpeg_put_refusals_are_named(void) {
+    const uint32_t ring_packets = 16u;
+    s_rr_release = 0u;
+    s_rr_flush = 0;
+    MEM_W32(EF_CALLBACK, 0u);
+    CHECK(sr_exec_span_register(EF_CALLBACK, EF_CALLBACK + 4u), "mpeg-put-refused: the fill callback is guest code");
+    sr_register(EF_CALLBACK, reread_fill_callback_body);
+    sr_hle_test_register_mpeg_ring_handlers();
+    MEM_W32(EF_DESC, 0u);
+    CHECK(mpeg_ringbuffer_construct(EF_RING, ring_packets, EF_RING_DATA,
+                                    ring_packets * MPEG_RING_BYTES_PER_PKT, EF_CALLBACK, 0u) == 0u &&
+              mpeg_create(EF_DESC, EF_DATA, 0x10000u, EF_RING, 512u, 0u, 0u) == 0u,
+          "mpeg-put-refused: the ring with its fill callback and the context are set up");
+    Mpeg *ctx = mpeg_find(EF_DESC);
+    int frames[SR_NESTED_FRAME_SLOTS + 1u];
+    unsigned held = 0;
+    for (unsigned i = 0; i <= SR_NESTED_FRAME_SLOTS; i++) {
+        uint32_t sp = 0;
+        int handle = -1;
+        if (!sr_nested_frame_acquire(sched_current_uid(), &sp, &handle)) break;
+        frames[held++] = handle;
+    }
+    CHECK(held > 0u && held <= SR_NESTED_FRAME_SLOTS, "mpeg-put-refused: the caller's nested frames are all taken");
+    CpuState cpu;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = EF_RING; cpu.r[5] = 4u; cpu.r[6] = ring_packets;
+    uint32_t r = sr_syscall(&cpu, NID_MPEG_RINGBUFFER_PUT);
+    CHECK(r == 0u && cpu.flow_kind == SR_FLOW_FATAL && cpu.flow_target == EF_CALLBACK,
+          "mpeg-put-refused: a callback with no frame to run on stops the run by name");
+    CHECK(rr_ring_is(0u, 0u, 0u) && ctx && ctx->fedPackets == 0u,
+          "mpeg-put-refused: the put counts no packet of a callback that never ran");
+    CHECK(ctx && !ctx->feedShort, "mpeg-put-refused: a callback that never ran is not a feed that ran short");
+    while (held) (void)sr_nested_frame_release(frames[--held]);
+    CHECK(guest_mpeg_import(NID_MPEG_RINGBUFFER_PUT, EF_RING, 4u, ring_packets, 0u, 0u) == 4u &&
+              rr_ring_is(4u, 4u, 4u),
+          "mpeg-put-refused: with a frame free the same put adds its packets");
+
+    rb_set(EF_RING, RB_packetSize, 1024u);
+    CHECK(guest_mpeg_import(NID_MPEG_RINGBUFFER_PUT, EF_RING, 4u, ring_packets, 0u, 0u) == SCE_MPEG_ERROR_INVALID_VALUE &&
+              rr_ring_is(4u, 4u, 4u),
+          "mpeg-put-refused: Put refuses a ring that fails its layout checks with INVALID_VALUE");
+    CHECK(guest_mpeg_import(NID_MPEG_RINGBUFFER_AVAIL, EF_RING, 0u, 0u, 0u, 0u) == SCE_MPEG_ERROR_INVALID_VALUE,
+          "mpeg-put-refused: AvailableSize refuses a ring that fails its layout checks with INVALID_VALUE");
+    rb_set(EF_RING, RB_packetSize, MPEG_PACKET_SIZE);
+    CHECK(guest_mpeg_import(NID_MPEG_RINGBUFFER_PUT, EF_RING, 0u, ring_packets, 0u, 0u) == 0u,
+          "mpeg-put-refused: a put of no packets on a good ring still adds 0");
+    mpeg_finish();
+}
+
+/* The sceMpeg ATRAC demux keeps only the registered stream's PS1 sub-stream (0x00 + its number).
+ * Here two ATRAC streams are interleaved and every frame straddles two packets, so a demux that
+ * kept every sub-stream in one track spliced the other stream's bytes into each frame. */
+static void test_mpeg_atrac_second_substream_is_not_spliced(void) {
+    enum { FRAMES = 4, HALF = 72 };
+    static uint8_t ps[16384];
+    uint8_t frame[2][FRAMES][160];
+    uint32_t bytes = 0;
+    Buf b = { ps, 0u, sizeof(ps), 0 };
+    for (int k = 0; k < FRAMES; k++)
+        for (int st = 0; st < 2; st++) {
+            bytes = make_audio_frame(frame[st][k], sizeof(frame[st][k]), 0x28, 0x10,
+                                     (uint8_t)((st ? 0x81 : 0x11) + k));
+        }
+    CHECK(bytes == 2u * HALF, "mpeg-atrac-sub: each fixture frame is two packets' payload");
+    for (int k = 0; k < FRAMES; k++) {
+        add_audio_pes_sub(&b, 0x00u, 0, 0, frame[0][k], HALF);
+        add_audio_pes_sub(&b, 0x01u, 0, 0, frame[1][k], HALF);
+        add_audio_pes_sub(&b, 0x00u, 0, 0, frame[0][k] + HALF, HALF);
+        add_audio_pes_sub(&b, 0x01u, 0, 0, frame[1][k] + HALF, HALF);
+    }
+    CHECK(!b.overflow, "mpeg-atrac-sub: the interleaved program stream fits");
+    for (int st = 0; st < 2; st++) {
+        Mpeg m;
+        memset(&m, 0, sizeof(m));
+        mpeg_audio_open(&m, st);
+        mpeg_audio_feed(&m, ps, b.at);
+        int exact = !m.audioDemuxFailed && m.audioFifoCount == (uint32_t)FRAMES;
+        for (uint32_t i = 0; exact && i < m.audioFifoCount; i++) {
+            uint32_t at = (m.audioFifoHead + i) % MPEG_ATRAC_FIFO_DEPTH;
+            exact = m.audioFifo[at].bytes == bytes && memcmp(m.audioFifo[at].data, frame[st][i], bytes) == 0;
+        }
+        CHECK(exact, st ? "mpeg-atrac-sub: stream 1's frames come out whole, with none of stream 0's bytes"
+                        : "mpeg-atrac-sub: stream 0's frames come out whole, with none of stream 1's bytes");
+        mpeg_audio_close(&m);
+    }
+}
+
+/* A guest that takes no ATRAC unit (skip mode, or no GetAtracAu at all) leaves the FIFO full while
+ * the video keeps the ring moving.  The demux's unparsed bytes once grew with every put until the
+ * producer's 16 MiB limit failed the stream for good; the oldest frames now go instead, and the
+ * frames the guest takes afterwards are whole. */
+static void test_mpeg_atrac_untaken_backlog_is_bounded(void) {
+    enum { UNIT = 2048, UNITS = 32 };
+    static uint8_t chunk[UNIT * UNITS];
+    uint8_t frame[160];
+    uint32_t bytes = make_audio_frame(frame, sizeof(frame), 0x28, 0x10, 0x33);
+    Buf b = { chunk, 0u, sizeof(chunk), 0 };
+    for (int u = 0; u < UNITS; u++) {
+        uint32_t start = b.at;
+        add_audio_pes_sub(&b, 0x00u, 0, 0, frame, bytes);
+        uint32_t pad = UNIT - (b.at - start) - 6u;
+        uint8_t hdr[6] = { 0x00, 0x00, 0x01, 0xbe, (uint8_t)(pad >> 8), (uint8_t)pad };
+        put(&b, hdr, sizeof(hdr));
+        if (b.at + pad <= b.cap) { memset(b.d + b.at, 0xff, pad); b.at += pad; } else b.overflow = 1;
+    }
+    CHECK(!b.overflow && b.at == sizeof(chunk), "mpeg-atrac-backlog: the chunk is whole packets");
+    Mpeg m;
+    memset(&m, 0, sizeof(m));
+    mpeg_audio_open(&m, 0);
+    const uint32_t feeds = SR_PSMF_MAX_PS_BUFFER_BYTES / sizeof(chunk) + 4u;
+    for (uint32_t i = 0; i < feeds && !m.audioDemuxFailed; i++) mpeg_audio_feed(&m, chunk, sizeof(chunk));
+    CHECK(!m.audioDemuxFailed, "mpeg-atrac-backlog: more than 16 MiB put with no unit taken does not fail the stream");
+    CHECK(m.audioSkipped > 0u && m.audioFifoCount == MPEG_ATRAC_FIFO_DEPTH,
+          "mpeg-atrac-backlog: the oldest frames are dropped and counted as skipped");
+    CHECK(mpeg_audio_backlog(&m) <= SR_PSMF_MAX_PS_BUFFER_BYTES,
+          "mpeg-atrac-backlog: the unparsed bytes stay within the demux's limit");
+    int whole = 1;
+    for (uint32_t i = 0; i < m.audioFifoCount; i++) {
+        uint32_t at = (m.audioFifoHead + i) % MPEG_ATRAC_FIFO_DEPTH;
+        whole &= m.audioFifo[at].bytes == bytes && memcmp(m.audioFifo[at].data, frame, bytes) == 0;
+    }
+    CHECK(whole, "mpeg-atrac-backlog: the frames the guest takes afterwards are whole");
+    mpeg_audio_close(&m);
+}
+
+/* Each context names its own first ATRAC failure: the flag was once one per process, so a second
+ * movie's silent audio had no named cause. */
+unsigned sr_mpeg_test_atrac_reports(void);
+static void test_mpeg_atrac_failure_named_per_context(void) {
+    enum { RP_DESC_A = 0x08600000u, RP_DATA_A = 0x08610000u, RP_DESC_B = 0x08620000u, RP_DATA_B = 0x08630000u };
+    MEM_W32(RP_DESC_A, 0u);
+    MEM_W32(RP_DESC_B, 0u);
+    CHECK(mpeg_create(RP_DESC_A, RP_DATA_A, 0x10000u, 0u, 512u, 0u, 0u) == 0u &&
+              mpeg_create(RP_DESC_B, RP_DATA_B, 0x10000u, 0u, 512u, 0u, 0u) == 0u,
+          "mpeg-atrac-report: two contexts");
+    const unsigned before = sr_mpeg_test_atrac_reports();
+    (void)mpeg_regist_stream(RP_DESC_A, MPEG_ATRAC_STREAM, 0x10u);   /* no PS1 sub-stream id */
+    (void)mpeg_regist_stream(RP_DESC_A, MPEG_ATRAC_STREAM, 0x11u);
+    (void)mpeg_regist_stream(RP_DESC_B, MPEG_ATRAC_STREAM, 0x10u);
+    CHECK(sr_mpeg_test_atrac_reports() - before == 3u,
+          "mpeg-atrac-report: each registration's failure is named, in each context");
+    Mpeg *a = mpeg_find(RP_DESC_A);
+    const unsigned named = sr_mpeg_test_atrac_reports();
+    if (a) mpeg_audio_report(a, "a second failure of the same stream");
+    CHECK(sr_mpeg_test_atrac_reports() == named, "mpeg-atrac-report: one stream's failure is named once");
+    mpeg_finish();
+}
+
+/* sceMpegFlushAllStream: the game refills the ring from another position.  The H.264 demux,
+ * which RingbufferPut feeds at put time, starts over with it, and so do the feed's end and the
+ * packet accounting (PPSSPP reloads its media engine at the first put after the flush).
+ * sceMpegAvcDecodeFlush puts the video clock back to the stream's start, an offset of 0 from the
+ * first timestamp, as the skip-mode clock shows. */
+static void test_mpeg_flush_restarts_the_video(void) {
+    enum {
+        FA_DESC = 0x08600000u, FA_DATA = 0x08610000u, FA_RING = 0x08630000u, FA_HDR = 0x08640000u,
+        FA_AU = 0x08641000u, FA_ATTR = 0x08641100u, FA_OFF = 0x08641110u, FA_INIT = 0x08641120u,
+        FA_PTR = 0x08641300u, FA_FRAME = 0x08680000u, FA_RING_DATA = 0x086c0000u,
+    };
+    uint32_t size = 0;
+    uint8_t *image = build_psmf_av(&size, AV_LAYOUT_SPLIT);
+    if (!image) { CHECK(0, "mpeg-flush: the A/V container builds"); return; }
+    const uint32_t ps = size - 2048u;
+    const uint32_t packets = (ps + MPEG_PACKET_SIZE - 1u) / MPEG_PACKET_SIZE;
+    const uint32_t pad = packets * MPEG_PACKET_SIZE - ps;
+    CHECK(pad == 0u || pad >= 6u, "mpeg-flush: the tail is long enough for a padding packet");
+    memcpy(SR_HOST(FA_RING_DATA), image + 2048u, ps);
+    if (pad >= 6u) {
+        uint8_t *tail = (uint8_t *)SR_HOST(FA_RING_DATA + ps);
+        tail[0] = 0x00; tail[1] = 0x00; tail[2] = 0x01; tail[3] = 0xbe;
+        tail[4] = (uint8_t)((pad - 6u) >> 8); tail[5] = (uint8_t)(pad - 6u);
+        memset(tail + 6, 0xff, pad - 6u);
+    }
+    memcpy(SR_HOST(FA_HDR), image, 2048u);
+    memcpy(SR_HOST(FA_HDR + 4u), "0015", 4u);
+    be32_at((uint8_t *)SR_HOST(FA_HDR + 12u), packets * MPEG_PACKET_SIZE);
+    MEM_W32(FA_DESC, 0u);
+    CHECK(mpeg_ringbuffer_construct(FA_RING, packets, FA_RING_DATA,
+                                    packets * MPEG_RING_BYTES_PER_PKT, 0u, 0u) == 0u &&
+              mpeg_create(FA_DESC, FA_DATA, 0x10000u, FA_RING, 512u, 0u, 0u) == 0u &&
+              mpeg_query_stream_offset(FA_DESC, FA_HDR, FA_OFF) == 0u,
+          "mpeg-flush: the ring, the context and the header are set up");
+    uint32_t avc = mpeg_regist_stream(FA_DESC, MPEG_AVC_STREAM, 0u);
+    Mpeg *ctx = mpeg_find(FA_DESC);
+    CHECK(mpeg_ringbuffer_put(NULL, FA_RING, packets, packets) == packets, "mpeg-flush: the whole movie goes in");
+
+    /* The skip-mode clock after AvcDecodeFlush is the stream's first timestamp, not twice it. */
+    CHECK(ctx && ctx->firstTimestamp == FIX_BASE &&
+              mpeg_change_get_au_mode(FA_DESC, avc, MPEG_AU_MODE_SKIP) == 0u &&
+              mpeg_avc_decode_flush(FA_DESC) == 0u &&
+              mpeg_get_avc_au(FA_DESC, avc, FA_AU, FA_ATTR) == 0u && au_read_pts(FA_AU) == FIX_BASE &&
+              mpeg_change_get_au_mode(FA_DESC, avc, MPEG_AU_MODE_DECODE) == 0u,
+          "mpeg-flush: after AvcDecodeFlush the skip-mode clock is the first timestamp");
+    if (!ctx || ctx->h264 < 0) {
+        fprintf(stderr, "SKIP: the FlushAllStream video restart needs a real H.264 backend\n");
+        mpeg_finish();
+        free(image);
+        return;
+    }
+    MEM_W32(FA_PTR, FA_FRAME);
+    int64_t first[2] = { -1, -1 };
+    for (int i = 0; i < 2; i++) {
+        CHECK(mpeg_get_avc_au(FA_DESC, avc, FA_AU, FA_ATTR) == 0u, "mpeg-flush: a unit of the first position");
+        first[i] = au_read_pts(FA_AU);
+        MEM_W32(FA_INIT, 0u);
+        mpeg_avc_decode(FA_DESC, FA_AU, 512u, FA_PTR, FA_INIT);
+    }
+    CHECK(first[0] >= 0 && first[1] > first[0], "mpeg-flush: the first two units carry their own times");
+    /* In mid-movie the game seeks back to the start. */
+    CHECK(mpeg_flush_all_stream(FA_DESC) == 0u &&
+              mpeg_ringbuffer_put(NULL, FA_RING, packets, packets) == packets &&
+              mpeg_get_avc_au(FA_DESC, avc, FA_AU, FA_ATTR) == 0u && au_read_pts(FA_AU) == first[0],
+          "mpeg-flush: after a flush in mid-movie the first unit is the new position's first");
+    /* The movie plays to its end, then the game loops it. */
+    for (int guard = 0; guard < 8 * AV_PICTURES && !ctx->videoEnd; guard++) {
+        if (mpeg_get_avc_au(FA_DESC, avc, FA_AU, FA_ATTR)) continue;
+        MEM_W32(FA_INIT, 0u);
+        mpeg_avc_decode(FA_DESC, FA_AU, 512u, FA_PTR, FA_INIT);
+    }
+    CHECK(ctx->videoEnd && ctx->streamEnded, "mpeg-flush: the movie ends");
+    CHECK(mpeg_flush_all_stream(FA_DESC) == 0u &&
+              mpeg_ringbuffer_put(NULL, FA_RING, packets, packets) == packets &&
+              mpeg_get_avc_au(FA_DESC, avc, FA_AU, FA_ATTR) == 0u && au_read_pts(FA_AU) == first[0] &&
+              !ctx->videoEnd && !ctx->streamEnded && !ctx->h264DemuxFailed,
+          "mpeg-flush: after the end a flush and a refeed play the movie again from its first unit");
+    mpeg_finish();
+    free(image);
+}
+
 /* #2205: the frame size is ((b2 & 3) << 8 | b3) * 8 + 0x10, so a frame over 2 KiB has b2 & 3 != 0.
  * The expression once multiplied b3 before the OR, which read such a frame as a short one and
  * refused it at the size check, before any decoder was set up.  The held unit's length comes
@@ -5584,6 +5876,14 @@ static void test_mpeg_atrac_au_decode(void) {
               mpeg_create(AT_DESC, AT_DATA, 0x10000u, AT_RING, 512u, 0u, 0u) == 0u &&
               mpeg_query_stream_offset(AT_DESC, AT_HDR, AT_OFF) == 0u,
           "mpeg-atrac: the ring, the context and the header are set up");
+    /* The header's first (0x54) and last (0x5a) timestamps are six big-endian bytes each; the
+     * fixture writes 00 00 00 01 5F 90 (90000) at 0x54, which a five-byte read takes as 351. */
+    {
+        const Mpeg *hdr = mpeg_find(AT_DESC);
+        CHECK(hdr && hdr->firstTimestamp == FIX_BASE &&
+                  hdr->lastTimestamp == FIX_BASE + av_video_pts(AV_PICTURES),
+              "mpeg-atrac: QueryStreamOffset reads the header's six-byte first and last timestamps");
+    }
     uint32_t sid = mpeg_regist_stream(AT_DESC, MPEG_ATRAC_STREAM, 0u);
     CHECK(mpeg_get_atrac_au(AT_DESC, sid, AT_AU, AT_ATTR) == SCE_MPEG_ERROR_NO_DATA,
           "mpeg-atrac: before any packet GetAtracAu reports no data");
@@ -6421,6 +6721,12 @@ int main(int argc, char **argv) {
     test_mpeg_feed_end_without_stream_size(3);
     test_mpeg_feed_end_without_stream_size(4);
     test_mpeg_feed_end_without_stream_size(5);
+    test_mpeg_put_rereads_ring_after_callback();
+    test_mpeg_put_refusals_are_named();
+    test_mpeg_atrac_second_substream_is_not_spliced();
+    test_mpeg_atrac_untaken_backlog_is_bounded();
+    test_mpeg_atrac_failure_named_per_context();
+    test_mpeg_flush_restarts_the_video();
     test_mpeg_avc_decode_detail();
     test_psmf_contract_fragmentation_and_malformed_rejection();
     if (fuzz_iterations) test_legacy_demux_mutations(fuzz_iterations);
