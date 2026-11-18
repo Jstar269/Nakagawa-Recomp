@@ -75,15 +75,21 @@ typedef struct NkUiTextBlock {
 } NkUiTextBlock;
 
 /* nk_ui's own errors, reported through NkUiConfig.report_error beside Clay's
-   (nk_ui_clay_report_own takes bits 20 to 29). */
+   (nk_ui_clay_report_own takes bits 20 to 28: bit 29 is the layout's
+   text-style table, 30 and 31 its draw errors). */
 enum {
     NK_UI_ERROR_FRAME_TEXT = 20,
     NK_UI_ERROR_SCROLL_MAX,
     NK_UI_ERROR_CUSTOM_SLOTS,
     NK_UI_ERROR_OPEN_CONTAINER,
     NK_UI_ERROR_DRAW,
-    NK_UI_ERROR_EVENT_QUEUE
+    NK_UI_ERROR_EVENT_QUEUE,
+    NK_UI_ERROR_END             /* one past the last; stays at most 29 */
 };
+/* Compile-time check in the C99 form (no _Static_assert under -std=c99): an
+   error at bit 29 or above would be refused by nk_ui_clay_report_own and never
+   reported. */
+typedef char nk_ui_error_bits_fit_check[(NK_UI_ERROR_END <= 29) ? 1 : -1];
 
 struct NkUi {
     NkUiHostKind host;
