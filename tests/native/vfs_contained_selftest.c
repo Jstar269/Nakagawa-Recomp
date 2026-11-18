@@ -1383,6 +1383,52 @@ static void case_set_mode_clears_lone_readonly(void) {
 }
 #endif
 
+#if defined(SR_CD_BACKEND_POSIX_AT)
+/* sceIoChstat models the FAT read-only attribute on POSIX as on Windows. The pre-fix
+ * backend ran fchmod with the guest's 0777 bits, so FIO_S_IFDIR|0444 cleared the save
+ * folder's search bits (every later open inside it failed with EACCES) and
+ * FIO_S_IFREG|0200 left the file unreadable to the host user. */
+static void case_set_mode_models_fat_readonly(void) {
+    char root[1100], dir[1200], path[1300];
+    struct stat st;
+    CHECK(build_save("t_mode_posix", "ULUS00001DATA", SAVE_FILES, 3, root, sizeof(root)),
+          "fixture t_mode_posix");
+    fp(dir, sizeof(dir), "%s/PSP/SAVEDATA/ULUS00001DATA", root);
+    fp(path, sizeof(path), "%s/DATA.BIN", dir);
+    sr_cd_root r;
+    CHECK_ST(sr_cd_root_open(root, &r), SR_CD_OK);
+
+    CHECK_ST(sr_cd_set_mode(&r, "PSP/SAVEDATA/ULUS00001DATA", 0x1000u | 0444u), SR_CD_OK);
+    CHECK(stat(dir, &st) == 0 && (st.st_mode & (S_IRUSR | S_IXUSR)) == (S_IRUSR | S_IXUSR),
+          "a read-only directory mode keeps the owner's read and search bits (mode %o)",
+          (unsigned)(st.st_mode & 07777));
+    CHECK((st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0,
+          "a mode without write bits clears every host write bit (mode %o)",
+          (unsigned)(st.st_mode & 07777));
+    CHECK(read_file_equals(path, "payload"),
+          "a file inside a read-only save folder stays readable");
+    CHECK_ST(sr_cd_set_mode(&r, "PSP/SAVEDATA/ULUS00001DATA", 0x1000u | 0777u), SR_CD_OK);
+    CHECK(stat(dir, &st) == 0 && (st.st_mode & S_IWUSR) != 0,
+          "a writable directory mode restores the owner's write bit");
+
+    CHECK_ST(sr_cd_set_mode(&r, "PSP/SAVEDATA/ULUS00001DATA/DATA.BIN", 0x2000u | 0200u),
+             SR_CD_OK);
+    CHECK(stat(path, &st) == 0 && (st.st_mode & (S_IRUSR | S_IWUSR)) == (S_IRUSR | S_IWUSR),
+          "a write-only file mode keeps the owner's read bit (mode %o)",
+          (unsigned)(st.st_mode & 07777));
+    CHECK_ST(sr_cd_set_mode(&r, "PSP/SAVEDATA/ULUS00001DATA/DATA.BIN", 0x2000u), SR_CD_OK);
+    CHECK(stat(path, &st) == 0 && (st.st_mode & S_IRUSR) != 0 &&
+              (st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0,
+          "a mode of 0 makes the file read-only, still readable (mode %o)",
+          (unsigned)(st.st_mode & 07777));
+    CHECK(read_file_equals(path, "payload"), "the read-only file keeps its bytes readable");
+    CHECK_ST(sr_cd_set_mode(&r, "PSP/SAVEDATA/ULUS00001DATA/DATA.BIN", 0x2000u | 0666u),
+             SR_CD_OK);
+    sr_cd_root_close(&r);
+    nuke(root);
+}
+#endif
+
 static void case_rel_split_unit(void) {
     char parent[64], last[64];
     CHECK(sr_cd_rel_split("PSP/SAVEDATA/X", parent, sizeof(parent), last, sizeof(last)),
@@ -1454,6 +1500,9 @@ int main(void) {
     case_invalid_utf8_leaf_is_refused();
     case_set_mode_clears_lone_readonly();
 #endif
+#if defined(SR_CD_BACKEND_POSIX_AT)
+    case_set_mode_models_fat_readonly();
+#endif
     case_final_symlink_entry(&skipped);
     case_leaf_replacement(&skipped);
     case_parent_replacement();
@@ -1468,7 +1517,9 @@ int main(void) {
     }
 #endif
 
-    t_rmdir(g_tmp);
+    /* A case that fails or returns early can leave entries (planted links among them)
+     * behind; nuke follows no link, so it is safe to sweep the whole sandbox with it. */
+    nuke(g_tmp);
 
     printf("vfs_contained selftest: %d checks, %d skipped hostile case(s)\n", g_checks, skipped);
     if (g_failed) {

@@ -20,6 +20,24 @@ static int g_failed = 0;
         g_failed = 1; \
     }
 
+#ifdef _WIN32
+/* Test 22's tree under ROOT, innermost first. Every name is one the test creates; a
+ * name it never created is simply absent, so each removal may fail harmlessly. */
+static void remove_mkdir_fixture(const char *root) {
+    static const char *const owned[] = {
+        "PSP\\SAVEDATA\\UCUS98701DATA00", "PSP\\SAVEDATA", "PSP"
+    };
+    char path[700];
+    snprintf(path, sizeof(path), "%s\\PSP\\SAVEDATA\\NOTADIR", root);
+    DeleteFileA(path);
+    for (size_t i = 0; i < sizeof(owned) / sizeof(owned[0]); ++i) {
+        snprintf(path, sizeof(path), "%s\\%s", root, owned[i]);
+        RemoveDirectoryA(path);
+    }
+    RemoveDirectoryA(root);
+}
+#endif
+
 int main(void) {
     char out[512];
     int len;
@@ -569,6 +587,10 @@ int main(void) {
                 char root2[512];
                 snprintf(root2, sizeof(root2), "%snk_vfs_mkdir_%lu", temp_dir,
                          (unsigned long)GetCurrentProcessId());
+                /* A recycled PID can find an earlier run's tree: start from nothing so
+                 * the happy path proves every level was created, not merely present. */
+                remove_mkdir_fixture(root2);
+                ASSERT_INT_EQ(GetFileAttributesA(root2) == INVALID_FILE_ATTRIBUTES, 1);
                 ASSERT_INT_EQ(sr_vfs_canonical_root(root2, canonical2,
                                                     sizeof(canonical2)/sizeof(wchar_t)), 1);
                 char tree[900], above[700];
@@ -604,6 +626,8 @@ int main(void) {
                 ASSERT_INT_EQ(attrs != INVALID_FILE_ATTRIBUTES &&
                               (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0, 1);
                 DeleteFileA(as_file);
+                remove_mkdir_fixture(root2);
+                ASSERT_INT_EQ(GetFileAttributesA(root2) == INVALID_FILE_ATTRIBUTES, 1);
             }
 
             /* Test 23: delete-by-handle semantics inside the root. */
@@ -665,9 +689,22 @@ int main(void) {
             }
         }
 
+        /* The outside fixtures stay in the sibling until here (secret.txt from Test 21,
+         * z.txt from Test 23, fresh.txt only if a refused create leaked one); remove them
+         * first so the sibling itself can go. */
+        {
+            static const char *const outside_leaves[] = {"secret.txt", "z.txt", "fresh.txt"};
+            char leaf_path[700];
+            for (size_t i = 0; i < sizeof(outside_leaves) / sizeof(outside_leaves[0]); ++i) {
+                snprintf(leaf_path, sizeof(leaf_path), "%s\\%s", sibling, outside_leaves[i]);
+                DeleteFileA(leaf_path);
+            }
+        }
         RemoveDirectoryA(test_sub);
         RemoveDirectoryA(test_root);
         RemoveDirectoryA(sibling);
+        ASSERT_INT_EQ(GetFileAttributesA(test_root) == INVALID_FILE_ATTRIBUTES, 1);
+        ASSERT_INT_EQ(GetFileAttributesA(sibling) == INVALID_FILE_ATTRIBUTES, 1);
     }
 #endif
 

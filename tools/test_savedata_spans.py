@@ -635,8 +635,9 @@ class TestWindowsContainmentArchitecture(unittest.TestCase):
                       "the save directory itself must be removed by handle")
         self.assertIn("FILE_FLAG_OPEN_REPARSE_POINT", win,
                       "the directory disposition must stay pinned to the object, not a link target")
-        self.assertIn("sr_vfs_dir_is_contained(", win,
-                      "the save directory must be containment-checked before enumeration")
+        self.assertIn("sr_vfs_open_contained_utf8(", win,
+                      "the save directory must be opened through a final-path-verified handle "
+                      "before enumeration")
 
     def test_do_erase_deletes_through_verified_handle(self):
         win = _seam_backend("SR_CD_BACKEND_WINDOWS")

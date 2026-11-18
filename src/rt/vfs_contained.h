@@ -598,8 +598,8 @@ static inline sr_cd_status sr_cd_delete_leaf(const sr_cd_root *root, const char 
     char dir[SR_CD_HOST_PATH_MAX], path[SR_CD_HOST_PATH_MAX];
     if (!root || !leaf) return SR_CD_NOT_CONTAINED;
     if (!sr_cd_rel_is_acceptable(rel_dir)) return SR_CD_INVALID_PATH;
-    if (!sr_cd_name_is_acceptable(leaf, strlen(leaf))) return SR_CD_INVALID_PATH;
     if (!sr_cd__win_dir_path(root, rel_dir, dir, sizeof(dir))) return SR_CD_INVALID_PATH;
+    /* sr_cd__win_join applies sr_cd_name_is_acceptable to the leaf. */
     if (!sr_cd__win_join(path, sizeof(path), dir, leaf)) return SR_CD_INVALID_PATH;
     int was_dir = 0;
     /* The disposition rides the handle whose final path was just verified, and
@@ -721,10 +721,12 @@ static inline sr_cd_status sr_cd_delete_dir_shallow(const sr_cd_root *root, cons
     if (!root) return SR_CD_NOT_CONTAINED;
     if (!sr_cd_rel_is_acceptable(rel)) return SR_CD_INVALID_PATH;
     if (!sr_cd__win_dir_path(root, rel, dir, sizeof(dir))) return SR_CD_INVALID_PATH;
-    if (!sr_vfs_dir_is_contained(dir, root->canonical)) return SR_CD_NOT_CONTAINED;
 
     /* THE verified handle. Opened before anything is destroyed and held across
-     * the whole operation; the disposition at the end rides it. */
+     * the whole operation; the disposition at the end rides it. Its final-path
+     * check is the containment check: a junction above the directory resolves
+     * outside the root and is refused, and one at the directory itself is the
+     * reparse point refused below. */
     HANDLE hd;
     if (!sr_vfs_open_contained_utf8(dir, DELETE | FILE_READ_ATTRIBUTES,
                                     FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -769,9 +771,10 @@ static inline sr_cd_status sr_cd_delete_dir_shallow(const sr_cd_root *root, cons
     while ((de = _wreaddir(d)) != NULL) {
         char name[MAX_PATH * 3 + 1];
         if (!wcscmp(de->d_name, L".") || !wcscmp(de->d_name, L"..")) continue;
+        /* The join applies the entry-name rule: sr_cd_entry_name_is_acceptable is
+         * sr_cd_name_is_acceptable, which sr_cd__win_join checks. */
         if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, de->d_name, -1, name,
                                 (int)sizeof(name), NULL, NULL) <= 0 ||
-            !sr_cd_entry_name_is_acceptable(name, strlen(name)) ||
             !sr_cd__win_join(path, sizeof(path), dir, name)) {
             entries = SR_CD_INVALID_PATH;
             continue;
@@ -1524,10 +1527,19 @@ static inline sr_cd_status sr_cd_set_mode(const sr_cd_root *root, const char *re
             (type == 0x00001000u && !is_dir) ||
             (type != 0u && type != 0x00002000u && type != 0x00001000u)) {
             status = SR_CD_INVALID_PATH;
-        } else if (fchmod(fd, (mode_t)(mode & 0777u)) != 0) {
-            status = SR_CD_IO_ERROR;
         } else {
-            status = SR_CD_OK;
+            /* A Memory Stick (FAT) entry has one permission: the read-only
+             * attribute. Model only that, as the Windows backend does: any guest
+             * write bit (0222) makes the entry owner-writable, none clears every
+             * host write bit. The owner keeps read, and search on a directory,
+             * so a guest mode such as 0444 cannot lock the host out of a save
+             * folder or file the PSP itself would still read. */
+            mode_t next = info.st_mode & 07777;
+            if (mode & 0222u) next |= S_IWUSR;
+            else next &= (mode_t)~(S_IWUSR | S_IWGRP | S_IWOTH);
+            next |= S_IRUSR;
+            if (is_dir) next |= S_IXUSR;
+            status = fchmod(fd, next) != 0 ? SR_CD_IO_ERROR : SR_CD_OK;
         }
     }
     close(fd);

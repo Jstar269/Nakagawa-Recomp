@@ -81,8 +81,9 @@ class TestContainedDeleteSelftest(unittest.TestCase):
         elif "backend=posix-descriptor-relative" in out:
             # +10 device-name grammar; +4 root-level open; +21 open-existence modes (#1380);
             # includes the Linux guest path and file-operation matrix; +48: every write mode
-            # through a leaf symlink, a folder symlink and a hard link to an outside file
-            expected_checks = 402
+            # through a leaf symlink, a folder symlink and a hard link to an outside file;
+            # +14: sceIoChstat models the FAT read-only attribute (POSIX only)
+            expected_checks = 416
         else:
             self.fail("selftest did not identify a supported containment backend:\n" + out)
         self.assertIn(f": {expected_checks} checks, 0 skipped hostile case(s)", out)
