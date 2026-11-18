@@ -27,7 +27,9 @@ This page covers building and running the Android app from source. The plan it b
   `NK_TARGET=android` ([below](#a-title-library-from-the-package-route)). `TitleActivity` loads a
   library the APK ships by its name, or a built one by its absolute path in the app's files
   folder (`TitleLibrary.java`); it refuses any other library, and its process ends with exit
-  status 126.
+  status 126. A library that does not start (SDL cannot load it, or it has no
+  `nk_android_title_main`) ends the process with exit status 127, so the player never waits for
+  a run that did not begin.
 
 ## Prerequisites
 

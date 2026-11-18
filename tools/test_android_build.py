@@ -494,6 +494,17 @@ _TITLE_LIBRARY_PROBE = """package io.github.jstar269.nakagawa;
 
 public final class TitleLibraryProbe {
     public static void main(String[] args) {
+        if (args[0].equals("--launch-file")) {
+            for (int i = 2; i < args.length; i++) {
+                System.out.println(TitleLibrary.launchFile(args[i], args[1]) == null ? "REFUSED" : "OK");
+            }
+            return;
+        }
+        if (args[0].equals("--write-status")) {
+            boolean recorded = TitleLibrary.writeStatus(args[1], Integer.parseInt(args[2]));
+            System.out.println(recorded ? "RECORDED" : "FAILED");
+            return;
+        }
         for (int i = 2; i < args.length; i++) {
             TitleLibrary.Choice choice = TitleLibrary.resolve(args[i], args[0], args[1]);
             System.out.println(choice == null ? "REFUSED" : choice.path + "|" + choice.bundledName);
@@ -590,23 +601,195 @@ class AndroidTitleLibraryTests(unittest.TestCase):
             refused.append((self.files / "escape.so").as_posix())    # a link that resolves out
         self.assertEqual(self._resolve(*refused), ["REFUSED"] * len(refused))
 
+    def _probe(self, *args: str) -> list[str]:
+        out = subprocess.run([*self.java, *args], check=True, capture_output=True, text=True,
+                             timeout=120).stdout
+        return out.splitlines()
+
+    def test_only_the_launchers_status_files_are_accepted(self) -> None:
+        """A debug build exports TitleActivity, so its env extra may come from any app: the exit
+        and pid files it names are written by renaming over them, and only the launcher's
+        title-launch-<pid>-<serial>.<exit|pid> names are taken."""
+        cache = (self.files / "Nakagawa" / "cache").as_posix()
+        self.assertEqual(self._probe("--launch-file", "exit", f"{cache}/title-launch-4242-1.exit"), ["OK"])
+        self.assertEqual(self._probe("--launch-file", "pid", f"{cache}/title-launch-4242-17.pid"), ["OK"])
+        refused = [
+            (self.files / "Nakagawa" / "settings.json").as_posix(),
+            f"{cache}/title-launch-4242-1.pid",          # the other status file
+            f"{cache}/title-launch-4242-1.exit.tmp",
+            f"{cache}/title-launch-x-1.exit",
+            f"{cache}/title-launch-1-1.exit/../settings.json",
+            "",
+        ]
+        self.assertEqual(self._probe("--launch-file", "exit", *refused), ["REFUSED"] * len(refused))
+
+    def test_a_status_is_recorded_only_when_written_in_full(self) -> None:
+        """As nk_android_title.c's write_number_file: the temporary file is renamed over the
+        status file only after the whole number is written, so a failed write publishes
+        nothing the launcher could read as a status."""
+        folder = self.work / "status"
+        folder.mkdir(exist_ok=True)
+        good = folder / "title-launch-1-1.exit"
+        self.assertEqual(self._probe("--write-status", str(good), "126"), ["RECORDED"])
+        self.assertEqual(good.read_text(encoding="ascii"), "126\n")
+        self.assertFalse((folder / "title-launch-1-1.exit.tmp").exists())
+        bad = folder / "title-launch-1-2.exit"
+        (folder / "title-launch-1-2.exit.tmp").mkdir()   # the temporary file cannot be written
+        self.assertEqual(self._probe("--write-status", str(bad), "126"), ["FAILED"])
+        self.assertFalse(os.path.lexists(bad), "a failed write must not be renamed into place")
+
     def test_title_activity_loads_only_what_title_library_allows(self) -> None:
         source = (ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" /
                   "nakagawa" / "TitleActivity.java").read_text(encoding="utf-8")
         self.assertIn("TitleLibrary.resolve(\n                    library, "
                       "getApplicationInfo().nativeLibraryDir, getFilesDir().getPath());", source)
-        self.assertRegex(source, r"if \(choice == null\) \{\s*refuse\(library, env\);")
+        self.assertRegex(source, r"if \(choice == null\) \{[^}]*endProcess\(EXIT_REFUSED\);")
         self.assertIn("static final int EXIT_REFUSED = 126;", source)
-        self.assertIn('entry.startsWith("NK_ANDROID_EXIT_FILE=")', source)
         self.assertIn("Process.killProcess(Process.myPid());", source)
         # The env is applied before the library is chosen, so a refusal can record its status.
-        self.assertLess(source.index("NakagawaHost.setenv(entry.substring(0, eq)"),
+        self.assertLess(source.index("NakagawaHost.setenv(name, value);"),
                         source.index("TitleLibrary.resolve("))
+
+    def test_title_activity_takes_only_the_launchers_status_files(self) -> None:
+        source = (ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" /
+                  "nakagawa" / "TitleActivity.java").read_text(encoding="utf-8")
+        check = source.index("TitleLibrary.launchFile(value, suffix) == null")
+        self.assertIn('name.equals("NK_ANDROID_EXIT_FILE") ? "exit"', source)
+        self.assertIn('name.equals("NK_ANDROID_PID_FILE") ? "pid"', source)
+        self.assertLess(check, source.index("NakagawaHost.setenv(name, value);"))
+        self.assertIn("continue;", source[check:source.index("NakagawaHost.setenv(name, value);")])
+        # The exit status is written only through TitleLibrary.writeStatus.
+        self.assertIn("TitleLibrary.writeStatus(mExitFile, status)", source)
+        self.assertNotIn("renameTo(", source)
+
+    def test_a_title_that_never_starts_records_a_status(self) -> None:
+        """nk_android_title_main ends the process itself, so SDL's main returning, or SDL failing
+        to load a library, means the runtime never ran: the launcher gets status 127 instead of
+        waiting forever for a pid or exit file."""
+        source = (ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" /
+                  "nakagawa" / "TitleActivity.java").read_text(encoding="utf-8")
+        self.assertIn("static final int EXIT_NOT_STARTED = 127;", source)
+        main = re.search(r"protected void main\(\) \{(.*?)\n    \}", source, re.S)
+        self.assertIsNotNone(main)
+        assert main is not None
+        self.assertLess(main.group(1).index("super.main();"),
+                        main.group(1).index("endProcess(EXIT_NOT_STARTED);"))
+        created = source[source.index("super.onCreate(savedInstanceState);"):]
+        self.assertRegex(created, r"^super\.onCreate\(savedInstanceState\);\s+if \(mBrokenLibraries\) \{"
+                                  r"[^}]*endProcess\(EXIT_NOT_STARTED\);")
+        shim = (ANDROID / "app" / "src" / "main" / "cpp" / "nk_android_title.c").read_text(encoding="utf-8")
+        self.assertIn("    __wrap_exit(main(argc, argv));\n}", shim)
+
+    def test_a_failed_bundled_file_unpack_is_shown(self) -> None:
+        """A failed copy of the bundled files is shown by the launcher, and does not also hide
+        the toolchain unpack (its flag is set before the copy)."""
+        java = ANDROID / "app" / "src" / "main" / "java" / "io" / "github" / "jstar269" / "nakagawa"
+        host = (java / "NakagawaHost.java").read_text(encoding="utf-8")
+        self.assertLess(host.index("sBundlesToolchain = bundlesToolchain;"),
+                        host.index('copyAssetTree(context.getAssets(), "app/" + child'))
+        failed = host[host.index('Log.e(TAG, "BUNDLED_FILES_UNPACK_FAILED dir="'):]
+        self.assertLess(failed.index("sBundledFilesError = "), failed.index("return;"))
+        launcher = (java / "LauncherActivity.java").read_text(encoding="utf-8")
+        created = launcher[launcher.index("    protected void onCreate("):]
+        created = created[:created.index("\n    }\n")]
+        self.assertIn("NakagawaHost.bundledFilesError()", created)
+        self.assertIn("showBundledFilesFailure(", created)
+        strings = (ANDROID / "app" / "src" / "main" / "res" / "values" / "strings.xml").read_text(encoding="utf-8")
+        self.assertRegex(strings, r'<string name="bundled_files_failed">[^<]*%1\$s')
 
 
 def cast_str(value: str | None) -> str:
     assert value is not None
     return value
+
+
+#: A stand-in for git, for AndroidPinnedDependencyTests: it logs each command line to
+#: NK_TEST_GIT_LOG, keeps HEAD in .git/HEAD, and fails `submodule update` while
+#: NK_TEST_SUBMODULE_FAIL is set, as a network drop would.
+_FAKE_GIT = r"""
+import os
+import sys
+
+args = sys.argv[1:]
+with open(os.environ["NK_TEST_GIT_LOG"], "a", encoding="utf-8") as log:
+    log.write(" ".join(args) + "\n")
+while args[:1] == ["-c"]:
+    args = args[2:]
+if args[:1] == ["--version"]:
+    print("git version 2.45.0")
+    sys.exit(0)
+folder = "."
+if args[:1] == ["-C"]:
+    folder, args = args[1], args[2:]
+command = args[0]
+if command == "init":
+    os.makedirs(os.path.join(args[-1], ".git"), exist_ok=True)
+elif command == "fetch":
+    with open(os.path.join(folder, ".git", "FETCH_HEAD"), "w", encoding="utf-8") as out:
+        out.write(args[-1])
+elif command == "checkout":
+    with open(os.path.join(folder, ".git", "FETCH_HEAD"), encoding="utf-8") as src:
+        commit = src.read()
+    with open(os.path.join(folder, ".git", "HEAD"), "w", encoding="utf-8") as out:
+        out.write(commit)
+elif command == "submodule":
+    if os.environ.get("NK_TEST_SUBMODULE_FAIL"):
+        sys.exit(1)
+elif command == "rev-parse":
+    try:
+        with open(os.path.join(folder, ".git", "HEAD"), encoding="utf-8") as src:
+            print(src.read())
+    except OSError:
+        sys.exit(128)
+"""
+
+
+class AndroidPinnedDependencyTests(unittest.TestCase):
+    """android/app/deps.cmake reuses a pinned checkout only when its fetch completed: one left
+    at the pinned commit by a failed or killed submodule fetch is fetched again."""
+
+    def setUp(self) -> None:
+        self.cmake = shutil.which("cmake")
+        if not self.cmake:
+            self.skipTest("CMake is required")
+        scratch = tempfile.TemporaryDirectory(prefix="nk-android-deps-")
+        self.addCleanup(scratch.cleanup)
+        self.work = Path(scratch.name)
+        script = self.work / "fake_git.py"
+        script.write_text(_FAKE_GIT, encoding="utf-8")
+        if os.name == "nt":
+            self.git = self.work / "git.cmd"
+            self.git.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+        else:
+            self.git = self.work / "git"
+            self.git.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
+            self.git.chmod(0o755)
+        self.log = self.work / "git.log"
+        self.deps = self.work / "deps"
+
+    def _configure(self, *, submodules_fail: bool) -> tuple[int, list[str]]:
+        self.log.write_text("", encoding="utf-8")
+        env = dict(os.environ, NK_TEST_GIT_LOG=str(self.log))
+        env.pop("NK_TEST_SUBMODULE_FAIL", None)
+        if submodules_fail:
+            env["NK_TEST_SUBMODULE_FAIL"] = "1"
+        ran = subprocess.run([cast_str(self.cmake), f"-DNK_ANDROID_DEPS_DIR={self.deps.as_posix()}",
+                              f"-DGIT_EXECUTABLE={self.git.as_posix()}", "-P",
+                              str(ANDROID / "app" / "deps.cmake")],
+                             env=env, capture_output=True, text=True, timeout=300, check=False)
+        fetches = [line for line in self.log.read_text(encoding="utf-8").splitlines() if " fetch " in line]
+        return ran.returncode, fetches
+
+    def test_a_checkout_left_by_a_failed_submodule_fetch_is_fetched_again(self) -> None:
+        status, _ = self._configure(submodules_fail=True)
+        self.assertNotEqual(status, 0, "a failed submodule fetch must stop the configure")
+        status, fetches = self._configure(submodules_fail=False)
+        self.assertEqual(status, 0)
+        # SDL completed on the first run and is reused; SDL_ttf stopped after its checkout.
+        self.assertEqual(len(fetches), 1, fetches)
+        self.assertIn("SDL_ttf", fetches[0])
+        status, fetches = self._configure(submodules_fail=False)
+        self.assertEqual((status, fetches), (0, []), "a completed checkout is reused with no fetch")
 
 
 #: A stub runtime for the title shim (nk_android_title.c), built on Linux by

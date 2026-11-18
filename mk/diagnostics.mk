@@ -58,7 +58,10 @@ compiler-info:
 # attestation step when the path is absent is exactly the silent pass this
 # target exists to prevent, so an unset value is BLOCKED, not "not applicable".
 READINESS_BASE ?= $(shell git merge-base origin/main HEAD)
-READINESS_WORKDIR ?= $(CURDIR)/../.nk-readiness-verify
+# The attestation writes and reads back its inputs and outputs in READINESS_WORKDIR, which it
+# requires outside the checkout. The default is keyed by the checkout's folder name, so sibling
+# checkouts (worktrees under one parent) running readiness at once never share one.
+READINESS_WORKDIR ?= $(CURDIR)/../.nk-readiness-verify-$(notdir $(CURDIR))
 
 readiness:
 	$(NK_REQUIRE_POSIX_SHELL)
@@ -81,7 +84,7 @@ endif
 	git diff --check $(READINESS_BASE)..HEAD
 	@echo "== readiness: control-file completeness"
 	"$(PYTHON)" tools/policy_sync.py --regen-export
-	git diff --quiet -- PUBLIC_EXPORT.json assets/public_provenance_ledger.json assets/public_source_profile.json || { echo "readiness: FAIL -- regenerating the control files changed them, so the commit does not carry the evidence for its own contents. Stage and commit assets/public_provenance_ledger.json, assets/public_source_profile.json and PUBLIC_EXPORT.json."; exit 1; }
+	git diff --quiet HEAD -- PUBLIC_EXPORT.json assets/public_provenance_ledger.json assets/public_source_profile.json || { echo "readiness: FAIL -- the regenerated control files differ from HEAD (staged or not), so the commit does not carry the evidence for its own contents. Stage and commit assets/public_provenance_ledger.json, assets/public_source_profile.json and PUBLIC_EXPORT.json."; exit 1; }
 	@echo "== readiness: OK (the suite is separate and still yours to run)"
 
 # One-command local refresh using the hosted attestation's control generator.

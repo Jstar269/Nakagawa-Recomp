@@ -267,6 +267,63 @@ class BuildSystemParityTests(unittest.TestCase):
         self.assertIn("NK_TRUSTED_LEDGER", self.makefile_text)
         self.assertIn("PROVENANCE_REFRESH_APPLY_POLICY", self.makefile_text)
 
+    def _readiness_dry_run(self) -> list[str]:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make or not shutil.which("git"):
+            self.skipTest("GNU Make and git are required for the readiness dry run")
+        proc = subprocess.run(
+            [make, "-n", "--no-print-directory", "readiness", "NK_TRUSTED_LEDGER=unused"],
+            cwd=ROOT, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return proc.stdout.splitlines()
+
+    def test_readiness_workdir_is_not_shared_by_sibling_checkouts(self) -> None:
+        """The attestation writes and reads back policy and ledger files in its workdir, so two
+        checkouts under one parent (C:/nk/worktrees/<a> and <b>) must not default to one folder."""
+        lines = self._readiness_dry_run()
+        verify = [line for line in lines if "tools/provenance_attest_verify.py" in line]
+        self.assertEqual(len(verify), 1, lines)
+        match = re.search(r'--workdir "([^"]+)"', verify[0])
+        self.assertIsNotNone(match, verify[0])
+        assert match is not None
+        workdir = Path(match.group(1)).resolve()
+        self.assertEqual(workdir.parent, ROOT.parent, "the workdir stays outside the checkout")
+        self.assertNotEqual(workdir.name, ".nk-readiness-verify", "shared by every sibling checkout")
+        self.assertIn(ROOT.name, workdir.name, "keyed by this checkout")
+
+    def test_readiness_control_completeness_compares_with_the_commit(self) -> None:
+        """Regenerated controls staged but not committed leave HEAD without its evidence, so the
+        completeness step compares the regenerated controls with HEAD, not with the index."""
+        lines = self._readiness_dry_run()
+        step = [line for line in lines if line.startswith("git diff --quiet")]
+        self.assertEqual(len(step), 1, lines)
+        command = step[0].split(" || ", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="nk-readiness-") as tmp:
+            repo = Path(tmp)
+
+            def git(*args: str) -> None:
+                subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                *args], cwd=repo, check=True, capture_output=True, timeout=60)
+
+            git("init", "-q")
+            (repo / "assets").mkdir()
+            controls = ("PUBLIC_EXPORT.json", "assets/public_provenance_ledger.json",
+                        "assets/public_source_profile.json")
+            for control in controls:
+                (repo / control).write_text("{}\n", encoding="utf-8")
+            git("add", *controls)
+            git("commit", "-q", "-m", "base")
+
+            def completeness() -> int:
+                return subprocess.run(command, shell=True, cwd=repo, timeout=60).returncode
+
+            self.assertEqual(completeness(), 0, "controls that match HEAD pass")
+            # contrib-refresh staged the regenerated ledger; only the source change was committed.
+            (repo / "assets/public_provenance_ledger.json").write_text('{"refreshed": 1}\n', encoding="utf-8")
+            git("add", "assets/public_provenance_ledger.json")
+            self.assertNotEqual(completeness(), 0, "a staged, uncommitted control must fail")
+
     def test_audited_public_controls_stay_diff_visible(self) -> None:
         """The provenance controls are audited bytes, so PR diffs must show them.
 
