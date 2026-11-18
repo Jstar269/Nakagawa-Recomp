@@ -3441,6 +3441,29 @@ static void test_platform_cards_name_this_platform(void) {
     assert(!player_app_open_prerequisite_about(app));
     assert(strcmp(app->last_error.error_code, "DATA_DIR_UNAVAILABLE") == 0);
     assert(strcmp(app->last_error.title, "Data folder not found") == 0); /* #1974: sentence case */
+    /* The wizard's checks with no data folder: the disc's encrypted program is not decrypted
+       into the working directory's titles/ folder; the step stops by name before any
+       program check (audit 2026-11-17). */
+    {
+        PlayerApp *wizard = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+        NkIsoExecutableReport executables;
+        const PlayerPreflightCheck *blocking;
+        assert(wizard != NULL);
+        memset(&executables, 0, sizeof(executables));
+        executables.eboot.kind = NK_ISO_EXEC_PSP_ENCRYPTED;
+        snprintf(wizard->inspecting_game.disc_id, sizeof(wizard->inspecting_game.disc_id),
+                 "TEST80961");
+        snprintf(wizard->inspecting_game.iso_path, sizeof(wizard->inspecting_game.iso_path),
+                 "no-such-disc-TEST80961.iso");
+        player_app_build_compatibility_preflight(wizard, true, true, &executables);
+        blocking = player_preflight_blocking_check(&wizard->wizard.preflight);
+        assert(blocking != NULL && strcmp(blocking->code, "DATA_DIR_UNAVAILABLE") == 0);
+        assert(wizard->wizard.preflight.count == 1u);
+        assert(strstr(player_preflight_plain_message(blocking), "before adding this game.") != NULL);
+        assert(strcmp(player_preflight_status_word(blocking), "Can't use") == 0);
+        assert(nk_platform_path_missing("titles/TEST80961"));
+        free(wizard);
+    }
 #if defined(__ANDROID__)
     assert(strstr(app->last_error.message, "NK_ANDROID_DATA_DIR") != NULL);
     assert(strstr(app->last_error.message, "XDG_DATA_HOME") == NULL);
@@ -3649,7 +3672,7 @@ static void test_error_cards_are_plain(void) {
     {
         static const char *const codes[] = {
             "EXPERIMENTAL", "DISC_SFO", "EXECUTABLE", "GUEST_MODULES", "RUNTIME_PACKAGE",
-            "DATA_ROOT", "SYSTEM_FONTS", "AUDIO_OUTPUT", "SOMETHING_NEW"
+            "DATA_ROOT", "SYSTEM_FONTS", "AUDIO_OUTPUT", "DATA_DIR_UNAVAILABLE", "SOMETHING_NEW"
         };
         static const PlayerPreflightStatus statuses[] = {
             PREFLIGHT_OK, PREFLIGHT_MISSING, PREFLIGHT_INCOMPATIBLE, PREFLIGHT_STALE,
@@ -8377,6 +8400,67 @@ static void test_psn_package_imports_as_its_iso(void) {
                                       message, sizeof(message)));
     assert(again.iso_ready);
 
+    /* Another package with the same disc ID (a re-release, a fixed download) is converted
+       itself, not given the first one's image; then the first is converted again, and an
+       image cut short is not reused (audit 2026-11-17). */
+    {
+        char second_iso[NATIVE_TEST_PATH_MAX + 96];
+        char second_pbp[NATIVE_TEST_PATH_MAX + 96];
+        uint8_t *second_image;
+        uint8_t *second_package;
+        size_t second_image_len = 0, second_package_len = 0;
+        PlayerPsnPackage second;
+        snprintf(second_iso, sizeof(second_iso), "%s%csecond.iso", base, sep);
+        snprintf(second_pbp, sizeof(second_pbp), "%s%cSECOND.PBP", base, sep);
+        write_player_package_preflight_iso(second_iso, "TEST80901", "Synthetic PSN Game Two",
+                                           false);
+        second_image = psn_test_read_file(second_iso, &second_image_len);
+        assert(second_image_len != iso_len || memcmp(second_image, iso, iso_len) != 0);
+        keys = nk_keystore_create();
+        assert(keys != NULL);
+        assert(nk_keystore_load_builtin(keys, key_error, sizeof(key_error)) == NK_PSP_OK);
+        nk_psp_ctx_init(&ctx, keys);
+        second_package = psp_seal_npumdimg_pbp(&ctx, "TEST80901", second_image,
+                                               second_image_len, 4u, &second_package_len);
+        nk_keystore_free(keys);
+        write_binary_file(second_pbp, second_package, second_package_len);
+        free(second_package);
+
+        assert(player_psn_package_inspect(second_pbp, &second, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(strcmp(second.iso_path, expected_iso) == 0);
+        assert(!second.iso_ready);
+        assert(player_psn_package_convert(&second, NULL, code, sizeof(code), message,
+                                          sizeof(message)));
+        converted = psn_test_read_file(expected_iso, &converted_len);
+        assert(converted_len == second_image_len &&
+               memcmp(converted, second_image, second_image_len) == 0);
+        free(converted);
+        assert(player_psn_package_inspect(second_pbp, &second, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(second.iso_ready);
+        /* The first package's image is gone, so picking it converts it again. */
+        assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(!again.iso_ready);
+        assert(player_psn_package_convert(&again, NULL, code, sizeof(code), message,
+                                          sizeof(message)));
+        converted = psn_test_read_file(expected_iso, &converted_len);
+        assert(converted_len == iso_len && memcmp(converted, iso, iso_len) == 0);
+        /* Its tail cut off, with the volume descriptor and PARAM.SFO still readable. */
+        write_binary_file(expected_iso, converted, converted_len - 2048u);
+        free(converted);
+        assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(!again.iso_ready);
+        assert(player_psn_package_convert(&again, NULL, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(player_psn_package_inspect(pbp_path, &again, code, sizeof(code), message,
+                                          sizeof(message)));
+        assert(again.iso_ready);
+        free(second_image);
+    }
+
     /* The wizard's panel shows the conversion and hands back the view the
        package was picked from. */
     app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
@@ -9518,6 +9602,40 @@ static void test_play_mode_settings(void) {
  * section 10.9): "ace" becomes the library's default and parts, "ace_titles" the titles'
  * choices and parts, and a disc in "enhancement_60hz_discs" plain Ace: Enhanced plus its 60 FPS
  * game logic (owner, 2026-11-04). The keys are read only when "enhanced" is absent. */
+/* A full table of per-title play choices (audit 2026-11-17): saved choices outlive a disc's
+ * removal, so the table can be full while a library title has none. A new choice then makes
+ * room by dropping the choices of discs no longer in the library, keeping every library
+ * title's, instead of being dropped while the change is logged as saved. */
+static void test_title_play_full_table_makes_room(void) {
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    const PlayerTitlePlay *kept;
+    printf("[PLAYER_STATE_TEST] Subtest: a full title play table makes room\n");
+    assert(app != NULL);
+    app->game_count = 2;
+    snprintf(app->games[0].disc_id, sizeof(app->games[0].disc_id), "TEST90071");
+    snprintf(app->games[1].disc_id, sizeof(app->games[1].disc_id), "TEST90072");
+    for (int i = 0; i < MAX_LIBRARY_GAMES; i++) {
+        PlayerTitlePlay *entry = &app->settings.title_play[i];
+        memset(entry, 0, sizeof(*entry));
+        if (i == 7) snprintf(entry->key, sizeof(entry->key), "TEST90072");
+        else snprintf(entry->key, sizeof(entry->key), "TEST7%04d", i);
+        entry->mode = PLAYER_PLAY_AUTHENTIC;
+        entry->logic_60 = -1;
+        for (int p = 0; p < PLAYER_PART_COUNT; p++) entry->part[p] = -1;
+    }
+    app->settings.title_play_count = MAX_LIBRARY_GAMES;
+    assert(player_app_title_play_mode(app, 0) == PLAYER_PLAY_LIBRARY);
+    player_app_cycle_title_play_mode(app, 0);
+    assert(player_app_title_play_mode(app, 0) == PLAYER_PLAY_AUTHENTIC);
+    /* The other library title keeps its choice; the removed discs' choices made the room. */
+    kept = player_settings_title_play(&app->settings, "TEST90072");
+    assert(kept != NULL && kept->mode == PLAYER_PLAY_AUTHENTIC);
+    assert(app->settings.title_play_count == 2);
+    assert(player_settings_title_play(&app->settings, "TEST70000") == NULL);
+    assert(app->last_error.error_code[0] == '\0');
+    free(app);
+}
+
 static void test_play_mode_settings_mapping(void) {
     char sep = nk_platform_path_separator();
     char cache_root[512], root[700], path[800];
@@ -9579,6 +9697,17 @@ static void test_play_mode_settings_mapping(void) {
     player_play_resolve(&back->settings, "TEST91001", &r);
     assert(r.chosen == PLAYER_PLAY_ACE && r.logic_60 && r.part[PLAYER_PART_FILTERING] == 16 &&
            r.part[PLAYER_PART_TEXT] == 1);
+
+    /* A filtering value past int is refused before it is narrowed (audit 2026-11-17):
+       2^32 + 8 and 2^32 + 2 are not read as 8x and 2x. */
+    write_text_file(path,
+        "{\"schema_version\": 2, \"ace\": {\"enabled\": true, \"af\": 4294967304},"
+        " \"ace_titles\": {\"TEST91007\": {\"mode\": \"ace\", \"af\": 4294967298}}}");
+    memset(back, 0, sizeof(*back));
+    assert(player_app_load_settings(back, path) == NK_OK);
+    assert(back->settings.enhanced.part[PLAYER_PART_FILTERING] == 16);
+    player_play_resolve(&back->settings, "TEST91007", &r);
+    assert(r.chosen == PLAYER_PLAY_ENHANCED && r.part[PLAYER_PART_FILTERING] == 16);
 
     /* With "enhanced" present the development keys are not read at all. */
     write_text_file(path,
@@ -13578,6 +13707,7 @@ int main(int argc, char **argv) {
     test_enhanced_package_variants();
     test_play_mode_settings();
     test_play_mode_settings_mapping();
+    test_title_play_full_table_makes_room();
     test_play_mode_smooth_motion();
     test_play_mode_sas_settings();
     test_play_mode_cull_settings();
@@ -16839,9 +16969,26 @@ int main(int argc, char **argv) {
         /* The user name is replaced as a whole word only. */
         assert(player_dev_log_redact("by synth, not synthetic", NULL, "synth", out, sizeof(out)));
         assert(strcmp(out, "by <user>, not synthetic") == 0);
-        /* Short names are left alone rather than blanking common letters. */
-        assert(player_dev_log_redact("ab cd", NULL, "ab", out, sizeof(out)));
-        assert(strcmp(out, "ab cd") == 0);
+        /* A two-letter name is hidden too, as a whole word, so a report pasted in public does
+           not show it (audit 2026-11-17); a single letter is left, rather than blanking the
+           words "a" and "I". */
+        assert(player_dev_log_redact("ab cd abc", NULL, "ab", out, sizeof(out)));
+        assert(strcmp(out, "<user> cd abc") == 0);
+        assert(player_dev_log_redact("D:/ab/Games/x.iso", NULL, "ab", out, sizeof(out)));
+        assert(strcmp(out, "D:/<user>/Games/x.iso") == 0);
+        assert(player_dev_log_redact("a b", NULL, "a", out, sizeof(out)));
+        assert(strcmp(out, "a b") == 0);
+        /* A profile folder that is the start of another folder's name is not the profile:
+           the other folder's path is left whole, not cut to "%USERPROFILE%ice". */
+#if defined(_WIN32) || defined(_WIN64)
+        assert(player_dev_log_redact("copied C:\\Users\\Alice\\x.iso and C:\\Users\\Al\\y",
+                                     "C:\\Users\\Al", "Al", out, sizeof(out)));
+        assert(strcmp(out, "copied C:\\Users\\Alice\\x.iso and %USERPROFILE%\\y") == 0);
+#else
+        assert(player_dev_log_redact("copied /home/al/x and /home/alice/y.iso", "/home/al",
+                                     "al", out, sizeof(out)));
+        assert(strcmp(out, "copied %USERPROFILE%/x and /home/alice/y.iso") == 0);
+#endif
         assert(!player_dev_log_redact("abcdef", NULL, NULL, out, 4u));
         assert(strcmp(out, "abc") == 0);
 

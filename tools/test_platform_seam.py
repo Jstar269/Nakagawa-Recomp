@@ -75,9 +75,6 @@ ALLOWLIST: Mapping[str, tuple[int, str]] = {
     "src/player/package_builder.c": (
         28, "build-tool discovery, process spawn and the Windows prerequisite download; "
             "to move behind nk_platform (#306)"),
-    "src/player/player_state.c": (
-        2, "the settings.json durable replace (FlushFileBuffers, MoveFileExW), owned by "
-           "the user-data format work: left alone"),
     "src/player/setup_staging.c": (
         9, "PPSSPP folder discovery and its own wide file calls; to move behind "
             "nk_platform (#306)"),
