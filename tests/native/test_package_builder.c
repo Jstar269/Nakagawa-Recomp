@@ -1597,6 +1597,46 @@ static int run_build_speed_probe(int argc, char *argv[]) {
     if (fclose(f) != 0) return 4;
     return released ? 0 : 5;
 }
+/* Audit 2026-11-17: nk_cli.py reports the package PASS line before it has finished (it
+ * still records the title's input identity and closes its reporter), and the child can
+ * still fail after it. The session then ended both complete and failed, and the launcher's
+ * completion branch, which read is_complete alone, adopted the build while the failure card
+ * opened too. Failing before: is_complete stayed set after the non-zero exit. Complete now
+ * means the PASS line and a clean exit. The child is this test binary with --child-exit-three. */
+static void test_pass_then_failed_exit_is_not_complete(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: package PASS then a failed exit\n");
+    assert(s_self_executable && s_self_executable[0]);
+    const char *child_argv[] = { s_self_executable, "--child-exit-three", NULL };
+
+    PackageBuildSession session;
+    package_builder_init_session(&session, "TEST80007", "Pass Then Fail Fixture");
+    int n = snprintf(session.progress_file_path, sizeof(session.progress_file_path),
+                     "%s%cpass-then-fail.progress", native_test_get_root(),
+                     nk_platform_path_separator());
+    assert(n > 0 && (size_t)n < sizeof(session.progress_file_path));
+    FILE *progress = nk_fopen_utf8(session.progress_file_path, "wb");
+    assert(progress != NULL);
+    fputs("{\"stage\": \"package\", \"status\": \"PASS\", "
+          "\"message\": \"Runtime package cached\"}\n", progress);
+    fclose(progress);
+    session.is_building = true;
+    session.start_time_ms = 0;
+    bool spawned = nk_platform_spawn_tool(s_self_executable, child_argv, NULL, NULL,
+                                          NULL, &session.process);
+    assert(spawned);
+
+    uint64_t deadline = route_now_ms() + 30000u;
+    while (session.is_building && route_now_ms() < deadline) {
+        package_builder_poll(&session, route_now_ms());
+        if (session.is_building) route_pause_ms(10);
+    }
+    assert(!session.is_building);
+    assert(session.exit_code == 3);
+    assert(session.is_failed);
+    assert(!session.is_complete);
+    assert(session.current_stage == PACKAGE_BUILD_STAGE_FAILED);
+    (void)nk_remove_utf8(session.progress_file_path);
+}
 
 /* Settings > Build speed reaches the build child: nk_cli.py gets --build-speed with the
  * setting's key, and a Background child runs below normal while Balanced keeps the
@@ -1725,6 +1765,7 @@ static void test_build_speed_reaches_the_child(void) {
 
 int main(int argc, char *argv[]) {
     if (argc == 2 && strcmp(argv[1], "--child-exit-zero") == 0) return 0;
+    if (argc == 2 && strcmp(argv[1], "--child-exit-three") == 0) return 3;
     if (argc > 2 && strcmp(argv[1], "--build-speed-probe") == 0) {
         return run_build_speed_probe(argc, argv);
     }
@@ -1766,6 +1807,7 @@ int main(int argc, char *argv[]) {
     test_state_machine_transitions();
     test_clean_exit_without_completion_is_a_failure();
     test_poll_ends_a_session_whose_child_was_already_reaped();
+    test_pass_then_failed_exit_is_not_complete();
     test_build_speed_reaches_the_child();
     test_output_line_circular_buffer();
     test_python_candidate_validation();

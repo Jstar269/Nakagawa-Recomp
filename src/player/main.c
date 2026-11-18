@@ -392,81 +392,67 @@ static void trigger_font_folder_picker(SDL_Window *window, PlayerApp *app) {
                             on_font_files_dialog_callback, app);
 }
 
-/* Saves > Add a save (#1883). SDL may call the folder picker's callback on another
-   thread, so the folder waits here and player_frame_requests hands it to the
-   Saves dialog on the main thread: 1 a folder was picked, 2 cancelled, 3 the
-   picker failed, 4 the picked folder's path is too long to hold. */
-static char s_save_pick[NK_MAX_PATH];
-static char s_save_pick_error[256];
-static SDL_AtomicInt s_save_pick_state;
+/* A folder picker's answer: SDL may call the picker's callback on another thread, so
+   the folder waits here and player_frame_requests takes it on the main thread.
+   state: 1 a folder was picked, 2 cancelled, 3 the picker failed, 4 the picked
+   folder's path is too long to hold. */
+typedef struct {
+    char path[NK_MAX_PATH];
+    char error[256];
+    SDL_AtomicInt state;
+} PlayerFolderPick;
 
-static void on_save_folder_dialog_callback(void *userdata, const char *const *filelist,
+/* Saves > Add a save (#1883), handed to the Saves dialog. */
+static PlayerFolderPick s_save_pick;
+/* A title's Enhanced page > Texture pack folder. */
+static PlayerFolderPick s_texpack_pick;
+
+static void on_folder_pick_dialog_callback(void *userdata, const char *const *filelist,
                                            int filter) {
-    (void)userdata;
+    PlayerFolderPick *pick = (PlayerFolderPick *)userdata;
     (void)filter;
     if (!filelist) {
-        (void)snprintf(s_save_pick_error, sizeof(s_save_pick_error), "%s", SDL_GetError());
-        SDL_SetAtomicInt(&s_save_pick_state, 3);
+        (void)snprintf(pick->error, sizeof(pick->error), "%s", SDL_GetError());
+        SDL_SetAtomicInt(&pick->state, 3);
     } else if (!filelist[0]) {
-        SDL_SetAtomicInt(&s_save_pick_state, 2);
-    } else if (strlen(filelist[0]) >= sizeof(s_save_pick)) {
-        SDL_SetAtomicInt(&s_save_pick_state, 4);
+        SDL_SetAtomicInt(&pick->state, 2);
+    } else if (strlen(filelist[0]) >= sizeof(pick->path)) {
+        SDL_SetAtomicInt(&pick->state, 4);
     } else {
-        (void)snprintf(s_save_pick, sizeof(s_save_pick), "%s", filelist[0]);
-        SDL_SetAtomicInt(&s_save_pick_state, 1);
+        (void)snprintf(pick->path, sizeof(pick->path), "%s", filelist[0]);
+        SDL_SetAtomicInt(&pick->state, 1);
     }
+}
+
+static void trigger_folder_picker(PlayerHostPick what, PlayerFolderPick *pick,
+                                  SDL_Window *window, PlayerApp *app) {
+    SDL_SetAtomicInt(&pick->state, 0);
+    player_host_show_picker(what, window, player_picker_start(app),
+                            on_folder_pick_dialog_callback, pick);
 }
 
 static void trigger_save_folder_picker(SDL_Window *window, PlayerApp *app) {
-    SDL_SetAtomicInt(&s_save_pick_state, 0);
-    player_host_show_picker(PLAYER_HOST_PICK_SAVE, window, player_picker_start(app),
-                            on_save_folder_dialog_callback, app);
-}
-
-/* A title's Enhanced page > Texture pack folder. As with a save, SDL may call back on another
-   thread, so the folder waits here for the main thread: 1 picked, 2 cancelled, 3 the picker
-   failed, 4 the path is too long to hold. */
-static char s_texpack_pick[NK_MAX_PATH];
-static char s_texpack_pick_error[256];
-static SDL_AtomicInt s_texpack_pick_state;
-
-static void on_texpack_folder_dialog_callback(void *userdata, const char *const *filelist,
-                                              int filter) {
-    (void)userdata;
-    (void)filter;
-    if (!filelist) {
-        (void)snprintf(s_texpack_pick_error, sizeof(s_texpack_pick_error), "%s", SDL_GetError());
-        SDL_SetAtomicInt(&s_texpack_pick_state, 3);
-    } else if (!filelist[0]) {
-        SDL_SetAtomicInt(&s_texpack_pick_state, 2);
-    } else if (strlen(filelist[0]) >= sizeof(s_texpack_pick)) {
-        SDL_SetAtomicInt(&s_texpack_pick_state, 4);
-    } else {
-        (void)snprintf(s_texpack_pick, sizeof(s_texpack_pick), "%s", filelist[0]);
-        SDL_SetAtomicInt(&s_texpack_pick_state, 1);
-    }
+    trigger_folder_picker(PLAYER_HOST_PICK_SAVE, &s_save_pick, window, app);
 }
 
 static void trigger_texpack_folder_picker(SDL_Window *window, PlayerApp *app) {
-    SDL_SetAtomicInt(&s_texpack_pick_state, 0);
-    player_host_show_picker(PLAYER_HOST_PICK_TEXPACK, window, player_picker_start(app),
-                            on_texpack_folder_dialog_callback, app);
+    trigger_folder_picker(PLAYER_HOST_PICK_TEXPACK, &s_texpack_pick, window, app);
 }
 
 static void player_take_texpack_folder_pick(PlayerApp *app) {
-    int state = SDL_GetAtomicInt(&s_texpack_pick_state);
+    int state = SDL_GetAtomicInt(&s_texpack_pick.state);
     if (state == 0) return;
-    SDL_SetAtomicInt(&s_texpack_pick_state, 0);
+    SDL_SetAtomicInt(&s_texpack_pick.state, 0);
     if (state != 1) player_app_cancel_texpack_pick(app);
     if (state == 1) {
         /* Read and refused with its reason, or stored for the game the dialog was opened for. */
-        (void)player_app_take_texpack_pick(app, s_texpack_pick);
+        (void)player_app_take_texpack_pick(app, s_texpack_pick.path);
     } else if (state == 3) {
-        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_texpack_pick_error);
+        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_texpack_pick.error);
         player_app_set_error_with_details(
             app, "TEXTURE_PACK_PICKER_FAILED", "The folder picker didn't open",
             "Nakagawa couldn't show a folder picker, so no texture pack was chosen.",
-            s_texpack_pick_error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
+            s_texpack_pick.error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
                                                                         : app->active_view);
     } else if (state == 4) {
         player_app_set_error(
@@ -478,19 +464,19 @@ static void player_take_texpack_folder_pick(PlayerApp *app) {
 }
 
 static void player_take_save_folder_pick(PlayerApp *app) {
-    int state = SDL_GetAtomicInt(&s_save_pick_state);
+    int state = SDL_GetAtomicInt(&s_save_pick.state);
     if (state == 0) return;
-    SDL_SetAtomicInt(&s_save_pick_state, 0);
+    SDL_SetAtomicInt(&s_save_pick.state, 0);
     if (state == 1) {
-        (void)snprintf(app->saves_picked, sizeof(app->saves_picked), "%s", s_save_pick);
+        (void)snprintf(app->saves_picked, sizeof(app->saves_picked), "%s", s_save_pick.path);
         app->saves_pick_ready = true;
     } else if (state == 3) {
-        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_save_pick_error);
+        fprintf(stderr, "[PLAYER] The folder picker could not open: %s\n", s_save_pick.error);
         player_app_set_error_with_details(
             app, "SAVES_PICKER_FAILED", "The folder picker didn't open",
             "Nakagawa couldn't show a folder picker, so no save was added. Copy the save's "
             "folder into PSP/SAVEDATA in the save folder yourself: Open save folder shows it.",
-            s_save_pick_error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
+            s_save_pick.error, "Back", app->active_view == VIEW_ERROR ? VIEW_LIBRARY
                                                                      : app->active_view);
     } else if (state == 4) {
         player_app_set_error(
@@ -717,6 +703,53 @@ static bool player_confirm_quit(SDL_Window *window, PlayerApp *app) {
 /* Select is held: with R it toggles the developer log panel. */
 static bool s_pad_select_held;
 
+/* Back, from Escape or the controller's East button: one ladder of views, so a
+   view added later goes back the same way from both. Only Escape cancels a
+   control's capture (a controller press during it is the binding) and asks to
+   quit at the library; East does nothing at the library. */
+static void player_go_back(PlayerApp *app, SDL_Window *window, bool *running,
+                           bool from_keyboard) {
+    if (app->active_view == VIEW_SETUP_WIZARD) {
+        player_app_wizard_back(app);
+    } else if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
+        if (from_keyboard && input_settings_is_capturing(&app->input_settings)) {
+            input_settings_cancel_capture(&app->input_settings);
+        } else if (input_settings_is_calibrating(&app->input_settings)) {
+            input_settings_cancel_calibration(&app->input_settings);
+        } else if (input_settings_aim_is_open(&app->input_settings)) {
+            /* The mouse aiming settings (#1791) go back to the keys they opened from. */
+            input_settings_close_aim(&app->input_settings);
+        } else {
+            player_app_set_view(app, VIEW_SETTINGS);
+        }
+    } else if (app->active_view == VIEW_PREREQ_CONSENT ||
+               app->active_view == VIEW_PREREQ_PROGRESS) {
+        player_app_prereq_cancel(app);
+    } else if (app->active_view == VIEW_CONFIRM_REMOVE_TOOLS) {
+        player_app_set_view(app, VIEW_BUILD_CACHE);
+    } else if (app->active_view == VIEW_PREREQ_ABOUT ||
+               app->active_view == VIEW_BUILD_CACHE ||
+               app->active_view == VIEW_PSP_FONTS ||
+               app->active_view == VIEW_UPDATES ||
+               app->active_view == VIEW_CONFIRM_FACTORY_RESET ||
+               app->active_view == VIEW_ONLINE_SETTINGS ||
+               app->active_view == VIEW_ACCESSIBILITY_SETTINGS ||
+               app->active_view == VIEW_PROBLEM_REPORT) {
+        player_app_set_view(app, VIEW_SETTINGS);
+    } else if (app->active_view == VIEW_ACE_SETTINGS) {
+        player_app_close_enhanced_page(app);
+    } else if (app->active_view == VIEW_DEVELOPER_LOG) {
+        player_app_close_developer_log(app);
+    } else if (app->active_view == VIEW_BUILDING_PACKAGE) {
+        player_app_cancel_package_build(app);
+        player_app_set_view(app, VIEW_LIBRARY);
+    } else if (!player_view_is_library(app->active_view)) {
+        player_app_set_view(app, VIEW_LIBRARY);
+    } else if (from_keyboard) {
+        if (player_confirm_quit(window, app)) *running = false;
+    }
+}
+
 /* Backspace and the mouse's back button (X1) are Back: each is taken as Esc,
    so every view goes back the same way. A key the Controls page is waiting
    for keeps its own name, so Backspace can still be mapped, and so does
@@ -850,45 +883,7 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
                                     !player_view_is_library(app->active_view))) {
             return player_ui_nk_handle_event(next_ui, event);
         } else if (event->key.key == SDLK_ESCAPE) {
-            if (app->active_view == VIEW_SETUP_WIZARD) {
-                player_app_wizard_back(app);
-            } else if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
-                if (input_settings_is_capturing(&app->input_settings)) {
-                    input_settings_cancel_capture(&app->input_settings);
-                } else if (input_settings_is_calibrating(&app->input_settings)) {
-                    input_settings_cancel_calibration(&app->input_settings);
-                } else if (input_settings_aim_is_open(&app->input_settings)) {
-                    /* The mouse aiming settings (#1791) go back to the keys they opened from. */
-                    input_settings_close_aim(&app->input_settings);
-                } else {
-                    player_app_set_view(app, VIEW_SETTINGS);
-                }
-            } else if (app->active_view == VIEW_PREREQ_CONSENT ||
-                       app->active_view == VIEW_PREREQ_PROGRESS) {
-                player_app_prereq_cancel(app);
-            } else if (app->active_view == VIEW_CONFIRM_REMOVE_TOOLS) {
-                player_app_set_view(app, VIEW_BUILD_CACHE);
-            } else if (app->active_view == VIEW_PREREQ_ABOUT ||
-                       app->active_view == VIEW_BUILD_CACHE ||
-                       app->active_view == VIEW_PSP_FONTS ||
-                       app->active_view == VIEW_UPDATES ||
-                       app->active_view == VIEW_CONFIRM_FACTORY_RESET ||
-                       app->active_view == VIEW_ONLINE_SETTINGS ||
-                       app->active_view == VIEW_ACCESSIBILITY_SETTINGS ||
-                       app->active_view == VIEW_PROBLEM_REPORT) {
-                player_app_set_view(app, VIEW_SETTINGS);
-            } else if (app->active_view == VIEW_ACE_SETTINGS) {
-                player_app_close_enhanced_page(app);
-            } else if (app->active_view == VIEW_DEVELOPER_LOG) {
-                player_app_close_developer_log(app);
-            } else if (app->active_view == VIEW_BUILDING_PACKAGE) {
-                player_app_cancel_package_build(app);
-                player_app_set_view(app, VIEW_LIBRARY);
-            } else if (!player_view_is_library(app->active_view)) {
-                player_app_set_view(app, VIEW_LIBRARY);
-            } else {
-                if (player_confirm_quit(window, app)) *running = false;
-            }
+            player_go_back(app, window, running, true);
         }
         return true;
     case SDL_EVENT_KEY_UP:
@@ -963,40 +958,7 @@ static bool player_dispatch_ui_event(PlayerApp *app, PlayerUiNk *next_ui,
         }
         if (event->gbutton.button == SDL_GAMEPAD_BUTTON_EAST &&
             !player_view_is_library(app->active_view)) {
-            if (app->active_view == VIEW_SETUP_WIZARD) {
-                player_app_wizard_back(app);
-            } else if (app->active_view == VIEW_CONTROLLER_SETTINGS) {
-                if (input_settings_is_calibrating(&app->input_settings)) {
-                    input_settings_cancel_calibration(&app->input_settings);
-                } else if (input_settings_aim_is_open(&app->input_settings)) {
-                    input_settings_close_aim(&app->input_settings);
-                } else {
-                    player_app_set_view(app, VIEW_SETTINGS);
-                }
-            } else if (app->active_view == VIEW_PREREQ_CONSENT ||
-                       app->active_view == VIEW_PREREQ_PROGRESS) {
-                player_app_prereq_cancel(app);
-            } else if (app->active_view == VIEW_CONFIRM_REMOVE_TOOLS) {
-                player_app_set_view(app, VIEW_BUILD_CACHE);
-            } else if (app->active_view == VIEW_PREREQ_ABOUT ||
-                       app->active_view == VIEW_BUILD_CACHE ||
-                       app->active_view == VIEW_PSP_FONTS ||
-                       app->active_view == VIEW_UPDATES ||
-                       app->active_view == VIEW_CONFIRM_FACTORY_RESET ||
-                       app->active_view == VIEW_ONLINE_SETTINGS ||
-                       app->active_view == VIEW_ACCESSIBILITY_SETTINGS ||
-                       app->active_view == VIEW_PROBLEM_REPORT) {
-                player_app_set_view(app, VIEW_SETTINGS);
-            } else if (app->active_view == VIEW_ACE_SETTINGS) {
-                player_app_close_enhanced_page(app);
-            } else if (app->active_view == VIEW_DEVELOPER_LOG) {
-                player_app_close_developer_log(app);
-            } else if (app->active_view == VIEW_BUILDING_PACKAGE) {
-                player_app_cancel_package_build(app);
-                player_app_set_view(app, VIEW_LIBRARY);
-            } else {
-                player_app_set_view(app, VIEW_LIBRARY);
-            }
+            player_go_back(app, window, running, false);
         }
         return true;
     case SDL_EVENT_GAMEPAD_BUTTON_UP:
@@ -1501,6 +1463,9 @@ typedef struct {
     char output_path[NK_MAX_PATH];
     char title_id[64];
     char title_name[128];
+    /* The name travels as one "--title-name=<name>" argument: argparse would read a
+       separate value that starts with '-' (a homebrew title) as an option. */
+    char title_name_arg[sizeof("--title-name=") + 128];
     PlayerReportState result;
 } PlayerReportJob;
 
@@ -1620,8 +1585,9 @@ static int SDLCALL player_report_thread_main(void *userdata) {
         argv[argc++] = "--title";
         argv[argc++] = job->title_id;
         if (job->title_name[0] != '\0') {
-            argv[argc++] = "--title-name";
-            argv[argc++] = job->title_name;
+            (void)snprintf(job->title_name_arg, sizeof(job->title_name_arg), "--title-name=%s",
+                           job->title_name);
+            argv[argc++] = job->title_name_arg;
         }
     }
     argv[argc++] = "--user-data-root";
@@ -1760,11 +1726,7 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             break;
         case PLAYER_UI_SETTINGS_OPEN_REPORT_FOLDER: {
             char folder[NK_MAX_PATH];
-            size_t cut = strlen(app->report.path);
-            snprintf(folder, sizeof(folder), "%s", app->report.path);
-            while (cut > 0u && folder[cut - 1u] != '/' && folder[cut - 1u] != '\\') --cut;
-            if (cut > 1u) {
-                folder[cut - 1u] = '\0';
+            if (player_path_parent_folder(app->report.path, folder, sizeof(folder))) {
                 (void)player_app_request_open_folder(app, folder);
             }
             break;
@@ -1802,17 +1764,13 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             break;
         case PLAYER_UI_SETTINGS_OPEN_UPDATE_FOLDER: {
             char folder[NK_MAX_PATH];
-            size_t cut;
             if (app->update.phase == PLAYER_UPDATE_INSTALLED) {
                 (void)player_app_request_open_folder(app, app->update.install_dir);
                 break;
             }
-            snprintf(folder, sizeof(folder), "%s", app->update.zip_path);
-            cut = strlen(folder);
-            while (cut > 0u && folder[cut - 1u] != '/' && folder[cut - 1u] != '\\') --cut;
-            if (cut == 0u) break;
-            folder[cut - 1u] = '\0';
-            (void)player_app_request_open_folder(app, folder);
+            if (player_path_parent_folder(app->update.zip_path, folder, sizeof(folder))) {
+                (void)player_app_request_open_folder(app, folder);
+            }
             break;
         }
         case PLAYER_UI_SETTINGS_OPEN_RELEASE_PAGE: player_update_open_release_page(app); break;
@@ -2822,7 +2780,11 @@ static void staging_push_event(PlayerStagingJob *job, int code) {
     event.type = SDL_EVENT_USER;
     event.user.code = code;
     event.user.data1 = job;
-    SDL_PushEvent(&event);
+    /* A refused push is not retried: player_frame_requests finishes a job whose
+       worker is done, so a lost completion still ends the extraction. The UI-test
+       build models SDL refusing the completion push. */
+    if (code == PLAYER_STAGING_EVENT_COMPLETE && player_ui_test_drop_worker_event()) return;
+    (void)SDL_PushEvent(&event);
 }
 
 static bool staging_cancelled(void *userdata) {
@@ -2938,6 +2900,16 @@ static void sync_staging_progress(PlayerApp *app, PlayerStagingJob *job) {
     SDL_UnlockMutex(job->mutex);
     player_app_wizard_set_extraction_progress(app, percent, (int)files,
                                               (int)total, current);
+}
+
+/* The worker is done and its result not yet taken: player_frame_requests finishes it
+   here when SDL refused the completion event, as it does for a PSN job. */
+static bool staging_job_finished(PlayerStagingJob *job) {
+    if (!job || !job->mutex || job->completion_handled) return false;
+    SDL_LockMutex(job->mutex);
+    bool finished = job->finished;
+    SDL_UnlockMutex(job->mutex);
+    return finished;
 }
 
 static void finish_staging_job(PlayerApp *app, PlayerStagingJob *job) {
@@ -3788,6 +3760,23 @@ static bool player_parse_positive_u32(const char *text, uint32_t maximum,
     return true;
 }
 
+/* A whole number from 0 to INT_MAX, all of the text: --launch-index=abc or an empty
+   value is refused, never read as entry 0. */
+static bool player_parse_index(const char *text, int *out_value) {
+    if (!text || !text[0] || !out_value || text[0] < '0' || text[0] > '9') return false;
+    char *end = NULL;
+    /* An overflow reads as ULONG_MAX, which is above INT_MAX too. */
+    unsigned long value = strtoul(text, &end, 10);
+    if (end == text || !end || *end || value > (unsigned long)INT_MAX) {
+        return false;
+    }
+    *out_value = (int)value;
+    return true;
+}
+
+/* The largest --width or --height a capture or a test window takes. */
+#define PLAYER_MAX_OVERRIDE_DIMENSION 16384u
+
 /* PLAY's package check and process start, on a worker so the launcher keeps
  * drawing (#1298). Checking a retail package hashes every artifact it lists,
  * several hundred MB, and the launch used to do that up to three times on the
@@ -4405,14 +4394,26 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
             run->stage_only = true;
         } else if (strncmp(argv[i], "--launch-index=", 15) == 0) {
             run->launch_index_requested = true;
-            run->launch_index = atoi(argv[i] + 15);
+            if (!player_parse_index(argv[i] + 15, &run->launch_index)) {
+                fprintf(stderr, "[PLAYER] --launch-index must be a whole number from 0 up, "
+                                "the game's place in the library.\n");
+                return 2;
+            }
         } else if (strncmp(argv[i], PLAYER_LAUNCH_TITLE_ARG,
                            sizeof(PLAYER_LAUNCH_TITLE_ARG) - 1u) == 0) {
             run->launch_title = argv[i] + sizeof(PLAYER_LAUNCH_TITLE_ARG) - 1u;
-        } else if (strncmp(argv[i], "--width=", 8) == 0) {
-            run->override_w = atoi(argv[i] + 8);
-        } else if (strncmp(argv[i], "--height=", 9) == 0) {
-            run->override_h = atoi(argv[i] + 9);
+        } else if (strncmp(argv[i], "--width=", 8) == 0 ||
+                   strncmp(argv[i], "--height=", 9) == 0) {
+            bool width = argv[i][2] == 'w';
+            uint32_t value = 0u;
+            if (!player_parse_positive_u32(argv[i] + (width ? 8 : 9),
+                                           PLAYER_MAX_OVERRIDE_DIMENSION, &value)) {
+                fprintf(stderr, "[PLAYER] --width and --height must be whole numbers from 1 "
+                                "to %u.\n", PLAYER_MAX_OVERRIDE_DIMENSION);
+                return 2;
+            }
+            if (width) run->override_w = (int)value;
+            else run->override_h = (int)value;
         } else if (strncmp(argv[i], "--render-scale=", 15) == 0) {
             char *end = NULL;
             float value = strtof(argv[i] + 15, &end);
@@ -5383,19 +5384,25 @@ static int player_capture_screenshot(PlayerRun *run) {
     PlayerApp *app = &run->app;
     /* Headless Screenshot Mode */
     if (run->screenshot_path != NULL) {
+        /* A capture that was not drawn at its size or not saved fails the run: a caller
+           that trusts the exit code never takes a missing picture for a pass. */
+        bool saved = false;
         SDL_Texture *target = SDL_CreateTexture(run->renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
                                                 run->capture_pixel_width, run->capture_pixel_height);
-        if (target) {
-            SDL_SetRenderTarget(run->renderer, target);
-        }
-        player_ui_test_delay_screenshot();
-        player_render_active_ui(run->next_ui, app, run->renderer, run->window);
-        if (player_host_save_screenshot(run->renderer, run->screenshot_path)) {
-            printf("[PLAYER] Screenshot saved to %s (%dx%d pixels, %dx%d layout)\n", run->screenshot_path,
-                   run->capture_pixel_width, run->capture_pixel_height,
-                   app->window_width, app->window_height);
+        if (!target || !SDL_SetRenderTarget(run->renderer, target)) {
+            fprintf(stderr, "[PLAYER] Failed creating the %dx%d screenshot target: %s\n",
+                    run->capture_pixel_width, run->capture_pixel_height, SDL_GetError());
         } else {
-            fprintf(stderr, "[PLAYER] Failed saving screenshot to %s: %s\n", run->screenshot_path, SDL_GetError());
+            player_ui_test_delay_screenshot();
+            player_render_active_ui(run->next_ui, app, run->renderer, run->window);
+            saved = player_host_save_screenshot(run->renderer, run->screenshot_path);
+            if (saved) {
+                printf("[PLAYER] Screenshot saved to %s (%dx%d pixels, %dx%d layout)\n", run->screenshot_path,
+                       run->capture_pixel_width, run->capture_pixel_height,
+                       app->window_width, app->window_height);
+            } else {
+                fprintf(stderr, "[PLAYER] Failed saving screenshot to %s: %s\n", run->screenshot_path, SDL_GetError());
+            }
         }
         if (target) {
             SDL_SetRenderTarget(run->renderer, NULL);
@@ -5419,7 +5426,7 @@ static int player_capture_screenshot(PlayerRun *run) {
         SDL_DestroyRenderer(run->renderer);
         SDL_DestroyWindow(run->window);
         SDL_Quit();
-        return 0;
+        return saved ? 0 : 1;
     }
     return PLAYER_RUN_CONTINUE;
 }
@@ -5593,7 +5600,9 @@ static void player_frame_events(PlayerRun *run) {
                             finish_disc_check_job(app, &run->disc_check_job);
                         }
                     } else if (event.user.data1 == run->staging_job) {
-                        if (event.user.code == PLAYER_STAGING_EVENT_PROGRESS) {
+                        if (run->staging_job && run->staging_job->completion_handled) {
+                            /* Finished by the frame poll already; a late event changes nothing. */
+                        } else if (event.user.code == PLAYER_STAGING_EVENT_PROGRESS) {
                             sync_staging_progress(app, run->staging_job);
                         } else if (event.user.code == PLAYER_STAGING_EVENT_COMPLETE) {
                             sync_staging_progress(app, run->staging_job);
@@ -5697,6 +5706,16 @@ static void player_frame_requests(PlayerRun *run) {
     if (psn_job_finished(run->psn_job)) {
         finish_psn_job(app, run->psn_job);
     }
+    /* A staging completion whose event SDL refused (a full queue) is finished here,
+       as its COMPLETE event finishes it; otherwise the wizard stayed extracting. */
+    if (staging_job_finished(run->staging_job)) {
+        sync_staging_progress(app, run->staging_job);
+        finish_staging_job(app, run->staging_job);
+        player_package_status_queue_game(
+            app, app->selected_game_index, true,
+            run->package_status_requested,
+            run->package_status_force_requested);
+    }
     /* Each added image is hashed once, on its own worker: the library's
        Cancel reaches it here, a completion whose event was lost is
        finished here, and the next image waiting starts. */
@@ -5793,7 +5812,10 @@ static void player_frame_requests(PlayerRun *run) {
        visible. Completion is keyed to the build session's disc, not the
        current library selection. */
     player_app_poll_package_build(app, SDL_GetTicks());
-    if (app->build_session.is_complete && !run->build_check_pending &&
+    /* nk_cli.py reports the package PASS before it has finished writing, so the
+       build counts as done only once its child has exited cleanly. */
+    if (app->build_session.is_complete && !app->build_session.is_building &&
+        !app->build_session.is_failed && !run->build_check_pending &&
         !build_check_session_already_handled) {
         /* The card of the image built, not another image with its disc ID. */
         int build_game_index = player_app_find_built_game(

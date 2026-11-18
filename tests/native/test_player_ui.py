@@ -253,9 +253,11 @@ def synthetic_art_iso(
     path.write_bytes(image)
 
 
-def write_large_library(scratch: Path, data: Path, count: int) -> None:
+def write_large_library(scratch: Path, data: Path, count: int,
+                        first_title_name: str | None = None) -> None:
     """A saved library of `count` experimental titles, each on its own synthetic
-    disc with its own one-pixel ICON0.PNG, in the player's data folder `data`."""
+    disc with its own one-pixel ICON0.PNG, in the player's data folder `data`.
+    `first_title_name`, when given, names the first title instead of its number."""
     discs = scratch / "large-library"
     discs.mkdir()
     games = []
@@ -265,7 +267,9 @@ def write_large_library(scratch: Path, data: Path, count: int) -> None:
         synthetic_art_iso(iso, include_picture=False,
                           icon_bytes=png_pixel(index % 251, (index * 7) % 251, 90))
         games.append({
-            "disc_id": disc_id, "title_name": f"Synthetic title {index}",
+            "disc_id": disc_id,
+            "title_name": (first_title_name if index == 0 and first_title_name is not None
+                           else f"Synthetic title {index}"),
             "iso_path": str(iso), "title_id": f"experimental-{disc_id.lower()}",
             "is_experimental": True, "selected_executable": "EBOOT.BIN",
         })
@@ -1158,6 +1162,7 @@ class NativePlayerUiTests(unittest.TestCase):
         height: int = 720,
         timeout: float | None = None,
         library_titles: int = 0,
+        library_first_title_name: str | None = None,
         dedicated_data_root: bool = False,
         settings: dict[str, object] | None = None,
         package_built_by: str | None = None,
@@ -1365,6 +1370,7 @@ class NativePlayerUiTests(unittest.TestCase):
                     localappdata / "Nakagawa" / "data" if os.name == "nt"
                     else userprofile / "data" / "Nakagawa" / "data",
                     library_titles,
+                    library_first_title_name,
                 )
             if settings is not None:
                 # A settings.json saved before this run, where the player reads it.
@@ -4087,6 +4093,28 @@ class NativePlayerUiTests(unittest.TestCase):
             self.assertIn("about.txt", names)
             self.assertFalse((Path(tmp) / "report-output.json").exists(),
                              "the answer file is removed once it has been read")
+
+    def test_problem_report_previews_a_title_whose_name_starts_with_a_dash(self) -> None:
+        """Audit 2026-11-17: the report job passed the selected title's name as its own
+        argument after --title-name. argparse reads a value that starts with '-' (a homebrew
+        title such as '-=Demo=-') as an option, so the tool refused the command line.
+
+        Failing before: the preview of such a title ended in the failed phase (5) with
+        'Run this in a terminal'. The name now travels as one --title-name=<name> argument."""
+        with tempfile.TemporaryDirectory(prefix="nk-report-test-") as tmp:
+            env = {"NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            run = self.next_ui_run(
+                "problem-report", ("WAIT_REPORT=2|5|6,60000",), env_extra=env,
+                library_titles=1, library_first_title_name="-=Demo=-")
+            stdout = run["stdout"]
+            assert isinstance(stdout, str)
+            steps, names = self.problem_report_steps(stdout)
+            phases = [int(step["problem_report"]) for step in steps]
+            if 6 in phases:
+                self.skipTest("no Python interpreter on this host, so the page shows the command")
+            self.assertNotIn(5, phases, stdout)
+            self.assertEqual(phases[-1], 2, stdout)
+            self.assertIn("about.txt", names)
 
     def test_problem_report_that_cannot_start_its_worker_says_so_on_the_page(self) -> None:
         """#1849: if the report thread cannot start, the page shows a failed phase with the
@@ -6927,6 +6955,90 @@ class FirstRunRouteTests(unittest.TestCase):
         # No runtime is built in the scratch root, so the bounded launch refuses.
         self.assertEqual(completed.returncode, 3, completed.stdout + completed.stderr)
         self.assertIn("SAMPLE", completed.stderr)
+
+    def test_launch_index_that_is_not_a_whole_number_is_refused(self) -> None:
+        """Audit 2026-11-17: --launch-index was read with atoi, so a value that is not a whole
+        number (a typo in a shortcut, or an empty value) became 0 and launched the first entry.
+
+        Failing before: --demo --launch-index=abc reached the first SAMPLE entry (exit 3, no
+        runtime) instead of refusing the argument with exit 2."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-demo-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            for value in ("abc", "", "1x", "-1", "99999999999"):
+                with self.subTest(value=value):
+                    completed = self.run_route(
+                        scratch, ["--demo", f"--launch-index={value}", "--headless-launch"])
+                    self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                    self.assertIn("--launch-index must be a whole number", completed.stderr)
+                    self.assertNotIn("SAMPLE", completed.stdout + completed.stderr)
+
+    def test_screenshot_that_is_not_saved_fails_the_run(self) -> None:
+        """Audit 2026-11-17: --screenshot logged a failed save and still exited 0, and a
+        --width or --height of zero or less (read with atoi) went on to draw.
+
+        Failing before: a capture into a folder that does not exist exited 0, and --width=0
+        drew a frame instead of refusing the argument."""
+        with tempfile.TemporaryDirectory(prefix=".first-run-screenshot-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            missing = scratch / "no-such-folder" / "shot.bmp"
+            completed = self.run_route(scratch, ["--view=library", f"--screenshot={missing}"])
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("Failed saving screenshot", completed.stderr)
+            self.assertFalse(missing.exists())
+            shot = scratch / "shot.bmp"
+            for size in ("--width=0", "--height=-5", "--width=abc", "--height="):
+                with self.subTest(size=size):
+                    completed = self.run_route(
+                        scratch, ["--view=library", size, f"--screenshot={shot}"])
+                    self.assertEqual(completed.returncode, 2, completed.stdout + completed.stderr)
+                    self.assertIn("--width and --height must be whole numbers",
+                                  completed.stderr)
+                    self.assertFalse(shot.exists())
+            completed = self.run_route(
+                scratch, ["--view=library", "--width=640", "--height=360", f"--screenshot={shot}"])
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertTrue(shot.is_file())
+
+    def test_stage_route_finishes_when_the_completion_event_is_lost(self) -> None:
+        """Audit 2026-11-17: the staging worker's completion reached the launcher only as an
+        SDL event. If SDL refused the push (a full queue), the wizard stayed extracting for
+        the rest of the session. NK_UI_TEST_DROP_WORKER_EVENT models that refusal.
+
+        Failing before: the --stage route never reached the ready library card. The frame
+        loop now finishes a staging job whose worker is done, as it does for a PSN job."""
+        sys.path.insert(0, str(ROOT / "tools"))
+        from test_iso_parity import (
+            archive_title_manifest,
+            build_plain_mips_elf,
+            create_archive_title_iso,
+        )
+
+        with tempfile.TemporaryDirectory(prefix=".first-run-archive-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            iso = scratch / "archive.iso"
+            create_archive_title_iso(iso, disc_id="ULUS99996", title="Synthetic Archive",
+                                     executable=build_plain_mips_elf())
+            user_root = scratch / "user-data"
+            (user_root / "manifests").mkdir(parents=True)
+            (user_root / "manifests" / "archive.json").write_text(
+                json.dumps(archive_title_manifest("ULUS99996", "archive-ulus99996")),
+                encoding="utf-8",
+            )
+            env = self.scratch_env(scratch)
+            env["NK_UI_TEST_DROP_WORKER_EVENT"] = "1"
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--user-data-root={user_root}", f"--iso={iso}", "--stage",
+                 "--ui-test-events=WAIT_VIEW=ready_library,30000;QUIT",
+                 f"--ui-test-screenshot={scratch / 'last-frame.bmp'}"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            frames = parse_frames(completed.stdout)
+            self.assertTrue(frames, completed.stdout)
+            self.assertEqual(frames[-1]["view"], "ready_library", completed.stdout)
+            self.assertEqual(frames[-1]["extracting"], "0")
+            library = json.loads((user_root / "library.json").read_text(encoding="utf-8"))
+            self.assertEqual([game["disc_id"] for game in library["games"]], ["ULUS99996"])
 
 
 class ScreenshotDeterminismTests(unittest.TestCase):

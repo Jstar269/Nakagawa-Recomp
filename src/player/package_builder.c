@@ -2710,6 +2710,10 @@ void package_builder_poll(PackageBuildSession *session, uint64_t current_time_ms
         read_new_progress_lines(session);
 
         if (session->exit_code != 0) {
+            /* The package PASS line comes before the child has finished (nk_cli.py still
+               records the title's input identity), so a failed exit after it is a failed
+               build: complete means the PASS line and a clean exit. */
+            session->is_complete = false;
             session->is_failed = true;
             if (session->current_stage != PACKAGE_BUILD_STAGE_FAILED) {
                 session->current_stage = PACKAGE_BUILD_STAGE_FAILED;
