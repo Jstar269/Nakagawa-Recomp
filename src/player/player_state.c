@@ -5082,6 +5082,9 @@ static const struct { const char *code; const char *badge; } k_error_badges[] = 
     {"HOMEBREW_KEPT_COPY_NOT_DELETED", "Not deleted"},
     {"FACTORY_RESET_BUSY", "Reset waiting"},
     {"FACTORY_RESET_FAILED", "Reset stopped"},
+    /* A defect in the player (docs/FAILURE_CODES.md), such as a full per-game play
+       table: whichever operation raised it, the badge does not guess its subject. */
+    {"INTERNAL_ERROR", "Player problem"},
     /* The build tools download's own codes (tools/nk_core/prereq_fetcher.py). */
     {"DISK_FULL", "Disk full"},
     {"OFFLINE_OR_NETWORK_ERROR", "Download failed"},
@@ -8715,7 +8718,13 @@ void player_app_wizard_next(PlayerApp *app) {
             break;
         case WIZARD_STEP_READY_LAUNCH:
             if (app->inspecting_game.disc_id[0] != '\0') {
-                player_app_add_game(app, &app->inspecting_game);
+                /* A title library.json did not take is not shown as added: the
+                   library-write card says so and the wizard stays on this step
+                   (audit 2026-11-17). */
+                if (!player_app_add_game(app, &app->inspecting_game)) {
+                    player_app_set_library_write_error(app);
+                    break;
+                }
                 int idx = player_app_find_added_game(app, &app->inspecting_game);
                 if (idx >= 0) {
                     app->selected_game_index = idx;

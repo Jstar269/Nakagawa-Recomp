@@ -13716,6 +13716,41 @@ static void test_add_to_steam_artwork_per_title(void) {
     free(app);
 }
 
+/* Audit 2026-11-17 (F-e7f8730a): the setup wizard's Ready step threw away
+ * player_app_add_game's result and went on to the library, so a title library.json
+ * did not take was reported nowhere and was gone on the next start.
+ *
+ * Failing before: the Ready step showed the library with no error card. Here the
+ * library's folder is a file, so the library write fails. */
+static void test_wizard_ready_step_reports_a_title_not_saved(void) {
+    printf("[PLAYER_STATE_TEST] Subtest: the wizard's Ready step reports a title not saved\n");
+    char sep = nk_platform_path_separator();
+    char blocker[1024];
+    char path[1100];
+    snprintf(blocker, sizeof(blocker), "%s%cwizard-library-folder-is-a-file",
+             native_test_get_root(), sep);
+    write_text_file(blocker, "a file where the library's folder would be\n");
+    snprintf(path, sizeof(path), "%s%clibrary.json", blocker, sep);
+
+    PlayerApp *app = (PlayerApp *)calloc(1, sizeof(PlayerApp));
+    assert(app != NULL);
+    nk_library_init(&app->library);
+    assert(strlen(path) < sizeof(app->library.library_path));
+    strcpy(app->library.library_path, path);
+
+    seed_entry(&app->inspecting_game, "TEST00063", "Synthetic Wizard Title");
+    app->wizard.step = WIZARD_STEP_READY_LAUNCH;
+    app->active_view = VIEW_SETUP_WIZARD;
+    player_app_wizard_next(app);
+    assert(app->active_view == VIEW_ERROR);
+    assert(strcmp(app->last_error.error_code, "LIBRARY_WRITE_FAILED") == 0);
+    assert(app->wizard.step == WIZARD_STEP_READY_LAUNCH);
+
+    assert(nk_remove_utf8(blocker) == 0);
+    free(app);
+    printf("[PLAYER_STATE_TEST] the wizard's Ready step reports a title not saved PASS\n");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--image") == 0) {
         return repeat_launch_child_mode();
@@ -19941,6 +19976,7 @@ int main(int argc, char **argv) {
     fflush(stdout);
     test_input_classification_and_check_again();
     test_game_build_check_names_the_executable_build();
+    test_wizard_ready_step_reports_a_title_not_saved();
 
     /* Last: it changes how this whole process loads libraries. */
     printf("[PLAYER_STATE_TEST] Subtest 27: library loads leave the current folder and PATH\n");

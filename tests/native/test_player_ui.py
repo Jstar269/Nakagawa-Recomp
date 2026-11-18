@@ -1401,6 +1401,11 @@ class NativePlayerUiTests(unittest.TestCase):
                     "XDG_DATA_HOME": str(userprofile / "data"),
                     "XDG_CACHE_HOME": str(userprofile / "cache"),
                     "NK_INPUT_PROFILE": str(profile),
+                    # The executable runs from a sandbox folder under build/, where none of
+                    # the folders beside it holds tools/nk_cli.py, and the working folder
+                    # is never searched (package_builder_cli_candidate_paths): name the
+                    # checkout as the install root. A test's env_extra may name another.
+                    "NK_INSTALL_ROOT": str(ROOT),
                 }
             )
             if env_extra:
@@ -1667,6 +1672,26 @@ class NativePlayerUiTests(unittest.TestCase):
                       "the disc's 1 x 1 ICON0.PNG is decoded and shown on its card")
         self.assertNotIn("next_ui_disc_icon", missing["stdout"],
                          "an unreadable disc keeps the placeholder")
+
+    def test_next_ui_wait_wakes_each_frame_while_disc_art_is_read(self) -> None:
+        """Audit 2026-11-17 (F-8100ccc0): the launcher loop's wait (player_ui_nk_wait_ms)
+        ignored the disc-art loader, so with a read waiting to start the loop slept the
+        full 50 ms idle wait and a library page filled in one card per idle wake.
+
+        Failing before: busy_ms=50. The wait is now at most PLAYER_UI_ART_POLL_MS (16 ms)
+        while a read runs or waits, and the full idle wait when nothing is wanted."""
+        with tempfile.TemporaryDirectory(prefix=".art-wait-", dir=ROOT) as tmp:
+            probe = Path(tmp) / "never-read.iso"
+            run = self.next_ui_run("library", ("WAIT_MS=50",),
+                                   env_extra={"NK_UI_TEST_ART_WAIT_PROBE": str(probe)})
+        match = re.search(r"\[PLAYER_UI_TEST\] art_wait idle_ms=(\d+) busy=(\d) busy_ms=(\d+)",
+                          str(run["stdout"]))
+        self.assertIsNotNone(match, run["stdout"])
+        assert match is not None
+        idle_ms, busy, busy_ms = (int(group) for group in match.groups())
+        self.assertEqual(idle_ms, 50, "nothing wanted: the loop sleeps the idle wait")
+        self.assertEqual(busy, 1, "the probe's read waits to start")
+        self.assertLessEqual(busy_ms, 16, "a read waiting to start wakes the loop each frame")
 
     @staticmethod
     def backdrops(run: dict[str, object]) -> list[tuple[int, str, str]]:

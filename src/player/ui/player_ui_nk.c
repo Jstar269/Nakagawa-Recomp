@@ -548,6 +548,20 @@ PlayerUiNk *player_ui_nk_create(SDL_Renderer *renderer, SDL_Window *window, Play
     player->last_view = VIEW_LIBRARY;
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
     player->disc_reported_view = -1;
+    {
+        /* NK_UI_TEST_ART_WAIT_PROBE=<iso path>: the host loop's wait with the art
+           loader idle, then with a read of that image waiting to start. */
+        const char *probe = getenv("NK_UI_TEST_ART_WAIT_PROBE");
+        if (probe != NULL && probe[0] != '\0') {
+            const NkUiImage *probe_icon = NULL;
+            uint32_t idle_wait = player_ui_nk_wait_ms(player, 50u);
+            player_ui_art_get(player->art, probe, false, &probe_icon, NULL);
+            printf("[PLAYER_UI_TEST] art_wait idle_ms=%u busy=%d busy_ms=%u\n",
+                   (unsigned)idle_wait, player_ui_art_busy(player->art) ? 1 : 0,
+                   (unsigned)player_ui_nk_wait_ms(player, 50u));
+            fflush(stdout);
+        }
+    }
 #endif
     nk_ui_sdl_input_init(&player->input);
     player_ui_version_line(NK_PLAYER_VERSION, (long long)NK_PLAYER_BUILD_EPOCH,
