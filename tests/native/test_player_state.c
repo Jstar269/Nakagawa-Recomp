@@ -15463,6 +15463,17 @@ int main(int argc, char **argv) {
            Latin indices are served by a stand-in. */
         assert(psp_app->wizard.font_own_count == 3);
         assert(nk_font_own_font_count(per_user, per_user) == 3);
+        /* The status refresh counts from the states it already read, with the same result. */
+        {
+            NkFontSlotState own_states[NK_FONT_SLOT_COUNT];
+            NkFontLatinIndexState own_latin[NK_FONT_LATIN_INDEX_COUNT];
+            char own_font_dir[NK_MAX_PATH * 2];
+            nk_font_slot_states(per_user, per_user, own_states);
+            snprintf(own_font_dir, sizeof(own_font_dir), "%s%c%s", per_user,
+                     nk_platform_path_separator(), NK_FONT_PROJECT_SUBDIR);
+            nk_font_latin_index_states(per_user, own_font_dir, own_latin);
+            assert(nk_font_own_font_count_from_states(own_states, own_latin) == 3);
+        }
         assert(strstr(psp_app->wizard.font_summary,
                       "3 of the 18 PSP fonts are your PSP's originals") != NULL);
         assert(strcmp(psp_app->wizard.font_latin_index_detail[0], "L1 exact ltn0.pgf") == 0);

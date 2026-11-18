@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "nk_shared_helpers.h"
+
 #ifndef NK_ISO_NO_PLAYER_EXTRAS
 #include "nk_types.h"
 #include "generated/nk_title_catalog.h"
@@ -159,17 +161,8 @@ typedef struct {
     char identity_sha256[65];
 } NkIsoMetadata;
 
-/* SHA-256 (FIPS 180-4), shared by the disc identity below and the package and
- * profile identities in nk_title_manifest.c. */
-typedef struct {
-    uint32_t state[8];
-    uint64_t bit_count;
-    uint8_t block[64];
-    size_t block_len;
-} NkSha256;
-void nk_sha256_init(NkSha256 *ctx);
-void nk_sha256_update(NkSha256 *ctx, const uint8_t *data, size_t len);
-void nk_sha256_finish(NkSha256 *ctx, uint8_t digest[32]);
+/* SHA-256 (NkSha256, nk_sha256_*), used by the disc identity below and the package and
+ * profile identities in nk_title_manifest.c, is declared in nk_shared_helpers.h. */
 
 /* Library keys of non-retail discs start with this letter. Retail disc IDs
  * start with U or N and the project's synthetic IDs with TEST, so a key that

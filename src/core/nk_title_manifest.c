@@ -2230,7 +2230,7 @@ bool nk_title_manifest_load_overlay(
     return nk_title_manifest_load_overlay_ext(manifest_path, false, error_buf, error_buf_len);
 }
 
-/* SHA-256 (NkSha256, nk_sha256_*) is shared with the disc identity in nk_iso.c. */
+/* SHA-256 (NkSha256, nk_sha256_*) is the shared one in nk_shared_helpers.c. */
 
 static bool nk_manifest_normalize_disc_id(const char *source, char out[10]) {
     if (!source || strlen(source) != 9) return false;
