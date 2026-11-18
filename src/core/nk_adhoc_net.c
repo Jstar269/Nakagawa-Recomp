@@ -541,9 +541,33 @@ static int ptp_alloc_slot(Console *c) {
     return NK_NET_NO_SLOT;
 }
 
+/* Any socket on the port: an automatic port skips it. */
 static int ptp_port_in_use(const Console *c, uint16_t port) {
     for (unsigned i = 0; i < NK_NET_PTP_SOCKETS; i++) {
         if (c->ptp_sockets[i].used && c->ptp_sockets[i].lport == port) return 1;
+    }
+    return 0;
+}
+
+/* The ports a listen or an open the caller named is refused on, by the HLE layer's rule
+ * (src/rt/hle_network.c adhoc_ptp_port_in_use, after PPSSPP's isPTPPortInUse): a listen when
+ * another listener holds the port, an open when a stream already joins the same local port, peer
+ * MAC and peer port. A listener, its accepted children and streams to other peers share a port. */
+static int ptp_listen_port_taken(const Console *c, uint16_t port) {
+    for (unsigned i = 0; i < NK_NET_PTP_SOCKETS; i++) {
+        const PtpSocket *ps = &c->ptp_sockets[i];
+        if (ps->used && ps->state == 1 && ps->lport == port) return 1;
+    }
+    return 0;
+}
+
+static int ptp_stream_taken(const Console *c, uint16_t port, const uint8_t dst[NK_RELAY_MAC_LEN],
+                            uint16_t dport) {
+    for (unsigned i = 0; i < NK_NET_PTP_SOCKETS; i++) {
+        const PtpSocket *ps = &c->ptp_sockets[i];
+        if (ps->used && ps->state != 1 && ps->lport == port && ps->pport == dport &&
+            memcmp(ps->peer_mac, dst, NK_RELAY_MAC_LEN) == 0)
+            return 1;
     }
     return 0;
 }
@@ -564,7 +588,7 @@ static int lo_ptp_listen(NkAdhocTransport *t, uint16_t sport, int backlog) {
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
     if (sport == 0u) sport = ptp_pick_port(c);
     if (sport == 0u) return NK_NET_NO_SLOT;
-    if (ptp_port_in_use(c, sport)) return NK_NET_PORT_IN_USE;
+    if (ptp_listen_port_taken(c, sport)) return NK_NET_PORT_IN_USE;
     const int slot = ptp_alloc_slot(c);
     if (slot < 0) return slot;
     PtpSocket *ps = &c->ptp_sockets[slot];
@@ -599,7 +623,7 @@ static int lo_ptp_open(NkAdhocTransport *t, uint16_t sport, const uint8_t dst[NK
     if (!dst || dport == 0u) return NK_NET_BAD_ARG;
     if (sport == 0u) sport = ptp_pick_port(c);
     if (sport == 0u) return NK_NET_NO_SLOT;
-    if (ptp_port_in_use(c, sport)) return NK_NET_PORT_IN_USE;
+    if (ptp_stream_taken(c, sport, dst, dport)) return NK_NET_PORT_IN_USE;
     if (c->group < 0) return NK_NET_CONNECTION_REFUSED;
 
     Console *target = NULL;

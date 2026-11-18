@@ -352,6 +352,9 @@ static struct {
                                 been asked to take it out (PPSSPP adhocctlInServerGroup) */
     int abandoned_joins;     /* joins given up at their timeout whose answer the lobby may still
                                 send (PPSSPP abandonedGroupJoins) */
+    int abandoned_scans;     /* scans given up at their timeout whose answer the lobby may still
+                                send (this project's, after abandoned_joins: PPSSPP's scan has no
+                                timeout) */
     int lobby_lost_reported; /* logged dead-lobby warning once for this session */
     unsigned error_events;   /* ALREADY_CONNECTED events still to deliver */
     struct { int used; uint32_t fn, arg; } handlers[ADHOCCTL_HANDLERS];
@@ -615,9 +618,23 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
             adhoc_remove_peer_by_id(ev[i].peer_id);
             break;
         case NK_LOBBY_SCAN:
+            /* A group of an abandoned scan's answer: the lobby answers scans in the order it got
+             * them, so while one is abandoned these frames are its answer, not the current scan's. */
+            if (s_adhocctl.abandoned_scans > 0) break;
             adhoc_record_scan(&ev[i]);
             break;
         case NK_LOBBY_SCAN_COMPLETE:
+            if (s_adhocctl.abandoned_scans > 0) {
+                /* The end of a scan that timed out below. It does not complete a scan started
+                 * since; the groups before it were dropped above. The log names the first. */
+                static int abandoned_scan_logged;
+                s_adhocctl.abandoned_scans--;
+                if (!abandoned_scan_logged) {
+                    abandoned_scan_logged = 1;
+                    fprintf(stderr, "HLE: adhocctl ignored the late answer of an abandoned scan\n");
+                }
+                break;
+            }
             if (s_adhocctl.request != ADHOCCTL_REQ_SCAN) {
                 static int unsolicited_scan_logged;
                 if (!unsolicited_scan_logged) {
@@ -683,6 +700,7 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
                               s_adhocctl.state != 0);
         s_adhocctl.lobby_group = 0;
         s_adhocctl.abandoned_joins = 0; /* as PPSSPP's killAdhocctlClient (proAdhoc.cpp:1351-1352) */
+        s_adhocctl.abandoned_scans = 0;
         if (!s_adhocctl.lobby_lost_reported) {
             s_adhocctl.lobby_lost_reported = 1;
             const char *err = nk_relay_client_last_error(s_adhoc_relay_client);
@@ -710,7 +728,9 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
      * handlers get that event and error and the log names the request. A join given up this way
      * is counted as abandoned and withdrawn from the lobby, as PPSSPP does for the game-mode join
      * it gives up (NetAdhocctl_GameModeTimedOut and AbandonGroupJoin,
-     * Core/HLE/sceNetAdhoc.cpp:1727-1736 and 813-825), and its late answer is dropped above. */
+     * Core/HLE/sceNetAdhoc.cpp:1727-1736 and 813-825), and its late answer is dropped above. A scan
+ * given up this way is counted the same way (this project's: PPSSPP's scan has no timeout), so
+ * its late groups and SCAN_COMPLETE do not answer a scan started since. */
     if ((s_adhocctl.request == ADHOCCTL_REQ_CREATE ||
          s_adhocctl.request == ADHOCCTL_REQ_CONNECT ||
          s_adhocctl.request == ADHOCCTL_REQ_SCAN) &&
@@ -721,7 +741,10 @@ static void adhoc_pump_lobby(CpuState *s, uint32_t gen, uint32_t sp, uint32_t gp
                 req_kind, ADHOCCTL_ONLINE_REQUEST_TIMEOUT_US / 1000u,
                 (err && err[0]) ? " (" : "", (err && err[0]) ? err : "",
                 (err && err[0]) ? ")" : "");
-        if (req_kind != ADHOCCTL_REQ_SCAN) s_adhocctl.abandoned_joins++;
+        if (req_kind == ADHOCCTL_REQ_SCAN)
+            s_adhocctl.abandoned_scans++; /* its late answer is dropped above */
+        else
+            s_adhocctl.abandoned_joins++;
         if (s_adhocctl.lobby_group && t->ops->disconnect) {
             (void)t->ops->disconnect(t);
             s_adhocctl.lobby_group = 0;
@@ -801,6 +824,7 @@ static void adhocctl_teardown(void) {
     s_adhocctl.online_active = 0;
     s_adhocctl.lobby_group = 0;
     s_adhocctl.abandoned_joins = 0;
+    s_adhocctl.abandoned_scans = 0;
     s_adhocctl.lobby_lost_reported = 0;
     s_adhocctl.thread_uid = 0u;
     s_adhocctl.state = 0;
@@ -945,6 +969,7 @@ static uint32_t h_NetAdhocctlInit(CpuState *s) {
     s_adhocctl.online_active = online;
     s_adhocctl.lobby_group = 0;
     s_adhocctl.abandoned_joins = 0;
+    s_adhocctl.abandoned_scans = 0;
     s_adhocctl.lobby_lost_reported = 0;
     s_adhocctl.state = 0;
     s_adhocctl.request = ADHOCCTL_REQ_NONE;
@@ -2474,11 +2499,14 @@ static uint32_t h_NetAdhocGetPtpStat(CpuState *s) {
     for (int i = 0; i < ADHOC_MAX_SOCKETS && written < max_n; i++) {
         const AdhocSockSlot *sk = &s_adhoc.slots[i];
         if (!sk->used || sk->type != ADHOC_SOCK_PTP) continue;
-        uint32_t rx_cc = (sk->state != ADHOC_PTP_STATE_LISTEN && !sk->transport_lost &&
-                          sk->transport_handle >= 0 && t && t->ops && t->ops->ptp_peek)
-                             ? t->ops->ptp_peek(t, sk->transport_handle)
-                             : sk->bufsize;
-        if (sk->state == ADHOC_PTP_STATE_LISTEN) rx_cc = sk->bufsize;
+        /* A socket with no transport (detached at sceNetAdhocctlTerm, or never connected) has
+         * nothing left to read, and PtpRecv answers DISCONNECTED or NOT_CONNECTED for it: it
+         * counts 0 pending bytes, not its buffer. A listener reports its buffer size, unchanged. */
+        uint32_t rx_cc = 0u;
+        if (sk->state == ADHOC_PTP_STATE_LISTEN)
+            rx_cc = sk->bufsize;
+        else if (!sk->transport_lost && sk->transport_handle >= 0 && t && t->ops && t->ops->ptp_peek)
+            rx_cc = t->ops->ptp_peek(t, sk->transport_handle);
         const uint32_t addr = A1 + (uint32_t)written * 36u;
         MEM_W32(addr, (written + 1 < max_n) ? addr + 36u : 0u);
         MEM_W32(addr + 4u, (uint32_t)(i + 1));
@@ -2685,7 +2713,6 @@ typedef struct MatchPeer {
     int state;
     int sending;
     int accepting;
-    int ack_aborted;
     uint64_t lastping;
     uint64_t data_timeout_at;
     uint16_t port;
@@ -2729,6 +2756,7 @@ typedef struct MatchContext {
     MatchEvent events[MATCH_MAX_EVENTS];
     int ev_head;
     int ev_count;
+    uint32_t ev_dropped; /* events the full queue (or a failed copy) could not hold */
 } MatchContext;
 
 static struct {
@@ -2785,13 +2813,30 @@ static MatchPeer *match_add_peer(MatchContext *ctx, const uint8_t mac[6], int st
     return NULL;
 }
 
+/* An event the context cannot queue (its MATCH_MAX_EVENTS queue is full, or its data could not
+ * be copied) is lost to the game. It is counted on the context and the first one is logged by
+ * the context and the event's number, so a game left waiting for it has a named cause. */
+static void match_drop_event(MatchContext *ctx, int op, const char *why) {
+    if (ctx->ev_dropped++ == 0u) {
+        fprintf(stderr, "HLE: sceNetAdhocMatching context %d dropped event %d (%s); the game does "
+                        "not see it, and later drops are only counted\n",
+                ctx->id, op, why);
+    }
+}
+
 static void match_spawn_event(MatchContext *ctx, int op, const uint8_t mac[6], int optlen,
                               const void *opt) {
-    if (ctx->ev_count >= MATCH_MAX_EVENTS) return;
+    if (ctx->ev_count >= MATCH_MAX_EVENTS) {
+        match_drop_event(ctx, op, "the event queue is full");
+        return;
+    }
     uint8_t *copy = NULL;
     if (optlen > 0 && opt) {
         copy = malloc((size_t)optlen);
-        if (!copy) return;
+        if (!copy) {
+            match_drop_event(ctx, op, "its data could not be copied");
+            return;
+        }
         memcpy(copy, opt, (size_t)optlen);
     }
     MatchEvent *ev = &ctx->events[(ctx->ev_head + ctx->ev_count) % MATCH_MAX_EVENTS];
@@ -2800,6 +2845,21 @@ static void match_spawn_event(MatchContext *ctx, int op, const uint8_t mac[6], i
     ev->optlen = opt ? optlen : 0;
     ev->opt = copy;
     ctx->ev_count++;
+}
+
+/* Removes the queued events with opcode op for the peer at mac, keeping the others in order. */
+static void match_remove_peer_events(MatchContext *ctx, int op, const uint8_t mac[6]) {
+    int kept = 0;
+    for (int i = 0; i < ctx->ev_count; i++) {
+        MatchEvent ev = ctx->events[(ctx->ev_head + i) % MATCH_MAX_EVENTS];
+        if (ev.opcode == op && is_mac_match(ev.mac, mac)) {
+            free(ev.opt);
+            continue;
+        }
+        ctx->events[(ctx->ev_head + kept) % MATCH_MAX_EVENTS] = ev;
+        kept++;
+    }
+    ctx->ev_count = kept;
 }
 
 static void match_clear_events(MatchContext *ctx) {
@@ -3628,8 +3688,13 @@ static uint32_t h_NetAdhocMatchingAbortSendData(CpuState *s) {
     for (uint32_t i = 0u; i < 6u; i++) tmac[i] = MEM_R8(A1 + i);
     MatchPeer *peer = match_find_peer(ctx, tmac);
     if (!peer) return SCE_NET_ADHOC_MATCHING_ERROR_UNKNOWN_TARGET;
+    /* The aborted send ends here: its pending timeout is cancelled and an acknowledgement or a
+     * timeout already queued for it is withdrawn, so the game is not told about a transfer it
+     * aborted, and a later send's busy flag is not cleared by the aborted one's event. */
     peer->sending = 0;
-    peer->ack_aborted = 1;
+    peer->data_timeout_at = 0u;
+    match_remove_peer_events(ctx, MATCH_EV_DATA_ACK, peer->mac);
+    match_remove_peer_events(ctx, MATCH_EV_DATA_TO, peer->mac);
     return 0u;
 }
 
@@ -3672,6 +3737,13 @@ void hle_net_reset(void) {
 }
 int sr_hle_test_adhocctl_state(void) { return s_adhocctl.inited ? s_adhocctl.state : -1; }
 uint32_t sr_hle_test_adhocctl_thread(void) { return s_adhocctl.thread_uid; }
+uint32_t sr_hle_test_match_events_dropped(void) {
+    uint32_t n = 0u;
+    for (int i = 0; i < MATCH_MAX_CONTEXTS; i++) {
+        if (s_matching.ctx[i].used) n += s_matching.ctx[i].ev_dropped;
+    }
+    return n;
+}
 int sr_hle_test_net_inited(void) { return s_netlib.inited; }
 uint32_t sr_hle_test_net_pool_uid(void) { return s_netlib.pool_uid; }
 

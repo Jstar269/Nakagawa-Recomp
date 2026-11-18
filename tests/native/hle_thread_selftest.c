@@ -10285,6 +10285,9 @@ typedef struct {
     size_t inject_count;
     int pdp_recv_dead;
     int pdp_send_force; /* nonzero: pdp_send answers this NkNetResult */
+    int hold_lobby;     /* nonzero: take_events passes on at most hold_budget of the console's
+                           events, the rest wait in its queue (a slow lobby) */
+    size_t hold_budget;
 } AdhAuditShim;
 static AdhAuditShim s_adh_shim;
 
@@ -10304,7 +10307,9 @@ static int shim_disconnect(NkAdhocTransport *t) { return SHIM_IN(t)->ops->discon
 static int shim_scan(NkAdhocTransport *t) { return SHIM_IN(t)->ops->scan(SHIM_IN(t)); }
 static size_t shim_take_events(NkAdhocTransport *t, NkLobbyEvent *out, size_t max) {
     AdhAuditShim *sh = (AdhAuditShim *)t;
-    size_t n = sh->inner->ops->take_events(sh->inner, out, max);
+    if (sh->hold_lobby && max > sh->hold_budget) max = sh->hold_budget;
+    size_t n = max ? sh->inner->ops->take_events(sh->inner, out, max) : 0u;
+    if (sh->hold_lobby) sh->hold_budget -= n;
     size_t k = 0u;
     while (k < sh->inject_count && n < max) out[n++] = sh->inject[k++];
     if (k) {
@@ -10671,6 +10676,279 @@ static void test_adhoc_audit_20261117_shim(void) {
     sr_hle_test_set_adhoc_transport(&s_adh_shim.base);
     adh_run(ADH_P2_MAIN, adh_audit_main_fn);
     expect(s_adh_audit_done == 1, "adhoc audit: shim regression flow completed");
+    hle_net_reset();
+    sr_hle_test_set_adhoc_transport(NULL);
+    adh_fixture_end(loaded_end);
+    nk_loopnet_destroy(s_adh_p2_net);
+    s_adh_p2_net = NULL;
+}
+
+/* ---- Audit 2026-11-17, second unit: AbortSendData ends the aborted send, a full matching event
+ * queue reports what it drops, and GetPtpStat counts no pending bytes on a socket with no
+ * transport. Over the shim, with peer 0 as the matching child. */
+extern uint32_t sr_hle_test_match_events_dropped(void);
+static NkAdhocTransport *s_u02_peer;
+static int s_u02_peer_pdp;
+static uint8_t s_u02_self_mac[6];
+static int s_u02_flood;    /* BULK packets peer 0 sends at the next DATA delivery */
+static int s_u02_events[16];
+static int s_u02_done;
+
+static void u02_match_cb_fn(CpuState *cpu) {
+    const int ev = (int)cpu->r[5];
+    if (ev >= 0 && ev < 16) s_u02_events[ev]++;
+    if (ev == 11 /* DATA */ && s_u02_flood > 0) {
+        const int n = s_u02_flood;
+        static const uint8_t pkt[6] = {5u, 1u, 0u, 0u, 0u, 'F'};
+        s_u02_flood = 0;
+        for (int i = 0; i < n; i++)
+            (void)s_u02_peer->ops->pdp_send(s_u02_peer, s_u02_peer_pdp, s_u02_self_mac, 0x5102u, pkt,
+                                            sizeof(pkt));
+    }
+    cpu->r[2] = 0u;
+}
+
+static void u02_peer_send_bulk(int n) {
+    static const uint8_t pkt[6] = {5u, 1u, 0u, 0u, 0u, 'B'};
+    for (int i = 0; i < n; i++)
+        (void)s_u02_peer->ops->pdp_send(s_u02_peer, s_u02_peer_pdp, s_u02_self_mac, 0x5102u, pkt,
+                                        sizeof(pkt));
+}
+
+static void adh_u02_main_fn(CpuState *cpu) {
+    static const uint8_t p0_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x71u};
+    const uint8_t grp[8] = {'N', 'K', 'A', 'U', 'D', 'I', 'T', '2'};
+    NkAdhocTransport *t0 = nk_loopnet_console(s_adh_p2_net, 0);
+    s_u02_peer = t0;
+    expect(t0->ops->login(t0, p0_mac, "PeerZero", "TEST00001") == NK_NET_OK &&
+               t0->ops->connect(t0, grp) == NK_NET_OK,
+           "adhoc audit u02: peer 0 joins NKAUDIT2");
+    s_u02_peer_pdp = t0->ops->pdp_open(t0, 0x5102u);
+    const int p0_lsn = t0->ops->ptp_listen(t0, 0x4201u, 2);
+    expect(s_u02_peer_pdp >= 0 && p0_lsn >= 0, "adhoc audit u02: peer 0 PDP and PTP listener open");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               adh(0x0c622081u /* sceWlanGetEtherAddr */, ADH_P2_SELF_MAC, 0u, 0u) == 0u &&
+               adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhoc audit u02: Net/Adhocctl init");
+    for (uint32_t i = 0u; i < 6u; i++) s_u02_self_mac[i] = MEM_R8(ADH_P2_SELF_MAC + i);
+    expect(adh(ADH_NID_CONNECT, adh_name(0, "NKAUDIT2"), 0u, 0u) == 0u, "adhoc audit u02: Connect starts");
+    adh_p2_wait_state(cpu, 1u, 1u);
+    expect(adh_state() == 1u, "adhoc audit u02: Connect reaches CONNECTED");
+
+    /* Peer 0 joins this host's matching context and is accepted. */
+    expect(adh(0xe1d621d7u /* AdhocInit */, 0x20000u, 0u, 0u) == 0u &&
+               adh(0x2a2a1e07u /* MatchingInit */, 0x20000u, 0u, 0u) == 0u,
+           "adhoc audit u02: AdhocInit + MatchingInit");
+    sr_test_register_guest_fn(ADH_P2_MATCH_CB, u02_match_cb_fn);
+    memset(s_u02_events, 0, sizeof(s_u02_events));
+    const uint32_t saved_sp0 = MEM_R32(cpu->r[29]);
+    MEM_W32(cpu->r[29], ADH_P2_MATCH_CB);
+    /* hello 0.1 s, keepalive 2 s, 5 tries (peer timeout 10.5 s), resend 50 ms (data timeout 250 ms) */
+    const int32_t mid = (int32_t)adh_call_full(0xca5eda6fu /* MatchingCreate */, cpu->r[29],
+                                               1u /* HOST */, 4u, 0x5102u, 0x1000u,
+                                               100000u, 2000000u, 5u, 50000u);
+    MEM_W32(cpu->r[29], saved_sp0);
+    expect(mid > 0, "adhoc audit u02: host MatchingCreate");
+    expect(adh_call_full(0x93ef3843u /* MatchingStart */, cpu->r[29], (uint32_t)mid,
+                         0x30u, 0x2000u, 0x30u, 0x2000u, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02: host MatchingStart");
+    const uint8_t join_pkt[5] = {2u, 0u, 0u, 0u, 0u};
+    (void)t0->ops->pdp_send(t0, s_u02_peer_pdp, s_u02_self_mac, 0x5102u, join_pkt, sizeof(join_pkt));
+    for (int w = 0; w < 20 && s_u02_events[2] == 0; w++) adh_audit_delay(cpu, 20000u);
+    for (uint32_t i = 0u; i < 6u; i++) MEM_W8(ADH_P2_PEER_MAC + i, p0_mac[i]);
+    expect(s_u02_events[2] == 1 &&
+               adh_call5(0x5e3d4b79u /* SelectTarget */, (uint32_t)mid, ADH_P2_PEER_MAC, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02: REQUEST from peer 0, SelectTarget");
+    const uint8_t acc_pkt[5] = {3u, 0u, 0u, 0u, 0u};
+    (void)t0->ops->pdp_send(t0, s_u02_peer_pdp, s_u02_self_mac, 0x5102u, acc_pkt, sizeof(acc_pkt));
+    for (int w = 0; w < 20 && s_u02_events[7] == 0; w++) adh_audit_delay(cpu, 20000u);
+    expect(s_u02_events[7] == 1, "adhoc audit u02: peer 0 ESTABLISHED");
+
+    /* F-05efa617: an aborted send is not acknowledged afterwards; a later send still is. */
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_P2_BUF + i, (uint8_t)"ABRT"[i]);
+    const uint32_t send_rc = adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 4u,
+                                       ADH_P2_BUF, 0u);
+    const uint32_t abort_rc = adh(0xec19337du /* AbortSendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 0u);
+    adh_audit_delay(cpu, 50000u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02: no DATA_ACK for a send AbortSendData ended "
+                 "(SendData 0x%08x, Abort 0x%08x, DATA_ACK %d)", send_rc, abort_rc, s_u02_events[12]);
+        expect(send_rc == 0u && abort_rc == 0u && s_u02_events[12] == 0, msg);
+    }
+    expect(adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 4u, ADH_P2_BUF, 0u) == 0u,
+           "adhoc audit u02: SendData after the abort");
+    adh_audit_delay(cpu, 50000u);
+    expect(s_u02_events[12] == 1, "adhoc audit u02: the send after the abort gets its DATA_ACK");
+
+    /* F-995596b0: a full event queue reports each event it cannot hold. 64 DATA packets wait at
+     * the first delivery (32 already moved to the socket's queue by GetPtpStat's pump, 32 in the
+     * medium); the first DATA delivery has peer 0 send 32 more, which meet a queue with one free
+     * slot. */
+    const int data0 = s_u02_events[11];
+    u02_peer_send_bulk(32);
+    MEM_W32(ADH_P2_LEN, 0u);
+    (void)adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, 0u, 0u);
+    u02_peer_send_bulk(32);
+    s_u02_flood = 32;
+    for (int w = 0; w < 10; w++) adh_audit_delay(cpu, 20000u);
+    {
+        const int delivered = s_u02_events[11] - data0;
+        const uint32_t dropped = sr_hle_test_match_events_dropped();
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02: 96 DATA events, each delivered or counted as dropped "
+                 "(delivered %d, dropped %u)", delivered, dropped);
+        expect(s_u02_flood == 0 && dropped > 0u && delivered + (int)dropped == 96, msg);
+    }
+
+    /* F-05efa617: once peer 0 has left the group a send waits for its timeout; AbortSendData ends
+     * that wait, so no DATA_TO follows. */
+    adh_shim_inject_disconnect(1u); /* the medium's peer id for console 0 */
+    adh_audit_delay(cpu, 20000u);
+    const uint32_t left_send_rc = adh_call5(0xf79472d7u /* SendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 4u,
+                                            ADH_P2_BUF, 0u);
+    const uint32_t left_abort_rc = adh(0xec19337du /* AbortSendData */, (uint32_t)mid, ADH_P2_PEER_MAC, 0u);
+    for (int w = 0; w < 8; w++) adh_audit_delay(cpu, 50000u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02: no DATA_TO for an aborted send to a peer that left "
+                 "(SendData 0x%08x, Abort 0x%08x, DATA_TO %d, DATA_ACK %d)", left_send_rc,
+                 left_abort_rc, s_u02_events[13], s_u02_events[12]);
+        expect(left_send_rc == 0u && left_abort_rc == 0u && s_u02_events[13] == 0 &&
+                   s_u02_events[12] == 1, msg);
+    }
+    expect(adh(0x32b156b3u /* MatchingStop */, (uint32_t)mid, 0u, 0u) == 0u &&
+               adh(0xf16eaf4fu /* MatchingDelete */, (uint32_t)mid, 0u, 0u) == 0u &&
+               adh(0x7945ecdau /* MatchingTerm */, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02: Matching Stop/Delete/Term");
+
+    /* F-8c0377bf: a PTP socket whose transport went away with sceNetAdhocctlTerm has nothing left
+     * to read, and PtpRecv says DISCONNECTED; GetPtpStat counts 0 pending bytes, not its buffer. */
+    const int32_t ptp = (int32_t)adh_call_full(0x877f6d66u /* PtpOpen */, cpu->r[29], ADH_P2_SELF_MAC,
+                                               0x4202u, ADH_P2_PEER_MAC, 0x4201u, 0x1000u, 100000u, 3u, 0u);
+    expect(ptp > 0 && adh(0xfc6fc07bu /* PtpConnect */, (uint32_t)ptp, 0u, 1u) == 0u,
+           "adhoc audit u02: PtpOpen + PtpConnect to peer 0");
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u, "adhoc audit u02: AdhocctlTerm detaches the transport");
+    MEM_W32(ADH_P2_LEN, 36u);
+    const uint32_t stat_rc = adh(0xb9685118u /* GetPtpStat */, ADH_P2_LEN, ADH_P2_STAT, 0u);
+    MEM_W32(ADH_P2_LEN, 64u);
+    const uint32_t recv_rc = adh_call5(0x8bea2b3eu /* PtpRecv */, (uint32_t)ptp, ADH_P2_BUF, ADH_P2_LEN, 0u, 1u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02: GetPtpStat counts 0 pending bytes on a socket with no "
+                 "transport (stat 0x%08x, rcv_sb_cc %u, PtpRecv 0x%08x)", stat_rc,
+                 MEM_R32(ADH_P2_STAT + 28u), recv_rc);
+        expect(stat_rc == 0u && MEM_R32(ADH_P2_STAT + 28u) == 0u && recv_rc == 0x8041070cu, msg);
+    }
+    expect(adh(0x157e6225u /* PtpClose */, (uint32_t)ptp, 0u, 0u) == 0u &&
+               adh(0xa62c6f57u /* AdhocTerm */, 0u, 0u, 0u) == 0u &&
+               net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02: PtpClose + AdhocTerm + NetTerm");
+    (void)t0->ops->ptp_close(t0, p0_lsn);
+    (void)t0->ops->pdp_close(t0, s_u02_peer_pdp);
+    s_u02_done = 1;
+}
+
+static void test_adhoc_audit_20261117_u02(void) {
+    extern void sr_hle_test_set_adhoc_transport(NkAdhocTransport *t);
+    s_adh_p2_net = nk_loopnet_create();
+    expect(s_adh_p2_net != NULL, "adhoc audit u02: create NkAdhocLoopNet");
+    if (!s_adh_p2_net) return;
+    memset(&s_adh_shim, 0, sizeof(s_adh_shim));
+    s_adh_shim.base.ops = &s_adh_shim_ops;
+    s_adh_shim.inner = nk_loopnet_console(s_adh_p2_net, 1);
+    s_u02_done = 0;
+    const uint32_t loaded_end = adh_fixture_begin();
+    sr_hle_test_set_adhoc_transport(&s_adh_shim.base);
+    adh_run(ADH_P2_MAIN, adh_u02_main_fn);
+    expect(s_u02_done == 1, "adhoc audit u02: regression flow completed");
+    hle_net_reset();
+    sr_hle_test_set_adhoc_transport(NULL);
+    adh_fixture_end(loaded_end);
+    nk_loopnet_destroy(s_adh_p2_net);
+    s_adh_p2_net = NULL;
+}
+
+/* F-4cec3491: a scan the lobby answers after its timeout does not answer the next scan. The shim
+ * holds console 1's lobby events back (a slow lobby), the first scan times out, a second group
+ * appears and the game scans again; the first scan's late answer then arrives on its own. */
+static int s_u02_scan_done;
+
+static void adh_u02_scan_main_fn(CpuState *cpu) {
+    static const uint8_t p0_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x81u};
+    static const uint8_t p2_mac[6] = {0x02u, 0x11u, 0x22u, 0x33u, 0x44u, 0x82u};
+    const uint8_t grp_a[8] = {'N', 'K', 'S', 'C', 'A', 'N', 'A', '1'};
+    const uint8_t grp_b[8] = {'N', 'K', 'S', 'C', 'A', 'N', 'B', '1'};
+    NkAdhocTransport *t0 = nk_loopnet_console(s_adh_p2_net, 0);
+    NkAdhocTransport *t2 = nk_loopnet_console(s_adh_p2_net, 2);
+    expect(t0->ops->login(t0, p0_mac, "PeerZero", "TEST00001") == NK_NET_OK &&
+               t0->ops->connect(t0, grp_a) == NK_NET_OK &&
+               t2->ops->login(t2, p2_mac, "PeerTwo", "TEST00001") == NK_NET_OK,
+           "adhoc audit u02 scan: peer 0 holds NKSCANA1, peer 2 logged in");
+
+    const char product[9] = {'T', 'E', 'S', 'T', '0', '0', '0', '0', '1'};
+    for (uint32_t i = 0u; i < 4u; i++) MEM_W8(ADH_ID + i, 0u);
+    for (uint32_t i = 0u; i < 9u; i++) MEM_W8(ADH_ID + 4u + i, (uint8_t)product[i]);
+    s_adh_events = 0u;
+    expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
+               adh_init(0x2000u, 0x30u, ADH_ID) == 0u &&
+               adh(ADH_NID_ADD_HANDLER, ADH_HANDLER, 0u, 0u) == 0u,
+           "adhoc audit u02 scan: Net/Adhocctl init");
+
+    s_adh_shim.hold_lobby = 1;
+    s_adh_shim.hold_budget = 0u;
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "adhoc audit u02 scan: first Scan starts");
+    for (int w = 0; w < 120 && s_adh_events == 0u; w++) adh_audit_delay(cpu, 50000u); /* 6 s > 5 s */
+    expect(s_adh_events == 1u && ADH_AT(0).event == 0 && ADH_AT(0).error == 0x80410b05u,
+           "adhoc audit u02 scan: the unanswered Scan ends with ERROR/TIMEOUT");
+
+    expect(t2->ops->connect(t2, grp_b) == NK_NET_OK, "adhoc audit u02 scan: peer 2 creates NKSCANB1");
+    expect(adh(ADH_NID_SCAN, 0u, 0u, 0u) == 0u, "adhoc audit u02 scan: second Scan starts");
+    s_adh_shim.hold_budget = 2u; /* the first scan's answer: NKSCANA1, then SCAN_COMPLETE */
+    for (int w = 0; w < 10; w++) adh_audit_delay(cpu, 20000u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02 scan: the first Scan's late answer does not complete "
+                 "the second (budget left %u, events %u, last event %d)",
+                 (unsigned)s_adh_shim.hold_budget, s_adh_events, s_adh_events ? ADH_AT(s_adh_events - 1u).event : -1);
+        expect(s_adh_shim.hold_budget == 0u && s_adh_events == 1u, msg);
+    }
+    s_adh_shim.hold_lobby = 0;
+    for (int w = 0; w < 20 && s_adh_events < 2u; w++) adh_audit_delay(cpu, 20000u);
+    MEM_W32(ADH_P2_LEN, 0u);
+    const uint32_t info_rc = adh(ADH_NID_SCAN_INFO, ADH_P2_LEN, 0u, 0u);
+    {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "adhoc audit u02 scan: the second Scan completes on its own answer, with "
+                 "both groups (events %u, event %d, GetScanInfo 0x%08x, %u bytes)",
+                 s_adh_events, s_adh_events > 1u ? ADH_AT(1).event : -1, info_rc, MEM_R32(ADH_P2_LEN));
+        expect(s_adh_events == 2u && ADH_AT(1).event == 3 && ADH_AT(1).error == 0u && info_rc == 0u &&
+                   MEM_R32(ADH_P2_LEN) == 2u * 28u, msg);
+    }
+    expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u && net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u,
+           "adhoc audit u02 scan: cleanup");
+    s_u02_scan_done = 1;
+}
+
+static void test_adhoc_audit_20261117_u02_scan(void) {
+    extern void sr_hle_test_set_adhoc_transport(NkAdhocTransport *t);
+    s_adh_p2_net = nk_loopnet_create();
+    expect(s_adh_p2_net != NULL, "adhoc audit u02 scan: create NkAdhocLoopNet");
+    if (!s_adh_p2_net) return;
+    memset(&s_adh_shim, 0, sizeof(s_adh_shim));
+    s_adh_shim.base.ops = &s_adh_shim_ops;
+    s_adh_shim.inner = nk_loopnet_console(s_adh_p2_net, 1);
+    s_u02_scan_done = 0;
+    const uint32_t loaded_end = adh_fixture_begin();
+    sr_hle_test_set_adhoc_transport(&s_adh_shim.base);
+    adh_run(ADH_P2_MAIN, adh_u02_scan_main_fn);
+    expect(s_u02_scan_done == 1, "adhoc audit u02 scan: regression flow completed");
     hle_net_reset();
     sr_hle_test_set_adhoc_transport(NULL);
     adh_fixture_end(loaded_end);
@@ -11823,6 +12101,9 @@ static void mr_pump_once(AdhP2MiniRelay *r) {
             size_t need = (op == 0u || op == 3u || op == 4u) ? 1u : (op == 1u ? 144u : (op == 2u ? 9u : 0u));
             if (need == 0u) { p->rx_len = 0u; break; }
             if (p->rx_len < need) break;
+            /* A silent lobby holds a scan back unanswered, as a slow server does: TCP keeps the
+             * request, and the server answers it, in order, once it speaks again. */
+            if (op == 4u && r->silent_lobby) break;
             if (op == 1u) {
                 memcpy(p->mac, p->rx + 1, 6u);
                 memcpy(p->nick, p->rx + 7, 128u);
@@ -12284,7 +12565,8 @@ static void d3_main_fn(CpuState *cpu) {
     expect(adh(ADH_NID_TERM, 0u, 0u, 0u) == 0u &&
            net_call(ADH_NID_NET_TERM, 0u, 0u, 0u, 0u, 0u) == 0u, "d3.2: cleanup");
 
-    /* 3. Silent lobby (no response) times out Scan at adhocDefaultTimeout (5s) and allows retry. */
+    /* 3. A silent lobby (it holds the Scan back) times out Scan at adhocDefaultTimeout (5s) and
+     *    allows a retry, which completes on its own answer after the late one. */
     s_adh_events = 0u;
     s_d3_srv->silent_lobby = 1;
     expect(net_call(ADH_NID_NET_INIT, 0x20000u, 0x20u, 0x1000u, 0x20u, 0x1000u) == 0u &&
@@ -60371,6 +60653,8 @@ static int hle_selftest_main(int argc, char **argv) {
         test_adhoc_offline_refusal_stays_closed();
         test_adhoc_online_loopnet_e2e();
         test_adhoc_audit_20261117_shim();
+        test_adhoc_audit_20261117_u02();
+        test_adhoc_audit_20261117_u02_scan();
         test_adhoc_online_real_tcp_loopback_e2e();
         test_adhoc_d2_d12_regressions();
         test_adhoc_d1_lifetime_across_term();
@@ -60531,6 +60815,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_adhoc_offline_refusal_stays_closed();
     test_adhoc_online_loopnet_e2e();
     test_adhoc_audit_20261117_shim();
+    test_adhoc_audit_20261117_u02();
+    test_adhoc_audit_20261117_u02_scan();
     test_adhoc_online_real_tcp_loopback_e2e();
     test_adhoc_d2_d12_regressions();
     test_adhoc_d1_lifetime_across_term();

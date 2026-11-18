@@ -773,6 +773,131 @@ static void test_ptp_accept_waits_for_free_slot(void) {
     srv_destroy(&srv);
 }
 
+/* Audit 2026-11-17 (F-33b0dd4e): a lobby burst larger than the event queue is not decoded and
+ * dropped. The client leaves the frames it has no room for in its receive buffer (TCP holds the
+ * rest), and take_events decodes them as the queue drains, so a scan answer of 70 groups still
+ * ends with its SCAN_COMPLETE and events_dropped stays 0. */
+static void test_lobby_burst_waits_for_queue_room(void) {
+    uint16_t lp = 0u, dp = 0u;
+    TSock ls = t_listen_loopback(&lp);
+    TSock ds = t_listen_loopback(&dp);
+    NkAdhocRelayConfig cfg = {"127.0.0.1", lp, dp, NK_RELAY_PORT_OFFSET};
+    NkAdhocRelayClient *c = nk_relay_client_create(&cfg);
+    CHECK(c != NULL, "lobby burst: client created");
+    NkAdhocTransport *t = nk_relay_client_transport(c);
+    static const uint8_t mac[6] = {0x02, 1, 2, 3, 4, 6};
+    CHECK(t->ops->login(t, mac, "Burst", "ULUS10000") == NK_NET_OK, "lobby burst: login queued");
+    TSock accepted = T_INV;
+    for (int i = 0; i < 40 && accepted == T_INV; i++) {
+        accepted = accept(ls, NULL, NULL);
+        t->ops->pump(t);
+    }
+    CHECK(accepted != T_INV, "lobby burst: server accepted the lobby client");
+    enum { GROUPS = 70 };
+    uint8_t burst[GROUPS * NK_LOBBY_S2C_SCAN_SIZE + 1u];
+    for (unsigned g = 0u; g < GROUPS; g++) {
+        uint8_t *f = burst + g * NK_LOBBY_S2C_SCAN_SIZE;
+        memset(f, 0, NK_LOBBY_S2C_SCAN_SIZE);
+        f[0] = (uint8_t)NK_LOBBY_SCAN;
+        memcpy(f + 1, "GRP", 3u);
+        f[4] = (uint8_t)('0' + g / 10u);
+        f[5] = (uint8_t)('0' + g % 10u);
+        f[9] = 0x02u;
+        f[14] = (uint8_t)g;
+    }
+    burst[sizeof(burst) - 1u] = (uint8_t)NK_LOBBY_SCAN_COMPLETE;
+    CHECK(t_send_all(accepted, burst, sizeof(burst)), "lobby burst: server sent 70 groups and the end");
+    for (int i = 0; i < 40; i++) {
+        t->ops->pump(t);
+        test_sleep_ms(1u);
+    }
+    unsigned scans = 0u, completes = 0u;
+    NkLobbyEvent ev[16];
+    for (int round = 0; round < 40; round++) {
+        const size_t n = t->ops->take_events(t, ev, 16u);
+        for (size_t i = 0u; i < n; i++) {
+            if (ev[i].kind == NK_LOBBY_SCAN) scans++;
+            if (ev[i].kind == NK_LOBBY_SCAN_COMPLETE) completes++;
+        }
+        if (completes) break;
+    }
+    CHECK(scans == GROUPS && completes == 1u && t->ops->events_dropped(t) == 0u,
+          "lobby burst: every group and the SCAN_COMPLETE arrive (scans %u, completes %u, dropped %u)",
+          scans, completes, (unsigned)t->ops->events_dropped(t));
+    t_close(accepted);
+    t_close(ls);
+    t_close(ds);
+    nk_relay_client_destroy(c);
+}
+
+/* Audit 2026-11-17 (F-008632bb, F-4e51f13d): the relay client refuses a local PTP port by the HLE
+ * layer's rule (hle_network.c adhoc_ptp_port_in_use, after PPSSPP's isPTPPortInUse): a listen only
+ * for another listener on the port, an open only for a stream with the same local port, peer MAC
+ * and peer port. A listener, its accepted children and streams to other peers share the port. */
+static void test_ptp_port_reuse(void) {
+    TestServer srv;
+    srv_init(&srv);
+    NkAdhocRelayConfig cfg = {"127.0.0.1", srv.lobby_port, srv.data_port, NK_RELAY_PORT_OFFSET};
+    NkAdhocRelayClient *ca = nk_relay_client_create(&cfg);
+    NkAdhocRelayClient *cb = nk_relay_client_create(&cfg);
+    CHECK(ca && cb, "port reuse: clients created");
+    NkAdhocTransport *ta = nk_relay_client_transport(ca);
+    NkAdhocTransport *tb = nk_relay_client_transport(cb);
+    static const uint8_t mac_a[6] = {0x02, 0xaa, 0xbb, 0x02, 0x00, 0x01};
+    static const uint8_t mac_b[6] = {0x02, 0xaa, 0xbb, 0x02, 0x00, 0x02};
+    static const uint8_t mac_c[6] = {0x02, 0xaa, 0xbb, 0x02, 0x00, 0x03};
+    static const uint8_t grp[8] = {'P', 'O', 'R', 'T', 'T', 'E', 'S', 'T'};
+    CHECK(ta->ops->login(ta, mac_a, "Alpha", "ULUS10001") == NK_NET_OK &&
+          tb->ops->login(tb, mac_b, "Beta", "ULUS10001") == NK_NET_OK,
+          "port reuse: both logged in");
+    for (int i = 0; i < 30; i++) { srv_pump(&srv); ta->ops->pump(ta); tb->ops->pump(tb); }
+    CHECK(ta->ops->connect(ta, grp) == NK_NET_OK && tb->ops->connect(tb, grp) == NK_NET_OK,
+          "port reuse: joined group");
+    for (int i = 0; i < 30; i++) { srv_pump(&srv); ta->ops->pump(ta); tb->ops->pump(tb); }
+
+    /* A listens on 0x4001, then opens streams from 0x4001 to two different peers. */
+    const int lsn = ta->ops->ptp_listen(ta, 0x4001u, 4);
+    CHECK(lsn >= 0, "port reuse: A listens on 0x4001");
+    const int to_b = ta->ops->ptp_open(ta, 0x4001u, mac_b, 0x4100u);
+    CHECK(to_b >= 0, "port reuse: A opens 0x4001 -> B beside its listener on 0x4001 (got %d)", to_b);
+    const int to_c = ta->ops->ptp_open(ta, 0x4001u, mac_c, 0x4100u);
+    CHECK(to_c >= 0, "port reuse: A opens 0x4001 -> C beside a stream 0x4001 -> B (got %d)", to_c);
+    CHECK(ta->ops->ptp_open(ta, 0x4001u, mac_b, 0x4100u) == NK_NET_PORT_IN_USE,
+          "port reuse: a second stream 0x4001 -> B:0x4100 is refused");
+    CHECK(ta->ops->ptp_listen(ta, 0x4001u, 1) == NK_NET_PORT_IN_USE,
+          "port reuse: a second listener on 0x4001 is refused");
+    if (to_b >= 0) ta->ops->ptp_close(ta, to_b);
+    if (to_c >= 0) ta->ops->ptp_close(ta, to_c);
+    for (int i = 0; i < 20; i++) { srv_pump(&srv); ta->ops->pump(ta); tb->ops->pump(tb); }
+
+    /* B connects to A's listener; A accepts, closes the listener and listens again. */
+    const int cli = tb->ops->ptp_open(tb, 0x4009u, mac_a, 0x4001u);
+    CHECK(cli >= 0, "port reuse: B connects to A:0x4001");
+    uint8_t pmac[6] = {0};
+    uint16_t pport = 0u;
+    int child = NK_NET_AGAIN;
+    for (int i = 0; i < 60 && child < 0; i++) {
+        srv_pump(&srv);
+        ta->ops->pump(ta);
+        tb->ops->pump(tb);
+        child = ta->ops->ptp_accept(ta, lsn, pmac, &pport);
+    }
+    CHECK(child >= 0 && pport == 0x4009u, "port reuse: A accepts B on 0x4001 (child=%d)", child);
+    ta->ops->ptp_close(ta, lsn);
+    const int lsn2 = ta->ops->ptp_listen(ta, 0x4001u, 4);
+    CHECK(lsn2 >= 0, "port reuse: A listens on 0x4001 again while the accepted child lives (got %d)",
+          lsn2);
+
+    if (lsn2 >= 0) ta->ops->ptp_close(ta, lsn2);
+    if (child >= 0) ta->ops->ptp_close(ta, child);
+    if (cli >= 0) tb->ops->ptp_close(tb, cli);
+    ta->ops->logout(ta);
+    tb->ops->logout(tb);
+    nk_relay_client_destroy(ca);
+    nk_relay_client_destroy(cb);
+    srv_destroy(&srv);
+}
+
 static void test_posix_high_fd_above_fd_setsize(void) {
 #ifndef _WIN32
     int dummy_fds[1200];
@@ -920,6 +1045,8 @@ int main(void) {
     test_two_clients_loopback();
     test_bad_server_frames_fail_closed();
     test_ptp_accept_waits_for_free_slot();
+    test_lobby_burst_waits_for_queue_room();
+    test_ptp_port_reuse();
     test_posix_high_fd_above_fd_setsize();
     test_async_dns_resolve_nonblocking_and_failure();
 #ifdef _WIN32

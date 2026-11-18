@@ -662,9 +662,34 @@ static int alloc_ptp_slot(NkAdhocRelayClient *c) {
     return NK_NET_NO_SLOT;
 }
 
+/* Any socket on the port: an automatic port skips it. */
 static bool ptp_port_in_use(const NkAdhocRelayClient *c, uint16_t port) {
     for (unsigned i = 0u; i < NK_RELAY_PTP_SOCKETS; i++) {
         if (c->ptp[i].used && c->ptp[i].state != PTP_STATE_UNUSED && c->ptp[i].lport == port)
+            return true;
+    }
+    return false;
+}
+
+/* The ports a listen or an open the caller named is refused on, by the HLE layer's rule
+ * (src/rt/hle_network.c adhoc_ptp_port_in_use, after PPSSPP's isPTPPortInUse): a listen when
+ * another listener holds the port, an open when a stream already joins the same local port, peer
+ * MAC and peer port. A listener, its accepted children and streams to other peers share a port. */
+static bool ptp_listen_port_taken(const NkAdhocRelayClient *c, uint16_t port) {
+    for (unsigned i = 0u; i < NK_RELAY_PTP_SOCKETS; i++) {
+        const RelayPtpSocket *ps = &c->ptp[i];
+        if (ps->used && ps->state == PTP_STATE_LISTEN && ps->lport == port) return true;
+    }
+    return false;
+}
+
+static bool ptp_stream_taken(const NkAdhocRelayClient *c, uint16_t port,
+                             const uint8_t dst[NK_RELAY_MAC_LEN], uint16_t dport) {
+    for (unsigned i = 0u; i < NK_RELAY_PTP_SOCKETS; i++) {
+        const RelayPtpSocket *ps = &c->ptp[i];
+        if (ps->used && ps->state != PTP_STATE_UNUSED && ps->state != PTP_STATE_LISTEN &&
+            ps->lport == port && ps->pport == dport &&
+            memcmp(ps->peer_mac, dst, NK_RELAY_MAC_LEN) == 0)
             return true;
     }
     return false;
@@ -693,6 +718,30 @@ static bool ensure_data_chan_connected(NkAdhocRelayClient *c, TcpChan *ch) {
         }
     }
     return true;
+}
+
+/* Decodes the lobby frames received so far while the event queue has room. A frame the queue
+ * cannot hold stays in lobby.rx: the receive buffer then fills, chan_pump_rx stops reading at
+ * NK_RELAY_CHAN_MAX_BUF and TCP holds the rest at the server, so a burst (a scan answer of more
+ * groups than the queue holds) waits instead of losing its last frames. rc_take_events calls this
+ * again as it drains the queue. A frame that does not parse ends the session and the bytes after
+ * it are discarded, since nothing after it can be framed. */
+static void parse_lobby_rx(NkAdhocRelayClient *c) {
+    while (c->lobby.rx_len > 0u && c->ev_count < NK_NET_EVENT_QUEUE) {
+        NkLobbyEvent ev;
+        const int used = nk_lobby_parse(c->lobby.rx, c->lobby.rx_len, &ev);
+        if (used == NK_LOBBY_NEED_MORE) break;
+        if (used == NK_LOBBY_BAD) {
+            c->lobby.dead = 1;
+            c->lobby.rx_len = 0u;
+            set_error(c, "lobby rejected invalid server frame");
+            break;
+        }
+        chan_consume_rx(&c->lobby, (size_t)used);
+        if (ev.kind == NK_LOBBY_CONNECT_BSSID) c->in_group = 1;
+        if (ev.kind == NK_LOBBY_SCAN_COMPLETE) c->scanning = 0;
+        if (ev.kind != NK_LOBBY_CHAT) queue_lobby_event(c, &ev);
+    }
 }
 
 static void pump_lobby(NkAdhocRelayClient *c) {
@@ -741,20 +790,7 @@ static void pump_lobby(NkAdhocRelayClient *c) {
     }
     chan_flush_tx(&c->lobby);
     chan_pump_rx(&c->lobby);
-    while (c->lobby.rx_len > 0u) {
-        NkLobbyEvent ev;
-        const int used = nk_lobby_parse(c->lobby.rx, c->lobby.rx_len, &ev);
-        if (used == NK_LOBBY_NEED_MORE) break;
-        if (used == NK_LOBBY_BAD) {
-            c->lobby.dead = 1;
-            set_error(c, "lobby rejected invalid server frame");
-            break;
-        }
-        chan_consume_rx(&c->lobby, (size_t)used);
-        if (ev.kind == NK_LOBBY_CONNECT_BSSID) c->in_group = 1;
-        if (ev.kind == NK_LOBBY_SCAN_COMPLETE) c->scanning = 0;
-        if (ev.kind != NK_LOBBY_CHAT) queue_lobby_event(c, &ev);
-    }
+    parse_lobby_rx(c);
     if (c->lobby.remote_eof || c->lobby.dead) {
         if (!c->last_error[0])
             set_error(c, c->lobby.connected ? "lobby connection closed" : "lobby connection failed");
@@ -1053,7 +1089,9 @@ static size_t rc_take_events(NkAdhocTransport *t, NkLobbyEvent *out, size_t max)
     NkAdhocRelayClient *c = as_client(t);
     rc_pump(t);
     size_t n = 0u;
-    while (out && n < max && c->ev_count) {
+    while (out && n < max) {
+        if (!c->ev_count) parse_lobby_rx(c);
+        if (!c->ev_count) break;
         out[n++] = c->events[c->ev_head];
         c->ev_head = (c->ev_head + 1u) % NK_NET_EVENT_QUEUE;
         c->ev_count--;
@@ -1161,7 +1199,7 @@ static int rc_ptp_listen(NkAdhocTransport *t, uint16_t sport, int backlog) {
     if (!c->logged_in) return NK_NET_NOT_LOGGED_IN;
     if (sport == 0u) sport = pick_ptp_port(c);
     if (sport == 0u) return NK_NET_NO_SLOT;
-    if (ptp_port_in_use(c, sport)) return NK_NET_PORT_IN_USE;
+    if (ptp_listen_port_taken(c, sport)) return NK_NET_PORT_IN_USE;
     const int slot = alloc_ptp_slot(c);
     if (slot < 0) return slot;
     RelayPtpSocket *ps = &c->ptp[slot];
@@ -1209,7 +1247,7 @@ static int rc_ptp_open(NkAdhocTransport *t, uint16_t sport, const uint8_t dst[NK
     if (!dst || dport == 0u) return NK_NET_BAD_ARG;
     if (sport == 0u) sport = pick_ptp_port(c);
     if (sport == 0u) return NK_NET_NO_SLOT;
-    if (ptp_port_in_use(c, sport)) return NK_NET_PORT_IN_USE;
+    if (ptp_stream_taken(c, sport, dst, dport)) return NK_NET_PORT_IN_USE;
     const int slot = alloc_ptp_slot(c);
     if (slot < 0) return slot;
     RelayPtpSocket *ps = &c->ptp[slot];
