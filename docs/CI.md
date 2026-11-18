@@ -1635,9 +1635,10 @@ setting, and it does this:
    exist yet, so the controls stay as our side (`NOT_RUN provenance controls`). After `git commit`, run
    `python tools/regen_all.py` and commit the refresh on its own, as section 4 of `AGENTS.md` asks.
 
-It never commits. `regen_all.py --check` in hosted CI stays the gate: if a merge took the wrong side
-somewhere this route does not cover, the head still fails `Generated files and repository lints` and
-cannot land.
+It never commits. Hosted CI stays the gate: `python tools/regen_all.py --check` in `Generated files and
+repository lints` on a quick run, and on a full run `tools/test_regen_all.py` in `Python tooling gates`,
+which compares each generator's output with the committed file. If a merge took the wrong side somewhere
+this route does not cover, the head still fails there and cannot land.
 
 Why not a merge driver like `nk-append`? A driver for these files would have to write one side and exit
 0 (then `git merge` commits a stale file on its own) or exit 1 (then the merge stops exactly as it does
