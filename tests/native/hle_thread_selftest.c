@@ -7098,6 +7098,20 @@ static void test_ms0_unified_namespace(void) {
 #else
             expect(read_refusal == 0x80010016u, "POSIX refuses a read through the link as EINVAL");
 #endif
+            /* sceIoGetstat through the same link is refused like the read, and tells nothing
+             * of the outside file: not that it exists, nor its type or size. */
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = PATH_ADDR;
+            cpu.r[5] = STAT_ADDR;
+            for (uint32_t i = 0; i < 0x58u; i++) MEM_W8(STAT_ADDR + i, 0xcc);
+            const uint32_t stat_refusal = sr_hle_test_io_getstat(&cpu);
+            if (stat_refusal != read_refusal)
+                fprintf(stderr, "  sceIoGetstat through the link answered 0x%08x, a read 0x%08x\n",
+                        (unsigned)stat_refusal, (unsigned)read_refusal);
+            expect(stat_refusal == read_refusal && MEM_R32(STAT_ADDR) == 0xccccccccu &&
+                       MEM_R32(STAT_ADDR + 8u) == 0xccccccccu,
+                   "sceIoGetstat through a folder link is refused like a read and reports no "
+                   "outside file");
             for (size_t i = 0; i < sizeof(opens) / sizeof(opens[0]); ++i) {
                 fd_guest_copy(PATH_ADDR, opens[i].guest, strlen(opens[i].guest) + 1u);
                 fd_set_path(&cpu, PATH_ADDR, opens[i].guest);
@@ -12333,6 +12347,23 @@ static int sdt_live_bookkeeping(const char *dir) {
     return n;
 }
 
+/* The kept copies of one member in a save directory: ".nakagawa-kept-<anything>-<member>". */
+static int sdt_kept_copies(const char *dir, const char *member) {
+    int n = 0;
+    size_t ml = strlen(member);
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        size_t len = strlen(de->d_name);
+        if (!strncmp(de->d_name, ".nakagawa-kept-", 15) && len > 15u + ml &&
+            de->d_name[len - ml - 1u] == '-' && !strcmp(de->d_name + len - ml, member))
+            n++;
+    }
+    closedir(d);
+    return n;
+}
+
 static void sdt_param(uint32_t mode, const char *game, const char *save, const char *file) {
     memset(g_mem_base + SDT_PARAM, 0, 0x600u);
     memset(g_mem_base + SDT_BUF, 0, 0x100u);
@@ -12467,11 +12498,27 @@ static void test_savedata_list_selection(void) {
     fd_guest_copy(SDT_BUF, "UNO", 3u);
     MEM_W32(SDT_PARAM + 0x7cu, 3u);
     snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/NKLISTSLOT1/DATA.BIN", root);
-    char kept[600];
-    snprintf(kept, sizeof(kept), "%s/PSP/SAVEDATA/NKLISTSLOT1/.nakagawa-kept-0-DATA.BIN", root);
+    char kept[600], slot1[600];
+    snprintf(kept, sizeof(kept), "%s/PSP/SAVEDATA/NKLISTSLOT1/.nakagawa-kept-replaced-DATA.BIN", root);
+    snprintf(slot1, sizeof(slot1), "%s/PSP/SAVEDATA/NKLISTSLOT1", root);
     expect(sr_savedata_execute(SDT_PARAM) == 0u && sdt_read(path, text, sizeof(text)) &&
                !strcmp(text, "UNO") && sdt_read(kept, text, sizeof(text)) && !strcmp(text, "ONE"),
            "an automatic LISTSAVE over an existing save keeps the replaced version");
+    /* Each automatic overwrite supersedes the last: the slot keeps one copy per member, the
+     * version just before, so repeated saving never fills the kept names (which made every
+     * later SAVE to the slot fail). */
+    for (int i = 0; i < 3; i++) {
+        static const char *const again[] = { "DOS", "TRES", "CUATRO" };
+        sdt_list(5u, 0u /* NAME */, "SLOT1", save_list);
+        fd_guest_copy(SDT_BUF, again[i], (uint32_t)strlen(again[i]));
+        MEM_W32(SDT_PARAM + 0x7cu, (uint32_t)strlen(again[i]));
+        expect(sr_savedata_execute(SDT_PARAM) == 0u, "a repeated automatic LISTSAVE succeeds");
+    }
+    expect(sdt_read(path, text, sizeof(text)) && !strcmp(text, "CUATRO") &&
+               sdt_read(kept, text, sizeof(text)) && !strcmp(text, "TRES"),
+           "repeated automatic LISTSAVEs keep the version just before the last one");
+    expect(sdt_kept_copies(slot1, "DATA.BIN") == 1 && sdt_kept_copies(slot1, "PARAM.SFO") == 1,
+           "repeated automatic LISTSAVEs keep one copy of each member, not one per save");
 
     /* Outside the list modes "<>" is the empty save name, not some existing save. */
     sdt_list(0u /* AUTOLOAD */, 0u, "<>", listed);

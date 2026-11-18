@@ -227,9 +227,13 @@ static int savedata_root_relative(const char *path, char *out, size_t cap) {
     const char *root = ms_root();
     size_t root_len = strlen(root);
     size_t path_len = path ? strlen(path) : 0;
+    /* A root spelled with a trailing separator ("memstick/", the documented default form)
+     * joins without a second one, so the separator after the root is its own last byte. */
+    const int root_ends_in_separator =
+        root_len > 0 && (root[root_len - 1u] == '/' || root[root_len - 1u] == '\\');
     if (!path || !out || cap == 0 || root_len == 0 || path_len <= root_len ||
         strncmp(path, root, root_len) != 0 ||
-        (path[root_len] != '/' && path[root_len] != '\\')) {
+        (!root_ends_in_separator && path[root_len] != '/' && path[root_len] != '\\')) {
         return 0;
     }
     const char *rel = path + root_len;
@@ -260,10 +264,12 @@ static int mkdirs(const char *path) {
     wchar_t canonical_root[MAX_PATH * 2];
     if (!ms_canonical_root(canonical_root, sizeof(canonical_root)/sizeof(wchar_t)))
         return 0;
+    /* The prefix is checked first: it also proves the path is at least as long as the root,
+     * so the tail below never starts past the path's terminator. */
     size_t root_len = strlen(ms_root());
+    if (strncmp(path, ms_root(), root_len) != 0) return 0;
     const char *tail = path + root_len;
     while (*tail == '/' || *tail == '\\') tail++;
-    if (strncmp(path, ms_root(), root_len) != 0) return 0;
     return sr_vfs_mkdirs_contained(tail, canonical_root);
 #else
 #if defined(SR_CD_BACKEND_POSIX_AT)
@@ -535,6 +541,94 @@ static void free_names(char **names, size_t count) {
     free(names);
 }
 
+/* Directory listing and status by path. Every path here starts with the Memory Stick root,
+ * which is UTF-8 on every host (sr_ms0_root). Windows' narrow CRT calls would read it in the
+ * ANSI code page, so a root with a character outside ASCII (a user name in a per-user path)
+ * would name another folder or none; that host lists and stats through the wide calls. */
+#ifdef _WIN32
+static wchar_t *sd_wide_path(const char *path) {
+    int need = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (need <= 0) return NULL;
+    wchar_t *wpath = (wchar_t *)malloc((size_t)need * sizeof(wchar_t));
+    if (!wpath) return NULL;
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, need);
+    for (wchar_t *p = wpath; *p; p++) if (*p == L'/') *p = L'\\';
+    return wpath;
+}
+
+typedef struct SdHostDir {
+    _WDIR *d;
+    char name[MAX_PATH * 3 + 1];
+} SdHostDir;
+
+static int sd_host_dir_open(SdHostDir *h, const char *path) {
+    wchar_t *wpath = sd_wide_path(path);
+    h->d = wpath ? _wopendir(wpath) : NULL;
+    free(wpath);
+    return h->d != NULL;
+}
+
+/* The next entry's name in UTF-8; a name that is not valid UTF-16 names no file a UTF-8 path
+ * can reach and is passed over. NULL at the end. */
+static const char *sd_host_dir_next(SdHostDir *h) {
+    struct _wdirent *de;
+    while ((de = _wreaddir(h->d)) != NULL) {
+        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, de->d_name, -1, h->name,
+                                (int)sizeof(h->name), NULL, NULL) > 0)
+            return h->name;
+    }
+    return NULL;
+}
+
+static void sd_host_dir_close(SdHostDir *h) {
+    _wclosedir(h->d);
+}
+
+/* 1 when `path` exists (followed as stat follows it), with its type and modification time. */
+static int sd_host_stat(const char *path, int *is_dir, int64_t *mtime) {
+    wchar_t *wpath = sd_wide_path(path);
+    struct _stat64 st;
+    int ok = wpath && _wstat64(wpath, &st) == 0;
+    free(wpath);
+    if (!ok) return 0;
+    if (is_dir) *is_dir = (st.st_mode & _S_IFMT) == _S_IFDIR;
+    if (mtime) *mtime = (int64_t)st.st_mtime;
+    return 1;
+}
+#else
+typedef struct SdHostDir {
+    DIR *d;
+} SdHostDir;
+
+static int sd_host_dir_open(SdHostDir *h, const char *path) {
+    h->d = opendir(path);
+    return h->d != NULL;
+}
+
+static const char *sd_host_dir_next(SdHostDir *h) {
+    struct dirent *de = readdir(h->d);
+    return de ? de->d_name : NULL;
+}
+
+static void sd_host_dir_close(SdHostDir *h) {
+    closedir(h->d);
+}
+
+static int sd_host_stat(const char *path, int *is_dir, int64_t *mtime) {
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    if (is_dir) *is_dir = S_ISDIR(st.st_mode);
+    if (mtime) *mtime = (int64_t)st.st_mtime;
+    return 1;
+}
+#endif
+
+/* 1 when `path` is a directory (followed as stat follows it). */
+static int sd_host_is_dir(const char *path) {
+    int is_dir = 0;
+    return sd_host_stat(path, &is_dir, NULL) && is_dir;
+}
+
 /* The entry names of one host directory, sorted bytewise, without "." and ".." and without
  * bookkeeping names. A PSP lists a FAT directory in its own entry order, which a host folder
  * cannot reproduce, and host readdir order differs between file systems (#1387). Returns 0, and
@@ -542,15 +636,14 @@ static void free_names(char **names, size_t count) {
 static int savedata_sorted_names(const char *dir, char ***names_out, size_t *count_out) {
     *names_out = NULL;
     *count_out = 0;
-    DIR *d = opendir(dir);
-    if (!d) return 0;
+    SdHostDir d;
+    if (!sd_host_dir_open(&d, dir)) return 0;
     char **names = NULL;
     size_t count = 0, cap = 0;
     int ok = 1;
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..") ||
-            savedata_is_reserved_name(de->d_name))
+    const char *entry;
+    while ((entry = sd_host_dir_next(&d)) != NULL) {
+        if (!strcmp(entry, ".") || !strcmp(entry, "..") || savedata_is_reserved_name(entry))
             continue;
         if (count == cap) {
             size_t grown_cap = cap ? cap * 2u : 16u;
@@ -559,13 +652,13 @@ static int savedata_sorted_names(const char *dir, char ***names_out, size_t *cou
             names = grown;
             cap = grown_cap;
         }
-        size_t len = strlen(de->d_name);
+        size_t len = strlen(entry);
         char *copy = (char *)malloc(len + 1u);
         if (!copy) { ok = 0; break; }
-        memcpy(copy, de->d_name, len + 1u);
+        memcpy(copy, entry, len + 1u);
         names[count++] = copy;
     }
-    closedir(d);
+    sd_host_dir_close(&d);
     if (!ok) {
         free_names(names, count);
         return 0;
@@ -580,8 +673,7 @@ static int savedata_sorted_names(const char *dir, char ***names_out, size_t *cou
 static int64_t savedata_save_time(const char *dir) {
     int64_t when = 0;
     if (host_file_stat(dir, "PARAM.SFO", NULL, &when)) return when;
-    struct stat st;
-    return stat(dir, &st) == 0 ? (int64_t)st.st_mtime : 0;
+    return sd_host_stat(dir, NULL, &when) ? when : 0;
 }
 
 static int dir_exists(const char *dir);     /* below, with the modes */
@@ -602,6 +694,8 @@ static int is_system_file(const char *n);  /* below, with FILES */
  *   J    .nakagawa-journal        the transaction record before the commit
  *   C    .nakagawa-commit         the same record after it: the commit point
  *   K    .nakagawa-kept-<n>-<m>   a file kept out of the way (below); never restored or deleted
+ *   R    .nakagawa-kept-replaced-<m>  the version of member m the last automatic list overwrite
+ *                                 replaced; the next such overwrite replaces it (below)
  * The record lists each slot's member name (as it is spelled on disk), whether a previous
  * version existed (only "no such file" counts as absent; any other error fails the SAVE
  * first), and the size and FNV-1a 64 of the previous and the new content, with a hash over
@@ -628,8 +722,12 @@ static int is_system_file(const char *n);  /* below, with FILES */
  *   - No record but a P: the record was lost (a file system without ordered metadata, or a
  *     file removed from outside), so the directory fails closed and every file is kept.
  *   - A file that may not be deleted but must leave its live name (a duplicate the host refuses
- *     to delete, a stage with foreign content, the previous version an automatic list overwrite
- *     replaced) is renamed to a K name and logged with its path.
+ *     to delete, a stage with foreign content) is renamed to a K name and logged with its path.
+ *   - The previous version an automatic list overwrite replaced, proven by its content, is
+ *     renamed to its member's R name, over the copy an earlier overwrite kept there: each
+ *     automatic overwrite supersedes the last, so the slot keeps the save it held just before.
+ *     Kept as K names, every overwrite added a whole copy of the save until the K names ran out
+ *     and every later SAVE to that slot failed.
  *   - Every slot is classified before any is changed; every step is a no-op when its target
  *     state already holds, so recovery can be repeated.
  *
@@ -646,6 +744,7 @@ static int is_system_file(const char *n);  /* below, with FILES */
 #define SAVEDATA_STAGE_PREFIX SAVEDATA_RESERVED_PREFIX "stage-"
 #define SAVEDATA_PREV_PREFIX  SAVEDATA_RESERVED_PREFIX "prev-"
 #define SAVEDATA_KEPT_PREFIX  SAVEDATA_RESERVED_PREFIX "kept-"
+#define SAVEDATA_REPLACED_PREFIX SAVEDATA_KEPT_PREFIX "replaced-"
 #define SAVEDATA_JOURNAL_NAME SAVEDATA_RESERVED_PREFIX "journal"
 #define SAVEDATA_COMMIT_NAME  SAVEDATA_RESERVED_PREFIX "commit"
 #define SAVEDATA_LOCK_NAME    SAVEDATA_RESERVED_PREFIX "savedata-lock"
@@ -1060,6 +1159,20 @@ static int sd_keep(SavedataDir *d, const char *name, const char *member, const c
     return 0;
 }
 
+/* Keep `name`, the proven previous version of `member` an automatic list overwrite replaced, as
+ * the member's R name (see "the SAVE transaction"), replacing the copy an earlier overwrite kept
+ * there. Anything at the R name that cannot be replaced (a folder) leaves `name` to a K name. */
+static int sd_keep_replaced(SavedataDir *d, const char *name, const char *member) {
+    char kept[64];
+    int n = snprintf(kept, sizeof(kept), SAVEDATA_REPLACED_PREFIX "%s", member);
+    if (n > 0 && (size_t)n < sizeof(kept) && path_sanitize(kept) && sd_rename(d, name, kept, 1)) {
+        fprintf(stderr, "savedata: kept %s/%s as %s (the version an automatic list overwrite "
+                "replaced)\n", d->dir, name, kept);
+        return 1;
+    }
+    return sd_keep(d, name, member, "the version an automatic list overwrite replaced");
+}
+
 /* Delete a proven duplicate; if the host refuses, keep it under a K name instead. */
 static int sd_drop(SavedataDir *d, const char *name, const char *member) {
     return sd_delete(d, name) || sd_keep(d, name, member, "the host refused to delete it");
@@ -1167,21 +1280,21 @@ enum { SD_RECOVER_CLEAN, SD_RECOVER_ROLLED_BACK, SD_RECOVER_COMMITTED, SD_RECOVE
 /* The live bookkeeping names in the directory: stage and prev temporaries (K names are kept on
  * purpose and do not count). Returns -1 when the directory cannot be read. */
 static int sd_scan(SavedataDir *d, char names[][40], int cap, int *has_prev) {
-    DIR *dd = opendir(d->dir);
+    SdHostDir dd;
     int n = 0;
     *has_prev = 0;
-    if (!dd) return -1;
-    struct dirent *de;
-    while ((de = readdir(dd)) != NULL) {
-        const int prev = !strncmp(de->d_name, SAVEDATA_PREV_PREFIX, sizeof(SAVEDATA_PREV_PREFIX) - 1u);
-        const int stage = !strncmp(de->d_name, SAVEDATA_STAGE_PREFIX, sizeof(SAVEDATA_STAGE_PREFIX) - 1u);
+    if (!sd_host_dir_open(&dd, d->dir)) return -1;
+    const char *entry;
+    while ((entry = sd_host_dir_next(&dd)) != NULL) {
+        const int prev = !strncmp(entry, SAVEDATA_PREV_PREFIX, sizeof(SAVEDATA_PREV_PREFIX) - 1u);
+        const int stage = !strncmp(entry, SAVEDATA_STAGE_PREFIX, sizeof(SAVEDATA_STAGE_PREFIX) - 1u);
         if (!prev && !stage) continue;
         if (prev) *has_prev = 1;
-        const size_t len = strlen(de->d_name);
-        if (n < cap && len < 40u) memcpy(names[n++], de->d_name, len + 1u);
+        const size_t len = strlen(entry);
+        if (n < cap && len < 40u) memcpy(names[n++], entry, len + 1u);
         else n = cap + 1;               /* more than the scan holds: the caller fails closed */
     }
-    closedir(dd);
+    sd_host_dir_close(&dd);
     return n;
 }
 
@@ -1296,10 +1409,11 @@ static int sd_roll_forward(SavedataDir *d, const SdRecord *r, int *leftover) {
             done = 1;
         }
         if (p[i].present) {
-            int ok = done && sd_is(&p[i], sl->old_size, sl->old_hash) && !keep_previous
-                ? sd_drop(d, pn, sl->name)
-                : sd_keep(d, pn, sl->name, keep_previous ? "the version an automatic list overwrite replaced"
-                                                         : "a previous copy it cannot prove superseded");
+            const int superseded = done && sd_is(&p[i], sl->old_size, sl->old_hash);
+            int ok = superseded && !keep_previous ? sd_drop(d, pn, sl->name)
+                   : superseded ? sd_keep_replaced(d, pn, sl->name)
+                   : sd_keep(d, pn, sl->name, keep_previous ? "the version an automatic list overwrite replaced"
+                                                            : "a previous copy it cannot prove superseded");
             if (!ok) *leftover = 1;
         }
         if (s[i].present &&
@@ -2092,8 +2206,7 @@ static int dir_exists(const char *dir) {
     if (!ms_canonical_root(canonical_root, sizeof(canonical_root)/sizeof(wchar_t)))
         return 0;
     if (!sr_vfs_dir_is_contained(dir, canonical_root)) return 0;
-    struct stat st;
-    return stat(dir, &st) == 0 && S_ISDIR(st.st_mode);
+    return sd_host_is_dir(dir);
 #else
 #if defined(SR_CD_BACKEND_POSIX_AT)
     char rel[SR_CD_REL_MAX];
@@ -2268,10 +2381,17 @@ static uint32_t do_delete(const char *game, const char *save) {
         st = sr_cd_delete_dir_shallow(&root, rel);
         sr_cd_root_close(&root);
     }
-    if (sdlog())
-        fprintf(stderr, "savedata: DELETE %s [%s] -> %s\n", rel, sr_cd_backend_name(),
-                sr_cd_status_name(st));
-    return st == SR_CD_OK ? 0 : ERR_DELETE_NO_DATA;
+    if (st == SR_CD_OK) {
+        if (sdlog())
+            fprintf(stderr, "savedata: DELETE %s [%s] -> ok\n", rel, sr_cd_backend_name());
+        return 0;
+    }
+    /* The save was there a moment ago: a deletion that fails (a folder or a file the host keeps,
+     * a removal cut short) leaves it, or part of it, on disk, so it is an access error, never
+     * "no save data". Only a save that is gone by now reports DELETE_NO_DATA. */
+    fprintf(stderr, "savedata: DELETE %s [%s] failed (%s); what remains of the save is kept\n",
+            rel, sr_cd_backend_name(), sr_cd_status_name(st));
+    return st == SR_CD_NOT_FOUND ? ERR_DELETE_NO_DATA : ERR_DELETE_ACCESS_ERROR_UNMEASURED;
 }
 
 /* ERASE/ERASESECURE: remove just the named data file inside the save dir (PPSSPP DeleteData). */
@@ -2307,10 +2427,18 @@ static uint32_t do_erase(uint32_t param, const char *game, const char *save) {
         st = sr_cd_delete_leaf(&root, rel, fileName);
         sr_cd_root_close(&root);
     }
-    if (sdlog())
-        fprintf(stderr, "savedata: ERASE %s/%s [%s] -> %s\n", rel, fileName,
-                sr_cd_backend_name(), sr_cd_status_name(st));
-    return st == SR_CD_OK ? 0 : ERR_RW_NO_DATA;
+    if (st == SR_CD_OK) {
+        if (sdlog())
+            fprintf(stderr, "savedata: ERASE %s/%s [%s] -> ok\n", rel, fileName,
+                    sr_cd_backend_name());
+        return 0;
+    }
+    /* The file was there a moment ago: a deletion the host refuses keeps it, so the result is an
+     * access error (this family has none; the Memory Stick reads as unavailable), never "no
+     * save data". Only a file that is gone by now reports RW_NO_DATA. */
+    fprintf(stderr, "savedata: ERASE %s/%s [%s] failed (%s); the file is kept\n", rel, fileName,
+            sr_cd_backend_name(), sr_cd_status_name(st));
+    return st == SR_CD_NOT_FOUND ? ERR_RW_NO_DATA : ERR_RW_NO_MEMSTICK_UNMEASURED;
 }
 
 /* LIST (11): fill idList with this game's save directories. */
@@ -2382,8 +2510,7 @@ static uint32_t do_list(uint32_t param, uint32_t size, const char *game) {
 #ifdef _WIN32
         if (!sr_vfs_dir_is_contained(path, canonical_root)) continue;
 #endif
-        struct stat st;
-        if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (!sd_host_is_dir(path)) continue;
         (void)savedata_recover(path);     /* settle an unfinished SAVE before its time is read */
         rows[found] = name;
         times[found] = savedata_save_time(path);
@@ -2899,10 +3026,9 @@ static uint32_t resolve_save(uint32_t param, uint32_t size, uint32_t mode, const
             size_t gl = strlen(game);
             for (size_t i = 0; names_read > 0 && gl && i < name_count; i++) {
                 const char *name = names[i];
-                struct stat st;
                 if (strncmp(name, game, gl) != 0 || !path_sanitize(name)) continue;
                 if (!path_join(path, sizeof(path), root, name)) continue;
-                if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+                if (!sd_host_is_dir(path)) continue;
                 if (strlen(name + gl) > 20u || save_list_has(rows, count, name + gl)) continue;
                 save_list_add(&rows[count], game, name + gl);
                 if (rows[count].exists) count++;

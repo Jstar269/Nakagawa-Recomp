@@ -1897,12 +1897,7 @@ static uint32_t h_IoSync(CpuState *s) {
     for (size_t fd = 3u; fd < sizeof(s_fds) / sizeof(s_fds[0]); fd++) {
         Fd *file = &s_fds[fd];
         if (!file->used || !file->host || !file->writable) continue;
-        if (fflush(file->host) != 0) return 0x80010005u;
-#ifdef _WIN32
-        if (_commit(_fileno(file->host)) != 0) return 0x80010005u;
-#else
-        if (fsync(fileno(file->host)) != 0) return 0x80010005u;
-#endif
+        if (fflush(file->host) != 0 || !sreg_sync_file(file->host)) return 0x80010005u;
     }
     return 0u;
 }
@@ -2188,11 +2183,8 @@ static uint32_t h_IoChdir(CpuState *s) {
     uint32_t dirfd = h_io_dopen_path(path);
     if (!hle_fd_is_directory(dirfd))
         return dirfd;
-    CpuState close_cpu;
-    memset(&close_cpu, 0, sizeof(close_cpu));
-    close_cpu.r[4] = dirfd;
-    rc = h_IoDclose(&close_cpu);
-    if (rc != 0u) return rc;
+    /* The open only proved the directory exists; its descriptor goes straight back. */
+    hle_dirfd_release_descriptor(dirfd);
     IoCwd *cwd = io_cwd_find(sched_current_uid(), 1);
     if (!cwd) return 0x8001000cu;
     size_t len = strlen(path);
@@ -2287,14 +2279,119 @@ uint32_t sr_hle_test_io_rename(CpuState *s) { return h_IoRename(s); }
 uint32_t sr_hle_test_io_mkdir(CpuState *s) { return h_IoMkdir(s); }
 uint32_t sr_hle_test_io_remove(CpuState *s) { return h_IoRemove(s); }
 #endif
-static int data_stat_write(uint32_t st, uint64_t size) {
+/* A regular file in the data-file shape: mode 0x2124 (regular, r-x), attr 0x0005, the size, and
+ * st_private[0] (+0x40) the physical UMD start LBN of a disc file, 0 for a host-backed one. */
+static int data_stat_write(uint32_t st, uint64_t size, uint32_t lbn) {
     if (!st || size > UINT32_MAX) return 0;
     for (int i = 0; i < 0x58; i++) MEM_W8(st + (uint32_t)i, 0);
     MEM_W32(st + 0, 0x2000u | 0x0124u);
     MEM_W32(st + 4, 0x0004u | 0x0001u);
     MEM_W32(st + 8, (uint32_t)size);
-    MEM_W32(st + 0x40, 0);
+    MEM_W32(st + 0x40, lbn);
     return 1;
+}
+
+/* Memory Stick FAT shape, PSPAutotests tests/io/stat/stat.expected (recorded on a PSP): file mode
+ * 0x21ff attr 0x0020, directory mode 0x11ff attr 0x0010; bytes [0..0x3f] are written and
+ * st_private is left as the caller had it. */
+static void ms0_stat_write(const char *path, uint32_t st, int is_dir, uint64_t fsize) {
+    if (io_statlog_on())
+        fprintf(stderr, "Getstat(%s) -> ms0 host size=0x%llx dir=%d\n",
+                path, (unsigned long long)fsize, is_dir);
+    for (int i = 0; i < 0x40; i++) MEM_W8(st + (uint32_t)i, 0);
+    MEM_W32(st + 0, is_dir ? 0x11ffu : 0x21ffu);
+    MEM_W32(st + 4, is_dir ? 0x0010u : 0x0020u);
+    if (!is_dir) {
+        MEM_W32(st + 8, (uint32_t)fsize);
+        MEM_W32(st + 12, (uint32_t)(fsize >> 32));
+    }
+}
+
+/* The ms0 leg of sceIoGetstat: what is at `path` under the unified Memory Stick root, reached
+ * without passing through a link. The object named is described itself, so a link at the leaf
+ * is reported as the link and its target is never looked at. 1: found, *is_dir and *size set;
+ * 0: nothing there, and the caller goes on to the data lookups; -1: the path passes through a
+ * link inside the Memory Stick and is refused with *error. */
+static int ms0_stat_contained(const char *path, int *is_dir, uint64_t *size, uint32_t *error) {
+#ifdef _WIN32
+    /* The verified open sceIoOpen uses: the handle's final path must lie inside the root, so
+     * a junction or symlink above the leaf that leads outside fails the open, which reads as
+     * nothing there (Windows refuses an open through such a link as not found). The leaf is
+     * opened as itself (FILE_FLAG_OPEN_REPARSE_POINT); the root itself, which the operator may
+     * have configured as a link, is opened the way the root is bound. */
+    (void)error;
+    const char *tail = NULL;
+    if (sr_ms0_classify(path, &tail) != SR_MS0_OWNED || !tail) return 0;
+    while (*tail == '/' || *tail == '\\') tail++;
+    wchar_t canonical[MAX_PATH * 2];
+    char *hp = host_path_alloc(path);
+    wchar_t *wh = NULL;
+    int found = 0;
+    if (hp && sr_vfs_canonical_root(sr_ms0_root(), canonical,
+                                    sizeof(canonical) / sizeof(canonical[0])) &&
+        sr_wide_path_alloc(hp, &wh)) {
+        DWORD err = 0;
+        HANDLE h = sr_vfs_open_verified_wide(
+            wh, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_FLAG_BACKUP_SEMANTICS | (*tail ? FILE_FLAG_OPEN_REPARSE_POINT : 0u),
+            OPEN_EXISTING, canonical, &err);
+        if (h != INVALID_HANDLE_VALUE) {
+            BY_HANDLE_FILE_INFORMATION info;
+            if (GetFileInformationByHandle(h, &info)) {
+                *is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                *size = ((uint64_t)info.nFileSizeHigh << 32) | (uint64_t)info.nFileSizeLow;
+                found = 1;
+            }
+            CloseHandle(h);
+        }
+    }
+    free(wh);
+    free(hp);
+    return found;
+#else
+    /* Descriptor-relative, as sceIoDopen: every directory on the way is opened with
+     * O_NOFOLLOW from the bound root, and the leaf is read with AT_SYMLINK_NOFOLLOW. */
+    char trimmed[SR_CD_REL_MAX + 16u], rel[SR_CD_REL_MAX], parent[SR_CD_REL_MAX];
+    char leaf[SR_CD_NAME_MAX];
+    const char *tail = NULL;
+    size_t n = strlen(path);
+    if (n >= sizeof(trimmed)) return 0;
+    memcpy(trimmed, path, n + 1u);
+    while (n > 0u && (trimmed[n - 1u] == '/' || trimmed[n - 1u] == '\\')) trimmed[--n] = '\0';
+    if (sr_ms0_classify(trimmed, &tail) != SR_MS0_OWNED || !tail) return 0;
+    while (*tail == '/' || *tail == '\\') tail++;
+    const int is_root = *tail == '\0';
+    if (!is_root && (ms0_posix_guest_relpath(trimmed, rel, sizeof(rel)) != SR_CD_OK ||
+                     !sr_cd_rel_split(rel, parent, sizeof(parent), leaf, sizeof(leaf))))
+        return 0;
+    sr_cd_root root;
+    if (ms0_posix_root_open(&root) != SR_CD_OK) return 0;
+    struct stat info;
+    sr_cd_status st = SR_CD_OK;
+    if (is_root) {
+        if (fstat(root.fd, &info) != 0) st = SR_CD_IO_ERROR;
+    } else {
+        int dir_fd = -1;
+        st = sr_cd__at_walk(root.fd, parent, &dir_fd);
+        if (st == SR_CD_OK) {
+            if (fstatat(dir_fd, leaf, &info, AT_SYMLINK_NOFOLLOW) != 0)
+                st = errno == ENOENT ? SR_CD_NOT_FOUND : SR_CD_IO_ERROR;
+            close(dir_fd);
+        }
+    }
+    sr_cd_root_close(&root);
+    if (st == SR_CD_NOT_CONTAINED) {
+        fprintf(stderr, "sceIoGetstat: refusing '%s': it is reachable only through a link "
+                        "inside the configured Memory Stick root\n", path);
+        fflush(stderr);
+        *error = sr_cd_psp_error(st);
+        return -1;
+    }
+    if (st != SR_CD_OK) return 0;
+    *is_dir = S_ISDIR(info.st_mode);
+    *size = S_ISREG(info.st_mode) ? (uint64_t)info.st_size : 0u;
+    return 1;
+#endif
 }
 
 /* sceIoGetstat for flash0: (read-only font device). A served font reports its size as a
@@ -2313,7 +2410,7 @@ static uint32_t h_io_getstat_flash0(const char *path, uint32_t st) {
         MEM_W32(st + 0x40, 0);
         return 0u;
     }
-    return data_stat_write(st, font_size) ? 0u : 0x80010005u;
+    return data_stat_write(st, font_size, 0u) ? 0u : 0x80010005u;
 }
 
 static uint32_t h_IoGetstat(CpuState *s) {
@@ -2334,79 +2431,32 @@ static uint32_t h_IoGetstat(CpuState *s) {
     if (iso_lookup(path, &lba, &size) != 0) {
         /* Host-backed path under the unified Memory Stick root (ordinary ms0:
          * sceIoGetstat). Foreign devices fail closed here and fall through. */
-        char *hp = host_path_alloc(path);
-        if (hp) {
-#ifdef _WIN32
-            wchar_t *wh = NULL;
-            if (sr_wide_path_alloc(hp, &wh)) {
-                WIN32_FILE_ATTRIBUTE_DATA fad;
-                if (GetFileAttributesExW(wh, GetFileExInfoStandard, &fad)) {
-                    free(wh);
-                    free(hp);
-                    int is_dir = (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-                    uint64_t fsize = ((uint64_t)fad.nFileSizeHigh << 32) |
-                                     (uint64_t)fad.nFileSizeLow;
-                    if (io_statlog_on())
-                        fprintf(stderr, "Getstat(%s) -> ms0 host size=0x%llx dir=%d\n",
-                                path, (unsigned long long)fsize, is_dir);
-                    /* Memory Stick FAT shape, PSPAutotests tests/io/stat/stat.expected (recorded on a PSP): file mode
-                     * 0x21ff attr 0x0020, directory mode 0x11ff attr 0x0010; bytes [0..0x3f] are written and st_private
-                     * is left as the caller had it. */
-                    for (int i = 0; i < 0x40; i++) MEM_W8(st + (uint32_t)i, 0);
-                    MEM_W32(st + 0, is_dir ? 0x11ffu : 0x21ffu);
-                    MEM_W32(st + 4, is_dir ? 0x0010u : 0x0020u);
-                    if (!is_dir) {
-                        MEM_W32(st + 8, (uint32_t)fsize);
-                        MEM_W32(st + 12, (uint32_t)(fsize >> 32));
-                    }
-                    return 0;
-                }
-                free(wh);
-            }
-#else
-            /* lstat, not stat: a symlink is this host's redirect and must be
-             * reported as the link itself, exactly as the Windows leg reports
-             * a reparse point rather than its target. */
-            struct stat fad;
-            if (lstat(hp, &fad) == 0) {
-                free(hp);
-                int is_dir = S_ISDIR(fad.st_mode);
-                uint64_t fsize = (uint64_t)S_ISREG(fad.st_mode) ? (uint64_t)fad.st_size : 0u;
-                if (io_statlog_on())
-                    fprintf(stderr, "Getstat(%s) -> ms0 host size=0x%llx dir=%d\n",
-                            path, (unsigned long long)fsize, is_dir);
-                /* Memory Stick FAT shape, PSPAutotests tests/io/stat/stat.expected (recorded on a PSP): file mode
-                 * 0x21ff attr 0x0020, directory mode 0x11ff attr 0x0010; bytes [0..0x3f] are written and st_private
-                 * is left as the caller had it. */
-                for (int i = 0; i < 0x40; i++) MEM_W8(st + (uint32_t)i, 0);
-                MEM_W32(st + 0, is_dir ? 0x11ffu : 0x21ffu);
-                MEM_W32(st + 4, is_dir ? 0x0010u : 0x0020u);
-                if (!is_dir) {
-                    MEM_W32(st + 8, (uint32_t)fsize);
-                    MEM_W32(st + 12, (uint32_t)(fsize >> 32));
-                }
-                return 0;
-            }
-#endif
-            free(hp);
+        int is_dir = 0;
+        uint64_t fsize = 0;
+        uint32_t refused = 0;
+        const int ms0 = ms0_stat_contained(path, &is_dir, &fsize, &refused);
+        if (ms0 < 0) return refused;
+        if (ms0 > 0) {
+            ms0_stat_write(path, st, is_dir, fsize);
+            return 0;
         }
-        if (s_data_archive_mode && data_archive_guest_path_allowed(path)) {
-            int wanted_variant = -2;
-            char *key = data_normalize_guest_key(path, &wanted_variant);
-            if (key) {
-                FILE *loose = NULL;
-                uint32_t loose_size = 0;
-                int loose_result = data_loose_file_open(key, &loose, &loose_size);
-                if (loose_result < 0) {
-                    free(key);
-                    return 0x80010005u;
-                }
-                if (loose_result > 0) {
-                    if (loose) fclose(loose);
-                    free(key);
-                    return data_stat_write(st, loose_size) ? 0u : 0x80010005u;
-                }
+        /* One archive key serves both the loose-file and the archive lookups. */
+        char *key = NULL;
+        int wanted_variant = -2;
+        if (s_data_archive_mode && data_archive_guest_path_allowed(path))
+            key = data_normalize_guest_key(path, &wanted_variant);
+        if (key) {
+            FILE *loose = NULL;
+            uint32_t loose_size = 0;
+            int loose_result = data_loose_file_open(key, &loose, &loose_size);
+            if (loose_result < 0) {
                 free(key);
+                return 0x80010005u;
+            }
+            if (loose_result > 0) {
+                if (loose) fclose(loose);
+                free(key);
+                return data_stat_write(st, loose_size, 0u) ? 0u : 0x80010005u;
             }
         }
         /* Not on the ISO -- try the extracted-XB data-root (graphical/text data the game
@@ -2414,6 +2464,7 @@ static uint32_t h_IoGetstat(CpuState *s) {
          * XB archives on the real ISO; dev workflow extracts them onto a host tree). */
         const SrAssetIndexEntry *entry = host_data_lookup(path);
         if (entry) {
+            free(key);
             FILE *probe = sr_fopen_utf8(entry->host, L"rb");
             uint32_t actual_size = 0;
             if (!probe || !sr_stream_size_u32(probe, &actual_size)) {
@@ -2426,35 +2477,22 @@ static uint32_t h_IoGetstat(CpuState *s) {
             if (io_statlog_on())
                 fprintf(stderr, "Getstat(%s) -> data-root %s size=0x%x\n", path,
                         entry->host, (unsigned)actual_size);
-            for (int i = 0; i < 0x58; i++) MEM_W8(st + (uint32_t)i, 0);
-            MEM_W32(st + 0,  0x2000 | 0x0124);   /* mode: regular file, r-x */
-            MEM_W32(st + 4,  0x0004 | 0x0001);   /* attr: file */
-            MEM_W32(st + 8,  actual_size); /* size low (SceOff is 64-bit at +8) */
-            MEM_W32(st + 0x40, 0);                /* st_private[0]: no LBN (host-backed) */
+            (void)data_stat_write(st, actual_size, 0u);
             return 0;
         }
-        if (s_data_archive_mode && data_archive_guest_path_allowed(path)) {
-            int wanted_variant = -2;
-            char *key = data_normalize_guest_key(path, &wanted_variant);
-            if (key) {
-                SrArchiveFile archive_file;
-                if (sr_archive_vfs_lookup(&s_archive_vfs, key, wanted_variant,
-                                          &archive_file)) {
-                    free(key);
-                    return data_stat_write(st, archive_file.size) ? 0u : 0x80010005u;
-                }
+        if (key) {
+            SrArchiveFile archive_file;
+            if (sr_archive_vfs_lookup(&s_archive_vfs, key, wanted_variant, &archive_file)) {
                 free(key);
+                return data_stat_write(st, archive_file.size, 0u) ? 0u : 0x80010005u;
             }
+            free(key);
         }
         if (io_statlog_on()) fprintf(stderr, "Getstat(%s) -> NOT FOUND\n", path);
         return 0x80010002;
     }
     if (io_statlog_on()) fprintf(stderr, "Getstat(%s) -> lba=0x%x size=0x%x\n", path, lba, size);
-    for (int i = 0; i < 0x58; i++) MEM_W8(st + (uint32_t)i, 0);
-    MEM_W32(st + 0, 0x2000 | 0x0124);          /* mode: regular file, r-x */
-    MEM_W32(st + 4, 0x0004 | 0x0001);          /* attr: file */
-    MEM_W32(st + 8, size);                      /* size low (SceOff is 64-bit at +8) */
-    MEM_W32(st + 0x40, iso_physical_lba(lba));  /* st_private[0]: physical UMD start LBN */
+    (void)data_stat_write(st, size, iso_physical_lba(lba));
     return 0;
 }
 

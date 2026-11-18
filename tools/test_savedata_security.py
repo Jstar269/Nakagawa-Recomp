@@ -1249,6 +1249,61 @@ static void check_getsize_cases(void) {
     CHECK(result == 0 && g_oor == 0, "null sizeInfo must remain a no-op");
 }
 
+/* The Memory Stick root as the documented default spells it ("memstick/"), and a DELETE or
+ * ERASE the host refuses part way. */
+static uint32_t run_mode(const char *root, uint32_t mode, const char *file) {
+    set_save_request(root, mode, file);
+    return sr_savedata_execute(PARAM);
+}
+
+static void check_edge_cases(const char *base) {
+#if defined(SR_CD_BACKEND_POSIX_AT)
+    char root[512], slot[600], sub[700], data[700], content[64];
+
+    /* A root with a trailing separator: the save directory joins without a second one, and
+     * every operation still finds it under the root. */
+    snprintf(root, sizeof(root), "%s/trailing/", base);
+    CHECK(run_save(root, "DATA.BIN", "TRAILING") == 0,
+          "a SAVE under a root that ends in '/' must succeed");
+    snprintf(data, sizeof(data), "%sPSP/SAVEDATA/ULUS99999SLOT00/DATA.BIN", root);
+    CHECK(read_file(data, content, sizeof(content)) && !strcmp(content, "TRAILING"),
+          "the SAVE under a root that ends in '/' must publish its bytes");
+    memset(content, 0, sizeof(content));
+    CHECK(run_load(root, "DATA.BIN", content, sizeof(content)) == 0 && !strcmp(content, "TRAILING"),
+          "a LOAD under a root that ends in '/' must read the save back");
+
+    /* A DELETE the host cannot finish (a folder inside the save directory) leaves the save on
+     * disk: an access error, never "no save data". DELETEDATA reports its family's code. */
+    snprintf(root, sizeof(root), "%s/delete", base);
+    snprintf(slot, sizeof(slot), "%s/PSP/SAVEDATA/ULUS99999SLOT00", root);
+    snprintf(sub, sizeof(sub), "%s/SUBDIR", slot);
+    CHECK(run_save(root, "DATA.BIN", "KEEP") == 0 && make_dir(sub), "DELETE fixture");
+    uint32_t result = run_mode(root, SD_DELETE, "DATA.BIN");
+    CHECK(result == 0x80110345u, "a DELETE the host cannot finish is DELETE_ACCESS_ERROR, got 0x%08x",
+          (unsigned)result);
+    result = run_mode(root, SD_DELETEDATA, "DATA.BIN");
+    CHECK(result == 0x80110321u, "a DELETEDATA the host cannot finish is RW_NO_MEMSTICK, got 0x%08x",
+          (unsigned)result);
+    CHECK(is_dir(slot), "the save directory a failed DELETE leaves is still there");
+
+    /* An ERASE whose file the host refuses to remove keeps it: an access error, never "no
+     * save data". */
+    snprintf(root, sizeof(root), "%s/erase", base);
+    snprintf(slot, sizeof(slot), "%s/PSP/SAVEDATA/ULUS99999SLOT00", root);
+    snprintf(data, sizeof(data), "%s/DATA.BIN", slot);
+    CHECK(run_save(root, "DATA.BIN", "KEEP") == 0 && chmod(slot, 0500) == 0, "ERASE fixture");
+    result = run_mode(root, SD_ERASE, "DATA.BIN");
+    CHECK(chmod(slot, 0700) == 0, "ERASE fixture cleanup");
+    CHECK(result == 0x80110321u, "an ERASE the host refuses is RW_NO_MEMSTICK, got 0x%08x",
+          (unsigned)result);
+    CHECK(read_file(data, content, sizeof(content)) && !strcmp(content, "KEEP"),
+          "the file a refused ERASE names is kept");
+#else
+    (void)base;
+    printf("SKIP: savedata edge cases require the POSIX descriptor backend\n");
+#endif
+}
+
 static void check_unsupported_host(void) {
     reset_guest();
     sr_w32(PARAM + SDP_mode, SD_SAVE);
@@ -1266,6 +1321,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "atomic") && argc == 3) check_atomic_cases(argv[2]);
     else if (!strcmp(argv[1], "preempt") && argc == 3) check_preempt_cases(argv[2]);
     else if (!strcmp(argv[1], "inject") && argc == 3) check_inject_cases(argv[2]);
+    else if (!strcmp(argv[1], "edges") && argc == 3) check_edge_cases(argv[2]);
     else if (!strcmp(argv[1], "getsize")) check_getsize_cases();
     else if (!strcmp(argv[1], "unsupported")) check_unsupported_host();
     else { free(arena); return 2; }
@@ -1274,6 +1330,215 @@ int main(int argc, char **argv) {
     return g_fail ? 1 : 0;
 }
 """
+
+
+# The Windows host's own cases, over the real src/rt/savedata.c: a Memory Stick root with
+# characters outside ASCII (a user name in the per-user path the launcher sets reaches the
+# narrow CRT environment in the ANSI code page), a root with a trailing separator, a DELETE or
+# ERASE the host refuses part way, and mkdirs given a path shorter than the root. The scratch
+# folder is the current directory.
+WINDOWS_HARNESS = r"""
+#include <windows.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+
+#include "recomp.h"
+uint8_t *g_mem;
+CpuState *s_cpu;
+int g_sr_heap_watch, g_hle_depth;
+volatile int g_sr_vram_read_pending;
+void sr_oor(uint32_t a, uint32_t v, int s) { (void)a; (void)v; (void)s; }
+void sr_ge_vram_read_prepare(uint32_t address, uint32_t bytes) { (void)address; (void)bytes; }
+void sr_ge_vram_write_prepare(uint32_t address, uint32_t bytes) { (void)address; (void)bytes; }
+void sr_ge_vram_write_commit(uint32_t address, uint32_t bytes) { (void)address; (void)bytes; }
+void sr_heap_note_write(uint32_t a, uint32_t w, uint32_t v, uint32_t p)
+    { (void)a; (void)w; (void)v; (void)p; }
+void sr_heap_note_bulk_write(uint32_t a, uint32_t w, uint32_t p)
+    { (void)a; (void)w; (void)p; }
+uint32_t sched_current_uid(void) { return 0; }
+uint32_t sr_get_ge_status(void) { return 0; }
+atomic_int_least32_t sr_preempt_due;
+int (*sr_sched_stop_requested)(void);
+void sched_preempt_point(void) {}
+int sr_hle_memstick_free_bytes(uint64_t *free_bytes) { *free_bytes = 0; return 0; }
+uint64_t sr_savedata_guest_rtc_tick(void) { return 62135596800000000ull + 1000000000ull * 1000000ull; }
+int32_t sr_savedata_console_offset_minutes(void) { return 0; }
+
+#include "savedata.c"
+
+#define PARAM 0x08800000u
+#define DATA 0x08900000u
+#define IDLIST 0x08a00000u
+#define ENTRIES 0x08a01000u
+#define ARENA 0x0c000000u
+
+static int g_fail;
+#define CHECK(c, ...) do { if (!(c)) { g_fail++; printf("FAIL: "); printf(__VA_ARGS__); \
+                                       printf("\n"); } } while (0)
+
+static wchar_t g_base[MAX_PATH];
+
+static void set_guest_string(uint32_t addr, const char *s) {
+    for (size_t i = 0; i <= strlen(s); i++) sr_w8(addr + (uint32_t)i, (uint8_t)s[i]);
+}
+
+/* As the launcher's child sees it: the wide environment holds the path, and the CRT's narrow
+ * copy holds it in the ANSI code page. */
+static void set_root(const wchar_t *leaf, wchar_t *out, size_t cap) {
+    _snwprintf(out, cap, L"%ls\\%ls", g_base, leaf);
+    out[cap - 1] = 0;
+    _wputenv_s(L"SR_MEMSTICK", out);
+}
+
+static uint32_t run_mode(uint32_t mode, const char *file, const char *data) {
+    memset(g_mem - 0x08000000u, 0, ARENA);
+    sr_w32(PARAM + SDP_mode, mode);
+    set_guest_string(PARAM + SDP_gameName, "ULUS99999");
+    set_guest_string(PARAM + SDP_saveName, "SLOT00");
+    set_guest_string(PARAM + SDP_fileName, file);
+    sr_w32(PARAM + SDP_dataBuf, DATA);
+    sr_w32(PARAM + SDP_dataBufSize, 64u);
+    if (data) {
+        sr_w32(PARAM + SDP_dataSize, (uint32_t)strlen(data));
+        for (size_t i = 0; i < strlen(data); i++) sr_w8(DATA + (uint32_t)i, (uint8_t)data[i]);
+    }
+    return sr_savedata_execute(PARAM);
+}
+
+static int read_wide(const wchar_t *path, char *out, size_t cap) {
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) return 0;
+    size_t n = fread(out, 1, cap - 1, f);
+    out[n] = 0;
+    fclose(f);
+    return 1;
+}
+
+static void check_unicode_root(void) {
+    wchar_t root[MAX_PATH], file[MAX_PATH];
+    char content[64];
+    /* An e with an acute accent (in the ANSI code page of Western systems) and two CJK
+     * characters (in none of them). */
+    set_root(L"ms-José-中文", root, MAX_PATH);
+    CHECK(run_mode(SD_SAVE, "DATA.BIN", "UNICODE-SAVE") == 0,
+          "a SAVE under a root outside ASCII must succeed");
+    _snwprintf(file, MAX_PATH, L"%ls\\PSP\\SAVEDATA\\ULUS99999SLOT00\\DATA.BIN", root);
+    file[MAX_PATH - 1] = 0;
+    CHECK(read_wide(file, content, sizeof(content)) && !strcmp(content, "UNICODE-SAVE"),
+          "the SAVE must land in the configured root, not another folder");
+    CHECK(run_mode(SD_SAVE, "DATA.BIN", "SECOND") == 0, "an overwrite under that root must succeed");
+    CHECK(run_mode(SD_LOAD, "DATA.BIN", NULL) == 0 && MEM_R32(PARAM + SDP_dataSize) == 6u &&
+              MEM_R8(DATA) == 'S',
+          "a LOAD under that root must read the save back");
+    memset(g_mem - 0x08000000u, 0, ARENA);
+    sr_w32(PARAM + SDP_mode, SD_LIST);
+    set_guest_string(PARAM + SDP_gameName, "ULUS99999");
+    sr_w32(PARAM + SDP_idList, IDLIST);
+    sr_w32(IDLIST + 0u, 4u);
+    sr_w32(IDLIST + 8u, ENTRIES);
+    CHECK(sr_savedata_execute(PARAM) == 0 && MEM_R32(IDLIST + 4u) == 1u &&
+              MEM_R8(ENTRIES + 52u) == 'S',
+          "a LIST under that root must find the save (%u rows)", (unsigned)MEM_R32(IDLIST + 4u));
+    CHECK(run_mode(SD_DELETE, "DATA.BIN", NULL) == 0, "a DELETE under that root must succeed");
+    CHECK(_waccess(file, 0) != 0, "the DELETE must remove the save");
+}
+
+static void check_trailing_separator_root(void) {
+    wchar_t root[MAX_PATH];
+    set_root(L"ms-trailing\\", root, MAX_PATH);
+    CHECK(run_mode(SD_SAVE, "DATA.BIN", "TRAILING") == 0,
+          "a SAVE under a root that ends in a separator must succeed");
+    CHECK(run_mode(SD_LOAD, "DATA.BIN", NULL) == 0 && MEM_R8(DATA) == 'T',
+          "a LOAD under a root that ends in a separator must read the save back");
+}
+
+static void check_refused_deletions(void) {
+    wchar_t root[MAX_PATH], path[MAX_PATH];
+    char content[64];
+    set_root(L"ms-delete", root, MAX_PATH);
+    CHECK(run_mode(SD_SAVE, "DATA.BIN", "KEEP") == 0, "DELETE fixture");
+    _snwprintf(path, MAX_PATH, L"%ls\\PSP\\SAVEDATA\\ULUS99999SLOT00\\SUBDIR", root);
+    path[MAX_PATH - 1] = 0;
+    CHECK(CreateDirectoryW(path, NULL), "DELETE fixture folder");
+    uint32_t result = run_mode(SD_DELETE, "DATA.BIN", NULL);
+    CHECK(result == 0x80110345u, "a DELETE the host cannot finish is DELETE_ACCESS_ERROR, got 0x%08x",
+          (unsigned)result);
+    result = run_mode(SD_DELETEDATA, "DATA.BIN", NULL);
+    CHECK(result == 0x80110321u, "a DELETEDATA the host cannot finish is RW_NO_MEMSTICK, got 0x%08x",
+          (unsigned)result);
+    CHECK(GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES, "a failed DELETE keeps the save");
+
+    set_root(L"ms-erase", root, MAX_PATH);
+    CHECK(run_mode(SD_SAVE, "DATA.BIN", "KEEP") == 0, "ERASE fixture");
+    _snwprintf(path, MAX_PATH, L"%ls\\PSP\\SAVEDATA\\ULUS99999SLOT00\\DATA.BIN", root);
+    path[MAX_PATH - 1] = 0;
+    /* Another program holds the file without delete sharing, so the host refuses the deletion. */
+    HANDLE held = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    CHECK(held != INVALID_HANDLE_VALUE, "ERASE fixture handle");
+    result = run_mode(SD_ERASE, "DATA.BIN", NULL);
+    if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+    CHECK(result == 0x80110321u, "an ERASE the host refuses is RW_NO_MEMSTICK, got 0x%08x",
+          (unsigned)result);
+    CHECK(read_wide(path, content, sizeof(content)) && !strcmp(content, "KEEP"),
+          "the file a refused ERASE names is kept");
+}
+
+/* mkdirs given a path shorter than the root, ending right before an inaccessible page: it must
+ * refuse the path without reading past its terminator. */
+static void check_mkdirs_short_path(void) {
+    wchar_t root[MAX_PATH];
+    set_root(L"ms-mkdirs-root-longer-than-the-path", root, MAX_PATH);
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    uint8_t *pages = (uint8_t *)VirtualAlloc(NULL, 2u * si.dwPageSize, MEM_RESERVE | MEM_COMMIT,
+                                             PAGE_READWRITE);
+    DWORD old = 0;
+    CHECK(pages && VirtualProtect(pages + si.dwPageSize, si.dwPageSize, PAGE_NOACCESS, &old),
+          "guard page fixture");
+    if (!pages) return;
+    char *shortp = (char *)pages + si.dwPageSize - 2u;
+    shortp[0] = 'x';
+    shortp[1] = '\0';
+    CHECK(mkdirs(shortp) == 0, "mkdirs must refuse a path that does not start with the root");
+    VirtualFree(pages, 0, MEM_RELEASE);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    uint8_t *arena = (uint8_t *)calloc(1, ARENA);
+    if (!arena) return 2;
+    g_mem = arena + 0x08000000u;
+    if (!GetCurrentDirectoryW(MAX_PATH, g_base)) return 2;
+    if (!strcmp(argv[1], "unicode")) check_unicode_root();
+    else if (!strcmp(argv[1], "trailing")) check_trailing_separator_root();
+    else if (!strcmp(argv[1], "deletions")) check_refused_deletions();
+    else if (!strcmp(argv[1], "mkdirs")) check_mkdirs_short_path();
+    else { free(arena); return 2; }
+    printf(g_fail ? "windows_selftest: %d FAILURE(S)\n" : "windows_selftest: OK\n", g_fail);
+    free(arena);
+    return g_fail ? 1 : 0;
+}
+"""
+
+
+def _build_windows(tmp, savedata_override=None):
+    harness = Path(tmp) / "savedata_windows_selftest.c"
+    harness.write_text(WINDOWS_HARNESS, encoding="utf-8", newline="\n")
+    if savedata_override is not None:
+        (Path(tmp) / "savedata.c").write_text(savedata_override, encoding="utf-8", newline="\n")
+    exe = Path(tmp) / "savedata_windows_selftest.exe"
+    rt = ROOT / "src" / "rt"
+    build = subprocess.run(
+        [CC, "-std=c11", "-O1", "-I", str(tmp), "-I", str(rt), "-I", str(ROOT / "src" / "core"),
+         "-o", str(exe), str(harness), str(ROOT / "src" / "core" / "nk_shared_helpers.c"),
+         str(rt / "debug.c"), str(rt / "watchpoints_file.c")],
+        capture_output=True, text=True)
+    if build.returncode != 0:
+        raise AssertionError("savedata Windows harness failed to build:\n" + build.stderr[-5000:])
+    return str(exe)
 
 
 def _build(tmp, savedata_override=None, seam_override=None, hooks=False,
@@ -1425,6 +1690,23 @@ class TestSavedataSecurityProduction(unittest.TestCase):
             self.assertIn("security_selftest: OK", run.stdout)
             self.assertNotIn("SKIP", run.stdout)
 
+    @unittest.skipIf(os.name == "nt", "the POSIX savedata edge cases run in the WSL POSIX lane")
+    def test_trailing_separator_root_and_refused_deletions(self):
+        """A root spelled "memstick/" still saves; a DELETE or ERASE the host refuses is an
+        access error, never "no save data"."""
+        with scratch_dir.TemporaryDirectory(prefix="savedata_edges_") as tmp:
+            exe = _build(tmp)
+            run = _run(exe, "edges", tmp)
+            self.assertIsNotNone(run, "savedata edge-case selftest timed out")
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("security_selftest: OK", run.stdout)
+            self.assertNotIn("SKIP", run.stdout)
+            # Each refused deletion is reported without SR_DLGLOG.
+            backend = "[posix-descriptor-relative] failed"
+            self.assertIn("savedata: DELETE PSP/SAVEDATA/ULUS99999SLOT00 " + backend, run.stderr)
+            self.assertIn("savedata: ERASE PSP/SAVEDATA/ULUS99999SLOT00/DATA.BIN " + backend,
+                          run.stderr)
+
     @unittest.skipIf(os.name == "nt", "GETSIZE production harness runs in the WSL POSIX lane")
     def test_getsize_regressions(self):
         with scratch_dir.TemporaryDirectory(prefix="savedata_getsize_") as tmp:
@@ -1442,6 +1724,40 @@ class TestSavedataSecurityProduction(unittest.TestCase):
             self.assertIsNotNone(run)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertIn("security_selftest: OK", run.stdout)
+
+    def _run_windows_case(self, case):
+        with scratch_dir.TemporaryDirectory(prefix="savedata_windows_") as tmp:
+            exe = _build_windows(tmp)
+            try:
+                run = subprocess.run([exe, case], capture_output=True, text=True, cwd=tmp,
+                                     timeout=30)
+            except subprocess.TimeoutExpired:
+                self.fail("savedata Windows selftest timed out: " + case)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertIn("windows_selftest: OK", run.stdout)
+            return run
+
+    @unittest.skipUnless(os.name == "nt", "the Windows host cases run on Windows")
+    def test_windows_root_outside_ascii_saves_loads_lists_and_deletes(self):
+        """SR_MEMSTICK is read from the wide environment and every listing and status call
+        takes the UTF-8 root through the wide API."""
+        self._run_windows_case("unicode")
+
+    @unittest.skipUnless(os.name == "nt", "the Windows host cases run on Windows")
+    def test_windows_root_with_trailing_separator(self):
+        self._run_windows_case("trailing")
+
+    @unittest.skipUnless(os.name == "nt", "the Windows host cases run on Windows")
+    def test_windows_refused_deletions_are_access_errors(self):
+        run = self._run_windows_case("deletions")
+        backend = "[windows-verified-handle] failed"
+        self.assertIn("savedata: DELETE PSP/SAVEDATA/ULUS99999SLOT00 " + backend, run.stderr)
+        self.assertIn("savedata: ERASE PSP/SAVEDATA/ULUS99999SLOT00/DATA.BIN " + backend,
+                      run.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "the Windows host cases run on Windows")
+    def test_windows_mkdirs_refuses_a_short_path_before_reading_past_it(self):
+        self._run_windows_case("mkdirs")
 
     def test_load_bearing_mutants_are_killed(self):
         if os.name == "nt":

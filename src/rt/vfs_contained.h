@@ -745,17 +745,31 @@ static inline sr_cd_status sr_cd_delete_dir_shallow(const sr_cd_root *root, cons
         return SR_CD_NOT_CONTAINED;
     }
 
-    DIR *d = opendir(dir);
+    /* The listing goes through the wide API: `dir` is UTF-8 (the Memory Stick root is UTF-8 on
+     * every host), which the narrow CRT calls would read in the ANSI code page. An entry name
+     * that is not valid UTF-16 cannot be named in UTF-8 and is not removed. */
+    int wide_need = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, dir, -1, NULL, 0);
+    wchar_t *wdir = wide_need > 0 ? (wchar_t *)malloc((size_t)wide_need * sizeof(wchar_t)) : NULL;
+    _WDIR *d = NULL;
+    if (wdir) {
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, dir, -1, wdir, wide_need);
+        for (wchar_t *p = wdir; *p; p++) if (*p == L'/') *p = L'\\';
+        d = _wopendir(wdir);
+        free(wdir);
+    }
     if (!d) {
         CloseHandle(hd);
         return SR_CD_NOT_FOUND;
     }
-    struct dirent *de;
+    struct _wdirent *de;
     sr_cd_status entries = SR_CD_OK;
-    while ((de = readdir(d)) != NULL) {
-        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
-        if (!sr_cd_entry_name_is_acceptable(de->d_name, strlen(de->d_name)) ||
-            !sr_cd__win_join(path, sizeof(path), dir, de->d_name)) {
+    while ((de = _wreaddir(d)) != NULL) {
+        char name[MAX_PATH * 3 + 1];
+        if (!wcscmp(de->d_name, L".") || !wcscmp(de->d_name, L"..")) continue;
+        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, de->d_name, -1, name,
+                                (int)sizeof(name), NULL, NULL) <= 0 ||
+            !sr_cd_entry_name_is_acceptable(name, strlen(name)) ||
+            !sr_cd__win_join(path, sizeof(path), dir, name)) {
             entries = SR_CD_INVALID_PATH;
             continue;
         }
@@ -764,7 +778,7 @@ static inline sr_cd_status sr_cd_delete_dir_shallow(const sr_cd_root *root, cons
             entries = was_dir ? SR_CD_IS_DIRECTORY : SR_CD_NOT_CONTAINED;
         }
     }
-    closedir(d);
+    _wclosedir(d);
 
     sr_cd__hook_fire(SR_CD_HOOK_AFTER_DRAIN);
     /* No re-confirmation step exists on this backend because no re-resolution

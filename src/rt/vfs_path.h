@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -216,12 +217,42 @@ static inline int sr_vfs_host_flat_path(const char *root, const char *guest, cha
 
 /* Canonical host Memory Stick root for ordinary sceIo* I/O and savedata
  * (issue #334). Both routes share this root and sr_ms0_resolve so one guest
- * path always maps to one host path. getenv is used (not a Win32-only helper)
- * so the function stays host-neutral. */
+ * path always maps to one host path.
+ *
+ * The root is UTF-8 on every host: every consumer converts it as UTF-8
+ * (sr_vfs_canonical_root, the verified opens, sr_wide_path_alloc). On Windows
+ * the narrow CRT environment (getenv) holds the value in the ANSI code page,
+ * which differs from UTF-8 for any character outside ASCII, such as the user
+ * name in a per-user path the launcher sets. So Windows reads the wide process
+ * environment and converts it. A value that cannot be read or converted (longer
+ * than the verified-path buffers, or not valid UTF-16) is reported and replaced
+ * by a name Win32 refuses ('<' is not a legal file-name character), so every
+ * Memory Stick operation fails closed instead of using another folder. The
+ * returned string is per thread and stays valid until this thread calls again. */
+#ifdef _WIN32
+#define SR_MS0_ROOT_WIDE_MAX (MAX_PATH * 2)
+static inline const char *sr_ms0_root(void) {
+    static _Thread_local char utf8[SR_MS0_ROOT_WIDE_MAX * 3 + 1];
+    static volatile LONG reported;
+    wchar_t wide[SR_MS0_ROOT_WIDE_MAX];
+    DWORD n = GetEnvironmentVariableW(L"SR_MEMSTICK", wide, SR_MS0_ROOT_WIDE_MAX);
+    if (n == 0) return "memstick";   /* unset, or set to the empty string */
+    if (n < SR_MS0_ROOT_WIDE_MAX &&
+        WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1, utf8, (int)sizeof(utf8),
+                            NULL, NULL) > 0)
+        return utf8;
+    if (InterlockedExchange(&reported, 1) == 0)
+        fprintf(stderr, "SR_MEMSTICK: the Memory Stick folder cannot be used (longer than %d "
+                        "characters, or not a valid name); every Memory Stick operation fails\n",
+                SR_MS0_ROOT_WIDE_MAX - 1);
+    return "<SR_MEMSTICK unusable>";
+}
+#else
 static inline const char *sr_ms0_root(void) {
     const char *r = getenv("SR_MEMSTICK");
     return (r && *r) ? r : "memstick";
 }
+#endif
 
 enum sr_ms0_kind {
     SR_MS0_FOREIGN = 0,
