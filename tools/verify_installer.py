@@ -128,12 +128,37 @@ def egress_findings(script_text: str) -> list[str]:
     previous install left); any other ``CreateOleObject`` could be an HTTP client and is a finding."""
     lowered = script_text.lower()
     names = ("downloadtemporaryfile", "itdownload", "itd_", "winhttp", "urlmon", "wininet",
+             "downloadpage", "tdownloadwizardpage",
              "shellexec('open', 'http", 'shellexec("open", "http')
     findings = [f"INSTALLER_NETWORK_CALL: {name}" for name in names if name in lowered]
     for match in re.finditer(r"createoleobject\s*\(([^)]*)\)", lowered):
         if match.group(1).strip() != "'wscript.shell'":
             findings.append(f"INSTALLER_NETWORK_CALL: createoleobject({match.group(1).strip()})")
+    # The [Code] section names no URL (the [Setup] App*URL directives are only shown text), and
+    # never runs a program that downloads, whatever the call's verb.
+    code = _code_section(lowered)
+    for scheme in sorted(set(re.findall(r"\b(https?|ftp)://", code))):
+        findings.append(f"INSTALLER_NETWORK_CALL: {scheme}:// in [Code]")
+    for match in re.finditer(r"\b((?:shell)?exec(?:asoriginaluser)?)\s*\(([^;]*)", code):
+        tools = sorted({tool for tool in _DOWNLOAD_TOOLS if re.search(rf"\b{tool}\b", match.group(2))})
+        if tools:
+            findings.append(f"INSTALLER_NETWORK_CALL: {match.group(1)}({', '.join(tools)})")
     return findings
+
+
+#: Programs an Exec or ShellExec could start to reach the network.
+_DOWNLOAD_TOOLS = ("curl", "wget", "powershell", "pwsh", "bitsadmin", "certutil", "mshta")
+
+_SECTION_HEADER = re.compile(r"^[ \t]*\[([a-z]+)\][ \t]*$", re.MULTILINE)
+
+
+def _code_section(lowered: str) -> str:
+    """The ``[Code]`` section of a lowered Inno script; a text with no section header is all code."""
+    headers = list(_SECTION_HEADER.finditer(lowered))
+    if not headers:
+        return lowered
+    return "\n".join(lowered[header.end():(headers[i + 1].start() if i + 1 < len(headers) else len(lowered))]
+                     for i, header in enumerate(headers) if header.group(1) == "code")
 
 
 def setup_log_reason(log: Path) -> str:

@@ -550,6 +550,26 @@ try {
             "partial skip reported as $($status.Completeness)"
     }
 
+    Test-Case "a failure beside a skipped binary reports FAILED, not PARTIAL_SKIPPED" {
+        $log = "GPU_SELFTEST_RESULT gpu_coherence_selftest.exe SKIP 77`n" +
+               "GPU_SELFTEST_RESULT gpu_capture_selftest.exe FAIL 1`n" +
+               (New-CaptureLegLines -Verdict PASS -Code 0)
+        $status = Resolve-GpuSelftestStatus -Results (Get-GpuSelftestResults -Log $log) `
+            -Gates $gpuGates -ExitCode 2
+        Assert-True ($status.Gates[1].Status -eq "FAIL") "executed failure reported as $($status.Gates[1].Status)"
+        Assert-True ($status.Completeness -eq "FAILED") `
+            "skip plus failure reported as $($status.Completeness)"
+    }
+
+    Test-Case "a missing result line beside a skipped binary reports FAILED" {
+        $log = "GPU_SELFTEST_RESULT gpu_coherence_selftest.exe SKIP 77`n"
+        $status = Resolve-GpuSelftestStatus -Results (Get-GpuSelftestResults -Log $log) `
+            -Gates $gpuGates -ExitCode 2
+        Assert-True ($status.Gates[1].Status -eq "FAIL") "missing binary reported as $($status.Gates[1].Status)"
+        Assert-True ($status.Completeness -eq "FAILED") `
+            "skip plus missing line reported as $($status.Completeness)"
+    }
+
     Test-Case "an executed semantic failure stays FAIL" {
         $log = "GPU_SELFTEST_RESULT gpu_coherence_selftest.exe FAIL 3`n" +
                "GPU_SELFTEST_RESULT gpu_capture_selftest.exe PASS 0`n"

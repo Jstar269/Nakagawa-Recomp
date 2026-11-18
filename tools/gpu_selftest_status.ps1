@@ -81,8 +81,9 @@ function Resolve-GpuSelftestStatus {
         word "skip". gpu-capture-selftest also needs its terminal-fault legs
         (Get-GpuSelftestResultNames). A SKIP keeps its reason and never counts
         as a failure. The
-        returned Completeness value is the evidence fact: EXECUTED when every
-        binary reported a verdict, PARTIAL_SKIPPED when some did, and
+        returned Completeness value is the evidence fact: FAILED when any gate
+        failed (even beside a skipped one), EXECUTED when every binary reported
+        a verdict, PARTIAL_SKIPPED when some did, and
         NOT_RUN_HOST_UNSUPPORTED when every binary skipped, so callers can report
         graphics evidence as optional-but-absent instead of silently complete.
     .OUTPUTS
@@ -134,11 +135,16 @@ function Resolve-GpuSelftestStatus {
         }
     }
 
-    $completeness = if ($Gates.Count -gt 0 -and $skipped -eq $Gates.Count) {
+    # A failed gate (a FAIL verdict or a missing result line) decides the fact
+    # first: a sibling's SKIP must not report an executed failure as merely
+    # partially skipped.
+    $completeness = if ($failedGates -gt 0) {
+        "FAILED"
+    } elseif ($Gates.Count -gt 0 -and $skipped -eq $Gates.Count) {
         "NOT_RUN_HOST_UNSUPPORTED"
     } elseif ($skipped -gt 0) {
         "PARTIAL_SKIPPED"
-    } elseif ($ExitCode -ne 0 -or $failedGates -gt 0) {
+    } elseif ($ExitCode -ne 0) {
         "FAILED"
     } else {
         "EXECUTED"

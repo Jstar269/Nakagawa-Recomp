@@ -829,8 +829,10 @@ $env:SR_NOINPUT = "1"
 
 The converter expands shorter presses so a replay holds each press for as many
 vblanks as a person would. A one-vblank pulse can no longer fall between the
-game's controller reads, because scripted input waits for a read (below). Use
-`--minimum-width 1` only when an exact-width replay is required.
+game's controller reads, because scripted input waits for a read (below). An
+expanded press stops where the next row starts (a vblank earlier for the same
+button), so it never replays a chord or merges two presses the recording did not
+hold. Use `--minimum-width 1` only when an exact-width replay is required.
 
 The left stick is recorded with the buttons. Each `ctrl_latch:` line carries the
 stick the guest was handed (`lx=`, `ly=`; a title in digital mode reads 128, 128),
