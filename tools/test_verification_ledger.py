@@ -169,6 +169,47 @@ class LedgerTests(unittest.TestCase):
         with self.assertRaises(ledger_mod.LedgerError):
             ledger_mod.ppsspp_vfpu_kernels(text.replace(ledger_mod.VFPU_PPSSPP_KERNEL_SECTION, "renamed"))
 
+    def test_a_handler_defined_across_lines_is_credited_like_the_manifest_sees_it(self) -> None:
+        raw = (
+            "/* PPSSPP-derived: a handler whose signature wraps. */\n"
+            "uint32_t h_SyntheticWrapped(\n"
+            "    CpuState *s) {\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        self.assertIn("h_SyntheticWrapped", hle_manifest._handler_bodies(hle_manifest.active_source(raw)))
+        self.assertEqual(
+            ledger_mod.ppsspp_handler_comments([("src/rt/synthetic.c", raw)]),
+            {"h_SyntheticWrapped": {"src/rt/synthetic.c"}},
+        )
+
+    def test_unbalanced_handler_body_is_refused(self) -> None:
+        raw = "uint32_t h_SyntheticOpen(CpuState *s) {\n    if (s) {\n"
+        with self.assertRaisesRegex(ledger_mod.LedgerError, "unbalanced handler body"):
+            ledger_mod.ppsspp_handler_comments([("src/rt/synthetic.c", raw)])
+
+    def test_unverified_masks_compile_the_decoder_probe_twice_in_all(self) -> None:
+        # Every unverified form's bit flips share one classify_words call and every form's
+        # samples a second, so the probe is not recompiled per form.
+        from unittest import mock
+
+        import vfpu_coverage_report as census_mod
+
+        real = census_mod.classify_words
+        calls: list[frozenset[int]] = []
+
+        def counting(words, **kwargs):
+            words = list(words)
+            calls.append(frozenset(words))
+            return real(words, **kwargs)
+
+        with mock.patch.object(census_mod, "classify_words", counting):
+            masks = ledger_mod.vfpu_unverified_masks(self.ledger["vfpu"])
+        self.assertEqual(masks, self.ledger["vfpu_unverified_masks"])
+        systematic = frozenset(census_mod.systematic_words())
+        probes = [words for words in calls if words != systematic]
+        self.assertLessEqual(len(probes), 2, [len(words) for words in probes])
+
 
 class RuntimeLogTests(unittest.TestCase):
     def test_host_tested_with_no_recorded_host_test_fails(self) -> None:

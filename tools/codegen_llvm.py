@@ -675,6 +675,14 @@ def lower(cg, elf, start, ranges, known, *, c_text: str, resume_owners=None, res
     plan = P.plan_function(cg, elf, start, ranges, known, resume_owners=resume_owners,
                            resumable=resumable, profile=profile,
                            dispatch_boundaries=dispatch_boundaries, options=options)
+    boundary = cg.ENHANCEMENT_UPDATE_BOUNDARY
+    if boundary is not None and any(
+            getattr(step, "addr", None) == boundary or
+            getattr(getattr(step, "slot", None), "addr", None) == boundary
+            for step in plan.steps):
+        # The C emitter injects the logic-update counter at this word. The LLVM operation
+        # plan covers only the guest instruction, so lowering would silently drop the counter.
+        raise LLVMUnsupported("enhancement-package update_boundary")
     lowering = FunctionLowering(plan, stack_census)
     function = lowering.lower()
     returned: LLVMBody = LLVMBody.make(lowering.definition_name, start, lowering.module, function, len(c_text))

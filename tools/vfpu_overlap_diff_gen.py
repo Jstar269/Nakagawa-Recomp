@@ -25,45 +25,21 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import codegen
 import vfpu_coverage_report
+from vfpu_synth_gen import _decode_size_independent, _encode, _encode_sub21
 
 
 def _bin_word(op6: int, sub: int, size: int, vd: int, vs: int, vt: int) -> int:
-    lo, hi = (size - 1) & 1, (size - 1) >> 1
-    return (
-        ((op6 & 0x3F) << 26)
-        | ((sub & 7) << 23)
-        | ((vt & 0x7F) << 16)
-        | ((vs & 0x7F) << 8)
-        | (vd & 0x7F)
-        | (lo << 7)
-        | (hi << 15)
-    )
+    """A word with the 3-bit suboperation at bits 25:23; size is 1..4 (S/P/T/Q)."""
+    return int(_encode(op6, sub, vt, vs, vd, size - 1))
 
 
 def _vv2_word(optype: int, size: int, vd: int, vs: int) -> int:
     """A VFPU4 unary-group word (vsin.s, vrexp2.s, ...): optype in bits 16..20."""
-    lo, hi = (size - 1) & 1, (size - 1) >> 1
-    return (
-        (0x34 << 26)
-        | ((optype & 0x1F) << 16)
-        | ((vs & 0x7F) << 8)
-        | (vd & 0x7F)
-        | (lo << 7)
-        | (hi << 15)
-    )
+    return int(_encode(0x34, 0, optype & 0x1F, vs, vd, size - 1))
 
 
 def _matrix1_word(which: int, size: int, vd: int, vs: int) -> int:
-    lo, hi = (size - 1) & 1, (size - 1) >> 1
-    return (
-        (0x3C << 26)
-        | (28 << 21)
-        | ((which & 0xF) << 16)
-        | ((vs & 0x7F) << 8)
-        | (vd & 0x7F)
-        | (lo << 7)
-        | (hi << 15)
-    )
+    return int(_encode_sub21(0x3C, 28, which & 0xF, vs, vd, size - 1))
 
 
 # One word per supported census row that had no differential evidence before this list
@@ -94,7 +70,7 @@ WIDE_DOT_WORDS: tuple[tuple[str, int], ...] = (
 
 def census_gap_size(word: int) -> int:
     """Vector size 1..4 from bit 7 (low) and bit 15 (high)."""
-    return ((word >> 7) & 1 | ((word >> 15) & 1) << 1) + 1
+    return int(_decode_size_independent(word))
 
 
 def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
@@ -350,8 +326,10 @@ def build_sweep_cases() -> tuple[tuple[str, ...], tuple[tuple[int, int, str], ..
     return tuple(form[0] for form in forms), tuple(cases)
 
 
+@lru_cache(maxsize=1)
 def sweep_words() -> frozenset[int]:
-    """Words vfpu_interp_selftest runs through check_alias_edge_sweep."""
+    """Words vfpu_interp_selftest runs through check_alias_edge_sweep (computed once; the
+    coverage census looks every record up here)."""
     return frozenset(word for word, _, _ in build_sweep_cases()[1])
 
 
@@ -372,6 +350,8 @@ def mutant_body(body: str) -> str | None:
 
 
 def _sweep_lines(forms: tuple[str, ...], cases: tuple[tuple[int, int, str], ...]) -> list[str]:
+    # One emitted body per case, shared by the switch and the mutant search.
+    bodies = [_direct_body(w) for w, _, _ in cases]
     out = [f"#define SWEEP_NFORMS {len(forms)}", f"#define SWEEP_NCASES {len(cases)}", ""]
     out.append("static const char *const sweep_forms[SWEEP_NFORMS] = {")
     out.extend(f'    "{form}",' for form in forms)
@@ -399,11 +379,11 @@ def _sweep_lines(forms: tuple[str, ...], cases: tuple[tuple[int, int, str], ...]
         out.append(f"static void sweep_run_codegen_{chunk}(CpuState *s, int idx) {{")
         out.append("    switch (idx) {")
         for i in range(chunk * SWEEP_CHUNK, min(len(cases), (chunk + 1) * SWEEP_CHUNK)):
-            out.append(f"    case {i}: {_direct_body(cases[i][0])} break;")
+            out.append(f"    case {i}: {bodies[i]} break;")
         out.append("    default: break;")
         out.append("    }")
         out.append("}")
-    mutants = [(i, mutant_body(str(_direct_body(w)))) for i, (w, _, _) in enumerate(cases)]
+    mutants = [(i, mutant_body(str(body))) for i, body in enumerate(bodies)]
     mutants = [(i, body) for i, body in mutants if body is not None]
     if not mutants:
         raise AssertionError("the sweep mutant matched no vadd instance")

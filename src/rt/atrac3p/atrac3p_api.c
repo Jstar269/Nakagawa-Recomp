@@ -5,11 +5,16 @@
  ** Nakagawa-authored thin C wrappers for the standalone ATRAC3+ and plain
  * ATRAC3 decoders (PR-A).
  *
- * This file is NOT imported FFmpeg code. It provides:
+ * This file is NOT imported FFmpeg code (the provenance ledger still files it
+ * under the decoder import's record; see PROVENANCE.md, Authored API layer).
+ * It provides:
  *  - av_log()/av_vlog(): the only libavutil symbols the imported subset
- *    calls that FFmpeg defines in libavutil/log.c (not imported). Format
- *    strings used by the imported code already carry their own line
- *    endings, so messages are written to stderr verbatim.
+ *    calls that FFmpeg defines in libavutil/log.c (not imported). Like
+ *    upstream's default av_log_level (AV_LOG_INFO), messages above
+ *    AV_LOG_INFO (verbose, debug, trace) are dropped. Each kept call is
+ *    written as one line: prefixed "atrac3p: ", ended with a newline when the
+ *    format has none, and handed to the log sink (stderr unless
+ *    atrac3p_set_log_sink() installed another).
  *  - the thin C ABI (create / decode-to-s16 / reset / flush / destroy)
  *    that PR-B (PSP HLE integration) will consume. No C++ exceptions
  *    cross this boundary, no PSP HLE state is held here, and no guest
@@ -25,26 +30,55 @@
 #include "atrac3p_api.h"
 #include "libavutil/mem.h"
 #include "libavutil/error.h"
+#include "libavutil/log.h"
 
 /* ------------------------------------------------------------------ */
 /* av_log()/av_vlog() implementation (see header comment)             */
 /* ------------------------------------------------------------------ */
 
-void av_log(void *avcl, int level, const char *fmt, ...)
+static atrac3p_log_sink g_log_sink;
+static void *g_log_opaque;
+
+void atrac3p_set_log_sink(atrac3p_log_sink sink, void *opaque)
 {
-    va_list ap;
-    (void)avcl;
-    (void)level;
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
+    g_log_sink = sink;
+    g_log_opaque = opaque;
 }
 
 void av_vlog(void *avcl, int level, const char *fmt, va_list vl)
 {
+    static const char prefix[] = "atrac3p: ";
+    char line[512];
+    size_t len;
+    int n;
+
     (void)avcl;
-    (void)level;
-    vfprintf(stderr, fmt, vl);
+    if (level > AV_LOG_INFO || !fmt)
+        return;
+    memcpy(line, prefix, sizeof(prefix));
+    len = sizeof(prefix) - 1;
+    n = vsnprintf(line + len, sizeof(line) - len - 1, fmt, vl);
+    if (n < 0)
+        return;
+    /* vsnprintf stores at most sizeof(line) - len - 2 characters, so a
+     * terminator always fits after a truncated message. */
+    len = strlen(line);
+    if (line[len - 1] != '\n') {
+        line[len++] = '\n';
+        line[len] = '\0';
+    }
+    if (g_log_sink)
+        g_log_sink(line, g_log_opaque);
+    else
+        fputs(line, stderr);
+}
+
+void av_log(void *avcl, int level, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    av_vlog(avcl, level, fmt, ap);
+    va_end(ap);
 }
 
 /* ------------------------------------------------------------------ */
@@ -139,10 +173,11 @@ fail:
  * Returns the number of frame bytes consumed on success (always
  * h->frame_size for well-formed input) or a negative AVERROR_* code.
  *
- * PCM conversion: float [0..1] planes are scaled by 32768, rounded with
- * lrintf() and saturated to int16. Bit-exact DSP (AV_CODEC_FLAG_BITEXACT)
- * is forced at create time so output is deterministic on the supported
- * platform set; the conversion step itself is integer-deterministic.
+ * PCM conversion: float [0..1] planes are scaled by 32768, saturated to
+ * int16 and rounded with lrintf() (atrac3p_pcm_sample()). Bit-exact DSP
+ * (AV_CODEC_FLAG_BITEXACT) is forced at create time so output is
+ * deterministic on the supported platform set; the conversion step itself is
+ * integer-deterministic.
  */
 int atrac3p_decode(Atrac3pHandle *h, const uint8_t *frame, int frame_size,
                    int16_t *pcm_out, int *samples_out)
@@ -179,11 +214,27 @@ int atrac3p_decode(Atrac3pHandle *h, const uint8_t *frame, int frame_size,
     for (ch = 0; ch < channels; ch++) {
         const float *p = h->planes[ch];
         for (i = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
-            pcm_out[(size_t)i * channels + ch] = av_clip_int16(lrintf(p[i] * 32768.0f));
+            pcm_out[(size_t)i * channels + ch] = atrac3p_pcm_sample(p[i]);
     }
 
     *samples_out = nb_samples;
     return ret;
+}
+
+/* One scaled sample to s16. The float is clamped to the int16 range before
+ * lrintf(), whose result is unspecified outside the range of long (32 bits
+ * on Windows) and for inf or NaN, so out-of-range decoder output saturates
+ * instead of wrapping; NaN gives 0. */
+static int16_t pcm_s16_from_scaled(float x)
+{
+    if (isnan(x))
+        return 0;
+    return av_clip_int16(lrintf(av_clipf(x, -32768.0f, 32767.0f)));
+}
+
+int16_t atrac3p_pcm_sample(float v)
+{
+    return pcm_s16_from_scaled(v * 32768.0f);
 }
 
 /*
@@ -311,7 +362,7 @@ fail:
  * none equals it unnegated. So the core's float is negated, then scaled like ATRAC3+ above. */
 int16_t atrac3_pcm_sample(float v)
 {
-    return av_clip_int16(lrintf(-v * 32768.0f));
+    return pcm_s16_from_scaled(-v * 32768.0f);
 }
 
 int atrac3_decode(Atrac3Handle *h, const uint8_t *frame, int frame_size,

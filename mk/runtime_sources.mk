@@ -180,7 +180,7 @@ RT_SRCS    := src/rt/recomp.c \
 # and its hooks into the runtime and the generated code, and links the reference interpreter
 # (src/ref) beside it. It is off by default and the default objects do not change. Run the
 # resulting player with SR_VERIFY=k and SR_VERIFY_REPORT=file (src/rt/verify.h lists the
-# settings). The reference's sr_bitrev is renamed in its own object, as for snapshot-selftest.
+# settings).
 VERIFY ?= 0
 ifeq ($(VERIFY),1)
 override CFLAGS += -DSR_VERIFY
@@ -188,9 +188,9 @@ RT_SRCS += src/rt/verify.c src/rt/nksnap.c
 override LIBS += -lstdc++
 VERIFY_REF_OBJS := $(BUILD_DIR)/verify_ref_interp.o $(BUILD_DIR)/verify_ref.o
 $(BUILD_DIR)/verify_ref_interp.o: src/ref/interp.cpp
-	$(CXX) -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -Dsr_bitrev=sr_ref_bitrev -c $< -o $@
+	$(CXX) -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -c $< -o $@
 $(BUILD_DIR)/verify_ref.o: src/ref/snapshot_ref.cpp src/ref/snapshot_ref.h
-	$(CXX) -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -Dsr_bitrev=sr_ref_bitrev -c $< -o $@
+	$(CXX) -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -c $< -o $@
 endif
 
 RT_OBJS   := $(addprefix $(BUILD_DIR)/,$(notdir $(RT_SRCS:.c=.o)))
@@ -311,9 +311,10 @@ endif
 ifneq ($(strip $(SOURCE_DATE_EPOCH)),)
 # Transported through the environment (see the guest-input transport above) so
 # no operator value reaches a command interpreter as syntax. Fail closed on a
-# non-decimal value: flight_recorder.c emits it as a JSON number.
+# non-decimal value, or one with a leading zero: flight_recorder.c emits it as a
+# JSON number, and JSON numbers have no leading zeros.
 export SOURCE_DATE_EPOCH
-SR_SOURCE_DATE_EPOCH := $(shell "$(PYTHON)" -c "import os; v = os.environ.get('SOURCE_DATE_EPOCH', ''); print(v if v.isdigit() else '')")
+SR_SOURCE_DATE_EPOCH := $(shell "$(PYTHON)" -c "import os; v = os.environ.get('SOURCE_DATE_EPOCH', ''); print(v if v.isascii() and v.isdigit() and (v == '0' or v[0] != '0') else '')")
 ifeq ($(strip $(SR_SOURCE_DATE_EPOCH)),)
 $(error SOURCE_DATE_EPOCH must be a decimal Unix timestamp (reproducible-builds.org), got "$(SOURCE_DATE_EPOCH)")
 endif

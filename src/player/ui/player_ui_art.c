@@ -339,6 +339,11 @@ bool player_ui_art_reading_cover(const PlayerUiArt *art) {
            SDL_GetAtomicInt(&art->job->done) == 0;
 }
 
+uint32_t player_ui_art_wait_ms(const PlayerUiArt *art, uint32_t wait_ms) {
+    return player_ui_art_busy(art) && wait_ms > PLAYER_UI_ART_POLL_MS ? PLAYER_UI_ART_POLL_MS
+                                                                      : wait_ms;
+}
+
 bool player_ui_art_busy(const PlayerUiArt *art) {
     size_t i;
     if (art == NULL) {

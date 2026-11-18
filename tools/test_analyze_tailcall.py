@@ -119,15 +119,17 @@ class TestSyntheticTailcallPromotion(unittest.TestCase):
         # It must be promoted as a function entry.
         j_1018 = (2 << 26) | ((0x1018 >> 2) & 0x03FFFFFF)
         words = {
-            0x1000: 0x27BDFF30,  # addiu $sp, $sp, -16
+            0x1000: 0x27BDFFF0,  # addiu $sp, $sp, -16
             0x1004: j_1018,      # j 0x1018
             0x1008: 0x00000000,  # nop
             0x100C: 0x00000000,  # nop
-            0x1010: 0x00400009,  # jalr $zero, $a0 (unlinked tail call)
+            0x1010: 0x00800009,  # jalr $zero, $a0 (unlinked tail call)
             0x1014: 0x24840004,  # addiu $a0, $a0, 4 (delay slot register write)
             0x1018: 0x03E00008,  # jr $ra
             0x101C: 0x00000000,  # nop
         }
+        self.assertEqual((words[0x1010] >> 21) & 0x1F, 4)  # jalr reads $a0
+        self.assertEqual((words[0x1014] >> 16) & 0x1F, 4)  # delay slot writes $a0
         elf = FakeElf(words)
         starts, _ = analyze.analyze(elf)
         self.assertIn(0x1018, starts, "jalr $zero tailcall target not promoted as function entry")
@@ -138,15 +140,17 @@ class TestSyntheticTailcallPromotion(unittest.TestCase):
         # Target 0x1018 is preceded by 0x1010 (jr $a0) and its delay slot.
         j_1018 = (2 << 26) | ((0x1018 >> 2) & 0x03FFFFFF)
         words = {
-            0x1000: 0x27BDFF30,  # addiu $sp, $sp, -16
+            0x1000: 0x27BDFFF0,  # addiu $sp, $sp, -16
             0x1004: j_1018,      # j 0x1018
             0x1008: 0x00000000,  # nop
             0x100C: 0x00000000,  # nop
-            0x1010: 0x00400008,  # jr $a0 (unlinked tail call)
+            0x1010: 0x00800008,  # jr $a0 (unlinked tail call)
             0x1014: 0x24840004,  # addiu $a0, $a0, 4 (delay slot register write)
             0x1018: 0x03E00008,  # jr $ra
             0x101C: 0x00000000,  # nop
         }
+        self.assertEqual((words[0x1010] >> 21) & 0x1F, 4)  # jr reads $a0
+        self.assertEqual((words[0x1014] >> 16) & 0x1F, 4)  # delay slot writes $a0
         elf = FakeElf(words)
         starts, _ = analyze.analyze(elf)
         self.assertIn(0x1018, starts, "jr tailcall target not promoted as function entry")

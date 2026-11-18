@@ -35,7 +35,6 @@ NkH264Decoder *nk_h264_open(int verbose) {
     dec->pkt = av_packet_alloc();
     if (!dec->ctx || !dec->pic || !dec->pkt) { nk_h264_close(dec); return NULL; }
     dec->ctx->thread_count = 1;                 /* deterministic, low memory, no frame delay */
-    dec->ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
     dec->ctx->pkt_timebase = (AVRational){1, 90000};
     if (avcodec_open2(dec->ctx, codec, NULL) < 0) { nk_h264_close(dec); return NULL; }
     return dec;
