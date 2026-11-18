@@ -51,7 +51,11 @@ typedef struct NkAchRequest {
 } NkAchRequest;
 
 /* The answer: the HTTP status and the body. A transport that reached no server answers
- * NK_ACH_HTTP_CLIENT_ERROR (give up) or NK_ACH_HTTP_RETRY (rc_client retries later). */
+ * NK_ACH_HTTP_CLIENT_ERROR (give up) or NK_ACH_HTTP_RETRY; with no body, the failure reports "no
+ * response from the RetroAchievements server". rc_client honours NK_ACH_HTTP_RETRY (and the
+ * server's 429 and 5xx answers) only for unlocks and leaderboard submissions, which it sends again
+ * later; sign-in and game load fail at once, as LOGIN_FAILED or GAME_FAILED, and the caller
+ * starts them again. */
 #define NK_ACH_HTTP_CLIENT_ERROR (-1)
 #define NK_ACH_HTTP_RETRY (-2)
 typedef struct NkAchResponse {
@@ -62,7 +66,8 @@ typedef struct NkAchResponse {
 
 typedef void (*NkAchDone)(const NkAchResponse *response, void *done_ctx);
 /* Sends one request and calls done exactly once, now or later on the thread that calls
- * nk_ach_frame. The request's strings are valid only until done is called. */
+ * nk_ach_frame. The request's strings are the bridge's own copies: they stay valid after the
+ * transport returns, until done is called. */
 typedef void (*NkAchTransport)(void *ctx, const NkAchRequest *request, NkAchDone done,
                                void *done_ctx);
 
@@ -76,7 +81,8 @@ typedef enum NkAchEventKind {
     NK_ACH_EVENT_DISCONNECTED,     /* an unlock is waiting to be sent */
     NK_ACH_EVENT_RECONNECTED,      /* every waiting unlock was sent */
     NK_ACH_EVENT_DISABLED          /* id: an achievement rc_client turned off because guest memory
-                                    * it reads could not be read; message: rc_client's note */
+                                    * it reads could not be read or its trigger could not be
+                                    * parsed; message: rc_client's note */
 } NkAchEventKind;
 
 typedef struct NkAchEvent {
@@ -106,6 +112,10 @@ uint32_t nk_ach_read_memory(const NkAchMemory *mem, uint32_t ra_address, uint8_t
 /* A client over mem (copied) with transport, which may be NULL: then every request is refused
  * and nothing is sent. NULL when rc_client cannot be created. Hardcore is off. */
 NkAch *nk_ach_create(const NkAchMemory *mem, NkAchTransport transport, void *transport_ctx);
+/* Ends the client; ach is not used again. With a request still in flight, the bridge and
+ * rc_client stay alive until the transport calls its done (which it still must, once per request):
+ * that late answer is dropped, rc_client is told the request was refused, and the last one frees
+ * everything. Nothing after nk_ach_destroy reads guest memory or raises an event the caller sees. */
 void nk_ach_destroy(NkAch *ach);
 
 /* Signs in with an RA API token (never a password: the token comes from the user's own
@@ -114,7 +124,8 @@ void nk_ach_destroy(NkAch *ach);
 bool nk_ach_begin_login(NkAch *ach, const char *username, const char *token);
 /* Loads the achievement set for the disc whose RA hash (32 lowercase hex digits, the MD5 RA's
  * PSP rule takes of PARAM.SFO then EBOOT.BIN) is hash. False only for a malformed hash;
- * otherwise the outcome is a GAME_LOADED or GAME_FAILED event. */
+ * otherwise the outcome is a GAME_LOADED or GAME_FAILED event. A set the server gives for another
+ * console is unloaded and reported as GAME_FAILED naming that console. */
 bool nk_ach_begin_load_game(NkAch *ach, const char *hash);
 
 /* Once per guest frame, at the vblank boundary: evaluates the achievements on guest memory. */

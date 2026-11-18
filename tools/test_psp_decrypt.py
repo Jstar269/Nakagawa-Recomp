@@ -1006,6 +1006,22 @@ BUILTIN_TABLE = ROOT / "src" / "core" / "nk_psp_builtin_keys.c"
 BUILTIN_GAME_TAG = 0xD91613F0
 FIRMWARE_TAGS = (0x0B000000, 0x0E000000, 0x0F000000, 0x862648D1, 0x07000000, 0x0B2B92F0,
                  0x06000000, 0x0B2B10F0)
+# One tag from each flash0 firmware-module family PPSSPP's table carries (kernel modules:
+# 0x4C94xxF0, 0xCFEFxxF0, 0x16D59E03; VSH modules: 0x457BxxF0, 0x3802xxF0, 0x76202403,
+# 0x0F037303), with the name the refusal gives it.
+FIRMWARE_MODULE_TAGS = {
+    0x4C9494F0: "flash0 kernel firmware module", 0x4C940FF0: "flash0 kernel firmware module",
+    0xCFEF09F0: "flash0 kernel firmware module", 0x16D59E03: "flash0 kernel firmware module",
+    0x457B90F0: "flash0 VSH firmware module", 0x380290F0: "flash0 VSH firmware module",
+    0x380280F0: "flash0 VSH firmware module", 0x76202403: "flash0 VSH firmware module",
+    0x0F037303: "flash0 VSH firmware module",
+}
+
+
+def is_firmware_module_tag(tag: int) -> bool:
+    """True for a tag in one of the flash0 kernel or VSH module families."""
+    return (tag & 0xFFFF00FF) in (0x4C9400F0, 0xCFEF00F0, 0x457B00F0, 0x380200F0) or tag in (
+        0x16D59E03, 0x76202403, 0x0F037303)
 
 
 def builtin_table() -> tuple[dict, dict, dict]:
@@ -1142,12 +1158,29 @@ class TestBuiltinTables(unittest.TestCase):
                     self.assertNotIn("KEY_REQUIRED", out.stdout)
                     self.assertFalse(dst.exists())
 
+    def test_flash0_firmware_modules_are_refused_by_name_before_any_key_lookup(self):
+        # AGENTS.md section 5: an encrypted module copied from a console's flash0 is
+        # refused by name, as firmware, whatever key store is loaded.
+        absent = self.tmp / "no-such-keys.json"
+        for tag, what in FIRMWARE_MODULE_TAGS.items():
+            for extra in ((), ("--key-file", str(absent))):
+                with self.subTest(tag=f"0x{tag:08X}", key_store="empty" if extra else "built-in"):
+                    out, dst = self._run(f"fw_module_{tag:08X}", self._seal_builtin(tag), *extra)
+                    self.assertEqual(out.returncode, 10, out.stdout + out.stderr)
+                    self.assertIn("FIRMWARE_OUT_OF_SCOPE", out.stdout)
+                    self.assertIn(f"container tag 0x{tag:08X} marks a {what}", out.stdout)
+                    self.assertNotIn("KEY_REQUIRED", out.stdout)
+                    self.assertFalse(dst.exists())
+
     def test_table_carries_no_firmware_recipe_or_psar_value(self):
-        self.assertEqual(set(self.firmware), set(FIRMWARE_TAGS) | {
+        containers = {tag for tag in self.firmware if not is_firmware_module_tag(tag)}
+        self.assertEqual(containers, set(FIRMWARE_TAGS) | {
             0x0B2B90F0, 0x0B2B91F0, 0x495BE403, 0x0B2B05F0, 0x0B2B06F0, 0x0B2B08F0,
             0x0B2B0AF0, 0x0B2B0BF0, 0x0B2B11F0, 0x0B2B1EF0, 0x0B2B0CF0, 0x0B2B12F0,
             0x0B2B1FF0, 0x0B2B80F0, 0x0B2B81F0, 0x0B2B82F0})
         self.assertFalse(set(self.firmware) & set(self.recipes))
+        self.assertFalse([tag for tag in self.recipes if is_firmware_module_tag(tag)])
+        self.assertTrue(set(FIRMWARE_MODULE_TAGS) <= set(self.firmware))
         self.assertFalse([name for name in self.values if name.startswith("psar.")])
         used = {recipe["code"] for recipe in self.recipes.values()}
         rows = {int(name.rsplit(".", 1)[1]) for name in self.values

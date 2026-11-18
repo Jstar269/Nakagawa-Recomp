@@ -3,8 +3,8 @@
 The decryption boundary that turns the encrypted executable and modules of a game the user owns into plain ELF files,
 locally, from the user's own disc image (issue #295). It was added in PRs #548 and #550, removed as a temporary measure
 in PR #1187, and restored with built-in key tables after the maintainer's decision of 2026-10-27 to decrypt the way
-PPSSPP does. Firmware is never decrypted: updater PSAR archives, the IPL, the Media Engine image and system-menu files are
-refused by name before any decryption step runs (`AGENTS.md` section 5).
+PPSSPP does. Firmware is never decrypted: updater PSAR archives, the IPL, the Media Engine image, system-menu files and
+encrypted `flash0` kernel and VSH modules are refused by name before any decryption step runs (`AGENTS.md` section 5).
 
 Every derived file below is labelled `derived-translated` in the trusted provenance record
 (`docs/provenance/INDEPENDENCE_MODEL.md`); none is "independent". The project-authored files are listed last.
@@ -35,6 +35,11 @@ Every derived file below is labelled `derived-translated` in the trusted provena
     3.60 index.dat) are the two tags PPSSPP added after the pin, in `fb371af6bb7d13406fdfe7f23b6bbad6c47629a0` and `6a9b84a714e2e03470dcfebb223c8c4688e61e99`; a review on 2026-11-05 of
     the five upstream commits to `Core/ELF/PrxDecrypter.*` and `ext/libkirk` between the pin and
     `5b3ddcc0628585b7b091c9a9904dba58bb4118c8` found no new or changed game key, tag recipe or cipher fix missing here;
+  - every `flash0` firmware-module tag, removed on 2026-11-17: the kernel-module families `0x4C94xxF0` (with
+    `key_2DA8`), `0xCFEFxxF0` and `0x16D59E03`, and the VSH-module families `0x457BxxF0`, `0x3802xxF0` (with
+    `key_380210F0`, `key_380280F0` and `key_380283F0`), `0x76202403` and `0x0F037303`, with their key arrays and the
+    keyvault row `0x62` that only they name. They are listed in `nk_psp_firmware_tags` with the firmware container
+    tags, so an encrypted module copied from a console's `flash0` is refused by name before any key lookup;
   - the type-3 DRM BB patch tag `0x89742B04`, the SPRX decrypt-mode pad `xor_91E0A9AD` and the KIRK command-2 results,
     which need the installing console's context (PBP/NPDRM);
   - amctrl's fixed-key tables (`key_357C`, `key_363C`, `dnas_key1A90`, `dnas_key1AA0`), which only PGD data and
