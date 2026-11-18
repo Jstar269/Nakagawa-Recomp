@@ -12,8 +12,11 @@ jump-table landing pads, and ordinary ``jalr`` targets.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import struct
 import sys
+from types import SimpleNamespace
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -45,6 +48,11 @@ def jr(rs=31):
 
 def jalr(rs, rd=31):
     return (rs << 21) | (rd << 11) | 0x09
+
+
+def bvt(offset):
+    """COP2 branch-on-true with condition code zero."""
+    return (0x12 << 26) | (8 << 21) | (1 << 16) | (offset & 0xFFFF)
 
 
 def j(target):
@@ -88,6 +96,10 @@ def lui(rt, imm):
 
 def addu(rd, rs, rt):
     return (rs << 21) | (rt << 16) | (rd << 11) | 0x21
+
+
+def sc(rt, base, offset=0):
+    return (0x38 << 26) | (base << 21) | (rt << 16) | (offset & 0xFFFF)
 
 
 NOP = 0
@@ -847,6 +859,155 @@ class DirectJumpAuditTests(unittest.TestCase):
         self.assertIn("address-taken evidence", rec_data.reason)
 
 
+class JumpRegionBoundaryTests(unittest.TestCase):
+    def test_trace_edge_census_and_call_evidence_use_the_pc_plus_four_region(self):
+        source, target = 0x0FFFFFFC, 0x10000004
+        jump_elf, jump_ranges = image(emit(source, j(target), NOP, jr(RA), NOP))
+
+        covered = set()
+        analyze.trace_function(jump_elf, source, jump_ranges, covered, set(), set())
+        self.assertIn(target, covered)
+        self.assertEqual(analyze.direct_j_edges(jump_elf, jump_ranges), {target: (source,)})
+
+        call_elf, call_ranges = image(emit(source, jal(target), NOP, jr(RA), NOP))
+        evidence = analyze.code_pointer_evidence(call_elf, call_ranges)
+        self.assertIn(target, evidence["jal"])
+
+    def test_codegen_emits_the_transfer_into_the_pc_plus_four_region(self):
+        # The analyzer traces and seeds 0x10000004 for this `j`; codegen must emit the
+        # transfer to that same function, not to 0x00000004 in the jump's own region.
+        import codegen
+        source, target = 0x0FFFFFFC, 0x10000004
+        self.assertEqual(codegen.jump_target(source, j(target)), target)
+        jump_elf, jump_ranges = image(emit(source, j(target), NOP, jr(RA), NOP))
+        text = "\n".join(codegen.emit_function(jump_elf, source, jump_ranges, {source, target}))
+        self.assertIn(f"{target:08x}", text)
+        self.assertNotIn("00000004", text)
+
+
+class TraceLookupReuseTests(unittest.TestCase):
+    def test_trace_computes_stub_and_file_executable_lookups_once(self):
+        words = emit(
+            0x1000,
+            jal(0x3000), NOP,
+            jal(0x3004), NOP,
+            bne(A0, 0, 2), NOP,
+            j(0x1028), NOP,
+            j(0x1030), NOP,
+            NOP, NOP,
+            jr(RA), NOP,
+            jr(RA), NOP,
+        )
+        elf, ranges = image(words)
+        sec_calls = []
+        real_sec = elf.sec
+
+        def counted_sec(name):
+            sec_calls.append(name)
+            return real_sec(name)
+
+        elf.sec = counted_sec
+        file_range_calls = []
+        real_file_ranges = analyze._file_backed_exec_ranges
+
+        def counted_file_ranges(image):
+            file_range_calls.append(image)
+            return real_file_ranges(image)
+
+        with unittest.mock.patch.object(analyze, "_file_backed_exec_ranges",
+                                        side_effect=counted_file_ranges):
+            analyze.trace_function(elf, 0x1000, ranges, set(), set(), set())
+
+        self.assertEqual(
+            {"stub-section lookups": sec_calls, "file-range lookups": file_range_calls},
+            {"stub-section lookups": [".sceStub.text"], "file-range lookups": [elf]},
+        )
+
+
+class DataSectionSeedTests(unittest.TestCase):
+    def test_pointer_table_seed_does_not_run_the_code_word_census(self):
+        elf, ranges = image(emit(0x1000, jr(RA), NOP), data_pointers=(0x1000,))
+        discovery = SimpleNamespace(
+            elf=elf,
+            ranges=ranges,
+            file_exec_ranges=[],
+            relocated=None,
+            hc=set(),
+            in_text=lambda address: analyze.in_ranges(address, ranges),
+        )
+        read_words = analyze._iter_code_words
+
+        with unittest.mock.patch.object(analyze, "_iter_code_words", wraps=read_words) as census:
+            analyze._seed_function_pointer_tables(discovery, None)
+
+        self.assertEqual(census.call_count, 0)
+        self.assertIn(0x1000, discovery.hc)
+
+
+class TraceFunctionTerminatorTests(unittest.TestCase):
+    def test_direct_jump_outside_ranges_stops_after_its_delay_slot(self):
+        words = emit(0x1000, j(0x2000), NOP, addiu(SP, SP, -0x20), jr(RA), NOP)
+        elf, ranges = image(words)
+        covered = set()
+
+        analyze.trace_function(elf, 0x1000, ranges, covered, set(), set())
+
+        self.assertEqual(covered, {0x1000, 0x1004})
+
+    def test_jalr_with_zero_destination_stops_after_its_delay_slot(self):
+        words = emit(0x1000, jalr(T9, rd=0), NOP, addiu(SP, SP, -0x20), jr(RA), NOP)
+        elf, ranges = image(words)
+        covered = set()
+
+        analyze.trace_function(elf, 0x1000, ranges, covered, set(), set())
+
+        self.assertEqual(covered, {0x1000, 0x1004})
+
+    def test_vfpu_branch_traces_its_target_after_the_return_path(self):
+        words = emit(0x1000, bvt(4), NOP, jr(RA), NOP, NOP,
+                     addiu(SP, SP, -0x20), jr(RA), NOP)
+        elf, ranges = image(words)
+        covered = set()
+
+        analyze.trace_function(elf, 0x1000, ranges, covered, set(), set())
+
+        self.assertIn(0x1014, covered)
+
+    def test_vfpu_branch_ends_the_materialization_straight_line_run(self):
+        words = emit(0x1000, lui(T9, 0), bvt(4), NOP, addiu(T9, T9, 0x1010),
+                     jr(RA), NOP, jr(RA), NOP)
+        elf, ranges = image(words)
+        read_word = elf.read_at_vaddr
+
+        def read(address, size):
+            if size == 4:
+                return read_word(address, size)
+            if size <= 0 or size % 4:
+                return None
+            parts = [read_word(at, 4) for at in range(address, address + size, 4)]
+            return b"".join(parts) if all(part is not None for part in parts) else None
+
+        elf.read_at_vaddr = read
+        discovery = SimpleNamespace(
+            elf=elf,
+            ranges=ranges,
+            file_exec_ranges=[],
+            relocated=None,
+            jumps=None,
+            hc=set(),
+            noisy=set(),
+            jtails=set(),
+            cfg_gate=False,
+            in_text=lambda address: analyze.in_ranges(address, ranges),
+            shadow=frozenset(),
+            materialized={},
+        )
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertNotIn(0x1010, discovery.hc)
+
+
 class BranchEdgeCensusTests(unittest.TestCase):
     """The edge census must report what the encoding says, and nothing else."""
 
@@ -923,6 +1084,14 @@ class CodePointerEvidenceTests(unittest.TestCase):
         evidence = analyze.code_pointer_evidence(elf, ranges)
         self.assertIn(0x1010, evidence["immediate"])
 
+    def test_chained_la_tracks_the_completed_value_in_the_destination(self):
+        base = 0x08800000
+        words = emit(base, lui(A0, 0x0880), addiu(A0, A0, 0x10), addiu(5, A0, 0x40))
+        elf, _ranges = image(words)
+        evidence = analyze.code_pointer_evidence(elf, [(base, base + 0x100)])
+        self.assertIn(base + 0x50, evidence["immediate"])
+        self.assertNotIn(base + 0x40, evidence["immediate"])
+
     def test_a_branch_between_the_halves_breaks_the_pair(self):
         """The high half does not survive a control-flow edge."""
         words = emit(
@@ -943,6 +1112,123 @@ class CodePointerEvidenceTests(unittest.TestCase):
         elf, ranges = image(words)
         self.assertEqual(analyze.code_pointer_evidence(elf, ranges)["data"],
                          frozenset())
+
+
+class AddressMaterializationTests(unittest.TestCase):
+    BASE = 0x08800000
+    END = BASE + 0x100
+
+    def discovery(self, instructions):
+        words = {address: NOP for address in range(self.BASE, self.END, 4)}
+        words.update(instructions)
+        elf = WordImage(words)
+        read_word = elf.read_at_vaddr
+
+        def read(address, size):
+            if size == 4:
+                return read_word(address, size)
+            if size <= 0 or size % 4:
+                return None
+            parts = [read_word(at, 4) for at in range(address, address + size, 4)]
+            return b"".join(parts) if all(part is not None for part in parts) else None
+
+        elf.read_at_vaddr = read
+        ranges = [(self.BASE, self.END)]
+        return SimpleNamespace(
+            elf=elf,
+            ranges=ranges,
+            file_exec_ranges=[],
+            relocated=None,
+            jumps=None,
+            hc=set(),
+            noisy=set(),
+            jtails=set(),
+            cfg_gate=False,
+            in_text=lambda address: analyze.in_ranges(address, ranges),
+            shadow=frozenset(),
+            materialized={},
+        )
+
+    def test_chained_la_tracks_the_completed_value_not_the_stale_high_half(self):
+        base = self.BASE
+        discovery = self.discovery({
+            base: lui(A0, 0x0880),
+            base + 4: addiu(A0, A0, 0x10),
+            base + 8: addiu(5, A0, 0x40),
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertIn(base + 0x10, discovery.materialized)
+        self.assertNotIn(base + 0x40, discovery.materialized)
+
+    def test_addu_does_not_copy_a_tracked_register_over_an_unknown_operand(self):
+        base = self.BASE
+        discovery = self.discovery({
+            base: lui(A0, 0x0880),
+            base + 4: addu(5, A0, 8),
+            base + 8: addiu(6, 5, 0x50),
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertNotIn(base + 0x50, discovery.materialized)
+
+    def test_gas_switch_table_expansion_seeds_the_table_entries(self):
+        # `lw v0, T(idx)` expands to lui at, %hi(T); addu at, at, idx; lw v0, %lo(T)(at):
+        # the table address is hi + lo whatever the index holds.
+        base, table, at, index = self.BASE, self.BASE + 0x80, 1, 8
+        discovery = self.discovery({
+            base: lui(at, 0x0880),
+            base + 4: addu(at, at, index),
+            base + 8: lw(V0, at, 0x80),
+            base + 12: jr(V0),
+            table: base + 0x40,
+            table + 4: base + 0x50,
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertLessEqual({base + 0x40, base + 0x50}, discovery.hc)
+
+    def test_la_then_sw_reads_the_vtable_at_the_completed_address(self):
+        base, vtable, s0 = self.BASE, self.BASE + 0x80, 16
+        discovery = self.discovery({
+            base: lui(A0, 0x0880),
+            base + 4: addiu(A0, A0, 0x80),
+            base + 8: sw(A0, s0, 0),
+            vtable: base + 0x40,
+            vtable + 4: base + 0x50,
+        })
+
+        analyze._seed_address_materializations(discovery)
+
+        self.assertLessEqual({base + 0x40, base + 0x50}, discovery.hc)
+
+    def test_materialization_scan_does_not_dump_ranges_to_stderr(self):
+        discovery = self.discovery({self.BASE: lui(A0, 0x0880)})
+        output = io.StringIO()
+
+        with contextlib.redirect_stderr(output):
+            analyze._seed_address_materializations(discovery)
+
+        self.assertEqual(output.getvalue(), "")
+
+
+class ScWriteTests(unittest.TestCase):
+    def test_sc_invalidates_a_constant_call_argument(self):
+        target = 0x1040
+        words = emit(
+            0x1000,
+            lui(A0, 0), addiu(A0, A0, 0x1010),
+            lui(5, 0), addiu(5, 5, 0x1020),
+            sc(A0, 16), jal(target), NOP,
+        )
+        elf, _ranges = image(words)
+
+        arguments = list(analyze._constant_arguments_at_calls(elf, set(words), None))
+
+        self.assertEqual(arguments, [])
 
 
 class DirectBranchAuditTests(unittest.TestCase):
