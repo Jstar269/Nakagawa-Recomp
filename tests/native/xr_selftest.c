@@ -72,6 +72,13 @@ typedef struct Fake {
     const void *last_end_layers;
     char order[64];  // W, B, E in call order
     int bad_args;    // a fake saw an argument the OpenXR specification forbids
+    // Lists that change between the two-call idiom's count call and its fill call (a layer
+    // or runtime added extensions, or the system gained a blend mode): each call after the
+    // first reports one more entry, up to ext_grow (blend_grow) extra entries.
+    uint32_t ext_grow;
+    uint32_t blend_grow;
+    int app_name_bad_utf8;  // xrCreateInstance saw an applicationName that is not valid UTF-8
+    char app_name_seen[XR_MAX_APPLICATION_NAME_SIZE];
 } Fake;
 
 static Fake fk;
@@ -111,8 +118,27 @@ static XrResult XRAPI_CALL fake_EnumerateInstanceExtensionProperties(const char 
     if (XR_FAILED(fk.enum_result)) {
         return fk.enum_result;
     }
-    const char *names[2] = {"XR_KHR_opengl_enable", "XR_KHR_vulkan_enable2"};
-    uint32_t count = fk.has_vulkan_enable2 ? 2u : 1u;
+    static const char *const grown[] = {"XR_EXT_fake_grow_1", "XR_EXT_fake_grow_2", "XR_EXT_fake_grow_3",
+                                        "XR_EXT_fake_grow_4", "XR_EXT_fake_grow_5", "XR_EXT_fake_grow_6",
+                                        "XR_EXT_fake_grow_7", "XR_EXT_fake_grow_8"};
+    const char *names[2 + sizeof(grown) / sizeof(grown[0])];
+    uint32_t count = 0;
+    names[count++] = "XR_KHR_opengl_enable";
+    // Extensions added after the count call land before XR_KHR_vulkan_enable2, so a fill
+    // call with the stale capacity cannot see it.
+    uint32_t extra = (uint32_t)(fk.n_enum - 1);
+    if (extra > fk.ext_grow) {
+        extra = fk.ext_grow;
+    }
+    if (extra > sizeof(grown) / sizeof(grown[0])) {
+        extra = (uint32_t)(sizeof(grown) / sizeof(grown[0]));
+    }
+    for (uint32_t i = 0; i < extra; i++) {
+        names[count++] = grown[i];
+    }
+    if (fk.has_vulkan_enable2) {
+        names[count++] = "XR_KHR_vulkan_enable2";
+    }
     *countOutput = count;
     if (capacityInput == 0) {
         return XR_SUCCESS;
@@ -129,9 +155,44 @@ static XrResult XRAPI_CALL fake_EnumerateInstanceExtensionProperties(const char 
     return XR_SUCCESS;
 }
 
+// The specification's valid usage for XrApplicationInfo: applicationName is a
+// NUL-terminated UTF-8 string within XR_MAX_APPLICATION_NAME_SIZE. Returns 1 when the
+// field holds one (each lead byte followed by its continuation bytes).
+static int fake_name_is_utf8(const char *name, size_t cap) {
+    const unsigned char *p = (const unsigned char *)name;
+    size_t n = 0;
+    while (n < cap && p[n] != 0) {
+        n++;
+    }
+    if (n == cap) {
+        return 0;  // no NUL inside the field
+    }
+    for (size_t i = 0; i < n;) {
+        unsigned char c = p[i];
+        size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+        if (len == 0 || i + len > n) {
+            return 0;
+        }
+        for (size_t k = 1; k < len; k++) {
+            if ((p[i + k] & 0xC0) != 0x80) {
+                return 0;
+            }
+        }
+        i += len;
+    }
+    return 1;
+}
+
 static XrResult XRAPI_CALL fake_CreateInstance(const XrInstanceCreateInfo *createInfo, XrInstance *instance) {
     if (fk.n_create < 4 && createInfo != NULL) {
         fk.api_seen[fk.n_create] = createInfo->applicationInfo.apiVersion;
+    }
+    if (createInfo != NULL) {
+        memcpy(fk.app_name_seen, createInfo->applicationInfo.applicationName, sizeof(fk.app_name_seen));
+        if (!fake_name_is_utf8(createInfo->applicationInfo.applicationName, XR_MAX_APPLICATION_NAME_SIZE)) {
+            fk.app_name_bad_utf8++;
+            fk.bad_args++;
+        }
     }
     fk.n_create++;
     if (createInfo == NULL || createInfo->type != XR_TYPE_INSTANCE_CREATE_INFO || createInfo->enabledExtensionCount != 1 ||
@@ -183,14 +244,21 @@ static XrResult XRAPI_CALL fake_EnumerateEnvironmentBlendModes(XrInstance instan
     if (XR_FAILED(fk.blend_result)) {
         return fk.blend_result;
     }
-    *countOutput = fk.n_blend_modes;
+    // A mode added after the count call comes from blend_modes[n_blend_modes..].
+    uint32_t n = fk.n_blend_modes + ((uint32_t)(fk.n_blend_enum - 1) < fk.blend_grow
+                                         ? (uint32_t)(fk.n_blend_enum - 1)
+                                         : fk.blend_grow);
+    if (n > sizeof(fk.blend_modes) / sizeof(fk.blend_modes[0])) {
+        n = (uint32_t)(sizeof(fk.blend_modes) / sizeof(fk.blend_modes[0]));
+    }
+    *countOutput = n;
     if (capacityInput == 0) {
         return XR_SUCCESS;
     }
-    if (capacityInput < fk.n_blend_modes) {
+    if (capacityInput < n) {
         return XR_ERROR_SIZE_INSUFFICIENT;
     }
-    for (uint32_t i = 0; i < fk.n_blend_modes; i++) {
+    for (uint32_t i = 0; i < n; i++) {
         modes[i] = fk.blend_modes[i];
     }
     return XR_SUCCESS;
@@ -404,6 +472,69 @@ static void test_refusals(void) {
     CHECK(r == NK_XR_REFUSE_INSTANCE);
     CHECK(fk.n_create == 1 && fk.n_destroy_instance == 1 && fk.n_get_system == 0);
 
+    // xrDestroyInstance itself cannot be resolved: the only destroy function comes from the
+    // instance, so the instance cannot be destroyed (the documented exception to "nothing
+    // is left open"); the probe still refuses and leaves the outputs untouched.
+    fake_reset();
+    fk.omit = "xrDestroyInstance";
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    r = nk_xr_probe(&f, "test", &inst, &sys);
+    CHECK(r == NK_XR_REFUSE_INSTANCE);
+    CHECK(fk.n_create == 1 && fk.n_destroy_instance == 0 && fk.n_get_system == 0);
+    CHECK(inst == (XrInstance)(uintptr_t)0xdead && sys == 99);
+
+    // An extension added between the count call and the fill call: the fill call reports
+    // XR_ERROR_SIZE_INSUFFICIENT, and the probe asks again with the new count instead of
+    // reporting a missing runtime.
+    fake_reset();
+    fk.ext_grow = 1;
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    r = nk_xr_probe(&f, "test", &inst, &sys);
+    CHECK(r == NK_XR_OK);
+    CHECK(fk.n_enum == 3);  // count, a fill that is too small, a fill at the new count
+    CHECK(fk.n_create == 1);
+    inst = (XrInstance)(uintptr_t)0xdead;
+    sys = 99;
+    // A list that changes on every call is asked a bounded number of times, then refused
+    // by name before any instance is created.
+    fake_reset();
+    fk.ext_grow = 8;
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    r = nk_xr_probe(&f, "test", &inst, &sys);
+    CHECK(r == NK_XR_REFUSE_NO_RUNTIME);
+    CHECK(fk.n_enum == 1 + NK_XR_ENUM_ATTEMPTS && fk.n_create == 0);
+    CHECK(inst == (XrInstance)(uintptr_t)0xdead && sys == 99);
+
+    // An application name longer than the field is cut on a UTF-8 code point boundary:
+    // 50 three-byte characters (150 bytes) keep 42 whole characters (126 bytes), never a
+    // lead byte without its continuation bytes.
+    {
+        char longname[50 * 3 + 1];
+        for (int i = 0; i < 50; i++) {
+            memcpy(longname + 3 * i, "\xE3\x81\x82", 3);  // U+3042
+        }
+        longname[150] = '\0';
+        fake_reset();
+        CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+        r = nk_xr_probe(&f, longname, &inst, &sys);
+        CHECK(r == NK_XR_OK);
+        CHECK(fk.app_name_bad_utf8 == 0);
+        CHECK(strlen(fk.app_name_seen) == 126 && memcmp(fk.app_name_seen, longname, 126) == 0);
+        // A long ASCII name keeps the whole field less its NUL.
+        memset(longname, 'a', 150);
+        fake_reset();
+        CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+        CHECK(nk_xr_probe(&f, longname, &inst, &sys) == NK_XR_OK);
+        CHECK(strlen(fk.app_name_seen) == XR_MAX_APPLICATION_NAME_SIZE - 1);
+        // A name that fits is passed unchanged.
+        fake_reset();
+        CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+        CHECK(nk_xr_probe(&f, "\xE3\x81\x82 test", &inst, &sys) == NK_XR_OK);
+        CHECK(strcmp(fk.app_name_seen, "\xE3\x81\x82 test") == 0 && fk.app_name_bad_utf8 == 0);
+        inst = (XrInstance)(uintptr_t)0xdead;
+        sys = 99;
+    }
+
     // No head-mounted display: the instance is destroyed again.
     fake_reset();
     fk.get_system_result = XR_ERROR_FORM_FACTOR_UNAVAILABLE;
@@ -519,6 +650,19 @@ static void test_blend_mode_choice(void) {
     CHECK(fk.last_end_blend == XR_ENVIRONMENT_BLEND_MODE_ADDITIVE);
     CHECK(fk.bad_args == 0);
 
+    // A mode added between the count call and the fill call: asked again with the new
+    // count, so OPAQUE (the added mode) is found instead of refusing the instance.
+    fake_reset();
+    fk.blend_modes[0] = XR_ENVIRONMENT_BLEND_MODE_ADDITIVE;
+    fk.blend_modes[1] = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    fk.n_blend_modes = 1;
+    fk.blend_grow = 1;
+    CHECK(nk_xr_load_from_proc(&f, fake_GetInstanceProcAddr) == NK_XR_OK);
+    CHECK(nk_xr_probe(&f, "test", &inst, &sys) == NK_XR_OK);
+    CHECK(f.blend_mode == XR_ENVIRONMENT_BLEND_MODE_OPAQUE);
+    CHECK(fk.n_blend_enum == 3 && fk.n_destroy_instance == 0);
+    CHECK(fk.bad_args == 0);
+
     // A runtime that offers no mode, or fails the query: refused, instance destroyed again.
     fake_reset();
     fk.n_blend_modes = 0;
@@ -540,14 +684,27 @@ static void test_null_table_refusals(void) {
     memset(&z, 0, sizeof(z));
     nk_xr_mailbox_init(&m);
     nk_xr_run_init(&run);
-    nk_xr_session_next(&run, XR_SESSION_STATE_READY);  // running = 1
+    CHECK(nk_xr_session_next(&run, XR_SESSION_STATE_READY) == NK_XR_ACT_BEGIN_SESSION);  // running = 1
 
     // A table whose instance functions were never resolved: a named result, no crash.
+    // No xrBeginSession was made, so the session is not begun: running is undone and the
+    // next READY asks for the begin again.
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_BEGIN_SESSION) == XR_ERROR_FUNCTION_UNSUPPORTED);
+    CHECK(run.running == 0 && run.layers_shown == 0);
+    CHECK(nk_xr_session_next(&run, XR_SESSION_STATE_READY) == NK_XR_ACT_BEGIN_SESSION);
+    // A refused end changes nothing (STOPPING already stopped the frames).
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_END_SESSION) == XR_ERROR_FUNCTION_UNSUPPORTED);
+    CHECK(run.running == 1);
+    // No xrDestroySession was made, so the session is not destroyed: a later EXITING
+    // still asks for the destroy instead of the plain exit.
+    CHECK(nk_xr_session_next(&run, XR_SESSION_STATE_LOSS_PENDING) == NK_XR_ACT_DESTROY_SESSION);
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_DESTROY_SESSION) == XR_ERROR_FUNCTION_UNSUPPORTED);
+    CHECK(run.session_destroyed == 0);
+    CHECK(nk_xr_session_next(&run, XR_SESSION_STATE_EXITING) == NK_XR_ACT_DESTROY_AND_EXIT);
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_DESTROY_AND_EXIT) == XR_ERROR_FUNCTION_UNSUPPORTED);
-    CHECK(run.running == 1);  // a refused action changes no bookkeeping
+    CHECK(run.session_destroyed == 0 && run.done == 1);
+    nk_xr_run_init(&run);
+    nk_xr_session_next(&run, XR_SESSION_STATE_READY);  // running = 1 for the frame checks below
     CHECK(nk_xr_do_action(&z, FAKE_SESSION, &run, NK_XR_ACT_FRAMES_SHOWN) == XR_SUCCESS);  // no call needed
     CHECK(nk_xr_frame_once(&z, FAKE_SESSION, &run, &m, &fr) == XR_ERROR_FUNCTION_UNSUPPORTED);
     CHECK(fr.slot == -1 && fr.layers_submitted == 0);

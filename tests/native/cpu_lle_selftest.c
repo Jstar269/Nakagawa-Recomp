@@ -696,9 +696,9 @@ static void test_hw_psp_a3_08_11_vfpu_through_interpreter(void) {
     s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
     s.r[13] = base;
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "interp aligned lv.q must not raise (got %s)",
-          sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_UNSUPPORTED && fault.pc == TEST_BASE,
+          "interp aligned lv.q must not raise: want the stub VFPU op's UNSUPPORTED at the op (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
     CHECK(s.flow_kind == SR_FLOW_NONE, "interp aligned lv.q must not set flow");
 
     /* PSP-A3-11: lvl.q/lvr.q at +4 bypass like lwl/lwr and must not raise. */
@@ -709,9 +709,9 @@ static void test_hw_psp_a3_08_11_vfpu_through_interpreter(void) {
     s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
     s.r[13] = base + 4u;
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "interp lvl.q at +4 must not raise (got %s)",
-          sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_UNSUPPORTED && fault.pc == TEST_BASE,
+          "interp lvl.q at +4 must not raise: want the stub VFPU op's UNSUPPORTED at the op (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
     CHECK(s.flow_kind == SR_FLOW_NONE, "interp lvl.q at +4 must not set flow");
 
     fresh_state(&s);
@@ -721,9 +721,9 @@ static void test_hw_psp_a3_08_11_vfpu_through_interpreter(void) {
     s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
     s.r[13] = base + 4u;
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "interp lvr.q at +4 must not raise (got %s)",
-          sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_UNSUPPORTED && fault.pc == TEST_BASE,
+          "interp lvr.q at +4 must not raise: want the stub VFPU op's UNSUPPORTED at the op (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
     CHECK(s.flow_kind == SR_FLOW_NONE, "interp lvr.q at +4 must not set flow");
 }
 
@@ -992,9 +992,9 @@ static void test_hw_psp_a3_12_15_vfpu_through_interpreter(void) {
     s.cop0[SR_CP0_STATUS] = TEST_PRE_STATUS;
     s.r[13] = base + 1u;
     r = sr_guest_interp_run(&s, TEST_BASE, &fault);
-    CHECK(r != SR_GUEST_INTERP_EXCEPTION,
-          "interp lvl.q at odd must not raise (got %s)",
-          sr_guest_interp_result_name(r));
+    CHECK(r == SR_GUEST_INTERP_UNSUPPORTED && fault.pc == TEST_BASE,
+          "interp lvl.q at odd must not raise: want the stub VFPU op's UNSUPPORTED at the op (got %s at 0x%08x)",
+          sr_guest_interp_result_name(r), fault.pc);
     CHECK(s.flow_kind == SR_FLOW_NONE, "interp lvl.q at odd must not set flow");
 }
 
@@ -1840,9 +1840,41 @@ static void aot_fatal_native_caller_body(CpuState *s) {
     g_aot_fatal_native_caller_after_call++;
 }
 
+/* The fatal-flow children exit(1) inside dispatch_call, but so does an ordinary
+ * dispatch miss: a refused registration, a caller PC that misses at the first
+ * dispatch, or an exception that never reached the unowned vector. The exit status
+ * alone cannot tell those apart, so each child records its final flow state from an
+ * atexit hook into a marker file the parent reads. The state is static so the hook
+ * can still read it while exit() runs from inside dispatch_call. */
+static const CpuState *g_fatal_child_state;
+static const char *g_fatal_child_marker;
+
+static void fatal_child_write_marker(void) {
+    if (g_fatal_child_state == NULL || g_fatal_child_marker == NULL) return;
+    FILE *out = fopen(g_fatal_child_marker, "wb");
+    if (out == NULL) return;
+    fprintf(out, "flow_kind=%u flow_target=0x%08x exccode=%u\n",
+            (unsigned)g_fatal_child_state->flow_kind,
+            (unsigned)g_fatal_child_state->flow_target,
+            (unsigned)CAUSE_EXCCODE(g_fatal_child_state->cop0[SR_CP0_CAUSE]));
+    fclose(out);
+}
+
+static void fatal_child_record(const CpuState *s, const char *marker) {
+    g_fatal_child_state = s;
+    g_fatal_child_marker = marker;
+    (void)atexit(fatal_child_write_marker);
+}
+
+#define FATAL_CHILD_MARKER_DIR SR_SELFTEST_BUILD_ROOT "/mygame"
+#define FATAL_CHILD_MARKER_AOT FATAL_CHILD_MARKER_DIR "/cpu_lle_fatal_child_aot.txt"
+#define FATAL_CHILD_MARKER_SYSCALL FATAL_CHILD_MARKER_DIR "/cpu_lle_fatal_child_syscall.txt"
+#define FATAL_CHILD_MARKER_BREAK FATAL_CHILD_MARKER_DIR "/cpu_lle_fatal_child_break.txt"
+
 static int run_fatal_dispatch_child(void) {
-    CpuState s;
+    static CpuState s;
     fresh_state(&s);
+    fatal_child_record(&s, FATAL_CHILD_MARKER_AOT);
     sr_cpu_lle_set_enabled(1);
     sr_cpu_lle_set_vectors(AOT_EXCEPTION_FATAL_VECTOR,
                            AOT_EXCEPTION_FATAL_VECTOR,
@@ -2193,7 +2225,8 @@ static void test_dispatch_aot_fatal_flow_propagates(void) {
 }
 
 static int run_generated_fatal_dispatch_child(const char *which) {
-    CpuState s;
+    static CpuState s;
+    const char *marker;
     uint32_t caller_pc;
     uint32_t body_pc;
     RecompFn caller;
@@ -2204,16 +2237,19 @@ static int run_generated_fatal_dispatch_child(const char *which) {
         body_pc = GENERATED_SYSCALL_ENTRY;
         caller = f_08810820;
         body = f_08810800;
+        marker = FATAL_CHILD_MARKER_SYSCALL;
     } else if (strcmp(which, "break") == 0) {
         caller_pc = GENERATED_BREAK_CALLER;
         body_pc = GENERATED_BREAK_ENTRY;
         caller = f_08810860;
         body = f_08810840;
+        marker = FATAL_CHILD_MARKER_BREAK;
     } else {
         return 97;
     }
 
     fresh_state(&s);
+    fatal_child_record(&s, marker);
     sr_cpu_lle_set_enabled(1);
     sr_cpu_lle_set_vectors(AOT_EXCEPTION_FATAL_VECTOR,
                            AOT_EXCEPTION_FATAL_VECTOR,
@@ -2231,17 +2267,57 @@ static int run_generated_fatal_dispatch_child(const char *which) {
     return s.r[8] == 1u ? 98 : 99;
 }
 
+/* Run a fatal-flow child and require both its exit status 1 and the marker its
+ * atexit hook wrote: the fatal flow to the unowned vector, with the cause the body
+ * raised. Returns the child status. */
+static int run_fatal_child_checked(const char *self_path, const char *mode,
+                                   const char *marker, unsigned want_exccode,
+                                   const char *what) {
+#ifdef _WIN32
+    (void)_mkdir(FATAL_CHILD_MARKER_DIR);
+#else
+    (void)mkdir(FATAL_CHILD_MARKER_DIR, 0755);
+#endif
+    (void)remove(marker);
+    int status = run_child_process(self_path, mode);
+    char want[96];
+    char got[96] = "";
+    snprintf(want, sizeof want, "flow_kind=%u flow_target=0x%08x exccode=%u\n",
+             (unsigned)SR_FLOW_FATAL, (unsigned)AOT_EXCEPTION_FATAL_VECTOR,
+             want_exccode);
+    FILE *in = fopen(marker, "rb");
+    if (in != NULL) {
+        size_t n = fread(got, 1, sizeof got - 1u, in);
+        got[n] = '\0';
+        fclose(in);
+    }
+    CHECK(strcmp(got, want) == 0,
+          "%s child did not exit through the fatal flow to the unowned vector "
+          "(marker \"%s\", want \"%s\")", what, got, want);
+    (void)remove(marker);
+    return status;
+}
+
 static void test_generated_lle_syscall_break_fatal_flow(const char *self_path) {
-    const char *cases[] = {
-        "--generated-fatal-dispatch-child:syscall",
-        "--generated-fatal-dispatch-child:break",
+    static const struct {
+        const char *mode;
+        const char *marker;
+        unsigned exccode;
+        const char *name;
+    } cases[] = {
+        {"--generated-fatal-dispatch-child:syscall", FATAL_CHILD_MARKER_SYSCALL,
+         SR_EXC_SYS, "syscall"},
+        {"--generated-fatal-dispatch-child:break", FATAL_CHILD_MARKER_BREAK,
+         SR_EXC_BP, "break"},
     };
     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
-        int status = run_child_process(self_path, cases[i]);
+        int status = run_fatal_child_checked(self_path, cases[i].mode,
+                                             cases[i].marker, cases[i].exccode,
+                                             cases[i].name);
         CHECK(status == 1,
               "generated --lle-cpu %s caller did not fail closed before its "
               "post-call sentinel (child status=%d)",
-              i == 0 ? "syscall" : "break", status);
+              cases[i].name, status);
     }
 }
 
@@ -2256,7 +2332,9 @@ static int run_selftest_child(const char *mode) {
 }
 
 static void test_public_dispatch_call_terminates_fatal_flow(const char *self_path) {
-    int status = run_child_process(self_path, "--fatal-aot-dispatch-child");
+    int status = run_fatal_child_checked(self_path, "--fatal-aot-dispatch-child",
+                                         FATAL_CHILD_MARKER_AOT, SR_EXC_SYS,
+                                         "public dispatch_call");
     CHECK(status == 1,
           "dispatch_call returned through an AOT continuation after fatal flow "
           "instead of terminating (child status=%d)", status);
