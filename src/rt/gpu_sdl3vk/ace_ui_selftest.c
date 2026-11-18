@@ -243,11 +243,24 @@ static void cell_layout(void) {
         const NkUiDrawList *list = build(ui, &f, &density);
         CHECK(list != NULL, "%dx%d: the frame was dropped", f.pixel_w, f.pixel_h);
         if (!list) continue;
-        int readout[4], notice[4], keys[4];
+        int readout[4] = { 0, 0, 0, 0 }, notice[4] = { 0, 0, 0, 0 }, keys[4] = { 0, 0, 0, 0 };
         int safe = (int)(16.0f * density) - 1;
-        CHECK(element_bounds(list, ACE_UI_ID_READOUT, readout), "%dx%d: no readout", f.pixel_w, f.pixel_h);
-        CHECK(element_bounds(list, ACE_UI_ID_NOTICE, notice), "%dx%d: no notice", f.pixel_w, f.pixel_h);
-        CHECK(element_bounds(list, ACE_UI_ID_KEYBOARD, keys), "%dx%d: no keyboard", f.pixel_w, f.pixel_h);
+        const int has_readout = element_bounds(list, ACE_UI_ID_READOUT, readout);
+        const int has_notice = element_bounds(list, ACE_UI_ID_NOTICE, notice);
+        const int has_keys = element_bounds(list, ACE_UI_ID_KEYBOARD, keys);
+        CHECK(has_readout, "%dx%d: no readout", f.pixel_w, f.pixel_h);
+        CHECK(has_notice, "%dx%d: no notice", f.pixel_w, f.pixel_h);
+        CHECK(has_keys, "%dx%d: no keyboard", f.pixel_w, f.pixel_h);
+        /* No element draws outside the window. */
+        for (uint32_t i = 0; i < list->ncmd; i++) {
+            const NkUiDrawCmd *c = &list->cmd[i];
+            if (c->kind == NK_UI_DRAW_SCISSOR_START || c->kind == NK_UI_DRAW_SCISSOR_END) continue;
+            CHECK(c->bounds[0] >= 0 && c->bounds[1] >= 0 && c->bounds[2] <= f.pixel_w &&
+                  c->bounds[3] <= f.pixel_h, "%dx%d: command %u outside the window", f.pixel_w,
+                  f.pixel_h, i);
+        }
+        /* The checks below compare the three rectangles: without one of them they have nothing to read. */
+        if (!has_readout || !has_notice || !has_keys) continue;
         const int *rects[3] = { readout, notice, keys };
         for (int r = 0; r < 3; r++) {
             CHECK(rects[r][0] >= safe && rects[r][1] >= safe && rects[r][2] <= f.pixel_w - safe &&
@@ -260,14 +273,6 @@ static void cell_layout(void) {
               "%dx%d: readout top left, notice top right", f.pixel_w, f.pixel_h);
         CHECK(keys[1] >= readout[3] && keys[1] >= notice[3], "%dx%d: the keyboard covers a chip",
               f.pixel_w, f.pixel_h);
-        /* No element draws outside the window. */
-        for (uint32_t i = 0; i < list->ncmd; i++) {
-            const NkUiDrawCmd *c = &list->cmd[i];
-            if (c->kind == NK_UI_DRAW_SCISSOR_START || c->kind == NK_UI_DRAW_SCISSOR_END) continue;
-            CHECK(c->bounds[0] >= 0 && c->bounds[1] >= 0 && c->bounds[2] <= f.pixel_w &&
-                  c->bounds[3] <= f.pixel_h, "%dx%d: command %u outside the window", f.pixel_w,
-                  f.pixel_h, i);
-        }
     }
     /* The render notice (#2151) at the sizes above and at small and scaled windows (a 1x game
      * window at 200% and 150% display scale, a window smaller than the game's, a tall one): at
@@ -298,7 +303,8 @@ static void cell_layout(void) {
             const NkUiDrawList *list = build(shaped, &f, &density);
             CHECK(list != NULL, "%dx%d host: the frame was dropped", f.pixel_w, f.pixel_h);
             if (!list) continue;
-            int readout[4], notice[4], host[4], head[4], text[4] = {0, 0, 0, 0}, hint[4];
+            int readout[4] = {0, 0, 0, 0}, notice[4] = {0, 0, 0, 0}, host[4] = {0, 0, 0, 0},
+                head[4] = {0, 0, 0, 0}, text[4] = {0, 0, 0, 0}, hint[4] = {0, 0, 0, 0};
             char joined[512];
             int safe = (int)(16.0f * density) - 1;
             CHECK(element_bounds(list, ACE_UI_ID_HOST_NOTICE, host), "%dx%d: no render notice",
@@ -359,7 +365,7 @@ static void cell_layout(void) {
         f.host_notice = k_long;
         f.host_notice_hint = k_host_hint;
         float density = 1.0f;
-        int host[4], text[4] = {0, 0, 0, 0};
+        int host[4] = {0, 0, 0, 0}, text[4] = {0, 0, 0, 0};
         char joined[512];
         const NkUiDrawList *list = build(shaped, &f, &density);
         CHECK(list && element_bounds(list, ACE_UI_ID_HOST_NOTICE, host), "long words: no render notice");
@@ -766,6 +772,56 @@ static uint32_t pixel(int w, int x, int y) {
     return ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | p[0];   /* BGRA -> 0xRRGGBB */
 }
 
+/* Whether the clear colour read back is the UNORM8 value of {0.25, 0.5, 0.75}, within one level for
+ * the device's rounding. */
+static int is_frame_colour(uint32_t c) {
+    static const int want[3] = { 64, 128, 191 };   /* 0.25, 0.5 and 0.75 of 255, R G B */
+    for (int k = 0; k < 3; k++) {
+        const int got = (int)((c >> (16 - 8 * k)) & 0xFFu);
+        if (got < want[k] - 1 || got > want[k] + 1) return 0;
+    }
+    return 1;
+}
+
+/* Every pixel of the read-back image that no command of frame f's draw list covers is the game
+ * frame's colour: the pass drew nowhere else. The list is laid out again here, with the pass's text
+ * backend, and a command covers its bounds. */
+static void check_outside(const NkUiTextBackend *text, const AceUiFrame *f, int w, int h, uint32_t frame_colour,
+                          const char *what) {
+    NkUiConfig config;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_OVERLAY;
+    config.text = text;
+    NkUi *probe = nk_ui_create(&config);
+    float density = 1.0f;
+    const NkUiDrawList *list = probe ? build(probe, f, &density) : NULL;
+    unsigned char *covered = (unsigned char *)calloc((size_t)w * (size_t)h, 1u);
+    CHECK(list != NULL && covered != NULL, "%s: the frame could not be laid out to check the pixels outside it", what);
+    if (list && covered) {
+        for (uint32_t i = 0; i < list->ncmd; i++) {
+            const NkUiDrawCmd *c = &list->cmd[i];
+            if (c->kind == NK_UI_DRAW_SCISSOR_START || c->kind == NK_UI_DRAW_SCISSOR_END) continue;
+            const int x0 = c->bounds[0] < 0 ? 0 : c->bounds[0], y0 = c->bounds[1] < 0 ? 0 : c->bounds[1];
+            const int x1 = c->bounds[2] > w ? w : c->bounds[2], y1 = c->bounds[3] > h ? h : c->bounds[3];
+            for (int y = y0; y < y1; y++)
+                if (x1 > x0) memset(covered + (size_t)y * (size_t)w + (size_t)x0, 1, (size_t)(x1 - x0));
+        }
+        unsigned changed = 0;
+        int first_x = -1, first_y = -1;
+        uint32_t first = 0;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                if (covered[(size_t)y * (size_t)w + (size_t)x] || pixel(w, x, y) == frame_colour) continue;
+                if (!changed) { first_x = x; first_y = y; first = pixel(w, x, y); }
+                changed++;
+            }
+        CHECK(changed == 0, "%s: %u pixel(s) outside every element changed, the first at (%d,%d) is %06x, "
+              "not %06x", what, changed, first_x, first_y, first, frame_colour);
+    }
+    free(covered);
+    nk_ui_destroy(probe);
+}
+
 static void write_ppm(const char *path, int w, int h) {
     FILE *f = fopen(path, "wb");
     if (!f) return;
@@ -780,14 +836,30 @@ static void write_ppm(const char *path, int w, int h) {
 }
 
 #if defined(NK_UI_WITH_SDL_TTF)
-/* The launcher's fonts from a player folder, as the overlay host registers them. */
+/* Set when the SDL3_ttf library could not be loaded at run time: the font legs are a named SKIP
+ * (exit 77), never a silent pass. */
+static int s_fonts_skipped;
+
+/* The launcher's fonts from a player folder, as the overlay host registers them. Without the
+ * SDL3_ttf library the font legs skip by name; with it, a font that does not load from the folder
+ * the run was given is a failure. */
 static NkUiTtf *fonts_open(const char *root) {
     NkUiTtf *ttf = nk_ui_ttf_create(NULL, 0);
-    if (!ttf) return NULL;
+    if (!ttf) {
+        if (!s_fonts_skipped)
+            printf("SKIP ace-ui-selftest fonts: the SDL3_ttf library could not be loaded (%s); the launcher's "
+                   "fonts were not laid out or drawn\n", nk_ui_ttf_last_error());
+        s_fonts_skipped = 1;
+        return NULL;
+    }
     for (int font = 0; font < NK_UI_FONT_COUNT; font++) {
         char path[1024];
         snprintf(path, sizeof(path), "%s/%s", root, nk_ui_font_path(font));
-        if (!nk_ui_ttf_add_font(ttf, font, path)) { nk_ui_ttf_destroy(ttf); return NULL; }
+        if (!nk_ui_ttf_add_font(ttf, font, path)) {
+            CHECK(0, "the launcher's font %s could not be loaded (%s)", path, nk_ui_ttf_last_error());
+            nk_ui_ttf_destroy(ttf);
+            return NULL;
+        }
     }
     for (int font = 0; font < NK_UI_FONT_COUNT; font++) {
         if (font == NK_UI_FONT_CJK) continue;
@@ -1025,9 +1097,6 @@ static void cell_notice_every_part(const char *fonts_root) {
             NkUiTextBackend ttf_text = nk_ui_ttf_backend(ttf);
             notice_every_part(&ttf_text, "the launcher's fonts");
             nk_ui_ttf_destroy(ttf);
-        } else {
-            printf("ace-ui-selftest: the fonts under %s could not be loaded; every part on was laid out "
-                   "with block glyphs only\n", fonts_root);
         }
     }
 #else
@@ -1056,7 +1125,6 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
     if (fonts_root) {
         ttf = fonts_open(fonts_root);
         if (ttf) { ttf_text = nk_ui_ttf_backend(ttf); text = &ttf_text; }
-        else printf("ace-ui-selftest: the fonts under %s could not be loaded; block glyphs\n", fonts_root);
     }
 #else
     (void)fonts_root;
@@ -1083,8 +1151,10 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
         CHECK(present(ui, &empty, w, h, 0) == 0, "an empty frame drew");
         /* The clear colour as this device stores it, from a frame the pass left alone. */
         const uint32_t frame_colour = pixel(w, w / 2, h / 2);
+        CHECK(is_frame_colour(frame_colour), "the cleared frame reads %06x, not {0.25, 0.5, 0.75}", frame_colour);
         CHECK(pixel(w, 22, 22) == frame_colour && pixel(w, w - 22, 22) == frame_colour &&
               pixel(w, w / 2, h - 60) == frame_colour, "an empty frame changed the image");
+        check_outside(text, &empty, w, h, frame_colour, "an empty frame");
         keyboard_open();
         AceUiFrame f = frame_full(w, h, 1.0f);
         CHECK(present(ui, &f, w, h, 0) == 1, "the full frame did not draw");
@@ -1100,6 +1170,7 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
         /* The 16 px safe area stays the game's. */
         CHECK(pixel(w, 8, 8) == frame_colour && pixel(w, w - 8, h - 8) == frame_colour,
               "the safe area changed");
+        check_outside(text, &f, w, h, frame_colour, "the full frame");
         char path[600];
         snprintf(path, sizeof(path), "%s%sace_ui_selftest.ppm", dir ? dir : "", dir ? "/" : "");
         write_ppm(path, w, h);
@@ -1122,12 +1193,14 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
               "the render notice changed the frame outside its chip");
         CHECK(pixel(w, 8, h - 8) == frame_colour && pixel(w, 8, 8) == frame_colour,
               "the render notice changed the safe area");
+        check_outside(text, &host, w, h, frame_colour, "the render notice");
         snprintf(path, sizeof(path), "%s%sace_ui_selftest_notice.ppm", dir ? dir : "", dir ? "/" : "");
         write_ppm(path, w, h);
         printf("ace-ui-selftest: render notice frame written to %s\n", path);
         host.host_notice = NULL;
         CHECK(present(ui, &host, w, h, 0) == 0, "a hidden render notice drew");
         CHECK(pixel(w, 24, h - 24) == frame_colour, "a hidden render notice left its chip");
+        check_outside(text, &host, w, h, frame_colour, "a hidden render notice");
         /* The slowed-logic warning under the readout: two chips, one under the other, with the
          * frame showing in the gap between them and beside the warning. */
         {
@@ -1154,6 +1227,7 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
                       "no readout and warning chips at the top left");
                 CHECK(pixel(w, x, gap_y) == frame_colour && pixel(w, logic[2] + 4, (logic[1] + logic[3]) / 2) ==
                       frame_colour, "the frame does not show between and beside the two chips");
+                check_outside(text, &lf, w, h, frame_colour, "the warning under the readout");
                 snprintf(path, sizeof(path), "%s%sace_ui_selftest_logic.ppm", dir ? dir : "", dir ? "/" : "");
                 write_ppm(path, w, h);
                 printf("ace-ui-selftest: the warning under the readout written to %s\n", path);
@@ -1170,6 +1244,7 @@ static int cell_gpu(const char *dir, const char *fonts_root) {
             CHECK(pixel(w, w / 2 - 40, 40) == frame_colour && pixel(w, w - 22, h / 2) == frame_colour &&
                   pixel(w, w - 8, 8) == frame_colour && pixel(w, 8, h - 8) == frame_colour,
                   "every part on: the notice changed the frame outside its chip");
+            check_outside(text, &every, w, h, frame_colour, "every part on");
             snprintf(path, sizeof(path), "%s%sace_ui_selftest_every_part.ppm", dir ? dir : "", dir ? "/" : "");
             write_ppm(path, w, h);
             printf("ace-ui-selftest: every part on written to %s\n", path);
@@ -1205,6 +1280,13 @@ int main(int argc, char **argv) {
         printf("ace-ui-selftest: layout PASS; gpu SKIP\n");
         return 77;
     }
+#if defined(NK_UI_WITH_SDL_TTF)
+    if (s_fonts_skipped) {
+        /* Everything else passed; the launcher's fonts were not laid out or drawn. */
+        printf("ace-ui-selftest: layout and gpu PASS with block glyphs; the launcher's fonts SKIP\n");
+        return 77;
+    }
+#endif
     printf("ace-ui-selftest: PASS (layout, gpu)\n");
     return 0;
 }

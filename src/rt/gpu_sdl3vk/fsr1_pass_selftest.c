@@ -135,8 +135,9 @@ static int gpu_open(char *why, size_t cap) {
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     if (CreateDevice(g.physical, &dci, NULL, &g.device) != VK_SUCCESS) {
+        /* A device with the queue is there, and could not be made: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDevice failed");
-        return 0;
+        return -1;
     }
 #define DEV(name) name = (PFN_vk##name)GetDeviceProcAddr(g.device, "vk" #name)
     DEV(DestroyDevice); DEV(GetDeviceQueue); DEV(CreateCommandPool); DEV(DestroyCommandPool);
@@ -705,7 +706,8 @@ int main(int argc, char **argv) {
     }
     int up = gpu_open(why, sizeof(why));
     if (up <= 0) {
-        printf("SKIP fsr1-selftest: %s\n", why[0] ? why : "the device could not be set up");
+        printf("%s fsr1-selftest: %s\n", up == 0 ? "SKIP" : "FAIL",
+               why[0] ? why : "the device could not be set up");
         gpu_close();
         free(mutant);
         return up == 0 ? 77 : 1;

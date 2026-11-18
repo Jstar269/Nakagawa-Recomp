@@ -247,8 +247,9 @@ static int gpu_open(char *why, size_t cap) {
     mci.pNext = NULL; /* the chain above belongs to instance creation; the messenger takes none */
     if (g.validation && (!CreateDebugUtilsMessengerEXT ||
                          CreateDebugUtilsMessengerEXT(g.instance, &mci, NULL, &g.messenger) != VK_SUCCESS)) {
+        /* The layer and VK_EXT_debug_utils were found and enabled: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDebugUtilsMessengerEXT failed");
-        return 0;
+        return -1;
     }
     VkPhysicalDevice devs[8];
     uint32_t nd = 8;
@@ -292,8 +293,9 @@ static int gpu_open(char *why, size_t cap) {
     dci.pQueueCreateInfos = &qci;
     dci.pEnabledFeatures = &features;
     if (CreateDevice(g.physical, &dci, NULL, &g.device) != VK_SUCCESS) {
+        /* A device with what the pass needs is there, and could not be made: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDevice failed");
-        return 0;
+        return -1;
     }
 #define DEV(name) name = (PFN_vk##name)GetDeviceProcAddr(g.device, "vk" #name)
     DEV(DestroyDevice); DEV(GetDeviceQueue); DEV(CreateCommandPool); DEV(DestroyCommandPool);
@@ -360,8 +362,12 @@ static void cmd_end(void) {
     si.pCommandBuffers = &g.cb;
     EndCommandBuffer(g.cb);
     ResetFences(g.device, 1, &g.fence);
-    QueueSubmit(g.queue, 1, &si, g.fence);
-    WaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    /* A frame that was not submitted, or whose fence never signalled, left nothing to measure. */
+    const VkResult submitted = QueueSubmit(g.queue, 1, &si, g.fence);
+    CHECK(submitted == VK_SUCCESS, "vkQueueSubmit failed (%d)", (int)submitted);
+    if (submitted != VK_SUCCESS) return;
+    const VkResult waited = WaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    CHECK(waited == VK_SUCCESS, "vkWaitForFences failed (%d)", (int)waited);
 }
 
 /* Every earlier compute or transfer access before every later one. */
@@ -781,14 +787,24 @@ static int run_open(Run *r, int dw, int dh) {
     r->out_px = malloc((size_t)dw * dh * 4);
     r->truth = malloc((size_t)dw * dh * 3 * sizeof(float));
     r->base = malloc((size_t)dw * dh * 3 * sizeof(float));
-    return r->out_px && r->truth && r->base &&
-           tex_make(&r->color, CANVAS_W, CANVAS_H, VK_FORMAT_R8G8B8A8_UNORM, in) &&
-           tex_make(&r->depth, CANVAS_W, CANVAS_H, VK_FORMAT_R32_SFLOAT, in) &&
-           tex_make(&r->mv, CANVAS_W, CANVAS_H, VK_FORMAT_R16G16_SFLOAT, in) &&
-           tex_make(&r->reactive, CANVAS_W, CANVAS_H, VK_FORMAT_R8_UNORM, in) &&
-           tex_make(&r->tc, CANVAS_W, CANVAS_H, VK_FORMAT_R8_UNORM, in) &&
-           tex_make(&r->out, (uint32_t)dw, (uint32_t)dh, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    if (!r->out_px || !r->truth || !r->base) {
+        printf("FAIL run_open %dx%d: out of host memory for the output, truth and baseline\n", dw, dh);
+        s_fail = 1;
+        return 0;
+    }
+    /* A run whose images cannot be made measures nothing: a failure, never a quiet return. */
+    if (!tex_make(&r->color, CANVAS_W, CANVAS_H, VK_FORMAT_R8G8B8A8_UNORM, in) ||
+        !tex_make(&r->depth, CANVAS_W, CANVAS_H, VK_FORMAT_R32_SFLOAT, in) ||
+        !tex_make(&r->mv, CANVAS_W, CANVAS_H, VK_FORMAT_R16G16_SFLOAT, in) ||
+        !tex_make(&r->reactive, CANVAS_W, CANVAS_H, VK_FORMAT_R8_UNORM, in) ||
+        !tex_make(&r->tc, CANVAS_W, CANVAS_H, VK_FORMAT_R8_UNORM, in) ||
+        !tex_make(&r->out, (uint32_t)dw, (uint32_t)dh, VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        printf("FAIL run_open %dx%d: an input or output image could not be made\n", dw, dh);
+        s_fail = 1;
+        return 0;
+    }
+    return 1;
 }
 
 static void run_close(Run *r) {
@@ -833,7 +849,10 @@ static void raster(Run *r, const Scene *s, int t) {
 
 /* One FSR 3 frame of scene s at time t; the output lands in r->out_px. */
 static int frame(Run *r, const Scene *s, int t, int reset) {
-    if (fsr3_jitter_next(&r->jitter, reset, RENDER_W, r->dw, &r->jx, &r->jy) != 0) return 0;
+    if (fsr3_jitter_next(&r->jitter, reset, RENDER_W, r->dw, &r->jx, &r->jy) != 0) {
+        CHECK(0, "fsr3_jitter_next refused frame %d (display width %d)", t, r->dw);
+        return 0;
+    }
     raster(r, s, t);
     Fsr3PassFrame f;
     memset(&f, 0, sizeof(f));
@@ -1350,7 +1369,8 @@ int main(int argc, char **argv) {
     char why[160] = "";
     const int up = gpu_open(why, sizeof(why));
     if (up != 1) {
-        printf("SKIP fsr3-pass-selftest: %s\n", up == 0 ? why : "a Vulkan object could not be made");
+        printf("%s fsr3-pass-selftest: %s\n", up == 0 ? "SKIP" : "FAIL",
+               why[0] ? why : "a Vulkan object could not be made");
         gpu_close();
         return up == 0 ? 77 : 1;
     }

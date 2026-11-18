@@ -255,8 +255,9 @@ static int gpu_open(char *why, size_t cap) {
     mci.pNext = NULL; /* the chain above belongs to instance creation; the messenger takes none */
     if (g.validation && (!CreateDebugUtilsMessengerEXT ||
                          CreateDebugUtilsMessengerEXT(g.instance, &mci, NULL, &g.messenger) != VK_SUCCESS)) {
+        /* The layer and VK_EXT_debug_utils were found and enabled: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDebugUtilsMessengerEXT failed");
-        return 0;
+        return -1;
     }
     VkPhysicalDevice devs[8];
     uint32_t nd = 8;
@@ -319,8 +320,9 @@ static int gpu_open(char *why, size_t cap) {
         dci.ppEnabledExtensionNames = &ext;
     }
     if (CreateDevice(g.physical, &dci, NULL, &g.device) != VK_SUCCESS) {
+        /* A device with the queue is there, and could not be made: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDevice failed");
-        return 0;
+        return -1;
     }
     g.features_enabled = !g.refusal && sf.subgroupSizeControl && sf.computeFullSubgroups && f2.pNext;
 #define DEV(name) name = (PFN_vk##name)GetDeviceProcAddr(g.device, "vk" #name)
@@ -386,8 +388,12 @@ static void cmd_end(void) {
     si.pCommandBuffers = &g.cb;
     EndCommandBuffer(g.cb);
     ResetFences(g.device, 1, &g.fence);
-    QueueSubmit(g.queue, 1, &si, g.fence);
-    WaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    /* A frame that was not submitted, or whose fence never signalled, left nothing to measure. */
+    const VkResult submitted = QueueSubmit(g.queue, 1, &si, g.fence);
+    CHECK(submitted == VK_SUCCESS, "vkQueueSubmit failed (%d)", (int)submitted);
+    if (submitted != VK_SUCCESS) return;
+    const VkResult waited = WaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    CHECK(waited == VK_SUCCESS, "vkWaitForFences failed (%d)", (int)waited);
 }
 
 /* Every earlier compute or transfer access before every later one. */
@@ -785,12 +791,18 @@ static int run_open(Run *r, uint32_t rw, uint32_t rh, uint32_t dw, uint32_t dh, 
     }
     const VkImageUsageFlags in = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     const VkImageUsageFlags color = in | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    return tex_make(&r->depth, rw, rh, VK_FORMAT_R32_SFLOAT, in) &&
-           tex_make(&r->mv, rw, rh, VK_FORMAT_R16G16_SFLOAT, in) &&
-           tex_make(&r->present, dw, dh, COLOR_FORMAT, color) &&
-           tex_make(&r->hudless, dw, dh, COLOR_FORMAT, color) &&
-           tex_make(&r->out, dw, dh, COLOR_FORMAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    /* A run whose images cannot be made measures nothing: a failure, never a quiet return. */
+    if (!tex_make(&r->depth, rw, rh, VK_FORMAT_R32_SFLOAT, in) ||
+        !tex_make(&r->mv, rw, rh, VK_FORMAT_R16G16_SFLOAT, in) ||
+        !tex_make(&r->present, dw, dh, COLOR_FORMAT, color) ||
+        !tex_make(&r->hudless, dw, dh, COLOR_FORMAT, color) ||
+        !tex_make(&r->out, dw, dh, COLOR_FORMAT,
+                  VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        printf("FAIL run_open %ux%u -> %ux%u: an input or output image could not be made\n", rw, rh, dw, dh);
+        s_fail = 1;
+        return 0;
+    }
+    return 1;
 }
 
 static void run_close(Run *r) {
@@ -1473,7 +1485,8 @@ int main(int argc, char **argv) {
     if (up != 1) {
         /* G-R's table needs no device. */
         if (!any || want[0]) cell_gr();
-        printf("SKIP fsr3-fg-pass-selftest: %s\n", up == 0 ? why : "a Vulkan object could not be made");
+        printf("%s fsr3-fg-pass-selftest: %s\n", up == 0 ? "SKIP" : "FAIL",
+               why[0] ? why : "a Vulkan object could not be made");
         gpu_close();
         return s_fail || up != 0 ? 1 : 77;
     }
