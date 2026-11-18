@@ -150,8 +150,9 @@ independence leverage x confidence x evidence availability / replacement risk
 - **Replacement risk** — blast radius, guest-visible surface, and how a regression would present.
 
 Deliberately *low* priority regardless of score: anything owned by another active agent lane,
-anything blocked on unresolved licensing (`pgf.c` while PGF provenance and
-distribution remain unresolved), and anything requiring
+anything blocked on unresolved licensing (the derived `pgf.c` is excluded private
+material; the public reader is the project-authored `src/rt/pgf_public.c`, and font
+payload distribution remains tracked in #300), and anything requiring
 speculative PSP semantics.
 
 ## Rules that override the score
@@ -171,15 +172,20 @@ speculative PSP semantics.
 `assets/public_provenance_ledger.json` is the machine-readable public record.
 The detailed development ledger is deliberately outside the active public source tree;
 `tools/provenance_ledger.py` builds the public record from it and
-`tools/test_provenance_ledger.py` enforces the public record instead:
+`tools/test_provenance_ledger.py` checks the public record without it:
 
 - every included implementation path is covered by exactly one **path-specific** record;
   wildcard records such as `tools/*` are never expanded, so a newly added tool without its
   own record resolves to `unresolved` and cannot be published;
-- every classification is in the closed vocabulary above;
-- every file whose header declares `Derived from <project>` has a record whose classification is
-  `derived-translated`, `derived-data`, `behavior-informed`, or `unresolved` — never
-  `project-authored-independent`;
+- on the public record, every classification is in `ALLOWED_CLASSES` in
+  `tools/provenance_ledger.py`: `project_authored_attested`, `upstream_derived`,
+  `generated_from_public_source`, `synthetic_fixture`, `public_factual_metadata`,
+  `reviewed_configuration`, `reviewed_documentation`, `reviewed_other`, or `unresolved`;
+- against the private detailed ledger, every classification is in the closed vocabulary above;
+  the hyphenated terms are mapped to the public class names when the record is generated;
+- against the private detailed ledger, every file whose header declares `Derived from <project>`
+  has a record whose classification is `derived-translated`, `derived-data`, `behavior-informed`,
+  or `unresolved` — never `project-authored-independent`; the public-only test skips this check;
 - every record naming an upstream project also carries a license field.
 
 Documentation, configuration, public factual metadata, and explicitly synthetic fixtures keep
