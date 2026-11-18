@@ -1552,6 +1552,36 @@ class ApprovalRecordForgeryTests(unittest.TestCase):
         self.assertEqual(raw["approval_records"], [])
         self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "failure")
 
+    def test_the_digest_reuses_the_trees_the_facts_read(self) -> None:
+        """Failing-before: approval_digest listed both trees and read every workflow again after git_facts had."""
+        scenario = Scenario()
+        scenario.change("tools/ci_paths.py")
+        scenario.label(at=LABELLED_AT)
+        view = ({"t": "100644:1"}, {"c": "100644:2"}, {"tools/ci_paths.py"})
+        facts = _facts(scenario.raw["protected_changes"]) | {ctv.VIEW_KEY: view}
+        with mock.patch.object(ctv, "git_facts", return_value=facts), \
+                mock.patch.object(ctv, "approval_digest", return_value=D1) as digest:
+            raw = ctv.collect(FakeGitHub(scenario), Path("."), "main", HEAD, PR)
+        assert raw is not None
+        digest.assert_called_once_with(Path("."), HEAD, view)
+        # The trees stay out of the snapshot (--snapshot-out).
+        self.assertNotIn(ctv.VIEW_KEY, raw)
+        # Given the view, the digest reads no tree.
+        with mock.patch.object(ctv, "tree_entries", side_effect=AssertionError("tree read twice")):
+            self.assertEqual(ctv.approval_digest(Path("."), HEAD, ({}, {}, set())),
+                             ctv.hashlib.sha256(ctv.DIGEST_VERSION.encode("ascii") + b"\n").hexdigest())
+
+    def test_the_verdict_and_the_approval_writer_choose_the_same_label_event(self) -> None:
+        """One selection serves normalise, collect and label_state: the newest event, ties broken by ID."""
+        older = {"event": "labeled", "id": 5, "created_at": LABELLED_AT, "actor": {"login": "maintainer"},
+                 "label": {"name": ctv.APPROVAL_LABEL}}
+        newer = older | {"event": "unlabeled", "id": 6}
+        other = older | {"id": 9, "label": {"name": "something-else"}}
+        self.assertIs(ctv.latest_label_event([newer, older, other]), newer)
+        self.assertIsNone(ctv.latest_label_event([other]))
+        raw = Scenario().raw | {"label_events": [older, newer, other]}
+        self.assertEqual(ctv.normalise(raw)["approval"]["event"], "unlabeled")
+
 
 def _dispatched(run_id: int, digest: str = D1, *, number: int = PR, head: str = HEAD, created: str = LABELLED,
                 event: str = "workflow_dispatch", path: str = VERDICT_RUN_PATH, branch: str = "main",
@@ -3165,6 +3195,34 @@ class CommandLineTests(unittest.TestCase):
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
             self._main(Scenario().raw, "--post")
 
+    def test_a_candidate_path_cannot_write_workflow_commands_or_table_cells(self) -> None:
+        """Failing-before: a path a pull request adds reached the trusted job's log and step summary verbatim, so a
+        newline in it started a ``::`` workflow command and a ``|`` or a backtick broke the summary's table."""
+        import io  # noqa: PLC0415
+
+        path = ".github/actions/x\n::error title=forged::verdict success|`row`\x1b"
+        scenario = Scenario()
+        scenario.change(path, "added")
+        scenario.raw["context_collisions"] = [path]
+        log = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            saved, summary = Path(tmp) / "snapshot.json", Path(tmp) / "summary.md"
+            saved.write_text(json.dumps(scenario.raw), encoding="utf-8")
+            with mock.patch("sys.stdout", log):
+                code = ctv.main(["--snapshot", str(saved), "--summary", str(summary)])
+            report = summary.read_text(encoding="utf-8")
+        self.assertEqual(code, 1)
+        self.assertIn(report, log.getvalue())
+        self.assertFalse([line for line in log.getvalue().splitlines() if line.lstrip().startswith("::")])
+        rows = [line for line in report.splitlines() if line.startswith("| ")]
+        # The header, its rule and one row per finding; each row has its four cell borders and nothing more.
+        self.assertEqual(len(rows), 4, report)
+        for row in rows:
+            self.assertEqual(row.count("|"), 4, row)
+        escaped = ".github/actions/x\\x0a::error title=forged::verdict success\\x7c\\x60row\\x60\\x1b"
+        self.assertIn(f"`CI_CHANGE_UNAPPROVED` | `{escaped}` |", report)
+        self.assertIn(f"`CI_CONTEXT_COLLISION` | `{escaped}` |", report)
+
 
 class ForkProducerTests(unittest.TestCase):
     """The upstream judges the trusted attestation; a fork judges its Fork provenance check (docs/FORKING.md)."""
@@ -3312,6 +3370,35 @@ class ForkProducerTests(unittest.TestCase):
                 "check run: https://github.com/example-user/nakagawa-recomp/actions/runs/4")
         self.assertTrue(report.endswith(f"\n{line}\n"), report)
         self.assertIn(line, log)
+
+    def test_a_forks_saved_snapshot_replays_to_the_verdict_it_posted(self) -> None:
+        """Failing-before: --snapshot judged the upstream producers, so a fork's saved snapshot replayed as waiting
+        for the Trusted provenance attestation its repository never runs."""
+        import io  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as scratch:
+            saved = Path(scratch) / "snapshot.json"
+            gh = FakeGitHub(self._fork_scenario())
+            with mock.patch.object(ctv, "git_facts", return_value=_facts()), \
+                    mock.patch.object(ctv, "GitHub", return_value=gh), \
+                    mock.patch.dict(os.environ, {"GITHUB_TOKEN": "token", "GITHUB_REPOSITORY_ID": "42"}), \
+                    mock.patch("sys.stdout"):
+                live = ctv.main(["--repository", "example-user/nakagawa-recomp", "--pull-request", str(PR),
+                                 "--snapshot-out", str(saved)])
+            self.assertEqual(live, 0)
+            recorded = json.loads(saved.read_text(encoding="utf-8"))
+            self.assertEqual((recorded["repository"], recorded["repository_id"]),
+                             ("example-user/nakagawa-recomp", "42"))
+            log = io.StringIO()
+            # The replay reads the producer set from the snapshot, not from this shell's environment.
+            with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY_ID": str(ctv.provenance_mode.UPSTREAM_REPOSITORY_ID)}), \
+                    mock.patch("sys.stdout", log):
+                replayed = ctv.main(["--snapshot", str(saved)])
+        self.assertEqual(replayed, 0)
+        self.assertIn(f"### {ctv.VERDICT_CONTEXT}: success", log.getvalue())
+        self.assertIn("Provenance producer set: fork (repository example-user/nakagawa-recomp, ID 42); judged Fork "
+                      "provenance check run: https://github.com/example-user/nakagawa-recomp/actions/runs/4",
+                      log.getvalue())
 
     def test_a_forks_pending_verdict_names_its_own_check(self) -> None:
         # collect waits for the fork's producer, not the upstream's.

@@ -286,12 +286,16 @@ def find_tool(name: str) -> str | None:
 
 
 class Gate:
-    __slots__ = ("name", "status", "detail")
+    """One gate's result. ``detail`` is what is shown; ``output`` is a failed command's whole output, which
+    a caller that classifies the failure reads (``detail`` keeps only its last lines)."""
 
-    def __init__(self, name: str, status: str, detail: str = "") -> None:
+    __slots__ = ("name", "status", "detail", "output")
+
+    def __init__(self, name: str, status: str, detail: str = "", output: str = "") -> None:
         self.name = name
         self.status = status
         self.detail = detail
+        self.output = output
 
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -335,7 +339,9 @@ def python_test_modules(paths: list[str]) -> list[str]:
         if not path.startswith("tools/") or not name.endswith(".py"):
             continue
         if name.startswith("test_"):
-            modules.add("tools." + name[:-3])
+            # A deleted test module has nothing to import.
+            if (ROOT / path).is_file():
+                modules.add("tools." + name[:-3])
             continue
         modules.update(SHARED_TOOL_TESTS.get(path, ()))
         if (ROOT / f"tools/test_{name}").is_file():
@@ -354,8 +360,9 @@ def _run(label: str, command: list[str], *, timeout: int) -> Gate:
         return Gate(label, FAIL, f"timed out after {timeout}s: {' '.join(command)}")
     if result.returncode == 0:
         return Gate(label, PASS)
-    output = (result.stdout + result.stderr).strip().splitlines()
-    return Gate(label, FAIL, " | ".join(output[-6:]) or f"exit {result.returncode}")
+    text = (result.stdout + result.stderr).strip()
+    output = text.splitlines()
+    return Gate(label, FAIL, " | ".join(output[-6:]) or f"exit {result.returncode}", text)
 
 
 def _python_tool(tool: str, arguments: list[str], *, timeout: int) -> Gate:
@@ -493,7 +500,8 @@ def c_gate(paths: list[str]) -> Gate:
             continue
         gate = _run(f"cc {source}", command, timeout=600)
         if gate.status == FAIL:
-            sdk = _missing_sdk(gate.detail)
+            # The whole output: a real error printed before the missing header's last lines still fails.
+            sdk = _missing_sdk(gate.output)
             if sdk is not None:
                 # A missing SDK header is the environment, not the change: the
                 # file was not compiled, so it is a skip and never a pass.
@@ -576,8 +584,11 @@ def publication_gate() -> tuple[Gate, Gate]:
 def run(base: str) -> list[Gate]:
     paths = changed_paths(base)
     routing = ci_paths.classify(paths)
+    # A file the branch deleted still routes (its removal can break what remains), but the gates that open
+    # each named file (ruff, markdownlint) get only the files that exist; the strict compile filters likewise.
+    present = [path for path in paths if (ROOT / path).is_file()]
     python_paths = [
-        path for path in paths
+        path for path in present
         if path.endswith(".py") and path.startswith(("tools/", "tests/fixtures/"))
     ]
     print(f"contrib-check: base {base}, {len(paths)} changed path(s)")
@@ -596,7 +607,7 @@ def run(base: str) -> list[Gate]:
         ruff_gate(python_paths),
         unit_gate(modules),
         c_gate(paths),
-        markdown_gate(paths),
+        markdown_gate(present),
         docs_gate(paths),
         purity_gate(paths),
     ]

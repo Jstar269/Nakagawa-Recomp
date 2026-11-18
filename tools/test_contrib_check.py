@@ -54,6 +54,27 @@ class TestRouting(unittest.TestCase):
         modules = contrib_check.python_test_modules(["tools/policy_sync.py"])
         self.assertIn("tools.test_publication_policy_gate", modules)
 
+    def test_a_deleted_file_is_not_handed_to_a_gate_that_opens_it(self) -> None:
+        """Failing-before: a file the branch deleted went to ruff (E902), unittest (an import error) and
+        markdownlint, so a valid deletion failed contrib-check."""
+        deleted = ["docs/no_such_page.md", "tools/no_such_tool.py", "tools/test_no_such_tool.py"]
+        gate = contrib_check.Gate("x", contrib_check.NOT_RUN)
+        with mock.patch.object(contrib_check, "changed_paths", return_value=deleted), \
+                mock.patch.object(contrib_check, "ruff_gate", return_value=gate) as ruff, \
+                mock.patch.object(contrib_check, "unit_gate", return_value=gate) as unit, \
+                mock.patch.object(contrib_check, "markdown_gate", return_value=gate) as markdown, \
+                mock.patch.object(contrib_check, "c_gate", return_value=gate), \
+                mock.patch.object(contrib_check, "docs_gate", return_value=gate) as docs, \
+                mock.patch.object(contrib_check, "purity_gate", return_value=gate), \
+                mock.patch.object(contrib_check, "publication_gate", return_value=(gate, gate)), \
+                mock.patch("sys.stdout"):
+            contrib_check.run("origin/main")
+        ruff.assert_called_once_with([])
+        unit.assert_called_once_with([])
+        markdown.assert_called_once_with([])
+        # The deletion still routes: the documentation check runs over what remains.
+        docs.assert_called_once_with(deleted)
+
     def test_documentation_and_build_files_select_no_python_module(self) -> None:
         self.assertEqual(
             contrib_check.python_test_modules(["CONTRIBUTING.md", "Makefile", "mk/build_common.mk"]),
@@ -390,6 +411,23 @@ class TestStrictCompileUnavailableInputs(unittest.TestCase):
                 )
                 self.assertEqual(gate.status, contrib_check.FAIL)
                 self.assertIn("unknown type name", gate.detail)
+
+    def test_a_real_error_far_above_a_missing_sdk_header_still_fails(self) -> None:
+        """Failing-before: the SDK classification read only the six lines shown in the detail, so an error with
+        its source and caret lines above the missing header's block was classified as a missing SDK (SKIP)."""
+        source = "tests/fixtures/psp_oracle/probe_ge_sample.c"
+        gate = self._gate_for_output(
+            source,
+            "In file included from tests/fixtures/psp_oracle/probe_ge_sample.c:1:\n"
+            "tests/fixtures/psp_oracle/h.h:1:1: error: unknown type name 'foo_t'\n"
+            "    1 | foo_t x;\n"
+            "      | ^~~~~\n"
+            f"{source}:2:10: fatal error: vulkan/vulkan.h: No such file or directory\n"
+            "    2 | #include <vulkan/vulkan.h>\n"
+            "      |          ^~~~~~~~~~~~~~~~~\n"
+            "compilation terminated.",
+        )
+        self.assertEqual(gate.status, contrib_check.FAIL, gate.detail)
 
     def test_a_discovered_vulkan_sdk_is_on_the_include_path(self) -> None:
         sdk = Path(tempfile.gettempdir()) / "VulkanSDK" / "1.4.0"
