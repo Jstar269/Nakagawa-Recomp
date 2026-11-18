@@ -67,6 +67,21 @@ static void relay_thread_finish(RelayThread t, bool wait) {
     if (wait) (void)WaitForSingleObject(t, INFINITE);
     CloseHandle(t);
 }
+/* A reference on the host socket library (Winsock); each true return is paired with one
+ * relay_net_unref. */
+static bool relay_net_ref(void) {
+    WSADATA wsa;
+    return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+}
+static void relay_net_unref(void) { (void)WSACleanup(); }
+/* A process-wide counter that any thread may change. */
+typedef volatile LONG RelayCounter;
+static void relay_counter_add(RelayCounter *c, int delta) {
+    (void)InterlockedExchangeAdd(c, (LONG)delta);
+}
+static unsigned relay_counter_read(RelayCounter *c) {
+    return (unsigned)InterlockedCompareExchange(c, 0, 0);
+}
 #else
 #  include <errno.h>
 #  include <fcntl.h>
@@ -100,6 +115,23 @@ static bool relay_thread_spawn(RelayThread *out, void *(*fn)(void *), void *arg)
 static void relay_thread_finish(RelayThread t, bool wait) {
     if (wait) (void)pthread_join(t, NULL);
     else (void)pthread_detach(t);
+}
+/* POSIX sockets need no library reference. */
+static bool relay_net_ref(void) { return true; }
+static void relay_net_unref(void) {}
+typedef unsigned RelayCounter;
+static pthread_mutex_t s_relay_counter_lock = PTHREAD_MUTEX_INITIALIZER;
+static void relay_counter_add(RelayCounter *c, int delta) {
+    (void)pthread_mutex_lock(&s_relay_counter_lock);
+    if (delta > 0) *c += (unsigned)delta;
+    else *c -= (unsigned)-delta;
+    (void)pthread_mutex_unlock(&s_relay_counter_lock);
+}
+static unsigned relay_counter_read(RelayCounter *c) {
+    (void)pthread_mutex_lock(&s_relay_counter_lock);
+    const unsigned n = *c;
+    (void)pthread_mutex_unlock(&s_relay_counter_lock);
+    return n;
 }
 #endif
 
@@ -527,46 +559,24 @@ typedef struct RelayResolveJob {
     NkRelayTestResolveFn hook_fn;
     void *hook_ctx;
     RelayAddrList addrs;
-    int wsa_started; /* the job's own Winsock reference, dropped by the worker as it ends */
+    int net_ref; /* the job's own socket-library reference, dropped by the worker as it ends */
 } RelayResolveJob;
 
-#ifdef _WIN32
-static volatile LONG s_resolve_jobs_live;
-static void resolve_jobs_live_add(int delta) {
-    if (delta > 0) (void)InterlockedIncrement(&s_resolve_jobs_live);
-    else (void)InterlockedDecrement(&s_resolve_jobs_live);
-}
+static RelayCounter s_resolve_jobs_live;
+
 unsigned nk_relay_client_resolve_jobs_live_for_test(void) {
-    return (unsigned)InterlockedCompareExchange(&s_resolve_jobs_live, 0, 0);
+    return relay_counter_read(&s_resolve_jobs_live);
 }
-#else
-static pthread_mutex_t s_resolve_jobs_lock = PTHREAD_MUTEX_INITIALIZER;
-static unsigned s_resolve_jobs_live;
-static void resolve_jobs_live_add(int delta) {
-    (void)pthread_mutex_lock(&s_resolve_jobs_lock);
-    if (delta > 0) s_resolve_jobs_live++;
-    else s_resolve_jobs_live--;
-    (void)pthread_mutex_unlock(&s_resolve_jobs_lock);
-}
-unsigned nk_relay_client_resolve_jobs_live_for_test(void) {
-    (void)pthread_mutex_lock(&s_resolve_jobs_lock);
-    const unsigned n = s_resolve_jobs_live;
-    (void)pthread_mutex_unlock(&s_resolve_jobs_lock);
-    return n;
-}
-#endif
 
 static void free_resolve_job(RelayResolveJob *job) {
     relay_lock_destroy(&job->lock);
     free(job);
-    resolve_jobs_live_add(-1);
+    relay_counter_add(&s_resolve_jobs_live, -1);
 }
 
 RELAY_THREAD_FN(resolve_worker_fn, raw) {
     RelayResolveJob *job = (RelayResolveJob *)raw;
-#ifdef _WIN32
-    const int wsa_started = job->wsa_started;
-#endif
+    const int net_ref = job->net_ref;
     RelayAddrList found;
     memset(&found, 0, sizeof(found));
     const bool ok = resolve_host_addrs(job->host, job->lobby_port, job->data_port, 0, job->hook_fn,
@@ -581,11 +591,9 @@ RELAY_THREAD_FN(resolve_worker_fn, raw) {
     const int drop = (job->refs == 0);
     relay_lock_leave(&job->lock);
     if (drop) free_resolve_job(job);
-#ifdef _WIN32
-    /* A destroyed client has already dropped its reference; this one kept Winsock up for the
-     * lookup until here. */
-    if (wsa_started) WSACleanup();
-#endif
+    /* A destroyed client has already dropped its reference; this one kept the socket library
+     * (Winsock) up for the lookup until here. */
+    if (net_ref) relay_net_unref();
     RELAY_THREAD_RETURN;
 }
 
@@ -593,7 +601,7 @@ static RelayResolveJob *start_resolve_job(const char *host, uint16_t lobby_port,
                                           NkRelayTestResolveFn hook_fn, void *hook_ctx) {
     RelayResolveJob *job = calloc(1, sizeof *job);
     if (!job) return NULL;
-    resolve_jobs_live_add(1);
+    relay_counter_add(&s_resolve_jobs_live, 1);
     relay_lock_init(&job->lock);
     job->refs = 2;
     snprintf(job->host, sizeof(job->host), "%s", host);
@@ -601,20 +609,15 @@ static RelayResolveJob *start_resolve_job(const char *host, uint16_t lobby_port,
     job->data_port = data_port;
     job->hook_fn = hook_fn;
     job->hook_ctx = hook_ctx;
-#ifdef _WIN32
     /* The lookup may outlive the client (release_resolve_job detaches it), so it holds its own
-     * Winsock reference rather than leaning on the client's. */
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+     * socket-library (Winsock) reference rather than leaning on the client's. */
+    if (!relay_net_ref()) {
         free_resolve_job(job);
         return NULL;
     }
-    job->wsa_started = 1;
-#endif
+    job->net_ref = 1;
     if (!relay_thread_spawn(&job->thread, resolve_worker_fn, job)) {
-#ifdef _WIN32
-        WSACleanup();
-#endif
+        relay_net_unref();
         free_resolve_job(job);
         return NULL;
     }
