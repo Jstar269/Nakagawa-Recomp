@@ -1166,8 +1166,12 @@ static bool hb_holds_personal_folder(const char *folder)
         if (hb_join(known, sizeof(known), home, english[i]) && hb_holds_folder(folder, known))
             return true;
     }
+    /* Read as UTF-8 (the wide environment on Win32): the narrow getenv gives code-page
+       bytes, which the UTF-8 path resolver refuses, so the check was skipped. */
     for (size_t i = 0; i < sizeof(sync_roots) / sizeof(sync_roots[0]); ++i) {
-        if (hb_holds_folder(folder, getenv(sync_roots[i]))) return true;
+        if (nk_platform_env_utf8(sync_roots[i], known, sizeof(known)) == 1 &&
+            hb_holds_folder(folder, known))
+            return true;
     }
     return false;
 }

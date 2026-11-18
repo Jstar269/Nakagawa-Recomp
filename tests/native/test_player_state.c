@@ -7866,6 +7866,41 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         }
         nk_ps_set_env(home_name, had_home ? saved : NULL);
     }
+#if defined(_WIN32) || defined(_WIN64)
+    /* The OneDrive root is read from the wide environment: a root whose name is outside the
+       ANSI code page (here under a profile folder named so) was '?' bytes through getenv,
+       the path resolver refused it, and a package picked in it took the whole root along
+       as the program's folder. */
+    {
+        char sync_profile[NATIVE_TEST_PATH_MAX + 64];
+        char sync_root[NATIVE_TEST_PATH_MAX + 96];
+        char loose_path[NATIVE_TEST_PATH_MAX + 160];
+        WCHAR wsync_root[NATIVE_TEST_PATH_MAX + 96];
+        static WCHAR saved_sync[32768];
+        DWORD saved_sync_len = GetEnvironmentVariableW(L"OneDriveConsumer", saved_sync, 32768);
+        int sync_written = snprintf(sync_profile, sizeof(sync_profile),
+                                    "%s%cJos\xC3\xA9_\xE6\x97\xA5", base, sep);
+        assert(sync_written > 0 && (size_t)sync_written < sizeof(sync_profile));
+        sync_written = snprintf(sync_root, sizeof(sync_root), "%s%cOneDrive", sync_profile, sep);
+        assert(sync_written > 0 && (size_t)sync_written < sizeof(sync_root));
+        assert(nk_platform_mkdir_p(sync_root));
+        snprintf(loose_path, sizeof(loose_path), "%s%cEBOOT.PBP", sync_root, sep);
+        pbp = homebrew_pbp("Synced", program, 88u, NULL, 0, &pbp_len);
+        FILE *synced = nk_fopen_utf8(loose_path, "wb");
+        assert(synced != NULL);
+        assert(fwrite(pbp, 1, pbp_len, synced) == pbp_len);
+        assert(fclose(synced) == 0);
+        free(pbp);
+        assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, sync_root, -1, wsync_root,
+                                   (int)(sizeof(wsync_root) / sizeof(wsync_root[0]))) > 0);
+        assert(_wputenv_s(L"OneDriveConsumer", wsync_root) == 0);
+        psn_test_refused(loose_path, "HOMEBREW_FOLDER_UNSUPPORTED", "which holds your own files");
+        assert(_wputenv_s(L"OneDriveConsumer",
+                          saved_sync_len > 0 && saved_sync_len < 32768 ? saved_sync : L"") == 0);
+        /* The narrow-API cleanup of base cannot open a non-code-page name. */
+        assert(nk_platform_remove_tree(sync_profile, NULL));
+    }
+#endif
 
     /* An encrypted program and a file that is not a program are refused by name, and nothing
        is written. */
