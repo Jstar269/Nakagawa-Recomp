@@ -63,7 +63,8 @@ int sdl3vk_present_mode_log_due(int *last_mode, int *last_vsync, int mode, int v
  * int (0 = VK_SUCCESS, 5 = VK_INCOMPLETE). VK_INCOMPLETE means the surface has more formats
  * than the caller's array holds; the entries written are valid, so it is accepted. `formats`
  * lists the VkFormat values as plain ints; only the first min(count, SDL3VK_SURFACE_FORMAT_CAP)
- * entries are read. Returns the index of the first VK_FORMAT_B8G8R8A8_UNORM (44) entry, else 0.
+ * entries are read. Returns the index of the first VK_FORMAT_B8G8R8A8_UNORM (44) entry, else of
+ * the first VK_FORMAT_R8G8B8A8_UNORM (37) entry, else 0.
  * Returns -1 when the query failed, count is zero, or formats is NULL. */
 #define SDL3VK_SURFACE_FORMAT_CAP 32
 int sdl3vk_pick_surface_format(int query, int count, const int *formats);
@@ -138,7 +139,8 @@ void sdl3vk_set_audio_active_cb(int (*cb)(void));
 /* Whether an enhancement build's 60 FPS logic has fallen behind, and its rate in updates/s
  * (sr_enhancement_logic_slowed in the runtime). With a query that answers yes the presenter
  * shows a notice whether or not the HUD is on: in the HUD while it shows, else through the UI
- * pass (below), else in a box of its own at the top left. */
+ * pass (below), else in a box of its own at the top left. A HUD that is on but does not fit the
+ * window counts as not showing. The box needs a window of at least 240x22 pixels. */
 void sdl3vk_set_logic_slowed_cb(int (*cb)(unsigned *rate));
 /* That notice's words for a rate in updates/s ("60 FPS logic: 52/s - SLOWED"), as the HUD and
  * the UI pass show them; returns `out`. */
@@ -152,7 +154,8 @@ const char *sdl3vk_logic_notice_text(char *out, size_t cap, unsigned rate);
  * it. Handles are Vulkan's, passed as void pointers. It returns 1 when it drew, 0 when it drew
  * nothing. With logic_slowed set it shows the slowed-logic notice in its own layout (under the
  * readout) whenever it draws; when it returns 0 the presenter copies its own notice box after
- * it, so the notice is never lost and never shares the corner with the pass's readout. */
+ * it, so the notice is not lost in any window the box fits, and never shares the corner with
+ * the pass's readout. */
 typedef struct {
     void *cmd;                    /* VkCommandBuffer */
     uint32_t frame_slot;          /* its fence already waited */

@@ -1337,6 +1337,35 @@ static int sdl3vk_text_keys_selftest(void) {
     tkey_set(SDL_SCANCODE_RETURN, false);
     (void)mbtn_test_sample(&lx, &ly);
 
+    /* Typed text: each well-formed UTF-8 character is one SDL3VK_KEY_TEXT. A lead byte cut
+     * short, a stray continuation byte, an overlong form, a surrogate and a value past
+     * U+10FFFF queue nothing, and the byte that cut a sequence short is read on its own. */
+    {
+        static const struct { const char *in; int n; uint32_t cp[3]; } texts[] = {
+            { "a\xC3\xA9\xE2\x82\xAC", 3, { 0x61u, 0xE9u, 0x20ACu } },
+            { "\xF0\x9F\x98\x80", 1, { 0x1F600u } },
+            { "\xC3" "A", 1, { 0x41u } },
+            { "\xE2\x82" "B", 1, { 0x42u } },
+            { "\x80" "E", 1, { 0x45u } },
+            { "\xC0\x80" "C", 1, { 0x43u } },
+            { "\xE0\x80\xAF", 0, { 0u } },
+            { "\xED\xA0\x80" "D", 1, { 0x44u } },
+            { "\xF4\x90\x80\x80", 0, { 0u } },
+        };
+        Sdl3VkKeyEvent kev[8];
+        while (sdl3vk_take_key_events(kev, 8) > 0) {}
+        for (size_t t = 0; t < sizeof texts / sizeof texts[0]; t++) {
+            queue_text_utf8(texts[t].in);
+            const int n = sdl3vk_take_key_events(kev, 8);
+            int same = n == texts[t].n;
+            for (int i = 0; same && i < n; i++)
+                same = kev[i].key == SDL3VK_KEY_TEXT && kev[i].codepoint == texts[t].cp[i];
+            TKEY_CHECK(same, "text case %u queued %d character(s), first U+%04X (want %d, U+%04X)",
+                       (unsigned)t, n, n > 0 ? (unsigned)kev[0].codepoint : 0u, texts[t].n,
+                       (unsigned)texts[t].cp[0]);
+        }
+    }
+
     s_key_state_fn = NULL;
     memset(s_text_keys, 0, sizeof s_text_keys);
     s_key_head = 0;
@@ -1528,6 +1557,25 @@ static int sdl3vk_lifecycle_selftest(void) {
                             "shown=%d, %d validation error(s), %d object(s) alive after "
                             "shutdown\n", name, warm, armed, reached, got, want, capture,
                     terminal, after, verrors, live);
+            ok = 0;
+        }
+    }
+    /* VK_INCOMPLETE from the physical-device or the instance-layer list is a success: the
+     * entries written are valid. Init still finds the device, and the validation layer the run
+     * asked for, and shutdown leaves nothing alive. */
+    for (int c = 0; ok && c < 2; c++) {
+        const char *name = c == 0 ? "physical devices" : "instance layers";
+        s_enum_incomplete_fault = c == 0 ? ENUM_FAULT_DEVICES : ENUM_FAULT_LAYERS;
+        const int inited = sdl3vk_init("Nakagawa GPU lifecycle selftest");
+        const int reached = s_enum_incomplete_fault == 0;
+        s_enum_incomplete_fault = 0;
+        const int validated = s_validation_on && s_validation_msgr != VK_NULL_HANDLE;
+        if (inited) sdl3vk_shutdown();
+        const int live = lifecycle_live_objects();
+        if (!inited || !reached || !validated || live != 0) {
+            fprintf(stderr, "lifecycle: VK_INCOMPLETE from the %s list: init %d (want 1), fault "
+                            "reached %d, validation layer on %d, %d object(s) alive after "
+                            "shutdown\n", name, inited, reached, validated, live);
             ok = 0;
         }
     }
@@ -2409,12 +2457,80 @@ static int sdl3vk_capture_selftest_body(void) {
                 ok = 0;
             }
         }
+        /* The HUD on in a window too short for it (300x100 against the 240x130 HUD and notice):
+         * the HUD draws nothing, so the notice goes to the pass, else to the presenter's own
+         * box, which fits. The extent stands in for the one create_swapchain stored. */
+        {
+            static const struct { int pass, drew; unsigned copies; const char *what; } small[] = {
+                { 0, 0, 1u, "HUD on, window too small, no UI pass: the presenter's box" },
+                { 1, 1, 0u, "HUD on, window too small, a pass that drew it" },
+            };
+            const VkExtent2D saved_ext = s_swap_ext;
+            hud_set_mode(SDL3VK_HUD_PERF);
+            for (size_t c = 0; c < sizeof small / sizeof small[0]; c++) {
+                const unsigned before = s_hud_last.copies;
+                const int calls = s_test_logic_calls;
+                s_test_logic_drew = small[c].drew;
+                s_test_logic_asked = -1;
+                sdl3vk_set_ui_pass(small[c].pass ? test_logic_pass : NULL);
+                s_swap_ext.width = 300u;
+                s_swap_ext.height = 100u;
+                const int shown = sdl3vk_present_rgba(px);
+                s_swap_ext = saved_ext;
+                sdl3vk_set_ui_pass(NULL);
+                if (shown != 1 || s_hud_last.copies - before != small[c].copies ||
+                    (small[c].copies && (s_hud_last.w != HUD_W || s_hud_last.h != LOGIC_NOTICE_H)) ||
+                    (small[c].pass && (s_test_logic_calls != calls + 1 || s_test_logic_asked != 1))) {
+                    fprintf(stderr, "logic notice: %s: present %d, %u box copies (want %u), last "
+                                    "%dx%d, the pass asked %d (want 1)\n", small[c].what, shown,
+                            s_hud_last.copies - before, small[c].copies, s_hud_last.w,
+                            s_hud_last.h, s_test_logic_asked);
+                    ok = 0;
+                }
+            }
+        }
         if (strcmp(sdl3vk_logic_notice_text(words, sizeof(words), 52u), "60 FPS logic: 52/s - SLOWED") != 0) {
             fprintf(stderr, "logic notice: the words read \"%s\"\n", words);
             ok = 0;
         }
         s_logic_slowed_cb = saved_cb;
         hud_set_mode(saved_mode);
+    }
+
+    /* ---- a sharp-scaling image that could not be made is tried again --------------------
+     * In a 900x500 place a 480x272 frame is a fractional fit: sharp scaling enlarges it with
+     * nearest filtering first, into an image of its own. When that image cannot be made the
+     * present is one linear blit from the frame, and later presents of that size with the same
+     * swapchain do not try again; a new swapchain (a resize, a re-init) does. The extent stands
+     * in for the one create_swapchain stored. */
+    {
+        const int saved_scaling = s_scaling;
+        const VkExtent2D saved_ext = s_swap_ext;
+        s_scaling = SDL3VK_SCALING_SHARP;
+        const Sdl3VkPresentPlan plan = sdl3vk_present_plan(s_scaling, PSP_W, PSP_H, 900, 500,
+                                                           (int)s_max_image_dim);
+        int sw[3] = { 0, 0, 0 }, shown = 1;
+        int reached = 0;
+        s_prescale_fault = 1;
+        for (int k = 0; k < 3; k++) {
+            if (k == 2) shown &= create_swapchain();   /* stores the window's real extent */
+            s_swap_ext.width = 900u;
+            s_swap_ext.height = 500u;
+            shown &= sdl3vk_present_rgba(px) == 1;
+            if (k == 0) reached = s_prescale_fault == 0;
+            sw[k] = s_last_blit.sw;
+        }
+        s_prescale_fault = 0;
+        s_swap_ext = saved_ext;
+        s_scaling = saved_scaling;
+        if (plan.prescale < 2 || !shown || !reached || sw[0] != PSP_W || sw[1] != PSP_W ||
+            sw[2] != plan.prescale * PSP_W) {
+            fprintf(stderr, "sharp scaling: prescale %d, presents shown %d, fault reached %d; the "
+                            "frame blits read %d, %d, then %d wide after a new swapchain (want "
+                            "%d, %d, %d)\n", plan.prescale, shown, reached, sw[0], sw[1], sw[2],
+                    PSP_W, PSP_W, plan.prescale * PSP_W);
+            ok = 0;
+        }
     }
 
     /* ---- presentation upscaler (#1273, SR_PRESENT_UPSCALE=fsr1) ------------------------
@@ -3260,6 +3376,30 @@ static int sdl3vk_capture_selftest_body(void) {
             fprintf(stderr, "swapchain: present before the failed wait failed\n"); ok = 0;
         }
         VkSwapchainKHR kept = s_swap;
+        /* A minimized window (a 0x0 surface) keeps the swapchain without waiting for the frames
+         * or the queue: an armed queue-idle fault is never reached, the frame in flight stays
+         * in flight and the renderer goes on. */
+        {
+            int before = 0, still = 0;
+            for (int i = 0; i < PRESENT_FRAMES; i++) before += s_frame[i].submitted;
+            sc0 = sdl3vk_swapchain_generation();
+            s_swap_extent_zero_fault = 1;
+            s_idle_fault_result = VK_ERROR_DEVICE_LOST;
+            const int made = create_swapchain();
+            const int idle_waited = s_idle_fault_result == VK_SUCCESS;
+            s_idle_fault_result = VK_SUCCESS;
+            s_swap_extent_zero_fault = 0;
+            for (int i = 0; i < PRESENT_FRAMES; i++) still += s_frame[i].submitted;
+            if (made || s_swap != kept || sdl3vk_swapchain_generation() != sc0 ||
+                sdl3vk_renderer_terminal() || idle_waited || before == 0 || still != before) {
+                fprintf(stderr, "swapchain: a minimized window's rebuild made %d, waited the "
+                                "queue %d, left %d of %d frame(s) in flight, terminal %d (want "
+                                "0, 0, all, 0)\n", made, idle_waited, still, before,
+                        sdl3vk_renderer_terminal());
+                ok = 0;
+            }
+            s_renderer_terminal = 0;
+        }
         sc0 = sdl3vk_swapchain_generation();
         s_idle_fault_result = VK_ERROR_DEVICE_LOST;
         if (create_swapchain() || s_swap != kept || sdl3vk_swapchain_generation() != sc0 ||

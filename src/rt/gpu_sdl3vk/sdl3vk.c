@@ -478,13 +478,28 @@ static int s_swapchain_in_init = 0;
 /* Creates the swapchain, or replaces the current one: the old swapchain is retired into the new
  * one and destroyed once its images are no longer in use, and its present semaphores with it. */
 static int create_swapchain(void) {
-    if (s_swap && !wait_swapchain_unused()) return 0;
     VkSurfaceCapabilitiesKHR caps;
     VK_TRY(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_pdev, s_surf, &caps));
 
-    /* Prefer BGRA8 UNORM (matches the framebuffer byte order); fall back to whatever the
-     * surface offers first. VK_INCOMPLETE is a success code here (the surface has more
-     * formats than fmts[] holds, and the entries written are valid), so it is not routed
+    VkExtent2D ext = caps.currentExtent;
+    if (ext.width == UINT32_MAX) {   /* surface lets us choose: use the window pixel size */
+        int w = 0, h = 0;
+        SDL_GetWindowSizeInPixels(s_win, &w, &h);
+        ext.width  = (uint32_t)w;  ext.height = (uint32_t)h;
+    }
+    if (ext.width  < caps.minImageExtent.width)  ext.width  = caps.minImageExtent.width;
+    if (ext.width  > caps.maxImageExtent.width)  ext.width  = caps.maxImageExtent.width;
+    if (ext.height < caps.minImageExtent.height) ext.height = caps.minImageExtent.height;
+    if (ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
+    if (s_swap_extent_zero_fault) { s_swap_extent_zero_fault = 0; ext.width = ext.height = 0; }
+    /* Minimized: the old swapchain is kept, so nothing waits for its frames or the queue. A
+     * present to a minimized window comes back here every frame. */
+    if (ext.width == 0 || ext.height == 0) return 0;
+    if (s_swap && !wait_swapchain_unused()) return 0;
+
+    /* Prefer BGRA8 UNORM (matches the framebuffer byte order), then RGBA8 UNORM; fall back to
+     * whatever the surface offers first. VK_INCOMPLETE is a success code here (the surface has
+     * more formats than fmts[] holds, and the entries written are valid), so it is not routed
      * through VK_TRY (issue #884). The pick itself is sdl3vk_pick_surface_format. */
     VkSurfaceFormatKHR fmts[SDL3VK_SURFACE_FORMAT_CAP]; uint32_t nf = SDL3VK_SURFACE_FORMAT_CAP;
     VkResult fr = vkGetPhysicalDeviceSurfaceFormatsKHR(s_pdev, s_surf, &nf, fmts);
@@ -502,19 +517,6 @@ static int create_swapchain(void) {
     }
     VkSurfaceFormatKHR pick = fmts[pi];
     s_swap_fmt = pick.format;
-
-    VkExtent2D ext = caps.currentExtent;
-    if (ext.width == UINT32_MAX) {   /* surface lets us choose: use the window pixel size */
-        int w = 0, h = 0;
-        SDL_GetWindowSizeInPixels(s_win, &w, &h);
-        ext.width  = (uint32_t)w;  ext.height = (uint32_t)h;
-    }
-    if (ext.width  < caps.minImageExtent.width)  ext.width  = caps.minImageExtent.width;
-    if (ext.width  > caps.maxImageExtent.width)  ext.width  = caps.maxImageExtent.width;
-    if (ext.height < caps.minImageExtent.height) ext.height = caps.minImageExtent.height;
-    if (ext.height > caps.maxImageExtent.height) ext.height = caps.maxImageExtent.height;
-    if (s_swap_extent_zero_fault) { s_swap_extent_zero_fault = 0; ext.width = ext.height = 0; }
-    if (ext.width == 0 || ext.height == 0) return 0;   /* minimized: keep old swapchain */
     s_swap_ext = ext;
 
     uint32_t n = caps.minImageCount + 1;
@@ -694,20 +696,25 @@ int sdl3vk_pick_present_mode(int vsync, const int *available, int count) {
 }
 
 /* Guard the Vulkan values sdl3vk_pick_surface_format compares against (passed as plain
- * ints, see sdl3vk.h): VK_SUCCESS, VK_INCOMPLETE and VK_FORMAT_B8G8R8A8_UNORM. */
+ * ints, see sdl3vk.h): VK_SUCCESS, VK_INCOMPLETE, VK_FORMAT_B8G8R8A8_UNORM and
+ * VK_FORMAT_R8G8B8A8_UNORM. */
 typedef char sdl3vk_surface_success_is_0[(int)VK_SUCCESS == 0 ? 1 : -1];
 typedef char sdl3vk_surface_incomplete_is_5[(int)VK_INCOMPLETE == 5 ? 1 : -1];
 typedef char sdl3vk_surface_bgra8_unorm_is_44[(int)VK_FORMAT_B8G8R8A8_UNORM == 44 ? 1 : -1];
+typedef char sdl3vk_surface_rgba8_unorm_is_37[(int)VK_FORMAT_R8G8B8A8_UNORM == 37 ? 1 : -1];
 
 int sdl3vk_pick_surface_format(int query, int count, const int *formats) {
     const int success = 0;
     const int incomplete = 5;
-    const int bgra8_unorm = 44;
+    /* The 8-bit UNORM formats, in order: the frame blit writes them without an sRGB encode, and
+     * the HUD and the pause overlay (8-bit RGBA or BGRA texels) can be copied into them. */
+    static const int unorm8[] = { 44 /* B8G8R8A8 */, 37 /* R8G8B8A8 */ };
     if (query != success && query != incomplete) return -1;
     if (count > SDL3VK_SURFACE_FORMAT_CAP) count = SDL3VK_SURFACE_FORMAT_CAP;
     if (count <= 0 || formats == NULL) return -1;
-    for (int i = 0; i < count; i++)
-        if (formats[i] == bgra8_unorm) return i;
+    for (size_t k = 0; k < sizeof unorm8 / sizeof unorm8[0]; k++)
+        for (int i = 0; i < count; i++)
+            if (formats[i] == unorm8[k]) return i;
     return 0;
 }
 
@@ -724,6 +731,24 @@ static int init_step_fails(void) {
     if (++s_init_steps != s_init_fault_step) return 0;
     s_init_fault_step = 0;
     return 1;
+}
+
+/* Enumeration seam for the lifecycle selftest: a list query that succeeded reports VK_INCOMPLETE
+ * instead, as it does when the list holds more entries than the caller's array. One-shot per
+ * bit; 0 in production. */
+enum { ENUM_FAULT_DEVICES = 1, ENUM_FAULT_LAYERS = 2 };
+static int s_enum_incomplete_fault = 0;
+
+static VkResult enum_fault(int bit, VkResult r) {
+    if (r != VK_SUCCESS || !(s_enum_incomplete_fault & bit)) return r;
+    s_enum_incomplete_fault &= ~bit;
+    return VK_INCOMPLETE;
+}
+
+/* A list query's result as init takes it: VK_INCOMPLETE means the list holds more entries than
+ * the caller's array, and the entries written are valid. */
+static VkResult list_result(VkResult r) {
+    return r == VK_INCOMPLETE ? VK_SUCCESS : r;
 }
 
 /* A failed step leaves sdl3vk_init through its one unwind (fail:). */
@@ -853,15 +878,20 @@ int sdl3vk_init(const char *title) {
     uint32_t n_layers = 0;
     if (s_validation_on) {
         /* Fail closed when the layer was requested but is not installed: a silently
-         * missing layer would make a "validation-clean" evidence claim meaningless. */
+         * missing layer would make a "validation-clean" evidence claim meaningless.
+         * Every installed layer is read; a layer installed between the count and the list
+         * makes the list VK_INCOMPLETE, and the entries written are still searched. */
         uint32_t n = 0;
-        vkEnumerateInstanceLayerProperties(&n, NULL);
-        VkLayerProperties lp[64];
+        VkLayerProperties *lp = NULL;
         int have = 0;
-        if (n > 64) n = 64;
-        if (vkEnumerateInstanceLayerProperties(&n, lp) == VK_SUCCESS)
-            for (uint32_t i = 0; i < n; i++)
-                if (strcmp(lp[i].layerName, "VK_LAYER_KHRONOS_validation") == 0) { have = 1; break; }
+        if (vkEnumerateInstanceLayerProperties(&n, NULL) == VK_SUCCESS && n > 0 &&
+            (lp = (VkLayerProperties *)calloc(n, sizeof *lp)) != NULL) {
+            if (list_result(enum_fault(ENUM_FAULT_LAYERS,
+                                       vkEnumerateInstanceLayerProperties(&n, lp))) == VK_SUCCESS)
+                for (uint32_t i = 0; i < n; i++)
+                    if (strcmp(lp[i].layerName, "VK_LAYER_KHRONOS_validation") == 0) { have = 1; break; }
+            free(lp);
+        }
         INIT_OK(have, "sdl3vk: SR_VULKAN_VALIDATION set but VK_LAYER_KHRONOS_validation "
                       "is not installed; refusing to initialize\n");
         INIT_OK(next < 16, "sdl3vk: too many instance extensions to enable VK_EXT_debug_utils\n");
@@ -904,9 +934,10 @@ int sdl3vk_init(const char *title) {
     INIT_OK(SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surf),
             "sdl3vk: SDL_Vulkan_CreateSurface failed: %s\n", SDL_GetError());
 
-    /* Physical device: first one with a graphics queue that can present to our surface. */
+    /* Physical device: first one with a graphics queue that can present to our surface, among
+     * the first 16 the instance lists. */
     VkPhysicalDevice devs[16]; uint32_t nd = 16;
-    INIT_VK(vkEnumeratePhysicalDevices(s_inst, &nd, devs));
+    INIT_VK(list_result(enum_fault(ENUM_FAULT_DEVICES, vkEnumeratePhysicalDevices(s_inst, &nd, devs))));
     s_pdev = VK_NULL_HANDLE;
     for (uint32_t d = 0; d < nd && !s_pdev; d++) {
         VkQueueFamilyProperties qf[16]; uint32_t nq = 16;
@@ -1114,10 +1145,9 @@ int sdl3vk_init(const char *title) {
         vkGetBufferMemoryRequirements(s_dev, f->hud_staging, &hmr);
         VkMemoryAllocateInfo hmai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         hmai.allocationSize = hmr.size;
+        /* Coherent, as f->staging: nothing flushes the HUD bytes copied into it. Vulkan
+         * guarantees a buffer such a type. */
         hmai.memoryTypeIndex = find_mem_type(hmr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (hmai.memoryTypeIndex == UINT32_MAX) {
-            hmai.memoryTypeIndex = find_mem_type(hmr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-        }
         INIT_VK(vkAllocateMemory(s_dev, &hmai, NULL, &f->hud_staging_mem));
         INIT_VK(vkBindBufferMemory(s_dev, f->hud_staging, f->hud_staging_mem, 0));
         INIT_VK(vkMapMemory(s_dev, f->hud_staging_mem, 0, VK_WHOLE_SIZE, 0, &f->hud_staging_map));
@@ -1378,8 +1408,11 @@ static int text_entry_key(SDL_Keycode k, int *repeats) {
     }
 }
 
-/* Queue each Unicode character of a UTF-8 text event. Malformed bytes are skipped. */
+/* Queue each Unicode character of a UTF-8 text event. Malformed bytes are skipped: a stray
+ * continuation byte, a sequence cut short (the byte that cut it is read on its own), an
+ * overlong form, a surrogate and a value past U+10FFFF queue nothing. */
 static void queue_text_utf8(const char *s) {
+    static const uint32_t min_cp[4] = { 0x0u, 0x80u, 0x800u, 0x10000u };
     const unsigned char *p = (const unsigned char *)s;
     while (*p) {
         uint32_t cp;
@@ -1389,7 +1422,10 @@ static void queue_text_utf8(const char *s) {
         else if ((*p & 0xF0) == 0xE0)  { cp = *p++ & 0x0Fu; extra = 2; }
         else if ((*p & 0xF8) == 0xF0)  { cp = *p++ & 0x07u; extra = 3; }
         else                           { p++; continue; }
-        while (extra-- > 0 && (*p & 0xC0) == 0x80) cp = (cp << 6) | (*p++ & 0x3Fu);
+        int got = 0;
+        while (got < extra && (*p & 0xC0) == 0x80) { cp = (cp << 6) | (*p++ & 0x3Fu); got++; }
+        if (got < extra || cp < min_cp[extra] || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu))
+            continue;
         key_queue_push(SDL3VK_KEY_TEXT, cp);
     }
 }
@@ -1881,12 +1917,14 @@ static void cap_free_buffer(CapBuffer *c) {
 }
 
 /* The memory type for a buffer the CPU reads back, from the device's per-type property flags
- * and the buffer's allowed type bits. A HOST_CACHED type comes first, as
- * gegpu_pick_host_mem_type (ge_gpu.c) chooses for the GE readbacks: the first
+ * and the buffer's allowed type bits. A HOST_CACHED type comes first: the first
  * HOST_VISIBLE|HOST_COHERENT type is usually uncached write-combined memory, where every CPU
  * read goes to memory, and reading a 4x frame back from it took about a second (#1296). In
  * order: cached and coherent; cached (*noncoherent set: invalidate after the copy fence);
- * coherent; any host-visible type. UINT32_MAX when no type is host-visible. */
+ * coherent; any host-visible type. UINT32_MAX when no type is host-visible. This is not
+ * gegpu_pick_host_mem_type (ge_gpu.c), which the GE readbacks use: that one takes only
+ * coherent types (cached and coherent, else the first coherent one), because nothing there
+ * invalidates a mapped range, so the two can choose different types on the same device. */
 static uint32_t cap_pick_mem_type(const uint32_t *type_flags, uint32_t type_count,
                                   uint32_t allowed_bits, int *noncoherent) {
     static const uint32_t want[4] = {
@@ -2166,84 +2204,13 @@ int sdl3vk_present_needs_clear(const Sdl3VkPresentPlan *plan, int dw, int dh) {
     return plan->x != 0 || plan->y != 0 || plan->w != dw || plan->h != dh;
 }
 
-/* The sharp-scaling intermediate image, shared by the frame ring: each use transitions it from
- * UNDEFINED behind a transfer-stage barrier, which also orders the write after the previous
- * frame's read on this queue. */
-static VkImage        s_prescale_img;
-static VkDeviceMemory s_prescale_mem;
-static int            s_prescale_w, s_prescale_h;
-
-static void prescale_free(void) {
-    if (s_prescale_img) vkDestroyImage(s_dev, s_prescale_img, NULL);
-    if (s_prescale_mem) vkFreeMemory(s_dev, s_prescale_mem, NULL);
-    s_prescale_img = VK_NULL_HANDLE;
-    s_prescale_mem = VK_NULL_HANDLE;
-    s_prescale_w = s_prescale_h = 0;
-}
-
-/* A w x h prescale image, recreated only when the size changes (a window resize). Returns 0
- * when it cannot be made; the caller then presents with one linear blit. */
-static int prescale_ensure(int w, int h) {
-    static int failed_w, failed_h;
-    if (s_prescale_img && s_prescale_w == w && s_prescale_h == h) return 1;
-    if (failed_w == w && failed_h == h) return 0;
-    failed_w = w; failed_h = h;  /* cleared below on success */
-    if (s_prescale_img) {
-        if (!wait_all_present_frames()) return 0;  /* an in-flight frame may still read it */
-        prescale_free();
-    }
-    VkImageCreateInfo imi = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    imi.imageType = VK_IMAGE_TYPE_2D;
-    imi.format = VK_FORMAT_R8G8B8A8_UNORM;
-    imi.extent.width = (uint32_t)w; imi.extent.height = (uint32_t)h; imi.extent.depth = 1;
-    imi.mipLevels = 1; imi.arrayLayers = 1; imi.samples = VK_SAMPLE_COUNT_1_BIT;
-    imi.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imi.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    imi.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(s_dev, &imi, NULL, &s_prescale_img) != VK_SUCCESS) {
-        s_prescale_img = VK_NULL_HANDLE;
-        fprintf(stderr, "sdl3vk: no %dx%d sharp-scaling image; presenting with linear filtering\n", w, h);
-        return 0;
-    }
-    VkMemoryRequirements mr;
-    vkGetImageMemoryRequirements(s_dev, s_prescale_img, &mr);
-    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize = mr.size;
-    mai.memoryTypeIndex = find_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (mai.memoryTypeIndex == UINT32_MAX ||
-        vkAllocateMemory(s_dev, &mai, NULL, &s_prescale_mem) != VK_SUCCESS ||
-        vkBindImageMemory(s_dev, s_prescale_img, s_prescale_mem, 0) != VK_SUCCESS) {
-        prescale_free();
-        fprintf(stderr, "sdl3vk: no memory for the %dx%d sharp-scaling image; presenting with linear "
-                        "filtering\n", w, h);
-        return 0;
-    }
-    s_prescale_w = w;
-    s_prescale_h = h;
-    failed_w = failed_h = 0;
-    return 1;
-}
-
-/* ---- video recording (videorec.h, #1273) ---------------------------------------------------
- * With SR_VIDEOREC_DIR set, every present also scales the picture it shows, with the window's
- * own plan and filters, into a record target of one fixed size (SR_VIDEOREC_SIZE, or the
- * window's size at the first recorded present), without the HUD or the pause overlay. The
- * target is copied to the frame slot's own readback buffer in the same command buffer; the
- * recorder reads that buffer when the next VBLANK writes its frame (rec_resolve), and a present
- * reads it before it reuses the slot. Each use of the target and of its sharp-scaling image
- * starts from UNDEFINED behind a transfer-stage barrier, like the window's prescale image. */
+/* A transfer image (TRANSFER_DST | TRANSFER_SRC, device-local), made again only when its size
+ * changes: the window's sharp-scaling image, and the recording's target and its own. */
 typedef struct RecImage {
     VkImage img;
     VkDeviceMemory mem;
     int w, h;
 } RecImage;
-
-static int s_rec_state = -1;      /* -1 undecided, 0 off, 1 recording */
-static uint32_t s_rec_w, s_rec_h; /* the record target's size, fixed at the first use */
-static RecImage s_rec_target, s_rec_pre;
-static CapBuffer s_rec_buf[PRESENT_FRAMES];
-static int s_rec_filter[PRESENT_FRAMES]; /* the SrVideoRecFilter each slot's picture was made with */
-static PresentFrame *s_rec_pending; /* the slot whose readback holds the newest recorded picture */
 
 static void rec_image_free(RecImage *r) {
     if (r->img) vkDestroyImage(s_dev, r->img, NULL);
@@ -2284,6 +2251,67 @@ static int rec_image_ensure(RecImage *r, int w, int h, VkFormat fmt) {
     r->h = h;
     return 1;
 }
+
+/* The sharp-scaling intermediate image, shared by the frame ring: each use transitions it from
+ * UNDEFINED behind a transfer-stage barrier, which also orders the write after the previous
+ * frame's read on this queue. */
+static RecImage s_prescale;
+/* The size whose image could not be made, and the swapchain it was tried for. That size is not
+ * tried again on every present of the same swapchain; a new swapchain (a resize, a re-init)
+ * tries it again, and shutdown forgets it. */
+static int      s_prescale_failed_w, s_prescale_failed_h;
+static uint64_t s_prescale_failed_gen;
+
+/* Sharp-scaling fault seam for the capture selftest: the next prescale image is not made, as
+ * a failed allocation would leave it. One-shot; 0 in production. */
+static int s_prescale_fault = 0;
+
+static void prescale_free(void) {
+    rec_image_free(&s_prescale);
+    s_prescale_failed_w = s_prescale_failed_h = 0;
+    s_prescale_failed_gen = 0;
+}
+
+/* A w x h prescale image, recreated only when the size changes (a window resize). Returns 0
+ * when it cannot be made; the caller then presents with one linear blit. */
+static int prescale_ensure(int w, int h) {
+    if (s_prescale.img && s_prescale.w == w && s_prescale.h == h) return 1;
+    if (s_prescale_failed_w == w && s_prescale_failed_h == h &&
+        s_prescale_failed_gen == s_swapchain_gen)
+        return 0;
+    int made;
+    if (s_prescale_fault) {
+        s_prescale_fault = 0;
+        made = 0;
+    } else {
+        made = rec_image_ensure(&s_prescale, w, h, VK_FORMAT_R8G8B8A8_UNORM);
+    }
+    if (!made) {
+        s_prescale_failed_w = w;
+        s_prescale_failed_h = h;
+        s_prescale_failed_gen = s_swapchain_gen;
+        fprintf(stderr, "sdl3vk: no %dx%d sharp-scaling image; presenting with linear "
+                        "filtering\n", w, h);
+        return 0;
+    }
+    s_prescale_failed_w = s_prescale_failed_h = 0;
+    return 1;
+}
+
+/* ---- video recording (videorec.h, #1273) ---------------------------------------------------
+ * With SR_VIDEOREC_DIR set, every present also scales the picture it shows, with the window's
+ * own plan and filters, into a record target of one fixed size (SR_VIDEOREC_SIZE, or the
+ * window's size at the first recorded present), without the HUD or the pause overlay. The
+ * target is copied to the frame slot's own readback buffer in the same command buffer; the
+ * recorder reads that buffer when the next VBLANK writes its frame (rec_resolve), and a present
+ * reads it before it reuses the slot. Each use of the target and of its sharp-scaling image
+ * starts from UNDEFINED behind a transfer-stage barrier, like the window's prescale image. */
+static int s_rec_state = -1;      /* -1 undecided, 0 off, 1 recording */
+static uint32_t s_rec_w, s_rec_h; /* the record target's size, fixed at the first use */
+static RecImage s_rec_target, s_rec_pre;
+static CapBuffer s_rec_buf[PRESENT_FRAMES];
+static int s_rec_filter[PRESENT_FRAMES]; /* the SrVideoRecFilter each slot's picture was made with */
+static PresentFrame *s_rec_pending; /* the slot whose readback holds the newest recorded picture */
 
 static int rec_on(void) {
     if (s_rec_state < 0) s_rec_state = sr_videorec_active() ? 1 : 0;
@@ -2481,27 +2509,29 @@ static void draw_profile_hud(SDL_Renderer *ren, int w, int h, double game_fps, d
 
 static int overlay_format_order(VkFormat fmt, int *rgba);
 
-/* The HUD, or with the HUD off the slowed-logic notice alone in a box of its own (`slowed`,
+/* With `with_hud` the HUD, else the slowed-logic notice alone in a box of its own (`slowed`,
  * at `slow_rate` updates/s), copied at the top left. Its surface is 8-bit RGBA or BGRA, so a
- * swapchain in any other format (10-bit, half float) gets no HUD, as it gets no pause overlay. */
-static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_img, int swap_w, int swap_h,
-                             int slowed, unsigned slow_rate) {
+ * swapchain in any other format (10-bit, half float) gets no HUD, as it gets no pause overlay.
+ * Returns 1 when it copied, 0 when it drew nothing: the window is smaller than the HUD (240x108,
+ * 240x130 with the notice) or the box (240x22), or the format does not fit. */
+static int draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_img, int swap_w,
+                            int swap_h, int with_hud, int slowed, unsigned slow_rate) {
     /* The profile HUD needs a window it fits in; a smaller one shows the performance HUD. */
-    int notice_only = !s_hud_enabled;
-    int profile = s_hud_enabled == SDL3VK_HUD_PROFILE && swap_w >= PROFILE_HUD_W &&
+    int notice_only = !with_hud;
+    int profile = with_hud && s_hud_enabled == SDL3VK_HUD_PROFILE && swap_w >= PROFILE_HUD_W &&
                   swap_h >= PROFILE_HUD_H + LOGIC_NOTICE_H;
     int hud_w = profile ? PROFILE_HUD_W : HUD_W;
     int hud_h = notice_only ? 0 : profile ? PROFILE_HUD_H : HUD_H;
-    if (!slowed && notice_only) return;
+    if (!slowed && notice_only) return 0;
     if (slowed) hud_h += LOGIC_NOTICE_H;
-    if (!f || !f->hud_staging_map || swap_w < hud_w || swap_h < hud_h) return;
+    if (!f || !f->hud_staging_map || swap_w < hud_w || swap_h < hud_h) return 0;
     int hud_rgba = 0;
     if (!overlay_format_order(s_swap_fmt, &hud_rgba)) {
         static int hud_format_warned;
         if (!hud_format_warned++)
             fprintf(stderr, "sdl3vk: the HUD is not shown: swapchain format %d is not 8-bit "
                             "RGBA or BGRA\n", (int)s_swap_fmt);
-        return;
+        return 0;
     }
 
     if (!s_hud_surf || s_hud_fmt != s_swap_fmt || s_hud_surf->w != hud_w || s_hud_surf->h != hud_h) {
@@ -2514,7 +2544,7 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
             s_hud_ren = SDL_CreateSoftwareRenderer(s_hud_surf);
         }
     }
-    if (!s_hud_surf || !s_hud_ren) return;
+    if (!s_hud_surf || !s_hud_ren) return 0;
 
     /* Game FPS counts new frames (a present of a buffer other than the previous one's), the
      * figure a player feels; Presents counts every frame handed to the window, re-presents of
@@ -2605,6 +2635,7 @@ static void draw_hud_overlay(VkCommandBuffer cmd, PresentFrame *f, VkImage dst_i
     s_hud_last.h = hud_h;
     s_hud_last.swap_w = swap_w;
     s_hud_last.swap_h = swap_h;
+    return 1;
 }
 
 static int present_common(VkImage src, int srcw, int srch, const uint32_t *upload) {
@@ -2771,21 +2802,21 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         } else if (plan.prescale > 1 &&
                    prescale_ensure(plan.prescale * showw, plan.prescale * showh)) {
             /* Sharp scaling, pass 1: nearest enlargement to the integer multiple. */
-            barrier(cmd, s_prescale_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            barrier(cmd, s_prescale.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     0, VK_ACCESS_TRANSFER_WRITE_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
             blt.srcOffsets[1].x = showw;         blt.srcOffsets[1].y = showh;
-            blt.dstOffsets[1].x = s_prescale_w;  blt.dstOffsets[1].y = s_prescale_h;
+            blt.dstOffsets[1].x = s_prescale.w;  blt.dstOffsets[1].y = s_prescale.h;
             vkCmdBlitImage(cmd, show, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           s_prescale_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           s_prescale.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &blt, VK_FILTER_NEAREST);
-            barrier(cmd, s_prescale_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            barrier(cmd, s_prescale.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-            blit_src = s_prescale_img;
-            bw = s_prescale_w;
-            bh = s_prescale_h;
+            blit_src = s_prescale.img;
+            bw = s_prescale.w;
+            bh = s_prescale.h;
         }
         if (plan.w > 0 && plan.h > 0) {
             blt.srcOffsets[1].x = bw;              blt.srcOffsets[1].y = bh;
@@ -2807,13 +2838,15 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         /* 60 FPS logic that has fallen behind plays slower than the original game; say so even
          * with the HUD off (section 9.5 of docs/ENHANCEMENT_CONTRACT.md): in the HUD while it
          * shows, else in the UI pass's layout, under its readout, else in the presenter's own
-         * box. That box sits where the readout does, so it is copied only when no pass drew. */
+         * box. That box sits where the readout does, so it is copied only when no pass drew. A
+         * HUD that is on but drew nothing (a window too small for it) does not count as shown. */
         const int hud_on = s_hud_enabled != SDL3VK_HUD_OFF;
         unsigned slow_rate = 0;
         const int slowed = s_logic_slowed_cb && s_logic_slowed_cb(&slow_rate);
         int slowed_shown = 0;
+        int hud_drawn = 0;
         if (hud_on && f->hud_staging_map) {
-            draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, slowed, slow_rate);
+            hud_drawn = draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, 1, slowed, slow_rate);
         }
         if (s_ui_pass) {
             Sdl3VkUiPass ui;
@@ -2827,12 +2860,12 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
             ui.image_count = s_swap_n;
             ui.image_index = idx;
             ui.swapchain_gen = s_swapchain_gen;
-            ui.logic_slowed = slowed && !hud_on;
+            ui.logic_slowed = slowed && !hud_drawn;
             ui.logic_rate = slow_rate;
             slowed_shown = s_ui_pass(&ui) && ui.logic_slowed;
         }
-        if (slowed && !hud_on && !slowed_shown && f->hud_staging_map) {
-            draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, slowed, slow_rate);
+        if (slowed && !hud_drawn && !slowed_shown && f->hud_staging_map) {
+            draw_hud_overlay(cmd, f, s_swap_img[idx], dw, dh, 0, slowed, slow_rate);
         }
 
         barrier(cmd, s_swap_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
