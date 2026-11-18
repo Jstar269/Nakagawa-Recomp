@@ -1389,6 +1389,7 @@ void hle_register_iofilemgr_handlers(void);
 extern uint32_t g_audio_bufs[9][4];
 extern int g_audio_nbufs[9];
 void hle_audio_guest_reset(void);
+void hle_mp3_guest_reset(void);
 void hle_register_regular_audio_handlers(void);
 void hle_register_output2_audio_handlers(void);
 void sr_dump_calls(void);

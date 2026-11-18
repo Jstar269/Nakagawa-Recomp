@@ -57742,6 +57742,238 @@ int main(int argc, char **argv) {
     return rc;
 }
 
+/* ---- ATRAC and sceMp3 state, audit 2026-11-17 -----------------------------------------------
+ * Production-dispatch regressions. The ATRAC3+ tracks are synthetic (terminator units, as in the
+ * ring-wrap fixture), with an optional smpl loop chunk. HOST_TESTED, not PSP_HARDWARE evidence;
+ * the ATRAC3+ end and loop rules are PPSSPP-derived, not PSP-measured. */
+enum { AU03_ALIGN = 24u, AU03_TRACK = 0x08020000u, AU03_PCM = 0x08030000u,
+       AU03_OUT_N = 0x08004100u, AU03_OUT_END = 0x08004104u, AU03_OUT_REMAIN = 0x08004108u,
+       AU03_LOOP_OUT = 0x08004110u, AU03_LOOP_FLAG = 0x08004114u };
+#define NID_SCE_ATRAC_SET_LOOP_NUM_AU03    0x868120b5u
+#define NID_SCE_ATRAC_GET_LOOP_STATUS_AU03 0xfaa4f89bu
+/* RIFF/WAVE ATRAC3+ track of `frames` frames at AU03_TRACK; `loop_end` > 0 adds a smpl loop from
+ * sample 0 to it. Returns the file size. */
+static uint32_t au03_build_at3p(uint32_t frames, uint32_t fact_samples, uint32_t loop_end) {
+    uint8_t *h = &g_mem[AU03_TRACK - 0x08000000u];
+    const uint32_t data_off = 56u + (loop_end ? 68u : 0u);
+    const uint32_t file_size = data_off + frames * AU03_ALIGN;
+    memset(h, 0, file_size);
+    memcpy(h + 0, "RIFF", 4);
+    fixture_wr32(h + 4, file_size - 8u);
+    memcpy(h + 8, "WAVE", 4);
+    memcpy(h + 12, "fmt ", 4);
+    fixture_wr32(h + 16, 16u);
+    fixture_wr16(h + 20, 0xFFFEu);
+    fixture_wr16(h + 22, 2u);
+    fixture_wr32(h + 24, 44100u);
+    fixture_wr32(h + 28, 44100u * 4u);
+    fixture_wr16(h + 32, (uint16_t)AU03_ALIGN);
+    fixture_wr16(h + 34, 16u);
+    memcpy(h + 36, "fact", 4);
+    fixture_wr32(h + 40, 4u);
+    fixture_wr32(h + 44, fact_samples);
+    uint32_t off = 48u;
+    if (loop_end) {
+        memcpy(h + off, "smpl", 4);
+        fixture_wr32(h + off + 4u, 60u);
+        fixture_wr32(h + off + 8u + 28u, 1u);           /* one loop */
+        fixture_wr32(h + off + 8u + 44u, 0u);           /* loop start */
+        fixture_wr32(h + off + 8u + 48u, loop_end);     /* loop end */
+        off += 68u;
+    }
+    memcpy(h + off, "data", 4);
+    fixture_wr32(h + off + 4u, frames * AU03_ALIGN);
+    for (uint32_t f = 0; f < frames; f++) h[data_off + f * AU03_ALIGN] = 0x60u;
+    return file_size;
+}
+
+/* A prefix with no frame grid cannot be decoded: no frame size (a fact-only ATRAC3+ prefix), or a
+ * frame size but no 'data' chunk header yet. Each DecodeData stops the run by name instead of
+ * reporting 0 samples as success or decoding the RIFF header as frame 0. */
+static void test_atrac_decode_without_frame_grid(void) {
+    reset_fixture();
+    sr_hle_init();
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, 0x1000u, 0u, 0u, 0u);
+    expect(id < 8u, "no frame grid: an ATRAC3+ ID");
+    if (id >= 8u) return;
+    for (uint32_t b = 0; b < 0x40u; b++) MEM_W8(AU03_TRACK + b, 0u);
+    MEM_W32(AU03_TRACK + 0x00u, 0x46464952u);
+    MEM_W32(AU03_TRACK + 0x04u, 0x1000u);
+    MEM_W32(AU03_TRACK + 0x08u, 0x45564157u);
+    MEM_W32(AU03_TRACK + 0x0cu, 0x74636166u);
+    MEM_W32(AU03_TRACK + 0x10u, 8u);
+    MEM_W32(AU03_TRACK + 0x14u, 2048u);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, AU03_TRACK, 0x40u, 0u) == 0u,
+           "no frame grid: SetData takes a fact-only ATRAC3+ prefix");
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret != 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "DecodeData on a track with no frame size stops by name, not a 0-sample success");
+
+    /* fmt and fact, then the prefix ends before the 'data' chunk header. */
+    (void)au03_build_at3p(4u, 4096u, 0u);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, AU03_TRACK, 48u, 0u) == 0u,
+           "no frame grid: SetData takes a prefix that ends before the data chunk");
+    stops = sr_hle_test_unmodelled_stops();
+    ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret != 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "DecodeData on a track with no data offset stops by name, not a decode of the header");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+/* Past the end of an ATRAC3+ track that does not loop, DecodeData is refused with 0x80630024 and
+ * decodes nothing, as plain AT3 is (frames stored after the fact sample count stay undecoded). */
+static void test_atrac3plus_decode_after_end(void) {
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t size = au03_build_at3p(4u, 2u * 2048u, 0u);
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, size, 0u, 0u);
+    expect(id < 8u, "after end: the ATRAC3+ track is accepted");
+    if (id >= 8u) return;
+    uint32_t r1 = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    uint32_t n1 = MEM_R32(AU03_OUT_N), e1 = MEM_R32(AU03_OUT_END);
+    uint32_t r2 = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    uint32_t n2 = MEM_R32(AU03_OUT_N), e2 = MEM_R32(AU03_OUT_END);
+    expect(r1 == 0u && n1 == 2048u && e1 == 0u && r2 == 0u && n2 == 2048u && e2 == 1u,
+           "after end: two frames decode and the second sets the end flag");
+    uint32_t r3 = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(r3 == ATRAC_ERROR_DECODE_DATA_AFTER_END && MEM_R32(AU03_OUT_N) == 0u,
+           "ATRAC3+ DecodeData after the final frame returns 0x80630024 with 0 samples "
+           "(PPSSPP-derived, not PSP-measured)");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+/* The loop end rewinds only while loops remain, in every buffer state: a streamed play-once
+ * track with a loop chunk finishes, and an all-data track with a trailer rewinds at its loop end
+ * rather than at the end of the file. PPSSPP-derived, not PSP-measured. */
+static void test_atrac_loop_end_follows_loop_num(void) {
+    enum { FRAMES = 6u, END = 3u * 2048u, LOOP_END = 2u * 2048u - 1u };
+    reset_fixture();
+    sr_hle_init();
+
+    /* Streamed: the buffer holds four of the six frames; loopNum stays 0 (play once). */
+    uint32_t size = au03_build_at3p(FRAMES, END, LOOP_END);
+    const uint32_t ring = size - 2u * AU03_ALIGN;
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, ring, 0u, 0u);
+    expect(id < 8u, "loop rule: the streamed looped ATRAC3+ track is accepted");
+    if (id >= 8u) return;
+    uint32_t finished_on = 0u;
+    for (uint32_t call = 1u; call <= 3u && !finished_on; call++) {
+        uint32_t r = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        if (r != 0u) break;
+        if (MEM_R32(AU03_OUT_END) == 1u) finished_on = call;
+    }
+    expect(finished_on == 3u,
+           "a streamed track with a loop chunk and loopNum 0 plays through its loop end and "
+           "finishes on its last frame");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+
+    /* All data loaded, one loop: the rewind comes at the loop end, before the trailer. */
+    size = au03_build_at3p(FRAMES, END, LOOP_END);
+    id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, size, 0u, 0u);
+    expect(id < 8u, "loop rule: the all-data looped ATRAC3+ track is accepted");
+    if (id >= 8u) return;
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, id, 1u, 0u, 0u) == 0u,
+           "loop rule: sceAtracSetLoopNum(1)");
+    (void)td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    (void)td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    MEM_W32(AU03_LOOP_OUT, 0xdeadbeefu);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_AU03, id, AU03_LOOP_OUT, AU03_LOOP_FLAG,
+                           0u) == 0u && MEM_R32(AU03_LOOP_OUT) == 0u,
+           "an all-data track rewinds at its loop end (sample 4095), using its one loop");
+    finished_on = 0u;
+    for (uint32_t call = 3u; call <= 8u && !finished_on; call++) {
+        uint32_t r = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        if (r != 0u) break;
+        if (MEM_R32(AU03_OUT_END) == 1u) finished_on = call;
+    }
+    expect(finished_on == 5u,
+           "after the rewind the track plays through its trailer once and finishes on call 5");
+    expect(td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN) ==
+               ATRAC_ERROR_DECODE_DATA_AFTER_END,
+           "the call after the finished one is refused with 0x80630024");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+/* sceAtracSetLoopNum refuses an ID that is out of range or not in use, like its siblings. */
+static void test_atrac_set_loop_num_bad_id(void) {
+    reset_fixture();
+    sr_hle_init();
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, 7u, 1u, 0u, 0u) == ATRAC_ERROR_BAD_ATRACID,
+           "sceAtracSetLoopNum on an unused ID is refused (BAD_ATRACID)");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, 9u, 1u, 0u, 0u) == ATRAC_ERROR_BAD_ATRACID,
+           "sceAtracSetLoopNum on an out-of-range ID is refused (BAD_ATRACID)");
+}
+
+/* sceKernelLoadExec ends the sceMp3 library's state: the next program finds it uninitialized
+ * with both handles free, as a program that never used it would. */
+static void test_mp3_loadexec_reset(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_mp3_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);
+    uint32_t len = mp3t_build_file(0, 0, 40u);
+    expect(mp3t_call(NID_MP3_INIT_RESOURCE, 0, 0, 0, 0) == 0u, "loadexec: sceMp3InitResource");
+    expect(mp3t_reserve(len) == 0u && mp3t_reserve(len) == 1u,
+           "loadexec: the first program reserves both handles");
+    sr_hle_loadexec_reset_guest_state();
+    expect(mp3t_call(NID_MP3_CHECK_NEEDED, 0u, 0, 0, 0) == MP3_ERR_UNRESERVED &&
+               mp3t_call(NID_MP3_CHECK_NEEDED, 1u, 0, 0, 0) == MP3_ERR_UNRESERVED,
+           "after sceKernelLoadExec neither of the old program's handles is reserved");
+    expect(mp3t_reserve(len) == MP3_ERR_NO_RESOURCE,
+           "after sceKernelLoadExec the library needs sceMp3InitResource again");
+    expect(mp3t_call(NID_MP3_INIT_RESOURCE, 0, 0, 0, 0) == 0u && mp3t_reserve(len) == 0u,
+           "the next program's sceMp3InitResource and sceMp3ReserveMp3Handle get handle 0");
+    sr_hle_test_mp3_reset();
+}
+
+/* A notify whose span runs past the stream area's end is not taken, and that is reported by
+ * name. The game writes less than asked once (a short read), so the write offset sits mid-half
+ * when the next half opens and the asked size runs past the area's end. */
+extern uint32_t sr_hle_test_mp3_notify_dropped(void);
+static void test_mp3_notify_past_area_end_reported(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_mp3_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);
+    uint32_t len = mp3t_build_file(0, 0, MP3T_FRAMES);
+    expect(mp3t_call(NID_MP3_INIT_RESOURCE, 0, 0, 0, 0) == 0u, "notify span: sceMp3InitResource");
+    uint32_t h = mp3t_reserve(len);
+    expect(h == 0u, "notify span: a handle");
+    if (h != 0u) { sr_hle_test_mp3_reset(); return; }
+    /* A short first refill: three quarters of the asked two halves. */
+    const uint32_t short_add = 3u * MP3T_STREAM_HALF / 2u;
+    expect(mp3t_call(NID_MP3_GET_INFO_TO_ADD, h, MP3T_OUT_DST, MP3T_OUT_SIZE, MP3T_OUT_POS) == 0u &&
+               MEM_R32(MP3T_OUT_SIZE) == 2u * MP3T_STREAM_HALF,
+           "notify span: the first refill asks for both halves");
+    uint32_t dst = MEM_R32(MP3T_OUT_DST);
+    for (uint32_t i = 0; i < short_add; i++) MEM_W8(dst + i, s_mp3t_file[i]);
+    expect(mp3t_call(NID_MP3_NOTIFY_ADD, h, short_add, 0, 0) == 0u &&
+               sr_hle_test_mp3_notify_dropped() == 0u,
+           "notify span: a span inside the stream area is taken");
+    expect(mp3t_call(NID_MP3_INIT, h, 0, 0, 0) == 0u, "notify span: sceMp3Init");
+    uint32_t want = 0u, off = 0u;
+    for (uint32_t call = 0; call < 80u; call++) {
+        if (mp3t_call(NID_MP3_DECODE, h, MP3T_OUT_PCM, 0, 0) & 0x80000000u) break;
+        (void)mp3t_call(NID_MP3_GET_INFO_TO_ADD, h, MP3T_OUT_DST, MP3T_OUT_SIZE, MP3T_OUT_POS);
+        want = MEM_R32(MP3T_OUT_SIZE);
+        off = MEM_R32(MP3T_OUT_DST) - MP3T_STREAM_AREA;
+        if (want && off + want > 2u * MP3T_STREAM_HALF) break;
+    }
+    expect(want != 0u && off + want > 2u * MP3T_STREAM_HALF,
+           "notify span: the next refill runs past the stream area's end");
+    if (want && off + want > 2u * MP3T_STREAM_HALF) {
+        uint32_t pos = MEM_R32(MP3T_OUT_POS);
+        dst = MEM_R32(MP3T_OUT_DST);
+        for (uint32_t i = 0; i < want && pos + i < len; i++) MEM_W8(dst + i, s_mp3t_file[pos + i]);
+        expect(mp3t_call(NID_MP3_NOTIFY_ADD, h, want, 0, 0) == 0u &&
+                   sr_hle_test_mp3_notify_dropped() == 1u,
+               "a notified span past the stream area's end is reported by name, not dropped "
+               "silently");
+    }
+    sr_hle_test_mp3_reset();
+}
+
 /* #322: no ATRAC call divides by a frame size of 0. Each route runs in a child process, so a
  * build that still divides fails its check with the child's crash status (0xC0000094 on Windows,
  * SIGFPE on POSIX) instead of ending this binary. */
@@ -58388,6 +58620,12 @@ static int hle_selftest_main(int argc, char **argv) {
     test_atrac_context_state_write_322();
     test_atrac_context_zero_frame_322();
     test_atrac_zero_frame_routes_322(argc > 0 ? argv[0] : NULL);
+    test_atrac_decode_without_frame_grid();
+    test_atrac3plus_decode_after_end();
+    test_atrac_loop_end_follows_loop_num();
+    test_atrac_set_loop_num_bad_id();
+    test_mp3_loadexec_reset();
+    test_mp3_notify_past_area_end_reported();
     test_texdump_finished_by_run_stops(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();

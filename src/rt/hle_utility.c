@@ -1166,6 +1166,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     memset(s_atrac_slot_codec, 0, sizeof(s_atrac_slot_codec));
     hle_atrac_context_reset();        /* the ATRAC context table's block went with the partition */
     hle_audio_guest_reset();
+    hle_mp3_guest_reset();            /* sceMp3 handles, their decoders and the resource flag */
     hle_sas_guest_reset();
     hle_videocodec_guest_reset();     /* sceVideocodec, sceAudiocodec and the ME RAM model */
 

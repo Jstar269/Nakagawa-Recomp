@@ -1177,10 +1177,33 @@ static uint32_t atrac_decode_data(CpuState *s) {
      * measurement is plain AT3; ATRAC3+ follows the same context state here,
      * UNMEASURED. */
     if (a->bufferState == 0) return ATRAC_ERROR_NO_DATA;
+    /* A prefix with no frame grid is classed ALL_DATA_LOADED by atrac_set_track so that a later
+     * sceAtracSetData with more of the file can still configure the track. Decoding it is not
+     * defined: with no frame size there is no frame to hand the decoder, and with no 'data' chunk
+     * header the frame offsets would start at the RIFF header. Either way the call stops the run
+     * by name instead of decoding header bytes or reporting 0 samples as success (#322). */
+    if (atrac_no_frame_size(a)) return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;   /* stopped */
+    if (a->dataByteOffset == 0u)
+        return hle_unmodelled_stop(hle_import_name(sr_last_nid), "ID %u: the fed prefix ends "
+                                   "before the track's 'data' chunk header, so no frame has a "
+                                   "file offset to decode (#322)", (unsigned)(a - s_atrac));
     uint32_t out = A1, decAddr = A2, finAddr = A3, remAddr = stack_arg(s, 0);
     int n = 0, finished = 0;
-    if (a->codecType == ATRAC_CODEC_AT3 &&
-        a->posSample >= a->endSample && a->loopNum == 0) {
+    /* Past the end of a track that does not loop, the call is refused and nothing is decoded.
+     * Plain AT3 follows #1109. ATRAC3+ takes the same refusal and the same outputs: the code is
+     * PPSSPP-derived, not PSP-measured (hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+     * Core/HLE/AtracCtx.cpp Atrac::DecodeData returns SCE_ERROR_ATRAC_ALL_DATA_DECODED,
+     * 0x80630024, once currentSample_ >= endSample with loopNum 0, for either codec). */
+    if (a->posSample >= a->endSample && a->loopNum == 0) {
+        if (a->codecType != ATRAC_CODEC_AT3) {
+            static int noted;
+            if (!noted) {
+                noted = 1;
+                fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceAtracDecodeData on "
+                                "ATRAC3+ ID %u past its end returns 0x%08x\n",
+                        (unsigned)(a - s_atrac), ATRAC_ERROR_DECODE_DATA_AFTER_END);
+            }
+        }
         if (decAddr) MEM_W32(decAddr, 0u);
         if (finAddr) MEM_W32(finAddr, 0u);
         if (remAddr) MEM_W32(remAddr, atrac_remaining_frames(a));
@@ -1229,7 +1252,20 @@ static uint32_t atrac_decode_data(CpuState *s) {
         a->at3FirstFramePending = 0;
         if (atrac_streamed_state(a)) atrac_consume_frame(a);
         a->posSample += decoded_samples;
-        if (atrac_streamed_state(a) && a->loopEndSample > 0 && a->posSample > a->loopEndSample) {
+        /* The loop end rewinds only while loops remain (loopNum != 0), in every buffer state, so
+         * a play-once track with a loop chunk reaches its end and a looped linear track does
+         * not play its trailer. PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+         * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/AtracCtx2.cpp
+         * Atrac2::DecodeInternal rewinds when loopEnd != 0 && loopNum != 0 && decodePos >
+         * loopEnd, whatever the state. */
+        if (a->loopNum != 0 && a->loopEndSample > 0 && a->posSample > a->loopEndSample) {
+            static int noted;
+            if (!noted) {
+                noted = 1;
+                fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceAtracDecodeData "
+                                "rewinds ID %u at its loop end while loopNum != 0\n",
+                        (unsigned)(a - s_atrac));
+            }
             a->posSample = a->loopStartSample >= 0 ? a->loopStartSample : 0;
             if (a->loopNum > 0) a->loopNum--;
             (void)atrac_reset_decoder(a);   /* loop rewind: no cross-frame leak */
@@ -1467,9 +1503,12 @@ static uint32_t h_AtracGetLoopStatus(CpuState *s) {
     if (A2) MEM_W32(A2, a->loopEndSample > 0 && a->bufferState != ATRAC_STATE_STREAMED_LOOP_TRAILER ? 1u : 0u);
     return 0;
 }
+/* An ID that is out of range, not in use or stopped is refused like every sibling call, so a
+ * game that sets the loop count on a released ID is not told it succeeded. */
 static uint32_t h_AtracSetLoopNum(CpuState *s) {
-    Atrac *a = atrac_of(A0);
-    if (a) { a->loopNum = (int)A1; atrac_ctx_push(a); }
+    Atrac *a = atrac_of(A0); if (!a) return ATRAC_ERROR_BAD_ATRACID;
+    a->loopNum = (int)A1;
+    atrac_ctx_push(a);
     return 0;
 }
 /* sceAtracGetBufferInfoForResetting and sceAtracResetPlayPosition share one
@@ -1747,6 +1786,7 @@ typedef struct Mp3Ctx {
 } Mp3Ctx;
 static Mp3Ctx s_mp3[MP3_MAX_HANDLES];
 static int s_mp3_resource_inited;
+static uint32_t s_mp3_notify_dropped;   /* notified spans not taken (each reported by name) */
 
 static Mp3Ctx *mp3_ctx(uint32_t handle) {
     return handle < MP3_MAX_HANDLES && s_mp3[handle].used ? &s_mp3[handle] : NULL;
@@ -2031,9 +2071,16 @@ static uint32_t h_Mp3NotifyAddStreamData(CpuState *s) {
     c->readPos += size;
     c->available += size;
     /* The positions follow the game's size even when it is negative or overruns the buffer;
-     * only bytes that really sit in the stream area are taken. */
-    if (size > 0 && (int64_t)MP3_STREAM_WORKAREA + write_offset + size <= (int64_t)c->auBufSize) {
+     * only bytes that really sit in the stream area are taken. A span that is not taken is
+     * reported by name, since the positions now count bytes the decoder does not hold. */
+    if (size > 0 && (int64_t)MP3_STREAM_WORKAREA + write_offset + size > (int64_t)c->auBufSize) {
+        s_mp3_notify_dropped++;
+        fprintf(stderr, "MP3: handle %u added %d bytes at stream offset %d, past the stream area's "
+                        "end at %d; not taken\n",
+                handle, size, write_offset, (int)c->auBufSize - (int)MP3_STREAM_WORKAREA);
+    } else if (size > 0) {
         if (c->srcLen + (uint32_t)size > c->srcCap) {
+            s_mp3_notify_dropped++;
             fprintf(stderr, "MP3: handle %u added %d bytes past two unconsumed halves; not taken\n",
                     handle, size);
         } else {
@@ -2143,13 +2190,22 @@ static uint32_t h_Mp3GetMPEGVersion(CpuState *s) {
     return (uint32_t)c->version;
 }
 
-#ifdef SR_HLE_THREAD_SELFTEST
-/* Test builds only: put the library back to its boot state between cases. */
-void sr_hle_test_mp3_reset(void) {
+/* sceKernelLoadExec: the next program starts with the library uninitialized and no handle
+ * reserved. A handle's buffers lie in the old program's partition, which the next program
+ * reuses, so its decoder and source copy go with it. */
+void hle_mp3_guest_reset(void) {
     for (uint32_t i = 0; i < MP3_MAX_HANDLES; i++)
         if (s_mp3[i].used) mp3_free(&s_mp3[i]);
     s_mp3_resource_inited = 0;
 }
+
+#ifdef SR_HLE_THREAD_SELFTEST
+/* Test builds only: put the library back to its boot state between cases. */
+void sr_hle_test_mp3_reset(void) {
+    hle_mp3_guest_reset();
+    s_mp3_notify_dropped = 0u;
+}
+uint32_t sr_hle_test_mp3_notify_dropped(void) { return s_mp3_notify_dropped; }
 #endif
 
 void hle_register_mp3_handlers(void) {
