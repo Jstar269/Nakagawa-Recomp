@@ -438,17 +438,17 @@ native-core-tests: ge-float24-selftest
 # SR_VRAMDUMP captures (#314): two captures are written next to the binary and removed.  Run
 # twice because ge.c latches the strip-cache switch per process, and a third time with the
 # per-draw vertex cache off for the scenes (its own case compares the cache on and off in
-# every run).  No game input.
+# every run).  The binary sets both switches from its arguments, so an SR_GE_*_DISABLE the
+# caller exported cannot turn a run into another leg.  No game input.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
-	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
 		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
-	SR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)
+	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --vertex-cache-disabled
 
 native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
 
@@ -515,14 +515,15 @@ native-core-tests: ge-tnl-census-selftest
 # patches at every factor, and a crack the check finds when the two are drawn at different
 # factors; line and point patches keep the PSP's division; the vertex cap lowers the factor
 # along its divisor chain, after the PSP's own cap; with the GE timing model on, factor F costs
-# the clocks of division d*F, not the PSP's d; the PATCH_TESS: exit line. It writes one scratch file under
+# the clocks of division d*F, not the PSP's d; a draw whose buffers cannot be allocated (malloc is
+# wrapped so one chosen call fails) is counted and draws nothing; the PATCH_TESS: exit line. It writes one scratch file under
 # BUILD_ROOT. No game input.
 GE_PATCH_TESS_SELFTEST := $(BUILD_DIR)/ge_patch_tess_selftest$(EXE_EXT)
 
 ge-patch-tess-selftest: $(RT_GE_O)
 	$(CC) $(CFLAGS) -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(LDFLAGS) -o $(GE_PATCH_TESS_SELFTEST) \
 		tests/native/ge_patch_tess_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
-		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
+		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm -Wl,--wrap=malloc
 	$(GE_PATCH_TESS_SELFTEST)
 
 native-core-tests: ge-patch-tess-selftest
