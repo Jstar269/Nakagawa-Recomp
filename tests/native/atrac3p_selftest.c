@@ -23,6 +23,10 @@
 //     (the terminator frame) after a loud frame decodes to silence, not to
 //     the previous frame's planes,
 //   - destroy(NULL) no-op,
+//   - out-of-range float samples saturate to int16 (NaN gives 0) on both the
+//     ATRAC3+ and the plain AT3 conversion,
+//   - decoder diagnostics: debug lines are dropped, and a missing-feature
+//     report is one complete "atrac3p: "-prefixed line,
 //   - transform-path canary: a deterministic MONO channel-unit frame drives a
 //     real unit through decode_residual_spectrum() + reconstruct_frame()
 //     (IMDCT/IPQF) and must decode with the nb_samples=2048 contract and
@@ -44,6 +48,7 @@
 //
 // Exit code 0 = all public checks passed (fixture portion SKIP or passed).
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -284,6 +289,89 @@ static void test_at3_pcm_polarity(void)
     CHECK(atrac3_pcm_sample(0.0f) == 0, "AT3 silence stays 0");
 }
 
+/* Out-of-range core output saturates. lrintf() alone is unspecified outside
+ * the range of long (32 bits on Windows) and for inf/NaN; on MinGW
+ * atrac3_pcm_sample(-70000) used to give 0 instead of +32767. MUTANT: removing
+ * the clamp before lrintf() fails the 70000 and infinity checks. */
+static void test_pcm_saturation(void)
+{
+    CHECK(atrac3_pcm_sample(-70000.0f) == 32767, "AT3 sample -70000 saturates to +32767");
+    CHECK(atrac3_pcm_sample(-1.0e6f) == 32767, "AT3 sample -1e6 saturates to +32767");
+    CHECK(atrac3_pcm_sample(70000.0f) == -32768, "AT3 sample +70000 saturates to -32768");
+    CHECK(atrac3_pcm_sample(-INFINITY) == 32767, "AT3 sample -inf saturates to +32767");
+    CHECK(atrac3_pcm_sample(INFINITY) == -32768, "AT3 sample +inf saturates to -32768");
+    CHECK(atrac3_pcm_sample(NAN) == 0, "AT3 sample NaN is 0");
+
+    CHECK(atrac3p_pcm_sample(0.5f) == 16384, "AT3+ sample +0.5 is +16384");
+    CHECK(atrac3p_pcm_sample(-1.0f) == -32768, "AT3+ sample -1.0 is -32768");
+    CHECK(atrac3p_pcm_sample(1.0f) == 32767, "AT3+ sample +1.0 saturates to +32767");
+    CHECK(atrac3p_pcm_sample(70000.0f) == 32767, "AT3+ sample +70000 saturates to +32767");
+    CHECK(atrac3p_pcm_sample(1.0e6f) == 32767, "AT3+ sample +1e6 saturates to +32767");
+    CHECK(atrac3p_pcm_sample(-70000.0f) == -32768, "AT3+ sample -70000 saturates to -32768");
+    CHECK(atrac3p_pcm_sample(INFINITY) == 32767, "AT3+ sample +inf saturates to +32767");
+    CHECK(atrac3p_pcm_sample(-INFINITY) == -32768, "AT3+ sample -inf saturates to -32768");
+    CHECK(atrac3p_pcm_sample(NAN) == 0, "AT3+ sample NaN is 0");
+}
+
+typedef struct {
+    char text[1024];
+    int lines;
+} LogCapture;
+
+static void capture_log_line(const char *line, void *opaque)
+{
+    LogCapture *cap = opaque;
+    size_t used = strlen(cap->text);
+    cap->lines++;
+    if (used < sizeof(cap->text) - 1)
+        snprintf(cap->text + used, sizeof(cap->text) - used, "%s", line);
+}
+
+/* Decoder diagnostics through the production paths. Creating a plain AT3
+ * decoder runs FFmpeg's atrac3_decode_init(), which logs four AV_LOG_DEBUG
+ * lines for a WAV stream; they used to reach stderr on every create and
+ * reset. A frame whose first channel unit is CH_UNIT_EXTENSION (start bit 0,
+ * unit id 2: 0x40) makes the decoder report the missing feature; that report
+ * used to be written with no line ending, so the next stderr line was glued
+ * onto it. MUTANT: ignoring the level fails the debug check; dropping the
+ * newline or the prefix fails the line check. */
+static void test_decoder_log_lines(void)
+{
+    static const uint8_t at3_wav_mono[14] = {
+        1, 0, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0
+    };
+    static const uint8_t extension_frame[] = { 0x40 };
+    LogCapture cap;
+    Atrac3Handle *at3 = NULL;
+    Atrac3pHandle *h = NULL;
+    int16_t pcm[ATRAC3P_FRAME_SAMPLES];
+    int samples = -1;
+
+    memset(&cap, 0, sizeof(cap));
+    atrac3p_set_log_sink(capture_log_line, &cap);
+
+    CHECK(atrac3_create(1, 96, at3_wav_mono, &at3) == 0, "AT3 WAV mono create");
+    CHECK(atrac3_reset(at3) == 0, "AT3 WAV mono reset");
+    CHECK(cap.lines == 0, "AT3 create/reset debug lines are not logged");
+    atrac3_destroy(at3);
+
+    memset(&cap, 0, sizeof(cap));
+    CHECK(atrac3p_create(1, 16, &h) == 0, "AT3+ mono create");
+    if (h) {
+        CHECK(atrac3p_decode(h, extension_frame, (int)sizeof(extension_frame),
+                             pcm, &samples) < 0,
+              "channel-unit extension frame is refused");
+        CHECK(samples == 0, "refused extension frame reports 0 samples");
+    }
+    CHECK(cap.lines == 1, "missing-feature report is one log call");
+    CHECK(strcmp(cap.text,
+                 "atrac3p: Missing feature: Channel unit extension is not implemented.\n") == 0,
+          "missing-feature report is one prefixed, terminated line");
+    atrac3p_destroy(h);
+
+    atrac3p_set_log_sink(NULL, NULL);
+}
+
 static void test_create_validation(void)
 {
     Atrac3pHandle *h = NULL;
@@ -449,6 +537,8 @@ int main(int argc, char **argv)
     (void)argv;
 
     test_at3_pcm_polarity();
+    test_pcm_saturation();
+    test_decoder_log_lines();
     test_create_validation();
     test_decode_rejection();
     test_terminator_decode();

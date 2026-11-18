@@ -120,7 +120,7 @@ Each file below keeps its upstream licence header unchanged and carries, just
 under it, the dated notice `Modified by Nakagawa Recomp contributors, <date>.`
 (LGPL-2.1 section 2(a)); its changes are marked `LOCAL DELTA` in the file. The
 notices were added on 2026-11-17 and date each file's changes: `atrac3.c`
-2026-10-20 (the plain AT3 import, #1109), `atrac3plus.c` and `sinewin.c`
+2026-10-20 (the plain AT3 import, #1109) and 2026-11-17, `atrac3plus.c` and `sinewin.c`
 2026-08-11 (the first public release), `atrac3plusdec.c` 2026-08-11 and
 2026-11-17.
 
@@ -136,7 +136,11 @@ notices were added on 2026-11-17 and date each file's changes: `atrac3.c`
   its layout.
 - The unused FFmpeg `AVFrame`/`AVPacket` decode wrappers and decoder registry
   entries are disabled, matching the standalone subset pattern in
-  `atrac3plusdec.c`.
+  `atrac3plusdec.c`. They are only wrapped in `#if 0` ... `#endif` (each
+  block marked `LOCAL DELTA` at its `#if 0`); the code inside is the upstream
+  n4.4 bytes. (2026-11-17: the disabled `atrac3_decode_frame()` wrapper had lost
+  two upstream comments, some blank lines and its `"Frame decoding error!"`
+  log; those upstream bytes are restored.)
 
 ### `libavcodec/atrac3plus.c`
 
@@ -251,7 +255,31 @@ contract:
 - `atrac3p_api.c` — thin C wrapper: handle struct holds the `AVCodecContext`,
   planar float decode buffer, per-channel plane pointers, and a padded
   scratch copy of the input frame; the ATRAC3+ float→s16 conversion is
-  `av_clip_int16(lrintf(p * 32768.0f))`, interleaved into caller memory.
+  `atrac3p_pcm_sample()`, interleaved into caller memory. Since 2026-11-17
+  both conversions clamp the scaled float to [-32768, 32767] before
+  `lrintf()` and map NaN to 0: before that `av_clip_int16(lrintf(x))` was
+  applied to the raw product, and `lrintf()` is unspecified outside the range
+  of `long` (32 bits on Windows) and for inf/NaN, so out-of-range decoder
+  output gave 0 or wrapped instead of saturating
+  (`tests/native/atrac3p_selftest.c`, `test_pcm_saturation`).
+- `av_log()`/`av_vlog()` (also in `atrac3p_api.c`; upstream's live in the
+  unimported `libavutil/log.c`): since 2026-11-17 a message above
+  `AV_LOG_INFO` (upstream's default `av_log_level`) is dropped, so FFmpeg's
+  `AV_LOG_DEBUG` lines from `atrac3_decode_init()` no longer reach stderr on
+  every AT3 create and reset. Each kept call is one line, prefixed
+  `atrac3p: ` and ended with a newline if the format has none, written to
+  stderr or to a sink installed with `atrac3p_set_log_sink()`. Before that
+  the level was ignored and the format was written verbatim
+  (`test_decoder_log_lines`).
+- Ledger record: the public provenance ledger lists `atrac3p_api.c` and
+  `atrac3p_api.h` under the decoder import's trusted record
+  (`atrac3p-decoder-import`, class `upstream_derived`), the record they
+  were admitted with, not under a project-authored record of their own. The
+  `AUTHORED stand-in` kind in the manifest above describes their content (no
+  FFmpeg n4.4 counterpart); giving them their own project-authored record is
+  a maintainer admission step that has not been taken. The HLE bridge that
+  drives these APIs, `src/rt/atrac3p_bridge.c`/`.h`, does have its own
+  project-authored record (`atrac3p-bridge-hle`).
   Every public entry validates all arguments (including a NULL handle on
   `decode`, which previously dereferenced `h` before the check) before any
   dereference, so hostile callers get a clean `AVERROR(EINVAL)`.
@@ -267,7 +295,8 @@ contract:
   The extension words [0-1], [2-5], [8-9] and [12-13] are not gates, matching
   upstream, because their PSP-visible values are `NOT_MEASURED`. It converts FFmpeg's 1024 planar float samples
   per channel to interleaved s16 with the opposite sign:
-  `atrac3_pcm_sample()` is `av_clip_int16(lrintf(-v * 32768.0f))`. The
+  `atrac3_pcm_sample()` negates the float, scales it by 32768 and saturates
+  it like `atrac3p_pcm_sample()` above. The
   negation is project-authored and MEASURED on a PSP-3000 (firmware 6.61,
   #1096, probe `at3-decode`): the PSP decoder's waveform is FFmpeg's negated.
   It never routes AT3 data through the ATRAC3+ context.

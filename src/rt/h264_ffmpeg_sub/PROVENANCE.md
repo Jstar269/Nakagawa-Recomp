@@ -315,10 +315,14 @@ unmodified n4.4 blob and pass with the delta.
   present, and the host allocator selected by `_WIN32` (`_aligned_malloc`) or POSIX
   (`posix_memalign`). `codec_list.c` registers only `ff_h264_decoder`; `bsf_list.c` only
   `ff_null_bsf`. Every `HAVE_*`/`ARCH_*`/`CONFIG_*` symbol the imported sources reference is
-  listed, so a missing one is a compile error rather than a silent zero.
+  listed (all were defined when checked on 2026-11-17). A missing one is a compile error only
+  where C code uses it (`if (CONFIG_X)`); in `#if CONFIG_X` an undefined name reads as 0 with no
+  diagnostic, and the `-w` build flag silences `-Wundef` too, so a pin bump must re-check the
+  list against every symbol the new sources reference (corrected 2026-11-17; the earlier text
+  said every missing symbol was a compile error).
 - `nk_h264_symbols.h` is force-included (`-include`) into every translation unit of this
   subset. The runtime also links the ATRAC3/ATRAC3+ subset, which carries its own copies of
-  some libavutil/libavcodec files at the same pin, so the 38 global symbols the two subsets
+  some libavutil/libavcodec files at the same pin, so the 35 global symbols the two subsets
   both define (the allocator, `av_log`, VLC and bit-copy helpers, `ff_log2_tab`, `ff_reverse`)
   are renamed with an `nkh264_` prefix here. This keeps the imported files byte-identical. A
   symbol missed by the list fails the runtime link with a duplicate-definition error.
@@ -339,8 +343,13 @@ code is not held to the project warning set), the `nk_h264_symbols.h` force-incl
   header leaks out. Results are `NK_H264_OK/AGAIN/EOF/INVALID_DATA/ERROR`; a picture is
   reported as planes, strides, size, one of YUV420P, NV12 or other, range and PTS.
 - `nk_h264_api.c` — drives the decoder (unmodified apart from the LOCAL DELTAs above) through `avcodec_send_packet` /
-  `avcodec_receive_frame` with one thread (`thread_count = 1`), `AV_CODEC_FLAG_LOW_DELAY`,
+  `avcodec_receive_frame` with one thread (`thread_count = 1`, so no frame-threading delay),
   a 1/90000 packet time base, and `AV_NOPTS_VALUE` for access units without a source PTS.
+  Output order follows the stream's reorder depth (the SPS `num_reorder_frames`, or the
+  decoder's own heuristics), so a picture can come out one or more access units after its
+  packet; `src/rt/h264_ffmpeg.c` drains pictures as they arrive. Until 2026-11-17 the wrapper
+  also set `AV_CODEC_FLAG_LOW_DELAY`, which no file of the n4.4 H.264 decoder reads; it was
+  dropped with no change in output.
 - The seam backend that converts pictures into guest or host pixel buffers and keeps the
   fail-closed, reset and EOS contract is `src/rt/h264_ffmpeg.c` (project-authored).
 

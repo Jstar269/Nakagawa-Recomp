@@ -69,8 +69,10 @@ We aim to respond promptly and will remove material where appropriate.
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `third_party/licenses/PSPSDK.txt` and `assets/upstream/`.
 - **FFmpeg n4.4 ATRAC3 and ATRAC3+ subsets** — LGPL-2.1-or-later. The imported
-  decoders and their license/provenance file are under `src/rt/atrac3p/`; the project wrapper
-  remains separately identified in the ledger. Two byte-identical imports,
+  decoders, the project-authored API layer over them (`atrac3p_api.c`/`.h`) and their
+  license/provenance file are under `src/rt/atrac3p/`. The provenance ledger lists all of
+  these under the FFmpeg decoder-import record; the HLE bridge that drives them,
+  `src/rt/atrac3p_bridge.c`, has its own project-authored record. Two byte-identical imports,
   `libavcodec/fft_init_table.c` and `libavcodec/fft_table.h`, also carry a MIPS
   Technologies, Inc. BSD-3-Clause notice. Its verbatim text is in
   `third_party/licenses/FFMPEG_MIPS_FFT.txt` and is included in the generated
