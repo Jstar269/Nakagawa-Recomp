@@ -726,6 +726,9 @@ int sdl3vk_pick_surface_format(int query, int count, const int *formats) {
 static int s_init_fault_step = 0;
 static int s_init_steps = 0;        /* fallible steps the last sdl3vk_init reached */
 static int s_sdl_subsystems = 0;    /* sdl3vk_init's SDL_Init succeeded and is not undone */
+/* The last sdl3vk_init found a Vulkan device that presents to its window: a step that fails
+ * after it is a renderer failure, not a host without Vulkan presentation (the selftests' SKIP). */
+static int s_init_found_device = 0;
 
 static int init_step_fails(void) {
     if (++s_init_steps != s_init_fault_step) return 0;
@@ -843,6 +846,7 @@ static void sdl3vk_set_app_identity(void) {
 
 int sdl3vk_init(const char *title) {
     s_init_steps = 0;
+    s_init_found_device = 0;
     sdl3vk_set_app_identity();
     INIT_OK(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD), "sdl3vk: SDL_Init failed: %s\n", SDL_GetError());
     s_sdl_subsystems = 1;
@@ -951,6 +955,7 @@ int sdl3vk_init(const char *title) {
         }
     }
     INIT_OK(s_pdev != VK_NULL_HANDLE, "sdl3vk: no usable Vulkan device\n");
+    s_init_found_device = 1;
     {
         VkPhysicalDeviceProperties pp;
         vkGetPhysicalDeviceProperties(s_pdev, &pp);
@@ -2127,13 +2132,7 @@ static PresentDisposition classify_present(VkResult pr, int *out_presented, cons
  * pending: once the frame's submit (the signal) is done, the semaphore is replaced. */
 static int recover_unenqueued_present(PresentFrame *f, uint32_t idx) {
     if (!s_dev) return 0;
-    if (f->submitted) {
-        if (vkWaitForFences(s_dev, 1, &f->fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-            s_renderer_terminal = 1;
-            return 0;
-        }
-        present_frame_finished(f);
-    }
+    if (!wait_present_frame(f)) return 0;   /* a failed wait leaves the renderer terminal */
     if (s_swap_sem_done[idx]) {
         vkDestroySemaphore(s_dev, s_swap_sem_done[idx], NULL);
         s_swap_sem_done[idx] = VK_NULL_HANDLE;
@@ -3049,20 +3048,20 @@ static int present_common(VkImage src, int srcw, int srch, const uint32_t *uploa
         sr_capture_set_probe_resolver(cap_probe_resolve);
         sr_capture_probe_defer();
     } else if (sr_capture_is_recorded()) {
-        if (f->submitted) {
-            uint64_t perf_wait_started = sr_perf_now_ns();
-            if (vkWaitForFences(s_dev, 1, &f->fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-                why = "capture fence wait failed"; goto fail;
-            }
-            if (perf_wait_started) sr_perf_vulkan_wait(perf_wait_started, 0);
-            present_frame_finished(f);
-        }
         /* The frame reached the presentation engine (vkQueuePresentKHR succeeded above):
          * a readback/publication failure must not make the frame itself look unpresented,
          * because gui.c would otherwise re-present it through the CPU fallback. The
          * capture resolves as attempted-and-failed (-1) inside fbcap.c, never as a
-         * fabricated success. */
-        if (!cap_invalidate_readback(&s_cap))
+         * fabricated success. The wait is the present's own (wait_present_frame), so the
+         * frame's GPU time is read and a failed wait leaves the renderer terminal: the copy
+         * into s_cap may still be running, and no later capture may free or regrow it. */
+        if (!wait_present_frame(f)) {
+            if (!s_terminal_reported) {
+                s_terminal_reported = 1;
+                fprintf(stderr, "sdl3vk: capture fence wait failed; the renderer is terminal\n");
+            }
+            sr_capture_fail("capture fence wait failed");
+        } else if (!cap_invalidate_readback(&s_cap))
             sr_capture_fail("capture readback invalidate failed");
         else
             sr_capture_publish_recorded(s_cap.map, s_cap_w * 4u, s_cap_order);
@@ -3137,7 +3136,14 @@ int sdl3vk_present_image(void *vk_image) {
 }
 
 int sdl3vk_present_image_ex(void *vk_image, int srcw, int srch) {
-    /* render-scaled GE target: the visible region scales with the internal resolution */
+    /* render-scaled GE target: the visible region scales with the internal resolution. The
+     * region is the blit and readback extent and sizes an armed capture's buffer, so a size no
+     * image can have is refused, as sdl3vk_present_rgba_ex refuses its own. */
+    if (srcw <= 0 || srch <= 0 || (uint32_t)srcw > s_max_image_dim ||
+        (uint32_t)srch > s_max_image_dim) {
+        sr_capture_fail("present_image_ex: unsupported picture size");
+        return -1;
+    }
     uint64_t started = sr_perf_now_ns();
     int result = present_common((VkImage)vk_image, srcw, srch, NULL);
     if (started) sr_perf_present_done(started, result);

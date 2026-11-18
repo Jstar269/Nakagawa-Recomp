@@ -67,6 +67,39 @@ static void profile_test_setenv(const char *name, const char *value) {
 #endif
 }
 
+/* A profile name that never exists in the scratch directory. NK_INPUT_PROFILE names it whenever a
+ * cell wants the default bindings, and SR_INPUT_PROFILE is cleared, so neither a developer's
+ * SR_INPUT_PROFILE nor their own <config>/input_profile.json (nk_input_profile_resolve_path's
+ * fallbacks once NK_INPUT_PROFILE is empty) reaches a cell. */
+#define PROFILE_TEST_NONE "selftest_no_input_profile.json"
+
+static void profile_test_use_defaults(void) {
+    profile_test_setenv("SR_INPUT_PROFILE", NULL);
+    profile_test_setenv("NK_INPUT_PROFILE", PROFILE_TEST_NONE);
+}
+
+/* Rewrites the first `from` in a saved profile fixture to `to`: a refused value the serializer
+ * never writes. 0 when the file cannot be read or written whole or `from` is not in it. */
+static int profile_test_rewrite(const char *path, const char *from, const char *to) {
+    static char buf[256 * 1024];
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1u, f);
+    const int whole = feof(f) && !ferror(f);
+    fclose(f);
+    if (!whole) return 0;
+    buf[n] = '\0';
+    char *at = strstr(buf, from);
+    if (!at) return 0;
+    f = fopen(path, "wb");
+    if (!f) return 0;
+    const size_t head = (size_t)(at - buf), tail = n - head - strlen(from);
+    int ok = fwrite(buf, 1, head, f) == head && fputs(to, f) >= 0 &&
+             fwrite(at + strlen(from), 1, tail, f) == tail;
+    ok &= fclose(f) == 0;
+    return ok;
+}
+
 static int cap_test_rmdir(const char *path) {
 #ifdef _WIN32
     return _rmdir(path) == 0;
@@ -91,6 +124,7 @@ static int cap_test_verify_ppm(const char *path, int w, int h) {
             fprintf(stderr, "verify: header mismatch (got %zu bytes)\n", got);
             for (size_t i = 0; i < got; i++)
                 fprintf(stderr, "  hdr byte %02u: %02x\n", (unsigned)i, (unsigned char)hdr[i]);
+            fclose(f);
             return 0;
         }
             size_t body = (size_t)w * (size_t)h * 3u;
@@ -404,26 +438,78 @@ int sdl3vk_input_profile_selftest(void) {
         }
     }
 
-    /* ---- 5(c) Invalid profile fallback + diagnostic; missing file fallback ---- */
+    /* ---- 5(c) A refused profile falls back to defaults with its diagnostic; missing file fallback ----
+     * Each fixture is a saved profile whose remap of cross shows when it is in force, and which
+     * loads as saved; it is then rewritten to one value the loader refuses (the serializer
+     * writes neither): a future schema_version, and an axis deadzone_inner below 0. */
     {
         const char *tmp_invalid = "selftest_invalid_profile.json";
-        FILE *f = fopen(tmp_invalid, "w");
-        if (f) {
-            fputs("{\n  \"schema_version\": 999,\n  \"deadzone_inner\": -100\n}\n", f);
-            fclose(f);
+        static const struct {
+            const char *name, *key;
+            int deadzone;
+        } kRefused[] = {
+            { "future schema_version", "schema_version", NK_INPUT_DEFAULT_DEADZONE_INNER },
+            { "negative axis deadzone_inner", "deadzone_inner", 12345 },
+        };
+        for (size_t i = 0; i < sizeof(kRefused) / sizeof(kRefused[0]); i++) {
+            NkInputProfile custom;
+            nk_input_profile_init_default(&custom);
+            custom.psp_buttons[NK_PSP_BTN_CROSS].primary.index = NK_HOST_BUTTON_NORTH;
+            custom.psp_buttons[NK_PSP_BTN_TRIANGLE].primary.index = NK_HOST_BUTTON_SOUTH;
+            custom.axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner = (int16_t)kRefused[i].deadzone;
+            char diag[NK_INPUT_DIAGNOSTIC_MAX_LEN] = {0};
+            if (nk_input_profile_save(&custom, tmp_invalid, diag, sizeof(diag)) != NK_OK) {
+                fprintf(stderr, "input_profile_selftest: %s: could not write %s: %s\n",
+                        kRefused[i].name, tmp_invalid, diag);
+                ok = 0;
+                continue;
+            }
+            profile_test_setenv("NK_INPUT_PROFILE", tmp_invalid);
+            sdl3vk_reset_input_profile();
+            sdl3vk_init_input_profile();
+            const NkInputProfile *prof = sdl3vk_get_input_profile();
+            if (prof->psp_buttons[NK_PSP_BTN_CROSS].primary.index != NK_HOST_BUTTON_NORTH ||
+                prof->axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner != kRefused[i].deadzone) {
+                fprintf(stderr, "input_profile_selftest: %s: the fixture as saved is not the profile "
+                                "in force\n", kRefused[i].name);
+                ok = 0;
+            }
+            char from[64], to[64];
+            if (i == 0) {
+                snprintf(from, sizeof from, "\"schema_version\": %d,", NK_INPUT_PROFILE_SCHEMA_VERSION);
+                snprintf(to, sizeof to, "\"schema_version\": 999,");
+            } else {
+                snprintf(from, sizeof from, "\"deadzone_inner\": %d,", kRefused[i].deadzone);
+                snprintf(to, sizeof to, "\"deadzone_inner\": -100,");
+            }
+            if (!profile_test_rewrite(tmp_invalid, from, to)) {
+                fprintf(stderr, "input_profile_selftest: %s: could not rewrite %s\n",
+                        kRefused[i].name, tmp_invalid);
+                ok = 0;
+                remove(tmp_invalid);
+                continue;
+            }
+            NkInputProfile loaded;
+            const NkResult res = nk_input_profile_load(&loaded, tmp_invalid, diag, sizeof(diag));
+            if (res == NK_OK || !strstr(diag, kRefused[i].key)) {
+                fprintf(stderr, "input_profile_selftest: %s: load gave %d with diagnostic '%s' (want a "
+                                "refusal naming %s)\n", kRefused[i].name, (int)res, diag,
+                        kRefused[i].key);
+                ok = 0;
+            }
+            sdl3vk_reset_input_profile();
+            sdl3vk_init_input_profile();
+            prof = sdl3vk_get_input_profile();
+            if (prof->schema_version != NK_INPUT_PROFILE_SCHEMA_VERSION ||
+                prof->psp_buttons[NK_PSP_BTN_CROSS].primary.index != NK_HOST_BUTTON_SOUTH ||
+                prof->axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner != NK_INPUT_DEFAULT_DEADZONE_INNER) {
+                fprintf(stderr, "input_profile_selftest: %s: the refused profile did not fall back to "
+                                "defaults\n", kRefused[i].name);
+                ok = 0;
+            }
+            remove(tmp_invalid);
         }
-
-        profile_test_setenv("NK_INPUT_PROFILE", tmp_invalid);
-        sdl3vk_reset_input_profile();
-        sdl3vk_init_input_profile();
-
-        const NkInputProfile *prof = sdl3vk_get_input_profile();
-        if (!prof || prof->schema_version != NK_INPUT_PROFILE_SCHEMA_VERSION ||
-            prof->axes[NK_PSP_AXIS_ANALOG_X].deadzone_inner != NK_INPUT_DEFAULT_DEADZONE_INNER) {
-            fprintf(stderr, "input_profile_selftest: invalid profile did not fall back to defaults\n");
-            ok = 0;
-        }
-        remove(tmp_invalid);
+        const NkInputProfile *prof;
 
         profile_test_setenv("NK_INPUT_PROFILE", "selftest_nonexistent_profile_12345.json");
         sdl3vk_reset_input_profile();
@@ -434,7 +520,7 @@ int sdl3vk_input_profile_selftest(void) {
             ok = 0;
         }
 
-        profile_test_setenv("NK_INPUT_PROFILE", NULL);
+        profile_test_use_defaults();
         sdl3vk_reset_input_profile();
     }
 
@@ -446,9 +532,22 @@ int sdl3vk_input_profile_selftest(void) {
         custom.psp_buttons[NK_PSP_BTN_CROSS].primary.index = NK_HOST_BUTTON_NORTH;
         custom.psp_buttons[NK_PSP_BTN_TRIANGLE].primary.index = NK_HOST_BUTTON_SOUTH;
         char diag[NK_INPUT_DIAGNOSTIC_MAX_LEN] = {0};
-        nk_input_profile_save(&custom, tmp_custom, diag, sizeof(diag));
+        if (nk_input_profile_save(&custom, tmp_custom, diag, sizeof(diag)) != NK_OK) {
+            fprintf(stderr, "input_profile_selftest: SR_PADSCRIPT profile save failed: %s\n", diag);
+            ok = 0;
+        }
 
+        /* Without SR_PADSCRIPT the profile is in force: cross reads Triangle. */
         profile_test_setenv("NK_INPUT_PROFILE", tmp_custom);
+        sdl3vk_reset_input_profile();
+        sdl3vk_init_input_profile();
+        const uint32_t south_profile = gamepad_button(SDL_GAMEPAD_BUTTON_SOUTH);
+        if (south_profile != 0x1000) {
+            fprintf(stderr, "input_profile_selftest: the remapping profile is not in force: south gave "
+                            "0x%04x expected 0x1000\n", south_profile);
+            ok = 0;
+        }
+
         profile_test_setenv("SR_PADSCRIPT", "synthetic_script_active");
         sdl3vk_reset_input_profile();
         sdl3vk_init_input_profile();
@@ -461,7 +560,7 @@ int sdl3vk_input_profile_selftest(void) {
         }
 
         profile_test_setenv("SR_PADSCRIPT", NULL);
-        profile_test_setenv("NK_INPUT_PROFILE", NULL);
+        profile_test_use_defaults();
         remove(tmp_custom);
         sdl3vk_reset_input_profile();
     }
@@ -564,7 +663,7 @@ int sdl3vk_input_profile_selftest(void) {
         }
 
         profile_test_setenv("SR_PADSCRIPT", NULL);
-        profile_test_setenv("NK_INPUT_PROFILE", NULL);
+        profile_test_use_defaults();
         remove(tmp_keys);
         sdl3vk_reset_input_profile();
     }
@@ -689,13 +788,17 @@ int sdl3vk_pause_input_selftest(void) {
         profile_test_setenv("NK_INPUT_PROFILE", tmp_profile);
         sdl3vk_reset_input_profile();
         sdl3vk_init_input_profile();
+        const NkInputProfile *guide_prof = sdl3vk_get_input_profile();
+        PAUSE_CHECK(guide_prof->psp_buttons[NK_PSP_BTN_HOME].primary.type == NK_BINDING_HOST_BUTTON &&
+                    guide_prof->psp_buttons[NK_PSP_BTN_HOME].primary.index == NK_HOST_BUTTON_GUIDE,
+                    "the Guide profile is not the one in force");
         SDL_SetJoystickVirtualButton(joy, SDL_GAMEPAD_BUTTON_GUIDE, true);
         (void)pause_test_sample();
         PAUSE_CHECK((pause_test_sample() & NK_PSP_BTN_HOME_BIT) == 0, "a Guide binding reached the game");
         PAUSE_CHECK(sdl3vk_take_pause_request() == SDL3VK_PAUSE_REQUEST_USER,
                     "Guide bound in the profile did not ask for the pause");
         pause_test_guide_release(joy);
-        profile_test_setenv("NK_INPUT_PROFILE", NULL);
+        profile_test_use_defaults();
         remove(tmp_profile);
         sdl3vk_reset_input_profile();
         sdl3vk_init_input_profile();
@@ -998,7 +1101,7 @@ static int sdl3vk_mouse_aim_selftest(void) {
     aim_test_stick(&lx, &ly);
     AIM_CHECK(lx == 128 + 7, "one count gave %u, expected %d", lx, 128 + 7);
 
-    profile_test_setenv("NK_INPUT_PROFILE", NULL);
+    profile_test_use_defaults();
     remove(tmp_profile);
     sdl3vk_reset_input_profile();
     aim_reset();
@@ -1238,7 +1341,7 @@ static int sdl3vk_mouse_buttons_selftest(void) {
     (void)mbtn_test_sample(&lx, &ly);
     profile_test_setenv("SR_PADSCRIPT", NULL);
 
-    profile_test_setenv("NK_INPUT_PROFILE", NULL);
+    profile_test_use_defaults();
     remove(tmp_profile);
     sdl3vk_reset_input_profile();
     s_aim_relative_mode = aim_relative_mode_default;
@@ -1401,15 +1504,30 @@ static int lifecycle_live_objects(void) {
                                                          : SDL_INIT_VIDEO | SDL_INIT_GAMEPAD) != 0);
 }
 
+/* A failed sdl3vk_init's selftest status: SKIP (77) while the host has no Vulkan presentation
+ * (SDL video, the window, the instance, the surface or a device that presents to it), and a
+ * failure (1) once init found a presenting device, because every later step is the renderer's
+ * own. */
+static int cap_test_init_status(void) {
+    return s_init_found_device ? 1 : 77;
+}
+
+static int cap_test_init_failed(void) {
+    const int status = cap_test_init_status();
+    if (status == 77)
+        fprintf(stderr, "gpu capture selftest: SKIP (Vulkan initialization unavailable)\n");
+    else
+        fprintf(stderr, "gpu capture selftest: sdl3vk_init failed after it found a presenting "
+                        "device\n");
+    return status;
+}
+
 /* Init unwind, repeated shutdown and re-init (#1377). A failure injected at each fallible step
  * of sdl3vk_init in turn must leave no Vulkan object, window or SDL subsystem alive and raise no
  * validation error (with validation on, vkDestroyDevice and vkDestroyInstance report any child
  * the unwind missed). Returns 0, 77 when Vulkan is unavailable, or 1. */
 static int sdl3vk_lifecycle_selftest(void) {
-    if (!sdl3vk_init("Nakagawa GPU lifecycle selftest")) {
-        fprintf(stderr, "gpu capture selftest: SKIP (Vulkan initialization unavailable)\n");
-        return 77;
-    }
+    if (!sdl3vk_init("Nakagawa GPU lifecycle selftest")) return cap_test_init_failed();
     const int steps = s_init_steps;
     const int errors = sdl3vk_validation_error_count();
     int ok = 1;
@@ -1447,6 +1565,14 @@ static int sdl3vk_lifecycle_selftest(void) {
             fprintf(stderr, "lifecycle: init step %d of %d failed (%s) and left %d object(s) alive\n",
                     step, steps, inited || s_init_steps != step ? "not where injected" : "as injected",
                     live);
+            ok = 0;
+        }
+        /* SDL_Init failing is a host without Vulkan presentation (SKIP); the last step failing,
+         * on a host whose device was found, is a renderer failure, never a SKIP. */
+        const int status = cap_test_init_status();
+        if ((step == 1 && status != 77) || (step == steps && status != 1)) {
+            fprintf(stderr, "lifecycle: init step %d of %d failed with selftest status %d (want %d)\n",
+                    step, steps, status, step == 1 ? 77 : 1);
             ok = 0;
         }
     }
@@ -1560,6 +1686,69 @@ static int sdl3vk_lifecycle_selftest(void) {
             ok = 0;
         }
     }
+    /* A file capture's fence wait is the present's own (wait_present_frame). With
+     * SR_GPU_TIMESTAMPS the captured frame's GPU time is read like any other present's. A failed
+     * wait leaves the renderer terminal, as the copy into the readback buffer may still be
+     * running; the frame was presented, so the present reports it shown and the capture fails.
+     * Every slot is waited first, so the capture's wait is the only fence wait the present
+     * makes. */
+    for (int c = 0; ok && c < 2; c++) {
+        const char *name = c == 0 ? "captured frame's GPU time" : "capture fence wait, device lost";
+        char saved_ts[64] = {0};
+        const char *ts_env = getenv("SR_GPU_TIMESTAMPS");
+        if (ts_env) snprintf(saved_ts, sizeof saved_ts, "%s", ts_env);
+        if (c == 0 && !cap_test_setenv("SR_GPU_TIMESTAMPS", "1")) {
+            fprintf(stderr, "lifecycle: cannot set SR_GPU_TIMESTAMPS\n");
+            ok = 0;
+            break;
+        }
+        const int inited = sdl3vk_init("Nakagawa GPU lifecycle selftest");
+        if (c == 0 && !cap_test_setenv("SR_GPU_TIMESTAMPS", saved_ts[0] ? saved_ts : "0")) {
+            fprintf(stderr, "lifecycle: cannot restore SR_GPU_TIMESTAMPS\n");
+            ok = 0;
+        }
+        if (!inited) {
+            fprintf(stderr, "lifecycle: re-init before present case '%s' failed\n", name);
+            ok = 0;
+            break;
+        }
+        const int pool = s_pts_pool != VK_NULL_HANDLE;
+        int warm = 1;
+        for (int k = 0; k < PRESENT_FRAMES; k++) warm &= sdl3vk_present_rgba(px) == 1;
+        warm &= wait_all_present_frames();
+        const uint64_t timed_before = s_pts_timed;
+        const int armed = sr_capture_arm("selftest_lifecycle.ppm");
+        if (c == 1) {
+            s_pstep_fault = PSTEP_FRAME_WAIT;
+            s_pstep_fault_result = VK_ERROR_DEVICE_LOST;
+        }
+        const PresentFrame *f = &s_frame[s_frame_cursor];
+        const int got = sdl3vk_present_rgba(px);
+        const int reached = s_pstep_fault == PSTEP_NONE;
+        s_pstep_fault = PSTEP_NONE;
+        const int capture = sr_capture_result();
+        const int terminal = sdl3vk_renderer_terminal();
+        const int reported = s_terminal_reported;
+        const uint64_t timed = s_pts_timed - timed_before;
+        const int ts_left = f->ts_written;
+        const int after = sdl3vk_present_rgba(px);
+        sdl3vk_shutdown();
+        remove("selftest_lifecycle.ppm");
+        const int live = lifecycle_live_objects();
+        const int want_capture = c == 0 ? 1 : -1;
+        const uint64_t want_timed = c == 0 && pool ? 1u : 0u;
+        if (!warm || !armed || !reached || got != 1 || capture != want_capture ||
+            terminal != c || reported != c || after != (c ? -1 : 1) ||
+            (c == 0 && (timed != want_timed || ts_left)) || live != 0) {
+            fprintf(stderr, "lifecycle: present case '%s': warm=%d armed=%d reached=%d present=%d "
+                            "(want 1) capture=%d (want %d) terminal=%d named %d (want %d) next "
+                            "present=%d, GPU times read %llu (want %llu, pool %d, left %d), %d "
+                            "object(s) alive after shutdown\n", name, warm, armed, reached, got,
+                    capture, want_capture, terminal, reported, c, after,
+                    (unsigned long long)timed, (unsigned long long)want_timed, pool, ts_left, live);
+            ok = 0;
+        }
+    }
     /* VK_INCOMPLETE from the physical-device or the instance-layer list is a success: the
      * entries written are valid. Init still finds the device, and the validation layer the run
      * asked for, and shutdown leaves nothing alive. */
@@ -1596,7 +1785,7 @@ static int sdl3vk_lifecycle_selftest(void) {
     }
     if (!ok) return 1;
     printf("gpu lifecycle selftest: init unwind at each of %d steps OK; %d present faults OK\n",
-           steps, npcases + 2);
+           steps, npcases + 4);
     return 0;
 }
 
@@ -2088,6 +2277,27 @@ static int sdl3vk_capture_selftest_body(void) {
     }
     if (!ok) return 1;
 
+    /* ---- cap_test_verify_ppm closes a file it refuses, so the removal that follows works
+     * (on Windows an open file cannot be removed) ------------------------------------- */
+    {
+        const char *bad = "selftest_bad_header.ppm";
+        FILE *bf = fopen(bad, "wb");
+        int wrote = bf && fputs("P6\n1 1\n255\n", bf) >= 0 && fwrite("abc", 1, 3, bf) == 3;
+        if (bf) wrote &= fclose(bf) == 0;
+        const int verified = wrote && cap_test_verify_ppm(bad, 2, 1);
+        const int removed = remove(bad) == 0;
+        if (!wrote || verified || !removed) {
+            fprintf(stderr, "verify: a header-mismatch file was %s, verified %d (want 0), removed "
+                            "%d (want 1)\n", wrote ? "written" : "not written", verified, removed);
+            ok = 0;
+        }
+    }
+    if (!ok) return 1;
+
+    /* Every profile cell starts from the default bindings: no developer's profile reaches it. */
+    profile_test_use_defaults();
+    sdl3vk_reset_input_profile();
+
     /* ---- input profile mapping selftest (#357); no Vulkan needed ------------------- */
     if (!sdl3vk_input_profile_selftest()) {
         fprintf(stderr, "gpu capture selftest: input profile selftest failed\n");
@@ -2143,10 +2353,7 @@ static int sdl3vk_capture_selftest_body(void) {
         int lifecycle = sdl3vk_lifecycle_selftest();
         if (lifecycle != 0) return lifecycle;
     }
-    if (!sdl3vk_init("Nakagawa GPU capture selftest")) {
-        fprintf(stderr, "gpu capture selftest: SKIP (Vulkan initialization unavailable)\n");
-        return 77;
-    }
+    if (!sdl3vk_init("Nakagawa GPU capture selftest")) return cap_test_init_failed();
     /* Every "no validation error" check below means something only if the layer is on. */
     if (!s_validation_on) {
         fprintf(stderr, "gpu capture selftest: SR_VULKAN_VALIDATION=1 did not reach sdl3vk_init; "
@@ -2999,6 +3206,36 @@ static int sdl3vk_capture_selftest_body(void) {
             fprintf(stderr, "scaled: PPM bytes wrong (pitch or truncation)\n"); ok = 0;
         }
         remove("selftest_scaled.ppm");
+        /* A region no image can have is refused before anything is recorded: an armed capture
+         * fails, nothing reaches the validation layer, and the next present is shown. */
+        {
+            static const int bad[][2] = { { 0, 544 }, { 960, 0 }, { -4, 544 }, { 960, -1 } };
+            const int errors_before = sdl3vk_validation_error_count();
+            for (size_t i = 0; i < 2u * (sizeof bad / sizeof bad[0]); i++) {
+                const int w = bad[i / 2u][0], h = bad[i / 2u][1], arm = (int)(i & 1u);
+                const int armed = !arm || sr_capture_arm("selftest_bad_region.ppm");
+                const int got = sdl3vk_present_image_ex((void *)big.img, w, h);
+                const int capture = arm ? sr_capture_result() : -1;
+                if (!armed || got != -1 || capture != -1) {
+                    fprintf(stderr, "scaled: a %dx%d region%s gave present %d capture %d (want -1, "
+                                    "-1)\n", w, h, arm ? " with a capture armed" : "", got, capture);
+                    ok = 0;
+                }
+                remove("selftest_bad_region.ppm");
+            }
+            const int shown = sdl3vk_present_image_ex((void *)big.img, 960, 544);
+            /* That present carries no capture, so nothing waited for it: the image it read
+             * is destroyed below only once every frame has finished. */
+            const int finished = wait_all_present_frames();
+            if (shown != 1 || !finished || sdl3vk_renderer_terminal() ||
+                sdl3vk_validation_error_count() != errors_before) {
+                fprintf(stderr, "scaled: after the refused regions the present gave %d, finished %d, "
+                                "terminal %d, %d validation error(s)\n", shown, finished,
+                        sdl3vk_renderer_terminal(),
+                        sdl3vk_validation_error_count() - errors_before);
+                ok = 0;
+            }
+        }
         cap_test_image_destroy(&big);
     }
 
