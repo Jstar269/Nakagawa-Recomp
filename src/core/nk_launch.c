@@ -1935,6 +1935,12 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     }
     argv[argc] = NULL;
 
+    /* A session started again after its child ended still holds that child's
+       process and job handles (nk_launch_is_running and nk_launch_wait read the
+       status but keep them); the spawn below overwrites them, so they are closed
+       here first. The live-child case returned above. */
+    nk_platform_close_process(&session->process);
+
     bool ok = nk_platform_spawn_process(
         session->executable_path,
         argv,
@@ -2089,7 +2095,7 @@ bool nk_launch_keep_run_log_in(const char *events_path, const char *log_dir,
     if (ok && cut > 0) {
         ok = fprintf(out, "[nakagawa] the first %llu bytes of this run were cut; "
                           "the last %llu bytes are kept\n",
-                     (unsigned long long)cut, (unsigned long long)max_bytes) > 0;
+                     (unsigned long long)cut, (unsigned long long)((uint64_t)size - cut)) > 0;
     }
     char buffer[16384];
     size_t got;

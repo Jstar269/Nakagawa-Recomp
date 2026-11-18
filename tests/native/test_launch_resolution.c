@@ -733,6 +733,29 @@ static void test_no_iso_child_environment(const char *test_executable,
     int child_exit = nk_launch_wait(&session, -1);
     nk_launch_stop(&session);
     assert(child_exit == 0);
+
+    /* A session whose child has ended may be started again without a stop in
+       between; the ended child's process and job handles are closed by the new
+       start, not left open and overwritten. */
+    {
+#ifdef _WIN32
+        DWORD handles_before = 0;
+        assert(GetProcessHandleCount(GetCurrentProcess(), &handles_before));
+#endif
+        assert(nk_launch_start(&session) == NK_OK);
+        assert(nk_launch_wait(&session, -1) == 0);
+        assert(!session.is_running);
+        assert(nk_launch_start(&session) == NK_OK);
+        assert(nk_launch_wait(&session, -1) == 0);
+        nk_launch_stop(&session);
+#ifdef _WIN32
+        DWORD handles_after = 0;
+        assert(GetProcessHandleCount(GetCurrentProcess(), &handles_after));
+        printf("[LAUNCH_TEST] handles before restart %lu, after %lu\n",
+               (unsigned long)handles_before, (unsigned long)handles_after);
+        assert(handles_after <= handles_before);
+#endif
+    }
     assert(getenv("PSP_ISO") != NULL);
     assert(strcmp(getenv("PSP_ISO"), "poisoned-parent.iso") == 0);
     assert(getenv("NK_LAUNCH_TEST_UNRELATED") != NULL);
@@ -2687,6 +2710,18 @@ static void test_keep_run_log(const char *base, char sep) {
     assert(strlen(body) <= 100u);
     assert(strstr(body, "second run line 39\n") != NULL);
     assert(strcmp(body + strlen(body) - 19u, "second run line 39\n") == 0);
+    {
+        /* The note names what the file holds: the cut moved on to a whole line,
+           so fewer than the cap's bytes are kept, and the two counts add up to
+           the run. */
+        unsigned long long cut_bytes = 0;
+        unsigned long long kept_bytes = 0;
+        assert(sscanf(text, "[nakagawa] the first %llu bytes of this run were cut; "
+                            "the last %llu bytes are kept", &cut_bytes, &kept_bytes) == 2);
+        assert(kept_bytes == (unsigned long long)strlen(body));
+        assert(kept_bytes < 100u);
+        assert(cut_bytes + kept_bytes == (unsigned long long)strlen(second_run));
+    }
     assert(!nk_platform_file_exists(part));
 
     /* A third run drops the oldest copy. */

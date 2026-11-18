@@ -294,8 +294,12 @@ NkResult nk_library_save(const NkLibrary *lib, const char *file_path) {
         if (!nk_platform_get_path(NK_PATH_DATA, default_path, sizeof(default_path))) {
             return NK_ERROR_IO;
         }
-        int written = snprintf(default_path + strlen(default_path), sizeof(default_path) - strlen(default_path), "%clibrary.json", nk_platform_path_separator());
-        if (written < 0) return NK_ERROR_IO;
+        size_t used = strlen(default_path);
+        int written = snprintf(default_path + used, sizeof(default_path) - used,
+                               "%clibrary.json", nk_platform_path_separator());
+        if (written < 0 || (size_t)written >= sizeof(default_path) - used) {
+            return NK_ERROR_PATH_TOO_LONG;
+        }
         target = default_path;
     }
 
@@ -369,8 +373,13 @@ NkResult nk_library_save(const NkLibrary *lib, const char *file_path) {
     }
 
     fprintf(f, "  ]\n}\n");
-    if (fflush(f) != 0) {
-        fclose(f);
+    /* The temp file replaces the library only once every byte is written and
+       on disk: a write that failed earlier (the stream's error flag), or a
+       flush, sync or close that fails, leaves the library and its .bak as they
+       were. */
+    bool written_whole = !ferror(f) && nk_platform_sync_file(f);
+    if (fclose(f) != 0) written_whole = false;
+    if (!written_whole) {
 #if defined(_WIN32) || defined(_WIN64)
         WCHAR wtmp[32768];
         if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, tmp_path, -1, wtmp, 32768) > 0) {
@@ -381,22 +390,6 @@ NkResult nk_library_save(const NkLibrary *lib, const char *file_path) {
 #endif
         return NK_ERROR_IO;
     }
-
-#if defined(_WIN32) || defined(_WIN64)
-    int fd = _fileno(f);
-    if (fd >= 0) {
-        HANDLE hFile = (HANDLE)_get_osfhandle(fd);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            FlushFileBuffers(hFile);
-        }
-    }
-#else
-    int fd = fileno(f);
-    if (fd >= 0) {
-        fsync(fd);
-    }
-#endif
-    fclose(f);
 
     /* Promote the temp file over the target, keeping the previous file as .bak. */
 #if defined(_WIN32) || defined(_WIN64)
@@ -484,10 +477,13 @@ static const char *skip_whitespace(const char *p) {
  * manifest and profile parsers use (nk_json_decode_escape), so \uXXXX, surrogate
  * pairs and the short escapes all produce their UTF-8 bytes. A malformed escape,
  * a raw control character, malformed UTF-8 or an unterminated string fails the
- * parse. A code point that does not fit the field is dropped whole, so a value
- * is never cut inside a UTF-8 sequence. */
+ * parse. A value that does not fit the field ends at the last code point that
+ * fits: it is never cut inside a UTF-8 sequence, and nothing after the first
+ * code point that does not fit is kept, so a shorter one further on cannot
+ * leave a hole in the middle of the value. */
 static const char *parse_string_val(const char *p, char *out_val, size_t max_len) {
     if (!out_val || max_len == 0) return NULL;
+    bool cut = false;
     out_val[0] = '\0';
     p = skip_whitespace(p);
     if (!p || *p != '\"') return NULL;
@@ -524,9 +520,11 @@ static const char *parse_string_val(const char *p, char *out_val, size_t max_len
             length = seq;
             p += seq;
         }
-        if (idx + length < max_len) {
+        if (!cut && idx + length < max_len) {
             memcpy(out_val + idx, encoded, length);
             idx += length;
+        } else {
+            cut = true;
         }
     }
     out_val[idx] = '\0';
@@ -563,7 +561,12 @@ static bool library_hex_field(char *value, size_t digits) {
     return true;
 }
 
-static NkResult nk_library_load_from_file(NkLibrary *lib, const char *target) {
+/* *unreadable is set when the file is there but could not be read at all (it
+ * could not be opened, or there was no memory to read it into): its contents
+ * are unknown, not damaged. */
+static NkResult nk_library_load_from_file(NkLibrary *lib, const char *target,
+                                          bool *unreadable) {
+    *unreadable = false;
     if (!lib || !target) return NK_ERROR_GENERIC;
 
     if (!nk_platform_file_exists(target)) {
@@ -572,7 +575,10 @@ static NkResult nk_library_load_from_file(NkLibrary *lib, const char *target) {
     }
 
     FILE *f = nk_fopen_utf8(target, "rb");
-    if (!f) return NK_ERROR_IO;
+    if (!f) {
+        *unreadable = true;
+        return NK_ERROR_IO;
+    }
 
     fseek(f, 0, SEEK_END);
     long file_size = ftell(f);
@@ -586,6 +592,7 @@ static NkResult nk_library_load_from_file(NkLibrary *lib, const char *target) {
     char *buf = (char *)malloc((size_t)file_size + 1);
     if (!buf) {
         fclose(f);
+        *unreadable = true;
         return NK_ERROR_OUT_OF_MEMORY;
     }
 
@@ -867,7 +874,10 @@ static NkResult nk_library_load_from_file(NkLibrary *lib, const char *target) {
     return NK_OK;
 }
 
-NkResult nk_library_load(NkLibrary *lib, const char *file_path) {
+/* *primary_unreadable is set when the library file is there but could not be
+ * read at all; its .bak is then not loaded in its place. */
+static NkResult library_load(NkLibrary *lib, const char *file_path, bool *primary_unreadable) {
+    *primary_unreadable = false;
     if (!lib) return NK_ERROR_GENERIC;
     nk_library_init(lib);
 
@@ -877,8 +887,12 @@ NkResult nk_library_load(NkLibrary *lib, const char *file_path) {
         if (!nk_platform_get_path(NK_PATH_DATA, default_path, sizeof(default_path))) {
             return NK_ERROR_IO;
         }
-        int written = snprintf(default_path + strlen(default_path), sizeof(default_path) - strlen(default_path), "%clibrary.json", nk_platform_path_separator());
-        if (written < 0) return NK_ERROR_IO;
+        size_t used = strlen(default_path);
+        int written = snprintf(default_path + used, sizeof(default_path) - used,
+                               "%clibrary.json", nk_platform_path_separator());
+        if (written < 0 || (size_t)written >= sizeof(default_path) - used) {
+            return NK_ERROR_PATH_TOO_LONG;
+        }
         target = default_path;
     }
 
@@ -887,38 +901,35 @@ NkResult nk_library_load(NkLibrary *lib, const char *file_path) {
     char bak_path[NK_MAX_PATH + 8];
     snprintf(bak_path, sizeof(bak_path), "%s.bak", target);
 
+    bool unreadable = false;
+    NkResult res = NK_OK;
     if (!nk_platform_file_exists(target)) {
-        /* Check if backup exists even if primary is missing */
+        /* With the primary missing, its .bak is the library when there is one.
+           A .bak that does not load whole is no library either: the entries it
+           gave before failing are dropped below, with its error. */
         if (nk_platform_file_exists(bak_path)) {
-            NkResult bres = nk_library_load_from_file(lib, bak_path);
-            if (bres == NK_OK) {
-                snprintf(lib->library_path, sizeof(lib->library_path), "%s", target);
-                return NK_OK;
-            }
-            if (bres == NK_ERROR_NEWER_SCHEMA) {
-                long newer = lib->newer_schema_version;
-                nk_library_init(lib);
-                snprintf(lib->library_path, sizeof(lib->library_path), "%s", target);
-                lib->newer_schema_version = newer;
-                return bres;
-            }
+            res = nk_library_load_from_file(lib, bak_path, &unreadable);
         }
-        return NK_OK;
-    }
-
-    NkResult res = nk_library_load_from_file(lib, target);
-    /* A newer player wrote the primary: the .bak is older, and loading it would
-       let the next save replace the newer library. It is refused by name. */
-    if (res != NK_OK && res != NK_ERROR_NEWER_SCHEMA) {
-        /* Primary corrupted or invalid: attempt automatic recovery from .bak */
-        if (nk_platform_file_exists(bak_path)) {
-            nk_library_init(lib);
-            NkResult bres = nk_library_load_from_file(lib, bak_path);
-            if (bres == NK_OK) {
-                snprintf(lib->library_path, sizeof(lib->library_path), "%s", target);
-                return NK_OK;
+    } else {
+        res = nk_library_load_from_file(lib, target, &unreadable);
+        /* A newer player wrote the primary: the .bak is older, and loading it
+           would let the next save replace the newer library. It is refused by
+           name. A primary that is there but cannot be read now (another program
+           holds it, or there is no memory) is not damaged: what it holds is
+           unknown, so its older .bak is not handed back in its place either. */
+        if (unreadable) {
+            *primary_unreadable = true;
+        } else if (res != NK_OK && res != NK_ERROR_NEWER_SCHEMA) {
+            /* Primary corrupted or invalid: attempt automatic recovery from .bak */
+            if (nk_platform_file_exists(bak_path)) {
+                nk_library_init(lib);
+                NkResult bres = nk_library_load_from_file(lib, bak_path, &unreadable);
+                if (bres == NK_OK) {
+                    snprintf(lib->library_path, sizeof(lib->library_path), "%s", target);
+                    return NK_OK;
+                }
+                if (bres == NK_ERROR_NEWER_SCHEMA) res = bres;
             }
-            if (bres == NK_ERROR_NEWER_SCHEMA) res = bres;
         }
     }
     if (res != NK_OK) {
@@ -930,9 +941,16 @@ NkResult nk_library_load(NkLibrary *lib, const char *file_path) {
         nk_library_init(lib);
         snprintf(lib->library_path, sizeof(lib->library_path), "%s", target);
         if (res == NK_ERROR_NEWER_SCHEMA) lib->newer_schema_version = newer;
+    } else {
+        snprintf(lib->library_path, sizeof(lib->library_path), "%s", target);
     }
 
     return res;
+}
+
+NkResult nk_library_load(NkLibrary *lib, const char *file_path) {
+    bool primary_unreadable = false;
+    return library_load(lib, file_path, &primary_unreadable);
 }
 
 /* locks/library.lock beside the library file, as tools/nk_cli.py names it. */
@@ -1033,9 +1051,13 @@ static NkResult library_commit(NkLibrary *lib, const NkGameEntry *entry, bool fr
     NkFileLock lock;
     NkResult res = nk_library_lock_acquire(&lock, target, NK_LIBRARY_LOCK_TIMEOUT_MS);
     if (res == NK_OK) {
-        res = nk_library_load(disk, target);
+        bool unreadable = false;
+        res = library_load(disk, target, &unreadable);
         if (res == NK_ERROR_NEWER_SCHEMA) {
             lib->newer_schema_version = disk->newer_schema_version;
+        } else if (res != NK_OK && unreadable) {
+            /* The file is there but cannot be read now: what it holds is
+               unknown, so nothing is written over it and the error stands. */
         } else {
             if (res != NK_OK) {
                 /* Neither the file nor its .bak reads: nothing on disk can be kept,
