@@ -208,10 +208,11 @@ STRICT_C_UNITS: dict[str, StrictUnit] = {
         ),
     ),
     # The texture-pack selftest counts sort comparisons and inflater builds;
-    # nk_zip.h declares those counters only under these defines.
+    # nk_zip.h declares those counters only under these defines. It also
+    # swaps a pack's ZIP through texrepl.c's NK_TEXREPL_TEST_HOOKS seam.
     "tests/native/texrepl_selftest.c": StrictUnit(
         recipes=("texrepl-selftest",),
-        defines=("NK_SORT_COUNT_COMPARES", "NK_INFLATE_COUNT_BUILDS"),
+        defines=("NK_SORT_COUNT_COMPARES", "NK_INFLATE_COUNT_BUILDS", "NK_TEXREPL_TEST_HOOKS"),
     ),
 }
 

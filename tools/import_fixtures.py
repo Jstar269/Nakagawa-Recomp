@@ -501,8 +501,10 @@ def build_module_elf(
 # to exercise a manifest classification (those NIDs and API names are public
 # PSPSDK/PPSSPP knowledge and already appear in src/rt/hle.c).
 MIXED_FIXTURE_LIBS = [
-    # dedicated (real handler), fake_success (h_ok), controlled_unsupported
+    # dedicated (real handlers): sceKernelCreateThread, sceKernelCheckCallback
     ("ThreadManForUser", [0x446D8DE6, 0x349D6D6C]),
+    # fake_success (h_ok stub): sceAtracGetOutputChannel
+    ("sceAtrac3plus", [0xB3B5D042]),
     # dedicated: the PSMF video getter drives the media producer and host codecs
     ("scePsmfPlayer", [0x46F61F8B]),
     # controlled unsupported: ATRAC3 voice setter with no source codec

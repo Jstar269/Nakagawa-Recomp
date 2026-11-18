@@ -390,6 +390,86 @@ class FrameBalanceBasicsTests(unittest.TestCase):
         self.assertEqual(profile.return_deltas, frozenset())
         self.assertEqual(efb.classify(profile), efb.INDETERMINATE)
 
+    def test_inline_syscall_continues_to_epilogue_like_trace_function(self):
+        """An inline syscall returns to pc+4, matching analyze.trace_function."""
+        syscall_word = 0x0C
+        words = emit(
+            0x1000,
+            addiu(SP, SP, -0x20),   # 0x1000 prologue
+            sw(RA, SP, 0x1C),       # 0x1004
+            syscall_word,           # 0x1008 inline syscall
+            lw(RA, SP, 0x1C),       # 0x100c epilogue after syscall
+            jr(RA),                 # 0x1010
+            addiu(SP, SP, 0x20),    # 0x1014
+        )
+        elf, ranges = image(words)
+        covered, calls = set(), set()
+        analyze.trace_function(elf, 0x1000, ranges, covered, calls, {0x1000})
+        self.assertIn(0x1010, covered)
+        profile = efb.profile_entry(elf, 0x1000, ranges)
+        self.assertEqual(profile.return_deltas, frozenset({0}))
+        self.assertEqual(efb.classify(profile), efb.CALLABLE)
+
+    def test_all_sp_writing_encodings_are_marked_unknown(self):
+        """Every instruction whose GPR destination is $sp (except addiu $sp,$sp,imm) is unknown."""
+        for label, word in (
+            ("slti $sp", (0x0A << 26) | (A0 << 21) | (SP << 16) | 1),
+            ("sltiu $sp", (0x0B << 26) | (A0 << 21) | (SP << 16) | 1),
+            ("lwl $sp", (0x22 << 26) | (A0 << 21) | (SP << 16)),
+            ("lwr $sp", (0x26 << 26) | (A0 << 21) | (SP << 16)),
+            ("ll $sp", (0x30 << 26) | (A0 << 21) | (SP << 16)),
+            ("sc $sp", (0x38 << 26) | (A0 << 21) | (SP << 16)),
+            ("clz $sp", (A0 << 21) | (SP << 11) | 0x16),
+            ("clo $sp", (A0 << 21) | (SP << 11) | 0x17),
+            ("max $sp", (A0 << 21) | (V0 << 16) | (SP << 11) | 0x2C),
+            ("min $sp", (A0 << 21) | (V0 << 16) | (SP << 11) | 0x2D),
+            ("ext $sp", (0x1F << 26) | (A0 << 21) | (SP << 16) | 0x00),
+            ("ins $sp", (0x1F << 26) | (A0 << 21) | (SP << 16) | 0x04),
+            ("seb/wsbh $sp", (0x1F << 26) | (A0 << 16) | (SP << 11) | 0x20),
+            ("mfc1 $sp", (0x11 << 26) | (0x00 << 21) | (SP << 16)),
+            ("cfc1 $sp", (0x11 << 26) | (0x02 << 21) | (SP << 16)),
+            ("mfv $sp", (0x12 << 26) | (0x03 << 21) | (SP << 16)),
+            ("mfvc $sp", (0x12 << 26) | (0x03 << 21) | (SP << 16) | 0x80),
+        ):
+            with self.subTest(form=label):
+                self.assertEqual(efb.sp_effect(word), (0, True), label)
+
+    def test_vfpu_moves_to_the_vfpu_leave_sp_untouched(self):
+        """mtv and mtvc (COP2 rs 7) read rt and write no general register."""
+        for label, word in (
+            ("mtv $sp", (0x12 << 26) | (0x07 << 21) | (SP << 16)),
+            ("mtvc $sp", (0x12 << 26) | (0x07 << 21) | (SP << 16) | 0x80),
+        ):
+            with self.subTest(form=label):
+                self.assertEqual(efb.sp_effect(word), (0, False), label)
+
+    def test_unconditional_branch_synonyms_do_not_invent_fallthrough(self):
+        """beql $0,$0 and bgez/bgezl $0 have no fall-through path."""
+        for label, br_word in (
+            ("beql $zero, $zero", (0x14 << 26) | 3),
+            ("bgez $zero", (1 << 26) | (0x01 << 16) | 3),
+            ("bgezl $zero", (1 << 26) | (0x03 << 16) | 3),
+        ):
+            with self.subTest(form=label):
+                words = emit(
+                    0x1000,
+                    addiu(SP, SP, -0x20),   # 0x1000
+                    sw(RA, SP, 0x1C),       # 0x1004
+                    br_word,                # 0x1008 -> 0x1018 (always taken)
+                    NOP,                    # 0x100c delay slot
+                    jr(RA),                 # 0x1010 unreachable padding / next function
+                    NOP,                    # 0x1014 would record -0x20 if fallen into
+                    lw(RA, SP, 0x1C),       # 0x1018 real epilogue
+                    jr(RA),                 # 0x101c
+                    addiu(SP, SP, 0x20),    # 0x1020
+                )
+                elf, ranges = image(words)
+                self.assertTrue(analyze.is_hard_terminator(br_word), label)
+                self.assertEqual(analyze.branch_kind(br_word), analyze.BRANCH_UNCOND, label)
+                profile = efb.profile_entry(elf, 0x1000, ranges)
+                self.assertEqual(profile.return_deltas, frozenset({0}), label)
+                self.assertEqual(efb.classify(profile), efb.CALLABLE, label)
+
 
 class SharedTailOwnershipTests(unittest.TestCase):
     """Multiple owners must not be silently reduced to one."""
@@ -726,6 +806,57 @@ class DirectJumpAuditTests(unittest.TestCase):
             efb.audit_direct_j_candidates(elf, {owner, target}, ranges),
             (),
         )
+
+    def test_second_owner_beyond_window_or_above_stops_direct_j_promotion(self):
+        """Direct-j owner resolution must be image-wide, not truncated to [addr-0x8000, addr)."""
+        owner_low = 0x1000
+        resume = 0x1100
+        owner_high = 0x1200
+        words = {}
+        words.update(emit(
+            owner_low,
+            addiu(SP, SP, -0x20),
+            sw(RA, SP, 0x1C),
+            j(resume),
+            NOP,
+        ))
+        words.update(emit(
+            resume,
+            lw(RA, SP, 0x1C),
+            addiu(SP, SP, 0x20),
+            jr(RA),
+            NOP,
+        ))
+        words.update(emit(
+            owner_high,
+            addiu(SP, SP, -0x20),
+            sw(RA, SP, 0x1C),
+            b(-0x81),  # 0x1208 -> 0x1008 (reaches the j source from above resume)
+            NOP,
+        ))
+        elf = WordImage(words)
+        ranges = [(0x1000, 0x1300)]
+        records = efb.audit_direct_j_candidates(
+            elf, {owner_low, resume, owner_high}, ranges
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].classification, efb.AMBIGUOUS)
+        self.assertIn("multiple balanced owners", records[0].reason)
+
+    def test_direct_j_call_or_address_taken_target_is_ambiguous(self):
+        """A jal target or address-taken target cannot be promoted to resume-only via direct-j."""
+        (elf, ranges), starts, owner, resume = self._one_way_tail()
+        words_jal = dict(elf.words)
+        words_jal.update(emit(0x2000, jal(resume), NOP))
+        elf_jal, ranges_jal = image(words_jal)
+        rec_jal = efb.audit_direct_j_candidates(elf_jal, starts, ranges_jal)[0]
+        self.assertEqual(rec_jal.classification, efb.AMBIGUOUS)
+        self.assertIn("call evidence", rec_jal.reason)
+
+        elf_data, ranges_data = image(elf.words, data_pointers=(resume,))
+        rec_data = efb.audit_direct_j_candidates(elf_data, starts, ranges_data)[0]
+        self.assertEqual(rec_data.classification, efb.AMBIGUOUS)
+        self.assertIn("address-taken evidence", rec_data.reason)
 
 
 class JumpRegionBoundaryTests(unittest.TestCase):
@@ -1528,6 +1659,20 @@ class DirectBranchAuditTests(unittest.TestCase):
         words[0x1010] = jr(RA)
         _, _, records = self.audit(words)
         self.assertEqual(self.only(records).classification, efb.CONTINUATION)
+
+    def test_fall_in_after_jal_or_branch_in_same_owner_stays_continuation(self):
+        """B12 must check the instruction start at addr-8 when addr-4 is its delay slot."""
+        words_jal = self.base_words()
+        words_jal[0x1010] = jal(0x2000)
+        words_jal[0x1014] = NOP
+        _, _, records_jal = self.audit(words_jal)
+        self.assertEqual(self.only(records_jal).classification, efb.CONTINUATION)
+
+        words_br = self.base_words()
+        words_br[0x1010] = bne(A0, V0, 1)  # 0x1010 -> 0x1018, delay slot at 0x1014 falls into 0x1018
+        words_br[0x1014] = NOP
+        _, _, records_br = self.audit(words_br)
+        self.assertEqual(self.only(records_br).classification, efb.CONTINUATION)
 
     # ---- B2: stack role ---------------------------------------------------
 
