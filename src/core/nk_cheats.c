@@ -1208,10 +1208,11 @@ static bool run_cheat(Frame *f, const Cheat *c, uint32_t *held_line) {
             break;
         }
         case OP_POINTER: {
-            /* In a run whose image is not where a PSP has it (NkCheatConfig), a null pointer plus
-             * an offset can land on the game's own bytes: an image placed at 0 starts there. On
-             * a PSP the same address is below user memory and the cheat is held, so a pointer
-             * that is null holds it here too. */
+            /* In a run whose image is not where a PSP has it (NkCheatConfig), null plus an offset
+             * is not an address the game set up: offsets are not moved with the image, so in this
+             * run it can land on the moved image's own bytes (an image placed at 0 starts there)
+             * or on its heap. A pointer that is null therefore holds its cheat. A PSP holds it too
+             * only for an offset below 0x08800000; for a larger one it writes at that address. */
             const bool moved = set->image_size != 0u;
             uint32_t pointer = load(f, op->addr, 4u);
             uint32_t target;

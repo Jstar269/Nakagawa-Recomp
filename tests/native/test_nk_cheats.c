@@ -878,8 +878,10 @@ static void test_moved_image(void) {
     CHECK(nk_cheats_apply(set, &k_host) == 3u && r8(0x9FFFu) == 0xAAu && r8(0xA000u) == 0u,
           "and the byte just below that memory is the game's");
     nk_cheats_free(set);
-    /* A pointer that is null (audit 2026-11-17): null plus the offset is this run's memory, the
-     * moved image's bytes where an image is placed at 0, but below user memory on a PSP. */
+    /* A pointer that is null (audit 2026-11-17). On a PSP this cheat would write at 0x08805000,
+     * the image's byte at +0x1000. In this moved run that address is not the PSP's byte (the
+     * offset is not moved with the image; here it is the moved image's byte at +0x2000), so the
+     * cheat is held. */
     set = load_as("_C1 through a null pointer\n_L 0x60004100 0x000000AA\n_L 0x00000001 0x08805000\n",
                   &moved, &k_host);
     w32(0x3100u, 0u);

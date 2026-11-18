@@ -191,8 +191,9 @@ typedef struct {
  * image and is moved with it; a code that names any other address refuses its cheat, because
  * where the rest of a PSP's memory (its heap, its stacks) lives in such a run is not known. A
  * pointer a code follows is the game's own, read from this run's memory, and is used as it is;
- * one that is null holds its cheat, because a null pointer plus an offset can land on the moved
- * image's own bytes where a PSP has no user memory. */
+ * one that is null holds its cheat, because null plus an offset is not an address the game set
+ * up: offsets are not moved with the image, so in this run it can land on the moved image's own
+ * bytes or on its heap. (A PSP holds such a cheat only for an offset below 0x08800000.) */
 typedef struct {
     const char *disc_id;
     uint32_t user_base;
