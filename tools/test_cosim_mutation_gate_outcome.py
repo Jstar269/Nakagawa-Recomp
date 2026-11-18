@@ -305,13 +305,9 @@ class SchedulerGateVerdictTests(unittest.TestCase):
         self.source.write_text("/* synthetic mutant source */\n", encoding="utf-8")
 
     def run_scheduler(self, code: str):
-        original = mutate.make_command
-        mutate.make_command = lambda source, target: _child(code)
-        try:
+        with mock.patch.object(mutate, "make_command", lambda source, target: _child(code)):
             return mutate.run_gate(self.source, target="scheduler",
                                    accepted_boundary="AOT_RETURN_TARGET_MISMATCH")
-        finally:
-            mutate.make_command = original
 
     def test_exactly_one_boundary_failure_is_the_kill(self):
         verdict, detail = self.run_scheduler(_scheduler_gate(1, 1))
