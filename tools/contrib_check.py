@@ -253,6 +253,9 @@ SHARED_TOOL_TESTS = {
     "tools/ci_paths.py": ("tools.test_ci_paths", "tools.test_ci_required"),
     "tools/contrib_check.py": ("tools.test_contrib_check",),
     "tools/provenance_record_gap.py": ("tools.test_provenance_record_gap",),
+    # Covered by a test module that is not named after them.
+    "tools/nk_core/disc_expand_tool.py": ("tools.test_disc_expand",),
+    "tests/fixtures/cosim/mutate.py": ("tools.test_cosim_mutation_gate_outcome",),
 }
 
 PASS, FAIL, SKIP, NOT_RUN, MAINTAINER_SIDE = "PASS", "FAIL", "SKIP", "NOT_RUN", "MAINTAINER-SIDE"
@@ -295,13 +298,17 @@ class Gate:
     """One gate's result. ``detail`` is what is shown; ``output`` is a failed command's whole output, which
     a caller that classifies the failure reads (``detail`` keeps only its last lines)."""
 
-    __slots__ = ("name", "status", "detail", "output")
+    __slots__ = ("name", "status", "detail", "output", "unchecked")
 
-    def __init__(self, name: str, status: str, detail: str = "", output: str = "") -> None:
+    def __init__(self, name: str, status: str, detail: str = "", output: str = "",
+                 *, unchecked: bool = False) -> None:
         self.name = name
         self.status = status
         self.detail = detail
         self.output = output
+        #: A NOT_RUN that leaves a changed surface unchecked locally, rather than one the
+        #: change does not touch; the summary names it next to the skipped gates.
+        self.unchecked = unchecked
 
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -312,9 +319,15 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
 
 def changed_paths(base: str) -> list[str]:
     """Committed changes against *base* plus anything still uncommitted."""
-    merge_base = _git("merge-base", base, "HEAD").stdout.strip()
-    if not merge_base:
-        raise SystemExit(f"contrib-check: cannot resolve a merge base with {base}")
+    # An unknown base (origin/main never fetched) or one with no common ancestor makes
+    # `git merge-base` exit non-zero; that is the named stop below, not a traceback.
+    found = _git("merge-base", base, "HEAD", check=False)
+    merge_base = found.stdout.strip()
+    if found.returncode != 0 or not merge_base:
+        why = found.stderr.strip() or (
+            "it has no common ancestor with HEAD" if found.returncode == 1
+            else f"git merge-base exited {found.returncode}")
+        raise SystemExit(f"contrib-check: cannot resolve a merge base with {base}: {why}")
     # NUL-separated output: paths are never quoted or split on spaces. In
     # `status --porcelain=v1 -z` each entry is one field "XY path"; a rename or
     # copy is followed by one more field holding its source path.
@@ -342,6 +355,8 @@ def python_test_modules(paths: list[str]) -> list[str]:
     modules: set[str] = set()
     for path in paths:
         name = PurePosixPath(path).name
+        # A shared or differently named module outside tools/ still selects its tests.
+        modules.update(SHARED_TOOL_TESTS.get(path, ()))
         if not path.startswith("tools/") or not name.endswith(".py"):
             continue
         if name.startswith("test_"):
@@ -349,7 +364,6 @@ def python_test_modules(paths: list[str]) -> list[str]:
             if (ROOT / path).is_file():
                 modules.add("tools." + name[:-3])
             continue
-        modules.update(SHARED_TOOL_TESTS.get(path, ()))
         if (ROOT / f"tools/test_{name}").is_file():
             modules.add(f"tools.test_{name[:-3]}")
     return sorted(modules)
@@ -493,11 +507,18 @@ def c_gate(paths: list[str]) -> Gate:
         if PurePosixPath(p).suffix.lower() == ".c" and (ROOT / p).is_file()
     ]
     if not sources:
+        headers = [p for p in paths if PurePosixPath(p).suffix.lower() in (".h", ".hpp") and (ROOT / p).is_file()]
+        if headers:
+            # A header-only change: this gate compiles changed sources only, so the headers
+            # are unchecked here and the summary says so (an OK must not read as covering them).
+            return Gate("strict-c-compile", NOT_RUN,
+                        f"changed header(s) not compiled: {', '.join(headers)}; hosted CI "
+                        "(or a local make check) builds them", unchecked=True)
         if ci_paths.classify(paths)["native_runtime"] == "true":
-            # A header-only native change: hosted CI builds it, this local gate compiles sources only.
+            # A native change with no C file: hosted CI builds it, this local gate compiles sources only.
             return Gate("strict-c-compile", NOT_RUN,
                         "no changed C source; the native_runtime surface changed, which only hosted CI "
-                        "(or a local make check) builds")
+                        "(or a local make check) builds", unchecked=True)
         return Gate("strict-c-compile", NOT_RUN, "no changed C source")
     compiler = os.environ.get("CC") or find_tool("gcc") or find_tool("cc")
     if compiler is None:
@@ -661,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
     failed = [gate.name for gate in gates if gate.status == FAIL]
     maintainer = [gate.name for gate in gates if gate.status == MAINTAINER_SIDE]
     skipped = [gate.name for gate in gates if gate.status == SKIP]
+    unchecked = [gate.name for gate in gates if gate.status == NOT_RUN and gate.unchecked]
     if maintainer:
         print("\n  a maintainer regenerates PUBLIC_EXPORT.json and the public ledger from the "
               "private trusted ledger (make provenance-refresh); a contributor cannot do that, and these findings are "
@@ -668,6 +690,9 @@ def main(argv: list[str] | None = None) -> int:
     if skipped:
         print(f"  SKIPPED because the tool is not installed: {', '.join(skipped)} -- "
               "a skipped gate is not a pass.")
+    if unchecked:
+        print(f"  NOT CHECKED here, although the change touches it: {', '.join(unchecked)} -- "
+              "hosted CI checks it; OK does not cover it.")
     print(f"\ncontrib-check: {'FAIL (' + ', '.join(failed) + ')' if failed else 'OK'}")
     return 1 if failed else 0
 

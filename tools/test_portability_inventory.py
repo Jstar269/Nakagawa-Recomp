@@ -29,6 +29,15 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(pi.classify_file("src/rt/sr_coro.c")[1], "SEMANTIC_CORE_CONTAMINATION")
         self.assertEqual(pi.classify_file("src/rt/recomp.c")[1], "SEMANTIC_CORE_CONTAMINATION")
 
+    def test_hle_private_headers_are_semantic_core(self) -> None:
+        """The headers every runtime HLE source includes are HLE core, not the src/rt backend default."""
+        import hle_sources
+
+        self.assertTrue(hle_sources.HLE_PRIVATE_HEADERS)
+        for header in hle_sources.HLE_PRIVATE_HEADERS:
+            with self.subTest(header=header):
+                self.assertEqual(pi.classify_file(header), ("CORE", "SEMANTIC_CORE_CONTAMINATION"))
+
     def test_backend_files_are_backend(self) -> None:
         self.assertEqual(pi.classify_file("src/rt/gpu_sdl3vk/sdl3vk.c")[1], "BACKEND_EXPECTED")
         self.assertEqual(pi.classify_file("src/rt/gpu_sdl3vk/ge_gpu.c")[1], "BACKEND_EXPECTED")

@@ -3,6 +3,7 @@
 
 """Offline deterministic tests for tools/lint_docs.py and the tools/README.md index."""
 
+import os
 import pathlib
 import re
 import sys
@@ -98,8 +99,9 @@ class TestDocFreshnessLinter(unittest.TestCase):
             root = pathlib.Path(temp_dir)
             doc_dir = root / "docs" / "nested"
             doc_dir.mkdir(parents=True)
-            (root / "NOTICE.md").write_text("notice\n", encoding="utf-8")
-            (root / "docs" / "file with spaces.md").write_text("content\n", encoding="utf-8")
+            (root / "NOTICE.md").write_text("# Some section\n\nnotice\n", encoding="utf-8")
+            (root / "docs" / "file with spaces.md").write_text(
+                "## Section\n\ncontent\n\n## Section\n\nmore\n", encoding="utf-8")
 
             doc = doc_dir / "TEST.md"
             doc.write_text(
@@ -115,6 +117,70 @@ class TestDocFreshnessLinter(unittest.TestCase):
         self.assertTrue(
             any("missing repository-relative link target: ../../MISSING.md#section" in error for error in errors)
         )
+
+    def test_a_fragment_must_name_a_heading_or_anchor_of_the_target(self) -> None:
+        """Failing-before: the fragment was dropped, so a renamed heading left a dead link passing."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            (root / "docs").mkdir()
+            (root / "docs" / "PACKAGING.md").write_text(
+                "# Packaging\n\n## 5. Local AOT package contract (v3)\n\n"
+                "### The `nk_pkg` header\n\n<a id=\"explicit-anchor\"></a>\n\n"
+                "Setext heading\n--------------\n\n```md\n# Not a heading\n```\n",
+                encoding="utf-8",
+            )
+            doc = root / "docs" / "README.md"
+            live = (
+                "[a](PACKAGING.md#5-local-aot-package-contract-v3)",
+                "[b](PACKAGING.md#the-nk_pkg-header)",
+                "[c](PACKAGING.md#explicit-anchor)",
+                "[d](PACKAGING.md#setext-heading)",
+                "[e](PACKAGING.md#5-Local-AOT-package-contract-v3)",
+            )
+            doc.write_text("\n".join(live) + "\n", encoding="utf-8")
+            self.assertEqual(lint_doc_links_and_topology(doc, root), [])
+            for dead in ("PACKAGING.md#5-local-aot-package-contract-v2", "PACKAGING.md#not-a-heading"):
+                with self.subTest(dead=dead):
+                    doc.write_text(f"[x]({dead})\n", encoding="utf-8")
+                    errors = lint_doc_links_and_topology(doc, root)
+                    self.assertEqual(len(errors), 1, errors)
+                    self.assertIn(f"heading anchor the target does not have: {dead}", errors[0])
+
+    def test_titled_angle_and_reference_links_are_checked(self) -> None:
+        """Failing-before: these CommonMark forms never matched the link pattern, so their targets passed."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            (root / "docs").mkdir()
+            (root / "docs" / "a b.md").write_text("# A\n", encoding="utf-8")
+            doc = root / "docs" / "README.md"
+            doc.write_text(
+                '[t](GONE_TITLED.md "a title")\n'
+                "[s](<GONE SPACED.md>)\n"
+                "[ref]: GONE_REF.md\n"
+                '[ok](<a b.md> "title")\n'
+                "[ok2]: <a b.md>\n"
+                "[^1]: a footnote, not a link\n",
+                encoding="utf-8",
+            )
+            errors = lint_doc_links_and_topology(doc, root)
+        self.assertEqual(len(errors), 3, errors)
+        for name in ("GONE_TITLED.md", "GONE SPACED.md", "GONE_REF.md"):
+            self.assertTrue(any(error.endswith(f"missing repository-relative link target: {name}")
+                                for error in errors), (name, errors))
+
+    def test_a_link_differing_only_in_letter_case_is_rejected(self) -> None:
+        """Failing-before on a case-insensitive file system: docs/setup.md found docs/SETUP.md."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            (root / "docs").mkdir()
+            (root / "docs" / "SETUP.md").write_text("# Setup\n", encoding="utf-8")
+            doc = root / "docs" / "README.md"
+            doc.write_text("[ok](SETUP.md)\n", encoding="utf-8")
+            self.assertEqual(lint_doc_links_and_topology(doc, root), [])
+            doc.write_text("[bad](setup.md)\n", encoding="utf-8")
+            errors = lint_doc_links_and_topology(doc, root)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertTrue(errors[0].endswith("setup.md"), errors)
 
     def test_recursive_fallback_includes_nested_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -319,6 +385,7 @@ class TestDocTruthInvariants(unittest.TestCase):
                 text=True,
                 check=True,
             ).stdout.strip()
+            run_git(["update-ref", "refs/remotes/origin/main", live], cwd=root, check=True)
             doc = self._write_doc(
                 root, "docs/NOTE.md",
                 "base https://github.com/Jstar269/nakagawa-recomp/tree/deadbee1234abcd end\n",
@@ -330,6 +397,43 @@ class TestDocTruthInvariants(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(lint_doc_truth(doc, root, hst_manifest_tracked=False), [])
+
+    def test_a_commit_only_in_the_local_store_is_not_public_history(self) -> None:
+        """Failing-before: `git cat-file -e` passed an unpushed commit and a tree SHA in a commit URL."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            run_git(["init", "-q"], cwd=root, check=True)
+            (root / "a.txt").write_text("x", encoding="utf-8")
+            run_git(["add", "."], cwd=root, check=True)
+            run_git(["commit", "-qm", "x"], cwd=root, check=True)
+
+            def rev(name: str) -> str:
+                return run_git(["rev-parse", name], cwd=root, capture_output=True, text=True,
+                               check=True).stdout.strip()
+
+            public = rev("HEAD")
+            tree = rev("HEAD^{tree}")
+            (root / "a.txt").write_text("y", encoding="utf-8")
+            run_git(["commit", "-qam", "unpushed"], cwd=root, check=True)
+            unpushed = rev("HEAD")
+            doc = self._write_doc(root, "docs/NOTE.md", "placeholder\n")
+
+            def lint(sha: str) -> list[str]:
+                doc.write_text(f"see https://github.com/Jstar269/nakagawa-recomp/commit/{sha}\n",
+                               encoding="utf-8")
+                return lint_doc_truth(doc, root, hst_manifest_tracked=False)
+
+            # No public ref: the link cannot be checked, which is said by name, never passed.
+            errors = lint(public)
+            self.assertEqual(len(errors), 1, errors)
+            self.assertIn("cannot be checked against public history", errors[0])
+            run_git(["update-ref", "refs/remotes/origin/main", public], cwd=root, check=True)
+            self.assertEqual(lint(public), [])
+            for sha in (unpushed, tree):
+                with self.subTest(sha=sha):
+                    errors = lint(sha)
+                    self.assertEqual(len(errors), 1, errors)
+                    self.assertIn("unavailable in public history", errors[0])
 
     def test_truth_snapshot_dir_is_excluded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -515,6 +619,49 @@ class TestHleCensusDocGuard(unittest.TestCase):
             errors = lint_hle_census_counts(doc, root, statuses)
         self.assertEqual(len(errors), 1, errors)
         self.assertIn(":6:", errors[0])
+
+    def test_census_markers_exempt_only_the_generated_inventory(self) -> None:
+        """Failing-before: the markers exempted any CURRENT page, and a lone BEGIN the rest of it."""
+        block = (
+            f"{lint_docs.HLE_CENSUS_BLOCK_BEGIN}\n"
+            "412 registrations.\n"
+            f"{lint_docs.HLE_CENSUS_BLOCK_END}\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            statuses = self._taxonomy(root)
+            doc = self._write_doc(root, "docs/PORTING.md", block)
+            errors = lint_hle_census_counts(doc, root, statuses)
+            self.assertEqual(sum("carries a generated HLE census marker" in e for e in errors), 2, errors)
+            self.assertTrue(any(":2:" in e and "hand-codes" in e for e in errors), errors)
+
+            cases = {
+                "unterminated": (f"{lint_docs.HLE_CENSUS_BLOCK_BEGIN}\n412 registrations.\n",
+                                 "never closed"),
+                "stray end": (f"{lint_docs.HLE_CENSUS_BLOCK_END}\n412 registrations.\n",
+                              "never opened"),
+                "nested": (f"{lint_docs.HLE_CENSUS_BLOCK_BEGIN}\n{block}412 registrations.\n",
+                           "inside the one opened at line 1"),
+            }
+            for name, (text, marker_error) in cases.items():
+                with self.subTest(case=name):
+                    doc = self._write_doc(root, lint_docs.HLE_CENSUS_BLOCK_DOC, text)
+                    errors = lint_hle_census_counts(doc, root, statuses)
+                    self.assertTrue(any(marker_error in e for e in errors), errors)
+                    if name != "nested":
+                        self.assertTrue(any("hand-codes" in e for e in errors), errors)
+
+    def test_a_bare_then_is_not_a_historical_label(self) -> None:
+        """Failing-before: any line containing "then" skipped every count on it."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            statuses = self._taxonomy(root)
+            doc = self._write_doc(root, "docs/PORTING.md",
+                                  "There are 412 registrations; then run the census.\n")
+            self.assertEqual(len(lint_hle_census_counts(doc, root, statuses)), 1)
+            doc = self._write_doc(root, "docs/PORTING.md",
+                                  "Count at the time: 412 registrations.\n")
+            self.assertEqual(lint_hle_census_counts(doc, root, statuses), [])
 
     def test_the_repository_inventory_passes_the_census_guard(self) -> None:
         doc = ROOT / "docs" / "HLE_AND_WORKAROUND_INVENTORY.md"
@@ -1236,6 +1383,18 @@ class TestToolsModuleIndex(unittest.TestCase):
             "tools/README.md module index does not match the tracked tools modules:\n"
             + "\n".join(errors),
         )
+
+    def test_an_inherited_git_dir_does_not_list_another_repository(self) -> None:
+        """Failing-before: `git ls-files` ran without the isolated environment, so a GIT_DIR and
+        GIT_WORK_TREE inherited from a hook listed the caller's repository, not *repo_root*."""
+        git_dir = run_git(["rev-parse", "--absolute-git-dir"], cwd=ROOT, capture_output=True,
+                          text=True, check=True).stdout.strip()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            self._make_repo(root, "tools/alpha.py")
+            with patch.dict(os.environ, {"GIT_DIR": git_dir, "GIT_WORK_TREE": str(ROOT)}):
+                rows = lint_docs.tools_index_rows(root)
+        self.assertEqual([name for name, _summary in rows], ["alpha.py"])
 
     def test_new_module_without_an_index_row_is_reported(self) -> None:
         """A module that exists but is unindexed is undiscoverable, so it must fail closed."""

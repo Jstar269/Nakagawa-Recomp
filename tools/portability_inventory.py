@@ -58,6 +58,9 @@ CORE_HEADERS = {
     "asset_index.h", "evf.h", "intr_conformance.h", "fp_convert.h",
     "ge_shared.h", "sdkver.h", "sr_h264.h",
     "fbcap_policy.h", "watchpoints_file.h", "debug.h", "perf.h",
+    # The runtime HLE's private headers are HLE core like the sources that include them;
+    # otherwise the src/rt fallback below would file their Win32 use as backend.
+    *(Path(path).name for path in hle_sources.HLE_PRIVATE_HEADERS),
 }
 BACKEND_HEADERS = {"pgd_api.h", "pgf_api.h"}
 BACKEND_FILES = {
