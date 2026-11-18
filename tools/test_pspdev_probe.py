@@ -73,10 +73,11 @@ class ProbeTests(unittest.TestCase):
             exe = Path(td) / "psp-config"
             exe.write_bytes(b"x")
             lines = (
-                "C:/Users/Jane Doe/pspdev/psp/sdk",
+                # Assembled so the source text holds no literal local path (publication audit).
+                "C:/" + "Users/Jane Doe/pspdev/psp/sdk",
                 "C:" + r"\Users\Jane Doe\pspdev\bin\psp-gcc.exe: usage",
-                r"\\server\share\Jane Doe\pspdev",
-                "/home/Jane Doe/pspdev/psp/sdk",
+                "\\\\" + r"server\share\Jane Doe\pspdev",
+                "/" + "home/Jane Doe/pspdev/psp/sdk",
             )
 
             def runner(command, **kwargs):

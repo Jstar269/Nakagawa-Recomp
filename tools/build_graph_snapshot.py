@@ -36,7 +36,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = 1
 
 _PROFILE_RE = re.compile(r"^(.+?)_profile\.json$")
-_D_TARGET_RE = re.compile(r"^(.*?):\s*(.*)$")
+# The rule separator is a colon followed by whitespace or the end of the line, so a
+# Windows drive letter in an absolute target (``C:/x/build/a.o: ...``) stays in the target.
+_D_TARGET_RE = re.compile(r"^(.*?):(?:\s+|$)(.*)$")
 
 
 def _join_continuations(text: str) -> list[str]:

@@ -411,6 +411,13 @@ jobs:
         if: >-
           ${{ needs.classify.outputs.security_publication == 'true' ||
               github.event_name == 'workflow_dispatch' }}
+        # The export commits under the operator's Git identity and refuses without one;
+        # the runner has none, so this throwaway check names a CI operator explicitly.
+        env:
+          GIT_AUTHOR_NAME: Nakagawa Recomp CI
+          GIT_AUTHOR_EMAIL: ci@nakagawa-recomp.invalid
+          GIT_COMMITTER_NAME: Nakagawa Recomp CI
+          GIT_COMMITTER_EMAIL: ci@nakagawa-recomp.invalid
         run: |
           set -euo pipefail
           export_dir="${RUNNER_TEMP:?}/public-export-candidate"

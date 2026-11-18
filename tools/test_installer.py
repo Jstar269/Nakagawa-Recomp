@@ -577,6 +577,16 @@ class BuildToolTests(unittest.TestCase):
         with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_PACKAGE_MISSING"):
             build_installer.check_package(self.root / "nothing")
 
+    def test_an_unreadable_checksum_list_is_a_named_refusal_not_a_traceback(self):
+        sums = self.package / build_installer.SUMS_NAME
+        sums.write_bytes(sums.read_bytes() + b"\xff\n")
+        with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_PACKAGE_INVALID: SHA256SUMS.txt is unreadable"):
+            self.build()
+        sums.unlink()
+        with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_PACKAGE_INVALID: SHA256SUMS.txt is unreadable"):
+            build_installer.read_sums(self.package)
+        self.assertEqual(self.calls, [])
+
     def test_a_runtime_manifest_that_does_not_verify_is_refused(self):
         def reject(_bin):
             raise RuntimeError("RUNTIME_FILE_CHANGED: bin/SDL3.dll")

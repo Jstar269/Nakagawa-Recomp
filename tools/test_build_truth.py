@@ -436,6 +436,20 @@ class CpuStateAbiTests(unittest.TestCase):
         self.assertRegex(stale.stdout + stale.stderr, r"SR_CPUSTATE_ABI_VERSION|CpuState ABI version")
 
 
+class CompilerIdentityTests(unittest.TestCase):
+    """A compiler named by a native path keeps its identity in the profile hash."""
+
+    def test_a_native_interpreter_path_is_run_not_reported_unavailable(self) -> None:
+        # On Windows sys.executable is a backslash path (often with a space): POSIX splitting
+        # used to turn it into a name that does not exist and hash a fixed "unavailable" text.
+        expected = f"Python {sys.version_info.major}.{sys.version_info.minor}"
+        for command in (sys.executable, f'"{sys.executable}" -I'):
+            with self.subTest(command=command):
+                identity = build_profile.compiler_identity(command)
+                self.assertTrue(identity["version"].startswith(expected), identity["version"])
+                self.assertEqual(Path(identity["executable"]).resolve(), Path(sys.executable).resolve())
+
+
 class CpuStateAbiProfileTests(unittest.TestCase):
     """Profile hashing needs no compiler; keep it out of the compiler-gated suite."""
 
