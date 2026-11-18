@@ -1643,8 +1643,11 @@ NkResult nk_launch_start(NkLaunchSession *session) {
                  adhoc_ok ? "1" : "0");
         snprintf(env_adhoc_server, sizeof(env_adhoc_server), "SR_ADHOC_SERVER=%s",
                  adhoc_ok ? session->config.online_play_server : "");
-        snprintf(env_adhoc_offset, sizeof(env_adhoc_offset), "SR_ADHOC_PORT_OFFSET=%s",
-                 adhoc_ok ? "10000" : "");
+        if (adhoc_ok)
+            snprintf(env_adhoc_offset, sizeof(env_adhoc_offset), "SR_ADHOC_PORT_OFFSET=%u",
+                     (unsigned)NK_RELAY_PORT_OFFSET);
+        else
+            snprintf(env_adhoc_offset, sizeof(env_adhoc_offset), "SR_ADHOC_PORT_OFFSET=");
         envp[env_count++] = env_adhoc_enabled;
         envp[env_count++] = env_adhoc_server;
         envp[env_count++] = env_adhoc_offset;

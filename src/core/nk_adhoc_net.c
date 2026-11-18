@@ -628,7 +628,6 @@ static int lo_ptp_open(NkAdhocTransport *t, uint16_t sport, const uint8_t dst[NK
 
     Console *target = NULL;
     PtpSocket *listener = NULL;
-    int listen_idx = -1;
     for (unsigned i = 0; i < NK_LOOPNET_CONSOLES; i++) {
         Console *peer = &c->net->consoles[i];
         if (!peer->logged_in || peer->group != c->group || memcmp(peer->mac, dst, NK_RELAY_MAC_LEN))
@@ -638,7 +637,6 @@ static int lo_ptp_open(NkAdhocTransport *t, uint16_t sport, const uint8_t dst[NK
             if (peer->ptp_sockets[k].used && peer->ptp_sockets[k].state == 1 &&
                 peer->ptp_sockets[k].lport == dport) {
                 listener = &peer->ptp_sockets[k];
-                listen_idx = (int)k;
                 break;
             }
         }
@@ -646,7 +644,6 @@ static int lo_ptp_open(NkAdhocTransport *t, uint16_t sport, const uint8_t dst[NK
     }
     if (!target || !listener || (int)listener->pending_count >= listener->max_backlog)
         return NK_NET_CONNECTION_REFUSED;
-    (void)listen_idx;
     const int cli_slot = ptp_alloc_slot(c);
     if (cli_slot < 0) return cli_slot;
     const int srv_slot = ptp_alloc_slot(target);

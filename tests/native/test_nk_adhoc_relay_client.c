@@ -35,6 +35,8 @@ static uint64_t test_now_ms(void) { return (uint64_t)GetTickCount64(); }
 #  include <fcntl.h>
 #  include <netinet/in.h>
 #  include <netinet/tcp.h>
+#  include <pthread.h>
+#  include <sys/resource.h>
 #  include <sys/select.h>
 #  include <sys/socket.h>
 #  include <time.h>
@@ -898,19 +900,93 @@ static void test_ptp_port_reuse(void) {
     srv_destroy(&srv);
 }
 
+/* Audit 2026-11-17 (F-45cfed21): a host name that resolves to more than one address is tried in
+ * order until the lobby connects. "localhost" resolves through the hosts table, with no network
+ * use; Windows lists ::1 before 127.0.0.1, and the test server listens on 127.0.0.1 only, so the
+ * first address is refused and the client must go on to the IPv4 one. Where localhost resolves to
+ * 127.0.0.1 alone (a stock Ubuntu hosts file) the case passes on its first address. */
+static void test_lobby_tries_each_resolved_address(void) {
+    TestServer srv;
+    srv_init(&srv);
+    NkAdhocRelayConfig cfg = {"localhost", srv.lobby_port, srv.data_port, NK_RELAY_PORT_OFFSET};
+    NkAdhocRelayClient *c = nk_relay_client_create(&cfg);
+    CHECK(c != NULL, "addr fallback: client created");
+    NkAdhocTransport *t = nk_relay_client_transport(c);
+    static const uint8_t mac[6] = {0x02, 0x31, 0x32, 0x33, 0x34, 0x35};
+    static const uint8_t grp[8] = {'F', 'A', 'L', 'L', 'B', 'A', 'C', 'K'};
+    CHECK(t->ops->login(t, mac, "Fallback", "ULUS10003") == NK_NET_OK,
+          "addr fallback: login queued");
+    const int pdp = t->ops->pdp_open(t, 0x3100u);
+    CHECK(pdp >= 0, "addr fallback: PDP socket queued before the lobby connects");
+    const uint64_t deadline = test_now_ms() + 10000u;
+    while (test_now_ms() < deadline && !nk_relay_client_lobby_connected(c) &&
+           !nk_relay_client_lobby_dead(c)) {
+        srv_pump(&srv);
+        t->ops->pump(t);
+        test_sleep_ms(2u);
+    }
+    CHECK(nk_relay_client_lobby_connected(c),
+          "addr fallback: lobby connected through a later address (dead %d, error '%s')",
+          (int)nk_relay_client_lobby_dead(c), nk_relay_client_last_error(c));
+    CHECK(t->ops->connect(t, grp) == NK_NET_OK, "addr fallback: group join queued");
+    int joined = 0;
+    for (uint64_t end = test_now_ms() + 5000u; test_now_ms() < end && !joined;) {
+        srv_pump(&srv);
+        t->ops->pump(t);
+        NkLobbyEvent evs[4];
+        const size_t n = t->ops->take_events(t, evs, 4u);
+        for (size_t k = 0; k < n; k++) {
+            if (evs[k].kind == NK_LOBBY_CONNECT_BSSID) joined = 1;
+        }
+        test_sleep_ms(2u);
+    }
+    CHECK(joined, "addr fallback: group joined over the address that connected");
+    static const uint8_t peer[6] = {0x02, 0x31, 0x32, 0x33, 0x34, 0x36};
+    static const uint8_t payload[3] = {1, 2, 3};
+    CHECK(pdp < 0 || t->ops->pdp_send(t, pdp, peer, 0x3100u, payload, 3u) == NK_NET_OK,
+          "addr fallback: the PDP socket opened before the lobby connected still sends");
+    t->ops->logout(t);
+    nk_relay_client_destroy(c);
+    srv_destroy(&srv);
+}
+
+/* Audit 2026-11-17 (F-23278c14): a descriptor can reach FD_SETSIZE only when the open-file
+ * limit allows it, and a stock Linux shell's soft limit is 1024 (macOS: 256). The case raises
+ * the soft limit within the hard limit first and restores it after; where even the hard limit
+ * is too low it prints SKIP and counts neither a pass nor a failure. */
 static void test_posix_high_fd_above_fd_setsize(void) {
 #ifndef _WIN32
+    struct rlimit saved;
+    int raised = 0;
+    const rlim_t want = (rlim_t)FD_SETSIZE + 64u;
+    if (getrlimit(RLIMIT_NOFILE, &saved) == 0 && saved.rlim_cur != RLIM_INFINITY &&
+        saved.rlim_cur < want) {
+        struct rlimit more = saved;
+        more.rlim_cur = (saved.rlim_max == RLIM_INFINITY || saved.rlim_max >= want) ? want
+                                                                                   : saved.rlim_max;
+        raised = setrlimit(RLIMIT_NOFILE, &more) == 0;
+    }
     int dummy_fds[1200];
     int ndummy = 0;
+    int out_of_fds = 0;
     while (ndummy < (int)(sizeof(dummy_fds) / sizeof(dummy_fds[0]))) {
         int d = open("/dev/null", O_RDONLY);
-        if (d < 0) break;
+        if (d < 0) {
+            out_of_fds = (errno == EMFILE);
+            break;
+        }
         dummy_fds[ndummy++] = d;
         if (d >= (int)FD_SETSIZE + 32) break;
     }
-    int high_ok = (ndummy > 0 && dummy_fds[ndummy - 1] >= (int)FD_SETSIZE);
-    CHECK(high_ok, "posix-high-fd: raised next fd past FD_SETSIZE (%d)",
-          ndummy > 0 ? dummy_fds[ndummy - 1] : -1);
+    int high_ok = (ndummy > 0 && dummy_fds[ndummy - 1] >= (int)FD_SETSIZE + 32);
+    if (!high_ok && out_of_fds) {
+        printf("SKIP: posix-high-fd: the hard open-file limit keeps descriptors below "
+               "FD_SETSIZE + 32 (highest %d)\n",
+               ndummy > 0 ? dummy_fds[ndummy - 1] : -1);
+    } else {
+        CHECK(high_ok, "posix-high-fd: raised next fd past FD_SETSIZE (%d)",
+              ndummy > 0 ? dummy_fds[ndummy - 1] : -1);
+    }
     if (high_ok) {
         TestServer srv;
         srv_init(&srv);
@@ -932,6 +1008,7 @@ static void test_posix_high_fd_above_fd_setsize(void) {
         srv_destroy(&srv);
     }
     for (int i = 0; i < ndummy; i++) close(dummy_fds[i]);
+    if (raised) (void)setrlimit(RLIMIT_NOFILE, &saved);
 #endif
 }
 
@@ -1019,19 +1096,109 @@ static void test_async_dns_resolve_nonblocking_and_failure(void) {
     CHECK(strstr(nk_relay_client_last_error(c), "resolve") != NULL,
           "async-dns-fail: last_error mentions resolve (%s)", nk_relay_client_last_error(c));
     nk_relay_client_destroy(c);
-
-    /* Destroy while resolve is in flight must not crash, leak or touch freed state. */
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.delay_ms = 80u;
-    ctx.succeed = true;
-    c = nk_relay_client_create(&cfg);
-    CHECK(c != NULL, "async-dns-cancel: client created");
-    t = nk_relay_client_transport(c);
-    CHECK(t->ops->login(t, mac, "DnsCancel", "ULUS10009") == NK_NET_OK,
-          "async-dns-cancel: login started");
-    nk_relay_client_destroy(c);
     nk_relay_client_set_resolve_hook_for_test(NULL, NULL);
     srv_destroy(&srv);
+}
+
+/* Flags shared between the test thread and the resolver thread. */
+#ifdef _WIN32
+typedef volatile LONG TFlag;
+static int t_flag_get(TFlag *f) { return (int)InterlockedCompareExchange(f, 0, 0); }
+static void t_flag_set(TFlag *f, int v) { (void)InterlockedExchange(f, (LONG)v); }
+#else
+typedef int TFlag;
+static pthread_mutex_t g_flag_lock = PTHREAD_MUTEX_INITIALIZER;
+static int t_flag_get(TFlag *f) {
+    (void)pthread_mutex_lock(&g_flag_lock);
+    const int v = *f;
+    (void)pthread_mutex_unlock(&g_flag_lock);
+    return v;
+}
+static void t_flag_set(TFlag *f, int v) {
+    (void)pthread_mutex_lock(&g_flag_lock);
+    *f = v;
+    (void)pthread_mutex_unlock(&g_flag_lock);
+}
+#endif
+
+typedef struct LatchHookCtx {
+    TFlag started;
+    TFlag release;
+    TFlag returned;
+    TFlag winsock_ok;
+} LatchHookCtx;
+
+/* Static so a detached resolver may still use it after the client is gone. */
+static LatchHookCtx g_latch;
+
+/* Stands in for a slow getaddrinfo: blocks until the test releases it (at most 3 s), then uses
+ * Winsock the way getaddrinfo would. */
+static bool latch_resolve_hook(const char *host, uint8_t out_ipv4[4], void *ctx) {
+    LatchHookCtx *h = (LatchHookCtx *)ctx;
+    (void)host;
+    t_flag_set(&h->started, 1);
+    const uint64_t end = test_now_ms() + 3000u;
+    while (!t_flag_get(&h->release) && test_now_ms() < end) test_sleep_ms(1u);
+#ifdef _WIN32
+    SOCKET probe = socket(AF_INET, SOCK_STREAM, 0);
+    t_flag_set(&h->winsock_ok, probe != INVALID_SOCKET);
+    if (probe != INVALID_SOCKET) closesocket(probe);
+#else
+    t_flag_set(&h->winsock_ok, 1);
+#endif
+    out_ipv4[0] = 127u;
+    out_ipv4[1] = 0u;
+    out_ipv4[2] = 0u;
+    out_ipv4[3] = 1u;
+    t_flag_set(&h->returned, 1);
+    return true;
+}
+
+/* Audit 2026-11-17 (F-b9935c48, F-5a546d12): destroying a client while its server name is still
+ * resolving does not wait for the lookup. The resolver runs on detached, frees its job itself
+ * once it finishes, and keeps its own Winsock reference, so the lookup still works after the
+ * client's WSACleanup dropped the last other one. */
+static void test_destroy_detaches_pending_resolve(void) {
+    memset((void *)&g_latch, 0, sizeof(g_latch));
+#ifdef _WIN32
+    /* Drop main's reference: from here only the client and its resolver hold Winsock. */
+    WSACleanup();
+#endif
+    nk_relay_client_set_resolve_hook_for_test(latch_resolve_hook, &g_latch);
+    NkAdhocRelayConfig cfg = {"pending.example.invalid", 1u, 2u, NK_RELAY_PORT_OFFSET};
+    NkAdhocRelayClient *c = nk_relay_client_create(&cfg);
+    CHECK(c != NULL, "detach: client created");
+    const unsigned live_before = nk_relay_client_resolve_jobs_live_for_test();
+    if (c) {
+        NkAdhocTransport *t = nk_relay_client_transport(c);
+        static const uint8_t mac[6] = {0x02, 0x41, 0x42, 0x43, 0x44, 0x45};
+        CHECK(t->ops->login(t, mac, "Detach", "ULUS10009") == NK_NET_OK,
+              "detach: login started a lookup");
+        for (uint64_t end = test_now_ms() + 2000u;
+             test_now_ms() < end && !t_flag_get(&g_latch.started);)
+            test_sleep_ms(1u);
+        CHECK(t_flag_get(&g_latch.started), "detach: the resolver is inside its lookup");
+        nk_relay_client_destroy(c);
+        CHECK(!t_flag_get(&g_latch.returned),
+              "detach: destroy returned without waiting for the pending lookup");
+        CHECK(nk_relay_client_resolve_jobs_live_for_test() == live_before + 1u,
+              "detach: the detached resolver still owns its job (live %u, before %u)",
+              nk_relay_client_resolve_jobs_live_for_test(), live_before);
+    }
+    t_flag_set(&g_latch.release, 1);
+    for (uint64_t end = test_now_ms() + 5000u;
+         test_now_ms() < end && nk_relay_client_resolve_jobs_live_for_test() != live_before;)
+        test_sleep_ms(1u);
+    CHECK(nk_relay_client_resolve_jobs_live_for_test() == live_before,
+          "detach: the resolver freed its job once the lookup finished (live %u)",
+          nk_relay_client_resolve_jobs_live_for_test());
+    CHECK(t_flag_get(&g_latch.winsock_ok),
+          "detach: the lookup still had Winsock after the client's cleanup");
+    nk_relay_client_set_resolve_hook_for_test(NULL, NULL);
+#ifdef _WIN32
+    WSADATA wsa;
+    CHECK(WSAStartup(MAKEWORD(2, 2), &wsa) == 0, "detach: Winsock started again for main");
+#endif
 }
 
 int main(void) {
@@ -1047,8 +1214,10 @@ int main(void) {
     test_ptp_accept_waits_for_free_slot();
     test_lobby_burst_waits_for_queue_room();
     test_ptp_port_reuse();
+    test_lobby_tries_each_resolved_address();
     test_posix_high_fd_above_fd_setsize();
     test_async_dns_resolve_nonblocking_and_failure();
+    test_destroy_detaches_pending_resolve();
 #ifdef _WIN32
     WSACleanup();
 #endif

@@ -10975,6 +10975,19 @@ static void adh_p2_usleep(unsigned long us) {
 }
 #endif
 
+/* Audit 2026-11-17 (F-ba5fd499): closes a listening socket so that a server thread blocked in
+ * accept() on it returns. On POSIX, close() alone does not wake an accept() in another thread and
+ * the join below would wait forever when the HLE flow failed before the client connected;
+ * shutdown() first makes the accept() fail at once. */
+static void adh_p2_close_listener(adh_p2_sock_t s) {
+#ifdef _WIN32
+    (void)shutdown(s, SD_BOTH);
+#else
+    (void)shutdown(s, SHUT_RDWR);
+#endif
+    adh_p2_close_sock(s);
+}
+
 static int adh_p2_recv_exact(adh_p2_sock_t s, void *buf, size_t n) {
     uint8_t *p = (uint8_t *)buf;
     size_t got = 0u;
@@ -11173,9 +11186,11 @@ static void test_adhoc_online_real_tcp_loopback_e2e(void) {
     hle_test_setenv("SR_ADHOC_PORT_OFFSET", NULL);
     adh_fixture_end(loaded_end);
     srv.stop = 1;
-    adh_p2_close_sock(lsn);
+    adh_p2_close_listener(lsn);
 #ifdef _WIN32
-    if (th) { WaitForSingleObject((HANDLE)th, 3000u); CloseHandle((HANDLE)th); }
+    /* The listener is closed, so the thread leaves accept(); wait for it before srv (on this
+     * stack) goes away. */
+    if (th) { WaitForSingleObject((HANDLE)th, INFINITE); CloseHandle((HANDLE)th); }
     WSACleanup();
 #else
     if (pt_ok) pthread_join(th, NULL);
@@ -11489,10 +11504,10 @@ static void test_adhoc_d2_d12_regressions(void) {
             hle_test_setenv("SR_ADHOC_SERVER", NULL);
             adh_fixture_end(loaded_end);
             srv.stop = 1;
-            adh_p2_close_sock(lsn);
-            adh_p2_close_sock(trig);
+            adh_p2_close_listener(lsn);
+            adh_p2_close_listener(trig);
 #ifdef _WIN32
-            if (th) { WaitForSingleObject((HANDLE)th, 3000u); CloseHandle((HANDLE)th); }
+            if (th) { WaitForSingleObject((HANDLE)th, INFINITE); CloseHandle((HANDLE)th); }
 #else
             if (pt_ok) pthread_join(th, NULL);
 #endif

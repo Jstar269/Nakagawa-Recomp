@@ -23,6 +23,8 @@
  *     postoffice client calls.
  *   - Dead-lobby detection, single-lookup async DNS worker thread with AI_NUMERICHOST IP
  *     literal fast path, and PTP slot reservation before consuming connect frames.
+ *   - 2026-11-17: the lobby tries each resolved server address in turn; the DNS worker holds
+ *     its own Winsock reference and a destroyed client's pending lookup runs on detached.
  */
 
 #ifndef _WIN32
@@ -105,6 +107,18 @@ static void relay_thread_finish(RelayThread t, bool wait) {
 #define NK_RELAY_PTP_SOCKETS 16u
 #define NK_RELAY_PTP_BACKLOG 8u
 #define NK_RELAY_PING_INTERVAL_MS UINT64_C(5000)
+#define NK_RELAY_MAX_ADDRS 8u
+
+/* The addresses a server name resolved to, in resolver order, each with the lobby and data
+ * ports. The lobby tries them in turn until one connects (a name with AAAA and A records on a
+ * host with no IPv6 route still reaches the server over IPv4). */
+typedef struct RelayAddrList {
+    unsigned count;
+    struct sockaddr_storage lobby[NK_RELAY_MAX_ADDRS];
+    socklen_t lobby_len[NK_RELAY_MAX_ADDRS];
+    struct sockaddr_storage data[NK_RELAY_MAX_ADDRS];
+    socklen_t data_len[NK_RELAY_MAX_ADDRS];
+} RelayAddrList;
 
 enum {
     PTP_STATE_UNUSED = 0,
@@ -173,6 +187,8 @@ struct NkAdhocRelayClient {
     socklen_t lobby_addr_len;
     struct sockaddr_storage data_addr;
     socklen_t data_addr_len;
+    RelayAddrList addrs;
+    unsigned addr_next;
     int resolved;
     struct RelayResolveJob *resolve_job;
 
@@ -304,11 +320,6 @@ static bool chan_connect_existing_tx(TcpChan *ch, const struct sockaddr *addr, s
     sock_close_fd(fd);
     ch->dead = 1;
     return false;
-}
-
-static bool chan_open_nonblock(TcpChan *ch, const struct sockaddr *addr, socklen_t len) {
-    chan_close(ch);
-    return chan_connect_existing_tx(ch, addr, len);
 }
 
 static bool buf_append(uint8_t **buf, size_t *len, size_t *cap, const uint8_t *data, size_t n,
@@ -462,10 +473,10 @@ static void assign_sockaddr_ports(const struct sockaddr *src, socklen_t src_len,
     (void)src_len;
 }
 
-static bool resolve_host_pair(const char *host, uint16_t lobby_port, uint16_t data_port,
-                              int extra_flags, NkRelayTestResolveFn hook_fn, void *hook_ctx,
-                              struct sockaddr_storage *lobby_out, socklen_t *lobby_len,
-                              struct sockaddr_storage *data_out, socklen_t *data_len) {
+static bool resolve_host_addrs(const char *host, uint16_t lobby_port, uint16_t data_port,
+                               int extra_flags, NkRelayTestResolveFn hook_fn, void *hook_ctx,
+                               RelayAddrList *out) {
+    out->count = 0u;
     if (hook_fn) {
         uint8_t ip4[4] = {0};
         if (!hook_fn(host, ip4, hook_ctx)) return false;
@@ -474,7 +485,9 @@ static bool resolve_host_pair(const char *host, uint16_t lobby_port, uint16_t da
         sin.sin_family = AF_INET;
         memcpy(&sin.sin_addr, ip4, 4u);
         assign_sockaddr_ports((const struct sockaddr *)&sin, (socklen_t)sizeof(sin),
-                              lobby_port, data_port, lobby_out, lobby_len, data_out, data_len);
+                              lobby_port, data_port, &out->lobby[0], &out->lobby_len[0],
+                              &out->data[0], &out->data_len[0]);
+        out->count = 1u;
         return true;
     }
     struct addrinfo hints;
@@ -486,20 +499,19 @@ static bool resolve_host_pair(const char *host, uint16_t lobby_port, uint16_t da
     snprintf(port_str, sizeof(port_str), "%u", (unsigned)lobby_port);
     struct addrinfo *res = NULL;
     if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return false;
-    bool ok = false;
-    for (struct addrinfo *it = res; it; it = it->ai_next) {
+    for (struct addrinfo *it = res; it && out->count < NK_RELAY_MAX_ADDRS; it = it->ai_next) {
         if ((it->ai_family == AF_INET && it->ai_addrlen >= sizeof(struct sockaddr_in)) ||
             (it->ai_family == AF_INET6 && it->ai_addrlen >= sizeof(struct sockaddr_in6))) {
-            if (it->ai_addrlen <= sizeof(*lobby_out) && it->ai_addrlen <= sizeof(*data_out)) {
+            if (it->ai_addrlen <= sizeof(struct sockaddr_storage)) {
+                const unsigned i = out->count++;
                 assign_sockaddr_ports(it->ai_addr, (socklen_t)it->ai_addrlen, lobby_port, data_port,
-                                      lobby_out, lobby_len, data_out, data_len);
-                ok = true;
-                break;
+                                      &out->lobby[i], &out->lobby_len[i], &out->data[i],
+                                      &out->data_len[i]);
             }
         }
     }
     freeaddrinfo(res);
-    return ok;
+    return out->count > 0u;
 }
 
 typedef struct RelayResolveJob {
@@ -514,38 +526,66 @@ typedef struct RelayResolveJob {
     uint16_t data_port;
     NkRelayTestResolveFn hook_fn;
     void *hook_ctx;
-    struct sockaddr_storage lobby_addr;
-    socklen_t lobby_addr_len;
-    struct sockaddr_storage data_addr;
-    socklen_t data_addr_len;
+    RelayAddrList addrs;
+    int wsa_started; /* the job's own Winsock reference, dropped by the worker as it ends */
 } RelayResolveJob;
+
+#ifdef _WIN32
+static volatile LONG s_resolve_jobs_live;
+static void resolve_jobs_live_add(int delta) {
+    if (delta > 0) (void)InterlockedIncrement(&s_resolve_jobs_live);
+    else (void)InterlockedDecrement(&s_resolve_jobs_live);
+}
+unsigned nk_relay_client_resolve_jobs_live_for_test(void) {
+    return (unsigned)InterlockedCompareExchange(&s_resolve_jobs_live, 0, 0);
+}
+#else
+static pthread_mutex_t s_resolve_jobs_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned s_resolve_jobs_live;
+static void resolve_jobs_live_add(int delta) {
+    (void)pthread_mutex_lock(&s_resolve_jobs_lock);
+    if (delta > 0) s_resolve_jobs_live++;
+    else s_resolve_jobs_live--;
+    (void)pthread_mutex_unlock(&s_resolve_jobs_lock);
+}
+unsigned nk_relay_client_resolve_jobs_live_for_test(void) {
+    (void)pthread_mutex_lock(&s_resolve_jobs_lock);
+    const unsigned n = s_resolve_jobs_live;
+    (void)pthread_mutex_unlock(&s_resolve_jobs_lock);
+    return n;
+}
+#endif
+
+static void free_resolve_job(RelayResolveJob *job) {
+    relay_lock_destroy(&job->lock);
+    free(job);
+    resolve_jobs_live_add(-1);
+}
 
 RELAY_THREAD_FN(resolve_worker_fn, raw) {
     RelayResolveJob *job = (RelayResolveJob *)raw;
-    struct sockaddr_storage la;
-    struct sockaddr_storage da;
-    socklen_t llen = 0;
-    socklen_t dlen = 0;
-    memset(&la, 0, sizeof(la));
-    memset(&da, 0, sizeof(da));
-    const bool ok = resolve_host_pair(job->host, job->lobby_port, job->data_port, 0, job->hook_fn,
-                                      job->hook_ctx, &la, &llen, &da, &dlen);
+#ifdef _WIN32
+    const int wsa_started = job->wsa_started;
+#endif
+    RelayAddrList found;
+    memset(&found, 0, sizeof(found));
+    const bool ok = resolve_host_addrs(job->host, job->lobby_port, job->data_port, 0, job->hook_fn,
+                                       job->hook_ctx, &found);
     relay_lock_enter(&job->lock);
     if (ok) {
-        job->lobby_addr = la;
-        job->lobby_addr_len = llen;
-        job->data_addr = da;
-        job->data_addr_len = dlen;
+        job->addrs = found;
         job->ok = 1;
     }
     job->done = 1;
     job->refs--;
     const int drop = (job->refs == 0);
     relay_lock_leave(&job->lock);
-    if (drop) {
-        relay_lock_destroy(&job->lock);
-        free(job);
-    }
+    if (drop) free_resolve_job(job);
+#ifdef _WIN32
+    /* A destroyed client has already dropped its reference; this one kept Winsock up for the
+     * lookup until here. */
+    if (wsa_started) WSACleanup();
+#endif
     RELAY_THREAD_RETURN;
 }
 
@@ -553,6 +593,7 @@ static RelayResolveJob *start_resolve_job(const char *host, uint16_t lobby_port,
                                           NkRelayTestResolveFn hook_fn, void *hook_ctx) {
     RelayResolveJob *job = calloc(1, sizeof *job);
     if (!job) return NULL;
+    resolve_jobs_live_add(1);
     relay_lock_init(&job->lock);
     job->refs = 2;
     snprintf(job->host, sizeof(job->host), "%s", host);
@@ -560,9 +601,21 @@ static RelayResolveJob *start_resolve_job(const char *host, uint16_t lobby_port,
     job->data_port = data_port;
     job->hook_fn = hook_fn;
     job->hook_ctx = hook_ctx;
+#ifdef _WIN32
+    /* The lookup may outlive the client (release_resolve_job detaches it), so it holds its own
+     * Winsock reference rather than leaning on the client's. */
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        free_resolve_job(job);
+        return NULL;
+    }
+    job->wsa_started = 1;
+#endif
     if (!relay_thread_spawn(&job->thread, resolve_worker_fn, job)) {
-        relay_lock_destroy(&job->lock);
-        free(job);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        free_resolve_job(job);
         return NULL;
     }
     job->thread_valid = 1;
@@ -575,25 +628,20 @@ static void release_resolve_job(RelayResolveJob **slot) {
     *slot = NULL;
     relay_lock_enter(&job->lock);
     const int done = job->done;
-    const int has_hook = (job->hook_fn != NULL);
     const int tv = job->thread_valid;
     const RelayThread th = job->thread;
     job->thread_valid = 0;
-    if (done || has_hook) {
+    if (done) {
         relay_lock_leave(&job->lock);
         if (tv) relay_thread_finish(th, true);
-        relay_lock_destroy(&job->lock);
-        free(job);
+        free_resolve_job(job);
         return;
     }
     job->refs--;
     const int drop = (job->refs == 0);
     relay_lock_leave(&job->lock);
     if (tv) relay_thread_finish(th, false);
-    if (drop) {
-        relay_lock_destroy(&job->lock);
-        free(job);
-    }
+    if (drop) free_resolve_job(job);
 }
 
 static void queue_lobby_event(NkAdhocRelayClient *c, const NkLobbyEvent *ev) {
@@ -706,9 +754,49 @@ static uint16_t pick_ptp_port(NkAdhocRelayClient *c) {
     return 0u;
 }
 
+/* True while the lobby has not connected and a later resolved address is left to try. */
+static bool lobby_has_fallback(const NkAdhocRelayClient *c) {
+    return c->resolved && !c->lobby.connected && c->addr_next < c->addrs.count;
+}
+
+/* The server address is settled once the lobby connected or no other address is left; data
+ * channels connect to it only then, so they follow the lobby to the address that answers. */
+static bool addr_committed(const NkAdhocRelayClient *c) {
+    return c->resolved && !lobby_has_fallback(c);
+}
+
+/* Points the lobby at the next resolved address and starts its connect, keeping the frames
+ * already queued (the login). Returns false, with the lobby dead, when no address is left. */
+static bool lobby_connect_next(NkAdhocRelayClient *c) {
+    while (c->addr_next < c->addrs.count) {
+        const unsigned i = c->addr_next++;
+        c->lobby_addr = c->addrs.lobby[i];
+        c->lobby_addr_len = c->addrs.lobby_len[i];
+        c->data_addr = c->addrs.data[i];
+        c->data_addr_len = c->addrs.data_len[i];
+        sock_close_fd(c->lobby.fd);
+        c->lobby.fd = NK_INVALID_SOCK;
+        c->lobby.connecting = 0;
+        c->lobby.connected = 0;
+        c->lobby.remote_eof = 0;
+        c->lobby.dead = 0;
+        c->lobby.rx_len = 0u;
+        if (chan_connect_existing_tx(&c->lobby, (const struct sockaddr *)&c->lobby_addr,
+                                     c->lobby_addr_len))
+            return true;
+    }
+    c->lobby.dead = 1;
+    return false;
+}
+
+/* A lobby connect that failed before it ever connected moves on to the next address. */
+static void lobby_fall_back(NkAdhocRelayClient *c) {
+    if (c->lobby.dead && lobby_has_fallback(c)) (void)lobby_connect_next(c);
+}
+
 static bool ensure_data_chan_connected(NkAdhocRelayClient *c, TcpChan *ch) {
-    if (!c->resolved) {
-        if (c->lobby.dead) ch->dead = 1;
+    if (!addr_committed(c)) {
+        if (c->lobby.dead && !lobby_has_fallback(c)) ch->dead = 1;
         return false;
     }
     if (ch->fd == NK_INVALID_SOCK && !ch->dead && !ch->remote_eof) {
@@ -756,12 +844,7 @@ static void pump_lobby(NkAdhocRelayClient *c) {
         relay_lock_enter(&job->lock);
         const int done = job->done;
         const int ok = job->ok;
-        if (done && ok) {
-            c->lobby_addr = job->lobby_addr;
-            c->lobby_addr_len = job->lobby_addr_len;
-            c->data_addr = job->data_addr;
-            c->data_addr_len = job->data_addr_len;
-        }
+        if (done && ok) c->addrs = job->addrs;
         relay_lock_leave(&job->lock);
         if (!done) return;
         release_resolve_job(&c->resolve_job);
@@ -771,8 +854,8 @@ static void pump_lobby(NkAdhocRelayClient *c) {
             return;
         }
         c->resolved = 1;
-        if (!chan_connect_existing_tx(&c->lobby, (const struct sockaddr *)&c->lobby_addr,
-                                      c->lobby_addr_len)) {
+        c->addr_next = 0u;
+        if (!lobby_connect_next(c)) {
             set_error(c, "could not connect to lobby server");
             return;
         }
@@ -789,7 +872,9 @@ static void pump_lobby(NkAdhocRelayClient *c) {
         }
     }
     chan_flush_tx(&c->lobby);
+    lobby_fall_back(c);
     chan_pump_rx(&c->lobby);
+    lobby_fall_back(c);
     parse_lobby_rx(c);
     if (c->lobby.remote_eof || c->lobby.dead) {
         if (!c->last_error[0])
@@ -811,7 +896,7 @@ static bool open_data_chan(NkAdhocRelayClient *c, TcpChan *ch, NkRelayInit type,
         ch->dead = 1;
         return false;
     }
-    if (c->resolved) {
+    if (addr_committed(c)) {
         if (!chan_connect_existing_tx(ch, (const struct sockaddr *)&c->data_addr,
                                       c->data_addr_len)) {
             chan_close(ch);
@@ -821,7 +906,7 @@ static bool open_data_chan(NkAdhocRelayClient *c, TcpChan *ch, NkRelayInit type,
         chan_flush_tx(ch);
         return !ch->dead;
     }
-    if (c->resolve_job && !c->lobby.dead) return true;
+    if ((c->resolve_job || lobby_has_fallback(c)) && !c->lobby.dead) return true;
     chan_close(ch);
     ch->dead = 1;
     return false;
@@ -876,7 +961,7 @@ static void pump_ptp_socket(NkAdhocRelayClient *c, int idx) {
     RelayPtpSocket *ps = &c->ptp[idx];
     if (!ps->used || ps->state == PTP_STATE_UNUSED || ps->state == PTP_STATE_REFUSED) return;
     if (!ps->chan.dead && !ps->chan.remote_eof && !ensure_data_chan_connected(c, &ps->chan) &&
-        !c->resolved)
+        !addr_committed(c))
         return;
 
     chan_flush_tx(&ps->chan);
@@ -983,10 +1068,10 @@ static int rc_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], co
     chan_close(&c->lobby);
     release_resolve_job(&c->resolve_job);
     c->resolved = 0;
+    c->addr_next = 0u;
     if (!s_test_resolve_fn &&
-        resolve_host_pair(c->host, c->lobby_port, c->data_port, AI_NUMERICHOST, NULL, NULL,
-                          &c->lobby_addr, &c->lobby_addr_len, &c->data_addr,
-                          &c->data_addr_len)) {
+        resolve_host_addrs(c->host, c->lobby_port, c->data_port, AI_NUMERICHOST, NULL, NULL,
+                           &c->addrs)) {
         c->resolved = 1;
     } else {
         c->resolve_job = start_resolve_job(c->host, c->lobby_port, c->data_port,
@@ -997,8 +1082,7 @@ static int rc_login(NkAdhocTransport *t, const uint8_t mac[NK_RELAY_MAC_LEN], co
         }
     }
 
-    if (c->resolved &&
-        !chan_open_nonblock(&c->lobby, (const struct sockaddr *)&c->lobby_addr, c->lobby_addr_len)) {
+    if (c->resolved && !lobby_connect_next(c)) {
         set_error(c, "could not connect to lobby server");
         return NK_NET_DEAD;
     }
@@ -1032,6 +1116,7 @@ static int queue_lobby_cmd(NkAdhocRelayClient *c, const uint8_t *bytes, size_t n
         return NK_NET_AGAIN;
     c->last_lobby_tx_ms = monotonic_ms();
     chan_flush_tx(&c->lobby);
+    lobby_fall_back(c);
     return NK_NET_OK;
 }
 

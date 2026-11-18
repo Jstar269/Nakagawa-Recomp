@@ -34,6 +34,9 @@ const char *nk_relay_client_last_error(const NkAdhocRelayClient *client);
 
 typedef bool (*NkRelayTestResolveFn)(const char *host, uint8_t out_ipv4[4], void *ctx);
 void nk_relay_client_set_resolve_hook_for_test(NkRelayTestResolveFn fn, void *ctx);
+/* Resolver jobs not yet freed, across all clients: a destroyed client's pending lookup runs on
+ * detached and frees its job itself, so a test can wait for that. */
+unsigned nk_relay_client_resolve_jobs_live_for_test(void);
 
 #ifdef __cplusplus
 }
