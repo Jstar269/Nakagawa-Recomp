@@ -18,6 +18,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+/*
+ * Modified by Nakagawa Recomp contributors, 2026-11-17. The local changes are
+ * marked LOCAL DELTA and listed in ../PROVENANCE.md.
+ */
+
 /**
  * @file
  * @ingroup lavu_mem
