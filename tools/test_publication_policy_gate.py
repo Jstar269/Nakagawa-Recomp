@@ -181,6 +181,16 @@ def findings_of(result: subprocess.CompletedProcess) -> list[tuple[str, str]]:
     return parsed
 
 
+def assert_audit_completed(test: unittest.TestCase, result: subprocess.CompletedProcess) -> None:
+    """The audit ran to its verdict: a crash prints no finding codes, so an absent code
+    proves nothing unless the run reached its OK or FAIL summary."""
+    test.assertIn(result.returncode, (0, 1), result.stderr[-2000:])
+    test.assertNotIn("Traceback", result.stderr, result.stderr[-2000:])
+    summary = result.stdout if result.returncode == 0 else result.stderr
+    verdict = "OK" if result.returncode == 0 else "FAIL"
+    test.assertIn(f"publication audit: {verdict} (", summary, result.stderr[-2000:])
+
+
 def codes_for(result: subprocess.CompletedProcess, path: str) -> set[str]:
     return {code for code, found in findings_of(result) if found == path}
 
@@ -372,6 +382,8 @@ class TestUnknownPathsRejected(FixtureMixin, unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         codes = codes_for(result, "assets/ui/theme.dat")
         self.assertIn("POLICY_UNCLASSIFIED", codes)
+        # Unclassified alone is any unlisted path; the font magic must be named too.
+        self.assertIn("MAGIC", codes)
 
     def test_pgf_magic_is_recognised_at_the_real_offset(self):
         """The signature sits at offset 4, after a header word."""
@@ -687,6 +699,20 @@ class TestTreeBinding(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("POLICY_TREE_MISMATCH", {c for c, _ in findings_of(result)})
 
+    def test_a_crashed_audit_is_not_a_completed_one(self):
+        crash = subprocess.CompletedProcess(
+            ["audit"], 1, "", 'Traceback (most recent call last):\n  File "x", line 1\nValueError: boom\n')
+        # A crash prints no finding codes, so an absent code alone would read as a pass.
+        self.assertEqual(findings_of(crash), [])
+        silent = subprocess.CompletedProcess(["audit"], 0, "", "")
+        for result in (crash, silent):
+            with self.subTest(stderr=result.stderr), self.assertRaises(AssertionError):
+                assert_audit_completed(self, result)
+        assert_audit_completed(self, subprocess.CompletedProcess(
+            ["audit"], 0, "publication audit: OK (1 tracked files, index content)\n", ""))
+        assert_audit_completed(self, subprocess.CompletedProcess(
+            ["audit"], 1, "", "X_CODE: a: b\npublication audit: FAIL (1 findings across 1 tracked files, index content)\n"))
+
     def test_matching_expected_tree_passes(self):
         tree = subprocess.run(["git", "write-tree"], cwd=ROOT,
                               capture_output=True, text=True, check=True).stdout.strip()
@@ -694,6 +720,7 @@ class TestTreeBinding(unittest.TestCase):
             [sys.executable, str(AUDIT), "--tracked-only", "--expect-tree", tree],
             cwd=ROOT, capture_output=True, text=True,
         )
+        assert_audit_completed(self, result)
         self.assertNotIn("POLICY_TREE_MISMATCH", {c for c, _ in findings_of(result)})
 
     def _scratch_repo(self) -> Path:
@@ -738,7 +765,9 @@ class TestTreeBinding(unittest.TestCase):
         head_tree = self._git(root, "rev-parse", "HEAD^{tree}")
         run_git(["rm", "-q", "--cached", "smuggled.bin"], cwd=root, check=True, capture_output=True)
         index_tree = self._git(root, "write-tree")
-        self.assertNotIn("POLICY_TREE_MISMATCH", {c for c, _ in findings_of(self._bind(root, index_tree))})
+        index_bound = self._bind(root, index_tree)
+        assert_audit_completed(self, index_bound)
+        self.assertNotIn("POLICY_TREE_MISMATCH", {c for c, _ in findings_of(index_bound)})
         self.assertIn("POLICY_TREE_MISMATCH", {c for c, _ in findings_of(self._bind(root, head_tree))})
 
     def test_worktree_audit_cannot_be_tree_bound(self):

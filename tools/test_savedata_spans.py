@@ -11,8 +11,10 @@ import unittest
 
 try:
     import scratch_dir
+    from test_savedata_security import MUTANT_TIMEOUT, _mutant_outcome
 except ModuleNotFoundError:
     from tools import scratch_dir
+    from tools.test_savedata_security import MUTANT_TIMEOUT, _mutant_outcome
 
 ROOT = Path(__file__).resolve().parent.parent
 SAVEDATA_C = ROOT / "src" / "rt" / "savedata.c"
@@ -538,6 +540,18 @@ SFO_MUTANTS = {
 }
 
 
+# The CHECK each mutant exists to trip. Only the harness's failure exit (1) with this
+# message is a kill (AGENTS.md section 6): a crash, a timeout or another CHECK proves
+# nothing about the layer the mutant removes.
+SFO_MUTANT_REASONS = {
+    "restore-pre-fix-writer": "128-byte TITLE must not write past the sfo_write allocation",
+    "oversize-locals-drop-clamp": "production sfo_write must have allocated its buffer",
+    "terminator-accounting": "the maximum legal TITLE must not touch the red zone",
+    "zero-capacity-unguarded": "an ordinary save must not touch the red zone",
+    "over-eager-truncation": "127 payload bytes must round-trip as len=128",
+}
+
+
 # savedata.c reaches the POSIX contained-delete backend only when the
 # translation unit selects a POSIX.1-2008 feature profile. -std=c11 selects
 # none, so the flag is supplied here rather than letting the seam's #error stop
@@ -577,7 +591,8 @@ class TestSavedataSfoProduction(unittest.TestCase):
     def test_production_sfo_write_stays_inside_its_allocation(self):
         with scratch_dir.TemporaryDirectory(prefix="sfo_prod_") as tmp:
             exe = _build(tmp)
-            run = subprocess.run([exe], capture_output=True, text=True, cwd=tmp)
+            run = subprocess.run([exe], capture_output=True, text=True, cwd=tmp,
+                                 timeout=MUTANT_TIMEOUT)
             self.assertEqual(
                 run.returncode, 0,
                 "production SFO selftest failed:\n" + run.stdout + run.stderr)
@@ -585,6 +600,8 @@ class TestSavedataSfoProduction(unittest.TestCase):
 
     def test_every_production_mutant_is_killed(self):
         original = SAVEDATA_C.read_text(encoding="utf-8")
+        self.assertEqual(sorted(SFO_MUTANT_REASONS), sorted(SFO_MUTANTS),
+                         "every SFO mutant names the CHECK that must kill it")
         survivors = []
         for name, edits in SFO_MUTANTS.items():
             mutated = original
@@ -596,12 +613,17 @@ class TestSavedataSfoProduction(unittest.TestCase):
                                 "mutant {} changed nothing".format(name))
             with scratch_dir.TemporaryDirectory(prefix="sfo_mut_") as tmp:
                 exe = _build(tmp, savedata_override=mutated)
-                run = subprocess.run([exe], capture_output=True, text=True, cwd=tmp)
-                if run.returncode == 0:
-                    survivors.append(name)
+                try:
+                    run = subprocess.run([exe], capture_output=True, text=True, cwd=tmp,
+                                         timeout=MUTANT_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    run = None
+                outcome = _mutant_outcome(run, SFO_MUTANT_REASONS[name])
+                if outcome != "KILLED":
+                    survivors.append(f"{name}: {outcome}")
         self.assertEqual(
             survivors, [],
-            "production mutants survived the SFO assertions: " + ", ".join(survivors))
+            "production mutants not killed by their SFO assertion: " + ", ".join(survivors))
 
 
 class TestWindowsContainmentArchitecture(unittest.TestCase):

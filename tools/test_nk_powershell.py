@@ -26,9 +26,28 @@ def _which(table: dict[str, str]):
     return lambda name: table.get(name)
 
 
+def _clear_override(test: unittest.TestCase) -> None:
+    """Remove the override for one test only; the run's own NK_POWERSHELL comes back after."""
+    patcher = mock.patch.dict(os.environ)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    os.environ.pop(nk_powershell.ENV_OVERRIDE, None)
+
+
+class OverrideIsolationTests(unittest.TestCase):
+    def test_setup_leaves_the_run_override_in_place(self) -> None:
+        with mock.patch.dict(os.environ, {nk_powershell.ENV_OVERRIDE: "the run's own host"}):
+            for case in (HostSelectionTests("test_override_wins"), CallSiteTests("test_psp_readiness")):
+                with self.subTest(case=type(case).__name__):
+                    case.setUp()
+                    self.assertNotIn(nk_powershell.ENV_OVERRIDE, os.environ)
+                    case.doCleanups()
+                    self.assertEqual(os.environ.get(nk_powershell.ENV_OVERRIDE), "the run's own host")
+
+
 class HostSelectionTests(unittest.TestCase):
     def setUp(self) -> None:
-        os.environ.pop(nk_powershell.ENV_OVERRIDE, None)
+        _clear_override(self)
 
     def test_pwsh_wins_when_installed(self) -> None:
         with mock.patch.object(nk_powershell.shutil, "which",
@@ -56,7 +75,7 @@ class CallSiteTests(unittest.TestCase):
     """Every call site builds argv[0] through the helper."""
 
     def setUp(self) -> None:
-        os.environ.pop(nk_powershell.ENV_OVERRIDE, None)
+        _clear_override(self)
 
     def _ok(self, calls):
         def run(command, *a, **k):
