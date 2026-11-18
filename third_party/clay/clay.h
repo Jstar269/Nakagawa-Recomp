@@ -1696,7 +1696,11 @@ Clay__MeasureTextCacheItem *Clay__MeasureTextCached(Clay_String *text, Clay_Text
     #endif
     uint64_t contentKey = 0;
     uint32_t id = Clay__HashStringContentsWithConfig(text, config, &contentKey);
-    uint32_t hashBucket = id % (context->maxMeasureTextCacheWordCount / 32);
+    /* LOCAL DELTA (Nakagawa Recomp): the bucket is taken modulo the bucket array's own capacity, as
+     * Clay__AddHashMapItem does. Upstream takes it modulo the word-cache size / 32, which has no tie to that
+     * array (sized by the element count): a word count below 32 divides by zero, and one above 32 times the
+     * element count indexes past the array. */
+    uint32_t hashBucket = id % (uint32_t)context->measureTextHashMap.capacity;
     int32_t elementIndexPrevious = 0;
     int32_t elementIndex = context->measureTextHashMap.internalArray[hashBucket];
     while (elementIndex != 0) {
@@ -4097,10 +4101,13 @@ void* Clay__Array_Allocate_Arena(int32_t capacity, uint32_t itemSize, Clay_Arena
 {
     /* LOCAL DELTA (Nakagawa Recomp): upstream multiplies in 32 bits and widens the result, so a large
      * capacity * itemSize could wrap before the arena bounds check (CodeQL "multiplication result converted
-     * to larger type"). Multiply in size_t instead; every in-range result is unchanged. */
-    size_t totalSizeBytes = (size_t)capacity * itemSize;
+     * to larger type"). The request is now refused when the capacity is negative or the product does not
+     * fit size_t, and the bounds check compares the size with the room left, so neither the product nor the
+     * sum can wrap; every in-range result is unchanged. */
+    bool sizeFits = capacity >= 0 && (itemSize == 0 || (size_t)capacity <= SIZE_MAX / itemSize);
+    size_t totalSizeBytes = sizeFits ? (size_t)capacity * itemSize : 0;
     uintptr_t nextAllocOffset = arena->nextAllocation + ((64 - (arena->nextAllocation % 64)) & 63);
-    if (nextAllocOffset + totalSizeBytes <= arena->capacity) {
+    if (sizeFits && nextAllocOffset <= arena->capacity && totalSizeBytes <= arena->capacity - nextAllocOffset) {
         arena->nextAllocation = nextAllocOffset + totalSizeBytes;
         return (void*)((uintptr_t)arena->memory + (uintptr_t)nextAllocOffset);
     }

@@ -394,7 +394,7 @@ static int word_cache_reuses_evicted_words(void)
     int32_t words = context->measuredWords.capacity - 1 - context->measuredWords.length +
                     context->measuredWordsFreeList.length;
     Clay_String full_text = { .isStaticallyAllocated = false, .length = 2 * words - 1, .chars = full };
-    uint32_t buckets = (uint32_t)context->maxMeasureTextCacheWordCount / 32u;
+    uint32_t buckets = (uint32_t)context->measureTextHashMap.capacity;
     uint32_t full_bucket;
     int32_t probe_length = 0;
     float width;
@@ -519,6 +519,42 @@ static int measure_cache_tells_colliding_texts_apart(void)
         return 0;
     }
     return 1;
+}
+
+/* A word cache smaller than 32 words still measures text. The measure-text
+   buckets are counted from the bucket array, not from the word count: a word
+   count below 32 made upstream take each bucket modulo zero. */
+static int small_word_cache_measures_text(void)
+{
+    Clay_Context *previous = Clay_GetCurrentContext();
+    int32_t previous_words = Clay_GetMaxMeasureTextCacheWordCount();
+    uint32_t arena_bytes = 0;
+    unsigned char *block;
+    Clay_Context *small_context;
+    float width;
+    int ok;
+
+    /* A new context takes its counts from the current one. */
+    Clay_SetMaxMeasureTextCacheWordCount(16);
+    block = guarded_context(&arena_bytes);
+    small_context = Clay_GetCurrentContext();
+    Clay_SetCurrentContext(previous);
+    Clay_SetMaxMeasureTextCacheWordCount(previous_words);
+    if (!block) {
+        return 0;
+    }
+    Clay_SetCurrentContext(small_context);
+    clay_error_count = 0;
+    width = measured_text_width("small-cache", "hello world", 11);
+    ok = clay_error_count == 0 && width == 110.0f &&
+         Clay_GetMaxMeasureTextCacheWordCount() == 16 && guard_intact(block, arena_bytes);
+    if (!ok) {
+        fprintf(stderr, "FAIL: with a 16-word cache, \"hello world\" measured %g px "
+                        "with %d errors, not 110 px\n", (double)width, clay_error_count);
+    }
+    Clay_SetCurrentContext(previous);
+    free(block);
+    return ok;
 }
 
 int main(void)
@@ -654,6 +690,29 @@ int main(void)
         }
     }
 
+    /* An arena request for a negative count of items is refused and leaves
+       the arena as it was. Formed in size_t, -1 items of 64 bytes are just
+       under SIZE_MAX bytes, so adding them to the offset wraps below the
+       capacity: the request would get memory already handed out and move the
+       arena's next allocation backwards. */
+    {
+        char small[256];
+        Clay_Arena tiny = Clay_CreateArenaWithCapacityAndMemory(sizeof(small), small);
+        void *first = Clay__Array_Allocate_Arena(1, 128u, &tiny);
+        void *block;
+
+        clay_error_count = 0;
+        block = Clay__Array_Allocate_Arena(-1, 64u, &tiny);
+        if (first == NULL || block != NULL || tiny.nextAllocation != 128u ||
+            clay_error_count != 1 || clay_last_error != CLAY_ERROR_TYPE_ARENA_CAPACITY_EXCEEDED) {
+            fprintf(stderr, "FAIL: a request for -1 arena items was not refused "
+                            "(next allocation at %u)\n", (unsigned)tiny.nextAllocation);
+            free(memory);
+            return EXIT_FAILURE;
+        }
+        clay_error_count = 1; /* as the 4 GiB request left it */
+    }
+
     /* A layout past the element limit fills the element-id map. The next
        layout, back under the limit, reuses the slots pruning freed and lays
        out without an error. */
@@ -727,13 +786,19 @@ int main(void)
     }
     Clay_SetCurrentContext(main_context);
 
+    if (!small_word_cache_measures_text()) {
+        free(memory);
+        return EXIT_FAILURE;
+    }
+
     free(memory);
     puts("Clay layout selftest passed: root, padding, child gap, fixed children, grow child, "
-         "wrapped text kept whole in an overfull column, an oversized arena request refused, "
+         "wrapped text kept whole in an overfull column, oversized and negative arena requests refused, "
          "a layout after a full element-id map, a timeless drag without momentum, "
          "the wheel on the scroll container after a removed one, a newline after an "
          "overlong word, wrapped lines for both passes of a layout with a transition, "
          "colliding measure-cache ids told apart, evicted and overfull texts' words "
-         "reused, and the debug view's id digits kept inside the arena");
+         "reused, the debug view's id digits kept inside the arena, and text measured "
+         "with a word cache under 32 words");
     return EXIT_SUCCESS;
 }

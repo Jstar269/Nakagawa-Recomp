@@ -24,7 +24,7 @@ launcher, the in-game overlay and their tests lay out through it:
 
 | File | Kind | Upstream blob SHA at the pin | SHA-256 |
 | --- | --- | --- | --- |
-| `clay.h` | imported + LOCAL DELTA | `7d9cf4cc7a918d1bdd766867c180851c949a3310` | `a7265aafda776988c88de5f8382d30e39862a188cc6a64c817f3c4675afc1cbe` |
+| `clay.h` | imported + LOCAL DELTA | `7d9cf4cc7a918d1bdd766867c180851c949a3310` | `35bb5743f123cf323086487e7f16da75e6f5c2aa400bc623c5e5f50494d2483e` |
 | `LICENSE.md` | imported byte-identical | `2968c61bcdc6ecbef470e02edd45b47aba1d8c44` | `5dd30f9f52093076b7574458f5efb8242fe6cbbd4669d4a2914e7616810d0df8` |
 | `PROVENANCE.md` | project-authored manifest | n/a | n/a |
 
@@ -37,7 +37,8 @@ applying the changes below to them gives the SHA-256 in the table.
 Each change is marked `LOCAL DELTA` in the file, and
 `tests/native/test_clay_layout.c` fails on the upstream bytes for each of them.
 The file's second and third lines say it was modified and point here. The first
-four changes were made on 2026-10-29, the rest on 2026-11-17.
+four changes were made on 2026-10-29, the rest on 2026-11-17; the first was
+also amended on 2026-11-17.
 
 - `clay.h`, `Clay__Array_Allocate_Arena`: `capacity * itemSize` is computed as
   `(size_t)capacity * itemSize`, so the product is formed in `size_t` instead of
@@ -45,6 +46,14 @@ four changes were made on 2026-10-29, the rest on 2026-11-17.
   converted to larger type"). Every in-range result is unchanged. Upstream at
   the pin still multiplies in 32 bits, so a request of 65536 items of 65536
   bytes wraps to 0 and is granted; the selftest checks that it is refused.
+  Since 2026-11-17 a negative capacity, or a product that does not fit
+  `size_t`, is refused before the multiplication, and the bounds check compares
+  the size with the room left after the aligned offset, so neither the product
+  nor the sum can wrap on any `size_t` width. The 2026-10-29 form let a
+  capacity of -1 become a size just under `SIZE_MAX` whose sum with the offset
+  wrapped below the capacity: the request got memory already handed out and
+  moved the arena's next allocation backwards. The selftest checks that -1
+  items are refused and the arena is left as it was.
 - `clay.h`, `Clay__CalculateFinalLayout`: a wrapped text element's minimum height
   is raised to its wrapped height, and the pass that carries wrapped heights up
   the tree also carries the minimum heights, with the rule an element's close
@@ -109,3 +118,10 @@ four changes were made on 2026-10-29, the rest on 2026-11-17.
   and its wrapped lines are cut at the first one's word offsets, which can run
   past its end. The selftest finds two texts of different lengths with the same
   id by a birthday search and checks each is measured as itself.
+- `clay.h`, `Clay__MeasureTextCached`: a text's measure-cache bucket is its id
+  modulo the bucket array's capacity, as `Clay__AddHashMapItem` takes it.
+  Upstream at the pin takes it modulo the word-cache size divided by 32, which
+  has no tie to that array, sized by the element count: a word cache under 32
+  words divides by zero on the first text measured, and one over 32 times the
+  element count indexes past the array. The selftest measures a text with a
+  16-word cache.
