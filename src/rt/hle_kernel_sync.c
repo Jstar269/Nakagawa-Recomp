@@ -1150,6 +1150,92 @@ static uint32_t h_DeleteSema(CpuState *s) {
     }
     return 0;
 }
+/* Semaphore waiter records. SignalSema hands the signalled count to the waiters it
+ * releases: each released waiter's need is subtracted inside SignalSema and the waiter
+ * is readied with result 0, so a PollSema, WaitSema or ReferSemaStatus made before the
+ * waiter runs sees the count already taken. Waiters are served in arrival order, or by
+ * current priority (arrival order among equals) when the semaphore has attr 0x100; a
+ * waiter whose need does not fit is passed over and the next one is tried.
+ * PPSSPP-derived, not PSP-measured: hrydgard/ppsspp 0697e8bd6f488b891a17e275b3eb5cd5815c96d7,
+ * Core/HLE/sceKernelSemaphore.cpp, sceKernelSignalSema and __KernelUnlockSemaForThread.
+ * A record is used only while its thread is still blocked on that semaphore
+ * (sema_waiter_live), so a thread terminated in the wait leaves a dead record that is
+ * never served and is reclaimed. A thread blocks on one object at a time, so live
+ * records never outnumber the scheduler's 128 threads. */
+#define SEMA_WAITER_MAX 128
+#define PSP_SEMA_ATTR_PRIORITY 0x100u
+typedef struct { uint32_t sema, thread; int need; uint64_t order; int active; } SemaWaiter;
+static SemaWaiter s_sema_waiters[SEMA_WAITER_MAX];
+static uint64_t s_sema_wait_order;
+static int s_sema_handoff_noted;
+
+static int sema_waiter_live(const SemaWaiter *w) {
+    SrThreadRunStatus rs;
+    /* Measured (PSP-B3-01): a semaphore wait is waitType 3 with waitId = the UID. */
+    return w->active && sched_thread_run_status(w->thread, &rs) == 0 &&
+           rs.waitType == 3u && rs.waitId == w->sema;
+}
+static void sema_waiter_end(void) {
+    uint32_t self = sched_current_uid();
+    for (int i = 0; i < SEMA_WAITER_MAX; i++)
+        if (s_sema_waiters[i].active && s_sema_waiters[i].thread == self) s_sema_waiters[i].active = 0;
+}
+static void sema_waiter_begin(uint32_t sema, int need) {
+    sema_waiter_end();
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < SEMA_WAITER_MAX; i++)
+            if (!s_sema_waiters[i].active) {
+                s_sema_waiters[i] = (SemaWaiter){sema, sched_current_uid(), need, ++s_sema_wait_order, 1};
+                return;
+            }
+        for (int i = 0; i < SEMA_WAITER_MAX; i++)
+            if (!sema_waiter_live(&s_sema_waiters[i])) s_sema_waiters[i].active = 0;
+    }
+    fprintf(stderr, "HLE: semaphore waiter table full; uid=0x%x thread=0x%x not recorded\n",
+            sema, sched_current_uid());
+}
+/* Hand m's count to its live waiters in service order. Returns 1 when one was readied. */
+static int sema_hand_over(Sync *m) {
+    int order[SEMA_WAITER_MAX];
+    uint32_t pri[SEMA_WAITER_MAX];
+    int n = 0;
+    const int by_priority = (m->attr & PSP_SEMA_ATTR_PRIORITY) != 0;
+    for (int i = 0; i < SEMA_WAITER_MAX; i++) {
+        const SemaWaiter *w = &s_sema_waiters[i];
+        SrThreadRunStatus rs;
+        if (w->sema != m->uid || !sema_waiter_live(w) ||
+            sched_thread_run_status(w->thread, &rs) != 0) continue;
+        /* Insertion by (current priority when attr 0x100, then arrival order). */
+        int j = n++;
+        while (j > 0) {
+            const SemaWaiter *p = &s_sema_waiters[order[j - 1]];
+            const int before = by_priority && rs.currentPriority != pri[j - 1]
+                                   ? rs.currentPriority < pri[j - 1]
+                                   : w->order < p->order;
+            if (!before) break;
+            order[j] = order[j - 1];
+            pri[j] = pri[j - 1];
+            j--;
+        }
+        order[j] = i;
+        pri[j] = rs.currentPriority;
+    }
+    int woke = 0;
+    for (int k = 0; k < n && m->count > 0; k++) {
+        SemaWaiter *w = &s_sema_waiters[order[k]];
+        if (w->need > m->count) continue;
+        m->count -= w->need;
+        w->active = 0;
+        if (!s_sema_handoff_noted) {
+            s_sema_handoff_noted = 1;
+            fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelSignalSema "
+                            "(NID 0x3f53e640) hands the signalled count to the waiter it releases\n");
+        }
+        woke |= sched_wake_one_object_waiter_with_result(w->thread, 0u);
+    }
+    return woke;
+}
+
 /* Entry contract shared by sceKernelWaitSema and sceKernelWaitSemaCB.
  *
  * The order below is not a style choice; each step is placed where a measured
@@ -1248,7 +1334,10 @@ static uint32_t h_WaitSema(CpuState *s) {
                     return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
                 }
             }
-            if (sched_block_on_timeout(uid, usec)) {
+            sema_waiter_begin(uid, need);
+            const int timed_out = sched_block_on_timeout(uid, usec);
+            sema_waiter_end();
+            if (timed_out) {
                 /* Measured (PSP-B2-01): an expired timed wait writes the
                  * remaining time (0 at the deadline) to *timeout and answers
                  * WAIT_TIMEOUT. */
@@ -1256,10 +1345,14 @@ static uint32_t h_WaitSema(CpuState *s) {
                 return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
             }
         } else {
+            sema_waiter_begin(uid, need);
             sched_block_on(uid);
+            sema_waiter_end();
         }
         /* Measured (PSP-B2-01): a cancelled/deleted/released wait answers
-         * its wake result instead of resuming into a satisfied count. */
+         * its wake result instead of resuming into a satisfied count. A
+         * SignalSema that released this waiter already took its count
+         * (sema_hand_over) and answers 0 the same way. */
         {
             uint32_t woken = 0;
             if (sched_take_wake_result(&woken)) return woken;
@@ -1303,7 +1396,9 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
             sched_set_current_cb_wait(1);
             /* Measured (PSP-B3-01): sema CB waits report waitType 3. */
             sched_set_current_wait_kind(3);
+            sema_waiter_begin(uid, need);
             int timed_out = sched_block_on_timeout(uid, remaining);
+            sema_waiter_end();
             sched_set_current_cb_wait(0);
             if (timed_out) {
                 /* Measured (PSP-B2-01): same remaining-0 contract after
@@ -1314,11 +1409,14 @@ static uint32_t h_WaitSemaCB(CpuState *s) {
         } else {
             sched_set_current_cb_wait(1);
             sched_set_current_wait_kind(3);
+            sema_waiter_begin(uid, need);
             sched_block_on(uid);
+            sema_waiter_end();
             sched_set_current_cb_wait(0);
         }
         /* Measured (PSP-B2-01): a cancelled/deleted/released wait answers
-         * its wake result instead of resuming into a satisfied count. */
+         * its wake result instead of resuming into a satisfied count; a
+         * SignalSema hand-over (sema_hand_over) answers 0 the same way. */
         {
             uint32_t woken = 0;
             if (sched_take_wake_result(&woken)) return woken;
@@ -1339,7 +1437,7 @@ static uint32_t h_SignalSema(CpuState *s) {
      * 800201AE and leaves the count unchanged; it does not cap. */
     if (new_count > m->maxc) return 0x800201aeu;
     m->count = (int32_t)(uint32_t)new_count;
-    sched_wake(A0);
+    (void)sema_hand_over(m);
     sched_preempt();    /* a woken higher-priority waiter runs immediately */
     return 0;
 }
@@ -1474,34 +1572,63 @@ int sr_hle_test_sema_state(uint32_t uid, int *count_out, int *max_out) {
 /* Measured (PSP-B2-01): an unlock to level 0 with a waiter hands
  * ownership directly to the waiter (lockThread = waiter, level = the waiter's
  * count) before the waiter runs. The waiter's requested count lives on its own
- * host stack while blocked, so a small FIFO queue carries it to the unlocker. */
-#define LWWAIT_MAX 64
-typedef struct { uint32_t muid, thread; int count; int active; } LwWait;
+ * host stack while blocked, so a small FIFO queue carries it to the unlocker.
+ *
+ * Each record is one thread's wait and is counted once in its workarea's
+ * numWaitThreads word: lww_enqueue adds it, lww_finish drops it. The waiter
+ * finishes its own record when it leaves the wait (granted, released, timed out
+ * or deleted); a thread that never leaves (terminated or deleted while waiting,
+ * or granted and then terminated before it ran) is finished by
+ * sr_hle_lwmutex_release_thread. A granted record stays until then, so the unlocker
+ * cannot hand the lock to it a second time. A thread waits on one object at a
+ * time and has one record, so the table holds the scheduler's 128 threads. */
+#define LWWAIT_MAX 128
+typedef struct { uint32_t muid, thread, wa; int count; int active; int granted; } LwWait;
 static LwWait s_lwwait[LWWAIT_MAX];
-static void lww_enqueue(uint32_t muid, uint32_t thread, int count) {
+static void lww_finish(uint32_t thread) {
+    for (int i = 0; i < LWWAIT_MAX; i++) {
+        LwWait *w = &s_lwwait[i];
+        if (!w->active || w->thread != thread) continue;
+        w->active = 0;
+        if (sr_guest_span_writable(w->wa + LWMUTEX_NUM_WAIT, 4u)) {
+            uint32_t waiters = MEM_R32(w->wa + LWMUTEX_NUM_WAIT);
+            if (waiters) MEM_W32(w->wa + LWMUTEX_NUM_WAIT, waiters - 1u);
+        }
+    }
+}
+static void lww_enqueue(uint32_t muid, uint32_t wa, uint32_t thread, int count) {
+    lww_finish(thread);
     for (int i = 0; i < LWWAIT_MAX; i++)
         if (!s_lwwait[i].active) {
-            s_lwwait[i] = (LwWait){muid, thread, count, 1};
+            s_lwwait[i] = (LwWait){muid, thread, wa, count, 1, 0};
+            MEM_W32(wa + LWMUTEX_NUM_WAIT, MEM_R32(wa + LWMUTEX_NUM_WAIT) + 1u);
             return;
         }
+    fprintf(stderr, "HLE: LwMutex waiter table full; uid=0x%x thread=0x%x not recorded\n",
+            muid, thread);
 }
-static void lww_remove_thread(uint32_t thread) {
-    for (int i = 0; i < LWWAIT_MAX; i++)
-        if (s_lwwait[i].active && s_lwwait[i].thread == thread) s_lwwait[i].active = 0;
-}
-static void lww_remove_mutex(uint32_t muid) {
-    for (int i = 0; i < LWWAIT_MAX; i++)
-        if (s_lwwait[i].active && s_lwwait[i].muid == muid) s_lwwait[i].active = 0;
-}
-static int lww_pop_first(uint32_t muid, uint32_t *thread_out, int *count_out) {
-    for (int i = 0; i < LWWAIT_MAX; i++)
-        if (s_lwwait[i].active && s_lwwait[i].muid == muid) {
-            *thread_out = s_lwwait[i].thread;
-            *count_out = s_lwwait[i].count;
-            s_lwwait[i].active = 0;
-            return 1;
-        }
+/* The first ungranted record of a thread still blocked on muid (waitType 13,
+ * PSP-B3-01). A record whose thread already left the wait some other way is
+ * skipped; its owner finishes it. */
+static int lww_grant_first(uint32_t muid, uint32_t *thread_out, int *count_out) {
+    for (int i = 0; i < LWWAIT_MAX; i++) {
+        LwWait *w = &s_lwwait[i];
+        SrThreadRunStatus rs;
+        if (!w->active || w->granted || w->muid != muid) continue;
+        if (sched_thread_run_status(w->thread, &rs) != 0 || rs.waitType != 13u || rs.waitId != muid)
+            continue;
+        w->granted = 1;
+        *thread_out = w->thread;
+        *count_out = w->count;
+        return 1;
+    }
     return 0;
+}
+void sr_hle_lwmutex_release_thread(uint32_t thread_uid) {
+    lww_finish(thread_uid);
+}
+void sr_hle_lwmutex_waits_reset(void) {
+    memset(s_lwwait, 0, sizeof(s_lwwait));
 }
 
 /* The guest hands us a pointer; validate the entire struct, not just its first
@@ -1542,8 +1669,8 @@ static uint32_t h_DeleteLwMutex(CpuState *s) {
     /* PSP-B1-01: deleting an already-deleted workarea is NOT_FOUND. */
     if (!m) return SCE_KERNEL_ERROR_LWMUTEX_NOT_FOUND;
     m->used = 0;
-    /* Anything still blocked here would wait forever otherwise. */
-    lww_remove_mutex(uid);
+    /* Anything still blocked here would wait forever otherwise. Each woken
+     * waiter finds the mutex gone and finishes its own record. */
     sched_wake(uid);
     /* PSP-B1-01: delete (even while held) leaves level 0 and poisons the
      * owner and uid words with 0xFFFFFFFF; attr is kept. */
@@ -1627,12 +1754,15 @@ enum {
     LWMUTEX_NOT_RECURSIVE,   /* self-held without the RECURSIVE attribute */
     LWMUTEX_GONE,            /* deleted before or while waiting */
     LWMUTEX_TIMEOUT,         /* contended timed wait expired */
+    LWMUTEX_WAKE_RESULT,     /* the wait was ended with a result (ReleaseWaitThread) */
 };
-static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_t toptr);
+static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_t toptr,
+                                   uint32_t *wake_out);
 static int lwmutex_acquire(uint32_t wa, int count, int blocking) {
-    return lwmutex_acquire_timeout(wa, count, blocking, 0u);
+    return lwmutex_acquire_timeout(wa, count, blocking, 0u, NULL);
 }
-static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_t toptr) {
+static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_t toptr,
+                                   uint32_t *wake_out) {
     uint32_t cur = sched_current_uid();
     uint64_t end = 0;
     int has_timeout = 0;
@@ -1674,8 +1804,7 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
                         blocks, wa, owner, cur, level);
         }
         uint32_t uid = MEM_R32(wa + LWMUTEX_UID);
-        MEM_W32(wa + LWMUTEX_NUM_WAIT, MEM_R32(wa + LWMUTEX_NUM_WAIT) + 1u);
-        lww_enqueue(uid, cur, count);
+        lww_enqueue(uid, wa, cur, count);
         /* Measured (PSP-B3-01): LwMutex waits report waitType 13 with
          * waitId = the workarea's uid. */
         sched_set_current_wait_kind(13);
@@ -1693,9 +1822,8 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
         } else {
             sched_block_on(uid);
         }
-        uint32_t waiters = MEM_R32(wa + LWMUTEX_NUM_WAIT);
-        if (waiters) MEM_W32(wa + LWMUTEX_NUM_WAIT, waiters - 1u);
-        if (!sync_find(uid, SYNC_KIND_LWMUTEX)) { lww_remove_thread(cur); return LWMUTEX_GONE; }
+        lww_finish(cur);
+        if (!sync_find(uid, SYNC_KIND_LWMUTEX)) return LWMUTEX_GONE;
         /* Measured (PSP-B2-01): the unlocker hands ownership directly to
          * the waiter, so a woken waiter that now owns the mutex takes it. */
         if (MEM_R32(wa + LWMUTEX_LOCK_THREAD) == cur) {
@@ -1706,10 +1834,18 @@ static int lwmutex_acquire_timeout(uint32_t wa, int count, int blocking, uint32_
             }
             return LWMUTEX_TAKEN;
         }
+        /* Measured (PSP-B3-01): ReleaseWaitThread ends the wait with WAIT_RELEASE,
+         * latched on this thread; it is answered, not waited out again. */
+        {
+            uint32_t woken = 0;
+            if (sched_take_wake_result(&woken)) {
+                if (wake_out) *wake_out = woken;
+                return LWMUTEX_WAKE_RESULT;
+            }
+        }
         if (timed_out || (has_timeout && ({ sched_vtime_refresh(); sched_vtime_us() >= end; }))) {
             /* Measured (PSP-B2-01): a contended timed lock answers
              * WAIT_TIMEOUT (0x800201A8) and reports the remaining timeout (0). */
-            lww_remove_thread(cur);
             if (toptr) MEM_W32(toptr, 0u);
             return LWMUTEX_TIMEOUT;
         }
@@ -1723,12 +1859,13 @@ static uint32_t h_lwmutex_lock_common(CpuState *s) {
     int count = (int)A1; if (count <= 0) return 0x800200d2u;  /* ILLEGAL_ARGUMENT */
     uint32_t toptr = A2;
     if (toptr && !sr_guest_span_writable(toptr, 4)) return 0x80000103u;
-    int rc = (toptr ? lwmutex_acquire_timeout(wa, count, 1, toptr)
-                    : lwmutex_acquire(wa, count, 1));
+    uint32_t woken = 0;
+    int rc = lwmutex_acquire_timeout(wa, count, 1, toptr, &woken);
     switch (rc) {
     case LWMUTEX_TAKEN: return 0u;
     case LWMUTEX_NOT_RECURSIVE: return SCE_KERNEL_ERROR_LWMUTEX_RECURSIVE_NOT_ALLOWED;
     case LWMUTEX_TIMEOUT: return 0x800201a8u;
+    case LWMUTEX_WAKE_RESULT: return woken;
     default: return 0x800201b5u;   /* WAIT_DELETE */
     }
 }
@@ -1811,7 +1948,7 @@ static uint32_t h_UnlockLwMutex(CpuState *s) {
          * before it runs; only then does the waiter become runnable. */
         uint32_t next_thread = 0;
         int next_count = 0;
-        if (lww_pop_first(muid, &next_thread, &next_count)) {
+        if (lww_grant_first(muid, &next_thread, &next_count)) {
             MEM_W32(wa + LWMUTEX_LOCK_LEVEL, (uint32_t)next_count);
             MEM_W32(wa + LWMUTEX_LOCK_THREAD, next_thread);
             sched_wake_one_object_waiter(muid, next_thread);
@@ -1826,7 +1963,7 @@ static uint32_t h_UnlockLwMutex(CpuState *s) {
 }
 
 static uint32_t h_CancelSema(CpuState *s) {
-    /* a0=semaid, a1=newCount, a2=numWaitThreads out (stack_arg 0).
+    /* a0=semaid, a1=newCount, a2=numWaitThreads out.
      * Measured (PSP-B2-01): newCount -1 resets the count to the initial
      * count, n <= max sets it, n > max rejects with ILLEGAL_COUNT (and numWait
      * stays untouched). Wake waiters with WAIT_CANCEL and report their number;
@@ -1839,8 +1976,9 @@ static uint32_t h_CancelSema(CpuState *s) {
     int waiters = sched_count_waiters(A0);
     /* Measured (PSP-B2-01): -1 restores the create-time initial count. */
     m->count = (new_count == -1) ? m->initc : new_count;
-    uint32_t nump = stack_arg(s, 0);
-    if (nump) MEM_W32(nump, (uint32_t)waiters);
+    /* The third argument is a2 (AGENTS.md section 7: arguments 1-4 are a0-a3). */
+    uint32_t nump = A2;
+    if (nump && sr_guest_span_writable(nump, 4u)) MEM_W32(nump, (uint32_t)waiters);
     /* No waiter: no wake result to latch (a stale result would be
      * misattributed to the next waiter). */
     if (waiters) {

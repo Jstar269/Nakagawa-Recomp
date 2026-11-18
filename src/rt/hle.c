@@ -3098,6 +3098,7 @@ void sr_hle_release_thread_resources(uint32_t thread_uid) {
         io_cwd_release_thread(thread_uid);
         hle_io_release_thread(thread_uid);
         mbx_remove_thread_waiters(thread_uid);
+        sr_hle_lwmutex_release_thread(thread_uid);
 
         for (size_t i = 0, n = fpl_slot_count(); i < n; i++) {
             if (fpl_slot(i)->used) fpl_remove_waiter(fpl_slot(i), thread_uid);
@@ -4030,6 +4031,7 @@ void hle_sync_reset(void) {
     free(s_sync_chunks);
     s_sync_chunks = NULL;
     s_sync_chunk_count = 0u;
+    sr_hle_lwmutex_waits_reset();
 }
 
 /* Measured on a PSP-3000, firmware 6.61 (PSP-B2-01 / PSP-B3-01,

@@ -21520,6 +21520,7 @@ static void test_expired_timed_object_waits_enter_strict_priority(void) {
 #define WCR_NAMEBUF     0x00250500u
 #define WCR_NUMWAIT     0x00250540u
 #define WCR_EVF_OUT     0x00250544u
+#define WCR_T0_DECOY    0x00250548u
 #define WCR_WAIT_CANCEL 0x800201a9u
 #define WCR_WAIT_RELEASE 0x800201aau
 #define NID_WCR_CANCEL_SEMA     0x8ffdf9a2u
@@ -21765,12 +21766,16 @@ static void test_cancel_release_wake_results(void) {
          * cell below would observe the caller as itself. */
         s_cur = (int)(waiter - s_tcb) - 1;
         MEM_W32(WCR_NUMWAIT, 0xFFFFFFFFu);
+        MEM_W32(WCR_T0_DECOY, 0x5a5a5a5au);
         memset(&cpu, 0, sizeof cpu);
-        cpu.r[4] = s_wcr_obj; cpu.r[5] = 0xFFFFFFFFu; cpu.r[6] = WCR_NUMWAIT; cpu.r[8] = WCR_NUMWAIT;
+        /* numWaitThreads is the third argument (a2); t0 holds an unrelated address. */
+        cpu.r[4] = s_wcr_obj; cpu.r[5] = 0xFFFFFFFFu; cpu.r[6] = WCR_NUMWAIT; cpu.r[8] = WCR_T0_DECOY;
         uint32_t rc = sr_syscall(&cpu, NID_WCR_CANCEL_SEMA);
         expect(rc == 0u, "PSP-B2-01: CancelSema succeeds");
         expect(MEM_R32(WCR_NUMWAIT) == 1u,
-               "PSP-B2-01: CancelSema reports the number of woken waiters");
+               "PSP-B2-01: CancelSema reports the number of woken waiters through a2");
+        expect(MEM_R32(WCR_T0_DECOY) == 0x5a5a5a5au,
+               "CancelSema leaves the address in t0 untouched");
         expect(wsv_count(s_wcr_obj) == 0,
                "PSP-B2-01: CancelSema(-1) resets the count to the initial count");
         s_cur = (int)(waiter - s_tcb);
@@ -22311,6 +22316,87 @@ static void b23_waiter_lw_lock(void *arg) {
     s_b23_ret = sr_syscall(&cpu, NID_B1_LOCK_LWMUTEX);
     s_b23_returned = 1;
     selftest_park_on_scheduler();
+}
+
+static TCB *lww_case_begin(uint32_t *muid_out) {
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    TCB *main_t = fixture_thread(0x1e1u, TH_RUNNING, 32);
+    s_cur = (int)(main_t - s_tcb);
+    main_t->started = 1;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = B23_LW_WA; cpu.r[5] = WCR_NAMEBUF; cpu.r[6] = 0u; cpu.r[7] = 0u;
+    expect(sr_syscall(&cpu, NID_B1_CREATE_LWMUTEX) == 0u, "LwMutex wait record: create");
+    *muid_out = MEM_R32(B23_LW_WA + 0x10u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = B23_LW_WA; cpu.r[5] = 1u;
+    expect(sr_syscall(&cpu, NID_B1_TRYLOCK_LWMUTEX) == 0u, "LwMutex wait record: main locks");
+    s_b23_lw_wa = B23_LW_WA; s_b23_lw_count = 1; s_b23_lw_toptr = 0u;
+    s_b23_ret = 0xFFFFFFFFu; s_b23_returned = 0;
+    TCB *waiter = fixture_thread(0x1e2u, TH_READY, 16);
+    waiter->started = 1;
+    waiter->coro = sr_coro_create(b23_waiter_lw_lock, NULL, (size_t)4 << 20);
+    if (!waiter->coro) return NULL;
+    s_cur = (int)(waiter - s_tcb);
+    waiter->state = TH_RUNNING;
+    sr_coro_switch(waiter->coro);
+    expect(waiter->state == TH_WAIT_OBJ && MEM_R32(B23_LW_WA + 0x0cu) == 1u,
+           "LwMutex wait record: the waiter blocks and is counted");
+    s_cur = (int)(main_t - s_tcb);
+    return waiter;
+}
+
+static void test_lwmutex_wait_records_follow_the_waiter(void) {
+    CpuState cpu;
+    uint32_t muid = 0;
+
+    /* ReleaseWaitThread: the waiter answers WAIT_RELEASE and leaves no record. */
+    TCB *waiter = lww_case_begin(&muid);
+    if (waiter) {
+        const int main_idx = s_cur;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = waiter->uid;
+        expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0u,
+               "LwMutex: ReleaseWaitThread of a LockLwMutex waiter succeeds");
+        s_cur = (int)(waiter - s_tcb);
+        waiter->state = TH_RUNNING;
+        sr_coro_switch(waiter->coro);
+        expect(s_b23_returned == 1 && s_b23_ret == WCR_WAIT_RELEASE,
+               "PSP-B3-01: a released LockLwMutex answers WAIT_RELEASE (0x800201AA)");
+        expect(MEM_R32(B23_LW_WA + 0x0cu) == 0u,
+               "LwMutex: the released waiter is no longer counted in numWaitThreads");
+        s_cur = main_idx;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = B23_LW_WA; cpu.r[5] = 1u;
+        expect(sr_syscall(&cpu, NID_B1_UNLOCK_LWMUTEX) == 0u &&
+               MEM_R32(B23_LW_WA + 0x04u) == 0u && MEM_R32(B23_LW_WA + 0x00u) == 0u,
+               "LwMutex: unlock after the release hands the lock to nobody");
+        if (waiter->coro) { sr_coro_destroy(waiter->coro); waiter->coro = NULL; }
+        s_cur = -1;
+    }
+
+    /* TerminateThread: the dead waiter is neither counted nor handed the lock. */
+    waiter = lww_case_begin(&muid);
+    if (waiter) {
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = waiter->uid;
+        expect(sr_syscall(&cpu, NID_SCE_KERNEL_TERMINATE_THREAD) == 0u,
+               "LwMutex: TerminateThread of a LockLwMutex waiter succeeds");
+        expect(MEM_R32(B23_LW_WA + 0x0cu) == 0u,
+               "LwMutex: a terminated waiter is no longer counted in numWaitThreads");
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = B23_LW_WA; cpu.r[5] = 1u;
+        expect(sr_syscall(&cpu, NID_B1_UNLOCK_LWMUTEX) == 0u &&
+               MEM_R32(B23_LW_WA + 0x04u) == 0u && MEM_R32(B23_LW_WA + 0x00u) == 0u,
+               "LwMutex: unlock does not hand the lock to a terminated waiter");
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = B23_LW_WA; cpu.r[5] = 1u;
+        expect(sr_syscall(&cpu, NID_B1_TRYLOCK_LWMUTEX) == 0u,
+               "LwMutex: the mutex is free for the next locker");
+        if (waiter->coro) { sr_coro_destroy(waiter->coro); waiter->coro = NULL; }
+        s_cur = -1;
+    }
 }
 
 static void test_b23_second_round(void) {
@@ -25286,8 +25372,8 @@ static void srt_released_wait_case(int mode, const char *what, uint32_t want_ret
         cpu.r[4] = sema; cpu.r[5] = 1u;
         expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u, "signal inside the deadline");
         if (mode == RW_TOKEN_STOLEN)
-            expect(wsv_wait(0x58b1f937u, sema, 1u, 0u) == 0u,
-                   "another thread takes the signalled count before the waiter runs");
+            expect(wsv_wait(0x58b1f937u, sema, 1u, 0u) == 0x800201adu,
+                   "a PollSema before the waiter runs finds the count handed to the waiter");
         s_vtime_us = late;               /* the waiter is READY but has not been dispatched */
         break;
     case RW_CANCEL_DELAYED:
@@ -25317,8 +25403,8 @@ static void test_released_timed_wait_reports_release_not_clock(void) {
     srt_released_wait_case(RW_SIGNAL_SUSPENDED, "signalled while suspended, resumed after the deadline", 0u);
     srt_released_wait_case(RW_SIGNAL_DELAYED, "signalled, dispatched after the deadline", 0u);
     srt_released_wait_case(RW_CANCEL_DELAYED, "cancelled, dispatched after the deadline", WCR_WAIT_CANCEL);
-    srt_released_wait_case(RW_TOKEN_STOLEN, "signalled but count taken, dispatched after the deadline",
-                           SLC_WAIT_TIMEOUT);
+    srt_released_wait_case(RW_TOKEN_STOLEN, "signalled, polled by another thread, dispatched after the deadline",
+                           0u);
 }
 
 /* A suspended DelayThread sleeper likewise reaches READY at its deadline without
@@ -40619,8 +40705,8 @@ static void test_hle_liveness_sema_handoff(void) {
     cpu.r[5] = 1u;
     expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u,
            "HLE semaphore producer signals the waiting consumer");
-    expect(consumer->state == TH_READY && wsv_count(s_live_sema_obj) == 1,
-           "HLE semaphore signal readies the consumer without consuming its count");
+    expect(consumer->state == TH_READY && wsv_count(s_live_sema_obj) == 0,
+           "HLE semaphore signal hands its count to the consumer it readies");
     int selected = pick_next();
     expect(selected == (int)(consumer - s_tcb),
            "HLE semaphore producer-to-consumer order selects the consumer next");
@@ -40637,6 +40723,97 @@ static void test_hle_liveness_sema_handoff(void) {
            "HLE semaphore trace identifies producer ownership and consumer selection");
     liveness_finish_waiter(consumer);
     wsv_delete(s_live_sema_obj);
+}
+
+/* SignalSema hands its count to the waiters it releases, in the semaphore's service
+ * order (PPSSPP-derived, not PSP-measured; see sema_hand_over). Two waiters on one
+ * semaphore: the first to wait has the weaker priority. */
+static uint32_t s_svc_sema;
+static int s_svc_need[2];
+static uint32_t s_svc_ret[2];
+static int s_svc_returned[2];
+static int s_svc_phase;
+
+static void svc_sema_waiter(void *arg) {
+    (void)arg;
+    int phase = s_svc_phase++;
+    CpuState cpu = {0};
+    cpu.r[4] = s_svc_sema;
+    cpu.r[5] = (uint32_t)s_svc_need[phase];
+    s_svc_ret[phase] = sr_syscall(&cpu, NID_CNW_WAIT_SEMA);
+    s_svc_returned[phase] = 1;
+    selftest_park_on_scheduler();
+}
+
+static void svc_sema_case(uint32_t attr, int first_need, int second_need, int served,
+                          const char *what) {
+    char msg[200];
+    reset_fixture();
+    sr_hle_init();
+    TCB *producer = fixture_thread(0x2a21u, TH_RUNNING, 32);
+    producer->started = 1;
+    s_cur = (int)(producer - s_tcb);
+    CpuState cpu = {0};
+    cpu.r[4] = WSV_NAMEBUF; cpu.r[5] = attr; cpu.r[6] = 0u; cpu.r[7] = 4u;
+    s_svc_sema = sr_syscall(&cpu, NID_CNW_CREATE_SEMA);
+    s_svc_need[0] = first_need; s_svc_need[1] = second_need;
+    s_svc_ret[0] = s_svc_ret[1] = 0xffffffffu;
+    s_svc_returned[0] = s_svc_returned[1] = 0;
+    s_svc_phase = 0;
+    TCB *w[2];
+    w[0] = liveness_start_waiter(svc_sema_waiter, 0x2a22u, 48);   /* waits first, weaker */
+    w[1] = liveness_start_waiter(svc_sema_waiter, 0x2a23u, 16);   /* waits second, stronger */
+    expect(w[0] && w[0]->coro && w[1] && w[1]->coro &&
+           w[0]->state == TH_WAIT_OBJ && w[1]->state == TH_WAIT_OBJ,
+           "semaphore service order: both waiters block");
+    if (!w[0] || !w[0]->coro || !w[1] || !w[1]->coro) return;
+    s_cur = (int)(producer - s_tcb);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = s_svc_sema; cpu.r[5] = 1u;
+    expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u, "semaphore service order: signal 1");
+    const int other = 1 - served;
+    snprintf(msg, sizeof msg, "%s: the signal readies waiter %d only and takes its count",
+             what, served);
+    expect(w[served]->state == TH_READY && w[other]->state == TH_WAIT_OBJ &&
+           wsv_count(s_svc_sema) == 0, msg);
+    snprintf(msg, sizeof msg, "%s: a PollSema before the waiter runs answers SEMA_ZERO", what);
+    expect(wsv_wait(0x58b1f937u, s_svc_sema, 1u, 0u) == 0x800201adu && wsv_count(s_svc_sema) == 0,
+           msg);
+    MEM_W32(WSV_NAMEBUF + 0x40u, 56u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = s_svc_sema; cpu.r[5] = WSV_NAMEBUF + 0x40u;
+    snprintf(msg, sizeof msg, "%s: ReferSemaStatus reports count 0 and one waiter", what);
+    expect(sr_syscall(&cpu, NID_RSS_REFER_SEMA) == 0u &&
+           MEM_R32(WSV_NAMEBUF + 0x40u + 44u) == 0u && MEM_R32(WSV_NAMEBUF + 0x40u + 52u) == 1u,
+           msg);
+    s_cur = (int)(w[served] - s_tcb);
+    w[served]->state = TH_RUNNING;
+    sr_coro_switch(w[served]->coro);
+    snprintf(msg, sizeof msg, "%s: the served waiter returns 0 without waiting again", what);
+    expect(s_svc_returned[served] == 1 && s_svc_ret[served] == 0u &&
+           wsv_count(s_svc_sema) == 0 && w[other]->state == TH_WAIT_OBJ, msg);
+    liveness_finish_waiter(w[served]);
+    s_cur = (int)(producer - s_tcb);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = s_svc_sema; cpu.r[5] = (uint32_t)s_svc_need[other];
+    expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u &&
+           w[other]->state == TH_READY && wsv_count(s_svc_sema) == 0,
+           "semaphore service order: a second signal serves the other waiter");
+    s_cur = (int)(w[other] - s_tcb);
+    w[other]->state = TH_RUNNING;
+    sr_coro_switch(w[other]->coro);
+    expect(s_svc_returned[other] == 1 && s_svc_ret[other] == 0u,
+           "semaphore service order: the other waiter returns 0");
+    liveness_finish_waiter(w[other]);
+    s_cur = (int)(producer - s_tcb);
+    wsv_delete(s_svc_sema);
+    s_cur = -1;
+}
+
+static void test_sema_signal_hands_count_in_service_order(void) {
+    svc_sema_case(0x000u, 1, 1, 0, "FIFO semaphore");
+    svc_sema_case(0x100u, 1, 1, 1, "priority semaphore");
+    svc_sema_case(0x000u, 2, 1, 1, "FIFO semaphore, first need too large");
 }
 
 static void test_hle_liveness_event_handoff(void) {
@@ -45813,7 +45990,7 @@ static void check_coroutine_lifecycle(void) {
         extern int s_msgpipe_parks;
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
         char msg[1024];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
@@ -45829,6 +46006,7 @@ static void check_coroutine_lifecycle(void) {
                  "+ 6 issue #1389 call bodies (4 cross-kind waits + 2 deleted waiters) "
                  "+ 3 event-flag set/cancel waiters "
                  "+ 3 flight thread-snapshot waiters "
+                 "+ 6 semaphore service-order waiters + 1 released LwMutex waiter "
                  "+ %d returned conformance legs + %d mutex legs + %d pool legs + %d mailbox legs "
                  "+ %d Message Pipe waiter/owner legs + %d volatile-memory Lock waiters "
                  "+ %d controller read waiters = %d, observed %lu)",
@@ -58796,6 +58974,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wait_sema_count_validation();
     test_expired_timed_object_waits_enter_strict_priority();
     test_hle_liveness_sema_handoff();
+    test_sema_signal_hands_count_in_service_order();
     test_hle_liveness_event_handoff();
     test_hle_liveness_callback_reblock();
     test_hle_liveness_timeout_cancel_delete();
@@ -58810,6 +58989,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_evf_typed_uids_and_delete();
     test_wake_result_is_per_thread();
     test_b23_second_round();
+    test_lwmutex_wait_records_follow_the_waiter();
     test_allocate_fpl_context_precedence();
     test_atrac_context_abi();
     test_td24b_cheap_hle_batch();

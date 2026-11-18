@@ -1483,6 +1483,10 @@ size_t hle_sync_slot_count(void);
 Sync *hle_sync_slot(size_t index);
 Sync *hle_sync_grow(void);
 void hle_sync_reset(void);
+/* LwMutex wait records (hle_kernel_sync.c): a thread torn down while it waits leaves its
+ * record and its numWaitThreads count; LoadExec forgets every record. */
+void sr_hle_lwmutex_release_thread(uint32_t thread_uid);
+void sr_hle_lwmutex_waits_reset(void);
 extern Mutex **s_mutexes;
 extern size_t s_mutex_len;
 extern size_t s_mutex_cap;
