@@ -865,10 +865,9 @@ function Sync-SaveBase {
                     }
                 }
                 # Emptied, the shelter holds nothing to recover; left behind it would refuse
-                # every later restore as an interrupted one. A non-empty one stays for that.
-                if (@(Get-ChildItem -LiteralPath $rollback -Force -ErrorAction SilentlyContinue).Count -eq 0) {
-                    try { [IO.Directory]::Delete($rollback, $false) } catch { }
-                }
+                # every later restore as an interrupted one. A non-empty one stays for that:
+                # a non-recursive delete refuses a directory that still holds anything.
+                try { [IO.Directory]::Delete($rollback, $false) } catch { }
             }
             throw
         }

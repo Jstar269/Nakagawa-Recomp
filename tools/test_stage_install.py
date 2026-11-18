@@ -374,7 +374,7 @@ class InstallTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "PowerShell")
     def test_powershell_output_is_read_as_utf8(self):
         """The special folders (Desktop, Programs) are read through the same runner."""
-        folder = "C:\\Users\\Caf\u00e9\\Desktop"
+        folder = "\\".join(("C:", "Users", "Café", "Desktop"))
         result = stage_install._run_powershell(
             "$env:NK_PROBE", "INSTALL_TEST", {**os.environ, "NK_PROBE": folder})
         self.assertEqual(result.returncode, 0, result.stderr)
