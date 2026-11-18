@@ -128,8 +128,8 @@ static int      s_denorm_preserve_f32 = 0;   /* see sdl3vk_init: VK_KHR_shader_f
 static int      s_dst_read = SDL3VK_DST_READ_SNAPSHOT;   /* see sdl3vk_init: SR_GPU_DST_READ */
 static uint32_t s_dev_extensions = 0;        /* what vkCreateDevice was given (sdl3vk_get_vk) */
 static int      s_dev_features = 0, s_dev_features2 = 0;
-/* A quit request (window close, SDL_EVENT_QUIT, ESC) is sticky. Two call sites drain
- * the SDL event queue -- gui_pump's sdl3vk_poll() and every present -- and only the
+/* A quit request (window close, SDL_EVENT_QUIT; ESC and F1 only ask for the pause) is
+ * sticky. Two call sites drain the SDL event queue -- gui_pump's sdl3vk_poll() and every present -- and only the
  * former exits the process. When a present consumed the quit (the common case: it
  * polls every frame), the request was lost and the runtime kept running with no
  * window, so the launcher could never see the game end. */

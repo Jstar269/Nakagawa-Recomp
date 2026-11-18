@@ -286,6 +286,10 @@ static void test_jobs(void) {
     nk_tex_scale_image(tex, W, H, F, 1, 0, want);
     NkTexScaleResult r;
     CHECK(!nk_tex_scale_take(&r), "jobs: a result before any job");
+    /* The counts are cumulative over the run (earlier tests scaled too), so this test checks what
+     * it adds: each scale, the sync one included, counted once, and one full-queue refusal. */
+    NkTexScaleStats st0;
+    nk_tex_scale_stats(&st0);
 
     CHECK(nk_tex_scale_submit(41u, 0xABCDu, tex, W, H, F, 1, 0), "jobs: submit refused");
     tex[0] ^= 0x00FFFFFFu;   /* the job owns its own copy */
@@ -329,8 +333,9 @@ static void test_jobs(void) {
     nk_tex_scale_set_sync(0);
     NkTexScaleStats st;
     nk_tex_scale_stats(&st);
-    CHECK(st.refused_full >= 1u && st.scaled >= (uint64_t)NK_TEX_SCALE_QUEUE + 2u, "jobs: stats scaled=%llu full=%llu",
-          (unsigned long long)st.scaled, (unsigned long long)st.refused_full);
+    CHECK(st.refused_full - st0.refused_full == 1u && st.scaled - st0.scaled == (uint64_t)NK_TEX_SCALE_QUEUE + 2u,
+          "jobs: stats added scaled=%llu full=%llu (want %d, 1)", (unsigned long long)(st.scaled - st0.scaled),
+          (unsigned long long)(st.refused_full - st0.refused_full), NK_TEX_SCALE_QUEUE + 2);
     nk_tex_scale_shutdown();
     if (!s_fail) printf("tex scale selftest: PASS jobs queued=%d held, full, ordered, sync\n", queued);
 }

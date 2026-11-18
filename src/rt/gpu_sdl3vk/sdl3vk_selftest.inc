@@ -68,13 +68,12 @@ static void profile_test_setenv(const char *name, const char *value) {
 }
 
 /* A profile name that never exists in the scratch directory. NK_INPUT_PROFILE names it whenever a
- * cell wants the default bindings, and SR_INPUT_PROFILE is cleared, so neither a developer's
- * SR_INPUT_PROFILE nor their own <config>/input_profile.json (nk_input_profile_resolve_path's
- * fallbacks once NK_INPUT_PROFILE is empty) reaches a cell. */
+ * cell wants the default bindings. nk_input_profile_resolve_path consults its fallbacks (the legacy
+ * SR_ alias, then <config>/input_profile.json) only while NK_INPUT_PROFILE is empty, so a non-empty
+ * name keeps a developer's own profile from reaching a cell. */
 #define PROFILE_TEST_NONE "selftest_no_input_profile.json"
 
 static void profile_test_use_defaults(void) {
-    profile_test_setenv("SR_INPUT_PROFILE", NULL);
     profile_test_setenv("NK_INPUT_PROFILE", PROFILE_TEST_NONE);
 }
 

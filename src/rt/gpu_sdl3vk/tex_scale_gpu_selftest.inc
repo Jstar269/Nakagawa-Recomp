@@ -231,6 +231,17 @@ static int xst_report(const char *cell, int x0, int y0, const uint32_t *want, co
     return 0;
 }
 
+/* Whether the draws since `bound0` bound a scaled copy (`copy` 1) or none (`copy` 0). A copy can
+ * read back as the texture where the guest samples it at a texel xBRZ kept (at factor 4 and render
+ * scale 2: seeds 23 and 67 and the CLUT cell's second palette), and then the readback passes
+ * either way; the bind count tells a copy that landed from one that did not. */
+static int xst_bound(const char *cell, uint64_t bound0, int copy, const char *what) {
+    if ((s_cnt_xs_bound != bound0) == (copy != 0)) return 1;
+    fprintf(stderr, "gpu texscale selftest: FAIL %s: %s (%llu scaled bind(s), want %s)\n", cell, what,
+            (unsigned long long)(s_cnt_xs_bound - bound0), copy ? "some" : "0");
+    return 0;
+}
+
 static void xst_clear_fb(void) {
     memset(SR_HOST(XST_BASE), 0, XST_STRIDE * FB_H * 4u);
     xst_wrote(XST_BASE, XST_STRIDE * FB_H * 4u);
@@ -559,13 +570,15 @@ static int xst_cell_not_ready(int f) {
      * unscaled either way; the waits tex_scale.c counts say whether the renderer asked for one. */
     NkTexScaleStats st0, st1;
     nk_tex_scale_stats(&st0);
+    const uint64_t held0 = s_cnt_xs_bound;
     int ok = xst_draw(20.0f, 60.0f);
     s_tmpl_ok = 0;
     ok = ok && xst_draw(60.0f, 60.0f);
     nk_tex_scale_stats(&st1);
     xst_expect(tex, 0, 1, want);
     if (!ok || !xst_report("not-ready", 20, 60, want, "a texture with its scale queued is not drawn unscaled") ||
-        !xst_report("not-ready", 60, 60, want, "a held scale was drawn"))
+        !xst_report("not-ready", 60, 60, want, "a held scale was drawn") ||
+        !xst_bound("not-ready", held0, 0, "a held scale was bound"))
         return 0;
     if (st1.waits != st0.waits) {
         fprintf(stderr, "gpu texscale selftest: FAIL not-ready: the held draws waited for the scale queue %llu "
@@ -576,9 +589,12 @@ static int xst_cell_not_ready(int f) {
     nk_tex_scale_set_hold(0);
     nk_tex_scale_wait_idle();
     s_tmpl_ok = 0;
+    const uint64_t landed0 = s_cnt_xs_bound;
     ok = xst_draw(100.0f, 60.0f);
     xst_expect(tex, f, 1, want);
-    if (!ok || !xst_report("not-ready", 100, 60, want, "the copy did not land once its scale finished")) return 0;
+    if (!ok || !xst_report("not-ready", 100, 60, want, "the copy did not land once its scale finished") ||
+        !xst_bound("not-ready", landed0, 1, "the copy did not land once its scale finished"))
+        return 0;
     printf("gpu texscale selftest: PASS %-12s held draws unscaled with no wait for the queue, then the copy\n",
            "not-ready");
     return 1;
@@ -594,15 +610,19 @@ static int xst_cell_rewrite(int f) {
     xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
     int ok = xst_draw(20.0f, 100.0f);
     s_tmpl_ok = 0;
+    const uint64_t first0 = s_cnt_xs_bound;
     ok = ok && xst_draw(20.0f, 100.0f);
     xst_expect(a, f, 1, want);
-    if (!ok || !xst_report("rewrite", 20, 100, want, "the first content's copy is not drawn")) return 0;
+    if (!ok || !xst_report("rewrite", 20, 100, want, "the first content's copy is not drawn") ||
+        !xst_bound("rewrite", first0, 1, "the first content's copy is not drawn"))
+        return 0;
     /* The guest rewrites the texture; its scale is held, so only the content check stands
      * between the draw and the old copy. */
     nk_tex_scale_set_sync(0);
     nk_tex_scale_set_hold(1);
     xst_upload(b);
     s_tmpl_ok = 0;
+    const uint64_t waits0 = s_cnt_xs_bound;
     ok = xst_draw(60.0f, 100.0f);
     xst_expect(b, 0, 1, want);
     xst_expect(a, f, 1, stale);
@@ -612,14 +632,18 @@ static int xst_cell_rewrite(int f) {
                         "after the guest rewrote the texture\n");
         return 0;
     }
-    if (!xst_report("rewrite", 60, 100, want, "the rewritten texture is not drawn unscaled while its scale waits"))
+    if (!xst_report("rewrite", 60, 100, want, "the rewritten texture is not drawn unscaled while its scale waits") ||
+        !xst_bound("rewrite", waits0, 0, "a copy was bound for the rewritten texture while its scale waits"))
         return 0;
     nk_tex_scale_set_hold(0);
     nk_tex_scale_wait_idle();
     s_tmpl_ok = 0;
+    const uint64_t landed0 = s_cnt_xs_bound;
     ok = xst_draw(100.0f, 100.0f);
     xst_expect(b, f, 1, want);
-    if (!ok || !xst_report("rewrite", 100, 100, want, "the rewritten texture's own copy did not land")) return 0;
+    if (!ok || !xst_report("rewrite", 100, 100, want, "the rewritten texture's own copy did not land") ||
+        !xst_bound("rewrite", landed0, 1, "the rewritten texture's own copy did not land"))
+        return 0;
     printf("gpu texscale selftest: PASS %-12s rewritten texture rescaled, the old copy never drawn\n", "rewrite");
     return 1;
 }
@@ -645,10 +669,12 @@ static int xst_cell_clut(int f) {
         const float y = 140.0f + 40.0f * (float)pass;
         int ok = xst_draw(20.0f, y);
         s_tmpl_ok = 0;
+        const uint64_t bound0 = s_cnt_xs_bound;
         ok = ok && xst_draw(60.0f, y);
         xst_expect(lut, f, 1, want);
         if (!ok || !xst_report(pass ? "clut-new-palette" : "clut", 60, (int)y, want,
-                               "the copy is not the scale of the palette lookup"))
+                               "the copy is not the scale of the palette lookup") ||
+            !xst_bound(pass ? "clut-new-palette" : "clut", bound0, 1, "no copy of the palette lookup was bound"))
             return 0;
     }
     printf("gpu texscale selftest: PASS %-12s scaled after the lookup, rescaled for a new palette\n", "clut");
@@ -701,12 +727,13 @@ static int xst_budget_draw(uint32_t addr, const uint32_t *t, float x, int f, con
     uint32_t want[XST_W * XST_H];
     xst_state(XST_BASE, addr, 3u, 1, 1);
     s_tmpl_ok = 0;
+    const uint64_t bound0 = s_cnt_xs_bound;
     if (!xst_draw(x, 230.0f)) {
         fprintf(stderr, "gpu texscale selftest: FAIL budget: draw or readback failed\n");
         return 0;
     }
     xst_expect(t, f, 1, want);
-    return xst_report("budget", (int)x, 230, want, what);
+    return xst_report("budget", (int)x, 230, want, what) && xst_bound("budget", bound0, f >= 2, what);
 }
 
 static int xst_cell_budget(int f) {
@@ -2372,6 +2399,11 @@ int gegpu_texscale_selftest(void) {
         nk_tex_scale_wait_idle();
         s_tmpl_ok = 0;
         ok = ok && xst_draw(200.0f, 200.0f);
+        if (!ok) {
+            fprintf(stderr, "gpu texscale selftest: FAIL guest-bytes after %s: the post-cell draw or readback "
+                            "failed\n", names[i]);
+            break;
+        }
         (void)hook_vram_read(XST_TEX, 4096u);
         xst_guest_check("after");
         if (ok && s_xst_guest_when) {

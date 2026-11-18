@@ -196,8 +196,9 @@ void sdl3vk_set_show_done(Sdl3VkShowDone done);
  * submitted to that queue before it. So what a show pass left in a buffer of its own may be read
  * once this has reached its submission's serial. */
 uint64_t sdl3vk_present_completed(void);
-/* Presents what the show pass returns for no source: no capture, no input latch. Returns as the
- * other presents do, and 0 with nothing to show or no pass. */
+/* Presents what the show pass returns for no source. It pumps the SDL event loop and samples
+ * window input as every present does; it takes no capture (an armed capture fails: there is no
+ * source image). Returns as the other presents do, and 0 with nothing to show or no pass. */
 int sdl3vk_present_held(void);
 
 /* The presentation upscaler (src/rt/gpu_sdl3vk/fsr1_pass.h, SR_PRESENT_UPSCALE). Called on a
@@ -233,8 +234,9 @@ int  sdl3vk_poll(void);
 
 /* Present one 480x272 frame. px points to 480*272 little-endian BGRA words (the same
  * packing gui.c already produces for StretchDIBits: (r<<16)|(g<<8)|b). Pumps the SDL
- * event loop and samples input. Returns 1 when presented, 0 when the user closed the
- * window / pressed ESC, and -1 for a recoverable presentation failure. */
+ * event loop and samples input. Returns 1 when presented, 0 when the window was closed or
+ * SDL asked to quit, and -1 for a recoverable presentation failure. ESC and F1 only ask for
+ * the pause; they never quit. */
 int  sdl3vk_present_rgba(const uint32_t *px);
 
 /* The widest picture sdl3vk_present_rgba_ex uploads: 480 + 2 x 256 wing columns of a
