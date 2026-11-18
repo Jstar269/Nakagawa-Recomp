@@ -246,7 +246,10 @@ class NormalizeMemberPathTests(unittest.TestCase):
             normalize_member_path(None)  # type: ignore[arg-type]
 
     def test_reserved_device_names_are_rejected(self) -> None:
-        for name in ("NUL", "nul", "data/CON", "COM1.txt", "lpt9.bin", "CONIN$", "aux"):
+        for name in (
+            "NUL", "nul", "data/CON", "COM1.txt", "lpt9.bin", "CONIN$", "aux",
+            "COM¹", "LPT².bin", "CON .txt", "NUL .gim", "a/AUX .x",
+        ):
             with self.subTest(name=name):
                 with self.assertRaises(UnsafeArchivePathError):
                     normalize_member_path(name)
@@ -1075,9 +1078,10 @@ class ResourceLimitTests(unittest.TestCase):
             struct.pack_into("<H", content, 8, 2)
             struct.pack_into("<H", content, 10, 2)
             struct.pack_into("<I", content, 28, 36)
-            struct.pack_into("<I", content, 32, 40)
-            image = bytes(content) + b"\0\0\0\0"
+            struct.pack_into("<I", content, 32, 68)
+            image = bytes(content) + bytes(32)
             pal = bytearray(36)
+            struct.pack_into("<H", pal, 4, 3)
             struct.pack_into("<I", pal, 28, 36)
             struct.pack_into("<I", pal, 32, 40)
             palette = bytes(pal) + b"\x00\x00\xff\xff"
@@ -1097,6 +1101,37 @@ class ResourceLimitTests(unittest.TestCase):
             self.assertEqual(len(inventory["textures"]), 1)
             self.assertEqual(inventory["rejected"], [])
             self.assertTrue(os.path.isfile(os.path.join(dest, "small.png")))
+
+    def test_indexed_gim_without_palette_or_with_out_of_range_index_is_rejected(self) -> None:
+        rgba = b"\x12\x34\x56\xff"
+        fixtures = {
+            "t4-no-palette.gim": gim(
+                image_block(fmt=4, width=1, height=1, raw=bytes(16))
+            ),
+            "t8-no-palette.gim": gim(
+                image_block(fmt=5, width=1, height=1, raw=bytes(16))
+            ),
+            "t4-index-out-of-range.gim": gim(
+                image_block(fmt=4, width=1, height=1, raw=bytes((1,)) + bytes(15)),
+                palette_block(fmt=3, raw=rgba),
+            ),
+            "t8-index-out-of-range.gim": gim(
+                image_block(fmt=5, width=1, height=1, raw=bytes((1,)) + bytes(15)),
+                palette_block(fmt=3, raw=rgba),
+            ),
+        }
+        with tempfile.TemporaryDirectory() as dest:
+            for name, payload in fixtures.items():
+                Path(dest, name).write_bytes(payload)
+
+            inventory = process_extracted_directory(dest)
+
+            self.assertEqual(inventory["textures"], [])
+            self.assertEqual(
+                {entry["name"] for entry in inventory["rejected"]},
+                set(fixtures),
+            )
+            self.assertFalse(any(Path(dest).glob("*.png")))
 
     def test_default_worker_count_is_capped_below_the_cpu_count(self) -> None:
         default = resolve_workers(None)
@@ -1143,6 +1178,34 @@ class OverwriteTests(unittest.TestCase):
             save_png(1, 1, bytearray(4), target, overwrite=True)
             self.assertTrue(Path(target).read_bytes().startswith(b"\x89PNG"))
 
+    def test_partial_png_write_failure_propagates_and_removes_the_partial_file(self) -> None:
+        with tempfile.TemporaryDirectory() as dest:
+            Path(dest, "tex.gim").write_bytes(
+                gim(
+                    image_block(raw=bytes(32)),
+                    palette_block(fmt=3, raw=b"\x12\x34\x56\xff"),
+                )
+            )
+            original_write = extract_xb.os.write
+            first_write = True
+
+            def partial_then_fail(fd, payload):
+                nonlocal first_write
+                if first_write:
+                    first_write = False
+                    original_write(fd, payload[:8])
+                    raise OSError("synthetic disk full")
+                return original_write(fd, payload)
+
+            extract_xb.os.write = partial_then_fail
+            try:
+                with self.assertRaisesRegex(OSError, "synthetic disk full"):
+                    process_extracted_directory(dest)
+            finally:
+                extract_xb.os.write = original_write
+
+            self.assertFalse(Path(dest, "tex.png").exists())
+
     def test_a_png_name_collision_is_recorded_instead_of_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as dest:
             with open(os.path.join(dest, "tex.gim"), "wb") as handle:
@@ -1160,7 +1223,7 @@ class OverwriteTests(unittest.TestCase):
     def test_extraction_keeps_archive_member_when_png_name_collides(self) -> None:
         with tempfile.TemporaryDirectory() as base:
             gim_data = gim(
-                image_block(raw=b"\0\0\0\0"),
+                image_block(raw=bytes(32)),
                 palette_block(raw=b"\x00\x00\xff\xff"),
             )
             archive = _write_archive(
@@ -1179,6 +1242,42 @@ class OverwriteTests(unittest.TestCase):
 
 
 class PromotionTests(unittest.TestCase):
+    def test_failed_promotion_rollback_preserves_unrestored_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as base:
+            archive = _write_archive(
+                base,
+                [("existing.bin", b"new contents", XBCompression.NONE)],
+            )
+            dest = os.path.join(base, "out")
+            os.makedirs(dest)
+            target = os.path.join(dest, "existing.bin")
+            Path(target).write_bytes(b"old contents")
+            stage_path = os.path.join(dest + ".staging", "existing.bin")
+
+            original_replace = extract_xb.os.replace
+
+            def fail_promotion_and_rollback(source, target_path):
+                if source == stage_path and target_path == target:
+                    raise OSError("synthetic promotion failure")
+                if ".promotion-backup-" in source and target_path == target:
+                    raise OSError("synthetic rollback failure")
+                return original_replace(source, target_path)
+
+            extract_xb.os.replace = fail_promotion_and_rollback
+            try:
+                _, status, error = extract_xb.extract_one(
+                    archive, dest, overwrite=True
+                )
+            finally:
+                extract_xb.os.replace = original_replace
+
+            staging = Path(dest + ".staging")
+            self.assertEqual(status, "failed")
+            self.assertIn("rollback failed", error or "")
+            self.assertTrue(staging.is_dir())
+            backups = list(staging.rglob("existing.bin"))
+            self.assertTrue(any(path.read_bytes() == b"old contents" for path in backups))
+
     def test_promotion_preflights_type_conflicts_before_replacing(self) -> None:
         with tempfile.TemporaryDirectory() as base:
             staging = os.path.join(base, "staging")

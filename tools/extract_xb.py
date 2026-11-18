@@ -188,6 +188,7 @@ _RESERVED_DEVICE_NAMES = frozenset(
     ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
     + [f"COM{i}" for i in range(10)]
     + [f"LPT{i}" for i in range(10)]
+    + ["COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"]
 )
 
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
@@ -199,6 +200,15 @@ class UnsafeArchivePathError(ValueError):
 
 class OversizedInputError(ValueError):
     """Raised when an input file exceeds its repository-owned size budget."""
+
+
+class PromotionRollbackError(OSError):
+    """Raised when rollback failed and staging may contain the only backup."""
+
+    def __init__(self, message, staging_path, backup_root):
+        super().__init__(message)
+        self.staging_path = staging_path
+        self.backup_root = backup_root
 
 
 def _split_archive_grammar(name):
@@ -268,7 +278,8 @@ def _check_host_portability(normalized, name):
             raise UnsafeArchivePathError(f"reserved character in member name: {name!r}")
         if part[-1] in (".", " "):
             raise UnsafeArchivePathError(f"trailing dot or space in member name: {name!r}")
-        if part.split(".", 1)[0].upper() in _RESERVED_DEVICE_NAMES:
+        device_basename = part.split(".", 1)[0].rstrip(" ").upper()
+        if device_basename in _RESERVED_DEVICE_NAMES:
             raise UnsafeArchivePathError(f"reserved device name in member name: {name!r}")
 
 
@@ -662,7 +673,31 @@ def _write_exclusive(path, payload, overwrite=False):
                     f"write returned count {n} larger than remaining {len(view)} bytes to {path}"
                 )
             view = view[n:]
-    finally:
+    except BaseException as write_error:
+        close_error = None
+        try:
+            os.close(fd)
+        except OSError as exc:
+            close_error = exc
+
+        cleanup_error = None
+        if not overwrite:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                cleanup_error = exc
+
+        if cleanup_error is not None:
+            detail = f"write failed ({write_error}); partial-file cleanup failed ({cleanup_error})"
+            if close_error is not None:
+                detail += f"; close failed ({close_error})"
+            raise OSError(detail) from write_error
+        if close_error is not None:
+            raise OSError(f"write failed ({write_error}); close failed ({close_error})") from write_error
+        raise
+    else:
         os.close(fd)
 
 
@@ -693,6 +728,8 @@ def decode_gim_data(data):
 
     image_block = None
     palette_data = None
+    palette_fmt = None
+    palette_block_seen = False
     block_count = 0
     malformed = False
 
@@ -702,7 +739,7 @@ def decode_gim_data(data):
         return start + size
 
     def scan_blocks(offset, limit, depth=0):
-        nonlocal palette_data, image_block, block_count, malformed
+        nonlocal palette_data, palette_fmt, palette_block_seen, image_block, block_count, malformed
         if depth > GIM_MAX_NESTING or offset < 0 or limit < offset or limit > len(data):
             malformed = True
             return False
@@ -731,6 +768,8 @@ def decode_gim_data(data):
                 swiz = struct.unpack_from('<H', data, content + 6)[0]
                 w = struct.unpack_from('<H', data, content + 8)[0]
                 h = struct.unpack_from('<H', data, content + 10)[0]
+                pitch_align = struct.unpack_from('<H', data, content + 14)[0] or 16
+                height_align = struct.unpack_from('<H', data, content + 16)[0] or 8
                 d_off = struct.unpack_from('<I', data, content + 28)[0]
                 d_end = struct.unpack_from('<I', data, content + 32)[0]
                 raw_len = d_end - d_off if d_end >= d_off else -1
@@ -740,11 +779,19 @@ def decode_gim_data(data):
                     malformed = True
                     return False
                 if image_block is None:
-                    image_block = (fmt, swiz, w, h, data[content + d_off:content + d_end])
+                    image_block = (
+                        fmt, swiz, w, h, pitch_align, height_align,
+                        data[content + d_off:content + d_end],
+                    )
             elif block_id == 0x0005:
+                if palette_block_seen:
+                    malformed = True
+                    return False
+                palette_block_seen = True
                 if content_limit - content < 36:
                     malformed = True
                     return False
+                palette_fmt = struct.unpack_from('<H', data, content + 4)[0]
                 p_off = struct.unpack_from('<I', data, content + 28)[0]
                 p_end = struct.unpack_from('<I', data, content + 32)[0]
                 palette_len = p_end - p_off if p_end >= p_off else -1
@@ -761,53 +808,89 @@ def decode_gim_data(data):
     if not scan_blocks(16, len(data)) or malformed or image_block is None:
         return None
 
-    fmt, swiz, w, h, pix_data = image_block
+    fmt, swiz, w, h, pitch_align, height_align, pix_data = image_block
 
     # Build palette for indexed formats
     clut = None
-    if palette_data and len(palette_data) >= 4:
-        num_entries = len(palette_data) // 4
-        clut = []
-        for i in range(min(num_entries, 256)):
-            val = struct.unpack_from('<I', palette_data, i * 4)[0]
-            clut.append(val)
+    if palette_data is not None:
+        palette_entry_sizes = {0: 2, 1: 2, 2: 2, 3: 4}
+        palette_entry_size = palette_entry_sizes.get(palette_fmt)
+        if (palette_entry_size is None or len(palette_data) % palette_entry_size != 0):
+            return None
 
-    # Determine bytes per pixel element
-    bpp_map = {0: 2, 1: 2, 2: 2, 3: 4, 4: 0, 5: 1}
-    bpp = bpp_map.get(fmt, 4)
+        def decode_palette_entry(color_fmt, source, offset):
+            if color_fmt == 3:
+                return bytes(source[offset:offset + 4])
 
-    if fmt in (0, 1, 2, 3):
-        pitch = w * bpp
-    elif fmt == 4:
-        pitch = (w + 1) // 2
-    elif fmt == 5:
-        pitch = w
-    else:
+            val = struct.unpack_from('<H', source, offset)[0]
+            if color_fmt == 0:
+                r = val & 0x1F; r = (r << 3) | (r >> 2)
+                g = (val >> 5) & 0x3F; g = (g << 2) | (g >> 4)
+                b = (val >> 11) & 0x1F; b = (b << 3) | (b >> 2)
+                a = 0xFF
+            elif color_fmt == 1:
+                r = val & 0x1F; r = (r << 3) | (r >> 2)
+                g = (val >> 5) & 0x1F; g = (g << 3) | (g >> 2)
+                b = (val >> 10) & 0x1F; b = (b << 3) | (b >> 2)
+                a = 0xFF if (val & 0x8000) else 0x00
+            else:  # 4444
+                r = val & 0x0F; r |= r << 4
+                g = (val >> 4) & 0x0F; g |= g << 4
+                b = (val >> 8) & 0x0F; b |= b << 4
+                a = (val >> 12) & 0x0F; a |= a << 4
+            return bytes((r, g, b, a))
+
+        entry_count = len(palette_data) // palette_entry_size
+        clut = [
+            decode_palette_entry(palette_fmt, palette_data, i * palette_entry_size)
+            for i in range(min(entry_count, 256))
+        ]
+
+    if fmt in (4, 5) and not clut:
         return None
 
-    raw_size = pitch * h
+    # Determine the row size before applying GIM's row and swizzle alignment.
+    bpp_map = {0: 2, 1: 2, 2: 2, 3: 4, 4: 0, 5: 1}
+    bpp = bpp_map.get(fmt)
+    if bpp is None:
+        return None
+
+    if fmt in (0, 1, 2, 3):
+        row_bytes = w * bpp
+    elif fmt == 4:
+        row_bytes = (w + 1) // 2
+    elif fmt == 5:
+        row_bytes = w
+
+    pitch = ((row_bytes + pitch_align - 1) // pitch_align) * pitch_align
+    buffer_height = h
+    if swiz == 1:
+        buffer_height = ((h + height_align - 1) // height_align) * height_align
+        if pitch % 16 != 0 or buffer_height % 8 != 0:
+            return None
+
+    raw_size = pitch * buffer_height
     pixel_size = w * h * 4
     if (pitch <= 0 or raw_size > GIM_MAX_RAW_BYTES or len(pix_data) < raw_size or
         pixel_size > GIM_MAX_RAW_BYTES):
         return None
 
     # Unswizzle if needed
-    if swiz == 1 and pitch > 0 and h > 0:
-        pix_data = unswizzle(pix_data[:raw_size], pitch, h)
+    if swiz == 1:
+        pix_data = unswizzle(pix_data[:raw_size], pitch, buffer_height)
 
     # Convert to RGBA8888
     pixels = bytearray(pixel_size)
 
-    if fmt == 3:  # RGBA8888 direct (or BGRA, depending on layout, we output RGBA for PNG)
+    if fmt == 3:  # RGBA8888 direct
         for y in range(h):
             for x in range(w):
                 si = y * pitch + x * 4
                 di = (y * w + x) * 4
                 if si + 4 <= len(pix_data) and di + 4 <= len(pixels):
-                    # GIM stores BGRA usually, let's map to RGBA
-                    pixels[di] = pix_data[si+2] # R
+                    pixels[di] = pix_data[si] # R
                     pixels[di+1] = pix_data[si+1] # G
-                    pixels[di+2] = pix_data[si] # B
+                    pixels[di+2] = pix_data[si+2] # B
                     pixels[di+3] = pix_data[si+3] # A
 
     elif fmt == 5:  # T8 indexed
@@ -818,13 +901,9 @@ def decode_gim_data(data):
                     di = (y * w + x) * 4
                     if si < len(pix_data) and di + 4 <= len(pixels):
                         idx = pix_data[si]
-                        if idx < len(clut):
-                            val = clut[idx]
-                            # Clut is BGRA, swap to RGBA
-                            pixels[di] = (val >> 16) & 0xFF # R
-                            pixels[di+1] = (val >> 8) & 0xFF # G
-                            pixels[di+2] = val & 0xFF # B
-                            pixels[di+3] = (val >> 24) & 0xFF # A
+                        if idx >= len(clut):
+                            return None
+                        pixels[di:di+4] = clut[idx]
 
     elif fmt == 4:  # T4 indexed
         if clut:
@@ -835,12 +914,9 @@ def decode_gim_data(data):
                     if si < len(pix_data) and di + 4 <= len(pixels):
                         byte = pix_data[si]
                         idx = (byte & 0x0F) if (x % 2 == 0) else (byte >> 4)
-                        if idx < len(clut):
-                            val = clut[idx]
-                            pixels[di] = (val >> 16) & 0xFF # R
-                            pixels[di+1] = (val >> 8) & 0xFF # G
-                            pixels[di+2] = val & 0xFF # B
-                            pixels[di+3] = (val >> 24) & 0xFF # A
+                        if idx >= len(clut):
+                            return None
+                        pixels[di:di+4] = clut[idx]
 
     elif fmt == 0:  # BGR5650
         for y in range(h):
@@ -954,18 +1030,25 @@ def process_extracted_directory(dest_dir, overwrite=False, max_gim_bytes=MAX_GIM
                     # the decoder and its bytes are never paged in.
                     gim_data = read_bounded(fpath, max_gim_bytes)
                     decoded = decode_gim_data(gim_data)
-                    if decoded:
-                        w, h, rgba = decoded
-                        save_png(w, h, rgba, png_path, overwrite=overwrite)
-                        inventory["textures"].append({
+                    if decoded is None:
+                        inventory["rejected"].append({
                             "name": fn,
                             "path": rel_fpath,
-                            "png_path": rel_png_path,
-                            "width": w,
-                            "height": h,
-                            "size_bytes": sz
+                            "size_bytes": sz,
+                            "reason": "unsupported or malformed GIM"
                         })
                         continue
+                    w, h, rgba = decoded
+                    save_png(w, h, rgba, png_path, overwrite=overwrite)
+                    inventory["textures"].append({
+                        "name": fn,
+                        "path": rel_fpath,
+                        "png_path": rel_png_path,
+                        "width": w,
+                        "height": h,
+                        "size_bytes": sz
+                    })
+                    continue
                 except OversizedInputError:
                     inventory["rejected"].append({
                         "name": fn,
@@ -982,9 +1065,6 @@ def process_extracted_directory(dest_dir, overwrite=False, max_gim_bytes=MAX_GIM
                         "reason": f"{rel_png_path} already exists"
                     })
                     continue
-                except Exception:
-                    pass
-
             # Check sounds
             if fn.lower().endswith((".sgd", ".sgb", ".vag", ".at3", ".wav")):
                 inventory["sounds"].append({
@@ -1260,7 +1340,11 @@ def _promote_staging(staging, dest_real):
                 rollback_errors.append(str(rollback_error))
         if rollback_errors:
             detail = "; ".join(rollback_errors)
-            raise OSError(f"promotion failed and rollback failed: {detail}") from exc
+            raise PromotionRollbackError(
+                f"promotion failed and rollback failed: {detail}",
+                staging,
+                backup_root,
+            ) from exc
         raise
 
     # Commit point: every staged file has reached its validated destination,
@@ -1315,6 +1399,11 @@ def extract_one(archive_path, out_dir, verbose=False, overwrite=False):
             if not cleanup_complete:
                 print(f"  promotion cleanup deferred; staging remains at {staging}")
         return archive_path, "ok", None
+    except PromotionRollbackError as e:
+        detail = f"{e} (recovery files preserved at {e.staging_path}"
+        if e.backup_root is not None:
+            detail += f"; backups at {e.backup_root}"
+        return archive_path, "failed", f"{detail})"
     except Exception as e:
         detail = str(e)
         if not _discard_staging(staging):
