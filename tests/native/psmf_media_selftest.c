@@ -4468,6 +4468,74 @@ static void test_player_reordered_pictures_keep_their_own_time(int report_pts) {
     free(image);
 }
 
+/* ---- a failed decoder reset never reaches another instance's decoder -------------------
+ *
+ * Media Foundation and FFmpeg release their decoder slot when a reset cannot reopen it
+ * (sr_h264_mf_reset clears used, ff_reset ends in ff_close).  mpeg.c keeps its instance id after
+ * such a failure (it only marks the demux failed) and destroys it at delete.  A create in
+ * between gets the released backend slot, so the stale instance must no longer carry that slot:
+ * its submit must fail and its destroy must leave the other instance's decoder open.  This
+ * backend models the slot release with two slots and no bitstream. */
+#define RF_SLOTS 2
+static int s_rf_used[RF_SLOTS], s_rf_submits[RF_SLOTS], s_rf_fail_reset;
+
+static int rf_create(void) {
+    for (int i = 0; i < RF_SLOTS; i++) {
+        if (s_rf_used[i]) continue;
+        s_rf_used[i] = 1;
+        s_rf_submits[i] = 0;
+        return i;
+    }
+    return -1;
+}
+static void rf_destroy(int id) {
+    if (id >= 0 && id < RF_SLOTS) s_rf_used[id] = 0;
+}
+static int rf_reset(int id) {
+    if (id < 0 || id >= RF_SLOTS || !s_rf_used[id]) return -1;
+    if (s_rf_fail_reset) { s_rf_used[id] = 0; return -1; }   /* the reopen failed: slot released */
+    return 0;
+}
+static int rf_submit(int id, const SrH264AccessUnit *au) {
+    if (id < 0 || id >= RF_SLOTS || !s_rf_used[id] || !au) return -1;
+    s_rf_submits[id]++;
+    return 0;
+}
+static int rf_frame(int id, int eos, const SrH264FrameTarget *target, SrH264FrameInfo *info) {
+    (void)eos; (void)target; (void)info;
+    return (id >= 0 && id < RF_SLOTS && s_rf_used[id]) ? 0 : -1;
+}
+static const SrH264Backend s_rf_backend = {"reset-fail-test", rf_create, rf_destroy, rf_reset, rf_submit, rf_frame};
+
+static void test_h264_failed_reset_releases_its_backend_slot(void) {
+    static const uint8_t au[] = {0x00, 0x00, 0x01, 0x09, 0xf0};
+    memset(s_rf_used, 0, sizeof(s_rf_used));
+    s_rf_fail_reset = 0;
+    CHECK(sr_h264_select_backend_object(&s_rf_backend) && sr_h264_backend_available(),
+          "h264-reset: the slot-tracking test backend is selected");
+    int stale = sr_h264_create();
+    CHECK(stale >= 0 && s_rf_used[0], "h264-reset: the first instance owns backend slot 0");
+    s_rf_fail_reset = 1;
+    CHECK(sr_h264_reset(stale) < 0, "h264-reset: a reset whose reopen fails reports the failure");
+    s_rf_fail_reset = 0;
+    int other = sr_h264_create();
+    CHECK(other >= 0 && other != stale && s_rf_used[0],
+          "h264-reset: the next instance is handed the released backend slot");
+    CHECK(sr_h264_submit_au(stale, au, sizeof(au)) < 0 && s_rf_submits[0] == 0,
+          "h264-reset: the failed instance's submit never reaches the reassigned decoder");
+    CHECK(sr_h264_reset(stale) < 0, "h264-reset: the failed instance cannot be reset again");
+    sr_h264_destroy(stale);
+    CHECK(s_rf_used[0], "h264-reset: destroying the failed instance leaves the other decoder open");
+    CHECK(sr_h264_submit_au(other, au, sizeof(au)) == 0 && s_rf_submits[0] == 1,
+          "h264-reset: the other instance still decodes on its own slot");
+    sr_h264_destroy(other);
+    CHECK(!s_rf_used[0] && !s_rf_used[1], "h264-reset: every backend slot is released at the end");
+    (void)sr_h264_select_backend_object(NULL);
+#if defined(SR_H264_FFMPEG)
+    CHECK(sr_h264_select_backend("ffmpeg"), "h264-reset: the FFmpeg backend is selected again");
+#endif
+}
+
 /* The same rule through the real H.264 backend this build selects (Media Foundation on Windows,
  * FFmpeg where H264_FFMPEG=1), on a stream whose display order differs from its decode order
  * (build_au_reorder).  Each delivered picture is identified by its decoded colour, and the
@@ -6959,6 +7027,7 @@ int main(int argc, char **argv) {
     test_player_av_presentation_timing(AV_LAYOUT_PACKED);
     test_player_reordered_pictures_keep_their_own_time(1);
     test_player_reordered_pictures_keep_their_own_time(0);
+    test_h264_failed_reset_releases_its_backend_slot();
     test_player_decoder_reorder_keeps_picture_time();
     test_player_av_presentation_boundary();
     test_player_av_composited_presentation();
