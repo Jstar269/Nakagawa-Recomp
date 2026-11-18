@@ -154,19 +154,63 @@ static int guest_arena_is_guard(void) {
     return 1;
 }
 
+/* After an accepted load, every arena byte that is no longer the guard lies inside one of the
+ * segments the image reports, and every reported segment lies inside the arena: a loader that
+ * wrote a segment to the wrong place and returned success fails here. */
+static int guest_arena_writes_within_segments(const SrPrxImage *img) {
+    const uint64_t base = 0x08800000u;
+    if (img->nseg > SR_PRX_MAX_SEGMENTS) return 0;
+    for (uint32_t s = 0; s < img->nseg; s++) {
+        uint64_t start = img->segs[s].guest_addr;
+        uint64_t end = start + img->segs[s].mem_size;
+        if (img->segs[s].mem_size != 0 &&
+            (start < base || end > base + sizeof(s_guest_arena))) return 0;
+    }
+    for (size_t i = 0; i < sizeof(s_guest_arena); i++) {
+        if (s_guest_arena[i] == 0xA5) continue;
+        uint64_t addr = base + i;
+        int inside = 0;
+        for (uint32_t s = 0; s < img->nseg && !inside; s++) {
+            uint64_t start = img->segs[s].guest_addr;
+            inside = addr >= start && addr < start + img->segs[s].mem_size;
+        }
+        if (!inside) return 0;
+    }
+    return 1;
+}
+
 /* Mutate buffer in-place with bit flips, truncations, inserts, deletions,
    and length/offset/integer boundary value corruptions. */
 static void mutate_elf_field(uint8_t *data, size_t size);
 
-static unsigned parse_fuzz_iterations(const char *text, unsigned fallback) {
+/* An iteration count given in FUZZ_ITERS or --iters must be a whole number from 1 to 100000: a
+ * value outside that, or a typo such as "5k", stops the run by name instead of running the
+ * default depth under a passing banner. */
+static unsigned parse_fuzz_iterations(const char *source, const char *text, unsigned fallback) {
     if (!text || !*text) return fallback;
     errno = 0;
     char *end = NULL;
     unsigned long value = strtoul(text, &end, 10);
-    if (errno != 0 || end == text || *end != '\0' || value == 0 || value > 100000ul) {
-        return fallback;
+    if (text[0] == '-' || errno != 0 || end == text || *end != '\0' || value == 0 ||
+        value > 100000ul) {
+        fprintf(stderr, "FUZZ_ITERS_INVALID: %s '%s' is not a whole number from 1 to 100000\n",
+                source, text);
+        exit(2);
     }
     return (unsigned)value;
+}
+
+/* An exact-size heap copy of a mutated input. The work buffer the mutations ran in can be larger
+ * than the bytes the parser is given (a truncation or a deletion shrinks the length, not the
+ * buffer), so the parser gets this copy, which ends at its length argument: a read past that
+ * length leaves the allocation. An AddressSanitizer build (`make fuzz-parsers` on Linux and
+ * macOS) traps it; a build without a sanitizer only catches a read that crashes. */
+static uint8_t *fuzz_exact_copy(const uint8_t *data, size_t size) {
+    uint8_t *copy = (uint8_t *)malloc(size);
+    if (!copy && size == 0) copy = (uint8_t *)malloc(1u);
+    assert(copy != NULL);
+    if (size > 0) memcpy(copy, data, size);
+    return copy;
 }
 
 static void mutate_buffer(uint8_t *data, size_t *size, size_t max_cap) {
@@ -341,9 +385,18 @@ static void test_fuzz_param_sfo(unsigned iters) {
 
         NkIsoMetadata meta;
         memset(&meta, 0, sizeof(meta));
-        if (nk_iso_parse_sfo_buffer(mutated, cur_size, &meta)) {
+        uint8_t *exact = fuzz_exact_copy(mutated, cur_size);
+        if (nk_iso_parse_sfo_buffer(exact, cur_size, &meta)) {
+            /* Every string an accepted SFO fills ends inside its field. */
+            assert(memchr(meta.disc_id, 0, sizeof(meta.disc_id)) != NULL);
+            assert(memchr(meta.title_name, 0, sizeof(meta.title_name)) != NULL);
+            assert(memchr(meta.disc_version, 0, sizeof(meta.disc_version)) != NULL);
+            assert(memchr(meta.sfo_disc_id, 0, sizeof(meta.sfo_disc_id)) != NULL);
+            assert(memchr(meta.volume_id, 0, sizeof(meta.volume_id)) != NULL);
+            assert(memchr(meta.error_message, 0, sizeof(meta.error_message)) != NULL);
             accepted++;
         }
+        free(exact);
     }
     printf("[FUZZ] PARAM.SFO completed: %u/%u accepted, 0 crashes\n", accepted, iters);
     fflush(stdout);
@@ -758,7 +811,8 @@ static void test_fuzz_xb(unsigned iters) {
 
         bool be = (i & 1) != 0;
         NkXbArchive archive;
-        if (nk_xb_open_memory(mutated, cur_size, "mutated.xb", be, NULL,
+        uint8_t *exact = fuzz_exact_copy(mutated, cur_size);
+        if (nk_xb_open_memory(exact, cur_size, "mutated.xb", be, NULL,
                               &archive, err, sizeof(err)) == NK_OK) {
             accepted++;
             for (size_t e = 0; e < archive.entry_count; e++) {
@@ -768,6 +822,7 @@ static void test_fuzz_xb(unsigned iters) {
             }
             nk_xb_close(&archive);
         }
+        free(exact);
     }
 
     free(seed.data);
@@ -1082,11 +1137,17 @@ static void test_fuzz_prx(unsigned iters) {
 
         SrPrxImage img;
         reset_guest_arena();
-        rc = sr_prx_load_from_memory(mutated, cur_size, 0x08800000u,
+        uint8_t *exact = fuzz_exact_copy(mutated, cur_size);
+        rc = sr_prx_load_from_memory(exact, cur_size, 0x08800000u,
                                      &img, err, sizeof(err));
-        if (rc == 0) accepted++;
-        else if (strstr(err, "guest write failed") == NULL) assert(guest_arena_is_guard());
+        if (rc == 0) {
+            assert(guest_arena_writes_within_segments(&img));
+            accepted++;
+        } else if (strstr(err, "guest write failed") == NULL) {
+            assert(guest_arena_is_guard());
+        }
         sr_prx_image_free(&img);
+        free(exact);
     }
 
     printf("[FUZZ] PRX / ~PSP loader completed: %u/%u accepted, 0 crashes\n", accepted, iters);
@@ -1129,10 +1190,12 @@ static void test_fuzz_manifest(unsigned iters) {
         mutate_buffer(mutated, &cur_size, sizeof(mutated));
 
         NkTitleEntry entry;
-        if (nk_title_manifest_parse_buffer((const char *)mutated, cur_size,
+        uint8_t *exact = fuzz_exact_copy(mutated, cur_size);
+        if (nk_title_manifest_parse_buffer((const char *)exact, cur_size,
                                            true, &entry, err, sizeof(err))) {
             accepted++;
         }
+        free(exact);
     }
 
     printf("[FUZZ] Title Manifest JSON completed: %u/%u accepted, 0 crashes\n", accepted, iters);
@@ -2251,6 +2314,7 @@ static void test_fuzz_decrypt_boundary(unsigned iters) {
     }
 
     uint8_t wrapped[1200];
+    uint8_t work[1200];
     uint8_t *mutated;
     unsigned accepted = 0;
     for (unsigned i = 0; i < iters; i++) {
@@ -2271,12 +2335,12 @@ static void test_fuzz_decrypt_boundary(unsigned iters) {
             seed = wrapped;
             seed_len = 0x28u + sealed_len;
         }
-        /* Exact-size heap copy: any read past the caller's length traps. */
-        mutated = (uint8_t *)malloc(seed_len);
-        assert(mutated != NULL);
-        memcpy(mutated, seed, seed_len);
+        assert(seed_len <= sizeof(work));
+        memcpy(work, seed, seed_len);
         size_t cur_size = seed_len;
-        mutate_buffer(mutated, &cur_size, seed_len);
+        mutate_buffer(work, &cur_size, seed_len);
+        /* A truncation shrinks cur_size below seed_len: the parsers get an exact copy. */
+        mutated = fuzz_exact_copy(work, cur_size);
 
         NkPspCtx ctx;
         NkContainerInfo info;
@@ -2678,11 +2742,14 @@ static void test_fuzz_inflate(unsigned iters) {
     for (unsigned i = 0; i < iters; i++) {
         unsigned pick = (unsigned)(fuzz_rand32() % 5u);
         size_t seed_size = seeds[pick].size;
-        uint8_t *mutated = (uint8_t *)malloc(seed_size);
-        assert(mutated != NULL);
-        memcpy(mutated, seeds[pick].data, seed_size);
+        uint8_t *work = (uint8_t *)malloc(seed_size);
+        assert(work != NULL);
+        memcpy(work, seeds[pick].data, seed_size);
         size_t cur_size = seed_size;
-        mutate_buffer(mutated, &cur_size, seed_size);
+        mutate_buffer(work, &cur_size, seed_size);
+        /* A truncation shrinks cur_size below seed_size: the decoder gets an exact copy. */
+        uint8_t *mutated = fuzz_exact_copy(work, cur_size);
+        free(work);
 
         uint8_t *out = NULL;
         size_t out_len = 0;
@@ -2994,17 +3061,18 @@ static void test_fuzz_kle(unsigned iters) {
         int is_kl4e = (fuzz_rand32() % 2u) != 0u;
         const uint8_t *seed = is_kl4e ? kl4e : kl3e;
         size_t seed_len = is_kl4e ? kl4e_len : kl3e_len;
-        /* Exact-size heap copy: the decoder may never read past it. */
-        uint8_t *inbuf = (uint8_t *)malloc(seed_len);
-        assert(inbuf != NULL);
-        memcpy(inbuf, seed, seed_len);
+        uint8_t work[128];
+        assert(seed_len <= sizeof(work));
+        memcpy(work, seed, seed_len);
         size_t cur_size = seed_len;
-        mutate_buffer(inbuf, &cur_size, seed_len);
+        mutate_buffer(work, &cur_size, seed_len);
+        /* A truncation shrinks cur_size below seed_len: the decoder gets an exact copy. */
+        uint8_t *inbuf = fuzz_exact_copy(work, cur_size);
 
         memset(out, 0, FUZZ_KLE_SIZE);
         void *end = NULL;
         int in_size = (cur_size > 4u) ? (int)(cur_size - 4u) : 0;
-        int rc = decompress_kle(out, (int)FUZZ_KLE_SIZE, inbuf + 4, in_size,
+        int rc = decompress_kle(out, (int)FUZZ_KLE_SIZE, in_size > 0 ? inbuf + 4 : inbuf, in_size,
                                 &end, is_kl4e);
         assert(rc <= (int)FUZZ_KLE_SIZE);
         if (rc > 0) {
@@ -3316,6 +3384,13 @@ static uint8_t *fuzz_guest(uint32_t address) {
 #define FUZZ_PGF_CAP 16384u
 #define FUZZ_PGF_MAX_GLYPHS 6u
 #define FUZZ_PGF_MAX_SPAN (FUZZ_PGF_MAX_GLYPHS + 4u)
+/* The most a glyph needs besides its raster payload: 3 bytes of alignment, a 33-byte
+ * record (9 bytes plus three 8-byte metric groups), 6 composite-part bytes and the
+ * 6-byte shadow block. The builder keeps this much free for every glyph still to come. */
+#define FUZZ_PGF_GLYPH_TAIL 48u
+/* The smallest buffer build_fuzz_pgf accepts: the largest header and tables (at most 584
+ * bytes) plus a glyph tail for every glyph. */
+#define FUZZ_PGF_MIN_CAP 1024u
 
 typedef struct {
     uint32_t first_code;
@@ -3355,8 +3430,8 @@ static uint8_t fuzz_pgf_index(uint8_t count) {
 }
 
 static size_t build_fuzz_pgf(uint8_t *out, size_t cap, FuzzPgfLayout *layout) {
-    assert(cap >= FUZZ_PGF_CAP);
-    memset(out, 0, FUZZ_PGF_CAP);
+    assert(cap >= FUZZ_PGF_MIN_CAP);
+    memset(out, 0, cap);
     memset(layout, 0, sizeof(*layout));
 
     unsigned revision_pick = fuzz_rand32() % 8u;
@@ -3489,7 +3564,14 @@ static size_t build_fuzz_pgf(uint8_t *out, size_t cap, FuzzPgfLayout *layout) {
             record_size += (flags & (1u << group)) ? 1u : 8u;
         }
         size_t payload = composite ? 6u : fuzz_pick(0u, (width * height + 1u) / 2u + 8u);
-        if (record + record_size + payload + 8u > FUZZ_PGF_CAP) payload = 0u;
+        /* The record, a composite's parts and the shadow block are always written, and
+         * every later glyph keeps its own fixed tail; only a raster payload can shrink. */
+        size_t fixed = record_size + (composite ? 6u : 0u) + (shadow_id ? 6u : 0u);
+        size_t later = (size_t)(glyphs - g - 1u) * FUZZ_PGF_GLYPH_TAIL;
+        assert(record + fixed + later <= cap);
+        if (!composite && payload > cap - record - fixed - later) {
+            payload = cap - record - fixed - later;
+        }
         uint32_t shadow_offset = shadow_id ? (uint32_t)(record_size + payload) : 0u;
         size_t bits_size = record_size;
         fuzz_pgf_bits(out + record, bits_size, 0u, 14u, shadow_offset);
@@ -3539,7 +3621,7 @@ static size_t build_fuzz_pgf(uint8_t *out, size_t cap, FuzzPgfLayout *layout) {
     layout->char_map_bits = map_bits;
     layout->char_pointer_bits = pointer_bits;
     memcpy(layout->glyph_code, code_of_glyph, sizeof(code_of_glyph[0]) * glyphs);
-    assert(cursor <= FUZZ_PGF_CAP);
+    assert(cursor <= cap);
     return cursor;
 }
 
@@ -3684,6 +3766,44 @@ static int fuzz_pgf_draw(const PGF *p, const FuzzPgfLayout *layout) {
     return drawn;
 }
 
+/* Every font the builder makes stays inside the buffer it is given, however close to
+ * the end its glyph payloads land. A small buffer reaches that edge in most builds; the
+ * guard bytes after it catch a write past the end even without a sanitizer. */
+static void test_fuzz_pgf_builder_bounds(void) {
+    enum { BUILDS = 2000, GUARD = 64 };
+    uint64_t saved_state = s_rng_state;
+    s_rng_state = 0x9F0B0A2D5EEDF00DULL;
+    uint8_t *font = (uint8_t *)malloc(FUZZ_PGF_MIN_CAP + GUARD);
+    assert(font);
+    unsigned near_end = 0;
+    for (unsigned i = 0; i < BUILDS; i++) {
+        memset(font + FUZZ_PGF_MIN_CAP, 0xA5, GUARD);
+        FuzzPgfLayout layout;
+        size_t size = build_fuzz_pgf(font, FUZZ_PGF_MIN_CAP, &layout);
+        for (size_t b = 0; b < GUARD; b++) {
+            if (font[FUZZ_PGF_MIN_CAP + b] != 0xA5u) {
+                fprintf(stderr, "PGF_BUILDER_OVERRUN: build %u wrote byte %u past its %u-byte buffer\n",
+                        i, (unsigned)b, FUZZ_PGF_MIN_CAP);
+                assert(0);
+            }
+        }
+        assert(size <= FUZZ_PGF_MIN_CAP);
+        if (size + 64u > FUZZ_PGF_MIN_CAP) near_end++;
+        PgfVerdict verdict;
+        if (!pgf_validate_memory(font, size, &verdict)) {
+            fprintf(stderr, "PGF_BUILDER_REFUSED: build %u refused (rule %d)\n", i, (int)verdict.refusal);
+            assert(0);
+        }
+    }
+    /* The check means something only if builds actually reach the end of the buffer. */
+    assert(near_end > BUILDS / 10u);
+    free(font);
+    s_rng_state = saved_state;
+    printf("[FUZZ] PGF builder stays inside its buffer (%u builds, %u within 64 bytes of the end)\n",
+           (unsigned)BUILDS, near_end);
+    fflush(stdout);
+}
+
 static void test_fuzz_pgf(unsigned iters) {
     printf("[FUZZ] Testing PGF font reader and glyph drawing (%u iterations)...\n", iters);
     fflush(stdout);
@@ -3751,6 +3871,9 @@ typedef struct {
     char path[FUZZ_VFS_PATH];
     uint8_t payload[96];
     size_t payload_len;
+    /* Stored under the LZS tag with a compressed size of 0: the reader decodes it into a
+     * fresh buffer, which the archive cache then holds. */
+    bool lzs_stored;
 } FuzzVfsMember;
 
 typedef struct {
@@ -3785,8 +3908,13 @@ static FuzzByteBuffer make_xb_members(const FuzzVfsMember *members, size_t count
     for (size_t i = 0; i < count; i++) {
         size_t offset = data_start + body.size;
         assert((offset & 3u) == 0u);
+        NkXbCompression tag = members[i].lzs_stored ? NK_XB_COMPRESSION_LZS : NK_XB_COMPRESSION_NONE;
         bb_u32(&fst, (uint32_t)members[i].payload_len, be);
-        bb_u32(&fst, ((uint32_t)NK_XB_COMPRESSION_NONE << 28) | (uint32_t)(offset / 4u), be);
+        bb_u32(&fst, ((uint32_t)tag << 28) | (uint32_t)(offset / 4u), be);
+        if (members[i].lzs_stored) {
+            bb_u32(&body, (uint32_t)members[i].payload_len, be); /* expanded size */
+            bb_u32(&body, 0u, be);                               /* stored: no compressed size */
+        }
         bb_append(&body, members[i].payload, members[i].payload_len);
         bb_pad4(&body);
     }
@@ -3950,6 +4078,7 @@ static void test_fuzz_archive_vfs(unsigned iters) {
     fflush(stdout);
 
     unsigned mounted_total = 0, mutated_mounted = 0, lookups = 0, refused_names = 0;
+    unsigned cached_runs = 0;
     for (unsigned i = 0; i < iters; i++) {
         FuzzVfsMount mounts[FUZZ_VFS_MOUNTS];
         FuzzByteBuffer images[FUZZ_VFS_MOUNTS];
@@ -3961,8 +4090,12 @@ static void test_fuzz_archive_vfs(unsigned iters) {
 
         SrArchiveVfs vfs;
         sr_archive_vfs_init(&vfs);
+        size_t cache_bytes_cap = SR_ARCHIVE_VFS_DEFAULT_CACHE_BYTES;
+        size_t cache_entries_cap = SR_ARCHIVE_VFS_DEFAULT_CACHE_ENTRIES;
         if (fuzz_rand32() & 1u) {
-            assert(sr_archive_vfs_configure(&vfs, fuzz_pick(0u, 256u), fuzz_pick(0u, 4u)));
+            cache_bytes_cap = fuzz_pick(0u, 256u);
+            cache_entries_cap = fuzz_pick(0u, 4u);
+            assert(sr_archive_vfs_configure(&vfs, cache_bytes_cap, cache_entries_cap));
         }
         size_t slot = 0;
         for (size_t m = 0; m < mount_count; m++) {
@@ -3988,6 +4121,7 @@ static void test_fuzz_archive_vfs(unsigned iters) {
                 for (size_t b = 0; b < member->payload_len; b++) {
                     member->payload[b] = (uint8_t)fuzz_rand32();
                 }
+                member->lzs_stored = (fuzz_rand32() & 1u) != 0u;
             }
             images[m] = make_xb_members(mount->members, mount->member_count, be);
             bool names_fold = true;
@@ -4054,13 +4188,19 @@ static void test_fuzz_archive_vfs(unsigned iters) {
             fuzz_vfs_walk(&vfs, dir, wanted == -2 ? SR_ARCHIVE_VARIANT_AUTO : wanted);
         }
         fuzz_vfs_walk(&vfs, "", SR_ARCHIVE_VARIANT_AUTO);
-        assert(sr_archive_vfs_cache_bytes(&vfs) <= SR_ARCHIVE_VFS_DEFAULT_CACHE_BYTES);
+        /* The cache stays within the limits this run configured, not only the defaults. */
+        assert(sr_archive_vfs_cache_bytes(&vfs) <= cache_bytes_cap);
+        assert(sr_archive_vfs_cache_entry_count(&vfs) <= cache_entries_cap);
+        if (sr_archive_vfs_cache_entry_count(&vfs) > 0u) cached_runs++;
         sr_archive_vfs_destroy(&vfs);
         for (size_t m = 0; m < mount_count; m++) free(images[m].data);
     }
+    /* Decoded members fill the cache in most runs; a run of a few iterations may not. */
+    assert(iters < 20u || cached_runs > 0u);
     printf("[FUZZ] Archive VFS completed: %u archives mounted (%u of them mutated), "
            "%u lookups checked against the model, %u archives refused for a keyless name, "
-           "0 crashes\n", mounted_total, mutated_mounted, lookups, refused_names);
+           "%u runs ended with a filled cache, 0 crashes\n", mounted_total, mutated_mounted,
+           lookups, refused_names, cached_runs);
     fflush(stdout);
 }
 
@@ -4068,44 +4208,76 @@ int main(int argc, char **argv) {
     unsigned iters = 100;
 
     const char *env_iters = getenv("FUZZ_ITERS");
-    iters = parse_fuzz_iterations(env_iters, iters);
+    iters = parse_fuzz_iterations("FUZZ_ITERS", env_iters, iters);
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
-            iters = parse_fuzz_iterations(argv[++i], iters);
+        if (strcmp(argv[i], "--iters") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "FUZZ_ITERS_INVALID: --iters needs a value\n");
+                return 2;
+            }
+            iters = parse_fuzz_iterations("--iters", argv[++i], iters);
+        } else {
+            fprintf(stderr, "FUZZ_ARGUMENT_UNKNOWN: '%s' (the only option is --iters N)\n", argv[i]);
+            return 2;
         }
     }
 
     assert(nk_platform_mkdir_p(SR_SELFTEST_BUILD_ROOT));
 
+    /* The slower stages run at most a fixed number of iterations. Each cap is stated up
+     * front and in the final line, so a deep run never reads as deeper than it was. */
+    enum { STAGE_COUNT = 13 };
+    static const struct { const char *name; unsigned cap; } stages[STAGE_COUNT] = {
+        {"iso", 1000u}, {"elf", 1000u}, {"package", 1000u}, {"library", 500u}, {"pgf", 4000u},
+        {"archive", 4000u}, {"decrypt", 4000u}, {"keystore", 1000u}, {"inflate", 2000u},
+        {"kirk", 2000u}, {"kle", 2000u}, {"npumdimg", 2000u}, {"ec", 2000u}};
+    unsigned run[STAGE_COUNT];
+    char capped[512] = "";
+    for (unsigned s = 0; s < STAGE_COUNT; s++) {
+        run[s] = iters > stages[s].cap ? stages[s].cap : iters;
+        if (run[s] < iters) {
+            size_t used = strlen(capped);
+            snprintf(capped + used, sizeof(capped) - used, "%s%s=%u", used ? ", " : "",
+                     stages[s].name, run[s]);
+        }
+    }
+
     printf("=================================================================\n");
     printf("Starting Nakagawa deterministic parser fuzz suite (iters=%u)\n", iters);
+    if (capped[0]) printf("Stages capped below iters: %s\n", capped);
     printf("=================================================================\n");
     fflush(stdout);
 
     test_fuzz_param_sfo(iters);
-    test_fuzz_iso(iters > 1000 ? 1000 : iters);
-    test_fuzz_elf_classifier(iters > 1000 ? 1000 : iters);
+    test_fuzz_iso(run[0]);
+    test_fuzz_elf_classifier(run[1]);
     test_fuzz_xb(iters);
     test_fuzz_prx(iters);
     test_fuzz_manifest(iters);
     test_fuzz_input_profile(iters);
-    test_fuzz_package(iters > 1000 ? 1000 : iters);
-    test_fuzz_library(iters > 500 ? 500 : iters);
-    test_fuzz_pgf(iters > 4000 ? 4000 : iters);
-    test_fuzz_archive_vfs(iters > 4000 ? 4000 : iters);
-    test_fuzz_decrypt_boundary(iters > 4000 ? 4000 : iters);
-    test_fuzz_keystore(iters > 1000 ? 1000 : iters);
-    test_fuzz_inflate(iters > 2000 ? 2000 : iters);
-    test_fuzz_kirk(iters > 2000 ? 2000 : iters);
-    test_fuzz_kle(iters > 2000 ? 2000 : iters);
-    test_fuzz_npumdimg(iters > 2000 ? 2000 : iters);
+    test_fuzz_package(run[2]);
+    test_fuzz_library(run[3]);
+    test_fuzz_pgf_builder_bounds();
+    test_fuzz_pgf(run[4]);
+    test_fuzz_archive_vfs(run[5]);
+    test_fuzz_decrypt_boundary(run[6]);
+    test_fuzz_keystore(run[7]);
+    test_fuzz_inflate(run[8]);
+    test_fuzz_kirk(run[9]);
+    test_fuzz_kle(run[10]);
+    test_fuzz_npumdimg(run[11]);
     test_kirk_ecdsa_curve_names();
-    test_ec_mod_n_is_bounded(iters > 2000 ? 2000 : iters);
+    test_ec_mod_n_is_bounded(run[12]);
     test_ec_verify();
 
     printf("=================================================================\n");
     printf("ALL DETERMINISTIC PARSER FUZZ HARNESSES PASSED SUCCESSFULLY!\n");
+    if (capped[0]) {
+        printf("(iters=%u; stages capped below it: %s)\n", iters, capped);
+    } else {
+        printf("(iters=%u in every stage)\n", iters);
+    }
     printf("=================================================================\n");
     return 0;
 }
