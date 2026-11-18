@@ -2329,6 +2329,37 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertIn("did not exit", adapter.stop_detail)
         self.assertIn("not released", adapter.stop_detail)
 
+    def test_stop_records_a_post_kill_timeout_and_finishes_cleanup(self):
+        class NeverReapedProcess(CommandInputUsbHostFsProcess):
+            def __init__(self):
+                super().__init__(USBHOSTFS_BANNER, obeys_exit=False)
+                self.killed = False
+
+            def wait(self, timeout):
+                raise subprocess.TimeoutExpired("fake-usbhostfs", timeout)
+
+            def kill(self):
+                self.killed = True
+
+        process = NeverReapedProcess()
+        adapter = PsplinkProcessTransport(
+            session_id="synthetic-session",
+            pspsh_argv=["fake-pspsh"],
+            usbhostfs_argv=["fake-usbhostfs"],
+            host0_root=Path("host0-root"),
+            command_runner=lambda _command, _timeout: (0, "", "", "PROCESS_EXITED"),
+            popen_factory=lambda _command, **_kwargs: process,
+        )
+        adapter.server = process
+        with patch.object(run_psplink_module, "USBHOSTFS_EXIT_TIMEOUT", 0.05):
+            adapter.stop()
+
+        self.assertTrue(process.killed)
+        self.assertTrue(process.stdin.closed)
+        self.assertIsNone(adapter.server)
+        self.assertIsNone(adapter._server_output_thread)
+        self.assertIn("after kill", adapter.stop_detail)
+
     @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
     def test_stop_of_a_usbhostfs_that_already_exited_sends_nothing(self):
         process, adapter, scratch = self._started_command_input_server()
@@ -3451,6 +3482,10 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
                 report["estimated_total_seconds"],
                 _campaign_queue_summary()["estimated_total_seconds"],
             )
+            self.assertEqual(
+                report["case_time_seconds"],
+                sum(row["estimated_seconds"] for row in report["queue"]),
+            )
             self.assertFalse((output_root / "checkpoint.json").exists())
 
     def test_campaign_resets_between_cases_and_reuses_preflight_qualification(self):
@@ -3512,6 +3547,170 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(commands.count("ldstart host0:/smoke.prx"), 0)
         self.assertNotIn("reset", commands[second_launch + 1:])
         self.assertNotIn("modstun 0x04280001", commands[second_launch + 1:])
+
+
+    def test_direct_campaign_requires_intervention_when_a_launched_probe_is_not_unloaded(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        build_root = fixture_dir / "build"
+        build_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="direct-unload-failure-", dir=build_root) as name:
+            scratch = Path(name)
+            case_args = []
+            for case_id in ("transport-write", "model-profile"):
+                binary = scratch / f"{case_id}.prx"
+                binary.write_bytes(b"synthetic PRX")
+                case_args.extend(["--campaign-case", f"{case_id}={binary}"])
+            transport = SimulatedPsplinkTransport(
+                timeout_cases={"model-profile"},
+                fail_modstun_cases={"model-profile"},
+            )
+            transport.host0_root = scratch
+            with patch.object(
+                run_psplink_module, "PsplinkProcessTransport", return_value=transport
+            ):
+                code = run_psplink_module.main([
+                    *case_args,
+                    "--host0-root", str(scratch),
+                    "--model", "PSP-3000",
+                    "--source-commit", SOURCE_COMMIT,
+                    "--session-id", "synthetic-session",
+                    "--out", str(scratch / "report.json"),
+                ])
+            report = json.loads((scratch / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 3)
+        self.assertEqual(report["terminal_reason"], "PHYSICAL_INTERVENTION_REQUIRED")
+        self.assertEqual(report["intervention_case_id"], "model-profile")
+        self.assertEqual(report["state"], "SESSION_WEDGED")
+
+    def test_transport_start_keyboard_interrupt_stops_the_owned_transport(self):
+        class InterruptedTransport:
+            host0_root = None
+
+            def __init__(self):
+                self.stopped = False
+
+            def start(self):
+                raise KeyboardInterrupt()
+
+            def stop(self):
+                self.stopped = True
+
+        transport = InterruptedTransport()
+        runner = PsplinkCampaignRunner(
+            transport,
+            console_model="synthetic",
+            source_commit=SOURCE_COMMIT,
+        )
+        with patch.object(run_psplink_module, "_check_source_tree", return_value=None):
+            with self.assertRaises(KeyboardInterrupt):
+                runner.run([CampaignCase("transport-write", Path("synthetic.prx"), 1.0)])
+        self.assertTrue(transport.stopped)
+
+    def test_lock_loss_from_case_start_callback_is_a_named_lock_refusal(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="callback-lock-loss-", dir=fixture_dir) as name:
+            scratch = Path(name)
+            binary = scratch / "transport-write.prx"
+            binary.write_bytes(b"synthetic PRX")
+            transport = SimulatedPsplinkTransport()
+            transport.host0_root = scratch
+
+            def lock_was_revoked(_index, _case, _phase):
+                raise HardwareLockError("HARDWARE_LOCK_SESSION_MISMATCH")
+
+            runner = PsplinkCampaignRunner(
+                transport,
+                console_model="PSP-3000-04g",
+                source_commit=SOURCE_COMMIT,
+                model_code=3,
+            )
+            with patch.object(run_psplink_module, "_check_source_tree", return_value=None):
+                report = runner.run(
+                    [CampaignCase("transport-write", binary, 1.0)],
+                    on_case_start=lock_was_revoked,
+                )
+
+        self.assertEqual(report["terminal_reason"], "HARDWARE_LOCK_REFUSED")
+        self.assertEqual(report["hardware_lock_status"], "HARDWARE_LOCK_SESSION_MISMATCH")
+        self.assertNotIn(
+            "ldstart host0:/transport-write.prx",
+            [command for command, _timeout in transport.commands],
+        )
+
+    def test_recovery_skips_modstun_after_case_already_confirmed_unload(self):
+        transport = SimulatedPsplinkTransport()
+        runner = PsplinkCampaignRunner(
+            transport,
+            console_model="PSP-3000-04g",
+            source_commit=SOURCE_COMMIT,
+            model_code=3,
+        )
+        report = {
+            "status": "FAIL",
+            "issues": ["post-unload module set differs from S0"],
+            "recovery_eligible": True,
+        }
+        with patch.object(runner, "_unload_status", wraps=runner._unload_status) as unload, patch.object(
+            runner, "_reset_once", return_value=True
+        ) as reset:
+            self.assertTrue(
+                runner._enforce_teardown_check(
+                    report,
+                    module_uid="0x04280001",
+                    probe_succeeded=True,
+                    unload_status="PASS",
+                )
+            )
+        unload.assert_not_called()
+        reset.assert_called_once()
+        self.assertEqual(report["recovery_status"], "RECOVERED")
+
+    def test_roundtrip_preflight_refuses_a_dangling_host0_symlink(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="dangling-roundtrip-", dir=fixture_dir) as name:
+            root = Path(name)
+            binary = root / "transport-write.prx"
+            binary.write_bytes(b"synthetic PRX")
+            link = root / "nakagawa_transport_write.bin"
+            link.symlink_to(root / "missing-target.bin")
+            transport = SimulatedPsplinkTransport()
+            transport.host0_root = root
+            runner = PsplinkCampaignRunner(
+                transport,
+                console_model="PSP-3000-04g",
+                source_commit=SOURCE_COMMIT,
+                model_code=3,
+            )
+            with patch.object(run_psplink_module, "_check_source_tree", return_value=None):
+                report = runner.run([CampaignCase("transport-write", binary, 1.0)])
+
+        self.assertEqual(report["terminal_reason"], "HOST0_ROUNDTRIP_PATH_EXISTS")
+        self.assertFalse(transport.started)
+
+    def test_roundtrip_read_refuses_a_symlink_without_following_it(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="roundtrip-symlink-", dir=fixture_dir) as name:
+            root = Path(name)
+            expected = bytes(
+                (0x5A ^ (index * 0x25 + (index >> 3))) & 0xFF
+                for index in range(64)
+            )
+            target = root / "target.bin"
+            target.write_bytes(expected)
+            link = root / "nakagawa_transport_write.bin"
+            link.symlink_to(target)
+            transport = SimulatedPsplinkTransport()
+            transport.host0_root = root
+            runner = PsplinkCampaignRunner(
+                transport,
+                console_model="synthetic",
+                source_commit=SOURCE_COMMIT,
+            )
+
+            self.assertFalse(runner._verify_host0_roundtrip())
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_bytes(), expected)
 
 
 @patch.object(run_psplink_module, "_read_hardware_lock", _lock_held)
@@ -3940,6 +4139,26 @@ class CampaignCheckpointTransitionTests(unittest.TestCase):
             _checkpoint_state(next_case_index=0), case_count=self.CASES
         )
         self.assertEqual(start, 0)
+
+    def test_checkpoint_write_fsyncs_and_removes_temporary_file_on_replace_failure(self):
+        fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "psp_oracle"
+        with tempfile.TemporaryDirectory(prefix="checkpoint-write-", dir=fixture_dir) as name:
+            root = Path(name)
+            target = root / "checkpoint.json"
+            real_fsync = run_psplink_module.os.fsync
+            with patch.object(
+                run_psplink_module.os, "fsync", wraps=real_fsync
+            ) as fsync, patch.object(
+                run_psplink_module.os,
+                "replace",
+                side_effect=PermissionError("synthetic replace failure"),
+            ):
+                with self.assertRaises(PermissionError):
+                    run_psplink_module._write_campaign_json(target, {"state": "IN_PROGRESS"})
+            leftovers = list(root.glob(".checkpoint.json.*.tmp"))
+
+        self.assertGreaterEqual(fsync.call_count, 1)
+        self.assertEqual(leftovers, [])
 
 
 class CampaignPlanCheckpointTests(unittest.TestCase):

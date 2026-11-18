@@ -15,6 +15,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
+from functools import lru_cache
 import math
 import os
 from pathlib import Path
@@ -53,6 +54,7 @@ parse_progress = _protocol.parse_progress
 provenance_issues = _protocol.provenance_issues
 validate_dmac_size_matrix = _protocol.validate_dmac_size_matrix
 validate_dmac_size_matrix_size = _protocol.validate_dmac_size_matrix_size
+DMAC_SIZE_MATRIX_SIZES = _protocol.DMAC_SIZE_MATRIX_SIZES
 
 CAMPAIGN_PROBE_CASES = _parse_golden.CAMPAIGN_PROBE_CASES
 GE_CORPUS_PROBES = _parse_golden.GE_CORPUS_PROBES
@@ -112,82 +114,74 @@ _FULL_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 _ALL_ZERO_RE = re.compile(r"0+")
 
 
-def _fixed_campaign_rows(test_id: str, cases: list[tuple[str, int, frozenset[str]]]):
-    return test_id, tuple(cases)
-
-
 _PASS = frozenset({"PASS"})
 _PASS_OR_SKIP = frozenset({"PASS", "SKIP"})
 _FIXED_CAMPAIGN_CASES = {
-    "smoke": _fixed_campaign_rows(
-        "PSP-SMOKE-001", [("sum-1-to-100", 1, _PASS)]
-    ),
-    "thread-k0-block": _fixed_campaign_rows(
+    "smoke": ("PSP-SMOKE-001", (("sum-1-to-100", 1, _PASS),)),
+    "thread-k0-block": (
         "PSP-THREAD-K0-001",
-        [("K0-MAIN", 6, _PASS), ("K0-FRESH", 11, _PASS)]
+        tuple(
+            [("K0-MAIN", 6, _PASS), ("K0-FRESH", 11, _PASS)]
         + [(f"K0-FRESH-W{row}0", 16, _PASS) for row in range(4)]
-        + [(f"K0-REUSE-{attr}", 9, _PASS) for attr in ("DEF", "NOFILL", "CLEAR")],
+            + [(f"K0-REUSE-{attr}", 9, _PASS) for attr in ("DEF", "NOFILL", "CLEAR")]
+        ),
     ),
-    "thread-exit-delete": _fixed_campaign_rows(
+    "thread-exit-delete": (
         "PSP-THREAD-EXIT-001",
-        [(case_id, 6, _PASS) for case_id in (
-            "ED-R77", "ED-R00", "ED-RNEG", "ED-RERR",
-            "ED-X77", "ED-X00", "ED-XNEG", "ED-XERR",
-            "ED-D77", "ED-D00", "ED-DNEG", "ED-DERR",
-        )],
+        tuple(
+            (case_id, 6, _PASS)
+            for case_id in (
+                "ED-R77", "ED-R00", "ED-RNEG", "ED-RERR",
+                "ED-X77", "ED-X00", "ED-XNEG", "ED-XERR",
+                "ED-D77", "ED-D00", "ED-DNEG", "ED-DERR",
+            )
+        ),
     ),
-    "teardown-test": _fixed_campaign_rows(
-        "PSP-TEARDOWN-001", [("exitdelete-main", 1, frozenset({"SKIP"}))]
-    ),
-    "display-mask-duty": _fixed_campaign_rows(
+    "teardown-test": ("PSP-TEARDOWN-001", (("exitdelete-main", 1, frozenset({"SKIP"})),)),
+    "display-mask-duty": (
         "PSP-DISPLAY-001",
-        [(f"display-mask-duty-{duration}us", 13, _PASS)
-         for duration in (33000, 66000)],
+        tuple((f"display-mask-duty-{duration}us", 13, _PASS) for duration in (33000, 66000)),
     ),
     # run_display_wait_late emits, per API, its five late cells and then that
     # API's in-vblank cell (PASS, or SKIP when the in-vblank phase was not
     # reached), after one calibration record.
-    "display-wait-late": _fixed_campaign_rows(
+    "display-wait-late": (
         "PSP-DISPLAY-002",
-        [("calibration", 5, _PASS)]
-        + [
-            row
-            for api in ("waitvblankstart", "waitvblank")
-            for row in (
-                [(f"late-{api}-{offset}eighths", 22, _PASS) for offset in (2, 6, 10, 14, 20)]
-                + [(f"invblank-{api}", 22, _PASS_OR_SKIP)]
-            )
-        ],
+        tuple(
+            [("calibration", 5, _PASS)]
+            + [
+                row
+                for api in ("waitvblankstart", "waitvblank")
+                for row in (
+                    [(f"late-{api}-{offset}eighths", 22, _PASS) for offset in (2, 6, 10, 14, 20)]
+                    + [(f"invblank-{api}", 22, _PASS_OR_SKIP)]
+                )
+            ]
+        ),
     ),
-    "display-wait-priority": _fixed_campaign_rows(
+    "display-wait-priority": (
         "PSP-DISPLAY-003",
-        [("calibration", 5, _PASS),
+        (("calibration", 5, _PASS),
          ("priority-control", 16, _PASS),
-         ("priority-experiment", 16, _PASS)],
+         ("priority-experiment", 16, _PASS)),
     ),
-    "display-vblank-window": _fixed_campaign_rows(
-        "PSP-DISPLAY-004", [("vblank-window", 14, _PASS)]
-    ),
-    "mutex-refer-unlocked": _fixed_campaign_rows(
-        "PSP-MUTEX-001", [("mutex-refer-unlocked", 5, _PASS)]
-    ),
-    "mutex-timeout-quanta": _fixed_campaign_rows(
-        "PSP-MUTEX-001", [("mutex-timeout-quanta", 17, _PASS)]
-    ),
-    "mutex-priority-inheritance": _fixed_campaign_rows(
-        "PSP-MUTEX-001", [("mutex-priority-inheritance", 7, _PASS)]
-    ),
+    "display-vblank-window": ("PSP-DISPLAY-004", (("vblank-window", 14, _PASS),)),
+    "mutex-refer-unlocked": ("PSP-MUTEX-001", (("mutex-refer-unlocked", 5, _PASS),)),
+    "mutex-timeout-quanta": ("PSP-MUTEX-001", (("mutex-timeout-quanta", 17, _PASS),)),
+    "mutex-priority-inheritance": ("PSP-MUTEX-001", (("mutex-priority-inheritance", 7, _PASS),)),
     # Each trial records sceKernelIsCpuIntrEnable() from the VBLANK handler in
     # out0 (context only) and the six mutex returns in out1..out6. The verdict is
     # machinery-only: a trial is PASS with result 1 when the handler completed it.
     # FAIL is admitted here only so that _check_mutex_interrupt_trial can name it;
     # that check refuses any trial that is not a completed PASS. The returned
     # values are observations and are not compared with expected values.
-    "mutex-interrupt-context": _fixed_campaign_rows(
+    "mutex-interrupt-context": (
         "PSP-MUTEX-001",
-        [("mutex-interrupt-context", 3, _PASS)]
-        + [(f"mutex-interrupt-context-t{index:02d}", 7, frozenset({"PASS", "FAIL"}))
-           for index in range(20)],
+        tuple(
+            [("mutex-interrupt-context", 3, _PASS)]
+            + [(f"mutex-interrupt-context-t{index:02d}", 7, frozenset({"PASS", "FAIL"}))
+               for index in range(20)]
+        ),
     ),
 }
 
@@ -973,6 +967,7 @@ _SINGLE_RECORD_CAMPAIGN_CASES = {
 }
 
 
+@lru_cache(maxsize=8)
 def _parse_campaign_records(text: str, case_id: str) -> ParsedOutput:
     """Validate a campaign's known completion contract, then return its typed rows.
 
@@ -1514,7 +1509,13 @@ class PsplinkProcessTransport:
                     server.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
                     server.kill()
-                    server.wait(timeout=2.0)
+                    try:
+                        server.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        detail = self.stop_detail or "usbhostfs_pc did not stop cleanly"
+                        self.stop_detail = (
+                            f"{detail}; usbhostfs_pc did not exit within 2s after kill"
+                        )
         stdin = getattr(server, "stdin", None)
         if stdin is not None and not stdin.closed:
             try:
@@ -1859,6 +1860,7 @@ class PsplinkCampaignRunner:
         module_uid: str | None = None,
         *,
         probe_succeeded: bool = False,
+        unload_status: str | None = None,
     ) -> bool:
         if report.get("status") == "PASS":
             report["recovery_status"] = "NOT_REQUIRED"
@@ -1878,7 +1880,13 @@ class PsplinkCampaignRunner:
             return False
         issues = cast(Iterable[object], report.get("issues", []))
         detail = "; ".join(str(issue) for issue in issues)
-        recovered = self._recover(module_uid, f"probe teardown check failed: {detail}")
+        recovery_detail = f"probe teardown check failed: {detail}"
+        if unload_status is None:
+            recovered = self._recover(module_uid, recovery_detail)
+        else:
+            recovered = self._recover(
+                module_uid, recovery_detail, unload_status=unload_status
+            )
         report["recovery_status"] = "RECOVERED" if recovered else "FAILED"
         return recovered
 
@@ -1904,10 +1912,6 @@ class PsplinkCampaignRunner:
         if info[0] != 0 and "Unknown module" in text:
             return "PASS"
         return "BLOCKED"
-
-    def _unload(self, module_uid: str) -> bool:
-        """Compatibility predicate for callers that only need confirmed unload."""
-        return self._unload_status(module_uid) == "PASS"
 
     def _settle_after_unload(self) -> tuple[str, int]:
         """Settle the link after `modstun` before any post-unload check uses it.
@@ -1944,8 +1948,8 @@ class PsplinkCampaignRunner:
             return False
         path = root / "nakagawa_transport_write.bin"
         try:
-            captured = path.read_bytes()
-        except OSError:
+            captured, _info = _read_host0_file(path)
+        except (OSError, UnsafeHost0OutputError):
             return False
         expected = bytes(
             (0x5A ^ (index * 0x25 + (index >> 3))) & 0xFF
@@ -1985,6 +1989,14 @@ class PsplinkCampaignRunner:
             self.terminal_reason = "HARDWARE_LOCK_REFUSED"
             return False
         return True
+
+    def _case_start_lock_refused(self, case_id: str, exc: HardwareLockError) -> None:
+        self.hardware_lock_status = exc.status
+        self.state = "STOPPED"
+        self.terminal_reason = "HARDWARE_LOCK_REFUSED"
+        self.recovery_events.append(
+            f"HARDWARE_LOCK: before launching {case_id}: {exc.status}; probe not launched"
+        )
 
     def _transport_start_failed(self, detail: str) -> None:
         """Stop before any launch: the PSP ran nothing, so no power cycle is needed."""
@@ -2070,8 +2082,26 @@ class PsplinkCampaignRunner:
             return False
         return True
 
-    def _recover(self, module_uid: str | None, detail: str) -> bool:
+    def _recover(
+        self,
+        module_uid: str | None,
+        detail: str,
+        *,
+        unload_status: str | None = None,
+    ) -> bool:
         self.state = "RECOVERABLE_FAULT"
+        if unload_status == "PASS":
+            self._l0_cleanup_attempted = True
+            self._l1_attempted = True
+            self.recovery_events.append(
+                "L0: skip repeated modstun; case teardown already confirmed unload"
+            )
+            if self.terminal_reason is not None:
+                return False
+            recovered = self._reset_once("reset after confirmed unload")
+            if recovered:
+                self.state = "READY"
+            return recovered
         if not self._l0_cleanup_attempted:
             self._l0_cleanup_attempted = True
             self.recovery_events.append(f"L0: one shell qualification/cleanup retry ({detail})")
@@ -2143,14 +2173,6 @@ class PsplinkCampaignRunner:
             finally:
                 self._l1_active = False
         return self._reset_once("reset after L1 requalification")
-
-    @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
 
     def _envelope(
         self,
@@ -2251,7 +2273,7 @@ class PsplinkCampaignRunner:
 
         binary_sha = ""
         try:
-            binary_sha = self._sha256(case.binary)
+            binary_sha = _host_binary_sha256(case.binary)
         except OSError as exc:
             disqualify(f"campaign PRX could not be hashed ({type(exc).__name__})")
 
@@ -2284,6 +2306,7 @@ class PsplinkCampaignRunner:
                 firmware=self.firmware,
                 source_commit=self.source_commit,
             )
+            metadata_args._binary_sha256 = binary_sha
             identity = _device_identity(host0_text, metadata_args)
             blockers.extend(cast(list[str], identity["DEVICE_IDENTITY_BLOCKERS"]))
             try:
@@ -2432,12 +2455,12 @@ class PsplinkCampaignRunner:
             return self._report()
         self.source_tree_problem = _check_source_tree(self.source_commit)
         host0_path = getattr(self.transport, "host0_root", None)
-        if isinstance(host0_path, Path) and (
-            host0_path / "nakagawa_transport_write.bin"
-        ).exists():
-            self.state = "STOPPED"
-            self.terminal_reason = "HOST0_ROUNDTRIP_PATH_EXISTS"
-            return self._report()
+        if isinstance(host0_path, Path):
+            roundtrip_path = host0_path / "nakagawa_transport_write.bin"
+            if roundtrip_path.exists() or roundtrip_path.is_symlink():
+                self.state = "STOPPED"
+                self.terminal_reason = "HOST0_ROUNDTRIP_PATH_EXISTS"
+                return self._report()
         try:
             self.transport.start()
         except HardwareLockError as exc:
@@ -2457,6 +2480,15 @@ class PsplinkCampaignRunner:
                 else f"host transport process could not start ({type(exc).__name__})"
             )
             return self._report()
+        except BaseException:
+            try:
+                self.transport.stop()
+            except BaseException as cleanup_exc:
+                self.recovery_events.append(
+                    "HOST_ERROR: transport cleanup after start interruption raised "
+                    f"{type(cleanup_exc).__name__}"
+                )
+            raise
         start_detail = getattr(self.transport, "start_detail", None)
         if isinstance(start_detail, str) and start_detail:
             self.recovery_events.append(f"transport start: {start_detail}")
@@ -2528,6 +2560,9 @@ class PsplinkCampaignRunner:
             if on_case_start is not None:
                 try:
                     on_case_start(case_index, case, "RESET_BEFORE_CASE")
+                except HardwareLockError as exc:
+                    self._case_start_lock_refused(case.case_id, exc)
+                    return False
                 except (OSError, ValueError, TypeError):
                     self.state = "STOPPED"
                     self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
@@ -2636,6 +2671,9 @@ class PsplinkCampaignRunner:
         if on_case_start is not None:
             try:
                 on_case_start(case_index, case, "CASE_ACTIVE")
+            except HardwareLockError as exc:
+                self._case_start_lock_refused(case.case_id, exc)
+                return False
             except (OSError, ValueError, TypeError):
                 self.state = "STOPPED"
                 self.terminal_reason = "CHECKPOINT_WRITE_FAILED"
@@ -2824,7 +2862,20 @@ class PsplinkCampaignRunner:
                 f"module thread snapshot unavailable: {module_thread_problem}"
             )
         cleanup_ok = unload_status == "PASS" and teardown_report["status"] == "PASS"
-        if teardown_report["status"] != "PASS":
+        if (
+            not stop_on_incomplete
+            and progress.launched
+            and (not module_uid or unload_status != "PASS")
+            and not probe_succeeded
+        ):
+            self._physical_intervention(
+                f"direct case {case.case_id} launched without a confirmed module unload; "
+                "a newer qualified device boot is required before continuing"
+            )
+            self.intervention_case_id = case.case_id
+            self.resume_case_index = case_index + 1
+            teardown_report["recovery_status"] = "NOT_RUN"
+        elif teardown_report["status"] != "PASS":
             if stop_on_incomplete:
                 self._physical_intervention(
                     f"campaign stopped after teardown check failed for {case.case_id}; "
@@ -2838,6 +2889,7 @@ class PsplinkCampaignRunner:
                     teardown_report,
                     module_uid,
                     probe_succeeded=probe_succeeded,
+                    unload_status=unload_status,
                 )
         run_finished_ns = time.time_ns()
         if case.case_id == "transport-write":
@@ -3174,7 +3226,7 @@ def _campaign_queue_summary() -> dict[str, object]:
          "estimated_seconds": CAMPAIGN_CASE_ESTIMATE_SECONDS[case_id]}
         for index, case_id in enumerate(CAMPAIGN_QUEUE_CASES)
     ]
-    case_seconds = sum(CAMPAIGN_CASE_ESTIMATE_SECONDS.values())
+    case_seconds = sum(row["estimated_seconds"] for row in queue)
     reset_count = len(CAMPAIGN_QUEUE_CASES) - 1
     reset_seconds = reset_count * CAMPAIGN_RESET_ESTIMATE_SECONDS
     return {
@@ -3189,8 +3241,14 @@ def _campaign_queue_summary() -> dict[str, object]:
 def _write_campaign_json(path: Path, value: dict[str, object]) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     rendered = dump_json(value)
-    temporary.write_text(rendered, encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            stream.write(rendered)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _read_hardware_lock(
@@ -3849,11 +3907,6 @@ def _wait_for_host0_output(
     raise TimeoutError(f"host0 output did not become complete: {path.name}")
 
 
-_STEP_LINE_RE = re.compile(
-    r"^NAKAGAWA_PSP_STEP schema=1 case_id=\S+ step=(\S+)\s*$", re.MULTILINE
-)
-
-
 def _host0_progress_detail(
     text: str | None, mtime_ns: int | None, run_started_ns: int
 ) -> str:
@@ -3862,12 +3915,15 @@ def _host0_progress_detail(
     if text is None or mtime_ns is None:
         return "no host0 output was observed"
     records = sum(line.startswith("NAKAGAWA_PSP_TEST ") for line in text.splitlines())
-    steps = _STEP_LINE_RE.findall(text)
+    try:
+        last_step = parse_progress(text).last_step
+    except ProtocolError:
+        last_step = None
     detail = (
         f"{records} result record(s); last host0 write "
         f"{max(mtime_ns - run_started_ns, 0) / 1e9:.1f}s after launch"
     )
-    return detail + (f"; last step marker: {steps[-1]}" if steps else "")
+    return detail + (f"; last step marker: {last_step.step}" if last_step else "")
 
 
 def _snapshot_host0_output(path: Path) -> tuple[str | None, int | None, str | None]:
@@ -3892,7 +3948,9 @@ def _snapshot_host0_output(path: Path) -> tuple[str | None, int | None, str | No
 
 def _host0_capture_complete(text: str, args: argparse.Namespace) -> bool:
     try:
-        return len(parse_output(_canonicalize_psp(text, args)).results) == 16
+        return len(parse_output(_canonicalize_psp(text, args)).results) == (
+            2 * len(DMAC_SIZE_MATRIX_SIZES)
+        )
     except (ProtocolError, OSError, ValueError):
         return False
 
@@ -3903,8 +3961,17 @@ def _validate_host0_capture(text: str, args: argparse.Namespace) -> dict[str, ob
     parsed = validate_dmac_size_matrix(_canonicalize_psp(text, args))
     metadata = parsed.metadata_dict()
     identity = _device_identity(text, args)
+    identity_blockers = cast(list[str], identity["DEVICE_IDENTITY_BLOCKERS"])
+    if (
+        identity["SOURCE_COMMIT_BINDING"] != _IDENTITY_MATCH
+        or identity["BINARY_SHA256_BINDING"] != _IDENTITY_MATCH
+    ) and not identity_blockers:
+        identity_blockers = [
+            "IDENTITY_NOT_BOUND: host binary and source commit are required to bind a capture"
+        ]
+        identity["DEVICE_IDENTITY_BLOCKERS"] = identity_blockers
     blockers = list(provenance_issues(metadata)) + list(
-        cast(list[str], identity["DEVICE_IDENTITY_BLOCKERS"])
+        identity_blockers
     )
     return {
         "classification": "PASS" if all(result.status == "PASS" for result in parsed.results) else "FAIL",
@@ -3980,6 +4047,18 @@ def _host_binary_sha256(binary: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _binary_sha256_for_args(args: argparse.Namespace) -> str | None:
+    cached = getattr(args, "_binary_sha256", None)
+    if isinstance(cached, str) and _FULL_SHA256_RE.fullmatch(cached):
+        return cached
+    binary = getattr(args, "binary", None)
+    if not isinstance(binary, Path):
+        return None
+    digest = _host_binary_sha256(binary)
+    setattr(args, "_binary_sha256", digest)
+    return digest
 
 
 def _device_metadata(text: str) -> dict[str, str]:
@@ -4064,9 +4143,8 @@ def _device_identity(text: str, args: argparse.Namespace) -> dict[str, object]:
     """Compare raw device identity before host canonicalization."""
 
     device = _device_metadata(text)
-    binary = getattr(args, "binary", None)
     try:
-        expected_digest = _host_binary_sha256(binary) if isinstance(binary, Path) else None
+        expected_digest = _binary_sha256_for_args(args)
     except OSError:
         expected_digest = None
     expected_commit = getattr(args, "source_commit", None)
@@ -4151,12 +4229,7 @@ def _canonicalize_psp(text: str, args: argparse.Namespace) -> str:
     if _is_measured_identity(reported_digest, _FULL_SHA256_RE):
         binary_sha256 = reported_digest.lower()
     else:
-        binary = getattr(args, "binary", None)
-        binary_sha256 = (
-            _host_binary_sha256(binary)
-            if isinstance(binary, Path)
-            else reported_digest or ""
-        )
+        binary_sha256 = _binary_sha256_for_args(args) or reported_digest or ""
 
     source = device.get("source") or "unknown"
     metadata = (
@@ -4483,13 +4556,10 @@ def main(argv: list[str] | None = None) -> int:
             args.annotate_report, args.observed_terminal_outcome, args.session_id,
         )):
             parser.error("campaign-plan mode cannot be combined with single-run or manual campaign options")
-        try:
-            pspsh_argv = _argv_json(parser, args.pspsh_argv_json, "--pspsh-argv-json")
-            usbhostfs_argv = _argv_json(
-                parser, args.usbhostfs_argv_json, "--usbhostfs-argv-json"
-            )
-        except SystemExit:
-            raise
+        pspsh_argv = _argv_json(parser, args.pspsh_argv_json, "--pspsh-argv-json")
+        usbhostfs_argv = _argv_json(
+            parser, args.usbhostfs_argv_json, "--usbhostfs-argv-json"
+        )
         code, report = run_campaign_plan(
             args.campaign_plan.resolve(),
             dry_run=args.dry_run,
@@ -4588,13 +4658,10 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("campaign --out cannot replace the transport-write evidence file")
             if campaign_output in {case.binary for case in cases}:
                 parser.error("campaign --out cannot replace a probe PRX")
-        try:
-            pspsh_argv = _argv_json(parser, args.pspsh_argv_json, "--pspsh-argv-json")
-            usbhostfs_argv = _argv_json(
-                parser, args.usbhostfs_argv_json, "--usbhostfs-argv-json"
-            )
-        except SystemExit:
-            raise
+        pspsh_argv = _argv_json(parser, args.pspsh_argv_json, "--pspsh-argv-json")
+        usbhostfs_argv = _argv_json(
+            parser, args.usbhostfs_argv_json, "--usbhostfs-argv-json"
+        )
         transport = PsplinkProcessTransport(
             pspsh_argv=pspsh_argv,
             usbhostfs_argv=usbhostfs_argv,

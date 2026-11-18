@@ -123,8 +123,6 @@ def model_identity_fields(
 
     if software_model_raw_value is None:
         raw_value = "NOT_CAPTURED"
-    elif isinstance(software_model_raw_value, bool):
-        raw_value = str(software_model_raw_value)
     else:
         raw_value = str(software_model_raw_value)
 

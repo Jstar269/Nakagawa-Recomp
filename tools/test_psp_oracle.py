@@ -1685,6 +1685,8 @@ class PspOracleRunnerTests(unittest.TestCase):
             _parse_campaign_records(text, "unregistered-synthetic-case")
 
     def test_campaign_completeness_contract_tracks_parser_registries(self) -> None:
+        from psp_oracle import run_psplink
+
         text = META.format(
             source="psp",
             model="synthetic",
@@ -1692,16 +1694,23 @@ class PspOracleRunnerTests(unittest.TestCase):
             binary="0" * 64,
             commit="0" * 40,
         ) + "NAKAGAWA_PSP_TEST schema=1 test_id=SMOKE case_id=one status=PASS result=0x1\n"
-        with patch.dict(
-            "psp_oracle.run_psplink._COMPLETE_CAMPAIGN_PARSERS",
-            {"new-complete-case": lambda _text, *, require_complete: None},
-        ):
-            self.assertTrue(_campaign_stream_complete(text, "new-complete-case"))
-        with patch.dict(
-            "psp_oracle.run_psplink._SINGLE_RECORD_CAMPAIGN_CASES",
-            {"new-single-case": ("SMOKE", "one")},
-        ):
-            self.assertTrue(_campaign_stream_complete(text, "new-single-case"))
+        cache_clear = getattr(run_psplink._parse_campaign_records, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+        try:
+            with patch.dict(
+                "psp_oracle.run_psplink._COMPLETE_CAMPAIGN_PARSERS",
+                {"new-complete-case": lambda _text, *, require_complete: None},
+            ):
+                self.assertTrue(_campaign_stream_complete(text, "new-complete-case"))
+            with patch.dict(
+                "psp_oracle.run_psplink._SINGLE_RECORD_CAMPAIGN_CASES",
+                {"new-single-case": ("SMOKE", "one")},
+            ):
+                self.assertTrue(_campaign_stream_complete(text, "new-single-case"))
+        finally:
+            if cache_clear is not None:
+                cache_clear()
 
     def _compare_output_report(
         self,
@@ -1924,7 +1933,74 @@ class PspOracleRunnerTests(unittest.TestCase):
         report = _validate_host0_capture(dmac_matrix_stream(), args)
         self.assertEqual(report["classification"], "PASS")
         self.assertEqual(report["test_record_count"], 16)
-        self.assertTrue(report["acceptance_eligible"])
+        self.assertFalse(report["acceptance_eligible"])
+        self.assertIn("IDENTITY_NOT_BOUND", " | ".join(report["acceptance_blockers"]))
+
+    def test_campaign_parse_cache_validates_each_identical_stream_once(self) -> None:
+        from psp_oracle import run_psplink
+
+        text = META.format(
+            source="psp",
+            model="PSP-3000",
+            firmware="6.61-ARK",
+            binary="0" * 64,
+            commit="0" * 40,
+        ) + "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id=model-profile status=PASS result=0x3 out0=0x3 out1=0x06060110 out2=0xde\n"
+        text += "NAKAGAWA_PSP_COMPLETE schema=1 status=PASS\n"
+        records = text.split("NAKAGAWA_PSP_COMPLETE", 1)[0]
+        normalized = run_psplink._normalise_unbound_identity_fields(records)
+        cache_clear = getattr(run_psplink._parse_campaign_records, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+        original = run_psplink._validate_campaign_contract
+        with patch.object(
+            run_psplink, "_validate_campaign_contract", wraps=original
+        ) as validate:
+            self.assertTrue(run_psplink._campaign_stream_complete(text, "model-profile"))
+            run_psplink._parse_campaign_records(normalized, "model-profile")
+        self.assertEqual(validate.call_count, 1)
+        if cache_clear is not None:
+            cache_clear()
+
+    def test_canonicalization_and_identity_share_one_binary_hash_per_args(self) -> None:
+        from psp_oracle import run_psplink
+
+        with tempfile.TemporaryDirectory(prefix="binary-hash-cache-") as name:
+            args = identity_args(Path(name))
+            text = device_identity_stream(binary="0" * 64, commit="0" * 40)
+            with patch.object(
+                run_psplink,
+                "_host_binary_sha256",
+                wraps=run_psplink._host_binary_sha256,
+            ) as hash_binary:
+                run_psplink._device_identity(text, args)
+                run_psplink._canonicalize_psp(text, args)
+                run_psplink._canonicalize_psp(text, args)
+            self.assertEqual(hash_binary.call_count, 1)
+
+    def test_progress_detail_ignores_an_unterminated_final_step(self) -> None:
+        from psp_oracle import run_psplink
+
+        text = (
+            "NAKAGAWA_PSP_STEP schema=1 case_id=registry-readonly step=last-complete\n"
+            "NAKAGAWA_PSP_STEP schema=1 case_id=registry-readonly step=partial"
+        )
+        detail = run_psplink._host0_progress_detail(text, 2_000_000_000, 1_000_000_000)
+        self.assertIn("last step marker: last-complete", detail)
+        self.assertNotIn("partial", detail)
+
+    def test_dmac_host0_readiness_derives_its_record_count_from_protocol(self) -> None:
+        from psp_oracle import run_psplink
+
+        nine_sizes = tuple(range(9))
+        with patch.object(
+            run_psplink, "DMAC_SIZE_MATRIX_SIZES", nine_sizes, create=True
+        ), patch.object(
+            run_psplink, "_canonicalize_psp", side_effect=lambda text, _args: text
+        ), patch.object(
+            run_psplink, "parse_output", return_value=SimpleNamespace(results=[None] * 18)
+        ):
+            self.assertTrue(run_psplink._host0_capture_complete("synthetic", SimpleNamespace()))
 
     def test_capture_records_distinguish_result_skip_and_no_record(self) -> None:
         self.assertEqual(_record_summary("transport only\n"), ("NO_RECORD", 0))
