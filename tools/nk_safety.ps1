@@ -383,6 +383,9 @@ function Get-ProcessTreeIds {
     <#
         $RootPid plus every transitive child from the Win32_Process parent/child graph.
         Where Get-CimInstance is unavailable (POSIX hosts) only the root PID is returned.
+        Windows keeps a ParentProcessId after the parent exits, so a process is taken as a
+        child only when it started no earlier than its parent: an older one names an earlier
+        holder of the parent's PID. A process whose start time is unknown is left out.
     #>
     param([int]$RootPid)
     $ids = New-Object System.Collections.Generic.List[int]
@@ -390,17 +393,23 @@ function Get-ProcessTreeIds {
     $cim = Get-Command Get-CimInstance -ErrorAction SilentlyContinue
     $all = if ($cim) {
         @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Select-Object ProcessId, ParentProcessId)
+            Select-Object ProcessId, ParentProcessId, CreationDate)
     } else {
         @()
     }
+    $created = @{}
+    foreach ($p in $all) { $created[[int]$p.ProcessId] = $p.CreationDate }
     $queue = New-Object System.Collections.Generic.Queue[int]
     $ids.Add($RootPid)
     $queue.Enqueue($RootPid)
     while ($queue.Count -gt 0) {
         $cur = $queue.Dequeue()
+        $curCreated = $created[$cur]
         foreach ($p in $all) {
             if (([int]$p.ParentProcessId -eq $cur) -and (-not $ids.Contains([int]$p.ProcessId))) {
+                if ($null -eq $curCreated -or $null -eq $p.CreationDate -or $p.CreationDate -lt $curCreated) {
+                    continue
+                }
                 $ids.Add([int]$p.ProcessId)
                 $queue.Enqueue([int]$p.ProcessId)
             }
@@ -414,7 +423,7 @@ function Invoke-StaleBuildCleanup {
         Identity-verified stale build cleanup for one ledger file. Kills only recorded
         roots whose identity still fully matches (and their compiler children); leaves
         anything unverifiable untouched. Rewrites the ledger with the kept records.
-        -DryRun reports what would be killed without killing.
+        -DryRun reports what would be killed without killing, and keeps those records.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$PidFile,
@@ -441,6 +450,8 @@ function Invoke-StaleBuildCleanup {
             "valid" {
                 if ($DryRun) {
                     Write-Host "[dry-run] would reap verified build tree root $($rec.pid)" -ForegroundColor Yellow
+                    # Still running and not reaped: a later real cleanup needs its record.
+                    $kept.Add($rec)
                 } else {
                     foreach ($id in (Get-ProcessTreeIds -RootPid ([int]$rec.pid))) {
                         $tp = Get-Process -Id $id -ErrorAction SilentlyContinue
@@ -887,7 +898,10 @@ function Read-RouteOutcome {
         }
         if ($line -match '^ROUTE_FAIL: (.+)$') {
             $outcome.Kind = "failed"
-            $outcome.FailReason = $Matches[1].Trim()
+            # A refused route file prints its ROUTE_PARSE line (path, line and cause) before this
+            # generic one; keep that detail beside it.
+            $failReason = $Matches[1].Trim()
+            $outcome.FailReason = if ($outcome.FailReason) { "$failReason ($($outcome.FailReason))" } else { $failReason }
             continue
         }
         if ($line -match '^ROUTE_PARSE: (.+)$') {

@@ -437,6 +437,36 @@ try {
         Assert-True ($result.Killed.Count -eq 0 -and $result.Kept.Count -eq 0) "missing file was not a no-op"
     }
 
+    Test-Case "a dry run keeps the record of a live verified build" {
+        # The build is still running and was not reaped, so a later real cleanup must still find it.
+        $pidFile = Join-Path $tmpRoot "pids5.jsonl"
+        Set-Content -LiteralPath $pidFile -Value (($recordFull | ConvertTo-Json -Compress) + "`n") -Encoding utf8
+        $result = Invoke-StaleBuildCleanup -PidFile $pidFile -Probe $probeFull -DryRun
+        Assert-True ($result.Killed.Count -eq 1) "the live build was not reported as one to reap"
+        Assert-True (Test-Path -LiteralPath $pidFile) "a dry run deleted the ledger of a live build"
+        $left = @((Get-BuildPidRecords -Path $pidFile).Records)
+        Assert-True ($left.Count -eq 1 -and [int]$left[0].pid -eq 4242) "a dry run dropped the live build's record"
+    }
+
+    Test-Case "process tree skips an orphan whose stale parent PID matches the root" {
+        # Windows keeps a ParentProcessId after the parent exits, so a process started before the
+        # root by an earlier holder of the root's PID still names it as parent. The process list
+        # is modelled by a Get-CimInstance function, which PowerShell resolves before the cmdlet.
+        $t = [DateTime]::new(2026, 11, 17, 12, 0, 0)
+        function Get-CimInstance {
+            [CmdletBinding()] param([Parameter(Position = 0)][string]$ClassName)
+            @(
+                [pscustomobject]@{ ProcessId = 7100; ParentProcessId = 1;    CreationDate = $t },
+                [pscustomobject]@{ ProcessId = 7101; ParentProcessId = 7100; CreationDate = $t.AddSeconds(1) },
+                [pscustomobject]@{ ProcessId = 7103; ParentProcessId = 7101; CreationDate = $t.AddSeconds(2) },
+                [pscustomobject]@{ ProcessId = 7102; ParentProcessId = 7100; CreationDate = $t.AddSeconds(-60) },
+                [pscustomobject]@{ ProcessId = 7104; ParentProcessId = 7102; CreationDate = $t.AddSeconds(-30) }
+            )
+        }
+        $ids = @(Get-ProcessTreeIds -RootPid 7100 | Sort-Object)
+        Assert-True (($ids -join ",") -eq "7100,7101,7103") "the build tree took in an older orphan: $($ids -join ',')"
+    }
+
     # --- Build truth: unknown exit is not success -------------------------------------
     Test-Case "known zero exit is success; nonzero and unknown are not" {
         # Start-Process -PassThru returns before the child exits; wait first so the exit

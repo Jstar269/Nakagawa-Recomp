@@ -36,6 +36,17 @@ _GIT_ENV = {
     "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
     "GIT_CONFIG_NOSYSTEM": "1",
 }
+#: Variables that would point a fixture's Git commands at another repository or index (a suite
+#: run from a Git hook inherits them); the same list as tools/admit_paths.py.
+_GIT_REPOSITORY_VARIABLES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+)
+
+
+def _fixture_git_env(**extra: str) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key not in _GIT_REPOSITORY_VARIABLES}
+    return {**env, **_GIT_ENV, **extra}
 
 
 def _fixture_repo(root: Path) -> Path:
@@ -44,7 +55,7 @@ def _fixture_repo(root: Path) -> Path:
     (repo / "tools" / "nk_cli.py").write_text("print('cli')\n", encoding="utf-8")
     (repo / "assets").mkdir()
     (repo / "assets" / "prereq_manifest.json").write_text("{}\n", encoding="utf-8")
-    env = {**os.environ, **_GIT_ENV}
+    env = _fixture_git_env()
     for command in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "fixture"]):
         subprocess.run(["git", "-C", str(repo), *command], check=True, env=env,
                        capture_output=True)
@@ -78,6 +89,22 @@ def _nested_stager(target: Path) -> list[str]:
     nested = stage_runtime_dlls.stage_runtime_dlls(
         target, roots=[], search_dirs=[], notices=False, include_ui_fonts=True, repo_root=stage_install.ROOT)
     return sorted(_fake_stager(target) + nested)
+
+
+class FixtureRepoTests(unittest.TestCase):
+    def test_fixture_repo_ignores_an_inherited_git_dir_and_index(self):
+        """A suite run from a Git hook inherits GIT_DIR and GIT_INDEX_FILE; the fixture commit must still land
+        in the fixture repository, never in the repository those variables name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outer = root / "outer.git"
+            with mock.patch.dict(os.environ, {"GIT_DIR": str(outer), "GIT_INDEX_FILE": str(root / "outer.index")}):
+                repo = _fixture_repo(root)
+            self.assertFalse(outer.exists(), "the fixture's Git commands acted on the inherited GIT_DIR")
+            self.assertFalse((root / "outer.index").exists(), "the fixture wrote the inherited index")
+            head = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%s"], check=True,
+                                  env=_fixture_git_env(), capture_output=True, text=True).stdout.strip()
+            self.assertEqual(head, "fixture")
 
 
 class IconTests(unittest.TestCase):
@@ -759,7 +786,7 @@ class PortableZipTests(unittest.TestCase):
 
     def test_epoch_comes_from_the_argument_then_the_environment_then_the_commit(self):
         repo = _fixture_repo(self.root)
-        env = {**os.environ, **_GIT_ENV, "GIT_COMMITTER_DATE": "@1790000000 +0000"}
+        env = _fixture_git_env(GIT_COMMITTER_DATE="@1790000000 +0000")
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "dated"],
                        check=True, env=env, capture_output=True)
         resolve = stage_install.resolve_source_date_epoch

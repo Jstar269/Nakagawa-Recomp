@@ -371,6 +371,10 @@ try {
             Set-Content -LiteralPath $log
         $o = Read-RouteOutcome -StderrPath $log
         Assert-True ($o.Kind -eq "failed") "an unusable route file must fail the run, got $($o.Kind)"
+        # The generic ROUTE_FAIL that follows must not erase the line and cause the parse named.
+        Assert-True ($o.FailReason -match "undefined checkpoints") "the ROUTE_FAIL reason was lost: $($o.FailReason)"
+        Assert-True ($o.FailReason -match "r\.pad:7: no CHECKPOINT defines 'EXHIBITION_SETUP'") `
+            "the ROUTE_PARSE line and cause were lost: $($o.FailReason)"
     }
 
     # The runtime prints this one ROUTE_PARSE line and runs on with no route when fopen fails
