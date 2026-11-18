@@ -248,6 +248,16 @@ def cmd_vram(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sidecar_integer(value: object, label: str) -> int:
+    """A sidecar integer field: an integer, or a string int() reads with its prefix (0x...).
+    Anything else is a malformed sidecar (ValueError), never a TypeError traceback."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return int(value, 0)
+    raise ValueError(f"sidecar {label} must be an integer or a numeric string")
+
+
 def _cmd_vram_sidecar(sidecar_path: Path, output_dir: Path) -> None:
     sidecar_path = sidecar_path.resolve(strict=True)
     sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
@@ -280,7 +290,7 @@ def _cmd_vram_sidecar(sidecar_path: Path, output_dir: Path) -> None:
         temporary_path = Path(temporary)
         decoder = _build_vram_decoder(temporary_path)
         if clut_data:
-            if len(clut_data) % 2 or len(clut_data) > 4096:
+            if not isinstance(clut_data, str) or len(clut_data) % 2 or len(clut_data) > 4096:
                 raise ValueError("sidecar CLUT byte data is malformed or exceeds 2048 bytes")
             clut_path = temporary_path / "clut.bin"
             clut_path.write_bytes(bytes.fromhex(clut_data))
@@ -301,9 +311,18 @@ def _cmd_vram_sidecar(sidecar_path: Path, output_dir: Path) -> None:
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(f"sidecar surface {name!r} has invalid dimensions or format") from exc
             if format_code not in range(12) or not width or not height or width > 4096 or height > 4096:
-                raise ValueError(f"sidecar surface {name!r} has unsupported dimensions or format")
+                # The runtime lists texture levels from live GE state (a stale TEXSIZE
+                # nibble gives a width up to 32768), so one such level is unavailable, like
+                # a surface the decoder rejects; it does not abandon the surfaces after it.
+                print(f"VRAM_SURFACE_UNAVAILABLE name={name} reason=unsupported_dimensions "
+                      f"format_code={format_code} width={width} height={height}",
+                      file=sys.stderr)
+                failed.append(name)
+                continue
             output = output_dir / f"{name}.png"
             if surface.get("kind") == "palette" and surface.get("data_hex"):
+                if not isinstance(surface["data_hex"], str):
+                    raise ValueError(f"sidecar palette {name!r} data_hex must be a hex string")
                 palette_bytes = bytes.fromhex(surface["data_hex"])
                 if len(palette_bytes) > _VRAM_SIZE:
                     raise ValueError("sidecar palette exceeds the captured VRAM size")
@@ -318,10 +337,11 @@ def _cmd_vram_sidecar(sidecar_path: Path, output_dir: Path) -> None:
                     decoder, image_for_surface, output, addr=addr, width=width,
                     height=height, stride=stride, format_code=format_code,
                     swizzled=bool(surface.get("swizzled", False)),
-                    clut_addr=int(clut.get("addr", "0"), 0) if clut_path is None else 0,
-                    clut_format=int(clut.get("format_word", clut.get("format_code", 0)), 0)
-                    if isinstance(clut.get("format_word", clut.get("format_code", 0)), str)
-                    else int(clut.get("format_word", clut.get("format_code", 0))),
+                    clut_addr=(_sidecar_integer(clut.get("addr", "0"), "clut.addr")
+                               if clut_path is None else 0),
+                    clut_format=_sidecar_integer(
+                        clut.get("format_word", clut.get("format_code", 0)), "clut.format_word"
+                    ),
                     clut_file=clut_path if format_code in (4, 5, 6, 7) else None,
                 )
             except ValueError as exc:
@@ -422,6 +442,9 @@ def _extract_iso_executable(iso_path: Path, selected: str, destination: Path) ->
     if selected not in {"EBOOT.BIN", "BOOT.BIN"}:
         raise PackageBuildError(f"Unsupported selected executable {selected!r}; broader ISO-to-Play support is in the works.")
     member = ("PSP_GAME", "SYSDIR", selected)
+    # A failed extraction (a short or out-of-bounds read, a full disk) must not leave a
+    # partial copy of the game executable behind in the package cache.
+    temporary = destination.with_name(destination.name + ".tmp")
     try:
         file_size = iso_path.stat().st_size
         with iso_path.open("rb") as source:
@@ -432,7 +455,6 @@ def _extract_iso_executable(iso_path: Path, selected: str, destination: Path) ->
             if size <= 0 or size > MAX_EXECUTABLE_BYTES:
                 raise PackageBuildError("Selected executable exceeds the supported extraction bound.")
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            temporary = destination.with_name(destination.name + ".tmp")
             digest = hashlib.sha256()
             with temporary.open("wb") as output:
                 offset = 0
@@ -454,6 +476,10 @@ def _extract_iso_executable(iso_path: Path, selected: str, destination: Path) ->
         raise PackageBuildError(f"Selected executable could not be read as a supported plaintext ELF; broader ISO-to-Play support is in the works: {exc}") from exc
     except OSError as exc:
         raise PackageBuildError(f"Could not extract the selected executable to the private cache: {exc}") from exc
+    finally:
+        # Already moved into place on success; any other exit removes the partial copy.
+        with contextlib.suppress(OSError):
+            temporary.unlink(missing_ok=True)
 
 
 def _hash_iso_member(iso_path: Path, member: tuple[str, ...]) -> str | None:
@@ -1567,6 +1593,7 @@ def _copy_optional_modules(iso_path: Path, manifest: dict, cache_dir: Path,
                     "automatic intake is in the works."
                 )
             members.extend(matches)
+        temporary = destination.with_name(destination.name + ".tmp")
         for member in dict.fromkeys(members):
             try:
                 file_size = iso_path.stat().st_size
@@ -1577,7 +1604,6 @@ def _copy_optional_modules(iso_path: Path, manifest: dict, cache_dir: Path,
                     lba, size = extent
                     if size <= 0 or size > MAX_EXECUTABLE_BYTES:
                         break
-                    temporary = destination.with_name(destination.name + ".tmp")
                     with temporary.open("wb") as output_stream:
                         offset = 0
                         while offset < size:
@@ -1613,6 +1639,11 @@ def _copy_optional_modules(iso_path: Path, manifest: dict, cache_dir: Path,
                     break
             except OSError:
                 continue
+            finally:
+                # Moved into place on success; a refused, short or failed copy of the
+                # module is removed before the next member or the refusal.
+                with contextlib.suppress(OSError):
+                    temporary.unlink(missing_ok=True)
         if not extracted and source_path is None:
             suggested = module_dir_arg or default_module_dir
             raise PackageBuildError(
@@ -5371,8 +5402,11 @@ def runtime_output_kind(output: str, runtime_imports: list[dict]) -> str:
     folded = output.casefold()
     if runtime_imports:
         return "UNIMPLEMENTED_IMPORT"
-    if any(re.match(r"^(?:DISPATCH_MISS_NEW\[\d+\]:|--- UNIQUE DISPATCH MISSES SUMMARY \(\d+ entries\) ---)$",
-                    line.strip())
+    # src/rt/recomp.c prints one DISPATCH_MISS_NEW line per new miss as it happens, and the
+    # summary block only from atexit; a run that ends without atexit (abort, a kill at the
+    # launch timeout) has only the per-miss lines, so either one names the miss.
+    if any(re.match(r"^DISPATCH_MISS_NEW\[\d+\]: target=0x[0-9a-fA-F]{8} ", line.strip())
+           or re.fullmatch(r"--- UNIQUE DISPATCH MISSES SUMMARY \(\d+ entries\) ---", line.strip())
            for line in output.splitlines()):
         return "DISPATCH_MISS"
     if "unsupported instruction" in folded or "aot-gap" in folded:
@@ -6471,10 +6505,23 @@ def _bringup_launch(st):
             st.launch_output = launch_output
             _write_bringup_launch_log(work_dir, launch_output)
             _set_bringup_presentation(report, launch_output, stopped=True)
+            # The runtime ran until the limit: its output is classified as an exit's is, so
+            # the report keeps the import, miss or boundary it printed before the kill.
+            report["runtime_imports"] = _runtime_import_rows(launch_output, unsupported_imports)
+            report["runtime_output_kind"] = _runtime_output_kind(
+                launch_output, report["runtime_imports"]
+            )
+            stop = runtime_stop(launch_output)
+            report["runtime_boundary"] = stop[1] if stop else None
             report["exit_classification"] = "TIMED_OUT"
             fail_stage(report, "launch", "LAUNCH_TIMEOUT", [308],
                           int((time.perf_counter() - started) * 1000))
-    except OSError:
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # A package that cannot be launched (its executable missing, a damaged package.json
+        # or manifest) is a launch failure the report records, not a traceback that leaves
+        # no report and the sweep's progress at launch RUNNING. PackageBuildError is a
+        # ValueError.
+        print(f"LAUNCH_FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         report["exit_classification"] = "EXITED_NONZERO"
         fail_stage(report, "launch", "LAUNCH_FAILED", [308],
                       int((time.perf_counter() - started) * 1000))
@@ -6516,6 +6563,34 @@ def _bringup_capture_stop(launch_output: str | None) -> str | None:
     """The capture the run stopped at (src/rt/recomp.c code_capture_note), or None."""
     names = _CODE_CAPTURE_STOP_RE.findall(launch_output or "")
     return names[-1] if names else None
+
+
+def _bringup_make_safe_captures(captures: list[Path]) -> list[Path]:
+    """``captures`` named so the Make recipes can carry them.
+
+    CODEGEN_USER_ARGS reaches the codegen recipe unquoted (mk/pipeline.mk), so a capture
+    folder under a data root with a space (a Windows profile such as ``C:/Users/A B/...``)
+    would be split into a truncated path and a stray argument. Such a folder is named by its
+    Windows 8.3 short form, as the planner names a spaced input directory it reads in place;
+    with no safe form it is refused by name (title_codegen_plan.PackageRouteError,
+    PACKAGE_UNSUPPORTED_PATH). The runtime names a capture code_capture_<target>_<hash>.nkcap;
+    a file in the folder whose own name is not safe is refused the same way."""
+    import title_codegen_plan
+
+    named: dict[Path, Path] = {}
+    result = []
+    for path in captures:
+        if not title_codegen_plan._make_unsafe(path.as_posix()):
+            result.append(path)
+            continue
+        if path.parent not in named:
+            named[path.parent] = title_codegen_plan._make_safe_directory(
+                path.parent, "code-capture folder"
+            )
+        result.append(title_codegen_plan._require_make_safe(
+            named[path.parent] / path.name, "code capture"
+        ))
+    return result
 
 
 @contextlib.contextmanager
@@ -6577,6 +6652,8 @@ def _bringup_capture_rounds(st: Any) -> int:
     run that stops at a capture its own build translated is BRINGUP_CAPTURE_NOT_BOUND, since
     another round would build the same thing. Either exits non-zero, never as success.
     """
+    import title_codegen_plan
+
     limit = getattr(st.args, "capture_rounds", BRINGUP_CAPTURE_ROUNDS_DEFAULT)
     folder = bringup_capture_dir(st.user_root, st.metadata.disc_id)
     # Every round starts from the report as analysis left it; earlier rounds are kept as rows.
@@ -6591,7 +6668,15 @@ def _bringup_capture_rounds(st: Any) -> int:
         if rounds or translated:
             st.report["code_capture"] = {"round_limit": limit, "stop": "NONE", "rounds": rounds}
         st.launch_output = None
-        with _bringup_codegen_captures(translated):
+        try:
+            named_captures = _bringup_make_safe_captures(translated)
+        except title_codegen_plan.PackageRouteError as exc:
+            # PACKAGE_UNSUPPORTED_PATH: the build would word-split the capture path, so this
+            # round's codegen cannot translate it.
+            print(f"{exc.code}: {exc}", file=sys.stderr)
+            st.fail_stage(st.report, "codegen", "CODEGEN_FAILED", [308], 0)
+            return _bringup_finish(st)
+        with _bringup_codegen_captures(named_captures):
             rc: int | None = _bringup_codegen(st)
             if rc is None:
                 rc = _bringup_package(st)

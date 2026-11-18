@@ -1736,6 +1736,47 @@ int main(int argc, char **argv) {{
         self.assertIsNotNone(output)
         self.assertEqual((output / "manifest-sdk.prx").read_bytes(), module_bytes)
 
+    def test_a_disc_module_whose_copy_fails_leaves_no_partial_copy(self) -> None:
+        iso_file = self.temp_dir / "failed-module-copy.iso"
+        create_test_iso_with_modules(
+            iso_file, build_plain_mips_elf(),
+            sysdir_modules={"libfont.prx": build_plain_mips_elf(0xFFA0)},
+            usrdir_modules={},
+        )
+        cache = self.temp_dir / "failed-module-package"
+        manifest = {"modules": [{"name": "libfont.prx", "role": "guest-prx", "required": True}]}
+        # The copy was already opened for writing when the read fails (a disk error); the
+        # member is skipped, and the module is then refused as unavailable.
+        with patch.object(nk_cli, "_read_iso_extent",
+                          side_effect=OSError("synthetic read failure")):
+            with self.assertRaisesRegex(nk_cli.PackageBuildError, "is unavailable"):
+                nk_cli._copy_optional_modules(iso_file, manifest, cache, None)
+        self.assertEqual(sorted(path.name for path in (cache / "modules").iterdir()), [])
+        # A refusal of the copied bytes removes them too.
+        truncated_iso = self.temp_dir / "refused-module.iso"
+        create_test_iso_with_modules(
+            truncated_iso, build_plain_mips_elf(),
+            sysdir_modules={"libfont.prx": build_plain_mips_elf(0xFFA0)[:60]},
+            usrdir_modules={},
+        )
+        refused_cache = self.temp_dir / "refused-module-package"
+        with self.assertRaisesRegex(nk_cli.PackageBuildError, "not a usable plain MIPS ELF32"):
+            nk_cli._copy_optional_modules(truncated_iso, manifest, refused_cache, None)
+        self.assertEqual(sorted(path.name for path in (refused_cache / "modules").iterdir()), [])
+
+    def test_a_failed_executable_extraction_leaves_no_partial_copy(self) -> None:
+        iso_file = self.temp_dir / "short-read.iso"
+        create_test_iso_with_modules(
+            iso_file, build_plain_mips_elf(), sysdir_modules={}, usrdir_modules={},
+        )
+        destination = self.temp_dir / "short-read-package" / "selected.elf"
+        # The extent leaves the image part-way: the copy was already opened for writing.
+        with patch.object(nk_cli, "_read_iso_extent",
+                          side_effect=IsoInspectionError("synthetic out-of-bounds extent")):
+            with self.assertRaisesRegex(nk_cli.PackageBuildError, "synthetic out-of-bounds"):
+                nk_cli._extract_iso_executable(iso_file, "EBOOT.BIN", destination)
+        self.assertEqual(sorted(path.name for path in destination.parent.iterdir()), [])
+
     def test_one_module_name_in_two_disc_folders_gets_path_qualified_host_names(self) -> None:
         # A module is identified by its disc path. Two folders holding one file name
         # (ASCII case-insensitively) each get a path-qualified host name, so their
