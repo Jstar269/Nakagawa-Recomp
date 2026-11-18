@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Headless phone and desktop checks for the project website, ``docs/index.html``.
 
-The static checks need nothing but Python. They apply the Pages workflow's own reference rule (every local
+The static checks need nothing but Python. They hold the site's reference rule, which the Pages workflow runs on
+the assembled site (every local
 ``src``, ``srcset`` or ``href`` names a file the site publishes, and so does every absolute link to the site
 itself, such as the share-card image), check that the canonical, ``og:url`` and ``og:image`` addresses spell the
 site's case-sensitive address as Pages serves it, that in-page anchors resolve, that the page loads nothing from
@@ -58,8 +59,9 @@ if not SITE_DIR.is_absolute():
     SITE_DIR = Path.cwd() / SITE_DIR
 PAGE = SITE_DIR / "index.html"
 
-# The Pages workflow's rule, unchanged: grep -oE '(src|srcset|href)="[^"#:]+"'. A value with ":" (an external
-# link or a data: URI) or "#" (an in-page anchor) is not a local file and is skipped.
+# The site's one reference rule: the Pages workflow runs test_every_local_reference_is_published on the assembled
+# site rather than keeping a copy. A value with ":" (an external link or a data: URI) or "#" (an in-page anchor)
+# is not a local file and is skipped.
 LOCAL_REF = re.compile(r'(src|srcset|href)="([^"#:]+)"')
 
 PHONES = ((360, 780), (390, 844), (430, 932))

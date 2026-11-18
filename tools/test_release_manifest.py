@@ -123,7 +123,7 @@ class TestReleaseManifest(unittest.TestCase):
         evidence = (ROOT / vorbis["evidence_path"]).read_text(encoding="utf-8")
         self.assertIn("9f755b604db3492df2cbeb39bf84b81e3e3932e3", evidence)
 
-    def test_monocypher_family_is_pinned_cc0_and_not_claimed_as_runtime_linked(self):
+    def test_monocypher_family_is_pinned_cc0_and_its_player_link_matches_the_build(self):
         family = next(
             item for item in load_manifest()["provenance_families"]
             if item.get("id") == "monocypher-ed25519"
@@ -136,7 +136,39 @@ class TestReleaseManifest(unittest.TestCase):
         )
         self.assertEqual(family["notice_path"], "third_party/monocypher/LICENCE.md")
         self.assertEqual(family["evidence_path"], "third_party/monocypher/PROVENANCE.md")
-        self.assertIn("not linked into player runtime", family["disposition"])
+        # The player links Monocypher for the signed update check exactly when the
+        # build puts it in PLAYER_SRCS (through UPDATE_SIG_SRCS); the release
+        # disposition, which the SBOM publishes, must say the same.
+        pipeline = (ROOT / "mk" / "pipeline.mk").read_text(encoding="utf-8")
+        assignments = {}
+        for line in pipeline.splitlines():
+            name, sep, value = line.partition(":=")
+            if sep and name.strip().isidentifier():
+                assignments.setdefault(name.strip(), value.split())
+        player_sources = assignments["PLAYER_SRCS"]
+        if "$(UPDATE_SIG_SRCS)" in player_sources:
+            player_sources = player_sources + assignments["UPDATE_SIG_SRCS"]
+        linked = "third_party/monocypher/monocypher.c" in player_sources
+        self.assertTrue(linked, "mk/pipeline.mk no longer links Monocypher into the player")
+        self.assertIn("linked into the player", family["disposition"])
+        self.assertNotIn("not linked", family["disposition"])
+
+    def test_ppsspp_lineage_family_records_no_unsupported_revision(self):
+        families = {item.get("id"): item for item in load_manifest()["provenance_families"]}
+        lineage = families["ppsspp"]
+        vfpu = families["vfpu"]
+        # f0baf3ade7 is the pin of the VFPU tables alone (assets/vfpu/PROVENANCE.json);
+        # the inherited runtime's PPSSPP revision is unknown (src/rt/PROVENANCE.md).
+        vfpu_record = json.loads((ROOT / "assets" / "vfpu" / "PROVENANCE.json").read_text(encoding="utf-8"))
+        self.assertEqual(vfpu["revision"], vfpu_record["source_commit"])
+        self.assertNotIn(vfpu_record["source_commit"], lineage["revision"])
+        self.assertTrue(lineage["revision"].startswith("unknown"), lineage["revision"])
+        self.assertIn("src/rt/PROVENANCE.md", lineage["revision"])
+        gap = (ROOT / "src" / "rt" / "PROVENANCE.md").read_text(encoding="utf-8")
+        self.assertIn("The exact PPSSPP revision of every inherited file is **unknown**", gap)
+        for pin in ("da17b0e1db209206a407d097d132201e516e3855", "4e109dd6ae34cbcb39751bb7647d345569700161"):
+            self.assertIn(pin, lineage["revision"])
+            self.assertIn(pin, gap)
 
     def test_project_korean_font_source_is_an_approved_pinned_binary(self):
         data = load_manifest()

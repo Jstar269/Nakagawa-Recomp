@@ -542,6 +542,28 @@ class TestProductionSmoke(unittest.TestCase):
             self.assertIn(omitted_object, str(raised.exception))
             self.assertNotIn(retained_object, str(raised.exception))
 
+    def test_verify_link_map_reports_every_omitted_chunk_object(self):
+        # The aot build emits five chunks: a map that drops chunk 3 or 4 (the sceImpose
+        # stubs) fails like one that drops chunk 0.
+        for omitted in ("production_smoke_recomp_3.o", "production_smoke_recomp_4.o"):
+            with self.subTest(omitted=omitted), \
+                    tempfile.TemporaryDirectory(prefix="nk_prod_smoke_chunk_") as tmp_dir:
+                temp_root = Path(tmp_dir)
+                relative_dir = "sub_build"
+                build_dir = self._fabricated_aot_tree(temp_root, relative_dir)
+                map_path = build_dir / "production_smoke.map"
+                paths = [path for path in map_path.read_text(encoding="utf-8").splitlines()
+                         if path.rsplit("/", 1)[-1] != omitted]
+                map_path.write_text("\n".join(paths) + "\n", encoding="utf-8")
+                cwd = os.getcwd()
+                try:
+                    os.chdir(temp_root)
+                    with self.assertRaisesRegex(RuntimeError, "production link map omits") as raised:
+                        generator.verify(Path(relative_dir), mode="aot")
+                finally:
+                    os.chdir(cwd)
+                self.assertIn(omitted, str(raised.exception))
+
     def _assert_title_link_uses_response_file(self, makefile):
         """The title link reads its objects from a response file, never the command line.
 

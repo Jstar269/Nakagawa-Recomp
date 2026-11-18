@@ -1358,10 +1358,12 @@ gpu-coherence-selftest-movie-mutant: shader-verify $(RT_GE_O)
 # ge.c's lists run on ge_gpu.c's real targets: each frame draws a target, stores into it
 # from the CPU, draws it as a texture into the shown target and presents that with a capture
 # armed. A run without the viewer writes the digest (every presented frame, the lists' return
-# codes, then guest VRAM and RAM as a guest read sees them and the GE state); runs with the
+# codes, then all of guest VRAM and RAM as a guest read sees them and the GE state); runs with the
 # viewer's decodes at one frame's VBLANK must match it, and the decodes must show the scene and
 # move bytes into guest VRAM, so the match is not trivial. Again at render scale 2. Last, a
-# mutant whose viewer stores one byte into guest VRAM must fail on the next presented frame.
+# mutant whose viewer stores one byte into guest VRAM must fail on the next presented frame, and
+# the same mutant storing past the depth buffer or into RAM no list uses must fail on the
+# end-of-run vram or ram line.
 # Exit 77 (no Vulkan device) fails the recipe, as gpu-coherence-selftest's does on hosted CI.
 VRAM_VIEW_BIN := $(BUILD_DIR)/vram_view_identity_selftest.exe
 
@@ -1388,6 +1390,16 @@ vram-view-identity-selftest: $(VRAM_VIEW_BIN)
 	if ! grep -Fq 'FAIL want "present 2 ' $$log; then \
 		cat $$log; echo "vram-view-identity-selftest: the mutant failed for another reason" >&2; exit 1; fi; \
 	echo "vram-view-identity-selftest: the writing-viewer mutant is caught at the next presented frame"
+	@for spec in "0x041F0000 vram" "0x09000000 ram"; do \
+		set -- $$spec; log=$(BUILD_DIR)/vram_view_identity_mutant_$$2.log; \
+		if $(BUILD_DIR)/vram_view_identity_mutant.exe --check $(BUILD_DIR)/vram_view_ref_s1.txt --view-at 1 \
+			--mutant-store $$1 > $$log 2>&1; then \
+			cat $$log; echo "vram-view-identity-selftest: the mutant storing at $$1 passed" >&2; exit 1; fi; \
+		if ! grep -Fq "FAIL want \"$$2 " $$log; then \
+			cat $$log; echo "vram-view-identity-selftest: the mutant storing at $$1 failed for another reason" >&2; \
+			exit 1; fi; \
+		echo "vram-view-identity-selftest: a viewer store at $$1 no frame presents is caught on the $$2 line"; \
+	done
 
 # gpu-dst-read-mutants — the dst-read cells must kill each SR_GPU_DSTREAD_MUTANT in ge_gpu.c (#2109):
 # 1 merges every channel from the loaded destination, so the RMW store has no effect
@@ -1658,7 +1670,7 @@ native-core-tests: pipeline-cache-selftest
 texrepl-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_zip.c src/core/nk_psp_inflate.c \
+		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_TEST_HOOKS tests/native/texrepl_selftest.c src/rt/texrepl.c src/core/nk_zip.c src/core/nk_psp_inflate.c \
 		src/core/nk_shared_helpers.c \
 		$(PLAYER_PLATFORM_SRC) $(PLAYER_PLATFORM_LIBS) \
 		-o $(BUILD_DIR)/texrepl_selftest$(EXE_EXT) && $(BUILD_DIR)/texrepl_selftest$(EXE_EXT)
@@ -1672,7 +1684,7 @@ texrepl-mutant:
 	$(NK_REQUIRE_POSIX_SHELL)
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_DIR)').mkdir(parents=True, exist_ok=True)"
 	@$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/core -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR tests/native/texrepl_selftest.c src/rt/texrepl.c \
+		-DNK_SORT_COUNT_COMPARES -DNK_INFLATE_COUNT_BUILDS -DNK_TEXREPL_TEST_HOOKS -DNK_TEXREPL_MUTANT_NO_CLUTFORMAT_XOR tests/native/texrepl_selftest.c src/rt/texrepl.c \
 		src/core/nk_zip.c src/core/nk_psp_inflate.c src/core/nk_shared_helpers.c $(PLAYER_PLATFORM_SRC) \
 		$(PLAYER_PLATFORM_LIBS) -o $(BUILD_DIR)/texrepl_mutant$(EXE_EXT)
 	@rc=0; $(BUILD_DIR)/texrepl_mutant$(EXE_EXT) > $(BUILD_DIR)/texrepl_mutant.log 2>&1 || rc=$$?; \

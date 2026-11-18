@@ -43,6 +43,14 @@
 # redistributed with the public source (see font/README.md), so they must never be committed.
 /font/*.pgf
 /font/*.pgd
+# The same payloads and the console-bound licence files stay out of `git add -A` wherever
+# a user drops them: SR_FONTDIR can be any folder (docs/SETUP.md), and a *.rif or act.dat
+# is never committed (AGENTS.md section 5). No .pgf, .pgd, .rif or act.dat is tracked.
+*.[pP][gG][fF]
+*.[pP][gG][dD]
+*.[rR][iI][fF]
+[aA][cC][tT].[dD][aA][tT]
+/flash0/
 /original_game/
 /place_game_here/
 /.hst/
@@ -218,6 +226,13 @@ keys.json
 keys.txt
 keys.dat
 *.keys
+# An APK signing keystore is a credential with no text marker; the suffix keeps the binary
+# JKS and PKCS#12 forms and the Gradle signing properties out of `git add -A`.
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
 
 # Android (android/): Gradle and CMake outputs, the local SDK pointer, IDE state and the
 # generated Gradle wrapper scripts stay out of the repository; gradle-wrapper.properties is the pin.

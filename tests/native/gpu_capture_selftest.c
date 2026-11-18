@@ -76,8 +76,8 @@ int main(void) {
         assert(last_mode == 2 && last_vsync == 1);
     }
     /* Surface-format pick (issue #884): VK_INCOMPLETE (5) is a success code, so the first 32
-     * formats of a 40-format surface still count; BGRA8 UNORM (44) wins when present, else
-     * entry 0; zero formats, NULL lists and failed queries are refused. */
+     * formats of a 40-format surface still count; BGRA8 UNORM (44) wins when present, then
+     * RGBA8 UNORM (37), else entry 0; zero formats, NULL lists and failed queries are refused. */
     {
         enum { FMT_R8G8B8A8_UNORM = 37, FMT_BGRA8_UNORM = 44 };
         enum { RES_SUCCESS = 0, RES_INCOMPLETE = 5, RES_OUT_OF_HOST_MEMORY = -1 };
@@ -93,6 +93,15 @@ int main(void) {
         assert(sdl3vk_pick_surface_format(RES_INCOMPLETE, 35, big) == 0);
         assert(sdl3vk_pick_surface_format(RES_SUCCESS, 4, two_bgra) == 1);  /* first match */
         assert(sdl3vk_pick_surface_format(RES_SUCCESS, 2, no_bgra) == 0);   /* fallback */
+        /* An 8-bit UNORM format the HUD can be copied into, and the frame blit writes without
+         * an sRGB encode, wins over an sRGB, 10-bit or half-float entry listed first. */
+        static const int srgb_first[] = { 50, FMT_R8G8B8A8_UNORM };
+        static const int wide_first[] = { 64, 97, FMT_R8G8B8A8_UNORM, FMT_BGRA8_UNORM };
+        static const int no_8bit_unorm[] = { 97, 50 };
+        assert(sdl3vk_pick_surface_format(RES_SUCCESS, 2, srgb_first) == 1);
+        assert(sdl3vk_pick_surface_format(RES_SUCCESS, 3, wide_first) == 2);
+        assert(sdl3vk_pick_surface_format(RES_SUCCESS, 4, wide_first) == 3);
+        assert(sdl3vk_pick_surface_format(RES_SUCCESS, 2, no_8bit_unorm) == 0);
         assert(sdl3vk_pick_surface_format(RES_INCOMPLETE, 2, no_bgra) == 0);
         assert(sdl3vk_pick_surface_format(RES_SUCCESS, 0, two_bgra) == -1); /* zero count */
         assert(sdl3vk_pick_surface_format(RES_INCOMPLETE, 0, two_bgra) == -1);

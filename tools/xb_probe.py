@@ -125,14 +125,6 @@ class XBEntry:
     stored_size: int
     span_size: int
 
-    @property
-    def compressed_size(self) -> int | None:
-        """Return the compressed payload size, or ``None`` for raw data."""
-
-        if self.compression is XBCompression.NONE:
-            return None
-        return self.stored_size - 8
-
     def metadata(self) -> dict[str, object]:
         """Return metadata only; no archive bytes are included."""
 
@@ -476,18 +468,17 @@ class XBArchiveReader:
         if endian not in ("<", ">"):
             raise XBProbeError("endian must be '<' or '>'")
         self.path = Path(path)
-        self.endian = endian
-        self.limits = limits or XBLimits()
+        limits = limits or XBLimits()
         try:
             with self.path.open("rb") as handle:
                 try:
                     size = os.fstat(handle.fileno()).st_size
                 except OSError as exc:
                     raise XBProbeError(f"cannot stat archive: {self.path}") from exc
-                if size > self.limits.max_archive_bytes:
+                if size > limits.max_archive_bytes:
                     raise XBProbeError("archive exceeds the configured byte limit")
                 chunks = []
-                remaining = self.limits.max_archive_bytes + 1
+                remaining = limits.max_archive_bytes + 1
                 while remaining > 0:
                     chunk = handle.read(remaining)
                     if not chunk:
@@ -501,15 +492,11 @@ class XBArchiveReader:
                     raise XBProbeError(f"cannot stat archive: {self.path}") from exc
         except OSError as exc:
             raise XBProbeError(f"cannot read archive: {self.path}") from exc
-        if len(data) > self.limits.max_archive_bytes:
+        if len(data) > limits.max_archive_bytes:
             raise XBProbeError("archive exceeds the configured byte limit")
         if final_size != size or len(data) != size:
             raise XBProbeError("archive changed while it was being read")
-        self._data = data
-
-        self.variant = variant_from_path(self.path)
-        self._entries, self._data_start = self._parse()
-        self._by_path = {entry.path: entry for entry in self._entries}
+        self._init_from_data(data, self.path, endian, limits)
 
     @classmethod
     def from_bytes(
@@ -523,18 +510,29 @@ class XBArchiveReader:
         """Build a reader for synthetic tests without creating a private file."""
 
         obj = cls.__new__(cls)
+        obj._init_from_data(bytes(data), Path(name), endian, limits or XBLimits())
+        return obj
+
+    def _init_from_data(
+        self,
+        data: bytes,
+        path: Path,
+        endian: str,
+        limits: XBLimits,
+    ) -> None:
+        """Validate and index archive bytes; shared by both constructors."""
+
         if endian not in ("<", ">"):
             raise XBProbeError("endian must be '<' or '>'")
-        obj.path = Path(name)
-        obj.endian = endian
-        obj.limits = limits or XBLimits()
-        if len(data) > obj.limits.max_archive_bytes:
+        if len(data) > limits.max_archive_bytes:
             raise XBProbeError("archive exceeds the configured byte limit")
-        obj._data = bytes(data)
-        obj.variant = variant_from_path(name)
-        obj._entries, obj._data_start = obj._parse()
-        obj._by_path = {entry.path: entry for entry in obj._entries}
-        return obj
+        self.path = path
+        self.endian = endian
+        self.limits = limits
+        self._data = data
+        self.variant = variant_from_path(path)
+        self._entries, self._data_start = self._parse()
+        self._by_path = {entry.path: entry for entry in self._entries}
 
     @property
     def entries(self) -> tuple[XBEntry, ...]:
@@ -578,7 +576,7 @@ class XBArchiveReader:
             raise XBProbeError("metadata limit must be non-negative")
         visible = self._entries[:limit]
         return {
-            "path": str(self.path),
+            "path": self.path.name,
             "variant": self.variant.label,
             "variant_number": self.variant.number,
             "locale_hint": self.variant.locale_hint,
@@ -787,7 +785,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             print(
-                f"archive={archive.path} variant={archive.variant.label} "
+                f"archive={archive.path.name} variant={archive.variant.label} "
                 f"endian={args.endian} entries={len(archive.entries)}"
             )
             for entry in archive.entries[: args.limit]:

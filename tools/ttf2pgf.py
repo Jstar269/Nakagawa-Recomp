@@ -115,8 +115,8 @@ VARIABLE_FONT_TABLES = ("fvar", "gvar", "cvar", "avar", "HVAR", "MVAR", "VVAR")
 
 SUPPORTED_CMAP_FORMATS = (0, 4, 6, 12)
 #: Deterministic subtable preference: Unicode platforms first, then Microsoft
-#: full-repertoire, Microsoft BMP, Microsoft symbol, then legacy records.
-CMAP_PRIORITY = ((0, 3), (0, 4), (0, 2), (0, 1), (0, 0), (3, 10), (3, 1), (3, 6), (3, 0), (1, 0))
+#: full-repertoire and Microsoft BMP Unicode records.
+CMAP_PRIORITY = ((0, 3), (0, 4), (0, 2), (0, 1), (0, 0), (3, 10), (3, 1), (3, 6))
 
 MAX_TABLE_COUNT = 512
 MAX_CODE = 0xFFFF
@@ -689,10 +689,14 @@ def _parse_cmap4(cmap: bytes, rel: int) -> dict[int, int]:
     ranges_base = rel + 16 + 3 * seg_x2
     ranges = struct.unpack_from(f">{segments}H", cmap, ranges_base)
     mapping: dict[int, int] = {}
+    prev_end = -1
     for index in range(segments):
         start, end = starts[index], ends[index]
         if start > end:
             continue
+        if start <= prev_end:
+            raise _refuse("malformed-cmap", f"format 4 segment {index} overlaps or precedes segment {index - 1}")
+        prev_end = end
         # U+FFFF is a noncharacter and the format 4 terminator segment ends there, so it is never mapped.
         for code in range(start, min(end, MAX_CODE - 1) + 1):
             if ranges[index] == 0:
@@ -719,11 +723,15 @@ def _parse_cmap12(cmap: bytes, rel: int) -> dict[int, int]:
     if 16 + 12 * groups > length:
         raise _refuse("malformed-cmap", "format 12 group array is truncated")
     mapping: dict[int, int] = {}
+    prev_end = -1
     for index in range(groups):
         offset = rel + 16 + 12 * index
         start, end, first = struct.unpack_from(">III", cmap, offset)
         if start > end:
             raise _refuse("malformed-cmap", f"format 12 group {index} starts after it ends")
+        if start <= prev_end:
+            raise _refuse("malformed-cmap", f"format 12 group {index} overlaps or precedes group {index - 1}")
+        prev_end = end
         if end > 0x10FFFF:
             raise _refuse("malformed-cmap", f"format 12 group {index} ends beyond U+10FFFF")
         for code in range(start, min(end, MAX_CODE) + 1):
@@ -1781,7 +1789,7 @@ class _Planner:
             per_size[code] = cached
         return cached
 
-    def extents_at(self, ppem: int) -> tuple[int, int]:
+    def extents_at(self, ppem: int, embolden_y: int = 0) -> tuple[int, int]:
         """Header ascender/descender in 26.6 as ``build_pgf`` would derive them.
 
         Mirrors ``pgf_writer._extrema``: every glyph contributes
@@ -1790,12 +1798,14 @@ class _Planner:
         """
         ascender = 0
         descender = 0
+        grow_top = -(-embolden_y // SUPERSAMPLE)
         for code in self.codes:
             raster = self.raster_at(code, ppem)
             if raster.width <= 0 or raster.height <= 0:
                 continue
-            ascender = max(ascender, raster.top * 64)
-            descender = min(descender, (raster.top - raster.height) * 64)
+            top = raster.top + grow_top
+            ascender = max(ascender, top * 64)
+            descender = min(descender, raster.bottom * 64)
         return ascender, descender
 
     def extents_cheap(self, ppem: int) -> tuple[int, int]:
@@ -1824,7 +1834,7 @@ class _Planner:
             descender = min(descender, (bottom // 64) * 64)
         return ascender, descender
 
-    def search_ppem(self, targets: _MetricTargets) -> tuple[int, tuple[int, int]]:
+    def search_ppem(self, targets: _MetricTargets, embolden_y: int = 0) -> tuple[int, tuple[int, int]]:
         """Smallest ppem whose exact header extrema meet both targets.
 
         The cheap control-point bound prunes candidate sizes; only candidates
@@ -1832,14 +1842,15 @@ class _Planner:
         stays fast while the acceptance decision uses the same extents the
         writer will emit.
         """
+        grow_top = -(-embolden_y // SUPERSAMPLE)
         for ppem in range(targets.ppem_min, targets.ppem_max + 1):
             predicted_asc, predicted_desc = self.extents_cheap(ppem)
-            slack = targets.tolerance_px + 2.0
+            slack = targets.tolerance_px + 2.0 + grow_top
             if abs(predicted_asc / 64 - targets.ascender_px) > slack:
                 continue
             if abs(predicted_desc / 64 - targets.descender_px) > slack:
                 continue
-            ascender, descender = self.extents_at(ppem)
+            ascender, descender = self.extents_at(ppem, embolden_y=embolden_y)
             if (
                 abs(ascender / 64 - targets.ascender_px) <= targets.tolerance_px
                 and abs(descender / 64 - targets.descender_px) <= targets.tolerance_px
@@ -1951,8 +1962,10 @@ def convert(
         raise _refuse("conflicting-parameters", "pin both fonts or neither: --pin and --fallback-pin go together")
 
     validate_output_name(font_name, pin)
+    validate_output_name(font_type, pin)
     if fallback_pin is not None:
         validate_output_name(font_name, fallback_pin)
+        validate_output_name(font_type, fallback_pin)
 
     font = _Ttf(data)
     fallback = _Ttf(fallback_data) if fallback_data is not None else None
@@ -1964,7 +1977,7 @@ def convert(
 
     chosen_targets: dict | None = None
     if metric_targets is not None:
-        ppem, extents = planner.search_ppem(metric_targets)
+        ppem, extents = planner.search_ppem(metric_targets, embolden_y=embolden_y)
         chosen_targets = {
             "ascender_px": metric_targets.ascender_px,
             "descender_px": metric_targets.descender_px,
@@ -2450,12 +2463,11 @@ def _main(argv: list[str]) -> int:
     try:
         args.output.write_bytes(conversion.image)
         if args.manifest is not None:
-            try:
-                args.manifest.write_bytes(manifest)
-            except OSError:
-                args.output.unlink(missing_ok=True)
-                raise
+            args.manifest.write_bytes(manifest)
     except OSError as exc:
+        args.output.unlink(missing_ok=True)
+        if args.manifest is not None:
+            args.manifest.unlink(missing_ok=True)
         print(f"{CONVERTER_NAME}: cannot write output: {exc}", file=sys.stderr)
         return 1
     digest = hashlib.sha256(conversion.image).hexdigest()

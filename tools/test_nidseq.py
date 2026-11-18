@@ -233,21 +233,21 @@ class TestNidseqFailClosed(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("VERIFIED: import sequences identical (1 imports)", out)
 
-    def test_two_different_unmapped_stubs_diverge(self):
-        # STUBS[0] and STUBS[3] are mapped, so the stub range also covers the unmapped
-        # STUBS[1] and STUBS[2]. Unmapped stubs are keyed by PC, so two different ones diverge.
+    def test_a_return_in_a_small_gap_between_stub_runs_is_not_an_import(self):
+        # imports.py emits every slot of every stub region (unclaimed slots under the
+        # unattributed marker), so a gap in the map is not stub text: STUBS[0] and
+        # STUBS[3] are two one-slot runs, and a jr $ra at STUBS[1] or STUBS[2] (8 and
+        # 16 bytes past the first run) is an ordinary function return.
         toml = self.toml_with([0, 3])
-        rc, out = run_tool([toml, self.trace([STUBS[1]]), self.trace([STUBS[2]])])
-        self.assertEqual(rc, 1, out)
-        self.assertIn("DIVERGE at import 0: recomp=?.0x08a00008 oracle=?.0x08a00010", out)
-        self.assertIn("FAILED: import sequences diverge", out)
-        self.assertNotIn("VERIFIED", out)
-
-    def test_same_unmapped_stub_still_verifies(self):
-        toml = self.toml_with([0, 3])
-        rc, out = run_tool([toml, self.trace([STUBS[1]]), self.trace([STUBS[1]])])
+        for gap_pc in (STUBS[1], STUBS[2]):
+            with self.subTest(pc=hex(gap_pc)):
+                rc, out = run_tool([toml, self.trace([gap_pc]), self.trace([gap_pc])])
+                self.assertEqual(rc, 1, out)
+                self.assertIn("FAIL: zero imports compared", out)
+                self.assertNotIn("VERIFIED", out)
+        rc, out = run_tool([toml, self.trace([STUBS[0], STUBS[1], STUBS[3]]), self.trace([STUBS[0], STUBS[3]])])
         self.assertEqual(rc, 0, out)
-        self.assertIn("VERIFIED: import sequences identical (1 imports)", out)
+        self.assertIn("VERIFIED: import sequences identical (2 imports)", out)
 
     def test_duplicate_stub_address_fails(self):
         toml = self.write_imports([(STUBS[0], NIDS[0])])
@@ -306,6 +306,12 @@ class TestNidseqUnit(unittest.TestCase):
 
         cls.m = m
 
+    def test_stub_runs_are_strictly_contiguous_slots(self):
+        imp = {STUBS[0]: ("l", 1), STUBS[1]: ("l", 2), STUBS[3]: ("l", 4)}
+        self.assertEqual(
+            self.m._stub_runs(imp), ((STUBS[0], STUBS[1] + 8), (STUBS[3], STUBS[3] + 8))
+        )
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -352,11 +358,65 @@ class TestNidseqUnit(unittest.TestCase):
         imp = {STUBS[0]: ("l", 1), STUBS[1]: ("l", 2)}
         mine = [(STUBS[0], imp[STUBS[0]]), (STUBS[1], imp[STUBS[1]])]
         orac = [(STUBS[0], imp[STUBS[0]]), (STUBS[1], imp[STUBS[1]])]
-        self.assertEqual(self.m.verify_sequences(mine, orac, imp, allow_prefix=False), 0)
-        self.assertEqual(self.m.verify_sequences(mine[:1], orac, imp, allow_prefix=False), 1)
-        self.assertEqual(self.m.verify_sequences(mine, orac[:1], imp, allow_prefix=False), 1)
-        self.assertEqual(self.m.verify_sequences(mine[:1], orac, imp, allow_prefix=True), 0)
-        self.assertEqual(self.m.verify_sequences([], [], imp, allow_prefix=False), 1)
+        self.assertEqual(self.m.verify_sequences(mine, orac, allow_prefix=False), 0)
+        self.assertEqual(self.m.verify_sequences(mine[:1], orac, allow_prefix=False), 1)
+        self.assertEqual(self.m.verify_sequences(mine, orac[:1], allow_prefix=False), 1)
+        self.assertEqual(self.m.verify_sequences(mine[:1], orac, allow_prefix=True), 0)
+        self.assertEqual(self.m.verify_sequences([], [], allow_prefix=False), 1)
+
+    def test_detached_stub_runs_do_not_capture_intervening_function_returns(self):
+        # Two detached stub runs: 0x08801000..0x08801010 and 0x08a00000..0x08a00010.
+        # An ordinary function return (op=0x03e00008) at 0x08900000 in between must be ignored.
+        p = self.write(
+            "[[import]]\nstub = 0x08801000\nlib = \"sceUtility\"\nnid = 0x111\n"
+            "[[import]]\nstub = 0x08801008\nlib = \"sceUtility\"\nnid = 0x222\n"
+            "[[import]]\nstub = 0x08a00000\nlib = \"sceUtility\"\nnid = 0x333\n"
+            "[[import]]\nstub = 0x08a00008\nlib = \"sceUtility\"\nnid = 0x444\n"
+        )
+        imp, s0, s1 = self.m.load_imports(p)
+        tp = os.path.join(self.d, "detached.trace")
+        with open(tp, "w", newline="\n") as f:
+            f.write("0 pc=0x08801000 op=0x03e00008 r2=0x0\n")
+            f.write("1 pc=0x08900000 op=0x03e00008 r2=0x0\n")
+            f.write("2 pc=0x08a00000 op=0x03e00008 r2=0x0\n")
+        seq = self.m.nid_seq(tp, imp, s0, s1)
+        self.assertEqual([pc for pc, _ in seq], [0x08801000, 0x08A00000])
+
+    def test_informational_limit_is_reported_when_truncated(self):
+        toml = self.write(
+            "".join(
+                f"[[import]]\nstub = 0x{s:08x}\nlib = \"sceUtility\"\nnid = 0x{n:08x}\n"
+                for s, n in zip(STUBS[:3], NIDS[:3], strict=True)
+            )
+        )
+        tp = os.path.join(self.d, "three.trace")
+        with open(tp, "w", newline="\n") as f:
+            for i, s in enumerate(STUBS[:3]):
+                f.write(f"{i} pc=0x{s:08x} op=0x03e00008 r2=0x0\n")
+        old_limit = self.m.DEFAULT_IMPORT_SCAN_LIMIT
+        self.m.DEFAULT_IMPORT_SCAN_LIMIT = 2
+        try:
+            import contextlib
+            import io
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = self.m.main(["nidseq.py", toml, tp])
+            self.assertEqual(rc, 0)
+            self.assertIn("TRUNCATED", out.getvalue())
+        finally:
+            self.m.DEFAULT_IMPORT_SCAN_LIMIT = old_limit
+
+    def test_non_ascii_trace_bytes_fail_with_named_error_not_traceback(self):
+        toml = self.write(
+            f"[[import]]\nstub = 0x{STUBS[0]:08x}\nlib = \"sceUtility\"\nnid = 0x{NIDS[0]:08x}\n"
+        )
+        tp = os.path.join(self.d, "corrupt.trace")
+        with open(tp, "wb") as f:
+            f.write(b"0 pc=0x08a00000 op=0x03e00008 \x81\xff\n")
+        rc, out = run_tool([toml, tp])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("ERROR:", out)
+        self.assertNotIn("Traceback", out)
 
 
 if __name__ == "__main__":

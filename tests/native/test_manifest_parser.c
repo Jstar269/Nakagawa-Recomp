@@ -139,6 +139,7 @@ static void test_manifest_unicode_and_surrogates(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(lone_high, strlen(lone_high), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "unpaired high surrogate") != NULL);
 
     /* 4. Lone low surrogate -> MUST REJECT */
     const char *lone_low =
@@ -155,6 +156,7 @@ static void test_manifest_unicode_and_surrogates(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(lone_low, strlen(lone_low), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "unpaired low surrogate") != NULL);
 
     printf("[MANIFEST_TEST] Unicode and surrogate tests PASSED!\n");
 }
@@ -179,6 +181,7 @@ static void test_manifest_numbers_and_addresses(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(float_entry, strlen(float_entry), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.schema_version: only schema version 1 is supported") != NULL);
 
     /* 2. Number with exponent (1e5) for integer field -> MUST REJECT */
     const char *exp_entry =
@@ -195,6 +198,7 @@ static void test_manifest_numbers_and_addresses(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(exp_entry, strlen(exp_entry), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.schema_version: only schema version 1 is supported") != NULL);
 
     /* 3. Valid exact 8-hex address string -> MUST ACCEPT */
     const char *hex_addr =
@@ -229,6 +233,7 @@ static void test_manifest_numbers_and_addresses(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(overlong_hex, strlen(overlong_hex), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.executable.entry: invalid entry address") != NULL);
 
     /* 5. Short address string ("0x1") -> MUST REJECT */
     const char *short_hex =
@@ -245,6 +250,7 @@ static void test_manifest_numbers_and_addresses(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(short_hex, strlen(short_hex), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.executable.entry: invalid entry address") != NULL);
 
     printf("[MANIFEST_TEST] Numbers and addresses tests PASSED!\n");
 }
@@ -269,6 +275,7 @@ static void test_manifest_identifiers_and_disc_ids(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(upper_id, strlen(upper_id), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.id: must match") != NULL);
 
     /* 2. Identifier starting with symbol -> MUST REJECT */
     const char *sym_id =
@@ -285,6 +292,7 @@ static void test_manifest_identifiers_and_disc_ids(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(sym_id, strlen(sym_id), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.id: must match") != NULL);
 
     /* 3. Valid lowercase identifier with digits, '.', '_', '-' -> MUST ACCEPT */
     const char *valid_id =
@@ -319,6 +327,7 @@ static void test_manifest_identifiers_and_disc_ids(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(bad_disc, strlen(bad_disc), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.disc.id: must match") != NULL);
 
     /* 5. Retail disc ID with compatible_revisions containing primary disc ID -> MUST REJECT */
     const char *compat_dup_primary =
@@ -336,6 +345,7 @@ static void test_manifest_identifiers_and_disc_ids(void) {
         "  \"verification_profile\": \"smoke\"\n"
         "}\n";
     assert(!nk_title_manifest_parse_buffer(compat_dup_primary, strlen(compat_dup_primary), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.disc.compatible_revisions[0]: must be a distinct PSP disc ID from primary") != NULL);
 
     printf("[MANIFEST_TEST] Identifiers and disc ID tests PASSED!\n");
 }
@@ -363,18 +373,22 @@ static void test_manifest_mutations(void) {
     /* 4. Wrong type for schema_version */
     const char *wrong_type = "{\"schema_version\": \"1\", \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(wrong_type, strlen(wrong_type), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.schema_version: only schema version 1 is supported") != NULL);
 
     /* 5. Unsupported schema_version */
     const char *bad_sv = "{\"schema_version\": 2, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(bad_sv, strlen(bad_sv), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.schema_version: only schema version 1 is supported") != NULL);
 
     /* 6. Negative/overflow integer */
     const char *neg_entry = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": -5, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(neg_entry, strlen(neg_entry), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.executable.entry: invalid entry address") != NULL);
 
     /* 7. Malformed hex */
     const char *bad_hex = "{\"schema_version\": 1, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": \"0xZZZZ\", \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
     assert(!nk_title_manifest_parse_buffer(bad_hex, strlen(bad_hex), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "$.executable.entry: invalid entry address") != NULL);
 
     /* 8. Duplicate module binding */
     /* The bases must lie in user RAM: with load_address 1/2 the guest-module window rule fires
@@ -464,6 +478,11 @@ static void test_manifest_mutations(void) {
     assert(!nk_title_manifest_parse_buffer(bad_evidence, strlen(bad_evidence), false, &entry, err, sizeof(err)));
     assert(strstr(err, "unsupported evidence class") != NULL);
 
+    /* 22. Leading zero in JSON number -> REJECT (RFC 8259) */
+    const char *leading_zero = "{\"schema_version\": 01, \"id\": \"test\", \"display_name\": \"T\", \"kind\": \"synthetic\", \"executable\": {\"base\": 0, \"entry\": 0, \"bss_metadata_source\": \"none\", \"extra_executable_spans\": []}, \"modules\": [], \"filesystem\": {\"data_root\": \"d\", \"memory_stick_root\": \"m\", \"device_prefixes\": [\"host0:\"]}, \"hle_profile\": \"std\", \"feature_requirements\": [], \"verification_profile\": \"v\"}";
+    assert(!nk_title_manifest_parse_buffer(leading_zero, strlen(leading_zero), false, &entry, err, sizeof(err)));
+    assert(strstr(err, "leading zeros") != NULL || strstr(err, "Invalid number") != NULL);
+
     printf("[MANIFEST_TEST] Schema mutation tests PASSED!\n");
 }
 
@@ -503,9 +522,9 @@ static void test_multi_overlay_storage(void) {
 
     /* Overlay storage is a process-lifetime pool of NK_MANIFEST_MAX_OVERLAYS slots and every
        accepted parse_buffer() call takes one, so this test must start from a released pool: it
-       needs two slots that stay independent, and once the pool is full the parser deliberately
-       replaces the last slot instead. Without this the test silently depended on fewer than
-       MAX_OVERLAYS accepted parses having happened before it. */
+       needs two slots that stay independent, and once the pool is full the parser refuses
+       a new title. Without this the test silently depended on fewer than MAX_OVERLAYS
+       accepted parses having happened before it. */
     nk_title_catalog_clear_overlay();
 
     const char *manifest_alpha =
@@ -613,6 +632,57 @@ static void test_overlay_clear_releases_storage(void) {
 
     nk_title_catalog_clear_overlay();
     printf("[MANIFEST_TEST] Overlay clear/storage release test PASSED!\n");
+}
+
+static int overlay_capacity_manifest(char *out, size_t out_size, int index) {
+    return snprintf(out, out_size,
+        "{\"schema_version\":1,\"id\":\"overlay-capacity-%d\","
+        "\"display_name\":\"Overlay Capacity %d\",\"kind\":\"retail\","
+        "\"disc\":{\"id\":\"ULUS9984%d\",\"region\":\"NA\","
+        "\"revision_policy\":\"exact-disc-id\"},"
+        "\"executable\":{\"base\":0,\"entry\":0,\"bss_metadata_source\":\"none\","
+        "\"extra_executable_spans\":[]},\"modules\":[],"
+        "\"filesystem\":{\"data_root\":\"data\",\"memory_stick_root\":\"savedata\","
+        "\"device_prefixes\":[\"disc0:\",\"ms0:\"]},\"hle_profile\":\"generic\","
+        "\"feature_requirements\":[],\"verification_profile\":\"smoke\"}\n",
+        index, index, index);
+}
+
+static void test_overlay_capacity_refuses_new_title(void) {
+    printf("[MANIFEST_TEST] Testing that a full overlay pool refuses a new title...\n");
+    char err[512];
+    char json[1024];
+    NkTitleEntry entries[NK_TITLE_MAX_OVERLAYS + 1];
+
+    nk_title_catalog_clear_overlay();
+    for (int i = 0; i < NK_TITLE_MAX_OVERLAYS; i++) {
+        int length = overlay_capacity_manifest(json, sizeof(json), i);
+        assert(length > 0 && (size_t)length < sizeof(json));
+        assert(nk_title_manifest_parse_buffer(json, (size_t)length, false, &entries[i], err, sizeof(err)));
+    }
+
+    /* A ninth distinct title is refused by name. Before the fix it overwrote the
+       last slot, so the eighth title's entry (and any registration pointing at
+       that slot) silently became the ninth title. */
+    int length = overlay_capacity_manifest(json, sizeof(json), NK_TITLE_MAX_OVERLAYS);
+    assert(length > 0 && (size_t)length < sizeof(json));
+    err[0] = '\0';
+    assert(!nk_title_manifest_parse_buffer(json, (size_t)length, false,
+                                           &entries[NK_TITLE_MAX_OVERLAYS], err, sizeof(err)));
+    assert(strstr(err, "at most 8 title manifests") != NULL);
+    for (int i = 0; i < NK_TITLE_MAX_OVERLAYS; i++) {
+        char id[32];
+        snprintf(id, sizeof(id), "overlay-capacity-%d", i);
+        assert(strcmp(entries[i].id, id) == 0);
+    }
+
+    /* Reloading a title already in the pool still updates its own slot. */
+    length = overlay_capacity_manifest(json, sizeof(json), 3);
+    assert(nk_title_manifest_parse_buffer(json, (size_t)length, false, &entries[3], err, sizeof(err)));
+    assert(strcmp(entries[3].id, "overlay-capacity-3") == 0);
+
+    nk_title_catalog_clear_overlay();
+    printf("[MANIFEST_TEST] Overlay capacity refusal test PASSED!\n");
 }
 
 static void test_overlay_collision_policy(void) {
@@ -827,6 +897,7 @@ int main(int argc, char *argv[]) {
     test_multi_overlay_storage();
     test_overlay_collision_policy();
     test_overlay_clear_releases_storage();
+    test_overlay_capacity_refuses_new_title();
     printf("[MANIFEST_TEST] ALL NATIVE MANIFEST PARSER TESTS PASSED SUCCESSFULLY!\n");
     return 0;
 }
