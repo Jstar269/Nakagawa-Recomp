@@ -2421,13 +2421,17 @@ static const uint32_t k_candidate_counters[] = {
 static void test_title_config_foreign_entries_are_inert(void) {
     for (size_t i = 0; i < sizeof(k_candidate_entries) / sizeof(k_candidate_entries[0]); i++) {
         uint32_t entry = k_candidate_entries[i];
-        if (sr_title_config_is_worker_entry(entry) || sr_title_config_is_launcher_entry(entry)) {
+        /* The role this build's configuration gives the address, decided from the
+         * configuration itself rather than from the predicates checked here. */
+        const int worker = cfg_has(SR_TITLE_CFG_WORKER_ENTRY) && entry == cfg_worker_entry();
+        const int launcher = cfg_has(SR_TITLE_CFG_LAUNCHER_ENTRY) && entry == cfg_launcher_entry();
+        expect(!sr_title_config_is_worker_entry(entry) == !worker,
+               "a candidate entry is the worker entry exactly when this build configures it");
+        expect(!sr_title_config_is_launcher_entry(entry) == !launcher,
+               "a candidate entry is the launcher entry exactly when this build configures it");
+        if (worker || launcher) {
             continue;   /* this build configures the address; covered by the tests below */
         }
-        expect(!sr_title_config_is_worker_entry(entry),
-               "an unconfigured entry is not the worker entry");
-        expect(!sr_title_config_is_launcher_entry(entry),
-               "an unconfigured entry is not the launcher entry");
         reset_sched();
         uint32_t root = sched_create_thread(0x00001000u, 32, 0x1000u);
         expect(root != 0, "root create succeeds");
@@ -2690,22 +2694,19 @@ static uint32_t create_until_uid(uint32_t wanted, int priority) {
     return 0;
 }
 
-/* Regression A: in a build with no launcher binding, the historical launcher UID is an
- * ordinary thread: it leaves the launcher role uncaptured and gets an ordinary k0 block. */
+/* Regression A: in every build, the historical launcher UID allocated to an entry that is not
+ * the configured launcher is an ordinary thread: the UID alone confers no role, the launcher
+ * role stays uncaptured, and the thread gets an ordinary k0 block. */
 static void test_historical_launcher_uid_is_ordinary_when_unconfigured(void) {
-    if (cfg_has(SR_TITLE_CFG_LAUNCHER_ENTRY) &&
-        sr_title_config()->launcher_thread_entry == HISTORICAL_LAUNCHER_UID) {
-        return;   /* would not be an unconfigured build for this address */
-    }
     reset_sched();
     uint32_t uid = create_until_uid(HISTORICAL_LAUNCHER_UID, 32);
     expect(uid == HISTORICAL_LAUNCHER_UID, "the allocator can still produce UID 0x111");
     if (uid != HISTORICAL_LAUNCHER_UID) return;
 
     expect(!sched_uid_is_launcher(uid),
-           "UID 0x111 is not the launcher when no launcher entry is configured");
+           "UID 0x111 alone does not confer the launcher role");
     expect(g_launcher_uid == SR_ROLE_UID_NONE,
-           "the launcher role stays uncaptured in a build with no launcher binding");
+           "the launcher role stays uncaptured when no launcher entry was created");
     expect(sched_launcher_uid() == SR_ROLE_UID_NONE &&
            !sched_role_uid_captured(sched_launcher_uid()),
            "the launcher accessor reports uncaptured");
@@ -2714,18 +2715,14 @@ static void test_historical_launcher_uid_is_ordinary_when_unconfigured(void) {
 
 /* Regression B: same, for the historical worker UID. */
 static void test_historical_worker_uid_is_ordinary_when_unconfigured(void) {
-    if (cfg_has(SR_TITLE_CFG_WORKER_ENTRY) &&
-        sr_title_config()->worker_thread_entry == HISTORICAL_WORKER_UID) {
-        return;
-    }
     reset_sched();
     uint32_t uid = create_until_uid(HISTORICAL_WORKER_UID, 36);
     expect(uid == HISTORICAL_WORKER_UID, "the allocator can still produce UID 0x114");
     if (uid != HISTORICAL_WORKER_UID) return;
     expect(!sched_uid_is_worker(uid),
-           "UID 0x114 is not the worker when no worker entry is configured");
+           "UID 0x114 alone does not confer the worker role");
     expect(g_worker_uid == SR_ROLE_UID_NONE,
-           "the worker role stays uncaptured in a build with no worker binding");
+           "the worker role stays uncaptured when no worker entry was created");
     /* No entry reuses a thread: another create at the same entry gets a second TCB. */
     TCB *t = tcb_by_uid(uid);
     expect(t != NULL, "the 0x114 thread exists");
@@ -4747,7 +4744,12 @@ static void test_liveness_sole_runnable_becomes_nonsole(void) {
     expect(pick_next() == current,
            "the sole runnable thread owns the first scheduling decision");
     s_tcb[current].state = TH_RUNNING;
-    s_tcb[newcomer].state = TH_READY;
+    sched_wake(LIVENESS_SEMA_OBJ);
+    SrSchedLivenessSnapshot snap;
+    sched_liveness_snapshot(&snap);
+    expect(s_tcb[newcomer].state == TH_READY && sched_count_waiters(LIVENESS_SEMA_OBJ) == 0 &&
+               snap.wake_transitions == 1 && snap.waiters_readied == 1,
+           "the wake readies the parked newcomer and records one wake");
     sched_preempt();
     expect(s_tcb[current].state == TH_READY && pick_next() == newcomer,
            "a sole runnable thread yields when a higher-priority peer becomes runnable");
@@ -5013,7 +5015,7 @@ static void test_flight_recorder_thread_snapshot(void) {
     if (file) fclose(file);
     bundle[size] = '\0';
     expect(size > 0u && strstr(bundle, "\"schema_version\": 7") != NULL,
-           "thread snapshot: the bundle is schema 6");
+           "thread snapshot: the bundle is schema 7");
     expect(strstr(bundle, "\"threads\": [") != NULL, "thread snapshot: the bundle has a threads block");
 
     snprintf(needle, sizeof(needle),
@@ -6571,6 +6573,15 @@ static void test_pause_s11_refusal_verdicts(void) {
         "SR_PADSCRIPT", "SR_EXIT_AT_VBLANK", "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES",
         "SR_PAUSE_SCRIPT"
     };
+    enum { AUTOMATION_COUNT = sizeof(automation) / sizeof(automation[0]) };
+    char keep[AUTOMATION_COUNT][256];
+    int had[AUTOMATION_COUNT];
+    for (size_t i = 0; i < AUTOMATION_COUNT; i++) {
+        const char *v = getenv(automation[i]);
+        had[i] = v != NULL;
+        keep[i][0] = '\0';
+        if (v) snprintf(keep[i], sizeof(keep[i]), "%s", v);
+    }
     pause_test_reset(1, 2000u);
     const uint64_t host_before = g_test_host_ns;
     s_vtime_us = 1234u;
@@ -6604,6 +6615,8 @@ static void test_pause_s11_refusal_verdicts(void) {
     expect(s_vtime_us == time_before && g_test_host_ns == host_before &&
            g_pause_test_audio_enters == 0 && g_pause_test_audio_leaves == 0,
            "S11 refusal paths do not change guest time, host time or audio state");
+    for (size_t i = 0; i < AUTOMATION_COUNT; i++)
+        pause_test_set_env(automation[i], had[i] ? keep[i] : NULL);
 }
 
 static void pause_collect_turbo_sequence(int include_pause, uint64_t times[50], uint64_t vblanks[50]) {

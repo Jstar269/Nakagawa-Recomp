@@ -1671,13 +1671,20 @@ static inline int sreg_sync_file(FILE *f) {
 
 static inline uint32_t var_sext16(uint32_t word) { return (uint32_t)(int32_t)(int16_t)(word & 0xFFFFu); }
 
+static inline int var_import_stale_read(uint32_t addr, uint32_t *word_out, void *ctx) {
+    (void)ctx;
+    if (!sr_inrange_n(addr, 4u)) return 0;
+    *word_out = sr_r32(addr);
+    return 1;
+}
+
 static inline void var_import_write(uint32_t site, uint32_t word) {
-    MEM_W32(site, word);
     if (sr_stale_enabled()) {
-        /* A loader patch, not a code overwrite: the patched word is the expected one now. */
-        sr_stale_forget_range(site, 4u);
-        sr_stale_register_word(site, word);
+        /* A loader patch, not a code overwrite: the patched word is the expected one now, and
+         * the translated block around it keeps detecting overwrites of its other words. */
+        sr_stale_patch_word(site, word, var_import_stale_read, NULL);
     }
+    MEM_W32(site, word);
 }
 
 static inline int64_t psmf_av_x9_to_us(int64_t x9) { return (x9 >= 0 ? x9 + 4 : x9 - 4) / 9; }
