@@ -26,7 +26,9 @@ Commands:
                               Addresses are the recomp pipeline's base-0 view
                               (e.g. 0x000e1724); the stored image base is added
                               automatically. Pass --raw for Ghidra-space
-                              addresses.
+                              addresses. Each file is named by the Ghidra-space
+                              address (base-0 plus image base), not the ADDR
+                              given.
   info                        Show install/project/export status.
 
 All Ghidra stdout/stderr is teed to logs/ghidra_<command>.log.

@@ -669,7 +669,7 @@ class TestReleaseDocumentation(unittest.TestCase):
         upload = workflow[workflow.index("- name: Upload the attested candidate bundle"):]
         upload = upload.split("\n      - name:", 1)[0]
         self.assertIn("include-hidden-files: true", upload)
-        self.assertIn("'^\\.(iso|prx|elf|eboot|sav|key|pgf|pgd)$'", preview)
+        self.assertIn("'^\\.(iso|prx|elf|pbp|cso|sfo|bin|edat|pmf|at3|vag|gim|psar|chd|dax|sav|key|pgf|pgd)$'", preview)
         self.assertIn("$relative -notmatch '^bin/font/nk[^/]*\\.pgf$'", preview)
         self.assertIn("$relative -notlike 'bin/demos/*'", preview)
         self.assertEqual(preview.count("$relative -not"), 2)
@@ -2812,6 +2812,30 @@ class TestRuntimeDllStaging(unittest.TestCase):
                 refresh=False,
             )
             self.assertEqual((package_dir / "SDL3.dll").read_bytes(), old)
+
+    def test_stage_runtime_dlls_copy_failure_raises_named_stage_error(self) -> None:
+        import stage_runtime_dlls
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package_dir = Path(tmp) / "package"
+            package_dir.mkdir()
+            bin_dir = Path(tmp) / "toolchain-bin"
+            self.write_fake_dlls(bin_dir)
+            imports_of, is_system = self.fake_resolver()
+
+            with patch.object(
+                stage_runtime_dlls.shutil, "copyfile", side_effect=PermissionError("locked by running player")
+            ), self.assertRaises(stage_runtime_dlls.StageError) as ctx:
+                stage_runtime_dlls.stage_runtime_dlls(
+                    package_dir,
+                    roots=["SDL3.dll"],
+                    search_dirs=[bin_dir],
+                    env={},
+                    imports_of=imports_of,
+                    is_system=is_system,
+                    notices=False,
+                )
+            self.assertIn("RUNTIME_DLL_STAGE_FAILED", str(ctx.exception))
 
     def test_runtime_package_refuses_a_font_dll_collision_instead_of_warning(self) -> None:
         """A directory named SDL3_ttf.dll is a staging collision, not an absent optional
