@@ -931,6 +931,68 @@ static void test_per_frame_gpu_columns(void) {
     remove(path);
 }
 
+/* ---- SR_TRACE_PC window over the production trace hooks ----
+ * recomp.c's sr_begin_impl/sr_end_impl write the full trace unless an armed window gates
+ * them. When SR_TRACE_LIMIT is spent the window must complete, not disarm: a disarmed gate
+ * handed every later instruction back to the full trace, which grew without bound into the
+ * 50M-step abort. Each record must also be on disk as soon as it is written, because a host
+ * fault ends the process without flushing stdio buffers. */
+static size_t count_text(const char *text, const char *needle) {
+    size_t count = 0u;
+    for (const char *at = strstr(text, needle); at; at = strstr(at + 1, needle)) count++;
+    return count;
+}
+
+static void trace_window_step(CpuState *cpu, uint32_t pc, uint32_t value) {
+    sr_begin_impl(cpu, pc, 0x24020000u | (value & 0xffffu)); /* addiu v0, zero, value */
+    cpu->r[2] = value;
+    sr_end_impl(cpu, 0u, 0);
+}
+
+static void test_trace_window_limit_completes_the_window(const char *tmp) {
+    static CpuState cpu;
+    static char text[65536];
+    char trace_path[600], window_path[600];
+    snprintf(trace_path, sizeof trace_path, "%s/nk_profiler_selftest_trace.txt", tmp);
+    snprintf(window_path, sizeof window_path, "%s/nk_profiler_selftest_trace_window.txt", tmp);
+    set_env("SR_TRACE_PC", "0x08804000:0x08804010");
+    set_env("SR_TRACE", window_path);
+    set_env("SR_TRACE_LIMIT", "2");
+    set_env("SR_TRACE_V", NULL);
+    set_env("SR_TRACE_F", "2");
+    memset(&cpu, 0, sizeof cpu);
+    CHECK(sr_trace_open(trace_path, "selftest", 0x08804000u) == 0, "trace window: trace opens");
+    sr_trace_window_configure();
+    CHECK(sr_trace_window_armed() == 1, "trace window: SR_TRACE_PC arms the window");
+
+    trace_window_step(&cpu, 0x08803ffcu, 1u); /* below the window: no record */
+    trace_window_step(&cpu, 0x08804000u, 2u);
+    read_file(window_path, text, sizeof text);
+    CHECK(count_text(text, " pc=0x08804000") == 1u && count_text(text, " abs f2=") == 1u,
+          "trace window: the first record is on disk before the next instruction: %.300s", text);
+
+    trace_window_step(&cpu, 0x08804004u, 3u); /* the second record spends the limit */
+    for (uint32_t i = 0u; i < 8u; ++i) trace_window_step(&cpu, 0x08804008u, 4u + i);
+    trace_window_step(&cpu, 0x08800000u, 99u);
+    CHECK(sr_trace_window_armed() == 1 && sr_trace_window_begin_instruction(0x08804008u) == 0,
+          "trace window: a spent limit keeps the gate armed and admits no instruction");
+    read_file(window_path, text, sizeof text);
+    CHECK(count_text(text, " pc=0x") == 2u && strstr(text, "# window complete records=2") != NULL,
+          "trace window: exactly the two records the limit allows: %.400s", text);
+    sr_trace_close();
+    read_file(trace_path, text, sizeof text);
+    CHECK(count_text(text, " pc=0x") == 0u,
+          "trace window: no instruction reaches the full trace after the window completes: %.400s",
+          text);
+    set_env("SR_TRACE_PC", NULL);
+    set_env("SR_TRACE", NULL);
+    set_env("SR_TRACE_LIMIT", NULL);
+    set_env("SR_TRACE_F", NULL);
+    remove(trace_path);
+    /* The window stream stays open for the rest of the process by design, so its fixed-name
+     * file is overwritten by the next run rather than removed here. */
+}
+
 int main(void) {
     const char *tmp = getenv("TMPDIR");
     if (!tmp || !tmp[0]) tmp = getenv("TEMP");
@@ -939,6 +1001,7 @@ int main(void) {
              (long)sr_exec_now_ns());
     set_env("SR_PERF_CSV", s_csv_path);
     set_env("SR_HUD", NULL);
+    test_trace_window_limit_completes_the_window(tmp);
     test_exec_share();
     test_telemetry_lines_are_emitted_whole();
     test_audio_queue_line();

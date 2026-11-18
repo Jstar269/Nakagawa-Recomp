@@ -272,14 +272,24 @@ go on decides the transition:
   `vkCreateSwapchainKHR` fails (the old swapchain is retired anyway, so it is destroyed), or
   its images cannot be read.
 - A suboptimal acquire has acquired its image: the frame is presented and the present, which
-  reports it again, rebuilds the swapchain.
+  reports it again, rebuilds the swapchain. When that rebuild finds the window minimized (a 0x0
+  surface) or the surface query fails, the old swapchain stays and the next acquire rebuilds it;
+  the frame was presented and the renderer goes on.
+- An armed capture's readback buffer is made before the acquire, so a failure to make it fails
+  the capture and nothing else.
+- The present that turns the renderer terminal prints one line naming why
+  (`sdl3vk: <reason>; the renderer is terminal`): the line of the step that failed (a fence
+  wait with its `VkResult`, a swapchain rebuild step), or the present's own reason when no step
+  below it printed one. The lifecycle and terminal-fault cells count these lines.
 - Only `sdl3vk_shutdown` leaves the terminal state, and a later `sdl3vk_init` starts afresh.
 
 `sdl3vk_lifecycle_selftest` (inside `gpu-capture-selftest`) checks two kinds of fault with the
 validation layer on, and expects no leaked object and no validation error from either:
 
 - an init failure at each step;
-- a failure at each checked present step, through a one-shot present-step fault seam.
+- a failure at each checked present step, through a one-shot present-step fault seam, and the
+  two faults above the renderer goes on from (a capture buffer that cannot be made, a suboptimal
+  present whose rebuild finds a minimized window).
 
 ## Render scale and render targets read as textures (#2052)
 

@@ -169,6 +169,16 @@ class StrictLocalTraceCoverageTests(unittest.TestCase):
                 self.assertIn("DIVERGENCE at step 1, pc 0x08900004", output)
                 self.assertIn(expected, output)
 
+    def test_non_utf8_stream_is_rejected_as_malformed(self):
+        a, _ = self.complete_pair()
+        bad = Path(self.dir) / "not-utf8.trace"
+        bad.write_bytes((HEADER + RECORDS).encode("utf-8") + b"3 pc=0x0890000c op=0x\xff\n")
+        rc, output = self.run_tool(a, bad)
+        self.assertEqual(rc, 2, output)
+        self.assertIn("REJECTED", output)
+        self.assertIn("not valid UTF-8", output)
+        self.assertNotIn("Traceback", output)
+
     def test_legacy_v1_mode_is_unchanged_for_informational_callers(self):
         """The compatibility boundary is explicit: only gate callers opt in.
 

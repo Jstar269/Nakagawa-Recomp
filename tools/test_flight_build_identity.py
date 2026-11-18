@@ -36,6 +36,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -90,6 +91,20 @@ def _find_compiler() -> str:
 
 
 COMPILER = _find_compiler()
+
+# A hang fails by name (subprocess.TimeoutExpired) instead of holding the whole run.
+COMPILE_TIMEOUT_S = 300
+RUN_TIMEOUT_S = 120
+
+# Recorder switches a developer may have exported (the documented SR_FLIGHT*, SR_WATCH and
+# SR_TRACE* runtime switches). Every harness run starts without them and sets only what
+# its test arms, so an ambient trigger or watch never changes a bundle under test.
+_RECORDER_SWITCHES = ("SR_FLIGHT", "SR_FLIGHT_OUTPUT", "SR_FLIGHT_TRIGGER", "SR_WATCH")
+
+
+def _recorder_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key not in _RECORDER_SWITCHES and not key.startswith("SR_TRACE")}
 requires_compiler = unittest.skipUnless(COMPILER, "no C compiler on PATH")
 
 
@@ -113,6 +128,7 @@ class RecorderObjectTests(unittest.TestCase):
             cwd=ROOT,
             capture_output=True,
             text=True,
+            timeout=COMPILE_TIMEOUT_S,
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -167,12 +183,13 @@ class RecorderBundleTests(unittest.TestCase):
             cwd=ROOT,
             capture_output=True,
             text=True,
+            timeout=COMPILE_TIMEOUT_S,
             check=False,
         )
         self.assertEqual(
             compile_result.returncode, 0, compile_result.stdout + compile_result.stderr
         )
-        env = dict(os.environ)
+        env = _recorder_env()
         env["SR_FLIGHT"] = f"{classes};{limit}"
         env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
         run_result = subprocess.run(
@@ -181,6 +198,7 @@ class RecorderBundleTests(unittest.TestCase):
             env=env,
             capture_output=True,
             text=True,
+            timeout=RUN_TIMEOUT_S,
             check=False,
         )
         self.assertEqual(run_result.returncode, 0, run_result.stdout + run_result.stderr)
@@ -262,6 +280,19 @@ class RecorderBundleTests(unittest.TestCase):
         self.assertNotIn("compiled_time", raw)
         flight_diff.validate_bundle(bundle)
 
+    def test_bundles_ignore_an_exported_trigger_and_watch(self):
+        # SR_FLIGHT_TRIGGER and SR_WATCH are documented runtime switches a developer may
+        # have exported; the harness pins the recorder's environment instead of inheriting them.
+        ambient = {"SR_FLIGHT_TRIGGER": "watch", "SR_WATCH": "0x08800000:4"}
+        with scratch_dir.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, ambient):
+            bundle, _, _ = self._build_and_dump(
+                Path(tmp), "ambient", [f'-DSR_BUILD_ID="{FAKE_COMMIT}"']
+            )
+        self.assertEqual(bundle["recorder"]["triggers"]["mode"], "none")
+        self.assertEqual(bundle["recorder"]["triggers"]["fired"], 0)
+        self.assertIsNone(bundle["recorder"]["watch_range"])
+        flight_diff.validate_bundle(bundle)
+
     def test_build_id_alone_is_a_valid_identity(self):
         with scratch_dir.TemporaryDirectory() as tmp:
             bundle, _, _ = self._build_and_dump(
@@ -306,6 +337,19 @@ class RecorderBundleTests(unittest.TestCase):
             )
         self.assertIsNone(bundle["build"]["source_date_epoch"])
         self.assertNotIn("253402300800", raw)
+        self.assertIn("SR_FLIGHT", stderr)
+        flight_diff.validate_bundle(bundle)
+
+    def test_epoch_with_a_leading_zero_fails_closed_to_null(self):
+        # JSON has no leading zeros, and the text is emitted verbatim as a number.
+        with scratch_dir.TemporaryDirectory() as tmp:
+            bundle, raw, stderr = self._build_and_dump(
+                Path(tmp),
+                "zero-epoch",
+                [f"-DSR_SOURCE_DATE_EPOCH=0{FAKE_EPOCH}", f'-DSR_BUILD_ID="{FAKE_COMMIT}"'],
+            )
+        self.assertIsNone(bundle["build"]["source_date_epoch"])
+        self.assertNotIn(f"0{FAKE_EPOCH}", raw)
         self.assertIn("SR_FLIGHT", stderr)
         flight_diff.validate_bundle(bundle)
 
@@ -373,6 +417,7 @@ int main(void) {
                     cwd=ROOT,
                     capture_output=True,
                     text=True,
+                    timeout=COMPILE_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(
@@ -380,8 +425,7 @@ int main(void) {
                     0,
                     compile_result.stdout + compile_result.stderr,
                 )
-                env = dict(os.environ)
-                env.pop("SR_WATCH", None)
+                env = _recorder_env()
                 env["SR_FLIGHT"] = "hle,sched,prx;8"
                 env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
                 run_result = subprocess.run(
@@ -390,6 +434,7 @@ int main(void) {
                     env=env,
                     capture_output=True,
                     text=True,
+                    timeout=RUN_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(run_result.returncode, 0, run_result.stderr)
@@ -416,6 +461,7 @@ int main(void) {
                 ],
                 capture_output=True,
                 text=True,
+                timeout=RUN_TIMEOUT_S,
                 check=False,
             )
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -489,6 +535,7 @@ int main(void) {
                     cwd=ROOT,
                     capture_output=True,
                     text=True,
+                    timeout=COMPILE_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(
@@ -496,8 +543,7 @@ int main(void) {
                     0,
                     compile_result.stdout + compile_result.stderr,
                 )
-                env = dict(os.environ)
-                env.pop("SR_WATCH", None)
+                env = _recorder_env()
                 env["SR_FLIGHT"] = "hle,sched,prx,media;4"
                 env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
                 run_result = subprocess.run(
@@ -506,6 +552,7 @@ int main(void) {
                     env=env,
                     capture_output=True,
                     text=True,
+                    timeout=RUN_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(run_result.returncode, 0, run_result.stderr)
@@ -539,8 +586,7 @@ int main(void) {
             bundles_full: dict[str, Path] = {}
             for name in ("baseline", "injected"):
                 bundle_path = temp_path / f"{name}-full.json"
-                env = dict(os.environ)
-                env.pop("SR_WATCH", None)
+                env = _recorder_env()
                 env["SR_FLIGHT"] = "hle,sched,prx,media;8"
                 env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
                 run_result = subprocess.run(
@@ -549,6 +595,7 @@ int main(void) {
                     env=env,
                     capture_output=True,
                     text=True,
+                    timeout=RUN_TIMEOUT_S,
                     check=False,
                 )
                 self.assertEqual(run_result.returncode, 0, run_result.stderr)
@@ -576,6 +623,7 @@ int main(void) {
                 ],
                 capture_output=True,
                 text=True,
+                timeout=RUN_TIMEOUT_S,
                 check=False,
             )
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -655,6 +703,10 @@ int main(int argc, char **argv) {
         pick(2u);
         sr_flight_fatal(SR_FLIGHT_KIND_FATAL_RAW_SYSCALL, 0x08800200u, 0x0cu, 0u);
         pick(3u);
+    } else if (strcmp(scenario, "refusal") == 0) {
+        pick(1u);
+        sr_flight_unsupported(0x1579a159u, 0x80110001u, 0u, 0x08900100u);
+        pick(2u);
     } else {
         return 2;
     }
@@ -684,7 +736,7 @@ class RecorderTriggerModeTests(unittest.TestCase):
                 [COMPILER, "-std=c99", "-O0", "-Wall", "-Wextra", "-Werror", "-I", str(SRC_RT),
                  "-DSR_FLIGHT_RECORDER_LINKED", f'-DSR_BUILD_ID="{FAKE_COMMIT}"', *defines,
                  str(source), "src/rt/flight_recorder.c", "-o", str(executable)],
-                cwd=ROOT, capture_output=True, text=True, check=False,
+                cwd=ROOT, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, check=False,
             )
             if result.returncode != 0:
                 cls._scratch.cleanup()
@@ -700,9 +752,7 @@ class RecorderTriggerModeTests(unittest.TestCase):
         bundle_path = self.tmp / f"{tag or scenario}-{name}.json"
         if bundle_path.exists():
             bundle_path.unlink()
-        env = dict(os.environ)
-        for key in ("SR_FLIGHT_TRIGGER", "SR_WATCH"):
-            env.pop(key, None)
+        env = _recorder_env()
         env["SR_FLIGHT"] = flight
         env["SR_FLIGHT_OUTPUT"] = str(bundle_path)
         if trigger is not None:
@@ -710,7 +760,7 @@ class RecorderTriggerModeTests(unittest.TestCase):
         if watch is not None:
             env["SR_WATCH"] = watch
         result = subprocess.run([str(self.executables[name]), scenario], cwd=self.tmp, env=env,
-                                capture_output=True, text=True, check=False)
+                                capture_output=True, text=True, timeout=RUN_TIMEOUT_S, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         bundle = (json.loads(bundle_path.read_text(encoding="utf-8"))
                   if bundle_path.exists() else None)
@@ -790,6 +840,38 @@ class RecorderTriggerModeTests(unittest.TestCase):
         self.assertEqual(bundle["terminal"]["kind"], 12)
         self.assertEqual(bundle["recorder"]["recorded"], 3)
 
+    def test_a_fatal_on_the_last_event_the_window_owes_still_wins_the_terminal(self):
+        # The window opens at the second pick and owes one event; the fatal is that event.
+        # A terminal never spends the window, so it is the terminal, not a trigger freeze.
+        bundle, _, _ = self._run("checkpoint-fatal", "sched,fatal;8", "checkpoint:3:2:1",
+                                 tag="last-owed-fatal")
+        flight_diff.validate_bundle(bundle)
+        self.assertEqual(bundle["terminal"]["reason"], "fatal")
+        self.assertEqual(bundle["terminal"]["kind"], 12)
+        self.assertEqual(bundle["terminal"]["arg0"], 0x0C)
+        self.assertEqual(bundle["recorder"]["recorded"], 3)
+
+    def test_a_refusal_that_fires_a_mode_is_counted_in_the_bundle(self):
+        refusal_pc = 0x08900100
+        cases = (
+            (f"pc:0x{refusal_pc:08x}", {"reason": "trigger", "sequence": 2, "kind": 2,
+                                        "arg0": refusal_pc}, 2),
+            ("checkpoint:2:1:0", {"reason": "trigger", "sequence": 2, "kind": 2, "arg0": 1}, 2),
+            ("checkpoint:3:1:1", {"reason": "trigger", "sequence": 1, "kind": 3, "arg0": 1}, 2),
+        )
+        for index, (trigger, terminal, recorded) in enumerate(cases):
+            with self.subTest(trigger=trigger):
+                bundle, _, _ = self._run("refusal", "sched,unsupported;8", trigger,
+                                         tag=f"refusal-mode{index}")
+                flight_diff.validate_bundle(bundle)
+                self.assertEqual(bundle["terminal"], terminal)
+                self.assertEqual(bundle["recorder"]["recorded"], recorded)
+                refusals = bundle["refusals"]
+                self.assertEqual(refusals["count"], 1)
+                self.assertEqual(refusals["first_nid"], 0x1579A159)
+                self.assertEqual(refusals["first_pc"], refusal_pc)
+                self.assertEqual(refusals["nids"], [{"nid": 0x1579A159, "count": 1}])
+
     def test_refused_specs_disable_the_recorder_and_say_why(self):
         cases = (
             ("pc", "hle;8", "pc:", None),
@@ -827,12 +909,12 @@ class RecorderTriggerModeTests(unittest.TestCase):
                                        tag="diff-other")
         tool = str(ROOT / "tools" / "flight_diff.py")
         result = subprocess.run([sys.executable, tool, str(baseline), str(injected)],
-                                capture_output=True, text=True, check=False)
+                                capture_output=True, text=True, timeout=RUN_TIMEOUT_S, check=False)
         self.assertEqual(result.returncode, flight_diff.EXIT_DIVERGENCE, result.stdout + result.stderr)
         self.assertIn(f"trigger mode: pc=0x{TRIGGER_PC_B:08x}", result.stdout)
         self.assertIn("DIVERGENCE: sequence 2", result.stdout)
         result = subprocess.run([sys.executable, tool, str(baseline), str(other_policy)],
-                                capture_output=True, text=True, check=False)
+                                capture_output=True, text=True, timeout=RUN_TIMEOUT_S, check=False)
         self.assertEqual(result.returncode, flight_diff.EXIT_INCOMPARABLE,
                          result.stdout + result.stderr)
         self.assertIn("trigger policies differ", result.stdout)
@@ -848,6 +930,7 @@ class RecorderTriggerHotPathTests(unittest.TestCase):
     """
 
     HOT_PATHS = ("static uint64_t record_locked(", "static uint64_t record_checked(",
+                 "static void trigger_after_record(",
                  "static void check_trigger(", "static int event_pc(",
                  "static void watch_flight_note(", "void sr_flight_record(",
                  "uint64_t sr_flight_hle_import(", "int sr_flight_class_enabled(")
@@ -869,6 +952,16 @@ class RecorderTriggerHotPathTests(unittest.TestCase):
             if depth == 0:
                 return source[brace:index + 1]
         raise AssertionError(f"unterminated body for {signature}")
+
+    def test_a_bundle_rewrite_never_deletes_the_previous_bundle_first(self):
+        # The bundle is rewritten several times in a run (provisional refusals, a freeze,
+        # the terminal). Removing the old one before the rename left no bundle at all when
+        # the process died between the two calls; the replace is one step on both hosts.
+        body = self._body(self._source(), "static int write_bundle(int reason)")
+        self.assertNotIn("remove(output)", body)
+        self.assertIn("MoveFileExA(temporary, output, MOVEFILE_REPLACE_EXISTING", body)
+        self.assertIn("rename(temporary, output) == 0", body)
+        self.assertLess(body.index("#if defined(_WIN32)"), body.index("MoveFileExA("))
 
     def test_event_and_trigger_paths_do_no_io_or_allocation(self):
         source = self._source()
@@ -953,6 +1046,19 @@ class MakeIdentityResolutionTests(unittest.TestCase):
                     *overrides, env=env or {}
                 )
                 self.assertEqual(values, {FAKE_COMMIT}, output)
+
+    def test_epoch_with_a_leading_zero_is_refused_by_make(self):
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        self.assertTrue(make, "GNU Make is required for the build-identity check")
+        environment = dict(os.environ)
+        environment["SOURCE_DATE_EPOCH"] = f"0{FAKE_EPOCH}"
+        result = subprocess.run(
+            [make, "--no-print-directory", "-n", "clean-preview",
+             f"BUILD_ROOT={_scratch_build_root(self, 'identity-zero-epoch').as_posix()}"],
+            cwd=ROOT, capture_output=True, text=True, timeout=300, env=environment, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("SOURCE_DATE_EPOCH must be a decimal Unix timestamp", result.stderr)
 
     def test_caller_supplied_identity_wins_over_a_missing_git(self):
         """The Windows job's environment: no git, identity forwarded by CI."""

@@ -381,7 +381,6 @@ class NoOtherReaderTests(unittest.TestCase):
         "tools/test_hle_manifest.py": "synthetic sources and the owner_file values the manifest reports",
         "tools/test_hle_move_proof.py": "a synthetic split",
         "tools/test_hle_sources.py": "synthetic trees and this guard's own cases",
-        "tools/test_import_stub_census.py": "a synthetic tree",
         "tools/test_package_cache.py": "a synthetic compile command",
         "tools/test_portability_inventory.py": "paths handed to the classifier",
         "tools/test_progress_evidence.py": "a synthetic tree",

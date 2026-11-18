@@ -35,10 +35,9 @@ class ExtractXbProbeFallbackTests(unittest.TestCase):
         archive_path.write_bytes(archive_bytes)
 
         out_dir = Path(self.temp_dir) / "output"
-        arc_ret, ok, err = extract_one(str(archive_path), str(out_dir))
+        arc_ret, status, err = extract_one(str(archive_path), str(out_dir))
 
-        self.assertTrue(ok, f"extract_one failed with: {err}")
-        self.assertIsNone(err)
+        self.assertEqual((status, err), ("ok", None), f"extract_one failed with: {err}")
 
         extracted_hello = out_dir / "data" / "test" / "hello.txt"
         extracted_comp = out_dir / "data" / "test" / "compressed.bin"

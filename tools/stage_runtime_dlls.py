@@ -44,8 +44,9 @@ changed, missing, extra or unlisted runtime library unnoticed.
 from __future__ import annotations
 
 import argparse
-import hashlib
 from collections import deque
+import filecmp
+import hashlib
 import json
 import os
 import re
@@ -294,21 +295,21 @@ def stage_redump_list(target_dir: Path, *, repo_root: Path = ROOT) -> list[str]:
     return staged
 
 
+def _stage_bundled_player_data(target_dir: Path, *, repo_root: Path = ROOT) -> tuple[list[str], list[str], list[str]]:
+    fonts = stage_ui_font_assets(target_dir, repo_root=repo_root)
+    music = stage_launcher_music(target_dir, repo_root=repo_root)
+    redump = stage_redump_list(target_dir, repo_root=repo_root)
+    return fonts, music, redump
+
+
 def _files_equal(first: Path, second: Path) -> bool:
     """Whether two files have identical bytes; a file that cannot be stat'ed counts as different."""
     try:
         if first.stat().st_size != second.stat().st_size:
             return False
+        return filecmp.cmp(first, second, shallow=False)
     except OSError:
         return False
-    first_digest = hashlib.sha256()
-    second_digest = hashlib.sha256()
-    with first.open("rb") as first_file, second.open("rb") as second_file:
-        for chunk in iter(lambda: first_file.read(65536), b""):
-            first_digest.update(chunk)
-        for chunk in iter(lambda: second_file.read(65536), b""):
-            second_digest.update(chunk)
-    return first_digest.digest() == second_digest.digest()
 
 
 def stage_runtime_dlls(
@@ -352,6 +353,14 @@ def stage_runtime_dlls(
     environ = os.environ if env is None else env
     dirs = list(search_dirs) if search_dirs is not None else default_search_dirs(environ)
 
+    imports_cache: dict[Path, list[str]] = {}
+
+    def cached_imports(path: Path) -> list[str]:
+        resolved = path.resolve()
+        if resolved not in imports_cache:
+            imports_cache[resolved] = list(imports_of(path))
+        return imports_cache[resolved]
+
     staged: set[str] = set()
     for name in names:
         existing = target_dir / name
@@ -378,7 +387,7 @@ def stage_runtime_dlls(
                 override_env=overrides.get(name),
             )
         closure = resolve_dll_closure(
-            root_dll, search_dirs=dirs, imports_of=imports_of, is_system=is_system
+            root_dll, search_dirs=dirs, imports_of=cached_imports, is_system=is_system
         )
         for source in closure:
             destination = target_dir / source.name
@@ -388,21 +397,26 @@ def stage_runtime_dlls(
                     f"remove or move the directory to stage the runtime DLL"
                 )
             if not destination.is_file() or (refresh and not _files_equal(source, destination)):
-                shutil.copyfile(source, destination)
+                try:
+                    shutil.copyfile(source, destination)
+                except OSError as exc:
+                    raise StageError(
+                        f"RUNTIME_DLL_STAGE_FAILED: {source.name} -> {destination}: {exc}"
+                    ) from exc
             staged.add(source.name)
 
     if include_ui_fonts:
-        staged.update(stage_ui_font_assets(target_dir, repo_root=repo_root))
-        staged.update(stage_launcher_music(target_dir, repo_root=repo_root))
-        # The player's other bundled data goes with its fonts: the Redump list.
-        staged.update(stage_redump_list(target_dir, repo_root=repo_root))
+        fonts, music, redump = _stage_bundled_player_data(target_dir, repo_root=repo_root)
+        staged.update(fonts)
+        staged.update(music)
+        staged.update(redump)
 
     if notices:
         package_notices.generate_package_notices(
             target_dir, repo_root=repo_root, toolchain_root=toolchain_root
         )
     if runtime_manifest:
-        write_runtime_manifest(target_dir, imports_of=imports_of, is_system=is_system)
+        write_runtime_manifest(target_dir, imports_of=cached_imports, is_system=is_system)
     return sorted(staged)
 
 
@@ -699,9 +713,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # the executable.
         if args.include_ui_fonts:
             try:
-                fonts = stage_ui_font_assets(args.target, repo_root=ROOT)
-                stage_launcher_music(args.target, repo_root=ROOT)
-                redump = stage_redump_list(args.target, repo_root=ROOT)
+                fonts, _music, redump = _stage_bundled_player_data(args.target, repo_root=ROOT)
             except StageError as exc:
                 print(f"stage_runtime_dlls: FAIL: {exc}", file=sys.stderr)
                 return 1

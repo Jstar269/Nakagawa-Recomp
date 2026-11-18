@@ -41,8 +41,9 @@ AI-generated summaries must describe what the exact diff and tests actually prov
 - Map each claimed issue/acceptance criterion to a concrete code change and a concrete assertion or
   recorded route. State residual criteria explicitly.
 - Before proposing a merge, compare the PR against its intended base and inspect the changed-file
-  list. If the branch contains an unmerged parent PR, either make the stack explicit or split/rebase
-  the focused work.
+  list. Never stack pull requests: start a fresh branch from `origin/main` with only the focused
+  work and cherry-pick onto it if needed. Never rebase or force-push a pushed branch (`AGENTS.md`
+  Section 10).
 - Local test success is not GitHub CI. When Actions are blocked, skipped, or fail before steps run,
   report the exact local gates and the CI limitation separately.
 - Dependency/security remediation must be checked against the current advisory's affected/fixed
@@ -56,8 +57,9 @@ A `Signed-off-by:` trailer is a contributor rights certification, not decoration
 - AI tools and automated agents must not invent a human, vendor, or tool identity for DCO sign-off
   and must not add a sign-off on the maintainer's behalf.
 - When an AI-capable connector creates an otherwise unsigned commit, leave the attestation for the
-  actual contributor/maintainer to make deliberately after reviewing the final diff. Squash/recommit
-  or amend with `git commit -s` only when that person is prepared to certify the contribution.
+  actual contributor/maintainer to make deliberately after reviewing the final diff. Before the
+  first push, that person may sign the commit with `git commit -s`; after a branch is pushed they add
+  a new signed-off commit and never rebase or force-push it (`AGENTS.md` Section 10).
 - Do not retroactively fabricate sign-offs for historical commits.
 - Keep AI-assistance disclosure separate from DCO: disclosure records how work was produced; DCO
   records the contributor's rights/authority to submit it.

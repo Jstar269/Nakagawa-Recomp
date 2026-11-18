@@ -36,6 +36,12 @@ CONFIG = ROOT / ".betterleaks.toml"
 # detection and any other code is reported as a scanner failure.
 LEAKS_FOUND_EXIT = 99
 
+#: The `git log` options of the hosted reachable-history scan (.github/workflows/ci.yml,
+#: "Scan reachable sanitized Git history with Betterleaks"), before its revision range.
+#: `--diff-merges=first-parent` gives each merge commit a patch, so a value added while
+#: resolving a merge is scanned; tools/test_public_ci_wiring.py keeps the workflow equal.
+HISTORY_LOG_OPTIONS = "--full-history --diff-merges=first-parent"
+
 
 def _material(seed: str, length: int) -> str:
     value = ""
@@ -313,6 +319,52 @@ keywords = ["ghp_"]
         historical.unlink()
         run_git(["commit", "-qam", "remove synthetic canary"], cwd=ancestor, check=True)
         _require("ancestor-only-secret", _scan(binary, "git", str(ancestor)), leaks=True)
+
+        # A value typed only while resolving a merge conflict, and removed in the
+        # next commit, lives in no ordinary commit's patch: `git log -p` prints none
+        # for a merge unless told to. The hosted history scan passes the log options
+        # below; scan the same shape of history with them, both as a pull request's
+        # range from its base and as all history reachable from HEAD.
+        merged = temp_root / "merge-only-repo"
+        merged.mkdir()
+        run_git(["init", "-q", "-b", "trunk"], cwd=merged, check=True, capture_output=True)
+        conflicted = merged / "conflicted.txt"
+        conflicted.write_text("base\n", encoding="utf-8")
+        run_git(["add", "conflicted.txt"], cwd=merged, check=True, capture_output=True)
+        run_git(["commit", "-qm", "base"], cwd=merged, check=True)
+        run_git(["checkout", "-qb", "upstream"], cwd=merged, check=True, capture_output=True)
+        conflicted.write_text("upstream\n", encoding="utf-8")
+        run_git(["commit", "-qam", "upstream change"], cwd=merged, check=True)
+        upstream = run_git(
+            ["rev-parse", "HEAD"], cwd=merged, check=True, capture_output=True, text=True
+        ).stdout.strip()
+        run_git(["checkout", "-q", "trunk"], cwd=merged, check=True, capture_output=True)
+        conflicted.write_text("topic\n", encoding="utf-8")
+        run_git(["commit", "-qam", "topic change"], cwd=merged, check=True)
+        conflict = run_git(["merge", "-q", "upstream"], cwd=merged, check=False, capture_output=True)
+        if conflict.returncode == 0:
+            raise RuntimeError("merge-only canary: the synthetic merge did not conflict")
+        conflicted.write_text(
+            f'resolved\napi_key = "{_material("merge-resolution", 48)}"\n', encoding="utf-8"
+        )
+        run_git(["add", "conflicted.txt"], cwd=merged, check=True, capture_output=True)
+        run_git(["commit", "-qm", "merge upstream"], cwd=merged, check=True)
+        conflicted.write_text("resolved\n", encoding="utf-8")
+        run_git(["commit", "-qam", "remove synthetic canary"], cwd=merged, check=True)
+        for label, revisions in (
+            ("merge-only-secret-pull-request-range", f"{upstream}..HEAD"),
+            ("merge-only-secret-reachable-history", "HEAD"),
+        ):
+            _require(
+                label,
+                _scan(
+                    binary,
+                    "git",
+                    str(merged),
+                    extra=(f"--log-opts={HISTORY_LOG_OPTIONS} {revisions}",),
+                ),
+                leaks=True,
+            )
     return 0
 
 
