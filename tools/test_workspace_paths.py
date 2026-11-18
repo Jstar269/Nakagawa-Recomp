@@ -931,7 +931,7 @@ class FirmwareAndLicenceIgnoreTests(unittest.TestCase):
     )
 
     def test_firmware_payloads_and_licence_files_are_gitignored(self) -> None:
-        missing = sorted(set(self.PAYLOADS) - _check_ignored(self.PAYLOADS))
+        missing = sorted(set(self.PAYLOADS) - _check_ignored(list(self.PAYLOADS)))
         self.assertEqual(
             missing, [],
             "these firmware or console-bound files are not gitignored, so `git add -A` can "
