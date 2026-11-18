@@ -8237,7 +8237,7 @@ static void test_flow_bytes_unit_boundaries(void) {
 
 /* The launcher's display rule for these tests: a synthetic profile folder
    shown as "~" (player_display_text's rule), never growing its input. */
-static const char k_test_home[] = "C:/Users/SyntheticPlayerName";
+static const char k_test_home[] = "D:/SyntheticProfiles/SyntheticPlayerName";
 
 static size_t test_display_home(const char *in, char *out, size_t out_size) {
     size_t home = sizeof(k_test_home) - 1u;
@@ -8305,7 +8305,7 @@ static void test_update_page_folder_and_error_text(void) {
         "nakagawa_recomp-0.0.6-windows-x64";
     static const char failed[] =
         "Nakagawa couldn't create a folder for the new version "
-        "(C:/Users/SyntheticPlayerName/Documents/Emulators/"
+        "(D:/SyntheticProfiles/SyntheticPlayerName/Documents/Emulators/"
         "nakagawa-recomp-0.0.6-windows-x64.staging). Nothing was changed.";
     /* "~/" then three 3-byte characters end at byte 11: the 12-byte head
        would end inside the fourth. */
@@ -8319,7 +8319,7 @@ static void test_update_page_folder_and_error_text(void) {
               strstr(dump, "nakagawa_recomp-0.0.6-windows-x64. Close") != NULL,
           "Installed names the whole folder the new version is in");
     CHECK(dump_update_page(PLAYER_UI_UPDATE_FAILED, NULL, failed, dump, sizeof(dump)) &&
-              strstr(dump, "SyntheticPlayerName") == NULL && strstr(dump, "C:/Users/") == NULL &&
+              strstr(dump, "SyntheticPlayerName") == NULL && strstr(dump, "D:/SyntheticProfiles/") == NULL &&
               strstr(dump, "(~/Documents/Emulators/nakagawa-recomp-0.0.6-windows-x64.staging)") !=
                   NULL,
           "an error's path shows the profile folder as ~ before any word is shortened");
