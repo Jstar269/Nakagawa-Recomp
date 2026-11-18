@@ -54,16 +54,14 @@ PEM_KEY_MATERIAL = re.compile(
 # Sensitive local path patterns (fragmented to prevent self-match). A drive path's
 # separator is one backslash or a run of them: JSON, C and Python string literals store
 # each separator doubled, and that is the form a path takes in a committed manifest or
-# settings file. A UNC path is matched plain or with every backslash doubled; a mixed
-# count is not accepted, so an escaped sequence such as \\n\\t in source is not a path.
+# settings file. A UNC path is matched in its plain form only, as publish_audit does:
+# tracked native tests spell synthetic shares and named-pipe device paths as escaped C
+# literals, and a tree that passes publish_audit must not fail the history gate for them.
 WINDOWS_USER_PATH = re.compile(r"[a-zA-Z]:\\+(?:" + r"Us" + r"ers|Documents and Settings)\\+[^\s\\/]+", re.IGNORECASE)
 POSIX_USER_PATH = re.compile(r"/(?:" + r"ho" + r"me|Us" + r"ers)/[^\s/]+")
 MAC_USER_PATH = re.compile(r"/(?:" + r"Us" + r"ers)/[^\s/]+")
 WSL_USER_PATH = re.compile(r"/mnt/[a-z]/(?:" + r"Us" + r"ers)/[^\s/]+")
-UNC_PATH = re.compile(
-    r"\\\\[a-zA-Z0-9_.-]+\\[a-zA-Z0-9_.-]+"
-    r"|\\\\\\\\[a-zA-Z0-9_.-]+\\\\[a-zA-Z0-9_.-]+"
-)
+UNC_PATH = re.compile(r"\\\\[a-zA-Z0-9_.-]+\\[a-zA-Z0-9_.-]+")
 ONEDRIVE_PATH = re.compile(r"\bOne" + r"Drive\b(?:\s*-\s*[^/\\]+)?", re.IGNORECASE)
 TEMP_PATH = re.compile(r"(?:/tm" + r"p/|/var/tm" + r"p/|[a-zA-Z]:\\+(?:[^\s\\/]+\\+)*(?:Windows\\+Te" + r"mp|AppData\\+Local\\+Te" + r"mp)\\+)[a-zA-Z0-9_.-]+", re.IGNORECASE)
 

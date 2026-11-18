@@ -562,14 +562,21 @@ class TestHistoryAudit(unittest.TestCase):
         positives = {
             "json user path": '{"p": "C:' + escaped + "Us" + "ers" + escaped + "someone" + escaped + 'Desktop"}',
             "json legacy profile": '"D:' + escaped + "Documents and Settings" + escaped + 'someone"',
-            "json unc share": '{"p": "' + escaped * 2 + "fileserver" + escaped + 'share"}',
             "json temp dir": '"C:' + escaped + "Windows" + escaped + "Te" + "mp" + escaped + 'build1"',
+            "plain unc share": "share = " + escaped + "fileserver" + bs + "share",
         }
         for label, text in positives.items():
             with self.subTest(text=label):
                 self.assertIn("HISTORICAL_BLOB_LOCAL_PATH",
                               [f.code for f in self._blob_findings(text + "\n")])
-        # An escape sequence in source is not a share: a mixed backslash count is refused.
+        # The UNC rule matches publish_audit's plain form only: tracked native tests spell
+        # synthetic shares and named-pipe device paths as escaped C literals, and a tree
+        # publish_audit passes must not fail the full-history gate for them.
+        escaped_unc = '{"p": "' + escaped * 2 + "fileserver" + escaped + 'share"}'
+        self.assertIsNone(history_audit.UNC_PATH.search(escaped_unc))
+        self.assertNotIn("HISTORICAL_BLOB_LOCAL_PATH",
+                         [f.code for f in self._blob_findings(escaped_unc + "\n")])
+        # An escape sequence in source is not a share.
         for text in ('printf("' + escaped + "n" + escaped + 't");',
                      "r'" + escaped + "w+" + bs + "d'"):
             with self.subTest(text=text):
