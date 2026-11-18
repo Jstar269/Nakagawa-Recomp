@@ -1264,8 +1264,11 @@ def _llvm_tool_identity(tool: str, env: Mapping[str, str], version_flag: str) ->
     executable = shutil.which(tool, path=env.get("PATH"))
     if executable is None:
         raise PackageCacheError(f"the LLVM backend needs {tool}, which is not on PATH")
-    completed = subprocess.run([executable, version_flag], env=dict(env), capture_output=True,
-                               text=True, timeout=60, check=False)
+    try:
+        completed = subprocess.run([executable, version_flag], env=dict(env), capture_output=True,
+                                   text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PackageCacheError(f"{tool} {version_flag} could not run: {exc}") from exc
     if completed.returncode != 0:
         raise PackageCacheError(f"{tool} {version_flag} failed: {completed.stderr.strip()[:200]}")
     report = (completed.stdout + completed.stderr).strip()
@@ -1294,6 +1297,35 @@ def llvm_backend_options(environment: Mapping[str, str] | None = None,
     }}
 
 
+def _package_option_value(arguments: str, option: str) -> str | None:
+    tokens = arguments.split()
+    for index, token in enumerate(tokens):
+        if token == option:
+            if index + 1 < len(tokens) and tokens[index + 1].strip():
+                return tokens[index + 1].strip()
+            return None
+        if token.startswith(f"{option}="):
+            value = token.split("=", 1)[1].strip()
+            return value or None
+    return None
+
+
+def _locate_enhancement_package(
+    environment: Mapping[str, str], variable: str, option: str
+) -> tuple[str, str] | None:
+    value = environment.get(variable, "").strip()
+    if value:
+        return variable, value
+    for token in environment.get("MAKEFLAGS", "").split():
+        name, separator, value = token.partition("=")
+        if separator and name == variable and value.strip():
+            return f"MAKEFLAGS {variable}", value.strip()
+    value = _package_option_value(environment.get("CODEGEN_USER_ARGS", ""), option)
+    if value:
+        return f"CODEGEN_USER_ARGS {option}", value
+    return None
+
+
 def ambient_enhancement_package(environment: Mapping[str, str] | None = None) -> str | None:
     """Where an environment names an enhancement package on its own, or None.
 
@@ -1304,25 +1336,19 @@ def ambient_enhancement_package(environment: Mapping[str, str] | None = None) ->
     for which this returns a value: an inherited variable never enhances a build.
     """
     env = os.environ if environment is None else environment
-    # ENHANCEMENT_CODE_HOOK_PACKAGE, the code-hook package beside it (contract section 9.9), the same.
     for variable, option in (("ENHANCEMENT_PACKAGE", "--enhancement-package"),
                              ("ENHANCEMENT_CODE_HOOK_PACKAGE", "--code-hook-package")):
-        if env.get(variable, "").strip():
-            return variable
-        for token in env.get("MAKEFLAGS", "").split():
-            if token.startswith(f"{variable}=") and token.split("=", 1)[1].strip():
-                return f"MAKEFLAGS {variable}"
-        for token in env.get("CODEGEN_USER_ARGS", "").split():
-            if token.startswith(option):
-                return f"CODEGEN_USER_ARGS {option}"
+        location = _locate_enhancement_package(env, variable, option)
+        if location is not None:
+            return location[0]
     return None
 
 
 def enhancement_package_options(environment: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Return AOT cache-key options for an active enhancement package, or empty dict when off.
 
-    When no enhancement package is active (`ENHANCEMENT_PACKAGE` is unset/empty and
-    `--enhancement-package=` does not appear in `CODEGEN_USER_ARGS`), returns `{}` so
+    When no enhancement package is active in the environment, `MAKEFLAGS`, or
+    `CODEGEN_USER_ARGS`, returns `{}` so
     authentic mode's `codegen_options_sha256` and `aot.digest` remain byte-identical.
     When an enhancement package is active, validates and hashes the package (and any
     sibling `.symbols.json` map) and returns the explicit AOT instrumentation epoch
@@ -1330,13 +1356,10 @@ def enhancement_package_options(environment: Mapping[str, str] | None = None) ->
     package file is unreadable or invalid.
     """
     env = os.environ if environment is None else environment
-    pkg_raw = env.get("ENHANCEMENT_PACKAGE", "").strip()
-    if not pkg_raw:
-        user_args = env.get("CODEGEN_USER_ARGS", "")
-        for token in user_args.split():
-            if token.startswith("--enhancement-package="):
-                pkg_raw = token.split("=", 1)[1].strip()
-                break
+    package_location = _locate_enhancement_package(
+        env, "ENHANCEMENT_PACKAGE", "--enhancement-package"
+    )
+    pkg_raw = package_location[1] if package_location else ""
     if not pkg_raw:
         return {}
     import enhancement_package
@@ -1356,12 +1379,10 @@ def enhancement_package_options(environment: Mapping[str, str] | None = None) ->
         result["enhancement_symbol_map_sha256"] = sha256_file(sidecar)
     # The code-hook package applied beside it (contract section 9.9), named only when there is one,
     # so the key of a build without one is unchanged.
-    hook_raw = env.get("ENHANCEMENT_CODE_HOOK_PACKAGE", "").strip()
-    if not hook_raw:
-        for token in env.get("CODEGEN_USER_ARGS", "").split():
-            if token.startswith("--code-hook-package="):
-                hook_raw = token.split("=", 1)[1].strip()
-                break
+    hook_location = _locate_enhancement_package(
+        env, "ENHANCEMENT_CODE_HOOK_PACKAGE", "--code-hook-package"
+    )
+    hook_raw = hook_location[1] if hook_location else ""
     if hook_raw:
         hook_path = Path(hook_raw)
         try:
@@ -1765,7 +1786,7 @@ def _check_completion_manifest(
     if not isinstance(key, dict):
         return _COMPLETION_INVALID, "completion manifest cache key is missing", None
     try:
-        _key_components(key, "aot")
+        aot_components, _ = _key_components(key, "aot")
         _key_components(key, "native")
     except PackageCacheError as exc:
         return _COMPLETION_INVALID, str(exc), None
@@ -1773,10 +1794,6 @@ def _check_completion_manifest(
         return _COMPLETION_KEY, "completion manifest cache key does not match the package", None
     try:
         identity = validate_title_input_identity(document["title_input_identity"])
-    except PackageCacheError as exc:
-        return _COMPLETION_INVALID, str(exc), None
-    try:
-        aot_components, _ = _key_components(key, "aot")
     except PackageCacheError as exc:
         return _COMPLETION_INVALID, str(exc), None
     if aot_components.get("title_input_identity_sha256") != title_input_identity_digest(identity):
@@ -2352,7 +2369,7 @@ class ObjectCache:
         return total
 
     def prune(self, max_bytes: int) -> int:
-        """Remove the least recently used objects until the cache fits; return how many."""
+        """Keep the most recently used objects that fit the byte budget; return removals."""
         sized: list[tuple[int, int, Path]] = []
         for entry in self.entries():
             try:

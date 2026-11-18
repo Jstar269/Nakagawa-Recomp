@@ -27,6 +27,7 @@ The suite pins the claims the Python preparation route previously got wrong:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -46,6 +47,8 @@ from nk_core import (  # noqa: E402
     TitleProfile,
     TitleRegistry,
 )
+import nk_core.prep_engine as prep_engine  # noqa: E402
+from nk_core.types import IsoMetadata  # noqa: E402
 from nk_core.prep_engine import NativeTitleStager, PLAYER_EXECUTABLE  # noqa: E402
 from test_extract_xb_security import _make_raw_archive  # noqa: E402
 from test_nk_core import _create_mock_iso  # noqa: E402
@@ -321,6 +324,9 @@ class NativeStagingRouteTests(PreparationFailClosedCase):
         self.assertEqual(
             [event.completed for event in events if event.current_item], [25, 100]
         )
+        self.assertFalse(
+            any(event.cancellable for event in events if event.stage.value == "EXTRACTING_ARCHIVES")
+        )
         # Python wrote nothing of its own: no games folder, no staging tree.
         self.assertFalse((self.temp_dir / "games").exists())
 
@@ -452,6 +458,61 @@ class TransactionHardeningTests(PreparationFailClosedCase):
         self.assertEqual(result.error_code, "PREPARATION_OUTPUT_INVALID")
         self._assert_previous_install_intact(RAW_ISO, marker, manifest_bytes)
 
+    def test_early_refusals_end_progress_with_failed_event(self) -> None:
+        profile = TitleProfile(
+            id="synthetic-qualified-title",
+            name="Synthetic Qualified Title",
+            disc_ids=[RAW_ISO],
+            regions=["TEST"],
+            save_namespace=RAW_ISO,
+        )
+        cases = (
+            (
+                "boundary",
+                mock.DEFAULT,
+                prep_engine.IsoInspectionError(
+                    "synthetic PBP refusal", boundary_code="PBP_HEADER_TRUNCATED"
+                ),
+            ),
+            (
+                "unqualified",
+                IsoMetadata(
+                    disc_id=RAW_ISO,
+                    title="Synthetic Title",
+                    matched_profile=profile,
+                    qualification_error="synthetic revision refusal",
+                ),
+                None,
+            ),
+            (
+                "unsupported",
+                IsoMetadata(disc_id=UNSUPPORTED_ISO, title="Synthetic Unsupported Title"),
+                None,
+            ),
+        )
+        for label, metadata, error in cases:
+            with self.subTest(route=label):
+                iso_file = self.temp_dir / f"{label}.iso"
+                _create_mock_iso(iso_file, disc_id=RAW_ISO)
+                events: list[ProgressEvent] = []
+                registry = TitleRegistry(include_defaults=False)
+                registry.register(profile)
+                engine = PreparationEngine(base_dir=self.temp_dir, registry=registry)
+                if error is not None:
+                    inspector = mock.patch.object(
+                        prep_engine, "inspect_iso", side_effect=error
+                    )
+                else:
+                    inspector = mock.patch.object(
+                        prep_engine, "inspect_iso", return_value=metadata
+                    )
+                with inspector:
+                    result = engine.prepare_game(iso_file, on_progress=events.append)
+
+                self.assertFalse(result.success)
+                self.assertTrue(events)
+                self.assertEqual(events[-1].stage.value, "FAILED")
+
     def test_manifest_write_failure_fails_and_preserves_previous_install(
         self,
     ) -> None:
@@ -494,6 +555,51 @@ class TransactionHardeningTests(PreparationFailClosedCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "PREPARATION_FAILED")
         self._assert_previous_install_intact(RAW_ISO, marker, manifest_bytes)
+
+    def test_cso_preparation_uses_the_expanded_iso_for_identity_and_staging(self) -> None:
+        from test_disc_expand import build_cso
+        from test_iso_parity import create_test_iso_with_executables
+
+        executable = b"synthetic EBOOT executable for compressed preparation"
+        plain_iso = self.temp_dir / "synthetic-raw.iso"
+        create_test_iso_with_executables(
+            plain_iso, executable, disc_id=RAW_ISO, title="Synthetic Raw Preparation"
+        )
+        compressed_iso = self.temp_dir / "synthetic-raw.cso"
+        compressed_iso.write_bytes(build_cso(plain_iso.read_bytes()))
+        executable_sha256 = hashlib.sha256(executable).hexdigest()
+        profile = TitleProfile(
+            id="synthetic-compressed-raw-v1",
+            name="Synthetic Compressed Raw",
+            disc_ids=[RAW_ISO],
+            regions=["TEST"],
+            archive_format="raw",
+            save_namespace=RAW_ISO,
+            min_iso_bytes=1,
+            builds=[{
+                "executable_sha256": executable_sha256,
+                "status": "supported",
+                "label": "synthetic supported build",
+            }],
+        )
+        registry = TitleRegistry(include_defaults=False)
+        registry.register(profile)
+
+        result = PreparationEngine(base_dir=self.temp_dir, registry=registry).prepare_game(
+            compressed_iso, destination_root=self.dest_root
+        )
+
+        self.assertTrue(result.success, result.error_message)
+        self.assertIsNotNone(result.prepared_root)
+        self.assertEqual(result.build["status"], "supported")
+        assert result.prepared_root is not None
+        manifest = json.loads((result.prepared_root / "manifest.json").read_text(encoding="utf-8"))
+        prepared_iso = Path(manifest["iso_path"])
+        self.assertNotEqual(prepared_iso, compressed_iso)
+        self.assertEqual(prepared_iso.read_bytes(), plain_iso.read_bytes())
+        self.assertEqual(manifest["iso_size"], prepared_iso.stat().st_size)
+        self.assertEqual((result.prepared_root / "disc" / "game.iso").read_bytes(),
+                         plain_iso.read_bytes())
 
     def test_raw_preparation_completes_with_verified_required_outputs(
         self,

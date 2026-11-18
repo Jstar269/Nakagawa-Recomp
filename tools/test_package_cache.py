@@ -1019,6 +1019,73 @@ class PackageCacheTests(unittest.TestCase):
         self.assertEqual(target, "synthetic-target")
         query.assert_called_once_with("resolved-compiler", "-dumpmachine", environment)
 
+    def test_llvm_tool_probe_failures_are_named_package_cache_errors(self) -> None:
+        environment = {"PATH": "synthetic-path"}
+        failures = (
+            OSError("synthetic executable failure"),
+            subprocess.TimeoutExpired("synthetic clang", 60),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with (
+                    mock.patch.object(
+                        package_cache.shutil, "which", return_value="synthetic-clang"
+                    ),
+                    mock.patch.object(package_cache.subprocess, "run", side_effect=failure),
+                ):
+                    with self.assertRaisesRegex(
+                        package_cache.PackageCacheError, "clang -v could not run"
+                    ):
+                        package_cache._llvm_tool_identity("clang", environment, "-v")
+
+    def test_enhancement_package_location_is_shared_by_guard_and_cache_key(self) -> None:
+        import enhancement_package
+
+        package_path = self.root / "synthetic-enhancement.json"
+        environments = (
+            ({"MAKEFLAGS": f"-j3 ENHANCEMENT_PACKAGE={package_path}"},
+             "MAKEFLAGS ENHANCEMENT_PACKAGE"),
+            ({"CODEGEN_USER_ARGS": f"--enhancement-package {package_path}"},
+             "CODEGEN_USER_ARGS --enhancement-package"),
+            ({"CODEGEN_USER_ARGS": f"--enhancement-package={package_path}"},
+             "CODEGEN_USER_ARGS --enhancement-package"),
+        )
+        with (
+            mock.patch.object(
+                enhancement_package,
+                "load_and_validate_package",
+                return_value={"id": "synthetic.enhancement"},
+            ),
+            mock.patch.object(
+                enhancement_package, "compute_package_digest", return_value="a" * 64
+            ),
+        ):
+            for environment, expected_source in environments:
+                with self.subTest(environment=environment):
+                    self.assertEqual(
+                        package_cache.ambient_enhancement_package(environment),
+                        expected_source,
+                    )
+                    options = package_cache.enhancement_package_options(environment)
+                    self.assertEqual(
+                        options["enhancement_package_id"], "synthetic.enhancement"
+                    )
+
+    def test_completion_manifest_checks_aot_key_components_once(self) -> None:
+        package_dir, key, _ = self._new_package_dir("single-aot-key-check")
+        package_cache.write_completion_manifest(package_dir, key)
+        original = package_cache._key_components
+
+        with mock.patch.object(package_cache, "_key_components", wraps=original) as check:
+            status, reason, _document = package_cache._check_completion_manifest(
+                package_dir, expected_key=key
+            )
+
+        self.assertEqual(status, package_cache._COMPLETION_OK, reason)
+        self.assertEqual(
+            sum(call.args[1] == "aot" for call in check.call_args_list), 1
+        )
+
     def test_relative_cc_resolves_identity_and_target_to_the_same_compiler(self) -> None:
         # A relative CC that PATH does not provide names a file under the repository root.
         # The identity and the target must resolve that one file: otherwise the key could
