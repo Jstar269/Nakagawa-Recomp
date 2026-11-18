@@ -1,9 +1,14 @@
 # PROVENANCE.md — `third_party/stb/`
 
 Sean Barrett's single-header PNG decoder, vendored for the native player's next UI: `src/ui/nk_ui_image.c` builds
-it for PNG only, from memory, with no file access, to decode the project's embedded prompt glyphs and, at run time,
-the `ICON0.PNG` and `PIC1.PNG` the player reads from the user's own disc image. Those disc images are never written
-to disk or stored in this repository.
+it for PNG only, from memory, with no file access, to decode three inputs: the project's embedded prompt glyphs; at
+run time, the `ICON0.PNG` and `PIC1.PNG` the player reads from the user's own disc image, which are never written to
+disk or stored in this repository; and, when the user turns on the opt-in cover art
+([#2632](https://github.com/Jstar269/nakagawa-recomp/issues/2632)), the cover the player downloaded from
+`thumbnails.libretro.com` (`src/player/cover_art.h`) and cached on disk, read back through
+`player_ui_art_decode_cover` (`src/player/ui/player_ui_art.c`) with at most 8 MB and 2048 pixels a side
+(`PLAYER_UI_ART_COVER_MAX_BYTES`, `PLAYER_UI_ART_COVER_MAX_SIDE`). The cover comes from a remote host, so stb_image's
+input is not only local and user-owned (corrected 2026-11-18: this paragraph named only the first two inputs).
 
 `stb_vorbis.c`, the Ogg Vorbis decoder from the same repository, is vendored for the player's optional launcher
 music ([#2207](https://github.com/Jstar269/nakagawa-recomp/issues/2207)): `src/player/ui/player_ui_vorbis.c` builds
@@ -18,6 +23,9 @@ it, into the player only, to decode the one track the player ships (`assets/musi
   commit `013ac3beddff3dbffafd5177e7972067cd2b5083` (2024-05-31, v2.30), so the file is the same at both.
 - License: upstream offers a choice of MIT or public domain (Unlicense wording), in `LICENSE` and at the end of
   `stb_image.h`. The project uses it under the public-domain alternative (`Unlicense`). Both texts are kept unchanged.
+- Import method: `stb_image.h` and `LICENSE` were downloaded from the pinned commit
+  `003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5`. Their Git blob IDs match that commit's files, and the SHA-256 values
+  below were calculated from the local bytes (corrected 2026-11-18: this bullet sat in the `stb_vorbis.c` section).
 
 ### `stb_vorbis.c`
 
@@ -32,8 +40,6 @@ it, into the player only, to decode the one track the player ships (`assets/musi
 - Import method: downloaded from `raw.githubusercontent.com` at the pinned commit. Its Git blob ID matches the pinned
   commit's file (checked against the GitHub contents API on 2026-11-12), and the SHA-256 below was calculated from
   the local bytes.
-- Import method: both files were downloaded from the pinned commit. Their Git blob IDs match the pinned commit's
-  files, and the SHA-256 values below were calculated from the local bytes.
 
 ## File manifest
 
@@ -50,6 +56,13 @@ it, into the player only, to decode the one track the player ships (`assets/musi
 `STBI_NO_FAILURE_STRINGS`, `STBI_NO_THREAD_LOCALS`, `STBI_MAX_DIMENSIONS 8192` and `STB_IMAGE_STATIC`. Before stb
 reads anything past the header, the caller's byte and dimension limits are applied, so an oversized image is refused
 without being decoded.
+
+A second translation unit builds the header for a test only: `tests/native/texrepl_selftest.c` (`texrepl-selftest`)
+uses it as an independent PNG decoder to check the texture-replacement pack reader's own decoder on a seeded
+corpus. It defines `STBI_ONLY_PNG`, `STBI_NO_STDIO`, `STBI_NO_LINEAR`, `STBI_NO_HDR`, `STBI_NO_FAILURE_STRINGS`,
+`STBI_NO_THREAD_LOCALS` and `STB_IMAGE_STATIC`, but not `STBI_MAX_DIMENSIONS`, so stb's default limit of 2^24 pixels
+a side applies there. It is not part of the player or the runtime (corrected 2026-11-18: this section named only
+`src/ui/nk_ui_image.c`).
 
 `src/player/ui/player_ui_vorbis.c` is the only translation unit that includes `stb_vorbis.c`. It defines
 `STB_VORBIS_NO_STDIO` (the player reads the file itself and hands the decoder memory) and

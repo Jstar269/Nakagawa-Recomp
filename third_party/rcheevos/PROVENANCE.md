@@ -20,8 +20,8 @@ host's callback, so nothing here opens a connection.
   rcheevos uses it to sign unlock requests. The zlib licence is compatible with GPL-3.0-or-later.
 - Import method: each file was read from a clone of the repository with `git show <commit>:<path>`. Its Git blob ID
   matches the pinned commit's tree, and the SHA-256 values below were calculated from the local bytes. `src/rc_client.c`,
-  five `src/rapi/` files and `src/rcheevos/alloc.c` have since been changed (Local deltas below); their rows keep the
-  upstream blob ID.
+  five `src/rapi/` files, `src/rcheevos/alloc.c`, `src/rcheevos/richpresence.c` and `src/rcheevos/runtime_progress.c`
+  have since been changed (Local deltas below); their rows keep the upstream blob ID.
 - Only what rc_client needs to sign in, load a game's achievement set by its hash, evaluate it and submit unlocks is
   vendored, in the upstream layout so every `#include` resolves without an edit: the public headers, `rc_client`, the
   `rapi` request builders and parsers, the `rcheevos` runtime, and `rhash`'s MD5. Not vendored: the rest of `rhash`
@@ -79,9 +79,9 @@ host's callback, so nothing here opens a connection.
 | `src/rcheevos/rc_internal.h` | `src/rcheevos/rc_internal.h` | imported byte-identical | `51e2e234c9095fe49be755a0243050592f24f0b0` | `bdabc324f20606e6377e86b606d587d0ebe061f7413c2afce0a850b7274d4b8b` |
 | `src/rcheevos/rc_validate.c` | `src/rcheevos/rc_validate.c` | imported byte-identical | `843c2ad30cf77f4aecbc7651eb74ddaf2a19e007` | `b669159309b67eecbfd9ddd2332cdc083e025f75bb743f6e5c972f7ee5cdee0d` |
 | `src/rcheevos/rc_validate.h` | `src/rcheevos/rc_validate.h` | imported byte-identical | `cfda94075d36295b3a6cb78e4ad9f239eb507774` | `d3da5219ebf38d2c34008417b3415658997cb3b63ee26b859d4036fd3fff3191` |
-| `src/rcheevos/richpresence.c` | `src/rcheevos/richpresence.c` | imported byte-identical | `c6a3393e2a22f29c9119e27c5725e7eafdf4dc60` | `06c940a6159c9fb39785b29eed204865150cef89431bd923d4f11465665a1144` |
+| `src/rcheevos/richpresence.c` | `src/rcheevos/richpresence.c` | imported + LOCAL DELTA | `c6a3393e2a22f29c9119e27c5725e7eafdf4dc60` | `a753aef5eacd1ace621580bf6cb6d0477e033f8bbd3bcfed950714a7472375c1` (this tree's bytes) |
 | `src/rcheevos/runtime.c` | `src/rcheevos/runtime.c` | imported byte-identical | `c1100b9af9a9c33a50ba75420b51704d36d6336d` | `5dd68234cecb9111646431bc785a07eaca3234e8794a9c25d0622fe1607a360f` |
-| `src/rcheevos/runtime_progress.c` | `src/rcheevos/runtime_progress.c` | imported byte-identical | `c87721eb4fc04df5a110400a923bf7dec567681c` | `24de7caf7edf30fc54a65314c5046389be138d11ff122d20d70845fb778439ce` |
+| `src/rcheevos/runtime_progress.c` | `src/rcheevos/runtime_progress.c` | imported + LOCAL DELTA | `c87721eb4fc04df5a110400a923bf7dec567681c` | `fd333fc6b6192638476e13711909b02483433a4d4dbdbc455ecc9d976872556c` (this tree's bytes) |
 | `src/rcheevos/trigger.c` | `src/rcheevos/trigger.c` | imported byte-identical | `063a14f5c92c8e924c34a6325adf5d69a5340737` | `fe38429dd6c0e18d2c27c1eb797c963d61f63130c6546a20e1f8d27ed8271ece` |
 | `src/rcheevos/value.c` | `src/rcheevos/value.c` | imported byte-identical | `9a451c63c88d74cb6e540bc286712394f31fe41f` | `126a5e14182fa551c03c758a2066feeda17c6e255a0dcb21fc6895ed5371413b` |
 | `src/rhash/md5.c` | `src/rhash/md5.c` | imported byte-identical | `f3a52056695d3b582c3738f5e839a38db0547cbd` | `fd38ee6a43316007d4aa816f23c24a8355c58df106b4c54e43ec44afc55df521` |
@@ -90,7 +90,8 @@ host's callback, so nothing here opens a connection.
 
 ## Local deltas
 
-Six files are modified. The `src/rapi/` changes are listed after the `src/rc_client.c` ones.
+Nine files are modified (corrected 2026-11-18: this line said six). The `src/rapi/` changes are listed after the
+`src/rc_client.c` ones, then the `src/rcheevos/` ones.
 
 ### `src/rc_client.c`
 
@@ -188,6 +189,48 @@ tree's. The change is marked `LOCAL DELTA` in the file.
 - Not changed: the reservation still does not check its `calloc` and `malloc` results. Upstream's handling
   (commit `e3e7e86bc8ab10295dace443addfb091d1095a0e`, #559) makes every later allocation in the parse stop after
   an error, across nine files; a later pin that includes it supersedes this delta.
+
+### `src/rcheevos/richpresence.c`: lookups built in order, unknown-macro text cut to its buffer
+
+`src/rcheevos/richpresence.c` was modified by Nakagawa Recomp contributors on 2026-11-18 (audit 2026-11-17). Its
+upstream v12.5.0 bytes have SHA-256 `06c940a6159c9fb39785b29eed204865150cef89431bd923d4f11465665a1144`; the table
+gives this tree's. Both changes are upstream commit `cab7f7ff938a1e68cb07a6072745bb31197723bd` ("keep lookup tree
+semi-balanced while building", #569, in `src/runtime/rc_richpresence.c`, where upstream has since moved the file),
+applied by hand to the pinned file; each is marked `LOCAL DELTA`, and a later pin that includes that commit drops
+them. `achievements-selftest` fails on the upstream bytes for each.
+
+- `rc_parse_richpresence_lookup` keeps a lookup's entries in a sorted array, scanned from its end, and builds the
+  balanced tree from it once at the end of the lookup. Upstream at the pin inserted each entry into a plain binary
+  tree from its root and rebalanced it afterwards, so entries listed in value order, the usual case, built a list:
+  quadratic time to parse, then a count and a flatten that recursed once per entry. The selftest loads a lookup of
+  65536 sorted entries through the bridge and reads three of them and the default; on the upstream bytes the
+  Windows selftest dies with a stack overflow (`0xC00000FD`). One difference from #569: the array doubles when
+  full instead of growing by 64 entries, so a long lookup is not copied once per 64 entries; the size arithmetic
+  is checked. Entries listed out of order still cost a scan and a shift each, as in #569.
+- `rc_evaluate_richpresence_display` cuts an unknown macro's text to the 255 characters its 256-byte buffer holds.
+  `snprintf` returns the untruncated length, and upstream at the pin used it as the copy length, so a caller
+  buffer larger than 256 bytes (such as one passed to `rc_client_get_rich_presence_message`) received the stack
+  bytes past the buffer and a length longer than the text. The selftest gives a 1 KiB buffer a 624-character
+  unknown macro and checks that 255 characters and nothing more are written.
+- Not changed: the scratch allocator `rc_buffer_reserve` (`src/rc_util.c`) still walks every chunk from the first
+  on each allocation, and each chunk holds a few entries, so parsing a very long lookup stays quadratic there.
+
+### `src/rcheevos/runtime_progress.c`: progress reads bounded to each chunk
+
+`src/rcheevos/runtime_progress.c` was modified by Nakagawa Recomp contributors on 2026-11-18 (audit 2026-11-17). Its
+upstream v12.5.0 bytes have SHA-256 `24de7caf7edf30fc54a65314c5046389be138d11ff122d20d70845fb778439ce`; the table
+gives this tree's. The change is upstream commit `e9a6d580f01cbd4e299af967390aac3115c47ed5` ("runtime: bound progress
+deserialization to each chunk", #554), applied unchanged with `git apply`; it is marked `LOCAL DELTA` in the file,
+and a later pin that includes that commit drops it.
+
+- `rc_runtime_deserialize_progress_sized` checks each chunk's size against the bytes left before it forms the chunk
+  end, and every read (`rc_runtime_progress_read_uint`, the MD5 match) checks the buffer and the current chunk.
+  Upstream at the pin added the size to the offset in 32 bits unchecked and read with no bounds, so a chunk size
+  near `0xFFFFFFFF` wrapped the end back inside the state and the readers ran past it. #554 also skips a memref
+  chunk when no memref is waiting to be matched. The bridge does not restore progress itself, but its callers
+  reach `rc_client_deserialize_progress_sized` through `nk_ach_rc_client()`. The selftest restores a 29-byte state
+  whose DONE chunk size wraps and whose checksum lies in the 15 bytes past the stated size: the upstream bytes
+  accept it (`RC_OK`) by reading those bytes, this tree refuses it with `RC_INSUFFICIENT_BUFFER`.
 
 The bridge builds rc_client without `RC_CLIENT_SUPPORTS_HASH`,
 `RC_CLIENT_SUPPORTS_EXTERNAL` and `RC_CLIENT_SUPPORTS_RAINTEGRATION`, rcheevos' own defaults, so the files those

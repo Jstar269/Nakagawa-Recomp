@@ -2,8 +2,10 @@
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
 /* PNG decoding for nk_ui images: the project's bundled prompt glyphs and, in
-   the player, ICON0.PNG / PIC1.PNG read at run time from the user's own disc.
-   Decoding is stb_image (third_party/stb, used under its public-domain
+   the player, ICON0.PNG / PIC1.PNG read at run time from the user's own disc
+   and the opt-in cover art downloaded from thumbnails.libretro.com and cached
+   on disk (src/player/cover_art.h; at most 8 MB and 2048 px a side, see
+   player_ui_art_decode_cover). Decoding is stb_image (third_party/stb, used under its public-domain
    option), built for PNG only from memory. The limits are checked against the
    PNG header before any pixel is decoded, so a hostile or damaged file costs
    at most the caller's bounds. */

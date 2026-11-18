@@ -15,6 +15,9 @@
 #include "rc_consoles.h"
 #include "rc_error.h"
 
+/* rhash's MD5, which signs a progress state's DONE chunk; vendored, not a public header. */
+#include "../../third_party/rcheevos/src/rhash/md5.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -790,6 +793,150 @@ static void test_achievement_with_many_memrefs_loads(uint8_t *ram) {
     free(body);
 }
 
+/* Loads the synthetic set with RichPresencePatch set to script (already escaped for JSON) on a
+ * signed-in client over the deferred transport. NULL (with a failure counted) when it does not
+ * load. */
+static NkAch *load_with_rich_presence(uint8_t *ram, Deferred *d, const char *script) {
+    static const char head[] =
+        "{\"Success\":true,\"GameId\":1234,\"Title\":\"Synthetic Game\",\"ConsoleId\":41,"
+        "\"ImageIconUrl\":\"\",\"RichPresenceGameId\":1234,\"RichPresencePatch\":\"";
+    static const char tail[] =
+        "\",\"Sets\":[{\"AchievementSetId\":1111,\"GameId\":1234,\"Title\":\"Core\",\"Type\":\"core\","
+        "\"ImageIconUrl\":\"\",\"Achievements\":["
+        "{\"ID\":5501,\"Title\":\"Five\",\"Description\":\"The watched byte reads 5\","
+        "\"Flags\":3,\"Points\":5,\"MemAddr\":\"0xH800100=5\",\"Author\":\"Synthetic\","
+        "\"BadgeName\":\"00001\",\"Created\":1700000000,\"Modified\":1700000000}"
+        "],\"Leaderboards\":[]}]}";
+    const size_t len = sizeof head - 1u + strlen(script) + sizeof tail - 1u;
+    char *body = (char *)malloc(len + 1u);
+    CHECK(body != NULL, "out of memory");
+    if (!body) return NULL;
+    snprintf(body, len + 1u, "%s%s%s", head, script, tail);
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    NkAch *ach = deferred_login(ram, d);
+    if (ach) {
+        (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+        CHECK(nk_ach_begin_load_game(ach, HASH), "load starts");
+        CHECK(deliver_n(d, "r=achievementsets&", 200, body, len), "the set request waits for its answer");
+        CHECK(deliver(d, "r=startsession&", 200, k_session), "the session request waits");
+        CHECK(nk_ach_game_loaded(ach), "the set with a rich presence script loads");
+        if (!nk_ach_game_loaded(ach)) {
+            drain(d);
+            nk_ach_destroy(ach);
+            ach = NULL;
+        }
+    }
+    free(body);
+    return ach;
+}
+
+/* rcheevos LOCAL DELTA (rc_evaluate_richpresence_display, upstream cab7f7ff #569): an unknown
+ * macro's text is the whole "Name(params)" span, so "[Unknown macro]Name(params)" can be longer
+ * than the 256-byte tmp it is formatted into. Upstream at the pin took snprintf's untruncated
+ * length as the copy length, so a caller buffer larger than tmp received the stack bytes past tmp
+ * and a length longer than the text. */
+static void test_long_unknown_macro_is_cut(uint8_t *ram) {
+    enum { PARAMS = 600 };
+    char script[64 + PARAMS];
+    int n = snprintf(script, sizeof script, "Display:\\n@Unknown(");
+    memset(script + n, 'p', PARAMS);
+    snprintf(script + n + PARAMS, sizeof script - (size_t)n - PARAMS, ")");
+    Deferred d;
+    NkAch *ach = load_with_rich_presence(ram, &d, script);
+    if (!ach) return;
+    char message[1024];
+    memset(message, 'x', sizeof message);
+    const size_t got = rc_client_get_rich_presence_message(nk_ach_rc_client(ach), message, sizeof message);
+    CHECK(got == 255u, "the unknown macro's text is cut to 255 chars, got %u", (unsigned)got);
+    CHECK(memchr(message, '\0', sizeof message) == message + 255, "the message ends after 255 chars");
+    CHECK(starts_with(message, "[Unknown macro]Unknown(ppp"), "the message is the unknown macro: %.32s", message);
+    int untouched = 1;
+    for (size_t i = 256u; i < sizeof message; i++)
+        if (message[i] != 'x') untouched = 0;
+    CHECK(untouched, "nothing is written past the cut text (no bytes read past the 256-byte tmp)");
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
+/* rcheevos LOCAL DELTA (rc_parse_richpresence_lookup, upstream cab7f7ff #569): lookups are
+ * normally listed in value order. Upstream at the pin inserted each entry into a plain binary
+ * tree from its root, so sorted entries built a list: quadratic time to parse, then a count and a
+ * flatten that recursed once per entry: 65536 entries overflowed the 2 MB main-thread stack of a
+ * Windows build. The entries are now kept in a sorted array and the balanced tree built from it
+ * once. The keys are even, so no two entries merge into one range, and the labels repeat (L0 to
+ * L6) so the parser's string table stays small. */
+#define SORTED_LOOKUP_ENTRIES (1u << 16)
+#define RP_ADDR 0x00200u /* user RAM offset the rich presence reads (32 bits) */
+static void test_long_sorted_lookup_loads(uint8_t *ram) {
+    static const char head[] = "Lookup:L\\n*=odd\\n";
+    static const char tail[] = "\\nDisplay:\\n@L(0xX800200)";
+    const size_t cap = sizeof head + sizeof tail + (size_t)SORTED_LOOKUP_ENTRIES * 16u;
+    char *script = (char *)malloc(cap);
+    CHECK(script != NULL, "out of memory");
+    if (!script) return;
+    size_t len = (size_t)snprintf(script, cap, "%s", head);
+    for (uint32_t i = 0; i < SORTED_LOOKUP_ENTRIES; i++)
+        len += (size_t)snprintf(script + len, cap - len, "%u=L%u\\n", (unsigned)(2u * i), (unsigned)(i % 7u));
+    len += (size_t)snprintf(script + len, cap - len, "%s", tail);
+    CHECK(len < cap, "the script fits its buffer");
+    Deferred d;
+    NkAch *ach = load_with_rich_presence(ram, &d, script);
+    free(script);
+    if (!ach) return;
+    const uint32_t values[4] = {0u, 80000u, 2u * (SORTED_LOOKUP_ENTRIES - 1u), 80001u};
+    for (int i = 0; i < 4; i++) {
+        char want[16], message[64];
+        ram[RP_ADDR + 0] = (uint8_t)values[i];
+        ram[RP_ADDR + 1] = (uint8_t)(values[i] >> 8);
+        ram[RP_ADDR + 2] = (uint8_t)(values[i] >> 16);
+        ram[RP_ADDR + 3] = (uint8_t)(values[i] >> 24);
+        nk_ach_frame(ach);
+        if (values[i] & 1u)
+            snprintf(want, sizeof want, "odd");
+        else
+            snprintf(want, sizeof want, "L%u", (unsigned)(values[i] / 2u % 7u));
+        rc_client_get_rich_presence_message(nk_ach_rc_client(ach), message, sizeof message);
+        CHECK(strcmp(message, want) == 0, "the lookup of %u reads %s, got %s", (unsigned)values[i], want,
+              message);
+    }
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
+/* rcheevos LOCAL DELTA (rc_runtime_deserialize_progress_sized, upstream e9a6d580 #554): a chunk's
+ * size is checked against the bytes left, so it cannot wrap the 32-bit chunk end back inside the
+ * state. Upstream at the pin added the size to the offset unchecked: a DONE chunk whose size wraps
+ * passed the bounds test, and its checksum was then read from the 15 bytes past the state's stated
+ * size, so a state accepted only by reading past its end loaded as RC_OK. The bytes past the
+ * stated size here are that checksum, so the over-read is visible as an accepted state. */
+static void test_progress_chunk_cannot_wrap(uint8_t *ram) {
+    Deferred d;
+    NkAch *ach = deferred_login(ram, &d);
+    if (!ach) return;
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(nk_ach_begin_load_game(ach, HASH), "load starts");
+    CHECK(deliver(&d, "r=achievementsets&", 200, k_sets), "the set request waits for its answer");
+    CHECK(deliver(&d, "r=startsession&", 200, k_session), "the session request waits");
+    CHECK(nk_ach_game_loaded(ach), "the game loads");
+    /* "RAP\n", an unknown 8-byte chunk "PADD", then DONE whose size 0xFFFFFFF0 wraps the chunk
+     * end from 28 back to 12. The stated size, 29, ends one byte into the checksum. */
+    static const uint8_t prefix[28] = {
+        0x52, 0x41, 0x50, 0x0A, 'P', 'A', 'D', 'D', 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        'D', 'O', 'N', 'E', 0xF0, 0xFF, 0xFF, 0xFF};
+    uint8_t state[28 + 16];
+    memcpy(state, prefix, sizeof prefix);
+    md5_state_t md5;
+    md5_init(&md5);
+    md5_append(&md5, state, (int)sizeof prefix);
+    md5_finish(&md5, state + sizeof prefix);
+    const int result = rc_client_deserialize_progress_sized(nk_ach_rc_client(ach), state, sizeof prefix + 1u);
+    CHECK(result == RC_INSUFFICIENT_BUFFER, "a chunk size that wraps past the state's end is refused, got %d",
+          result);
+    drain(&d);
+    nk_ach_destroy(ach);
+}
+
 int main(void) {
     uint8_t *ram = (uint8_t *)calloc(1u, USER_RAM_SIZE);
     if (!ram) {
@@ -811,6 +958,9 @@ int main(void) {
     test_array_of_primitives_is_refused();
     test_set_with_primitive_entry_fails_load(ram);
     test_achievement_with_many_memrefs_loads(ram);
+    test_long_unknown_macro_is_cut(ram);
+    test_long_sorted_lookup_loads(ram);
+    test_progress_chunk_cannot_wrap(ram);
     free(ram);
     if (g_failures) {
         fprintf(stderr, "test_nk_achievements: %d failure(s)\n", g_failures);
