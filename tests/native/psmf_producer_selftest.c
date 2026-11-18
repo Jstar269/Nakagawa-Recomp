@@ -731,6 +731,107 @@ static void test_streaming_demux_cursor_progress_without_access_units(void) {
     free(bytes);
 }
 
+/* Feed one raw program stream (no PSMF header) to a streaming audio-only demux, cut
+ * at each offset in `cuts` and pumped after each piece, and count the ATRAC frames it
+ * emits. */
+static uint32_t stream_audio_frames(const uint8_t *ps, uint32_t len, const uint32_t *cuts,
+                                    int ncuts, uint32_t sizes[], int max, int *failed) {
+    SrPsmfProducer *p = sr_psmf_producer_open_stream(0);
+    CHECK(p != NULL, "audio resync stream producer opens");
+    if (!p) { *failed = 1; return 0; }
+    CHECK(sr_psmf_producer_select_streams(p, SR_PSMF_STREAM_NONE, 0) &&
+          sr_psmf_producer_select_audio_substream(p, 0),
+          "audio resync stream selects ATRAC sub-stream 0 only");
+    uint32_t fed = 0;
+    int count = 0;
+    for (int i = 0; i <= ncuts; i++) {
+        uint32_t end = i < ncuts ? cuts[i] : len;
+        CHECK(sr_psmf_producer_feed_stream(p, ps + fed, end - fed, i == ncuts) == 0,
+              "audio resync stream input is accepted");
+        fed = end;
+        sr_psmf_producer_pump(p, 64);
+        SrPsmfAu au;
+        while (sr_psmf_producer_pop(p, SR_PSMF_AU_AUDIO, &au)) {
+            if (count < max) sizes[count] = au.size;
+            count++;
+            sr_psmf_au_release(&au);
+        }
+    }
+    *failed = sr_psmf_producer_failed(p);
+    sr_psmf_producer_close(p);
+    return (uint32_t)count;
+}
+
+/* After stray bytes the audio demux resyncs on the next 0F D0 header.  A header whose
+ * first bytes end one PES payload and whose rest starts the next must stay buffered
+ * rather than be skipped with the stray bytes, and a 0F D0 pair inside the stray bytes
+ * whose size field is outside the accepted frame range is not a header to fail on. */
+static void test_audio_resync_keeps_split_header_and_skips_false_sync(void) {
+    uint8_t es_a[16], frame[32 + 48];
+    Buf f = {frame, 0, sizeof(frame), 0};
+    audio_frame(&f, 0x00, 0x02, 0x77);   /* 32-byte frame */
+    audio_frame(&f, 0x00, 0x04, 0x66);   /* 48-byte frame */
+    CHECK(!f.overflow && f.at == 80u, "two resync frames are built");
+
+    /* Split header: five stray bytes, then the first four header bytes end payload A. */
+    uint8_t ps[512];
+    Buf b = {ps, 0, sizeof(ps), 0};
+    memset(es_a, 0x55, 5);
+    memcpy(es_a + 5, frame, 4);
+    add_audio_pes(&b, 1, 9000, es_a, 9);
+    uint32_t cut = b.at;
+    add_audio_pes(&b, 0, 0, frame + 4, 76);
+    CHECK(!b.overflow, "split-header program stream is built");
+    uint32_t sizes[4] = {0};
+    int failed = 0;
+    uint32_t n = stream_audio_frames(ps, b.at, &cut, 1, sizes, 4, &failed);
+    CHECK(!failed, "a header split across PES payloads after stray bytes does not fail the stream");
+    CHECK(n == 2u && sizes[0] == 32u && sizes[1] == 48u,
+          "a header split across PES payloads after stray bytes is kept, not skipped");
+
+    /* False sync: stray bytes carry 0F D0 03 FF (a 0x2008-byte size, above the parser's
+     * frame bound) before the real header. */
+    static const uint8_t false_sync[8] = {0x55, 0x0f, 0xd0, 0x03, 0xff, 0x55, 0x55, 0x55};
+    uint8_t es_c[8 + 80];
+    memcpy(es_c, false_sync, 8);
+    memcpy(es_c + 8, frame, 80);
+    b.at = 0;
+    add_audio_pes(&b, 1, 9000, es_c, sizeof(es_c));
+    CHECK(!b.overflow, "false-sync program stream is built");
+    memset(sizes, 0, sizeof(sizes));
+    n = stream_audio_frames(ps, b.at, NULL, 0, sizes, 4, &failed);
+    CHECK(!failed, "a false 0F D0 pair inside resync bytes does not fail the stream");
+    CHECK(n == 2u && sizes[0] == 32u && sizes[1] == 48u,
+          "the resync scan passes a false 0F D0 pair and finds the real header");
+}
+
+/* A file-mode source that delivers all but the last header byte and then reports
+ * PENDING.  The header is incomplete, so the producer must not open on it. */
+typedef struct { MemSource inner; uint64_t pending_at; } PendingSource;
+static int pending_mem_read(void *opaque, uint64_t off, void *dst, uint32_t cap, uint32_t *got) {
+    PendingSource *s = (PendingSource *)opaque;
+    if (!s || !got) return SR_PSMF_SOURCE_ERROR;
+    if (off >= s->pending_at) { *got = 0; return SR_PSMF_SOURCE_PENDING; }
+    if (cap > s->pending_at - off) cap = (uint32_t)(s->pending_at - off);
+    return mem_read(&s->inner, off, dst, cap, got);
+}
+
+static void test_file_header_pending_is_not_a_header(void) {
+    uint32_t size = 0;
+    uint8_t *bytes = fixture(&size, 0);
+    if (!bytes) { CHECK(0, "pending-header fixture allocated"); return; }
+    PendingSource ps = {{bytes, size, 0, 0}, 2047u};
+    SrPsmfSource source = {pending_mem_read, &ps, size};
+    SrPsmfProducer *p = sr_psmf_producer_open(&source, 0);
+    CHECK(p == NULL, "a file-mode header read that ends PENDING does not open the producer");
+    sr_psmf_producer_close(p);
+    ps.pending_at = UINT64_MAX;
+    p = sr_psmf_producer_open(&source, 0);
+    CHECK(p != NULL, "the same source opens once the whole header is delivered");
+    sr_psmf_producer_close(p);
+    free(bytes);
+}
+
 static void test_backpressure_keeps_order(void) {
     uint32_t size = 0; uint8_t *bytes = fixture(&size, 4);
     MemSource mem = {bytes, size, 0, 0};
@@ -2015,6 +2116,8 @@ int main(int argc, char **argv) {
     test_streaming_demux_rejects_incomplete_pes_at_eos();
     test_streaming_demux_input_window_limit();
     test_streaming_demux_cursor_progress_without_access_units();
+    test_audio_resync_keeps_split_header_and_skips_false_sync();
+    test_file_header_pending_is_not_a_header();
     test_backpressure_keeps_order();
     test_no_aud_scan_work_bound();
     test_aud_split_across_pes();

@@ -17,7 +17,8 @@
  *
  * The producer/demux assertions run on every platform.  The decode assertions run wherever a
  * real H.264 backend selected by the registry exists; on a build without one they report SKIP,
- * and the demux half still runs, so the fixture itself always stays covered.
+ * and the demux half still runs, so the fixture itself always stays covered.  An SR_H264_FFMPEG
+ * build requires its backend, so there any SKIP fails the run.
  *
  * Coverage that matters most:
  *   - AU formation across PES boundaries, with fragmented source reads;
@@ -47,6 +48,16 @@
 
 static int checks, failures;
 #define CHECK(x, text) do { checks++; if (!(x)) { failures++; fprintf(stderr, "FAIL: %s\n", text); } } while (0)
+
+/* A decode cell that found no usable H.264 decoder reports SKIP through here.  The
+ * count lets main() refuse an SR_H264_FFMPEG build in which any cell skipped: that
+ * build requires the backend, so a decoder that cannot be created is a failure there,
+ * never missing evidence that exits 0. */
+static int media_skips;
+static void media_skip(const char *what) {
+    media_skips++;
+    fprintf(stderr, "SKIP: %s", what);
+}
 
 /* Published counter-line seam of the SR_MPEG_MEDIA_SELFTEST build of hle.c: the fixture
  * reads the exact summary bytes a run prints on stderr, plus a count so it can tell a
@@ -977,7 +988,7 @@ static void test_real_decode_into_guest_buffer(void) {
 
     int dec = sr_h264_create();
     if (dec < 0 || !p) {
-        fprintf(stderr, "SKIP: no H.264 backend on this build (demux contract still verified)\n");
+        media_skip("no H.264 backend on this build (demux contract still verified)\n");
         sr_psmf_producer_close(p);
         free(bytes);
         return;
@@ -1111,7 +1122,7 @@ static void test_decoded_pixels(void) {
     };
     int dec = sr_h264_create();
     if (dec < 0) {
-        fprintf(stderr, "SKIP: pixel assertions need a real H.264 backend\n");
+        media_skip("pixel assertions need a real H.264 backend\n");
         return;
     }
     uint8_t host[64 * 272 * 4];
@@ -1172,7 +1183,7 @@ static void test_decoded_pixels(void) {
 /* A fresh decoder instance must never expose the previous stream's trailing picture. */
 static void test_instance_isolation(void) {
     int dec = sr_h264_create();
-    if (dec < 0) { fprintf(stderr, "SKIP: instance isolation needs a real H.264 backend\n"); return; }
+    if (dec < 0) { media_skip("instance isolation needs a real H.264 backend\n"); return; }
     /* Nothing was ever fed: end of stream on an empty instance reports "no picture". */
     CHECK(sr_h264_frame(dec, 1, GUEST_BUF, 64, 3) == 0, "an unfed decoder produces no picture");
     sr_h264_destroy(dec);
@@ -1209,7 +1220,7 @@ static void test_instance_isolation(void) {
  * decoder for the pictures that follow. */
 static void test_destination_refusal(void) {
     int dec = sr_h264_create();
-    if (dec < 0) { fprintf(stderr, "SKIP: destination checks need a real H.264 backend\n"); return; }
+    if (dec < 0) { media_skip("destination checks need a real H.264 backend\n"); return; }
     uint32_t au_off[FIX_PICTURES], au_len[FIX_PICTURES];
     uint8_t es[65536];
     uint32_t es_len = 0;
@@ -1237,7 +1248,7 @@ static void test_legacy_feed_take_path(void) {
     if (!bytes) { CHECK(0, "fixture allocated"); return; }
     int dec = sr_h264_create();
     if (dec < 0) {
-        fprintf(stderr, "SKIP: the mpeg.c consumption path needs a real H.264 backend\n");
+        media_skip("the mpeg.c consumption path needs a real H.264 backend\n");
         free(bytes);
         return;
     }
@@ -1346,7 +1357,7 @@ static void guest_vram_write_coherence_case(const VramDest *dest, const uint8_t 
 #if defined(SR_H264_FFMPEG)
         CHECK(0, "the explicitly enabled FFmpeg backend creates a decoder for VRAM coherence");
 #else
-        fprintf(stderr, "SKIP: guest-VRAM coherence needs a real H.264 backend\n");
+        media_skip("guest-VRAM coherence needs a real H.264 backend\n");
 #endif
         ge_set_gpu_hooks(NULL);
         g_sr_vram_read_pending = 0;
@@ -1493,7 +1504,7 @@ static void test_backend_reset_and_restart(void) {
           "reset fixture stream builds");
     int id = conformance_backend.create();
     if (id < 0) {
-        fprintf(stderr, "SKIP: reset lifecycle needs a real H.264 backend\n");
+        media_skip("reset lifecycle needs a real H.264 backend\n");
         return;
     }
     CHECK(conformance_backend.submit_au(id, es + au_off[0], au_len[0]) == 0,
@@ -1525,7 +1536,7 @@ static void test_backend_reset_and_restart(void) {
 static void test_backend_malformed_input(void) {
     int id = conformance_backend.create();
     if (id < 0) {
-        fprintf(stderr, "SKIP: malformed-input contract needs a real H.264 backend\n");
+        media_skip("malformed-input contract needs a real H.264 backend\n");
         return;
     }
     static const uint8_t malformed[] = { 0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04 };
@@ -1551,7 +1562,7 @@ static void test_backend_pts_range(void) {
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         int id = conformance_backend.create();
         if (id < 0) {
-            fprintf(stderr, "SKIP: PTS range contract needs a real H.264 backend\n");
+            media_skip("PTS range contract needs a real H.264 backend\n");
             return;
         }
         int r = sr_h264_submit_au_timed(id, au, sizeof(au), cases[i].pts, cases[i].has_pts);
@@ -1619,7 +1630,7 @@ static void test_legacy_demux_mutations(unsigned iterations) {
         demux_fuzz_mutate(mutated, size - 2048u);
         int decoder = sr_h264_create();
         if (decoder < 0) {
-            if (attempted == 0) fprintf(stderr, "SKIP: hostile legacy demux needs a real H.264 backend\n");
+            if (attempted == 0) media_skip("hostile legacy demux needs a real H.264 backend\n");
             break;
         }
         attempted++;
@@ -1973,7 +1984,7 @@ static void test_mpeg_ps_demux_error_fails_closed(void) {
     CHECK(mpeg_ringbuffer_put(NULL, ERR_RING, 1u, 1u) == 1u,
           "RingbufferPut submits the malformed synthetic PS packet");
     if (ctx->h264 < 0) {
-        fprintf(stderr, "SKIP: malformed-PS MPEG integration needs a real H.264 backend\n");
+        media_skip("malformed-PS MPEG integration needs a real H.264 backend\n");
     } else {
         CHECK(ctx->h264DemuxFailed,
               "the production H.264 bridge latches the malformed PS parser failure");
@@ -2488,7 +2499,7 @@ static void test_mpeg_ycbcr_mode2_decode(void) {
     ctx->fedPackets = 1u;
     ctx->streamEnded = 1;
     if (ctx->h264 < 0) {
-        fprintf(stderr, "SKIP: the mode-2 decode needs a real H.264 backend\n");
+        media_skip("the mode-2 decode needs a real H.264 backend\n");
         mpeg_finish();
         return;
     }
@@ -2587,7 +2598,7 @@ static void test_mpeg_ycbcr_guest_decode(void) {
     ctx->streamEnded = 1;
     int ref = sr_h264_create();
     if (ctx->h264 < 0 || ref < 0) {
-        fprintf(stderr, "SKIP: the YCbCr decode layout needs a real H.264 backend\n");
+        media_skip("the YCbCr decode layout needs a real H.264 backend\n");
         if (ref >= 0) sr_h264_destroy(ref);
         mpeg_finish();
         return;
@@ -2734,7 +2745,7 @@ static void test_mpeg_ycbcr_restart_after_stop(int via_flush) {
     ctx->h264 = sr_h264_create();
     ctx->h264Init = 1;
     if (ctx->h264 < 0) {
-        fprintf(stderr, "SKIP: the YCbCr restart contract needs a real H.264 backend\n");
+        media_skip("the YCbCr restart contract needs a real H.264 backend\n");
         mpeg_finish();
         return;
     }
@@ -2834,7 +2845,7 @@ static void test_mpeg_ycbcr_catch_up(int newest) {
     ctx->h264Init = 1;
     int ref = sr_h264_create();
     if (ctx->h264 < 0 || ref < 0) {
-        fprintf(stderr, "SKIP: the YCbCr catch-up needs a real H.264 backend\n");
+        media_skip("the YCbCr catch-up needs a real H.264 backend\n");
         if (ref >= 0) sr_h264_destroy(ref);
         mpeg_finish();
         return;
@@ -3146,7 +3157,7 @@ static void test_mpeg_avc_decode_clear_in_vram_mirrors(void) {
     ctx->h264 = sr_h264_create();
     ctx->h264Init = 1;
     if (ctx->h264 < 0) {
-        fprintf(stderr, "SKIP: sceMpegAvcDecode blank-frame clear needs a decoder instance\n");
+        media_skip("sceMpegAvcDecode blank-frame clear needs a decoder instance\n");
         mpeg_finish();
         return;
     }
@@ -3510,7 +3521,7 @@ static int lc_play_first_picture(uint32_t player) {
  * player claims a slot, so every slot is as the program loaded it. */
 static void test_unused_player_slot_release_keeps_decoder_zero(void) {
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: unused-slot release needs an H.264 backend\n");
+        media_skip("unused-slot release needs an H.264 backend\n");
         return;
     }
     const int owned = sr_h264_create();
@@ -3574,7 +3585,7 @@ static void test_player_lifecycle_releases_what_it_acquired(void) {
               "psmf-lifecycle: the four probe players are deleted");
 
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: decoder-instance lifecycle needs an H.264 backend\n");
+        media_skip("decoder-instance lifecycle needs an H.264 backend\n");
     } else {
         /* Create, play, delete: every cycle gets a decoder and a picture. */
         int pictures = 0;
@@ -3659,7 +3670,7 @@ static void test_player_handle_word(void) {
  * if the multiply comes before the OR, and the player then refuses every audio block. */
 static void test_player_audio_frame_over_2_kib(void) {
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: the player audio-size cell needs an H.264 backend\n");
+        media_skip("the player audio-size cell needs an H.264 backend\n");
         return;
     }
     s_av_audio_b2 = 0x29u; s_av_audio_b3 = 0x00u;
@@ -3801,7 +3812,7 @@ static void test_player_get_psmf_info(void) {
  * picture must reach VRAM at the translated addresses (the Hot Shots Tennis Cinema path). */
 static void test_psmf_player_display_in_vram_mirrors(void) {
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: PSMF player VRAM display needs an H.264 backend\n");
+        media_skip("PSMF player VRAM display needs an H.264 backend\n");
         return;
     }
     uint32_t size = 0;
@@ -3842,7 +3853,7 @@ static void test_psmf_player_display_in_vram_mirrors(void) {
  * nothing: the picture changes exactly the display buffer's bytes either way. */
 static void test_movie_provenance_psmf_player(void) {
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: PSMF movie provenance needs an H.264 backend\n");
+        media_skip("PSMF movie provenance needs an H.264 backend\n");
         return;
     }
     uint32_t size = 0;
@@ -3911,7 +3922,7 @@ static void test_movie_provenance_mpeg_csc(void) {
         MC_INIT = 0x08170000u, MC_AU = 0x08180000u, MC_MODE = 0x08190000u,
     };
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: sceMpegAvcCsc movie provenance needs an H.264 backend\n");
+        media_skip("sceMpegAvcCsc movie provenance needs an H.264 backend\n");
         return;
     }
     const uint32_t width = 64u, height = 64u;
@@ -4320,7 +4331,7 @@ static void test_player_av_presentation_timing(int layout) {
                   AV_AUDIO_PTS_THEORETICAL_MAX_DRIFT,
               "psmf-av: terminal A/V gap stays within theoretical 3-tick bound");
     } else {
-        fprintf(stderr, "SKIP: guest video presentation assertions need an H.264 backend\n");
+        media_skip("guest video presentation assertions need an H.264 backend\n");
         CHECK(vsub == 0 && (long long)frames == 0 && vts == 0,
               "psmf-av: without a backend no picture is submitted, delivered, or timed");
         CHECK(ats == av_audio_pts(AV_AUDIO_BLOCKS - 1) ||
@@ -4444,7 +4455,7 @@ static void test_player_reordered_pictures_keep_their_own_time(int report_pts) {
  * reordered, or the stream could not tell a picture's own time from the ring's. */
 static void test_player_decoder_reorder_keeps_picture_time(void) {
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: picture reordering through the player needs a real H.264 backend\n");
+        media_skip("picture reordering through the player needs a real H.264 backend\n");
         return;
     }
     uint32_t size = 0;
@@ -4867,7 +4878,7 @@ static void pb_run(const PbScenario *sc, const char *name) {
             }
         }
     } else {
-        fprintf(stderr, "SKIP: picture presentation assertions need an H.264 backend\n");
+        media_skip("picture presentation assertions need an H.264 backend\n");
         CHECK(vdel == 0 && vmatch == 0, "psmf-present: without a backend no picture is delivered or matched");
     }
 done:
@@ -4946,7 +4957,7 @@ static void pc_flip(uint32_t target, int64_t clock_us) {
 
 static void test_player_av_composited_presentation(void) {
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: composited presentation assertions need an H.264 backend\n");
+        media_skip("composited presentation assertions need an H.264 backend\n");
         return;
     }
     uint32_t size = 0;
@@ -5183,7 +5194,7 @@ static void test_mpeg_looped_stream_feeds_past_header_size(uint32_t lead, int st
     CHECK(mpeg_ringbuffer_put(NULL, LP_RING, packets, packets) == packets,
           "mpeg-loop: the first pass is put into the ring");
     if (!ctx || ctx->h264 < 0) {
-        fprintf(stderr, "SKIP: the looped sceMpeg stream needs a real H.264 backend\n");
+        media_skip("the looped sceMpeg stream needs a real H.264 backend\n");
         mpeg_finish();
         free(image);
         return;
@@ -5281,7 +5292,7 @@ static void test_mpeg_last_unit_keeps_its_ring_packets(void) {
     Mpeg *ctx = mpeg_find(LU_DESC);
     CHECK(mpeg_ringbuffer_put(NULL, LU_RING, packets, packets) == packets, "mpeg-last: the whole movie goes in");
     if (!ctx || ctx->h264 < 0) {
-        fprintf(stderr, "SKIP: the last access unit needs a real H.264 backend\n");
+        media_skip("the last access unit needs a real H.264 backend\n");
         mpeg_finish();
         free(image);
         return;
@@ -5449,7 +5460,7 @@ static void test_mpeg_feed_end_without_stream_size(int mode) {
 
     eof_put_until_short();
     if (!ctx || ctx->h264 < 0) {
-        fprintf(stderr, "SKIP: the end of a feed needs a real H.264 backend\n");
+        media_skip("the end of a feed needs a real H.264 backend\n");
         mpeg_finish();
         free(source);
         free(image);
@@ -5886,7 +5897,7 @@ static void test_mpeg_h264_instances_return_to_the_pool(void) {
         HP_RING_DATA = 0x086c0000u, HP_PACKETS = 4u, HP_CYCLES = 12u,
     };
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: the H.264 pool check needs a real H.264 backend\n");
+        media_skip("the H.264 pool check needs a real H.264 backend\n");
         return;
     }
     for (int via_finish = 0; via_finish < 2; via_finish++) {
@@ -5963,7 +5974,7 @@ static void test_mpeg_flush_restarts_the_video(void) {
               mpeg_change_get_au_mode(FA_DESC, avc, MPEG_AU_MODE_DECODE) == 0u,
           "mpeg-flush: after AvcDecodeFlush the skip-mode clock is the first timestamp");
     if (!ctx || ctx->h264 < 0) {
-        fprintf(stderr, "SKIP: the FlushAllStream video restart needs a real H.264 backend\n");
+        media_skip("the FlushAllStream video restart needs a real H.264 backend\n");
         mpeg_finish();
         free(image);
         return;
@@ -6228,7 +6239,7 @@ static void test_mpeg_csc_presentation_boundary(int copy_planes) {
         PC_INIT = 0x08170000u, PC_AU = 0x08180000u, PC_MODE = 0x08190000u, PC_DISPLAY = 0x081a0000u,
     };
     if (!sr_h264_backend_available()) {
-        fprintf(stderr, "SKIP: sceMpegAvcCsc presentation assertions need an H.264 backend\n");
+        media_skip("sceMpegAvcCsc presentation assertions need an H.264 backend\n");
         return;
     }
     const uint32_t width = 64u, height = 64u;
@@ -6937,6 +6948,12 @@ int main(int argc, char **argv) {
     if (fuzz_iterations) test_legacy_demux_mutations(fuzz_iterations);
     test_atrac_channel_count_refusal();
     test_atrac_riff_mutations(fuzz_iterations ? fuzz_iterations : 100u);
+
+#if defined(SR_H264_FFMPEG)
+    if (media_skips)
+        fprintf(stderr, "note: %d decode cell(s) reported SKIP in an SR_H264_FFMPEG build\n", media_skips);
+    CHECK(media_skips == 0, "an SR_H264_FFMPEG build runs every decode cell (no SKIP)");
+#endif
 
     if (failures) {
         fprintf(stderr, "psmf_media_selftest: %d checks, %d FAILURES\n", checks, failures);

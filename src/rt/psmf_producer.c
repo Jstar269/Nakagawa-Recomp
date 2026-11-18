@@ -385,8 +385,12 @@ static int find_next_video_aud(SrPsmfProducer *p, Track *t) {
 
 /* One complete PSP audio frame at the head of the accumulator.
  * Returns 1 with *au_len set, 0 when more bytes are needed, 2 when unrelated
- * bytes have to be skipped, -1 on a frame header whose size field is outside the
- * field's own domain (the caller fails closed rather than guessing a boundary). */
+ * bytes have to be skipped, -1 on a frame header at the head whose size field is
+ * outside the accepted range (the caller fails closed rather than guessing a
+ * boundary).  While resyncing, a candidate whose sync word or size field is not
+ * buffered yet waits for more bytes instead of being skipped with the stray bytes
+ * (its PES packet may end mid-header), and a 0F D0 pair whose size is outside the
+ * accepted range is frame data, not a header, so the scan passes it. */
 static int audio_frame_at_head(Track *t, uint32_t *skip, uint32_t *au_len) {
     const uint8_t *b = track_ptr(t);
     uint32_t len = track_len(t);
@@ -395,11 +399,14 @@ static int audio_frame_at_head(Track *t, uint32_t *skip, uint32_t *au_len) {
     if (len < PSMF_AUDIO_HDR_BYTES) return 0;
     if (b[0] != PSMF_AUDIO_HDR_0 || b[1] != PSMF_AUDIO_HDR_1) {
         uint32_t limit = len < PSMF_AUDIO_RESYNC_MAX ? len : PSMF_AUDIO_RESYNC_MAX;
-        for (uint32_t i = 1; i + PSMF_AUDIO_HDR_BYTES <= limit; i++) {
-            if (b[i] == PSMF_AUDIO_HDR_0 && b[i + 1] == PSMF_AUDIO_HDR_1) {
-                *skip = i;
-                goto have_header;
-            }
+        for (uint32_t i = 1; i < limit; i++) {
+            if (b[i] != PSMF_AUDIO_HDR_0) continue;
+            if (i + 1u < len && b[i + 1] != PSMF_AUDIO_HDR_1) continue;
+            if (len - i < 4u) return 0;     /* sync word or size field still arriving */
+            uint32_t candidate = sr_psmf_audio_frame_bytes(b + i);
+            if (candidate < PSMF_AUDIO_MIN_FRAME || candidate > PSMF_AUDIO_MAX_FRAME) continue;
+            *skip = i;
+            goto have_header;
         }
         *skip = limit;
         return 2;
@@ -736,7 +743,9 @@ SrPsmfProducer *sr_psmf_producer_open(const SrPsmfSource *source,
     p->source = *source;
     p->presentation_base = presentation_base;
     p->first_audio_pts = -1;
-    if (!read_exact(p, 0, header, sizeof(header)) ||
+    /* Only a complete header opens the producer: a source that reports PENDING here
+     * has not delivered every header byte, and file mode has no later retry. */
+    if (read_exact(p, 0, header, sizeof(header)) != 1 ||
         header[0] != PSMF_MAGIC_0 || header[1] != PSMF_MAGIC_1 ||
         header[2] != PSMF_MAGIC_2 || header[3] != PSMF_MAGIC_3) {
         free(p); return NULL;
