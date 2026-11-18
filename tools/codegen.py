@@ -1191,14 +1191,14 @@ def _enhancement_store_lines() -> list[str]:
         if ENHANCEMENT_STORE_KEY is None:
             raise ValueError("stock_value_digests need the executable's digest key")
         out.append("static const unsigned char nk_enh_key[32] = {"
-                   + ", ".join(f"0x{b:02x}" for b in ENHANCEMENT_STORE_KEY) + "};")
+                   + _c_bytes(ENHANCEMENT_STORE_KEY) + "};")
     rows = []
     for i, row in enumerate(ENHANCEMENT_STORE_SITES):
         stock, scaled, req, digest = "0", "0", "0", "0"
         if row["digests"]:
             digest = f"nk_enh_digest_{i}"
             out.append(f"static const unsigned char {digest}[][32] = {{"
-                       + ", ".join("{" + ", ".join(f"0x{b:02x}" for b in bytes.fromhex(d)) + "}"
+                       + ", ".join("{" + _c_bytes(bytes.fromhex(d)) + "}"
                                    for d in row["digests"]) + "};")
         if row["pairs"]:
             stock, scaled = f"nk_enh_stock_{i}", f"nk_enh_scaled_{i}"
@@ -1501,7 +1501,9 @@ def write_funcs_header(path, emitted, resume_owners=None, runtime_modules=(), re
             symbol = entry_symbol(a, resume_owners)
             f.write(f"void {renames.get(symbol, symbol)}(CpuState *s);\n")
         for module in runtime_modules:
-            f.write(f"\n/* runtime-placed module {module.name} */\n")
+            name = (module.name if module.name.isascii()
+                    else _ascii_module_comment(module.name))
+            f.write(f"\n/* runtime-placed module {name} */\n")
             f.write(f"extern uint32_t {module.base_symbol};\n")
             for a, _nwords in module.functions:
                 f.write(f"void {module.prefix}_{a:08x}(CpuState *s);\n")
@@ -1829,13 +1831,25 @@ def emit_host_fallthrough(resumable, stack_census=False, sp_kept=False):
 
 def wrap_stack_census_functions(func_texts, emitted, resume_owners):
     """Wrap each callable generated entry with opt-in dynamic SP observation."""
+    c_matches_by_symbol = {}
+    llvm_indexes_by_address = {}
+    body_pattern = re.compile(r"(?m)^void (f_[0-9a-f]{8})\(CpuState \*s\) \{")
+    for index, text in enumerate(func_texts):
+        if isinstance(text, codegen_llvm.LLVMBody):
+            llvm_indexes_by_address.setdefault(text.address, []).append(index)
+            continue
+        matches_in_text = {}
+        for match in body_pattern.finditer(text):
+            matches_in_text.setdefault(match.group(1), match)
+        for symbol, match in matches_in_text.items():
+            c_matches_by_symbol.setdefault(symbol, []).append((index, match))
+
     for addr in sorted(set(emitted)):
         if addr in resume_owners or addr in GUEST_SP_ENTRIES:
             continue
         symbol = f"f_{addr:08x}"
         body = f"_sr_stack_census_body_{addr:08x}"
-        llvm = [i for i, text in enumerate(func_texts)
-                if isinstance(text, codegen_llvm.LLVMBody) and text.address == addr]
+        llvm = llvm_indexes_by_address.get(addr, [])
         if llvm:
             # The LLVM backend defines the wrapped body itself (codegen_llvm.census_body_symbol).
             # Its chunk weight grows as the C body's would: the renamed head and the wrapper.
@@ -1847,14 +1861,7 @@ def wrap_stack_census_functions(func_texts, emitted, resume_owners):
                                     - len(f"void {symbol}(CpuState *s) {{") + len(wrapper))
             func_texts[index] = lowered
             continue
-        pattern = re.compile(
-            rf"(?m)^void {re.escape(symbol)}\(CpuState \*s\) \{{"
-        )
-        matches = [
-            (index, pattern.search(text))
-            for index, text in enumerate(func_texts)
-            if pattern.search(text) is not None
-        ]
+        matches = c_matches_by_symbol.get(symbol, [])
         if len(matches) != 1:
             raise ValueError(
                 f"stack census expected one emitted callable body for "
@@ -2584,12 +2591,8 @@ def _vrndi_single_stmt(addr, w):
     unmeasured, so it stops the run with no state change, as sr_vfpu_interp refuses it.
     """
     d0 = vreg_indices(w & 0x7F, 1)[0]
-    return ("{ if (s->vfpuCtrl[0]!=0xe4u || s->vfpuCtrl[1]!=0xe4u || s->vfpuCtrl[2]!=0u) { "
-            f"s->pc={G(addr)}; "
-            f"fprintf(stderr, \"VFPU_UNSUPPORTED: pc=0x{addr:08x} word=0x{w:08x} issue=326\\n\"); "
-            f"sr_unimplemented({G(addr)}, \"VFPU vrndi.s under a prefix is unmeasured; issue #326\"); "
-            "sr_end(s, 0u, 0); return; } "
-            f"s->vi[{d0}]=sr_vfpu_rnd_step(&s->vfpuCtrl[8]); }}")
+    return _vfpu_forms_stmt(
+        addr, w, "vrndi.s", f"s->vi[{d0}]=sr_vfpu_rnd_step(&s->vfpuCtrl[8]);")
 
 def _vfpu_forms_stmt(addr, w, what, body):
     """A PSP-VFPU-FORMS-001 form (issue #326) under identity prefixes.
@@ -3775,7 +3778,9 @@ def branch_target(addr, w):
     return (addr + 4 + (s16(w) << 2)) & 0xFFFFFFFF
 
 def jump_target(addr, w):
-    return ((addr & 0xF0000000) | ((w & 0x3FFFFFF) << 2)) & 0xFFFFFFFF
+    """Pseudo-direct j/jal target: the region bits of the delay-slot PC (PC+4), as
+    analyze.jump_target and emit_decoded_jump_target use."""
+    return (((addr + 4) & 0xF0000000) | ((w & 0x3FFFFFF) << 2)) & 0xFFFFFFFF
 
 def read32(elf, addr):
     b = elf.read_at_vaddr(addr, 4)
@@ -3797,7 +3802,7 @@ def stale_fnv1a(words):
 
 
 def stale_block_for_function(elf, addr, ranges, known, resume_owners=None,
-                             dispatch_boundaries=None, options=None):
+                             dispatch_boundaries=None, options=None, flow=None):
     """Compact translation-time record for one emitted function.
 
     Returns (entry_word, nwords, digest) over the contiguous translated run
@@ -3810,10 +3815,12 @@ def stale_block_for_function(elf, addr, ranges, known, resume_owners=None,
     entry = read32(elf, addr)
     if entry is None:
         return None
-    insns, _, _ = function_flow(
-        elf, addr, ranges, known,
-        resume_owners=resume_owners or {},
-        dispatch_boundaries=dispatch_boundaries or set(), options=options)
+    if flow is None:
+        flow = function_flow(
+            elf, addr, ranges, known,
+            resume_owners=resume_owners or {},
+            dispatch_boundaries=dispatch_boundaries or set(), options=options)
+    insns, _, _ = flow
     words = head_run_words(elf, addr, insns)
     if not words:
         return None
@@ -4271,7 +4278,7 @@ def _is_cop0_move(w):
     cop_rs, _, _, _ = _cop0_fields(w)
     return cop_rs in (0x00, 0x04) and (w & 0x000007F8) == 0
 
-def _flow_return(resumable=False):
+def _flow_return():
     """Leave the native body when a helper set flow metadata (spec 3.4)."""
     return "if (s->flow_kind != 0u) { return; }"
 
@@ -4292,29 +4299,16 @@ def delay_slot_lines(ds, dsw, branch_pc, lle_cpu=None,
     if is_control(dsw):
         raise Unsupported(f"control in delay slot at 0x{ds:08x}")
     dop, dfn = dsw >> 26, dsw & 0x3F
-    if dop == 0 and dfn == 0x0C:  # syscall in delay slot
+    if dop == 0 and dfn in (0x0C, 0x0D):  # syscall / break in delay slot
         if not lle_cpu:
             return [normal_line(ds, dsw, options=options)]
-        code = (dsw >> 6) & 0xFFFFF
-        _ = code
+        exception_code = 8 if dfn == 0x0C else 9
         return [
             f"{indent}sr_begin(s, {G(ds)}, 0x{dsw:08x}u);",
-            f"{indent}if (sr_cpu_raise_exception(s, 8u, {G(ds)}, {G(branch_pc)}, 0u, 1u, 0u) < 0) "
+            f"{indent}if (sr_cpu_raise_exception(s, {exception_code}u, {G(ds)}, {G(branch_pc)}, 0u, 1u, 0u) < 0) "
             f"{{ sr_end(s, 0u, 0); return; }}",
             f"{indent}sr_end(s, 0u, 0);",
-            f"{indent}{_flow_return(resumable)}",
-        ]
-    if dop == 0 and dfn == 0x0D:  # break in delay slot
-        if not lle_cpu:
-            return [normal_line(ds, dsw, options=options)]
-        code = (dsw >> 6) & 0xFFFFF
-        _ = code
-        return [
-            f"{indent}sr_begin(s, {G(ds)}, 0x{dsw:08x}u);",
-            f"{indent}if (sr_cpu_raise_exception(s, 9u, {G(ds)}, {G(branch_pc)}, 0u, 1u, 0u) < 0) "
-            f"{{ sr_end(s, 0u, 0); return; }}",
-            f"{indent}sr_end(s, 0u, 0);",
-            f"{indent}{_flow_return(resumable)}",
+            f"{indent}{_flow_return()}",
         ]
     if _is_cop0_move(dsw):
         _, cop_rt, cop_rd, sel = _cop0_fields(dsw)
@@ -4327,7 +4321,7 @@ def delay_slot_lines(ds, dsw, branch_pc, lle_cpu=None,
             f"{{ s->in_delay_slot = _prev_ids; s->next_pc = _prev_npc; sr_end(s, 0u, 0); return; }}",
             f"{indent}  s->in_delay_slot = _prev_ids; s->next_pc = _prev_npc; }}",
             f"{indent}sr_end(s, 0u, 0);",
-            f"{indent}{_flow_return(resumable)}",
+            f"{indent}{_flow_return()}",
         ]
     line = normal_line(ds, dsw, delay_branch_pc=branch_pc if lle_cpu else None,
                        options=options)
@@ -4466,7 +4460,10 @@ def _sv_step(w, regs, written):
         if fn == 0x27: bin2(d, regs[a], regs[b], lambda x, y: ~(x | y)); return
         if fn == 0x2A: bin2(d, regs[a], regs[b], lambda x, y: 1 if _sv_s32(x) < _sv_s32(y) else 0); return  # slt
         if fn == 0x2B: bin2(d, regs[a], regs[b], lambda x, y: 1 if x < y else 0); return      # sltu
+        if fn == 0x2C: bin2(d, regs[a], regs[b], lambda x, y: max(_sv_s32(x), _sv_s32(y))); return  # max
+        if fn == 0x2D: bin2(d, regs[a], regs[b], lambda x, y: min(_sv_s32(x), _sv_s32(y))); return  # min
         if fn == 0x0F: return                                                                 # sync (no GPR write)
+        W(d, None)                                                                            # unmodeled SPECIAL may write rd
     elif op in (0x08, 0x09):   # addi/addiu
         W(b, regs[a] + s16(w) if regs[a] is not None else None); return
     elif op == 0x0A:           # slti
@@ -4487,7 +4484,7 @@ def _sv_step(w, regs, written):
         return
     elif op in (0x11, 0x12):   # cop1/cop2 move group: mfc/cfc write rt, mtc/ctc none
         W(b, None); return     # (marking rt Unknown for mtc too is sound)
-    elif op in (0x1C, 0x1F):   # Allegrex special2/special3 (max/min, ext/ins/seb/seh/wsbw)
+    elif op in (0x1C, 0x1F):   # Allegrex special2/special3 (ext/ins/seb/seh/wsbw)
         W(d, None); W(b, None); return
     elif op in _SV_NOGPR_OPS:
         return
@@ -4667,13 +4664,12 @@ def _dup_slot_skips(elf, insns, labels):
 def _emit_non_control_word(ctx, out, addr, w, sv_points):
     """One word that is not a control transfer, with its static checks and continuation edge."""
     continuations = ctx.continuations
-    resumable = ctx.resumable
     line = normal_line(addr, w, options=ctx.options)
     out.append(_sp_load_check(line) if addr in ctx.sp_checks else line)
     if _is_cop0_move(w):
         # MFC0/MTC0 can raise (privilege/reserved encoding): propagate
         # the resulting flow before any native continuation (spec 3.4).
-        out.append(f"    {_flow_return(resumable)}")
+        out.append(f"    {_flow_return()}")
     if addr in sv_points:
         for _sv_r, _sv_v in sv_points[addr]:
             out.append(f"    sr_sv_check(s, {G(addr)}, {_sv_r}, 0x{_sv_v:08x}u);")
@@ -4723,7 +4719,7 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
     if target in known or target in resume_owners:
         _call_stmt = f"    {emit_checked_body_call(ADDRESS_SPACE.symbol(target, resume_owners), addr)}"
         if lle_cpu:
-            _call_stmt += f"\n    {_flow_return(resumable)}"
+            _call_stmt += f"\n    {_flow_return()}"
     else:
         _call_stmt = "    " + emit_checked_dispatch_call(
             G(target), G((addr + 8) & 0xFFFFFFFF))
@@ -4817,7 +4813,7 @@ def _emit_jal(ctx, out, addr, w, ds, dsw):
                 else:
                     _lines.append("    " + emit_checked_dispatch_call(G(_alt), G(_resume)))
                 if lle_cpu:
-                    _lines.append(f"    {_flow_return(resumable)}")
+                    _lines.append(f"    {_flow_return()}")
             _lines.append("    } }")
             out.extend(_lines)
         else:
@@ -4989,7 +4985,7 @@ def _emit_conditional_branch(ctx, out, addr, w, ds, dsw):
                 ADDRESS_SPACE.symbol(target, resume_owners), addr
             )
             if lle_cpu:
-                call += f" {_flow_return(resumable)}"
+                call += f" {_flow_return()}"
         else:
             call = emit_checked_dispatch_call(G(target), G((addr + 8) & 0xFFFFFFFF))
         out.extend("   " + line for line in _delay)
@@ -5092,6 +5088,8 @@ def emitter_seed_check(elf, profile=None, omitted=(), stack_census=False, option
         known = {addr for addr, info in catalog.items() if info.callable}
         resume_owners = {addr: info.owner for addr, info in catalog.items() if info.resumable}
         emission = {}
+        stats = (SV_STATS, PROMOTION_STATS, STATE_RESUME_STATS)
+        previous_stats = tuple(table.copy() for table in stats)
         previous_space = ADDRESS_SPACE
         ADDRESS_SPACE = space
         try:
@@ -5114,6 +5112,9 @@ def emitter_seed_check(elf, profile=None, omitted=(), stack_census=False, option
                     emission[address] = str(exc).replace('"', "'")
         finally:
             ADDRESS_SPACE = previous_space
+            for table, previous in zip(stats, previous_stats, strict=True):
+                table.clear()
+                table.update(previous)
         return emission
     return check
 
@@ -5148,7 +5149,8 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
     # restore at a TAIL, so it keeps the static verdict.
     sp_kept = not stack_census and bool(guest_exits)
     if guest_exits:
-        GUEST_SP_ENTRIES.add(start)
+        if not ADDRESS_SPACE.runtime_module:
+            GUEST_SP_ENTRIES.add(start)
         if guest_exits == exits:
             resumable = True
         else:
@@ -5198,7 +5200,7 @@ def emit_function(elf, start, ranges, known, resume_owners=None, resumable=False
                 out.append(f"  L_{addr:08x}: ;")
             w = ADDRESS_SPACE.instruction_word(addr, read32(elf, addr), options=options)
             if w is None:
-                continue
+                raise Unsupported(f"unreadable instruction word at 0x{addr:08x}")
             if promo is not None:
                 promoted = None
                 if (not is_control(w) and not _is_cop0_move(w) and addr not in sv_points
@@ -5608,14 +5610,19 @@ def c_string(text):
     return '"' + "".join(out) + '"'
 
 
+def _ascii_module_comment(name):
+    """A readable, ASCII-only label for a generated C comment."""
+    return "".join(ch if ch.isascii() and (ch.isalnum() or ch in "._-") else "?"
+                   for ch in name)
+
+
 #: The PSP reference type of each variable-import reference kind (SrVarImportRef.kind).
 VAR_REFERENCE_KIND = {"word32": 2, "hi16": 5, "lo16": 6}
 NO_NID_IMPORT_STUB = "import stub without NID mapping"
 
 
-def primary_import_map(elf):
-    """The primary image's import stubs, {address: (library, NID)}. An image with no import table
-    has none."""
+def primary_import_map(elf, label=None):
+    """An image's import stubs, {address: (library, NID)}. An image with no import table has none."""
     if elf.reloc is None and elf.sec(".rodata.sceModuleInfo") is None:
         return {}
     try:
@@ -5624,12 +5631,13 @@ def primary_import_map(elf):
     except ImportTableError:
         raise
     except Exception as e:
-        sys.stderr.write(f"warning: import table parse failed: {e}\n")
+        subject = f" for {label}" if label else ""
+        sys.stderr.write(f"warning: import table parse failed{subject}: {e}\n")
         return {}
 
 
 def import_stub_test(elf, impmap):
-    """Whether an address of the primary image is an import stub. Stripped linked executables may
+    """Whether an address in an image is an import stub. Stripped linked executables may
     reconstruct the loader-owned table as .lib.stub instead of having a named .sceStub.text
     section."""
     stub = elf.sec(".sceStub.text") or elf.sec(".lib.stub")
@@ -5819,25 +5827,17 @@ def translate_runtime_module(index, module_path, profile=None, cfg_gate=False, s
                 sys.stderr.write(
                     f"CFG_GATE runtime-module {finding['code']}: {finding['message']}\n")
             return 1
-    impmap = {}
-    if elf.reloc is not None or elf.sec(".rodata.sceModuleInfo") is not None:
-        try:
-            from imports import parse_imports
-            impmap = parse_imports(elf)
-        except ImportTableError as exc:
-            sys.stderr.write(f"codegen: {format_boundary(exc, module_path)}\n")
-            return 1
-        except Exception as exc:
-            sys.stderr.write(f"warning: import table parse failed for {name}: {exc}\n")
+    try:
+        impmap = primary_import_map(elf, label=name)
+    except ImportTableError as exc:
+        sys.stderr.write(f"codegen: {format_boundary(exc, module_path)}\n")
+        return 1
     try:
         module.var_imports, var_sites = variable_import_sites(elf)
     except ImportTableError as exc:
         sys.stderr.write(f"codegen: {format_boundary(exc, module_path)}\n")
         return 1
-    stub = elf.sec(".sceStub.text") or elf.sec(".lib.stub")
-
-    def is_stub(a):
-        return a in impmap or (stub is not None and stub["addr"] <= a < stub["addr"] + stub["size"])
+    is_stub = import_stub_test(elf, impmap)
 
     space = AddressSpace(base_symbol=module.base_symbol, prefix=module.prefix,
                          relocations=relocations, patched=var_sites)
@@ -5942,6 +5942,19 @@ def translate_code_capture(index, image, profile=None, cfg_gate=False, options=N
     identity = [tuple(span) for span in module.overlay_check_spans]
     kept = [(fn, text) for fn, text in zip(module.functions, module.texts, strict=True)
             if in_ranges(fn[0], identity)]
+    # A translated body may name a known function whose body stopped at an unsupported
+    # instruction: a direct call `mN_<addr>(s)`, or a tail transfer that passes the symbol
+    # as a value (`sr_tail_record(s, ..., mN_<addr>, ...)`). Keep that zero-word named stop
+    # stub in the C unit, even though its guest words are outside the capture identity and
+    # spans. The symbol is matched as a whole identifier, whatever follows it.
+    stubbed = {address for address, _reason in module.stubbed}
+    symbol = re.compile(rf"\b{re.escape(module.prefix)}_([0-9a-f]{{8}})\b")
+    referenced_stubs = stubbed & {
+        int(digits, 16) for _fn, text in kept for digits in symbol.findall(str(text))
+    }
+    kept.extend((fn, text) for fn, text in zip(module.functions, module.texts, strict=True)
+                if fn[0] in referenced_stubs)
+    kept.sort(key=lambda item: item[0][0])
     module.functions = [fn for fn, _ in kept]
     module.texts = [text for _, text in kept]
     module.spans = identity
@@ -6235,10 +6248,14 @@ def write_unit_opt_makefile(path, rows):
         f.write("\n".join(lines) + "\n")
 
 
-def shared_library_units(module):
-    """``(file name, bodies)`` for each translation unit of a shared module, named by its bytes."""
+def shared_library_units(module, options=None):
+    """``(file name, bodies)`` for each shared unit, named by its bytes and codegen variant."""
+    options = _options_for_call(options)
     units = partition_units(module.texts, LIBRARY_UNIT_TARGET_BYTES, LIBRARY_UNIT_MAX_FUNCS)
-    stem = f"nk_lib_{module.file_fnv1a64:016x}"
+    unit_hash = module.file_fnv1a64
+    if options.null_page_guard:
+        unit_hash = fnv1a64(module.file_sha256.encode("ascii") + b"\0SR_NULL_PAGE_GUARD=1")
+    stem = f"nk_lib_{unit_hash:016x}"
     if len(units) == 1:
         return [(f"{stem}.c", units[0])]
     return [(f"{stem}_{n}.c", unit) for n, unit in enumerate(units)]
@@ -6252,10 +6269,14 @@ def shared_library_source_text(module, texts, options=None):
     not reach the compiler.
     """
     options = _options_for_call(options)
-    shown = "".join(ch if ch.isalnum() or ch in "._-" else "?" for ch in module.name)
+    shown = _ascii_module_comment(module.name)
     lines = [
         "/* Generated by tools/codegen.py. Do not edit by hand. */",
         f"/* system library {shown} */",
+    ]
+    if options.null_page_guard:
+        lines.append("#define SR_NULL_PAGE_GUARD 1")
+    lines += [
         '#include "recomp.h"',
         "#include <math.h>",
         "#include <string.h>",
@@ -6286,7 +6307,7 @@ def write_shared_library_sources(out_dir, module_translations, options=None):
     for module in module_translations:
         if not module.shared or not module.texts:
             continue
-        for name, texts in shared_library_units(module):
+        for name, texts in shared_library_units(module, options=options):
             written.add(name)
             row = fallback_unit_row(name[:-2], texts)
             if row is not None:
@@ -7103,7 +7124,7 @@ def _symbol_names(symbol_map_path, name_imports, symbols, import_nids, emitted, 
 def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resume_owners, dispatch_boundaries,
                         *, stack_census, module_translations, symbol_table, module_record, main_var_imports,
                         main_var_exports, main_func_exports, fixed_var_imports, exec_spans, stale_funcs,
-                        options=None):
+                        options=None, precomputed_stale_records=None):
     """The lines of the main generated file: the registration of every chunk, module and span."""
     options = _options_for_call(options)
     # Main recomp.c
@@ -7242,8 +7263,11 @@ def _registration_lines(elf, ranges, known, base_name, num_files, emitted, resum
         main_out.append("    sr_stale_reset();")
         stale_records = 0
         for a in stale_funcs:
-            rec = stale_block_for_function(
-                elf, a, ranges, known, resume_owners, dispatch_boundaries, options=options)
+            if precomputed_stale_records is not None and a in precomputed_stale_records:
+                rec = precomputed_stale_records[a]
+            else:
+                rec = stale_block_for_function(
+                    elf, a, ranges, known, resume_owners, dispatch_boundaries, options=options)
             if rec is None:
                 sys.stderr.write(f"stale-detect: no record for 0x{a:08x} (unreadable entry)\n")
                 continue
@@ -7382,6 +7406,9 @@ def _translate(argv):
     ``main`` turns it into the message and exit status.
     """
     reset_unverified_vfpu_uses()
+    for stats in (SV_STATS, PROMOTION_STATS, STATE_RESUME_STATS):
+        for name in stats:
+            stats[name] = 0
     args = [a for a in argv[1:] if not a.startswith("--")]
     try:
         cli = _command_line_parser().parse_args([a for a in argv[1:] if a.startswith("--")])
@@ -7563,6 +7590,8 @@ def _translate(argv):
     # (r2=0) and otherwise does nothing.
     hst_profile = profile == "hst"
     SIMPLE_STUBS = HST_SIMPLE_STUBS if hst_profile else {}
+    primary_walked_words = set()
+    precomputed_stale_records = {}
 
     for a in sorted(catalog):
         # The hand-written --profile=hst bodies are data: HST_CUSTOM_STUBS maps an address to
@@ -7594,16 +7623,24 @@ def _translate(argv):
         applied_before = (set(ENHANCEMENT_APPLIED) if ENHANCEMENT_SITES or ENHANCEMENT_ACE_SITES
                           else None)
         try:
-            func_texts.append(llvm_body("\n".join(emit_function(
+            flow = function_flow(elf, a, ranges, known, resume_owners=resume_owners,
+                                 dispatch_boundaries=dispatch_boundaries, options=options)
+            if main_non_code_words:
+                primary_walked_words.update(flow[0])
+            body = "\n".join(emit_function(
                 elf, a, ranges, known, resume_owners=resume_owners,
                 resumable=catalog[a].resumable, profile=profile,
-                dispatch_boundaries=dispatch_boundaries,
-                stack_census=stack_census, options=options)), elf, a, ranges, known,
+                dispatch_boundaries=dispatch_boundaries, stack_census=stack_census,
+                flow=flow, options=options))
+            func_texts.append(llvm_body(body, elf, a, ranges, known,
                 resume_owners=resume_owners, resumable=catalog[a].resumable,
                 dispatch_boundaries=dispatch_boundaries))
             emitted.append(a)
             if options.stale_detect:
                 stale_funcs.append(a)
+                precomputed_stale_records[a] = stale_block_for_function(
+                    elf, a, ranges, known, resume_owners, dispatch_boundaries,
+                    options=options, flow=flow)
         except Unsupported as e:
             if applied_before is not None:
                 # The stub replaces the body, so its rewrites were not emitted.
@@ -7618,15 +7655,7 @@ def _translate(argv):
             sys.stderr.write(f"skip 0x{a:08x}: {e}\n")
 
     if main_non_code_words:
-        owned = set(analyzed)
-        for a in emitted:
-            if not is_stub(a) and a not in SIMPLE_STUBS and not (hst_profile and a in HST_CUSTOM_STUBS):
-                try:
-                    owned.update(function_flow(elf, a, ranges, known, resume_owners=resume_owners,
-                                               dispatch_boundaries=dispatch_boundaries,
-                                               options=options)[0])
-                except Unsupported:
-                    pass  # left to the interpreter: its entry is in `owned` already
+        owned = set(analyzed) | primary_walked_words
         if not _non_code_disjoint("executable", owned, main_non_code_words):
             return 1
     primary_emitted = tuple(sorted(set(emitted)))
@@ -7727,11 +7756,7 @@ def _translate(argv):
         if extra_var_imports:
             fixed_var_imports.append((os.path.basename(extra_elf_path), extra_var_imports))
 
-        extra_stub = extra_elf.sec(".sceStub.text")
-        def is_extra_stub(a):
-            if a in extra_impmap:
-                return True
-            return extra_stub is not None and extra_stub["addr"] <= a < extra_stub["addr"] + extra_stub["size"]
+        is_extra_stub = import_stub_test(extra_elf, extra_impmap)
 
         # A module at a fixed base reads its own variable-import sites from memory.
         main_space = ADDRESS_SPACE
@@ -7745,23 +7770,28 @@ def _translate(argv):
                     text = import_stub_text(a, lib, nid, options=options)
                     import_nids[a] = nid
                 else:
-                    text = f"void f_{a:08x}(CpuState *s) {{  /* import stub -> HLE boundary */\n"
-                    text += f"    sr_hle_call(s, 0u);\n}}"
+                    text = f"void f_{a:08x}(CpuState *s) {{  /* {NO_NID_IMPORT_STUB} */\n"
+                    text += f'    sr_unimplemented(0x{a:08x}u, "{NO_NID_IMPORT_STUB}");\n}}'
                 func_texts.append(text)
                 emitted.append(a)
                 continue
+            flow = None
+            flow_error = None
             if extra_non_code_words:
                 try:
-                    extra_walked.update(function_flow(
-                        extra_elf, a, extra_ranges, extra_known,
-                        dispatch_boundaries=extra_boundaries, options=options)[0])
-                except Unsupported:
-                    pass  # left to the interpreter: its entry is in `extra_walked` already
+                    flow = function_flow(extra_elf, a, extra_ranges, extra_known,
+                                         **extra_boundary_args, options=options)
+                    extra_walked.update(flow[0])
+                except Unsupported as exc:
+                    flow_error = exc
             try:
-                func_texts.append(llvm_body("\n".join(emit_function(
+                if flow_error is not None:
+                    raise flow_error
+                body = "\n".join(emit_function(
                     extra_elf, a, extra_ranges, extra_known, profile=profile,
-                    stack_census=stack_census, options=options, **extra_boundary_args)),
-                    extra_elf, a, extra_ranges, extra_known, **extra_boundary_args))
+                    stack_census=stack_census, flow=flow, options=options, **extra_boundary_args))
+                func_texts.append(llvm_body(body, extra_elf, a, extra_ranges, extra_known,
+                                            **extra_boundary_args))
                 emitted.append(a)
             except Unsupported as e:
                 reason = str(e).replace('"', "'")
@@ -7842,7 +7872,7 @@ def _translate(argv):
                                           emitted, resume_owners, func_texts)
 
     # Write the codegen gap report
-    with open(f"{base_name}_stubs.txt", "w", encoding="ascii", newline="\n") as f:
+    with open(f"{base_name}_stubs.txt", "w", encoding="utf-8", newline="\n") as f:
         for a, r in sorted(stubbed):
             f.write(f"0x{a:08x} {r}\n")
         # A runtime module's fallbacks are in its own link space, so they carry
@@ -7854,11 +7884,7 @@ def _translate(argv):
     write_coverage_report(f"{base_name}_coverage.json", coverage_images, module_translations,
                           miss_seed_outcome=miss_seed_outcome)
 
-    # Write the shared functions header
     funcs_h_path = f"{base_name}_funcs.h"
-    write_funcs_header(funcs_h_path, emitted, resume_owners, module_translations, renames,
-                       enhancement=ENHANCEMENT_PKG_META is not None, options=options)
-
     exec_spans = _registrable_exec_spans(owned_exec_ranges)
 
     main_out = _registration_lines(
@@ -7866,15 +7892,14 @@ def _translate(argv):
         stack_census=stack_census, module_translations=module_translations, symbol_table=symbol_table,
         module_record=module_record, main_var_imports=main_var_imports, main_var_exports=main_var_exports,
         main_func_exports=main_func_exports, fixed_var_imports=fixed_var_imports,
-        exec_spans=exec_spans, stale_funcs=stale_funcs, options=options)
+        exec_spans=exec_spans, stale_funcs=stale_funcs, options=options,
+        precomputed_stale_records=precomputed_stale_records)
 
     if llvm_lowered:
         # The IR addresses CpuState fields by byte offset; this build's compiler checks them.
         main_out.append("")
         main_out.append("/* --backend=llvm (#330): the CpuState offsets the generated IR uses. */")
         main_out.extend(codegen_llvm.layout_asserts())
-    with open(out_c, "w", encoding="ascii", newline="\n") as f:
-        f.write(rename_generated_entries("\n".join(main_out), renames))
 
     llvm_manifest_path = _write_chunks(base_name, boundaries, renames, backend, llvm_lowered,
                                        llvm_fallbacks, options=options)
@@ -7893,18 +7918,37 @@ def _translate(argv):
 
     _remove_stale_chunks(base_name, num_files)
 
+    # The main Make targets publish only after every chunk, report and stale-file cleanup has
+    # succeeded. Stage each file beside its destination so a failed write never truncates a
+    # previously complete translation; .DELETE_ON_ERROR handles a failure between the two
+    # final replacements in mk/pipeline.mk.
+    funcs_h_tmp = f"{funcs_h_path}.tmp.{os.getpid()}"
+    out_c_tmp = f"{out_c}.tmp.{os.getpid()}"
+    try:
+        write_funcs_header(funcs_h_tmp, emitted, resume_owners, module_translations, renames,
+                           enhancement=ENHANCEMENT_PKG_META is not None, options=options)
+        with open(out_c_tmp, "w", encoding="ascii", newline="\n") as f:
+            f.write(rename_generated_entries("\n".join(main_out), renames))
+        os.replace(funcs_h_tmp, funcs_h_path)
+        os.replace(out_c_tmp, out_c)
+    finally:
+        for temporary in (funcs_h_tmp, out_c_tmp):
+            if os.path.exists(temporary):
+                os.remove(temporary)
     _print_summary(out_c, base_name, num_files, funcs_per_chunk, chunk_target_bytes, emitted, resume_owners,
                    stubbed, backend, llvm_lowered, llvm_fallbacks, llvm_manifest_path, options=options)
     return 0
 
 
 def main(argv):
+    global ADDRESS_SPACE
     try:
         return _translate(argv)
     except _Refusal as refusal:
         sys.stderr.write(refusal.message)
         return refusal.status
     finally:
+        ADDRESS_SPACE = AddressSpace()
         stop_collecting_unverified_vfpu_uses()
         # The package loaded for this run ends with it (_reset_enhancement_tables).
         _reset_enhancement_tables()

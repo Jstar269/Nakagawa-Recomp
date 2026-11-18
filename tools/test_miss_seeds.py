@@ -913,6 +913,40 @@ class CodegenSeedTests(_Fixture):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         return out, result
 
+    def test_seed_preflight_does_not_double_codegen_statistics(self):
+        words = {
+            ENTRY: (0x0F << 26) | (8 << 16) | 0x1234,                  # lui t0, 0x1234
+            ENTRY + 4: (0x0D << 26) | (8 << 21) | (8 << 16) | 0x5678,  # ori t0, t0, 0x5678
+            ENTRY + 8: (0x0D << 26) | (9 << 16) | 1,                  # ori t1, zero, 1
+            ENTRY + 12: 0x03E00008,                                   # jr ra
+            ENTRY + 16: 0,
+        }
+        stats_elf = self.work / "stats.elf"
+        stats_elf.write_bytes(_synthetic_elf(words, ENTRY))
+        seeds = self.write_seeds(
+            "stats_known.txt", f"# nakagawa-miss-seeds-v1\n0x{ENTRY:08x}\n")
+
+        def run(name, *options):
+            out = self.work / name
+            out.mkdir()
+            result = _codegen(stats_elf, out / "m_recomp.c", *options)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            return result
+
+        prefixes = ("static-verify:", "CODEGEN_PROMOTION", "state-resume:")
+        cases = (("verify_promotion", ("--static-verify", "--promote-registers")),
+                 ("resume", ("--state-resume",)))
+        for name, options in cases:
+            with self.subTest(name=name):
+                plain = run(f"stats_{name}_plain", *options)
+                seeded = run(
+                    f"stats_{name}_seeded", *options, f"--miss-seeds={seeds}")
+                plain_stats = [line for line in plain.stdout.splitlines()
+                               if line.startswith(prefixes)]
+                seeded_stats = [line for line in seeded.stdout.splitlines()
+                                if line.startswith(prefixes)]
+                self.assertEqual(seeded_stats, plain_stats)
+
     @staticmethod
     def functions_line(result):
         line = next(line for line in result.stdout.splitlines()

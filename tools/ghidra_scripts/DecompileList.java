@@ -5,7 +5,8 @@
  * Decompile a list of addresses to <outdir>/<addr>.c, one file each.
  * Args: <outdir> <addr> [<addr> ...]  (addresses in Ghidra's address space,
  * i.e. including the image base — tools/ghidra_headless.py handles the
- * base-0 -> imageBase translation for you).
+ * base-0 -> imageBase translation for you). Each file is named by its
+ * Ghidra-space address (0x%08x), never by the base-0 address the wrapper took.
  *
  * Output is a local analysis aid derived from the game binary: never commit
  * it. It lands under third_party/ghidra/exports/ which is gitignored.
@@ -36,10 +37,9 @@ public class DecompileList extends GhidraScript {
             for (int i = 1; i < args.length; i++) {
                 long a = Long.decode(args[i]);
                 Address addr = toAddr(a);
-                Function f = getFunctionAt(addr);
-                if (f == null) {
-                    f = getFunctionContaining(addr);
-                }
+                // Function bodies never overlap and contain their entry, so
+                // this also returns the function whose entry is addr.
+                Function f = getFunctionContaining(addr);
                 String tag = String.format("0x%08x", a);
                 PrintWriter w = new PrintWriter(new File(outDir, tag + ".c"), "UTF-8");
                 if (f == null) {

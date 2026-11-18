@@ -42,28 +42,26 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
+
+from nid_name_proof import DERIVABLE_CLASSES, SENTINEL_PREFIXES, nid_of  # noqa: E402
+
 CORPUS = ROOT / "tools" / "nid_corpus.json"
 HEADER = ROOT / "src" / "rt" / "nid_names.h"
 
-DERIVABLE_CLASSES = frozenset({"pspsdk-sourced", "hash-verified"})
 STORED_CLASSES = frozenset({"library-attributed", "editorial-alias", "unresolved"})
-SENTINEL_PREFIXES = ("1337", "c0de", "dead", "beef", "feed")
 C_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class CorpusError(RuntimeError):
     """The corpus violated an invariant the generator must not paper over."""
-
-
-def nid_of(name: str) -> int:
-    return int.from_bytes(hashlib.sha1(name.encode()).digest()[:4], "little")
 
 
 def resolve(entry: dict) -> tuple[int, str]:

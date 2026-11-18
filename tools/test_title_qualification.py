@@ -86,7 +86,12 @@ class BuildEvidenceTests(unittest.TestCase):
                 artifact.write_bytes(b"fresh")
                 return mock.Mock(returncode=0)
 
-            with mock.patch.object(tq.subprocess, "check_output", return_value="a" * 40), \
+            def check_git(cmd, **kwargs):
+                if "status" in cmd:
+                    return ""
+                return "a" * 40
+
+            with mock.patch.object(tq.subprocess, "check_output", side_effect=check_git), \
                     mock.patch.object(tq.subprocess, "run", side_effect=compile_fixture), \
                     mock.patch.object(tq, "compiler_identity", return_value="gcc:" + "b" * 64), \
                     mock.patch.object(tq, "run_player", return_value=(0, _pass_output(), False, 1)):
@@ -98,6 +103,23 @@ class BuildEvidenceTests(unittest.TestCase):
             self.assertEqual(report["build_evidence"]["compile_result"], "PASS")
             self.assertEqual(report["stages"]["compile"]["status"], "PASS")
             tq.verify_build_evidence(report, root)
+
+    def test_dirty_working_tree_is_refused_by_build_smoke(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "build"
+            args = tq.build_parser().parse_args([
+                "--build-root", str(root), "build-smoke", "--player", str(root / "player")])
+
+            def dirty_git(cmd, **kwargs):
+                if "status" in cmd:
+                    return " M src/player/main.c\n"
+                return "a" * 40
+
+            out = io.StringIO()
+            with mock.patch.object(tq.subprocess, "check_output", side_effect=dirty_git), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(tq.cmd_build_smoke(args), 2)
+            self.assertIn("BUILD_SOURCE_DIRTY", out.getvalue())
 
     def test_missing_and_tampered_evidence_are_refused(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -226,6 +248,58 @@ class InputProfileVocabularyTests(unittest.TestCase):
         document = copy.deepcopy(self.valid)
         document["per_title"] = [{"disc_id": "TEST00006", "profile": {}}]
         self._refused(document, "is not a field of the public input profile")
+
+    def test_accepts_and_refuses_stick_threshold_bindings(self):
+        document = copy.deepcopy(self.valid)
+        document["psp_bindings"][2]["secondary"] = "+rightx@20000"
+        document["psp_bindings"][3]["secondary"] = "-righty@1"
+        tq.validate_input_profile(document)
+        for bad in ("+rightx@0", "+rightx@32768", "+rightx@", "+rightx@-5", "+rightx@20000x", "+bogus@100"):
+            with self.subTest(bad=bad):
+                doc = copy.deepcopy(self.valid)
+                doc["psp_bindings"][2]["secondary"] = bad
+                with self.assertRaises(tq.QualificationError):
+                    tq.validate_input_profile(doc)
+
+    def test_refuses_equivalent_shared_psp_sources_and_navigation_sources(self):
+        # button:south and bare south
+        doc = copy.deepcopy(self.valid)
+        doc["psp_bindings"][0]["primary"] = "button:south"
+        self._refused(doc, "bound to both 'select' and 'cross'")
+        # case-insensitive match: SOUTH and south
+        doc = copy.deepcopy(self.valid)
+        doc["psp_bindings"][0]["primary"] = "SOUTH"
+        self._refused(doc, "bound to both 'select' and 'cross'")
+        # bare trigger and trigger: prefix
+        doc = copy.deepcopy(self.valid)
+        doc["psp_bindings"][0]["primary"] = "trigger:left_trigger"
+        self._refused(doc, "bound to both 'select' and 'ltrigger'")
+        # +axis@threshold and +axis share the same positive axis source
+        doc = copy.deepcopy(self.valid)
+        doc["psp_bindings"][0]["primary"] = "+rightx@20000"
+        doc["psp_bindings"][1]["primary"] = "+rightx"
+        self._refused(doc, "bound to both 'select' and 'start'")
+        # navigation_bindings shared source
+        doc = copy.deepcopy(self.valid)
+        doc["navigation_bindings"][0]["primary"] = "east"  # cancel already uses east
+        self._refused(doc, "bound to both 'confirm' and 'cancel'")
+
+    def test_refuses_axis_calibration_range_and_duplicate_host_axis(self):
+        # min_val >= max_val
+        doc = copy.deepcopy(self.valid)
+        doc["calibration"]["analog_x"]["min_val"] = 100
+        doc["calibration"]["analog_x"]["max_val"] = 100
+        self._refused(doc, "min_val")
+        # rest outside [min_val, max_val]
+        doc = copy.deepcopy(self.valid)
+        doc["calibration"]["analog_x"]["min_val"] = -1000
+        doc["calibration"]["analog_x"]["max_val"] = 1000
+        doc["calibration"]["analog_x"]["rest"] = 2000
+        self._refused(doc, "rest")
+        # analog_x and analog_y on the same host_axis
+        doc = copy.deepcopy(self.valid)
+        doc["calibration"]["analog_y"]["host_axis"] = doc["calibration"]["analog_x"]["host_axis"]
+        self._refused(doc, "bound to both 'analog_x' and 'analog_y'")
 
 
 class ManifestContractTests(unittest.TestCase):
@@ -411,6 +485,7 @@ class SandboxAndStagingTests(unittest.TestCase):
 
     def test_child_environment_points_every_user_location_into_the_sandbox(self):
         base = {"PATH": "x", "SR_FLIGHT": "ge,present", "SR_DATAROOT": "C:/elsewhere",
+                "NK_INPUT_PROFILE": "C:/outside.json", "SR_INPUT_PROFILE": "C:/outside2.json",
                 "LOCALAPPDATA": "C:/real/profile"}
         with tempfile.TemporaryDirectory(prefix="tq-env-") as temp:
             sandbox = Path(temp)
@@ -427,6 +502,8 @@ class SandboxAndStagingTests(unittest.TestCase):
             self.assertEqual(env["SDL_AUDIODRIVER"], "dummy")
             self.assertNotIn("SR_FLIGHT", env)
             self.assertNotIn("SR_DATAROOT", env)
+            self.assertNotIn("NK_INPUT_PROFILE", env)
+            self.assertNotIn("SR_INPUT_PROFILE", env)
             self.assertEqual(base["LOCALAPPDATA"], "C:/real/profile")
 
     def test_child_environment_sets_only_the_standard_sdl_names(self):
@@ -439,7 +516,7 @@ class SandboxAndStagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="tq-profile-") as temp:
             sandbox = Path(temp)
             staged = tq.stage_input_profile(sandbox, PROFILE)
-            self.assertEqual(staged, sandbox / "localappdata" / "Nakagawa" / "config" / "input_profile.json")
+            self.assertEqual(staged, sandbox / "user-data" / "config" / "input_profile.json")
             self.assertEqual(staged.read_bytes(), PROFILE.read_bytes())
 
     def test_launch_command_isolates_user_data_and_names_the_sample(self):
@@ -461,6 +538,23 @@ class LaunchProcessTests(unittest.TestCase):
         self.assertTrue(timed_out)
         self.assertIsNone(returncode)
         self.assertLess(duration_ms, 30000)
+
+    def test_second_communicate_timeout_still_returns_timed_out(self):
+        fake = mock.Mock(pid=4242, returncode=None, stdout=mock.Mock())
+        fake.communicate.side_effect = [
+            tq.subprocess.TimeoutExpired(cmd="player", timeout=2),
+            tq.subprocess.TimeoutExpired(cmd="player", timeout=10, output="partial output"),
+        ]
+        with tempfile.TemporaryDirectory(prefix="tq-hang2-") as temp, \
+                mock.patch.object(tq.subprocess, "Popen", return_value=fake), \
+                mock.patch.object(tq, "_stop_process_tree"):
+            returncode, output, timed_out, _ = tq.run_player(
+                Path("player"), Path(temp), ROOT, 1, timeout_seconds=2)
+        self.assertTrue(timed_out)
+        self.assertIsNone(returncode)
+        self.assertEqual(output, "partial output")
+        fake.kill.assert_called_once_with()
+        fake.stdout.close.assert_called_once_with()
 
 
 class PosixProcessGroupTests(unittest.TestCase):
@@ -697,10 +791,23 @@ class PublicSmokeTests(unittest.TestCase):
     """Load, stage and run the public display fixture through the native player, in a sandbox."""
 
     def test_display_fixture_presents_a_first_checkpoint_and_exits_cleanly(self):
+        # The run uses the real build root, where the player finds the fixture's staged folder and data. A report
+        # or log left by an earlier run must not pass for this one, so each must be written again by this run
+        # (the test never deletes inside the checkout; it compares modification times instead).
         output_dir = ROOT / "build" / TITLE_ID / "title-qualification"
+        report_path = output_dir / tq.REPORT_NAME
+        log_path = output_dir / tq.OUTPUT_LOG_NAME
+
+        def _mtime(path):
+            return path.stat().st_mtime_ns if path.is_file() else None
+
+        report_before, log_before = _mtime(report_path), _mtime(log_path)
         with contextlib.redirect_stdout(io.StringIO()):
             code = tq.main(["smoke", "--manifest", str(DISPLAY_SMOKE)])
-        report_path = output_dir / tq.REPORT_NAME
+        self.assertTrue(report_path.is_file(), "the run did not write its report")
+        self.assertTrue(log_path.is_file(), "the run did not write its log")
+        self.assertNotEqual(_mtime(report_path), report_before, "the report is left over from an earlier run")
+        self.assertNotEqual(_mtime(log_path), log_before, "the log is left over from an earlier run")
         report = json.loads(report_path.read_text(encoding="utf-8"))
         nk_cli.validate_bringup_report(report)
         self.assertEqual(code, 0, report)
@@ -709,7 +816,7 @@ class PublicSmokeTests(unittest.TestCase):
         self.assertGreater(report["presentation"]["frame_submissions"], 0)
         self.assertEqual(report["exit_classification"], "EXITED_ZERO")
         self.assertEqual(library_sweep._furthest_stage(report), "first presented frame")
-        log = (output_dir / tq.OUTPUT_LOG_NAME).read_text(encoding="utf-8")
+        log = log_path.read_text(encoding="utf-8")
         self.assertIn("phase=first_frame source=cpu", log)
         leftovers = [p.name for p in output_dir.iterdir() if p.name.startswith("title-qualification-")]
         self.assertEqual(leftovers, [], "the sandbox must be removed after the run")

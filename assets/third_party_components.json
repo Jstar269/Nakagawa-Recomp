@@ -104,7 +104,7 @@
       "libharfbuzz-0.dll": {
         "name": "HarfBuzz",
         "notice_file": "HarfBuzz.txt",
-        "spdx_id": "MIT",
+        "spdx_id": "MIT-Modern-Variant",
         "pacman_package": "harfbuzz",
         "upstream_origin": "https://github.com/harfbuzz/harfbuzz",
         "disposition": "copied_into_package",
@@ -285,14 +285,14 @@
         "name": "winpthreads",
         "notice_file": "winpthreads.txt",
         "spdx_id": "MIT AND BSD-3-Clause",
-        "pacman_package": "winpthreads",
+        "pacman_package": "libwinpthread",
         "upstream_origin": "https://mingw-w64.org/",
         "disposition": "copied_into_package",
         "license_texts": [
           {
             "file": "third_party/licenses/winpthreads/COPYING.txt",
-            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-winpthreads: ucrt64/share/licenses/winpthreads/COPYING",
-            "toolchain_license_rel": "share/licenses/winpthreads/COPYING",
+            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-libwinpthread: ucrt64/share/licenses/libwinpthread/COPYING",
+            "toolchain_license_rel": "share/licenses/libwinpthread/COPYING",
             "sha256": "63263614cdd29f2f93cba85e992f041b31f9fc7b4033692f31269489a8a1b177"
           }
         ]
@@ -301,20 +301,20 @@
         "name": "gcc-libs (libgcc)",
         "notice_file": "gcc-libs-libgcc.txt",
         "spdx_id": "GPL-3.0-or-later WITH GCC-exception-3.1",
-        "pacman_package": "gcc-libs",
+        "pacman_package": "libgcc",
         "upstream_origin": "https://gcc.gnu.org/",
         "disposition": "copied_into_package",
         "license_texts": [
           {
             "file": "third_party/licenses/gcc-libs/COPYING3.txt",
-            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-gcc-libs: ucrt64/share/licenses/gcc-libs/COPYING3",
-            "toolchain_license_rel": "share/licenses/gcc-libs/COPYING3",
+            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-libgcc: ucrt64/share/licenses/libgcc/COPYING3",
+            "toolchain_license_rel": "share/licenses/libgcc/COPYING3",
             "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
           },
           {
             "file": "third_party/licenses/gcc-libs/COPYING.RUNTIME.txt",
-            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-gcc-libs: ucrt64/share/licenses/gcc-libs/COPYING.RUNTIME",
-            "toolchain_license_rel": "share/licenses/gcc-libs/COPYING.RUNTIME",
+            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-libgcc: ucrt64/share/licenses/libgcc/COPYING.RUNTIME",
+            "toolchain_license_rel": "share/licenses/libgcc/COPYING.RUNTIME",
             "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
           }
         ]
@@ -323,20 +323,20 @@
         "name": "gcc-libs (libstdc++)",
         "notice_file": "gcc-libs-libstdcxx.txt",
         "spdx_id": "GPL-3.0-or-later WITH GCC-exception-3.1",
-        "pacman_package": "gcc-libs",
+        "pacman_package": "libstdc++",
         "upstream_origin": "https://gcc.gnu.org/",
         "disposition": "copied_into_package",
         "license_texts": [
           {
             "file": "third_party/licenses/gcc-libs/COPYING3.txt",
-            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-gcc-libs: ucrt64/share/licenses/gcc-libs/COPYING3",
-            "toolchain_license_rel": "share/licenses/gcc-libs/COPYING3",
+            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-libstdc++: ucrt64/share/licenses/libstdc++/COPYING3",
+            "toolchain_license_rel": "share/licenses/libstdc++/COPYING3",
             "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
           },
           {
             "file": "third_party/licenses/gcc-libs/COPYING.RUNTIME.txt",
-            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-gcc-libs: ucrt64/share/licenses/gcc-libs/COPYING.RUNTIME",
-            "toolchain_license_rel": "share/licenses/gcc-libs/COPYING.RUNTIME",
+            "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-libstdc++: ucrt64/share/licenses/libstdc++/COPYING.RUNTIME",
+            "toolchain_license_rel": "share/licenses/libstdc++/COPYING.RUNTIME",
             "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
           }
         ]
@@ -351,7 +351,10 @@
         "upstream_revision": "n4.4 / dc91b913b6260e85e1304c74ff7bb3c22a8c9fb1",
         "disposition": "statically_linked_subset",
         "notice_file": "FFmpeg-ATRAC3P.txt",
-        "object_glob": "build/*/atrac3p_*.o",
+        "object_globs": [
+          "build/*/atrac3p_*.o",
+          "build/*/atrac3p_*/**/*.o"
+        ],
         "relink_doc": "RELINK.md",
         "license_texts": [
           {
@@ -374,12 +377,29 @@
         "upstream_revision": "84abba93ff3d52c87e08ba81de1cc6615a42b72e",
         "disposition": "statically_linked_subset",
         "notice_file": "portable-snippets-safe-math.txt",
-        "note": "The byte-identical header third_party/portable-snippets/safe-math/safe-math.h (third_party/portable-snippets/PROVENANCE.md), compiled into the native player through src/core/nk_iso.c and src/core/nk_xb.c. CC0 1.0 asks for no notice; the dedication text travels with the package for clarity.",
+        "note": "The byte-identical header third_party/portable-snippets/safe-math/safe-math.h (third_party/portable-snippets/PROVENANCE.md), compiled into the native player through src/core/nk_iso.c and src/core/nk_xb.c, and into every title runtime through src/core/nk_xb.c (a runtime source in mk/runtime_sources.mk). CC0 1.0 asks for no notice; the dedication text travels with the package for clarity.",
         "license_texts": [
           {
             "file": "third_party/portable-snippets/COPYING.md",
             "copied_from": "Portable Snippets upstream COPYING.md at commit 84abba93ff3d52c87e08ba81de1cc6615a42b72e, imported byte-identical",
             "sha256": "ff5ac505f6fd6dd3c841f210db469a5dd2fc00a81559b0487c15357f6e2bd331"
+          }
+        ]
+      },
+      {
+        "id": "minimp3",
+        "name": "minimp3",
+        "spdx_id": "CC0-1.0",
+        "upstream_origin": "https://github.com/lieff/minimp3",
+        "upstream_revision": "ea99364f61c14656440e8d77e9c233ccf3124633",
+        "disposition": "statically_linked_subset",
+        "notice_file": "minimp3.txt",
+        "note": "The byte-identical header src/rt/minimp3/minimp3.h (src/rt/minimp3/PROVENANCE.md), compiled into every title runtime through the project wrapper src/rt/mp3_bridge.c (a runtime source in mk/runtime_sources.mk), where it decodes for sceMp3. CC0 1.0 asks for no notice; the dedication text travels with the package for clarity.",
+        "license_texts": [
+          {
+            "file": "src/rt/minimp3/LICENSE",
+            "copied_from": "minimp3 upstream LICENSE at commit ea99364f61c14656440e8d77e9c233ccf3124633, imported byte-identical",
+            "sha256": "6a1ee543e5282cd9061881edf462e6fdab181f328da71fc2c9a6950a80e94d01"
           }
         ]
       },
@@ -452,7 +472,8 @@
         "disposition": "statically_linked_subset",
         "notice_file": "libchdr.txt",
         "copyright_notices": [
-          "Copyright Romain Tisserand"
+          "Copyright Romain Tisserand",
+          "Copyright Aaron Giles"
         ],
         "note": "Compiled into the native player (and the nk_disc_expand wrapper the Python tools build) to read CHD disc images at import, through src/core/nk_disc_chd.c; see third_party/libchdr/PROVENANCE.md. Not linked into the runtime.",
         "license_texts": [
@@ -552,7 +573,10 @@
         "upstream_revision": "n4.4 / dc91b913b6260e85e1304c74ff7bb3c22a8c9fb1",
         "disposition": "statically_linked_subset",
         "notice_file": "FFmpeg-H264.txt",
-        "object_glob": "build/*/h264sub_*.o",
+        "object_globs": [
+          "build/*/h264sub_*.o",
+          "build/*/h264sub_*/**/*.o"
+        ],
         "relink_doc": "RELINK.md",
         "license_texts": [
           {
@@ -578,7 +602,7 @@
         "license_texts": [
           {
             "file": "third_party/licenses/GPL-2.0.txt",
-            "copied_from": "GNU General Public License version 2 text inherited with the sal063 lineage (third_party/licenses/GPL-2.0.txt)",
+            "copied_from": "GNU General Public License version 2 text (June 1991, the Free Software Foundation's earlier revision with the 59 Temple Place address), present in this repository since its initial public export; the exact copy it was taken from is not recorded. It is not sal063's LICENSE at da17b0e1db209206a407d097d132201e516e3855, which carries its own grant header and the later 51 Franklin Street revision.",
             "sha256": "7ec0306399fd391c17165cac57361c54da002ebe1b85cbfc49ea83b92867df24"
           },
           {
@@ -603,7 +627,7 @@
         "license_texts": [
           {
             "file": "third_party/licenses/GPL-2.0.txt",
-            "copied_from": "GNU General Public License version 2 text inherited with the sal063 lineage (third_party/licenses/GPL-2.0.txt)",
+            "copied_from": "GNU General Public License version 2 text (June 1991, the Free Software Foundation's earlier revision with the 59 Temple Place address), present in this repository since its initial public export; the exact copy it was taken from is not recorded. It is not sal063's LICENSE at da17b0e1db209206a407d097d132201e516e3855, which carries its own grant header and the later 51 Franklin Street revision.",
             "sha256": "7ec0306399fd391c17165cac57361c54da002ebe1b85cbfc49ea83b92867df24"
           }
         ]

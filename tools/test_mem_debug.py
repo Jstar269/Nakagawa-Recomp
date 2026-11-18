@@ -6,8 +6,9 @@
 These tests exercise the pure helpers (guest-span validation, region
 classification, host-offset mapping, PE image identity, process-candidate
 selection, argument parsing) and the mutation gate + simulation behavior of
-MemoryDebugger.  No test attaches to, reads, writes, or suspends a real
-process: live-process access is never exercised here.
+MemoryDebugger.  No test writes to or suspends a real process; on Windows,
+LiveDiscoveryTest discovers a child Python process this file starts and reads
+its mapped PE headers, read-only.
 """
 
 import contextlib
@@ -24,6 +25,31 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import mem_debug as md
+
+REPO_MOCK_STATE = md.get_mock_state_path()
+
+
+def _stat_or_none(path):
+    """(size, mtime_ns) of ``path``, or None when it does not exist."""
+    try:
+        status = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return status.st_size, status.st_mtime_ns
+
+
+class RedirectedMockState:
+    """Every simulated debugger built by a test reads and writes a temporary mock state for
+    the whole test, never the repository's build/hst/mock_debug_state.json."""
+
+    def setUp(self):
+        super().setUp()
+        directory = tempfile.TemporaryDirectory(prefix="mem_debug_mock_")
+        self.addCleanup(directory.cleanup)
+        self.mock_state_path = os.path.join(directory.name, "mock_debug_state.json")
+        patcher = mock.patch.object(md, "get_mock_state_path", return_value=self.mock_state_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class ExecutablePathResolutionTest(unittest.TestCase):
@@ -57,6 +83,64 @@ class ExecutablePathResolutionTest(unittest.TestCase):
                 os.path.normpath(captured["argv"][1]),
                 os.path.normpath(str(exe_dir / "game.exe")),
             )
+
+    NM_SYMBOLS = "0000000010001000 B g_mem\n0000000010002000 B s_cpu\n"
+
+    def _fake_nm(self, calls, version_rc=0):
+        def fake_run(argv, **kwargs):
+            argv = [str(arg) for arg in argv]
+            calls.append(argv)
+            if "--version" in argv:
+                return subprocess.CompletedProcess(
+                    argv, version_rc, stdout="GNU nm (GNU Binutils) 2.45\n", stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout=self.NM_SYMBOLS, stderr="")
+        return fake_run
+
+    def _pe_exe(self, folder, image_base):
+        path = os.path.join(folder, "game.exe")
+        Path(path).write_bytes(PEImageIdentityTest._pe_page(image_base, mapped=False))
+        return path
+
+    def test_rvas_are_relative_to_the_executables_own_image_base(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_exe_") as tmp_dir:
+            exe = self._pe_exe(tmp_dir, 0x10000000)
+            calls = []
+            with mock.patch.dict(os.environ, {"NM": "nm-fake"}):
+                with mock.patch.object(md.subprocess, "run", side_effect=self._fake_nm(calls)):
+                    rvas, provenance = md.get_symbol_rvas(exe)
+            self.assertEqual(provenance, "nm")
+            self.assertEqual((rvas["g_mem"], rvas["s_cpu"]), (0x1000, 0x2000))
+
+    def test_an_nm_in_the_working_directory_or_on_a_relative_path_is_never_run(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_cwd_") as tmp_dir:
+            exe = self._pe_exe(tmp_dir, 0x10000000)
+            for planted in ("nm", "nm.exe"):
+                Path(tmp_dir, planted).write_bytes(b"planted")
+            env = {"PATH": tmp_dir + os.pathsep + ".",
+                   "MSYS_PATH": os.path.join(tmp_dir, "no-msys")}
+            calls = []
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(tmp_dir)
+                with mock.patch.dict(os.environ, env):
+                    os.environ.pop("NM", None)
+                    with mock.patch.object(md.subprocess, "run", side_effect=self._fake_nm(calls)):
+                        _rvas, provenance = md.get_symbol_rvas(exe)
+            finally:
+                os.chdir(previous_cwd)
+            self.assertEqual(provenance, "fallback")
+            self.assertEqual(calls, [])
+
+    def test_an_nm_that_fails_its_version_probe_is_not_trusted(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_exe_") as tmp_dir:
+            exe = self._pe_exe(tmp_dir, 0x10000000)
+            calls = []
+            with mock.patch.dict(os.environ, {"NM": "nm-fake"}):
+                with mock.patch.object(md.subprocess, "run",
+                                       side_effect=self._fake_nm(calls, version_rc=1)):
+                    _rvas, provenance = md.get_symbol_rvas(exe)
+            self.assertEqual(provenance, "fallback")
+            self.assertEqual([argv for argv in calls if "--version" not in argv], [])
 
 
 class GuestSpanValidationTest(unittest.TestCase):
@@ -181,6 +265,35 @@ class PEImageIdentityTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    @staticmethod
+    def _pe_page(image_base, *, mapped, size_of_headers=0x400, stamp=0x5F000000):
+        """One synthetic PE32+ first page: on disk, raw section data follows the headers;
+        mapped, the rest of the page is zero and the loader has rebased ImageBase."""
+        page = bytearray(md.PE_PREFIX_BYTES)
+        page[0:2] = b"MZ"
+        page[0x3C:0x40] = (0x80).to_bytes(4, "little")
+        page[0x80:0x84] = b"PE\0\0"
+        page[0x84:0x86] = (0x8664).to_bytes(2, "little")
+        page[0x88:0x8C] = stamp.to_bytes(4, "little")
+        optional = 0x80 + 24
+        page[optional:optional + 2] = (0x20B).to_bytes(2, "little")
+        page[optional + 24:optional + 32] = image_base.to_bytes(8, "little")
+        page[optional + 60:optional + 64] = size_of_headers.to_bytes(4, "little")
+        if not mapped:
+            for offset in range(size_of_headers, len(page)):
+                page[offset] = (offset * 7 + 3) & 0xFF
+        return bytes(page)
+
+    def test_identity_compares_the_mapped_headers_not_the_whole_page(self):
+        # MinGW and MSVC images use SizeOfHeaders 0x400: on disk the rest of the first
+        # page is section data, mapped it is zero, and ASLR rewrites ImageBase.
+        disk = self._pe_page(0x140000000, mapped=False)
+        memory = self._pe_page(0x7FF712340000, mapped=True)
+        self.assertTrue(md.image_identity_matches(disk, memory))
+        other_build = self._pe_page(0x7FF712340000, mapped=True, stamp=0x5F000001)
+        self.assertFalse(md.image_identity_matches(disk, other_build))
+        self.assertFalse(md.image_identity_matches(disk, b"MZ" + bytes(md.PE_PREFIX_BYTES - 2)))
+
     def test_pe_prefix_bytes(self):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".exe") as f:
             f.write(b"X" * 0x2000)
@@ -288,7 +401,7 @@ class ParseUint32Test(unittest.TestCase):
             md.parse_uint32_arg("3.5")
 
 
-class MutationGateTest(unittest.TestCase):
+class MutationGateTest(RedirectedMockState, unittest.TestCase):
     """The fail-closed mutation gate, exercised without any live process."""
 
     def _dbg(self, **overrides):
@@ -307,6 +420,10 @@ class MutationGateTest(unittest.TestCase):
         for k, v in attrs.items():
             setattr(dbg, k, v)
         return dbg
+
+    def test_simulated_debuggers_use_a_temporary_mock_state(self):
+        self.assertNotEqual(os.path.normcase(os.path.abspath(md.get_mock_state_path())),
+                            os.path.normcase(os.path.abspath(REPO_MOCK_STATE)))
 
     def test_mutation_requires_flag(self):
         dbg = self._dbg(mutate_enabled=False)
@@ -353,26 +470,19 @@ class MutationGateTest(unittest.TestCase):
         self.assertIn("--mutate", reason)
 
 
-class SimulationBehaviorTest(unittest.TestCase):
-    def setUp(self):
-        # Point the mock state at a temp file so tests never touch the repo's
-        # real build/hst/mock_debug_state.json.
-        fd, self.tmp_path = tempfile.mkstemp(suffix=".json")
-        os.close(fd)
-        os.unlink(self.tmp_path)
-
-    def tearDown(self):
-        if os.path.exists(self.tmp_path):
-            os.unlink(self.tmp_path)
-
+class SimulationBehaviorTest(RedirectedMockState, unittest.TestCase):
+    # The redirect lasts the whole test: save_mock_state looks the path up on every
+    # write, so restoring it after construction sent the writes to the repository.
     def _sim(self, mutate=False):
-        orig = md.get_mock_state_path
-        md.get_mock_state_path = lambda: self.tmp_path
-        try:
-            dbg = md.MemoryDebugger(simulate=True, mutate=mutate)
-        finally:
-            md.get_mock_state_path = orig
-        return dbg
+        return md.MemoryDebugger(simulate=True, mutate=mutate)
+
+    def test_simulated_mutations_never_touch_the_repository_mock_state(self):
+        before = _stat_or_none(REPO_MOCK_STATE)
+        dbg = self._sim(mutate=True)
+        self.assertTrue(dbg.write_mem(0x08800000, "deadbeef")["success"])
+        self.assertTrue(dbg.write_cpu("r1", 1)["success"])
+        self.assertTrue(dbg.pause()["success"])
+        self.assertEqual(_stat_or_none(REPO_MOCK_STATE), before)
 
     def test_read_mem_valid_span(self):
         dbg = self._sim()
@@ -449,7 +559,7 @@ class SimulationBehaviorTest(unittest.TestCase):
         self.assertEqual(md.CPU_STATE_SIZE, 1000)
 
 
-class ResolverFailureTest(unittest.TestCase):
+class ResolverFailureTest(RedirectedMockState, unittest.TestCase):
     def test_guest_memory_resolver_rejects_bad_span(self):
         # No live process is needed: span validation runs before any g_mem read.
         dbg = md.MemoryDebugger(simulate=True, mutate=True)
@@ -467,7 +577,7 @@ class ResolverFailureTest(unittest.TestCase):
         self.assertIn("g_mem", err)
 
 
-class CpuStateAbiUpgradeTest(unittest.TestCase):
+class CpuStateAbiUpgradeTest(RedirectedMockState, unittest.TestCase):
     """ABI v2 must never be applied to state produced by a pre-v2 build."""
 
     def _header(self, abi=md.CPU_STATE_ABI_VERSION, size=md.CPU_STATE_SIZE,
@@ -571,7 +681,7 @@ class CpuStateAbiUpgradeTest(unittest.TestCase):
         self.assertIn("ABI 2", dbg._cpu_abi_check())
 
 
-class ExeOptionAndDefaultRejectionTest(unittest.TestCase):
+class ExeOptionAndDefaultRejectionTest(RedirectedMockState, unittest.TestCase):
     def test_default_without_exe_fails_clearly(self):
         """MemoryDebugger without --simulate or explicit exe must fail clearly instead of assuming HST."""
         with self.assertRaises(ValueError) as ctx:
@@ -644,6 +754,216 @@ class TargetDispositionTest(unittest.TestCase):
         self.assertTrue(
             md.get_mock_state_path().endswith(
                 os.path.join("build", "hst", "mock_debug_state.json")))
+
+
+def _live_debugger(tmp_dir, **overrides):
+    """A debugger in the attached state, without a process: tests replace the host calls."""
+    dbg = md.MemoryDebugger(simulate=True, mutate=True)
+    attrs = {
+        "is_simulated": False,
+        "is_offline": False,
+        "pid": 4242,
+        "candidate": {"pid": 4242, "exe_path": os.path.join(tmp_dir, "title.exe"),
+                      "base_address": 0x140000000},
+        "proc_info": {"pid": 4242, "exe_path": os.path.join(tmp_dir, "title.exe"),
+                      "base_address": 0x140000000},
+        "base_address": 0x140000000,
+        "image_verified": True,
+        "rva_provenance": "nm",
+        "rvas": {"g_mem": 1, "s_cpu": 2, md.ABI_SYMBOL: 3},
+    }
+    attrs.update(overrides)
+    for k, v in attrs.items():
+        setattr(dbg, k, v)
+    return dbg
+
+
+class _FakeDll:
+    def __init__(self, **functions):
+        self.__dict__.update(functions)
+
+
+class LiveResultTest(RedirectedMockState, unittest.TestCase):
+    """What a live action reports, with the Windows calls replaced."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="mem_debug_live_")
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_dir = self._tmp.name
+
+    def _dlls(self, **by_name):
+        def win_dll(name, **_kwargs):
+            return by_name[name.lower()]
+        return mock.patch.object(md.ctypes, "WinDLL", side_effect=win_dll, create=True)
+
+    def test_live_reads_report_where_g_mem_came_from(self):
+        dbg = _live_debugger(self.tmp_dir, rva_provenance="fallback", image_verified=False)
+        dbg._resolve_g_mem = lambda: 0x10000000
+        dbg._read_process_bytes = lambda addr, size: bytes(size)
+        for res in (dbg.read_mem(0x08800000, 4, "hex"), dbg.read_mem(0x08800000, 4, "words"),
+                    dbg.read_mem(0x08800000, 4, "string"), dbg.read_vram()):
+            self.assertEqual(res["rva_provenance"], "fallback")
+            self.assertFalse(res["image_verified"])
+
+    def test_float_register_writes_store_the_given_bit_pattern(self):
+        dbg = _live_debugger(self.tmp_dir)
+        dbg._cpu_abi_check = lambda: None
+        dbg._resolve_cpu_state_addr = lambda: 0x1000
+        written = {}
+        dbg._write_process_bytes = lambda addr, data: written.update({addr: data}) or True
+        res = dbg.write_cpu("f2", 0x3F800000)
+        self.assertTrue(res["success"], res)
+        self.assertEqual(written[0x1000 + 140 + 2 * 4], (0x3F800000).to_bytes(4, "little"))
+        res = dbg.write_cpu("v5", 0xBF800000)
+        self.assertTrue(res["success"], res)
+        self.assertEqual(written[0x1000 + 276 + 5 * 4], (0xBF800000).to_bytes(4, "little"))
+
+    def test_simulated_float_register_writes_store_the_given_bit_pattern(self):
+        mock_path = os.path.join(self.tmp_dir, "mock_debug_state.json")
+        with mock.patch.object(md, "get_mock_state_path", return_value=mock_path):
+            dbg = md.MemoryDebugger(simulate=True, mutate=True)
+            self.assertTrue(dbg.write_cpu("f2", 0x3F800000)["success"])
+            self.assertTrue(dbg.write_cpu("v5", 0xBF800000)["success"])
+        self.assertEqual(dbg.mock["cpu"]["f"][2], 1.0)
+        self.assertEqual(dbg.mock["cpu"]["v"][5], -1.0)
+
+    def test_status_is_offline_when_the_process_cannot_be_opened(self):
+        dbg = _live_debugger(self.tmp_dir)
+        kernel32 = _FakeDll(OpenProcess=lambda *args: 0, CloseHandle=lambda handle: 1)
+        with self._dlls(**{"kernel32.dll": kernel32}):
+            self.assertFalse(dbg.get_status()["online"])
+
+    def test_a_failed_suspend_or_resume_is_reported_and_leaves_the_flag(self):
+        dbg = _live_debugger(self.tmp_dir)
+        access_denied = -0x3FFFFFDE  # NTSTATUS 0xC0000022 as the signed int ctypes returns
+        kernel32 = _FakeDll(OpenProcess=lambda *args: 5, CloseHandle=lambda handle: 1)
+        ntdll = _FakeDll(NtSuspendProcess=lambda handle: access_denied,
+                         NtResumeProcess=lambda handle: access_denied)
+        flag = os.path.join(self.tmp_dir, "paused.flag")
+        with self._dlls(**{"kernel32.dll": kernel32, "ntdll.dll": ntdll}):
+            res = dbg.pause()
+            self.assertFalse(res["success"])
+            self.assertIn("0xc0000022", res["error"])
+            self.assertFalse(os.path.exists(flag))
+            Path(flag).write_text("1")
+            res = dbg.resume()
+            self.assertFalse(res["success"])
+            self.assertIn("0xc0000022", res["error"])
+            self.assertTrue(os.path.exists(flag))
+
+    def test_a_crash_dump_over_the_read_budget_is_not_read(self):
+        dbg = _live_debugger(self.tmp_dir, process_started=None)
+        stack = bytes(4096)
+        words = (md.CRASH_DUMP_FORMAT, md.CPU_STATE_ABI_VERSION, md.CPU_STATE_SIZE, 0x09FF0000,
+                 len(stack))
+        header = md.CRASH_DUMP_MAGIC + b"".join(w.to_bytes(4, "little") for w in words)
+        Path(self.tmp_dir, "crash_dump.bin").write_bytes(header + bytes(md.CPU_STATE_SIZE) + stack)
+        with mock.patch.object(md, "MAX_READ_BYTES", 2048):
+            res = dbg.trace_exit()
+        self.assertIn("error", res)
+        self.assertIn("budget", res["error"])
+
+
+@unittest.skipUnless(sys.platform == "win32", "process enumeration is the Windows backend")
+class ProcessEnumerationTest(unittest.TestCase):
+    def test_more_processes_than_the_first_buffer_holds_are_all_seen(self):
+        import ctypes
+        target = r"C:\titles\title\title.exe"
+        pids = list(range(4, 4 + 1500 * 4, 4))
+        paths = {pid: r"C:\other\other.exe" for pid in pids}
+        paths[pids[10]] = target
+        paths[pids[1400]] = target
+
+        def enum_processes(array_ref, size, needed_ref):
+            array = array_ref._obj
+            count = min(len(pids), size // ctypes.sizeof(ctypes.c_ulong))
+            for index in range(count):
+                array[index] = pids[index]
+            needed_ref._obj.value = count * ctypes.sizeof(ctypes.c_ulong)
+            return 1
+
+        def image_name(handle, flags, buffer_ref, size_ref):
+            buffer_ref._obj.value = paths[handle]
+            return 1
+
+        kernel32 = _FakeDll(OpenProcess=lambda access, inherit, pid: pid,
+                            CloseHandle=lambda handle: 1,
+                            QueryFullProcessImageNameW=image_name)
+        psapi = _FakeDll(EnumProcesses=enum_processes, EnumProcessModules=lambda *args: 0)
+        dlls = {"kernel32.dll": kernel32, "psapi.dll": psapi}
+        with mock.patch.object(md.ctypes, "WinDLL",
+                               side_effect=lambda name, **kwargs: dlls[name.lower()]):
+            candidates = md.enumerate_process_candidates("title.exe")
+        self.assertEqual(sorted(c["pid"] for c in candidates), [pids[10], pids[1400]])
+        chosen, reason = md.select_process_candidate(candidates, target)
+        self.assertIsNone(chosen)
+        self.assertIn("ambiguous", reason)
+
+
+@unittest.skipUnless(sys.platform == "win32", "live process discovery is the Windows backend")
+class LiveDiscoveryTest(unittest.TestCase):
+    """Discovery and the image identity check against a real child process, read-only."""
+
+    def setUp(self):
+        self.child = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(self._stop_child)
+
+    def _stop_child(self):
+        self.child.stdin.close()
+        self.child.wait(timeout=60)
+
+    def test_a_running_child_is_discovered_by_name(self):
+        import ntpath
+        candidates = md.enumerate_process_candidates(ntpath.basename(sys.executable))
+        self.assertIn(self.child.pid, [candidate["pid"] for candidate in candidates])
+
+    def test_attaching_by_pid_verifies_the_running_image(self):
+        dbg = md.MemoryDebugger(simulate=False, exe=sys.executable, pid=self.child.pid)
+        self.assertFalse(dbg.is_offline, dbg.identity_note)
+        self.assertTrue(dbg.image_verified)
+        self.assertIsNotNone(dbg.process_started)
+
+
+class ExitArtifactStalenessTest(RedirectedMockState, unittest.TestCase):
+    """exited.flag, paused.flag and crash_dump.bin older than the attached process are
+    left over from an earlier run of the same build, never this run's state."""
+
+    def _attached(self, tmp_dir, started):
+        dbg = md.MemoryDebugger(simulate=True)
+        dbg.is_simulated = False
+        dbg.is_offline = False
+        dbg.pid = 4242
+        dbg.proc_info = {"pid": 4242, "exe_path": os.path.join(tmp_dir, "title.exe"),
+                         "base_address": 0}
+        dbg.process_started = started
+        return dbg
+
+    def _artifact(self, tmp_dir, name, mtime, data=b"1"):
+        path = os.path.join(tmp_dir, name)
+        Path(path).write_bytes(data)
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def test_an_exit_flag_from_an_earlier_run_is_not_this_runs_status(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_artifacts_") as tmp_dir:
+            started = 1_800_000_000.0
+            self._artifact(tmp_dir, "exited.flag", started - 60)
+            dbg = self._attached(tmp_dir, started)
+            self.assertEqual(dbg._run_status(), ("running", ["exited.flag"]))
+            self._artifact(tmp_dir, "paused.flag", started + 5)
+            self.assertEqual(dbg._run_status(), ("paused", ["exited.flag"]))
+            self._artifact(tmp_dir, "exited.flag", started + 10)
+            self.assertEqual(dbg._run_status(), ("exited", []))
+
+    def test_trace_exit_refuses_a_crash_dump_from_an_earlier_run(self):
+        with tempfile.TemporaryDirectory(prefix="mem_debug_artifacts_") as tmp_dir:
+            started = 1_800_000_000.0
+            self._artifact(tmp_dir, "crash_dump.bin", started - 60, b"SRCD")
+            res = self._attached(tmp_dir, started).trace_exit()
+            self.assertIn("error", res)
+            self.assertIn("earlier run", res["error"])
 
 
 if __name__ == "__main__":

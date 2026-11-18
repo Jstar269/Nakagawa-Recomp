@@ -105,9 +105,12 @@ class SplitItemsTests(unittest.TestCase):
     def test_repeated_lookups_reuse_every_parsed_source(self) -> None:
         # Each lookup walks every source and header in order; a cache smaller than that
         # cycle evicts each file before it returns, so a second walk would parse all again.
+        # definitions() keeps its own per-root cache, cleared so each call walks the sources.
         units = len(hle_sources.sources(headers=True))
         hle_sources._items_of.cache_clear()
+        hle_sources.definitions.cache_clear()
         hle_sources.definitions()
+        hle_sources.definitions.cache_clear()
         hle_sources.definitions()
         info = hle_sources._items_of.cache_info()
         self.assertEqual((info.misses, info.hits), (units, units))
@@ -391,7 +394,6 @@ class NoOtherReaderTests(unittest.TestCase):
         "tools/test_hle_manifest.py": "synthetic sources and the owner_file values the manifest reports",
         "tools/test_hle_move_proof.py": "a synthetic split",
         "tools/test_hle_sources.py": "synthetic trees and this guard's own cases",
-        "tools/test_import_stub_census.py": "a synthetic tree",
         "tools/test_package_cache.py": "a synthetic compile command",
         "tools/test_portability_inventory.py": "paths handed to the classifier",
         "tools/test_progress_evidence.py": "a synthetic tree",
