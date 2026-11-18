@@ -42,6 +42,8 @@ SCHEMA_VERSION = 1
 
 #: The tail of a log kept when the log is longer, from its first whole line.
 MAX_LOG_BYTES = 2 * 1024 * 1024
+# Extra bytes before the retained tail allow _tail to align it to a whole line.
+_LOG_TAIL_MARGIN = 64 * 1024
 #: The largest settings or summary file taken.
 MAX_SMALL_BYTES = 1024 * 1024
 #: How many of a title's runtime logs the bundle keeps (the last run and the one before).
@@ -85,9 +87,9 @@ _USERS_DIR = re.compile(
     r"(?:\\\\\?\\|\\\\\.\\|file:/+)?"
     r"(?:(?:/mnt/[A-Za-z]|[A-Za-z]:))?"
     r"[\\/]+(?:Users|Documents and Settings)[\\/]+"
-    r"(?P<name>[^\\/\s\"'<>|:*?,;(){}\[\]]+)",
+    r"(?P<name>[^\\/\"'<>|:*?,;(){}\[\]]+)",
     re.IGNORECASE)
-_POSIX_HOME = re.compile(r"(?<![A-Za-z0-9_.\-])(?:/var)?/(?:home|Users)/(?P<name>[^/\s\"'<>|:*?,;(){}\[\]]+)")
+_POSIX_HOME = re.compile(r"(?<![A-Za-z0-9_.\-])(?:/var)?/(?:home|Users)/(?P<name>[^/\"'<>|:*?,;(){}\[\]]+)")
 
 
 @dataclass(frozen=True)
@@ -152,8 +154,10 @@ def _path_regex(path: str) -> re.Pattern[str] | None:
 
 def _name_regex(name: str) -> re.Pattern[str] | None:
     name = name.strip()
-    if len(name) < 3:
+    if not name:
         return None
+    if len(name) < 3:
+        return re.compile(r"(?<![A-Za-z0-9])" + re.escape(name) + r"(?![A-Za-z0-9])", re.IGNORECASE)
     return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", re.IGNORECASE)
 
 
@@ -299,14 +303,20 @@ def _read_allowed(path: Path, limit: int, plan: BundlePlan, label: str,
         plan.skipped.append((label, reason))
         return None
     try:
-        raw = path.read_bytes()
+        size = path.stat().st_size
+        start = max(0, size - limit - _LOG_TAIL_MARGIN)
+        with path.open("rb") as stream:
+            if start:
+                stream.seek(start)
+            raw = stream.read(limit + _LOG_TAIL_MARGIN)
     except OSError as exc:
         plan.skipped.append((label, f"could not be read ({exc.strerror or exc})"))
         return None
+    raw, window_cut = _tail(raw, limit)
+    cut = start + window_cut
     if not looks_like_text(raw):
         plan.skipped.append((label, "is not plain text"))
         return None
-    raw, cut = _tail(raw, limit)
     text = redact_text(_decode(raw), identity)
     note = f"first {cut} bytes left out" if cut else ""
     if cut:
@@ -322,8 +332,8 @@ _SENSITIVE_KEY = re.compile(
 
 def _scrub_json(value: object) -> object:
     if isinstance(value, dict):
-        return {k: ("<removed>" if _SENSITIVE_KEY.search(str(k)) and not isinstance(v, (dict, list))
-                    else _scrub_json(v)) for k, v in value.items()}
+        return {k: ("<removed>" if _SENSITIVE_KEY.search(str(k)) else _scrub_json(v))
+                for k, v in value.items()}
     if isinstance(value, list):
         return [_scrub_json(v) for v in value]
     return value
@@ -346,7 +356,13 @@ def flight_recorder_summary(path: Path, identity: Identity) -> str:
 
 
 def _newest(paths: Iterable[Path]) -> list[Path]:
-    return sorted(paths, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+    stamped: list[tuple[float, str, Path]] = []
+    for path in paths:
+        try:
+            stamped.append((path.stat().st_mtime, path.name, path))
+        except OSError:
+            continue
+    return [path for _modified, _name, path in sorted(stamped, reverse=True)]
 
 
 def runtime_logs(logs_dir: Path, title_id: str) -> list[Path]:

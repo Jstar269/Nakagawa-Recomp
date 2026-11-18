@@ -26,6 +26,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 import zlib
@@ -282,6 +283,44 @@ class DiscExpandToolTests(unittest.TestCase):
         self.assertEqual(disc_expand_tool.ensure_plain_iso(self.iso_path, self.root / "unused"),
                          self.iso_path)
         self.assertFalse((self.root / "unused").exists())
+
+
+class DiscExpandBuildCacheTests(unittest.TestCase):
+    def test_libchdr_header_change_rebuilds_the_cached_tool(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-disc-expand-cache-") as tmpdir:
+            root = Path(tmpdir)
+            inputs = (
+                disc_expand_tool.CORE_SOURCES
+                + (disc_expand_tool._platform_source(),)
+                + disc_expand_tool.CORE_HEADERS
+                + disc_expand_tool.LIBCHDR_SOURCES
+            )
+            for relative in inputs:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode("utf-8"))
+            header = root / "third_party" / "libchdr" / "include" / "libchdr" / "cache-test.h"
+            header.parent.mkdir(parents=True, exist_ok=True)
+            header.write_bytes(b"header revision one")
+            builds: list[list[str]] = []
+
+            def fake_compile(command, **_options):
+                builds.append(command)
+                output = Path(command[command.index("-o") + 1])
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"synthetic tool")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(disc_expand_tool, "_compiler", return_value="synthetic-cc"),
+                mock.patch.object(disc_expand_tool.subprocess, "run", side_effect=fake_compile),
+            ):
+                disc_expand_tool.find_or_build_tool(root)
+                first_build_count = len(builds)
+                header.write_bytes(b"header revision two")
+                disc_expand_tool.find_or_build_tool(root)
+
+            self.assertGreater(len(builds), first_build_count)
 
 
 @unittest.skipUnless(_have_compiler(), "no C compiler to build nk_disc_expand (SKIP, not a pass)")
