@@ -927,10 +927,13 @@ static void test_unpack_refuses_host_aliased_names(void) {
     printf("[XB_TEST] unpack refuses device names and trailing dots or spaces PASSED\n");
 }
 
-/* Two members whose names differ only in ASCII letter case land on one file on
- * Windows, so the second would silently replace the first: unpack refuses them on
- * every host. A Shift-JIS trail byte in the letter range is not a letter, and an exact
- * duplicate with the same bytes (which the parser accepts) still unpacks. */
+/* Two members whose names differ only in letter case land on one file on Windows, so
+ * the second would silently replace the first: unpack refuses them on every host. The
+ * case of an ASCII letter and of a two-byte Shift-JIS full-width Latin, Greek or
+ * Cyrillic letter counts (Windows converts CP932 to UTF-16 and NTFS folds those). A
+ * katakana trail byte in the ASCII letter range is not a letter, two different
+ * full-width letters stay distinct, and an exact duplicate with the same bytes (which
+ * the parser accepts) still unpacks. */
 static void test_unpack_refuses_case_collisions(void) {
     static const uint8_t first[] = "first";
     static const uint8_t second[] = "second";
@@ -951,6 +954,33 @@ static void test_unpack_refuses_case_collisions(void) {
     };
     assert(unpack_fixture(folder_case, 2u, dest, sizeof(dest), error, sizeof(error)) != NK_OK);
     assert(strstr(error, "letter case") != NULL);
+
+    /* Full-width Latin A (0x82 0x60, U+FF21) and a (0x82 0x81, U+FF41), Greek Alpha
+     * (0x83 0x9F) and alpha (0x83 0xBF), Cyrillic Io (0x84 0x46) and io (0x84 0x76),
+     * and Cyrillic Ya (0x84 0x60) and ya (0x84 0x91), in a file or a folder name. */
+    static const char *const wide_pairs[][2] = {
+        { "\x82\x60.BIN", "\x82\x81.BIN" },
+        { "\x83\x9F/x.bin", "\x83\xBF/x.bin" },
+        { "k\x84\x46.bin", "k\x84\x76.bin" },
+        { "\x84\x60" "z.bin", "\x84\x91" "z.bin" }
+    };
+    for (size_t p = 0; p < sizeof(wide_pairs) / sizeof(wide_pairs[0]); p++) {
+        const FixtureEntry wide[] = {
+            { wide_pairs[p][0], first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+            { wide_pairs[p][1], second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+        };
+        assert(unpack_fixture(wide, 2u, dest, sizeof(dest), error, sizeof(error)) != NK_OK);
+        assert(strstr(error, "letter case") != NULL);
+    }
+    /* Full-width A (0x82 0x60) and b (0x82 0x82), Cyrillic Ya (0x84 0x60) and yu
+     * (0x84 0x90): different letters, not two cases of one. */
+    const FixtureEntry wide_distinct[] = {
+        { "\x82\x60.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "\x82\x82.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE },
+        { "\x84\x60.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "\x84\x90.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    assert(unpack_fixture(wide_distinct, 4u, dest, sizeof(dest), error, sizeof(error)) == NK_OK);
 
     /* 0x83 0x41 and 0x83 0x61 are two different katakana. */
     const FixtureEntry sjis[] = {

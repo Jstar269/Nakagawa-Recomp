@@ -349,7 +349,11 @@ static int decompress_payload(NkPspCtx *ctx, const uint8_t *payload,
                                    "out of memory decompressing payload");
             }
             /* The magic is 4 bytes; the stream may not read past the
-             * decrypted payload we actually have. */
+             * decrypted payload we actually have.  decompress_kle returns the
+             * decoded byte count (> 0) on success, a negative SCE error
+             * (SCE_ERROR_INVALID_SIZE 0x80000104 or SCE_ERROR_INVALID_FORMAT
+             * 0x80000108) on a malformed or truncated stream, and 0 for an
+             * empty stored stream; only a positive count is a payload. */
             rc = decompress_kle(d, (int)elf_size,
                                 (uint8_t *)(void *)(payload + 4),
                                 (int)(payload_size - 4u), &end, is_kl4e);

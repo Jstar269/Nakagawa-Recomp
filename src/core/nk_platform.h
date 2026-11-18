@@ -59,6 +59,10 @@ int nk_rename_noreplace_utf8(const char *from, const char *to);
 char nk_platform_path_separator(void);
 /* The separator between entries of a PATH-style list: ';' on Windows, ':' elsewhere. */
 char nk_platform_path_list_separator(void);
+/* Whether the host compares file names without regard to case: true on Windows
+   (NTFS folds case), false on POSIX hosts, whose realpath() names are compared
+   byte for byte. */
+bool nk_platform_paths_fold_case(void);
 bool nk_platform_file_exists(const char *path);
 bool nk_platform_dir_exists(const char *path);
 /* True only when the OS says the name does not exist: ENOENT or ENOTDIR on POSIX, and

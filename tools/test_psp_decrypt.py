@@ -738,38 +738,57 @@ class TestKnownAnswers(unittest.TestCase):
         got = json.loads(out.stdout)
         self.assertEqual(got["digest"], SHA1_ABC_DIGEST.hex())
 
-    def test_sha1_final_clears_the_whole_context(self):
-        """SHAFinal zeroises its context: every byte of SHA_CTX, not only the first
-        sizeof(pointer) bytes, so no digest state of a hashed key stays behind."""
-        harness = self.tmp / "sha1_zero.c"
+    def test_prx_sha1_wipes_its_whole_context(self):
+        """sha1_parts, the SHA-1 every PRX decoder hashes decrypted header and
+        key-derived bytes through, wipes its whole SHA_CTX after SHAFinal: the
+        vendored SHAFinal clears only sizeof(pointer) bytes of it."""
+        from tools.nk_core import decrypt_tool
+
+        harness = self.tmp / "prx_sha1_wipe.c"
         harness.write_text(r"""
 #include <stdio.h>
 #include <string.h>
-#include "nk_psp_sha1.h"
+#define SHAFinal harness_sha_final
+#define nk_secure_zero harness_secure_zero
+#include "nk_psp_prx.c"
+#undef SHAFinal
+#undef nk_secure_zero
+void SHAFinal(BYTE *output, SHA_CTX *shsInfo);
+void nk_secure_zero(void *p, size_t len);
+static const void *final_ctx;
+static int finals, wiped;
+void harness_sha_final(BYTE *output, SHA_CTX *shsInfo) {
+    final_ctx = shsInfo;
+    finals++;
+    SHAFinal(output, shsInfo);
+}
+void harness_secure_zero(void *p, size_t len) {
+    if (finals > 0 && p == final_ctx && len >= sizeof(SHA_CTX)) wiped++;
+    nk_secure_zero(p, len);
+}
 int main(void) {
-    SHA_CTX ctx;
-    BYTE digest[20];
-    BYTE msg[3] = { 'a', 'b', 'c' };
-    size_t left = 0;
-    SHAInit(&ctx);
-    SHAUpdate(&ctx, msg, 3);
-    SHAFinal(digest, &ctx);
-    for (size_t i = 0; i < sizeof(ctx); i++) left += ((unsigned char *)&ctx)[i] != 0;
-    printf("left %u digest ", (unsigned)left);
+    static const u8 ab[2] = { 'a', 'b' }, c[1] = { 'c' };
+    ShaPart parts[3] = { { ab, 2 }, { NULL, 0 }, { c, 1 } };
+    u8 digest[0x14];
+    sha1_parts(parts, 3, digest);
+    printf("finals %d wiped %d digest ", finals, wiped);
     for (size_t i = 0; i < sizeof(digest); i++) printf("%02x", digest[i]);
     printf("\n");
     return 0;
 }
 """, encoding="utf-8")
-        exe = self.tmp / "sha1_zero.exe"
-        proc = subprocess.run([CC, "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
-                               str(harness), str(ROOT / "src" / "core" / "nk_psp_sha1.c"),
-                               "-o", str(exe)], capture_output=True, text=True)
+        exe = self.tmp / "prx_sha1_wipe.exe"
+        cmd = [cast(str, CC), "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+               str(harness)]
+        cmd.extend(str(ROOT / rel) for rel in decrypt_tool.SOURCES
+                   if not rel.endswith(("nk_decrypt_main.c", "nk_psp_prx.c")))
+        cmd.extend(["-o", str(exe)])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         out = subprocess.run([str(exe)], capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(out.stdout.split(),
-                         ["left", "0", "digest", SHA1_ABC_DIGEST.hex()])
+                         ["finals", "1", "wiped", "1", "digest", SHA1_ABC_DIGEST.hex()])
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")

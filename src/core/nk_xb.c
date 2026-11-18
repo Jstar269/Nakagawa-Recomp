@@ -1591,9 +1591,23 @@ static NkResult xb_check_host_member_name(const char *member, char *error_messag
     return NK_OK;
 }
 
-/* Member names compared with ASCII letters folded to upper case. The second byte of a
-   two-byte Shift-JIS character is kept as it is: 0x83 0x41 and 0x83 0x61 are two
-   different characters, not two cases of one. The parser has validated every pair. */
+/* The trail byte of the upper-case letter Windows folds a two-byte Shift-JIS letter
+   onto, or the trail byte itself. Windows writes a member name as CP932 converted to
+   UTF-16, and NTFS folds the case of the full-width Latin (U+FF41 onto U+FF21), Greek
+   and Cyrillic letters that CP932 encodes after the lead bytes 0x82, 0x83 and 0x84.
+   Other trail bytes, katakana among them (0x83 0x41 and 0x83 0x61), are distinct
+   characters, not two cases of one. */
+static uint8_t xb_sjis_upper_trail(uint8_t lead, uint8_t trail) {
+    if (lead == 0x82u && trail >= 0x81u && trail <= 0x9au) return (uint8_t)(trail - 0x21u);
+    if (lead == 0x83u && trail >= 0xbfu && trail <= 0xd6u) return (uint8_t)(trail - 0x20u);
+    if (lead == 0x84u && trail >= 0x70u && trail <= 0x7eu) return (uint8_t)(trail - 0x30u);
+    if (lead == 0x84u && trail >= 0x80u && trail <= 0x91u) return (uint8_t)(trail - 0x31u);
+    return trail;
+}
+
+/* Member names compared with ASCII letters folded to upper case and each two-byte
+   Shift-JIS character folded by xb_sjis_upper_trail; the hash and the comparison fold
+   the same way. The parser has validated every pair. */
 static uint32_t xb_folded_name_hash(const char *name) {
     uint32_t value = 2166136261u;
     for (size_t i = 0; name[i] != '\0'; i++) {
@@ -1601,9 +1615,9 @@ static uint32_t xb_folded_name_hash(const char *name) {
         value ^= (uint8_t)xb_ascii_upper(name[i]);
         value *= 16777619u;
         if (pair) {
-            i++;
-            value ^= (uint8_t)name[i];
+            value ^= xb_sjis_upper_trail((uint8_t)name[i], (uint8_t)name[i + 1]);
             value *= 16777619u;
+            i++;
         }
     }
     return value;
@@ -1615,13 +1629,16 @@ static bool xb_folded_names_equal(const char *a, const char *b) {
         if (a[i] == '\0') return true;
         if (sjis_lead((uint8_t)a[i]) && a[i + 1] != '\0') {
             /* a[i] == b[i]: a lead byte is not a letter. */
+            uint8_t lead = (uint8_t)a[i];
             i++;
-            if (a[i] != b[i]) return false;
+            if (xb_sjis_upper_trail(lead, (uint8_t)a[i]) !=
+                xb_sjis_upper_trail(lead, (uint8_t)b[i])) return false;
         }
     }
 }
 
-/* Refuses two members whose names differ only in ASCII letter case: Windows opens
+/* Refuses two members whose names differ only in letter case (ASCII, or the
+   full-width Latin, Greek and Cyrillic letters of xb_sjis_upper_trail): Windows opens
    both as one file, so the second would silently replace the first. It applies on
    every host, as the ZIP reader's duplicate rule does. Names that are byte-identical
    are the parser's accepted duplicates (their bytes were found identical), and

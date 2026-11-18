@@ -2999,18 +2999,18 @@ static bool package_path_is_within(const char *root, const char *path) {
            (abs_root[root_length - 1] == '/' || abs_root[root_length - 1] == '\\')) {
         abs_root[--root_length] = '\0';
     }
-#if defined(_WIN32) || defined(_WIN64)
-    /* NTFS names fold case: GetFinalPathNameByHandleW gives one spelling of
-       the root, and a path under it may differ from that only in case. */
-    for (size_t i = 0; i < root_length; i++) {
-        if (nk_ascii_lower((unsigned char)abs_root[i]) !=
-            nk_ascii_lower((unsigned char)abs_path[i])) return false;
+    if (nk_platform_paths_fold_case()) {
+        /* NTFS names fold case: GetFinalPathNameByHandleW gives one spelling of
+           the root, and a path under it may differ from that only in case. */
+        for (size_t i = 0; i < root_length; i++) {
+            if (nk_ascii_lower((unsigned char)abs_root[i]) !=
+                nk_ascii_lower((unsigned char)abs_path[i])) return false;
+        }
+    } else if (strncmp(abs_root, abs_path, root_length) != 0) {
+        /* realpath() names on a case-sensitive file system: a sibling that differs
+           from the root only in case is a different folder, outside the package. */
+        return false;
     }
-#else
-    /* realpath() names on a case-sensitive file system: a sibling that differs
-       from the root only in case is a different folder, outside the package. */
-    if (strncmp(abs_root, abs_path, root_length) != 0) return false;
-#endif
     return abs_path[root_length] == '/' || abs_path[root_length] == '\\';
 }
 

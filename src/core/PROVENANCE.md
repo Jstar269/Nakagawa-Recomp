@@ -100,15 +100,12 @@ it; the phase-1 disc route then runs unchanged.
 Every file except the built-in tables comes from this repository's own public history: the tree before PR #1187, at
 commit `8ca38e6399064e1d76f9670ed4722d521fd21a9a^`. No code, table or key value came from any other tool.
 
-- Byte-identical to those bytes: `nk_psp_aes.c/.h`, `nk_psp_sha1.h`, `nk_psp_kirk.c/.h`, `nk_psp_kle.c`,
+- Byte-identical to those bytes: `nk_psp_aes.c/.h`, `nk_psp_sha1.c/.h`, `nk_psp_kirk.c/.h`, `nk_psp_kle.c/.h`,
   `nk_psp_ec.c/.h`, `nk_psp_inflate.c/.h` and `nk_psp_prx.h`. The AES and SHA-1 ports keep their upstream layout and
   stay excluded from the trailing-whitespace hook (`.pre-commit-config.yaml`), as before PR #1187.
 - Changed on restoration (each file's header or this manifest says how): `nk_psp_prx.c`, `nk_psp_container.c/.h`,
   `nk_psp_crypto.c/.h`, `nk_psp_keystore.c/.h`, `nk_decrypt_main.c`, `tools/nk_core/decrypt_tool.py` and
   `tools/test_psp_decrypt.py`.
-- Changed after restoration (2026-11-18, each file's header says how): `nk_psp_sha1.c` (`SHAFinal` clears the
-  whole context, not `sizeof(pointer)` bytes of it) and `nk_psp_kle.h` (the `decompress_kle` comment states its
-  real return values).
 
 ## Project-authored files
 
