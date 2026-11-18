@@ -44,7 +44,7 @@ $(BUILD_DIR)/$(GAME_NAME)_imports.toml: $(GAME_INPUT_PREREQ) tools/imports.py to
 	"$(PYTHON)" tools/imports.py --env-elf $(GAME_BASE) --toml=$@
 
 ifndef NK_BUILD_DIR_READY
-RUNTIME_PROFILE_HASH := $(call profile_hash,NK_RUNTIME_PROFILE_ENTRIES,$(CC),$(BUILD_DIR)/.runtime-profile-entries)
+RUNTIME_PROFILE_HASH := $(call profile_hash,NK_RUNTIME_PROFILE_ENTRIES,$(CC))
 endif
 RUNTIME_PROFILE_STAMP := $(BUILD_DIR)/.runtime-profile-$(RUNTIME_PROFILE_HASH)
 # The objects the runtime profile invalidates go in a list file that make writes (see the record
@@ -125,8 +125,9 @@ $(BUILD_DIR)/xbrz.o: third_party/xbrz/xbrz.c third_party/xbrz/xbrz.h $(RUNTIME_P
 	$(CC) $(CFLAGS) -O2 $(DEPFLAGS) -c $< -o $@
 
 # The pause overlay draws its pages with nk_ui (src/ui, src/rt/overlay); only the window
-# presenter and those sources see the UI include path. SDL3_TTF_AVAILABLE is set further down;
-# these flags are read when a recipe runs.
+# presenter and those sources see the UI include path. SDL3_TTF_AVAILABLE comes from
+# mk/build_common.mk, and the runtime profile hashes it with SDL3_TTF_CFLAGS, so a change in
+# SDL3_ttf rebuilds these objects.
 RT_NK_UI_FLAGS = -Isrc/ui -Isrc/rt/overlay -Ithird_party/clay -DNK_UI_WITH_SDL -DNK_UI_WITH_SDL3 \
                  $(if $(filter yes,$(SDL3_TTF_AVAILABLE)),$(SDL3_TTF_CFLAGS) -DNK_UI_WITH_SDL_TTF,)
 

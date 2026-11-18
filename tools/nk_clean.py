@@ -56,10 +56,24 @@ CATEGORY_ORDER: tuple[str, ...] = ("build outputs", "logs", "tool scratch")
 
 #: build/ subdirectories that hold public, regenerable outputs. Any OTHER build/<name> is
 #: treated as a title output (for example a private title's generated code and executable,
-#: expensive to rebuild) and is skipped unless --include-title-outputs is given.
+#: expensive to rebuild) and is skipped unless --include-title-outputs is given. So is
+#: build/snapshots, the frames a title run's capture policy writes (SR_FBSNAP).
 PUBLIC_BUILD_DIRS: frozenset[str] = frozenset(
-    {"mygame", "fixtures", "cosim", "codegen", "packaging", "portable-core", "snapshots",
+    {"mygame", "fixtures", "cosim", "codegen", "packaging", "portable-core",
      "verify", "vfpu_oracle", "runtime"}
+)
+#: The Makefile's default GAME_NAME. The native selftests build there, but so does a title
+#: built without its own GAME_NAME (docs/PORTING.md), so build/mygame counts as a title output
+#: whenever it holds the title pipeline's outputs (<game>_image.bin, <game>_recomp*.c/.h,
+#: <game>_imports.toml).
+DEFAULT_TITLE_BUILD_DIR = "mygame"
+#: What the oracle fixture Makefile, the PSPSDK's build.mak and the smoke ELF write under
+#: tests/fixtures/psp_oracle/build. Anything else there is a PSP run's record kept in a host0
+#: scratch root (runner reports, host0 logs, dumps, staged inputs), which only a device run
+#: can produce again, so it is kept unless --include-title-outputs.
+ORACLE_BUILD_RULE = "tests/fixtures/psp_oracle/build"
+ORACLE_BUILD_SUFFIXES: frozenset[str] = frozenset(
+    {".o", ".d", ".a", ".c", ".exp", ".elf", ".prx", ".sfo", ".pbp", ".stamp"}
 )
 PUBLIC_BUILD_PREFIXES: tuple[str, ...] = (
     "synthetic", "test", "platform-ladder", "production", "pspdev", "nakagawa_player", "psmf",
@@ -70,6 +84,26 @@ TITLE_RUN_LOGS: frozenset[str] = frozenset({"logs/stdout_run.log", "logs/stderr_
 
 def _is_public_build_dir(name: str) -> bool:
     return name in PUBLIC_BUILD_DIRS or name.startswith(PUBLIC_BUILD_PREFIXES)
+
+
+def _is_title_pipeline_output(name: str) -> bool:
+    if name.endswith(("_image.bin", "_imports.toml")):
+        return True
+    stem, dot, suffix = name.rpartition(".")
+    return bool(dot) and suffix in ("c", "h") and "_recomp" in stem
+
+
+def _holds_title_build(dir_path: str) -> bool:
+    """Whether a build directory holds the title pipeline's outputs at its top level."""
+    with os.scandir(dir_path) as iterator:
+        return any(
+            entry.is_file(follow_symlinks=False) and _is_title_pipeline_output(entry.name)
+            for entry in iterator
+        )
+
+
+def _is_oracle_build_output(name: str) -> bool:
+    return os.path.splitext(name)[1].lower() in ORACLE_BUILD_SUFFIXES
 
 
 class CleanRefusedError(Exception):
@@ -290,13 +324,25 @@ def plan_clean(
                 preview.skipped.append(SkippedEntry(rel, "reparse point; never followed"))
                 continue
             if entry.is_dir(follow_symlinks=False):
-                if (dir_rel == "build" and not include_title_outputs
-                        and not _is_public_build_dir(entry.name)):
-                    preview.skipped.append(SkippedEntry(
-                        rel, "title output; pass --include-title-outputs to clean it"))
-                    continue
+                if dir_rel == "build" and not include_title_outputs:
+                    title_output = not _is_public_build_dir(entry.name)
+                    if not title_output and entry.name == DEFAULT_TITLE_BUILD_DIR:
+                        try:
+                            title_output = _holds_title_build(entry.path)
+                        except OSError as exc:
+                            preview.errors.append((rel, f"scan failed: {exc}"))
+                            continue
+                    if title_output:
+                        preview.skipped.append(SkippedEntry(
+                            rel, "title output; pass --include-title-outputs to clean it"))
+                        continue
                 scan_dir(Path(entry.path), rel, category)
             elif entry.is_file(follow_symlinks=False):
+                if (not include_title_outputs and dir_rel.startswith(ORACLE_BUILD_RULE)
+                        and not _is_oracle_build_output(entry.name)):
+                    preview.skipped.append(SkippedEntry(
+                        rel, "PSP run record; pass --include-title-outputs to clean it"))
+                    continue
                 consider_file(Path(entry.path), rel, category)
             else:
                 preview.skipped.append(SkippedEntry(rel, "not a regular file"))
@@ -463,7 +509,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-title-outputs",
         action="store_true",
-        help="also clean title build directories (build/<title>) and title run logs",
+        help=("also clean title build directories (build/<title>), title run logs and "
+              "PSP run records under tests/fixtures/psp_oracle/build"),
     )
     return parser
 

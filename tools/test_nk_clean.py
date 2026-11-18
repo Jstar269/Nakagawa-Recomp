@@ -199,6 +199,60 @@ class TitleOutputTests(unittest.TestCase):
             self.assertIn("build/hst/hst_recomp.c", chosen_opted)
             self.assertIn("logs/stdout_run.log", chosen_opted)
 
+    def test_default_build_dir_holding_a_title_build_needs_opt_in(self) -> None:
+        """build/mygame is where a title built without its own GAME_NAME lands (docs/PORTING.md)."""
+        for output in ("mygame_recomp.c", "mygame_recomp_3.c", "mygame_recomp_funcs.h",
+                       "mygame_image.bin", "mygame_imports.toml"):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as tmp:
+                root = _make_workspace(Path(tmp))
+                _write(root / "build" / "mygame" / output)
+                _write(root / "build" / "mygame" / "mygame.exe")
+                default = nk_clean.plan_clean(root, tracked=frozenset())
+                chosen = {entry.rel for entry in default.files}
+                self.assertNotIn(f"build/mygame/{output}", chosen)
+                self.assertNotIn("build/mygame/mygame.exe", chosen)
+                self.assertIn("build/mygame", {entry.rel for entry in default.skipped})
+                opted = nk_clean.plan_clean(root, tracked=frozenset(), include_title_outputs=True)
+                self.assertIn(f"build/mygame/{output}", {entry.rel for entry in opted.files})
+
+    def test_title_run_frame_captures_need_opt_in(self) -> None:
+        """build/snapshots holds the frames a (possibly private) title run's SR_FBSNAP wrote."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_workspace(Path(tmp))
+            _write(root / "build" / "snapshots" / "frame_0001.ppm")
+            default = nk_clean.plan_clean(root, tracked=frozenset())
+            self.assertNotIn("build/snapshots/frame_0001.ppm", {entry.rel for entry in default.files})
+            self.assertIn("build/snapshots", {entry.rel for entry in default.skipped})
+            opted = nk_clean.plan_clean(root, tracked=frozenset(), include_title_outputs=True)
+            self.assertIn("build/snapshots/frame_0001.ppm", {entry.rel for entry in opted.files})
+
+    def test_psp_run_records_in_the_oracle_host0_root_need_opt_in(self) -> None:
+        """A host0 root under tests/fixtures/psp_oracle/build keeps a PSP run's report and log."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _make_workspace(Path(tmp))
+            oracle = root / "tests" / "fixtures" / "psp_oracle" / "build"
+            _write(oracle / "probe.o")
+            _write(oracle / "nakagawa_psp_oracle.elf")
+            _write(oracle / "EBOOT.PBP")
+            _write(oracle / "build-config.stamp")
+            _write(oracle / "w6-size-bfff" / "dmac_size_matrix_cell.prx")
+            _write(oracle / "w6-size-bfff" / "m1-01-dmac-boot3.json")         # runner report
+            _write(oracle / "w6-size-bfff" / "dmac_size_matrix_cell_log.txt")  # host0 log
+            _write(oracle / "w6-size-bfff" / "mpy_x.bin")                      # device dump
+            default = nk_clean.plan_clean(root, tracked=frozenset())
+            chosen = {entry.rel for entry in default.files}
+            base = "tests/fixtures/psp_oracle/build"
+            for built in ("probe.o", "nakagawa_psp_oracle.elf", "EBOOT.PBP", "build-config.stamp",
+                          "w6-size-bfff/dmac_size_matrix_cell.prx"):
+                self.assertIn(f"{base}/{built}", chosen)
+            for record in ("w6-size-bfff/m1-01-dmac-boot3.json",
+                           "w6-size-bfff/dmac_size_matrix_cell_log.txt", "w6-size-bfff/mpy_x.bin"):
+                self.assertNotIn(f"{base}/{record}", chosen)
+                self.assertIn(f"{base}/{record}", {entry.rel for entry in default.skipped})
+            opted = nk_clean.plan_clean(root, tracked=frozenset(), include_title_outputs=True)
+            self.assertIn(f"{base}/w6-size-bfff/m1-01-dmac-boot3.json",
+                          {entry.rel for entry in opted.files})
+
 
 class ReparsePointTests(unittest.TestCase):
     def test_junction_target_outside_repo_is_never_selected(self) -> None:
