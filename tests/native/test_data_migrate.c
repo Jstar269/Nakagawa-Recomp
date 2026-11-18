@@ -515,16 +515,16 @@ static bool path_is_under(const char *path, const char *root) {
 
 /* The containment check the guard test relies on before it writes anything. */
 static void test_path_is_under(void) {
-    CHECK(path_is_under("/tmp/nk-root/a/config", "/tmp/nk-root"), "a folder below the root");
-    CHECK(path_is_under("/tmp/nk-root", "/tmp/nk-root/"), "the root itself, trailing separator");
-    CHECK(!path_is_under("/tmp/nk-root-other/config", "/tmp/nk-root"), "a sibling with the root as prefix");
-    CHECK(!path_is_under("/tmp/nk", "/tmp/nk-root"), "a shorter path");
-    CHECK(!path_is_under("/home/user/.config/nakagawa", "/tmp/nk-root"), "a folder outside the root");
-    CHECK(!path_is_under("/tmp/nk-root", ""), "an empty root contains nothing");
+    CHECK(path_is_under("/scratch/nk-root/a/config", "/scratch/nk-root"), "a folder below the root");
+    CHECK(path_is_under("/scratch/nk-root", "/scratch/nk-root/"), "the root itself, trailing separator");
+    CHECK(!path_is_under("/scratch/nk-root-other/config", "/scratch/nk-root"), "a sibling with the root as prefix");
+    CHECK(!path_is_under("/scratch/nk", "/scratch/nk-root"), "a shorter path");
+    CHECK(!path_is_under("/srv/profile/.config/nakagawa", "/scratch/nk-root"), "a folder outside the root");
+    CHECK(!path_is_under("/scratch/nk-root", ""), "an empty root contains nothing");
 #if defined(_WIN32) || defined(_WIN64)
     CHECK(path_is_under("c:/Temp/NK-Root\\a", "C:\\temp\\nk-root"), "Windows: case and separators");
 #else
-    CHECK(!path_is_under("/tmp/NK-ROOT/a", "/tmp/nk-root"), "POSIX: case matters");
+    CHECK(!path_is_under("/scratch/NK-ROOT/a", "/scratch/nk-root"), "POSIX: case matters");
 #endif
 }
 
@@ -587,7 +587,7 @@ static void set_env_wide(const WCHAR *name, const WCHAR *value) {
 static void test_guard_follows_the_windows_resolver(void) {
     char config[NK_MAX_PATH], stand_in[NATIVE_TEST_PATH_MAX];
     WCHAR wide[NATIVE_TEST_PATH_MAX];
-    snprintf(stand_in, sizeof(stand_in), "%s\\guard-Jos\xC3\xA9", native_test_get_root());
+    snprintf(stand_in, sizeof(stand_in), "%s%cguard-Jos\xC3\xA9", native_test_get_root(), '\\');
     CHECK(nk_platform_mkdir_p(stand_in), "make a stand-in profile with a non-ASCII name");
     CHECK(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, stand_in, -1, wide, NATIVE_TEST_PATH_MAX) > 0,
           "the stand-in name is UTF-8");
