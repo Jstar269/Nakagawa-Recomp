@@ -45,8 +45,9 @@ static inline uint32_t sr_evf_consume(uint32_t pattern, uint32_t bits, uint32_t 
     return pattern;
 }
 
-/* Argument validation shared by wait and poll: unknown mode bits are an
- * illegal mode, and an all-zero wait pattern can never be satisfied. */
+/* Wait argument validation: unknown mode bits are an illegal mode, and an
+ * all-zero wait pattern can never be satisfied. Poll checks in its own order
+ * (sr_evf_check_poll_args below). */
 static inline uint32_t sr_evf_check_wait_args(uint32_t bits, uint32_t mode) {
     if (mode & ~SR_EVF_WAIT_KNOWN) return SR_EVF_ERR_ILLEGAL_MODE;
     if (bits == 0)                 return SR_EVF_ERR_ILPAT;

@@ -4,8 +4,8 @@
 /*
  * mp3_bridge.h — Nakagawa-authored frame-level MPEG audio decode bridge.
  *
- * Wraps the vendored minimp3 decoder (src/rt/minimp3/, CC0, a pinned upstream
- * commit plus two later upstream lines; see its PROVENANCE.md) with the contract the
+ * Wraps the vendored minimp3 decoder (src/rt/minimp3/, CC0, byte-identical at
+ * a pinned upstream commit; see its PROVENANCE.md) with the contract the
  * sceMp3 HLE needs: parse a 4-byte frame header, and decode exactly one frame
  * from a host byte window into interleaved stereo s16. The caller owns all
  * guest-memory traffic; this file never sees a guest address.

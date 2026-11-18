@@ -972,8 +972,8 @@ static void test_intr_context_conformance(void) {
             /* Its cells are exempt from the declaration check below, so the scope itself
              * is checked here: every probe in the matrix is in scope in this build, and a
              * lost registration (or a changed NID) would otherwise drop its cells from
-             * measurement with only a count printed. A probe written ahead of its NID's
-             * registration says so in the table, through its skip reason. */
+             * measurement with only a count printed. The check comes before the table's
+             * skip reasons, so a skip reason does not exempt an unregistered probe. */
             char msg[256];
             snprintf(msg, sizeof msg,
                      "[REGISTRY SCOPE LOST] %s: its NID or its group's setup NIDs are not "

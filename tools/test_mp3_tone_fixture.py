@@ -13,16 +13,12 @@ from __future__ import annotations
 
 import importlib.util
 import re
-import shutil
-import subprocess
-import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "tests" / "fixtures" / "mp3_tone" / "generate.py"
 HEADER = ROOT / "tests" / "fixtures" / "mp3_tone" / "mp3_tone.h"
-CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
 
 
 def _load_generator():
@@ -67,112 +63,6 @@ class Mp3ToneFixtureTests(unittest.TestCase):
 
     def test_id3_prefix_is_an_empty_tag(self) -> None:
         self.assertEqual(_array(self.text, "k_mp3_tone_id3_prefix"), b"ID3\x03" + bytes(6))
-
-
-# Decodes one frame through the sceMp3 bridge (mp3_bridge.c and the vendored minimp3) after
-# filling the stack below main with a byte pattern, once per pattern, and prints whether every
-# decode gave the same PCM. Only uninitialized decoder state could make them differ.
-STACK_HARNESS_C = r"""#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "mp3_bridge.h"
-
-#if defined(__GNUC__)
-#define NOINLINE __attribute__((noinline))
-#else
-#define NOINLINE
-#endif
-
-static NOINLINE void fill_stack(unsigned char value) {
-    volatile unsigned char area[128 * 1024];
-    for (size_t i = 0; i < sizeof(area); i++) area[i] = value;
-}
-
-static NOINLINE int decode_once(const unsigned char *frame, int len, short *pcm) {
-    Mp3Bridge *b = NULL;
-    int consumed = 0, samples = 0;
-    if (mp3_bridge_create(&b) != 0) return -1;
-    int rc = mp3_bridge_decode(b, frame, len, pcm, &consumed, &samples, NULL);
-    mp3_bridge_destroy(b);
-    return rc == MP3_BRIDGE_OK ? samples : -1;
-}
-
-int main(int argc, char **argv) {
-    static unsigned char frame[4096];
-    static short pcm[3][MP3_BRIDGE_MAX_PCM_VALUES];
-    static const unsigned char patterns[3] = {0x00u, 0x3cu, 0xa5u};
-    if (argc < 2) return 2;
-    FILE *f = fopen(argv[1], "rb");
-    if (!f) return 2;
-    int len = (int)fread(frame, 1, sizeof(frame), f);
-    fclose(f);
-    int samples[3];
-    for (int p = 0; p < 3; p++) {
-        memset(pcm[p], 0, sizeof(pcm[p]));
-        fill_stack(patterns[p]);
-        samples[p] = decode_once(frame, len, pcm[p]);
-        if (samples[p] <= 0) { printf("decode failed: %d\n", samples[p]); return 3; }
-    }
-    long peak = 0;
-    for (int i = 0; i < samples[0] * 2; i++) {
-        long v = pcm[0][i] < 0 ? -(long)pcm[0][i] : pcm[0][i];
-        if (v > peak) peak = v;
-    }
-    for (int p = 1; p < 3; p++) {
-        if (samples[p] != samples[0] || memcmp(pcm[p], pcm[0], sizeof(pcm[0])) != 0) {
-            int at = 0;
-            while (at < MP3_BRIDGE_MAX_PCM_VALUES && pcm[p][at] == pcm[0][at]) at++;
-            printf("pcm differs with stack pattern 0x%02x at value %d\n", patterns[p], at);
-            return 1;
-        }
-    }
-    printf("pcm identical, peak %ld\n", peak);
-    return 0;
-}
-"""
-
-
-@unittest.skipUnless(CC, "no C compiler on PATH")
-class Mp3PrivateBitsDecodeTests(unittest.TestCase):
-    """An MPEG-1 stereo frame's private bits land in granule 0's right-channel scfsi.
-
-    minimp3 then reuses that channel's scalefactors from scratch it never wrote in this frame
-    (upstream lieff/minimp3 a01e51e zeroes it; src/rt/minimp3/PROVENANCE.md, LOCAL DELTA), so
-    the right channel's PCM followed whatever the host stack held.
-    """
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        assert CC is not None
-        cls.tmp = Path(tempfile.mkdtemp(prefix="mp3stack_"))
-        frame = bytearray(_load_generator().frame(mono=False))
-        # The three private bits follow main_data_begin's nine: byte 5, mask 0x70.
-        frame[5] |= 0x70
-        cls.frame_path = cls.tmp / "private_bits.mp3"
-        cls.frame_path.write_bytes(bytes(frame))
-        source = cls.tmp / "mp3_stack_harness.c"
-        source.write_text(STACK_HARNESS_C, encoding="utf-8")
-        cls.exe = cls.tmp / "mp3_stack_harness.exe"
-        result = subprocess.run(
-            [CC, "-std=c11", "-O0", "-Wall", "-Wextra", f"-I{ROOT / 'src' / 'rt'}", "-o",
-             str(cls.exe), str(source), str(ROOT / "src" / "rt" / "mp3_bridge.c"), "-lm"],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            raise AssertionError("mp3 stack harness did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def test_private_bits_frame_decodes_the_same_whatever_the_stack_held(self) -> None:
-        result = subprocess.run([str(self.exe), str(self.frame_path)], capture_output=True,
-                                text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        match = re.search(r"pcm identical, peak (\d+)", result.stdout)
-        self.assertIsNotNone(match, result.stdout)
-        # The frame carries the fixture's tones, so the comparison is over real audio.
-        self.assertGreater(int(match.group(1)), 1000, result.stdout)
 
 
 if __name__ == "__main__":

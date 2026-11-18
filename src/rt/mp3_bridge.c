@@ -5,8 +5,7 @@
  * mp3_bridge.c — Nakagawa-authored frame-level bridge over minimp3.
  *
  * The only translation unit that compiles the vendored decoder
- * (src/rt/minimp3/minimp3.h, CC0, pinned upstream plus two later upstream
- * lines as LOCAL DELTA; see its PROVENANCE.md).
+ * (src/rt/minimp3/minimp3.h, CC0, byte-identical; see its PROVENANCE.md).
  * Upstream defaults are kept: int16_t output and the SIMD paths the compiler
  * enables.
  *

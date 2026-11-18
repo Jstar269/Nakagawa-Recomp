@@ -625,8 +625,15 @@ class NativeHostBackendTests(unittest.TestCase):
                       "        ge_capture_exit_set_deferred(1);\n", driver)
         self.assertIn("if (driver_stop_requested() || gui_quit_requested()) {", driver,
                       "a run the person quit is continued after the scheduler returns")
-        teardown = driver.index("    sr_perf_shutdown();\n    gui_shutdown();\n    sr_trace_close();\n")
-        self.assertGreater(teardown, driver.index("sched_run(entry, s.r[4], s.r[5]);"),
+        teardown_body = _function_body(driver, "static void driver_run_teardown(void) {")
+        order = [teardown_body.find(call) for call in
+                 ("sr_perf_shutdown();", "gui_shutdown();", "sr_trace_close();")]
+        self.assertNotIn(-1, order, "the run teardown skips a step")
+        self.assertEqual(order, sorted(order),
+                         "the run teardown writes the perf summary, then releases the presenter, "
+                         "then closes the trace")
+        self.assertGreater(driver.rindex("    driver_run_teardown();\n"),
+                           driver.index("sched_run(entry, s.r[4], s.r[5]);"),
                            "the driver must tear down after the scheduler returns")
 
     def test_presenter_claims_and_choices_match_what_happened(self) -> None:
