@@ -111,6 +111,9 @@ bool nk_ui_ttf_set_fallback(NkUiTtf *ttf, int font, int fallback);
      "pen + (bearing_x, -bearing_y)" is the bitmap's top-left in either reading.
    - advance_x is the distance to the next glyph's x; the last glyph's runs to
      the end of the string.
+   - text_index counts the characters before the glyph's own in the text, so a
+     glyph after a space or a ligature still gets one letter-spacing gap per
+     character before it.
    - measure() height is the face's line height and baseline its ascent.
    The returned struct points at `ttf`, which must outlive it. */
 NkUiTextBackend nk_ui_ttf_backend(NkUiTtf *ttf);

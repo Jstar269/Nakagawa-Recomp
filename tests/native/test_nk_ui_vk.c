@@ -774,6 +774,7 @@ static int text_shape(void *user, int font, int px, const char *s, size_t n, NkU
         memset(&out[i], 0, sizeof(out[i]));
         out[i].glyph = (uint8_t)s[i];
         out[i].codepoint = (uint8_t)s[i];
+        out[i].text_index = (uint32_t)i;
         out[i].x = font == 1 ? 0.0f : (float)(i * TEXT_ADVANCE);
         out[i].advance_x = font == 1 ? 0.0f : (float)TEXT_ADVANCE;
     }

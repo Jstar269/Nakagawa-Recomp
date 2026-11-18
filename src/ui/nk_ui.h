@@ -177,6 +177,11 @@ typedef struct {
     float y;
     float advance_x;
     float advance_y;
+    /* Characters (UTF-8 code points) in the run's text before the first one this
+       glyph draws. A renderer adds that many letter-spacing gaps, as layout
+       reserves one after every character, the spaces and ligatures that draw
+       no glyph of their own included. */
+    uint32_t text_index;
 } NkUiGlyph;
 
 typedef struct {

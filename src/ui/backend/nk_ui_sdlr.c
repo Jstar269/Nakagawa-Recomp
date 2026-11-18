@@ -252,9 +252,10 @@ static NkUiSdlrEntry *nk_ui_sdlr_add_entry(NkUiSdlr *r, int font, int px, uint32
     return entry;
 }
 
-/* Finds room for a w x h cell (padding included) and returns its page, or -1. A
-   new page is added when the current one is full; at the page limit the caller
-   must rebuild the atlas. */
+/* Finds room for a w x h cell (padding included) and returns its page; -1 when
+   the cell is larger than a page, -2 at the page limit (the caller must rebuild
+   the atlas), -3 when SDL cannot create a new page. A new page is added when the
+   current one is full. */
 static int nk_ui_sdlr_place(NkUiSdlr *r, int w, int h, int *x, int *y) {
     int cell_w = w + NK_UI_SDLR_PAD;
     int cell_h = h + NK_UI_SDLR_PAD;
@@ -289,7 +290,7 @@ static int nk_ui_sdlr_place(NkUiSdlr *r, int w, int h, int *x, int *y) {
                                               SDL_TEXTUREACCESS_STATIC,
                                               r->page_size, r->page_size);
             if (page->texture == NULL) {
-                return -1;
+                return -3;
             }
             SDL_SetTextureBlendMode(page->texture, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
             SDL_SetTextureScaleMode(page->texture, SDL_SCALEMODE_NEAREST);
@@ -372,12 +373,18 @@ static NkUiSdlrEntry *nk_ui_sdlr_glyph(NkUiSdlr *r, int font, int px, uint32_t g
         /* The raster result may have been overwritten by the flush's text calls
            only if the backend shares scratch; flush draws no text, so it holds. */
     }
+    /* A page SDL could not create or a bitmap it could not take is a failed
+       render, not a blank glyph: nothing is cached, so the next render tries
+       again. */
+    if (page == -3 || (page >= 0 && !nk_ui_sdlr_upload(r, page, x, y, &bitmap))) {
+        return NULL;
+    }
     entry = nk_ui_sdlr_add_entry(r, font, px, glyph);
     if (entry == NULL) {
         return NULL;
     }
-    if (page < 0 || !nk_ui_sdlr_upload(r, page, x, y, &bitmap)) {
-        return entry; /* too large for a page or upload failed: skipped, cached */
+    if (page < 0) {
+        return entry; /* too large for any page: skipped, cached */
     }
     entry->page = page;
     entry->x = x;
@@ -413,6 +420,35 @@ static void nk_ui_sdlr_apply_clip(NkUiSdlr *r, NkUiSdlrClip *clip) {
     sdl_rect.w = rect.x1 - rect.x0;
     sdl_rect.h = rect.y1 - rect.y0;
     SDL_SetRenderClipRect(r->renderer, &sdl_rect);
+}
+
+/* Back to the open scissor's clip, or none when no scissor is open. */
+static void nk_ui_sdlr_restore_clip(NkUiSdlr *r, NkUiSdlrClip *clip) {
+    if (clip->depth == 1) {
+        SDL_SetRenderClipRect(r->renderer, NULL);
+        clip->empty = false;
+    } else {
+        nk_ui_sdlr_apply_clip(r, clip);
+    }
+}
+
+/* Clips the renderer to a text, waves or image command's own clip (its bounds
+   inside every open scissor, nk_ui_draw.h), as the Vulkan backend scissors each
+   draw: ink past the bounds, such as a label wider than its box, is cut alike.
+   False when the clip is empty and the command draws nothing. Rectangles and
+   borders keep the scissor's clip, since their geometry lies within their
+   bounds, so neighbours still draw as one batch. */
+static bool nk_ui_sdlr_clip_command(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
+    SDL_Rect rect;
+    if (cmd->clip[2] <= cmd->clip[0] || cmd->clip[3] <= cmd->clip[1]) {
+        return false;
+    }
+    rect.x = cmd->clip[0];
+    rect.y = cmd->clip[1];
+    rect.w = cmd->clip[2] - cmd->clip[0];
+    rect.h = cmd->clip[3] - cmd->clip[1];
+    SDL_SetRenderClipRect(r->renderer, &rect);
+    return true;
 }
 
 static SDL_FColor nk_ui_sdlr_color(uint32_t rgba_pm) {
@@ -546,7 +582,8 @@ static bool nk_ui_sdlr_draw_text(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
             pending_quads = 0;
         }
         pending_page = entry->page;
-        x0 = (float)(origin_x + nk_ui_sdlr_round(glyph->x + run->letter_spacing * (float)i) +
+        x0 = (float)(origin_x +
+                     nk_ui_sdlr_round(glyph->x + run->letter_spacing * (float)glyph->text_index) +
                      entry->bearing_x);
         y0 = (float)(baseline_y + nk_ui_sdlr_round(glyph->y) - entry->bearing_y);
         x1 = x0 + (float)entry->w;
@@ -918,8 +955,9 @@ bool nk_ui_sdlr_render(NkUiSdlr *r, const NkUiDrawList *list) {
         case NK_UI_DRAW_BORDER:
             break; /* clipped away */
         case NK_UI_DRAW_TEXT:
-            if (!clip.empty) {
+            if (!clip.empty && nk_ui_sdlr_clip_command(r, cmd)) {
                 ok = nk_ui_sdlr_draw_text(r, cmd);
+                nk_ui_sdlr_restore_clip(r, &clip);
             }
             break;
         case NK_UI_DRAW_SCISSOR_START:
@@ -939,22 +977,19 @@ bool nk_ui_sdlr_render(NkUiSdlr *r, const NkUiDrawList *list) {
         case NK_UI_DRAW_SCISSOR_END:
             if (clip.depth > 1) {
                 --clip.depth;
-                if (clip.depth == 1) {
-                    SDL_SetRenderClipRect(r->renderer, NULL);
-                    clip.empty = false;
-                } else {
-                    nk_ui_sdlr_apply_clip(r, &clip);
-                }
+                nk_ui_sdlr_restore_clip(r, &clip);
             }
             break;
         case NK_UI_DRAW_CUSTOM:
             if (cmd->custom_kind == NK_UI_CUSTOM_WAVES) {
-                if (!clip.empty) {
+                if (!clip.empty && nk_ui_sdlr_clip_command(r, cmd)) {
                     ok = nk_ui_sdlr_draw_waves(r, cmd);
+                    nk_ui_sdlr_restore_clip(r, &clip);
                 }
             } else if (cmd->custom_kind == NK_UI_CUSTOM_IMAGE) {
-                if (!clip.empty) {
+                if (!clip.empty && nk_ui_sdlr_clip_command(r, cmd)) {
                     ok = nk_ui_sdlr_draw_image(r, cmd);
+                    nk_ui_sdlr_restore_clip(r, &clip);
                 }
             } else {
                 ++r->stats.custom_skipped;

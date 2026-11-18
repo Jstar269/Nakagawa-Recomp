@@ -145,6 +145,9 @@ static int test_ttf_japanese_shaping(void) {
           (glyphs[2].glyph >> 24) == 1u && (glyphs[3].glyph >> 24) == 0u,
           "per-glyph fallback depths for mixed text");
     CHECK(glyphs[3].codepoint == 'V', "V keeps its codepoint after wide glyphs");
+    CHECK(glyphs[0].text_index == 0u && glyphs[1].text_index == 1u &&
+              glyphs[2].text_index == 2u && glyphs[3].text_index == 4u,
+          "text_index counts characters, the space that draws no glyph included");
     CHECK(!text.raster(text.user, 0, 24, (3u << 24) | 5u, &bitmap),
           "a fallback depth the font does not have is refused");
     return 1;
@@ -760,6 +763,150 @@ static int test_image_commands(void) {
     return 1;
 }
 
+/* SDL's allocator, wrapped so a test can make every allocation of a page's size
+   fail (a texture SDL cannot create) and then let them through again. Each call
+   goes to SDL's own functions, so memory allocated before the wrap frees alike. */
+#define LARGE_ALLOCATION ((size_t)1024u * 1024u)
+static bool g_fail_large_allocations;
+static SDL_malloc_func g_sdl_malloc;
+static SDL_calloc_func g_sdl_calloc;
+static SDL_realloc_func g_sdl_realloc;
+static SDL_free_func g_sdl_free;
+
+static void *SDLCALL test_malloc(size_t size) {
+    return g_fail_large_allocations && size >= LARGE_ALLOCATION ? NULL : g_sdl_malloc(size);
+}
+
+static void *SDLCALL test_calloc(size_t count, size_t size) {
+    return g_fail_large_allocations && size != 0u && count >= LARGE_ALLOCATION / size
+        ? NULL : g_sdl_calloc(count, size);
+}
+
+static void *SDLCALL test_realloc(void *memory, size_t size) {
+    return g_fail_large_allocations && size >= LARGE_ALLOCATION ? NULL : g_sdl_realloc(memory, size);
+}
+
+static void SDLCALL test_free(void *memory) {
+    g_sdl_free(memory);
+}
+
+static bool wrap_sdl_allocator(void) {
+    SDL_GetOriginalMemoryFunctions(&g_sdl_malloc, &g_sdl_calloc, &g_sdl_realloc, &g_sdl_free);
+    return g_sdl_malloc != NULL && g_sdl_calloc != NULL && g_sdl_realloc != NULL &&
+           g_sdl_free != NULL &&
+           SDL_SetMemoryFunctions(test_malloc, test_calloc, test_realloc, test_free);
+}
+
+static int test_atlas_page_failure_is_reported(void) {
+    /* An atlas page SDL cannot create fails the render, and the glyphs it was for
+       are not remembered as blank: the next render rasterises and draws them. */
+    NkUiTextBackend text = nk_ui_ttf_backend(g_ttf);
+    Target target;
+    NkUiSdlr *backend;
+    NkUiSdlrStats stats;
+    NkUiDrawBuffer buffer;
+    const int box[4] = {0, 0, 160, 60};
+    const uint32_t black = 0x000000FFu;
+    bool rendered;
+    Ink ink;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 160, 60), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, &text);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_text(&buffer, (NkUiPixelRect){0, 0, 160, 60}, "Hi", 2, 0, 32,
+                              0xFFFFFFFFu, 1u), "queue a text run");
+    target_clear(&target, black);
+    g_fail_large_allocations = true;
+    rendered = nk_ui_sdlr_render(backend, &buffer.list);
+    g_fail_large_allocations = false;
+    CHECK(!rendered, "a page SDL cannot create fails the render");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    CHECK(stats.atlas_pages == 0u && stats.atlas_glyphs == 0u,
+          "the failed glyph is not cached as blank");
+    target_clear(&target, black);
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "the next render succeeds");
+    nk_ui_sdlr_get_stats(backend, &stats);
+    ink = measure_ink(&target, box, black, 40);
+    CHECK(stats.atlas_pages == 1u && stats.glyphs_drawn == 2u && ink.pixels > 0,
+          "the glyphs are drawn once a page can be created");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+/* The rightmost ink column of `text` drawn with `spacing` px of letter spacing. */
+static int spaced_ink_right(Target *target, NkUiSdlr *backend, const char *text, float spacing) {
+    NkUiDrawBuffer buffer;
+    const int box[4] = {0, 0, 300, 60};
+    const uint32_t black = 0x000000FFu;
+    Ink ink;
+    memset(&buffer, 0, sizeof(buffer));
+    if (!nk_ui_draw_add_text_spaced(&buffer, (NkUiPixelRect){4, 0, 300, 60}, text, strlen(text),
+                                    0, 32, spacing, 0xFFFFFFFFu, 1u)) {
+        return -1;
+    }
+    target_clear(target, black);
+    if (!nk_ui_sdlr_render(backend, &buffer.list)) {
+        nk_ui_draw_buffer_destroy(&buffer);
+        return -1;
+    }
+    ink = measure_ink(target, box, black, 40);
+    nk_ui_draw_buffer_destroy(&buffer);
+    return ink.max_x;
+}
+
+static int test_letter_spacing_counts_characters(void) {
+    /* Layout reserves one gap after every character, spaces too (nk_ui_clay.c),
+       so a glyph after a space sits two gaps in, though the space draws no glyph. */
+    NkUiTextBackend text = nk_ui_ttf_backend(g_ttf);
+    Target target;
+    NkUiSdlr *backend;
+    int plain;
+    int spaced;
+    CHECK(target_open(&target, 300, 60), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, &text);
+    CHECK(backend != NULL, "create the backend");
+    plain = spaced_ink_right(&target, backend, "A B", 0.0f);
+    spaced = spaced_ink_right(&target, backend, "A B", 8.0f);
+    CHECK(plain > 0 && spaced > 0, "both runs draw");
+    CHECK(spaced - plain >= 15 && spaced - plain <= 17,
+          "B moves two gaps (A and the space), not one per drawn glyph");
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
+static int test_command_clip_bounds_text(void) {
+    /* A label wider and taller than its box is cut at the box, as every backend
+       clips a command to its clip (nk_ui_draw.h), with no scissor open. */
+    NkUiTextBackend text = nk_ui_ttf_backend(g_ttf);
+    Target target;
+    NkUiSdlr *backend;
+    NkUiDrawBuffer buffer;
+    const int inside[4] = {10, 10, 40, 30};
+    const int right[4] = {40, 0, 200, 80};
+    const int below[4] = {0, 30, 40, 80};
+    const uint32_t black = 0x000000FFu;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(target_open(&target, 200, 80), "open a render target");
+    backend = nk_ui_sdlr_create(target.renderer, &text);
+    CHECK(backend != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_text(&buffer, (NkUiPixelRect){10, 10, 40, 30}, "WWWWgy", 6, 0, 32,
+                              0xFFFFFFFFu, 1u), "queue an overhanging label");
+    target_clear(&target, black);
+    CHECK(nk_ui_sdlr_render(backend, &buffer.list), "render the label");
+    CHECK(measure_ink(&target, inside, black, 40).pixels > 0, "the label draws inside its box");
+    CHECK(measure_ink(&target, right, black, 40).pixels == 0 &&
+              measure_ink(&target, below, black, 40).pixels == 0,
+          "no ink outside the command's clip");
+    CHECK(!SDL_RenderClipEnabled(target.renderer), "the renderer's clip state is restored");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_sdlr_destroy(backend);
+    target_close(&target);
+    return 1;
+}
+
 #if defined(_WIN32)
 /* A copy of SDL3_ttf.dll in the current folder (here a file that is no library at all) is
    never the one nk_ui_ttf_create loads: its Windows default is a full path, beside the
@@ -846,6 +993,10 @@ int main(void) {
     size_t i;
     int passed = 0;
     int total = 0;
+    if (!wrap_sdl_allocator()) {
+        printf("FAIL wrapping SDL's allocator: %s\n", SDL_GetError());
+        return 1;
+    }
     for (i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); ++i) {
         if (!file_exists(fixtures[i])) {
             printf("FAIL fixture font %s is missing (run from the repository root)\n", fixtures[i]);
@@ -887,6 +1038,9 @@ int main(void) {
     RUN(test_snapshots_and_atlas);
     RUN(test_atlas_rebuild_on_scale_change);
     RUN(test_atlas_page_overflow);
+    RUN(test_atlas_page_failure_is_reported);
+    RUN(test_letter_spacing_counts_characters);
+    RUN(test_command_clip_bounds_text);
 #undef RUN
     nk_ui_ttf_destroy(g_ttf);
     printf("nk_ui_sdlr: %d of %d tests passed\n", passed, total);

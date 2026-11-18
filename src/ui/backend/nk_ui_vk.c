@@ -1066,7 +1066,8 @@ static bool nk_ui_vk_prepare_text(NkUiVk *vk, const NkUiDrawCmd *cmd) {
         if (entry->page < 0) {
             continue;
         }
-        x0 = (float)(origin_x + nk_ui_vk_round(glyph->x + run->letter_spacing * (float)i) +
+        x0 = (float)(origin_x +
+                     nk_ui_vk_round(glyph->x + run->letter_spacing * (float)glyph->text_index) +
                      entry->bearing_x);
         y0 = (float)(baseline_y + nk_ui_vk_round(glyph->y) - entry->bearing_y);
         first = nk_ui_vk_push_quad(vk, x0, y0, x0 + (float)entry->w, y0 + (float)entry->h,

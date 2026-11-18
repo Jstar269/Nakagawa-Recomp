@@ -3385,6 +3385,9 @@ static void test_settings_pages(void) {
     CHECK(activate_flow_button(PLAYER_UI_ID_TAB_LIBRARY, FLOW_SETTINGS).kind ==
               PLAYER_UI_ACTION_OPEN_LIBRARY,
           "the LIBRARY tab on Settings opens the library");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TAB_SETTINGS, FLOW_SETTINGS).kind ==
+              PLAYER_UI_ACTION_OPEN_SETTINGS,
+          "the SETTINGS tab on Settings closes it, as Start and Done do");
     CHECK(flow_case_fits(FLOW_SETTINGS_REFRESH, 960, 540, dump, sizeof(dump)) &&
               strstr(dump, "Your display runs at 144 Hz") != NULL &&
               strstr(dump, "set it to 60, 120 or 180 Hz") != NULL &&
@@ -3847,6 +3850,9 @@ static void test_controller_and_developer_log_pages(void) {
     CHECK(activate_flow_button(PLAYER_UI_ID_TAB_LIBRARY, FLOW_CONTROLLER).kind ==
               PLAYER_UI_ACTION_OPEN_LIBRARY,
           "the LIBRARY tab on the controller page opens the library");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TAB_SETTINGS, FLOW_CONTROLLER).kind ==
+              PLAYER_UI_ACTION_OPEN_SETTINGS,
+          "the SETTINGS tab on the controller page closes it, as Start does");
     CHECK(developer_log_op_is(activate_flow_button(PLAYER_UI_ID_DEVELOPER_LOG_COPY, FLOW_DEVLOG),
                               PLAYER_UI_DEVELOPER_LOG_COPY),
           "Copy puts the log on the clipboard");
@@ -5288,6 +5294,11 @@ static void test_screen_actions(void) {
     CHECK(action.kind == PLAYER_UI_ACTION_PRIMARY &&
           action.primary == PLAYER_UI_PRIMARY_PLAY,
           "the primary button returns its existing Play action");
+    /* The LIBRARY tab is the title page's highlighted parent; choosing it goes
+       back to the library grid, as it does from Settings and About. */
+    action = activate_title_button(PLAYER_UI_ID_TAB_LIBRARY, &detail);
+    CHECK(action.kind == PLAYER_UI_ACTION_OPEN_LIBRARY,
+          "the LIBRARY tab on a title page opens the library");
     {
         /* An INCOMPATIBLE package (#1147): REBUILD PACKAGE, not a dead label. */
         PlayerUiTitle incompatible = k_titles[1];
