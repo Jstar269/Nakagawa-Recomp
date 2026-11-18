@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -457,6 +458,17 @@ class GradleWiringTests(unittest.TestCase):
 
     def test_a_folder_that_was_not_staged_is_refused(self) -> None:
         self.assertIn('File(dir, "toolchain-manifest.json").isFile', self.gradle)
+
+    def test_a_bundled_title_without_its_image_or_package_is_refused(self) -> None:
+        # stageBundledAssets is a Sync, which skips a missing source file without an error
+        # (audit F-6fa82be1), so the nk.titles parse checks both files before any task runs.
+        parse = re.search(r'val titles: List<Pair<String, File>> = .*?\n    }\n', self.gradle, re.S)
+        self.assertIsNotNone(parse, "build.gradle.kts parses nk.titles")
+        assert parse is not None
+        self.assertIn('listOf("${id}_image.bin", "package.json")', parse.group(0))
+        self.assertIn("require(File(dir, name).isFile)", parse.group(0))
+        staged = re.findall(r'from\(File\(dir, "([^"]+)"\)\) \{ into\("app/titles/\$id"\) \}', self.gradle)
+        self.assertEqual(sorted(staged), sorted(["${id}_image.bin", "package.json"]))
 
     def test_the_toolchain_is_bundled_for_arm64_only(self) -> None:
         self.assertIn('require(abis == listOf("arm64-v8a"))', self.gradle)

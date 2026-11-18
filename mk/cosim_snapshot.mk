@@ -174,7 +174,9 @@ snapshot-selftest:
 	$(MAKE) snapshot-selftest-run $(SNAPSHOT_GAME_VARS)
 
 # Second phase: CHUNK_OBJS and the mutant's chunk exist only after codegen ran.
-SNAPSHOT_MUTANT_CHUNK = $(shell "$(PYTHON)" $(SNAPSHOT_DRIVER) find-chunk --build-dir $(BUILD_DIR) --game $(GAME_NAME) --cases $(SNAPSHOT_FIXTURE)/cases.json)
+# The chunk is looked up on first use and kept: the recipe names it four times, and one
+# lookup means every line mutates and filters the same chunk.
+SNAPSHOT_MUTANT_CHUNK = $(eval SNAPSHOT_MUTANT_CHUNK := $(shell "$(PYTHON)" $(SNAPSHOT_DRIVER) find-chunk --build-dir $(BUILD_DIR) --game $(GAME_NAME) --cases $(SNAPSHOT_FIXTURE)/cases.json))$(SNAPSHOT_MUTANT_CHUNK)
 SNAPSHOT_MUTANT_DIR = $(BUILD_DIR)/mutant
 SNAPSHOT_LINK_OBJS = $(BUILD_DIR)/snapshot_rt_recomp.o $(LIBRARY_OBJS) \
 	$(BUILD_DIR)/$(GAME_NAME)_recomp.o $(BUILD_DIR)/snapshot_ref_interp.o \
@@ -317,7 +319,8 @@ verify-selftest:
 		$(VERIFY_GAME_VARS) CODEGEN_TOOL=$(CODEGEN_TOOL)
 	$(MAKE) verify-selftest-run $(VERIFY_GAME_VARS) RECOMP_FLAGS="$(RECOMP_FLAGS) -DSR_VERIFY"
 
-VERIFY_MUTANT_CHUNK = $(shell "$(PYTHON)" $(VERIFY_DRIVER) find-chunk --build-dir $(BUILD_DIR) --game $(GAME_NAME) --cases $(VERIFY_FIXTURE)/cases.json)
+# Looked up on first use and kept, as SNAPSHOT_MUTANT_CHUNK is.
+VERIFY_MUTANT_CHUNK = $(eval VERIFY_MUTANT_CHUNK := $(shell "$(PYTHON)" $(VERIFY_DRIVER) find-chunk --build-dir $(BUILD_DIR) --game $(GAME_NAME) --cases $(VERIFY_FIXTURE)/cases.json))$(VERIFY_MUTANT_CHUNK)
 VERIFY_MUTANT_DIR = $(BUILD_DIR)/mutant
 VERIFY_LINK_OBJS = $(BUILD_DIR)/verify_rt_recomp.o $(LIBRARY_OBJS) \
 	$(BUILD_DIR)/$(GAME_NAME)_recomp.o $(BUILD_DIR)/verify_ref_interp.o \

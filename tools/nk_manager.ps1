@@ -236,8 +236,9 @@ try {
     # running that executable, so every path that derives it checks the name first.
     function Assert-NkPortableGameName {
         param([string]$Name)
-        if ($Name -notmatch '^[a-z0-9][a-z0-9._-]*$') {
-            throw "GameName '$Name' is not a portable build identifier (must match ^[a-z0-9][a-z0-9._-]*$; same contract as the codegen planner)"
+        # -cnotmatch: the planner's GAME_NAME_RE is case-sensitive, as -notmatch is not.
+        if ($Name -cnotmatch '^[a-z0-9][a-z0-9._-]{0,63}$') {
+            throw "GameName '$Name' is not a portable build identifier (must match ^[a-z0-9][a-z0-9._-]{0,63}$ in lower case; same contract as the codegen planner)"
         }
     }
 
