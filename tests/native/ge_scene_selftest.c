@@ -618,6 +618,8 @@ static void check_dump_outcomes(const char *dir) {
 
     /* The frame passes with no PRIM drawn while the dump waits. */
     expect(probe_run("2", dir) == GE_SCENE_DUMP_WAITING, "frame 2 waits");
+    ge_set_frame(2);                            /* the target frame begins: the dump still waits */
+    expect(ge_scene_dump_state_for_test() == GE_SCENE_DUMP_WAITING, "the dump waits as its frame begins");
     ge_set_frame(3);
     expect(ge_scene_dump_state_for_test() == GE_SCENE_DUMP_NOT_CAPTURED, "a frame that drew nothing is NOT_CAPTURED");
 

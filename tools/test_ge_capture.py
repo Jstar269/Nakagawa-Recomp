@@ -56,6 +56,37 @@ class TestGeCaptureC(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ge capture selftest: OK", result.stdout)
 
+    def test_selftest_keeps_its_checks_when_ndebug_is_defined(self):
+        # Every production call in the selftest sits inside assert(): a build that defines
+        # NDEBUG must still make them and check them, not compile them out.
+        exe = self.tmp / "ge_capture_selftest_ndebug.exe"
+        build = subprocess.run(
+            [CC, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-DNDEBUG",
+             f"-I{RT}", "-o", os.fspath(exe),
+             os.fspath(ROOT / "tests" / "native" / "ge_capture_selftest.c"),
+             os.fspath(RT / "ge_capture.c")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(build.returncode, 0, build.stderr)
+        result = subprocess.run(
+            [os.fspath(exe), os.fspath(self.tmp / "ndebug.ngef")], capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ge capture selftest: OK", result.stdout)
+
+    def test_gpu_capture_selftest_keeps_its_checks_when_ndebug_is_defined(self):
+        # mk/selftests.mk builds gpu_capture_selftest.c with the overridable CFLAGS; its
+        # present-mode, plan and scale checks are assert()s that NDEBUG must not remove.
+        result = subprocess.run(
+            [CC, "-E", "-DNDEBUG", "-DSR_SDL3VK", f"-I{RT}", f"-I{ROOT / 'src' / 'core'}",
+             os.fspath(ROOT / "tests" / "native" / "gpu_capture_selftest.c")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        main = result.stdout[result.stdout.rindex("int main(void)"):]
+        self.assertIn("sdl3vk_pick_present_mode(1, fifo_only, 1) == 2", main)
+        self.assertIn('sr_parse_render_scale("2", "4", 4) == 2', main)
+
 
 class TestGeCaptureWiring(unittest.TestCase):
     def test_runtime_build_contains_capture_but_not_fixture(self):
@@ -391,8 +422,10 @@ class TestGeCaptureWiring(unittest.TestCase):
         self.assertIn("$(RT_GE_O)", rule)
         self.assertNotIn("src/rt/ge.c", rule)
         self.assertIn("$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled", rule)
-        # The third run: every scene with the per-draw vertex cache off.
-        self.assertIn("\n\tSR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)\n", rule + "\n")
+        # The third run: every scene with the per-draw vertex cache off, chosen by argument so
+        # a value the caller exported cannot turn the first two runs into the cache-off leg.
+        self.assertIn("\n\t$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --vertex-cache-disabled\n", rule + "\n")
+        self.assertNotIn("SR_GE_VERTEX_CACHE_DISABLE=", rule)
         self.assertIn("native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants",
                       makefile)
         mutants = makefile.split("\nge-vertex-cache-mutants:", 1)[1].split("\n\n", 1)[0]

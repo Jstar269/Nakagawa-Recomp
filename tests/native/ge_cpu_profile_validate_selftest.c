@@ -3625,17 +3625,21 @@ int main(int argc, char **argv) {
         }
         return bench_main((uint32_t)rounds);
     }
-    if (argc == 2 && strcmp(argv[1], "--strip-cache-disabled") == 0) strip_cache = 0;
-    else if (argc != 1) {
-        fprintf(stderr, "usage: %s [--strip-cache-disabled]\n", argv[0]);
-        return 2;
+    /* The scenes below run with the vertex cache as the arguments set it, never as the caller's
+     * environment left it, so each Makefile run covers the leg it names (the third run passes
+     * --vertex-cache-disabled); test_ge_vertex_cache sets both modes itself. */
+    int vertex_cache = 1;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--strip-cache-disabled") == 0 && strip_cache) strip_cache = 0;
+        else if (strcmp(argv[i], "--vertex-cache-disabled") == 0 && vertex_cache) vertex_cache = 0;
+        else {
+            fprintf(stderr, "usage: %s [--strip-cache-disabled] [--vertex-cache-disabled]\n", argv[0]);
+            return 2;
+        }
     }
     env_set("SR_GE_STRIP_CACHE_DISABLE", strip_cache ? NULL : "1");
-    /* The scenes below run with the vertex cache as the environment sets it (the Makefile
-     * runs once more with SR_GE_VERTEX_CACHE_DISABLE=1); test_ge_vertex_cache sets both. */
-    const char *vertex_cache_disable = getenv("SR_GE_VERTEX_CACHE_DISABLE");
-    int vertex_cache = !(vertex_cache_disable && vertex_cache_disable[0] &&
-                         strcmp(vertex_cache_disable, "0") != 0);
+    env_set("SR_GE_VERTEX_CACHE_DISABLE", vertex_cache ? NULL : "1");
+    ge_vertex_cache_reload_env();
 
     uint8_t *arena = (uint8_t *)calloc(0x0c000000u, 1);
     if (!arena) {

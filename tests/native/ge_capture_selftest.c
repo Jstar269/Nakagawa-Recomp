@@ -4,6 +4,11 @@
 #include "ge_capture.h"
 #include "recomp.h"
 
+/* Every production call below sits inside assert(): keep the checks in a build that defines
+ * NDEBUG, as the other native tests do (#735). */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -184,6 +189,8 @@ int main(int argc, char **argv) {
     initial.fbfmt = 2;
     final = initial;
     final.vaddr = 0x08123456u;
+    final.iaddr = 0x08124560u;
+    final.fbw = 256;
     SR_HOST(GE_CAPTURE_VRAM_BASE)[17] = 0x6d;
     SR_HOST(0x00123000u)[9] = 0xa1;
     SR_HOST(0x08145000u)[11] = 0xb2;
@@ -205,6 +212,7 @@ int main(int argc, char **argv) {
     assert(fixture.frame == 77 && fixture.list_count == 2);
     assert(fixture.list_addrs[0] == 0x00123008u && fixture.list_addrs[1] == 0x00124008u);
     assert(fixture.page_count == 3);
+    assert(!memcmp(&fixture.final_state, &final, sizeof(final)));   /* end()'s state, not begin()'s */
     memset(SR_HOST(GE_CAPTURE_VRAM_BASE), 0, GE_CAPTURE_VRAM_SIZE);
     memset(SR_HOST(0x00123000u), 0, GE_CAPTURE_PAGE_SIZE);
     memset(SR_HOST(0x08145000u), 0, GE_CAPTURE_PAGE_SIZE * 2u);

@@ -5,6 +5,11 @@
 #include "gpu_sdl3vk/ge_gpu.h"
 #include "perf.h"
 
+/* The present-mode, plan and scale checks below are assert()s, and the Makefile's CFLAGS may be
+ * overridden: keep them in a build that defines NDEBUG, as the other native tests do (#735). */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

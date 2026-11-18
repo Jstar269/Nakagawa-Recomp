@@ -438,7 +438,8 @@ native-core-tests: ge-float24-selftest
 # SR_VRAMDUMP captures (#314): two captures are written next to the binary and removed.  Run
 # twice because ge.c latches the strip-cache switch per process, and a third time with the
 # per-draw vertex cache off for the scenes (its own case compares the cache on and off in
-# every run).  No game input.
+# every run).  The binary sets both switches from its arguments, so an SR_GE_*_DISABLE the
+# caller exported cannot turn a run into another leg.  No game input.
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
@@ -448,7 +449,7 @@ ge-cpu-profile-validate-selftest: $(RT_GE_O)
 		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST)
 	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --strip-cache-disabled
-	SR_GE_VERTEX_CACHE_DISABLE=1 $(GE_CPU_PROFILE_VALIDATE_SELFTEST)
+	$(GE_CPU_PROFILE_VALIDATE_SELFTEST) --vertex-cache-disabled
 
 native-core-tests: ge-cpu-profile-validate-selftest ge-vertex-cache-mutants
 
