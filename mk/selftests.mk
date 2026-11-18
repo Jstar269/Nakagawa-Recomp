@@ -443,7 +443,6 @@ native-core-tests: ge-float24-selftest
 GE_CPU_PROFILE_VALIDATE_SELFTEST := $(BUILD_DIR)/ge_cpu_profile_validate_selftest$(EXE_EXT)
 
 ge-cpu-profile-validate-selftest: $(RT_GE_O)
-	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) $(CFLAGS) -Werror $(LDFLAGS) -o $(GE_CPU_PROFILE_VALIDATE_SELFTEST) \
 		tests/native/ge_cpu_profile_validate_selftest.c $(RT_GE_O) src/rt/ge_capture.c \
 		src/rt/flight_recorder.c src/rt/perf.c src/rt/ace.c -lm
