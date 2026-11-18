@@ -2680,9 +2680,14 @@ static void test_settings_file_that_could_not_be_read_is_kept(void) {
         free(app);
         return;
     }
-    assert(chmod(path, 0) == 0);
+    /* The mode is changed and restored on one descriptor, so both changes
+     * reach the same file the load opens by name. */
+    int mode_fd = open(path, O_RDONLY | O_NOFOLLOW);
+    assert(mode_fd >= 0);
+    assert(fchmod(mode_fd, 0) == 0);
     NkResult loaded = player_app_load_settings(held, path);
-    assert(chmod(path, 0600) == 0);
+    assert(fchmod(mode_fd, 0600) == 0);
+    assert(close(mode_fd) == 0);
 #endif
     assert(loaded == NK_ERROR_IO);
     assert(held->settings.resolution_scale == 1);

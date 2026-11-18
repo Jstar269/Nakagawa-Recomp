@@ -2333,8 +2333,12 @@ static void test_title_staging_reuses_past_a_stuck_leftover(void) {
     title_join(held_file, sizeof(held_file), path, "held.bin");
     write_file_bytes(held_file, "held", 4);
     /* A folder nobody may list stands in for a file a program holds. A
-     * superuser bypasses the permission, so the leftover would just go. */
-    assert(chmod(path, 0) == 0);
+     * superuser bypasses the permission, so the leftover would just go. The
+     * mode is changed and restored on one descriptor, which stays valid even
+     * when a superuser's staging removes the folder. */
+    int held_fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    assert(held_fd >= 0);
+    assert(fchmod(held_fd, 0) == 0);
     bool stuck = geteuid() != 0;
 #endif
     NkResult result = run_title_stage(&fixture.request, NULL, &summary, &outcome,
@@ -2346,12 +2350,9 @@ static void test_title_staging_reuses_past_a_stuck_leftover(void) {
     bool stuck = true;
 #else
     /* A superuser (a root container) reads past the permission and removes
-     * the leftover, so the folder may be gone; anyone else finds it kept. */
-    if (nk_platform_dir_exists(path)) {
-        assert(chmod(path, 0700) == 0);
-    } else {
-        assert(!stuck);
-    }
+     * the leftover; anyone else finds it kept. */
+    assert(fchmod(held_fd, 0700) == 0);
+    assert(close(held_fd) == 0);
 #endif
     assert(result == NK_OK);
     assert(outcome == PLAYER_STAGE_TITLE_REUSED);
