@@ -7,6 +7,8 @@
  * All arithmetic is big-endian over fixed 160-bit values; curve parameters
  * arrive from the KeyStore.  Verification only -- there is no signing and
  * no key generation in this translation unit.
+ *
+ * 2026-11-18: point_on_curve refuses a coordinate that is not below p.
  */
 
 #include <string.h>

@@ -112,9 +112,10 @@ Every file except the built-in tables comes from this repository's own public hi
 commit `8ca38e6399064e1d76f9670ed4722d521fd21a9a^`. No code, table or key value came from any other tool.
 
 - Byte-identical to those bytes when restored: `nk_psp_aes.c/.h`, `nk_psp_sha1.c/.h`, `nk_psp_kirk.c/.h`,
-  `nk_psp_kle.c/.h`, `nk_psp_ec.c/.h`, `nk_psp_inflate.c/.h` and `nk_psp_prx.h`. Later changes are dated above and in
-  each file's header. The AES and SHA-1 ports keep their upstream layout and
-  stay excluded from the trailing-whitespace hook (`.pre-commit-config.yaml`), as before PR #1187.
+  `nk_psp_kle.c/.h`, `nk_psp_ec.c/.h`, `nk_psp_inflate.c/.h` and `nk_psp_prx.h`. Later changes are dated in each file's
+  header and in this manifest (above for the ports, below for the project-authored files). The AES and SHA-1 ports
+  keep their upstream layout and stay excluded from the trailing-whitespace hook (`.pre-commit-config.yaml`), as
+  before PR #1187.
 - Changed on restoration (each file's header or this manifest says how): `nk_psp_prx.c`, `nk_psp_container.c/.h`,
   `nk_psp_crypto.c/.h`, `nk_psp_keystore.c/.h`, `nk_decrypt_main.c`, `tools/nk_core/decrypt_tool.py` and
   `tools/test_psp_decrypt.py`.
@@ -125,7 +126,10 @@ commit `8ca38e6399064e1d76f9670ed4722d521fd21a9a^`. No code, table or key value 
 key-file loading, no PSAR entry name), `nk_psp_crypto.c/.h` (the error contract and result names), `nk_psp_ec.c/.h`,
 `nk_psp_inflate.c/.h` and `nk_decrypt_main.c` (the `nk_decrypt` command line, with its `npumdimg` subcommand) are
 project-authored from the format rules
-and the standards their headers cite (FIPS 197, RFC 4493, FIPS 180, RFC 1950-1952, SEC 1).
+and the standards their headers cite (FIPS 197, RFC 4493, FIPS 180, RFC 1950-1952, SEC 1). Since 2026-11-18,
+`nk_psp_ec.c`'s `point_on_curve` refuses a coordinate that is not below the field prime (SEC 1 3.2.2.1), and in
+`nk_psp_inflate.c` a failed raw retry of a zlib-looking stream reports into no buffer, so the zlib attempt's message
+stays with the code it returns.
 
 ## Ad hoc transport (`nk_adhoc_*`, issue #1139)
 

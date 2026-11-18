@@ -308,11 +308,11 @@ int main(int argc, char *argv[]) {
         static WCHAR saved_user[32768];
         DWORD profile_len = GetEnvironmentVariableW(L"USERPROFILE", saved_profile, 32768);
         DWORD user_len = GetEnvironmentVariableW(L"USERNAME", saved_user, 32768);
-        assert(_wputenv_s(L"USERPROFILE", L"C:\\Users\\Jos\x00E9_\x65E5\x672C") == 0);
+        assert(_wputenv_s(L"USERPROFILE", L"D:\\Profiles\\" L"Jos\x00E9_\x65E5\x672C") == 0);
         assert(_wputenv_s(L"USERNAME", L"Jos\x00E9_\x65E5\x672C") == 0);
         const char *home = nk_platform_env_home_dir();
         const char *user = nk_platform_env_user_name();
-        assert(home != NULL && strcmp(home, "C:\\Users\\Jos\xC3\xA9_\xE6\x97\xA5\xE6\x9C\xAC") == 0);
+        assert(home != NULL && strcmp(home, "D:\\Profiles\\" "Jos\xC3\xA9_\xE6\x97\xA5\xE6\x9C\xAC") == 0);
         assert(user != NULL && strcmp(user, "Jos\xC3\xA9_\xE6\x97\xA5\xE6\x9C\xAC") == 0);
         assert(_wputenv_s(L"USERPROFILE",
                           profile_len > 0 && profile_len < 32768 ? saved_profile : L"") == 0);

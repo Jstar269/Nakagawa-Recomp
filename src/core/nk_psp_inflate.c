@@ -9,6 +9,9 @@
  * Fail-closed contract: every malformed, truncated, checksum-mismatched
  * or over-capacity stream returns a negative code with a message; no
  * partial buffer is ever handed to the caller.
+ *
+ * 2026-11-18: a failed raw retry of a zlib-looking stream reports into no
+ * buffer, so the zlib attempt's message stays with its returned code.
  */
 
 #include "nk_psp_inflate.h"

@@ -7867,10 +7867,10 @@ static void test_homebrew_package_becomes_a_private_disc(void) {
         nk_ps_set_env(home_name, had_home ? saved : NULL);
     }
 #if defined(_WIN32) || defined(_WIN64)
-    /* The OneDrive root is read from the wide environment: a root whose name is outside the
-       ANSI code page (here under a profile folder named so) was '?' bytes through getenv,
-       the path resolver refused it, and a package picked in it took the whole root along
-       as the program's folder. */
+    /* The cloud-sync root (OneDriveConsumer) is read from the wide environment: a root whose
+       name is outside the ANSI code page (here under a profile folder named so) was '?'
+       bytes through getenv, the path resolver refused it, and a package picked in it took
+       the whole root along as the program's folder. */
     {
         char sync_profile[NATIVE_TEST_PATH_MAX + 64];
         char sync_root[NATIVE_TEST_PATH_MAX + 96];

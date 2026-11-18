@@ -236,7 +236,7 @@ static void test_nk_library_last_played_escaped(void) {
     nk_library_init(&lib);
     NkGameEntry g;
     seed_game_entry(&g, "TEST00003", "Last Played");
-    snprintf(g.last_played, sizeof(g.last_played), "a\"b\\c\x01" "d");
+    snprintf(g.last_played, sizeof(g.last_played), "a\"b\\" "c\x01" "d");
     assert(nk_library_add_or_update(&lib, &g) == NK_OK);
     assert(nk_library_save(&lib, path) == NK_OK);
 
