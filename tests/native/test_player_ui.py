@@ -2078,6 +2078,47 @@ class NativePlayerUiTests(unittest.TestCase):
         back = self.run_player("psp-fonts", ("WAIT_MS=100", "KEY_ESCAPE", "WAIT_MS=100"))
         self.assertEqual(self.screens(back)[-1][0], "settings", "Esc goes back to Settings")
 
+    def test_picked_disc_and_fonts_are_taken_on_the_main_thread(self) -> None:
+        """Audit 2026-11-17: SDL may call a file picker's callback on a thread of its own
+        (player_host.h; on Windows it always does). The regression build answers the picker
+        from such a thread too (PICK_FILE).
+
+        Failing before: the disc and fonts callbacks inspected the disc, changed the view and
+        the settings, and imported fonts right there, on SDL's thread, while the main loop
+        drew and changed the same state. The pick must reach the player on the main thread,
+        as the save and texture pack pickers already hand theirs over."""
+        with tempfile.TemporaryDirectory(prefix=".picker-thread-", dir=ROOT) as tmp:
+            picked = Path(tmp) / "picked.iso"
+            picked.write_bytes(b"synthetic invalid PSP disc image\n")
+            disc = self.run_player(
+                "library",
+                ("KEY_O", "WAIT_MS=100", f"PICK_FILE={picked}", "WAIT_VIEW=error,5000",
+                 "WAIT_MS=100"))
+            stdout = str(disc["stdout"])
+            self.assertIn("[PLAYER_UI_TEST] pick_file answered", stdout)
+            self.assertIn("[PLAYER_UI_TEST] pick_taken what=disc main_thread=1", stdout)
+            self.assertNotIn("main_thread=0", stdout)
+            frames = disc["frames"]
+            assert isinstance(frames, list)
+            self.assertEqual(frames[-1]["view"], "error", stdout)
+            self.assertEqual(frames[-1]["error"], "ISO_CORRUPT", stdout)
+            self.assertEqual(frames[-1]["picker"], "0", "the answered picker is closed")
+
+            font_folder = Path(tmp) / "fonts"
+            font_folder.mkdir()
+            font = font_folder / "ltn0.pgf"
+            font.write_bytes(b"synthetic PGF stand-in, not a font\n")
+            fonts = self.run_player(
+                "psp-fonts",
+                ("WAIT_MS=100", "KEY_RIGHT", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100",
+                 f"PICK_FILE={font}", "WAIT_MS=300"))
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(fonts["stdout"]):
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        stdout = str(fonts["stdout"])
+        self.assertIn("[PLAYER_UI_TEST] pick_file answered", stdout)
+        self.assertIn("[PLAYER_UI_TEST] pick_taken what=fonts main_thread=1", stdout)
+        self.assertNotIn("main_thread=0", stdout)
+
     def test_settings_factory_reset_asks_then_moves_the_data_aside(self) -> None:
         """Owner 2026-10-29: Factory reset asks first, with Keep everything focused.
 
@@ -4023,6 +4064,29 @@ class NativePlayerUiTests(unittest.TestCase):
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["view"], "problem_report")
+
+    def test_problem_report_previews_under_a_non_ascii_data_folder(self) -> None:
+        """Audit 2026-11-17: the report tool's answer file sits in the data folder, which on
+        Windows is under the user's profile. A profile with a non-ASCII name must still preview.
+
+        Failing before: the player read and removed the answer file with the narrow C runtime
+        (fopen, remove), which reads the UTF-8 path in the ANSI code page, so the file the tool
+        wrote was never found and the page showed a failed report."""
+        with tempfile.TemporaryDirectory(prefix="nk-report-test-José-") as tmp:
+            env = {"NK_UI_TEST_REPORT_DATA_ROOT": tmp}
+            run = self.next_ui_run(
+                "problem-report", ("WAIT_REPORT=2|5|6,60000",), env_extra=env)
+            stdout = run["stdout"]
+            assert isinstance(stdout, str)
+            steps, names = self.problem_report_steps(stdout)
+            phases = [int(step["problem_report"]) for step in steps]
+            if 6 in phases:
+                self.skipTest("no Python interpreter on this host, so the page shows the command")
+            self.assertNotIn(5, phases, stdout)
+            self.assertEqual(phases[-1], 2, stdout)
+            self.assertIn("about.txt", names)
+            self.assertFalse((Path(tmp) / "report-output.json").exists(),
+                             "the answer file is removed once it has been read")
 
     def test_problem_report_that_cannot_start_its_worker_says_so_on_the_page(self) -> None:
         """#1849: if the report thread cannot start, the page shows a failed phase with the

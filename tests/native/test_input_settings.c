@@ -234,6 +234,44 @@ static void test_bind_rebind_and_capture(void) {
     printf("[INPUT_SETTINGS_TEST] Subtest 3 PASSED!\n");
 }
 
+/* Audit 2026-11-17: SDL3 numbers gamepad buttons past NK_HOST_BUTTON_COUNT (MISC2 to MISC6
+ * on paddle and third-party pads), and the player hands a captured press over as SDL's raw
+ * index. Failing before: the out-of-range button became the control's binding (shown as
+ * unknown), the control that held it lost its input, and the profile then refused to save.
+ * Now the press is refused with a note and nothing changes. */
+static void test_capture_refuses_a_button_outside_the_profile(void) {
+    printf("[INPUT_SETTINGS_TEST] Subtest: a captured button outside the profile is refused\n");
+    InputSettingsState state;
+    input_settings_init(&state);
+    const NkDigitalBinding before = state.profile.psp_buttons[INPUT_CONTROL_BTN_CROSS];
+    const NkInputProfile profile_before = state.profile;
+    char diag[256];
+
+    assert(input_settings_start_capture(&state, INPUT_CONTROL_BTN_CROSS));
+    NkBindingSource extra = { NK_BINDING_HOST_BUTTON, NK_HOST_BUTTON_COUNT, 0 };
+    assert(!input_settings_feed_capture_source(&state, extra));
+    assert(!input_settings_is_capturing(&state));
+    assert(memcmp(&state.profile.psp_buttons[INPUT_CONTROL_BTN_CROSS], &before,
+                  sizeof(before)) == 0);
+    assert(memcmp(&state.profile, &profile_before, sizeof(profile_before)) == 0);
+    assert(state.note_error && state.note[0] != '\0');
+    assert(nk_input_profile_validate(&state.profile, diag, sizeof(diag)) == NK_OK);
+
+    /* A negative index and an axis past the host's axes are refused the same way. */
+    NkBindingSource negative = { NK_BINDING_HOST_BUTTON, -1, 0 };
+    assert(!input_settings_assign_binding(&state, INPUT_CONTROL_BTN_CROSS, negative));
+    NkBindingSource axis = { NK_BINDING_HOST_AXIS_POS, NK_HOST_AXIS_COUNT, 0 };
+    assert(!input_settings_assign_binding(&state, INPUT_CONTROL_BTN_CROSS, axis));
+    assert(memcmp(&state.profile, &profile_before, sizeof(profile_before)) == 0);
+
+    /* The last button the profile knows still binds. */
+    NkBindingSource last = { NK_BINDING_HOST_BUTTON, NK_HOST_BUTTON_COUNT - 1, 0 };
+    assert(input_settings_assign_binding(&state, INPUT_CONTROL_BTN_CROSS, last));
+    assert(state.profile.psp_buttons[INPUT_CONTROL_BTN_CROSS].primary.index ==
+           NK_HOST_BUTTON_COUNT - 1);
+    assert(!state.note_error);
+}
+
 /* -----------------------------------------------------------------------------
  * 4. A taken input swaps, and the note names the other control (#1299)
  * -------------------------------------------------------------------------- */
@@ -1603,6 +1641,7 @@ int main(void) {
     test_binding_words_fit();
     test_corrupt_file_load_diagnostic();
     test_bind_rebind_and_capture();
+    test_capture_refuses_a_button_outside_the_profile();
     test_conflict_detection();
     test_deadzone_and_trigger_bounds();
     test_reset_to_defaults();

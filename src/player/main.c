@@ -251,18 +251,15 @@ static void player_take_picked_package(PlayerApp *app, const char *path) {
     player_app_psn_conversion_begin(app, &package);
 }
 
-static void SDLCALL on_file_dialog_callback(void *userdata, const char * const *filelist, int filter) {
-    (void)filter;
-    PlayerApp *app = (PlayerApp *)userdata;
-    if (!app || !filelist || !filelist[0]) {
-        return;
-    }
+/* A disc image the picker chose or the user dropped, on the main thread: remembered as
+   the picker's next folder, then inspected, converted or expanded by its kind. */
+static void player_take_picked_file(PlayerApp *app, const char *selected_path) {
     if (app->wizard.is_extracting || app->psn_conversion_active) {
         /* A second file cannot replace the source while a worker owns the
            current staging transaction or conversion. */
         return;
     }
-    const char *selected_path = filelist[0];
+    player_ui_test_report_pick_taken("disc");
     printf("[PLAYER] ISO Selected: %s\n", selected_path);
     player_app_remember_picker_folder(app, selected_path, false);
     if (player_path_is_pbp_package(selected_path)) {
@@ -276,15 +273,50 @@ static void SDLCALL on_file_dialog_callback(void *userdata, const char * const *
     player_take_picked_disc(app, selected_path);
 }
 
+/* The disc picker. SDL may call its callback on another thread (player_host.h; on
+   Windows it always does), so the choice waits here and player_frame_requests takes it
+   on the main thread, as the save and texture pack pickers do: 1 a file was picked, 2
+   its path is too long to hold. A cancelled or failed dialog leaves nothing to take. */
+static char s_disc_pick[NK_MAX_PATH];
+static SDL_AtomicInt s_disc_pick_state;
+
+static void SDLCALL on_file_dialog_callback(void *userdata, const char * const *filelist, int filter) {
+    (void)userdata;
+    (void)filter;
+    if (!filelist) {
+        fprintf(stderr, "[PLAYER] The file picker could not open: %s\n", SDL_GetError());
+    } else if (!filelist[0]) {
+        return;
+    } else if (strlen(filelist[0]) >= sizeof(s_disc_pick)) {
+        SDL_SetAtomicInt(&s_disc_pick_state, 2);
+    } else {
+        (void)snprintf(s_disc_pick, sizeof(s_disc_pick), "%s", filelist[0]);
+        SDL_SetAtomicInt(&s_disc_pick_state, 1);
+    }
+}
+
+static void player_take_disc_pick(PlayerApp *app) {
+    int state = SDL_GetAtomicInt(&s_disc_pick_state);
+    if (state == 0) return;
+    SDL_SetAtomicInt(&s_disc_pick_state, 0);
+    if (state == 1) {
+        player_take_picked_file(app, s_disc_pick);
+    } else if (!app->wizard.is_extracting && !app->psn_conversion_active) {
+        player_show_picked_refusal(
+            app, "DISC_PATH_TOO_LONG", "Disc not added",
+            "The file you picked is too deep in other folders for Nakagawa to read, so it "
+            "wasn't added. Move it somewhere shorter and choose it from there.");
+    }
+}
+
 /* Opens the next dropped disc image the way the picker's choice opens, when the player
    can take one: not while a worker owns the staging or conversion. Later images of a
    drop wait for the library (player_frame_requests), so each is added in turn. */
 static void player_open_next_dropped_disc(PlayerApp *app) {
     char path[NK_MAX_PATH];
-    const char *files[2] = { path, NULL };
     if (app->wizard.is_extracting || app->psn_conversion_active) return;
     if (!player_app_drop_take(app, path, sizeof(path))) return;
-    on_file_dialog_callback(app, files, 0);
+    player_take_picked_file(app, path);
 }
 
 /* The end of a drop, whether SDL bracketed it with begin and complete or sent a lone file: a
@@ -310,6 +342,7 @@ static const char *player_picker_start(const PlayerApp *app) {
 }
 
 static void trigger_file_picker(SDL_Window *window, PlayerApp *app) {
+    SDL_SetAtomicInt(&s_disc_pick_state, 0);
     player_host_show_picker(PLAYER_HOST_PICK_DISC, window, player_picker_start(app),
                             on_file_dialog_callback, app);
 }
@@ -317,19 +350,44 @@ static void trigger_file_picker(SDL_Window *window, PlayerApp *app) {
 /* The PSP fonts import. The picker shows the .pgf files themselves, which a
    folder picker hides, so the user can see they are in the right folder; any
    one of them names the folder the import reads. A cancelled dialog arrives
-   with no entry and changes nothing. */
+   with no entry and changes nothing. As with a disc, SDL may call back on
+   another thread, so the file waits here for the main thread: 1 picked, 2 its
+   path is too long to hold. */
+static char s_font_pick[NK_MAX_PATH];
+static SDL_AtomicInt s_font_pick_state;
+
 static void on_font_files_dialog_callback(void *userdata, const char *const *filelist, int filter) {
-    PlayerApp *app = (PlayerApp *)userdata;
-    char folder[NK_MAX_PATH];
+    (void)userdata;
     (void)filter;
-    if (!app) return;
-    if (!filelist || !filelist[0]) return;
-    if (!player_path_parent_folder(filelist[0], folder, sizeof(folder))) return;
+    if (!filelist) {
+        fprintf(stderr, "[PLAYER] The font picker could not open: %s\n", SDL_GetError());
+    } else if (!filelist[0]) {
+        return;
+    } else if (strlen(filelist[0]) >= sizeof(s_font_pick)) {
+        SDL_SetAtomicInt(&s_font_pick_state, 2);
+    } else {
+        (void)snprintf(s_font_pick, sizeof(s_font_pick), "%s", filelist[0]);
+        SDL_SetAtomicInt(&s_font_pick_state, 1);
+    }
+}
+
+static void player_take_font_pick(PlayerApp *app) {
+    char folder[NK_MAX_PATH];
+    int state = SDL_GetAtomicInt(&s_font_pick_state);
+    if (state == 0) return;
+    SDL_SetAtomicInt(&s_font_pick_state, 0);
+    if (state != 1 || !player_path_parent_folder(s_font_pick, folder, sizeof(folder))) {
+        fprintf(stderr, "[PLAYER] The picked font file's folder could not be read from its "
+                        "path (too long, or no folder); no fonts were imported.\n");
+        return;
+    }
+    player_ui_test_report_pick_taken("fonts");
     player_app_remember_picker_folder(app, folder, true);
     (void)player_app_fonts_import_folder(app, folder);
 }
 
 static void trigger_font_folder_picker(SDL_Window *window, PlayerApp *app) {
+    SDL_SetAtomicInt(&s_font_pick_state, 0);
     player_host_show_picker(PLAYER_HOST_PICK_FONTS, window, player_picker_start(app),
                             on_font_files_dialog_callback, app);
 }
@@ -1459,7 +1517,7 @@ static void player_report_command(const char *title_id, char *out, size_t size) 
 /* Reads the --json answer. The child's stderr shares the file, so parsing starts
    at the first '{'. */
 static bool player_report_read_answer(const char *path, PlayerReportState *out) {
-    FILE *file = fopen(path, "rb");
+    FILE *file = nk_fopen_utf8(path, "rb");
     char *text;
     char *start;
     long size;
@@ -1517,7 +1575,7 @@ static void player_report_error_line(const char *path, char *out, size_t size) {
     static const char prefix[] = "Report error: ";
     char text[1024];
     char *line;
-    FILE *file = fopen(path, "rb");
+    FILE *file = nk_fopen_utf8(path, "rb");
     size_t used;
     if (size > 0u) out[0] = '\0';
     if (!file) return;
@@ -1573,7 +1631,7 @@ static int SDLCALL player_report_thread_main(void *userdata) {
     argv[argc++] = "--config-dir";
     argv[argc++] = job->config_dir;
     argv[argc] = NULL;
-    (void)remove(job->output_path);   /* the spawn appends */
+    (void)nk_remove_utf8(job->output_path);   /* the spawn appends */
     if (!nk_platform_spawn_tool(python_path, argv, NULL, NULL, job->output_path, &process)) {
         out->phase = PLAYER_REPORT_FAILED;
         snprintf(out->message, sizeof(out->message), "Python could not be started.");
@@ -1597,7 +1655,7 @@ static int SDLCALL player_report_thread_main(void *userdata) {
     }
     out->phase = job->create ? PLAYER_REPORT_DONE : PLAYER_REPORT_PREVIEWED;
 finished:
-    (void)remove(job->output_path);
+    (void)nk_remove_utf8(job->output_path);
     SDL_SetAtomicInt(&job->done, 1);
     return 0;
 }
@@ -3860,14 +3918,17 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
         uint32_t timeout_ms = app->headless_launch_timeout_ms > 0u
             ? app->headless_launch_timeout_ms : NK_HEADLESS_ACCEPTANCE_TIMEOUT_MS;
         int child_code = nk_launch_wait(&app->launch_session, (int)timeout_ms);
-        app->is_game_running = false;
         if (child_code < 0) {
+            /* The timed-out child is still running. player_app_stop_game ends it
+               only while the game still counts as running, so the flag stays set
+               until it has. */
             fprintf(stderr,
                     "[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=timeout timeout_ms=%u\n",
                     timeout_ms);
             player_app_stop_game(app);
             return 7;
         }
+        app->is_game_running = false;
         if (child_code == NK_LAUNCH_EXIT_ACCEPTANCE_REACHED) {
             printf("[PLAYER] HEADLESS_ACCEPTANCE status=PASS presented_frames=%u child_exit=%d\n",
                    app->headless_accept_presented_frames, child_code);
@@ -3891,7 +3952,6 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
            as a timeout with a distinct status, never as a launch. */
         int headless_code = nk_launch_wait(&app->launch_session,
                                            NK_HEADLESS_LAUNCH_TIMEOUT_MS);
-        app->is_game_running = false;
         if (headless_code < 0) {
             fprintf(stderr,
                     "[PLAYER] Headless launch did not finish within %d ms; stopping the child.\n",
@@ -3899,6 +3959,7 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
             player_app_stop_game(app);
             return 7;
         }
+        app->is_game_running = false;
         printf("[PLAYER] Headless launch child exited with code %d.\n", headless_code);
         return headless_code;
     }
@@ -5564,8 +5625,11 @@ static void player_frame_requests(PlayerRun *run) {
         if (!player_ui_test_active(&run->ui_test)) {
             app->request_file_picker = false;
             trigger_file_picker(run->window, app);
+        } else if (player_ui_test_answer_picker(on_file_dialog_callback, app)) {
+            app->request_file_picker = false;
         }
     }
+    player_take_disc_pick(app);
     /* The rest of a drop, one disc image whenever the library is showing again. */
     if (app->active_view == VIEW_LIBRARY && app->drop_next < app->drop_count) {
         player_open_next_dropped_disc(app);
@@ -5574,8 +5638,11 @@ static void player_frame_requests(PlayerRun *run) {
         if (!player_ui_test_active(&run->ui_test)) {
             app->request_font_folder_picker = false;
             trigger_font_folder_picker(run->window, app);
+        } else if (player_ui_test_answer_picker(on_font_files_dialog_callback, app)) {
+            app->request_font_folder_picker = false;
         }
     }
+    player_take_font_pick(app);
     if (app->request_save_folder_picker) {
         if (!player_ui_test_active(&run->ui_test)) {
             app->request_save_folder_picker = false;

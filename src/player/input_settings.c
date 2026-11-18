@@ -903,6 +903,19 @@ bool input_settings_assign_binding(InputSettingsState *state, int control_idx, N
     if (!state || control_idx < 0 || control_idx >= INPUT_CONTROL_DIGITAL_COUNT) return false;
     NkDigitalBinding *bind = &state->profile.psp_buttons[control_idx];
     clear_note(state);
+    if (source.type != NK_BINDING_NONE) {
+        /* SDL numbers buttons past the profile's (MISC2 to MISC6 on some pads), and the
+           profile refuses to save an index outside its own range (nk_input_profile_validate):
+           such an input is refused here, before anything is moved. */
+        const int limit = source.type == NK_BINDING_HOST_BUTTON ? NK_HOST_BUTTON_COUNT
+                                                                : NK_HOST_AXIS_COUNT;
+        if (source.index < 0 || source.index >= limit) {
+            snprintf(state->note, sizeof(state->note),
+                     "That input can't be used for a PSP button. Choose another one.");
+            state->note_error = true;
+            return false;
+        }
+    }
     if (source.type != NK_BINDING_NONE && sources_equal(&bind->primary, &source)) return true;
     NkBindingSource previous = bind->primary;
     if (source.type != NK_BINDING_NONE) {

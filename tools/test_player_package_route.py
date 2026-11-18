@@ -2170,6 +2170,10 @@ class TestPlayerPackageRoute(unittest.TestCase):
         timeout_output = timed_out.stdout + timed_out.stderr
         self.assertEqual(timed_out.returncode, 7, timeout_output[-4000:])
         self.assertIn("HEADLESS_ACCEPTANCE status=FAIL reason=timeout", timeout_output)
+        # The timed-out child is stopped, not left running as an orphan: the player
+        # cleared its running flag first, so player_app_stop_game returned at once
+        # and never called nk_launch_stop (audit 2026-11-17).
+        self.assertIn("[PLAYER] Stopping active game session...", timeout_output)
         self.assertEqual(tracked_status(), before)
 
         # 7. Negative control. A tampered package must fail closed at the

@@ -1601,6 +1601,35 @@ static int run_build_speed_probe(int argc, char *argv[]) {
 /* Settings > Build speed reaches the build child: nk_cli.py gets --build-speed with the
  * setting's key, and a Background child runs below normal while Balanced keeps the
  * player's priority. */
+/* Audit 2026-11-17: the player's shutdown waits for a cancelled build tools download with
+ * nk_platform_wait_process between polls. When the child exits inside that wait, the wait
+ * reaps it and clears process.is_active. Failing before: the next poll returned at the
+ * is_active check, so is_building never cleared and the shutdown loop spun forever. A
+ * child some other caller already reaped now ends the session like any other exit. */
+static void test_poll_ends_a_session_whose_child_was_already_reaped(void) {
+    printf("[PACKAGE_BUILDER_TEST] Subtest: a child reaped by a wait ends the session\n");
+    assert(s_self_executable && s_self_executable[0]);
+    const char *child_argv[] = { s_self_executable, "--child-exit-zero", NULL };
+
+    PackageBuildSession session;
+    package_builder_init_session(&session, "TEST80006", "Reaped Child Fixture");
+    session.is_building = true;
+    session.start_time_ms = 0;
+    bool spawned = nk_platform_spawn_tool(s_self_executable, child_argv, NULL, NULL,
+                                          NULL, &session.process);
+    assert(spawned);
+    /* The shutdown loop's wait: it returns once the child has exited, reaping it. */
+    int waited = nk_platform_wait_process(&session.process, 30000);
+    assert(waited == 0);
+    assert(!session.process.is_active);
+
+    package_builder_poll(&session, route_now_ms());
+    assert(!session.is_building);
+    assert(session.is_failed);   /* a clean exit without a package event is a failure */
+    assert(session.current_stage == PACKAGE_BUILD_STAGE_FAILED);
+    assert(session.process.native_handle == NULL);
+}
+
 static void test_build_speed_reaches_the_child(void) {
     printf("[PACKAGE_BUILDER_TEST] Subtest: build speed reaches the child\n");
     static const PackageBuildSpeed speeds[] = {
@@ -1736,6 +1765,7 @@ int main(int argc, char *argv[]) {
     test_reused_session_restarts_the_clock();
     test_state_machine_transitions();
     test_clean_exit_without_completion_is_a_failure();
+    test_poll_ends_a_session_whose_child_was_already_reaped();
     test_build_speed_reaches_the_child();
     test_output_line_circular_buffer();
     test_python_candidate_validation();

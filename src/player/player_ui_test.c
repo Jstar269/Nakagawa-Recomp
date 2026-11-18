@@ -209,6 +209,12 @@ static int player_ui_test_music_state(const char *name) {
     return -1;
 }
 
+/* PICK_FILE=<path>: the file the next host picker returns, and whether the script has
+   reached it. The main thread is the one that set the harness up. */
+static char s_ui_test_pick[1024];
+static bool s_ui_test_pick_pending;
+static SDL_ThreadID s_ui_test_main_thread;
+
 int player_ui_test_next_event(const char *script, size_t *cursor,
                                     SDL_Event *event) {
     if (!script || !cursor || !event) return -1;
@@ -434,6 +440,14 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
     if (strcmp(token, "DROP_BEGIN") == 0 || strcmp(token, "DROP_COMPLETE") == 0) {
         /* The brackets SDL puts around several dropped files. */
         event->type = token[5] == 'B' ? SDL_EVENT_DROP_BEGIN : SDL_EVENT_DROP_COMPLETE;
+        return 1;
+    }
+    if (strncmp(token, "PICK_FILE=", 10) == 0) {
+        /* The file the next host picker returns (player_ui_test_answer_picker). */
+        if (!token[10] || strlen(token + 10) >= sizeof(s_ui_test_pick)) return -1;
+        snprintf(s_ui_test_pick, sizeof(s_ui_test_pick), "%s", token + 10);
+        event->type = SDL_EVENT_USER;
+        event->user.code = PLAYER_UI_TEST_ACTION_PICK_FILE;
         return 1;
     }
     if (strncmp(token, "DROP_FILE=", 10) == 0) {
@@ -911,6 +925,7 @@ static bool s_ui_test_catalog_reload_failed;
 
 void player_ui_test_init(PlayerUiTest *t) {
     memset(t, 0, sizeof(*t));
+    s_ui_test_main_thread = SDL_GetCurrentThreadID();
     t->events = "";
     t->wait_package_status_target = NK_RUNTIME_PACKAGE_UNKNOWN;
     t->wait_view_mask = UINT32_C(1) << VIEW_LIBRARY;
@@ -1173,8 +1188,11 @@ void player_ui_test_end_first_frame(PlayerUiTest *t, const PlayerApp *app,
 }
 
 const char *player_ui_test_report_data_root(void) {
-    const char *root = getenv("NK_UI_TEST_REPORT_DATA_ROOT");
-    return root != NULL && root[0] != '\0' ? root : NULL;
+    /* Read as UTF-8, as the player reads its own data folder: the narrow getenv gives
+       code-page bytes for a folder name outside the ANSI code page. */
+    static char root[NK_MAX_PATH];
+    return nk_platform_env_utf8("NK_UI_TEST_REPORT_DATA_ROOT", root, sizeof(root)) == 1 &&
+           root[0] != '\0' ? root : NULL;
 }
 
 bool player_ui_test_fail_report_thread_create(void) {
@@ -1348,6 +1366,10 @@ void player_ui_test_step_script(PlayerUiTest *t, PlayerApp *app, bool *running,
         t->events, &t->event_cursor, &scripted_event);
     if (next_event > 0) {
         if (scripted_event.type == SDL_EVENT_USER &&
+            scripted_event.user.code == PLAYER_UI_TEST_ACTION_PICK_FILE) {
+            s_ui_test_pick_pending = true;
+            printf("[PLAYER_UI_TEST] pick_file queued\n");
+        } else if (scripted_event.type == SDL_EVENT_USER &&
             scripted_event.user.code == PLAYER_UI_TEST_ACTION_WAIT_PACKAGE_FAILURE) {
             g_ui_test_waiting_for_package_failure = true;
             printf("[PLAYER_UI_TEST] wait_package_failure disc=%s "
@@ -1766,6 +1788,38 @@ void player_ui_test_report_post_build_transition(PlayerApp *app, const char *dis
 }
 
 /* The UI test holds the worker, to see the library draw frames while a check runs. */
+typedef struct UiTestPickCall {
+    SDL_DialogFileCallback callback;
+    void *userdata;
+} UiTestPickCall;
+
+static int SDLCALL player_ui_test_pick_thread(void *data) {
+    const UiTestPickCall *call = (const UiTestPickCall *)data;
+    const char *const files[2] = { s_ui_test_pick, NULL };
+    call->callback(call->userdata, files, 0);
+    return 0;
+}
+
+bool player_ui_test_answer_picker(SDL_DialogFileCallback callback, void *userdata) {
+    if (!s_ui_test_pick_pending || !callback) return false;
+    s_ui_test_pick_pending = false;
+    UiTestPickCall call = { callback, userdata };
+    SDL_Thread *thread = SDL_CreateThread(player_ui_test_pick_thread, "ui-test-picker", &call);
+    if (!thread) {
+        fprintf(stderr, "[PLAYER_UI_TEST] pick_file result=FAIL the picker thread did not "
+                        "start: %s\n", SDL_GetError());
+        return false;
+    }
+    SDL_WaitThread(thread, NULL);
+    printf("[PLAYER_UI_TEST] pick_file answered\n");
+    return true;
+}
+
+void player_ui_test_report_pick_taken(const char *what) {
+    printf("[PLAYER_UI_TEST] pick_taken what=%s main_thread=%d\n", what ? what : "none",
+           SDL_GetCurrentThreadID() == s_ui_test_main_thread ? 1 : 0);
+}
+
 void player_ui_test_hold_disc_check(void) {
     const char *hold = getenv("NK_UI_TEST_DISC_CHECK_HOLD_MS");
     if (hold && hold[0]) SDL_Delay((Uint32)strtoul(hold, NULL, 10));

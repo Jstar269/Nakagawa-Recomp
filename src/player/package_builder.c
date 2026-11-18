@@ -2692,11 +2692,15 @@ void package_builder_poll(PackageBuildSession *session, uint64_t current_time_ms
 
     read_new_progress_lines(session);
 
-    if (!session->process.is_active) {
+    /* No child yet: nothing to reap. A child another caller's wait already reaped
+       (is_active cleared, the handle still open) has exited, and ends the session
+       below like any other exit; returning here left is_building set for good. */
+    if (!session->process.is_active && !session->process.native_handle) {
         return;
     }
 
-    bool running = nk_platform_is_process_running(&session->process);
+    bool running = session->process.is_active &&
+                   nk_platform_is_process_running(&session->process);
     if (!running) {
         session->exit_code = nk_platform_wait_process(&session->process, 0);
         session->is_building = false;
