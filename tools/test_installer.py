@@ -10,6 +10,7 @@ pass) when the pinned compiler is not installed.
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from typing import Any
 
 TOOLS = Path(__file__).resolve().parent
@@ -82,6 +84,14 @@ class InstallerScriptTests(unittest.TestCase):
         self.assertEqual(verify_installer.egress_findings(_code(self.text)), [])
         self.assertEqual(verify_installer.egress_findings("x := DownloadTemporaryFile('https://a', 'b', '', nil);"),
                          ["INSTALLER_NETWORK_CALL: downloadtemporaryfile"])
+        for snippet in (
+            "Shell.Run('powershell -c iwr https://example.com');",
+            "Shell.Exec('curl.exe https://example.com');",
+            "Exec('curl.exe', '', '', SW_HIDE, ewWaitUntilTerminated, Code);",
+            "ShellExec('', 'https://example.com', '', '', SW_SHOWNORMAL, ewNoWait, Code);",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertTrue(verify_installer.egress_findings(snippet))
 
     def test_the_app_id_is_the_one_the_verifier_and_upgrades_rely_on(self):
         self.assertEqual(_directive(self.text, "AppId"), "{{" + verify_installer.APP_ID + "}")
@@ -641,6 +651,31 @@ class VerifierPureTests(unittest.TestCase):
         with self.assertRaises(build_installer.InstallerError):
             verify_installer.Sentinels(link).plant()
         self.assertEqual(list(target.iterdir()), [])
+
+    def test_partial_sentinel_plant_or_finally_install_error_cleans_up_and_reports_coded_failure(self):
+        base = self.root / "local" / "Nakagawa"
+        (base / "config").mkdir(parents=True)
+        (base / "saves").parent.mkdir(parents=True, exist_ok=True)
+        (base / "saves").write_text("file instead of folder", encoding="utf-8")
+        sentinels = verify_installer.Sentinels(base)
+        with self.assertRaisesRegex(build_installer.InstallerError, "INSTALLER_VERIFY_REFUSED"):
+            try:
+                sentinels.plant()
+            finally:
+                sentinels.remove()
+        self.assertFalse((base / "config" / verify_installer.SENTINEL_NAME).exists())
+        self.assertFalse((base / "data").exists())
+
+        # main() catches stage_install.InstallError and returns 1 without traceback
+        with unittest.mock.patch.object(
+            verify_installer, "verify_installer",
+            side_effect=stage_install.InstallError("SHORTCUT_FAILED: synthetic"),
+        ), unittest.mock.patch("sys.stderr", new=io.StringIO()) as err:
+            self.assertEqual(
+                verify_installer.main(["--installer", "setup.exe", "--package-dir", str(self.package)]),
+                1,
+            )
+        self.assertIn("SHORTCUT_FAILED", err.getvalue())
 
     def test_an_install_equal_to_its_package_matches_even_with_the_uninstaller_beside_it(self):
         (self.installed / "unins000.exe").write_bytes(b"u")

@@ -128,8 +128,15 @@ def egress_findings(script_text: str) -> list[str]:
     previous install left); any other ``CreateOleObject`` could be an HTTP client and is a finding."""
     lowered = script_text.lower()
     names = ("downloadtemporaryfile", "itdownload", "itd_", "winhttp", "urlmon", "wininet",
-             "shellexec('open', 'http", 'shellexec("open", "http')
+             "shellexec('open', 'http", 'shellexec("open", "http',
+             "powershell", "pwsh", "curl", "bitsadmin", "certutil", "invoke-webrequest", "iwr ")
     findings = [f"INSTALLER_NETWORK_CALL: {name}" for name in names if name in lowered]
+    for pattern, label in (
+        (r"\b(?:exec|shellexec|shellexecasoriginaluser)\s*\(", "exec_call"),
+        (r"\.\s*(?:run|exec)\s*\(", "shell_run_or_exec"),
+    ):
+        for match in re.finditer(pattern, lowered):
+            findings.append(f"INSTALLER_NETWORK_CALL: {label}({match.group(0).strip()})")
     for match in re.finditer(r"createoleobject\s*\(([^)]*)\)", lowered):
         if match.group(1).strip() != "'wscript.shell'":
             findings.append(f"INSTALLER_NETWORK_CALL: createoleobject({match.group(1).strip()})")
@@ -197,14 +204,26 @@ class Sentinels:
         self._created: list[Path] = []
 
     def _make_dir(self, path: Path) -> None:
+        if path.is_symlink() or path.is_junction() or (path.exists() and not path.is_dir()):
+            raise build_installer.InstallerError(f"INSTALLER_VERIFY_REFUSED: {path} is not a plain folder")
         if not path.exists():
-            path.mkdir()
+            try:
+                path.mkdir()
+            except OSError as exc:
+                raise build_installer.InstallerError(
+                    f"INSTALLER_VERIFY_FAILED: cannot create {path}: {exc}"
+                ) from exc
             self._created.append(path)
 
     def plant(self) -> None:
         if self.root.is_symlink() or self.root.is_junction() or (self.root.exists() and not self.root.is_dir()):
             raise build_installer.InstallerError(f"INSTALLER_VERIFY_REFUSED: {self.root} is not a plain folder")
-        self.root.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise build_installer.InstallerError(
+                f"INSTALLER_VERIFY_FAILED: cannot create {self.root.parent}: {exc}"
+            ) from exc
         self._make_dir(self.root)
         for name in USER_DATA_FOLDERS:
             folder = self.root / name
@@ -216,7 +235,12 @@ class Sentinels:
                 places.append(nested)
             for place in places:
                 marker = place / SENTINEL_NAME
-                marker.write_text("planted by tools/verify_installer.py; safe to delete\n", encoding="utf-8")
+                try:
+                    marker.write_text("planted by tools/verify_installer.py; safe to delete\n", encoding="utf-8")
+                except OSError as exc:
+                    raise build_installer.InstallerError(
+                        f"INSTALLER_VERIFY_FAILED: cannot write {marker}: {exc}"
+                    ) from exc
                 self.files.append(marker)
 
     def missing(self) -> list[str]:
@@ -322,8 +346,8 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
             verify_runtime=lambda _bin: None,
             extra_defines=None if shortcut_name == DEFAULT_SHORTCUT_NAME else {"ShortcutName": shortcut_name},
         )["installer"])
-        sentinels.plant()
         try:
+            sentinels.plant()
             # 1. A shortcut that starts another copy (what tools/stage_install.py writes) is never taken over.
             other = Path(temp) / "other-copy"
             (other / "bin").mkdir(parents=True)
@@ -397,6 +421,9 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
             lost = sorted(set(PERSON_FILES) - set(left))
             if lost:
                 fail("INSTALLER_UNINSTALL_LEFTOVER", f"the uninstall after the upgrade removed {lost}")
+            unexpected = sorted(set(left) - {*PERSON_FILES, UPGRADE_EDITED})
+            if unexpected:
+                fail("INSTALLER_UNINSTALL_LEFTOVER", f"the uninstall after the upgrade left {unexpected}")
             gone = sentinels.missing()
             if gone:
                 fail("INSTALLER_UNINSTALL_TOUCHED_USER_DATA", f"a silent uninstall removed {gone}")
@@ -405,16 +432,24 @@ def verify_installer(installer: Path, package_dir: Path, *, shortcut_name: str =
             result["user_data_sentinels_kept"] = len(sentinels.files)
             result["status"] = "PASS"
         finally:
-            for folder in (upgraded, dest):
-                if _hkcu_key_exists() and (folder / "unins000.exe").is_file():
-                    subprocess.run([str(folder / "unins000.exe"), *silent_uninstall], capture_output=True,
-                                   text=True, timeout=600, check=False)
-                    _wait_for(lambda: not _hkcu_key_exists(), 60.0)
-            if shortcut.is_file() and stage_install.read_shortcut_app_id(shortcut) == stage_install.APP_USER_MODEL_ID:
-                shortcut.unlink()  # the one this check made (the check refused to start with one present)
-            sentinels.remove()
-            shutil.rmtree(dest, ignore_errors=True)
-            shutil.rmtree(upgraded, ignore_errors=True)
+            try:
+                for folder in (upgraded, dest):
+                    if _hkcu_key_exists() and (folder / "unins000.exe").is_file():
+                        try:
+                            subprocess.run([str(folder / "unins000.exe"), *silent_uninstall], capture_output=True,
+                                           text=True, timeout=600, check=False)
+                        except (OSError, subprocess.SubprocessError):
+                            pass
+                        _wait_for(lambda: not _hkcu_key_exists(), 60.0)
+                try:
+                    if shortcut.is_file() and stage_install.read_shortcut_app_id(shortcut) == stage_install.APP_USER_MODEL_ID:
+                        shortcut.unlink()  # the one this check made (the check refused to start with one present)
+                except (OSError, stage_install.InstallError):
+                    pass
+            finally:
+                sentinels.remove()
+                shutil.rmtree(dest, ignore_errors=True)
+                shutil.rmtree(upgraded, ignore_errors=True)
     return result
 
 
@@ -433,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         result = verify_installer(args.installer, args.package_dir, shortcut_name=args.shortcut_name, iscc=args.iscc)
-    except build_installer.InstallerError as exc:
+    except (build_installer.InstallerError, stage_install.InstallError, subprocess.TimeoutExpired) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     print(json.dumps({"event": "installer-verify", **result}, sort_keys=True))

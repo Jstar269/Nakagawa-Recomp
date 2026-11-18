@@ -77,6 +77,15 @@ from nk_core import package_cache
 
 SCHEMA_PATH = ROOT / "assets" / "enhancement_package.schema.json"
 GCC = shutil.which("gcc") or shutil.which("cc")
+_orig_subprocess_run = subprocess.run
+
+
+def _bounded_subprocess_run(*args, **kwargs):
+    kwargs.setdefault("timeout", 120)
+    return _orig_subprocess_run(*args, **kwargs)
+
+
+subprocess.run = _bounded_subprocess_run  # type: ignore[assignment]
 
 
 def _f32_decay_reference(k: float) -> int:
@@ -1121,6 +1130,8 @@ class TestEnhancementAotCodegenAndCache(_SynthTimingElfFixture):
                      f"-I{ROOT / 'src' / 'rt'}", f"-I{out_dir}", str(out_dir / "out.c")],
                     capture_output=True, text=True)
                 self.assertEqual(checked.returncode, 0, checked.stderr[-2000:])
+            else:
+                self.skipTest("needs a host C compiler for -fsyntax-only start-up check")
 
             refusals: tuple[tuple[str, dict[str, str] | None, list[str] | None, str], ...] = (
                 ("no-data-root", None, [], "need --enhancement-data-root"),
@@ -3700,7 +3711,25 @@ class TestEnhancementStoreSites(unittest.TestCase):
                 if not exit_call.search(code) or code.lstrip().startswith(("*", "/*")):
                     continue
                 paths += 1
-                window = "\n".join(lines[max(0, n - 10):n + 1])
+                block_lines: list[str] = []
+                depth = 0
+                for j in range(n, max(-1, n - 15), -1):
+                    clean = lines[j].split("//", 1)[0]
+                    if clean.lstrip().startswith(("*", "/*")):
+                        continue
+                    for ch in reversed(clean):
+                        if ch == "}":
+                            depth += 1
+                        elif ch == "{":
+                            if depth == 0:
+                                break
+                            depth -= 1
+                    else:
+                        block_lines.append(clean)
+                        continue
+                    block_lines.append(clean[clean.rfind("{") + 1:])
+                    break
+                window = "\n".join(reversed(block_lines))
                 with self.subTest(path=f"{path.name}:{n + 1}"):
                     self.assertRegex(window, report)
         self.assertGreaterEqual(paths, 12)
@@ -5084,9 +5113,12 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertFalse(out.exists())
             # The names resolve only through the project's map: without it, nothing is published.
             priv_path.with_suffix(".symbols.json").unlink()
+            err2 = StringIO()
             with mock.patch.object(enhancement_package, "extract_elf_func_symbols", return_value=game_symbols), \
-                    mock.patch("sys.stderr", new=StringIO()), mock.patch("sys.stdout", new=StringIO()):
+                    mock.patch("sys.stderr", new=err2), mock.patch("sys.stdout", new=StringIO()):
                 self.assertNotEqual(enhancement_package.main(args), 0)
+            self.assertIn("the symbol map does not name", err2.getvalue())
+            self.assertIn("synth_timer_duration", err2.getvalue())
             self.assertFalse(out.exists())
 
 
