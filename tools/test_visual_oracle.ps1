@@ -72,6 +72,24 @@ Test-Case "wait kills and reports a timeout at the deadline" {
         "took $($r.ElapsedSeconds)s to enforce a 2s deadline"
 }
 
+# A process the manager cannot terminate (access denied, or a kill still pending in a driver
+# call) must not turn the deadline into an unbounded wait. The refusal is modelled by a
+# Stop-Process function, which PowerShell resolves before the cmdlet of the same name.
+Test-Case "wait returns at the deadline when the kill is refused" {
+    function Stop-Process { throw "access is denied (test: a process the manager cannot terminate)" }
+    $p = Start-SleeperProcess -Seconds 40
+    try {
+        $r = Wait-ProcessOrKill -Process $p -TimeoutSeconds 1
+        Assert-True ($r.TimedOut) "should have reported a timeout"
+        Assert-True (-not $r.Killed) "a refused kill must not be reported as a kill"
+        Assert-True ($r.ElapsedSeconds -lt 20) `
+            "blocked $($r.ElapsedSeconds)s on a process that outlived its refused kill"
+        Assert-True ($null -eq $r.ExitCode) "a process still running has no exit code, got $($r.ExitCode)"
+    } finally {
+        try { $p.Kill($true) } catch { }
+    }
+}
+
 # Redirection is not incidental here: it is the configuration the real runner uses, and
 # Start-Process -PassThru with redirected streams returns a Process whose ExitCode reads
 # back EMPTY unless the native handle was cached first. An earlier version of this test
@@ -353,6 +371,22 @@ try {
             Set-Content -LiteralPath $log
         $o = Read-RouteOutcome -StderrPath $log
         Assert-True ($o.Kind -eq "failed") "an unusable route file must fail the run, got $($o.Kind)"
+    }
+
+    # The runtime prints this one ROUTE_PARSE line and runs on with no route when fopen fails
+    # (src/rt/hle_route.c), so no ROUTE_FAIL follows; the run must still not read as complete.
+    Test-Case "a route file the runtime could not open fails the run" {
+        $log = Join-Path $routeTmp "unopened.log"
+        @("ROUTE_PARSE: cannot open route file 'C:\r.pad'",
+          "BOOT_EVENT phase=exit_at_vblank vblanks=44000 (SR_EXIT_AT_VBLANK=44000)") |
+            Set-Content -LiteralPath $log
+        $o = Read-RouteOutcome -StderrPath $log
+        Assert-True ($o.Kind -eq "failed") "a route that never opened must fail the run, got $($o.Kind)"
+        Assert-True ($o.FailReason -match "cannot open route file") "the runtime's reason should be kept"
+        $v = Get-OracleVerdict -ReachedExit $true -TimedOut $false -ExitCode 0 `
+                 -CaptureCount 18 -RequestedVblank 44000 -ObservedVblank 44000 `
+                 -RouteKind $o.Kind -RouteFailReason $o.FailReason
+        Assert-True (-not $v.Complete) "captures from a run whose route never ran are not admissible"
     }
 } finally {
     Remove-Item -LiteralPath $routeTmp -Recurse -Force -ErrorAction SilentlyContinue

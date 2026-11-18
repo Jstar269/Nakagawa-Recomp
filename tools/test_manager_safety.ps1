@@ -298,6 +298,46 @@ try {
         Assert-True ((Get-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN")) -eq "live") "live save lost after rollback"
     }
 
+    Test-Case "a failed post-swap verification puts the changed live save back and leaves no swap dir" {
+        # The live save differs from the baseline here, so a rollback that leaves the restored
+        # baseline in place is caught (with identical contents it would pass vacuously).
+        $root = Join-Path $tmpRoot "sb12b/PSP/SAVEDATA"
+        New-Item -ItemType Directory -Path (Join-Path $root "UCUS98701") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN") -Value "base"
+        $base = Join-Path $tmpRoot "sb12b/base"
+        [void](Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot)
+        Set-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN") -Value "changed"
+        $r = Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot -Failpoint "verify"
+        Assert-True ($null -eq $r) "verify failure not reported"
+        Assert-True ((Get-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN")) -eq "changed") `
+            "the live save was left in the rollback folder"
+        $swap = @(Get-ChildItem -LiteralPath (Join-Path $tmpRoot "sb12b/PSP") -Directory -Force |
+            Where-Object { $_.Name -like ".nk_savebase_*" })
+        Assert-True ($swap.Count -eq 0) "a caught failure left $($swap.Count) swap dir(s) that block every later restore"
+        $r = Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot
+        Assert-True ($null -ne $r) "a restore after a caught failure was refused"
+        Assert-True ((Get-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN")) -eq "base") "baseline not restored"
+    }
+
+    Test-Case "a loose file in the save root does not fail the restore" {
+        # Only top-level save folders are captured and swapped; Explorer's desktop.ini beside
+        # them is neither, so the post-swap check must not count it as a difference.
+        $root = Join-Path $tmpRoot "sb12c/PSP/SAVEDATA"
+        New-Item -ItemType Directory -Path (Join-Path $root "UCUS98701") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN") -Value "base"
+        $base = Join-Path $tmpRoot "sb12c/base"
+        [void](Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot)
+        Set-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN") -Value "changed"
+        Set-Content -LiteralPath (Join-Path $root "desktop.ini") -Value "[.ShellClassInfo]"
+        $r = Sync-SaveBase -BasePath $base -SaveRoot $root -ApprovedRoot $tmpRoot
+        Assert-True ($null -ne $r) "a loose top-level file failed the restore"
+        Assert-True ((Get-Content -LiteralPath (Join-Path $root "UCUS98701/DATA0.BIN")) -eq "base") "baseline not restored"
+        Assert-True (Test-Path -LiteralPath (Join-Path $root "desktop.ini")) "the loose file was removed"
+        $swap = @(Get-ChildItem -LiteralPath (Join-Path $tmpRoot "sb12c/PSP") -Directory -Force |
+            Where-Object { $_.Name -like ".nk_savebase_*" })
+        Assert-True ($swap.Count -eq 0) "a finished restore left $($swap.Count) swap dir(s)"
+    }
+
     Test-Case "orphaned swap dir from an interrupted restore fails closed" {
         # Simulate a hard kill inside the swap window: an orphaned rollback sibling that
         # a caught-exception path would have cleaned up. The next restore must refuse to

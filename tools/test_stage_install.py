@@ -123,6 +123,28 @@ class InstallTests(unittest.TestCase):
         self.assertEqual((dest / "bin" / "nakagawa_player.exe").read_bytes(), b"player v2")
         self.assertFalse((dest / "bin.old").exists())
 
+    def test_a_first_install_interrupted_between_its_swaps_stays_owned(self):
+        """A fresh folder that got its new bin/ but not source/ can still be staged again or uninstalled."""
+        dest = self.root / "install"
+        real = stage_install._replace_owned
+        calls = []
+
+        def second_swap_fails(staged, final, carry=()):
+            calls.append(final.name)
+            if len(calls) == 2:
+                raise stage_install.InstallError("INSTALL_IN_USE: injected for the test")
+            real(staged, final, carry)
+
+        with mock.patch.object(stage_install, "_replace_owned", second_swap_fails), \
+                self.assertRaisesRegex(stage_install.InstallError, "INSTALL_IN_USE"):
+            stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self.assertEqual(calls, ["bin", "source"])
+        self.assertTrue((dest / "bin" / "nakagawa_player.exe").is_file())
+        self.assertFalse((dest / "source").exists())
+        self.assertIn(dest / "bin", stage_install.plan_uninstall(dest)["remove"])
+        stage_install.stage_install(dest, self.player, repo=self.repo, stage_dlls=_fake_stager)
+        self.assertTrue((dest / "source" / "tools" / "nk_cli.py").is_file())
+
     @staticmethod
     def _make_portable(bin_dir: Path) -> None:
         (bin_dir / "data" / "saves").mkdir(parents=True)
@@ -372,6 +394,15 @@ class ShortcutRefusalThroughMainTests(unittest.TestCase):
         writer.assert_not_called()
         recorder.assert_not_called()
         self.assertFalse((self.root / "install").exists())
+
+    def test_a_relative_custom_shortcut_is_recorded_as_an_absolute_path(self):
+        """--uninstall accepts only an absolute recorded path, so a relative --shortcut is recorded absolute."""
+        with contextlib.chdir(self.root):
+            status, _, _, writer, recorder = self._run("--shortcut", "links/Nak.lnk")
+        self.assertEqual(status, 0)
+        expected = (self.root / "links" / "Nak.lnk").absolute()
+        self.assertEqual(writer.call_args.args[0], expected)
+        self.assertEqual(recorder.call_args.args[1], [expected])
 
     def test_each_shortcut_is_recorded_as_it_is_written(self):
         status, _, staging, writer, recorder = self._run("--desktop-shortcut", "--start-menu-shortcut")
@@ -1094,6 +1125,52 @@ class UninstallTests(unittest.TestCase):
         stage_install.uninstall(self.dest)
         self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
         self.assertFalse(junction.exists())
+
+    @unittest.skipUnless(os.name == "nt", "directory junctions are a Windows feature")
+    def test_a_bin_old_junction_is_removed_not_searched(self):
+        """A junction is not is_symlink() on Windows; one named bin.old must not make another folder's
+        files look like a leftover bin/ whose non-portable entries are deleted."""
+        outside = self.root / "elsewhere"
+        (outside / "data").mkdir(parents=True)
+        (outside / "data" / "keep.sav").write_bytes(b"save")
+        (outside / "keep.txt").write_text("keep", encoding="utf-8")
+        junction = self.dest / "bin.old"
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+                              capture_output=True, text=True, check=False)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        stage_install.uninstall(self.dest)
+        self.assertEqual((outside / "keep.txt").read_text(encoding="utf-8"), "keep")
+        self.assertEqual((outside / "data" / "keep.sav").read_bytes(), b"save")
+        self.assertFalse(junction.exists() or junction.is_junction())
+
+    def _record_custom_shortcut(self, name="Nak.lnk"):
+        custom = self.shortcuts / name
+        custom.write_bytes(b"lnk")
+        stage_install.record_integration(self.dest, [custom])
+        return custom
+
+    def test_a_custom_named_shortcut_that_starts_this_install_is_removed(self):
+        """A shortcut written with --shortcut <own name> is recorded, so uninstall removes it too."""
+        custom = self._record_custom_shortcut()
+        player = str(self.dest / "bin" / "nakagawa_player.exe")
+        with mock.patch.object(stage_install, "IS_WINDOWS", True), \
+                mock.patch.object(stage_install, "read_shortcut_target", return_value=player):
+            summary = stage_install.uninstall(self.dest)
+        self.assertFalse(custom.exists())
+        self.assertIn(str(custom), summary["removed_integration"])
+        self.assertEqual(summary["skipped_integration"], [])
+
+    def test_a_custom_named_path_that_is_not_this_install_shortcut_is_kept(self):
+        other = str(self.root / "other" / "bin" / "nakagawa_player.exe")
+        custom = self._record_custom_shortcut()
+        notes = self._record_custom_shortcut("notes.txt")
+        with mock.patch.object(stage_install, "IS_WINDOWS", True), \
+                mock.patch.object(stage_install, "read_shortcut_target", return_value=other) as reader:
+            summary = stage_install.uninstall(self.dest)
+        self.assertTrue(custom.is_file())
+        self.assertTrue(notes.is_file())
+        self.assertCountEqual(summary["skipped_integration"], [str(custom), str(notes)])
+        reader.assert_called_once_with(custom)  # never asked what a file that is no .lnk starts
 
     def _rewrite_marker(self, change):
         marker = self.dest / stage_install.MARKER

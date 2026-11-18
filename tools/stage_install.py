@@ -50,7 +50,8 @@ cache live under ``%LOCALAPPDATA%\\Nakagawa`` (on Linux ``~/.local/share/Nakagaw
 not in the install. In portable mode (a ``bin/portable.txt``) the data folder
 ``bin/data``, the portable marker and the install marker stay where they are, so the
 user's data is never removed with the program. A recorded path whose name this tool would
-not have written is skipped, so an edited marker cannot make it delete another file. A
+not have written is skipped, so an edited marker cannot make it delete another file; the one
+exception is a ``.lnk`` (a ``--shortcut`` of your own name) that starts this install's player. A
 folder with no marker is refused. ``--dry-run`` lists what would go.
 
 The Windows install's ``bin/`` also carries ``runtime-manifest.json``
@@ -80,7 +81,6 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-import hashlib
 import io
 import json
 import os
@@ -100,6 +100,7 @@ if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 
 import make_app_icon  # noqa: E402
+from nk_core.package_cache import sha256_file  # noqa: E402
 from nk_powershell import powershell_exe  # noqa: E402
 import stage_runtime_dlls  # noqa: E402
 
@@ -300,22 +301,26 @@ def stage_install(dest: Path, player: Path, *, repo: Path = ROOT,
             runtime_stage = "SKIPPED_NOT_PE"
         commit = export_source(repo, stage / "source", revision)
         (stage / "nakagawa.ico").write_bytes(app_icon())
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "source_commit": commit,
+            "platform": _platform_name(),
+            "player": f"bin/{player.name}",
+            "runtime_stage": runtime_stage,
+            "runtime_files": sorted(staged),
+            "integration": integration,
+            "staged_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        }
+        if not (dest / MARKER).is_file():
+            # A first install is marked before its swaps: one that fails between them leaves
+            # bin/ without source/, and only a marked folder can be staged again or uninstalled.
+            _write_marker(dest, record)
         _replace_owned(bin_dir, dest / "bin", carry=(PORTABLE_DATA_LEAF, PORTABLE_MARKER))
         _replace_owned(stage / "source", dest / "source")
         os.replace(stage / "nakagawa.ico", dest / "nakagawa.ico")
     finally:
         if stage.exists():
             shutil.rmtree(stage)
-    record = {
-        "schema_version": SCHEMA_VERSION,
-        "source_commit": commit,
-        "platform": _platform_name(),
-        "player": f"bin/{player.name}",
-        "runtime_stage": runtime_stage,
-        "runtime_files": sorted(staged),
-        "integration": integration,
-        "staged_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-    }
     _write_marker(dest, record)
     return record
 
@@ -432,7 +437,8 @@ def start_menu_folder() -> Path:
 
 # WScript.Shell cannot set a shortcut's AppUserModelID, so the shortcut's property store
 # (System.AppUserModel.ID, PKEY {9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3},5) is written through
-# SHGetPropertyStoreFromParsingName. PowerShell compiles this once per run (Add-Type).
+# SHGetPropertyStoreFromParsingName. Each PowerShell process that writes or reads a shortcut's
+# AppUserModelID compiles it again (Add-Type).
 _APP_ID_CSHARP = r"""
 using System;
 using System.Runtime.InteropServices;
@@ -665,18 +671,10 @@ def _stage_tree(stage: Path) -> tuple[list[tuple[str, Path]], list[str]]:
     return sorted(files, key=lambda item: order(item[0])), sorted(empty, key=order)
 
 
-def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def write_sha256sums(stage: Path) -> int:
     """Rewrite ``SHA256SUMS.txt`` over every other file in ordinal path order; return the count."""
     files, _ = _stage_tree(stage)
-    lines = [f"{_sha256_path(path)}  {relative}\n" for relative, path in files if relative != SUMS_NAME]
+    lines = [f"{sha256_file(path)}  {relative}\n" for relative, path in files if relative != SUMS_NAME]
     (stage / SUMS_NAME).write_bytes("".join(lines).encode("utf-8"))
     return len(lines)
 
@@ -782,13 +780,13 @@ def write_portable_zip(stage: Path, zip_path: Path, *, source_date_epoch: int,
     return {
         "zip": str(zip_path),
         "zip_bytes": zip_path.stat().st_size,
-        "sha256": _sha256_path(zip_path),
+        "sha256": sha256_file(zip_path),
         "files": len(files),
         "empty_folders": len(empty),
         "unpacked_bytes": total,
         "source_date_epoch": source_date_epoch,
         "source_commit": source_commit,
-        "sha256sums_sha256": _sha256_path(stage / "SHA256SUMS.txt"),
+        "sha256sums_sha256": sha256_file(stage / "SHA256SUMS.txt"),
         "zlib": zlib.ZLIB_RUNTIME_VERSION,
     }
 
@@ -941,7 +939,9 @@ PORTABLE_DATA_LEAF = "data"
 def _remove_path(path: Path) -> None:
     """Delete a file, link or folder tree; a link is unlinked, never followed."""
     try:
-        if path.is_symlink() or path.is_file():
+        if path.is_junction():
+            os.rmdir(path)  # removes the junction itself; its target is never entered
+        elif path.is_symlink() or path.is_file():
             path.unlink()
         elif path.is_dir():
             shutil.rmtree(path)
@@ -1026,6 +1026,16 @@ def _check_uninstall_destination(dest: Path) -> None:
             "name the folder the install was staged into")
 
 
+def _starts_this_install(shortcut: Path, player: Path) -> bool:
+    """True for a Windows .lnk file that starts ``player``: the one proof that a recorded shortcut whose name
+    this tool does not always write (``--shortcut <path>``) is its own."""
+    if not IS_WINDOWS or shortcut.suffix.lower() != ".lnk" or not shortcut.is_file():
+        return False
+    target = read_shortcut_target(shortcut)
+    return bool(target) and os.path.normcase(os.path.realpath(target)) == os.path.normcase(
+        os.path.realpath(player))
+
+
 def plan_uninstall(dest: Path) -> dict:
     """What ``uninstall`` would remove and keep, without touching anything.
 
@@ -1046,7 +1056,7 @@ def plan_uninstall(dest: Path) -> dict:
         entry = dest / name
         if not (entry.exists() or entry.is_symlink()):
             continue
-        if name == "bin" and portable and entry.is_dir() and not entry.is_symlink():
+        if name == "bin" and portable and entry.is_dir() and not entry.is_symlink() and not entry.is_junction():
             # Portable mode: the program goes, the user's data and their marker stay.
             for child in sorted(entry.iterdir()):
                 if child.name in (PORTABLE_DATA_LEAF, PORTABLE_MARKER):
@@ -1057,7 +1067,10 @@ def plan_uninstall(dest: Path) -> dict:
             remove.append(entry)
     leftovers = {f"{name}.old" for name in OWNED_ENTRIES}
     for child in sorted(dest.iterdir()):
-        if child.name == "bin.old" and child.is_dir() and not child.is_symlink():
+        # A junction is not is_symlink() on Windows; it is listed itself and removed as a link,
+        # never searched for portable data that would be another folder's files.
+        if (child.name == "bin.old" and child.is_dir() and not child.is_symlink()
+                and not child.is_junction()):
             # A crashed update can leave the previous bin/, with the user's portable data in it.
             inner = sorted(child.iterdir())
             if any(item.name in (PORTABLE_DATA_LEAF, PORTABLE_MARKER) for item in inner):
@@ -1071,11 +1084,16 @@ def plan_uninstall(dest: Path) -> dict:
     skipped: list[str] = []
     for recorded in record.get("integration", []):
         path = Path(recorded)
-        if (not path.is_absolute() or path.name not in INTEGRATION_NAMES
-                or path.is_dir() or path.is_symlink()):
+        if not path.is_absolute() or path.is_dir() or path.is_symlink():
             skipped.append(recorded)
-        elif path.exists():
+        elif path.name in INTEGRATION_NAMES:
+            if path.exists():
+                integration.append(path)
+        elif _starts_this_install(path, dest / record["player"]):
+            # A --shortcut of the user's own name: removed only while it starts this install.
             integration.append(path)
+        else:
+            skipped.append(recorded)
     return {"dest": dest, "remove": remove, "keep": keep, "integration": integration,
             "skipped_integration": skipped, "portable": portable}
 
@@ -1204,7 +1222,8 @@ def main(argv=None) -> int:
         shortcuts: list[Path] = []
         if IS_WINDOWS:
             if args.shortcut is not None:
-                shortcuts.append(args.shortcut)
+                # Absolute, as uninstall accepts only an absolute recorded path.
+                shortcuts.append(args.shortcut.absolute())
             else:
                 if args.desktop_shortcut:
                     shortcuts.append(desktop_folder() / SHORTCUT_NAME)
