@@ -1716,9 +1716,6 @@ class ExpectedDataFileCountTests(unittest.TestCase):
         # Generic (no block) has no expectation — 0 — but HST's explicit GAME_NAME=hst
         # without a manifest is a build-time refusal, not a silent generic fallback.
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class GuestModuleList(unittest.TestCase):
     """The runtime half of the one-source module base: same list the recompiler uses."""
@@ -1767,3 +1764,7 @@ class GuestModuleList(unittest.TestCase):
         }]
         with self.assertRaises(title_runtime_config.TitleRuntimeConfigError):
             title_runtime_config.render_header(config)
+
+
+if __name__ == "__main__":
+    unittest.main()

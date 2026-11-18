@@ -224,6 +224,8 @@ class ScriptedInputDeliveryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.tmp = Path(tempfile.mkdtemp(prefix="scripted_input_"))
+        # A class cleanup runs even when setUpClass raises; tearDownClass would not.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         source = cls.tmp / "scripted_input_harness.c"
         source.write_text(HARNESS_C, encoding="utf-8")
         cls.exe = cls.tmp / "scripted_input_harness.exe"
@@ -233,10 +235,6 @@ class ScriptedInputDeliveryTests(unittest.TestCase):
             capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise AssertionError("scripted input harness did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def run_mode(self, mode: str) -> str:
         result = subprocess.run([os.fspath(self.exe), mode], capture_output=True, text=True, check=False)

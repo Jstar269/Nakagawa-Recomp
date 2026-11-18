@@ -934,10 +934,6 @@ assert(!nk_title_identity_by_disc("TEST12345"));
         self.assertEqual(result.stdout, b"")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class GuestModuleBaseTests(unittest.TestCase):
     """A guest PRX's code and data live at load_address, so it must be real user RAM."""
 
@@ -1015,3 +1011,7 @@ class GuestModuleBaseTests(unittest.TestCase):
         manifest["modules"] = modules(title_manifest.MAX_TITLE_MODULES + 1)
         with self.assertRaises(title_manifest.TitleManifestError):
             title_manifest.validate_manifest(manifest)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -480,22 +480,28 @@ class SiteBrowserTests(unittest.TestCase):
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
             cls._missing(f"Playwright for Python is not installed ({exc})")
+        # Each resource registers its own class cleanup as soon as it exists. Class cleanups also run
+        # when setUpClass raises (a bad NK_SITE_SCREENSHOTS folder, say), and tearDownClass does not, so
+        # the browser and the listening server never outlive a failed setup. They run last in, first out.
         cls._playwright = sync_playwright().start()
+        cls.addClassCleanup(cls._playwright.stop)
         executable = os.environ.get("NK_SITE_TEST_CHROMIUM") or None
         try:
             cls.browser = cls._playwright.chromium.launch(executable_path=executable)
         except Exception as exc:  # Playwright raises its own Error type for a missing browser.
-            cls._playwright.stop()
             if "Executable doesn't exist" in str(exc) or "executable doesn't exist" in str(exc).lower():
                 cls._missing(
                     "Playwright's Chromium is not installed: run `python -m playwright install chromium`, "
                     "or set NK_SITE_TEST_CHROMIUM to a Chromium executable"
                 )
             raise
+        cls.addClassCleanup(cls.browser.close)
         handler = functools.partial(_QuietHandler, directory=str(SITE_DIR))
         cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        cls.addClassCleanup(cls.server.server_close)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
+        cls.addClassCleanup(cls.server.shutdown)
         cls.origin = f"http://127.0.0.1:{cls.server.server_address[1]}"
         cls.url = cls.origin + "/index.html"
         shots = os.environ.get("NK_SITE_SCREENSHOTS")
@@ -508,13 +514,6 @@ class SiteBrowserTests(unittest.TestCase):
         if REQUIRED:
             raise RuntimeError(f"NK_SITE_TEST_REQUIRED=1 but {reason}")
         raise unittest.SkipTest(reason)
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.browser.close()
-        cls._playwright.stop()
 
     # -- helpers --
 
@@ -766,6 +765,57 @@ class SiteBrowserTests(unittest.TestCase):
                 self.assertGreater(seen, 10, "too few focus stops: is the page reachable by keyboard?")
                 self.assertEqual(problems, [])
                 self.assertEqual(errors, [])
+
+
+class SiteBrowserSetupCleanupTests(unittest.TestCase):
+    """A failed SiteBrowserTests.setUpClass stops what it already started.
+
+    Playwright is replaced by a stand-in, so this runs without a browser. The screenshot folder is named
+    as an existing file, so its mkdir fails after the browser and the server are up; unittest then skips
+    tearDownClass, and only class cleanups can release them.
+    """
+
+    def test_a_failed_setup_closes_the_browser_and_the_server(self) -> None:
+        import sys
+        import tempfile
+        import types
+        from unittest import mock
+
+        events: list[str] = []
+
+        class FakeBrowser:
+            def close(self) -> None:
+                events.append("browser.close")
+
+        class FakePlaywright:
+            def __init__(self) -> None:
+                self.chromium = types.SimpleNamespace(launch=lambda executable_path=None: FakeBrowser())
+
+            def stop(self) -> None:
+                events.append("playwright.stop")
+
+        class FakeStarter:
+            def start(self) -> FakePlaywright:
+                return FakePlaywright()
+
+        sync_api = types.ModuleType("playwright.sync_api")
+        sync_api.sync_playwright = FakeStarter  # type: ignore[attr-defined]
+        package = types.ModuleType("playwright")
+        package.sync_api = sync_api  # type: ignore[attr-defined]
+        with tempfile.TemporaryDirectory(prefix="site_mobile_cleanup_") as tmp:
+            not_a_folder = Path(tmp) / "a-file"
+            not_a_folder.write_text("x", encoding="utf-8")
+            with mock.patch.dict(sys.modules, {"playwright": package, "playwright.sync_api": sync_api}), \
+                    mock.patch.dict(os.environ, {"NK_SITE_SCREENSHOTS": str(not_a_folder)}):
+                suite = unittest.TestSuite([SiteBrowserTests("test_every_width_and_theme")])
+                result = unittest.TestResult()
+                suite.run(result)
+        self.assertEqual(len(result.errors), 1, result.errors)
+        self.assertIn("setUpClass", str(result.errors[0][0]))
+        self.assertEqual(events, ["browser.close", "playwright.stop"])
+        server = SiteBrowserTests.__dict__.get("server")
+        assert server is not None, "setUpClass did not reach the server"
+        self.assertEqual(server.socket.fileno(), -1, "the listening socket outlived the failed setUpClass")
 
 
 if __name__ == "__main__":

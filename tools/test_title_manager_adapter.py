@@ -353,6 +353,12 @@ class RunEntryIsPlanOwned(unittest.TestCase):
         returned: dict[str, Any] = title_manifest.load_manifest(TITLES / "synthetic.json")
         return returned
 
+    def plan_file(self) -> Path:
+        """A plan.json path in a temporary folder removed when the test (or subtest's test) ends."""
+        folder = tempfile.TemporaryDirectory(prefix="nakagawa-run-entry-")
+        self.addCleanup(folder.cleanup)
+        return Path(folder.name) / "plan.json"
+
     def test_run_entry_is_the_configured_fallback_entry(self) -> None:
         manifest = self.manifest()
         # The runnable fixture boots its real entry (fallback == entry), so give this copy a
@@ -381,7 +387,7 @@ class RunEntryIsPlanOwned(unittest.TestCase):
 
     def test_the_adapter_accepts_and_surfaces_it(self) -> None:
         plan = self.build(self.manifest())
-        plan_path = Path(tempfile.mkdtemp(prefix="nakagawa-run-entry-")) / "plan.json"
+        plan_path = self.plan_file()
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
         script = "\n".join([
             "$ErrorActionPreference = 'Stop'",
@@ -402,7 +408,7 @@ class RunEntryIsPlanOwned(unittest.TestCase):
             with self.subTest(case=label):
                 plan = self.build(self.manifest())
                 plan["run_entry"] = value
-                plan_path = Path(tempfile.mkdtemp(prefix="nakagawa-run-entry-")) / "plan.json"
+                plan_path = self.plan_file()
                 plan_path.write_text(json.dumps(plan), encoding="utf-8")
                 script = "\n".join([
                     "$ErrorActionPreference = 'Stop'",
@@ -421,7 +427,7 @@ class RunEntryIsPlanOwned(unittest.TestCase):
         """The manager must not silently fall back when the planner stops projecting it."""
         plan = self.build(self.manifest())
         plan.pop("run_entry")
-        plan_path = Path(tempfile.mkdtemp(prefix="nakagawa-run-entry-")) / "plan.json"
+        plan_path = self.plan_file()
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
         script = "\n".join([
             "$ErrorActionPreference = 'Stop'",

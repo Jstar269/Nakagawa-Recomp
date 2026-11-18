@@ -68,6 +68,8 @@ class TestSdkverSelftestC(unittest.TestCase):
     def setUpClass(cls):
         assert CC is not None
         cls.tmp = tempfile.mkdtemp(prefix="sdkverc_")
+        # A class cleanup runs even when setUpClass raises; tearDownClass would not.
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = os.path.join(cls.tmp, "sdkver_selftest.exe")
         result = subprocess.run(
             [
@@ -87,10 +89,6 @@ class TestSdkverSelftestC(unittest.TestCase):
         )
         if result.returncode != 0:
             raise AssertionError("sdkver_selftest.c did not compile:\n" + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_retained_state_invariants_hold(self):
         result = subprocess.run([self.exe], capture_output=True, text=True)
