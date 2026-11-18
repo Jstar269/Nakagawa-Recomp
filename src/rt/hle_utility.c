@@ -1124,7 +1124,7 @@ void sr_hle_loadexec_reset_guest_state(void) {
     fpl_table_reset();
     vpl_table_reset();
     hle_sync_reset();
-    memset(s_mbx, 0, sizeof(s_mbx));
+    mbx_table_reset();
     mutex_reset_all();
 
     if (s_callbacks) free(s_callbacks);

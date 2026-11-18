@@ -1069,7 +1069,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     },
     "h_ReferMbxStatus": {
         "status": "partial",
-        "limitation": "size-field caller contract (whether Refer preserves or overwrites size) unmeasured (#339, #341)",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-KERNEL-STATUS-001: mbx-size-zero, mbx-size-8, mbx-size-40, and mbx-size-full)",
+        ],
+        "limitation": "the cited cells establish bytes written and size-word behavior at four buffer sizes; full field values, unknown UID codes, invalid pointers, and error precedence are not established by that size row (#339, #341)",
     },
     # sceKernelReferSystemStatus: bytes written = min(size, 0x1c), return 0, and the size word reads back
     # 0x1c, all PSP-measured (PR #1003 head 3072bd7d, 2026-10-15).
@@ -1605,7 +1608,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 LwMutex cells)",
         ],
-        "limitation": "owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured",
+        "limitation": "owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured: waiters are served in arrival order, or by current priority under attr 0x100 (PPSSPP-derived, not PSP-measured)",
     },
     "h_AllocateFpl": {
         "status": "partial",
@@ -1767,7 +1770,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (PSP-B3-01: ReleaseWaitThread wakes a blocked target with WAIT_RELEASE)",
         ],
-        "limitation": "the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established",
+        "limitation": "the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established; a DelayThread wait is released with WAIT_RELEASE as PPSSPP does (PPSSPP-derived, not PSP-measured), and a ready, dormant or runtime-internally delayed target stops by name",
     },
     "h_TryAllocateFpl": {
         "status": "partial",
@@ -1921,7 +1924,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (PSP-WAIT-001: semaphore signal/cancel before deadline and late dispatch)",
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01: semaphore count and wait results)",
         ],
-        "limitation": "the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established",
+        "limitation": "the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established; the time left written back after a satisfied timed wait is PPSSPP-derived, not PSP-measured",
     },
     "h_WakeupThread": {
         "status": "partial",
@@ -2562,7 +2565,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "PSPAutotests tests/threads/threads/terminate.expected (unknown and deleted ids 0x80020198; 0 and the current thread 0x80020197; created and finished threads 0x800201a2; ready, suspended and waiting threads 0; a thread waiting for the end wakes with 0x800201ac)",
             "tests/native/hle_thread_selftest.c:test_issue339_terminate_waiting_thread",
         ],
-        "limitation": "the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341)",
+        "limitation": "the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341); from an interrupt handler the call answers ILLEGAL_CONTEXT for a compiled SDK version of 3.08 or later (PPSSPP-derived, not PSP-measured) and stops by name for an earlier one",
     },
     "h_TerminateDeleteThread": {
         "status": "partial",
@@ -3016,7 +3019,6 @@ PARTIAL_WITHOUT_EVIDENCE = frozenset({
     "h_PsmfGetVideo",
     "h_ReceiveMbx",
     "h_ReceiveMbxCB",
-    "h_ReferMbxStatus",
     "h_ReferProfilerNull",
     "h_ReferSemaStatus",
     "h_ReferSystemStatus",

@@ -1031,17 +1031,19 @@ typedef struct {
 
 /* ---- mailboxes (sceKernel*Mbx), PSP-measured + PSPSDK ABI ---- */
 
-#define MBX_MAX 32
-#define MBX_MAX_WAITERS 64
-#define MBX_MAX_MSGS 128
+/* A PSP mailbox links guest-owned packets and limits neither its queue nor its number of
+ * mailboxes, so the queue (mbx_reserve_msg) and the table of mailboxes (mbx_new_slot) grow on
+ * demand. A thread waits on one object at a time, so the waiters never outnumber the
+ * scheduler's 128 threads (MAXTHREADS). */
+#define MBX_MAX_WAITERS 128
 
 typedef struct {
     int used;
     uint32_t uid;
     uint32_t attr;
     char name[32];
-    uint32_t msgs[MBX_MAX_MSGS];   /* guest SceKernelMsgPacket addresses, delivery order */
-    int nmsgs;
+    uint32_t *msgs;                /* guest SceKernelMsgPacket addresses, delivery order */
+    int nmsgs, msg_cap;
     uint32_t waiters[MBX_MAX_WAITERS];
     int nwaiters;
 } Mbx;
@@ -1475,7 +1477,16 @@ void hle_sas_guest_reset(void);
 extern MsgPipe s_msg_pipes[MSG_PIPE_MAX];
 MsgPipe *msg_pipe_find(uint32_t uid);
 void hle_register_msgpipe_handlers(void);
-extern Mbx s_mbx[MBX_MAX];
+/* The mailbox table (hle.c): slots 0..mbx_slot_count()-1, each at a fixed address for the
+ * table's lifetime. mbx_new_slot returns an unused slot, growing the table, and stops the run by
+ * name when the host cannot allocate one; mbx_reserve_msg makes room for one more message the
+ * same way. mbx_release frees a deleted mailbox's queue; mbx_table_reset frees every mailbox. */
+size_t mbx_slot_count(void);
+Mbx *mbx_slot(size_t index);
+Mbx *mbx_new_slot(void);
+void mbx_reserve_msg(Mbx *m);
+void mbx_release(Mbx *m);
+void mbx_table_reset(void);
 Mbx *mbx_find(uint32_t uid);
 void mbx_remove_waiter(Mbx *m, uint32_t thid);
 void hle_register_mbx_handlers(void);

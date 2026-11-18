@@ -3972,17 +3972,65 @@ int sr_hle_test_msgpipe_state(uint32_t uid, SrMsgPipeState *out) {
 uint32_t sr_hle_test_msgpipe_max_capacity(void) { return MSG_PIPE_MAX_CAPACITY; }
 
 #endif /* SR_HLE_THREAD_SELFTEST */
-Mbx s_mbx[MBX_MAX];
+/* Mailboxes grow as the FPL and VPL tables do (pool_table_grow): the PSP gives no mailbox limit,
+ * and a 33rd CreateMbx used to answer NO_MEMORY. */
+static HlePoolTable s_mbx_table = {NULL, 0u, sizeof(Mbx), "mailbox"};
+
+size_t mbx_slot_count(void) { return s_mbx_table.nchunks * HLE_POOL_CHUNK; }
+Mbx *mbx_slot(size_t index) { return (Mbx *)pool_table_slot(&s_mbx_table, index); }
+
+Mbx *mbx_new_slot(void) {
+    for (size_t i = 0, n = mbx_slot_count(); i < n; i++)
+        if (!mbx_slot(i)->used) return mbx_slot(i);
+    return (Mbx *)pool_table_grow(&s_mbx_table);
+}
+
+/* Room for one more queued message. The PSP links the guest's own packets and limits the queue
+ * only by memory, so a host that cannot grow the queue stops the run by name instead of
+ * answering a PSP error the PSP never gives. */
+void mbx_reserve_msg(Mbx *m) {
+    if (m->nmsgs < m->msg_cap) return;
+    uint32_t *grown = NULL;
+    int cap = m->msg_cap ? m->msg_cap : 16;
+    if (m->msg_cap > 0 && (size_t)m->msg_cap <= (size_t)INT_MAX / 2u &&
+        (size_t)m->msg_cap * 2u <= SIZE_MAX / sizeof(*grown))
+        cap = m->msg_cap * 2;
+    if (cap > m->msg_cap)
+        grown = (uint32_t *)realloc(m->msgs, (size_t)cap * sizeof(*grown));
+    if (!grown) {
+        fprintf(stderr, "HLE: mailbox uid=0x%x cannot queue past %d messages: the host could not "
+                "allocate more memory\n", m->uid, m->nmsgs);
+        sr_flight_fatal(SR_FLIGHT_KIND_FATAL_HOST, 0u, m->uid, (uint32_t)m->nmsgs);
+        abort();
+    }
+    m->msgs = grown;
+    m->msg_cap = cap;
+}
+
+void mbx_release(Mbx *m) {
+    free(m->msgs);
+    m->msgs = NULL;
+    m->nmsgs = m->msg_cap = 0;
+    m->used = 0;
+}
+
+void mbx_table_reset(void) {
+    for (size_t i = 0, n = mbx_slot_count(); i < n; i++) mbx_release(mbx_slot(i));
+    pool_table_free(&s_mbx_table);
+}
 
 Mbx *mbx_find(uint32_t uid) {
-    for (int i = 0; i < MBX_MAX; i++)
-        if (s_mbx[i].used && s_mbx[i].uid == uid) return &s_mbx[i];
+    if (uid == 0u) return NULL;
+    for (size_t i = 0, n = mbx_slot_count(); i < n; i++) {
+        Mbx *m = mbx_slot(i);
+        if (m->used && m->uid == uid) return m;
+    }
     return NULL;
 }
 
 static void mbx_remove_thread_waiters(uint32_t thread_uid) {
-    for (int i = 0; i < MBX_MAX; i++) {
-        if (s_mbx[i].used) mbx_remove_waiter(&s_mbx[i], thread_uid);
+    for (size_t i = 0, n = mbx_slot_count(); i < n; i++) {
+        if (mbx_slot(i)->used) mbx_remove_waiter(mbx_slot(i), thread_uid);
     }
 }
 /* Semaphores, event flags and LwMutexes: one Sync each, tagged with its kind. The PSP has no

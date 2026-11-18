@@ -377,15 +377,18 @@ static uint32_t module_stop_thread_invoke(CpuState *caller, const LoadedModule *
     caller->r[5] = 0u;
     uint32_t join_rc = h_WaitThreadEnd_impl(caller, 0);
     /* The module's status is the stop thread's exit status, not the join's result: a join
-     * another thread released (ReleaseWaitThread) ends without the stop thread ending. */
-    uint32_t module_status = sched_thread_exit_status(thread_uid);
-    if (module_status == SCE_KERNEL_ERROR_NOT_DORMANT) {
+     * another thread released (ReleaseWaitThread) ends without the stop thread ending. Whether
+     * the stop thread still runs is read from its state, never from that status: module_stop
+     * may return any value, NOT_DORMANT (0x800201A4) among them. */
+    SrThreadInfo stop_info;
+    if (sched_thread_info(thread_uid, &stop_info) == 0 && !sched_is_dormant(thread_uid)) {
         *running_out = 1;
         fprintf(stderr, "PRX_MODULE_STOP_THREAD_JOIN_INTERRUPTED: the join on stop thread "
                         "uid=0x%x ended with 0x%08x while module_stop still runs; the module "
                         "stays stopping\n", thread_uid, join_rc);
         return HLE_KERNEL_ERROR_NOT_IMPLEMENTED;
     }
+    uint32_t module_status = sched_thread_exit_status(thread_uid);
     uint32_t delete_rc = sched_delete_thread(thread_uid);
     if (delete_rc != 0u) {
         fprintf(stderr, "PRX_MODULE_STOP_THREAD_JOIN_SYNTHETIC: stop thread uid=0x%x "

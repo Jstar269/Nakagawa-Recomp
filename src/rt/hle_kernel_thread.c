@@ -155,6 +155,12 @@ static uint32_t h_ExitDeleteThread(CpuState *s) {
     s_exit_delete_request = 1;
     return h_ExitThread(s);
 }
+/* The delay of DelayThread and DelaySysClockThread: 0 when it runs its course, or the result a
+ * sceKernelReleaseWaitThread ended it with (sched_release_thread_delay). */
+static uint32_t delay_thread_for_usec(uint64_t usec) {
+    uint32_t released = 0u;
+    return sched_delay_thread_current(usec, &released) ? released : 0u;
+}
 /* sceKernelDelayThread: delays the calling thread by usec microseconds.
  * PSP-3001 6.6.1 hardware measurement (#340): sceKernelDelayThread(0) returns 0
  * without yielding to an equal-priority ready thread and without dispatching
@@ -162,8 +168,7 @@ static uint32_t h_ExitDeleteThread(CpuState *s) {
 static uint32_t h_DelayThread(CpuState *s) {
     if (!sched_wait_permitted()) return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
     if (A0 == 0) return 0;
-    sched_delay_current(A0);
-    return 0;
+    return delay_thread_for_usec(A0);
 }
 /* sceKernelDelayThreadCB: delays the calling thread while servicing callbacks.
  * PSP-3001 6.6.1 hardware measurement (#340): sceKernelDelayThreadCB(0) returns 0
@@ -191,9 +196,11 @@ static uint32_t h_DelayThreadCBForUsec(uint64_t usec) {
             continue;
         }
         uint64_t remaining = end_time - sched_vtime_us();
+        uint32_t released = 0u;
         sched_set_current_cb_wait(1);
-        sched_delay_current(remaining);
+        const int was_released = sched_delay_thread_current(remaining, &released);
         sched_set_current_cb_wait(0);
+        if (was_released) return released;
         sched_vtime_refresh();
     }
     return 0;
@@ -221,8 +228,7 @@ static uint32_t h_DelaySysClockThread(CpuState *s) {
     uint64_t usec;
     uint32_t result = h_ReadSysClockDelay(A0, &usec);
     if (result != 0u) return result;
-    sched_delay_current(usec);
-    return 0;
+    return delay_thread_for_usec(usec);
 }
 
 static uint32_t h_DelaySysClockThreadCB(CpuState *s) {
@@ -273,7 +279,19 @@ static uint32_t h_RotateThreadReadyQueue(CpuState *s) {
     return sched_rotate_thread_ready_queue((int)A0);
 }
 
+/* TerminateThread from an interrupt handler (VBLANK, alarm, VTimer, GE finish): PPSSPP-derived,
+ * not PSP-measured: hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6,
+ * Core/HLE/sceKernelThread.cpp, sceKernelTerminateThread answers ILLEGAL_CONTEXT (0x80020064)
+ * there when the compiled SDK version is 3.08 or later; logged once per run. With an earlier SDK
+ * PPSSPP goes on to terminate the target, and TerminateDeleteThread has no interrupt check at
+ * all; neither is measured, and the interrupt handler here runs on the interrupted thread's own
+ * coroutine, so both stop by name. */
+#define TERMINATE_IN_INTERRUPT_MIN_SDK 0x03080000u
+static int s_terminate_intr_noted;
 static uint32_t h_TerminateDeleteThread(CpuState *s) {
+    if (sched_servicing_interrupts())
+        return hle_unmodelled_stop("sceKernelTerminateDeleteThread",
+                                   "of thread 0x%x from an interrupt handler is not measured", A0);
     uint32_t result = sched_terminate_thread(A0);
     if (result != 0) return result;
     result = sched_delete_thread(A0);
@@ -283,6 +301,20 @@ static uint32_t h_TerminateDeleteThread(CpuState *s) {
     return result;
 }
 static uint32_t h_TerminateThread(CpuState *s) {
+    if (sched_servicing_interrupts()) {
+        if (g_sdk_version < TERMINATE_IN_INTERRUPT_MIN_SDK)
+            return hle_unmodelled_stop("sceKernelTerminateThread",
+                                       "of thread 0x%x from an interrupt handler with compiled SDK "
+                                       "version 0x%08x (before 3.08) is not measured",
+                                       A0, g_sdk_version);
+        if (!s_terminate_intr_noted) {
+            s_terminate_intr_noted = 1;
+            fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelTerminateThread "
+                            "(NID 0x616403ba) from an interrupt handler answers ILLEGAL_CONTEXT "
+                            "(0x80020064)\n");
+        }
+        return 0x80020064u; /* SCE_KERNEL_ERROR_ILLEGAL_CONTEXT */
+    }
     /* DORMANT and invalid/self targets have distinct public PSPSDK error
      * classes; sched_terminate_thread supplies ILLEGAL_THID/UNKNOWN_THID. */
     if (sched_is_dormant(A0)) return 0x800201a2u; /* SCE_KERNEL_ERROR_DORMANT */
@@ -659,18 +691,34 @@ static uint32_t h_DeleteNotifyCallback(CpuState *s) {
  * consult sched_take_wake_result() right after each sched_block_on(). ---- */
 
 
+static int s_release_delay_noted;
 static uint32_t h_ReleaseWaitThread(CpuState *s) {
     /* a0=thid. Measured on a PSP-3000, firmware 6.61 (PSP-B3-01,
      * docs/HARDWARE_ORACLE.md): a waiter is released with WAIT_RELEASE;
      * the running caller (by uid or 0) answers ILLEGAL_THID
-     * and a deleted thread answers UNKNOWN_THID. A live thread that is not in an object
-     * wait or a SleepThread (ready, dormant, or in a DelayThread wait) is not measured: it
-     * is not the deleted-thread case, so it stops the run by name rather than answering
-     * UNKNOWN_THID for a thread that exists. */
+     * and a deleted thread answers UNKNOWN_THID.
+     * A thread in sceKernelDelayThread[CB] or DelaySysClockThread[CB] is released the same way:
+     * its delay ends and the call returns WAIT_RELEASE. PPSSPP-derived, not PSP-measured:
+     * hrydgard/ppsspp 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelThread.cpp,
+     * sceKernelReleaseWaitThread (a WAITTYPE_DELAY wait resumes with
+     * SCE_KERNEL_ERROR_RELEASE_WAIT); logged once per run.
+     * A live thread in no such wait (ready, dormant, or in a delay the runtime takes inside
+     * another call) is not measured: it is not the deleted-thread case, so it stops the run by
+     * name rather than answering UNKNOWN_THID for a thread that exists. */
     uint32_t uid = A0;
     uint32_t self = sched_current_uid();
     if (uid == 0u || uid == self) return 0x80020197u;
     if (!sched_wake_one_object_waiter_with_result(uid, SCE_KERNEL_ERROR_WAIT_RELEASE)) {
+        if (sched_release_thread_delay(uid, SCE_KERNEL_ERROR_WAIT_RELEASE)) {
+            if (!s_release_delay_noted) {
+                s_release_delay_noted = 1;
+                fprintf(stderr, "HLE: PPSSPP-derived, not PSP-measured: sceKernelReleaseWaitThread "
+                                "(NID 0x2c34e053) ends a sceKernelDelayThread wait with "
+                                "WAIT_RELEASE (0x800201aa)\n");
+            }
+            sched_preempt();
+            return 0;
+        }
         SrThreadInfo info;
         if (sched_thread_info(uid, &info) != 0) return 0x80020198u;
         return hle_unmodelled_stop("ThreadManForUser_2C34E053",
@@ -729,8 +777,8 @@ static int hle_visit_threadman_ids(int tmid, SrUidVisitor visit, void *ctx) {
             return 1;
         }
         case SR_TMID_MBOX:
-            for (int i = 0; i < MBX_MAX; i++)
-                if (s_mbx[i].used) visit(s_mbx[i].uid, ctx);
+            for (size_t i = 0, n = mbx_slot_count(); i < n; i++)
+                if (mbx_slot(i)->used) visit(mbx_slot(i)->uid, ctx);
             return 1;
         case SR_TMID_VPL:   /* vpl_lookup: the UID stored in the slot */
             for (size_t i = 0, n = vpl_slot_count(); i < n; i++)

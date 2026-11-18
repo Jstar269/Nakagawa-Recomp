@@ -2012,7 +2012,7 @@ static void module_start_param_body(CpuState *s) {
 }
 static int module_start_param_stop(void) { return g_mst_done; }
 
-static void run_module_start_thread(void) {
+static int run_module_start_thread(void) {
     reset_sched();
     memset(&g_mst_info, 0, sizeof(g_mst_info));
     g_mst_gp = 0u;
@@ -2020,8 +2020,9 @@ static void run_module_start_thread(void) {
     if (s_cpu) s_cpu->r[28] = 0u;
     g_test_body = module_start_param_body;
     sr_sched_stop_requested = module_start_param_stop;
-    sched_run(MST_ENTRY, 0u, 0u);
+    const int rc = sched_run(MST_ENTRY, 0u, 0u);
     sr_sched_stop_requested = NULL;
+    return rc;
 }
 
 static void test_module_start_thread_uses_declared_parameters(void) {
@@ -2046,13 +2047,16 @@ static void test_module_start_thread_uses_declared_parameters(void) {
 }
 
 /* A module record whose start thread cannot be created (a stack no free range holds) stops the
- * run by name before any thread runs.
- * MUTANT: drop the t0 check in sched_run -- the NULL TCB is written and the selftest crashes. */
+ * run by name before any thread runs, and sched_run reports it so the driver exits nonzero.
+ * MUTANT: drop the t0 check in sched_run -- the NULL TCB is written and the selftest crashes.
+ * MUTANT: return 0 from the failed create -- the driver would end the run as a clean exit. */
 static void test_module_start_thread_create_failure_stops_by_name(void) {
     sched_set_module_start_thread(32, 0x10000000u, 0u, NULL, 0u);   /* 256 MiB */
-    run_module_start_thread();
+    const int rc = run_module_start_thread();
     expect(g_mst_done == 0 && s_ntcb == 0 && s_cur == -1,
            "a module-start thread that cannot be created stops the run with no thread");
+    expect(rc == SCHED_RUN_NO_ENTRY_THREAD,
+           "sched_run reports the module-start thread it could not create (nonzero)");
     sched_set_module_start_thread(32, 0u, 0u, NULL, 0u);
 }
 

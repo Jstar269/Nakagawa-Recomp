@@ -186,6 +186,8 @@ typedef struct {
                                   * would be blamed for the code that ran next */
     int      exec_tier;          /* execution-share tier (perf.h SrExecTier) when suspended */
     int      is_cb_wait;         /* 1 when thread is in callback-aware wait */
+    int      guest_delay;        /* 1 while blocked in sceKernelDelayThread[CB]'s own delay
+                                  * (sched_delay_thread_current); 0 for a runtime-internal delay */
     int      deleted;             /* kernel object has been removed; slot may be recycled */
     int      suspended;           /* sceKernelSuspendThread is in effect.  Orthogonal to `state`:
                                    * a suspended thread keeps its READY/WAIT state (a wait still
@@ -3135,7 +3137,7 @@ uint32_t sched_start_thread(uint32_t uid, uint32_t arglen, uint32_t argp) {
     if (t->started && t->state == TH_DORMANT) {
         sched_destroy_thread_coro(t);
         t->started = 0;
-        t->wakeups = 0; t->sleeping = 0; t->wait_obj = 0; t->wake = 0;
+        t->wakeups = 0; t->sleeping = 0; t->wait_obj = 0; t->wake = 0; t->guest_delay = 0;
         /* The re-seeded pc is the entry, where the thread really resumes: the "switched out
          * inside a call" mark from its last run must not hide it from unload safety (#286). */
         t->pc_stale = 0;
@@ -4363,6 +4365,38 @@ void sched_delay_current_dispatching(uint64_t usec) {
     sched_delay_current(usec);
 }
 
+/* The delay of sceKernelDelayThread[CB] itself, which sceKernelReleaseWaitThread may end early
+ * (sched_release_thread_delay). A delay the runtime takes inside another call (a GE, audio or
+ * codec wait) uses sched_delay_current and is not released. Returns 1 with the release result
+ * when the delay was ended that way, 0 when it ran its course. */
+int sched_delay_thread_current(uint64_t usec, uint32_t *result_out) {
+    if (s_cur < 0) return 0;
+    s_tcb[s_cur].wake_result_valid = 0;   /* only a release of this delay is answered */
+    s_tcb[s_cur].guest_delay = 1;
+    sched_delay_current(usec);
+    if (s_cur < 0) return 0;
+    s_tcb[s_cur].guest_delay = 0;
+    return sched_take_wake_result(result_out);
+}
+
+/* sceKernelReleaseWaitThread on a thread in sceKernelDelayThread[CB]: the delay ends now and the
+ * thread's call returns `result`. PPSSPP-derived, not PSP-measured: hrydgard/ppsspp
+ * 3bc60270eae3069f13dfbfdb7292a7e1375de6f6, Core/HLE/sceKernelThread.cpp,
+ * sceKernelReleaseWaitThread resumes a WAITTYPE_DELAY wait with SCE_KERNEL_ERROR_RELEASE_WAIT
+ * (it refuses only its own HLE-internal delays and the start_module wait). Returns 1 when such a
+ * delay was ended. */
+int sched_release_thread_delay(uint32_t thread_uid, uint32_t result) {
+    TCB *t = tcb_by_uid(thread_uid);
+    if (!t || t->deleted || t->state != TH_WAIT_DELAY || !t->guest_delay) return 0;
+    t->wake_result = result;
+    t->wake_result_valid = 1;
+    t->wake_cause = SCHED_WAKE_SIGNAL;
+    t->state = TH_READY;
+    SR_FLIGHT_RECORD_CLASS(SR_FLIGHT_CLASS_SCHED, SR_FLIGHT_KIND_SCHED_WAKE,
+                           s_cur >= 0 && s_cur < s_ntcb ? s_tcb[s_cur].uid : 0u, t->uid, 0u, 1u);
+    return 1;
+}
+
 void sched_block_on(uint32_t obj) {
     if (s_cur < 0) return;
     TCB *t = &s_tcb[s_cur];
@@ -5397,9 +5431,10 @@ uint32_t sched_terminate_thread(uint32_t uid) {
     /* An interrupt handler (VBLANK, alarm, VTimer, GE finish) runs on the
      * interrupted thread's own host coroutine with s_cur forced to -1, so the
      * self check below cannot see that it would destroy the coroutine that is
-     * executing.  Refuse the call from interrupt context with ILLEGAL_CONTEXT,
-     * the code the sibling thread-manager calls in this runtime return there.
-     * UNMEASURED: no PSP cell records TerminateThread from an interrupt handler. */
+     * executing.  The scheduler refuses the call from interrupt context with
+     * ILLEGAL_CONTEXT as its own guard. The guest-visible decision is the HLE
+     * handlers': h_TerminateThread answers that code with its PPSSPP-derived note
+     * and h_TerminateDeleteThread stops by name, both before reaching here. */
     if (s_servicing_interrupts) return 0x80020064u; /* SCE_KERNEL_ERROR_ILLEGAL_CONTEXT */
     uid = resolve_thread_uid(uid);
     TCB *t = tcb_by_uid(uid);
@@ -5430,7 +5465,7 @@ uint32_t sched_terminate_thread(uint32_t uid) {
     t->sleeping = 0; t->wait_obj = 0; t->wake = 0;
     t->wait_kind = 0; t->pending_wait_kind = 0;
     t->wake_result = 0; t->wake_result_valid = 0;
-    t->wakeups = 0; t->is_cb_wait = 0;
+    t->wakeups = 0; t->is_cb_wait = 0; t->guest_delay = 0;
     t->join_waiting = 0; t->join_target = 0; t->join_result = 0;
     t->join_result_valid = 0;
     sched_wake_thread_joiners(uid, SCE_KERNEL_ERROR_THREAD_TERMINATED);
@@ -5466,6 +5501,7 @@ uint32_t sched_delete_thread(uint32_t uid) {
     t->wake = 0;
     t->wakeups = 0;
     t->is_cb_wait = 0;
+    t->guest_delay = 0;
     t->join_waiting = 0;
     t->join_result_valid = 0;
     t->deleted = 1;
@@ -5974,8 +6010,10 @@ static int sched_pause_run(void) {
 }
 
 /* The scheduler loop. Runs on the main (converted) fiber. Creates the entry thread, then keeps
- * resuming the highest-priority ready thread until none remain runnable. */
-void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {
+ * resuming the highest-priority ready thread until none remain runnable. Returns 0 once the
+ * loop ends, and SCHED_RUN_NO_ENTRY_THREAD when the entry thread could not be created, so the
+ * driver ends that run with a failure status instead of a clean exit. */
+int sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {
     sched_pause_script_load();
     uint32_t uid = sched_create_thread_ex(entry, s_module_start_priority,
                                           s_module_start_stack_size, s_module_start_attr,
@@ -5989,7 +6027,7 @@ void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {
                         "stack=0x%x attr=0x%x); no guest thread runs\n",
                 entry, s_module_start_priority, s_module_start_stack_size, s_module_start_attr);
         fflush(stderr);
-        return;
+        return SCHED_RUN_NO_ENTRY_THREAD;
     }
     t0->module_start = 1;
     /* The entry (module_start) keeps the driver-seeded state -- real sp, gp, and module args
@@ -6169,4 +6207,5 @@ void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {
         s_tick++;
         sr_rt_phase = SR_RT_PHASE_SCHED;
     }
+    return 0;
 }

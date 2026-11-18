@@ -128,7 +128,7 @@ void    sched_clear_current_join_target(void) {}
 int     sched_take_current_join_result(uint32_t uid, uint32_t *result_out) { (void)uid; (void)result_out; return 0; }
 int     sched_current_priority(void) { return 32; }
 int     sched_is_dormant(uint32_t uid) { (void)uid; return 1; }
-void    sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) { (void)entry; (void)arglen; (void)argp; }
+int     sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) { (void)entry; (void)arglen; (void)argp; return 0; }
 /* sceKernelLoadExec restart seam (driver.c --sched loop). The headless gate never runs
  * sched_run, so no guest thread can queue a LoadExec request: take reports "none" and the
  * loop breaks. The remaining entries are reachable only after a request was taken, so they

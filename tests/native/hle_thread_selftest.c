@@ -21633,6 +21633,27 @@ static void wcr_waiter_body_sleep_cb(void *arg) {
     selftest_park_on_scheduler();
 }
 
+/* A delayer: DelayThread or DelayThreadCB for one second, which only a release ends early. */
+static void wcr_waiter_body_delay(void *arg) {
+    (void)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 1000000u;
+    s_wcr_ret = sr_syscall(&cpu, NID_CNW_DELAY_THREAD);
+    s_wcr_returned = 1;
+    selftest_park_on_scheduler();
+}
+
+static void wcr_waiter_body_delay_cb(void *arg) {
+    (void)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 1000000u;
+    s_wcr_ret = sr_syscall(&cpu, NID_CNW_DELAY_THREAD_CB);
+    s_wcr_returned = 1;
+    selftest_park_on_scheduler();
+}
+
 /* One waiter blocked on `obj` (created through `create_nid`), waiting via
  * `body`. The fixture thread holds the CPU. */
 static TCB *wcr_begin_waiter(void (*body)(void *), uint32_t *obj, uint32_t create_nid) {
@@ -21970,14 +21991,49 @@ static void test_cancel_release_wake_results(void) {
         s_cur = -1;
     }
 
+    /* ---- ReleaseWaitThread on sceKernelDelayThread[CB]: the delay ends with WAIT_RELEASE -
+     * PPSSPP-derived, not PSP-measured (sceKernelReleaseWaitThread resumes a WAITTYPE_DELAY
+     * wait with RELEASE_WAIT): the release returns 0, the delayed thread is ready at once and
+     * its DelayThread returns 0x800201AA instead of finishing its 1-second delay.
+     * MUTANT: drop the sched_release_thread_delay call in h_ReleaseWaitThread -- the release
+     *   stops by name and the delay runs on. MUTANT: return 0 from h_DelayThread after the
+     *   delay -- the released call hides the result. */
+    for (int cb = 0; cb <= 1; cb++) {
+        waiter = wcr_begin_waiter(cb ? wcr_waiter_body_delay_cb : wcr_waiter_body_delay,
+                                  &s_wcr_obj, NID_CNW_CREATE_SEMA);
+        if (!waiter) continue;
+        const char *k = cb ? "DelayThreadCB" : "DelayThread";
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: the %s caller is in its own delay", k);
+        expect(waiter->state == TH_WAIT_DELAY && waiter->guest_delay, msg);
+        uint32_t waiter_uid = waiter->uid;
+        s_cur = (int)(waiter - s_tcb) - 1;
+        const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = waiter_uid;
+        snprintf(msg, sizeof msg, "ReleaseWaitThread of a %s caller returns 0 and readies it", k);
+        expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0u && waiter->state == TH_READY &&
+                   sr_hle_test_unmodelled_stops() == stops_before,
+               msg);
+        s_cur = (int)(waiter - s_tcb);
+        waiter->state = TH_RUNNING;
+        sr_coro_switch(waiter->coro);
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: the released %s returns 0x800201AA", k);
+        expect(s_wcr_returned == 1 && s_wcr_ret == WCR_WAIT_RELEASE && !waiter->guest_delay, msg);
+        wcr_finish(waiter, s_wcr_obj);
+    }
+
     /* ---- ReleaseWaitThread of a live thread that is not waiting ----------------------
      * PSP-B3-01 measures a waiter, the caller and a deleted thread. A live thread that is
-     * ready, dormant or in a DelayThread wait is none of those: it stops by name and keeps
-     * its state, and only a uid no live thread holds answers UNKNOWN_THID.
-     * MUTANT: return UNKNOWN_THID whenever the wake fails -- a live thread reads as deleted. */
+     * ready, dormant or in a delay the runtime takes inside another call (no guest_delay) is
+     * none of those: it stops by name and keeps its state, and only a uid no live thread
+     * holds answers UNKNOWN_THID.
+     * MUTANT: return UNKNOWN_THID whenever the wake fails -- a live thread reads as deleted.
+     * MUTANT: drop the guest_delay test in sched_release_thread_delay -- a runtime-internal
+     *   delay is cut short. */
     {
         static const struct { int state; const char *what; } cells[] = {
-            { TH_READY, "ready" }, { TH_DORMANT, "dormant" }, { TH_WAIT_DELAY, "delayed" },
+            { TH_READY, "ready" }, { TH_DORMANT, "dormant" },
+            { TH_WAIT_DELAY, "runtime-internal delayed" },
         };
         for (size_t i = 0; i < sizeof cells / sizeof cells[0]; i++) {
             reset_fixture();
@@ -22007,6 +22063,251 @@ static void test_cancel_release_wake_results(void) {
             s_cur = -1;
         }
     }
+}
+
+/* ---- One guest call on its own fixture thread -------------------------------------
+ * rv_spawn runs `c` on a new thread until the call returns or blocks; rv_resume runs the
+ * thread on after a wake. Both give the CPU back to the thread that was running. */
+typedef struct {
+    uint32_t nid;
+    uint32_t a[4];
+    uint32_t ret;
+    int      returned;
+} RvCall;
+
+int s_rv_parks = 0;   /* one per returned call, for the coroutine park count */
+static void rv_call_body(void *arg) {
+    RvCall *c = (RvCall *)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = c->a[0]; cpu.r[5] = c->a[1]; cpu.r[6] = c->a[2]; cpu.r[7] = c->a[3];
+    c->ret = sr_syscall(&cpu, c->nid);
+    c->returned = 1;
+    s_rv_parks++;
+    selftest_park_on_scheduler();
+}
+
+static void rv_resume(TCB *t) {
+    const int back = s_cur;
+    s_cur = (int)(t - s_tcb);
+    t->state = TH_RUNNING;
+    sr_coro_switch(t->coro);
+    s_cur = back;
+    if (back >= 0) s_tcb[back].state = TH_RUNNING;
+}
+
+static TCB *rv_spawn(RvCall *c, uint32_t uid, int priority) {
+    c->returned = 0;
+    c->ret = 0xFFFFFFFFu;
+    TCB *t = fixture_thread(uid, TH_READY, priority);
+    t->started = 1;
+    t->coro = sr_coro_create(rv_call_body, c, (size_t)1 << 20);
+    expect(t->coro != NULL, "rv_spawn: the thread's coroutine was created");
+    if (t->coro) rv_resume(t);
+    return t;
+}
+
+static void rv_end(TCB *t) {
+    if (t && t->coro) { sr_coro_destroy(t->coro); t->coro = NULL; }
+}
+
+/* ---- TerminateThread and TerminateDeleteThread from an interrupt handler -----------
+ * PPSSPP-derived, not PSP-measured: TerminateThread answers ILLEGAL_CONTEXT there with a
+ * compiled SDK version of 3.08 or later. An earlier SDK, and TerminateDeleteThread (which
+ * PPSSPP lets through), are unmeasured and stop by name; the target is never touched.
+ * MUTANT: answer ILLEGAL_CONTEXT whatever the SDK version -- the pre-3.08 call no longer
+ *   stops by name. MUTANT: drop the interrupt test in h_TerminateDeleteThread -- the call
+ *   reaches the scheduler's silent ILLEGAL_CONTEXT. */
+extern uint32_t g_sdk_version;
+static void test_terminate_from_interrupt_handler(void) {
+    const uint32_t saved_sdk = g_sdk_version;
+    static const struct { uint32_t nid; uint32_t sdk; int stops; const char *what; } cells[] = {
+        { NID_SCE_KERNEL_TERMINATE_THREAD, 0x06060010u, 0, "TerminateThread, SDK 6.60" },
+        { NID_SCE_KERNEL_TERMINATE_THREAD, 0x03080000u, 0, "TerminateThread, SDK 3.08" },
+        { NID_SCE_KERNEL_TERMINATE_THREAD, 0x03070000u, 1, "TerminateThread, SDK 3.07" },
+        { NID_SCE_KERNEL_TERMINATE_THREAD, 0u, 1, "TerminateThread, no SDK version" },
+        { NID_SCE_KERNEL_TERMINATE_DELETE_THREAD, 0x06060010u, 1, "TerminateDeleteThread" },
+    };
+    for (size_t i = 0; i < sizeof cells / sizeof cells[0]; i++) {
+        char msg[192];
+        TCB *self = wsv_begin();
+        TCB *target = fixture_thread(0x1e6u, TH_READY, 40);
+        target->started = 1;
+        g_sdk_version = cells[i].sdk;
+        const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+        s_servicing_interrupts = 1;
+        const uint32_t rc = b1_call(cells[i].nid, target->uid, 0u, 0u, 0u);
+        s_servicing_interrupts = 0;
+        const int stopped = sr_hle_test_unmodelled_stops() == stops_before + 1u;
+        snprintf(msg, sizeof msg, "%s from an interrupt handler %s", cells[i].what,
+                 cells[i].stops ? "stops by name" : "answers ILLEGAL_CONTEXT");
+        expect(cells[i].stops ? (stopped && rc == SCE_KERNEL_ERROR_NOT_IMPLEMENTED)
+                              : (!stopped && rc == 0x80020064u),
+               msg);
+        snprintf(msg, sizeof msg, "%s from an interrupt handler leaves its target ready",
+                 cells[i].what);
+        expect(target->state == TH_READY && !target->deleted, msg);
+        (void)self;
+        s_cur = -1;
+    }
+    g_sdk_version = saved_sdk;
+}
+
+/* ---- A timed WaitSema[CB] that gets its count writes the time it had left ----------
+ * PPSSPP-derived, not PSP-measured (__KernelUnlockSemaForThread writes the unexpired time):
+ * a 100 ms wait signalled 30 ms in reads about 70 ms back, as ReceiveMbx and LockLwMutex
+ * already do. MUTANT: drop sema_write_timeout_left after the hand-over -- WaitSema leaves
+ * the caller's 100000 and WaitSemaCB the 100000 it wrote before blocking. */
+#define RV_TIMEOUT_PTR 0x00244f00u
+static void test_sema_timed_wait_writes_time_left(void) {
+    for (int cb = 0; cb <= 1; cb++) {
+        const char *k = cb ? "WaitSemaCB" : "WaitSema";
+        char msg[160];
+        TCB *self = wsv_begin();
+        uint32_t sema = wsv_create(0, 1);
+        MEM_W32(RV_TIMEOUT_PTR, 100000u);
+        RvCall c = { cb ? NID_CNW_WAIT_SEMA_CB : NID_CNW_WAIT_SEMA, { sema, 1u, RV_TIMEOUT_PTR, 0u },
+                     0u, 0 };
+        TCB *w = rv_spawn(&c, 0x1f0u, 40);
+        snprintf(msg, sizeof msg, "%s: the timed waiter blocked", k);
+        expect(!c.returned && w->state == TH_WAIT_OBJ, msg);
+        s_vtime_us += 30000u;
+        expect(wsv_wait(NID_WSV_SIGNAL_SEMA, sema, 1u, 0u) == 0u && w->state == TH_READY,
+               "SignalSema readies the timed waiter");
+        rv_resume(w);
+        const uint32_t left = MEM_R32(RV_TIMEOUT_PTR);
+        snprintf(msg, sizeof msg, "%s: the satisfied timed wait returns 0 and writes the time left "
+                 "(%u us, about 70000)", k, left);
+        expect(c.returned && c.ret == 0u && left > 0u && left <= 71000u, msg);
+        rv_end(w);
+        wsv_delete(sema);
+        (void)self;
+        s_cur = -1;
+    }
+}
+
+/* ---- LwMutex waiters are served in arrival order, or by priority under attr 0x100 --
+ * A slot freed by an earlier waiter and reused by a later one must not put the later one
+ * first. MUTANT: pick the lowest active slot in lww_grant_first -- the newest waiter, in the
+ * reused slot 0, is granted before the older one. MUTANT: ignore attr 0x100 -- the earlier
+ * weaker waiter is granted before the stronger one. */
+#define NID_RV_LOCK_LWMUTEX_CB 0x1fc64e09u
+static void test_lwmutex_waiter_order(void) {
+    const uint32_t wa = B1_LW_WORKAREA;
+    {
+        TCB *self = wsv_begin();
+        b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 1u), 0u,
+                  "order: CreateLwMutex held by the caller");
+        RvCall cx = { NID_B1_LOCK_LWMUTEX, { wa, 1u, 0u, 0u }, 0u, 0 };
+        RvCall cy = cx, cz = cx;
+        TCB *x = rv_spawn(&cx, 0x1f1u, 40);
+        TCB *y = rv_spawn(&cy, 0x1f2u, 40);
+        expect(x->state == TH_WAIT_OBJ && y->state == TH_WAIT_OBJ && MEM_R32(wa + 12u) == 2u,
+               "order: two waiters block on the held LwMutex");
+        b1_expect(b1_call(NID_WCR_RELEASE_WAIT, x->uid, 0u, 0u, 0u), 0u,
+                  "order: ReleaseWaitThread ends the first waiter's wait");
+        rv_resume(x);
+        expect(cx.returned && cx.ret == WCR_WAIT_RELEASE && MEM_R32(wa + 12u) == 1u,
+               "order: the released first waiter leaves the queue");
+        TCB *z = rv_spawn(&cz, 0x1f3u, 40);
+        expect(z->state == TH_WAIT_OBJ && MEM_R32(wa + 12u) == 2u,
+               "order: a third waiter blocks in the freed record");
+        b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u, "order: owner unlocks");
+        expect(MEM_R32(wa + 4u) == y->uid && y->state == TH_READY && z->state == TH_WAIT_OBJ,
+               "order: the unlock hands the LwMutex to the older waiter, not the newer one");
+        rv_resume(y);
+        expect(cy.returned && cy.ret == 0u, "order: the older waiter's Lock returns 0");
+        s_cur = (int)(y - s_tcb);
+        b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u, "order: older waiter unlocks");
+        s_cur = (int)(self - s_tcb);
+        expect(MEM_R32(wa + 4u) == z->uid, "order: the newer waiter gets it next");
+        rv_resume(z);
+        s_cur = (int)(z - s_tcb);
+        (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+        s_cur = (int)(self - s_tcb);
+        (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
+        rv_end(x); rv_end(y); rv_end(z);
+        s_cur = -1;
+    }
+    {
+        TCB *self = wsv_begin();
+        b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x100u, 1u), 0u,
+                  "priority order: CreateLwMutex attr 0x100 held by the caller");
+        RvCall cweak = { NID_B1_LOCK_LWMUTEX, { wa, 1u, 0u, 0u }, 0u, 0 };
+        RvCall cstrong = cweak;
+        TCB *weak = rv_spawn(&cweak, 0x1f4u, 45);
+        TCB *strong = rv_spawn(&cstrong, 0x1f5u, 41);
+        b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u,
+                  "priority order: owner unlocks");
+        expect(MEM_R32(wa + 4u) == strong->uid && strong->state == TH_READY &&
+                   weak->state == TH_WAIT_OBJ,
+               "priority order: attr 0x100 hands the LwMutex to the stronger later waiter");
+        rv_resume(strong);
+        s_cur = (int)(strong - s_tcb);
+        (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+        s_cur = (int)(self - s_tcb);
+        rv_resume(weak);
+        s_cur = (int)(weak - s_tcb);
+        (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+        s_cur = (int)(self - s_tcb);
+        expect(cstrong.ret == 0u && cweak.ret == 0u, "priority order: both waiters lock in turn");
+        (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
+        rv_end(weak); rv_end(strong);
+        s_cur = -1;
+    }
+}
+
+/* ---- LockLwMutexCB runs the thread's callbacks while it waits ----------------------
+ * PPSSPP-derived, not PSP-measured: a callback pending when the lock would block runs
+ * before the block, the wait is callback-capable, and the lock is still granted after.
+ * MUTANT: route h_LockLwMutexCB through the plain wait -- the callback never runs and the
+ * wait is not marked callback-capable. */
+#define RV_CB_ENTRY 0x089b8000u
+#define NID_RV_DELETE_CALLBACK 0xedba5844u
+#define RV_CB_NAME  0x00244e00u
+static unsigned s_rv_cb_calls;
+static void rv_cb_count_fn(CpuState *cpu) { s_rv_cb_calls++; cpu->r[2] = 0u; }
+static uint32_t rv_make_pending_callback(TCB *owner) {
+    const int back = s_cur;
+    s_cur = (int)(owner - s_tcb);
+    static const char name[] = "rv-cb";
+    for (size_t k = 0; k < sizeof name; k++) MEM_W8(RV_CB_NAME + (uint32_t)k, (uint8_t)name[k]);
+    uint32_t cb = b1_call(NID_WSV_CREATE_CALLBACK, RV_CB_NAME, RV_CB_ENTRY, 0u, 0u);
+    expect(cb > 0 && sr_callback_is_valid(cb), "rv: callback created on its thread");
+    expect(b1_call(NID_WSV_NOTIFY_CALLBACK, cb, 1u, 0u, 0u) == 0u, "rv: callback notified");
+    s_cur = back;
+    return cb;
+}
+static void test_lock_lwmutex_cb_runs_callbacks(void) {
+    const uint32_t wa = B1_LW_WORKAREA;
+    TCB *self = wsv_begin();
+    sr_test_register_guest_fn(RV_CB_ENTRY, rv_cb_count_fn);
+    s_rv_cb_calls = 0;
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 1u), 0u,
+              "LockLwMutexCB: CreateLwMutex held by the caller");
+    RvCall c = { NID_RV_LOCK_LWMUTEX_CB, { wa, 1u, 0u, 0u }, 0u, 0 };
+    TCB *w = fixture_thread(0x1f6u, TH_READY, 40);
+    w->started = 1;
+    const uint32_t cb = rv_make_pending_callback(w);
+    w->coro = sr_coro_create(rv_call_body, &c, (size_t)1 << 20);
+    expect(w->coro != NULL, "LockLwMutexCB: waiter coroutine created");
+    if (!w->coro) { s_cur = -1; return; }
+    rv_resume(w);
+    expect(s_rv_cb_calls == 1u, "LockLwMutexCB: the pending callback runs before the lock blocks");
+    expect(!c.returned && w->state == TH_WAIT_OBJ && w->is_cb_wait == 1,
+           "LockLwMutexCB: the wait is a callback-capable block on the LwMutex");
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u, "LockLwMutexCB: owner unlocks");
+    rv_resume(w);
+    expect(c.returned && c.ret == 0u && MEM_R32(wa + 4u) == w->uid && w->is_cb_wait == 0,
+           "LockLwMutexCB: the waiter takes the LwMutex after its callbacks");
+    s_cur = (int)(w - s_tcb);
+    (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+    s_cur = (int)(self - s_tcb);
+    (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
+    (void)b1_call(NID_RV_DELETE_CALLBACK, cb, 0u, 0u, 0u);
+    rv_end(w);
+    sr_test_guest_fn_reset();
+    s_cur = -1;
 }
 
 /* -------------------------------------------------------------------------
@@ -43463,7 +43764,9 @@ static uint32_t selftest_mbx_cancel(uint32_t uid, uint32_t nump) {
     return sr_syscall(&cpu, NID_MBX_CANCEL);
 }
 
+/* A full-size refer: the caller's size word says 52 (PSP-KERNEL-STATUS-001 mbx-size-full). */
 static uint32_t selftest_mbx_refer(uint32_t uid, uint32_t info) {
+    if (info) MEM_W32(info, 52u);
     CpuState cpu;
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = uid;
@@ -45495,6 +45798,274 @@ static void test_mbx_lifecycle_and_ordering(void) {
     s_cur = (int)(cur - s_tcb);
 }
 
+/* ---- Mailboxes have no host-table limits ------------------------------------------
+ * A PSP mailbox links the guest's own packets, and the kernel limits neither the queue nor
+ * the number of mailboxes. 200 queued messages all arrive, in order; 40 mailboxes exist at
+ * once; 70 receivers wait on one mailbox and each gets its message in arrival order.
+ * MUTANT: restore the 128-message array -- the 129th SendMbx answers NO_MEMORY. MUTANT:
+ *   restore the 32-mailbox array -- the 33rd CreateMbx answers NO_MEMORY. MUTANT: restore the
+ *   64-waiter array -- the 65th receiver answers NO_MEMORY instead of waiting. */
+#define MBX_BULK_BASE   0x00244000u
+#define MBX_BULK_COUNT  200u
+#define MBX_BULK_BOXES  40u
+#define MBX_BULK_WAITERS 70u
+static void test_mbx_has_no_host_table_limits(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x160u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+
+    uint32_t mbx = selftest_mbx_create(0);
+    int sent = 1, order = 1;
+    for (uint32_t i = 0; i < MBX_BULK_COUNT; i++) {
+        mbx_init_packet(MBX_BULK_BASE + 16u * i, 0u);
+        sent &= selftest_mbx_send(mbx, MBX_BULK_BASE + 16u * i) == 0u;
+    }
+    expect(sent, "MBX: 200 SendMbx with no receiver all succeed");
+    expect(selftest_mbx_refer(mbx, MBX_INFO) == 0 && MEM_R32(MBX_INFO + 44u) == MBX_BULK_COUNT,
+           "MBX: ReferMbxStatus counts all 200 queued messages");
+    for (uint32_t i = 0; i < MBX_BULK_COUNT; i++) {
+        MEM_W32(MBX_OUTPTR, 0u);
+        order &= selftest_mbx_poll(mbx, MBX_OUTPTR) == 0u &&
+                 MEM_R32(MBX_OUTPTR) == MBX_BULK_BASE + 16u * i;
+    }
+    expect(order, "MBX: the 200 messages arrive in the order they were sent");
+    expect(selftest_mbx_delete(mbx) == 0u, "MBX: the bulk mailbox deletes");
+
+    uint32_t boxes[MBX_BULK_BOXES];
+    int made = 1;
+    for (uint32_t i = 0; i < MBX_BULK_BOXES; i++) {
+        boxes[i] = selftest_mbx_create(0);
+        made &= boxes[i] != 0u && (boxes[i] >> 31) == 0u;
+    }
+    expect(made, "MBX: 40 mailboxes exist at once");
+    int gone = 1;
+    for (uint32_t i = 0; i < MBX_BULK_BOXES; i++) gone &= selftest_mbx_delete(boxes[i]) == 0u;
+    expect(gone, "MBX: the 40 mailboxes delete");
+
+    mbx = selftest_mbx_create(0);
+    static SelftestMbxWaiterCtx ws[MBX_BULK_WAITERS];
+    int blocked = 1;
+    for (uint32_t i = 0; i < MBX_BULK_WAITERS; i++) {
+        memset(&ws[i], 0, sizeof ws[i]);
+        ws[i].uid = 0x400u + i;
+        ws[i].tcb = fixture_thread(ws[i].uid, TH_READY, 40);
+        ws[i].tcb->started = 1;
+        ws[i].mbx_uid = mbx;
+        ws[i].outptr = MBX_BULK_BASE + 0x1000u + 4u * i;
+        ws[i].tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, &ws[i], (size_t)1 << 20);
+        if (!ws[i].tcb->coro) { blocked = 0; break; }
+        s_cur = (int)(ws[i].tcb - s_tcb);
+        ws[i].tcb->state = TH_RUNNING;
+        sr_coro_switch(ws[i].tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+        blocked &= !ws[i].returned && ws[i].tcb->state == TH_WAIT_OBJ;
+    }
+    expect(blocked, "MBX: 70 receivers all block on one empty mailbox");
+    expect(selftest_mbx_refer(mbx, MBX_INFO) == 0 &&
+               MEM_R32(MBX_INFO + 40u) == MBX_BULK_WAITERS,
+           "MBX: ReferMbxStatus counts all 70 waiting receivers");
+    int served = 1;
+    for (uint32_t i = 0; i < MBX_BULK_WAITERS && blocked; i++) {
+        mbx_init_packet(MBX_BULK_BASE + 16u * i, 0u);
+        served &= selftest_mbx_send(mbx, MBX_BULK_BASE + 16u * i) == 0u &&
+                  ws[i].tcb->state == TH_READY;
+        s_cur = (int)(ws[i].tcb - s_tcb);
+        ws[i].tcb->state = TH_RUNNING;
+        sr_coro_switch(ws[i].tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+        served &= ws[i].returned && ws[i].ret == 0u &&
+                  MEM_R32(ws[i].outptr) == MBX_BULK_BASE + 16u * i;
+    }
+    expect(served, "MBX: each send serves the longest-waiting receiver its message");
+    for (uint32_t i = 0; i < MBX_BULK_WAITERS; i++)
+        if (ws[i].tcb && ws[i].tcb->coro) { sr_coro_destroy(ws[i].tcb->coro); ws[i].tcb->coro = NULL; }
+    expect(selftest_mbx_delete(mbx) == 0u, "MBX: the waited mailbox deletes");
+    s_cur = -1;
+}
+
+/* ---- A send's wake reaches a receiver that is blocked ------------------------------
+ * A receiver still on the queue but not blocked (its timed wait ran out and it has not run
+ * yet) cannot take the wake: the send goes on to the next waiter, which is blocked.
+ * MUTANT: pop only waiters[0] in h_SendMbx -- the blocked second receiver is never woken
+ * although a message is queued. */
+static void test_mbx_send_wakes_a_blocked_receiver(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x170u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    uint32_t mbx = selftest_mbx_create(0);
+    SelftestMbxWaiterCtx a, b;
+    memset(&a, 0, sizeof a);
+    memset(&b, 0, sizeof b);
+    a.uid = 0x171u; b.uid = 0x172u;
+    a.mbx_uid = b.mbx_uid = mbx;
+    a.outptr = MBX_BULK_BASE + 0x1800u;
+    b.outptr = MBX_BULK_BASE + 0x1804u;
+    MEM_W32(MBX_TIMEOUT_PTR, 500000u);
+    a.toptr = MBX_TIMEOUT_PTR;
+    SelftestMbxWaiterCtx *ctxs[2] = {&a, &b};
+    for (int i = 0; i < 2; i++) {
+        ctxs[i]->tcb = fixture_thread(ctxs[i]->uid, TH_READY, 40);
+        ctxs[i]->tcb->started = 1;
+        ctxs[i]->tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, ctxs[i],
+                                            (size_t)1 << 20);
+        s_cur = (int)(ctxs[i]->tcb - s_tcb);
+        ctxs[i]->tcb->state = TH_RUNNING;
+        sr_coro_switch(ctxs[i]->tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+    }
+    expect(a.tcb->state == TH_WAIT_OBJ && b.tcb->state == TH_WAIT_OBJ,
+           "MBX: a timed and an untimed receiver block");
+    /* The timed receiver's deadline passes: the scheduler readies it, still on the queue. */
+    a.tcb->state = TH_READY;
+    a.tcb->wake_cause = SCHED_WAKE_TIMEOUT;
+    mbx_init_packet(MBX_MSG_BASE, 0u);
+    expect(selftest_mbx_send(mbx, MBX_MSG_BASE) == 0u, "MBX: SendMbx succeeds");
+    expect(b.tcb->state == TH_READY,
+           "MBX: the send passes over the timed-out receiver and wakes the blocked one");
+    for (int i = 0; i < 2; i++) {
+        s_cur = (int)(ctxs[i]->tcb - s_tcb);
+        ctxs[i]->tcb->state = TH_RUNNING;
+        sr_coro_switch(ctxs[i]->tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+    }
+    const int one_message = (a.returned && a.ret == 0u && MEM_R32(a.outptr) == MBX_MSG_BASE) !=
+                            (b.returned && b.ret == 0u && MEM_R32(b.outptr) == MBX_MSG_BASE);
+    expect(one_message, "MBX: exactly one receiver takes the single message");
+    (void)selftest_mbx_delete(mbx);
+    for (int i = 0; i < 2; i++) {
+        if (!ctxs[i]->returned && ctxs[i]->tcb->state == TH_READY) {
+            s_cur = (int)(ctxs[i]->tcb - s_tcb);
+            ctxs[i]->tcb->state = TH_RUNNING;
+            sr_coro_switch(ctxs[i]->tcb->coro);
+            s_cur = (int)(cur - s_tcb);
+        }
+        if (ctxs[i]->tcb->coro) { sr_coro_destroy(ctxs[i]->tcb->coro); ctxs[i]->tcb->coro = NULL; }
+    }
+    s_cur = -1;
+}
+
+/* ---- ReceiveMbxCB takes a message its own callback sent ----------------------------
+ * The receiver runs a pending callback before it blocks; the callback sends to the mailbox
+ * the receiver waits on. The send finds the receiver running, not blocked, so the receiver
+ * must take the message itself when its callbacks return.
+ * MUTANT: drop the message check after sr_thread_dispatch_callbacks -- the receiver blocks
+ * with the message queued and no sender left to wake it. */
+#define MBX_CB_ENTRY 0x089b8100u
+static uint32_t s_mbx_cb_box;
+static unsigned s_mbx_cb_calls;
+static void mbx_cb_send_fn(CpuState *cpu) {
+    s_mbx_cb_calls++;
+    mbx_init_packet(MBX_MSG_BASE + 0x40u, 0u);
+    cpu->r[4] = s_mbx_cb_box;
+    cpu->r[5] = MBX_MSG_BASE + 0x40u;
+    (void)sr_syscall(cpu, NID_MBX_SEND);
+    cpu->r[2] = 0u;
+}
+static void test_mbx_receive_cb_takes_callback_message(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x180u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    sr_test_register_guest_fn(MBX_CB_ENTRY, mbx_cb_send_fn);
+    s_mbx_cb_calls = 0;
+    s_mbx_cb_box = selftest_mbx_create(0);
+    SelftestMbxWaiterCtx w;
+    memset(&w, 0, sizeof w);
+    w.uid = 0x181u;
+    w.mbx_uid = s_mbx_cb_box;
+    w.outptr = MBX_OUTPTR;
+    w.is_cb = 1;
+    MEM_W32(MBX_OUTPTR, 0xfeedfaceu);
+    w.tcb = fixture_thread(w.uid, TH_READY, 40);
+    w.tcb->started = 1;
+    s_cur = (int)(w.tcb - s_tcb);
+    static const char name[] = "mbx-cb";
+    for (size_t k = 0; k < sizeof name; k++) MEM_W8(MBX_NAMEBUF + (uint32_t)k, (uint8_t)name[k]);
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = MBX_NAMEBUF; cpu.r[5] = MBX_CB_ENTRY; cpu.r[6] = 0u;
+    const uint32_t cb = sr_syscall(&cpu, NID_WSV_CREATE_CALLBACK);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb; cpu.r[5] = 1u;
+    expect(cb > 0 && sr_syscall(&cpu, NID_WSV_NOTIFY_CALLBACK) == 0u,
+           "MBX: the receiver's callback is created and pending");
+    w.tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, &w, (size_t)1 << 20);
+    w.tcb->state = TH_RUNNING;
+    sr_coro_switch(w.tcb->coro);
+    s_cur = (int)(cur - s_tcb);
+    expect(s_mbx_cb_calls == 1u, "MBX: ReceiveMbxCB runs the pending callback");
+    expect(w.returned && w.ret == 0u && MEM_R32(MBX_OUTPTR) == MBX_MSG_BASE + 0x40u,
+           "MBX: ReceiveMbxCB returns the message its callback sent instead of blocking");
+    expect(selftest_mbx_refer(s_mbx_cb_box, MBX_INFO) == 0 && MEM_R32(MBX_INFO + 40u) == 0u &&
+               MEM_R32(MBX_INFO + 44u) == 0u,
+           "MBX: no waiter and no message are left behind");
+    if (!w.returned) (void)selftest_mbx_delete(s_mbx_cb_box);
+    if (!w.returned) {
+        s_cur = (int)(w.tcb - s_tcb);
+        w.tcb->state = TH_RUNNING;
+        sr_coro_switch(w.tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+    } else {
+        (void)selftest_mbx_delete(s_mbx_cb_box);
+    }
+    sr_coro_destroy(w.tcb->coro); w.tcb->coro = NULL;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb;
+    (void)sr_syscall(&cpu, 0xedba5844u);   /* sceKernelDeleteCallback */
+    sr_test_guest_fn_reset();
+    s_cur = -1;
+}
+
+/* ---- ReferMbxStatus honours the caller's size word (PSP-KERNEL-STATUS-001) ---------
+ * mbx-size-zero writes nothing; mbx-size-8 and mbx-size-40 write exactly that many bytes of
+ * the record, whose size word reads back 0x34; mbx-size-full writes 52 bytes.
+ * MUTANT: write the full 52 bytes whatever the size -- the size-0 probe is overwritten and
+ * the bytes past a short size are clobbered. */
+static void test_mbx_refer_honours_size_word(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x190u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    uint32_t mbx = selftest_mbx_create(0x400u);
+    static const uint32_t sizes[4] = {0u, 8u, 40u, 52u};
+    for (int k = 0; k < 4; k++) {
+        char msg[160];
+        for (uint32_t i = 0; i < 64u; i++) MEM_W8(MBX_INFO + i, 0xa5u);
+        MEM_W32(MBX_INFO, sizes[k]);
+        CpuState cpu;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = mbx; cpu.r[5] = MBX_INFO;
+        const uint32_t rc = sr_syscall(&cpu, NID_MBX_REFER);
+        uint32_t first_changed = 64u;
+        for (uint32_t i = 0; i < 64u; i++) {
+            const uint8_t was = i < 4u ? (uint8_t)(sizes[k] >> (8u * i)) : 0xa5u;
+            if (MEM_R8(MBX_INFO + i) != was) { first_changed = i; break; }
+        }
+        int tail_untouched = 1;
+        for (uint32_t i = sizes[k]; i < 64u; i++)
+            if (i >= 4u && MEM_R8(MBX_INFO + i) != 0xa5u) tail_untouched = 0;
+        snprintf(msg, sizeof msg, "MBX: ReferMbxStatus size %u writes only min(size, 52) bytes",
+                 sizes[k]);
+        expect(rc == 0u && tail_untouched, msg);
+        if (sizes[k] == 0u) {
+            expect(first_changed == 64u, "MBX: ReferMbxStatus size 0 writes nothing (mbx-size-zero)");
+        } else {
+            snprintf(msg, sizeof msg, "MBX: ReferMbxStatus size %u reads the size word back as 0x34",
+                     sizes[k]);
+            expect(MEM_R32(MBX_INFO) == 52u, msg);
+        }
+    }
+    expect(MEM_R32(MBX_INFO + 36u) == 0x400u, "MBX: the full refer reports the attr");
+    (void)selftest_mbx_delete(mbx);
+    s_cur = -1;
+}
+
 /* =========================================================================
  * PSP Heavyweight Mutex Semantics and Lifetime Test Suite
  * ========================================================================= */
@@ -46287,7 +46858,8 @@ static void check_coroutine_lifecycle(void) {
         extern int s_msgpipe_parks;
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        extern int s_rv_parks;
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 2 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + 2 /* released delayers */ + s_rv_parks + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
         char msg[1536];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
@@ -46304,11 +46876,11 @@ static void check_coroutine_lifecycle(void) {
                  "+ 3 event-flag set/cancel waiters "
                  "+ 3 flight thread-snapshot waiters "
                  "+ 6 semaphore service-order waiters + 1 released LwMutex waiter "
-                 "+ 4 unwritable-timeout call bodies + 2 released sleepers "
-                 "+ %d returned conformance legs + %d mutex legs + %d pool legs + %d mailbox legs "
+                 "+ 4 unwritable-timeout call bodies + 2 released sleepers + 2 released delayers "
+                 "+ %d single-call bodies + %d returned conformance legs + %d mutex legs + %d pool legs + %d mailbox legs "
                  "+ %d Message Pipe waiter/owner legs + %d volatile-memory Lock waiters "
                  "+ %d controller read waiters = %d, observed %lu)",
-                 ic_expected_parks(), s_mtx_parks, s_pool_parks, s_mbx_parks,
+                 s_rv_parks, ic_expected_parks(), s_mtx_parks, s_pool_parks, s_mbx_parks,
                  s_msgpipe_parks, s_vm_parks, s_ctrlc_parks, expected_parks, s_parks);
         expect(s_parks == (unsigned long)expected_parks, msg);
     }
@@ -49784,6 +50356,20 @@ static void stopjoin_caller_body(CpuState *s) {
     sched_delay_current(50000u);   /* any stop thread still alive runs to its end here */
 }
 
+#define STOPJOIN_NOTDORMANT_STOP 0x089a00c0u
+/* The stop thread ends through sceKernelStopUnloadSelfModuleWithStatus, the one exit that
+ * keeps a raw status: ExitThread and a plain return latch a negative status to
+ * ILLEGAL_ARGUMENT, so only this path can end a stop thread with 0x800201A4. */
+static void stopjoin_notdormant_stop_fn(CpuState *s) {
+    s->r[4] = 0x800201a4u;
+    s->r[5] = 0u;
+    s->r[6] = 0u;
+    s->r[7] = 0u;
+    s->r[8] = 0u;
+    (void)sr_syscall(s, 0x8f2df740u);   /* sceKernelStopUnloadSelfModuleWithStatus */
+    s->r[2] = 0u;
+}
+
 /* The first call releases its caller's join and keeps running past it. */
 static void stopjoin_release_stop_fn(CpuState *s) {
     if (s_stopjoin_release_calls++ == 0u) {
@@ -49803,6 +50389,7 @@ static void test_module_stop_join_failure_keeps_stop_single(void) {
     sr_test_register_guest_fn(SYNTH_MOD_START, synth_module_start_fn);
     sr_test_register_guest_fn(SYNTH_MOD_STOP, synth_module_stop_fn);
     sr_test_register_guest_fn(STOPJOIN_RELEASE_STOP, stopjoin_release_stop_fn);
+    sr_test_register_guest_fn(STOPJOIN_NOTDORMANT_STOP, stopjoin_notdormant_stop_fn);
     sr_test_register_guest_fn(STOPJOIN_CALLER_ENTRY, stopjoin_caller_body);
     s_synth_start_calls = 0;
     s_synth_stop_calls = 0;
@@ -49838,6 +50425,23 @@ static void test_module_stop_join_failure_keeps_stop_single(void) {
            "stop join: a released join leaves the module stopping, not started");
     expect(s_stopjoin_release_calls == 1u,
            "stop join: module_stop runs once although the caller's join was released");
+
+    /* A module_stop thread that ended with status NOT_DORMANT (0x800201A4) has ended: its
+     * status is a value like any other, not a sign that the stop thread still runs.
+     * MUTANT: compare the exit status with NOT_DORMANT again -- the stop is reported as
+     *   interrupted, the module stays STOPPING and the second StopModule answers
+     *   ALREADY_STOPPING. */
+    s_stopjoin_uid = sr_hle_test_register_module("stopjoin_notdormant.prx", SYNTH_MOD_START,
+                                                 STOPJOIN_NOTDORMANT_STOP);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = s_stopjoin_uid;
+    expect(s_stopjoin_uid != 0u && sr_syscall(&cpu, 0x50f0c1ecu) == 0,
+           "stop join: the NOT_DORMANT-status module starts");
+    s_stopjoin_dispatch = 0;
+    s_stopjoin_rc[0] = s_stopjoin_rc[1] = 0xFFFFFFFFu;
+    sched_run(STOPJOIN_CALLER_ENTRY, 0u, 0u);
+    expect(s_stopjoin_rc[0] == 0u && s_stopjoin_rc[1] == SCE_KERNEL_ERROR_ALREADY_STOPPED,
+           "stop join: a module_stop thread ending with status 0x800201A4 stops the module once");
 
     hle_test_setenv("SR_REAL_MODULE_START", "0");
     sr_test_guest_fn_reset();
@@ -59486,6 +60090,10 @@ static int hle_selftest_main(int argc, char **argv) {
     test_hle_liveness_timeout_cancel_delete();
     test_hle_liveness_queue_full_empty();
     test_cancel_release_wake_results();
+    test_terminate_from_interrupt_handler();
+    test_sema_timed_wait_writes_time_left();
+    test_lwmutex_waiter_order();
+    test_lock_lwmutex_cb_runs_callbacks();
     test_umd_cancel_wait_drive_stat();
     test_evf_cb_immediate();
     test_evf_cancel_outputs();
@@ -59589,6 +60197,10 @@ static int hle_selftest_main(int argc, char **argv) {
     test_std_handles_measured();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
+    test_mbx_has_no_host_table_limits();
+    test_mbx_send_wakes_a_blocked_receiver();
+    test_mbx_receive_cb_takes_callback_message();
+    test_mbx_refer_honours_size_word();
     test_intr_context_conformance();
     test_mpeg_create_refused_in_interrupt();
     test_psp_mutex();

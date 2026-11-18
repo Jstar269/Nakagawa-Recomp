@@ -833,7 +833,7 @@ class LiveManifestTests(unittest.TestCase):
                 if handler == "h_ClearEventFlag":
                     self.assertIn("0x8002019A", meta.HANDLER_LIMITATIONS[handler])
                 if handler == "h_DeleteFpl":
-                    self.assertIn("returns success", meta.HANDLER_LIMITATIONS[handler])
+                    self.assertIn("UNKNOWN_FPLID", meta.HANDLER_LIMITATIONS[handler])
 
     def test_route_a_kernel_lifecycle_batch_four_has_evidence_and_named_limits(self) -> None:
         expected = {

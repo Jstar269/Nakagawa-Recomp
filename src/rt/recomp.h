@@ -2787,6 +2787,10 @@ void     sched_delay_current(uint64_t usec);        /* block current thread for 
  * causes: when another thread is ready then, of any priority, that thread is dispatched first.
  * For the Ace load skip (nk_ace_load_skip_wait); see the definition in sched.c. */
 void     sched_delay_current_dispatching(uint64_t usec);
+/* sceKernelDelayThread[CB]'s own delay: 1 + the result when sceKernelReleaseWaitThread ended it
+ * (sched_release_thread_delay), 0 when it ran its course. */
+int      sched_delay_thread_current(uint64_t usec, uint32_t *result_out);
+int      sched_release_thread_delay(uint32_t thread_uid, uint32_t result);
 void     sched_preempt(void);                       /* yield now if a higher-priority thread is ready */
 /* Set by the preemption timer when a stronger thread's deadline comes. A long HLE call polls it
  * between units of work and, where the thread that runs cannot reach the call's own state (for
@@ -3036,7 +3040,10 @@ static inline SrResumeStatus sched_resume_describe(uint32_t uid, SrResumeFrame *
     }
     return sr_resume_describe(stack, s_cpu, frames, capacity, count, detail, detail_cap);
 }
-void     sched_run(uint32_t entry, uint32_t arglen, uint32_t argp);  /* run from the entry thread */
+/* Run from the entry thread. 0 when the scheduler loop ends; SCHED_RUN_NO_ENTRY_THREAD when the
+ * entry (module_start) thread could not be created and no guest thread ran. */
+#define SCHED_RUN_NO_ENTRY_THREAD 1
+int      sched_run(uint32_t entry, uint32_t arglen, uint32_t argp);
 
 /* PSP callback ABI: SceKernelCallbackFunction(int count, int arg, void *common).
  * PPSSPP (__KernelRunCallbackOnThread) passes { notifyCount, notifyArg, commonArgument },

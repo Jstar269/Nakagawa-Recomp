@@ -899,7 +899,8 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/threads/lwmutex/refer.expected (the sceKernelReferLwMutexStatusByID block: the same fields and sizes as by workarea)
   - Evidence: tests/native/hle_thread_selftest.c:test_td24d_hle_batch
 - **`h_ReferMbxStatus`** (`sceKernel`): `sceKernelReferMbxStatus` (0xa8e8c846)
-  - Limitation: size-field caller contract (whether Refer preserves or overwrites size) unmeasured (#339, #341)
+  - Limitation: the cited cells establish bytes written and size-word behavior at four buffer sizes; full field values, unknown UID codes, invalid pointers, and error precedence are not established by that size row (#339, #341)
+  - Evidence: docs/HARDWARE_ORACLE.md (PSP-KERNEL-STATUS-001: mbx-size-zero, mbx-size-8, mbx-size-40, and mbx-size-full)
 - **`h_ReferMsgPipeStatus`** (`sceKernel`): `sceKernelReferMsgPipeStatus` (0x33be4024)
   - Limitation: reports name, attr, buffer size, free size and the active send and receive waiter counts for a known pipe, honours a short or zero size word and checks the whole span before writing; the unknown-UID and NULL-pointer codes and error precedence are source-selftested, not hardware measured (#1381)
   - Evidence: public ABI (PSPSDK pspthreadman.h: SceKernelMppInfo, 56 bytes)
@@ -936,7 +937,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/intr/releasesub.expected and enablesub.expected at f573fe8c (the code for every line and VBLANK sub-interrupt -2 to 69; NOTFOUND_HANDLER for a number never registered, released or NULL-registered; Release clears the enable state)
   - Evidence: tests/native/hle_thread_selftest.c:test_vblank_subintr_measured_codes
 - **`h_ReleaseWaitThread`** (`sceKernel`): `sceKernelReleaseWaitThread` (0x2c34e053)
-  - Limitation: the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established
+  - Limitation: the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established; a DelayThread wait is released with WAIT_RELEASE as PPSSPP does (PPSSPP-derived, not PSP-measured), and a ready, dormant or runtime-internally delayed target stops by name
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-B3-01: ReleaseWaitThread wakes a blocked target with WAIT_RELEASE)
 - **`h_ResumeDispatchThread`** (`sceKernel`): `sceKernelResumeDispatchThread` (0x27e22ec2)
   - Limitation: Resume with the token 1 is measured; other token values are not (#341)
@@ -1024,7 +1025,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: PSPAutotests tests/threads/threads/terminate.expected (sceKernelTerminateDeleteThread: created, ready, finished, suspended and waiting threads 0; 0 and the current thread 0x80020197; the id answers 0x80020198 afterwards)
   - Evidence: tests/native/hle_thread_selftest.c:test_issue339_terminate_waiting_thread
 - **`h_TerminateThread`** (`sceKernel`): `sceKernelTerminateThread` (0x616403ba)
-  - Limitation: the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341)
+  - Limitation: the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341); from an interrupt handler the call answers ILLEGAL_CONTEXT for a compiled SDK version of 3.08 or later (PPSSPP-derived, not PSP-measured) and stops by name for an earlier one
   - Evidence: PSPAutotests tests/threads/threads/terminate.expected (unknown and deleted ids 0x80020198; 0 and the current thread 0x80020197; created and finished threads 0x800201a2; ready, suspended and waiting threads 0; a thread waiting for the end wakes with 0x800201ac)
   - Evidence: tests/native/hle_thread_selftest.c:test_issue339_terminate_waiting_thread
 - **`h_TryAllocateFpl`** (`sceKernel`): `sceKernelTryAllocateFpl` (0x623ae665)
@@ -1059,7 +1060,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
 - **`h_USec2SysClockWide`** (`sceKernel`): `sceKernelUSec2SysClockWide` (0xc8cd158c)
   - Limitation: returns the unsigned microsecond duration in $v0 with a zero $v1 high word under the runtime's microsecond SceKernelSysClock representation; hardware conversion is not measured
 - **`h_UnlockLwMutex`** (`sceKernel`): `sceKernelUnlockLwMutex` (0x15b6446b), `_sceKernelUnlockLwMutex` (0xbeed3a47)
-  - Limitation: owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured
+  - Limitation: owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured: waiters are served in arrival order, or by current priority under attr 0x100 (PPSSPP-derived, not PSP-measured)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 LwMutex cells)
 - **`h_UnlockMutex`** (`sceKernel`): `sceKernelUnlockMutex` (0x6b30100f)
   - Limitation: the cited cases cover owner release in the priority-inheritance control and interrupt-context refusal; invalid UIDs, bad counts, and multi-waiter priority ordering are not established
@@ -1078,7 +1079,7 @@ Semantic handler census: **601** handlers across **30** API families, covering *
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-WAIT-001: event signal/cancel before deadline and late dispatch)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01: event flag poll/wait modes and outputs)
 - **`h_WaitSema`** (`sceKernel`): `sceKernelWaitSema` (0x4e3a1105)
-  - Limitation: the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established
+  - Limitation: the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established; the time left written back after a satisfied timed wait is PPSSPP-derived, not PSP-measured
   - Evidence: docs/HARDWARE_ORACLE.md (PSP-WAIT-001: semaphore signal/cancel before deadline and late dispatch)
   - Evidence: docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01: semaphore count and wait results)
 - **`h_WaitThreadEnd`** (`sceKernel`): `sceKernelWaitThreadEnd` (0x278c0df5)
