@@ -15,6 +15,7 @@ hot-link arbitrary third-party images or tracking pixels.
 from __future__ import annotations
 
 import contextlib
+from html.parser import HTMLParser
 import io
 import json
 import pathlib
@@ -41,10 +42,61 @@ EXPECTED_HEIGHT = 272
 MAX_PNG_BYTES = 100 * 1024
 MAX_GIF_BYTES = 1_000_000
 
-MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
-HTML_IMAGE_RE = re.compile(r"<img[^>]*src=\"([^\"]+)\"", re.IGNORECASE)
-# Remote images the README may show: status badges from these services only.
-HTML_SOURCE_RE = re.compile(r'<source[^>]*srcset="([^"]+)"', re.IGNORECASE)
+# Markdown images: inline `![alt](dest "title")` (the destination may be padded or in <angle brackets>),
+# and the reference forms `![alt][label]`, `![alt][]` and `![alt]` resolved through `[label]: dest`.
+MARKDOWN_INLINE_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*(?:<([^>\n]*)>|([^)\s]+))[^)]*\)")
+MARKDOWN_REFERENCE_IMAGE_RE = re.compile(r"!\[([^\]]*)\](?:\[([^\]]*)\])?(?![(\[:])")
+MARKDOWN_DEFINITION_RE = re.compile(r"^ {0,3}\[([^\]]+)\]:[ \t]*(?:<([^>\n]*)>|(\S+))", re.MULTILINE)
+
+
+class _HtmlImageSources(HTMLParser):
+    """Every URL an HTML image element can fetch, in any attribute quoting (or none)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.urls: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in ("img", "source", "image", "input"):
+            return
+        for name, value in attrs:
+            if value is None:
+                continue
+            if name in ("src", "href", "xlink:href") and value.strip():
+                self.urls.append(value.strip())
+            elif name == "srcset":
+                # Candidates are comma-separated, each a URL then an optional width or density.
+                self.urls.extend(candidate.split()[0] for candidate in value.split(",") if candidate.split())
+
+    handle_startendtag = handle_starttag
+
+
+def _reference_label(label: str) -> str:
+    return " ".join(label.split()).casefold()
+
+
+def image_references(text: str) -> list[str]:
+    """Every image URL README text embeds, whatever its Markdown or HTML form.
+
+    The remote-image allowlist is only as good as this list: a form it misses is a tracking pixel
+    the allowlist never sees, so it covers inline and reference Markdown images and every HTML
+    image attribute, quoted or not.
+    """
+    references = [angled or bare for angled, bare in MARKDOWN_INLINE_IMAGE_RE.findall(text)]
+    definitions: dict[str, str] = {}
+    for label, angled, bare in MARKDOWN_DEFINITION_RE.findall(text):
+        definitions.setdefault(_reference_label(label), angled or bare)
+    for alt, label in MARKDOWN_REFERENCE_IMAGE_RE.findall(text):
+        target = definitions.get(_reference_label(label or alt))
+        if target is not None:
+            references.append(target)
+    parser = _HtmlImageSources()
+    parser.feed(text)
+    parser.close()
+    references.extend(parser.urls)
+    return references
+
+
 BRAND_MARKS = {
     "docs/images/brand/nakagawa-mark-dark.svg",
     "docs/images/brand/nakagawa-mark-light.svg",
@@ -56,6 +108,7 @@ MAX_SHARE_CARD_BYTES = 300 * 1024
 # GitHub, Scorecard and Codecov resolve the owner and repository name in any letter case, so the canonical
 # Jstar269/Nakagawa-Recomp and the lowercase spelling name the same project.
 REPOSITORY_RE = r"(?i:Jstar269/nakagawa-recomp)"
+# Remote images the README may show: status badges from these services only.
 BADGE_URL_RES = (
     re.compile(rf"https://github\.com/{REPOSITORY_RE}/actions/workflows/[\w.-]+\.ya?ml/badge\.svg(\?[\w=&%.-]*)?"),
     re.compile(r"https://img\.shields\.io/[\w./%+-]+(\?[\w=&%.:/-]*)?"),
@@ -142,11 +195,7 @@ def read_gif_metadata(data: bytes) -> tuple[int, int, int, bool]:
 class ReadmeImageTests(unittest.TestCase):
     def test_every_referenced_image_exists(self) -> None:
         text = README.read_text(encoding="utf-8")
-        references = (
-            MARKDOWN_IMAGE_RE.findall(text)
-            + HTML_IMAGE_RE.findall(text)
-            + HTML_SOURCE_RE.findall(text)
-        )
+        references = image_references(text)
         self.assertTrue(references, "README embeds no images")
         for reference in references:
             with self.subTest(image=reference):
@@ -184,6 +233,32 @@ class ReadmeImageTests(unittest.TestCase):
         for url in refused:
             with self.subTest(url=url):
                 self.assertFalse(any(p.fullmatch(url) for p in BADGE_URL_RES))
+
+    def test_every_remote_image_form_reaches_the_badge_allowlist(self) -> None:
+        tracker = "https://tracker.example/p.gif"
+        forms = (
+            f'<img src="{tracker}">',
+            f"<img src='{tracker}'>",
+            f"<img src={tracker}>",
+            f"<IMG alt=x SRC = {tracker} />",
+            f'<img srcset="{tracker}">',
+            f'<img src="docs/images/showcase-breakout.gif" srcset="docs/images/a.gif 1x, {tracker} 2x">',
+            f"<picture><source media='(prefers-color-scheme: dark)' srcset={tracker}></picture>",
+            f"![x]({tracker})",
+            f"![x]( {tracker} )",
+            f'![x]({tracker} "title")',
+            f"![x](<{tracker}>)",
+            f"![x][t]\n\n[t]: {tracker}",
+            f'![x][T]\n\n[t]: <{tracker}> "title"',
+            f"![t][]\n\n[t]: {tracker}",
+            f"![t]\n\n  [t]: {tracker}",
+        )
+        for form in forms:
+            with self.subTest(form=form):
+                self.assertIn(tracker, image_references(form))
+                self.assertFalse(any(p.fullmatch(tracker) for p in BADGE_URL_RES))
+        # A link is not an image, and a reference with no definition fetches nothing.
+        self.assertEqual(image_references(f"[x]({tracker}) ![x][missing] [t]: {tracker}"), [])
 
     def test_published_images_are_native_sized_and_small(self) -> None:
         # The README shows the showcase demos as GIFs (checked below); its last two

@@ -410,6 +410,28 @@ class PerCallPathsReadNoEnvironmentTests(unittest.TestCase):
         self.assertIn('getenv("SCHED_DUMP")', body[: body.index("for (;;)")])
 
 
+#: `make sched-selftest` (every configuration, in the hosted native legs) exports the exact binary it
+#: just built and runs the two execution tests below against it. Without it there is no binary to
+#: trust: a glob of build/ can find a stale or unrelated artifact, so the tests skip and say why.
+SCHED_SELFTEST_EXE_ENV = "NK_SCHED_SELFTEST_EXE"
+SCHED_SELFTEST_EXECUTION_TESTS = (
+    "tools.test_sched_invariants.NovbpaceSemanticsTests.test_pace_setup_binary_execution",
+    "tools.test_sched_invariants.PauseRuntimeAssertionTests.test_time_refresh_aborts_inside_the_pause_loop",
+)
+
+
+def sched_selftest_exe(case: unittest.TestCase) -> str:
+    """The binary `make sched-selftest-one` built; a named variable that points nowhere fails."""
+    exe = os.environ.get(SCHED_SELFTEST_EXE_ENV, "")
+    if not exe:
+        case.skipTest(f"run through `make sched-selftest`, which sets {SCHED_SELFTEST_EXE_ENV}")
+    path = Path(exe)
+    if not path.is_absolute():
+        path = ROOT / path
+    case.assertTrue(path.is_file(), f"{SCHED_SELFTEST_EXE_ENV}={exe} names no built selftest")
+    return str(path)
+
+
 class NovbpaceSemanticsTests(unittest.TestCase):
     """SR_NOVBPACE must enforce value semantics: unset/empty/'0' = paced, '1' = turbo, any other refused."""
 
@@ -422,13 +444,7 @@ class NovbpaceSemanticsTests(unittest.TestCase):
         self.assertIn("SR_NOVBPACE: invalid value", body)
 
     def test_pace_setup_binary_execution(self):
-        bin_candidates = list((ROOT / "build").glob("**/sched_selftest*.exe"))
-        if not bin_candidates:
-            bin_candidates = list((ROOT / "build").glob("**/sched_selftest*"))
-        if not bin_candidates:
-            self.skipTest("sched_selftest executable not found; skipping binary execution test")
-
-        exe = str(bin_candidates[0])
+        exe = sched_selftest_exe(self)
 
         # Unset -> paced (s_pace_on=1)
         env = {k: v for k, v in os.environ.items() if k != "SR_NOVBPACE"}
@@ -711,15 +727,9 @@ def _posix_classes_to_python(pattern):
 
 class PauseRuntimeAssertionTests(unittest.TestCase):
     def test_time_refresh_aborts_inside_the_pause_loop(self):
-        candidates = (
-            ROOT / "build" / "hst" / "sched_selftest_generic.exe",
-            ROOT / "build" / "hst" / "sched_selftest_generic",
-        )
-        binary = next((path for path in candidates if path.is_file()), None)
-        if binary is None:
-            self.skipTest("sched-selftest binary has not been built")
+        binary = sched_selftest_exe(self)
         result = subprocess.run(
-            [str(binary), "--pause-forbidden-vtime"], cwd=ROOT, text=True,
+            [binary, "--pause-forbidden-vtime"], cwd=ROOT, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10, check=False,
         )
         self.assertNotEqual(result.returncode, 0, "vtime_refresh unexpectedly ran while paused")
@@ -727,6 +737,23 @@ class PauseRuntimeAssertionTests(unittest.TestCase):
             "sched pause invariant: vtime_refresh ran while the guest was paused",
             result.stdout,
         )
+
+
+
+class SchedSelftestExecutionGateTests(unittest.TestCase):
+    """`make sched-selftest-one` runs the argv-only modes against the binary it just built."""
+
+    def test_the_selftest_recipe_runs_the_execution_tests_on_its_own_binary(self):
+        makefile = read_makefile(ROOT)
+        exe = "$(BUILD_DIR)/sched_selftest_$(SCHED_SELFTEST_CONFIG).exe"
+        self.assertIn(f"sched-selftest-one: export {SCHED_SELFTEST_EXE_ENV} = {exe}\n", makefile)
+        start = makefile.index("\nsched-selftest-one: $(TITLE_CONFIG_TOOL)")
+        recipe = makefile[start:makefile.index("\n\n", start)]
+        self.assertIn(f"\t{exe}\n", recipe)
+        run = '\t"$(PYTHON)" -m unittest ' + " ".join(SCHED_SELFTEST_EXECUTION_TESTS)
+        self.assertIn(run, recipe)
+        # The binary runs first, so the execution tests see the build that just passed.
+        self.assertLess(recipe.index(f"\t{exe}\n"), recipe.index(run))
 
 
 if __name__ == "__main__":

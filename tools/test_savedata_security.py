@@ -1315,6 +1315,48 @@ def _run(exe, *args, timeout=10):
         return None
 
 
+# A mutant runs the same harness as the production cases, with a budget that a loaded runner cannot
+# spuriously exceed; the slowest mutant (an unbounded, wrapping GETSIZE count) needs a few seconds.
+MUTANT_TIMEOUT = 60
+
+
+def _mutant_outcome(run, expected):
+    """Classify one mutant run; only ``KILLED`` is a kill (AGENTS.md section 6).
+
+    A kill is the harness's own failure exit (1) with the CHECK message the mutant exists to trip.
+    A timeout, a crash, a setup exit (2) or a failure for another reason proves nothing about the
+    defect the mutant injects, so each is reported as itself and fails the matrix.
+    """
+    if run is None:
+        return "TIMEOUT"
+    if run.returncode == 0:
+        return "SURVIVED"
+    if run.returncode != 1:
+        return f"FAILED({run.returncode})"
+    if "FAIL: " + expected not in run.stdout:
+        return "WRONG_REASON"
+    return "KILLED"
+
+
+class TestMutantOutcome(unittest.TestCase):
+    """Only the harness's failure exit with the named CHECK counts as a kill."""
+
+    @staticmethod
+    def _proc(returncode, stdout=""):
+        return subprocess.CompletedProcess(["harness"], returncode, stdout, "")
+
+    def test_only_the_named_check_failure_is_a_kill(self):
+        expected = "final symlink LOAD must fail closed"
+        failed = "FAIL: final symlink LOAD must fail closed\nsecurity_selftest: 1 FAILURE(S)\n"
+        self.assertEqual(_mutant_outcome(self._proc(1, failed), expected), "KILLED")
+        self.assertEqual(_mutant_outcome(None, expected), "TIMEOUT")
+        self.assertEqual(_mutant_outcome(self._proc(0, "security_selftest: OK\n"), expected), "SURVIVED")
+        self.assertEqual(_mutant_outcome(self._proc(-11), expected), "FAILED(-11)")
+        self.assertEqual(_mutant_outcome(self._proc(2), expected), "FAILED(2)")
+        other = "FAIL: ordinary SAVE must succeed\nsecurity_selftest: 1 FAILURE(S)\n"
+        self.assertEqual(_mutant_outcome(self._proc(1, other), expected), "WRONG_REASON")
+
+
 class TestSavedataSecurityShape(unittest.TestCase):
     # Every savedata function that opens a file: its marker and the text that follows it.
     STORAGE_OPENS = (("static int sd_write_new", "/* Rename `from` to `to`"),
@@ -1469,46 +1511,50 @@ class TestSavedataSecurityProduction(unittest.TestCase):
         self.assertIn(write_block, original_savedata)
         self.assertIn(read_block, original_savedata)
 
+        getsize_guard = (
+            "if (!span || count > SAVEDATA_MAX_FILE_ENTRIES ||\n"
+            "        !sr_size_mul_ok(count, SAVEDATA_SIZE_ENTRY_BYTES, span)) {"
+        )
+        self.assertIn(getsize_guard, original_savedata)
+        # Each mutant names the CHECK it must trip: a failure for any other reason is not a kill.
         mutants = [
             ("path-fopen", original_savedata.replace(write_block, unsafe_write, 1)
-             .replace(read_block, unsafe_read), original_seam, "open"),
+             .replace(read_block, unsafe_read), original_seam, "open",
+             "final symlink LOAD must fail closed"),
             ("final-no-follow", original_savedata, original_seam.replace(
                 "int flags = O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;",
-                "int flags = O_CLOEXEC | O_NONBLOCK;", 1), "open"),
+                "int flags = O_CLOEXEC | O_NONBLOCK;", 1), "open",
+             "replacement after validation must be rejected by the final open"),
             ("intermediate-no-follow", original_savedata, original_seam.replace(
                 "return openat(parent, comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);",
-                "return openat(parent, comp, O_RDONLY | O_DIRECTORY | O_CLOEXEC);", 1), "open"),
+                "return openat(parent, comp, O_RDONLY | O_DIRECTORY | O_CLOEXEC);", 1), "open",
+             "intermediate symlink SAVE must fail closed"),
             ("getsize-bound", original_savedata.replace(
-                "if (!span || count > SAVEDATA_MAX_FILE_ENTRIES ||\n"
-                "        !sr_size_mul_ok(count, SAVEDATA_SIZE_ENTRY_BYTES, span)) {",
+                getsize_guard,
                 "if (!span || !sr_size_mul_ok(count, SAVEDATA_SIZE_ENTRY_BYTES, span)) {", 1),
-             original_seam, "getsize"),
+             original_seam, "getsize", "one-past GETSIZE count must fail before output"),
+            # The span is still written, as a wrapping product: dropping the checked multiply
+            # must not leave it uninitialised, or the mutant exercises undefined behaviour instead.
             ("getsize-overflow", original_savedata.replace(
-                "if (!span || count > SAVEDATA_MAX_FILE_ENTRIES ||\n"
-                "        !sr_size_mul_ok(count, SAVEDATA_SIZE_ENTRY_BYTES, span)) {",
-                "if (!span) {", 1), original_seam, "getsize"),
+                getsize_guard,
+                "if (!span || (*span = count * SAVEDATA_SIZE_ENTRY_BYTES, 0)) {", 1),
+             original_seam, "getsize", "count-times-entry overflow must fail pre-loop"),
             ("getsize-span-order", original_savedata.replace(
                 "if (!sr_guest_span_readable(si, SAVEDATA_SIZE_INFO_BYTES) ||\n"
                 "        !sr_guest_span_writable(si, SAVEDATA_SIZE_INFO_BYTES)) return 0x80110381u;",
-                "/* nested output span validation removed */", 1), original_seam, "getsize"),
+                "/* nested output span validation removed */", 1), original_seam, "getsize",
+             "too-small output span must fail before scalar writes"),
         ]
 
-        survivors = []
         outcomes = {}
-        for name, savedata, seam, mode in mutants:
+        for name, savedata, seam, mode, expected in mutants:
             with scratch_dir.TemporaryDirectory(prefix="savedata_mutant_") as tmp:
                 exe = _build(tmp, savedata_override=savedata, seam_override=seam,
                              hooks=(mode == "open"))
-                run = _run(exe, mode, tmp, timeout=3)
-                if run is None:
-                    outcomes[name] = "TIMEOUT"
-                elif run.returncode == 0:
-                    outcomes[name] = "SURVIVED"
-                    survivors.append(name)
-                else:
-                    outcomes[name] = f"FAILED({run.returncode})"
-        self.assertEqual(survivors, [], "savedata security mutants survived: " + repr(outcomes))
-        self.assertEqual(set(outcomes), {name for name, *_ in mutants}, repr(outcomes))
+                run = _run(exe, mode, tmp, timeout=MUTANT_TIMEOUT)
+                outcomes[name] = _mutant_outcome(run, expected)
+        self.assertEqual(outcomes, {name: "KILLED" for name, *_ in mutants},
+                         "savedata security mutants not killed for their stated reason")
 
     @unittest.skipIf(os.name == "nt", "write-order mutant matrix runs in the WSL POSIX lane")
     def test_write_order_mutants_are_killed(self):
@@ -1533,43 +1579,39 @@ class TestSavedataSecurityProduction(unittest.TestCase):
         unsafe_write = UNSAFE_WRITE_OPEN
         self.assertIn(write_block, original_savedata)
 
+        # Each mutant names the CHECK it must trip: a failure for any other reason is not a kill.
         mutants = [
             ("O_TRUNC", original_seam.replace(
                 "        flags |= O_WRONLY | O_CREAT;\n",
                 "        flags |= O_WRONLY | O_CREAT | O_TRUNC;\n", 1),
-             original_savedata, "order", True),
+             original_savedata, "order", True, "the truncating open must not request O_TRUNC"),
             ("NO_FTRUNCATE", original_seam.replace(
                 ftruncate_block, "    /* post-validation ftruncate removed */\n", 1),
-             original_savedata, "order", True),
+             original_savedata, "order", True, "the truncated file must hold exactly the new bytes"),
             ("EARLY_FTRUNCATE", original_seam.replace(
                 regular_check + ftruncate_block, ftruncate_block + regular_check, 1),
-             original_savedata, "order", True),
+             original_savedata, "order", True, "non-regular final object must not be truncated"),
             ("FINAL_SYMLINK", original_seam.replace(
                 "int flags = O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;",
                 "int flags = O_CLOEXEC | O_NONBLOCK;", 1),
-             original_savedata, "open", False),
+             original_savedata, "open", False,
+             "replacement after validation must be rejected by the final open"),
             # A path fopen of the staging file: the write-order case requires every file a
             # SAVE creates to be an exclusive, no-follow openat.
             ("PATH_FOPEN", original_seam,
-             original_savedata.replace(write_block, unsafe_write, 1), "order", True),
+             original_savedata.replace(write_block, unsafe_write, 1), "order", True,
+             "every file a SAVE creates is created with O_EXCL and O_NOFOLLOW, never O_TRUNC"),
         ]
 
-        survivors = []
         outcomes = {}
-        for name, seam, savedata, mode, instrumented in mutants:
+        for name, seam, savedata, mode, instrumented, expected in mutants:
             with scratch_dir.TemporaryDirectory(prefix="savedata_order_mutant_") as tmp:
                 exe = _build(tmp, savedata_override=savedata, seam_override=seam,
                              hooks=(mode == "open"), order=instrumented)
-                run = _run(exe, mode, tmp, timeout=10)
-                if run is None:
-                    outcomes[name] = "TIMEOUT"
-                elif run.returncode == 0:
-                    outcomes[name] = "SURVIVED"
-                    survivors.append(name)
-                else:
-                    outcomes[name] = f"FAILED({run.returncode})"
-        self.assertEqual(survivors, [], "savedata write-order mutants survived: " + repr(outcomes))
-        self.assertEqual(set(outcomes), {name for name, *_ in mutants}, repr(outcomes))
+                run = _run(exe, mode, tmp, timeout=MUTANT_TIMEOUT)
+                outcomes[name] = _mutant_outcome(run, expected)
+        self.assertEqual(outcomes, {name: "KILLED" for name, *_ in mutants},
+                         "savedata write-order mutants not killed for their stated reason")
 
 
 if __name__ == "__main__":

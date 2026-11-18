@@ -16,6 +16,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+# `python -m unittest tools.test_soak_audit` (AGENTS.md, contrib-check) runs from the repository root, where tools/
+# is not on the path; discovery with `-s tools` puts it there. Add it so both find the sibling module.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hle_sources  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]

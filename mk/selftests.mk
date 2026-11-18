@@ -15,11 +15,16 @@ SCHED_SELFTEST_DIR := $(BUILD_DIR)/title-config/$(SCHED_SELFTEST_CONFIG)
 SCHED_SELFTEST_MANIFEST := $(SCHED_SELFTEST_MANIFEST_$(SCHED_SELFTEST_CONFIG))
 SCHED_SELFTEST_CONFIG_ARG := $(if $(strip $(SCHED_SELFTEST_MANIFEST)),--manifest $(strip $(SCHED_SELFTEST_MANIFEST)),)
 
+# The argv-only modes (--test-pace-setup: the SR_NOVBPACE values, invalid ones exit; and
+# --pause-forbidden-vtime: vtime_refresh aborts while paused) cannot run in-process, so the two
+# execution tests in tools/test_sched_invariants.py run them against the binary just built.
+sched-selftest-one: export NK_SCHED_SELFTEST_EXE = $(BUILD_DIR)/sched_selftest_$(SCHED_SELFTEST_CONFIG).exe
 sched-selftest-one: $(TITLE_CONFIG_TOOL) tools/title_manifest.py src/rt/nested_frames.c src/rt/nested_frames.h
 	"$(PYTHON)" $(TITLE_CONFIG_TOOL) $(SCHED_SELFTEST_CONFIG_ARG) --output $(SCHED_SELFTEST_DIR)/sr_title_config.h
 	$(CC) $(CFLAGS) -I$(SCHED_SELFTEST_DIR) -DSR_SCHED_LIVENESS_TEST $(LDFLAGS) -o $(BUILD_DIR)/sched_selftest_$(SCHED_SELFTEST_CONFIG).exe \
 		tests/native/sched_selftest.c src/rt/nested_frames.c src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/title_config.c src/rt/ace.c $(LIBS)
 	$(BUILD_DIR)/sched_selftest_$(SCHED_SELFTEST_CONFIG).exe
+	"$(PYTHON)" -m unittest tools.test_sched_invariants.NovbpaceSemanticsTests.test_pace_setup_binary_execution tools.test_sched_invariants.PauseRuntimeAssertionTests.test_time_refresh_aborts_inside_the_pause_loop
 
 # selftest-repeat — rerun the already built scheduler and HLE thread selftests until one fails
 # (#1846). A rare ordering bug in the cooperative scheduler or the thread HLE can pass the single
