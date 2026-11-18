@@ -966,26 +966,43 @@ def capture(sf: SceneFile, exe: Path, runs: int, replace: bool, keep_work: bool 
                 disagree.add(a.scene)
     settings = capture_settings(ini)
     sf.out.mkdir(parents=True, exist_ok=True)
-    for shot in first.shots:
-        if shot.scene in disagree:
-            # A reference this run was asked to replace must not survive as if it still held.
-            for stale in (sf.out / f"{shot.scene}.png", sf.out / f"{shot.scene}.png.json"):
-                stale.unlink(missing_ok=True)
-            verdicts.append((shot.scene, f"{FAIL} nondeterministic (PPSSPP runs differ; "
-                                         "no reference stored)"))
-            continue
-        ref = sf.out / f"{shot.scene}.png"
-        write_png(ref, shot.picture)
-        meta = {"tool": TOOL_NAME, "tool_version": TOOL_VERSION, "ppsspp_version": first.version,
-                "title": sf.title, "frame": shot.frame, "emulated_us": shot.us,
-                "rtc": sf.rtc, "runs": runs, "width": shot.picture.width,
-                "height": shot.picture.height,
-                "sha256": hashlib.sha256(shot.picture.pixels).hexdigest(),
-                "ini": settings}
-        Path(str(ref) + ".json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n",
-                                            encoding="utf-8")
-        verdicts.append((shot.scene, f"CAPTURED {shot.picture.width}x{shot.picture.height} "
-                                     f"v{shot.frame} ({runs} run{'s' if runs > 1 else ''})"))
+    # Every picture and sidecar is staged beside its final name first; the stored set
+    # changes only once all of them are written, so a failed write leaves the previous
+    # references whole instead of a mix no single capture produced.
+    staged: list[tuple[Path, Path]] = []
+    stale: list[Path] = []
+    try:
+        for shot in first.shots:
+            if shot.scene in disagree:
+                # A reference this run was asked to replace must not survive as if it still held.
+                stale += [sf.out / f"{shot.scene}.png", sf.out / f"{shot.scene}.png.json"]
+                verdicts.append((shot.scene, f"{FAIL} nondeterministic (PPSSPP runs differ; "
+                                             "no reference stored)"))
+                continue
+            ref = sf.out / f"{shot.scene}.png"
+            picture = sf.out / f".{shot.scene}.png.partial"
+            staged.append((picture, ref))
+            write_png(picture, shot.picture)
+            meta = {"tool": TOOL_NAME, "tool_version": TOOL_VERSION,
+                    "ppsspp_version": first.version, "title": sf.title, "frame": shot.frame,
+                    "emulated_us": shot.us, "rtc": sf.rtc, "runs": runs,
+                    "width": shot.picture.width, "height": shot.picture.height,
+                    "sha256": hashlib.sha256(shot.picture.pixels).hexdigest(),
+                    "ini": settings}
+            sidecar = sf.out / f".{shot.scene}.png.json.partial"
+            staged.append((sidecar, Path(str(ref) + ".json")))
+            sidecar.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+            verdicts.append((shot.scene, f"CAPTURED {shot.picture.width}x{shot.picture.height} "
+                                         f"v{shot.frame} ({runs} run{'s' if runs > 1 else ''})"))
+    except BaseException:
+        for partial, _final in staged:
+            partial.unlink(missing_ok=True)
+        raise
+    for path in stale:
+        path.unlink(missing_ok=True)
+    for partial, final in staged:
+        os.replace(partial, final)
     return verdicts
 
 

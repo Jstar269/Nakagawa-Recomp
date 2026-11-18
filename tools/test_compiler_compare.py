@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import io
 from pathlib import Path
@@ -1220,6 +1221,69 @@ class TimingOnlyWorkloadTests(unittest.TestCase):
             ])
         self.assertEqual(result, 0)
         self.assertEqual(captured, [("CC=clang", "LDFLAGS=-fuse-ld=lld")])
+
+    def _main_commands(self, *argv: str) -> tuple[int, list[list[str]]]:
+        """main() over one workload with make replaced; returns its status and make commands."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import run_perf_benchmarks
+        captured: list[list[str]] = []
+        done = subprocess.CompletedProcess(args=[], returncode=0, stdout="built and ran\n")
+
+        def fake_run(command, **_kwargs):
+            captured.append([str(part) for part in command])
+            return done
+
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(run_perf_benchmarks.shutil, "which", return_value="make"), \
+                mock.patch.object(run_perf_benchmarks, "WORKLOADS",
+                                  (("platform-ladder-gap", ("platform-ladder-gap",)),)), \
+                mock.patch.object(run_perf_benchmarks.subprocess, "run", side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            status = run_perf_benchmarks.main(["--make", "make", "--output", temp, *argv])
+        return status, captured
+
+    def test_every_workload_builds_under_its_compilers_own_build_root(self) -> None:
+        # Targets such as production-smoke-gap, cosim-selftest and the platform ladder
+        # build beneath BUILD_ROOT, so a prefix that set only BUILD_DIR shared their trees.
+        _status, commands = self._main_commands("--build-prefix", "build/cc-a")
+        make_commands = [command for command in commands if command[0] == "make"]
+        self.assertTrue(make_commands)
+        for command in make_commands:
+            self.assertIn("BUILD_ROOT=build/cc-a", command)
+
+    def test_the_overhead_build_uses_the_same_make_assignments(self) -> None:
+        _status, commands = self._main_commands("--build-prefix", "build/cc-a", "--make-arg",
+                                                "CC=clang", "--overhead", "--samples", "1")
+        overhead = [command for command in commands
+                    if "BUILD_DIR=build/cc-a/overhead-build" in command]
+        self.assertEqual(len(overhead), 1)
+        self.assertIn("CC=clang", overhead[0])
+
+    def test_a_matrix_that_measured_nothing_does_not_pass(self) -> None:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import run_perf_benchmarks
+        skipped = {"name": "audio", "status": "SKIP"}
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(run_perf_benchmarks.shutil, "which", return_value="make"), \
+                mock.patch.object(run_perf_benchmarks, "_run_one", return_value=skipped), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+            status = run_perf_benchmarks.main(["--make", "make", "--output", temp])
+        self.assertNotEqual(status, 0)
+        self.assertIn("SKIP=%d" % len(run_perf_benchmarks.WORKLOADS), stderr.getvalue())
+
+    def test_undecodable_make_output_is_kept_not_fatal(self) -> None:
+        # A stray byte is undefined in cp1252 (0x9d) and invalid UTF-8 (0xff).
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import run_perf_benchmarks
+        emit = "import sys; sys.stdout.buffer.write(b'before \\x9d\\xff after\\n')"
+        with tempfile.TemporaryDirectory() as temp:
+            record = run_perf_benchmarks._run_one(
+                sys.executable, sys.executable, "audio", ("audio-selftest",), Path(temp), False,
+                "build/perf-benchmark", make_assignments=("-c", emit))
+        self.assertEqual(record["status"], "PASS", record["output"])
+        self.assertIn("before", record["output"])
+        self.assertIn("after", record["output"])
 
 
 if __name__ == "__main__":

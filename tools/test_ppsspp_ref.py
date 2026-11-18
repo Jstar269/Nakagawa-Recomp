@@ -391,6 +391,27 @@ class TestCaptureAndCompare(unittest.TestCase):
         with self.assertRaisesRegex(pr.RefError, "--replace"):
             pr.capture(sf, Path("ppsspp.exe"), 1, False, runner=self.fake_runner([pic]))
 
+    def test_a_failed_replace_keeps_the_whole_previous_reference_set(self):
+        scenes = [{"name": "menu", "frame": 12}, {"name": "title", "frame": 13}]
+        sf = pr.load_scene_file(self.scene_file(scenes=scenes))
+        old, new = solid((1, 1, 1)), solid((9, 9, 9))
+        pr.capture(sf, Path("ppsspp.exe"), 1, False, runner=self.fake_runner([old]))
+        before = {path.name: path.read_bytes() for path in (self.dir / "ref").iterdir()}
+        real_write_png = pr.write_png
+        calls = []
+
+        def failing_write_png(path, picture):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError(28, "No space left on device")
+            real_write_png(path, picture)
+
+        with patch.object(pr, "write_png", side_effect=failing_write_png), \
+                self.assertRaises(OSError):
+            pr.capture(sf, Path("ppsspp.exe"), 1, True, runner=self.fake_runner([new]))
+        after = {path.name: path.read_bytes() for path in (self.dir / "ref").iterdir()}
+        self.assertEqual(after, before)
+
     def test_disagreeing_runs_store_nothing(self):
         sf = pr.load_scene_file(self.scene_file())
         old = solid((1, 1, 1))
