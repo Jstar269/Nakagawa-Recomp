@@ -131,6 +131,26 @@ class TitleCatalogTests(unittest.TestCase):
         self.assertIn("owned copies", header)
         self.assertIn("must not call catalog APIs", header)
 
+    def test_disc_id_lookup_uses_one_match_rule_for_overlays_and_static_entries(self) -> None:
+        """Overlays and static entries share one primary-then-compatible match.
+
+        Two hand-written copies of the loop can drift apart (they already
+        differed on the empty-primary check), so the generator emits a single
+        helper and both lookup passes call it.
+        """
+        source = title_catalog_codegen.generate_source("test-digest", [])
+        start = source.index("const NkTitleEntry *nk_title_catalog_find_by_disc_id_locked(")
+        end = source.index("bool nk_title_catalog_find_by_disc_id(", start)
+        lookup = source[start:end]
+        self.assertIn(
+            "static bool entry_matches_disc_id(const NkTitleEntry *e, const char *norm)",
+            source,
+        )
+        self.assertEqual(source.count("->compatible_disc_ids[c]"), 2)
+        self.assertNotIn("compatible_disc_ids", lookup)
+        self.assertIn("entry_matches_disc_id(ov, norm)", lookup)
+        self.assertIn("entry_matches_disc_id(e, norm)", lookup)
+
     def test_live_catalog_verify_passes(self) -> None:
         """Verify that current live repo catalog matches assets/titles/ exactly."""
         res = subprocess.run(
@@ -302,6 +322,23 @@ int main(void) {{
     uint64_t empty_epoch = nk_title_catalog_epoch();
     nk_title_catalog_clear_overlay();
     assert(nk_title_catalog_epoch() == empty_epoch);
+
+    /* An overlay with no primary id matches through a compatible id, stored
+       in any spelling the query normalization accepts. */
+    static const char *const alias_ids[] = {{ "ulus-00007", NULL }};
+    NkTitleEntry alias_overlay;
+    memset(&alias_overlay, 0, sizeof(alias_overlay));
+    alias_overlay.id = "alias-only-v1";
+    alias_overlay.primary_disc_id = "";
+    alias_overlay.compatible_disc_ids = alias_ids;
+    assert(nk_title_catalog_register_overlay(&alias_overlay));
+    NkTitleEntrySnapshot alias_found = {{0}};
+    assert(nk_title_catalog_find_by_disc_id("ULUS00007", &alias_found));
+    assert(strcmp(alias_found.entry.id, "alias-only-v1") == 0);
+    nk_title_catalog_snapshot_release(&alias_found);
+    assert(!nk_title_catalog_find_by_disc_id("ULUS00008", &missing));
+    nk_title_catalog_clear_overlay();
+    assert(!nk_title_catalog_find_by_disc_id("ULUS00007", &missing));
 
     NkTitleEntry capacity[9] = {{0}};
     char capacity_ids[9][32];

@@ -472,6 +472,23 @@ static void normalize_disc_id(const char *src, char *dst, size_t dst_size) {
     dst[d] = '\0';
 }
 
+/* One match rule for every entry, overlay or static: the primary id, then
+   each compatible id, compared after the same normalization as the query. */
+static bool entry_matches_disc_id(const NkTitleEntry *e, const char *norm) {
+    char stored[32];
+    if (e->primary_disc_id && e->primary_disc_id[0]) {
+        normalize_disc_id(e->primary_disc_id, stored, sizeof(stored));
+        if (strcmp(norm, stored) == 0) return true;
+    }
+    if (e->compatible_disc_ids) {
+        for (int c = 0; e->compatible_disc_ids[c]; c++) {
+            normalize_disc_id(e->compatible_disc_ids[c], stored, sizeof(stored));
+            if (strcmp(norm, stored) == 0) return true;
+        }
+    }
+    return false;
+}
+
 const NkTitleEntry *nk_title_catalog_find_by_disc_id_locked(const char *disc_id) {
     if (!disc_id || !*disc_id) return NULL;
     char norm[32];
@@ -481,44 +498,13 @@ const NkTitleEntry *nk_title_catalog_find_by_disc_id_locked(const char *disc_id)
     /* 1. Check in-memory private overlays first (newest registry slot first; re-registering an entry or its id keeps its slot) */
     for (int i = s_private_overlay_count - 1; i >= 0; i--) {
         const NkTitleEntry *ov = s_private_overlay_entries[i];
-        if (!ov) continue;
-        if (ov->primary_disc_id) {
-            char ov_norm[32];
-            normalize_disc_id(ov->primary_disc_id, ov_norm, sizeof(ov_norm));
-            if (strcmp(norm, ov_norm) == 0) {
-                return ov;
-            }
-        }
-        if (ov->compatible_disc_ids) {
-            for (int c = 0; ov->compatible_disc_ids[c]; c++) {
-                char cp_norm[32];
-                normalize_disc_id(ov->compatible_disc_ids[c], cp_norm, sizeof(cp_norm));
-                if (strcmp(norm, cp_norm) == 0) {
-                    return ov;
-                }
-            }
-        }
+        if (ov && entry_matches_disc_id(ov, norm)) return ov;
     }
 
     /* 2. Check static public catalog */
     for (int i = 0; i < nk_title_catalog_count; i++) {
         const NkTitleEntry *e = &nk_title_catalog_entries[i];
-        if (e->primary_disc_id && e->primary_disc_id[0]) {
-            char entry_norm[32];
-            normalize_disc_id(e->primary_disc_id, entry_norm, sizeof(entry_norm));
-            if (strcmp(norm, entry_norm) == 0) {
-                return e;
-            }
-        }
-        if (e->compatible_disc_ids) {
-            for (int c = 0; e->compatible_disc_ids[c]; c++) {
-                char compat_norm[32];
-                normalize_disc_id(e->compatible_disc_ids[c], compat_norm, sizeof(compat_norm));
-                if (strcmp(norm, compat_norm) == 0) {
-                    return e;
-                }
-            }
-        }
+        if (entry_matches_disc_id(e, norm)) return e;
     }
     return NULL;
 }
