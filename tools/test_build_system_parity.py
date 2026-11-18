@@ -3,10 +3,11 @@
 
 """Machine-checkable parity test between GNU Make (Makefile) and CMake (CMakeLists.txt).
 
-Verifies that both build systems build the identical set of core sources, player sources,
-platform drivers, include search paths, test targets, and library dependencies.
-Also verifies the architectural classification of _CRT_SECURE_NO_WARNINGS as MSVC
-compiler noise suppression rather than portable architecture.
+Compares as sets the player's core sources, its own src/player sources and its include
+search paths; checks that the named core sources and platform drivers are in both, that both
+build and run the named native test targets, and that both link the same libraries. Also
+verifies that _CRT_SECURE_NO_WARNINGS stays MSVC compiler noise suppression, never a switch
+that selects code.
 """
 
 from __future__ import annotations
@@ -23,6 +24,58 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from makefile_text import read_makefile  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# The player's own target and the libraries whose PUBLIC include directories it inherits.
+CMAKE_PLAYER_TARGET = "nakagawa_player"
+CMAKE_PLAYER_LIBRARIES = ("nakagawa_core", "nk_update_sig")
+# CMake adds this folder only for the generated version resource script; the Makefile
+# passes it to windres as --include-dir, not to the C compiler.
+CMAKE_RESOURCE_INCLUDE = "assets/brand"
+CMAKE_SOURCE_PREFIX = "${CMAKE_CURRENT_SOURCE_DIR}/"
+
+
+def make_player_sources(makefile_text: str) -> set[str]:
+    """The src/player files the Makefile's PLAYER_SRCS names literally."""
+    match = re.search(r"^PLAYER_SRCS\s*:=\s*(.+)$", makefile_text, re.MULTILINE)
+    if match is None:
+        raise AssertionError("PLAYER_SRCS not found in the Makefile text")
+    return {word for word in match.group(1).split() if word.startswith("src/player/")}
+
+
+def cmake_player_sources(cmake_text: str) -> set[str]:
+    """The src/player files CMake's set(PLAYER_SOURCES ...) names literally."""
+    match = re.search(r"set\(PLAYER_SOURCES\s+(.*?)\)", cmake_text, re.DOTALL)
+    if match is None:
+        raise AssertionError("set(PLAYER_SOURCES ...) not found in CMakeLists.txt")
+    return {word for word in match.group(1).split() if word.startswith("src/player/")}
+
+
+def make_player_includes(makefile_text: str) -> set[str]:
+    """The repository directories PLAYER_INCLUDES passes as -I flags."""
+    match = re.search(r"^PLAYER_INCLUDES\s*:=\s*(.+)$", makefile_text, re.MULTILINE)
+    if match is None:
+        raise AssertionError("PLAYER_INCLUDES not found in the Makefile text")
+    return {word[2:] for word in match.group(1).split() if word.startswith("-I") and "$" not in word}
+
+
+def cmake_player_includes(cmake_text: str) -> set[str]:
+    """The repository directories the CMake player compiles with: its own include
+    directories and the PUBLIC ones of the libraries it links."""
+    dirs: set[str] = set()
+    for target in (CMAKE_PLAYER_TARGET, *CMAKE_PLAYER_LIBRARIES):
+        blocks = re.findall(rf"target_include_directories\({target}\s+(PUBLIC|PRIVATE)\s+(.*?)\)",
+                            cmake_text, re.DOTALL)
+        if not blocks:
+            raise AssertionError(f"target_include_directories({target} ...) not found in CMakeLists.txt")
+        for scope, body in blocks:
+            if target != CMAKE_PLAYER_TARGET and scope != "PUBLIC":
+                continue
+            for word in body.split():
+                word = word.strip('"')
+                if word.startswith(CMAKE_SOURCE_PREFIX):
+                    dirs.add(word[len(CMAKE_SOURCE_PREFIX):])
+    dirs.discard(CMAKE_RESOURCE_INCLUDE)
+    return dirs
 
 
 class BuildSystemParityTests(unittest.TestCase):
@@ -55,7 +108,11 @@ class BuildSystemParityTests(unittest.TestCase):
             self.assertIn(src, self.cmake_text, f"Missing platform driver {src} in CMakeLists.txt")
 
     def test_player_sources_parity(self) -> None:
-        """Verify identical player UI sources in Makefile and CMakeLists.txt."""
+        """Make's PLAYER_SRCS and CMake's PLAYER_SOURCES name the same src/player sources, so a
+        file added to one list only fails here rather than at the other system's link."""
+        make_set = make_player_sources(self.makefile_text)
+        self.assertEqual(make_set, cmake_player_sources(self.cmake_text),
+                         "the player's src/player sources differ between make and CMake")
         expected_player = [
             "src/player/main.c",
             "src/player/player_host.c",
@@ -67,9 +124,13 @@ class BuildSystemParityTests(unittest.TestCase):
             "src/player/discord_presence.c",
             "src/player/cover_art.c",
         ]
-        for src in expected_player:
-            self.assertIn(src, self.makefile_text, f"Missing {src} in Makefile")
-            self.assertIn(src, self.cmake_text, f"Missing {src} in CMakeLists.txt")
+        self.assertLessEqual(set(expected_player), make_set)
+
+    def test_player_source_comparison_sees_a_one_sided_file(self) -> None:
+        """The comparison above can fail: a source in one list only makes the sets differ."""
+        mutated = re.sub(r"^(PLAYER_SRCS\s*:=)", r"\1 src/player/only_in_make.c", self.makefile_text,
+                         count=1, flags=re.MULTILINE)
+        self.assertNotEqual(make_player_sources(mutated), cmake_player_sources(self.cmake_text))
 
     def test_player_core_sources_are_one_set(self) -> None:
         """The player's core library is one list in both systems: make's PLAYER_CORE_SOURCES and
@@ -88,15 +149,21 @@ class BuildSystemParityTests(unittest.TestCase):
         self.assertIn("src/rt/texrepl.c", make_set, "the player does not link the texture pack reader")
 
     def test_include_paths_parity(self) -> None:
-        """Verify include search paths are declared in both build systems."""
-        expected_includes = [
-            "src/core",
-            "src/core/generated",
-            "src/player",
-        ]
-        for inc in expected_includes:
-            self.assertIn(inc, self.makefile_text, f"Missing include {inc} in Makefile")
-            self.assertIn(inc, self.cmake_text, f"Missing include {inc} in CMakeLists.txt")
+        """The player compiles with the same repository include directories in both systems:
+        the -I flags of Make's PLAYER_INCLUDES, and CMake's player include directories plus the
+        PUBLIC ones of the libraries it links. A source file path that merely contains a
+        directory name does not count."""
+        make_set = make_player_includes(self.makefile_text)
+        self.assertEqual(make_set, cmake_player_includes(self.cmake_text),
+                         "the player's include directories differ between make and CMake")
+        self.assertLessEqual({"src/core", "src/core/generated", "src/player"}, make_set)
+
+    def test_include_comparison_sees_a_dropped_flag(self) -> None:
+        """The comparison above can fail: dropping -Isrc/core/generated makes the sets differ."""
+        mutated = re.sub(r"^(PLAYER_INCLUDES\s*:=.*?) -Isrc/core/generated\b", r"\1", self.makefile_text,
+                         count=1, flags=re.MULTILINE)
+        self.assertNotEqual(mutated, self.makefile_text)
+        self.assertNotEqual(make_player_includes(mutated), cmake_player_includes(self.cmake_text))
 
     def test_library_dependencies_parity(self) -> None:
         """Verify SDL3 and platform libraries are linked in both systems."""
@@ -185,8 +252,15 @@ class BuildSystemParityTests(unittest.TestCase):
             "test_pgf_public",
         ]
         for target in test_targets:
-            self.assertIn(target, self.makefile_text, f"Missing test target {target} in Makefile")
-            self.assertIn(target, self.cmake_text, f"Missing test target {target} in CMakeLists.txt")
+            # Built and run by each system, not merely named somewhere in its text.
+            self.assertIn(f"-o $(BUILD_ROOT)/{target}$(EXE_EXT)", self.makefile_text,
+                          f"the Makefile builds no {target}")
+            self.assertIn(f"$(BUILD_ROOT_RUN)/{target}$(EXE_EXT)", self.makefile_text,
+                          f"the Makefile runs no {target}")
+            self.assertRegex(self.cmake_text, rf"add_executable\({target}\b",
+                             f"CMakeLists.txt builds no {target}")
+            self.assertRegex(self.cmake_text, rf"add_test\(NAME \S+ COMMAND {target}\b",
+                             f"CMakeLists.txt runs no {target}")
 
     def test_public_pgf_backend_and_test_sources(self) -> None:
         """Public Make builds and both test systems compile the same reader test."""
@@ -197,19 +271,33 @@ class BuildSystemParityTests(unittest.TestCase):
         self.assertIn("tests/native/test_pgf_public.c", self.cmake_text)
 
     def test_compiler_noise_suppression_classification(self) -> None:
-        """Verify _CRT_SECURE_NO_WARNINGS is classified as compiler noise suppression, not portable architecture."""
+        """_CRT_SECURE_NO_WARNINGS is MSVC compiler noise suppression, not portable architecture:
+        CMake defines it only for MSVC, and no source tests it to choose code (each use is the
+        #ifndef/#define guard that silences the CRT deprecation warnings)."""
         # Architectural rule: Nakagawa uses portable abstractions (nk_platform.h),
         # not Windows-specific CRT suppressions disguised as portability.
-        classification = {
-            "symbol": "_CRT_SECURE_NO_WARNINGS",
-            "classification": "COMPILER_NOISE_SUPPRESSION",
-            "target_compiler": "MSVC",
-            "rationale": "Suppresses non-standard MSVC deprecation warnings on standard C89/C99 runtime functions (e.g. fopen, strncpy)",
-            "is_portable_architecture": False,
-        }
-        self.assertEqual(classification["classification"], "COMPILER_NOISE_SUPPRESSION")
-        self.assertFalse(classification["is_portable_architecture"])
-        self.assertEqual(classification["target_compiler"], "MSVC")
+        msvc_block = re.search(r"^if\(MSVC\)\n(.*?)^(?:else\(\)|endif\(\))", self.cmake_text,
+                               re.MULTILINE | re.DOTALL)
+        self.assertIsNotNone(msvc_block, "CMakeLists.txt has no top-level if(MSVC) block")
+        assert msvc_block is not None
+        self.assertIn("add_compile_definitions(_CRT_SECURE_NO_WARNINGS)", msvc_block.group(1))
+        self.assertEqual(self.cmake_text.count("_CRT_SECURE_NO_WARNINGS"), 1,
+                         "CMake must define _CRT_SECURE_NO_WARNINGS for MSVC only")
+        selectors: list[str] = []
+        for path in sorted((ROOT / "src").rglob("*.[ch]")):
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for number, line in enumerate(lines):
+                if "_CRT_SECURE_NO_WARNINGS" not in line:
+                    continue
+                stripped = line.strip()
+                if stripped.startswith("#define _CRT_SECURE_NO_WARNINGS"):
+                    continue
+                following = lines[number + 1].strip() if number + 1 < len(lines) else ""
+                if stripped == "#ifndef _CRT_SECURE_NO_WARNINGS" and \
+                        following.startswith("#define _CRT_SECURE_NO_WARNINGS"):
+                    continue
+                selectors.append(f"{path.relative_to(ROOT).as_posix()}:{number + 1}: {stripped}")
+        self.assertEqual(selectors, [], "_CRT_SECURE_NO_WARNINGS must never select code")
 
     def test_verification_targets_present(self) -> None:
         """Verify make test and make check exist in Makefile (O-05)."""

@@ -90,12 +90,16 @@ class TestAssetIndexSelftestC(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("asset index selftest: OK", result.stdout)
 
-    def test_synthetic_filesystem_tree_crosses_legacy_limits(self):
-        """The same source-owned files enumerate under short and >512-byte roots.
+    def test_host_filesystem_accepts_the_long_path_fixture(self):
+        """The host filesystem and UCRT accept the short and >512-byte fixture roots.
 
-        Windows receives an explicit ``\\\\?\\`` prefix so this is a real
-        wide-path filesystem check rather than a test that silently skips the
-        platform whose path handling is being repaired.
+        This checks the fixture and the platform, not the runtime: the inventory is
+        Python's ``rglob`` and the Windows step is a bare UCRT ``_wfopen``, so the
+        runtime's own directory walk (``data_walk`` in src/rt/hle_data.c) does not
+        run here, and ``test_short_and_long_host_paths_have_identical_lookup``
+        builds its long-root index in memory. Windows receives an explicit
+        ``\\\\?\\`` prefix so the platform whose path handling matters is not
+        silently skipped.
         """
         with tempfile.TemporaryDirectory(prefix="asset_tree_") as tmp:
             base = Path(tmp)
@@ -372,6 +376,8 @@ class TestProjectFontAssetCopy(unittest.TestCase):
         sched_idx = driver.find("sched_init(&s)")
         fn_idx = driver.find("dispatch_from_host(&s, entry);")
         boot_begin = driver.find("BOOT_EVENT phase=index_prepare_begin")
+        self.assertNotEqual(boot_begin, -1,
+                            "driver.c must announce index_prepare_begin")
         self.assertLess(boot_begin, prepare_idx,
                         "preparation is announced before it runs")
         for name, idx in (("gui_init", gui_idx), ("sched_init", sched_idx),
