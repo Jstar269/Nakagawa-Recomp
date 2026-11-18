@@ -3469,6 +3469,18 @@ static void test_games(void) {
     }
 }
 
+/* The synthetic PNG writer reports a file it could not write in full, so a pack never holds a
+ * truncated image the test believes whole. Linux only: /dev/full opens, and every flush to it fails
+ * with ENOSPC; Windows and macOS have no such device. */
+static void test_png_writer_reports_write_failure(void) {
+#if defined(__linux__)
+    uint32_t *px = solid(4, 4, 0xff0000ffu);
+    CHECK(synpng_write("/dev/full", 4, 4, px) == 0,
+          "synthetic PNG writer: a write to a full device is reported as a failure");
+    free(px);
+#endif
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc == 3 && !strcmp(argv[1], "--bench")) return bench(atoi(argv[2]));
@@ -3499,6 +3511,7 @@ int main(int argc, char **argv) {
     test_sort_adversary();
     test_file_checks();
     test_games();
+    test_png_writer_reports_write_failure();
     if (g_failures) {
         fprintf(stderr, "texrepl selftest: %d check(s) failed\n", g_failures);
         return 1;
