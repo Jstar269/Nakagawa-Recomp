@@ -553,9 +553,12 @@ def _get_git_entries(
         for item in raw_ls.split("\0"):
             if not item:
                 continue
-            parts = item.split(None, 3)
-            if len(parts) == 4:
-                mode, sha, stage, rel_path = parts
+            # ``<mode> SP <sha> SP <stage> TAB <path>``: the path is everything after
+            # the tab, leading whitespace included.
+            meta, tab, rel_path = item.partition("\t")
+            fields = meta.split(" ")
+            if tab and len(fields) == 3:
+                mode, sha, stage = fields
                 kind = "file"
                 if mode == "120000":
                     kind = "symlink"

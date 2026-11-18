@@ -244,6 +244,19 @@ class TestPublishAudit(unittest.TestCase):
             self.assertTrue(path_findings)
             self.assertEqual(path_findings[0].detail, "local-only symbol reference")
 
+    def test_index_entries_keep_a_path_with_leading_whitespace(self):
+        # ``git ls-files -s`` separates the path with a tab; the path is judged by its
+        # exact published name, leading spaces included.
+        with tempfile.TemporaryDirectory() as tmp_dir_raw:
+            repo = Path(tmp_dir_raw).resolve()
+            run_git(["init", "-q"], cwd=repo, check=True, capture_output=True)
+            sha = run_git(["hash-object", "-w", "--stdin"], cwd=repo, check=True,
+                          capture_output=True, input=b"lead\n").stdout.decode("ascii").strip()
+            run_git(["update-index", "--add", "--cacheinfo", f"100644,{sha}, lead.md"],
+                    cwd=repo, check=True, capture_output=True)
+            entries = publish_audit._get_git_entries(tracked_only=True, repo_root=repo)
+            self.assertEqual([(e.path, e.sha, e.stage) for e in entries], [(" lead.md", sha, "0")])
+
     def test_prohibited_extension_passes_only_as_a_pinned_approved_binary(self):
         # Project-authored PSPDEV build output may carry a guest-executable
         # suffix, but only as a reviewed release-manifest binary with matching bytes.
