@@ -248,6 +248,19 @@ class DiscExpandToolTests(unittest.TestCase):
                 )
                 self.assertEqual(disc_check["status"], "OK")
 
+    def test_default_data_root_failure_is_a_named_iso_inspection_error(self) -> None:
+        from nk_core import prereq_fetcher
+        from nk_core.prereq_fetcher import PrerequisiteFetchError
+
+        with mock.patch.object(
+            prereq_fetcher, "default_data_root",
+            side_effect=PrerequisiteFetchError("DATA_DIR_UNAVAILABLE: synthetic"),
+        ):
+            with self.assertRaises(IsoInspectionError) as caught:
+                inspect_iso(self.images["cso"])
+
+        self.assertEqual(caught.exception.boundary_code, "DATA_DIR_UNAVAILABLE")
+
     def test_a_refused_image_keeps_its_named_boundary(self) -> None:
         bad = bytearray(self.images["cso"].read_bytes())
         bad[20] = 3  # CSO format version 3

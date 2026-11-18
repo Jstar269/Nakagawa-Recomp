@@ -7,18 +7,18 @@ from __future__ import annotations
 
 from collections import deque
 import hashlib
-import json
-import os
 from dataclasses import dataclass
 import functools
 from pathlib import Path
 import re
 import struct
+import threading
 from typing import Any, Dict, Iterator, Optional, Sequence, overload
 
 import psp_import_table
 import title_manifest
 from . import disc_expand_tool
+from . import package_cache
 from .synthetic_disc_ids import RETAIL_DISC_ID
 from .title_registry import TitleRegistry, get_default_registry
 from .types import IsoMetadata
@@ -26,12 +26,14 @@ from .types import IsoMetadata
 
 SECTOR_SIZE = 2048
 PVD_SECTOR = 16
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ISO_MAGIC = b"\x01CD001\x01"
 SFO_MAGIC = b"\x00PSF\x01\x01\x00\x00"
 # Also bounds a directory's entry count: every record is at least 34 bytes.
 MAX_DIRECTORY_BYTES = 512 * 1024
 MAX_SFO_BYTES = 64 * 1024
 MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024
+MAX_PRX_SEGMENT_BYTES = 64 * 1024 * 1024
 MAX_CFW_EBOOT_SCAN_BYTES = 256 * 1024
 # A PARAM.SFO DISC_ID is kept as data in at most 31 bytes, the native
 # NkIsoMetadata.sfo_disc_id field (NK_MAX_DISC_ID_LEN in src/core/nk_types.h).
@@ -47,6 +49,7 @@ NON_RETAIL_KEY_SPACE = 26 ** 3 * 10 ** 5
 NON_RETAIL_MAIN_EXECUTABLE = ("PSP_GAME", "SYSDIR", "EBOOT.BIN")
 _SYNTHETIC_DISC_ID_KEY = re.compile(r"TEST[0-9]{5}")
 EXPERIMENTAL_PROFILE_SCHEMA_VERSION = 1
+_EXPERIMENTAL_PROFILE_WRITE_LOCK = threading.Lock()
 PSP_DEFAULT_MAIN_LOAD_ADDRESS = 0x08804000
 PSP_CONVENTIONAL_USER_MEMORY_TOP = 0x0A000000
 SFO_FMT_UTF8_SPECIAL = 0x0004
@@ -105,20 +108,34 @@ class IsoInspectionError(ValueError):
         self.boundary_code = boundary_code
 
 
-def _has_cfw_or_kernel_only_imports(elf_bytes: bytes) -> bool:
-    """Return whether a validated ELF import table names a CFW-only library."""
+def _has_cfw_or_kernel_only_imports(elf_bytes: bytes) -> bool | None:
+    """Return CFW/kernel import status, or None when the analyzer cannot read it."""
     try:
         from analyze import Elf
         from imports import parse_imports
 
-        imports = parse_imports(Elf(elf_bytes))
+        elf = Elf(elf_bytes)
+        if elf.sec(".rodata.sceModuleInfo") is None:
+            return False
+        imports = parse_imports(elf)
     except (ImportError, IndexError, OSError, TypeError, ValueError, struct.error):
-        return False
+        return None
     cfw_libraries = {"systemctrlforkernel", "kubridge"}
     return any(
         library.casefold() in cfw_libraries or library.casefold().endswith("forkernel")
         for library, _nid in imports.values()
     )
+
+
+def _require_cfw_import_status(elf_bytes: bytes) -> bool:
+    """Fail closed when CFW/kernel-import status cannot be established."""
+    status = _has_cfw_or_kernel_only_imports(elf_bytes)
+    if status is None:
+        raise IsoInspectionError(
+            "ANALYZER_IMPORT_TABLE_INVALID: CFW and kernel-only imports could not be checked",
+            boundary_code="ANALYZER_IMPORT_TABLE_INVALID",
+        )
+    return status
 
 
 class RuntimeRegistryUnavailableError(IsoInspectionError):
@@ -201,8 +218,9 @@ def read_guest_module_interface(name: str, module_bytes: bytes) -> GuestModuleIn
     if table is None:
         return GuestModuleInterface(False, frozenset(), 0)
     libraries = table.user_callable_libraries()
+    cfw_imports = _require_cfw_import_status(module_bytes)
     return GuestModuleInterface(
-        requires_kernel=table.kernel_mode or _has_cfw_or_kernel_only_imports(module_bytes),
+        requires_kernel=table.kernel_mode or cfw_imports,
         callable_nids=frozenset(nid for library in libraries for nid in library.function_nids),
         callable_variables=sum(len(library.variable_nids) for library in libraries),
     )
@@ -884,14 +902,18 @@ def _plain_iso_path(
     path = Path(iso_path)
     if disc_expand_tool.compressed_format(path) is None:
         return path
-    if user_data_root is None:
-        from .prereq_fetcher import default_data_root
+    from .prereq_fetcher import PrerequisiteFetchError, default_data_root
 
-        user_data_root = default_data_root()
     try:
+        if user_data_root is None:
+            user_data_root = default_data_root()
         return disc_expand_tool.ensure_plain_iso(path, user_data_root)
     except disc_expand_tool.DiscImageRefused as exc:
         raise IsoInspectionError(str(exc), boundary_code=exc.code) from exc
+    except PrerequisiteFetchError as exc:
+        raise IsoInspectionError(
+            str(exc), boundary_code="DATA_DIR_UNAVAILABLE"
+        ) from exc
     except (RuntimeError, OSError) as exc:
         raise IsoInspectionError(
             f"The compressed disc image could not be expanded: {exc}"
@@ -1072,8 +1094,7 @@ def write_experimental_profile(
     user_root = Path(user_data_dir).expanduser()
     try:
         user_root = user_root.resolve(strict=False)
-        repository_root = Path(__file__).resolve().parents[2]
-        if user_root == repository_root or repository_root in user_root.parents:
+        if not package_cache.cache_root_is_private(user_root, PROJECT_ROOT):
             raise IsoInspectionError("experimental profiles must be stored outside the repository")
     except OSError as exc:
         raise IsoInspectionError("user data directory could not be resolved") from exc
@@ -1157,7 +1178,6 @@ def write_experimental_profile(
                 raise IsoInspectionError("selected decrypted EBOOT.elf exceeds the supported size bound")
         else:
             file_size = path.stat().st_size
-        digest = hashlib.sha256()
         with (decrypted_path if decrypted_path is not None else path).open("rb") as stream:
             if uses_decrypted_eboot:
                 lba = 0
@@ -1220,19 +1240,13 @@ def write_experimental_profile(
                         boundary_code="FIXED_ADDRESS_EXECUTABLE_OUTSIDE_GUEST_RAM",
                     )
                 executable_load_address = load_start
-            offset = 0
-            while offset < size:
-                count = min(64 * 1024, size - offset)
-                if uses_decrypted_eboot:
-                    stream.seek(offset)
-                    chunk = stream.read(count)
-                else:
-                    chunk = _read_iso_extent(stream, file_size, lba, size, offset, count)
-                if len(chunk) != count:
-                    raise IsoInspectionError("selected executable could not be read completely")
-                digest.update(chunk)
-                offset += count
-        executable_sha256 = digest.hexdigest()
+        if uses_decrypted_eboot:
+            assert decrypted_path is not None
+            executable_sha256 = package_cache.sha256_file(decrypted_path)
+        else:
+            executable_sha256 = iso_executable_sha256(path, selected)
+            if executable_sha256 is None:
+                raise IsoInspectionError("selected executable could not be hashed completely")
         elf_sha256 = executable_sha256
     if executable_entry_rebase:
         if executable_entry > 0xFFFFFFFF - executable_entry_rebase:
@@ -1264,12 +1278,10 @@ def write_experimental_profile(
     if user_root != resolved_dir and user_root not in resolved_dir.parents:
         raise IsoInspectionError("experimental profile path escaped the user data directory")
     profile_path = resolved_dir / "profile.json"
-    temporary_path = resolved_dir / "profile.json.tmp"
-    temporary_path.write_text(
-        json.dumps(profile, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary_path, profile_path)
+    with _EXPERIMENTAL_PROFILE_WRITE_LOCK:
+        package_cache._atomic_write(
+            profile_path, package_cache.canonical_json(profile).encode("utf-8")
+        )
     return profile_path
 
 
@@ -1739,17 +1751,19 @@ def walk_disc_module_entries(
     Returned paths are ISO member components; callers apply their own format
     and executable checks to the files.
     """
-    directories: deque[tuple[tuple[str, ...], int]] = deque()
+    directories: deque[
+        tuple[tuple[str, ...], int, list[IsoDirectoryEntry]]
+    ] = deque()
     visited = 0
     discovered = 0
+    path = _plain_iso_path(iso_path)
+    file_size = path.stat().st_size
 
-    def read_module_directory(
-        directory: tuple[str, ...], *, module_root: bool = False
-    ) -> list[IsoDirectoryEntry] | None:
+    def read_directory(
+        stream, directory: tuple[str, ...], lba: int, size: int
+    ) -> list[IsoDirectoryEntry]:
         try:
-            entries = list_iso_directory(
-                iso_path, directory, require_final_directory=module_root
-            )
+            return _read_iso_directory_entries(stream, file_size, lba, size)
         except IsoInspectionError as exc:
             if str(exc).startswith("DISC_MODULE_TREE_INVALID:"):
                 raise
@@ -1757,48 +1771,86 @@ def walk_disc_module_entries(
                 "DISC_MODULE_TREE_INVALID: module directory "
                 f"{'/'.join(directory)} could not be listed safely: {exc}"
             ) from exc
-        if entries is None and not module_root:
-            raise IsoInspectionError(
-                "DISC_MODULE_TREE_INVALID: listed module directory could not "
-                "be reopened safely."
-            )
-        return entries
 
-    for root in MODULE_ROOTS:
-        entries = read_module_directory(root, module_root=True)
-        if entries is not None:
-            discovered += 1
-            directories.append((root, 0))
-    while directories:
-        directory, depth = directories.popleft()
-        visited += 1
-        if visited > MAX_MODULE_DIRECTORIES:
-            raise IsoInspectionError(
-                "DISC_MODULE_DIRECTORY_LIMIT: ISO module discovery exceeds "
-                f"{MAX_MODULE_DIRECTORIES} directories; more directories "
-                "aren't supported yet."
+    with path.open("rb") as stream:
+        try:
+            stream.seek(PVD_SECTOR * SECTOR_SIZE)
+            pvd = stream.read(SECTOR_SIZE)
+            if len(pvd) != SECTOR_SIZE or pvd[:7] != ISO_MAGIC:
+                raise IsoInspectionError("missing primary volume descriptor")
+            root_lba, root_size, root_is_directory = _pvd_root_extent(pvd, file_size)
+            if not root_is_directory or root_size == 0 or root_size > MAX_DIRECTORY_BYTES:
+                raise IsoInspectionError("root directory is not a bounded directory extent")
+            root_entries = read_directory(
+                stream, MODULE_ROOTS[0], root_lba, root_size
             )
-        entries = read_module_directory(directory)
-        if entries is None:
+        except IsoInspectionError as exc:
+            if str(exc).startswith("DISC_MODULE_TREE_INVALID:"):
+                raise
             raise IsoInspectionError(
-                "DISC_MODULE_TREE_INVALID: listed module directory could not "
-                "be reopened safely."
+                "DISC_MODULE_TREE_INVALID: module directory "
+                f"{'/'.join(MODULE_ROOTS[0])} could not be listed safely: {exc}"
+            ) from exc
+
+        psp_game = next(
+            (entry for entry in root_entries if entry.name.casefold() == "psp_game"), None
+        )
+        if psp_game is not None and psp_game.is_directory:
+            psp_entries = read_directory(
+                stream, MODULE_ROOTS[0], psp_game.lba, psp_game.size
             )
-        for entry in entries:
-            if entry.is_directory:
-                if entry.name.casefold() == "kmodule":
+            for root in MODULE_ROOTS:
+                root_entry = next(
+                    (entry for entry in psp_entries if entry.name.casefold() == root[-1].casefold()),
+                    None,
+                )
+                if root_entry is None:
                     continue
-                if depth < MAX_MODULE_DIRECTORY_DEPTH:
-                    discovered += 1
-                    if discovered > MAX_MODULE_DIRECTORIES:
-                        raise IsoInspectionError(
-                            "DISC_MODULE_DIRECTORY_LIMIT: ISO module discovery "
-                            f"exceeds {MAX_MODULE_DIRECTORIES} directories; "
-                            "more directories aren't supported yet."
+                if not root_entry.is_directory:
+                    exc = IsoInspectionError("ISO path final directory component names a file")
+                    raise IsoInspectionError(
+                        "DISC_MODULE_TREE_INVALID: module directory "
+                        f"{'/'.join(root)} could not be listed safely: {exc}"
+                    ) from exc
+                entries = read_directory(stream, root, root_entry.lba, root_entry.size)
+                discovered += 1
+                directories.append((root, 0, entries))
+
+        while directories:
+            directory, depth, entries = directories.popleft()
+            visited += 1
+            if visited > MAX_MODULE_DIRECTORIES:
+                raise IsoInspectionError(
+                    "DISC_MODULE_DIRECTORY_LIMIT: ISO module discovery exceeds "
+                    f"{MAX_MODULE_DIRECTORIES} directories; more directories "
+                    "aren't supported yet."
+                )
+            for entry in entries:
+                if entry.is_directory:
+                    if entry.name.casefold() == "kmodule":
+                        continue
+                    if depth < MAX_MODULE_DIRECTORY_DEPTH:
+                        if "/" in entry.name or "\\" in entry.name:
+                            exc = IsoInspectionError("ISO directory path is invalid")
+                            child = directory + (entry.name,)
+                            raise IsoInspectionError(
+                                "DISC_MODULE_TREE_INVALID: module directory "
+                                f"{'/'.join(child)} could not be listed safely: {exc}"
+                            ) from exc
+                        discovered += 1
+                        if discovered > MAX_MODULE_DIRECTORIES:
+                            raise IsoInspectionError(
+                                "DISC_MODULE_DIRECTORY_LIMIT: ISO module discovery "
+                                f"exceeds {MAX_MODULE_DIRECTORIES} directories; "
+                                "more directories aren't supported yet."
+                            )
+                        child_directory = directory + (entry.name,)
+                        child_entries = read_directory(
+                            stream, child_directory, entry.lba, entry.size
                         )
-                    directories.append((directory + (entry.name,), depth + 1))
-                continue
-            yield directory, entry
+                        directories.append((child_directory, depth + 1, child_entries))
+                    continue
+                yield directory, entry
 
 
 def _fnv1a32(data: bytes) -> int:
@@ -1868,8 +1920,8 @@ def _prx_container_header_supported(header: bytes) -> bool:
     if len(header) < 0x64 or not 1 <= header[0x27] <= 4:
         return False
     sizes = struct.unpack_from("<4I", header, 0x54)[: header[0x27]]
-    return all(value <= MAX_EXECUTABLE_BYTES for value in sizes) and \
-        0 < sum(sizes) <= MAX_EXECUTABLE_BYTES
+    return all(value <= MAX_PRX_SEGMENT_BYTES for value in sizes) and \
+        0 < sum(sizes) <= MAX_PRX_SEGMENT_BYTES
 
 
 def list_disc_module_candidates(iso_path: Path | str) -> list[dict]:
@@ -1912,7 +1964,7 @@ def list_disc_module_candidates(iso_path: Path | str) -> list[dict]:
                 blob = _read_iso_extent(
                     stream, file_size, entry.lba, entry.size, 0, entry.size
                 )
-                if len(blob) != entry.size or _has_cfw_or_kernel_only_imports(blob):
+                if len(blob) != entry.size or _require_cfw_import_status(blob):
                     continue  # patch modules are excluded from every route
                 kind = "plain"
             elif header.startswith(b"~PSP"):
@@ -2271,46 +2323,60 @@ def iso_executable_sha256(iso_path: Path | str, name: str) -> str | None:
         return None
 
 
+def _boot_executable_facts(
+    stream, size_bytes: int
+) -> tuple[dict[str, dict[str, object]], tuple[int, int] | None, bool, str | None]:
+    """Classify both boot files and apply the shared on-disc CFW/fallback rule."""
+    executables = {
+        "EBOOT.BIN": _classify_iso_executable(stream, size_bytes, "EBOOT.BIN"),
+        "BOOT.BIN": _classify_iso_executable(stream, size_bytes, "BOOT.BIN"),
+    }
+    eboot_entry = _lookup_iso_file(
+        stream, size_bytes, ("PSP_GAME", "SYSDIR", "EBOOT.BIN")
+    )
+    old_eboot_entry = _lookup_iso_file(
+        stream, size_bytes, ("PSP_GAME", "SYSDIR", "EBOOT.OLD")
+    )
+    cfw_loader_detected = False
+    if (
+        eboot_entry is not None
+        and old_eboot_entry is not None
+        and eboot_entry[1] <= MAX_CFW_EBOOT_SCAN_BYTES
+        and executables["EBOOT.BIN"]["classification"] == "PLAIN_MIPS_ELF32"
+    ):
+        loader = _read_iso_extent(stream, size_bytes, *eboot_entry, 0, eboot_entry[1])
+        cfw_loader_detected = (
+            len(loader) == eboot_entry[1]
+            and _require_cfw_import_status(loader)
+        )
+
+    eboot_kind = executables["EBOOT.BIN"]["classification"]
+    boot_kind = executables["BOOT.BIN"]["classification"]
+    if cfw_loader_detected:
+        selected = "EBOOT.OLD"
+    elif eboot_kind in _BOOT_FALLBACK_EBOOT_KINDS and boot_kind == "PLAIN_MIPS_ELF32":
+        selected = "BOOT.BIN"
+    else:
+        selected = "EBOOT.BIN" if eboot_entry is not None else None
+    return executables, eboot_entry, cfw_loader_detected, selected
+
+
 def select_boot_executable_source(iso_path: Path | str) -> str | None:
     """Select an on-disc boot filename without resolving keys or decrypting files."""
     try:
         path = _plain_iso_path(iso_path)
         size_bytes = path.stat().st_size
         with path.open("rb") as stream:
-            executables = {
-                "EBOOT.BIN": _classify_iso_executable(stream, size_bytes, "EBOOT.BIN"),
-                "BOOT.BIN": _classify_iso_executable(stream, size_bytes, "BOOT.BIN"),
-            }
-            eboot_entry = _lookup_iso_file(
-                stream, size_bytes, ("PSP_GAME", "SYSDIR", "EBOOT.BIN")
+            _executables, _eboot_entry, _cfw, selected = _boot_executable_facts(
+                stream, size_bytes
             )
-            old_eboot_entry = _lookup_iso_file(
-                stream, size_bytes, ("PSP_GAME", "SYSDIR", "EBOOT.OLD")
-            )
-            cfw_loader_detected = False
-            if (
-                eboot_entry is not None
-                and old_eboot_entry is not None
-                and eboot_entry[1] <= MAX_CFW_EBOOT_SCAN_BYTES
-                and executables["EBOOT.BIN"]["classification"] == "PLAIN_MIPS_ELF32"
-            ):
-                loader = _read_iso_extent(
-                    stream, size_bytes, *eboot_entry, 0, eboot_entry[1]
-                )
-                cfw_loader_detected = (
-                    len(loader) == eboot_entry[1]
-                    and _has_cfw_or_kernel_only_imports(loader)
-                )
-    except (OSError, IsoInspectionError, struct.error):
+            return selected
+    except IsoInspectionError as exc:
+        if exc.boundary_code == "ANALYZER_IMPORT_TABLE_INVALID":
+            raise
         return None
-
-    if cfw_loader_detected:
-        return "EBOOT.OLD"
-    eboot_kind = executables["EBOOT.BIN"]["classification"]
-    boot_kind = executables["BOOT.BIN"]["classification"]
-    if eboot_kind in _BOOT_FALLBACK_EBOOT_KINDS and boot_kind == "PLAIN_MIPS_ELF32":
-        return "BOOT.BIN"
-    return "EBOOT.BIN" if eboot_entry is not None else None
+    except (OSError, struct.error):
+        return None
 
 
 def inspect_compatibility_preflight(
@@ -2318,6 +2384,7 @@ def inspect_compatibility_preflight(
     *,
     metadata: IsoMetadata,
     runtime_root: Path | str,
+    project_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """Return the player/CLI compatibility checks for a selected ISO."""
     path = _plain_iso_path(iso_path, runtime_root)
@@ -2326,6 +2393,8 @@ def inspect_compatibility_preflight(
     sfo_entry: tuple[int, int] | None = None
     cfw_loader_detected = False
     eboot_entry: tuple[int, int] | None = None
+    on_disc_selection: str | None = None
+    directory_error_code: str | None = None
     try:
         with path.open("rb") as stream:
             sfo_entry = _lookup_iso_file(stream, size_bytes, ("PSP_GAME", "PARAM.SFO"))
@@ -2338,32 +2407,17 @@ def inspect_compatibility_preflight(
                     sfo_parsed = True
                 except IsoInspectionError:
                     sfo_parsed = False
-            executables = {
-                "EBOOT.BIN": _classify_iso_executable(stream, size_bytes, "EBOOT.BIN"),
-                "BOOT.BIN": _classify_iso_executable(stream, size_bytes, "BOOT.BIN"),
-            }
-            eboot_entry = _lookup_iso_file(
-                stream, size_bytes, ("PSP_GAME", "SYSDIR", "EBOOT.BIN")
-            )
-            old_eboot_entry = _lookup_iso_file(
-                stream, size_bytes, ("PSP_GAME", "SYSDIR", "EBOOT.OLD")
-            )
-            if (
-                eboot_entry is not None
-                and old_eboot_entry is not None
-                and eboot_entry[1] <= MAX_CFW_EBOOT_SCAN_BYTES
-                and executables["EBOOT.BIN"]["classification"] == "PLAIN_MIPS_ELF32"
-            ):
-                loader = _read_iso_extent(
-                    stream, size_bytes, *eboot_entry, 0, eboot_entry[1]
-                )
-                cfw_loader_detected = (
-                    len(loader) == eboot_entry[1]
-                    and _has_cfw_or_kernel_only_imports(loader)
-                )
+            (
+                executables,
+                eboot_entry,
+                cfw_loader_detected,
+                on_disc_selection,
+            ) = _boot_executable_facts(stream, size_bytes)
     except (OSError, IsoInspectionError, struct.error) as exc:
         sfo_parsed = False
         directory_error = str(exc)
+        if isinstance(exc, IsoInspectionError):
+            directory_error_code = exc.boundary_code
         cfw_loader_detected = False
         executables = {
             name: {"classification": "UNKNOWN", "present": False, "size_bytes": 0}
@@ -2371,13 +2425,15 @@ def inspect_compatibility_preflight(
         }
 
     eboot_kind = executables["EBOOT.BIN"]["classification"]
-    boot_kind = executables["BOOT.BIN"]["classification"]
-    selected = "EBOOT.BIN" if eboot_kind == "PLAIN_MIPS_ELF32" else None
-    fallback = False
-    if eboot_kind in _BOOT_FALLBACK_EBOOT_KINDS and boot_kind == "PLAIN_MIPS_ELF32":
-        selected = "BOOT.BIN"
-        fallback = True
+    selected = (
+        on_disc_selection
+        if on_disc_selection is not None and on_disc_selection in executables
+        and executables[on_disc_selection]["classification"] == "PLAIN_MIPS_ELF32"
+        else None
+    )
+    fallback = on_disc_selection == "BOOT.BIN"
     root = Path(runtime_root)
+    project = Path(project_root) if project_root is not None else PROJECT_ROOT
     module_dir = decrypted_module_dir(root, metadata.disc_id)
     decrypted_elf: Path | None = None
     decrypted_elf_kind = "MISSING"
@@ -2435,7 +2491,12 @@ def inspect_compatibility_preflight(
     if directory_error:
         disc_check = {
             "code": "DISC_SFO", "status": "UNSUPPORTED",
-            "message": "Disc directories could not be read safely; PARAM.SFO and executables were not trusted.",
+            "message": (
+                "ANALYZER_IMPORT_TABLE_INVALID: CFW and kernel-only imports could not be checked; "
+                "PARAM.SFO and executables were not trusted."
+                if directory_error_code == "ANALYZER_IMPORT_TABLE_INVALID"
+                else "Disc directories could not be read safely; PARAM.SFO and executables were not trusted."
+            ),
             "issues": [],
         }
     elif sfo_parsed:
@@ -2531,10 +2592,8 @@ def inspect_compatibility_preflight(
             "issues": [308],
         }
 
-    from .launcher import RuntimeLauncher
-
-    package_present = RuntimeLauncher(repo_root=root).runtime_package_available(
-        metadata.matched_profile
+    package_present, _package_reason = package_cache.validate_package_cache(
+        root / "packages" / metadata.disc_id
     )
     is_experimental = (
         metadata.matched_profile is None and disc_check["status"] == "OK" and
@@ -2581,12 +2640,17 @@ def inspect_compatibility_preflight(
                 "issues": [],
             }
         else:
-            data_root_path = root / declared_data_root
+            staged_data_root = root / "games" / metadata.disc_id / declared_data_root
+            runtime_data_root = project / declared_data_root
             extracted_data_root = (
                 Path(iso_path).resolve(strict=False).parent
                 / "EXTRACTED" / "PSP_GAME" / "USRDIR" / declared_data_root
             )
-            if data_root_path.is_dir() or extracted_data_root.is_dir():
+            if (
+                staged_data_root.is_dir()
+                or runtime_data_root.is_dir()
+                or extracted_data_root.is_dir()
+            ):
                 data_root_check = {
                     "code": "DATA_ROOT", "status": "OK",
                     "message": "This game's data folder is available.", "issues": [],
@@ -2612,8 +2676,8 @@ def inspect_compatibility_preflight(
         }
     else:
         # Per slot, as the player's preflight: an imported font, else the project font, else missing.
-        states = slot_states(user_data_root=root, project_root=root)
-        latin_states = latin_index_states(user_data_root=root, project_root=root)
+        states = slot_states(user_data_root=root, project_root=project)
+        latin_states = latin_index_states(user_data_root=root, project_root=project)
         slot_message = " ".join(
             [states["japanese"]["detail"]]
             + [state["detail"] for state in latin_states]
