@@ -297,6 +297,31 @@ int main(int argc, char **argv) {
         fprintf(stderr, "debug value watch selftest: physical alias mismatch\n");
         return 1;
     }
+    /* A narrower write at the start of a wider one leaves the wider write's
+     * other bytes attributed to it; the narrow write owns only its own byte. */
+    sr_note_mem_write(0x0a310000u, 4u, 0x11223344u, 0x00070000u);
+    sr_note_mem_write(0x0a310000u, 1u, 0x000000aau, 0x00070004u);
+    if (!sr_find_last_writer(0x0a310002u, 1u, &addr, &width, &value, &pc) ||
+        addr != 0x0a310000u || width != 4u || value != 0x11223344u ||
+        pc != 0x00070000u) {
+        fprintf(stderr, "debug value watch selftest: narrower rewrite lost the wider writer\n");
+        return 1;
+    }
+    if (!sr_find_last_writer(0x0a310000u, 1u, &addr, &width, &value, &pc) ||
+        addr != 0x0a310000u || width != 1u || value != 0x000000aau ||
+        pc != 0x00070004u) {
+        fprintf(stderr, "debug value watch selftest: narrower rewrite not newest\n");
+        return 1;
+    }
+    /* A covering write at the same start supersedes both earlier writes. */
+    sr_note_mem_write(0x0a310000u, 4u, 0x55667788u, 0x00070008u);
+    if (!sr_find_last_writer(0x0a310000u, 1u, &addr, &width, &value, &pc) ||
+        width != 4u || value != 0x55667788u || pc != 0x00070008u ||
+        !sr_find_last_writer(0x0a310003u, 1u, &addr, &width, &value, &pc) ||
+        width != 4u || value != 0x55667788u || pc != 0x00070008u) {
+        fprintf(stderr, "debug value watch selftest: covering rewrite mismatch\n");
+        return 1;
+    }
 
     puts("debug value watch selftest: OK");
     return 0;

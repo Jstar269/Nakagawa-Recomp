@@ -1517,7 +1517,15 @@ static SrDispatchTable g_dtab;
 static uint32_t s_register_count = 0;
 
 void sr_register(uint32_t addr, RecompFn fn) {
-    sr_dtab_register(&g_dtab, addr, (uintptr_t)fn);
+    if (!sr_dtab_register(&g_dtab, addr, (uintptr_t)fn)) {
+        /* A full table would leave no empty slot to end a lookup's probe. */
+        fprintf(stderr, "DISPATCH_TABLE_FULL: cannot register guest function 0x%08" PRIx32
+                        ": the dispatch table holds its limit of %u functions\n",
+                addr, (unsigned)SR_DTAB_CAPACITY);
+        sr_flight_fatal(SR_FLIGHT_KIND_FATAL_DISPATCH, addr, 0u, 0u);
+        fflush(stderr);
+        exit(1);
+    }
     s_register_count++;
 }
 

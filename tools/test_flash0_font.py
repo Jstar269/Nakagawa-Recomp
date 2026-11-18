@@ -273,6 +273,19 @@ def write_latin_index_fixture(root: Path) -> dict[str, bytes]:
     (source / "ltn4.pgf").write_bytes(bold)
     (source / "ltn8.pgf").write_bytes(ninth)
 
+    # A mixed cache: one indexed import (ltn0, the large size group only) beside the old shared
+    # import. SR_FONTDIR pointed at it must not hide the vouched legacy file from the small group.
+    mixed = cache_dir(root / "mixed")
+    mixed.mkdir(parents=True, exist_ok=True)
+    (mixed / "nkltn.pgf").write_bytes(legacy)
+    (mixed / "ltn0.pgf").write_bytes(first)
+    mixed_manifest = dict(manifest)
+    mixed_manifest["latin_indices"] = {
+        "ltn0.pgf": manifest["latin_indices"]["ltn0.pgf"],
+    }
+    (mixed / fonts.MANIFEST_NAME).write_text(json.dumps(mixed_manifest, indent=2) + "\n",
+                                             encoding="utf-8")
+
     legacy_source = root / "legacy-source"
     legacy_source.mkdir(parents=True, exist_ok=True)
     (legacy_source / "nkltn.pgf").write_bytes(legacy)
@@ -670,6 +683,28 @@ int main(int argc, char **argv) {
             info.slot != NK_FONT_SLOT_KOREAN || strcmp(info.source, "project") != 0 ||
             strcmp(info.font_name, "Nakagawa Project Korean") != 0) return 5;
         printf("index17 %s %s\n", info.source, info.file_name);
+    }
+    {
+        /* The PSP's own name for the Korean font (its flash0 listing holds kr0.pgf) opens and
+         * stats the slot's file, as nkkr.pgf does; the Japanese slot, with no file here, is the
+         * named missing slot under its PSP name too, not an unknown name. */
+        FILE *by_project_name = NULL, *by_psp_name = NULL;
+        uint32_t project_size = 0, psp_size = 0, stat_size = 0;
+        int is_dir = 1;
+        if (sr_flash0_font_open("flash0:/font/" NK_FONT_SLOT_KOREAN_FILE, 0u, &sources,
+                                &by_project_name, &project_size) != 0u || !by_project_name)
+            return 6;
+        fclose(by_project_name);
+        if (sr_flash0_font_open("flash0:/font/KR0.pgf", 0u, &sources, &by_psp_name,
+                                &psp_size) != 0u || !by_psp_name || psp_size != project_size)
+            return 7;
+        fclose(by_psp_name);
+        if (sr_flash0_font_stat("flash0:/font/kr0.pgf", &sources, &stat_size, &is_dir) != 0u ||
+            stat_size != project_size || is_dir)
+            return 8;
+        if (sr_flash0_font_stat("flash0:/font/jpn0.pgf", &sources, &stat_size, &is_dir) !=
+            SR_FLASH0_ERR_NOT_FOUND)
+            return 9;
     }
     return 0;
 }

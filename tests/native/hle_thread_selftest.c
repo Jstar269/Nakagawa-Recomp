@@ -53855,6 +53855,22 @@ static void test_flash0_latin_index_resolution(void) {
                legacy_source && strcmp(legacy_source, "user-imported") == 0 &&
                legacy_served_index == -2 && strstr(legacy_path, "nkltn.pgf") != NULL,
            "SR_FONTDIR at a legacy-only import cache still resolves all Latin indices");
+    /* A mixed cache (ltn0 imported, plus the legacy single import) named by SR_FONTDIR: Latin
+     * index 9 has no import of its own or in its size group, and the cache's nkltn.pgf is not a
+     * project font, so the vouched legacy import serves it rather than nothing. */
+    Flash0Sources mixed_sources;
+    memset(&mixed_sources, 0, sizeof(mixed_sources));
+    snprintf(mixed_sources.user_data_dir, sizeof(mixed_sources.user_data_dir), "%s/mixed/data", root);
+    snprintf(mixed_sources.project_dir, sizeof(mixed_sources.project_dir), "%s/mixed/data/fonts/v2",
+             root);
+    legacy_source = NULL;
+    legacy_served_index = -3;
+    expect(sr_flash0_font_resolve_latin_index_path(&mixed_sources, 8, legacy_path,
+                                                   sizeof(legacy_path), &legacy_source,
+                                                   &legacy_served_index) &&
+               legacy_source && strcmp(legacy_source, "user-imported") == 0 &&
+               legacy_served_index == -2 && strstr(legacy_path, "nkltn.pgf") != NULL,
+           "SR_FONTDIR at a mixed import cache serves the legacy import where no index import fits");
 
     /* #1300: two indices not resolved above, so each logs its own line (the driver reads them):
      * index 7 has only the legacy import, and index 16 no import at all, only the project font. */
