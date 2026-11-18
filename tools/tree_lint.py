@@ -51,9 +51,17 @@ read once, split into path-shaped tokens, and every token is looked up in one ta
 Nothing here calls ``git grep`` per candidate, so the cost is linear in the size of
 the tree rather than quadratic in the number of candidates.
 
+An allowlist entry that excuses nothing is *stale*, and a stale entry is a hole: an
+exact path whose file was deleted or is now referenced would silently pre-excuse a
+dead file later created at that path, under a reason nobody reviewed for it.  So an
+exact-path entry that matches no unreferenced or ambiguous file, and a ``*`` pattern
+that matches no tracked file at all, fail ``--check``.  A ``*`` pattern whose tracked
+files are all referenced today is only noted: a family consumed by a glob is excused in
+advance by design (the next ``tools/test_*.py`` module is live the moment it exists).
+
 Exit status is 0 for the reporting default, whatever the tree contains; 1 only
 under ``--check`` when at least one tracked file lacks an unambiguous reference and is
-not allowlisted; and 2 when the tree or the allowlist cannot be read or validated
+not allowlisted, or when an allowlist entry is stale as described above; and 2 when the tree or the allowlist cannot be read or validated
 (a tracked tree that cannot be read is an error, never an empty report).
 
 The Makefile target runs the reporting form so a local inspection never fails
@@ -371,7 +379,34 @@ def unreferenced(
     return findings
 
 
-def report_text(findings: list[dict[str, object]], tracked: list[str], check: bool) -> str:
+def stale_allowlist(
+    allowed: dict[str, str], tracked: list[str], findings: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Every allowlist entry that excused no finding, in allowlist order.
+
+    ``blocking`` is true for an exact path (it would pre-excuse a future dead file
+    at that path) and for a ``*`` pattern that matches no tracked file at all (the
+    family it described is gone); a pattern whose tracked files are all referenced
+    today is reported with ``blocking`` false.
+    """
+    used = {entry["pattern"] for entry in findings if entry["pattern"] is not None}
+    stale = []
+    for pattern, reason in allowed.items():
+        if pattern in used:
+            continue
+        blocking = "*" not in pattern or not any(_pattern_matches(path, pattern) for path in tracked)
+        stale.append({"pattern": pattern, "reason": reason, "blocking": blocking})
+    return stale
+
+
+def report_text(
+    findings: list[dict[str, object]],
+    tracked: list[str],
+    check: bool,
+    stale: list[dict[str, object]] | None = None,
+) -> str:
+    stale = stale or []
+    blocking = [entry for entry in stale if entry["blocking"]]
     live = [entry for entry in findings if not entry["allowlisted"]]
     dead = [entry for entry in live if entry["status"] == UNREFERENCED]
     ambiguous = [entry for entry in live if entry["status"] == AMBIGUOUS]
@@ -392,10 +427,17 @@ def report_text(findings: list[dict[str, object]], tracked: list[str], check: bo
         shown = ", ".join(paths[:4]) + (f", and {len(paths) - 4} more" if len(paths) > 4 else "")
         lines.append(f"  allowlisted by {pattern}: {len(paths)} file(s) -- {entries[0]['reason']}")
         lines.append(f"    {shown}")
+    for entry in stale:
+        if entry["blocking"]:
+            lines.append(f"  stale allowlist entry: {entry['pattern']} excuses no file; remove it")
+        else:
+            lines.append(f"  allowlist pattern {entry['pattern']} excuses no file today (every tracked match is referenced)")
     if not live:
         lines.append("  no un-allowlisted file lacks an unambiguous reference")
     if check and live:
         lines.append("tree-lint: FAIL -- --check requires every file without an unambiguous reference to be allowlisted or removed")
+    elif check and blocking:
+        lines.append("tree-lint: FAIL -- --check requires every exact allowlist path to excuse a file and every pattern to match one")
     elif check:
         lines.append("tree-lint: OK (--check)")
     else:
@@ -408,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=ROOT, help="tracked tree to inspect (default: this repository)")
     parser.add_argument("--allowlist", type=Path, default=DEFAULT_ALLOWLIST, help="reviewed allowlist (default: tools/tree_lint_allow.json)")
     parser.add_argument("--json", action="store_true", help="emit the findings as JSON instead of text")
-    parser.add_argument("--check", action="store_true", help="exit 1 when a tracked file lacks an unambiguous reference and is not allowlisted")
+    parser.add_argument("--check", action="store_true", help="exit 1 when a tracked file lacks an unambiguous reference and is not allowlisted, or an allowlist entry is stale")
     args = parser.parse_args(argv)
 
     try:
@@ -419,6 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         allowlist_source = _tree_relative(args.allowlist, args.root)
         ignored = frozenset({allowlist_source}) if allowlist_source else frozenset()
         findings = unreferenced(args.root, tracked, allowed, ignored_sources=ignored)
+        stale = stale_allowlist(allowed, tracked, findings)
     except (OSError, TreeLintError, ValueError) as error:
         print(f"tree-lint: ERROR -- {error}", file=sys.stderr)
         return 2
@@ -433,11 +476,14 @@ def main(argv: list[str] | None = None) -> int:
                 {"path": entry["path"], "status": entry["status"], "pattern": entry["pattern"], "reason": entry["reason"]}
                 for entry in findings if entry["allowlisted"]
             ],
+            "stale_allowlist": stale,
         }, indent=2))
     else:
-        print(report_text(findings, tracked, args.check))
+        print(report_text(findings, tracked, args.check, stale))
 
     if args.check and any(not entry["allowlisted"] for entry in findings):
+        return 1
+    if args.check and any(entry["blocking"] for entry in stale):
         return 1
     return 0
 

@@ -373,6 +373,45 @@ class TreeLintTests(unittest.TestCase):
         self.assertEqual(status, 0, report)
         self.assertIn("tree-lint: OK (--check)", report)
 
+    def test_check_fails_on_an_exact_allowlist_entry_that_excuses_nothing(self) -> None:
+        """A stale exact path would pre-excuse a dead file later created there."""
+        allowlist = self._allowlist([
+            {"path": "index.md", "reason": "the synthetic tree's own entry point"},
+            {"path": "src/removed_helper.c", "reason": "a file that has since been deleted"},
+        ])
+        clean = self._repo({"index.md": "compile src/live.c\n", "src/live.c": "int live(void) { return 0; }\n"}).name
+        self.assertEqual(self._run(["--root", clean, "--allowlist", str(allowlist)])[0], 0)
+        status, report = self._run(["--root", clean, "--allowlist", str(allowlist), "--check"])
+        self.assertEqual(status, 1, report)
+        self.assertIn("stale allowlist entry: src/removed_helper.c excuses no file", report)
+        self.assertIn("tree-lint: FAIL", report)
+
+    def test_check_fails_on_a_pattern_that_matches_no_tracked_file(self) -> None:
+        allowlist = self._allowlist([
+            {"path": "index.md", "reason": "the synthetic tree's own entry point"},
+            {"path": "gone/*.json", "reason": "a family that has since been deleted"},
+        ])
+        clean = self._repo({"index.md": "compile src/live.c\n", "src/live.c": "int live(void) { return 0; }\n"}).name
+        status, report = self._run(["--root", clean, "--allowlist", str(allowlist), "--check"])
+        self.assertEqual(status, 1, report)
+        self.assertIn("stale allowlist entry: gone/*.json excuses no file", report)
+
+    def test_a_family_pattern_whose_files_are_all_referenced_is_noted_not_failed(self) -> None:
+        allowlist = self._allowlist([
+            {"path": "index.md", "reason": "the synthetic tree's own entry point"},
+            {"path": "tools/test_*.py", "reason": "consumed by a discovery glob"},
+        ])
+        clean = self._repo({"index.md": "run tools/test_one.py\n", "tools/test_one.py": "import unittest\n"}).name
+        status, report = self._run(["--root", clean, "--allowlist", str(allowlist), "--check"])
+        self.assertEqual(status, 0, report)
+        self.assertIn("allowlist pattern tools/test_*.py excuses no file today", report)
+        self.assertIn("tree-lint: OK (--check)", report)
+        _, document = self._run(["--root", clean, "--allowlist", str(allowlist), "--json"])
+        self.assertEqual(
+            json.loads(document)["stale_allowlist"],
+            [{"pattern": "tools/test_*.py", "reason": "consumed by a discovery glob", "blocking": False}],
+        )
+
     def test_json_output_names_the_status_of_each_finding(self) -> None:
         holder = self._repo({
             "index.md": "see Makefile for the build\n",
