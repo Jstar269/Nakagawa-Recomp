@@ -1588,6 +1588,8 @@ int player_ui_nk_music_state(const PlayerUiNk *player);
 /* Whether the launcher music's worker is reading or decoding the track. */
 bool player_ui_nk_music_decoding(const PlayerUiNk *player);
 const char *player_ui_nk_music_state_name(const PlayerUiNk *player);
+/* Draws one launcher frame. False when it could not be drawn; *out_action still
+   holds an action the frame committed, which the caller applies either way. */
 bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                          struct SDL_Renderer *renderer,
                          struct SDL_Window *window,

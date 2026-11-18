@@ -1631,6 +1631,25 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertEqual(frames[0]["view"], "online_settings")
         self.assertEqual(frames[1]["view"], "settings")
 
+    def test_online_settings_focuses_developer_mode_while_online_mode_is_off(self) -> None:
+        """Audit F-b88babaa: the Online mode switch is drawn only while online mode is
+        stored On, so on a default install the page opens on Developer mode, the first
+        row it draws (0x4515), and an Enter on the page's first frame toggles it.
+        Failing-before: the page asked for the Online mode switch, which it does not
+        draw, so that Enter reached no control and developer mode stayed off."""
+        run = self.next_ui_run(
+            "settings",
+            ("WAIT_MS=100",) + self.TO_SETTINGS_BUTTONS +
+            ("KEY_LEFT", "KEY_RETURN", "KEY_RETURN", "WAIT_MS=200"))
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertEqual([view for view, _ in self.screens(run)],
+                         ["settings", "online_settings"])
+        self.assertEqual(frames[-1]["online_mode"], "0")
+        self.assertEqual(frames[-1]["next_focus"], self.SETTINGS_FOCUS["developer"])
+        self.assertEqual(frames[-1]["developer_mode"], "1",
+                         "the Enter on the page's first frame reached Developer mode")
+
     def test_build_cache_page_leads_to_tool_removal_and_back(self) -> None:
         """#1306: Settings > Build tools and cache holds the shared-library switch, the
         clear button and tool removal; cancelling a removal returns to the page."""
@@ -1863,6 +1882,31 @@ class NativePlayerUiTests(unittest.TestCase):
         self.assertNotIn("QUIT_DIALOG", keyboard["stdout"], "Esc closes the box, not the player")
         self.assertEqual(self.focus_trail(keyboard)[-1], self.FIND)
 
+    def test_next_ui_find_page_turn_keeps_focus_on_the_last_match(self) -> None:
+        """Audit F-315e7fa5: while finding, the grid is the matches alone, with no add
+        card. End focuses the last match; Page Up then Page Down turns back to its page,
+        and focus returns to that match. Failing-before: the last slot was taken for the
+        add card, which find mode does not draw, so focus left the matches."""
+        run = self.run_player(
+            "library",
+            ("WAIT_MS=1000", "KEY_SLASH", "WAIT_MS=100", "TEXT=title", "WAIT_MS=100",
+             "KEY_RETURN", "WAIT_MS=100", "KEY_END", "WAIT_MS=100", "KEY_PAGEUP",
+             "WAIT_MS=100", "KEY_PAGEDOWN", "WAIT_MS=200"),
+            library_titles=40, timeout=120.0,
+        )
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
+            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assertEqual(self.find_states(run)[-1], "title", "the box stays open")
+        # The trail ends: the last match (End), a match on the page before (Page Up),
+        # then Page Down's focus.
+        trail = self.focus_trail(run)
+        self.assertGreaterEqual(len(trail), 3, trail)
+        last_match, page_before = trail[-3], trail[-2]
+        self.assertGreaterEqual(int(last_match), 0x10000, trail)
+        self.assertGreaterEqual(int(page_before), 0x10000, trail)
+        self.assertEqual(trail[-1], last_match,
+                         f"Page Down returns focus to the last match, not the add card: {trail}")
+
     @staticmethod
     def find_states(run: dict[str, object]) -> list[str]:
         """What the find box held while it was open, frame by frame, with repeats collapsed."""
@@ -2070,6 +2114,42 @@ class NativePlayerUiTests(unittest.TestCase):
             )
         self.assertNotIn("LAUNCHER_UNAVAILABLE", completed.stderr)
         self.assertIn(marker, completed.stdout, completed.stderr)
+
+    def test_release_player_reads_no_fonts_from_its_working_folder(self) -> None:
+        """Audit F-28726b2e: a player whose folder lacks assets/fonts/ui, started from a
+        working folder that has them (a shortcut may set any folder), does not parse the
+        working folder's fonts: it says its fonts are missing. Only the regression build,
+        run from the source tree, reads them there; NK_UI_TEST_ASSETS_BESIDE_ONLY makes
+        it look as a release build does. Failing-before: the font lookup fell back to
+        the working folder in every build, so the launcher started on those fonts."""
+        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
+        default_ui = self.run_player("empty")
+        if marker not in default_ui["stdout"]:
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assertFalse((PLAYER_EXE.parent / "assets").exists(),
+                         "the regression player has no assets beside it")
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            scratch = Path(tmp)
+            env = os.environ.copy()
+            env.update({
+                "SDL_VIDEODRIVER": "dummy",
+                "SDL_RENDER_DRIVER": "software",
+                "SDL_AUDIO_DRIVER": "dummy",
+                "LOCALAPPDATA": str(scratch),
+                "APPDATA": str(scratch),
+                "NK_UI_TEST_ASSETS_BESIDE_ONLY": "1",
+            })
+            completed = subprocess.run(
+                [str(PLAYER_EXE), f"--user-data-root={scratch / 'data'}",
+                 "--ui-test-events=WAIT_MS=100;QUIT",
+                 f"--ui-test-screenshot={scratch / 'shot.bmp'}"],
+                cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=60, check=False,
+            )
+        self.assertTrue((ROOT / "assets" / "fonts" / "ui").is_dir())
+        self.assertEqual(completed.returncode, 4, completed.stderr)
+        self.assertIn("LAUNCHER_UNAVAILABLE", completed.stderr)
+        self.assertNotIn(marker, completed.stdout)
 
     def test_removed_ui_switch_and_unknown_options_are_named_not_fatal(self) -> None:
         """Shortcuts made before the old renderer went still pass --ui=next. The
@@ -5503,6 +5583,25 @@ class NativePlayerUiTests(unittest.TestCase):
                 self.assertEqual(frames[1]["view"], "library")
                 self.assertEqual(frames[1]["picker"], "0")
 
+    def test_error_card_from_a_disc_card_focuses_its_own_recovery_button(self) -> None:
+        """Audit F-bd40d562: Add to library on a full library turns the disc card into
+        the LIBRARY_WRITE_FAILED error card. Its first frame focuses the error card's
+        recovery button (0x4201), so the Enter pressed on that frame goes back to the
+        library. Failing-before: the first error frame focused the disc card's primary
+        button (0x4801), which the error card never draws, so that Enter was lost and
+        the card stayed."""
+        run = self.next_ui_run(
+            "supported", ("WAIT_MS=300", "KEY_RETURN", "KEY_RETURN", "WAIT_MS=300"),
+            library_titles=4096, timeout=240.0)
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        errors = [i for i, frame in enumerate(frames) if frame["view"] == "error"]
+        self.assertTrue(errors, "Add to library on a full library opens the error card")
+        self.assertEqual(frames[errors[0]]["error"], "LIBRARY_WRITE_FAILED")
+        self.assertEqual(frames[-1]["view"], "library", "the second Enter recovers")
+        self.assertEqual(frames[errors[-1] + 1]["next_focus"], str(0x4201),
+                         "the recovery button took that Enter")
+
     def test_game_stop_cards_are_plain_with_restart_and_copy(self) -> None:
         """#1282: a game that ends on its own gets a plain card, not a raw code.
 
@@ -5954,6 +6053,29 @@ class NativePlayerUiTests(unittest.TestCase):
         # TEST00005 was the first tile, so TEST00006 now holds its place.
         self.assertEqual(last["next_focus"], self.library_item(0))
         self.assertEqual(last["selected_disc"], "TEST00006")
+
+    def test_remove_confirmed_on_a_frame_that_cannot_be_drawn_still_removes(self) -> None:
+        """Audit F-47574cfb: the frame that confirms Remove from library closes the
+        dialog before it ends. When that frame cannot be drawn (the test build stands in
+        for an nk_ui failure on it), the removal still runs. Failing-before: the caller
+        applied the frame's action only when it was drawn, so the dialog closed and the
+        title stayed."""
+        open_first = ("WAIT_MS=300", self.FIRST_TILE, "MOUSE_DOWN", "MOUSE_UP", "WAIT_MS=300")
+        run = self.run_player(
+            "library", (*open_first, *self.DOWN_TO_REMOVE, "KEY_RETURN", "WAIT_MS=200",
+                        "KEY_RIGHT", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=400"),
+            wait_background=True,
+            env_extra={"NK_UI_TEST_FAIL_REMOVE_CONFIRM_FRAME": "1"})
+        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
+            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assertIn("[PLAYER_UI_TEST] UI_FRAME_NOT_DRAWN", str(run["stdout"]),
+                      "the confirming frame was not drawn")
+        frames = run["frames"]
+        assert isinstance(frames, list)
+        self.assertIn(self.REMOVE_CONFIRM, [frame["next_focus"] for frame in frames])
+        self.assertEqual(frames[-1]["next_route"], "1", "the dialog closed onto the library")
+        self.assertEqual(int(frames[-1]["games"]), int(frames[0]["games"]) - 1,
+                         "the title left although its frame was not drawn")
 
     def test_remove_from_library_names_a_plan_it_cannot_make(self) -> None:
         """Audit F-b2900997: when the removal plan cannot be made (here a runtime root so

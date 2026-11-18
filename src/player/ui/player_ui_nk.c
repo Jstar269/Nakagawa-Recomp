@@ -367,6 +367,20 @@ static bool player_ui_join_path(const char *root, const char *relative,
                                NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
+/* The fonts and the music track are read from beside the player only: `make
+   player` and every install stage them there. A player never parses a font or a
+   track from its working folder, which a shortcut or file association may set to
+   any folder (a Downloads folder). The regression build alone, run from the
+   source tree without staged assets, reads them from there; a test can turn that
+   off to see what a release build does. */
+static bool player_ui_assets_from_working_folder(void) {
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    return getenv("NK_UI_TEST_ASSETS_BESIDE_ONLY") == NULL;
+#else
+    return false;
+#endif
+}
+
 static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
                                const char *relative_path) {
     char path[2u * NK_MAX_PATH];
@@ -375,7 +389,7 @@ static bool player_ui_add_font(NkUiTtf *ttf, int font, const char *base_path,
         player_ui_file_exists(path) && nk_ui_ttf_add_font(ttf, font, path)) {
         return true;
     }
-    if (player_ui_file_exists(relative_path) &&
+    if (player_ui_assets_from_working_folder() && player_ui_file_exists(relative_path) &&
         nk_ui_ttf_add_font(ttf, font, relative_path)) {
         return true;
     }
@@ -431,11 +445,10 @@ static void player_ui_report_layout_error(void *user, const NkUiLayoutError *err
                        error->fatal ? "frame dropped" : "frame drawn", length, error->text);
 }
 
-/* The launcher music's track: beside the player, as the fonts are, else from
-   the working folder. The working folder is only for a development run from the
-   source tree; a packaged player has the track beside it. A track found in
-   neither is still looked for beside the player, so the missing file is named
-   there. */
+/* The launcher music's track: beside the player, as the fonts are (the
+   regression build alone also looks in the working folder,
+   player_ui_assets_from_working_folder). A track not found is still looked for
+   beside the player, so the missing file is named there. */
 static PlayerUiMusic *player_ui_music_create_beside(const char *base_path) {
     char path[2u * NK_MAX_PATH];
     const char *track = PLAYER_UI_MUSIC_TRACK;
@@ -454,11 +467,15 @@ static PlayerUiMusic *player_ui_music_create_beside(const char *base_path) {
         player_ui_file_exists(path)) {
         return player_ui_music_create(path, track);
     }
-    if (player_ui_file_exists(track)) return player_ui_music_create(track, track);
+    if (player_ui_assets_from_working_folder() && player_ui_file_exists(track)) {
+        return player_ui_music_create(track, track);
+    }
     if (base_path != NULL && player_ui_join_path(base_path, track, path, sizeof(path))) {
         return player_ui_music_create(path, track);
     }
-    return player_ui_music_create(track, track);
+    /* No folder beside the player to name: the fonts failed the same way first. */
+    return player_ui_assets_from_working_folder() ? player_ui_music_create(track, track)
+                                                  : NULL;
 }
 
 bool player_ui_nk_built_with_launcher(void) {
@@ -732,6 +749,20 @@ static PlayerUiNoteKind player_ui_note_kind(PlayerNoteKind kind) {
     }
 }
 
+/* The PSP font lines the wizard's fonts step and Settings > PSP fonts list:
+   Japanese, each Latin index, then Korean, up to `cap` lines. */
+static size_t player_ui_font_lines(const PlayerApp *app, const char **lines, size_t cap) {
+    size_t count = 0u;
+    for (int item = 0; item < NK_FONT_LATIN_INDEX_COUNT + 2 && count < cap; ++item) {
+        lines[count++] = item == 0
+            ? app->wizard.font_slot_detail[NK_FONT_SLOT_JAPANESE]
+            : item == NK_FONT_LATIN_INDEX_COUNT + 1
+                ? app->wizard.font_slot_detail[NK_FONT_SLOT_KOREAN]
+                : app->wizard.font_latin_index_detail[item - 1];
+    }
+    return count;
+}
+
 /* The setup wizard's model, from the player's wizard state. */
 static bool player_ui_unrecorded_experimental(const GameRecord *game);
 
@@ -812,14 +843,8 @@ static PlayerUiAction player_ui_render_wizard(PlayerUiNk *player, PlayerApp *app
                                                         : "keyboard and mouse");
             model.resolution_line = player->wizard_resolution;
             model.controller_line = player->wizard_controller;
-            for (int item = 0; item < NK_FONT_LATIN_INDEX_COUNT + 2 &&
-                               (size_t)item < PLAYER_UI_WIZARD_FONT_LINES; ++item) {
-                model.font_lines[model.font_line_count++] = item == 0
-                    ? app->wizard.font_slot_detail[NK_FONT_SLOT_JAPANESE]
-                    : item == NK_FONT_LATIN_INDEX_COUNT + 1
-                        ? app->wizard.font_slot_detail[NK_FONT_SLOT_KOREAN]
-                        : app->wizard.font_latin_index_detail[item - 1];
-            }
+            model.font_line_count = player_ui_font_lines(
+                app, model.font_lines, sizeof(model.font_lines) / sizeof(model.font_lines[0]));
             model.font_message = app->wizard.font_message;
             model.font_message_kind = player_ui_note_kind(app->wizard.font_message_kind);
             model.font_summary = app->wizard.font_summary;
@@ -1032,14 +1057,14 @@ static void player_ui_fill_enhanced(PlayerUiNk *player, const PlayerApp *app,
         model->texpack_sentence = player->texpack_sentence;
     }
     model->enhanced_row_count = 0;
+    /* The library's value as a session uses it: the graphics preset's where it sets the
+       part (#2150), which the library page names, "On (Ultra)". */
+    const PlayerGraphicsPresetRow *preset =
+        player_graphics_preset_row(player_app_graphics_preset(app));
     for (int p = 0; p < PLAYER_PART_COUNT; p++) {
         const PlayerEnhancedPartInfo *info = player_enhanced_part(p);
         PlayerUiEnhancedRow *row = &model->enhanced_rows[model->enhanced_row_count++];
-        /* The library's value as a session uses it: the graphics preset's where it sets the
-           part (#2150), which the library page names, "On (Ultra)". */
         int library = player_settings_library_part(settings, p);
-        const PlayerGraphicsPresetRow *preset =
-            player_graphics_preset_row(player_app_graphics_preset(app));
         row->name = info->name;
         row->sentence = info->sentence;
         row->labels = info->labels;
@@ -1152,13 +1177,8 @@ static PlayerUiAction player_ui_render_settings(PlayerUiNk *player, PlayerApp *a
         case VIEW_PSP_FONTS:
             model.page = PLAYER_UI_SETTINGS_PAGE_FONTS;
             if (app->wizard.font_slot_detail[0][0] == '\0') player_app_refresh_font_status(app);
-            for (int item = 0; item < NK_FONT_LATIN_INDEX_COUNT + 2 && item < 18; ++item) {
-                model.font_lines[model.font_line_count++] = item == 0
-                    ? app->wizard.font_slot_detail[NK_FONT_SLOT_JAPANESE]
-                    : item == NK_FONT_LATIN_INDEX_COUNT + 1
-                        ? app->wizard.font_slot_detail[NK_FONT_SLOT_KOREAN]
-                        : app->wizard.font_latin_index_detail[item - 1];
-            }
+            model.font_line_count = player_ui_font_lines(
+                app, model.font_lines, sizeof(model.font_lines) / sizeof(model.font_lines[0]));
             model.font_message = app->wizard.font_message;
             model.font_message_kind = player_ui_note_kind(app->wizard.font_message_kind);
             model.font_summary = app->wizard.font_summary;
@@ -1616,19 +1636,25 @@ static PlayerUiAction player_ui_render_developer_log(PlayerUiNk *player, PlayerA
 }
 
 /* The build queue screen's games: the one building, then the ones that wait,
-   in queue order, as indices into app->rebuild_queue.entries. A game no longer
-   in the library is left out (the queue skips it). */
-static size_t player_ui_queue_list(const PlayerApp *app, int *list, size_t cap) {
+   in queue order, as indices into app->rebuild_queue.entries, with each one's
+   library index in `games`. A game no longer in the library is left out (the
+   queue skips it). Each entry's game is looked up once. */
+static size_t player_ui_queue_list(const PlayerApp *app, int *list, int *games, size_t cap) {
+    static int entry_game[MAX_LIBRARY_GAMES];
     const PlayerRebuildQueue *queue = &app->rebuild_queue;
+    int entries = queue->count < MAX_LIBRARY_GAMES ? queue->count : MAX_LIBRARY_GAMES;
     size_t count = 0u;
     if (!queue->active) return 0u;
+    for (int i = 0; i < entries; ++i) {
+        entry_game[i] = queue->entries[i].state == PLAYER_REBUILD_ACTIVE ||
+                        queue->entries[i].state == PLAYER_REBUILD_PENDING
+            ? player_app_find_game_by_disc_id(app, queue->entries[i].disc_id) : -1;
+    }
     for (int pass = 0; pass < 2; ++pass) {
         PlayerRebuildState want = pass == 0 ? PLAYER_REBUILD_ACTIVE : PLAYER_REBUILD_PENDING;
-        for (int i = 0; i < queue->count && count < cap; ++i) {
-            if (queue->entries[i].state != want ||
-                player_app_find_game_by_disc_id(app, queue->entries[i].disc_id) < 0) {
-                continue;
-            }
+        for (int i = 0; i < entries && count < cap; ++i) {
+            if (queue->entries[i].state != want || entry_game[i] < 0) continue;
+            games[count] = entry_game[i];
             list[count++] = i;
         }
     }
@@ -1649,10 +1675,11 @@ static size_t player_ui_queue_find(const PlayerApp *app, const int *list, size_t
 static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp *app,
                                              NkUiScale scale) {
     static int list[MAX_LIBRARY_GAMES];
+    static int list_games[MAX_LIBRARY_GAMES];
     const PlayerRebuildQueue *queue = &app->rebuild_queue;
     PlayerUiQueueModel model;
     PlayerUiAction result;
-    size_t total = player_ui_queue_list(app, list, MAX_LIBRARY_GAMES);
+    size_t total = player_ui_queue_list(app, list, list_games, MAX_LIBRARY_GAMES);
     size_t follow = total;
     size_t shown;
     if (player->queue_follow_disc[0] != '\0') {
@@ -1668,7 +1695,7 @@ static PlayerUiAction player_ui_render_queue(PlayerUiNk *player, const PlayerApp
     for (size_t r = 0u; r < shown; ++r) {
         size_t at = player->queue_first + r;
         const PlayerRebuildEntry *entry = &queue->entries[list[at]];
-        int game = player_app_find_game_by_disc_id(app, entry->disc_id);
+        int game = list_games[at];
         PlayerUiQueueRow *row = &player->queue_rows[r];
         bool first_waiting = at == 0u ||
             (at == 1u && queue->entries[list[0]].state == PLAYER_REBUILD_ACTIVE);
@@ -1947,7 +1974,9 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 break;
             case VIEW_PREREQ_CONSENT: focus = PLAYER_UI_ID_PREREQ_ACCEPT; break;
             case VIEW_PREREQ_PROGRESS: focus = PLAYER_UI_ID_PREREQ_CANCEL; break;
-            case VIEW_ERROR:
+            /* The error card draws its own buttons (scr_error.c), never the
+               disc card's: its recovery action has the focus. */
+            case VIEW_ERROR: focus = PLAYER_UI_ID_ERROR_RECOVER; break;
             case VIEW_INSPECTING:
             case VIEW_SUPPORTED_TITLE:
             case VIEW_EXPERIMENTAL_TITLE:
@@ -2023,7 +2052,12 @@ static void player_ui_flow_focus(PlayerUiNk *player, const PlayerApp *app) {
                 focus = app->report.phase == PLAYER_REPORT_PREVIEWED
                     ? PLAYER_UI_ID_REPORT_CREATE : PLAYER_UI_ID_SETTINGS_BACK;
                 break;
-            case VIEW_ONLINE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_ONLINE_MODE; break;
+            case VIEW_ONLINE_SETTINGS:
+                /* The Online mode switch is drawn only while online mode is stored
+                   On (scr_settings.c); otherwise Developer mode is the first row. */
+                focus = app->settings.online_mode ? PLAYER_UI_ID_SETTINGS_ONLINE_MODE
+                                                  : PLAYER_UI_ID_SETTINGS_DEVELOPER;
+                break;
             case VIEW_ACCESSIBILITY_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_INTERFACE_SIZE; break;
             case VIEW_ACE_SETTINGS: focus = PLAYER_UI_ID_SETTINGS_ACE_MODE; break;
             case VIEW_PREREQ_ABOUT:
@@ -3124,10 +3158,10 @@ static PlayerUiPrimaryAction player_ui_fill_title(PlayerUiNk *player,
 #endif
     out->save_folder_enabled = game->disc_id[0] != '\0';
     out->can_remove = player_app_removal_blocker(app, index) == NULL;
-    {
-        char value[PLAYER_LAUNCH_TITLE_VALUE_MAX];
-        out->can_add_to_steam = player_app_launch_title_value(app, index, value, sizeof(value));
-    }
+    /* Only the title page offers Add to Steam, so only it pays for the shared
+       disc ID scan (player_ui_fill_title_page): the library fills every title
+       each frame. */
+    out->can_add_to_steam = false;
     {
         const PlayerTitleEnhancement *enhancement = &app->title_enhancements[index];
         bool saved = player_app_title_60hz_saved(app, game->disc_id);
@@ -3438,7 +3472,8 @@ static size_t player_ui_focused_title_index(NkUiId focused, size_t count) {
 
 /* Shows library page `page`. A card with focus hands it to the card in the
    same place on the new page (the last one when the page is shorter), since
-   the page shown follows the focused card. */
+   the page shown follows the focused card. The grid's last slot is the add
+   card only outside find mode; while finding, every slot is a match. */
 static void player_ui_library_turn_page(PlayerUiNk *player, size_t count, size_t page_size,
                                         size_t slots, size_t page) {
     NkUiId focused = nk_ui_focused(player->ui);
@@ -3455,7 +3490,8 @@ static void player_ui_library_turn_page(PlayerUiNk *player, size_t count, size_t
     if (slot != SIZE_MAX) {
         size_t position = page * page_size + slot;
         if (position >= slots) position = slots - 1u;
-        index = position + 1u < slots ? player_ui_library_grid_title(&view, position) : count;
+        index = !player->find_open && position + 1u == slots
+            ? count : player_ui_library_grid_title(&view, position);
         nk_ui_focus(player->ui, index < count ? PLAYER_UI_ID_LIBRARY_ITEM(index)
                                               : PLAYER_UI_ID_LIBRARY_ADD);
     }
@@ -3885,9 +3921,13 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 !player_app_runtime_package_check_failed(app, game)) {
                 (void)player_app_build_package_preflight(app, index, false);
             }
-            player_ui_fill_titles(player, app, (size_t)app->game_count >
-                                  PLAYER_UI_TITLE_CAP ? PLAYER_UI_TITLE_CAP :
-                                  (size_t)app->game_count);
+            /* The page shows this title alone, so only it is filled. */
+            (void)player_ui_fill_title(player, app, index, &player->titles[index]);
+            {
+                char value[PLAYER_LAUNCH_TITLE_VALUE_MAX];
+                player->titles[index].can_add_to_steam =
+                    player_app_launch_title_value(app, index, value, sizeof(value));
+            }
             player_ui_title_art(player, app, (size_t)index, true);
             memset(&model, 0, sizeof(model));
             model.title = &player->titles[index];
@@ -4245,8 +4285,24 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
         nk_ui_focus(player->ui, PLAYER_UI_ID_TAB_LIBRARY);
         action.kind = PLAYER_UI_ACTION_NONE;
     }
+    /* The action is handed back before the frame is finished: its route has
+       already changed (a confirmation dialog closed, the rebuild prompt was
+       answered), so a frame that cannot be drawn must not drop it. */
+    if (action.kind == PLAYER_UI_ACTION_NONE) action = rebuild_answer;
+    if (out_action != NULL && action.kind != PLAYER_UI_ACTION_NONE) {
+        *out_action = action;
+    }
     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
     draw_list = nk_ui_end(player->ui);
+#ifdef NK_PLAYER_UI_REGRESSION_TEST
+    /* Stands in for a frame nk_ui could not finish, on the frame that confirms
+       Remove from library. */
+    if (getenv("NK_UI_TEST_FAIL_REMOVE_CONFIRM_FRAME") != NULL && out_action != NULL &&
+        out_action->kind == PLAYER_UI_ACTION_REMOVE_CONFIRM) {
+        puts("[PLAYER_UI_TEST] UI_FRAME_NOT_DRAWN");
+        draw_list = NULL;
+    }
+#endif
     if (draw_list == NULL) return false;
     {
         NkUiId focus_now = nk_ui_focused(player->ui);
@@ -4264,9 +4320,5 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
     (void)SDL_RenderClear(renderer);
     if (!nk_ui_sdlr_render(player->backend, draw_list)) return false;
     SDL_RenderPresent(renderer);
-    if (action.kind == PLAYER_UI_ACTION_NONE) action = rebuild_answer;
-    if (out_action != NULL && action.kind != PLAYER_UI_ACTION_NONE) {
-        *out_action = action;
-    }
     return true;
 }
