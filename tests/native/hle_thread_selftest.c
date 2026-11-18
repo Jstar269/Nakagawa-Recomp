@@ -110,6 +110,20 @@ static int hle_test_setenv(const char *name, const char *value) {
 #endif
 }
 
+/* A fixture that changes a variable the caller may have set saves the caller's value first and
+ * puts it back after, so neither it nor a later test depends on the caller's environment. */
+static char *hle_test_env_save(const char *name) {
+    const char *value = getenv(name);
+    char *copy = value ? (char *)malloc(strlen(value) + 1u) : NULL;
+    if (copy) memcpy(copy, value, strlen(value) + 1u);
+    return copy;
+}
+
+static void hle_test_env_restore(const char *name, char *saved) {
+    hle_test_setenv(name, saved);
+    free(saved);
+}
+
 extern void sr_vblank_tick(void);
 void sr_ctrl_sample(void);
 extern int sr_thread_has_pending_callbacks(uint32_t thread_uid);
@@ -1320,6 +1334,7 @@ static void title_hle_write_cstr(uint32_t addr, const char *text) {
 }
 
 static void test_guest_module_load_binding(void);
+static int runtime_module_path(char *out, size_t size, const char *file);
 
 /* #363: no title configuration arms an HLE display assist. For every profile the
  * production sceDisplaySetMode keeps its PSP success result and dispatches no guest body,
@@ -1651,9 +1666,7 @@ static int write_synthetic_libfont_prx(const char *path, uint32_t base) {
 
 static void test_synthetic_libfont_startup(const char *name, const char *guest_path,
                                            uint32_t base, int required) {
-    const char *root = getenv("SR_MODULE_DIR");
     char path[1024];
-    int written;
     CpuState cpu;
 
     expect(strcmp(name, "libfont.prx") == 0,
@@ -1664,10 +1677,9 @@ static void test_synthetic_libfont_startup(const char *name, const char *guest_p
            "libfont startup uses its required synthetic manifest base");
     if (base != SYNTH_LIBFONT_BASE || !guest_path || !name) return;
 
-    written = snprintf(path, sizeof(path), "%s/%s", root ? root : "", name);
-    expect(written > 0 && (size_t)written < sizeof(path),
-           "libfont startup fixture path fits the bounded test buffer");
-    if (written <= 0 || (size_t)written >= sizeof(path)) return;
+    expect(runtime_module_path(path, sizeof(path), name),
+           "libfont startup fixture path is under SR_MODULE_DIR and fits the bounded test buffer");
+    if (!path[0]) return;
     expect(write_synthetic_libfont_prx(path, base),
            "source-owned libfont PRX fixture is written");
 
@@ -2248,9 +2260,42 @@ static int runtime_module_identity(const char *path, SrModuleCode *code) {
     return 1;
 }
 
-static void runtime_module_path(char *out, size_t size, const char *file) {
+/* The guest-module fixtures write their PRX images under SR_MODULE_DIR, the scratch directory
+ * the title-config driver names. Unset or empty, the path is empty (nothing opens), never
+ * "/file" at the filesystem root. Returns 1 when the directory is named and the path fits. */
+static int runtime_module_path(char *out, size_t size, const char *file) {
     const char *root = getenv("SR_MODULE_DIR");
-    snprintf(out, size, "%s/%s", root ? root : "", file);
+    if (!size) return 0;
+    out[0] = '\0';
+    if (!root || !root[0]) return 0;
+    int written = snprintf(out, size, "%s/%s", root, file);
+    if (written <= 0 || (size_t)written >= size) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+static void test_guest_module_fixture_path_needs_its_directory(void) {
+    char *saved = hle_test_env_save("SR_MODULE_DIR");
+    char path[64];
+
+    hle_test_setenv("SR_MODULE_DIR", NULL);
+    memset(path, 'x', sizeof(path));
+    int ok = runtime_module_path(path, sizeof(path), "probe.prx");
+    expect(!ok && path[0] == '\0',
+           "guest-module fixture path: an unset SR_MODULE_DIR gives no path, not the filesystem root");
+    hle_test_setenv("SR_MODULE_DIR", "");
+    memset(path, 'x', sizeof(path));
+    ok = runtime_module_path(path, sizeof(path), "probe.prx");
+    expect(!ok && path[0] == '\0',
+           "guest-module fixture path: an empty SR_MODULE_DIR gives no path, not the filesystem root");
+    hle_test_setenv("SR_MODULE_DIR", "scratch");
+    ok = runtime_module_path(path, sizeof(path), "probe.prx");
+    expect(ok && strcmp(path, "scratch/probe.prx") == 0,
+           "guest-module fixture path: a named SR_MODULE_DIR holds the fixture");
+
+    hle_test_env_restore("SR_MODULE_DIR", saved);
 }
 
 static int s_rt_capture_fd = -1;
@@ -3382,6 +3427,11 @@ static void test_runtime_placed_modules(void) {
 static void test_guest_module_load_binding(void) {
     const char *mode = getenv("SR_TEST_GUEST_MODULE_LOAD");
     if (!mode || !mode[0]) return;
+    const char *module_dir = getenv("SR_MODULE_DIR");
+    if (!module_dir || !module_dir[0]) {
+        expect(0, "SR_MODULE_DIR names the guest-module fixture directory");
+        return;
+    }
 
     const char *name = NULL, *guest_path = NULL;
     uint32_t base = 0;
@@ -3404,12 +3454,10 @@ static void test_guest_module_load_binding(void) {
         return;
     }
     expect(required == 1, "synthetic manifest marks the guest module as required");
-    const char *root = getenv("SR_MODULE_DIR");
     char path[1024];
-    int written = snprintf(path, sizeof(path), "%s/%s", root ? root : "", name);
-    expect(written > 0 && (size_t)written < sizeof(path),
-           "synthetic guest-module path fits the test buffer");
-    if (written <= 0 || (size_t)written >= sizeof(path)) return;
+    expect(runtime_module_path(path, sizeof(path), name),
+           "synthetic guest-module path is under SR_MODULE_DIR and fits the test buffer");
+    if (!path[0]) return;
     const uint32_t sentinel = 0xA17E285Du;
     int collision = strcmp(mode, "collision") == 0;
     int missing = strcmp(mode, "missing") == 0;
@@ -19208,8 +19256,11 @@ static size_t hle_data_stderr_capture_end(FILE *capture, int saved_fd,
     output[length] = '\0';
     clearerr(capture);
     if (saved_fd >= 0) {
-        dup2(saved_fd, fileno(stderr));
+        const int restored = dup2(saved_fd, fileno(stderr)) >= 0;
         close(saved_fd);
+        /* stdout too: an unrestored stderr would swallow its own FAIL line. */
+        if (!restored) printf("FAIL: stderr could not be restored after a capture\n");
+        expect(restored, "stderr is restored after a capture");
     }
     fclose(capture);
     return length;
@@ -22935,8 +22986,10 @@ static void test_b23_second_round(void) {
 #define NID_VPL_REFER         0x39810265u
 /* PSP-measured (docs/HARDWARE_ORACLE.md kernel-object error table, PSP-B1-01): unknown VPL id. */
 #define VPL_UNKNOWN_ID_ERR    0x8002019cu
-/* UNMEASURED: no VPL exhausted code is recorded; the value predates the FPL measurement. */
-#define VPL_EXHAUSTED_ERR     0x80020190u /* pspautotests tests/threads/vpl/try.expected */
+/* A request no free block can hold: SCE_KERNEL_ERROR_NO_MEMORY, production's VPL_NO_SPACE
+ * (pspautotests tests/threads/vpl/try.expected; the 16th allocation of PSP-HLE-KERNEL-STATUS-002
+ * on the PSP-3000). */
+#define VPL_NO_SPACE_ERR      0x80020190u
 #define VPL_INFO              0x00240a00u
 #define VPL_OUTPTR            0x00240a80u
 #define NID_TLSPL_CREATE      0x8daff657u
@@ -31689,6 +31742,12 @@ static void test_umd_read_parks_its_thread_for_the_drives_time(void) {
 
     const uint32_t drive_us = hle_io_umd_read_us((uint64_t)URW_SECTORS * 2048u);
     const uint32_t minimum_us = hle_io_umd_read_us(2048u);
+    /* The model's own values, fixed here so a change to it has to change this test on purpose:
+     * 100 bytes per microsecond, never under 100 us (hle_io.c, PPSSPP-derived, not PSP-measured). */
+    expect(hle_io_umd_read_us(0u) == 100u && minimum_us == 100u &&
+               hle_io_umd_read_us(10000u) == 100u && hle_io_umd_read_us(10100u) == 101u &&
+               drive_us == URW_SECTORS * 2048u / 100u,
+           "the UMD drive's read time is 100 bytes per microsecond with a 100 us minimum");
     /* Blocks the sound thread outputs in the drive's time, less one for where in a block the
      * read begins. */
     const uint32_t blocks = (uint32_t)((uint64_t)drive_us * 44100u / (URW_SOUND_FRAMES * 1000000ull));
@@ -38752,26 +38811,42 @@ static void test_msgpipe_safety(void) {
            "receive on an empty pipe returns MPP_EMPTY");
 
     /* --- Churn: explicit invariants under mixed send/receive --- */
+    /* Every phase sends n bytes into the empty pipe and receives them back, so each call moves
+     * all n bytes, and the ring positions advance by n and wrap past the buffer's end. */
     int invariants_ok = 1;
+    int transfers_ok = 1;
     uint32_t cap = st.capacity; /* 64 */
-    for (uint32_t phase = 0; phase < 200u && invariants_ok; phase++) {
-        /* 1..cap: a 0-length request is ILLEGAL_SIZE by contract, so churn
-         * stays on legal request sizes to exercise the FULL/EMPTY boundary. */
+    for (uint32_t phase = 0; phase < 200u && invariants_ok && transfers_ok; phase++) {
+        /* 1..cap: a 0-length request is ILLEGAL_SIZE by contract. */
         uint32_t n = 1u + (phase * 7u + 3u) % cap;
-        msgpipe_setup(&cpu, uid, GUEST_BUF, n, 1u, GUEST_OUT);
-        uint32_t rc = sr_syscall(&cpu, NID_SCE_KERNEL_TRY_SEND_MSG_PIPE);
-        expect(rc == 0u || rc == SCE_KERNEL_ERROR_MPP_FULL,
-               "churn send returns success or MPP_FULL");
-        msgpipe_setup(&cpu, uid, GUEST_OUT, n, 1u, GUEST_OUT);
-        rc = sr_syscall(&cpu, NID_SCE_KERNEL_TRY_RECEIVE_MSG_PIPE);
-        expect(rc == 0u || rc == SCE_KERNEL_ERROR_MPP_EMPTY,
-               "churn receive returns success or MPP_EMPTY");
-        if (!sr_hle_test_msgpipe_state(uid, &st) ||
-            st.count > st.capacity || st.read_pos >= st.capacity || st.write_pos >= st.capacity) {
+        for (uint32_t i = 0; i < n; i++) {
+            MEM_W8(GUEST_BUF + i, (uint8_t)(phase * 31u + i));
+            MEM_W8(GUEST_OUT + i, 0u);
+        }
+        MEM_W32(GUEST_RES, 0xffffffffu);
+        msgpipe_setup(&cpu, uid, GUEST_BUF, n, 1u, GUEST_RES);
+        uint32_t send_rc = sr_syscall(&cpu, NID_SCE_KERNEL_TRY_SEND_MSG_PIPE);
+        uint32_t sent = MEM_R32(GUEST_RES);
+        MEM_W32(GUEST_RES, 0xffffffffu);
+        msgpipe_setup(&cpu, uid, GUEST_OUT, n, 1u, GUEST_RES);
+        uint32_t recv_rc = sr_syscall(&cpu, NID_SCE_KERNEL_TRY_RECEIVE_MSG_PIPE);
+        uint32_t received = MEM_R32(GUEST_RES);
+        int bytes_ok = 1;
+        for (uint32_t i = 0; i < n; i++)
+            if (MEM_R8(GUEST_OUT + i) != (uint8_t)(phase * 31u + i)) bytes_ok = 0;
+        if (send_rc != 0u || sent != n || recv_rc != 0u || received != n || !bytes_ok) {
+            printf("  msgpipe churn phase %u: send 0x%08x (%u of %u bytes), receive 0x%08x "
+                   "(%u bytes), bytes %s\n", (unsigned)phase, (unsigned)send_rc, (unsigned)sent,
+                   (unsigned)n, (unsigned)recv_rc, (unsigned)received, bytes_ok ? "match" : "differ");
+            transfers_ok = 0;
+        }
+        if (!sr_hle_test_msgpipe_state(uid, &st) || st.count != 0u ||
+            st.read_pos >= st.capacity || st.write_pos >= st.capacity) {
             invariants_ok = 0;
         }
     }
-    expect(invariants_ok, "count <= capacity and both positions < capacity under 200-op churn");
+    expect(transfers_ok, "every churn send and receive moves all n bytes, in order, across the ring's wrap");
+    expect(invariants_ok, "the pipe is empty and both positions < capacity after every churn phase");
 
     /* --- Delete: pipe no longer usable --- */
     memset(&cpu, 0, sizeof(cpu));
@@ -42898,7 +42973,7 @@ static void test_vpl_nonblocking_roundtrip(void) {
     MEM_W32(VPL_OUTPTR, 0xfeedfaceu);
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = vpl; cpu.r[5] = 1u; cpu.r[6] = VPL_OUTPTR;
-    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == VPL_EXHAUSTED_ERR,
+    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == VPL_NO_SPACE_ERR,
            "vpl exhaustion returns the existing pool error");
     expect(MEM_R32(VPL_OUTPTR) == 0xfeedfaceu, "vpl exhaustion leaves output/state untouched");
 
@@ -42968,7 +43043,7 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
     expect(all, "vpl holds as many blocks as its bytes allow (512 of 16 bytes), not 128");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = vpl; cpu.r[5] = 1u; cpu.r[6] = VPL_OUTPTR;
-    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == VPL_EXHAUSTED_ERR,
+    expect(sr_syscall(&cpu, NID_VPL_TRY_ALLOCATE) == VPL_NO_SPACE_ERR,
            "vpl is exhausted only once its bytes are used");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = vpl; cpu.r[5] = 0xfffffff8u; cpu.r[6] = VPL_OUTPTR;
@@ -44172,7 +44247,7 @@ static void test_vpl_blocking_waits(void) {
     uint32_t addr2 = MEM_R32(out2);
     expect(addr1 != addr2, "VPL: allocations return distinct addresses");
     MEM_W32(out3, 0xfeedfaceu);
-    expect(selftest_vpl_try_allocate(vpool, 64, out3) == VPL_EXHAUSTED_ERR, "VPL: pool is exhausted");
+    expect(selftest_vpl_try_allocate(vpool, 64, out3) == VPL_NO_SPACE_ERR, "VPL: pool is exhausted");
     expect(MEM_R32(out3) == 0xfeedfaceu, "VPL: exhausted try_allocate leaves outptr untouched");
 
     expect(selftest_vpl_free(0x6ffu, addr1) == VPL_UNKNOWN_ID_ERR, "VPL: bad UID free is rejected");
@@ -45798,6 +45873,18 @@ static int oracle_setup_owner(TCB **out_owner) {
     return 1;
 }
 
+/* A production syscall under test refused the case.  That is the case's result, recorded the
+ * way tests/fixtures/psp_oracle/probe.c records it on the PSP (out0 = 0, out1 = the returned
+ * code, a FAIL record), not an undrivable fixture: ORACLE_UNAVAILABLE stays for the fixture's
+ * own setup (oracle_setup_owner, a host allocation). */
+static int oracle_case_refused(const char *case_id, const char *call, uint32_t code,
+                               uint32_t *out0, uint32_t *out1) {
+    fprintf(stderr, "psp-oracle %s: %s returned 0x%08x\n", case_id, call, code);
+    *out0 = 0u;
+    *out1 = code;
+    return 0;
+}
+
 #ifdef SR_PSP_ORACLE_SMOKE
 static int oracle_smoke_case(uint32_t *out0, uint32_t *out1,
                              uint32_t *out2, uint32_t *out3,
@@ -45820,8 +45907,10 @@ static int oracle_smoke_case(uint32_t *out0, uint32_t *out1,
 }
 #endif
 
-static int oracle_callback_case(uint32_t *out0, uint32_t *out1,
-                                uint32_t *out2, uint32_t *out3) {
+/* name_addr is the CreateCallback name the case passes: ORACLE_CALLBACK_NAME in the oracle run,
+ * a refused one in the selftest that proves a refusal is a FAIL record. */
+static int oracle_callback_case_named(uint32_t name_addr, uint32_t *out0, uint32_t *out1,
+                                      uint32_t *out2, uint32_t *out3) {
     reset_fixture();
     sr_hle_init();
     TCB *owner = NULL;
@@ -45835,11 +45924,10 @@ static int oracle_callback_case(uint32_t *out0, uint32_t *out1,
 
     CpuState *cpu = s_cpu;
     uint32_t cbid = oracle_syscall4(cpu, ORACLE_NID_CREATE_CALLBACK,
-                                    ORACLE_CALLBACK_NAME, ORACLE_CALLBACK_ENTRY, 0x55u, 0);
+                                    name_addr, ORACLE_CALLBACK_ENTRY, 0x55u, 0);
     if (cbid & 0x80000000u) {
-        fprintf(stderr, "psp-oracle callback-notify-check unavailable: CreateCallback returned 0x%08x\n", cbid);
         s_oracle_mode = 0;
-        return ORACLE_UNAVAILABLE;
+        return oracle_case_refused("callback-notify-check", "CreateCallback", cbid, out0, out1);
     }
     uint32_t notify_first = oracle_syscall4(cpu, ORACLE_NID_NOTIFY_CALLBACK, cbid, 0x1234u, 0, 0);
     uint32_t count_before = oracle_syscall4(cpu, ORACLE_NID_CALLBACK_COUNT, cbid, 0, 0, 0);
@@ -45870,19 +45958,23 @@ static int oracle_callback_case(uint32_t *out0, uint32_t *out1,
            delete_result == 0 && s_oracle_callback_calls == 1;
 }
 
-static int oracle_wait_cancel_case(uint32_t *out0, uint32_t *out1,
-                                   uint32_t *out2, uint32_t *out3) {
+static int oracle_callback_case(uint32_t *out0, uint32_t *out1,
+                                uint32_t *out2, uint32_t *out3) {
+    return oracle_callback_case_named(ORACLE_CALLBACK_NAME, out0, out1, out2, out3);
+}
+
+/* attr is the CreateSema attribute the case passes: 0 in the oracle run. */
+static int oracle_wait_cancel_case_attr(uint32_t attr, uint32_t *out0, uint32_t *out1,
+                                        uint32_t *out2, uint32_t *out3) {
     reset_fixture();
     sr_hle_init();
     TCB *owner = NULL;
     if (!oracle_setup_owner(&owner)) return ORACLE_UNAVAILABLE;
     (void)owner;
     CpuState *cpu = s_cpu;
-    uint32_t semaid = oracle_syscall4(cpu, ORACLE_NID_CREATE_SEMA, 0, 0, 0, 1);
-    if (semaid & 0x80000000u) {
-        fprintf(stderr, "psp-oracle wait-cancel unavailable: CreateSema returned 0x%08x\n", semaid);
-        return ORACLE_UNAVAILABLE;
-    }
+    uint32_t semaid = oracle_syscall4(cpu, ORACLE_NID_CREATE_SEMA, 0, attr, 0, 1);
+    if (semaid & 0x80000000u)
+        return oracle_case_refused("wait-cancel", "CreateSema", semaid, out0, out1);
     uint32_t empty = oracle_syscall4(cpu, ORACLE_NID_POLL_SEMA, semaid, 1, 0, 0);
     uint32_t signal = oracle_syscall4(cpu, ORACLE_NID_SIGNAL_SEMA, semaid, 1, 0, 0);
     uint32_t ready = oracle_syscall4(cpu, ORACLE_NID_POLL_SEMA, semaid, 1, 0, 0);
@@ -45899,25 +45991,29 @@ static int oracle_wait_cancel_case(uint32_t *out0, uint32_t *out1,
     return *out0 == 0x1fu;
 }
 
-static int oracle_thread_lifecycle_case(uint32_t *out0, uint32_t *out1,
-                                        uint32_t *out2, uint32_t *out3) {
+static int oracle_wait_cancel_case(uint32_t *out0, uint32_t *out1,
+                                   uint32_t *out2, uint32_t *out3) {
+    return oracle_wait_cancel_case_attr(0u, out0, out1, out2, out3);
+}
+
+/* priority is the CreateThread priority the case passes: 32 in the oracle run. */
+static int oracle_thread_lifecycle_case_at(uint32_t priority, uint32_t *out0, uint32_t *out1,
+                                           uint32_t *out2, uint32_t *out3) {
     reset_fixture();
     sr_hle_init();
     TCB *owner = NULL;
     if (!oracle_setup_owner(&owner)) return ORACLE_UNAVAILABLE;
     s_exit_argument = 0x42;
     uint32_t thid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
-                                    ORACLE_THREAD_ENTRY, 32, 0x4000u);
-    if (thid & 0x80000000u) {
-        fprintf(stderr, "psp-oracle thread-lifecycle unavailable: CreateThread returned 0x%08x\n", thid);
-        return ORACLE_UNAVAILABLE;
-    }
+                                    ORACLE_THREAD_ENTRY, priority, 0x4000u);
+    if (thid & 0x80000000u)
+        return oracle_case_refused("thread-lifecycle", "CreateThread", thid, out0, out1);
     uint32_t start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD, thid, 0, 0, 0);
     TCB *worker = tcb_by_uid(thid);
-    if (!worker || worker->state != TH_READY) {
-        fprintf(stderr, "psp-oracle thread-lifecycle unavailable: StartThread did not produce a READY target\n");
-        return ORACLE_UNAVAILABLE;
-    }
+    /* A refused start, or one that leaves the target not READY (out1 = 0), is the case's FAIL. */
+    if (!worker || worker->state != TH_READY)
+        return oracle_case_refused("thread-lifecycle", "StartThread (target not READY)", start,
+                                   out0, out1);
     run_worker(worker);
     s_cur = (int)(owner - s_tcb);
     owner->state = TH_RUNNING;
@@ -45934,6 +46030,11 @@ static int oracle_thread_lifecycle_case(uint32_t *out0, uint32_t *out1,
     *out3 = delete_result;
     return start == 0 && (int32_t)wait >= 0 && delete_result == 0 &&
            (int32_t)post_delete_status < 0 && exit_status == 0x42u;
+}
+
+static int oracle_thread_lifecycle_case(uint32_t *out0, uint32_t *out1,
+                                        uint32_t *out2, uint32_t *out3) {
+    return oracle_thread_lifecycle_case_at(32u, out0, out1, out2, out3);
 }
 
 static int oracle_thread_delete_case(uint32_t *out0, uint32_t *out1,
@@ -45955,7 +46056,7 @@ static int oracle_thread_delete_case(uint32_t *out0, uint32_t *out1,
     uint32_t term_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *term_target = tcb_by_uid(term_target_uid);
-    if (!term_target) return ORACLE_UNAVAILABLE;
+    if (!term_target) return oracle_case_refused("thread-delete-lifecycle", "CreateThread", term_target_uid, out0, out1);
     uint32_t term_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                           term_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -45981,7 +46082,7 @@ static int oracle_thread_delete_case(uint32_t *out0, uint32_t *out1,
     uint32_t exit_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *exit_target = tcb_by_uid(exit_target_uid);
-    if (!exit_target) return ORACLE_UNAVAILABLE;
+    if (!exit_target) return oracle_case_refused("thread-delete-lifecycle", "CreateThread", exit_target_uid, out0, out1);
     TCB *exit_joiner = fixture_thread(0x1a1u, TH_WAIT_OBJ, 32);
     exit_joiner->wait_obj = exit_target_uid;
     exit_joiner->join_target = exit_target_uid;
@@ -46046,7 +46147,7 @@ static int oracle_thread_delete_followup_case(uint32_t *out0, uint32_t *out1,
     uint32_t error_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                 ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *error_target = tcb_by_uid(error_target_uid);
-    if (!error_target) return ORACLE_UNAVAILABLE;
+    if (!error_target) return oracle_case_refused("thread-delete-followup", "CreateThread", error_target_uid, out0, out1);
     uint32_t error_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                            error_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -46079,7 +46180,7 @@ static int oracle_thread_delete_followup_case(uint32_t *out0, uint32_t *out1,
     uint32_t positive_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                    ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *positive_target = tcb_by_uid(positive_target_uid);
-    if (!positive_target) return ORACLE_UNAVAILABLE;
+    if (!positive_target) return oracle_case_refused("thread-delete-followup", "CreateThread", positive_target_uid, out0, out1);
     uint32_t positive_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                               positive_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -46184,7 +46285,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     uint32_t error_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                 ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *error_target = tcb_by_uid(error_target_uid);
-    if (!error_target) return ORACLE_UNAVAILABLE;
+    if (!error_target) return oracle_case_refused("thread-delete-exit-pair", "CreateThread", error_target_uid, out0, out1);
     uint32_t error_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                            error_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -46193,7 +46294,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     uint32_t error_joiner_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                 ORACLE_THREAD_ENTRY, 16, 0x4000u);
     TCB *error_joiner = tcb_by_uid(error_joiner_uid);
-    if (!error_joiner) return ORACLE_UNAVAILABLE;
+    if (!error_joiner) return oracle_case_refused("thread-delete-exit-pair", "CreateThread", error_joiner_uid, out0, out1);
     uint32_t error_join_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                                 error_joiner_uid, 0, 0, 0);
     error_joiner->state = TH_WAIT_OBJ;
@@ -46225,7 +46326,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     uint32_t positive_target_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                    ORACLE_THREAD_ENTRY, 48, 0x4000u);
     TCB *positive_target = tcb_by_uid(positive_target_uid);
-    if (!positive_target) return ORACLE_UNAVAILABLE;
+    if (!positive_target) return oracle_case_refused("thread-delete-exit-pair", "CreateThread", positive_target_uid, out0, out1);
     uint32_t positive_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                               positive_target_uid, 0, 0, 0);
     s_oracle_thread_action = ORACLE_THREAD_ACTION_SLEEP;
@@ -46234,7 +46335,7 @@ static int oracle_thread_delete_exit_pair_case(uint32_t *out0, uint32_t *out1,
     uint32_t positive_joiner_uid = oracle_syscall4(s_cpu, ORACLE_NID_CREATE_THREAD, oracle_thread_name(),
                                                    ORACLE_THREAD_ENTRY, 16, 0x4000u);
     TCB *positive_joiner = tcb_by_uid(positive_joiner_uid);
-    if (!positive_joiner) return ORACLE_UNAVAILABLE;
+    if (!positive_joiner) return oracle_case_refused("thread-delete-exit-pair", "CreateThread", positive_joiner_uid, out0, out1);
     uint32_t positive_join_start = oracle_syscall4(s_cpu, ORACLE_NID_START_THREAD,
                                                    positive_joiner_uid, 0, 0, 0);
     positive_joiner->state = TH_WAIT_OBJ;
@@ -46493,6 +46594,33 @@ static int run_psp_oracle(int argc, char **argv) {
     }
     oracle_runtime_fini();
     return rc;
+}
+
+/* A production syscall under test that refuses an oracle case is that case's FAIL record
+ * (out0 = 0, out1 = the returned code, as probe.c records it on the PSP), never the
+ * "could not be driven" fixture outcome that emits no record. */
+static void test_psp_oracle_refusal_is_a_fail_record(void) {
+    uint32_t out[4];
+    memset(out, 0xa5, sizeof out);
+    int result = oracle_callback_case_named(0u, &out[0], &out[1], &out[2], &out[3]);
+    expect(result == 0 && out[0] == 0u && out[1] == 0x80020001u,
+           "psp-oracle: a refused CreateCallback is the callback case's FAIL record with its code");
+    memset(out, 0xa5, sizeof out);
+    result = oracle_wait_cancel_case_attr(0x400u, &out[0], &out[1], &out[2], &out[3]);
+    expect(result == 0 && out[0] == 0u && out[1] == 0x80020191u,
+           "psp-oracle: a refused CreateSema is the wait-cancel case's FAIL record with its code");
+    memset(out, 0xa5, sizeof out);
+    result = oracle_thread_lifecycle_case_at(0u, &out[0], &out[1], &out[2], &out[3]);
+    expect(result == 0 && out[0] == 0u && (out[1] & 0x80000000u) != 0u,
+           "psp-oracle: a refused CreateThread is the thread-lifecycle case's FAIL record with its code");
+    /* The oracle's own arguments still drive both cases to a PASS. */
+    memset(out, 0, sizeof out);
+    expect(oracle_callback_case(&out[0], &out[1], &out[2], &out[3]) == 1,
+           "psp-oracle: the callback case passes with its own CreateCallback name");
+    memset(out, 0, sizeof out);
+    expect(oracle_wait_cancel_case(&out[0], &out[1], &out[2], &out[3]) == 1 && out[0] == 0x1fu,
+           "psp-oracle: the wait-cancel case passes with its own CreateSema attribute");
+    reset_fixture();
 }
 
 /* ---- state-qualified acceptance routes (issue #64) --------------------------------
@@ -49800,26 +49928,22 @@ static void test_late_prx_duplicate_base_last_reference(void) {
 
 /* The runtime's stderr is the surface a consumer actually reads, so the always-on media
  * boundary is asserted from the captured text: a counter that outlived the message would
- * pass while the product went back to a silent freeze. */
+ * pass while the product went back to a silent freeze. The capture moves the stderr descriptor
+ * to a temporary file and back (hle_data_stderr_capture_*) and never closes the stream: a
+ * freopen that failed would have closed stderr, and every later FAIL line and the summary with
+ * it. */
+static FILE *s_stderr_capture;
 static int s_stderr_saved_fd = -1;
 static int stderr_capture_begin(void) {
-    fflush(stderr);
-    s_stderr_saved_fd = dup(fileno(stderr));
-    if (s_stderr_saved_fd < 0) return 0;
-    return freopen(HLE_BUILD_ROOT "/psmf_boundary_capture.txt", "w+", stderr) != NULL;
+    return hle_data_stderr_capture_begin(&s_stderr_capture, &s_stderr_saved_fd);
 }
 static size_t stderr_capture_end(char *out, size_t capacity) {
-    fflush(stderr);
-    rewind(stderr);
-    size_t n = fread(out, 1, capacity - 1u, stderr);
-    out[n] = '\0';
-    clearerr(stderr);
-    if (s_stderr_saved_fd >= 0) {
-        dup2(s_stderr_saved_fd, fileno(stderr));
-        close(s_stderr_saved_fd);
-        s_stderr_saved_fd = -1;
-    }
-    remove(HLE_BUILD_ROOT "/psmf_boundary_capture.txt");
+    size_t n = 0u;
+    if (capacity) out[0] = '\0';
+    if (s_stderr_capture)
+        n = hle_data_stderr_capture_end(s_stderr_capture, s_stderr_saved_fd, out, capacity);
+    s_stderr_capture = NULL;
+    s_stderr_saved_fd = -1;
     return n;
 }
 static int count_occurrences(const char *haystack, const char *needle) {
@@ -58217,6 +58341,9 @@ static int hle_selftest_main(int argc, char **argv) {
     }
     g_mem = g_mem_base + 0x08000000u;
     s_cpu = &s_cpu_store;
+    /* The registry tests assume no caller's nickname: the ones before a nickname fixture read the
+     * neutral default, and the fixtures leave the variable unset. No driver passes it here. */
+    hle_test_setenv("SR_NICKNAME", NULL);
     /* Every mode reads system settings through the virtual registry: point its per-user overlay
      * at a build-scoped scratch file so no test reads or writes the developer's own. */
     sysreg_env(SYSREG_SCRATCH_FILE);
@@ -58715,6 +58842,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_msgpipe_rendezvous();
     test_msgpipe_safety();
     test_msgpipe_blocking();
+    test_psp_oracle_refusal_is_a_fail_record();
+    test_guest_module_fixture_path_needs_its_directory();
     test_msgpipe_cancel_and_refer();
     test_msgpipe_departure_reconsiders_successor();
     test_msgpipe_invocation_lifetime();
