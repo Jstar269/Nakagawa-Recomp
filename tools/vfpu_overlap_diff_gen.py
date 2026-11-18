@@ -30,16 +30,16 @@ from vfpu_synth_gen import _decode_size_independent, _encode, _encode_sub21
 
 def _bin_word(op6: int, sub: int, size: int, vd: int, vs: int, vt: int) -> int:
     """A word with the 3-bit suboperation at bits 25:23; size is 1..4 (S/P/T/Q)."""
-    return _encode(op6, sub, vt, vs, vd, size - 1)
+    return int(_encode(op6, sub, vt, vs, vd, size - 1))
 
 
 def _vv2_word(optype: int, size: int, vd: int, vs: int) -> int:
     """A VFPU4 unary-group word (vsin.s, vrexp2.s, ...): optype in bits 16..20."""
-    return _encode(0x34, 0, optype & 0x1F, vs, vd, size - 1)
+    return int(_encode(0x34, 0, optype & 0x1F, vs, vd, size - 1))
 
 
 def _matrix1_word(which: int, size: int, vd: int, vs: int) -> int:
-    return _encode_sub21(0x3C, 28, which & 0xF, vs, vd, size - 1)
+    return int(_encode_sub21(0x3C, 28, which & 0xF, vs, vd, size - 1))
 
 
 # One word per supported census row that had no differential evidence before this list
@@ -70,7 +70,7 @@ WIDE_DOT_WORDS: tuple[tuple[str, int], ...] = (
 
 def census_gap_size(word: int) -> int:
     """Vector size 1..4 from bit 7 (low) and bit 15 (high)."""
-    return _decode_size_independent(word)
+    return int(_decode_size_independent(word))
 
 
 def build_cases() -> tuple[list[tuple[int, str, int]], int, tuple[int, int]]:
