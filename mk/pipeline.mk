@@ -25,12 +25,18 @@ $(BUILD_DIR)/$(GAME_NAME)_image.bin: $(GAME_INPUT_PREREQ) tools/prxload.py
 # regenerates them; a C build does not depend on these files. CODEGEN_BACKEND=llvm adds
 # --backend=llvm to CODEGEN_USER_ARGS (Makefile), so this sees either spelling.
 CODEGEN_LLVM_PREREQ := $(if $(filter --backend=llvm,$(CODEGEN_USER_ARGS)),tools/codegen_llvm.py tools/llvm_ir.py tools/lowering_plan.py)
+# The enhancement and code-hook packages codegen reads, and the package's <name>.symbols.json
+# sidecar when one exists, so editing a package in place regenerates: the codegen profile
+# records only their paths. Backslashes become slashes, the spelling a prerequisite needs.
+ENHANCEMENT_PACKAGE_PATH := $(subst \,/,$(strip $(ENHANCEMENT_PACKAGE)))
+ENHANCEMENT_PACKAGE_PREREQ := $(ENHANCEMENT_PACKAGE_PATH) $(subst \,/,$(strip $(ENHANCEMENT_CODE_HOOK_PACKAGE))) \
+	$(if $(ENHANCEMENT_PACKAGE_PATH),$(wildcard $(basename $(ENHANCEMENT_PACKAGE_PATH)).symbols.json))
 
 ifeq ($(NK_AOT_PREGENERATED),1)
 $(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h:
 	$(if $(wildcard $@),,$(error NK_AOT_PREGENERATED requires $@))
 else
-$(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h: $(GAME_INPUT_PREREQ) $(CODEGEN_TOOL) tools/codegen.py tools/analyze.py tools/analyze_cfg.py tools/entry_frame_balance.py tools/prxload.py tools/host_stubs.py tools/codegen_hst_stubs.py tools/imports.py $(CODEGEN_LLVM_PREREQ) $(CODEGEN_PROFILE_STAMP) $(SYMBOL_MAP) $(NAME_IMPORTS_PREREQ)
+$(BUILD_DIR)/$(GAME_NAME)_recomp.c $(BUILD_DIR)/$(GAME_NAME)_recomp_funcs.h: $(GAME_INPUT_PREREQ) $(CODEGEN_TOOL) tools/codegen.py tools/analyze.py tools/analyze_cfg.py tools/entry_frame_balance.py tools/prxload.py tools/host_stubs.py tools/codegen_hst_stubs.py tools/imports.py $(CODEGEN_LLVM_PREREQ) $(CODEGEN_PROFILE_STAMP) $(SYMBOL_MAP) $(NAME_IMPORTS_PREREQ) $(ENHANCEMENT_PACKAGE_PREREQ)
 	"$(PYTHON)" $(CODEGEN_TOOL) --env-elf $(BUILD_DIR)/$(GAME_NAME)_recomp.c --base=$(GAME_BASE) $(CODEGEN_PROFILE_ARG) $(EXTRA_SPAN_ARG) $(EXTRA_ELF_ENV_ARG) --funcs-per-chunk=$(FUNCS_PER_CHUNK) $(CHUNK_BYTES_ARG) $(SYMBOL_MAP_ARG) $(NAME_IMPORTS_ARG) $(ENHANCEMENT_PACKAGE_ARG) $(CODEGEN_USER_ARGS)
 endif
 

@@ -1384,6 +1384,34 @@ class CodegenProfileTransportTests(unittest.TestCase):
                          alone_hash)
         self.assertEqual(self._probe("ENHANCEMENT_CODE_HOOK_PACKAGE=h.json")[0], "[--code-hook-package=h.json]")
 
+    def test_editing_a_package_in_place_regenerates_the_translation(self) -> None:
+        # The codegen profile records only the packages' paths, so the codegen rule itself must
+        # depend on the package, the code-hook package and the package's .symbols.json sidecar:
+        # otherwise an edit at the same path leaves <game>_recomp.c up to date and the binary
+        # keeps the old package's translation. The rule's prerequisites are read from make's
+        # own database (-p), with nothing built.
+        temp = Path(self.temp.name)
+        package = temp / "pkg.json"
+        package.write_text("{}\n", encoding="utf-8")
+        (temp / "pkg.symbols.json").write_text("{}\n", encoding="utf-8")
+        hook = temp / "hook.json"
+        hook.write_text("{}\n", encoding="utf-8")
+        completed = subprocess.run(
+            [cast(str, self.make), "-n", "-p", "--no-print-directory", "GAME_NAME=probe",
+             f"BUILD_ROOT={temp.as_posix()}", f"BUILD_DIR={temp.as_posix()}",
+             f"ENHANCEMENT_PACKAGE={package}", f"ENHANCEMENT_CODE_HOOK_PACKAGE={hook}",
+             "--eval", "nkprobe: ;", "nkprobe"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr[-2000:])
+        rule = f"{temp.as_posix()}/probe_recomp.c: "
+        line = next((text for text in completed.stdout.splitlines() if text.startswith(rule)), "")
+        self.assertTrue(line, "make's database has no codegen rule for the probe title")
+        prerequisites = line.removeprefix(rule).split()
+        for path in (package, temp / "pkg.symbols.json", hook):
+            with self.subTest(prerequisite=path.name):
+                self.assertIn(path.as_posix(), prerequisites)
+
     def test_the_transport_keeps_the_argv_hash(self) -> None:
         # The environment form must hash exactly as the former --entry form did, so
         # existing builds keep their codegen profile. The former form is evaluated in
@@ -2616,7 +2644,13 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
             self.build_root / name
             for name in ("production-smoke", "production-smoke-gap", "cosim",
                          "nakagawa_psp_oracle", "vfpu_oracle", "portable-core",
-                         "verify", "link")
+                         "verify", "link",
+                         # The display smoke and platform ladder gates, the snapshot runner,
+                         # the form sweep and each cosimulation lane (mk/cosim_snapshot.mk)
+                         # build their own fixture trees beneath BUILD_ROOT too.
+                         "display-smoke-v1", "platform-ladder", "snapshot", "form-sweep",
+                         "cosim-split", "cosim-opt", "cosim-llvm", "cosim-llvm-mutants",
+                         "cosim-promoted", "cosim-resume")
         ]
         for fdir in fixture_dirs:
             self._plant(fdir / "artifact.tmp", "tmp")

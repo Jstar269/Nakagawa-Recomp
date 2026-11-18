@@ -804,10 +804,15 @@ mingw32-make --no-print-directory check
 ```
 
 `check` covers documentation and policy checks, the provenance record and
-disposition gap check, both publication-audit legs, the native host-core tests,
-and a fast Python subset. It does not replace `make readiness`: readiness
-additionally verifies the exact candidate against the external detailed ledger
-and therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is unavailable.
+disposition gap check, both publication-audit legs, the modified-file notice
+audit, the native host-core tests, and a fast Python subset. A native leg this
+host cannot run (no Vulkan device, no SDL3_ttf) prints `SKIP` and the run goes
+on, so `check`'s last line says every step exited 0, not that every check
+passed: a `SKIP` above it is not a pass. It does not replace `make readiness`:
+readiness runs the same publication checks and additionally verifies the exact
+candidate against the external detailed ledger, from the merge base with
+`origin/main` (resolved through `GIT`; an empty base is a named failure), and
+therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is unavailable.
 `make provenance-refresh` is the single local command for regenerating the
 tracked public controls. It calls the same `generate_ephemeral_controls()`
 implementation as the hosted provenance attestation, reads the trusted public
@@ -932,7 +937,8 @@ and run `python tools/hle_manifest.py --write-baseline` yourself.
 Some generators are listed but not run, and `--list` says why:
 
 - embedded shaders (`make shaders GLSLC=...`): regenerating needs `glslc`, whose
-  version the manifest records; `make shader-verify` checks the committed files;
+  version the manifest records; `make shader-verify` checks the committed files
+  of both glslc sets, the GPU backend's (`psp`) and the player UI's (`ui`);
 - profile-zero prebuilt digests: rebuilding needs the pinned PSPDEV toolchain;
   CI checks `SHA256SUMS`;
 - the import-stub census and the benchmark report: both need private inputs

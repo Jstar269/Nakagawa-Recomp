@@ -267,12 +267,16 @@ class BuildSystemParityTests(unittest.TestCase):
         self.assertIn("NK_TRUSTED_LEDGER", self.makefile_text)
         self.assertIn("PROVENANCE_REFRESH_APPLY_POLICY", self.makefile_text)
 
-    def _readiness_dry_run(self) -> list[str]:
+    def _readiness_dry_run(self, *assignments: str) -> list[str]:
         make = shutil.which("mingw32-make") or shutil.which("make")
         if not make or not shutil.which("git"):
             self.skipTest("GNU Make and git are required for the readiness dry run")
+        # Parsing writes beneath BUILD_ROOT (the SDL3 discovery fragment), so it is a scratch tree.
+        build_root = tempfile.TemporaryDirectory(prefix="nk-readiness-root-")
+        self.addCleanup(build_root.cleanup)
         proc = subprocess.run(
-            [make, "-n", "--no-print-directory", "readiness", "NK_TRUSTED_LEDGER=unused"],
+            [make, "-n", "--no-print-directory", "readiness", "NK_TRUSTED_LEDGER=unused",
+             f"BUILD_ROOT={Path(build_root.name).as_posix()}", *assignments],
             cwd=ROOT, capture_output=True, text=True, timeout=120,
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -297,7 +301,7 @@ class BuildSystemParityTests(unittest.TestCase):
         """Regenerated controls staged but not committed leave HEAD without its evidence, so the
         completeness step compares the regenerated controls with HEAD, not with the index."""
         lines = self._readiness_dry_run()
-        step = [line for line in lines if line.startswith("git diff --quiet")]
+        step = [line for line in lines if line.startswith('"git" diff --quiet')]
         self.assertEqual(len(step), 1, lines)
         command = step[0].split(" || ", 1)[0]
         with tempfile.TemporaryDirectory(prefix="nk-readiness-") as tmp:
@@ -324,6 +328,116 @@ class BuildSystemParityTests(unittest.TestCase):
             (repo / "assets/public_provenance_ledger.json").write_text('{"refreshed": 1}\n', encoding="utf-8")
             git("add", "assets/public_provenance_ledger.json")
             self.assertNotEqual(completeness(), 0, "a staged, uncommitted control must fail")
+
+    def test_readiness_resolves_its_base_through_git_and_refuses_an_empty_one(self) -> None:
+        """The base comes from $(GIT), not a bare `$(shell git ...)`, and an empty base stops
+        readiness with a named failure instead of an argparse error from the attestation."""
+        sh = shutil.which("sh")
+        if not sh:
+            self.skipTest("sh is required to run the readiness base check")
+        lines = self._readiness_dry_run("NK_GIT_REV_HEAD=0123456789abcdef0123456789abcdef01234567",
+                                        "GIT=nk-no-such-git")
+        verify = [line for line in lines if "tools/provenance_attest_verify.py" in line]
+        self.assertEqual(len(verify), 1, lines)
+        self.assertIn('--base ""', verify[0], "the base did not come from GIT")
+        step = [line for line in lines if "no merge base with origin/main" in line]
+        self.assertEqual(len(step), 1, lines)
+        run = subprocess.run([sh, "-c", step[0]], capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("readiness: FAIL -- no merge base with origin/main", run.stdout)
+        self.assertLess(lines.index(step[0]), lines.index(verify[0]))
+        self.assertFalse([line for line in lines if line.startswith("git ")],
+                         "a readiness step calls a bare git instead of $(GIT)")
+
+    @staticmethod
+    def _recipe(makefile: str, target: str) -> list[str]:
+        """The recipe lines of ``target`` in one mk file, as written."""
+        lines = (ROOT / makefile).read_text(encoding="utf-8").splitlines()
+        start = lines.index(f"{target}:")
+        recipe = []
+        for line in lines[start + 1:]:
+            if re.match(r"(ifn?def|ifn?eq|else|endif)\b", line):
+                continue  # a conditional inside the recipe
+            if not line.startswith("\t"):
+                break
+            recipe.append(line[1:])
+        return recipe
+
+    def test_readiness_and_check_run_the_modified_file_notice_audit(self) -> None:
+        """AGENTS.md section 9: a publication or provenance change always runs
+        tools/modified_file_notice_audit.py, so the pre-PR gates run it too."""
+        audit = '"$(PYTHON)" tools/modified_file_notice_audit.py --tracked-only'
+        for target in ("readiness", "check"):
+            with self.subTest(target=target):
+                self.assertIn(audit, self._recipe("mk/diagnostics.mk", target))
+        self.assertTrue([line for line in self._readiness_dry_run()
+                         if line.endswith(" tools/modified_file_notice_audit.py --tracked-only")])
+
+    def test_japanese_font_rebuilds_when_its_converter_arguments_change(self) -> None:
+        """PROJECT_JAPANESE_FONT_ARGS lives in mk/housekeeping.mk, so the hand-written nkjpn.pgf
+        rule lists that file as a prerequisite, as PROJECT_FONT_RULE does for every other face."""
+        text = (ROOT / "mk/housekeeping.mk").read_text(encoding="utf-8")
+        rules = re.findall(r"(?m)^(\$\(PROJECT_FONT_GENERATED_DIR\)/\S+): (.*)$", text)
+        prerequisites = dict(rules)
+        self.assertIn("$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf", prerequisites)
+        self.assertIn("$(PROJECT_FONT_GENERATED_DIR)/$(2)", prerequisites)
+        for target, line in prerequisites.items():
+            with self.subTest(target=target):
+                self.assertIn("mk/housekeeping.mk", line.split())
+
+    def test_check_summary_does_not_count_a_skip_as_a_pass(self) -> None:
+        """native-core-tests prints SKIP and exits 0 for a leg this host cannot run (no
+        Vulkan, no SDL3_ttf), so check's last line must not report every check PASSED."""
+        recipe = self._recipe("mk/diagnostics.mk", "check")
+        self.assertIn("$(MAKE) native-core-tests", recipe)
+        summary = recipe[-1]
+        self.assertTrue(summary.startswith("@echo "), summary)
+        self.assertNotIn("PASSED", summary)
+        self.assertIn("SKIP", summary)
+        self.assertIn("not a pass", summary)
+
+    def test_shader_targets_cover_the_ui_shader_set(self) -> None:
+        """The player links nk_ui_vk.o, which includes src/ui/shaders/ui_*.inc, so the shader
+        gate compile and runtime-objects depend on checks that set as well as psp."""
+        for target, verb in (("shaders", "regenerate"), ("shader-verify", "verify"),
+                             ("shader-repro-verify", "verify")):
+            with self.subTest(target=target):
+                recipe = self._recipe("mk/fuzz_verify.mk", target)
+                sets = ["ui" if "--shader-set ui" in line else "psp" for line in recipe
+                        if f"tools/shader_embed.py {verb}" in line]
+                self.assertEqual(sets, ["psp", "ui"], recipe)
+        nk_ui_vk = (ROOT / "src/ui/backend/nk_ui_vk.c").read_text(encoding="utf-8")
+        self.assertIn('"../shaders/ui_vert.inc"', nk_ui_vk)
+
+    def test_run_starts_the_title_the_compile_goal_links(self) -> None:
+        """run executes TITLE_OUTPUT (no .exe on POSIX), with ./ only for a relative path, and
+        refuses an Android build, whose output is a shared library, by name."""
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required")
+        ext = ".exe" if sys.platform == "win32" else ""
+        with tempfile.TemporaryDirectory(prefix="nk-run-") as tmp:
+            build_root = Path(tmp).resolve().as_posix()
+
+            def dry_run(*assignments: str) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    [make, "-n", "-o", "all", "--no-print-directory", "run", "NK_INFO_ONLY=1",
+                     "GAME_NAME=probe", f"BUILD_ROOT={build_root}", *assignments],
+                    cwd=ROOT, capture_output=True, text=True, timeout=120,
+                )
+
+            for build_dir, executable in ((f"{build_root}/title", f"{build_root}/title/probe{ext}"),
+                                          ("build/probe", f"./build/probe/probe{ext}")):
+                with self.subTest(build_dir=build_dir):
+                    proc = dry_run(f"BUILD_DIR={build_dir}")
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                    command = [line for line in proc.stdout.splitlines() if "--image" in line]
+                    self.assertEqual(len(command), 1, proc.stdout)
+                    self.assertEqual(command[0].split(" ", 1)[0], executable)
+            proc = dry_run(f"BUILD_DIR={build_root}/title", "NK_TARGET=android")
+            self.assertNotEqual(proc.returncode, 0, proc.stdout)
+            self.assertIn("run starts a host executable", proc.stderr)
+            self.assertNotIn("--image", proc.stdout)
 
     def test_audited_public_controls_stay_diff_visible(self) -> None:
         """The provenance controls are audited bytes, so PR diffs must show them.
