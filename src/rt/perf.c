@@ -419,17 +419,7 @@ static void checkpoint_timers(uint64_t now) {
 }
 
 static void stop_timers(uint64_t now) {
-    if (s_perf.guest_active && now > s_perf.guest_start_ns)
-        ADD(guest_ns, now - s_perf.guest_start_ns);
-    if (s_perf.current_tier == SR_PERF_TIER_AOT && s_perf.aot_start_ns &&
-        now > s_perf.aot_start_ns)
-        ADD(aot_ns, now - s_perf.aot_start_ns);
-    if (s_perf.current_tier == SR_PERF_TIER_INTERP && s_perf.interp_start_ns &&
-        now > s_perf.interp_start_ns)
-        ADD(interp_ns, now - s_perf.interp_start_ns);
-    if (s_perf.sched_state_valid && s_perf.sched_start_ns && now > s_perf.sched_start_ns &&
-        (unsigned)s_perf.sched_state < SR_PERF_SCHED_STATE_COUNT)
-        ADD_ARRAY(sched_ns, (unsigned)s_perf.sched_state, now - s_perf.sched_start_ns);
+    checkpoint_timers(now);
     s_perf.guest_active = 0;
     s_perf.guest_start_ns = 0;
     s_perf.aot_start_ns = 0;
@@ -569,19 +559,37 @@ static void csv_header(FILE *csv) {
     fputc('\n', csv);
 }
 
+/* What one interval's counters mean. The CSV row, the PERF line and the live view all read
+ * these, so they share one definition of each (docs/DEBUGGING.md). */
+typedef struct PerfDerived {
+    double seconds;
+    double fps;
+    double vblank_hz;
+    double frame_ms;
+    uint64_t idle_ns;   /* scheduler time outside guest code, plus guest idle */
+    uint64_t cpu_ns;    /* guest time less GE waits, presents and guest idle */
+} PerfDerived;
+
+static PerfDerived perf_derive(const SrPerfMetrics *m, uint64_t wall_ns) {
+    PerfDerived d;
+    uint64_t scheduler_ns = wall_ns > m->guest_ns ? wall_ns - m->guest_ns : 0;
+    uint64_t excluded_ns = m->ge_wait_ns + m->present_ns + m->guest_idle_ns;
+    d.seconds = (double)wall_ns / 1000000000.0;
+    d.fps = d.seconds > 0.0 ? (double)m->presents / d.seconds : 0.0;
+    d.vblank_hz = d.seconds > 0.0 ? (double)m->vblanks / d.seconds : 0.0;
+    d.frame_ms = m->presents ? ms(wall_ns) / (double)m->presents : 0.0;
+    d.idle_ns = scheduler_ns + m->guest_idle_ns;
+    d.cpu_ns = m->guest_ns > excluded_ns ? m->guest_ns - excluded_ns : 0;
+    return d;
+}
+
 static void csv_row(FILE *csv, const SrPerfMetrics *m, uint64_t total_vblanks,
                     uint64_t wall_ns) {
-    double seconds = (double)wall_ns / 1000000000.0;
-    double fps = seconds > 0.0 ? (double)m->presents / seconds : 0.0;
-    double vblank_hz = seconds > 0.0 ? (double)m->vblanks / seconds : 0.0;
-    double frame_ms = m->presents ? ms(wall_ns) / (double)m->presents : 0.0;
-    uint64_t scheduler_ns = wall_ns > m->guest_ns ? wall_ns - m->guest_ns : 0;
-    uint64_t idle_ns = scheduler_ns + m->guest_idle_ns;
-    uint64_t excluded_ns = m->ge_wait_ns + m->present_ns + m->guest_idle_ns;
-    uint64_t cpu_ns = m->guest_ns > excluded_ns ? m->guest_ns - excluded_ns : 0;
+    const PerfDerived d = perf_derive(m, wall_ns);
+    const double fps = d.fps;
     fprintf(csv, "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%llu,%.3f,%s",
-            (unsigned long long)total_vblanks, ms(wall_ns), fps, frame_ms, vblank_hz,
-            ms(cpu_ns), ms(m->ge_wait_ns), ms(m->present_ns), ms(idle_ns),
+            (unsigned long long)total_vblanks, ms(wall_ns), fps, d.frame_ms, d.vblank_hz,
+            ms(d.cpu_ns), ms(m->ge_wait_ns), ms(m->present_ns), ms(d.idle_ns),
             (unsigned long long)(m->ge_submits + m->present_submits),
             (unsigned long long)m->ge_submits, (unsigned long long)m->present_submits,
             (unsigned long long)(m->ge_waits + m->present_waits),
@@ -676,13 +684,20 @@ static int transition_compare(const void *left, const void *right) {
     return 0;
 }
 
-static void json_top_pcs(FILE *json, unsigned direction) {
-    SrPerfTransitionEntry entries[SR_PERF_TOP_N];
+/* The table's live entries for one direction, most frequent first; returns how many. */
+static unsigned sorted_transitions(unsigned direction,
+                                   SrPerfTransitionEntry entries[SR_PERF_TOP_N]) {
     unsigned count = 0;
     for (unsigned i = 0; i < SR_PERF_TOP_N; i++)
         if (s_perf.transitions[direction][i].count)
             entries[count++] = s_perf.transitions[direction][i];
     qsort(entries, count, sizeof(entries[0]), transition_compare);
+    return count;
+}
+
+static void json_top_pcs(FILE *json, unsigned direction) {
+    SrPerfTransitionEntry entries[SR_PERF_TOP_N];
+    unsigned count = sorted_transitions(direction, entries);
     fputc('[', json);
     for (unsigned i = 0; i < count; i++) {
         if (i) fputc(',', json);
@@ -1044,16 +1059,15 @@ static void report_if_due(uint64_t now) {
     sample_gpu_replay();
     uint64_t wall_ns = now - s_perf.interval_start_ns;
     SrPerfMetrics m = s_perf.interval;
-    uint64_t scheduler_ns = wall_ns > m.guest_ns ? wall_ns - m.guest_ns : 0;
-    uint64_t idle_ns = scheduler_ns + m.guest_idle_ns;
-    uint64_t excluded_ns = m.ge_wait_ns + m.present_ns + m.guest_idle_ns;
-    uint64_t cpu_ns = m.guest_ns > excluded_ns ? m.guest_ns - excluded_ns : 0;
+    const PerfDerived d = perf_derive(&m, wall_ns);
+    uint64_t idle_ns = d.idle_ns;
+    uint64_t cpu_ns = d.cpu_ns;
     uint64_t submits = m.ge_submits + m.present_submits;
     uint64_t waits = m.ge_waits + m.present_waits;
-    double seconds = (double)wall_ns / 1000000000.0;
-    double fps = seconds > 0.0 ? (double)m.presents / seconds : 0.0;
-    double vblank_hz = seconds > 0.0 ? (double)m.vblanks / seconds : 0.0;
-    double frame_ms = m.presents ? ms(wall_ns) / (double)m.presents : 0.0;
+    double seconds = d.seconds;
+    double fps = d.fps;
+    double vblank_hz = d.vblank_hz;
+    double frame_ms = d.frame_ms;
     s_hud_fps = fps;
     s_hud_frame_ms = frame_ms;
     s_hud_vblank_hz = vblank_hz;
@@ -1884,12 +1898,12 @@ void sr_perf_present_frame(uint32_t buffer, uint32_t vcount) {
 
 void sr_perf_aot_begin(uint32_t pc) {
     if (!s_perf.enabled || s_perf.shutdown) return;
-    uint64_t now = raw_now_ns();
     s_perf.last_aot_pc = pc;
     if (s_perf.interp_depth)
         s_perf.aot_seen = 1;
+    /* The clock is read only where a tier boundary is timed: a nested call reads none. */
     if (s_perf.current_tier != SR_PERF_TIER_AOT)
-        switch_to_aot(now);
+        switch_to_aot(raw_now_ns());
     /* The tag names the INNERMOST active tier, so it is re-asserted on every
      * entry rather than only on the outermost one: a late latch is attributed to
      * the code actually running, not to whatever context last ran a scheduler. */
@@ -1900,12 +1914,12 @@ void sr_perf_aot_begin(uint32_t pc) {
 
 void sr_perf_aot_end(void) {
     if (!s_perf.enabled || s_perf.shutdown || !s_perf.aot_depth) return;
-    uint64_t now = raw_now_ns();
     s_perf.aot_depth--;
     if (s_perf.aot_depth) {
         sr_rt_phase = SR_RT_PHASE_AOT;
         return;
     }
+    uint64_t now = raw_now_ns();
     if (s_perf.current_tier == SR_PERF_TIER_AOT && s_perf.aot_start_ns &&
         now > s_perf.aot_start_ns)
         ADD(aot_ns, now - s_perf.aot_start_ns);
@@ -1939,10 +1953,9 @@ void sr_perf_interp_set_reason(SrPerfInterpReason reason) {
 
 void sr_perf_interp_begin(uint32_t entry_pc) {
     if (!s_perf.enabled || s_perf.shutdown) return;
-    uint64_t now = raw_now_ns();
     if (!s_perf.interp_depth) {
         s_perf.aot_seen = 0;
-        switch_to_interp(entry_pc, s_perf.pending_interp_reason, now, 1);
+        switch_to_interp(entry_pc, s_perf.pending_interp_reason, raw_now_ns(), 1);
     }
     sr_rt_phase = SR_RT_PHASE_INTERP;
     s_perf.interp_depth++;
@@ -1958,9 +1971,9 @@ void sr_perf_interp_instruction(void) {
 
 void sr_perf_interp_end(uint32_t exit_pc, int result) {
     if (!s_perf.enabled || s_perf.shutdown || !s_perf.interp_depth) return;
-    uint64_t now = raw_now_ns();
     s_perf.interp_depth--;
     if (s_perf.interp_depth) return;
+    uint64_t now = raw_now_ns();
     if (s_perf.current_tier == SR_PERF_TIER_INTERP && s_perf.interp_start_ns &&
         now > s_perf.interp_start_ns)
         ADD(interp_ns, now - s_perf.interp_start_ns);
@@ -2172,6 +2185,16 @@ void sr_perf_enable_counters(void) {
     if (s_perf.interval_start_ns == 0) s_perf.interval_start_ns = raw_now_ns();
 }
 
+/* Seconds into the open interval, for the HUD's estimate before the first 1 Hz interval
+ * closes; 0 until an interval has run for more than a tenth of a second. */
+static double open_interval_seconds(uint64_t *out_elapsed) {
+    uint64_t now = raw_now_ns();
+    uint64_t elapsed = now > s_perf.interval_start_ns ? now - s_perf.interval_start_ns : 0;
+    double seconds = (double)elapsed / 1000000000.0;
+    *out_elapsed = elapsed;
+    return s_perf.interval_start_ns && seconds > 0.1 ? seconds : 0.0;
+}
+
 void sr_perf_get_hud_metrics(double *out_fps, double *out_frame_ms, double *out_vblank_hz) {
     double fps = 0.0, frame_ms = 0.0, vblank_hz = 0.0;
     if (s_hud_fps > 0.0) {
@@ -2180,10 +2203,9 @@ void sr_perf_get_hud_metrics(double *out_fps, double *out_frame_ms, double *out_
         vblank_hz = s_hud_vblank_hz;
     } else {
         /* Before the first 1 Hz interval closes, estimate from the open interval. */
-        uint64_t now = raw_now_ns();
-        uint64_t elapsed = now > s_perf.interval_start_ns ? now - s_perf.interval_start_ns : 0;
-        double seconds = (double)elapsed / 1000000000.0;
-        if (s_perf.interval_start_ns && seconds > 0.1) {
+        uint64_t elapsed;
+        double seconds = open_interval_seconds(&elapsed);
+        if (seconds > 0.0) {
             fps = (double)s_perf.interval.presents / seconds;
             vblank_hz = (double)s_perf.interval.vblanks / seconds;
             frame_ms = s_perf.interval.presents
@@ -2200,10 +2222,9 @@ void sr_perf_get_hud_frames(double *out_game_fps, double *out_vblanks_per_frame)
     if (s_hud_fps <= 0.0) {
         /* Before the first 1 Hz interval closes, estimate from the open interval, as
          * sr_perf_get_hud_metrics() does. */
-        uint64_t now = raw_now_ns();
-        uint64_t elapsed = now > s_perf.interval_start_ns ? now - s_perf.interval_start_ns : 0;
-        double seconds = (double)elapsed / 1000000000.0;
-        if (s_perf.interval_start_ns && seconds > 0.1) {
+        uint64_t elapsed;
+        double seconds = open_interval_seconds(&elapsed);
+        if (seconds > 0.0) {
             game_fps = (double)s_perf.interval.new_frames / seconds;
             vblanks_per_frame = s_perf.interval.new_frame_intervals
                 ? (double)s_perf.interval.new_frame_vblanks /
@@ -2241,12 +2262,8 @@ const SrPerfHistory *sr_perf_history(void) {
 
 unsigned sr_perf_top_transitions(unsigned direction, SrPerfTopPc *out, unsigned max) {
     SrPerfTransitionEntry entries[SR_PERF_TOP_N];
-    unsigned count = 0;
     if (direction > 1u || !out) return 0;
-    for (unsigned i = 0; i < SR_PERF_TOP_N; i++)
-        if (s_perf.transitions[direction][i].count)
-            entries[count++] = s_perf.transitions[direction][i];
-    qsort(entries, count, sizeof(entries[0]), transition_compare);
+    unsigned count = sorted_transitions(direction, entries);
     if (count > max) count = max;
     for (unsigned i = 0; i < count; i++) {
         out[i].pc = entries[i].pc;

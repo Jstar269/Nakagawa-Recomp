@@ -102,7 +102,6 @@ typedef struct LoaderCtx {
     uint32_t base;
     int is_reloc;
     uint32_t nseg;
-    uint32_t seg_p_offset[SR_PRX_MAX_SEGMENTS];
     ScratchSeg segs[SR_PRX_MAX_SEGMENTS];
     char *err;
     size_t errlen;
@@ -234,6 +233,39 @@ static uint32_t apply_jump(uint32_t w, uint32_t site_addr, uint32_t s) {
     return (w & 0xFC000000u) | ((nt >> 2) & 0x03FFFFFFu);
 }
 
+/* The format A rule for one site word, every kind but a HI16 (5) run, which the caller
+ * pairs with its partner first. */
+static int format_a_word(LoaderCtx *c, unsigned kind, uint32_t w, uint32_t s,
+                         uint32_t site_addr, uint32_t *nw) {
+    switch (kind) {
+    case 0:
+    case 8:
+        *nw = w;
+        return 0;
+    case 1:
+    case 6: {
+        int64_t t = (int64_t)sx16(w) + (int64_t)s;
+        *nw = (w & 0xFFFF0000u) | ((uint32_t)t & 0xFFFFu);
+        return 0;
+    }
+    case 2:
+        *nw = w + s;
+        return 0;
+    case 4:
+        *nw = apply_jump(w, site_addr, s);
+        return 0;
+    case 5:
+        set_err(c->err, c->errlen, "format A HI16 run without partner");
+        return -1;
+    case 7:
+        set_err(c->err, c->errlen, "format A kind 7 (GPREL16) refused");
+        return -1;
+    default:
+        set_err(c->err, c->errlen, "format A unknown kind");
+        return -1;
+    }
+}
+
 static int apply_format_a(LoaderCtx *c, const unsigned char *tab, size_t len) {
     size_t n;
     size_t i;
@@ -333,34 +365,8 @@ static int apply_format_a(LoaderCtx *c, const unsigned char *tab, size_t len) {
                 uint32_t w = rd32le(sp);
                 uint32_t s = c->segs[p_aseg].guest;
                 uint32_t site_addr = c->segs[p_oseg].guest + p_off;
-                uint32_t nw = w;
-                switch (p_kind) {
-                case 0:
-                    break;
-                case 1:
-                case 6: {
-                    int64_t t = (int64_t)sx16(w) + (int64_t)s;
-                    nw = (w & 0xFFFF0000u) | ((uint32_t)t & 0xFFFFu);
-                    break;
-                }
-                case 2:
-                    nw = w + s;
-                    break;
-                case 4:
-                    nw = apply_jump(w, site_addr, s);
-                    break;
-                case 5:
-                    set_err(c->err, c->errlen,
-                            "format A HI16 run without partner");
-                    return -1;
-                case 7:
-                    set_err(c->err, c->errlen,
-                            "format A kind 7 (GPREL16) refused");
-                    return -1;
-                case 8:
-                    break;
-                default:
-                    set_err(c->err, c->errlen, "format A unknown kind");
+                uint32_t nw;
+                if (format_a_word(c, p_kind, w, s, site_addr, &nw) != 0) {
                     return -1;
                 }
                 wr32le(sp, nw);
@@ -394,30 +400,7 @@ static int apply_format_a(LoaderCtx *c, const unsigned char *tab, size_t len) {
             w = rd32le(sp);
             s = c->segs[aseg].guest;
             site_addr = c->segs[oseg].guest + off;
-            nw = w;
-            switch (kind) {
-            case 0:
-                break;
-            case 1:
-            case 6: {
-                int64_t t = (int64_t)sx16(w) + (int64_t)s;
-                nw = (w & 0xFFFF0000u) | ((uint32_t)t & 0xFFFFu);
-                break;
-            }
-            case 2:
-                nw = w + s;
-                break;
-            case 4:
-                nw = apply_jump(w, site_addr, s);
-                break;
-            case 7:
-                set_err(c->err, c->errlen,
-                        "format A kind 7 (GPREL16) refused");
-                return -1;
-            case 8:
-                break;
-            default:
-                set_err(c->err, c->errlen, "format A unknown kind");
+            if (format_a_word(c, kind, w, s, site_addr, &nw) != 0) {
                 return -1;
             }
             wr32le(sp, nw);
@@ -659,6 +642,27 @@ typedef struct PhdrInfo {
     uint32_t p_memsz;
 } PhdrInfo;
 
+/* The section header table lies in the input and names a string table entry. */
+static int section_headers_valid(size_t size, uint32_t e_shoff, uint16_t shnum,
+                                 uint16_t shentsize, uint16_t shstrndx,
+                                 char *err, size_t errlen) {
+    uint64_t shneed;
+    if (shentsize < 40) {
+        set_err(err, errlen, "bad section header entry size");
+        return 0;
+    }
+    shneed = (uint64_t)e_shoff + (uint64_t)shnum * (uint64_t)shentsize;
+    if (shneed > (uint64_t)size) {
+        set_err(err, errlen, "section headers exceed input size");
+        return 0;
+    }
+    if (shstrndx >= shnum) {
+        set_err(err, errlen, "bad section string index");
+        return 0;
+    }
+    return 1;
+}
+
 static int do_load(const unsigned char *data, size_t size, uint32_t base,
                    SrPrxImage *out, char *err, size_t errlen) {
     LoaderCtx c;
@@ -668,6 +672,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
     PhdrInfo *ph = NULL;
     uint64_t image_bytes = 0;
     uint32_t seg_idx = 0;
+    uint32_t phdr_of_seg[SR_PRX_MAX_SEGMENTS] = {0};
     uint32_t start = 0, end = 0;
     int has_a_phdr = 0;
     uint32_t p_paddr0 = 0, p_offset0 = 0;
@@ -682,7 +687,9 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
     uint32_t nexp = 0, exps_cap = 0;
     SrPrxImportStub *imps = NULL;
     uint32_t nimp = 0, imps_cap = 0;
-    uint32_t s;
+    int syslib_seen = 0;
+    int have_start = 0, have_bootstart = 0;
+    uint32_t start_addr = 0, bootstart_addr = 0;
 
     memset(&c, 0, sizeof c);
     c.data = data;
@@ -841,7 +848,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                 free(ph);
                 return -1;
             }
-            c.seg_p_offset[seg_idx] = ph[i].p_offset;
+            phdr_of_seg[seg_idx] = i;
             c.segs[seg_idx].guest = guest;
             c.segs[seg_idx].memsz = ph[i].p_memsz;
             c.segs[seg_idx].buf = NULL;
@@ -904,6 +911,13 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                 free(ph);
                 return -1;
             }
+            if (!c.is_reloc) {
+                set_err(err, errlen,
+                        "ET_EXEC with relocation records refused (a fixed-address "
+                        "image is not rebased)");
+                free(ph);
+                return -1;
+            }
             if (ph[i].p_type == 0x700000A0u) {
                 has_a_phdr = 1;
             }
@@ -912,22 +926,9 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
 
     /* Allocate scratch and lay out segments. */
     for (i = 0; i < c.nseg; i++) {
-        uint32_t k = 0;
-        uint32_t filesz = 0;
+        uint32_t k = phdr_of_seg[i];
+        uint32_t filesz = ph[k].p_filesz;
         uint32_t memsz = c.segs[i].memsz;
-        /* Find the matching loadable phdr (k-th loadable). */
-        uint32_t seen = 0;
-        uint32_t j;
-        for (j = 0; j < (uint32_t)phnum; j++) {
-            if (ph[j].p_type == 1) {
-                if (seen == i) {
-                    break;
-                }
-                seen++;
-            }
-        }
-        k = j;
-        filesz = ph[k].p_filesz;
         if (memsz > 0) {
             c.segs[i].buf = (unsigned char *)calloc(1, memsz);
             if (c.segs[i].buf == NULL) {
@@ -970,74 +971,59 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
 
     /* Format-A from section headers when no such program header exists. */
     if (!has_a_phdr && e_shoff != 0 && shnum != 0) {
-        uint64_t shneed;
-        const unsigned char *strtab = NULL;
-        uint32_t strsz = 0;
         uint32_t si;
-        if (shentsize < 40) {
-            set_err(err, errlen, "bad section header entry size");
-            goto fail_scratch;
+        if (!section_headers_valid(size, e_shoff, shnum, shentsize, shstrndx,
+                                   err, errlen)) {
+            goto fail;
         }
-        shneed = (uint64_t)e_shoff + (uint64_t)shnum * (uint64_t)shentsize;
-        if (shneed > (uint64_t)size) {
-            set_err(err, errlen, "section headers exceed input size");
-            goto fail_scratch;
-        }
-        if (shstrndx >= shnum) {
-            set_err(err, errlen, "bad section string index");
-            goto fail_scratch;
-        }
-        (void)strtab;
-        (void)strsz;
         for (si = 0; si < shnum; si++) {
             const unsigned char *sh = data + e_shoff + (size_t)si * shentsize;
             uint32_t shtype = rd32le(sh + 4);
             uint32_t shoff = rd32le(sh + 16);
             uint32_t shsize = rd32le(sh + 20);
             if (shtype == 0x700000A0u) {
+                if (!c.is_reloc) {
+                    set_err(err, errlen,
+                            "ET_EXEC with relocation records refused (a "
+                            "fixed-address image is not rebased)");
+                    goto fail;
+                }
                 if ((uint64_t)shoff + (uint64_t)shsize > (uint64_t)size) {
                     set_err(err, errlen, "section data exceeds input size");
-                    goto fail_scratch;
+                    goto fail;
                 }
                 if (apply_format_a(&c, data + shoff, shsize) != 0) {
-                    goto fail_scratch;
+                    goto fail;
                 }
             }
         }
     }
 
-    /* Module info location from the first segment's p_paddr. */
+    /* Module info location from the first segment's p_paddr. Its top three bits are
+     * address-space bits (a kernel module sets 0x80000000), masked off as the shared
+     * start-entry rule does (sr_prx_start_entry_from_table in prx_loader.h). */
+    p_paddr0 &= 0x1FFFFFFFu;
     if (p_paddr0 < p_offset0) {
         set_err(err, errlen, "module info p_paddr below segment offset");
-        goto fail_scratch;
+        goto fail;
     }
     mod_off_in_seg = p_paddr0 - p_offset0;
     if ((uint64_t)mod_off_in_seg + SR_PRX_MODINFO_SIZE >
         (uint64_t)c.segs[0].memsz) {
         set_err(err, errlen, "module info block outside segment");
-        goto fail_scratch;
+        goto fail;
     }
     mod_guest = c.segs[0].guest + mod_off_in_seg;
 
     /* Section agreement for .rodata.sceModuleInfo when present. */
     if (e_shoff != 0 && shnum != 0) {
-        uint64_t shneed;
         const unsigned char *strtab = NULL;
         uint32_t strsz = 0;
         uint32_t si;
         static const char want[] = ".rodata.sceModuleInfo";
-        if (shentsize < 40) {
-            set_err(err, errlen, "bad section header entry size");
-            goto fail_scratch;
-        }
-        shneed = (uint64_t)e_shoff + (uint64_t)shnum * (uint64_t)shentsize;
-        if (shneed > (uint64_t)size) {
-            set_err(err, errlen, "section headers exceed input size");
-            goto fail_scratch;
-        }
-        if (shstrndx >= shnum) {
-            set_err(err, errlen, "bad section string index");
-            goto fail_scratch;
+        if (!section_headers_valid(size, e_shoff, shnum, shentsize, shstrndx,
+                                   err, errlen)) {
+            goto fail;
         }
         {
             const unsigned char *ssh =
@@ -1046,7 +1032,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
             uint32_t ssize = rd32le(ssh + 20);
             if ((uint64_t)soff + (uint64_t)ssize > (uint64_t)size) {
                 set_err(err, errlen, "section data exceeds input size");
-                goto fail_scratch;
+                goto fail;
             }
             strtab = data + soff;
             strsz = ssize;
@@ -1065,7 +1051,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
             if (shtype != SR_PRX_SHT_NOBITS &&
                 (uint64_t)shoff + (uint64_t)shsize > (uint64_t)size) {
                 set_err(err, errlen, "section data exceeds input size");
-                goto fail_scratch;
+                goto fail;
             }
             if (shname >= strsz) {
                 continue;
@@ -1095,14 +1081,14 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                 if (sec_guest64 > 0xFFFFFFFFULL) {
                     set_err(err, errlen,
                             "section address overflows 32 bits");
-                    goto fail_scratch;
+                    goto fail;
                 }
                 sec_guest = (uint32_t)sec_guest64;
                 if (sec_guest != mod_guest) {
                     set_err(err, errlen,
                             ".rodata.sceModuleInfo address disagrees with "
                             "p_paddr");
-                    goto fail_scratch;
+                    goto fail;
                 }
             }
         }
@@ -1110,7 +1096,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
 
     if (c.segs[0].buf == NULL) {
         set_err(err, errlen, "module info block outside segment");
-        goto fail_scratch;
+        goto fail;
     }
     memcpy(modblk, c.segs[0].buf + mod_off_in_seg, SR_PRX_MODINFO_SIZE);
     mod_attr = rd16le(modblk);
@@ -1128,7 +1114,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
         }
         if (!has_nul) {
             set_err(err, errlen, "module name without NUL terminator");
-            goto fail_scratch;
+            goto fail;
         }
     }
     gp = rd32le(modblk + 32);
@@ -1142,7 +1128,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
         uint32_t cur;
         if (exp_start > exp_end) {
             set_err(err, errlen, "export table end before start");
-            goto fail_scratch;
+            goto fail;
         }
         if (exp_start == exp_end) {
             cur = exp_start;
@@ -1150,7 +1136,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
             if (!range_covered(&c, exp_start,
                                (uint64_t)exp_end - exp_start)) {
                 set_err(err, errlen, "export table outside image");
-                goto fail_scratch;
+                goto fail;
             }
             cur = exp_start;
             while (cur < exp_end) {
@@ -1167,11 +1153,11 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                 if ((uint64_t)cur + SR_PRX_EXPORT_REC_SIZE > exp_end) {
                     set_err(err, errlen,
                             "export record crosses table end");
-                    goto fail_scratch;
+                    goto fail;
                 }
                 if (read_guest(&c, cur, h, sizeof h) != 0) {
                     set_err(err, errlen, "export record outside image");
-                    goto fail_scratch;
+                    goto fail;
                 }
                 /* Revised §3.7 layout: libname u32 @0, version 2B @4,
                  * attribute u16 @6, len u8 @8, nvar u8 @9,
@@ -1183,43 +1169,43 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                 etab = rd32le(h + 12);
                 if (len == 0) {
                     set_err(err, errlen, "export record zero length");
-                    goto fail_scratch;
+                    goto fail;
                 }
                 reclen = (uint64_t)len * 4u;
                 if (len < 4 || reclen < SR_PRX_EXPORT_REC_SIZE) {
                     set_err(err, errlen, "export record too short");
-                    goto fail_scratch;
+                    goto fail;
                 }
                 if ((uint64_t)cur + reclen > exp_end) {
                     set_err(err, errlen,
                             "export record crosses table end");
-                    goto fail_scratch;
+                    goto fail;
                 }
                 nn = (uint64_t)nfunc + (uint64_t)nvar;
                 if (nn > SR_PRX_MAX_ENTRIES) {
                     set_err(err, errlen, "too many export entries");
-                    goto fail_scratch;
+                    goto fail;
                 }
                 if (nexp + nn > SR_PRX_MAX_ENTRIES) {
                     set_err(err, errlen, "too many export entries");
-                    goto fail_scratch;
+                    goto fail;
                 }
                 if (nn > 0) {
                     if (!range_covered(&c, etab, nn * 8u)) {
                         set_err(err, errlen,
                                 "export entry table outside image");
-                        goto fail_scratch;
+                        goto fail;
                     }
                     raw = (unsigned char *)malloc((size_t)(nn * 8u));
                     if (raw == NULL) {
                         set_err(err, errlen, "out of memory");
-                        goto fail_scratch;
+                        goto fail;
                     }
                     if (read_guest(&c, etab, raw, (size_t)(nn * 8u)) != 0) {
                         free(raw);
                         set_err(err, errlen,
                                 "export entry table outside image");
-                        goto fail_scratch;
+                        goto fail;
                     }
                     nids = (uint32_t *)malloc((size_t)(nn * 4u));
                     addrs = (uint32_t *)malloc((size_t)(nn * 4u));
@@ -1228,7 +1214,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                         free(nids);
                         free(addrs);
                         set_err(err, errlen, "out of memory");
-                        goto fail_scratch;
+                        goto fail;
                     }
                     for (k = 0; k < (uint32_t)nn; k++) {
                         nids[k] = rd32le(raw + (size_t)k * 4);
@@ -1236,6 +1222,22 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                     }
                     free(raw);
                     raw = NULL;
+                }
+                /* The start routine comes from the function entries of the first
+                 * system-library record (no library name) that has functions, as in
+                 * sr_prx_start_entry_from_table (prx_loader.h): module_start, else
+                 * module_bootstart, the last listed of each winning. */
+                if (!syslib_seen && libptr == 0 && nfunc != 0) {
+                    syslib_seen = 1;
+                    for (k = 0; k < nfunc; k++) {
+                        if (nids[k] == SR_PRX_NID_MODULE_START) {
+                            have_start = 1;
+                            start_addr = addrs[k];
+                        } else if (nids[k] == SR_PRX_NID_MODULE_BOOTSTART) {
+                            have_bootstart = 1;
+                            bootstart_addr = addrs[k];
+                        }
+                    }
                 }
                 if (libptr == 0) {
                     lib[0] = '\0';
@@ -1246,7 +1248,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                         set_err(err, errlen,
                                 "export library name outside image or "
                                 "unterminated within 256 bytes");
-                        goto fail_scratch;
+                        goto fail;
                     }
                 }
                 for (k = 0; k < (uint32_t)nn; k++) {
@@ -1264,7 +1266,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                             free(nids);
                             free(addrs);
                             set_err(err, errlen, "out of memory");
-                            goto fail_scratch;
+                            goto fail;
                         }
                         exps = ng;
                         exps_cap = ncap;
@@ -1283,7 +1285,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
         uint32_t cur;
         if (imp_start > imp_end) {
             set_err(err, errlen, "import table end before start");
-            goto fail_entries;
+            goto fail;
         }
         if (imp_start == imp_end) {
             cur = imp_start;
@@ -1291,7 +1293,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
             if (!range_covered(&c, imp_start,
                                (uint64_t)imp_end - imp_start)) {
                 set_err(err, errlen, "import table outside image");
-                goto fail_entries;
+                goto fail;
             }
             cur = imp_start;
             while (cur < imp_end) {
@@ -1306,11 +1308,11 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                 if ((uint64_t)cur + SR_PRX_IMPORT_REC_MIN > imp_end) {
                     set_err(err, errlen,
                             "import record crosses table end");
-                    goto fail_entries;
+                    goto fail;
                 }
                 if (read_guest(&c, cur, h, SR_PRX_IMPORT_REC_MIN) != 0) {
                     set_err(err, errlen, "import record outside image");
-                    goto fail_entries;
+                    goto fail;
                 }
                 /* Revised §3.8 layout: libname u32 @0, version 2B @4,
                  * attribute u16 @6, len u8 @8, nvar u8 @9,
@@ -1324,38 +1326,38 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                 stubtab = rd32le(h + 16);
                 if (len == 0) {
                     set_err(err, errlen, "import record zero length");
-                    goto fail_entries;
+                    goto fail;
                 }
                 reclen = (uint64_t)len * 4u;
                 if (len < 5 || reclen < SR_PRX_IMPORT_REC_MIN) {
                     set_err(err, errlen, "import record too short");
-                    goto fail_entries;
+                    goto fail;
                 }
                 if ((uint64_t)cur + reclen > imp_end) {
                     set_err(err, errlen,
                             "import record crosses table end");
-                    goto fail_entries;
+                    goto fail;
                 }
                 if (nfunc > SR_PRX_MAX_ENTRIES ||
                     nimp + nfunc > SR_PRX_MAX_ENTRIES) {
                     set_err(err, errlen, "too many import stubs");
-                    goto fail_entries;
+                    goto fail;
                 }
                 if (nfunc > 0) {
                     if (!range_covered(&c, nidtab, (uint64_t)nfunc * 4u)) {
                         set_err(err, errlen,
                                 "import NID table outside image");
-                        goto fail_entries;
+                        goto fail;
                     }
                     if (!range_covered(&c, stubtab, (uint64_t)nfunc * 8u)) {
                         set_err(err, errlen,
                                 "import stub array outside image");
-                        goto fail_entries;
+                        goto fail;
                     }
                     nids = (uint32_t *)malloc((size_t)nfunc * 4u);
                     if (nids == NULL) {
                         set_err(err, errlen, "out of memory");
-                        goto fail_entries;
+                        goto fail;
                     }
                     for (k = 0; k < nfunc; k++) {
                         if (read_guest_u32(&c, nidtab + (uint64_t)k * 4u,
@@ -1363,7 +1365,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                             free(nids);
                             set_err(err, errlen,
                                     "import NID table outside image");
-                            goto fail_entries;
+                            goto fail;
                         }
                     }
                 }
@@ -1375,7 +1377,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                         set_err(err, errlen,
                                 "import library name outside image or "
                                 "unterminated within 256 bytes");
-                        goto fail_entries;
+                        goto fail;
                     }
                 }
                 for (k = 0; k < nfunc; k++) {
@@ -1392,7 +1394,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                         if (ng == NULL) {
                             free(nids);
                             set_err(err, errlen, "out of memory");
-                            goto fail_entries;
+                            goto fail;
                         }
                         imps = ng;
                         imps_cap = ncap;
@@ -1412,36 +1414,19 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
     out->version[1] = mod_ver[1];
     out->gp = gp;
     out->entry = c.is_reloc ? (e_entry + base) : e_entry;
-    out->has_mod_start = 0;
-    out->mod_start = 0;
     /* uofw's module manager assigns every module_start entry it walks past, so a table
      * that lists the NID more than once enters the last one (sr_prx_start_entry in
      * prx_loader.h names the revision; unmeasured on a PSP). */
-    for (s = 0; s < nexp; s++) {
-        if (exps[s].lib[0] == '\0' && exps[s].nid == 0xD632ACDBu) {
-            out->has_mod_start = 1;
-            out->mod_start = exps[s].addr;
-        }
-    }
+    out->has_mod_start = have_start || have_bootstart;
+    out->mod_start = have_start ? start_addr : (have_bootstart ? bootstart_addr : 0u);
     out->start = start;
     out->end = end;
     out->nseg = c.nseg;
     for (i = 0; i < c.nseg; i++) {
-        uint32_t j;
-        uint32_t filesz = 0;
-        uint32_t seen = 0;
-        for (j = 0; j < (uint32_t)phnum; j++) {
-            if (ph[j].p_type == 1) {
-                if (seen == i) {
-                    break;
-                }
-                seen++;
-            }
-        }
-        filesz = ph[j].p_filesz;
+        uint32_t j = phdr_of_seg[i];
         out->segs[i].file_offset = ph[j].p_offset;
         out->segs[i].guest_addr = c.segs[i].guest;
-        out->segs[i].file_size = filesz;
+        out->segs[i].file_size = ph[j].p_filesz;
         out->segs[i].mem_size = c.segs[i].memsz;
     }
     out->modinfo_addr = mod_guest;
@@ -1465,12 +1450,11 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
                      "guest write failed at 0x%08X size %u",
                      c.segs[i].guest, c.segs[i].memsz);
             set_err(err, errlen, msg);
-            for (s = 0; s < c.nseg; s++) {
-                free(c.segs[s].buf);
-            }
-            free(ph);
-            /* out already owns exps/imps; caller frees via image_free. */
-            return -1;
+            /* A failed load owns nothing, as on every other failure path: a caller
+             * that only reports the error leaks no tables. */
+            sr_prx_image_free(out);
+            memset(out, 0, sizeof *out);
+            goto fail;
         }
     }
     for (i = 0; i < c.nseg; i++) {
@@ -1479,16 +1463,7 @@ static int do_load(const unsigned char *data, size_t size, uint32_t base,
     free(ph);
     return 0;
 
-fail_entries:
-    free(exps);
-    free(imps);
-    for (i = 0; i < c.nseg; i++) {
-        free(c.segs[i].buf);
-    }
-    free(ph);
-    return -1;
-
-fail_scratch:
+fail:
     free(exps);
     free(imps);
     for (i = 0; i < c.nseg; i++) {

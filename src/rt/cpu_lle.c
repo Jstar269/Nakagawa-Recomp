@@ -149,6 +149,14 @@ uint32_t sr_intc_enable_mask(void) {
     return s_intc.configured ? s_intc.enabled : 0u;
 }
 
+/* The controller's Cause bit and whether its line is asserted now. Cause.IP sits at
+ * bits 15..8 (SR_CAUSE_IP_MASK); IP<n> is bit 8+n. The controller owns exactly its
+ * configured bit; the other hardware bits are unmodeled lines. */
+static uint32_t sr_intc_cause_bit(int *asserted) {
+    *asserted = (s_intc.pending & s_intc.enabled) != 0u;
+    return 1u << (8u + s_intc.cpu_ip_bit);
+}
+
 int sr_intc_cpu_pending(CpuState *s) {
     uint32_t bit;
     int asserted;
@@ -156,11 +164,8 @@ int sr_intc_cpu_pending(CpuState *s) {
     if (!s || !s_intc.configured) {
         return -1;
     }
-    /* Cause.IP sits at bits 15..8 (SR_CAUSE_IP_MASK); IP<n> is bit 8+n. The
-     * controller owns exactly its configured bit; the other hardware bits are
-     * unmodeled lines and are left as they are. */
-    bit = 1u << (8u + s_intc.cpu_ip_bit);
-    asserted = (s_intc.pending & s_intc.enabled) != 0u;
+    /* The other hardware bits are left as they are. */
+    bit = sr_intc_cause_bit(&asserted);
     s->cop0[SR_CP0_CAUSE] =
         (s->cop0[SR_CP0_CAUSE] & ~bit) | (asserted ? bit : 0u);
     return asserted;
@@ -210,13 +215,10 @@ void sr_cpu_clear_flow(CpuState *s) {
 /* Cause.IP as a delivery decision sees it: the stored bits with the
  * controller's bit replaced by the live line. Changes nothing. */
 static uint32_t sr_cpu_live_cause_ip(const CpuState *s) {
-    uint32_t ip = s->cop0[SR_CP0_CAUSE] & SR_CAUSE_IP_MASK;
-    uint32_t bit = 1u << (8u + s_intc.cpu_ip_bit);
-    ip &= ~bit;
-    if ((s_intc.pending & s_intc.enabled) != 0u) {
-        ip |= bit;
-    }
-    return ip;
+    int asserted;
+    uint32_t bit = sr_intc_cause_bit(&asserted);
+    uint32_t ip = s->cop0[SR_CP0_CAUSE] & SR_CAUSE_IP_MASK & ~bit;
+    return asserted ? ip | bit : ip;
 }
 
 SrGuestLaneHold sr_guest_lane_hold;

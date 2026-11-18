@@ -252,6 +252,34 @@ static void test_live_rows(void) {
 
 /* Each closed telemetry interval lands in the history the live view reads, carrying the
  * interval's counters, and the transition hot spots are the summary's top_pcs. */
+/* Audit 2026-11-17: the tier hooks run on every dispatch of a profiled run. A nested AOT or
+ * interpreter call crosses no tier boundary, so it reads no host clock; before, each begin and
+ * end read it and threw the value away, adding clock cost to the AOT time being measured. */
+static unsigned s_clock_reads;
+static uint64_t counting_wall(void) { return 50000000000ull + 1000u * (uint64_t)++s_clock_reads; }
+
+static void test_nested_tier_calls_read_no_clock(void) {
+    sr_perf_init();
+    sr_perf_test_set_clocks(counting_wall, NULL);
+    sr_perf_aot_begin(0x08804000u);              /* outermost: the AOT tier starts here */
+    unsigned before = s_clock_reads;
+    sr_perf_aot_begin(0x08804100u);
+    sr_perf_aot_end();
+    CHECK(s_clock_reads == before, "a nested AOT call read the clock %u times",
+          s_clock_reads - before);
+    sr_perf_interp_begin(0x08804200u);           /* AOT -> interpreter: a boundary */
+    before = s_clock_reads;
+    sr_perf_interp_begin(0x08804300u);
+    sr_perf_interp_end(0x08804310u, 0);
+    CHECK(s_clock_reads == before, "a nested interpreter call read the clock %u times",
+          s_clock_reads - before);
+    before = s_clock_reads;
+    sr_perf_interp_end(0x08804210u, 0);
+    sr_perf_aot_end();
+    CHECK(s_clock_reads > before, "the outermost ends still time their tiers");
+    sr_perf_test_set_clocks(NULL, NULL);
+}
+
 static void test_live_history_follows_the_report(void) {
     SrPerfTopPc top[4];
     sr_perf_init();
@@ -1019,6 +1047,7 @@ int main(void) {
     test_live_history_ring();
     test_live_rows();
     test_live_history_follows_the_report();
+    test_nested_tier_calls_read_no_clock();
     test_guest_symbol_labels();
     test_new_frames_are_distinct_buffers();
     test_frame_intervals_and_work();
