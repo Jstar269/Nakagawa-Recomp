@@ -748,6 +748,10 @@ void      ge_clut_load_extent(uint32_t *last_bytes, uint32_t *max_bytes);
  * directly call it to say how much they loaded). */
 void      ge_clut_note_load(uint32_t bytes);
 void      ge_replay_restore(const GeState *state, const uint16_t *zbuf);
+/* The colour target `state` draws to, as ge.c's software renderer addresses it: a VRAM view
+ * (an offset below 2 MiB or any 0x?4xxxxxx address) folded onto 0x04000000 | (fbp & 0x1FFFFF),
+ * a main-RAM target (render-to-RAM) kept as it is, masked to 28 bits. */
+uint32_t  ge_fb_addr_of(const GeState *state);
 void      ge_cpu_profile_reset(void);
 void      ge_cpu_profile_get(GeCpuProfileStats *out);
 /* The software GE's per-draw transformed-vertex cache (SR_GE_VERTEX_CACHE_DISABLE): triangle

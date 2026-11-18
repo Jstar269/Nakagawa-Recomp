@@ -874,6 +874,37 @@ class NkCliVramTests(unittest.TestCase):
             self.assertEqual(fits.returncode, 0, fits.stdout + fits.stderr)
             self.assertEqual(self._read_png(root / "fits.png")[2], [(0, 255, 0, 255)])
 
+    def test_vram_linear_extent_uses_the_decoder_row_pitch(self) -> None:
+        # The decoder reads a linear surface in whole 16-byte rows (ge_tex_row_bytes): a 2-texel
+        # 5650 stride is an 8-texel pitch. At 0x041ffff8, 2x2 needs 8 bytes at the raw stride but
+        # 20 at the decoder's pitch, so row 1 starts at 0x04200008, past the image. Before, the
+        # check used the raw stride, the read went through the swizzled 0x042 mirror into the
+        # image's start and the export passed with the wrong pixels. At 0x041fffe0 it fits.
+        with tempfile.TemporaryDirectory(prefix="nk_cli_vram_pitch_") as temp:
+            root = Path(temp)
+            image = bytearray(2 * 1024 * 1024)
+            struct.pack_into("<HH", image, 0x1FFFF0, 0x001F, 0x001F)   # row 1 at 0x041ffff0
+            image_path = root / "vram.bin"
+            image_path.write_bytes(image)
+
+            def export(addr: str, name: str):
+                return subprocess.run(
+                    [sys.executable, str(CLI_PATH), "vram", str(image_path),
+                     "--addr", addr, "--width", "2", "--height", "2", "--stride", "2",
+                     "--format", "5650", "--output", str(root / name)],
+                    cwd=ROOT, capture_output=True, text=True,
+                )
+
+            refused = export("0x041ffff8", "past.png")
+            self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+            self.assertIn("crosses the captured VRAM boundary", refused.stderr)
+            self.assertFalse((root / "past.png").exists())
+
+            fits = export("0x041fffe0", "fits.png")
+            self.assertEqual(fits.returncode, 0, fits.stdout + fits.stderr)
+            self.assertEqual(self._read_png(root / "fits.png")[2],
+                             [(0, 0, 0, 255)] * 2 + [(255, 0, 0, 255)] * 2)
+
     def test_vram_huge_stride_is_refused_not_wrapped(self) -> None:
         # Row 1 of a DEPTH16 surface with stride 0x80000000 lies 4 GiB past row 0. Before, the
         # 32-bit address wrapped back to row 0, every read stayed in the image and the export

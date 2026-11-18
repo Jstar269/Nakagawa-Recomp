@@ -11,13 +11,16 @@
 // sprite. Four checks:
 //
 // 1. The dump. SR_GESCENE=0 with SR_GESCENE_DIR=<argv[1]> is set before the first PRIM, so ge.c
-//    registers its dump; the file is read back and every record's identity and vertices are
-//    compared with what the record consumer below saw.
+//    registers its dump; the file is read back and every record is compared, field by field at
+//    the offsets ge_scene.h documents, with the record and state the consumer below saw: the
+//    identity, the transforms, targets, texture, output and lighting blocks, and every vertex.
 // 2. Record and draw agree. For every transform-mode triangle the stand-in received, the three
 //    vertices equal, bit for bit, ge_scene_project_for_test() of the record's vertex references
-//    in the order draw_prim forms that triangle. So a consumer that rebuilds the scene from the
-//    record (model-space vertices, the matrices and lights in `ge`) gets exactly the geometry the
-//    renderer drew. Stored vertices, weights, morph results, spans and identities are checked
+//    in the order draw_prim forms that triangle. That function runs ge.c's own vertex decode,
+//    transform and projection under the record's state, the code draw_prim uses, so the check
+//    proves that the record names the vertices drawn (its vertex address, stride, indices and
+//    triangle order), not that ge.c's transform is right: a transform error would appear on
+//    both sides. Stored vertices, weights, morph results, spans and identities are checked
 //    against the values written.
 // 3. No effect. The same lists with no consumer give the stand-in the same submissions, byte for
 //    byte, as with the consumer registered.
@@ -360,6 +363,96 @@ static void hooks_on(void) {
     ge_set_gpu_hooks(&hooks);
 }
 
+/* ---- The dump's layout, written here from ge_scene.h's format description ---- */
+
+/* 314 words: magic and size 2, identity 17, transforms 162, targets 5, texture 20, output 25,
+ * lighting 83. A vertex is 17 words. */
+#define DUMP_FIXED 1256u
+#define DUMP_VERTEX 68u
+
+/* The bytes ge_scene.h says a record holds, built field by field in the documented order from
+ * the record and its state, independently of ge.c's writer: a writer that swapped, dropped or
+ * reordered a field would differ here. record_bytes (bytes 4-7) is left zero. */
+typedef struct { uint8_t b[DUMP_FIXED]; size_t n; } DumpImage;
+static void di_put(DumpImage *d, const void *p, size_t n) {
+    if (d->n + n <= sizeof d->b) memcpy(d->b + d->n, p, n);
+    d->n += n;
+}
+static void di_u32(DumpImage *d, uint32_t v) { di_put(d, &v, 4); }
+static void di_i32(DumpImage *d, int v) { int32_t w = (int32_t)v; di_put(d, &w, 4); }
+static void di_f32(DumpImage *d, float v) { di_put(d, &v, 4); }
+static void di_f32s(DumpImage *d, const float *v, size_t n) {
+    for (size_t i = 0; i < n; i++) di_f32(d, v[i]);
+}
+static void di_u32s(DumpImage *d, const uint32_t *v, size_t n) {
+    for (size_t i = 0; i < n; i++) di_u32(d, v[i]);
+}
+
+static void dump_image(const GeSceneRecord *rec, DumpImage *d) {
+    const GeState *g = rec->ge;
+    memset(d, 0, sizeof *d);
+    di_u32(d, 0x4D495250u); di_u32(d, 0u);
+    /* identity */
+    di_u32(d, rec->frame); di_u32(d, rec->list_addr); di_u32(d, rec->cmd_addr);
+    di_put(d, &rec->prim_index, 8);
+    di_u32(d, rec->type); di_u32(d, rec->count); di_u32(d, rec->vtype); di_u32(d, rec->through);
+    di_u32(d, rec->weights); di_u32(d, rec->morphs); di_u32(d, rec->index_format);
+    di_u32(d, rec->vertex_addr); di_u32(d, rec->vertex_stride); di_u32(d, rec->vertex_span);
+    di_u32(d, rec->index_addr); di_u32(d, rec->index_bytes);
+    /* transforms */
+    di_f32s(d, g->world, 12); di_f32s(d, g->view, 12); di_f32s(d, g->proj, 16);
+    di_f32s(d, g->bone, 96); di_f32s(d, g->tgen, 12);
+    di_u32s(d, g->viewport_raw, 6); di_u32(d, g->offsetx); di_u32(d, g->offsety);
+    di_i32(d, g->scis_x1); di_i32(d, g->scis_y1); di_i32(d, g->scis_x2); di_i32(d, g->scis_y2);
+    di_u32(d, g->minz); di_u32(d, g->maxz);
+    /* targets */
+    di_u32(d, g->fbp); di_u32(d, g->fbw); di_u32(d, g->fbfmt); di_u32(d, g->zbp); di_u32(d, g->zbw);
+    /* texture */
+    di_u32(d, (uint32_t)g->tex_enable); di_u32(d, g->tex_addr); di_u32(d, g->tex_bufw);
+    di_u32(d, g->tex_fmt); di_u32(d, (uint32_t)g->tex_w); di_u32(d, (uint32_t)g->tex_h);
+    di_u32(d, (uint32_t)g->tex_swizzle); di_u32(d, g->tex_wrap); di_u32(d, g->tex_func);
+    di_u32(d, g->tex_env); di_u32(d, g->tex_filter); di_u32(d, g->tex_map_mode);
+    di_u32(d, g->tex_shade_ls); di_u32(d, g->clut_addr); di_u32(d, g->clut_fmt);
+    di_u32(d, g->clut_gen);
+    di_f32(d, g->tex_scale_u); di_f32(d, g->tex_scale_v);
+    di_f32(d, g->tex_off_u); di_f32(d, g->tex_off_v);
+    /* output */
+    di_u32(d, (uint32_t)g->blend_enable); di_u32(d, g->blend_mode); di_u32(d, g->blend_fixa);
+    di_u32(d, g->blend_fixb); di_u32(d, (uint32_t)g->atest_enable); di_u32(d, g->atest);
+    di_u32(d, (uint32_t)g->ztest_enable); di_u32(d, g->ztest);
+    di_u32(d, (uint32_t)g->zwrite_disable); di_u32(d, g->depth_clip);
+    di_u32(d, (uint32_t)g->fog_enable); di_f32(d, g->fog_end); di_f32(d, g->fog_slope);
+    di_u32(d, g->fog_color); di_u32(d, (uint32_t)g->dither_enable);
+    di_u32(d, (uint32_t)g->cull_enable); di_u32(d, g->cull); di_u32(d, (uint32_t)g->clear);
+    di_u32(d, g->clear_mode); di_u32(d, (uint32_t)g->shade_gouraud);
+    di_u32(d, (uint32_t)g->stencil_enable); di_u32(d, (uint32_t)g->color_test_enable);
+    di_u32(d, (uint32_t)g->logic_op_enable); di_u32(d, g->mask_rgb);
+    di_u32(d, (uint32_t)g->mask_alpha);
+    /* lighting */
+    di_u32(d, (uint32_t)g->lighting_enable); di_u32(d, (uint32_t)g->light_mode);
+    di_u32(d, (uint32_t)g->reverse_normal);
+    for (int i = 0; i < 4; i++) di_u32(d, (uint32_t)g->light_on[i]);
+    di_u32s(d, g->light_type, 4);
+    for (int i = 0; i < 4; i++) di_f32s(d, g->light_pos[i], 3);
+    for (int i = 0; i < 4; i++) di_f32s(d, g->light_dir[i], 3);
+    for (int i = 0; i < 4; i++) di_f32s(d, g->light_att[i], 3);
+    di_f32s(d, g->light_spot_exp, 4); di_f32s(d, g->light_spot_cut, 4);
+    di_u32s(d, g->light_acol, 4); di_u32s(d, g->light_dcol, 4); di_u32s(d, g->light_scol, 4);
+    di_u32(d, g->amb_color); di_u32(d, (uint32_t)g->amb_alpha); di_u32(d, g->material);
+    di_u32(d, g->mat_emissive); di_u32(d, g->mat_diffuse); di_u32(d, g->mat_specular);
+    di_u32(d, g->mat_update);
+    di_f32(d, g->spec_coef); di_f32s(d, g->morph_weight, 8);
+}
+
+/* One vertex as ge_scene.h lays it out: pos[3], nrm[3], uv[2], rgba, weight[8]. */
+static void dump_vertex(const GeSceneVertex *v, uint8_t out[DUMP_VERTEX]) {
+    memcpy(out, v->pos, 12);
+    memcpy(out + 12, v->nrm, 12);
+    memcpy(out + 24, v->uv, 8);
+    memcpy(out + 32, &v->rgba, 4);
+    memcpy(out + 36, v->weight, 4u * GE_SCENE_MAX_WEIGHTS);
+}
+
 /* ---- The consumer: a copy of each record, its vertices and their projections ---- */
 
 #define MAX_VERTS 8
@@ -367,6 +460,7 @@ typedef struct {
     GeSceneRecord rec;
     uint32_t fbp;
     int lit;
+    DumpImage image;           /* the record's fixed part, from its state (dump_image) */
     GeSceneVertex v[MAX_VERTS];
     int vok[MAX_VERTS];
     GeVtx p[MAX_VERTS];
@@ -384,6 +478,8 @@ static void consumer(const GeSceneRecord *rec, void *user) {
     s->rec.ge = NULL;
     s->fbp = rec->ge->fbp;
     s->lit = rec->ge->lighting_enable;
+    dump_image(rec, &s->image);
+    expect(s->image.n == DUMP_FIXED, "the documented fixed part is DUMP_FIXED bytes");
     for (uint32_t i = 0; i < rec->count && i < MAX_VERTS; i++) {
         s->vok[i] = ge_scene_vertex(rec, i, &s->v[i]);
         s->pok[i] = ge_scene_project_for_test(rec, i, &s->p[i]);
@@ -479,10 +575,6 @@ static void check_draws_match(void) {
 
 static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 
-/* 314 words: magic and size 2, identity 17, transforms 162, targets 5, texture 20, output 25,
- * lighting 83. */
-#define DUMP_FIXED 1256u
-
 static int file_exists(const char *dir, const char *name) {
     char path[1024];
     snprintf(path, sizeof path, "%s/%s", dir, name);
@@ -567,18 +659,31 @@ static void check_dump(const char *dir) {
         uint64_t prim_index;
         memcpy(&prim_index, r + 20, 8);
         expect(rd32(r + 8) == 0u && prim_index == s->rec.prim_index, what);
-        expect(bytes == DUMP_FIXED + 4u + s->rec.count * 68u, what);
+        expect(bytes == DUMP_FIXED + 4u + s->rec.count * DUMP_VERTEX, what);
         expect(rd32(r + 724) == s->fbp && rd32(r + 924) == (uint32_t)s->lit, what);
+        /* Every other field of the fixed part (identity, transforms, targets, texture, output
+         * and lighting) at its documented offset. record_bytes and the frame were checked
+         * above: the dump ran in frame 0, the consumer in frame 1. */
+        for (size_t off = 12; bytes >= DUMP_FIXED && off < DUMP_FIXED; off += 4) {
+            if (memcmp(r + off, s->image.b + off, 4) != 0) {
+                char field[160];
+                snprintf(field, sizeof field, "%s: the fixed part differs at byte %u", what,
+                         (unsigned)off);
+                expect(0, field);
+                break;
+            }
+        }
         expect(rd32(r + 12) == s->rec.list_addr && rd32(r + 16) == s->rec.cmd_addr, what);
         expect(rd32(r + 28) == s->rec.type && rd32(r + 32) == s->rec.count &&
                rd32(r + 36) == s->rec.vtype, what);
         uint32_t nv = s->rec.count;
-        size_t vblock = 4u + (size_t)nv * 68u;
+        size_t vblock = 4u + (size_t)nv * DUMP_VERTEX;
         expect(bytes > vblock && rd32(r + bytes - vblock) == nv, what);
         for (uint32_t i = 0; i < nv && i < MAX_VERTS; i++) {
-            const uint8_t *v = r + bytes - vblock + 4u + (size_t)i * 68u;
-            expect(memcmp(v, s->v[i].pos, 12) == 0 && rd32(v + 32) == s->v[i].rgba &&
-                   memcmp(v + 36, s->v[i].weight, 32) == 0, what);
+            const uint8_t *v = r + bytes - vblock + 4u + (size_t)i * DUMP_VERTEX;
+            uint8_t want[DUMP_VERTEX];
+            dump_vertex(&s->v[i], want);
+            expect(memcmp(v, want, DUMP_VERTEX) == 0, what);
         }
         at += bytes;
         k++;
@@ -599,6 +704,12 @@ int main(int argc, char **argv) {
     g_mem = arena + 0x08000000u;
     build_list();
     hooks_on();
+    /* Every run starts from the same GE state, so the dump (frame 0) and the consumer (frame 1)
+     * see the same state at each PRIM and the dump is compared field by field. */
+    (void)ge_get_cmd(0);                        /* ge.c's power-on state */
+    static GeState start;
+    static uint16_t start_zbuf[272u * 512u];
+    start = *ge_state_ptr();
 
     /* 1. The dump, registered by ge.c from the environment at the first PRIM. */
     env_set("SR_GESCENE", "0");
@@ -610,6 +721,7 @@ int main(int argc, char **argv) {
     ge_scene_set_consumer(NULL, NULL);
 
     /* 2. The consumer, and the draws it must agree with. */
+    ge_replay_restore(&start, start_zbuf);
     s_nsubs = 0;
     ge_scene_set_consumer(consumer, &s_seen);
     expect(ge_run_list(LIST_MAIN, 0) == 0, "consumer run reaches END");
@@ -622,6 +734,7 @@ int main(int argc, char **argv) {
     check_dump(argv[1]);
 
     /* 3. No consumer: the same submissions, byte for byte. */
+    ge_replay_restore(&start, start_zbuf);
     s_nsubs = 0;
     expect(ge_run_list(LIST_MAIN, 0) == 0, "plain run reaches END");
     expect(s_nsubs == with_n && memcmp(s_subs, with, sizeof(Sub) * with_n) == 0,

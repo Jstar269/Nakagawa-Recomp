@@ -3045,6 +3045,10 @@ static uint32_t ge_fb_addr(void) {
     return ge_target_addr(ge.fbp);
 }
 
+uint32_t ge_fb_addr_of(const GeState *state) {
+    return state ? ge_target_addr(state->fbp) : 0u;
+}
+
 static uint32_t ge_normalize_vram_target(uint32_t addr) {
     return addr < 0x00200000u ? (0x04000000u | addr) : addr;
 }

@@ -10,7 +10,9 @@
 /* The standalone VRAM decoder (nk_cli's `ge-vram-decoder`): decodes one surface of a captured
  * 2 MiB VRAM image with the runtime's own texture decoder. nk_cli builds this file together
  * with ge.c under -DSR_GE_VRAM_DECODER_CLI, which redirects ge.c's guest reads to the image
- * (ge_vram_cli_read8, bounds-checked per byte). Split out of ge.c on 2026-11-01 (#1531). */
+ * (ge_vram_cli_read8, bounds-checked per byte). A linear surface of formats 0-3 is the one
+ * exception: the decoder reads its rows through a host pointer, so main() checks its whole
+ * extent, at the decoder's row pitch, before decoding. Split out of ge.c on 2026-11-01 (#1531). */
 
 #include "recomp.h"
 #include "ge_shared.h"
@@ -95,7 +97,15 @@ int main(int argc, char **argv) {
     }
     if (format <= 3u || format == 11u) {
         bytes_per_pixel = format == 3u ? 4u : 2u;
-        byte_extent = ((uint64_t)height - 1u) * stride * bytes_per_pixel +
+        /* A linear 0-3 surface is read in whole rows through a host pointer
+         * (ge_decode_tex_rgba), not per byte, at the sampler's pitch: whole 16-byte lines,
+         * at least one (ge_tex_row_bytes). Its extent is checked at that pitch, so no row
+         * reaches past the image into the swizzled 0x042 mirror. Depth and swizzled
+         * surfaces read per byte at the raw stride. */
+        const uint64_t row_pitch = (format <= 3u && !swizzled)
+            ? ge_tex_row_bytes(stride, (uint32_t)bytes_per_pixel * 8u)
+            : (uint64_t)stride * bytes_per_pixel;
+        byte_extent = ((uint64_t)height - 1u) * row_pitch +
                       (uint64_t)width * bytes_per_pixel;
         if ((uint64_t)addr + byte_extent >
             (uint64_t)GE_CAPTURE_VRAM_BASE + GE_CAPTURE_VRAM_SIZE) {
