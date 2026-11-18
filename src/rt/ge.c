@@ -124,8 +124,10 @@ static uint32_t ge_vram_cli_read32(uint32_t addr) {
 #define MEM_W32(a, v) (g_ge_capture_active ? ge_capture_w32((a), (uint32_t)(v)) : sr_w32((a), (uint32_t)(v)))
 #endif
 
-/* Wall-clock ms (MinGW clock() is wall time with CLOCKS_PER_SEC=1000). */
-static unsigned long wall_ms(void) { return (unsigned long)(clock() * 1000ull / CLOCKS_PER_SEC); }
+/* Wall-clock ms for GESTAT, from SDL's monotonic clock. clock() is wall time only on MinGW;
+ * on glibc it is the process's CPU time over all threads, so a Linux run reported worker time
+ * and missed sleeps. */
+static unsigned long wall_ms(void) { return (unsigned long)(SDL_GetTicksNS() / 1000000u); }
 
 /* ---- command numbers (subset) ---- */
 enum {
@@ -1814,6 +1816,25 @@ static void read_color(uint32_t addr, const VFmt *v, int *r, int *g, int *b, int
     *r=ci[0]; *g=ci[1]; *b=ci[2]; *a=ci[3];
 }
 
+/* One vertex's raw fields, as the TNL offload (ge_tnl_try_prim) and the scene dump
+ * (ge_scene_vertex) both consume them: position, normal, texcoord, the colour packed
+ * R | G<<8 | B<<16 | A<<24, and the skinning weights when the format has any. Sharing it
+ * keeps the dump showing exactly the vertices the offload read. */
+static void read_packed_vertex(uint32_t a, const VFmt *vf, float *px, float *py, float *pz,
+                               float *nx, float *ny, float *nz, float *u, float *v,
+                               uint32_t *rgba, float *weights) {
+    int r, g, b, al;
+    vtx_linear_begin(a, vf);
+    read_pos(a, vf, px, py, pz);
+    read_nrm(a, vf, nx, ny, nz);
+    read_tc(a, vf, u, v);
+    read_color(a, vf, &r, &g, &b, &al);
+    if (vf->w_n) read_weights(a, vf, weights);
+    vtx_linear_end();
+    *rgba = (uint32_t)(r & 0xFF) | ((uint32_t)(g & 0xFF) << 8) |
+            ((uint32_t)(b & 0xFF) << 16) | ((uint32_t)(al & 0xFF) << 24);
+}
+
 /* Test-only (hle_thread_selftest): a deliberately wrong multi-CLUT rule, so the PSP-GE-MIP-002
  * cells are shown to fail under it. 0 is the measured rule. */
 static int s_multi_clut_mutant;
@@ -2987,14 +3008,23 @@ static uint32_t ge_rel_addr(uint32_t data) {
  * buffers may also legally be placed in main RAM (render-to-RAM); those addresses pass
  * through untouched instead of being folded into the VRAM window (MEM_* validates the
  * range at access time). */
+static inline int ge_is_vram_view(uint32_t addr) {
+    return addr < 0x00200000u || (addr & 0x0F000000u) == 0x04000000u;
+}
+static inline uint32_t ge_vram_fold(uint32_t addr) { return 0x04000000u | (addr & 0x001FFFFFu); }
+
+/* A draw target's address: a VRAM view folded as above, any other address masked to 28 bits.
+ * ge_fb_addr and the widescreen slots (ge_wide_norm) share it. */
+static inline uint32_t ge_target_addr(uint32_t addr) {
+    return ge_is_vram_view(addr) ? ge_vram_fold(addr) : (addr & 0x0FFFFFFFu);
+}
+
 static uint32_t ge_fb_addr(void) {
     /* HST emits VRAM display targets as 2 MiB-local GE offsets (0 / 0x44000).
      * Preserve explicit main-RAM targets, but fold local offsets into the PSP
      * eDRAM window. Without this, software GE overwrites low recompiled code and
      * the Vulkan backend rejects every target as non-VRAM. */
-    if (ge.fbp < 0x00200000u || (ge.fbp & 0x0F000000u) == 0x04000000u)
-        return 0x04000000u | (ge.fbp & 0x001FFFFFu);
-    return ge.fbp & 0x0FFFFFFFu;
+    return ge_target_addr(ge.fbp);
 }
 
 static uint32_t ge_normalize_vram_target(uint32_t addr) {
@@ -3111,6 +3141,24 @@ static int blend_chan(int s, int d, int sf, int df, int eq) {
         case 6: case 7: return s;
         case 0: default: return clamp8(sv+dv);
     }
+}
+
+/* The blend unit for one pixel: both factors from BLENDMODE (and the fixed colours) and the
+ * equation, applied to the source colour against the destination. compose_px_rgba and the host
+ * twin (ge_twin_compose) both call it, so the two cannot blend differently. */
+static inline void ge_blend_rgb(int *r, int *g, int *b, int src_a, int dr, int dg, int db, int da) {
+    const int eq = (int)((ge.blend_mode >> 8) & 7);
+    const int fa = (int)(ge.blend_mode & 0xF), fb = (int)((ge.blend_mode >> 4) & 0xF);
+    const int sr = *r, sg = *g, sb = *b;
+    const int rfa = factor_component(fa, 0, sr, sg, sb, src_a, dr, dg, db, da, 1);
+    const int gfa = factor_component(fa, 1, sr, sg, sb, src_a, dr, dg, db, da, 1);
+    const int bfa = factor_component(fa, 2, sr, sg, sb, src_a, dr, dg, db, da, 1);
+    const int rfb = factor_component(fb, 0, sr, sg, sb, src_a, dr, dg, db, da, 0);
+    const int gfb = factor_component(fb, 1, sr, sg, sb, src_a, dr, dg, db, da, 0);
+    const int bfb = factor_component(fb, 2, sr, sg, sb, src_a, dr, dg, db, da, 0);
+    *r = blend_chan(sr, dr, rfa, rfb, eq);
+    *g = blend_chan(sg, dg, gfa, gfb, eq);
+    *b = blend_chan(sb, db, bfa, bfb, eq);
 }
 
 /* The columns the rasteriser may write, before the scissor. #2193 states that a PSP draws
@@ -3375,14 +3423,7 @@ static __attribute__((noinline)) void ge_twin_compose(int x, int y, int r, int g
         if (ge.clear) {
             if (!(ge.clear_mode & 0x100)) { r = dr; g = dg; b = db; }
         } else if (ge.blend_enable) {
-            int eq=(int)((ge.blend_mode>>8)&7);
-            int rfa=factor_component((int)(ge.blend_mode&0xF),   0,r,g,b,src_a,dr,dg,db,da,1);
-            int gfa=factor_component((int)(ge.blend_mode&0xF),   1,r,g,b,src_a,dr,dg,db,da,1);
-            int bfa=factor_component((int)(ge.blend_mode&0xF),   2,r,g,b,src_a,dr,dg,db,da,1);
-            int rfb=factor_component((int)((ge.blend_mode>>4)&0xF),0,r,g,b,src_a,dr,dg,db,da,0);
-            int gfb=factor_component((int)((ge.blend_mode>>4)&0xF),1,r,g,b,src_a,dr,dg,db,da,0);
-            int bfb=factor_component((int)((ge.blend_mode>>4)&0xF),2,r,g,b,src_a,dr,dg,db,da,0);
-            r=blend_chan(r,dr,rfa,rfb,eq); g=blend_chan(g,dg,gfa,gfb,eq); b=blend_chan(b,db,bfa,bfb,eq);
+            ge_blend_rgb(&r, &g, &b, src_a, dr, dg, db, da);
         }
         /* no dither, no 16-bit colour snap */
         rgba = pack8888(clamp8(r), clamp8(g), clamp8(b), 0);
@@ -3492,14 +3533,7 @@ static void compose_px_rgba(int x, int y, int r, int g, int b, int src_a, int st
         if (!write_alpha) stencil=da;
     } else {
         if (ge.blend_enable) {
-            int eq=(int)((ge.blend_mode>>8)&7);
-            int rfa=factor_component((int)(ge.blend_mode&0xF),   0,r,g,b,src_a,dr,dg,db,da,1);
-            int gfa=factor_component((int)(ge.blend_mode&0xF),   1,r,g,b,src_a,dr,dg,db,da,1);
-            int bfa=factor_component((int)(ge.blend_mode&0xF),   2,r,g,b,src_a,dr,dg,db,da,1);
-            int rfb=factor_component((int)((ge.blend_mode>>4)&0xF),0,r,g,b,src_a,dr,dg,db,da,0);
-            int gfb=factor_component((int)((ge.blend_mode>>4)&0xF),1,r,g,b,src_a,dr,dg,db,da,0);
-            int bfb=factor_component((int)((ge.blend_mode>>4)&0xF),2,r,g,b,src_a,dr,dg,db,da,0);
-            r=blend_chan(r,dr,rfa,rfb,eq); g=blend_chan(g,dg,gfa,gfb,eq); b=blend_chan(b,db,bfa,bfb,eq);
+            ge_blend_rgb(&r, &g, &b, src_a, dr, dg, db, da);
         }
     }
     /* Dither precedes clamping and logic, and applies in clear mode and RGBA8888 too. A clear
@@ -3930,6 +3964,14 @@ static unsigned long ge_time_prim_count(int type, int count) {
         case 4: case 5: return count > 2 ? (unsigned long)(count - 2) : 0ul; /* strip, fan */
         default: return 0ul;
     }
+}
+
+/* Vertex references a PRIM's primitives make, before any reuse: each primitive's own vertices
+ * (1 for a point, 2 for a line or sprite, 3 for a triangle). The profiler's use counts and the
+ * TNL offload derive from ge_time_prim_count through this, so all count the same primitives. */
+static uint64_t ge_prim_vertex_refs(int type, int count) {
+    static const unsigned char per_prim[8] = {1u, 2u, 2u, 3u, 3u, 3u, 2u, 0u};
+    return (uint64_t)ge_time_prim_count(type, count) * per_prim[type & 7];
 }
 
 /* A PRIM (or a patch, `patch` != 0) is about to run: charge its fixed and vertex work and set
@@ -4932,6 +4974,29 @@ typedef struct {
     float sx, sy, sz;
 } CVtx;
 
+/* The fog coefficients a vertex uses. Inf/NaN fog coefficients are VALID on the PSP: games
+ * leave fog enabled but set fog-end to inf/nan to force a constant factor (PPSSPP
+ * TransformUnit ComputeState, "required for Outrun to render proper skies"). Plain float math
+ * turns these into NaN, which clampf01 passes through -> full fog -> solid fog-coloured
+ * geometry. Returns 1 for a constant factor (*constant: 1 = no fog, 0 = full fog) or 2 for
+ * the linear factor clampf01((cz + *end) * *slope). transform_model_vtx_clip and the TNL
+ * offload's parameters (tnl_params) both use it, so the two cannot fog differently. */
+static int ge_fog_coeffs(float *end, float *slope, float *constant) {
+    float fend = ge.fog_end, fslope = ge.fog_slope;
+    if (isinf(fend) || isnan(fend)) {
+        int sign = signbit(fend) ? 1 : 0;
+        if (signbit(fslope)) sign = !sign;   /* the multiply would flip it */
+        if (fslope == 0.0f) sign = 1;        /* *0 clamps to zero regardless of sign */
+        *constant = sign ? 0.0f : 1.0f;
+        return 1;
+    }
+    if (isinf(fslope) || isnan(fslope))
+        fslope = signbit(fslope) ? -262144.0f : 262144.0f;
+    *end = fend;
+    *slope = fslope;
+    return 2;
+}
+
 static void transform_model_vtx_clip(const ModelVtx *m, CVtx *o) {
     /* Every non-finite verdict below ORs into nf; the lighting pass runs first, so start
      * from a clean verdict. */
@@ -4958,21 +5023,10 @@ static void transform_model_vtx_clip(const ModelVtx *m, CVtx *o) {
     /* Fog factor from view-space depth: 1 = no fog, 0 = full fog (PPSSPP convention).
      * Linear in cz, so interpolating the factor across a clipped edge stays exact. */
     if (ge.fog_enable && !ge_env_nofog()) {
-        /* Inf/NaN fog coefficients are VALID on the PSP: games leave fog enabled but set
-         * fog-end to inf/nan to force a constant factor (PPSSPP TransformUnit ComputeState,
-         * "required for Outrun to render proper skies"). Plain float math turns these into
-         * NaN, which clampf01 passes through -> full fog -> solid fog-coloured geometry. */
-        float fend = ge.fog_end, fslope = ge.fog_slope;
-        if (isinf(fend) || isnan(fend)) {
-            int sign = signbit(fend) ? 1 : 0;
-            if (signbit(fslope)) sign = !sign;   /* the multiply would flip it */
-            if (fslope == 0.0f) sign = 1;        /* *0 clamps to zero regardless of sign */
-            o->fog = sign ? 0.0f : 1.0f;
-        } else {
-            if (isinf(fslope) || isnan(fslope))
-                fslope = signbit(fslope) ? -262144.0f : 262144.0f;
-            o->fog = clampf01((cz + fend) * fslope);
-        }
+        /* Inf/NaN coefficients give a constant factor (ge_fog_coeffs). */
+        float fend = 0.0f, fslope = 0.0f, fconst = 1.0f;
+        if (ge_fog_coeffs(&fend, &fslope, &fconst) == 1) o->fog = fconst;
+        else o->fog = clampf01((cz + fend) * fslope);
     } else o->fog = 1.0f;
 
     /* Texcoords. Mode 0: vertex UVs with TEXSCALE/TEXOFFSET. Mode 1: texgen matrix applied
@@ -5652,11 +5706,7 @@ static void fill_sprite_and_wings(const Vtx *p0, const Vtx *p1, int persp) {
 
 /* ---- widescreen Fill: which primitives reach a wing canvas ------------------------------- */
 
-static uint32_t ge_wide_norm(uint32_t addr) {
-    if (addr < 0x00200000u || (addr & 0x0F000000u) == 0x04000000u)
-        return 0x04000000u | (addr & 0x001FFFFFu);
-    return addr & 0x0FFFFFFFu;
-}
+static uint32_t ge_wide_norm(uint32_t addr) { return ge_target_addr(addr); }
 
 static GeWideSlot *wide_slot_for(uint32_t fb) {
     for (int i = 0; i < GE_WIDE_SLOTS; i++)
@@ -6215,24 +6265,40 @@ static void draw_patch(uint32_t op,int spline){
         tu*=f;tv*=f;
     }
     s_patch_quads+=(unsigned long long)pu*(unsigned long long)pv*(unsigned long long)tu*(unsigned long long)tv;
+    /* Each grid vertex is evaluated once: the u weights of a patch's tu+1 columns are computed
+     * once per patch, and two rows of evaluated vertices (the tile row's top and bottom edges)
+     * are kept, so a tile reads its four corners from them. Every corner is evaluated with the
+     * same weights and parameters a per-tile evaluation gave it, so the vertices are the same. */
+    PatchWeight *wu=(PatchWeight*)malloc((size_t)(tu+1)*sizeof(*wu));
+    ModelVtx *rows=(ModelVtx*)malloc((size_t)(tu+1)*2u*sizeof(*rows));
+    if(!wu||!rows){free(wu);free(rows);free(all);return;}
+    const int gen=vf.tc_off<0;
     for(int py=0;py<pv;py++)for(int px=0;px<pu;px++){
         int base=(spline?py:py*3)*nu+(spline?px:px*3);
-        for(int y=0;y<tv;y++)for(int x=0;x<tu;x++){
-            PatchWeight ux[2],vy[2];
-            if(spline){spline_weight(px,x,tu,pu,typeu,&ux[0]);spline_weight(px,x+1,tu,pu,typeu,&ux[1]);
-                spline_weight(py,y,tv,pv,typev,&vy[0]);spline_weight(py,y+1,tv,pv,typev,&vy[1]);}
-            else{bezier_weight((float)x/tu,&ux[0]);bezier_weight((float)(x+1)/tu,&ux[1]);
-                bezier_weight((float)y/tv,&vy[0]);bezier_weight((float)(y+1)/tv,&vy[1]);}
-            ModelVtx q[4];int gen=vf.tc_off<0;
-            patch_eval(all+base,nu,&ux[0],&vy[0],gen,(float)px+(float)x/tu,(float)py+(float)y/tv,&q[0]);
-            patch_eval(all+base,nu,&ux[1],&vy[0],gen,(float)px+(float)(x+1)/tu,(float)py+(float)y/tv,&q[1]);
-            patch_eval(all+base,nu,&ux[0],&vy[1],gen,(float)px+(float)x/tu,(float)py+(float)(y+1)/tv,&q[2]);
-            patch_eval(all+base,nu,&ux[1],&vy[1],gen,(float)px+(float)(x+1)/tu,(float)py+(float)(y+1)/tv,&q[3]);
-            if(prim==0){submit_model_triangle(&q[0],&q[2],&q[1],vf.through);submit_model_triangle(&q[1],&q[2],&q[3],vf.through);}
-            else if(prim==1){submit_model_line(&q[0],&q[2],vf.through);submit_model_line(&q[1],&q[3],vf.through);submit_model_line(&q[1],&q[2],vf.through);}
-            else submit_model_point(&q[0],vf.through);
+        for(int x=0;x<=tu;x++){
+            if(spline)spline_weight(px,x,tu,pu,typeu,&wu[x]);
+            else bezier_weight((float)x/tu,&wu[x]);
+        }
+        ModelVtx *top=rows,*bottom=rows+tu+1;
+        PatchWeight vy;
+        if(spline)spline_weight(py,0,tv,pv,typev,&vy);else bezier_weight((float)0/tv,&vy);
+        for(int x=0;x<=tu;x++)
+            patch_eval(all+base,nu,&wu[x],&vy,gen,(float)px+(float)x/tu,(float)py+(float)0/tv,&top[x]);
+        for(int y=0;y<tv;y++){
+            if(spline)spline_weight(py,y+1,tv,pv,typev,&vy);else bezier_weight((float)(y+1)/tv,&vy);
+            for(int x=0;x<=tu;x++)
+                patch_eval(all+base,nu,&wu[x],&vy,gen,(float)px+(float)x/tu,(float)py+(float)(y+1)/tv,&bottom[x]);
+            for(int x=0;x<tu;x++){
+                const ModelVtx *q0=&top[x],*q1=&top[x+1],*q2=&bottom[x],*q3=&bottom[x+1];
+                if(prim==0){submit_model_triangle(q0,q2,q1,vf.through);submit_model_triangle(q1,q2,q3,vf.through);}
+                else if(prim==1){submit_model_line(q0,q2,vf.through);submit_model_line(q1,q3,vf.through);submit_model_line(q1,q2,vf.through);}
+                else submit_model_point(q0,vf.through);
+            }
+            ModelVtx *t=top;top=bottom;bottom=t;
         }
     }
+    free(rows);
+    free(wu);
     free(all);
 }
 
@@ -6433,16 +6499,11 @@ static void tnl_params(const VFmt *vf, GeTnlParams *p) {
     p->tex[2] = ge.tex_off_u;   p->tex[3] = ge.tex_off_v;
     p->tex[4] = (float)ge.tex_w; p->tex[5] = (float)ge.tex_h;
     if (ge.fog_enable && !ge_env_nofog()) {
-        float fend = ge.fog_end, fslope = ge.fog_slope;
-        if (isinf(fend) || isnan(fend)) {
-            int sign = signbit(fend) ? 1 : 0;
-            if (signbit(fslope)) sign = !sign;
-            if (fslope == 0.0f) sign = 1;
+        float fend = 0.0f, fslope = 0.0f, fconst = 1.0f;
+        if (ge_fog_coeffs(&fend, &fslope, &fconst) == 1) {
             p->fog_mode = 1;
-            p->fog[2] = sign ? 0.0f : 1.0f;
+            p->fog[2] = fconst;
         } else {
-            if (isinf(fslope) || isnan(fslope))
-                fslope = signbit(fslope) ? -262144.0f : 262144.0f;
             p->fog_mode = 2;
             p->fog[0] = fend;
             p->fog[1] = fslope;
@@ -6489,7 +6550,7 @@ static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, 
     if (!s_gpu || !s_gpu->tnl_prim || !tnl_enabled() || count < 3 || s_wide_d) return 0;
     int why = tnl_state_why(type, vf);
     if (why >= 0) { tnl_decline(why); return 0; }
-    uint32_t ntri = type == 3 ? (uint32_t)(count / 3) : (uint32_t)(count - 2);
+    uint32_t ntri = (uint32_t)ge_time_prim_count(type, count);
     if (!tnl_grow((void **)&s_tnl_refs, &s_tnl_refs_cap, (uint32_t)count, sizeof(GeTnlVtx)) ||
         !tnl_grow((void **)&s_tnl_tri, &s_tnl_tri_cap, ntri * 3u, sizeof(uint32_t))) {
         tnl_decline(GE_TNL_WHY_ALLOC);
@@ -6504,16 +6565,8 @@ static int ge_tnl_try_prim(int type, int count, const VFmt *vf, uint32_t vbase, 
         uint32_t a = prim_vtx_addr(vbase, ibase, idxfmt, i, vf->stride);
         GeTnlVtx *o = &s_tnl_refs[i];
         memset(o, 0, sizeof(*o));
-        int r, g, b, al;
-        vtx_linear_begin(a, vf);
-        read_pos(a, vf, &o->x, &o->y, &o->z);
-        read_nrm(a, vf, &o->nx, &o->ny, &o->nz);
-        read_tc(a, vf, &o->u, &o->v);
-        read_color(a, vf, &r, &g, &b, &al);
-        o->rgba = (uint32_t)(r & 0xFF) | ((uint32_t)(g & 0xFF) << 8) |
-                  ((uint32_t)(b & 0xFF) << 16) | ((uint32_t)(al & 0xFF) << 24);
-        if (vf->w_n) read_weights(a, vf, o->w);
-        vtx_linear_end();
+        read_packed_vertex(a, vf, &o->x, &o->y, &o->z, &o->nx, &o->ny, &o->nz, &o->u, &o->v,
+                           &o->rgba, o->w);
         float pos[3] = { o->x, o->y, o->z }, nrm[3] = { o->nx, o->ny, o->nz };
         if (!tnl_nums_ok(pos, 3) || (lit && !tnl_nums_ok(nrm, 3)) || !tnl_nums_ok(o->w, vf->w_n)) {
             tnl_decline(GE_TNL_WHY_VERTEX_RANGE);
@@ -6605,27 +6658,30 @@ void ge_scene_set_consumer(GeSceneConsumer fn, void *user) {
     s_scene_user = user;
 }
 
+/* Where vertex `i` of a recorded draw lies, with the record's vertex format: 0 when its index
+ * list or the vertex itself is outside guest memory. ge_scene_vertex and
+ * ge_scene_project_for_test resolve indices the same way through it. */
+static int ge_scene_vertex_addr(const GeSceneRecord *rec, uint32_t i, VFmt *vf, uint32_t *addr) {
+    decode_vtype(rec->vtype, vf);
+    if (rec->index_format && !sr_inrange_n(rec->index_addr, rec->index_bytes)) return 0;
+    uint32_t a = rec->vertex_addr +
+                 (rec->index_format ? index_value(rec->index_addr, (int)rec->index_format, (int)i) : i) *
+                 (uint32_t)vf->stride;
+    if (!sr_inrange_n(a, (uint32_t)vf->stride)) return 0;
+    *addr = a;
+    return 1;
+}
+
 int ge_scene_vertex(const GeSceneRecord *rec, uint32_t i, GeSceneVertex *out) {
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
     if (!rec || rec->version != GE_SCENE_RECORD_VERSION || i >= rec->count) return 0;
     VFmt vf;
-    decode_vtype(rec->vtype, &vf);
-    if (rec->index_format && !sr_inrange_n(rec->index_addr, rec->index_bytes)) return 0;
-    uint32_t a = rec->vertex_addr +
-                 (rec->index_format ? index_value(rec->index_addr, (int)rec->index_format, (int)i) : i) *
-                 (uint32_t)vf.stride;
-    if (!sr_inrange_n(a, (uint32_t)vf.stride)) return 0;
-    int r, g, b, al;
-    vtx_linear_begin(a, &vf);
-    read_pos(a, &vf, &out->pos[0], &out->pos[1], &out->pos[2]);
-    read_nrm(a, &vf, &out->nrm[0], &out->nrm[1], &out->nrm[2]);
-    read_tc(a, &vf, &out->uv[0], &out->uv[1]);
-    read_color(a, &vf, &r, &g, &b, &al);
-    if (vf.w_n) read_weights(a, &vf, out->weight);
-    vtx_linear_end();
-    out->rgba = (uint32_t)(r & 0xFF) | ((uint32_t)(g & 0xFF) << 8) |
-                ((uint32_t)(b & 0xFF) << 16) | ((uint32_t)(al & 0xFF) << 24);
+    uint32_t a;
+    if (!ge_scene_vertex_addr(rec, i, &vf, &a)) return 0;
+    read_packed_vertex(a, &vf, &out->pos[0], &out->pos[1], &out->pos[2],
+                       &out->nrm[0], &out->nrm[1], &out->nrm[2], &out->uv[0], &out->uv[1],
+                       &out->rgba, out->weight);
     return 1;
 }
 
@@ -6633,12 +6689,8 @@ int ge_scene_project_for_test(const GeSceneRecord *rec, uint32_t i, GeVtx *out) 
     if (!out || !rec || rec->version != GE_SCENE_RECORD_VERSION || rec->through || i >= rec->count)
         return 0;
     VFmt vf;
-    decode_vtype(rec->vtype, &vf);
-    if (rec->index_format && !sr_inrange_n(rec->index_addr, rec->index_bytes)) return 0;
-    uint32_t a = rec->vertex_addr +
-                 (rec->index_format ? index_value(rec->index_addr, (int)rec->index_format, (int)i) : i) *
-                 (uint32_t)vf.stride;
-    if (!sr_inrange_n(a, (uint32_t)vf.stride)) return 0;
+    uint32_t a;
+    if (!ge_scene_vertex_addr(rec, i, &vf, &a)) return 0;
     ModelVtx m;
     CVtx c;
     decode_model_vtx(a, &vf, &m);
@@ -6969,31 +7021,14 @@ static void primitive_profile_note_draw(int type, int count, const VFmt *vf) {
     s_cpu_profile_stats.primitive_profile_draw_setup_eligible++;
 #endif
 
-    uint64_t uses = 0;
-    uint64_t vertex_references = 0;
-    uint64_t submitted = 0;
-    if (type == 0) uses = vertex_references = (uint64_t)count;
-    else if (type == 1) uses = vertex_references = (uint64_t)(count / 2) * 2u;
-    else if (type == 2) uses = vertex_references = count > 0 ? (uint64_t)(count - 1) * 2u : 0;
-    else if (type == 3) uses = vertex_references = (uint64_t)(count / 3) * 3u;
-    else if (type == 4) {
-        uint64_t legacy_uses = count > 2 ? (uint64_t)(count - 2) * 3u : 0;
-        vertex_references = legacy_uses;
-        int cache_strip = strip_cache_enabled() && count >= 3;
-        uses = cache_strip ? (uint64_t)count : legacy_uses;
-        if (cache_strip) {
-            s_cpu_profile_stats.primitive_profile_strip_cache_commands++;
-            s_cpu_profile_stats.primitive_profile_strip_cache_hits += legacy_uses - uses;
-        }
-    } else if (type == 5) uses = vertex_references = count > 2 ? (uint64_t)(count - 2) * 3u : 0;
-    else if (type == 6) uses = vertex_references = (uint64_t)(count / 2) * 2u;
-
-    if (type == 0) submitted = (uint64_t)count;
-    else if (type == 1) submitted = (uint64_t)(count / 2);
-    else if (type == 2) submitted = count > 0 ? (uint64_t)(count - 1) : 0;
-    else if (type == 3) submitted = (uint64_t)count / 3u;
-    else if (type == 4 || type == 5) submitted = count > 2 ? (uint64_t)count - 2u : 0;
-    else if (type == 6) submitted = (uint64_t)(count / 2);
+    const uint64_t submitted = ge_time_prim_count(type, count);
+    const uint64_t vertex_references = ge_prim_vertex_refs(type, count);
+    uint64_t uses = vertex_references;
+    if (type == 4 && strip_cache_enabled() && count >= 3) {   /* the strip cache loads each vertex once */
+        uses = (uint64_t)count;
+        s_cpu_profile_stats.primitive_profile_strip_cache_commands++;
+        s_cpu_profile_stats.primitive_profile_strip_cache_hits += vertex_references - uses;
+    }
     s_cpu_profile_stats.primitive_profile_submitted[type] += submitted;
     if (type < 3 || type == 6)
         s_cpu_profile_stats.primitive_profile_non_triangle_primitives += submitted;
@@ -7016,9 +7051,7 @@ static void primitive_profile_note_draw(int type, int count, const VFmt *vf) {
             s_cpu_profile_stats.primitive_profile_eligible[GE_PRIM_PROFILE_LIGHTING] += uses;
     }
 
-    uint64_t triangles = 0;
-    if (type == 3) triangles = (uint64_t)count / 3u;
-    else if (type == 4 || type == 5) triangles = count > 2 ? (uint64_t)count - 2u : 0;
+    const uint64_t triangles = (type == 3 || type == 4 || type == 5) ? submitted : 0u;
     if (type == 3 || type == 4 || type == 5)
         s_cpu_profile_stats.primitive_profile_triangle_vertex_uses += uses;
     else
@@ -7045,22 +7078,12 @@ typedef struct {
 /* Profiling counters for one PRIM: vertex uses by primitive type (s_cpu_profile only). */
 static void draw_prim_note_profile(int type, int count) {
     if (s_cpu_profile) {
-        uint64_t uses = 0;
-        if (type == 0) uses = (uint64_t)count;
-        else if (type == 1) uses = (uint64_t)(count / 2) * 2u;
-        else if (type == 2) uses = count > 0 ? (uint64_t)(count - 1) * 2u : 0;
-        else if (type == 3) uses = (uint64_t)(count / 3) * 3u;
-        else if (type == 4) {
-            uint64_t legacy_uses = count > 2 ? (uint64_t)(count - 2) * 3u : 0;
-            if (strip_cache_enabled() && count >= 3) {
-                uses = (uint64_t)count;
-                s_cpu_profile_stats.strip_vertices_reused += legacy_uses - uses;
-            } else {
-                uses = legacy_uses;
-            }
+        const uint64_t legacy_uses = ge_prim_vertex_refs(type, count);
+        uint64_t uses = legacy_uses;
+        if (type == 4 && strip_cache_enabled() && count >= 3) {
+            uses = (uint64_t)count;
+            s_cpu_profile_stats.strip_vertices_reused += legacy_uses - uses;
         }
-        else if (type == 5) uses = count > 2 ? (uint64_t)(count - 2) * 3u : 0;
-        else if (type == 6) uses = (uint64_t)(count / 2) * 2u;
         s_cpu_profile_stats.vertex_decode_uses += uses;
         s_cpu_profile_stats.primitive_type[type]++;
     }
@@ -8066,7 +8089,16 @@ static void ge_block_transfer(uint32_t startdata) {
     uint32_t dstX = ge.xf_dpos & 0x3FFu, dstY = (ge.xf_dpos >> 10) & 0x3FFu;
     uint32_t w = (ge.xf_size & 0x3FFu) + 1, h = ((ge.xf_size >> 10) & 0x3FFu) + 1;
     uint32_t bpp = (startdata & 1) ? 4 : 2;
-    if (!srcStride || !dstStride) return;
+    /* A stride of 0, or one past 0x400 (forced to 0 above), has no rectangle to copy. What a
+     * PSP does with it is unmeasured, so the blit is skipped and named, as an invalid
+     * rectangle is below. */
+    if (!srcStride || !dstStride) {
+        fprintf(stderr,
+                "ge_block_transfer: unmeasured stride srcw=0x%08" PRIx32 " dstw=0x%08" PRIx32
+                " (a stride of 0 or past 0x400 is not measured on a PSP), skipping blit\n",
+                ge.xf_srcw, ge.xf_dstw);
+        return;
+    }
 
     /* Validate both complete pitched rectangles before any backend flush, capture,
      * heap-watch, guest write, or dirty notification.  GE permits width to be greater
@@ -8872,9 +8904,7 @@ int ge_vram_decode_bound_texture(uint32_t *out, size_t capacity) {
 /* A GE-local offset (below 2 MiB) or any view of VRAM, as its 0x04000000 address: the fold
  * ge_fb_addr() applies to the draw target. Any other address is left as it is. */
 static uint32_t ge_vram_view_fold(uint32_t addr) {
-    if (addr < 0x00200000u || (addr & 0x0F000000u) == 0x04000000u)
-        return 0x04000000u | (addr & 0x001FFFFFu);
-    return addr;
+    return ge_is_vram_view(addr) ? ge_vram_fold(addr) : addr;
 }
 
 void ge_vram_view_sources(uint32_t shown_addr, uint32_t shown_stride, uint32_t shown_fmt,
@@ -9252,9 +9282,25 @@ int ge_vram_cli_decode(uint32_t addr, uint32_t width, uint32_t height, uint32_t 
     if (clut_ram) {
         memcpy(ge.clutram, clut_ram, sizeof ge.clutram);
     } else if (clut_addr) {
-        uint32_t offset = (clut_addr - GE_CAPTURE_VRAM_BASE) & 0x001FFFFFu;
-        for (uint32_t i = 0; i < sizeof ge.clutram; i++)
-            ge.clutram[i] = arena[(offset + i) & 0x001FFFFFu];
+        /* The CLI checked that clut_addr lies in the image. The bytes the texture can index
+         * (clut_index: the masked index ORed with the start, inside CLUT RAM) must lie in it
+         * too; a palette that runs past the image's end is a read outside it, not a wrap to
+         * the image's start. Bytes past the end that no index reaches stay zero. */
+        const uint32_t offset = clut_addr - GE_CAPTURE_VRAM_BASE;
+        const uint32_t entry_bytes = (clut_format & 3u) == 3u ? 4u : 2u;
+        const uint32_t start_mask = (clut_format & 3u) == 3u ? 0xFFu : 0x1FFu;
+        const uint32_t top_index = (((clut_format >> 8) & 0xFFu) |
+                                    ((((clut_format >> 16) & 0x1Fu) << 4) & start_mask)) &
+                                   start_mask;
+        const uint32_t indexed_bytes = (top_index + 1u) * entry_bytes;
+        for (uint32_t i = 0; i < sizeof ge.clutram; i++) {
+            if (offset < GE_CAPTURE_VRAM_SIZE && i < GE_CAPTURE_VRAM_SIZE - offset) {
+                ge.clutram[i] = arena[offset + i];
+            } else {
+                ge.clutram[i] = 0;
+                if (i < indexed_bytes) ge_vram_cli_bad_read = 1;
+            }
+        }
     }
     if (format == 11u) {
         for (uint32_t y = 0; y < height; y++) {

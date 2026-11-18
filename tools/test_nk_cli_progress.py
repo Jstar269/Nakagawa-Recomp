@@ -841,6 +841,39 @@ class NkCliVramTests(unittest.TestCase):
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
             self.assertEqual(self._read_png(output)[2], [(255, 0, 0, 255)])
 
+    def test_vram_clut_past_the_image_end_is_refused_not_wrapped(self) -> None:
+        # A CLUT read from the image must lie in it: 256 16-bit entries at 0x041fff00 need 512
+        # bytes and only 256 remain. Before, the copy wrapped to the image's start and the
+        # export passed with a palette from the wrong bytes. 16 entries at 0x041fffe0 fit.
+        with tempfile.TemporaryDirectory(prefix="nk_cli_vram_clut_end_") as temp:
+            root = Path(temp)
+            image = bytearray(2 * 1024 * 1024)
+            struct.pack_into("<H", image, 0, 0x001F)            # wrapped entry 128: red
+            struct.pack_into("<H", image, 0x1FFFE0, 0x07E0)     # last 32 bytes, entry 0: green
+            image_path = root / "vram.bin"
+            image_path.write_bytes(image)
+
+            def export(addr: str, fmt: str, clut_addr: str, clut_format: str, name: str):
+                return subprocess.run(
+                    [sys.executable, str(CLI_PATH), "vram", str(image_path),
+                     "--addr", addr, "--width", "1", "--height", "1", "--stride", "4",
+                     "--format", fmt, "--clut-addr", clut_addr, "--clut-format", clut_format,
+                     "--output", str(root / name)],
+                    cwd=ROOT, capture_output=True, text=True,
+                )
+
+            # CLUT8 texel 0x80 at 0x04000100; the palette's entry 128 is 256 bytes past the end.
+            image[0x100] = 0x80
+            image_path.write_bytes(image)
+            refused = export("0x04000100", "CLUT8", "0x041fff00", "0xff00", "past.png")
+            self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+            self.assertIn("read outside the captured 2 MiB VRAM image", refused.stderr)
+            self.assertFalse((root / "past.png").exists())
+
+            fits = export("0x04000200", "CLUT4", "0x041fffe0", "0x0f00", "fits.png")
+            self.assertEqual(fits.returncode, 0, fits.stdout + fits.stderr)
+            self.assertEqual(self._read_png(root / "fits.png")[2], [(0, 255, 0, 255)])
+
 
 if __name__ == "__main__":
     unittest.main()

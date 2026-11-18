@@ -368,6 +368,23 @@ static void expect_window_line(uint32_t frame, const char *scenario, const char 
     expect(strstr(line + len, "GESTAT-TNL ") == NULL, scenario, "more than one GESTAT-TNL line");
 }
 
+/* The window closing at `frame` prints a GESTAT line that starts with `want`. */
+static void expect_gestat_wall(uint32_t frame, const char *scenario, const char *want) {
+    static char out[16384];
+    if (set_frame_captured(frame, out, sizeof out) != 0) {
+        expect(0, scenario, "stderr could not be redirected");
+        return;
+    }
+    const char *line = strstr(out, "GESTAT f=");
+    if (!line || strncmp(line, want, strlen(want)) != 0) {
+        const char *end = line ? strchr(line, '\n') : NULL;
+        fprintf(stderr, "ge_tnl_census_selftest: %s: got  \"%.*s\"\n", scenario,
+                line ? (int)(end ? (size_t)(end - line) : strlen(line)) : 0, line ? line : "");
+        fprintf(stderr, "ge_tnl_census_selftest: %s: want \"%s...\"\n", scenario, want);
+        expect(0, scenario, "the GESTAT wall time is not the monotonic clock's");
+    }
+}
+
 /* Removes every SR_ variable, one at a time so the environment is never walked while it
  * changes. Returns the number left behind (0 unless removal fails). */
 static int env_scrub(void) {
@@ -445,9 +462,15 @@ int main(void) {
         " texcoord=1 fog=1 specular=1 light=1 alloc=0 vertex=1 clip=1 backend=1");
     run_scenario(&k_scenarios[0], 0);   /* eligible */
     run_scenario(&k_scenarios[3], 1);   /* texgen */
+    s_clock_ns = 2000000000u;           /* window 2 closes at 2 s on the monotonic clock */
     expect_window_line(120u, "window-2",
         "GESTAT-TNL f=120 taken=1 cpu=1: clear=0 flat=0 diagnostic=0 texgen=1 matrix=0 viewport=0"
         " texcoord=0 fog=0 specular=0 light=0 alloc=0 vertex=0 clip=0 backend=0");
+    /* GESTAT's wall= is the monotonic clock's time across the window, here 5 s with no CPU
+     * spent. Before, it was clock(): CPU time over all threads on glibc, and on any host it
+     * did not follow the clock the runtime paces frames by, so this window read 0 ms. */
+    s_clock_ns = 7000000000u;
+    expect_gestat_wall(180u, "window-3", "GESTAT f=180 wall=5000ms ");
     ge_set_gpu_hooks(NULL);
 
     if (s_failures) {

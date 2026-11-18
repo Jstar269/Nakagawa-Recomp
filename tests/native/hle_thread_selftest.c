@@ -31825,6 +31825,50 @@ static void test_ge_list_call_ret_faults_and_long_runs(void) {
     sr_hle_test_ge_lists_reset();
 }
 
+/* A block transfer whose source or destination stride is 0, or past 0x400 (decoded as 0), has
+ * no rectangle to copy and a PSP's behaviour for it is unmeasured: the blit is skipped and
+ * named. Before, it returned before any report, so the dropped transfer was silent. A 64-pixel
+ * stride on both sides is the control: the same list copies the row. */
+static void test_ge_block_transfer_unmeasured_stride_is_named(void) {
+    const uint32_t list = 0x08946400u, src = 0x04100000u, dst = 0x04110000u;
+    static const uint32_t srcw[] = {0x00040000u, 0x00040408u, 0x00040040u};
+    static const int named[] = {1, 1, 0};
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    for (size_t k = 0; k < sizeof srcw / sizeof srcw[0]; k++) {
+        MEM_W32(src, 0x11223344u);
+        MEM_W32(src + 4u, 0x55667788u);
+        MEM_W32(dst, 0xa5a5a5a5u);
+        MEM_W32(dst + 4u, 0xa5a5a5a5u);
+        MEM_W32(list, 0xb2000000u | (src & 0x00fffff0u));        /* TRANSFERSRC */
+        MEM_W32(list + 4u, 0xb3000000u | srcw[k]);                /* TRANSFERSRCW */
+        MEM_W32(list + 8u, 0xb4000000u | (dst & 0x00fffff0u));    /* TRANSFERDST */
+        MEM_W32(list + 12u, 0xb5040040u);                         /* TRANSFERDSTW: stride 64 */
+        MEM_W32(list + 16u, 0xeb000000u);                         /* TRANSFERSRCPOS 0,0 */
+        MEM_W32(list + 20u, 0xec000000u);                         /* TRANSFERDSTPOS 0,0 */
+        MEM_W32(list + 24u, 0xee000003u);                         /* TRANSFERSIZE 4x1 */
+        MEM_W32(list + 28u, 0xea000000u);                         /* TRANSFERSTART, 16-bit */
+        MEM_W32(list + 32u, 0x0f000000u);                         /* FINISH */
+        MEM_W32(list + 36u, 0x0c000000u);                         /* END */
+        FILE *capture = NULL;
+        int saved_fd = -1;
+        char log[1024] = {0};
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        (void)ge_run_list(list, 0);
+        if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof log);
+        const int copied = MEM_R32(dst) == 0x11223344u && MEM_R32(dst + 4u) == 0x55667788u;
+        const int note = strstr(log, "ge_block_transfer: unmeasured stride") != NULL;
+        if (named[k])
+            expect(capturing && note && !copied && MEM_R32(dst) == 0xa5a5a5a5u,
+                   "a block transfer with a source stride of 0 or past 0x400 is skipped and named");
+        else
+            expect(capturing && !note && copied,
+                   "control: a block transfer with 64-pixel strides copies its row unnamed");
+    }
+    sr_hle_test_ge_lists_reset();
+}
+
 /* A list whose run stops early and resumes (a preemption, ge_list_run) publishes the whole
  * list's primitive count and signature at its END, as a run that never stopped does. Before,
  * each resumed run started counting again, so the count covered only the last run. */
@@ -58196,6 +58240,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_sync_ids_match_psp();
     test_ge_signal_jump_call_ret();
     test_ge_list_call_ret_faults_and_long_runs();
+    test_ge_block_transfer_unmeasured_stride_is_named();
     test_ge_stopped_run_keeps_the_list_totals();
     test_ge_signal_depth_origin_stall();
     test_ge_break_continue();
