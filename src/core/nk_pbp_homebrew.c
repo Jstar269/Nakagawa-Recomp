@@ -672,12 +672,12 @@ typedef struct {
    became cool-v2), and a linked EBOOT.PBP its target's folder. So on POSIX only
    the folder's parent is resolved and the folder and file names are kept as
    picked. A folder spelled ".", ".." or not at all has no name of its own here
-   and is resolved whole. */
+   and is resolved whole. The host is asked at run time (nk_platform_host_kind),
+   so both branches compile and stay inside the platform seam on every host. */
 static bool hb_picked_absolute(const char *pbp_path, char *out, size_t out_size)
 {
-#if defined(_WIN32) || defined(_WIN64)
-    return nk_platform_absolute_path(pbp_path, out, out_size);
-#else
+    if (nk_platform_host_kind() == NK_HOST_WINDOWS)
+        return nk_platform_absolute_path(pbp_path, out, out_size);
     size_t file_at = strlen(pbp_path), name_end, name_at;
     char parent[HB_PATH_MAX];
     char resolved[HB_PATH_MAX];
@@ -704,7 +704,6 @@ static bool hb_picked_absolute(const char *pbp_path, char *out, size_t out_size)
     const int written = snprintf(out, out_size, "%s%s%.*s/%s", resolved, joined ? "" : "/",
                                  (int)name_length, pbp_path + name_at, pbp_path + file_at);
     return written > 0 && (size_t)written < out_size;
-#endif
 }
 
 static bool hb_source(const char *pbp_path, HbSource *source)

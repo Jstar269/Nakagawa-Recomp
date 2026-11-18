@@ -61,7 +61,7 @@ ALLOWLIST: Mapping[str, tuple[int, str]] = {
     "src/core/nk_iso.c": (
         3, "its own wide-character file operation outside nk_fopen_utf8"),
     "src/core/nk_library.c": (
-        4, "durable library replacement still uses direct Win32 file operations"),
+        2, "durable library replacement still uses direct Win32 file operations"),
     "src/core/nk_psp_keystore.c": (
         2, "the random source (BCrypt or getrandom); PR #1666 changes the glibc test for bionic"),
     "src/core/nk_psp_npumdimg.c": (
