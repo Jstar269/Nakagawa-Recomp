@@ -1383,6 +1383,8 @@ typedef struct {
     size_t row_count;           /* up to PLAYER_UI_SAVES_ROW_CAP */
     size_t first_row;           /* the page's first backup, from 0 (the newest) */
     size_t total;               /* backups found */
+    size_t listed;              /* the newest of them listed, which the pages reach;
+                                   0 lists all of total */
     PlayerUiSavesAsk ask;
     size_t ask_row;             /* the row Restore asks about, on this page */
     const char *ask_name;       /* the save Add a save would replace */

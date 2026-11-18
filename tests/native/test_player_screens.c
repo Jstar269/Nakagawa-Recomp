@@ -6712,6 +6712,25 @@ static void test_saves_dialog(void) {
     CHECK(saves_op(action) == PLAYER_UI_SAVES_OLDER, "Older turns the page");
     action = activate_saves_button(PLAYER_UI_ID_SAVES_NEWER, &saves);
     CHECK(saves_op(action) == PLAYER_UI_SAVES_NEWER, "Newer turns the page back");
+    /* Audit F-c070bc9e: 80 backups, the newest 64 listed. The page of 63-64 is the last
+       the pages reach, so it offers Newer and no Older that could not turn. */
+    saves.total = 80u;
+    saves.listed = 64u;
+    saves.first_row = 62u;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_saves(ui, &saves);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "BACKUPS 63-64 OF 80, NEWEST FIRST; THE NEWEST 64 ARE LISTED") != NULL &&
+              strstr(dump, "\"NEWER\"") != NULL && strstr(dump, "\"OLDER\"") == NULL,
+          "the last listed page counts every backup, says how many are listed, and has no Older");
+    saves.first_row = 56u;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_saves(ui, &saves);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"OLDER\"") != NULL, "a page before the last listed one still has Older");
+    saves.listed = 0u;
     saves.total = 2u;
     saves.first_row = 0u;
     saves.ask = PLAYER_UI_SAVES_ASK_RESTORE;

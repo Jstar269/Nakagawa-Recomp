@@ -344,10 +344,12 @@ static void player_ui_display_in_place(char *text, size_t size) {
     snprintf(text, size, "%s", shown);
 }
 
+/* The path is UTF-8 (SDL_GetBasePath), so it opens through nk_fopen_utf8: the
+   narrow fopen reads it in the ANSI code page on Windows (nk_platform.h). */
 static bool player_ui_file_exists(const char *path) {
     FILE *file;
     if (path == NULL || path[0] == '\0') return false;
-    file = fopen(path, "rb");
+    file = nk_fopen_utf8(path, "rb");
     if (file == NULL) return false;
     fclose(file);
     return true;
@@ -2483,11 +2485,15 @@ static void player_ui_find_close(PlayerUiNk *player) {
    a whole UTF-8 character are left out. */
 static void player_ui_find_type(PlayerUiNk *player, const char *text) {
     if (ui_keyboard_type(&player->find_keyboard, text)) player->library_page = 0u;
+    /* As in a box opened from the keyboard: Enter after typing moves on to the
+       matches, never types the on-screen key that had focus. */
+    player->find_focus = PLAYER_UI_ID_LIBRARY_FIND_DONE;
 }
 
 /* Removes the last character, all of its UTF-8 bytes. */
 static void player_ui_find_delete(PlayerUiNk *player) {
     if (ui_keyboard_delete(&player->find_keyboard)) player->library_page = 0u;
+    player->find_focus = PLAYER_UI_ID_LIBRARY_FIND_DONE;
 }
 
 /* The nickname editor starts empty, showing the nickname in use until
@@ -3981,6 +3987,16 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                 if (player_ui_open_remove(player, app, index)) {
                     nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
                     (void)nk_ui_router_push(player->router, PLAYER_UI_ROUTE_REMOVE);
+                } else {
+                    /* No plan, so nothing is removed: say why rather than ignore the press. */
+                    const char *blocker = player_app_removal_blocker(app, index);
+                    player_app_set_error(
+                        app, "REMOVE_PLAN_FAILED", "The game was not removed",
+                        blocker != NULL
+                            ? blocker
+                            : "Nakagawa could not list this game's files safely: a folder "
+                              "path is too long. Nothing was removed.",
+                        "Back", VIEW_LIBRARY);
                 }
                 action.kind = PLAYER_UI_ACTION_NONE;
             } else if (action.kind == PLAYER_UI_ACTION_PRIMARY &&
@@ -4116,6 +4132,7 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             model.row_count = player_ui_saves_page_rows(player);
             model.first_row = player->saves_first;
             model.total = player->saves_total;
+            model.listed = player->saves_list_count;
             model.ask = player->saves_ask;
             model.ask_row = player->saves_ask_row;
             model.ask_name = player->saves_ask_name;

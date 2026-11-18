@@ -428,9 +428,11 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
    ("16x filtering \xC2\xB7 crisp keyboard"). The line is the whole items that
    fit max_width, each space a no-break space, so it is one run that is measured
    and drawn alike and never wraps; the dot after its last item stays on it while
-   items follow. It always takes one item: an item wider than the line ends in an
-   ellipsis. With `last` set and items left over, the line ends "and N more" for
-   the N items it leaves out, after as many items as still fit. Moves *rest past
+   items follow. Without `last` it always takes one item: an item wider than the
+   line ends in an ellipsis. With `last` set and items left over, the line ends
+   "and N more" for the N items it leaves out, after as many items as still fit;
+   the count is never cut for an item, so a line too narrow for the first item and
+   the count is the count alone ("and N more", every item counted). Moves *rest past
    what the line took (to "" after a last line). Returns frame storage. */
 const char *nk_ui_list_line(NkUi *ui, const char **rest, const NkUiTextStyle *style,
                             float max_width, bool last);

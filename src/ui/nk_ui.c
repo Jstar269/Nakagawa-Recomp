@@ -150,6 +150,11 @@ struct NkUi {
         float fade;
         bool shown;
         bool asked;
+        /* The last scrim solved and the eased fade it was solved for: a backdrop at
+           rest keeps one fade, so its scrim is solved once. */
+        float scrim;
+        float scrim_eased;
+        bool scrim_ok;
     } backdrop;
     double now_s;
     double frame_delta_s;       /* seconds since the previous frame; 0 on the first */
@@ -160,6 +165,11 @@ struct NkUi {
     bool frame_open;
     bool frame_ok;
     NkUiPendingWaves waves;
+    /* The last wave palette solved (its contrast cap is a bisection), kept across
+       frames: it depends only on its tint. */
+    NkUiWavePalette wave_palette;
+    unsigned wave_palette_tint;
+    bool wave_palette_ok;
     NkUiCustomSlot custom[NK_UI_CUSTOM_SLOTS];
     size_t custom_count;
     NkUiTextBlock *text_blocks;    /* the chain, first block first */
@@ -1698,7 +1708,6 @@ static bool nk_ui_paint_custom(void *user, void *data, NkUiRect rect, float dens
 }
 
 bool nk_ui_waves_element(NkUi *ui, NkUiId id, NkUiRect rect, unsigned tint_index) {
-    NkUiWavePalette palette;
     NkUiPixelRect bounds;
     if (ui == NULL || !ui->frame_open) {
         return false;
@@ -1707,9 +1716,15 @@ bool nk_ui_waves_element(NkUi *ui, NkUiId id, NkUiRect rect, unsigned tint_index
         return false;
     }
     if (!isfinite(rect.x) || !isfinite(rect.y) || !isfinite(rect.w) ||
-        !isfinite(rect.h) || rect.w <= 0.0f || rect.h <= 0.0f ||
-        !nk_ui_waves_palette(tint_index, &palette)) {
+        !isfinite(rect.h) || rect.w <= 0.0f || rect.h <= 0.0f) {
         return false;
+    }
+    if (!ui->wave_palette_ok || ui->wave_palette_tint != tint_index) {
+        ui->wave_palette_ok = nk_ui_waves_palette(tint_index, &ui->wave_palette);
+        ui->wave_palette_tint = tint_index;
+        if (!ui->wave_palette_ok) {
+            return false;
+        }
     }
     bounds = nk_ui_round_rect(rect, ui->scale.density);
     if (bounds.x1 <= bounds.x0 || bounds.y1 <= bounds.y0) {
@@ -1723,8 +1738,16 @@ bool nk_ui_waves_element(NkUi *ui, NkUiId id, NkUiRect rect, unsigned tint_index
     nk_ui_waves_command(ui->prefs.reduce_motion ? NK_UI_STILL_TIME_S :
                             floor(ui->now_s / NK_UI_MOTION_WAVE_FRAME) * NK_UI_MOTION_WAVE_FRAME,
                         (float)(bounds.x1 - bounds.x0), (float)(bounds.y1 - bounds.y0),
-                        &palette, &ui->waves.command);
+                        &ui->wave_palette, &ui->waves.command);
     return true;
+}
+
+/* The time a transition or fade advances by this frame: the time since the last
+   frame, but only one display frame of it when nothing was moving then (that time
+   was idle, waiting for input). */
+static double nk_ui_transition_delta(const NkUi *ui) {
+    return !ui->transitioning && ui->frame_delta_s > NK_UI_MOTION_FRAME
+        ? NK_UI_MOTION_FRAME : ui->frame_delta_s;
 }
 
 bool nk_ui_backdrop(NkUi *ui, NkUiId id, NkUiRect rect, const NkUiImage *picture, bool shown) {
@@ -1748,8 +1771,7 @@ bool nk_ui_backdrop(NkUi *ui, NkUiId id, NkUiRect rect, const NkUiImage *picture
     ui->backdrop.asked = true;
     /* As a transition does: one starting now is given one display frame of the idle
        time before it, not the whole wait for input. */
-    step = (float)((!ui->transitioning && ui->frame_delta_s > NK_UI_MOTION_FRAME
-                        ? NK_UI_MOTION_FRAME : ui->frame_delta_s) / NK_UI_MOTION_SLOW);
+    step = (float)(nk_ui_transition_delta(ui) / NK_UI_MOTION_SLOW);
     if (!(step > 0.0f)) step = 0.0f;
     ui->backdrop.fade += shown ? step : -step;
     if (ui->backdrop.fade < 0.0f) ui->backdrop.fade = 0.0f;
@@ -1763,8 +1785,14 @@ bool nk_ui_backdrop(NkUi *ui, NkUiId id, NkUiRect rect, const NkUiImage *picture
 static bool nk_ui_paint_backdrop(NkUi *ui) {
     float t = 1.0f - ui->backdrop.fade;
     float eased = 1.0f - t * t * t;
-    float scrim = nk_ui_backdrop_scrim(eased);
+    float scrim;
     NkUiImageArt art;
+    if (!ui->backdrop.scrim_ok || ui->backdrop.scrim_eased != eased) {
+        ui->backdrop.scrim = nk_ui_backdrop_scrim(eased);
+        ui->backdrop.scrim_eased = eased;
+        ui->backdrop.scrim_ok = true;
+    }
+    scrim = ui->backdrop.scrim;
     memset(&art, 0, sizeof(art));
     art.cover = ui->backdrop.picture;
     return nk_ui_paint_image(&ui->draw, &art, eased, ui->backdrop.rect, ui->scale.density,
@@ -1810,15 +1838,9 @@ const NkUiDrawList *nk_ui_end(NkUi *ui) {
        The time since the last frame was idle when nothing was moving then, so
        a transition starting now gets one frame of it, not the whole wait for
        input, and begins its course where it should. */
-    {
-        double transition_delta = ui->frame_delta_s;
-        if (!ui->transitioning && transition_delta > NK_UI_MOTION_FRAME) {
-            transition_delta = NK_UI_MOTION_FRAME;
-        }
-        if (!nk_ui_clay_end(ui->clay, &ui->draw, ui->scale.density, (float)transition_delta,
-                            nk_ui_paint_custom, ui)) {
-            ui->frame_ok = false;
-        }
+    if (!nk_ui_clay_end(ui->clay, &ui->draw, ui->scale.density,
+                        (float)nk_ui_transition_delta(ui), nk_ui_paint_custom, ui)) {
+        ui->frame_ok = false;
     }
     ui->transitioning = nk_ui_clay_transitioning(ui->clay) || ui->art_fading;
     /* A picture not drawn this frame starts afresh when it comes back. */
@@ -1862,19 +1884,21 @@ bool nk_ui_laid_out(const NkUi *ui) {
 }
 
 bool nk_ui_next_wake(const NkUi *ui, double *at_s) {
+    /* The waves' step rate (NK_UI_MOTION_WAVE_FRAME); 1 / (1 / 30.0) is 30.0 exactly. */
+    const double rate = 1.0 / NK_UI_MOTION_WAVE_FRAME;
     double frame;
     if (ui == NULL || !ui->waves.active || ui->prefs.reduce_motion) {
         return false;
     }
-    if (!isfinite(ui->now_s * 30.0)) {
+    if (!isfinite(ui->now_s * rate)) {
         return false;
     }
-    frame = floor(ui->now_s * 30.0) + 1.0;
+    frame = floor(ui->now_s * rate) + 1.0;
     if (!isfinite(frame)) {
         return false;
     }
     if (at_s != NULL) {
-        *at_s = frame / 30.0;
+        *at_s = frame / rate;
     }
     return true;
 }
