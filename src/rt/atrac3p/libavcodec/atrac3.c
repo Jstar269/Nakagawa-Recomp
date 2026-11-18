@@ -20,6 +20,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+/*
+ * Modified by Nakagawa Recomp contributors, 2026-10-20 and 2026-11-17. The local changes are
+ * marked LOCAL DELTA and listed in ../PROVENANCE.md.
+ */
+
 /**
  * @file
  * ATRAC3 compatible decoder.
@@ -805,19 +810,27 @@ static int atrac3_decode_frame(AVCodecContext *avctx, void *data,
         return AVERROR_INVALIDDATA;
     }
 
+    /* get output buffer */
     frame->nb_samples = SAMPLES_PER_FRAME;
     if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
         return ret;
+
+    /* Check if we need to descramble and what buffer to pass on. */
     if (q->scrambled_stream) {
         decode_bytes(buf, q->decoded_bytes_buffer, avctx->block_align);
         databuf = q->decoded_bytes_buffer;
     } else {
         databuf = buf;
     }
+
     ret = decode_frame(avctx, databuf, (float **)frame->extended_data);
-    if (ret)
+    if (ret) {
+        av_log(avctx, AV_LOG_ERROR, "Frame decoding error!\n");
         return ret;
+    }
+
     *got_frame_ptr = 1;
+
     return avctx->block_align;
 }
 
