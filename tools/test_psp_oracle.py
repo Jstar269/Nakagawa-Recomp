@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+import dataclasses
 from datetime import datetime, timedelta
 import hashlib
 import io
@@ -40,6 +41,7 @@ from psp_oracle.protocol import (
     STATUSES,
     ge_corpus_report,
     PSP_MODEL_INTERPRETATION_RULE,
+    compare_outputs,
     compare_texts,
     decode_psp_model_code,
     model_identity_fields,
@@ -118,6 +120,14 @@ from makefile_text import read_makefile  # noqa: E402
 def _matched(match: re.Match[str] | None) -> re.Match[str]:
     """Return a regex match at call sites that already rely on it being present."""
     return cast(re.Match[str], match)
+
+
+#: Variables that would point a git command at another repository or index (the list
+#: tools/admit_paths.py strips for the same reason).
+GIT_REPOSITORY_VARIABLES = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+)
 
 
 META = (
@@ -325,9 +335,34 @@ class PspOracleProtocolTests(unittest.TestCase):
         self.assertEqual(match["comparisons"][0]["comparison"], "MATCH")
         difference = compare_texts(stream("psp", "0x2"), stream("nakagawa"))
         self.assertEqual(difference["comparisons"][0]["comparison"], "DIFFERENCE")
-        psp_only = compare_texts(stream("psp"), stream("nakagawa") +
-                                 "NAKAGAWA_PSP_TEST schema=1 test_id=EXTRA case_id=one status=PASS result=0x2\n")
-        self.assertIn(psp_only["comparisons"][1]["comparison"], {"NAKAGAWA_ONLY", "MATCH"})
+        extra = "NAKAGAWA_PSP_TEST schema=1 test_id=EXTRA case_id=one status=PASS result=0x2\n"
+
+        def labels(report: dict[str, Any]) -> dict[tuple[str, str], str]:
+            return {(row["test_id"], row["case_id"]): row["comparison"] for row in report["comparisons"]}
+
+        nakagawa_only = compare_texts(stream("psp"), stream("nakagawa") + extra)
+        self.assertEqual(labels(nakagawa_only),
+                         {("EXTRA", "one"): "NAKAGAWA_ONLY", ("SMOKE", "one"): "MATCH"})
+        self.assertEqual(nakagawa_only["classification"], "INCONCLUSIVE")
+        psp_only = compare_texts(stream("psp") + extra, stream("nakagawa"))
+        self.assertEqual(labels(psp_only), {("EXTRA", "one"): "PSP_ONLY", ("SMOKE", "one"): "MATCH"})
+        self.assertEqual(psp_only["classification"], "INCONCLUSIVE")
+        # Every record on one side only: the stream-level verdict names that side.
+        other = stream("nakagawa").replace("test_id=SMOKE", "test_id=OTHER")
+        self.assertEqual(compare_texts(stream("psp"), other)["classification"], "INCONCLUSIVE")
+        # A stream with no records does not parse, so the empty side is built directly.
+        empty_psp = dataclasses.replace(parse_output(stream("psp")), results=())
+        empty_nakagawa = dataclasses.replace(parse_output(stream("nakagawa")), results=())
+        all_psp = compare_outputs(parse_output(stream("psp") + extra), empty_nakagawa)
+        self.assertEqual(set(labels(all_psp).values()), {"PSP_ONLY"})
+        self.assertEqual(all_psp["classification"], "PSP_ONLY")
+        all_nakagawa = compare_outputs(empty_psp, parse_output(stream("nakagawa") + extra))
+        self.assertEqual(set(labels(all_nakagawa).values()), {"NAKAGAWA_ONLY"})
+        self.assertEqual(all_nakagawa["classification"], "NAKAGAWA_ONLY")
+        # A difference outranks one-sided records.
+        mixed = compare_texts(stream("psp", "0x2"), stream("nakagawa") + extra)
+        self.assertEqual(labels(mixed), {("EXTRA", "one"): "NAKAGAWA_ONLY", ("SMOKE", "one"): "DIFFERENCE"})
+        self.assertEqual(mixed["classification"], "DIFFERENCE")
 
     def test_malformed_hex_is_rejected(self) -> None:
         with self.assertRaises(ProtocolError):
@@ -3184,6 +3219,19 @@ class PspOracleBuildRouteTests(unittest.TestCase):
             root = Path(scratch)
             repo = root / "repo"
             repo.mkdir()
+            # A caller that exported GIT_DIR and GIT_INDEX_FILE (a hook, rebase -x) must not
+            # have the fixture staged or committed into its repository.
+            decoy = root / "decoy"
+            decoy.mkdir()
+            decoy_index = root / "decoy.index"
+            subprocess.run(
+                ["git", "init", "-q"], cwd=decoy, check=True, capture_output=True,
+                env={key: value for key, value in os.environ.items()
+                     if key not in GIT_REPOSITORY_VARIABLES},
+            )
+            self.enterContext(patch.dict(
+                os.environ, {"GIT_DIR": str(decoy / ".git"), "GIT_INDEX_FILE": str(decoy_index)}
+            ))
             dated = time.time() - 3600
             # The Makefile and every source and header it may name as a prerequisite.
             sources = [self.fixture / "Makefile"]
@@ -3206,8 +3254,10 @@ class PspOracleBuildRouteTests(unittest.TestCase):
                 "    log.write('compiled\\n')\n",
                 encoding="utf-8",
             )
+            # The git commands below, and the Makefile's clean-tree check, use this repo.
             env = {
-                **os.environ,
+                **{key: value for key, value in os.environ.items()
+                   if key not in GIT_REPOSITORY_VARIABLES},
                 "GIT_CONFIG_GLOBAL": os.devnull,
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_AUTHOR_NAME": "oracle-case-stamp test",
@@ -3247,6 +3297,14 @@ class PspOracleBuildRouteTests(unittest.TestCase):
             # make kept the smoke object.
             self.assertEqual(build("callback-notify-check"), ("-DPSP_ORACLE_CASE=1\n", 2))
             self.assertEqual(build("smoke"), ("-DPSP_ORACLE_CASE=0\n", 3))
+            # The fixture commit is the scratch repository's own; the decoy is untouched.
+            history = subprocess.run(["git", "log", "--format=%s"], cwd=repo, env=env,
+                                     check=True, capture_output=True, text=True).stdout
+            self.assertEqual(history, "fixture\n")
+            decoy_refs = subprocess.run(["git", "for-each-ref"], cwd=decoy, env=env,
+                                        check=True, capture_output=True, text=True).stdout
+            self.assertEqual(decoy_refs, "")
+            self.assertFalse(decoy_index.exists())
 
 
 class PspDmacProbeTests(unittest.TestCase):
@@ -4604,9 +4662,55 @@ class ProbeProgressAndBoundedWaitTests(unittest.TestCase):
             block = self._case_block(macro)
             self.assertNotIn("for (;;)", block, macro)
             self.assertNotIn("sceKernelSleepThread(", block, macro)
-            for call in re.finditer(r"sceKernel(?:WaitSema|WaitThreadEnd)\(([^;]*)\);", block):
-                self.assertFalse(call.group(1).rstrip().endswith("NULL"), (macro, call.group(0)))
+            for name, timeout, call in self._blocking_waits(block):
+                if (macro, call) in self.UNCONTENDED_WAITS:
+                    continue
+                self.assertNotIn(timeout, {"NULL", "0"}, (macro, name, call))
             self.assertIn("probe_step(emulated,", block, macro)
+
+    # Infinite-timeout waits that cannot block: (case, call text) -> why.
+    UNCONTENDED_WAITS: ClassVar[dict[tuple[str, str], str]] = {
+        ("CPU_TIMING", "sceKernelLockLwMutex(&s_cpu_timing_lwmutex, 1, NULL)"):
+            "a non-recursive LwMutex only this thread locks, unlocked after every lock",
+    }
+
+    @staticmethod
+    def _blocking_waits(block: str) -> list[tuple[str, str, str]]:
+        """(name, timeout argument, call text) for every Wait/Lock/Receive kernel call.
+
+        The call is closed by bracket matching, so it is found in a condition, a ternary or
+        an assignment as well as a bare statement; its last argument is the timeout pointer.
+        """
+
+        code = _c_code(block)
+        waits = []
+        for call in re.finditer(r"\b(sceKernel(?:Wait|Lock|Receive)\w*)\s*\(", code):
+            close = _c_close(code, call.end() - 1)
+            args = _c_split(code[call.end():close])
+            waits.append((call.group(1), args[-1].strip() if args else "",
+                          " ".join(code[call.start():close + 1].split())))
+        return waits
+
+    def test_the_wait_scan_sees_every_shape_and_family(self) -> None:
+        shapes = (
+            "if (sceKernelWaitSema(s, 1, NULL) < 0) { foo(); }",
+            "rc = sceKernelWaitThreadEnd(t, NULL) ;",
+            "sceKernelWaitEventFlag(f, 1, 0, &o, NULL);",
+            "x = cond ? y : sceKernelReceiveMbx(m, &msg, 0);",
+            "sceKernelLockMutex(m, 1, NULL);",
+        )
+        for shape in shapes:
+            with self.subTest(shape):
+                ((_, timeout, _),) = self._blocking_waits(shape)
+                self.assertIn(timeout, {"NULL", "0"})
+        ((_, timeout, _),) = self._blocking_waits("sceKernelWaitSema(s, 1, &timeout);")
+        self.assertEqual(timeout, "&timeout")
+
+    def test_every_uncontended_wait_exception_is_still_in_its_case(self) -> None:
+        for (macro, call), _reason in self.UNCONTENDED_WAITS.items():
+            with self.subTest(macro=macro, call=call):
+                calls = [text for _, _, text in self._blocking_waits(self._case_block(macro))]
+                self.assertEqual(calls.count(call), 1)
 
     def test_exhaustion_loops_are_capped_and_record_the_cap(self) -> None:
         registry = self._case_block("REGISTRY_READONLY")
