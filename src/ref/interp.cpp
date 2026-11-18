@@ -86,6 +86,17 @@ inline uint32_t Funct(uint32_t op) { return op & 0x3F; }
 inline int32_t SImm(uint32_t op) { return (int32_t)(int16_t)(op & 0xFFFF); }
 inline uint32_t ZImm(uint32_t op) { return op & 0xFFFF; }
 
+// Allegrex bitrev: reverse the 32 bits of a word. The reference keeps its own copy, apart
+// from the runtime's sr_bitrev (src/rt/recomp.c), so the two lanes check each other and the
+// reference object exports no symbol that clashes when it links beside the runtime.
+inline uint32_t BitReverse(uint32_t x) {
+	x = ((x >> 1) & 0x55555555u) | ((x << 1) & 0xaaaaaaaau);
+	x = ((x >> 2) & 0x33333333u) | ((x << 2) & 0xccccccccu);
+	x = ((x >> 4) & 0x0f0f0f0fu) | ((x << 4) & 0xf0f0f0f0u);
+	x = ((x >> 8) & 0x00ff00ffu) | ((x << 8) & 0xff00ff00u);
+	return (x >> 16) | (x << 16);
+}
+
 // MIPS branch displacement is a signed 16-bit word offset, but the guest PC
 // addition wraps at 32 bits.  Convert to unsigned before scaling so a
 // backwards branch never left-shifts a negative signed value (C++ UB).
@@ -488,7 +499,7 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 				if (sub == 0x03) { SetR(s, Rd(op), ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) | ((v & 0x00FF0000u) >> 8) | ((v >> 24) & 0x000000FFu)); return StopReason::kRunning; }  // wsbw
 				if (sub == 0x10) { SetR(s, Rd(op), (uint32_t)(int32_t)(int8_t)v); return StopReason::kRunning; }   // seb
 				if (sub == 0x18) { SetR(s, Rd(op), (uint32_t)(int32_t)(int16_t)v); return StopReason::kRunning; }  // seh
-				if (sub == 0x14) { SetR(s, Rd(op), sr_bitrev(v)); return StopReason::kRunning; }  // bitrev
+				if (sub == 0x14) { SetR(s, Rd(op), BitReverse(v)); return StopReason::kRunning; }  // bitrev
 				return StopReason::kUnimplemented;
 			}
 			return StopReason::kUnimplemented;
@@ -533,13 +544,3 @@ StepResult Run(CpuState *s, Memory *mem, unsigned long long max_steps, TraceSink
 }
 
 }  // namespace ref
-
-// Bit-reverse a 32-bit word (Allegrex bitrev).  This is a standalone definition
-// for the selftest/run_elf builds; the runtime copy lives in recomp.c.
-extern "C" uint32_t sr_bitrev(uint32_t x) {
-    x = ((x >> 1) & 0x55555555) | ((x << 1) & 0xaaaaaaaa);
-    x = ((x >> 2) & 0x33333333) | ((x << 2) & 0xcccccccc);
-    x = ((x >> 4) & 0x0f0f0f0f) | ((x << 4) & 0xf0f0f0f0);
-    x = ((x >> 8) & 0x00ff00ff) | ((x << 8) & 0xff00ff00);
-    return (x >> 16) | (x << 16);
-}

@@ -23,7 +23,8 @@ enum class StopReason {
 	kUnimplemented,    // decoded but no semantics implemented yet -> trap, do not fake
 	kMemoryFault,      // fetch/load/store outside modeled memory, or a misaligned one
 	kBreak,            // break instruction
-	kStepLimit,        // reached the caller's instruction budget
+	kStepLimit,        // reached the caller's instruction budget; stays last (run_elf lists
+	                   // the stop names up to it)
 };
 
 struct StepResult {
@@ -58,9 +59,5 @@ private:
 // condition (syscall, unimplemented op, fault, break) or when the budget is exhausted.
 // When sink is non-null, every executed instruction is traced.
 StepResult Run(CpuState *s, Memory *mem, unsigned long long max_steps, TraceSink *sink);
-
-// Bit-reverse helper (Allegrex bitrev). Declared here so the interpreter and the
-// runtime can share the same symbol; the definition lives in recomp.c.
-extern "C" uint32_t sr_bitrev(uint32_t x);
 
 }  // namespace ref

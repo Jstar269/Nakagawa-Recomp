@@ -97,6 +97,13 @@ GuestRangeStatus ClassifyGuestRange(Memory *mem, uint32_t addr, uint32_t length,
 uint32_t LoadElf(const std::vector<uint8_t> &elf, Memory *mem) {
 	if (!mem) ElfError("null memory");
 	if (elf.size() < 52 || memcmp(elf.data(), "\x7f""ELF", 4) != 0) ElfError("not an ELF");
+	// The fields below are read with the ELF32 little-endian layout, and nothing here
+	// relocates: anything but a 32-bit little-endian MIPS executable is refused by name
+	// (a PRX, e_type 0xFFA0, would otherwise run unrelocated).
+	if (elf[4] != 1) ElfError("ELF class is not ELFCLASS32");
+	if (elf[5] != 1) ElfError("ELF data encoding is not little-endian");
+	if (Rd16(&elf[16]) != 2) ElfError("ELF type is not ET_EXEC (only a non-relocated executable is loaded)");
+	if (Rd16(&elf[18]) != 8) ElfError("ELF machine is not EM_MIPS");
 	uint32_t e_entry = Rd32(&elf[24]);
 	uint32_t e_phoff = Rd32(&elf[28]);
 	uint32_t e_shoff = Rd32(&elf[32]);
@@ -142,6 +149,7 @@ uint32_t LoadElf(const std::vector<uint8_t> &elf, Memory *mem) {
 		uint32_t p_vaddr = Rd32(ph + 8);
 		uint32_t p_filesz = Rd32(ph + 16);
 		uint32_t p_memsz = Rd32(ph + 20);
+		uint32_t p_flags = Rd32(ph + 24);
 		if (p_type != 1)  // PT_LOAD
 			continue;
 		if (p_filesz > p_memsz) ElfError("ELF PT_LOAD filesz exceeds memsz");
@@ -149,7 +157,16 @@ uint32_t LoadElf(const std::vector<uint8_t> &elf, Memory *mem) {
 		uint32_t guest_index = 0;
 		GuestRangeStatus guest_range = ClassifyGuestRange(mem, p_vaddr, p_memsz, &guest_index);
 		if (guest_range == GuestRangeStatus::kInvalid) ElfError("ELF PT_LOAD guest range crosses modeled memory");
-		if (guest_range == GuestRangeStatus::kUnmapped) continue;
+		if (guest_range == GuestRangeStatus::kUnmapped) {
+			if (p_memsz == 0) continue;
+			// Code outside modeled memory would never run as the ELF says, so it is refused.
+			// Another segment there (GNU ld puts the ELF headers in a read-only PT_LOAD at
+			// 0x00400000 when only -Ttext moves the code) is skipped, and the skip is named.
+			if ((p_flags & 1u) != 0) ElfError("ELF executable PT_LOAD outside modeled guest memory");
+			fprintf(stderr, "run_elf: program header %u (PT_LOAD at 0x%08x, memsz 0x%x) is outside modeled guest memory; skipped\n",
+			        static_cast<unsigned>(i), p_vaddr, p_memsz);
+			continue;
+		}
 		if (p_filesz != 0)
 			memcpy(mem->RamData() + guest_index, elf.data() + p_offset, p_filesz);
 		if (p_memsz > p_filesz)
@@ -158,13 +175,13 @@ uint32_t LoadElf(const std::vector<uint8_t> &elf, Memory *mem) {
 	return e_entry;
 }
 
-bool ParseIndexedRegister(const char *name, char prefix, uint32_t *index) {
+bool ParseIndexedRegister(const char *name, char prefix, uint32_t *index, uint32_t max_index = 31) {
 	if (!name || !index || name[0] != prefix) return false;
 	if (name[1] < '0' || name[1] > '9') return false;
 	char *end = nullptr;
 	errno = 0;
 	unsigned long long value = strtoull(name + 1, &end, 10);
-	if (errno != 0 || !end || end == name + 1 || *end != '\0' || value > 31ULL) return false;
+	if (errno != 0 || !end || end == name + 1 || *end != '\0' || value > max_index) return false;
 	*index = static_cast<uint32_t>(value);
 	return true;
 }
@@ -186,8 +203,20 @@ bool ParseHex32(const char *text, uint32_t *value) {
 	return true;
 }
 
+// A token of the init line that cannot be seeded stops the run by name: a register left at
+// its default would make the first divergence look like an interpreter mismatch.
+[[noreturn]] void InitTokenError(const char *trace_path, const char *what, const char *token) {
+	fprintf(stderr, "%s: '# init' line has a %s: '%s'; refusing a partly seeded state\n",
+	        trace_path, what, token);
+	exit(2);
+}
+
 // Parse the "# init r0=.. ... fcr31=.. f0=.. .." line from the oracle trace into a CpuState.
+// Every token must be <register>=<hex32> for r0-r31 (r0 only as zero), f0-f31, v0-v127 (as
+// src/rt/driver.c seeds them), hi, lo or fcr31. A carriage return is a delimiter, so a CRLF
+// trace seeds its last register too.
 bool SeedFromInit(const char *trace_path, CpuState *s) {
+	static const char kDelimiters[] = " \t\r\n";
 	FILE *f = fopen(trace_path, "rb");
 	if (!f) { fprintf(stderr, "cannot open %s\n", trace_path); exit(2); }
 	char buf[8192];
@@ -196,23 +225,42 @@ bool SeedFromInit(const char *trace_path, CpuState *s) {
 		if (strncmp(buf, "# init", 6) != 0)
 			continue;
 		found = true;
-		char *tok = strtok(buf + 6, " \t\n");
+		char *tok = strtok(buf + 6, kDelimiters);
 		while (tok) {
 			char *eq = strchr(tok, '=');
-			if (eq) {
-				*eq = 0;
-				uint32_t val = 0, index = 0;
-				const char *name = tok;
-				if (ParseHex32(eq + 1, &val)) {
-					if (ParseIndexedRegister(name, 'r', &index)) s->r[index] = val;
-					else if (ParseIndexedRegister(name, 'f', &index)) s->fi[index] = val;
-					else if (strcmp(name, "hi") == 0) s->hi = val;
-					else if (strcmp(name, "lo") == 0) s->lo = val;
-					else if (strcmp(name, "fcr31") == 0) s->fcr31 = val;
-				}
+			if (!eq) InitTokenError(trace_path, "token without a value", tok);
+			*eq = 0;
+			uint32_t val = 0, index = 0;
+			const char *name = tok;
+			if (!ParseHex32(eq + 1, &val)) {
+				*eq = '=';
+				InitTokenError(trace_path, "malformed value", tok);
 			}
-			tok = strtok(nullptr, " \t\n");
+			if (ParseIndexedRegister(name, 'r', &index)) {
+				if (index == 0 && val != 0) {
+					*eq = '=';
+					InitTokenError(trace_path, "nonzero r0", tok);
+				}
+				s->r[index] = val;
+			} else if (ParseIndexedRegister(name, 'f', &index)) {
+				s->fi[index] = val;
+			} else if (ParseIndexedRegister(name, 'v', &index, 127)) {
+				s->vi[index] = val;
+			} else if (strcmp(name, "hi") == 0) {
+				s->hi = val;
+			} else if (strcmp(name, "lo") == 0) {
+				s->lo = val;
+			} else if (strcmp(name, "fcr31") == 0) {
+				s->fcr31 = val;
+			} else {
+				*eq = '=';
+				InitTokenError(trace_path, "unknown register", tok);
+			}
+			tok = strtok(nullptr, kDelimiters);
 		}
+		// fpcond is the interpreter's cached copy of FCR31 FCC0 (bit 23, cpu.h); bc1t and
+		// bc1f read only the copy, so it follows the seeded fcr31.
+		s->fpcond = (s->fcr31 >> 23) & 1u;
 		break;
 	}
 	fclose(f);
@@ -231,6 +279,26 @@ const char *ReasonName(StopReason r) {
 	return "?";
 }
 
+// The entry function returning to the host return address ends the run as a return. The
+// interpreter sees it as a fetch fault at kHostReturnPc, which no instruction can occupy
+// (it is outside modeled memory), so that stop is renamed and every other fault keeps its
+// memory-fault name.
+constexpr const char *kReturnedStop = "returned";
+
+const char *StopName(const StepResult &res) {
+	if (res.reason == StopReason::kMemoryFault && res.pc == kHostReturnPc) return kReturnedStop;
+	return ReasonName(res.reason);
+}
+
+// Calls f with every stop name run_elf can report, in order: each StopReason after kRunning
+// (through kStepLimit, the last) by its ReasonName, then "returned". --expect-stop and the
+// usage text both come from here, so they cannot drift from what a run prints.
+template <typename F> void ForEachStopName(F f) {
+	for (int r = static_cast<int>(StopReason::kRunning) + 1; r <= static_cast<int>(StopReason::kStepLimit); r++)
+		f(ReasonName(static_cast<StopReason>(r)));
+	f(kReturnedStop);
+}
+
 // Process statuses. A successful exit means the observed stop matched what the
 // caller declared; unsupported execution, a memory fault and a break each get a
 // distinct nonzero status so an automation caller cannot confuse them with an
@@ -242,6 +310,7 @@ enum ExitStatus {
 	kExitUnimplemented = 3,
 	kExitMemoryFault = 4,
 	kExitBreak = 5,
+	kExitTraceWrite = 6,  // the output trace could not be written completely
 };
 
 int ExitForUnexpectedStop(StopReason r) {
@@ -255,10 +324,27 @@ int ExitForUnexpectedStop(StopReason r) {
 
 bool IsStopReasonName(const char *name) {
 	if (name == nullptr) return false;
-	for (const char *known : {"syscall", "unimplemented", "memory-fault", "break", "step-limit"}) {
-		if (std::strcmp(name, known) == 0) return true;
-	}
+	bool known = false;
+	ForEachStopName([&](const char *stop) { known = known || std::strcmp(name, stop) == 0; });
+	return known;
+}
+
+// Finish the output trace: a write that failed earlier (the sink's fwrite is unchecked) or
+// a failed close leaves a truncated trace, which must not pass for a complete one.
+bool CloseTrace(FILE *out, const char *path) {
+	const bool write_failed = ferror(out) != 0;
+	const bool close_failed = fclose(out) != 0;
+	if (!write_failed && !close_failed) return true;
+	fprintf(stderr, "run_elf: trace write failed for %s; the trace is incomplete\n", path);
 	return false;
+}
+
+// The trace header names the loaded ELF by its file name.
+const char *TargetName(const char *elf_path) {
+	const char *name = elf_path;
+	for (const char *p = elf_path; *p != '\0'; p++)
+		if (*p == '/' || *p == '\\') name = p + 1;
+	return name;
 }
 
 // Validate the instruction budget instead of trusting strtoull: "abc", "-1", "0"
@@ -285,7 +371,11 @@ void PrintUsage() {
 	        "usage: run_elf <elf> <oracle-trace> <out-trace> [max_steps] "
 	        "[--expect-stop=<reason>]\n"
 	        "  max_steps      positive decimal instruction budget (default 2000000)\n"
-	        "  --expect-stop  syscall|unimplemented|memory-fault|break|step-limit\n"
+	        "  --expect-stop  ");
+	const char *separator = "";
+	ForEachStopName([&](const char *stop) { fprintf(stderr, "%s%s", separator, stop); separator = "|"; });
+	fprintf(stderr,
+	        "\n"
 	        "exit 0 only when the observed stop matches the expectation; without\n"
 	        "--expect-stop only a guest syscall exit succeeds.\n");
 }
@@ -354,11 +444,11 @@ int main(int argc, char **argv) {
 	FILE *out = fopen(out_path, "wb");
 	if (!out) { fprintf(stderr, "cannot open %s for write\n", out_path); return kExitUsage; }
 	TraceSink sink(out);
-	sink.Header("hello", entry);
+	sink.Header(TargetName(elf_path), entry);
 	sink.InitDump(&s);
 
 	StepResult res = Run(&s, &mem, max_steps, &sink);
-	fclose(out);
+	if (!CloseTrace(out, out_path)) return kExitTraceWrite;
 
 	const char *ppm_path = getenv("SR_PPM_DUMP");
 	if (ppm_path) {
@@ -380,7 +470,7 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	const char *observed = ReasonName(res.reason);
+	const char *observed = StopName(res);
 	fprintf(stderr, "stopped: reason=%s pc=0x%08x op=0x%08x\n", observed, res.pc, res.op);
 	// Structured stop metadata: the process status alone cannot distinguish a run that
 	// stopped because the caller's budget ran out from one where the guest exited, so
@@ -403,6 +493,9 @@ int main(int argc, char **argv) {
 		        "run_elf: UNEXPECTED_STOP expected=syscall observed=%s; pass "
 		        "--expect-stop=<reason> to assert a bounded or faulting stop\n",
 		        observed);
+		// A return is not a fault: it keeps the plain unexpected-stop status, and only a
+		// wild access gets the memory-fault one.
+		if (std::strcmp(observed, kReturnedStop) == 0) return kExitUnexpectedStop;
 		return ExitForUnexpectedStop(res.reason);
 	}
 	return kExitExpected;

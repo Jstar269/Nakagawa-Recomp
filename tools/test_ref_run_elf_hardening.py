@@ -38,6 +38,10 @@ static void wr32(std::vector<uint8_t> &v, size_t off, uint32_t x) {{
 static std::vector<uint8_t> base_elf(size_t size) {{
     std::vector<uint8_t> elf(size, 0);
     memcpy(elf.data(), "\\x7f" "ELF", 4);
+    elf[4] = 1;            // ELFCLASS32
+    elf[5] = 1;            // ELFDATA2LSB
+    wr16(elf, 16, 2);      // ET_EXEC
+    wr16(elf, 18, 8);      // EM_MIPS
     wr32(elf, 24, 0x08000010u);
     return elf;
 }}
@@ -66,12 +70,28 @@ int main(int argc, char **argv) {{
 
         ref::CpuState s;
         for (int i = 0; i < 32; i++) {{ s.r[i] = 0x11110000u + (uint32_t)i; s.fi[i] = 0x22220000u + (uint32_t)i; }}
-        s.hi = 0xaaaaaaaau; s.lo = 0xbbbbbbbbu; s.fcr31 = 0xccccccccu;
+        s.r[0] = 0u;
+        s.hi = 0xaaaaaaaau; s.lo = 0xbbbbbbbbu; s.fcr31 = 0xccccccccu; s.fpcond = 0u;
         if (!SeedFromInit(argv[2], &s)) return 1;
         if (s.r[31] != 0x12345678u || s.fi[31] != 0x89abcdefu) return 2;
-        if (s.hi != 0x11111111u || s.lo != 0x22222222u || s.fcr31 != 0x33333333u) return 3;
+        if (s.hi != 0x11111111u || s.lo != 0x22222222u || s.fcr31 != 0x33b33333u) return 3;
         if (s.r[1] != 0x11110001u || s.r[2] != 0x11110002u || s.r[3] != 0x11110003u) return 4;
+        // fpcond mirrors FCR31 FCC0 (bit 23), which the seeded fcr31 sets: bc1t reads it.
+        if (s.fpcond != 1u) return 5;
+        if (s.vi[127] != 0x44444444u || s.r[0] != 0u) return 6;
         return 0;
+    }}
+    if (strcmp(mode, "seedonly") == 0) {{
+        if (argc < 3) return 91;
+        ref::CpuState s;
+        return SeedFromInit(argv[2], &s) ? 0 : 1;
+    }}
+    if (strcmp(mode, "closetrace") == 0) {{
+        if (argc < 3) return 91;
+        FILE *f = fopen(argv[2], "rb");
+        if (!f) return 92;
+        fputc('x', f);  // a write to a read-only stream fails and sets its error flag
+        return CloseTrace(f, argv[2]) ? 40 : 0;
     }}
     ref::Memory mem;
     if (strcmp(mode, "phbounds") == 0) {{
@@ -102,6 +122,24 @@ int main(int argc, char **argv) {{
         if (LoadElf(elf, &mem) != 0x08000010u) return 30;
         if (mem.last_fault()) return 31;
         return 0;
+    }}
+    if (strcmp(mode, "unmappedexec") == 0) {{
+        auto elf = base_elf(88); wr32(elf, 28, 52); wr16(elf, 42, 32); wr16(elf, 44, 1);
+        wr32(elf, 52, 1); wr32(elf, 56, 84); wr32(elf, 60, 0x00400000u); wr32(elf, 68, 4); wr32(elf, 72, 8);
+        wr32(elf, 76, 5);  // p_flags PF_R | PF_X: code that would never be loaded
+        LoadElf(elf, &mem); return 32;
+    }}
+    if (strcmp(mode, "class64") == 0) {{
+        auto elf = base_elf(52); elf[4] = 2; LoadElf(elf, &mem); return 33;
+    }}
+    if (strcmp(mode, "bigendian") == 0) {{
+        auto elf = base_elf(52); elf[5] = 2; LoadElf(elf, &mem); return 34;
+    }}
+    if (strcmp(mode, "prx") == 0) {{
+        auto elf = base_elf(52); wr16(elf, 16, 0xFFA0); LoadElf(elf, &mem); return 35;
+    }}
+    if (strcmp(mode, "notmips") == 0) {{
+        auto elf = base_elf(52); wr16(elf, 18, 3); LoadElf(elf, &mem); return 36;
     }}
     if (strcmp(mode, "shbounds") == 0) {{
         auto elf = base_elf(52); wr32(elf, 32, 50); wr16(elf, 46, 40); wr16(elf, 48, 1); LoadElf(elf, &mem); return 15;
@@ -144,12 +182,12 @@ int main(int argc, char **argv) {{
             exe = tmpdir / "harness"
             trace = tmpdir / "init.trace"
             src.write_text(source, encoding="utf-8")
-            trace.write_text(
-                "# init r31=12345678 f31=89abcdef hi=11111111 lo=22222222 "
-                "fcr31=33333333 r32=deadbeef f32=feedface r1junk=77777777 "
-                "r2=zzzz r3=100000000\\n",
-                encoding="ascii",
-            )
+            # fcr31 comes last, as InitDump writes it, so a CRLF line ends on its token.
+            init_line = (b"# init r0=00000000 r31=12345678 f31=89abcdef v127=44444444 "
+                         b"hi=11111111 lo=22222222 fcr31=33b33333")
+            trace.write_bytes(init_line + b"\n")
+            trace_crlf = tmpdir / "init-crlf.trace"
+            trace_crlf.write_bytes(b"# psp-recomp trace v1\r\n" + init_line + b"\r\n")
             compiled = subprocess.run(
                 [CC, "-std=c++17", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", str(src), "-o", str(exe)],
                 capture_output=True, text=True,
@@ -157,15 +195,55 @@ int main(int argc, char **argv) {{
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             seed = subprocess.run([str(exe), "seed", str(trace)], capture_output=True, text=True)
             self.assertEqual(seed.returncode, 0, seed.stderr + seed.stdout)
+            # A CRLF trace seeds the same state: the carriage return is a delimiter, not part
+            # of the last value (which would otherwise fail to parse and be dropped).
+            seed = subprocess.run([str(exe), "seed", str(trace_crlf)], capture_output=True, text=True)
+            self.assertEqual(seed.returncode, 0, seed.stderr + seed.stdout)
+            # A malformed or unknown init token refuses the whole seed by name instead of
+            # leaving that register at its default.
+            bad_tokens = {
+                "r32=deadbeef": "unknown register",
+                "f32=feedface": "unknown register",
+                "v128=00000001": "unknown register",
+                "r1junk=77777777": "unknown register",
+                "pc=08900000": "unknown register",
+                "r2=zzzz": "malformed value",
+                "r3=100000000": "malformed value",
+                "r4=": "malformed value",
+                "r0=00000001": "nonzero r0",
+                "r5": "token without a value",
+            }
+            for index, (token, reason) in enumerate(bad_tokens.items()):
+                with self.subTest(token=token):
+                    bad = tmpdir / f"bad-{index}.trace"
+                    bad.write_bytes(b"# init r1=00000010 " + token.encode("ascii") + b" r2=00000020\n")
+                    result = subprocess.run([str(exe), "seedonly", str(bad)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+                    self.assertIn(reason, result.stderr)
+                    self.assertIn(f"'{token}'", result.stderr)
+            closed = subprocess.run([str(exe), "closetrace", str(trace)], capture_output=True, text=True)
+            self.assertEqual(closed.returncode, 0, closed.stderr + closed.stdout)
+            self.assertIn("trace write failed", closed.stderr)
             valid = subprocess.run([str(exe), "valid"], capture_output=True, text=True)
             self.assertEqual(valid.returncode, 0, valid.stderr + valid.stdout)
+            # A non-executable segment outside modeled memory (a GNU ld headers segment at
+            # 0x00400000, as the CI microtest ELFs carry) is skipped with a named note.
             unmapped = subprocess.run([str(exe), "unmapped"], capture_output=True, text=True)
             self.assertEqual(unmapped.returncode, 0, unmapped.stderr + unmapped.stdout)
+            self.assertIn("program header 0 (PT_LOAD at 0x00400000, memsz 0x8) is outside modeled guest memory; skipped",
+                          unmapped.stderr)
             entry_reasons = {
                 "entryunaligned": "ELF entry address unaligned",
                 "entryunmapped": "ELF entry address out of mapped guest memory",
+                "unmappedexec": "ELF executable PT_LOAD outside modeled guest memory",
+                "class64": "ELF class is not ELFCLASS32",
+                "bigendian": "ELF data encoding is not little-endian",
+                "prx": "ELF type is not ET_EXEC",
+                "notmips": "ELF machine is not EM_MIPS",
             }
-            for mode in ("phbounds", "phentsize", "segbounds", "memrange", "filesz", "shbounds", "shentsize", "shstrndx", "secbounds", "entryunaligned", "entryunmapped"):
+            for mode in ("phbounds", "phentsize", "segbounds", "memrange", "filesz", "shbounds", "shentsize",
+                         "shstrndx", "secbounds", "entryunaligned", "entryunmapped",
+                         "unmappedexec", "class64", "bigendian", "prx", "notmips"):
                 result = subprocess.run([str(exe), mode], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 2, f"{mode}: {result.stderr}{result.stdout}")
                 if mode in entry_reasons:
@@ -221,6 +299,10 @@ class TestReferenceRunnerTerminationContract(unittest.TestCase):
         payload = b"".join(word.to_bytes(4, "little") for word in words)
         elf = bytearray(84 + len(payload))
         elf[0:4] = b"\x7fELF"
+        elf[4] = 1                                       # ELFCLASS32
+        elf[5] = 1                                       # ELFDATA2LSB
+        elf[16:18] = (2).to_bytes(2, "little")           # ET_EXEC
+        elf[18:20] = (8).to_bytes(2, "little")           # EM_MIPS
         elf[24:28] = entry.to_bytes(4, "little")
         elf[28:32] = (52).to_bytes(4, "little")
         elf[42:44] = (32).to_bytes(2, "little")
@@ -230,6 +312,7 @@ class TestReferenceRunnerTerminationContract(unittest.TestCase):
         elf[60:64] = entry.to_bytes(4, "little")        # p_vaddr
         elf[68:72] = len(payload).to_bytes(4, "little")  # p_filesz
         elf[72:76] = max(0x1000, len(payload)).to_bytes(4, "little")  # p_memsz
+        elf[76:80] = (5).to_bytes(4, "little")          # p_flags PF_R | PF_X
         elf[84:] = payload
         path = self.root / name
         path.write_bytes(bytes(elf))
@@ -299,11 +382,23 @@ class TestReferenceRunnerTerminationContract(unittest.TestCase):
         init.write_text("# psp-recomp trace v1 oracle=interp target=fixture "
                         "start_pc=0x08900000\n# init r1=00000010\n", encoding="ascii", newline="\n")
         proc, meta = self.run_cli(elf, init)
-        self.assertEqual(proc.returncode, 4, proc.stderr)
-        self.assertEqual(meta.get("stop_reason"), "memory-fault", proc.stderr)
+        # Returning to the host return address is a return, not a memory fault: without an
+        # expectation it is an unexpected stop (1), not the wild-access status (4).
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertEqual(meta.get("stop_reason"), "returned", proc.stderr)
         self.assertEqual(meta.get("pc"), f"0x{host_return:08x}", proc.stderr)
+        self.assertIn("UNEXPECTED_STOP expected=syscall observed=returned", proc.stderr)
         out = elf.with_name(f"{elf.stem}-out.trace").read_text(encoding="ascii").splitlines()
         self.assertIn(f" r31=0x{host_return:08x}", out[1])
+        # The header names the loaded ELF, not a fixed target.
+        self.assertIn(" target=hostret.elf ", out[0])
+        proc, meta = self.run_cli(elf, init, "--expect-stop=returned")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(meta.get("stop_reason"), "returned", proc.stderr)
+        # A caller that declared a memory fault does not accept a clean return.
+        proc, meta = self.run_cli(elf, init, "--expect-stop=memory-fault")
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("UNEXPECTED_STOP expected=memory-fault observed=returned", proc.stderr)
 
     def test_break_stop_is_nonzero_and_distinct(self) -> None:
         elf = self.write_elf("break.elf", [self.OPCODE_BREAK])
