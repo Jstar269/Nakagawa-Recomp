@@ -10,9 +10,12 @@ target exists because a contributor who must run the whole native and tooling
 matrix to find out whether a one-line documentation fix is well formed gives up
 instead of opening the pull request.
 
-It does not decide what to run with a second, private copy of the rules.  Path
-routing comes from ``tools/ci_paths.py``, the same classifier the hosted
-workflow uses, so the local run and the hosted run cannot drift apart.  Each
+It does not classify the change with a second, private copy of the rules: the
+surfaces come from ``tools/ci_paths.py``, the same classifier the hosted
+workflow uses, and are printed.  Each local gate then checks only the files it
+can check here (ruff the changed Python, the strict compile the changed C
+sources), so a surface hosted CI builds that no local gate covers, such as a
+header-only native change, is reported ``NOT_RUN`` with that reason.  Each
 gate reports one of ``PASS``, ``FAIL``, ``SKIP`` (the tool is not installed) or
 ``NOT_RUN`` (the change does not touch that surface).  A gate that cannot run is
 never reported as a pass.
@@ -60,6 +63,9 @@ MAINTAINER_SIDE_CODES = (
     "PROVENANCE_UNVERIFIED",
     "POLICY_EXPORT_STALE",
 )
+
+#: The shape of one publish_audit finding line: ``CODE: path: detail``.
+AUDIT_FINDING = re.compile(r"^[A-Z][A-Z0-9_]+: ")
 
 STRICT_C_FLAGS = (
     "-fsyntax-only", "-std=c11", "-Wall", "-Wextra", "-Werror",
@@ -487,6 +493,11 @@ def c_gate(paths: list[str]) -> Gate:
         if PurePosixPath(p).suffix.lower() == ".c" and (ROOT / p).is_file()
     ]
     if not sources:
+        if ci_paths.classify(paths)["native_runtime"] == "true":
+            # A header-only native change: hosted CI builds it, this local gate compiles sources only.
+            return Gate("strict-c-compile", NOT_RUN,
+                        "no changed C source; the native_runtime surface changed, which only hosted CI "
+                        "(or a local make check) builds")
         return Gate("strict-c-compile", NOT_RUN, "no changed C source")
     compiler = os.environ.get("CC") or find_tool("gcc") or find_tool("cc")
     if compiler is None:
@@ -562,15 +573,23 @@ def publication_gate() -> tuple[Gate, Gate]:
         )
     except subprocess.TimeoutExpired:
         return policy, Gate("publication-safety", FAIL, "publish_audit timed out")
-    findings = [
-        line.strip()
-        for line in (audit.stdout + audit.stderr).splitlines()
-        if line.strip() and ": " in line and not line.strip().startswith("publication audit:")
-    ]
-    maintainer = [line for line in findings if any(f"{code}:" in line for code in MAINTAINER_SIDE_CODES)]
+    lines = [line.strip() for line in (audit.stdout + audit.stderr).splitlines() if line.strip()]
+    # Only the audit's own ``CODE: path: detail`` lines are findings; its hints (such as the
+    # stale-control fix) and summary line are not.
+    findings = [line for line in lines if AUDIT_FINDING.match(line)]
+    maintainer = [line for line in findings if line.split(":", 1)[0] in MAINTAINER_SIDE_CODES]
     contributor = [line for line in findings if line not in maintainer]
+    completed = any(line.startswith("publication audit: ") for line in lines)
+    clean = audit.returncode == 0 and any(line.startswith("publication audit: OK") for line in lines)
     if contributor:
         return policy, Gate("publication-safety", FAIL, " || ".join(contributor[:6]))
+    if not completed or (not maintainer and not clean):
+        # Killed, crashed or silent: an audit that did not report its verdict is never a pass.
+        return policy, Gate(
+            "publication-safety", FAIL,
+            f"publish_audit exited {audit.returncode} without a complete verdict: "
+            + (" | ".join(lines[-6:]) or "no output"),
+        )
     if maintainer:
         codes = sorted({line.split(":", 1)[0] for line in maintainer})
         return policy, Gate(

@@ -90,6 +90,13 @@ class TestRouting(unittest.TestCase):
 
 
 class TestGateStatusVocabulary(unittest.TestCase):
+    def test_a_header_only_native_change_names_the_hosted_build(self) -> None:
+        """The hosted classifier routes a header to native_runtime; the local NOT_RUN says so."""
+        gate = contrib_check.c_gate(["src/core/nk_example.h"])
+        self.assertEqual(gate.status, contrib_check.NOT_RUN)
+        self.assertIn("native_runtime", gate.detail)
+        self.assertIn("hosted CI", gate.detail)
+
     def test_an_untouched_surface_is_not_run_not_pass(self) -> None:
         self.assertEqual(contrib_check.c_gate(["docs/a.md"]).status, contrib_check.NOT_RUN)
         self.assertEqual(contrib_check.markdown_gate(["tools/a.py"]).status, contrib_check.NOT_RUN)
@@ -520,6 +527,22 @@ class TestPublicationGateSplit(unittest.TestCase):
     def test_a_clean_audit_passes(self) -> None:
         _policy, audit = self._run("publication audit: OK\n", audit_returncode=0)
         self.assertEqual(audit.status, contrib_check.PASS)
+
+    def test_the_stale_control_hint_does_not_turn_maintainer_side_into_a_failure(self) -> None:
+        """publish_audit prints its regen hint after a stale-control finding; the hint is not a finding."""
+        import publish_audit
+
+        _policy, audit = self._run(f"{MAINTAINER_LINE}\n{SUMMARY_LINE}\n{publish_audit.STALE_CONTROL_FIX}\n")
+        self.assertEqual(audit.status, contrib_check.MAINTAINER_SIDE, audit.detail)
+
+    def test_an_audit_without_a_complete_verdict_fails_rather_than_passes(self) -> None:
+        """A killed, crashed or silent audit with no finding line never reports a pass."""
+        for stdout, returncode in (("", 1), ("", -9), ("MemoryError\n", 1), ("", 0),
+                                   ("publication audit: FAIL (0 findings)\n", 1)):
+            with self.subTest(stdout=stdout, returncode=returncode):
+                _policy, audit = self._run(stdout, audit_returncode=returncode)
+                self.assertEqual(audit.status, contrib_check.FAIL)
+                self.assertIn(f"exited {returncode}", audit.detail)
 
     def test_policy_drift_fails_before_the_audit_runs(self) -> None:
         def fake_run(command, **kwargs):
