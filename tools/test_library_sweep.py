@@ -84,6 +84,46 @@ class LibrarySweepTests(unittest.TestCase):
         self.private_dir = self.root / "private"
         self.public_output = self.root / "public" / "aggregate.json"
 
+    def test_source_fingerprint_includes_dirty_changes_outside_its_file_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sweep_source = root / "tools" / "library_sweep.py"
+            cli_source = root / "tools" / "nk_cli.py"
+            schema_source = root / "assets" / "bringup_report.schema.json"
+            family_source = root / "tools" / "nid_corpus.json"
+            for path in (sweep_source, cli_source, schema_source, family_source):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"stable tracked source")
+
+            clean_diff = subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+            dirty_diff = subprocess.CompletedProcess(
+                [], 0, stdout=b"diff -- src/rt/hle.c\n+ changed runtime bytes\n", stderr=b""
+            )
+            with (
+                mock.patch.object(library_sweep, "ROOT", root),
+                mock.patch.object(library_sweep, "__file__", str(sweep_source)),
+                mock.patch.object(library_sweep, "NK_CLI", cli_source),
+                mock.patch.object(library_sweep, "_PUBLIC_LIBRARY_FAMILY_SOURCE", family_source),
+                mock.patch.object(library_sweep.subprocess, "run", side_effect=[clean_diff, dirty_diff]),
+            ):
+                clean_fingerprint = library_sweep._source_fingerprint()
+                dirty_fingerprint = library_sweep._source_fingerprint()
+
+        self.assertNotEqual(clean_fingerprint, dirty_fingerprint)
+
+    def test_source_keys_preserve_case_on_posix(self) -> None:
+        iso_root = self.root / "case-sensitive-isos"
+        upper = iso_root / "Game.iso"
+        lower = iso_root / "game.iso"
+
+        with mock.patch.object(library_sweep.os, "name", "posix"):
+            upper_key = library_sweep._source_key(upper, iso_root)
+            lower_key = library_sweep._source_key(lower, iso_root)
+
+        self.assertEqual(upper_key, "Game.iso")
+        self.assertEqual(lower_key, "game.iso")
+        self.assertNotEqual(upper_key, lower_key)
+
     def _run_kwargs(self) -> dict:
         return {
             "source_commit": SOURCE_COMMIT,
@@ -197,6 +237,37 @@ class LibrarySweepTests(unittest.TestCase):
         self.assertTrue(outcome.timed_out)
         self.assertEqual(observed_timeouts, [7])
         terminate.assert_called_once_with(process)
+
+    def test_posix_route_uses_a_new_session_and_terminates_its_process_group(self) -> None:
+        work_dir = self.private_dir / "posix-group-timeout-work"
+        work_dir.mkdir(parents=True)
+        iso = _write_iso(self.iso_dir, "posix-group-timeout.iso", "UCUS99992", "Timeout Sentinel")
+
+        class TimedOutProcess:
+            pid = 9004
+            returncode = None
+
+            def communicate(self, timeout=None):
+                raise subprocess.TimeoutExpired("nk_cli bringup", timeout)
+
+        process = TimedOutProcess()
+        with (
+            mock.patch.object(library_sweep.os, "name", "posix"),
+            mock.patch.object(library_sweep.subprocess, "Popen", return_value=process) as popen,
+            mock.patch.object(library_sweep, "_terminate_process_tree") as terminate,
+        ):
+            outcome = library_sweep._run_bringup(
+                iso,
+                work_dir,
+                work_dir / "bringup.json",
+                work_dir / "sweep-imports.json",
+                7,
+                7,
+            )
+
+        self.assertTrue(outcome.timed_out)
+        self.assertIs(popen.call_args.kwargs.get("start_new_session"), True)
+        terminate.assert_called_once_with(process, process_group=True)
 
     def test_posix_timeout_terminates_the_entire_process_group(self) -> None:
         process = mock.Mock()

@@ -42,7 +42,7 @@ def manifest(titles: dict[str, dict], *, commit: str | None = OLD, launch_timeou
     for index, (key, fields) in enumerate(titles.items()):
         row = {"source_key": key, "source": key, "disc_id": f"TEST{index:05d}", "title": f"Title {index}",
                "wall_seconds": 600.0}
-        if commit is not None and fields.get("outcome") not in ("PENDING", "DUPLICATE"):
+        if commit is not None and fields.get("outcome") not in ("PENDING", "DUPLICATE", "REPLACED"):
             row["run_settings"] = {"source_commit": commit, "launch_timeout_seconds": launch_timeout}
         row.update(fields)
         records.append(row)
@@ -135,7 +135,7 @@ class LadderTests(unittest.TestCase):
         self.assertEqual(self.place(timed_out)["end"], "running")  # type: ignore[index]
 
     def test_titles_this_run_did_not_end_are_not_on_the_ladder(self) -> None:
-        for outcome in ("PENDING", "RUNNING", "DUPLICATE"):
+        for outcome in ("PENDING", "RUNNING", "DUPLICATE", "REPLACED"):
             self.assertIsNone(self.place({"outcome": outcome}))
 
 

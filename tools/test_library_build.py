@@ -160,6 +160,36 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertIn("| compile | COMPILE_FAILED | 1 |", markdown)
         self.assertIn("`sceUsb:sceUsbDeactivate`", markdown)
 
+    def test_summarize_report_treats_null_import_lists_as_empty(self) -> None:
+        report = {
+            "stages": {
+                "prepare_import": {"status": "PASS"},
+                "build_package": {"status": "PASS"},
+                "launch": {"status": "PASS"},
+            },
+            "unsupported_imports": None,
+            "runtime_imports": None,
+            "counts": {},
+            "presentation": {},
+        }
+
+        summary = library_build.summarize_report(report)
+
+        self.assertEqual(summary["unsupported_imports"], [])
+        self.assertEqual(summary["launch"]["runtime_imports"], [])
+
+    def test_post_bringup_package_measurement_error_is_recorded(self) -> None:
+        self.disc("ok-test70090.iso", "TEST70090")
+        with mock.patch.object(
+            library_build, "_directory_bytes",
+            side_effect=PermissionError("synthetic package walk failure"),
+        ):
+            result = self.build(jobs=1).run()
+
+        record = self.by_source(result)["ok-test70090.iso"]
+        self.assertEqual(record["outcome"], "NO_REPORT")
+        self.assertIn("PermissionError", record["error"])
+
     def test_only_builds_the_named_discs_and_keeps_every_other_record(self) -> None:
         self.disc("ok-test70011.iso", "TEST70011")
         self.disc("Sub/ok-test70012.iso", "TEST70012")
@@ -186,6 +216,25 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual(library_build.read_only_list(listing),
                          frozenset({"sub/ok-test70015.iso", "ok-test70016.iso"}))
 
+    def test_posix_source_keys_and_only_lists_preserve_case_distinctions(self) -> None:
+        root = self.root / "case-sensitive"
+        first = root / "Games" / "foo.iso"
+        second = root / "games" / "foo.iso"
+        listing = self.root / "only-case-sensitive.txt"
+        separator = chr(92)
+        listing.write_text(
+            f"Games{separator}foo.iso\ngames{separator}foo.iso\n", encoding="utf-8"
+        )
+
+        with mock.patch.object(library_build.os, "name", "posix"):
+            first_key = library_build._source_key(first, root)
+            second_key = library_build._source_key(second, root)
+            only_keys = library_build.read_only_list(listing)
+
+        self.assertEqual(first_key, "Games/foo.iso")
+        self.assertEqual(second_key, "games/foo.iso")
+        self.assertEqual(only_keys, frozenset({"Games/foo.iso", "games/foo.iso"}))
+
     def test_a_disc_id_seen_before_is_a_duplicate_and_builds_once(self) -> None:
         self.disc("a/ok-test70010.iso", "TEST70010")
         self.disc("b/ok-test70010.iso", "TEST70010")
@@ -204,7 +253,13 @@ class LibraryBuildTests(unittest.TestCase):
         create_test_iso(translated, disc_id="TEST70011", title="Title TEST70011 [T-En]")
         result = self.build().run()
         records = self.by_source(result)
-        self.assertEqual([records[key]["outcome"] for key in sorted(records)], ["BUILT", "BUILT"])
+        first = records["a/ok-test70011.iso"]
+        latest = records["b/ok-test70011.iso"]
+        self.assertEqual(first["outcome"], "REPLACED")
+        self.assertEqual(first["replaced_by"], latest["source"])
+        self.assertIsNone(first["package_bytes"])
+        self.assertEqual(latest["outcome"], "BUILT")
+        self.assertIsNotNone(latest["package_bytes"])
         self.assertEqual(sorted(self.calls()), ["ok-test70011", "ok-test70011"])
         hashes = {records[key]["verification"]["sha1"] for key in records}
         self.assertEqual(len(hashes), 2)
@@ -219,11 +274,15 @@ class LibraryBuildTests(unittest.TestCase):
         self.disc("c/ok-test70017.iso", "TEST70017")
         result = self.build(jobs=2).run()
         records = self.by_source(result)
-        self.assertEqual([records[key]["outcome"] for key in sorted(records)], ["BUILT"] * 3)
+        self.assertEqual(records["a/busy-test70016.iso"]["outcome"], "REPLACED")
+        self.assertEqual(records["a/busy-test70016.iso"]["replaced_by"],
+                         "b/busy-test70016.iso")
+        self.assertEqual(records["b/busy-test70016.iso"]["outcome"], "BUILT")
+        self.assertEqual(records["c/ok-test70017.iso"]["outcome"], "BUILT")
         # No overlap was logged: the second image started only after the first one ended.
         self.assertEqual(sorted(self.calls()), ["busy-test70016", "busy-test70016", "ok-test70017"])
 
-    def test_two_discs_that_could_not_be_hashed_both_build(self) -> None:
+    def test_two_discs_that_could_not_be_hashed_still_build_sequentially(self) -> None:
         self.disc("a/ok-test70015.iso", "TEST70015")
         self.disc("b/ok-test70015.iso", "TEST70015")
 
@@ -232,7 +291,9 @@ class LibraryBuildTests(unittest.TestCase):
 
         result = self.build(hash_disc=unreadable).run()
         records = self.by_source(result)
-        self.assertEqual([records[key]["outcome"] for key in sorted(records)], ["BUILT", "BUILT"])
+        self.assertEqual(records["a/ok-test70015.iso"]["outcome"], "REPLACED")
+        self.assertEqual(records["a/ok-test70015.iso"]["replaced_by"], "b/ok-test70015.iso")
+        self.assertEqual(records["b/ok-test70015.iso"]["outcome"], "BUILT")
         self.assertEqual(records["a/ok-test70015.iso"]["verification"],
                          {"error": "DISC_IMAGE_READ_FAILED"})
 
@@ -375,12 +436,30 @@ class LibraryBuildTests(unittest.TestCase):
 
         with (
             mock.patch.object(library_build.os, "name", "posix"),
-            mock.patch.object(library_build, "_preexec", return_value=None),
             mock.patch.object(library_build.subprocess, "Popen", return_value=process) as popen,
         ):
             self.build(jobs=1).run()
 
         self.assertIs(popen.call_args.kwargs.get("start_new_session"), True)
+
+    def test_posix_priority_is_applied_after_spawn_without_preexec(self) -> None:
+        self.disc("ok-test70033.iso", "TEST70033")
+        process = mock.Mock()
+        process.pid = 70033
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(library_build.os, "name", "posix"),
+            mock.patch.object(library_build.os, "PRIO_PROCESS", 0, create=True),
+            mock.patch.object(library_build.os, "getpriority", return_value=0, create=True) as getpriority,
+            mock.patch.object(library_build.os, "setpriority", create=True) as setpriority,
+            mock.patch.object(library_build.subprocess, "Popen", return_value=process) as popen,
+        ):
+            self.build(jobs=1, priority="below").run()
+
+        self.assertIsNone(popen.call_args.kwargs.get("preexec_fn"))
+        getpriority.assert_called_once_with(0, process.pid)
+        setpriority.assert_called_once_with(0, process.pid, 10)
 
     def test_stop_ends_the_run_and_pause_holds_new_titles(self) -> None:
         for index in range(3):

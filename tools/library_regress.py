@@ -101,7 +101,7 @@ ENVIRONMENT_CLASSES = frozenset({
 })
 CRASH_CLASSES = frozenset({"NATIVE_RUNTIME_CRASH", "LAUNCH_FAILED"})
 # Titles that have not ended in this run (still to build, building, or a copy of another disc).
-UNTESTED_OUTCOMES = frozenset({"PENDING", "RUNNING", "DUPLICATE"})
+UNTESTED_OUTCOMES = frozenset({"PENDING", "RUNNING", "DUPLICATE", "REPLACED"})
 
 
 def _utc_now() -> str:

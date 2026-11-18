@@ -298,11 +298,22 @@ def _source_fingerprint() -> str:
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
+    diff = subprocess.run(
+        ["git", "diff", "--binary", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
+    digest.update(b"working-tree-diff\0")
+    digest.update(diff.stdout)
+    digest.update(b"\0")
     return digest.hexdigest()
 
 
 def _source_key(iso_path: Path, iso_root: Path) -> str:
-    return iso_path.relative_to(iso_root).as_posix().casefold()
+    relative = iso_path.relative_to(iso_root).as_posix()
+    return relative.casefold() if os.name == "nt" else relative
 
 
 def _iso_files(iso_root: Path) -> list[Path]:
@@ -311,7 +322,7 @@ def _iso_files(iso_root: Path) -> list[Path]:
     return sorted(
         (path for path in iso_root.rglob("*")
          if path.is_file() and path.suffix.casefold() == ".iso"),
-        key=lambda path: path.relative_to(iso_root).as_posix().casefold(),
+        key=lambda path: _source_key(path, iso_root),
     )
 
 
@@ -852,17 +863,25 @@ def _run_bringup(
     }
     if os.name == "nt":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
     process: subprocess.Popen[str] | None = None
     try:
         process = subprocess.Popen(command, **kwargs)
         process.communicate(timeout=time_budget_seconds)
     except KeyboardInterrupt:
         if process is not None:
-            _terminate_process_tree(process)
+            if os.name == "nt":
+                _terminate_process_tree(process)
+            else:
+                _terminate_process_tree(process, process_group=True)
         raise
     except subprocess.TimeoutExpired:
         assert process is not None  # only communicate() raises TimeoutExpired
-        _terminate_process_tree(process)
+        if os.name == "nt":
+            _terminate_process_tree(process)
+        else:
+            _terminate_process_tree(process, process_group=True)
         progress = _read_bringup_progress(progress_path)
         active_stage, active_elapsed_ms, durations = _progress_stage_details(progress)
         return RouteOutcome(
