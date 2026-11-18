@@ -99,7 +99,7 @@ We aim to respond promptly and will remove material where appropriate.
   `47d794151b2b64f6aba60304e6480f4f5a2bc24b`, with the codecs it carries: miniz 3.1.2
   (`MIT`), the Zstandard 1.5.7 single-file decompressor (`BSD-3-Clause`, elected from
   upstream's `BSD-3-Clause OR GPL-2.0-only`), the LZMA SDK decoder (public domain) and
-  dr_flac v0.13.4 (the Unlicense, elected from its Unlicense or `MIT-0` choice). Every file
+  the dr_flac v0.13.4 development snapshot libchdr carries at that pin (the Unlicense, elected from its Unlicense or `MIT-0` choice). Every file
   keeps its upstream bytes apart from LF line endings (recorded as LOCAL DELTA); the
   licence texts and the pinned manifest are under `third_party/libchdr/`. It is compiled into the native player, which uses it only
   to expand a CHD disc image into a plain `.iso` when the image is added; it is not in the
