@@ -243,7 +243,8 @@ class BuildSystemParityTests(unittest.TestCase):
             r"(?m)^([A-Za-z0-9_.%/+?-]+):",
             self.makefile_text,
         ))
-        defined_targets.difference_update({".PHONY", ".SECONDARY"})
+        # GNU make special targets are directives, not targets a user can run.
+        defined_targets.difference_update({".PHONY", ".SECONDARY", ".DELETE_ON_ERROR"})
         internal = set(
             self.makefile_text.split("INTERNAL_TARGETS :=", 1)[1]
             .splitlines()[0].split()

@@ -21,7 +21,8 @@ This page covers building and running the Android app from source. The plan it b
   process ends when the run ends, as a desktop child's does. The guest sees no difference.
 - **A title's runtime library** is the package's generated C compiled with the runtime for the
   device's ABI (`nk_add_title_runtime` in `CMakeLists.txt`). Packages are built on a PC by the
-  ordinary route; the APK contains no C compiler, Make or CPython
+  ordinary route; the default APK contains no C compiler, Make or CPython, while
+  `-Pnk.toolchain` bundles all three for arm64-v8a and nothing runs them yet
   ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 - **A title built by the package route** is the same library, linked by Make with
   `NK_TARGET=android` ([below](#a-title-library-from-the-package-route)). `TitleActivity` loads a
@@ -105,8 +106,9 @@ id> --target android` (the default when nk_cli itself runs on Android). The pack
 A build on the phone also needs a C compiler, GNU Make and CPython in the APK. Android lets an
 app run only the programs it ships in its native library folder, so those would ship there as
 `lib*.so` files. `nk_platform_spawn_tool` starts only programs in that folder, and on Android the
-package builder's Python is the APK's `libnk_python.so` there. The APK bundles none of the three
-([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
+package builder's Python is the APK's `libnk_python.so` there. The default APK bundles none of
+the three; `-Pnk.toolchain` bundles clang, lld, Make and CPython for arm64-v8a, and nothing runs
+them yet ([#360](https://github.com/Jstar269/nakagawa-recomp/issues/360)).
 
 ## Run in the emulator
 
@@ -335,7 +337,7 @@ relative path against that folder, so `SDL_GetBasePath()` (`./` on Android) find
 | Launcher library | The launcher does not list bundled titles; they start from `adb` (above). |
 | Disc import | Picking the user's own ISO through the system document picker (SAF) is not wired. |
 | Packages from a PC | A package can be built for Android on a PC (`NK_TARGET=android`), and `TitleActivity` loads a built library from the files folder. Moving the package to the phone, and the launcher starting it, are not wired. |
-| Building on the phone | The package route and its process rules are in place. The compiler, Make and Python it needs are not in the APK. |
+| Building on the phone | The package route and its process rules are in place. The compiler, Make and Python it needs are not in the default APK; `-Pnk.toolchain` bundles them for arm64-v8a, and nothing runs them yet. |
 | Lifecycle | Measured in the emulator: with the title in the background the guest keeps running and every present fails (`swapchain acquire failed`), because the presenter does not recreate its Vulkan surface and swapchain after Android destroys the window surface. Pausing the guest in the background and recreating the swapchain on return are not done. |
 | Input | Touch controls are not built; SDL gamepads reach the runtime's ordinary input path. |
 | Video | The FFmpeg H.264 subset builds for Android; it has not been run on a device. |

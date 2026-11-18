@@ -128,14 +128,16 @@ ahead of time without a load address and laid out only when the game loads it
 - **Named boundaries.** A module the build did not translate, a staged file that is
   not the translated one, a module codegen could not translate (for example one
   with GPREL16 relocations), a second live instance of one translation, and a load
-  option asking for another partition or High placement fail closed with
-  `SCE_KERNEL_ERROR_NOTIMP` and a `GUEST_MODULE_BOUNDARY` line.
+  option asking for another partition fail closed with `SCE_KERNEL_ERROR_NOTIMP` and
+  a `GUEST_MODULE_BOUNDARY` line. A relocatable module with `PSP_SMEM_High`
+  placement is placed through `alloc_block_high`, and is refused only when the
+  partition base lies below the runtime stacks.
 
 Remaining work on this path: `module_start` runs as a nested call on the caller's
 thread rather than in its own thread, module entry return values have no broader
 start-state policy beyond the stop status output, one translation binds one live
-image, `PSP_SMEM_High` and fixed `PSP_SMEM_Addr` module placement are not modelled,
-and the runtime's thread stacks and nested-call frames occupy a fixed region near
+image, fixed `PSP_SMEM_Addr` module placement is not modelled, and the runtime's
+thread stacks and nested-call frames occupy a fixed region near
 the top of user memory instead of partition blocks, so the allocator neither
 counts nor avoids them. Package-local `sceKernelLoadExec` is limited to required,
 runtime-placed programs declared by the active title manifest; VSH and other launch
@@ -210,11 +212,16 @@ end to end by source-owned tests:
   per-track compressed-access-unit queues with backpressure, bounded parsing, and fail-closed
   malformed-input handling. Its H.264 boundary accepts both Annex-B start-code forms:
   `00 00 01` and `00 00 00 01` (the latter keeps its leading zero in the first access unit).
-- The `scePsmfPlayer*` handlers are host HLE: they own the guest control block and the
-  output contract, and drive that producer plus the host codecs (Media Foundation H.264 for
-  pictures, the project's ATRAC3plus decoder import for audio). A getter returns success only for
-  output a decoder actually produced; a compressed access unit is never presented as a decoded
-  frame or PCM block, and a track that runs dry reports `NO_MORE_DATA` rather than silence.
+- `scePsmfPlayer` is a guest-owned library: a title that ships and translates
+  `libpsmfplayer.prx` runs it as guest code through `guest_module_owns_library` in
+  `src/rt/hle_kernel_module.c` (#1782). The host `scePsmfPlayer*` handlers remain only for
+  titles that do not stage and translate the module and for the public synthetic fixtures
+  (#286); there they own the guest control block and the output contract, and drive that
+  producer plus the host codecs (Media
+  Foundation H.264 for pictures, the project's ATRAC3plus decoder import for audio). A getter
+  returns success only for output a decoder actually produced; a compressed access unit is never
+  presented as a decoded frame or PCM block, and a track that runs dry reports `NO_MORE_DATA`
+  rather than silence.
 - `sceMpeg` is a guest-owned library: a title that ships and translates `mpeg.prx` runs it as guest
   code once it starts (`guest_module_owns_library` in `src/rt/hle_kernel_module.c`), over the
   Media Engine floor in `src/rt/hle_videocodec.c` (#286). That floor's context words are JPCSP's,

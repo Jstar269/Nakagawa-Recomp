@@ -317,11 +317,12 @@ ifneq ($(strip $(SOURCE_DATE_EPOCH)),)
 # Checked inside Make, so no operator value reaches a command interpreter as syntax and
 # no environment round trip is needed: GNU Make before 4.4 (the Linux runners' 4.3) does
 # not hand exported variables to $(shell), which refused a valid value given on the make
-# command line. Fail closed on anything but one run of ASCII digits: flight_recorder.c
-# emits it as a JSON number. It stays exported for the recipes that read it.
+# command line. Fail closed on anything but one run of ASCII digits with no leading zero
+# (0 itself is allowed): flight_recorder.c emits it as a JSON number, and JSON numbers
+# have no leading zeros. It stays exported for the recipes that read it.
 export SOURCE_DATE_EPOCH
 SR_SOURCE_DATE_EPOCH := $(strip $(SOURCE_DATE_EPOCH))
-ifneq ($(words $(SR_SOURCE_DATE_EPOCH))$(subst 0,,$(subst 1,,$(subst 2,,$(subst 3,,$(subst 4,,$(subst 5,,$(subst 6,,$(subst 7,,$(subst 8,,$(subst 9,,$(SR_SOURCE_DATE_EPOCH))))))))))),1)
+ifneq ($(words $(SR_SOURCE_DATE_EPOCH))$(subst 0,,$(subst 1,,$(subst 2,,$(subst 3,,$(subst 4,,$(subst 5,,$(subst 6,,$(subst 7,,$(subst 8,,$(subst 9,,$(SR_SOURCE_DATE_EPOCH)))))))))))$(filter-out 0,$(filter 0%,$(SR_SOURCE_DATE_EPOCH))),1)
 $(error SOURCE_DATE_EPOCH must be a decimal Unix timestamp (reproducible-builds.org), got "$(SOURCE_DATE_EPOCH)")
 endif
 FLIGHT_IDENTITY_DEFS += -DSR_SOURCE_DATE_EPOCH=$(SR_SOURCE_DATE_EPOCH)

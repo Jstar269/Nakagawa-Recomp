@@ -383,6 +383,9 @@ function Get-ProcessTreeIds {
     <#
         $RootPid plus every transitive child from the Win32_Process parent/child graph.
         Where Get-CimInstance is unavailable (POSIX hosts) only the root PID is returned.
+        Windows keeps a ParentProcessId after the parent exits, so a process is taken as a
+        child only when it started no earlier than its parent: an older one names an earlier
+        holder of the parent's PID. A process whose start time is unknown is left out.
     #>
     param([int]$RootPid)
     $ids = New-Object System.Collections.Generic.List[int]
@@ -390,17 +393,23 @@ function Get-ProcessTreeIds {
     $cim = Get-Command Get-CimInstance -ErrorAction SilentlyContinue
     $all = if ($cim) {
         @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Select-Object ProcessId, ParentProcessId)
+            Select-Object ProcessId, ParentProcessId, CreationDate)
     } else {
         @()
     }
+    $created = @{}
+    foreach ($p in $all) { $created[[int]$p.ProcessId] = $p.CreationDate }
     $queue = New-Object System.Collections.Generic.Queue[int]
     $ids.Add($RootPid)
     $queue.Enqueue($RootPid)
     while ($queue.Count -gt 0) {
         $cur = $queue.Dequeue()
+        $curCreated = $created[$cur]
         foreach ($p in $all) {
             if (([int]$p.ParentProcessId -eq $cur) -and (-not $ids.Contains([int]$p.ProcessId))) {
+                if ($null -eq $curCreated -or $null -eq $p.CreationDate -or $p.CreationDate -lt $curCreated) {
+                    continue
+                }
                 $ids.Add([int]$p.ProcessId)
                 $queue.Enqueue([int]$p.ProcessId)
             }
@@ -414,7 +423,7 @@ function Invoke-StaleBuildCleanup {
         Identity-verified stale build cleanup for one ledger file. Kills only recorded
         roots whose identity still fully matches (and their compiler children); leaves
         anything unverifiable untouched. Rewrites the ledger with the kept records.
-        -DryRun reports what would be killed without killing.
+        -DryRun reports what would be killed without killing, and keeps those records.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$PidFile,
@@ -441,6 +450,8 @@ function Invoke-StaleBuildCleanup {
             "valid" {
                 if ($DryRun) {
                     Write-Host "[dry-run] would reap verified build tree root $($rec.pid)" -ForegroundColor Yellow
+                    # Still running and not reaped: a later real cleanup needs its record.
+                    $kept.Add($rec)
                 } else {
                     foreach ($id in (Get-ProcessTreeIds -RootPid ([int]$rec.pid))) {
                         $tp = Get-Process -Id $id -ErrorAction SilentlyContinue
@@ -547,7 +558,14 @@ function Wait-ProcessOrKill {
         $Process.WaitForExit()
     }
 
-    try { $Process.WaitForExit() } catch { }
+    # The unbounded wait drains redirected output once the process has gone. After the
+    # deadline it runs only when the process did exit: a kill that was refused, or one still
+    # pending in a driver call, must not hold the manager past its backstop.
+    $exited = $false
+    try { $exited = $Process.HasExited } catch { }
+    if (-not $timedOut -or $exited) {
+        try { $Process.WaitForExit() } catch { }
+    }
     $sw.Stop()
 
     $exitCode = $null
@@ -682,8 +700,11 @@ function Compare-SaveBaseInventory {
     $actual = @{}
     foreach ($e in (New-SaveBaseInventory -Root $Root)) {
         if ($IncludesUnmanaged) {
-            $top = ($e.rel -split '[\\/]')[0]
-            if (Test-SaveBaseUnmanagedName -Name $top) { continue }
+            $parts = @($e.rel -split '[\\/]')
+            # Only top-level save folders are captured and swapped, so a loose file beside
+            # them (desktop.ini, Thumbs.db) is outside the managed set, like GAMEDATA.
+            if ($parts.Count -eq 1) { continue }
+            if (Test-SaveBaseUnmanagedName -Name $parts[0]) { continue }
         }
         $actual[$e.rel] = "$($e.size)|$($e.sha256)"
     }
@@ -808,6 +829,13 @@ function Sync-SaveBase {
                     Move-Item -LiteralPath $d.FullName -Destination $saveCanon -ErrorAction Stop
                     $movedStage += $d.FullName
                 }
+                # Verified inside the swap's try, so a mismatch takes the restored folders out
+                # and moves the live ones back by name, as a failed swap does.
+                if ($Failpoint -eq "verify") { throw "injected post-swap verification failure (test seam)" }
+                $liveDiff = @(Compare-SaveBaseInventory -Root $saveCanon -Manifest $manifest -IncludesUnmanaged)
+                if ($liveDiff.Count -gt 0) {
+                    throw "post-swap verification failed ($($liveDiff.Count) difference(s)); the live save was put back"
+                }
             } catch {
                 foreach ($m in $movedStage) {
                     $name = [IO.Path]::GetFileName($m)
@@ -823,11 +851,6 @@ function Sync-SaveBase {
                 throw
             }
 
-            if ($Failpoint -eq "verify") { throw "injected post-swap verification failure (test seam)" }
-            $liveDiff = @(Compare-SaveBaseInventory -Root $saveCanon -Manifest $manifest -IncludesUnmanaged)
-            if ($liveDiff.Count -gt 0) {
-                throw "post-swap verification failed ($($liveDiff.Count) difference(s)); live save left in rollback"
-            }
             [void](Remove-SafeDirectory -Path $stage -Root $rootCanon)
             [void](Remove-SafeDirectory -Path $rollback -Root $rootCanon)
             Write-Host "[*] Save state restored from baseline ($($manifest.file_count) file(s)): $BasePath" -ForegroundColor Cyan
@@ -841,6 +864,10 @@ function Sync-SaveBase {
                         Move-Item -LiteralPath $d.FullName -Destination $saveCanon -ErrorAction SilentlyContinue
                     }
                 }
+                # Emptied, the shelter holds nothing to recover; left behind it would refuse
+                # every later restore as an interrupted one. A non-empty one stays for that:
+                # a non-recursive delete refuses a directory that still holds anything.
+                try { [IO.Directory]::Delete($rollback, $false) } catch { }
             }
             throw
         }
@@ -870,11 +897,18 @@ function Read-RouteOutcome {
         }
         if ($line -match '^ROUTE_FAIL: (.+)$') {
             $outcome.Kind = "failed"
-            $outcome.FailReason = $Matches[1].Trim()
+            # A refused route file prints its ROUTE_PARSE line (path, line and cause) before this
+            # generic one; keep that detail beside it.
+            $failReason = $Matches[1].Trim()
+            $outcome.FailReason = if ($outcome.FailReason) { "$failReason ($($outcome.FailReason))" } else { $failReason }
             continue
         }
-        if ($line -match '^ROUTE_PARSE: (.+)$' -and -not $outcome.FailReason) {
-            $outcome.FailReason = "parse: $($Matches[1].Trim())"
+        if ($line -match '^ROUTE_PARSE: (.+)$') {
+            # Every ROUTE_PARSE line refuses the route (src/rt/hle_route.c). A route file the
+            # runtime could not open prints only this line and the run goes on with no route,
+            # so it must fail here rather than read as an unqualified pad script.
+            $outcome.Kind = "failed"
+            if (-not $outcome.FailReason) { $outcome.FailReason = "parse: $($Matches[1].Trim())" }
             continue
         }
         if ($line -match '^ROUTE_OK:') { if ($outcome.Kind -ne "failed") { $outcome.Kind = "ok" }; continue }

@@ -599,10 +599,15 @@ class NkCliProgressTests(unittest.TestCase):
             ]
             proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
             self.assertNotEqual(proc.returncode, 0)
-            # Output should not contain JSON objects
-            for line in proc.stdout.splitlines():
-                with self.assertRaises(json.JSONDecodeError):
-                    json.loads(line)
+            # The refusal is human text on stderr; an empty stream would pass the JSON check below.
+            self.assertIn("Package build refused", proc.stderr)
+            # Neither stream carries a progress JSON object.
+            for line in proc.stdout.splitlines() + proc.stderr.splitlines():
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                self.assertNotIsInstance(parsed, dict, f"JSON object without --progress-json: {line!r}")
 
     def test_progress_json_reports_boundary_on_encrypted_iso(self) -> None:
         """Verify --progress-json reports the fail-closed boundary and issue #295 for encrypted ISO."""

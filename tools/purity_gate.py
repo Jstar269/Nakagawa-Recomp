@@ -8,7 +8,11 @@ The runtime under ``src/rt/`` is meant to be title-independent: a fix for one ga
 in the generic code path or in that game's title config, never as a hard-coded guest
 address in the core.  This gate fails on any hexadecimal literal in ``src/rt/`` C code
 whose value lies in PSP user RAM (``0x08800000``-``0x09ffffff``, the user partition a game
-loads into), outside the places where such a value is expected:
+loads into), outside the places where such a value is expected.  In C code (``.c`` / ``.h``)
+the uncached (``0x4``), kernel (``0x8``) and kernel-uncached (``0xA``) segment mirrors of that
+range count too: ``0x48A12340`` and ``0x88A12340`` name the same byte as ``0x08A12340``.
+Embedded SPIR-V blobs (``.inc``) are checked against the cached range only, since their words
+are shader binary and not C code that can address guest memory.  The exempt places are:
 
 * title-config files (``TITLE_CONFIG_FILES``), which is where per-title data belongs;
 * native self-tests (``*_selftest.c`` / ``*_selftest.h``), whose guest addresses are
@@ -42,6 +46,10 @@ SCAN_DIR = "src/rt"
 SCAN_SUFFIXES = (".c", ".h", ".inc")
 USER_RAM_FIRST = 0x08800000
 USER_RAM_LAST = 0x09FFFFFF
+# Segment nibbles whose low 29 bits view the same physical RAM: cached user, uncached
+# user, cached kernel and uncached kernel.
+MIRROR_SEGMENTS = (0x0, 0x4, 0x8, 0xA)
+MIRROR_SUFFIXES = (".c", ".h")
 
 TITLE_CONFIG_FILES = ("src/rt/title_config.c", "src/rt/title_config.h")
 SELFTEST_PATTERNS = ("src/rt/*_selftest.c", "src/rt/*_selftest.h")
@@ -94,6 +102,35 @@ ALLOWLIST: tuple[Allowed, ...] = (
     Allowed("src/rt/gpu_sdl3vk/psp_tnl_vert.inc", 0x09E6809E, 1,
             "the GE_POW_EL word above as a SPIR-V constant in the embedded T&L shader, "
             "which carries the same ge_powf tables as ge.c"),
+    # Segment-mirror values, reviewed 2026-11-18 when the gate began reading the
+    # uncached and kernel mirrors of user RAM.  None is an address.
+    Allowed("src/rt/ge.c", 0xA8E83F58, 1,
+            "GE_POW_R word: 1/m rounded up for one of the 92 mantissa intervals of "
+            "ge_powf's log2, a number, not an address"),
+    Allowed("src/rt/ge.c", 0x89AE408A, 1,
+            "GE_POW_R word: 1/m rounded up for one of the 92 mantissa intervals of "
+            "ge_powf's log2, a number, not an address"),
+    Allowed("src/rt/ge.c", 0x88888889, 1,
+            "GE_POW_R word: 1/m rounded up for one of the 92 mantissa intervals of "
+            "ge_powf's log2, a number, not an address"),
+    Allowed("src/rt/ge.c", 0x88980E80, 1,
+            "GE_POW_EH word: the high half of 2^(j/64) in Q63, a number of ge_powf's "
+            "exponent table, not an address"),
+    Allowed("src/rt/ge.c", 0xA9A15AB4, 1,
+            "GE_POW_EH word: the high half of 2^(j/64) in Q63, a number of ge_powf's "
+            "exponent table, not an address"),
+    Allowed("src/rt/ge.c", 0x496EFD9A, 1,
+            "GE_POW_EL word: the low half of 2^(j/64) in Q63, a number of ge_powf's "
+            "exponent table, not an address"),
+    Allowed("src/rt/ge.c", 0xA93ED337, 1,
+            "GE_POW_EL word: the low half of 2^(j/64) in Q63, a number of ge_powf's "
+            "exponent table, not an address"),
+    Allowed("src/rt/ge.c", 0xA9112489, 1,
+            "GE_POW_EL word: the low half of 2^(j/64) in Q63, a number of ge_powf's "
+            "exponent table, not an address"),
+    Allowed("src/rt/h264_mf.c", 0x48EBA18E, 1,
+            "first field of the Media Foundation MF_MT_MAJOR_TYPE GUID, a host API "
+            "identifier, not a guest address"),
 )
 
 _HEX = re.compile(r"\b0[xX]([0-9a-fA-F]+)[uUlL]*\b")
@@ -142,15 +179,25 @@ def strip_comments_and_strings(source: str) -> str:
     return "".join(out)
 
 
-def user_ram_literals(source: str) -> list[tuple[int, int, str]]:
-    """(line, value, original line) for each user-RAM hex literal in code."""
+def in_user_ram(value: int, mirrors: bool = True) -> bool:
+    """Whether ``value`` names a byte of PSP user RAM, through a segment mirror if ``mirrors``."""
+    if mirrors and value <= 0xFFFFFFFF and (value >> 28) in MIRROR_SEGMENTS:
+        value &= 0x1FFFFFFF
+    return USER_RAM_FIRST <= value <= USER_RAM_LAST
+
+
+def user_ram_literals(source: str, mirrors: bool = True) -> list[tuple[int, int, str]]:
+    """(line, value, original line) for each user-RAM hex literal in code.
+
+    ``value`` is the literal as written, so an allowlist entry names the exact spelling.
+    """
     code_lines = strip_comments_and_strings(source).split("\n")
     raw_lines = source.split("\n")
     found = []
     for number, line in enumerate(code_lines, start=1):
         for match in _HEX.finditer(line):
             value = int(match.group(1), 16)
-            if USER_RAM_FIRST <= value <= USER_RAM_LAST:
+            if in_user_ram(value, mirrors):
                 found.append((number, value, raw_lines[number - 1]))
     return found
 
@@ -179,7 +226,7 @@ def scan(root: Path, allowlist: tuple[Allowed, ...] = ALLOWLIST) -> list[str]:
         if _exempt(rel):
             continue
         source = file.read_text(encoding="utf-8", errors="replace")
-        for line, value, text in user_ram_literals(source):
+        for line, value, text in user_ram_literals(source, file.suffix in MIRROR_SUFFIXES):
             if value in nids:
                 continue
             findings.append(Finding(rel, line, value, text))

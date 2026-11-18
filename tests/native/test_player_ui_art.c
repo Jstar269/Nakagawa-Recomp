@@ -150,6 +150,29 @@ static int test_art_slots_and_shutdown(void) {
     return 1;
 }
 
+/* While a read runs or one waits to start, the host loop wakes about once a
+   frame to collect it and start the next disc's read; idle, it sleeps the full
+   wait (audit 2026-11-17). */
+static int test_art_wakes_the_loop_while_busy(void) {
+    PlayerUiArt *art = player_ui_art_create(fake_reader);
+    const NkUiImage *icon = NULL;
+    CHECK(art != NULL, "create the loader");
+    CHECK(player_ui_art_wait_ms(NULL, 50u) == 50u, "no loader: the idle wait");
+    CHECK(player_ui_art_wait_ms(art, 50u) == 50u, "nothing wanted: the idle wait");
+    player_ui_art_get(art, "good", false, &icon, NULL);
+    CHECK(player_ui_art_wait_ms(art, 50u) == PLAYER_UI_ART_POLL_MS,
+          "a read waiting to start wakes the loop on the next frame");
+    CHECK(player_ui_art_wait_ms(art, 5u) == 5u, "never past a shorter wait");
+    player_ui_art_get(art, "slow", false, &icon, NULL);
+    player_ui_art_pump(art);
+    CHECK(player_ui_art_wait_ms(art, 50u) == PLAYER_UI_ART_POLL_MS,
+          "a running read wakes the loop on the next frame");
+    CHECK(settle(art), "the reads finish");
+    CHECK(player_ui_art_wait_ms(art, 50u) == 50u, "settled: the idle wait again");
+    player_ui_art_destroy(art);
+    return 1;
+}
+
 static int test_sounds(void) {
     PlayerUiSounds *sounds = player_ui_sounds_create();
     int i;
@@ -246,6 +269,7 @@ int main(void) {
     SDL_SetAtomicInt(&g_reads, 0);
     (void)SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
     if (!test_art_loads_once_and_falls_back() || !test_art_slots_and_shutdown() ||
+        !test_art_wakes_the_loop_while_busy() ||
         !test_cover_art_decodes_and_invalidates() || !test_sounds()) {
         return 1;
     }

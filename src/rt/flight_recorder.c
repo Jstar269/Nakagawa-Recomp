@@ -12,6 +12,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h> /* MoveFileExA: the bundle's atomic replace */
+#endif
 
 #if defined(__clang__)
 #define SR_FLIGHT_COMPILER "clang"
@@ -58,6 +61,7 @@ static FILE *s_tw_fp;
 static int s_tw_configured;
 static int s_tw_armed;
 static int s_tw_skip;
+static int s_tw_complete; /* SR_TRACE_LIMIT spent: the gate admits nothing more */
 static uint32_t s_tw_lo, s_tw_hi;
 static SrTraceWindowIndices s_tw_indices;
 static unsigned long s_tw_limit, s_tw_count;
@@ -131,17 +135,43 @@ void sr_watch_store(uint32_t pc, uint32_t addr, uint32_t value, uint32_t width) 
 
 uint64_t sr_watch_match_count(void) { return s_watch_matches; }
 
-static void sr_trace_window_list(const char *text, uint8_t *out, unsigned *count) {
+static int parse_trigger_number(const char *text, const char *end, uint32_t minimum,
+                                uint32_t maximum, uint32_t *out);
+
+/* An index list names CpuState registers whose absolute value each record carries, so an index
+ * is refused unless it lies inside that register file: limit is 128 for SR_TRACE_V (v[128])
+ * and 32 for SR_TRACE_F (fi[32]). Returns 0, after a named diagnostic, for any token that is
+ * not a whole in-range index, so a typo never arms a window that reads past the file. */
+static int sr_trace_window_list(const char *name, const char *text, uint32_t limit,
+                                uint8_t *out, unsigned *count) {
     *count = 0;
-    if (!text || !text[0]) return;
-    while (*text && *count < SR_TRACE_WINDOW_MAX_INDEX) {
-        char *end = NULL;
-        const unsigned long value = strtoul(text, &end, 0);
-        if (end == text) return;
-        if (value < 128u) out[(*count)++] = (uint8_t)value;
-        text = end;
+    if (!text || !text[0]) return 1;
+    const char *list = text;
+    while (*text == ',' || *text == ' ') text++;
+    while (*text) {
+        const char *token_end = text;
+        while (*token_end && *token_end != ',' && *token_end != ' ') token_end++;
+        uint32_t value = 0u;
+        if (!parse_trigger_number(text, token_end, 0u, UINT32_MAX, &value)) {
+            fprintf(stderr, "TRACE_WINDOW: %s needs a list of register indices, got '%s'\n",
+                    name, list);
+            return 0;
+        }
+        if (value >= limit) {
+            fprintf(stderr, "TRACE_WINDOW: %s index %" PRIu32 " out of range 0..%" PRIu32 "\n",
+                    name, value, limit - 1u);
+            return 0;
+        }
+        if (*count >= SR_TRACE_WINDOW_MAX_INDEX) {
+            fprintf(stderr, "TRACE_WINDOW: %s names more than %u indices\n", name,
+                    (unsigned)SR_TRACE_WINDOW_MAX_INDEX);
+            return 0;
+        }
+        out[(*count)++] = (uint8_t)value;
+        text = token_end;
         while (*text == ',' || *text == ' ') text++;
     }
+    return 1;
 }
 
 void sr_trace_window_configure(void) {
@@ -157,16 +187,35 @@ void sr_trace_window_configure(void) {
         fprintf(stderr, "TRACE_WINDOW: SR_TRACE_PC needs LO:HI, got '%s'\n", window);
         return;
     }
-    const uint32_t lo = (uint32_t)strtoul(window, NULL, 0);
-    const uint32_t hi = (uint32_t)strtoul(sep + 1, NULL, 0);
+    /* Each bound is consumed whole, so a typo (a letter O for a zero, a word) is refused by
+     * name instead of arming an empty 0..0 window that looks like an untouched range. */
+    uint32_t lo = 0u, hi = 0u;
+    if (!parse_trigger_number(window, sep, 0u, UINT32_MAX, &lo) ||
+        !parse_trigger_number(sep + 1, sep + 1 + strlen(sep + 1), 0u, UINT32_MAX, &hi)) {
+        fprintf(stderr, "TRACE_WINDOW: SR_TRACE_PC needs two 32-bit addresses LO:HI, got '%s'\n",
+                window);
+        return;
+    }
     if (hi < lo) {
         fprintf(stderr, "TRACE_WINDOW: empty window %s\n", window);
         return;
     }
-    sr_trace_window_list(getenv("SR_TRACE_V"), s_tw_indices.v, &s_tw_indices.vn);
-    sr_trace_window_list(getenv("SR_TRACE_F"), s_tw_indices.f, &s_tw_indices.fn);
+    if (!sr_trace_window_list("SR_TRACE_V", getenv("SR_TRACE_V"), 128u, s_tw_indices.v,
+                              &s_tw_indices.vn) ||
+        !sr_trace_window_list("SR_TRACE_F", getenv("SR_TRACE_F"), 32u, s_tw_indices.f,
+                              &s_tw_indices.fn)) {
+        s_tw_indices.vn = s_tw_indices.fn = 0u;
+        return;
+    }
     const char *limit = getenv("SR_TRACE_LIMIT");
-    s_tw_limit = limit && limit[0] ? strtoul(limit, NULL, 0) : 0ul;
+    uint32_t limit_value = 0u;
+    if (limit && limit[0] &&
+        !parse_trigger_number(limit, limit + strlen(limit), 0u, UINT32_MAX, &limit_value)) {
+        fprintf(stderr, "TRACE_WINDOW: SR_TRACE_LIMIT needs a record count, got '%s'\n", limit);
+        s_tw_indices.vn = s_tw_indices.fn = 0u;
+        return;
+    }
+    s_tw_limit = limit_value;
     s_tw_fp = fopen(path, "wb");
     if (!s_tw_fp) {
         fprintf(stderr, "TRACE_WINDOW: cannot open '%s'\n", path);
@@ -182,14 +231,14 @@ void sr_trace_window_configure(void) {
 }
 
 void sr_trace_note_frame(uint32_t frame) {
-    if (!s_tw_armed || !s_tw_fp) return;
+    if (!s_tw_armed || s_tw_complete || !s_tw_fp) return;
     fprintf(s_tw_fp, "frame %" PRIu32 "\n", frame);
 }
 
 int sr_trace_window_armed(void) { return s_tw_armed; }
 
 int sr_trace_window_begin_instruction(uint32_t pc) {
-    s_tw_skip = pc < s_tw_lo || pc > s_tw_hi;
+    s_tw_skip = s_tw_complete || pc < s_tw_lo || pc > s_tw_hi;
     return !s_tw_skip;
 }
 
@@ -201,13 +250,18 @@ void sr_trace_window_record(uint32_t pc, const char *text) {
     (void)pc;
     if (!s_tw_armed || s_tw_skip || !s_tw_fp) return;
     fprintf(s_tw_fp, "%s\n", text);
+    /* Each record reaches the file before the next instruction runs: the window is usually
+     * armed over the code leading into a crash, and a host fault or abort ends the process
+     * without flushing stdio buffers. */
+    fflush(s_tw_fp);
     if (s_tw_limit && ++s_tw_count >= s_tw_limit) {
         fprintf(s_tw_fp, "# window complete records=%lu\n", s_tw_count);
         fflush(s_tw_fp);
-        /* Disarm rather than close: the trace writer's own stream is untouched,
-         * and the gate stops admitting in-window instructions, so the rest of
-         * the run executes uninstrumented. */
-        s_tw_armed = 0;
+        /* Complete, not disarmed: the gate stays armed and admits no instruction from now on,
+         * so neither this stream nor the trace writer's own stream records anything more and
+         * the rest of the run costs one test per instruction. Disarming would hand every
+         * instruction back to the full per-instruction trace. */
+        s_tw_complete = 1;
     }
 }
 
@@ -557,7 +611,6 @@ static uint64_t record_locked(uint32_t event_class, uint32_t kind, uint32_t arg0
     s_flight_last_sequence = sequence;
     s_flight_last_kind = kind;
     if (kind <= SR_FLIGHT_KIND_WATCH_CHANGE) s_flight_kind_recorded[kind]++;
-    if (s_trig_window_open && --s_trig_after_remaining == 0u) mode_freeze();
     return sequence;
 }
 
@@ -645,13 +698,28 @@ static void check_trigger(uint64_t sequence, uint32_t event_class, uint32_t kind
     mode_freeze();
 }
 
+/* The trigger step after a non-terminal event was recorded: it spends one event of an open
+ * checkpoint window, or checks the armed mode. Only non-terminal events reach it: a terminal
+ * that lands on the last event a window owes is still the terminal, because trigger() ends the
+ * window, rather than freezing the record as a trigger first. */
+static void trigger_after_record(uint64_t sequence, uint32_t event_class, uint32_t kind,
+                                 uint32_t arg0, uint32_t arg1, uint32_t arg2, uint32_t arg3) {
+    if (sequence == 0u) return;
+    if (s_trig_window_open) {
+        if (--s_trig_after_remaining == 0u) mode_freeze();
+        return;
+    }
+    if (s_trig_mode != SR_FLIGHT_TRIGGER_NONE && s_trig_match_sequence == 0u)
+        check_trigger(sequence, event_class, kind, arg0, arg1, arg2, arg3);
+}
+
 /* Every non-terminal producer records through here, so a trigger mode sees exactly the events
- * the bundle retains. Terminal paths call record_locked and keep their own trigger. */
+ * the bundle retains (sr_flight_unsupported takes the same two steps, with its refusal count
+ * between them). Terminal paths call record_locked and keep their own trigger. */
 static uint64_t record_checked(uint32_t event_class, uint32_t kind, uint32_t arg0, uint32_t arg1,
                                uint32_t arg2, uint32_t arg3) {
     uint64_t sequence = record_locked(event_class, kind, arg0, arg1, arg2, arg3);
-    if (sequence != 0u && s_trig_mode != SR_FLIGHT_TRIGGER_NONE && s_trig_match_sequence == 0u)
-        check_trigger(sequence, event_class, kind, arg0, arg1, arg2, arg3);
+    trigger_after_record(sequence, event_class, kind, arg0, arg1, arg2, arg3);
     return sequence;
 }
 
@@ -810,8 +878,9 @@ static void trigger(int reason, uint32_t kind, uint32_t arg) {
     if (write_bundle(reason)) s_flight_dumped = 1;
 }
 
-static void note_refusal(uint32_t nid, uint32_t pc, uint64_t sequence) {
-    if (s_flight_trigger_count != 0u || s_flight_dumped) return;
+/* Counts a refusal; returns 1 when it was counted. */
+static int note_refusal(uint32_t nid, uint32_t pc, uint64_t sequence) {
+    if (s_flight_trigger_count != 0u || s_flight_dumped) return 0;
     s_refusal_count++;
     if (s_refusal_count == 1u) {
         s_refusal_first_nid = nid;
@@ -829,9 +898,15 @@ static void note_refusal(uint32_t nid, uint32_t pc, uint64_t sequence) {
     } else {
         s_refusal_unlisted++;
     }
-    /* Until a terminal the record is provisional and says the run is still running, so a run
-     * that is killed later is not reported under its first refusal. It is rewritten at each
-     * power of two of the refusal count: the counts on disk are at least half the live total. */
+    return 1;
+}
+
+/* Until a terminal the record is provisional and says the run is still running, so a run that
+ * is killed later is not reported under its first refusal. It is rewritten at each power of two
+ * of the refusal count: the counts on disk are at least half the live total. A mode that froze
+ * or a window that is open owns the terminal fields, so neither is overwritten here. */
+static void publish_refusal(void) {
+    if (s_flight_trigger_count != 0u || s_flight_dumped) return;
     if (!s_trig_window_open && (s_refusal_count & (s_refusal_count - 1u)) == 0u) {
         s_flight_terminal_reason = SR_FLIGHT_TERMINAL_RUNNING;
         s_flight_terminal_kind = 0u;
@@ -845,10 +920,15 @@ void sr_flight_unsupported(uint32_t nid, uint32_t error, uint32_t uid, uint32_t 
     uint64_t sequence = 0u;
     if (s_flight_classes == 0u) return;
     if (s_flight_classes & SR_FLIGHT_CLASS_UNSUPPORTED) {
-        sequence = record_checked(SR_FLIGHT_CLASS_UNSUPPORTED, SR_FLIGHT_KIND_UNSUPPORTED_NID,
-                                  nid, error, uid, pc);
+        sequence = record_locked(SR_FLIGHT_CLASS_UNSUPPORTED, SR_FLIGHT_KIND_UNSUPPORTED_NID,
+                                 nid, error, uid, pc);
     }
-    note_refusal(nid, pc, sequence);
+    /* Counted before the trigger step: a refusal that fires a mode (pc:<call site>, or the
+     * checkpoint that ends on it) is in the refusals block of the bundle that freeze writes. */
+    const int counted = note_refusal(nid, pc, sequence);
+    trigger_after_record(sequence, SR_FLIGHT_CLASS_UNSUPPORTED, SR_FLIGHT_KIND_UNSUPPORTED_NID,
+                         nid, error, uid, pc);
+    if (counted) publish_refusal();
 }
 
 void sr_flight_unsupported_fatal(uint32_t nid, uint32_t uid, uint32_t pc) {
@@ -1006,6 +1086,8 @@ static int decimal_epoch_text(const char *text) {
     if (!text || !*text) return 0;
     length = strlen(text);
     if (length > 12u) return 0;
+    /* The text is written verbatim as a JSON number, which has no leading zeros. */
+    if (length > 1u && text[0] == '0') return 0;
     for (const char *p = text; *p; ++p) {
         if (*p < '0' || *p > '9') return 0;
         value = value * 10u + (unsigned long long)(*p - '0');
@@ -1296,12 +1378,17 @@ static int write_bundle(int reason) {
         fprintf(stderr, "SR_FLIGHT: evidence output failed; bundle not written\n");
         return 0;
     }
-    if (remove(output) != 0 && errno != ENOENT) {
-        remove(temporary);
-        fprintf(stderr, "SR_FLIGHT: could not replace evidence output; bundle not written\n");
-        return 0;
-    }
-    if (rename(temporary, output) != 0) {
+    /* The new bundle replaces the old one in one step, so a run that dies during a rewrite
+     * (a second fault, a kill) still leaves the previous complete bundle. POSIX rename
+     * replaces atomically; the Windows CRT rename refuses an existing target, and
+     * MoveFileEx replaces it. */
+#if defined(_WIN32)
+    const int replaced =
+        MoveFileExA(temporary, output, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    const int replaced = rename(temporary, output) == 0;
+#endif
+    if (!replaced) {
         remove(temporary);
         fprintf(stderr, "SR_FLIGHT: could not publish evidence output; bundle not written\n");
         return 0;

@@ -129,6 +129,10 @@ typedef struct {
     bool loaded_from_file;
     bool has_load_diagnostic;
     bool has_save_diagnostic;
+    /* The file at profile_path could not be read (has_load_diagnostic), so its mappings
+     * are not in `file`: the first save into it moves it to "<file>.unreadable.bak"
+     * instead of writing over it, and refuses when it cannot. */
+    bool keep_unreadable;
 
     /* Conflict tracking */
     InputBindingConflict conflicts[INPUT_SETTINGS_MAX_CONFLICTS];

@@ -71,6 +71,32 @@ def _cmake_list(text: str, name: str) -> list[str]:
     return [w for w in match.group(1).split() if not w.startswith("#")]
 
 
+def _unconditional_definitions(text: str, variable: str) -> set[str]:
+    """The ``-DNAME`` tokens assigned to ``variable`` outside an ifeq/ifdef/ifndef block.
+
+    A definition a Makefile adds only for one profile is deliberately absent here: the
+    parity check is about the macros every normal build of the variable carries.
+    """
+    definitions: set[str] = set()
+    depth = 0
+    assignment = re.compile(r"^(?:override\s+)?" + re.escape(variable) + r"\s*(?::=|\?=|\+=|=)\s*(.*)$")
+    for line in text.replace("\\\n", " ").splitlines():
+        stripped = line.strip()
+        if re.match(r"^(?:ifeq|ifneq|ifdef|ifndef)\b", stripped):
+            depth += 1
+            continue
+        if re.match(r"^endif\b", stripped):
+            depth = max(0, depth - 1)
+            continue
+        if depth:
+            continue
+        match = assignment.match(stripped)
+        if match:
+            definitions.update(token[2:] for token in match.group(1).split()
+                               if token.startswith("-D") and len(token) > 2)
+    return definitions
+
+
 class AndroidRuntimeInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -125,6 +151,25 @@ class AndroidRuntimeInventoryTests(unittest.TestCase):
         self.assertIn("-w", options("h264"))
         self.assertNotIn("-w", options("h264_api"))
         self.assertIn("-Wall", options("h264_api"))
+
+    def test_ge_compile_definitions_match_the_makefile(self) -> None:
+        """The `${target}_ge` object is the Makefile's RT_GE_O (GE_CFLAGS). A macro the
+        Makefile always passes to ge.c must reach the Android title build too, or ge.c
+        compiles against the header's no-op stubs (for example the flight recorder's
+        sr_flight_record() and SR_WATCH_ACTIVE() when SR_FLIGHT_RECORDER_LINKED is absent)."""
+        smoke = (ROOT / "mk" / "smoke_gates.mk").read_text(encoding="utf-8")
+        make_defs = _unconditional_definitions(smoke, "GE_CFLAGS")
+        self.assertIn("SR_SDL3VK", make_defs)
+        self.assertIn("SR_FLIGHT_RECORDER_LINKED", make_defs)
+        target = re.search(r"target_compile_definitions\(\$\{target\}_ge PRIVATE ([^)]*)\)", self.cmake)
+        self.assertIsNotNone(target, "CMakeLists.txt must define ${target}_ge's macros explicitly")
+        assert target is not None
+        cmake_defs = set(target.group(1).split())
+        missing = sorted(make_defs - cmake_defs)
+        self.assertEqual(
+            missing, [],
+            "GE_CFLAGS macros the Android ${target}_ge object does not define:\n  " + "\n  ".join(missing),
+        )
 
 
 class AndroidAppContractTests(unittest.TestCase):

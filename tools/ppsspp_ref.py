@@ -211,8 +211,13 @@ def parse_mask(token: str) -> int:
     return mask
 
 
+def _decimal(token: str) -> bool:
+    """ASCII decimal digits only: str.isdigit() also accepts digits int() cannot read."""
+    return token.isascii() and token.isdigit()
+
+
 def _axis(token: str) -> int:
-    if not token.isdigit() or int(token) > 255:
+    if not _decimal(token) or int(token) > 255:
         raise RefError(f"stick value '{token}' is not 0-255")
     return int(token)
 
@@ -224,7 +229,7 @@ def parse_padscript(text: str, label: str = "pad") -> list[PadRow]:
         tokens = raw.split()
         if not tokens or tokens[0].startswith("#"):
             continue
-        if not tokens[0][0].isdigit():
+        if not _decimal(tokens[0][0]):
             raise RefError(f"{label}:{lineno}: '{tokens[0]}' starts a route program; PPSSPP cannot "
                            "report guest state, so only the legacy '<frame> <mask> <width>' table "
                            "is accepted")
@@ -232,7 +237,7 @@ def parse_padscript(text: str, label: str = "pad") -> list[PadRow]:
         tokens = tokens[:cut]
         if len(tokens) not in (3, 5):
             raise RefError(f"{label}:{lineno}: expected '<frame> <mask> <width> [<lx> <ly>]'")
-        if not tokens[0].isdigit() or not tokens[2].isdigit():
+        if not _decimal(tokens[0]) or not _decimal(tokens[2]):
             raise RefError(f"{label}:{lineno}: frame and width are decimal vblank counts")
         try:
             mask = parse_mask(tokens[1])
@@ -271,7 +276,9 @@ def pad_states(rows: Sequence[PadRow]) -> list[PadState]:
         for r in held:
             mask |= r.mask
         with_stick = [r for r in held if r.stick is not None]
-        latest = max(with_stick, key=lambda r: r.frame).stick if with_stick else None
+        # The later row in file order wins a tie, as f[i] >= f[stick_row] does in the runtime.
+        latest = (max(enumerate(with_stick), key=lambda t: (t[1].frame, t[0]))[1].stick
+                  if with_stick else None)
         stick = latest if latest is not None else (CENTRE, CENTRE)
         if states and states[-1].mask == mask and states[-1].stick == stick:
             continue
@@ -320,13 +327,8 @@ class SceneFile:
         return self.out / f"{scene.name}.png"
 
 
-def _inside_checkout(path: Path) -> bool:
-    path = Path(os.path.abspath(path))
-    try:
-        rel = path.relative_to(ROOT)
-    except ValueError:
-        return False
-    return not (rel.parts and rel.parts[0] == "build")
+# The one checkout guard: game pixels never land in a tracked folder (build/ is ignored).
+_inside_checkout = picture_gate._inside_checkout
 
 
 def load_scene_file(path: Path) -> SceneFile:
@@ -405,9 +407,10 @@ def load_scene_file(path: Path) -> SceneFile:
             raise RefError(f"{where}: 'nakagawa' must be a path string")
         scenes.append(Scene(name, frame, (base / nk).resolve() if nk else None, threshold,
                             float(max_percent)))
-    names = [s.name for s in scenes]
+    # Each name is a reference file name, and Windows file names ignore case.
+    names = [s.name.casefold() for s in scenes]
     if len(set(names)) != len(names):
-        raise RefError(f"{path.name}: scene names repeat")
+        raise RefError(f"{path.name}: scene names repeat (names are compared ignoring case)")
     return SceneFile(path, title, opt_path("disc"), opt_path("pad"), out, rtc, float(timeout),
                      ini_norm, tuple(scenes))
 
@@ -463,6 +466,12 @@ def effective_ini(port: int, overrides: Mapping[str, Mapping[str, str]]) -> dict
         raise RefError("the scene file's 'ini' turns the debugger off; the driver needs it")
     general["RemoteISOPort"] = str(port)  # the driver's choice, never the scene file's
     return ini
+
+
+def capture_settings(ini: Mapping[str, Mapping[str, str]]) -> dict[str, dict[str, str]]:
+    """The settings a reference sidecar records: the port is the run's own choice and differs
+    every time, so it is not a capture setting."""
+    return {s: {k: v for k, v in kv.items() if k != "RemoteISOPort"} for s, kv in ini.items()}
 
 
 def render_ini(ini: Mapping[str, Mapping[str, str]]) -> str:
@@ -820,7 +829,12 @@ def drive(dbg: Debugger, plan: Sequence[Action], pid: int | None, rtc: int, time
     if "pid" not in info:
         raise NotRun("ppsspp-too-old", f"PPSSPP {version} does not report its process id; the "
                      "driver needs a build newer than v1.20.4")
-    if pid is not None and int(info["pid"]) != pid:
+    try:
+        reported_pid = int(info["pid"])
+    except (TypeError, ValueError):
+        raise CaptureFailed(f"the debugger on this port reports process {info['pid']!r}, not a "
+                            "process id") from None
+    if pid is not None and reported_pid != pid:
         raise CaptureFailed(f"the debugger on this port is process {info['pid']}, not the "
                             f"PPSSPP the driver started ({pid})")
     while dbg.request("game.status").get("game") is None:
@@ -950,29 +964,45 @@ def capture(sf: SceneFile, exe: Path, runs: int, replace: bool, keep_work: bool 
         for a in first.shots:
             if theirs.get(a.scene) != a.picture:
                 disagree.add(a.scene)
-    # The port is the run's own choice and differs every time; it is not a capture setting.
-    settings = {s: {k: v for k, v in kv.items() if k != "RemoteISOPort"} for s, kv in ini.items()}
+    settings = capture_settings(ini)
     sf.out.mkdir(parents=True, exist_ok=True)
-    for shot in first.shots:
-        if shot.scene in disagree:
-            # A reference this run was asked to replace must not survive as if it still held.
-            for stale in (sf.out / f"{shot.scene}.png", sf.out / f"{shot.scene}.png.json"):
-                stale.unlink(missing_ok=True)
-            verdicts.append((shot.scene, f"{FAIL} nondeterministic (PPSSPP runs differ; "
-                                         "no reference stored)"))
-            continue
-        ref = sf.out / f"{shot.scene}.png"
-        write_png(ref, shot.picture)
-        meta = {"tool": TOOL_NAME, "tool_version": TOOL_VERSION, "ppsspp_version": first.version,
-                "title": sf.title, "frame": shot.frame, "emulated_us": shot.us,
-                "rtc": sf.rtc, "runs": runs, "width": shot.picture.width,
-                "height": shot.picture.height,
-                "sha256": hashlib.sha256(shot.picture.pixels).hexdigest(),
-                "ini": settings}
-        Path(str(ref) + ".json").write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n",
-                                            encoding="utf-8")
-        verdicts.append((shot.scene, f"CAPTURED {shot.picture.width}x{shot.picture.height} "
-                                     f"v{shot.frame} ({runs} run{'s' if runs > 1 else ''})"))
+    # Every picture and sidecar is staged beside its final name first; the stored set
+    # changes only once all of them are written, so a failed write leaves the previous
+    # references whole instead of a mix no single capture produced.
+    staged: list[tuple[Path, Path]] = []
+    stale: list[Path] = []
+    try:
+        for shot in first.shots:
+            if shot.scene in disagree:
+                # A reference this run was asked to replace must not survive as if it still held.
+                stale += [sf.out / f"{shot.scene}.png", sf.out / f"{shot.scene}.png.json"]
+                verdicts.append((shot.scene, f"{FAIL} nondeterministic (PPSSPP runs differ; "
+                                             "no reference stored)"))
+                continue
+            ref = sf.out / f"{shot.scene}.png"
+            picture = sf.out / f".{shot.scene}.png.partial"
+            staged.append((picture, ref))
+            write_png(picture, shot.picture)
+            meta = {"tool": TOOL_NAME, "tool_version": TOOL_VERSION,
+                    "ppsspp_version": first.version, "title": sf.title, "frame": shot.frame,
+                    "emulated_us": shot.us, "rtc": sf.rtc, "runs": runs,
+                    "width": shot.picture.width, "height": shot.picture.height,
+                    "sha256": hashlib.sha256(shot.picture.pixels).hexdigest(),
+                    "ini": settings}
+            sidecar = sf.out / f".{shot.scene}.png.json.partial"
+            staged.append((sidecar, Path(str(ref) + ".json")))
+            sidecar.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+            verdicts.append((shot.scene, f"CAPTURED {shot.picture.width}x{shot.picture.height} "
+                                         f"v{shot.frame} ({runs} run{'s' if runs > 1 else ''})"))
+    except BaseException:
+        for partial, _final in staged:
+            partial.unlink(missing_ok=True)
+        raise
+    for path in stale:
+        path.unlink(missing_ok=True)
+    for partial, final in staged:
+        os.replace(partial, final)
     return verdicts
 
 
@@ -1009,6 +1039,37 @@ class Grade:
                 + (f" {self.detail}" if self.detail else ""))
 
 
+def _stale_reference(sf: SceneFile, scene: Scene, ref_path: Path,
+                     reference: picture_gate.Frame) -> str | None:
+    """Why the stored reference is not this scene's capture, or None when its sidecar agrees.
+
+    The sidecar records what capture stored: the frame, the RTC, the settings and the pixels'
+    digest. A scene edited since, or a picture replaced by hand, is not the same frames.
+    """
+    sidecar = Path(str(ref_path) + ".json")
+    try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    except OSError:
+        return f"{sidecar.name} is missing"
+    except json.JSONDecodeError:
+        return f"{sidecar.name} is not JSON"
+    if not isinstance(meta, dict):
+        return f"{sidecar.name} is not an object"
+    if meta.get("frame") != scene.frame:
+        return f"captured at v{meta.get('frame')}, the scene asks for v{scene.frame}"
+    if meta.get("rtc") != sf.rtc:
+        return "captured with another RTC"
+    try:
+        settings = capture_settings(effective_ini(0, sf.ini))
+    except RefError as exc:
+        return str(exc)
+    if meta.get("ini") != settings:
+        return "captured with other PPSSPP settings"
+    if meta.get("sha256") != hashlib.sha256(reference.pixels).hexdigest():
+        return "the picture is not the one captured"
+    return None
+
+
 def grade_scene(sf: SceneFile, scene: Scene, diff_dir: Path | None) -> Grade:
     ref_path = sf.reference(scene)
     if not ref_path.exists():
@@ -1017,6 +1078,9 @@ def grade_scene(sf: SceneFile, scene: Scene, diff_dir: Path | None) -> Grade:
         reference = picture_gate.load_picture(ref_path)
     except picture_gate.PictureError as exc:
         return Grade(scene.name, scene.frame, FAIL, f"unreadable-reference ({exc})")
+    stale = _stale_reference(sf, scene, ref_path, reference)
+    if stale:
+        return Grade(scene.name, scene.frame, FAIL, f"stale-reference ({stale}; run capture --replace)")
     if scene.nakagawa is None:
         return Grade(scene.name, scene.frame, NOT_RUN, "no-capture (the scene names no Nakagawa frame)")
     if not scene.nakagawa.exists():

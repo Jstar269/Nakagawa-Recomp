@@ -798,7 +798,7 @@ the device is created with no feature outside Ace.
   buffer keeps the PSP's saturated bytes (section 10.22).
 - **Input timing:** `pad=late` holds each 60 FPS logic update at its package's update boundary until shortly before
   its VBLANK deadline, so the update reads a fresher pad sample. It changes when the update runs inside its period,
-  which the guest can measure, so it is a guest-visible item. Its entry is section 11.3.9.
+  which the guest can measure, so it is a guest-visible item, not yet admitted. Its entry is section 11.3.9.
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
