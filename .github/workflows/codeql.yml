@@ -42,8 +42,11 @@ concurrency:
   # prevent. Group by head repository and branch, so a newer head of a branch cancels the
   # older analysis. Distinct repositories (forks) never share a group, so one author cannot
   # cancel another author's analysis. workflow_run payloads do not reliably include
-  # pull_requests for fork PRs, so the PR number is not used.
-  group: codeql-${{ github.event.workflow_run.head_repository.full_name || github.repository }}/${{ github.event.workflow_run.head_branch || github.event.inputs.pull_request_number || github.ref }}
+  # pull_requests for fork PRs, so the PR number is not used. A push to main and the
+  # schedule have neither a wake branch nor a dispatch input, so each is a group of its own:
+  # keyed on the ref, a landing cancelled the previous main commit's analysis (and the
+  # weekly run), leaving that commit without code-scanning results.
+  group: codeql-${{ github.event.workflow_run.head_repository.full_name || github.repository }}/${{ github.event.workflow_run.head_branch || github.event.inputs.pull_request_number || format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -246,10 +249,7 @@ jobs:
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
         run: |
           set -euo pipefail
-          case "${TARGET_SHA}" in
-            [0-9a-f]*) [ "${#TARGET_SHA}" -eq 40 ] || { echo "target SHA malformed" >&2; exit 1; } ;;
-            *) echo "target SHA malformed" >&2; exit 1 ;;
-          esac
+          [[ "${TARGET_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "target SHA malformed" >&2; exit 1; }
 
           if [ "${TARGET_KIND}" = "pull-request" ]; then
             case "${PR_NUMBER}" in
@@ -284,10 +284,7 @@ jobs:
           fi
 
           tree_sha="$(git rev-parse "${TARGET_SHA}^{tree}")"
-          case "${tree_sha}" in
-            [0-9a-f]*) [ "${#tree_sha}" -eq 40 ] || { echo "tree SHA malformed" >&2; exit 1; } ;;
-            *) echo "tree SHA malformed" >&2; exit 1 ;;
-          esac
+          [[ "${tree_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "tree SHA malformed" >&2; exit 1; }
           echo "tree_sha=${tree_sha}" >> "${GITHUB_OUTPUT}"
           export TREE_SHA="${tree_sha}"
 

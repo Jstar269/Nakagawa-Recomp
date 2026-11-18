@@ -200,7 +200,7 @@ def _decode_size_independent(word: int) -> int:
 #   - prefix/immediate category  (VPFXS/VPFXT/VPFXD/VIIM/VFIM via top byte & bit23)
 #
 # Baseline preserves exact accepted facts:
-#   total 2742, S718 P682 T677 Q665,
+#   total 2742, S718 P714 T661 Q649,
 #   0x18:144 0x19:204 0x1B:60 0x34:2020 0x37:182 0x3C:132, actual 0x3C/sub5=6,
 #   vcrsp.t 0xF2808000, vqmul.q 0xF2808080.
 #
@@ -223,9 +223,9 @@ INTENDED_FAMILY_COUNTS: dict[int, int] = {
 
 INTENDED_SIZE_COUNTS: dict[int, int] = {
     1: 718,  # S
-    2: 682,  # P
-    3: 677,  # T
-    4: 665,  # Q
+    2: 714,  # P
+    3: 661,  # T
+    4: 649,  # Q
 }
 
 # Family -> sub (3-bit) -> count
@@ -270,7 +270,7 @@ INTENDED_FAMILY_SIZE_COUNTS: dict[int, dict[int, int]] = {
     0x19: {1: 48, 2: 48, 3: 60, 4: 48},
     0x1B: {1: 15, 2: 15, 3: 15, 4: 15},
     0x34: {1: 505, 2: 505, 3: 505, 4: 505},
-    0x37: {1: 114, 2: 36, 3: 16, 4: 16},
+    0x37: {1: 114, 2: 68, 3: 0, 4: 0},
     0x3C: {1: 0, 2: 42, 3: 45, 4: 45},
 }
 
@@ -351,28 +351,19 @@ def _encode(op6: int, sub: int, vt: int, vs: int, vd: int, size: int) -> int:
     return word & 0xFFFFFFFF
 
 
+def _encode_sub21(op6: int, sub21: int, vt: int, vs: int, vd: int, size: int) -> int:
+    """Encode a VFPU instruction whose suboperation is the 5-bit field at bits 25:21."""
+    return _encode(op6, 0, vt, vs, vd, size) | ((sub21 & 0x1F) << 21)
+
+
 def _encode_vfpu4(sub21: int, vt: int, vs: int, vd: int, size: int) -> int:
     """Encode a VFPU4 (0x34) instruction with 5-bit sub21 at bits 25:21."""
-    word = (0x34 << 26)
-    word |= (sub21 & 0x1F) << 21
-    word |= (vt & 0x7F) << 16
-    word |= ((size >> 1) & 1) << 15
-    word |= (vs & 0x7F) << 8
-    word |= (size & 1) << 7
-    word |= (vd & 0x7F)
-    return word & 0xFFFFFFFF
+    return _encode_sub21(0x34, sub21, vt, vs, vd, size)
 
 
 def _encode_vfpu12(sub21: int, vt: int, vs: int, vd: int, size: int) -> int:
     """Encode a VFPU12 (0x3C) instruction with 5-bit sub21 at bits 25:21."""
-    word = (0x3C << 26)
-    word |= (sub21 & 0x1F) << 21
-    word |= (vt & 0x7F) << 16
-    word |= ((size >> 1) & 1) << 15
-    word |= (vs & 0x7F) << 8
-    word |= (size & 1) << 7
-    word |= (vd & 0x7F)
-    return word & 0xFFFFFFFF
+    return _encode_sub21(0x3C, sub21, vt, vs, vd, size)
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +396,14 @@ def _iter_vfpu1() -> Iterator[int]:
 
 
 def _iter_vpfx() -> Iterator[int]:
-    """Major opcode 0x37 — VPFXS/VPFXT/VPFXD (prefix state registers)."""
+    """Major opcode 0x37 — VPFXS/VPFXT/VPFXD (prefix state registers).
+
+    Field layout as the runtime decodes it (src/rt/recomp.c sr_vread/sr_vwrite):
+      VPFXS/VPFXT: swizzle bits 0-7 (2 per lane), abs bits 8-11, constant bits 12-15,
+                   negate bits 16-19 (1 per lane each).
+      VPFXD:       saturation bits 0-7 (2 per lane: 0 none, 1 [0,1], 3 [-1,1]),
+                   write mask bits 8-11 (1 per lane; a set bit skips the write).
+    """
     swizzles = [0x00, 0xE4, 0xB1, 0x1B]
     abs_mask = [0x00, 0x0F]
     neg_mask = [0x00, 0x0F]
@@ -415,13 +413,14 @@ def _iter_vpfx() -> Iterator[int]:
         for ab in abs_mask:
             for neg in neg_mask:
                 for cst in cst_mask:
-                    desc = (neg << 16) | (ab << 12) | (cst << 8) | swz
+                    desc = (neg << 16) | (cst << 12) | (ab << 8) | swz
                     yield (0xDC << 24) | (desc & 0xFFFFF)
                     yield (0xDD << 24) | (desc & 0xFFFFF)
 
     for mask in range(16):
-        for sat in (0, 1, 2):
-            dpfx = (sat << 4) | mask
+        for sat in (0, 1, 3):
+            # The same saturation code on all four lanes.
+            dpfx = (mask << 8) | (sat * 0x55)
             yield (0xDE << 24) | dpfx
 
 
@@ -788,23 +787,7 @@ def generate_memory_cop2_corpus() -> list[int]:
 
 def generate_synthetic_corpus() -> list[int]:
     """Return a sorted, deduplicated list of synthetic VFPU instruction words."""
-    seen: set[int] = set()
-    for w in _iter_vfpu0():
-        seen.add(w)
-    for w in _iter_vfpu1():
-        seen.add(w)
-    for w in _iter_vpfx():
-        seen.add(w)
-    for w in _iter_viim_vfim():
-        seen.add(w)
-    for w in _iter_vfpu3():
-        seen.add(w)
-    for w in _iter_vfpu4():
-        seen.add(w)
-    for w in _iter_vfpu12():
-        seen.add(w)
-
-    corpus = sorted(seen)
+    corpus = sorted(set(iter_synthetic_corpus_raw()))
     _check_corpus_nonempty(corpus)
     return corpus
 
