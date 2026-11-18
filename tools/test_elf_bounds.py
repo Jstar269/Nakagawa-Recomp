@@ -504,6 +504,26 @@ class ProgramImageTests(unittest.TestCase):
         )
         self.assertEqual(functions, (base + 0x40,))
 
+        # A len=5 or len=6 SceLibraryEntryTable entry still uses the 16-byte header
+        # (entrytable at offset 12, extra words skipped), not the legacy synthetic layout.
+        for size_words in (5, 6):
+            data5 = bytearray(0x100)
+            data5[0x70:0x7B] = b"sceFixture\0"
+            struct.pack_into(
+                "<I2sHBBHI", data5, 0x20,
+                base + 0x70, b"\x01\x00", 0, size_words, 1, 1, base + 0x80,
+            )
+            struct.pack_into("<4I", data5, 0x80, 0x11111111, 0x22222222,
+                             base + 0x40, base + 0x50)
+            findings5 = []
+            entries5 = prxload._program_image_table(
+                data5, loads, base + 0x20, base + 0x20 + size_words * 4, "module.exports",
+                findings5, base, "export",
+            )
+            self.assertEqual(findings5, [])
+            self.assertEqual(len(entries5), 1)
+            self.assertEqual(entries5[0][6:], (base + 0x88, base + 0x8C))
+
     def test_standard_psp_export_entry_table_must_be_mapped(self):
         base = 0x1000
         data = bytearray(0x100)
@@ -620,12 +640,17 @@ class ProgramImageTests(unittest.TestCase):
         module_off = 0x40
         name_off = 0x90
         nid_off = (name_off + len(name) + 1 + 3) & ~3
-        entry_off = nid_off + 4
-        # Turn the fixture's library entry into an export and make its function
-        # pointer leave the only validated PT_LOAD segment.
-        struct.pack_into("<2I", blob, data_off + module_off + 36, base + entry_off, base + entry_off + 20)
+        entry_off = nid_off + 8
+        # Turn the fixture's library entry into a 4-word export whose entrytable
+        # (1 NID followed by 1 function address) has a function pointer outside
+        # the only validated PT_LOAD segment.
+        struct.pack_into("<2I", blob, data_off + module_off + 36, base + entry_off, base + entry_off + 16)
         struct.pack_into("<2I", blob, data_off + module_off + 44, 0, 0)
-        struct.pack_into("<I", blob, data_off + nid_off, base + 0x5000)
+        struct.pack_into("<2I", blob, data_off + nid_off, 0x12345678, base + 0x5000)
+        struct.pack_into(
+            "<I2sHBBHI", blob, data_off + entry_off,
+            base + name_off, b"\x01\x01", 0, 4, 0, 1, base + nid_off,
+        )
         self.assert_invalid(blob, "pointer-target-oob", base=base, name="export-pointer-oob.prx")
 
     def test_string_bounds_cover_missing_nul_and_overlong_import_names(self):

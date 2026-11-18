@@ -41,6 +41,11 @@ import sys
 from pathlib import Path
 
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+if TOOLS_DIR not in sys.path:
+    sys.path.insert(0, TOOLS_DIR)
+
+from nid_name_proof import DERIVABLE_CLASSES, nid_of  # noqa: E402
+
 REPO = Path(TOOLS_DIR).parent
 CORPUS_PATH = Path(TOOLS_DIR) / "nid_corpus.json"
 
@@ -57,7 +62,7 @@ def load_nid_corpus(path: Path | str | None = None) -> dict[int, list[tuple[str 
             data = json.load(f)
         if not isinstance(data, dict):
             return table
-        derivable = set(data.get("derivable_classes", ["hash-verified", "pspsdk-sourced"]))
+        derivable = set(data.get("derivable_classes", sorted(DERIVABLE_CLASSES)))
         entries = data.get("entries", [])
         if not isinstance(entries, list):
             return table
@@ -70,7 +75,7 @@ def load_nid_corpus(path: Path | str | None = None) -> dict[int, list[tuple[str 
             cls = entry.get("class")
             try:
                 if cls in derivable:
-                    nid = int.from_bytes(hashlib.sha1(name.encode("utf-8")).digest()[:4], "little")
+                    nid = nid_of(name)
                 elif "nid" in entry:
                     nid = int(str(entry["nid"]), 16)
                 else:

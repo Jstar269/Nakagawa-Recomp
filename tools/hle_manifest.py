@@ -810,6 +810,22 @@ def runtime_hle_source() -> str:
     return "\n".join(text for _, text in runtime_hle_sources())
 
 
+def tracked_src_c_files() -> list[Path]:
+    """Return tracked `src/**/*.c` paths so local untracked files do not pollute checks."""
+    import subprocess
+    res = subprocess.run(
+        ["git", "ls-files", "-z", "src"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    )
+    return [
+        ROOT / rel
+        for rel in res.stdout.decode("utf-8").split("\0")
+        if rel.endswith(".c") and (ROOT / rel).exists()
+    ]
+
+
 def registration_calls_outside(files: dict[str, str], composed: Collection[str]) -> list[str]:
     """`path:line` of each registration call in a file the manifest does not read.
 

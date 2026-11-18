@@ -75,6 +75,42 @@ class ClassifierTest(unittest.TestCase):
     def test_sentinel_nid_is_recognised(self) -> None:
         entries = proof.classify_all([(0xC0DE0001, "__UtilityFinishDialog")])
         self.assertEqual(entries[0].classification, "emulator-internal-sentinel")
+        # Even when a name matches the <Library>_<8hex> placeholder pattern, a
+        # sentinel-prefixed NID or leading '__' must classify as sentinel so
+        # --emit-corpus never emits a stored entry that gen_nidnames refuses.
+        for nid, name in ((0xC0DE1234, "sceFoo_c0de1234"), (0x12345678, "__sceFoo_12345678")):
+            with self.subTest(nid=nid, name=name):
+                got = proof.classify_all([(nid, name)])
+                self.assertEqual(got[0].classification, "emulator-internal-sentinel")
+
+    def test_emit_corpus_reports_dropped_sentinel_count_and_reproduces_tracked_corpus(self) -> None:
+        import contextlib
+        import io
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            hdr = Path(td) / "synth.h"
+            out = Path(td) / "corpus.json"
+            hdr.write_text(
+                make_header([(proof.nid_of("sceIoOpen"), "sceIoOpen"), (0xDEAD0001, "sceUnknownExport")]),
+                encoding="utf-8",
+            )
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = proof.main(["--header", str(hdr), "--emit-corpus", str(out)])
+            self.assertEqual(rc, 0)
+            self.assertIn("dropped 1 sentinel", buf.getvalue())
+            emitted = json.loads(out.read_text(encoding="utf-8"))
+            self.assertIn("0 pspsdk-sourced", emitted["provenance"]["regeneration"])
+
+        tracked = json.loads((ROOT / "tools" / "nid_corpus.json").read_text(encoding="utf-8"))
+        pspsdk_names = {
+            e["name"] for e in tracked["entries"] if e["class"] == "pspsdk-sourced"
+        }
+        shipped_entries = proof.classify_all(proof.parse_header(proof.DEFAULT_HEADER.read_text(encoding="utf-8")))
+        rebuilt = proof.build_corpus(shipped_entries, pspsdk_names)
+        self.assertEqual(rebuilt, tracked)
 
     def test_alias_requires_a_verified_base_in_the_same_table(self) -> None:
         base = "scePowerSetClockFrequency"

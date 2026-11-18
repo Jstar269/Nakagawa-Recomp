@@ -575,72 +575,30 @@ def _program_image_table(data, loads, start, end, label, findings, base=0, mode=
             else:
                 name = "(null)"
 
-            if size_words == 4:
-                # PSP SceLibraryEntryTable is 16 bytes. Its entrytable points
-                # to function/variable NIDs followed by their guest addresses.
-                table_a = table_b = 0
-                count = num_funcs + num_vars
-                if count:
-                    entry_address = (
-                        _program_image_ptr(entry_table, base, loads)
-                        if entry_table else None
-                    )
-                    table_bytes = count * 8
-                    raw_tables = (
-                        _program_image_raw_read(data, loads, entry_address, table_bytes)
-                        if entry_address is not None else None
-                    )
-                    if raw_tables is None or len(raw_tables) != table_bytes:
-                        findings.append(ProgramImageFinding(
-                            "table-export-oob", "error", label,
-                            f"export entry table at 0x{entry_table:08x} does not contain "
-                            f"{count} NIDs and addresses",
-                        ))
-                    else:
-                        address_table = entry_address + count * 4
-                        table_a = address_table if num_funcs else 0
-                        table_b = address_table + num_funcs * 4 if num_vars else 0
-            else:
-                # Retain the original bounded 20-byte synthetic record used
-                # by source-owned ProgramImage fixtures.
-                raw_extended = _program_image_raw_read(data, loads, position, 20)
-                if raw_extended is None or len(raw_extended) != 20:
-                    findings.append(ProgramImageFinding(
-                        "table-entry-oob", "error", label,
-                        f"extended entry at 0x{position:08x} is not wholly mapped",
-                    ))
-                    break
-                _, legacy_version, legacy_flags, _, num_vars, num_funcs, table_a_raw, table_b_raw = (
-                    struct.unpack("<IHHBBHII", raw_extended)
+            table_a = table_b = 0
+            count = num_funcs + num_vars
+            if count:
+                entry_address = (
+                    _program_image_ptr(entry_table, base, loads)
+                    if entry_table else None
                 )
-                version = legacy_version
-                flags = legacy_flags
-                table_a = _program_image_ptr(table_a_raw, base, loads) if table_a_raw else 0
-                table_b = _program_image_ptr(table_b_raw, base, loads) if table_b_raw else 0
-                if table_a is None or table_b is None:
+                table_bytes = count * 8
+                raw_tables = (
+                    _program_image_raw_read(data, loads, entry_address, table_bytes)
+                    if entry_address is not None else None
+                )
+                if raw_tables is None or len(raw_tables) != table_bytes:
                     findings.append(ProgramImageFinding(
-                        "pointer-value-oob", "error", label,
-                        "legacy export table pointer cannot be represented",
+                        "table-export-oob", "error", label,
+                        f"export entry table at 0x{entry_table:08x} does not contain "
+                        f"{count} NIDs and addresses",
                     ))
-                    table_a = table_b = 0
-                if num_funcs and (
-                    not table_a
-                    or _program_image_raw_read(data, loads, table_a, num_funcs * 4) is None
-                ):
-                    findings.append(ProgramImageFinding(
-                        "table-function-oob", "error", label,
-                        f"function table at 0x{table_a:08x} has {num_funcs} entries outside a segment",
-                    ))
-                if num_vars and (
-                    not table_b
-                    or _program_image_raw_read(data, loads, table_b, num_vars * 4) is None
-                ):
-                    findings.append(ProgramImageFinding(
-                        "table-variable-oob", "error", label,
-                        f"variable table at 0x{table_b:08x} has {num_vars} entries outside a segment",
-                    ))
+                else:
+                    address_table = entry_address + count * 4
+                    table_a = address_table if num_funcs else 0
+                    table_b = address_table + num_funcs * 4 if num_vars else 0
             entries.append((
-                position, name, int.from_bytes(version_bytes, "little") if size_words == 4 else version,
+                position, name, int.from_bytes(version_bytes, "little"),
                 flags, num_vars, num_funcs, table_a, table_b,
             ))
             position += entry_size
@@ -1605,7 +1563,7 @@ class Prx:
         n = len(rels)
         for r in range(n):
             offset, info = rels[r]
-            rtype = info & 0xF
+            rtype = info & 0xFF
             ofs_seg = (info >> 8) & 0xFF
             addr_seg = (info >> 16) & 0xFF
             if ofs_seg >= nseg or addr_seg >= nseg:
@@ -1645,7 +1603,7 @@ class Prx:
                 # closed.
                 cur = (op & 0xFFFF) << 16
                 for t in range(r + 1, n):
-                    t_type = rels[t][1] & 0xF
+                    t_type = rels[t][1] & 0xFF
                     if t_type == R_MIPS_HI16:
                         continue
                     t_ofs_seg = (rels[t][1] >> 8) & 0xFF

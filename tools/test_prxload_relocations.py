@@ -64,6 +64,19 @@ class Hi16Lo16PairingTests(unittest.TestCase):
             r" \(offset segment 0, target segment 0\)",
         ):
             prx._apply([(0, info(0xF))])
+        with self.assertRaisesRegex(
+            ValueError,
+            r"unsupported Type-A relocation type 0x15 at offset 0x00000000"
+            r" \(offset segment 0, target segment 0\)",
+        ):
+            prx._apply([(0, info(0x15))])
+        with self.assertRaisesRegex(
+            ValueError,
+            r"unsupported Type-A relocation type 0x16 at offset 0x00000004"
+            r" \(offset segment 0, target segment 0\)",
+        ):
+            prx2 = make_prx([0x3C020000, 0x24420000], seg_vaddr=[0])
+            prx2._apply([(0, info(R_MIPS_HI16)), (4, info(0x16))])
 
     def test_known_noop_relocation_types_remain_nonfatal(self):
         # These values are recognized Type-A categories, not unknown types:

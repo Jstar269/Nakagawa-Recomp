@@ -629,6 +629,25 @@ class ManifestValidationTests(unittest.TestCase):
 class GateWiringTests(unittest.TestCase):
     def test_gate_passes_on_current_tree(self) -> None:
         self.assertEqual(import_audit_gate.main(), 0)
+        classes = set(import_audit_gate.MIXED_EXPECTED.values())
+        self.assertEqual(
+            classes,
+            {"dedicated", "fake_success", "controlled_unsupported", "missing"},
+            "MIXED_EXPECTED must cover all four import classifications",
+        )
+        # Verify check_fixtures rejects a duplicate (lib, nid) emission:
+        manifest = import_audit_gate.build_manifest()
+        orig_classify = import_audit_gate.classify_imports
+
+        def dup_classify(funcs, m, **kw):
+            return orig_classify(list(funcs) + [funcs[0]], m, **kw)
+
+        import_audit_gate.classify_imports = dup_classify
+        try:
+            with self.assertRaises(SystemExit):
+                import_audit_gate.check_fixtures(manifest)
+        finally:
+            import_audit_gate.classify_imports = orig_classify
 
     def test_ci_runs_the_gate(self) -> None:
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

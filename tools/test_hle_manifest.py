@@ -379,10 +379,18 @@ class RegistrationOwnerFileTests(unittest.TestCase):
 
     def test_live_production_tree_registers_only_from_composed_sources(self) -> None:
         composed = [path for path, _ in hle_manifest.runtime_hle_sources()]
-        files = {
-            p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8")
-            for p in sorted((ROOT / "src").rglob("*.c"))
-        }
+        untracked = ROOT / "src" / "rt" / "_untracked_audit_probe.c"
+        untracked.write_text(
+            'static void probe(void) { sr_hle_register(0x00000099u, "probe", h_Probe); }\n',
+            encoding="utf-8",
+        )
+        try:
+            files = {
+                p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8")
+                for p in sorted(hle_manifest.tracked_src_c_files())
+            }
+        finally:
+            untracked.unlink(missing_ok=True)
         self.assertEqual(hle_manifest.registration_calls_outside(files, composed), [])
 
     def test_nid_registered_from_two_runtime_units_is_rejected(self) -> None:
@@ -1495,15 +1503,7 @@ static uint32_t h_SynthReal(CpuState *s) {
              for r in manifest["registrations"] if r["name"] == "sceUmdGetErrorStat"],
             [("0x20628e6f", "sceUmdGetErrorStat", "dedicated", "compatibility")],
         )
-        # Compare against the committed baseline rather than a literal, so converting a
-        # stub into a real handler only needs the baseline refresh the gate already demands.
-        baseline_path = Path(__file__).resolve().parent / "import_audit_baseline.json"
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-        committed = sum(
-            1 for v in baseline.values()
-            if isinstance(v, dict) and v.get("classification") == "fake_success"
-        )
-        self.assertEqual(len(fake), committed, "live census must match the committed baseline")
+        self.assertEqual(len(fake), 4, "expected 4 fake_success registrations in the live census")
 
 
 class ControlledRefusalDiagnosticTests(unittest.TestCase):
@@ -2154,6 +2154,17 @@ class LiveEvidenceChainTests(unittest.TestCase):
         )
 
     def test_exercised_stubs_are_reported_rather_than_counted_as_coverage(self) -> None:
+        expected_stubs = [
+            {"nid": e["nid"], "name": e["canonical_name"], "handler": e["registration"]["handler"]}
+            for e in self.chain["entries"]
+            if e["registration"]["classification"] == "fake_success"
+            and (
+                e["exercised"]["conformance_cells"]
+                or e["exercised"]["hle_selftest_dispatch"]
+                or e["exercised"]["psp_oracle_probes"]
+            )
+        ]
+        self.assertEqual(self.chain["summary"]["exercised_stubs"], expected_stubs)
         for stub in self.chain["summary"]["exercised_stubs"]:
             entry = self.by_nid[stub["nid"]]
             self.assertTrue(entry["exercised_stub"])
@@ -2163,10 +2174,16 @@ class LiveEvidenceChainTests(unittest.TestCase):
         manifest = json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))
         apis = hle_manifest.oracle_exercised_apis(manifest)
         registered = {e["canonical_name"] for e in self.chain["entries"]}
+        matched = []
         for api, probes in apis.items():
             if api in registered:
+                matched.append(api)
                 entry = next(e for e in self.chain["entries"] if e["canonical_name"] == api)
                 self.assertEqual(entry["exercised"]["psp_oracle_probes"], probes)
+        self.assertGreater(len(matched), 0, "at least one hardware-probe API must join a registration")
+        fake_entries = [dict(e, canonical_name=f"broken::{e['canonical_name']}") for e in self.chain["entries"]]
+        fake_registered = {e["canonical_name"] for e in fake_entries}
+        self.assertEqual([api for api in apis if api in fake_registered], [])
 
 
 
