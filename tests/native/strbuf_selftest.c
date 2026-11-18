@@ -129,20 +129,31 @@ static void test_append_v_truncates(void) {
 static void test_trace_line_production_size(void) {
     char line[4096];
     size_t n = 0;
-    n = sr_buf_append(line, sizeof(line), n, "%llu pc=0x%08x op=0x%08x",
-                      12345ULL, 0x08804000, 0x00000000);
+    /* Each token's untruncated length, from the formatter itself: the cursor stops at
+     * sizeof(line) - 1 whether or not a token was cut, so only this sum shows that the whole
+     * line was written. */
+    size_t want = 0;
+#define TRACE_TOKEN(...)                                       \
+    do {                                                       \
+        n = sr_buf_append(line, sizeof(line), n, __VA_ARGS__); \
+        int tok = snprintf(NULL, 0, __VA_ARGS__);              \
+        want += tok > 0 ? (size_t)tok : 0u;                    \
+    } while (0)
+    TRACE_TOKEN("%llu pc=0x%08x op=0x%08x", 12345ULL, 0x08804000u, 0x00000000u);
     for (int i = 1; i < 32; i++)
-        n = sr_buf_append(line, sizeof(line), n, " r%d=0x%08x", i, (uint32_t)((uint32_t)i * 0x11111111u));
-    n = sr_buf_append(line, sizeof(line), n, " hi=0x%08x", 0x12345678);
-    n = sr_buf_append(line, sizeof(line), n, " lo=0x%08x", 0x87654321);
+        TRACE_TOKEN(" r%d=0x%08x", i, (uint32_t)((uint32_t)i * 0x11111111u));
+    TRACE_TOKEN(" hi=0x%08x", 0x12345678u);
+    TRACE_TOKEN(" lo=0x%08x", 0x87654321u);
     for (int i = 0; i < 32; i++)
-        n = sr_buf_append(line, sizeof(line), n, " f%d=0x%08x", i, (uint32_t)i);
-    n = sr_buf_append(line, sizeof(line), n, " fcr31=0x%08x", 0x00000000);
+        TRACE_TOKEN(" f%d=0x%08x", i, (uint32_t)i);
+    TRACE_TOKEN(" fcr31=0x%08x", 0x00000000u);
     for (int i = 0; i < 128; i++)
-        n = sr_buf_append(line, sizeof(line), n, " v%d=0x%08x", i, (uint32_t)((uint32_t)i * 0x01010101u));
-    n = sr_buf_append(line, sizeof(line), n, " m32[0x%08x]=0x%08x", 0x08800000, 0xdeadbeef);
+        TRACE_TOKEN(" v%d=0x%08x", i, (uint32_t)((uint32_t)i * 0x01010101u));
+    TRACE_TOKEN(" m32[0x%08x]=0x%08x", 0x08800000u, 0xdeadbeefu);
+#undef TRACE_TOKEN
 
-    CHECK(n < sizeof(line), "trace line with all registers fits in 4096 bytes");
+    CHECK(want < sizeof(line), "trace line with all registers fits in 4096 bytes");
+    CHECK(n == want && strlen(line) == want, "every token of the trace line was written, none cut");
     CHECK(line[n] == '\0', "trace line is NUL terminated");
     line[n] = '\n';
     CHECK(line[n] == '\n' && n + 1 <= sizeof(line), "writer finalize stays in range");
@@ -283,9 +294,9 @@ static void test_no_size_t_underflow_or_wrap(void) {
     CHECK(buf[n] == '\0', "NUL at clamped cursor");
 }
 
-/* Failing-before comparison: prove that using raw snprintf accumulation
- * causes out-of-bounds writes into canaries when formatting truncates. */
-static void test_failing_before_old_arithmetic_overflows_canary(void) {
+/* Two truncating appends in a row leave the bytes on both sides of the buffer untouched: the
+ * cursor clamps at cap - 1 instead of advancing by the would-have-been length. */
+static void test_truncating_appends_keep_canaries(void) {
     struct {
         unsigned char pre[16];
         char buf[8];
@@ -327,7 +338,7 @@ int main(void) {
     test_repeated_appends_after_full_state();
     test_two_byte_buffer();
     test_no_size_t_underflow_or_wrap();
-    test_failing_before_old_arithmetic_overflows_canary();
+    test_truncating_appends_keep_canaries();
 
     if (g_failures == 0) {
         printf("strbuf_selftest: all %d checks passed\n", g_checks);
