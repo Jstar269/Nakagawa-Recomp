@@ -301,8 +301,16 @@ bool nk_launch_format_input_profile_env(
 /* Check if runtime child process is currently running */
 bool nk_launch_is_running(NkLaunchSession *session);
 
-/* Wait for runtime process to exit (timeout_ms < 0 for infinite) */
+/* Wait for runtime process to exit (timeout_ms < 0 for infinite). Returns the
+ * exit code, or -1 when a bounded wait expired with the child still running;
+ * a child that ended with no exit status (a signal on POSIX) also returns -1,
+ * so a caller that must tell the two apart uses nk_launch_wait_status. */
 int nk_launch_wait(NkLaunchSession *session, int timeout_ms);
+
+/* nk_launch_wait that also says why it returned: *timed_out (when not NULL)
+ * is true only when a bounded wait expired with the child still running, which
+ * leaves the session running and the caller's to wait on again or stop. */
+int nk_launch_wait_status(NkLaunchSession *session, int timeout_ms, bool *timed_out);
 
 /* Terminate child process cleanly if running */
 void nk_launch_stop(NkLaunchSession *session);

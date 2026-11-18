@@ -3859,9 +3859,14 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
     if (app->headless_accept_presented_frames > 0u) {
         uint32_t timeout_ms = app->headless_launch_timeout_ms > 0u
             ? app->headless_launch_timeout_ms : NK_HEADLESS_ACCEPTANCE_TIMEOUT_MS;
-        int child_code = nk_launch_wait(&app->launch_session, (int)timeout_ms);
+        /* A timeout is told apart from the exit code: a child that crashed
+           (a signal on POSIX, a negative NTSTATUS exit code on Windows) also
+           reads negative, and is a failed checkpoint, not a hang. */
+        bool child_timed_out = false;
+        int child_code = nk_launch_wait_status(&app->launch_session, (int)timeout_ms,
+                                               &child_timed_out);
         app->is_game_running = false;
-        if (child_code < 0) {
+        if (child_timed_out) {
             fprintf(stderr,
                     "[PLAYER] HEADLESS_ACCEPTANCE status=FAIL reason=timeout timeout_ms=%u\n",
                     timeout_ms);
@@ -3889,10 +3894,12 @@ static int player_run_command_line_launch(PlayerApp *app, int game_index,
            window so a host with no display can still run it. The bound is
            the whole check -- a run that has not ended inside it is reported
            as a timeout with a distinct status, never as a launch. */
-        int headless_code = nk_launch_wait(&app->launch_session,
-                                           NK_HEADLESS_LAUNCH_TIMEOUT_MS);
+        bool headless_timed_out = false;
+        int headless_code = nk_launch_wait_status(&app->launch_session,
+                                                  NK_HEADLESS_LAUNCH_TIMEOUT_MS,
+                                                  &headless_timed_out);
         app->is_game_running = false;
-        if (headless_code < 0) {
+        if (headless_timed_out) {
             fprintf(stderr,
                     "[PLAYER] Headless launch did not finish within %d ms; stopping the child.\n",
                     NK_HEADLESS_LAUNCH_TIMEOUT_MS);
