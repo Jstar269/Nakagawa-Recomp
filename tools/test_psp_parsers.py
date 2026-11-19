@@ -13,6 +13,7 @@ import prxload
 
 from psp_oracle.parse_golden import (
     EXPECTED_CELLS as FPU_EXPECTED_CELLS,
+    EXPECTED_SYSTEM_CASES,
     EXPECTED_ORDERED_CASES as PHASEB_EXPECTED_CASES,
     FPU_EXPECTED_TERMINAL_COUNT as EXPECTED_TERMINAL_COUNT,
     parse_ctrl_clock_output,
@@ -179,6 +180,34 @@ class TestPspParsers(unittest.TestCase):
         )
         with self.assertRaises(ProtocolError):
             parse_ctrl_clock_output(stream)
+
+    def test_ctrl_clock_rejects_foreign_records_in_both_modes(self) -> None:
+        rows = [
+            f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id={case} "
+            "status=PASS result=0x0 out0=0x1\n"
+            for case in EXPECTED_SYSTEM_CASES
+        ]
+        foreign = (
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SMOKE-001 "
+            "case_id=foreign status=FAIL result=0x0\n"
+        )
+        stream = SAMPLE_META + "".join(rows) + foreign
+        for strict in (True, False):
+            with self.subTest(strict=strict), self.assertRaisesRegex(ProtocolError, "foreign"):
+                parse_ctrl_clock_output(stream, require_complete=strict)
+
+    def test_ctrl_clock_rejects_unknown_same_test_case_in_non_strict_mode(self) -> None:
+        rows = [
+            f"NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 case_id={case} "
+            "status=PASS result=0x0 out0=0x1\n"
+            for case in EXPECTED_SYSTEM_CASES
+        ]
+        unknown = (
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-SYSTEM-001 "
+            "case_id=unregistered status=PASS result=0x0\n"
+        )
+        with self.assertRaisesRegex(ProtocolError, "unexpected ctrl/clock case"):
+            parse_ctrl_clock_output(SAMPLE_META + "".join(rows) + unknown, require_complete=False)
 
 
 class TestPartialStreamsNeverPass(unittest.TestCase):
@@ -412,7 +441,7 @@ class TestDualChannelReconciliation(unittest.TestCase):
         """Partial stdout capture (1/16) must fail strict parse and report all_passed=False."""
         with self.assertRaises(ProtocolError) as ctx:
             parse_fpu_vector_output(self.partial_fpu_stdout, require_complete=True)
-        self.assertIn("missing cells", str(ctx.exception))
+        self.assertIn("incomplete", str(ctx.exception))
         report = parse_fpu_vector_output(self.partial_fpu_stdout, require_complete=False)
         self.assertEqual(report.cell_count, 1)
         self.assertFalse(report.complete)
@@ -557,7 +586,7 @@ class TestDualChannelReconciliation(unittest.TestCase):
         )
         with self.assertRaises(ProtocolError) as ctx:
             parse_fpu_vector_output(stream, require_complete=True)
-        self.assertIn("missing cells", str(ctx.exception))
+        self.assertIn("incomplete", str(ctx.exception))
 
         report = parse_fpu_vector_output(stream, require_complete=False)
         self.assertTrue(report.terminal_present)
@@ -608,7 +637,7 @@ class TestDualChannelReconciliation(unittest.TestCase):
             with self.subTest(require_complete=strict):
                 with self.assertRaises(ProtocolError) as ctx:
                     parse_fpu_vector_output(stream, require_complete=strict)
-                self.assertIn("unknown cell", str(ctx.exception))
+                self.assertIn("unknown", str(ctx.exception))
 
     def test_mutation_foreign_test_id_record_rejected(self) -> None:
         """A complete run plus one foreign-probe record must not pass.
