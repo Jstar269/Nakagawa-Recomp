@@ -1098,9 +1098,9 @@ until one is settled the record lists the code as it is.
 - `focus` and `accent_dark` are two fields with one value (`#6B9FF0`): the ring reads `focus`, while focused
   steppers and overlay rows draw their edge in `accent_dark`.
 - Copies of theme colours outside the theme, which a theme change would not reach: `NK_UI_ACCENT_RGBA` and
-  `NK_UI_PAPER_RGBA` (the N1 mark and the showcase art, `nk_ui_widgets.c`), `g_surface_rgba` (the ground, in
-  `nk_ui_waves.c`), and the empty library's disc icon (`library_empty` in `scr_library.c`: the accent and
-  `surface_high` as literals).
+  `NK_UI_PAPER_RGBA` (the N1 mark and the showcase art, `nk_ui_widgets.c`), and the empty library's disc icon
+  (`library_empty` in `scr_library.c`: the accent and `surface_high` as literals). The waves read the
+  ground from the theme (`nk_ui_theme_n1()->surface`), not from a copy.
 - The build and developer log boxes fill with `#080B0F`, darker than the ground, written as a literal in
   `scr_build.c` and again in `scr_devlog.c`; there is no token for it.
 - The art tints (`nk_ui_art_tint`), the showcase fills (`nk_ui_art_fill`) and the showcase pictures' colours
@@ -1190,7 +1190,6 @@ In `pairs`, `kind` `text` lists the type `roles` drawn there; `focus` and `edge`
     {"name": "showcase_red", "source": "src/ui/nk_ui_widgets.c", "symbol": "g_showcase_breakout", "value": "#FF5A5F", "role": "showcase picture"},
     {"name": "empty_disc_accent", "source": "src/player/ui/scr_library.c", "symbol": "library_empty", "value": "#6B9FF0", "role": "the empty library's disc icon; a copy of accent_dark"},
     {"name": "empty_disc_hole", "source": "src/player/ui/scr_library.c", "symbol": "library_empty", "value": "#18202B", "role": "the empty library's disc icon; a copy of surface_high"},
-    {"name": "waves_surface", "source": "src/ui/nk_ui_waves.c", "symbol": "g_surface_rgba", "value": "#0B0F14", "role": "the ground the waves' cap is solved over; a copy of surface"},
     {"name": "wave_base_0", "source": "src/ui/nk_ui_waves.c", "symbol": "g_base_colors", "value": "#5E9CC2", "role": "ribbon colour"},
     {"name": "wave_base_1", "source": "src/ui/nk_ui_waves.c", "symbol": "g_base_colors", "value": "#2F6FD0", "role": "ribbon colour"},
     {"name": "wave_base_2", "source": "src/ui/nk_ui_waves.c", "symbol": "g_base_colors", "value": "#6B9FF0", "role": "ribbon colour"},
