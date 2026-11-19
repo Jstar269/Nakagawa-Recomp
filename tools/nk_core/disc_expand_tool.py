@@ -117,12 +117,23 @@ def find_or_build_tool(root: Union[Path, str] = ROOT) -> Path:
     out = root / "build" / f"nk_disc_expand{suffix}"
     stamp = root / "build" / f"nk_disc_expand{suffix}.stamp"
     core = CORE_SOURCES + (_platform_source(),)
+    link_flags = (
+        "-std=c99", "-O2", "-Wall", "-Wextra", "-Isrc/core", "-Isrc/core/generated",
+        f"-I{LIBCHDR_DIR}/include",
+    )
+    link_libraries = ("-lshell32", "-lole32", "-luuid") if os.name == "nt" else ()
 
     digest = hashlib.sha256()
     digest.update(cc.encode("utf-8"))
     for rel in core + CORE_HEADERS + LIBCHDR_SOURCES:
         digest.update(rel.encode("utf-8"))
         digest.update((root / rel).read_bytes())
+    for header in sorted((root / LIBCHDR_DIR).rglob("*.h")):
+        relative = header.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(header.read_bytes())
+    for argument in (*LIBCHDR_FLAGS, *link_flags, *link_libraries):
+        digest.update(b"\0" + argument.encode("utf-8"))
     key = digest.hexdigest()
     if out.is_file() and stamp.is_file() and stamp.read_text(encoding="utf-8") == key:
         return out
@@ -137,10 +148,7 @@ def find_or_build_tool(root: Union[Path, str] = ROOT) -> Path:
         if proc.returncode != 0:
             raise RuntimeError(f"failed to build libchdr ({rel}):\n{proc.stdout}{proc.stderr}")
         object_paths.append(str(obj))
-    cmd = [cc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Isrc/core", "-Isrc/core/generated",
-           f"-I{LIBCHDR_DIR}/include", *core, *object_paths, "-o", str(out)]
-    if os.name == "nt":
-        cmd.extend(["-lshell32", "-lole32", "-luuid"])
+    cmd = [cc, *link_flags, *core, *object_paths, "-o", str(out), *link_libraries]
     proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError("failed to build nk_disc_expand:\n" + proc.stdout + proc.stderr)

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -14,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import socket
 import subprocess
 import sys
+import shutil
 import tarfile
 import tempfile
 import threading
@@ -76,6 +78,17 @@ class _PayloadHandler(BaseHTTPRequestHandler):
             return
         body = type(self).payloads.get(self.path, type(self).payload)
         self.send_response(200)
+        if type(self).mode == "chunked-incomplete":
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            if type(self).requests == 1:
+                partial = body[: max(1, len(body) // 2)]
+                self.wfile.write(f"{len(body) + 7:X}\r\n".encode("ascii") + partial + b"\r\n")
+                self.wfile.flush()
+                self.close_connection = True
+            else:
+                self.wfile.write(f"{len(body):X}\r\n".encode("ascii") + body + b"\r\n0\r\n\r\n")
+            return
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if type(self).mode == "interrupt" and type(self).requests == 1:
@@ -420,6 +433,51 @@ class TestPrerequisiteFetcher(unittest.TestCase):
         self.assertEqual(_PayloadHandler.requests, 2)
         self.assertFalse((self.root / "payload.zip.part").exists())
 
+    def test_chunked_incomplete_read_retries_and_cleans_the_partial_archive(self) -> None:
+        _PayloadHandler.mode = "chunked-incomplete"
+        item = self.item()
+        destination = download_verified_item(
+            item, self.root / "chunked-payload.zip", retries=2, allow_http=True
+        )
+
+        self.assertEqual(destination.read_bytes(), _PayloadHandler.payload)
+        self.assertEqual(_PayloadHandler.requests, 2)
+        self.assertFalse(destination.with_name(destination.name + ".part").exists())
+
+    def test_local_disk_full_is_not_retried_as_a_network_error(self) -> None:
+        item = self.item()
+        destination = self.root / "disk-full.zip"
+        partial = destination.with_name(destination.name + ".part")
+        original_open = Path.open
+
+        def fail_partial_open(path, *args, **kwargs):
+            if path == partial and args and args[0] == "wb":
+                raise OSError(errno.ENOSPC, "synthetic disk full")
+            return original_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", new=fail_partial_open):
+            with self.assertRaisesRegex(PrerequisiteFetchError, "DISK_FULL"):
+                download_verified_item(item, destination, retries=3, allow_http=True)
+
+        self.assertEqual(_PayloadHandler.requests, 1)
+        self.assertFalse(partial.exists())
+
+    def test_main_records_an_unexpected_install_failure(self) -> None:
+        manifest = self.root / "manifest.json"
+        manifest.write_text(json.dumps({"artifacts": []}), encoding="utf-8")
+        progress = self.root / "progress.jsonl"
+
+        with patch("nk_core.prereq_fetcher.install_items", side_effect=RuntimeError("synthetic failure")):
+            status = fetcher_main([
+                "--manifest", str(manifest), "--data-root", str(self.root / "data"),
+                "--progress-file", str(progress),
+            ])
+
+        self.assertEqual(status, 2)
+        events = [json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(events[-1]["event"], "install-failed")
+        self.assertEqual(events[-1]["code"], "PREREQUISITE_INSTALL_FAILED")
+
     def test_valid_cached_archive_reports_completed_progress_without_network(self) -> None:
         item = self.item()
         destination = download_verified_item(item, self.root / "payload.zip", allow_http=True)
@@ -513,6 +571,68 @@ class TestPrerequisiteFetcher(unittest.TestCase):
         self.assertFalse((install_root / "installed.json").exists())
         staging_root = install_root / ".staging"
         self.assertTrue(not staging_root.exists() or not any(staging_root.iterdir()))
+
+    def test_windows_link_fallback_resolves_links_after_their_targets(self) -> None:
+        from nk_core import prereq_fetcher
+
+        archive = self.root / "link-chain.tar"
+        payload = b"synthetic link target\n"
+        with tarfile.open(archive, "w") as package:
+            first = tarfile.TarInfo("first.txt")
+            first.type = tarfile.SYMTYPE
+            first.linkname = "second.txt"
+            package.addfile(first)
+            second = tarfile.TarInfo("second.txt")
+            second.type = tarfile.SYMTYPE
+            second.linkname = "target.txt"
+            package.addfile(second)
+            target = tarfile.TarInfo("target.txt")
+            target.size = len(payload)
+            package.addfile(target, io.BytesIO(payload))
+
+        install_root = self.root / "link-chain-install"
+        with patch.object(prereq_fetcher.os, "symlink", side_effect=OSError("synthetic privilege refusal")):
+            prereq_fetcher._extract_tar(
+                {"id": "python-test"}, archive, install_root, self.root / "notices"
+            )
+
+        self.assertEqual((install_root / "first.txt").read_bytes(), payload)
+        self.assertEqual((install_root / "second.txt").read_bytes(), payload)
+        self.assertEqual((install_root / "target.txt").read_bytes(), payload)
+
+    def test_failed_shared_prefix_merge_restores_files_already_replaced(self) -> None:
+        from nk_core import prereq_fetcher
+
+        source = self.root / "staged-merge"
+        target = self.root / "shared-prefix"
+        source.mkdir()
+        (source / "z-dir").mkdir()
+        (source / "first.dll").write_bytes(b"synthetic new first\n")
+        (source / "z-dir" / "second.dll").write_bytes(b"synthetic new second\n")
+        (target / "z-dir").mkdir(parents=True)
+        (target / "first.dll").write_bytes(b"synthetic old first\n")
+        (target / "z-dir" / "second.dll").write_bytes(b"synthetic old second\n")
+        original_replace = prereq_fetcher.os.replace
+        failed_destination = False
+
+        def fail_second_artifact(source_path, destination_path):
+            nonlocal failed_destination
+            if (
+                Path(destination_path) == target / "z-dir" / "second.dll"
+                and not failed_destination
+            ):
+                failed_destination = True
+                raise PermissionError(errno.EACCES, "synthetic file-in-use")
+            return original_replace(source_path, destination_path)
+
+        with patch.object(prereq_fetcher.os, "replace", side_effect=fail_second_artifact):
+            with self.assertRaises(PermissionError):
+                prereq_fetcher._merge_staged_tree(source, target)
+
+        self.assertEqual((target / "first.dll").read_bytes(), b"synthetic old first\n")
+        self.assertEqual(
+            (target / "z-dir" / "second.dll").read_bytes(), b"synthetic old second\n"
+        )
 
     def test_installed_record_names_notices_relative_to_the_install_root(self) -> None:
         # The notices were recorded at their temporary staging paths, which are
@@ -788,6 +908,23 @@ class TestPrerequisiteFetcher(unittest.TestCase):
         with (dest / "bundle-inventory.txt").open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(f"{'0' * 64} 1 msys64/../../outside.txt\n")
         with self.assertRaisesRegex(PrerequisiteFetchError, "BUNDLE_PATH_REJECTED"):
+            verify_bundle(manifest, dest)
+
+    def test_bundle_verification_refuses_a_symlinked_directory(self) -> None:
+        manifest = self.bundle_manifest()
+        dest = self.root / "directory-link"
+        stage_bundle(manifest, dest, self.root / "directory-link-cache", allow_http=True)
+        bundle_bin = dest / "msys64" / "ucrt64" / "bin"
+        outside_bin = self.root / "outside-bundle-bin"
+        shutil.copytree(bundle_bin, outside_bin)
+        (outside_bin / "unlisted.synthetic").write_bytes(b"unlisted synthetic file\n")
+        shutil.rmtree(bundle_bin)
+        try:
+            bundle_bin.symlink_to(outside_bin, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"directory symlink creation is unavailable: {type(exc).__name__}")
+
+        with self.assertRaisesRegex(PrerequisiteFetchError, "BUNDLE_INVALID: symlinked path"):
             verify_bundle(manifest, dest)
 
     def test_bundle_refuses_unsafe_destinations_and_incomplete_toolchains(self) -> None:

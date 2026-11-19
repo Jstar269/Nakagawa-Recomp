@@ -38,9 +38,11 @@ early warning, never as the safety argument.
 import os
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -410,9 +412,48 @@ class PerCallPathsReadNoEnvironmentTests(unittest.TestCase):
         self.assertIn('getenv("SCHED_DUMP")', body[: body.index("for (;;)")])
 
 
+#: Configurations produced by `make sched-selftest` (mk/housekeeping.mk + mk/selftests.mk).
+SCHED_SELFTEST_CONFIGS = ("generic", "fixture-a", "fixture-b")
+
+
+def _is_executable_program(path: Path, *, is_windows: bool | None = None) -> bool:
+    """Return True only for a regular file that is an executable program on this platform."""
+    if not path.is_file():
+        return False
+    windows = (os.name == "nt") if is_windows is None else is_windows
+    if windows:
+        return path.suffix.lower() == ".exe"
+    return os.access(path, os.X_OK)
+
+
+def _find_sched_selftest_binary(
+    build_root: Path, *, is_windows: bool | None = None
+) -> Path | None:
+    """Locate a built `sched-selftest` executable under *build_root*.
+
+    Matches only the exact program filenames produced by `mk/selftests.mk`
+    (`sched_selftest_<cfg>.exe`, plus extensionless `sched_selftest_<cfg>` on
+    POSIX when executable).  Never returns directories or non-program files
+    such as `.c`, `.o`, or `.d`.
+    """
+    if not build_root.is_dir():
+        return None
+    windows = (os.name == "nt") if is_windows is None else is_windows
+    allowed_names: tuple[str, ...] = tuple(
+        f"sched_selftest_{cfg}.exe" for cfg in SCHED_SELFTEST_CONFIGS
+    )
+    if not windows:
+        allowed_names += tuple(f"sched_selftest_{cfg}" for cfg in SCHED_SELFTEST_CONFIGS)
+    for name in allowed_names:
+        for candidate in sorted(build_root.rglob(name)):
+            if candidate.name == name and _is_executable_program(candidate, is_windows=windows):
+                return candidate
+    return None
+
+
 #: `make sched-selftest` (every configuration, in the hosted native legs) exports the exact binary it
-#: just built and runs the two execution tests below against it. Without it there is no binary to
-#: trust: a glob of build/ can find a stale or unrelated artifact, so the tests skip and say why.
+#: just built and runs the two execution tests below against it. Run any other way, the tests use a
+#: real built program under build/ (`_find_sched_selftest_binary`), never a decoy, or skip and say why.
 SCHED_SELFTEST_EXE_ENV = "NK_SCHED_SELFTEST_EXE"
 SCHED_SELFTEST_EXECUTION_TESTS = (
     "tools.test_sched_invariants.NovbpaceSemanticsTests.test_pace_setup_binary_execution",
@@ -421,15 +462,20 @@ SCHED_SELFTEST_EXECUTION_TESTS = (
 
 
 def sched_selftest_exe(case: unittest.TestCase) -> str:
-    """The binary `make sched-selftest-one` built; a named variable that points nowhere fails."""
+    """The binary `make sched-selftest-one` built (a named variable that points nowhere fails), else a
+    real built program under build/ (`_find_sched_selftest_binary`), else the test skips."""
     exe = os.environ.get(SCHED_SELFTEST_EXE_ENV, "")
-    if not exe:
-        case.skipTest(f"run through `make sched-selftest`, which sets {SCHED_SELFTEST_EXE_ENV}")
-    path = Path(exe)
-    if not path.is_absolute():
-        path = ROOT / path
-    case.assertTrue(path.is_file(), f"{SCHED_SELFTEST_EXE_ENV}={exe} names no built selftest")
-    return str(path)
+    if exe:
+        path = Path(exe)
+        if not path.is_absolute():
+            path = ROOT / path
+        case.assertTrue(path.is_file(), f"{SCHED_SELFTEST_EXE_ENV}={exe} names no built selftest")
+        return str(path)
+    binary = _find_sched_selftest_binary(ROOT / "build")
+    if binary is None:
+        case.skipTest("sched_selftest executable not found; run through `make sched-selftest`, "
+                      f"which sets {SCHED_SELFTEST_EXE_ENV}")
+    return str(binary)
 
 
 class NovbpaceSemanticsTests(unittest.TestCase):
@@ -442,6 +488,66 @@ class NovbpaceSemanticsTests(unittest.TestCase):
         self.assertIn('strcmp(e, "1")', body)
         self.assertIn("exit(1)", body)
         self.assertIn("SR_NOVBPACE: invalid value", body)
+
+    def test_sched_selftest_lookup_ignores_decoys_and_picks_real_program(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build_root = Path(tmp) / "build"
+            decoys = [
+                build_root / "u08" / "headtree" / "tests" / "native" / "sched_selftest.c",
+                build_root / "mygame" / "sched_selftest_generic.c",
+                build_root / "mygame" / "sched_selftest_generic.o",
+                build_root / "mygame" / "sched_selftest_generic.d",
+                build_root / "mygame" / "sched_selftest_generic.exe.d",
+                build_root / "mygame" / "sched_selftest_generic.log",
+                build_root / "mygame" / "sched_selftest_other.exe",
+                build_root / "mygame" / "sched_selftest_generic",
+            ]
+            for decoy in decoys:
+                decoy.parent.mkdir(parents=True, exist_ok=True)
+                decoy.write_text("not a program\n", encoding="utf-8")
+            # A directory whose name matches the real target must never be chosen.
+            dir_decoy = build_root / "aaa" / "sched_selftest_generic.exe"
+            dir_decoy.mkdir(parents=True)
+
+            # With only decoys present, lookup finds nothing on Windows or POSIX (non-exec).
+            self.assertIsNone(_find_sched_selftest_binary(build_root, is_windows=True))
+            with mock.patch("os.access", return_value=False):
+                self.assertIsNone(_find_sched_selftest_binary(build_root, is_windows=False))
+
+            # Even if a decoy .c/.o/.d is marked executable on POSIX, it must not be chosen.
+            with mock.patch("os.access", side_effect=lambda p, mode: Path(p).suffix in {".c", ".o", ".d"}):
+                self.assertIsNone(_find_sched_selftest_binary(build_root, is_windows=False))
+
+            # Plant fake built programs beside the decoys and verify the real target is chosen.
+            fixture_prog = build_root / "zzz" / "sched_selftest_fixture-a.exe"
+            fixture_prog.parent.mkdir(parents=True, exist_ok=True)
+            fixture_prog.write_bytes(b"MZ")
+            self.assertEqual(_find_sched_selftest_binary(build_root, is_windows=True), fixture_prog)
+
+            generic_prog = build_root / "mygame" / "sched_selftest_generic.exe"
+            generic_prog.write_bytes(b"MZ")
+            self.assertEqual(_find_sched_selftest_binary(build_root, is_windows=True), generic_prog)
+
+            with mock.patch("os.access", side_effect=lambda p, mode: Path(p) == generic_prog):
+                self.assertEqual(_find_sched_selftest_binary(build_root, is_windows=False), generic_prog)
+
+            # On POSIX, an executable extensionless target is accepted when no .exe is executable.
+            posix_prog = build_root / "mygame" / "sched_selftest_generic"
+            with mock.patch("os.access", side_effect=lambda p, mode: Path(p) == posix_prog):
+                self.assertEqual(_find_sched_selftest_binary(build_root, is_windows=False), posix_prog)
+
+    def test_pace_setup_skips_when_only_decoys_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_root = Path(tmp)
+            decoy = fake_root / "build" / "u08" / "headtree" / "tests" / "native" / "sched_selftest.c"
+            decoy.parent.mkdir(parents=True)
+            decoy.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            # Not through `make sched-selftest`, whose exported binary would be used before any lookup.
+            env = {k: v for k, v in os.environ.items() if k != SCHED_SELFTEST_EXE_ENV}
+            with mock.patch.object(sys.modules[__name__], "ROOT", fake_root), \
+                    mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(unittest.SkipTest):
+                    self.test_pace_setup_binary_execution()
 
     def test_pace_setup_binary_execution(self):
         exe = sched_selftest_exe(self)

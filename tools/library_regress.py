@@ -65,7 +65,6 @@ are never published. This tool holds no title data of its own.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -77,12 +76,14 @@ import subprocess
 import sys
 import time
 from typing import Any, Callable, Iterable
+import uuid
+
+from library_build import MANIFEST_FORMAT, _read_json_strict as _read_json, _utc_now
 
 ROOT = Path(__file__).resolve().parents[1]
 LIBRARY_BUILD = ROOT / "tools" / "library_build.py"
 SNAPSHOT_FORMAT = "nakagawa-library-ladder"
 SNAPSHOT_SCHEMA_VERSION = 1
-MANIFEST_FORMAT = "nakagawa-library-build"
 RUNGS = ("build_failed", "built", "first_frame", "frames")
 # Alive (1) ranks above stopped (0); the kinds of stop are told apart, never ranked.
 END_RANK = {"crash": 0, "hang": 0, "stalled": 0, "guest_exit": 0, "named_stop": 0, "exited": 1, "running": 1}
@@ -101,15 +102,7 @@ ENVIRONMENT_CLASSES = frozenset({
 })
 CRASH_CLASSES = frozenset({"NATIVE_RUNTIME_CRASH", "LAUNCH_FAILED"})
 # Titles that have not ended in this run (still to build, building, or a copy of another disc).
-UNTESTED_OUTCOMES = frozenset({"PENDING", "RUNNING", "DUPLICATE"})
-
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+UNTESTED_OUTCOMES = frozenset({"PENDING", "RUNNING", "DUPLICATE", "REPLACED"})
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -130,6 +123,8 @@ def _first_runtime_import(launch: dict[str, Any]) -> str | None:
     if not isinstance(imports, list) or not imports:
         return None
     first = imports[0]
+    if isinstance(first, dict):
+        return _stop_name(first.get("library"), first.get("nid_name") or first.get("nid"))
     if isinstance(first, str) and first.startswith("{"):
         try:
             row = json.loads(first)
@@ -205,17 +200,32 @@ def classify(record: dict[str, Any], frames_threshold: int = DEFAULT_FRAMES) -> 
 
 
 def _record_commit(record: dict[str, Any], manifest: dict[str, Any]) -> str | None:
-    for settings in (record.get("run_settings"), manifest.get("settings")):
-        commit = settings.get("source_commit") if isinstance(settings, dict) else None
-        if isinstance(commit, str):
-            return commit
-    return None
+    run_settings = record.get("run_settings")
+    if isinstance(run_settings, dict):
+        commit = run_settings.get("source_commit")
+        return commit if isinstance(commit, str) else None
+    settings = manifest.get("settings")
+    commit = settings.get("source_commit") if isinstance(settings, dict) else None
+    return commit if isinstance(commit, str) else None
 
 
 def _launch_timeout(manifest: dict[str, Any]) -> int | None:
     settings = manifest.get("settings")
     timeout = settings.get("launch_timeout_seconds") if isinstance(settings, dict) else None
     return timeout if isinstance(timeout, int) else None
+
+
+def _record_timeout(record: dict[str, Any], manifest: dict[str, Any], key: str,
+                    fallback: int | None = None) -> int | None:
+    run_settings = record.get("run_settings")
+    if isinstance(run_settings, dict):
+        value = run_settings.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+    settings = manifest.get("settings")
+    value = settings.get(key) if isinstance(settings, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return fallback
 
 
 def snapshot_from_manifest(manifest: dict[str, Any], *, mode: str = "full",
@@ -239,10 +249,17 @@ def snapshot_from_manifest(manifest: dict[str, Any], *, mode: str = "full",
             untested[record["source_key"]] = {"outcome": record.get("outcome") or "NO_OUTCOME",
                                               "disc_id": record.get("disc_id"), "title": record.get("title")}
             continue
+        record_commit = _record_commit(record, manifest)
+        if not isinstance(record.get("run_settings"), dict):
+            record_commit = record_commit or commit
         place.update({
             "disc_id": record.get("disc_id"),
             "title": record.get("title"),
-            "commit": _record_commit(record, manifest) or commit,
+            "commit": record_commit,
+            "launch_timeout_seconds": _record_timeout(
+                record, manifest, "launch_timeout_seconds", launch_timeout
+            ),
+            "title_timeout_seconds": _record_timeout(record, manifest, "title_timeout_seconds"),
             "wall_seconds": record.get("wall_seconds"),
         })
         titles[record["source_key"]] = place
@@ -277,8 +294,11 @@ def load_snapshot(path: Path, **manifest_options: Any) -> dict[str, Any]:
 
 def _snapshot_name(snapshot: dict[str, Any]) -> str:
     stamp = snapshot["recorded_at"].replace(":", "").replace("-", "")
-    commit = snapshot["commits"][-1][:12] if len(snapshot["commits"]) == 1 else (
-        f"{len(snapshot['commits'])}commits" if snapshot["commits"] else "nocommit")
+    commits = snapshot["commits"]
+    if len(commits) == 1 and isinstance(commits[0], str) and _COMMIT.fullmatch(commits[0]):
+        commit = commits[0][:12]
+    else:
+        commit = f"{len(commits)}commits" if len(commits) > 1 else "nocommit"
     return f"{stamp}-{snapshot['mode']}-{commit}.json"
 
 
@@ -291,21 +311,44 @@ def record(snapshot: dict[str, Any], store: Path) -> Path:
                if path.name.split("-", 1)[0].isdigit()]
     number = max(numbers, default=0) + 1
     while True:
-        path = folder / f"{number:05d}-{_snapshot_name(snapshot)}"
+        claim = folder / f"{number:05d}.claim"
         try:
-            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))  # claim the number
+            descriptor = os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             number += 1  # another record took it at the same moment
             continue
-        _write_json(path, snapshot)
-        return path
+        if any(folder.glob(f"{number:05d}-*.json")):
+            # A record that finished after this one read the folder already holds the
+            # number: its snapshot is in place before its claim is released.
+            os.close(descriptor)
+            claim.unlink()
+            number += 1
+            continue
+        path = folder / f"{number:05d}-{_snapshot_name(snapshot)}"
+        try:
+            os.close(descriptor)
+            _write_json(path, snapshot)
+            return path
+        except BaseException:
+            for incomplete in (path, path.with_name(path.name + ".tmp")):
+                try:
+                    incomplete.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+        finally:
+            try:
+                claim.unlink()
+            except FileNotFoundError:
+                pass
 
 
 # -- comparison ------------------------------------------------------------------------------
 
 def _score(place: dict[str, Any], ceiling: int, like: bool) -> tuple[int, ...]:
     rung = min(RUNGS.index(place["rung"]), ceiling)
-    return (rung, END_RANK[place["end"]]) if like else (rung,)
+    return (rung, END_RANK[place["end"]]) \
+        if like and ceiling == RUNGS.index("frames") else (rung,)
 
 
 def same_stop(old: str | None, new: str | None) -> bool:
@@ -333,6 +376,30 @@ def _row(key: str, before: dict[str, Any], after: dict[str, Any] | None,
     }
 
 
+def _title_like_for_like(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    old_ladder: dict[str, Any],
+    new_ladder: dict[str, Any],
+    manifest_like: bool,
+) -> bool:
+    if old_ladder.get("frames_threshold") != new_ladder.get("frames_threshold"):
+        return False
+    old_has_timeout = "launch_timeout_seconds" in before
+    new_has_timeout = "launch_timeout_seconds" in after
+    if old_has_timeout != new_has_timeout:
+        return False
+    if not old_has_timeout:
+        return manifest_like
+    old_timeout = before.get("launch_timeout_seconds")
+    new_timeout = after.get("launch_timeout_seconds")
+    if old_timeout is None or new_timeout is None or old_timeout != new_timeout:
+        return False
+    old_title_timeout = before.get("title_timeout_seconds")
+    new_title_timeout = after.get("title_timeout_seconds")
+    return old_title_timeout == new_title_timeout
+
+
 def compare(old: dict[str, Any], new: dict[str, Any], *, keys: Iterable[str] | None = None,
             partial: bool = False) -> dict[str, Any]:
     """Judge every title the old run judged (or ``keys``, or a fast run's own titles): down, up,
@@ -340,12 +407,11 @@ def compare(old: dict[str, Any], new: dict[str, Any], *, keys: Iterable[str] | N
     titles the new run has not ended (still to build, or not in it at all) instead of
     counting them as no verdict."""
     old_ladder, new_ladder = old["ladder"], new["ladder"]
-    like = (old_ladder.get("launch_timeout_seconds") is not None
-            and old_ladder.get("launch_timeout_seconds") == new_ladder.get("launch_timeout_seconds")
-            and old_ladder.get("frames_threshold") == new_ladder.get("frames_threshold"))
-    ceiling = min(RUNGS.index(old_ladder["ceiling"]), RUNGS.index(new_ladder["ceiling"]))
-    if not like:
-        ceiling = min(ceiling, RUNGS.index("first_frame"))
+    manifest_like = (old_ladder.get("launch_timeout_seconds") is not None
+                     and old_ladder.get("launch_timeout_seconds") == new_ladder.get("launch_timeout_seconds")
+                     and old_ladder.get("frames_threshold") == new_ladder.get("frames_threshold"))
+    maximum_ceiling = min(RUNGS.index(old_ladder["ceiling"]), RUNGS.index(new_ladder["ceiling"]))
+    compared_likeness: list[bool] = []
     untested_titles: dict[str, Any] = new.get("untested_titles") or {}
     if keys is not None:
         scope = set(keys)
@@ -383,15 +449,23 @@ def compare(old: dict[str, Any], new: dict[str, Any], *, keys: Iterable[str] | N
             row["reason"] = after.get("stop") or after["end"]
             rows["no_verdict"].append(row)
             continue
-        old_score, new_score = _score(before, ceiling, like), _score(after, ceiling, like)
+        title_like = _title_like_for_like(before, after, old_ladder, new_ladder, manifest_like)
+        compared_likeness.append(title_like)
+        title_ceiling = maximum_ceiling if title_like else min(
+            maximum_ceiling, RUNGS.index("first_frame")
+        )
+        old_score = _score(before, title_ceiling, title_like)
+        new_score = _score(after, title_ceiling, title_like)
         if new_score < old_score:
             rows["down"].append(row)
         elif new_score > old_score:
             rows["up"].append(row)
-        elif like and (before["end"] != after["end"] or not same_stop(before["stop"], after["stop"])):
+        elif title_like and (before["end"] != after["end"] or not same_stop(before["stop"], after["stop"])):
             rows["changed"].append(row)
         else:
             same += 1
+    like = all(compared_likeness) if compared_likeness else manifest_like
+    ceiling = maximum_ceiling if like else min(maximum_ceiling, RUNGS.index("first_frame"))
     compared = len(rows["down"]) + len(rows["up"]) + len(rows["changed"]) + same
     if rows["down"]:
         verdict = "down"
@@ -491,8 +565,18 @@ def history(store: Path, needle: str) -> list[dict[str, Any]]:
     folded = needle.casefold()
     rows = []
     for path in sorted((store / "snapshots").glob("*.json")):
-        snapshot = _read_json(path)
-        for key, place in sorted(snapshot.get("titles", {}).items()):
+        try:
+            snapshot = _read_json(path)
+        except (OSError, ValueError) as exc:
+            print(f"library_regress: skipped snapshot {path.name} ({type(exc).__name__})", file=sys.stderr)
+            continue
+        titles = snapshot.get("titles") if isinstance(snapshot, dict) else None
+        if not isinstance(titles, dict):
+            print(f"library_regress: skipped snapshot {path.name} (invalid titles object)", file=sys.stderr)
+            continue
+        for key, place in sorted(titles.items()):
+            if not isinstance(place, dict):
+                continue
             if folded in (key, str(place.get("disc_id") or "").casefold()):
                 rows.append({"snapshot": path.name, "mode": snapshot.get("mode"), "source_key": key,
                              **{field: place.get(field) for field in
@@ -705,35 +789,36 @@ def run_fast(args: argparse.Namespace, *,
              log: Callable[[str], None] = print) -> int:
     store: Path = args.store
     baseline = load_snapshot(args.baseline)
-    state_path = _fast_state_path(store)
-    state = _read_json(state_path) if state_path.is_file() else {"cursor": 0, "runs": 0}
-    cursor = args.cursor if args.cursor is not None else int(state.get("cursor", 0))
-    choice = select_fast(baseline, budget_seconds=args.budget_minutes * 60, jobs=args.jobs,
-                         cursor=cursor)
-    log(f"fast: {len(choice['selected'])} of {choice['candidates']} first-frame titles from cursor "
-        f"{choice['cursor']}, about {choice['estimated_seconds'] // 60} min on {args.jobs} jobs"
-        + (f"; {len(choice['too_slow'])} over the budget alone, passed over" if choice["too_slow"] else ""))
-    if not choice["selected"]:
-        log("fast: nothing to run")
-        return EXIT_NO_VERDICT
-    run_id = f"{_utc_now().replace(':', '').replace('-', '')}-fast"
-    run_dir = store / "runs" / run_id
-    run_dir.mkdir(parents=True)
-    only = run_dir / "only.txt"
-    only.write_text("".join(f"{key}\n" for key in choice["selected"]), encoding="utf-8")
-    _write_json(run_dir / "selection.json", choice)
-    if args.dry_run:
-        log(f"fast: dry run; the list is {only}")
-        return 0
-    scratch = args.scratch_root / run_id
     lock = None
-    if args.slot_dir is not None:
+    if not args.dry_run and args.slot_dir is not None:
         lock = acquire_slot(args.slot_dir, args.slot_name, args.max_slots, quiet_globs=args.quiet_lock,
                             log=log)
         if lock is None:
             log("fast: no title slot")
             return EXIT_NO_VERDICT
+    scratch: Path | None = None
     try:
+        state_path = _fast_state_path(store)
+        state = _read_json(state_path) if state_path.is_file() else {"cursor": 0, "runs": 0}
+        cursor = args.cursor if args.cursor is not None else int(state.get("cursor", 0))
+        choice = select_fast(baseline, budget_seconds=args.budget_minutes * 60, jobs=args.jobs,
+                             cursor=cursor)
+        log(f"fast: {len(choice['selected'])} of {choice['candidates']} first-frame titles from cursor "
+            f"{choice['cursor']}, about {choice['estimated_seconds'] // 60} min on {args.jobs} jobs"
+            + (f"; {len(choice['too_slow'])} over the budget alone, passed over" if choice["too_slow"] else ""))
+        if not choice["selected"]:
+            log("fast: nothing to run")
+            return EXIT_NO_VERDICT
+        run_id = f"{_utc_now().replace(':', '').replace('-', '')}-fast-{uuid.uuid4().hex[:8]}"
+        run_dir = store / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        only = run_dir / "only.txt"
+        only.write_text("".join(f"{key}\n" for key in choice["selected"]), encoding="utf-8")
+        _write_json(run_dir / "selection.json", choice)
+        if args.dry_run:
+            log(f"fast: dry run; the list is {only}")
+            return 0
+        scratch = args.scratch_root / run_id
         command = [sys.executable, str(LIBRARY_BUILD), str(args.disc_root),
                    "--user-data-root", str(scratch / "data"), "--work-dir", str(scratch / "work"),
                    "--manifest-dir", str(run_dir), "--jobs", str(args.jobs), "--only", str(only)]
@@ -746,6 +831,8 @@ def run_fast(args: argparse.Namespace, *,
                 _remove_slot_file(lock)
             except OSError as error:  # the run's result still counts; a later run reclaims the lock
                 log(f"fast: could not remove {lock}: {error}; it is reclaimed once this process is gone")
+        if scratch is not None and not args.keep_scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
     manifest_path = run_dir / "library-build.json"
     if completed.returncode != 0 or not manifest_path.is_file():
         log(f"fast: library_build.py ended {completed.returncode}; no verdict")
@@ -763,8 +850,6 @@ def run_fast(args: argparse.Namespace, *,
     state.update(runs=int(state.get("runs", 0)) + 1, last_run=run_id, last_snapshot=path.name,
                  last_verdict=result["verdict"])
     _write_json(state_path, state)
-    if not args.keep_scratch:
-        shutil.rmtree(scratch, ignore_errors=True)
     return exit_code(result)
 
 
