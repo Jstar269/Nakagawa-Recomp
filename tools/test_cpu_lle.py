@@ -132,6 +132,7 @@ def makefile_link_recipes(makefile, source):
 PYTHON_LINK_AUDIT_ONLY = frozenset({
     "test_dispatch_c.py",           # compiles tests/native/dispatch_selftest.c alone
     "test_title_runtime_config.py", # audits Makefile recipes; compiles title_config.c alone
+    "test_trace_window_probe.py",   # reads guest_interp.c as text; compiles flight_recorder.c alone
 })
 
 

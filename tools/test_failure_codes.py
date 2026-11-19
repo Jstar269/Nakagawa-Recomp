@@ -180,7 +180,7 @@ PLAYER_NOT_CODES = {
     # Discord RPC event names and the HTTP method
     "READY", "ERROR", "GET",
     # environment variables without a project prefix
-    "APPDATA", "PATH", "PYTHON", "USERPROFILE",
+    "APPDATA", "PATH", "PYTHON", "USER", "USERNAME", "USERPROFILE",
     # disc folders, PARAM.SFO keys, module and folder names, file magic and disc-format names
     "EXTRACTED", "KMODULE", "PPSSPP", "SYSDIR", "TEST", "TITLE", "USRDIR", "CD001", "CISO", "CSO",
     "ELF", "IHDR", "ZISO", "ZSO",
