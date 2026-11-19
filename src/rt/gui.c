@@ -388,6 +388,8 @@ static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
     s_ace_present_kind = ACE_PRESENT_REAL;
     s_ace_show_pending = ACE_SHOW_REAL;
     gui_ace_collect_motion();
+    /* What the pass changes is kept until its present ends: undone if it is never submitted. */
+    ace_smooth_begin(s_ace_smooth);
     if (!src) {
         VkImage held = ace_smooth_held(s_ace_smooth, vk_cmd);
         if (!held) return NULL;
@@ -440,10 +442,17 @@ static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
  * the owed frame and holds the new one again (ace.h, ace_pace_owed_failed). Failed before its
  * submission, the pass's commands never ran, so the frame is given up and counted. The new frame of a
  * failed in-between is not held, so the CPU present shows it as itself and no VBLANK shows it
- * again, and an in-between nobody saw is not measured. */
+ * again, and an in-between nobody saw is not measured. Whatever the pass showed, when its commands
+ * were never submitted the pass's own state goes back to what it was before it (ace_smooth_discard):
+ * its private frames still hold what they held, in the layouts they were in. The frame it took is
+ * then not the pass's (ace_smooth_untake), so the next one is not paired with it. */
 static void gui_ace_show_done(int result, uint64_t submission) {
     const AceShow shown = s_ace_show_pending;
     s_ace_show_pending = ACE_SHOW_REAL;
+    if (!submission) {
+        ace_smooth_discard(s_ace_smooth);
+        ace_smooth_untake();
+    }
     if (shown == ACE_SHOW_OWED) {
         if (result == 1) {
             ace_smooth_shown_owed(SDL_GetTicksNS());
@@ -3091,9 +3100,13 @@ typedef struct {
     int fails;                  /* how many */
     uint64_t submitted;         /* present submissions made */
     unsigned keeps;             /* pictures the recording was told to keep (sr_videorec_frame_keep) */
+    int gaps;                   /* in-betweens made of two frames that are not consecutive */
 } BusyRun;
 
 static BusyRun *s_busy;
+/* The first present made in this VBLANK fails before its submission (a capture buffer that cannot
+ * be made): the show pass ran, but its commands never reach the GPU. */
+static uint32_t s_busy_unsubmitted_vcount = BUSY_NO_FAIL;
 
 static struct {
     int have_new, have_old;     /* the frames the pass keeps, by number */
@@ -3123,6 +3136,30 @@ void ace_smooth_unrecord(AceBetween *s) {
     s_stub_smooth.have_old = 0;
 }
 
+/* The pass's frames as they were at the show pass's start, as ace_smooth.c keeps them. */
+static struct { int valid, have_new, have_old, newest, older; uint64_t serial; } s_stub_undo;
+static unsigned s_stub_discards;
+void ace_smooth_begin(AceBetween *s) {
+    (void)s;
+    s_stub_undo.valid = 1;
+    s_stub_undo.have_new = s_stub_smooth.have_new;
+    s_stub_undo.have_old = s_stub_smooth.have_old;
+    s_stub_undo.newest = s_stub_smooth.newest;
+    s_stub_undo.older = s_stub_smooth.older;
+    s_stub_undo.serial = s_stub_smooth.serial;
+}
+void ace_smooth_discard(AceBetween *s) {
+    (void)s;
+    if (!s_stub_undo.valid) return;
+    s_stub_undo.valid = 0;
+    s_stub_discards++;
+    s_stub_smooth.have_new = s_stub_undo.have_new;
+    s_stub_smooth.have_old = s_stub_undo.have_old;
+    s_stub_smooth.newest = s_stub_undo.newest;
+    s_stub_smooth.older = s_stub_undo.older;
+    s_stub_smooth.serial = s_stub_undo.serial;
+}
+
 /* A failed present is an out-of-date swapchain, unless a run makes the renderer terminal. */
 static int s_stub_terminal;
 int sdl3vk_renderer_terminal(void) { return s_stub_terminal; }
@@ -3142,6 +3179,7 @@ VkImage ace_smooth_record_aux(AceBetween *s, VkCommandBuffer cmd, VkImage src, i
     s_stub_smooth.newest = (int)(uintptr_t)src - BUSY_IMG_FRAME;
     s_stub_smooth.have_new = 1;
     if (!between || !had) return VK_NULL_HANDLE;
+    if (s_busy && s_stub_smooth.newest != s_stub_smooth.older + 1) s_busy->gaps++;
     s_stub_smooth.serial++;
     s_stub_smooth.submission[s_stub_smooth.serial % ACE_SMOOTH_MOTION_RING] = 0;   /* not submitted yet */
     return busy_image(BUSY_IMG_BETWEEN, s_stub_smooth.newest);
@@ -3200,6 +3238,9 @@ static int busy_present(VkImage src) {
     uint64_t submission = 0;
     if (!shown) {
         result = -1;                    /* nothing to show: nothing is submitted */
+    } else if (r->vcount == s_busy_unsubmitted_vcount) {
+        s_busy_unsubmitted_vcount = BUSY_NO_FAIL;
+        result = -1;                    /* failed after the show pass, before the submission */
     } else {
         submission = ++r->submitted;
         if (s_stub_smooth.serial != made)
@@ -3415,6 +3456,21 @@ static void selftest_busy_display_keeps_real_frames(void) {
      * guessed. */
     busy_run(&r, 0, busy_never, BUSY_NO_FAIL, 0, 5u);
     busy_check_motion(&r, 1u);
+
+    /* An in-between's present fails before its submission (frame 150's flip): the pass's commands
+     * never ran, so what it recorded is undone (ace_smooth_discard) and the pass still holds 149.
+     * The CPU present of the same flip shows 150 as itself, and 151 is not paired with 149, two
+     * frames back: it is shown as itself, counted unpaired, and in-betweens resume with 152. */
+    s_stub_discards = 0;
+    s_busy_unsubmitted_vcount = 300u;
+    busy_run(&r, 0, busy_never, BUSY_NO_FAIL, 0, 0u);
+    assert(s_busy_unsubmitted_vcount == BUSY_NO_FAIL);
+    assert(s_stub_discards == 1u && r.gaps == 0);
+    assert(!r.between[150] && r.real[150] == 1 && !r.between[151] && r.real[151] == 1);
+    assert(r.between[152] == 1 && busy_most(r.real) == 1);
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES && r.order_ok);
+    busy_check_motion(&r, 0u);
+    busy_check_report("\"superseded\": 0, \"unpaired\": 1, \"busy\": 0}");
     g_ace_on = 0;
 }
 

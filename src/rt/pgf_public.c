@@ -1234,20 +1234,9 @@ static PgfDrawStatus pgf_plan_component(const PgfTarget *target, const PgfGlyph 
     plan->row_count = last_y > first_y ? (uint32_t)(last_y - first_y) : 0u;
     plan->dirty_count = 0u;
 
-    for (y = first_y; y < last_y; ++y) {
-        uint64_t row_offset = (uint64_t)y * target->bytes_per_line;
-        uint64_t byte_start = target->format <= 1u ?
-                              actual_x0 / 2u : actual_x0 * target->unit_bytes;
-        uint64_t byte_end = target->format <= 1u ?
-                            (actual_x1 + 1u) / 2u : actual_x1 * target->unit_bytes;
-        uint32_t ignored_address;
-        if (byte_end <= byte_start ||
-            !pgf_guest_row_span(target->buffer_address, row_offset, byte_start,
-                                byte_end - byte_start, &ignored_address)) {
-            return PGF_DRAW_BAD_BUFFER;
-        }
-    }
-
+    /* The dirty span of each row starts at actual_x0 and ends at or past actual_x1 (the
+       addressable width is at least the writable width), and every row has one, so checking the
+       dirty spans checks every byte a pixel is written to. */
     dirty_x0 = target->base_x < 0 ? 0u : (uint64_t)target->base_x;
     dirty_x1 = pixel_x1 < 0 ? 0u : (uint64_t)pixel_x1;
     if (dirty_x1 > target->addressable_width) dirty_x1 = target->addressable_width;

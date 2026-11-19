@@ -156,6 +156,12 @@ def load_routing_manifest(source: Any = DEFAULT_ROUTING) -> dict[int, dict[str, 
                 if not isinstance(value, str) or not value:
                     raise RoutingManifestError(f"routing issue {number} {field} must be a non-empty string")
                 entry[field] = value
+        if "hardware_test_id" in entry and state != "hardware":
+            # A matrix row for a non-hardware state says no PSP evidence is needed, so a
+            # hardware test id there would contradict the row it is printed in.
+            raise RoutingManifestError(
+                f"routing issue {number} has hardware_test_id but primary_state {state!r}, not 'hardware'"
+            )
         routes[number] = entry
     return routes
 

@@ -87,9 +87,60 @@ static void xst_pattern(uint32_t *t, uint32_t seed) {
         }
 }
 
+/* Guest bytes: guest VRAM and the CLUT as the cells' own writes left them, while the cells run
+ * (gegpu_texscale_selftest). Every byte a cell writes on purpose goes through xst_wrote (VRAM) or
+ * xst_clut_wrote, which copy it here, so a byte that differs anywhere else, outside the frames the
+ * draws write back (XST_BASE's, and XST_RTT's while a cell draws into it), was written by something
+ * no cell asked for: a scaling step. A check runs at each xst_reset and after each cell, so a write
+ * made inside a cell's own draws is seen. */
+#define XST_VRAM_BYTES 0x00200000u
+static uint8_t *s_xst_guest;                          /* NULL: no check runs */
+static uint8_t s_xst_guest_clut[sizeof(s_ge->clutram)];
+static const char *s_xst_guest_when;                  /* the first check that found a byte, or NULL */
+static size_t s_xst_guest_off;                        /* its VRAM offset; XST_VRAM_BYTES: a CLUT byte */
+static int s_xst_rtt_target;                          /* XST_RTT is a target until the next xst_reset */
+
+static int xst_guest_frame(size_t off) {
+    const size_t n = XST_STRIDE * FB_H * 4u, fb = XST_BASE & 0x001FFFFFu, rtt = XST_RTT & 0x001FFFFFu;
+    return (off >= fb && off < fb + n) || (s_xst_rtt_target && off >= rtt && off < rtt + n);
+}
+
+static void xst_guest_sync(void) {
+    if (!s_xst_guest) return;
+    memcpy(s_xst_guest, SR_HOST(0x04000000u), XST_VRAM_BYTES);
+    memcpy(s_xst_guest_clut, s_ge->clutram, sizeof(s_xst_guest_clut));
+}
+
+static void xst_guest_check(const char *when) {
+    if (!s_xst_guest || s_xst_guest_when) return;
+    const uint8_t *now = (const uint8_t *)SR_HOST(0x04000000u);
+    for (size_t b = 0; b < XST_VRAM_BYTES; b++)
+        if (!xst_guest_frame(b) && now[b] != s_xst_guest[b]) {
+            s_xst_guest_when = when;
+            s_xst_guest_off = b;
+            return;
+        }
+    if (memcmp(s_xst_guest_clut, s_ge->clutram, sizeof(s_xst_guest_clut)) != 0) {
+        s_xst_guest_when = when;
+        s_xst_guest_off = XST_VRAM_BYTES;
+    }
+}
+
+/* A cell wrote guest bytes [addr, addr + len) on purpose: the renderer is told, and the copy kept. */
+static void xst_wrote(uint32_t addr, uint32_t len) {
+    sr_gpu_vram_dirty(addr, len);
+    const uint32_t off = addr & 0x001FFFFFu;
+    if (s_xst_guest && (addr & 0xFFE00000u) == 0x04000000u && len <= XST_VRAM_BYTES - off)
+        memcpy(s_xst_guest + off, SR_HOST(addr), len);
+}
+
+static void xst_clut_wrote(void) {
+    if (s_xst_guest) memcpy(s_xst_guest_clut, s_ge->clutram, sizeof(s_xst_guest_clut));
+}
+
 static void xst_upload(const uint32_t *t) {
     memcpy(SR_HOST(XST_TEX), t, sizeof(uint32_t) * XST_W * XST_H);
-    sr_gpu_vram_dirty(XST_TEX, sizeof(uint32_t) * XST_W * XST_H);
+    xst_wrote(XST_TEX, sizeof(uint32_t) * XST_W * XST_H);
 }
 
 /* GE state for a 16x16 8888 VRAM texture drawn by REPLACE into the 8888 target at `base`. */
@@ -106,6 +157,7 @@ static void xst_state(uint32_t base, uint32_t tex_addr, uint32_t fmt, int linear
     s_ge->tex_wrap = clamp ? 0x101u : 0u;
     s_ge->vtype = 1u << 23;                  /* through mode */
     ge_state_note_external_write();
+    xst_clut_wrote();                        /* the state reset cleared the palette */
 }
 
 /* A 1:1 sprite of the whole texture at guest (x, y), read back to guest VRAM. */
@@ -179,13 +231,25 @@ static int xst_report(const char *cell, int x0, int y0, const uint32_t *want, co
     return 0;
 }
 
+/* Whether the draws since `bound0` bound a scaled copy (`copy` 1) or none (`copy` 0). A copy can
+ * read back as the texture where the guest samples it at a texel xBRZ kept (at factor 4 and render
+ * scale 2: seeds 23 and 67 and the CLUT cell's second palette), and then the readback passes
+ * either way; the bind count tells a copy that landed from one that did not. */
+static int xst_bound(const char *cell, uint64_t bound0, int copy, const char *what) {
+    if ((s_cnt_xs_bound != bound0) == (copy != 0)) return 1;
+    fprintf(stderr, "gpu texscale selftest: FAIL %s: %s (%llu scaled bind(s), want %s)\n", cell, what,
+            (unsigned long long)(s_cnt_xs_bound - bound0), copy ? "some" : "0");
+    return 0;
+}
+
 static void xst_clear_fb(void) {
     memset(SR_HOST(XST_BASE), 0, XST_STRIDE * FB_H * 4u);
-    sr_gpu_vram_dirty(XST_BASE, XST_STRIDE * FB_H * 4u);
+    xst_wrote(XST_BASE, XST_STRIDE * FB_H * 4u);
 }
 
 /* The scaled copies and their jobs, from a clean cache. */
 static void xst_reset(void) {
+    xst_guest_check("at a reset in");
     coherence_reset_targets();
     (void)submit_pending();
     (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
@@ -208,6 +272,8 @@ static void xst_reset(void) {
     NkTexScaleResult r;
     while (nk_tex_scale_take(&r)) nk_tex_scale_release(&r);
     xst_clear_fb();
+    xst_guest_sync();
+    s_xst_rtt_target = 0;
     s_cnt_present_cpu++;   /* a new present: the per-present upload bytes start again */
 }
 
@@ -500,24 +566,37 @@ static int xst_cell_not_ready(int f) {
     xst_pattern(tex, 23u);
     xst_upload(tex);
     xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
-    const uint64_t t0 = SDL_GetTicksNS();
+    /* Without waiting: the hold makes a wait for the queue return at once, so the draws are
+     * unscaled either way; the waits tex_scale.c counts say whether the renderer asked for one. */
+    NkTexScaleStats st0, st1;
+    nk_tex_scale_stats(&st0);
+    const uint64_t held0 = s_cnt_xs_bound;
     int ok = xst_draw(20.0f, 60.0f);
     s_tmpl_ok = 0;
     ok = ok && xst_draw(60.0f, 60.0f);
-    const uint64_t spent_ms = (SDL_GetTicksNS() - t0) / 1000000u;
+    nk_tex_scale_stats(&st1);
     xst_expect(tex, 0, 1, want);
     if (!ok || !xst_report("not-ready", 20, 60, want, "a texture with its scale queued is not drawn unscaled") ||
-        !xst_report("not-ready", 60, 60, want, "a held scale was drawn"))
+        !xst_report("not-ready", 60, 60, want, "a held scale was drawn") ||
+        !xst_bound("not-ready", held0, 0, "a held scale was bound"))
         return 0;
+    if (st1.waits != st0.waits) {
+        fprintf(stderr, "gpu texscale selftest: FAIL not-ready: the held draws waited for the scale queue %llu "
+                        "time(s) (want 0)\n", (unsigned long long)(st1.waits - st0.waits));
+        return 0;
+    }
     /* Released, the copy lands at a later lookup. */
     nk_tex_scale_set_hold(0);
     nk_tex_scale_wait_idle();
     s_tmpl_ok = 0;
+    const uint64_t landed0 = s_cnt_xs_bound;
     ok = xst_draw(100.0f, 60.0f);
     xst_expect(tex, f, 1, want);
-    if (!ok || !xst_report("not-ready", 100, 60, want, "the copy did not land once its scale finished")) return 0;
-    printf("gpu texscale selftest: PASS %-12s held draws unscaled in %llu ms, then the copy\n", "not-ready",
-           (unsigned long long)spent_ms);
+    if (!ok || !xst_report("not-ready", 100, 60, want, "the copy did not land once its scale finished") ||
+        !xst_bound("not-ready", landed0, 1, "the copy did not land once its scale finished"))
+        return 0;
+    printf("gpu texscale selftest: PASS %-12s held draws unscaled with no wait for the queue, then the copy\n",
+           "not-ready");
     return 1;
 }
 
@@ -531,15 +610,19 @@ static int xst_cell_rewrite(int f) {
     xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
     int ok = xst_draw(20.0f, 100.0f);
     s_tmpl_ok = 0;
+    const uint64_t first0 = s_cnt_xs_bound;
     ok = ok && xst_draw(20.0f, 100.0f);
     xst_expect(a, f, 1, want);
-    if (!ok || !xst_report("rewrite", 20, 100, want, "the first content's copy is not drawn")) return 0;
+    if (!ok || !xst_report("rewrite", 20, 100, want, "the first content's copy is not drawn") ||
+        !xst_bound("rewrite", first0, 1, "the first content's copy is not drawn"))
+        return 0;
     /* The guest rewrites the texture; its scale is held, so only the content check stands
      * between the draw and the old copy. */
     nk_tex_scale_set_sync(0);
     nk_tex_scale_set_hold(1);
     xst_upload(b);
     s_tmpl_ok = 0;
+    const uint64_t waits0 = s_cnt_xs_bound;
     ok = xst_draw(60.0f, 100.0f);
     xst_expect(b, 0, 1, want);
     xst_expect(a, f, 1, stale);
@@ -549,14 +632,18 @@ static int xst_cell_rewrite(int f) {
                         "after the guest rewrote the texture\n");
         return 0;
     }
-    if (!xst_report("rewrite", 60, 100, want, "the rewritten texture is not drawn unscaled while its scale waits"))
+    if (!xst_report("rewrite", 60, 100, want, "the rewritten texture is not drawn unscaled while its scale waits") ||
+        !xst_bound("rewrite", waits0, 0, "a copy was bound for the rewritten texture while its scale waits"))
         return 0;
     nk_tex_scale_set_hold(0);
     nk_tex_scale_wait_idle();
     s_tmpl_ok = 0;
+    const uint64_t landed0 = s_cnt_xs_bound;
     ok = xst_draw(100.0f, 100.0f);
     xst_expect(b, f, 1, want);
-    if (!ok || !xst_report("rewrite", 100, 100, want, "the rewritten texture's own copy did not land")) return 0;
+    if (!ok || !xst_report("rewrite", 100, 100, want, "the rewritten texture's own copy did not land") ||
+        !xst_bound("rewrite", landed0, 1, "the rewritten texture's own copy did not land"))
+        return 0;
     printf("gpu texscale selftest: PASS %-12s rewritten texture rescaled, the old copy never drawn\n", "rewrite");
     return 1;
 }
@@ -568,7 +655,7 @@ static int xst_cell_clut(int f) {
     nk_tex_scale_set_sync(1);
     xst_pattern(pat, 5u);
     for (int i = 0; i < XST_W * XST_H; i++) idx[i] = (uint8_t)(pat[i] & 0x0Fu);   /* 16 indices */
-    sr_gpu_vram_dirty(XST_TEX, XST_W * XST_H);
+    xst_wrote(XST_TEX, XST_W * XST_H);
     for (int pass = 0; pass < 2; pass++) {
         xst_state(XST_BASE, XST_TEX, 5u, 1, 1);   /* CLUT8; the state reset clears the palette */
         for (uint32_t j = 0; j < 256u; j++) {
@@ -577,14 +664,17 @@ static int xst_cell_clut(int f) {
         }
         s_ge->clut_fmt = 3u | (0xFFu << 8);       /* 8888, shift 0, mask 0xFF */
         ge_state_note_external_write();
+        xst_clut_wrote();
         for (int i = 0; i < XST_W * XST_H; i++) memcpy(&lut[i], &s_ge->clutram[idx[i] * 4u], 4);
         const float y = 140.0f + 40.0f * (float)pass;
         int ok = xst_draw(20.0f, y);
         s_tmpl_ok = 0;
+        const uint64_t bound0 = s_cnt_xs_bound;
         ok = ok && xst_draw(60.0f, y);
         xst_expect(lut, f, 1, want);
         if (!ok || !xst_report(pass ? "clut-new-palette" : "clut", 60, (int)y, want,
-                               "the copy is not the scale of the palette lookup"))
+                               "the copy is not the scale of the palette lookup") ||
+            !xst_bound(pass ? "clut-new-palette" : "clut", bound0, 1, "no copy of the palette lookup was bound"))
             return 0;
     }
     printf("gpu texscale selftest: PASS %-12s scaled after the lookup, rescaled for a new palette\n", "clut");
@@ -599,7 +689,8 @@ static int xst_rtt_pass(int factor, int swizzle, uint8_t *out) {
     nk_tex_scale_set_sync(1);
     s_xs_factor = factor;
     memset(SR_HOST(XST_RTT), 0, XST_STRIDE * FB_H * 4u);
-    sr_gpu_vram_dirty(XST_RTT, XST_STRIDE * FB_H * 4u);
+    xst_wrote(XST_RTT, XST_STRIDE * FB_H * 4u);
+    s_xst_rtt_target = 1;   /* the draws below write it back */
     xst_pattern(tex, 71u);
     xst_upload(tex);
     /* Render into the second target: it becomes a GPU-valid render target. */
@@ -636,12 +727,13 @@ static int xst_budget_draw(uint32_t addr, const uint32_t *t, float x, int f, con
     uint32_t want[XST_W * XST_H];
     xst_state(XST_BASE, addr, 3u, 1, 1);
     s_tmpl_ok = 0;
+    const uint64_t bound0 = s_cnt_xs_bound;
     if (!xst_draw(x, 230.0f)) {
         fprintf(stderr, "gpu texscale selftest: FAIL budget: draw or readback failed\n");
         return 0;
     }
     xst_expect(t, f, 1, want);
-    return xst_report("budget", (int)x, 230, want, what);
+    return xst_report("budget", (int)x, 230, want, what) && xst_bound("budget", bound0, f >= 2, what);
 }
 
 static int xst_cell_budget(int f) {
@@ -660,7 +752,7 @@ static int xst_cell_budget(int f) {
     const uint32_t *tex[3] = { ta, tb, tc };
     for (int i = 0; i < 3; i++) {
         memcpy(SR_HOST(addr[i]), tex[i], sizeof(uint32_t) * XST_W * XST_H);
-        sr_gpu_vram_dirty(addr[i], sizeof(uint32_t) * XST_W * XST_H);
+        xst_wrote(addr[i], sizeof(uint32_t) * XST_W * XST_H);
     }
     const uint64_t short0 = s_cnt_xs_budget_short, reclaimed0 = s_cnt_xs_reclaimed;
     /* A and B: decoded and scaled at the first draw, the copy at the second. */
@@ -1185,7 +1277,7 @@ static int xst_cell_replace_palette(int f) {
     nk_tex_scale_set_sync(1);
     xst_pattern(pat, 9u);
     for (int i = 0; i < XST_W * XST_H; i++) idx[i] = (uint8_t)(pat[i] & 0x0Fu);
-    sr_gpu_vram_dirty(XST_TEX, XST_W * XST_H);
+    xst_wrote(XST_TEX, XST_W * XST_H);
     xst_state(XST_BASE, XST_TEX, 5u, 1, 1);          /* CLUT8; the state reset clears the palette */
     for (uint32_t j = 0; j < 256u; j++) {
         uint32_t entry = 0xFF000000u | (xst_hash(0xC00u + j * 5u) & 0xFFFFFFu);
@@ -1194,6 +1286,7 @@ static int xst_cell_replace_palette(int f) {
     s_ge->clut_fmt = 3u | (0xFFu << 8);              /* 8888, shift 0, mask 0xFF, start 0 */
     ge_clut_note_load(256u * 4u);                    /* what GE_LOADCLUT records for a 1 KiB load */
     ge_state_note_external_write();
+    xst_clut_wrote();
 
     uint32_t last = 0, max = 0;
     ge_clut_load_extent(&last, &max);
@@ -1277,7 +1370,7 @@ static void xst_dump_folder(char *dir, size_t cap, const char *leaf) {
 /* The 16x16 8888 texture `t` at `addr`, with the state that draws it. */
 static void xst_dump_upload_at(uint32_t addr, const uint32_t *t) {
     memcpy(SR_HOST(addr), t, sizeof(uint32_t) * XST_W * XST_H);
-    sr_gpu_vram_dirty(addr, sizeof(uint32_t) * XST_W * XST_H);
+    xst_wrote(addr, sizeof(uint32_t) * XST_W * XST_H);
     xst_state(XST_BASE, addr, 3u, 1, 1);
 }
 
@@ -1710,7 +1803,7 @@ static int xst_cell_dump_palette(int f) {
     memset(&s_dump, 0, sizeof(s_dump));
     xst_pattern(pat, 19u);
     for (int i = 0; i < XST_W * XST_H; i++) idx[i] = (uint8_t)(pat[i] & 0x0Fu);
-    sr_gpu_vram_dirty(XST_TEX, XST_W * XST_H);
+    xst_wrote(XST_TEX, XST_W * XST_H);
     xst_state(XST_BASE, XST_TEX, 5u, 1, 1);
     for (uint32_t j = 0; j < 256u; j++) {
         uint32_t entry = 0xFF000000u | (xst_hash(0xD00u + j * 7u) & 0xFFFFFFu);
@@ -1719,6 +1812,7 @@ static int xst_cell_dump_palette(int f) {
     s_ge->clut_fmt = 3u | (0xFFu << 8);
     ge_clut_note_load(256u * 4u);
     ge_state_note_external_write();
+    xst_clut_wrote();
     for (int i = 0; i < XST_W * XST_H; i++) memcpy(&lut[i], &s_ge->clutram[(size_t)idx[i] * 4u], 4);
     uint32_t last = 0, max = 0;
     ge_clut_load_extent(&last, &max);
@@ -1767,7 +1861,7 @@ static int xst_cell_dump_mip(int f) {
     xst_repl_name(t0, name0, sizeof(name0));   /* also uploads level 0 */
     const uint32_t l1 = XST_TEX + sizeof(t0);
     memcpy(SR_HOST(l1), t1, sizeof(t1));
-    sr_gpu_vram_dirty(l1, sizeof(t1));
+    xst_wrote(l1, sizeof(t1));
     snprintf(name1, sizeof(name1), "%.*s_1.png", (int)(strlen(name0) - 4u), name0);
     xst_state(XST_BASE, XST_TEX, 3u, 0, 1);
     s_ge->tex_filter |= 4u;          /* mipmapped minification: the levels are sampled */
@@ -2067,6 +2161,60 @@ done:
     return 1;
 }
 
+/* A run that ends on a thread other than the one that draws, with no file being written (audit
+ * 2026-11-17): the end must leave the dump's state alone, as it does with files in flight, since the
+ * drawing thread may be inside tex_dump_note using the names and the scratch. The drawing thread's
+ * own end then finishes the dump. Failing before: with nothing in flight the other thread's end
+ * stopped the dump, closed its names and freed the scratch under the drawing thread. */
+static int SDLCALL xst_dump_end_elsewhere(void *ctx) {
+    (void)ctx;
+    sr_texdump_exit_finish();   /* what an exit from HLE or display code calls */
+    return 0;
+}
+
+static int xst_cell_dump_thread(int f) {
+    (void)f;
+    uint32_t t[XST_W * XST_H];
+    char dir[400];
+    xst_dump_folder(dir, sizeof(dir), "texdump_gpu_thread");
+    xst_reset();
+    memset(&s_dump, 0, sizeof(s_dump));
+    nk_tex_scale_set_sync(1);
+    const char *why = NULL;
+    if (!xst_dump_start(dir)) { why = "the dump did not start"; goto done; }
+    xst_pattern(t, 801u);
+    xst_upload(t);
+    xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
+    if (!xst_dump_draw()) { why = "a draw failed"; goto done; }
+    if (s_dump.inflight || !s_dump.owner || !s_dump.on || !s_dump.names) {
+        why = "the drawn level was still being written, or no thread drew it";
+        goto done;
+    }
+    const void *names = s_dump.names;
+    const uint32_t *scratch = s_dumpscratch;
+    SDL_Thread *th = SDL_CreateThread(xst_dump_end_elsewhere, "xst-dump-end", NULL);
+    if (!th) { why = "the other thread could not be started"; goto done; }
+    SDL_WaitThread(th, NULL);
+    if (!s_dump.on || s_dump.names != names || s_dumpscratch != scratch) {
+        why = "an end on another thread, nothing in flight, cleared the dump's state under the drawing thread";
+        goto done;
+    }
+    tex_dump_shutdown();   /* the drawing thread's own end */
+    if (s_dump.on || s_dump.names || s_dump.starts) why = "the drawing thread's end did not finish the dump";
+
+done:
+    gegpu_texdump_stop();
+    tex_dump_collect();
+    memset(&s_dump, 0, sizeof(s_dump));
+    if (why) {
+        fprintf(stderr, "gpu texscale selftest: FAIL dump-thread: %s\n", why);
+        return 0;
+    }
+    printf("gpu texscale selftest: PASS %-12s an end on another thread left the dump to the drawing thread, "
+           "whose end finished it\n", "dump-thread");
+    return 1;
+}
+
 int gegpu_texrepl_only_prepare(const char *build_root) {
     char dir[400], path[480];
     snprintf(dir, sizeof(dir), "%s/texrepl_gpu_only_pack", build_root);
@@ -2107,7 +2255,7 @@ int gegpu_texrepl_only_selftest(void) {
     xst_pattern(a, 61u);
     xst_pattern(b, 67u);
     memcpy(SR_HOST(XST_ONLY_TEX_B), b, sizeof(b));
-    sr_gpu_vram_dirty(XST_ONLY_TEX_B, sizeof(b));
+    xst_wrote(XST_ONLY_TEX_B, sizeof(b));
     xst_upload(a);
     xst_state(XST_BASE, XST_TEX, 3u, 1, 1);
     xst_repl_expect(rimg, rf, want);
@@ -2279,45 +2427,53 @@ int gegpu_texscale_selftest(void) {
                                          xst_cell_not_ready, xst_cell_rewrite, xst_cell_clut, xst_cell_replace,
                                          xst_cell_replace_palette, xst_cell_dump, xst_cell_dump_xxh,
                                          xst_cell_dump_palette, xst_cell_dump_mip, xst_cell_dump_async,
-                                         xst_cell_dump_exit, xst_cell_dump_stuck, xst_cell_budget,
+                                         xst_cell_dump_exit, xst_cell_dump_stuck, xst_cell_dump_thread,
+                                         xst_cell_budget,
                                          xst_cell_rtt, xst_cell_color_test, xst_cell_onetoone };
     static const char *const names[] = { "scaled-draw", "large", "upload-cap", "not-ready", "rewrite", "clut",
                                          "replace", "replace-pal", "dump", "dump-xxh",
-                                         "dump-pal", "dump-mip", "dump-async", "dump-exit", "dump-stuck", "budget", "rtt", "color-test",
+                                         "dump-pal", "dump-mip", "dump-async", "dump-exit", "dump-stuck", "dump-thread", "budget", "rtt", "color-test",
                                          "onetoone" };
     /* The cells before onetoone check copies through 1:1 sprites, so they run with the 1:1 rule
      * off; onetoone turns it back on. */
     s_xs_onetoone_plain = 0;
-    const size_t vram = 0x00200000u, fb0 = XST_BASE & 0x001FFFFFu, fb1 = fb0 + XST_STRIDE * FB_H * 4u;
-    uint8_t *before = (uint8_t *)malloc(vram), clut[sizeof(s_ge->clutram)];
-    if (!before) return 0;
+    /* Guest bytes: in each cell, from its own writes on (xst_reset, xst_wrote), and after it, with
+     * one more draw of its last texture while every pending scale lands and a VRAM read of the
+     * texture, guest VRAM outside the frames and the palette are the bytes the CPU left: no
+     * scaling step writes guest memory. */
+    s_xst_guest = (uint8_t *)malloc(XST_VRAM_BYTES);
+    if (!s_xst_guest) return 0;
+    s_xst_guest_when = NULL;
+    xst_guest_sync();
     for (size_t i = 0; ok && i < sizeof(cells) / sizeof(cells[0]); i++) {
         ok = cells[i](f);
         if (!ok) break;
-        /* After the cell: one more draw of its last texture while every pending scale lands, and
-         * a VRAM read of the texture. Outside the frame that draw writes, guest VRAM and the
-         * palette are the bytes the CPU left: no scaling step writes guest memory. */
-        memcpy(before, SR_HOST(0x04000000u), vram);
-        memcpy(clut, s_ge->clutram, sizeof(clut));
+        xst_guest_check("during");
         s_tmpl_ok = 0;
         ok = xst_draw(200.0f, 200.0f);
         nk_tex_scale_wait_idle();
         s_tmpl_ok = 0;
         ok = ok && xst_draw(200.0f, 200.0f);
+        if (!ok) {
+            fprintf(stderr, "gpu texscale selftest: FAIL guest-bytes after %s: the post-cell draw or readback "
+                            "failed\n", names[i]);
+            break;
+        }
         (void)hook_vram_read(XST_TEX, 4096u);
-        const uint8_t *now = (const uint8_t *)SR_HOST(0x04000000u);
-        size_t bad = vram;
-        for (size_t b = 0; b < vram; b++)
-            if ((b < fb0 || b >= fb1) && now[b] != before[b]) { bad = b; break; }
-        if (ok && (bad != vram || memcmp(clut, s_ge->clutram, sizeof(clut)) != 0)) {
-            fprintf(stderr, "gpu texscale selftest: FAIL guest-bytes after %s: %s changed (VRAM offset 0x%zx)\n",
-                    names[i], bad != vram ? "a guest VRAM byte" : "a CLUT byte", bad);
+        xst_guest_check("after");
+        if (ok && s_xst_guest_when) {
+            fprintf(stderr, "gpu texscale selftest: FAIL guest-bytes %s %s: %s changed (VRAM offset 0x%zx)\n",
+                    s_xst_guest_when, names[i],
+                    s_xst_guest_off < XST_VRAM_BYTES ? "a guest VRAM byte no cell wrote" : "a CLUT byte",
+                    s_xst_guest_off);
             ok = 0;
         }
     }
-    free(before);
+    free(s_xst_guest);
+    s_xst_guest = NULL;
     s_xs_onetoone_plain = 1;
-    if (ok) printf("gpu texscale selftest: PASS %-12s VRAM outside the frame and the CLUT unchanged\n", "guest-bytes");
+    if (ok) printf("gpu texscale selftest: PASS %-12s VRAM outside the frames and the CLUT only as the cells wrote "
+                   "them, during and after each cell\n", "guest-bytes");
     ok = ok && xst_cell_smart2d();
     xst_reset();
     nk_tex_scale_set_sync(0);

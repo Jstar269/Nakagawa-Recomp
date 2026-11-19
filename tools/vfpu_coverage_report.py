@@ -64,6 +64,10 @@ BOUNDARY_DISPOSITIONS = frozenset(
         "unsupported-encoding",
     }
 )
+# The boundary dispositions the runtime refuses outright: the AOT raised Unsupported, so no
+# path executes the word (interpreter-only words still run through sr_vfpu_interp).
+REFUSED_DISPOSITIONS = frozenset({"supported-opcode-form-unmodeled", "unsupported-encoding"})
+assert REFUSED_DISPOSITIONS <= BOUNDARY_DISPOSITIONS
 # Every emitted guest instruction carries its word literal in sr_begin().
 ROUTE_SR_BEGIN_PATTERN = re.compile(
     r"sr_begin\(\s*s\s*,\s*0x[0-9a-fA-F]{8}u\s*,\s*0x([0-9a-fA-F]{8})u\s*\)"
@@ -770,7 +774,7 @@ def _hardware_evidence(record: Record, vector_size: int | None) -> list[dict[str
 
 
 def _evidence_tier(disposition: str, differential: list[str], hardware: list[dict[str, str]]) -> str:
-    if disposition in {"unsupported-encoding", "supported-opcode-form-unmodeled", "interpreter-only"}:
+    if disposition in BOUNDARY_DISPOSITIONS:
         return "U"
     if any(item["kind"] == "semantic" for item in hardware):
         return "H"
@@ -835,6 +839,23 @@ def form_id_of(key: tuple[Any, ...], representative: int) -> str:
     return f"vfpu-{cast(int, key[0]):02x}-{representative & 0xFFFFFF00:08x}-{_form_hash(key)[:12]}"
 
 
+PSP_ORACLE_MANIFEST = TOOLS / "psp_oracle" / "manifest.json"
+
+
+@lru_cache(maxsize=1)
+def formal_manifest_vfpu_ids() -> tuple[str, ...]:
+    """The MEASURED ``PSP-VFPU-*`` rows of the formal PSP oracle manifest, sorted."""
+    try:
+        manifest = json.loads(PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CensusError(f"PSP oracle manifest {PSP_ORACLE_MANIFEST.name} is unreadable") from exc
+    return tuple(sorted(
+        str(test["id"])
+        for test in manifest.get("tests", [])
+        if str(test.get("id", "")).startswith("PSP-VFPU-") and test.get("hardware_evidence") == "MEASURED"
+    ))
+
+
 @lru_cache(maxsize=1)
 def systematic_records() -> tuple[Record, ...]:
     return tuple(classify_words(systematic_words()))
@@ -885,7 +906,7 @@ def _make_rows(records: list[Record]) -> list[Record]:
         agreement = next(iter(agreements))
         hardware_sensitive = (
             agreement != "explicit-aot-direct-control"
-            and disposition not in {"unsupported-encoding", "supported-opcode-form-unmodeled"}
+            and disposition not in REFUSED_DISPOSITIONS
         )
         evidence_tier = _evidence_tier(disposition, differential, hardware)
         row: Record = {
@@ -906,11 +927,7 @@ def _make_rows(records: list[Record]) -> list[Record]:
             "decoder_branch": f"src/rt/vfpu_interp.c:{return_line}",
             "aot_reason": sorted({str(record["aot_reason"]) for record in group if record["aot_reason"]}),
             "agreement": agreement,
-            "boundary_issue": TRACKING_ISSUE if disposition in {
-                "unsupported-encoding",
-                "supported-opcode-form-unmodeled",
-                "interpreter-only",
-            } else None,
+            "boundary_issue": TRACKING_ISSUE if disposition in BOUNDARY_DISPOSITIONS else None,
             "differential_tests": differential,
             "hardware_measured": hardware,
             "hardware_sensitive": hardware_sensitive,
@@ -1004,7 +1021,7 @@ def build_census() -> Record:
             },
         },
         "hardware_oracle_boundary": {
-            "formal_manifest_vfpu_ids": [],
+            "formal_manifest_vfpu_ids": list(formal_manifest_vfpu_ids()),
             "documented_evidence_ids": [
                 "hardware_vfpu_addr_001",
                 "issue-40-group-a",
@@ -1019,7 +1036,7 @@ def build_census() -> Record:
                 "PSP-A3-15",
             ],
             "context_only_not_inherited": ["PSP-A3-11", "PSP-A3-14"],
-            "rule": "documented cells are row-level evidence; context-only cells are not inherited; the formal PSP oracle manifest currently has no VFPU id",
+            "rule": "documented cells are row-level evidence; context-only cells are not inherited; a formal manifest VFPU id is credited to a form through the measured selftest that cites it (tools/verification_ledger.py VFPU_MEASURED_SELFTESTS), not through the evidence tier",
         },
         "agreement_gate": {
             "status": "pass",
@@ -1027,7 +1044,7 @@ def build_census() -> Record:
             "counts": agreement,
         },
         "acceleration_gate": {
-            "rule": "differential coverage is mandatory; hardware-sensitive forms also require evidence tier H",
+            "rule": "differential coverage is mandatory; hardware-sensitive forms also require evidence tier H; a measured-selftest form stays tier D here and is credited as PSP-measured only by the route forms (psp measured-cells) and the verification ledger",
             "all_supported_forms_are_hardware_sensitive": True,
             "accelerated_forms": list(ACCELERATED_FORMS),
             "violations": acceleration_violations,
@@ -1206,11 +1223,7 @@ def build_encounter_report(path: Path) -> Record:
                 "aot": record["aot_disposition"],
                 "interpreter": record["interpreter_kind"],
                 "reason": record["aot_reason"],
-                "tracking_issue": TRACKING_ISSUE if disposition in {
-                    "interpreter-only",
-                    "supported-opcode-form-unmodeled",
-                    "unsupported-encoding",
-                } else None,
+                "tracking_issue": TRACKING_ISSUE if disposition in BOUNDARY_DISPOSITIONS else None,
                 "differential_tests": _differential_tests(record, synthetic_words),
                 **form_disposition(record),
             }
@@ -1354,6 +1367,21 @@ def _route_words(path: Path, route_args: list[str]) -> tuple[Counter[int], int, 
     return counts, emitted, stubbed
 
 
+def _route_lle_cpu(route_args: list[str]) -> bool:
+    """Whether codegen run with ``route_args`` emits LLE CPU code.
+
+    Read through codegen's own command-line parser and option setters, so an option
+    that implies the LLE CPU (``--lle-import-seam`` does) is followed like ``--lle-cpu``.
+    """
+    cli, _unknown = codegen._command_line_parser().parse_known_args(route_args)
+    options = codegen.CodegenOptions()
+    if cli.lle_cpu:
+        options.lle_cpu = True
+    if cli.lle_import_seam:
+        codegen.enable_lle_import_seam(options)
+    return bool(options.lle_cpu)
+
+
 def build_route_report(
     path: Path | str, route_args: Iterable[str] = ()
 ) -> Record:
@@ -1366,10 +1394,10 @@ def build_route_report(
     """
     route_args = list(route_args)
     counts, emitted, stubbed = _route_words(Path(path), route_args)
-    # The scanned route may have been generated with --lle-cpu, which changes how
+    # The scanned route may have been generated with the LLE CPU, which changes how
     # VFPU memory forms are emitted; classify with the same setting so the report
     # describes the route that was scanned. A generated .c input carries no flags.
-    lle_cpu = "--lle-cpu" in route_args
+    lle_cpu = _route_lle_cpu(route_args)
     entries: list[Record] = []
     failures: list[str] = []
     records: list[Record] = []

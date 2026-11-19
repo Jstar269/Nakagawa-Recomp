@@ -798,7 +798,7 @@ the device is created with no feature outside Ace.
   buffer keeps the PSP's saturated bytes (section 10.22).
 - **Input timing:** `pad=late` holds each 60 FPS logic update at its package's update boundary until shortly before
   its VBLANK deadline, so the update reads a fresher pad sample. It changes when the update runs inside its period,
-  which the guest can measure, so it is a guest-visible item. Its entry is section 11.3.9.
+  which the guest can measure, so it is a guest-visible item, not yet admitted. Its entry is section 11.3.9.
 - **Patches:** `tess=2` to `tess=4` draws every triangle patch with finer triangles, which changes the frames a
   present commits to guest VRAM, and under `SR_GE_TIMING=1` it alters the GE timing model's clocks. It is a
   guest-visible item. Its entry is section 11.3.7.
@@ -897,7 +897,9 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
 
   Nothing is dropped silently. The report's `smooth_aux` block counts the pairs that used each input (`pairs`,
   `pairs_mask`, `pairs_depth`) and the depth copies refused (`depth_refused`). It counts the boxes kept, merged or
-  left out, by reason (`boxes`: `kept`, `merged`, `large`, `target`, `outside`, `full`). It also counts frames:
+  left out, by reason (`boxes`: `kept`, `merged`, `large`, `target`, `outside`, `full`), of the targets a present
+  showed: a target no present shows (a texture drawn to) adds none, and a target that is freed takes its boxes
+  with it, so the next target made in its place starts with none. It also counts frames:
   those with a mask, those that overflowed it, and those with depth, with unwritten depth or with no depth buffer.
   The last count is inputs no show pass took (`frames`: `mask`, `overflow`, `depth`, `depth_unwritten`,
   `depth_none`, `unshown`). The run's exit prints the same counts on one `ACE_MODE: smooth inputs` line. The first
@@ -928,7 +930,8 @@ below). The code is `src/rt/gpu_sdl3vk/ace_smooth.c`, its shaders and the pure p
   display could not take or that failed and were tried again, and `presents.superseded` every held frame that never
   reached the screen.
 - **Only consecutive frames.** An in-between is made of a frame and the one flipped just before it. When that one
-  never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed), the
+  never reached a present (the presenter's slot rule dropped its flip on a busy PC, or the present failed; one
+  that failed before its submission has the pass's record of that frame undone, since its commands never ran), the
   pass still holds an older frame, and an in-between of the two would put a fast-moving object in the wrong place
   or lose it. The new frame is then shown as it is and kept, and the report counts it in `presents.unpaired`.
 - **Only at 30.** Every other detector class, a pause, a static picture and fast forward (section 10.15) show each

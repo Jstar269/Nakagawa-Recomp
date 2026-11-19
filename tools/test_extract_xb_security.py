@@ -1145,12 +1145,27 @@ class OverwriteTests(unittest.TestCase):
 
     def test_a_png_name_collision_is_recorded_instead_of_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as dest:
+            gim_data = gim(
+                image_block(raw=b"\0\0\0\0"),
+                palette_block(raw=b"\x00\x00\xff\xff"),
+            )
             with open(os.path.join(dest, "tex.gim"), "wb") as handle:
-                handle.write(_gim_bytes(16))
+                handle.write(gim_data)
             with open(os.path.join(dest, "tex.png"), "wb") as handle:
                 handle.write(b"member that already owns this name")
             inventory = process_extracted_directory(dest)
             self.assertEqual(inventory["textures"], [])
+            self.assertEqual(
+                inventory["rejected"],
+                [
+                    {
+                        "name": "tex.gim",
+                        "path": "tex.gim",
+                        "size_bytes": len(gim_data),
+                        "reason": "tex.png already exists",
+                    }
+                ],
+            )
             self.assertEqual(
                 Path(dest, "tex.png").read_bytes(),
                 b"member that already owns this name",

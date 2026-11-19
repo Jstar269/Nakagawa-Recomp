@@ -425,6 +425,55 @@ class ClassifierTests(unittest.TestCase):
         report = import_audit.classify_imports(table.funcs, SYNTH_MANIFEST, with_addresses=True)
         self.assertTrue(all("stub" in row for row in report["imports"]))
 
+    def test_findings_addresses_redacted_unless_requested(self) -> None:
+        table = parse_import_table(build_import_elf(SIMPLE_LIBS))
+        raw_findings = ["import run at 0x08901234: stub slots not covered by any library window: 1 positions [0]"]
+        redacted = import_audit.classify_imports(table.funcs, SYNTH_MANIFEST, findings=raw_findings)
+        self.assertNotIn("0x08901234", redacted["findings"][0])
+        self.assertIn("<redacted>", redacted["findings"][0])
+        unredacted = import_audit.classify_imports(
+            table.funcs, SYNTH_MANIFEST, with_addresses=True, findings=raw_findings
+        )
+        self.assertEqual(unredacted["findings"], raw_findings)
+
+    def test_missing_import_falls_back_to_nid_corpus_name(self) -> None:
+        # 0x005b5f20 is sceNpCommerce2GetProductInfoStart in tools/nid_corpus.json, not registered in SYNTH_MANIFEST.
+        table = parse_import_table(build_import_elf([("sceNpCommerce2", [0x005B5F20])]))
+        report = import_audit.classify_imports(table.funcs, SYNTH_MANIFEST)
+        self.assertEqual(report["imports"][0]["classification"], "missing")
+        self.assertEqual(report["imports"][0]["name"], "sceNpCommerce2GetProductInfoStart")
+
+    def test_unusable_nid_corpus_fails_visibly(self) -> None:
+        """A missing or corrupt corpus is a named error, never an empty name map."""
+        import contextlib
+        import io
+        import tempfile
+        from unittest import mock
+
+        import gen_nidnames
+
+        table = parse_import_table(build_import_elf([("sceNpCommerce2", [0x005B5F20])]))
+        with tempfile.TemporaryDirectory() as td:
+            corrupt = Path(td) / "nid_corpus.json"
+            corrupt.write_text("{not json", encoding="ascii")
+            elf = Path(td) / "fixture.bin"
+            elf.write_bytes(build_import_elf([("sceNpCommerce2", [0x005B5F20])]))
+            manifest = Path(td) / "manifest.json"
+            manifest.write_text(json.dumps(SYNTH_MANIFEST), encoding="ascii")
+            for label, path in (("missing", Path(td) / "absent.json"), ("corrupt", corrupt)):
+                with self.subTest(corpus=label), mock.patch.object(gen_nidnames, "CORPUS", path):
+                    import_audit._corpus_nid_names.cache_clear()
+                    try:
+                        with self.assertRaises(import_audit.NidCorpusError):
+                            import_audit.classify_imports(table.funcs, SYNTH_MANIFEST)
+                        err = io.StringIO()
+                        with contextlib.redirect_stderr(err):
+                            rc = import_audit.main(["--elf", str(elf), "--manifest", str(manifest)])
+                        self.assertEqual(rc, 1)
+                        self.assertIn("import_audit: NID corpus unusable:", err.getvalue())
+                    finally:
+                        import_audit._corpus_nid_names.cache_clear()
+
     def test_cross_library_duplicate_nids_reported(self) -> None:
         table = parse_import_table(build_import_elf(MIXED_FIXTURE_LIBS))
         report = import_audit.classify_imports(table.funcs, SYNTH_MANIFEST)
@@ -623,6 +672,25 @@ class ManifestValidationTests(unittest.TestCase):
 class GateWiringTests(unittest.TestCase):
     def test_gate_passes_on_current_tree(self) -> None:
         self.assertEqual(import_audit_gate.main(), 0)
+        classes = set(import_audit_gate.MIXED_EXPECTED.values())
+        self.assertEqual(
+            classes,
+            {"dedicated", "fake_success", "controlled_unsupported", "missing"},
+            "MIXED_EXPECTED must cover all four import classifications",
+        )
+        # Verify check_fixtures rejects a duplicate (lib, nid) emission:
+        manifest = import_audit_gate.build_manifest()
+        orig_classify = import_audit_gate.classify_imports
+
+        def dup_classify(funcs, m, **kw):
+            return orig_classify(list(funcs) + [funcs[0]], m, **kw)
+
+        import_audit_gate.classify_imports = dup_classify
+        try:
+            with self.assertRaises(SystemExit):
+                import_audit_gate.check_fixtures(manifest)
+        finally:
+            import_audit_gate.classify_imports = orig_classify
 
     def test_ci_runs_the_gate(self) -> None:
         ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
@@ -642,6 +710,8 @@ class GateWiringTests(unittest.TestCase):
             "0x11111111": {"name": "synthDedicated", "handler": "h_Synth",
                            "classification": "dedicated", "status": "partial"},
         }
+        import contextlib
+        import io
         import tempfile
 
         with tempfile.TemporaryDirectory() as td:
@@ -649,11 +719,14 @@ class GateWiringTests(unittest.TestCase):
             path.write_text(json.dumps(baseline), encoding="ascii")
             old = import_audit_gate.DEFAULT_BASELINE
             import_audit_gate.DEFAULT_BASELINE = path
+            err = io.StringIO()
             try:
-                with self.assertRaises(SystemExit):
+                with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
                     import_audit_gate.check_baseline(manifest)
             finally:
                 import_audit_gate.DEFAULT_BASELINE = old
+        self.assertIn("import-coverage regression", err.getvalue())
+        self.assertIn("dedicated -> fake_success", err.getvalue())
 
 
 if __name__ == "__main__":

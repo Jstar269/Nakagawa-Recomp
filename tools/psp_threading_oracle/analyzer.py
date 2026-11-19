@@ -19,8 +19,8 @@ except ImportError:
     from psp_oracle.protocol import ProtocolError  # type: ignore[no-redef]
 
 
-def _read_capture(path: pathlib.Path) -> tuple[str, str]:
-    """Read exact UTF-8 capture bytes and return text plus their original digest."""
+def _read_capture(path: pathlib.Path) -> tuple[bytes, str]:
+    """Read a capture's exact bytes, refuse a non-UTF-8 encoding by name, and return them with their digest."""
 
     try:
         raw = path.read_bytes()
@@ -31,10 +31,10 @@ def _read_capture(path: pathlib.Path) -> tuple[str, str]:
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         raise ValueError("UTF-16 BOM is not supported")
     try:
-        text = raw.decode("utf-8")
+        raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("input is not valid UTF-8") from exc
-    return text, hashlib.sha256(raw).hexdigest()
+    return raw, hashlib.sha256(raw).hexdigest()
 
 
 def _write_error(output: pathlib.Path | None, text: str) -> None:
@@ -48,25 +48,29 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("inputs", nargs="+", type=pathlib.Path, help="one or more captured result files (one per launch)")
     ap.add_argument("--out", type=pathlib.Path, help="write table to file")
     args = ap.parse_args(argv)
-    texts: list[str] = []
+    # Exact file bytes (no newline translation), so a raw_capture_sha256 binds them.
+    captures: list[bytes] = []
     raw_hashes: list[str] = []
     for p in args.inputs:
         try:
-            text, raw_hash = _read_capture(p)
+            raw, raw_hash = _read_capture(p)
         except ValueError as exc:
             _write_error(args.out, f"MALFORMED input {p.name}: {exc}")
             return 2
-        texts.append(text)
+        captures.append(raw)
         raw_hashes.append(raw_hash)
     # By default without explicit evidence context, parsing is UNVERIFIED_CAPTURE.
     # Callers with trusted hardware workflow should construct HardwareCaptureContext
-    # out-of-band and call analyze_runs(texts, evidence_contexts=...) directly.
+    # out-of-band and call analyze_runs(captures, evidence_contexts=...) directly.
     try:
-        analysis = analyze_runs(texts)
+        analysis = analyze_runs(captures)
     except ProtocolError as exc:
         _write_error(args.out, f"MALFORMED capture: {exc}")
         return 2
     table = human_table(analysis)
+    # Provenance per input: no out-of-band context via the CLI, so every input
+    # is UNVERIFIED_CAPTURE (never self-promotes to HARDWARE). Only the file name
+    # is printed, never the local path.
     for idx, (path, label, raw_hash) in enumerate(
         zip(args.inputs, analysis["evidence_labels"], raw_hashes, strict=True)
     ):
@@ -75,8 +79,14 @@ def main(argv: list[str] | None = None) -> int:
         args.out.write_text(table, encoding="utf-8")
     else:
         sys.stdout.write(table)
+    # Exit 2 when a required case is missing or an observation varies: the results
+    # are not usable. Exit 1 when a launch mixes launch groups or repetitions are uneven.
     variable_cases = any(item["variable"] for item in analysis["case_reports"])
-    return 0 if analysis["all_required_observed"] and not variable_cases else 2
+    if not analysis["all_required_observed"] or variable_cases:
+        return 2
+    if analysis["launch_group_issues"] or analysis["repetition_issues"]:
+        return 1
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())

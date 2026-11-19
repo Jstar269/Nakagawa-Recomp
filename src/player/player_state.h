@@ -78,18 +78,6 @@ typedef enum {
     STATUS_VERIFIED = NK_STATUS_VERIFIED
 } GameSupportStatus;
 
-typedef enum {
-    STAGE_IDLE = 0,
-    STAGE_INSPECTING_ISO,
-    STAGE_EXTRACTING_CONTAINERS,
-    STAGE_DECRYPTING_MODULES,
-    STAGE_VALIDATING_ELFS,
-    STAGE_PREPARING_VFS,
-    STAGE_READY,
-    STAGE_FAILED,
-    STAGE_CANCELLED
-} PlayerPrepStage;
-
 typedef NkGameEntry GameRecord;
 
 /* Requested client-area geometry in SDL screen/window coordinate units. */
@@ -154,18 +142,6 @@ typedef struct {
     uint32_t failure_count;
     uint64_t retry_after_ms;
 } PlayerRuntimePackageWorkerFailure;
-
-typedef struct {
-    PlayerPrepStage stage;
-    char operation[64];
-    char current_item[128];
-    int completed_items;
-    int total_items;
-    float percentage;
-    int elapsed_ms;
-    char status_message[256];
-    bool cancellable;
-} PreparationState;
 
 /* The player and runtime are offline by default (AGENTS.md section 5). Later
  * opt-in modes ("lan", "online") get their own values; a value this build does
@@ -568,6 +544,9 @@ typedef struct {
     char log_file_path[MAX_PATH_LEN];
     /* The game the card is about, for its retry action; "" for none. */
     char subject_disc_id[32];
+    /* That card's own image when it is known, "" otherwise: two images can
+       share a disc ID (player_app_error_subject_index). */
+    char subject_iso_path[MAX_PATH_LEN];
     PlayerErrorRetry retry;
     /* Copy details has put this card's report on the clipboard. */
     bool details_copied;
@@ -814,6 +793,9 @@ typedef struct {
     bool scanned;
     /* main.c runs a scan: at start, after a library change, after the queue. */
     bool scan_requested;
+    /* A scan began and its result is not in yet: its worker reads the packages in the
+       user data, so a factory reset waits for it. */
+    bool scan_running;
     /* This player's own identity, from its source tree; read once a session. */
     bool identity_known;
     NkPackageBuildIdentity identity;
@@ -933,7 +915,6 @@ struct PlayerApp {
     int game_count;
     int selected_game_index;
     GameRecord inspecting_game;
-    PreparationState prep_state;
     PlayerSettings settings;
     ErrorState last_error;
     SetupWizardState wizard;
@@ -1054,9 +1035,6 @@ struct PlayerApp {
     bool launch_pending;
     char launch_pending_disc_id[NK_MAX_DISC_ID_LEN];
 
-    /* Navigation & Focus */
-    int active_tab;   /* for settings: 0=Display, 1=Audio, 2=Controller, 3=Logs */
-
     /* Controller settings and live input monitor (#357) */
     InputSettingsState input_settings;
     bool host_buttons_live[NK_HOST_BUTTON_COUNT];
@@ -1098,6 +1076,11 @@ struct PlayerApp {
      * session runs on the defaults, and settings_notice says so on every
      * Settings page (player_app_load_settings). */
     bool settings_newer_schema;
+    /* settings.json is there but could not be opened or read in full (another
+     * program holding it, an I/O error): it is kept as it is, this session runs
+     * on the defaults, and player_app_save_settings does not replace it, so a
+     * passing failure never costs the user their settings (audit 2026-11-17). */
+    bool settings_unreadable;
     /* This run keeps the first-launch nickname prompt down (#2197): a --screenshot, --view
        or scripted run shows the page it names. Memory only: nickname_asked and settings.json
        are left as they are. */
@@ -1175,6 +1158,9 @@ struct PlayerApp {
     /* The added images waiting for their disc check, and the one running. */
     PlayerDiscCheckState disc_check;
 
+    /* The library image the running game was started from (its card's iso_path):
+       a card raised when it stops names that image, not only its disc ID. */
+    char running_iso_path[NK_MAX_PATH];
     /* Discord status (#2259): what the running game shows, set when it starts, and the
        client that sends it (player_app_discord_tick). */
     char running_title[NK_MAX_TITLE_LEN];
@@ -1252,7 +1238,9 @@ typedef enum {
     PLAYER_REMOVAL_KIND_COUNT
 } PlayerRemovalKind;
 
-#define PLAYER_REMOVAL_PATH_CAP 16
+/* The fixed folders (eleven at most) and the title's enhanced builds, one folder
+   per variant left in packages/. */
+#define PLAYER_REMOVAL_PATH_CAP 32
 
 typedef struct {
     char path[NK_MAX_PATH];
@@ -1477,7 +1465,7 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
 
 /* Report this game (docs/ONLINE_FEATURES.md "Reports"). These are links the user
    opens in their own browser; the player makes no network call for them. */
-#define PLAYER_REPORT_REPO_URL "https://github.com/Jstar269/nakagawa-recomp"
+#define PLAYER_REPORT_REPO_URL NK_UPDATE_REPOSITORY_URL
 #define PLAYER_REPORT_CATEGORY "compatibility-reports"
 /* The longest report link. Windows hands a link to the browser through the
    shell, whose limit is INTERNET_MAX_URL_LENGTH (2083 characters); GitHub's
@@ -2025,6 +2013,10 @@ int player_app_find_added_game(const PlayerApp *app, const GameRecord *game);
    when two images share the disc ID and neither names the file. */
 int player_app_find_built_game(const PlayerApp *app, const char *disc_id,
                                const char *iso_path);
+/* The card an error card is about (subject_disc_id, and subject_iso_path when
+   the card set it), by player_app_find_built_game's rule; -1 for none, or when
+   two images share the disc ID and the card does not name its image. */
+int player_app_error_subject_index(const PlayerApp *app, const ErrorState *error);
 /* The card a package check of game is for: the same package and image, or else
    the first card of that package. Two images of a disc ID share its package
    folder, and each card's check lands on its own card. */
@@ -2342,6 +2334,9 @@ void player_app_outdated_scan_finish(PlayerApp *app, const PlayerOutdatedScan *s
                                      const char *player_version);
 /* The source tree a build would use: the folder above tools/nk_cli.py. */
 bool player_app_build_source_root(const PlayerApp *app, char *out, size_t out_size);
+/* That folder for the nk_cli.py path cli: "." for a relative tools/nk_cli.py, and the root
+   itself ("/", "C:\") for a tree at a filesystem or drive root. */
+bool player_source_root_from_cli(const char *cli, char *out, size_t out_size);
 
 bool player_app_game_is_outdated(const PlayerApp *app, const GameRecord *game);
 int player_app_outdated_count(const PlayerApp *app);
@@ -2494,8 +2489,9 @@ void player_app_remove_prerequisites(PlayerApp *app);
 /* Factory reset: the player goes back to a first run by
  * moving its user data aside, never by deleting it. The folders that move are
  * the config, data, cache and saves folders (library, settings, saves,
- * imported PSP fonts, keys, built games and downloaded build tools), and the
- * runtime root when one is set; a folder inside another one moves with it.
+ * imported PSP fonts, keys, built games and downloaded build tools); a folder
+ * inside another one moves with it. A runtime root (--runtime-root) does not
+ * move: it can be a checkout or an install folder.
  * Each is renamed in place to
  * "<folder>-backup-<stamp>", so the move is a rename on the same disk and the
  * user can move it back. Logs stay: the player is writing to them.

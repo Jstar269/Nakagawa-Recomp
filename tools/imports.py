@@ -61,6 +61,9 @@ from analyze import Elf
 from psp_import_table import UNATTRIBUTED_LIBRARY as UNATTRIBUTED_LIBRARY  # re-exported marker
 from psp_import_table import (
     ImportWindow,
+    MAX_STUB_ENTRY_WORDS,
+    MIN_STUB_ENTRY_WORDS,
+    U32_MAX,
     layout_import_windows,
 )
 from psp_import_table import ImportTableError as LayoutImportError
@@ -69,7 +72,7 @@ from psp_import_table import ImportTableError as LayoutImportError
 # Guest strings are metadata, not trusted host-language source. PSP import-library names in
 # practice are tiny (sceKernelLibrary, sceDisplay, etc.); keep a generous hard ceiling so a
 # malformed/unmapped string cannot make the offline pipeline walk an unbounded address range.
-MAX_IMPORT_LIBRARY_NAME_BYTES = 1024
+MAX_IMPORT_LIBRARY_NAME_BYTES = 128
 
 
 class ImportTableError(ValueError):
@@ -104,6 +107,31 @@ class VariableImportTable:
     vstub_table: int
 
 
+def _rebase(v, base):
+    return v + base if v and base != 0 and v < base else v
+
+
+def _read_mapped(elf, addr, size):
+    """The ``size`` bytes at ``addr`` when the image maps the whole span, else None.
+
+    The image read contract: ``read_at_vaddr(addr, n)`` serves the bytes of one mapped
+    span or None (prxload.ProgramImage, the synthetic test images). An image whose
+    ``read_at_vaddr`` only places the start, as analyze.Elf's does, also offers
+    ``read_mapped_span``, which holds the whole span to one mapped span; that is used
+    when present. Either way a short read is unmapped.
+    """
+    if size < 0 or addr < 0 or addr + size > 0x100000000:
+        return None
+    reader = getattr(elf, "read_mapped_span", None) or elf.read_at_vaddr
+    blob = reader(addr, size)
+    if blob is None or len(blob) != size:
+        return None
+    return bytes(blob)
+
+
+def _mapped_span(elf, addr, size):
+    """True when the image maps all of [addr, addr + size) (see _read_mapped)."""
+    return _read_mapped(elf, addr, size) is not None
 def _variable_import_table(elf, pos, entry_bytes, size_words, library, count, rebase):
     """Validate and record one entry's variable-import declaration.
 
@@ -126,8 +154,8 @@ def _variable_import_table(elf, pos, entry_bytes, size_words, library, count, re
             f"import entry at 0x{pos:08x} declares {count} variables but its "
             f"variable-stub table pointer 0x{vstub_table:08x} is null or misaligned",
         )
-    head = elf.read_at_vaddr(vstub_table, 4)
-    if head is None or len(head) != 4:
+    head = _read_mapped(elf, vstub_table, 4)
+    if head is None:
         raise ImportTableError(
             "ANALYZER_IMPORT_TABLE_INVALID",
             f"import entry at 0x{pos:08x}: variable-stub table 0x{vstub_table:08x} "
@@ -179,8 +207,8 @@ def _named_library_exports(elf):
     libent = elf.sec(".lib.ent")
     if not libent or not libent.get("size"):
         return
-    blob = elf.read_at_vaddr(libent["addr"], libent["size"])
-    if blob is None or len(blob) != libent["size"]:
+    blob = _read_mapped(elf, libent["addr"], libent["size"])
+    if blob is None:
         raise ImportTableError("ANALYZER_IMPORT_TABLE_INVALID", ".lib.ent leaves mapped input")
     pos = 0
     while pos + 16 <= len(blob):
@@ -191,8 +219,8 @@ def _named_library_exports(elf):
         if (num_vars or num_funcs) and name_ptr:
             library = _read_guest_cstr(elf, name_ptr)
             count = num_funcs + num_vars
-            words = elf.read_at_vaddr(table, 8 * count) if table else None
-            if words is None or len(words) != 8 * count:
+            words = _read_mapped(elf, table, 8 * count) if table else None
+            if words is None:
                 raise ImportTableError(
                     "ANALYZER_IMPORT_TABLE_INVALID",
                     f"{library} export table at 0x{table:08x} leaves mapped input")
@@ -202,13 +230,18 @@ def _named_library_exports(elf):
 
 def variable_exports(elf):
     """Every variable a named library of the image exports, in .lib.ent order."""
-    found = []
-    for library, num_funcs, num_vars, values in _named_library_exports(elf):
-        count = num_funcs + num_vars
-        for j in range(num_vars):
-            found.append(VariableExport(library, values[num_funcs + j],
-                                        values[count + num_funcs + j]))
-    return tuple(found)
+    try:
+        found = []
+        for library, num_funcs, num_vars, values in _named_library_exports(elf):
+            count = num_funcs + num_vars
+            for j in range(num_vars):
+                found.append(VariableExport(library, values[num_funcs + j],
+                                            values[count + num_funcs + j]))
+        return tuple(found)
+    except ImportTableError:
+        raise
+    except (ValueError, RuntimeError, struct.error) as exc:
+        raise ImportTableError("ANALYZER_IMPORT_TABLE_INVALID", str(exc)) from exc
 
 
 def function_exports(elf, stubs):
@@ -220,82 +253,89 @@ def function_exports(elf, stubs):
     map: such an export is left out when the stub imports the same NID, because that NID
     already reaches the system function, and linking it would make the stub call itself.
     """
-    found = {}
-    for library, num_funcs, num_vars, values in _named_library_exports(elf):
-        count = num_funcs + num_vars
-        for j in range(num_funcs):
-            nid, address = values[j], values[count + j]
-            if address in stubs and stubs[address][1] == nid:
-                continue
-            if found.setdefault(nid, address) != address:
-                raise ImportTableError(
-                    "ANALYZER_IMPORT_TABLE_INVALID",
-                    f"{library} exports 0x{nid:08x} at 0x{address:08x}, "
-                    f"and another library at 0x{found[nid]:08x}")
-    return tuple(sorted(found.items()))
+    try:
+        found = {}
+        for library, num_funcs, num_vars, values in _named_library_exports(elf):
+            count = num_funcs + num_vars
+            for j in range(num_funcs):
+                nid, address = values[j], values[count + j]
+                if address in stubs and stubs[address][1] == nid:
+                    continue
+                if found.setdefault(nid, address) != address:
+                    raise ImportTableError(
+                        "ANALYZER_IMPORT_TABLE_INVALID",
+                        f"{library} exports 0x{nid:08x} at 0x{address:08x}, "
+                        f"and another library at 0x{found[nid]:08x}")
+        return tuple(sorted(found.items()))
+    except ImportTableError:
+        raise
+    except (ValueError, RuntimeError, struct.error) as exc:
+        raise ImportTableError("ANALYZER_IMPORT_TABLE_INVALID", str(exc)) from exc
 
 
 def variable_imports(elf):
     """Return every declared variable import with its reference sites, in table order.
 
-    The analyzer still refuses an image that declares variable imports (parse_imports):
-    this is the model the linking work reads. A reference of another type, a list that
+    parse_imports accepts variable imports; this function gives codegen the reference
+    sites, and the runtime linker patches them. A reference of another type, a list that
     leaves mapped input or runs past MAX_VARIABLE_REFERENCES, and a site outside the
     image are named boundaries.
     """
-    _windows, tables, base = _walk_import_windows(elf)
+    try:
+        _windows, tables, base = _walk_import_windows(elf)
 
-    def rebase(v):
-        return v + base if v and base != 0 and v < base else v
-
-    result = []
-    for table in tables:
-        for index in range(table.count):
-            pair = elf.read_at_vaddr(table.vstub_table + 8 * index, 8)
-            if pair is None or len(pair) != 8:
-                raise ImportTableError(
-                    "ANALYZER_IMPORT_TABLE_INVALID",
-                    f"variable stub {index} of {table.library} at "
-                    f"0x{table.vstub_table + 8 * index:08x} leaves mapped input",
-                )
-            refs_ptr, nid = struct.unpack("<II", pair)
-            refs_ptr = rebase(refs_ptr)
-            references = []
-            for slot in range(MAX_VARIABLE_REFERENCES + 1):
-                raw = elf.read_at_vaddr(refs_ptr + 4 * slot, 4) if refs_ptr else None
-                if raw is None or len(raw) != 4:
+        result = []
+        for table in tables:
+            for index in range(table.count):
+                pair = _read_mapped(elf, table.vstub_table + 8 * index, 8)
+                if pair is None:
                     raise ImportTableError(
                         "ANALYZER_IMPORT_TABLE_INVALID",
-                        f"{table.library} variable 0x{nid:08x}: reference list at "
-                        f"0x{refs_ptr:08x} leaves mapped input",
+                        f"variable stub {index} of {table.library} at "
+                        f"0x{table.vstub_table + 8 * index:08x} leaves mapped input",
                     )
-                word = struct.unpack("<I", raw)[0]
-                if word == 0:
-                    break
-                if slot == MAX_VARIABLE_REFERENCES:
-                    raise ImportTableError(
-                        "ANALYZER_IMPORT_TABLE_INVALID",
-                        f"{table.library} variable 0x{nid:08x}: more than "
-                        f"{MAX_VARIABLE_REFERENCES} references",
-                    )
-                field = VARIABLE_REFERENCE_FIELDS.get(word >> 26)
-                if field is None:
-                    raise ImportTableError(
-                        "ANALYZER_IMPORT_TABLE_INVALID",
-                        f"{table.library} variable 0x{nid:08x}: reference type "
-                        f"{word >> 26} is not a 32-bit, HI16 or LO16 relocation",
-                    )
-                site = rebase((refs_ptr & 0xF0000000) | ((word & 0x03FFFFFF) << 2))
-                target = elf.read_at_vaddr(site, 4)
-                if target is None or len(target) != 4:
-                    raise ImportTableError(
-                        "ANALYZER_IMPORT_TABLE_INVALID",
-                        f"{table.library} variable 0x{nid:08x}: reference site "
-                        f"0x{site:08x} leaves mapped input",
-                    )
-                references.append((field, site))
-            result.append(VariableImport(table.library, nid, tuple(references)))
-    return tuple(result)
+                refs_ptr, nid = struct.unpack("<II", pair)
+                refs_ptr = _rebase(refs_ptr, base)
+                references = []
+                for slot in range(MAX_VARIABLE_REFERENCES + 1):
+                    raw = _read_mapped(elf, refs_ptr + 4 * slot, 4) if refs_ptr else None
+                    if raw is None:
+                        raise ImportTableError(
+                            "ANALYZER_IMPORT_TABLE_INVALID",
+                            f"{table.library} variable 0x{nid:08x}: reference list at "
+                            f"0x{refs_ptr:08x} leaves mapped input",
+                        )
+                    word = struct.unpack("<I", raw)[0]
+                    if word == 0:
+                        break
+                    if slot == MAX_VARIABLE_REFERENCES:
+                        raise ImportTableError(
+                            "ANALYZER_IMPORT_TABLE_INVALID",
+                            f"{table.library} variable 0x{nid:08x}: more than "
+                            f"{MAX_VARIABLE_REFERENCES} references",
+                        )
+                    field = VARIABLE_REFERENCE_FIELDS.get(word >> 26)
+                    if field is None:
+                        raise ImportTableError(
+                            "ANALYZER_IMPORT_TABLE_INVALID",
+                            f"{table.library} variable 0x{nid:08x}: reference type "
+                            f"{word >> 26} is not a 32-bit, HI16 or LO16 relocation",
+                        )
+                    site = _rebase((refs_ptr & 0xF0000000) | ((word & 0x03FFFFFF) << 2), base)
+                    target = _read_mapped(elf, site, 4)
+                    if target is None:
+                        raise ImportTableError(
+                            "ANALYZER_IMPORT_TABLE_INVALID",
+                            f"{table.library} variable 0x{nid:08x}: reference site "
+                            f"0x{site:08x} leaves mapped input",
+                        )
+                    references.append((field, site))
+                result.append(VariableImport(table.library, nid, tuple(references)))
+        return tuple(result)
+    except ImportTableError:
+        raise
+    except (ValueError, RuntimeError, struct.error) as exc:
+        raise ImportTableError("ANALYZER_IMPORT_TABLE_INVALID", str(exc)) from exc
 
 
 def _encode_import_library_name(raw):
@@ -343,8 +383,8 @@ def _read_guest_cstr(elf, addr, *, max_bytes=MAX_IMPORT_LIBRARY_NAME_BYTES):
         cur = addr + offset
         if cur > 0xFFFFFFFF:
             raise ValueError("guest string address wraps 32-bit address space")
-        ch = elf.read_at_vaddr(cur, 1)
-        if ch is None or len(ch) != 1:
+        ch = _read_mapped(elf, cur, 1)
+        if ch is None:
             raise ImportTableError(
                 "ANALYZER_IMPORT_LIBRARY_NAME_UNMAPPED",
                 f"guest string at 0x{addr:08x} leaves mapped input",
@@ -393,8 +433,9 @@ def function_import_model(
 ) -> "tuple[dict[int, tuple[str, int]], list[str], tuple[VariableImportTable, ...]]":
     """Return (stubs, findings, variable_tables): parse_imports plus the windows that
     declare variables (variable_imports models those)."""
-    returned: tuple[dict[int, tuple[str, int]], list[str], tuple[VariableImportTable, ...]] = _function_import_model(elf)
-    return returned
+    model: tuple[dict[int, tuple[str, int]], list[str], tuple[VariableImportTable, ...]]
+    model = _function_import_model(elf)
+    return model
 
 
 def function_import_windows(
@@ -427,23 +468,44 @@ def _walk_import_windows(elf):
             libstub += base
             libstubend += base
 
-    def rebase(v):
-        if v and base != 0 and v < base:
-            return v + base
-        return v
+    rebase = lambda v: _rebase(v, base)  # noqa: E731
 
-    # Pass 1: walk the PspLibStubEntry window table (libstub..libstubend).
+    # Pass 1: walk the PspLibStubEntry window table (libstub..libstubend). An empty table
+    # (a module that imports nothing) reads no bytes, so only a non-empty one must be mapped;
+    # its bounds may name an address the image does not map, such as an unset 0 after rebasing.
+    if libstub > libstubend or (
+        libstubend > libstub and not _mapped_span(elf, libstub, libstubend - libstub)
+    ):
+        raise ImportTableError(
+            "ANALYZER_IMPORT_TABLE_INVALID",
+            f"libstub range 0x{libstub:08x}..0x{libstubend:08x} is reversed or unmapped",
+        )
     windows = []  # ImportWindow(library, numFuncs, nidData, firstSym), in table order
     variable_tables = []  # one VariableImportTable per window that declares variables
     pos = libstub
     while pos < libstubend:
-        e = elf.read_at_vaddr(pos, 28)
+        if libstubend - pos < 20:
+            raise ImportTableError(
+                "ANALYZER_IMPORT_TABLE_INVALID",
+                f"truncated import stub entry header at 0x{pos:08x}",
+            )
+        e = _read_mapped(elf, pos, min(28, libstubend - pos))
         if e is None or len(e) < 20:
             raise ValueError(f"truncated import stub entry at 0x{pos:08x}")
         name_ptr, ver, flags, size, numVars, numFuncs, nidData, firstSym = struct.unpack(
             "<IHHBBHII", e[:20])
-        if size == 0:
-            break
+        if size < MIN_STUB_ENTRY_WORDS or size > MAX_STUB_ENTRY_WORDS:
+            raise ImportTableError(
+                "ANALYZER_IMPORT_TABLE_INVALID",
+                f"import entry at 0x{pos:08x}: entry size {size} words outside "
+                f"[{MIN_STUB_ENTRY_WORDS}, {MAX_STUB_ENTRY_WORDS}]",
+            )
+        step = size * 4
+        if step <= 0 or pos + step > 0xFFFFFFFF or pos + step > libstubend:
+            raise ImportTableError(
+                "ANALYZER_IMPORT_TABLE_INVALID",
+                f"import entry at 0x{pos:08x}: entry size {size} words runs past libstubend",
+            )
         name_ptr, nidData, firstSym = rebase(name_ptr), rebase(nidData), rebase(firstSym)
         if numFuncs > 0 and nidData == 0:
             raise ImportTableError(
@@ -463,10 +525,27 @@ def _walk_import_windows(elf):
         if numVars:
             variable_tables.append(
                 _variable_import_table(elf, pos, e, size, libname, numVars, rebase))
+        if numFuncs > 0:
+            # The layout's named arithmetic boundary first, so a wrapping window reads as
+            # that rather than as an unmapped span.
+            if firstSym + numFuncs * 8 > U32_MAX or nidData + numFuncs * 4 > U32_MAX:
+                raise ImportTableError(
+                    "ANALYZER_IMPORT_TABLE_INVALID",
+                    "import table address arithmetic exceeds 32-bit guest space",
+                )
+            if not _mapped_span(elf, nidData, numFuncs * 4):
+                raise ImportTableError(
+                    "ANALYZER_IMPORT_TABLE_INVALID",
+                    f"import entry at 0x{pos:08x}: NID table at 0x{nidData:08x} "
+                    f"({numFuncs} functions) leaves mapped input",
+                )
+            if firstSym % 4 or not _mapped_span(elf, firstSym, numFuncs * 8):
+                raise ImportTableError(
+                    "ANALYZER_IMPORT_TABLE_INVALID",
+                    f"import entry at 0x{pos:08x}: function stub span at 0x{firstSym:08x} "
+                    f"({numFuncs} functions) is misaligned or leaves mapped input",
+                )
         windows.append(ImportWindow(libname, numFuncs, nidData, firstSym))
-        step = size * 4
-        if step <= 0 or pos + step > 0xFFFFFFFF:
-            raise ValueError("import stub table step wraps 32-bit guest space")
         pos += step
     return windows, variable_tables, base
 
@@ -476,17 +555,14 @@ def _function_import_model(elf):
 
     # Passes 2-4: the shared layout model (psp_import_table.layout_import_windows)
     # pairs stub slots with NIDs for the audit parser and the analyzer alike.
-    def sec_base(s):
-        return s["addr"] + base if (base != 0 and s["addr"] < base) else s["addr"]
-
     st = elf.sec(".sceStub.text")
     nidsec = elf.sec(".rodata.sceNid")
-    stub_section = (sec_base(st), st["size"]) if st is not None else None
-    nid_section = (sec_base(nidsec), nidsec["size"]) if nidsec is not None else None
+    stub_section = (_rebase(st["addr"], base), st["size"]) if st is not None else None
+    nid_section = (_rebase(nidsec["addr"], base), nidsec["size"]) if nidsec is not None else None
 
     def read_nids(address, count):
-        blob = elf.read_at_vaddr(address, count * 4)
-        if blob is None or len(blob) != count * 4:
+        blob = _read_mapped(elf, address, count * 4)
+        if blob is None:
             raise ValueError(f"truncated import NID region at 0x{address:08x}")
         return struct.unpack(f"<{count}I", blob)
 
@@ -518,8 +594,29 @@ def parse_imports(elf):
 
 
 def main(argv):
-    args = [a for a in argv[1:] if not a.startswith("--")]
-    opts = [a for a in argv[1:] if a.startswith("--")]
+    args = []
+    opts = []
+    out = None
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--toml":
+            if i + 1 >= len(argv):
+                sys.stderr.write("imports: --toml requires an output path\n")
+                return 2
+            out = argv[i + 1]
+            opts.append(a)
+            i += 2
+        elif a.startswith("--toml="):
+            out = a.split("=", 1)[1]
+            opts.append(a)
+            i += 1
+        elif a.startswith("--"):
+            opts.append(a)
+            i += 1
+        else:
+            args.append(a)
+            i += 1
 
     use_env_elf = "--env-elf" in opts
     expected = 1 if use_env_elf else 2
@@ -568,10 +665,6 @@ def main(argv):
     for finding in findings:
         print(f"note: {finding}")
 
-    out = None
-    for a in argv[1:]:
-        if a.startswith("--toml"):
-            out = a.split("=", 1)[1] if "=" in a else argv[argv.index(a) + 1]
     if out:
         lines = ["# Import map emitted by tools/imports.py: stub address -> (library, NID).", ""]
         for addr in sorted(stubs):

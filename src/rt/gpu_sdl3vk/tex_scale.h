@@ -193,15 +193,25 @@ int nk_tex_scale_on_worker(void);
  * queued job stays queued). */
 void nk_tex_scale_set_sync(int on);
 void nk_tex_scale_set_hold(int on);
+/* Tests: make every later start fail at one step, so its fallback runs: NK_TEX_SCALE_FAULT_SYNC (a
+ * condition variable is not made), NK_TEX_SCALE_FAULT_THREAD (no worker thread starts), or
+ * NK_TEX_SCALE_FAULT_NONE. And the mutexes and conditions this file holds now (0 when stopped). */
+enum { NK_TEX_SCALE_FAULT_NONE, NK_TEX_SCALE_FAULT_SYNC, NK_TEX_SCALE_FAULT_THREAD };
+void nk_tex_scale_set_start_fault(int fault);
+int nk_tex_scale_sync_objects(void);
 /* Wait until every queued job has finished (tests and shutdown). */
 void nk_tex_scale_wait_idle(void);
-/* Stop the workers and free every queued or finished job. */
+/* Stop the workers and free every queued or finished job. A worker still inside a work job is not
+ * waited for (its owner's bounded wait has given up on it): it is left to finish on its own,
+ * touches nothing here afterwards, and is counted in workers_left and said on stderr. */
 void nk_tex_scale_shutdown(void);
 
 typedef struct NkTexScaleStats {
     uint64_t submitted, scaled, refused_full, taken, discarded;
     uint64_t work_submitted, work_done, work_refused;   /* work jobs */
     uint64_t scale_ns;          /* worker time spent scaling */
+    uint64_t waits;             /* nk_tex_scale_wait_idle and nk_tex_scale_wait_work calls */
+    uint64_t workers_left;      /* workers a stop left inside a work job, not waited for */
     uint64_t budget_used, budget_peak;
 } NkTexScaleStats;
 void nk_tex_scale_stats(NkTexScaleStats *out);
