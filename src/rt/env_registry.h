@@ -232,6 +232,7 @@
     X("SR_T111PC", "flag-presence", "off", "sched.c", "Enables a scheduler trace of a specific thread program counter, limited by SR_T111PC_MAX.") \
     X("SR_T111PC_MAX", "number", "built-in limit; accepts 1 to 256", "sched.c", "Maximum number of entries for the T111 PC trace; out-of-range values are ignored.") \
     X("SR_TEST_EXITGAME_ATEXIT", "flag-presence", "off", "hle_thread_selftest.c", "Self-test switch that registers an atexit probe in the exit-game test.") \
+    X("SR_TEST_EXITGAME_CHEATS", "path", "unset: the exit-game child loads no cheats", "hle_thread_selftest.c", "Self-test path: the exit-game child starts a cheat that is held and sends stderr to this file, so the test reads the hold counts sceKernelExitGame gives.") \
     X("SR_TEST_EXITGAME_INTERRUPT", "flag-presence", "off", "hle_thread_selftest.c", "Test hook in the HLE thread selftest that clears the current thread when set.") \
     X("SR_TEST_GUEST_MODULE_LOAD", "string", "unset: the test returns immediately", "hle_thread_selftest.c", "Selects the mode of the guest-module-load binding self-test.") \
     X("SR_TEXDUMP", "flag-presence", "off", "ge.c", "When set, enables texture dumping.") \
