@@ -56,6 +56,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import nk_cli  # noqa: E402
+import nk_powershell  # noqa: E402
 import scratch_dir  # noqa: E402
 from test_build_truth import _class_scratch_build_root  # noqa: E402
 from nk_core import package_cache  # noqa: E402
@@ -1134,6 +1135,19 @@ class TestPlayerPackageRoute(unittest.TestCase):
         discovered = completed.stdout.partition("path=")[2].strip()
         self.assertEqual(Path(discovered).resolve(), cli.resolve())
 
+    def _isolated_profile_env(self) -> dict[str, str]:
+        """Per-test profile environment whose Windows PowerShell cache stays inside self.root."""
+        userprofile = self.root / "userprofile"
+        (userprofile / "AppData" / "Local").mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        environment["LOCALAPPDATA"] = str(self.local_appdata)
+        environment["APPDATA"] = str(self.root / "appdata")
+        environment["USERPROFILE"] = str(userprofile)
+        anchored: dict[str, str] = nk_powershell.powershell_env(
+            environment, cache_dir=self.local_appdata / "ps-cache"
+        )
+        return anchored
+
     def test_source_owned_showcase_without_data_root_stages_without_data(self):
         self.skip_if_toolchain_unavailable()
         demo = next(item for item in SHOWCASE_DEMOS if item["disc_id"] == "TEST00007")
@@ -1148,10 +1162,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
             b"Source-owned synthetic notice\n",
         )
 
-        environment = os.environ.copy()
-        environment["LOCALAPPDATA"] = str(self.local_appdata)
-        environment["APPDATA"] = str(self.root / "appdata")
-        environment["USERPROFILE"] = str(self.root / "userprofile")
+        environment = self._isolated_profile_env()
         completed = subprocess.run(
             [str(self.player), f"--iso={iso_path}", "--stage-only"],
             cwd=ROOT, env=environment, capture_output=True, text=True, timeout=60,
@@ -1174,10 +1185,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
             iso_path, build_plain_mips_elf() + bytes(i % 251 for i in range(70000)),
             disc_id=DISC_ID, title="Synthetic Experimental Disc",
         )
-        environment = os.environ.copy()
-        environment["LOCALAPPDATA"] = str(self.local_appdata)
-        environment["APPDATA"] = str(self.root / "appdata")
-        environment["USERPROFILE"] = str(self.root / "userprofile")
+        environment = self._isolated_profile_env()
         completed = subprocess.run(
             [str(self.player), f"--user-data-root={self.user_root}", f"--iso={iso_path}",
              "--stage-only"],
@@ -1201,10 +1209,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
 
     def import_and_build_homebrew(self, eboot: Path) -> tuple[str, str]:
         """The player's --iso import of eboot, ADD TO LIBRARY, and BUILD PACKAGE: (key, title)."""
-        environment = os.environ.copy()
-        environment["LOCALAPPDATA"] = str(self.local_appdata)
-        environment["APPDATA"] = str(self.root / "appdata")
-        environment["USERPROFILE"] = str(self.root / "userprofile")
+        environment = self._isolated_profile_env()
         imported = subprocess.run(
             [str(self.player), f"--user-data-root={self.user_root}", f"--iso={eboot}",
              "--stage-only"],
@@ -1324,10 +1329,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         second_dir.mkdir(parents=True)
         second = second_dir / "EBOOT.PBP"
         shutil.copyfile(first, second)
-        environment = os.environ.copy()
-        environment["LOCALAPPDATA"] = str(self.local_appdata)
-        environment["APPDATA"] = str(self.root / "appdata")
-        environment["USERPROFILE"] = str(self.root / "userprofile")
+        environment = self._isolated_profile_env()
 
         def run_iso(eboot: Path) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
@@ -1519,10 +1521,7 @@ class TestPlayerPackageRoute(unittest.TestCase):
         # 1 and 2. Import: the player's own --iso inspection and disc check. Today an
         # uncatalogued disc stops --stage-only at the title list (exit 3,
         # STAGING_RESULT status=FAIL) after both ran; that is the current boundary.
-        environment = os.environ.copy()
-        environment["LOCALAPPDATA"] = str(self.local_appdata)
-        environment["APPDATA"] = str(self.root / "appdata")
-        environment["USERPROFILE"] = str(self.root / "userprofile")
+        environment = self._isolated_profile_env()
         imported = subprocess.run(
             [str(self.player), f"--user-data-root={user_root}", f"--iso={iso_path}",
              "--stage-only"],

@@ -380,8 +380,10 @@ class NoNetworkTests(unittest.TestCase):
 
 class CliTests(unittest.TestCase):
     def run_cli(self, tmp: Path, *extra: str, fx: Fixture) -> subprocess.CompletedProcess[str]:
+        local_appdata = tmp / "localappdata"
+        local_appdata.mkdir(exist_ok=True)
         env = dict(os.environ, USERPROFILE=WIN_HOME, HOME=POSIX_HOME, USERNAME=USER, USER=USER,
-                   COMPUTERNAME=HOST)
+                   COMPUTERNAME=HOST, LOCALAPPDATA=str(local_appdata))
         return subprocess.run(
             [sys.executable, str(ROOT / "tools" / "nk_cli.py"), "report", "--no-doctor", "--json",
              "--user-data-root", str(fx.data), "--logs-dir", str(fx.logs), "--config-dir", str(fx.config),
