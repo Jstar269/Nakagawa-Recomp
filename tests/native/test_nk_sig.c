@@ -288,7 +288,7 @@ static void test_minisign(void) {
         {
             /* Every cut that takes more than the final line end. */
             size_t n = strlen(sig);
-            for (size_t cut = 0; cut + 2u < n; cut += 7u) {
+            for (size_t cut = 0; cut + 2u < n; ++cut) {
                 NkMinisignResult r = nk_minisign_verify(
                     &key, sig, cut, (const uint8_t *)k_minisign_test_message, msg_len, NULL, NULL);
                 if (r == NK_MINISIGN_VALID) {

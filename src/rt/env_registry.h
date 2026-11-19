@@ -44,7 +44,7 @@
     X("SR_ACE_SHADOW_CANDIDATES", "string", "off (nothing listed)", "gpu_sdl3vk/ge_gpu.c", "Exactly 1, with shadow=soft declared, prints a SOFT_SHADOW: candidate line (size, keyed digest) per distinct texture hashed.") \
     X("SR_ACE_SMOOTH_DEPTH", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the GE's depth for its in-betweens.") \
     X("SR_ACE_SMOOTH_HUD", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the HUD mask of through-mode draws for its in-betweens.") \
-    X("SR_ALLOC_GUARD", "flag-nonzero", "on (guard enabled when unset)", "hle.c", "Allocator guard stays on unless set with a value starting with 0, which disables it.") \
+    X("SR_ALLOC_GUARD", "flag-nonzero", "on (refusal lines printed when unset)", "hle.c", "A value starting with 0 silences the allocator's refusal lines; a request the user partition cannot hold is refused either way.") \
     X("SR_ALLOC_MAX", "number", "0xFFFFFFFF (no extra cap)", "hle.c", "Hexadecimal optional stricter cap on the size of a user-partition allocation request.") \
     X("SR_ALLOC_TRACE", "flag-presence", "off", "hle.c,recomp.c", "When set, prints a trace line for guest memory allocations and partition frees to stderr.") \
     X("SR_ARGLOG", "flag-presence", "off", "sched.c", "Logs a THREAD_ARG_COPY line to stderr when a started thread's argument block is copied.") \
@@ -62,6 +62,8 @@
     X("SR_CALLCOUNT_ALL", "flag-presence", "off (top 18 NIDs listed)", "hle.c", "Makes the HLE call-count report list every distinct NID instead of the top 18.") \
     X("SR_CBLOG", "flag-presence", "off", "debug.h,hle.c,hle_kernel_module.c,hle_kernel_thread.c,hle_umd.c", "Logs kernel callback creation, notification and registration events and enables the misc debug class.") \
     X("SR_CBSNAP", "flag-presence", "off", "sched.c", "Diagnostic switch read in sched.c that enables callback snapshots at each delivered vblank.") \
+    X("SR_CHEATS", "string", "off", "cheats.c", "Set to exactly 1 to apply the user's CWCheat file each VBLANK; set by the launcher from the player's Cheats setting (#2639).") \
+    X("SR_CHEATS_FILE", "path", "unset (no cheats)", "cheats.c", "The CWCheat file SR_CHEATS=1 reads; the launcher names cheats/<DISC-ID>.ini in the user data folder, or the --cheats-file path.") \
     X("SR_CODE_CAPTURE", "path", "unset (no capture written)", "recomp.c", "Folder to which a run stopped by a call into unowned RAM writes the code around the target, for tools/code_capture.py (#1933).") \
     X("SR_DATAROOT", "path", "unset", "hle_thread_selftest.c", "Extracted data root directory used to serve guest files from the host; the self-test saves and restores it.") \
     X("SR_DEBUG", "list", "unset (legacy per-subsystem variables decide)", "debug.h,hle.c", "Bitmask (strtoul, base 0) selecting debug log categories; 0x08 also enables GE display-list dumping.") \
@@ -70,13 +72,14 @@
     X("SR_DETERMINISTIC_CLOCK", "string", "empty (off)", "sched.c", "1 makes guest time follow the guest work, not the host clock; empty or 0 keeps the paced or turbo clock. 1 with SR_NOVBPACE=0 is rejected.") \
     X("SR_DETERMINISTIC_SLICE_US", "number", "100", "sched.c", "Guest microseconds the deterministic clock charges per scheduler boundary; a value outside 1..100000 or not a number is rejected.") \
     X("SR_DEVELOPER_MODE", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c", "Marks a hand-started run as a developer run in the SDL3 Vulkan presenter.") \
-    X("SR_DISC_ID", "string", "unset", "gui.c,hle_display.c,replay_checkpoint.c,gpu_sdl3vk/ge_gpu.c", "Disc ID set by the launcher: pause overlay, screenshot names, the texture pack [games] check, and the texture dump folder and its [games] line.") \
+    X("SR_DISC_ID", "string", "unset", "cheats.c,gui.c,hle_display.c,replay_checkpoint.c,gpu_sdl3vk/ge_gpu.c", "Disc ID set by the launcher: pause overlay, screenshot names, texture pack and dump [games] checks, and the cheat file's _S sections.") \
     X("SR_DISPLOG", "flag-presence", "off", "guest_interp.c,recomp.c", "Logs each guest dispatch with target, source pc and return address to stderr.") \
     X("SR_DLGLOG", "flag-presence", "off", "debug.h,hle_utility.c,savedata.c", "Prints diagnostic lines to stderr for utility dialogs and savedata dialog calls.") \
     X("SR_EXEC_SHARE_JSON", "path", "unset (no JSON written)", "perf.c", "File to which the execution-share profile is written as JSON at exit.") \
     X("SR_EXE_DIR", "path", "unset (executable directory is detected)", "hle_host.c", "Overrides the directory the host treats as the executable root; read as a wide string on Windows.") \
     X("SR_EXITSNAP", "flag-presence", "off", "hle_kernel_thread.c", "Arms capture of the last worker thread's CPU state at thread exit for later diagnostics.") \
     X("SR_EXIT_AT_VBLANK", "number", "0 (never exit)", "hle_display.c,sched.c", "Ends the run successfully once the vblank count reaches this value; also counts as pause automation.") \
+    X("SR_EXIT_DUMP", "flag-presence", "off", "hle_kernel_module.c", "Writes crash_dump.bin (CpuState and 64 KiB of guest stack) and exited.flag beside the executable at sceKernelExitGame, for tools/mem_debug.py.") \
     X("SR_EXPECT_DATA_FILE_COUNT", "number", "unset", "hle_thread_selftest.c", "Expected data-file count the title-config self-test compares with sr_title_config_expected_data_file_count().") \
     X("SR_EXPECT_HLE_DIAGNOSTICS", "string", "unset", "hle_thread_selftest.c", "Expected HLE diagnostics state that the title-config self-test compares against.") \
     X("SR_FBDIAG", "flag-presence", "off", "hle_display.c", "Prints a FRAMEBUF MISMATCH warning when the presented buffer differs from the GE draw target.") \
@@ -151,7 +154,7 @@
     X("SR_GPU_TWIN_REF", "path", "unset (no reference check)", "gpu_sdl3vk/ge_gpu_selftest.inc", "Reference file for the coherence self-test's twin cases: a twin-off run writes it, a twin-on run at the same scale checks it.") \
     X("SR_GPU_XFER_RING_KB", "number", "built-in default ring size", "gpu_sdl3vk/ge_gpu.c", "Transfer ring size in KiB (0 disables, above 65536 ignored).") \
     X("SR_HEADLESS", "flag-nonzero", "off", "audio_sdl3.c,gui.c,sched.c", "Marks the run headless: silent audio, headless presenter and no pause UI (audio check wants exactly 1).") \
-    X("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", "string", "unset (off)", "gui.c,sched.c", "Requests the headless presented-frames acceptance checkpoint; any non-empty value enables it.") \
+    X("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", "string", "unset (off)", "cheats.c,gui.c,sched.c", "Requests the headless presented-frames acceptance checkpoint; any non-empty value enables it. Cheats are refused for such a run.") \
     X("SR_HEAP_BASE", "number", "first page-aligned address after the loaded image", "hle.c", "Hexadecimal base address for the user heap partition.") \
     X("SR_HEAP_DIAG", "flag-presence", "off", "recomp.c", "When set, prints live heap blocks and rejected foreign frees to stderr.") \
     X("SR_HEAP_REUSE_OFF", "flag-presence", "off (heap free-list reuse enabled)", "recomp.c", "Disables guest heap block reuse so free is a no-op, restoring bump-only allocation.") \
@@ -214,9 +217,9 @@
     X("SR_PSMF_SELFTEST_DEBUG", "flag-presence", "off", "psmf_producer_selftest.c", "Makes the PSMF producer self-test print extra statistics lines to stderr.") \
     X("SR_QUIET", "flag-nonzero", "off", "driver.c", "When nonzero, redirects stdout and stderr to the null device.") \
     X("SR_REAL_MODULE_START", "string", "unset (module_start runs for libfont only)", "hle_kernel_module.c,hle_thread_selftest.c", "1 lets module_start run for any module, 0 for none; other values are ignored with a warning.") \
-    X("SR_RECORD", "path", "unset (no recording)", "replay_checkpoint.c", "Records the run (checkpoints, pad samples, keyboard answers) to this file for SR_REPLAY; needs SR_DETERMINISTIC_CLOCK=1.") \
+    X("SR_RECORD", "path", "unset (no recording)", "cheats.c,replay_checkpoint.c", "Records the run (checkpoints, pad samples, keyboard answers) to this file for SR_REPLAY; needs SR_DETERMINISTIC_CLOCK=1.") \
     X("SR_REDUCE_MOTION", "string", "Automatic (system setting)", "gui.c,overlay/overlay_host.c", "Player's Reduce motion choice for the overlay, falling back to the platform preference.") \
-    X("SR_REPLAY", "path", "unset (no replay)", "replay_checkpoint.c", "Replays an SR_RECORD file in a fresh run, checking each checkpoint; prints one REPLAY_ verdict and goes live when used up.") \
+    X("SR_REPLAY", "path", "unset (no replay)", "cheats.c,replay_checkpoint.c", "Replays an SR_RECORD file in a fresh run, checking each checkpoint; prints one REPLAY_ verdict and goes live when used up.") \
     X("SR_REPLAY_CHECKPOINTS", "path", "unset (no checkpoints)", "replay_checkpoint.c", "Writes digests of the threads, scheduler, VRAM and RAM every N vblanks to this file; tools/nkstate.py ckpt-diff names where two runs split.") \
     X("SR_REPLAY_CHECKPOINT_EVERY", "number", "60", "replay_checkpoint.c", "Vblanks between checkpoints for SR_REPLAY_CHECKPOINTS and SR_RECORD, 1..100000; another value stops the run.") \
     X("SR_RESOLUTION_SCALE", "number", "1", "gpu_sdl3vk/ge_gpu.c", "Internal render scale for the Vulkan GE backend; SR_GPU_SCALE is read first as the other spelling.") \
@@ -239,6 +242,7 @@
     X("SR_T111PC", "flag-presence", "off", "sched.c", "Enables a scheduler trace of a specific thread program counter, limited by SR_T111PC_MAX.") \
     X("SR_T111PC_MAX", "number", "built-in limit; accepts 1 to 256", "sched.c", "Maximum number of entries for the T111 PC trace; out-of-range values are ignored.") \
     X("SR_TEST_EXITGAME_ATEXIT", "flag-presence", "off", "hle_thread_selftest.c", "Self-test switch that registers an atexit probe in the exit-game test.") \
+    X("SR_TEST_EXITGAME_CHEATS", "path", "unset: the exit-game child loads no cheats", "hle_thread_selftest.c", "Self-test path: the exit-game child starts a cheat that is held and sends stderr to this file, so the test reads the hold counts sceKernelExitGame gives.") \
     X("SR_TEST_EXITGAME_INTERRUPT", "flag-presence", "off", "hle_thread_selftest.c", "Test hook in the HLE thread selftest that clears the current thread when set.") \
     X("SR_TEST_GUEST_MODULE_LOAD", "string", "unset: the test returns immediately", "hle_thread_selftest.c", "Selects the mode of the guest-module-load binding self-test.") \
     X("SR_TEXDUMP", "flag-presence", "off", "ge.c", "When set, enables texture dumping.") \

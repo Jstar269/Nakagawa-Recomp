@@ -500,7 +500,8 @@ int player_ui_test_next_event(const char *script, size_t *cursor,
             { "S", SDLK_S, SDL_SCANCODE_S }, { "O", SDLK_O, SDL_SCANCODE_O },
             { "X", SDLK_X, SDL_SCANCODE_X }, { "F1", SDLK_F1, SDL_SCANCODE_F1 },
             { "BACKSPACE", SDLK_BACKSPACE, SDL_SCANCODE_BACKSPACE },
-            { "D", SDLK_D, SDL_SCANCODE_D }, { "SLASH", SDLK_SLASH, SDL_SCANCODE_SLASH },
+            { "D", SDLK_D, SDL_SCANCODE_D }, { "E", SDLK_E, SDL_SCANCODE_E },
+            { "Q", SDLK_Q, SDL_SCANCODE_Q }, { "SLASH", SDLK_SLASH, SDL_SCANCODE_SLASH },
             { "F12", SDLK_F12, SDL_SCANCODE_F12 }, { "W", SDLK_W, SDL_SCANCODE_W }
         };
         for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
