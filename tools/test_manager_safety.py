@@ -401,7 +401,13 @@ class ManagerSafetyContractTests(unittest.TestCase):
             self.manager.index("function Run-NkEngine") : self.manager.index("function Analyze-RunLogs")
         ]
         self.assertNotIn("Stop-WorkspaceTarget", run_engine_body)
-        self.assertIn("Get-WorkspaceTargetProcesses", run_engine_body)
+        # The refusal lives in the preconditions Run-NkEngine (and VisualOracle) apply.
+        self.assertIn("Test-NkRunPreconditions", run_engine_body)
+        preconditions_body = self.manager[
+            self.manager.index("function Test-NkRunPreconditions") : self.manager.index("function Run-NkEngine")
+        ]
+        self.assertNotIn("Stop-WorkspaceTarget", preconditions_body)
+        self.assertIn("Get-WorkspaceTargetProcesses", preconditions_body)
 
         # Stop-WorkspaceTarget retains its clean-up capability using full process identity
         stop_target_body = self.manager[

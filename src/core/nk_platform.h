@@ -59,6 +59,20 @@ int nk_rename_noreplace_utf8(const char *from, const char *to);
 char nk_platform_path_separator(void);
 /* The separator between entries of a PATH-style list: ';' on Windows, ':' elsewhere. */
 char nk_platform_path_list_separator(void);
+/* Whether the host compares file names without regard to case: true on Windows
+   (NTFS folds case), false on POSIX hosts, whose realpath() names are compared
+   byte for byte. */
+bool nk_platform_paths_fold_case(void);
+/* Orders two UTF-8 file names the way the host's file system matches them, so 0 means
+   the host opens both as one file. Win32: the UTF-16 names compared ordinally with case
+   ignored through the system's upper-case table (CompareStringOrdinal), so two names
+   that differ only in case, or that are different UTF-8 for one UTF-16 text, order
+   equal; POSIX: the bytes (strcmp). Returns <0, 0 or >0, one consistent order fit for
+   sorting. On Win32 a name that is not valid UTF-8 or has NK_PLATFORM_FILE_NAME_UNITS
+   UTF-16 units or more is ordered by its bytes after every name that converts; a name
+   shorter than NK_PLATFORM_FILE_NAME_UNITS UTF-8 bytes always converts when valid. */
+#define NK_PLATFORM_FILE_NAME_UNITS 4096u
+int nk_platform_compare_file_names(const char *a, const char *b);
 bool nk_platform_file_exists(const char *path);
 bool nk_platform_dir_exists(const char *path);
 /* True only when the OS says the name does not exist: ENOENT or ENOTDIR on POSIX, and
@@ -440,6 +454,11 @@ typedef enum {
 } NkHostKind;
 
 NkHostKind nk_platform_host_kind(void);
+
+/* Linux Steam integration: discover the common per-user Steam root and conservatively check
+   `$HOME/.steam/steam.pid`. These POSIX-backend helpers return false on non-Linux hosts. */
+bool nk_platform_linux_steam_find_root(char *root, size_t root_cap);
+bool nk_platform_linux_steam_client_running(void);
 
 /* Path text comparison as the host's file system compares names: Win32 folds ASCII case
    and treats '/' and '\\' as one separator; POSIX compares bytes. Used to find a folder's
