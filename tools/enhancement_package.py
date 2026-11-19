@@ -1908,26 +1908,31 @@ _LOAD_OPS = frozenset((0x20, 0x21, 0x23, 0x24, 0x25))  # lb, lh, lw, lbu, lhu
 HOLD_CALLEE_MAX_WORDS = 256
 EVEN_COUNTER_SCAN_WORDS = 16
 _JR_RA = 0x03E00008
-_ANALYZE_BRANCH_TARGET: Any = None
 
 
 def _is_reserved_zero_branch(word: int) -> bool:
+    """blez, bgtz, blezl or bgtzl with a nonzero rt: a reserved encoding, refused where it is read."""
     op, rt = word >> 26, (word >> 16) & 31
     return op in (0x06, 0x07, 0x16, 0x17) and rt != 0
 
 
 def _branch_target(w: int, pc: int) -> int | None:
-    """The target of an analyzer-recognized conditional branch at ``pc``, else None."""
-    global _ANALYZE_BRANCH_TARGET
-    if _ANALYZE_BRANCH_TARGET is None:
-        tools_dir = str(Path(__file__).resolve().parent)
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
-        from analyze import branch_target  # noqa: PLC0415 - lazy to keep package loading light
+    """The target of a conditional branch (likely forms included) at ``pc``, else None.
 
-        _ANALYZE_BRANCH_TARGET = branch_target
-    target: int | None = _ANALYZE_BRANCH_TARGET(pc, w)
-    return target
+    Decoded here and not taken from the analyzer, so what this file refuses does not follow a
+    change there. The linking branches (bltzal, bgezal, bltzall, bgezall) are calls, not
+    conditional branches: they give None here and are named by _is_jump. A reserved
+    blez/bgtz/blezl/bgtzl encoding still has a target here; _is_reserved_zero_branch names it."""
+    op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+    is_branch = (op in (0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17)
+                 or (op == 0x01 and rt in (0x00, 0x01, 0x02, 0x03))
+                 or (op in (0x11, 0x12) and rs == 0x08))  # bc1*, the VFPU's bvf/bvt
+    if not is_branch:
+        return None
+    simm16 = w & 0xFFFF
+    if simm16 & 0x8000:
+        simm16 -= 0x10000
+    return (pc + 4 + (simm16 << 2)) & 0xFFFFFFFF
 
 
 def _leaf_refusal(w: int) -> str | None:

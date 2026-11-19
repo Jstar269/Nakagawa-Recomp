@@ -8094,5 +8094,100 @@ class TestAcePartsSoftShadows(_AcePartsFixture):
         self.assertEqual(text.count("(void)nk_ace_soft_shadows_declare("), 1)
 
 
+class TestLinkingBranchesAreCalls(unittest.TestCase):
+    """bltzal, bgezal, bltzall and bgezall link $ra: the package walkers read them as calls, never
+    as conditional branches, and this file decodes them itself (it does not take the analyzer's
+    word for what a branch is)."""
+
+    BASE = 0x08900000
+    LINKING_RT = (0x10, 0x11, 0x12, 0x13)  # bltzal, bgezal, bltzall, bgezall
+
+    @staticmethod
+    def _reader(base: int, body: list[int]) -> Any:
+        words = {base + 4 * index: word for index, word in enumerate(body)}
+        return lambda address, count: [
+            words[address + 4 * index] for index in range(count) if address + 4 * index in words
+        ]
+
+    def test_the_instruction_graph_refuses_every_linking_branch(self) -> None:
+        for rt in self.LINKING_RT:
+            body = [_i(0x01, ZERO, rt, 3), NOP, JR_RA, NOP, JR_RA, NOP]
+            with self.subTest(rt=rt), self.assertRaisesRegex(
+                    EnhancementPackageError, r"fn has a linking branch at 0x08900000 \(fail-closed refusal\)"):
+                enhancement_package._Graph(
+                    self.BASE, self.BASE + 4 * len(body), self._reader(self.BASE, body), "fn", "sites[0](SYNTH)")
+
+    def test_a_linking_branch_is_a_call_and_never_falls_through(self) -> None:
+        for rt in self.LINKING_RT:
+            for rs in (ZERO, A0):
+                word = _i(0x01, rs, rt, 8)
+                with self.subTest(rt=rt, rs=rs):
+                    self.assertIsNone(enhancement_package._branch_target(word, self.BASE))
+                    self.assertTrue(enhancement_package._is_jump(word))
+                    self.assertFalse(enhancement_package._falls_through(word, self.BASE))
+
+    def test_a_referenced_load_is_not_followed_back_past_a_linking_branch(self) -> None:
+        load = _lwc1(0, 16, T0)
+        for rt in self.LINKING_RT:
+            # The lui runs before a call: the callee may leave anything in the base register.
+            before_call = [_lui(T0, 0x0890), _i(0x01, ZERO, rt, 8), NOP, load]
+            # The lui is the call's delay slot.
+            in_the_slot = [NOP, _i(0x01, A0, rt, 8), _lui(T0, 0x0890), NOP, load]
+            for name, body in (("lui before the call", before_call), ("lui in the call's slot", in_the_slot)):
+                site = self.BASE + 4 * (len(body) - 1)
+                with self.subTest(name, rt=rt), self.assertRaisesRegex(
+                        EnhancementPackageError, "site 'X' does not load from a constant address"):
+                    enhancement_package._loaded_float_address(
+                        "sites[0](X)", "X", self.BASE, site, load, self._reader(self.BASE, body))
+
+    def test_the_call_tree_reads_a_linking_branchs_delay_slot_as_code(self) -> None:
+        """origin/main's reading, kept: the call tree does not follow a linking branch's target, and
+        reads the word after it as the next instruction, so a call there joins the tree. Reading the
+        linking branch as a conditional branch instead skipped that word."""
+        callee = self.BASE + 0x100
+        words: dict[int, int] = {callee: JR_RA, callee + 4: NOP}
+
+        def read_words(address: int, count: int) -> list[int]:
+            return [words[address + 4 * index] for index in range(count) if address + 4 * index in words]
+
+        for rt in self.LINKING_RT:
+            body = [_i(0x01, ZERO, rt, 2), _jal(callee), NOP, JR_RA, NOP]
+            words.update({self.BASE + 4 * index: word for index, word in enumerate(body)})
+            with self.subTest(rt=rt):
+                self.assertEqual(
+                    enhancement_package._direct_call_tree("sites[0](SYNTH)", self.BASE, read_words,
+                                                          [self.BASE, callee]),
+                    {self.BASE, callee})
+
+    def test_branch_decoding_is_pinned_over_the_whole_opcode_space(self) -> None:
+        """Every opcode, rs and rt: which words are conditional branches, linking branches and
+        reserved encodings here, and that no word the analyzer follows as a branch is read here as
+        an instruction that only falls through."""
+        import analyze
+
+        pc = self.BASE
+        for op in range(64):
+            for rs in range(32):
+                for rt in range(32):
+                    word = (op << 26) | (rs << 21) | (rt << 16) | 3
+                    branch = (op in (0x04, 0x05, 0x06, 0x07, 0x14, 0x15, 0x16, 0x17)
+                              or (op == 0x01 and rt in (0x00, 0x01, 0x02, 0x03))
+                              or (op in (0x11, 0x12) and rs == 0x08))
+                    linking = op == 0x01 and rt in self.LINKING_RT
+                    reserved = op in (0x06, 0x07, 0x16, 0x17) and rt != 0
+                    got = (enhancement_package._branch_target(word, pc),
+                           enhancement_package._is_jump(word),
+                           enhancement_package._is_reserved_zero_branch(word))
+                    want = (pc + 16 if branch else None,
+                            linking or op in (0x02, 0x03),
+                            reserved)
+                    if got != want:
+                        self.fail(f"0x{word:08x}: (target, jump, reserved) is {got}, expected {want}")
+                    if analyze.branch_target(pc, word) is not None and not (branch or linking):
+                        self.fail(f"0x{word:08x}: the analyzer follows a branch this file reads as plain code")
+                    if branch and not reserved and analyze.branch_target(pc, word) != pc + 16:
+                        self.fail(f"0x{word:08x}: a branch here that the analyzer does not follow")
+
+
 if __name__ == "__main__":
     unittest.main()
