@@ -243,6 +243,9 @@ LIBCHDR_INC := -I$(LIBCHDR_DIR)/include
 LIBCHDR_CFLAGS := -std=c99 -O2 $(LIBCHDR_INC) -I$(LIBCHDR_DIR)/deps/lzma-26.02/include \
 	-I$(LIBCHDR_DIR)/deps/miniz-3.1.2 -I$(LIBCHDR_DIR)/deps/zstd-1.5.7 \
 	-DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_STDIO -DMINIZ_NO_TIME
+ifneq ($(strip $(REPRODUCIBLE_COMPILE_FLAG)),)
+LIBCHDR_CFLAGS += $(REPRODUCIBLE_COMPILE_FLAG)
+endif
 # The CHD backend over libchdr, compiled into the programs that read CHD.
 PLAYER_CHD_SRCS := src/core/nk_disc_chd.c
 LIBCHDR_PUBLIC_HDRS := $(wildcard $(LIBCHDR_DIR)/include/libchdr/*.h)
