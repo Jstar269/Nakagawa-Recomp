@@ -120,6 +120,9 @@ class FakePPSSPP:
             self.reply({"event": "error", "message": "Bad message: unknown event"}, t)
             return
         target = int(msg["us"])
+        if target <= self.us:
+            self.reply({"event": "error", "message": "Target time has already passed"}, t)
+            return
         before = self.us
         self.us = max(self.us, target - self.stop_short_by + self.overshoot_by)
         self.reply({"event": "cpu.runUntilTime", "targetUs": target, "us": before}, t)
@@ -157,11 +160,23 @@ class TestTiming(unittest.TestCase):
             self.assertEqual(vblank_of(us), frame)
 
     def test_input_lands_in_the_period_before_its_vblank(self):
-        self.assertEqual(pr.input_us(0), 0)
+        self.assertEqual(pr.input_us(0), 1)
+        self.assertGreater(pr.input_us(0), 0)
+        self.assertEqual(vblank_of(pr.input_us(0)), 0)
+        self.assertLess(pr.input_us(0), pr.capture_us(0))
+        self.assertLess(pr.input_us(0), pr.input_us(1))
         for frame in (1, 2, 600, 1499):
             us = pr.input_us(frame)
             self.assertEqual(vblank_of(us), frame - 1, frame)
             self.assertGreater(Fraction(frame) * PERIOD - us, PERIOD / 3)
+
+    def test_later_frame_input_times_match_main(self):
+        expected = {1: 8342, 2: 25025, 10: 158492, 13: 208542,
+                    600: 10001658, 1499: 24999975, 3000: 50041658}
+        for frame, want in expected.items():
+            self.assertEqual(pr.input_us(frame), want, frame)
+        with self.assertRaises(ValueError):
+            pr.input_us(-1)
 
 
 class TestPadScript(unittest.TestCase):
@@ -247,6 +262,18 @@ class TestPlan(unittest.TestCase):
         plan = pr.build_plan(pr.parse_padscript("8 CROSS 1\n"), [pr.Scene("s", 7, None, 0, 0.0)])
         same = [a for a in plan if a.us == pr.capture_us(7)]
         self.assertEqual([a.kind for a in same], ["capture", "input"])
+
+    def test_frame_zero_input_plan_has_only_positive_times(self):
+        rows = pr.parse_padscript("0 CROSS 3\n")
+        scenes = [pr.Scene("boot", 0, None, 0, 0.0), pr.Scene("after", 3, None, 0, 0.0)]
+        plan = pr.build_plan(rows, scenes)
+        self.assertTrue(all(a.us > 0 for a in plan), [a.us for a in plan])
+        self.assertEqual([(a.kind, a.frame, a.us, a.buttons, a.scene) for a in plan], [
+            ("input", 0, 1, (("cross", True),), ""),
+            ("capture", 0, 8342, (), "boot"),
+            ("input", 3, 41708, (("cross", False),), ""),
+            ("capture", 3, 58392, (), "after"),
+        ])
 
 
 class TestLaunch(unittest.TestCase):
@@ -345,6 +372,45 @@ class TestDrive(unittest.TestCase):
         self.assertEqual(result.max_late_us, pr.LATE_LIMIT_US)
         with self.assertRaisesRegex(pr.CaptureFailed, "past the next vblank"):
             self.drive(FakePPSSPP(overshoot_by=pr.LATE_LIMIT_US + 1))
+
+    def test_plan_in_the_past_is_refused_before_anything_is_sent(self):
+        bad_plans = (
+            ("at-reset", [pr.Action(0, "input", 0, buttons=(("cross", True),))],
+             r"input v0.*0 us"),
+            ("negative", [pr.Action(-5, "input", 0, buttons=(("cross", True),))],
+             r"input v0.*-5 us"),
+            ("out-of-order", [pr.Action(100, "input", 1, buttons=(("cross", True),)),
+                              pr.Action(50, "input", 2, buttons=(("cross", False),))],
+             r"input v2.*50 us.*100 us"),
+        )
+        for label, plan, pattern in bad_plans:
+            with self.subTest(case=label):
+                fake = FakePPSSPP()
+                with self.assertRaisesRegex(pr.RefError, pattern):
+                    self.drive(fake, plan)
+                self.assertEqual(fake.log, [])
+
+    def test_runtime_overshoot_past_next_input_refuses_before_sending(self):
+        fake = FakePPSSPP(overshoot_by=100)
+        plan = [
+            pr.Action(10, "input", 0, buttons=(("cross", True),)),
+            pr.Action(20, "input", 1, buttons=(("cross", False),)),
+        ]
+        with self.assertRaisesRegex(pr.CaptureFailed, r"input v1.*20 us.*110 us"):
+            self.drive(fake, plan)
+        run_calls = [p for e, _, p in fake.log if e == "cpu.runUntilTime"]
+        send_calls = [p["buttons"] for e, _, p in fake.log if e == "input.buttons.send"]
+        self.assertEqual(run_calls, [{"us": 10}])
+        self.assertEqual(send_calls, [{"cross": True}])
+
+    def test_same_timestamp_capture_and_input_share_one_run_until_time(self):
+        fake = FakePPSSPP()
+        plan = pr.build_plan(pr.parse_padscript("8 CROSS 1\n"), [pr.Scene("s", 7, None, 0, 0.0)])
+        result = self.drive(fake, plan)
+        self.assertEqual(len(result.shots), 1)
+        run_targets = [p["us"] for e, _, p in fake.log if e == "cpu.runUntilTime"]
+        self.assertEqual(run_targets, sorted(set(run_targets)))
+        self.assertEqual(run_targets[0], 1)
 
 
 class TestCaptureAndCompare(unittest.TestCase):

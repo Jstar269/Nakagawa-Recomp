@@ -177,9 +177,17 @@ def capture_us(frame: int) -> int:
 
 
 def input_us(frame: int) -> int:
-    """Half a period before vblank ``frame``, so that vblank's controller sample sees it."""
-    if frame <= 0:
-        return 0
+    """Half a period before vblank ``frame``, so that vblank's controller sample sees it.
+
+    Frame 0 has no prior vblank; 1 us is the earliest strictly-after-reset time
+    ``cpu.runUntilTime`` accepts (0 us is already at the reset clock, which PPSSPP
+    refuses as already passed), while staying before frame 0's capture and frame 1's
+    input (both at 8342 us).
+    """
+    if frame < 0:
+        raise ValueError(f"frame must be >= 0, got {frame}")
+    if frame == 0:
+        return 1
     return round((2 * frame - 1) * PERIOD_US_NUM / (2 * PERIOD_US_DEN))
 
 
@@ -559,6 +567,29 @@ def build_plan(rows: Sequence[PadRow], scenes: Sequence[Scene]) -> list[Action]:
     return actions
 
 
+def _action_label(action: Action) -> str:
+    if action.scene:
+        return f"{action.kind} {action.scene!r} (v{action.frame})"
+    return f"{action.kind} v{action.frame}"
+
+
+def validate_plan(plan: Sequence[Action]) -> None:
+    """Refuse any plan with an action at/before reset (<= 0 us) or out of time order."""
+    prev_us: int | None = None
+    for action in plan:
+        if action.us <= 0:
+            raise RefError(
+                f"planned {_action_label(action)} at {action.us} us is at or before reset "
+                "(0 us); planned times must be > 0 us"
+            )
+        if prev_us is not None and action.us < prev_us:
+            raise RefError(
+                f"planned {_action_label(action)} at {action.us} us is earlier than the "
+                f"previous action ({prev_us} us)"
+            )
+        prev_us = action.us
+
+
 # ---- a minimal WebSocket client (RFC 6455), loopback only -----------------------------------
 
 class WebSocket:
@@ -816,6 +847,7 @@ def drive(dbg: Debugger, plan: Sequence[Action], pid: int | None, rtc: int, time
           clock: Callable[[], float] = time.monotonic, pause: Callable[[float], None] = time.sleep
           ) -> DriveResult:
     """Run one capture against a connected PPSSPP debugger."""
+    validate_plan(plan)
     deadline = clock() + timeout
 
     def left() -> float:
@@ -854,25 +886,35 @@ def drive(dbg: Debugger, plan: Sequence[Action], pid: int | None, rtc: int, time
         raise NotRun("ppsspp-too-old", f"PPSSPP {version} reports no emulated time in cpu.status")
     base_us = int(status["us"])
     result = DriveResult(version, base_us)
+    current_us = base_us
+    last_planned_us: int | None = None
     for action in plan:
         target = base_us + action.us
-        dbg.clear_events()
-        try:
-            dbg.request("cpu.runUntilTime", us=target)
-        except DebuggerError as exc:
-            if _unknown_event(exc):
-                raise NotRun("ppsspp-too-old", f"PPSSPP {version} has no cpu.runUntilTime") from None
-            raise CaptureFailed(f"cpu.runUntilTime {target} refused ({exc})") from None
-        dbg.wait_event("cpu.stepping", left())
-        reached = int(dbg.request("cpu.status").get("us", -1))
-        if reached < target - CLOCK_SLACK_US:
-            raise CaptureFailed(f"PPSSPP stopped at {reached} us before the {target} us the plan "
-                                f"asked for (a breakpoint or an exception?)")
-        if reached > target + LATE_LIMIT_US:
-            raise CaptureFailed(f"PPSSPP stopped at {reached} us, past the next vblank after the "
-                                f"{target} us the plan asked for")
-        result.max_early_us = max(result.max_early_us, target - reached)
-        result.max_late_us = max(result.max_late_us, reached - target)
+        if action.us != last_planned_us:
+            if target <= current_us:
+                raise CaptureFailed(
+                    f"planned {_action_label(action)} at {target} us is at or before the "
+                    f"debugger's current time ({current_us} us)"
+                )
+            dbg.clear_events()
+            try:
+                dbg.request("cpu.runUntilTime", us=target)
+            except DebuggerError as exc:
+                if _unknown_event(exc):
+                    raise NotRun("ppsspp-too-old", f"PPSSPP {version} has no cpu.runUntilTime") from None
+                raise CaptureFailed(f"cpu.runUntilTime {target} refused ({exc})") from None
+            dbg.wait_event("cpu.stepping", left())
+            reached = int(dbg.request("cpu.status").get("us", -1))
+            if reached < target - CLOCK_SLACK_US:
+                raise CaptureFailed(f"PPSSPP stopped at {reached} us before the {target} us the plan "
+                                    f"asked for (a breakpoint or an exception?)")
+            if reached > target + LATE_LIMIT_US:
+                raise CaptureFailed(f"PPSSPP stopped at {reached} us, past the next vblank after the "
+                                    f"{target} us the plan asked for")
+            result.max_early_us = max(result.max_early_us, target - reached)
+            result.max_late_us = max(result.max_late_us, reached - target)
+            current_us = reached
+            last_planned_us = action.us
         if action.kind == "input":
             if action.buttons:
                 dbg.request("input.buttons.send", buttons=dict(action.buttons))
@@ -881,7 +923,7 @@ def drive(dbg: Debugger, plan: Sequence[Action], pid: int | None, rtc: int, time
                             y=analog_value(action.stick[1], invert=True))
         else:
             shot = dbg.request("gpu.buffer.screenshot", type="base64")
-            result.shots.append(Shot(action.scene, action.frame, reached - base_us,
+            result.shots.append(Shot(action.scene, action.frame, current_us - base_us,
                                      decode_screenshot(shot)))
     return result
 
@@ -942,6 +984,7 @@ def capture(sf: SceneFile, exe: Path, runs: int, replace: bool, keep_work: bool 
     if existing and not replace:
         raise RefError(f"references exist for {existing}; pass --replace to capture over them")
     plan = build_plan(rows, sf.scenes)
+    validate_plan(plan)
     results: list[DriveResult] = []
     ini: dict = {}
     for run in range(runs):
