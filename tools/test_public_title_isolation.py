@@ -437,16 +437,10 @@ class PublicTitleIsolationTests(unittest.TestCase):
         proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(scratch))
         self.assertEqual(proc.returncode, 0, f"--verify failed on baseline: {proc.stderr}")
 
-        # 2. A private overlay where --verify reads manifests: assets/titles, untracked. Were it
-        # read, its id would change the digest and fail the verify.
-        fake_overlay = {
-            "schema_version": 1,
-            "id": "private-retail-lookalike-v1",
-            "display_name": "Private Retail Overlay",
-            "kind": "retail",
-            "disc": {"id": UNCATALOGUED_RETAIL_DISC_ID, "region": "EU", "revision_policy": "exact-disc-id"}
-        }
-        overlay_path = plant_untracked_manifest(scratch, "private-overlay-lookalike.json", fake_overlay)
+        # 2. A private overlay where --verify reads manifests: assets/titles, untracked. It is a
+        # schema-valid title, so were it collected it would be one more catalog entry and the
+        # verify would report the catalog out of date.
+        overlay_path = plant_untracked_manifest(scratch, "private-overlay-lookalike.json", PRIVATE_OVERLAY)
         self.assertIn(overlay_path, list((scratch / "assets" / "titles").glob("*.json")))
 
         proc2 = subprocess.run(cmd, capture_output=True, text=True, cwd=str(scratch))
@@ -508,12 +502,14 @@ class PublicTitleIsolationTests(unittest.TestCase):
 PRIVATE_LOOKALIKE_NAME = "private-retail-lookalike.json"
 PRIVATE_LOOKALIKE_REL = f"assets/titles/{PRIVATE_LOOKALIKE_NAME}"
 
+#: Schema-valid on purpose (PlantedManifestTests): a tool that read it would register or
+#: catalogue one more title, and the exclusion tests fail on that leak, not on a schema error.
 SYNTHETIC_LOOKALIKE = {
     "schema_version": 1,
     "id": "private-retail-lookalike",
     "display_name": "Synthetic ignored lookalike (hermetic-suite regression)",
     "kind": "retail",
-    "disc": {"id": "TEST00000", "region": "TEST", "revision_policy": "exact-disc-id"},
+    "disc": {"id": "TEST00000", "region": "OTHER", "revision_policy": "exact-disc-id"},
     "executable": {"base": 0, "entry": 0, "bss_metadata_source": "none", "extra_executable_spans": []},
     "modules": [],
     "filesystem": {
@@ -525,6 +521,14 @@ SYNTHETIC_LOOKALIKE = {
     "codegen_profile": "none",
     "feature_requirements": ["allegrex-core"],
     "verification_profile": "synthetic-public",
+}
+
+#: The same stand-in under another region's disc id, for the catalog --verify test.
+PRIVATE_OVERLAY = {
+    **SYNTHETIC_LOOKALIKE,
+    "id": "private-retail-lookalike-v1",
+    "display_name": "Private Retail Overlay",
+    "disc": {"id": UNCATALOGUED_RETAIL_DISC_ID, "region": "EU", "revision_policy": "exact-disc-id"},
 }
 
 
@@ -561,6 +565,31 @@ def staged_index_audit(rel_path: str, blob_bytes: bytes) -> subprocess.Completed
              "--provenance-self-consistency"],
             cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=600,
         )
+
+
+class PlantedManifestTests(unittest.TestCase):
+    """The planted stand-ins are loadable titles that collide with nothing tracked.
+
+    An invalid stand-in would make the exclusion tests fail for any tool that merely read it,
+    and pass for one that read it and skipped invalid manifests; a valid one is a title that
+    leaks unless the publication policy keeps it out.
+    """
+
+    def test_planted_manifests_are_valid_titles_with_their_own_identity(self):
+        with tempfile.TemporaryDirectory(prefix="planted-manifest-") as tmp:
+            for planted in (SYNTHETIC_LOOKALIKE, PRIVATE_OVERLAY):
+                with self.subTest(id=planted["id"]):
+                    path = Path(tmp) / f"{planted['id']}.json"
+                    path.write_text(json.dumps(planted), encoding="utf-8")
+                    # The default registry holds the tracked catalog and, in standard mode,
+                    # refuses an id or a disc id it already has: loading proves the stand-in is a
+                    # valid title that would be one more entry.
+                    registry = TitleRegistry()
+                    before = {profile.id for profile in registry.all_profiles()}
+                    profile = registry.load_private_manifest(path)
+                    self.assertEqual(profile.id, planted["id"])
+                    self.assertEqual({p.id for p in registry.all_profiles()}, before | {planted["id"]})
+                    self.assertEqual(registry.find_by_disc_id(planted["disc"]["id"]).id, planted["id"])
 
 
 class TrackedSetHelperTests(unittest.TestCase):
