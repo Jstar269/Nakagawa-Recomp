@@ -3686,8 +3686,14 @@ class EphemeralGenerationBehaviorTests(EphemeralGenerationTests):
         self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
         self.assertEqual(verdict["policy_delta"]["rule_changes"], ["exclude_rationale"])
 
-    def test_a_v2_delta_authorizes_removing_an_exclusion_glob_or_prefix(self) -> None:
-        """A trusted exclusion rule may go with an authority bound to both values (audit 2026-11-17)."""
+    def test_a_v2_delta_cannot_authorize_removing_an_exclusion_glob_or_prefix(self) -> None:
+        """A removed exclusion rule is refused even when the authority binds both of its values.
+
+        docs/PUBLICATION_READINESS.md, Limits: "a removed exclude_globs or exclude_prefixes
+        entry is refused whatever the delta says".  The delta here is otherwise valid, so the
+        refusal is the verifier's own and not a rejected authority document.
+        """
+        removed = {"exclude_globs": "*.iso", "exclude_prefixes": "private/"}
         for key in ("exclude_globs", "exclude_prefixes"):
             with self.subTest(key=key):
                 self.repo.branch(f"drop-{key}", self.base)
@@ -3710,8 +3716,14 @@ class EphemeralGenerationBehaviorTests(EphemeralGenerationTests):
                     head, trusted_candidate_policy=blessed_policy, policy_delta_authority=authority,
                 )
 
-                self.assertEqual(verdict["verdict"], "pass", verdict["findings"])
-                self.assertNotIn("POLICY_SUBSTITUTION", {item["code"] for item in verdict["findings"]})
+                self.assertEqual(verdict["policy_delta"]["rule_changes"], [key])
+                self.assertEqual(verdict["verdict"], "fail", verdict["findings"])
+                self.assertEqual(
+                    [(item["path"], item["detail"], item["fatal"]) for item in verdict["findings"]
+                     if item["code"] == "POLICY_SUBSTITUTION"],
+                    [(verifier.POLICY_PATH,
+                      f"candidate policy removes the trusted {key} entry {removed[key]}", True)],
+                )
 
     def test_an_exclusion_rule_change_without_its_authority_is_still_refused(self) -> None:
         trusted = load_policy(self.repo.root / verifier.POLICY_PATH)

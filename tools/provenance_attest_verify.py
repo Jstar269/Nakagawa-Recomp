@@ -2393,12 +2393,7 @@ def _policy_findings(
             "POLICY_SUBSTITUTION", POLICY_PATH,
             f"candidate policy removes the trusted exclusion of {path}",
         ))
-    # A V2+ authority binds a rule field's exact value on both sides, so a field it names
-    # may change as bound; its digests were checked before this delta was accepted.
-    authorized_rules = set((authorized_delta or {}).get("rule_changes", ()))
     for attribute in ("exclude_globs", "exclude_prefixes"):
-        if attribute in authorized_rules:
-            continue
         trusted_values = set(getattr(trusted_policy, attribute, ()) or ())
         candidate_values = set(getattr(candidate_policy, attribute, ()) or ())
         for value in sorted(trusted_values - candidate_values):
