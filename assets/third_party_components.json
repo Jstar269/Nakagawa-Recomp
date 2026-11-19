@@ -13,9 +13,10 @@
           "SDL3.dll",
           "libgcc_s_seh-1.dll",
           "libwinpthread-1.dll",
-          "libstdc++-6.dll"
+          "libstdc++-6.dll",
+          "libiconv-2.dll"
         ],
-        "note": "The three MinGW/UCRT runtime DLLs are copied only when a bundled .exe/.dll in the build directory actually imports them (objdump -p 'DLL Name' match). The conditional does not narrow the notice obligation: every DLL this route can copy must carry a license record."
+        "note": "The four toolchain runtime DLLs are copied only when a bundled .exe/.dll in the build directory actually imports them (objdump -p 'DLL Name' match), transitively (SDL3.dll imports libiconv-2.dll; libstdc++-6.dll imports libgcc_s_seh-1.dll and libwinpthread-1.dll), and a staged copy whose bytes differ from the toolchain's is replaced. The conditional does not narrow the notice obligation: every DLL this route can copy must carry a license record."
       },
       {
         "id": "player-typography-runtime",

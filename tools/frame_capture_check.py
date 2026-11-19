@@ -8,8 +8,10 @@
 # build/snapshots-style captures) plus the run's stderr log and reports, in a JSON
 # manifest plus a one-line summary:
 #
-#   - frame accounting: every "FBSNAP ... (result=1)" line must have its file present;
-#     result=-1 lines are capture failures; SKIPPED lines are dropped presents.
+#   - frame accounting: every "FBSNAP ... (result=1)" line must have its file present
+#     (a frame_* sequence file, or a capture with its own name such as SR_FBDUMP's
+#     present_source.ppm); result=-1 lines are capture failures; swapchain SKIPPED
+#     lines are dropped presents; legacy VRAM-dump sync failures are counted apart;
 #   - black-frame detection (mean luminance below a threshold);
 #   - stale-frame detection (consecutive frames with identical content hashes);
 #   - frame-number gaps in the rotating sequence (expected when the 30 Hz output cap
@@ -22,7 +24,9 @@
 # Synthetic/source-owned frames are handled identically, so CI can hash those.
 #
 # Exit codes: 0 = check ran and found no hard inconsistency; 1 = a capture reported
-# successful is missing, or the check itself failed; 2 = usage error.
+# successful is missing, or the check itself failed; 2 = usage error; 3 = no capture
+# at all (no frame in --dir and no successful capture in the log): verdict
+# "no-capture", which is NOT_RUN evidence, never a clean pass.
 
 import argparse
 import hashlib
@@ -32,6 +36,7 @@ import sys
 from pathlib import Path
 
 BLACK_MEAN_THRESHOLD = 4.0  # out of 255; menus/scene borders are far above this
+EXIT_NO_CAPTURE = 3
 
 # "FBSNAP f=<vcount> swapchain capture -> <path> (result=<n>)"
 RE_RESULT = re.compile(
@@ -39,11 +44,12 @@ RE_RESULT = re.compile(
 )
 # "FBSNAP f=<vcount> swapchain capture -> SKIPPED (no present serviced this frame)"
 RE_SKIPPED = re.compile(r"FBSNAP f=(\d+) swapchain capture -> SKIPPED")
-# src/rt/hle.c:14274 also emits "FBSNAP f=<vcount> -> SKIPPED (synchronisation failed)"
-# on the legacy VRAM-side dump path.  It is a dropped present too, but without its
-# own pattern it falls through to RE_LEGACY and is recorded as a capture whose
-# path is the literal "SKIPPED", inflating legacy_snaps and undercounting
-# skipped_presents.  Match it as a skip before the generic legacy form.
+# src/rt/hle_display.c also emits "FBSNAP f=<vcount> -> SKIPPED (synchronisation failed)"
+# on the legacy VRAM-side dump path.  Only that dump failed: the swapchain line for the
+# same frame always follows and says whether the present was captured or dropped, so
+# it is counted as a legacy sync failure, not a dropped present.  Without its own
+# pattern it would fall through to RE_LEGACY as a capture whose path is the literal
+# "SKIPPED", so match it before the generic legacy form.
 RE_LEGACY_SKIPPED = re.compile(r"FBSNAP f=(\d+) -> SKIPPED")
 # "PRESENT_GAP: vcount=<n> last_host_present=<n> gap=<n>" -- guest running with no
 # host present.  No emitter exists in the current tree; kept so an archived log
@@ -155,6 +161,7 @@ def classify_log(log_path):
     report = {
         "capture_results": [],   # {vcount, path, result}
         "skipped": [],
+        "legacy_sync_failures": [],
         "present_gaps": [],      # {vcount, last_present, gap}
         "watchdogs": [],         # {vblanks}
         "legacy": [],            # {vcount, path}
@@ -183,9 +190,7 @@ def classify_log(log_path):
             continue
         m = RE_LEGACY_SKIPPED.search(line)
         if m:
-            # Legacy VRAM-side dump dropped this present too; count it as a skip
-            # rather than as a legacy capture of a file named "SKIPPED".
-            report["skipped"].append(int(m.group(1)))
+            report["legacy_sync_failures"].append(int(m.group(1)))
             continue
         m = RE_PRESENT_GAP.search(line)
         if m:
@@ -225,11 +230,18 @@ def run_check(directory, log_path, out_path):
     by_name = {f["file"] for f in frames if "error" not in f}
     missing_for_success = []
     capture_failures = []
+    # A capture with its own name (SR_FBDUMP's present_source.ppm, src/rt/fbcap_policy.c)
+    # is not part of the frame_* sequence: look for it in the directory directly.
+    non_sequence_captures = []
     for r in report["capture_results"]:
         if r["result"] == -1:
             capture_failures.append(r)
         elif r["result"] == 1:
-            if Path(r["path"]).name not in by_name:
+            name = Path(r["path"]).name
+            if frame_number(name) is None and (Path(directory) / name).is_file():
+                if name not in non_sequence_captures:
+                    non_sequence_captures.append(name)
+            elif name not in by_name:
                 missing_for_success.append(r)
 
     black = [f["file"] for f in frames if f.get("black")]
@@ -264,6 +276,10 @@ def run_check(directory, log_path, out_path):
         # Gaps larger than the cadence are normal when the 30 Hz output cap drops a
         # present; they are reported in the JSON but do not alone warn.
         verdict = "warn"
+    elif not frames and not non_sequence_captures:
+        # Nothing was captured (capture never enabled, wrong directory, a crash before
+        # the first FBSNAP): that proves no frame was presented, so it is not clean.
+        verdict = "no-capture"
 
     result = {
         "total_frames": len(frames),
@@ -272,6 +288,8 @@ def run_check(directory, log_path, out_path):
         "frame_number_gaps": gaps,
         "capture_failures": capture_failures,
         "skipped_presents": len(report["skipped"]),
+        "legacy_sync_failures": len(report["legacy_sync_failures"]),
+        "non_sequence_captures": non_sequence_captures,
         "present_gaps": report["present_gaps"],
         "present_gap_classification": gap_class,
         "watchdog_events": len(report["watchdogs"]),
@@ -309,7 +327,11 @@ def main(argv=None):
         f"present={result['present_gap_classification']} verdict={result['verdict']}"
     )
     print(summary)
-    return 1 if result["verdict"] == "hard-error" else 0
+    if result["verdict"] == "hard-error":
+        return 1
+    if result["verdict"] == "no-capture":
+        return EXIT_NO_CAPTURE
+    return 0
 
 
 if __name__ == "__main__":

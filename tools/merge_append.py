@@ -227,7 +227,15 @@ def merge(base: Path, current: Path, other: Path, marker: int, path: str = "") -
         current.write_bytes(merged)
         return 0
     if status < 0 or status > 127:
-        return 1  # git merge-file failed outright (for example a binary file): leave ours as it is
+        # git merge-file failed outright (for example a binary file): leave ours as it is, and say so,
+        # because the file then holds our side alone with no conflict markers to resolve from.
+        if status < 0:
+            why = "no git on an absolute PATH entry outside the working directory"
+        else:
+            why = f"git merge-file failed with status {status}"
+        print(f"merge_append: {why}; {path or current} left as ours, without conflict markers and "
+              "without the other side", file=sys.stderr)
+        return 1
     unioned = None
     if allowed:
         # A larger marker for this analysis run only, so no content line can pass for the separator.

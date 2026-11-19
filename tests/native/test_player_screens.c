@@ -1325,7 +1325,7 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
                            "needed after that: Steam reads the shortcut when it starts.";
             steam.status_kind = PLAYER_UI_NOTE_WARNING;
         } else {
-            steam.blocked = "Steam isn't installed for this Windows user, so nothing was "
+            steam.blocked = "Steam wasn't found for this user, so nothing was "
                             "added. Install Steam and sign in once, then try again.";
         }
         steam.logical_width = g_flow_width;
@@ -8391,13 +8391,13 @@ static void test_add_to_steam_dialog(void) {
     action = activate_steam_button(PLAYER_UI_ID_STEAM_ACCOUNT_BASE + 1u, &steam);
     CHECK(steam_op(action) == PLAYER_UI_STEAM_ACCOUNT_BASE + 1u, "each account is its own row");
 
-    steam.blocked = "Steam isn't installed for this Windows user, so nothing was added.";
+    steam.blocked = "Steam wasn't found for this user, so nothing was added.";
     steam.status = NULL;
     nk_ui_begin(ui, 0.0);
     (void)player_ui_screen_steam(ui, &steam);
     (void)end_frame(ui);
     (void)dump_frame(ui, dump, sizeof(dump));
-    CHECK(strstr(dump, "Steam isn't installed") != NULL &&
+    CHECK(strstr(dump, "Steam wasn't found") != NULL &&
               strstr(dump, "WHICH STEAM ACCOUNT?") == NULL,
           "without Steam the dialog says so and offers no account");
     action = activate_steam_button(PLAYER_UI_ID_STEAM_ADD, &steam);

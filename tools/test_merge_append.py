@@ -12,6 +12,8 @@ and they pin which files may use it.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 from pathlib import Path
 import re
@@ -238,6 +240,22 @@ class DriverUnitTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertEqual((d / "cur").read_text(), "a\nours\nb\n")
         self.assertIsNone(merge_append._git_executable(""))
+
+    def test_no_safe_git_on_path_says_the_file_holds_ours_without_markers(self) -> None:
+        # The driver run with only relative PATH entries: it finds no safe git, leaves ours, and names it.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for name, body in (("base", "a\nb\n"), ("cur", "a\nours\nb\n"), ("other", "a\ntheirs\nb\n")):
+                (d / name).write_bytes(body.encode())
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"PATH": os.pathsep.join((".", "relative-bin"))}), \
+                    contextlib.redirect_stderr(err):
+                rc = merge_append.main(["merge_append.py", str(d / "base"), str(d / "cur"), str(d / "other"),
+                                        "7", "mk/selftests.mk"])
+            self.assertEqual(rc, 1)
+            self.assertEqual((d / "cur").read_text(), "a\nours\nb\n")
+        self.assertIn("merge_append: no git on an absolute PATH entry", err.getvalue())
+        self.assertIn("mk/selftests.mk left as ours, without conflict markers", err.getvalue())
 
 
 class RealMergeTests(unittest.TestCase):

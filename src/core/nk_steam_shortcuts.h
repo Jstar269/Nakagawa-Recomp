@@ -116,12 +116,13 @@ typedef struct {
     char shortcuts_path[NK_MAX_PATH];  /* <Steam>/userdata/<id>/config/shortcuts.vdf */
 } NkSteamAccount;
 
-/* Steam's folder from this machine's own settings (Windows: HKCU\Software\Valve\Steam
- * SteamPath). NK_STEAM_ERR_UNSUPPORTED off Windows, NK_STEAM_ERR_NOT_FOUND when Steam is not
- * installed for this user or its folder is gone. */
+/* Steam's folder from this user's settings (Windows: HKCU\Software\Valve\Steam
+ * SteamPath). NK_STEAM_ERR_UNSUPPORTED on systems other than Windows and Linux,
+ * NK_STEAM_ERR_NOT_FOUND when Steam is not installed for this user or its folder is gone. Linux
+ * checks `$HOME/.local/share/Steam` and `$HOME/.steam/steam`, preferring a root with `userdata/`. */
 NkSteamStatus nk_steam_find_root(char *root, size_t root_cap);
 
-/* The accounts that have signed in on this PC: the all-digit folders of <root>/userdata other than
+/* The accounts that have signed in for this user: the all-digit folders of <root>/userdata other than
  * "0", in ascending order, at most `cap`. `*count` is set. NOT_FOUND when there are none. */
 NkSteamStatus nk_steam_list_accounts(const char *root, NkSteamAccount *accounts, size_t cap,
                                      size_t *count);
@@ -130,7 +131,7 @@ NkSteamStatus nk_steam_list_accounts(const char *root, NkSteamAccount *accounts,
  * "PersonaName" of the account's entry in <root>/config/loginusers.vdf (a text KeyValues file,
  * keyed by the 64-bit Steam ID, 76561197960265728 + the account ID). Control characters are
  * dropped and a long name is cut at a whole UTF-8 character. NOT_FOUND when the file or the
- * account is missing or the file does not parse; the name is then "". Shown only on this PC,
+ * account is missing or the file does not parse; the name is then "". Shown only on this machine,
  * never logged. */
 NkSteamStatus nk_steam_account_name(const char *root, const char *account_id, char *name,
                                     size_t cap);
@@ -138,10 +139,10 @@ NkSteamStatus nk_steam_account_name(const char *root, const char *account_id, ch
 bool nk_steam_login_users_name(const char *text, size_t length, const char *account_id,
                                char *name, size_t cap);
 
-/* Whether the Steam client runs now (Windows: the process ID Steam records and keeps current
- * while it runs). True when it cannot tell (fail closed: the file is only written when Steam is surely closed), false when Steam is not running; off Windows always
- * false: that is not an answer, so nk_steam_add_for_account refuses there (UNSUPPORTED) unless a
- * caller supplies its own probe. */
+/* Whether the Steam client runs now (Windows: its active-process registry PID; Linux: the PID in
+ * `$HOME/.steam/steam.pid`). True when it cannot tell (fail closed: the file is only written when
+ * Steam is surely closed), false when Steam is not running. Other platforms return false and
+ * nk_steam_add_for_account requires a caller-supplied probe there. */
 bool nk_steam_client_running(void);
 
 /* The fail-closed rules of nk_steam_client_running as functions of a Win32 error number, available

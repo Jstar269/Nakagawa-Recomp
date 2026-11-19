@@ -544,6 +544,21 @@ class SeedFileTests(unittest.TestCase):
         self.assertEqual(seeds, {0x10: "first", 0x20: "second"})
         self.assertEqual((added, dropped, overflow), ([0x20], [0x30], 2))
 
+    def test_merge_drops_a_listed_seed_that_is_now_a_known_entry_and_names_each_drop_once(self):
+        existing = miss_seeds.SeedFile({0x10: "first", 0x40: "old"})
+        a = miss_seeds.SeedFile({0x30: "unknown"})
+        b = miss_seeds.SeedFile({0x30: "unknown", 0x20: "unknown"})
+        seeds, added, dropped, _ = miss_seeds.merge(
+            existing, [a, b], "second", known=frozenset({0x30, 0x40}))
+        self.assertEqual(seeds, {0x10: "first", 0x20: "second"})
+        self.assertEqual((added, dropped), ([0x20], [0x30, 0x40]))
+
+    def test_an_overflow_survives_the_merged_list(self):
+        text = miss_seeds.format_seed_file({0x10: "a"}, overflow=3)
+        self.assertEqual(miss_seeds.parse_seed_text(text).overflow, 3)
+        self.assertEqual(miss_seeds.parse_seed_text(text).seeds, {0x10: "a"})
+        self.assertNotIn("overflow", miss_seeds.format_seed_file({0x10: "a"}))
+
 
 class AnalysisSeedTests(_Fixture):
     def test_without_seeds_the_target_is_not_a_function_entry(self):
@@ -875,6 +890,9 @@ class MergeCommandTests(_Fixture):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("3 interpreter entries that did not fit", result.stderr)
+        # The merged list keeps the note, so it is still read back as incomplete.
+        self.assertEqual(
+            miss_seeds.read_seed_file(self.work / "overflow_seeds.txt").overflow, 3)
 
     def test_a_malformed_seed_list_is_refused(self):
         miss = self.write_seeds("bad.txt", "not a seed\n")

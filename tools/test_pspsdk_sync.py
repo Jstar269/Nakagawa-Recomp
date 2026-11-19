@@ -155,6 +155,37 @@ class ImportParserTests(unittest.TestCase):
             self.assertIn("sceKernelCreateCallback", lines[0])
             self.assertIn("kept once", lines[0])
 
+    def test_suffix_match_is_case_sensitive_on_every_host(self) -> None:
+        # Only exact ``.S`` files are import sources. A lowercase ``.s`` file
+        # holding a conflicting declaration must not be scanned on Windows,
+        # whose pathlib glob is case-insensitive, any more than on Linux.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            make_tree(root)
+            (root / "src" / "other").mkdir()
+            (root / "src" / "other" / "helper.s").write_text(
+                IMPORT_SOURCE.replace("sceKernelCreateCallback", "otherName"),
+                encoding="utf-8",
+            )
+            functions, _ = pspsdk_source.scan_imports(root)
+            self.assertEqual(
+                [(f["nid"], f["symbol"], f["source_file"]) for f in functions],
+                [("0xe81caf8f", "sceKernelCreateCallback",
+                  "src/user/ThreadManForUser.S")],
+            )
+
+    def test_first_seen_duplicate_follows_case_sensitive_path_order(self) -> None:
+        # The kept duplicate's location is the first file in case-sensitive
+        # POSIX path order ("B" sorts before "a"), the same on every host.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "src" / "user").mkdir(parents=True)
+            for name in ("a.S", "B.S"):
+                (root / "src" / "user" / name).write_text(IMPORT_SOURCE, encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                functions, _ = pspsdk_source.scan_imports(root)
+            self.assertEqual([f["source_file"] for f in functions], ["src/user/B.S"])
+
     def test_same_nid_with_different_names_fails_with_both_locations(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

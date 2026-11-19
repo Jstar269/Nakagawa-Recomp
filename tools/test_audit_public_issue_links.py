@@ -22,6 +22,7 @@ from tools.audit_public_issue_links import (
     fetch_public_issues_map,
     get_tracked_markdown_files,
     main,
+    status_findings,
 )
 
 
@@ -169,85 +170,57 @@ class TestAuditPublicIssueLinks(unittest.TestCase):
         findings = audit_markdown_files(self.repo_path, {})
         self.assertEqual(findings, [])
 
-    def test_at_a_glance_open_row_linking_closed_issue_fails(self) -> None:
-        # Regression: the status summary (then ISSUES.md) used to declare an "Open"
-        # portable-float-to-word row that pointed at #38 after the fix had merged
-        # (the follow-on was #40).
+    def _status(self, body: str) -> None:
         doc = self.repo_path / "docs" / "STATUS.md"
         doc.parent.mkdir(exist_ok=True)
-        doc.write_text(
-            "# Status\n\n"
-            "## At a glance\n\n"
-            "| Priority | State | Public work item |\n"
-            "| --- | --- | --- |\n"
-            "| P1 | Open | Float-to-word: [issue #38](https://github.com/Jstar269/nakagawa-recomp/issues/38) |\n",
-            encoding="utf-8",
-        )
-        issues_map = {
-            38: {
-                "number": 38,
-                "is_pr": False,
-                "type": "Issue",
-                "state": "closed",
-                "merged_at": None,
-                "title": "portable float-to-word (merged via PR #39)",
-                "url": "",
-            }
-        }
-        findings = audit_markdown_files(self.repo_path, issues_map)
-        self.assertTrue(any(not finding[4] for finding in findings))
-        self.assertTrue(any("STALE TRACKER STATUS" in finding[3] for finding in findings))
-        self.assertTrue(any("State 'Open'" in finding[3] for finding in findings))
+        doc.write_text("# Status\n\n" + body, encoding="utf-8")
 
-    def test_at_a_glance_open_row_linking_open_issue_passes(self) -> None:
-        doc = self.repo_path / "docs" / "STATUS.md"
-        doc.parent.mkdir(exist_ok=True)
-        doc.write_text(
-            "# Status\n\n"
-            "## At a glance\n\n"
-            "| Priority | State | Public work item |\n"
-            "| --- | --- | --- |\n"
-            "| P1 | Open | Exotic VFPU: [issue #40](https://github.com/Jstar269/nakagawa-recomp/issues/40) |\n",
-            encoding="utf-8",
+    def test_live_work_area_citing_a_closed_issue_as_remaining_work_fails(self) -> None:
+        # Regression: the status summary used to present work as open while pointing at #38
+        # after its fix had merged; its live-work bullets now carry that rule.
+        self._status(
+            "## Live work areas\n\n"
+            "- Unified PSP clocks, waits, and interrupt delivery remain source-owned\n"
+            "  runtime work ([#38](https://github.com/Jstar269/nakagawa-recomp/issues/38)).\n"
+            "- Exotic VFPU results remain runtime work (#40).\n"
         )
-        issues_map = {
-            40: {
-                "number": 40,
-                "is_pr": False,
-                "type": "Issue",
-                "state": "open",
-                "merged_at": None,
-                "title": "Exotic VFPU NaN/Inf divergences",
-                "url": "",
-            }
-        }
-        findings = audit_markdown_files(self.repo_path, issues_map)
-        self.assertTrue(all(finding[4] for finding in findings))
+        issues_map = {38: self._tracker(38, "closed"), 40: self._tracker(40, "open")}
+        stale = [f for f in audit_markdown_files(self.repo_path, issues_map) if not f[4]]
+        self.assertEqual([(f[0], f[1], f[2]) for f in stale], [("docs/STATUS.md", 5, "#38")])
+        self.assertIn("STALE LIVE WORK POINTER", stale[0][3])
+        self.assertIn("CLOSED ISSUE", stale[0][3])
 
-    def test_at_a_glance_non_open_rows_are_not_checked(self) -> None:
-        doc = self.repo_path / "docs" / "STATUS.md"
-        doc.parent.mkdir(exist_ok=True)
-        doc.write_text(
-            "# Status\n\n"
+    def test_finished_work_cited_in_a_live_work_area_passes(self) -> None:
+        # A bullet may cite the merged PR that did part of the work, outside a clause that
+        # says work remains; and a closed item outside the section is not this rule's.
+        self._status(
+            "## Live work areas\n\n"
+            "- The PGF reader was retired. The public reader is project-authored\n"
+            "  ([#474](https://github.com/Jstar269/nakagawa-recomp/pull/474)).\n\n"
+            "## Records of past closures\n\n"
+            "- Timing work remains documented in #38.\n"
+        )
+        issues_map = {474: self._tracker(474, "closed", is_pr=True, merged=True),
+                      38: self._tracker(38, "closed")}
+        findings = audit_markdown_files(self.repo_path, issues_map)
+        self.assertTrue(all(finding[4] for finding in findings), findings)
+
+    def test_status_without_an_audited_section_fails_by_name(self) -> None:
+        # The At-a-glance and tracker-label checks once ran on nothing after the summary's
+        # layout changed, and the audit passed; a missing section is now a finding.
+        self._status(
             "## At a glance\n\n"
             "| Priority | State | Public work item |\n"
             "| --- | --- | --- |\n"
-            "| P1 | Blocked | [issue #23](https://github.com/Jstar269/nakagawa-recomp/issues/23) |\n",
-            encoding="utf-8",
+            "| P1 | Open | [issue #38](https://github.com/Jstar269/nakagawa-recomp/issues/38) |\n"
         )
-        issues_map = {
-            23: {
-                "number": 23,
-                "is_pr": False,
-                "type": "Issue",
-                "state": "closed",
-                "merged_at": None,
-                "title": "Closed thing",
-                "url": "",
-            }
-        }
-        findings = audit_markdown_files(self.repo_path, issues_map)
-        self.assertTrue(all(finding[4] for finding in findings))
+        findings = audit_markdown_files(self.repo_path, {38: self._tracker(38, "closed")})
+        missing = [f for f in findings if not f[4] and "MISSING AUDITED SECTION" in f[3]]
+        self.assertEqual([(f[0], f[2]) for f in missing], [("docs/STATUS.md", "## Live work areas")])
+
+    def test_the_real_status_summary_has_every_audited_section(self) -> None:
+        text = (ROOT / "docs" / "STATUS.md").read_text(encoding="utf-8")
+        self.assertEqual([f for f in status_findings(text, {}) if not f[4]], [])
 
     def test_copilot_instructions_is_current_facing(self) -> None:
         # copilot-instructions.md carried pre-export shorthand numbers (#20 as an
@@ -283,54 +256,6 @@ class TestAuditPublicIssueLinks(unittest.TestCase):
                 self.assertEqual(len(findings), 1)
                 self.assertTrue(findings[0][4])
                 self.assertIn("HISTORICAL EVIDENCE REFERENCE", findings[0][3])
-
-    def test_tracker_state_label_mismatch_fails(self) -> None:
-        doc = self.repo_path / "docs" / "STATUS.md"
-        doc.parent.mkdir(exist_ok=True)
-        doc.write_text(
-            "# Status\n\n"
-            "## Current public tracker\n\n"
-            "- [Issue #23](https://github.com/Jstar269/nakagawa-recomp/issues/23) "
-            "[CLOSED ISSUE]\n",
-            encoding="utf-8",
-        )
-        issues_map = {
-            23: {
-                "number": 23,
-                "is_pr": False,
-                "type": "Issue",
-                "state": "open",
-                "merged_at": None,
-                "title": "DMA Issue",
-                "url": "",
-            }
-        }
-        findings = audit_markdown_files(self.repo_path, issues_map)
-        self.assertTrue(any(not finding[4] for finding in findings))
-        self.assertTrue(any("STALE TRACKER STATUS" in finding[3] for finding in findings))
-
-    def test_open_pr_tracker_label_passes(self) -> None:
-        doc = self.repo_path / "docs" / "STATUS.md"
-        doc.parent.mkdir(exist_ok=True)
-        doc.write_text(
-            "# Status\n\n"
-            "## Current public tracker\n\n"
-            "- [PR #1](https://github.com/Jstar269/nakagawa-recomp/pull/1) [OPEN PR]\n",
-            encoding="utf-8",
-        )
-        issues_map = {
-            1: {
-                "number": 1,
-                "is_pr": True,
-                "type": "PR",
-                "state": "open",
-                "merged_at": None,
-                "title": "Dependency PR",
-                "url": "",
-            }
-        }
-        findings = audit_markdown_files(self.repo_path, issues_map)
-        self.assertTrue(all(finding[4] for finding in findings))
 
     @staticmethod
     def _tracker(number: int, state: str, *, is_pr: bool = False, merged: bool = False) -> dict:

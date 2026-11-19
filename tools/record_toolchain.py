@@ -151,17 +151,23 @@ def _detect_vulkan_version(vk_path: Path) -> str:
     for header in header_candidates:
         if header.is_file():
             text = header.read_text(encoding="utf-8", errors="replace")
+            # VK_HEADER_VERSION_COMPLETE uses VK_MAKE_API_VERSION(variant, ...) from
+            # 1.2.175 and VK_MAKE_VERSION(major, minor, ...) before it.
             m_comp = re.search(
                 r"#define\s+VK_HEADER_VERSION_COMPLETE\s+VK_MAKE_API_VERSION\(\s*0\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*VK_HEADER_VERSION\s*\)",
+                text,
+            ) or re.search(
+                r"#define\s+VK_HEADER_VERSION_COMPLETE\s+VK_MAKE_VERSION\(\s*(\d+)\s*,\s*(\d+)\s*,\s*VK_HEADER_VERSION\s*\)",
                 text,
             )
             m_patch = re.search(r"#define\s+VK_HEADER_VERSION\s+(\d+)", text)
             if m_comp and m_patch:
                 return f"{m_comp.group(1)}.{m_comp.group(2)}.{m_patch.group(1)}"
-            m_ver = re.search(r"#define\s+VK_API_VERSION_1_(\d+)", text)
-            if m_ver:
+            # Every header defines VK_API_VERSION_1_0 first; the SDK is the highest one.
+            minors = [int(minor) for minor in re.findall(r"#define\s+VK_API_VERSION_1_(\d+)", text)]
+            if minors:
                 patch = m_patch.group(1) if m_patch else "0"
-                return f"1.{m_ver.group(1)}.{patch}"
+                return f"1.{max(minors)}.{patch}"
     return "unknown"
 
 
