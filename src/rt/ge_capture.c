@@ -27,13 +27,24 @@ typedef struct GeCaptureHeader {
     uint32_t reserved[5];
 } GeCaptureHeader;
 
+/* A saved page starts as the bytes at first touch. A byte the GE has not yet consumed or
+ * written may still change (a list the CPU streams past a stall, a vertex or CLUT buffer
+ * filled after another draw read the same page), so each GE read re-records the bytes it
+ * consumes until then. `shadow` holds what the replay sees at this point in the frame: the
+ * saved bytes with the GE's own writes applied. `fixed` marks a byte the GE already consumed
+ * or wrote; a later GE read of it that finds other bytes in memory means the CPU changed it
+ * mid-frame, which one saved page cannot replay. */
 typedef struct CaptureState {
     int active;
     char path[1024];
     GeCaptureFixture fixture;
-    uint8_t *seen;
+    uint32_t *slot;      /* page index -> saved page number + 1, 0 when not saved */
+    uint8_t *shadow;     /* page_cap pages */
+    uint8_t *fixed;      /* page_cap pages, one flag per byte */
     uint32_t page_cap;
     uint32_t list_cap;
+    uint32_t cpu_vram_addr;   /* first CPU VRAM store noted since begin */
+    uint32_t cpu_vram_bytes;  /* nonzero while that store is pending */
 } CaptureState;
 
 static CaptureState s_capture;
@@ -59,7 +70,9 @@ void ge_capture_free(GeCaptureFixture *fixture) {
 
 void ge_capture_abort(void) {
     ge_capture_free(&s_capture.fixture);
-    free(s_capture.seen);
+    free(s_capture.slot);
+    free(s_capture.shadow);
+    free(s_capture.fixed);
     memset(&s_capture, 0, sizeof(s_capture));
     g_ge_capture_active = 0;
 }
@@ -80,8 +93,8 @@ int ge_capture_begin(const char *path, uint32_t frame, uint32_t start_list_addr,
     f->initial_state = *state;
     f->initial_zbuf = (uint16_t *)malloc(GE_CAPTURE_ZBUF_WORDS * sizeof(uint16_t));
     f->initial_vram = (uint8_t *)malloc(GE_CAPTURE_VRAM_SIZE);
-    s_capture.seen = (uint8_t *)calloc(GE_CAPTURE_MAX_PAGES, 1);
-    if (!f->initial_zbuf || !f->initial_vram || !s_capture.seen) {
+    s_capture.slot = (uint32_t *)calloc(GE_CAPTURE_MAX_PAGES, sizeof(*s_capture.slot));
+    if (!f->initial_zbuf || !f->initial_vram || !s_capture.slot) {
         ge_capture_abort();
         return 0;
     }
@@ -110,42 +123,124 @@ int ge_capture_add_list(uint32_t list_addr) {
     return 1;
 }
 
+/* The whole VRAM aperture, 0x04000000-0x047FFFFF with its linear and swizzled mirrors, folds
+ * onto the 2 MiB VRAM that begin copies eagerly. A page there is never saved: saving a mirror page
+ * would write post-draw bytes over that copy at replay. */
+static int page_in_vram_aperture(uint32_t page_addr) {
+    return page_addr >= SR_VRAM_CPU_BASE && page_addr < SR_VRAM_CPU_END;
+}
+
+enum { PAGE_SAVED = 0, PAGE_UNREADABLE = 1, PAGE_NO_MEMORY = 2 };
+
 static int append_page(uint32_t page_addr) {
-    if (!sr_guest_span_readable_current(page_addr, GE_CAPTURE_PAGE_SIZE)) return 0;
+    if (!sr_guest_span_readable_current(page_addr, GE_CAPTURE_PAGE_SIZE)) return PAGE_UNREADABLE;
     GeCaptureFixture *f = &s_capture.fixture;
     if (f->page_count == s_capture.page_cap) {
         uint32_t next = s_capture.page_cap ? s_capture.page_cap * 2u : 64u;
         GeCapturePage *pages = (GeCapturePage *)realloc(f->pages, (size_t)next * sizeof(*pages));
-        if (!pages) return 0;
+        if (!pages) return PAGE_NO_MEMORY;
         f->pages = pages;
+        uint8_t *shadow = (uint8_t *)realloc(s_capture.shadow, (size_t)next * GE_CAPTURE_PAGE_SIZE);
+        if (!shadow) return PAGE_NO_MEMORY;
+        s_capture.shadow = shadow;
+        uint8_t *fixed = (uint8_t *)realloc(s_capture.fixed, (size_t)next * GE_CAPTURE_PAGE_SIZE);
+        if (!fixed) return PAGE_NO_MEMORY;
+        s_capture.fixed = fixed;
         s_capture.page_cap = next;
     }
-    GeCapturePage *page = &f->pages[f->page_count++];
+    uint32_t number = f->page_count++;
+    GeCapturePage *page = &f->pages[number];
     page->addr = page_addr;
     memcpy(page->data, SR_HOST(page_addr), GE_CAPTURE_PAGE_SIZE);
+    memcpy(s_capture.shadow + (size_t)number * GE_CAPTURE_PAGE_SIZE, page->data,
+           GE_CAPTURE_PAGE_SIZE);
+    memset(s_capture.fixed + (size_t)number * GE_CAPTURE_PAGE_SIZE, 0, GE_CAPTURE_PAGE_SIZE);
+    s_capture.slot[page_addr / GE_CAPTURE_PAGE_SIZE] = number + 1u;
+    return PAGE_SAVED;
+}
+
+/* A CPU store to VRAM after begin is not in the VRAM copy. It matters only if the GE runs
+ * again in this capture, so it is held until the next GE access or list. */
+static int cpu_vram_store_pending(void) {
+    if (!s_capture.cpu_vram_bytes) return 0;
+    fprintf(stderr,
+            "GE_CAPTURE: the CPU stored %u bytes to VRAM 0x%08x after the capture began and the "
+            "GE ran again; the fixture holds VRAM only as it was at begin, so this capture is "
+            "dropped\n", s_capture.cpu_vram_bytes, s_capture.cpu_vram_addr);
+    ge_capture_abort();
     return 1;
 }
 
-void ge_capture_note_memory(uint32_t addr, uint32_t bytes) {
-    if (!s_capture.active || bytes == 0) return;
+/* Walk the saved pages under [addr, addr + bytes): `src` NULL is a GE read, otherwise the GE
+ * writes `src` there. Returns 0 after dropping the capture. */
+static int note_span(uint32_t addr, uint32_t bytes, const uint8_t *src) {
+    if (!s_capture.active || bytes == 0) return 1;
+    if (cpu_vram_store_pending()) return 0;
     uint64_t first = SR_PHYS(addr);
     uint64_t last = first + (uint64_t)bytes - 1u;
-    if (first >= GE_CAPTURE_ARENA_SIZE || last >= GE_CAPTURE_ARENA_SIZE) return;
+    if (first >= GE_CAPTURE_ARENA_SIZE || last >= GE_CAPTURE_ARENA_SIZE) return 1;
     uint32_t first_page = (uint32_t)first / GE_CAPTURE_PAGE_SIZE;
     uint32_t last_page = (uint32_t)last / GE_CAPTURE_PAGE_SIZE;
     for (uint32_t index = first_page; index <= last_page; index++) {
         uint32_t page_addr = index * GE_CAPTURE_PAGE_SIZE;
-        if (page_addr >= GE_CAPTURE_VRAM_BASE &&
-            page_addr < GE_CAPTURE_VRAM_BASE + GE_CAPTURE_VRAM_SIZE)
-            continue;
-        if (s_capture.seen[index]) continue;
-        if (!append_page(page_addr)) {
-            fprintf(stderr, "GE_CAPTURE: out of memory while saving page 0x%08x\n", page_addr);
+        if (page_in_vram_aperture(page_addr)) continue;
+        int saved = sr_guest_span_readable_current(page_addr, GE_CAPTURE_PAGE_SIZE)
+                  ? PAGE_SAVED : PAGE_UNREADABLE;
+        if (saved == PAGE_SAVED && !s_capture.slot[index]) saved = append_page(page_addr);
+        if (saved != PAGE_SAVED) {
+            if (saved == PAGE_UNREADABLE)
+                fprintf(stderr, "GE_CAPTURE: GE page 0x%08x is not readable guest memory, "
+                        "so this capture is dropped\n", page_addr);
+            else
+                fprintf(stderr, "GE_CAPTURE: out of memory while saving page 0x%08x\n",
+                        page_addr);
             ge_capture_abort();
-            return;
+            return 0;
         }
-        s_capture.seen[index] = 1;
+        uint32_t number = s_capture.slot[index] - 1u;
+        uint8_t *data = s_capture.fixture.pages[number].data;
+        uint8_t *shadow = s_capture.shadow + (size_t)number * GE_CAPTURE_PAGE_SIZE;
+        uint8_t *fixed = s_capture.fixed + (size_t)number * GE_CAPTURE_PAGE_SIZE;
+        const uint8_t *live = SR_HOST(page_addr);
+        uint32_t lo = index == first_page ? (uint32_t)(first % GE_CAPTURE_PAGE_SIZE) : 0u;
+        uint32_t hi = index == last_page ? (uint32_t)(last % GE_CAPTURE_PAGE_SIZE)
+                                         : GE_CAPTURE_PAGE_SIZE - 1u;
+        for (uint32_t off = lo; off <= hi; off++) {
+            if (src) {
+                shadow[off] = src[(uint64_t)page_addr + off - first];
+                fixed[off] = 1;
+            } else if (!fixed[off]) {
+                if (live[off] != shadow[off]) data[off] = shadow[off] = live[off];
+                fixed[off] = 1;
+            } else if (live[off] != shadow[off]) {
+                fprintf(stderr,
+                        "GE_CAPTURE: guest byte 0x%08x changed after the GE consumed it in this "
+                        "frame; one saved page cannot replay both values, so this capture is "
+                        "dropped\n", page_addr + off);
+                ge_capture_abort();
+                return 0;
+            }
+        }
     }
+    return 1;
+}
+
+void ge_capture_note_memory(uint32_t addr, uint32_t bytes) {
+    (void)note_span(addr, bytes, NULL);
+}
+
+void ge_capture_note_write(uint32_t addr, const void *src, uint32_t bytes) {
+    if (src) (void)note_span(addr, bytes, (const uint8_t *)src);
+}
+
+void ge_capture_note_cpu_vram_store(uint32_t addr, uint32_t bytes) {
+    if (!s_capture.active || bytes == 0 || s_capture.cpu_vram_bytes) return;
+    s_capture.cpu_vram_addr = addr;
+    s_capture.cpu_vram_bytes = bytes;
+}
+
+int ge_capture_drop_after_cpu_vram_store(void) {
+    return s_capture.active && cpu_vram_store_pending();
 }
 
 int ge_capture_end(const GeState *final_state) {
@@ -193,6 +288,23 @@ int ge_capture_end(const GeState *final_state) {
     return ok;
 }
 
+/* A fixture's GeState comes from a file, so each field the GE uses as an array index, a
+ * shift or a size must hold a value its command could have set: the matrix cursors count up
+ * from a masked NUMBER (DATA checks only the upper bound), TEXSIZE sizes are 1 << 0..15. */
+static int texture_size_valid(int size) {
+    return size == 0 || (size > 0 && size <= 0x8000 && (size & (size - 1)) == 0);
+}
+
+static int state_valid(const GeState *g) {
+    if (g->world_num < 0 || g->view_num < 0 || g->proj_num < 0 || g->bone_num < 0 ||
+        g->tgen_num < 0)
+        return 0;
+    if (!texture_size_valid(g->tex_w) || !texture_size_valid(g->tex_h)) return 0;
+    for (unsigned i = 0; i < 7u; i++)
+        if (g->tex_mip_wlog2[i] > 15u || g->tex_mip_hlog2[i] > 15u) return 0;
+    return g->tex_max_level <= 7u && g->tex_level_mode <= 3u;
+}
+
 int ge_capture_load(const char *path, GeCaptureFixture *out) {
     if (!path || !out) return 0;
     memset(out, 0, sizeof(*out));
@@ -221,6 +333,7 @@ int ge_capture_load(const char *path, GeCaptureFixture *out) {
         (h.page_count && !out->pages)) ok = 0;
     if (ok) ok = read_exact(file, &out->initial_state, sizeof(out->initial_state));
     if (ok) ok = read_exact(file, &out->final_state, sizeof(out->final_state));
+    ok = ok && state_valid(&out->initial_state) && state_valid(&out->final_state);
     if (ok) ok = read_exact(file, out->list_addrs, (size_t)h.list_count * sizeof(uint32_t));
     for (uint32_t i = 0; ok && i < h.list_count; i++)
         ok = (out->list_addrs[i] & 3u) == 0 && SR_PHYS(out->list_addrs[i]) < GE_CAPTURE_ARENA_SIZE;
@@ -234,8 +347,7 @@ int ge_capture_load(const char *path, GeCaptureFixture *out) {
         uint32_t index = page->addr / GE_CAPTURE_PAGE_SIZE;
         ok = ok && (page->addr % GE_CAPTURE_PAGE_SIZE) == 0;
         ok = ok && page->addr < GE_CAPTURE_ARENA_SIZE && index < GE_CAPTURE_MAX_PAGES;
-        ok = ok && !(page->addr >= GE_CAPTURE_VRAM_BASE &&
-                     page->addr < GE_CAPTURE_VRAM_BASE + GE_CAPTURE_VRAM_SIZE);
+        ok = ok && !page_in_vram_aperture(page->addr);
         ok = ok && !seen[index];
         if (ok) seen[index] = 1;
         if (ok) ok = read_exact(file, page->data, GE_CAPTURE_PAGE_SIZE);

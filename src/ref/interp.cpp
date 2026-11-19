@@ -86,6 +86,17 @@ inline uint32_t Funct(uint32_t op) { return op & 0x3F; }
 inline int32_t SImm(uint32_t op) { return (int32_t)(int16_t)(op & 0xFFFF); }
 inline uint32_t ZImm(uint32_t op) { return op & 0xFFFF; }
 
+// Allegrex bitrev: reverse the 32 bits of a word. The reference keeps its own copy, apart
+// from the runtime's sr_bitrev (src/rt/recomp.c), so the two lanes check each other and the
+// reference object exports no symbol that clashes when it links beside the runtime.
+inline uint32_t BitReverse(uint32_t x) {
+	x = ((x >> 1) & 0x55555555u) | ((x << 1) & 0xaaaaaaaau);
+	x = ((x >> 2) & 0x33333333u) | ((x << 2) & 0xccccccccu);
+	x = ((x >> 4) & 0x0f0f0f0fu) | ((x << 4) & 0xf0f0f0f0u);
+	x = ((x >> 8) & 0x00ff00ffu) | ((x << 8) & 0xff00ff00u);
+	return (x >> 16) | (x << 16);
+}
+
 // MIPS branch displacement is a signed 16-bit word offset, but the guest PC
 // addition wraps at 32 bits.  Convert to unsigned before scaling so a
 // backwards branch never left-shifts a negative signed value (C++ UB).
@@ -117,8 +128,11 @@ void StoreInfo(const CpuState *s, uint32_t op, uint32_t *addr, int *size) {
 		case 0x28: *size = 1; break;   // sb
 		case 0x29: *size = 2; break;   // sh
 		case 0x2B: *size = 4; break;   // sw
-		case 0x2A: *size = 4; break;   // swl (records the touched word)
-		case 0x2E: *size = 4; break;   // swr
+		case 0x2A:                     // swl and swr record the aligned word they merge into,
+		case 0x2E:                     // as the generated code does (tools/codegen.py)
+			*size = 4;
+			*addr = (s->r[Rs(op)] + SImm(op)) & ~3u;
+			return;
 		case 0x39: *size = 4; break;   // swc1
 		case 0x38:                     // sc writes memory only while the link is set
 			if (!s->llbit) return;
@@ -129,13 +143,45 @@ void StoreInfo(const CpuState *s, uint32_t op, uint32_t *addr, int *size) {
 	*addr = s->r[Rs(op)] + SImm(op);
 }
 
+// c.cond.s orders its operands from their raw bits, never through a host float compare: a
+// host compare runs in the ambient FP environment, where DAZ (or FPCR.FZ) makes a denormal
+// equal to zero, so the result would depend on the process instead of the guest. Returns
+// whether the word is a NaN; otherwise *key is the signed magnitude, which orders like the
+// value and gives +0 and -0 the same key. It is written independently of sr_fpu_condition_s,
+// which the generated code uses, so the two lanes still cross-check each other.
+bool CompareKey(uint32_t bits, int64_t *key) {
+	const uint32_t magnitude = bits & 0x7FFFFFFFu;
+	if (magnitude > 0x7F800000u) return true;  // exponent all ones, mantissa nonzero
+	*key = (bits >> 31) != 0 ? -static_cast<int64_t>(magnitude) : static_cast<int64_t>(magnitude);
+	return false;
+}
+
+// A jump or branch: the forms that own a delay slot (the runtime interpreter's
+// is_control_opcode, less the traps, which have none).
+bool IsControlTransfer(uint32_t op) {
+	const uint32_t opcode = op >> 26;
+	if (opcode == 0x00) return Funct(op) == 0x08 || Funct(op) == 0x09;  // jr, jalr
+	switch (opcode) {
+		case 0x01:                                   // REGIMM b*z / b*zal and likely forms
+		case 0x02: case 0x03:                        // j, jal
+		case 0x04: case 0x05: case 0x06: case 0x07:  // beq, bne, blez, bgtz
+		case 0x14: case 0x15: case 0x16: case 0x17:  // the likely forms
+			return true;
+		case 0x11: case 0x12:                        // the COP1 / COP2 branch group
+			return Rs(op) == 0x08;
+		default:
+			return false;
+	}
+}
+
 }  // namespace
 
 // ---- Execute one instruction ---------------------------------------------------------
 
 // Advances s->pc and sets branch bookkeeping. Returns kRunning on success, or a stop reason
-// for syscall / unimplemented / break. Memory faults are detected by the caller via the
-// Memory fault flag after load/store.
+// for syscall / unimplemented / break / a null code pointer (kMemoryFault). Memory faults of
+// loads and stores are detected by the caller via the Memory fault flag. Run restores the
+// state of any instruction that stops on an error, so Execute need not undo its own writes.
 static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 	const uint32_t opcode = op >> 26;
 	const uint32_t branch_pc = s->pc;
@@ -164,26 +210,42 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 			switch (funct) {
 				case 0x00: SetR(s, Rd(op), s->r[Rt(op)] << Sa(op)); return StopReason::kRunning;          // sll
 				case 0x02: {  // srl; Allegrex rs == 1 makes it rotr (the form sweep, #1844, found it missing)
+					// Other rs values are reserved: the production lanes refuse them
+					// (guest_interp.c; codegen.py "SRL reserved rs field"), and so does the reference.
+					if (Rs(op) > 1) return StopReason::kUnimplemented;
 					const uint32_t v = s->r[Rt(op)], n = Sa(op);
 					SetR(s, Rd(op), Rs(op) == 1 ? (n == 0 ? v : (v >> n) | (v << (32 - n))) : v >> n);
 					return StopReason::kRunning;
 				}
 				case 0x03: SetR(s, Rd(op), ArithShiftRight(s->r[Rt(op)], Sa(op))); return StopReason::kRunning;  // sra
 				case 0x04: SetR(s, Rd(op), s->r[Rt(op)] << (s->r[Rs(op)] & 31)); return StopReason::kRunning;          // sllv
-				case 0x06: {  // srlv; Allegrex sa == 1 makes it rotrv
+				case 0x06: {  // srlv; Allegrex sa == 1 makes it rotrv, other sa values are reserved
+					if (Sa(op) > 1) return StopReason::kUnimplemented;
 					const uint32_t v = s->r[Rt(op)], n = s->r[Rs(op)] & 31;
 					SetR(s, Rd(op), Sa(op) == 1 ? (n == 0 ? v : (v >> n) | (v << (32 - n))) : v >> n);
 					return StopReason::kRunning;
 				}
 				case 0x07: SetR(s, Rd(op), ArithShiftRight(s->r[Rt(op)], s->r[Rs(op)] & 31)); return StopReason::kRunning;  // srav
+				// jr and jalr latch their target before the link write (AGENTS.md section 7,
+				// PR #126), so jalr with rd == rs jumps to the register's old value. Their
+				// reserved fields (rt, rd and sa for jr; rt and sa for jalr) must be zero, as the
+				// runtime interpreter's decode requires. A computed target of 0 is a null code
+				// pointer (#1375): it stops at the transfer, before the link write and the delay
+				// slot, as a memory fault at address 0, where the production lanes refuse it.
 				case 0x08: {  // jr
-					s->next_pc = s->r[Rs(op)];
+					if ((op & 0x001FFFC0u) != 0u) return StopReason::kUnimplemented;
+					const uint32_t target = s->r[Rs(op)];
+					if (target == 0u) return StopReason::kMemoryFault;
+					s->next_pc = target;
 					s->in_delay_slot = true;
 					return StopReason::kRunning;
 				}
 				case 0x09: {  // jalr
+					if ((op & 0x001F07C0u) != 0u) return StopReason::kUnimplemented;
+					const uint32_t target = s->r[Rs(op)];
+					if (target == 0u) return StopReason::kMemoryFault;
 					SetR(s, Rd(op), branch_pc + 8);
-					s->next_pc = s->r[Rs(op)];
+					s->next_pc = target;
 					s->in_delay_slot = true;
 					return StopReason::kRunning;
 				}
@@ -298,8 +360,14 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 		case 0x03: SetR(s, 31, branch_pc + 8); s->next_pc = (branch_pc & 0xF0000000) | ((op & 0x3FFFFFF) << 2); s->in_delay_slot = true; return StopReason::kRunning;  // jal
 		case 0x04: take_branch(s->r[Rs(op)] == s->r[Rt(op)]); return StopReason::kRunning;  // beq
 		case 0x05: take_branch(s->r[Rs(op)] != s->r[Rt(op)]); return StopReason::kRunning;  // bne
-		case 0x06: take_branch((int32_t)s->r[Rs(op)] <= 0); return StopReason::kRunning;    // blez
-		case 0x07: take_branch((int32_t)s->r[Rs(op)] > 0); return StopReason::kRunning;     // bgtz
+		// blez, bgtz and their likely forms have a reserved rt field that must be zero; the
+		// production lanes refuse any other value, and so does the reference.
+		case 0x06:  // blez
+			if (Rt(op) != 0) return StopReason::kUnimplemented;
+			take_branch((int32_t)s->r[Rs(op)] <= 0); return StopReason::kRunning;
+		case 0x07:  // bgtz
+			if (Rt(op) != 0) return StopReason::kUnimplemented;
+			take_branch((int32_t)s->r[Rs(op)] > 0); return StopReason::kRunning;
 		case 0x08:    // addi
 		case 0x09: SetR(s, Rt(op), s->r[Rs(op)] + (uint32_t)SImm(op)); return StopReason::kRunning;  // addiu
 		case 0x0A: SetR(s, Rt(op), (int32_t)s->r[Rs(op)] < SImm(op) ? 1 : 0); return StopReason::kRunning;  // slti
@@ -310,8 +378,12 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 		case 0x0F: SetR(s, Rt(op), ZImm(op) << 16); return StopReason::kRunning;           // lui
 		case 0x14: skip_likely(s->r[Rs(op)] == s->r[Rt(op)]); return StopReason::kRunning;  // beql
 		case 0x15: skip_likely(s->r[Rs(op)] != s->r[Rt(op)]); return StopReason::kRunning;  // bnel
-		case 0x16: skip_likely((int32_t)s->r[Rs(op)] <= 0); return StopReason::kRunning;    // blezl
-		case 0x17: skip_likely((int32_t)s->r[Rs(op)] > 0); return StopReason::kRunning;     // bgtzl
+		case 0x16:  // blezl
+			if (Rt(op) != 0) return StopReason::kUnimplemented;
+			skip_likely((int32_t)s->r[Rs(op)] <= 0); return StopReason::kRunning;
+		case 0x17:  // bgtzl
+			if (Rt(op) != 0) return StopReason::kUnimplemented;
+			skip_likely((int32_t)s->r[Rs(op)] > 0); return StopReason::kRunning;
 		case 0x20: SetR(s, Rt(op), (uint32_t)(int32_t)(int8_t)mem->Read8(s->r[Rs(op)] + SImm(op))); return StopReason::kRunning;   // lb
 		case 0x21: SetR(s, Rt(op), (uint32_t)(int32_t)(int16_t)mem->Read16(s->r[Rs(op)] + SImm(op))); return StopReason::kRunning; // lh
 		case 0x23: SetR(s, Rt(op), mem->Read32(s->r[Rs(op)] + SImm(op))); return StopReason::kRunning;  // lw
@@ -362,6 +434,7 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 		case 0x38: {  // sc: store and report 1 only while the link is set, else 0
 			uint32_t addr = s->r[Rs(op)] + SImm(op);
 			const uint32_t linked = s->llbit != 0 ? 1u : 0u;
+			if (!mem->CheckAligned(addr, 4u)) return StopReason::kRunning;  // address error
 			if (linked) mem->Write32(addr, s->r[Rt(op)]);
 			SetR(s, Rt(op), linked);
 			return StopReason::kRunning;
@@ -374,7 +447,7 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 			switch (fmt) {
 				case 0x00: SetR(s, ft, s->fi[fs]); return StopReason::kRunning;   // mfc1
 				case 0x02:  // cfc1
-					SetR(s, ft, fs == 31 ? s->fcr31 : (fs == 0 ? 0x00003351u : 0u));
+					SetR(s, ft, fs == 31 ? s->fcr31 : (fs == 0 ? SR_FCR0_FIR : 0u));
 					return StopReason::kRunning;
 				case 0x04: s->fi[fs] = s->r[ft]; return StopReason::kRunning;     // mtc1
 				case 0x06:
@@ -397,29 +470,20 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 				case 0x10: {  // fmt = S
 					const uint32_t funct = Funct(op);
 					const uint32_t fcr31 = s->fcr31;
-					// Evidence-class note: these scalar cells share the exact
-					// fp_convert.h helper with generated code, so AOT-vs-ref
-					// agreement here is SHARED_HELPER corroboration, not an
-					// independent semantic line. Independent authority for
-					// the underlying contract is the cited PSP_HARDWARE
-					// anchors in fp_convert.h.
+					// Evidence-class note: the arithmetic and conversion cells
+					// share the exact fp_convert.h helper with generated code,
+					// so AOT-vs-ref agreement there is SHARED_HELPER
+					// corroboration, not an independent semantic line.
+					// Independent authority for the underlying contract is the
+					// cited PSP_HARDWARE anchors in fp_convert.h. c.cond.s is
+					// the exception: it is deliberately independent of
+					// sr_fpu_condition_s (see CompareKey).
 					switch (funct) {
 						case 0x00: s->f[fd] = sr_fpu_add_s(s->f[fs], s->f[ft], fcr31); return StopReason::kRunning;  // add.s
 						case 0x01: s->f[fd] = sr_fpu_sub_s(s->f[fs], s->f[ft], fcr31); return StopReason::kRunning;  // sub.s
-						case 0x02: {  // mul.s: inf*0 canonicalization classifies from RAW BITS
-							// (environment-blind). A floating isinf()/==0.0f precheck would
-							// be a guest-sensitive comparison outside any scoped window;
-							// under ambient DAZ=1 a subnormal operand would compare zero
-							// and inf*subnormal would wrongly canonicalize.
-							const uint32_t ab = sr_float_bits(s->f[fs]);
-							const uint32_t bb = sr_float_bits(s->f[ft]);
-							if (((ab & 0x7fffffffu) == 0x7f800000u && (bb & 0x7fffffffu) == 0u) ||
-							    ((bb & 0x7fffffffu) == 0x7f800000u && (ab & 0x7fffffffu) == 0u))
-								s->fi[fd] = 0x7fc00000;
-							else
-								s->f[fd] = sr_fpu_mul_s(s->f[fs], s->f[ft], fcr31);
-							return StopReason::kRunning;
-						}
+						// mul.s: sr_fpu_mul_s canonicalizes inf*0 to 0x7fc00000 from the raw
+						// bits (environment-blind) before it touches the FP environment.
+						case 0x02: s->f[fd] = sr_fpu_mul_s(s->f[fs], s->f[ft], fcr31); return StopReason::kRunning;
 						case 0x03: s->f[fd] = sr_fpu_div_s(s->f[fs], s->f[ft], fcr31); return StopReason::kRunning;  // div.s
 						case 0x04: s->f[fd] = std::sqrt(s->f[fs]); return StopReason::kRunning;  // sqrt.s
 						case 0x05: s->f[fd] = std::fabs(s->f[fs]); return StopReason::kRunning;  // abs.s
@@ -433,8 +497,10 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 						default:
 							if (funct >= 0x30) {  // c.cond.s
 								uint32_t cond = funct & 0xF;
-								float a = s->f[fs], b = s->f[ft];
-								bool unordered = std::isnan(a) || std::isnan(b);
+								int64_t a = 0, b = 0;
+								const bool a_nan = CompareKey(s->fi[fs], &a);
+								const bool b_nan = CompareKey(s->fi[ft], &b);
+								bool unordered = a_nan || b_nan;
 								bool less = !unordered && a < b;
 								bool equal = !unordered && a == b;
 								bool result = (unordered && (cond & 1)) || (equal && (cond & 2)) || (less && (cond & 4));
@@ -484,7 +550,7 @@ static StopReason Execute(CpuState *s, Memory *mem, uint32_t op) {
 				if (sub == 0x03) { SetR(s, Rd(op), ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) | ((v & 0x00FF0000u) >> 8) | ((v >> 24) & 0x000000FFu)); return StopReason::kRunning; }  // wsbw
 				if (sub == 0x10) { SetR(s, Rd(op), (uint32_t)(int32_t)(int8_t)v); return StopReason::kRunning; }   // seb
 				if (sub == 0x18) { SetR(s, Rd(op), (uint32_t)(int32_t)(int16_t)v); return StopReason::kRunning; }  // seh
-				if (sub == 0x14) { SetR(s, Rd(op), sr_bitrev(v)); return StopReason::kRunning; }  // bitrev
+				if (sub == 0x14) { SetR(s, Rd(op), BitReverse(v)); return StopReason::kRunning; }  // bitrev
 				return StopReason::kUnimplemented;
 			}
 			return StopReason::kUnimplemented;
@@ -507,21 +573,35 @@ StepResult Run(CpuState *s, Memory *mem, unsigned long long max_steps, TraceSink
 		if (mem->last_fault())
 			return {StopReason::kMemoryFault, pc, op, i};
 
+		// A jump or branch in a delay slot is UNPREDICTABLE on MIPS, and the production lanes
+		// refuse it before any effect. Running it would drop the outer target and the inner
+		// slot, so the reference stops by name instead of making up a result.
+		if (s->in_delay_slot && IsControlTransfer(op))
+			return {StopReason::kUnimplemented, pc, op, i};
+
 		uint32_t store_addr = 0;
 		int store_size = 0;
-		StoreInfo(s, op, &store_addr, &store_size);
+		if (sink) StoreInfo(s, op, &store_addr, &store_size);  // only the trace uses it
 
 		if (sink) sink->BeginStep(s, pc, op);
+		// An instruction that stops on an error (an unimplemented form, a fatal BREAK, a null
+		// code pointer or a memory fault) does not complete: the state goes back to what it was
+		// before it, so pc names it, a faulting load leaves rt alone, ll leaves the link, and a
+		// delay slot keeps its branch pending. It is neither traced nor counted as executed.
+		const CpuState before = *s;
 		bool was_in_delay_slot = s->in_delay_slot;
 		StopReason reason = Execute(s, mem, op);
+		if (mem->last_fault() || reason == StopReason::kUnimplemented ||
+		    reason == StopReason::kBreak || reason == StopReason::kMemoryFault) {
+			*s = before;
+			return {mem->last_fault() ? StopReason::kMemoryFault : reason, pc, op, i};
+		}
 		if (s->in_delay_slot && was_in_delay_slot) {
 			s->pc = s->next_pc;
 			s->in_delay_slot = false;
 		}
 		if (sink) sink->EndStep(s, store_addr, store_size, mem);
 
-		if (mem->last_fault())
-			return {StopReason::kMemoryFault, pc, op, i + 1};
 		if (reason != StopReason::kRunning)
 			return {reason, pc, op, i + 1};
 	}
@@ -529,13 +609,3 @@ StepResult Run(CpuState *s, Memory *mem, unsigned long long max_steps, TraceSink
 }
 
 }  // namespace ref
-
-// Bit-reverse a 32-bit word (Allegrex bitrev).  This is a standalone definition
-// for the selftest/run_elf builds; the runtime copy lives in recomp.c.
-extern "C" uint32_t sr_bitrev(uint32_t x) {
-    x = ((x >> 1) & 0x55555555) | ((x << 1) & 0xaaaaaaaa);
-    x = ((x >> 2) & 0x33333333) | ((x << 2) & 0xcccccccc);
-    x = ((x >> 4) & 0x0f0f0f0f) | ((x << 4) & 0xf0f0f0f0);
-    x = ((x >> 8) & 0x00ff00ff) | ((x << 8) & 0xff00ff00);
-    return (x >> 16) | (x << 16);
-}

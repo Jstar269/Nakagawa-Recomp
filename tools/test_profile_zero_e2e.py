@@ -57,16 +57,19 @@ VBLANK_SCRIPT = "12 4000 4\n240 0008 4\n"
 # alone, so these are pure functions of the guest bytes and the runtime source. Values:
 # sha256 of RESULT.TXT and ROUNDTRIP.BIN, and the vblank and sha256 of the first frame
 # snapshot that shows the rasterized primitive (#306).
+# 2026-11-18: first_frame re-pinned. The GE now reads the VRAM word at 0x04084000 as VRAM, not as
+# the CPU's GE status shim, so pixel (0, 264) of the cleared frame holds the clear colour instead of
+# status bits; that one pixel is the only change (same digest on Windows and hosted Linux).
 CROSS_HOST_DIGESTS: dict[str, dict[str, str]] = {
     "synthetic-allegrex-v1": {
         "result_txt": "233610c1d4af4c78d6ae41fb9f9fce9a7564f5b37dc5c0684e7850a4ef7f6b5f",
         "save_bin": "52abb30ce3f156d815824a3f06c75fa094dd814c8fef673a0c72319d86581f99",
-        "first_frame": "vblank=60 758a9e84df25d20fb9c33aa20e18d84efa3cf9c3986a0f4466c85da5062636f5",
+        "first_frame": "vblank=60 84b48de0710aa8df364ee3e26963d396aaed56d915f1718fef0dc8b067ce8168",
     },
     "synthetic-title2-v1": {
         "result_txt": "233610c1d4af4c78d6ae41fb9f9fce9a7564f5b37dc5c0684e7850a4ef7f6b5f",
         "save_bin": "52abb30ce3f156d815824a3f06c75fa094dd814c8fef673a0c72319d86581f99",
-        "first_frame": "vblank=60 758a9e84df25d20fb9c33aa20e18d84efa3cf9c3986a0f4466c85da5062636f5",
+        "first_frame": "vblank=60 84b48de0710aa8df364ee3e26963d396aaed56d915f1718fef0dc8b067ce8168",
     },
 }
 # Set by the hosted CI steps: the route must run there, so a missing dependency fails.
