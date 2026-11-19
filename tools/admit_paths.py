@@ -145,10 +145,11 @@ PRE_COMMIT_CONFIG = ".pre-commit-config.yaml"
 #: paths before anything is read or pinned (``check_rewriting_hooks``). Nothing from the pull
 #: request runs: its hook definitions and any module it ships are never executed.
 REWRITING_HOOKS = ("trailing-whitespace", "end-of-file-fixer", "mixed-line-ending", "fix-byte-order-marker")
-#: The bytes ``identify`` (pre-commit's file typing) accepts as text in its content test. That
-#: test decides only when the file name gives no ``text`` or ``binary`` tag: a ``.txt`` file is
-#: text, and the text hooks rewrite it, whatever its first 1024 bytes hold
-#: (``hook_file_is_text``).
+#: The bytes ``identify`` (pre-commit's file typing) accepts as text in its content test. For
+#: the hooks that test decides only when the file name gives no ``text`` or ``binary`` tag: a
+#: ``.txt`` file is text, and the text hooks rewrite it, whatever its first 1024 bytes hold
+#: (``hook_file_is_text``). The line-ending rule also applies it whatever the name says, since
+#: Git's normalization does not follow ``identify``'s names (``rewriting_hook_findings``).
 _TEXT_BYTES = bytes(sorted({7, 8, 9, 10, 11, 12, 13, 27} | set(range(0x20, 0x100)) - {0x7F}))
 #: The exclusion of a hook that is declared without one.
 _NO_EXCLUSION = re.compile(r"(?!)")
@@ -299,12 +300,52 @@ def _yaml_scalar(lines: list[str], index: int, indent: int, rest: str) -> tuple[
     return rest.split(" #", 1)[0].strip(), index + 1
 
 
+def _without_yaml_comments(config: str) -> str:
+    """``config`` with its YAML comments removed, for a test of whether a hook id is named at all.
+
+    A ``#`` starts a comment at the start of a line or after a space or tab, outside a quoted
+    scalar. A quote opens a scalar at the start of a line or after a space, a tab or one of
+    ``[{,:?-``, and a quoted scalar may span lines. A quote misread as an opening one keeps
+    text that is a comment, so a misreading can only find an id where there is none (and refuse).
+    """
+    kept: list[str] = []
+    quote = ""
+    for line in config.splitlines():
+        out: list[str] = []
+        index = 0
+        while index < len(line):
+            char = line[index]
+            if quote:
+                if quote == '"' and char == "\\":
+                    out.append(line[index:index + 2])
+                    index += 2
+                    continue
+                if char == quote and quote == "'" and line[index + 1:index + 2] == "'":
+                    out.append("''")
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = ""
+            elif char == "#" and (index == 0 or line[index - 1] in " \t"):
+                break
+            elif char in "'\"" and (not line[:index].strip() or line[index - 1] in " \t[{,:?-"):
+                quote = char
+            out.append(char)
+            index += 1
+        kept.append("".join(out))
+    return "\n".join(kept)
+
+
 def rewriting_hook_exclusions(config: str) -> tuple[re.Pattern[str] | None, dict[str, re.Pattern[str]]]:
     """The top-level ``exclude`` and, for each ``REWRITING_HOOKS`` hook ``config`` declares, its own ``exclude``.
 
     A declared hook without an ``exclude`` maps to a pattern that matches nothing. ``config`` is the trusted base's ``.pre-commit-config.yaml``, never the pull request's.
     Raises ``AdmitError("ADMIT_HOOKS_CONFIG_INVALID")`` for a form this reader does not
-    understand, an invalid pattern, or a rewriting hook declared twice.
+    understand, an invalid pattern, or a rewriting hook declared twice. A hook is declared only
+    as a list item whose first key is ``id`` (``- id: trailing-whitespace``). A rewriting hook
+    whose id ``config`` names outside a comment but not in that form (``id`` as a later key, a
+    flow sequence, a quoted key, ``id :``) is refused the same way: pre-commit may run it, and a
+    hook this reader did not see would otherwise count as not declared.
     """
     lines = config.splitlines()
     top: re.Pattern[str] | None = None
@@ -339,6 +380,13 @@ def rewriting_hook_exclusions(config: str) -> tuple[re.Pattern[str] | None, dict
                     hooks[hook] = re.compile(value)
                 continue
             index += 1
+        named = _without_yaml_comments(config)
+        for hook_id in REWRITING_HOOKS:
+            if hook_id not in hooks and re.search(rf"(?<![\w-]){re.escape(hook_id)}(?![\w-])", named):
+                raise ValueError(
+                    f"it names {hook_id} outside a comment, but not as a declaration this reader reads "
+                    f"(a list item whose first key is id: `- id: {hook_id}`)"
+                )
     except (ValueError, re.error) as error:
         raise AdmitError(
             "ADMIT_HOOKS_CONFIG_INVALID", f"cannot read the trusted base's {PRE_COMMIT_CONFIG}: {error}",
@@ -392,28 +440,31 @@ def rewriting_hook_findings(data: bytes, path: str) -> dict[str, str]:
     The same rules as the pinned pre-commit-hooks: trailing whitespace (``bytes.rstrip()``
     before each line ending), exactly one line ending at the end of a non-empty file, LF
     line endings only (``.gitattributes`` stores text as LF), and no UTF-8 byte-order mark.
-    A file pre-commit types as binary (``hook_file_is_text``) is left alone.
+    A file pre-commit types as binary (``hook_file_is_text``) is left alone by the hooks. The
+    line-ending finding is also made for such a file when its content passes the content test:
+    Git, not pre-commit, normalizes line endings, and Git types a file by its attributes and
+    content, never by ``identify``'s name table (``check_rewriting_hooks`` labels it so).
     """
-    if not hook_file_is_text(path, data):
-        return {}
+    hook_text = hook_file_is_text(path, data)
     found: dict[str, str] = {}
-    for number, line in enumerate(data.split(b"\n"), 1):
-        body = line[:-1] if line.endswith(b"\r") else line
-        if body != body.rstrip():
-            found["trailing-whitespace"] = f"trailing whitespace on line {number}"
-            break
-    if data:
-        body = data.rstrip(b"\r\n")
-        tail = data[len(body):]
-        if not body:
-            found["end-of-file-fixer"] = "only line endings (the hook empties the file)"
-        elif tail not in (b"\n", b"\r\n"):
-            found["end-of-file-fixer"] = (
-                "no line ending at the end of the file" if not tail else "more than one line ending at the end of the file"
-            )
-    if b"\r" in data:
+    if hook_text:
+        for number, line in enumerate(data.split(b"\n"), 1):
+            body = line[:-1] if line.endswith(b"\r") else line
+            if body != body.rstrip():
+                found["trailing-whitespace"] = f"trailing whitespace on line {number}"
+                break
+        if data:
+            body = data.rstrip(b"\r\n")
+            tail = data[len(body):]
+            if not body:
+                found["end-of-file-fixer"] = "only line endings (the hook empties the file)"
+            elif tail not in (b"\n", b"\r\n"):
+                found["end-of-file-fixer"] = (
+                    "no line ending at the end of the file" if not tail else "more than one line ending at the end of the file"
+                )
+    if b"\r" in data and (hook_text or not data[:1024].translate(None, _TEXT_BYTES)):
         found["mixed-line-ending"] = "CRLF or CR line endings (the repository stores text with LF)"
-    if data.startswith(b"\xef\xbb\xbf"):
+    if hook_text and data.startswith(b"\xef\xbb\xbf"):
         found["fix-byte-order-marker"] = "a UTF-8 byte-order mark"
     return found
 
@@ -424,8 +475,10 @@ def check_rewriting_hooks(pr: Path, base: str, head: str, paths: list[str]) -> l
     The ``REWRITING_HOOKS`` rules run in pure Python on each path's blob at ``head``, honouring
     the trusted ``base``'s ``.pre-commit-config.yaml``: only the hooks it declares, with their
     exclusions (top-level and per hook), plus the LF rule for a path the base's
-    ``.gitattributes`` stores as text. When the base has no configuration, all four rules apply
-    with no exclusion. Nothing is checked out and nothing
+    ``.gitattributes`` does not mark ``-text`` and that is text by its content (whatever its
+    name) or by pre-commit's typing.
+    When the base has no configuration, all four rules apply with no exclusion. Nothing is
+    checked out and nothing
     from the pull request is executed: a candidate ``.pre-commit-config.yaml``, a planted
     ``pre_commit`` module or a redefined local hook has no effect. Returns the hooks checked.
     """
@@ -450,18 +503,24 @@ def check_rewriting_hooks(pr: Path, base: str, head: str, paths: list[str]) -> l
     for path in paths:
         if top is not None and top.search(path):
             continue
-        findings = rewriting_hook_findings(_git(pr, "cat-file", "blob", f"{head}:{path}"), path)
+        data = _git(pr, "cat-file", "blob", f"{head}:{path}")
+        findings = rewriting_hook_findings(data, path)
+        hook_text = hook_file_is_text(path, data)
         for hook, problem in findings.items():
             if hook in excluded and excluded[hook].search(path):
                 continue
-            if hook == "mixed-line-ending" and hook not in excluded and path in verbatim:
-                continue
-            # A hook the trusted configuration does not declare never runs. CRLF in a text path
-            # stays refused without one: Git's text normalization rewrites those bytes itself.
-            if config and hook not in excluded:
-                if hook != "mixed-line-ending":
+            if hook == "mixed-line-ending":
+                # The hook rewrites a file pre-commit types as text, -text or not. Git rewrites
+                # CRLF in a path the base does not mark -text, whatever its name: such a CRLF
+                # stays refused without the hook (a name identify types binary included).
+                hook_runs = hook_text and (not config or hook in excluded)
+                if path in verbatim and not (hook_text and hook in excluded):
                     continue
-                problems.append(f"{path}: {problem} (Git text normalization; convert it to LF)")
+                if not hook_runs:
+                    problems.append(f"{path}: {problem} (Git text normalization; convert it to LF)")
+                    continue
+            elif config and hook not in excluded:
+                # A hook the trusted configuration does not declare never runs.
                 continue
             problems.append(f"{path}: {problem} ({hook})")
     if problems:

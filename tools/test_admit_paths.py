@@ -1897,8 +1897,12 @@ class HookCheckTest(unittest.TestCase):
         self.enterContext(mock.patch.object(admit_paths, "check_rewriting_hooks", _REAL_HOOK_CHECK))
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="nakagawa-admit-hooks-test-")))
 
-    def _repo(self, base_files: dict[str, bytes], head_files: dict[str, bytes]) -> tuple[Path, str, str]:
-        repo = self.tmp / "repo"
+    def _repo(
+        self, base_files: dict[str, bytes], head_files: dict[str, bytes], name: str = "repo",
+        unfiltered_head: bool = False,
+    ) -> tuple[Path, str, str]:
+        """``unfiltered_head`` commits the head files' exact bytes, past the base's ``.gitattributes``."""
+        repo = self.tmp / name
         repo.mkdir()
         git(repo, "init", "-q")
         git(repo, "config", "core.autocrlf", "false")
@@ -1909,6 +1913,10 @@ class HookCheckTest(unittest.TestCase):
                 path.write_bytes(data)
             (repo / "anchor").write_bytes(str(len(files)).encode() + b"\n")
             git(repo, "add", "-A")
+            if unfiltered_head and files is head_files:
+                for relative in files:
+                    blob = git(repo, "hash-object", "-w", "--no-filters", "--", relative)
+                    git(repo, "update-index", "--cacheinfo", f"100644,{blob},{relative}")
             git(repo, "commit", "-qm", "commit")
             if files is base_files:
                 base = git(repo, "rev-parse", "HEAD")
@@ -2087,6 +2095,116 @@ class HookCheckTest(unittest.TestCase):
             with self.subTest(config=config), self.assertRaises(AdmitError) as caught:
                 admit_paths.rewriting_hook_exclusions(config)
             self.assertEqual(caught.exception.code, "ADMIT_HOOKS_CONFIG_INVALID")
+
+    def test_a_declaration_form_the_reader_does_not_read_is_refused_not_skipped(self) -> None:
+        """pre-commit runs a hook declared in any valid YAML form; the reader reads only ``- id: x``.
+
+        Each form below makes pre-commit strip the trailing space of ``docs/a.md`` (review of
+        #2720, L1). Read as "not declared", the rule was skipped and the file admitted.
+        """
+        repo_head = (
+            "repos:\n  - repo: https://github.com/pre-commit/pre-commit-hooks\n    rev: v6.0.0\n"
+        )
+        forms = {
+            "id-second-key": repo_head + "    hooks:\n      - name: trim\n        id: trailing-whitespace\n",
+            "flow-sequence": repo_head + "    hooks: [{id: trailing-whitespace}, {id: end-of-file-fixer}]\n",
+            "quoted-key": repo_head + '    hooks:\n      - "id": trailing-whitespace\n',
+            "space-before-colon": repo_head + "    hooks:\n      - id : trailing-whitespace\n",
+            "hash-in-a-quoted-scalar": repo_head + "    hooks: [{name: 'a # b', id: trailing-whitespace}]\n",
+        }
+        for name, config in forms.items():
+            with self.subTest(form=name):
+                repo, base, head = self._repo(
+                    {admit_paths.PRE_COMMIT_CONFIG: config.encode()}, {"docs/a.md": b"# A \n"}, name=name,
+                )
+                with self.assertRaises(AdmitError) as caught:
+                    admit_paths.check_rewriting_hooks(repo, base, head, ["docs/a.md"])
+                self.assertEqual(caught.exception.code, "ADMIT_HOOKS_CONFIG_INVALID")
+                self.assertIn("trailing-whitespace", str(caught.exception))
+
+        # An id named only in comments is not declared: no hook runs, and the file is admitted.
+        config = (
+            "# trailing-whitespace and end-of-file-fixer are not run here.\n" + repo_head
+            + "    hooks:\n      - id: check-yaml  # unlike trailing-whitespace\n"
+        )
+        repo, base, head = self._repo(
+            {admit_paths.PRE_COMMIT_CONFIG: config.encode()}, {"docs/a.md": b"# A \n"}, name="comments-only",
+        )
+        self.assertEqual(admit_paths.check_rewriting_hooks(repo, base, head, ["docs/a.md"]),
+                         list(admit_paths.REWRITING_HOOKS))
+
+    #: identify 2.6.20's ``tags_from_filename`` for the names below (checked against the
+    #: installed package when there is one).
+    _NAME_TAGS = {
+        "data.jar": {"binary", "jar", "zip"},
+        "figure.eps": {"binary", "eps"},
+        "logo.png": {"binary", "image", "png"},
+        "page.md": {"text", "markdown"},
+        "Dockerfile.png": {"binary", "dockerfile", "image", "png", "text"},
+    }
+
+    def _name_tags(self) -> None:
+        installed = admit_paths._identify_filename_tags("x.txt") is not None
+        for name, tags in self._NAME_TAGS.items():
+            if installed:
+                self.assertEqual(admit_paths._identify_filename_tags(name), tags, name)
+        self.enterContext(mock.patch.object(
+            admit_paths, "_identify_filename_tags",
+            side_effect=lambda path: set(self._NAME_TAGS[PurePosixPath(path).name]),
+        ))
+
+    def test_the_line_ending_rule_follows_git_not_the_file_name(self) -> None:
+        """Git normalizes CRLF in a path its attributes leave as text, whatever ``identify`` says the name is.
+
+        The repository's ``* text=auto eol=lf`` leaves ``.jar`` and ``.eps`` to Git's content test,
+        so a text ``.jar`` with CRLF is rewritten by ``git add --renormalize`` (review of #2720, L2).
+        """
+        self._name_tags()
+        base = {
+            admit_paths.PRE_COMMIT_CONFIG: (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_bytes(),
+            ".gitattributes": (ROOT / ".gitattributes").read_bytes(),
+        }
+        head_files = {
+            "assets/data.jar": b"a\r\nb\r\n",
+            "assets/figure.eps": b"%!PS-Adobe-3.0 EPSF-3.0\r\n%%EOF\r\n",
+            "assets/real/data.jar": b"PK\x03\x04\x14\x00\x00\x00\x08\x00\r\n\x00\x00 \n",
+            "assets/logo.png": b"text \r\nonly\r\n",
+            "docs/page.md": b"a\r\nb\r\n",
+        }
+        repo, base_sha, head = self._repo(base, head_files, unfiltered_head=True)
+        for path, data in head_files.items():
+            self.assertEqual(git_bytes(repo, "cat-file", "blob", f"{head}:{path}"), data, "the blob keeps its CRLF")
+        check = admit_paths.check_rewriting_hooks
+        for path in ("assets/data.jar", "assets/figure.eps", "docs/page.md"):
+            with self.subTest(path=path):
+                with self.assertRaises(AdmitError) as caught:
+                    check(repo, base_sha, head, [path])
+                self.assertEqual(caught.exception.code, "ADMIT_HOOKS_WOULD_REWRITE")
+                self.assertIn(f"{path}: CRLF or CR line endings", str(caught.exception))
+                self.assertIn("(Git text normalization; convert it to LF)", str(caught.exception))
+        # Bytes that are not text, under a binary name: neither Git nor the hooks touch them.
+        self.assertEqual(check(repo, base_sha, head, ["assets/real/data.jar"]), list(admit_paths.REWRITING_HOOKS))
+        # *.png is binary in the repository's attributes, so Git leaves the CRLF, and the hooks skip a .png.
+        self.assertEqual(check(repo, base_sha, head, ["assets/logo.png"]), list(admit_paths.REWRITING_HOOKS))
+        self.assertEqual(admit_paths.rewriting_hook_findings(b"a \r\nb\r\n", "assets/data.jar"),
+                         {"mixed-line-ending": "CRLF or CR line endings (the repository stores text with LF)"},
+                         "the name still keeps the three other rules away, as it keeps the hooks away")
+
+    def test_a_name_identify_tags_both_text_and_binary_is_text(self) -> None:
+        """``Dockerfile.png`` is tagged both ``text`` and ``binary``: the text hooks run on it.
+
+        pre-commit selects a hook's files with ``tags >= types``, so a ``types: [text]`` hook runs
+        on any file carrying the ``text`` tag, whatever else it carries; the review's ground truth
+        saw the pinned hooks rewrite this name. The text tag therefore wins over the binary one.
+        """
+        self._name_tags()
+        self.assertTrue(admit_paths.hook_file_is_text("Dockerfile.png", b"\x89PNG\r\n\x1a\n\x00"))
+        self.assertEqual(set(admit_paths.rewriting_hook_findings(b"FROM scratch \n", "Dockerfile.png")),
+                         {"trailing-whitespace"})
+        repo, base, head = self._repo({"README": b"base\n"}, {"Dockerfile.png": b"FROM scratch \n"})
+        with self.assertRaises(AdmitError) as caught:
+            admit_paths.check_rewriting_hooks(repo, base, head, ["Dockerfile.png"])
+        self.assertIn("Dockerfile.png: trailing whitespace on line 1 (trailing-whitespace)", str(caught.exception))
 
     def test_the_repository_configuration_is_read(self) -> None:
         config = (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_text(encoding="utf-8")

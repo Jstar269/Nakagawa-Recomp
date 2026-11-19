@@ -693,7 +693,7 @@ contributor's pull request only says where each new file came from
 | `POLICY_DELTA_AUTHORITY_REQUIRED` | The profile changed and no delta named after the change sits beside the trusted ledger, or `origin/main` is stale, so the change is measured from an older base | Fetch `origin`, record step 2 for exactly this change, or fast-forward the authority checkout |
 | `REFRESH_HOSTED_VERDICT_FAIL` | The hosted attestation would fail the refreshed tree | Fix each finding it names |
 | Hosted check: HTTP 404 fetching the policy delta | The private records are not on the private `main` | Step 3 |
-| `ADMIT_HOOKS_WOULD_REWRITE` | A pre-commit hook would change a byte of a path being admitted | Fix it on the pull request branch, then admit |
+| `ADMIT_HOOKS_WOULD_REWRITE` | A pre-commit hook, or Git's line-ending normalization, would change a byte of a path being admitted | Fix it on the pull request branch, then admit |
 | `POLICY_DELTA_CLAIM_MISMATCH` | A new path's class, record, upstream, revision or licence differs from its admission | Restore the claim, or admit the new claim (a new decision) |
 | `POLICY_DELTA_ADDED_BYTES_MISMATCH` | A byte-bound import changed after its admission | Restore the upstream bytes, or admit it again: as a LOCAL DELTA with `--binding claim`, or, for a binary file, a path under `assets/vfpu/` or a path the release manifest waives, bound to its new bytes |
 | `ADMISSION_BINDING_BYTES_REQUIRED` | A binary file, a path under `assets/vfpu/` or a path the release manifest waives was to be admitted bound to its claim only | Admit it bound to its bytes; under `--rekey`, admit it again without `--rekey` |
@@ -716,12 +716,18 @@ or a module it ships. The rules and their exclusions come from the trusted base'
 the hooks it declares apply, with their exclusions (top-level and per hook). CRLF in a text path is refused even
 without `mixed-line-ending`, because Git's text normalization rewrites those bytes; when the base has no
 configuration, all four rules apply with no exclusion. The line-ending rule skips a file that the base's
-`.gitattributes` marks `-text`. A file is typed as pre-commit types it: by its name first (a `.txt` file is text
-whatever its first bytes hold), by its content only when the name says neither. That takes the installed
-`identify` package (a pre-commit dependency); without it, a file whose content looks binary is refused by name
-(`ADMIT_HOOKS_TYPING_UNAVAILABLE`). If a hook would change a byte, it refuses with `ADMIT_HOOKS_WOULD_REWRITE` and
-names each path and rule. Fix them on the pull request branch first, so the next commit cannot reshape what was
-just admitted. A base configuration this reader cannot parse is refused (`ADMIT_HOOKS_CONFIG_INVALID`). Then it
+`.gitattributes` marks `-text`, unless a declared `mixed-line-ending` hook would rewrite it. For the hooks, a file
+is typed as pre-commit types it: by its name first (a `.txt` file is text whatever its first bytes hold), by its
+content only when the name says neither. That takes the installed `identify` package (a pre-commit dependency);
+without it, a file whose content looks binary is refused by name (`ADMIT_HOOKS_TYPING_UNAVAILABLE`). Git does not
+type files by name, so the line-ending rule also applies to a file whose name `identify` calls binary (a `.jar`,
+an `.eps`) when its content is text. If a hook or Git would change a byte, it refuses with
+`ADMIT_HOOKS_WOULD_REWRITE` and names each path and rule. Fix them on the pull request branch first, so the next
+commit cannot reshape what was just admitted. A base configuration this reader cannot parse is refused
+(`ADMIT_HOOKS_CONFIG_INVALID`). The reader takes a hook as declared only from a list item whose first key is `id`
+(`- id: trailing-whitespace`); a configuration that names a byte-rewriting hook's id outside a comment in any other
+form (`id` as a later key, a flow sequence, a quoted key) is refused the same way, never read as not declaring it.
+Then it
 reads each path's committed bytes
 and derives its class with the gate's classifier. An implementation path needs an exact record already in
 `IMPLEMENTATION_PROVENANCE.json`; the command never writes one. It writes and locally
