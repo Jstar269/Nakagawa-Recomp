@@ -5,39 +5,85 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import pathlib
 import sys
 
 try:
     from .parser import analyze_runs, human_table
+    from psp_oracle.protocol import ProtocolError
 except ImportError:
     # Direct invocation
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
     from psp_threading_oracle.parser import analyze_runs, human_table  # type: ignore[no-redef]
+    from psp_oracle.protocol import ProtocolError  # type: ignore[no-redef]
+
+
+def _read_capture(path: pathlib.Path) -> tuple[bytes, str]:
+    """Read a capture's exact bytes, refuse a non-UTF-8 encoding by name, and return them with their digest."""
+
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"cannot read input ({type(exc).__name__})") from exc
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise ValueError("UTF-8 BOM is not supported")
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        raise ValueError("UTF-16 BOM is not supported")
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("input is not valid UTF-8") from exc
+    return raw, hashlib.sha256(raw).hexdigest()
+
+
+def _write_error(output: pathlib.Path | None, text: str) -> None:
+    if output is None:
+        sys.stderr.write(text + "\n")
+    else:
+        output.write_text(text + "\n", encoding="utf-8")
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Analyze PSP threading oracle captures")
     ap.add_argument("inputs", nargs="+", type=pathlib.Path, help="one or more captured result files (one per launch)")
     ap.add_argument("--out", type=pathlib.Path, help="write table to file")
-    ap.add_argument("--provenance", type=str, help="label provenance: synthetic vs hardware (auto per-stream)")
     args = ap.parse_args(argv)
     # Exact file bytes (no newline translation), so a raw_capture_sha256 binds them.
-    captures = [p.read_bytes() for p in args.inputs]
+    captures: list[bytes] = []
+    raw_hashes: list[str] = []
+    for p in args.inputs:
+        try:
+            raw, raw_hash = _read_capture(p)
+        except ValueError as exc:
+            _write_error(args.out, f"MALFORMED input {p.name}: {exc}")
+            return 2
+        captures.append(raw)
+        raw_hashes.append(raw_hash)
     # By default without explicit evidence context, parsing is UNVERIFIED_CAPTURE.
     # Callers with trusted hardware workflow should construct HardwareCaptureContext
     # out-of-band and call analyze_runs(captures, evidence_contexts=...) directly.
-    analysis = analyze_runs(captures)
+    try:
+        analysis = analyze_runs(captures)
+    except ProtocolError as exc:
+        _write_error(args.out, f"MALFORMED capture: {exc}")
+        return 2
     table = human_table(analysis)
     # Provenance per input: no out-of-band context via the CLI, so every input
-    # is UNVERIFIED_CAPTURE (never self-promotes to HARDWARE).
-    for idx, label in enumerate(analysis["evidence_labels"]):
-        table += f"\n# Input {idx}: {label} ({args.inputs[idx]})"
+    # is UNVERIFIED_CAPTURE (never self-promotes to HARDWARE). Only the file name
+    # is printed, never the local path.
+    for idx, (path, label, raw_hash) in enumerate(
+        zip(args.inputs, analysis["evidence_labels"], raw_hashes, strict=True)
+    ):
+        table += f"\n# Input {idx}: {label} ({path.name}; raw_capture_sha256={raw_hash})"
     if args.out:
         args.out.write_text(table, encoding="utf-8")
     else:
         sys.stdout.write(table)
-    # Exit 1 when a launch mixes launch groups or repetitions are uneven;
-    # missing cases and variable results are reported for the harness to judge.
+    # Exit 2 when a required case is missing or an observation varies: the results
+    # are not usable. Exit 1 when a launch mixes launch groups or repetitions are uneven.
+    variable_cases = any(item["variable"] for item in analysis["case_reports"])
+    if not analysis["all_required_observed"] or variable_cases:
+        return 2
     if analysis["launch_group_issues"] or analysis["repetition_issues"]:
         return 1
     return 0
