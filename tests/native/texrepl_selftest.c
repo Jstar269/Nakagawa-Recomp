@@ -1811,16 +1811,18 @@ static void test_png_corpus(void) {
 }
 
 #if defined(_WIN32)
-static int make_dir_link(const char *link, const char *target) {
+static int make_dir_link(const char *link, const char *target, int *err_out) {
     char cmd[1600], full[700], name[700];
+    if (err_out) *err_out = 0;
     if (!GetFullPathNameA(target, sizeof(full), full, NULL)) return 0;
     snprintf(name, sizeof(name), "%s", link);
     for (char *c = name; *c; c++) if (*c == '/') *c = '\\';   /* the link's name only, so "/J" stays */
     snprintf(cmd, sizeof(cmd), "mklink /J \"%s\" \"%s\" >NUL 2>&1", name, full);
     return system(cmd) == 0;
 }
-static int make_file_link(const char *link, const char *target) {
+static int make_file_link(const char *link, const char *target, int *err_out) {
     WCHAR wl[700], wt[700];
+    if (err_out) *err_out = 0;
     if (!MultiByteToWideChar(CP_UTF8, 0, link, -1, wl, 700) || !MultiByteToWideChar(CP_UTF8, 0, target, -1, wt, 700))
         return 0;
     for (WCHAR *c = wl; *c; c++) if (*c == L'/') *c = L'\\';
@@ -1830,18 +1832,29 @@ static int make_file_link(const char *link, const char *target) {
     return CreateSymbolicLinkW(wl, full, 0x2 /* SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE */) != 0;
 }
 #else
-static int make_abs(const char *target, char *out, size_t cap) {
+static int make_abs(const char *target, char *out, size_t cap, int *err_out) {
     char *r = realpath(target, NULL);
-    if (!r) return 0;
+    if (!r) {
+        if (err_out) *err_out = errno;
+        return 0;
+    }
     snprintf(out, cap, "%s", r);
     free(r);
     return 1;
 }
-static int make_dir_link(const char *link, const char *target) {
+static int make_dir_link(const char *link, const char *target, int *err_out) {
     char abs[4096];
-    return make_abs(target, abs, sizeof(abs)) && symlink(abs, link) == 0;
+    if (err_out) *err_out = 0;
+    if (!make_abs(target, abs, sizeof(abs), err_out)) return 0;
+    if (symlink(abs, link) != 0) {
+        if (err_out) *err_out = errno;
+        return 0;
+    }
+    return 1;
 }
-static int make_file_link(const char *link, const char *target) { return make_dir_link(link, target); }
+static int make_file_link(const char *link, const char *target, int *err_out) {
+    return make_dir_link(link, target, err_out);
+}
 #endif
 
 /* Hostile cases this host could not set up, so their checks did not run. main exits 77 for them
@@ -1853,15 +1866,16 @@ static int s_skipped_hostile;
  * symbolic link needs Developer Mode or an elevated shell; a junction needs NTFS): `cases` checks
  * are counted as skipped. On POSIX a build folder takes symbolic links and FIFOs, so there it is a
  * failure. */
-static void hostile_not_set_up(const char *what, int cases) {
+static void hostile_not_set_up(const char *what, int cases, int errnum) {
 #if defined(_WIN32)
+    (void)errnum;
     s_skipped_hostile += cases;
     printf("SKIP %s: it could not be made on this host (a file symbolic link needs Developer Mode or an elevated "
            "shell, a junction needs NTFS); %d hostile case(s) not run\n", what, cases);
 #else
     (void)cases;
     CHECK(0, "%s: it could not be made in the build folder (%s), so its hostile case cannot run; use a BUILD_ROOT "
-             "on a file system with symbolic links and FIFOs", what, strerror(errno));
+             "on a file system with symbolic links and FIFOs", what, strerror(errnum));
 #endif
 }
 
@@ -1884,20 +1898,25 @@ static void test_file_checks(void) {
     nk_platform_mkdir_p(path);
 
     /* Links: a junction (Windows) or symlink to a folder outside, a file link outside and one inside. */
+    int dir_link_err = 0, file_link_err = 0, in_link_err = 0;
     pack_path(path, sizeof(path), "texrepl_pack_files", "jdir");
-    int have_dir_link = nk_platform_dir_exists(path) || make_dir_link(path, outside);
+    int have_dir_link = nk_platform_dir_exists(path) || make_dir_link(path, outside, &dir_link_err);
     pack_path(path, sizeof(path), "texrepl_pack_files", "flink.png");
     pack_path(target, sizeof(target), "texrepl_pack_outside", "out.png");
-    int have_file_link = nk_platform_file_exists(path) || make_file_link(path, target);
+    int have_file_link = nk_platform_file_exists(path) || make_file_link(path, target, &file_link_err);
     pack_path(path, sizeof(path), "texrepl_pack_files", "inlink.png");
     pack_path(target, sizeof(target), "texrepl_pack_files", "in.png");
-    int have_in_link = nk_platform_file_exists(path) || make_file_link(path, target);
-    if (!have_dir_link) hostile_not_set_up("a folder link out of the pack", 1);
-    if (!have_file_link || !have_in_link) hostile_not_set_up("a file link out of the pack and one inside it", 2);
+    int have_in_link = nk_platform_file_exists(path) || make_file_link(path, target, &in_link_err);
+    if (!have_dir_link) hostile_not_set_up("a folder link out of the pack", 1, dir_link_err);
+    if (!have_file_link || !have_in_link) {
+        hostile_not_set_up("a file link out of the pack and one inside it", 2,
+                           !have_file_link ? file_link_err : in_link_err);
+    }
 #if !defined(_WIN32)
     pack_path(path, sizeof(path), "texrepl_pack_files", "fifo.png");
-    int have_fifo = mkfifo(path, 0600) == 0 || errno == EEXIST;
-    if (!have_fifo) hostile_not_set_up("a FIFO named as an image", 1);
+    int fifo_err = mkfifo(path, 0600) == 0 ? 0 : errno;
+    int have_fifo = fifo_err == 0 || fifo_err == EEXIST;
+    if (!have_fifo) hostile_not_set_up("a FIFO named as an image", 1, fifo_err);
 #endif
     pack_path(path, sizeof(path), "texrepl_pack_files", "textures.ini");
     write_text(path, "[options]\nhash = quick\n[hashes]\n"
@@ -1993,7 +2012,8 @@ static void test_file_checks(void) {
     pack_path(path, sizeof(path), "texrepl_pack_fifozip", "textures.ini");
     write_text(path, "[options]\nhash = quick\n");
     pack_path(path, sizeof(path), "texrepl_pack_fifozip", "textures.zip");
-    if (mkfifo(path, 0600) == 0 || errno == EEXIST) {
+    int fifozip_err = mkfifo(path, 0600) == 0 ? 0 : errno;
+    if (fifozip_err == 0 || fifozip_err == EEXIST) {
         err[0] = '\0';
         p = nk_texrepl_open(fifo_dir, 0, err, sizeof(err));
         CHECK(p != NULL && !nk_texrepl_is_zip(p), "FIFO textures.zip: '%s'", err);
@@ -2003,7 +2023,7 @@ static void test_file_checks(void) {
         CHECK(p == NULL && err[0], "FIFO ZIP pack opened");
         if (p) nk_texrepl_close(p);
     } else {
-        hostile_not_set_up("a FIFO named textures.zip", 2);
+        hostile_not_set_up("a FIFO named textures.zip", 2, fifozip_err);
     }
 #endif
 
