@@ -892,7 +892,7 @@ static inline __attribute__((noinline)) uint32_t sr_r32_slow(uint32_t a) {
 static inline __attribute__((noinline)) void sr_w8_pc_slow(uint32_t a, uint8_t v, uint32_t pc) {
     if (__builtin_expect(g_sr_store_context_pc != 0u, 0)) sr_log_store_context(a, v, 1u, pc);
     if (__builtin_expect(g_sr_last_writer_enabled, 0)) sr_note_mem_write(a, 1u, v, pc);
-    if (sr_check_mem_watch(a, v, 1, pc)) sr_log_mem_watch_context(pc);
+    if (sr_check_mem_watch_width(a, 1u, v, 1, pc)) sr_log_mem_watch_context(pc);
     if (__builtin_expect(g_sr_heap_watch, 0)) sr_heap_note_write(a, 1u, v, pc);
     if (sr_inrange(a)) {
         if (sr_vram_cpu_aperture(a)) {
@@ -909,7 +909,7 @@ static inline __attribute__((noinline)) void sr_w8_pc_slow(uint32_t a, uint8_t v
 static inline __attribute__((noinline)) void sr_w16_pc_slow(uint32_t a, uint16_t v, uint32_t pc) {
     if (__builtin_expect(g_sr_store_context_pc != 0u, 0)) sr_log_store_context(a, v, 2u, pc);
     if (__builtin_expect(g_sr_last_writer_enabled, 0)) sr_note_mem_write(a, 2u, v, pc);
-    if (sr_check_mem_watch(a, v, 1, pc)) sr_log_mem_watch_context(pc);
+    if (sr_check_mem_watch_width(a, 2u, v, 1, pc)) sr_log_mem_watch_context(pc);
     if (__builtin_expect(g_sr_heap_watch, 0)) sr_heap_note_write(a, 2u, v, pc);
     if (sr_inrange_n(a, 2)) {
         if (sr_vram_cpu_span_touches(a, 2u)) {
@@ -927,7 +927,7 @@ static inline __attribute__((noinline)) void sr_w16_pc_slow(uint32_t a, uint16_t
 static inline __attribute__((noinline)) void sr_w32_pc_slow(uint32_t a, uint32_t v, uint32_t pc) {
     if (__builtin_expect(g_sr_store_context_pc != 0u, 0)) sr_log_store_context(a, v, 4u, pc);
     if (__builtin_expect(g_sr_last_writer_enabled, 0)) sr_note_mem_write(a, 4u, v, pc);
-    if (sr_check_mem_watch(a, v, 1, pc)) sr_log_mem_watch_context(pc);
+    if (sr_check_mem_watch_width(a, 4u, v, 1, pc)) sr_log_mem_watch_context(pc);
     if (__builtin_expect(g_sr_heap_watch, 0)) sr_heap_note_write(a, 4u, v, pc);
     if (sr_inrange_n(a, 4)) {
         if (sr_vram_cpu_span_touches(a, 4u)) {
@@ -1248,10 +1248,14 @@ float sr_vfpu_exp2(float x);
 
 /* Single-instruction VFPU interpreter (src/rt/vfpu_interp.c). Returns SR_VFPU_COMPUTE for a
  * value-producing op (compare v[]/f[] to the reference trace), SR_VFPU_STATE for a prefix,
- * control, or store op, or SR_VFPU_OTHER for an instruction it cannot execute. */
+ * control, or store op, SR_VFPU_OTHER for an instruction it cannot execute, or
+ * SR_VFPU_ACCESS_REFUSED for a known VFPU load or store whose guest span is not wholly
+ * readable (loads) or writable (stores): nothing was read or written and no prefix was
+ * consumed. A caller stops a refused access by that name, never as a missing encoding. */
 #define SR_VFPU_OTHER   0
 #define SR_VFPU_COMPUTE 1
 #define SR_VFPU_STATE   2
+#define SR_VFPU_ACCESS_REFUSED 3
 int sr_vfpu_interp(CpuState *s, uint32_t op);
 
 /* Unverified VFPU forms in the run log (#1877; patterns generated into hle_evidence.h from
@@ -1436,6 +1440,9 @@ static inline const char *sr_guest_symbol_format(const SrGuestSymbol *sym, uint3
 void     sr_exec_span_reset(void);
 int      sr_exec_span_register(uint32_t start, uint32_t end);
 int      sr_exec_span_owns_fetch(uint32_t pc);
+/* The static spans only, with no runtime-module authority query: for a caller that
+ * has already found pc outside every bound module image. */
+int      sr_exec_span_owns_static_fetch(uint32_t pc);
 /* Whether any byte of [addr, addr + size) is translated code, a bound module's included: what a
  * writer of guest memory asks before it writes (src/rt/cheats.h). */
 int      sr_exec_span_overlaps(uint32_t addr, uint32_t size);
@@ -2609,12 +2616,6 @@ int sched_fast_forward_on(void);
 uint32_t sched_fast_forward_speed(void);
 /* How many times fast forward has started in this run (0 before the first). */
 uint32_t sched_fast_forward_epoch(void);
-/* f_00065c60 field-writer intercept: the container walker reads count from
- * r18+0x04 but f_0005a500's control block init puts count at r18+0x00 and
- * cursor at r18+0x04.  Since both functions are called directly (not via
- * dispatch()), the only hook point is SR_YIELD at function entry.  Copy
- * count from +0x00 to +0x04 before the walker body executes.  Idempotent:
- * if +0x04 already holds count, writing it again is harmless. */
 extern int g_prof_enabled;
 void sr_profile_init(void);
 void sr_profile_dump(void);
@@ -2635,6 +2636,19 @@ uint64_t sr_profile_test_lookup_drops(void);
 #else
 #define SR_VERIFY_NOTE_YIELD() ((void)0)
 #endif
+
+/* The preemption point alone, with no SR_PROFILE block count: for a site whose pc is not a
+ * block entry, such as the dispatch core, where s->pc is the last return or yield point and
+ * the entered body's own entry SR_YIELD counts the block. */
+#define SR_YIELD_UNPROFILED(s, target_pc) do { \
+    if (__builtin_expect(sr_sched_on, 1)) { \
+        if (atomic_fetch_sub_explicit(&sr_timeslice, 1, memory_order_relaxed) <= 1) { \
+            (s)->pc = (target_pc); \
+            SR_VERIFY_NOTE_YIELD(); \
+            sr_yield(s); \
+        } \
+    } \
+} while (0)
 
 #define SR_YIELD(s, target_pc) do { \
     if (__builtin_expect(g_prof_enabled, 0)) { \
