@@ -32,6 +32,7 @@ import os
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -144,6 +145,23 @@ def _reproducible_flags(compiler: str) -> tuple[list[str], list[str]]:
     )
 
 
+def _coff_timestamp(data: bytes) -> int:
+    """Return COFF ImageFileHeader.TimeDateStamp (little-endian uint32 at offset 4)."""
+    if len(data) < 8:
+        raise AssertionError(f"object file too short for COFF header ({len(data)} bytes)")
+    return struct.unpack_from("<I", data, 4)[0]
+
+
+def _pe_timestamp(data: bytes) -> int:
+    """Return PE ImageFileHeader.TimeDateStamp from a Windows executable."""
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        raise AssertionError("linked output is not a valid PE image (missing MZ header)")
+    pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+    if len(data) < pe_offset + 12 or data[pe_offset:pe_offset + 4] != b"PE\x00\x00":
+        raise AssertionError("linked output is missing the PE signature")
+    return struct.unpack_from("<I", data, pe_offset + 8)[0]
+
+
 class RecorderObjectTests(unittest.TestCase):
     """Two compiles of identical inputs must produce identical objects."""
 
@@ -175,8 +193,45 @@ class RecorderObjectTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def _link_small_executable(
+        self,
+        output: Path,
+        *,
+        source_date_epoch: int,
+        compile_flags: list[str],
+        link_flags: list[str],
+    ) -> None:
+        env = os.environ.copy()
+        env["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
+        result = subprocess.run(
+            [
+                COMPILER,
+                "-std=c11",
+                "-O2",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-I",
+                str(SRC_RT),
+                *compile_flags,
+                *link_flags,
+                "tests/native/strbuf_selftest.c",
+                "-o",
+                str(output),
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=COMPILE_TIMEOUT_S,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @requires_compiler
     def test_two_compilations_produce_identical_objects(self):
+        if not _find_make():
+            self.skipTest("GNU Make is not on PATH")
         compile_flags, _ = _reproducible_flags(COMPILER)
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -194,6 +249,52 @@ class RecorderObjectTests(unittest.TestCase):
                 "two compiles of identical inputs produced different objects; "
                 "flight_recorder.c still embeds the compile clock",
             )
+            if os.name == "nt":
+                self.assertEqual(
+                    _coff_timestamp(left),
+                    0,
+                    "COFF object header still carries a non-zero wall-clock TimeDateStamp",
+                )
+
+    @requires_compiler
+    def test_two_links_produce_identical_executables(self):
+        if not _find_make():
+            self.skipTest("GNU Make is not on PATH")
+        compile_flags, link_flags = _reproducible_flags(COMPILER)
+        suffix = ".exe" if os.name == "nt" else ""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            first_dir = tmp_path / "first"
+            second_dir = tmp_path / "second"
+            first_dir.mkdir()
+            second_dir.mkdir()
+            first = first_dir / f"strbuf_selftest{suffix}"
+            second = second_dir / f"strbuf_selftest{suffix}"
+            self._link_small_executable(
+                first,
+                source_date_epoch=1_700_000_000,
+                compile_flags=compile_flags,
+                link_flags=link_flags,
+            )
+            self._link_small_executable(
+                second,
+                source_date_epoch=1_700_000_001,
+                compile_flags=compile_flags,
+                link_flags=link_flags,
+            )
+            left = first.read_bytes()
+            right = second.read_bytes()
+            self.assertEqual(
+                hashlib.sha256(left).hexdigest(),
+                hashlib.sha256(right).hexdigest(),
+                "two links of identical inputs produced different executables",
+            )
+            if os.name == "nt":
+                self.assertEqual(
+                    _pe_timestamp(left),
+                    0,
+                    "PE image header still carries a non-zero link TimeDateStamp",
+                )
 
 
 @requires_compiler
@@ -1147,6 +1248,97 @@ class MakeIdentityResolutionTests(unittest.TestCase):
         self.assertIn("-DSR_BUILD_ID=", compile_line)
         self.assertIn(FAKE_COMMIT, compile_line)
         self.assertIn(f"-DSR_SOURCE_DATE_EPOCH={FAKE_EPOCH}", compile_line)
+
+
+class ReproducibleFlagsMakefileTests(unittest.TestCase):
+    """Makefile emits COFF/PE determinism flags only for the targets and compilers that need them."""
+
+    def test_makefile_wires_reproducible_flags_for_windows_and_clang_only(self):
+        makefile = read_makefile(ROOT)
+        clang_detect = (
+            'RECOMP_CC_IS_CLANG := $(findstring clang version,$(shell "$(CC)" --version 2>&1))'
+        )
+        self.assertEqual(makefile.count(clang_detect), 1)
+        win_start = makefile.index("ifeq ($(NK_TARGET_OS),windows)\nVULKAN_LIB_NAME")
+        win_else = makefile.index("\nelse\n", win_start)
+        win_end = makefile.index("\nendif\n", win_else)
+        win_block = makefile[win_start:win_else]
+        non_win_block = makefile[win_else:win_end]
+
+        self.assertIn(
+            "REPRODUCIBLE_COMPILE_FLAG := $(if $(RECOMP_CC_IS_CLANG),"
+            "-mno-incremental-linker-compatible,)",
+            win_block,
+        )
+        self.assertIn("REPRODUCIBLE_LINK_FLAG := -Wl,--no-insert-timestamp", win_block)
+        self.assertRegex(non_win_block, r"(?m)^REPRODUCIBLE_COMPILE_FLAG :=$")
+        self.assertRegex(non_win_block, r"(?m)^REPRODUCIBLE_LINK_FLAG :=$")
+
+        for var in ("CFLAGS", "PORTABLE_CORE_CFLAGS", "GE_CFLAGS", "RECOMP_FLAGS"):
+            with self.subTest(variable=var):
+                self.assertIn(f"override {var} += $(REPRODUCIBLE_COMPILE_FLAG)", makefile)
+        self.assertIn("LIBCHDR_CFLAGS += $(REPRODUCIBLE_COMPILE_FLAG)", makefile)
+        self.assertIn("override LDFLAGS += $(REPRODUCIBLE_LINK_FLAG)", makefile)
+        for target in ("strbuf-selftest:", "xr-selftest:"):
+            with self.subTest(target=target):
+                start = makefile.index(f"\n{target}\n")
+                recipe = makefile[start:makefile.index("\n\n", start)]
+                self.assertIn("$(REPRODUCIBLE_COMPILE_FLAG)", recipe)
+                self.assertIn("$(REPRODUCIBLE_LINK_FLAG)", recipe)
+
+    def test_compiler_info_emits_determinism_flags_only_for_matching_compiler_and_target(self):
+        if not _find_make():
+            self.skipTest("GNU Make is not on PATH")
+        cases = (
+            (
+                "windows-clang",
+                ("OS=Windows_NT", "RECOMP_CC_IS_CLANG=clang version"),
+                "-mno-incremental-linker-compatible",
+                "-Wl,--no-insert-timestamp",
+            ),
+            (
+                "windows-gcc",
+                ("OS=Windows_NT", "RECOMP_CC_IS_CLANG="),
+                "",
+                "-Wl,--no-insert-timestamp",
+            ),
+            (
+                "posix-clang",
+                ("OS=", "RECOMP_CC_IS_CLANG=clang version"),
+                "",
+                "",
+            ),
+            (
+                "posix-gcc",
+                ("OS=", "RECOMP_CC_IS_CLANG="),
+                "",
+                "",
+            ),
+            (
+                "android-clang",
+                ("OS=Windows_NT", "NK_TARGET=android", "RECOMP_CC_IS_CLANG=clang version"),
+                "",
+                "",
+            ),
+        )
+        for label, overrides, expected_compile, expected_link in cases:
+            with self.subTest(case=label):
+                info = _compiler_info(*overrides)
+                self.assertEqual(info.get("REPRODUCIBLE_COMPILE_FLAG", ""), expected_compile)
+                self.assertEqual(info.get("REPRODUCIBLE_LINK_FLAG", ""), expected_link)
+                for var in ("CFLAGS", "GE_CFLAGS", "RECOMP_FLAGS"):
+                    words = shlex.split(info.get(var, ""))
+                    if expected_compile:
+                        self.assertIn(expected_compile, words, f"{label}: {var}")
+                    else:
+                        self.assertNotIn(
+                            "-mno-incremental-linker-compatible", words, f"{label}: {var}"
+                        )
+                ld_words = shlex.split(info.get("LDFLAGS", ""))
+                if expected_link:
+                    self.assertIn(expected_link, ld_words, f"{label}: LDFLAGS")
+                else:
+                    self.assertNotIn("-Wl,--no-insert-timestamp", ld_words, f"{label}: LDFLAGS")
 
 
 if __name__ == "__main__":
