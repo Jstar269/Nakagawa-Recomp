@@ -870,6 +870,18 @@ read again before each case's soft reset, before each launch, and before every
 PSPLink `reset`. A refusal stops with `HARDWARE_LOCK_REFUSED` before the next
 PSP action. In plan mode it keeps the checkpoint at the unlaunched case.
 
+Every process that writes the lock file, such as the matrix noting a launch in
+`probes_run`, the lock's acquisition and release, a lease, or a device-state
+attestation, goes through `update_hardware_lock` in
+`tools/psp_oracle/run_psplink.py`. It takes an exclusive OS lock on the sidecar
+file `HARDWARE_LOCK.json.writer`, re-reads the lock, applies the caller's change
+to that fresh read and replaces the file atomically, so no writer loses a field
+another wrote. A writer that cannot take the sidecar lock within its bound
+(10 seconds by default) stops with `HARDWARE_LOCK_WRITER_TIMEOUT` and writes
+nothing. The OS releases the sidecar lock when its holder exits, so a crashed
+writer blocks nobody; the sidecar file itself stays and is never deleted.
+Readers take no lock and see either the old file or the new one.
+
 After an interrupted case, the checkpoint records its attested boot number.
 The campaign resumes automatically only when the held session provides a fresh
 qualified device-state record with a strictly higher boot number. The former

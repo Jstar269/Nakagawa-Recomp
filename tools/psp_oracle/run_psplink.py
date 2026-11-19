@@ -11,9 +11,11 @@ process exit means that a probe passed.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import errno
 import hashlib
 from functools import lru_cache
 import math
@@ -30,6 +32,11 @@ import threading
 import time
 import traceback
 from typing import Any, Callable, TypeGuard, cast
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 _PACKAGE_PARENT = str(Path(__file__).resolve().parents[1])
 if _PACKAGE_PARENT not in sys.path:
@@ -3279,6 +3286,42 @@ def _write_campaign_json(path: Path, value: dict[str, object]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+# Every writer of the hardware lock file takes an exclusive OS lock on a sidecar file next to it, re-reads the
+# lock under that OS lock, applies its change and replaces the file atomically (update_hardware_lock). The
+# sidecar is never the lock file itself, which each write replaces, and it is never deleted: deleting it would
+# let two writers lock two different files. A leftover sidecar is harmless, because only the OS lock on it
+# matters and the OS drops that lock when its holder exits, so a writer that dies holding it does not block the
+# next one. Readers take no lock: each replace is atomic, so a reader sees the whole old file or the whole new
+# one. On Windows a reader that has the file open makes the writer's replace fail, and a reader that opens it
+# during the replace fails, both with a sharing violation (PermissionError) that lasts only as long as one read
+# or one rename. Both sides retry that error alone, for at most HARDWARE_LOCK_SHARING_RETRY_SECONDS, then
+# report it.
+HARDWARE_LOCK_WRITER_SUFFIX = ".writer"
+HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS = 10.0
+HARDWARE_LOCK_SHARING_RETRY_SECONDS = 1.0
+_HARDWARE_LOCK_WRITER_POLL_SECONDS = 0.002
+
+
+def _retry_windows_sharing_violation(action: Callable[[], Any]) -> Any:
+    """Run ``action``, retrying a Windows sharing violation for a bounded time; other errors propagate."""
+
+    deadline = time.monotonic() + HARDWARE_LOCK_SHARING_RETRY_SECONDS
+    while True:
+        try:
+            return action()
+        except PermissionError:
+            if sys.platform != "win32" or time.monotonic() >= deadline:
+                raise
+            time.sleep(_HARDWARE_LOCK_WRITER_POLL_SECONDS)
+
+
+def read_hardware_lock_file(lock_path: Path) -> object:
+    """Parse the hardware lock file without taking the writer lock; read errors propagate."""
+
+    path = Path(lock_path)
+    return json.loads(_retry_windows_sharing_violation(lambda: path.read_text(encoding="utf-8")))
+
+
 def _hardware_lock_holder_problem(lock: object, session_id: str) -> str | None:
     if not isinstance(lock, dict) or lock.get("state") != "HELD":
         return "HARDWARE_LOCK_NOT_HELD"
@@ -3294,7 +3337,7 @@ def _read_hardware_lock(
 ) -> tuple[bool, str, dict[str, object] | None]:
     path = HARDWARE_LOCK_PATH if lock_path is None else Path(lock_path)
     try:
-        lock = json.loads(path.read_text(encoding="utf-8"))
+        lock = read_hardware_lock_file(path)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return False, f"HARDWARE_LOCK_UNAVAILABLE:{type(exc).__name__}", None
     problem = _hardware_lock_holder_problem(lock, session_id)
@@ -3335,6 +3378,113 @@ def require_hardware_lock(session_id: object) -> dict[str, object]:
         raise HardwareLockError(status)
     assert device_state is not None
     return device_state
+
+
+def hardware_lock_writer_path(lock_path: Path) -> Path:
+    """The sidecar file whose OS lock serialises every writer of ``lock_path``."""
+
+    path = Path(lock_path)
+    return path.with_name(path.name + HARDWARE_LOCK_WRITER_SUFFIX)
+
+
+def _try_lock_writer_file(fd: int) -> bool:
+    """Take the exclusive lock on the sidecar without waiting; False when another writer holds it."""
+
+    if sys.platform == "win32":
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EDEADLOCK):
+                return False
+            raise
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _unlock_writer_file(fd: int) -> None:
+    if sys.platform == "win32":
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def hardware_lock_writer(
+    lock_path: Path, *, timeout_seconds: float | None = None
+) -> Iterator[None]:
+    """Hold the exclusive cross-process writer lock for ``lock_path`` for the ``with`` body.
+
+    The wait is bounded: a writer that cannot take the lock within ``timeout_seconds`` (default
+    ``HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS``) stops with
+    ``HardwareLockError("HARDWARE_LOCK_WRITER_TIMEOUT")`` and writes nothing. The lock is not fair: a
+    waiter polls, so a process that writes back to back can hold it off until that bound. Lock writers
+    update a few times per launch, far below that.
+    """
+
+    if timeout_seconds is None:
+        timeout_seconds = HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds < 0
+    ):
+        raise ValueError("timeout_seconds must be a finite non-negative number")
+    fd = os.open(hardware_lock_writer_path(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + timeout_seconds
+        while not _try_lock_writer_file(fd):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HardwareLockError("HARDWARE_LOCK_WRITER_TIMEOUT")
+            time.sleep(min(_HARDWARE_LOCK_WRITER_POLL_SECONDS, remaining))
+        try:
+            yield
+        finally:
+            _unlock_writer_file(fd)
+    finally:
+        os.close(fd)
+
+
+def update_hardware_lock(
+    lock_path: Path,
+    mutate: Callable[[dict[str, object]], None],
+    *,
+    timeout_seconds: float | None = None,
+    allow_missing: bool = False,
+) -> dict[str, object]:
+    """Apply ``mutate`` to a fresh read of the hardware lock and replace the file, as one atomic update.
+
+    The one way to write the hardware lock. Under :func:`hardware_lock_writer` it reads the lock file,
+    passes the object to ``mutate`` to change in place, and writes it back with the atomic replace of
+    :func:`_write_campaign_json`. An exception from ``mutate`` writes nothing and propagates. An unreadable
+    lock stops with ``HardwareLockError("HARDWARE_LOCK_UNAVAILABLE:<reason>")``; with ``allow_missing``
+    a missing file starts from an empty object. Returns the object written.
+    """
+
+    path = Path(lock_path)
+    with hardware_lock_writer(path, timeout_seconds=timeout_seconds):
+        loaded: object
+        try:
+            loaded = read_hardware_lock_file(path)
+        except FileNotFoundError as exc:
+            if not allow_missing:
+                raise HardwareLockError(f"HARDWARE_LOCK_UNAVAILABLE:{type(exc).__name__}") from exc
+            loaded = {}
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise HardwareLockError(f"HARDWARE_LOCK_UNAVAILABLE:{type(exc).__name__}") from exc
+        if not isinstance(loaded, dict):
+            raise HardwareLockError("HARDWARE_LOCK_UNAVAILABLE:not-an-object")
+        lock: dict[str, object] = loaded
+        mutate(lock)
+        _retry_windows_sharing_violation(lambda: _write_campaign_json(path, lock))
+    return lock
 
 
 def _checkpoint_waiting(
