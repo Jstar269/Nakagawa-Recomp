@@ -7,18 +7,24 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import types
 import unittest
 from unittest import mock
 
 from tools.format_portability_check import (
+    ToolchainUnavailable,
     check_format_portability,
     host_long_width,
     main,
     narrow_long_flags,
     resolve_compiler,
+    target_macros,
+    x86_float_math_flags,
 )
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestFormatPortabilityCheck(unittest.TestCase):
@@ -131,6 +137,97 @@ class TestFormatPortabilityCheck(unittest.TestCase):
         self.assertEqual(narrow_long_flags(8), ["-m32"])
         self.assertEqual(narrow_long_flags(4), [])
         self.assertIn(host_long_width(resolve_compiler("gcc")), (4, 8))
+
+    def _check_command(self, default_macros: list[str], m32_macros: list[str]) -> list[str]:
+        """Run the check on one file with a scripted compiler; return that file's compile command.
+
+        The scripted compiler answers the predefined-macro probe with m32_macros when -m32 is on
+        the command line and default_macros otherwise, and accepts every compile.
+        """
+        calls: list[list[str]] = []
+
+        def scripted(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+            calls.append(list(args))
+            stdout = ""
+            if "-dM" in args:
+                macros = m32_macros if "-m32" in args else default_macros
+                stdout = "".join(f"#define {macro}\n" for macro in macros)
+            return subprocess.CompletedProcess(args, 0, stdout, "")
+
+        source = self.test_root / "any.c"
+        source.write_text("int f(void) { return 0; }\n", encoding="utf-8")
+        with mock.patch("tools.format_portability_check.run_compiler", scripted):
+            failed, errors = check_format_portability(files=[str(source)], shim_dir=self.shim_dir)
+        self.assertEqual(failed, 0, "\n".join(errors))
+        commands = [call for call in calls if "-Werror=format" in call]
+        self.assertEqual(len(commands), 1, calls)
+        return commands[0]
+
+    def test_32_bit_x86_check_build_uses_sse_float_math(self) -> None:
+        """The -m32 build of an LP64 x86 host is one the core supports: SSE2 float arithmetic.
+
+        src/rt/fp_convert.h refuses x87 float math, GCC's 32-bit x86 default. Failing before: the
+        check compiled the core with -m32 alone, so every file that reaches fp_convert.h stopped at
+        the header's #error and the hosted check failed for a reason that is not a format error.
+        """
+        lp64 = ["__SIZEOF_LONG__ 8", "__x86_64__ 1", "__SSE2__ 1", "__SSE_MATH__ 1"]
+        for m32_macros in (["__SIZEOF_LONG__ 4", "__i386__ 1"],
+                           ["__SIZEOF_LONG__ 4", "__i386__ 1", "__SSE2__ 1"]):
+            command = self._check_command(lp64, m32_macros)
+            self.assertIn("-m32", command)
+            self.assertIn("-msse2", command)
+            self.assertIn("-mfpmath=sse", command)
+        # A native 32-bit x86 compiler needs no -m32 and the same float-math flags.
+        command = self._check_command(["__SIZEOF_LONG__ 4", "__i386__ 1"], [])
+        self.assertNotIn("-m32", command)
+        self.assertIn("-msse2", command)
+        self.assertIn("-mfpmath=sse", command)
+
+    def test_other_targets_get_no_float_math_flags(self) -> None:
+        """Only x87 float math on 32-bit x86 is corrected; no other target is given x86 flags.
+
+        x86-64 (LLP64 Windows included) and a 32-bit x86 compiler already set for SSE math need nothing, and
+        a host with no supported FP backend (32-bit ARM) must still reach the header's refusal.
+        """
+        for macros in (["__SIZEOF_LONG__ 4", "__x86_64__ 1", "__SSE2__ 1", "__SSE_MATH__ 1"],
+                       ["__SIZEOF_LONG__ 4", "__i386__ 1", "__SSE2__ 1", "__SSE_MATH__ 1"],
+                       ["__SIZEOF_LONG__ 4", "__arm__ 1"]):
+            command = self._check_command(macros, [])
+            self.assertFalse(
+                [flag for flag in command if flag in ("-m32", "-msse2") or flag.startswith("-mfpmath")],
+                command,
+            )
+
+    def test_float_math_flags_satisfy_the_core_fp_guard(self) -> None:
+        """With a compiler that can target 32-bit x86, the chosen flags build fp_convert.h.
+
+        The same translation unit without them still stops at the header's #error: the check does
+        not switch the guard off, it compiles a configuration the guard admits.
+        """
+        compiler = resolve_compiler("gcc")
+        try:
+            macros = target_macros(compiler, ["-m32"])
+        except ToolchainUnavailable as exc:
+            self.skipTest(f"no compiler that targets 32-bit x86: {exc}")
+        base = [compiler, "-m32", "-fsyntax-only", "-std=c11", "-I", str(REPO_ROOT / "src" / "rt")]
+        libc_probe = self.test_root / "libc_probe.c"
+        libc_probe.write_text("#include <stdint.h>\n#include <string.h>\n", encoding="utf-8")
+        if "__i386__" not in macros or subprocess.run(
+                [*base, str(libc_probe)], capture_output=True, text=True).returncode != 0:
+            self.skipTest("the compiler cannot build 32-bit x86 with its C library headers")
+        source = self.test_root / "fp_guard.c"
+        source.write_text(
+            '#include <stdint.h>\n#include <string.h>\n#include "fp_convert.h"\n'
+            "float f(float a, float b, uint32_t c) { return sr_fpu_add_s(a, b, c); }\n",
+            encoding="utf-8",
+        )
+        flags = x86_float_math_flags(macros)
+        built = subprocess.run([*base, *flags, str(source)], capture_output=True, text=True)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        if flags:
+            refused = subprocess.run([*base, str(source)], capture_output=True, text=True)
+            self.assertNotEqual(refused.returncode, 0, "x87 float math built the MXCSR window")
+            self.assertIn("__SSE_MATH__", refused.stderr)
 
     def test_compiler_resolution_honors_msys_path(self) -> None:
         ucrt_bin = self.test_root / "custom-ucrt64" / "bin"

@@ -24,6 +24,12 @@ host the check therefore compiles with -m32, which needs only the 32-bit C libra
 headers (libc6-dev-i386 on Debian/Ubuntu; gcc-multilib also provides them) because
 nothing is linked, and fails closed with exit status 2 when that is unavailable,
 rather than passing vacuously.
+
+A 32-bit x86 check build also has to be a build the core supports. GCC's default
+there runs float arithmetic on the x87 unit, which src/rt/fp_convert.h refuses with
+#error (its MXCSR window controls only SSE arithmetic), so the check passes the flags
+a real 32-bit x86 build of the core needs, -msse2 -mfpmath=sse (x86_float_math_flags).
+The guard stays on: a host with no supported FP backend still fails the check there.
 """
 
 from __future__ import annotations
@@ -344,6 +350,30 @@ def narrow_long_flags(long_width: int) -> list[str]:
     return ["-m32"] if long_width == 8 else []
 
 
+def target_macros(compiler: str, flags: list[str]) -> set[str]:
+    """Names of the macros the compiler predefines for the target the given flags select."""
+    proc = run_compiler([compiler, *flags, "-dM", "-E", "-x", "c", "-"], input="")
+    if proc.returncode != 0:
+        raise ToolchainUnavailable(
+            f"{compiler} did not report its predefined macros with {' '.join(flags) or 'no flags'}"
+        )
+    return set(re.findall(r"^#define (\w+)", proc.stdout, re.M))
+
+
+def x86_float_math_flags(macros: set[str]) -> list[str]:
+    """Flags that make a 32-bit x86 check build one the core supports: SSE2 float arithmetic.
+
+    src/rt/fp_convert.h refuses an x86 build whose float arithmetic runs on the x87 unit (no
+    __SSE_MATH__), and x87 is GCC's default for 32-bit x86. A real 32-bit x86 build of the core
+    passes these flags, so the check build does too. x86-64 has SSE float arithmetic by default
+    and needs nothing; another architecture gets nothing either, so the header's own refusal
+    of a host without a supported FP backend still shows.
+    """
+    if "__i386__" in macros and "__SSE_MATH__" not in macros:
+        return ["-msse2", "-mfpmath=sse"]
+    return []
+
+
 def kernel_header_fallback(compiler: str, flags: list[str]) -> list[str]:
     """Under -m32 on Linux, let <asm/...> resolve through the default target's multiarch directory.
 
@@ -424,6 +454,7 @@ def check_format_portability(
         width_flags = narrow_long_flags(host_long_width(resolved_cc))
         width_flags += kernel_header_fallback(resolved_cc, width_flags)
         verify_narrow_long(resolved_cc, width_flags, shim_dir)
+    target_flags = width_flags + x86_float_math_flags(target_macros(resolved_cc, width_flags))
     failed_count = 0
     errors: list[str] = []
 
@@ -439,7 +470,7 @@ def check_format_portability(
 
         cmd = [
             resolved_cc,
-            *width_flags,
+            *target_flags,
             "-fsyntax-only",
             "-Wformat",
             "-Werror=format",
