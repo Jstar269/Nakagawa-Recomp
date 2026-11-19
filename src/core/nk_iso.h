@@ -8,8 +8,12 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#ifndef NK_ISO_NO_PLAYER_EXTRAS
+#include "nk_shared_helpers.h"
+/* NkResult: the shared reader returns it, so the runtime's build (NK_ISO_NO_PLAYER_EXTRAS)
+ * needs it too. nk_types.h includes only standard headers. */
 #include "nk_types.h"
+
+#ifndef NK_ISO_NO_PLAYER_EXTRAS
 #include "generated/nk_title_catalog.h"
 #endif
 
@@ -58,7 +62,8 @@ void nk_iso_reader_close(NkIsoReader *reader);
 
 /* Resolve a path (e.g. "PSP_GAME/PARAM.SFO") to its extent LBA and size.
  * If out_is_dir is non-NULL, sets whether it is a directory.
- * Returns 0 on success, -1 if not found.
+ * Returns 0 on success, -1 if not found or if the path is longer than the
+ * reader resolves (it is refused, never shortened).
  */
 int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lba, uint32_t *out_size, bool *out_is_dir);
 
@@ -68,7 +73,9 @@ int nk_iso_reader_lookup(NkIsoReader *reader, const char *path, uint32_t *out_lb
 int nk_iso_reader_read(NkIsoReader *reader, uint32_t lba, uint64_t offset, void *dst, uint32_t bytes);
 
 /* Return the directory entry at 0-based index in directory at dir_path.
- * Returns 1 on success, 0 on end of directory, -1 on invalid / not a directory.
+ * Returns 1 on success, 0 on end of directory, -1 on invalid / not a directory,
+ * including a record up to `index` whose both-endian fields disagree or whose
+ * extent leaves the image.
  */
 int nk_iso_reader_list(NkIsoReader *reader, const char *dir_path, uint32_t index, NkIsoDirEntry *out_entry);
 
@@ -159,17 +166,8 @@ typedef struct {
     char identity_sha256[65];
 } NkIsoMetadata;
 
-/* SHA-256 (FIPS 180-4), shared by the disc identity below and the package and
- * profile identities in nk_title_manifest.c. */
-typedef struct {
-    uint32_t state[8];
-    uint64_t bit_count;
-    uint8_t block[64];
-    size_t block_len;
-} NkSha256;
-void nk_sha256_init(NkSha256 *ctx);
-void nk_sha256_update(NkSha256 *ctx, const uint8_t *data, size_t len);
-void nk_sha256_finish(NkSha256 *ctx, uint8_t digest[32]);
+/* SHA-256 (NkSha256, nk_sha256_*), used by the disc identity below and the package and
+ * profile identities in nk_title_manifest.c, is declared in nk_shared_helpers.h. */
 
 /* Library keys of non-retail discs start with this letter. Retail disc IDs
  * start with U or N and the project's synthetic IDs with TEST, so a key that
@@ -208,6 +206,12 @@ NkResult nk_iso_classify_executables(const char *iso_path,
 /* Extract a file from an ISO9660 disc image to the host filesystem.
  * disc_rel_path: path inside ISO (e.g. "PSP_GAME/PARAM.SFO" or "PSP_GAME/ICON0.PNG")
  * host_dest_path: destination file path on host
+ * The path resolves as nk_iso_reader_lookup resolves it. A path that names a
+ * directory, or that is not on the disc, is NK_ERROR_FILE_NOT_FOUND; a damaged
+ * image or directory is NK_ERROR_INVALID_ISO; a path refused before the disc is
+ * read (too long, or a ".." component) is NK_ERROR_GENERIC. A zero-length file
+ * is extracted as an empty file. A read, write or close failure is NK_ERROR_IO
+ * and leaves no file at host_dest_path.
  */
 NkResult nk_iso_extract_file(const char *iso_path, const char *disc_rel_path, const char *host_dest_path);
 

@@ -10,13 +10,17 @@
  * that .iso exactly as it reads a user's own .iso. Nothing is decompressed
  * into guest or runtime memory: this is an import step only.
  *
- *   <data>/discs/<DISC_ID>/<DISC_ID>.<cso|zso|chd>.iso   the expanded image
- *   <data>/discs/<DISC_ID>/<DISC_ID>.<ext>.iso.source    its source fingerprint
- *   <data>/discs/expanded/<fingerprint>.ref              fingerprint -> disc ID
+ *   <data>/discs/<DISC_ID>/<DISC_ID>.<fp>.<cso|zso|chd>.iso   the expanded image
+ *   <data>/discs/<DISC_ID>/<DISC_ID>.<fp>.<ext>.iso.source    its source fingerprint
+ *   <data>/discs/expanded/<fingerprint>.ref                   fingerprint -> disc ID
+ *   <data>/discs/expanded/<fingerprint>.lock                  held while it is imported
  *
  * The fingerprint keys on the source's size, write time and a hash of its
  * first 64 KiB (the header and the start of the block index), so adding the
  * same unchanged file again reuses the expansion instead of writing it again.
+ * <fp> is the first NK_DISC_TITLE_FINGERPRINT_CHARS characters of it, so two
+ * different images of one disc ID (a retail dump and a fan translation) keep
+ * two expansions instead of the second replacing the first.
  *
  * CSO (CISO v1 and v2) and ZSO (ZISO) are read here: the block index, raw
  * DEFLATE blocks through nk_psp_inflate_raw and LZ4 blocks through a small
@@ -45,6 +49,12 @@ extern "C" {
    hostile header, refused before any allocation or loop uses it. */
 #define NK_DISC_MAX_EXPANDED_BYTES (4ull * 1024ull * 1024ull * 1024ull)
 #define NK_DISC_FINGERPRINT_CHARS 32u
+/* The part of the fingerprint in an expansion's per-title file name. */
+#define NK_DISC_TITLE_FINGERPRINT_CHARS 16u
+/* The largest CHD hunk read; a header naming more is refused before libchdr
+   allocates anything for it. */
+#define NK_DISC_CHD_MAX_HUNK_BYTES (16u * 1024u * 1024u)
+#define NK_DISC_SHA1_BYTES 20u
 
 /* Named boundary codes. */
 #define NK_DISC_TRUNCATED              "DISC_IMAGE_TRUNCATED"
@@ -62,6 +72,7 @@ extern "C" {
 #define NK_DISC_CHD_INVALID            "DISC_IMAGE_CHD_INVALID"
 #define NK_DISC_CHD_CD_UNSUPPORTED     "DISC_IMAGE_CHD_CD_UNSUPPORTED"
 #define NK_DISC_CHD_UNSUPPORTED        "DISC_IMAGE_CHD_UNSUPPORTED"
+#define NK_DISC_IMPORT_BUSY            "DISC_IMAGE_IMPORT_BUSY"
 #define NK_DISC_CANCELLED              "CANCELLED"
 #define NK_DISC_INTERNAL               "INTERNAL_ERROR"
 
@@ -84,11 +95,14 @@ typedef struct {
 } NkDiscExpandStatus;
 
 /* The CHD reader the program links. open checks that the image is a DVD-layout
-   CHD of 2048-byte sectors and reports its size; read_hunk reads hunk `index`
-   (hunk_bytes bytes) into dst. Every failure fills status. */
+   CHD of 2048-byte sectors and reports its size and the SHA-1 its header
+   records for the logical_bytes of data (all zero when it records none);
+   read_hunk reads hunk `index` (hunk_bytes bytes) into dst. Every failure
+   fills status. */
 typedef struct {
     bool (*open)(const char *path, void **handle, uint64_t *logical_bytes,
-                 uint32_t *hunk_bytes, NkDiscExpandStatus *status);
+                 uint32_t *hunk_bytes, uint8_t raw_sha1[NK_DISC_SHA1_BYTES],
+                 NkDiscExpandStatus *status);
     bool (*read_hunk)(void *handle, uint32_t index, uint8_t *dst, NkDiscExpandStatus *status);
     void (*close)(void *handle);
 } NkDiscChdBackend;
@@ -109,8 +123,9 @@ const char *nk_disc_format_extension(NkDiscFormat format);
 bool nk_disc_expanded_size(const char *source, NkDiscFormat *out_format,
                            uint64_t *out_expanded_bytes, NkDiscExpandStatus *status);
 
-/* Expand source into dest_iso: written to dest_iso + ".part", its size checked,
-   then renamed into place. A failure or a cancel removes the partial file and
+/* Expand source into dest_iso: written to dest_iso + ".part", its size checked
+   (and, for a CHD whose header records one, the SHA-1 of its data), then
+   renamed into place. A failure or a cancel removes the partial file and
    leaves any existing dest_iso untouched. */
 bool nk_disc_expand_file(const char *source, const char *dest_iso,
                          const NkDiscExpandCallbacks *callbacks,
@@ -142,7 +157,11 @@ bool nk_disc_source_fingerprint(const char *source, char out[NK_DISC_FINGERPRINT
 
 /* Probe, then expand when no matching expansion exists: the image is expanded
    into <data_root>/discs/expanded/, checked to be a PSP disc with a disc ID,
-   and moved into its per-title folder. */
+   and moved into its per-title folder. The import holds
+   <fingerprint>.lock from the probe to the move, so a second import of the
+   same file that starts meanwhile (another program, or another worker) is
+   refused as NK_DISC_IMPORT_BUSY instead of writing over the first one's
+   partial image. */
 bool nk_disc_import(const char *source, const char *data_root,
                     const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
                     NkDiscExpandStatus *status);

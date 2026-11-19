@@ -1415,6 +1415,7 @@ void hle_register_iofilemgr_handlers(void);
 extern uint32_t g_audio_bufs[9][4];
 extern int g_audio_nbufs[9];
 void hle_audio_guest_reset(void);
+void hle_mp3_guest_reset(void);
 void hle_register_regular_audio_handlers(void);
 void hle_register_output2_audio_handlers(void);
 void sr_dump_calls(void);
@@ -1625,11 +1626,11 @@ uint32_t ctrl_unread_refresh_taps(void);
 
 
 /* Success-result exceptions named in the end-of-run summary. sceKernelVolatileMemUnlock is absent:
- * it returns the PSP-measured states now. sceUtilityOskUpdate stays listed for VISIBLE's measured 0
+ * it returns the PSP-measured states now, and sceAtracGetOutputChannel checks its ID and writes the
+ * channel count DecodeData interleaves. sceUtilityOskUpdate stays listed for VISIBLE's measured 0
  * (#363 comment 6331070692, attended); after-use now returns the measured 0x80110001. */
 static inline const char *hle_success_exception_issue(uint32_t nid) {
     switch (nid) {
-    case 0xb3b5d042u: return "#363, #286"; /* sceAtracGetOutputChannel */
     case 0x4b85c861u: return "#363";       /* sceUtilityOskUpdate: measured VISIBLE success */
     default: return NULL;
     }
@@ -1642,6 +1643,13 @@ static inline const char *hle_success_exception_issue(uint32_t nid) {
 static inline int hle_env_switch(int *cached, const char *name) {
     if (*cached < 0) *cached = getenv(name) != NULL;
     return *cached;
+}
+/* SR_AUDIOSTAT buffer identities: add a nonzero guest address to a set of at most `cap` distinct
+ * ones (set[0..*n)), once. The audio outputs, the SAS mix and the ATRAC decode each keep a set. */
+static inline void hle_note_buf(uint32_t *set, int *n, int cap, uint32_t buf) {
+    if (!buf) return;
+    for (int i = 0; i < *n; i++) if (set[i] == buf) return;
+    if (*n < cap) set[(*n)++] = buf;
 }
 /* Argument 5+idx of an HLE call. PSP userland is MIPS EABI: arguments 1..8 arrive in
  * a0-a3,t0-t3 (r4..r11) and only 9+ go to the stack (sp+0) -- same as PPSSPP's PARAM(n).

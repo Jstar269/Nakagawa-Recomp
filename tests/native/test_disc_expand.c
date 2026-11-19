@@ -44,6 +44,7 @@
 #include "nk_disc_verify.h"
 #include "nk_iso.h"
 #include "nk_platform.h"
+#include "nk_psp_sha1.h"
 
 #include "libchdr/bitstream.h"
 #include "libchdr/huffman.h"
@@ -54,6 +55,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define SECTOR 2048u
 #define ISO_SECTORS 64u
@@ -86,6 +94,37 @@ static void write_bytes(const char *path, const uint8_t *data, size_t size) {
     assert(f != NULL);
     assert(fwrite(data, 1, size, f) == size);
     assert(fclose(f) == 0);
+}
+
+/* Gives a file one fixed write time (2020-01-01 00:00:00 UTC), through its own
+   handle. Two files stamped so share a write time on every host, as two files
+   written inside one tick of the host's clock do. */
+static void stamp_write_time(const char *path) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    FILETIME stamp;
+    HANDLE file;
+    stamp.dwLowDateTime = 0x69050000u;
+    stamp.dwHighDateTime = 0x01D5C036u;
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
+                               NATIVE_TEST_PATH_MAX) > 0);
+    file = CreateFileW(wide, FILE_WRITE_ATTRIBUTES,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(file != INVALID_HANDLE_VALUE);
+    assert(SetFileTime(file, NULL, NULL, &stamp));
+    assert(CloseHandle(file));
+#else
+    struct timespec times[2];
+    int fd = open(path, O_WRONLY);
+    assert(fd >= 0);
+    times[0].tv_sec = 0;
+    times[0].tv_nsec = UTIME_OMIT;
+    times[1].tv_sec = 1577836800;
+    times[1].tv_nsec = 0;
+    assert(futimens(fd, times) == 0);
+    assert(close(fd) == 0);
+#endif
 }
 
 static uint8_t *read_all(const char *path, size_t *size) {
@@ -931,13 +970,14 @@ static void test_import_and_reuse(void) {
     CHECK(!result.reused && result.format == NK_DISC_FORMAT_CSO);
     CHECK(result.expanded_bytes == ISO_BYTES);
     CHECK(strlen(result.fingerprint) == NK_DISC_FINGERPRINT_CHARS);
+    /* The per-title name carries the start of the source's fingerprint. */
+    snprintf(expected, sizeof(expected), "%s%cdiscs%cTEST00042%cTEST00042.%.16s.cso.iso", root,
+             sep, sep, sep, result.fingerprint);
 
     if (!nk_disc_import(src, root, NULL, &result, &status)) {
         fprintf(stderr, "import: %s: %s\n", status.code, status.message);
         CHECK(false);
     }
-    snprintf(expected, sizeof(expected), "%s%cdiscs%cTEST00042%cTEST00042.cso.iso", root, sep,
-             sep, sep);
     CHECK(!result.reused);
     CHECK(strcmp(result.disc_id, "TEST00042") == 0);
     CHECK(strcmp(result.iso_path, expected) == 0);
@@ -972,7 +1012,8 @@ static void test_import_and_reuse(void) {
     CHECK(result.reused);
     CHECK(strcmp(result.iso_path, expected) == 0);
 
-    /* An expansion whose image was damaged on the drive is not reused. */
+    /* An expansion whose size changed on the drive is not reused. Only the
+       size is checked: a change that keeps the size is not seen by the probe. */
     {
         FILE *f = nk_fopen_utf8(expected, "ab");
         assert(f);
@@ -989,7 +1030,8 @@ static void test_import_and_reuse(void) {
     build_ciso(&image, "ZISO", 1, 0, g_iso, ISO_BYTES, zso_kind);
     write_bytes(src, image.data, image.len);
     CHECK(nk_disc_import(src, root, NULL, &result, &status));
-    CHECK(!result.reused && strstr(result.iso_path, "TEST00042.zso.iso") != NULL);
+    CHECK(!result.reused && strstr(result.iso_path, "TEST00042.") != NULL &&
+          strstr(result.iso_path, ".zso.iso") != NULL);
     CHECK(file_equals(result.iso_path, g_iso, ISO_BYTES));
 
     /* A CHD imports the same way. */
@@ -997,7 +1039,8 @@ static void test_import_and_reuse(void) {
     build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_COMPRESSED, CHD_TAG('D', 'V', 'D', ' '));
     write_bytes(src, image.data, image.len);
     CHECK(nk_disc_import(src, root, NULL, &result, &status));
-    CHECK(!result.reused && strstr(result.iso_path, "TEST00042.chd.iso") != NULL);
+    CHECK(!result.reused && strstr(result.iso_path, "TEST00042.") != NULL &&
+          strstr(result.iso_path, ".chd.iso") != NULL);
     CHECK(file_equals(result.iso_path, g_iso, ISO_BYTES));
     CHECK(nk_disc_import(src, root, NULL, &result, &status) && result.reused);
 
@@ -1016,6 +1059,208 @@ static void test_import_and_reuse(void) {
     }
     free(image.data);
     printf("PASS import, reuse and per-title placement\n");
+}
+
+/* The SHA-1 a CHD header records for its data (offset 64 in a v5 header). */
+static void chd_set_raw_sha1(Buf *image, const uint8_t *iso, size_t iso_len) {
+    SHA_CTX ctx;
+    SHAInit(&ctx);
+    SHAUpdate(&ctx, (BYTE *)iso, (int)iso_len);
+    SHAFinal(image->data + 64, &ctx);
+}
+
+/* A damaged metadata chain is a damaged image, not "not a DVD image". */
+static void test_chd_damaged_metadata(void) {
+    Buf image = { NULL, 0, 0 };
+    /* A hard-disk tag whose entry links back to itself: every search for a
+       tag it does not hold runs round the cycle until libchdr gives up. */
+    build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_UNCOMPRESSED, CHD_TAG('G', 'D', 'D', 'D'));
+    put_be64(image.data + 124u + 8u, 124u);
+    expect_refused("chd-metadata-cycle", image.data, image.len, NK_DISC_CHD_INVALID);
+    free(image.data);
+}
+
+/* An uncompressed CHD hunk carries no CRC; the header's SHA-1 of the data
+   is what finds a damaged one. */
+static void test_chd_raw_sha1(void) {
+    Buf image = { NULL, 0, 0 };
+    size_t map_off = 0;
+    size_t data_off;
+    uint32_t entry;
+    build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_UNCOMPRESSED, CHD_TAG('D', 'V', 'D', ' '));
+    chd_set_raw_sha1(&image, g_iso, ISO_BYTES);
+    expect_expands("chd-uncompressed-sha1", &image, g_iso, ISO_BYTES);
+    /* Flip one byte of hunk 12 (sectors 24 and 25, in DATA.BIN) where it is
+       stored: its map entry names the place. */
+    for (int b = 0; b < 8; b++) map_off = (map_off << 8) | image.data[40 + b];
+    map_off += 12u * 4u;
+    entry = ((uint32_t)image.data[map_off] << 24) | ((uint32_t)image.data[map_off + 1] << 16) |
+            ((uint32_t)image.data[map_off + 2] << 8) | (uint32_t)image.data[map_off + 3];
+    CHECK(entry != 0u);
+    data_off = (size_t)entry * CHD_HUNK + 100u;
+    CHECK(data_off < image.len);
+    image.data[data_off] ^= 0x5Au;
+    expect_refused("chd-uncompressed-flipped", image.data, image.len, NK_DISC_BLOCK_CORRUPT);
+    build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_COMPRESSED, CHD_TAG('D', 'V', 'D', ' '));
+    chd_set_raw_sha1(&image, g_iso, ISO_BYTES);
+    expect_expands("chd-zlib-sha1", &image, g_iso, ISO_BYTES);
+    free(image.data);
+}
+
+/* Header fields no PSP disc has are refused from the header alone, before
+   libchdr's open allocates for them: these files end right after the header,
+   so the full open would only report them as damaged. */
+static void test_chd_header_caps(void) {
+    Buf image = { NULL, 0, 0 };
+    build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_UNCOMPRESSED, CHD_TAG('D', 'V', 'D', ' '));
+    put_be64(image.data + 32, 8ull * 1024u * 1024u * 1024u);
+    expect_refused("chd-header-size", image.data, 124u, NK_DISC_SIZE_INVALID);
+    build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_UNCOMPRESSED, CHD_TAG('D', 'V', 'D', ' '));
+    put_be32(image.data + 56, 32u * 1024u * 1024u);
+    expect_refused("chd-header-hunk", image.data, 124u, NK_DISC_CHD_UNSUPPORTED);
+    free(image.data);
+}
+
+/* An intact CHD whose codec this libchdr lacks is unsupported, not damaged. */
+static void test_chd_unknown_codec(void) {
+    Buf image = { NULL, 0, 0 };
+    build_chd(&image, g_iso, ISO_BYTES, CHD_MAP_COMPRESSED, CHD_TAG('D', 'V', 'D', ' '));
+    put_be32(image.data + 16, CHD_TAG('n', 'k', 'x', 'x'));
+    expect_refused("chd-unknown-codec", image.data, image.len, NK_DISC_CHD_UNSUPPORTED);
+    free(image.data);
+}
+
+/* Two different images of one disc ID (say a retail dump and a fan
+   translation) keep two expansions: neither import replaces the other. The
+   two files here have one write time, so what keeps them apart is what the
+   fingerprint reads of each image (its size and its first 64 KiB), never
+   the moment each happened to be written. */
+static void test_import_same_disc_id(void) {
+    Buf image = { NULL, 0, 0 };
+    char root[NATIVE_TEST_PATH_MAX];
+    char first_src[NATIVE_TEST_PATH_MAX];
+    char second_src[NATIVE_TEST_PATH_MAX];
+    char first_iso[NK_MAX_PATH];
+    static uint8_t translated[ISO_BYTES];
+    size_t first_len;
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    /* The same disc ID with different data: the first DATA.BIN sector is
+       rewritten. Its block is deflated, so the compressed image's size and
+       block index change with it, as a translation's do. */
+    memcpy(translated, g_iso, ISO_BYTES);
+    memset(translated + (size_t)DATA_FIRST * SECTOR, 'T', SECTOR);
+    path_in(root, sizeof(root), "same-id-root");
+    CHECK(nk_platform_mkdir_p(root));
+    path_in(first_src, sizeof(first_src), "same-id-a.cso");
+    build_ciso(&image, "CISO", 1, 0, g_iso, ISO_BYTES, cso_v1_kind);
+    write_bytes(first_src, image.data, image.len);
+    first_len = image.len;
+    path_in(second_src, sizeof(second_src), "same-id-b.cso");
+    build_ciso(&image, "CISO", 1, 0, translated, ISO_BYTES, cso_v1_kind);
+    write_bytes(second_src, image.data, image.len);
+    CHECK(image.len != first_len);
+    stamp_write_time(first_src);
+    stamp_write_time(second_src);
+
+    CHECK(nk_disc_import(first_src, root, NULL, &result, &status) && !result.reused);
+    CHECK(strcmp(result.disc_id, "TEST00042") == 0);
+    snprintf(first_iso, sizeof(first_iso), "%s", result.iso_path);
+    CHECK(nk_disc_import(second_src, root, NULL, &result, &status) && !result.reused);
+    CHECK(strcmp(result.disc_id, "TEST00042") == 0);
+    CHECK(strcmp(result.iso_path, first_iso) != 0);
+    CHECK(file_equals(first_iso, g_iso, ISO_BYTES));
+    CHECK(file_equals(result.iso_path, translated, ISO_BYTES));
+    /* Adding the first again reuses its own expansion. */
+    CHECK(nk_disc_import(first_src, root, NULL, &result, &status) && result.reused);
+    CHECK(strcmp(result.iso_path, first_iso) == 0);
+    free(image.data);
+    printf("PASS two images of one disc ID keep two expansions\n");
+}
+
+/* An expansion an earlier build wrote as <ID>.<ext>.iso is still reused. */
+static void test_import_reuses_earlier_name(void) {
+    Buf image = { NULL, 0, 0 };
+    char root[NATIVE_TEST_PATH_MAX];
+    char src[NATIVE_TEST_PATH_MAX];
+    char legacy[NATIVE_TEST_PATH_MAX + 64];
+    char legacy_sidecar[NATIVE_TEST_PATH_MAX + 80];
+    char sep = nk_platform_path_separator();
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    path_in(root, sizeof(root), "legacy-root");
+    CHECK(nk_platform_mkdir_p(root));
+    path_in(src, sizeof(src), "legacy.cso");
+    build_ciso(&image, "CISO", 1, 0, g_iso, ISO_BYTES, cso_v1_kind);
+    write_bytes(src, image.data, image.len);
+    CHECK(nk_disc_import(src, root, NULL, &result, &status) && !result.reused);
+    snprintf(legacy, sizeof(legacy), "%s%cdiscs%cTEST00042%cTEST00042.cso.iso", root, sep, sep,
+             sep);
+    snprintf(legacy_sidecar, sizeof(legacy_sidecar), "%s.source", legacy);
+    {
+        char sidecar[NK_MAX_PATH + 8];
+        snprintf(sidecar, sizeof(sidecar), "%s.source", result.iso_path);
+        CHECK(nk_rename_utf8(result.iso_path, legacy) == 0);
+        CHECK(nk_rename_utf8(sidecar, legacy_sidecar) == 0);
+    }
+    CHECK(nk_disc_import(src, root, NULL, &result, &status) && result.reused);
+    CHECK(strcmp(result.iso_path, legacy) == 0);
+    free(image.data);
+    printf("PASS an expansion under its earlier name is reused\n");
+}
+
+typedef struct {
+    const char *source;
+    const char *root;
+    int nested_calls;
+    bool nested_ok;
+    char nested_code[48];
+} NestedImport;
+
+/* Starts a second import of the same file while the first is part-way
+   through writing its partial image, as a second program would. */
+static void on_progress_import_again(uint64_t done, uint64_t total, void *user) {
+    NestedImport *n = (NestedImport *)user;
+    if (done > 0u && done < total && n->nested_calls == 0) {
+        NkDiscImport again;
+        NkDiscExpandStatus status;
+        n->nested_calls++;
+        n->nested_ok = nk_disc_import(n->source, n->root, NULL, &again, &status);
+        snprintf(n->nested_code, sizeof(n->nested_code), "%s", status.code);
+    }
+}
+
+static void test_import_busy(void) {
+    Buf image = { NULL, 0, 0 };
+    char root[NATIVE_TEST_PATH_MAX];
+    char src[NATIVE_TEST_PATH_MAX];
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    NestedImport nested;
+    NkDiscExpandCallbacks callbacks = { on_progress_import_again, NULL, &nested };
+    path_in(root, sizeof(root), "busy-root");
+    CHECK(nk_platform_mkdir_p(root));
+    path_in(src, sizeof(src), "busy.cso");
+    build_ciso(&image, "CISO", 1, 0, g_iso, ISO_BYTES, cso_v1_kind);
+    write_bytes(src, image.data, image.len);
+    memset(&nested, 0, sizeof(nested));
+    nested.source = src;
+    nested.root = root;
+    if (!nk_disc_import(src, root, &callbacks, &result, &status)) {
+        fprintf(stderr, "busy: %s: %s\n", status.code, status.message);
+        CHECK(false);
+    }
+    CHECK(nested.nested_calls == 1);
+    if (nested.nested_ok || strcmp(nested.nested_code, NK_DISC_IMPORT_BUSY) != 0) {
+        fprintf(stderr, "busy: the second import gave ok=%d code=%s\n", (int)nested.nested_ok,
+                nested.nested_code);
+        CHECK(false);
+    }
+    CHECK(!result.reused && file_equals(result.iso_path, g_iso, ISO_BYTES));
+    /* Once the first is done, the lock is free and the file is reused. */
+    CHECK(nk_disc_import(src, root, NULL, &result, &status) && result.reused);
+    free(image.data);
+    printf("PASS a second import of the same file meanwhile is refused as busy\n");
 }
 
 int main(void) {
@@ -1040,6 +1285,13 @@ int main(void) {
     test_chd_flac_empty_hunk_refused();
     test_cancel_removes_partial();
     test_import_and_reuse();
+    test_chd_damaged_metadata();
+    test_chd_raw_sha1();
+    test_chd_header_caps();
+    test_chd_unknown_codec();
+    test_import_same_disc_id();
+    test_import_reuses_earlier_name();
+    test_import_busy();
     printf("test_disc_expand: %d checks passed\n", g_checks);
     return 0;
 }

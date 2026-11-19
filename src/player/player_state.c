@@ -5203,6 +5203,9 @@ static const struct { const char *code; const char *badge; } k_error_badges[] = 
     {"PREREQUISITE_BUNDLE_INVALID", "Build tools damaged"},
     {"TOOLS_IN_USE", "Build tools busy"},
     {"TOOLS_REMOVE_FAILED", "Not removed"},
+    /* Removing the downloaded tools names it when <data root>/prerequisites does not fit
+       (package_builder_remove_downloaded_tools). */
+    {"PATH_TOO_LONG", "Path too long"},
     {"REMOVE_FAILED", "Not removed"},
     {"SAVES_ADD_FAILED", "Save not added"},
     {"SAVES_BACKUP_FAILED", "Not backed up"},
@@ -11169,7 +11172,7 @@ void player_app_refresh_font_status(PlayerApp *app) {
                  sizeof(app->wizard.font_latin_index_detail[index]), "%s",
                  latin_states[index].detail);
     }
-    app->wizard.font_own_count = nk_font_own_font_count(root, project_root);
+    app->wizard.font_own_count = nk_font_own_font_count_from_states(states, latin_states);
     if (app->wizard.font_own_count >= NK_FONT_PSP_FONT_COUNT) {
         snprintf(app->wizard.font_summary, sizeof(app->wizard.font_summary),
                  "All %d PSP fonts are your PSP's originals.", NK_FONT_PSP_FONT_COUNT);

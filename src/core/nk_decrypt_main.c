@@ -28,6 +28,21 @@
  *          before any key lookup; console-bound DRM prints CONTEXT_REQUIRED.
  */
 
+/* This program has no platform layer (tools/nk_core/decrypt_tool.py builds it
+ * from the crypto sources alone), so the host calls it needs are local: the
+ * UTF-8 command line on Windows, and the removal, replacing rename and private
+ * open of the output file. POSIX needs the feature-test macro before any
+ * system header, as strict -std=c99 hides open() flags and fdopen(). */
+#if defined(_WIN32) || defined(_WIN64)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#else
+#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -74,14 +89,106 @@ static int read_file(const char *path, u8 **data, size_t *size)
     return 0;
 }
 
+/* Paths are UTF-8; Win32 converts strictly, as nk_fopen_utf8 does. A new
+ * output file is one only the user can read: POSIX creates it 0600 (O_EXCL,
+ * so no file or symlink already there is reused), as nk_platform_fopen_private
+ * does for other per-title private data; Win32 inherits the per-user data
+ * folder's ACLs. */
+#if defined(_WIN32) || defined(_WIN64)
+static wchar_t *utf8_to_wide_alloc(const char *path)
+{
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    wchar_t *wide;
+    if (n <= 0) return NULL;
+    wide = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
+    if (wide == NULL) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, n) <= 0) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static void remove_file(const char *path)
+{
+    wchar_t *wide = utf8_to_wide_alloc(path);
+    if (wide != NULL) (void)DeleteFileW(wide);
+    free(wide);
+}
+
+static int replace_file(const char *from, const char *to)
+{
+    wchar_t *wfrom = utf8_to_wide_alloc(from);
+    wchar_t *wto = utf8_to_wide_alloc(to);
+    int rc = -1;
+    if (wfrom != NULL && wto != NULL &&
+        MoveFileExW(wfrom, wto, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        rc = 0;
+    free(wfrom);
+    free(wto);
+    return rc;
+}
+
+static FILE *open_private_new(const char *path)
+{
+    return nk_fopen_utf8(path, "wb");
+}
+#else
+static void remove_file(const char *path)
+{
+    (void)unlink(path);
+}
+
+static int replace_file(const char *from, const char *to)
+{
+    return rename(from, to);
+}
+
+static FILE *open_private_new(const char *path)
+{
+    int flags = O_WRONLY | O_CREAT | O_EXCL;
+    int fd;
+    FILE *f;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    fd = open(path, flags, 0600);
+    if (fd < 0) return NULL;
+    f = fdopen(fd, "wb");
+    if (f == NULL) close(fd);
+    return f;
+}
+#endif
+
+/* The decrypted module is written beside `path` and renamed into place only
+ * once every byte was written and the file closed, so a short write (a full
+ * disk) or a failed close never leaves a truncated module at `path`, where
+ * the tooling would keep it as a finished copy. The temporary file is
+ * removed on any failure. */
 static int write_file(const char *path, const u8 *data, size_t size)
 {
-    FILE *f = nk_fopen_utf8(path, "wb");
-    size_t put;
-    if (f == NULL) return -1;
-    put = fwrite(data, 1, size, f);
-    if (fclose(f) != 0) return -1;
-    return put == size ? 0 : -1;
+    static const char suffix[] = ".tmp";
+    size_t len = strlen(path);
+    char *temp;
+    FILE *f;
+    int ok;
+    if (len > (size_t)-1 - sizeof(suffix)) return -1;
+    temp = (char *)malloc(len + sizeof(suffix));
+    if (temp == NULL) return -1;
+    memcpy(temp, path, len);
+    memcpy(temp + len, suffix, sizeof(suffix));
+    remove_file(temp); /* one a killed run left behind */
+    f = open_private_new(temp);
+    if (f == NULL) {
+        free(temp);
+        return -1;
+    }
+    ok = fwrite(data, 1, size, f) == size;
+    if (fclose(f) != 0) ok = 0;
+    if (ok && replace_file(temp, path) != 0) ok = 0;
+    if (!ok) remove_file(temp);
+    free(temp);
+    return ok ? 0 : -1;
 }
 
 static int file_present(const char *path)
@@ -423,7 +530,7 @@ static void usage(void)
             "       nk_decrypt npumdimg [--key-file FILE] --in EBOOT.PBP --out FILE.iso\n");
 }
 
-int main(int argc, char **argv)
+static int run(int argc, char **argv)
 {
     const char *cmd;
     const char *vector = NULL;
@@ -463,4 +570,52 @@ int main(int argc, char **argv)
     fprintf(stderr, "nk_decrypt: unknown command '%s'\n", cmd);
     usage();
     return 2;
+}
+
+/* The paths arrive as UTF-16 on Windows, and the narrow argv the C runtime
+ * builds from them is in the ANSI code page, which turns a profile folder name
+ * with an accented or CJK letter into bytes nk_fopen_utf8 refuses. The
+ * arguments are rebuilt as UTF-8 from the wide command line, as nk_disc_expand
+ * does. */
+int main(int argc, char **argv)
+{
+#if defined(_WIN32) || defined(_WIN64)
+    int wargc = 0;
+    LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    char **utf8;
+    int i;
+    int rc;
+    (void)argc;
+    (void)argv;
+    if (wargv == NULL) {
+        fprintf(stderr, "nk_decrypt: cannot read the command line\n");
+        return 2;
+    }
+    utf8 = (char **)calloc((size_t)wargc + 1u, sizeof(char *));
+    if (utf8 == NULL) {
+        LocalFree(wargv);
+        printf("INTERNAL_ERROR out of memory\n");
+        return 9;
+    }
+    for (i = 0; i < wargc; i++) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, NULL, 0, NULL, NULL);
+        utf8[i] = len > 0 ? (char *)malloc((size_t)len) : NULL;
+        if (utf8[i] == NULL ||
+            WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, utf8[i], len, NULL, NULL) <= 0) {
+            int j;
+            for (j = 0; j <= i; j++) free(utf8[j]);
+            free(utf8);
+            LocalFree(wargv);
+            fprintf(stderr, "nk_decrypt: cannot convert the command line to UTF-8\n");
+            return 2;
+        }
+    }
+    LocalFree(wargv);
+    rc = run(wargc, utf8);
+    for (i = 0; i < wargc; i++) free(utf8[i]);
+    free(utf8);
+    return rc;
+#else
+    return run(argc, argv);
+#endif
 }

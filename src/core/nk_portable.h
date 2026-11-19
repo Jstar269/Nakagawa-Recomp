@@ -116,8 +116,12 @@ static inline NkPortableState nk_portable_resolve(const char *exe_path,
  * per-user folder. A host that cannot name its executable has no portable mode. */
 static inline NkPortableState nk_portable_apply(NkPortableResolution *out) {
     char exe[NK_MAX_PATH];
+    /* A caller that wants only the state passes NULL; the resolution still
+     * needs somewhere to live while the override is applied. */
+    NkPortableResolution local;
+    if (!out) out = &local;
     if (!nk_platform_get_executable_path(exe, sizeof(exe))) {
-        if (out) memset(out, 0, sizeof(*out));
+        memset(out, 0, sizeof(*out));
         return NK_PORTABLE_ABSENT;
     }
     if (nk_portable_resolve(exe, out) != NK_PORTABLE_ACTIVE) return out->state;

@@ -27,7 +27,9 @@
  *     not a multiple of 16 derives its last keystream block in full and uses
  *     only the bytes it needs, as upstream's oversized KIRK buffer did;
  *   - a MAC update that leaves only the previous full pad block chains that
- *     block instead of dropping it, and results are NK_PSP_* codes.
+ *     block instead of dropping it, and results are NK_PSP_* codes;
+ *   - 2026-11-18: the cipher's counter base is derived once per
+ *     sceDrmBBCipherInit (on the first chunk) instead of once per 2 KiB chunk.
  */
 
 #include <limits.h>
@@ -348,22 +350,31 @@ static int sub_428(NkPspCtx *ctx, u8 *dbuf, int size, CIPHER_KEY *ckey)
 	const u8 *loc_1CE4 = NULL, *loc_1CF4 = NULL;
 
 	if (size <= 0 || size > AMCTRL_CHUNK) return NK_PSP_ERR_INTERNAL;
-	retv = amctrl_const(ctx, "amctrl.loc_1CE4", &loc_1CE4);
-	if (retv == 0) retv = amctrl_const(ctx, "amctrl.loc_1CF4", &loc_1CF4);
-	if (retv)
-		return retv;
+	/* The counter base depends only on ckey->key, which is fixed from
+	 * sceDrmBBCipherInit to Final, so it is derived for the first chunk and
+	 * kept for the rest instead of costing a KeyStore lookup and a KIRK pass
+	 * per 2 KiB. */
+	if (!ckey->have_ctr_base) {
+		retv = amctrl_const(ctx, "amctrl.loc_1CE4", &loc_1CE4);
+		if (retv == 0) retv = amctrl_const(ctx, "amctrl.loc_1CF4", &loc_1CF4);
+		if (retv)
+			return retv;
 
-	for(i=0; i<16; i++){
-		tmp2[i] = ckey->key[i] ^ loc_1CF4[i];
+		for(i=0; i<16; i++){
+			tmp2[i] = ckey->key[i] ^ loc_1CF4[i];
+		}
+
+		retv = do_kirk7(ctx, tmp2, tmp2, 16, AMCTRL_CIPHER_CODE);
+		if(retv)
+			return retv;
+
+		for(i=0; i<16; i++){
+			tmp2[i] ^= loc_1CE4[i];
+		}
+		memcpy(ckey->ctr_base, tmp2, 16);
+		ckey->have_ctr_base = 1;
 	}
-
-	retv = do_kirk7(ctx, tmp2, tmp2, 16, AMCTRL_CIPHER_CODE);
-	if(retv)
-		return retv;
-
-	for(i=0; i<16; i++){
-		tmp2[i] ^= loc_1CE4[i];
-	}
+	memcpy(tmp2, ckey->ctr_base, 16);
 
 	if(ckey->seed==1){
 		memset(tmp1, 0, 0x10);
@@ -459,6 +470,8 @@ int sceDrmBBCipherFinal(CIPHER_KEY *ckey)
 {
 	if (ckey == NULL) return NK_PSP_ERR_INTERNAL;
 	memset(ckey->key, 0, 16);
+	memset(ckey->ctr_base, 0, 16);
+	ckey->have_ctr_base = 0;
 	ckey->type = 0;
 	ckey->seed = 0;
 
