@@ -199,6 +199,13 @@ bool nk_disc_hash_file(const char *path, const NkDiscExpandCallbacks *callbacks,
                            "The disc image could not be opened for reading.");
     }
     int64_t total = nk_platform_get_file_size(path);
+    /* Without its size the read cannot be checked against the file, and a
+     * short or growing read would pass as the image's hash. */
+    if (total < 0) {
+        fclose(f);
+        return verify_fail(status, NK_DISC_READ_FAILED,
+                           "The size of the disc image could not be read.");
+    }
     uint8_t *buffer = (uint8_t *)malloc(NK_DISC_HASH_CHUNK);
     if (!buffer) {
         fclose(f);
@@ -236,7 +243,7 @@ bool nk_disc_hash_file(const char *path, const NkDiscExpandCallbacks *callbacks,
     fclose(f);
     free(buffer);
     /* The file changed size while it was read: the hash is of no one image. */
-    if (ok && total >= 0 && (uint64_t)total != done) {
+    if (ok && (uint64_t)total != done) {
         ok = verify_fail(status, NK_DISC_READ_FAILED,
                          "The disc image changed while it was being checked.");
     }

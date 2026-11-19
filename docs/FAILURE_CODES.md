@@ -67,6 +67,7 @@ The **Where** column of each table names the places a code can appear:
 | `DISC_IMAGE_EXPANDED_INVALID` | disc, player | The compressed file expanded, but the result is not a readable disc image. |
 | `DISC_IMAGE_HEADER_INVALID` | disc, player | The compressed disc image's header is invalid. |
 | `DISC_IMAGE_ID_MISSING` | disc, player | The disc image has no disc ID in its title information. |
+| `DISC_IMAGE_IMPORT_BUSY` | disc, player | The same compressed disc image is already being expanded by another window or tool. |
 | `DISC_IMAGE_INDEX_INVALID` | disc, player | The compressed disc image's block index is invalid. |
 | `DISC_IMAGE_NOT_COMPRESSED` | disc, player | The file given to the disc expander does not start with a CSO, ZSO or CHD signature. |
 | `DISC_IMAGE_NOT_EXPANDED` | disc, player | A compressed disc image was given to the disc inspector, which reads only the plain ISO made when the image is added to the library. |
