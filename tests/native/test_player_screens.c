@@ -3779,6 +3779,9 @@ static void test_settings_pages(void) {
     CHECK(activate_flow_button(PLAYER_UI_ID_TAB_LIBRARY, FLOW_SETTINGS).kind ==
               PLAYER_UI_ACTION_OPEN_LIBRARY,
           "the LIBRARY tab on Settings opens the library");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TAB_SETTINGS, FLOW_SETTINGS).kind ==
+              PLAYER_UI_ACTION_OPEN_SETTINGS,
+          "the SETTINGS tab on Settings closes it, as Start and Done do");
     CHECK(flow_case_fits(FLOW_SETTINGS_REFRESH, 960, 540, dump, sizeof(dump)) &&
               strstr(dump, "Your display runs at 144 Hz") != NULL &&
               strstr(dump, "set it to 60, 120 or 180 Hz") != NULL &&
@@ -4485,6 +4488,9 @@ static void test_controller_and_developer_log_pages(void) {
     CHECK(activate_flow_button(PLAYER_UI_ID_TAB_LIBRARY, FLOW_CONTROLLER).kind ==
               PLAYER_UI_ACTION_OPEN_LIBRARY,
           "the LIBRARY tab on the controller page opens the library");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TAB_SETTINGS, FLOW_CONTROLLER).kind ==
+              PLAYER_UI_ACTION_OPEN_SETTINGS,
+          "the SETTINGS tab on the controller page closes it, as Start does");
     CHECK(developer_log_op_is(activate_flow_button(PLAYER_UI_ID_DEVELOPER_LOG_COPY, FLOW_DEVLOG),
                               PLAYER_UI_DEVELOPER_LOG_COPY),
           "Copy puts the log on the clipboard");
@@ -6505,6 +6511,11 @@ static void test_screen_actions(void) {
     CHECK(action.kind == PLAYER_UI_ACTION_PRIMARY &&
           action.primary == PLAYER_UI_PRIMARY_PLAY,
           "the primary button returns its existing Play action");
+    /* The LIBRARY tab is the title page's highlighted parent; choosing it goes
+       back to the library grid, as it does from Settings and About. */
+    action = activate_title_button(PLAYER_UI_ID_TAB_LIBRARY, &detail);
+    CHECK(action.kind == PLAYER_UI_ACTION_OPEN_LIBRARY,
+          "the LIBRARY tab on a title page opens the library");
     {
         /* An INCOMPATIBLE package (#1147): REBUILD PACKAGE, not a dead label. */
         PlayerUiTitle incompatible = k_titles[1];
@@ -7640,6 +7651,94 @@ static PlayerUiAction activate_remove_button(NkUiId id, const PlayerUiRemoveMode
     return result;
 }
 
+/* The quoted text of the dump's first run that starts with `start`, copied into out. */
+static bool dump_quoted_run(const char *dump, const char *start, char *out, size_t cap) {
+    char needle[96];
+    const char *at;
+    const char *end;
+    (void)snprintf(needle, sizeof(needle), "\"%s", start);
+    at = strstr(dump, needle);
+    if (at == NULL) return false;
+    ++at;
+    end = strstr(at, "\"\n");
+    if (end == NULL || (size_t)(end - at) >= cap) return false;
+    memcpy(out, at, (size_t)(end - at));
+    out[end - at] = '\0';
+    return true;
+}
+
+static bool utf8_whole(const char *text) {
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p != 0u) {
+        size_t follow = *p < 0x80u ? 0u : (*p & 0xE0u) == 0xC0u ? 1u
+                      : (*p & 0xF0u) == 0xE0u ? 2u : (*p & 0xF8u) == 0xF0u ? 3u : 4u;
+        if (follow == 4u) return false;
+        ++p;
+        for (size_t i = 0u; i < follow; ++i, ++p) {
+            if ((*p & 0xC0u) != 0x80u) return false;
+        }
+    }
+    return true;
+}
+
+/* One setting row drawn alone in a box `width` px across; returns its dump. */
+static void draw_setting_row(NkUi *ui, const char *name, const char *value, float width,
+                             char *dump, size_t cap) {
+    NkUiLayout box = layout_make(NK_UI_LAYOUT_COLUMN, sizing_fixed(width), sizing_fit(), 0.0f);
+    nk_ui_begin(ui, 0.0);
+    if (nk_ui_begin_container(ui, 0x7E000100u, &box, NULL)) {
+        (void)scr_wizard_value(ui, PLAYER_UI_ID_SETTINGS_TEXPACK_CHOOSE, 0x7E000110u, name,
+                               value, "Chooses the folder.", true, width, NULL);
+        nk_ui_end_container(ui);
+    }
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, cap);
+}
+
+/* Audit F-3b26bca1: a setting button's "name: value" was formatted into 48 bytes, so a
+   texture pack's folder and count were cut short with no ellipsis, a cut could split a
+   character, and the column was measured on the cut text. Failing-before: the first
+   two checks read "... 1520 T" and a lone 0xC2. */
+static void test_setting_label_holds_a_long_value(void) {
+    static char dump[CASE_DUMP_CAP];
+    char shown[512];
+    char value[200];
+    NkUiConfig config;
+    NkUi *ui;
+    NkUiTextBackend text = screen_test_text_backend();
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the setting row UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    draw_setting_row(ui, "Texture pack folder", "HotShotsTennisHD \xC2\xB7 1520 textures",
+                     1000.0f, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"TEXTURE PACK FOLDER: HOTSHOTSTENNISHD \xC2\xB7 1520 TEXTURES\"") !=
+              NULL,
+          "a pack's folder and count show whole");
+    draw_setting_row(ui, "Texture pack folder", "ABCDEFGHIJKLMNOPQRSTUVWX \xC2\xB7 3 textures",
+                     1000.0f, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"TEXTURE PACK FOLDER: ABCDEFGHIJKLMNOPQRSTUVWX \xC2\xB7 3 TEXTURES\"") !=
+              NULL,
+          "a 24-byte folder name keeps its middle dot whole");
+    /* A folder name far wider than its row ends in an ellipsis on a whole character, and
+       the button fits the row. */
+    value[0] = '\0';
+    for (int i = 0; i < 20; ++i) (void)strcat(value, "\xE3\x83\x97\xE3\x83\xAC ");
+    (void)strcat(value, "\xC2\xB7 9 textures");
+    draw_setting_row(ui, "Texture pack folder", value, 400.0f, dump, sizeof(dump));
+    CHECK(dump_quoted_run(dump, "TEXTURE PACK FOLDER: ", shown, sizeof(shown)) &&
+              utf8_whole(shown) && strlen(shown) >= 3u &&
+              strcmp(shown + strlen(shown) - 3u, "\xE2\x80\xA6") == 0,
+          "a label wider than its row ends in an ellipsis on a whole character");
+    nk_ui_begin(ui, 0.0);
+    CHECK(nk_ui_button_width(ui, shown, 0u) <= 400.0f, "and its button fits the row");
+    (void)nk_ui_end(ui);
+    nk_ui_destroy(ui);
+}
+
 /* #1304: Remove from library sits on a disc's title page, never a showcase
    demo's, and asks first: the dialog lists what Nakagawa built with sizes,
    says the disc image stays, and keeps the saves unless their box is ticked. */
@@ -7748,6 +7847,18 @@ static void test_remove_from_library(void) {
     CHECK(strstr(dump, "They go too, with any decrypted files you added yourself.") != NULL &&
               strstr(dump, "Your disc image stays.") != NULL,
           "a ticked disc copy box says what goes and that the disc image stays");
+    /* Audit F-7ec512c1: the ticked disc copy (5.0 MB) is freed too, so the total counts
+       it. Failing-before: the total stayed at the built files' 43.5 MB. */
+    CHECK(strstr(dump, "FREES 48.5 MB") != NULL && strstr(dump, "FREES 43.5 MB") == NULL,
+          "the total counts the ticked disc copy");
+    remove.item_count = 0u;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_remove(ui, &remove);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "FREES 5.0 MB") != NULL,
+          "with nothing built, a ticked disc copy still says what it frees");
+    remove.item_count = sizeof(items) / sizeof(items[0]);
     action = activate_remove_button(PLAYER_UI_ID_REMOVE_CONFIRM, &remove);
     CHECK(action.kind == PLAYER_UI_ACTION_REMOVE_CONFIRM &&
               (unsigned)action.primary == PLAYER_UI_REMOVE_ALSO_DISC_COPY,
@@ -7929,6 +8040,25 @@ static void test_saves_dialog(void) {
     CHECK(saves_op(action) == PLAYER_UI_SAVES_OLDER, "Older turns the page");
     action = activate_saves_button(PLAYER_UI_ID_SAVES_NEWER, &saves);
     CHECK(saves_op(action) == PLAYER_UI_SAVES_NEWER, "Newer turns the page back");
+    /* Audit F-c070bc9e: 80 backups, the newest 64 listed. The page of 63-64 is the last
+       the pages reach, so it offers Newer and no Older that could not turn. */
+    saves.total = 80u;
+    saves.listed = 64u;
+    saves.first_row = 62u;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_saves(ui, &saves);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "BACKUPS 63-64 OF 80, NEWEST FIRST; THE NEWEST 64 ARE LISTED") != NULL &&
+              strstr(dump, "\"NEWER\"") != NULL && strstr(dump, "\"OLDER\"") == NULL,
+          "the last listed page counts every backup, says how many are listed, and has no Older");
+    saves.first_row = 56u;
+    nk_ui_begin(ui, 0.0);
+    (void)player_ui_screen_saves(ui, &saves);
+    (void)nk_ui_end(ui);
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    CHECK(strstr(dump, "\"OLDER\"") != NULL, "a page before the last listed one still has Older");
+    saves.listed = 0u;
     saves.total = 2u;
     saves.first_row = 0u;
     saves.ask = PLAYER_UI_SAVES_ASK_RESTORE;
@@ -9169,6 +9299,36 @@ static void test_nickname_keyboard(void) {
                   memcmp(label->bounds, dimmed, sizeof(dimmed)) == 0,
               "a key that can type again has its outline back, in the same place and size");
     }
+    {
+        /* Audit 2026-11-17: Space is a key that types, so it follows the same rule. With
+           room left it is an outlined button; with the text full it is dimmed and loses
+           its outline, keeps its label where it was, and keeps its focus stop. */
+        const NkUiId space = key + UI_KEYBOARD_KEY_SPACE;
+        const NkUiDrawCmd *label;
+        int usable[4] = {0, 0, 0, 0};
+        bool outlined;
+        (void)nickname_frame(ui, &model, &draw);
+        label = find_command(draw, space, NK_UI_DRAW_TEXT, 0u);
+        outlined = find_command(draw, space, NK_UI_DRAW_BORDER, 0u) != NULL;
+        if (label != NULL) memcpy(usable, label->bounds, sizeof(usable));
+        CHECK(label != NULL && label->rgba_pm != theme->muted && outlined,
+              "Space with room left is drawn as an outlined key");
+        typed[31] = 'z';
+        typed[32] = '\0';
+        (void)nickname_frame(ui, &model, &draw);
+        label = find_command(draw, space, NK_UI_DRAW_TEXT, theme->muted);
+        outlined = find_command(draw, space, NK_UI_DRAW_BORDER, 0u) != NULL;
+        CHECK(label != NULL && !outlined && memcmp(label->bounds, usable, sizeof(usable)) == 0,
+              "a full text dims Space and drops its outline, in the same place and size");
+        CHECK(nickname_dump_has(ui, &model, "\"SPACE\""), "the dimmed Space keeps its label");
+        nk_ui_focus(ui, space);
+        (void)nickname_frame(ui, &model, NULL);
+        (void)nickname_frame(ui, &model, NULL);
+        CHECK(nk_ui_focused(ui) == space, "the dimmed Space keeps its focus stop");
+        action = nickname_press(ui, &model, space);
+        CHECK(action.kind == PLAYER_UI_ACTION_NONE && strlen(typed) == 32u,
+              "the dimmed Space does nothing");
+    }
     (void)snprintf(typed, sizeof(typed), "%s", "abcdefghijklmnopqrstuvwxyz01234");
     CHECK(!ui_keyboard_type(&keyboard, "\xC3\xA9") && strlen(typed) == 31u,
           "a 2-byte character does not fit in the last byte");
@@ -9212,6 +9372,260 @@ static void test_nickname_keyboard(void) {
               flow_case_shows(FLOW_NICKNAME_REFUSED, 853, 480, "DONE") &&
               flow_case_shows(FLOW_NICKNAME_FIRST, 960, 540, "SKIP"),
           "at the design text size the whole keyboard fits the smallest window");
+}
+
+/* Audit 2026-11-17: a keyboard whose key block cannot open (here, the container
+   nesting is full) still takes the pad's shortcuts, so none reaches the screen drawn
+   under it, and still answers Back. */
+static void test_keyboard_takes_the_pad_when_its_block_cannot_open(void) {
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    NkUi *ui;
+    char typed[NK_NICKNAME_MAX_BYTES + 1u] = "ab";
+    UiKeyboard keyboard;
+    UiKeyboardView view;
+    UiKeyboardResult result;
+    NkUiEvent event;
+    unsigned depth = 0u;
+    bool left_queued;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create a context for the keyboard's pad");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 720);
+    ui_keyboard_init(&keyboard, typed, NK_NICKNAME_MAX_BYTES, player_ui_nickname_accepts, NULL);
+    memset(&view, 0, sizeof(view));
+    view.key_base = PLAYER_UI_ID_NICKNAME_KEY_BASE;
+    view.part_base = FLOW_ID_NICKNAME_KEYS;
+    view.done_id = PLAYER_UI_ID_NICKNAME_SAVE;
+    view.cancel_id = PLAYER_UI_ID_NICKNAME_SKIP;
+    memset(&event, 0, sizeof(event));
+    event.type = NK_UI_EV_BACK;
+    event.down = true;
+    nk_ui_push_event(ui, &event);
+    nk_ui_begin(ui, 0.0);
+    for (;;) {
+        NkUiLayout layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(), 0.0f);
+        if (!nk_ui_begin_container(ui, NK_UI_ID(NK_UI_ID_SCREEN_FLOW, 0x7000u + depth), &layout,
+                                   NULL)) {
+            break;
+        }
+        ++depth;
+    }
+    result = ui_keyboard_draw(ui, &keyboard, &view);
+    left_queued = nk_ui_take_event(ui, NK_UI_EV_BACK, NULL);
+    while (depth-- > 0u) nk_ui_end_container(ui);
+    (void)nk_ui_end(ui);
+    CHECK(result == UI_KEYBOARD_CANCEL && !left_queued && strcmp(typed, "ab") == 0,
+          "a keyboard that cannot draw its keys still takes Back, and answers it as Cancel");
+    nk_ui_destroy(ui);
+}
+
+/* Audit 2026-11-17: a size is shown in the unit its rounded figure fits, so just
+   under 1 MiB reads 1.0 MB, never 1024.0 KB. */
+static void test_flow_bytes_unit_boundaries(void) {
+    static const struct {
+        unsigned long long bytes;
+        const char *shown;
+    } cases[] = {
+        {0ull, "0 bytes"},
+        {1023ull, "1023 bytes"},
+        {1024ull, "1.0 KB"},
+        {1048524ull, "1023.9 KB"},
+        {1048525ull, "1.0 MB"},
+        {1048575ull, "1.0 MB"},
+        {1048576ull, "1.0 MB"},
+        {1073689395ull, "1023.9 MB"},
+        {1073741823ull, "1.0 GB"},
+        {1073741824ull, "1.0 GB"},
+        {3221225472ull, "3.0 GB"},
+    };
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        char shown[32];
+        char message[96];
+        scr_flow_bytes(shown, sizeof(shown), cases[i].bytes);
+        (void)snprintf(message, sizeof(message), "%llu bytes read \"%s\" (got \"%s\")",
+                       cases[i].bytes, cases[i].shown, shown);
+        CHECK(strcmp(shown, cases[i].shown) == 0, message);
+    }
+}
+
+/* The launcher's display rule for these tests: a synthetic profile folder
+   shown as "~" (player_display_text's rule), never growing its input. */
+static const char k_test_home[] = "D:/SyntheticProfiles/SyntheticPlayerName";
+
+static size_t test_display_home(const char *in, char *out, size_t out_size) {
+    size_t home = sizeof(k_test_home) - 1u;
+    size_t used = 0u;
+    if (out == NULL || out_size == 0u) return 0u;
+    while (*in != '\0' && used + 1u < out_size) {
+        if (strncmp(in, k_test_home, home) == 0 && (in[home] == '/' || in[home] == '\0')) {
+            out[used++] = '~';
+            in += home;
+        } else {
+            out[used++] = *in++;
+        }
+    }
+    out[used] = '\0';
+    return used;
+}
+
+/* One Settings > Updates frame at `step`, with the folder or error message given,
+   drawn by a context that applies test_display_home. */
+static bool dump_update_page(PlayerUiUpdateStep step, const char *folder, const char *message,
+                             char *dump, size_t cap) {
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    PlayerUiSettingsModel settings;
+    NkUi *ui;
+    size_t used = 0u;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    config.display_text = test_display_home;
+    ui = screen_ui_create(&config);
+    if (ui == NULL) return false;
+    set_test_viewport(ui, 1280, 800);
+    memset(&settings, 0, sizeof(settings));
+    settings.page = PLAYER_UI_SETTINGS_PAGE_UPDATES;
+    settings.current_version = "0.0.5";
+    settings.update_step = step;
+    settings.update_version = "0.0.6";
+    settings.update_folder = folder;
+    settings.update_failed_step = PLAYER_UI_UPDATE_INSTALLING;
+    settings.update_error_title = "Couldn't install the update";
+    settings.update_error_message = message;
+    settings.logical_width = 1280.0f;
+    settings.logical_height = 800.0f;
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_settings(ui, &settings);
+        (void)nk_ui_end(ui);
+    }
+    used = nk_ui_dump(ui, dump, cap);
+    nk_ui_destroy(ui);
+    return used > 0u;
+}
+
+/* Audit 2026-11-17: the Updates page names the update's folder whole, shows
+   no part of the user name in an error, and cuts a long word only between
+   characters. */
+static void test_update_page_folder_and_error_text(void) {
+    static char dump[CASE_DUMP_CAP];
+    /* Every word is short, so nothing is shortened: a 96-byte buffer cut the
+       version's folder name off the end with no mark. The text wraps, so the
+       checks look for the folder's own name and the word after it. */
+    static const char folder[] =
+        "~/Downloads/Nakagawa Recomp/updates/kept here for the next version/"
+        "nakagawa_recomp-0.0.6-windows-x64";
+    static const char failed[] =
+        "Nakagawa couldn't create a folder for the new version "
+        "(D:/SyntheticProfiles/SyntheticPlayerName/Documents/Emulators/"
+        "nakagawa-recomp-0.0.6-windows-x64.staging). Nothing was changed.";
+    /* "~/" then three 3-byte characters end at byte 11: the 12-byte head
+       would end inside the fourth. */
+    static const char wide[] =
+        "It stopped at ~/\xE3\x82\xB2\xE3\x83\xBC\xE3\x83\xA0\xE3\x82\xBA/"
+        "emulators/nakagawa-recomp-0.0.6-windows-x64-with-a-long-name.staging today.";
+    CHECK(dump_update_page(PLAYER_UI_UPDATE_DOWNLOADED, folder, NULL, dump, sizeof(dump)) &&
+              strstr(dump, "nakagawa_recomp-0.0.6-windows-x64. Install") != NULL,
+          "Downloaded names the whole folder the ZIP was saved in");
+    CHECK(dump_update_page(PLAYER_UI_UPDATE_INSTALLED, folder, NULL, dump, sizeof(dump)) &&
+              strstr(dump, "nakagawa_recomp-0.0.6-windows-x64. Close") != NULL,
+          "Installed names the whole folder the new version is in");
+    CHECK(dump_update_page(PLAYER_UI_UPDATE_FAILED, NULL, failed, dump, sizeof(dump)) &&
+              strstr(dump, "SyntheticPlayerName") == NULL && strstr(dump, "D:/SyntheticProfiles/") == NULL &&
+              strstr(dump, "(~/Documents/Emulators/nakagawa-recomp-0.0.6-windows-x64.staging)") !=
+                  NULL,
+          "an error's path shows the profile folder as ~ before any word is shortened");
+    CHECK(dump_update_page(PLAYER_UI_UPDATE_FAILED, NULL, wide, dump, sizeof(dump)) &&
+              strstr(dump, "~/\xE3\x82\xB2\xE3\x83\xBC\xE3\x83\xA0\xE2\x80\xA6") != NULL &&
+              strstr(dump, "\xA0\xE3\xE2\x80\xA6") == NULL,
+          "a long word's head ends on a whole character before the ellipsis");
+}
+
+/* Audit 2026-11-17: Back on the Saves card answers its question with Cancel and
+   keeps the card (docs/PLAYER_UI_DESIGN.md); with no question up it closes it. */
+static void test_saves_back_answers_the_question(void) {
+    static const PlayerUiSavesRow rows[] = {{"2026-11-04 14:05:01", "Backed up, 120 KB"}};
+    PlayerUiSavesModel saves;
+    PlayerUiAction result[2];
+    for (int asked = 0; asked < 2; ++asked) {
+        NkUiConfig config;
+        NkUiEvent back;
+        NkUi *ui;
+        memset(&config, 0, sizeof(config));
+        config.host = NK_UI_HOST_LAUNCHER;
+        ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create the Saves UI for Back");
+        if (ui == NULL) return;
+        set_test_viewport(ui, 1280, 800);
+        memset(&saves, 0, sizeof(saves));
+        saves.title = "Synthetic Untested Fixture";
+        saves.title_index = 2u;
+        saves.has_saves = true;
+        saves.rows = rows;
+        saves.row_count = 1u;
+        saves.total = 1u;
+        saves.ask = asked ? PLAYER_UI_SAVES_ASK_RESTORE : PLAYER_UI_SAVES_ASK_NONE;
+        saves.logical_width = 1280.0f;
+        saves.logical_height = 800.0f;
+        memset(&back, 0, sizeof(back));
+        back.type = NK_UI_EV_BACK;
+        back.down = true;
+        nk_ui_push_event(ui, &back);
+        nk_ui_begin(ui, 0.0);
+        result[asked] = player_ui_screen_saves(ui, &saves);
+        (void)nk_ui_end(ui);
+        nk_ui_destroy(ui);
+    }
+    CHECK(saves_op(result[1]) == PLAYER_UI_SAVES_CANCEL && result[1].title_index == 2u,
+          "Back while Restore asks answers it with Cancel");
+    CHECK(result[0].kind == PLAYER_UI_ACTION_BACK && result[0].title_index == 2u,
+          "Back given to the card with no question up closes it");
+}
+
+/* Audit 2026-11-17: a refused pick clears iso_selected but leaves the last
+   disc's path, so the Game step must not show that disc as chosen in green. */
+static void test_wizard_refused_pick_is_not_chosen(void) {
+    static char dump[CASE_DUMP_CAP];
+    NkUiConfig config;
+    NkUiTextBackend text = screen_test_text_backend();
+    PlayerUiWizardModel wizard;
+    NkUi *ui;
+    char expect[96];
+    const NkUiTheme *theme = nk_ui_theme_n1();
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &text;
+    ui = screen_ui_create(&config);
+    CHECK(ui != NULL, "create the wizard UI");
+    if (ui == NULL) return;
+    set_test_viewport(ui, 1280, 800);
+    memset(&wizard, 0, sizeof(wizard));
+    wizard.logical_width = 1280.0f;
+    wizard.logical_height = 800.0f;
+    wizard.step = 2;
+    wizard.has_iso = true;
+    wizard.iso_selected = false;
+    wizard.iso_path = "C:/synthetic/discs/synthetic-showcase.iso";
+    wizard.iso_detail = "Size: 12.00 MB \xC2\xB7 Disc ID: TEST00007";
+    wizard.status_message = "This file isn't a PSP disc image.";
+    for (int frame = 0; frame < 2; ++frame) {
+        nk_ui_begin(ui, 0.0);
+        (void)player_ui_screen_wizard(ui, &wizard);
+        (void)nk_ui_end(ui);
+    }
+    (void)nk_ui_dump(ui, dump, sizeof(dump));
+    nk_ui_destroy(ui);
+    (void)snprintf(expect, sizeof(expect), "%08X \"This file isn't a PSP disc image.\"",
+                   (unsigned)theme->warning);
+    CHECK(strstr(dump, "synthetic-showcase.iso") == NULL &&
+              strstr(dump, "TEST00007") == NULL,
+          "a refused pick shows no disc as chosen");
+    CHECK(strstr(dump, expect) != NULL, "the refusal reads in the warning colour");
 }
 
 int main(int argc, char **argv) {
@@ -9263,8 +9677,12 @@ int main(int argc, char **argv) {
     test_stalled_game_offers_stop_once();
     test_default_focus_lands_on_the_main_action();
     test_tier_table_matches_the_docs();
+    test_setting_label_holds_a_long_value();
     test_remove_from_library();
     test_saves_dialog();
+    test_saves_back_answers_the_question();
+    test_update_page_folder_and_error_text();
+    test_wizard_refused_pick_is_not_chosen();
     test_add_to_steam_dialog();
     test_wizard_steps_match_the_route();
     test_outcome_lines_take_their_colour();
@@ -9283,6 +9701,8 @@ int main(int argc, char **argv) {
     test_library_find_box_fits();
     test_library_find_filter_and_cap();
     test_nickname_keyboard();
+    test_keyboard_takes_the_pad_when_its_block_cannot_open();
+    test_flow_bytes_unit_boundaries();
     test_texture_scaling_rows();
     test_ssaa_warning_rows();
     CHECK(build_library_golden(library, sizeof(library), &library_size),

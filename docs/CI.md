@@ -681,7 +681,9 @@ with the host twin (#2050) on, native and full colour, on both paths at scales 1
 the native twin on the interlock path: the image and the path taken must be those of the twin-off run, a native
 twin must equal its image, and a full-colour twin of the overlapping pair must hold the blends at 8 bits per
 channel, in drawing order on the interlock path. A device that refuses the
-interlock prints one SKIP line for each interlock leg. The lavapipe step prints
+interlock prints one SKIP line for each interlock leg, and the recipe's last line names every leg that printed a
+SKIP line (a leg that refuses the interlock, supersampling or the twin exits 0 without running its path), or says
+that every leg ran. The lavapipe step prints
 the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
 pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Four
 mutant targets follow, and each broken variant must fail its case with its own message:

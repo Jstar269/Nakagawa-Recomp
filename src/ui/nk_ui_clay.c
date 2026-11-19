@@ -35,6 +35,16 @@
 #pragma GCC diagnostic pop
 #endif
 
+/* How many text styles (font, letter spacing and line height) the Clay
+   measure cache can tell apart at once; nk_ui_clay_begin starts over when half
+   are in use, so a frame always has at least half to itself. */
+#define NK_UI_CLAY_TEXT_STYLE_MAX 256u
+
+typedef struct {
+    uint16_t font;        /* the font and letter spacing (nk_ui_clay_pack_font) */
+    uint16_t line_height; /* the line box Clay lays the run's lines in */
+} NkUiClayTextStyle;
+
 typedef struct {
     Clay_Context *context;
     Clay_Context *previous_context;
@@ -61,6 +71,10 @@ typedef struct {
     } starts[NK_UI_SCROLL_MAX];
     size_t start_count;
     bool transitioning;         /* a transition ran in the last layout */
+    /* The text styles of the runs since the measure cache was last emptied:
+       a run's Clay fontId is its style's index here. */
+    NkUiClayTextStyle text_styles[NK_UI_CLAY_TEXT_STYLE_MAX];
+    size_t text_style_count;
 } NkUiClay;
 
 /* Clay calls a transition's handler, with no user pointer, for each element
@@ -80,16 +94,6 @@ static Clay_ElementId nk_ui_clay_container_id(NkUiId id) {
     return Clay_GetElementIdWithIndex(CLAY_STRING("nk_ui.container"), id);
 }
 
-static int nk_ui_clay_clamp_int(double value) {
-    if (value <= (double)INT_MIN + 2.0) {
-        return INT_MIN + 2;
-    }
-    if (value >= (double)INT_MAX - 2.0) {
-        return INT_MAX - 2;
-    }
-    return (int)value;
-}
-
 static NkUiPixelRect nk_ui_clay_round_box(Clay_BoundingBox box, float density) {
     NkUiRect rect = {box.x, box.y, box.width, box.height};
     return nk_ui_round_rect(rect, density);
@@ -101,10 +105,10 @@ static NkUiPixelRect nk_ui_clay_round_box(Clay_BoundingBox box, float density) {
    the bar beside it. */
 static NkUiPixelRect nk_ui_clay_round_scissor(Clay_BoundingBox box, float density) {
     NkUiPixelRect rect;
-    rect.x0 = nk_ui_clay_clamp_int(floor((double)box.x * (double)density + 0.5));
-    rect.y0 = nk_ui_clay_clamp_int(floor((double)box.y * (double)density + 0.5));
-    rect.x1 = nk_ui_clay_clamp_int(floor((double)(box.x + box.width) * (double)density + 0.5));
-    rect.y1 = nk_ui_clay_clamp_int(floor((double)(box.y + box.height) * (double)density + 0.5));
+    rect.x0 = nk_ui_round_edge(box.x, density);
+    rect.y0 = nk_ui_round_edge(box.y, density);
+    rect.x1 = nk_ui_round_edge(box.x + box.width, density);
+    rect.y1 = nk_ui_round_edge(box.y + box.height, density);
     return rect;
 }
 
@@ -132,9 +136,10 @@ static uint32_t nk_ui_clay_color(Clay_Color color) {
     return (r << 24) | (g << 16) | (b << 8) | a;
 }
 
-/* Clay hashes fontId into its text-measure cache but stores letter spacing as a
-   whole number, so the letter spacing travels in fontId's high bits instead (in
-   eighths of a logical pixel) and Clay's own letterSpacing stays zero. */
+/* Clay stores letter spacing as a whole number, so the letter spacing travels
+   beside the font instead (in eighths of a logical pixel, in the high bits) and
+   Clay's own letterSpacing stays zero. A run's Clay fontId is the index of its
+   whole text style (nk_ui_clay_text_style_index), not this packing. */
 #define NK_UI_CLAY_FONT_BITS 4u
 #define NK_UI_CLAY_FONT_MASK 0x000Fu
 #define NK_UI_CLAY_SPACING_STEPS 8.0f
@@ -156,6 +161,46 @@ static int nk_ui_clay_font(uint16_t packed) {
 
 static float nk_ui_clay_spacing(uint16_t packed) {
     return (float)(packed >> NK_UI_CLAY_FONT_BITS) / NK_UI_CLAY_SPACING_STEPS;
+}
+
+/* Clay keys its text-measure cache on the text, fontId, fontSize and
+   letterSpacing alone, and nk_ui_clay_measure gives a run its line height, so
+   the fontId names the font, the letter spacing and the line height together:
+   two runs that differ only in line height are measured apart. Writes the
+   style's index; false when the table is full. */
+static bool nk_ui_clay_text_style_index(NkUiClay *clay, uint16_t font, uint16_t line_height,
+                                        uint16_t *index) {
+    size_t i;
+    for (i = 0; i < clay->text_style_count; ++i) {
+        if (clay->text_styles[i].font == font && clay->text_styles[i].line_height == line_height) {
+            *index = (uint16_t)i;
+            return true;
+        }
+    }
+    if (clay->text_style_count >= NK_UI_CLAY_TEXT_STYLE_MAX) {
+        return false;
+    }
+    clay->text_styles[clay->text_style_count].font = font;
+    clay->text_styles[clay->text_style_count].line_height = line_height;
+    *index = (uint16_t)clay->text_style_count++;
+    return true;
+}
+
+/* The font and letter spacing of the style a Clay fontId names; false for an
+   index this context never gave out. */
+static bool nk_ui_clay_text_style_font(const NkUiClay *clay, uint16_t index, uint16_t *font) {
+    if (index >= clay->text_style_count) {
+        return false;
+    }
+    *font = clay->text_styles[index].font;
+    return true;
+}
+
+/* Empties the text-style table with Clay's measure cache, which keys on its
+   indices. */
+static void nk_ui_clay_reset_text_styles(NkUiClay *clay) {
+    clay->text_style_count = 0u;
+    Clay_ResetMeasureTextCache();
 }
 
 /* A style's letter spacing as Clay lays it out (in eighths of a logical px),
@@ -277,8 +322,12 @@ static Clay_Dimensions nk_ui_clay_measure(Clay_StringSlice text,
         device_px = 1;
     }
     {
-        uint16_t packed = config != NULL ? config->fontId : 0u;
-        int font = nk_ui_clay_font(packed);
+        uint16_t packed;
+        int font;
+        if (config == NULL || !nk_ui_clay_text_style_font(clay, config->fontId, &packed)) {
+            return result;
+        }
+        font = nk_ui_clay_font(packed);
         float spacing = nk_ui_clay_spacing(packed);
         NkUiTextSize measured = clay->text.measure(clay->text.user, font, device_px,
                                                    text.chars, (size_t)text.length);
@@ -359,6 +408,10 @@ bool nk_ui_clay_error_kind(int type, const char **kind) {
 /* The error bit of a render command nk_ui does not draw, beside Clay's own
    error types. */
 #define NK_UI_CLAY_UNDRAWN_BIT (1u << 31)
+/* A draw command the draw buffer refused (no memory, too many nested clips). */
+#define NK_UI_CLAY_DRAW_BIT (1u << 30)
+/* A frame with more text styles than the text-style table holds. */
+#define NK_UI_CLAY_TEXT_STYLE_BIT (1u << 29)
 
 /* Records an error for this frame and reports it once a frame, and not again
    while it repeats frame after frame. */
@@ -371,6 +424,24 @@ static void nk_ui_clay_report(NkUiClay *clay, uint32_t bit, NkUiLayoutError repo
     if (!ongoing && clay->report_error != NULL) {
         clay->report_error(clay->report_user, &report);
     }
+}
+
+/* An error nk_ui raises itself (a frame storage or capacity limit), reported
+   as Clay's own are: once when it starts, not again while it repeats. bit
+   names the error: nk_ui's own use 20 to 28, above Clay's types (29 is the
+   text-style table's, 30 and 31 the draw's). */
+void nk_ui_clay_report_own(void *opaque_clay, unsigned bit, const char *kind,
+                           const char *text, bool fatal) {
+    NkUiClay *clay = (NkUiClay *)opaque_clay;
+    NkUiLayoutError report;
+    if (clay == NULL || kind == NULL || text == NULL || bit < 20u || bit > 28u) {
+        return;
+    }
+    report.kind = kind;
+    report.text = text;
+    report.text_length = strlen(text);
+    report.fatal = fatal;
+    nk_ui_clay_report(clay, 1u << bit, report);
 }
 
 static void nk_ui_clay_error(Clay_ErrorData error) {
@@ -499,7 +570,7 @@ bool nk_ui_clay_set_dimensions(void *opaque_clay, float width, float height, flo
     if (clay->density != density || clay->text_scale != text_scale) {
         clay->density = density;
         clay->text_scale = text_scale;
-        Clay_ResetMeasureTextCache();
+        nk_ui_clay_reset_text_styles(clay);
     }
     clay->dimensions = (Clay_Dimensions){width, height};
     Clay_SetCurrentContext(previous);
@@ -513,6 +584,9 @@ bool nk_ui_clay_begin(void *opaque_clay) {
     }
     clay->previous_context = Clay_GetCurrentContext();
     Clay_SetCurrentContext(clay->context);
+    if (clay->text_style_count >= NK_UI_CLAY_TEXT_STYLE_MAX / 2u) {
+        nk_ui_clay_reset_text_styles(clay);
+    }
     clay->failed = false;
     clay->previous_errors = clay->frame_errors;
     clay->frame_errors = 0u;
@@ -695,8 +769,24 @@ bool nk_ui_clay_text_styled(void *opaque_clay, NkUiId id, const char *text, size
     Clay_ElementDeclaration declaration;
     Clay_TextElementConfig text_config;
     Clay_String contents;
+    uint16_t font_size;
+    uint16_t line_height;
+    uint16_t style_index;
     if (clay == NULL || !clay->frame_open || text == NULL || size_px <= 0 ||
         length > (size_t)INT32_MAX) {
+        return false;
+    }
+    font_size = (uint16_t)(size_px > 65535 ? 65535 : size_px);
+    /* fontSize stays the style's own size (the measure and the draw scale it);
+       the line box Clay stacks wrapped lines in grows with the text. */
+    line_height = (uint16_t)nk_ui_clay_line_height(style->line_height, font_size,
+                                                   clay->text_scale);
+    if (!nk_ui_clay_text_style_index(clay, nk_ui_clay_pack_font(font, style->letter_spacing),
+                                     line_height, &style_index)) {
+        static const char full[] = "A frame used more text styles (font, letter spacing and "
+                                   "line height) than the layout's text-style table holds.";
+        NkUiLayoutError report = {"TEXT_STYLES_EXCEEDED", full, sizeof(full) - 1u, true};
+        nk_ui_clay_report(clay, NK_UI_CLAY_TEXT_STYLE_BIT, report);
         return false;
     }
     Clay_SetCurrentContext(clay->context);
@@ -714,13 +804,9 @@ bool nk_ui_clay_text_styled(void *opaque_clay, NkUiId id, const char *text, size
         (float)((rgba >> 8) & 0xFFu),
         (float)(rgba & 0xFFu)
     };
-    text_config.fontId = nk_ui_clay_pack_font(font, style->letter_spacing);
-    text_config.fontSize = (uint16_t)(size_px > 65535 ? 65535 : size_px);
-    /* fontSize stays the style's own size (the measure and the draw scale it);
-       the line box Clay stacks wrapped lines in grows with the text. */
-    text_config.lineHeight = (uint16_t)nk_ui_clay_line_height(style->line_height,
-                                                              text_config.fontSize,
-                                                              clay->text_scale);
+    text_config.fontId = style_index;
+    text_config.fontSize = font_size;
+    text_config.lineHeight = line_height;
     text_config.wrapMode = style->wrap ? CLAY_TEXT_WRAP_WORDS : CLAY_TEXT_WRAP_NONE;
     text_config.userData = (void *)(uintptr_t)id;
     text_config.textAlignment = CLAY_TEXT_ALIGN_LEFT;
@@ -851,6 +937,21 @@ void nk_ui_clay_set_debug(void *opaque_clay, bool enabled) {
     Clay_SetCurrentContext(clay->context);
     Clay_SetDebugModeEnabled(enabled);
     Clay_SetCurrentContext(restore);
+}
+
+/* Whether the inspector is on: the panel's own close button turns it off. */
+bool nk_ui_clay_debug(void *opaque_clay) {
+    NkUiClay *clay = (NkUiClay *)opaque_clay;
+    Clay_Context *restore;
+    bool enabled;
+    if (clay == NULL || clay->context == NULL) {
+        return false;
+    }
+    restore = Clay_GetCurrentContext();
+    Clay_SetCurrentContext(clay->context);
+    enabled = Clay_IsDebugModeEnabled();
+    Clay_SetCurrentContext(restore);
+    return enabled;
 }
 
 /* Runs Clay's scrolling for this frame, between frames as its lifecycle asks:
@@ -1007,9 +1108,20 @@ bool nk_ui_clay_end(void *opaque_clay, NkUiDrawBuffer *draw, float density,
             NkUiPixelRect bounds = nk_ui_clay_round_box(box, density);
             int pixel_size = nk_ui_clay_device_px((int)text->fontSize, density,
                                                   clay->text_scale);
+            uint16_t packed;
+            if (!nk_ui_clay_text_style_font(clay, text->fontId, &packed)) {
+                /* Every run nk_ui lays out names a style it recorded. */
+                static const char unknown[] = "A text command names a text style the layout "
+                                              "never recorded.";
+                NkUiLayoutError report = {"UNKNOWN_TEXT_STYLE", unknown, sizeof(unknown) - 1u,
+                                          true};
+                nk_ui_clay_report(clay, NK_UI_CLAY_TEXT_STYLE_BIT, report);
+                ok = false;
+                break;
+            }
             ok = nk_ui_draw_add_text_spaced(draw, bounds, text->stringContents.chars,
-                (size_t)text->stringContents.length, nk_ui_clay_font(text->fontId), pixel_size,
-                nk_ui_clay_device_spacing(nk_ui_clay_spacing(text->fontId), density,
+                (size_t)text->stringContents.length, nk_ui_clay_font(packed), pixel_size,
+                nk_ui_clay_device_spacing(nk_ui_clay_spacing(packed), density,
                                           clay->text_scale),
                 nk_ui_clay_color(text->textColor), id);
             break;
@@ -1040,6 +1152,13 @@ bool nk_ui_clay_end(void *opaque_clay, NkUiDrawBuffer *draw, float density,
             break;
         }
         }
+    }
+    if (!ok && !clay->failed) {
+        /* The layout was whole, but the draw list could not take a command. */
+        static const char text[] = "The draw list refused a command: out of memory or "
+                                   "clips nested too deep.";
+        NkUiLayoutError report = {"DRAW_COMMAND_FAILED", text, sizeof(text) - 1u, true};
+        nk_ui_clay_report(clay, NK_UI_CLAY_DRAW_BIT, report);
     }
     clay->start_count = 0u;
     restore = clay->previous_context;

@@ -454,15 +454,22 @@ static void settings_problem_report(NkUi *ui, const PlayerUiSettingsModel *model
 
 /* Text only wraps at spaces, so a folder path is one word that would run out of
    the card. Each word longer than max_word bytes keeps its start and its end
-   (the folder's own name) around "...". */
-static void settings_shorten_words(const char *in, char *out, size_t cap, size_t max_word) {
+   (the folder's own name) around "...", both cut at a character boundary. The
+   host's display rule (the profile folder as "~") runs first, on the whole
+   text: a cut made before it could keep part of the user name, which the
+   draw-time rule can then no longer match. The result is never longer than the
+   text, so a buffer that holds the text holds it whole. */
+static void settings_shorten_words(NkUi *ui, const char *in, char *out, size_t cap,
+                                   size_t max_word) {
     size_t used = 0u;
     if (cap == 0u) return;
+    in = nk_ui_frame_text(ui, in);
     while (*in != '\0' && used + 1u < cap) {
         size_t word = strcspn(in, " ");
         if (word > max_word) {
             size_t head = 12u;
             size_t tail = max_word - head - 3u;
+            while (head > 0u && ((unsigned char)in[head] & 0xC0u) == 0x80u) --head;
             while (tail > 0u && ((unsigned char)in[word - tail] & 0xC0u) == 0x80u) --tail;
             (void)snprintf(out + used, cap - used, "%.*s…%.*s", (int)head, in, (int)tail,
                            in + word - tail);
@@ -487,7 +494,7 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
     bool busy = step == PLAYER_UI_UPDATE_CHECKING || step == PLAYER_UI_UPDATE_DOWNLOADING ||
                 step == PLAYER_UI_UPDATE_INSTALLING;
     char lead[192];
-    char line[640];
+    char line[800]; /* a sentence around a whole folder (folder[] below) */
     char a[32];
     char b[32];
     uint32_t lead_rgba = theme->muted;
@@ -606,8 +613,10 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                 nk_ui_text_role(ui, SET_ID_TEXT + 0xD4u, line, NK_UI_TYPE_DATA, theme->muted);
                 break;
             case PLAYER_UI_UPDATE_DOWNLOADED: {
-                char folder[96];
-                settings_shorten_words(safe_text(model->update_folder, "the downloads folder"),
+                /* Holds any folder whole (NK_MAX_PATH): a shorter buffer cut the
+                   folder's own name off its end with no mark. */
+                char folder[600];
+                settings_shorten_words(ui, safe_text(model->update_folder, "the downloads folder"),
                                        folder, sizeof(folder), 72u);
                 (void)snprintf(line, sizeof(line),
                                "Its SHA-256 matches the release's signed checksum. Saved in "
@@ -618,8 +627,8 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
                 break;
             }
             case PLAYER_UI_UPDATE_INSTALLED: {
-                char folder[96];
-                settings_shorten_words(safe_text(model->update_folder, "a new folder"), folder,
+                char folder[600];
+                settings_shorten_words(ui, safe_text(model->update_folder, "a new folder"), folder,
                                        sizeof(folder), 72u);
                 (void)snprintf(line, sizeof(line),
                                "It is in %s. Close Nakagawa, then start bin\\nakagawa_player.exe "
@@ -631,7 +640,7 @@ static void settings_updates(NkUi *ui, const PlayerUiSettingsModel *model, float
             }
             case PLAYER_UI_UPDATE_FAILED:
                 text = nk_ui_type(NK_UI_TYPE_BODY_S, theme->paper);
-                settings_shorten_words(safe_text(model->update_error_message, ""), line,
+                settings_shorten_words(ui, safe_text(model->update_error_message, ""), line,
                                        sizeof(line), 72u);
                 nk_ui_text(ui, SET_ID_TEXT + 0xD2u,
                            nk_ui_text_clamp(ui, line, &text, inner - 32.0f, 5), &text);
@@ -2158,7 +2167,7 @@ static void settings_dialog(NkUi *ui, const PlayerUiSettingsModel *model, float 
                 /* The folders differ at their ends (config, data, cache,
                    saves), so a long one keeps its end and loses its middle. */
                 char folder[600];
-                settings_shorten_words(safe_text(model->reset_folders[i], ""), folder,
+                settings_shorten_words(ui, safe_text(model->reset_folders[i], ""), folder,
                                        sizeof(folder), 72u);
                 nk_ui_text(ui, (NkUiId)(SET_ID_TEXT + 0x201u + (NkUiId)i),
                            nk_ui_text_clamp(ui, folder, &data, inner - 32.0f, 1), &data);

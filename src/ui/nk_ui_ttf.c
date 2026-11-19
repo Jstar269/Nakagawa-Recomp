@@ -342,6 +342,8 @@ static int nk_ui_ttf_shape(void *user, int font, int px, const char *text, size_
     int count = 0;
     int i;
     int total_width = 0;
+    size_t counted_to = 0u; /* text[0, counted_to) holds `counted` characters */
+    uint32_t counted = 0u;
     if (ttf == NULL || text == NULL || out == NULL || max <= 0 || length == 0 ||
         length > NK_UI_TTF_MAX_STRING) {
         return 0;
@@ -380,6 +382,22 @@ static int nk_ui_ttf_shape(void *user, int font, int px, const char *text, size_
         out[count].y = (float)(op->dst.y + op->dst.h - instance->ascent);
         out[count].advance_x = 0.0f;
         out[count].advance_y = 0.0f;
+        {
+            /* Characters before this glyph's text, counted as layout counts them
+               (every byte that is not a UTF-8 continuation byte). Spaces draw no
+               glyph and a ligature draws several characters as one, so the glyph
+               index is not this count. */
+            size_t at = op->text_offset >= 0 && (size_t)op->text_offset < length
+                            ? (size_t)op->text_offset : length;
+            if (at < counted_to) {
+                counted_to = 0u;
+                counted = 0u;
+            }
+            for (; counted_to < at; ++counted_to) {
+                if (((unsigned char)text[counted_to] & 0xC0u) != 0x80u) ++counted;
+            }
+            out[count].text_index = counted;
+        }
         ++count;
     }
     for (i = 0; i < count; ++i) {

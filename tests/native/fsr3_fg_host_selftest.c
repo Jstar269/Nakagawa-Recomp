@@ -344,6 +344,19 @@ static void refusals(void) {
         CHECK(fsr3_fg_host_dispatch(&h, &q) == 0, "refusals: rectangle %u %u %u %u refused", good_rect[i][0],
               good_rect[i][1], good_rect[i][2], good_rect[i][3]);
     }
+    /* A dispatch for a frame never prepared: its slot is still zero from init (frame 2), or holds another frame
+     * (frame 3 over frame 1's slot). Refused, never planned with a render size of 0 from the empty slot. */
+    memset(q.generation_rect, 0, sizeof(q.generation_rect));
+    fsr3_fg_host_configure(&h, 2, 1);
+    q.frame_id = 2;
+    CHECK(fsr3_fg_host_dispatch(&h, &q) == -1, "refusals: a dispatch of frame 2, never prepared, accepted");
+    fsr3_fg_host_configure(&h, 3, 1);
+    q.frame_id = 3;
+    CHECK(fsr3_fg_host_dispatch(&h, &q) == -1, "refusals: a dispatch of frame 3 over frame 1's prepare accepted");
+    p.frame_id = 3;
+    CHECK(fsr3_fg_host_prepare(&h, &p) == 0, "refusals: the prepare of frame 3 was refused");
+    fsr3_fg_host_configure(&h, 3, 1);
+    CHECK(fsr3_fg_host_dispatch(&h, &q) == 0, "refusals: the dispatch of prepared frame 3 refused");
     for (int i = 0; i < FSR3FG_PASS_COUNT; i++)
         CHECK(fsr3_fg_pass_layout[i].count <= FSR3FG_MAX_BINDINGS, "pass %d has %u bindings", i,
               fsr3_fg_pass_layout[i].count);

@@ -18,8 +18,7 @@ typedef struct {
 struct NkUiRouter {
     PlayerUiRouteEntry entries[PLAYER_UI_ROUTE_DEPTH_MAX];
     size_t depth;
-    NkUiId focus_restore;
-    bool focus_restore_pending;
+    NkUiId focus_restore; /* 0: nothing to restore */
 };
 
 NkUiRouter *nk_ui_router_create(void) {
@@ -53,7 +52,6 @@ bool nk_ui_router_replace(NkUiRouter *router, PlayerUiRoute route) {
     router->entries[0].focus = 0u;
     router->depth = 1u;
     router->focus_restore = 0u;
-    router->focus_restore_pending = false;
     return true;
 }
 
@@ -67,7 +65,6 @@ bool nk_ui_router_push(NkUiRouter *router, PlayerUiRoute route) {
     entry->route = route;
     entry->focus = 0u;
     router->focus_restore = 0u;
-    router->focus_restore_pending = false;
     return true;
 }
 
@@ -77,7 +74,6 @@ bool nk_ui_router_pop(NkUiRouter *router) {
     }
     --router->depth;
     router->focus_restore = router->entries[router->depth - 1u].focus;
-    router->focus_restore_pending = router->focus_restore != 0u;
     return true;
 }
 
@@ -106,12 +102,11 @@ void nk_ui_router_set_focus(NkUiRouter *router, NkUiId id) {
 
 NkUiId nk_ui_router_take_focus_restore(NkUiRouter *router) {
     NkUiId id;
-    if (router == NULL || !router->focus_restore_pending) {
+    if (router == NULL) {
         return 0u;
     }
     id = router->focus_restore;
     router->focus_restore = 0u;
-    router->focus_restore_pending = false;
     return id;
 }
 
@@ -197,10 +192,12 @@ PlayerUiActionKind player_ui_top_bar(NkUi *ui, NkUiId id, PlayerUiRoute active) 
     chosen = nk_ui_top_bar(ui, id, sections, 3u,
                            nk_ui_input_label(nk_ui_prompt_style(ui)),
                            nk_ui_prompt_style(ui) != NK_UI_PROMPT_KEYCAPS);
-    if (chosen == 0 && !sections[0].active) return PLAYER_UI_ACTION_OPEN_LIBRARY;
+    /* LIBRARY stays highlighted on a title page, its parent, and choosing it
+       there goes back to the grid; only on the grid itself does it do nothing.
+       SETTINGS on the Settings or Controls page closes it, as Start does. */
+    if (chosen == 0 && active != PLAYER_UI_ROUTE_LIBRARY) return PLAYER_UI_ACTION_OPEN_LIBRARY;
     if (chosen == 1 && !sections[1].active) return PLAYER_UI_ACTION_OPEN_ABOUT;
-    if ((chosen == 2 && !sections[2].active) ||
-        (chosen < 0 && nk_ui_take_event(ui, NK_UI_EV_MENU, NULL))) {
+    if (chosen == 2 || (chosen < 0 && nk_ui_take_event(ui, NK_UI_EV_MENU, NULL))) {
         return PLAYER_UI_ACTION_OPEN_SETTINGS;
     }
     return PLAYER_UI_ACTION_NONE;

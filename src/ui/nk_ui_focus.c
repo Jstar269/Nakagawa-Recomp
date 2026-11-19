@@ -457,6 +457,18 @@ void nk_ui_focus_end_frame(NkUiFocusGraph *graph) {
     graph->memory[top] = graph->focused;
 }
 
+void nk_ui_focus_clear(NkUiFocusGraph *graph) {
+    int top;
+    if (graph == NULL) {
+        return;
+    }
+    top = nk_ui_focus_top_scope(graph->entries, graph->count);
+    graph->focused = 0u;
+    if (top >= 0) {
+        graph->memory[top] = 0u;
+    }
+}
+
 NkUiId nk_ui_focus_current(const NkUiFocusGraph *graph) {
     return graph != NULL ? graph->focused : 0u;
 }
@@ -495,6 +507,8 @@ static bool nk_ui_focus_scroll_for(const NkUiFocusScroller *s, NkUiRect *rect,
     } else if (rect->x + rect->w > s->viewport.x + s->viewport.w) {
         nx += (rect->x + rect->w) - (s->viewport.x + s->viewport.w);
     }
+    /* nk_ui's scrollers are vertical (content_w is the viewport width), so nx clamps
+       to 0 there; the horizontal half serves hosts that register wider content. */
     if (max_x < 0.0f) max_x = 0.0f;
     if (max_y < 0.0f) max_y = 0.0f;
     if (nx > max_x) nx = max_x;
