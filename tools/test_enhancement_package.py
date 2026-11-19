@@ -5103,7 +5103,7 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertEqual(enhancement_package.published_package_findings(published), [])
 
         def finding(pkg: dict[str, Any]) -> str:
-            findings = enhancement_package.published_package_findings(pkg)
+            findings: list[str] = enhancement_package.published_package_findings(pkg)
             self.assertEqual(len(findings), 1, findings)
             return findings[0]
 
