@@ -871,5 +871,104 @@ class TestDebuggerProtocol(unittest.TestCase):
             pr.Debugger(fake).request("no.such.event")
 
 
+class TestDecodeScreenshot(unittest.TestCase):
+    @staticmethod
+    def _msg(width, height, fmt, raw, flipped=False):
+        return {
+            "width": width,
+            "height": height,
+            "format": fmt,
+            "flipped": flipped,
+            "base64": base64.b64encode(raw).decode("ascii"),
+        }
+
+    def test_16bit_formats_decode_with_bit_replication(self):
+        # Each tuple: (format_name, [red, green, blue, black, white, mixed] uint16 words,
+        #              expected RGB for the mixed pixel).
+        # Bit replication:
+        #   4-bit: (v << 4) | v           -> 0xA->170, 0x5->85, 0xC->204
+        #   5-bit: (v << 3) | (v >> 2)    -> 21->173, 13->107, 9->74
+        #   6-bit: (v << 2) | (v >> 4)    -> 42->170
+        cases = (
+            # Native PSP display formats (GEBufferFormat 5650 / 5551 / 4444)
+            ("B5G6R5_UNORM_PACK16",
+             [0x001F, 0x07E0, 0xF800, 0x0000, 0xFFFF,
+              (21 << 0) | (42 << 5) | (9 << 11)],
+             (173, 170, 74)),
+            ("A1B5G5R5_UNORM_PACK16",
+             [0x801F, 0x03E0, 0xFC00, 0x8000, 0x7FFF,
+              (21 << 0) | (13 << 5) | (9 << 10) | (1 << 15)],
+             (173, 107, 74)),
+            ("A4B4G4R4_UNORM_PACK16",
+             [0xF00F, 0x00F0, 0xAF00, 0xF000, 0x0FFF,
+              (0xA << 0) | (0x5 << 4) | (0xC << 8) | (0x7 << 12)],
+             (170, 85, 204)),
+            # PPSSPP reversed / BGRA 16-bit color variants (GPUDebugBufferFormat)
+            ("R5G6B5_UNORM_PACK16",
+             [0xF800, 0x07E0, 0x001F, 0x0000, 0xFFFF,
+              (9 << 0) | (42 << 5) | (21 << 11)],
+             (173, 170, 74)),
+            ("R5G5B5A1_UNORM_PACK16",
+             [0xF801, 0x07C0, 0x003F, 0x0001, 0xFFFE,
+              (1 << 0) | (9 << 1) | (13 << 6) | (21 << 11)],
+             (173, 107, 74)),
+            ("R4G4B4A4_UNORM_PACK16",
+             [0xF00F, 0x0F00, 0x00FA, 0x000F, 0xFFF0,
+              (0x7 << 0) | (0xC << 4) | (0x5 << 8) | (0xA << 12)],
+             (170, 85, 204)),
+            ("A1R5G5B5_UNORM_PACK16",
+             [0xFC00, 0x03E0, 0x801F, 0x8000, 0x7FFF,
+              (9 << 0) | (13 << 5) | (21 << 10) | (1 << 15)],
+             (173, 107, 74)),
+            ("A4R4G4B4_UNORM_PACK16",
+             [0xAF00, 0x00F0, 0xF00F, 0xF000, 0x0FFF,
+              (0xC << 0) | (0x5 << 4) | (0xA << 8) | (0x7 << 12)],
+             (170, 85, 204)),
+        )
+        for fmt, words, mixed_rgb in cases:
+            with self.subTest(fmt=fmt):
+                raw = struct.pack("<6H", *words)
+                frame = pr.decode_screenshot(self._msg(3, 2, fmt, raw))
+                want = bytes(
+                    (255, 0, 0) + (0, 255, 0) + (0, 0, 255)
+                    + (0, 0, 0) + (255, 255, 255) + mixed_rgb
+                )
+                self.assertEqual((frame.width, frame.height, frame.pixels), (3, 2, want))
+
+    def test_16bit_flipped_rows_are_inverted(self):
+        # Row 0 in buffer (bottom on screen): pure blue; row 1 in buffer (top on screen): pure red.
+        raw = struct.pack("<2H", 0x7C00, 0x001F)
+        frame = pr.decode_screenshot(self._msg(1, 2, "A1B5G5R5_UNORM_PACK16", raw, flipped=True))
+        self.assertEqual(frame.pixels, bytes((255, 0, 0, 0, 0, 255)))
+
+    def test_16bit_wrong_byte_count_is_refused_with_numbers(self):
+        for nbytes in (10, 14):
+            with self.subTest(nbytes=nbytes):
+                msg = self._msg(3, 2, "A1B5G5R5_UNORM_PACK16", b"\x00" * nbytes)
+                with self.assertRaisesRegex(pr.CaptureFailed, rf"{nbytes} bytes.*3x2x2"):
+                    pr.decode_screenshot(msg)
+
+    def test_unknown_format_is_refused_by_name(self):
+        for fmt in ("D16", "UNDEFINED", "R5G5B5X1_UNORM_PACK16"):
+            with self.subTest(fmt=fmt):
+                msg = self._msg(1, 1, fmt, b"\x00\x00")
+                with self.assertRaisesRegex(pr.CaptureFailed, fmt):
+                    pr.decode_screenshot(msg)
+
+    def test_existing_24_and_32bit_paths_are_unchanged(self):
+        rgba = bytes((10, 20, 30, 255, 40, 50, 60, 128))
+        bgra = bytes((30, 20, 10, 255, 60, 50, 40, 128))
+        rgb = bytes((10, 20, 30, 40, 50, 60))
+        want = bytes((10, 20, 30, 40, 50, 60))
+        for fmt, raw in (("R8G8B8A8_UNORM", rgba), ("B8G8R8A8_UNORM", bgra), ("R8G8B8_UNORM", rgb)):
+            with self.subTest(fmt=fmt):
+                frame = pr.decode_screenshot(self._msg(2, 1, fmt, raw))
+                self.assertEqual((frame.width, frame.height, frame.pixels), (2, 1, want))
+        flipped = pr.decode_screenshot(self._msg(1, 2, "R8G8B8_UNORM", rgb, flipped=True))
+        self.assertEqual(flipped.pixels, bytes((40, 50, 60, 10, 20, 30)))
+        with self.assertRaisesRegex(pr.CaptureFailed, r"5 bytes.*2x1x3"):
+            pr.decode_screenshot(self._msg(2, 1, "R8G8B8_UNORM", b"\x00" * 5))
+
+
 if __name__ == "__main__":
     unittest.main()
