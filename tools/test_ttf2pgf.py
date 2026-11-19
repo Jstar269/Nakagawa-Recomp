@@ -1492,7 +1492,7 @@ _CONVERT_FLAGS = {
     "--embolden-advance": "embolden_advance", "--nominal-size": "nominal_size_26_6",
     "--resolution": "resolution_26_6", "--header-ascender": "header_ascender_26_6",
     "--header-descender": "header_descender_26_6", "--tracking": "tracking",
-    "--digit-advance": "digit_advance_26_6", "--snap-overshoot": "snap_overshoot",
+    "--digit-advance": "digit_advance_26_6", "--snap-overshoot": "snap_overshoot", "--scale-x": "scale_x",
 }
 
 
@@ -1637,6 +1637,20 @@ class ProjectLatinStrikeTests(unittest.TestCase):
                 ink = sum(sum(glyphs[code].samples) for code in letters) / 15 / len(letters)
                 self.assertLessEqual(abs(ink - target) / target, 0.02, f"ink per letter {ink:.1f}")
 
+    def test_sans_faces_set_the_console_x_height_and_cap_height_rows(self) -> None:
+        """#1300: the sans-serif faces' --embolden-y thickened strokes upwards far enough that the
+        x-height and cap height of the bold faces of both sizes, and the x-height of the smaller
+        regular face, came out one row above the console's, so game text looked taller and
+        narrower than the console's. Each sans face now tops x and H on the console rows of
+        ``INK`` (shared by every sans face of a size); the parameters were tuned against a
+        private comparison with the console's own fonts."""
+        for index in (0, 2, 4, 6, 8, 10, 12, 14):
+            _nominal, _ascender, _descender, x_height, cap, _drop, _stem = self.INK[0 if index < 8 else 8]
+            with self.subTest(index=index):
+                glyphs = _glyph_map(self._convert(index).glyphs)
+                self.assertEqual(self._ink_rows(glyphs[ord("x")])[0], x_height, "x-height row")
+                self.assertEqual(self._ink_rows(glyphs[ord("H")])[0], cap, "cap-height row")
+
     def test_the_ellipsis_sits_on_the_line_of_the_full_stop(self) -> None:
         # No strike passes --baseline-ellipsis: every Liberation face already draws U+2026 there.
         for index in range(16):
@@ -1749,7 +1763,7 @@ class OvershootSnapTests(CliRefusalMixin):
 
     def test_the_option_is_recorded_and_absent_when_off(self) -> None:
         conversion = self._convert(13, snap_overshoot=3)
-        self.assertEqual(conversion.manifest["converter"]["version"], "0.5.0")
+        self.assertEqual(conversion.manifest["converter"]["version"], "0.6.0")
         self.assertEqual(conversion.manifest["parameters"]["snap_overshoot"], {
             "unit": "sub-sample (1/8 pixel)", "threshold": 3,
             "zones": {"baseline": 0, "x_height": 1082, "cap_height": 1409},
@@ -1888,6 +1902,40 @@ class SpacingAndFallbackOptionTests(CliRefusalMixin):
                 self.assertEqual(glyphs[code].advance_x, 640)
                 self.assertEqual(glyphs[code].adjust_x, direct[code].adjust_x)
                 self.assertEqual(glyphs[code].samples, direct[code].samples)
+
+    def test_scale_x_widens_outlines_and_advances_only_and_is_recorded(self) -> None:
+        """#1300: ``--scale-x`` (spec section 3, rule 14) scales x in font units before rule 1."""
+        plain = self._convert()
+        self.assertNotIn("scale_x_thousandths", plain.manifest["parameters"])
+        neutral = self._convert(scale_x=ttf2pgf.SCALE_X_NEUTRAL)
+        self.assertEqual(neutral.image, plain.image, "1000 is byte-identical to no option")
+        wide = self._convert(scale_x=1200)
+        self.assertEqual(wide.manifest["parameters"]["scale_x_thousandths"], 1200)
+        font = ttf2pgf._Ttf(self.data)
+        before, after = _glyph_map(plain.glyphs), _glyph_map(wide.glyphs)
+        for code, glyph in after.items():
+            with self.subTest(code=hex(code)):
+                units = font.advance_units(cast(int, font.glyph_id(code)))
+                self.assertEqual(glyph.advance_x,
+                                 ttf2pgf._to26_6(Fraction(units * 1200, 1000), 13, font.units_per_em))
+                # Rows are untouched: same top row and height.
+                self.assertEqual((glyph.adjust_y, glyph.height), (before[code].adjust_y, before[code].height))
+        h_plain, h_wide = before[0x48], after[0x48]
+        self.assertGreater(h_wide.width, h_plain.width)
+        self.assertGreater(sum(h_wide.samples), sum(h_plain.samples))
+        self.assertEqual(self._convert(scale_x=1200).image, wide.image, "deterministic")
+
+    def test_scale_x_cli_matches_the_api_and_misuse_is_refused(self) -> None:
+        output = self.tmp / "wide.pgf"
+        result = _cli(output, FONT, "--codes", "0x30-0x48", "--ppem", "13", "--scale-x", "1080")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(output.read_bytes(), self._convert(scale_x=1080, pin=None, output_path=str(output)).image)
+        for value in (ttf2pgf.MIN_SCALE_X - 1, ttf2pgf.MAX_SCALE_X + 1, True):
+            with self.subTest(value=value), self.assertRaises(TtfConvertError) as caught:
+                self._convert(scale_x=value)
+            self.assertEqual(caught.exception.reason, "scale-x-out-of-range")
+        self.assert_cli_refused("scale-x-out-of-range", self.tmp / "out.pgf", FONT, "--codes", "0x48-0x48",
+                                "--scale-x", "1251")
 
     def test_spacing_options_out_of_range_are_refused(self) -> None:
         for kwargs, reason in (

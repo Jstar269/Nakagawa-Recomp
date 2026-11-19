@@ -107,6 +107,7 @@ scaling.
 | `snap-overshoot-out-of-range` | `--snap-overshoot` outside 0..8 sub-samples. |
 | `snap-overshoot-unavailable` | `--snap-overshoot` with a drawing font that lacks an outline for `H` or `x`, or whose flat edges do not ascend (section 3, rule 13). |
 | `snap-overshoot-zones-overlap` | At the chosen ppem the band above the x-height reaches the cap height (section 3, rule 13). |
+| `scale-x-out-of-range` | `--scale-x` outside 800..1250 thousandths (section 3, rule 14). |
 | `glyph-too-large` | A raster exceeds the writer's 7-bit record fields (127 px). |
 | `composite-too-deep` / `composite-too-many-components` | Composite expansion bounds. |
 | `metric-targets-invalid` / `metric-target-unreachable` | Policy document is malformed / no size satisfies it. |
@@ -290,6 +291,22 @@ manifest in memory first and writes only after every stage succeeds.
     the chosen ppem the band above `X` must end below `C`
     (`(C - X) * ppem * 8 > N * unitsPerEm`), so no point is in two bands.
 
+14. **Horizontal scale** (optional, default off). `--scale-x P` (800..1250, in
+    thousandths; 1000 is off) multiplies every `x` of every outline, in font
+    units, by exactly `P / 1000` as a rational, after rule 11's shift and
+    rule 13's alignment (which never moves `x`) and before rule 7's digit
+    centring and rule 1's scaling; the `hmtx` advance of each code is
+    multiplied the same way before rule 1. `y`, and so every row, is
+    untouched, and at 1000 the output is byte-identical to a conversion
+    without the option. Rule 7's digit centring uses the scaled advance.
+    *Project decision* (#1300): the sans-serif stand-ins are Liberation Sans,
+    whose letters at the console's sizes come out narrower than the console
+    fonts' and spaced looser to keep the console's line lengths. A small
+    horizontal scale moves ink from the gaps into the letters without a new
+    source face; the project's parameters were tuned against a private
+    comparison with the console's own fonts, and only those parameters are
+    recorded.
+
 Same pinned input plus same parameters plus same converter version therefore
 produce byte-identical `.pgf` and manifest output on every supported host,
 which `tools/test_ttf2pgf.py` asserts by repeated runs.
@@ -402,7 +419,7 @@ Generated PGFs are fixtures, never an authenticity claim.
 | `code_points` | For `--codepoints`: the file's leaf name, count, and SHA-256; `null` for a range. |
 | `glyphs` | Count, zero-area codes, maximum pixel dimensions. |
 | `metric_targets` | The policy, the chosen ppem, and achieved 26.6 values - or `null`. |
-| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`). |
+| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`); `scale_x_thousandths` only when it is not 1000. |
 | `fallback` | Only with `--fallback`: the second font's `input` record (as above), its `license` block, and the ascending `codes` it draws. |
 | `license` | SPDX id, copyright line, reserved font names, the **full licence text**, its digest, and the source pin's provenance record - or `null` without a pin. |
 
@@ -450,9 +467,9 @@ Generated PGFs are fixtures, never an authenticity claim.
 | Code-point set converts only the listed codes, sparse map, digest in manifest, nominal size | `CodePointSetTests` |
 | Sparse code-point set reads back through the reader; absent codes are misses | `ReaderRoundTripTests` |
 | Every named refusal writes nothing | `RefusalTests`, `CompositeRefusalTests` |
-| Tracking, tabular digits and the second font: effect, manifest record and refusals | `SpacingAndFallbackOptionTests` |
+| Tracking, tabular digits, the horizontal scale and the second font: effect, manifest record and refusals | `SpacingAndFallbackOptionTests` |
 | Built-in Latin, Japanese and Korean sets and the pinned fonts' coverage of them | `ProjectCodePointCoverageTests`, `JapaneseCodePointCoverageTests` |
-| Project Latin faces: one per console index, line widths, class widths and ink | `ProjectLatinStrikeTests` |
+| Project Latin faces: one per console index, line widths, class widths, ink, and the sans faces' x-height and cap-height rows | `ProjectLatinStrikeTests` |
 | Overshoot alignment: round and flat letters share their rows, flat letters and deep features unchanged, manifest record and refusals | `OvershootSnapTests`, `ProjectLatinStrikeTests` |
 | Project Japanese and Korean nominal size and advances | `ProjectCjkSizeTests` |
 | Independent structural validation | `nk_core.fonts.validate_pgf_data` on the output |

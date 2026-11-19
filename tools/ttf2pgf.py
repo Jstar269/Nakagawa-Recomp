@@ -55,7 +55,7 @@ except ImportError:  # direct script execution
     import pgf_writer  # type: ignore[no-redef]
 
 CONVERTER_NAME = "ttf2pgf"
-CONVERTER_VERSION = "0.5.0"
+CONVERTER_VERSION = "0.6.0"
 SPEC_PATH = "docs/cleanroom/PGF_CONVERTER_SPEC.md"
 PIN_SCHEMA = "font-pin/v1"
 
@@ -93,6 +93,11 @@ FULL_STOP_CODE = 0x2E
 #: and the flat edges come from these reference glyphs: baseline and cap height from ``H``,
 #: x-height from ``x``.
 MAX_SNAP_OVERSHOOT = SUPERSAMPLE
+#: ``--scale-x`` (spec section 3, rule 14): horizontal scale of outlines and advances in thousandths;
+#: 1000 is off. The bounds keep a letter recognisably the source face's.
+SCALE_X_NEUTRAL = 1000
+MIN_SCALE_X = 800
+MAX_SCALE_X = 1250
 SNAP_CAP_REFERENCE = 0x48
 SNAP_X_REFERENCE = 0x78
 DEFAULT_FONT_NAME = "Nakagawa Open Latin"
@@ -1676,8 +1681,11 @@ class _Planner:
         baseline_ellipsis: bool = False,
         fallback: _Ttf | None = None,
         snap_overshoot: int = 0,
+        scale_x: int = SCALE_X_NEUTRAL,
     ) -> None:
         self.font = font
+        #: ``--scale-x`` as an exact ratio (spec section 3, rule 14); 1 leaves every outline as read.
+        self.scale_x = Fraction(scale_x, SCALE_X_NEUTRAL)
         #: ``--snap-overshoot`` threshold in sub-samples (0: off) and each drawing font's flat
         #: edges, keyed by the font object's identity (spec section 3, rule 13).
         self.snap_overshoot = snap_overshoot
@@ -1734,8 +1742,9 @@ class _Planner:
             return self.fallback
         return self.font
 
-    def advance_units(self, code: int) -> int:
-        return self.font_for(code).advance_units(self.gids[code])
+    def advance_units(self, code: int) -> int | Fraction:
+        units = self.font_for(code).advance_units(self.gids[code])
+        return units if self.scale_x == 1 else units * self.scale_x
 
     def _ellipsis_shift(self) -> int:
         """Font units that set the ellipsis on the full stop's line.
@@ -1757,9 +1766,12 @@ class _Planner:
         font = self.font_for(code)
         contours = font.outline(self.gids[code])
         shift = self.outline_shift.get(code, 0)
-        if not shift:
+        scale = self.scale_x
+        if not shift and scale == 1:
             return contours
-        return [[(x, y + shift, on) for x, y, on in contour] for contour in contours]
+        if scale == 1:
+            return [[(x, y + shift, on) for x, y, on in contour] for contour in contours]
+        return [[(x * scale, y + shift, on) for x, y, on in contour] for contour in contours]
 
     def set_shift_x(self, code: int, shift_26_6: int) -> None:
         """Move ``code``'s outline right by ``shift_26_6`` and drop any raster planned before the move.
@@ -1890,6 +1902,7 @@ def convert(
     fallback_path: str | None = None,
     fallback_pin: SourcePin | None = None,
     snap_overshoot: int = 0,
+    scale_x: int = SCALE_X_NEUTRAL,
 ) -> Conversion:
     """Convert one pinned TrueType font into a PGF image plus its manifest.
 
@@ -1899,7 +1912,9 @@ def convert(
     ``digit_advance_26_6`` gives the digits 0-9 one advance (tabular figures) and centres each
     digit's outline in the change. ``fallback_data`` is a second pinned font that draws only the
     code points the first lacks. ``snap_overshoot`` sets round letters' overshoots of less than that
-    many sub-samples on the flat baseline, x-height and cap height (spec section 3, rule 13). Every stage
+    many sub-samples on the flat baseline, x-height and cap height (spec section 3, rule 13).
+    ``scale_x`` widens (over 1000) or narrows outlines and advances by that many thousandths
+    (rule 14). Every stage
     validates before the next runs; the returned bytes are final. Raises
     :class:`TtfConvertError` naming the refusal on any malformed, unsupported, or
     policy-violating input.
@@ -1954,6 +1969,11 @@ def convert(
             "snap-overshoot-out-of-range",
             f"--snap-overshoot {snap_overshoot!r} is outside 0..{MAX_SNAP_OVERSHOOT} sub-samples",
         )
+    if isinstance(scale_x, bool) or not isinstance(scale_x, int) or not MIN_SCALE_X <= scale_x <= MAX_SCALE_X:
+        raise _refuse(
+            "scale-x-out-of-range",
+            f"--scale-x {scale_x!r} is outside {MIN_SCALE_X}..{MAX_SCALE_X} thousandths",
+        )
     if (fallback_data is None) != (fallback_path is None):
         raise _refuse("conflicting-parameters", "a fallback font needs both its bytes and its path")
     if fallback_pin is not None and fallback_data is None:
@@ -1971,6 +1991,7 @@ def convert(
     fallback = _Ttf(fallback_data) if fallback_data is not None else None
     planner = _Planner(
         font, code_list, baseline_ellipsis=baseline_ellipsis, fallback=fallback, snap_overshoot=snap_overshoot,
+        scale_x=scale_x,
     )
     if fallback is not None and not planner.fallback_codes:
         raise _refuse("fallback-unused", "the first font draws every code point; drop --fallback")
@@ -2089,6 +2110,7 @@ def convert(
         tracking=tracking,
         digit_advance_26_6=digit_advance_26_6,
         snap_overshoot=snap_overshoot,
+        scale_x=scale_x,
         fallback=None if fallback is None else {
             "data": fallback_data, "font": fallback, "path": fallback_path, "pin": fallback_pin,
             "codes": planner.fallback_codes,
@@ -2146,6 +2168,7 @@ def _build_manifest(
     tracking: int = 0,
     digit_advance_26_6: int | None = None,
     snap_overshoot: int = 0,
+    scale_x: int = SCALE_X_NEUTRAL,
     fallback: dict | None = None,
 ) -> dict:
     first, last = codes
@@ -2186,6 +2209,9 @@ def _build_manifest(
         if planner.fallback is not None and id(planner.fallback) in planner.snap_zones:
             snap["fallback_zones"] = _zones_record(planner.snap_zones[id(planner.fallback)])
         parameters["snap_overshoot"] = snap
+    # Added in converter 0.6.0, likewise only when used.
+    if scale_x != SCALE_X_NEUTRAL:
+        parameters["scale_x_thousandths"] = scale_x
     manifest = {
         "converter": {
             "name": CONVERTER_NAME,
@@ -2375,6 +2401,13 @@ def _main(argv: list[str]) -> int:
         help="set overshoots of less than N/8 px on the flat baseline, x-height and cap height "
         f"measured from H and x (0..{MAX_SNAP_OVERSHOOT}, default 0: off)",
     )
+    parser.add_argument(
+        "--scale-x",
+        type=int,
+        default=SCALE_X_NEUTRAL,
+        help=f"scale outlines and advances horizontally by N/1000 ({MIN_SCALE_X}..{MAX_SCALE_X}, "
+        f"default {SCALE_X_NEUTRAL}: off)",
+    )
     parser.add_argument("--fallback", type=Path, help="second .ttf drawing only the code points the input lacks")
     parser.add_argument("--fallback-pin", type=Path, help="font-pin/v1 JSON for --fallback")
     parser.add_argument(
@@ -2451,6 +2484,7 @@ def _main(argv: list[str]) -> int:
             fallback_path=None if args.fallback is None else str(args.fallback),
             fallback_pin=fallback_pin,
             snap_overshoot=args.snap_overshoot,
+            scale_x=args.scale_x,
         )
         manifest = manifest_bytes(conversion.manifest)
     except TtfConvertError as exc:
