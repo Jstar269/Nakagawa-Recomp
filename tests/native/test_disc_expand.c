@@ -55,6 +55,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define SECTOR 2048u
 #define ISO_SECTORS 64u
@@ -87,6 +94,37 @@ static void write_bytes(const char *path, const uint8_t *data, size_t size) {
     assert(f != NULL);
     assert(fwrite(data, 1, size, f) == size);
     assert(fclose(f) == 0);
+}
+
+/* Gives a file one fixed write time (2020-01-01 00:00:00 UTC), through its own
+   handle. Two files stamped so share a write time on every host, as two files
+   written inside one tick of the host's clock do. */
+static void stamp_write_time(const char *path) {
+#if defined(_WIN32) || defined(_WIN64)
+    WCHAR wide[NATIVE_TEST_PATH_MAX];
+    FILETIME stamp;
+    HANDLE file;
+    stamp.dwLowDateTime = 0x69050000u;
+    stamp.dwHighDateTime = 0x01D5C036u;
+    assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
+                               NATIVE_TEST_PATH_MAX) > 0);
+    file = CreateFileW(wide, FILE_WRITE_ATTRIBUTES,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(file != INVALID_HANDLE_VALUE);
+    assert(SetFileTime(file, NULL, NULL, &stamp));
+    assert(CloseHandle(file));
+#else
+    struct timespec times[2];
+    int fd = open(path, O_WRONLY);
+    assert(fd >= 0);
+    times[0].tv_sec = 0;
+    times[0].tv_nsec = UTIME_OMIT;
+    times[1].tv_sec = 1577836800;
+    times[1].tv_nsec = 0;
+    assert(futimens(fd, times) == 0);
+    assert(close(fd) == 0);
+#endif
 }
 
 static uint8_t *read_all(const char *path, size_t *size) {
@@ -1093,7 +1131,10 @@ static void test_chd_unknown_codec(void) {
 }
 
 /* Two different images of one disc ID (say a retail dump and a fan
-   translation) keep two expansions: neither import replaces the other. */
+   translation) keep two expansions: neither import replaces the other. The
+   two files here have one write time, so what keeps them apart is what the
+   fingerprint reads of each image (its size and its first 64 KiB), never
+   the moment each happened to be written. */
 static void test_import_same_disc_id(void) {
     Buf image = { NULL, 0, 0 };
     char root[NATIVE_TEST_PATH_MAX];
@@ -1101,19 +1142,26 @@ static void test_import_same_disc_id(void) {
     char second_src[NATIVE_TEST_PATH_MAX];
     char first_iso[NK_MAX_PATH];
     static uint8_t translated[ISO_BYTES];
+    size_t first_len;
     NkDiscImport result;
     NkDiscExpandStatus status;
-    /* The same disc ID with different data (a patched DATA.BIN sector). */
+    /* The same disc ID with different data: the first DATA.BIN sector is
+       rewritten. Its block is deflated, so the compressed image's size and
+       block index change with it, as a translation's do. */
     memcpy(translated, g_iso, ISO_BYTES);
-    memset(translated + (size_t)(ISO_SECTORS - 2u) * SECTOR, 'T', SECTOR);
+    memset(translated + (size_t)DATA_FIRST * SECTOR, 'T', SECTOR);
     path_in(root, sizeof(root), "same-id-root");
     CHECK(nk_platform_mkdir_p(root));
     path_in(first_src, sizeof(first_src), "same-id-a.cso");
     build_ciso(&image, "CISO", 1, 0, g_iso, ISO_BYTES, cso_v1_kind);
     write_bytes(first_src, image.data, image.len);
+    first_len = image.len;
     path_in(second_src, sizeof(second_src), "same-id-b.cso");
     build_ciso(&image, "CISO", 1, 0, translated, ISO_BYTES, cso_v1_kind);
     write_bytes(second_src, image.data, image.len);
+    CHECK(image.len != first_len);
+    stamp_write_time(first_src);
+    stamp_write_time(second_src);
 
     CHECK(nk_disc_import(first_src, root, NULL, &result, &status) && !result.reused);
     CHECK(strcmp(result.disc_id, "TEST00042") == 0);
