@@ -43,7 +43,7 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from fractions import Fraction
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 try:  # pragma: no cover - the tests import both styles
     from . import pgf_writer
@@ -60,6 +60,8 @@ CONVERTER_NAME = "ttf2pgf"
 CONVERTER_VERSION = "0.8.0"
 SPEC_PATH = "docs/cleanroom/PGF_CONVERTER_SPEC.md"
 PIN_SCHEMA = "font-pin/v1"
+#: The ``schema_version`` of a static font list that may serve as a pin (spec section 7).
+FONT_LIST_SCHEMA_VERSION = 1
 
 #: Output supersampling grid: 8x8 sub-samples per pixel before the 4-bit round.
 SUPERSAMPLE = 8
@@ -203,11 +205,98 @@ def _string(value: object, label: str) -> str:
     return value
 
 
-def load_pin(pin_path: Path, input_bytes: bytes) -> SourcePin:
+def _read_license_text(text_path: Path, text_digest: str) -> str:
+    try:
+        license_text = text_path.read_bytes().decode("utf-8")
+    except OSError as exc:
+        raise _refuse("pin-invalid", f"cannot read licence text {text_path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise _refuse("pin-invalid", f"licence text {text_path} is not UTF-8: {exc}") from exc
+    actual_text_digest = hashlib.sha256(license_text.encode("utf-8")).hexdigest()
+    if actual_text_digest != text_digest:
+        raise _refuse(
+            "pin-license-mismatch",
+            f"licence text SHA-256 {actual_text_digest} does not match the pin {text_digest}",
+        )
+    return license_text
+
+
+def _load_font_list_pin(pin_path: Path, document: dict, input_bytes: bytes, input_path: Path | None) -> SourcePin:
+    """Verify the input against its record in a static font list (``FONT_LIST_SCHEMA_VERSION``).
+
+    The list is the project's record of fonts it already ships (``assets/fonts/ui/manifest.json``):
+    each entry gives a repository path, digest, size, licence file and digest, and upstream origin.
+    The input must be the entry's file by name and digest, and the licence text is the entry's
+    licence file beside the input. The list records no copyright line, so the licence text's first
+    paragraph, which must begin with ``Copyright``, is it; a paragraph that names a Reserved Font
+    Name the entry does not list is refused, so a reserved name is never missed (spec section 7).
+    """
+    if input_path is None:
+        raise _refuse("pin-invalid", f"{pin_path} is a font list: the input font's path is needed to find its licence")
+    fonts = document.get("fonts")
+    upstream = document.get("upstream")
+    if not isinstance(fonts, list) or not isinstance(upstream, dict):
+        raise _refuse("pin-invalid", f"{pin_path} must carry a fonts list and an upstream object")
+    digest = hashlib.sha256(input_bytes).hexdigest()
+    matches = [entry for entry in fonts if isinstance(entry, dict) and entry.get("sha256") == digest]
+    if len(matches) != 1:
+        raise _refuse("pin-digest-mismatch", f"input SHA-256 {digest} is not the digest of exactly one entry of {pin_path}")
+    entry = matches[0]
+    file_name = PurePosixPath(_string(entry.get("file"), "fonts[].file"))
+    if file_name.name != input_path.name:
+        raise _refuse("pin-invalid", f"the entry with the input's digest is {file_name.name}, not {input_path.name}")
+    if entry.get("static") is not True:
+        raise _refuse("pin-invalid", f"{file_name.name} is not recorded as a static font")
+    size = entry.get("size_bytes")
+    if not isinstance(size, int) or isinstance(size, bool) or size != len(input_bytes):
+        raise _refuse("pin-size-mismatch", f"input is {len(input_bytes)} bytes, the font list records {size!r}")
+    license_file = PurePosixPath(_string(entry.get("license_file"), "fonts[].license_file"))
+    if license_file.parent != file_name.parent:
+        raise _refuse("pin-invalid", f"the licence {license_file} is not beside {file_name}")
+    text_digest = _hex64(entry.get("license_sha256"), "fonts[].license_sha256")
+    license_text = _read_license_text(input_path.parent / license_file.name, text_digest)
+    notice = license_text.replace("\r\n", "\n").split("\n\n", 1)[0].strip()
+    if not notice.startswith("Copyright"):
+        raise _refuse("pin-invalid", f"the licence text {license_file.name} does not begin with its copyright notice")
+    names = entry.get("reserved_font_names", [])
+    if not isinstance(names, list) or any(not isinstance(name, str) or not name for name in names):
+        raise _refuse("pin-invalid", "fonts[].reserved_font_names must be a list of non-empty strings")
+    if "reserved font" in notice.casefold() and not names:
+        raise _refuse("pin-invalid", f"the copyright notice of {license_file.name} reserves a font name the entry does not list")
+    source = {
+        "repository": _string(upstream.get("repository"), "upstream.repository"),
+        "commit": _string(upstream.get("commit"), "upstream.commit"),
+        "path": _string(entry.get("upstream_path"), "fonts[].upstream_path"),
+        "upstream_sha256": _hex64(entry.get("upstream_sha256"), "fonts[].upstream_sha256"),
+        "source_kind": _string(entry.get("source_kind"), "fonts[].source_kind"),
+    }
+    instance = entry.get("instance")
+    if instance is not None:
+        if not isinstance(instance, dict) or not instance:
+            raise _refuse("pin-invalid", "fonts[].instance must be a non-empty object when present")
+        source["instance"] = ",".join(f"{axis}={value}" for axis, value in sorted(instance.items()))
+    return SourcePin(
+        path=pin_path,
+        sha256=digest,
+        size_bytes=size,
+        spdx=_string(entry.get("license_spdx"), "fonts[].license_spdx"),
+        copyright=" ".join(notice.split()),
+        license_text=license_text,
+        license_text_sha256=text_digest,
+        license_text_file=license_file.name,
+        reserved_font_names=tuple(names),
+        source=source,
+        family=_string(entry.get("family"), "fonts[].family"),
+    )
+
+
+def load_pin(pin_path: Path, input_bytes: bytes, input_path: Path | None = None) -> SourcePin:
     """Load and verify the source pin against the exact input bytes.
 
     The pin binds the input digest, the licence text bytes, and the reserved
     font names the output name must avoid.  Any mismatch is a named refusal.
+    A pin is a ``font-pin/v1`` file or, for a font the project already ships,
+    the static font list that records it (``input_path`` then names the font).
     """
     try:
         document = json.loads(pin_path.read_text(encoding="utf-8"))
@@ -217,6 +306,8 @@ def load_pin(pin_path: Path, input_bytes: bytes) -> SourcePin:
         raise _refuse("pin-invalid", f"{pin_path} is not valid JSON: {exc}") from exc
     if not isinstance(document, dict):
         raise _refuse("pin-invalid", f"{pin_path} must contain a JSON object")
+    if "schema" not in document and document.get("schema_version") == FONT_LIST_SCHEMA_VERSION:
+        return _load_font_list_pin(pin_path, document, input_bytes, input_path)
     if document.get("schema") != PIN_SCHEMA:
         raise _refuse("pin-invalid", f"schema must be {PIN_SCHEMA!r}")
 
@@ -239,19 +330,7 @@ def load_pin(pin_path: Path, input_bytes: bytes) -> SourcePin:
     if not isinstance(names, list) or any(not isinstance(name, str) or not name for name in names):
         raise _refuse("pin-invalid", "license.reserved_font_names must be a list of non-empty strings")
 
-    text_path = pin_path.parent / text_file
-    try:
-        license_text = text_path.read_bytes().decode("utf-8")
-    except OSError as exc:
-        raise _refuse("pin-invalid", f"cannot read licence text {text_path}: {exc}") from exc
-    except UnicodeDecodeError as exc:
-        raise _refuse("pin-invalid", f"licence text {text_path} is not UTF-8: {exc}") from exc
-    actual_text_digest = hashlib.sha256(license_text.encode("utf-8")).hexdigest()
-    if actual_text_digest != text_digest:
-        raise _refuse(
-            "pin-license-mismatch",
-            f"licence text SHA-256 {actual_text_digest} does not match the pin {text_digest}",
-        )
+    license_text = _read_license_text(pin_path.parent / text_file, text_digest)
 
     source = document.get("source")
     if not isinstance(source, dict):
@@ -1442,20 +1521,26 @@ def _set_from(codes: set[int], source: str) -> CodePointSet:
     return CodePointSet(codes=ordered, sha256=hashlib.sha256(canonical).hexdigest(), source=source)
 
 
+#: General categories of invisible characters the Latin text set leaves out: format controls and
+#: the line and paragraph separators.
+_NOT_DRAWN_CATEGORIES = frozenset({"Cf", "Zl", "Zp"})
+
+
 def latin_cyrillic_text_code_points(draws: Callable[[int], bool]) -> CodePointSet:
     """Return the project Latin repertoire: the Latin text blocks as far as the face draws them.
 
     :data:`LATIN_TEXT_BLOCKS` names public Unicode blocks (Latin, Cyrillic, punctuation and
     symbols) and :data:`LATIN_TEXT_CODE_PAGES` public code pages; the set is every code point in
     them that ``draws`` (the face's own character map) accepts, so it depends on no console font.
-    Invisible format controls (Unicode general category Cf, such as the bidirectional marks) are
-    left out, except the soft hyphen U+00AD that Latin-1 text writes. The set's digest is recorded
-    in the manifest.
+    Invisible format controls and separators (Unicode general categories Cf, such as the
+    bidirectional marks, Zl and Zp, the line and paragraph separators U+2028 and U+2029) are left
+    out, except the soft hyphen U+00AD that Latin-1 text writes. The set's digest is recorded in
+    the manifest.
     """
     codes = _drawn_in_blocks(LATIN_TEXT_BLOCKS, draws)
     for codec in LATIN_TEXT_CODE_PAGES:
         codes |= {code for code in _code_page_characters(codec) if draws(code)}
-    codes = {code for code in codes if code == 0x00AD or unicodedata.category(chr(code)) != "Cf"}
+    codes = {code for code in codes if code == 0x00AD or unicodedata.category(chr(code)) not in _NOT_DRAWN_CATEGORIES}
     if not set(range(0x20, 0x7F)) <= codes:
         raise _refuse("latin-mapping-invalid", "the face does not draw all of printable ASCII")
     return _set_from(codes, "builtin:latin-text-blocks")
@@ -2671,10 +2756,10 @@ def _main(argv: list[str]) -> int:
             code_points = None
         codes = None if code_points is not None else parse_code_range(args.codes or DEFAULT_CODES)
         data = args.input.read_bytes()
-        pin = load_pin(args.pin, data) if args.pin is not None else None
+        pin = load_pin(args.pin, data, args.input) if args.pin is not None else None
         fallback_data = args.fallback.read_bytes() if args.fallback is not None else None
         fallback_pin = (
-            load_pin(args.fallback_pin, fallback_data)
+            load_pin(args.fallback_pin, fallback_data, args.fallback)
             if args.fallback_pin is not None and fallback_data is not None else None
         )
         if args.fallback_pin is not None and fallback_data is None:

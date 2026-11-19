@@ -11,17 +11,24 @@ fonts, with the project's converter `tools/ttf2pgf.py`:
 | File | Stands in for | Made from | Licence |
 | --- | --- | --- | --- |
 | `nkjpn.pgf` | `jpn0`, Japanese text | Noto Sans JP Regular, and M PLUS 1p Regular for the 341 characters of its set Noto Sans JP lacks (`≒` among them) | SIL Open Font License 1.1 |
-| `nkltn.pgf`, `nkltn1.pgf` to `nkltn7.pgf` | `ltn0` to `ltn7`, Latin text at the PSP's larger size | Liberation Sans and Liberation Serif, Regular, Italic, Bold and Bold Italic | SIL Open Font License 1.1 |
-| `nkltns.pgf`, `nkltn9.pgf` to `nkltn15.pgf` | `ltn8` to `ltn15`, Latin text at the PSP's smaller size | The same eight faces | SIL Open Font License 1.1 |
+| `nkltn.pgf`, `nkltn4.pgf` | `ltn0` and `ltn4`, sans-serif regular and bold Latin text at the PSP's larger size | Geist Regular and Geist SemiBold, and Liberation Sans Regular and Bold for the 110 characters of their set Geist lacks | SIL Open Font License 1.1 |
+| `nkltns.pgf`, `nkltn12.pgf` | `ltn8` and `ltn12`, the same at the PSP's smaller size | The same faces | SIL Open Font License 1.1 |
+| `nkltn1.pgf` to `nkltn3.pgf`, `nkltn5.pgf` to `nkltn7.pgf` | `ltn1` to `ltn3` and `ltn5` to `ltn7`, the other Latin styles at the PSP's larger size | Liberation Serif Regular, Italic, Bold and Bold Italic, and Liberation Sans Italic and Bold Italic | SIL Open Font License 1.1 |
+| `nkltn9.pgf` to `nkltn11.pgf`, `nkltn13.pgf` to `nkltn15.pgf` | `ltn9` to `ltn11` and `ltn13` to `ltn15`, the same at the PSP's smaller size | The same six faces | SIL Open Font License 1.1 |
 | `nkkr.pgf` | `kr0`, Korean text | Gowun Dodum Regular | SIL Open Font License 1.1 |
 
 Each Latin file has the family and style of the PSP font it stands in for, in the PSP's order: within each size,
 sans-serif regular, serif regular, sans-serif italic, serif italic, sans-serif bold, serif bold, sans-serif bold
-italic and serif bold italic.
+italic and serif bold italic. The regular and bold sans-serif styles are Geist, the player's own interface font
+(#1300), whose SemiBold draws the bold styles; the italic and bold italic sans-serif styles and all serif styles stay
+Liberation, because the project ships no Geist italic or serif.
 
 Each font comes with its licence text (`nkjpn-OFL.txt` and so on) and a manifest (`nkjpn.json` and so on) that names
-its exact source file and the converter settings. The source fonts are pinned in
-[`tests/fixtures/fonts/`](../tests/fixtures/fonts/): each pin file gives the file's SHA-256 and where it came from. Generated
+its exact source file and the converter settings. Where a font draws from two source fonts (`nkjpn.pgf`, and the
+four Geist fonts), its licence text carries both licences and its manifest names both sources. The source fonts are pinned in
+[`tests/fixtures/fonts/`](../tests/fixtures/fonts/): each pin file gives the file's SHA-256 and where it came from. Geist
+and Noto Sans JP are the player's interface fonts in [`assets/fonts/ui/`](../assets/fonts/ui/), recorded with their
+SHA-256 and origin in its `manifest.json`. Generated
 fonts are never committed.
 
 These fonts are stand-ins. They let a game draw its text when you have not imported your PSP's fonts, but they look
@@ -37,18 +44,21 @@ dip below the baseline and rise above the x-height and cap height by up to a thi
 which would otherwise be drawn as a faint extra row; the converter sets those overshoots on the flat letters'
 heights (`--snap-overshoot`, [the converter specification](../docs/cleanroom/PGF_CONVERTER_SPEC.md)).
 
-The sans-serif faces of the smaller size (`ltn8`, `ltn10`, `ltn12`, `ltn14`) and the bold sans-serif faces of the
-larger size (`ltn4`, `ltn6`) set their x-height, and the bold ones their cap height, on the PSP font's rows, and
-are drawn slightly wider than Liberation Sans (`--scale-x`, 3 % for `ltn8` and `ltn10`, 6.5 % for `ltn4`, 8 % for
-`ltn6` and `ltn12`, 10.5 % for `ltn14`) with tighter spacing, because the PSP's letters at those sizes fill more of
-their width. Those settings were tuned on 2026-11-19 against a private comparison with one PSP's own fonts (#1300).
+The sans-serif faces set their x-height, and the bold ones their cap height, on the PSP font's rows. The Geist faces
+(`ltn0`, `ltn4`, `ltn8`, `ltn12`) are drawn wider than Geist (`--scale-x`, 15 % for `ltn0`, 12.5 % for `ltn4`, 20 % for
+`ltn8`, 25 % for `ltn12`) with tighter spacing, the SemiBold ones one pixel smaller than the Liberation faces of their
+size and thickened in both directions to the PSP bold faces' ink; the Liberation italic sans-serif faces are drawn slightly wider than
+Liberation Sans (3 % for `ltn10`, 8 % for `ltn6`, 10.5 % for `ltn14`). The PSP's letters at those sizes fill more
+of their width. Those settings were tuned on 2026-11-19 against a private comparison with one PSP's own fonts
+(#1300).
 
 Each letter's image is cut to its ink, as in the PSP's fonts, with no blank column or row around it (rule 15 of the
 converter specification). Some games place each letter one pixel after the previous letter's image rather than by
 its advance; in such a game, Hot Shots Tennis for one, a line drawn with a stand-in is as long as the letters' ink.
-Liberation Sans leaves more space beside its letters than the PSP's fonts do, so in those games `ltn8` and `ltn10`
-lines come out 8 to 11 % shorter than on a PSP; widening them further would break the stem and line-width limits
-above.
+Liberation Sans leaves more space beside its letters than the PSP's fonts do, so in those games its lines came out 8
+to 11 % shorter than on a PSP; that is why the regular and bold sans-serif styles are Geist. With Geist the two lines
+of Hot Shots Tennis's auto-save dialog come out one pixel longer each than with the PSP's fonts (215 and 186 pixels
+against 214 and 185). `ltn10`, Liberation Sans Italic, still draws such lines shorter.
 
 ## Without your PSP's fonts: what changes
 
@@ -64,7 +74,7 @@ What stays the same:
   it is in or out). The Latin stand-ins have the 556 characters of the Unicode blocks Basic Latin, Latin-1
   Supplement, Latin Extended-A, Spacing Modifier Letters, General Punctuation and Letterlike Symbols and of the
   Windows code pages for Western, Central European, Turkish, Baltic and Cyrillic text, ISO 8859-16 and Mac Cyrillic
-  that Liberation draws: Latin text of most European languages, the Cyrillic alphabets, `™`, `№` and `€`. The
+  that Liberation draws (Geist with Liberation Sans for what Geist lacks draws the same): Latin text of most European languages, the Cyrillic alphabets, `™`, `№` and `€`. The
   Japanese stand-in has every character of Shift JIS as PSP games write it (Microsoft's code page 932), including
   all 6,355 kanji of JIS X 0208 levels 1 and 2, every character of JIS X 0213 and of 23 further Unicode blocks (kana,
   radicals, kanji outside JIS, enclosed and squared characters, symbols, box drawing) that Noto Sans JP or M PLUS 1p
@@ -76,18 +86,16 @@ What stays the same:
 
 What changes:
 
-- **Letter shapes.** The text looks like Liberation Sans and Liberation Serif (Latin), Noto Sans JP (Japanese) or
-  Gowun Dodum (Korean), not the PSP's fonts.
-- **Capitals against small letters.** In Liberation's faces capitals are wider, compared with small letters, than in
-  the PSP's. The spacing splits the difference, so in the regular sans-serif faces capitals average up to 2 % wider
-  than the PSP's and small letters up to 3 % narrower. A line in capitals, such as a menu, runs up to 3 % longer and
-  a sentence up to 2 % shorter.
+- **Letter shapes.** The text looks like Geist, Liberation Sans and Liberation Serif (Latin), Noto Sans JP (Japanese)
+  or Gowun Dodum (Korean), not the PSP's fonts.
+- **Capitals against small letters.** In the regular sans-serif faces (Geist) small letters average up to 3 % wider
+  than the PSP's and capitals within 0.3 %; a sentence and a menu line each run up to 1.5 % longer. In Liberation's
+  faces capitals are wider, compared with small letters, than in the PSP's, and the spacing splits the difference.
 - **Weight of the serif faces.** The serif stand-ins (`ltn1`, `ltn3`, `ltn5`, `ltn7` and the same four of the
   smaller size) carry 6 % to 30 % more ink per letter than the PSP's, because the PSP's serif faces are lighter than
   Liberation Serif. Measured on 2026-11-07 on the PSP-3000's files described under "Measured differences" below.
-- **Weight of the sans-serif faces.** The sans-serif stand-ins carry the PSP fonts' ink per letter within 2 %. The
-  bold ones (`ltn4`, `ltn6`, `ltn12`, `ltn14`) get most of it from thicker vertical strokes, so that their x-height
-  and cap height stay on the PSP font's rows.
+- **Weight of the sans-serif faces.** The sans-serif stand-ins carry the PSP fonts' ink per letter within 2 %, with
+  their x-height and cap height on the PSP font's rows.
 - **Japanese weight and Latin letters in Japanese text.** The Japanese stand-in is Noto Sans JP's regular weight;
   its stroke weight has not been compared with the PSP font's. Latin letters drawn with the Japanese font come from
   Noto Sans JP and are about 18 % narrower than the PSP's (9.7 pixels on average against 11.8).
@@ -108,9 +116,10 @@ stand-in that serves it through the player's own font reader (`src/rt/pgf_public
 The "Now" columns compare the stand-ins of that date with those recorded PSP widths (#2005); the "Before" columns are
 the measurement of the earlier stand-ins. Since 2026-11-19 the stand-ins' characters follow the public rule above
 (#1300): the Japanese stand-in lacks 47 of the 9,773 instead of the "Now" column's 2,202, and among the characters
-it gained is the trade mark sign `™` that games write in "Memory Stick™"; the Latin stand-ins lack 6 of 322. The faces retuned on 2026-11-19 (`ltn4`, `ltn6`, `ltn8`, `ltn10`,
-`ltn12`, `ltn14`) keep every sentence and menu line within 3 % of those recorded widths (`tools/test_ttf2pgf.py`); their
-per-class numbers in the table predate that change.
+it gained is the trade mark sign `™` that games write in "Memory Stick™"; the Latin stand-ins lack 6 of 322. The faces
+retuned on 2026-11-19 (`ltn0`, `ltn4`, `ltn8` and `ltn12`, now Geist, and `ltn6`, `ltn10` and `ltn14`) keep every
+sentence and menu line within 3 % of those recorded widths (`tools/test_ttf2pgf.py`); their per-class numbers in the
+table predate that change.
 
 | PSP fonts | Before: characters lacking | Before: width against the PSP font | Now: characters lacking | Now: width against the PSP font |
 | --- | --- | --- | --- | --- |

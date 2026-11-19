@@ -38,8 +38,9 @@ policy into a public-safe PGF fixture:
   converts the `--japanese-text` repertoire described below from Noto Sans JP,
   with M PLUS 1p drawing through `--fallback` the 341 points of that set Noto
   Sans JP lacks (#2005, #1300). The converter is
-  codepoint-driven; any additional font pin still needs its own pin file and
-  coverage set. The output is not claimed to be pixel-identical to a firmware
+  codepoint-driven; any additional font needs its own pin (a pin file, or
+  for a font the project already ships its record in the static font list,
+  section 7) and coverage set. The output is not claimed to be pixel-identical to a firmware
   font (`FONT_ORIGINS.md` records the source and conversion).
 
 ## 2. Input contract
@@ -146,8 +147,10 @@ to the face being converted: every code point of the Unicode blocks and the
 single-byte code pages below that the face's own character map draws. Code
 pages are read through Python's standard codecs, bytes 0x20-0xFF, without the
 C1 controls and the Private Use Area. Invisible format controls (Unicode general
-category Cf, such as the bidirectional marks of General Punctuation) are left
-out, except the soft hyphen U+00AD that Latin-1 text writes. A face that does
+category Cf, such as the bidirectional marks of General Punctuation) and the
+line and paragraph separators U+2028 and U+2029 (categories Zl and Zp, which a
+face such as Geist maps but which end a line rather than draw) are left out,
+except the soft hyphen U+00AD that Latin-1 text writes. A face that does
 not draw all of printable ASCII is refused (`latin-mapping-invalid`). No list
 of characters is taken from a console font. The blocks, each with its reason:
 
@@ -177,8 +180,9 @@ Left out, with the reason:
 | Mathematical Operators, Arrows, Number Forms | Not text characters. Hot Shots Tennis writes the minus sign U+2212 in its dialog and draws its own character where the font has none. |
 | Mac Roman, KOI8-R, CP866 | Their integral, box-drawing and block characters are taller than any letter (the glyph box again). |
 
-With each Liberation face of the build the set has 556 points, the same for all
-eight faces (canonical SHA-256
+With each face of the build (Liberation, or Geist with its Liberation Sans
+`--fallback`, which the set's `draws` test counts) the set has 556 points, the
+same for all eight faces (canonical SHA-256
 `7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d`); the
 manifest records the set's digest and source `builtin:latin-text-blocks`.
 
@@ -357,7 +361,10 @@ manifest in memory first and writes only after every stage succeeds.
     largest of those overshoots is 0.30 px at 20 ppem, under 3/8, and the
     nearest flat height that is not an overshoot, the top of Liberation
     Sans `f` 73 units above the cap height, is 0.46 px at 13 ppem, over 3/8,
-    so ascenders keep their own height. The rule does not tell an overshoot
+    so ascenders keep their own height. The Geist faces (#1300), with the
+    same `N` (the bold ones drawn at 19 and 12 ppem), set their round letters
+    on the same rows as their flat ones too, with `l` as drawn without the
+    option (`tools/test_ttf2pgf.py`). The rule does not tell an overshoot
     from a small deliberate excursion: at 13 ppem the extremes of `/`, `\`,
     `ø`, `Ø`, `§`, `∞`, `ƒ`, `@`, `×`, `÷`, the fractions `¼` and `¾`, and
     the spur of Liberation Serif `q`, which lie within 3/8 px of an edge,
@@ -375,13 +382,13 @@ manifest in memory first and writes only after every stage succeeds.
     multiplied the same way before rule 1. `y`, and so every row, is
     untouched, and at 1000 the output is byte-identical to a conversion
     without the option. Rule 7's digit centring uses the scaled advance.
-    *Project decision* (#1300): the sans-serif stand-ins are Liberation Sans,
-    whose letters at the console's sizes come out narrower than the console
-    fonts' and spaced looser to keep the console's line lengths. A small
-    horizontal scale moves ink from the gaps into the letters without a new
-    source face; the project's parameters were tuned against a private
-    comparison with the console's own fonts, and only those parameters are
-    recorded.
+    *Project decision* (#1300): the sans-serif stand-ins (Geist for the
+    regular and bold styles, Liberation Sans for the italic ones) have letters
+    that at the console's sizes come out narrower than the console fonts' and
+    spaced looser to keep the console's line lengths. A horizontal scale moves
+    ink from the gaps into the letters; the project's parameters were tuned
+    against a private comparison with the console's own fonts, and only those
+    parameters are recorded.
 15. **Ink trim** (always on, from converter 0.7.0). After rule 6, each glyph
     image is cut to the columns and rows that hold a nonzero sample: the
     empty columns at its left and right and the empty rows at its top and
@@ -545,6 +552,28 @@ Generated PGFs are fixtures, never an authenticity claim.
 | `license.license_text`, `license.license_text_sha256` | Licence file beside the pin, read as UTF-8. |
 | `license.spdx`, `license.copyright`, `license.reserved_font_names` | Carried into the manifest verbatim. |
 | `source.url`, `source.repository`, `source.path`, `source.retrieved` | Static provenance of the pinned bytes; carried into the manifest. |
+
+A font the project already ships may instead be pinned by the static font list
+that records it (`assets/fonts/ui/manifest.json`: a JSON object with
+`schema_version` 1, an `upstream` object and a `fonts` list, and no `schema`
+field). The converter takes the one entry whose `sha256` is the input's
+digest and refuses the input (`pin-digest-mismatch`) when no entry, or more
+than one, has it. It then requires, each a `pin-invalid` refusal otherwise:
+the entry's `file` names the input file (the same leaf name), `static` is
+`true`, and `license_file` is in the same folder as `file`. `size_bytes` is
+verified as for a pin (`pin-size-mismatch`), and the licence text is the file
+of that leaf name beside the input, verified against `license_sha256`
+(`pin-license-mismatch`). The list records no copyright line, so the licence
+text's first paragraph (up to the first blank line), which must begin with
+`Copyright`, is the manifest's copyright line, whitespace runs joined by single
+spaces. The Reserved Font Names are the entry's `reserved_font_names` (none when
+absent), and a copyright paragraph that mentions a reserved font name while the
+entry lists none is refused, so a reserved name cannot be missed. The
+manifest's `source` record is the list's `upstream.repository` and
+`upstream.commit` with the entry's `upstream_path`, `upstream_sha256`,
+`source_kind` and, for a variable-font instance, its `instance` axes
+(`wght=400`). `family` is the entry's. The CLI passes the input and
+`--fallback` paths for this; a pin file needs neither.
 
 `--manifest FILE` (which requires `--pin`) emits canonical JSON with:
 

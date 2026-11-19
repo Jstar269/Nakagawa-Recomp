@@ -57,6 +57,19 @@ $(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) tools/ttf2pgf.py tools/pgf_wr
 	"$(PYTHON)" -c "import shutil; shutil.copyfile('$(5)', '$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2))-OFL.txt')"
 endef
 
+# The same for a font drawn from two pinned sources: the first draws every character it has and the
+# second (--fallback) the rest. Arguments 1-9 as above, then 10 fallback TTF, 11 its pin, 12 its licence
+# text, 13 the first source's name and 14 the fallback's, which head their licences in the one licence
+# file that ships beside the font (each source's copyright notice and licence, OFL section 2).
+define PROJECT_FALLBACK_FONT_RULE
+project-$(1)-font: $(PROJECT_FONT_GENERATED_DIR)/$(2)
+
+$(PROJECT_FONT_GENERATED_DIR)/$(2): $(3) $(4) $(5) $(10) $(11) $(12) tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
+	"$(PYTHON)" tools/ttf2pgf.py "$$@" "$(3)" --pin "$(4)" --fallback "$(10)" --fallback-pin "$(11)" $(6) $(8) --font-name "$(7)" --font-type "$(9)" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2)).json"
+	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(5)', '$(12)')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/$(basename $(2))-OFL.txt').write_text('$(13):\n\n' + parts[0] + '\n\n$(14) (the characters $(13) lacks):\n\n' + parts[1], encoding='utf-8', newline='\n')"
+endef
+
 # The console's two Latin sizes, 10.125 and 7 points at 128 dpi (#2005, font/README.md). Every face of
 # a size shares its strike: the size and emboldening that put the regular face's ink where the console
 # font of that size has it (x-height, cap height, descender, stem), and the console fonts' header
@@ -70,29 +83,36 @@ endef
 # above the ascender. The repertoire is the Latin text rule over Unicode blocks and code pages, as far as
 # each face draws it (docs/cleanroom/PGF_CONVERTER_SPEC.md, --latin-cyrillic-text).
 LIBERATION := tests/fixtures/fonts/liberation
+GEIST := assets/fonts/ui/geist
 PROJECT_LATIN_STRIKE_ARGS := --ppem 20 --snap-overshoot 3 --embolden-x 4 --embolden-advance 4 --nominal-size 648 --resolution 8192 --header-ascender 863 --header-descender -196 --vertical-advance 950
 PROJECT_LATIN_SMALL_STRIKE_ARGS := --ppem 13 --snap-overshoot 3 --embolden-x 2 --embolden-advance 2 --nominal-size 448 --resolution 8192 --header-ascender 576 --header-descender -131 --vertical-advance 917
-# Per index: source face, PGF style, then that face's spacing (--tracking, eighths of a pixel), where
-# measured its digit advance (26.6 px), and its horizontal-stroke weight (--embolden-y, eighths of a
-# pixel). The weight puts each sans-serif face's ink per letter within 2 % of the console face's (#1300);
-# the serif faces keep none, because they already carry more ink than the console's. The sans-serif
-# faces of the smaller size and the bold ones of the larger size also take a horizontal scale
-# (--scale-x, thousandths, spec section 3 rule 14) and, for the bold ones, more --embolden-x than the
-# strike's (a later flag wins) in place of --embolden-y: thickening upwards had set their x-height (and
-# the bold faces' cap height) a row above the console's, and their letters were narrower and spaced
-# looser than the console's. These values were tuned against a private comparison with the console's
-# own fonts (#1300); the regular faces of the smaller size keep a scale small enough for the 3 % line
-# widths of the larger capitals. Since converter 0.7.0 cuts each image to its ink (rule 15), ltn4 and
-# ltn14 take a little more scale and less tracking, so that a game that places text by image width (as
-# Hot Shots Tennis does) draws their lines as long as the console's; the others are already at a bound.
-PROJECT_LATIN_0_FACE := LiberationSans-Regular
+# Per face within a size: source folder, source face and PGF style. The regular and bold sans-serif
+# faces (ltn0, ltn4, ltn8, ltn12) are Geist Regular and SemiBold, the player's own interface font,
+# whose letters fill their width as the console's do (#1300); the project ships no Geist italic or
+# Bold, so the italic sans-serif faces and every serif face are Liberation, and SemiBold takes the
+# bold weight with emboldening below. Liberation Sans Regular and Bold draw the characters Geist lacks
+# (--fallback). Geist's pin is the font list that already records the shipped UI fonts
+# (assets/fonts/ui/manifest.json, spec section 7); a Liberation face's is the pin file beside it.
+PROJECT_LATIN_0_DIR := $(GEIST)
+PROJECT_LATIN_1_DIR := $(LIBERATION)
+PROJECT_LATIN_2_DIR := $(LIBERATION)
+PROJECT_LATIN_3_DIR := $(LIBERATION)
+PROJECT_LATIN_4_DIR := $(GEIST)
+PROJECT_LATIN_5_DIR := $(LIBERATION)
+PROJECT_LATIN_6_DIR := $(LIBERATION)
+PROJECT_LATIN_7_DIR := $(LIBERATION)
+PROJECT_LATIN_0_FACE := Geist-Regular
 PROJECT_LATIN_1_FACE := LiberationSerif-Regular
 PROJECT_LATIN_2_FACE := LiberationSans-Italic
 PROJECT_LATIN_3_FACE := LiberationSerif-Italic
-PROJECT_LATIN_4_FACE := LiberationSans-Bold
+PROJECT_LATIN_4_FACE := Geist-SemiBold
 PROJECT_LATIN_5_FACE := LiberationSerif-Bold
 PROJECT_LATIN_6_FACE := LiberationSans-BoldItalic
 PROJECT_LATIN_7_FACE := LiberationSerif-BoldItalic
+PROJECT_LATIN_0_FALLBACK := LiberationSans-Regular
+PROJECT_LATIN_4_FALLBACK := LiberationSans-Bold
+PROJECT_LATIN_0_PIN := assets/fonts/ui/manifest.json
+PROJECT_LATIN_4_PIN := assets/fonts/ui/manifest.json
 PROJECT_LATIN_0_STYLE := Regular
 PROJECT_LATIN_1_STYLE := Regular
 PROJECT_LATIN_2_STYLE := Italic
@@ -101,25 +121,38 @@ PROJECT_LATIN_4_STYLE := Bold
 PROJECT_LATIN_5_STYLE := Bold
 PROJECT_LATIN_6_STYLE := Bold Italic
 PROJECT_LATIN_7_STYLE := Bold Italic
-PROJECT_LATIN_0_SPACING := --tracking 7 --digit-advance 852 --embolden-y 3
+# Per index, that face's spacing (--tracking, eighths of a pixel), where measured its digit advance
+# (26.6 px), and its horizontal-stroke weight (--embolden-y, eighths of a pixel). The weight puts each
+# sans-serif face's ink per letter within 2 % of the console face's (#1300); the serif faces keep none,
+# because they already carry more ink than the console's. The Liberation sans-serif faces of the
+# smaller size and the bold one of the larger size also take a horizontal scale (--scale-x,
+# thousandths, spec section 3 rule 14) and, for the bold ones, more --embolden-x than the strike's (a
+# later flag wins) in place of --embolden-y: thickening upwards had set their x-height (and the bold
+# faces' cap height) a row above the console's. The Geist faces take their own scale and weight, and
+# the bold ones their own size (--ppem), so that their images are as wide as the console's (a game that
+# places text by image width, as Hot Shots Tennis does, draws their lines as long as the console's),
+# their x-height and cap height sit on the console's rows, and their advances meet the line widths;
+# SemiBold's strokes are thickened both ways to the console bold faces' ink.
+# These values were tuned against a private comparison with the console's own fonts (#1300).
+PROJECT_LATIN_0_SPACING := --scale-x 1150 --embolden-x 3 --embolden-y 0 --tracking -8 --digit-advance 972
 PROJECT_LATIN_1_SPACING := --tracking 2
 PROJECT_LATIN_2_SPACING := --tracking 7 --digit-advance 852 --embolden-y 3
 PROJECT_LATIN_3_SPACING := --tracking 3
-PROJECT_LATIN_4_SPACING := --scale-x 1065 --embolden-x 8 --embolden-y 3 --tracking 0 --digit-advance 888
+PROJECT_LATIN_4_SPACING := --ppem 19 --scale-x 1125 --embolden-x 7 --embolden-y 6 --tracking -3 --digit-advance 945
 PROJECT_LATIN_5_SPACING := --tracking 1
 PROJECT_LATIN_6_SPACING := --scale-x 1080 --embolden-x 8 --embolden-y 2 --tracking -2 --digit-advance 904
 PROJECT_LATIN_7_SPACING := --tracking 2
-PROJECT_LATIN_8_SPACING := --scale-x 1030 --tracking 5 --digit-advance 571 --embolden-y 4
+PROJECT_LATIN_8_SPACING := --scale-x 1200 --embolden-x 1 --embolden-y 2 --tracking -6 --digit-advance 659
 PROJECT_LATIN_9_SPACING := --tracking 3
 PROJECT_LATIN_10_SPACING := --scale-x 1030 --tracking 5 --digit-advance 571 --embolden-y 4
 PROJECT_LATIN_11_SPACING := --tracking 4
-PROJECT_LATIN_12_SPACING := --scale-x 1080 --embolden-x 4 --embolden-y 4 --tracking 1 --digit-advance 599
+PROJECT_LATIN_12_SPACING := --ppem 12 --scale-x 1250 --embolden-x 3 --embolden-y 6 --tracking -5 --digit-advance 659
 PROJECT_LATIN_13_SPACING := --tracking 3
 PROJECT_LATIN_14_SPACING := --scale-x 1105 --embolden-x 6 --embolden-y 2 --tracking 0 --digit-advance 607
 PROJECT_LATIN_15_SPACING := --tracking 3
 # $(1) index, $(2) target stem, $(3) output, $(4) the face index within its size (0-7), $(5) strike.
 define PROJECT_LATIN_FACE_RULE
-$(call PROJECT_FONT_RULE,$(2),$(3),$(LIBERATION)/$(PROJECT_LATIN_$(4)_FACE).ttf,$(LIBERATION)/$(PROJECT_LATIN_$(4)_FACE).pin.json,$(LIBERATION)/OFL.txt,--latin-cyrillic-text,Nakagawa Open Latin,$(5) $(PROJECT_LATIN_$(1)_SPACING),$(PROJECT_LATIN_$(4)_STYLE))
+$(if $(PROJECT_LATIN_$(4)_FALLBACK),$(call PROJECT_FALLBACK_FONT_RULE,$(2),$(3),$(PROJECT_LATIN_$(4)_DIR)/$(PROJECT_LATIN_$(4)_FACE).ttf,$(or $(PROJECT_LATIN_$(4)_PIN),$(PROJECT_LATIN_$(4)_DIR)/$(PROJECT_LATIN_$(4)_FACE).pin.json),$(PROJECT_LATIN_$(4)_DIR)/OFL.txt,--latin-cyrillic-text,Nakagawa Open Latin,$(5) $(PROJECT_LATIN_$(1)_SPACING),$(PROJECT_LATIN_$(4)_STYLE),$(LIBERATION)/$(PROJECT_LATIN_$(4)_FALLBACK).ttf,$(LIBERATION)/$(PROJECT_LATIN_$(4)_FALLBACK).pin.json,$(LIBERATION)/OFL.txt,Geist,Liberation Sans),$(call PROJECT_FONT_RULE,$(2),$(3),$(PROJECT_LATIN_$(4)_DIR)/$(PROJECT_LATIN_$(4)_FACE).ttf,$(or $(PROJECT_LATIN_$(4)_PIN),$(PROJECT_LATIN_$(4)_DIR)/$(PROJECT_LATIN_$(4)_FACE).pin.json),$(PROJECT_LATIN_$(4)_DIR)/OFL.txt,--latin-cyrillic-text,Nakagawa Open Latin,$(5) $(PROJECT_LATIN_$(1)_SPACING),$(PROJECT_LATIN_$(4)_STYLE)))
 endef
 $(eval $(call PROJECT_LATIN_FACE_RULE,0,latin,nkltn.pgf,0,$(PROJECT_LATIN_STRIKE_ARGS)))
 $(eval $(call PROJECT_LATIN_FACE_RULE,1,latin-1,nkltn1.pgf,1,$(PROJECT_LATIN_STRIKE_ARGS)))

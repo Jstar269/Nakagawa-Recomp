@@ -340,7 +340,10 @@ No console font file is read by the build or the tests: the targets are the
 aggregate line widths, class averages and ink edges already recorded, and they
 are written into `tools/test_ttf2pgf.py`.
 
-**Latin: Liberation Sans and Liberation Serif 2.1.5.** Release
+**Latin: Liberation Sans and Liberation Serif 2.1.5.** Liberation draws the
+serif faces and the italic and bold italic sans-serif faces, and, through the
+converter's `--fallback` option, the characters the Geist faces below lack.
+Release
 [`2.1.5`](https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5)
 (tag commit `4b0192046158094654e865245832c66d2104219e`), from its TTF tarball
 <https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz>,
@@ -377,16 +380,20 @@ widths of each Latin index. Liberation came closest on both the sentence and
 the menu line, carries all four styles in a sans-serif and a serif family, and
 covers the whole Latin repertoire below. No candidate has the console's
 capital-to-lowercase width ratio (1.28; Liberation Sans 1.38), so the per-face
-spacing balances the two lines.
+spacing balances the two lines. A later comparison by the width of each
+letter's ink (#1300) chose Geist for the regular and bold sans-serif faces
+(below).
 
 Repertoire. The `--latin-cyrillic-text` set is a rule over public standards
 (#1300): every character of the Unicode blocks Basic Latin, Latin-1
 Supplement, Latin Extended-A, Spacing Modifier Letters, General Punctuation
 and Letterlike Symbols and of the code pages Windows-1250, -1251, -1252, -1254
 and -1257, ISO 8859-16 and Mac Cyrillic that the face draws, without invisible
-format controls but with the soft hyphen. It is computed from each face's
+format controls and line and paragraph separators but with the soft hyphen.
+It is computed from each face's
 character map at conversion time; no list of characters is taken from a
-console font. Each of the eight faces gives the same 556 points, canonical
+console font. Each of the eight faces (a Geist face together with its
+Liberation Sans fallback) gives the same 556 points, canonical
 SHA-256 `7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d`.
 `docs/cleanroom/PGF_CONVERTER_SPEC.md` gives the reason for each block and code
 page and for those left out. Until 2026-11-19 the set was the first set
@@ -398,16 +405,60 @@ console order (sans-serif regular, serif regular, sans-serif italic, serif
 italic, sans-serif bold, serif bold, sans-serif bold italic, serif bold
 italic), with the PGF style `Regular`, `Italic`, `Bold` or `Bold Italic`. The
 larger size is 20 ppem (nominal 648, 10.125 points at 128 dpi) and the smaller
-13 ppem (nominal 448), each with synthetic emboldening. Each index has its own
+13 ppem (nominal 448), each with synthetic emboldening; the Geist SemiBold
+faces are drawn one pixel smaller (19 and 12 ppem) with the same nominal size,
+their images then widened by `--scale-x`. Each index has its own
 `--tracking`, and the sans-serif faces `--digit-advance` (tabular figures at
 the console's digit width) and `--embolden-y` (horizontal strokes as thick as
 the console's: its sans-serif letters carry 9 to 25 % more ink than the source
 faces draw without it). Both sizes set round letters' overshoots of less than
 3/8 px on the face's own baseline, x-height and cap height (`--snap-overshoot
-3`, #1300), and the bold sans-serif faces, already at the largest
-`--embolden-y`, take one sub-sample more `--embolden-x` than their strike.
-Every index's sentence and menu line then comes within 3 % of the console's,
-and each sans-serif face's mean ink per letter within 2 %.
+3`, #1300), and the bold italic sans-serif faces take more `--embolden-x`
+than their strike. Every
+index's sentence and menu line then comes within 3 % of the console's, and
+each sans-serif face's mean ink per letter within 2 %.
+
+**Latin: Geist for the regular and bold sans-serif faces (#1300).** Geist
+Regular draws `ltn0` and `ltn8` (`nkltn.pgf`, `nkltns.pgf`) and Geist SemiBold
+draws `ltn4` and `ltn12` (`nkltn4.pgf`, `nkltn12.pgf`), after a comparison by
+the width of each letter's ink: Hot Shots Tennis places each letter one pixel
+after the previous letter's image, and Liberation Sans, whose letters are
+narrower for their advance than the console's, drew that game's dialog lines 8
+to 11 % shorter than the console fonts do. Geist is the player's own interface
+font: the converter reads the static instances already shipped in
+`assets/fonts/ui/geist/` (section 8 records their upstream, `google/fonts` at
+`45e3d5269e4a17d823f6d84470bc084dc5ae46f6`, `ofl/geist/Geist[wght].ttf`, and
+the instancing), pinned by their records in `assets/fonts/ui/manifest.json`
+(`docs/cleanroom/PGF_CONVERTER_SPEC.md` section 7), so no font file is added:
+
+| Input | Weight | SHA-256 | Slots |
+| --- | ---: | --- | --- |
+| `Geist-Regular.ttf` | 400 | `58a4bac9a7b901313822aada65bb1469b3c873874e11b3fc88ba75ed9576d98a` | `ltn0`, `ltn8` |
+| `Geist-SemiBold.ttf` | 600 | `c157d36cc1778633d43f5a0ff92b078bb6de26f5011a6a092b7b6f49fe022fc5` | `ltn4`, `ltn12` |
+
+The project ships no Geist Bold, so SemiBold, thickened in both directions
+(`--embolden-x`, `--embolden-y`), draws the bold slots; with it the bold
+slots' images come within 0.3 % of the console's widths and their ink per
+letter within 2 %, closer than Liberation Sans Bold, which drew the smaller
+bold slot's images 2.6 % narrower. The licence is SIL OFL 1.1
+(`assets/fonts/ui/geist/OFL.txt`); its copyright notice, `Copyright 2024 The
+Geist Project Authors (https://github.com/vercel/geist-font.git)`, reserves no
+font name. The PGFs are named `Nakagawa Open Latin` and their files
+`nkltn*.pgf`.
+
+Geist lacks 110 characters of the Latin text set: the soft hyphen, eleven
+letters of Latin Extended-A (U+0114, U+0115, U+012C, U+012D, U+0138, U+013F,
+U+0140, U+0149, U+014E, U+014F and the long s U+017F), 69 modifier letters of
+Spacing Modifier Letters, the spaces U+2000 to U+200A and U+202F, eleven
+dashes, quotes, primes and punctuation marks of General Punctuation, and six
+letterlike symbols (U+2105, U+2113, U+2126, U+212E, U+214D, U+214E). The converter's `--fallback` option draws those from
+Liberation Sans of the slot's weight (Regular for Geist Regular, Bold for
+Geist SemiBold), so each of the four fonts has the same 556 characters as the
+Liberation faces; its manifest lists them under `fallback.codes` with the
+Liberation face's digest and licence, and its licence copy (`nkltn-OFL.txt`
+and so on) carries Geist's licence text and then Liberation's. Both faces are
+converted to PGF, scaled horizontally (`--scale-x`), emboldened and cut to
+their ink as the Liberation faces are; no glyph is edited by hand.
 
 The ink targets (`LETTER_INK` in `tools/test_ttf2pgf.py`) are one number per sans-serif face, measured on
 a PSP-3000's own font files, read locally; no font bytes or glyph data are recorded. To
