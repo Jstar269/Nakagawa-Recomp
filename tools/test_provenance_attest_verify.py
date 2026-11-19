@@ -4698,7 +4698,7 @@ class VendoredManifestTests(unittest.TestCase):
             verifier._manifest_row_path(manifest, row.get("file", ""))
             for row in rows if "local delta" in row.get("kind", "").lower()
         ]
-        self.assertEqual(len(deltas), 4, "atrac3.c, atrac3plus.c, atrac3plusdec.c and sinewin.c")
+        self.assertEqual(len(deltas), 5, "atrac3.c, atrac3plus.c, atrac3plusdec.c, sinewin.c and libavutil/mem.h")
         notice = re.compile(r"Modified by Nakagawa Recomp contributors, \d{4}-\d{2}-\d{2}")
         unmarked = [path for path in deltas if path is None or not notice.search((ROOT / path).read_text("utf-8"))]
         self.assertEqual(unmarked, [])
