@@ -152,6 +152,7 @@ static NkZipStatus tzip_open(const TZip *z, NkZipError *err) {
         status = nk_zip_reader_verify(reader, err);
         nk_zip_reader_close(reader);
     } else if (reader != NULL) {
+        nk_zip_reader_close(reader);
         status = NK_ZIP_STATUS_COUNT; /* a failed open must not hand out a reader */
     }
     return status;
@@ -439,6 +440,31 @@ static void test_duplicate_refusals(void) {
     items[2].name = "PSP/SAVEDATA/X-1/DATA.BIN";
     tzip_build(&z, items, 3);
     expect_status(&z, NK_ZIP_OK, "a folder, its file and a similar name are fine");
+    /* Windows folds letters past ASCII too: e acute, Greek and Cyrillic in either case land
+       on one file, and a file named like a folder in other case is that folder. */
+    items[0] = k_save;
+    items[1] = k_save;
+    items[0].name = "PSP/SAVEDATA/X/\xC3\xA9.BIN";
+    items[1].name = "PSP/SAVEDATA/X/\xC3\x89.BIN";
+    tzip_build(&z, items, 2);
+    expect_status(&z, NK_ZIP_ERR_NAME_DUPLICATE, "e acute in either case");
+    items[0].name = "PSP/SAVEDATA/X/\xCE\xA3\xCE\x91\xCE\x92.BIN";
+    items[1].name = "PSP/SAVEDATA/X/\xCF\x82\xCE\xB1\xCE\xB2.BIN";
+    tzip_build(&z, items, 2);
+    expect_status(&z, NK_ZIP_ERR_NAME_DUPLICATE, "Greek in either case, final sigma included");
+    items[0].name = "PSP/SAVEDATA/\xD0\x94\xD0\x81";
+    items[1].name = "PSP/SAVEDATA/\xD0\xB4\xD1\x91/DATA.BIN";
+    tzip_build(&z, items, 2);
+    expect_status(&z, NK_ZIP_ERR_NAME_CONFLICT, "a Cyrillic file named like a folder in other case");
+    items[0].name = "PSP/SAVEDATA/X/\xC4\x80\xC5\xB8.BIN";
+    items[1].name = "PSP/SAVEDATA/X/\xC4\x81\xC3\xBF.BIN";
+    tzip_build(&z, items, 2);
+    expect_status(&z, NK_ZIP_ERR_NAME_DUPLICATE, "Latin Extended-A and y diaeresis in either case");
+    items[0].name = "PSP/SAVEDATA/X/\xC3\xA9.BIN";
+    items[1].name = "PSP/SAVEDATA/X/\xC3\xA8.BIN";
+    items[2].name = "PSP/SAVEDATA/X/E.BIN";
+    tzip_build(&z, items, 3);
+    expect_status(&z, NK_ZIP_OK, "e acute, e grave and a plain E are three names");
     printf("PASS: nk_zip refuses duplicate and case-duplicate names\n");
 }
 
@@ -744,7 +770,10 @@ static NkZipStatus tzip_open_with(const TZip *z, const NkZipReadOptions *options
     if (got) *got = 0;
     for (size_t i = 0; status == NK_ZIP_OK && i < nk_zip_reader_count(reader); ++i) {
         NkZipEntryInfo info;
-        if (!nk_zip_reader_entry(reader, i, &info) || info.size > cap) return NK_ZIP_STATUS_COUNT;
+        if (!nk_zip_reader_entry(reader, i, &info) || info.size > cap) {
+            nk_zip_reader_close(reader);
+            return NK_ZIP_STATUS_COUNT;
+        }
         status = nk_zip_reader_read(reader, i, out, cap, &err);
         if (status == NK_ZIP_OK && got) *got = info.size;
     }
@@ -886,6 +915,17 @@ static void test_status_words(void) {
             CHECK(strcmp(code, nk_zip_status_code((NkZipStatus)j)) != 0, "codes are distinct");
             CHECK(strcmp(message, nk_zip_status_message((NkZipStatus)j)) != 0,
                   "messages are distinct");
+        }
+    }
+    /* The caps and the methods read are each caller's (a texture pack takes 65534 entries,
+       gigabytes and DEFLATE), so the words for them name no number and no one kind of archive. */
+    {
+        const NkZipStatus caller_set[] = {NK_ZIP_ERR_TOO_MANY_ENTRIES, NK_ZIP_ERR_TOO_LARGE,
+                                          NK_ZIP_ERR_METHOD};
+        for (size_t i = 0; i < sizeof(caller_set) / sizeof(caller_set[0]); ++i) {
+            const char *message = nk_zip_status_message(caller_set[i]);
+            CHECK(strpbrk(message, "0123456789") == NULL && strstr(message, "backup") == NULL,
+                  "a cap or method the caller sets is worded for every reader");
         }
     }
     CHECK(strcmp(nk_zip_status_code(NK_ZIP_STATUS_COUNT), "ZIP_UNKNOWN") == 0,
