@@ -40,6 +40,9 @@ rc_json_field_t;
 typedef struct rc_json_iterator_t {
   const char* json;
   const char* end;
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): nesting depth for RC_JSON_MAX_DEPTH, as
+   * upstream rcheevos commit 8409479c (#577) adds. */
+  uint32_t depth;
 }
 rc_json_iterator_t;
 

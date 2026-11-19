@@ -24,6 +24,9 @@
 // xbrz::scale(factor, ..., ColorFormat::argbUnbuffered) (src/rt/gpu_sdl3vk/tex_scale_selftest.c
 // checks it against goldens made from the pinned upstream source). Factor 1 clamps the slice
 // to the image. See PROVENANCE.md in this directory.
+// Modified by Nakagawa Recomp contributors, 2026-11-18: a factor-1 slice is copied to its own
+// rows of trg instead of to its start, so slices of one image may run on separate threads at
+// every factor, as xbrz.h says.
 
 #include "xbrz.h"
 
@@ -839,8 +842,11 @@ int nk_xbrz_scale(int factor, const uint32_t *src, uint32_t *trg, int srcWidth, 
     {
         if (yFirst < 0) yFirst = 0;
         if (yLast > srcHeight) yLast = srcHeight;
+        /* The slice lands at its own rows, as every other factor's does (upstream copies it to
+           the start of trg whatever yFirst is). */
         if (yFirst < yLast && srcWidth > 0)
-            memcpy(trg, src + (size_t)yFirst * srcWidth, (size_t)(yLast - yFirst) * srcWidth * sizeof(uint32_t));
+            memcpy(trg + (size_t)yFirst * srcWidth, src + (size_t)yFirst * srcWidth,
+                   (size_t)(yLast - yFirst) * srcWidth * sizeof(uint32_t));
         return 1;
     }
     if (factor < 2 || factor > NK_XBRZ_SCALE_FACTOR_MAX)

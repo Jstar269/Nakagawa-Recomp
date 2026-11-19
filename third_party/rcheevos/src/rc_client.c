@@ -1973,11 +1973,15 @@ static void rc_client_start_session_callback(const rc_api_server_response_t* ser
   error_message = rc_client_server_error_message(&result, server_response->http_status_code, &start_session_response.response);
   outstanding_requests = rc_client_end_load_state(load_state);
 
-  if (error_message) {
-    rc_client_load_error(load_state, result, error_message);
-  }
-  else if (outstanding_requests < 0) {
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): test for an aborted load first. When the load was
+   * abandoned, rc_client_end_load_state may have just freed load_state, so reporting the error on it
+   * would use it after the free and free it again. Upstream rcheevos commit db8ca2e6 (#570) makes
+   * the same change. */
+  if (outstanding_requests < 0) {
     /* previous load state was aborted, load_state was free'd */
+  }
+  else if (error_message) {
+    rc_client_load_error(load_state, result, error_message);
   }
   else if (outstanding_requests == 0 && load_state->client->state.allow_background_memory_reads) {
     rc_client_activate_game(load_state, &start_session_response);
@@ -4657,6 +4661,42 @@ static void rc_client_award_achievement_retry(rc_client_scheduled_callback_data_
   rc_client_award_achievement_server_call(ach_data);
 }
 
+/* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): the mastery check, moved out of
+ * rc_client_award_achievement_callback as upstream rcheevos commit db8ca2e6 (#570) does. An award's
+ * answer can arrive after the game was unloaded (client->game NULL), so the check holds the state
+ * mutex and does nothing without a game. */
+static void rc_client_award_achievement_check_mastery(rc_client_t* client, uint32_t achievement_id)
+{
+  rc_mutex_lock(&client->state.mutex);
+  if (client->game) {
+    rc_client_subset_info_t* subset;
+    for (subset = client->game->subsets; subset; subset = subset->next) {
+      if (subset->mastery == RC_CLIENT_MASTERY_STATE_NONE) {
+        rc_client_achievement_info_t* scan = subset->achievements;
+        rc_client_achievement_info_t* stop = scan + subset->public_.num_achievements;
+        int found = 0;
+        for (; scan < stop; ++scan) {
+          if (scan->public_.id == achievement_id) {
+            found = 1;
+            break;
+          }
+        }
+
+        if (found) {
+          RC_CLIENT_LOG_INFO_FORMATTED(client, "%s %u %s",
+            (subset->public_.id == client->game->public_.id) ? "Game" : "Subset",
+            client->game->public_.id,
+            client->state.hardcore ? "mastered" : "completed");
+
+          subset->mastery = RC_CLIENT_MASTERY_STATE_PENDING;
+          break;
+        }
+      }
+    }
+  }
+  rc_mutex_unlock(&client->state.mutex);
+}
+
 static void rc_client_award_achievement_callback(const rc_api_server_response_t* server_response, void* callback_data)
 {
   rc_client_award_achievement_callback_data_t* ach_data =
@@ -4710,7 +4750,9 @@ static void rc_client_award_achievement_callback(const rc_api_server_response_t*
     ach_data->client->user.score_softcore = award_achievement_response.new_player_score_softcore;
 
     if (award_achievement_response.awarded_achievement_id != ach_data->id) {
-      RC_CLIENT_LOG_ERR_FORMATTED(ach_data->client, "Awarded achievement %u instead of %u", award_achievement_response.awarded_achievement_id, error_message);
+      /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): the second %u is the requested achievement;
+       * upstream passes error_message, a pointer that is NULL on this path. */
+      RC_CLIENT_LOG_ERR_FORMATTED(ach_data->client, "Awarded achievement %u instead of %u", award_achievement_response.awarded_achievement_id, ach_data->id);
     }
     else {
       if (award_achievement_response.response.error_message) {
@@ -4728,25 +4770,8 @@ static void rc_client_award_achievement_callback(const rc_api_server_response_t*
             ach_data->hardcore ? award_achievement_response.new_player_score : award_achievement_response.new_player_score_softcore);
       }
 
-      if (award_achievement_response.achievements_remaining == 0) {
-        rc_client_subset_info_t* subset;
-        for (subset = ach_data->client->game->subsets; subset; subset = subset->next) {
-          if (subset->mastery == RC_CLIENT_MASTERY_STATE_NONE &&
-              rc_client_subset_get_achievement_info(ach_data->client, subset, ach_data->id)) {
-            if (subset->public_.id == ach_data->client->game->public_.id) {
-              RC_CLIENT_LOG_INFO_FORMATTED(ach_data->client, "Game %u %s", ach_data->client->game->public_.id,
-                ach_data->client->state.hardcore ? "mastered" : "completed");
-              subset->mastery = RC_CLIENT_MASTERY_STATE_PENDING;
-            }
-            else {
-              RC_CLIENT_LOG_INFO_FORMATTED(ach_data->client, "Subset %u %s", ach_data->client->game->public_.id,
-                ach_data->client->state.hardcore ? "mastered" : "completed");
-
-              subset->mastery = RC_CLIENT_MASTERY_STATE_PENDING;
-            }
-          }
-        }
-      }
+      if (award_achievement_response.achievements_remaining == 0)
+        rc_client_award_achievement_check_mastery(ach_data->client, ach_data->id);
     }
   }
 

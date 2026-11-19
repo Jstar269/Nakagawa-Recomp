@@ -27,8 +27,8 @@ no C++ runtime.
 | File | Kind | Upstream file | Upstream blob | SHA-256 in this tree |
 | --- | --- | --- | --- | --- |
 | `License.txt` | LOCAL DELTA: CRLF line endings normalised to LF | `License.txt` | `ea09e3734b6a49a0c0c4f123d0451db78522408c` | `c61f12da7cdad526bdcbed47a4c0a603e60dbbfdaf8b66933cd088e9132c303f` |
-| `xbrz.c` | imported + LOCAL DELTA: translated from C++ to C | `xbrz.cpp`, `xbrz_config.h`, `xbrz_tools.h` | `a027586a3043c723fef8c4ae54eb876953ec18df` (`xbrz.cpp`) | `40a1875b1816dc8c8670738fe4232a901edce7170802677538e7a4761f4f78b2` |
-| `xbrz.h` | imported + LOCAL DELTA: translated from C++ to C | `xbrz.h`, `xbrz_config.h` | `f92b65cf1daf314db2af0025f46000bdc0a0bacc` (`xbrz.h`) | `0bc611b221191c100a9f2d5dfa95aabac92e68e2f30e014828fc84a9d78f7592` |
+| `xbrz.c` | imported + LOCAL DELTA: translated from C++ to C | `xbrz.cpp`, `xbrz_config.h`, `xbrz_tools.h` | `a027586a3043c723fef8c4ae54eb876953ec18df` (`xbrz.cpp`) | `63cd80f827e70245939759afe847541b20985688d4dba511ee03e004dfc514cc` |
+| `xbrz.h` | imported + LOCAL DELTA: translated from C++ to C | `xbrz.h`, `xbrz_config.h` | `f92b65cf1daf314db2af0025f46000bdc0a0bacc` (`xbrz.h`) | `7c8419b0c4868816b103bca0dcbcaa298bdd036fe636422a0584fbd927a6f348` |
 
 The other upstream inputs to the translation: `xbrz_config.h` (blob
 `238045e625842dca4cce01d36681407782ac07f8`) and `xbrz_tools.h` (blob
@@ -59,11 +59,20 @@ The translation keeps upstream's algorithm and constants and changes only what C
   the image read as transparent. The runtime pads the image with two texels of its own (repeated
   or clamped, by the texture's wrap mode) and crops the result, so the scaler never sees the
   border (`tex_scale.c`).
-- **Floating point.** `#pragma GCC optimize("fp-contract=off")` keeps the compiler from fusing
-  the colour-distance arithmetic into FMA, which would change rounding against upstream.
+- **Floating point.** `#pragma GCC optimize("fp-contract=off")` (GCC) and `#pragma STDC
+  FP_CONTRACT OFF` (clang) keep the compiler from fusing the colour-distance arithmetic into FMA,
+  which would change rounding against upstream. No MSVC pragma is set; the goldens run only in
+  the make (GCC) build.
 - **API.** `nk_xbrz_scale(factor, src, trg, w, h, cfg, yFirst, yLast)` and `NkXbrzCfg` with
   upstream's defaults (`nk_xbrz_default_cfg`), in place of `xbrz::scale` and `xbrz::ScalerCfg`.
-  A bad factor returns 0 instead of asserting.
+  A bad factor returns 0 instead of asserting. A NULL `cfg` means `nk_xbrz_default_cfg` (upstream
+  takes the configuration by reference). Factor 1 clamps `[yFirst, yLast)` to the image (upstream
+  copies `src + yFirst * w` to `src + yLast * w` unclamped, which with the default `yLast` of
+  `INT_MAX` reads past the image). Since 2026-11-18, factor 1 also copies a slice to its own rows
+  of `trg`, as factors 2 to 6 do, where upstream copies it to the start of `trg` whatever `yFirst`
+  is; slices of one image can then share one target at every factor, as the header's thread-safety
+  note says. `tex_scale_selftest.c` checks that two factor-1 slices rebuild the image (corrected
+  2026-11-18: this bullet named only the bad-factor change).
 - **SPDX line.** Each translated file starts with `SPDX-License-Identifier: GPL-3.0-only`, the
   identifier of the licence the upstream header names; the header and its exception follow
   unchanged.

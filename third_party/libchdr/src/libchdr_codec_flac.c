@@ -48,6 +48,11 @@ chd_error flac_codec_decompress(void *codec, const uint8_t *src, uint32_t comple
 	flac_codec_data *flac = (flac_codec_data*)codec;
 	int swap_endian;
 
+	/* Nakagawa LOCAL DELTA (2026-11-17): check the length before reading
+	 * src[0]; a zero-length hunk has no endianness byte to read. */
+	if (complen == 0)  /* complen - 1 below */
+		return CHDERR_DECOMPRESSION_ERROR;
+
 	if (src[0] == 'L')
 		swap_endian = !flac->native_endian;
 	else if (src[0] == 'B')
@@ -55,8 +60,6 @@ chd_error flac_codec_decompress(void *codec, const uint8_t *src, uint32_t comple
 	else
 		return CHDERR_DECOMPRESSION_ERROR;
 
-	if (complen == 0)  /* complen - 1 below */
-		return CHDERR_DECOMPRESSION_ERROR;
 	if (!flac_decoder_reset(&flac->decoder, 44100, 2, flac_codec_blocksize(destlen), src + 1, complen - 1))
 		return flac->decoder.alloc_failed ? CHDERR_OUT_OF_MEMORY : CHDERR_DECOMPRESSION_ERROR;
 	if (!flac_decoder_decode_interleaved(&flac->decoder, (int16_t *)(dest), destlen/4, swap_endian))
