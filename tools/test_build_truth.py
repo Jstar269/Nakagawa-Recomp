@@ -485,6 +485,15 @@ def _supplies_capture(text: str) -> bool:
     return SDL3VK_VAR in text or (FBCAP_C in text and CAPTURE_C in text and RECORDER_C in text)
 
 
+def _capture_policy_offenders(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Makefile statements that compile the sdl3vk backend without the capture policy.
+
+    The live scan and its failing-before proof both run this one predicate.
+    """
+    return [(number, text) for number, text in lines
+            if (SDL3VK_C in text or SDL3VK_VAR in text) and not _supplies_capture(text)]
+
+
 def _logical_lines(makefile: str) -> list[tuple[int, str]]:
     """Join backslash continuations, dropping whole-line comments.
 
@@ -631,11 +640,8 @@ class Sdl3vkLinkDependencyTests(unittest.TestCase):
             "than leaving it to pass vacuously.",
         )
 
-        offenders = []
-        for number, text in self.lines:
-            uses_backend = SDL3VK_C in text or SDL3VK_VAR in text
-            if uses_backend and not _supplies_capture(text):
-                offenders.append(f"Makefile:{number}: {text.strip()}")
+        offenders = [f"Makefile:{number}: {text.strip()}"
+                     for number, text in _capture_policy_offenders(self.lines)]
         self.assertEqual(
             offenders,
             [],
@@ -660,12 +666,7 @@ class Sdl3vkLinkDependencyTests(unittest.TestCase):
             )
             + "\n"
         )
-        offenders = [
-            number
-            for number, text in regressed
-            if (SDL3VK_C in text or SDL3VK_VAR in text) and not _supplies_capture(text)
-        ]
-        self.assertEqual(offenders, [2])
+        self.assertEqual([number for number, _ in _capture_policy_offenders(regressed)], [2])
         # Supplying the policy without the capture service is the same link failure.
         policy_only = _logical_lines(
             f"ge-replay:\n\t$(CC) -o out.exe {SDL3VK_C} {FBCAP_C} $(LIBS)\n"
@@ -1142,6 +1143,33 @@ def _link_defines_nested_frame_stubs(text: str) -> bool:
     return False
 
 
+def _nested_frame_link_offenders(
+    lines: list[tuple[int, str]], variables: dict[str, list[str]], callers: list[str],
+) -> tuple[list[tuple[int, str]], list[int]]:
+    """(offenders, checked) for the nested-frames link guard.
+
+    A link statement is checked when its text, with $(VARS) expanded, names a caller;
+    it offends unless it names a bundle carrying nested_frames.c or links a source
+    that defines the nested-frame API itself. The live scan and its failing-before
+    proof both run this one predicate.
+    """
+    offenders: list[tuple[int, str]] = []
+    checked: list[int] = []
+    for number, raw in lines:
+        if not _is_link_statement(raw):
+            continue
+        text = _expanded(raw, variables)
+        if not any(caller in text for caller in callers):
+            continue
+        checked.append(number)
+        if any(bundle in text for bundle in NESTED_FRAMES_BUNDLES):
+            continue
+        if _link_defines_nested_frame_stubs(text):
+            continue
+        offenders.append((number, text))
+    return offenders, checked
+
+
 class NestedFramesLinkDependencyTests(unittest.TestCase):
     """hle.c, mpeg.c and sched.c call into nested_frames.c, so every recipe that
     links one of them must also supply it.  This is the same failure shape as
@@ -1174,28 +1202,15 @@ class NestedFramesLinkDependencyTests(unittest.TestCase):
         self.assertIn("src/rt/nested_frames.c", self.makefile.split("RT_SRCS    :=", 1)[1])
 
     def test_every_link_of_a_caller_also_supplies_the_module(self) -> None:
-        callers = _nested_frame_callers()
-        variables = _make_variables(self.makefile)
-        offenders = []
-        checked = []
-        for number, raw in self.lines:
-            if not _is_link_statement(raw):
-                continue
-            text = _expanded(raw, variables)
-            if not any(caller in text for caller in callers):
-                continue
-            checked.append(number)
-            if any(bundle in text for bundle in NESTED_FRAMES_BUNDLES):
-                continue
-            if _link_defines_nested_frame_stubs(text):
-                continue
-            offenders.append(f"Makefile:{number}: {text.strip()}")
+        offenders, checked = _nested_frame_link_offenders(
+            self.lines, _make_variables(self.makefile), _nested_frame_callers())
+        offender_lines = [f"Makefile:{number}: {text.strip()}" for number, text in offenders]
         self.assertEqual(
-            offenders,
+            offender_lines,
             [],
             "these Makefile link statements use a nested-frame caller without "
             f"{NESTED_FRAMES_C}; the link will fail with undefined references to "
-            "sr_nested_frame_*:\n" + "\n".join(offenders),
+            "sr_nested_frame_*:\n" + "\n".join(offender_lines),
         )
         # The HLE sources reach the link lines through $(HLE_SRCS) (#307); a scan that cannot
         # see through it would skip every HLE selftest link and still pass.
@@ -1218,15 +1233,10 @@ class NestedFramesLinkDependencyTests(unittest.TestCase):
             )
             + "\n"
         )
-        callers = _nested_frame_callers()
-        offenders = [
-            number
-            for number, text in regressed
-            if _is_link_statement(text)
-            and any(caller in text for caller in callers)
-            and not any(bundle in text for bundle in NESTED_FRAMES_BUNDLES)
-        ]
-        self.assertEqual(offenders, [2])
+        offenders, checked = _nested_frame_link_offenders(
+            regressed, _make_variables(self.makefile), _nested_frame_callers())
+        self.assertEqual([number for number, _ in offenders], [2])
+        self.assertEqual(checked, [2])
 
     def test_a_compile_only_rule_is_not_flagged(self) -> None:
         """The per-object rule for a caller compiles with -c and links nothing."""
@@ -1236,20 +1246,59 @@ class NestedFramesLinkDependencyTests(unittest.TestCase):
             "$(BUILD_DIR)/hle.o: src/rt/hle.c src/rt/asset_index.h"))
 
 
+def _atrac3p_rule_mkdir_offenders(makefile: str) -> tuple[int, list[str]]:
+    """(rules found, offenders): every `mkdir -p` in an atrac3p_%.o rule's header or recipe.
+
+    A rule's recipe is the tab-indented logical lines after its header, up to the next
+    line that is neither a recipe line nor blank.
+    """
+    rules = 0
+    offenders: list[str] = []
+    in_rule = False
+    for number, text in _logical_lines(makefile):
+        if text.startswith("\t") and in_rule:
+            pass
+        elif not text.strip() and in_rule:
+            continue
+        else:
+            in_rule = "atrac3p_%.o:" in text
+            if not in_rule:
+                continue
+            rules += 1
+        if "mkdir -p" in text:
+            offenders.append(f"Makefile:{number}: {text.strip()}")
+    return rules, offenders
+
+
 class Atrac3pBuildPortabilityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.makefile = read_makefile(ROOT)
         self.make = shutil.which("mingw32-make") or shutil.which("make")
 
     def test_makefile_does_not_contain_per_recipe_mkdir_in_atrac3p_rule(self) -> None:
-        lines = _logical_lines(self.makefile)
-        for number, text in lines:
-            if "atrac3p_%.o:" in text:
-                self.assertNotIn(
-                    "mkdir -p",
-                    text,
-                    f"Makefile:{number} contains per-recipe 'mkdir -p' in atrac3p rule which fails in cmd.exe when sh is absent",
-                )
+        rules, offenders = _atrac3p_rule_mkdir_offenders(self.makefile)
+        self.assertGreaterEqual(rules, 1, "no atrac3p_%.o rule found; the check would pass on nothing")
+        self.assertEqual(
+            offenders, [],
+            "the atrac3p rule runs a per-recipe 'mkdir -p', which fails in cmd.exe when sh is absent:\n"
+            + "\n".join(offenders),
+        )
+
+    def test_the_mkdir_check_sees_the_rule_recipe_lines(self) -> None:
+        """Failing-before proof: a `mkdir -p` recipe line under the header is reported."""
+        regressed = (
+            "$(BUILD_DIR)/atrac3p_%.o: src/rt/atrac3p/%.c src/rt/recomp.h\n"
+            "\t@echo compiling\n"
+            "\n"
+            "\tmkdir -p $(@D)\n"
+            "\t$(CC) -c $< -o $@\n"
+            "other: x\n"
+            "\tmkdir -p elsewhere\n"
+        )
+        rules, offenders = _atrac3p_rule_mkdir_offenders(regressed)
+        self.assertEqual(rules, 1)
+        self.assertEqual(len(offenders), 1, offenders)
+        self.assertIn("Makefile:4:", offenders[0])
 
     def test_makefile_defines_atrac3p_obj_dirs_up_front(self) -> None:
         self.assertIn("ATRAC3P_OBJ_DIRS :=", self.makefile)
@@ -1672,8 +1721,19 @@ class GuestInputTransportTests(unittest.TestCase):
     INJECTION_SIGNATURES = (
         VER_OUTPUT,                       # cmd.exe ran `ver`
         "is not recognized as an internal",  # cmd.exe tried to resolve a fragment
-        "ver: command not found",         # a POSIX shell tried to run `ver`
+        "ver: command not found",         # bash tried to run `ver`
+        ": ver: not found",               # dash (Ubuntu's /bin/sh): `sh: 1: ver: not found`
     )
+
+    def test_injection_signatures_cover_each_shell_make_dispatches_to(self) -> None:
+        """Each interpreter's spelling of "ran a pathname fragment" is recognized."""
+        for message in ("Microsoft Windows [Version 10.0.26100.1]",
+                        "'tail.elf' is not recognized as an internal or external command,",
+                        "/bin/sh: line 1: ver: command not found",
+                        "/bin/sh: 1: ver: not found"):
+            with self.subTest(message=message):
+                self.assertTrue(self._injection_evidence(f"prxload: ok\n{message}\n"))
+        self.assertEqual(self._injection_evidence("image written: test_gi_split_image.bin\n"), [])
 
     def _injection_evidence(self, blob: str) -> list[str]:
         return [marker for marker in self.INJECTION_SIGNATURES if marker in blob]
@@ -1757,9 +1817,11 @@ class GuestInputTransportTests(unittest.TestCase):
         self.assertTrue((build / "test_gi_split_image.bin").is_file(), blob)
 
     def test_M1_mutation_raw_recipe_interpolation_reintroduces_command_execution(self) -> None:
-        """M1: restoring raw $(GAME_ELF) in the recipe must make the above test fail."""
-        if sys.platform != "win32":
-            self.skipTest("cmd.exe command splitting is the Windows failure mode")
+        """M1: restoring raw $(GAME_ELF) in the recipe must make the above test fail.
+
+        It runs on every host: `&` splits the command for cmd.exe and backgrounds it for a
+        POSIX shell, so each host proves the signature list matches its own shell.
+        """
         elf = self._build_dir("test_gi_m1") / self.SPLIT_NAME
         self._write_minimal_elf(elf)
 
@@ -2172,7 +2234,10 @@ class ShellPortabilityAndRecipeTruthTests(unittest.TestCase):
         """Mutation test: verify that a failing sub-configuration causes the aggregate target to fail.
 
         When Make runs newline-separated recipe lines, any non-zero exit code must immediately
-        abort the target with non-zero exit status (fail-closed behavior preserved).
+        abort the target with non-zero exit status (fail-closed behavior preserved). The
+        bad manifest is the first configuration's (generic); each configuration generates
+        its title header under title-config/<cfg>/ before it compiles anything, so the
+        failure must name the manifest, and no later configuration may have started.
         """
         if not self.make:
             self.skipTest("GNU Make is required")
@@ -2195,11 +2260,19 @@ class ShellPortabilityAndRecipeTruthTests(unittest.TestCase):
                     text=True,
                     check=False,
                 )
+                blob = proc.stdout + proc.stderr
                 self.assertNotEqual(
                     proc.returncode, 0,
-                    f"{target} did not fail when a configuration was invalid:\n"
-                    + proc.stdout + proc.stderr,
+                    f"{target} did not fail when a configuration was invalid:\n" + blob,
                 )
+                # Any Make failure (no compiler, no SDL3, a broken source) would satisfy the
+                # exit status alone; the failure must be the manifest's.
+                self.assertIn("nonexistent_manifest_fixture.json: manifest is not a regular file",
+                              blob, f"{target} failed, but not on the bad manifest:\n{blob}")
+                self.assertIn("title-config/generic/", blob, blob)
+                for later in ("fixture-a", "fixture-b"):
+                    self.assertNotIn(f"title-config/{later}/", blob,
+                                     f"{target} ran the {later} configuration after generic failed:\n{blob}")
 
 
 #: The guard a recipe written for a POSIX sh names on its first line (Makefile, "RECIPE SHELL").
@@ -3887,6 +3960,74 @@ class ProfileEntriesEnvTransportTests(unittest.TestCase):
         self.assertIn(self.ENV_VAR, proc.stderr)
 
 
+_IMPORT_ERRORS = frozenset({"ImportError", "ModuleNotFoundError"})
+
+
+def _catches_import_error(handler: ast.ExceptHandler) -> bool:
+    kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return any((isinstance(kind, ast.Name) and kind.id in _IMPORT_ERRORS)
+               or (isinstance(kind, ast.Attribute) and kind.attr in _IMPORT_ERRORS)
+               for kind in kinds if kind is not None)
+
+
+def _unguarded_sibling_imports(source: str, sibling_modules: set[str]) -> list[str]:
+    """`name (line N)` for each sibling import that no working path idiom covers.
+
+    A sibling import is covered when it sits in a `try` that catches ImportError or
+    ModuleNotFoundError (the `from tools import x` fallback), or when a module-level
+    `sys.path.insert`/`sys.path.append` call runs first: before it in the file for an
+    import executed at import time, anywhere at module level for one inside a function,
+    or earlier in the same function. Only code counts: the same words in a string or
+    comment cover nothing.
+    """
+    tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+    def enclosing(node: ast.AST) -> list[ast.AST]:
+        chain = []
+        while node in parents:
+            node = parents[node]
+            chain.append(node)
+        return chain
+
+    def is_path_call(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("insert", "append")
+                and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "path"
+                and isinstance(node.func.value.value, ast.Name) and node.func.value.value.id == "sys")
+
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+    def innermost_function(node: ast.AST) -> ast.AST | None:
+        return next((parent for parent in enclosing(node) if isinstance(parent, functions)), None)
+
+    path_calls = [(innermost_function(node), cast(ast.Call, node).lineno)
+                  for node in ast.walk(tree) if is_path_call(node)]
+    path_lines = [line for function, line in path_calls if function is None]
+    unguarded: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names if alias.name in sibling_modules]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in sibling_modules:
+            names = [cast(str, node.module)]
+        else:
+            continue
+        if not names:
+            continue
+        chain = enclosing(node)
+        if any(isinstance(parent, ast.Try) and any(_catches_import_error(h) for h in parent.handlers)
+               for parent in chain):
+            continue
+        function = innermost_function(node)
+        if any(function is not None or line < node.lineno for line in path_lines):
+            continue
+        if function is not None and any(owner is function and line < node.lineno
+                                        for owner, line in path_calls):
+            continue  # the function puts tools on the path itself before it imports
+        unguarded.extend(f"{name} (line {node.lineno})" for name in names)
+    return unguarded
+
+
 class ToolsModuleImportPathTests(unittest.TestCase):
     """Regression tests ensuring test modules under tools/ use path idioms for sibling imports."""
 
@@ -3897,34 +4038,45 @@ class ToolsModuleImportPathTests(unittest.TestCase):
 
         missing: list[tuple[str, list[str]]] = []
         for path in sorted(tools_dir.glob("test_*.py")):
-            text = path.read_text(encoding="utf-8")
-            has_path_idiom = (
-                "sys.path.insert" in text
-                or "sys.path.append" in text
-                or "except ModuleNotFoundError" in text
-                or "except ImportError" in text
-            )
-            if has_path_idiom:
-                continue
-
-            tree = ast.parse(text)
-            imported: list[str] = []
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name in sibling_modules:
-                            imported.append(alias.name)
-                elif isinstance(node, ast.ImportFrom):
-                    if node.module and node.module in sibling_modules:
-                        imported.append(node.module)
+            imported = _unguarded_sibling_imports(path.read_text(encoding="utf-8"), sibling_modules)
             if imported:
-                missing.append((path.name, sorted(set(imported))))
+                missing.append((path.name, imported))
 
         self.assertEqual(
             missing,
             [],
             f"Test modules under tools/ import siblings without sys.path idiom: {missing}",
         )
+
+    def test_the_idiom_must_be_code_that_covers_the_import(self) -> None:
+        """Failing-before proof: the idiom's words in a string, a comment or an unrelated
+        try, or a path call after the import, cover nothing."""
+        siblings = {"flight_diff", "scratch_dir"}
+        uncovered = {
+            "string": 'SCRIPT = "import sys; sys.path.insert(0, x)"\nimport flight_diff\n',
+            "comment": "# sys.path.append(TOOLS) is not needed\nimport flight_diff\n",
+            "unrelated try": ("try:\n    import json\nexcept ImportError:\n    json = None\n"
+                              "from flight_diff import main\n"),
+            "path call after": "import sys\nimport flight_diff\nsys.path.insert(0, 'tools')\n",
+            "path call in a function": ("import sys\nimport flight_diff\n"
+                                        "def setUpModule():\n    sys.path.insert(0, 'tools')\n"),
+        }
+        for label, source in uncovered.items():
+            with self.subTest(label):
+                self.assertEqual(len(_unguarded_sibling_imports(source, siblings)), 1, source)
+        covered = {
+            "try fallback": ("try:\n    import scratch_dir\nexcept ModuleNotFoundError:\n"
+                             "    from tools import scratch_dir\n"),
+            "path call first": "import sys\nsys.path.insert(0, 'tools')\nimport flight_diff\n",
+            "deferred import": ("import sys\ndef load():\n    import flight_diff\n"
+                                "sys.path.append('tools')\n"),
+            "package import": "from tools import flight_diff\nimport tools.scratch_dir\n",
+            "same function": ("import sys\ndef setUp(self):\n    sys.path.insert(0, TOOLS)\n"
+                              "    import flight_diff\n"),
+        }
+        for label, source in covered.items():
+            with self.subTest(label):
+                self.assertEqual(_unguarded_sibling_imports(source, siblings), [], source)
 
 
 #: Module-level functions that delete the path passed as their first argument.
@@ -4057,12 +4209,107 @@ def _propagate(bindings: list[tuple[list[str], ast.AST]], anchored: set[str]) ->
     return anchored
 
 
+#: Wrappers that hand back the program they are given: `cast(str, self.make)` (the
+#: suite's own idiom), `os.fspath(make)`, `str(make)`, `Path(make)`.
+_PROGRAM_PASSTHROUGH_CALLS = frozenset({"cast", "str", "fspath", "Path", "PurePath"})
+
+
 def _is_make_program(node: ast.AST) -> bool:
+    if isinstance(node, ast.Call) and node.args and _call_name(node) in _PROGRAM_PASSTHROUGH_CALLS:
+        # cast(T, value) carries the program in its last argument, the others in the first.
+        return _is_make_program(node.args[-1] if _call_name(node) == "cast" else node.args[0])
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return Path(node.value).stem.lower() in _MAKE_PROGRAMS
     if isinstance(node, ast.Name):
         return _MAKE_PROGRAM_NAME.search(node.id.lower()) is not None
     return isinstance(node, ast.Attribute) and _MAKE_PROGRAM_NAME.search(node.attr.lower()) is not None
+
+
+def _make_directory_operands(elements: list[ast.expr]) -> list[ast.expr | None]:
+    """The operand of each `-C DIR`, `-CDIR`, `--directory DIR` or `--directory=DIR` in an argv.
+
+    An operand that cannot be read from the argv (the option is the last element) is None.
+    """
+    operands: list[ast.expr | None] = []
+    for index, element in enumerate(elements):
+        if _literal_text(element) in _OTHER_TREE_MAKE_OPTIONS:
+            operands.append(elements[index + 1] if index + 1 < len(elements) else None)
+            continue
+        prefix = _literal_prefix(element)
+        for option in ("--directory=", "-C"):
+            if not prefix.startswith(option):
+                continue
+            if isinstance(element, ast.Constant):
+                operands.append(ast.Constant(cast(str, element.value)[len(option):]))
+            else:
+                rest = cast(ast.JoinedStr, element).values[1:]
+                head = prefix[len(option):]
+                if head:
+                    rest = [ast.Constant(head), *rest]
+                operands.append(rest[0].value if len(rest) == 1 and isinstance(
+                    rest[0], ast.FormattedValue) else ast.JoinedStr(rest))
+            break
+    return operands
+
+
+#: Calls that keep the directory they are given (they only respell it).
+_SAME_DIRECTORY_CALLS = frozenset({"str", "fspath", "Path", "PurePath", "abspath", "realpath", "normpath"})
+_SAME_DIRECTORY_METHODS = frozenset({"resolve", "absolute", "expanduser"})
+
+
+def _same_directory_operand(node: ast.AST) -> ast.AST:
+    """``node`` with the wrappers that keep the same directory removed."""
+    while True:
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Attribute) and node.func.attr in _SAME_DIRECTORY_METHODS:
+                node = node.func.value
+                continue
+            if node.args and _call_name(node) in _SAME_DIRECTORY_CALLS:
+                node = node.args[0]
+                continue
+        if isinstance(node, ast.JoinedStr) and len(node.values) == 1:
+            node = node.values[0]
+            continue
+        if isinstance(node, ast.FormattedValue):
+            node = node.value
+            continue
+        return node
+
+
+def _descends_below_anchor(node: ast.AST, anchored: set[str]) -> bool:
+    """True for a path beneath a checkout-anchored one: `ROOT / "tests"`, `ROOT.joinpath("x")`."""
+    node = _same_directory_operand(node)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
+        return _is_anchored(node.left, anchored)
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "joinpath" and bool(node.args)
+            and _is_anchored(node.func.value, anchored))
+
+
+def _subtree_names(bindings: list[tuple[list[str], ast.AST]], anchored: set[str]) -> set[str]:
+    """Anchored names every binding of which is a path beneath the anchor, not the anchor."""
+    descending: dict[str, bool] = {}
+    for names, value in bindings:
+        for name in names:
+            descending[name] = descending.get(name, True) and _descends_below_anchor(value, anchored)
+    return {name for name, below in descending.items() if below}
+
+
+def _names_checkout_root(node: ast.AST, anchored: set[str], subtrees: set[str]) -> bool:
+    """True when ``node`` is a checkout-anchored directory itself, not a path beneath it.
+
+    `-C str(ROOT)` runs the repository Makefile; `-C str(ROOT / "tests" / "fixtures")`,
+    or a name bound only to such a path, runs a fixture tree's own Makefile and is a
+    different tree. Only wrappers that keep the same directory (`str`, `os.fspath`,
+    `Path`, `.resolve()`, an f-string of the value alone) are seen through.
+    """
+    node = _same_directory_operand(node)
+    attribute = _instance_attribute(node)
+    if attribute is not None:
+        return attribute in anchored and attribute not in subtrees
+    if isinstance(node, ast.Name):
+        return node.id in anchored and node.id not in subtrees
+    return False
 
 
 def _literal_prefix(node: ast.AST) -> str:
@@ -4189,7 +4436,9 @@ def _scan_for_checkout_damage(source: str, label: str) -> list[str]:
       `PLAYER_EXE=build/x.exe`.
 
     A run is not checked when it names another tree with `-C`, or when its `cwd=`
-    is given and is not checkout-anchored (it then builds in that tree). Lists that
+    is given and is not checkout-anchored (it then builds in that tree); a `-C` that
+    names the checkout itself (`-C str(ROOT)`) is checked like a run there. The make
+    program may be wrapped (`cast(str, self.make)`, `os.fspath(make)`). Lists that
     are assertion arguments, dictionary values or arguments to other helpers are
     not runs and are not followed. A goal held in a variable is invisible to the
     scan; `_run_scratch_make` refuses checkout roots at run time.
@@ -4202,7 +4451,8 @@ def _scan_for_checkout_damage(source: str, label: str) -> list[str]:
     def report(node: ast.AST, message: str) -> None:
         findings.append((cast(ast.expr, node).lineno, message))
 
-    def check_make_run(node: ast.List, scope: ast.AST, is_anchored) -> None:
+    def check_make_run(node: ast.List, scope: ast.AST, is_anchored, anchored: set[str],
+                       subtrees: set[str]) -> None:
         elements = list(node.elts)
         if not elements or not _is_make_program(elements[0]):
             return
@@ -4242,8 +4492,11 @@ def _scan_for_checkout_damage(source: str, label: str) -> list[str]:
                     report(node, f"runs destructive Make goal(s) {destructive} with {variable} "
                                  f"inside the repository checkout")
             return
-        if foreign_tree or any(_literal_text(e) in _OTHER_TREE_MAKE_OPTIONS for e in elements):
-            return
+        directories = _make_directory_operands(elements)
+        names_checkout = any(operand is not None and _names_checkout_root(operand, anchored, subtrees)
+                             for operand in directories)
+        if not names_checkout and (foreign_tree or directories):
+            return  # it builds in the tree -C or cwd= names, which is not the checkout
         goal_like = [e for e in elements[1:] if _is_goal_like(e)]
         if not goal_like or all(_literal_text(e) == "help" for e in goal_like):
             return
@@ -4258,7 +4511,10 @@ def _scan_for_checkout_damage(source: str, label: str) -> list[str]:
         elif all(is_anchored(e) for e in relocations):
             report(node, f"runs Make for {goals} with BUILD_ROOT inside the repository checkout")
 
+    module_bindings = [binding for node in tree.body if not isinstance(
+        node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) for binding in _assignments(node)]
     for scope, anchored in _checkout_scopes(tree):
+        subtrees = _subtree_names(module_bindings + _assignments(scope), anchored)
         def is_anchored(expr: ast.AST, anchored: set[str] = anchored) -> bool:
             return _is_anchored(expr, anchored)
 
@@ -4286,7 +4542,7 @@ def _scan_for_checkout_damage(source: str, label: str) -> list[str]:
                     report(node, f"deletes a path inside the repository checkout: "
                                  f"{ast.unparse(target)}")
             elif isinstance(node, ast.List):
-                check_make_run(node, scope, is_anchored)
+                check_make_run(node, scope, is_anchored, anchored, subtrees)
     findings.sort(key=lambda finding: finding[0])
     return [f"{label}:{line}: {message}" for line, message in findings]
 
@@ -4531,17 +4787,22 @@ class CheckoutDeletionGuardTests(unittest.TestCase):
                     self.addCleanup(shutil.rmtree, doomed, True)
                     os.remove(self.logs / "stdout_run.log")
                     subprocess.run([self.make, "GAME_NAME=hst", "--eval", "v: ; @echo", "v"], cwd=ROOT)
+                    subprocess.run([cast(str, self.make), "clean-all"], cwd=ROOT)
+                    subprocess.run([os.fspath(self.make), "distclean"], cwd=ROOT)
         ''')
         findings = _scan_for_checkout_damage(source, "case.py")
         self.assertEqual(
             [int(finding.split(":")[1]) for finding in findings],
-            [12, 12, 13, 14, 16, 17, 18, 19, 20],
+            [12, 12, 13, 14, 16, 17, 18, 19, 20, 21, 21, 22, 22],
             "\n".join(findings),
         )
         self.assertIn("without a scratch BUILD_ROOT=", findings[0])
         self.assertIn("without a scratch LOG_DIR=", findings[1])
         self.assertIn("BUILD_ROOT inside the repository checkout", findings[2])
         self.assertIn("without a scratch BUILD_ROOT=", findings[8])
+        # The suite's own idiom wraps the program: cast(str, self.make), os.fspath(make).
+        self.assertIn("['clean-all'] without a scratch BUILD_ROOT=", findings[9])
+        self.assertIn("['distclean'] without a scratch LOG_DIR=", findings[12])
 
     def test_scan_reports_each_unscratched_make_run(self) -> None:
         source = textwrap.dedent('''
@@ -4561,16 +4822,25 @@ class CheckoutDeletionGuardTests(unittest.TestCase):
                     subprocess.run([self.make, "all"], cwd=scratch)
                     argv = [self.make, "--no-print-directory", "gpu-selftest-status"]
                     self.assertEqual(argv, [self.make, "all"])
+                    subprocess.run([os.fspath(self.make), "player"], cwd=ROOT)
+                    subprocess.run([self.make, "-C", str(ROOT), "player"])
+                    subprocess.run([self.make, f"--directory={ROOT}", "player"], cwd=scratch)
+                    subprocess.run([cast(str, self.make), "-C", str(ROOT), "player", f"BUILD_ROOT={scratch}"])
+                    checkout = ROOT.resolve()
+                    subprocess.run([self.make, "-C", checkout, "player"])
         ''')
         findings = _scan_for_checkout_damage(source, "case.py")
         self.assertEqual(
             [int(finding.split(":")[1]) for finding in findings],
-            [8, 10, 13, 16],
+            [8, 10, 13, 16, 18, 19, 20, 23],
             "\n".join(findings),
         )
         self.assertIn("without a scratch BUILD_ROOT=", findings[0])
         self.assertIn("with BUILD_ROOT inside the repository checkout", findings[1])
         self.assertIn("passes PLAYER_EXE= a checkout build/ path", findings[2])
+        # A wrapped program, and a -C that names the checkout itself, are runs there.
+        for finding in findings[4:]:
+            self.assertIn("without a scratch BUILD_ROOT=", finding)
 
     def test_scan_accepts_scratch_trees_and_read_only_checkout_use(self) -> None:
         source = textwrap.dedent('''
@@ -4590,6 +4860,10 @@ class CheckoutDeletionGuardTests(unittest.TestCase):
                     subprocess.run([self.make, "help"], cwd=ROOT)
                     subprocess.run([self.make, "GAME_NAME=hst", f"BUILD_ROOT={scratch}", "v"], cwd=ROOT)
                     subprocess.run([self.make, "--no-print-directory", "player"], cwd=self.clone)
+                    subprocess.run([self.make, "-C", str(ROOT.parent / "other"), "all"])
+                    subprocess.run([os.fspath(self.make), "-C", str(ROOT / "tests" / "fixtures"), "all"])
+                    fixture_tree = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "probe"
+                    subprocess.run([make, "-C", str(fixture_tree)])
         ''')
         self.assertEqual(_scan_for_checkout_damage(source, "case.py"), [])
 
@@ -4707,6 +4981,48 @@ class LinkerSpellingTests(unittest.TestCase):
         if expected is None:
             self.skipTest(f"no expectation for {sys.platform}")
         self.assertIn(f"HOST_KIND={expected}", completed.stdout.splitlines())
+
+
+class PspDisplaySizeHeaderTests(unittest.TestCase):
+    """The PSP screen size has one definition, ``src/core/nk_display_size.h``.
+
+    The window, the presenter, the VR quad and the player's hero art each carried a private
+    copy of 480 and 272 (audit 2026-11-17). They now take both from the shared header, by a
+    relative include, so no compile line needs an include directory for it.
+    """
+
+    HEADER = ROOT / "src" / "core" / "nk_display_size.h"
+    USERS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "src/rt/gui.c": ("#define PSP_W NK_PSP_DISPLAY_WIDTH", "#define PSP_H NK_PSP_DISPLAY_HEIGHT"),
+        "src/rt/gpu_sdl3vk/sdl3vk.c": ("#define PSP_W NK_PSP_DISPLAY_WIDTH",
+                                       "#define PSP_H NK_PSP_DISPLAY_HEIGHT"),
+        "src/rt/xr/nk_xr_layout.h": ("#define NK_XR_PSP_WIDTH NK_PSP_DISPLAY_WIDTH_F",
+                                     "#define NK_XR_PSP_HEIGHT NK_PSP_DISPLAY_HEIGHT_F"),
+        "src/ui/nk_ui_theme.h": (
+            "#define NK_UI_HERO_ASPECT (NK_PSP_DISPLAY_HEIGHT_F / NK_PSP_DISPLAY_WIDTH_F)",),
+    }
+
+    def test_the_header_defines_the_size_in_integer_and_float_form(self) -> None:
+        defines = dict(re.findall(r"^#define (NK_PSP_DISPLAY_\w+) (\S+)$",
+                                  self.HEADER.read_text(encoding="utf-8"), re.MULTILINE))
+        self.assertEqual(defines, {
+            "NK_PSP_DISPLAY_WIDTH": "480", "NK_PSP_DISPLAY_HEIGHT": "272",
+            "NK_PSP_DISPLAY_WIDTH_F": "480.0f", "NK_PSP_DISPLAY_HEIGHT_F": "272.0f",
+        })
+
+    def test_each_user_takes_its_size_from_the_header(self) -> None:
+        for path, lines in self.USERS.items():
+            with self.subTest(path=path):
+                text = (ROOT / path).read_text(encoding="utf-8")
+                include = re.search(r'^#include "((?:\.\./)+core/nk_display_size\.h)"', text,
+                                    re.MULTILINE)
+                self.assertIsNotNone(include, f"{path} does not include the shared header")
+                assert include is not None
+                # The include resolves from the including file's own directory.
+                self.assertEqual(((ROOT / path).parent / include.group(1)).resolve(),
+                                 self.HEADER.resolve())
+                for line in lines:
+                    self.assertIn(line, text)
 
 
 if __name__ == "__main__":

@@ -49,14 +49,16 @@ extern int sr_audio_pause_script_ready(void);
 extern int sr_audio_init(void);
 /* Ace Mode's peak=limit (#2137): the host audio backend's true-peak limiter (audio_sdl3.c). */
 extern int sr_audio_set_true_peak_limiter(int on);
-extern void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
-                                     double *min_gain);
+extern int sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                                    double *min_gain);
 
-/* peak=limit's totals into the Ace report: registered after ace_finish, so it runs first. */
+/* peak=limit's totals into the Ace report: registered after ace_finish, so it runs first. A run
+ * whose host output never opened (no device) limited nothing, and the report says so. */
 static void driver_peak_stats_to_ace(void) {
     uint64_t pushes = 0, frames = 0, limited = 0;
     double min_gain = 1.0;
-    sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain);
+    if (!sr_audio_true_peak_stats(&pushes, &frames, &limited, &min_gain))
+        ace_feature_unavailable(ACE_FEATURE_PEAK, "did not run: no host audio output opened");
     ace_set_peak_stats(pushes, frames, limited, min_gain);
 }
 

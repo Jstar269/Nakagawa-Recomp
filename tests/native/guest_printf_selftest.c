@@ -295,25 +295,35 @@ int main(void) {
             uint32_t fit = GUEST_LAST + 1u - w;
             for (uint32_t i = 0; i < w; i++) MEM_W8(fit + i, 0xa5u);
             run_words(nwidths[k].fmt, &fit, 1);
-            if (MEM_R8(fit) != 4u) {
-                failures++;
-                fprintf(stderr, "FAIL %-30s width=%u exact fit did not write\n",
-                        "n at arena edge", w);
+            /* Every byte of the store: the count 4, little-endian, zero-extended. */
+            for (uint32_t i = 0; i < w; i++) {
+                if (MEM_R8(fit + i) != (i == 0u ? 4u : 0u)) {
+                    failures++;
+                    fprintf(stderr, "FAIL %-30s width=%u exact fit byte %u is 0x%02x\n",
+                            "n at arena edge", w, i, MEM_R8(fit + i));
+                    break;
+                }
             }
 
-            /* One byte past: the span preflight must reject, leaving every
-             * still-addressable byte of the destination untouched. */
+            /* One byte past: the span preflight must reject before any store, so
+             * no checked accessor sees an out-of-arena address and every
+             * addressable byte at the edge, below the destination included, keeps
+             * its seed. For width 1 the destination itself lies past the arena. */
             uint32_t over = GUEST_LAST + 2u - w;
-            for (uint32_t i = 0; i + over <= GUEST_LAST; i++) {
-                MEM_W8(over + i, 0xa5u);
-            }
+            uint32_t seed_from = GUEST_LAST - 7u;
+            for (uint32_t a = seed_from; a <= GUEST_LAST; a++) MEM_W8(a, 0xa5u);
+            g_oor_events = 0;
             run_words(nwidths[k].fmt, &over, 1);
-            for (uint32_t i = 0; i + over <= GUEST_LAST; i++) {
-                if (MEM_R8(over + i) != 0xa5u) {
+            if (g_oor_events != 0) {
+                failures++;
+                fprintf(stderr, "FAIL %-30s width=%u store reached past the arena (%ld)\n",
+                        "n past arena edge", w, g_oor_events);
+            }
+            for (uint32_t a = seed_from; a <= GUEST_LAST; a++) {
+                if (MEM_R8(a) != 0xa5u) {
                     failures++;
-                    fprintf(stderr,
-                            "FAIL %-30s width=%u partial store at offset %u\n",
-                            "n past arena edge", w, i);
+                    fprintf(stderr, "FAIL %-30s width=%u store at 0x%08x\n",
+                            "n past arena edge", w, a);
                     break;
                 }
             }
@@ -455,7 +465,9 @@ int main(void) {
         EXPECT("negative nan", "%f", "-nan", dbl_lo(neg_nan), dbl_hi(neg_nan));
         EXPECT("nan never zero padded", "%010f", "       nan",
                dbl_lo(nan), dbl_hi(nan));
-        EXPECT("nan via a", "%a", "inf", dbl_lo(inf), dbl_hi(inf));
+        EXPECT("inf via a", "%a", "inf", dbl_lo(inf), dbl_hi(inf));
+        EXPECT("nan via a", "%a", "nan", dbl_lo(nan), dbl_hi(nan));
+        EXPECT("negative nan via A", "%A", "-NAN", dbl_lo(neg_nan), dbl_hi(neg_nan));
 
         EXPECT("hex float", "%a", "0x1.8p+0", dbl_lo(1.5), dbl_hi(1.5));
         EXPECT("hex float upper", "%A", "0X1.8P+0", dbl_lo(1.5), dbl_hi(1.5));

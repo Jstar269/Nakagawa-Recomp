@@ -96,7 +96,7 @@ def title_profile_from_manifest(manifest: Dict[str, Any]) -> TitleProfile:
 
 
 class TitleRegistry:
-    """Thread-safe registry loaded directly from validated manifest files."""
+    """Registry loaded directly from validated manifest files."""
 
     def __init__(self, titles_dir: Optional[Path] = None, include_defaults: bool = True) -> None:
         self._profiles: Dict[str, TitleProfile] = {}
@@ -204,6 +204,12 @@ class TitleRegistry:
                     file=sys.stderr
                 )
 
+        previous = self._profiles.get(profile.id)
+        if previous is not None and previous is not profile:
+            for disc_id in previous.disc_ids:
+                normalized = self._norm_disc(disc_id)
+                if self._disc_index.get(normalized) == profile.id:
+                    del self._disc_index[normalized]
         self._profiles[profile.id] = profile
         for disc_id in profile.disc_ids:
             self._disc_index[self._norm_disc(disc_id)] = profile.id

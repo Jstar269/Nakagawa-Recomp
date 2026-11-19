@@ -9,6 +9,7 @@ import os
 import hashlib
 import itertools
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -60,9 +61,13 @@ if _PLAYER_EXE_BUILD_PATH.is_file():
         raise RuntimeError("player UI regression executable sandbox contains demos/")
 
 # Starts argv[1] (with the rest of argv) with no console and null standard handles, as
-# Explorer starts the GUI player, and exits with its exit code.
+# Explorer starts the GUI player, and exits with its exit code. A child still running after
+# the wait (CONSOLE_LESS_WAIT_ENV milliseconds, 60 s unless set) is a hang: the launcher ends
+# it, so it does not outlive the test in its scratch folder, and exits CONSOLE_LESS_HUNG.
+CONSOLE_LESS_WAIT_ENV = "NAKAGAWA_PLAYER_UI_CONSOLE_LESS_WAIT_MS"
+CONSOLE_LESS_HUNG = 101
 CONSOLE_LESS_LAUNCHER = """
-import ctypes, subprocess, sys
+import ctypes, os, subprocess, sys
 from ctypes import wintypes
 class STARTUPINFOW(ctypes.Structure):
     _fields_ = [("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR),
@@ -87,13 +92,24 @@ command = ctypes.create_unicode_buffer(subprocess.list2cmdline(sys.argv[1:]))
 if not kernel32.CreateProcessW(None, command, None, None, False, 0x00000008,  # DETACHED_PROCESS
                                None, None, ctypes.byref(info), ctypes.byref(process)):
     sys.exit(100)
-kernel32.WaitForSingleObject(process.hProcess, 60000)
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
+wait_ms = int(os.environ.get("NAKAGAWA_PLAYER_UI_CONSOLE_LESS_WAIT_MS", "60000"))
+if kernel32.WaitForSingleObject(process.hProcess, wait_ms) != 0:  # not WAIT_OBJECT_0: hung
+    kernel32.TerminateProcess(process.hProcess, 101)
+    kernel32.WaitForSingleObject(process.hProcess, 10000)
+    kernel32.CloseHandle(process.hThread)
+    kernel32.CloseHandle(process.hProcess)
+    sys.exit(101)
 code = wintypes.DWORD()
 kernel32.GetExitCodeProcess(process.hProcess, ctypes.byref(code))
 kernel32.CloseHandle(process.hThread)
 kernel32.CloseHandle(process.hProcess)
 sys.exit(code.value)
 """
+
+# The player prints this once its launcher (the next UI) has started in a --ui-test-* run
+# (src/player/player_ui_test.c); without the launcher it exits 4 instead.
+NEXT_UI_MARKER = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
 
 # NAKAGAWA_PLAYER_UI_SHARD=<k>/<n> runs only the tests whose position in test-id order
 # is k modulo n. The Makefile's player-ui-regressions runs all n shards side by side,
@@ -102,6 +118,41 @@ PLAYER_UI_SHARD_ENV = "NAKAGAWA_PLAYER_UI_SHARD"
 # NAKAGAWA_PLAYER_UI_ECHO=1 copies each player run's own output to stderr, so a
 # repeat check can see the player's markers (UI_NEXT_ACTIVE) on passing runs too.
 PLAYER_UI_ECHO_ENV = "NAKAGAWA_PLAYER_UI_ECHO"
+
+# The check package_builder.c's python_candidate_runs_required_version runs on a candidate
+# when no 3.15 is found first: CPython 3.14 or 3.15, and not an MSYS2 mingw build.
+PLAYER_PYTHON_PROBE = (
+    "import sys, sysconfig; sys.exit(sys.implementation.name != 'cpython' or "
+    "sysconfig.get_platform().startswith('mingw') or "
+    "not ((3, 14) <= sys.version_info[:2] <= (3, 15)))"
+)
+
+
+def player_accepted_python() -> str | None:
+    """An interpreter the player's own search (package_builder_find_python) should accept,
+    found here without the player: PYTHON, MSYS2's UCRT64 paths on Windows, python3 and
+    python on PATH, then the POSIX fallbacks. None when this host has none."""
+    windows = os.name == "nt"
+    candidates = [os.environ["PYTHON"]] if os.environ.get("PYTHON") else []
+    if windows:
+        candidates += ["C:/msys64/ucrt64/bin/python3.exe", "C:/msys64/ucrt64/bin/python.exe"]
+    names = ("python3.exe", "python.exe") if windows else ("python3", "python")
+    for directory in os.environ.get("PATH", "").split(";" if windows else ":"):
+        if directory:
+            candidates += [os.path.join(directory, name) for name in names]
+    if not windows:
+        candidates += ["/usr/bin/python3", "/usr/local/bin/python3", "/usr/bin/python"]
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            probe = subprocess.run([candidate, "-c", PLAYER_PYTHON_PROBE], capture_output=True,
+                                   timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            return candidate
+    return None
 
 
 def parse_shard(spec: str) -> tuple[int, int]:
@@ -890,6 +941,272 @@ class LegacyRendererSourceTests(unittest.TestCase):
             self.assertNotIn("ui_render_frame(", text, source.name)
 
 
+def wcag_luminance(rgb: Sequence[float]) -> float:
+    """WCAG 2.x relative luminance of sRGB channel values in 0..255."""
+    linear = []
+    for value in rgb:
+        channel = value / 255.0
+        linear.append(channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def wcag_contrast(first: float, second: float) -> float:
+    """WCAG 2.x contrast ratio of two relative luminances."""
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+class PlayerUiDesignTokenTests(unittest.TestCase):
+    """docs/PLAYER_UI_DESIGN.md's token record against the C source it describes, and the WCAG
+    contrast of every text-on-background pair it lists. The record cannot drift from the
+    theme, a colour literal cannot be added to the UI source without being recorded, and a
+    pair below its target fails unless it is a known shortfall with its exact ratio."""
+
+    DOC = ROOT / "docs" / "PLAYER_UI_DESIGN.md"
+    RECORD = re.compile(r"<!-- player-ui-tokens -->\s*```json\n(.*?)\n```", re.S)
+    # The UI's drawing source: every opaque 0xRRGGBBFFu literal in it must be recorded.
+    COLOUR_SOURCES = ("src/ui/*.c", "src/ui/*.h", "src/player/ui/*.c", "src/player/ui/*.h",
+                      "src/rt/overlay/*.c", "src/rt/overlay/*.h")
+    # Opaque-looking literals that are masks, not colours.
+    NOT_COLOURS = {
+        ("src/ui/nk_ui_widgets.c", "7FFFFF"),   # nk_ui_child_id's id mask
+        ("src/ui/nk_ui_ttf.c", "00FFFF"),       # the glyph index mask
+        ("src/rt/overlay/overlay_dev.c", "1FFFFF"),  # the PSP physical address mask
+    }
+    DEFINE_SOURCES = ("src/ui/nk_ui_theme.h", "src/ui/nk_ui_waves.h")
+    # WCAG large text is 24 px, or 18.66 px (14 pt) bold; these slots count as bold.
+    BOLD_FONTS = {"NK_UI_FONT_BODY_SEMIBOLD", "NK_UI_FONT_DISPLAY_BOLD"}
+    TARGETS = {"text": 4.5, "large_text": 3.0, "focus": 3.0, "edge": 3.0}
+    # Pairs drawn today below their target. The owner decides what changes; until then each
+    # is pinned at its measured ratio, so a better or a worse colour fails here.
+    KNOWN_SHORTFALLS = {
+        ("dim", "ground"): (4.16, "footnotes, disabled labels and a dimmed row's chips on the page"),
+        ("dim", "wave_limit"): (2.53, "About's footnotes over the brightest waves allowed"),
+        ("dim", "panel"): (3.86, "a game card's disc ID, footnotes and notes in cards"),
+        ("dim", "control"): (3.55, "a disabled primary button; a focused card's disc ID"),
+        ("dim", "pressed"): (3.06, "a pressed game card's disc ID"),
+        ("dim", "art_tint_0"): (3.71, "the art placeholder's caption"),
+        ("dim", "art_tint_1"): (2.86, "the art placeholder's caption"),
+        ("dim", "art_tint_2"): (3.56, "the art placeholder's caption"),
+        ("dim", "art_tint_3"): (3.59, "the art placeholder's caption"),
+        ("selected_neutral_edge_dimmed", "control"): (
+            2.64, "a dimmed row's value edge against its own box, accepted as the row is inert"),
+    }
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        text = cls.DOC.read_text(encoding="utf-8")
+        match = cls.RECORD.search(text)
+        if match is None:
+            raise AssertionError(f"{cls.DOC.name} has no <!-- player-ui-tokens --> json block")
+        cls.doc_text = text
+        cls.record = json.loads(match.group(1))
+
+    @staticmethod
+    def read(path: str) -> str:
+        return (ROOT / path).read_text(encoding="utf-8")
+
+    @staticmethod
+    def rgba(value: str) -> tuple[int, int, int, int]:
+        digits = value.lstrip("#")
+        if len(digits) == 6:
+            digits += "FF"
+        if not re.fullmatch(r"[0-9A-Fa-f]{8}", digits):
+            raise AssertionError(f"not a #RRGGBB or #RRGGBBAA colour: {value!r}")
+        return tuple(int(digits[i:i + 2], 16) for i in range(0, 8, 2))  # type: ignore[return-value]
+
+    @staticmethod
+    def c_value(text: str) -> float | str:
+        """A #define body as a number when it is one (or one number over another), else its
+        text with the spacing and outer parentheses normalised."""
+        body = text.strip()
+        while body.startswith("(") and body.endswith(")"):
+            body = body[1:-1].strip()
+        number = r"([0-9]+(?:\.[0-9]*)?)[fFuU]?"
+        match = re.fullmatch(number, body)
+        if match:
+            return float(match.group(1))
+        match = re.fullmatch(number + r"\s*/\s*" + number, body)
+        if match:
+            return float(match.group(1)) / float(match.group(2))
+        return re.sub(r"\s+", " ", body)
+
+    def section(self, heading: str) -> str:
+        start = self.doc_text.index(heading + "\n")
+        end = self.doc_text.find("\n#", start + len(heading))
+        return self.doc_text[start:end if end >= 0 else len(self.doc_text)]
+
+    def theme_values(self) -> dict[str, str]:
+        header = self.read("src/ui/nk_ui_theme.h")
+        source = self.read("src/ui/nk_ui_theme.c")
+        struct_body = header[header.index("struct NkUiTheme {"):]
+        fields = re.findall(r"uint32_t\s+(\w+);", struct_body[:struct_body.index("};")])
+        init = source[source.index("g_n1_theme = {"):]
+        values = re.findall(r"0x([0-9A-Fa-f]{8})u", init[:init.index("};")])
+        self.assertEqual(len(fields), len(values), "NkUiTheme fields and g_n1_theme values")
+        self.assertGreater(len(fields), 20)
+        return {name: value.upper() for name, value in zip(fields, values, strict=True)}
+
+    def colours(self) -> dict[str, tuple[int, int, int, int]]:
+        named = {entry["name"]: self.rgba(entry["value"]) for entry in self.record["colours"]}
+        for entry in self.record["outside_theme"]:
+            self.assertNotIn(entry["name"], named, "a colour name is used twice")
+            named[entry["name"]] = self.rgba(entry["value"])
+        return named
+
+    def test_colours_match_the_theme(self) -> None:
+        theme = self.theme_values()
+        recorded = {entry["name"]: "%02X%02X%02X%02X" % self.rgba(entry["value"])
+                    for entry in self.record["colours"]}
+        self.assertEqual(recorded, theme, "the record's colours against g_n1_theme")
+
+    def test_colour_table_matches_the_theme(self) -> None:
+        theme = self.theme_values()
+        rows = 0
+        for line in self.section("### Colour").splitlines():
+            if not line.startswith("| `"):
+                continue
+            cells = line.split("|")
+            names = re.findall(r"`(\w+)`", cells[1])
+            values = re.findall(r"`#([0-9A-Fa-f]{6})`", cells[2])
+            if not values:
+                continue  # a value given in words (the scrims)
+            self.assertEqual(len(names), len(values), line)
+            for name, value in zip(names, values, strict=True):
+                self.assertEqual(theme.get(name), value.upper() + "FF", f"Colour table: {name}")
+                rows += 1
+        self.assertGreater(rows, 20)
+
+    def test_every_colour_literal_is_recorded(self) -> None:
+        theme = set(self.theme_values().values())
+        recorded = {(entry["source"], "%02X%02X%02X" % self.rgba(entry["value"])[:3])
+                    for entry in self.record["outside_theme"]}
+        found: set[tuple[str, str]] = set()
+        for pattern in self.COLOUR_SOURCES:
+            for path in sorted(ROOT.glob(pattern)):
+                rel = path.relative_to(ROOT).as_posix()
+                for rgb in re.findall(r"\b0x([0-9A-Fa-f]{6})[Ff]{2}u\b", path.read_text(encoding="utf-8")):
+                    found.add((rel, rgb.upper()))
+        found -= self.NOT_COLOURS
+        missing = sorted(item for item in found - recorded
+                         if not (item[0] == "src/ui/nk_ui_theme.c" and item[1] + "FF" in theme))
+        self.assertEqual(missing, [], "colour literals in the UI source missing from the record")
+        gone = sorted(recorded - found)
+        self.assertEqual(gone, [], "outside_theme entries no longer in their source file")
+
+    def test_metrics_match_the_defines(self) -> None:
+        defines: dict[str, float | str] = {}
+        for path in self.DEFINE_SOURCES:
+            for name, body in re.findall(r"^#define\s+(NK_UI_\w+)[ \t]+([^\n]+)", self.read(path), re.M):
+                defines[name] = self.c_value(re.sub(r"/\*.*", "", body))
+        recorded = {entry["name"]: self.c_value(str(entry["value"])) for entry in self.record["metrics"]}
+        self.assertEqual(sorted(recorded), sorted(defines), "metrics against the #defines")
+        for name, value in defines.items():
+            if isinstance(value, float):
+                self.assertIsInstance(recorded[name], float, name)
+                self.assertTrue(math.isclose(value, recorded[name], rel_tol=1e-9),  # type: ignore[arg-type]
+                                f"{name}: {value} in the source, {recorded[name]} in the record")
+            else:
+                self.assertEqual(recorded[name], value, name)
+
+    def test_type_scale_and_fonts_match(self) -> None:
+        header = self.read("src/ui/nk_ui_theme.h")
+        source = self.read("src/ui/nk_ui_theme.c")
+        enum = header[header.index("typedef enum {\n    NK_UI_TYPE_"):header.index("} NkUiTypeRole;")]
+        roles = [r for r in re.findall(r"NK_UI_TYPE_(\w+)", enum) if r != "COUNT"]
+        scale = source[source.index("g_type_scale[NK_UI_TYPE_COUNT] = {"):]
+        rows = re.findall(r"\{(NK_UI_FONT_\w+),\s*(\d+),\s*([0-9.]+)f,\s*([0-9.]+)f\}",
+                          scale[:scale.index("};")])
+        wrap = re.search(r"style\.wrap = role >= NK_UI_TYPE_(\w+) && role <= NK_UI_TYPE_(\w+);", source)
+        self.assertIsNotNone(wrap, "nk_ui_type's wrap rule")
+        assert wrap is not None
+        first, last = roles.index(wrap.group(1)), roles.index(wrap.group(2))
+        self.assertEqual(len(rows), len(roles), "g_type_scale rows against NkUiTypeRole")
+        expected = [{"name": role, "font": font, "size_px": int(size), "line_px": float(line),
+                     "tracking_em": float(tracking), "wraps": first <= i <= last}
+                    for i, (role, (font, size, tracking, line)) in enumerate(zip(roles, rows, strict=True))]
+        recorded = [{key: (float(entry[key]) if key in ("line_px", "tracking_em") else entry[key])
+                     for key in ("name", "font", "size_px", "line_px", "tracking_em", "wraps")}
+                    for entry in self.record["type"]]
+        self.assertEqual(recorded, expected, "the record's type against g_type_scale")
+        table = {}
+        for line in self.section("### Type").splitlines():
+            match = re.match(r"\| `(\w+)` \|[^|]*\| (\d+) / (\d+) \|", line)
+            if match:
+                table[match.group(1)] = (int(match.group(2)), float(match.group(3)))
+        self.assertEqual(table, {e["name"]: (e["size_px"], e["line_px"]) for e in expected},
+                         "the Type table's size / line against g_type_scale")
+        slots = {name: int(slot) for name, slot in re.findall(r"(NK_UI_FONT_\w+) = (\d+),", header)}
+        paths = re.findall(r'"(assets/fonts/ui/[^"]+)"', source)
+        expected_fonts = sorted((slot, name, paths[slot]) for name, slot in slots.items())
+        recorded_fonts = sorted((e["slot"], e["name"], e["file"]) for e in self.record["fonts"])
+        self.assertEqual(recorded_fonts, expected_fonts, "fonts against NK_UI_FONT_* and g_font_paths")
+
+    def background_luminance(self, entry: dict, colours: dict, metrics: dict) -> float:
+        if "luminance" in entry:
+            return float(metrics[entry["luminance"]])
+        r, g, b, a = colours[entry["colour"]]
+        under = self.rgba(entry.get("over", "#000000"))
+        alpha = a / 255.0
+        # Composited channel by channel in sRGB bytes, as nk_ui_composite_luminance does.
+        rgb = [c * alpha + u * (1.0 - alpha) for c, u in zip((r, g, b), under[:3], strict=True)]
+        if a != 255 and "over" not in entry:
+            raise AssertionError(f"background {entry['name']} has alpha but nothing under it")
+        return wcag_luminance(rgb)
+
+    def measured_pairs(self) -> dict[tuple[str, str], tuple[float, float, dict]]:
+        colours = self.colours()
+        metrics = {e["name"]: self.c_value(str(e["value"])) for e in self.record["metrics"]}
+        type_roles = {e["name"]: e for e in self.record["type"]}
+        backgrounds = {e["name"]: self.background_luminance(e, colours, metrics)
+                       for e in self.record["backgrounds"]}
+        measured = {}
+        for pair in self.record["pairs"]:
+            key = (pair["text"], pair["on"])
+            self.assertNotIn(key, measured, f"pair listed twice: {key}")
+            self.assertIn(pair["kind"], ("text", "focus", "edge"), key)
+            kind = pair["kind"]
+            if kind == "text":
+                self.assertTrue(pair.get("roles"), f"a text pair names its roles: {key}")
+                if all(type_roles[r]["size_px"] >= 24 or (type_roles[r]["font"] in self.BOLD_FONTS and
+                                                          type_roles[r]["size_px"] >= 18.66)
+                       for r in pair["roles"]):
+                    kind = "large_text"
+            r, g, b, a = colours[pair["text"]]
+            self.assertEqual(a, 255, f"a pair's text or edge colour is opaque: {key}")
+            ratio = wcag_contrast(wcag_luminance((r, g, b)), backgrounds[pair["on"]])
+            measured[key] = (ratio, self.TARGETS[kind], pair)
+        return measured
+
+    def test_contrast_meets_targets_or_is_a_known_shortfall(self) -> None:
+        measured = self.measured_pairs()
+        self.assertGreater(len(measured), 40)
+        below = {key: round(ratio, 2) for key, (ratio, target, _) in measured.items() if ratio < target}
+        unexpected = sorted(f"{text} on {on}: {below[(text, on)]}:1"
+                            for text, on in below if (text, on) not in self.KNOWN_SHORTFALLS)
+        self.assertEqual(unexpected, [], "pairs below their contrast target")
+        for key, (ratio, reason) in self.KNOWN_SHORTFALLS.items():
+            self.assertIn(key, measured, f"known shortfall no longer listed in the record: {key}")
+            self.assertEqual(round(measured[key][0], 2), ratio,
+                             f"{key} ({reason}) measures {measured[key][0]:.2f}:1, recorded {ratio}:1")
+
+    def test_known_shortfalls_table_matches(self) -> None:
+        measured = self.measured_pairs()
+        rows = {}
+        for line in self.section("### Known shortfalls").splitlines():
+            match = re.match(r"\| `(\w+)` \| `(\w+)` \| ([0-9.]+) \| ([0-9.]+) \|", line)
+            if match:
+                rows[(match.group(1), match.group(2))] = (float(match.group(3)), float(match.group(4)))
+        expected = {key: (ratio, measured[key][1]) for key, (ratio, _) in self.KNOWN_SHORTFALLS.items()}
+        self.assertEqual(rows, expected, "the Known shortfalls table against KNOWN_SHORTFALLS")
+
+    def test_wcag_formula(self) -> None:
+        self.assertAlmostEqual(wcag_contrast(wcag_luminance((255, 255, 255)),
+                                             wcag_luminance((0, 0, 0))), 21.0)
+        self.assertAlmostEqual(wcag_contrast(wcag_luminance((119, 119, 119)),
+                                             wcag_luminance((255, 255, 255))), 4.48, places=2)
+
+
 class LaunchMusicTimingTests(unittest.TestCase):
     """assert_launch_waits_for_the_music on synthetic frame records, with no player: what
     it accepts and what it refuses, whatever the runner's frame pace (#2207)."""
@@ -1546,6 +1863,21 @@ class NativePlayerUiTests(unittest.TestCase):
             def files_under(folder: Path) -> list[str]:
                 return sorted(path.relative_to(folder).as_posix()
                               for path in folder.rglob("*") if path.is_file())
+
+            def default_profile_files() -> list[str]:
+                # Every file in a Nakagawa folder of the default profile, on either platform:
+                # %APPDATA% and %LOCALAPPDATA% on Windows; on POSIX $XDG_CONFIG_HOME,
+                # $XDG_DATA_HOME and $XDG_CACHE_HOME (all under the profile here) and the
+                # $HOME fallbacks such as ~/.local/state, whose folders are named Nakagawa,
+                # nakagawa-recomp or NakagawaRecomp (src/core/nk_platform_*.c). Another
+                # program's cache in the profile is not the player's.
+                return sorted(
+                    f"{root.name}/{path.relative_to(root).as_posix()}"
+                    for root in (appdata, localappdata, userprofile)
+                    for path in root.rglob("*")
+                    if path.is_file() and any(part.casefold().startswith("nakagawa")
+                                              for part in path.relative_to(root).parts)
+                )
             return {
                 "frames": frames,
                 "bmp": bmp,
@@ -1559,7 +1891,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 "settings": persisted_settings,
                 "settings_json": persisted_settings_json,
                 "library": persisted_library,
-                "default_profile_files": files_under(localappdata / "Nakagawa"),
+                "default_profile_files": default_profile_files(),
                 "data_folder_files": files_under(data_folder),
                 "dedicated_files": files_under(dedicated),
                 "downloaded_tool_marker_exists": (
@@ -1624,11 +1956,44 @@ class NativePlayerUiTests(unittest.TestCase):
                 timeout=90,
                 check=False,
             )
+            self.assertNotEqual(completed.returncode, CONSOLE_LESS_HUNG,
+                                "the player was still running 60 s after --help")
             self.assertEqual(completed.returncode, 0)
             outputs = list(scratch.rglob("player-output.txt"))
             self.assertEqual(len(outputs), 1, outputs)
             text = outputs[0].read_text(encoding="utf-8", errors="replace")
             self.assertIn("Usage: nakagawa_player", text)
+
+    @unittest.skipUnless(sys.platform == "win32", "the console-less launcher is Windows-only")
+    def test_console_less_launcher_ends_a_child_that_outlives_its_wait(self) -> None:
+        """A child still running when the console-less launcher's wait ends is a hang: the
+        launcher ends it and exits CONSOLE_LESS_HUNG. Failing-before: it ignored the wait's
+        result, exited STILL_ACTIVE (259) and left the child running in the scratch folder."""
+        import ctypes
+        from ctypes import wintypes
+        with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
+            pid_file = Path(tmp) / "child.pid"
+            env = {**os.environ, CONSOLE_LESS_WAIT_ENV: "500"}
+            completed = subprocess.run(
+                [sys.executable, "-I", "-c", CONSOLE_LESS_LAUNCHER, sys.executable, "-I", "-c",
+                 "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); "
+                 "time.sleep(60)", str(pid_file)],
+                env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
+            )
+            self.assertEqual(completed.returncode, CONSOLE_LESS_HUNG, completed.stderr)
+            self.assertTrue(pid_file.is_file(), "the child started")
+            pid = int(pid_file.read_text(encoding="utf-8"))
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if handle:
+                code = wintypes.DWORD()
+                kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                kernel32.CloseHandle(handle)
+                self.assertNotEqual(code.value, 259, "the hung child is still running")
 
     def test_empty_library_wizard_picker_and_font_confirmation(self) -> None:
         run = self.run_player("empty", ("KEY_RETURN", "KEY_RETURN", "KEY_RETURN", "KEY_RETURN"))
@@ -1741,8 +2106,7 @@ class NativePlayerUiTests(unittest.TestCase):
         it on the card; a disc that cannot be read keeps the placeholder."""
         shown = self.run_player("ready", ("WAIT_MS=1500",), art_iso="available")
         missing = self.run_player("ready", ("WAIT_MS=1500",), art_iso="unavailable")
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in shown["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(shown["stdout"])
         self.assertIn("[PLAYER_UI_TEST] next_ui_disc_icon index=0 width=1 height=1", shown["stdout"],
                       "the disc's 1 x 1 ICON0.PNG is decoded and shown on its card")
         self.assertNotIn("next_ui_disc_icon", missing["stdout"],
@@ -1786,8 +2150,7 @@ class NativePlayerUiTests(unittest.TestCase):
         # The waits only bound how long the picture may take to be read on a busy machine.
         rest = self.run_player("ready", ("WAIT_MS=4000",), art_iso="available",
                                settings=motion, env_extra=keep, wait_background=True)
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(rest["stdout"]):
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(str(rest["stdout"]))
         frames = self.backdrops(rest)
         start = frames[0][0]
         self.assertTrue(all(game == "-1" for ticks, game, _ in frames if ticks - start < 550),
@@ -1838,8 +2201,7 @@ class NativePlayerUiTests(unittest.TestCase):
         run = self.run_player("library", events, library_titles=300, timeout=180.0)
         stdout = run["stdout"]
         assert isinstance(stdout, str)
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(stdout)
         statuses = {int(i) for i in re.findall(r"next_ui_library_status index=(\d+)", stdout)}
         self.assertTrue(set(range(300)) <= statuses, "every saved title is in the launcher")
 
@@ -1879,8 +2241,7 @@ class NativePlayerUiTests(unittest.TestCase):
             ("WAIT_MS=2000", "KEY_END", "WAIT_MS=200", "KEY_HOME", "WAIT_MS=200"),
             library_titles=40, timeout=120.0,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(run["stdout"])
         frames = run["frames"]
         assert isinstance(frames, list)
         selected = [frame["selected"] for frame in frames]
@@ -1893,8 +2254,7 @@ class NativePlayerUiTests(unittest.TestCase):
         game added first, where the first focus lands."""
         added = self.run_player("library", ("WAIT_MS=1000",), library_titles=12,
                                 settings={"library_sort": "added"}, timeout=120.0)
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in added["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(added["stdout"])
         frames = added["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["selected"], "11", "the last game added is first")
@@ -1920,8 +2280,7 @@ class NativePlayerUiTests(unittest.TestCase):
              "WAIT_MS=200"),
             library_titles=12, timeout=120.0,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(run["stdout"])
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertIn(self.FIND_DONE, [frame["next_focus"] for frame in frames],
@@ -1940,8 +2299,7 @@ class NativePlayerUiTests(unittest.TestCase):
              "KEY_RETURN", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"),
             library_titles=12, timeout=120.0,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(run["stdout"])
         trail = self.focus_trail(run)
         self.assertIn(self.FIND_KEY_Q, trail, "Space opens the box on q")
         self.assertIn(self.FIND_DONE, trail[trail.index(self.FIND_KEY_Q):],
@@ -1959,8 +2317,7 @@ class NativePlayerUiTests(unittest.TestCase):
             "library", ("WAIT_MS=1000", "PAD_WEST", "WAIT_MS=100", "PAD_EAST", "WAIT_MS=100"),
             library_titles=4, timeout=120.0,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in pad["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(pad["stdout"])
         trail = self.focus_trail(pad)
         self.assertIn(self.FIND_KEY_Q, trail, "the pad opens the box on Q")
         self.assertEqual(trail[-1], self.FIND, "B closes it and focus returns to FIND")
@@ -1983,8 +2340,7 @@ class NativePlayerUiTests(unittest.TestCase):
              "WAIT_MS=100", "KEY_PAGEDOWN", "WAIT_MS=200"),
             library_titles=40, timeout=120.0,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(run["stdout"])
         self.assertEqual(self.find_states(run)[-1], "title", "the box stays open")
         # The trail ends: the last match (End), a match on the page before (Page Up),
         # then Page Down's focus.
@@ -2018,8 +2374,7 @@ class NativePlayerUiTests(unittest.TestCase):
                         "TEXT=" + "x" * 40, "WAIT_MS=200"),
             library_titles=4, timeout=120.0,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(run["stdout"])
         states = self.find_states(run)
         self.assertTrue(states, run["stdout"])
         self.assertEqual(states[-1], "x" * 63)
@@ -2037,8 +2392,7 @@ class NativePlayerUiTests(unittest.TestCase):
              "PAD_SOUTH", "WAIT_MS=200"),
             library_titles=12, timeout=120.0,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(run["stdout"])
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertIn(self.FIND_KEY_Q, self.focus_trail(run), "the pad opens the box on q")
@@ -2097,8 +2451,7 @@ class NativePlayerUiTests(unittest.TestCase):
              "WAIT_MS=200"),
             library_titles=12, timeout=120.0,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI could not start here (no UI fonts)")
+        self.assert_next_ui_active(run["stdout"])
         trail = self.find_grid_trail(run)
         self.assertEqual([text for text, *_ in trail],
                          [None, "", "e", "e ", "e 1", "e 11", "e 1", "e ", "e", "", "1", None],
@@ -2125,10 +2478,9 @@ class NativePlayerUiTests(unittest.TestCase):
 
         A player whose launcher cannot start (an extraction that lost
         assets/fonts/ui) says why and exits; it never draws the old renderer."""
-        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
+        marker = NEXT_UI_MARKER
         default_ui = self.run_player("empty")
-        if marker not in default_ui["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(default_ui["stdout"])
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
             env = os.environ.copy()
@@ -2171,10 +2523,9 @@ class NativePlayerUiTests(unittest.TestCase):
         name), started from another working folder, still finds assets/fonts/ui beside
         it. Failing-before: the font probe opened the UTF-8 path with the narrow fopen,
         which Windows reads in the ANSI code page, so the launcher was unavailable."""
-        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
+        marker = NEXT_UI_MARKER
         default_ui = self.run_player("empty")
-        if marker not in default_ui["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(default_ui["stdout"])
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
             scratch = Path(tmp)
             folder = scratch / "José プレイヤー"
@@ -2211,10 +2562,9 @@ class NativePlayerUiTests(unittest.TestCase):
         run from the source tree, reads them there; NK_UI_TEST_ASSETS_BESIDE_ONLY makes
         it look as a release build does. Failing-before: the font lookup fell back to
         the working folder in every build, so the launcher started on those fonts."""
-        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
+        marker = NEXT_UI_MARKER
         default_ui = self.run_player("empty")
-        if marker not in default_ui["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(default_ui["stdout"])
         self.assertFalse((PLAYER_EXE.parent / "assets").exists(),
                          "the regression player has no assets beside it")
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
@@ -2244,10 +2594,8 @@ class NativePlayerUiTests(unittest.TestCase):
         """Shortcuts made before the old renderer went still pass --ui=next. The
         switch is gone, so the player says it ignores it, and any other option it
         does not know, then starts the launcher as usual."""
-        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
         default_ui = self.run_player("empty")
-        if marker not in default_ui["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(default_ui["stdout"])
         # The harness's own --ui-test-* options are taken first: none is unknown.
         self.assertNotIn("Ignoring", str(default_ui["stderr"]))
         with tempfile.TemporaryDirectory(prefix=".player-ui-test-", dir=ROOT) as tmp:
@@ -2286,8 +2634,7 @@ class NativePlayerUiTests(unittest.TestCase):
         declared = re.findall(r"\b((?:PLAYER_)?VIEW_[A-Z_]+)\b", body)
         run = self.run_player("library", ("WAIT_MS=50",),
                               env_extra={"NK_UI_TEST_REPORT_VIEWS": "1"})
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(run["stdout"])
         coverage = re.findall(r"\[PLAYER_UI_TEST\] view_coverage value=(\d+) name=(\S+) nk=(\d)",
                               str(run["stdout"]))
         self.assertEqual(len(coverage), len(declared), (coverage, declared))
@@ -2297,8 +2644,7 @@ class NativePlayerUiTests(unittest.TestCase):
     def test_settings_psp_fonts_imports_and_removes(self) -> None:
         """Walkthrough blocker: the PSP font import is reachable from Settings."""
         run = self.run_player("psp-fonts", ("WAIT_MS=100", "KEY_RIGHT", "WAIT_MS=100"))
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(run["stdout"])
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["view"], "psp_fonts")
@@ -2361,8 +2707,7 @@ class NativePlayerUiTests(unittest.TestCase):
                 "psp-fonts",
                 ("WAIT_MS=100", "KEY_RIGHT", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100",
                  f"PICK_FILE={font}", "WAIT_MS=300"))
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(fonts["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(fonts["stdout"]))
         stdout = str(fonts["stdout"])
         self.assertIn("[PLAYER_UI_TEST] pick_file answered", stdout)
         self.assertIn("[PLAYER_UI_TEST] pick_taken what=fonts main_thread=1", stdout)
@@ -2375,8 +2720,7 @@ class NativePlayerUiTests(unittest.TestCase):
         renames this run's scratch user data folders to "-backup-<stamp>" and
         quits; the test build skips starting the fresh copy and says so."""
         keep = self.run_player("factory-reset", ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=100"))
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in keep["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(keep["stdout"])
         frames = keep["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["view"], "confirm_factory_reset")
@@ -2401,8 +2745,7 @@ class NativePlayerUiTests(unittest.TestCase):
 
     def test_next_ui_mouse_and_keyboard_reach_the_add_card(self) -> None:
         click = self.run_player("library", ("MOUSE_MOVE=794,257", "MOUSE_DOWN", "MOUSE_UP"))
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in click["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(click["stdout"])
         frames = click["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["picker"], "1", "a click on the add card opens the picker")
@@ -2437,8 +2780,7 @@ class NativePlayerUiTests(unittest.TestCase):
         }
         for name, events in runs.items():
             run = self.run_player("library", events)
-            if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-                self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+            self.assert_next_ui_active(run["stdout"])
             with self.subTest(input=name):
                 self.assertEqual(self.screens(run), [library, about, library])
         empty = self.run_player("empty", runs["mouse"])
@@ -2507,8 +2849,7 @@ class NativePlayerUiTests(unittest.TestCase):
         }
         for name, events in runs.items():
             run = self.run_player("library", events)
-            if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-                self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+            self.assert_next_ui_active(run["stdout"])
             with self.subTest(input=name):
                 self.assertEqual(self.screens(run), [library, settings, library])
         empty = self.run_player("empty", runs["mouse"])
@@ -2523,10 +2864,19 @@ class NativePlayerUiTests(unittest.TestCase):
             "R steps from About to Settings, and Back returns to About",
         )
 
+    def assert_next_ui_active(self, stdout: object) -> None:
+        """Fails a run that printed no UI_NEXT_ACTIVE marker; it never skips.
+
+        A launcher that cannot start (no SDL3_ttf, no UI fonts) makes the player exit 4
+        with LAUNCHER_UNAVAILABLE, and run_player fails every nonzero exit, so a run that
+        got here drew the next UI. A missing marker is then a lost or renamed marker, or a
+        launcher that failed without saying so: a failure, never "this host lacks SDL3_ttf"."""
+        self.assertIn(NEXT_UI_MARKER, str(stdout),
+                      "the player exited 0 but printed no UI_NEXT_ACTIVE marker")
+
     def next_ui_run(self, view: str, events: tuple[str, ...], **kwargs: object) -> dict[str, object]:
         run = self.run_player(view, events, **kwargs)  # type: ignore[arg-type]
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(run["stdout"])
         return run
 
     @staticmethod
@@ -2961,9 +3311,8 @@ class NativePlayerUiTests(unittest.TestCase):
         opened over every such run, so a fresh root's frame differed from an answered one's.
 
         Review N1: whether the next UI runs here is the font-independent UI_NEXT_ACTIVE marker,
-        as the other next-UI tests read it, never the frames themselves. On hosted CI (the
-        Linux player UI job installs SDL3_ttf, and the repository ships open fonts) a missing
-        marker fails instead of skipping, and with the next UI running, a prompt view that
+        as the other next-UI tests read it, never the frames themselves. A missing marker fails,
+        on every host (assert_next_ui_active), and with the next UI running, a prompt view that
         draws the same frame as the answered one is a failure.
 
         Review S1: both roots turn Reduce motion on (``reduce_motion_choice``), which holds every
@@ -2971,12 +3320,7 @@ class NativePlayerUiTests(unittest.TestCase):
         a busy host let its clock run before the capture. The fresh root is still one that has
         not answered the prompt: a settings.json without ``nickname_asked`` reads as not asked,
         as a missing file does."""
-        marker = "[PLAYER_UI_TEST] UI_NEXT_ACTIVE"
-        if marker not in str(self.run_player("empty")["stdout"]):
-            if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
-                self.fail("the next UI did not start on this CI host (no UI_NEXT_ACTIVE "
-                          "marker), so the nickname prompt could not be checked")
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(self.run_player("empty")["stdout"])
         fresh_root = {"reduce_motion_choice": "on"}
         answered = {**fresh_root, "nickname_asked": True}
         prompt_fresh, _ = self.bare_screenshot("nickname-prompt", fresh_root)
@@ -3234,8 +3578,7 @@ class NativePlayerUiTests(unittest.TestCase):
             env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_SLOW_START_MS": "300"},
         )
         stdout = str(run["stdout"])
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(stdout)
         assert_launch_waits_for_the_music(self, stdout)
         workers = [line for line in stdout.splitlines()
                    if line.startswith(LAUNCH_WORKER_START)]
@@ -3277,8 +3620,7 @@ class NativePlayerUiTests(unittest.TestCase):
             env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_GAME_RUNNING": "TEST00006"},
         )
         stdout = str(run["stdout"])
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(stdout)
         self.assertIn("game_exit code=0 result=PASS", stdout)
         frames = run["frames"]
         assert isinstance(frames, list)
@@ -3302,8 +3644,7 @@ class NativePlayerUiTests(unittest.TestCase):
             post_build_ready=True, wait_background=True, env_extra=self.MUSIC_AUDIO,
         )
         stdout = str(run["stdout"])
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(stdout)
         workers = self.music_workers(stdout)
         self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
                                    "music=off decoder=idle sounds=closed"], stdout)
@@ -3326,8 +3667,7 @@ class NativePlayerUiTests(unittest.TestCase):
             env_extra=self.MUSIC_AUDIO,
         )
         stdout = str(run["stdout"])
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(stdout)
         self.assertEqual(self.music_workers(stdout),
                          ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
                           "music=off decoder=idle sounds=closed"], stdout)
@@ -3360,8 +3700,7 @@ class NativePlayerUiTests(unittest.TestCase):
             env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_MUSIC_HOLD_DECODE": "1"},
         )
         stdout = str(run["stdout"])
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(stdout)
         workers = self.music_workers(stdout)
         self.assertEqual(workers, ["[PLAYER_UI_TEST] launch_worker_start launcher_audio=closed "
                                    "music=stopped decoder=idle sounds=closed"], stdout)
@@ -3390,8 +3729,7 @@ class NativePlayerUiTests(unittest.TestCase):
             env_extra={**self.MUSIC_AUDIO, "NK_UI_TEST_MUSIC_STALL": "1"},
         )
         stdout = str(run["stdout"])
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(stdout)
         stderr = str(run["stderr"])
         lines = [line for line in stderr.splitlines()
                  if line.startswith("[PLAYER] LAUNCHER_MUSIC_RELEASE_TIMEOUT: ")]
@@ -4698,8 +5036,7 @@ class NativePlayerUiTests(unittest.TestCase):
                     ("WAIT_MS=100", "KEY_RETURN", "WAIT_MS=200"),
                     build_preflight=fixture,
                 )
-                if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-                    self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+                self.assert_next_ui_active(run["stdout"])
                 frames = run["frames"]
                 assert isinstance(frames, list)
                 title_frames = [frame for frame in frames if frame["next_route"] == "2"]
@@ -4831,6 +5168,12 @@ class NativePlayerUiTests(unittest.TestCase):
             steps, names = self.problem_report_steps(stdout)
             phases = [int(step["problem_report"]) for step in steps]
             if 6 in phases:
+                # The page's no-Python answer is a skip only when this host really has no
+                # interpreter the player accepts; otherwise the player's search missed it.
+                accepted = player_accepted_python()
+                if accepted is not None:
+                    self.fail(f"the page says no Python, but {accepted} is a CPython 3.14 or "
+                              f"3.15 the player's search accepts:\n{stdout}")
                 self.skipTest("no Python interpreter on this host, so the page shows the command")
             # 1 is listing, 2 previewed, 4 done (PlayerReportPhase).
             self.assertEqual(phases[:1], [1], stdout)
@@ -5247,8 +5590,15 @@ class NativePlayerUiTests(unittest.TestCase):
             )
             frames = run["frames"]
             assert isinstance(frames, list)
-            if frames[-1]["view"] != "building_package":
-                self.skipTest("no build started: this host lacks the build tools")
+            # The test supplies tools/nk_cli.py itself, so the one reason for no build is the
+            # player's own finding that this host has no Python, gcc or make for it: the build
+            # tools consent (Windows) or BUILD_TOOLCHAIN_MISSING (elsewhere). Any other view
+            # is a failure.
+            last = frames[-1]
+            if last["view"] == "prereq_consent" or (
+                    last["view"] == "error" and last.get("error") == "BUILD_TOOLCHAIN_MISSING"):
+                self.skipTest(f"no build started: this host lacks the build tools ({last['view']})")
+            self.assertEqual(last["view"], "building_package", run["stdout"])
             self.assertTrue((witness / "started").exists(), run["stdout"])
             heartbeat = witness / "heartbeat"
             size_at_exit = heartbeat.stat().st_size
@@ -5264,8 +5614,7 @@ class NativePlayerUiTests(unittest.TestCase):
         shown = self.run_player(
             "ready", ("WAIT_MS=100",), incompatible_package=True, wait_background=True,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in shown["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(shown["stdout"])
         frames = shown["frames"]
         assert isinstance(frames, list)
         last = frames[-1]
@@ -5544,8 +5893,7 @@ class NativePlayerUiTests(unittest.TestCase):
             "ready", ("WAIT_MS=4500",), wait_background=True,
             env_extra={"NK_UI_TEST_PACKAGE_STATUS_WORKER_DELAY_MS": "1500"},
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         statuses = [
             line.split("status=", 1)[1]
             for line in str(run["stdout"]).splitlines()
@@ -5859,8 +6207,7 @@ class NativePlayerUiTests(unittest.TestCase):
             "building",
             ("KEY_ESCAPE", "WAIT_MS=200", "KEY_S", "WAIT_MS=300", "ASSERT_VIEW=settings"),
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in cancelled["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(cancelled["stdout"])
         self.assertIn(
             "[PLAYER_UI_TEST] assert_view result=PASS actual=settings", cancelled["stdout"]
         )
@@ -6214,8 +6561,7 @@ class NativePlayerUiTests(unittest.TestCase):
 
     def test_library_shortcuts_reach_settings_picker_and_quit(self) -> None:
         settings = self.run_player("library", ("KEY_S",))
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in settings["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(settings["stdout"])
         frames = settings["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["view"], "settings")
@@ -6236,8 +6582,7 @@ class NativePlayerUiTests(unittest.TestCase):
             "wizard-options",
             ("WAIT_MS=100", "KEY_UP", "KEY_RETURN", "WAIT_MS=100"),
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in run["stdout"]:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(run["stdout"])
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[-1]["online_mode"], "0")
@@ -6393,8 +6738,7 @@ class NativePlayerUiTests(unittest.TestCase):
             error_code="RUNTIME_SEMANTIC_BOUNDARY",
         )
         stdout = str(copied["stdout"])
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(stdout)
         report = re.search(r"\[PLAYER_UI_TEST\] copied_details clipboard=(\d) report=(.*)", stdout)
         self.assertIsNotNone(report, stdout)
         assert report is not None
@@ -6427,8 +6771,7 @@ class NativePlayerUiTests(unittest.TestCase):
             env_extra={"USERNAME": user, "USER": user},
         )
         stdout = str(run["stdout"])
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in stdout:
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(stdout)
         urls = re.findall(r"\[PLAYER_UI_TEST\] open_url=(\S+)", stdout)
         frames = run["frames"]
         assert isinstance(frames, list)
@@ -6532,8 +6875,7 @@ class NativePlayerUiTests(unittest.TestCase):
             post_build_ready=True, wait_background=True,
             env_extra={"NK_UI_TEST_SLOW_START_MS": str(slow_start_ms)},
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
         before = [frame for frame in frames if frame["next_primary_label"] == "PLAY"]
@@ -6588,8 +6930,7 @@ class NativePlayerUiTests(unittest.TestCase):
             post_build_ready=True, wait_background=True,
             env_extra={"NK_UI_TEST_PACKAGE_STATUS_WORKER_DELAY_MS": "1500"},
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
         labels = [frame["next_primary_label"] for frame in frames]
@@ -6623,8 +6964,7 @@ class NativePlayerUiTests(unittest.TestCase):
             # This flow needs tools/nk_cli.py (CLI_INSTALL_ROOT).
             env_extra=self.CLI_INSTALL_ROOT,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
         prompted = [frame for frame in frames if frame.get("rebuild_prompt", "0") == "1"]
@@ -6671,8 +7011,7 @@ class NativePlayerUiTests(unittest.TestCase):
             post_build_ready=True, wait_background=True,
             package_built_by="current",
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
         scanned = [frame for frame in frames if frame.get("outdated_scanned", "0") == "1"]
@@ -6693,8 +7032,7 @@ class NativePlayerUiTests(unittest.TestCase):
             env_extra={"NK_UI_TEST_GAME_RUNNING": running,
                        "NK_UI_TEST_MESSAGEBOX_FAIL": "1"},
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
         titled = [frame for frame in frames if frame["next_package"] != "-1"]
@@ -6729,8 +7067,7 @@ class NativePlayerUiTests(unittest.TestCase):
             ("WAIT_MS=300", self.SECOND_TILE, "MOUSE_DOWN", "MOUSE_UP", "WAIT_MS=300"),
             wait_background=True,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
         self.assertEqual(frames[0]["selected_disc"], "TEST00005", "focus starts on tile 1")
@@ -6750,8 +7087,7 @@ class NativePlayerUiTests(unittest.TestCase):
              self.SECOND_TILE, "MOUSE_DOWN", "MOUSE_UP", "WAIT_MS=300"),
             wait_background=True, post_build_ready=True,
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         self.assertIn("synthetic_build result=PASS index=1 disc=TEST00006", str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
@@ -6784,8 +7120,7 @@ class NativePlayerUiTests(unittest.TestCase):
                    runtime_root_arg: str | None = None) -> list[dict[str, str]]:
         run = self.run_player("library", events, wait_background=True,
                               runtime_root_arg=runtime_root_arg)
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
         return frames
@@ -6829,8 +7164,7 @@ class NativePlayerUiTests(unittest.TestCase):
                         "KEY_RIGHT", "WAIT_MS=100", "KEY_RETURN", "WAIT_MS=400"),
             wait_background=True,
             env_extra={"NK_UI_TEST_FAIL_REMOVE_CONFIRM_FRAME": "1"})
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         self.assertIn("[PLAYER_UI_TEST] UI_FRAME_NOT_DRAWN", str(run["stdout"]),
                       "the confirming frame was not drawn")
         frames = run["frames"]
@@ -7396,8 +7730,7 @@ class NativePlayerUiTests(unittest.TestCase):
             env_extra={"NK_UI_TEST_GAME_RUNNING": "TEST00006",
                        "NK_UI_TEST_MESSAGEBOX_FAIL": "1"},
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
         # Each change of route, focus or running state, in order.
@@ -7438,8 +7771,7 @@ class NativePlayerUiTests(unittest.TestCase):
             post_build_ready=True, wait_background=True,
             env_extra={"NK_UI_TEST_GAME_RUNNING": "TEST00006"},
         )
-        if "[PLAYER_UI_TEST] UI_NEXT_ACTIVE" not in str(run["stdout"]):
-            self.skipTest("the next UI needs SDL3_ttf, which this host lacks")
+        self.assert_next_ui_active(str(run["stdout"]))
         self.assertIn(f"game_exit code={exit_code} result=PASS", str(run["stdout"]))
         frames = run["frames"]
         assert isinstance(frames, list)
@@ -7732,7 +8064,8 @@ class FirstRunRouteTests(unittest.TestCase):
             games = json.loads(libraries[0].read_text(encoding="utf-8"))["games"]
             self.assertEqual([game["disc_id"] for game in games], ["TEST00002"])
             expanded = Path(games[0]["iso_path"])
-            self.assertEqual(expanded.name, "TEST00002.cso.iso")
+            # <DISC_ID>.<16 hex digits of the source fingerprint>.cso.iso
+            self.assertRegex(expanded.name, r"^TEST00002\.[0-9a-f]{16}\.cso\.iso$")
             self.assertEqual(expanded.parent.name, "TEST00002")
             self.assertEqual(expanded.parent.parent.name, "discs")
             self.assertEqual(expanded.read_bytes(), iso.read_bytes())
@@ -8110,10 +8443,13 @@ class ScreenshotDeterminismTests(unittest.TestCase):
              "--height=720", f"--user-data-root={data / 'user'}", f"--runtime-root={data / 'runtime'}"],
             cwd=ROOT, env=env, capture_output=True, text=True, timeout=120, check=False,
         )
-        if "[PLAYER] Screenshot saved" not in completed.stdout:
-            if "UI_NEXT_ACTIVE" not in completed.stdout:
-                self.skipTest("the next UI could not start here (no UI fonts)")
-            self.fail(f"--view={view} saved no screenshot:\n{completed.stdout}\n{completed.stderr}")
+        # A bare capture prints no UI_NEXT_ACTIVE marker (that needs a --ui-test-* option), so
+        # the marker cannot tell a host without the launcher from a broken view: a capture
+        # that fails, exits nonzero or saves no frame is a failure, never a skip.
+        report = f"--view={view}:\n{completed.stdout}\n{completed.stderr}"
+        self.assertEqual(completed.returncode, 0, f"the player failed; {report}")
+        self.assertIn("[PLAYER] Screenshot saved", completed.stdout, f"no screenshot; {report}")
+        self.assertTrue(shot.is_file(), f"no screenshot file; {report}")
         return shot.read_bytes()
 
     @staticmethod
@@ -8141,10 +8477,6 @@ class ScreenshotDeterminismTests(unittest.TestCase):
                               f"--view={view}: the two captures differ")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PlayerVersionIdentityTests(unittest.TestCase):
     """The About page's build date comes from SOURCE_DATE_EPOCH when it is set.
 
@@ -8165,6 +8497,8 @@ class PlayerVersionIdentityTests(unittest.TestCase):
     # of them takes 41-67 s on hosted Windows runners; 180 s is about three times
     # that whole shard, so a stuck dry run fails in minutes, not after ten.
     DRY_RUN_TIMEOUT_S = 180
+    # The Makefile's stops for a host without SDL3 or a Vulkan SDK (Makefile, mk/pipeline.mk).
+    MISSING_DEPENDENCY = re.compile(r"SDL3 discovery failed|No usable Vulkan SDK found")
 
     def _player_defines(self, env_extra: dict[str, str]) -> list[str]:
         make = shutil.which("mingw32-make") or shutil.which("make")
@@ -8182,11 +8516,34 @@ class PlayerVersionIdentityTests(unittest.TestCase):
                 timeout=self.DRY_RUN_TIMEOUT_S,
             )
         if run.returncode != 0:
-            self.skipTest(f"the player dry run needs its build dependencies: {run.stderr[-400:]}")
+            # Only the Makefile's own missing-dependency stops are a reason to skip; any
+            # other failing dry run (a Makefile error, a missing rule) is a failure.
+            if self.MISSING_DEPENDENCY.search(run.stderr):
+                self.skipTest(f"the player dry run needs its build dependencies: {run.stderr[-400:]}")
+            self.fail(f"the player dry run failed ({run.returncode}): {run.stderr[-2000:]}")
         return re.findall(r"-DNK_PLAYER_BUILD_[A-Z]+=\S+", run.stdout)
+
+    def test_a_failing_dry_run_is_a_failure_not_a_skip(self) -> None:
+        """A Makefile stop that is not a missing build dependency fails the identity check.
+        Failing-before: every nonzero dry run was a skip, so a malformed SOURCE_DATE_EPOCH,
+        which the Makefile refuses by name (mk/runtime_sources.mk), read as a skip."""
+        try:
+            self._player_defines({"SOURCE_DATE_EPOCH": "not-a-timestamp"})
+        except unittest.SkipTest as skipped:
+            if "make is not on PATH" in str(skipped) or self.MISSING_DEPENDENCY.search(str(skipped)):
+                raise
+            self.fail(f"a Makefile error was reported as a skip: {skipped}")
+        except self.failureException as failed:
+            self.assertIn("SOURCE_DATE_EPOCH must be a decimal Unix timestamp", str(failed))
+        else:
+            self.fail("the dry run accepted a malformed SOURCE_DATE_EPOCH")
 
     def test_source_date_epoch_fixes_the_build_date(self) -> None:
         defines = self._player_defines({"SOURCE_DATE_EPOCH": "1792713600"})
         self.assertIn("-DNK_PLAYER_BUILD_EPOCH=1792713600LL", defines)
         again = self._player_defines({"SOURCE_DATE_EPOCH": "1792713600"})
         self.assertEqual(defines, again, "the same epoch gives the same defines")
+
+
+if __name__ == "__main__":
+    unittest.main()

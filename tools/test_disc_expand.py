@@ -26,6 +26,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 import zlib
@@ -35,7 +36,9 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from nk_core import disc_expand_tool, package_cache  # noqa: E402
-from nk_core.iso_inspect import IsoInspectionError, inspect_iso  # noqa: E402
+from nk_core.iso_inspect import (
+    IsoInspectionError, inspect_compatibility_preflight, inspect_iso,
+)  # noqa: E402
 from test_iso_parity import create_test_iso_with_executables  # noqa: E402
 
 SECTOR = 2048
@@ -155,6 +158,12 @@ def _have_compiler() -> bool:
     return bool(os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc"))
 
 
+def expanded_name_pattern(extension: str) -> str:
+    """The per-title expansion's name: <DISC_ID>.<16 hex digits of the source's
+    fingerprint>.<extension>.iso (src/core/nk_disc_expand.h)."""
+    return rf"^TEST00042\.[0-9a-f]{{16}}\.{extension}\.iso$"
+
+
 @unittest.skipUnless(_have_compiler(), "no C compiler to build nk_disc_expand (SKIP, not a pass)")
 class DiscExpandToolTests(unittest.TestCase):
     _tmp: ClassVar[tempfile.TemporaryDirectory[str]]
@@ -203,8 +212,9 @@ class DiscExpandToolTests(unittest.TestCase):
             with self.subTest(name=name):
                 data_root = self.root / f"data-{name}"
                 first = disc_expand_tool.import_image(image, data_root)
-                expected = data_root / "discs" / "TEST00042" / f"TEST00042.{name}.iso"
-                self.assertEqual(Path(first["iso_path"]), expected)
+                expected = Path(first["iso_path"])
+                self.assertEqual(expected.parent, data_root / "discs" / "TEST00042")
+                self.assertRegex(expected.name, expanded_name_pattern(name))
                 self.assertEqual(first["disc_id"], "TEST00042")
                 self.assertFalse(first["reused"])
                 self.assertEqual(expected.read_bytes(), self.iso)
@@ -230,8 +240,36 @@ class DiscExpandToolTests(unittest.TestCase):
                     container=dict(info.container_metadata),
                 )
                 self.assertNotIn("source_format", identity["container"])
-                expanded = data_root / "discs" / "TEST00042" / f"TEST00042.{name}.iso"
-                self.assertEqual(expanded.read_bytes(), self.iso)
+                found = sorted((data_root / "discs" / "TEST00042").glob(f"TEST00042.*.{name}.iso"))
+                self.assertEqual(len(found), 1, found)
+                self.assertRegex(found[0].name, expanded_name_pattern(name))
+                self.assertEqual(found[0].read_bytes(), self.iso)
+
+    def test_preflight_reads_the_expanded_iso_for_each_compressed_input(self) -> None:
+        for name, image in self.images.items():
+            with self.subTest(name=name):
+                data_root = self.root / f"preflight-{name}"
+                metadata = inspect_iso(image, user_data_root=data_root)
+                report = inspect_compatibility_preflight(
+                    image, metadata=metadata, runtime_root=data_root
+                )
+                disc_check = next(
+                    check for check in report["checks"] if check["code"] == "DISC_SFO"
+                )
+                self.assertEqual(disc_check["status"], "OK")
+
+    def test_default_data_root_failure_is_a_named_iso_inspection_error(self) -> None:
+        from nk_core import prereq_fetcher
+        from nk_core.prereq_fetcher import PrerequisiteFetchError
+
+        with mock.patch.object(
+            prereq_fetcher, "default_data_root",
+            side_effect=PrerequisiteFetchError("DATA_DIR_UNAVAILABLE: synthetic"),
+        ):
+            with self.assertRaises(IsoInspectionError) as caught:
+                inspect_iso(self.images["cso"])
+
+        self.assertEqual(caught.exception.boundary_code, "DATA_DIR_UNAVAILABLE")
 
     def test_a_refused_image_keeps_its_named_boundary(self) -> None:
         bad = bytearray(self.images["cso"].read_bytes())
@@ -254,6 +292,44 @@ class DiscExpandToolTests(unittest.TestCase):
         self.assertEqual(disc_expand_tool.ensure_plain_iso(self.iso_path, self.root / "unused"),
                          self.iso_path)
         self.assertFalse((self.root / "unused").exists())
+
+
+class DiscExpandBuildCacheTests(unittest.TestCase):
+    def test_libchdr_header_change_rebuilds_the_cached_tool(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-disc-expand-cache-") as tmpdir:
+            root = Path(tmpdir)
+            inputs = (
+                disc_expand_tool.CORE_SOURCES
+                + (disc_expand_tool._platform_source(),)
+                + disc_expand_tool.CORE_HEADERS
+                + disc_expand_tool.LIBCHDR_SOURCES
+            )
+            for relative in inputs:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode("utf-8"))
+            header = root / "third_party" / "libchdr" / "include" / "libchdr" / "cache-test.h"
+            header.parent.mkdir(parents=True, exist_ok=True)
+            header.write_bytes(b"header revision one")
+            builds: list[list[str]] = []
+
+            def fake_compile(command, **_options):
+                builds.append(command)
+                output = Path(command[command.index("-o") + 1])
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(b"synthetic tool")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(disc_expand_tool, "_compiler", return_value="synthetic-cc"),
+                mock.patch.object(disc_expand_tool.subprocess, "run", side_effect=fake_compile),
+            ):
+                disc_expand_tool.find_or_build_tool(root)
+                first_build_count = len(builds)
+                header.write_bytes(b"header revision two")
+                disc_expand_tool.find_or_build_tool(root)
+
+            self.assertGreater(len(builds), first_build_count)
 
 
 @unittest.skipUnless(_have_compiler(), "no C compiler to build nk_disc_expand (SKIP, not a pass)")
@@ -313,7 +389,7 @@ class BringupAcceptsCompressedImagesTests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(report["failure_class"], "EXECUTABLE_UNSUPPORTED")
                 self.assertEqual(len(seen), 1)
-                self.assertEqual(seen[0].name, f"TEST00042.{name}.iso")
+                self.assertRegex(seen[0].name, expanded_name_pattern(name))
                 self.assertEqual(seen[0].read_bytes(), self.iso)
                 user_data = (self.root / f"case-{name}" / "work" / "user-data").resolve()
                 self.assertTrue(seen[0].resolve().is_relative_to(user_data))

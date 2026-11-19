@@ -17,14 +17,21 @@
  *        system         set by the host, read for its value (TEMP, TERM, SDL_*)
  *
  * Adding a switch means adding its row here; tools/test_env_registry.py fails on a name that is read
- * in src/rt but missing from the table, on a row nothing reads, and on a malformed row. A name ending
- * in _N stands for a numbered family (SR_WATCH_0 .. SR_WATCH_15). The readers keep the literal name
- * in their getenv calls: the source tests assert those literals. */
+ * in src/rt, or in a src/core file mk/runtime_sources.mk links into the runtime, but missing from the
+ * table, on a row nothing reads, and on a malformed row. Reading files are named relative to src/rt
+ * (or tests/native), and core/<file> for src/core. A name ending in _N stands for a numbered family
+ * (SR_WATCH_0 .. SR_WATCH_15). The readers keep the literal name in their getenv calls: the source
+ * tests assert those literals. */
 #define NK_ENV_REGISTRY(X) \
     X("ATRAC3P_FIXTURE", "path", "unset: the fixture test is skipped", "atrac3p_selftest.c", "Directory holding stream.bin and meta.txt that the ATRAC3+ self-test decodes as an extra fixture.") \
     X("FUZZ_CONSTRAINT", "string", "unset (finite floats only)", "vfpu_fuzz.c", "The value allow_nan_inf makes the VFPU fuzzer also generate NaN and infinity operands.") \
     X("FUZZ_SEED", "number", "unset (seed from argv or built-in value)", "vfpu_fuzz.c", "Seeds the random generator of the VFPU fuzz test tool; parsed with strtoul base 0 and overrides the argument.") \
     X("FUZZ_TRIALS", "number", "200 (or first command-line argument)", "vfpu_fuzz.c", "Sets the number of random trials run by the VFPU fuzz test program.") \
+    X("HOME", "system", "set by the host", "core/nk_platform_posix.c", "POSIX home folder: the base of the default per-user folders when no XDG home is set, and of the desktop and personal folders.") \
+    X("NK_ANDROID_APP_DIR", "path", "unset (set by the Android activity)", "core/nk_platform_posix.c", "Android only: the folder the app unpacked its bundled files to; host startup makes it the working directory.") \
+    X("NK_ANDROID_DATA_DIR", "path", "unset (set by the Android activity)", "core/nk_platform_posix.c", "Android only: the app's private files folder, under which the per-user settings, data, saves, cache and logs are laid out.") \
+    X("NK_ANDROID_LOG_FILE", "path", "unset (logcat only)", "core/nk_platform_posix.c", "Android only: file the host appends each stdout and stderr line to, beside logcat.") \
+    X("NK_INPUT_PROFILE", "path", "unset: SR_INPUT_PROFILE, then input_profile.json in the config folder", "core/nk_input_profile.c", "Input profile the runtime loads; the launcher sets it to a disc's own mapping.") \
     X("NK_VIDEOREC_FAKE_FFMPEG", "string", "unset (the self-test sets it per case)", "videorec_selftest.c", "How the videorec self-test, run as a fake FFmpeg, ends: enc= and mux= each ok, slow:MS, fail, dead or crash.") \
     X("PATH", "system", "set by the host", "videorec.c", "Searched, absolute entries only, for the FFmpeg executable a recording encodes with.") \
     X("PSP_ISO", "path", "unset: no ISO path from the environment", "iso_public.c", "Path of the disc image the public ISO reader opens when no image is given another way.") \
@@ -47,7 +54,7 @@
     X("SR_AUDIO_BACKEND", "string", "unset (normal audio backend)", "audio_sdl3.c,psmf_media_selftest.c", "Audio backend choice; null, none, 0 or off select the silent null backend.") \
     X("SR_AUDIO_DISABLED", "string", "unset (audio enabled)", "audio_sdl3.c", "When set to exactly 1, host audio output is disabled and the null audio backend is used.") \
     X("SR_BLOCKLOG", "flag-presence", "off", "debug.h,sched.c", "Logs each time the scheduler parks a thread in a delay or object wait; read once per process.") \
-    X("SR_BOOT_EVENT_FILE", "path", "unset (no event file)", "driver.c,gui.c,hle.c,hle_kernel_module.c,recomp.c", "File to which boot progress events are appended in addition to stderr.") \
+    X("SR_BOOT_EVENT_FILE", "path", "unset (no event file)", "core/nk_shared_helpers.c,driver.c,gui.c,hle.c,hle_kernel_module.c,recomp.c", "File to which boot progress events are appended in addition to stderr.") \
     X("SR_BOOT_PATH", "path", "unset (no boot argument seeded)", "driver.c,hle_kernel_module.c", "Guest boot path (under 4096 bytes) placed in the entry's argument block; a disc0: or umd0: path marks a title booted from the disc.") \
     X("SR_BREAKLOG", "flag-presence", "off", "debug.h", "Legacy switch that turns on the memory debug log class, like SR_OORLOG.") \
     X("SR_BREAK_FATAL", "flag-nonzero", "off: BREAK is logged and execution continues", "recomp.c", "Makes a guest BREAK instruction record a fatal event and abort the process; src/ref/interp.cpp reads it too and stops with a break.") \
@@ -73,6 +80,7 @@
     X("SR_EXITSNAP", "flag-presence", "off", "hle_kernel_thread.c", "Arms capture of the last worker thread's CPU state at thread exit for later diagnostics.") \
     X("SR_EXIT_AT_VBLANK", "number", "0 (never exit)", "hle_display.c,sched.c", "Ends the run successfully once the vblank count reaches this value; also counts as pause automation.") \
     X("SR_EXIT_DUMP", "flag-presence", "off", "hle_kernel_module.c", "Writes crash_dump.bin (CpuState and 64 KiB of guest stack) and exited.flag beside the executable at sceKernelExitGame, for tools/mem_debug.py.") \
+    X("SR_EXPECT_DATA_FILE_COUNT", "number", "unset", "hle_thread_selftest.c", "Expected data-file count the title-config self-test compares with sr_title_config_expected_data_file_count().") \
     X("SR_EXPECT_HLE_DIAGNOSTICS", "string", "unset", "hle_thread_selftest.c", "Expected HLE diagnostics state that the title-config self-test compares against.") \
     X("SR_FBDIAG", "flag-presence", "off", "hle_display.c", "Prints a FRAMEBUF MISMATCH warning when the presented buffer differs from the GE draw target.") \
     X("SR_FBDUMP", "number", "off", "ge.c,hle_display.c", "Frame count (vcount) from which a framebuffer dump is captured; also enables the GE list snapshot.") \
@@ -157,6 +165,7 @@
     X("SR_HUD", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c,perf.c", "Enables the developer HUD and performance counters when set to a non-empty value other than 0.") \
     X("SR_IDENTITY_SEED", "string", "nakagawa-deterministic-profile-v1", "hle.c", "Seed for the synthetic WLAN MAC and OpenPSID of a fresh profile under SR_DETERMINISTIC_CLOCK=1; ignored otherwise.") \
     X("SR_INLOG", "flag-presence", "off", "debug.h,gpu_sdl3vk/sdl3vk.c,hle_input.c", "Logs controller input: published button changes in the SDL backend and HLE input calls.") \
+    X("SR_INPUT_PROFILE", "path", "unset", "core/nk_input_profile.c", "Older name of NK_INPUT_PROFILE, read only when that one is unset or empty.") \
     X("SR_IOLOG", "flag-presence", "off", "debug.h,hle_data.c,hle_io.c", "When set, logs file I/O operations to stderr and enables the file-system debug category.") \
     X("SR_LAUNCHER_DISPLAY_BOUNDS", "list", "unset (primary display)", "gpu_sdl3vk/sdl3vk.c,gui.c", "Display bounds as x,y,w,h used to open the launcher window on a chosen display.") \
     X("SR_LOOSE_CONTENT_ROOTS", "list", "unset (no loose content roots)", "hle_thread_selftest.c", "Serialized list of extra loose-content root directories bound alongside the primary root.") \
@@ -186,7 +195,7 @@
     X("SR_OSK_TEXT", "string", "unset: on-screen keyboard is answered by a person", "hle_thread_selftest.c,hle_utility.c", "Answers every on-screen keyboard field with this text; CANCEL cancels every field.") \
     X("SR_PAD", "list", "0x0008 (START)", "debug.h,hle_route.c", "Hex button mask for the automatic input pulse; also enables the input debug category.") \
     X("SR_PADPERIOD", "number", "240", "hle_route.c", "Period in frames of the automatic pad pulse; values of 0 or less use 240.") \
-    X("SR_PADSCRIPT", "path", "unset", "hle_route.c,sched.c", "Path to a pad input script loaded by the route code; its presence also affects pause behavior.") \
+    X("SR_PADSCRIPT", "path", "unset", "core/nk_input_profile.c,hle_route.c,sched.c", "Path to a pad input script loaded by the route code; its presence also affects pause behavior.") \
     X("SR_PADSCRIPT_READ_BUDGET", "number", "1800", "hle_route.c", "Vblank count a pad script may be read for; a value below 1 or not a number is refused.") \
     X("SR_PADSTART", "number", "0", "hle_route.c", "Frame number before which the automatic input pulses are held back.") \
     X("SR_PADWIDTH", "number", "4", "hle_route.c", "Width in frames of each automatic pad pulse; 0 or less disables the pulse.") \
@@ -287,6 +296,14 @@
     X("SR_WINDOW_HIDDEN", "flag-nonzero", "off", "gpu_sdl3vk/sdl3vk.c", "When nonzero, the presenter creates a hidden window for headless routes.") \
     X("SR_YIELDLOG", "flag-presence", "off", "sched.c", "Logs the first 200 worker-thread yields to stderr.") \
     X("TEMP", "system", "falls back to TMPDIR, then current dir or /tmp", "audio_sdl3.c,profiler_selftest.c", "Host temporary directory used for scratch files by the audio and profiler code.") \
-    X("TMPDIR", "system", "unset: falls back to the current directory", "audio_sdl3.c,profiler_selftest.c,vfs_contained_selftest.c", "Host temp directory (after TEMP) where self-tests place their scratch files.")
+    X("TMPDIR", "system", "unset: falls back to the current directory", "audio_sdl3.c,profiler_selftest.c,vfs_contained_selftest.c", "Host temp directory (after TEMP) where self-tests place their scratch files.") \
+    X("USER", "system", "set by the host", "core/nk_platform_posix.c", "POSIX user name the platform layer reports (nk_platform_env_user_name).") \
+    X("USERNAME", "system", "set by the host", "core/nk_platform_win32.c", "Windows user name the platform layer reports (nk_platform_env_user_name).") \
+    X("USERPROFILE", "system", "set by the host", "core/nk_platform_win32.c", "Windows home folder the platform layer reports (nk_platform_env_home_dir).") \
+    X("WINDIR", "system", "set by the host; the usual Windows folder when unset", "core/nk_platform_win32.c", "Windows folder whose Fonts folder is searched for the open-source fallback fonts.") \
+    X("XDG_CACHE_HOME", "system", "unset: HOME/.cache", "core/nk_platform_posix.c", "Linux XDG cache base, holding the cache folder.") \
+    X("XDG_CONFIG_HOME", "system", "unset: HOME/.config", "core/nk_platform_posix.c", "Linux XDG config base: the older layout's settings folder and the user-dirs.dirs file naming the personal folders.") \
+    X("XDG_DATA_HOME", "system", "unset: HOME/.local/share", "core/nk_platform_posix.c", "Linux XDG data base, holding the per-user settings, data and saves folders.") \
+    X("XDG_STATE_HOME", "system", "unset: HOME/.local/state", "core/nk_platform_posix.c", "Linux XDG state base, holding the logs folder.")
 
 #endif /* NK_ENV_REGISTRY_H */

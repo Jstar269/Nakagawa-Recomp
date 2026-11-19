@@ -186,7 +186,10 @@ class AndroidAppContractTests(unittest.TestCase):
             self.assertEqual(android_pin.group(1), ci_pin.group(1), cmake_name)
 
     def test_manifest_requests_no_permissions(self) -> None:
-        for manifest in ANDROID.glob("app/src/*/AndroidManifest.xml"):
+        manifests = sorted(ANDROID.glob("app/src/*/AndroidManifest.xml"))
+        # An empty glob (a moved source set) would otherwise pass without reading one manifest.
+        self.assertIn(ANDROID / "app" / "src" / "main" / "AndroidManifest.xml", manifests)
+        for manifest in manifests:
             text = manifest.read_text(encoding="utf-8")
             self.assertNotIn("uses-permission", text, f"{manifest} asks for a permission")
 
@@ -507,6 +510,14 @@ class AndroidMakeTargetTests(unittest.TestCase):
     def test_the_host_build_is_unchanged(self) -> None:
         proc = self._dry_run("compile", "CC=gcc", "SDL3_DIR=", "VULKAN_SDK=")
         out = proc.stdout + proc.stderr
+        if proc.returncode != 0 and "SDL3 discovery failed" in proc.stderr:
+            self.skipTest("this host's SDL3 cannot be discovered, so its compile goal cannot be planned: "
+                          + proc.stderr.strip()[-500:])
+        # A dry run that stopped (a parse error, any $(error)) prints none of the Android names
+        # either, so the host plan must be there before their absence means anything.
+        self.assertEqual(proc.returncode, 0, out[-2000:])
+        self.assertRegex(proc.stdout, rf"-o {re.escape(self.build_dir.as_posix())}/demo(?:\.exe)?(?:\s|$)",
+                         "the host compile goal links no title executable")
         self.assertNotIn("libdemo.so", out)
         self.assertNotIn("nk_android_title", out)
         self.assertNotIn("-shared", out.split())

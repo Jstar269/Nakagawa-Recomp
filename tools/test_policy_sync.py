@@ -6,6 +6,7 @@
 import contextlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -71,6 +72,28 @@ class PolicySyncTests(unittest.TestCase):
         added = json.loads(self.policy.read_text(encoding="utf-8"))["include_paths"]
         self.assertIn("tools/c.py", added)
         self.assertEqual(self.run_sync(["docs/a.md", "tools/c.py"])[0], 0)
+
+    def test_every_tracked_name_reaches_the_check(self):
+        """A name with a space, a non-ASCII name and a file deleted from disk are all checked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            names = ["docs/a.md", "docs/my notes.md", "tools/résumé.py", "tools/gone.py"]
+            for name in names:
+                (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                (repo / name).write_text("x\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "-c", "core.quotepath=true", "add", "--", *names], cwd=repo, check=True)
+            (repo / "tools/gone.py").unlink()
+            self.assertEqual(sorted(policy_sync.tracked_paths(repo)), sorted(names))
+
+            out, err = io.StringIO(), io.StringIO()
+            with patch.object(policy_sync, "ROOT", repo), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = policy_sync.main(["--policy", str(self.policy)])
+        self.assertEqual(rc, 1)
+        self.assertNotIn("policy sync: OK", out.getvalue())
+        for name in names[1:]:
+            self.assertIn(f"unclassified: {name}", out.getvalue())
 
     def test_is_high_risk_classes(self):
         for path in ("assets/font/x.txt", "a/b.pgf", "x/kirk.c", "oracle/n.txt"):

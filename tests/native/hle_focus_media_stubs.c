@@ -159,8 +159,9 @@ uint32_t g_sdk_version;   /* hle.c: no compiled SDK version is set; 0 is "unknow
 /* ---- everything else fails loudly ---- */
 
 /* hle.c: a handler that meets an argument shape the runtime does not model stops the run by
- * name. The full build exits 7 (or counts the stop in a thread selftest); no focused test
- * exercises a stop, so one that reaches it prints the same line and aborts. It never returns. */
+ * name. With no scheduler running (this build has none) the full build prints the line and
+ * leaves through the driver's run boundary, g_hle_jmp; this does the same, so the media
+ * selftest's boundary (atrac_fuzz_call, or main's) sees the stop. It never returns. */
 uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...) {
     char detail[192];
     va_list ap;
@@ -168,8 +169,9 @@ uint32_t hle_unmodelled_stop(const char *import_name, const char *fmt, ...) {
     vsnprintf(detail, sizeof(detail), fmt, ap);
     va_end(ap);
     fprintf(stderr, "UNSUPPORTED_IMPORT: %s %s; the run stops here (#308)\n", import_name, detail);
-    focus_fail("hle_unmodelled_stop", "hle.c");
-    return 0;   /* not reached: focus_fail aborts */
+    fflush(stderr);
+    sr_hit_hle = 1;
+    longjmp(g_hle_jmp, 1);
 }
 
 /* hle.c: the user partition's block allocator. _sceAtracGetContextAddress (hle_audio_codec.c,

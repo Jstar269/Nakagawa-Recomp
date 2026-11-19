@@ -14,16 +14,15 @@
 #include <stdint.h>
 
 #ifndef SR_EVIDENCE_NO_NIDS
-#define SR_HLE_UNVERIFIED_NID_COUNT 74u
+#define SR_HLE_UNVERIFIED_NID_COUNT 71u
 /* Sorted ascending for binary search. */
-static const uint32_t sr_hle_unverified_nids[74] = {
+static const uint32_t sr_hle_unverified_nids[71] = {
     0x00061e74u,
     0x0530be4eu,
     0x0c116e1bu,
     0x0ed48fe2u,
     0x1117c65fu,
     0x13a5abefu,
-    0x13f592bcu,
     0x1575d64bu,
     0x17099f0au,
     0x172d316eu,
@@ -71,7 +70,6 @@ static const uint32_t sr_hle_unverified_nids[74] = {
     0xa85880d0u,
     0xab96437fu,
     0xb293727fu,
-    0xb3b5d042u,
     0xb7f46618u,
     0xb8a740f4u,
     0xb9848a74u,
@@ -84,7 +82,6 @@ static const uint32_t sr_hle_unverified_nids[74] = {
     0xd1f59fdbu,
     0xd5a229c9u,
     0xdba273fau,
-    0xe2d56b2du,
     0xe855bf76u,
     0xf6107f00u,
     0xf7d13214u,
@@ -100,12 +97,12 @@ typedef struct { uint32_t mask; uint32_t match; const char *forms; } SrVfpuUnver
 #define SR_VFPU_UNVERIFIED_FORM_COUNT 22u
 static const SrVfpuUnverifiedForm sr_vfpu_unverified_forms[22] = {
     { 0xfc000000u, 0xfc000000u, "VFPU opcode 0x3f [vfpu-3f-fc000000-2f62df9cdfc2]" },
-    { 0xffe00003u, 0xd8000000u, "lv.q [vfpu-36-d8000000-460695424519]" },
-    { 0xffe00003u, 0xd8000001u, "lv.q [vfpu-36-d8050100-311bbc14b1ed]" },
-    { 0xffe00003u, 0xd8000003u, "lv.q [vfpu-36-d8018100-a59abdf93d57]" },
-    { 0xffe00003u, 0xf8000000u, "sv.q [vfpu-3e-f8000000-eafd4b0b3fa0]" },
-    { 0xffe00003u, 0xf8000001u, "sv.q [vfpu-3e-f8050100-e50967e96480]" },
-    { 0xffe00003u, 0xf8000003u, "sv.q [vfpu-3e-f8018100-bdb3647af048]" },
+    { 0xffe00003u, 0xd8000000u, "lv.q [vfpu-36-d8000000-30cb7956a8d1]" },
+    { 0xffe00003u, 0xd8000001u, "lv.q [vfpu-36-d8050100-8dd825f5ccb5]" },
+    { 0xffe00003u, 0xd8000003u, "lv.q [vfpu-36-d8018100-825702516a48]" },
+    { 0xffe00003u, 0xf8000000u, "sv.q [vfpu-3e-f8000000-7dab64c0d8ca]" },
+    { 0xffe00003u, 0xf8000001u, "sv.q [vfpu-3e-f8050100-8f42ebca67a0]" },
+    { 0xffe00003u, 0xf8000003u, "sv.q [vfpu-3e-f8018100-34ace421a012]" },
     { 0xffe08003u, 0xc8000000u, "lv.s [vfpu-32-c8000000-4ed11a01c431]" },
     { 0xffe08003u, 0xc8000001u, "lv.s [vfpu-32-c8050100-cf7177187253]" },
     { 0xffe08003u, 0xc8000003u, "lv.s [vfpu-32-c8050100-7190ae39c3e3]" },

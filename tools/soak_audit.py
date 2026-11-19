@@ -29,8 +29,10 @@ Machine-readable output, one line per assertion, then one summary::
     SOAK_CHECK: cadence PASS mean_hz=59.94 worst_s=58.90 p5_hz=59.10
     SOAK_AUDIT: verdict=PASS checks=7 failures=0 presenting_s=458/460
 
-Exit status is 0 only when every enabled assertion passed. A missing input is reported as
-``SKIP`` with the reason, never as a pass: an absent artifact is not a healthy run.
+Exit status is 0 only when at least one assertion was judged and every judged one passed,
+1 when one failed, and 77 (verdict=SKIP) when nothing was judged at all. A missing input is
+reported as ``SKIP`` with the reason, never as a pass: an absent artifact is not a healthy run,
+and a run with nothing measured is not a passing one.
 """
 
 from __future__ import annotations
@@ -52,6 +54,12 @@ FATAL_PATTERNS = (
     "stack overflow",
     "assertion failed",
 )
+
+#: Checks that report and never judge: a PASS from one of these is not evidence the run was
+#: healthy, so a run whose only PASS is one of them has nothing judged.
+REPORTED_ONLY = frozenset({"compat_patches"})
+#: Exit status when no assertion was judged: the automake/meson convention for a skipped test.
+EXIT_NOTHING_JUDGED = 77
 
 AUDIOSTAT_HOST = re.compile(
     r"AUDIOSTAT_HOST:\s+state=(\S+)\s+driver=(\S+)\s+pushed=(\d+)\s+underruns=(\d+)\s+"
@@ -117,8 +125,18 @@ class Report:
     def failures(self) -> int:
         return sum(1 for c in self.checks if c.status == "FAIL")
 
+    @property
+    def judged_passes(self) -> int:
+        """Passing checks that judged something; compat_patches only reports."""
+        return sum(1 for c in self.checks if c.status == "PASS" and c.name not in REPORTED_ONLY)
+
     def verdict(self) -> str:
-        return "FAIL" if self.failures else "PASS"
+        if self.failures:
+            return "FAIL"
+        return "PASS" if self.judged_passes else "SKIP"
+
+    def exit_status(self) -> int:
+        return {"PASS": 0, "FAIL": 1, "SKIP": EXIT_NOTHING_JUDGED}[self.verdict()]
 
     def render(self) -> str:
         lines = [c.line() for c in self.checks]
@@ -264,14 +282,16 @@ def check_route(report: Report, text: str) -> None:
     report.add("route", None, "no route program in this run")
 
 
-def lead_series(text: str) -> list[int]:
+def lead_series(text: str, readings: list[tuple[str, str]] | None = None) -> list[int]:
     """The un-consumed audio, in milliseconds, in the order the run reported it.
 
     Every emitter contributes to one series, whichever mixer a build links, and the readings
     keep the order they appear in the log. -1 readings are dropped: they mean the backend had
     no host queue to be ahead of, and a window of pure absence is not a drift of zero.
     """
-    return [int(ms) for _q, ms in AUDIOSTAT_DRIFT.findall(text) if int(ms) >= 0]
+    if readings is None:
+        readings = AUDIOSTAT_DRIFT.findall(text)
+    return [int(ms) for _q, ms in readings if int(ms) >= 0]
 
 
 def check_audio(report: Report, text: str, max_underruns: int, max_drift_ms: int,
@@ -333,8 +353,9 @@ def check_audio_drift(report: Report, text: str, max_drift_ms: int,
     non-accumulating (the end of the run is not meaningfully ahead of where it started), and
     a series that rises at every single window is called out by name.
     """
-    series = lead_series(text)
-    queued = [int(q) for q, _ms in AUDIOSTAT_DRIFT.findall(text) if int(q) >= 0]
+    readings = AUDIOSTAT_DRIFT.findall(text)
+    series = lead_series(text, readings)
+    queued = [int(q) for q, _ms in readings if int(q) >= 0]
     if not series:
         report.add("audio_drift", None,
                    "no queue depth in this run's telemetry (run with SR_AUDIOSTAT=1 on a "
@@ -360,10 +381,16 @@ def check_audio_drift(report: Report, text: str, max_drift_ms: int,
         report.add("audio_drift", True, detail)
 
 
-def check_fatal(report: Report, text: str) -> None:
-    hits = sorted({line[:120] for line in text.splitlines()
-                   if any(p in line for p in FATAL_PATTERNS)})
-    if hits:
+def check_fatal(report: Report, text: str, counts_only: bool = False) -> None:
+    """Fail on any fatal marker. A raw marker line can name a host path (a table the
+    runtime could not open, for one), so a summary meant for publication (counts_only)
+    names only which marker patterns matched, never the line."""
+    marked = [line for line in text.splitlines() if any(p in line for p in FATAL_PATTERNS)]
+    hits = sorted({line[:120] for line in marked})
+    if hits and counts_only:
+        kinds = ",".join(p for p in FATAL_PATTERNS if any(p in line for line in marked))
+        report.add("fatal", False, f"markers={len(hits)} kinds={kinds}")
+    elif hits:
         report.add("fatal", False, f"markers={len(hits)} first={hits[0]!r}")
     else:
         report.add("fatal", True, "no fatal marker")
@@ -415,7 +442,7 @@ def audit(args: argparse.Namespace) -> Report:
             report.add(name, None, "no process-metrics CSV given (--proc)")
     if args.stderr:
         text = Path(args.stderr).read_text(encoding="utf-8", errors="replace")
-        check_fatal(report, text)
+        check_fatal(report, text, args.compat_counts_only)
         check_route(report, text)
         check_compat_patches(report, text, args.compat_counts_only)
         if args.audio:
@@ -451,7 +478,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="how far the queue may end up ahead of where it started")
     ap.add_argument("--audio", action="store_true", help="judge the audio counters")
     ap.add_argument("--compat-counts-only", action="store_true",
-                    help="report how many compatibility patches fired, not which (for a public summary)")
+                    help="report how many compatibility patches fired, not which, and fatal "
+                         "marker kinds, not lines (for a public summary)")
     ap.add_argument("--json", action="store_true", help="also print the report as JSON")
     args = ap.parse_args(argv)
 
@@ -459,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
     print(report.render())
     if args.json:
         print(report.as_json())
-    return 1 if report.failures else 0
+    return report.exit_status()
 
 
 if __name__ == "__main__":

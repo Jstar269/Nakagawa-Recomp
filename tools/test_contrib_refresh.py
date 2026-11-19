@@ -21,11 +21,13 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -253,6 +255,69 @@ class ContribRefreshRefusalTests(unittest.TestCase):
         rc, output = self._run()
         self.assertEqual(rc, 1)
         self.assertIn("CANDIDATE_INDEX_STALE", output)
+
+
+class ProvenanceRefreshApplyPolicyRollbackTests(unittest.TestCase):
+    """``provenance_refresh.py --apply-policy`` leaves no half-update behind a refusal.
+
+    The policy apply writes and stages the profile before the controls are generated;
+    when the controls then refuse (no policy-delta authority covers the new profile),
+    the profile on disk and in the index are what they were before the run.
+    """
+
+    #: A stand-in ``tools/policy_sync.py``: unclassified without ``--apply``, and with
+    #: it the routine profile update (one more included path).
+    POLICY_SYNC_STUB = (
+        "import json, sys\n"
+        "if '--apply' not in sys.argv:\n"
+        "    sys.exit(1)\n"
+        "path = 'assets/public_source_profile.json'\n"
+        "document = json.load(open(path, encoding='utf-8'))\n"
+        "document['include_paths'] = sorted(document['include_paths'] + ['docs/routine.md'])\n"
+        "open(path, 'w', encoding='utf-8', newline='\\n').write(json.dumps(document, indent=2) + '\\n')\n"
+    )
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        (Path(self._tmp.name) / "repo").mkdir()
+        self.repo = merge_fixture.SyntheticControlRepository(Path(self._tmp.name) / "repo")
+        self.root = self.repo.root
+        (self.root / "tools").mkdir(exist_ok=True)
+        # Untracked, so the refresh's clean-index check still passes.
+        (self.root / "tools" / "policy_sync.py").write_text(self.POLICY_SYNC_STUB, encoding="utf-8")
+        self.ledger = Path(self._tmp.name) / "IMPLEMENTATION_PROVENANCE.json"
+        self.ledger.write_text('{"records": []}\n', encoding="utf-8")
+
+    def _index_entry(self) -> str:
+        return str(_git(self.root, "ls-files", "-s", "--", POLICY).stdout)
+
+    def test_a_refused_refresh_restores_the_profile_and_its_index_entry(self) -> None:
+        before_bytes = (self.root / POLICY).read_bytes()
+        before_entry = self._index_entry()
+
+        def refuse(**_kwargs):
+            # The apply really changed the profile before the controls were asked for.
+            self.assertNotEqual((self.root / POLICY).read_bytes(), before_bytes)
+            raise provenance_refresh.verifier.VerifyError(
+                "POLICY_DELTA_AUTHORITY_REQUIRED", "no policy-delta authority covers the profile change",
+            )
+
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(
+            ("PROVENANCE_", "NK_TRUSTED_LEDGER"))}
+        buffer = StringIO()
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(provenance_refresh, "ROOT", self.root), \
+                mock.patch.object(provenance_refresh, "generate_controls", refuse), \
+                redirect_stderr(buffer), redirect_stdout(StringIO()):
+            rc = provenance_refresh.main([
+                "--trusted-ledger", str(self.ledger), "--base", self.repo.base, "--apply-policy",
+            ])
+        self.assertEqual(rc, 1)
+        self.assertIn("POLICY_DELTA_AUTHORITY_REQUIRED", buffer.getvalue())
+        self.assertEqual((self.root / POLICY).read_bytes(), before_bytes)
+        self.assertEqual(self._index_entry(), before_entry)
+        self.assertEqual(_git(self.root, "status", "--porcelain", "--", POLICY).stdout, "")
 
 
 class PublicSourceProfileOrderingTests(unittest.TestCase):

@@ -68,6 +68,7 @@ typedef struct {
 #define SR_AUDIO_PAUSE_FADE_FRAMES 256
 
 static AudioBackendState s_audio_state = AUDIO_STATE_UNINITIALIZED;
+static int s_audio_opened;   /* host output became ACTIVE at some point in the run */
 static SDL_AudioDeviceID s_device_id = 0;
 static SDL_AudioStream *s_streams[SR_AUDIO_CHANNELS] = {NULL};
 static AudioStats s_stats;
@@ -261,6 +262,8 @@ static int s_test_fail_pause_stash_alloc;
 static int s_test_device_freq;   /* open the device at this rate, so the streams convert */
 static int s_test_pause_failure_messages;
 static int s_test_device_open_attempts;   /* times sr_audio_init went on to open the device */
+static int s_test_fail_stream_create;     /* 1 + the channel whose stream creation fails; 0 for none */
+static int s_test_fail_pause_leave_put;   /* 1 + the channel whose fade-in put fails once; 0 for none */
 #endif
 
 /* SR_AUDIOSTAT gate, matching the other backend: the queue/drift fields are diagnostics and
@@ -486,20 +489,25 @@ void sr_audio_dump_finish(void) {
     sr_audio_dump_stop(s_device_id);
 }
 
+/* The streams, the device and the audio subsystem reference an open took. */
+static void sr_audio_release_device(void) {
+    for (int i = 0; i < SR_AUDIO_CHANNELS; i++) {
+        if (s_streams[i]) {
+            SDL_DestroyAudioStream(s_streams[i]);
+            s_streams[i] = NULL;
+        }
+    }
+    if (s_device_id) {
+        SDL_CloseAudioDevice(s_device_id);
+        s_device_id = 0;
+    }
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+}
+
 static void sr_audio_cleanup(void) {
     if (s_audio_state == AUDIO_STATE_ACTIVE) {
         sr_audio_dump_stop(s_device_id);
-        for (int i = 0; i < SR_AUDIO_CHANNELS; i++) {
-            if (s_streams[i]) {
-                SDL_DestroyAudioStream(s_streams[i]);
-                s_streams[i] = NULL;
-            }
-        }
-        if (s_device_id) {
-            SDL_CloseAudioDevice(s_device_id);
-            s_device_id = 0;
-        }
-        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        sr_audio_release_device();
     }
     for (int i = 0; i < SR_AUDIO_CHANNELS; i++) {
         free(s_pause_stash[i].samples);
@@ -630,22 +638,32 @@ static void sr_audio_tpl_design(void) {
     s_tpl_release = exp(-1.0 / (SR_TPL_RELEASE_S * SR_AUDIO_SAMPLE_RATE));
 }
 
+static int sr_audio_env_disables_output(void);
+
 /* Turns the limiter on or off for the run, before the first push (driver.c, from the Ace line).
- * Returns 1: this backend carries it. */
+ * Returns 1 when this backend carries it. Turning it on returns 0, and leaves it off, when there
+ * is no host output to limit: the environment chose the null back end (sr_audio_init's test), or
+ * an open was already refused. A device that refuses its open after this call is reported by
+ * sr_audio_true_peak_stats. */
 int sr_audio_set_true_peak_limiter(int on) {
+    if (on && (s_audio_state == AUDIO_STATE_NULL || s_audio_state == AUDIO_STATE_UNAVAILABLE ||
+               sr_audio_env_disables_output()))
+        on = 0;
     s_tpl_on = on ? 1 : 0;
     sr_audio_tpl_design();
     sr_audio_tpl_reset();
-    return 1;
+    return s_tpl_on;
 }
 
-/* The run's totals, for the Ace report (driver.c hands them to ace.c at exit). */
-void sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
-                              double *min_gain) {
+/* The run's totals, for the Ace report (driver.c hands them to ace.c at exit). Returns 1 when the
+ * limiter is on and host output opened during the run, 0 when nothing could have been limited. */
+int sr_audio_true_peak_stats(uint64_t *pushes_wide, uint64_t *frames_wide, uint64_t *frames_limited,
+                             double *min_gain) {
     if (pushes_wide) *pushes_wide = s_tpl_stats.pushes_wide;
     if (frames_wide) *frames_wide = s_tpl_stats.frames_wide;
     if (frames_limited) *frames_limited = s_tpl_stats.frames_limited;
     if (min_gain) *min_gain = s_tpl_stats.min_gain;
+    return s_tpl_on && s_audio_opened;
 }
 
 static float sr_audio_tpl_scaled(int64_t sample, int volume) {
@@ -815,6 +833,20 @@ static uint32_t sr_audio_pull_in_mixer_frames(int device_frames, int device_freq
     return frames > (uint64_t)INT32_MAX ? (uint32_t)INT32_MAX : (uint32_t)frames;
 }
 
+/* The environment's explicit null or disabled audio: SR_AUDIO_BACKEND=null (none, 0, off),
+ * SR_AUDIO_DISABLED=1, or SR_HEADLESS=1 without SR_AUDIO_BACKEND. */
+static int sr_audio_env_disables_output(void) {
+    const char *env_backend = getenv("SR_AUDIO_BACKEND");
+    const char *env_disabled = getenv("SR_AUDIO_DISABLED");
+    const char *env_headless = getenv("SR_HEADLESS");
+    return (env_backend && (strcmp(env_backend, "null") == 0 ||
+                            strcmp(env_backend, "none") == 0 ||
+                            strcmp(env_backend, "0") == 0 ||
+                            strcmp(env_backend, "off") == 0)) ||
+           (env_disabled && strcmp(env_disabled, "1") == 0) ||
+           (env_headless && strcmp(env_headless, "1") == 0 && !env_backend);
+}
+
 int sr_audio_init(void) {
     if (s_audio_state == AUDIO_STATE_ACTIVE) {
         return 0;
@@ -823,16 +855,8 @@ int sr_audio_init(void) {
         return -1;
     }
 
-    /* Check environment configuration for explicit null/disabled audio */
     const char *env_backend = getenv("SR_AUDIO_BACKEND");
-    const char *env_disabled = getenv("SR_AUDIO_DISABLED");
-    const char *env_headless = getenv("SR_HEADLESS");
-    if ((env_backend && (strcmp(env_backend, "null") == 0 ||
-                         strcmp(env_backend, "none") == 0 ||
-                         strcmp(env_backend, "0") == 0 ||
-                         strcmp(env_backend, "off") == 0)) ||
-        (env_disabled && strcmp(env_disabled, "1") == 0) ||
-        (env_headless && strcmp(env_headless, "1") == 0 && !env_backend)) {
+    if (sr_audio_env_disables_output()) {
         s_audio_state = AUDIO_STATE_NULL;
         if (!s_reported_unavailable) {
             fprintf(stderr, "audio: host audio output disabled by environment (null backend)\n");
@@ -880,6 +904,13 @@ int sr_audio_init(void) {
 
     for (int i = 0; i < SR_AUDIO_CHANNELS; i++) {
         s_streams[i] = SDL_CreateAudioStream(&spec, &spec);
+#ifdef SR_AUDIO_SELFTEST
+        if (s_streams[i] && s_test_fail_stream_create == i + 1) {
+            SDL_DestroyAudioStream(s_streams[i]);
+            s_streams[i] = NULL;
+            SDL_SetError("selftest: stream creation refused");
+        }
+#endif
         /* Each stream reports the device's pulls (sr_audio_pull_callback). Without the report the
          * queue is sized against SDL's chunk size alone, read on every query, and no channel is
          * seen played dry after its first push. */
@@ -895,7 +926,11 @@ int sr_audio_init(void) {
                 fprintf(stderr, "audio: host audio output stream creation failed: %s\n", SDL_GetError());
                 s_reported_unavailable = 1;
             }
-            sr_audio_cleanup();
+            /* Give back what this open took and stay UNAVAILABLE, as a refused device open does:
+             * sr_audio_cleanup releases only an ACTIVE backend, and its UNINITIALIZED state
+             * would send every later audio call back to open another device. */
+            sr_audio_release_device();
+            for (int j = 0; j < SR_AUDIO_CHANNELS; j++) s_shadow_queues[j].valid = 0;
             return -1;
         }
         s_shadow_queues[i].valid = 1;
@@ -912,6 +947,7 @@ int sr_audio_init(void) {
     }
 
     s_audio_state = AUDIO_STATE_ACTIVE;
+    s_audio_opened = 1;
     sr_audio_dump_start(s_device_id);
     if (!s_reported_init) {
         const char *driver = SDL_GetCurrentAudioDriver();
@@ -1103,55 +1139,40 @@ static void sr_audio_push_frames(int ch, const int16_t *lr, const int32_t *wide,
         return;
     }
 
-    const int16_t *submitted = lr;
-    int push_ok;
     /* Before the data, as in sr_audio_push_silence. Played dry: a device pull found nothing (an
      * empty queue a pull just emptied is still playing). Read and cleared in one step, so a pull
      * that finds nothing in between is not lost. */
     const int played_dry = SDL_SetAtomicInt(&s_played_dry[ch], 0) && takeable_frames == 0;
-    /* Volume scaling and submission */
-    if (s_tpl_on) {
-        /* Ace Mode's limiter in place of the per-sample clamp: n frames in, n frames out. On a
-         * channel played dry with no hold ahead of this push, the frames the limiter still holds
-         * would play as a fragment ahead of the new sound, so they go (as in the hold). A queue the
-         * last pull emptied without coming up short is still playing: its frames stay. */
-        if (played_dry) sr_audio_tpl_reset_channel(ch);
-        int16_t stack_buf[1024 * 2];
-        int16_t *buf = stack_buf;
-        if (nframes > 1024) {
-            buf = (int16_t *)malloc((size_t)nframes * 4);
-            if (!buf) return;
-        }
-        sr_audio_tpl_block(ch, lr, wide, nframes, volL, volR, buf);
-        push_ok = SDL_PutAudioStreamData(s_streams[ch], buf, nframes * 4);
-        if (push_ok) (void)sr_audio_shadow_append(ch, buf, nframes);
-        if (buf != stack_buf) free(buf);
-    } else if (volL == 0x8000 && volR == 0x8000) {
-        push_ok = SDL_PutAudioStreamData(s_streams[ch], lr, nframes * 4);
-    } else {
-        int16_t stack_buf[1024 * 2];
-        int16_t *buf = stack_buf;
-        if (nframes > 1024) {
-            buf = (int16_t *)malloc((size_t)nframes * 4);
-            if (!buf) return;
-        }
-        for (int i = 0; i < nframes; i++) {
-            buf[i * 2]     = sr_audio_scale_sample(lr[i * 2], volL);
-            buf[i * 2 + 1] = sr_audio_scale_sample(lr[i * 2 + 1], volR);
+    /* Ace Mode's limiter in place of the per-sample clamp: n frames in, n frames out. On a channel
+     * played dry with no hold ahead of this push, the frames the limiter still holds would play as
+     * a fragment ahead of the new sound, so they go (as in the hold). A queue the last pull emptied
+     * without coming up short is still playing: its frames stay. */
+    if (s_tpl_on && played_dry) sr_audio_tpl_reset_channel(ch);
+    /* Volume scaling: each path only makes the frames to submit; unity gain submits `lr` itself. */
+    const int16_t *submitted = lr;
+    int16_t stack_buf[1024 * 2];
+    int16_t *buf = NULL;
+    if (s_tpl_on || volL != 0x8000 || volR != 0x8000) {
+        buf = nframes > 1024 ? (int16_t *)malloc((size_t)nframes * 4) : stack_buf;
+        if (!buf) return;
+        if (s_tpl_on) {
+            sr_audio_tpl_block(ch, lr, wide, nframes, volL, volR, buf);
+        } else {
+            for (int i = 0; i < nframes; i++) {
+                buf[i * 2]     = sr_audio_scale_sample(lr[i * 2], volL);
+                buf[i * 2 + 1] = sr_audio_scale_sample(lr[i * 2 + 1], volR);
+            }
         }
         submitted = buf;
-        push_ok = SDL_PutAudioStreamData(s_streams[ch], buf, nframes * 4);
-        if (push_ok) (void)sr_audio_shadow_append(ch, submitted, nframes);
-        if (buf != stack_buf) {
-            free(buf);
-        }
     }
+    /* Submission, and the queued-audio mirror the pause fade reads back. */
+    const int push_ok = SDL_PutAudioStreamData(s_streams[ch], submitted, nframes * 4);
+    if (push_ok) (void)sr_audio_shadow_append(ch, submitted, nframes);
+    if (buf && buf != stack_buf) free(buf);
     if (!push_ok) {
         fprintf(stderr, "audio: SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
         return;
     }
-    if (!s_tpl_on && volL == 0x8000 && volR == 0x8000)
-        (void)sr_audio_shadow_append(ch, submitted, nframes);
     s_stats.total_pushed_frames += (uint64_t)nframes;
     s_stats.channel_pushed_frames[ch] += (uint64_t)nframes;
 
@@ -1353,6 +1374,35 @@ void sr_audio_pause_enter(void) {
     s_stats.pause_held_frames += queued_frames;
 }
 
+/* The fade-in's first put on `ch`. */
+static int sr_audio_pause_put_fade(int ch, const int16_t *samples, int frames) {
+#ifdef SR_AUDIO_SELFTEST
+    if (s_test_fail_pause_leave_put == ch + 1) {
+        s_test_fail_pause_leave_put = 0;
+        SDL_SetError("selftest: fade-in put refused");
+        return 0;
+    }
+#endif
+    return SDL_PutAudioStreamData(s_streams[ch], samples, frames * 4);
+}
+
+/* After a restore failed at channel `first`, that channel and every later one still hold only
+ * their fade-out prefix, and their stashes are about to be freed: each is put back to its whole
+ * stash, unfaded, as pause_enter's failure does (sr_audio_pause_restore_unfaded). A channel that
+ * cannot be put back no longer matches its queued-audio mirror, so the mirror is dropped: the next
+ * pause then says so (the mirror unavailable) instead of stashing samples the stream lost. */
+static void sr_audio_pause_leave_unfaded(int first) {
+    for (int i = first; i < SR_AUDIO_CHANNELS; i++) {
+        const int frames = s_pause_stash[i].frames;
+        if (!s_streams[i] || !SDL_ClearAudioStream(s_streams[i]) ||
+            (frames && !SDL_PutAudioStreamData(s_streams[i], s_pause_stash[i].samples, frames * 4))) {
+            fprintf(stderr, "AUDIO_PAUSE: could not restore channel %d after fade failure (%s)\n",
+                    i, SDL_GetError());
+            s_shadow_queues[i].valid = 0;
+        }
+    }
+}
+
 void sr_audio_pause_leave(void) {
     if (s_audio_state != AUDIO_STATE_ACTIVE || !s_pause_active) return;
     if (s_pause_device_fallback) {
@@ -1378,6 +1428,7 @@ void sr_audio_pause_leave(void) {
         sr_audio_pause_unlock(locked);
         fprintf(stderr, "AUDIO_PAUSE: could not lock streams while restoring audio (%s)\n", SDL_GetError());
         fflush(stderr);
+        sr_audio_pause_leave_unfaded(0);
         sr_audio_pause_free_stashes();
         s_pause_active = 0;
         return;
@@ -1389,18 +1440,16 @@ void sr_audio_pause_leave(void) {
             ? frames : SR_AUDIO_PAUSE_FADE_FRAMES;
         if (!SDL_ClearAudioStream(s_streams[i])) {
             failure = 1;
+            sr_audio_pause_leave_unfaded(i);
             break;
         }
         if (!frames) continue;
         sr_audio_pause_scale_prefix(s_pause_stash[i].samples, s_pause_fade[i], fade_frames, 1);
-        if (!SDL_PutAudioStreamData(s_streams[i], s_pause_fade[i], fade_frames * 4) ||
+        if (!sr_audio_pause_put_fade(i, s_pause_fade[i], fade_frames) ||
             (frames > fade_frames && !SDL_PutAudioStreamData(s_streams[i],
                 s_pause_stash[i].samples + fade_frames * 2, (frames - fade_frames) * 4))) {
             failure = 1;
-            SDL_ClearAudioStream(s_streams[i]);
-            if (!SDL_PutAudioStreamData(s_streams[i], s_pause_stash[i].samples, frames * 4))
-                fprintf(stderr, "AUDIO_PAUSE: could not restore channel %d after fade failure (%s)\n",
-                        i, SDL_GetError());
+            sr_audio_pause_leave_unfaded(i);
             break;
         }
     }
@@ -1501,10 +1550,8 @@ static void audio_lead(int *worst, long *lead_ms) {
     audio_lead_from(queued, SR_AUDIO_CHANNELS, worst, lead_ms);
 }
 
+/* Opens nothing: a run whose guest never reached audio reports "uninitialized". */
 void sr_audio_dump_stats(void) {
-    if (s_audio_state == AUDIO_STATE_UNINITIALIZED) {
-        sr_audio_init();
-    }
     uint32_t peak = 0;
     for (int i = 0; i < SR_AUDIO_CHANNELS; i++) {
         if (s_stats.peak_queued_frames[i] > peak) {
@@ -1513,7 +1560,8 @@ void sr_audio_dump_stats(void) {
     }
     const char *driver = (s_audio_state == AUDIO_STATE_ACTIVE) ? SDL_GetCurrentAudioDriver() : NULL;
     const char *state_str = (s_audio_state == AUDIO_STATE_ACTIVE) ? "active" :
-                            (s_audio_state == AUDIO_STATE_NULL) ? "null" : "unavailable";
+                            (s_audio_state == AUDIO_STATE_NULL) ? "null" :
+                            (s_audio_state == AUDIO_STATE_UNINITIALIZED) ? "uninitialized" : "unavailable";
     /* SR_AUDIOSTAT: the value the blocking output paces against, and the drift it is
      * accumulating (see audio_lead). */
     long lead_ms = -1;
@@ -1577,6 +1625,9 @@ static void test_reset(void) {
     s_test_pause_failure_messages = 0;
     s_test_device_freq = 0;
     s_test_device_open_attempts = 0;
+    s_test_fail_stream_create = 0;
+    s_test_fail_pause_leave_put = 0;
+    s_audio_opened = 0;
     memset(&s_stats, 0, sizeof(s_stats));
     memset(s_push_marks, 0, sizeof(s_push_marks));
     s_tpl_on = 0;
@@ -2857,6 +2908,117 @@ static void test_pause_stash_failure_is_visible(void) {
     printf("test_pause_stash_failure_is_visible: PASS\n");
 }
 
+/* A stream that cannot be created or bound after the device opened: the open gives back the
+ * streams, the device and its subsystem reference, and the state stays UNAVAILABLE, so no later
+ * audio call opens again.
+ * MUTANT: the failure path calls sr_audio_cleanup -- it releases nothing (the state is not
+ *   ACTIVE) and leaves UNINITIALIZED, so the push opens a second device and the attempts read 2. */
+static void test_stream_failure_releases_the_open(void) {
+    static const int16_t block[64 * 2];
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    s_test_fail_stream_create = 4;   /* the fourth channel's stream */
+    assert(sr_audio_init() == -1);
+    assert(s_audio_state == AUDIO_STATE_UNAVAILABLE && s_reported_unavailable == 1);
+    assert(s_test_device_open_attempts == 1 && s_device_id == 0);
+    for (int i = 0; i < SR_AUDIO_CHANNELS; i++) assert(s_streams[i] == NULL);
+    sr_audio_push(0, block, 64, 0x8000, 0x8000);
+    assert(sr_audio_queued(0) == -1 && sr_audio_played_dry(0) == 0);
+    assert(s_audio_state == AUDIO_STATE_UNAVAILABLE && s_test_device_open_attempts == 1);
+    assert(s_stats.total_pushed_frames == 0u);
+    test_reset();
+    printf("test_stream_failure_releases_the_open: PASS\n");
+}
+
+/* peak=limit with no host output to limit: the setter refuses it under the environment's null
+ * back end and after a refused open, and the run's totals say nothing ran when the device refuses
+ * its open after the limiter went on (driver.c then reports the feature unavailable).
+ * MUTANT: the setter returns 1 unconditionally -- the SR_AUDIO_DISABLED cell reads 1. */
+static void test_peak_limiter_needs_host_output(void) {
+    test_reset();
+    set_test_env("SR_AUDIO_DISABLED", "1");
+    assert(sr_audio_set_true_peak_limiter(1) == 0 && !s_tpl_on);
+    set_test_env("SR_AUDIO_DISABLED", "");
+    set_test_env("SR_HEADLESS", "1");
+    assert(sr_audio_set_true_peak_limiter(1) == 0 && !s_tpl_on);
+    set_test_env("SR_HEADLESS", "");
+    set_test_env("SR_AUDIO_BACKEND", "null");
+    assert(sr_audio_set_true_peak_limiter(1) == 0 && !s_tpl_on);
+    set_test_env("SR_AUDIO_BACKEND", "");
+    assert(sr_audio_set_true_peak_limiter(0) == 0);
+
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "nonexistent_driver_xyz", SDL_HINT_OVERRIDE);
+    assert(sr_audio_set_true_peak_limiter(1) == 1);   /* before the open: not yet known */
+    assert(sr_audio_init() == -1 && s_audio_state == AUDIO_STATE_UNAVAILABLE);
+    assert(sr_audio_true_peak_stats(NULL, NULL, NULL, NULL) == 0);
+    assert(sr_audio_set_true_peak_limiter(1) == 0 && !s_tpl_on);
+
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    assert(sr_audio_set_true_peak_limiter(1) == 1);
+    assert(sr_audio_init() == 0 && sr_audio_true_peak_stats(NULL, NULL, NULL, NULL) == 1);
+    sr_audio_cleanup();   /* the backend's atexit runs before the driver's report */
+    assert(sr_audio_true_peak_stats(NULL, NULL, NULL, NULL) == 1);
+    test_reset();
+    printf("test_peak_limiter_needs_host_output: PASS\n");
+}
+
+/* A fade-in that fails on one channel when the pause ends puts that channel and every later one
+ * back to its whole stash, unfaded, so no queued audio is lost and each queued-audio mirror still
+ * matches its stream: the next pause stashes what the streams hold.
+ * MUTANT: pause_leave breaks out of its loop and frees the stashes -- channel 1 holds only its
+ *   256-frame fade-out prefix and the queued cell reads 256. */
+static void test_pause_leave_failure_restores_every_channel(void) {
+    enum { N = 4096 };
+    static int16_t a[N * 2], b[N * 2];
+    for (int i = 0; i < N * 2; i++) {
+        a[i] = (int16_t)(1000 + (i % 977));
+        b[i] = (int16_t)(-2000 - (i % 613));
+    }
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    assert(sr_audio_init() == 0 && s_audio_state == AUDIO_STATE_ACTIVE);
+    assert(SDL_PauseAudioDevice(s_device_id));   /* nothing is consumed while the cells read */
+    sr_audio_push(0, a, N, 0x8000, 0x8000);
+    sr_audio_push(1, b, N, 0x8000, 0x8000);
+    assert(sr_audio_queued(0) == N && sr_audio_queued(1) == N);
+    sr_audio_pause_enter();
+    assert(s_pause_active && !s_pause_device_fallback);
+    s_test_fail_pause_leave_put = 1;   /* channel 0's fade-in */
+    sr_audio_pause_leave();
+    assert(!s_pause_active && s_test_fail_pause_leave_put == 0);
+    assert(sr_audio_queued(0) == N && sr_audio_queued(1) == N);
+    assert(s_shadow_queues[0].valid && s_shadow_queues[1].valid);
+    for (uint32_t i = 0; i < (uint32_t)N; i++)
+        for (int c = 0; c < 2; c++) {
+            assert(test_queued_sample(0, i, c) == a[i * 2u + (uint32_t)c]);
+            assert(test_queued_sample(1, i, c) == b[i * 2u + (uint32_t)c]);
+        }
+    /* The next pause stashes the streams' own samples. */
+    sr_audio_pause_enter();
+    assert(s_pause_active && !s_pause_device_fallback);
+    assert(s_pause_stash[1].frames == N && memcmp(s_pause_stash[1].samples, b, sizeof(b)) == 0);
+    s_test_fail_pause_leave_put = 2;   /* channel 1's fade-in this time */
+    sr_audio_pause_leave();
+    assert(!s_pause_active && sr_audio_queued(0) == N && sr_audio_queued(1) == N);
+    assert(s_shadow_queues[0].valid && s_shadow_queues[1].valid);
+    test_reset();
+    printf("test_pause_leave_failure_restores_every_channel: PASS\n");
+}
+
+/* The SR_AUDIOSTAT line at exit opens no device: a run whose guest never reached audio reports
+ * the state as it is.
+ * MUTANT: sr_audio_dump_stats calls sr_audio_init when UNINITIALIZED -- the attempts read 1. */
+static void test_dump_stats_opens_nothing(void) {
+    test_reset();
+    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "dummy", SDL_HINT_OVERRIDE);
+    sr_audio_dump_stats();
+    assert(s_audio_state == AUDIO_STATE_UNINITIALIZED && s_test_device_open_attempts == 0);
+    test_reset();
+    printf("test_dump_stats_opens_nothing: PASS\n");
+}
+
 int main(int argc, char **argv) {
     sr_perf_init();
     (void)argc;
@@ -2877,6 +3039,10 @@ int main(int argc, char **argv) {
     test_no_device_path();
     test_null_backend_env();
     test_start_up_open_is_the_only_open();
+    test_stream_failure_releases_the_open();
+    test_peak_limiter_needs_host_output();
+    test_pause_leave_failure_restores_every_channel();
+    test_dump_stats_opens_nothing();
     test_host_pull_frames();
     test_played_dry_is_exact_and_per_channel();
     test_push_silence_is_not_a_push();

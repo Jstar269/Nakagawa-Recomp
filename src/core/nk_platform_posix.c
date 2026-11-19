@@ -250,7 +250,10 @@ bool nk_platform_list_files(const char *dir, NkDirFileFn fn, void *ctx) {
     if (!handle) return false;
     struct dirent *item;
     while ((item = readdir(handle)) != NULL) {
-        if (item->d_name[0] == '.') continue;
+        /* Only "." and ".." are left out by name (lstat below would skip them as
+           directories anyway): a name that starts with a dot is listed, as the Win32
+           backend lists it. */
+        if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) continue;
         char path[4096];
         int written = snprintf(path, sizeof(path), "%s/%s", dir, item->d_name);
         if (written < 0 || (size_t)written >= sizeof(path)) continue;
@@ -394,19 +397,25 @@ bool nk_platform_mkdir_p_private(const char *dir_path) {
     /* Only newly-created components are made private. Existing ancestors can
        be shared application or system directories (for example /home or
        /tmp); changing their mode here would be an unrelated permission
-       mutation. lstat() also keeps a symlink from satisfying the directory
-       check and redirecting later writes outside the intended tree. */
+       mutation. An ancestor that already exists may be a symlink the system
+       or the user set up (/home -> var/home on Fedora Silverblue, /tmp and
+       /var -> private/... on macOS, a data folder on another disk), so stat()
+       follows it. The final component, and any component this call created,
+       goes through lstat(): a symlink there does not satisfy the directory
+       check, so it cannot redirect later writes outside the intended tree. */
     for (char *p = tmp + 1;; p++) {
         if (*p != '/' && *p != '\0') continue;
         char saved = *p;
         *p = '\0';
         if (tmp[0] != '\0') {
-            if (mkdir(tmp, 0700) != 0 && errno != EEXIST) {
+            bool created = mkdir(tmp, 0700) == 0;
+            if (!created && errno != EEXIST) {
                 *p = saved;
                 return false;
             }
             struct stat st;
-            if (lstat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            int got = (created || saved == '\0') ? lstat(tmp, &st) : stat(tmp, &st);
+            if (got != 0 || !S_ISDIR(st.st_mode)) {
                 *p = saved;
                 return false;
             }
@@ -786,7 +795,10 @@ bool nk_platform_user_data_layout(struct NkUserDataLayout *out) {
 
 bool nk_platform_get_path(NkPathType type, char *out_path, size_t max_len) {
     if (!resolve_posix_path(type, out_path, max_len)) return false;
-    (void)nk_platform_mkdir_p(out_path);
+    /* The per-user data, config, cache, log and save folders hold the library, private
+       per-title files and saves, so the folders this creates are owner-only (0700), as the
+       XDG Base Directory specification asks. Folders that already exist keep their mode. */
+    (void)nk_platform_mkdir_p_private(out_path);
     return true;
 }
 
@@ -919,6 +931,37 @@ bool nk_platform_get_personal_dir(NkPersonalDir which, char *out_path, size_t ma
  * Every POSIX process the desktop starts, and on Android the bundled tool programs
  * (nk_platform_spawn_tool), are ordinary forked children; these posix_child_* functions are the
  * one implementation of starting, polling, waiting for, ending and closing them. */
+
+/* The pipe a forked child reports a failed set-up or exec through. Both ends close on exec,
+ * so the parent's read sees end-of-file once the program has started. On Linux and Android
+ * pipe2 sets that in the same call, so no other thread's child can inherit the write end
+ * and hold the parent's read open; elsewhere (macOS) the flag is set right after. */
+static int posix_status_pipe(int fds[2]) {
+#if defined(__linux__) && defined(SYS_pipe2)
+    if (syscall(SYS_pipe2, fds, O_CLOEXEC) == 0) return 0;
+    if (errno != ENOSYS) return -1;
+#endif
+    if (pipe(fds) != 0) return -1;
+    if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
+        int saved = errno;
+        close(fds[0]);
+        close(fds[1]);
+        errno = saved;
+        return -1;
+    }
+    return 0;
+}
+
+/* In the forked child: hand errno to the parent and end. Only async-signal-safe calls. */
+static void posix_child_fail(int status_fd) {
+    int error = errno != 0 ? errno : EINVAL;
+    ssize_t put;
+    do {
+        put = write(status_fd, &error, sizeof(error));
+    } while (put < 0 && errno == EINTR);
+    _exit(127);
+}
+
 static bool posix_child_spawn(
     const char *executable_path,
     const char * const *argv,
@@ -940,16 +983,41 @@ static bool posix_child_spawn(
         }
     }
 
-    pid_t pid = fork();
-    if (pid < 0) {
+    int status_pipe[2];
+    if (posix_status_pipe(status_pipe) != 0) {
         out_process->spawn_error = errno;
         if (output_fd >= 0) close(output_fd);
         return false;
     }
 
+    pid_t pid = fork();
+    if (pid < 0) {
+        out_process->spawn_error = errno;
+        if (output_fd >= 0) close(output_fd);
+        close(status_pipe[0]);
+        close(status_pipe[1]);
+        return false;
+    }
+
     if (pid == 0) {
+        close(status_pipe[0]);
         /* Child process: establish own process group to allow tree-wide signals */
         (void)setpgid(0, 0);
+
+        /* The signal mask and ignored dispositions survive exec. The spawning thread may
+           block SIGTERM and the other asynchronous signals (SDL's threads do, and the player
+           starts games from one), which would leave nk_platform_terminate_process's SIGTERM
+           pending until the grace period ends in SIGKILL. The program starts with nothing
+           blocked, and SIGPIPE and SIGXFSZ at their defaults, as a shell would start it. */
+        sigset_t none;
+        sigemptyset(&none);
+        (void)sigprocmask(SIG_SETMASK, &none, NULL);
+        struct sigaction dfl;
+        memset(&dfl, 0, sizeof(dfl));
+        dfl.sa_handler = SIG_DFL;
+        sigemptyset(&dfl.sa_mask);
+        (void)sigaction(SIGPIPE, &dfl, NULL);
+        (void)sigaction(SIGXFSZ, &dfl, NULL);
 
         /* Lower the priority before exec, so the program never runs above it; what it
            starts inherits the nice value. A child already nicer keeps its own. */
@@ -958,21 +1026,21 @@ static bool posix_child_spawn(
             int nice_now = getpriority(PRIO_PROCESS, 0);
             if ((nice_now != -1 || errno == 0) && nice_now < NK_PLATFORM_LOW_PRIORITY_NICE &&
                 setpriority(PRIO_PROCESS, 0, NK_PLATFORM_LOW_PRIORITY_NICE) != 0) {
-                _exit(127);
+                posix_child_fail(status_pipe[1]);
             }
         }
 
         if (output_fd >= 0) {
             if (dup2(output_fd, STDOUT_FILENO) < 0 ||
                 dup2(output_fd, STDERR_FILENO) < 0) {
-                _exit(127);
+                posix_child_fail(status_pipe[1]);
             }
             close(output_fd);
         }
 
         if (working_directory && *working_directory) {
             if (chdir(working_directory) != 0) {
-                _exit(127);
+                posix_child_fail(status_pipe[1]);
             }
         }
 
@@ -984,10 +1052,13 @@ static bool posix_child_spawn(
                 if (eq) {
                     char name[256];
                     size_t name_len = (size_t)(eq - envp[i]);
-                    if (name_len == 0 || name_len >= sizeof(name)) _exit(127);
+                    if (name_len == 0 || name_len >= sizeof(name)) {
+                        errno = EINVAL;
+                        posix_child_fail(status_pipe[1]);
+                    }
                     memcpy(name, envp[i], name_len);
                     name[name_len] = '\0';
-                    if (setenv(name, eq + 1, 1) != 0) _exit(127);
+                    if (setenv(name, eq + 1, 1) != 0) posix_child_fail(status_pipe[1]);
                 } else {
                     unsetenv(envp[i]);
                 }
@@ -998,9 +1069,10 @@ static bool posix_child_spawn(
         char * const *exec_argv = argv ? (char * const *)argv : default_argv;
 
         execv(executable_path, exec_argv);
-        _exit(127);
+        posix_child_fail(status_pipe[1]);
     }
 
+    close(status_pipe[1]);
     if (output_fd >= 0) close(output_fd);
 
     /* Parent process: close race by setting child's process group */
@@ -1014,6 +1086,24 @@ static bool posix_child_spawn(
         if ((child_nice != -1 || errno == 0) && child_nice < NK_PLATFORM_LOW_PRIORITY_NICE) {
             (void)setpriority(PRIO_PROCESS, (id_t)pid, NK_PLATFORM_LOW_PRIORITY_NICE);
         }
+    }
+
+    /* End-of-file: the program started (the pipe closed on exec). An errno: the set-up or
+       the exec failed, so the spawn fails with that error, as the Win32 backend reports
+       CreateProcess's, instead of a started child that soon exits 127. */
+    int child_error = 0;
+    ssize_t got;
+    do {
+        got = read(status_pipe[0], &child_error, sizeof(child_error));
+    } while (got < 0 && errno == EINTR);
+    close(status_pipe[0]);
+    if (got > 0) {
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        out_process->spawn_error =
+            got == (ssize_t)sizeof(child_error) && child_error != 0 ? child_error : ECHILD;
+        return false;
     }
 
     out_process->native_handle = (void *)(intptr_t)pid;

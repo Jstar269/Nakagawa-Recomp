@@ -208,4 +208,17 @@ uint16_t nk_render_fallback_window_step(NkRenderFallbackWindow *window,
 NkRenderFallbackEvent nk_render_fallback_window_event(const NkRenderFallbackWindow *window,
                                                       NkRenderEffect effect);
 
+/* SHA-256 (FIPS 180-4), the one implementation the player and the runtime share: the disc,
+ * package and profile identities (nk_iso.c, nk_title_manifest.c, nk_pbp_homebrew.c) and the
+ * imported font identities (nk_font.c). */
+typedef struct {
+    uint32_t state[8];
+    uint64_t bit_count;
+    uint8_t block[64];
+    size_t block_len;
+} NkSha256;
+void nk_sha256_init(NkSha256 *ctx);
+void nk_sha256_update(NkSha256 *ctx, const uint8_t *data, size_t len);
+void nk_sha256_finish(NkSha256 *ctx, uint8_t digest[32]);
+
 #endif

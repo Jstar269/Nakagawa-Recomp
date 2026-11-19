@@ -19,6 +19,7 @@ Classification (per the wave-1 portability lane contract):
   BUILD_TOOL_ONLY              Make/tooling/CI code
   TEST_ONLY                    selftest/unit-test code
   PRIVATE_MANAGER_ONLY         PowerShell title-manager orchestration
+  UNCLASSIFIED                 a path no rule covers (reported as "other")
 
 The scan is structural text evidence (SOURCE_SHAPE): a hit reports the line,
 not an interpretation. A guarded `#ifdef _WIN32` block that compiles to
@@ -34,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -58,6 +60,9 @@ CORE_HEADERS = {
     "asset_index.h", "evf.h", "intr_conformance.h", "fp_convert.h",
     "ge_shared.h", "sdkver.h", "sr_h264.h",
     "fbcap_policy.h", "watchpoints_file.h", "debug.h", "perf.h",
+    # The runtime HLE's private headers are HLE core like the sources that include them;
+    # otherwise the src/rt fallback below would file their Win32 use as backend.
+    *(Path(path).name for path in hle_sources.HLE_PRIVATE_HEADERS),
 }
 BACKEND_HEADERS = {"pgd_api.h", "pgf_api.h"}
 BACKEND_FILES = {
@@ -90,6 +95,20 @@ def classify_file(path: str) -> tuple[str, str]:
         return "BACKEND", "BACKEND_EXPECTED"
     if parts[:2] == ("src", "ref"):
         return "REF", "TEST_ONLY" if name == "selftest.cpp" else "BACKEND_EXPECTED"
+    # The host side outside src/rt: the launcher core (ISO, library, crypto, platform
+    # layer), the player and the UI toolkit are host services, not PSP semantics.
+    if parts[:2] == ("src", "core"):
+        return "HOST_CORE", "BACKEND_EXPECTED"
+    if parts[:2] == ("src", "player"):
+        return "PLAYER", "BACKEND_EXPECTED"
+    if parts[:2] == ("src", "ui"):
+        return "UI", "BACKEND_EXPECTED"
+    if parts[:2] == ("src", "psp_companion"):
+        # The PSP-side companion program; its Makefile is build tooling.
+        return "COMPANION", "BUILD_TOOL_ONLY" if name == "Makefile" else "BACKEND_EXPECTED"
+    if parts[:1] == ("src",):
+        # A source area no rule covers is reported as such, never filed as build tooling.
+        return "SRC_UNCLASSIFIED", "UNCLASSIFIED"
     if parts[0] == "tools" and name in ("nk_safety.ps1", "nk_manager.ps1"):
         return "MANAGER", "CANONICAL_MANAGER"
     if parts[0] == "tools" and name.endswith(".ps1"):
@@ -100,13 +119,13 @@ def classify_file(path: str) -> tuple[str, str]:
         return "MANAGER", "CANONICAL_MANAGER"
     if p.name == "Makefile":
         return "TOOLS", "BUILD_TOOL_ONLY"
-    if parts[:2] == ("mk",):
+    if parts[:1] == ("mk",):
         return "TOOLS", "BUILD_TOOL_ONLY"
-    if parts[:2] == (".github",):
+    if parts[:1] == (".github",):
         return "TOOLS", "BUILD_TOOL_ONLY"
     if parts[0] == "interface":
         return "DASH", "BUILD_TOOL_ONLY"
-    return "OTHER", "BUILD_TOOL_ONLY"
+    return "OTHER", "UNCLASSIFIED"
 
 
 # --------------------------------------------------------------------------
@@ -200,34 +219,36 @@ def scan_file(path: Path) -> dict | None:
     }
 
 
+SCAN_PATHSPECS = ("src", "tools", "mk", ".github", "Makefile", "nk.ps1")
+
+
+def tracked_files() -> list[Path]:
+    """The tracked files under the scan areas, from `git ls-files`.
+
+    Untracked and ignored local files (scratch scripts, notes, generated helpers) are
+    never scanned, so the report holds only tracked text and one commit gives one result.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--", *SCAN_PATHSPECS],
+        capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "portability_inventory: git ls-files failed: "
+            + proc.stderr.decode("utf-8", errors="replace").strip())
+    names = [n for n in proc.stdout.decode("utf-8").split("\0") if n]
+    return [ROOT / n for n in sorted(names)]
+
+
 def scan() -> list[dict]:
     out: list[dict] = []
-    roots = [
-        ROOT / "src",
-        ROOT / "tools",
-        ROOT / "mk",
-        ROOT / ".github",
-    ]
-    extra_files = [
-        ROOT / "Makefile",
-        ROOT / "nk.ps1",
-    ]
-    for root in roots:
-        if not root.exists():
+    for p in tracked_files():
+        # A gitlink (submodule) or a tracked file deleted in the worktree is not a file.
+        if not p.is_file():
             continue
-        for p in sorted(root.rglob("*")):
-            if not p.is_file():
-                continue
-            if ".git" in p.parts:
-                continue
-            rec = scan_file(p)
-            if rec:
-                out.append(rec)
-    for p in extra_files:
-        if p.exists():
-            rec = scan_file(p)
-            if rec:
-                out.append(rec)
+        rec = scan_file(p)
+        if rec:
+            out.append(rec)
     class_to_key = {
         "SEMANTIC_CORE_CONTAMINATION": "semantic_core",
         "BACKEND_EXPECTED": "backend",

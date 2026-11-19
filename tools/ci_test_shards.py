@@ -285,6 +285,11 @@ def check_plan(
 # * a module couples to make when its text names the Makefile, a ``.mk`` file,
 #   ``$(MAKE)``, ``gmake``/``mingw32-make``, or a string literal that starts with the
 #   ``make`` or ``MAKE`` command word (``"make"``, ``f"make {goal}"``, ``"MAKE"``);
+# * a shell or PowerShell script in tools/ (``"tools/nk_manager.ps1"``) is a unit too:
+#   its dependencies are the local tools its text names, and it also couples when it
+#   runs ``make`` as a bare command word;
+# * an import of a repository module outside tools/ (a fixture generator under tests/
+#   that a test puts on ``sys.path``) counts as coupled, because it is not inspected;
 # * the closure is transitive, and a package dependency pulls in every file in it;
 # * a file that cannot be read or parsed counts as coupled.
 #
@@ -295,6 +300,13 @@ MAKEFILE_COUPLING = re.compile(
     r"\bMakefile\b|\bmingw32-make\b|\bgmake\b|\$\(MAKE\)|\.mk\b"
     r"|[\"'](?:make|MAKE)(?:\.exe)?(?:[\"'\s]|$)"
 )
+# A script runs make as a bare command word, which the Python-literal form above does not see.
+_SCRIPT_MAKE = re.compile(r"(?<![\w$.-])make(?:\.exe)?(?![\w.-])")
+_SCRIPT_SUFFIXES = frozenset({".bat", ".cmd", ".ps1", ".psm1", ".sh"})
+# Directories never walked for repository modules: local inputs and generated output, which
+# hold no module a test imports (and must not be read by a planner that runs anywhere).
+_UNWALKED_DIRS = frozenset({"build", "fs", "keys", "logs", "memstick", "node_modules", "oracle",
+                            "place_game_here"})
 _LITERAL_SEPARATORS = re.compile(r"[\s/\\]+")
 _DOTTED_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
@@ -329,23 +341,65 @@ def _local_units(tools_dir: Path) -> dict[str, list[Path]]:
             files = sorted(package.rglob("*.py"))
             if files:
                 units.setdefault(package.name, []).extend(files)
+    for script in tools_dir.iterdir():
+        if script.is_file() and script.suffix.lower() in _SCRIPT_SUFFIXES:
+            units[script.name] = [script]
     return units
 
 
-def _unit_edges(path: Path, local: frozenset[str]) -> tuple[set[str], bool]:
-    """Return the local units ``path`` depends on, and whether it is unparseable."""
+def _outside_modules(repo_dir: Path | None, tools_dir: Path) -> frozenset[str]:
+    """Return the names an import can resolve to among the repository's Python files
+    outside ``tools_dir``: every ``.py`` file's stem and every package directory's name."""
+
+    if repo_dir is None:
+        return frozenset()
+    names: set[str] = set()
+    skip = tools_dir.resolve()
+    for folder, dirs, files in os.walk(repo_dir):
+        here = Path(folder)
+        dirs[:] = sorted(
+            name for name in dirs
+            if not name.startswith(".") and name != "__pycache__"
+            and not (here == repo_dir and name in _UNWALKED_DIRS)
+            and (here / name).resolve() != skip
+        )
+        for name in files:
+            if name.endswith(".py"):
+                names.add(name[:-3])
+        if "__init__.py" in files and here != repo_dir:
+            names.add(here.name)
+    return frozenset(names)
+
+
+def _script_edges(path: Path, local: frozenset[str]) -> tuple[set[str], bool]:
+    """Return the local units a script names, and whether it runs make or cannot be read."""
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return set(), True
+    return _literal_names(text) & local, bool(_SCRIPT_MAKE.search(text))
+
+
+def _unit_edges(path: Path, local: frozenset[str], outside: frozenset[str] = frozenset()) -> tuple[set[str], bool]:
+    """Return the local units ``path`` depends on, and whether it is unparseable or imports
+    a repository module outside tools/ (``outside``), which is not inspected."""
 
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
         return set(), True
     edges: set[str] = set()
+    imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
                 edges.add(parts[1] if parts[0] == "tools" and len(parts) > 1 else parts[0])
+                imported.add(parts[0])
         elif isinstance(node, ast.ImportFrom):
+            if not node.level and node.module:
+                imported.add(node.module.split(".")[0])
             parts = (node.module or "").split(".")
             if node.level or parts == ["tools"] or not node.module:
                 edges.update(alias.name for alias in node.names)
@@ -355,21 +409,29 @@ def _unit_edges(path: Path, local: frozenset[str]) -> tuple[set[str], bool]:
             edges.add(parts[1] if parts[0] == "tools" and len(parts) > 1 else parts[0])
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             edges.update(_literal_names(node.value))
-    return edges & local, False
+    return edges & local, bool((imported - local - {"tools"}) & outside)
 
 
-def makefile_coupled_modules(modules: Iterable[str], tools_dir: Path = TOOLS_DIR) -> list[str]:
-    """Return the test modules whose transitive tool closure can observe the Makefile."""
+def makefile_coupled_modules(modules: Iterable[str], tools_dir: Path = TOOLS_DIR,
+                             repo_dir: Path | None = ROOT) -> list[str]:
+    """Return the test modules whose transitive tool closure can observe the Makefile.
+
+    ``repo_dir`` is the repository whose Python files outside ``tools_dir`` a test can
+    import; ``None`` looks at ``tools_dir`` alone."""
 
     units = _local_units(tools_dir)
     local = frozenset(units)
+    outside = _outside_modules(repo_dir, tools_dir) - local
     edges: dict[str, set[str]] = {}
     coupled_unit: dict[str, bool] = {}
     for name, files in units.items():
         deps: set[str] = set()
         coupled = False
         for file in files:
-            file_edges, unparseable = _unit_edges(file, local)
+            if file.suffix.lower() in _SCRIPT_SUFFIXES:
+                file_edges, unparseable = _script_edges(file, local)
+            else:
+                file_edges, unparseable = _unit_edges(file, local, outside)
             deps |= file_edges
             try:
                 text = file.read_text(encoding="utf-8")

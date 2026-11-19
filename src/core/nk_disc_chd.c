@@ -64,23 +64,60 @@ static bool chd_status(NkDiscExpandStatus *status, const char *code, const char 
     return false;
 }
 
-static bool chd_has_metadata(chd_file *chd, uint32_t tag) {
+/* CHDERR_NONE when the image holds metadata `tag`, CHDERR_METADATA_NOT_FOUND
+   when it does not, and any other error when the metadata chain itself could
+   not be read (a cycle, an entry past the end of the file). */
+static chd_error chd_find_metadata(chd_file *chd, uint32_t tag) {
     uint8_t scratch[256];
     uint32_t length = 0;
     uint32_t found_tag = 0;
     uint8_t flags = 0;
-    return chd_get_metadata(chd, tag, 0, scratch, sizeof(scratch), &length, &found_tag,
-                            &flags) == CHDERR_NONE;
+    return chd_get_metadata(chd, tag, 0, scratch, sizeof(scratch), &length, &found_tag, &flags);
+}
+
+static bool chd_metadata_damaged(NkDiscExpandStatus *status, chd_error err) {
+    return chd_status(status, NK_DISC_CHD_INVALID,
+                      "This CHD disc image is damaged or incomplete: its metadata could not "
+                      "be read.", chd_error_string(err));
+}
+
+/* An error from libchdr's open or header read, named by what it means for the
+   user: a parent-linked image, a version or compression this build can't read,
+   a host short of memory, or a damaged file. */
+static bool chd_open_failed(NkDiscExpandStatus *status, chd_error err) {
+    switch (err) {
+    case CHDERR_REQUIRES_PARENT:
+        return chd_status(status, NK_DISC_CHD_UNSUPPORTED,
+                          "This CHD disc image only stores its differences from a parent "
+                          "image. Nakagawa reads complete CHD images only.", NULL);
+    case CHDERR_UNSUPPORTED_VERSION:
+        return chd_status(status, NK_DISC_CHD_UNSUPPORTED,
+                          "This CHD disc image is a format version Nakagawa can't read.",
+                          chd_error_string(err));
+    case CHDERR_UNSUPPORTED_FORMAT:
+        return chd_status(status, NK_DISC_CHD_UNSUPPORTED,
+                          "This CHD disc image uses a compression Nakagawa can't read.",
+                          chd_error_string(err));
+    case CHDERR_OUT_OF_MEMORY:
+        return chd_status(status, NK_DISC_INTERNAL,
+                          "There is not enough memory to read this CHD disc image.",
+                          chd_error_string(err));
+    default:
+        return chd_status(status, NK_DISC_CHD_INVALID,
+                          "This CHD disc image is damaged or incomplete.", chd_error_string(err));
+    }
 }
 
 static bool chd_backend_open(const char *path, void **handle, uint64_t *logical_bytes,
-                             uint32_t *hunk_bytes, NkDiscExpandStatus *status) {
+                             uint32_t *hunk_bytes, uint8_t raw_sha1[NK_DISC_SHA1_BYTES],
+                             NkDiscExpandStatus *status) {
     static const uint32_t cd_tags[] = {
         CDROM_OLD_METADATA_TAG, CDROM_TRACK_METADATA_TAG, CDROM_TRACK_METADATA2_TAG,
         GDROM_OLD_METADATA_TAG, GDROM_TRACK_METADATA_TAG
     };
     chd_file *chd = NULL;
     const chd_header *header;
+    chd_header peek;
     chd_error err;
     FILE *f;
     *handle = NULL;
@@ -89,22 +126,33 @@ static bool chd_backend_open(const char *path, void **handle, uint64_t *logical_
         return chd_status(status, NK_DISC_READ_FAILED,
                           "The CHD disc image could not be opened for reading.", NULL);
     }
+    /* The header alone first: libchdr's open allocates a hunk buffer, codec
+       dictionaries and the map from these fields (and does not check a v5
+       header), so sizes no PSP disc has are refused before any of that. The
+       header read leaves the file open and with the caller. */
+    memset(&peek, 0, sizeof(peek));
+    err = chd_read_header_core_file_callbacks(&k_chd_file_callbacks, f, &peek);
+    if (err != CHDERR_NONE) {
+        fclose(f);
+        return chd_open_failed(status, err);
+    }
+    if (peek.logicalbytes > NK_DISC_MAX_EXPANDED_BYTES) {
+        fclose(f);
+        return chd_status(status, NK_DISC_SIZE_INVALID,
+                          "This CHD disc image names an expanded size that no PSP disc has.",
+                          NULL);
+    }
+    if (peek.hunkbytes > NK_DISC_CHD_MAX_HUNK_BYTES) {
+        char detail[64];
+        fclose(f);
+        snprintf(detail, sizeof(detail), "%u bytes", (unsigned)peek.hunkbytes);
+        return chd_status(status, NK_DISC_CHD_UNSUPPORTED,
+                          "This CHD disc image uses a block size larger than any PSP disc "
+                          "image needs.", detail);
+    }
     /* libchdr owns the file from here, on success and on failure alike. */
     err = chd_open_core_file_callbacks(&k_chd_file_callbacks, f, CHD_OPEN_READ, NULL, &chd);
-    if (err == CHDERR_REQUIRES_PARENT) {
-        return chd_status(status, NK_DISC_CHD_UNSUPPORTED,
-                          "This CHD disc image only stores its differences from a parent "
-                          "image. Nakagawa reads complete CHD images only.", NULL);
-    }
-    if (err == CHDERR_UNSUPPORTED_VERSION) {
-        return chd_status(status, NK_DISC_CHD_UNSUPPORTED,
-                          "This CHD disc image is a format version Nakagawa can't read.",
-                          chd_error_string(err));
-    }
-    if (err != CHDERR_NONE) {
-        return chd_status(status, NK_DISC_CHD_INVALID,
-                          "This CHD disc image is damaged or incomplete.", chd_error_string(err));
-    }
+    if (err != CHDERR_NONE) return chd_open_failed(status, err);
     header = chd_get_header(chd);
     if (!header || (header->flags & CHDFLAGS_HAS_PARENT) != 0u) {
         chd_close(chd);
@@ -112,10 +160,21 @@ static bool chd_backend_open(const char *path, void **handle, uint64_t *logical_
                           "This CHD disc image only stores its differences from a parent "
                           "image. Nakagawa reads complete CHD images only.", NULL);
     }
-    if (!chd_has_metadata(chd, DVD_METADATA_TAG)) {
+    err = chd_find_metadata(chd, DVD_METADATA_TAG);
+    if (err != CHDERR_NONE && err != CHDERR_METADATA_NOT_FOUND) {
+        chd_close(chd);
+        return chd_metadata_damaged(status, err);
+    }
+    if (err == CHDERR_METADATA_NOT_FOUND) {
         bool cd = false;
         for (size_t i = 0; i < sizeof(cd_tags) / sizeof(cd_tags[0]); i++) {
-            if (chd_has_metadata(chd, cd_tags[i])) cd = true;
+            err = chd_find_metadata(chd, cd_tags[i]);
+            if (err == CHDERR_NONE) {
+                cd = true;
+            } else if (err != CHDERR_METADATA_NOT_FOUND) {
+                chd_close(chd);
+                return chd_metadata_damaged(status, err);
+            }
         }
         chd_close(chd);
         if (cd) {
@@ -141,6 +200,7 @@ static bool chd_backend_open(const char *path, void **handle, uint64_t *logical_
     }
     *logical_bytes = header->logicalbytes;
     *hunk_bytes = header->hunkbytes;
+    memcpy(raw_sha1, header->rawsha1, NK_DISC_SHA1_BYTES);
     *handle = chd;
     return true;
 }

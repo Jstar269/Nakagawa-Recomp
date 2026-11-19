@@ -91,6 +91,32 @@ class HostHarnessContractTests(unittest.TestCase):
             self.assertIn(fn, self.host,
                           "the Nakagawa side must call production code, not reimplement it")
 
+    def test_host_emits_every_record_the_probe_emits(self) -> None:
+        """A record-by-record comparison needs both streams to name the same cells: the eight
+        digests, the per-word vasin domain records and the per-input large-argument vsin/vcos
+        records (the divergence-prone cells HARDWARE_ORACLE.md names)."""
+        probe = PROBE.read_text(encoding="utf-8")
+        cases = CASES.read_text(encoding="utf-8")
+
+        def case_formats(text: str) -> set[str]:
+            return set(re.findall(r'case_id=([^\s"]+)', text))
+
+        self.assertEqual(case_formats(self.host), case_formats(probe))
+        self.assertEqual(case_formats(probe), {"%s", "vfpu-vasin-domain-arg%02u", "%s-arg%02u"})
+
+        def case_order(text: str) -> list[str]:
+            body = text.split("CASES[] = {", 1)[1].split("};", 1)[0]
+            return re.findall(r'\{\s*"(vfpu-[a-z0-9]+)"', body)
+
+        self.assertEqual(case_order(self.host), case_order(probe))
+        self.assertEqual(case_order(probe)[5:7], ["vfpu-vsin", "vfpu-vcos"])
+        for text in (self.host, probe):
+            self.assertIn("for (unsigned c = 5; c <= 6; ++c)", text)
+            self.assertIn("i = VFPU_ORACLE_LARGE_ARG_FIRST; i < VFPU_ORACLE_INPUT_COUNT", text)
+            self.assertIn("sizeof(VASIN_DOMAIN_INPUTS) / sizeof(VASIN_DOMAIN_INPUTS[0])", text)
+            self.assertNotIn("VASIN_DOMAIN_INPUTS[] = {", text, "the vasin words live in the shared header")
+        self.assertIn("VASIN_DOMAIN_INPUTS[] = {", cases)
+
     def test_provenance_is_required_not_defaulted(self) -> None:
         self.assertIn("--model", self.host)
         self.assertIn("--firmware", self.host)

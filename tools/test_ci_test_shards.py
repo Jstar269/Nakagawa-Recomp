@@ -238,24 +238,26 @@ class LiveRepositoryPlanTests(unittest.TestCase):
                 break
             body.append(line[indent:])
         script = "\n".join(body) + "\n"
-        for label, planner, expect_rc, expect_modules in (
-            ("planner fails", "exit 2", False, None),
-            ("planner prints nothing", "exit 0", False, None),
-            ("planner lists modules", "printf 'test_a\\ntest_b\\n'", True, "test_a test_b"),
-        ):
-            with self.subTest(label), tempfile.TemporaryDirectory() as scratch:
+        planner_line = 'listing="$(python tools/ci_test_shards.py'
+        self.assertEqual(script.count(planner_line), 1, script)
+
+        def run_step(step: str, planner: str) -> tuple[subprocess.CompletedProcess[str], str | None]:
+            """Run ``step`` with ``planner`` standing in for ci_test_shards.py; the unittest modules, if it ran."""
+            with tempfile.TemporaryDirectory() as scratch:
                 stub = Path(scratch) / "python"
                 ran = Path(scratch) / "unittest-args"
                 step_summary = Path(scratch) / "step-summary.md"
-                # The step runs the planner first and then the shard's tests under the
-                # coverage wrapper. The stub answers the planner, records the module
-                # arguments of the unittest invocation wherever it appears, and returns
-                # success for the coverage combine/xml calls that follow it.
+                # Only the planner's invocation gets the planner's answer. Every other python
+                # call succeeds, and the unittest one (under the coverage wrapper) records its
+                # module arguments, so a step that goes on after a failed planner is seen.
                 stub.write_text(
                     "#!/bin/sh\n"
-                    + planner + "\n"
                     'all="$*"\n'
                     'case " $all " in\n'
+                    "  *ci_test_shards.py*)\n"
+                    "    " + planner + "\n"
+                    "    exit 0\n"
+                    "    ;;\n"
                     '  *" -m unittest -v "*)\n'
                     '    modules="${all##*-m unittest -v }"\n'
                     '    printf \'%s\\n\' "$modules" > "' + _bash_path(ran) + '"\n'
@@ -268,13 +270,30 @@ class LiveRepositoryPlanTests(unittest.TestCase):
                 env = {"PATH": f"{_bash_path(scratch)}:/usr/bin:/bin", "SHARD": "0", "NUM_SHARDS": "4",
                        "PYTHON_SCOPE": "all", "RUNNER_TEMP": _bash_path(scratch),
                        "GITHUB_STEP_SUMMARY": _bash_path(step_summary)}
-                result = subprocess.run([bash, "-c", script], env=env, capture_output=True,
+                result = subprocess.run([bash, "-c", step], env=env, capture_output=True,
                                         text=True, check=False)
+                modules = ran.read_text(encoding="utf-8").strip() if ran.exists() else None
+            return result, modules
+
+        for label, planner, expect_rc, expect_modules in (
+            ("planner fails", "exit 2", False, None),
+            ("planner prints nothing", "exit 0", False, None),
+            ("planner lists modules", "printf 'test_a\\ntest_b\\n'", True, "test_a test_b"),
+        ):
+            with self.subTest(label):
+                result, modules = run_step(script, planner)
                 self.assertEqual(result.returncode == 0, expect_rc, result.stdout + result.stderr)
                 if expect_modules is None:
-                    self.assertFalse(ran.exists(), "unittest ran after a planner failure")
+                    self.assertIsNone(modules, "unittest ran after a planner failure")
                 else:
-                    self.assertEqual(ran.read_text(encoding="utf-8").strip(), expect_modules)
+                    self.assertEqual(modules, expect_modules)
+        # The stub must see a step that runs unittest after a failed planner. Failing-before: the
+        # stub applied the planner's 'exit 2' to every python call, the unittest one included, so
+        # this fallback still failed the step and never recorded the run it would make in CI.
+        fallback = script.replace('--select "$PYTHON_SCOPE")"', '--select "$PYTHON_SCOPE")" || listing=test_fallback', 1)
+        self.assertNotEqual(fallback, script)
+        _result, modules = run_step(fallback, "exit 2")
+        self.assertEqual(modules, "test_fallback", "the stub cannot see unittest running after a failed planner")
 
     def test_classifier_shard_outputs_match_the_planner_choices(self) -> None:
         for paths, scope in ((["tools/codegen.py"], "all"), (["Makefile"], "makefile")):
@@ -404,6 +423,37 @@ class MakefileCouplingTests(unittest.TestCase):
                 "test_transitive",
             ],
         )
+
+    def test_selection_follows_script_launchers_and_modules_outside_tools(self) -> None:
+        """Failing-before: every edge was cut to tools/*.py units, so a test that runs a
+        tools/ script which runs make, or imports a module outside tools/, was left out of
+        the selection the docstring calls a superset."""
+        files = {
+            "tools/build.sh": "#!/bin/sh\nmake CC=gcc native-core-tests\n",
+            "tools/runner.ps1": "& python \"$PSScriptRoot/helper.py\"\n",
+            "tools/helper.py": "GOAL = '$(MAKE) smoke'\n",
+            "tools/quiet.ps1": "Write-Host 'nothing to build'\n",
+            "tools/test_shell_script.py": "import subprocess\nsubprocess.run(['sh', 'tools/build.sh'])\n",
+            "tools/test_ps_script.py": "import subprocess\nsubprocess.run(['pwsh', '-File', 'tools/runner.ps1'])\n",
+            "tools/test_quiet_script.py": "SCRIPT = 'tools/quiet.ps1'\n",
+            "tools/test_outside.py": "import sys\nsys.path.insert(0, 'tests/fixtures/gen')\nimport fixture_gen\n",
+            "tools/test_stdlib.py": "import json\nfrom tools import quiet_helper\n",
+            "tools/quiet_helper.py": "VALUE = 1\n",
+            "tests/fixtures/gen/fixture_gen.py": "VALUE = 2\n",
+            "build/hst/private_input.py": "VALUE = 3\n",
+        }
+        with tempfile.TemporaryDirectory() as scratch:
+            repo = Path(scratch)
+            for name, text in files.items():
+                (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                (repo / name).write_text(text, encoding="utf-8")
+            tools_dir = repo / "tools"
+            modules = ci_test_shards.discover_modules(tools_dir)
+            selected = ci_test_shards.makefile_coupled_modules(modules, tools_dir, repo)
+            self.assertEqual(ci_test_shards._outside_modules(repo, tools_dir), frozenset({"fixture_gen"}))
+            alone = ci_test_shards.makefile_coupled_modules(modules, tools_dir, None)
+        self.assertEqual(selected, ["test_outside", "test_ps_script", "test_shell_script"])
+        self.assertEqual(alone, ["test_ps_script", "test_shell_script"])
 
     def test_unknown_module_names_are_kept(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:

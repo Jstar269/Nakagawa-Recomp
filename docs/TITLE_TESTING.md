@@ -350,4 +350,6 @@ when the run ends. That includes a run stopped by `SR_EXIT_AT_VBLANK`, an `SR_FB
 the `SR_WATCHDOG_EXIT` watchdog, the stops for an unsupported import or a guest fault, and the stop
 when the guest's own exit path fails: each of those ends the process without the C runtime's exit handlers, and prints the table first.
 `SR_PROFILE_DUMP_VBLANKS=<N>` also prints it every N VBLANKs, for a run that may be killed from
-outside.
+outside. Each row's `duration_ns` is inclusive host wall time: a function that yields or blocks
+is charged with the time other guest threads ran before it returned, so a function that waits
+can rank high without doing the work itself.

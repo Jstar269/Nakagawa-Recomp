@@ -17,8 +17,12 @@
 #define NK_SCE_KERNEL_ERRORS_H
 
 /* ---- memory and general ---- */
+/* BUSY and INVALID_FORMAT are the sceVaudioChReserve refusals; hle_audio.c cites the reference
+ * they come from and marks them unmeasured. */
+#define SCE_KERNEL_ERROR_BUSY                       0x80000021u
 #define SCE_KERNEL_ERROR_ILLEGAL_ADDR               0x80000103u
 #define SCE_KERNEL_ERROR_INVALID_MODE               0x80000107u
+#define SCE_KERNEL_ERROR_INVALID_FORMAT             0x80000108u
 /* PSP's public pspkerror.h names ILLEGAL_ADDR as 0x800200D3 for kernel APIs. Keep it distinct
  * from the subsystem-specific 0x80000103 memory error used by several HLE objects. */
 #define SCE_KERNEL_ERROR_KERNEL_ILLEGAL_ADDR        0x800200d3u

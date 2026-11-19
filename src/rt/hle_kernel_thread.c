@@ -440,7 +440,7 @@ static uint32_t h_ReferThreadStatus(CpuState *s) {
     if (!A1 || !sr_guest_span_readable(A1, 4u))
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     SrThreadInfo info;
-    if (sched_thread_info(A0, &info) != 0) return 0x80020198u;
+    if (sched_thread_info(A0, &info) != 0) return SCE_KERNEL_ERROR_UNKNOWN_THID;
     const uint32_t input_size = MEM_R32(A1);
     if (input_size == 0u) return 0;
     if (input_size > (uint32_t)sizeof(SrThreadInfo))
@@ -720,7 +720,7 @@ static uint32_t h_ReleaseWaitThread(CpuState *s) {
             return 0;
         }
         SrThreadInfo info;
-        if (sched_thread_info(uid, &info) != 0) return 0x80020198u;
+        if (sched_thread_info(uid, &info) != 0) return SCE_KERNEL_ERROR_UNKNOWN_THID;
         return hle_unmodelled_stop("ThreadManForUser_2C34E053",
                                    "of live thread 0x%x that is not waiting (status 0x%x) "
                                    "is not measured", uid, info.status);

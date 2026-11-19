@@ -18,7 +18,10 @@ runs this script:
 ``mutant``           runs a harness whose generated C has one changed immediate (executed,
                      never build-only) and requires MISMATCH on exactly the register the
                      immediate reaches, a capture, and the same first difference when the
-                     snapshot runner replays that capture.
+                     snapshot runner replays that capture. Then, for one field of each kind
+                     the comparison walks, both programs change that field of the translated
+                     side at a syscall stop (``--selftest-corrupt``) and must report the same
+                     first difference.
 ``default-unchanged`` requires that the default build's preprocessed ``recomp.c`` and
                      ``hle.c``, the two runtime units that carry a hook, have no verify token.
 ``exit-paths``       requires every ``_Exit`` and ``_exit`` in the runtime sources to write the verify
@@ -218,7 +221,14 @@ def run(args: argparse.Namespace) -> None:
     print("PASS hard-exit: the report survives an _Exit, which skips atexit")
 
     for bad in ({"SR_VERIFY": "abc"}, {"SR_VERIFY": "1", "SR_VERIFY_RANGE": "10"},
-                {"SR_VERIFY": "1", "SR_VERIFY_RATE": "0"}, {"SR_VERIFY_EVERY": "0"}):
+                {"SR_VERIFY": "1", "SR_VERIFY_RATE": "0"}, {"SR_VERIFY_EVERY": "0"},
+                # strtoull reads a sign as 2^64-1 and saturates an overflow: neither may pass
+                # as an unbounded budget or as a truncated capture count.
+                {"SR_VERIFY": "1", "SR_VERIFY_STEPS": "-1"},
+                {"SR_VERIFY": "1", "SR_VERIFY_STEPS": " -1"},
+                {"SR_VERIFY": "1", "SR_VERIFY_STEPS": "99999999999999999999"},
+                {"SR_VERIFY": "1", "SR_VERIFY_CAPTURE_MAX": "-1"},
+                {"SR_VERIFY": "1", "SR_VERIFY_CAPTURE_MAX": "4294967296"}):
         # The harness reads the environment itself, before any call.
         _report, done = run_harness(harness, image, base, work, "bad", bad, "--call", f"{alu:x}:1")
         expect(done.returncode == 2 and "malformed" in done.stderr, f"{bad}: {done.returncode} {done.stderr}")
@@ -258,6 +268,62 @@ def mutant(args: argparse.Namespace) -> None:
     expect(line == f"MISMATCH {row.first}" and code == 1,
            f"replay of {snaps[0].name}: {line!r} (exit {code}), want 'MISMATCH {row.first}'\n{stderr}")
     print(f"PASS mutant-replay: the snapshot runner replays the capture to {line!r}")
+    first_difference_parity(args, cases, work, captures)
+
+
+#: One field of each kind src/rt/end_state_compare.h compares that a syscall stop can carry,
+#: with the name the verdict gives it. The two memory bytes are one in VRAM, which the
+#: checker compares first, and one in RAM.
+PARITY_FIELDS = (
+    ("syscall_pc", "syscall_pc"), ("syscall_code", "syscall_code"),
+    ("r1", "r1"), ("r31", "r31"), ("hi", "hi"), ("lo", "lo"),
+    ("f0", "f0"), ("f31", "f31"), ("fcr31", "fcr31"),
+    ("mem:04000100", "mem[0x04000100]"), (f"mem:{DATA + 0x30:08x}", f"mem[0x{DATA + 0x30:08x}]"),
+)
+
+
+def first_difference_parity(args: argparse.Namespace, cases: dict, work: Path, captures: Path) -> None:
+    """The checker and the snapshot runner report the same first difference, field by field.
+
+    Each run changes one compared field of the translated side at the syscall stop
+    (``--selftest-corrupt``). The harness, through ``src/rt/verify.c``, has to report that field
+    and capture the call; the snapshot runner, replaying the capture with the same change,
+    has to print the same text after ``MISMATCH``.
+    """
+    syscall = cases["functions"]["syscall"]
+    for field, reported in PARITY_FIELDS:
+        name = f"parity-{reported}"
+        for old in captures.glob("*"):
+            old.unlink()
+        report, done = run_harness(
+            Path(args.harness), Path(args.image), cases["base"], work, "parity",
+            {"SR_VERIFY": "1", "SR_VERIFY_CAPTURE": str(captures)},
+            "--selftest-corrupt", field, "--call", f"{syscall:x}:1:10:20")
+        if report is None or done.returncode != 0:
+            raise Failure(f"{name}: harness exit {done.returncode}\n{done.stderr}")
+        row = only_row(report, syscall, name)
+        expect(row.checks == 1 and row.mismatch == 1 and row.first.startswith(f"{reported} aot=0x"),
+               f"{name}: the checker reported {row}")
+        snaps = sorted(captures.glob("*.nksnap"))
+        expect(len(snaps) == 1, f"{name}: expected one capture, found {snaps}")
+        line, stderr, code = snapshot_selftest._run(
+            Path(args.replay), Path(args.image), cases["base"], snaps[0], "--selftest-corrupt", field)
+        expect(line == f"MISMATCH {row.first}" and code == 1,
+               f"{name}: the runner printed {line!r} (exit {code}), the checker {row.first!r}\n{stderr}")
+    print(f"PASS first-difference-parity: the checker and the snapshot runner report the same "
+          f"first difference for {len(PARITY_FIELDS)} changed fields")
+    for program, command in (
+        ("harness", [args.harness, "--selftest-corrupt", "r0", "--call", f"{syscall:x}:1",
+                     args.image, f"{cases['base']:08x}"]),
+        ("runner", [args.replay, "--selftest-corrupt", "r0", args.image, f"{cases['base']:08x}",
+                    str(snaps[0])]),
+    ):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SR_VERIFY")}
+        done = subprocess.run([str(Path(command[0]).resolve()), *command[1:]], capture_output=True,
+                              text=True, timeout=120, env={**env, "SR_VERIFY": "1"}, check=False)
+        expect(done.returncode == 2 and "--selftest-corrupt does not know r0" in done.stderr,
+               f"{program}: an unknown field must stop the run: exit {done.returncode}\n{done.stderr}")
+    print("PASS first-difference-parity: a field neither program compares is refused by name")
 
 
 def default_unchanged(args: argparse.Namespace) -> None:

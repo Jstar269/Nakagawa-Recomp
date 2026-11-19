@@ -83,11 +83,15 @@ MALFORMED_FIXTURES = (
 # one NID of each class so a classifier change that collapses two classes cannot
 # pass: the PSMF video getter moved from controlled unsupported to dedicated when
 # it started driving the media producer and the host codecs, and the SAS ATRAC3
-# voice setter replaced it as the controlled-unsupported example.
+# voice setter replaced it as the controlled-unsupported example. The fake_success
+# example was sceAtracGetOutputChannel until it became a dedicated handler (it checks
+# its ID and writes the channel count); sceKernelReferThreadProfiler replaced it, a
+# handler whose body is a bare success return, kept on purpose (no profiler is
+# modeled, and NULL is what firmware with profiling off reports).
 MIXED_EXPECTED = {
     ("ThreadManForUser", 0x446D8DE6): "dedicated",           # sceKernelCreateThread
     ("ThreadManForUser", 0x349D6D6C): "dedicated",           # sceKernelCheckCallback
-    ("sceAtrac3plus", 0xB3B5D042): "fake_success",           # sceAtracGetOutputChannel
+    ("ThreadManForUser", 0x64D4540E): "fake_success",        # sceKernelReferThreadProfiler
     ("scePsmfPlayer", 0x46F61F8B): "dedicated",              # scePsmfPlayerGetVideoData
     ("sceSasCore", 0x4AA9EAD6): "controlled_unsupported",    # __sceSasSetVoiceATRAC3
     ("SynthLibA", 0x00C0FFEE): "missing",
