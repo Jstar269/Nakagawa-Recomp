@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* stb_image (vendored under third_party/stb) as a second, independent PNG decoder: the pack reader
  * decodes PNG itself, and the seed corpus checks the two agree. */
@@ -1119,6 +1120,64 @@ static void mem_now(double *ws_mib, double *peak_mib) {
 }
 #endif
 
+/* ------------------------------------------------------------------------------ open timing */
+
+#ifdef NK_TEXREPL_TEST_HOOKS
+/* Seconds on the host's monotonic clock. */
+static double mono_s(void) {
+#if defined(_WIN32)
+    return wall_s();   /* QueryPerformanceCounter */
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) { fprintf(stderr, "no monotonic clock\n"); exit(2); }
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+#endif
+}
+
+static double s_blocked_s;
+
+/* Inside nk_texrepl_open, between the ZIP's checks and its reader: the thread blocked for 50 ms or
+ * more, using no CPU, as it is while a slow disk answers. */
+static void block_in_open(const char *zip_path) {
+    (void)zip_path;
+    const double t0 = mono_s();
+    while (mono_s() - t0 < 0.05) {
+#if defined(_WIN32)
+        Sleep(10);
+#else
+        const struct timespec nap = { 0, 10000000L };
+        nanosleep(&nap, NULL);
+#endif
+    }
+    s_blocked_s = mono_s() - t0;
+}
+
+/* stats.open_ns is elapsed wall time: an open that spent 50 ms blocked reports at least that. A
+ * CPU-time clock (ISO C clock() on POSIX) leaves blocked time out and reports a few microseconds. */
+static void test_open_wall_time(void) {
+    char dir[512], zip[600], err[256] = "";
+    Zw z;
+    make_pack(dir, sizeof(dir), "texrepl_open_time");
+    memset(&z, 0, sizeof(z));
+    zw_add_text(&z, "textures.ini", "[options]\nhash = quick\n", 0);
+    pack_path(zip, sizeof(zip), "texrepl_open_time", "textures.zip");
+    zw_finish(&z, zip, 0);
+    s_blocked_s = 0.0;
+    nk_texrepl_test_zip_checked = block_in_open;
+    NkTexRepl *p = nk_texrepl_open(dir, 0, err, sizeof(err));
+    nk_texrepl_test_zip_checked = NULL;
+    CHECK(p != NULL && nk_texrepl_is_zip(p), "the timed pack did not open as its textures.zip: %s", err);
+    if (!p) return;
+    NkTexReplStats st;
+    nk_texrepl_stats(p, &st);
+    CHECK(s_blocked_s >= 0.05, "the open was not blocked (%.3f s)", s_blocked_s);
+    CHECK((double)st.open_ns >= s_blocked_s * 1e9 && st.list_ns <= st.open_ns,
+          "open timing: open_ns %llu, list_ns %llu, for an open blocked %.0f ns: open_ns is not elapsed wall time",
+          (unsigned long long)st.open_ns, (unsigned long long)st.list_ns, s_blocked_s * 1e9);
+    nk_texrepl_close(p);
+}
+#endif
+
 
 /* ------------------------------------------------------------------------- ZIP refusals */
 
@@ -1785,6 +1844,27 @@ static int make_dir_link(const char *link, const char *target) {
 static int make_file_link(const char *link, const char *target) { return make_dir_link(link, target); }
 #endif
 
+/* Hostile cases this host could not set up, so their checks did not run. main exits 77 for them
+ * (mk/selftests.mk texrepl-selftest prints the SKIP), never 0: a run that left a containment check
+ * out is not a pass. */
+static int s_skipped_hostile;
+
+/* A link or FIFO a hostile case needs could not be made. On Windows that is a host limit (a file
+ * symbolic link needs Developer Mode or an elevated shell; a junction needs NTFS): `cases` checks
+ * are counted as skipped. On POSIX a build folder takes symbolic links and FIFOs, so there it is a
+ * failure. */
+static void hostile_not_set_up(const char *what, int cases) {
+#if defined(_WIN32)
+    s_skipped_hostile += cases;
+    printf("SKIP %s: it could not be made on this host (a file symbolic link needs Developer Mode or an elevated "
+           "shell, a junction needs NTFS); %d hostile case(s) not run\n", what, cases);
+#else
+    (void)cases;
+    CHECK(0, "%s: it could not be made in the build folder (%s), so its hostile case cannot run; use a BUILD_ROOT "
+             "on a file system with symbolic links and FIFOs", what, strerror(errno));
+#endif
+}
+
 /* A [hashes] value with a device name or a name Windows changes is not opened; a link or junction
  * that leaves the pack folder is not followed; a FIFO is refused without blocking (POSIX); a
  * textures.ini over 4 MiB refuses the pack; a pack's error names only its last path component. */
@@ -1812,13 +1892,12 @@ static void test_file_checks(void) {
     pack_path(path, sizeof(path), "texrepl_pack_files", "inlink.png");
     pack_path(target, sizeof(target), "texrepl_pack_files", "in.png");
     int have_in_link = nk_platform_file_exists(path) || make_file_link(path, target);
-    if (!have_dir_link) printf("SKIP folder link out of the pack: the link could not be made on this host\n");
-    if (!have_file_link || !have_in_link)
-        printf("SKIP file links: a symbolic link could not be made here (Windows needs Developer Mode)\n");
+    if (!have_dir_link) hostile_not_set_up("a folder link out of the pack", 1);
+    if (!have_file_link || !have_in_link) hostile_not_set_up("a file link out of the pack and one inside it", 2);
 #if !defined(_WIN32)
     pack_path(path, sizeof(path), "texrepl_pack_files", "fifo.png");
     int have_fifo = mkfifo(path, 0600) == 0 || errno == EEXIST;
-    if (!have_fifo) printf("SKIP FIFO: mkfifo failed\n");
+    if (!have_fifo) hostile_not_set_up("a FIFO named as an image", 1);
 #endif
     pack_path(path, sizeof(path), "texrepl_pack_files", "textures.ini");
     write_text(path, "[options]\nhash = quick\n[hashes]\n"
@@ -1924,7 +2003,7 @@ static void test_file_checks(void) {
         CHECK(p == NULL && err[0], "FIFO ZIP pack opened");
         if (p) nk_texrepl_close(p);
     } else {
-        printf("SKIP FIFO ZIP: mkfifo failed\n");
+        hostile_not_set_up("a FIFO named textures.zip", 2);
     }
 #endif
 
@@ -3570,6 +3649,9 @@ int main(int argc, char **argv) {
     test_budget();
     test_index_forms();
     test_zip_packs();
+#ifdef NK_TEXREPL_TEST_HOOKS
+    test_open_wall_time();
+#endif
     test_zip_refusals();
     test_png_corpus();
     test_png_seeds();
@@ -3590,6 +3672,11 @@ int main(int argc, char **argv) {
     if (g_failures) {
         fprintf(stderr, "texrepl selftest: %d check(s) failed\n", g_failures);
         return 1;
+    }
+    if (s_skipped_hostile) {
+        printf("texrepl selftest: SKIP %d hostile case(s) not run on this host (named above); every check that "
+               "ran passed\n", s_skipped_hostile);
+        return 77;
     }
     printf("texrepl selftest: OK\n");
     return 0;
