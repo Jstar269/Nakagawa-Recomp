@@ -725,8 +725,10 @@ an `.eps`) when its content is text. If a hook or Git would change a byte, it re
 `ADMIT_HOOKS_WOULD_REWRITE` and names each path and rule. Fix them on the pull request branch first, so the next
 commit cannot reshape what was just admitted. A base configuration this reader cannot parse is refused
 (`ADMIT_HOOKS_CONFIG_INVALID`). The reader takes a hook as declared only from a list item whose first key is `id`
-(`- id: trailing-whitespace`); a configuration that names a byte-rewriting hook's id outside a comment in any other
-form (`id` as a later key, a flow sequence, a quoted key) is refused the same way, never read as not declaring it.
+(`- id: trailing-whitespace`). While a byte-rewriting hook is not declared that way, a configuration is refused the
+same way if its text names that hook's id anywhere, a comment included (`id` as a later key, a flow sequence, a
+quoted key), or if any line holds both a double quote and a backslash, since a double-quoted escape could spell the
+id. A second declaration of a hook the reader did read is not detected.
 Then it
 reads each path's committed bytes
 and derives its class with the gate's classifier. An implementation path needs an exact record already in

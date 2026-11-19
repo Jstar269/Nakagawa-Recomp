@@ -300,52 +300,23 @@ def _yaml_scalar(lines: list[str], index: int, indent: int, rest: str) -> tuple[
     return rest.split(" #", 1)[0].strip(), index + 1
 
 
-def _without_yaml_comments(config: str) -> str:
-    """``config`` with its YAML comments removed, for a test of whether a hook id is named at all.
-
-    A ``#`` starts a comment at the start of a line or after a space or tab, outside a quoted
-    scalar. A quote opens a scalar at the start of a line or after a space, a tab or one of
-    ``[{,:?-``, and a quoted scalar may span lines. A quote misread as an opening one keeps
-    text that is a comment, so a misreading can only find an id where there is none (and refuse).
-    """
-    kept: list[str] = []
-    quote = ""
-    for line in config.splitlines():
-        out: list[str] = []
-        index = 0
-        while index < len(line):
-            char = line[index]
-            if quote:
-                if quote == '"' and char == "\\":
-                    out.append(line[index:index + 2])
-                    index += 2
-                    continue
-                if char == quote and quote == "'" and line[index + 1:index + 2] == "'":
-                    out.append("''")
-                    index += 2
-                    continue
-                if char == quote:
-                    quote = ""
-            elif char == "#" and (index == 0 or line[index - 1] in " \t"):
-                break
-            elif char in "'\"" and (not line[:index].strip() or line[index - 1] in " \t[{,:?-"):
-                quote = char
-            out.append(char)
-            index += 1
-        kept.append("".join(out))
-    return "\n".join(kept)
-
-
 def rewriting_hook_exclusions(config: str) -> tuple[re.Pattern[str] | None, dict[str, re.Pattern[str]]]:
     """The top-level ``exclude`` and, for each ``REWRITING_HOOKS`` hook ``config`` declares, its own ``exclude``.
 
     A declared hook without an ``exclude`` maps to a pattern that matches nothing. ``config`` is the trusted base's ``.pre-commit-config.yaml``, never the pull request's.
     Raises ``AdmitError("ADMIT_HOOKS_CONFIG_INVALID")`` for a form this reader does not
-    understand, an invalid pattern, or a rewriting hook declared twice. A hook is declared only
-    as a list item whose first key is ``id`` (``- id: trailing-whitespace``). A rewriting hook
-    whose id ``config`` names outside a comment but not in that form (``id`` as a later key, a
-    flow sequence, a quoted key, ``id :``) is refused the same way: pre-commit may run it, and a
-    hook this reader did not see would otherwise count as not declared.
+    understand, an invalid pattern, or a rewriting hook declared twice. A hook counts as
+    declared only from a list item whose first key is ``id`` (``- id: trailing-whitespace``);
+    one that is not, and so would be skipped as undeclared, is refused the same way when
+    ``config`` could still name it in another form pre-commit reads:
+
+    * its id appears anywhere in the text, comments included (``id`` as a later key, a flow
+      sequence, a quoted key, ``id :``, or a mention in a comment, which also refuses);
+    * any line holds both a double quote and a backslash, since only a double-quoted escape
+      (``\\x2d``, ``\\u002d``, an escaped line break) can spell an id without its literal text.
+
+    The search is skipped for an id the reader did declare: a second declaration of it in an
+    unread form is not detected (as before this check existed).
     """
     lines = config.splitlines()
     top: re.Pattern[str] | None = None
@@ -380,13 +351,20 @@ def rewriting_hook_exclusions(config: str) -> tuple[re.Pattern[str] | None, dict
                     hooks[hook] = re.compile(value)
                 continue
             index += 1
-        named = _without_yaml_comments(config)
-        for hook_id in REWRITING_HOOKS:
-            if hook_id not in hooks and re.search(rf"(?<![\w-]){re.escape(hook_id)}(?![\w-])", named):
+        undeclared = [hook_id for hook_id in REWRITING_HOOKS if hook_id not in hooks]
+        for hook_id in undeclared:
+            if re.search(rf"(?<![\w-]){re.escape(hook_id)}(?![\w-])", config):
                 raise ValueError(
-                    f"it names {hook_id} outside a comment, but not as a declaration this reader reads "
+                    f"it names {hook_id}, but not as a declaration this reader reads "
                     f"(a list item whose first key is id: `- id: {hook_id}`)"
                 )
+        if undeclared:
+            for number, line in enumerate(lines, 1):
+                if '"' in line and "\\" in line:
+                    raise ValueError(
+                        f"line {number} holds a double quote and a backslash, so an escape could name "
+                        f"{', '.join(undeclared)}, which it does not declare as `- id: <hook>`"
+                    )
     except (ValueError, re.error) as error:
         raise AdmitError(
             "ADMIT_HOOKS_CONFIG_INVALID", f"cannot read the trusted base's {PRE_COMMIT_CONFIG}: {error}",

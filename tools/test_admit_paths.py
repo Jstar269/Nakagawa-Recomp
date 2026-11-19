@@ -2111,6 +2111,16 @@ class HookCheckTest(unittest.TestCase):
             "quoted-key": repo_head + '    hooks:\n      - "id": trailing-whitespace\n',
             "space-before-colon": repo_head + "    hooks:\n      - id : trailing-whitespace\n",
             "hash-in-a-quoted-scalar": repo_head + "    hooks: [{name: 'a # b', id: trailing-whitespace}]\n",
+            # Round 2 of the review: a double-quoted escape spells the id without its text, and a
+            # stray quote in a plain scalar must not hide a later declaration.
+            "escape-x2d-later-key": repo_head + '    hooks:\n      - name: trim\n        id: "trailing\\x2dwhitespace"\n',
+            "escape-u002d-flow": repo_head + '    hooks: [{id: "trailing\\u002dwhitespace"}]\n',
+            "escaped-line-break": repo_head + '    hooks:\n      - name: trim\n        id: "trailing-\\\n          whitespace"\n',
+            "stray-apostrophe": repo_head + "    hooks:\n      - id: check-yaml\n        name: rock 'n roll\n"
+                                "      - {name: \"it's # tidy\", id: trailing-whitespace}\n",
+            "stray-double-quote": repo_head + '    hooks:\n      - id: check-yaml\n        name: say "cheese\n'
+                                  "      - {name: 'a \" # b', id: trailing-whitespace}\n",
+            "only-in-a-comment": repo_head + "    hooks:\n      - id: check-yaml  # unlike trailing-whitespace\n",
         }
         for name, config in forms.items():
             with self.subTest(form=name):
@@ -2122,16 +2132,53 @@ class HookCheckTest(unittest.TestCase):
                 self.assertEqual(caught.exception.code, "ADMIT_HOOKS_CONFIG_INVALID")
                 self.assertIn("trailing-whitespace", str(caught.exception))
 
-        # An id named only in comments is not declared: no hook runs, and the file is admitted.
-        config = (
-            "# trailing-whitespace and end-of-file-fixer are not run here.\n" + repo_head
-            + "    hooks:\n      - id: check-yaml  # unlike trailing-whitespace\n"
-        )
+        # A rewriting hook named nowhere is not declared: no hook runs, and the file is admitted.
+        config = repo_head + "    hooks:\n      - id: check-yaml  # no fixer here\n"
         repo, base, head = self._repo(
-            {admit_paths.PRE_COMMIT_CONFIG: config.encode()}, {"docs/a.md": b"# A \n"}, name="comments-only",
+            {admit_paths.PRE_COMMIT_CONFIG: config.encode()}, {"docs/a.md": b"# A \n"}, name="not-named",
         )
         self.assertEqual(admit_paths.check_rewriting_hooks(repo, base, head, ["docs/a.md"]),
                          list(admit_paths.REWRITING_HOOKS))
+        # A hook read as `- id: x` may be mentioned elsewhere: its id is not searched for.
+        _top, hooks = admit_paths.rewriting_hook_exclusions(
+            repo_head + "    hooks:\n      # trailing-whitespace keeps imports as recorded\n"
+            "      - id: trailing-whitespace\n        name: trailing-whitespace\n"
+        )
+        self.assertEqual(set(hooks), {"trailing-whitespace"})
+
+    def test_the_repository_configuration_names_no_undeclared_hook_and_holds_no_escape(self) -> None:
+        """The two refusals above never fire on the repository's own configuration."""
+        config = (ROOT / admit_paths.PRE_COMMIT_CONFIG).read_text(encoding="utf-8")
+        _top, hooks = admit_paths.rewriting_hook_exclusions(config)
+        self.assertEqual(set(hooks), {"trailing-whitespace", "end-of-file-fixer"})
+        self.assertFalse([line for line in config.splitlines() if '"' in line and "\\" in line])
+        for hook_id in hooks:
+            (line,) = [line for line in config.splitlines() if hook_id in line]
+            self.assertEqual(line.strip(), f"- id: {hook_id}")
+
+    def test_a_binary_name_under_minus_text_is_admitted_with_mixed_line_ending_declared(self) -> None:
+        """The CRLF in a ``-text`` path is rewritten by the declared hook only when pre-commit types it text.
+
+        ``logo.png`` (binary by name, CRLF text inside) under ``*.png -text``: Git stores it as it is
+        and the ``types: [text]`` hook skips a ``.png``, so neither rewrites it and it is admitted
+        (main refused it). ``page.md`` under ``*.md -text`` is still refused: the hook rewrites it.
+        """
+        self._name_tags()
+        config = (
+            "repos:\n  - repo: https://github.com/pre-commit/pre-commit-hooks\n    rev: v6.0.0\n    hooks:\n"
+            + "".join(f"      - id: {hook}\n" for hook in admit_paths.REWRITING_HOOKS)
+        )
+        repo, base, head = self._repo(
+            {admit_paths.PRE_COMMIT_CONFIG: config.encode(), ".gitattributes": b"*.png -text\n*.md -text\n"},
+            {"assets/logo.png": b"a\r\nb\r\n", "docs/page.md": b"a\r\nb\r\n"},
+            unfiltered_head=True,
+        )
+        check = admit_paths.check_rewriting_hooks
+        self.assertEqual(check(repo, base, head, ["assets/logo.png"]), list(admit_paths.REWRITING_HOOKS))
+        with self.assertRaises(AdmitError) as caught:
+            check(repo, base, head, ["docs/page.md"])
+        self.assertIn("docs/page.md: CRLF or CR line endings (the repository stores text with LF) (mixed-line-ending)",
+                      str(caught.exception))
 
     #: identify 2.6.20's ``tags_from_filename`` for the names below (checked against the
     #: installed package when there is one).
