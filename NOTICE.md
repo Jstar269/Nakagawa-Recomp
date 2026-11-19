@@ -248,15 +248,16 @@ executable (`tools/stage_runtime_dlls.py`, PE import-table walk stopping at
 Windows system DLLs). The launcher's fonts are the project's own, under
 `assets/fonts/ui/` (see Project UI fonts below). Every staged DLL ships its upstream
 license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
-(`ucrt64/share/licenses/`, read-only) and recorded with its SHA-256 in
-`assets/third_party_components.json`:
+(`ucrt64/share/licenses/`, read-only), or from the upstream source at the
+packaged tag for a text the package does not install, and recorded with its
+SHA-256 in `assets/third_party_components.json`:
 
 | DLL | License | License text |
 | --- | --- | --- |
 | `SDL3.dll` | Zlib | `third_party/licenses/sdl3/LICENSE.txt` |
 | `SDL3_ttf.dll` | Zlib | `third_party/licenses/SDL3_ttf.txt` |
 | `libfreetype-6.dll` | FTL | `third_party/licenses/FreeType-FTL.txt` |
-| `libharfbuzz-0.dll` | MIT-Modern-Variant | `third_party/licenses/HarfBuzz.txt` |
+| `libharfbuzz-0.dll` | MIT-Modern-Variant | `third_party/licenses/HarfBuzz.txt`, `third_party/licenses/harfbuzz/ms-use-COPYING.txt` |
 | `libgraphite2.dll` | MIT (chosen) | `third_party/licenses/Graphite2.txt` |
 | `libpng16-16.dll` | libpng-2.0 | `third_party/licenses/libpng.txt` |
 | `zlib1.dll` | Zlib | `third_party/licenses/zlib.txt` |
@@ -279,6 +280,12 @@ License choices and combination notes:
   repeats that statement.
 - **Graphite2** is granted under four licenses (LGPL-2.1+, MPL-2.0, GPL-2.0+,
   or MIT) by its upstream `LICENSE`; this distribution uses the **MIT** option.
+- **HarfBuzz**'s `COPYING` refers readers to `COPYING` files in subdirectories.
+  At the packaged tag, `src/ms-use/COPYING` (MIT, Microsoft Corporation) is the
+  licence of the data from which the Universal Shaping Engine and vowel-constraint
+  tables compiled into `libharfbuzz-0.dll` are generated, so the package ships it
+  beside `HarfBuzz.txt`. The other subdirectory `COPYING` files cover benchmark
+  and test data that the MSYS2 build does not compile.
 - **GLib, libintl and libiconv** are LGPL-2.1-or-later and are dynamically
   linked as separate replaceable DLLs. LGPL-2.1 section 3 permits use under
   GPL-3 terms, so they combine with this GPL-3 distribution.
