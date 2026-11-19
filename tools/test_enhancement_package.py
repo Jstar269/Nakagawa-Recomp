@@ -5494,7 +5494,8 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             priv_path.with_suffix(".symbols.json").unlink()
             err2 = StringIO()
             with mock.patch.object(
-                    enhancement_package, "extract_elf_symbol_names", return_value=set(game_symbols)),                     mock.patch("sys.stderr", new=err2), mock.patch("sys.stdout", new=StringIO()):
+                    enhancement_package, "extract_elf_symbol_names", return_value=set(game_symbols)), \
+                    mock.patch("sys.stderr", new=err2), mock.patch("sys.stdout", new=StringIO()):
                 self.assertNotEqual(enhancement_package.main(args), 0)
             self.assertIn("the symbol map does not name", err2.getvalue())
             self.assertIn("synth_timer_duration", err2.getvalue())
