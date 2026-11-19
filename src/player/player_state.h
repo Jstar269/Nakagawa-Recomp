@@ -414,6 +414,10 @@ typedef struct {
     /* Opt-in cover art (#2632): fetch Redump-matched PSP box art from thumbnails.libretro.com
        to the local cache folder. Off by default. */
     bool download_cover_art;
+    /* Cheats (#2639): a launch applies the user's CWCheat file for the title,
+       cheats/<DISC-ID>.ini in the user data folder, and the game shows a marker while any
+       cheat is on (src/rt/cheats.h). Off by default; an optional "cheats" key in the file. */
+    bool cheats;
     /* The folder the last file picker picked from (Add disc, PSP fonts), where
        the next one opens. Empty on a first run: the pickers then open at the
        Desktop (player_app_picker_start_folder). */
@@ -1050,6 +1054,11 @@ struct PlayerApp {
        has an enhancement package and does not resolve to Authentic launches its
        enhanced build, as Ace. Never saved with the settings. */
     bool experimental_60hz_session;
+    /* --cheats or --cheats-file=<path> on the command line (#2639): cheats are on for this
+       session's launches whatever the stored setting says, reading the named file when one
+       was given (an absolute path) and the title's own file otherwise. Never saved. */
+    bool cheats_session;
+    char cheats_session_file[MAX_PATH_LEN];
     /* Settings > Enhanced opened from a title's page (player_app_open_title_enhanced): that
        game's normalised disc key, so a re-sync that reorders the games cannot point the page at
        another game; empty for the library's page. Any other view clears it, and a re-sync that
@@ -1831,6 +1840,11 @@ bool player_app_title_60hz_released(const PlayerApp *app, int game_index);
 void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on);
 /* The --experimental-60hz flag: on for this session only, never saved. */
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on);
+/* The --cheats and --cheats-file flags (#2639): cheats on for this session only, never saved.
+ * `file` is the cheat file to read, which must exist and is made absolute here, or NULL or ""
+ * for each title's own (cheats/<DISC-ID>.ini in the user data folder). False, with nothing
+ * changed, when `file` is not a file or cannot be made an absolute path that fits. */
+bool player_app_set_cheats_session(PlayerApp *app, const char *file);
 /* An Ace launch of the title with its Wider culling part on (section 11.3.6): the launch line
    carries cull=on, and the title builds and launches with its culling package when it has a
    usable one (PlayerTitleEnhancement.cull_available). Authentic and Enhanced never. */
@@ -2095,6 +2109,9 @@ typedef struct {
     PlayerSettings settings;
     bool launch_headless;
     uint32_t headless_accept_presented_frames;
+    /* --cheats or --cheats-file for this session (#2639), and the file it named, if any. */
+    bool cheats_session;
+    char cheats_file[NK_MAX_PATH];
     char boot_event_file_path[MAX_PATH_LEN];
     char input_profile_path[NK_MAX_PATH];
     char ui_root[MAX_PATH_LEN];
@@ -2513,6 +2530,8 @@ void player_app_clear_shared_library_cache(PlayerApp *app);
 void player_app_refresh_cover_art_cache_size(PlayerApp *app);
 void player_app_refresh_cover_art_cache(PlayerApp *app);
 void player_app_toggle_download_cover_art(PlayerApp *app);
+/* Settings > Online and developer options: the Cheats switch (#2639), stored. */
+void player_app_toggle_cheats(PlayerApp *app);
 void player_app_set_build_error(
     PlayerApp *app,
     const char *failed_stage,

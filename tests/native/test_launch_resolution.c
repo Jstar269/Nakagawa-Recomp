@@ -282,6 +282,8 @@ static int write_launch_environment_probe(void) {
     const char *boot_path = getenv("SR_BOOT_PATH");
     char nickname_utf8[512];
     const char *nickname = probe_env_utf8("SR_NICKNAME", nickname_utf8, sizeof(nickname_utf8));
+    const char *cheats = getenv("SR_CHEATS");
+    const char *cheats_file = getenv("SR_CHEATS_FILE");
     int ok = fprintf(f,
                      "PSP_ISO=%s\n"
                      "NK_LAUNCH_TEST_UNRELATED=%s\n"
@@ -314,7 +316,9 @@ static int write_launch_environment_probe(void) {
                      "SR_HOST_TIME_ZONE=%s\n"
                      "SR_CODE_CAPTURE=%s\n"
                      "SR_BOOT_PATH=%s\n"
-                     "SR_NICKNAME=%s\n",
+                     "SR_NICKNAME=%s\n"
+                     "SR_CHEATS=%s\n"
+                     "SR_CHEATS_FILE=%s\n",
                      iso ? iso : "<unset>",
                      unrelated ? unrelated : "<unset>",
                      fps ? fps : "<unset>",
@@ -346,7 +350,9 @@ static int write_launch_environment_probe(void) {
                      host_time_zone ? host_time_zone : "<unset>",
                      code_capture ? code_capture : "<unset>",
                      boot_path ? boot_path : "<unset>",
-                     nickname ? nickname : "<unset>") >= 0;
+                     nickname ? nickname : "<unset>",
+                     cheats ? cheats : "<unset>",
+                     cheats_file ? cheats_file : "<unset>") >= 0;
     if (fclose(f) != 0) ok = 0;
     /* Subtest 21 sets NK_LAUNCH_TEST_HOLD so the probe stays alive long
      * enough for nk_launch_stop to have a running child to stop. */
@@ -378,6 +384,7 @@ static bool test_child_exited(int pid, unsigned timeout_ms) {
 }
 
 static void write_valid_elf(const char *path, uint32_t base, uint32_t entry);
+static void write_bytes(const char *path, const void *data, size_t size);
 static bool ends_with(const char *s, const char *suffix);
 static void make_game(NkGameEntry *game, const char *iso_path);
 
@@ -528,6 +535,13 @@ static void test_no_iso_child_environment(const char *test_executable,
     bool had_nickname;
     char *old_nickname = capture_environment_value("SR_NICKNAME", &had_nickname);
     set_environment_value("SR_NICKNAME", "poisoned-parent-nickname");
+    /* Nor inherited cheats (#2639): a session that did not turn them on runs without them,
+       whatever switch and file the parent had. */
+    bool had_cheats, had_cheats_file;
+    char *old_cheats = capture_environment_value("SR_CHEATS", &had_cheats);
+    char *old_cheats_file = capture_environment_value("SR_CHEATS_FILE", &had_cheats_file);
+    set_environment_value("SR_CHEATS", "1");
+    set_environment_value("SR_CHEATS_FILE", "poisoned-parent-cheats");
     /* Nor an inherited Ace Mode line (src/rt/ace.h): a session the player did not resolve on
        is authentic, "off", and exports no report path (A1). */
     /* Nor an inherited presentation upscaler (#1273): an authentic session runs it off. */
@@ -757,6 +771,10 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strcmp(session.config.nickname, NK_NICKNAME_DEFAULT) == 0);
     assert(strstr(observed, "SR_NICKNAME=Player\n") != NULL);
     assert(strstr(observed, "poisoned-parent-nickname") == NULL);
+    assert(!session.config.cheats && session.config.cheats_file[0] == '\0');   /* prepare_session's default */
+    assert(strstr(observed, "SR_CHEATS=0\n") != NULL);
+    assert(strstr(observed, "SR_CHEATS_FILE=\n") != NULL);
+    assert(strstr(observed, "poisoned-parent-cheats") == NULL);
     assert(strcmp(session.config.ace_spec, "off") == 0);   /* prepare_session's default */
     assert(strstr(observed, "SR_ACE=off\n") != NULL);
     assert(strstr(observed, "SR_ACE_REPORT=\n") != NULL);   /* the parent's path is masked */
@@ -807,6 +825,8 @@ static void test_no_iso_child_environment(const char *test_executable,
     /* The nickname the player chose reaches the child as SR_NICKNAME (#2197). */
     snprintf(session.config.nickname, sizeof(session.config.nickname), "%s",
              "Kaz \xE3\x83\x8A");
+    /* Cheats turned on name the title's own file under the per-user data directory (#2639). */
+    session.config.cheats = true;
     /* An Ace Mode session exports its line and, with it, the report path. */
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec),
              "v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off");
@@ -837,6 +857,14 @@ static void test_no_iso_child_environment(const char *test_executable,
     assert(strstr(observed, "SR_DEVELOPER_MODE=1\n") != NULL);
     assert(strstr(observed, "SR_REDUCE_MOTION=off\n") != NULL);
     assert(strstr(observed, "SR_NICKNAME=Kaz \xE3\x83\x8A\n") != NULL);
+    {
+        char expected[NK_MAX_PATH * 2 + 64];
+        snprintf(expected, sizeof(expected), "SR_CHEATS_FILE=%s%ccheats%cTEST00006.ini\n",
+                 per_user_root, sep, sep);
+        assert(strstr(observed, "SR_CHEATS=1\n") != NULL);
+        assert(strstr(observed, expected) != NULL);
+        assert(strstr(observed, "poisoned-parent-cheats") == NULL);
+    }
     assert(strstr(observed, "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
     assert(strstr(observed, "SR_TEX_REPLACE=\n") != NULL);
     assert(strstr(observed, "fixture-pack-folder") == NULL);
@@ -864,6 +892,43 @@ static void test_no_iso_child_environment(const char *test_executable,
     session.config.headless_accept_presented_frames = 0u;
     snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     session.config.ace_report_path[0] = '\0';
+    /* Nor does it launch with cheats on (#2639): the checkpoint is the game as it is. */
+    session.config.headless_accept_presented_frames = 3u;
+    assert(nk_launch_start(&session) != NK_OK);
+    assert(strstr(session.last_error, "Cheats are on") != NULL);
+    session.config.headless_accept_presented_frames = 0u;
+    /* Nor does a package whose runtime was built before cheats existed (review of #2652): it
+       would start, apply nothing and show no marker. The launcher asks the executable whether
+       it reads the switch; this one, put in the package's place, does not. */
+    {
+        char kept[NK_MAX_PATH + 8];
+        char block[70000];
+        assert(nk_launch_runtime_reads_cheats(session.executable_path));
+        assert(snprintf(kept, sizeof(kept), "%s.kept", session.executable_path) < (int)sizeof(kept));
+        assert(rename(session.executable_path, kept) == 0);
+        write_file(session.executable_path, "an older runtime: it names SR_CHEATS_FIL and SR_CHEATS, never the file's variable");
+        assert(!nk_launch_runtime_reads_cheats(session.executable_path));
+        assert(nk_launch_start(&session) != NK_OK);
+        assert(strstr(session.last_error, "built before cheats existed") != NULL &&
+               strstr(session.last_error, "Rebuild the package to use cheats, or turn cheats off") != NULL);
+        /* The name is found wherever it lies, across the reader's block boundary too. */
+        memset(block, 'x', sizeof(block));
+        memcpy(block + 65536 - 5, "SR_CHEATS_" "FILE", 14u);
+        write_bytes(session.executable_path, block, sizeof(block));
+        assert(nk_launch_runtime_reads_cheats(session.executable_path));
+        memcpy(block + 65536 - 5, "SR_CHEATS_" "FILX", 14u);
+        write_bytes(session.executable_path, block, sizeof(block));
+        assert(!nk_launch_runtime_reads_cheats(session.executable_path));
+        assert(nk_launch_runtime_reads_cheats("no-such-package-executable"));
+        /* A read that fails (audit 2026-11-17): a folder opens on POSIX and its first read
+           fails, which is an executable that cannot be read, not an older runtime. Windows
+           refuses to open it, the same answer. */
+        assert(nk_launch_runtime_reads_cheats("."));
+        assert(remove(session.executable_path) == 0 && rename(kept, session.executable_path) == 0);
+    }
+    /* A file the session names (the player's --cheats-file) is the one exported, while cheats
+       are on; with them off it names nothing. */
+    snprintf(session.config.cheats_file, sizeof(session.config.cheats_file), "named-cheats.ini");
 
     /* Either an enhanced build or Ace Mode alone is enough to follow the upscale setting
        (an enhancement package or Ace, not both): one launch with each. */
@@ -888,9 +953,14 @@ static void test_no_iso_child_environment(const char *test_executable,
         assert(strstr(observed, only == 0 ? "SR_ACE=off\n"
                                           : "SR_ACE=v1;af=8;text=on;readout=off;notice=on;wide=off;smooth=off;sas=off;tess=off;twin=off\n") != NULL);
         assert(strstr(observed, "SR_PRESENT_UPSCALE=fsr1\n") != NULL);
+        assert(strstr(observed, only == 0 ? "SR_CHEATS=1\n" : "SR_CHEATS=0\n") != NULL);
+        assert(strstr(observed, only == 0 ? "SR_CHEATS_FILE=named-cheats.ini\n" : "SR_CHEATS_FILE=\n") != NULL);
+        assert(strstr(observed, "poisoned-parent-cheats") == NULL);
+        session.config.cheats = false;   /* the second launch: the named file with cheats off */
         session.enhancement_package_id[0] = '\0';
         snprintf(session.config.ace_spec, sizeof(session.config.ace_spec), "off");
     }
+    session.config.cheats_file[0] = '\0';
 
     /* A culling build (contract 9.9, 11.3.6) exports 60 Hz on only when it carries the timing
        package: beside it, on; the culling package alone, whose site runs on its own SR_ACE
@@ -1331,6 +1401,10 @@ static void test_no_iso_child_environment(const char *test_executable,
     restore_environment_value("SR_DEVELOPER_MODE", old_developer, had_developer);
     restore_environment_value("SR_NICKNAME", old_nickname, had_nickname);
     free(old_nickname);
+    restore_environment_value("SR_CHEATS", old_cheats, had_cheats);
+    restore_environment_value("SR_CHEATS_FILE", old_cheats_file, had_cheats_file);
+    free(old_cheats);
+    free(old_cheats_file);
     free(old_developer);
     restore_environment_value("SR_LAUNCHER_DISPLAY_BOUNDS", old_launcher_display,
                               had_launcher_display);

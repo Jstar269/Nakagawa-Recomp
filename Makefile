@@ -670,6 +670,12 @@ DISPLAY_SMOKE_BASE      := 0x08810000
 # watch. Both are the same guest recipe with a different frame count.
 DISPLAY_SMOKE_FRAMES      := 60
 DISPLAY_SMOKE_DEMO_FRAMES := 1800
+# The same guest built with its image at 0, as a title manifest with "base": 0 has its image
+# loaded, for display-smoke-cheats-base0 (#2639). It has no title manifest and is not launchable
+# from the player. Keep the name equal to BASE0_ARTIFACT_STEM in the generator.
+DISPLAY_SMOKE_BASE0_NAME    := display-smoke-base0
+DISPLAY_SMOKE_BASE0_DIR     := $(BUILD_ROOT)/$(DISPLAY_SMOKE_BASE0_NAME)
+DISPLAY_SMOKE_BASE0_FIXTURE := $(DISPLAY_SMOKE_BASE0_DIR)/fixture
 
 # The AOT-gap mode of the same fixture: identical guest addresses, but the
 # helper is omitted from native emission (--omit-aot) so region A reaches it

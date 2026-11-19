@@ -652,6 +652,7 @@ typedef enum {
     PLAYER_UI_SETTINGS_TOGGLE_DISCORD,       /* Settings > Online and developer (#2259) */
     PLAYER_UI_SETTINGS_TOGGLE_COVER_ART,     /* Settings > Online and developer (#2632) */
     PLAYER_UI_SETTINGS_REFRESH_COVER_ART,    /* Settings > Build tools and cache (#2632) */
+    PLAYER_UI_SETTINGS_TOGGLE_CHEATS,        /* Settings > Online and developer (#2639) */
     PLAYER_UI_SETTINGS_TOGGLE_LAUNCHER_MUSIC, /* launcher background music (#2207) */
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_DOWN,
     PLAYER_UI_SETTINGS_MUSIC_VOLUME_UP
@@ -777,6 +778,8 @@ typedef struct {
        under Settings > Build tools and cache. */
     bool download_cover_art;
     const char *cover_art_cache_size;
+    /* Cheats (#2639): the stored switch, off by default. */
+    bool cheats;
     const char *current_version;    /* "0.0.3" */
     const char *update_version;     /* "0.0.4", once checked */
     bool update_prerelease;
@@ -1208,6 +1211,7 @@ enum {
     PLAYER_UI_ID_SETTINGS_NICKNAME = 0x4562u,         /* Settings: opens the nickname editor */
     PLAYER_UI_ID_SETTINGS_COVER_ART = 0x4563u,        /* Settings > Online: Download cover art */
     PLAYER_UI_ID_SETTINGS_REFRESH_COVER_ART = 0x4564u,/* Settings > Build cache: Refresh cover art */
+    PLAYER_UI_ID_SETTINGS_CHEATS = 0x4565u,           /* Settings > Online: Cheats */
     PLAYER_UI_ID_NICKNAME_KEY_BASE = 0x4570u,         /* + its keyboard key's place */
     PLAYER_UI_ID_CONTROLLER_BUTTON_BASE = 0x4600u,   /* + the control, 0-18 */
     PLAYER_UI_ID_CONTROLLER_DEADZONE_DOWN = 0x4621u,
