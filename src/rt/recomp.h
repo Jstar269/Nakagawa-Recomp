@@ -2204,8 +2204,9 @@ uint32_t sr_alloc_uid(void);
 /* sceGe display-list GPU (src/rt/ge.c): execute a GE command list, rasterising into VRAM. */
 uint32_t ge_run_list(uint32_t addr, int resume);
 /* ge_run_list that also stops at a command boundary once *stop is set, after at least one
- * command, exactly as it stops at a stall address: it returns the next command's address, with
- * *stopped set, and resuming there continues the list. */
+ * command, or once the run has executed 2^20 commands, exactly as it stops at a stall address:
+ * it returns the next command's address, with *stopped set, and resuming there continues the
+ * list. (A plain ge_run_list stops by name at that limit, through ge_take_signal_fault.) */
 uint32_t ge_run_list_until(uint32_t addr, int resume, atomic_int_least32_t *stop, int *stopped);
 /* The 16-bit argument of the FINISH command the last ge_run_list call executed. */
 uint32_t ge_last_finish_id(void);
@@ -2220,9 +2221,13 @@ double   ge_timing_run_clk(void);
 void ge_transition_trace_check(const char *why, uint32_t vcount);
 extern uint32_t g_ge_stall_addr;
 /* SIGNAL list control (ge.c): how many SIGNAL CALLs the running list may nest (the numStacks
- * its sceGeListEnQueue took), and the fault a SIGNAL JUMP, CALL or RET met in the last run,
- * if any. A fault stops the list at that SIGNAL; ge_take_signal_fault names it once. */
+ * its sceGeListEnQueue took), the signal function of the running list's callback (0 when it
+ * has none: a callback id of -1, or one registered with a NULL signal function), and the
+ * fault the last run met, if any: a SIGNAL JUMP, CALL or RET, a CALL with the call stack full
+ * or a RET with it empty, or a SIGNAL behaviour that is not modelled. A fault stops the list
+ * at that command; ge_take_signal_fault names it once. */
 extern uint32_t g_ge_signal_stack_limit;
+extern uint32_t g_ge_signal_handler;
 int ge_take_signal_fault(char *detail, size_t size);
 /* Diagnostic counters the watchdog and statistics reports print (hle.c). The GE ones
  * are kept by ge.c, the MPEG ones by mpeg.c. */

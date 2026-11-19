@@ -296,7 +296,8 @@ void fsr3_fg_host_configure(Fsr3FgHost *h, uint64_t frame_id, int has_hudless);
 int fsr3_fg_host_prepare(Fsr3FgHost *h, const Fsr3FgHostPrepare *p);
 
 /* The provider's dispatch: optical flow, then frame interpolation, for the frame prepared under
- * d->frame_id. 0, or -1 for a generation rectangle outside the display or a plan that does not fit. */
+ * d->frame_id. 0, or -1 for a frame with no accepted prepare of its own, a generation rectangle outside the
+ * display, or a plan that does not fit. */
 int fsr3_fg_host_dispatch(Fsr3FgHost *h, const Fsr3FgHostDispatch *d);
 
 /* One descriptor of a pass's set 0, as the project's SPIR-V declares it (binding number and name),

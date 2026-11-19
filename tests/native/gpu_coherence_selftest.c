@@ -140,6 +140,8 @@ static int set_env(const char *name, const char *value) {
  * `--ssaa-ref PATH` sets SR_GPU_SSAA_REF (ssaa-edge's reference: a run without supersampling writes
  * it, a supersampled run at the same scale checks it). `--ssaa-budget-mb N`, `--ssaa-max-dim N` and
  * `--ssaa-expect F` force the size check's limits and name the factor ssaa-limit expects.
+ * `--init-fail` (with `--depth 32`) makes gegpu_init fail after every part is set up, runs no
+ * cell, and checks that the Ace report found 32-bit depth never confirmed.
  * In the sharp game text build (SR_GPU_GLYPH_SELFTEST), `--glyphs on|off|absent` picks the Ace line's
  * glyphs key (on by default; absent writes no key), and `--scene-hash` draws one scene and prints its
  * hash instead of running the cells; `--authentic` (no Ace line) implies it.
@@ -155,7 +157,7 @@ static int set_env(const char *name, const char *value) {
  * Recipes pass arguments, not a `VAR=value` prefix, which cmd.exe does not accept. */
 int main(int argc, char **argv) {
     int twin_arg = 0, twin_key = 0, twin_key_on = 0, authentic = 0, repl_only = 0, pcache_arg = 0, depth_arg = 0;
-    int ssaa_arg = 0, ssaa_expect = 0, scene_hash = 0, tex_scale_arg = 0;
+    int ssaa_arg = 0, ssaa_expect = 0, scene_hash = 0, tex_scale_arg = 0, init_fail = 0;
     char tex_scale_key[24] = "";   /* ";texscale=N" for the Ace line, or "" */
     unsigned long long ssaa_budget_mb = 0;
     unsigned ssaa_dim = 0;
@@ -174,6 +176,7 @@ int main(int argc, char **argv) {
             continue;
         }
         if (strcmp(argv[i], "--authentic") == 0) { authentic = 1; continue; }
+        if (strcmp(argv[i], "--init-fail") == 0) { init_fail = 1; continue; }
         if (strcmp(argv[i], "--scene-hash") == 0) { scene_hash = 1; continue; }
         if (strcmp(argv[i], "--glyphs") == 0) {
             if (i + 1 >= argc || (strcmp(argv[i + 1], "on") != 0 && strcmp(argv[i + 1], "off") != 0 &&
@@ -363,6 +366,33 @@ int main(int argc, char **argv) {
 #endif
 
     gegpu_selftest_ssaa_limits(ssaa_budget_mb << 20, ssaa_dim, ssaa_expect);
+    if (init_fail) {
+        /* --init-fail (with --depth 32): gegpu_init fails after every part is set up, and a failed
+         * init registers nothing (ge_gpu.h), so the Ace report's settle finds 32-bit depth never
+         * confirmed and reports it unavailable. It also leaves no object behind: everything its
+         * steps made is released before it returns. */
+        gegpu_selftest_init_fail(1);
+        if (!sdl3vk_init("Nakagawa GPU coherence selftest")) {
+            fprintf(stderr, "gpu coherence selftest: SKIP (Vulkan initialization unavailable)\n");
+            free(arena);
+            return 77;
+        }
+        const int asked = g_ace_on && ace_effective()->depth;
+        const int made = gegpu_init();
+        const int held = gegpu_selftest_init_left();
+        ace_finish();
+        const int left = ace_effective()->depth;
+        free(arena);
+        if (!asked || made || left || held) {
+            fprintf(stderr, "gpu coherence selftest: FAIL init-fail depth=32 asked=%d init made=%d, depth left "
+                    "on after the report=%d%s, objects still held=%d%s\n", asked, made, left,
+                    left ? " -- the failed init confirmed a part the software rasterizer stood in for" : "", held,
+                    held ? " -- the failed init leaked what its steps made" : "");
+            return 1;
+        }
+        puts("gpu coherence selftest: PASS init-fail a failed init confirmed no Ace part and released every object");
+        return 0;
+    }
     if (!sdl3vk_init("Nakagawa GPU coherence selftest")) {
         fprintf(stderr, "gpu coherence selftest: SKIP (Vulkan initialization unavailable)\n");
         sdl3vk_shutdown();

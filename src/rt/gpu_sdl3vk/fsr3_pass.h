@@ -30,6 +30,8 @@ typedef struct {
     /* Descriptor sets and constants are kept per slot; a slot is reused once its last use finished. */
     uint32_t frames_in_flight;
     /* The flags must include FSR3_HOST_ENABLE_DEPTH_INVERTED: the shaders are built for inverted depth.
+     * Only DEPTH_INFINITE and AUTO_EXPOSURE may join it; the shaders are not built for HDR colour,
+     * display-resolution or jittered motion vectors, and those flags are refused by name.
      * The maximum render size must be at least 2 x 2 (AMD's half-size images). */
     Fsr3HostDesc desc;
 } Fsr3PassInit;
@@ -64,7 +66,11 @@ typedef struct {
 } Fsr3PassFrame;
 
 /* Records one FSR 3 dispatch. 0, or -1 with nothing recorded when the frame is refused (a missing
- * view, a bad slot or layout, or sizes fsr3_host_dispatch refuses). */
+ * view, a bad slot or layout, or sizes fsr3_host_dispatch refuses). A call that returns 0 has
+ * advanced the context (the frame count and its ping-pong images) and, the first time, recorded the
+ * definition of every internal image; neither is recorded again, so the command buffer of every call
+ * that returns 0 must be submitted. Dropping one leaves the pass in a state it cannot recover from:
+ * destroy it and create a new one. */
 int fsr3_pass_record(Fsr3Pass *p, VkCommandBuffer cmd, const Fsr3PassFrame *f);
 
 /* The plan behind the last recorded dispatch, for tests. */
