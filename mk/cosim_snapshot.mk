@@ -161,7 +161,7 @@ SNAPSHOT_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions
 SNAPSHOT_RUNNER_SRCS := src/rt/snapshot_runner.c src/rt/nksnap.c src/rt/guest_interp.c \
 	src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/cpu_lle.c src/rt/domain_mode.c \
 	src/rt/stale_code.c src/rt/title_config.c src/rt/vfpu_tables.c src/rt/vfpu_interp.c \
-	src/rt/perf.c src/rt/nested_frames.c
+	src/rt/perf.c src/rt/nested_frames.c src/rt/harness_stubs.c
 SNAPSHOT_GAME_VARS = GAME_NAME=snapshot GAME_ELF=$(SNAPSHOT_FIXTURE)/guest.prx \
 	GAME_BASE=$(SNAPSHOT_BASE_ADDR) GAME_ENTRY=$(SNAPSHOT_BASE_ADDR) \
 	GAME_PSP_HEADER=$(SNAPSHOT_FIXTURE)/guest.psp GAME_EXTRA_ELFS= TITLE_MANIFEST= \
@@ -236,7 +236,7 @@ FORM_SWEEP_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions
 FORM_SWEEP_SRCS   := src/rt/form_sweep.c src/rt/nksnap.c src/rt/guest_interp.c \
 	src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/cpu_lle.c src/rt/domain_mode.c \
 	src/rt/stale_code.c src/rt/title_config.c src/rt/vfpu_tables.c src/rt/vfpu_interp.c \
-	src/rt/perf.c src/rt/nested_frames.c
+	src/rt/perf.c src/rt/nested_frames.c src/rt/harness_stubs.c
 # One sweep: FORM_SWEEP_DIR holds fixture/ (the module and plan) and the build tree.
 FORM_SWEEP_DIR    ?= $(FORM_SWEEP_ROOT)/public
 FORM_SWEEP_ONLY   ?=

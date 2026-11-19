@@ -53,6 +53,15 @@ class DepFileParsingTests(unittest.TestCase):
             parsed = bgs._parse_d(d)
         self.assertEqual(sorted(parsed["o.o"]), ["a.h", "b.h", "c.h"])
 
+    def test_drive_letter_targets_keep_their_whole_path(self) -> None:
+        # An absolute BUILD_ROOT on Windows puts a drive letter in the -MT target.
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "a.d"
+            d.write_text("C:/w/build/hst/a.o: src/rt/a.c C:/w/build/hst/gen.h \\\n src/rt/b.h\n"
+                         "src/rt/b.h:\n", encoding="utf-8")
+            parsed = bgs._parse_d(d)
+        self.assertEqual(parsed, {"C:/w/build/hst/a.o": ["src/rt/a.c", "C:/w/build/hst/gen.h", "src/rt/b.h"]})
+
     def test_categorize(self) -> None:
         bd = "build/hst"
         self.assertEqual(bgs._categorize("src/rt/hle.c", bd, "hst"), "runtime_source")

@@ -16,7 +16,8 @@
 //   - If a supposedly dead stub is ever reached, it returns a safe value
 //     (0 / false / no-op) rather than crashing or silently skipping CPU state.
 //   - sr_syscall is the only stub reached on the intended exit path: the explicit
-//     syscall at the end of exit_stub(). It marks the HLE boundary and returns 0.
+//     syscall at the end of exit_stub(). It marks the HLE boundary, flushes the
+//     trace and exits the process.
 //
 // This is NOT a silent workaround: it does not mask or skip any instruction under
 // test. It only provides dead symbols so the host executable links headlessly.
@@ -350,7 +351,6 @@ uint64_t SDL_GetTicksNS(void) { return 0u; }
 void     SDL_DelayPrecise(uint64_t ns) { (void)ns; }
 
 /* --- HLE / OSK stubs (dead on microtest path) --- */
-void     sr_syscall_wrapper(uint32_t nid) { (void)nid; }
 /* No SAS mixer here: Ace Mode's sas=sinc is refused, so driver.c never confirms it. */
 int      sr_hle_sas_set_band_limited(int on) { (void)on; return 0; }
 int      sr_hle_sas_set_wide_mix(int on) { (void)on; return 0; }
@@ -366,15 +366,11 @@ void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {
 }
 #endif
 
-/* --- generated-entry fallback stub --- */
-void     f_00304290(void *s) { (void)s; }
-
 /* --- GE / vblank stubs (dead on microtest path) --- */
 uint32_t g_frame_prims = 0u;
 int      sr_vblank_subintr(uint32_t no, uint32_t *handler, uint32_t *arg) { (void)no; (void)handler; (void)arg; return -1; }
 int      sr_vblank_dispatch_registered(void) { return 0; }
 void     sr_vblank_tick(void) {}
-void     sr_vblank_nop(void) {}
 
 #ifdef __cplusplus
 }

@@ -27,6 +27,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "recomp.h"
+#include "../core/nk_display_size.h"
 #include "../core/nk_shared_helpers.h"
 #include "gpu_sdl3vk/sdl3vk.h"
 #include "fbcap.h"
@@ -68,8 +69,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define PSP_W 480
-#define PSP_H 272
+#define PSP_W NK_PSP_DISPLAY_WIDTH
+#define PSP_H NK_PSP_DISPLAY_HEIGHT
 #define PSP_SCANOUT_RATE_NUMERATOR 60000ull
 #define PSP_SCANOUT_RATE_DENOMINATOR 1001ull
 #define PSP_SCANOUT_PERIOD_NS \

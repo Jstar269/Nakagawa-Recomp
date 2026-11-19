@@ -11,6 +11,7 @@
    rings to whole device pixels. */
 
 #include "nk_ui.h"
+#include "../core/nk_display_size.h" /* the hero art's aspect is the PSP screen's */
 
 /* Colors use 0xRRGGBBAA sRGB bytes. The first fourteen fields are the original
    C3 set; the rest were added with the C5 design pass. */
@@ -103,7 +104,7 @@ struct NkUiTheme {
 #define NK_UI_TILE_BODY_HEIGHT 90.0f     /* title (2 lines) + meta row + padding */
 #define NK_UI_DETAIL_ASIDE_WIDTH 520.0f  /* Title detail: hero column */
 #define NK_UI_DETAIL_GAP 32.0f
-#define NK_UI_HERO_ASPECT (272.0f / 480.0f)
+#define NK_UI_HERO_ASPECT (NK_PSP_DISPLAY_HEIGHT_F / NK_PSP_DISPLAY_WIDTH_F)
 #define NK_UI_SAFE_AREA_MIN 16.0f        /* never closer to a window edge */
 
 /* ---- Motion (seconds) ------------------------------------------------------ */

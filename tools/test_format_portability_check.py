@@ -16,6 +16,7 @@ from unittest import mock
 from tools.format_portability_check import (
     ToolchainUnavailable,
     check_format_portability,
+    ensure_title_config_header,
     host_long_width,
     main,
     narrow_long_flags,
@@ -238,6 +239,47 @@ class TestFormatPortabilityCheck(unittest.TestCase):
                 mock.patch("tools.format_portability_check.sys", types.SimpleNamespace(platform="win32")), \
                 mock.patch("tools.format_portability_check.shutil", types.SimpleNamespace(which=lambda *_: None)):
             self.assertEqual(resolve_compiler("gcc"), str(gcc))
+
+    def test_pointer_sized_specifiers_match_the_shim_intptr_t(self) -> None:
+        """PRI*PTR follows intptr_t's type (long long on Win64, int under -m32), not a fixed "l"."""
+        good_c = self.test_root / "good_ptr.c"
+        good_c.write_text(
+            "#include <stdint.h>\n"
+            "#include <inttypes.h>\n"
+            "#include <stdio.h>\n"
+            "void test_ptr(intptr_t s, uintptr_t u) {\n"
+            '    printf("s=%" PRIdPTR " u=%" PRIuPTR " x=%" PRIxPTR " X=%" PRIXPTR "\\n", s, u, u, u);\n'
+            '    sscanf("1", "%" SCNxPTR, &u);\n'
+            "}\n",
+            encoding="utf-8",
+        )
+        failed, errors = check_format_portability(
+            files=[str(good_c)],
+            shim_dir=self.shim_dir,
+            narrow_long=False,
+        )
+        self.assertEqual(failed, 0, "\n".join(errors))
+
+    def test_the_generic_title_config_header_is_regenerated_when_stale(self) -> None:
+        """A header left by an older generator is replaced; an unchanged one keeps its bytes."""
+        repo = self.test_root / "repo"
+        (repo / "tools").mkdir(parents=True)
+        header = repo / "build" / "title-config" / "generic" / "sr_title_config.h"
+        header.parent.mkdir(parents=True)
+        header.write_text("/* stale output of an older generator */\n", encoding="utf-8")
+        fresh = "#ifndef SR_TITLE_CONFIG_GENERATED_H\n#define SR_TITLE_CONFIG_GENERATED_H\n#endif\n"
+        (repo / "tools" / "title_runtime_config.py").write_text(
+            "import argparse\nfrom pathlib import Path\n"
+            "parser = argparse.ArgumentParser()\nparser.add_argument('--output', type=Path)\n"
+            f"parser.parse_args().output.write_text({fresh!r}, encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(ensure_title_config_header(repo), header.parent)
+        self.assertEqual(header.read_text(encoding="utf-8"), fresh)
+        stamp = header.stat().st_mtime_ns
+        ensure_title_config_header(repo)
+        self.assertEqual(header.stat().st_mtime_ns, stamp)
+        self.assertEqual(sorted(path.name for path in header.parent.iterdir()), ["sr_title_config.h"])
 
 
 if __name__ == "__main__":

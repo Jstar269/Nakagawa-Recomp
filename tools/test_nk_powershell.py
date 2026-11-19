@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -45,6 +46,23 @@ class HostSelectionTests(unittest.TestCase):
             self.assertEqual(
                 Path(nk_powershell.powershell_exe()),
                 Path("R") / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+
+    @unittest.skipUnless(os.name == "nt", "only Windows searches the working directory first")
+    def test_a_pwsh_in_the_working_directory_is_never_picked(self) -> None:
+        with tempfile.TemporaryDirectory() as here, tempfile.TemporaryDirectory() as empty_bin:
+            for name in ("pwsh.exe", "powershell.exe"):
+                (Path(here) / name).write_bytes(b"MZ placeholder, never run\n")
+            env = {"PATH": empty_bin, "PATHEXT": ".COM;.EXE", "SystemRoot": "R"}
+            previous = os.getcwd()
+            os.chdir(here)
+            try:
+                with mock.patch.dict(os.environ, env):
+                    os.environ.pop("NoDefaultCurrentDirectoryInExePath", None)
+                    picked = nk_powershell.powershell_exe()
+            finally:
+                os.chdir(previous)
+        self.assertEqual(
+            Path(picked), Path("R") / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
 
     def test_override_wins(self) -> None:
         with mock.patch.object(nk_powershell.shutil, "which", _which({"pwsh": "P7"})), \

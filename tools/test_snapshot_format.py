@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 from tools import nksnap
 
@@ -24,6 +25,9 @@ ROOT = Path(__file__).resolve().parents[1]
 RECOMP_H = (ROOT / "src" / "rt" / "recomp.h").read_text(encoding="utf-8")
 NKSNAP_C = (ROOT / "src" / "rt" / "nksnap.c").read_text(encoding="utf-8")
 RUNNER_C = (ROOT / "src" / "rt" / "snapshot_runner.c").read_text(encoding="utf-8")
+# The comparison the runner and src/rt/verify.c both report through (audit F-2829a72a).
+COMPARE_H = (ROOT / "src" / "rt" / "end_state_compare.h").read_text(encoding="utf-8")
+VERIFY_C = (ROOT / "src" / "rt" / "verify.c").read_text(encoding="utf-8")
 
 DATA = 0x09000000
 
@@ -156,8 +160,21 @@ class CLoaderParityTests(unittest.TestCase):
 
     def test_reason_names(self):
         names = re.findall(r'case NKSNAP_\w+: return "([a-z-]+)";', NKSNAP_C)
-        refusals = [n for n in names if n not in ("ok", "io-error", "out-of-memory")]
+        refusals = [n for n in names if n != "ok" and n not in nksnap.RUNNER_REFUSALS]
         self.assertEqual(tuple(refusals), nksnap.REASONS)
+        self.assertEqual(tuple(n for n in names if n in nksnap.RUNNER_REFUSALS), nksnap.RUNNER_REFUSALS)
+        self.assertEqual(len(names), 1 + len(nksnap.REASONS) + len(nksnap.RUNNER_REFUSALS))
+
+    def test_the_runner_refusal_line_for_every_loader_status_parses(self):
+        # snapshot_runner.c prints "REFUSED <nksnap_status_name> <detail>" for any load failure.
+        self.assertIn('printf("REFUSED %s%s%s\\n", nksnap_status_name(st)', RUNNER_C)
+        names = re.findall(r'case NKSNAP_\w+: return "([a-z-]+)";', NKSNAP_C)
+        for name in names:
+            if name == "ok":
+                continue
+            with self.subTest(reason=name):
+                verdict = nksnap.parse_verdict(f"REFUSED {name} snap.bin: detail")
+                self.assertEqual((verdict.kind, verdict.reason), ("REFUSED", name))
 
     def test_regions(self):
         regions = re.findall(r'\{ (0x[0-9a-fA-F]+)u, (0x[0-9a-fA-F]+)u, "(\w+)" \}', NKSNAP_C)
@@ -235,22 +252,36 @@ class VerdictGrammarTests(unittest.TestCase):
         self.assertEqual(printed, set(nksnap.NOT_CHECKED_REASONS))
 
     def test_runner_mismatch_fields_parse(self):
-        fields = set(re.findall(r'verdict_mismatch_hex\("([a-z_0-9]+)"', RUNNER_C))
+        fields = set(re.findall(r'sr_end_difference_hex\(out, cap, "([a-z_0-9]+)"', COMPARE_H))
         self.assertTrue({"syscall_pc", "syscall_code", "import_nid", "hi", "lo", "fcr31",
                          "oor_loads", "oor_stores"} <= fields)
         for name in fields:
             with self.subTest(field=name):
                 nksnap.parse_verdict(f"MISMATCH {name} aot=0x00000000 ref=0x00000001")
-        self.assertIn('"MISMATCH stop aot=%s ref=%s\\n"', RUNNER_C)
-        self.assertIn('"r%d"', RUNNER_C)
-        self.assertIn('"f%d"', RUNNER_C)
-        self.assertIn('"MISMATCH mem[0x%08" PRIx32 "] aot=0x%02x ref=0x%02x\\n"', RUNNER_C)
+        self.assertIn('"stop aot=%s ref=%s"', COMPARE_H)
+        self.assertIn('"r%d"', COMPARE_H)
+        self.assertIn('"f%d"', COMPARE_H)
+        self.assertIn('"mem[0x%08" PRIx32 "] aot=0x%02x ref=0x%02x"', COMPARE_H)
+        self.assertIn('printf("MISMATCH %s\\n", what);', RUNNER_C)
         self.assertIn('"MATCH\\n"', RUNNER_C)
 
     def test_runner_stop_names_are_the_grammar(self):
-        names = re.search(r"k_stop_names\[\] = \{ ([^}]*) \}", RUNNER_C)
+        names = re.search(r"sr_end_stop_names\[\] = \{ ([^}]*) \}", COMPARE_H)
         self.assertIsNotNone(names)
         self.assertEqual(tuple(re.findall(r'"(\w+)"', names.group(1))), nksnap.STOP_KINDS)
+
+    def test_the_runner_and_the_checker_share_one_field_walk(self):
+        """A captured mismatch replays to the same first difference (audit F-2829a72a).
+
+        Each program used to carry its own copy of the walk, kept in step by a comment. Both
+        now call sr_end_state_difference, and neither formats a field of its own.
+        """
+        for name, text in (("snapshot_runner.c", RUNNER_C), ("verify.c", VERIFY_C)):
+            with self.subTest(source=name):
+                self.assertEqual(text.count("sr_end_state_difference("), 1)
+                for own in ("aot=0x", "aot=%s", '"r%d"', '"f%d"', "static int is_vfpu_opcode",
+                            "first_difference(const uint8_t"):
+                    self.assertNotIn(own, text)
 
 
 _COUNTING_DRIVER = """\
@@ -286,6 +317,78 @@ class MutantChunkLookupTests(unittest.TestCase):
                 self.assertIn("mutate --chunk probe/snapshot_recomp_0.c", proc.stdout)
                 calls = (work / "find-chunk.log").read_text(encoding="utf-8").splitlines()
                 self.assertEqual(len(calls), 1, f"{goal} ran find-chunk {len(calls)} times")
+
+
+class SharedHarnessStubTests(unittest.TestCase):
+    """The isolated-run harnesses share one stub unit, src/rt/harness_stubs.c (audit F-c543d233).
+
+    The snapshot runner and the verify harness each carried the runtime stand-ins, the image
+    reader and the hex parser, so a new extern in recomp.c had to be added twice.
+    """
+
+    STUBS = "src/rt/harness_stubs.c"
+    # One definition of each kind the two programs used to repeat.
+    SHARED = (
+        "volatile int g_sr_vram_read_pending;",
+        "uint32_t sched_current_uid(void) {",
+        "uint64_t snapshot_runner_ticks_ns(void) {",
+        "void sr_note_mem_write(uint32_t addr, uint32_t width, uint32_t val, uint32_t pc) {",
+        "uint8_t *sr_harness_read_image(const char *path, uint32_t *len_out) {",
+        "int sr_harness_parse_hex32(const char *text, uint32_t *out) {",
+    )
+    # Every program each recipe links, and the harness source that carries its main.
+    PROGRAMS: ClassVar[dict[str, dict[str, str]]] = {
+        "snapshot-selftest-run": {
+            "snapshot_runner.exe": "src/rt/snapshot_runner.c",
+            "snapshot_runner_mutant.exe": "src/rt/snapshot_runner.c",
+        },
+        "verify-selftest-run": {
+            "verify_harness.exe": "src/rt/verify_harness.c",
+            "verify_harness_mutant.exe": "src/rt/verify_harness.c",
+            "verify_replay_mutant.exe": "src/rt/snapshot_runner.c",
+        },
+        "form-sweep-link": {"form_sweep.exe": "src/rt/form_sweep.c"},
+    }
+
+    def test_the_stand_ins_are_defined_in_the_shared_unit_only(self) -> None:
+        stubs = (ROOT / self.STUBS).read_text(encoding="utf-8")
+        harness = (ROOT / "src" / "rt" / "verify_harness.c").read_text(encoding="utf-8")
+        for definition in self.SHARED:
+            with self.subTest(definition=definition):
+                self.assertEqual(stubs.count(definition), 1)
+        for text in (RUNNER_C, harness):
+            for name in ("g_sr_vram_read_pending", "sched_current_uid", "snapshot_runner_ticks_ns",
+                         "sr_note_mem_write", "*read_image(", "int parse_u32(", "int parse_hex("):
+                with self.subTest(name=name):
+                    self.assertNotIn(name, text)
+
+    @unittest.skipIf(shutil.which("mingw32-make") is None and shutil.which("make") is None,
+                     "needs GNU Make")
+    def test_every_harness_program_links_the_shared_unit_once(self) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        assert make is not None
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            driver = work / "driver.py"
+            driver.write_text(_COUNTING_DRIVER, encoding="utf-8")
+            proc = subprocess.run(
+                [make, "-n", "--no-print-directory", *self.PROGRAMS, "GAME_NAME=snapshot",
+                 f"BUILD_ROOT={(work / 'build-root').as_posix()}",
+                 f"BUILD_DIR={(work / 'build').as_posix()}",
+                 f"SNAPSHOT_DRIVER={driver.as_posix()}", f"VERIFY_DRIVER={driver.as_posix()}"],
+                cwd=ROOT, capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
+        # A recipe line continues over several physical lines; join them first.
+        commands = [line.split() for line in proc.stdout.replace("\\\n", " ").splitlines()]
+        for programs in self.PROGRAMS.values():
+            for program, source in programs.items():
+                with self.subTest(program=program):
+                    links = [words for words in commands if "-o" in words[:-1]
+                             and words[words.index("-o") + 1].endswith("/" + program)]
+                    self.assertEqual(len(links), 1, f"{program} link lines: {links}")
+                    self.assertEqual(links[0].count(self.STUBS), 1, links[0])
+                    self.assertEqual(links[0].count(source), 1, links[0])
 
 
 if __name__ == "__main__":

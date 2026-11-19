@@ -315,15 +315,6 @@ _EXCLUDE_MARKERS = (
 _SYSTEM_OPS = {0x10: "COP0 system instructions (#1727 LLE gates cover them)"}
 
 
-def _sweep(op: int, base: dict[str, int], name: str, values: range, funct_fixed: dict) -> list[Probe]:
-    out = []
-    for v in values:
-        fields = dict(base)
-        fields[name] = v
-        out.append(probe(word_of(op, **fields)))
-    return out
-
-
 def _classify(op: int, base: dict[str, int], names: tuple[str, ...]) -> dict[str, str]:
     """Role of each field around ``base``: ``unused``, ``register`` or ``variant``.
 
@@ -592,7 +583,7 @@ def form_instances(form: Form, seed: int, cap: int | None, start: int = 0) -> tu
     """
     gpr, fpr = _form_slots(form)
     gpats = alias_patterns(len(gpr), tuple(not (form.memory and n == "rs") for n in gpr))
-    fpats = [p for p in alias_patterns(len(fpr), (False,) * len(fpr))]
+    fpats = alias_patterns(len(fpr), (False,) * len(fpr))
     patterns = [(g, f) for g in gpats for f in fpats]
     reps = immediate_reps(form)
     total = len(patterns) * len(reps)

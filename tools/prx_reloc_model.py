@@ -38,7 +38,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from elf_bounds import validate_elf32_envelope
+from elf_bounds import MAX_ELF_IMAGE_BYTES, validate_elf32_envelope
 
 ET_REL = 1
 ET_EXEC = 2
@@ -419,6 +419,8 @@ def model_relocations(data: bytes, label: str = "<module>") -> RelocationModel:
     for segment in segments:
         if segment.vaddr + segment.memsz > 0x100000000:
             raise RelocationModelError(f"{label}: segment exceeds the 32-bit address space")
+        if segment.memsz > MAX_ELF_IMAGE_BYTES:
+            raise RelocationModelError(f"{label}: segment exceeds the 256 MiB flat-image bound")
     image = _Image(segments, e_type in (ET_SCE_PRX, ET_REL))
     has_program_format_a = False
     for ph in envelope["phdrs"]:

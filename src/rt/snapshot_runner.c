@@ -6,7 +6,7 @@
  * state and check it against the reference interpreter in src/ref.
  *
  *   snapshot_runner [--import ADDR:NID]... [--max-steps N] [--rewrite OUT]
- *                   <image.bin> <base-hex> <snapshot.nksnap>
+ *                   [--selftest-corrupt FIELD] <image.bin> <base-hex> <snapshot.nksnap>
  *
  * The runner links against one module's generated code, like src/rt/funcdiff.c. It loads
  * the module image at <base>, registers the translated bodies, then overlays the
@@ -30,10 +30,17 @@
  * Exit status: 0 MATCH, 1 MISMATCH, 2 REFUSED or a usage error, 3 NOT_CHECKED.
  * NOT_CHECKED is never a pass (AGENTS.md section 6).
  *
+ * --selftest-corrupt FIELD is for the gates only: the translated side changes that compared
+ * field at its syscall or import stop (sr_end_state_selftest_corrupt), so the verdict must
+ * be a MISMATCH that names it. tests/fixtures/verify/selftest.py uses it to hold this
+ * runner and src/rt/verify.c to the same first difference, field by field.
+ *
  * The fields are compared in this order and the first difference is reported: the stop
  * kind (return, syscall, import), the syscall PC and code or the import NID, r1..r31,
  * hi, lo, f0..f31 (raw bits), fcr31, the out-of-range access counts, then memory from the
- * lowest address up.
+ * lowest address up. src/rt/end_state_compare.h holds that walk and its wording, and
+ * src/rt/verify.c reports through it too, so a mismatch it captures replays here to the
+ * same first difference.
  *
  * Memory comparison. Both sides start from the same bytes: after the image and the blocks
  * are in the runtime's arena, its 64 MiB of RAM are copied into the reference's RAM, and a
@@ -54,6 +61,8 @@
  */
 
 #include "recomp.h"
+#include "end_state_compare.h"
+#include "harness_stubs.h"
 #include "nested_frames.h"
 #include "nksnap.h"
 #include "../ref/snapshot_ref.h"
@@ -61,7 +70,6 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <setjmp.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -74,99 +82,61 @@ extern unsigned long g_oor_reads, g_oor_writes;
 /* ---- the runtime symbols a module and recomp.c reference, for an isolated run ---------- */
 /*
  * The runner links the generated module, recomp.c and the dispatch/interpreter units, but
- * no scheduler, HLE, GE or host platform. These definitions stand in for those units. None
- * of them can change a compared result silently: the scheduler is off (sr_sched_on is 0,
- * so SR_YIELD never calls sr_yield), the GE and debug hooks are inert because nothing arms
- * them, and the two calls that would leave guest code -- sr_syscall and sr_raw_syscall --
- * end the AOT run and are reported as its stop.
+ * no scheduler, HLE, GE or host platform. src/rt/harness_stubs.c stands in for those units,
+ * for this runner and for src/rt/verify_harness.c alike. What is left here is the runner's
+ * own: the scheduler is off (sr_sched_on is 0, so SR_YIELD never calls sr_yield), and the
+ * two calls that would leave guest code -- sr_syscall and sr_raw_syscall -- end the AOT
+ * run and are reported as its stop.
  */
-volatile int g_sr_vram_read_pending;
-void sr_ge_vram_read_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
-void sr_ge_vram_write_prepare(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
-void sr_ge_vram_write_commit(uint32_t addr, uint32_t width) { (void)addr; (void)width; }
-
-uint32_t g_sr_debug = 0;
-SrMemWatch g_sr_mem_watches[SR_MAX_MEM_WATCHES];
-int g_sr_mem_watch_count = 0;
-int g_sr_metadata_watch = 0;
-uint32_t g_sr_mem_watch_context_pc = 0;
-unsigned g_sr_mem_watch_context_limit = 0;
-unsigned g_sr_mem_watch_context_count = 0;
-int g_sr_mem_watch_context_fpr = -1;
-uint32_t g_sr_mem_watch_context_fpr_value = 0;
-uint32_t g_sr_store_context_pc = 0;
-unsigned g_sr_store_context_count = 0;
-unsigned g_sr_store_context_limit = 0;
-int g_sr_store_context_mem_gpr = -1;
-uint32_t g_sr_store_context_mem_offset = 0;
-unsigned g_sr_store_context_mem_words = 0;
-int g_sr_last_writer_enabled = 0;
-CpuState *s_cpu = NULL;
-int sr_sched_on = 0;
-atomic_int_least32_t sr_timeslice;
-
-uint32_t sched_current_uid(void) { return 0u; }
-void sched_exit_current(int32_t status) { (void)status; }
-void sched_exit_current_delete(int32_t status) { (void)status; }
-uint32_t sched_start_thread(uint32_t uid, uint32_t arglen, uint32_t argp) { (void)uid; (void)arglen; (void)argp; return 0; }
-uint32_t sched_terminate_thread(uint32_t uid) { (void)uid; return 0; }
-uint32_t sched_delete_thread(uint32_t uid) { (void)uid; return 0; }
-uint32_t sched_thread_wakeup(uint32_t uid) { (void)uid; return 0; }
-void sched_set_current_join_target(uint32_t uid) { (void)uid; }
-void sched_clear_current_join_target(void) {}
-int sched_take_current_join_result(uint32_t uid, uint32_t *result_out) { (void)uid; (void)result_out; return 0; }
-uint32_t sr_get_ge_status(void) { return 0u; }
-uint32_t sr_hle_resolve_late_import(uint32_t nid) { (void)nid; return 0u; }
-void sr_main_module_register(const SrMainModuleRecord *record) { (void)record; }
 void sr_yield(CpuState *s) { (void)s; }
-/* recomp.c reads the SDL clock for diagnostics only; the Makefile builds the runner's copy
- * of recomp.c with SDL_GetTicksNS renamed to this, so no SDL symbol is defined here. */
-uint64_t snapshot_runner_ticks_ns(void) { return 0u; }
-/* g_sr_last_writer_enabled stays 0, so the guest accessors never call this. */
-void sr_note_mem_write(uint32_t addr, uint32_t width, uint32_t val, uint32_t pc) {
-    (void)addr; (void)width; (void)val; (void)pc;
-}
 
 /* ---- where the AOT run stopped ----------------------------------------------------- */
 
-typedef enum { STOP_RETURN = 0, STOP_SYSCALL, STOP_IMPORT } StopKind;
-
-static const char *const k_stop_names[] = { "return", "syscall", "import" };
-
-static struct {
-    StopKind kind;
-    uint32_t syscall_pc;
-    uint32_t syscall_code;
-    uint32_t import_nid;
-} s_aot_stop;
+static SrEndStop s_aot_stop;
 
 static jmp_buf s_stop_jmp;
 static int s_aot_running;
+/* --selftest-corrupt FIELD: the compared field the translated side's stop changes. */
+static const char *s_selftest_corrupt;
+
+#define ARENA_SIZE 0x0c000000u   /* the runtime arena: guest physical [0, 0x0c000000) */
+
+static uint8_t *arena_base(void) { return g_mem - SR_RAM_BASE; }
+
+/* Self-test only: the stop that was just recorded changes one compared field of the
+ * translated side, so the verdict has to name that field. */
+static void selftest_corrupt_at_stop(CpuState *s) {
+    if (!s_selftest_corrupt) return;
+    if (!sr_end_state_selftest_corrupt(s_selftest_corrupt, s, &s_aot_stop, arena_base(), ARENA_SIZE)) {
+        fprintf(stderr, "snapshot_runner: --selftest-corrupt does not know %s\n", s_selftest_corrupt);
+        exit(2);
+    }
+}
 
 /* An import stub's body calls sr_syscall (the generated stub, tools/codegen.py
  * import_stub_text). The handler does not run: the import is where this call ends. */
 uint32_t sr_syscall(CpuState *s, uint32_t nid) {
-    (void)s;
     if (!s_aot_running) {
         fprintf(stderr, "snapshot_runner: import 0x%08" PRIx32 " outside the AOT run\n", nid);
         abort();
     }
-    s_aot_stop.kind = STOP_IMPORT;
+    s_aot_stop.kind = SR_END_STOP_IMPORT;
     s_aot_stop.import_nid = nid;
+    selftest_corrupt_at_stop(s);
     longjmp(s_stop_jmp, 1);
 }
 
 /* A raw `syscall` instruction (generated as sr_raw_syscall). recomp.c leaves this symbol to
  * the harness when it is built with SR_GATE_BUILD, as tools/codegen_gate.py does. */
 void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {
-    (void)s;
     if (!s_aot_running) {
         fprintf(stderr, "snapshot_runner: raw syscall 0x%" PRIx32 " outside the AOT run\n", code);
         abort();
     }
-    s_aot_stop.kind = STOP_SYSCALL;
+    s_aot_stop.kind = SR_END_STOP_SYSCALL;
     s_aot_stop.syscall_code = code;
     s_aot_stop.syscall_pc = pc;
+    selftest_corrupt_at_stop(s);
     longjmp(s_stop_jmp, 1);
 }
 
@@ -185,19 +155,10 @@ typedef struct {
     const char *snapshot;
 } Options;
 
-static int parse_u32(const char *text, uint32_t *out) {
-    char *end = NULL;
-    errno = 0;
-    unsigned long long v = strtoull(text, &end, 16);
-    if (errno || !end || end == text || *end != '\0' || v > UINT32_MAX) return 0;
-    *out = (uint32_t)v;
-    return 1;
-}
-
 static int usage(void) {
     fprintf(stderr,
             "usage: snapshot_runner [--import ADDR:NID]... [--max-steps N] [--rewrite OUT]\n"
-            "                       <image.bin> <base-hex> <snapshot.nksnap>\n");
+            "                       [--selftest-corrupt FIELD] <image.bin> <base-hex> <snapshot.nksnap>\n");
     return 2;
 }
 
@@ -213,7 +174,8 @@ static int parse_options(int argc, char **argv, Options *o) {
             char *colon = strchr(buf, ':');
             if (!colon || o->count >= MAX_IMPORTS) return 0;
             *colon = '\0';
-            if (!parse_u32(buf, &o->stub[o->count]) || !parse_u32(colon + 1, &o->nid[o->count]))
+            if (!sr_harness_parse_hex32(buf, &o->stub[o->count]) ||
+                !sr_harness_parse_hex32(colon + 1, &o->nid[o->count]))
                 return 0;
             o->count++;
         } else if (!strcmp(a, "--max-steps") && i + 1 < argc) {
@@ -224,12 +186,14 @@ static int parse_options(int argc, char **argv, Options *o) {
             o->max_steps = v;
         } else if (!strcmp(a, "--rewrite") && i + 1 < argc) {
             o->rewrite = argv[++i];
+        } else if (!strcmp(a, "--selftest-corrupt") && i + 1 < argc) {
+            s_selftest_corrupt = argv[++i];
         } else if (a[0] == '-' && a[1] == '-') {
             return 0;
         } else if (positional == 0) {
             o->image = a; positional++;
         } else if (positional == 1) {
-            if (!parse_u32(a, &o->base)) return 0;
+            if (!sr_harness_parse_hex32(a, &o->base)) return 0;
             positional++;
         } else if (positional == 2) {
             o->snapshot = a; positional++;
@@ -240,31 +204,7 @@ static int parse_options(int argc, char **argv, Options *o) {
     return positional == 3;
 }
 
-static uint8_t *read_image(const char *path, uint32_t *len_out) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    uint8_t *data = NULL;
-    long n = -1;
-    if (fseek(f, 0, SEEK_END) == 0) n = ftell(f);
-    if (n < 0 || (unsigned long long)n > UINT32_MAX || fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return NULL;
-    }
-    data = (uint8_t *)malloc(n ? (size_t)n : 1u);
-    if (data && n && fread(data, 1, (size_t)n, f) != (size_t)n) {
-        free(data);
-        data = NULL;
-    }
-    fclose(f);
-    *len_out = (uint32_t)n;
-    return data;
-}
-
 /* ---- comparison ------------------------------------------------------------------------ */
-
-#define ARENA_SIZE 0x0c000000u   /* the runtime arena: guest physical [0, 0x0c000000) */
-
-static uint8_t *arena_base(void) { return g_mem - SR_RAM_BASE; }
 
 typedef struct {
     uint32_t *first;
@@ -284,47 +224,12 @@ static int in_regions(const Regions *r, uint32_t addr, uint32_t *region_end) {
     return 0;
 }
 
-/* Lowest index in [from, to) where a and b differ, or `to`. */
-static uint32_t first_difference(const uint8_t *a, const uint8_t *b, uint32_t from, uint32_t to) {
-    const uint32_t step = 4096u;
-    uint32_t i = from;
-    while (i < to) {
-        uint32_t n = to - i < step ? to - i : step;
-        if (memcmp(a + i, b + i, n) != 0) {
-            for (uint32_t j = 0; j < n; j++)
-                if (a[i + j] != b[i + j]) return i + j;
-        }
-        i += n;
-    }
-    return to;
-}
-
-static int verdict_mismatch_hex(const char *field, uint32_t aot, uint32_t ref) {
-    printf("MISMATCH %s aot=0x%08" PRIx32 " ref=0x%08" PRIx32 "\n", field, aot, ref);
-    return 1;
-}
-
-static int verdict_mismatch_mem(uint32_t addr, uint8_t aot, uint8_t ref) {
-    printf("MISMATCH mem[0x%08" PRIx32 "] aot=0x%02x ref=0x%02x\n", addr, aot, ref);
-    return 1;
-}
-
-static int is_vfpu_opcode(uint32_t op) {
-    switch (op >> 26) {
-    case 0x12: case 0x18: case 0x19: case 0x1b: case 0x32: case 0x34: case 0x35:
-    case 0x36: case 0x37: case 0x3a: case 0x3c: case 0x3d: case 0x3e: case 0x3f:
-        return 1;
-    default:
-        return 0;
-    }
-}
-
 /* NOT_CHECKED for a reference stop that is not a comparable end of the call. */
 static int verdict_reference_stop(const NkRefResult *rr, uint64_t max_steps) {
     switch (rr->stop) {
     case NK_REF_UNIMPLEMENTED:
         printf("NOT_CHECKED %s pc=0x%08" PRIx32 " op=0x%08" PRIx32 "\n",
-               is_vfpu_opcode(rr->op) ? "ref-no-vfpu" : "ref-unimplemented", rr->pc, rr->op);
+               sr_end_is_vfpu_opcode(rr->op) ? "ref-no-vfpu" : "ref-unimplemented", rr->pc, rr->op);
         return 3;
     case NK_REF_MEMORY_FAULT:
         printf("NOT_CHECKED ref-memory-fault pc=0x%08" PRIx32 " op=0x%08" PRIx32
@@ -344,68 +249,35 @@ static int verdict_reference_stop(const NkRefResult *rr, uint64_t max_steps) {
     return 0;
 }
 
-static StopKind ref_stop_kind(const NkRefResult *rr) {
-    return rr->stop == NK_REF_IMPORT ? STOP_IMPORT
-         : rr->stop == NK_REF_SYSCALL ? STOP_SYSCALL : STOP_RETURN;
-}
-
 static CpuState g_aot_cpu;     /* static: a longjmp out of guest code must not lose it */
 static CpuState g_ref_cpu;
 
 static int compare(const Options *o, const NkRefResult *rr, const uint8_t *ref_ram,
                    const uint8_t *baseline, const Regions *known,
                    unsigned long oor_reads, unsigned long oor_writes) {
-    const CpuState *a = &g_aot_cpu, *r = &g_ref_cpu;
-    StopKind ref_kind = ref_stop_kind(rr);
-    if (s_aot_stop.kind != ref_kind) {
-        printf("MISMATCH stop aot=%s ref=%s\n", k_stop_names[s_aot_stop.kind],
-               k_stop_names[ref_kind]);
+    SrEndStop ref_stop = sr_end_stop_of_reference(rr);
+    if (ref_stop.kind == SR_END_STOP_IMPORT) {
+        for (uint32_t i = 0; i < o->count; i++)
+            if (o->stub[i] == rr->pc) { ref_stop.import_nid = o->nid[i]; break; }
+    }
+    /* Below RAM the reference models nothing: its view there is the bytes the run began with. */
+    const uint8_t *arena = arena_base();
+    const SrEndSpan spans[] = {
+        { 0u, arena, baseline, SR_RAM_BASE },
+        { SR_RAM_BASE, arena + SR_RAM_BASE, ref_ram, NK_REF_RAM_SIZE },
+    };
+    char what[SR_END_DIFFERENCE_MAX];
+    if (sr_end_state_difference(&s_aot_stop, &g_aot_cpu, &ref_stop, &g_ref_cpu, 1,
+                                oor_reads, oor_writes, spans, sizeof spans / sizeof spans[0],
+                                what, sizeof what)) {
+        printf("MISMATCH %s\n", what);
         return 1;
     }
-    if (ref_kind == STOP_SYSCALL) {
-        if (s_aot_stop.syscall_pc != rr->pc)
-            return verdict_mismatch_hex("syscall_pc", s_aot_stop.syscall_pc, rr->pc);
-        uint32_t ref_code = (rr->op >> 6) & 0xFFFFFu;
-        if (s_aot_stop.syscall_code != ref_code)
-            return verdict_mismatch_hex("syscall_code", s_aot_stop.syscall_code, ref_code);
-    } else if (ref_kind == STOP_IMPORT) {
-        uint32_t ref_nid = 0;
-        for (uint32_t i = 0; i < o->count; i++)
-            if (o->stub[i] == rr->pc) { ref_nid = o->nid[i]; break; }
-        if (s_aot_stop.import_nid != ref_nid)
-            return verdict_mismatch_hex("import_nid", s_aot_stop.import_nid, ref_nid);
-    }
-    char name[16];
-    for (int i = 1; i < 32; i++) {
-        if (a->r[i] != r->r[i]) {
-            snprintf(name, sizeof name, "r%d", i);
-            return verdict_mismatch_hex(name, a->r[i], r->r[i]);
-        }
-    }
-    if (a->hi != r->hi) return verdict_mismatch_hex("hi", a->hi, r->hi);
-    if (a->lo != r->lo) return verdict_mismatch_hex("lo", a->lo, r->lo);
-    for (int i = 0; i < 32; i++) {
-        if (a->fi[i] != r->fi[i]) {
-            snprintf(name, sizeof name, "f%d", i);
-            return verdict_mismatch_hex(name, a->fi[i], r->fi[i]);
-        }
-    }
-    if (a->fcr31 != r->fcr31) return verdict_mismatch_hex("fcr31", a->fcr31, r->fcr31);
-    /* The reference ran to a comparable stop, so it made no access outside its RAM. */
-    if (oor_reads != 0u) return verdict_mismatch_hex("oor_loads", (uint32_t)oor_reads, 0u);
-    if (oor_writes != 0u) return verdict_mismatch_hex("oor_stores", (uint32_t)oor_writes, 0u);
-
-    const uint8_t *arena = arena_base();
-    uint32_t low = first_difference(arena, baseline, 0u, SR_RAM_BASE);
-    if (low < SR_RAM_BASE) return verdict_mismatch_mem(low, arena[low], baseline[low]);
-    uint32_t ram = first_difference(arena + SR_RAM_BASE, ref_ram, 0u, NK_REF_RAM_SIZE);
-    if (ram < NK_REF_RAM_SIZE)
-        return verdict_mismatch_mem(SR_RAM_BASE + ram, arena[SR_RAM_BASE + ram], ref_ram[ram]);
 
     /* Both sides now hold identical bytes everywhere, so the AOT arena speaks for both. */
     uint32_t from = 0u;
     for (;;) {
-        uint32_t at = first_difference(arena, baseline, from, ARENA_SIZE);
+        uint32_t at = sr_end_first_difference(arena, baseline, from, ARENA_SIZE);
         if (at >= ARENA_SIZE) break;
         uint32_t region_end = 0u;
         if (!in_regions(known, at, &region_end)) {
@@ -450,7 +322,7 @@ int main(int argc, char **argv) {
     }
 
     uint32_t image_len = 0;
-    uint8_t *image = read_image(o.image, &image_len);
+    uint8_t *image = sr_harness_read_image(o.image, &image_len);
     if (!image) {
         fprintf(stderr, "snapshot_runner: cannot read %s\n", o.image);
         return 2;
@@ -539,7 +411,7 @@ int main(int argc, char **argv) {
     oor_reads = g_oor_reads - oor_reads;
     oor_writes = g_oor_writes - oor_writes;
     fprintf(stderr, "aot: stop=%s nid=0x%08" PRIx32 " syscall=0x%" PRIx32 "@0x%08" PRIx32 "\n",
-            k_stop_names[s_aot_stop.kind], s_aot_stop.import_nid, s_aot_stop.syscall_code,
+            sr_end_stop_names[s_aot_stop.kind], s_aot_stop.import_nid, s_aot_stop.syscall_code,
             s_aot_stop.syscall_pc);
     if (dispatch_rc < 0) {
         printf("NOT_CHECKED aot-dispatch-error code=%d\n", dispatch_rc);
