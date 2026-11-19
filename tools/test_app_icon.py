@@ -284,6 +284,10 @@ class VersionInfoCommandLineTests(unittest.TestCase):
             out = Path(tmp) / "t.rc"
             args = ("--player", "--original-filename", "nakagawa_player.exe")
             self.assertEqual(self.run_tool(out, *args).returncode, 0)
+            # Move the first write well away from the filesystem's current timestamp tick.
+            # A redundant second write must then change the observed mtime on coarse filesystems too.
+            sentinel_mtime_ns = 946_684_800_000_000_000  # 2000-01-01 UTC
+            os.utime(out, ns=(sentinel_mtime_ns, sentinel_mtime_ns))
             before = out.stat().st_mtime_ns
             self.assertEqual(self.run_tool(out, *args).returncode, 0)
             self.assertEqual(out.stat().st_mtime_ns, before)
