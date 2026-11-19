@@ -16,7 +16,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-import hle_sources  # noqa: E402
+try:
+    import hle_sources
+except ModuleNotFoundError:  # Running as ``python -m unittest tools.test_soak_audit``.
+    from tools import hle_sources
 
 ROOT = Path(__file__).resolve().parents[1]
 PERF_HEADER = "vblank_total,wall_ms,fps,frame_ms,vblank_hz\n"
@@ -423,13 +426,54 @@ class SoakAuditTests(unittest.TestCase):
 
     # -- inputs -------------------------------------------------------------
     def test_missing_inputs_skip_with_a_reason_and_never_pass_silently(self) -> None:
+        """FAILING-BEFORE PROOF: with nothing measured the audit used to print
+        verdict=PASS and exit 0."""
         code, out = self._run()
-        self.assertEqual(code, 0, out)
+        self.assertEqual(code, 77, out)
         self.assertNotIn("verdict=FAIL", out)
         for name in ("presenting", "cadence", "memory_working_set", "handles", "fatal", "route",
                      "compat_patches"):
             self.assertIn(f"SOAK_CHECK: {name} SKIP", out)
+        self.assertIn("SOAK_AUDIT: verdict=SKIP", out)
+        self.assertNotIn("verdict=PASS", out)
+
+        # Too short a perf.csv for a cadence sample and no other input: nothing judged
+        # except presenting, which passes, so the run is a PASS on that one assertion.
+        perf = self._write("perf.csv", _perf([(28.0, 59.9)] * 5))
+        code, out = self._run("--perf", perf)
+        self.assertEqual(code, 0, out)
         self.assertIn("SOAK_AUDIT: verdict=PASS", out)
+
+    def test_a_reported_only_check_is_not_a_judged_pass(self) -> None:
+        """compat_patches reports and never judges, so on its own it is not a PASS."""
+        sys.path.insert(0, str(ROOT / "tools"))
+        import soak_audit
+
+        report = soak_audit.Report()
+        report.add("compat_patches", True, "fired=0 none")
+        report.add("presenting", None, "no perf.csv given")
+        self.assertEqual(report.verdict(), "SKIP")
+        self.assertEqual(report.exit_status(), 77)
+        self.assertIn('"verdict": "SKIP"', report.as_json())
+        report.add("fatal", True, "no fatal marker")
+        self.assertEqual((report.verdict(), report.exit_status()), ("PASS", 0))
+        report.add("route", False, "never reported ROUTE_OK")
+        self.assertEqual((report.verdict(), report.exit_status()), ("FAIL", 1))
+
+    def test_counts_only_keeps_the_raw_fatal_line_out_of_the_summary(self) -> None:
+        """FAILING-BEFORE PROOF: a fatal marker line can carry a host path; the
+        public-summary mode printed its first 120 characters."""
+        stderr = self._write("stderr.log",
+                             "[vfpu_tables] FATAL: cannot open /opt/nakagawa/vfpu/sin.bin\n"
+                             "ROUTE_FAIL: line 3: WAIT MAIN_MENU timed out\n")
+        code, out = self._run("--stderr", stderr, "--compat-counts-only")
+        self.assertEqual(code, 1, out)
+        self.assertIn("SOAK_CHECK: fatal FAIL markers=2 kinds=FATAL,ROUTE_FAIL", out)
+        self.assertNotIn("/opt/nakagawa", out)
+        self.assertNotIn("MAIN_MENU", out)
+        code, out = self._run("--stderr", stderr)
+        self.assertEqual(code, 1, out)
+        self.assertIn("SOAK_CHECK: fatal FAIL markers=2 first='ROUTE_FAIL: line 3", out)
 
     def test_json_output_carries_the_same_verdict(self) -> None:
         perf = self._write("perf.csv", _perf([(28.0, 40.0)] * 40))

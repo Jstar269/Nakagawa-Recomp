@@ -143,6 +143,13 @@ class FontProvisioningTests(unittest.TestCase):
         self.assertIsNone(validate_pgf_data(digits)["slot"])
         mixed = build_pgf([_glyph(0x3042), _glyph(0xAC00)], font_name="Nakagawa Test Mixed")
         self.assertIsNone(validate_pgf_data(mixed)["slot"])
+        # Fonts whose embedded name names another slot: only coverage decides.
+        named_latin = build_pgf([_glyph(0x41), _glyph(0x3042)], font_name="Nakagawa Test Latin")
+        self.assertEqual(validate_pgf_data(named_latin)["slot"], "japanese")
+        named_japanese = build_pgf([_glyph(0x41), _glyph(0xAC00)], font_name="Nakagawa Test Japanese")
+        self.assertEqual(validate_pgf_data(named_japanese)["slot"], "korean")
+        named_korean = build_pgf([_glyph(0x41), _glyph(0x61)], font_name="Nakagawa Test Korean")
+        self.assertEqual(validate_pgf_data(named_korean)["slot"], "latin")
 
     # Import, classify, manifest, status, and removal in a scratch folder --------------------
 
@@ -260,7 +267,7 @@ class FontProvisioningTests(unittest.TestCase):
 
         self.assertEqual(resolve_latin_index(user_data, project / "font", 1),
                          {"source": "user", "served_index": 0})
-        # Index 9 belongs to the second eight-entry group and cannot borrow ltn0.
+        # Index 8, the first entry of the second eight-entry group, cannot borrow ltn0.
         self.assertEqual(resolve_latin_index(user_data, project / "font", 8),
                          {"source": "project", "served_index": -1, "project_file": "nkltn.pgf",
                           "project_style_index": 0})

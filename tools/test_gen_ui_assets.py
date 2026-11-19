@@ -54,17 +54,24 @@ class GenUiAssetsTests(unittest.TestCase):
         self.assertTrue(all(name.endswith(".wav") for name in sounds))
 
     def test_oversized_or_missing_assets_are_refused(self) -> None:
+        # Each case leaves exactly one defect, and the refusal must name that defect.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompts = root / "third_party" / "kenney" / "input-prompts"
             sounds = root / "third_party" / "kenney" / "interface-sounds"
             prompts.mkdir(parents=True)
-            with self.assertRaises(SystemExit):
+            with self.assertRaisesRegex(SystemExit, r"no \*\.png under .*input-prompts"):
+                gen_ui_assets.collect(root)
+            (prompts / "a.png").write_bytes(b"\x89PNG")
+            # Only the sound pack's folder is missing now.
+            with self.assertRaisesRegex(SystemExit, r"no \*\.wav under .*interface-sounds"):
                 gen_ui_assets.collect(root)
             sounds.mkdir(parents=True)
-            (prompts / "a.png").write_bytes(b"\x89PNG")
+            (sounds / "a.wav").write_bytes(b"")
+            with self.assertRaisesRegex(SystemExit, r"a\.wav is 0 bytes"):
+                gen_ui_assets.collect(root)
             (sounds / "a.wav").write_bytes(b"x" * (gen_ui_assets.MAX_ASSET_BYTES + 1))
-            with self.assertRaises(SystemExit):
+            with self.assertRaisesRegex(SystemExit, rf"a\.wav is {gen_ui_assets.MAX_ASSET_BYTES + 1} bytes"):
                 gen_ui_assets.collect(root)
             (sounds / "a.wav").write_bytes(b"RIFF")
             self.assertEqual(

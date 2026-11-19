@@ -894,6 +894,57 @@ static int test_repeat_timing(void) {
     return 1;
 }
 
+/* A direction is one hold however many devices press it: the first press steps,
+   the others add nothing, and it lets go only after its last holder. */
+static int test_direction_holders(void) {
+    NkUiInput in;
+    NkUiEvent ev[NK_UI_INPUT_MAX_EVENTS];
+    NkUiEvent poll[16];
+    double wake = 0.0;
+    size_t n;
+    size_t k;
+
+    /* The D-pad and the stick of one pad pushing the same way. */
+    nk_ui_input_init(&in);
+    n = nk_ui_input_button(&in, NK_UI_BTN_DOWN, true, 7, NK_UI_PAD_NEUTRAL, 0.0, ev, 4);
+    CHECK(n == 2 && ev[1].type == NK_UI_EV_NAV && ev[1].dir == NK_UI_DIR_DOWN,
+          "holders: the D-pad press steps down");
+    n = nk_ui_input_stick(&in, 0.0f, 0.9f, 7, NK_UI_PAD_NEUTRAL, 0.3, ev, 4);
+    for (k = 0; k < n; ++k) {
+        CHECK(ev[k].type != NK_UI_EV_NAV, "holders: the stick joining a held D-pad does not step again");
+    }
+    CHECK(nk_ui_input_next_wake(&in, &wake) && fabs(wake - 0.4) < 1e-9,
+          "holders: the stick joining does not restart the repeat delay");
+    (void)nk_ui_input_button(&in, NK_UI_BTN_DOWN, false, 7, NK_UI_PAD_NEUTRAL, 0.35, ev, 4);
+    n = nk_ui_input_poll(&in, 0.4, poll, 16);
+    CHECK(n == 1 && poll[0].dir == NK_UI_DIR_DOWN && poll[0].repeat,
+          "holders: the stick still holds the repeat after the D-pad lets go");
+    (void)nk_ui_input_stick(&in, 0.0f, 0.0f, 7, NK_UI_PAD_NEUTRAL, 0.45, ev, 4);
+    CHECK(!nk_ui_input_next_wake(&in, &wake), "holders: the last holder letting go stops it");
+
+    /* The keyboard and a pad holding the same direction. */
+    nk_ui_input_init(&in);
+    (void)nk_ui_input_button(&in, NK_UI_BTN_DOWN, true, NK_UI_DEVICE_KEYBOARD_MOUSE,
+                             NK_UI_PAD_KEYBOARD, 0.0, ev, 4);
+    n = nk_ui_input_button(&in, NK_UI_BTN_DOWN, true, 7, NK_UI_PAD_LETTERS_A_SOUTH, 0.1, ev, 4);
+    CHECK(n == 1 && ev[0].type == NK_UI_EV_DEVICE && ev[0].device == 7,
+          "holders: a second device's press names the device but does not step");
+    CHECK(nk_ui_input_prompt_style(&in) == NK_UI_PROMPT_LETTERS_A_SOUTH,
+          "holders: the prompts follow the pad that joined");
+    (void)nk_ui_input_button(&in, NK_UI_BTN_DOWN, false, 9, NK_UI_PAD_NEUTRAL, 0.15, ev, 4);
+    (void)nk_ui_input_button(&in, NK_UI_BTN_DOWN, false, NK_UI_DEVICE_KEYBOARD_MOUSE,
+                             NK_UI_PAD_KEYBOARD, 0.2, ev, 4);
+    CHECK(nk_ui_input_next_wake(&in, &wake) && fabs(wake - 0.4) < 1e-9,
+          "holders: the keyboard letting go leaves the pad's hold and its repeat");
+    n = nk_ui_input_poll(&in, 0.4, poll, 16);
+    CHECK(n == 1 && poll[0].dir == NK_UI_DIR_DOWN, "holders: the pad keeps repeating");
+    (void)nk_ui_input_button(&in, NK_UI_BTN_DOWN, true, 7, NK_UI_PAD_LETTERS_A_SOUTH, 0.45, ev, 4);
+    (void)nk_ui_input_button(&in, NK_UI_BTN_DOWN, false, 7, NK_UI_PAD_LETTERS_A_SOUTH, 0.5, ev, 4);
+    CHECK(!nk_ui_input_next_wake(&in, &wake),
+          "holders: a repeated press does not count twice, so one release ends it");
+    return 1;
+}
+
 static int test_stick_hysteresis(void) {
     NkUiInput in;
     NkUiEvent ev[NK_UI_INPUT_MAX_EVENTS];
@@ -1214,7 +1265,8 @@ static int test_prompt_bounds(void) {
         CHECK(!nk_ui_prompt_draw(&buffer, NULL, rect, 1.0f, 1u), "NULL spec");
         CHECK(!nk_ui_prompt_draw(&buffer, &spec, rect, 0.0f, 1u), "zero density");
         rect.w = 0.0f;
-        CHECK(!nk_ui_prompt_draw(&buffer, &spec, rect, 1.0f, 1u), "empty rect");
+        CHECK(nk_ui_prompt_draw(&buffer, &spec, rect, 1.0f, 1u) && buffer.list.ncmd == 0u,
+              "an empty rect draws nothing and does not fail the frame");
         rect.w = 20.0f;
         spec.action = NK_UI_PROMPT_ACT_COUNT;
         CHECK(!nk_ui_prompt_draw(&buffer, &spec, rect, 1.0f, 1u), "unknown action");
@@ -1769,6 +1821,102 @@ static int test_sdl_translation(void) {
               "SDL_EVENT_GAMEPAD_REMOVED switches back to keyboard and mouse");
     }
 
+    /* Two pads: the stick and each trigger belong to the pad that pressed them, so a
+       resting second pad's jitter neither releases nor re-presses the first pad's hold. */
+    {
+        NkUiSdlInput two;
+        double wake;
+        nk_ui_sdl_input_init(&two);
+        memset(&e, 0, sizeof(e));
+        e.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+        e.gaxis.which = 41;
+        e.gaxis.axis = SDL_GAMEPAD_AXIS_LEFTX;
+        e.gaxis.value = 32000;
+        n = tr(&two, &e, 20.0);
+        CHECK(n >= 1 && g_out[n - 1].type == NK_UI_EV_NAV && g_out[n - 1].dir == NK_UI_DIR_RIGHT,
+              "two pads: pad 41 holds the stick right");
+        e.gaxis.which = 52;
+        e.gaxis.value = 600;
+        CHECK(tr(&two, &e, 20.05) == 0u && nk_ui_input_next_wake(&two.input, &wake),
+              "two pads: a resting pad's stick jitter keeps the held direction repeating");
+        e.gaxis.which = 41;
+        e.gaxis.value = 31000;
+        CHECK(tr(&two, &e, 20.1) == 0u,
+              "two pads: the holding pad's next axis event presses nothing new");
+        e.gaxis.value = 0;
+        (void)tr(&two, &e, 20.15);
+        CHECK(!nk_ui_input_next_wake(&two.input, &wake),
+              "two pads: the holding pad lets the stick go and the repeat stops");
+        e.gaxis.axis = SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
+        e.gaxis.value = 30000;
+        n = tr(&two, &e, 20.2);
+        CHECK(n >= 1 && g_out[n - 1].type == NK_UI_EV_PAGE && g_out[n - 1].dir == NK_UI_DIR_RIGHT,
+              "two pads: pad 41 presses the right trigger");
+        e.gaxis.which = 52;
+        e.gaxis.value = 0;
+        CHECK(tr(&two, &e, 20.25) == 0u, "two pads: a resting pad's trigger is silent");
+        e.gaxis.which = 41;
+        e.gaxis.value = 30000;
+        CHECK(tr(&two, &e, 20.3) == 0u,
+              "two pads: the held trigger turns no second page after the other pad's event");
+    }
+
+    /* A pad removed while it holds the stick or a trigger releases them even when
+       another device was used last and SDL sends no recentering events first. */
+    {
+        NkUiSdlInput gone;
+        double wake;
+        nk_ui_sdl_input_init(&gone);
+        memset(&e, 0, sizeof(e));
+        e.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+        e.gaxis.which = 41;
+        e.gaxis.axis = SDL_GAMEPAD_AXIS_LEFTX;
+        e.gaxis.value = 32000;
+        n = tr(&gone, &e, 30.0);
+        CHECK(n >= 1 && g_out[n - 1].type == NK_UI_EV_NAV && g_out[n - 1].dir == NK_UI_DIR_RIGHT,
+              "removal: pad 41 holds the stick right");
+        e.gaxis.axis = SDL_GAMEPAD_AXIS_LEFT_TRIGGER;
+        n = tr(&gone, &e, 30.01);
+        CHECK(n >= 1 && g_out[n - 1].type == NK_UI_EV_PAGE, "removal: pad 41 holds the left trigger");
+        e = key_event(SDLK_D, true, false, SDL_KMOD_NONE);
+        (void)tr(&gone, &e, 30.1);
+        CHECK(nk_ui_input_last_device(&gone.input) != 41, "removal: the keyboard was used last");
+        memset(&e, 0, sizeof(e));
+        e.type = SDL_EVENT_GAMEPAD_REMOVED;
+        e.gdevice.which = 41;
+        (void)tr(&gone, &e, 30.2);
+        CHECK(!nk_ui_input_next_wake(&gone.input, &wake) &&
+              nk_ui_input_poll(&gone.input, 40.0, g_out, NK_UI_INPUT_MAX_EVENTS) == 0u,
+              "removal: no repeat survives the pad that held the stick");
+        memset(&e, 0, sizeof(e));
+        e.type = SDL_EVENT_GAMEPAD_AXIS_MOTION;
+        e.gaxis.which = 52;
+        e.gaxis.axis = SDL_GAMEPAD_AXIS_LEFT_TRIGGER;
+        e.gaxis.value = 32000;
+        n = tr(&gone, &e, 40.1);
+        CHECK(n >= 1 && g_out[n - 1].type == NK_UI_EV_PAGE && g_out[n - 1].dir == NK_UI_DIR_LEFT,
+              "removal: the removed pad's trigger no longer holds the page button down");
+    }
+    {
+        /* A removed pad lets go of its D-pad even when another device was used last. */
+        NkUiSdlInput gone;
+        double wake;
+        nk_ui_sdl_input_init(&gone);
+        e = pad_button(SDL_GAMEPAD_BUTTON_DPAD_DOWN, true);
+        n = tr(&gone, &e, 50.0);
+        CHECK(n >= 1 && g_out[n - 1].type == NK_UI_EV_NAV && g_out[n - 1].dir == NK_UI_DIR_DOWN,
+              "removal: pad 41 holds the D-pad down");
+        e = key_event(SDLK_D, true, false, SDL_KMOD_NONE);
+        (void)tr(&gone, &e, 50.1);
+        CHECK(nk_ui_input_last_device(&gone.input) != 41, "removal: the keyboard was used last");
+        memset(&e, 0, sizeof(e));
+        e.type = SDL_EVENT_GAMEPAD_REMOVED;
+        e.gdevice.which = 41;
+        (void)tr(&gone, &e, 50.2);
+        CHECK(!nk_ui_input_next_wake(&gone.input, &wake),
+              "removal: no repeat survives the pad that held the D-pad");
+    }
+
     /* Mouse and wheel, scaled into logical pixels. */
     nk_ui_sdl_input_set_event_scale(&s, 0.5f);
     memset(&e, 0, sizeof(e));
@@ -1880,7 +2028,8 @@ int main(int argc, char **argv) {
         !test_ragged_row() || !test_scroll_into_view() || !test_place_follows_the_layout() ||
         !test_nested_scrollers() || !test_scroller_showing_no_control() ||
         !test_nested_scroller_hides_its_list() || !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
-        !test_repeat_timing() || !test_stick_hysteresis() || !test_event_construction() ||
+        !test_repeat_timing() || !test_direction_holders() || !test_stick_hysteresis() ||
+        !test_event_construction() ||
         !test_prompt_style_follows_device() ||
         !test_utf8() || !test_label_table() || !test_prompt_bounds() ||
         !test_prompt_labels() || !test_prompt_images() || !test_glyph_goldens()) {

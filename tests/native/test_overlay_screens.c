@@ -1778,10 +1778,15 @@ static bool append_case(char *out, size_t cap, size_t *used, const char *name, N
     nk_ui_begin(ui, 0.0);
     (void)nk_overlay_frame(ui, state, model);
     if (nk_ui_end(ui) == NULL) return false;
+    /* nk_ui_dump returns the length it needed: a cut dump is refused before it is read. */
     dumped = nk_ui_dump(ui, dump, sizeof(dump));
+    if (dumped >= sizeof(dump)) {
+        fprintf(stderr, "FAIL: the %s dump needs %zu bytes, past its %zu-byte buffer\n", name, dumped,
+                sizeof(dump));
+        return false;
+    }
     while (dumped > 0u && (dump[dumped - 1u] == '\n' || dump[dumped - 1u] == '\r')) --dumped;
-    return dumped < sizeof(dump) && append_text(out, cap, used, dump, dumped) &&
-           append_text(out, cap, used, "\n", 1u);
+    return append_text(out, cap, used, dump, dumped) && append_text(out, cap, used, "\n", 1u);
 }
 
 static bool build_golden(char *out, size_t cap, size_t *used) {
@@ -2122,6 +2127,8 @@ int main(int argc, char **argv) {
     size_t golden_size = 0u;
     bool write = argc > 1 && strcmp(argv[1], "--write-goldens") == 0;
     const char *capture_dir = NULL;
+    bool built;
+    int capture_result = 0;
     for (int i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--capture-dir=", 14u) == 0) {
             capture_dir = argv[i] + 14u;
@@ -2147,19 +2154,31 @@ int main(int argc, char **argv) {
     test_developer_pages_fit();
     test_describe_controls();
     test_eyebrow_cut();
-    CHECK(build_golden(golden, sizeof(golden), &golden_size), "build the overlay golden");
+    built = build_golden(golden, sizeof(golden), &golden_size);
+    CHECK(built, "build the overlay golden");
     if (write) {
-        CHECK(write_golden(GOLDEN_PATH, golden, golden_size), "write the overlay golden");
+        /* A failed build or check leaves the tracked golden as it was, not cut short. */
+        if (built && failures == 0) {
+            CHECK(write_golden(GOLDEN_PATH, golden, golden_size), "write the overlay golden");
+        } else {
+            fprintf(stderr, "overlay screens: %s not written: the checks above failed\n",
+                    GOLDEN_PATH);
+        }
     } else {
         compare_golden(GOLDEN_PATH, golden, golden_size);
     }
     if (capture_dir != NULL && failures == 0) {
-        int capture_result = capture_overlay(capture_dir);
+        capture_result = capture_overlay(capture_dir);
         if (capture_result != 0 && capture_result != 77) ++failures;
     }
     if (failures != 0) {
         fprintf(stderr, "overlay screens: %d failure(s)\n", failures);
         return 1;
+    }
+    /* Captures were asked for and none were made: a SKIP, not a PASS. */
+    if (capture_result == 77) {
+        printf("overlay screens: SKIP (the checks passed; captures were not made)\n");
+        return 77;
     }
     printf("overlay screens: PASS\n");
     return 0;
