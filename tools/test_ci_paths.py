@@ -735,7 +735,8 @@ class CiPathAdversarialTests(unittest.TestCase):
         self.assertEqual(other["run_native"], "false")
 
     def test_windows_job_modules_named_in_ci_yml_stay_routed(self) -> None:
-        for path in ("tools/test_flash0_font.py", "tools/test_public_ci_wiring.py"):
+        for path in ("tools/test_flash0_font.py", "tools/test_public_ci_wiring.py",
+                     "tools/test_hle_title_config_behavior.py"):
             with self.subTest(path=path):
                 self.assertFalse(ci_paths_module._is_unexecuted_test(path))
 

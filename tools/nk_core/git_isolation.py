@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-import functools
 import os
 from pathlib import Path
 import subprocess
@@ -26,7 +25,6 @@ _REPOSITORY_SELECTING_VARIABLES = frozenset({
 })
 
 
-@functools.lru_cache(maxsize=32)
 def _absolute_git_dir(cwd: str, git_dir: str | None = None) -> str | None:
     """The repository directory git resolves from `cwd` (and an explicit GIT_DIR)."""
     env = {key: value for key, value in os.environ.items()

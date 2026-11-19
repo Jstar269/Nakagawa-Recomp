@@ -203,11 +203,11 @@ class UninstallRuleTests(unittest.TestCase):
         resolved = re.findall(r'case NK_PATH_\w+:\s+subdir = "(\w+)";', resolve)
         self.assertEqual(sorted(names.values()), sorted(set(resolved)))
         self.assertIn('"%s\\\\Nakagawa\\\\%s"', resolve)
-        # The docs table, once #2164 lands it, lists the same five.
+        # The docs data-folder table lists the same five; a format change that the
+        # pattern no longer matches fails here as an empty list.
         setup_doc = (ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
         rows = re.findall(r"^\| `(\w+)/` \|", setup_doc, re.MULTILINE)
-        if rows:
-            self.assertEqual(sorted(names.values()), sorted(rows))
+        self.assertEqual(sorted(names.values()), sorted(rows))
 
     def test_the_delete_is_reached_only_from_the_unchecked_box_and_never_when_silent(self):
         release = _release(self.text)

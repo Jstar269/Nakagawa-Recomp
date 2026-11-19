@@ -69,6 +69,7 @@ SAMPLE = manifest([
            tier=disc_verify.VERIFIED_RETAIL),
     record("TEST71005", "Copper Tide", "PENDING"),
     record("TEST71006", "Copper Tide Again", "DUPLICATE"),
+    record("TEST71007", "Replaced Variant", "REPLACED"),
 ])
 
 
@@ -84,6 +85,7 @@ class TierRuleTests(unittest.TestCase):
         self.assertIsNone(compat_table.tier_of(record("A", "B", "PENDING")))
         self.assertIsNone(compat_table.tier_of(record("A", "B", "RUNNING")))
         self.assertIsNone(compat_table.tier_of(record("A", "B", "DUPLICATE")))
+        self.assertIsNone(compat_table.tier_of(record("A", "B", "REPLACED")))
 
     def test_counts_by_tier_verification_and_cause(self) -> None:
         summary = compat_table.summarize(SAMPLE)
@@ -93,7 +95,7 @@ class TierRuleTests(unittest.TestCase):
         self.assertEqual(tiers[compat_table.NO_FRAME][disc_verify.MODIFIED], 1)
         self.assertEqual(tiers[compat_table.NOT_BUILT][disc_verify.UNKNOWN], 1)
         self.assertEqual(tiers[compat_table.NOT_BUILT][disc_verify.NOT_CHECKED], 1)
-        self.assertEqual(summary["left_out"], {"not_built_yet": 1, "copies": 1})
+        self.assertEqual(summary["left_out"], {"not_built_yet": 2, "copies": 1})
         causes = {(row["tier"], row["cause"]): (row["discs"], row["issue"])
                   for row in summary["causes"]}
         self.assertEqual(causes[(compat_table.NOT_BUILT, "COMPILE_FAILED")], (1, 1730))
@@ -112,7 +114,11 @@ class TierRuleTests(unittest.TestCase):
         self.assertIn("commit `0123456789ab`, with a 2400 s time budget per disc and a 30 s "
                       "first launch", block)
         self.assertIn("3,500 discs, version 2026-06-13", block)
-        self.assertIn("1 not built yet in this run, and 1 copy of a disc already counted.", block)
+        self.assertIn(
+            "2 without a current package in this run (not built yet or replaced by a later "
+            "same-ID build), and 1 copy of a disc already counted.",
+            block,
+        )
         # The list in SAMPLE records no serials, so the summary says Unknown is not Modified.
         self.assertIn("A lone fan translation counts as **Unknown**", block)
         with_serials = json.loads(json.dumps(SAMPLE))

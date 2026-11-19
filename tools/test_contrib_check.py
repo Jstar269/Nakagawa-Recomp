@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 from contextlib import redirect_stdout
 import io
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -114,6 +115,261 @@ class TestRouting(unittest.TestCase):
         self.assertIn("ci_paths.classify", source)
         self.assertNotIn("def _is_docs", source)
         self.assertNotIn("def _is_native", source)
+
+
+def _derive_source_test_pairs(root: Path) -> dict[str, set[str]]:
+    """Independently derive ``(source_path -> {tools.test_*})`` pairs from test sources.
+
+    Scans every ``tools/test_*.py`` AST for literal paths that exist under
+    ``src/`` or ``tests/native/`` (string literals, ``Path`` ``/`` joins with
+    directory-variable resolution, ``Path``/``os.path.join``/``joinpath`` calls,
+    and inline ``#include "<unit>.c/.inc"`` directives).
+    """
+    existing: set[str] = set()
+    by_basename: dict[str, list[str]] = {}
+    for base in ("src", "tests/native"):
+        base_dir = root / base
+        if not base_dir.is_dir():
+            continue
+        for dirpath, _dirnames, filenames in os.walk(base_dir):
+            rel_dir = Path(dirpath).relative_to(root).as_posix()
+            for filename in filenames:
+                rel_path = f"{rel_dir}/{filename}"
+                existing.add(rel_path)
+                by_basename.setdefault(filename, []).append(rel_path)
+
+    include_re = re.compile(r'#\s*include\s*"([^"]+)"')
+
+    def norm(raw: str) -> str:
+        s = raw.replace("\\", "/").strip("/")
+        while s.startswith("./"):
+            s = s[2:]
+        return s
+
+    def anchor(joined: str) -> str | None:
+        for prefix in ("src", "tests/native"):
+            if joined == prefix:
+                return prefix
+            marker = prefix + "/"
+            if joined.startswith(marker):
+                return joined
+            pos = joined.find("/" + marker)
+            if pos != -1:
+                return joined[pos + 1:]
+        return None
+
+    def div_path(node: ast.BinOp, env: dict[str, str]) -> str | None:
+        parts: list[str] = []
+        cur: ast.AST = node
+        while isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Div):
+            if isinstance(cur.right, ast.Constant) and isinstance(cur.right.value, str):
+                parts.append(cur.right.value)
+            else:
+                return None
+            cur = cur.left
+        if isinstance(cur, ast.Constant) and isinstance(cur.value, str):
+            parts.append(cur.value)
+        elif isinstance(cur, ast.Name) and cur.id in env:
+            parts.append(env[cur.id])
+        elif isinstance(cur, ast.Attribute) and cur.attr in env:
+            parts.append(env[cur.attr])
+        parts.reverse()
+        return anchor("/".join(norm(p) for p in parts if p))
+
+    def call_path(node: ast.Call, env: dict[str, str]) -> str | None:
+        fn = node.func
+        base: str | None = None
+        if isinstance(fn, ast.Attribute) and fn.attr == "joinpath":
+            if isinstance(fn.value, ast.Name) and fn.value.id in env:
+                base = env[fn.value.id]
+            elif isinstance(fn.value, ast.BinOp) and isinstance(fn.value.op, ast.Div):
+                base = div_path(fn.value, env)
+        elif isinstance(fn, ast.Attribute) and fn.attr == "join":
+            pass
+        elif isinstance(fn, ast.Name) and fn.id in {"Path", "PurePosixPath", "PurePath"}:
+            pass
+        else:
+            return None
+        parts: list[str] = [base] if base else []
+        for idx, arg in enumerate(node.args):
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                parts.append(arg.value)
+            elif isinstance(arg, ast.Name) and arg.id in env:
+                parts.append(env[arg.id])
+            elif idx == 0 and base is None:
+                continue
+            else:
+                return None
+        if not parts:
+            return None
+        return anchor("/".join(norm(p) for p in parts if p))
+
+    pairs: dict[str, set[str]] = {}
+    for test_file in sorted((root / "tools").glob("test_*.py")):
+        if not test_file.is_file():
+            continue
+        module = f"tools.{test_file.stem}"
+        text = test_file.read_text(encoding="utf-8")
+        if "src" not in text and "tests" not in text and "#include" not in text:
+            continue
+        tree = ast.parse(text, filename=str(test_file))
+        docs: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.body and isinstance(node.body[0], ast.Expr):
+                    val = node.body[0].value
+                    if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                        docs.add(id(val))
+        env: dict[str, str] = {}
+        assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and len(n.targets) == 1]
+        for _ in range(2):
+            for assign in assigns:
+                target = assign.targets[0]
+                name = (
+                    target.id if isinstance(target, ast.Name)
+                    else target.attr if isinstance(target, ast.Attribute)
+                    else None
+                )
+                if not name:
+                    continue
+                resolved: str | None = None
+                if isinstance(assign.value, ast.BinOp) and isinstance(assign.value.op, ast.Div):
+                    resolved = div_path(assign.value, env)
+                elif isinstance(assign.value, ast.Call):
+                    resolved = call_path(assign.value, env)
+                elif isinstance(assign.value, ast.Constant) and isinstance(assign.value.value, str):
+                    cand = norm(assign.value.value)
+                    if cand in {"src", "tests/native"} or cand.startswith(("src/", "tests/native/")):
+                        resolved = cand
+                if resolved:
+                    env[name] = resolved
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if id(node) in docs:
+                    continue
+                literal = norm(node.value)
+                if literal in existing:
+                    pairs.setdefault(literal, set()).add(module)
+                if "#include" in node.value:
+                    for match in include_re.finditer(node.value):
+                        inc = match.group(1).replace("\\", "/")
+                        if inc.endswith((".c", ".inc")):
+                            matches = by_basename.get(inc, [])
+                            if len(matches) == 1:
+                                pairs.setdefault(matches[0], set()).add(module)
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+                div_resolved = div_path(node, env)
+                if div_resolved and div_resolved in existing:
+                    pairs.setdefault(div_resolved, set()).add(module)
+            elif isinstance(node, ast.Call):
+                call_resolved = call_path(node, env)
+                if call_resolved and call_resolved in existing:
+                    pairs.setdefault(call_resolved, set()).add(module)
+    return pairs
+
+
+class TestSourceFileTestSelection(unittest.TestCase):
+    """Changing a ``tests/native/`` or ``src/`` file must select the Python tests that exercise it."""
+
+    derived_pairs: dict[str, set[str]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.derived_pairs = _derive_source_test_pairs(ROOT)
+
+    def test_dispatch_isolation_selftest_selects_dispatch_call_boundary(self) -> None:
+        modules = contrib_check.python_test_modules(["tests/native/dispatch_isolation_selftest.c"])
+        self.assertIn("tools.test_dispatch_call_boundary", modules)
+        self.assertIn("tools.test_dispatch_c", modules)
+        self.assertIn("tools.test_analyzer_span_scope", modules)
+        self.assertIn("tools.test_title_runtime_config", modules)
+        self.assertIn("tools.test_trace_window_probe", modules)
+
+    def test_every_literal_source_path_in_test_modules_is_selected_or_excluded(self) -> None:
+        self.assertTrue(self.derived_pairs, "expected literal src/ or tests/native/ references in tools/test_*.py")
+        missed: list[tuple[str, str]] = []
+        leaked_excluded: list[tuple[str, str]] = []
+        for source_path, expected_modules in sorted(self.derived_pairs.items()):
+            selected = set(contrib_check.python_test_modules([source_path]))
+            for module in sorted(expected_modules):
+                if module in contrib_check.SOURCE_TEST_EXCLUSIONS:
+                    if module in selected:
+                        leaked_excluded.append((source_path, module))
+                elif module not in selected:
+                    missed.append((source_path, module))
+        self.assertEqual(
+            missed,
+            [],
+            f"contrib_check.python_test_modules missed {len(missed)} (source, test) pair(s): {missed[:10]}",
+        )
+        self.assertEqual(
+            leaked_excluded,
+            [],
+            f"excluded test modules were still selected by source changes: {leaked_excluded[:10]}",
+        )
+
+    def test_source_test_exclusions_are_valid_documented_and_non_stale(self) -> None:
+        referenced_modules = {mod for mods in self.derived_pairs.values() for mod in mods}
+        for module, reason in contrib_check.SOURCE_TEST_EXCLUSIONS.items():
+            with self.subTest(module=module):
+                self.assertTrue(module.startswith("tools.test_"), f"{module} is not a tools.test_* name")
+                rel = f"tools/{module.removeprefix('tools.')}.py"
+                self.assertTrue((ROOT / rel).is_file(), f"{module} does not exist at {rel}")
+                self.assertTrue(reason.strip(), f"{module} exclusion has an empty reason")
+                self.assertIn(
+                    module,
+                    referenced_modules,
+                    f"{module} is in SOURCE_TEST_EXCLUSIONS but no longer references any src/ or tests/native/ path",
+                )
+                # Direct edits to an excluded test module itself must still run that module.
+                self.assertIn(module, contrib_check.python_test_modules([rel]))
+
+    def test_selection_stays_focused_on_affected_modules(self) -> None:
+        all_test_modules = list((ROOT / "tools").glob("test_*.py"))
+        selected = contrib_check.python_test_modules(["tests/native/dispatch_isolation_selftest.c"])
+        self.assertGreater(len(selected), 0)
+        self.assertLess(len(selected), len(all_test_modules) // 10)
+        self.assertEqual(
+            contrib_check.python_test_modules(["src/rt/nonexistent_unreferenced_file.c"]),
+            [],
+        )
+
+    def test_synthetic_root_selects_and_excludes_literal_source_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_root = Path(tmp)
+            (fake_root / "src" / "rt").mkdir(parents=True)
+            (fake_root / "tests" / "native").mkdir(parents=True)
+            (fake_root / "tools").mkdir(parents=True)
+            (fake_root / "src" / "rt" / "demo_unit.c").write_text("int demo(void) { return 0; }\n", encoding="utf-8")
+            (fake_root / "tests" / "native" / "demo_selftest.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+            (fake_root / "tools" / "test_demo_unit.py").write_text(
+                'from pathlib import Path\n'
+                'ROOT = Path(__file__).resolve().parent.parent\n'
+                'UNIT = ROOT / "src" / "rt" / "demo_unit.c"\n'
+                'SELFTEST = "tests/native/demo_selftest.c"\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(contrib_check, "ROOT", fake_root):
+                self.assertEqual(
+                    contrib_check.python_test_modules(["src/rt/demo_unit.c"]),
+                    ["tools.test_demo_unit"],
+                )
+                self.assertEqual(
+                    contrib_check.python_test_modules(["tests/native/demo_selftest.c"]),
+                    ["tools.test_demo_unit"],
+                )
+                with mock.patch.dict(
+                    contrib_check.SOURCE_TEST_EXCLUSIONS,
+                    {"tools.test_demo_unit": "synthetic exclusion"},
+                ):
+                    self.assertEqual(
+                        contrib_check.python_test_modules(["src/rt/demo_unit.c"]),
+                        [],
+                    )
+                    self.assertEqual(
+                        contrib_check.python_test_modules(["tools/test_demo_unit.py"]),
+                        ["tools.test_demo_unit"],
+                    )
 
 
 class TestGateStatusVocabulary(unittest.TestCase):

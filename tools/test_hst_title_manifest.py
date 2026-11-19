@@ -94,7 +94,13 @@ class HstTitleManifestTests(unittest.TestCase):
     def test_module_names_and_load_addresses_match_private_adapter(self) -> None:
         adapter = (ROOT / "tools" / "title_manager_plan.ps1").read_text(encoding="utf-8")
         for module in self.manifest["modules"]:
-            self.assertIn(module["name"], adapter)
+            # The adapter pins each module as one hashtable row; compare the whole
+            # row so a drifted load address fails here and not only under pwsh.
+            self.assertIn(
+                f"@{{ name = '{module['name']}'; load_address = {module['load_address']} }}",
+                adapter,
+                module["name"],
+            )
         self.assertNotIn("CODEGEN_PROFILE_ARG := --profile=hst", read_makefile(ROOT))
 
     def test_extra_executable_span_is_owned_by_the_manifest_plan(self) -> None:
