@@ -683,7 +683,9 @@ with the host twin (#2050) on, native and full colour, on both paths at scales 1
 the native twin on the interlock path: the image and the path taken must be those of the twin-off run, a native
 twin must equal its image, and a full-colour twin of the overlapping pair must hold the blends at 8 bits per
 channel, in drawing order on the interlock path. A device that refuses the
-interlock prints one SKIP line for each interlock leg. The lavapipe step prints
+interlock prints one SKIP line for each interlock leg, and the recipe's last line names every leg that printed a
+SKIP line (a leg that refuses the interlock, supersampling or the twin exits 0 without running its path), or says
+that every leg ran. The lavapipe step prints
 the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
 pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Four
 mutant targets follow, and each broken variant must fail its case with its own message:
@@ -1612,7 +1614,59 @@ purpose, and `tools/test_merge_append.py` keeps the list honest:
 - The root `Makefile` only includes the `mk/` files, so it is no longer an append point.
 
 Add a file to the list only when every conflict it can have is two independent items, and add it to
-`ALLOWED_PATHS`, `.gitattributes` and the test together.
+`ALLOWED_PATHS`, `.gitattributes` and the test together. Generated files never use this driver; they
+have their own route below.
+
+## Merging regenerated files
+
+The files that `python tools/regen_all.py --list` names (`docs/HLE_COVERAGE.md`, `src/rt/hle_evidence.h`,
+`src/rt/nid_names.h`, `docs/RECOMP_HELPER_INVENTORY.md`, the HLE baseline and the census block in
+`docs/HLE_AND_WORKAROUND_INVENTORY.md`, the waits census, the title catalog, the provenance controls and
+the rest) are rewritten whole from the tree. Two pull requests that each touch an HLE or runtime source
+therefore conflict in those files even when their own changes are far apart, and every landing makes the
+rest of the queue conflict again. Under section 10 of `AGENTS.md` such a conflict is generated content,
+not a substantive correction. Neither side's copy is right after the merge: the right bytes are a fresh
+generation from the merged tree. `tools/regen_all.py --resolve-merge` produces them:
+
+```bash
+git merge origin/main             # or: git merge --squash --no-commit <branch>, git cherry-pick <commit>
+python tools/regen_all.py --resolve-merge
+git commit                        # concludes the merge
+python tools/regen_all.py         # after a merge commit only: the provenance refresh, its own commit
+```
+
+It works from the conflicted index (stage 1 the ancestor, 2 ours, 3 theirs), so it needs no Git
+setting, and it does this:
+
+1. It reads every conflicted path. If any is not an output of a step it runs (source, prose, a
+   skipped step's output such as the embedded shaders), or a generated file was deleted on one side,
+   it lists each one as `CONFLICT` and exits 1 without writing anything. No generator runs on a tree
+   that still holds a person's conflict. Resolve those by hand, `git add` them and run it again.
+2. A whole-file output takes our side. `docs/HLE_AND_WORKAROUND_INVENTORY.md` is hand-written around its
+   generated census block, so it merges three ways with the block emptied on every side. A conflict in
+   that hand-written text is a `CONFLICT` as in step 1.
+3. It regenerates every output from the merged tree, stages the results and runs the same comparison
+   as `--check` again. A step that fails, or an output that is still stale, makes it exit 1 with
+   `refusing to finish the merge`.
+4. The provenance controls hash the staged tree against a base, `merge-base(HEAD, origin/main)`, that
+   must be an ancestor of `HEAD`. During a squash merge or a cherry-pick `HEAD` is the branch being
+   built, so it refreshes and checks them too. If they conflicted and `contrib_refresh.py` refuses to
+   refresh them (a new or removed public path, a changed profile), it exits 1: that needs the
+   maintainer's admission route. During `git merge` the base that the finished merge will have does not
+   exist yet, so the controls stay as our side (`NOT_RUN provenance controls`). After `git commit`, run
+   `python tools/regen_all.py` and commit the refresh on its own, as section 4 of `AGENTS.md` asks.
+
+It never commits. Hosted CI stays the gate: `python tools/regen_all.py --check` in `Generated files and
+repository lints` on a quick run, and on a full run `tools/test_regen_all.py` in `Python tooling gates`,
+which compares each generator's output with the committed file. If a merge took the wrong side somewhere
+this route does not cover, the head still fails there and cannot land.
+
+Why not a merge driver like `nk-append`? A driver for these files would have to write one side and exit
+0 (then `git merge` commits a stale file on its own) or exit 1 (then the merge stops exactly as it does
+without one). The index already holds all three sides, so the command needs no driver, no per-clone
+setting and no `.gitattributes` entry that a pull request could point at another file. GitHub's own
+mergeability check and its **Update branch** button cannot run either, so a pull request can still show
+a conflict on GitHub that this command resolves locally.
 
 ## Trusted CI verdict
 

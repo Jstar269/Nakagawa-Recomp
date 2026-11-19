@@ -527,7 +527,7 @@
     },
     {
       "id": "PSP-FPU-001",
-      "status": "planned",
+      "status": "implemented",
       "hardware_evidence": "MEASURED",
       "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
       "evidence_cases": ["fpu-boot-fcr31", "fpu-cvt-rm0", "fpu-cvt-rm1", "fpu-cvt-rm2", "fpu-cvt-rm3", "fpu-ccast-trunc", "fpu-cvt-s-w", "fpu-flag-overflow", "fpu-flag-div0", "fpu-flag-invalid", "fpu-flag-underflow", "fpu-flag-inexact", "fpu-ftz-contrast", "fpu-signed-zero", "fpu-nan-payload", "fpu-done"],
@@ -596,7 +596,7 @@
     },
     {
       "id": "PSP-GE-001",
-      "status": "planned",
+      "status": "implemented",
       "hardware_evidence": "MEASURED",
       "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
       "evidence_cases": ["ge-nan-vfpu-qnan", "ge-nan-screen2d-qnan", "ge-nan-clip3d-qnan", "ge-nan-litnormal-qnan", "ge-nan-vfpu-pinf", "ge-nan-screen2d-pinf", "ge-nan-clip3d-pinf", "ge-nan-litnormal-pinf", "ge-nan-vfpu-ninf", "ge-nan-screen2d-ninf", "ge-nan-clip3d-ninf", "ge-nan-litnormal-ninf", "ge-nan-vfpu-nzero", "ge-nan-screen2d-nzero", "ge-nan-clip3d-nzero", "ge-nan-litnormal-nzero", "ge-nan-vfpu-denorm", "ge-nan-screen2d-denorm", "ge-nan-clip3d-denorm", "ge-nan-litnormal-denorm", "ge-nan-done"],
@@ -614,7 +614,7 @@
     },
     {
       "id": "PSP-MUTEX-001",
-      "status": "planned",
+      "status": "implemented",
       "hardware_evidence": "MEASURED",
       "evidence_ref": "docs/HARDWARE_ORACLE.md#measured-to-date-index-exact-cells-only-do-not-generalize",
       "evidence_cases": ["mutex-refer-unlocked", "mutex-timeout-quanta", "mutex-priority-inheritance", "mutex-interrupt-context"],

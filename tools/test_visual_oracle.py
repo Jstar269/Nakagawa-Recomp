@@ -86,14 +86,20 @@ def _declared_parameters(source: str) -> dict[str, set[str]]:
 
 
 def _call_segments(source: str, names: set[str]) -> list[tuple[str, str]]:
-    """Yield (helper name, argument text) for every `Helper -Argument` call in `source`."""
+    """Yield (helper name, argument text) for every `Helper -Argument` call in `source`.
+
+    PowerShell resolves command names case-insensitively, so a call is found in any casing
+    and reported under the helper's declared name.
+    """
+    by_lower = {name.lower(): name for name in names}
     segments: list[tuple[str, str]] = []
-    for match in re.finditer(r"\b(" + "|".join(sorted(map(re.escape, names))) + r")\b", source):
+    pattern = r"\b(" + "|".join(sorted(map(re.escape, names))) + r")\b"
+    for match in re.finditer(pattern, source, re.IGNORECASE):
         text = match.end()
         while True:
             newline = source.find("\n", text)
             line = source[text : newline if newline >= 0 else len(source)]
-            segments.append((match.group(1), line))
+            segments.append((by_lower[match.group(1).lower()], line))
             if not line.rstrip().endswith("`") or newline < 0:
                 break
             text = newline + 1
@@ -101,10 +107,81 @@ def _call_segments(source: str, names: set[str]) -> list[tuple[str, str]]:
 
 
 def _named_arguments(segment: str) -> set[str]:
-    """Return the -Named arguments in one call segment, ignoring strings and comments."""
+    """Return the -Named arguments in one call segment, ignoring strings and comments.
+
+    A name ends at whitespace, a `:` (colon-bound `-Name:$value`), a closing paren, a line
+    continuation or the end of the segment, which is one line without its newline.
+    """
     line = re.sub(r"#.*$", "", segment, flags=re.M)
     line = re.sub(r"\"[^\"]*\"|'[^']*'", " ", line)
-    return set(re.findall(r"(?<![\w-])-([A-Za-z]\w*)\s*:?\s", line))
+    return set(re.findall(r"(?<![\w-])-([A-Za-z]\w*)(?=[\s:)`]|$)", line, re.M))
+
+
+def _unbound_helper_arguments(manager: str, support: str) -> list[str]:
+    """`Helper -Param` pairs in `manager` whose helper in `support` declares no such parameter.
+
+    PowerShell binds parameter names case-insensitively, so they are compared that way.
+    """
+    declared = {name: {p.lower() for p in params}
+                for name, params in _declared_parameters(support).items()}
+    return [
+        f"{name} -{param}"
+        for name, segment in _call_segments(manager, set(declared))
+        for param in _named_arguments(segment)
+        if param.lower() not in declared[name]
+    ]
+
+
+def _manifest_keys(manager: str) -> set[str]:
+    """The keys of the hashtable the visual oracle writes to oracle_manifest.json."""
+    write = manager.index('"oracle_manifest.json"')
+    start = manager.rindex("$manifest = [ordered]@{", 0, write)
+    end = manager.index("\n        }\n", start)
+    if end > write or manager.find("$manifest | ConvertTo-Json", end, write) < 0:
+        raise AssertionError("oracle_manifest.json is not written from the $manifest hashtable")
+    return set(re.findall(r"(?m)^\s*(\w+)\s*=", manager[start:end].split("{", 1)[1]))
+
+
+class HelperBindingGuardTests(unittest.TestCase):
+    """The parameter-binding guard sees every form PowerShell binds."""
+
+    SUPPORT = (
+        "function Reset-OracleArchive {\n"
+        "    param([string]$Path, [switch]$Overwrite)\n"
+        "}\n"
+    )
+
+    def test_named_arguments_sees_trailing_and_colon_bound_switches(self) -> None:
+        self.assertEqual({"Path", "Bogus"}, _named_arguments(" -Path $outDir -Bogus"))
+        self.assertEqual({"Path", "Overwrite"}, _named_arguments(" -Path $d -Overwrite:$x"))
+        self.assertEqual({"Path"}, _named_arguments(" -Path $d)"))
+        self.assertEqual({"Path"}, _named_arguments(" -Path $d `"))
+        self.assertEqual(set(), _named_arguments(' "-Path" # -Bogus'))
+
+    def test_unknown_trailing_or_colon_bound_parameter_is_reported(self) -> None:
+        for call in ("Reset-OracleArchive -Path $outDir -Bogus\n",
+                     "Reset-OracleArchive -Path $outDir -Overwrit:$x\n"):
+            self.assertEqual(1, len(_unbound_helper_arguments(call, self.SUPPORT)), call)
+        self.assertEqual([], _unbound_helper_arguments(
+            "Reset-OracleArchive -Path $outDir -Overwrite:$x\n", self.SUPPORT))
+
+    def test_calls_and_parameters_match_case_insensitively(self) -> None:
+        self.assertEqual(["Reset-OracleArchive -Pth"],
+                         _unbound_helper_arguments("reset-oraclearchive -Pth $x\n", self.SUPPORT))
+        self.assertEqual([], _unbound_helper_arguments(
+            "RESET-ORACLEARCHIVE -path $x -OVERWRITE\n", self.SUPPORT))
+
+    def test_manifest_keys_come_from_the_written_hashtable_only(self) -> None:
+        manager = (
+            "$complete = 1\n"
+            "        $manifest = [ordered]@{\n"
+            "            oracle_name          = $OracleName\n"
+            "            exit_code            = $code\n"
+            "        }\n"
+            "        $manifest | ConvertTo-Json -Depth 4 |\n"
+            '            Out-File -FilePath (Join-Path $outDir "oracle_manifest.json") -Encoding utf8\n'
+        )
+        self.assertEqual({"oracle_name", "exit_code"}, _manifest_keys(manager))
 
 
 class VisualOracleBehaviorTests(unittest.TestCase):
@@ -513,7 +590,9 @@ class VisualOracleContractTests(unittest.TestCase):
 
     def test_oracle_records_a_provenance_manifest(self) -> None:
         # An evidence set that cannot be traced to a build, a route and a verdict is not
-        # evidence. Each of these was requested explicitly after #141 review.
+        # evidence. Each of these was requested explicitly after #141 review. The keys are read
+        # from the hashtable written to oracle_manifest.json, not from anywhere in the manager.
+        keys = _manifest_keys(self.manager)
         for field in (
             "git_head",
             "exe_sha256",
@@ -525,8 +604,7 @@ class VisualOracleContractTests(unittest.TestCase):
             "observed_vblank",
             "complete",
         ):
-            self.assertIn(field, self.manager, f"manifest must record {field}")
-        self.assertIn("oracle_manifest.json", self.manager)
+            self.assertIn(field, keys, f"oracle_manifest.json must record {field}")
 
     def test_oracle_supports_profiles_without_a_second_runner(self) -> None:
         # #33 baselines need the Benchmark profile; they must not fork the runner.
@@ -546,14 +624,8 @@ class VisualOracleContractTests(unittest.TestCase):
         # dies on its first call with a message that names neither the caller nor the action.
         # -Action VisualOracle shipped that way since #196, which left the only scripted-input
         # route in the product unusable.
-        declared = _declared_parameters(self.support)
-        self.assertIn("Test-SafeComponentName", declared)
-        unknown = [
-            f"{name} -{param}"
-            for name, segment in _call_segments(self.manager, set(declared))
-            for param in _named_arguments(segment)
-            if param not in declared[name]
-        ]
+        self.assertIn("Test-SafeComponentName", _declared_parameters(self.support))
+        unknown = _unbound_helper_arguments(self.manager, self.support)
         self.assertEqual(
             [],
             unknown,

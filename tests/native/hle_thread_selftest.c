@@ -52,6 +52,7 @@ instrumentation is this test's protection against the historical RAM runaway."
 #define HLE_BUILD_ROOT SR_SELFTEST_BUILD_ROOT
 
 #include "ge_shared.h"
+#include "ge_capture.h"      /* the capture a texture decode must tell */
 #include "gpu_sdl3vk/ge_gpu.h"   /* GeGpuFbDescriptor: header-only, no Vulkan */
 #include "sce_kernel_errors.h"
 #include "sched.c" /* white-box fixture setup and observable TCB state */
@@ -6028,7 +6029,92 @@ static void test_fd_namespace(void) {
            "sceIoRename source file removed after replace");
     expect(fd_host_bytes_equal(rename_dst_host, overwrite_payload, sizeof(overwrite_payload) - 1u),
            "sceIoRename replaced destination contains new payload");
+
+    /* 5. A rename that cannot complete leaves an existing destination alone. The Windows leg
+     * used to delete the destination before the move, so a missing source onto it, a rename
+     * onto itself and a case-only rename (the same file on NTFS) each lost the file. */
+    fd_guest_copy(rename_src_addr, rename_nonexist, sizeof(rename_nonexist));
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = rename_src_addr;
+    cpu.r[5] = rename_dst_addr;
+    expect(sr_hle_test_io_rename(&cpu) == 0x80010002u,
+           "sceIoRename of a missing source onto an existing file returns 0x80010002");
+    expect(fd_host_bytes_equal(rename_dst_host, overwrite_payload, sizeof(overwrite_payload) - 1u),
+           "sceIoRename of a missing source leaves the existing destination intact");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = rename_dst_addr;
+    cpu.r[5] = rename_dst_addr;
+    expect(sr_hle_test_io_rename(&cpu) == 0u &&
+               fd_host_bytes_equal(rename_dst_host, overwrite_payload, sizeof(overwrite_payload) - 1u),
+           "sceIoRename of a file onto itself succeeds and keeps the file");
+    static const char rename_case_guest[] = "ms0:/nakagawa_renamed_result.txt";
+    char rename_case_host[256];
+    fd_host_path(rename_case_host, sizeof(rename_case_host), rename_case_guest);
+    fd_guest_copy(rename_src_addr, rename_dst_guest, sizeof(rename_dst_guest));
+    fd_guest_copy(rename_dst_addr, rename_case_guest, sizeof(rename_case_guest));
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = rename_src_addr;
+    cpu.r[5] = rename_dst_addr;
+    expect(sr_hle_test_io_rename(&cpu) == 0u &&
+               fd_host_bytes_equal(rename_case_host, overwrite_payload, sizeof(overwrite_payload) - 1u),
+           "a case-only sceIoRename succeeds and keeps the file's bytes");
+    nk_remove_utf8(rename_case_host);
     nk_remove_utf8(rename_dst_host);
+
+    /* A synchronous write or read whose guest span leaves guest memory is 0x80010016, as
+     * sceIoWriteAsync and sceIoReadAsync refuse it at submission, and the file and position stay
+     * unchanged. The write used to store zeros for the bytes past the arena and the read to drop
+     * them, each reporting the full count. A read is judged on the bytes it delivers, after the
+     * clamp to the end of the file. */
+    {
+        static const char span_guest[] = "ms0:/NAKAGAWA_SPAN_EDGE.BIN";
+        static const uint8_t span_bytes[] = "ABCDEF";
+        char span_host[256];
+        fd_host_path(span_host, sizeof(span_host), span_guest);
+        nk_remove_utf8(span_host);
+        fd_set_path(&cpu, path_addr, span_guest);
+        uint32_t span_fd = sr_hle_test_io_open(&cpu);
+        expect(span_fd >= 3u && span_fd < 64u, "the span-edge fixture opens for writing");
+        fd_guest_copy(payload_addr, span_bytes, 4u);
+        fd_set_write(&cpu, span_fd, payload_addr, 4u);
+        expect(sr_hle_test_io_write(&cpu) == 4u, "the span-edge fixture's first write lands");
+        fd_set_write(&cpu, span_fd, 0x0bffff00u, 0x200u);
+        expect(sr_hle_test_io_write(&cpu) == 0x80010016u,
+               "sceIoWrite from a source that leaves guest memory is 0x80010016");
+        fd_guest_copy(payload_addr, span_bytes + 4, 2u);
+        fd_set_write(&cpu, span_fd, payload_addr, 2u);
+        expect(sr_hle_test_io_write(&cpu) == 2u, "the write after the refused one lands");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = span_fd;
+        expect(sr_hle_test_io_close(&cpu) == 0u, "the span-edge write descriptor closes");
+        expect(fd_host_bytes_equal(span_host, span_bytes, 6u),
+               "a refused sceIoWrite stores nothing and keeps the position");
+
+        fd_set_path(&cpu, path_addr, span_guest);
+        cpu.r[5] = 0x0001u; /* PSP_O_RDONLY */
+        span_fd = sr_hle_test_io_open(&cpu);
+        expect(span_fd >= 3u && span_fd < 64u, "the span-edge fixture opens for reading");
+        fd_set_write(&cpu, span_fd, 0x0bfffff0u, 0x1000u);
+        int top_ok = sr_hle_test_io_read(&cpu) == 6u;
+        for (uint32_t k = 0; k < 6u; k++) top_ok = top_ok && MEM_R8(0x0bfffff0u + k) == span_bytes[k];
+        expect(top_ok, "a long sceIoRead whose bytes after the clamp fit guest memory reads the file");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = span_fd;
+        cpu.r[5] = 0u;
+        cpu.r[6] = SEEK_SET;
+        expect(sr_hle_test_io_lseek32(&cpu) == 0u, "the span-edge read descriptor seeks to 0");
+        fd_set_write(&cpu, span_fd, 0x0bfffffcu, 0x40u);
+        expect(sr_hle_test_io_read(&cpu) == 0x80010016u,
+               "sceIoRead into a destination that leaves guest memory is 0x80010016");
+        fd_set_write(&cpu, span_fd, payload_addr, 0x40u);
+        int kept_ok = sr_hle_test_io_read(&cpu) == 6u;
+        for (uint32_t k = 0; k < 6u; k++) kept_ok = kept_ok && MEM_R8(payload_addr + k) == span_bytes[k];
+        expect(kept_ok, "a refused sceIoRead keeps the position");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = span_fd;
+        expect(sr_hle_test_io_close(&cpu) == 0u, "the span-edge read descriptor closes");
+        nk_remove_utf8(span_host);
+    }
 
     /* A write longer than the host copy buffer (4096 bytes) reaches the file whole. It used to
      * stop after the first buffer and report 4096, and a game takes that short count for a
@@ -6964,6 +7050,9 @@ static void test_ms0_unified_namespace(void) {
     cpu.r[4] = 0x09181000u;
     uint32_t ms_dir_fd = sr_hle_test_io_dopen(&cpu);
     int ms_dread_file = 0;
+    /* d_private (SceIoDirent + 0x158) is the caller's pointer, set once before the loop. */
+    MEM_W32(0x09180000u + 0x158u, 0x09182000u);
+    MEM_W32(0x09180000u + 0x15cu, 0x5a5a5a5au);
     for (int guard = 0; guard < 16; guard++) {
         memset(&cpu, 0, sizeof cpu);
         cpu.r[4] = ms_dir_fd;
@@ -6974,6 +7063,8 @@ static void test_ms0_unified_namespace(void) {
                             MEM_R32(0x09180000u + 8u) == (uint32_t)(sizeof(payload) - 1u);
     }
     expect(ms_dread_file, "sceIoDread lists an ms0 file with sceIoGetstat's mode 0x21ff and attr 0x0020");
+    expect(MEM_R32(0x09180000u + 0x158u) == 0x09182000u && MEM_R32(0x09180000u + 0x15cu) == 0x5a5a5a5au,
+           "sceIoDread leaves the caller's d_private pointer and the word after it untouched");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = ms_dir_fd;
     (void)sr_hle_test_io_dclose(&cpu);
@@ -7337,6 +7428,20 @@ static void test_ms0_unified_namespace(void) {
 #else
             expect(read_refusal == 0x80010016u, "POSIX refuses a read through the link as EINVAL");
 #endif
+            /* sceIoGetstat through the same link is refused like the read, and tells nothing
+             * of the outside file: not that it exists, nor its type or size. */
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = PATH_ADDR;
+            cpu.r[5] = STAT_ADDR;
+            for (uint32_t i = 0; i < 0x58u; i++) MEM_W8(STAT_ADDR + i, 0xcc);
+            const uint32_t stat_refusal = sr_hle_test_io_getstat(&cpu);
+            if (stat_refusal != read_refusal)
+                fprintf(stderr, "  sceIoGetstat through the link answered 0x%08x, a read 0x%08x\n",
+                        (unsigned)stat_refusal, (unsigned)read_refusal);
+            expect(stat_refusal == read_refusal && MEM_R32(STAT_ADDR) == 0xccccccccu &&
+                       MEM_R32(STAT_ADDR + 8u) == 0xccccccccu,
+                   "sceIoGetstat through a folder link is refused like a read and reports no "
+                   "outside file");
             for (size_t i = 0; i < sizeof(opens) / sizeof(opens[0]); ++i) {
                 fd_guest_copy(PATH_ADDR, opens[i].guest, strlen(opens[i].guest) + 1u);
                 fd_set_path(&cpu, PATH_ADDR, opens[i].guest);
@@ -12700,6 +12805,23 @@ static int sdt_live_bookkeeping(const char *dir) {
     return n;
 }
 
+/* The kept copies of one member in a save directory: ".nakagawa-kept-<anything>-<member>". */
+static int sdt_kept_copies(const char *dir, const char *member) {
+    int n = 0;
+    size_t ml = strlen(member);
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        size_t len = strlen(de->d_name);
+        if (!strncmp(de->d_name, ".nakagawa-kept-", 15) && len > 15u + ml &&
+            de->d_name[len - ml - 1u] == '-' && !strcmp(de->d_name + len - ml, member))
+            n++;
+    }
+    closedir(d);
+    return n;
+}
+
 static void sdt_param(uint32_t mode, const char *game, const char *save, const char *file) {
     memset(g_mem_base + SDT_PARAM, 0, 0x600u);
     memset(g_mem_base + SDT_BUF, 0, 0x100u);
@@ -12834,11 +12956,27 @@ static void test_savedata_list_selection(void) {
     fd_guest_copy(SDT_BUF, "UNO", 3u);
     MEM_W32(SDT_PARAM + 0x7cu, 3u);
     snprintf(path, sizeof(path), "%s/PSP/SAVEDATA/NKLISTSLOT1/DATA.BIN", root);
-    char kept[600];
-    snprintf(kept, sizeof(kept), "%s/PSP/SAVEDATA/NKLISTSLOT1/.nakagawa-kept-0-DATA.BIN", root);
+    char kept[600], slot1[600];
+    snprintf(kept, sizeof(kept), "%s/PSP/SAVEDATA/NKLISTSLOT1/.nakagawa-kept-replaced-DATA.BIN", root);
+    snprintf(slot1, sizeof(slot1), "%s/PSP/SAVEDATA/NKLISTSLOT1", root);
     expect(sr_savedata_execute(SDT_PARAM) == 0u && sdt_read(path, text, sizeof(text)) &&
                !strcmp(text, "UNO") && sdt_read(kept, text, sizeof(text)) && !strcmp(text, "ONE"),
            "an automatic LISTSAVE over an existing save keeps the replaced version");
+    /* Each automatic overwrite supersedes the last: the slot keeps one copy per member, the
+     * version just before, so repeated saving never fills the kept names (which made every
+     * later SAVE to the slot fail). */
+    for (int i = 0; i < 3; i++) {
+        static const char *const again[] = { "DOS", "TRES", "CUATRO" };
+        sdt_list(5u, 0u /* NAME */, "SLOT1", save_list);
+        fd_guest_copy(SDT_BUF, again[i], (uint32_t)strlen(again[i]));
+        MEM_W32(SDT_PARAM + 0x7cu, (uint32_t)strlen(again[i]));
+        expect(sr_savedata_execute(SDT_PARAM) == 0u, "a repeated automatic LISTSAVE succeeds");
+    }
+    expect(sdt_read(path, text, sizeof(text)) && !strcmp(text, "CUATRO") &&
+               sdt_read(kept, text, sizeof(text)) && !strcmp(text, "TRES"),
+           "repeated automatic LISTSAVEs keep the version just before the last one");
+    expect(sdt_kept_copies(slot1, "DATA.BIN") == 1 && sdt_kept_copies(slot1, "PARAM.SFO") == 1,
+           "repeated automatic LISTSAVEs keep one copy of each member, not one per save");
 
     /* Outside the list modes "<>" is the empty save name, not some existing save. */
     sdt_list(0u /* AUTOLOAD */, 0u, "<>", listed);
@@ -18876,6 +19014,22 @@ static void test_direct_xb_read_precedence_and_listing(void) {
     expect(sr_hle_test_io_lseek32(&cpu) == 3u, "archive member seek uses logical file offsets");
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = data_addr; cpu.r[6] = 64u;
     expect(sr_hle_test_io_read(&cpu) == 9u, "a partial read clamps at archive member EOF");
+    /* The archive backend judges the destination on the bytes it delivers, after the clamp to the
+     * member's end, like the loose and disc backends: a long count into a buffer near the top of
+     * guest memory reads the member, and a destination those bytes leave is 0x80010016 with the
+     * position kept. It used to test the unclamped count and refuse the first read. */
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = 3u; cpu.r[6] = SEEK_SET;
+    expect(sr_hle_test_io_lseek32(&cpu) == 3u, "archive member seeks back to 3");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = 0x0bfffff0u; cpu.r[6] = 0x10000u;
+    expect(sr_hle_test_io_read(&cpu) == 9u,
+           "a long archive read whose clamped bytes fit guest memory returns them");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = 3u; cpu.r[6] = SEEK_SET;
+    expect(sr_hle_test_io_lseek32(&cpu) == 3u, "archive member seeks back to 3 again");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = 0x0bfffffcu; cpu.r[6] = 64u;
+    expect(sr_hle_test_io_read(&cpu) == 0x80010016u,
+           "an archive read whose clamped bytes leave guest memory is 0x80010016");
+    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd; cpu.r[5] = data_addr; cpu.r[6] = 64u;
+    expect(sr_hle_test_io_read(&cpu) == 9u, "the refused archive read keeps the position");
     memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = fd;
     expect(sr_hle_test_io_close(&cpu) == 0u, "the archive descriptor closes cleanly");
     uint32_t ms0_fd = disc_route_open(&cpu, "ms0:/data/menu/archived.to");
@@ -19420,6 +19574,37 @@ static void test_hle_hot_log_switches_are_cached(void) {
     expect(sr_hle_test_io_statlog_env_reads() == 1u,
            "sceIoGetstat production path reads SR_STATLOG once across repeated syscalls");
     sr_hle_test_io_statlog_switch_reset();
+
+    /* SR_IOLOG is asked on every sceIoRead; it is read once, like SR_STATLOG (#1296). */
+    {
+        extern void sr_hle_test_io_iolog_switch_reset(void);
+        extern unsigned sr_hle_test_io_iolog_env_reads(void);
+        char *old_iolog = hle_archive_route_env_copy(getenv("SR_IOLOG"));
+        hle_archive_route_set_env("SR_IOLOG", NULL);
+        sr_hle_test_io_iolog_switch_reset();
+        CpuState cpu;
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = PATH_ADDR;
+        cpu.r[5] = 0x0001u; /* PSP_O_RDONLY */
+        uint32_t log_fd = sr_hle_test_io_open(&cpu);
+        expect(log_fd >= 3u && log_fd < 64u, "the SR_IOLOG fixture opens for reading");
+        for (unsigned i = 0; i < 4u; i++) {
+            memset(&cpu, 0, sizeof(cpu));
+            cpu.r[4] = log_fd;
+            cpu.r[5] = STAT_ADDR;
+            cpu.r[6] = 1u;
+            expect(sr_hle_test_io_read(&cpu) == 1u, "sceIoRead reads one byte of the SR_IOLOG fixture");
+            if (i == 0u) hle_archive_route_set_env("SR_IOLOG", "1");
+        }
+        expect(sr_hle_test_io_iolog_env_reads() == 1u,
+               "sceIoRead reads SR_IOLOG once across repeated reads");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = log_fd;
+        expect(sr_hle_test_io_close(&cpu) == 0u, "the SR_IOLOG fixture closes");
+        hle_archive_route_set_env("SR_IOLOG", old_iolog);
+        free(old_iolog);
+        sr_hle_test_io_iolog_switch_reset();
+    }
 
     hle_archive_route_set_env("SR_GELOG", old_ge);
     hle_archive_route_set_env("SR_GEDUMP", old_gedump);
@@ -30932,6 +31117,60 @@ static void test_ge_raster_cells_match_psp(void) {
     }
 }
 
+/* A clear that writes alpha (stencil) but not colour keeps the colour it clears over
+ * (compose_px_rgba), and dither must not move that kept colour: dither offsets the colour
+ * the pixel writes, and this clear writes none. Before, the kept colour was dithered and
+ * written back. The cells below use the PSP-GE-RASTER-001 list and window, but no PSP
+ * capture has a dithered colour-off clear (its clr-a cells are undithered), so this pins the
+ * software GE's own keep rule, not a PSP measurement. */
+static void test_ge_alpha_only_clear_keeps_colour_under_dither(void) {
+    static const struct gr_cell cells[2] = {
+        {"clr-a-dth565", GR_K_CLEAR, 0u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000201u, 0x20000001u}},
+        {"clr-a-dth8888", GR_K_CLEAR, 3u, GR_T_8888, GR_D_PATTERN, 0u, 0x5ac3a50fu,
+         {0xd3000201u, 0x20000001u}},
+    };
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t list = 0x08900000u, vtx = 0x08904000u, clut = 0x08918000u;
+    const uint32_t fb = 0x04000000u + GR_FB_OFFSET;
+    uint32_t tex[GR_T_COUNT];
+    for (uint32_t t = 0; t < GR_T_COUNT; t++) {
+        tex[t] = 0x08910000u + t * 0x400u;
+        (void)gr_texture(t, (uint8_t *)SR_HOST(tex[t]));
+    }
+    gr_clut((uint8_t *)SR_HOST(clut));
+    for (uint32_t k = 0; k < 2u; k++) {
+        const struct gr_cell *c = &cells[k];
+        memset(SR_HOST(fb), 0, GR_STRIDE * GR_ROWS * 4u);
+        for (uint32_t i = 0; i < GR_N; i++) {
+            const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
+            if (c->psm == 3u) MEM_W32(fb + at * 4u, gr_dst(c, i));
+            else MEM_W16(fb + at * 2u, (uint16_t)gr_dst(c, i));
+        }
+        (void)gr_vertices(c, (uint32_t *)SR_HOST(vtx));
+        (void)gr_list(c, vtx, tex, clut, (uint32_t *)SR_HOST(list));
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = list;
+        const uint32_t qid = sr_syscall(&cpu, NID_SCE_GE_LIST_ENQUEUE);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = qid;
+        int ok = (qid & 0xFF000000u) == 0x35000000u && sr_syscall(&cpu, NID_SCE_GE_LIST_SYNC) == 0u;
+        int alpha_written = c->psm != 3u;
+        for (uint32_t i = 0; i < GR_N; i++) {
+            const uint32_t at = (GR_WY + i / GR_WW) * GR_STRIDE + GR_WX + i % GR_WW;
+            const uint32_t px = c->psm == 3u ? MEM_R32(fb + at * 4u) : (uint32_t)MEM_R16(fb + at * 2u);
+            const uint32_t colour = c->psm == 3u ? 0x00ffffffu : 0xffffu;
+            if ((px & colour) != (gr_dst(c, i) & colour)) ok = 0;
+            if (c->psm == 3u && (px >> 24) != (gr_dst(c, i) >> 24)) alpha_written = 1;
+        }
+        expect(ok && alpha_written, k == 0
+            ? "a dithered alpha-only clear of a 565 target keeps every colour bit"
+            : "a dithered alpha-only clear of an 8888 target writes alpha and keeps every colour bit");
+    }
+}
+
 static void test_ge_guest_sentinel(void) {
     CpuState cpu;
     reset_fixture();
@@ -31668,13 +31907,15 @@ static void test_ge_list_stops_for_a_stronger_thread(void) {
     expect(s_gpp_peek_list == 3u && s_gpp_finishes == 0u && s_gpp_stops == 3u,
            "a peek at a list stopped on the way to a stall address reads that stall");
 
-    /* SIGNAL pairs with the END after it: no stop between them. */
+    /* SIGNAL pairs with the END after it: no stop between them. The pair is a SIGNAL JUMP
+     * to the word after its END, a behaviour the GE models; a handler behaviour (0x01 to
+     * 0x03) is a named stop (test_ge_signal_jump_call_ret). */
     sr_hle_test_ge_lists_reset();
     s_gpp_mode = GPP_STOP_EVERY;
     s_gpp_stops = s_gpp_finishes = 0u;
     MEM_W32(GPP_LIST, 0u);
-    MEM_W32(GPP_LIST + 4u, GPP_SIGNAL_OP | 0x010000u);
-    MEM_W32(GPP_LIST + 8u, GPP_END_OP);
+    MEM_W32(GPP_LIST + 4u, GPP_SIGNAL_OP | 0x100000u | ((GPP_LIST + 12u) >> 16));
+    MEM_W32(GPP_LIST + 8u, GPP_END_OP | ((GPP_LIST + 12u) & 0xffffu));
     MEM_W32(GPP_LIST + 12u, GPP_FINISH_OP);
     MEM_W32(GPP_LIST + 16u, GPP_END_OP);
     gpp_stop_again();
@@ -32374,7 +32615,238 @@ static void test_ge_signal_jump_call_ret(void) {
     (void)gsw_call(NID_SCE_GE_LIST_ENQUEUE, sub2, 0u, 0xffffffffu, 0u);
     expect(sr_hle_test_unmodelled_stops() == stops + 1u,
            "a SIGNAL RET with an empty stack stops the run by name");
+
+    /* The handler behaviours HANDLER_SUSPEND and HANDLER_CONTINUE (0x01, 0x02) call the list's
+     * signal callback, which is not modelled, so a list with one stops the run by name at the
+     * SIGNAL, the list unfinished; before, it ran on after a once-only note and the callback a
+     * title waits on never ran. HANDLER_PAUSE (0x03) pauses the list until sceGeContinue and
+     * the undefined 0x00 and 0x04 left the GE busy (PSP-GE-SIGNAL-001, CAPTURED): each stops
+     * with or without a handler. With no handler (a callback id of -1, or one registered with
+     * a NULL signal function), 0x01 and 0x02 run on after the END to the list's own END, as
+     * the capture's b01-nocb and b02-nocb completed without a sceGeContinue. */
+    const uint32_t hl = 0x08927800u, cb_with = 0x08927a00u, cb_none = 0x08927a10u;
+    MEM_W32(cb_with, 0x08a00000u);              /* signal_func: never called, the run stops */
+    MEM_W32(cb_with + 4u, 0u);
+    MEM_W32(cb_with + 8u, 0u);
+    MEM_W32(cb_with + 12u, 0u);
+    for (uint32_t w = 0; w < 16u; w += 4u) MEM_W32(cb_none + w, 0u);   /* all NULL */
+    const uint32_t id_with = gsw_call(NID_SCE_GE_SET_CALLBACK, cb_with, 0u, 0u, 0u);
+    const uint32_t id_none = gsw_call(NID_SCE_GE_SET_CALLBACK, cb_none, 0u, 0u, 0u);
+    expect(id_with < 16u && id_none < 16u && id_with != id_none,
+           "a callback with a signal function and an all-NULL one register");
+    static const struct { unsigned behaviour; int handler; } cells[] = {
+        {0x01u, 1}, {0x02u, 1}, {0x03u, 1}, {0x03u, 0}, {0x00u, 0}, {0x04u, 0},
+    };
+    int handler_stops_ok = 1;
+    for (size_t k = 0; k < sizeof cells / sizeof cells[0]; k++) {
+        for (int with_null_cb = 0; with_null_cb < 2; with_null_cb++) {
+            if (cells[k].handler && with_null_cb) continue;
+            const uint32_t cbid = cells[k].handler ? id_with : with_null_cb ? id_none : 0xffffffffu;
+            sr_hle_test_ge_lists_reset();
+            MEM_W32(hl, 0x0e000000u | (cells[k].behaviour << 16) | 0x1234u);   /* SIGNAL */
+            MEM_W32(hl + 4u, 0x0c000000u);          /* END */
+            MEM_W32(hl + 8u, 0xcd0000bbu);          /* FOG1: reached only if the list runs on */
+            MEM_W32(hl + 12u, 0x0f000000u);         /* FINISH */
+            MEM_W32(hl + 16u, 0x0c000000u);         /* END */
+            MEM_W32(0x08928000u, 0xcd000000u);      /* FOG1 0 */
+            MEM_W32(0x08928004u, 0x0c000000u);
+            (void)ge_run_list(0x08928000u, 0);
+            stops = sr_hle_test_unmodelled_stops();
+            const uint32_t h = gsw_call(NID_SCE_GE_LIST_ENQUEUE, hl, 0u, cbid, 0u);
+            if (sr_hle_test_unmodelled_stops() != stops + 1u ||
+                gsw_call(NID_SCE_GE_LIST_SYNC, h, 1u, 0u, 0u) == 0u ||
+                gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) != 0u)
+                handler_stops_ok = 0;
+        }
+    }
+    expect(handler_stops_ok,
+           "a SIGNAL 0x01 or 0x02 whose list has a signal callback, a 0x03 and an undefined 0x00 "
+           "or 0x04 stop the run by name at the SIGNAL, and the list does not run on");
+
+    static const unsigned no_handler[] = {0x01u, 0x02u};
+    int no_handler_runs_on = 1;
+    for (size_t k = 0; k < sizeof no_handler / sizeof no_handler[0]; k++) {
+        for (int with_null_cb = 0; with_null_cb < 2; with_null_cb++) {
+            sr_hle_test_ge_lists_reset();
+            MEM_W32(hl, 0x0e000000u | (no_handler[k] << 16) | 0x1234u);   /* SIGNAL */
+            MEM_W32(hl + 4u, 0x0c000000u);          /* END */
+            MEM_W32(hl + 8u, 0xcd0000bbu);          /* FOG1: runs after the END */
+            MEM_W32(hl + 12u, 0x0f000000u);         /* FINISH */
+            MEM_W32(hl + 16u, 0x0c000000u);         /* END */
+            MEM_W32(0x08928000u, 0xcd000000u);      /* FOG1 0 */
+            MEM_W32(0x08928004u, 0x0c000000u);
+            (void)ge_run_list(0x08928000u, 0);
+            stops = sr_hle_test_unmodelled_stops();
+            const uint32_t h = gsw_call(NID_SCE_GE_LIST_ENQUEUE, hl, 0u,
+                                        with_null_cb ? id_none : 0xffffffffu, 0u);
+            if (sr_hle_test_unmodelled_stops() != stops ||
+                gsw_call(NID_SCE_GE_LIST_SYNC, h, 1u, 0u, 0u) != 0u ||
+                gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) != 0xbbu)
+                no_handler_runs_on = 0;
+        }
+    }
+    expect(no_handler_runs_on,
+           "a SIGNAL 0x01 or 0x02 whose list has no signal callback (id -1, or a NULL signal "
+           "function) runs on after its END to the list's END (PSP-GE-SIGNAL-001 b01-nocb, "
+           "b02-nocb, CAPTURED)");
+    (void)gsw_call(NID_SCE_GE_UNSET_CALLBACK, id_with, 0u, 0u, 0u);
+    (void)gsw_call(NID_SCE_GE_UNSET_CALLBACK, id_none, 0u, 0u, 0u);
     sr_hle_test_set_compiled_sdk_version(0u);
+    sr_hle_test_ge_lists_reset();
+}
+
+/* The list's own CALL and RET, and a run that does not reach its END. A CALL past the call
+ * stack's 32 levels and a RET with an empty stack have no modelled result, so each stops the
+ * run by name at that command, as a refused SIGNAL does. Before, both were skipped and the
+ * list ran on into the words after them. A list that runs 2^20 commands in one run used to
+ * end that run as a stall nobody asked for, with nothing reported: a list without a stall
+ * address never reached its END. Now the run stops and resumes there, as at a preemption,
+ * and a run that cannot resume stops by name. */
+static void test_ge_list_call_ret_faults_and_long_runs(void) {
+    const uint32_t cl = 0x08946000u, rl = 0x08946100u, fog = 0x08946200u;
+    const uint32_t ll = 0x09000000u, long_nops = (1u << 20) + 8u;
+    char fault[160];
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_preempt_hook(NULL);
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    MEM_W32(fog, 0xcd000000u);                  /* FOG1 0 */
+    MEM_W32(fog + 4u, 0x0c000000u);
+
+    /* A CALL to itself: the 33rd CALL finds the stack full. */
+    MEM_W32(cl, 0x13000000u);                   /* OFFSETADDR 0 */
+    MEM_W32(cl + 4u, 0x10080000u);              /* BASE 0x08 */
+    MEM_W32(cl + 8u, 0x0a000000u | ((cl + 8u) & 0x00ffffffu));   /* CALL itself */
+    MEM_W32(cl + 12u, 0xcd0000bbu);             /* FOG1: reached only if the CALL runs on */
+    MEM_W32(cl + 16u, 0x0f000000u);             /* FINISH */
+    MEM_W32(cl + 20u, 0x0c000000u);             /* END */
+    (void)ge_run_list(fog, 0);
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    uint32_t id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, cl, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) != 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0u,
+           "a CALL with the GE call stack full stops the run by name, and the list does not run on");
+    sr_hle_test_ge_lists_reset();
+    (void)ge_take_signal_fault(NULL, 0);
+    expect(ge_run_list(cl, 0) == cl + 8u && ge_take_signal_fault(fault, sizeof fault) &&
+               strstr(fault, "CALL with the call stack full") != NULL,
+           "the full-stack CALL is named at its own address");
+
+    /* A RET with nothing called. */
+    MEM_W32(rl, 0x0b000000u);                   /* RET */
+    MEM_W32(rl + 4u, 0xcd0000bbu);              /* FOG1: reached only if the RET runs on */
+    MEM_W32(rl + 8u, 0x0f000000u);
+    MEM_W32(rl + 12u, 0x0c000000u);
+    (void)ge_run_list(fog, 0);
+    stops = sr_hle_test_unmodelled_stops();
+    id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, rl, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) != 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0u,
+           "a RET with an empty GE call stack stops the run by name, and the list does not run on");
+    sr_hle_test_ge_lists_reset();
+    (void)ge_take_signal_fault(NULL, 0);
+    expect(ge_run_list(rl, 0) == rl && ge_take_signal_fault(fault, sizeof fault) &&
+               strstr(fault, "RET with an empty call stack") != NULL,
+           "the empty-stack RET is named at its own address");
+
+    /* A list of 2^20 + 8 NOPs, then FOG1, FINISH and END, with no stall address. */
+    for (uint32_t i = 0; i < long_nops; i++) MEM_W32(ll + i * 4u, 0u);
+    MEM_W32(ll + long_nops * 4u, 0xcd0000ccu);
+    MEM_W32(ll + long_nops * 4u + 4u, 0x0f000000u);
+    MEM_W32(ll + long_nops * 4u + 8u, 0x0c000000u);
+    (void)ge_run_list(fog, 0);
+    stops = sr_hle_test_unmodelled_stops();
+    id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, ll, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) == 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0xccu,
+           "a list of more than 2^20 commands with no stall address runs on to its END");
+    sr_hle_test_ge_lists_reset();
+    (void)ge_take_signal_fault(NULL, 0);
+    expect(ge_run_list(ll, 0) == ll + (1u << 20) * 4u &&
+               ge_take_signal_fault(fault, sizeof fault) &&
+               strstr(fault, "1048576 commands") != NULL,
+           "a run with no stop flag to resume through stops by name after 2^20 commands");
+    sr_hle_test_ge_lists_reset();
+}
+
+/* A block transfer whose source or destination stride is 0, or past 0x400 (decoded as 0), has
+ * no rectangle to copy and a PSP's behaviour for it is unmeasured: the blit is skipped and
+ * named. Before, it returned before any report, so the dropped transfer was silent. A 64-pixel
+ * stride on both sides is the control: the same list copies the row. */
+static void test_ge_block_transfer_unmeasured_stride_is_named(void) {
+    const uint32_t list = 0x08946400u, src = 0x04100000u, dst = 0x04110000u;
+    static const uint32_t srcw[] = {0x00040000u, 0x00040408u, 0x00040040u};
+    static const int named[] = {1, 1, 0};
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ge_lists_reset();
+    for (size_t k = 0; k < sizeof srcw / sizeof srcw[0]; k++) {
+        MEM_W32(src, 0x11223344u);
+        MEM_W32(src + 4u, 0x55667788u);
+        MEM_W32(dst, 0xa5a5a5a5u);
+        MEM_W32(dst + 4u, 0xa5a5a5a5u);
+        MEM_W32(list, 0xb2000000u | (src & 0x00fffff0u));        /* TRANSFERSRC */
+        MEM_W32(list + 4u, 0xb3000000u | srcw[k]);                /* TRANSFERSRCW */
+        MEM_W32(list + 8u, 0xb4000000u | (dst & 0x00fffff0u));    /* TRANSFERDST */
+        MEM_W32(list + 12u, 0xb5040040u);                         /* TRANSFERDSTW: stride 64 */
+        MEM_W32(list + 16u, 0xeb000000u);                         /* TRANSFERSRCPOS 0,0 */
+        MEM_W32(list + 20u, 0xec000000u);                         /* TRANSFERDSTPOS 0,0 */
+        MEM_W32(list + 24u, 0xee000003u);                         /* TRANSFERSIZE 4x1 */
+        MEM_W32(list + 28u, 0xea000000u);                         /* TRANSFERSTART, 16-bit */
+        MEM_W32(list + 32u, 0x0f000000u);                         /* FINISH */
+        MEM_W32(list + 36u, 0x0c000000u);                         /* END */
+        FILE *capture = NULL;
+        int saved_fd = -1;
+        char log[1024] = {0};
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        (void)ge_run_list(list, 0);
+        if (capturing) hle_data_stderr_capture_end(capture, saved_fd, log, sizeof log);
+        const int copied = MEM_R32(dst) == 0x11223344u && MEM_R32(dst + 4u) == 0x55667788u;
+        const int note = strstr(log, "ge_block_transfer: unmeasured stride") != NULL;
+        if (named[k])
+            expect(capturing && note && !copied && MEM_R32(dst) == 0xa5a5a5a5u,
+                   "a block transfer with a source stride of 0 or past 0x400 is skipped and named");
+        else
+            expect(capturing && !note && copied,
+                   "control: a block transfer with 64-pixel strides copies its row unnamed");
+    }
+    sr_hle_test_ge_lists_reset();
+}
+
+/* A list whose run stops early and resumes (a preemption, ge_list_run) publishes the whole
+ * list's primitive count and signature at its END, as a run that never stopped does. Before,
+ * each resumed run started counting again, so the count covered only the last run. */
+static void test_ge_stopped_run_keeps_the_list_totals(void) {
+    gpp_setup();
+    sr_hle_test_ge_lists_reset();
+    MEM_W32(GPP_LIST, 0x04030000u);             /* PRIM: triangles, no vertices */
+    MEM_W32(GPP_LIST + 4u, 0x04030000u);
+    MEM_W32(GPP_LIST + 8u, 0u);
+    MEM_W32(GPP_LIST + 12u, 0u);
+    MEM_W32(GPP_LIST + 16u, GPP_FINISH_OP);
+    MEM_W32(GPP_LIST + 20u, GPP_END_OP);
+    atomic_store_explicit(&sr_preempt_due, 0, memory_order_relaxed);
+    sr_hle_test_ge_preempt_hook(NULL);
+    uint32_t id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, GPP_LIST, 0u, 0xffffffffu, 0u);
+    const unsigned long whole_prims = g_ge_prim_count, whole_sig = g_ge_list_sig;
+    expect(gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) == 0u && whole_prims == 2ul,
+           "control: a run that never stops counts the list's two primitives");
+    sr_hle_test_ge_lists_reset();
+    sr_hle_test_ge_preempt_hook(gpp_hook);
+    s_gpp_mode = GPP_STOP_EVERY;
+    s_gpp_stops = s_gpp_finishes = 0u;
+    gpp_stop_again();
+    id = gsw_call(NID_SCE_GE_LIST_ENQUEUE, GPP_LIST, 0u, 0xffffffffu, 0u);
+    expect(s_gpp_stops == 5u && gsw_call(NID_SCE_GE_LIST_SYNC, id, 1u, 0u, 0u) == 0u,
+           "control: the run stopped after every command and reached its END");
+    expect(g_ge_prim_count == whole_prims && g_ge_list_sig == whole_sig,
+           "a list whose run stopped and resumed publishes the whole list's primitive count "
+           "and signature");
+    sr_hle_test_ge_preempt_hook(NULL);
     sr_hle_test_ge_lists_reset();
 }
 
@@ -32387,9 +32859,10 @@ static void test_ge_signal_depth_origin_stall(void) {
     sr_hle_test_ge_lists_reset();
     sr_hle_test_set_compiled_sdk_version(0u);   /* before SDK 2.00: 32 stack entries */
 
-    /* A SIGNAL CALL made one hardware CALL deep. The callee's unpaired hardware RET can't pop
-     * the caller's entry, and the callee's own hardware CALL, left open at its SIGNAL RET, is
-     * dropped: the RET restores the caller's depth, so the caller's RET returns to m3. */
+    /* A SIGNAL CALL made one hardware CALL deep. The callee's own hardware CALL, left open at
+     * its SIGNAL RET, is dropped: the RET restores the caller's depth, so the caller's RET
+     * returns to m3. (An unpaired hardware RET in the callee can't pop the caller's entry: it
+     * stops the run by name, below.) */
     MEM_W32(m3, 0x10080000u);                   /* BASE 0x08 */
     MEM_W32(m3 + 4u, 0x13000000u);              /* OFFSETADDR 0 */
     MEM_W32(m3 + 8u, 0x0a000000u | (h3 & 0x00ffffffu));   /* hardware CALL h3 */
@@ -32399,7 +32872,7 @@ static void test_ge_signal_depth_origin_stall(void) {
     ge_signal_pair(h3, 0x11u, c3);              /* SIGNAL CALL c3, at hardware depth 1 */
     MEM_W32(h3 + 8u, 0xce000088u);
     MEM_W32(h3 + 12u, 0x0b000000u);             /* hardware RET to m3 */
-    MEM_W32(c3, 0x0b000000u);                   /* unpaired hardware RET: ignored */
+    MEM_W32(c3, 0u);                            /* NOP; the RET case below */
     MEM_W32(c3 + 4u, 0x0a000000u | (x3 & 0x00ffffffu));   /* hardware CALL x3, never returned */
     MEM_W32(c3 + 8u, 0xcd0000eeu);              /* reached only by a wrong RET */
     MEM_W32(c3 + 12u, 0x0f000000u);
@@ -32413,8 +32886,22 @@ static void test_ge_signal_depth_origin_stall(void) {
                gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0x99u &&
                gsw_call(NID_SCE_GE_GET_CMD, 0xceu, 0u, 0u, 0u) == 0x88u &&
                gsw_call(NID_SCE_GE_GET_CMD, 0xcfu, 0u, 0u, 0u) == 0x77u,
-           "a SIGNAL CALL one hardware CALL deep: the callee's RET keeps off the caller's "
-           "entry, and SIGNAL RET restores the caller's depth");
+           "a SIGNAL CALL one hardware CALL deep: SIGNAL RET restores the caller's depth");
+
+    /* The same lists with an unpaired hardware RET first in the callee: the callee's stack is
+     * empty above the SIGNAL CALL's floor, so the RET has nothing to return to and stops the
+     * run by name. It neither pops the caller's entry nor runs on into the callee. */
+    MEM_W32(c3, 0x0b000000u);                   /* unpaired hardware RET */
+    MEM_W32(0x08928000u, 0xcd000000u);          /* FOG1 0 */
+    MEM_W32(0x08928004u, 0x0c000000u);
+    (void)ge_run_list(0x08928000u, 0);
+    stops = sr_hle_test_unmodelled_stops();
+    const uint32_t a2 = gsw_call(NID_SCE_GE_LIST_ENQUEUE, m3, 0u, 0xffffffffu, 0u);
+    expect(sr_hle_test_unmodelled_stops() == stops + 1u &&
+               gsw_call(NID_SCE_GE_LIST_SYNC, a2, 1u, 0u, 0u) != 0u &&
+               gsw_call(NID_SCE_GE_GET_CMD, 0xcdu, 0u, 0u, 0u) == 0u,
+           "an unpaired hardware RET at a SIGNAL CALL's floor stops the run by name");
+    sr_hle_test_ge_lists_reset();
 
     /* OCALL and OJUMP add the offset register (OFFSETADDR or ORIGIN), not BASE. BASE is
      * 0x09 here, so a target that also added it would land outside these lists. */
@@ -34612,6 +35099,120 @@ static void test_ge_block_transfer_span_atomicity(void) {
     free(scratch);
 }
 
+
+/* The software depth surface lies inside the 2 MiB of physical VRAM, seen through the linear
+ * 0x040 view. Its accessors copy it through SR_HOST_LINEAR, which does not translate the
+ * 0x042-0x046 mirrors, so a span that ends past 0x04200000, or one based in a mirror view,
+ * would land in arena bytes no CPU load or VRAM view reads. Each is refused by name
+ * (VRAM_DEPTH_SPAN_UNSUPPORTED); before, any span below 0x04800000 was accepted. */
+static void test_ge_depth_span_stays_inside_vram(void) {
+    reset_fixture();
+    sr_hle_init();
+    GeState *state = ge_state_ptr();
+    state->zbw = 512u;
+    state->zbp = 0x04088000u;                     /* ends at 0x040cc000 */
+    expect(ge_zbuf_ptr() != NULL, "a depth surface inside the 2 MiB of VRAM is accepted");
+    state->zbp = 0x041d0000u;                     /* 272 rows of 1 KiB end past 0x04210000 */
+    expect(ge_zbuf_ptr() == NULL,
+           "a depth surface that runs past the end of the 2 MiB of VRAM is refused");
+    state->zbp = 0x04288000u;                     /* the same placement through the 0x042 view */
+    expect(ge_zbuf_ptr() == NULL,
+           "a depth surface based in a swizzled VRAM mirror view is refused");
+    state->zbp = 0x04088000u;
+    expect(ge_zbuf_ptr() != NULL, "the depth surface inside VRAM is accepted again");
+}
+
+/* A replay starts from the captured VRAM, which already holds the depth the live run had:
+ * capture begin materializes a dirty software depth surface into VRAM before it copies it.
+ * The captured depth blob need not be valid or belong to the state's zbp and zbw (it is all
+ * zeros when the frame drew no depth-tested pixel yet), so a replay must load depth from
+ * the captured VRAM, as the live run does, not trust the blob. Before, restore marked the
+ * blob valid and dirty for the state's layout: the replay depth-tested against it, and the
+ * first CPU read wrote it over the captured VRAM depth. */
+static void test_ge_replay_restore_reloads_depth_from_vram(void) {
+    static uint16_t blob[GE_CAPTURE_ZBUF_WORDS];
+    reset_fixture();
+    sr_hle_init();
+    GeState state = *ge_state_ptr();
+    state.zbp = 0x04088000u;
+    state.zbw = 512u;
+    state.fbw = 512u;
+    /* Depth pixel (0, 0) of that surface: the GE XORs bits 6 and 13 of its address. */
+    const uint32_t depth00 = 0x04088000u ^ 0x2040u;
+    MEM_W16(depth00, 0x1234u);
+    memset(blob, 0, sizeof blob);
+    ge_replay_restore(&state, blob);
+    const uint16_t *z = ge_zbuf_ptr();
+    expect(z != NULL && z[0] == 0x1234u,
+           "a replay depth-tests against the depth in the captured VRAM, not the captured blob");
+    expect(MEM_R16(depth00) == 0x1234u,
+           "a CPU read after a replay restore reads the captured VRAM depth");
+}
+
+/* sr_r32 answers a CPU load of 0x04084000 with the GE status word, a CPU-side shim. The GE
+ * itself reads VRAM there: pixel (0, 264) of an 8888 surface at 0x04000000 with stride 512,
+ * a texel or a CLUT word. LOADCLUT reads a span holding that word through its scalar loads,
+ * so it is the production path that shows which value the GE reads. Before, it loaded the
+ * status word in place of the VRAM word. */
+static void test_ge_reads_vram_under_the_status_word(void) {
+    reset_fixture();
+    sr_hle_init();
+    GeState *state = ge_state_ptr();
+    static const uint8_t vram_word[4] = {0x44u, 0x33u, 0x22u, 0x11u};
+    for (uint32_t i = 0; i < 4u; i++) MEM_W8(0x04084000u + i, vram_word[i]);
+    MEM_W32(0x04084004u, 0x55667788u);
+    memset(state->clutram, 0, sizeof(state->clutram));
+    const uint32_t clut_list = 0x08942000u;
+    MEM_W32(clut_list, (0xb0u << 24) | 0x084000u);          /* CLUTADDR 0x04084000 */
+    MEM_W32(clut_list + 4u, (0xb1u << 24) | 0x040000u);
+    MEM_W32(clut_list + 8u, (0xc4u << 24) | 1u);            /* LOADCLUT: 1 block */
+    MEM_W32(clut_list + 12u, 0x0c000000u);                  /* END */
+    (void)ge_run_list(clut_list, 0);
+    uint32_t first, second;
+    memcpy(&first, &state->clutram[0], 4u);
+    memcpy(&second, &state->clutram[4], 4u);
+    expect(first == 0x11223344u && second == 0x55667788u,
+           "LOADCLUT from 0x04084000 loads the VRAM word there, not the CPU's GE status word");
+}
+
+/* A GE capture keeps every guest page the GE reads (ge_capture.h); the replay has only those.
+ * The GPU backend decodes a texture through ge_decode_tex_rgba, whose linear fast path reads
+ * rows through a host pointer, so it must tell the capture too. Before, a linear 8888 texture
+ * in main RAM decoded during a capture was missing from the fixture, and the replay sampled
+ * zeros. */
+static void test_ge_texture_decode_notes_the_capture(void) {
+    static uint16_t zbuf[GE_CAPTURE_ZBUF_WORDS];
+    static uint32_t out[16u * 4u];
+    reset_fixture();
+    sr_hle_init();
+    GeState *state = ge_state_ptr();
+    const uint32_t tex = 0x08353000u;
+    for (uint32_t i = 0; i < 16u * 4u; i++) MEM_W32(tex + i * 4u, 0xff000000u | (i * 0x010203u));
+    state->tex_addr = tex;
+    state->tex_bufw = 16u;
+    state->tex_fmt = 3u;
+    state->tex_w = 16;
+    state->tex_h = 4;
+    state->tex_swizzle = 0;
+    const char *path = HLE_BUILD_ROOT "/hle_ge_decode_capture.ngef";
+    memset(zbuf, 0, sizeof zbuf);
+    int captured = ge_capture_begin(path, 1u, 0x08942000u, state, zbuf);
+    expect(captured, "a GE capture begins");
+    if (!captured) return;
+    ge_decode_tex_rgba(out);
+    expect(out[5] == (0xff000000u | (5u * 0x010203u)), "the texture decodes during the capture");
+    expect(ge_capture_end(state), "the GE capture is written");
+    GeCaptureFixture fixture;
+    memset(&fixture, 0, sizeof fixture);
+    int noted = 0;
+    if (ge_capture_load(path, &fixture)) {
+        for (uint32_t i = 0; i < fixture.page_count; i++)
+            if (fixture.pages[i].addr == tex) noted = 1;
+        ge_capture_free(&fixture);
+    }
+    (void)remove(path);
+    expect(noted, "a texture the GPU backend decodes during a capture is in the fixture");
+}
 
 /* #1732: a store to plain RAM is inline only while no store instrumentation is armed.
  * Through every view a store must land where the full load reads it, and each armed
@@ -59184,6 +59785,9 @@ static int hle_selftest_main(int argc, char **argv) {
     test_umd_read_parks_its_thread_for_the_drives_time();
     test_ge_sync_ids_match_psp();
     test_ge_signal_jump_call_ret();
+    test_ge_list_call_ret_faults_and_long_runs();
+    test_ge_block_transfer_unmeasured_stride_is_named();
+    test_ge_stopped_run_keeps_the_list_totals();
     test_ge_signal_depth_origin_stall();
     test_ge_break_continue();
     test_ge_completion_timing();
@@ -59288,10 +59892,15 @@ static int hle_selftest_main(int argc, char **argv) {
     test_ge_stall_alias_linear_from_uncached_list();
     test_ge_linear_filter_stays_inside_region();
     test_ge_raster_cells_match_psp();
+    test_ge_alpha_only_clear_keeps_colour_under_dither();
     test_ge_mip_cells_software_contract();
     test_ge_mip_cells_match_psp();
     test_ge_clut_mip_cells_match_psp();
     test_ge_block_transfer_span_atomicity();
+    test_ge_depth_span_stays_inside_vram();
+    test_ge_replay_restore_reloads_depth_from_vram();
+    test_ge_reads_vram_under_the_status_word();
+    test_ge_texture_decode_notes_the_capture();
     test_dcache_maintenance_notifies_renderer();
     test_icache_maintenance_returns_zero_for_every_range();
     test_exit_game_ignores_argument_registers(argc > 0 ? argv[0] : NULL);

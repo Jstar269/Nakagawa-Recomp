@@ -1457,7 +1457,7 @@ jobs:
         if: matrix.part == 'translation'
         run: |
           g++ -std=c++17 -O1 -Isrc/ref -Isrc/rt -o build/selftest \
-            src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp \
+            src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp src/ref/snapshot_ref.cpp \
             -DSR_SELFTEST_ONLY -fno-exceptions \
             -fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all
           ./build/selftest
@@ -2039,7 +2039,7 @@ jobs:
       - name: Run selftest (C++ interpreter unit tests under UBSan)
         run: |
           g++ -std=c++17 -O1 -Isrc/ref -Isrc/rt -o build/selftest \
-            src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp \
+            src/ref/selftest.cpp src/ref/interp.cpp src/ref/run_elf.cpp src/ref/snapshot_ref.cpp \
             -DSR_SELFTEST_ONLY -fno-exceptions \
             -fsanitize=undefined,float-cast-overflow -fno-sanitize-recover=all
           ./build/selftest

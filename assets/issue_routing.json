@@ -75,7 +75,7 @@
     {"issue": 353, "primary_state": "future_work", "depends_on": [69, 343, 348], "note": "Vulkan re-expression waits for independent GE truth and defect resolution."},
     {"issue": 354, "primary_state": "future_work", "note": "Host-shell lineage replacement is a long-term independence campaign."},
     {"issue": 355, "primary_state": "future_work", "note": "This umbrella tracks child independence campaigns rather than near-term work."},
-    {"issue": 356, "primary_state": "hardware", "depends_on": [352], "hardware_test_id": "PSP-SYSTEM-001", "oracle_groups": ["system"], "note": "Physical model probes must resolve the chassis and raw-value contradiction."},
+    {"issue": 356, "primary_state": "hardware", "depends_on": [352], "hardware_test_id": "PSP-SYSTEM-001", "oracle_groups": ["cpu", "system"], "note": "Physical model probes must resolve the chassis and raw-value contradiction."},
     {"issue": 357, "primary_state": "implementation", "note": "Portable controller binding and calibration are public player work."},
     {"issue": 358, "primary_state": "private_route", "note": "Prepared private-title launch qualification needs private runtime inputs."},
     {"issue": 359, "primary_state": "future_work", "depends_on": [280, 281, 286, 299, 307, 325, 339, 340, 341], "note": "HLE lineage reduction is a staged long-term independence campaign."},

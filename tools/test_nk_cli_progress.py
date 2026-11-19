@@ -730,7 +730,11 @@ class NkCliVramTests(unittest.TestCase):
             (255, 0, 0, 255), (0, 255, 0, 255),
             (0, 0, 255, 255), (255, 255, 255, 255),
         ], swizzled=True)
-        struct.pack_into("<H", image, 112, 0x7F00)
+        # The GE stores depth pixel (x, y) at (base + 2 * (y * stride + x)) ^ 0x2040
+        # (PSP-VRAM-MIRROR-001); the linear address holds another value, which a decoder that
+        # read depth linearly would show.
+        struct.pack_into("<H", image, 112 ^ 0x2040, 0x7F00)
+        struct.pack_into("<H", image, 112, 0xFF00)
         add("depth", 112, 1, 1, 1, "DEPTH16", [(127, 127, 127, 255)], kind="depth")
         palette_hex = palette.hex()
         surfaces.append({
@@ -911,6 +915,93 @@ class NkCliVramTests(unittest.TestCase):
             )
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
             self.assertEqual(self._read_png(output)[2], [(255, 0, 0, 255)])
+
+    def test_vram_clut_past_the_image_end_is_refused_not_wrapped(self) -> None:
+        # A CLUT read from the image must lie in it: 256 16-bit entries at 0x041fff00 need 512
+        # bytes and only 256 remain. Before, the copy wrapped to the image's start and the
+        # export passed with a palette from the wrong bytes. 16 entries at 0x041fffe0 fit.
+        with tempfile.TemporaryDirectory(prefix="nk_cli_vram_clut_end_") as temp:
+            root = Path(temp)
+            image = bytearray(2 * 1024 * 1024)
+            struct.pack_into("<H", image, 0, 0x001F)            # wrapped entry 128: red
+            struct.pack_into("<H", image, 0x1FFFE0, 0x07E0)     # last 32 bytes, entry 0: green
+            image_path = root / "vram.bin"
+            image_path.write_bytes(image)
+
+            def export(addr: str, fmt: str, clut_addr: str, clut_format: str, name: str):
+                return subprocess.run(
+                    [sys.executable, str(CLI_PATH), "vram", str(image_path),
+                     "--addr", addr, "--width", "1", "--height", "1", "--stride", "4",
+                     "--format", fmt, "--clut-addr", clut_addr, "--clut-format", clut_format,
+                     "--output", str(root / name)],
+                    cwd=ROOT, capture_output=True, text=True,
+                )
+
+            # CLUT8 texel 0x80 at 0x04000100; the palette's entry 128 is 256 bytes past the end.
+            image[0x100] = 0x80
+            image_path.write_bytes(image)
+            refused = export("0x04000100", "CLUT8", "0x041fff00", "0xff00", "past.png")
+            self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+            self.assertIn("read outside the captured 2 MiB VRAM image", refused.stderr)
+            self.assertFalse((root / "past.png").exists())
+
+            fits = export("0x04000200", "CLUT4", "0x041fffe0", "0x0f00", "fits.png")
+            self.assertEqual(fits.returncode, 0, fits.stdout + fits.stderr)
+            self.assertEqual(self._read_png(root / "fits.png")[2], [(0, 255, 0, 255)])
+
+    def test_vram_linear_extent_uses_the_decoder_row_pitch(self) -> None:
+        # The decoder reads a linear surface in whole 16-byte rows (ge_tex_row_bytes): a 2-texel
+        # 5650 stride is an 8-texel pitch. At 0x041ffff8, 2x2 needs 8 bytes at the raw stride but
+        # 20 at the decoder's pitch, so row 1 starts at 0x04200008, past the image. Before, the
+        # check used the raw stride, the read went through the swizzled 0x042 mirror into the
+        # image's start and the export passed with the wrong pixels. At 0x041fffe0 it fits.
+        with tempfile.TemporaryDirectory(prefix="nk_cli_vram_pitch_") as temp:
+            root = Path(temp)
+            image = bytearray(2 * 1024 * 1024)
+            struct.pack_into("<HH", image, 0x1FFFF0, 0x001F, 0x001F)   # row 1 at 0x041ffff0
+            image_path = root / "vram.bin"
+            image_path.write_bytes(image)
+
+            def export(addr: str, name: str):
+                return subprocess.run(
+                    [sys.executable, str(CLI_PATH), "vram", str(image_path),
+                     "--addr", addr, "--width", "2", "--height", "2", "--stride", "2",
+                     "--format", "5650", "--output", str(root / name)],
+                    cwd=ROOT, capture_output=True, text=True,
+                )
+
+            refused = export("0x041ffff8", "past.png")
+            self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+            self.assertIn("crosses the captured VRAM boundary", refused.stderr)
+            self.assertFalse((root / "past.png").exists())
+
+            fits = export("0x041fffe0", "fits.png")
+            self.assertEqual(fits.returncode, 0, fits.stdout + fits.stderr)
+            self.assertEqual(self._read_png(root / "fits.png")[2],
+                             [(0, 0, 0, 255)] * 2 + [(255, 0, 0, 255)] * 2)
+
+    def test_vram_huge_stride_is_refused_not_wrapped(self) -> None:
+        # Row 1 of a DEPTH16 surface with stride 0x80000000 lies 4 GiB past row 0. Before, the
+        # 32-bit address wrapped back to row 0, every read stayed in the image and the export
+        # passed with row 0 twice. No GE buffer is wider than 4096 pixels, so the metadata is
+        # refused; a CLUT format with the same stride is refused the same way.
+        with tempfile.TemporaryDirectory(prefix="nk_cli_vram_stride_") as temp:
+            root = Path(temp)
+            image_path = root / "vram.bin"
+            image_path.write_bytes(bytes(2 * 1024 * 1024))
+            for fmt, clut in (("DEPTH16", []),
+                              ("CLUT8", ["--clut-addr", "0x04100000", "--clut-format", "0xff00"])):
+                output = root / f"{fmt}.png"
+                refused = subprocess.run(
+                    [sys.executable, str(CLI_PATH), "vram", str(image_path),
+                     "--addr", "0x04000000", "--width", "1", "--height", "2",
+                     "--stride", str(0x80000000), "--format", fmt, *clut,
+                     "--output", str(output)],
+                    cwd=ROOT, capture_output=True, text=True,
+                )
+                self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+                self.assertIn("rejected out-of-range", refused.stderr)
+                self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":

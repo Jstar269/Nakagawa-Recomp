@@ -148,16 +148,16 @@ cosim-selftest-clean:
 #
 # The runner links recomp.c with SR_GATE_BUILD, which leaves sr_raw_syscall to the
 # harness exactly as tools/codegen_gate.py does: the runner's definition ends the run at
-# a raw syscall instead of running it. The reference interpreter carries its own
-# sr_bitrev (src/ref/interp.cpp); it is renamed in that one object so it links beside the
-# runtime's definition and the reference keeps using its own. The runner links no SDL, so
-# its copy of recomp.c reads SDL_GetTicksNS under a name the runner defines.
+# a raw syscall instead of running it. The reference interpreter keeps its own bitrev
+# (BitReverse in src/ref/interp.cpp) inside its object, so it links beside the runtime's
+# sr_bitrev without a rename. The runner links no SDL, so its copy of recomp.c reads
+# SDL_GetTicksNS under a name the runner defines.
 SNAPSHOT_DIR      := $(BUILD_ROOT)/snapshot
 SNAPSHOT_FIXTURE   := $(SNAPSHOT_DIR)/fixture
 SNAPSHOT_GENERATOR := tests/fixtures/snapshot/generate.py
 SNAPSHOT_DRIVER    := tests/fixtures/snapshot/selftest.py
 SNAPSHOT_BASE_ADDR := 0x08A00000
-SNAPSHOT_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -Dsr_bitrev=sr_ref_bitrev
+SNAPSHOT_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions
 SNAPSHOT_RUNNER_SRCS := src/rt/snapshot_runner.c src/rt/nksnap.c src/rt/guest_interp.c \
 	src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/cpu_lle.c src/rt/domain_mode.c \
 	src/rt/stale_code.c src/rt/title_config.c src/rt/vfpu_tables.c src/rt/vfpu_interp.c \
@@ -230,7 +230,7 @@ FORM_SWEEP_CODEGEN_ARGS ?=
 FORM_SWEEP_ROOT   := $(BUILD_ROOT)/form-sweep
 FORM_SWEEP_BASE_ADDR := 0x08C00000
 FORM_SWEEP_TOOL   := tools/form_sweep.py
-FORM_SWEEP_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -Dsr_bitrev=sr_ref_bitrev
+FORM_SWEEP_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions
 FORM_SWEEP_SRCS   := src/rt/form_sweep.c src/rt/nksnap.c src/rt/guest_interp.c \
 	src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/cpu_lle.c src/rt/domain_mode.c \
 	src/rt/stale_code.c src/rt/title_config.c src/rt/vfpu_tables.c src/rt/vfpu_interp.c \
@@ -299,7 +299,7 @@ form-sweep-deep:
 # The hooks are the same C the default build compiles, behind SR_VERIFY: recomp.c's
 # preprocessed text without the flag must contain no sr_verify token, so the default
 # build's runtime objects cannot differ. Everything here links the same isolated runtime
-# as the snapshot gate (see above for SR_GATE_BUILD, sr_bitrev and SDL_GetTicksNS).
+# as the snapshot gate (see above for SR_GATE_BUILD and SDL_GetTicksNS).
 VERIFY_DIR       := $(BUILD_ROOT)/verify
 VERIFY_FIXTURE   := $(VERIFY_DIR)/fixture
 VERIFY_GENERATOR := tests/fixtures/verify/generate.py
