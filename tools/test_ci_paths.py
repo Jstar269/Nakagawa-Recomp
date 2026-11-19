@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 import json
@@ -98,6 +99,123 @@ class CiPathClassificationTests(unittest.TestCase):
                 self.assertEqual(classify(["docs/unnamed-by-any-tool.md"])["run_python"], "true")
         finally:
             ci_paths_module._is_test_read_doc.cache_clear()
+
+    def test_a_document_a_native_python_test_reads_runs_the_native_and_windows_gates(self) -> None:
+        """A docs-only edit to a document a non-tools Python test asserts runs native and Windows.
+
+        Failing before: docs/PLAYER_UI_DESIGN.md routed neither Python nor native in either tier,
+        even though PlayerUiDesignTokenTests in tests/native/test_player_ui.py reads its token
+        record and runs via make player-ui-regressions in native_tools and windows_runtime."""
+
+        ui_test = (ROOT / "tests" / "native" / "test_player_ui.py").read_text(encoding="utf-8")
+        self.assertIn('"PLAYER_UI_DESIGN.md"', ui_test)
+        for tier, expected_substantive in (
+            (ci_paths_module.TIER_FULL, "true"),
+            (ci_paths_module.TIER_LIGHT, "false"),
+        ):
+            for paths in (["docs/PLAYER_UI_DESIGN.md"], ["docs/PLAYER_UI_DESIGN.md", "docs/unnamed-by-any-tool.md"]):
+                with self.subTest(tier=tier, paths=paths):
+                    result = classify(paths, tier=tier)
+                    self.assertEqual(result["docs_only"], "true")
+                    self.assertEqual(result["allow_substantive"], expected_substantive)
+                    self.assertEqual(result["run_native"], "true")
+                    self.assertEqual(result["run_windows"], "true")
+                    self.assertEqual(result["run_installer"], "true")
+                    self.assertEqual(result["run_python"], "false")
+        self.assertFalse(ci_paths_module._is_native_test_read_doc("docs/unnamed-by-any-tool.md"))
+
+    def test_an_unreadable_native_test_tree_routes_every_document_to_native_and_windows(self) -> None:
+        ci_paths_module._is_native_test_read_doc.cache_clear()
+        try:
+            with patch.object(ci_paths_module, "_native_docs_reader_sources", return_value=None):
+                result = classify(["docs/unnamed-by-any-tool.md"])
+                self.assertEqual(result["run_native"], "true")
+                self.assertEqual(result["run_windows"], "true")
+                self.assertEqual(result["run_installer"], "true")
+        finally:
+            ci_paths_module._is_native_test_read_doc.cache_clear()
+
+        ci_paths_module._native_docs_reader_sources.cache_clear()
+        ci_paths_module._is_native_test_read_doc.cache_clear()
+        try:
+            with patch.object(ci_paths_module, "ROOT", Path(tempfile.gettempdir()) / "ci-paths-no-native-tree"):
+                self.assertIsNone(ci_paths_module._native_docs_reader_sources())
+                self.assertTrue(ci_paths_module._is_native_test_read_doc("docs/unnamed-by-any-tool.md"))
+        finally:
+            ci_paths_module._native_docs_reader_sources.cache_clear()
+            ci_paths_module._is_native_test_read_doc.cache_clear()
+
+    def test_every_non_tools_python_test_module_is_covered_by_native_docs_reader_globs(self) -> None:
+        """Any tracked Python test module outside tools/ must be covered by _NATIVE_DOCS_READER_GLOBS."""
+
+        tracked = subprocess.check_output(["git", "ls-files", "*.py"], cwd=ROOT, text=True).splitlines()
+        discovered_test_modules: set[str] = set()
+        for rel in tracked:
+            if rel.startswith("tools/"):
+                continue
+            name = Path(rel).name
+            is_test = name.startswith(("test_", "selftest")) or name.endswith("_test.py")
+            if not is_test:
+                tree = ast.parse((ROOT / rel).read_text(encoding="utf-8", errors="replace"), filename=rel)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import) and any(a.name == "unittest" for a in node.names):
+                        is_test = True
+                        break
+                    if isinstance(node, ast.ImportFrom) and node.module == "unittest":
+                        is_test = True
+                        break
+            if is_test:
+                discovered_test_modules.add(rel)
+
+        covered = {
+            path.relative_to(ROOT).as_posix()
+            for pattern in ci_paths_module._NATIVE_DOCS_READER_GLOBS
+            for path in ROOT.glob(pattern)
+            if path.is_file()
+        }
+        self.assertIn("tests/native/test_player_ui.py", discovered_test_modules)
+        self.assertLessEqual(
+            discovered_test_modules,
+            covered,
+            f"Python test module(s) outside _NATIVE_DOCS_READER_GLOBS: {sorted(discovered_test_modules - covered)}",
+        )
+
+    def test_adding_a_doc_read_to_a_scratch_native_test_routes_without_list_edit(self) -> None:
+        """Adding a read of an unrouted document to a native-side test routes it automatically."""
+
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch_root = Path(scratch)
+            (scratch_root / "tools").mkdir()
+            (scratch_root / "tools" / "dummy.py").write_text("# no docs named\n", encoding="utf-8")
+            native_dir = scratch_root / "tests" / "native"
+            native_dir.mkdir(parents=True)
+            test_file = native_dir / "test_player_ui.py"
+            test_file.write_text("# no docs named yet\n", encoding="utf-8")
+
+            def clear_caches() -> None:
+                ci_paths_module._docs_reader_sources.cache_clear()
+                ci_paths_module._is_test_read_doc.cache_clear()
+                ci_paths_module._native_docs_reader_sources.cache_clear()
+                ci_paths_module._is_native_test_read_doc.cache_clear()
+
+            clear_caches()
+            try:
+                with patch.object(ci_paths_module, "ROOT", scratch_root):
+                    before = classify(["docs/scratch-unrouted-doc.md"])
+                    self.assertEqual(before["run_native"], "false")
+                    self.assertEqual(before["run_windows"], "false")
+                    self.assertEqual(before["run_python"], "false")
+
+                    test_file.write_text('DOC = ROOT / "docs" / "scratch-unrouted-doc.md"\n', encoding="utf-8")
+                    clear_caches()
+
+                    after = classify(["docs/scratch-unrouted-doc.md"])
+                    self.assertEqual(after["run_native"], "true")
+                    self.assertEqual(after["run_windows"], "true")
+                    self.assertEqual(after["run_installer"], "true")
+                    self.assertEqual(after["docs_only"], "true")
+            finally:
+                clear_caches()
 
     def test_tools_readme_runs_the_python_gate_that_guards_it(self) -> None:
         """tools/README.md is Markdown, but tools/test_lint_docs.py compares its module

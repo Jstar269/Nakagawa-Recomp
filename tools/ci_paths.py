@@ -696,22 +696,51 @@ def _is_python_tool(path: str) -> bool:
 #: routing fixtures.
 _DOCS_READER_GLOB = "tools/**/*.py"
 _DOCS_READER_EXCLUDED = frozenset({"tools/ci_paths.py", "tools/test_ci_paths.py"})
+#: Non-tools Python test modules that hosted CI runs in ``native_tools`` and
+#: ``windows_runtime`` rather than the Python shards (for example
+#: ``tests/native/test_player_ui.py``, run via ``make player-ui-regressions``).
+_NATIVE_DOCS_READER_GLOBS = ("tests/native/**/*.py", "tests/**/test_*.py", "tests/**/selftest*.py")
 _NAME_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
+def _read_doc_reader_sources(
+    globs: Sequence[str],
+    excluded: frozenset[str] = frozenset(),
+    *,
+    required_dir: str | None = None,
+) -> str | None:
+    """Concatenated text of Python sources matching ``globs``, or None when unreadable."""
+
+    chunks: list[str] = []
+    seen: set[Path] = set()
+    try:
+        if required_dir is not None and not (ROOT / required_dir).is_dir():
+            return None
+        for pattern in globs:
+            for path in sorted(ROOT.glob(pattern)):
+                if path in seen or not path.is_file():
+                    continue
+                if path.relative_to(ROOT).as_posix() in excluded:
+                    continue
+                seen.add(path)
+                chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    return "\n".join(chunks)
 
 
 @lru_cache(maxsize=1)
 def _docs_reader_sources() -> str | None:
     """Text of every tools Python module that can read a document, or None when unreadable."""
 
-    chunks: list[str] = []
-    try:
-        for path in sorted(ROOT.glob(_DOCS_READER_GLOB)):
-            if path.relative_to(ROOT).as_posix() in _DOCS_READER_EXCLUDED or not path.is_file():
-                continue
-            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
-    except OSError:
-        return None
-    return "\n".join(chunks)
+    return _read_doc_reader_sources((_DOCS_READER_GLOB,), _DOCS_READER_EXCLUDED, required_dir="tools")
+
+
+@lru_cache(maxsize=1)
+def _native_docs_reader_sources() -> str | None:
+    """Text of every non-tools Python test module that can read a document, or None when unreadable."""
+
+    return _read_doc_reader_sources(_NATIVE_DOCS_READER_GLOBS, required_dir="tests")
 
 
 def _names_file(text: str, name: str) -> bool:
@@ -742,6 +771,24 @@ def _is_test_read_doc(path: str) -> bool:
     """
 
     sources = _docs_reader_sources()
+    if sources is None:
+        return True
+    return _names_file(sources, PurePosixPath(_normalise(path)).name)
+
+
+@lru_cache(maxsize=256)
+def _is_native_test_read_doc(path: str) -> bool:
+    """True for a documentation path whose file name a non-tools Python test module names.
+
+    Non-tools Python test modules (such as ``tests/native/test_player_ui.py``, which runs
+    ``make player-ui-regressions`` in ``native_tools`` and ``windows_runtime``) are not run
+    by the Python shards, so an edit to a document they assert against (for example
+    ``docs/PLAYER_UI_DESIGN.md``) must route the native and Windows jobs directly. Uses the
+    same whole-file-name match as ``_is_test_read_doc``; an unreadable tests tree counts as
+    naming every document.
+    """
+
+    sources = _native_docs_reader_sources()
     if sources is None:
         return True
     return _names_file(sources, PurePosixPath(_normalise(path)).name)
@@ -1724,9 +1771,15 @@ def classify(
         or _is_workflow_ci(path)
         for path in gated
     )
+    # A document a non-tools Python test module names (such as docs/PLAYER_UI_DESIGN.md,
+    # asserted by tests/native/test_player_ui.py) is exercised by native_tools and
+    # windows_runtime rather than the Python shards, so it routes the native and Windows jobs.
+    native_test_read_docs = not force_full and any(
+        _is_docs(path) and _is_native_test_read_doc(path) for path in files
+    )
     # A recipe-only Makefile edit still runs every native and Windows gate: those are
     # the jobs that execute recipes, and the edited target may be one of them.
-    run_native = native_without_recipe or makefile_recipe_only
+    run_native = native_without_recipe or makefile_recipe_only or native_test_read_docs
     # ``security_publication`` was computed and exported but fed no decision at
     # all, so a change to the publication contract itself -- docs/PUBLICATION*,
     # tools/publish_audit.py, the notice audit -- routed no Python gate.  It now
