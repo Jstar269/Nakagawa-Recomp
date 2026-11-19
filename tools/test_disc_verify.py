@@ -258,6 +258,19 @@ class HashAndImportTests(unittest.TestCase):
             self.assertEqual(imported.read_bytes(), source.read_bytes())
             source.write_text(datafile(serials=False), encoding="utf-8")
             disc_verify.import_dat(source, data)
+            self.assertEqual(disc_verify.load_imported_dat(data).serials, frozenset())
+            self.assertEqual(sorted(path.name for path in imported.parent.iterdir()),
+                             ["redump.dat"])
+
+    def test_import_refuses_to_write_through_a_link(self) -> None:
+        # A host that cannot make a symlink reports this test as a SKIP, never a pass.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "chosen.dat"
+            source.write_text(datafile(serials=False), encoding="utf-8")
+            data = root / "data"
+            disc_verify.import_dat(source, data)
+            imported = data / "verification" / "redump.dat"
             # A verification folder that links elsewhere is refused; the file there is kept.
             outside = root / "outside"
             outside.mkdir()
@@ -266,19 +279,18 @@ class HashAndImportTests(unittest.TestCase):
             linked.mkdir()
             try:
                 (linked / "verification").symlink_to(outside, target_is_directory=True)
-            except OSError:
-                pass  # this host cannot make a symlink without privilege
-            else:
-                with self.assertRaises(disc_verify.DiscVerifyError):
-                    disc_verify.import_dat(source, linked)
-                self.assertEqual((outside / "redump.dat").read_text(encoding="utf-8"), "kept")
-                # Nor is a link left where an earlier import named its temporary file.
-                planted = data / "verification" / f".redump.dat.{os.getpid()}.tmp"
-                planted.symlink_to(outside / "redump.dat")
-                disc_verify.import_dat(source, data)
-                self.assertEqual((outside / "redump.dat").read_text(encoding="utf-8"), "kept")
-                self.assertTrue(planted.is_symlink())
-                planted.unlink()
+            except OSError as error:
+                self.skipTest(f"this host cannot create symlinks: {error}")
+            with self.assertRaises(disc_verify.DiscVerifyError):
+                disc_verify.import_dat(source, linked)
+            self.assertEqual((outside / "redump.dat").read_text(encoding="utf-8"), "kept")
+            # Nor is a link left where an earlier import named its temporary file.
+            planted = data / "verification" / f".redump.dat.{os.getpid()}.tmp"
+            planted.symlink_to(outside / "redump.dat")
+            disc_verify.import_dat(source, data)
+            self.assertEqual((outside / "redump.dat").read_text(encoding="utf-8"), "kept")
+            self.assertTrue(planted.is_symlink())
+            planted.unlink()
             self.assertEqual(disc_verify.load_imported_dat(data).serials, frozenset())
             self.assertEqual(sorted(path.name for path in imported.parent.iterdir()),
                              ["redump.dat"])
