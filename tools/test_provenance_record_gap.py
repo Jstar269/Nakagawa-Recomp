@@ -249,7 +249,8 @@ class TestInventoryShape(unittest.TestCase):
         covered, victims = constructed_gap()
         victim = sorted(victims)[0]
         public_class = gap.public_classifications(LEDGER)[victim]
-        trusted_class = "derived_data" if public_class != "derived_data" else "upstream_derived"
+        # A gate class the public ledger does not give the victim, so the authority's wins visibly.
+        trusted_class = "unresolved" if public_class != "unresolved" else "upstream_derived"
         buffer = io.StringIO()
         with mock.patch.object(gap, "exact_paths_from_trusted_ledger", return_value=covered), \
                 mock.patch.object(gap, "classifications_from_trusted_ledger",
@@ -517,6 +518,75 @@ class TestOutput(unittest.TestCase):
             [item["path"] for item in document["paths"]],
             [item["path"] for item in gap.record_gaps(covered=covered)],
         )
+
+
+
+class TestInventoryPrintsOnlyItsFields(unittest.TestCase):
+    """The inventory prints a path, its gate class and the fixed status strings, nothing more.
+
+    A trusted ledger's records and a ledger's classification field may hold anything; only a
+    class name the gate defines reaches the output (CodeQL py/clear-text-logging-sensitive-data
+    on the record_gaps flow, #2720).
+    """
+
+    ROW_KEYS = {"path", "reason", "deterministic_class", "independence"}
+    INDEPENDENCE_KEYS = {"status", "owner", "disposition", "reason", "source"}
+    SECRETS = ("hunter2-RECORD-SECRET", "hunter2-PRIVATE-NOTE", "hunter2-CLASS-SECRET", "hunter2-PUBLIC-CLASS")
+
+    def _run(self, *mode: str) -> str:
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        covered, victims = constructed_gap()
+        self.assertGreaterEqual(len(victims), 3)
+        first, second, third = sorted(victims)[:3]
+        records = [
+            {"id": "PROV-SECRET-1", "paths": [first], "classification": f"api_key={self.SECRETS[2]}",
+             "secret_token": self.SECRETS[0], "private_note": self.SECRETS[1]},
+            {"id": "PROV-SECRET-2", "paths": [second], "classification": "unresolved",
+             "password": self.SECRETS[0], "credential": {"token": self.SECRETS[1]}},
+        ]
+        public = dict(gap.public_classifications(LEDGER))
+        # No trusted record speaks for the third path, so its class comes from this field.
+        public[third] = f"password={self.SECRETS[3]}"
+        with tempfile.TemporaryDirectory(prefix="nakagawa-record-gap-test-") as tmp:
+            ledger = Path(tmp) / "trusted.json"
+            ledger.write_text(json.dumps({"records": records}), encoding="utf-8")
+            buffer = io.StringIO()
+            with mock.patch.object(gap, "exact_paths_from_trusted_ledger", return_value=covered), \
+                    mock.patch.object(gap, "public_classifications", return_value=public), \
+                    redirect_stdout(buffer):
+                self.assertEqual(gap.main(["--repo", str(ROOT), *mode, "--trusted-ledger", str(ledger)]), 0)
+        return buffer.getvalue()
+
+    def test_json_rows_hold_only_the_printed_fields(self) -> None:
+        out = self._run("--json")
+        for secret in self.SECRETS:
+            self.assertNotIn(secret, out)
+        document = json.loads(out)
+        self.assertEqual(set(document), {"source", "gap_count", "paths"})
+        self.assertEqual(document["source"], "trusted authority (--trusted-ledger)")
+        allowed_classes = set(provenance_ledger.ALLOWED_CLASSES)
+        for row in document["paths"]:
+            self.assertLessEqual(set(row), self.ROW_KEYS, row)
+            self.assertEqual(row["reason"], "no exact trusted record")
+            self.assertIn(row["deterministic_class"], allowed_classes, row)
+            if "independence" in row:
+                self.assertLessEqual(set(row["independence"]), self.INDEPENDENCE_KEYS, row)
+                self.assertTrue(all(isinstance(value, str) for value in row["independence"].values()))
+
+    def test_text_rows_hold_only_the_path_and_class(self) -> None:
+        out = self._run()
+        for secret in self.SECRETS:
+            self.assertNotIn(secret, out)
+        allowed_classes = set(provenance_ledger.ALLOWED_CLASSES)
+        for line in out.splitlines():
+            if line.startswith("  ") and not line.startswith("    "):
+                path, _, bracket = line.strip().partition("  [")
+                self.assertTrue(path and bracket.endswith("]"), line)
+                self.assertIn(bracket[:-1], allowed_classes, line)
 
 
 if __name__ == "__main__":

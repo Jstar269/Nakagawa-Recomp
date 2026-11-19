@@ -93,6 +93,38 @@ _PRODUCTION_PREFIXES = ("src/", "tools/")
 #: independence annotation skip them; a vendored dependency's licence or notice
 #: file must never have to be pruned from the baseline when it is relocated.
 _NON_CODE_SUFFIXES = (".md", ".txt")
+#: The class names a gap row may carry: the gate's own deterministic classes, in a fixed
+#: order. A row takes its class from this tuple (``_known_class``), never from a ledger.
+_GAP_CLASSES: tuple[str, ...] = tuple(sorted(provenance_ledger.ALLOWED_CLASSES))
+#: The keys an ``independence`` annotation may carry (``independence_metadata`` and the
+#: missing-disposition default), in the order they are printed.
+_INDEPENDENCE_KEYS = ("status", "owner", "disposition", "reason", "source")
+
+
+def _known_class(value: object) -> str | None:
+    """``value`` as the matching name in ``_GAP_CLASSES``, or ``None`` when it names no class.
+
+    The result is the constant from ``_GAP_CLASSES``, not ``value`` itself, so whatever else a
+    ledger's classification field holds never reaches the inventory's output.
+    """
+    for name in _GAP_CLASSES:
+        if value == name:
+            return name
+    return None
+
+
+def _gap_row(path: str, deterministic_class: str, independence: dict[str, object] | None) -> dict[str, object]:
+    """One inventory row, projected to exactly the fields the output prints, each a plain string."""
+    row: dict[str, object] = {
+        "path": str(path),
+        "reason": "no exact trusted record",
+        "deterministic_class": deterministic_class,
+    }
+    if independence is not None:
+        row["independence"] = {
+            key: str(independence[key]) for key in _INDEPENDENCE_KEYS if key in independence
+        }
+    return row
 
 
 def _is_production_code(path: str) -> bool:
@@ -275,14 +307,16 @@ def record_gaps(
     *,
     repo: Path = ROOT,
     covered: set[str] | None = None,
-    trusted_classifications: dict[str, str] | None = None,
+    ledger_classes: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """Return the tracked public paths that no exact trusted record covers.
 
     ``covered`` is the set of paths the authority speaks about exactly.  When it
-    is ``None`` the committed public ledger is used.  ``trusted_classifications``
-    (from ``--trusted-ledger``) takes precedence over the public projection for
-    the reported class, as in :func:`disposition_gaps`.
+    is ``None`` the committed public ledger is used.  ``ledger_classes`` (from
+    ``--trusted-ledger``) takes precedence over the public projection for the
+    reported class, as in :func:`disposition_gaps`.  A ledger's class is used only
+    when it names one of the gate's classes; otherwise the path's deterministic
+    class is reported.  Each row is projected to its printed fields (``_gap_row``).
     """
     ledger_path = repo / LEDGER_PATH
     document = json.loads(ledger_path.read_text(encoding="utf-8"))
@@ -300,27 +334,23 @@ def record_gaps(
             continue
         if path in covered:
             continue
-        classification = (trusted_classifications or {}).get(path)
+        classification = _known_class((ledger_classes or {}).get(path))
         if classification is None:
-            classification = classifications.get(path)
+            classification = _known_class(classifications.get(path))
         if classification is None:
             classification, _evidence = provenance_ledger.class_for(path, None)
-        gap: dict[str, object] = {
-            "path": path,
-            "reason": "no exact trusted record",
-            "deterministic_class": classification,
-        }
+        independence: dict[str, object] | None = None
         if _is_production_code(path) and classification in {
             "upstream_derived",
             "unresolved",
         }:
             metadata = independence_metadata(path, campaign_path=campaign_path, campaign=campaign)
-            gap["independence"] = metadata or {
+            independence = metadata or {
                 "status": "missing",
                 "reason": "no explicit campaign owner or disposition",
                 "source": INDEPENDENCE_PLAN_PATH,
             }
-        gaps.append(gap)
+        gaps.append(_gap_row(path, classification, independence))
     return gaps
 
 
@@ -582,13 +612,13 @@ def main(argv: list[str] | None = None) -> int:
     repo = args.repo.resolve()
     source = "committed public ledger (projection of the private authority)"
     covered = None
-    trusted_classifications = None
+    ledger_classes = None
     if args.trusted_ledger is not None:
         covered = exact_paths_from_trusted_ledger(args.trusted_ledger)
-        trusted_classifications = classifications_from_trusted_ledger(args.trusted_ledger)
+        ledger_classes = classifications_from_trusted_ledger(args.trusted_ledger)
         source = "trusted authority (--trusted-ledger)"
 
-    gaps = record_gaps(repo=repo, covered=covered, trusted_classifications=trusted_classifications)
+    gaps = record_gaps(repo=repo, covered=covered, ledger_classes=ledger_classes)
 
     if args.json:
         print(json.dumps({"source": source, "gap_count": len(gaps), "paths": gaps}, indent=2))
@@ -608,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         validate_baseline(KNOWN_DISPOSITION_GAPS)
         unlisted, stale = check_disposition_gaps(
-            disposition_gaps(repo=repo, trusted_classifications=trusted_classifications),
+            disposition_gaps(repo=repo, trusted_classifications=ledger_classes),
             baseline=KNOWN_DISPOSITION_GAPS)
         if unlisted or stale:
             if unlisted:
