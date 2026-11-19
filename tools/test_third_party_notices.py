@@ -102,14 +102,17 @@ class TestThirdPartyComponentInventory(unittest.TestCase):
                     )
 
     def test_old_mit_grant_is_recorded_as_mit_modern_variant(self) -> None:
-        """The 'without written agreement' grant (HarfBuzz's COPYING) is SPDX MIT-Modern-Variant, not MIT."""
+        """The 'without written agreement' grant (HarfBuzz's COPYING) is SPDX MIT-Modern-Variant, not MIT.
+
+        HarfBuzz's record also ships src/ms-use/COPYING, an MIT grant, so its expression names both.
+        """
         for key, record in self.records.items():
             for entry in record.get("license_texts", []):
                 text = " ".join((ROOT / entry["file"]).read_text(encoding="utf-8", errors="replace").split())
                 if "without written agreement and without license or royalty fees" not in text:
                     continue
                 with self.subTest(component=key, text=entry["file"]):
-                    self.assertEqual(record["spdx_id"], "MIT-Modern-Variant")
+                    self.assertEqual(record["spdx_id"], "MIT-Modern-Variant AND MIT")
 
     def test_harfbuzz_records_the_subdirectory_licence_of_its_compiled_tables(self) -> None:
         """HarfBuzz's COPYING defers to subdirectory COPYING files; the one whose inputs are compiled in ships.

@@ -257,7 +257,7 @@ SHA-256 in `assets/third_party_components.json`:
 | `SDL3.dll` | Zlib | `third_party/licenses/sdl3/LICENSE.txt` |
 | `SDL3_ttf.dll` | Zlib | `third_party/licenses/SDL3_ttf.txt` |
 | `libfreetype-6.dll` | FTL | `third_party/licenses/FreeType-FTL.txt` |
-| `libharfbuzz-0.dll` | MIT-Modern-Variant | `third_party/licenses/HarfBuzz.txt`, `third_party/licenses/harfbuzz/ms-use-COPYING.txt` |
+| `libharfbuzz-0.dll` | MIT-Modern-Variant AND MIT | `third_party/licenses/HarfBuzz.txt`, `third_party/licenses/harfbuzz/ms-use-COPYING.txt` |
 | `libgraphite2.dll` | MIT (chosen) | `third_party/licenses/Graphite2.txt` |
 | `libpng16-16.dll` | libpng-2.0 | `third_party/licenses/libpng.txt` |
 | `zlib1.dll` | Zlib | `third_party/licenses/zlib.txt` |
