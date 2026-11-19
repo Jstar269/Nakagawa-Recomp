@@ -129,6 +129,43 @@ class TestPackageNotices(unittest.TestCase):
                     )
                 self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
 
+    def test_freetype_credit_reaches_the_notices(self) -> None:
+        """The FTL's binary-distribution credit is stated in THIRD_PARTY_NOTICES.txt, not only implied."""
+        (self.pkg_dir / "mygame.exe").write_bytes(b"MZ\0\0exe")
+        (self.pkg_dir / "libfreetype-6.dll").write_bytes(b"MZ\0\0freetype")
+
+        result = package_notices.generate_package_notices(
+            self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+        )
+
+        freetype = next(c for c in result["components"] if c.get("binary") == "libfreetype-6.dll")
+        self.assertIn(
+            "This software is based in part on the work of the FreeType Team.",
+            freetype.get("copyright_notices", []),
+        )
+        combined = (self.pkg_dir / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
+        section = combined.split("Component: FreeType", 1)[1].split("The FreeType Project LICENSE", 1)[0]
+        self.assertIn("based in part on the work of the FreeType Team", section)
+        self.assertIn("The FreeType Project (https://freetype.org)", section)
+
+    def test_malformed_bundled_copyright_notices_fail_closed(self) -> None:
+        """A bundled DLL record's copyright_notices must also be a list of strings."""
+        (self.pkg_dir / "libfreetype-6.dll").write_bytes(b"MZ\0\0freetype")
+        real = package_notices.load_component_inventory()
+        for bad in ("Portions copyright The FreeType Project", ["ok", 3]):
+            inventory = json.loads(json.dumps(real))
+            inventory["native"]["dlls"]["libfreetype-6.dll"]["copyright_notices"] = bad
+            record = inventory["native"]["dlls"]["libfreetype-6.dll"]
+            with self.subTest(bad=bad), \
+                    mock.patch.object(package_notices, "load_component_inventory", return_value=inventory), \
+                    mock.patch.dict(package_notices.KNOWN_RUNTIME_DLLS, {"libfreetype-6.dll": record}):
+                with self.assertRaises(PackageRouteError) as ctx:
+                    package_notices.generate_package_notices(
+                        self.pkg_dir, repo_root=ROOT, toolchain_root=self.no_toolchain
+                    )
+                self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
+                self.assertIn("libfreetype-6.dll", str(ctx.exception))
+
     def test_notices_bundle_generation_with_in_tree_license_texts(self) -> None:
         """Bundle generation reads the checked-in texts, not a host toolchain."""
         # Synthetic package contents

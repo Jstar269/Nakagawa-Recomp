@@ -401,16 +401,14 @@ static void of_dispatch(Fsr3FgHost *h, uint32_t color, int reset, uint32_t trans
     for (int level = OF_PYRAMID_LEVELS - 1; level >= 0; level--) {
         const int odd_level = (level & 1) != 0;
         const uint32_t lv = (uint32_t)level;
-        const uint32_t input_a = odd_frame ? OFR(OPTICAL_FLOW_INPUT_2) : OFR(OPTICAL_FLOW_INPUT_1);
-        const uint32_t input_b = odd_frame ? OFR(OPTICAL_FLOW_INPUT_1) : OFR(OPTICAL_FLOW_INPUT_2);
         const uint32_t flow_a = (odd_frame != odd_level) ? OFR(OPTICAL_FLOW_2) : OFR(OPTICAL_FLOW_1);
         const uint32_t flow_b = (odd_frame != odd_level) ? OFR(OPTICAL_FLOW_1) : OFR(OPTICAL_FLOW_2);
         c->opticalFlowPyramidLevel = lv;
         c->opticalFlowPyramidLevelCount = OF_PYRAMID_LEVELS;
         stage(h, FSR3FG_STAGE_OF, c, sizeof(*c));
 
-        srv[OFB_OPTICAL_FLOW_INPUT] = input_a + lv;
-        srv[OFB_OPTICAL_FLOW_PREVIOUS_INPUT] = input_b + lv;
+        srv[OFB_OPTICAL_FLOW_INPUT] = input + lv;
+        srv[OFB_OPTICAL_FLOW_PREVIOUS_INPUT] = previous_input + lv;
         uav[OFB_OPTICAL_FLOW] = flow_a + lv;
         srv[OFB_OPTICAL_FLOW_PREVIOUS] = flow_b + lv;
         {
@@ -635,9 +633,12 @@ int fsr3_fg_host_dispatch(Fsr3FgHost *h, const Fsr3FgHostDispatch *d) {
             return -1;
         memcpy(fi.rect, r, sizeof(fi.rect));
     }
+    /* The frame's own prepare: a slot still zero from init, or one holding another frame, has no render size
+     * for this frame (a 0 x 0 pyramid would give its SPD a dispatch of 2^26 x 2^26 groups). */
+    const Fsr3FgHostPrepare *p = &h->prepared[d->frame_id % PROVIDER_MAX_QUEUED_FRAMES];
+    if (p->frame_id != d->frame_id || !p->render_width || !p->render_height) return -1;
     plan_begin(h);
 
-    const Fsr3FgHostPrepare *p = &h->prepared[d->frame_id % PROVIDER_MAX_QUEUED_FRAMES];
     /* Disjoint frame IDs: decreased, skipped, or not the frame last configured. */
     const int decreased = d->frame_id < h->last_frame_id;
     const int skipped = (d->frame_id - h->last_frame_id) > 1;
