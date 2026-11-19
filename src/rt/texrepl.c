@@ -257,8 +257,21 @@ uint32_t nk_texrepl_bits_per_texel(uint32_t format) {
     return kBits[format & 15u];
 }
 
+/* Elapsed wall time on the host's monotonic clock, for the open, list and decode figures: the same
+ * meaning on every host, time blocked on a slow disk included and no other thread's CPU time added
+ * (ISO C clock() is this process's CPU time on POSIX and elapsed time on Windows). 0 when the host
+ * has no such clock; the figures are diagnostics only. */
 static uint64_t now_ns(void) {
-    return (uint64_t)((double)clock() * (1e9 / (double)CLOCKS_PER_SEC));
+#if defined(_WIN32)
+    LARGE_INTEGER freq, count;
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 || !QueryPerformanceCounter(&count)) return 0;
+    const uint64_t f = (uint64_t)freq.QuadPart, c = (uint64_t)count.QuadPart;
+    return (c / f) * 1000000000ull + (c % f) * 1000000000ull / f;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
 }
 
 /* ======================================================================================= pack */

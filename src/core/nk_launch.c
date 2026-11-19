@@ -65,6 +65,78 @@ static bool launch_join_path(const char *base, const char *relative,
                                    NK_SHARED_PATH_REQUIRE_POSITIVE_LENGTH);
 }
 
+/* Whether the runtime in a package's executable knows the cheats switch (#2639). A package is
+   linked with the runtime of the Nakagawa that built it, and one built before cheats existed
+   ignores SR_CHEATS without a word: no marker in its window and no line in its log. The
+   package's build identity (NkPackageBuildIdentity) says only that another Nakagawa built it,
+   not which one came first, and nothing else a package records names its runtime's features.
+   So the launcher asks the executable: a runtime that reads the switch holds the name of the
+   variable its file comes from in its data. An executable that cannot be read (or no memory
+   to read it with) answers true, so the launch itself reports what is wrong with it. */
+bool nk_launch_runtime_reads_cheats(const char *executable_path) {
+    static const char marker[] = "SR_CHEATS_" "FILE";
+    const size_t marker_len = sizeof(marker) - 1u;
+    const size_t block_size = 65536u;
+    unsigned char *block;
+    size_t kept = 0u;
+    bool found = false;
+    FILE *f;
+    if (!executable_path || !executable_path[0]) return true;
+    f = nk_fopen_utf8(executable_path, "rb");
+    if (!f) return true;
+    block = (unsigned char *)malloc(block_size);
+    if (!block) {
+        fclose(f);
+        return true;
+    }
+    for (;;) {
+        size_t got = fread(block + kept, 1u, block_size - kept, f);
+        size_t have = kept + got;
+        if (got == 0u) break;
+        for (size_t i = 0u; i + marker_len <= have && !found; i++) {
+            if (block[i] == (unsigned char)marker[0] && memcmp(block + i, marker, marker_len) == 0) found = true;
+        }
+        if (found) break;
+        /* Keep the tail a marker could start in. */
+        kept = have < marker_len - 1u ? have : marker_len - 1u;
+        memmove(block, block + have - kept, kept);
+    }
+    /* A read that failed part way (a lock, a drive that went away) is an executable that
+       cannot be read, not one whose runtime predates cheats. */
+    if (!found && ferror(f)) found = true;
+    free(block);
+    fclose(f);
+    return found;
+}
+
+/* The cheat file a launch with cheats on names (#2639): the one the session names, else
+   <user_data_root>/cheats/<DISC>.ini with the disc ID as the package folders spell it
+   (ULUS12345). False, with `out_path` empty, when the session names none and has no per-user
+   data directory or no PSP disc ID, or the path does not fit; the runtime then says that no
+   file is named and applies nothing. */
+static bool launch_cheats_file(const NkLaunchSession *session, char *out_path, size_t out_size) {
+    int written;
+    if (!out_path || out_size == 0u) return false;
+    out_path[0] = '\0';
+    if (session->config.cheats_file[0]) {
+        written = snprintf(out_path, out_size, "%s", session->config.cheats_file);
+    } else {
+        char disc[NK_MAX_DISC_ID_LEN + 8];
+        char sep = nk_platform_path_separator();
+        if (!session->user_data_root[0] ||
+            !nk_title_manifest_package_dir_name(session->disc_id, NULL, disc, sizeof(disc))) {
+            return false;
+        }
+        written = snprintf(out_path, out_size, "%s%ccheats%c%s.ini", session->user_data_root, sep,
+                           sep, disc);
+    }
+    if (written < 0 || (size_t)written >= out_size) {
+        out_path[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 /* The title's code-capture folder (#1933), <user_data_root>/cache/bringup/<DISC>/captures, the
    folder `nk_cli.py bringup` reads (bringup_capture_dir). False, with `out_path` empty, when the
    session has no per-user data directory or no PSP disc ID, or the path does not fit. */
@@ -1505,6 +1577,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     char env_ui_root[NK_MAX_PATH + 16];
     char env_launcher_display[96];
     char env_nickname[sizeof(session->config.nickname) + 16];
+    char env_cheats_file[NK_MAX_PATH + 24];
     char sep = nk_platform_path_separator();
 
     if (session->config.fps_cap == -1) {
@@ -1526,7 +1599,7 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     snprintf(env_memstick, sizeof(env_memstick), "SR_MEMSTICK=%s", session->memstick_root);
     snprintf(env_tables, sizeof(env_tables), "PSP_VFPU_TABLES=assets%cvfpu", sep);
 
-    const char *envp[48];
+    const char *envp[52];
     int env_count = 0;
     /* An empty value masks an inherited ISO for staged sessions with no ISO. */
     snprintf(env_iso, sizeof(env_iso), "PSP_ISO=%s", session->iso_path);
@@ -1711,6 +1784,32 @@ NkResult nk_launch_start(NkLaunchSession *session) {
     /* The console nickname (#2197), always exported so an inherited value cannot name it. */
     snprintf(env_nickname, sizeof(env_nickname), "SR_NICKNAME=%s", session->config.nickname);
     envp[env_count++] = env_nickname;
+    /* Cheats (#2639, src/rt/cheats.h): the switch and the file, both always exported so an
+       inherited value cannot turn them on or name a file. The acceptance checkpoint is evidence
+       of the game as it is, so a session with one refuses to launch with cheats on. */
+    {
+        char cheats_file[NK_MAX_PATH];
+        cheats_file[0] = '\0';
+        if (session->config.cheats) {
+            if (session->config.headless_accept_presented_frames > 0u) {
+                snprintf(session->last_error, sizeof(session->last_error),
+                         "Cheats are on; the acceptance checkpoint needs a run without them.");
+                return NK_ERROR_GENERIC;
+            }
+            /* A package built before cheats existed would start, apply nothing and say
+               nothing. It is not started that way. */
+            if (!nk_launch_runtime_reads_cheats(session->executable_path)) {
+                snprintf(session->last_error, sizeof(session->last_error),
+                         "Cheats are on, but this game's package was built before cheats existed "
+                         "and would ignore them. Rebuild the package to use cheats, or turn cheats off.");
+                return NK_ERROR_GENERIC;
+            }
+            (void)launch_cheats_file(session, cheats_file, sizeof(cheats_file));
+        }
+        envp[env_count++] = session->config.cheats ? "SR_CHEATS=1" : "SR_CHEATS=0";
+        snprintf(env_cheats_file, sizeof(env_cheats_file), "SR_CHEATS_FILE=%s", cheats_file);
+        envp[env_count++] = env_cheats_file;
+    }
     /* What the pause overlay shows and draws with, beside the game's name (SR_GAME_TITLE
      * below): the disc ID and the player's folder for the UI fonts. Always exported, so an
      * empty value masks an inherited one instead of naming another game. */

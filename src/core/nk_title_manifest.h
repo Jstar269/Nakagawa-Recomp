@@ -176,6 +176,7 @@ typedef struct {
     NkBuildStatus status;
     char executable[16];
     char sha256[65];      /* empty when the executable could not be read */
+    bool unreadable;      /* named but not found or not read in the image */
     char label[65];       /* the matched build's label */
     char reason[201];     /* a known-bad build's reason */
     char supported[256];  /* the supported builds' labels, "; " apart */
@@ -183,7 +184,9 @@ typedef struct {
 
 /* False only for an unusable disc ID or argument; a title without builds is
  * NK_BUILD_UNTRACKED. iso_path or executable_name may be NULL: the build is
- * then NK_BUILD_UNLISTED when the title records any. */
+ * then NK_BUILD_UNLISTED when the title records any. A named executable the
+ * image does not hold, or one that cannot be read, is NK_BUILD_UNLISTED with
+ * `unreadable` set, and its description names the read failure. */
 bool nk_title_manifest_identify_build(const char *disc_id, const char *iso_path,
                                       const char *executable_name, NkBuildIdentity *out);
 /* A one-sentence description for the game card; empty for an untracked title. */
@@ -247,7 +250,8 @@ NkRuntimePackageStatus nk_title_manifest_validate_aot_package(
 /* Validation hashes the package's files, which takes seconds for a large
  * package. A host that is shutting down can stop it early: once `cancelled`
  * returns true, the file being hashed is abandoned between 32 KiB reads and
- * the validation fails with the reason "Package validation was cancelled.".
+ * the validation fails with NK_RUNTIME_PACKAGE_UNKNOWN and the reason
+ * "Package validation was cancelled.".
  * The check must be safe to call from any thread. Install it before any
  * validation starts; NULL (the default) never cancels. */
 typedef bool (*NkTitleManifestCancelFn)(void *user);

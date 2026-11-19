@@ -350,11 +350,12 @@ static int probe_frame(Target *target, const NkUiDrawList *list, uint32_t page, 
         } else if (cmd->kind == NK_UI_DRAW_TEXT) {
             const NkUiTextRun *run = (const NkUiTextRun *)cmd->custom;
             int box[4];
-            int slack = run->size_px / 6 > 3 ? run->size_px / 6 : 3;
+            int slack;
             Ink inside;
             Ink around;
             uint32_t bg = page;
             CHECK(run != NULL && run->length > 0, "text command carries its run");
+            slack = run->size_px / 6 > 3 ? run->size_px / 6 : 3;
             /* The background under a label: the panel, the card, or the button. */
             if (strncmp(run->text, "AVAT", 4) == 0) {
                 bg = theme->surface_raised;
@@ -614,12 +615,13 @@ static int test_rounded_corner_fringe(void) {
     corner = target_pixel(&target, 8, 8);
     CHECK(center == 0xFFFFFFFFu, "the middle is solid");
     CHECK(corner == 0x000000FFu, "the cut corner stays background");
-    /* The fringe fades from white to black without a dark halo: a pixel on the
-       curve is a grey no darker than the background and no brighter than white. */
+    /* The fringe fades from white to black without a colour halo. (11.5, 11.5) is
+       12.02 px from the corner's centre (20, 20): inside the fringe band from 11.5
+       to 12.5 px, so the pixel is a grey strictly between background and white. */
     {
-        uint32_t edge = target_pixel(&target, 10, 10);
+        uint32_t edge = target_pixel(&target, 11, 11);
         int r = (int)(edge >> 24);
-        CHECK(r >= 0 && r <= 255, "fringe pixel is a valid grey");
+        CHECK(r > 0 && r < 255, "the curve is antialiased");
         CHECK(((edge >> 16) & 0xFFu) == (uint32_t)r && ((edge >> 8) & 0xFFu) == (uint32_t)r,
               "fringe pixels stay neutral grey: premultiplied blending, no colour halo");
     }
@@ -1136,6 +1138,18 @@ static int test_geometry_failure_fails_the_render(void) {
 }
 
 #if defined(_WIN32)
+/* The SDL3_ttf.dll path in the folder of module (NULL: this executable), or "" when that
+   folder cannot be named. */
+static void ttf_beside_module(HMODULE module, char out[MAX_PATH + 32]) {
+    DWORD n = GetModuleFileNameA(module, out, MAX_PATH);
+    char *slash = n > 0 && n < MAX_PATH ? strrchr(out, '\\') : NULL;
+    if (slash != NULL) {
+        snprintf(slash + 1, (size_t)(MAX_PATH + 32) - (size_t)(slash + 1 - out), "SDL3_ttf.dll");
+    } else {
+        out[0] = '\0';
+    }
+}
+
 /* A copy of SDL3_ttf.dll in the current folder (here a file that is no library at all) is
    never the one nk_ui_ttf_create loads: its Windows default is a full path, beside the
    executable or beside the SDL3.dll in use. A bare name would reach the current folder
@@ -1146,6 +1160,7 @@ static int test_geometry_failure_fails_the_render(void) {
 static int planted_ttf_in_current_folder_is_ignored(void) {
     char temp[MAX_PATH], folder[MAX_PATH + 64], planted[MAX_PATH + 96], previous[MAX_PATH];
     char loaded[MAX_PATH] = "", reason[256], beside_sdl[MAX_PATH + 32] = "";
+    char beside_exe[MAX_PATH + 32] = "";
     HMODULE module;
     NkUiTtf *ttf;
     FILE *file;
@@ -1155,13 +1170,11 @@ static int planted_ttf_in_current_folder_is_ignored(void) {
                (unsigned long)GetLastError());
         return 0;
     }
+    /* The two default places nk_ui_ttf_create tries: beside this executable, then beside
+       the SDL3.dll in use. */
+    ttf_beside_module(NULL, beside_exe);
     module = GetModuleHandleA("SDL3.dll");
-    if (module != NULL && GetModuleFileNameA(module, beside_sdl, MAX_PATH) > 0) {
-        char *slash = strrchr(beside_sdl, '\\');
-        if (slash != NULL) snprintf(slash + 1, sizeof(beside_sdl) - (size_t)(slash + 1 - beside_sdl),
-                                    "SDL3_ttf.dll");
-        else beside_sdl[0] = '\0';
-    }
+    if (module != NULL) ttf_beside_module(module, beside_sdl);
     if (length == 0 || length >= MAX_PATH ||
         GetCurrentDirectoryA(MAX_PATH, previous) == 0) {
         printf("FAIL the planted-library check cannot name its folders\n");
@@ -1174,6 +1187,7 @@ static int planted_ttf_in_current_folder_is_ignored(void) {
     file = fopen(planted, "wb");
     if (file == NULL) {
         printf("FAIL cannot plant %s\n", planted);
+        RemoveDirectoryA(folder);
         return 0;
     }
     fputs("MZ planted by test_nk_ui_sdlr: not a library\n", file);
@@ -1193,11 +1207,16 @@ static int planted_ttf_in_current_folder_is_ignored(void) {
     DeleteFileA(planted);
     RemoveDirectoryA(folder);
     if (ttf == NULL) {
-        if (beside_sdl[0] == '\0' || GetFileAttributesA(beside_sdl) == INVALID_FILE_ATTRIBUTES) {
-            return -1;
+        const char *present = NULL;
+        if (beside_exe[0] != '\0' && GetFileAttributesA(beside_exe) != INVALID_FILE_ATTRIBUTES) {
+            present = beside_exe;
+        } else if (beside_sdl[0] != '\0' &&
+                   GetFileAttributesA(beside_sdl) != INVALID_FILE_ATTRIBUTES) {
+            present = beside_sdl;
         }
+        if (present == NULL) return -1;
         printf("FAIL %s exists but SDL3_ttf did not load with the library search limited "
-               "(a planted copy taken instead, or its imports not found): %s\n", beside_sdl, reason);
+               "(a planted copy taken instead, or its imports not found): %s\n", present, reason);
         return 0;
     }
     if (_strnicmp(loaded, folder, strlen(folder)) == 0) {
@@ -1232,7 +1251,14 @@ int main(void) {
         }
     }
 #if defined(_WIN32)
-    if (planted_ttf_in_current_folder_is_ignored() == 0) return 1;
+    {
+        int planted = planted_ttf_in_current_folder_is_ignored();
+        if (planted == 0) return 1;
+        if (planted < 0) {
+            printf("SKIP planted-library check: no SDL3_ttf.dll beside this executable or "
+                   "beside SDL3.dll\n");
+        }
+    }
 #endif
     g_ttf = nk_ui_ttf_create(NULL, 0);
     if (g_ttf == NULL) {

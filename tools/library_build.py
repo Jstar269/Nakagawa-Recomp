@@ -57,7 +57,8 @@ import threading
 import time
 from typing import Any, Callable
 
-from library_sweep import _read_bringup_progress, _terminate_process_tree
+from library_sweep import (MAX_LAUNCH_TIMEOUT_SECONDS, _read_bringup_progress,
+                           _terminate_process_tree)
 from nk_core import decrypt_tool, disc_verify, inspect_iso
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -828,7 +829,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--title-timeout", type=int, default=DEFAULT_TITLE_TIMEOUT_SECONDS,
                         help="Seconds one title may take before it is stopped and recorded")
     parser.add_argument("--launch-timeout", type=int, default=DEFAULT_LAUNCH_TIMEOUT_SECONDS,
-                        help="Seconds of the hidden first launch (nk_cli bringup --launch-timeout)")
+                        help="Seconds of the hidden first launch, 1.."
+                             f"{MAX_LAUNCH_TIMEOUT_SECONDS} (nk_cli bringup --launch-timeout)")
     parser.add_argument("--retry-failed", action="store_true",
                         help="Build again the titles whose last attempt failed or timed out")
     parser.add_argument("--limit", type=int, default=None, help="Build at most this many titles")
@@ -847,6 +849,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.jobs < 1 or args.title_timeout < 1 or args.launch_timeout < 1:
         parser.error("--jobs, --title-timeout and --launch-timeout must be positive")
+    # Every title's bring-up refuses a launch limit outside its range, so a larger value is
+    # refused here, once, instead of failing each title in turn.
+    if args.launch_timeout > MAX_LAUNCH_TIMEOUT_SECONDS:
+        parser.error(f"--launch-timeout must be 1..{MAX_LAUNCH_TIMEOUT_SECONDS} seconds "
+                     "(the bring-up launch range)")
     only = read_only_list(args.only) if args.only is not None else None
     # The list is the one given (imported first), else the data folder's import, else the list
     # bundled with Nakagawa (disc_verify.load_verification_dat).

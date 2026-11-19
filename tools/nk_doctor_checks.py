@@ -773,31 +773,59 @@ def check_worktree_accumulation(
         )
 
 
-def _shader_provenance_errors(root: Path) -> list[str]:
-    shader_root = root / "src" / "rt" / "gpu_sdl3vk"
-    manifest = shader_root / "shader_manifest.json"
-    try:
-        from shader_embed import verify as verify_shader_provenance
+# The GLSL shader sets `shader_embed.py verify` checks, as (set name, directory the
+# manifest's paths are relative to, manifest, shader_embed attribute naming the set).
+# The FSR 3 sets are DXC-built and pinned separately; glslc regenerates neither.
+_GLSL_SHADER_SETS = (
+    ("psp", Path("src/rt/gpu_sdl3vk"), Path("src/rt/gpu_sdl3vk/shader_manifest.json"), "SHADERS"),
+    ("ui", Path("src/ui"), Path("src/ui/shaders/shader_manifest.json"), "UI_SHADERS"),
+)
 
-        returned: list[str] = verify_shader_provenance(shader_root, manifest)
-        return returned
-    except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
-        return [f"shader verification error: {exc}"]
+
+def _shader_set_errors(root: Path) -> list[tuple[str, Path, list[str]]]:
+    """Return (set name, manifest, errors) for each GLSL shader set that fails verification."""
+    failures: list[tuple[str, Path, list[str]]] = []
+    for name, directory, manifest, shaders_attr in _GLSL_SHADER_SETS:
+        manifest_path = root / manifest
+        try:
+            import shader_embed
+
+            errors: list[str] = shader_embed.verify(
+                root / directory, manifest_path, shaders=getattr(shader_embed, shaders_attr),
+            )
+        except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            errors = [f"shader verification error: {exc}"]
+        if errors:
+            failures.append((name, manifest_path, errors))
+    return failures
+
+
+def _shader_failure_details(root: Path, failures: list[tuple[str, Path, list[str]]]) -> list[str]:
+    return [
+        f"{manifest.relative_to(root).as_posix()}: {error}"
+        for _name, manifest, errors in failures
+        for error in errors
+    ]
 
 
 def check_shader_provenance(report: Report, root: Path, vulkan_sdk: Path | None) -> None:
-    errors = _shader_provenance_errors(root)
-    if not errors:
+    failures = _shader_set_errors(root)
+    if not failures:
         report.info("GLSLC", "glslc is not required; checked-in shader provenance is valid")
         return
 
-    shader_root = root / "src" / "rt" / "gpu_sdl3vk"
+    commands = [
+        "`python tools/shader_embed.py regenerate --glslc glslc`"
+        if name == "psp"
+        else f"`python tools/shader_embed.py regenerate --shader-set {name} --glslc glslc`"
+        for name, _manifest, _errors in failures
+    ]
     report.fail(
         "SHADER_PROVENANCE",
         "Checked-in shader provenance is invalid; regeneration is required",
-        path=shader_root / "shader_manifest.json",
-        detail="; ".join(errors),
-        remediation="Run `python tools/shader_embed.py regenerate --glslc glslc`, then verify the checked-in shader embeddings.",
+        path=failures[0][1],
+        detail="; ".join(_shader_failure_details(root, failures)),
+        remediation=f"Run {' and '.join(commands)}, then verify the checked-in shader embeddings.",
     )
     glslc_dir = vulkan_sdk / "Bin" if vulkan_sdk else None
     glslc = _find_executable(("glslc.exe", "glslc"), glslc_dir)
@@ -920,11 +948,14 @@ def discover_sdl3_provider(
         version = extract_sdl3_version(found_inc) or "unknown"
         arch = "unknown"
         if found_dll:
+            # Refuse a DLL that is not x86-64, as the automatic MSYS2 branch below does:
+            # the build would link against it and fail only when the player loads it.
             ok, pe_info = _validate_pe_x64(found_dll)
-            if ok:
-                arch = "x86_64"
-            else:
-                arch = pe_info
+            if not ok:
+                raise Sdl3ProviderError(
+                    f"Explicit SDL3 path has an SDL3.dll that is not a valid x86-64 PE: {found_dll}: {pe_info}"
+                )
+            arch = "x86_64"
 
         prov_name = "explicit"
         if "ucrt64" in str(cand).lower() or (cand / "lib" / "libSDL3.dll.a").is_file():
@@ -974,26 +1005,28 @@ def discover_sdl3_provider(
         runtime_dll = msys_bin / "SDL3.dll"
         has_dll = runtime_dll.is_file()
 
-        vulkan_incidental = False
-        vk_path = None
-        if vulkan_sdk:
-            vk_path = Path(vulkan_sdk).resolve()
-        else:
-            try:
-                vk_path = discover_vulkan_sdk()
-            except (VulkanSdkError, RuntimeError):
-                vk_path = None
-
-        if vk_path and vk_path.is_dir():
-            vk_candidates = (
-                vk_path / "Lib" / "SDL3.lib",
-                vk_path / "lib" / "SDL3.lib",
-                vk_path / "Include" / "SDL3",
-                vk_path / "include" / "SDL3",
-            )
-            vulkan_incidental = any(p.exists() for p in vk_candidates)
-
         if not (has_headers and found_import_lib and has_dll):
+            # The Vulkan SDK matters only to name an incidental SDL3 copy in this
+            # failure, so it is looked for only here.
+            vulkan_incidental = False
+            vk_path = None
+            if vulkan_sdk:
+                vk_path = Path(vulkan_sdk).resolve()
+            else:
+                try:
+                    vk_path = discover_vulkan_sdk()
+                except (VulkanSdkError, RuntimeError):
+                    vk_path = None
+
+            if vk_path and vk_path.is_dir():
+                vk_candidates = (
+                    vk_path / "Lib" / "SDL3.lib",
+                    vk_path / "lib" / "SDL3.lib",
+                    vk_path / "Include" / "SDL3",
+                    vk_path / "include" / "SDL3",
+                )
+                vulkan_incidental = any(p.exists() for p in vk_candidates)
+
             missing = []
             if not has_headers:
                 missing.append("headers (include/SDL3/SDL.h)")
@@ -1135,7 +1168,12 @@ def _pkg_config_flags(flag: str) -> str:
     return res.stdout.strip() if res.returncode == 0 else ""
 
 
-def sdl3_make_fragment(explicit: str | None = None, compiler: str | None = None) -> str:
+def sdl3_make_fragment(
+    explicit: str | None = None,
+    compiler: str | None = None,
+    *,
+    vulkan_sdk: str | None = None,
+) -> str:
     """Every SDL3 Make variable from one discovery pass.
 
     The Makefile evaluates this once per parse; separate queries cost one
@@ -1148,7 +1186,7 @@ def sdl3_make_fragment(explicit: str | None = None, compiler: str | None = None)
               "SDL3_VERSION": "none", "SDL3_DLL": "",
               "SDL3_INC_FLAGS": "", "SDL3_LDFLAGS": ""}
     try:
-        p = discover_sdl3_provider(explicit=exp)
+        p = discover_sdl3_provider(explicit=exp, vulkan_sdk=vulkan_sdk or None)
     except Sdl3ProviderError as exc:
         values["SDL3_ERROR"] = str(exc)
     else:
@@ -1229,7 +1267,8 @@ def build_discovery_make_fragment(
             vulkan_sdk = ""
 
     prefix = f"override VULKAN_SDK := {_make_escape(vulkan_sdk)}\n"
-    return prefix + sdl3_make_fragment(explicit_sdl3, compiler)
+    # The SDK found above is passed on, so one Make parse discovers it once.
+    return prefix + sdl3_make_fragment(explicit_sdl3, compiler, vulkan_sdk=vulkan_sdk or None)
 
 
 def write_build_discovery_make_fragment(
@@ -1249,50 +1288,6 @@ def write_build_discovery_make_fragment(
     )
     if not out.is_file() or out.read_text(encoding="utf-8") != text:
         out.write_text(text, encoding="utf-8")
-
-
-def query_sdl3_make(explicit: str | None = None) -> str:
-    """Helper for Makefile to discover SDL3 root directory in a single call."""
-    exp = explicit if explicit and explicit.strip() else None
-    try:
-        provider = discover_sdl3_provider(explicit=exp)
-        return provider.root_dir.as_posix()
-    except Sdl3ProviderError:
-        return ""
-
-
-def query_sdl3_error(explicit: str | None = None) -> str:
-    """Helper for Makefile to query actionable SDL3 failure message."""
-    exp = explicit if explicit and explicit.strip() else None
-    try:
-        discover_sdl3_provider(explicit=exp)
-        return ""
-    except Sdl3ProviderError as exc:
-        return str(exc)
-
-
-def query_sdl3_info(var: str, explicit: str | None = None) -> str:
-    """Query a specific attribute of the resolved SDL3 provider."""
-    exp = explicit if explicit and explicit.strip() else None
-    try:
-        p = discover_sdl3_provider(explicit=exp)
-        if var == "inc":
-            return p.include_dir.as_posix()
-        elif var == "lib_dir":
-            return p.import_lib.parent.as_posix()
-        elif var == "lib":
-            return p.import_lib.as_posix()
-        elif var == "dll":
-            return p.runtime_dll.as_posix() if p.runtime_dll else ""
-        elif var == "version":
-            return p.version
-        elif var == "provider":
-            return p.provider
-        elif var == "arch":
-            return p.arch
-        return ""
-    except Sdl3ProviderError:
-        return ""
 
 
 def check_toolchain(
@@ -1531,9 +1526,14 @@ class TitleDiagnosticContext:
     requires_psp_header: bool
     requires_iso: bool
     requires_assets: bool
+    # Why a declared filesystem.disc_image was refused, when it was; disc_image is None then.
+    disc_image_error: str | None = None
+    # Why a declared filesystem.module_dir was refused, when it was; module_dir is None then.
+    module_dir_error: str | None = None
 
 
-_BUILD_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$", re.IGNORECASE)
+# The codegen planner's contract (title_codegen_plan.GAME_NAME_RE): lower case only.
+_BUILD_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _MANIFEST_PATH_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 _MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -1543,6 +1543,24 @@ def _safe_manifest_path(root: Path, value: object) -> Path | None:
     if not isinstance(value, str) or not _MANIFEST_PATH_RE.fullmatch(value):
         return None
     return root.joinpath(*value.split("/"))
+
+
+def _safe_disc_image_path(root: Path, value: object) -> tuple[Path | None, str | None]:
+    """Resolve filesystem.disc_image by the manifest loader's own rule.
+
+    Disc-image names may carry spaces, parentheses and Unicode (ordinary dump names), so
+    the narrow rule for the paths make consumes does not apply. Returns (path, None), or
+    (None, reason) for a declared value the loader refuses, or (None, None) when absent.
+    """
+    if value is None:
+        return None, None
+    import title_manifest
+
+    try:
+        relative = title_manifest.disc_image_path(value, "filesystem.disc_image")
+    except title_manifest.TitleManifestError as exc:
+        return None, str(exc)
+    return root.joinpath(*relative.split("/")), None
 
 
 def _has_loose_files_beside_data_root(data_root: Path, limit: int = 100_000) -> bool:
@@ -1631,9 +1649,17 @@ def title_diagnostic_context(
     filesystem = filesystem if isinstance(filesystem, dict) else {}
 
     declared_data_root = _safe_manifest_path(root, filesystem.get("data_root"))
-    declared_module_dir = _safe_manifest_path(root, filesystem.get("module_dir"))
+    raw_module_dir = filesystem.get("module_dir")
+    declared_module_dir = _safe_manifest_path(root, raw_module_dir)
+    module_dir_error = None
+    if raw_module_dir is not None and declared_module_dir is None:
+        # Declared, but not in the form make consumes: say so, rather than "not declared".
+        module_dir_error = (
+            f"filesystem.module_dir {raw_module_dir!r} is not a relative path of letters, "
+            "digits, '.', '_' and '-' joined by '/'"
+        )
     declared_psp_header = _safe_manifest_path(root, filesystem.get("psp_header"))
-    declared_disc_image = _safe_manifest_path(root, filesystem.get("disc_image"))
+    declared_disc_image, disc_image_error = _safe_disc_image_path(root, filesystem.get("disc_image"))
     raw_loose_roots = filesystem.get("loose_content_roots")
     has_loose_content_roots = isinstance(raw_loose_roots, list) and bool(raw_loose_roots)
 
@@ -1670,7 +1696,7 @@ def title_diagnostic_context(
                 if module.get("required") is True and isinstance(name, str) and _MODULE_NAME_RE.fullmatch(name):
                     required_modules.append(name)
     requires_psp_header = executable.get("bss_metadata_source") == "psp-header"
-    requires_iso = kind == "retail" or declared_disc_image is not None
+    requires_iso = kind == "retail" or declared_disc_image is not None or disc_image_error is not None
     requires_assets = kind == "retail" or data_root is not None
     return TitleDiagnosticContext(
         kind=kind,
@@ -1688,6 +1714,8 @@ def title_diagnostic_context(
         requires_psp_header=requires_psp_header,
         requires_iso=requires_iso,
         requires_assets=requires_assets,
+        disc_image_error=disc_image_error,
+        module_dir_error=module_dir_error,
     )
 
 
@@ -1781,26 +1809,47 @@ def check_private_inputs(
 
     if context.requires_module_dir:
         module_dir = context.module_dir or (root / "modules")
-        if not module_dir.is_dir():
-            for name in context.required_modules:
-                _check_elf_file(
-                    report,
-                    f"INPUT_PRX_{name.upper().replace('.', '_')}",
-                    module_dir / name,
-                    f"decrypted {name}",
-                )
-        else:
-            for name in context.required_modules:
-                _check_elf_file(
-                    report,
-                    f"INPUT_PRX_{name.upper().replace('.', '_')}",
-                    module_dir / name,
-                    f"decrypted {name}",
-                )
+        if context.module_dir is None and context.module_dir_error is not None:
+            report.fail(
+                "INPUT_MODULE_DIR",
+                "The title manifest's filesystem.module_dir is not a valid relative directory path",
+                detail=context.module_dir_error,
+                remediation="Declare filesystem.module_dir as a relative POSIX-style directory path.",
+            )
+        elif context.module_dir is None:
+            # The manager refuses this manifest the same way before it builds.
+            report.fail(
+                "INPUT_MODULE_DIR",
+                "The title manifest declares guest-prx modules but no filesystem.module_dir "
+                "(a relative directory path)",
+                remediation="Declare filesystem.module_dir: the relative directory holding the guest modules.",
+            )
+        elif not module_dir.is_dir() and not context.required_modules:
+            # A missing required module fails by name below; optional ones get this note.
+            report.warn(
+                "INPUT_MODULE_DIR",
+                "The declared module directory does not exist; the title's optional guest modules cannot load",
+                path=module_dir,
+                remediation="Create filesystem.module_dir and place the decrypted guest modules there.",
+            )
+        for name in context.required_modules:
+            _check_elf_file(
+                report,
+                f"INPUT_PRX_{name.upper().replace('.', '_')}",
+                module_dir / name,
+                f"decrypted {name}",
+            )
 
     if need_iso and context.requires_iso:
         selected = context.disc_image
-        if selected is None:
+        if selected is None and context.disc_image_error is not None:
+            report.fail(
+                "INPUT_ISO",
+                "The selected title manifest's filesystem.disc_image is not a valid relative path",
+                detail=context.disc_image_error,
+                remediation="Declare the local ISO as a relative POSIX-style path in the title manifest.",
+            )
+        elif selected is None:
             report.fail(
                 "INPUT_ISO",
                 "The selected title manifest does not declare filesystem.disc_image",
@@ -1976,11 +2025,46 @@ def check_save_root(report: Report, root: Path) -> None:
         )
 
 
-def check_build_profile(report: Report, root: Path, game_name: str = "recomp") -> None:
-    profile_file = root / "build" / game_name / "runtime_profile.json"
+def resolve_build_dir(root: Path, game_name: str) -> Path:
+    """The folder Make writes ``game_name``'s build products to.
+
+    ``BUILD_DIR`` names it outright; otherwise it is ``<build root>/<game_name>``, the
+    build root being ``NK_BUILD_ROOT``, then ``BUILD_ROOT`` (the Makefile's
+    ``BUILD_ROOT ?= build``), then ``build``. A relative value is under ``root``.
+    """
+    build_dir_value = os.environ.get("BUILD_DIR")
+    if build_dir_value:
+        build_dir = Path(build_dir_value)
+        return build_dir if build_dir.is_absolute() else root / build_dir
+    build_root = Path(os.environ.get("NK_BUILD_ROOT") or os.environ.get("BUILD_ROOT") or "build")
+    if not build_root.is_absolute():
+        build_root = root / build_root
+    return build_root / game_name
+
+
+def _shown_path(root: Path, path: Path) -> str:
+    """``path`` relative to the checkout when it is inside it, else as given."""
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def check_build_profile(
+    report: Report,
+    root: Path,
+    game_name: str = "recomp",
+    *,
+    build_dir: Path | None = None,
+) -> None:
+    if build_dir is None:
+        build_dir = resolve_build_dir(root, game_name)
+    profile_file = build_dir / "runtime_profile.json"
     if profile_file.is_file():
         try:
             data = json.loads(profile_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("the profile is not a JSON object")
             raw_entries: list[str] = []
             sections = data.get("sections")
             if isinstance(sections, dict):
@@ -2007,16 +2091,30 @@ def check_build_profile(report: Report, root: Path, game_name: str = "recomp") -
                     metadata={"profile": "public_safe", "public_safe": 1},
                 )
             else:
+                # Every current build records -DSR_PUBLIC_SAFE (PUBLIC_SAFE=0 is retired),
+                # so a profile without it is stale or was not written by this build.
                 report.info(
                     "BUILD_PROFILE",
-                    "Selected build profile: full (PUBLIC_SAFE=0; all built backends enabled)",
+                    "Runtime build profile is unrecognized or predates the PUBLIC_SAFE=0 "
+                    "retirement (no SR_PUBLIC_SAFE entry); rebuild to record the current profile",
                     path=profile_file,
-                    metadata={"profile": "full", "public_safe": 0},
+                    metadata={"profile": "unrecognized"},
                 )
-        except (OSError, json.JSONDecodeError):
-            report.info("BUILD_PROFILE", "Runtime build profile recorded (unparsed)", path=profile_file)
+        except (OSError, ValueError) as exc:
+            # ValueError covers a JSONDecodeError, a file that is not UTF-8 and a
+            # top level that is not an object.
+            report.info(
+                "BUILD_PROFILE",
+                "Runtime build profile recorded (unparsed)",
+                path=profile_file,
+                detail=str(exc),
+            )
     else:
-        report.info("BUILD_PROFILE", "No runtime build profile recorded yet (unbuilt)")
+        report.info(
+            "BUILD_PROFILE",
+            "No runtime build profile recorded yet (unbuilt)",
+            path=profile_file,
+        )
 
 
 def check_vfpu_assets(report: Report) -> None:
@@ -2050,8 +2148,16 @@ def check_vfpu_assets(report: Report) -> None:
         report.warn("VFPU_EXTRA", "Unexpected .dat files are present in assets/vfpu", detail=", ".join(extras))
 
 
-def check_runtime_dependencies(report: Report, msys_path: Path, game_name: str = "recomp") -> None:
+def check_runtime_dependencies(
+    report: Report,
+    msys_path: Path,
+    game_name: str = "recomp",
+    *,
+    build_dir: Path | None = None,
+) -> None:
     root = report.root
+    if build_dir is None:
+        build_dir = resolve_build_dir(root, game_name)
     sdl_dll = None
     try:
         provider = discover_sdl3_provider(msys_path=msys_path)
@@ -2060,7 +2166,7 @@ def check_runtime_dependencies(report: Report, msys_path: Path, game_name: str =
         pass
 
     candidates = [
-        root / "build" / game_name / "SDL3.dll",
+        build_dir / "SDL3.dll",
         root / "SDL3.dll",
     ]
     if sdl_dll and sdl_dll.is_file() and sdl_dll not in candidates:
@@ -2081,7 +2187,7 @@ def check_runtime_dependencies(report: Report, msys_path: Path, game_name: str =
             report.fail("RUNTIME_SDL3", "Resolved SDL3.dll is not a valid x86-64 DLL", path=sdl, detail=detail)
 
     vulkan_candidates = [
-        root / "build" / game_name / "vulkan-1.dll",
+        build_dir / "vulkan-1.dll",
         root / "vulkan-1.dll",
         msys_path / "vulkan-1.dll",
     ]
@@ -2223,22 +2329,29 @@ def check_typography_runtime(
         )
 
 
-def check_build_products(report: Report, game_name: str = "recomp") -> None:
-    build = report.root / "build" / game_name
+def check_build_products(
+    report: Report,
+    game_name: str = "recomp",
+    *,
+    build_dir: Path | None = None,
+) -> None:
+    build = build_dir if build_dir is not None else resolve_build_dir(report.root, game_name)
     exe = build / f"{game_name}.exe"
     image = build / f"{game_name}_image.bin"
+    shown_exe = _shown_path(report.root, exe)
+    shown_image = _shown_path(report.root, image)
     if exe.is_file():
         ok, detail = _validate_pe_x64(exe)
         if ok:
-            report.pass_("BUILD_EXE", f"Validated build/{game_name}/{game_name}.exe", path=exe, detail=detail)
+            report.pass_("BUILD_EXE", f"Validated {shown_exe}", path=exe, detail=detail)
         else:
-            report.fail("BUILD_EXE", f"build/{game_name}/{game_name}.exe is not a valid x86-64 PE executable", path=exe, detail=detail)
+            report.fail("BUILD_EXE", f"{shown_exe} is not a valid x86-64 PE executable", path=exe, detail=detail)
     else:
-        report.fail("BUILD_EXE", f"Missing build/{game_name}/{game_name}.exe", path=exe, remediation="Run BuildFull or BuildFast first.")
+        report.fail("BUILD_EXE", f"Missing {shown_exe}", path=exe, remediation="Run BuildFull or BuildFast first.")
     if image.is_file() and image.stat().st_size > 0:
-        report.pass_("BUILD_IMAGE", f"Found nonempty {game_name}_image.bin", path=image, metadata={"bytes": image.stat().st_size})
+        report.pass_("BUILD_IMAGE", f"Found nonempty {shown_image}", path=image, metadata={"bytes": image.stat().st_size})
     else:
-        report.fail("BUILD_IMAGE", f"Missing or empty build/{game_name}/{game_name}_image.bin", path=image, remediation="Run the full code-generation pipeline.")
+        report.fail("BUILD_IMAGE", f"Missing or empty {shown_image}", path=image, remediation="Run the full code-generation pipeline.")
 
 
 def check_runtime_package_cache(

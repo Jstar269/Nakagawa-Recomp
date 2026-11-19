@@ -158,6 +158,7 @@ $script:TitleManagerPlan = $null
 $script:TitleManagerMakeArgs = $null
 $script:TitleManagerSpans = $null
 $script:TitleManagerRunEntry = $null
+$script:TitleManagerRunBase = $null
 $script:LastBuildInfo = $null
 # The manager lives in tools/, so the workspace root is the parent of its own folder.
 $ManagerRoot = Split-Path -Parent $PSScriptRoot
@@ -232,9 +233,20 @@ try {
     Write-Host "Using Vulkan SDK: $VulkanSdk" -ForegroundColor DarkGray
     $VulkanSdkForMake = $VulkanSdk -replace "\\", "/"
 
+    # The game name becomes build\<name>\<name>.exe, and Clean force-stops the processes
+    # running that executable, so every path that derives it checks the name first.
+    function Assert-NkPortableGameName {
+        param([string]$Name)
+        # -cnotmatch: the planner's GAME_NAME_RE is case-sensitive, as -notmatch is not.
+        if ($Name -cnotmatch '^[a-z0-9][a-z0-9._-]{0,63}$') {
+            throw "GameName '$Name' is not a portable build identifier (must match ^[a-z0-9][a-z0-9._-]{0,63}$ in lower case; same contract as the codegen planner)"
+        }
+    }
+
     if (-not $hasManifest -or -not $hasTitlePlan) {
         if ($Action -eq "Clean") {
             $script:ActiveGameName = if ($GameName) { $GameName } else { "recomp" }
+            Assert-NkPortableGameName -Name $script:ActiveGameName
             $script:ManifestId = "none"
             $script:IsRetail = $false
             $BuildDirForMake = "build/$script:ActiveGameName"
@@ -273,9 +285,7 @@ try {
                 $GameName = "recomp"
             }
         }
-        if ($GameName -notmatch '^[a-z0-9][a-z0-9._-]*$') {
-            throw "GameName '$GameName' is not a portable build identifier (must match ^[a-z0-9][a-z0-9._-]*$; same contract as the codegen planner)"
-        }
+        Assert-NkPortableGameName -Name $GameName
         $script:ActiveGameName = $GameName
 
         # Title input layout (issue #196 Phase 4): a manifest DECLARES where its
@@ -409,6 +419,7 @@ try {
             $script:TitleManagerMakeArgs = @($boundPlan.MakeArgs)
             $script:TitleManagerSpans = $boundPlan.Environment.TITLE_EXTRA_SPANS
             $script:TitleManagerRunEntry = $boundPlan.RunEntry
+            $script:TitleManagerRunBase = $script:TitleManagerPlan.make.game_base
         } else {
             $modules = @($script:TitleManagerPlan.required_guest_modules)
             $extra = ""
@@ -434,6 +445,7 @@ try {
             $script:TitleManagerMakeArgs = $mArgs
             $script:TitleManagerSpans = $script:TitleManagerPlan.environment.TITLE_EXTRA_SPANS
             $script:TitleManagerRunEntry = $script:TitleManagerPlan.run_entry
+            $script:TitleManagerRunBase = $script:TitleManagerPlan.make.game_base
         }
         Write-Host "Using title manifest: $($script:TitleManagerPlan.title_manifest_id) (target: $GameName)" -ForegroundColor DarkGray
     }
@@ -441,6 +453,15 @@ try {
     function Get-NkRunEntry {
         if ($script:TitleManagerRunEntry) { return $script:TitleManagerRunEntry }
         throw "No run entry point resolved by the active title manifest."
+    }
+
+    # The guest address of the image's first byte: the build writes the image at the
+    # plan's GAME_BASE (prxload --env-elf), so a launch must name the same base.
+    function Get-NkRunBase {
+        if ($null -ne $script:TitleManagerRunBase -and "$($script:TitleManagerRunBase)" -ne "") {
+            return "$($script:TitleManagerRunBase)"
+        }
+        throw "No image base address resolved by the active title manifest."
     }
 
     function Get-NkMakeBaseArgs {
@@ -461,6 +482,39 @@ try {
         "collect2", "as", "ld", "ld.lld", "lld", "lld-link", "cpp", "windres", "ar"
     )
 
+    # Every manager on this workspace shares the build-PID ledger (a build in one shell,
+    # Clean in another), so each append and each read-and-rewrite holds this lock: a
+    # record appended between another manager's read and its rewrite would be lost.
+    function Invoke-WithBuildPidLock {
+        param([Parameter(Mandatory = $true)][scriptblock]$Body)
+        $ledger = [System.IO.Path]::GetFullPath($script:BuildPidFile).ToLowerInvariant()
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($ledger))).Replace("-", "")
+        } finally {
+            $sha.Dispose()
+        }
+        $mutex = [System.Threading.Mutex]::new($false, "Local\nk-build-pids-$digest")
+        $held = $false
+        try {
+            try {
+                $held = $mutex.WaitOne([TimeSpan]::FromSeconds(60))
+            } catch [System.Threading.AbandonedMutexException] {
+                # A manager that died holding the lock hands it over. The ledger is
+                # re-read under the lock, and a line it half-wrote parses as malformed,
+                # which is never trusted for a kill.
+                $held = $true
+            }
+            if (-not $held) {
+                throw "Timed out waiting for the build-PID ledger lock: $script:BuildPidFile"
+            }
+            & $Body
+        } finally {
+            if ($held) { $mutex.ReleaseMutex() }
+            $mutex.Dispose()
+        }
+    }
+
     function Register-BuildProcess {
         param([int]$ProcessId)
         if ($ProcessId -le 0) { return }
@@ -469,19 +523,23 @@ try {
             Write-Host "[!] Could not capture identity for build process $ProcessId; not recording it." -ForegroundColor Yellow
             return
         }
-        Add-Content -LiteralPath $script:BuildPidFile -Value ($rec | ConvertTo-Json -Compress) -Encoding utf8 -ErrorAction SilentlyContinue
+        Invoke-WithBuildPidLock {
+            Add-Content -LiteralPath $script:BuildPidFile -Value ($rec | ConvertTo-Json -Compress) -Encoding utf8 -ErrorAction SilentlyContinue
+        }
     }
 
     function Unregister-BuildProcess {
         param([int]$ProcessId)
-        if (-not (Test-Path -LiteralPath $script:BuildPidFile)) { return }
-        $parsed = Get-BuildPidRecords -Path $script:BuildPidFile
-        $kept = @($parsed.Records | Where-Object { [int]$_.pid -ne $ProcessId })
-        if ($kept.Count -gt 0) {
-            $kept | ForEach-Object { $_ | ConvertTo-Json -Compress } |
-                Set-Content -LiteralPath $script:BuildPidFile -Encoding utf8 -ErrorAction SilentlyContinue
-        } else {
-            Remove-Item -LiteralPath $script:BuildPidFile -Force -ErrorAction SilentlyContinue
+        Invoke-WithBuildPidLock {
+            if (-not (Test-Path -LiteralPath $script:BuildPidFile)) { return }
+            $parsed = Get-BuildPidRecords -Path $script:BuildPidFile
+            $kept = @($parsed.Records | Where-Object { [int]$_.pid -ne $ProcessId })
+            if ($kept.Count -gt 0) {
+                $kept | ForEach-Object { $_ | ConvertTo-Json -Compress } |
+                    Set-Content -LiteralPath $script:BuildPidFile -Encoding utf8 -ErrorAction SilentlyContinue
+            } else {
+                Remove-Item -LiteralPath $script:BuildPidFile -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 
@@ -532,8 +590,10 @@ try {
 
     function Stop-BuildProcesses {
         Write-Host "Clearing this workspace's stale build/runtime processes..." -ForegroundColor Yellow
-        $cleanup = Invoke-StaleBuildCleanup -PidFile $script:BuildPidFile `
-            -WorkspaceRoot $script:RepoRoot -BuildToolNames $script:BuildToolNames
+        $cleanup = Invoke-WithBuildPidLock {
+            Invoke-StaleBuildCleanup -PidFile $script:BuildPidFile `
+                -WorkspaceRoot $script:RepoRoot -BuildToolNames $script:BuildToolNames
+        }
         if ($cleanup.Malformed.Count -gt 0) {
             Write-Host "[!] Discarding $($cleanup.Malformed.Count) legacy/unverifiable build-PID record(s); nothing was killed on their account." -ForegroundColor Yellow
         }
@@ -875,6 +935,10 @@ try {
         if (-not (Test-SafeComponentName -Name $OracleName)) {
             return $false
         }
+        # A launch Run-NkEngine would refuse (no image, no disc or data root, the title
+        # already running) is refused here, before the archive is reset and the live save
+        # folder is swapped for the baseline.
+        if (-not (Test-NkRunPreconditions)) { return $false }
         $outDir = Join-Path $script:LogDir "oracle_$OracleName"
         if (-not (Reset-OracleArchive -Path $outDir -AllowedRoot $script:LogDir -Overwrite:$OverwriteOracle)) { return $false }
         try {
@@ -885,12 +949,18 @@ try {
             return $false
         }
 
-        $env:SR_PADSCRIPT     = (Resolve-Path $Route).Path
-        $env:SR_NOINPUT       = "1"
-        $env:SR_EXIT_AT_VBLANK = "$ExitAtVblank"
-        if ($SnapEvery -gt 0) { $env:SR_FBSNAP = "$SnapEvery" } else { $env:SR_FBSNAP = $null }
-        if ($SnapAfter -gt 0) { $env:SR_FBSNAP_AFTER = "$SnapAfter" } else { $env:SR_FBSNAP_AFTER = $null }
-        if ($SnapWindows) { $env:SR_FBSNAP_WINDOWS = $SnapWindows } else { $env:SR_FBSNAP_WINDOWS = $null }
+        # The route and capture variables belong to this oracle run only. The manager runs
+        # in the caller's process (nk.ps1 calls it with `&`), so they are restored once
+        # the run ends: a later Run in the same shell must not replay this route with live
+        # input off and stop at this oracle's vblank.
+        $oracleEnvironment = [ordered]@{
+            SR_PADSCRIPT      = (Resolve-Path $Route).Path
+            SR_NOINPUT        = "1"
+            SR_EXIT_AT_VBLANK = "$ExitAtVblank"
+            SR_FBSNAP         = $(if ($SnapEvery -gt 0) { "$SnapEvery" } else { $null })
+            SR_FBSNAP_AFTER   = $(if ($SnapAfter -gt 0) { "$SnapAfter" } else { $null })
+            SR_FBSNAP_WINDOWS = $(if ($SnapWindows) { $SnapWindows } else { $null })
+        }
 
         $exeHash   = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
         $routeHash = (Get-FileHash -LiteralPath $Route  -Algorithm SHA256).Hash
@@ -910,7 +980,18 @@ try {
         Write-Host "VisualOracle: route=$Route exit_at_vblank=$ExitAtVblank snap_every=$SnapEvery snap_after=$SnapAfter snap_windows=$SnapWindows profile=$RunProfile" -ForegroundColor Cyan
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $backstop = [int][math]::Max(180, [math]::Ceiling($ExitAtVblank / 10.0))
-        Run-NkEngine -Profile $RunProfile -RunDuration $backstop
+        $callerEnvironment = @{}
+        foreach ($name in $oracleEnvironment.Keys) {
+            $callerEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
+            [Environment]::SetEnvironmentVariable($name, $oracleEnvironment[$name])
+        }
+        try {
+            Run-NkEngine -Profile $RunProfile -RunDuration $backstop
+        } finally {
+            foreach ($name in $callerEnvironment.Keys) {
+                [Environment]::SetEnvironmentVariable($name, $callerEnvironment[$name])
+            }
+        }
         $sw.Stop()
         $runResult = $script:LastRunResult
 
@@ -990,7 +1071,10 @@ try {
     function Set-NkRuntimeFilesystemEnvironment {
         param([AllowNull()][string]$ResolvedDataRootPath)
 
-        # Direct runtime launches must not inherit another title's roots.
+        # Direct runtime launches must not inherit another title's roots or disc: a
+        # title that declares no disc image runs with no PSP_ISO at all.
+        $env:PSP_ISO = $null
+        if ($GameIsoPath) { $env:PSP_ISO = $GameIsoPath }
         $env:SR_DATAROOT = $null
         if (-not [string]::IsNullOrWhiteSpace($ResolvedDataRootPath)) {
             $env:SR_DATAROOT = $ResolvedDataRootPath
@@ -1041,19 +1125,35 @@ try {
             [string]$Oracle,
             [int]$Step = 0
         )
+        # Returns $true only when the runtime wrote a fresh trace and funcdiff_cmp.py
+        # compared it and exited 0; every other outcome is a failure the caller reports.
         if (-not (Test-Path $ExePath)) {
             Write-Host "[!] $ExePath not found - run BuildFast first." -ForegroundColor Red
-            return
+            return $false
         }
         if (-not (Test-Path $Oracle)) {
             Write-Host "[!] Oracle trace not found: $Oracle" -ForegroundColor Red
-            return
+            return $false
+        }
+        $cmpTool = Join-Path $script:RepoRoot "tools\funcdiff_cmp.py"
+        if (-not (Test-Path -LiteralPath $cmpTool -PathType Leaf)) {
+            Write-Host "[!] Comparison tool not found: $cmpTool" -ForegroundColor Red
+            return $false
         }
         $addr = $Target -replace '^f_',''
         $outTrace = "diff_${addr}.trace"
+        # A trace left by an earlier run must never stand in for this one.
+        if (Test-Path -LiteralPath $outTrace) {
+            try {
+                Remove-Item -LiteralPath $outTrace -Force -ErrorAction Stop
+            } catch {
+                Write-Host "[!] Could not remove the earlier trace $($outTrace): $($_.Exception.Message)" -ForegroundColor Red
+                return $false
+            }
+        }
         Write-Host "DiffFunc: target=0x$addr oracle=$Oracle step=$Step" -ForegroundColor Cyan
         $imagePath = $ImagePath
-        $args = @("--image", $imagePath, "0", (Get-NkRunEntry), $outTrace, "none",
+        $args = @("--image", $imagePath, (Get-NkRunBase), (Get-NkRunEntry), $outTrace, "none",
                   "--diff-func=0x$addr", "--diff-oracle=$Oracle", "--diff-step=$Step")
         $resolvedDataRoot = $null
         if ($script:TitleDataRoot) {
@@ -1066,27 +1166,39 @@ try {
         Set-NkRuntimeFilesystemEnvironment -ResolvedDataRootPath $resolvedDataRoot
         $proc = Start-Process -FilePath $ExePath -ArgumentList $args -PassThru -NoNewWindow -Wait `
             -RedirectStandardError "$LogDir/difffunc_err.log"
-        Write-Host "DiffFunc finished (exit $($proc.ExitCode)). Output: $outTrace" -ForegroundColor $(if ($proc.ExitCode -eq 0) { "Green" } else { "Yellow" })
+        $runtimeExit = if ($null -ne $proc) { $proc.ExitCode } else { $null }
+        Write-Host "DiffFunc finished (exit $runtimeExit). Output: $outTrace" -ForegroundColor $(if ($runtimeExit -eq 0) { "Green" } else { "Yellow" })
         if (Test-Path "$LogDir/difffunc_err.log") {
             Get-Content "$LogDir/difffunc_err.log" -Tail 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
         }
-        if (Test-Path $outTrace) {
-            # funcdiff_cmp.py fail-closed contract (issue #381):
-            #   funcdiff_cmp.py <oracle-trace> <recomp-trace> <entry-step>
-            # Exit 0 only when at least one step is compared, the oracle covers every
-            # recomp step from <entry-step> onward, and all compared steps match.
-            $cmpTool = Join-Path $script:RepoRoot "tools\funcdiff_cmp.py"
-            if (Test-Path $cmpTool) {
-                Write-Host "Comparing with oracle via funcdiff_cmp.py..." -ForegroundColor Cyan
-                python $cmpTool $Oracle $outTrace $Step 2>&1 | Select-Object -First 20 |
-                    ForEach-Object { Write-Host "  $_" }
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "[PASS] funcdiff comparison matched" -ForegroundColor Green
-                } else {
-                    Write-Host "[FAIL] funcdiff comparison failed (exit $LASTEXITCODE)" -ForegroundColor Red
-                }
-            }
+        if ($null -eq $runtimeExit -or $runtimeExit -ne 0) {
+            Write-Host "[FAIL] The runtime exited with status $(if ($null -eq $runtimeExit) { 'unknown' } else { $runtimeExit }); nothing was compared." -ForegroundColor Red
+            return $false
         }
+        if (-not (Test-Path -LiteralPath $outTrace -PathType Leaf)) {
+            Write-Host "[FAIL] The runtime wrote no trace ($outTrace); nothing was compared." -ForegroundColor Red
+            return $false
+        }
+        # funcdiff_cmp.py fail-closed contract (issue #381):
+        #   funcdiff_cmp.py <oracle-trace> <recomp-trace> <entry-step>
+        # Exit 0 only when at least one step is compared, the oracle covers every
+        # recomp step from <entry-step> onward, and all compared steps match.
+        # The whole output is collected before any of it is shown: cutting the
+        # pipeline short stops python before it sets the exit status read here.
+        Write-Host "Comparing with oracle via funcdiff_cmp.py..." -ForegroundColor Cyan
+        $global:LASTEXITCODE = $null
+        $cmpOutput = @(& python $cmpTool $Oracle $outTrace $Step 2>&1)
+        $cmpExit = $LASTEXITCODE
+        $cmpOutput | Select-Object -First 20 | ForEach-Object { Write-Host "  $_" }
+        if ($cmpOutput.Count -gt 20) {
+            Write-Host "  ... $($cmpOutput.Count - 20) more line(s)" -ForegroundColor DarkGray
+        }
+        if ($cmpExit -eq 0) {
+            Write-Host "[PASS] funcdiff comparison matched" -ForegroundColor Green
+            return $true
+        }
+        Write-Host "[FAIL] funcdiff comparison failed (exit $(if ($null -eq $cmpExit) { 'unknown' } else { $cmpExit }))" -ForegroundColor Red
+        return $false
     }
 
     function Invoke-NkBuild {
@@ -1161,16 +1273,36 @@ try {
                 }
                 Register-BuildProcess $proc.Id
 
-                while (-not $proc.HasExited) {
-                    $outSize = if (Test-Path $outLog) { (Get-Item $outLog).Length } else { 0 }
-                    $errSize = if (Test-Path $errLog) { (Get-Item $errLog).Length } else { 0 }
-                    $recompTarget = Join-Path $BuildDir "$($script:ActiveGameName)_recomp.o"
-                    $recompSize = if (Test-Path $recompTarget) { (Get-Item $recompTarget).Length } else { 0 }
-                    $exeState = if (Test-Path $ExePath) { "Ready" } else { "Building" }
+                # make runs hidden in its own console, so Ctrl+C reaches only this
+                # monitor. When the monitor ends before make does, it stops the build
+                # it started instead of leaving it writing $BuildDir unseen.
+                $monitorFinished = $false
+                try {
+                    while (-not $proc.HasExited) {
+                        $outSize = if (Test-Path $outLog) { (Get-Item $outLog).Length } else { 0 }
+                        $errSize = if (Test-Path $errLog) { (Get-Item $errLog).Length } else { 0 }
+                        $recompTarget = Join-Path $BuildDir "$($script:ActiveGameName)_recomp.o"
+                        $recompSize = if (Test-Path $recompTarget) { (Get-Item $recompTarget).Length } else { 0 }
+                        $exeState = if (Test-Path $ExePath) { "Ready" } else { "Building" }
 
-                    Write-Host ("[{0}] stdout: {1}b | stderr: {2}b | recomp.o: {3}b | status: {4}" -f `
-                        (Get-Date -Format "HH:mm:ss"), $outSize, $errSize, $recompSize, $exeState) -ForegroundColor Gray
-                    Start-Sleep -Seconds 15
+                        Write-Host ("[{0}] stdout: {1}b | stderr: {2}b | recomp.o: {3}b | status: {4}" -f `
+                            (Get-Date -Format "HH:mm:ss"), $outSize, $errSize, $recompSize, $exeState) -ForegroundColor Gray
+                        Start-Sleep -Seconds 15
+                    }
+                    $monitorFinished = $true
+                } finally {
+                    if (-not $monitorFinished -and -not $proc.HasExited) {
+                        Write-Host "[!] Build monitor stopped; stopping the background make (PID $($proc.Id)) and its compilers." -ForegroundColor Yellow
+                        foreach ($id in (Get-ProcessTreeIds -RootPid $proc.Id)) {
+                            try {
+                                [System.Diagnostics.Process]::GetProcessById($id).Kill()
+                            } catch [System.ArgumentException], [System.InvalidOperationException] {
+                                # This member of the tree has already exited.
+                            }
+                        }
+                        [void]$proc.WaitForExit(10000)
+                        Unregister-BuildProcess $proc.Id
+                    }
                 }
 
                 $makeResult = Wait-ProcessOrKill -Process $proc -TimeoutSeconds 0
@@ -1237,6 +1369,48 @@ try {
         } catch { }
     }
 
+    # The checks that refuse a runtime launch. Run-NkEngine applies them, and
+    # VisualOracle applies them before it swaps the save folder, so a launch that will
+    # be refused leaves the live saves alone.
+    function Test-NkRunPreconditions {
+        if (-not (Test-Path $ExePath)) {
+            Write-Host "[!] Error: Executable target is missing: $ExePath. Execute build pipeline first." -ForegroundColor Red
+            return $false
+        }
+
+        if (-not (Test-Path $ImagePath)) {
+            Write-Host "[!] Error: Game image target is missing: $ImagePath. Execute build pipeline first." -ForegroundColor Red
+            return $false
+        }
+
+        if ($script:IsRetail) {
+            $effectiveDataRoot = $script:TitleDataRoot
+            $resolvedDataRoot = $null
+            if ($effectiveDataRoot) {
+                $resolvedDataRoot = Resolve-Path -LiteralPath $effectiveDataRoot -ErrorAction SilentlyContinue
+            }
+            if (-not $GameIsoPath -or -not (Test-Path -LiteralPath $GameIsoPath)) {
+                Write-Host "[!] Cannot run game: no disc image found (declare filesystem.disc_image in the title manifest, or provide game.iso)." -ForegroundColor Red
+                return $false
+            }
+            if (-not $effectiveDataRoot) {
+                Write-Host "[!] Cannot run game: the title manifest does not declare filesystem.data_root and no legacy layout is present." -ForegroundColor Red
+                return $false
+            }
+            if (-not $resolvedDataRoot -or -not (Test-Path -LiteralPath $resolvedDataRoot.Path -PathType Container)) {
+                Write-Host "[!] Cannot run game: Extracted asset tree was not found at $effectiveDataRoot." -ForegroundColor Red
+                return $false
+            }
+        }
+        $runningTargets = @(Get-WorkspaceTargetProcesses)
+        if ($runningTargets.Count -gt 0) {
+            $pids = ($runningTargets | ForEach-Object { $_.pid }) -join ", "
+            Write-Host "[!] Target executable is already running (PID $pids); close it or use -Action Clean." -ForegroundColor Red
+            return $false
+        }
+        return $true
+    }
+
     function Run-NkEngine {
         param(
             [string]$Profile = "Standard",
@@ -1246,46 +1420,15 @@ try {
 
         Assert-TitleManagerPrivateBindings -Runtime
 
-        if (-not (Test-Path $ExePath)) {
-            Write-Host "[!] Error: Executable target is missing: $ExePath. Execute build pipeline first." -ForegroundColor Red
-            return
-        }
+        if (-not (Test-NkRunPreconditions)) { return }
 
-        if (-not (Test-Path $ImagePath)) {
-            Write-Host "[!] Error: Game image target is missing: $ImagePath. Execute build pipeline first." -ForegroundColor Red
-            return
-        }
-
-        $effectiveDataRoot = $script:TitleDataRoot
         $resolvedDataRoot = $null
-        if ($effectiveDataRoot) {
-            $resolvedDataRoot = Resolve-Path -LiteralPath $effectiveDataRoot -ErrorAction SilentlyContinue
-        }
-
-        if ($script:IsRetail) {
-            if (-not $GameIsoPath -or -not (Test-Path -LiteralPath $GameIsoPath)) {
-                Write-Host "[!] Cannot run game: no disc image found (declare filesystem.disc_image in the title manifest, or provide game.iso)." -ForegroundColor Red
-                return
-            }
-            if (-not $effectiveDataRoot) {
-                Write-Host "[!] Cannot run game: the title manifest does not declare filesystem.data_root and no legacy layout is present." -ForegroundColor Red
-                return
-            }
-            if (-not $resolvedDataRoot -or -not (Test-Path -LiteralPath $resolvedDataRoot.Path -PathType Container)) {
-                Write-Host "[!] Cannot run game: Extracted asset tree was not found at $effectiveDataRoot." -ForegroundColor Red
-                return
-            }
-        }
-        $runningTargets = @(Get-WorkspaceTargetProcesses)
-        if ($runningTargets.Count -gt 0) {
-            $pids = ($runningTargets | ForEach-Object { $_.pid }) -join ", "
-            Write-Host "[!] Target executable is already running (PID $pids); close it or use -Action Clean." -ForegroundColor Red
-            return
+        if ($script:TitleDataRoot) {
+            $resolvedDataRoot = Resolve-Path -LiteralPath $script:TitleDataRoot -ErrorAction SilentlyContinue
         }
 
         Remove-Item "$LogDir/stdout_run.log", "$LogDir/stderr_run.log" -ErrorAction SilentlyContinue
 
-        if ($GameIsoPath) { $env:PSP_ISO = $GameIsoPath }
         # The runtime requires absolute roots. Clear inherited values first,
         # then encode this manifest's validated loose roots through the shared
         # title-manifest encoder used by the native launcher.
@@ -1400,7 +1543,7 @@ try {
 
         $entryAddr = Get-NkRunEntry
         $imagePath = $ImagePath
-        $args = @("--image", $imagePath, "0", (Get-NkRunEntry), "none", "none")
+        $args = @("--image", $imagePath, (Get-NkRunBase), (Get-NkRunEntry), "none", "none")
         if (-not $NoGui) {
             $args += "--gui"
         } else {
@@ -1506,10 +1649,12 @@ try {
             "DiffFunc" {
                 if (-not $DiffTarget) {
                     Write-Host "[!] -DiffTarget required (e.g. -DiffTarget f_00010738)" -ForegroundColor Red
+                    $script:ManagerExitCode = 1; break
                 } elseif (-not $DiffOracle) {
                     Write-Host "[!] -DiffOracle required (path to reference trace)" -ForegroundColor Red
-                } else {
-                    Invoke-DiffFunc -Target $DiffTarget -Oracle $DiffOracle -Step $DiffStep
+                    $script:ManagerExitCode = 1; break
+                } elseif (-not (Invoke-DiffFunc -Target $DiffTarget -Oracle $DiffOracle -Step $DiffStep)) {
+                    $script:ManagerExitCode = 1; break
                 }
             }
             "FindSymbol" {

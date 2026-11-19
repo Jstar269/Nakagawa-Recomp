@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -722,6 +724,24 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual(command[1:4], [str(library_build.NK_CLI), "bringup", "disc.iso"])
         self.assertEqual(command[command.index("--user-data-root") + 1], str(self.data))
         self.assertEqual(command[command.index("--launch-timeout") + 1], "30")
+
+    def test_a_launch_timeout_beyond_the_bringup_range_is_refused_at_once(self) -> None:
+        # nk_cli bringup refuses a launch limit outside 1..120 s, so passing a larger one on
+        # would fail every title's bring-up in turn; the build refuses it before starting.
+        import nk_cli
+        limit = nk_cli.BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS
+        for value in (limit + 1, 300):
+            stderr = io.StringIO()
+            with self.subTest(value=value), mock.patch.object(
+                    library_build, "LibraryBuild") as build, contextlib.redirect_stderr(
+                    stderr), self.assertRaises(SystemExit) as raised:
+                library_build.main([str(self.discs), "--user-data-root", str(self.data),
+                                    "--work-dir", str(self.work),
+                                    "--launch-timeout", str(value)])
+            self.assertEqual(raised.exception.code, 2)
+            build.assert_not_called()
+            self.assertIn(f"--launch-timeout must be 1..{limit} seconds", stderr.getvalue())
+        self.assertEqual(library_build.MAX_LAUNCH_TIMEOUT_SECONDS, limit)
 
 
 if __name__ == "__main__":

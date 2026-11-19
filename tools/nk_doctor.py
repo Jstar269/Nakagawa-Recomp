@@ -42,6 +42,7 @@ from nk_doctor_checks import (
     check_toolchain,
     check_vfpu_assets,
     check_worktree_accumulation,
+    resolve_build_dir,
     title_diagnostic_context,
 )
 
@@ -117,20 +118,7 @@ def _long_path_candidates(
         if path.is_absolute():
             add("configured asset input root", path)
 
-    build_dir_value = os.environ.get("BUILD_DIR")
-    if build_dir_value:
-        build_dir = Path(build_dir_value)
-        if not build_dir.is_absolute():
-            build_dir = root / build_dir
-    else:
-        build_root_value = os.environ.get("NK_BUILD_ROOT") or os.environ.get("BUILD_ROOT")
-        if build_root_value:
-            build_root = Path(build_root_value)
-            if not build_root.is_absolute():
-                build_root = root / build_root
-            build_dir = build_root / title_context.game_name
-        else:
-            build_dir = root / "build" / title_context.game_name
+    build_dir = resolve_build_dir(root, title_context.game_name)
     add("build executable output", build_dir / f"{title_context.game_name}.exe")
     add("build image output", build_dir / f"{title_context.game_name}_image.bin")
 
@@ -218,7 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--disc-id",
-        help="validate the private runtime package cache for this disc ID",
+        help="validate the private runtime package cache for this disc ID (scopes products, run and all)",
     )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--strict", action="store_true", help="make warnings produce exit status 2")
@@ -289,6 +277,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         root,
         extra_paths=_long_path_candidates(root, title_context, args.user_data_root),
     )
+    # One folder for every scope: where Make writes this title's build products.
+    build_dir = resolve_build_dir(root, title_context.game_name)
 
     if args.scope in {"repo", "all"}:
         check_repository_contract(report)
@@ -317,11 +307,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             title_context=title_context,
         )
     if args.scope in {"products", "run", "all"}:
-        check_build_products(report, title_context.game_name)
-        check_build_profile(report, root, title_context.game_name)
+        check_build_products(report, title_context.game_name, build_dir=build_dir)
+        check_build_profile(report, root, title_context.game_name, build_dir=build_dir)
     if args.scope in {"run", "all"}:
         check_vfpu_assets(report)
-        check_runtime_dependencies(report, args.msys_path, title_context.game_name)
+        check_runtime_dependencies(report, args.msys_path, title_context.game_name, build_dir=build_dir)
         check_typography_runtime(report, args.msys_path)
     if args.disc_id:
         if args.user_data_root is None:
@@ -332,6 +322,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.scope in {"products", "run", "all"}:
             check_runtime_package_cache(report, args.user_data_root, args.disc_id.upper())
+        else:
+            report.fail(
+                "RUNTIME_PACKAGE_CACHE",
+                f"--disc-id package validation does not run under --scope {args.scope}",
+                remediation="Rerun Doctor with --scope products, run or all to validate the package cache.",
+            )
 
     output = render_json(report, args.strict) if args.json else render_text(report)
     print(output)

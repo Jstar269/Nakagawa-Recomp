@@ -28,7 +28,9 @@ static const NkUiTheme g_n1_theme = {
     0xC9D6E3FFu, /* art_label */
     0x3A4552FFu, /* placeholder */
     0x223046FFu, /* capture */
-    0x8FB8F2FFu  /* accent_hover */
+    0x8FB8F2FFu, /* accent_hover */
+    0x6B7684FFu, /* selected_neutral_edge */
+    0x576270FFu  /* selected_neutral_edge_dimmed */
 };
 
 const NkUiTheme *nk_ui_theme_n1(void) {
