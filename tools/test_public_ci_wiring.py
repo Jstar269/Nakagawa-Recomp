@@ -4508,7 +4508,10 @@ class TwoTierInvariantTests(CiRunHarness):
         "everything": ["src/rt/driver.c", "tools/codegen.py", "docs/CI.md"],
         "python only": ["tools/codegen.py"],
         "native only": ["src/rt/driver.c"],
-        "docs only": ["docs/CI.md"],
+        # A document no tools module names, so it routes no substantive job: one a module names
+        # (docs/CI.md) routes the Python suite (ci_paths._is_test_read_doc). The name is joined at
+        # run time because writing it whole here would make this module name it.
+        "docs only": ["docs/UNROUTED_DOCUMENT" + ".md"],
         "a CI definition": [".github/workflows/ci.yml"],
     }
 
