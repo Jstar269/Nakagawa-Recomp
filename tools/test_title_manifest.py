@@ -555,6 +555,11 @@ class TitleManifestTests(unittest.TestCase):
             "control\x01.iso",
             "CON.iso",
             "CON .iso",
+            # Superscript COM/LPT forms and the console devices are devices too (audit 2026-11-17).
+            "COM¹.iso",
+            "lpt³ .iso",
+            "conin$.iso",
+            "folder/CONOUT$",
         ]
         for bad_path in bad_paths:
             with self.subTest(path=bad_path):

@@ -21,14 +21,14 @@ REQUIRED_BEFORE_HARDWARE`.
   - L4 `ST-LIFE+RET` 6 cases: `ST-SL01 ST-SL02 ST-SL04 ST-SR01 ST-SR02 ST-SR03`
   - L5 `ST-SCHED` 3 cases: `ST-SP01 ST-SP02 ST-SP03`
   - `CT-C05` (`KERNEL 1`) and `CT-C06` (genuine block UID) are **full-campaign only** (`PSP_THREADING_FULL=1`) – valuable option experiments beyond the 28-case gating minimum (partition-ID primary vs block-UID competing hypothesis). Full accounting from research note (59 unique / 71 records / 13 launches) remains unchanged as consolidated.
-- Repeat target: 56 records / 10 launches (one full repeat). Each record includes `CAMPAIGN_VERSION`, `RUN_ID`, `CASE_ID`, `result` (raw return code), `attempt=0x…`, bounded `out*` scalars, and `canary=0xA5A5A5A5`. Host parser rejects truncated, unknown version, duplicate, malformed, bad-canary, or unknown-field streams. A synthetic stream with placeholder `model=unknown` etc. is `SYNTHETIC_TEST_ONLY`; only a real PSP capture bound via explicit `HardwareCaptureContext` (raw_capture_sha256, binary_sha256, source_commit, model, firmware, timestamp/run_id, runner) validates as `HARDWARE_MEASURED`. Raw capture text never self-promotes.
+- Repeat target: 56 records / 10 launches (one full repeat). Each record includes `CAMPAIGN_VERSION`, `RUN_ID`, `CASE_ID`, `result` (raw return code), `attempt=0x…`, bounded `out*` scalars, and `canary=0xA5A5A5A5`. Host parser rejects truncated, unknown version, duplicate, malformed, bad-canary, or unknown-field streams. Without a context every stream, placeholder `model=unknown` metadata included, is `UNVERIFIED_CAPTURE`; host fixtures are `SYNTHETIC_TEST_ONLY` only through `SyntheticCaptureContext`, and only a real PSP capture bound via explicit `HardwareCaptureContext` (raw_capture_sha256, binary_sha256, source_commit, model, firmware, timestamp/run_id, runner) validates as `HARDWARE_MEASURED`. Raw capture text never self-promotes.
 
 For every case the matrix encodes `CASE_ID`, `OPERATION`, `INPUTS`, `CONTROL_GROUP`, `MEASUREMENT_FIELDS`, `REQUIRED_OUT_FIELDS`, `OPTIONAL_OUT_FIELDS`, `LAUNCH`/`PHASE`, and `EXPECTED_CLASSIFICATION`. The parser enforces per-case required fields, rejects missing/misspelled/unknown-hex fields (fail-closed; only `future_` namespace allowed, grammar `future_[A-Za-z0-9][A-Za-z0-9_]*`), checks `canary`, `result`, `attempt`, oversized `probe_len` (>64), duplicate `run/case/attempt`, and incompatible `campaign_version`. Unknown hardware outcomes are never stored as expected constants.
 
 ## Status semantics (Stage 3)
 
 - `PASS` = `MEASURED`: experiment completed structurally and all required measurement fields were captured. The PSP API return code remains raw in `result`; an API error (e.g., `0x800201ac`) can still be `PASS` if the experiment measured that outcome.
-- `FAIL` = `ERROR`: harness itself could not produce a valid measurement (e.g., thread creation failed before measurement, allocation failed and `NOT_MEASURABLE` could not be recorded). Distinguished from raw API errors preserved as `PASS` data.
+- `FAIL` = `ERROR`: harness itself could not produce a valid measurement (e.g., thread creation failed before measurement, allocation failed and `NOT_MEASURABLE` could not be recorded). Distinguished from raw API errors preserved as `PASS` data. A `FAIL` or `SKIP` record carries `result`, `attempt` and `canary`, the out fields it could fill and optional `error`/`detail`; only a `PASS` record must carry every required out field.
 - `SKIP` = `NOT_MEASURABLE_WITH_CURRENT_HARNESS`: bounded scalar-only, orientation not established or resource unavailable; no unsafe memory read performed.
 - `UNKNOWN_RESULTS_PRESERVED = true`: emulator/phantom expected answers are never encoded; raw values retained and divergent observations across repeats are preserved (no majority vote).
 
@@ -37,17 +37,17 @@ For every case the matrix encodes `CASE_ID`, `OPERATION`, `INPUTS`, `CONTROL_GRO
 `PARSED_CAPTURE` (via `parse_threading_output(text)`) carries no authority by default (`UNVERIFIED_CAPTURE`). `EVIDENCE PROVENANCE` is out-of-band:
 
 - `SYNTHETIC_TEST_ONLY` via `SyntheticCaptureContext` for host fixtures
-- `HARDWARE_MEASURED` via `HardwareCaptureContext` binding `raw_capture_sha256`, `binary_sha256`, `source_commit`, `model`, `firmware`, `capture_timestamp`/`run_id`, `runner`
+- `HARDWARE_MEASURED` via `HardwareCaptureContext` binding `raw_capture_sha256`, `binary_sha256`, `source_commit`, `model`, `firmware`, `capture_timestamp`/`run_id`, `runner`; a measured `binary_sha256`, `source_commit`, `model` or `firmware` in the stream must equal the context's value (the emitter's placeholders are filled by the context)
 
 A hand-edited file with plausible `model=PSP-3001 firmware=6.61 binary_sha256=…` remains `UNVERIFIED_CAPTURE` even if every field looks real. Classification is an explicit provenance claim from the capture workflow, not text self-assertion.
 
 ## Strict per-case schemas (Stage 5)
 
-`matrix.json` defines for every `CASE_ID` the `required_out_fields` (e.g., `CT-A01: out0..out3`, `ST-SA02: out0..out8`), `optional_out_fields` (empty; only `future_[A-Za-z0-9][A-Za-z0-9_]*` allowed as explicit forward-compatible hex namespace under `future_` prefix), `classification`, `launch` group, and `control` relation. Parser rejects: missing required field, misspelled mandatory field, unexpected arbitrary field (including unexpected hex), near-miss extension prefix (`future`, `future_`, `future__invalid`), oversized field (`probe_len >64`, `stack_bytes` etc.), duplicate field/case, incompatible campaign version, and extension shadowing a required field. Unknown mandatory `unknown_mandatory` and typo `otu0` etc. are fail-closed. Grammar: `future_[A-Za-z0-9][A-Za-z0-9_]*` (identifier-style, not dotted).
+`matrix.json` defines for every `CASE_ID` the `required_out_fields` (e.g., `CT-A01: out0..out3`, `ST-SA02: out0..out8`), `optional_out_fields` (empty; only `future_[A-Za-z0-9][A-Za-z0-9_]*` allowed as explicit forward-compatible hex namespace under `future_` prefix), `classification`, `launch` group, and `control` relation. Parser rejects: missing required field (on a `PASS` record), misspelled mandatory field, unexpected arbitrary field (including unexpected hex), near-miss extension prefix (`future`, `future_`, `future__invalid`), a probe-length field (`probe_len`, `stack_bytes`, `window_bytes`, `arg_bytes`) on a case whose matrix entry does not list it, or one that is not `0x` hex or exceeds 64, duplicate field/case, incompatible campaign version, and extension shadowing a required field. Unknown mandatory `unknown_mandatory` and typo `otu0` etc. are fail-closed. Grammar: `future_[A-Za-z0-9][A-Za-z0-9_]*` (identifier-style, not dotted).
 
 ## Run/attempt identity (Stage 6)
 
-Every observation carries validated `run_id` (hex, from `NAKAGAWA_PSP_META`), `attempt` (hex, per-record, sane 0..255), `case_id`. Analyzer validates: syntactic `run_id`, duplicate `run/case/attempt` impossible, expected repetitions present, case belongs to expected launch group, divergent observations preserved, `run_id` uniqueness across launches (not derived from list position).
+Every observation carries validated `run_id` (hex, from `NAKAGAWA_PSP_META`), `attempt` (hex, per-record, sane 0..255), `case_id`. Analyzer validates: syntactic `run_id`, duplicate `run/case/attempt` impossible, expected repetitions present (every case observed equally often; `repetition_issues`), case belongs to expected launch group (each launch is one group or a `CASE=all` build carrying every gating case; `launch_group_issues`), divergent observations preserved (status and values, `attempt` excluded), `run_id` uniqueness across launches (not derived from list position). The required set is the 28-case gating minimum by default (`scope="gating"`); `scope="full"` also requires `CT-C05`/`CT-C06`. `analyzer.py` exits 2 when a required case is missing or an observation is variable, and 1 on a launch-group or repetition issue.
 
 ## Stack/memory probe safety (Stage 7)
 
@@ -117,7 +117,7 @@ All reads/writes bounded and checked, every created thread/block cleaned up wher
 2. Acquire global hardware lock (per `docs/HARDWARE_ORACLE.md`).
 3. Build the desired phase: `make -C tests/fixtures/psp_threading_oracle CASE=ct-attr EBOOT.PBP`.
 4. Launch via PSPLink and capture with `tools/psp_oracle/run_psplink.py` plus provenance flags; runner constructs `HardwareCaptureContext` binding `raw_capture_sha256`.
-5. Parse with `python -m psp_threading_oracle.parser` or `python tools/psp_threading_oracle/analyzer.py` with explicit evidence context.
+5. Analyze with `python tools/psp_threading_oracle/analyzer.py capture-1.txt ...`. The CLI labels inputs `UNVERIFIED_CAPTURE` by default (or `SYNTHETIC_TEST_ONLY` for placeholder metadata), prints each input basename and the SHA-256 of its original bytes, and returns nonzero for missing required cases or variable observations. The CLI does not accept evidence-context flags or promote captures to `HARDWARE_MEASURED`; a trusted caller must use the Python API with an explicit `HardwareCaptureContext`.
 6. Repeat for all 5 phases (10-launch repeat target); retain every capture, report stability. Until execution, results remain `NOT RUN` and no `HARDWARE_MEASURED` label is valid.
 
 `REGISTER_CAPTURE_BUILD_VALIDATION = REQUIRED_BEFORE_HARDWARE`.

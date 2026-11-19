@@ -210,9 +210,13 @@ mingw32-make clean-preview
 python tools/nk_clean.py
 ```
 
-Deletion requires an explicit confirmation: `.\nk.ps1 Clean -Yes`, `CONFIRM=1` (which makes
-`make clean-preview` pass `--yes`), or `python tools/nk_clean.py --yes`. An optional age
-bound previews and deletes only files older than N days:
+Deletion requires an explicit confirmation: `.\nk.ps1 Clean -Yes`, `CONFIRM=1` on the make
+command line (which makes `make clean-preview` pass `--yes`; a `CONFIRM` inherited from the
+environment does not count), or `python tools/nk_clean.py --yes`. Title build directories
+(`build/<title>`), the title run logs and the PSP run records under
+`tests/fixtures/psp_oracle/build/` are kept and listed by name unless `--include-title-outputs`
+(make: `INCLUDE_TITLE=1`) is given. An optional age bound previews and deletes only files
+older than N days:
 
 ```powershell
 mingw32-make clean-preview OLDER_THAN=7

@@ -14,7 +14,9 @@ A matrix plan names a source commit and an ordered list of probe cases. This too
    than every boot this matrix has already seen;
 3. launches ``transport-write`` plus the case through the configured probe command
    (normally the resident agent's guarded ``probe`` wrapper around
-   ``tools/psp_oracle/run_psplink.py``, or the runner itself);
+   ``tools/psp_oracle/run_psplink.py``). The last JSON object the command prints must
+   carry a ``boots`` list that names the launch boot; a command that prints none, such
+   as the bare runner, leaves the reboot state unknown and its launch is never accepted;
 4. accepts a case only from a runner report written by that launch whose envelopes
    carry the plan's source commit, the staged PRX digests, the expected firmware and
    a host0 run window that starts after the launch; and
@@ -35,13 +37,13 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import shutil
 import subprocess
 import sys
@@ -59,8 +61,8 @@ except ImportError:  # direct ``python tools/psp_oracle/oracle_matrix.py`` invoc
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURE_ROOT = ROOT / "tests" / "fixtures" / "psp_oracle"
 PREFLIGHT_CASE = "transport-write"
+COMPANION_CASES = {"hle-self-stop-unload": "hle-self-stop-helper"}
 MAX_CASES = 64
 MAX_CASE_TIMEOUT_SECONDS = 3600
 MAX_CONTAINED_FAILURES = 4
@@ -73,7 +75,7 @@ BUILD_TIMEOUT_SECONDS = 1800.0
 # watchdog countdown and its containment grace) before its own exit code reports the outcome.
 PROBE_RECOVERY_ALLOWANCE_SECONDS = 900.0
 
-_SIMPLE_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_SIMPLE_ID_RE = _runner._SESSION_ID_RE
 _CASE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -84,7 +86,7 @@ _COMMAND_PLACEHOLDERS = {
                              "deadline", "runner_log"}),
     "build_shell_argv": frozenset(),
 }
-_RUNNER_TEMPLATES = ("pspsh_argv", "usbhostfs_argv")
+_RUNNER_TEMPLATES = _runner.RUNNER_ARGV_PLACEHOLDERS
 
 # Case outcomes. Only ACCEPTED is evidence; every other status says why not.
 ACCEPTED = "ACCEPTED"
@@ -96,11 +98,16 @@ NOT_RUN = "NOT_RUN"
 # Matrix terminal states besides INTERVENTION: the device is fine but the matrix cannot go on.
 RECOVERY_REFUSED = "RECOVERY_REFUSED"
 NO_FRESH_BOOT = "NO_FRESH_BOOT"
+LOCK_LOST = "LOCK_LOST"
 CONTAINED_BUDGET_EXHAUSTED = "CONTAINED_FAILURE_BUDGET_EXHAUSTED"
 
 
 class MatrixError(ValueError):
     """The plan, the staged inputs or the checkpoint cannot be used; nothing touched the PSP."""
+
+
+def _staged_name(case_id: str) -> str:
+    return case_id.replace("-", "_") + ".prx"
 
 
 @dataclass(frozen=True)
@@ -112,7 +119,7 @@ class MatrixCase:
 
     @property
     def staged_name(self) -> str:
-        return self.case_id.replace("-", "_") + ".prx"
+        return _staged_name(self.case_id)
 
 
 @dataclass(frozen=True)
@@ -173,6 +180,24 @@ def _resolve_under(base: Path, value: object, name: str) -> Path:
     return path
 
 
+def _is_git_ignored(path: Path, repo_root: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", "--", relative],
+            cwd=repo_root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
 def load_plan(path: Path, *, repo_root: Path = ROOT) -> MatrixPlan:
     """Read and validate a schema 1 matrix plan; refuse anything the runner would refuse later."""
 
@@ -196,14 +221,33 @@ def load_plan(path: Path, *, repo_root: Path = ROOT) -> MatrixPlan:
     model = raw["console_model"]
     if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,48}", model):
         raise MatrixError("console_model must be a non-identifying model label")
+    if not isinstance(raw["expected_firmware"], str):
+        raise MatrixError("expected_firmware must be a PSPLink firmware string")
     firmware_problem = _runner._expected_firmware_problem(raw["expected_firmware"])
     if firmware_problem:
         raise MatrixError(f"expected_firmware: {firmware_problem}")
 
     repo_root = Path(repo_root).resolve()
     plan_dir = path.parent
-    host0_root = _resolve_under(repo_root / "tests" / "fixtures" / "psp_oracle", raw["host0_root"], "host0_root")
+    fixture_root = repo_root / "tests" / "fixtures" / "psp_oracle"
+    host0_root = _resolve_under(fixture_root, raw["host0_root"], "host0_root")
+    build_root = (fixture_root / "build").resolve()
+    try:
+        host0_root.relative_to(build_root)
+    except ValueError as exc:
+        raise MatrixError(
+            "host0_root must stay under tests/fixtures/psp_oracle/build"
+        ) from exc
     evidence_dir = _resolve_under(plan_dir, raw["evidence_dir"], "evidence_dir")
+    try:
+        evidence_dir.relative_to(repo_root)
+    except ValueError:
+        pass
+    else:
+        if not _is_git_ignored(evidence_dir, repo_root):
+            raise MatrixError(
+                "evidence_dir must stay outside repo_root or be Git-ignored"
+            )
 
     raw_cases = raw["cases"]
     if not isinstance(raw_cases, list) or not raw_cases:
@@ -249,6 +293,21 @@ def load_plan(path: Path, *, repo_root: Path = ROOT) -> MatrixPlan:
             raise MatrixError(f"{case_id}: sha256 pins a prebuilt_prx only; built cases are hashed when built")
         cases.append(MatrixCase(case_id, float(timeout), prebuilt, sha256))
 
+    staged_owners: dict[str, str] = {}
+    staged_case_ids = [PREFLIGHT_CASE, *(case.case_id for case in cases)]
+    for case in cases:
+        companion = COMPANION_CASES.get(case.case_id)
+        if companion is not None:
+            staged_case_ids.append(companion)
+    for case_id in dict.fromkeys(staged_case_ids):
+        staged_name = MatrixCase(case_id, 0.0).staged_name
+        owner = staged_owners.get(staged_name)
+        if owner is not None and owner != case_id:
+            raise MatrixError(
+                f"case ids {owner} and {case_id} stage to the same PRX name {staged_name}"
+            )
+        staged_owners[staged_name] = case_id
+
     commands_raw = raw["commands"]
     if not isinstance(commands_raw, dict):
         raise MatrixError("commands must be a JSON object")
@@ -257,10 +316,10 @@ def load_plan(path: Path, *, repo_root: Path = ROOT) -> MatrixPlan:
         if name not in commands_raw:
             raise MatrixError(f"commands.{name} is required")
         commands[name] = _argv_template(commands_raw[name], name, allowed)
-    for name in _RUNNER_TEMPLATES:
+    for name, allowed in _RUNNER_TEMPLATES.items():
         if name not in commands_raw:
             raise MatrixError(f"commands.{name} is required")
-        commands[name] = _argv_template(commands_raw[name], name, None)
+        commands[name] = _argv_template(commands_raw[name], name, allowed)
     unknown = set(commands_raw) - set(commands) - {"path_style"}
     if unknown:
         raise MatrixError(f"unknown commands: {', '.join(sorted(unknown))}")
@@ -370,14 +429,6 @@ def parse_build_output(text: str, expected: list[str]) -> dict[str, str]:
     return built
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 # ------------------------------------------------------------------------------------- lock and epochs
 
 
@@ -396,37 +447,42 @@ def _read_lock(path: Path) -> dict[str, object]:
 
 
 def lock_holder_problem(lock: dict[str, object], session_id: str) -> str | None:
-    if lock.get("state") != "HELD":
-        return "HARDWARE_LOCK_NOT_HELD"
-    if lock.get("holder_session") != session_id:
-        return "HARDWARE_LOCK_SESSION_MISMATCH"
-    return None
+    return _runner._hardware_lock_holder_problem(lock, session_id)
 
 
-def attested_boot(lock: dict[str, object], session_id: str) -> tuple[int | None, str]:
+def _attested_device_state(path: Path, session_id: str) -> tuple[dict[str, object] | None, str]:
+    held, status, state = _runner._read_hardware_lock(session_id, lock_path=path)
+    return (state, status) if held else (None, status)
+
+
+def attested_boot(path: Path, session_id: str) -> tuple[int | None, str]:
     """The boot number of a fresh, session-bound QUALIFIED device-state attestation, or a refusal status."""
 
-    problem = lock_holder_problem(lock, session_id)
-    if problem:
-        return None, problem
-    attestation, status = _runner._validate_device_state_attestation(lock, session_id)
+    attestation, status = _attested_device_state(path, session_id)
     if attestation is None:
         return None, status
-    return int(cast(int, attestation["boot_number"])), status
+    boot = _runner._attested_boot_number(attestation)
+    assert boot is not None
+    return boot, status
 
 
 def note_launch(path: Path, session_id: str, text: str) -> None:
-    """Append one ``probes_run`` line to the lock this session holds (atomic replace)."""
+    """Append one ``probes_run`` line to the lock this session holds (read, then atomic replace).
+
+    The lock file has no writer-side locking: a field another writer changes between this read
+    and the replace is overwritten.
+    """
 
     lock = _read_lock(path)
     problem = lock_holder_problem(lock, session_id)
     if problem:
         raise MatrixError(problem)
     runs = lock.get("probes_run")
-    lock["probes_run"] = [*(runs if isinstance(runs, list) else []), f"{session_id} {_utc_now()}: {text}"]
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.matrix.tmp")
-    temporary.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    lock["probes_run"] = [
+        *(runs if isinstance(runs, list) else []),
+        f"{session_id} {_utc_now()}: {text}",
+    ]
+    _runner._write_campaign_json(path, lock)
 
 
 # --------------------------------------------------------------------------------- launch classification
@@ -449,23 +505,31 @@ class CaseOutcome:
 def _probe_command_report(stdout: str) -> dict[str, object] | None:
     """The JSON object a guarded probe command prints last (Nakagawa Link's probe report), if any."""
 
-    start = stdout.find("{")
-    if start < 0:
-        return None
-    try:
-        value = json.loads(stdout[start:])
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, dict) else None
+    decoder = json.JSONDecoder()
+    last: dict[str, object] | None = None
+    for start, char in enumerate(stdout):
+        if char != "{":
+            continue
+        try:
+            value, end = decoder.raw_decode(stdout, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and not stdout[end:].strip():
+            last = value
+    return last
 
 
-def _boots(report: dict[str, object] | None) -> list[int]:
+def _boots(report: dict[str, object] | None) -> list[int] | None:
     if report is None:
-        return []
+        return None
     boots = report.get("boots")
-    if not isinstance(boots, list):
-        return []
-    return [boot for boot in boots if isinstance(boot, int) and not isinstance(boot, bool)]
+    if (
+        not isinstance(boots, list)
+        or not boots
+        or any(not isinstance(boot, int) or isinstance(boot, bool) or boot < 0 for boot in boots)
+    ):
+        return None
+    return boots
 
 
 def classify_launch(
@@ -485,7 +549,8 @@ def classify_launch(
     outcome = CaseOutcome(case.case_id, NOT_ELIGIBLE, boot=epoch_boot, probe_exit=probe_exit,
                           report=runner_report_path.name)
     command_report = _probe_command_report(probe_stdout)
-    outcome.boots_seen = _boots(command_report)
+    reported_boots = _boots(command_report)
+    outcome.boots_seen = [] if reported_boots is None else list(reported_boots)
     if probe_exit is None:
         outcome.status = INTERVENTION
         outcome.reasons.append("probe command exceeded its wall-clock bound and was stopped; device state unknown")
@@ -496,17 +561,26 @@ def classify_launch(
         outcome.reasons.append("probe command could not recover the device"
                                + (f": {detail}" if isinstance(detail, str) and detail else ""))
         return outcome
-    rebooted = [boot for boot in outcome.boots_seen if boot != epoch_boot]
-    if probe_exit == 4 or rebooted:
+    if probe_exit == 4:
         outcome.status = CONTAINED
-        if probe_exit == 4:
-            outcome.reasons.append("the probe failed and the device had to be recovered")
-        if rebooted:
-            outcome.reasons.append(f"the device rebooted during the launch (boot {epoch_boot} -> "
-                                   f"{', '.join(str(boot) for boot in rebooted)})")
+        outcome.reasons.append("the probe failed and the device had to be recovered")
         return outcome
     if probe_exit not in (0, 2):
         outcome.reasons.append(f"probe command exited {probe_exit}")
+        return outcome
+    if reported_boots is None:
+        outcome.reasons.append("probe command report has no valid boots list; reboot state is unknown")
+        return outcome
+    if epoch_boot not in reported_boots:
+        outcome.reasons.append(
+            f"probe command boots list does not include launch boot {epoch_boot}; reboot state is unknown"
+        )
+        return outcome
+    rebooted = [boot for boot in reported_boots if boot != epoch_boot]
+    if rebooted:
+        outcome.status = CONTAINED
+        outcome.reasons.append(f"the device rebooted during the launch (boot {epoch_boot} -> "
+                               f"{', '.join(str(boot) for boot in rebooted)})")
         return outcome
 
     try:
@@ -582,23 +656,91 @@ def classify_launch(
 CommandRunner = Callable[[list[str], float, "str | None"], tuple[int | None, str, str]]
 
 
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> bool:
+    """Stop the timed-out command and its descendants, returning whether the tree was stopped."""
+
+    if os.name == "nt":
+        taskkill = shutil.which("taskkill")
+        if taskkill is not None:
+            try:
+                result = subprocess.run(
+                    [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=2.0,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.SubprocessError):
+                result = None
+            if result is not None and result.returncode == 0:
+                return True
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            pass
+
+    try:
+        process.kill()
+    except OSError:
+        return False
+    return False
+
+
 def run_command(argv: list[str], timeout: float, stdin: str | None = None) -> tuple[int | None, str, str]:
     """Run one bounded host command without a shell; ``None`` means it was stopped at its timeout."""
 
-    def text(value: bytes | None) -> str:
+    def text(value: bytes | str | None) -> str:
+        if isinstance(value, str):
+            return value
         return (value or b"").decode("utf-8", "replace")
 
     env = {**os.environ, "MSYS_NO_PATHCONV": "1"}
+    process_options: dict[str, Any] = {}
+    if os.name == "nt":
+        process_options["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+    else:
+        process_options["start_new_session"] = True
     try:
-        # Bytes, not text mode: on Windows text mode would turn the script's LF line ends into CRLF, which
-        # bash then reads as part of each command.
-        result = subprocess.run(argv, input=None if stdin is None else stdin.encode("utf-8"),
-                                capture_output=True, timeout=timeout, check=False, env=env)
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            **process_options,
+        )
     except subprocess.TimeoutExpired as exc:
-        return None, text(exc.stdout), text(exc.stderr)  # type: ignore[arg-type]
+        return None, text(exc.stdout), text(exc.stderr)
     except OSError as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
-    return result.returncode, text(result.stdout), text(result.stderr)
+    try:
+        stdout, stderr = process.communicate(
+            input=None if stdin is None else stdin.encode("utf-8"),
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stopped_tree = _terminate_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=2.0)
+        except subprocess.TimeoutExpired as reap_exc:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            stdout = reap_exc.stdout if reap_exc.stdout is not None else exc.stdout
+            stderr = reap_exc.stderr if reap_exc.stderr is not None else exc.stderr
+            detail = "command process did not reap after process-tree termination"
+            if not stopped_tree:
+                detail = "process-tree termination was not confirmed; " + detail
+            stderr_text = text(stderr)
+            return None, text(stdout), (stderr_text + "\n" + detail).strip()
+        return None, text(stdout), text(stderr)
+    return process.returncode, text(stdout), text(stderr)
 
 
 class MatrixRunner:
@@ -619,6 +761,7 @@ class MatrixRunner:
         self.source_tree_problem = source_tree_problem or _runner._check_source_tree
         self.git_common_dir = git_common_dir or _git_common_dir
         self.events: list[str] = []
+        self._pending_probe_capture: tuple[Path, int | None, str, str] | None = None
 
     # -- inputs
     def _values(self) -> dict[str, str]:
@@ -634,7 +777,15 @@ class MatrixRunner:
 
         plan = self.plan
         plan.host0_root.mkdir(parents=True, exist_ok=True)
-        to_build = [MatrixCase(PREFLIGHT_CASE, 0.0)] + [case for case in plan.cases if case.prebuilt is None]
+        plan_case_ids = {case.case_id for case in plan.cases}
+        companion_ids = list(dict.fromkeys(
+            companion for case in plan.cases
+            if (companion := COMPANION_CASES.get(case.case_id)) is not None
+            and companion not in plan_case_ids
+        ))
+        to_build = [MatrixCase(PREFLIGHT_CASE, 0.0)] + [
+            case for case in plan.cases if case.prebuilt is None
+        ] + [MatrixCase(case_id, 0.0) for case_id in companion_ids]
         source_repo = plan.shell_path(self.git_common_dir(plan.repo_root))
         script = build_script(plan, source_repo, to_build)
         code, out, err = self.run(plan.commands["build_shell_argv"], BUILD_TIMEOUT_SECONDS, script)
@@ -649,7 +800,12 @@ class MatrixRunner:
             raise MatrixError(f"build shell exited {code}: {err.strip()[-200:]}")
         staged: dict[str, str] = {}
         for case in to_build:
-            digest = _sha256(plan.host0_root / case.staged_name)
+            try:
+                digest = _runner._host_binary_sha256(plan.host0_root / case.staged_name)
+            except OSError as exc:
+                raise MatrixError(
+                    f"{case.case_id}: staged PRX is unavailable after build ({type(exc).__name__})"
+                ) from exc
             if digest != reported[case.case_id]:
                 raise MatrixError(f"{case.case_id}: staged PRX digest differs from the one the build reported")
             staged[case.case_id] = digest
@@ -657,28 +813,60 @@ class MatrixRunner:
             if case.prebuilt is None:
                 continue
             try:
-                digest = _sha256(case.prebuilt)
+                digest = _runner._host_binary_sha256(case.prebuilt)
             except OSError as exc:
                 raise MatrixError(f"{case.case_id}: prebuilt PRX unreadable ({type(exc).__name__})") from exc
             if digest != case.sha256:
                 raise MatrixError(f"{case.case_id}: prebuilt PRX digest is not the pinned one")
-            shutil.copyfile(case.prebuilt, plan.host0_root / case.staged_name)
-            staged[case.case_id] = _sha256(plan.host0_root / case.staged_name)
+            try:
+                shutil.copyfile(case.prebuilt, plan.host0_root / case.staged_name)
+                staged[case.case_id] = _runner._host_binary_sha256(
+                    plan.host0_root / case.staged_name
+                )
+            except OSError as exc:
+                raise MatrixError(
+                    f"{case.case_id}: staged prebuilt PRX is unavailable ({type(exc).__name__})"
+                ) from exc
             if staged[case.case_id] != case.sha256:
                 raise MatrixError(f"{case.case_id}: staged copy differs from the pinned prebuilt PRX")
-        return {name: staged[name] for name in [PREFLIGHT_CASE, *(case.case_id for case in plan.cases)]}
+        required_ids = [PREFLIGHT_CASE, *(case.case_id for case in plan.cases)]
+        required_ids.extend(case_id for case_id in companion_ids if case_id not in required_ids)
+        return {name: staged[name] for name in required_ids}
 
     def verify_staged(self, staged: dict[str, str]) -> None:
         for name, digest in staged.items():
-            path = self.plan.host0_root / (name.replace("-", "_") + ".prx")
+            path = self.plan.host0_root / _staged_name(name)
             try:
-                current = _sha256(path)
+                current = _runner._host_binary_sha256(path)
             except OSError as exc:
                 raise MatrixError(f"{name}: staged PRX is missing ({type(exc).__name__})") from exc
             if current != digest:
                 raise MatrixError(f"{name}: staged PRX changed since it was built; rebuild the matrix")
 
     # -- checkpoint
+    def _checkpoint_identity(self) -> dict[str, object]:
+        plan = self.plan
+        return {
+            "matrix_id": plan.matrix_id,
+            "source_commit": plan.source_commit,
+            "session_id": plan.session_id,
+            "console_model": plan.console_model,
+            "expected_firmware": plan.expected_firmware,
+            "host0_root": str(plan.host0_root),
+            "watchdog_deadline_seconds": plan.watchdog_deadline,
+            "max_contained_failures": plan.max_contained_failures,
+            "cases": [case.case_id for case in plan.cases],
+            "case_specs": [
+                {
+                    "case_id": case.case_id,
+                    "timeout_seconds": case.timeout,
+                    "prebuilt_prx": str(case.prebuilt) if case.prebuilt is not None else None,
+                    "sha256": case.sha256,
+                }
+                for case in plan.cases
+            ],
+        }
+
     def _load_checkpoint(self) -> dict[str, object] | None:
         path = self.plan.checkpoint_path
         if not path.is_file():
@@ -687,16 +875,17 @@ class MatrixRunner:
             state = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise MatrixError(f"checkpoint unreadable ({type(exc).__name__})") from exc
-        identity = {
-            "matrix_id": self.plan.matrix_id,
-            "source_commit": self.plan.source_commit,
-            "session_id": self.plan.session_id,
-            "cases": [case.case_id for case in self.plan.cases],
-        }
+        identity = self._checkpoint_identity()
         if not isinstance(state, dict) or any(state.get(key) != value for key, value in identity.items()):
             raise MatrixError("checkpoint belongs to a different matrix, commit, session or case list")
         if not isinstance(state.get("staged"), dict) or not isinstance(state.get("outcomes"), list):
             raise MatrixError("checkpoint is malformed")
+        staged = cast(dict[str, object], state["staged"])
+        for case in self.plan.cases:
+            if case.prebuilt is not None and staged.get(case.case_id) != case.sha256:
+                raise MatrixError(
+                    f"{case.case_id}: checkpoint staged digest does not match the pinned prebuilt PRX"
+                )
         return state
 
     def _save(self, state: dict[str, object]) -> None:
@@ -709,8 +898,8 @@ class MatrixRunner:
         if problem:
             raise MatrixError(f"{problem} ({stage})")
 
-    def _recover(self, stage: str) -> tuple[int | None, str, str | None]:
-        """Run the recover command; return (attested boot, detail, terminal state when there is no boot).
+    def _recover(self, stage: str) -> tuple[dict[str, object] | None, str, str | None]:
+        """Run recover; return its qualified device state, detail, and terminal state when unavailable.
 
         Exit 2 is the recover command refusing (lock or reset budget): the matrix stops without claiming
         that a person is needed. Any other failure, or a timeout, means the device could not be brought
@@ -723,28 +912,31 @@ class MatrixRunner:
         if code != 0:
             detail = f"{stage}: recover command exited {code}: {err.strip()[-200:]}"
             return None, detail, RECOVERY_REFUSED if code == 2 else INTERVENTION
-        boot, status = attested_boot(_read_lock(self.lock_path), self.plan.session_id)
-        if boot is None:
+        device_state, status = _attested_device_state(self.lock_path, self.plan.session_id)
+        if device_state is None:
             return None, f"{stage}: no fresh qualified device-state attestation after recovery ({status})",                 INTERVENTION
-        return boot, status, None
+        return device_state, status, None
 
     def fresh_epoch(self, used_boots: list[int]) -> tuple[int | None, str, int | None, str | None]:
         """Requalify, soft-reset once, requalify.
 
         Return (new boot, detail, boot before the reset, terminal state when there is no new boot)."""
 
-        before, detail, terminal = self._recover("before the soft reset")
-        if before is None:
+        before_state, detail, terminal = self._recover("before the soft reset")
+        if before_state is None:
             return None, detail, None, terminal
-        self._gate("before the soft reset")
+        before = _runner._attested_boot_number(before_state)
+        assert before is not None
         argv = render_argv(self.plan.commands["reset_argv"], self._values())
         code, _out, _err = self.run(argv, RESET_COMMAND_TIMEOUT_SECONDS, None)
         self.events.append(f"PSPLink soft reset from boot {before}: command exit {code} (a timeout is expected)")
-        after, detail, terminal = self._recover("after the soft reset")
-        if after is None:
+        after_state, detail, terminal = self._recover("after the soft reset")
+        if after_state is None:
             return None, detail, before, terminal
+        after = _runner._attested_boot_number(after_state)
+        assert after is not None
         newest = max([before, *used_boots])
-        if after <= newest:
+        if not _runner._has_newer_qualified_boot(after_state, newest):
             return None, (f"the soft reset did not produce a newer qualified boot (attested boot {after}, "
                           f"newest seen {newest})"), before, NO_FRESH_BOOT
         return after, "QUALIFIED", before, None
@@ -764,12 +956,11 @@ class MatrixRunner:
             "--host0-root", str(plan.host0_root),
             "--pspsh-argv-json", json.dumps(plan.commands["pspsh_argv"]),
             "--usbhostfs-argv-json", json.dumps(plan.commands["usbhostfs_argv"]),
-            "--campaign-case", f"{PREFLIGHT_CASE}={plan.host0_root / 'transport_write.prx'}",
+            "--campaign-case", f"{PREFLIGHT_CASE}={plan.host0_root / _staged_name(PREFLIGHT_CASE)}",
             "--campaign-case", f"{case.case_id}={plan.host0_root / case.staged_name}",
             "--out", str(out),
         ]
         out.unlink(missing_ok=True)
-        self._gate(f"before launching {case.case_id}")
         note_launch(self.lock_path, plan.session_id,
                     f"matrix {plan.matrix_id} case {index + 1}/{len(plan.cases)}: boot {boot}, launching "
                     f"transport-write + {case.case_id} ({plan.source_commit[:8]}, PRX sha256 "
@@ -777,12 +968,13 @@ class MatrixRunner:
         started = self.clock_ns()
         wall = 2 * (case.timeout + 120.0) + plan.watchdog_deadline + PROBE_RECOVERY_ALLOWANCE_SECONDS
         code, stdout, err = self.run(argv, wall, None)
-        # The probe command's own report (for Nakagawa Link: its recovery steps and boot numbers) is the only
-        # record of how a contained launch was recovered; keep it next to the runner log.
-        plan.evidence_dir.mkdir(parents=True, exist_ok=True)
-        (plan.evidence_dir / f"{plan.matrix_id}-{tag}.probe-command.txt").write_text(
-            f"exit {code}\n--- stdout\n{stdout}\n--- stderr\n{err[-4000:]}\n", encoding="utf-8")
-        return classify_launch(
+        self._pending_probe_capture = (
+            plan.evidence_dir / f"{plan.matrix_id}-{tag}.probe-command.txt",
+            code,
+            stdout,
+            err,
+        )
+        outcome = classify_launch(
             case=case,
             epoch_boot=boot,
             probe_exit=code,
@@ -793,6 +985,22 @@ class MatrixRunner:
             source_commit=plan.source_commit,
             expected_firmware=plan.expected_firmware,
         )
+        post_boot, post_status = attested_boot(self.lock_path, plan.session_id)
+        if post_boot is None:
+            if outcome.status not in {INTERVENTION, REJECTED}:
+                outcome.status = NOT_ELIGIBLE
+            outcome.reasons.append(
+                f"post-launch device state is unknown ({post_status})"
+            )
+        elif post_boot != boot:
+            if post_boot not in outcome.boots_seen:
+                outcome.boots_seen.append(post_boot)
+            if outcome.status != INTERVENTION:
+                outcome.status = CONTAINED
+            reboot_reason = f"the device rebooted during the launch (boot {boot} -> {post_boot})"
+            if reboot_reason not in outcome.reasons:
+                outcome.reasons.append(reboot_reason)
+        return outcome
 
     # -- the whole matrix
     def execute(self, *, build_only: bool = False) -> tuple[int, dict[str, Any]]:
@@ -805,10 +1013,7 @@ class MatrixRunner:
             staged = self.build()
             state = {
                 "schema": 1,
-                "matrix_id": plan.matrix_id,
-                "source_commit": plan.source_commit,
-                "session_id": plan.session_id,
-                "cases": [case.case_id for case in plan.cases],
+                **self._checkpoint_identity(),
                 "staged": staged,
                 "used_boots": [],
                 "outcomes": [],
@@ -819,20 +1024,58 @@ class MatrixRunner:
         staged = dict(cast(dict[str, str], state["staged"]))
         self.verify_staged(staged)
         if build_only:
-            return 0, self._report(state, "BUILT")
+            return 0, self._report(state, str(state.get("state") or "BUILT"))
         outcomes: list[dict[str, object]] = list(
             cast(list[dict[str, object]], state["outcomes"])
         )
         used_boots: list[int] = list(cast(list[int], state.get("used_boots") or []))
         contained = int(cast(int, state.get("contained_failures") or 0))
         terminal: str | None = None
+        hardware_started = bool(outcomes) or bool(used_boots)
         for index in range(len(outcomes), len(plan.cases)):
             case = plan.cases[index]
             if contained > plan.max_contained_failures:
                 terminal = CONTAINED_BUDGET_EXHAUSTED
                 break
+            required_names = [PREFLIGHT_CASE, case.case_id]
+            companion = COMPANION_CASES.get(case.case_id)
+            if companion is not None:
+                required_names.append(companion)
+            try:
+                case_staged: dict[str, str] = {}
+                for name in dict.fromkeys(required_names):
+                    digest = staged.get(name)
+                    if not isinstance(digest, str):
+                        raise MatrixError(f"{name}: staged PRX digest is missing from the checkpoint")
+                    case_staged[name] = digest
+                self.verify_staged(case_staged)
+            except MatrixError as exc:
+                if not hardware_started:
+                    raise
+                terminal = REJECTED
+                state["stopped_before"] = {
+                    "case_id": case.case_id,
+                    "state": terminal,
+                    "reason": f"staged PRX verification failed before reset: {exc}",
+                }
+                self.events.append(f"matrix stopped before {case.case_id}: staged input verification failed")
+                break
             state["state"] = "IN_PROGRESS"
-            boot, detail, before, epoch_terminal = self.fresh_epoch(used_boots)
+            try:
+                boot, detail, before, epoch_terminal = self.fresh_epoch(used_boots)
+            except MatrixError as exc:
+                reset_started = any(event.startswith("PSPLink soft reset") for event in self.events)
+                if not hardware_started and not reset_started:
+                    raise
+                terminal = LOCK_LOST
+                state["stopped_before"] = {
+                    "case_id": case.case_id,
+                    "state": terminal,
+                    "reason": f"matrix stopped after hardware work started: {exc}",
+                }
+                state.update({"used_boots": used_boots})
+                self.events.append(f"matrix stopped before {case.case_id}: {exc}")
+                break
             if before is not None and before not in used_boots:
                 used_boots.append(before)
             if boot is None:
@@ -844,25 +1087,57 @@ class MatrixRunner:
                 self._save(state)
                 break
             state.pop("stopped_before", None)
+            hardware_started = True
             used_boots.append(boot)
-            outcome = self.launch(case, boot, index, staged)
+            try:
+                outcome = self.launch(case, boot, index, staged)
+            except MatrixError as exc:
+                terminal = LOCK_LOST
+                state["stopped_before"] = {
+                    "case_id": case.case_id,
+                    "state": terminal,
+                    "reason": f"matrix stopped after hardware work started: {exc}",
+                }
+                state.update({"used_boots": used_boots})
+                self.events.append(f"matrix stopped before launching {case.case_id}: {exc}")
+                break
             for seen in outcome.boots_seen:
                 if seen not in used_boots:
                     used_boots.append(seen)
             if outcome.status == CONTAINED:
                 contained += 1
+                if contained > plan.max_contained_failures:
+                    terminal = CONTAINED_BUDGET_EXHAUSTED
             if outcome.status == INTERVENTION:
                 terminal = INTERVENTION
+            outcomes.append(outcome.as_dict())
+            state.update({"outcomes": outcomes, "used_boots": used_boots, "contained_failures": contained})
+            self._save(state)
+
+            capture = self._pending_probe_capture
+            self._pending_probe_capture = None
+            if capture is not None:
+                capture_path, capture_exit, capture_stdout, capture_stderr = capture
+                try:
+                    plan.evidence_dir.mkdir(parents=True, exist_ok=True)
+                    capture_path.write_text(
+                        f"exit {capture_exit}\n--- stdout\n{capture_stdout}\n"
+                        f"--- stderr\n{capture_stderr[-4000:]}\n",
+                        encoding="utf-8",
+                    )
+                except OSError as exc:
+                    self.events.append(
+                        f"probe-command evidence for {case.case_id} not written ({type(exc).__name__})"
+                    )
             try:
                 note_launch(self.lock_path, plan.session_id,
                             f"matrix {plan.matrix_id} case {index + 1}/{len(plan.cases)} {case.case_id} on boot "
                             f"{boot}: {outcome.status}"
                             + (f" ({'; '.join(outcome.reasons)[:300]})" if outcome.reasons else ""))
-            except MatrixError as exc:
-                self.events.append(f"probes_run note after {case.case_id} not written: {exc}")
-            outcomes.append(outcome.as_dict())
-            state.update({"outcomes": outcomes, "used_boots": used_boots, "contained_failures": contained})
-            self._save(state)
+            except (MatrixError, OSError) as exc:
+                self.events.append(
+                    f"probes_run note after {case.case_id} not written ({type(exc).__name__})"
+                )
             if terminal:
                 break
         final = terminal or "COMPLETE"

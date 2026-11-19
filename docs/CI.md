@@ -456,7 +456,9 @@ gate runs in exactly one part with the command it had in the serial job:
   the single scheduler and HLE thread runs: it reruns the three `sched_selftest_*` binaries
   and `hle_thread_selftest` they built `SELFTEST_REPEAT` times (default 20), stops at the
   first failure and prints the iteration and binary that failed (#1846). Pull requests, pushes,
-  merge groups and manual runs skip it, so their time is unchanged.
+  merge groups and manual runs skip it, so their time is unchanged. The nightly schedule also
+  runs `gpu-coherence-twin-mutants` on lavapipe: its fourteen mutants each build their own
+  coherence selftest, which is too long for every run.
 - `player`: present pacing, the player UI tests and regressions, the CMake player, the
   showcase and the two player smokes that stage its ISO.
 
@@ -681,7 +683,9 @@ with the host twin (#2050) on, native and full colour, on both paths at scales 1
 the native twin on the interlock path: the image and the path taken must be those of the twin-off run, a native
 twin must equal its image, and a full-colour twin of the overlapping pair must hold the blends at 8 bits per
 channel, in drawing order on the interlock path. A device that refuses the
-interlock prints one SKIP line for each interlock leg. The lavapipe step prints
+interlock prints one SKIP line for each interlock leg, and the recipe's last line names every leg that printed a
+SKIP line (a leg that refuses the interlock, supersampling or the twin exits 0 without running its path), or says
+that every leg ran. The lavapipe step prints
 the device's interlock features from `vulkaninfo` first, so the log shows which path the hosted legs took. The
 pipeline cache (#2149) runs next, as three processes over one empty data root: cold, warm and reject. Four
 mutant targets follow, and each broken variant must fail its case with its own message:
@@ -696,6 +700,15 @@ snapshot path as before the shader owned depth, 16 copies the twin's shader dept
 writes depth for a batch whose depth writes are off),
 and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
 reordering, every state called write-once, no depth condition).
+A mutant target that gets exit 77 (no Vulkan device) prints a SKIP line and fails with status 77, so a
+host without a device never counts a mutant killed; only an interlock leg on a device without the
+interlock is a SKIP that passes.
+A further step runs `gpu-ace-selftest` (Ace Mode's texture filtering: through-mode draws keep the PSP's
+sample points, a transformed linear draw gets the anisotropic sampler) and `gpu-mips-selftest` (host-built
+mip chains at render scales 4, 2 and 1, with 16x filtering and with mips off), then the mutants that must
+fail for their own reason: `gpu-mips-mutant`'s four, `tex-scale-gate-mutant` (texture scaling without its
+Ace gate) and `gpu-coherence-selftest-movie-mutant`'s three movie cells. A `SKIP` line in its log fails the
+step.
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
@@ -816,13 +829,19 @@ mingw32-make --no-print-directory check
 ```
 
 `check` covers documentation and policy checks, the provenance record and
-disposition gap check, both publication-audit legs, the native host-core tests,
-and a fast Python subset. Contributors run `mingw32-make contrib-check`
-(AGENTS.md Section 9), which adds the gates the change needs, before opening a
-pull request. `make readiness` is the maintainer's authority-bound aggregate:
-it additionally verifies the exact candidate against the external detailed
-ledger and therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is unavailable,
-which is expected for a fork or an outside contributor. `make provenance-refresh` is the single local command for regenerating the
+disposition gap check, both publication-audit legs, the modified-file notice
+audit, the native host-core tests, and a fast Python subset. A native leg this
+host cannot run (no Vulkan device, no SDL3_ttf) prints `SKIP` and the run goes
+on, so `check`'s last line says every step exited 0, not that every check
+passed: a `SKIP` above it is not a pass. Contributors run
+`mingw32-make contrib-check` (AGENTS.md Section 9), which adds the gates the
+change needs, before opening a pull request. `make readiness` is the
+maintainer's authority-bound aggregate: it runs the same publication checks and
+additionally verifies the exact candidate against the external detailed ledger,
+from the merge base with `origin/main` (resolved through `GIT`; an empty base is
+a named failure), and therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is
+unavailable, which is expected for a fork or an outside contributor.
+`make provenance-refresh` is the single local command for regenerating the
 tracked public controls. It calls the same `generate_ephemeral_controls()`
 implementation as the hosted provenance attestation, reads the trusted public
 ledger from the exact base commit, and requires the external detailed ledger
@@ -947,7 +966,8 @@ and run `python tools/hle_manifest.py --write-baseline` yourself.
 Some generators are listed but not run, and `--list` says why:
 
 - embedded shaders (`make shaders GLSLC=...`): regenerating needs `glslc`, whose
-  version the manifest records; `make shader-verify` checks the committed files;
+  version the manifest records; `make shader-verify` checks the committed files
+  of both glslc sets, the GPU backend's (`psp`) and the player UI's (`ui`);
 - profile-zero prebuilt digests: rebuilding needs the pinned PSPDEV toolchain;
   CI checks `SHA256SUMS`;
 - the import-stub census and the benchmark report: both need private inputs
@@ -1196,17 +1216,18 @@ whenever their jobs run; neither can change a gate's result.
   - `gui-present-selftest`, the player UI regressions and the player UI tests (overlays,
     fonts, art).
   - On lavapipe under Xvfb, as in `native_tools`: the GPU snapshot sync, capture, coherence,
-    VRAM view identity and texture scaling self-tests, the FSR 3 pass self-test and the FSR 3
-    frame generation refusal (cell `G-R`). As in `native_tools`, the step fails when the
-  device is not llvmpipe or the texture scaling self-test prints a `SKIP`, so a skip cannot
-  shrink the number unseen.
+    VRAM view identity, texture scaling, Ace and mip chain self-tests, the FSR 3 pass self-test
+    and the FSR 3 frame generation refusal (cell `G-R`). As in `native_tools`, the step fails
+  when the device is not llvmpipe or the texture scaling, Ace or mip chain self-test prints a
+  `SKIP`, so a skip cannot shrink the number unseen.
 
   Not measured, each `native_tools` step named in `tools/test_public_ci_wiring.py`
   (`CoverageWiringTests.C_NOT_MEASURED`), so a gate added later fails that test until it is
   measured or named:
 
-  - Mutants: the separate mutant steps (`gpu-texscale-mutant`, the cosimulation mutation
-    corpus) are left out, and the objects the mutants inside measured targets compile for
+  - Mutants: the separate mutant steps (`gpu-texscale-mutant`, the mip chain, texture scaling
+    gate and movie mutants, the nightly host twin mutants, the cosimulation mutation corpus)
+    are left out, and the objects the mutants inside measured targets compile for
     themselves are skipped at collection. They run deliberately broken code. Their runs still
     count in the unmutated objects they link.
   - Not C self-tests: the import and fake-success audit, the provenance gap check, the 32-bit
@@ -1593,7 +1614,59 @@ purpose, and `tools/test_merge_append.py` keeps the list honest:
 - The root `Makefile` only includes the `mk/` files, so it is no longer an append point.
 
 Add a file to the list only when every conflict it can have is two independent items, and add it to
-`ALLOWED_PATHS`, `.gitattributes` and the test together.
+`ALLOWED_PATHS`, `.gitattributes` and the test together. Generated files never use this driver; they
+have their own route below.
+
+## Merging regenerated files
+
+The files that `python tools/regen_all.py --list` names (`docs/HLE_COVERAGE.md`, `src/rt/hle_evidence.h`,
+`src/rt/nid_names.h`, `docs/RECOMP_HELPER_INVENTORY.md`, the HLE baseline and the census block in
+`docs/HLE_AND_WORKAROUND_INVENTORY.md`, the waits census, the title catalog, the provenance controls and
+the rest) are rewritten whole from the tree. Two pull requests that each touch an HLE or runtime source
+therefore conflict in those files even when their own changes are far apart, and every landing makes the
+rest of the queue conflict again. Under section 10 of `AGENTS.md` such a conflict is generated content,
+not a substantive correction. Neither side's copy is right after the merge: the right bytes are a fresh
+generation from the merged tree. `tools/regen_all.py --resolve-merge` produces them:
+
+```bash
+git merge origin/main             # or: git merge --squash --no-commit <branch>, git cherry-pick <commit>
+python tools/regen_all.py --resolve-merge
+git commit                        # concludes the merge
+python tools/regen_all.py         # after a merge commit only: the provenance refresh, its own commit
+```
+
+It works from the conflicted index (stage 1 the ancestor, 2 ours, 3 theirs), so it needs no Git
+setting, and it does this:
+
+1. It reads every conflicted path. If any is not an output of a step it runs (source, prose, a
+   skipped step's output such as the embedded shaders), or a generated file was deleted on one side,
+   it lists each one as `CONFLICT` and exits 1 without writing anything. No generator runs on a tree
+   that still holds a person's conflict. Resolve those by hand, `git add` them and run it again.
+2. A whole-file output takes our side. `docs/HLE_AND_WORKAROUND_INVENTORY.md` is hand-written around its
+   generated census block, so it merges three ways with the block emptied on every side. A conflict in
+   that hand-written text is a `CONFLICT` as in step 1.
+3. It regenerates every output from the merged tree, stages the results and runs the same comparison
+   as `--check` again. A step that fails, or an output that is still stale, makes it exit 1 with
+   `refusing to finish the merge`.
+4. The provenance controls hash the staged tree against a base, `merge-base(HEAD, origin/main)`, that
+   must be an ancestor of `HEAD`. During a squash merge or a cherry-pick `HEAD` is the branch being
+   built, so it refreshes and checks them too. If they conflicted and `contrib_refresh.py` refuses to
+   refresh them (a new or removed public path, a changed profile), it exits 1: that needs the
+   maintainer's admission route. During `git merge` the base that the finished merge will have does not
+   exist yet, so the controls stay as our side (`NOT_RUN provenance controls`). After `git commit`, run
+   `python tools/regen_all.py` and commit the refresh on its own, as section 4 of `AGENTS.md` asks.
+
+It never commits. Hosted CI stays the gate: `python tools/regen_all.py --check` in `Generated files and
+repository lints` on a quick run, and on a full run `tools/test_regen_all.py` in `Python tooling gates`,
+which compares each generator's output with the committed file. If a merge took the wrong side somewhere
+this route does not cover, the head still fails there and cannot land.
+
+Why not a merge driver like `nk-append`? A driver for these files would have to write one side and exit
+0 (then `git merge` commits a stale file on its own) or exit 1 (then the merge stops exactly as it does
+without one). The index already holds all three sides, so the command needs no driver, no per-clone
+setting and no `.gitattributes` entry that a pull request could point at another file. GitHub's own
+mergeability check and its **Update branch** button cannot run either, so a pull request can still show
+a conflict on GitHub that this command resolves locally.
 
 ## Trusted CI verdict
 

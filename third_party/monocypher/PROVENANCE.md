@@ -17,9 +17,14 @@ vendored files contain no network code and no key.
   elects **CC0-1.0**, the public-domain dedication, under the maintainer's 2026-10-24 rule for officially
   public-domain code. The complete upstream `LICENCE.md`, with both licences and the author list, is kept beside the
   sources unchanged.
-- Import method: the four source files and `LICENCE.md` were downloaded from the tag's release tarball and again
-  from `raw.githubusercontent.com` at the pinned commit; both copies are identical. Their Git blob IDs match the
-  pinned commit's tree, and the SHA-256 values below were calculated from the local bytes.
+- Import method: the four source files and `LICENCE.md` come from the Git tree at the pinned commit
+  (`raw.githubusercontent.com` at `ab2b16dd`, or the Git blobs). Their Git blob IDs match the pinned commit's tree,
+  and the SHA-256 values below were calculated from the local bytes. The tag's release tarball
+  (`monocypher-4.0.3.tar.gz`) is not the same bytes: its release script replaces `__git__` in the first line of each
+  source file with the version (`// Monocypher version 4.0.3`), and its `LICENCE.md` lacks the six-line "Special
+  notes" section at the end. Re-verify the SHA-256 column against the Git tree, never against the tarball.
+  (Corrected 2026-11-17: this line said the tarball and the commit copies were identical; checked against the
+  release asset, they are not.)
 - Only what Ed25519 verification needs is vendored: the core library (`monocypher.c`, `.h`) and the optional
   Ed25519 file (`src/optional/monocypher-ed25519.c`, `.h`), which supplies the SHA-512 that RFC 8032 Ed25519
   requires (the core library's EdDSA uses BLAKE2b). The optional pair is flattened into this directory; its
@@ -40,3 +45,14 @@ vendored files contain no network code and no key.
 
 None. The files build warning-free with `-std=c99 -Wall -Wextra -Wpedantic` under MinGW-w64 GCC and Linux GCC, so
 no compile flag or source edit is needed.
+
+## Upstream fixes not included
+
+- Upstream commit `55158d37f4d86a536fb807096fa9cacc7d4469db` (2026-09-30, "Fix timing leak in constant time
+  comparisons"), made after the `4.0.3` pin and in no release yet (checked 2026-11-17), rewrites `neq0`, the helper
+  behind `crypto_verify16/32/64`. Depending on compiler and target, the pinned form can be lowered to a
+  data-dependent branch that leaks whether two buffers matched. This tree keeps the pinned `neq0`
+  (`monocypher.c`). It does not affect the project's use: `nk_sig.c` only verifies public Ed25519 signatures over
+  public data and hashes public data with BLAKE2b, so nothing secret is compared. Any future use of `crypto_verify*`
+  or another Monocypher function on secret data (a MAC or key comparison) must first take that fix, by re-pinning
+  to a release that carries it or as a recorded LOCAL DELTA.

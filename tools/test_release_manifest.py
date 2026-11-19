@@ -100,11 +100,31 @@ class TestReleaseManifest(unittest.TestCase):
         self.assertIn("003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5", stb["revision"])
         self.assertEqual(stb["notice_path"], "third_party/stb/LICENSE")
         self.assertEqual(stb["evidence_path"], "third_party/stb/PROVENANCE.md")
-        kenney = families["kenney-ui-assets"]
-        self.assertEqual(kenney["license"], "CC0-1.0")
-        self.assertIn("ac2fcf599080b0f3ba2d174c9474db6df1a0e96ff0662580e2da79a122ab78a1", kenney["revision"])
-        self.assertEqual(kenney["evidence_path"], "third_party/kenney/PROVENANCE.md")
-        for family in (stb, kenney):
+        self.assertNotIn("kenney-ui-assets", families)
+        prompts = families["kenney-input-prompts"]
+        sounds = families["kenney-interface-sounds"]
+        # One row per pack: each names its own page, archive and licence file, so the SPDX package built
+        # from a row gives the right download location and notice for that pack.
+        for family, page, archive, notice in (
+            (prompts, "https://kenney.nl/assets/input-prompts",
+             "ac2fcf599080b0f3ba2d174c9474db6df1a0e96ff0662580e2da79a122ab78a1",
+             "third_party/kenney/input-prompts/License.txt"),
+            (sounds, "https://kenney.nl/assets/interface-sounds",
+             "f2193d072726d6758a5f7871b2dcc54dcce0d5c35c6f0a62f92549b327c81232",
+             "third_party/kenney/interface-sounds/License.txt"),
+        ):
+            with self.subTest(family=family["id"]):
+                self.assertEqual(family["license"], "CC0-1.0")
+                self.assertEqual(family["origin"], page)
+                self.assertIn(archive, family["revision"])
+                self.assertEqual(family["notice_path"], notice)
+                self.assertEqual(family["evidence_path"], "third_party/kenney/PROVENANCE.md")
+                manifest = (ROOT / family["evidence_path"]).read_text(encoding="utf-8")
+                self.assertIn(f"| `{page}` |", manifest)
+                self.assertIn(f"| `{archive}` |", manifest)
+        self.assertNotIn(sounds["revision"].split()[-1], prompts["revision"])
+        self.assertNotIn(prompts["revision"].split()[-1], sounds["revision"])
+        for family in (stb, prompts, sounds):
             self.assertTrue((ROOT / family["notice_path"]).is_file(), family["notice_path"])
             self.assertTrue((ROOT / family["evidence_path"]).is_file(), family["evidence_path"])
 

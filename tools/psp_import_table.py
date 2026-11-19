@@ -62,6 +62,7 @@ MAX_SEGMENTS = 512
 MAX_SECTIONS = 0xFFFF
 MAX_LIBRARIES = 256
 MAX_FUNCS_PER_LIB = 4096
+MAX_EXPORTS_PER_LIB = 1024
 MAX_TOTAL_FUNCS = 65536
 MAX_LIBNAME_LEN = 128
 # PspLibStubEntry.size is in 32-bit words; 5 covers the fields we decode and
@@ -69,9 +70,8 @@ MAX_LIBNAME_LEN = 128
 MIN_STUB_ENTRY_WORDS = 5
 MAX_STUB_ENTRY_WORDS = 32
 # SceLibraryEntryTable.len is in 32-bit words; the 16-byte header is the
-# minimum and real tables use 4 to 6. The upper bound and the export-table span
-# cap are the runtime loader's own (src/rt/hle.c register_prx_exports), so the
-# planner never refuses a table the runtime would publish.
+# minimum and real tables use 4 to 6. The runtime uses the same entry-size,
+# export-count, and table-span limits in src/rt/hle_kernel_module.c.
 MIN_EXPORT_ENTRY_WORDS = 4
 MAX_EXPORT_ENTRY_WORDS = 0x40
 MAX_EXPORT_TABLE_BYTES = 0x10000
@@ -444,8 +444,10 @@ def parse_export_table(data: bytes) -> ExportTable | None:
         if len(libraries) >= MAX_LIBRARIES:
             raise ImportTableError(f"more than {MAX_LIBRARIES} export entries")
         count = num_funcs + num_vars
-        if count > MAX_FUNCS_PER_LIB:
-            raise ImportTableError(f"{what}: {count} exports exceeds cap {MAX_FUNCS_PER_LIB}")
+        if count > MAX_EXPORTS_PER_LIB:
+            raise ImportTableError(
+                f"{what}: {count} exports exceeds cap {MAX_EXPORTS_PER_LIB}"
+            )
         name = _read_guest_cstr(data, gmap, name_ptr, f"{what} library name") if name_ptr else None
         nids: tuple[int, ...] = ()
         if count:
