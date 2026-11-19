@@ -5,8 +5,9 @@
    the player, ICON0.PNG / PIC1.PNG read at run time from the user's own disc.
    Decoding is stb_image (third_party/stb, used under its public-domain
    option), built for PNG only from memory. The limits are checked against the
-   PNG header before any pixel is decoded, so a hostile or damaged file costs
-   at most the caller's bounds. */
+   PNG header before any pixel is decoded, and every buffer stb_image allocates
+   is held to what an image of the header's size can need, so a hostile or
+   damaged file costs at most the caller's bounds. */
 
 #include "nk_ui_image.h"
 
@@ -17,6 +18,35 @@
 #include <intrin.h>
 #endif
 
+/* stb_image allocates through these. While a decode runs on a thread, every
+   request it makes is held to that decode's cap (nk_ui_image_alloc_cap): its
+   zlib buffer doubles for as long as the image data inflates, and stb_image
+   accepts data longer than the image, so without a cap a small file of highly
+   compressible data could grow it to gigabytes. Zero means no decode runs. */
+#if defined(_MSC_VER)
+#define NK_UI_IMAGE_THREAD_LOCAL __declspec(thread)
+#else
+#define NK_UI_IMAGE_THREAD_LOCAL __thread
+#endif
+static NK_UI_IMAGE_THREAD_LOCAL size_t g_nk_ui_image_alloc_cap;
+
+static void *nk_ui_image_stbi_malloc(size_t size) {
+    if (g_nk_ui_image_alloc_cap != 0u && size > g_nk_ui_image_alloc_cap) {
+        return NULL;
+    }
+    return malloc(size);
+}
+
+static void *nk_ui_image_stbi_realloc(void *pointer, size_t size) {
+    if (g_nk_ui_image_alloc_cap != 0u && size > g_nk_ui_image_alloc_cap) {
+        return NULL;
+    }
+    return realloc(pointer, size);
+}
+
+#define STBI_MALLOC(size) nk_ui_image_stbi_malloc(size)
+#define STBI_REALLOC(pointer, size) nk_ui_image_stbi_realloc(pointer, size)
+#define STBI_FREE(pointer) free(pointer)
 #define STBI_ONLY_PNG
 #define STBI_NO_STDIO
 #define STBI_NO_LINEAR
@@ -57,6 +87,44 @@ uint64_t nk_ui_image_new_serial(void) {
 }
 
 static const uint8_t g_png_signature[8] = {0x89u, 'P', 'N', 'G', '\r', '\n', 0x1Au, '\n'};
+
+static uint32_t nk_ui_image_be32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
+           (uint32_t)p[3];
+}
+
+/* Whether the first IDAT chunk is empty. stb_image v2.30 copies a zero-length
+   chunk into its image-data buffer before it has allocated one, a memcpy into
+   NULL (stbi__getn), so such a file is refused before it reaches stb_image.
+   The walk stops at the first IDAT or a chunk that runs past the end, which
+   stb_image then fails on its own. */
+static bool nk_ui_image_first_idat_empty(const uint8_t *bytes, size_t size) {
+    size_t at = sizeof(g_png_signature);
+    while (at <= size && size - at >= 12u) {
+        uint32_t length = nk_ui_image_be32(bytes + at);
+        if (memcmp(bytes + at + 4, "IDAT", 4u) == 0) {
+            return length == 0u;
+        }
+        if (length > size - at - 12u) {
+            return false;
+        }
+        at += (size_t)length + 12u;
+    }
+    return false;
+}
+
+/* The largest allocation a genuine w x h PNG of size bytes asks stb_image for.
+   An image row is at most 8 bytes a pixel (16-bit RGBA) plus its filter byte;
+   Adam7 adds at most a filter byte and a partial byte a row in each pass, and
+   the zlib buffer doubles past what it needs, hence 4 x h x (8 w + 2). The
+   compressed data is gathered in a buffer that doubles from 4096 bytes, hence
+   twice the file; 64 KiB covers tiny images, where the per-row costs dominate.
+   w and h are at most STBI_MAX_DIMENSIONS and size below 2^31, so the sum
+   fits 64 bits. */
+static size_t nk_ui_image_decode_cap(int w, int h, size_t size) {
+    uint64_t cap = (uint64_t)h * ((uint64_t)w * 8u + 2u) * 4u + (uint64_t)size * 2u + 65536u;
+    return cap > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)cap;
+}
 
 const char *nk_ui_image_status_name(NkUiImageStatus status) {
     switch (status) {
@@ -103,13 +171,20 @@ NkUiImageStatus nk_ui_image_decode_png(const uint8_t *bytes, size_t size,
             return NK_UI_IMAGE_TOO_LARGE;
         }
     }
+    if (nk_ui_image_first_idat_empty(bytes, size)) {
+        return NK_UI_IMAGE_DECODE_FAILED;
+    }
     if (!stbi_info_from_memory(bytes, (int)size, &w, &h, &channels) || w <= 0 || h <= 0) {
         return NK_UI_IMAGE_DECODE_FAILED;
     }
     if ((uint32_t)w > limits->max_width || (uint32_t)h > limits->max_height) {
         return NK_UI_IMAGE_TOO_LARGE;
     }
+    /* Every buffer stb_image asks for is held to what this image can need, so
+       data that inflates past it fails the decode instead of growing. */
+    g_nk_ui_image_alloc_cap = nk_ui_image_decode_cap(w, h, size);
     pixels = stbi_load_from_memory(bytes, (int)size, &w, &h, &channels, 4);
+    g_nk_ui_image_alloc_cap = 0u;
     if (pixels == NULL) {
         return NK_UI_IMAGE_DECODE_FAILED;
     }
@@ -152,8 +227,10 @@ bool nk_ui_image_resample(const NkUiImage *src, uint32_t w, uint32_t h, uint8_t 
         for (x = 0; x < w; ++x) {
             uint32_t x0 = (uint32_t)((uint64_t)x * src->width / w);
             uint32_t x1 = (uint32_t)((uint64_t)(x + 1u) * src->width / w);
-            uint32_t sum[4] = {0u, 0u, 0u, 0u};
-            uint32_t count;
+            /* 64 bits: a destination pixel can average more than the 16.8 M
+               source pixels whose 8-bit channels a 32-bit sum holds. */
+            uint64_t sum[4] = {0u, 0u, 0u, 0u};
+            uint64_t count;
             uint32_t sx;
             uint32_t sy;
             uint8_t *out = dst + ((size_t)y * w + x) * 4u;
@@ -167,7 +244,7 @@ bool nk_ui_image_resample(const NkUiImage *src, uint32_t w, uint32_t h, uint8_t 
                     sum[3] += row[sx * 4u + 3u];
                 }
             }
-            count = (y1 - y0) * (x1 - x0);
+            count = (uint64_t)(y1 - y0) * (x1 - x0);
             out[0] = (uint8_t)((sum[0] + count / 2u) / count);
             out[1] = (uint8_t)((sum[1] + count / 2u) / count);
             out[2] = (uint8_t)((sum[2] + count / 2u) / count);

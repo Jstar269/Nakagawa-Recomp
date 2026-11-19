@@ -1383,6 +1383,8 @@ typedef struct {
     size_t row_count;           /* up to PLAYER_UI_SAVES_ROW_CAP */
     size_t first_row;           /* the page's first backup, from 0 (the newest) */
     size_t total;               /* backups found */
+    size_t listed;              /* the newest of them listed, which the pages reach;
+                                   0 lists all of total */
     PlayerUiSavesAsk ask;
     size_t ask_row;             /* the row Restore asks about, on this page */
     const char *ask_name;       /* the save Add a save would replace */
@@ -1578,14 +1580,18 @@ void player_ui_nk_note_window_focus(PlayerUiNk *player, bool focused);
 /* Once per loop, whatever view shows: the launcher music follows its setting,
    whether a game is starting or running, and the window's focus (#2207). */
 void player_ui_nk_update_music(PlayerUiNk *player, PlayerApp *app);
-/* True when the launcher music holds no audio stream and no worker is decoding
-   the track: a game may start. True for a NULL player. */
+/* True when neither the launcher music nor the UI sounds hold an audio stream and
+   no worker is decoding the track: a game may start. True for a NULL player. */
 bool player_ui_nk_launcher_audio_closed(const PlayerUiNk *player);
+/* Whether the UI sounds hold an audio stream, for reports. */
+bool player_ui_nk_ui_sounds_hold_audio(const PlayerUiNk *player);
 /* The launcher music's state (PlayerUiMusicState) and its name, for reports. */
 int player_ui_nk_music_state(const PlayerUiNk *player);
 /* Whether the launcher music's worker is reading or decoding the track. */
 bool player_ui_nk_music_decoding(const PlayerUiNk *player);
 const char *player_ui_nk_music_state_name(const PlayerUiNk *player);
+/* Draws one launcher frame. False when it could not be drawn; *out_action still
+   holds an action the frame committed, which the caller applies either way. */
 bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                          struct SDL_Renderer *renderer,
                          struct SDL_Window *window,

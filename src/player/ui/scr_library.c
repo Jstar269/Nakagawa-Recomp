@@ -9,6 +9,7 @@
 
 #include "player_ui_nk.h"
 #include "nk_ui_widgets.h"
+#include "scr_shared.h"
 
 #include <stdio.h>
 #include <math.h>
@@ -76,40 +77,6 @@
 /* The library notice under the heading (two NK_UI_TYPE_BODY lines) and its gap. */
 #define LIBRARY_ID_NOTICE LIBRARY_ID(0x000026u)
 #define LIBRARY_NOTICE_ROW_HEIGHT (44.0f + NK_UI_SPACE_4)
-
-static NkUiSizing sizing_grow(void) {
-    NkUiSizing sizing = {NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
-    return sizing;
-}
-
-static NkUiSizing sizing_fit(void) {
-    NkUiSizing sizing = {NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
-    return sizing;
-}
-
-static NkUiSizing sizing_fixed(float value) {
-    NkUiSizing sizing = {NK_UI_SIZE_FIXED, value, 0.0f, 0.0f};
-    return sizing;
-}
-
-static NkUiLayout layout_make(NkUiLayoutDirection direction, NkUiSizing width,
-                              NkUiSizing height, float gap) {
-    NkUiLayout layout;
-    memset(&layout, 0, sizeof(layout));
-    layout.width = width;
-    layout.height = height;
-    layout.direction = direction;
-    layout.gap = gap;
-    return layout;
-}
-
-static PlayerUiAction action(PlayerUiActionKind kind, size_t title_index) {
-    PlayerUiAction result;
-    result.kind = kind;
-    result.primary = PLAYER_UI_PRIMARY_NONE;
-    result.title_index = title_index;
-    return result;
-}
 
 /* The library's side margin. Past LIBRARY_MAX_WIDTH of content the margins
    grow, so a wide window centres the heading, the grid and TEST THIS PC in one
@@ -306,10 +273,6 @@ size_t player_ui_library_grid_position(const PlayerUiLibraryModel *model, size_t
     return position;
 }
 
-static const char *safe_text(const char *text, const char *fallback) {
-    return text != NULL && text[0] != '\0' ? text : fallback;
-}
-
 static void library_prompts(NkUi *ui, bool has_titles, bool finding) {
     static const NkUiPromptItem with_titles[] = {
         {NK_UI_PROMPT_ACT_MOVE, "Move"},
@@ -351,7 +314,7 @@ bool player_ui_find_accepts(uint32_t codepoint, void *user) {
 static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *model,
                                        const UiKeyboardPad *pad) {
     const NkUiTheme *theme = nk_ui_theme(ui);
-    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u);
+    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
     NkUiLayout layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_fit(),
                                     NK_UI_SPACE_1);
     if (!nk_ui_begin_container(ui, LIBRARY_ID_FIND, &layout, NULL)) return result;
@@ -400,13 +363,16 @@ static PlayerUiAction library_find_box(NkUi *ui, const PlayerUiLibraryModel *mod
         view.pad = pad;
         switch (ui_keyboard_draw(ui, model->find_keyboard, &view)) {
         case UI_KEYBOARD_EDITED:
-            result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_EDITED);
+            result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_EDITED,
+                            PLAYER_UI_PRIMARY_NONE);
             break;
         case UI_KEYBOARD_DONE:
-            result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_DONE);
+            result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_DONE,
+                            PLAYER_UI_PRIMARY_NONE);
             break;
         case UI_KEYBOARD_CANCEL:
-            result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_CANCEL);
+            result = action(PLAYER_UI_ACTION_FIND_KEY, PLAYER_UI_FIND_CANCEL,
+                            PLAYER_UI_PRIMARY_NONE);
             break;
         default:
             break;
@@ -426,7 +392,7 @@ static PlayerUiAction library_empty(NkUi *ui, bool with_icon) {
     };
     static const NkUiShapeArt disc_art = {0.0f, 0.0f, 64.0f, 64.0f, disc, 3u};
     const NkUiTheme *theme = nk_ui_theme(ui);
-    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u);
+    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
     NkUiLayout wrap = layout_make(NK_UI_LAYOUT_ROW, sizing_grow(), sizing_grow(), 0.0f);
     wrap.align_x = NK_UI_ALIGN_CENTER;
     wrap.align_y = NK_UI_ALIGN_CENTER;
@@ -462,12 +428,12 @@ static PlayerUiAction library_empty(NkUi *ui, bool with_icon) {
             if (nk_ui_begin_container(ui, LIBRARY_ID_EMPTY_ACTIONS, &actions, NULL)) {
                 if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_EMPTY_WIZARD, "Start setup wizard",
                                  NK_UI_BUTTON_PRIMARY | NK_UI_BUTTON_LARGE)) {
-                    result = action(PLAYER_UI_ACTION_START_WIZARD, 0u);
+                    result = action(PLAYER_UI_ACTION_START_WIZARD, 0u, PLAYER_UI_PRIMARY_NONE);
                 }
                 /* Not a default: START SETUP WIZARD is the one default action. */
                 if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_EMPTY_ADD, "Choose a disc image",
                                  NK_UI_BUTTON_LARGE | NK_UI_BUTTON_NOT_DEFAULT)) {
-                    result = action(PLAYER_UI_ACTION_ADD_DISC, 0u);
+                    result = action(PLAYER_UI_ACTION_ADD_DISC, 0u, PLAYER_UI_PRIMARY_NONE);
                 }
                 nk_ui_end_container(ui);
             }
@@ -562,7 +528,7 @@ static bool library_demo_card(NkUi *ui, NkUiId id, const PlayerUiTitle *title, f
 static PlayerUiAction library_demos(NkUi *ui, const PlayerUiLibraryModel *model,
                                     float width, size_t columns) {
     const NkUiTheme *theme = nk_ui_theme(ui);
-    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u);
+    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
     size_t per_row = library_demos_per_row(columns);
     size_t demo_count = player_ui_library_demo_count(model->titles, model->title_count);
     size_t rows = library_demo_rows(demo_count, columns);
@@ -605,7 +571,7 @@ static PlayerUiAction library_demos(NkUi *ui, const PlayerUiLibraryModel *model,
             if (!model->titles[next].is_demo) continue;
             if (library_demo_card(ui, PLAYER_UI_ID_LIBRARY_ITEM(next), &model->titles[next],
                                   cell)) {
-                result = action(PLAYER_UI_ACTION_OPEN_TITLE, next);
+                result = action(PLAYER_UI_ACTION_OPEN_TITLE, next, PLAYER_UI_PRIMARY_NONE);
             }
             ++placed;
         }
@@ -669,7 +635,7 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                                         const PlayerUiLibraryModel *model) {
     const NkUiTheme *theme;
     NkUiLayout layout;
-    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u);
+    PlayerUiAction result = action(PLAYER_UI_ACTION_NONE, 0u, PLAYER_UI_PRIMARY_NONE);
     float width;
     float height;
     float gutter;
@@ -709,7 +675,7 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
     }
     {
         PlayerUiActionKind tab = player_ui_top_bar(ui, LIBRARY_ID_TOP, PLAYER_UI_ROUTE_LIBRARY);
-        if (tab != PLAYER_UI_ACTION_NONE) result = action(tab, 0u);
+        if (tab != PLAYER_UI_ACTION_NONE) result = action(tab, 0u, PLAYER_UI_PRIMARY_NONE);
     }
 
     layout = layout_make(NK_UI_LAYOUT_COLUMN, sizing_grow(), sizing_grow(), NK_UI_SPACE_4);
@@ -776,14 +742,14 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
             if (has_games && !model->find_open &&
                 nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_FIND, "Find",
                              NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
-                result = action(PLAYER_UI_ACTION_FIND_OPEN, 0u);
+                result = action(PLAYER_UI_ACTION_FIND_OPEN, 0u, PLAYER_UI_PRIMARY_NONE);
             }
             if (has_games && model->sort_label != NULL) {
                 char sort[64];
                 (void)snprintf(sort, sizeof(sort), "Sort: %s", model->sort_label);
                 if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_SORT, sort,
                                  NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
-                    result = action(PLAYER_UI_ACTION_CYCLE_SORT, 0u);
+                    result = action(PLAYER_UI_ACTION_CYCLE_SORT, 0u, PLAYER_UI_PRIMARY_NONE);
                 }
             }
             /* The check at start found a newer version: one quiet button, never a
@@ -865,7 +831,7 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                     if (nk_ui_button(ui, PLAYER_UI_ID_LIBRARY_PAGE_PREVIOUS, "Previous",
                                      NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT |
                                      (model->page_index == 0u ? NK_UI_BUTTON_DISABLED : 0u))) {
-                        result = action(PLAYER_UI_ACTION_PAGE_PREVIOUS, 0u);
+                        result = action(PLAYER_UI_ACTION_PAGE_PREVIOUS, 0u, PLAYER_UI_PRIMARY_NONE);
                     }
                     nk_ui_text_role(ui, LIBRARY_ID_PAGE_LABEL,
                                     nk_ui_caps(ui, safe_text(model->page_label, "More titles")),
@@ -874,7 +840,7 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                                      NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT |
                                      (model->page_index + 1u >= page_count
                                           ? NK_UI_BUTTON_DISABLED : 0u))) {
-                        result = action(PLAYER_UI_ACTION_PAGE_NEXT, 0u);
+                        result = action(PLAYER_UI_ACTION_PAGE_NEXT, 0u, PLAYER_UI_PRIMARY_NONE);
                     }
                     nk_ui_end_container(ui);
                 }
@@ -955,13 +921,14 @@ PlayerUiAction player_ui_screen_library(NkUi *ui,
                             tile.icon = title->cover != NULL ? title->cover : title->icon;
                             tile.width = tile_width;
                             if (nk_ui_tile(ui, PLAYER_UI_ID_LIBRARY_ITEM(index), &tile)) {
-                                result = action(PLAYER_UI_ACTION_OPEN_TITLE, index);
+                                result = action(PLAYER_UI_ACTION_OPEN_TITLE, index,
+                                                PLAYER_UI_PRIMARY_NONE);
                             }
                         } else if (nk_ui_add_tile(ui, PLAYER_UI_ID_LIBRARY_ADD,
                                                   "Add a disc image you own",
                                                   "Choose an .iso file",
                                                   tile_width, tile_height)) {
-                            result = action(PLAYER_UI_ACTION_ADD_DISC, 0u);
+                            result = action(PLAYER_UI_ACTION_ADD_DISC, 0u, PLAYER_UI_PRIMARY_NONE);
                         }
                     }
                     nk_ui_end_container(ui);
