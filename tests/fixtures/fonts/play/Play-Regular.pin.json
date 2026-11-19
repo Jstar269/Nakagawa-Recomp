@@ -1,0 +1,26 @@
+{
+  "schema": "font-pin/v1",
+  "family": "Play",
+  "file": "Play-Regular.ttf",
+  "sha256": "eed0da79005cab35d6ed0eacab594ed67cc643be0b2632fa9e440b3bc5078dc4",
+  "size_bytes": 199020,
+  "license": {
+    "spdx": "OFL-1.1",
+    "copyright": "Copyright (c) 2011, Jonas Hecksher, Playtypes, e-types AS (lasse@e-types.com), with Reserved Font Name 'Play', 'Playtype', 'Playtype Sans'.",
+    "license_text": "OFL.txt",
+    "license_text_sha256": "719b3041c6c476331750cd23ed4a153cbaf68dbaea893f1e5a08954cdbacbd1b",
+    "upstream_license_text_sha256": "6d216cec166b6e139adaa599053dd49720c053e1f2adb4845de3cc9c3704344d",
+    "upstream_license_text_url": "https://raw.githubusercontent.com/google/fonts/cc5661d43cd4f9aad5567033a8e15ca28dc35c86/ofl/play/OFL.txt",
+    "reserved_font_names": [
+      "Play",
+      "Playtype",
+      "Playtype Sans"
+    ]
+  },
+  "source": {
+    "url": "https://raw.githubusercontent.com/google/fonts/cc5661d43cd4f9aad5567033a8e15ca28dc35c86/ofl/play/Play-Regular.ttf",
+    "repository": "https://github.com/google/fonts",
+    "path": "ofl/play/Play-Regular.ttf",
+    "retrieved": "2026-11-19"
+  }
+}

@@ -340,7 +340,10 @@ No console font file is read by the build or the tests: the targets are the
 aggregate line widths, class averages and ink edges already recorded, and they
 are written into `tools/test_ttf2pgf.py`.
 
-**Latin: Liberation Sans and Liberation Serif 2.1.5.** Release
+**Latin: Liberation Sans and Liberation Serif 2.1.5.** Liberation draws the
+serif faces and the italic and bold italic sans-serif faces, and, through the
+converter's `--fallback` option, the characters the Play faces below lack.
+Release
 [`2.1.5`](https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5)
 (tag commit `4b0192046158094654e865245832c66d2104219e`), from its TTF tarball
 <https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz>,
@@ -377,7 +380,9 @@ widths of each Latin index. Liberation came closest on both the sentence and
 the menu line, carries all four styles in a sans-serif and a serif family, and
 covers the whole Latin repertoire below. No candidate has the console's
 capital-to-lowercase width ratio (1.28; Liberation Sans 1.38), so the per-face
-spacing balances the two lines.
+spacing balances the two lines. A later comparison by the width of each
+letter's ink (#1300) chose Play for the regular and bold sans-serif faces
+(below).
 
 Repertoire. The `--latin-cyrillic-text` set is a rule over public standards
 (#1300): every character of the Unicode blocks Basic Latin, Latin-1
@@ -386,7 +391,8 @@ and Letterlike Symbols and of the code pages Windows-1250, -1251, -1252, -1254
 and -1257, ISO 8859-16 and Mac Cyrillic that the face draws, without invisible
 format controls but with the soft hyphen. It is computed from each face's
 character map at conversion time; no list of characters is taken from a
-console font. Each of the eight faces gives the same 556 points, canonical
+console font. Each of the eight faces (a Play face together with its
+Liberation Sans fallback) gives the same 556 points, canonical
 SHA-256 `7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d`.
 `docs/cleanroom/PGF_CONVERTER_SPEC.md` gives the reason for each block and code
 page and for those left out. Until 2026-11-19 the set was the first set
@@ -398,16 +404,61 @@ console order (sans-serif regular, serif regular, sans-serif italic, serif
 italic, sans-serif bold, serif bold, sans-serif bold italic, serif bold
 italic), with the PGF style `Regular`, `Italic`, `Bold` or `Bold Italic`. The
 larger size is 20 ppem (nominal 648, 10.125 points at 128 dpi) and the smaller
-13 ppem (nominal 448), each with synthetic emboldening. Each index has its own
+13 ppem (nominal 448), each with synthetic emboldening; the Play faces are drawn
+one pixel larger (21 and 14 ppem) with the same nominal size, because Play's
+letters are smaller on the em than Liberation's. Each index has its own
 `--tracking`, and the sans-serif faces `--digit-advance` (tabular figures at
 the console's digit width) and `--embolden-y` (horizontal strokes as thick as
 the console's: its sans-serif letters carry 9 to 25 % more ink than the source
 faces draw without it). Both sizes set round letters' overshoots of less than
 3/8 px on the face's own baseline, x-height and cap height (`--snap-overshoot
-3`, #1300), and the bold sans-serif faces, already at the largest
-`--embolden-y`, take one sub-sample more `--embolden-x` than their strike.
-Every index's sentence and menu line then comes within 3 % of the console's,
-and each sans-serif face's mean ink per letter within 2 %.
+3`, #1300), and the bold italic sans-serif faces take more `--embolden-x`
+than their strike. Every
+index's sentence and menu line then comes within 3 % of the console's, and
+each sans-serif face's mean ink per letter within 2 %.
+
+**Latin: Play for the regular and bold sans-serif faces (#1300).** Play
+Regular draws `ltn0` and `ltn8` (`nkltn.pgf`, `nkltns.pgf`) and Play Bold
+draws `ltn4` and `ltn12` (`nkltn4.pgf`, `nkltn12.pgf`), chosen by the
+maintainer on 2026-11-19 after a comparison by the width of each letter's ink:
+Hot Shots Tennis places each letter one pixel after the previous letter's
+image, and Liberation Sans, whose letters are narrower for their advance than
+the console's, drew that game's dialog lines 8 to 11 % shorter than the
+console fonts do. Play is by Jonas Hecksher (Playtypes, e-types AS), from
+[`google/fonts`](https://github.com/google/fonts) at commit
+[`cc5661d43cd4f9aad5567033a8e15ca28dc35c86`](https://github.com/google/fonts/tree/cc5661d43cd4f9aad5567033a8e15ca28dc35c86/ofl/play),
+path `ofl/play/`; its `METADATA.pb` there names the designer, the licence `OFL`
+and the source repository `googlefonts/googlefontdirectory-hg` at commit
+`52f780bc9d197280a9f430574e179a5f233c56b6`. The two files in
+`tests/fixtures/fonts/play/` are byte-identical to that commit's:
+
+| Input | Size (bytes) | SHA-256 | Pin |
+| --- | ---: | --- | --- |
+| `Play-Regular.ttf` | 199,020 | `eed0da79005cab35d6ed0eacab594ed67cc643be0b2632fa9e440b3bc5078dc4` | `Play-Regular.pin.json` |
+| `Play-Bold.ttf` | 210,704 | `45c572eccda4cf335165b750345258e753035bf48ee2fdf37faa07c7db88bce0` | `Play-Bold.pin.json` |
+
+The licence is SIL OFL 1.1. Its copyright notice is `Copyright (c) 2011, Jonas
+Hecksher, Playtypes, e-types AS (lasse@e-types.com), with Reserved Font Name
+'Play', 'Playtype', 'Playtype Sans'.` The pins record those three Reserved
+Font Names; the PGFs are named `Nakagawa Open Latin` and their files
+`nkltn*.pgf`, which use none of them, and the converter refuses an output name
+that does. The upstream `OFL.txt` has SHA-256
+`6d216cec166b6e139adaa599053dd49720c053e1f2adb4845de3cc9c3704344d`; the local
+`tests/fixtures/fonts/play/OFL.txt`
+(`719b3041c6c476331750cd23ed4a153cbaf68dbaea893f1e5a08954cdbacbd1b`) removes
+one trailing space on line 21, without changing any wording.
+
+Play lacks 100 characters of the Latin text set: modifier letters of Spacing
+Modifier Letters, the spaces U+2000 to U+200A and U+202F, a few dashes, quotes,
+primes and punctuation of General Punctuation, and five letterlike symbols
+(U+2105, U+2113, U+2117, U+214D, U+214E). The converter's `--fallback` option
+draws those from Liberation Sans of the same weight (Regular for Play Regular,
+Bold for Play Bold), so each of the four fonts has the same 556 characters as
+the Liberation faces; its manifest lists them under `fallback.codes` with the
+Liberation face's digest and licence, and its licence copy (`nkltn-OFL.txt`
+and so on) carries Play's licence text and then Liberation's. Both faces are
+converted to PGF, scaled horizontally (`--scale-x`), emboldened and cut to
+their ink as the Liberation faces are; no glyph is edited by hand.
 
 The ink targets (`LETTER_INK` in `tools/test_ttf2pgf.py`) are one number per sans-serif face, measured on
 a PSP-3000's own font files, read locally; no font bytes or glyph data are recorded. To

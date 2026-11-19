@@ -76,15 +76,30 @@ KOREAN_FONT_DIR = ROOT / "tests" / "fixtures" / "fonts" / "gowundodum"
 KOREAN_FONT = KOREAN_FONT_DIR / "GowunDodum-Regular.ttf"
 KOREAN_PIN = KOREAN_FONT_DIR / "PIN.json"
 LIBERATION_DIR = ROOT / "tests" / "fixtures" / "fonts" / "liberation"
+PLAY_DIR = ROOT / "tests" / "fixtures" / "fonts" / "play"
 NOTO_JP_FONT = ROOT / "assets" / "fonts" / "ui" / "noto-sans-jp" / "NotoSansJP-Regular.ttf"
 NOTO_JP_PIN = ROOT / "tests" / "fixtures" / "fonts" / "notosansjp" / "PIN.json"
-#: The console's Latin index order within a size group (#2005): family, then style.
+#: The console's Latin index order within a size group (#2005): family, then style. The regular and
+#: bold sans-serif faces are Play (#1300), with Liberation Sans of the same weight for what Play lacks.
 LATIN_FACES = (
-    ("LiberationSans-Regular", "Regular"), ("LiberationSerif-Regular", "Regular"),
+    ("Play-Regular", "Regular"), ("LiberationSerif-Regular", "Regular"),
     ("LiberationSans-Italic", "Italic"), ("LiberationSerif-Italic", "Italic"),
-    ("LiberationSans-Bold", "Bold"), ("LiberationSerif-Bold", "Bold"),
+    ("Play-Bold", "Bold"), ("LiberationSerif-Bold", "Bold"),
     ("LiberationSans-BoldItalic", "Bold Italic"), ("LiberationSerif-BoldItalic", "Bold Italic"),
 )
+#: The fallback face of each Play face (``--fallback``).
+LATIN_FALLBACKS = {"Play-Regular": "LiberationSans-Regular", "Play-Bold": "LiberationSans-Bold"}
+
+
+def _latin_dir(stem: str) -> Path:
+    """The fixture folder of a Latin source face."""
+    return PLAY_DIR if stem.startswith("Play-") else LIBERATION_DIR
+
+
+def _latin_source(stem: str) -> tuple[bytes, ttf2pgf.SourcePin]:
+    """A Latin source face's bytes and pin."""
+    data = (_latin_dir(stem) / f"{stem}.ttf").read_bytes()
+    return data, load_pin(_latin_dir(stem) / f"{stem}.pin.json", data)
 
 DEFAULT_CODES = (0x20, 0x7E)
 PPEM_SHAPE = 16  # large enough that the source-owned H shape is unambiguous
@@ -1165,40 +1180,83 @@ class ProjectCodePointCoverageTests(unittest.TestCase):
         self.assertNotIn(0x2212, codes)
         self.assertFalse(set(range(0x0300, 0x0370)) & codes, "no combining marks")
 
-    def test_every_liberation_face_draws_the_same_latin_cyrillic_set(self) -> None:
-        license_text = (LIBERATION_DIR / "OFL.txt").read_text(encoding="utf-8")
+    @staticmethod
+    def _latin_faces_draw(stem: str):
+        """Whether the face, or the fallback face the build gives it, draws a code point."""
+        faces = [ttf2pgf._Ttf(_latin_source(name)[0]) for name in (stem, LATIN_FALLBACKS.get(stem)) if name]
+        return lambda code: any(face.glyph_id(code) is not None for face in faces)
+
+    def test_every_latin_face_draws_the_same_latin_cyrillic_set(self) -> None:
+        licenses = {LIBERATION_DIR: ("Liberation", (LIBERATION_DIR / "OFL.txt").read_text(encoding="utf-8")),
+                    PLAY_DIR: ("Play", (PLAY_DIR / "OFL.txt").read_text(encoding="utf-8"))}
         digests = set()
         for stem, _style in LATIN_FACES:
             with self.subTest(face=stem):
-                data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
-                pin = load_pin(LIBERATION_DIR / f"{stem}.pin.json", data)
-                self.assertEqual(pin.spdx, "OFL-1.1")
-                self.assertEqual(pin.license_text, license_text)
-                self.assertIn("Liberation", pin.reserved_font_names)
-                ttf2pgf.validate_output_name("Nakagawa Open Latin", pin)
-                font = ttf2pgf._Ttf(data)
-                points = ttf2pgf.latin_cyrillic_text_code_points(lambda code, font=font: font.glyph_id(code) is not None)
+                for name in (stem, LATIN_FALLBACKS.get(stem)):
+                    if name is None:
+                        continue
+                    _data, pin = _latin_source(name)
+                    reserved, license_text = licenses[_latin_dir(name)]
+                    self.assertEqual(pin.spdx, "OFL-1.1")
+                    self.assertEqual(pin.license_text, license_text)
+                    self.assertIn(reserved, pin.reserved_font_names)
+                    ttf2pgf.validate_output_name("Nakagawa Open Latin", pin)
+                points = ttf2pgf.latin_cyrillic_text_code_points(self._latin_faces_draw(stem))
                 self.assertTrue(set(range(0x20, 0x7F)) <= set(points.codes))
                 digests.add(points.sha256)
-        self.assertEqual(len(digests), 1, "every face of the build draws the same Latin text set")
+        self.assertEqual(digests, {"7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d"},
+                         "every face of the build draws the same Latin text set")
 
-    def test_latin_set_keeps_the_small_sans_glyph_box(self) -> None:
-        """#1300: Hot Shots Tennis places the second line of its dialogs from the font's glyph box.
-        A wider set whose wide or tall glyphs (Latin Extended-B digraphs, historic Cyrillic letters,
-        box drawing) grew the box moved that line; the set must leave the small sans face's box as
-        the Latin-1, Cyrillic and punctuation text set had it."""
-        stem = _makefile_flags("PROJECT_LATIN_0_FACE")[0]
-        data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
-        font = ttf2pgf._Ttf(data)
-        points = ttf2pgf.latin_cyrillic_text_code_points(lambda code: font.glyph_id(code) is not None)
-        tokens = _makefile_flags("PROJECT_LATIN_SMALL_STRIKE_ARGS") + _makefile_flags("PROJECT_LATIN_8_SPACING")
-        image = convert(data, input_path=f"{stem}.ttf", output_path="nkltns.pgf", code_points=points,
-                        font_name="Nakagawa Open Latin", font_type="Regular",
-                        pin=load_pin(LIBERATION_DIR / f"{stem}.pin.json", data), **_convert_arguments(tokens)).image
-        box = (struct.unpack_from("<i", image, 0xE0)[0], struct.unpack_from("<i", image, 0xE8)[0],
-               struct.unpack_from("<i", image, 0xEC)[0], struct.unpack_from("<2i", image, 0xF4),
-               struct.unpack_from("<2H", image, 0xFC))
-        self.assertEqual(box, (832, 11, 975, (896, 896), (14, 14)))
+    def test_play_faces_take_from_liberation_only_what_play_lacks(self) -> None:
+        """#1300: Play draws the letters of the regular and bold sans faces; Liberation Sans of the
+        same weight draws the 100 characters of the set that Play lacks (modifier letters, spaces of
+        General Punctuation, a few dashes, quotes and primes, and five letterlike symbols)."""
+        lacks = (set(range(0x02B0, 0x02BC)) | set(range(0x02BD, 0x02C6)) | {0x02C8} | set(range(0x02CA, 0x02D8))
+                 | set(range(0x02DE, 0x0300)) | set(range(0x2000, 0x200B))
+                 | {0x2010, 0x2012, 0x2015, 0x2016, 0x2017, 0x201B, 0x201F, 0x202F, 0x2032, 0x2033, 0x2034,
+                    0x203C, 0x203E, 0x205E, 0x2105, 0x2113, 0x2117, 0x214D, 0x214E})
+        self.assertEqual(len(lacks), 100)
+        for stem, fallback in LATIN_FALLBACKS.items():
+            with self.subTest(face=stem):
+                play = ttf2pgf._Ttf(_latin_source(stem)[0])
+                points = ttf2pgf.latin_cyrillic_text_code_points(self._latin_faces_draw(stem))
+                self.assertEqual({code for code in points.codes if play.glyph_id(code) is None}, lacks)
+                self.assertTrue(fallback.startswith("LiberationSans-"))
+                self.assertEqual(fallback.split("-")[1], stem.split("-")[1], "the fallback has the face's weight")
+
+    def test_latin_set_keeps_the_small_sans_glyph_box_height(self) -> None:
+        """#1300: Hot Shots Tennis places the second line of its dialogs from the height of the font's
+        glyph box. A wider set whose tall glyphs (historic Cyrillic letters, box drawing) grew the box
+        moved that line; the full set must leave the small sans faces' box as high as the Latin-1
+        text set (section 6.3 of the font origins), whose accented capitals set it. The widths grow
+        (the per mille sign is Play's widest glyph); the game spaces text by each glyph's own image."""
+        for index in (8, 12):
+            stem = _makefile_flags(f"PROJECT_LATIN_{index % 8}_FACE")[0]
+            with self.subTest(index=index):
+                data, pin = _latin_source(stem)
+                fallback = LATIN_FALLBACKS.get(stem)
+                extra: dict = {}
+                if fallback is not None:
+                    fallback_data, fallback_pin = _latin_source(fallback)
+                    extra = {"fallback_data": fallback_data, "fallback_path": f"{fallback}.ttf",
+                             "fallback_pin": fallback_pin}
+                tokens = _makefile_flags("PROJECT_LATIN_SMALL_STRIKE_ARGS") + _makefile_flags(
+                    f"PROJECT_LATIN_{index}_SPACING")
+                arguments = dict(input_path=f"{stem}.ttf", output_path="nkltns.pgf", font_name="Nakagawa Open Latin",
+                                 font_type=" ".join(_makefile_flags(f"PROJECT_LATIN_{index % 8}_STYLE")), pin=pin,
+                                 **_convert_arguments(tokens))
+                draws = self._latin_faces_draw(stem)
+                full = convert(data, code_points=ttf2pgf.latin_cyrillic_text_code_points(draws), **extra,
+                               **arguments).image
+                latin_1 = {code for code in ttf2pgf.latin_1_text_code_points().codes if draws(code)}
+                first = convert(data, code_points=_code_set(latin_1), **extra, **arguments).image
+
+                def height(image: bytes) -> tuple:
+                    # base_y, top_y, maximum height, glyph height.
+                    return (struct.unpack_from("<i", image, 0xE0)[0], struct.unpack_from("<i", image, 0xE8)[0],
+                            struct.unpack_from("<i", image, 0xF8)[0], struct.unpack_from("<H", image, 0xFE)[0])
+
+                self.assertEqual(height(full), height(first))
 
     def test_latin_set_refuses_a_face_without_ascii(self) -> None:
         with self.assertRaises(ttf2pgf.TtfConvertError) as caught:
@@ -1792,11 +1850,11 @@ class ProjectLatinStrikeTests(unittest.TestCase):
             strike = "PROJECT_LATIN_STRIKE_ARGS" if index < 8 else "PROJECT_LATIN_SMALL_STRIKE_ARGS"
             tokens = _makefile_flags(strike) + _makefile_flags(f"PROJECT_LATIN_{index}_SPACING")
             stem, style = cls._face(index)
-            data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
+            # Play draws every code of CODES, so the Play faces need no fallback here.
+            data, pin = _latin_source(stem)
             cls._cache[index] = convert(
                 data, input_path=f"{stem}.ttf", output_path="nkltn.pgf", code_points=_code_set(cls.CODES),
-                font_name="Nakagawa Open Latin", font_type=style,
-                pin=load_pin(LIBERATION_DIR / f"{stem}.pin.json", data), **_convert_arguments(tokens))
+                font_name="Nakagawa Open Latin", font_type=style, pin=pin, **_convert_arguments(tokens))
         return cls._cache[index]
 
     @staticmethod
@@ -1891,7 +1949,7 @@ class ProjectLatinStrikeTests(unittest.TestCase):
                 self.assertEqual(self._ink_rows(glyphs[ord("H")])[0], cap, "cap-height row")
 
     def test_the_ellipsis_sits_on_the_line_of_the_full_stop(self) -> None:
-        # No strike passes --baseline-ellipsis: every Liberation face already draws U+2026 there.
+        # No strike passes --baseline-ellipsis: every Play and Liberation face already draws U+2026 there.
         for index in range(16):
             with self.subTest(index=index):
                 glyphs = _glyph_map(self._convert(index).glyphs)
@@ -1920,11 +1978,72 @@ class ProjectLatinStrikeTests(unittest.TestCase):
                 arguments = _convert_arguments(_makefile_flags(strike) + _makefile_flags(f"PROJECT_LATIN_{index}_SPACING"))
                 self.assertEqual(arguments.pop("snap_overshoot"), 3)
                 stem, style = self._face(index)
-                data = (LIBERATION_DIR / f"{stem}.ttf").read_bytes()
+                data = _latin_source(stem)[0]
                 plain = convert(data, input_path=f"{stem}.ttf", output_path="nkltn.pgf",
                                 code_points=_code_set({ord("l")} | set(range(0x30, 0x3A))), font_type=style,
                                 **arguments)
                 self.assertEqual(glyphs[ord("l")], _glyph_map(plain.glyphs)[ord("l")])
+
+
+class LatinSourceCreditTests(unittest.TestCase):
+    """#1300: every source face the build converts into a Latin stand-in, its fallback face included,
+    is credited where the project credits font sources: the family, its Reserved Font Names, and
+    for the Google Fonts faces the pinned revision; and it is an approved pinned binary of the
+    release manifest with its digest."""
+
+    @staticmethod
+    def _sources() -> set[str]:
+        stems = set()
+        for group in range(8):
+            stems.add(_makefile_flags(f"PROJECT_LATIN_{group}_FACE")[0])
+            if re.search(rf"^PROJECT_LATIN_{group}_FALLBACK := ", read_makefile(ROOT), re.MULTILINE):
+                stems.add(_makefile_flags(f"PROJECT_LATIN_{group}_FALLBACK")[0])
+        return stems
+
+    def test_the_build_uses_play_with_liberation_sans_fallbacks(self) -> None:
+        sources = self._sources()
+        self.assertTrue({"Play-Regular", "Play-Bold", "LiberationSans-Regular", "LiberationSans-Bold"} <= sources)
+        readme = (ROOT / "font" / "README.md").read_text(encoding="utf-8").splitlines()
+        for stem, fallback in LATIN_FALLBACKS.items():
+            group = next(index for index, (face, _style) in enumerate(LATIN_FACES) if face == stem)
+            self.assertEqual(_makefile_flags(f"PROJECT_LATIN_{group}_FALLBACK"), [fallback])
+            # font/README.md's "Made from" column names the face and its fallback for the file.
+            output = "nkltn.pgf" if group == 0 else f"nkltn{group}.pgf"
+            row = next(line for line in readme if line.startswith(f"| `{output}`") or f", `{output}` |" in line)
+            self.assertIn(stem.replace("-", " "), row)
+            self.assertIn(fallback.split("-")[0].replace("Sans", " Sans"), row)
+
+    def test_every_latin_source_is_credited_and_an_approved_binary(self) -> None:
+        texts = {path: (ROOT / path).read_text(encoding="utf-8") for path in (
+            "CREDITS.md", "NOTICE.md", "docs/provenance/FONT_ORIGINS.md", "font/README.md",
+            "tests/fixtures/fonts/README.md")}
+        components = {item["source_path"]: item for item in json.loads(
+            (ROOT / "assets" / "release_manifest.json").read_text(encoding="utf-8"))["components"]
+            if "source_path" in item}
+        for stem in sorted(self._sources()):
+            with self.subTest(face=stem):
+                data, pin = _latin_source(stem)
+                record = json.loads((_latin_dir(stem) / f"{stem}.pin.json").read_text(encoding="utf-8"))
+                family = record["family"]
+                for path, text in texts.items():
+                    self.assertRegex(text, rf"\b{re.escape(family)}\b", f"{path} names {family}")
+                for path in ("CREDITS.md", "NOTICE.md"):
+                    for name in pin.reserved_font_names:
+                        self.assertIn(name, texts[path], f"{path} names the Reserved Font Name {name}")
+                self.assertIn(record["sha256"], texts["docs/provenance/FONT_ORIGINS.md"])
+                url = record["source"]["url"]
+                if "/google/fonts/" in url:
+                    revision = url.split("/google/fonts/")[1].split("/")[0]
+                    for path in ("CREDITS.md", "NOTICE.md", "docs/provenance/FONT_ORIGINS.md"):
+                        self.assertIn(revision, texts[path], f"{path} gives the pinned revision")
+                relative = (_latin_dir(stem) / f"{stem}.ttf").relative_to(ROOT).as_posix()
+                component = components.get(relative)
+                self.assertIsNotNone(component, f"assets/release_manifest.json lists {relative}")
+                assert component is not None
+                self.assertEqual(component["disposition"], "approved_binary")
+                self.assertEqual(component["license"], pin.spdx)
+                self.assertEqual(component["notice_path"], (_latin_dir(stem) / "OFL.txt").relative_to(ROOT).as_posix())
+                self.assertEqual(component["hashes"]["sha256"], hashlib.sha256(data).hexdigest())
 
 
 class InkTrimTests(unittest.TestCase):

@@ -177,8 +177,9 @@ Left out, with the reason:
 | Mathematical Operators, Arrows, Number Forms | Not text characters. Hot Shots Tennis writes the minus sign U+2212 in its dialog and draws its own character where the font has none. |
 | Mac Roman, KOI8-R, CP866 | Their integral, box-drawing and block characters are taller than any letter (the glyph box again). |
 
-With each Liberation face of the build the set has 556 points, the same for all
-eight faces (canonical SHA-256
+With each face of the build (Liberation, or Play with its Liberation Sans
+`--fallback`, which the set's `draws` test counts) the set has 556 points, the
+same for all eight faces (canonical SHA-256
 `7eb9461a9b5e1012ff653746e9b0e3ff7947b8d51b27cc9fa224003a1705647d`); the
 manifest records the set's digest and source `builtin:latin-text-blocks`.
 
@@ -357,7 +358,10 @@ manifest in memory first and writes only after every stage succeeds.
     largest of those overshoots is 0.30 px at 20 ppem, under 3/8, and the
     nearest flat height that is not an overshoot, the top of Liberation
     Sans `f` 73 units above the cap height, is 0.46 px at 13 ppem, over 3/8,
-    so ascenders keep their own height. The rule does not tell an overshoot
+    so ascenders keep their own height. The Play faces (#1300), drawn at 21
+    and 14 ppem with the same `N`, set their round letters on the same rows
+    as their flat ones too, with `l` as drawn without the option
+    (`tools/test_ttf2pgf.py`). The rule does not tell an overshoot
     from a small deliberate excursion: at 13 ppem the extremes of `/`, `\`,
     `ø`, `Ø`, `§`, `∞`, `ƒ`, `@`, `×`, `÷`, the fractions `¼` and `¾`, and
     the spur of Liberation Serif `q`, which lie within 3/8 px of an edge,
@@ -375,13 +379,13 @@ manifest in memory first and writes only after every stage succeeds.
     multiplied the same way before rule 1. `y`, and so every row, is
     untouched, and at 1000 the output is byte-identical to a conversion
     without the option. Rule 7's digit centring uses the scaled advance.
-    *Project decision* (#1300): the sans-serif stand-ins are Liberation Sans,
-    whose letters at the console's sizes come out narrower than the console
-    fonts' and spaced looser to keep the console's line lengths. A small
-    horizontal scale moves ink from the gaps into the letters without a new
-    source face; the project's parameters were tuned against a private
-    comparison with the console's own fonts, and only those parameters are
-    recorded.
+    *Project decision* (#1300): the sans-serif stand-ins (Play for the
+    regular and bold styles, Liberation Sans for the italic ones) have letters
+    that at the console's sizes come out narrower than the console fonts' and
+    spaced looser to keep the console's line lengths. A horizontal scale moves
+    ink from the gaps into the letters; the project's parameters were tuned
+    against a private comparison with the console's own fonts, and only those
+    parameters are recorded.
 15. **Ink trim** (always on, from converter 0.7.0). After rule 6, each glyph
     image is cut to the columns and rows that hold a nonzero sample: the
     empty columns at its left and right and the empty rows at its top and

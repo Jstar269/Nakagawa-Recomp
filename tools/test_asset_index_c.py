@@ -3,8 +3,10 @@
 
 """Host-neutral regression for the dynamic extracted-asset index."""
 
+import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -213,6 +215,88 @@ class TestProjectFontBuildWiring(unittest.TestCase):
             self.assertIn(f"project-{target}-font", makefile)
         self.assertIn("project-fonts: $(PROJECT_FONT_SLOT_TARGETS)", makefile)
         self.assertIn("compile: | project-fonts", makefile)
+
+
+class TestProjectFontPackageContents(unittest.TestCase):
+    """#1300: the package's font folder holds what the player's slots use and nothing else, and the
+    notices name every source font a shipped font draws from, and no other.
+
+    The release stages ``bin/font`` with ``tools/copy_build_assets.ps1 -ExcludeOptionalFonts``
+    (``.github/workflows/provenance-attestation.yml``), which copies exactly the names of its list;
+    ``font/README.md`` and the pinned source fonts are not copied."""
+
+    @staticmethod
+    def _staged() -> list[str]:
+        script = (ROOT / "tools" / "copy_build_assets.ps1").read_text(encoding="utf-8")
+        block = script.split("foreach ($name in @(", 1)[1].split("))", 1)[0]
+        return re.findall(r"'([^']+)'", block)
+
+    @staticmethod
+    def _variable(makefile: str, name: str) -> str:
+        match = re.search(rf"^{name} := (.+)$", makefile, re.MULTILINE)
+        assert match is not None, name
+        return match.group(1).strip()
+
+    def _slot_sources(self) -> dict[str, list[str]]:
+        """Each generated PGF and the source font files the Makefile converts into it, fallback first-class."""
+        makefile = read_makefile(ROOT)
+        folders = {"$(LIBERATION)": self._variable(makefile, "LIBERATION"),
+                   "$(PLAY)": self._variable(makefile, "PLAY")}
+        sources: dict[str, list[str]] = {}
+        for output, group in re.findall(r"PROJECT_LATIN_FACE_RULE,\d+,[\w-]+,(nk\w+\.pgf),(\d+),", makefile):
+            folder = folders[self._variable(makefile, f"PROJECT_LATIN_{group}_DIR")]
+            files = [f"{folder}/{self._variable(makefile, f'PROJECT_LATIN_{group}_FACE')}.ttf"]
+            if re.search(rf"^PROJECT_LATIN_{group}_FALLBACK := ", makefile, re.MULTILINE):
+                files.append(f"{folders['$(LIBERATION)']}/{self._variable(makefile, f'PROJECT_LATIN_{group}_FALLBACK')}.ttf")
+            sources[output] = files
+        sources["nkjpn.pgf"] = [f"{self._variable(makefile, 'NOTO_SANS_JP')}/NotoSansJP-Regular.ttf",
+                                "tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf"]
+        korean = re.search(r"PROJECT_FONT_RULE,korean,(nk\w+\.pgf),([^,]+\.ttf),", makefile)
+        assert korean is not None
+        sources[korean.group(1)] = [korean.group(2)]
+        return sources
+
+    def test_the_package_ships_each_slot_font_with_its_manifest_and_licence_and_nothing_else(self):
+        sources = self._slot_sources()
+        # The runtime's eighteen slot files (src/core/nk_font.c and nk_font_slots.h).
+        runtime = (ROOT / "src" / "core" / "nk_font.c").read_text(encoding="utf-8")
+        slots = (ROOT / "src" / "core" / "nk_font_slots.h").read_text(encoding="utf-8")
+        named = set(re.findall(r'"(nk\w+\.pgf)"', runtime)) | set(re.findall(r'"(nk\w+\.pgf)"', slots))
+        self.assertEqual(set(sources), named)
+        self.assertEqual(len(sources), 18)
+        expected = {f"{Path(name).stem}{suffix}" for name in sources for suffix in (".pgf", ".json", "-OFL.txt")}
+        staged = self._staged()
+        self.assertEqual(len(staged), len(set(staged)), "a name is staged twice")
+        self.assertEqual(set(staged), expected)
+
+    def test_the_notices_name_exactly_the_sources_of_the_shipped_fonts(self):
+        used = {Path(path).parent.as_posix() for files in self._slot_sources().values() for path in files}
+        notice = (ROOT / "NOTICE.md").read_text(encoding="utf-8")
+        entry = notice.split("**Stand-in PSP font sources", 1)[1].split("\n- **", 1)[0]
+        named = set(re.findall(r"`(tests/fixtures/fonts/[\w-]+)/`", entry))
+        # Noto Sans JP is the project UI font, credited under "Project UI fonts" in NOTICE.md.
+        self.assertEqual(named | {"assets/fonts/ui/noto-sans-jp"}, used)
+        for files in self._slot_sources().values():
+            for path in files:
+                pin = Path(path).with_suffix(".pin.json")
+                if not (ROOT / pin).is_file():
+                    pin = Path(path).parent / "PIN.json"
+                if not (ROOT / pin).is_file():
+                    continue  # Noto Sans JP: its pin is tests/fixtures/fonts/notosansjp/PIN.json.
+                family = json.loads((ROOT / pin).read_text(encoding="utf-8"))["family"]
+                family = {"M PLUS 1p": "M+ 1p"}.get(family, family)
+                self.assertIn(family, entry, f"NOTICE.md names {family}, a source of a shipped font")
+
+    def test_a_font_drawn_from_two_sources_ships_both_licences(self):
+        makefile = read_makefile(ROOT)
+        rule = makefile.split("define PROJECT_FALLBACK_FONT_RULE", 1)[1].split("endef", 1)[0]
+        # The licence copy is the first source's licence text and then the fallback's.
+        self.assertIn("('$(5)', '$(12)')", rule)
+        self.assertIn("-OFL.txt').write_text('$(13):", rule)
+        self.assertIn("$(14) (the characters $(13) lacks)", rule)
+        self.assertIn("$(LIBERATION)/OFL.txt,Play,Liberation Sans)", makefile)
+        japanese = makefile.split("$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf:", 1)[1].split("\n$(eval", 1)[0]
+        self.assertIn("'$(NOTO_SANS_JP)/OFL.txt', 'tests/fixtures/fonts/mplus1p/OFL.txt'", japanese)
 
 
 @unittest.skipUnless(POWERSHELL, "PowerShell is required to exercise tools/copy_build_assets.ps1")

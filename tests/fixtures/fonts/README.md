@@ -36,6 +36,7 @@ for the full contract, including why generated PGFs are never committed here:
 | Liberation Sans and Liberation Serif | `liberation/Liberation{Sans,Serif}-{Regular,Italic,Bold,BoldItalic}.ttf` | OFL-1.1 | `Arimo`, `Tinos`, `Cousine`, `Liberation` |
 | M PLUS 1p | `mplus1p/MPLUS1p-Regular.ttf` | OFL-1.1 | none declared |
 | Noto Sans JP | `../../../assets/fonts/ui/noto-sans-jp/NotoSansJP-Regular.ttf` (pin in `notosansjp/`) | OFL-1.1 | `Source` |
+| Play | `play/Play-{Regular,Bold}.ttf` | OFL-1.1 | `Play`, `Playtype`, `Playtype Sans` |
 
 Noto Sans JP is the project Japanese build input (#2005). The
 `--japanese-text` set is all of JIS X 0208 (rows 1-8 and the 6,355 kanji of
@@ -47,19 +48,26 @@ points. Noto Sans JP draws all but 341, U+2252 among them, which M PLUS 1p
 draws through the converter's `--fallback` option. The Japanese font is built at 18 ppem with the console's
 10.125-point nominal size.
 
-Liberation Sans and Liberation Serif (release 2.1.5) are the project Latin
-build inputs (#2005): one face for each of the console's eight Latin styles,
-at each of its two sizes. They are byte-identical to the release tarball
-recorded in each pin. Their `--latin-cyrillic-text` set, the Latin text rule
+Liberation Sans and Liberation Serif (release 2.1.5) and Play are the project
+Latin build inputs (#2005, #1300): one face for each of the console's eight
+Latin styles, at each of its two sizes. Play Regular and Play Bold draw the
+regular and bold sans-serif styles, with Liberation Sans Regular and Bold
+drawing, through `--fallback`, the 100 characters of the set Play lacks;
+Liberation draws the other six styles. The Liberation files are
+byte-identical to the release tarball recorded in each pin, and the Play
+files to the immutable Google Fonts commit recorded in theirs; the adjacent
+`play/OFL.txt` is that commit's licence text with one trailing space removed.
+Their `--latin-cyrillic-text` set, the Latin text rule
 over Unicode blocks and code pages of `docs/cleanroom/PGF_CONVERTER_SPEC.md`
 computed from each face's character map, has the same 556 points for every
 face (ASCII, Latin-1, Latin Extended-A, the punctuation and symbols of text,
-and the Cyrillic alphabets). The larger size is built at 20 ppem and the smaller at 13 ppem,
+and the Cyrillic alphabets). The larger size is built at 20 ppem and the smaller at 13 ppem
+(Play at 21 and 14 ppem),
 with the converter's synthetic emboldening and a per-face tracking (and, for
 the sans-serif faces, tabular digits) chosen so that each face's line widths
 come within 3 % of the console font it stands in for. The sans-serif faces also
-thicken horizontal strokes (`--embolden-y`), so that a letter carries the ink
-of the console's within 4 % (#1300).
+thicken horizontal strokes where they need it (`--embolden-y`), so that a
+letter carries the ink of the console's within 2 % (#1300).
 
 M PLUS 1p was the first project Japanese build input. Its pin uses the immutable
 Google Fonts commit recorded in `mplus1p/PIN.json`; the adjacent `OFL.txt`

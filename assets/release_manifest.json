@@ -1090,6 +1090,42 @@
       "comment": "Retrieved from google/fonts ofl/mplus1p/MPLUS1p-Regular.ttf at d714b17ce2379f06daf6295617f961df605dccb5; byte-identical pinned source that draws the 341 characters of the Japanese text set Noto Sans JP lacks (U+2252 among them) in the build-time project Japanese PGF (#2005, #1300). Shipped beside its OFL license text."
     },
     {
+      "id": "fixture-fonts-play-bold",
+      "name": "Pinned permissively redistributable Latin font source: Play-Bold.ttf",
+      "source_path": "tests/fixtures/fonts/play/Play-Bold.ttf",
+      "type": "asset",
+      "relationship": "CONTAINS",
+      "presence": "required",
+      "upstream_origin": "https://github.com/google/fonts",
+      "license": "OFL-1.1",
+      "notice_path": "tests/fixtures/fonts/play/OFL.txt",
+      "disposition": "approved_binary",
+      "public_scope_included": true,
+      "optional": false,
+      "hashes": {
+        "sha256": "45c572eccda4cf335165b750345258e753035bf48ee2fdf37faa07c7db88bce0"
+      },
+      "comment": "Retrieved from google/fonts ofl/play/Play-Bold.ttf at cc5661d43cd4f9aad5567033a8e15ca28dc35c86; byte-identical pinned source for the build-time project Latin PGFs of the bold sans-serif slots ltn4 and ltn12 (#1300). Shipped beside its OFL license text."
+    },
+    {
+      "id": "fixture-fonts-play-regular",
+      "name": "Pinned permissively redistributable Latin font source: Play-Regular.ttf",
+      "source_path": "tests/fixtures/fonts/play/Play-Regular.ttf",
+      "type": "asset",
+      "relationship": "CONTAINS",
+      "presence": "required",
+      "upstream_origin": "https://github.com/google/fonts",
+      "license": "OFL-1.1",
+      "notice_path": "tests/fixtures/fonts/play/OFL.txt",
+      "disposition": "approved_binary",
+      "public_scope_included": true,
+      "optional": false,
+      "hashes": {
+        "sha256": "eed0da79005cab35d6ed0eacab594ed67cc643be0b2632fa9e440b3bc5078dc4"
+      },
+      "comment": "Retrieved from google/fonts ofl/play/Play-Regular.ttf at cc5661d43cd4f9aad5567033a8e15ca28dc35c86; byte-identical pinned source for the build-time project Latin PGFs of the regular sans-serif slots ltn0 and ltn8 (#1300). Shipped beside its OFL license text."
+    },
+    {
       "id": "readme-hst-title-screen",
       "name": "README presentation screenshot: Hot Shots Tennis title screen",
       "type": "asset",
