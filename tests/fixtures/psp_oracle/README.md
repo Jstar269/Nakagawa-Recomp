@@ -885,7 +885,13 @@ launched case without a clean completion, or a failed soft reset, waits for a
 new qualified boot. The checkpoint also records whether
 the `transport-write` preflight qualified host0; a campaign resumes past the
 preflight only when it did, and an interrupted preflight resumes at
-`transport-write`. Interrupted cases accumulate in `interrupted_cases`.
+`transport-write`. Interrupted cases accumulate in `interrupted_cases`, and the
+last one is kept in `failed_case_id` across resumes. That includes a case whose
+launch was recorded but whose host process ended before any completion record.
+A campaign with such a case never ends `COMPLETE`: once the queue has been
+walked, the checkpoint stays `IN_PROGRESS`, the run exits 2, and a later run
+reports `INCOMPLETE` without starting the transport. Each case after the first
+gets its soft reset before launch, in a resumed run too.
 
 The runner waits for each case's host0 log until the probe appends its
 completion marker, which every probe writes after its last record. A slow stream

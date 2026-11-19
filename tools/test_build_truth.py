@@ -950,6 +950,170 @@ class PortableCoreSourceSetTests(unittest.TestCase):
         self.assertEqual(entries, self.EXPECTED_PORTABLE_SRCS)
 
 
+class PortableCoreProfileTests(unittest.TestCase):
+    """A portable-core object is rebuilt when its compiler or flags change, not only its source.
+
+    The portability gate compiles these objects with PORTABLE_CORE_CFLAGS, which no runtime
+    profile stamp covers; without a stamp of its own a rerun with other flags passed on the
+    objects of the first run without compiling anything."""
+
+    def setUp(self) -> None:
+        self.make = shutil.which("mingw32-make") or shutil.which("make")
+        if not self.make or not shutil.which("gcc"):
+            self.skipTest("GNU Make and gcc are required")
+        self.build_root = _scratch_build_root(self, "portable-core-profile")
+        self.object = (self.build_root / "probe" / "portable-core" / "sr_coro.o").as_posix()
+
+    def _compiles(self, *assignments: str) -> bool:
+        proc = _run_scratch_make(
+            cast(str, self.make), "CC=gcc", "GAME_NAME=probe", *assignments, self.object,
+            build_root=self.build_root, log_dir=self.build_root.parent / "logs",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return "-c src/rt/sr_coro.c" in proc.stdout
+
+    def test_changed_flags_rebuild_and_unchanged_flags_do_not(self) -> None:
+        self.assertTrue(self._compiles())
+        self.assertFalse(self._compiles(), "an unchanged profile recompiled the object")
+        self.assertTrue(self._compiles("GE_FRONTEND_PROFILE=1"),
+                        "a changed PORTABLE_CORE_CFLAGS reused the object built without it")
+        self.assertFalse(self._compiles("GE_FRONTEND_PROFILE=1"))
+        self.assertTrue(self._compiles(), "returning to the first flags reused the other object")
+
+
+class BuildIdentityTests(unittest.TestCase):
+    """SOURCE_DATE_EPOCH and the source commit reach the programs that embed them."""
+
+    def setUp(self) -> None:
+        self.make = shutil.which("mingw32-make") or shutil.which("make")
+        if not self.make:
+            self.skipTest("GNU Make is required")
+        self.build_root = _scratch_build_root(self, "build-identity")
+
+    def _probe(self, *assignments: str) -> subprocess.CompletedProcess:
+        return _run_scratch_make(
+            cast(str, self.make), "GAME_NAME=probe", *assignments, "--eval",
+            "nkprobe: ; @echo EPOCH=[$(SR_SOURCE_DATE_EPOCH)] PLAYER=[$(NK_PLAYER_BUILD_EPOCH)]"
+            " COMMIT=[$(NK_PLAYER_BUILD_COMMIT)] STAMP=[$(notdir $(PLAYER_IDENTITY_STAMP))]",
+            "nkprobe", build_root=self.build_root, log_dir=self.build_root.parent / "logs",
+        )
+
+    def test_a_command_line_source_date_epoch_is_accepted(self) -> None:
+        # Make before 4.4 hands no exported variable to $(shell), so a check that read the
+        # value back from the environment refused this valid value there.
+        proc = self._probe("SOURCE_DATE_EPOCH=1700000000", "SR_SOURCE_COMMIT=0123456789abcdef")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("EPOCH=[1700000000] PLAYER=[1700000000] COMMIT=[0123456] "
+                      "STAMP=[.player-identity-0123456-1700000000]", proc.stdout)
+
+    def test_a_source_date_epoch_that_is_not_decimal_is_refused(self) -> None:
+        for value in ("17e8", "-1", "0x10", "12 34"):
+            with self.subTest(value=value):
+                proc = self._probe(f"SOURCE_DATE_EPOCH={value}")
+                self.assertNotEqual(proc.returncode, 0, proc.stdout)
+                self.assertIn("SOURCE_DATE_EPOCH must be a decimal Unix timestamp", proc.stderr)
+
+    def test_the_player_and_its_ui_test_depend_on_their_identity_stamp(self) -> None:
+        database = _run_scratch_make(
+            cast(str, self.make), "-p", "-q", "GAME_NAME=probe", "SOURCE_DATE_EPOCH=1700000000",
+            "SR_SOURCE_COMMIT=0123456789abcdef", "--eval", "nkprobe: ;", "nkprobe",
+            build_root=self.build_root, log_dir=self.build_root.parent / "logs",
+        ).stdout
+        for exe in ("nakagawa_player", "nakagawa_player_ui_test"):
+            with self.subTest(exe=exe):
+                rules = [line for line in database.splitlines()
+                         if re.match(rf"^\S*/{exe}(\.exe)?:(?!=)", line)]
+                self.assertTrue(any("/.player-identity-0123456-1700000000" in line for line in rules),
+                                f"{exe} does not relink when the commit or date it embeds changes")
+
+    def test_the_identity_stamp_replaces_the_previous_one(self) -> None:
+        for commit in ("aaaaaaa1", "bbbbbbb2"):
+            stamp = self.build_root / f".player-identity-{commit[:7]}-1700000000"
+            proc = _run_scratch_make(
+                cast(str, self.make), "GAME_NAME=probe", "SOURCE_DATE_EPOCH=1700000000",
+                f"SR_SOURCE_COMMIT={commit}", stamp.as_posix(),
+                build_root=self.build_root, log_dir=self.build_root.parent / "logs",
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(sorted(p.name for p in self.build_root.glob(".player-identity-*")),
+                         [".player-identity-bbbbbbb-1700000000"])
+
+
+class H264WrapperWarningTests(unittest.TestCase):
+    """nk_h264_api.c is project-authored (src/rt/h264_ffmpeg_sub/PROVENANCE.md), so it compiles
+    under the project warning set; only the imported FFmpeg units take -w."""
+
+    def test_only_the_imported_units_are_compiled_with_w(self) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required")
+        build_root = _scratch_build_root(self, "h264-warnings")
+        commands = {}
+        for stem in ("nk_h264_api", "libavutil/log2_tab"):
+            obj = (build_root / "probe" / f"h264sub_{stem}.o").as_posix()
+            proc = _run_scratch_make(
+                make, "-n", "CC=gcc", "GAME_NAME=probe", "H264_FFMPEG=1", obj,
+                build_root=build_root, log_dir=build_root.parent / "logs",
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            line = next((text for text in proc.stdout.splitlines()
+                         if f"-c src/rt/h264_ffmpeg_sub/{stem}.c" in text), "")
+            self.assertTrue(line, proc.stdout)
+            commands[stem] = line.split()
+        self.assertNotIn("-w", commands["nk_h264_api"], "the authored wrapper's warnings are off")
+        self.assertIn("-Wall", commands["nk_h264_api"])
+        self.assertIn("-w", commands["libavutil/log2_tab"])
+        for flag in ("-std=c11", "-DHAVE_AV_CONFIG_H", "-include"):
+            self.assertIn(flag, commands["nk_h264_api"])
+
+
+class LibchdrHeaderDependencyTests(unittest.TestCase):
+    """A header-only change to libchdr (a re-pin or a local delta of chd.h) rebuilds the archive
+    and the programs that compile nk_disc_chd.c against it, instead of linking objects built
+    against the old chd_header layout."""
+
+    HEADER = "third_party/libchdr/include/libchdr/chd.h"
+
+    def setUp(self) -> None:
+        self.make = shutil.which("mingw32-make") or shutil.which("make")
+        if not self.make or not shutil.which("gcc"):
+            self.skipTest("GNU Make and gcc are required")
+        self.build_root = _scratch_build_root(self, "libchdr-headers")
+
+    def _make(self, *arguments: str) -> subprocess.CompletedProcess:
+        return _run_scratch_make(
+            cast(str, self.make), "CC=gcc", "GAME_NAME=probe", *arguments,
+            build_root=self.build_root, log_dir=self.build_root.parent / "logs",
+        )
+
+    def test_a_libchdr_object_is_rebuilt_when_a_header_it_read_changes(self) -> None:
+        obj = (self.build_root / "libchdr" / "libchdr_chd.o").as_posix()
+        built = self._make(obj)
+        self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+        # libchdr_chd.c includes "../include/libchdr/chd.h", so the dependency file names the
+        # header in that spelling; -W must use the same name to pretend it is newer, which it
+        # does without touching the checkout's file.
+        depfile = Path(obj).with_suffix(".d")
+        self.assertTrue(depfile.is_file(), "the libchdr object recorded no header dependencies")
+        spelled = [word for word in depfile.read_text(encoding="utf-8").split()
+                   if word.endswith("include/libchdr/chd.h")]
+        self.assertTrue(spelled, depfile.read_text(encoding="utf-8"))
+        what_if = self._make("-n", f"-W{spelled[0]}", obj)
+        self.assertEqual(what_if.returncode, 0, what_if.stdout + what_if.stderr)
+        self.assertIn("-c third_party/libchdr/src/libchdr_chd.c", what_if.stdout,
+                      "a changed chd.h left the object built against the old header")
+
+    def test_the_programs_that_compile_the_chd_backend_list_libchdr_headers(self) -> None:
+        database = self._make("-p", "-q", "--eval", "nkprobe: ;", "nkprobe")
+        for exe in ("nakagawa_player", "nakagawa_player_ui_test"):
+            with self.subTest(exe=exe):
+                rules = [line for line in database.stdout.splitlines()
+                         if re.match(rf"^\S*/{exe}(\.exe)?:(?!=)", line)]
+                self.assertTrue(rules, f"no rule for {exe} in the database")
+                self.assertTrue(any(self.HEADER in line for line in rules),
+                                f"{exe} does not depend on {self.HEADER}")
+
+
 def _link_defines_nested_frame_stubs(text: str) -> bool:
     """True when a source named on the link line defines the nested-frame API itself.
 
@@ -1432,6 +1596,52 @@ class CodegenProfileTransportTests(unittest.TestCase):
         self.assertEqual(self._probe("ENHANCEMENT_PACKAGE=a.json", "ENHANCEMENT_CODE_HOOK_PACKAGE=")[1],
                          alone_hash)
         self.assertEqual(self._probe("ENHANCEMENT_CODE_HOOK_PACKAGE=h.json")[0], "[--code-hook-package=h.json]")
+
+    def test_editing_a_package_in_place_regenerates_the_translation(self) -> None:
+        # The codegen profile records only the packages' paths, so the codegen rule itself must
+        # depend on the package, the code-hook package and the package's .symbols.json sidecar:
+        # otherwise an edit at the same path leaves <game>_recomp.c up to date and the binary
+        # keeps the old package's translation. The rule's prerequisites are read from make's
+        # own database (-p), with nothing built.
+        temp = Path(self.temp.name)
+        package = temp / "pkg.json"
+        package.write_text("{}\n", encoding="utf-8")
+        (temp / "pkg.symbols.json").write_text("{}\n", encoding="utf-8")
+        hook = temp / "hook.json"
+        hook.write_text("{}\n", encoding="utf-8")
+        completed = subprocess.run(
+            [cast(str, self.make), "-n", "-p", "--no-print-directory", "GAME_NAME=probe",
+             f"BUILD_ROOT={temp.as_posix()}", f"BUILD_DIR={temp.as_posix()}",
+             f"ENHANCEMENT_PACKAGE={package}", f"ENHANCEMENT_CODE_HOOK_PACKAGE={hook}",
+             "--eval", "nkprobe: ;", "nkprobe"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr[-2000:])
+        rule = f"{temp.as_posix()}/probe_recomp.c: "
+        line = next((text for text in completed.stdout.splitlines() if text.startswith(rule)), "")
+        self.assertTrue(line, "make's database has no codegen rule for the probe title")
+        prerequisites = line.removeprefix(rule).split()
+        for path in (package, temp / "pkg.symbols.json", hook):
+            with self.subTest(prerequisite=path.name):
+                self.assertIn(path.as_posix(), prerequisites)
+
+    def test_nan_trap_reaches_codegen_when_codegen_args_come_from_the_command_line(self) -> None:
+        # NAN_TRAP=1 turns on both halves at once. The gates that run a sub-make with
+        # CODEGEN_USER_ARGS on its command line (production-smoke-gap, the platform
+        # ladder, the cosim lanes, form-sweep) still get --nan-trap, or the runtime
+        # traps would be compiled in while codegen emits no check.
+        completed = subprocess.run(
+            [cast(str, self.make), "--no-print-directory", "GAME_NAME=probe",
+             f"BUILD_ROOT={Path(self.temp.name).as_posix()}",
+             f"BUILD_DIR={Path(self.temp.name).as_posix()}",
+             "NAN_TRAP=1", "CODEGEN_USER_ARGS=--omit-aot=0x1",
+             "--eval", "nkprobe: ; @echo ARGS=[$(strip $(CODEGEN_USER_ARGS))] CFLAGS=[$(filter -DSR_NAN_TRAP,$(CFLAGS))]",
+             "nkprobe"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        line = next(text for text in completed.stdout.splitlines() if text.startswith("ARGS="))
+        self.assertEqual(line, "ARGS=[--omit-aot=0x1 --nan-trap] CFLAGS=[-DSR_NAN_TRAP]")
 
     def test_the_transport_keeps_the_argv_hash(self) -> None:
         # The environment form must hash exactly as the former --entry form did, so
@@ -2527,6 +2737,27 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
                 self.assertIn(f"BUILD_DIR '{value}' is {reason}", proc.stderr)
                 self.assertNotIn("rmtree", proc.stdout)
 
+    def test_game_name_that_leaves_the_build_root_is_refused(self) -> None:
+        """A GAME_NAME that is a path, or only dots, is refused before the default BUILD_DIR forms.
+
+        The default BUILD_DIR is BUILD_ROOT/GAME_NAME, and `make clean` deletes it
+        wholesale, so `GAME_NAME=..` would name the checkout itself (and `../src` the
+        sources) while the BUILD_DIR scope check, which runs only for an overridden
+        BUILD_DIR, never looked. The probe is a dry run with NK_INFO_ONLY=1, so a lost
+        guard still deletes nothing and the parse-time mkdir does not run.
+        """
+        if not self.make:
+            self.skipTest("GNU Make is required")
+        for value in ("..", ".", "...", "../src", "..\\src", "a/b", "C:x"):
+            with self.subTest(game_name=value):
+                proc = self._lifecycle_make("-n", "clean", "NK_INFO_ONLY=1", f"GAME_NAME={value}")
+                self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertIn(f"GAME_NAME '{value}' is not a title name", proc.stderr)
+                self.assertNotIn("rmtree", proc.stdout)
+        proc = self._lifecycle_make("-n", "clean", "NK_INFO_ONLY=1", "GAME_NAME=my.game-1")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(f"{self.build_root.as_posix()}/my.game-1", proc.stdout)
+
     def _build_dir_refusal(self, goal: str, build_dir: str) -> subprocess.CompletedProcess:
         """A dry run of ``goal`` whose BUILD_DIR names the whole build root.
 
@@ -2689,7 +2920,13 @@ class BuildArtifactLifecycleTests(unittest.TestCase):
             self.build_root / name
             for name in ("production-smoke", "production-smoke-gap", "cosim",
                          "nakagawa_psp_oracle", "vfpu_oracle", "portable-core",
-                         "verify", "link")
+                         "verify", "link",
+                         # The display smoke and platform ladder gates, the snapshot runner,
+                         # the form sweep and each cosimulation lane (mk/cosim_snapshot.mk)
+                         # build their own fixture trees beneath BUILD_ROOT too.
+                         "display-smoke-v1", "platform-ladder", "snapshot", "form-sweep",
+                         "cosim-split", "cosim-opt", "cosim-llvm", "cosim-llvm-mutants",
+                         "cosim-promoted", "cosim-resume")
         ]
         for fdir in fixture_dirs:
             self._plant(fdir / "artifact.tmp", "tmp")
@@ -3257,6 +3494,15 @@ class MachinePortabilityTests(unittest.TestCase):
             (explicit_dir / "lib" / "libSDL3.dll.a").write_bytes(b"!<arch>\n")
             prov_exp = discover_sdl3_provider(explicit=str(explicit_dir), msys_path=msys, vulkan_sdk=vulkan)
             self.assertEqual(prov_exp.root_dir, explicit_dir)
+
+            # An explicit tree whose SDL3.dll is not x86-64 (here a 32-bit i386 PE) is refused,
+            # as the MSYS2 branch refuses it, not selected as a supported provider.
+            (explicit_dir / "bin").mkdir(parents=True)
+            i386_pe = b"MZ" + b"\x00" * 58 + struct.pack("<I", 64) + b"PE\0\0" + struct.pack("<H", 0x014C)
+            (explicit_dir / "bin" / "SDL3.dll").write_bytes(i386_pe)
+            with self.assertRaises(Sdl3ProviderError) as explicit_ctx:
+                discover_sdl3_provider(explicit=str(explicit_dir), msys_path=msys, vulkan_sdk=vulkan)
+            self.assertIn("not a valid x86-64 PE", str(explicit_ctx.exception))
 
     def test_sdl3_provider_follows_a_gcc_symlink_into_the_toolchain(self) -> None:
         """A gcc on PATH that links into UCRT64 (ccache's masquerade) selects that toolchain.
@@ -4628,6 +4874,31 @@ class DoctorRefusesTrackedCodeCaptureTests(unittest.TestCase):
         tracked = [r for r in report.results if r.code == "GIT_TRACKED_PRIVATE"]
         self.assertEqual([r.status for r in tracked], ["FAIL"])
         self.assertIn(".nkcap", tracked[0].detail or "")
+
+    def test_a_tracked_dump_profile_or_database_fails_the_repository_contract(self):
+        import nk_doctor_checks
+        import nk_doctor_core
+
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("git is required")
+        for name in ("crash.dmp", "session.psess", "index.sqlite"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                subprocess.run([git, "init", "-q"], cwd=root, check=True)
+                (root / name).write_bytes(b"synthetic")
+                subprocess.run([git, "add", "-f", "."], cwd=root, check=True)
+                report = nk_doctor_core.Report(root, "build")
+                nk_doctor_checks.check_repository_contract(report)
+                tracked = [r for r in report.results if r.code == "GIT_TRACKED_PRIVATE"]
+                self.assertEqual([r.status for r in tracked], ["FAIL"])
+                self.assertIn(name, tracked[0].detail or "")
+
+    def test_the_doctor_refuses_every_extension_the_history_audit_forbids(self):
+        import history_audit
+        import nk_doctor_core
+
+        self.assertEqual(history_audit.FORBIDDEN_EXTENSIONS - nk_doctor_core.PRIVATE_EXTENSIONS, set())
 
 
 class LinkerSpellingTests(unittest.TestCase):

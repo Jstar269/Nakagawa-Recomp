@@ -42,9 +42,13 @@ void nk_ui_sdlr_destroy(NkUiSdlr *renderer);
 void nk_ui_sdlr_set_scale(NkUiSdlr *renderer, float density);
 
 /* Draws one frame's list from nk_ui_end(). Returns true when the list was
-   drawn, and false for a NULL argument or a malformed list (nothing is then
-   guaranteed about partial output). Clip, blend and draw-colour state of the
-   renderer are restored before returning.
+   drawn. Returns false, drawing nothing, for a NULL argument or a malformed list
+   (an index or command range outside the list, scissors nested deeper than
+   NK_UI_DRAW_CLIP_DEPTH, a scissor end with none open). Also returns false when
+   a draw fails at run time (an allocation, an atlas page, the waves texture, or
+   geometry SDL refuses): drawing stops at that command, later commands are not
+   drawn, and nothing is guaranteed about partial output. Clip, blend and
+   draw-colour state of the renderer are restored before returning.
    NK_UI_CUSTOM_WAVES commands are drawn through the CPU reference
    (nk_ui_waves_render_command) into a texture at a third of their size and
    scaled up; the frame is re-rendered only when the command changes.
@@ -111,6 +115,9 @@ bool nk_ui_ttf_set_fallback(NkUiTtf *ttf, int font, int fallback);
      "pen + (bearing_x, -bearing_y)" is the bitmap's top-left in either reading.
    - advance_x is the distance to the next glyph's x; the last glyph's runs to
      the end of the string.
+   - text_index counts the characters before the glyph's own in the text, so a
+     glyph after a space or a ligature still gets one letter-spacing gap per
+     character before it.
    - measure() height is the face's line height and baseline its ascent.
    The returned struct points at `ttf`, which must outlive it. */
 NkUiTextBackend nk_ui_ttf_backend(NkUiTtf *ttf);

@@ -80,6 +80,10 @@ bool player_ui_sounds_enabled(const PlayerUiSounds *sounds) {
     return sounds != NULL && sounds->enabled;
 }
 
+bool player_ui_sounds_hold_audio(const PlayerUiSounds *sounds) {
+    return sounds != NULL && sounds->stream != NULL;
+}
+
 /* Decodes the clips and opens one stream on the default playback device. Every
    clip shares the first clip's format (the embedded set is 44.1 kHz mono
    16-bit); a clip in another format is left silent. */

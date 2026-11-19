@@ -69,6 +69,7 @@ typedef struct {
     int size_px;
     float letter_spacing; /* extra device px after each glyph (CSS letter-spacing) */
     bool center;          /* centre the run across its bounds (glyph labels) */
+    size_t text_capacity; /* bytes held at text; the draw buffer reuses them */
 } NkUiTextRun;
 
 typedef struct {
@@ -82,6 +83,7 @@ typedef struct {
     NkUiTextRun **text_runs;
     uint32_t text_run_count;
     uint32_t text_run_capacity;
+    uint32_t text_run_pool;   /* runs allocated: a reset keeps them for the next frame */
     int clip_stack[NK_UI_DRAW_CLIP_DEPTH][4]; /* the scissors open now, nested */
     uint32_t clip_depth;
 } NkUiDrawBuffer;
@@ -143,5 +145,12 @@ bool nk_ui_draw_add_image(NkUiDrawBuffer *buffer, const NkUiImage *image,
                           uint32_t element_id);
 bool nk_ui_draw_add_scissor(NkUiDrawBuffer *buffer, bool start,
                             NkUiPixelRect bounds, uint32_t element_id);
+
+/* Whether a list is well formed, as the producer above builds every list: its
+   arrays are present for their counts, every index names a vertex, every
+   rectangle and border range lies inside the index buffer, and scissors nest
+   no deeper than NK_UI_DRAW_CLIP_DEPTH, with no end before its start. Both
+   backends check a list with it before drawing any of it. */
+bool nk_ui_draw_list_valid(const NkUiDrawList *list);
 
 #endif /* NK_UI_DRAW_H */

@@ -351,15 +351,6 @@ set(NK_UI_PLAYER_TITLE_SOURCES
     src/player/ui/scr_devlog.c
     src/player/ui/ui_keyboard.c
 )
-set(NK_UI_PLAYER_SCREEN_SOURCES
-    src/player/ui/player_ui_nk.c
-    src/player/ui/ui_router.c
-    src/player/ui/scr_library.c
-    src/player/ui/scr_title.c
-    src/player/ui/scr_settings.c
-    src/player/ui/scr_first_run.c
-    src/player/ui/scr_dialogs.c
-)
 set(NK_UI_PLAYER_C5_SOURCES
     src/player/ui/player_ui_nk.c
     src/player/ui/ui_router.c
@@ -374,17 +365,6 @@ set(NK_UI_PLAYER_HOST_SOURCES
     src/player/ui/player_ui_music.c
     src/player/ui/player_ui_vorbis.c
 )
-set(NK_UI_OVERLAY_SOURCES
-    src/rt/overlay/nk_overlay.c
-    src/rt/overlay/overlay_pause.c
-    src/rt/overlay/overlay_quick.c
-    src/rt/overlay/overlay_hud.c
-    src/rt/overlay/overlay_toast.c
-    src/rt/overlay/overlay_dialogs.c
-    src/rt/overlay/overlay_controls.c
-    src/rt/overlay/overlay_dev.c
-    src/rt/overlay/overlay_host.c
-)
 # The overlay pages built so far (C9c, and the developer pages of #314), SDL-free; overlay_host.c builds only into the runtime.
 set(NK_UI_OVERLAY_C9C_SOURCES
     src/rt/overlay/nk_overlay.c
@@ -393,14 +373,6 @@ set(NK_UI_OVERLAY_C9C_SOURCES
     src/rt/overlay/overlay_dialogs.c
     src/rt/overlay/overlay_controls.c
     src/rt/overlay/overlay_dev.c
-)
-set(NK_UI_TEST_SOURCES
-    tests/native/test_nk_ui_core.c
-    tests/native/test_nk_ui_focus.c
-    tests/native/test_nk_ui_sdlr.c
-    tests/native/test_nk_ui_vk.c
-    tests/native/test_player_screens.c
-    tests/native/test_overlay_screens.c
 )
 add_executable(test_nk_ui_core
     tests/native/test_nk_ui_core.c
@@ -1220,14 +1192,27 @@ function(nk_add_title_runtime target package_dir title_id)
     target_compile_definitions(${target}_atrac PRIVATE ${rt_defs})
     target_link_libraries(${target}_atrac PRIVATE SDL3::SDL3)
 
-    # The FFmpeg H.264 subset: the Makefile's h264sub_% rule (upstream code, warnings off).
+    # The FFmpeg H.264 subset: the Makefile's h264sub_% rule (upstream code, warnings off), and
+    # the project's own wrapper over it (nk_h264_api.c, the Makefile's h264sub_nk_h264_api.o
+    # rule), which keeps the project warning set (-Wall -Wextra) without -Werror, as the runtime.
+    set(h264api "${h264sub}")
+    list(FILTER h264api INCLUDE REGEX "/nk_h264_api[.]c$")
+    list(FILTER h264sub EXCLUDE REGEX "/nk_h264_api[.]c$")
+    set(h264_defs ${rt_defs} HAVE_AV_CONFIG_H _ISOC99_SOURCE _FILE_OFFSET_BITS=64
+        _LARGEFILE_SOURCE _POSIX_C_SOURCE=200112 _XOPEN_SOURCE=600)
+    set(h264_symbols -include "${root}/src/rt/h264_ffmpeg_sub/nk_h264_symbols.h")
     add_library(${target}_h264 OBJECT ${h264sub})
     target_include_directories(${target}_h264 PRIVATE "${root}/src/rt/h264_ffmpeg_sub"
         "${root}/src/rt")
     target_compile_options(${target}_h264 PRIVATE -O2 -fno-strict-aliasing -w -std=c11
-        -include "${root}/src/rt/h264_ffmpeg_sub/nk_h264_symbols.h")
-    target_compile_definitions(${target}_h264 PRIVATE ${rt_defs} HAVE_AV_CONFIG_H _ISOC99_SOURCE
-        _FILE_OFFSET_BITS=64 _LARGEFILE_SOURCE _POSIX_C_SOURCE=200112 _XOPEN_SOURCE=600)
+        ${h264_symbols})
+    target_compile_definitions(${target}_h264 PRIVATE ${h264_defs})
+    add_library(${target}_h264_api OBJECT ${h264api})
+    target_include_directories(${target}_h264_api PRIVATE "${root}/src/rt/h264_ffmpeg_sub"
+        "${root}/src/rt")
+    target_compile_options(${target}_h264_api PRIVATE -O2 -fno-strict-aliasing -Wall -Wextra
+        -Wno-error -std=c11 ${h264_symbols})
+    target_compile_definitions(${target}_h264_api PRIVATE ${h264_defs})
 
     # Generated C: RECOMP_FLAGS (-O0 -w), with the package directory on the include path.
     add_library(${target}_gen OBJECT ${generated})
@@ -1238,7 +1223,7 @@ function(nk_add_title_runtime target package_dir title_id)
     add_library(${target} SHARED
         $<TARGET_OBJECTS:${target}_rt> $<TARGET_OBJECTS:${target}_ge>
         $<TARGET_OBJECTS:${target}_atrac> $<TARGET_OBJECTS:${target}_h264>
-        $<TARGET_OBJECTS:${target}_gen>)
+        $<TARGET_OBJECTS:${target}_h264_api> $<TARGET_OBJECTS:${target}_gen>)
     target_link_libraries(${target} PRIVATE SDL3::SDL3 vulkan m)
     if(ANDROID)
         target_link_libraries(${target} PRIVATE log android)

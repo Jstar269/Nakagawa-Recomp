@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -546,6 +547,20 @@ class FontProvisioningTests(unittest.TestCase):
         removed = self._cli("remove", "--all", "--user-data-root", str(user_data))
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertIn("Removed 2 imported font file(s).", removed.stdout)
+
+    def test_cli_refuses_a_user_data_root_inside_the_checkout(self) -> None:
+        """The user's console fonts are never written where they could be committed."""
+        source = self._folder("cli_inside", {"one.pgf": latin_pgf()})
+        # A path that does not exist yet: the refusal comes before anything is created, so
+        # the test creates nothing in the checkout and has nothing there to clean up.
+        inside = ROOT / "build" / f"font-guard-{os.getpid()}-{self.temp_path.name}"
+        self.assertFalse(inside.exists())
+        for args in (("import", str(source)), ("status",), ("remove", "--all")):
+            with self.subTest(command=args[0]):
+                res = self._cli(*args, "--user-data-root", str(inside))
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertIn("outside the repository", res.stderr)
+                self.assertFalse(inside.exists(), "a font command wrote inside the checkout")
 
     def test_cli_import_choose_and_refusal(self) -> None:
         dupes = self._folder("cli_dupes", {"x.pgf": latin_pgf(), "y.pgf": latin_pgf()})
