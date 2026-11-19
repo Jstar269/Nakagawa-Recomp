@@ -10,9 +10,10 @@ them; this module proves the generic/title separation, that a manifest still nam
 of those groups fails with the named HLE_TITLE_ASSIST_RETIRED error, and the retired
 libfont field migration.
 
-Evidence tiers used here are SOURCE_SHAPE (text/manifest/header shape) and
-PRODUCTION_DISPATCH-level via generated-header assertions. No private HST
-bytes are read.
+The evidence tier here is SOURCE_SHAPE only: manifest validation, rendered
+title_runtime_config headers and HLE source text. Nothing dispatches through
+production HLE; tools/test_hle_title_config_behavior.py runs the native
+hle-title-selftest-one routes for that. No private HST bytes are read.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +31,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import title_manifest
 import title_runtime_config
 import compat_overrides
-from test_compat_manifest import extract_hle_guest_addresses
+from test_compat_manifest import extract_hle_guest_addresses, uninventoried_hle_addresses
 import hle_sources  # noqa: E402
 
 FIXTURE_A = ROOT / "assets" / "titles" / "pspdev-phase5.json"
@@ -326,12 +328,18 @@ class MutationTests(unittest.TestCase):
         self.assertIn(0x002d132c, missing)
 
     def test_removing_inventory_entry_fails(self):
-        retired = {a for group in compat_overrides.RETIRED_HLE_DIAGNOSTIC_GROUPS
-                   for a in group["addresses"]}
-        thinned = retired - {0x0030a000}
-        found = set(extract_hle_guest_addresses(hle_sources.text()))
-        self.assertEqual(found & thinned, set())
-        self.assertNotIn(0x0030a000, found)
+        # Take 0x0030a000 out of the retired inventory, then re-add a read of it to
+        # generic HLE: the inventory gate must still report it as uninventoried, so
+        # thinning the retired list can never readmit a retired title address.
+        removed = 0x0030a000
+        thinned = [dict(group, addresses=[a for a in group["addresses"] if a != removed])
+                   for group in compat_overrides.RETIRED_HLE_DIAGNOSTIC_GROUPS]
+        self.assertNotEqual(thinned, compat_overrides.RETIRED_HLE_DIAGNOSTIC_GROUPS,
+                            "the retired inventory no longer names the removed address")
+        contaminated = hle_sources.text() + "\nstatic void h_probe(void) { MEM_R32(0x0030a000u); }\n"
+        self.assertNotIn(removed, uninventoried_hle_addresses(hle_sources.text()))
+        with mock.patch.object(compat_overrides, "RETIRED_HLE_DIAGNOSTIC_GROUPS", thinned):
+            self.assertIn(removed, uninventoried_hle_addresses(contaminated))
 
     def test_title_configured_inventory_is_not_live(self):
         live = {a for group in compat_overrides.HLE_GUEST_ADDRESS_GROUPS for a in group["addresses"]}

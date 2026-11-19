@@ -17,7 +17,8 @@
  *   - successful load into a local aggregate WITHOUT publishing globals;
  *   - atomic once-only publication, repeated initialization, and concurrent
  *     first use from two host threads (sequential fallback if the toolchain
- *     lacks C11 threads).
+ *     lacks C11 threads);
+ *   - the evidence line of a load from an explicit root says override=explicit.
  *
  * The abort-after-cleanup path of sr_vfpu_load_with_root is intentionally not
  * exercised in-process (abort terminates the harness); the loader-level
@@ -567,14 +568,83 @@ static void test_concurrent_first_use(void) {
 #endif
 }
 
+/* ---- evidence label --------------------------------------------------------- */
+
+/* The first published load prints "[vfpu_tables] root=<root> override=<source>" on
+ * stderr. The tests around it run with stderr sent to a scratch file, so the label
+ * of the root they pin can be read back. */
+#if defined(_WIN32)
+#define SR_DUP(fd) _dup(fd)
+#define SR_DUP2(fd, to) _dup2(fd, to)
+#define SR_CLOSE(fd) _close(fd)
+#define SR_FILENO(f) _fileno(f)
+#else
+#define SR_DUP(fd) dup(fd)
+#define SR_DUP2(fd, to) dup2(fd, to)
+#define SR_CLOSE(fd) close(fd)
+#define SR_FILENO(f) fileno(f)
+#endif
+
+static char g_capture_path[512];
+static int g_saved_stderr = -1;
+
+static void begin_stderr_capture(void) {
+    int n = snprintf(g_capture_path, sizeof g_capture_path, "%s/vfpu_tables_selftest_%d.stderr",
+                     SR_SELFTEST_BUILD_ROOT, (int)SR_GETPID());
+    if (n < 0 || (size_t)n >= sizeof g_capture_path) return;
+    fflush(stderr);
+    FILE *f = fopen(g_capture_path, "wb");
+    if (!f) return;
+    g_saved_stderr = SR_DUP(SR_FILENO(stderr));
+    if (g_saved_stderr >= 0 && SR_DUP2(SR_FILENO(f), SR_FILENO(stderr)) < 0) {
+        SR_CLOSE(g_saved_stderr);
+        g_saved_stderr = -1;
+    }
+    fclose(f);
+}
+
+/* Restore stderr, echo the captured text (a FAIL line inside stays visible) and
+ * return it in `out`; an empty `out` means nothing was captured. */
+static void end_stderr_capture(char *out, size_t cap) {
+    out[0] = '\0';
+    if (g_saved_stderr < 0) return;
+    fflush(stderr);
+    SR_DUP2(g_saved_stderr, SR_FILENO(stderr));
+    SR_CLOSE(g_saved_stderr);
+    g_saved_stderr = -1;
+    FILE *f = fopen(g_capture_path, "rb");
+    if (f) {
+        size_t got = fread(out, 1, cap - 1u, f);
+        out[got] = '\0';
+        fclose(f);
+    }
+    remove(g_capture_path);
+    fputs(out, stderr);
+}
+
+/* sr_vfpu_load_with_root("assets/vfpu") loaded the tables, so the evidence must say
+ * the root was explicit: neither PSP_VFPU_TABLES nor the default was used. */
+static void test_evidence_names_explicit_root(const char *captured) {
+    CHECK(captured[0] != '\0', "stderr capture around the first published load failed");
+    CHECK(strstr(captured, "[vfpu_tables] root=assets/vfpu override=explicit\n") != NULL,
+          "an explicit root must be labelled override=explicit");
+    CHECK(strstr(captured, "override=PSP_VFPU_TABLES") == NULL &&
+          strstr(captured, "override=default-assets/vfpu") == NULL,
+          "an explicit root must not be labelled as the environment or default root");
+}
+
 int main(void) {
     test_sha256_known_answers();
     test_asin_index_validator();
     test_sin_interval_validator();
     test_loader_rejects_corrupt_roots();
     test_pure_load_and_publish();   /* fills the aggregate + publishes; state still 0 */
+    static char captured[16384];
+    begin_stderr_capture();
     test_concurrent_first_use();    /* resets globals and races the real first-use load */
     test_once_only_and_repeated_init();  /* state now 2: idempotence */
+    end_stderr_capture(captured, sizeof captured);
+    test_evidence_names_explicit_root(captured);
 
     if (g_failures) {
         fprintf(stderr, "vfpu-tables selftest: %d FAILURE(S)\n", g_failures);

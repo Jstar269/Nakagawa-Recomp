@@ -141,7 +141,9 @@ proposals. Each claim covers only the exact fixture named:
   for these 14 exact raw words on the authorized PSP-3000-series / 6.61 /
   ARK-5.1.0 route (2026-09-30). Fixture: `tests/fixtures/vfpu_oracle/vfpu_probe.c`
   (`FIXTURE_BUILD_ID nakagawa-vfpu-oracle-v1`), whose source-owned
-  `VASIN_DOMAIN_INPUTS` list fed the console; each word produced one record,
+  `VASIN_DOMAIN_INPUTS` list (now in the shared
+  `tests/fixtures/vfpu_oracle/vfpu_oracle_cases.h`, so `src/rt/vfpu_oracle_host.c`
+  prints the same records) fed the console; each word produced one record,
   `vfpu-vasin-domain-arg00` through `vfpu-vasin-domain-arg13`, in the table's
   order. These were two fresh USBHostFS/PSPLink sessions of that single probe
   (no multi-fixture campaign identifier applies); both returned

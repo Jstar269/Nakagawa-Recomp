@@ -20,6 +20,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import codegen
 from makefile_text import read_makefile  # noqa: E402
+# The link-surface audits are shared with test_cpu_lle.py (same drift class).
+from test_cpu_lle import _names_source, makefile_link_recipes, python_link_harnesses  # noqa: E402
 
 
 DOMAIN_H = ROOT / "src" / "rt" / "domain_mode.h"
@@ -256,26 +258,28 @@ class MakefileWiringTests(unittest.TestCase):
             self.assertIn("src/rt/domain_mode.c", block.group(1))
 
     def test_every_guest_interp_link_also_links_domain_mode(self):
-        offenders = []
-        for number, raw in enumerate(MAKEFILE.splitlines(), start=1):
-            if "src/rt/guest_interp.c" in raw and "-o " in raw:
-                if "src/rt/domain_mode.c" not in raw:
-                    offenders.append(f"Makefile:{number}: {raw.strip()}")
+        recipes = makefile_link_recipes(MAKEFILE, "src/rt/guest_interp.c")
+        commands = " ".join(command for _number, command, _linked in recipes)
+        for output in ("domain_mode_selftest.exe", "heap_selftest.exe", "nkstate_selftest.exe",
+                       "hle_thread_selftest.exe", "snapshot_runner.exe"):
+            self.assertIn(output, commands)
+        offenders = [f"inlined Makefile line {number}: {command[:160]}"
+                     for number, command, linked in recipes
+                     if "src/rt/domain_mode.c" not in linked]
         self.assertEqual(offenders, [])
 
     def test_every_python_harness_link_also_links_domain_mode(self):
         # Same drift class as the cpu_lle audit in test_cpu_lle.py: tools/*.py
         # inline gcc commands that link guest_interp.c must also link
-        # domain_mode.c. Only quoted path operands count, so prose mentions
-        # in docstrings are not mistaken for link surfaces.
-        offenders = []
-        for path in sorted((ROOT / "tools").glob("*.py")):
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if re.search(r"""["']guest_interp\.c["']""", text) and '"-o "' in text:
-                if "domain_mode.c" not in text:
-                    offenders.append(path.name)
+        # domain_mode.c. Only string constants count as operands, so prose
+        # mentions in docstrings are not mistaken for link surfaces.
+        harnesses = python_link_harnesses("guest_interp.c")
+        for known in ("codegen_gate.py", "test_dispatch_call_boundary.py",
+                      "test_native_gate_stub_link.py"):
+            self.assertIn(known, harnesses)
+        offenders = [name for name, constants in harnesses.items()
+                     if not _names_source(constants, "domain_mode.c")]
         self.assertEqual(offenders, [])
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,7 @@ import io
 import os
 from pathlib import Path
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -528,10 +529,43 @@ class MutantDriverTests(unittest.TestCase):
 class InertTests(unittest.TestCase):
     """F-A-lite's static half: no FSR 3 code is in what the player builds or runs."""
 
+    MAKE = shutil.which("mingw32-make") or shutil.which("make") or "make"
+    # Every list the runtime and the player compile or link, as Make expands it: the lists pull in
+    # fragments defined elsewhere (mk/nk_ui.mk's NK_UI_* lists feed both), so the two files that
+    # spell PLAYER_SRCS and RT_SRCS are not the whole input.
+    BUILD_LISTS = ("PLAYER_SRCS", "PLAYER_CHD_SRCS", "RT_SRCS", "RT_OBJS", "GEGPU_SRCS")
+
+    def _expanded_build_inputs(self, *overrides: str) -> list[str]:
+        """The words of BUILD_LISTS after the real Makefile is read, for a synthetic title."""
+        listing = " ".join(f"$({name})" for name in self.BUILD_LISTS)
+        with tempfile.TemporaryDirectory(prefix="nk-inert-make-") as build_root:
+            proc = subprocess.run(
+                [self.MAKE, "-f", str(ROOT / "Makefile"), "GAME_NAME=synthetic2",
+                 f"BUILD_ROOT={Path(build_root).as_posix()}", *overrides,
+                 "--eval", f"nk_print_build_inputs: ; $(info NK_BUILD_INPUTS={listing})",
+                 "nk_print_build_inputs"],
+                cwd=ROOT, capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        rows = [line for line in proc.stdout.splitlines() if line.startswith("NK_BUILD_INPUTS=")]
+        self.assertEqual(len(rows), 1, "the Make probe printed no source listing:\n" + proc.stdout)
+        return rows[0].split("=", 1)[1].split()
+
     def test_no_fsr3_file_in_the_runtime_or_player_sources(self) -> None:
         for mk in ("mk/runtime_sources.mk", "mk/pipeline.mk"):
             with self.subTest(file=mk):
                 self.assertNotIn("fsr3", (ROOT / mk).read_text(encoding="utf-8"))
+        inputs = self._expanded_build_inputs()
+        # Positive control: the probe reads the real lists (runtime, player and Vulkan backend).
+        for known in ("src/rt/recomp.c", "src/player/main.c", "src/ui/nk_ui.c",
+                      "src/rt/gpu_sdl3vk/ge_gpu.c"):
+            self.assertIn(known, inputs)
+        self.assertEqual([word for word in inputs if "fsr3" in Path(word).name.lower()], [],
+                         "an FSR 3 file is compiled or linked into the runtime or the player")
+
+    def test_the_expanded_lists_see_a_fragment_outside_the_two_scanned_files(self) -> None:
+        # mk/nk_ui.mk's core list feeds PLAYER_SRCS and RT_SRCS; an FSR 3 file there must show.
+        core = self._expanded_build_inputs("NK_UI_CORE_SRCS=src/ui/nk_ui.c src/rt/fsr3_host.c")
+        self.assertIn("src/rt/fsr3_host.c", core)
 
     def test_no_runtime_or_player_source_refers_to_fsr3(self) -> None:
         own = {"fsr3_host.c", "fsr3_host.h", "fsr3_jitter.c", "fsr3_jitter.h", "fsr3_pass.c", "fsr3_pass.h",
