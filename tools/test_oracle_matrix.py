@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -275,6 +276,145 @@ class LockHelperTests(MatrixTestCase):
     def test_probe_command_report_without_a_valid_boot_list_is_unknown(self) -> None:
         self.assertIsNone(om._boots({"verdict": "ok"}))
         self.assertIsNone(om._boots({"verdict": "ok", "boots": [70, "bad"]}))
+
+
+# A second process that writes the hardware lock. It reports "ready", waits for "go" on stdin so both
+# writers start together, then makes its updates: "note" appends probes_run lines through note_launch,
+# "count" increments its own field through the shared writer, "read" reads the lock without the writer lock
+# until that field reaches ``count`` and fails on any read error, and "hold" takes the writer lock and keeps it
+# until stdin closes (or the process is killed).
+_LOCK_WRITER_PROCESS = """
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from tools.psp_oracle import oracle_matrix as om
+path, mode, count, label = Path(sys.argv[2]), sys.argv[3], int(sys.argv[4]), sys.argv[5]
+def bump(lock):
+    lock[label] = lock.get(label, 0) + 1
+if mode == "hold":
+    with om._runner.hardware_lock_writer(path, timeout_seconds=30):
+        print("ready", flush=True)
+        sys.stdin.read()
+    raise SystemExit(0)
+print("ready", flush=True)
+sys.stdin.readline()
+if mode == "read":
+    reads, errors, deadline = 0, [], time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            held, status, _state = om._runner._read_hardware_lock(sys.argv[6], lock_path=path)
+            seen = om._read_lock(path).get(label, 0)
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+            continue
+        reads += 1
+        if status.startswith("HARDWARE_LOCK_UNAVAILABLE"):
+            errors.append(status)
+        if seen == count:
+            break
+    print(f"{reads} reads, {len(errors)} failed: {sorted(set(errors))}", file=sys.stderr)
+    raise SystemExit(1 if errors or seen != count else 0)
+for index in range(count):
+    if mode == "note":
+        om.note_launch(path, sys.argv[6], f"{label} {index}")
+    else:
+        om._runner.update_hardware_lock(path, bump)
+"""
+
+
+class LockWriterProcessTests(MatrixTestCase):
+    """Writers in separate processes share the lock file without losing each other's updates."""
+
+    UPDATES = 150
+
+    def start_writer(self, mode: str, label: str, count: int = 0) -> subprocess.Popen[str]:
+        process = subprocess.Popen(
+            [sys.executable, "-c", _LOCK_WRITER_PROCESS, str(om.ROOT), str(self.lock_path), mode,
+             str(count), label, SESSION],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.addCleanup(self._stop_writer, process)
+        assert process.stdout is not None
+        self.assertEqual(process.stdout.readline().strip(), "ready", process.stderr)
+        return process
+
+    @staticmethod
+    def _stop_writer(process: subprocess.Popen[str]) -> None:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=30)
+
+    def run_together(self, *writers: subprocess.Popen[str]) -> None:
+        for writer in writers:
+            assert writer.stdin is not None
+            writer.stdin.write("go\n")
+            writer.stdin.flush()
+        for writer in writers:
+            _stdout, stderr = writer.communicate(timeout=120)
+            self.assertEqual(writer.returncode, 0, stderr)
+
+    def test_two_processes_noting_launches_lose_no_line(self) -> None:
+        first = self.start_writer("note", "first", self.UPDATES)
+        second = self.start_writer("note", "second", self.UPDATES)
+        self.run_together(first, second)
+        lines = [line.split(": ", 1)[1] for line in self.lock()["probes_run"]]
+        expected = {f"{label} {index}" for label in ("first", "second") for index in range(self.UPDATES)}
+        self.assertEqual(len(expected - set(lines)), 0, f"{len(expected - set(lines))} probes_run lines lost")
+        self.assertEqual(len(lines), 2 * self.UPDATES)
+
+    def test_note_launch_keeps_the_field_another_writer_process_changes(self) -> None:
+        noter = self.start_writer("note", "noted", self.UPDATES)
+        counter = self.start_writer("count", "lease_renewals", self.UPDATES)
+        self.run_together(noter, counter)
+        lock = self.lock()
+        self.assertEqual(self.UPDATES - lock.get("lease_renewals", 0), 0, "lease_renewals updates lost")
+        self.assertEqual(len(lock["probes_run"]), self.UPDATES, "probes_run lines lost")
+        self.assertEqual(lock["holder_session"], SESSION)
+
+    def test_readers_without_the_writer_lock_never_fail_while_a_writer_replaces_the_file(self) -> None:
+        reader = self.start_writer("read", "lease_renewals", self.UPDATES)
+        counter = self.start_writer("count", "lease_renewals", self.UPDATES)
+        self.run_together(reader, counter)
+        self.assertEqual(self.lock()["lease_renewals"], self.UPDATES)
+
+    def test_writer_that_cannot_take_the_lock_stops_with_a_named_error(self) -> None:
+        holder = self.start_writer("hold", "holder")
+        before = self.lock_path.read_bytes()
+        started = time.monotonic()
+        with patch.object(om._runner, "HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS", 0.5):
+            with self.assertRaisesRegex(om.MatrixError, "^HARDWARE_LOCK_WRITER_TIMEOUT$"):
+                om.note_launch(self.lock_path, SESSION, "blocked note")
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 0.5)
+        self.assertLess(elapsed, 5.0)
+        self.assertEqual(self.lock_path.read_bytes(), before)
+        with self.assertRaises(om._runner.HardwareLockError) as raised:
+            om._runner.update_hardware_lock(self.lock_path, lambda lock: None, timeout_seconds=0)
+        self.assertEqual(raised.exception.status, "HARDWARE_LOCK_WRITER_TIMEOUT")
+        assert holder.stdin is not None
+        holder.stdin.close()
+        self.assertEqual(holder.wait(timeout=30), 0)
+        om.note_launch(self.lock_path, SESSION, "after release")
+        self.assertTrue(self.lock()["probes_run"][-1].endswith(": after release"))
+
+    def test_a_holder_that_dies_does_not_block_the_next_writer(self) -> None:
+        holder = self.start_writer("hold", "holder")
+        holder.kill()
+        holder.wait(timeout=30)
+        sidecar = om._runner.hardware_lock_writer_path(self.lock_path)
+        self.assertTrue(sidecar.exists(), "the dead holder's sidecar file stays behind")
+        with patch.object(om._runner, "HARDWARE_LOCK_WRITER_TIMEOUT_SECONDS", 5.0):
+            om.note_launch(self.lock_path, SESSION, "after the holder died")
+        self.assertTrue(self.lock()["probes_run"][-1].endswith(": after the holder died"))
+
+    def test_a_failed_mutation_writes_nothing_and_releases_the_writer_lock(self) -> None:
+        before = self.lock_path.read_bytes()
+        with self.assertRaisesRegex(om.MatrixError, "HARDWARE_LOCK_SESSION_MISMATCH"):
+            om.note_launch(self.lock_path, "another-session", "refused note")
+        self.assertEqual(self.lock_path.read_bytes(), before)
+        om._runner.update_hardware_lock(self.lock_path, lambda lock: lock.update(lease="renewed"),
+                                        timeout_seconds=0)
+        self.assertEqual(self.lock()["lease"], "renewed")
 
 
 class PlanValidationTests(MatrixTestCase):
