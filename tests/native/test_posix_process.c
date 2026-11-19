@@ -50,6 +50,7 @@ int main(void) {
 #endif
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -372,9 +373,14 @@ static void mkdir_private_symlink_subtest(void) {
     assert(symlink("real", link) == 0);
 
     assert(nk_platform_mkdir_p_private(below));
+    /* One descriptor answers for the folder itself, so its kind and its mode are said
+       of the same folder; O_NOFOLLOW refuses a link in the leaf's place. */
+    int leaf_fd = open(leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    assert(leaf_fd >= 0);
     struct stat st;
-    assert(lstat(leaf, &st) == 0 && S_ISDIR(st.st_mode));
+    assert(fstat(leaf_fd, &st) == 0 && S_ISDIR(st.st_mode));
     assert((st.st_mode & 0777) == 0700);
+    assert(close(leaf_fd) == 0);
     assert(!nk_platform_mkdir_p_private(link));          /* a final symlink stays refused */
 
     rmdir(leaf);

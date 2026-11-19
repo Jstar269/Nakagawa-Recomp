@@ -744,10 +744,19 @@ static void test_nk_library_save_refuses_unsynced_file(void) {
     seed_game_entry(&entry, "SYNC00002", "Not durable");
     assert(nk_library_add_or_update(&lib, &entry) == NK_OK);
     assert(nk_library_save(&lib, path) == NK_ERROR_IO);
+    /* One descriptor answers what the library is and what it holds, so both
+       are said of the same file; O_NOFOLLOW refuses a link promoted over it. */
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    assert(fd >= 0);
     struct stat st;
-    assert(lstat(path, &st) == 0 && S_ISREG(st.st_mode));
+    assert(fstat(fd, &st) == 0 && S_ISREG(st.st_mode));
+    FILE *held = fdopen(fd, "rb");
+    assert(held != NULL);
     char after[8192];
-    assert(library_read_text(path, after, sizeof(after)) > 0);
+    size_t after_length = fread(after, 1, sizeof(after) - 1u, held);
+    after[after_length] = '\0';
+    assert(fclose(held) == 0);
+    assert(after_length > 0);
     assert(strcmp(after, before) == 0);
     assert(lstat(tmp, &st) != 0);
     remove(path);
