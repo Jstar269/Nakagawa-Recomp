@@ -29,6 +29,7 @@
 #include "flight_recorder.h"
 #include "prx_loader.h"
 #include "ace.h"
+#include "cheats.h"
 #include "ge_shared.h"
 #include "videorec.h"
 
@@ -83,6 +84,7 @@ static int driver_stop_requested(void) {
 /* An end of main once the guest has run: a recording (#1273) names it and the exit status
  * main is about to return, so record.json tells a clean end from a failed one. */
 static int driver_run_end(int status, const char *how) {
+    sr_cheats_run_end();        /* the counts behind the cheats' hold lines (cheats.h) */
     sr_texdump_exit_finish();   /* the texture dump's files land and its exit line prints */
     (void)sr_videorec_finish_status(how, status);
     return status;
@@ -756,7 +758,10 @@ have_image:;
         (void)sr_audio_init();
         for (;;) {
             sr_driver_boot_event("BOOT_EVENT phase=guest_start mode=scheduler entry=0x%08x", entry);
-            sched_run(entry, s.r[4], s.r[5]);
+            /* No entry thread (the title's module_start parameters refused): nothing ran, so
+             * the run ends with a failure status, not as a run that returned normally. */
+            if (sched_run(entry, s.r[4], s.r[5]) != 0)
+                return driver_run_end(2, "the module_start thread could not be created");
 
             /* A run stopped from outside the guest ends here, even with a LoadExec queued, and
              * so does one the person asked to quit before the stop was due (a LoadExec from the

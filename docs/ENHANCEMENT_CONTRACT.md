@@ -1676,8 +1676,9 @@ memory, no network; ZIP packs through the project's own `src/core/nk_zip.c` and 
   known; a chain whose level 0 image proved unusable through another key serves none of its higher levels;
   `[hashranges]` lines are checked for the last line winning, a non-finite fraction noted, and 175,000 lines in
   reverse order (4.0 MB) read within 5 s and the comparison bound. These cells are fixed and seeded mutations, not coverage-guided fuzzing; the selftest also runs under
-  AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows, so that
-  check is skipped there, and said, without it. `test_nk_zip` checks the
+  AddressSanitizer and UndefinedBehaviorSanitizer on Linux. A file link needs Developer Mode on Windows. Without it
+  that check does not run there: the selftest names the cases left out and exits 77, which `texrepl-selftest`
+  reports as a SKIP, not a pass. On Linux a link or FIFO that cannot be made is a failure. `test_nk_zip` checks the
   reader's options: DEFLATE read only when asked, its level bits, damaged, short and long streams, a stream that
   stops at its declared size before a bad block, empty-block padding at and past its limit, data descriptors, device
   names with blanks before the extension, and the caps. `texrepl_selftest --bench N` measures an N-texture synthetic pack as a folder and as

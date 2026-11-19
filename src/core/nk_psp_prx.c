@@ -303,6 +303,10 @@ static void sha1_parts(const ShaPart *parts, size_t count, u8 out[0x14])
         }
     }
     SHAFinal(out, &shactx);
+    /* The hashed parts include decrypted header bytes and key-derived
+     * material.  The vendored SHAFinal clears only sizeof(pointer) bytes of
+     * its context, so wipe all of it here. */
+    nk_secure_zero(&shactx, sizeof(shactx));
 }
 
 /* ------------------------- type decoders ------------------------------ */

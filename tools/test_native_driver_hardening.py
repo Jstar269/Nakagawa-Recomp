@@ -144,6 +144,8 @@ int ge_capture_exit_due(void) {{ return 0; }}
 void ge_capture_exit_set_deferred(int deferred) {{ (void)deferred; }}
 /* No GE, so no texture dump to finish where the run ends (ge.c, ge_shared.h). */
 void sr_texdump_exit_finish(void) {{}}
+/* No cheat file is loaded (sr_cheats_init is gui.c's), so the run's end has no hold counts. */
+void sr_cheats_run_end(void) {{}}
 int (*sr_sched_stop_requested)(void) = NULL;
 const SrPauseHost *sr_sched_pause_host = NULL;
 void sr_audio_pause_enter(void) {{}}
@@ -209,11 +211,16 @@ static void synthetic_module_start(uint32_t args, uint32_t argp) {{
         if (g_module_start_arg[i] == '\\0') return;
     }}
 }}
-void sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {{
+/* HARNESS_SCHED_RUN_FAILS=1 answers as sched_run does when the module_start thread cannot be
+ * created: no guest thread ran. */
+int sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) {{
     note_guest_start();
     g_sched_runs++;
     g_audio_init_calls_at_last_sched_run = g_audio_init_calls;
+    const char *fails = getenv("HARNESS_SCHED_RUN_FAILS");
+    if (fails && strcmp(fails, "1") == 0) return SCHED_RUN_NO_ENTRY_THREAD;
     if (entry == 0x08000010u) synthetic_module_start(arglen, argp);
+    return 0;
 }}
 /* Extracted-data preparation seam: this harness links driver.c without hle.c,
  * so the headless stub records that boot called it exactly once and reports a
@@ -801,6 +808,15 @@ int main(int argc, char **argv) {{
                     self.assertEqual(audio_sched.returncode, 0,
                                      f"open fails={fails} {restart}: "
                                      f"{audio_sched.stderr}{audio_sched.stdout}")
+            # 6d. A scheduler run whose module_start thread could not be created ran no guest
+            # thread: the driver ends it with status 2, never as a run that returned (exit 0).
+            no_entry_env = os.environ.copy()
+            no_entry_env["HARNESS_SCHED_RUN_FAILS"] = "1"
+            no_entry = subprocess.run(
+                [str(exe), "audio_open_sched", str(sample_img)],
+                capture_output=True, text=True, env=no_entry_env,
+            )
+            self.assertEqual(no_entry.returncode, 2, no_entry.stderr + no_entry.stdout)
             audio_direct = subprocess.run(
                 [str(exe), "audio_open_direct", str(sample_img)], capture_output=True, text=True
             )

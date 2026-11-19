@@ -122,6 +122,19 @@ DISPLAY_HEIGHT = 272
 PIXELS = STRIDE * DISPLAY_HEIGHT
 DEFAULT_FRAMES = 240
 
+# The cheats-base0 route (#2639) builds this guest a second time with its image at 0, the way a
+# title manifest with "base": 0 has its image loaded, and runs it with a CWCheat file. Keep the
+# stem equal to the Makefile's DISPLAY_SMOKE_BASE0_NAME.
+BASE0_ARTIFACT_STEM = "display-smoke-base0"
+# The address a CWCheat line's 28-bit offset counts from (NK_CHEATS_ADDRESS_BASE in
+# src/core/nk_cheats.h), and where a PSP loads a relocatable main module, which is where a cheat
+# written for the game counts its image from (CHEATS_PSP_IMAGE_BASE in src/rt/cheats.c).
+CWCHEAT_ADDRESS_BASE = 0x08800000
+PSP_IMAGE_BASE = 0x08804000
+IMAGE_SIZE = DATA_VADDR + DATA_MEMORY_SIZE
+# A PSP address that is user memory and no part of the guest's image.
+CHEATS_OUTSIDE_IMAGE = 0x09000000
+
 _HOST_PRESENT_SUBMITTED_RE = re.compile(
     r"^HOST_PRESENT_SUBMITTED f=\d+ buf=0x[0-9a-fA-F]{8} "
     r"fmt=[0-3] stride=\d+$"
@@ -972,6 +985,151 @@ def run(
     print(
         f"DISPLAY_SMOKE_RUN status=PASS mode={mode} "
         f"frames={frames} framebuffer=0x{FRAMEBUFFER:08x} value=0x{expected:08x}"
+    )
+    return 0
+
+
+def cheats_base0_file() -> str:
+    """The CWCheat file of the cheats-base0 route: three cheats that are on, addresses as on a PSP.
+
+    The first writes the last byte of the image (in .bss, which the guest never touches), the
+    second the image's first instruction, the third memory that is no part of the image.
+    """
+    data = PSP_IMAGE_BASE + IMAGE_SIZE - 1 - CWCHEAT_ADDRESS_BASE
+    code = PSP_IMAGE_BASE - CWCHEAT_ADDRESS_BASE
+    outside = CHEATS_OUTSIDE_IMAGE - CWCHEAT_ADDRESS_BASE
+    return (
+        "_C1 Data in the image\n"
+        f"_L 0x0{data:07X} 0x000000A5\n"
+        "_C1 Code in the image\n"
+        f"_L 0x2{code:07X} 0x03E00008\n"
+        "_C1 Outside the image\n"
+        f"_L 0x2{outside:07X} 0x12345678\n"
+    )
+
+
+def cheats_base0_expectations(frames: int, cheats: bool) -> list[tuple[int, int]]:
+    """Guest words the base-0 run must end with: (address in the run, value)."""
+    last_word = IMAGE_SIZE - 4
+    first_instruction = _entry_words(frames)[0]
+    return [
+        # The data cheat's byte, moved with the image; nothing without cheats.
+        (last_word, 0xA5000000 if cheats else 0),
+        # The same byte's PSP address is other memory in this run and stays as it was.
+        (PSP_IMAGE_BASE + last_word, 0),
+        # The code cheat changed neither the image's code nor the PSP address it names.
+        (0, first_instruction),
+        (PSP_IMAGE_BASE, 0),
+        # The cheat that names memory outside the image wrote nothing.
+        (CHEATS_OUTSIDE_IMAGE, 0),
+        # The guest drew its last frame.
+        (FRAMEBUFFER, final_frame_first_pixel(frames)),
+    ]
+
+
+def cheats_base0_evidence_failure(cheats_on: str, cheats_off: str, frames: int,
+                                  file_name: str) -> str | None:
+    """Judge the two runs of the cheats-base0 route from their output; None when both hold.
+
+    With cheats on, the runtime must say where the image is, move the data cheat with it, and
+    refuse by name the cheat that writes translated code and the one that names memory outside
+    the image. With cheats off the same file must leave the run without a CHEATS line and the
+    data byte unwritten, which is what makes the first run's byte the cheat's.
+    """
+    image_end = PSP_IMAGE_BASE + IMAGE_SIZE - 1
+    required_on = [
+        f"CHEATS: this game's image is at 0x{0:08X} here and at 0x{PSP_IMAGE_BASE:08X} on a PSP: "
+        f"a cheat's address inside the image (0x{PSP_IMAGE_BASE:08X} to 0x{image_end:08X}) is "
+        "moved with it, and a cheat that names any other address is refused",
+        f"CHEATS: {file_name}: 1 on, 2 refused, 0 off, 0 for other discs",
+        f'CHEATS: refused "Code in the image" (line 3): line 4 writes 4 byte(s) at '
+        f"0x{PSP_IMAGE_BASE:08X} (0x{0:08X} in this run), inside code the recompiler translated",
+        f'CHEATS: refused "Outside the image" (line 5): line 6 names 4 byte(s) at '
+        f"0x{CHEATS_OUTSIDE_IMAGE:08X}, outside the game's image as a PSP loads it",
+    ]
+    for cheats, output, required in (
+        (True, cheats_on, required_on),
+        (False, cheats_off, []),
+    ):
+        label = "cheats on" if cheats else "cheats off"
+        markers = [
+            "BOOT_EVENT phase=init public_safe=1",
+            f"BOOT_EVENT phase=image_loaded entry=0x{0:08x}",
+            *required,
+            *(
+                f"DRIVER_EXPECT_U32 addr=0x{address:08x} got=0x{value:08x} "
+                f"expected=0x{value:08x} status=PASS"
+                for address, value in cheats_base0_expectations(frames, cheats)
+            ),
+        ]
+        forbidden = ("UNKNOWN NID", "NONPLT_MISS", "INTERP_REJECT", "status=FAIL")
+        if failure := evidence_failure(output, tuple(markers), forbidden):
+            return f"{label}: {failure}"
+        cheat_lines = [line for line in output.splitlines() if line.startswith("CHEATS:")]
+        if not cheats and cheat_lines:
+            return f"{label}: the runtime read or reported cheats: {cheat_lines[0]}"
+        # The emulator-derived meaning is named once per run, at first use (AGENTS.md section 7).
+        origin = sum("PPSSPP-derived, not PSP-measured" in line for line in cheat_lines)
+        if cheats and origin != 1:
+            return f"{label}: the PPSSPP-derived line appears {origin} times, expected once"
+    return None
+
+
+def cheats_base0(build_dir: Path) -> int:
+    """Run the guest built at base 0 with a CWCheat file, then without cheats (#2639).
+
+    A cheat names PSP addresses. This image is not where a PSP has it, so the full runtime has
+    to move an address inside the image with it and refuse the rest by name; before that was
+    modelled, all three cheats here were applied at the addresses as written.
+    """
+    build_dir = build_dir.resolve()
+    frames = int(_read_manifest(build_dir / "fixture")["frames"])
+    executable = (build_dir / f"{BASE0_ARTIFACT_STEM}.exe").resolve()
+    if not executable.exists():
+        executable = (build_dir / BASE0_ARTIFACT_STEM).resolve()
+    image_path = (build_dir / f"{BASE0_ARTIFACT_STEM}_image.bin").resolve()
+    cheat_file = build_dir / "cheats-base0.ini"
+    write_if_changed(cheat_file, cheats_base0_file().encode("ascii"))
+    outputs = {}
+    for cheats in (True, False):
+        command = [
+            str(executable), "--image", str(image_path), "0x00000000", "0x00000000",
+            "none", "none", "--sched", "--gui",
+            *(f"--expect-u32=0x{address:08x}:0x{value:08x}"
+              for address, value in cheats_base0_expectations(frames, cheats)),
+        ]
+        env = os.environ.copy()
+        env.update({
+            "SDL_VIDEO_DRIVER": "dummy",
+            "SDL_VIDEODRIVER": "dummy",
+            "SDL_AUDIO_DRIVER": "dummy",
+            "SDL_AUDIODRIVER": "dummy",
+            "SR_VIDEO": "offscreen",
+            "SR_CHEATS": "1" if cheats else "0",
+            "SR_CHEATS_FILE": str(cheat_file),
+        })
+        # The file has no _S line, so it is for whatever disc the run names; a run that
+        # records, replays or is an acceptance checkpoint refuses every cheat.
+        for key in ("SR_DISC_ID", "SR_RECORD", "SR_REPLAY", "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES",
+                    "SR_VIDEOREC_DIR", "SR_TEX_DUMP"):
+            env.pop(key, None)
+        completed = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
+        tag = "cheats-on" if cheats else "cheats-off"
+        write_if_changed(build_dir / f"{BASE0_ARTIFACT_STEM}.{tag}.stdout.log",
+                         completed.stdout.encode("utf-8"))
+        write_if_changed(build_dir / f"{BASE0_ARTIFACT_STEM}.{tag}.stderr.log",
+                         completed.stderr.encode("utf-8"))
+        outputs[cheats] = completed.stdout + completed.stderr
+        if completed.returncode != 0:
+            sys.stderr.write(outputs[cheats])
+            raise RuntimeError(f"base-0 runtime with {tag} exited {completed.returncode}")
+    if failure := cheats_base0_evidence_failure(outputs[True], outputs[False], frames,
+                                                cheat_file.name):
+        sys.stderr.write(outputs[True] + outputs[False])
+        raise RuntimeError(f"base-0 cheats evidence {failure}")
+    print(
+        f"DISPLAY_SMOKE_CHEATS-BASE0 status=PASS frames={frames} on=1 refused=2 "
+        f"data=0x{IMAGE_SIZE - 4:08x} psp_data=0x{PSP_IMAGE_BASE + IMAGE_SIZE - 4:08x}"
     )
     return 0
 
@@ -2089,6 +2247,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     player_parser.add_argument("--build-dir", type=Path, required=True)
     quit_parser = subparsers.add_parser("quit")
     quit_parser.add_argument("--build-dir", type=Path, required=True)
+    cheats_base0_parser = subparsers.add_parser(
+        "cheats-base0",
+        help="run the guest built at base 0 with a CWCheat file, and again without cheats",
+    )
+    cheats_base0_parser.add_argument("--build-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "run" and args.offscreen and not args.gui:
         run_parser.error("--offscreen requires --gui")
@@ -2119,6 +2282,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_player(args.build_dir)
         if args.command == "quit":
             return run_quit(args.build_dir)
+        if args.command == "cheats-base0":
+            return cheats_base0(args.build_dir)
         raise AssertionError(f"unhandled command {args.command}")
     except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as error:
         sys.stderr.write(f"DISPLAY_SMOKE_{args.command.upper()} status=FAIL: {error}\n")

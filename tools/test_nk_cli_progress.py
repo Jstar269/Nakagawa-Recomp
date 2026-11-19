@@ -814,6 +814,76 @@ class NkCliVramTests(unittest.TestCase):
             )
             self.assertNotEqual(process.returncode, 0)
 
+    def _vram_export(self, sidecar: Path, output: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(CLI_PATH), "vram", "--from-sidecar", str(sidecar),
+             "--out-dir", str(output)],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+
+    def test_one_oversized_surface_does_not_abandon_the_rest(self) -> None:
+        # The runtime lists texture levels from live GE state: a stale TEXSIZE nibble of
+        # 13 gives a width of 8192, and a texture format nibble of 12 or more is no format.
+        with tempfile.TemporaryDirectory(prefix="nk_cli_vram_oversized_") as temp:
+            root = Path(temp)
+            sidecar, _expected = self._make_fixture(root)
+            document = json.loads(sidecar.read_text(encoding="utf-8"))
+            good = next(item for item in document["surfaces"] if item["format_code"] == 0)
+            wide = dict(good, name="texture_level_1", width=8192, height=1, stride=8192)
+            no_format = dict(good, name="texture_level_2", format_code=13)
+            document["surfaces"] = [wide, no_format, good]
+            sidecar.write_text(json.dumps(document), encoding="utf-8")
+            output = root / "png-oversized"
+            process = self._vram_export(sidecar, output)
+            self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            self.assertIn("VRAM_SURFACE_UNAVAILABLE name=texture_level_1 "
+                          "reason=unsupported_dimensions", process.stderr)
+            self.assertIn("VRAM_SURFACE_UNAVAILABLE name=texture_level_2 "
+                          "reason=unsupported_dimensions", process.stderr)
+            self.assertIn("VRAM_EXPORT_PARTIAL exported=1 unavailable=2", process.stderr)
+            self.assertTrue((output / f"{good['name']}.png").is_file())
+            self.assertFalse((output / "texture_level_1.png").exists())
+
+    def test_a_clut_field_of_the_wrong_type_is_a_named_failure_not_a_traceback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk_cli_vram_clut_type_") as temp:
+            root = Path(temp)
+            sidecar, _expected = self._make_fixture(root)
+            document = json.loads(sidecar.read_text(encoding="utf-8"))
+            document["surfaces"] = [item for item in document["surfaces"]
+                                    if item["name"] == "indexed8"]
+            document["clut"]["loaded_data_hex"] = ""
+            outputs = {}
+            # An integer address reads as the same address its hex string names.
+            for label, address in (("string", "0x04000000"), ("integer", 0x04000000)):
+                document["clut"]["addr"] = address
+                sidecar.write_text(json.dumps(document), encoding="utf-8")
+                process = self._vram_export(sidecar, root / label)
+                self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+                outputs[label] = (root / label / "indexed8.png").read_bytes()
+            self.assertEqual(outputs["integer"], outputs["string"])
+            # Neither a string nor an integer: the export fails by name.
+            for field, value in (("addr", [4096]), ("loaded_data_hex", 7)):
+                with self.subTest(field=field):
+                    broken = json.loads(json.dumps(document))
+                    broken["clut"]["addr"] = "0x04000000"
+                    broken["clut"][field] = value
+                    sidecar.write_text(json.dumps(broken), encoding="utf-8")
+                    process = self._vram_export(sidecar, root / f"broken-{field}")
+                    self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
+                    self.assertIn("VRAM_PNG status=FAIL", process.stderr)
+                    self.assertNotIn("Traceback", process.stderr)
+            # A palette surface whose bytes are not a hex string fails the same way.
+            palette = json.loads(json.dumps(document))
+            palette["surfaces"] = [{
+                "name": "clut_preview", "kind": "palette", "addr": "0x04000000",
+                "width": 4, "height": 1, "stride": 4, "format_code": 0, "data_hex": 5,
+            }]
+            sidecar.write_text(json.dumps(palette), encoding="utf-8")
+            process = self._vram_export(sidecar, root / "broken-palette")
+            self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
+            self.assertIn("VRAM_PNG status=FAIL", process.stderr)
+            self.assertNotIn("Traceback", process.stderr)
+
     def test_depth_surface_declares_the_screen_width_not_the_stride(self) -> None:
         source = (ROOT / "src" / "rt" / "ge.c").read_text(encoding="utf-8")
         header = source.index('"\\"depth_buffer\\":{')

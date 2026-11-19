@@ -1157,14 +1157,10 @@ void sr_hle_loadexec_reset_guest_state(void) {
     memset(s_ge_cb, 0, sizeof(s_ge_cb));
     loadexec_reset_user_partition();
 
-    for (unsigned i = 0; i < FPL_MAX; i++) {
-        free(s_fpls[i].free_blocks);
-        free(s_fpls[i].allocated);
-    }
-    memset(s_fpls, 0, sizeof(s_fpls));
-    for (unsigned i = 0; i < VPL_MAX; i++) vpl_release(&s_vpls[i]);
+    fpl_table_reset();
+    vpl_table_reset();
     hle_sync_reset();
-    memset(s_mbx, 0, sizeof(s_mbx));
+    mbx_table_reset();
     mutex_reset_all();
 
     if (s_callbacks) free(s_callbacks);
