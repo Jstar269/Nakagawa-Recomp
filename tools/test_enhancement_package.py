@@ -5482,6 +5482,30 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 self.assertTrue(all(f.code in ("ENHANCEMENT_PACKAGE_NAME", "ENHANCEMENT_PACKAGE_UNREADABLE")
                                     for f in findings), findings)
 
+    def test_executable_symbol_names_include_a_name_at_string_index_zero(self) -> None:
+        """A symbol is skipped only when its name is empty. In a string table that does not start
+        with a NUL, the symbol whose st_name is 0 has a name, and --publish must see it."""
+        strings = b"synth_first\x00synth_data\x00"
+        symbols = (
+            (0, 0x00001000, 2),                              # STT_FUNC named by index 0
+            (strings.index(b"synth_data"), 0x00002000, 1),   # STT_OBJECT
+            (strings.index(b"\x00"), 0x00003000, 2),         # an empty name: unnamed
+            (len(strings), 0x00004000, 2),                   # an index past the table
+        )
+        table = b"".join(struct.pack("<IIIBBH", name, value, 0, kind, 0, 1) for name, value, kind in symbols)
+        sections = {
+            ".strtab": {"off": 0, "size": len(strings)},
+            ".symtab": {"off": len(strings), "size": len(table), "entsz": 16},
+        }
+        elf = mock.Mock(data=strings + table, base=0, reloc=None)
+        elf.sec.side_effect = sections.get
+
+        names = enhancement_package.extract_elf_symbol_names(elf)
+
+        self.assertEqual(names, {"synth_first", "synth_data"})
+        # Every function name origin/main's check compared against is among them.
+        self.assertEqual(set(enhancement_package.extract_elf_func_symbols(elf)), {"synth_first"})
+
     def test_publish_refuses_names_from_the_executables_symbol_table(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)

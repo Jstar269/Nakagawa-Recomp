@@ -1323,8 +1323,10 @@ def extract_elf_symbol_names(elf: Any) -> set[str]:
         if offset + 16 > len(data):
             break
         st_name = struct.unpack_from("<I", data, offset)[0]
-        if not st_name or st_name >= len(strings):
+        if st_name >= len(strings):
             continue
+        # A symbol is unnamed when its name is empty, not when its index is 0: a string table
+        # that does not start with a NUL has a name there.
         end = strings.find(b"\x00", st_name)
         if end <= st_name:
             continue
