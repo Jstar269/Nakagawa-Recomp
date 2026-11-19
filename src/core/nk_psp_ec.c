@@ -7,6 +7,8 @@
  * All arithmetic is big-endian over fixed 160-bit values; curve parameters
  * arrive from the KeyStore.  Verification only -- there is no signing and
  * no key generation in this translation unit.
+ *
+ * 2026-11-18: point_on_curve refuses a coordinate that is not below p.
  */
 
 #include <string.h>
@@ -248,6 +250,11 @@ static void point_add(const NkEcParams *params, const EcPoint *p,
 static int point_on_curve(const NkEcParams *params, const EcPoint *p)
 {
     uint8_t yy[NK_EC_Len], xxx[NK_EC_Len], ax[NK_EC_Len], rhs[NK_EC_Len];
+    /* SEC 1 3.2.2.1: both coordinates lie in [0, p). An unreduced x + p or
+     * y + p still satisfies the equation below modulo p, but mod_add and
+     * mod_sub assume inputs below p, so the point arithmetic would leave the
+     * field. */
+    if (ge(p->x, params->p) || ge(p->y, params->p)) return 0;
     mod_mul(p->y, p->y, params->p, yy);
     mod_mul(p->x, p->x, params->p, xxx);
     mod_mul(xxx, p->x, params->p, xxx);

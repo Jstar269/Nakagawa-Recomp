@@ -836,6 +836,8 @@ class TestSyntheticEndToEnd(unittest.TestCase):
     """A source-owned encrypted fixture is
     unwrapped end-to-end by the production boundary."""
 
+    tmp: ClassVar[Path]
+    exe: ClassVar[Path]
     elf: ClassVar[bytes]
 
     @classmethod
@@ -888,6 +890,37 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(dst.read_bytes(), self.elf)
 
+    def _decrypt_top_level(self, name: str, data: bytes):
+        src = self.tmp / f"{name}.gz"
+        dst = self.tmp / f"{name}.out"
+        src.write_bytes(data)
+        dst.unlink(missing_ok=True)
+        out = subprocess.run(
+            [str(self.exe), "decrypt", "--key-file", str(self.tmp / "absent.json"),
+             "--in", str(src), "--out", str(dst)],
+            capture_output=True, text=True,
+        )
+        return out, dst
+
+    def test_top_level_gzip_of_an_elf_decrypts(self):
+        out, dst = self._decrypt_top_level("top_gzip_elf", gzip_payload(self.elf))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("DECRYPT_OK", out.stdout)
+        self.assertEqual(dst.read_bytes(), self.elf)
+
+    def test_top_level_gzip_that_is_not_an_elf_is_refused(self):
+        """F-ce7d22cc: the gzip path checks the ELF magic, as the ~PSP path does.
+
+        Failing before: a gzip of non-ELF bytes was written out and reported as
+        DECRYPT_OK, a validated decryption of something that is not a module.
+        """
+        out, dst = self._decrypt_top_level(
+            "top_gzip_png", gzip_payload(b"\x89PNG\r\n\x1a\n" + bytes(64)))
+        self.assertNotEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("DECRYPT_OK", out.stdout)
+        self.assertIn("not an ELF image", out.stdout + out.stderr)
+        self.assertFalse(dst.exists())
+
     def test_gzip_payload_with_stored_blocks_between_huffman_blocks(self):
         """A gzip payload that switches between Huffman and stored blocks decrypts.
 
@@ -916,6 +949,83 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         )
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertEqual(dst.read_bytes(), plain)
+
+    def test_non_ascii_in_and_out_paths_decrypt(self):
+        """A per-user folder with an accented or CJK letter still decrypts.
+
+        On Windows nk_decrypt used the narrow argv, which the C runtime builds in
+        the ANSI code page, and nk_fopen_utf8 refuses those bytes as UTF-8: every
+        run printed IO_FAILURE cannot read input file and exited 1.
+        """
+        container, entries, _ = self._seal(self.elf, compressed=False)
+        folder = self.tmp / "décodé_日本"
+        folder.mkdir(exist_ok=True)
+        src = folder / "EBOOT_é.BIN"
+        src.write_bytes(container)
+        keyfile = folder / "keys_é.json"
+        write_keyfile(keyfile, entries)
+        dst = folder / "EBOOT_日.elf"
+        out = subprocess.run(
+            [str(self.exe), "decrypt", "--key-file", str(keyfile),
+             "--in", str(src), "--out", str(dst)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(dst.read_bytes(), self.elf)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes and resource limits")
+    def test_decrypted_output_is_owner_only(self):
+        """The decrypted module is created 0600, not under the caller's umask."""
+        container, entries, _ = self._seal(self.elf, compressed=False)
+        src = self.tmp / "EBOOT_mode.BIN"
+        src.write_bytes(container)
+        keyfile = self.tmp / "keys_mode.json"
+        write_keyfile(keyfile, entries)
+        dst = self.tmp / "EBOOT_mode.elf"
+        dst.unlink(missing_ok=True)
+        out = subprocess.run(
+            [str(self.exe), "decrypt", "--key-file", str(keyfile),
+             "--in", str(src), "--out", str(dst)],
+            capture_output=True, text=True,
+            preexec_fn=lambda: os.umask(0o022),
+        )
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(dst.stat().st_mode & 0o777, 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file modes and resource limits")
+    def test_a_short_write_leaves_no_partial_output(self):
+        """A write that stops part way (a full disk) leaves nothing at --out.
+
+        The output used to be opened in place, so a short write left a truncated
+        module at --out, which decrypt_tool keeps as a finished copy on the next run.
+        A file-size limit with SIGXFSZ ignored makes the write stop the way a full
+        disk does.
+        """
+        import resource
+        import signal
+
+        container, entries, _ = self._seal(self.elf, compressed=False)
+        src = self.tmp / "EBOOT_short.BIN"
+        src.write_bytes(container)
+        keyfile = self.tmp / "keys_short.json"
+        write_keyfile(keyfile, entries)
+        dst = self.tmp / "EBOOT_short.elf"
+        dst.unlink(missing_ok=True)
+        limit = len(self.elf) // 2
+
+        def limit_file_size():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+        out = subprocess.run(
+            [str(self.exe), "decrypt", "--key-file", str(keyfile),
+             "--in", str(src), "--out", str(dst)],
+            capture_output=True, text=True, preexec_fn=limit_file_size,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("IO_FAILURE", out.stdout)
+        self.assertFalse(dst.exists())
+        self.assertFalse(Path(str(dst) + ".tmp").exists())
 
     def test_probe_reports_needed_entries_without_keyfile(self):
         container, _, _ = self._seal(self.elf, compressed=False)
@@ -1016,6 +1126,22 @@ BUILTIN_TABLE = ROOT / "src" / "core" / "nk_psp_builtin_keys.c"
 BUILTIN_GAME_TAG = 0xD91613F0
 FIRMWARE_TAGS = (0x0B000000, 0x0E000000, 0x0F000000, 0x862648D1, 0x07000000, 0x0B2B92F0,
                  0x06000000, 0x0B2B10F0)
+# One tag from each flash0 firmware-module family PPSSPP's table carries (kernel modules:
+# 0x4C94xxF0, 0xCFEFxxF0, 0x16D59E03; VSH modules: 0x457BxxF0, 0x3802xxF0, 0x76202403,
+# 0x0F037303), with the name the refusal gives it.
+FIRMWARE_MODULE_TAGS = {
+    0x4C9494F0: "flash0 kernel firmware module", 0x4C940FF0: "flash0 kernel firmware module",
+    0xCFEF09F0: "flash0 kernel firmware module", 0x16D59E03: "flash0 kernel firmware module",
+    0x457B90F0: "flash0 VSH firmware module", 0x380290F0: "flash0 VSH firmware module",
+    0x380280F0: "flash0 VSH firmware module", 0x76202403: "flash0 VSH firmware module",
+    0x0F037303: "flash0 VSH firmware module",
+}
+
+
+def is_firmware_module_tag(tag: int) -> bool:
+    """True for a tag in one of the flash0 kernel or VSH module families."""
+    return (tag & 0xFFFF00FF) in (0x4C9400F0, 0xCFEF00F0, 0x457B00F0, 0x380200F0) or tag in (
+        0x16D59E03, 0x76202403, 0x0F037303)
 
 
 def builtin_table() -> tuple[dict, dict, dict]:
@@ -1149,12 +1275,29 @@ class TestBuiltinTables(unittest.TestCase):
                     self.assertNotIn("KEY_REQUIRED", out.stdout)
                     self.assertFalse(dst.exists())
 
+    def test_flash0_firmware_modules_are_refused_by_name_before_any_key_lookup(self):
+        # AGENTS.md section 5: an encrypted module copied from a console's flash0 is
+        # refused by name, as firmware, whatever key store is loaded.
+        absent = self.tmp / "no-such-keys.json"
+        for tag, what in FIRMWARE_MODULE_TAGS.items():
+            for extra in ((), ("--key-file", str(absent))):
+                with self.subTest(tag=f"0x{tag:08X}", key_store="empty" if extra else "built-in"):
+                    out, dst = self._run(f"fw_module_{tag:08X}", self._seal_builtin(tag), *extra)
+                    self.assertEqual(out.returncode, 10, out.stdout + out.stderr)
+                    self.assertIn("FIRMWARE_OUT_OF_SCOPE", out.stdout)
+                    self.assertIn(f"container tag 0x{tag:08X} marks a {what}", out.stdout)
+                    self.assertNotIn("KEY_REQUIRED", out.stdout)
+                    self.assertFalse(dst.exists())
+
     def test_table_carries_no_firmware_recipe_or_psar_value(self):
-        self.assertEqual(set(self.firmware), set(FIRMWARE_TAGS) | {
+        containers = {tag for tag in self.firmware if not is_firmware_module_tag(tag)}
+        self.assertEqual(containers, set(FIRMWARE_TAGS) | {
             0x0B2B90F0, 0x0B2B91F0, 0x495BE403, 0x0B2B05F0, 0x0B2B06F0, 0x0B2B08F0,
             0x0B2B0AF0, 0x0B2B0BF0, 0x0B2B11F0, 0x0B2B1EF0, 0x0B2B0CF0, 0x0B2B12F0,
             0x0B2B1FF0, 0x0B2B80F0, 0x0B2B81F0, 0x0B2B82F0})
         self.assertFalse(set(self.firmware) & set(self.recipes))
+        self.assertFalse([tag for tag in self.recipes if is_firmware_module_tag(tag)])
+        self.assertTrue(set(FIRMWARE_MODULE_TAGS) <= set(self.firmware))
         self.assertFalse([name for name in self.values if name.startswith("psar.")])
         used = {recipe["code"] for recipe in self.recipes.values()}
         rows = {int(name.rsplit(".", 1)[1]) for name in self.values
@@ -1336,6 +1479,18 @@ class TestMatchedTypeDiagnosis(unittest.TestCase):
             f"expected the keyvault entry first, got: {first!r}",
         )
         self.assertNotIn("kirk.ecdsa", combined)
+
+    def test_zero_padded_keyvault_name_is_refused_when_the_file_loads(self):
+        """A slot has one spelling. kirk.keyvault.067 used to load cleanly and then
+        never be found, so the decrypt asked for kirk.keyvault.67, which the user
+        believed was present. The key file is refused by the padded name instead."""
+        container, entries = self._sealed()
+        entries[f"kirk.keyvault.0{SYNTH_CODE}"] = entries.pop(f"kirk.keyvault.{SYNTH_CODE}")
+        out, dst, combined = self._decrypt("diag_padded", container, entries)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse(dst.exists())
+        self.assertIn(f"unknown key entry name 'kirk.keyvault.0{SYNTH_CODE}'", combined)
+        self.assertNotIn("KEY_REQUIRED", combined)
 
     def test_container_matching_no_type_reports_format_failure(self):
         """A ~PSP container whose header no type's selector matches is a
@@ -1634,6 +1789,267 @@ class TestKeystoreErasure(unittest.TestCase):
             "the erasure was not measured (probes were distinct blocks: "
             f"{report['probes_distinct']}, control marker survived: "
             f"{report['control_reclaimed']})")
+
+
+# The key file's text form is the other copy of the keys: the JSON reader holds
+# every hex value in its own heap strings (and their growth buffers) until the
+# tree is freed. This harness compiles the production nk_json.c and
+# nk_psp_keystore.c into itself with malloc/calloc/realloc/free routed through a
+# tracker, and scans every block those two files release, at the moment of
+# release, for the keys in text and in binary form. realloc is modelled as
+# always moving, the case where the allocator leaves the old block behind. No
+# allocator behaviour is assumed and no freed memory is read.
+_ERASE_TAG144_MATERIAL = bytes(((i * 37) + 0x41) & 0xFF for i in range(144))
+
+_TEXT_ERASE_HARNESS_C = r"""
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#if defined(_WIN32) || defined(_WIN64)
+#include <windows.h>
+#endif
+#include <ctype.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "nk_json.h"
+#include "nk_platform.h"
+#include "nk_psp_builtin_keys.h"
+#include "nk_psp_crypto.h"
+#include "nk_psp_keystore.h"
+
+#define TRACK_MAX 65536
+static struct { void *ptr; size_t size; } g_live[TRACK_MAX];
+static unsigned char g_needles[6][32];
+static size_t g_needle_len[6];
+static size_t g_needle_count;
+static size_t g_hits, g_released, g_untracked;
+static int g_overflow;
+
+static void track_add(void *ptr, size_t size)
+{
+    for (size_t i = 0; i < TRACK_MAX; i++) {
+        if (g_live[i].ptr == NULL) { g_live[i].ptr = ptr; g_live[i].size = size; return; }
+    }
+    g_overflow = 1;
+}
+
+static int track_take(void *ptr, size_t *size)
+{
+    for (size_t i = 0; i < TRACK_MAX; i++) {
+        if (g_live[i].ptr == ptr) { *size = g_live[i].size; g_live[i].ptr = NULL; return 1; }
+    }
+    return 0;
+}
+
+static size_t live_blocks(void)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < TRACK_MAX; i++) n += g_live[i].ptr != NULL;
+    return n;
+}
+
+static void scan_released(const unsigned char *block, size_t size)
+{
+    g_released++;
+    for (size_t k = 0; k < g_needle_count; k++) {
+        size_t len = g_needle_len[k];
+        for (size_t i = 0; i + len <= size; i++) {
+            if (memcmp(block + i, g_needles[k], len) == 0) g_hits++;
+        }
+    }
+}
+
+static void *tracked_malloc(size_t size)
+{
+    void *ptr = malloc(size ? size : 1);
+    if (ptr) track_add(ptr, size);
+    return ptr;
+}
+
+static void *tracked_calloc(size_t count, size_t size)
+{
+    void *ptr = calloc(count ? count : 1, size ? size : 1);
+    if (ptr) track_add(ptr, count * size);
+    return ptr;
+}
+
+static void tracked_free(void *ptr)
+{
+    size_t size = 0;
+    if (ptr == NULL) return;
+    if (track_take(ptr, &size)) scan_released((const unsigned char *)ptr, size);
+    else g_untracked++;
+    free(ptr);
+}
+
+static void *tracked_realloc(void *ptr, size_t size)
+{
+    size_t old = 0;
+    void *moved;
+    if (ptr == NULL) return tracked_malloc(size);
+    if (!track_take(ptr, &old)) { g_untracked++; return NULL; }
+    moved = malloc(size ? size : 1);
+    if (moved == NULL) { track_add(ptr, old); return NULL; }
+    memcpy(moved, ptr, old < size ? old : size);
+    scan_released((const unsigned char *)ptr, old);
+    free(ptr);
+    track_add(moved, size);
+    return moved;
+}
+
+#define malloc(n) tracked_malloc(n)
+#define calloc(c, n) tracked_calloc((c), (n))
+#define realloc(p, n) tracked_realloc((p), (n))
+#define free(p) tracked_free(p)
+#include "nk_json.c"
+#include "nk_psp_keystore.c"
+#undef malloc
+#undef calloc
+#undef realloc
+#undef free
+
+static void add_needle(const unsigned char *bytes, size_t len)
+{
+    static const char hex[] = "0123456789abcdef";
+    memcpy(g_needles[g_needle_count], bytes, len);
+    g_needle_len[g_needle_count++] = len;
+    for (size_t i = 0; i < 16; i++) {
+        g_needles[g_needle_count][2 * i] = (unsigned char)hex[bytes[i] >> 4];
+        g_needles[g_needle_count][2 * i + 1] = (unsigned char)hex[bytes[i] & 15];
+    }
+    g_needle_len[g_needle_count++] = 32;
+}
+
+int main(int argc, char **argv)
+{
+    unsigned char flat[16], tag[16], tag144[144];
+    char err[512];
+    size_t control_hits;
+    int status, read_back = 0;
+    NkKeystore *ks;
+    if (argc < 2) return 2;
+    for (size_t i = 0; i < 16; i++) { flat[i] = (unsigned char)(0x10 + i); tag[i] = (unsigned char)(0x80 + i); }
+    for (size_t i = 0; i < 144; i++) tag144[i] = (unsigned char)((i * 37u + 0x41u) & 0xFFu);
+    add_needle(flat, 16);
+    add_needle(tag, 16);
+    add_needle(tag144, 16);
+
+    /* Positive control: an unwiped block holding the text form is seen. */
+    {
+        char *copy = (char *)tracked_malloc(64);
+        if (copy == NULL) return 2;
+        memset(copy, 0, 64);
+        memcpy(copy, g_needles[1], 32);
+        tracked_free(copy);
+        control_hits = g_hits;
+        g_hits = 0;
+        g_released = 0;
+    }
+
+    ks = nk_keystore_create();
+    if (ks == NULL) return 2;
+    status = nk_keystore_load_file(ks, argv[1], err, sizeof(err));
+    if (status == 0) {
+        const uint8_t *got = NULL;
+        size_t got_len = 0;
+        NkPrxTagEntry entry;
+        if (nk_keystore_get(ks, "kirk.cmd1.key", &got, &got_len) == 0 &&
+            got_len == 16 && memcmp(got, flat, 16) == 0) read_back++;
+        memset(&entry, 0, sizeof(entry));
+        if (nk_keystore_get_prx_tag(ks, 0x0BADC0DEu, &entry) == 0 && entry.key != NULL &&
+            memcmp(entry.key, tag, 16) == 0) read_back++;
+        memset(&entry, 0, sizeof(entry));
+        if (nk_keystore_get_prx_tag(ks, 0x0BADC0DFu, &entry) == 0 && entry.key144 != NULL &&
+            memcmp(entry.key144, tag144, 144) == 0) read_back++;
+    }
+    nk_keystore_free(ks);
+    printf("{\"control_hits\": %zu, \"status\": %d, \"read_back\": %d, \"released\": %zu, "
+           "\"hits\": %zu, \"live\": %zu, \"untracked\": %zu, \"overflow\": %d}\n",
+           control_hits, status, read_back, g_released, g_hits, live_blocks(),
+           g_untracked, g_overflow);
+    return 0;
+}
+"""
+
+
+def _text_erase_keyfile(tail: bytes = b"", trailer: bytes = b"") -> bytes:
+    return (
+        b'{"format": "nakagawa-psp-keystore-1", "entries": {'
+        b'"kirk.cmd1.key": "' + _ERASE_FLAT_KEY.hex().encode() + b'", '
+        b'"prx.tag.0x0BADC0DE": {"code": 1, "key": "' + _ERASE_TAG_KEY.hex().encode() + b'"}, '
+        b'"prx.tag.0x0BADC0DF": {"code": 2, "key144": "' + _ERASE_TAG144_MATERIAL.hex().encode()
+        + b'"}' + tail + b'}}' + trailer
+    )
+
+
+@unittest.skipUnless(CC, "no C compiler on PATH")
+class TestKeystoreTextErasure(unittest.TestCase):
+    """The key file's hex text must not outlive a load, on success or failure.
+
+    TestKeystoreErasure scans the entry arrays for the binary keys. This suite
+    covers the copies the JSON reader makes: every block nk_json.c and
+    nk_psp_keystore.c release is scanned as it is released, so a hit is a
+    released block that still held a key, in hex text or in binary.
+    """
+
+    tmp: ClassVar[Path]
+    exe: ClassVar[Path]
+
+    @classmethod
+    def setUpClass(cls):
+        from tools.nk_core import decrypt_tool
+
+        cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_text_erase_"))
+        source = cls.tmp / "text_erase_harness.c"
+        source.write_text(_TEXT_ERASE_HARNESS_C, encoding="utf-8")
+        cls.exe = cls.tmp / "text_erase_harness.exe"
+        excluded = ("nk_decrypt_main.c", "nk_json.c", "nk_psp_keystore.c")
+        cmd = [cast(str, CC), "-std=c99", "-O2", "-Wall", "-Wextra",
+               "-I", str(ROOT / "src" / "core"), str(source)]
+        cmd.extend(str(ROOT / rel) for rel in decrypt_tool.SOURCES
+                   if not rel.endswith(excluded))
+        cmd.extend(["-o", str(cls.exe)])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+            raise AssertionError(
+                f"keystore text erasure harness did not build:\n{proc.stdout}{proc.stderr}")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _report(self, payload: bytes) -> dict:
+        keyfile = require_scratch_path(self.tmp / f"keys_{os.urandom(6).hex()}.json")
+        keyfile.write_bytes(payload)
+        out = subprocess.run([str(self.exe), str(keyfile)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        report: dict = json.loads(out.stdout)
+        # The scanner sees an unwiped block, every tracked block came back, and
+        # nothing outside the tracker was released through it.
+        self.assertGreater(report["control_hits"], 0, report)
+        self.assertEqual((report["live"], report["untracked"], report["overflow"]), (0, 0, 0), report)
+        self.assertGreater(report["released"], 0, report)
+        return report
+
+    def test_a_successful_load_leaves_no_key_text_in_released_blocks(self):
+        report = self._report(_text_erase_keyfile())
+        self.assertEqual((report["status"], report["read_back"]), (0, 3), report)
+        self.assertEqual(report["hits"], 0, report)
+
+    def test_a_load_refused_after_the_keys_leaves_no_key_text(self):
+        report = self._report(_text_erase_keyfile(tail=b', "bogus.entry": "00"'))
+        self.assertNotEqual(report["status"], 0, report)
+        self.assertEqual(report["hits"], 0, report)
+
+    def test_a_parse_failure_after_the_keys_leaves_no_key_text(self):
+        report = self._report(_text_erase_keyfile(trailer=b" trailing"))
+        self.assertNotEqual(report["status"], 0, report)
+        self.assertEqual(report["hits"], 0, report)
 
 
 # ---------------------------------------------------------------------------

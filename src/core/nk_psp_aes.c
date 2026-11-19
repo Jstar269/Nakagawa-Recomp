@@ -37,8 +37,10 @@
  * later-version grant, so this port is labelled GPL-3.0-only.
  * The underlying Rijndael implementation carries the notices above
  * (OpenBSD rijndael.c and rijndael-alg-fst.c 3.0, both public domain).
- * Modified for this project: include path only.  No key material is
- * present in this file; all keys enter through the KeyStore at run time.
+ * Modified for this project: include path; 2026-11-18, AES_cbc_decrypt
+ * returns at once for an empty run instead of decrypting a first block.
+ * No key material is present in this file; all keys enter through the
+ * KeyStore at run time.
  */
 
 #include <stdio.h>
@@ -1342,6 +1344,9 @@ void AES_cbc_decrypt(AES_ctx *ctx, const u8 *src, u8 *dst, int size)
 	u8 block_buff_previous[16];
 	int i;
 	
+	/* Nakagawa: an empty run decrypts nothing (the first block used to be
+	 * handled before the length was looked at). */
+	if (size <= 0) return;
 	memcpy(block_buff, src, 16);
 	memcpy(block_buff_previous, src, 16);
 	AES_decrypt(ctx, src, dst);
