@@ -1728,7 +1728,7 @@ static uint32_t h_lwmutex_lock_common(CpuState *s) {
     switch (rc) {
     case LWMUTEX_TAKEN: return 0u;
     case LWMUTEX_NOT_RECURSIVE: return SCE_KERNEL_ERROR_LWMUTEX_RECURSIVE_NOT_ALLOWED;
-    case LWMUTEX_TIMEOUT: return 0x800201a8u;
+    case LWMUTEX_TIMEOUT: return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
     default: return 0x800201b5u;   /* WAIT_DELETE */
     }
 }
@@ -2069,7 +2069,7 @@ static uint32_t h_LockMutex_impl(CpuState *s, int is_cb) {
     uint32_t toptr = A2;
 
     if (sched_is_intr_context()) return 0x80020064u; /* SCE_KERNEL_ERROR_ILLEGAL_CONTEXT */
-    if (!sched_wait_permitted()) return 0x800201A7u; /* SCE_KERNEL_ERROR_CAN_NOT_WAIT */
+    if (!sched_wait_permitted()) return SCE_KERNEL_ERROR_CAN_NOT_WAIT;
 
     Mutex *m = mutex_find(uid);
     if (!m) return SCE_KERNEL_ERROR_UNKNOWN_MUTEXID;

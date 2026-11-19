@@ -753,8 +753,6 @@ static uint32_t h_AudioSRCOutputBlocking(CpuState *s) {
  * shares (also unmeasured). That reference marks a reservation
  * before its later checks and releases any SRC reservation; here a refused reserve marks
  * nothing and each API releases only its own (audio_src_release). */
-#define SCE_KERNEL_ERROR_INVALID_FORMAT 0x80000108u
-#define SCE_KERNEL_ERROR_BUSY           0x80000021u
 #define PSP_VAUDIO_FORMAT_STEREO        2u
 static uint32_t h_VaudioChReserve(CpuState *s) {
     const uint32_t samples = A0, freq = A1, format = A2;

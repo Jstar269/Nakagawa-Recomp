@@ -344,6 +344,68 @@ int main(void) {{
                     self.assertIn(want, effect)
                     self.assertNotIn("-sr_vfpu_exp2(", effect)
 
+    def test_vrot_cosine_lane_drops_its_own_d_prefix_fields(self):
+        # The D prefix keeps lane i's saturation in bits 2i..2i+1 and its write mask in bit
+        # 8+i; the cosine lane drops both (PPSSPP Int_Vrot), so the mask for lane cl is
+        # (3 << 2*cl) | (1 << 8+cl), not (3 << cl), which hit lane cl-1's field for cl >= 1.
+        for cl in range(4):
+            word = ((0x3c << 26) | (7 << 23) | (29 << 21) | (1 << 15) | (1 << 7)
+                    | (cl << 16) | (4 << 8) | 0)
+            with self.subTest(cosine_lane=cl):
+                effect, _, _ = codegen.vfpu_effect(0x4000, word)
+                mask = (3 << (2 * cl)) | (1 << (8 + cl))
+                self.assertIn(f"s->vfpuCtrl[2]&~0x{mask:x}u", effect)
+
+    @unittest.skipUnless(CC, "a host C compiler is required")
+    def test_out_of_range_vfpu_memory_access_stops_by_its_own_name(self):
+        # sr_vfpu_interp refuses an lv.q/sv.q/lvl/lvr/svl/svr span outside guest memory with
+        # SR_VFPU_ACCESS_REFUSED. The generated fallback stops the run as that access, before
+        # the next instruction, and never reports it as a missing encoding on issue #326.
+        words = {
+            "lv.q": (0x36 << 26) | (4 << 21) | 0x10,
+            "sv.q": (0x3E << 26) | (4 << 21) | 0x10,
+            "lvl.q": (0x35 << 26) | (4 << 21) | 0x8,
+            "svr.q": (0x3D << 26) | (4 << 21) | 0x8 | 2,
+        }
+        for name, word in words.items():
+            line = codegen.normal_line(0x1234, word)
+            source = f'''#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#define SR_VFPU_OTHER 0
+#define SR_VFPU_ACCESS_REFUSED 3
+typedef struct CpuState {{ uint32_t pc; uint32_t r[32]; uint32_t vi[128]; }} CpuState;
+static void sr_begin(CpuState *s, uint32_t pc, uint32_t op) {{ (void)s; (void)pc; (void)op; }}
+static void sr_end(CpuState *s, uint32_t addr, uint32_t size) {{ (void)s; (void)addr; (void)size; }}
+static int sr_guest_span_readable(uint32_t a, uint32_t n) {{ (void)a; (void)n; return 0; }}
+static int sr_guest_span_writable(uint32_t a, uint32_t n) {{ (void)a; (void)n; return 0; }}
+static uint32_t MEM_R32(uint32_t a) {{ (void)a; return 0u; }}
+static void MEM_W32_PC(uint32_t a, uint32_t v, uint32_t pc) {{ (void)a; (void)v; (void)pc; }}
+static int sr_vfpu_interp(CpuState *s, uint32_t op) {{ (void)s; (void)op; return SR_VFPU_ACCESS_REFUSED; }}
+static const char *reason;
+static void sr_unimplemented(uint32_t pc, const char *why) {{ (void)pc; reason = why; }}
+static void generated(CpuState *s) {{ {line} s->r[0] = 0xdeadbeefu; }}
+int main(void) {{
+    CpuState s; memset(&s, 0, sizeof s); s.r[4] = 0x7ffffff0u;
+    generated(&s);
+    return reason && strcmp(reason, "VFPU load or store outside guest memory") == 0 && s.r[0] == 0u ? 0 : 1;
+}}
+'''
+            with self.subTest(form=name):
+                with scratch_dir.TemporaryDirectory(prefix="vfpu_refused_fallback_") as tmp:
+                    root = Path(tmp)
+                    source_path = root / "refused.c"
+                    exe_path = root / ("refused.exe" if Path(CC).suffix.lower() == ".exe" else "refused")
+                    source_path.write_text(source, encoding="ascii", newline="\n")
+                    compiled = subprocess.run(
+                        [CC, "-std=c11", "-O0", str(source_path), "-o", str(exe_path)],
+                        capture_output=True, text=True)
+                    self.assertEqual(compiled.returncode, 0, compiled.stderr)
+                    ran = subprocess.run([str(exe_path)], capture_output=True, text=True)
+                    self.assertEqual(ran.returncode, 0, ran.stderr)
+                    self.assertIn("VFPU_ACCESS_OUT_OF_RANGE: pc=0x00001234", ran.stderr)
+                    self.assertNotIn("VFPU_UNSUPPORTED", ran.stderr)
+
     def test_vrot_overlap_ignores_inactive_lanes(self):
         # A scalar source register 0 must not match a zero-filled inactive
         # lane of a pair destination.

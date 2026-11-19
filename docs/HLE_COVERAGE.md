@@ -1058,16 +1058,16 @@ a title that translates none has generated code unchanged.
 | `vfpu-34-d2a68000-7118faa02091` | `0x34` | `0xd2a68004` | 3 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d2a68000-bbca1f833115` | `0x34` | `0xd2a68084` | 4 | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-34-d3000000-8d033fde8982` | `0x34` | `0xd3000000` | 1 | `aot-direct` | `hardware-measured` | selftest pinned to PSP-VFPU-FORMS-001 |
-| `vfpu-35-d4000000-3c6ee712bb5c` | `0x35` | `0xd4000000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
-| `vfpu-35-d4018100-e4c37f0fbf47` | `0x35` | `0xd401810f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
-| `vfpu-35-d4050100-55232218a9a5` | `0x35` | `0xd4050101` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
-| `vfpu-36-d8000000-460695424519` | `0x36` | `0xd8000000` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
-| `vfpu-36-d8018100-a59abdf93d57` | `0x36` | `0xd801810f` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
-| `vfpu-36-d8050100-311bbc14b1ed` | `0x36` | `0xd8050101` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
-| `vfpu-36-d8200000-21b49665cf78` | `0x36` | `0xd8200000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
-| `vfpu-36-d8218000-44bff127c0fe` | `0x36` | `0xd821800f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
-| `vfpu-36-d8258000-b04c26043d59` | `0x36` | `0xd8258081` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
-| `vfpu-36-d9400000-83daafc8f505` | `0x36` | `0xd9400002` | - | `aot-routes-to-sr-vfpu-interp` | `hardware-measured` | selftest pinned to PSP-VFPU-QUADWB-001 |
+| `vfpu-35-d4000000-30ed52b75295` | `0x35` | `0xd4000000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
+| `vfpu-35-d4018100-f95e3da828e4` | `0x35` | `0xd401810f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
+| `vfpu-35-d4050100-241b7b54d297` | `0x35` | `0xd4050101` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
+| `vfpu-36-d8000000-30cb7956a8d1` | `0x36` | `0xd8000000` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
+| `vfpu-36-d8018100-825702516a48` | `0x36` | `0xd801810f` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
+| `vfpu-36-d8050100-8dd825f5ccb5` | `0x36` | `0xd8050101` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
+| `vfpu-36-d8200000-93dd7f8a7407` | `0x36` | `0xd8200000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-36-d8218000-e7dd5ef8e4a5` | `0x36` | `0xd821800f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-36-d8258000-fe7b38135311` | `0x36` | `0xd8258081` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-36-d9400000-8205a8443576` | `0x36` | `0xd9400002` | - | `aot-routes-to-sr-vfpu-interp` | `hardware-measured` | selftest pinned to PSP-VFPU-QUADWB-001 |
 | `vfpu-37-dc000000-04aa804c6140` | `0x37` | `0xdc000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-37-dd000000-fc234082344e` | `0x37` | `0xdd000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
 | `vfpu-37-de000000-7caa71cf79ea` | `0x37` | `0xde000000` | - | `aot-direct` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback`, `vfpu-interp-selftest:check_alias_edge_sweep` |
@@ -1144,14 +1144,14 @@ a title that translates none has generated code unchanged.
 | `vfpu-3c-f3bb8100-d4ba071b47ae` | `0x3c` | `0xf3bb8101` | 3 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
 | `vfpu-3c-f3bf7f00-2468b129850e` | `0x3c` | `0xf3bf7fff` | 2 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
 | `vfpu-3c-f3bfff00-71d7fd3c1ae4` | `0x3c` | `0xf3bfffff` | 4 | `aot-direct` | `ppsspp-derived` | calls `sr_vfpu_cos`, `sr_vfpu_sin` |
-| `vfpu-3d-f4000000-ae5712eb3675` | `0x3d` | `0xf4000000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
-| `vfpu-3d-f4018100-4ab6d9b8ecd6` | `0x3d` | `0xf401810f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
-| `vfpu-3d-f4050100-9398f112c7ca` | `0x3d` | `0xf4050101` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
-| `vfpu-3e-f8000000-eafd4b0b3fa0` | `0x3e` | `0xf8000000` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
-| `vfpu-3e-f8018100-bdb3647af048` | `0x3e` | `0xf801810f` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
-| `vfpu-3e-f8050100-e50967e96480` | `0x3e` | `0xf8050101` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
-| `vfpu-3e-f8200000-c7eee1612aba` | `0x3e` | `0xf8200000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
-| `vfpu-3e-f8218000-9dd390013655` | `0x3e` | `0xf821800f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
-| `vfpu-3e-f8258000-51b5a0cb59ca` | `0x3e` | `0xf8258081` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
-| `vfpu-3e-f9400000-eacdf8c4ae88` | `0x3e` | `0xf9400002` | - | `aot-routes-to-sr-vfpu-interp` | `hardware-measured` | selftest pinned to PSP-VFPU-QUADWB-001 |
+| `vfpu-3d-f4000000-780daabd6524` | `0x3d` | `0xf4000000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
+| `vfpu-3d-f4018100-085ff4a242cc` | `0x3d` | `0xf401810f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
+| `vfpu-3d-f4050100-2015e3b47e92` | `0x3d` | `0xf4050101` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `vfpu-interp-selftest:check_quad_memops` |
+| `vfpu-3e-f8000000-7dab64c0d8ca` | `0x3e` | `0xf8000000` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
+| `vfpu-3e-f8018100-34ace421a012` | `0x3e` | `0xf801810f` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
+| `vfpu-3e-f8050100-8f42ebca67a0` | `0x3e` | `0xf8050101` | - | `aot-routes-to-sr-vfpu-interp` | `unverified` | no recorded evidence |
+| `vfpu-3e-f8200000-95fdd57e57fa` | `0x3e` | `0xf8200000` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-3e-f8218000-aa38a30b4b2b` | `0x3e` | `0xf821800f` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-3e-f8258000-a32e6b5a9ccc` | `0x3e` | `0xf8258081` | - | `aot-routes-to-sr-vfpu-interp` | `synthetic` | `make vfpu_fuzz`, `tools.test_vfpu_synth_corpus.CategoryDistinguishingTests.test_positive_corpus_has_no_fallback` |
+| `vfpu-3e-f9400000-bbd4ccac8e06` | `0x3e` | `0xf9400002` | - | `aot-routes-to-sr-vfpu-interp` | `hardware-measured` | selftest pinned to PSP-VFPU-QUADWB-001 |
 | `vfpu-3f-fc000000-2f62df9cdfc2` | `0x3f` | `0xfc000000` | - | `aot-direct` | `unverified` | no recorded evidence |

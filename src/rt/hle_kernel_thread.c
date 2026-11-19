@@ -399,7 +399,7 @@ static uint32_t h_ReferThreadStatus(CpuState *s) {
     if (!A1 || !sr_guest_span_writable(A1, (uint32_t)sizeof(SrThreadInfo)))
         return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
     SrThreadInfo info;
-    if (sched_thread_info(A0, &info) != 0) return 0x80020198u;
+    if (sched_thread_info(A0, &info) != 0) return SCE_KERNEL_ERROR_UNKNOWN_THID;
     for (uint32_t i = 0; i < sizeof(info.name); i++) MEM_W8(A1 + 4u + i, (uint8_t)info.name[i]);
     MEM_W32(A1 + 0x00u, info.size);
     MEM_W32(A1 + 0x24u, info.attr);
@@ -663,7 +663,7 @@ static uint32_t h_ReleaseWaitThread(CpuState *s) {
     uint32_t self = sched_current_uid();
     if (uid == 0u || uid == self) return 0x80020197u;
     if (!sched_wake_one_object_waiter_with_result(uid, SCE_KERNEL_ERROR_WAIT_RELEASE))
-        return 0x80020198u;
+        return SCE_KERNEL_ERROR_UNKNOWN_THID;
     sched_preempt();
     return 0;
 }

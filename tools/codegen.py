@@ -2515,6 +2515,24 @@ def _vfpu_interp_stmt(addr, w):
             f"sr_unimplemented({G(addr)}, \"VFPU unsupported encoding; issue #326\"); "
             "sr_end(s, 0u, 0); return; }")
 
+
+def _vfpu_mem_interp_stmt(addr, w):
+    """The interpreter fallback for a VFPU load or store (lvl/lvr/svl/svr, lv.q, sv.q).
+
+    The interpreter refuses a span that is not wholly guest-readable or writable with
+    SR_VFPU_ACCESS_REFUSED (nothing accessed, no prefix consumed); that stops the run as
+    the out-of-range access it is, not as a missing encoding on issue #326."""
+    return (f"s->pc={G(addr)}; {{ int _vr = sr_vfpu_interp(s,0x{w:08x}u); "
+            "if (_vr == SR_VFPU_ACCESS_REFUSED) { "
+            f"fprintf(stderr, \"VFPU_ACCESS_OUT_OF_RANGE: pc=0x{addr:08x} word=0x{w:08x}\\n\"); "
+            f"sr_unimplemented({G(addr)}, \"VFPU load or store outside guest memory\"); "
+            "sr_end(s, 0u, 0); return; } "
+            "if (_vr == SR_VFPU_OTHER) { "
+            f"fprintf(stderr, \"VFPU_UNSUPPORTED: pc=0x{addr:08x} word=0x{w:08x} issue=326\\n\"); "
+            f"sr_unimplemented({G(addr)}, \"VFPU unsupported encoding; issue #326\"); "
+            "sr_end(s, 0u, 0); return; } }")
+
+
 def _half_to_f32_bits(h):
     s = (h >> 15) & 1
     e = (h >> 10) & 0x1F
@@ -3134,7 +3152,7 @@ def _vfpu_left_right_effect(addr, w, options, delay_branch_pc):
     # Guest code pages are not guaranteed to remain mapped in the runtime image.
     # Pass the instruction captured from the ELF directly instead of asking dispatch
     # to reread it from MEM[pc] (which can be zero after loader/data overlays).
-    run = _vfpu_interp_stmt(addr, w)
+    run = _vfpu_mem_interp_stmt(addr, w)
     return run, (base if op == 0x3d else None), (16 if op == 0x3d else 0)
 def _vfpu_quad_memory_effect(addr, w, options, delay_branch_pc):
     op = w >> 26
@@ -3156,11 +3174,11 @@ def _vfpu_lvq(addr, w, options, delay_branch_pc):
         return (f"{{ uint32_t _a = {base}; if (sr_cpu_guard_access(s, _a, 16u, 0, "
                 f"{G(addr)}, {branch}, {in_delay}u)) {{ sr_end(s, 0u, 0); return; }} "
                 f"if((_a&15u)==0 && sr_guest_span_readable(_a,16u)){{ {parts} }}else{{"
-                f"{_vfpu_interp_stmt(addr, w)} }} }}"), None, 0
+                f"{_vfpu_mem_interp_stmt(addr, w)} }} }}"), None, 0
     # The whole 16-byte span must be readable before any destination lane commits.
     parts = " ".join(f"s->vi[{idx[i]}] = MEM_R32(_a + {i*4});" for i in range(4))
     return (f"{{ uint32_t _a = {base}; if((_a&15u)==0 && sr_guest_span_readable(_a,16u)){{ {parts} }}else{{"
-            f"{_vfpu_interp_stmt(addr, w)} }} }}"), None, 0
+            f"{_vfpu_mem_interp_stmt(addr, w)} }} }}"), None, 0
 
 
 def _vfpu_svq(addr, w, options, delay_branch_pc):
@@ -3175,10 +3193,10 @@ def _vfpu_svq(addr, w, options, delay_branch_pc):
         return (f"{{ uint32_t _a = {base}; if (sr_cpu_guard_access(s, _a, 16u, 1, "
                 f"{G(addr)}, {branch}, {in_delay}u)) {{ sr_end(s, 0u, 0); return; }} "
                 f"if((_a&15u)==0 && sr_guest_span_writable(_a,16u)){{ {parts} }}else{{"
-                f"{_vfpu_interp_stmt(addr, w)} }} }}"), base, 16
+                f"{_vfpu_mem_interp_stmt(addr, w)} }} }}"), base, 16
     parts = " ".join(f"MEM_W32_PC(_a + {i*4}, s->vi[{idx[i]}], {G(addr)});" for i in range(4))
     return (f"{{ uint32_t _a = {base}; if((_a&15u)==0 && sr_guest_span_writable(_a,16u)){{ {parts} }}else{{"
-            f"{_vfpu_interp_stmt(addr, w)} }} }}"), base, 16  # sv.q
+            f"{_vfpu_mem_interp_stmt(addr, w)} }} }}"), base, 16  # sv.q
 
 
 _VFPU_QUAD_MEMORY_FORMS = {0x36: _vfpu_lvq, 0x3E: _vfpu_svq}
@@ -3470,8 +3488,10 @@ def _vfpu_rotation_effect(addr, w, options, delay_branch_pc):
         dnames=vreg_names(vd,n)
         if vs in dnames:
             lines.append(f"_d[{cos_lane}]=sr_vfpu_cos(_d[{dnames.index(vs)}]);")
-    # PSP ignores destination saturation and write-mask bits for the cosine lane.
-    dmask=(3<<cos_lane)|(1<<(8+cos_lane))
+    # The cosine lane drops its D-prefix saturation (bits 2*lane..2*lane+1) and write-mask
+    # (bit 8+lane) fields, as sr_vfpu_interp does (PPSSPP Int_Vrot at
+    # 154d52379a3f205002aca1f729e6761b7e06dde7: PPSSPP-derived, not PSP-measured).
+    dmask=(3<<(2*cos_lane))|(1<<(8+cos_lane))
     lines.append(_nanv(addr, "vrot", vd, "_d", n, "(&_a)", 1, options=options)
                  + f"sr_vwrite(s,{_arr(di)},_d,{n},s->vfpuCtrl[2]&~0x{dmask:x}u);{_EAT}")
     return "{ " + " ".join(lines) + " }", None, 0
@@ -4135,7 +4155,8 @@ def _plain_line(addr, w, trace_w, lle_cpu=None, delay_branch_pc=None, options=No
         # runtime guest code pages may be unmapped or overlaid and cannot be reread by PC.
         if (w >> 26) not in (0x12,0x18,0x19,0x1b,0x32,0x34,0x35,0x36,0x37,0x3a,0x3c,0x3d,0x3e,0x3f):
             raise
-        eff = _vfpu_interp_stmt(addr, w)
+        eff = (_vfpu_mem_interp_stmt(addr, w) if (w >> 26) in (0x35, 0x36, 0x3d, 0x3e)
+               else _vfpu_interp_stmt(addr, w))
         saddr, ssize = None, 0
     if _UNVERIFIED_VFPU_COLLECTING[0] and (w >> 26) in _UNVERIFIED_VFPU_OPCODES:
         note_unverified_vfpu(addr, w)

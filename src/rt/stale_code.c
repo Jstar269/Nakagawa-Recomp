@@ -163,18 +163,28 @@ int sr_stale_enabled(void) {
     return s_enabled;
 }
 
-uint32_t sr_stale_fnv1a(const uint32_t *words, uint32_t nwords) {
-    uint32_t h = 0x811c9dc5u;
-    uint32_t i;
+#define SR_STALE_FNV1A_SEED 0x811c9dc5u
+
+/* One word of the FNV-1a hash, its four bytes little-endian first. sr_stale_fnv1a (the
+ * function pinned against tools/codegen.py) and mark_block both hash through it, so the
+ * runtime check cannot drift from the pinned vectors. */
+static uint32_t fnv1a_step(uint32_t h, uint32_t word) {
     int shift;
+    for (shift = 0; shift < 32; shift += 8) {
+        h ^= (word >> shift) & 0xffu;
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+uint32_t sr_stale_fnv1a(const uint32_t *words, uint32_t nwords) {
+    uint32_t h = SR_STALE_FNV1A_SEED;
+    uint32_t i;
     if (!words) {
         return h;
     }
     for (i = 0; i < nwords; i++) {
-        for (shift = 0; shift < 32; shift += 8) {
-            h ^= (words[i] >> shift) & 0xffu;
-            h *= 0x01000193u;
-        }
+        h = fnv1a_step(h, words[i]);
     }
     return h;
 }
@@ -212,19 +222,15 @@ static int range_words(uint32_t addr, uint32_t size, uint32_t *first_out, uint32
  * caller's business. */
 static int mark_block(SrStaleBlockEntry *entry, SrStaleReadFn read, void *ctx,
                       uint32_t *hash_out) {
-    uint32_t h = 0x811c9dc5u;
+    uint32_t h = SR_STALE_FNV1A_SEED;
     uint32_t i;
-    int shift;
     for (i = 0; i < entry->nwords; i++) {
         uint32_t waddr = entry->addr + i * 4u;
         uint32_t w = 0u;
         if (!read(waddr, &w, ctx)) {
             return 0;
         }
-        for (shift = 0; shift < 32; shift += 8) {
-            h ^= (w >> shift) & 0xffu;
-            h *= 0x01000193u;
-        }
+        h = fnv1a_step(h, w);
     }
     if (h != entry->expected_hash) {
         entry->stale = 1;
