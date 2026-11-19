@@ -27,10 +27,35 @@ from test_iso_parity import create_test_iso, create_test_iso_with_executables  #
 
 # A stand-in for `nk_cli.py bringup`: what it does depends on the disc file's name.
 STUB_BRINGUP = r'''
-import json, sys, time
+import json, os, sys, time
 from pathlib import Path
 iso, data, work = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 name = iso.stem
+
+
+def log_line(text):
+    # Stand-ins run side by side and share one log. An append on Windows is a seek to the end
+    # and then a write, so two of them can land at one offset and one line is lost: each append
+    # holds a lock on the log.
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0))
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            try:
+                os.write(fd, (text + "\n").encode("utf-8"))
+            finally:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.write(fd, (text + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
 stages = {s: {"status": "NOT_RUN", "duration_ms": 0} for s in
           ("inspect", "prepare_import", "analyze", "codegen", "compile", "build_package", "launch")}
 report = {"reached_stage": "inspect", "stages": stages, "failure_class": "NONE",
@@ -40,8 +65,7 @@ report = {"reached_stage": "inspect", "stages": stages, "failure_class": "NONE",
           "exit_classification": "NOT_RUN", "runtime_output_kind": "NOT_RUN",
           "process_exit_code": None, "presentation": {"status": "NOT_RUN", "frame_submissions": 0}}
 log = work.parent / "calls.log"
-with open(log, "a", encoding="utf-8") as stream:
-    stream.write(name + "\n")
+log_line(name)
 if name.startswith("slow"):
     progress = {"schema_version": 1, "stages": {"compile": {
         "status": "RUNNING", "started_at_unix_ms": 1, "finished_at_unix_ms": None,
@@ -54,8 +78,7 @@ if name.startswith("busy"):
     try:
         marker.touch(exist_ok=False)
     except FileExistsError:
-        with open(log, "a", encoding="utf-8") as stream:
-            stream.write("OVERLAP\n")
+        log_line("OVERLAP")
     else:
         marker.unlink()
 if name.startswith("crash"):
