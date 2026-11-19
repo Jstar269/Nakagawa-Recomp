@@ -70,6 +70,10 @@ typedef enum {
 /* Pads the input layer tracks as connected, for the prompt-glyph choice. */
 #define NK_UI_INPUT_MAX_PADS 8
 
+/* Devices that can hold one direction button at once: the keyboard and every
+   tracked pad. */
+#define NK_UI_INPUT_DIR_HOLDERS (NK_UI_INPUT_MAX_PADS + 1)
+
 /* Large enough for one call: a device change plus the action, or a stick that
    releases one direction and presses another. */
 #define NK_UI_INPUT_MAX_EVENTS 4
@@ -82,7 +86,12 @@ typedef struct {
     NkUiRepeatConfig config;
     NkUiRepeatRate rate;
     bool down[NK_UI_BTN_COUNT];
-    bool dir_held[2][4];       /* [0] buttons and keys, [1] stick; UP, DOWN, LEFT, RIGHT */
+    /* Who holds each direction (UP, DOWN, LEFT, RIGHT): the devices whose key or
+       D-pad button is down, and the stick. A direction is one logical hold: it
+       presses when its first holder goes down and lets go after its last. */
+    int dir_button_holders[4][NK_UI_INPUT_DIR_HOLDERS];
+    size_t dir_button_holder_count[4];
+    bool dir_stick_held[4];
     uint32_t dir_seq[4];       /* press order of the held directions */
     uint32_t seq;
     NkUiNavDir stick_dir;
@@ -112,7 +121,9 @@ void nk_ui_input_reset(NkUiInput *input);
 /* Every function below writes at most `cap` events to `out` and returns the count.
    Presses carry down=true. Releases are reported only for NK_UI_EV_ACTIVATE (down=false),
    for pressed-state drawing; the other events are press-only. A press of a button that
-   is already down (an OS key repeat) is ignored: repeats come from nk_ui_input_poll. */
+   is already down (an OS key repeat) is ignored: repeats come from nk_ui_input_poll.
+   A direction is held per device: a second device or the stick pressing a direction
+   already held only notes that device, and the direction lets go after its last holder. */
 size_t nk_ui_input_button(NkUiInput *input, NkUiInputButton button, bool down,
                           int device, NkUiPadFamily family, double now_s,
                           NkUiEvent *out, size_t cap);
@@ -244,8 +255,10 @@ size_t nk_ui_prompt_images_load(NkUiPromptImages *set);
 void nk_ui_prompt_images_free(NkUiPromptImages *set);
 
 /* Draws one glyph into the buffer, fitted into rect (logical UI pixels, whole-pixel
-   rounded through density like every other primitive). Returns false only when the
-   buffer could not grow. */
+   rounded through density like every other primitive). An empty rect draws nothing
+   and returns true. Returns false when the buffer could not grow, or for a call no
+   frame can make: a NULL buffer or spec, a density that is not finite and positive,
+   a rect that is not finite, or an action out of range. */
 bool nk_ui_prompt_draw(NkUiDrawBuffer *buffer, const NkUiPromptSpec *spec,
                        NkUiRect rect, float density, uint32_t element_id);
 
@@ -258,9 +271,11 @@ union SDL_Event;
 typedef struct {
     NkUiInput input;
     float event_scale;        /* window-event units to logical UI pixels */
-    float stick_x;
+    float stick_x;            /* the left stick of stick_device */
     float stick_y;
+    int stick_device;         /* the pad whose stick values these are; it owns a held direction */
     bool trigger_down[2];     /* left, right: pressed past the stick thresholds */
+    int trigger_device[2];    /* the pad holding each trigger while trigger_down is set */
     float wheel_acc_x;
     float wheel_acc_y;
 } NkUiSdlInput;
