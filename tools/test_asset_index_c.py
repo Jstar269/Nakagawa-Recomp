@@ -24,12 +24,14 @@ CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
 POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
 
 
-def synthetic_sdl3_dll() -> bytes:
-    """A minimal well-formed PE32+ image with no imports, standing in for SDL3.dll.
+def synthetic_pe(marker: str) -> bytes:
+    """A minimal well-formed PE32+ image with no import table, then ``marker``.
 
-    The copy route reads every staged DLL's import table and refuses a file that is not a
-    PE image, so the stand-in carries a DOS header, the PE signature, an x86-64 COFF header
-    and a PE32+ optional header with sixteen empty data directories, then a marker.
+    The copy route reads the import table of every DLL and executable it stages and refuses
+    a file that is not a PE image, so a stand-in for SDL3.dll, a runtime DLL or a game
+    executable carries a DOS header, the PE signature, an x86-64 COFF header and a PE32+
+    optional header with sixteen empty data directories. A test that needs imports reports
+    them through its synthetic objdump; the marker keeps each stand-in's bytes distinct.
     """
     optional_size = 240
     image = bytearray(64 + 24 + optional_size)
@@ -38,10 +40,10 @@ def synthetic_sdl3_dll() -> bytes:
     image[64:68] = b"PE\0\0"
     struct.pack_into("<H", image, 64 + 4, 0x8664)  # IMAGE_FILE_MACHINE_AMD64
     struct.pack_into("<H", image, 64 + 20, optional_size)
-    struct.pack_into("<H", image, 64 + 22, 0x2022)  # executable, large-address-aware DLL
+    struct.pack_into("<H", image, 64 + 22, 0x0022)  # executable image, large-address-aware
     struct.pack_into("<H", image, 64 + 24, 0x20B)  # PE32+
     struct.pack_into("<I", image, 64 + 24 + 108, 16)  # NumberOfRvaAndSizes; all zero
-    return bytes(image) + b"synthetic SDL3 runtime"
+    return bytes(image) + marker.encode("ascii")
 
 CAPTION_HARNESS = r'''
 #include "recomp.h"
@@ -279,7 +281,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             msys_bin = root / "custom-ucrt64" / "bin"
             msys_bin.mkdir(parents=True)
             sdl = msys_bin / "SDL3.dll"
-            sdl.write_bytes(synthetic_sdl3_dll())
+            sdl.write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             env = os.environ.copy()
             env["MSYS_PATH"] = str(msys_bin)
             env["PATH"] = os.pathsep.join([str(root / "empty-path"), str(Path(sys.executable).parent)])
@@ -301,7 +303,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             gcc_bin.mkdir()
             (gcc_bin / "gcc.exe").write_bytes(b"synthetic executable path marker")
             sdl = gcc_bin / "SDL3.dll"
-            sdl.write_bytes(synthetic_sdl3_dll())
+            sdl.write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             stale = root / "stale-msys" / "bin"
             stale.mkdir(parents=True)
             env = os.environ.copy()
@@ -350,9 +352,9 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             build = root / "build"
             self._generated_fonts(build)
             gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
-            (gcc_bin / "SDL3.dll").write_bytes(b"synthetic SDL3 runtime")
+            (gcc_bin / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             iconv = gcc_bin / "libiconv-2.dll"
-            iconv.write_bytes(b"synthetic libiconv runtime")
+            iconv.write_bytes(synthetic_pe("synthetic libiconv runtime"))
             env = os.environ.copy()
             env.pop("MSYS_PATH", None)
             env.pop("MINGW_PREFIX", None)
@@ -368,14 +370,14 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             root = Path(tmp)
             build = root / "build"
             self._generated_fonts(build)
-            (build / "game.exe").write_bytes(b"synthetic game executable")
-            (build / "libstdc++-6.dll").write_bytes(b"runtime from an older toolchain")
+            (build / "game.exe").write_bytes(synthetic_pe("synthetic game executable"))
+            (build / "libstdc++-6.dll").write_bytes(synthetic_pe("runtime from an older toolchain"))
             gcc_bin = self._toolchain(root, {"game.exe": "libstdc++-6.dll",
                                              "libstdc++-6.dll": "libgcc_s_seh-1.dll"})
             current = gcc_bin / "libstdc++-6.dll"
-            current.write_bytes(b"runtime from the current toolchain")
+            current.write_bytes(synthetic_pe("runtime from the current toolchain"))
             libgcc = gcc_bin / "libgcc_s_seh-1.dll"
-            libgcc.write_bytes(b"synthetic libgcc runtime")
+            libgcc.write_bytes(synthetic_pe("synthetic libgcc runtime"))
             env = os.environ.copy()
             env.pop("MSYS_PATH", None)
             env.pop("MINGW_PREFIX", None)
@@ -403,16 +405,16 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             root = Path(tmp)
             build = root / "build"
             self._generated_fonts(build)
-            (build / "game.exe").write_bytes(b"synthetic game executable")
+            (build / "game.exe").write_bytes(synthetic_pe("synthetic game executable"))
             shim = self._compiler_cache_shim(root)
             gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll",
                                              "game.exe": "libstdc++-6.dll"})
             sdl = gcc_bin / "SDL3.dll"
-            sdl.write_bytes(b"synthetic SDL3 runtime")
+            sdl.write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             iconv = gcc_bin / "libiconv-2.dll"
-            iconv.write_bytes(b"synthetic libiconv runtime")
+            iconv.write_bytes(synthetic_pe("synthetic libiconv runtime"))
             stdcxx = gcc_bin / "libstdc++-6.dll"
-            stdcxx.write_bytes(b"synthetic libstdc++ runtime")
+            stdcxx.write_bytes(synthetic_pe("synthetic libstdc++ runtime"))
             env = os.environ.copy()
             env.pop("MSYS_PATH", None)
             env.pop("MINGW_PREFIX", None)
@@ -432,7 +434,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             root = Path(tmp)
             build = root / "build"
             self._generated_fonts(build)
-            (build / "SDL3.dll").write_bytes(b"synthetic SDL3 runtime")
+            (build / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             shim = self._compiler_cache_shim(root)
             gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
             env = os.environ.copy()
@@ -457,11 +459,11 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             root = Path(tmp)
             build = root / "build"
             self._generated_fonts(build)
-            (build / "SDL3.dll").write_bytes(b"synthetic SDL3 runtime")
+            (build / "SDL3.dll").write_bytes(synthetic_pe("synthetic SDL3 runtime"))
             first = self._compiler_cache_shim(root)
-            (first / "libiconv-2.dll").write_bytes(b"synthetic libiconv runtime, first directory")
+            (first / "libiconv-2.dll").write_bytes(synthetic_pe("synthetic libiconv runtime, first directory"))
             gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
-            (gcc_bin / "libiconv-2.dll").write_bytes(b"synthetic libiconv runtime, later directory")
+            (gcc_bin / "libiconv-2.dll").write_bytes(synthetic_pe("synthetic libiconv runtime, later directory"))
             env = os.environ.copy()
             env.pop("MSYS_PATH", None)
             env.pop("MINGW_PREFIX", None)
