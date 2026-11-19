@@ -118,14 +118,22 @@ def _compiler_info(*overrides: str) -> dict[str, str]:
     make = _find_make()
     if not make:
         raise AssertionError("GNU Make is required to read Makefile build flags")
-    result = subprocess.run(
-        [make, "--no-print-directory", "NK_INFO_ONLY=1", *overrides, "compiler-info"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=COMPILE_TIMEOUT_S,
-        check=False,
-    )
+    with scratch_dir.TemporaryDirectory() as tmp:
+        result = subprocess.run(
+            [
+                make,
+                "--no-print-directory",
+                "NK_INFO_ONLY=1",
+                f"BUILD_ROOT={Path(tmp).as_posix()}",
+                *overrides,
+                "compiler-info",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=COMPILE_TIMEOUT_S,
+            check=False,
+        )
     if result.returncode != 0:
         raise AssertionError(result.stdout + result.stderr)
     info: dict[str, str] = {}
