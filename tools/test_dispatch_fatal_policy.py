@@ -19,8 +19,9 @@ Verifies:
 3. No dispatch-control environment variable exists: nothing in src/rt or
    src/core reads or writes one, and the native launch session (src/core/nk_launch.c)
    injects none into the runtime.
-4. A synthetic unregistered dispatch fails closed with no environment variable
-   set and regardless of any hostile continuation flag.
+4. The production dispatch() (the real recomp.c and interpreter floor, linked with
+   nothing registered) stops an unowned target by name with exit code 1, with no
+   environment variable set and regardless of any hostile continuation flag.
 5. The production runner (tools/nk_manager.ps1) sets no dispatch control and reports
    the retired SR_UNSAFE_CONTINUE_ON_DISPATCH_MISS escape as inert.
 6. Every fatal stop in the HLE files that ends the process with _Exit or _exit, which skip
@@ -292,62 +293,83 @@ class TestFatalStopsFinishRecording(unittest.TestCase):
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestDispatchFatalPolicyBehavioral(unittest.TestCase):
-    """Behavioral test verifying that dispatch() on unknown targets exits with code 1."""
+    """The production dispatch() stops a run with exit code 1 on an unowned target."""
+
+    UNOWNED_TARGET = 0x08900000
+    # Registers no function and no executable span, then hands the production dispatch() a
+    # target in guest memory. Reaching the puts means the miss returned to its caller.
+    HARNESS = """\
+#include <stdio.h>
+#include <string.h>
+#include "recomp.h"
+void sr_register_all(void) {{}}
+int main(void) {{
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    sr_mem_init();
+    s.r[29] = 0x09F00000u;
+    s.pc = 0x{target:08x}u;
+    dispatch(&s, 0x{target:08x}u);
+    puts("DISPATCH_RETURNED");
+    return 0;
+}}
+"""
 
     def test_dispatch_unmapped_target_exits_code_1(self):
+        """Link the real recomp.c and interpreter floor, register nothing, and dispatch.
+
+        The target lies in guest memory but in no registered function and no executable
+        span, so dispatch() reports the miss by name, the interpreter floor refuses it, and
+        the run ends with exit code 1 instead of returning to the caller. No environment
+        variable changes that, a hostile continuation flag included.
+        """
+        assert CC is not None
         with scratch_dir.TemporaryDirectory(prefix="nk_dispatch_fatal_") as tmp_dir:
-            wrapper_c = Path(tmp_dir) / "wrapper_test.c"
-            wrapper_code = """
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <assert.h>
-
-typedef struct {
-    uint32_t r[32];
-    uint32_t pc;
-} CpuState;
-
-static int mock_dispatch_try(CpuState *s, uint32_t target) {
-    (void)s; (void)target;
-    return -1;
-}
-
-void dispatch(CpuState *s, uint32_t target) {
-    if (mock_dispatch_try(s, target) < 0) {
-        exit(1);
-    }
-}
-
-int main(void) {
-    CpuState s;
-    dispatch(&s, 0xdeadbeef);
-    return 0;
-}
-"""
-            wrapper_c.write_bytes(wrapper_code.encode("utf-8"))
-            exe_path = Path(tmp_dir) / "wrapper_test.exe"
-            comp = subprocess.run([CC, str(wrapper_c), "-o", str(exe_path)], capture_output=True, text=True)
-            self.assertEqual(comp.returncode, 0, f"Compilation failed: {comp.stderr}")
-            run_res = subprocess.run([str(exe_path)], capture_output=True)
-            self.assertEqual(run_res.returncode, 1, "dispatch() must exit with code 1 on miss")
-            hostile = dict(os.environ)
-            hostile.update({
-                "SR_DISPATCH_FATAL": "0",
-                "SR_UNSAFE_CONTINUE_ON_DISPATCH_MISS": "1",
-            })
-            run_res = subprocess.run([str(exe_path)], capture_output=True, env=hostile)
-            self.assertEqual(
-                run_res.returncode, 1,
-                "hostile continuation flags must not make a dispatch miss permissive",
+            work = Path(tmp_dir)
+            harness = work / "dispatch_miss.c"
+            harness.write_text(self.HARNESS.format(target=self.UNOWNED_TARGET), encoding="ascii")
+            config_dir = work / "title-config"
+            config_dir.mkdir()
+            gen = subprocess.run(
+                [sys.executable, str(ROOT / "tools" / "title_runtime_config.py"),
+                 "--output", str(config_dir / "sr_title_config.h")],
+                cwd=ROOT, capture_output=True, text=True,
             )
-            run_res = subprocess.run(
-                [str(exe_path)], capture_output=True, env={"PATH": os.environ.get("PATH", "")}
+            self.assertEqual(gen.returncode, 0, gen.stdout + gen.stderr)
+            exe_path = work / ("dispatch_miss.exe" if os.name == "nt" else "dispatch_miss")
+            comp = subprocess.run(
+                [CC, "-O0", "-w", "-D_CRT_SECURE_NO_WARNINGS", "-DSR_GATE_BUILD",
+                 "-I", str(RT), "-I", str(CORE), "-I", str(config_dir),
+                 "-o", str(exe_path), str(harness),
+                 *(str(RT / name) for name in (
+                     "recomp.c", "guest_interp.c", "cpu_lle.c", "domain_mode.c",
+                     "stale_code.c", "vfpu_tables.c", "title_config.c", "ace.c",
+                     "videorec.c")),
+                 str(CORE / "nk_shared_helpers.c"), str(ROOT / "tools" / "gate_stub.c"),
+                 "-lm"],
+                cwd=ROOT, capture_output=True, text=True,
             )
-            self.assertEqual(
-                run_res.returncode, 1,
-                "a synthetic unregistered dispatch must fail closed with no environment variable set",
+            self.assertEqual(comp.returncode, 0, f"Compilation failed: {comp.stdout}{comp.stderr}")
+            environments = (
+                ("inherited", None),
+                ("hostile continuation flags", {
+                    **os.environ,
+                    "SR_DISPATCH_FATAL": "0",
+                    "SR_UNSAFE_CONTINUE_ON_DISPATCH_MISS": "1",
+                }),
+                ("no environment variable", {"PATH": os.environ.get("PATH", "")}),
             )
+            for label, env in environments:
+                with self.subTest(environment=label):
+                    run = subprocess.run([str(exe_path)], cwd=work, capture_output=True,
+                                         text=True, env=env, timeout=60)
+                    detail = f"rc={run.returncode} stdout={run.stdout!r} stderr={run.stderr!r}"
+                    self.assertEqual(run.returncode, 1, detail)
+                    self.assertNotIn("DISPATCH_RETURNED", run.stdout, detail)
+                    self.assertIn(
+                        f"DISPATCH_MISS_NEW[1]: target=0x{self.UNOWNED_TARGET:08x}",
+                        run.stderr, detail)
+                    self.assertIn("SEMANTIC_BOUNDARY: target-not-executable;", run.stderr, detail)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 RT = ROOT / "src" / "rt"
@@ -505,15 +506,53 @@ def _compile(tmp: Path) -> Path:
 
 def _run(exe: Path, mode: str, gpu: bool = False,
          extra_env: dict | None = None) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
+    # ge.c reads many SR_* settings that change what it draws or write files (SR_FBSNAP,
+    # SR_NOCULL, SR_TEXDUMP, ...): none of the caller's reach the harness, and it runs in its
+    # own scratch folder, so the shell cannot change a verdict or write into the checkout.
+    # A test that needs a setting passes it in extra_env.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SR_")}
     env["SR_GESTAT"] = "1"
-    for name in ("SR_RTRACE", "SR_GE_TRANSITION_TRACE", "SR_NAN_TRAP", "SR_PIXWHO",
-                 "SR_GE_CAPTURE_FRAME", "SR_GE_CAPTURE_PATH", "SR_GE_CAPTURE_MIN_PRIMS",
-                 "SR_GE_CAPTURE_EXIT"):
-        env.pop(name, None)
     env.update(extra_env or {})
     argv = [os.fspath(exe), mode] + (["hook"] if gpu else [])
-    return subprocess.run(argv, capture_output=True, text=True, env=env)
+    return subprocess.run(argv, capture_output=True, text=True, env=env, cwd=exe.parent)
+
+
+def _c_function_body(source: str, name: str) -> str:
+    """The brace-matched body of C function ``name`` (comments and literals skipped)."""
+    match = re.search(rf"\bstatic void {re.escape(name)}\([^)]*\)\s*\{{", source)
+    if not match:
+        raise AssertionError(f"function {name} not found")
+    start = match.end() - 1
+    depth = 0
+    pos = start
+    while pos < len(source):
+        if source.startswith("/*", pos):
+            end = source.find("*/", pos + 2)
+            pos = len(source) if end < 0 else end + 2
+            continue
+        if source.startswith("//", pos):
+            end = source.find("\n", pos)
+            pos = len(source) if end < 0 else end + 1
+            continue
+        char = source[pos]
+        if char in "\"'":
+            pos += 1
+            while pos < len(source) and source[pos] != char:
+                pos += 2 if source[pos] == "\\" else 1
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:pos + 1]
+        pos += 1
+    raise AssertionError(f"function {name} has no closing brace")
+
+
+def _gate_precedes_seam(source: str, entry: str) -> tuple[int, int]:
+    """Offsets, inside ``entry``'s own body, of its non-finite gate and its first GPU seam."""
+    body = _c_function_body(source, entry)
+    return body.find("vtx_nonfinite("), body.find("s_gpu->")
 
 
 def _out(result: subprocess.CompletedProcess, key: str) -> int:
@@ -734,12 +773,56 @@ class TestNonFiniteVertex(unittest.TestCase):
         ge_src = (RT / "ge.c").read_text(encoding="utf-8")
         self.assertIn("static int vtx_nonfinite(", ge_src)
         for entry in ("raster_tri", "draw_line_vtx", "draw_point_vtx", "fill_sprite"):
-            body = ge_src.split(f"static void {entry}(", 1)[1]
-            gate = body.find("vtx_nonfinite(")
-            seam = body.find("s_gpu->")
+            gate, seam = _gate_precedes_seam(ge_src, entry)
             self.assertGreaterEqual(gate, 0, f"{entry} must fail closed on a non-finite vertex")
+            # The seam must be the entry's own: a seam moved into a helper needs this check
+            # moved with it, not a later function's gate standing in for this one.
+            self.assertGreaterEqual(seam, 0, f"{entry} no longer offers the GPU seam itself")
             self.assertLess(gate, seam,
                             f"{entry} must fail closed BEFORE the GPU capture seam")
+
+    def test_the_gate_check_reads_only_the_named_function(self):
+        # raster_tri lost its gate and moved its seam into a helper; the next function's gate
+        # and seam must not stand in for it.
+        source = ("static void raster_tri(const GeVtx *v) {\n"
+                  "    /* } a brace in a comment */ const char *s = \"}\";\n"
+                  "    if (v) { offer_tri(v); }\n"
+                  "}\n"
+                  "static void draw_line_vtx(const GeVtx *v) {\n"
+                  "    if (vtx_nonfinite(v)) return;\n"
+                  "    if (s_gpu->line) s_gpu->line(v);\n"
+                  "}\n")
+        self.assertEqual(_gate_precedes_seam(source, "raster_tri"), (-1, -1))
+        gate, seam = _gate_precedes_seam(source, "draw_line_vtx")
+        self.assertGreaterEqual(gate, 0)
+        self.assertLess(gate, seam)
+
+    def test_the_harness_ignores_ambient_ge_settings(self):
+        # SR_FBSNAP makes the stat window dump framebuffers into the current directory, and
+        # SR_NOCULL changes what is drawn; neither may reach the harness from the caller.
+        # _run starts the harness in the scratch exe folder, so only that folder is cleaned;
+        # the checkout and this process's directory are only checked, never written to.
+        def snapshots(folder: Path) -> set[Path]:
+            return {path.resolve() for path in folder.glob("snap_f*.ppm")}
+
+        scratch = self.exe.parent
+        watched = {ROOT.resolve(), Path.cwd().resolve()} - {scratch.resolve()}
+        before_scratch = snapshots(scratch)
+        before_watched = {folder: snapshots(folder) for folder in watched}
+        with mock.patch.dict(os.environ, {"SR_FBSNAP": "1", "SR_NOCULL": "1"}):
+            result = _run(self.exe, "finite")
+        leaked = sorted(snapshots(scratch) - before_scratch)
+        for path in leaked:
+            self.addCleanup(path.unlink, missing_ok=True)
+        escaped = sorted(str(path) for folder in watched
+                         for path in snapshots(folder) - before_watched[folder])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([path.name for path in leaked], [],
+                         "an ambient SR_FBSNAP made the harness write GE snapshots")
+        self.assertEqual(escaped, [],
+                         "the harness wrote GE snapshots outside its scratch folder "
+                         "(left in place for inspection)")
+        self.assertEqual(_stat(result.stderr, 120).get("nonfinite"), "0")
 
     def test_docs_name_the_boundary(self):
         row = (DOCS / "COMPATIBILITY.md").read_text(encoding="utf-8")

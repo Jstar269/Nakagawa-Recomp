@@ -3,6 +3,8 @@
 
 """Unit tests for the private<->public drift classifier."""
 
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import sys
@@ -128,10 +130,54 @@ class ExcludedPathLoadingTests(unittest.TestCase):
     def test_export_manifest_is_preferred(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _write(root, drift.EXPORT_MANIFEST, json.dumps({"excluded_paths": ["src/rt/pgd.c"]}))
+            _write(root, drift.EXPORT_MANIFEST,
+                   json.dumps({"excluded_paths": ["src/rt/pgd.c"], "excluded_globs": []}))
             exact, globs = drift.load_excluded_paths(root)
             self.assertIn("src/rt/pgd.c", exact)
             self.assertEqual(globs, [])
+
+    def test_export_manifest_globs_are_applied(self):
+        """PUBLIC_EXPORT.json records excluded_globs beside excluded_paths; both apply."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write(root, drift.EXPORT_MANIFEST, json.dumps(
+                {"excluded_paths": ["src/rt/pgd.c"], "excluded_globs": ["font/*.pgf"]}))
+            exact, globs = drift.load_excluded_paths(root)
+            self.assertIn("src/rt/pgd.c", exact)
+            self.assertTrue(drift.is_excluded("font/x.pgf", exact, globs))
+
+    def test_older_manifest_without_globs_takes_the_profile_globs_and_prefixes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            export, source = Path(tmp) / "export", Path(tmp) / "source"
+            _write(export, drift.EXPORT_MANIFEST, json.dumps({"excluded_paths": ["src/rt/pgd.c"]}))
+            _write(source, drift.PROFILE_PATH, json.dumps(
+                {"exclude_paths": [], "exclude_globs": ["font/*.pgf"], "exclude_prefixes": ["private[1]/"]}))
+            exact, globs = drift.load_excluded_paths(export, source_root=source)
+            self.assertTrue(drift.is_excluded("font/x.pgf", exact, globs))
+            self.assertTrue(drift.is_excluded("private[1]/notes.txt", exact, globs))
+            self.assertFalse(drift.is_excluded("private1/notes.txt", exact, globs))
+
+    def test_manifest_with_globs_still_takes_the_profile_prefixes(self):
+        """public_export.py writes no prefixes, so a manifest's globs never stand alone."""
+        with tempfile.TemporaryDirectory() as tmp:
+            export, source = Path(tmp) / "export", Path(tmp) / "source"
+            _write(export, drift.EXPORT_MANIFEST, json.dumps(
+                {"excluded_paths": ["src/rt/pgd.c"], "excluded_globs": ["font/*.pgf"]}))
+            _write(source, drift.PROFILE_PATH, json.dumps(
+                {"exclude_paths": [], "exclude_globs": [], "exclude_prefixes": ["private[1]/"]}))
+            exact, globs = drift.load_excluded_paths(export, source_root=source)
+            self.assertTrue(drift.is_excluded("font/x.pgf", exact, globs))
+            self.assertTrue(drift.is_excluded("private[1]/notes.txt", exact, globs))
+            self.assertFalse(drift.is_excluded("private1/notes.txt", exact, globs))
+            findings = drift.classify({"private[1]/notes.txt": "n"}, {"private[1]/notes.txt": "n"},
+                                      exact, globs)
+            self.assertEqual([f["category"] for f in findings
+                              if f["path"] == "private[1]/notes.txt"], ["UNKNOWN"])
+
+    def test_globs_match_the_whole_path_as_the_publication_policy_does(self):
+        """Policy.resolve uses fnmatchcase over the whole path, not right-anchored matching."""
+        self.assertTrue(drift.is_excluded("font/ltn0.pgf", frozenset(), GLOBS))
+        self.assertFalse(drift.is_excluded("tools/font/ltn0.pgf", frozenset(), GLOBS))
 
     def test_missing_manifest_and_profile_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,6 +189,41 @@ class ExcludedPathLoadingTests(unittest.TestCase):
         self.assertIn("src/rt/pgd.c", exact)
         self.assertIn("src/rt/pgf.c", exact)
         self.assertIn("font/*.pgf", globs)
+
+
+class EndToEndTests(unittest.TestCase):
+    """main() over real trees: the leak cases must fail the run, never print RESULT: OK."""
+
+    def _run(self, export: dict[str, str], public: dict[str, str]) -> tuple[int, dict[str, str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            export_root, public_root = Path(tmp) / "export", Path(tmp) / "public"
+            manifest = json.dumps({"excluded_paths": sorted(EXCLUDED), "excluded_globs": GLOBS})
+            for root, files in ((export_root, export), (public_root, public)):
+                _write(root, drift.EXPORT_MANIFEST, manifest)
+                for rel, text in files.items():
+                    _write(root, rel, text)
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = drift.main(["--export-dir", str(export_root), "--public-dir", str(public_root), "--json"])
+        report = json.loads(out.getvalue())
+        return code, {f["path"]: f["category"] for f in report["findings"]}
+
+    def test_glob_excluded_font_identical_on_both_sides_is_a_leak(self):
+        code, result = self._run({"font/x.pgf": "pgf"}, {"font/x.pgf": "pgf"})
+        self.assertEqual(result.get("font/x.pgf"), "UNKNOWN")
+        self.assertEqual(code, 1)
+
+    def test_build_output_in_the_export_is_a_leak(self):
+        """A local build/ in the public checkout is ignored; one in the export is reported."""
+        leaked = "build/demo/demo_recomp_0.c"
+        code, result = self._run({leaked: "int x;"}, {leaked: "int x;"})
+        self.assertEqual(result.get(leaked), "UNKNOWN")
+        self.assertEqual(code, 1)
+
+    def test_local_build_in_the_public_checkout_alone_is_clean(self):
+        code, result = self._run({"Makefile": "m"}, {"Makefile": "m", "build/demo/demo.exe": "bin"})
+        self.assertNotIn("build/demo/demo.exe", result)
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":

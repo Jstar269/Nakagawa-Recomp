@@ -474,6 +474,19 @@ class TestDmacMutantList(unittest.TestCase):
             with mock.patch("os.access", side_effect=lambda p, mode: Path(p) == real_exe):
                 self.assertEqual(_find_hle_thread_selftest_binary(build_root, is_windows=False), real_exe)
 
+    def test_a_filter_that_matches_no_mutant_fails_the_campaign(self) -> None:
+        """NK_DMAC_MUTANTS_ONLY=<typo> must not report a campaign that judged nothing as OK."""
+        campaign = TestDmacMutationCampaign("test_every_mutant_is_killed_for_its_stated_reason")
+        with tempfile.TemporaryDirectory(prefix="nk-dmac-filter-") as scratch:
+            env = {"NK_DMAC_MUTANTS_BUILD_DIR": scratch,
+                   "NK_DMAC_MUTANTS_ONLY": "no mutant has this name"}
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(TestDmacMutationCampaign, "_build_and_run",
+                                      return_value=("PASS", "")) as build:
+                with self.assertRaisesRegex(AssertionError, "matched no mutant"):
+                    campaign.test_every_mutant_is_killed_for_its_stated_reason()
+        self.assertEqual(build.call_count, 0, "the filter is checked before anything is built")
+
 
 @unittest.skipUnless(os.environ.get("NK_DMAC_MUTANTS_BUILD_DIR"), "run through `make dmac-mutants`")
 class TestDmacMutationCampaign(unittest.TestCase):
@@ -499,15 +512,16 @@ class TestDmacMutationCampaign(unittest.TestCase):
     def test_every_mutant_is_killed_for_its_stated_reason(self) -> None:
         base = Path(os.environ["NK_DMAC_MUTANTS_BUILD_DIR"]).resolve()
         only = os.environ.get("NK_DMAC_MUTANTS_ONLY", "")
+        selected = [(index, mutant) for index, mutant in enumerate(DMAC_MUTANTS)
+                    if not only or only in mutant[0]]
+        self.assertTrue(selected, f"NK_DMAC_MUTANTS_ONLY={only!r} matched no mutant")
         base.mkdir(parents=True, exist_ok=True)
         sources = _dmac_hle_srcs()
         original = (ROOT / DMAC_TARGET).read_text(encoding="utf-8")
         shared = base / "build"
         stage, out = self._build_and_run(shared, sources, base / "unmutated.log")
         self.assertEqual(stage, "PASS", f"the unmutated sources must pass first:\n{out[-2000:]}")
-        for index, (name, old, new, expect) in enumerate(DMAC_MUTANTS):
-            if only and only not in name:
-                continue
+        for index, (name, old, new, expect) in selected:
             with self.subTest(name):
                 copy = base / f"m{index:02d}" / Path(DMAC_TARGET).name
                 copy.parent.mkdir(parents=True, exist_ok=True)

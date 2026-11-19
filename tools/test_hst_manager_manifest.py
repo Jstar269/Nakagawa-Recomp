@@ -15,6 +15,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -116,6 +117,9 @@ class HstManagerManifestTests(unittest.TestCase):
                 }
                 with (Path("capture.jsonl")).open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(record, sort_keys=True) + "\\n")
+                if os.environ.get("CAPTURE_FAIL_TARGET") == target:
+                    # A synthetic failing Make target, for the exit-propagation tests.
+                    sys.exit(7)
                 if target == "all":
                     # The manager expects the host's executable name: .exe on Windows only.
                     output = Path(build_dir) / (game_name + (".exe" if os.name == "nt" else ""))
@@ -292,28 +296,56 @@ class HstManagerManifestTests(unittest.TestCase):
         record = [item for item in self.records() if item["target"] == "all"][-1]
         self.assertEqual(record["title_extra_spans"], self.SPAN)
 
+    def test_a_failing_make_target_makes_each_action_exit_nonzero(self) -> None:
+        """The caller sees a nonzero exit when the action's Make target fails, and 0 when it passes."""
+        for action, target in (("BuildFull", "all"), ("BuildFast", "all"), ("Test", "selftest"),
+                               ("Fuzz", "vfpu_fuzz")):
+            with self.subTest(action=action):
+                capture = self.root / "capture.jsonl"
+                capture.unlink(missing_ok=True)
+                with mock.patch.dict(os.environ, {"CAPTURE_FAIL_TARGET": target}):
+                    failed = self.run_manager(action)
+                combined = failed.stdout + failed.stderr
+                self.assertNotEqual(failed.returncode, 0, combined)
+                self.assertIn(target, [record["target"] for record in self.records()], combined)
+                capture.unlink(missing_ok=True)
+                with mock.patch.dict(os.environ):
+                    os.environ.pop("CAPTURE_FAIL_TARGET", None)
+                    passed = self.run_manager(action)
+                self.assert_manager_success(passed)
+                self.assertIn(target, [record["target"] for record in self.records()],
+                              passed.stdout + passed.stderr)
+
     def test_scoped_span_unwinds_when_the_scoped_operation_throws(self) -> None:
         body = "\n".join(
             [
                 f". '{HELPER}'",
                 "function Invoke-Failing {",
                 "  $state = Push-TitleAnalyzerEnvironment -Value 'SCOPED-VALUE'",
-                "  try { throw 'synthetic spawn failure' }",
+                "  try {",
+                '    Write-Output "SCOPED=$env:TITLE_EXTRA_SPANS"',
+                "    throw 'synthetic spawn failure'",
+                "  }",
                 "  finally { Pop-TitleAnalyzerEnvironment -State $state }",
                 "}",
                 "$env:TITLE_EXTRA_SPANS = 'ORIGINAL-VALUE'",
-                "try { Invoke-Failing } catch { }",
+                'try { Invoke-Failing } catch { Write-Output "CAUGHT=$($_.Exception.Message)" }',
                 'Write-Output "RESTORED=$env:TITLE_EXTRA_SPANS"',
                 "Remove-Item -LiteralPath 'Env:TITLE_EXTRA_SPANS' -Force",
-                "try { Invoke-Failing } catch { }",
+                'try { Invoke-Failing } catch { Write-Output "CAUGHT=$($_.Exception.Message)" }',
                 "if (Test-Path -LiteralPath 'Env:TITLE_EXTRA_SPANS') "
                 "{ Write-Output 'ABSENT=NO' } else { Write-Output 'ABSENT=YES' }",
             ]
         )
         proc = self.run_in_one_shell(body, cwd=ROOT)
         combined = proc.stdout + proc.stderr
-        self.assertIn("RESTORED=ORIGINAL-VALUE", combined, combined)
-        self.assertIn("ABSENT=YES", combined, combined)
+        lines = proc.stdout.splitlines()
+        # Both runs set the span inside the scope and fail only by the thrown error, so
+        # the restore below is the finally block's work, not a push that never happened.
+        self.assertEqual(lines.count("SCOPED=SCOPED-VALUE"), 2, combined)
+        self.assertEqual(lines.count("CAUGHT=synthetic spawn failure"), 2, combined)
+        self.assertIn("RESTORED=ORIGINAL-VALUE", lines, combined)
+        self.assertIn("ABSENT=YES", lines, combined)
         self.assert_no_make()
 
     def records(self) -> list[dict[str, str | None]]:
@@ -452,17 +484,27 @@ class HstManagerManifestTests(unittest.TestCase):
                     path = self.root / name
                     path.write_text("{", encoding="ascii")
                 elif mutation == "duplicate":
+                    # The valid manifest with its own id repeated: duplication is the only defect.
                     path = self.root / name
-                    path.write_text('{"schema_version":1,"schema_version":1}', encoding="ascii")
+                    valid = json.loads(MANIFEST.read_text(encoding="utf-8"))
+                    text = json.dumps(valid)
+                    path.write_text("{" + json.dumps("id") + ": " + json.dumps(valid["id"]) + ", " + text[1:],
+                                    encoding="utf-8")
                 elif mutation == "unknown-field":
-                    path = self.root / name
-                    path.write_text('{"schema_version":1,"unexpected":true}', encoding="ascii")
+                    # The valid manifest plus one unknown top-level field.
+                    path = self.write_manifest(name, lambda value: value.update(unexpected=True))
                 elif mutation is None:
                     path = self.root / name
                 else:
                     path = self.write_manifest(name, mutation)
                 proc = self.run_manager("BuildFast", path)
                 self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                reason = {
+                    "duplicate": "duplicate JSON object key: 'id'",
+                    "unknown-field": "unknown field(s): unexpected",
+                }.get(mutation if isinstance(mutation, str) else "")
+                if reason is not None:
+                    self.assertIn(reason, proc.stdout + proc.stderr)
                 self.assert_no_make()
 
         # Dropping the hst codegen profile makes the manifest an ordinary generic
@@ -502,33 +544,45 @@ class HstManagerManifestTests(unittest.TestCase):
         )
         base = json.loads(plan_proc.stdout)
 
-        def assert_helper_rejects(value: str) -> None:
+        def validate(value: str) -> subprocess.CompletedProcess[str]:
             path = self.root / "plan.json"
             path.write_text(value, encoding="utf-8")
+            # Parsing and validation report separately, so a parse failure, a missing
+            # validator or an internal error can never pass as the validator's refusal.
             command = (
                 f". '{HELPER}'; "
                 f"$p=Get-Content -LiteralPath '{path}' -Raw; "
-                "try { $o=$p | ConvertFrom-Json; Assert-TitleManagerPlan $o | Out-Null; exit 1 } "
-                "catch { exit 0 }"
+                "try { $o=$p | ConvertFrom-Json } catch { Write-Output 'PARSE-FAILED'; exit 3 }; "
+                "try { Assert-TitleManagerPlan $o | Out-Null; Write-Output 'ACCEPTED'; exit 0 } "
+                "catch { Write-Output \"REJECTED=$($_.Exception.Message)\"; exit 2 }"
             )
-            proc = subprocess.run(
+            return subprocess.run(
                 [self.shell, "-NoProfile", "-Command", command],
                 capture_output=True,
                 text=True,
                 check=False,
             )
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
-        assert_helper_rejects("not-json")
+        def assert_helper_rejects(value: str, reason: str) -> None:
+            proc = validate(value)
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            self.assertIn(f"REJECTED={reason}", proc.stdout, proc.stdout + proc.stderr)
+
+        accepted = validate(json.dumps(base))
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        self.assertIn("ACCEPTED", accepted.stdout, accepted.stdout + accepted.stderr)
+        not_json = validate("not-json")
+        self.assertEqual(not_json.returncode, 3, not_json.stdout + not_json.stderr)
+        self.assertIn("PARSE-FAILED", not_json.stdout, not_json.stdout + not_json.stderr)
         version = copy.deepcopy(base)
         version["plan_version"] = 99
-        assert_helper_rejects(json.dumps(version))
+        assert_helper_rejects(json.dumps(version), "unsupported manager-plan version: 99")
         unknown = copy.deepcopy(base)
         unknown["unexpected"] = True
-        assert_helper_rejects(json.dumps(unknown))
+        assert_helper_rejects(json.dumps(unknown), "$ contains unknown field(s): unexpected")
         control = copy.deepcopy(base)
         control["make"]["build_dir"] = "bad\npath"
-        assert_helper_rejects(json.dumps(control))
+        assert_helper_rejects(json.dumps(control), "$.make.build_dir must not contain control characters")
 
     def test_difffunc_failures_exit_nonzero(self) -> None:
         # A script driving DiffFunc reads its exit status: a missing argument, a missing

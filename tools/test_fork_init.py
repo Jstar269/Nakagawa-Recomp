@@ -237,9 +237,16 @@ class AuthorityTest(unittest.TestCase):
 
 class RefusalTest(unittest.TestCase):
     def test_authority_inside_the_checkout_is_refused(self) -> None:
-        with self.assertRaises(fork_init.ForkInitError) as caught:
-            fork_init.init(ROOT, ROOT / "build" / "fork-authority")
-        self.assertEqual(caught.exception.code, "AUTHORITY_INSIDE_REPOSITORY")
+        # The checkout is a scratch folder standing in for this one (that this checkout is one of
+        # its worktrees is the test below), so a regressed guard seeds nothing in the real tree.
+        with tempfile.TemporaryDirectory(prefix="nk-fork-checkout-") as scratch:
+            checkout = Path(scratch)
+            target = checkout / "build" / "fork-authority"
+            with mock.patch.object(fork_init, "_worktrees", return_value=[checkout]):
+                with self.assertRaises(fork_init.ForkInitError) as caught:
+                    fork_init.init(ROOT, target)
+            self.assertEqual(caught.exception.code, "AUTHORITY_INSIDE_REPOSITORY")
+            self.assertFalse((checkout / "build").exists())
 
     def test_non_empty_authority_is_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nk-fork-full-") as scratch:

@@ -33,8 +33,10 @@ Two complementary layers:
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -163,6 +165,50 @@ def _timeout_text(command: list[str], exc: subprocess.TimeoutExpired) -> str:
     return f"phase timeout\ncommand: {' '.join(command)}\n{detail}"
 
 
+def _bounded_run(command: list, timeout_s: float, timeout_verdict: str,
+                 **kwargs) -> subprocess.CompletedProcess:
+    """One phase of a dedicated mutant harness, under the same budgets as the staged helper.
+
+    A wedged compiler, generator or mutant fails the test by its INVALID name instead of
+    hanging the suite until the CI job is killed; a timeout is never a kill.
+    """
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout_s,
+                              **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            f"{timeout_verdict}: a timed-out phase is not a semantic kill\n"
+            + _timeout_text([str(part) for part in command], exc)) from None
+
+
+# x86 machine names, for the guard that an x86 host never silently skips the MXCSR mutants.
+X86_MACHINES = frozenset({"x86_64", "amd64", "i386", "i486", "i586", "i686", "x86"})
+
+
+def _sse_backend_selected(predefined_macros: str) -> bool:
+    """Whether a compiler with these predefined macros builds fp_convert.h's MXCSR backend.
+
+    The header picks it under ``__SSE2__ || _M_X64 || __i386__``. Every behavioural mutant
+    anchor (rm_to_mxcsr, the FTZ and DAZ bits, ``_mm_setcsr(saved)``) lives in that branch,
+    and the M13 harness needs <xmmintrin.h>; an AArch64 compiler builds the FPCR backend
+    instead, where those mutants are dead code that would SURVIVE for no semantic reason.
+    """
+    defined = {line.split()[1] for line in predefined_macros.splitlines()
+               if line.startswith("#define ") and len(line.split()) >= 2}
+    return bool(defined & {"__SSE2__", "_M_X64", "__i386__"})
+
+
+@functools.lru_cache(maxsize=None)
+def _cc_compiles_sse_backend(cc: str) -> bool:
+    """Ask ``cc`` for its predefined macros; a compiler that cannot answer builds nothing."""
+    try:
+        probe = subprocess.run([cc, "-dM", "-E", "-x", "c", os.devnull], capture_output=True,
+                               text=True, timeout=BUILD_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0 and _sse_backend_selected(probe.stdout)
+
+
 class FpMutationVerdictTests(unittest.TestCase):
     """The staged verdict policy, driven without a compiler.
 
@@ -170,11 +216,85 @@ class FpMutationVerdictTests(unittest.TestCase):
     kills; the real mutant tests below supply the compiler-side evidence.
     """
 
+    def setUp(self) -> None:
+        # The staging tests mock subprocess.run, so the compiler only needs a name; without one,
+        # _build_mutated_selftest's `assert CC is not None` fires on a host with no gcc on PATH.
+        patcher = mock.patch.object(sys.modules[__name__], "CC", CC or "gcc")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _staged(self, **kwargs) -> StagedRun:
         fields = dict(build_rc=0, build_output="", run_rc=1,
                       run_output="FAIL: guest rounding wrong\n")
         fields.update(kwargs)
         return StagedRun(**fields)
+
+    def test_the_mocked_staging_tests_run_on_a_host_without_gcc(self):
+        """The verdict tests mock the compiler, so a host with no gcc on PATH still runs them."""
+        names = ("test_mocked_compiler_failure_never_reaches_execution",
+                 "test_mocked_launch_failure_after_clean_build_is_invalid",
+                 "test_mocked_run_timeout_is_invalid_not_a_kill")
+        result = unittest.TestResult()
+        with mock.patch.object(sys.modules[__name__], "CC", None):
+            for name in names:
+                type(self)(name).run(result)
+        self.assertEqual([str(test) for test, _ in result.errors + result.failures], [])
+        self.assertEqual(result.testsRun, len(names))
+
+    def test_the_sse_backend_is_read_from_the_compiler_macros(self):
+        self.assertTrue(_sse_backend_selected("#define __x86_64__ 1\n#define __SSE2__ 1\n"))
+        self.assertTrue(_sse_backend_selected("#define __i386__ 1\n"))
+        self.assertFalse(_sse_backend_selected("#define __aarch64__ 1\n#define __ARM_NEON 1\n"))
+        self.assertFalse(_sse_backend_selected("#define __SSE2_MATH__ 1\n"))
+
+    @unittest.skipUnless(CC and platform.machine().lower() in X86_MACHINES,
+                         "gcc on an x86 host required")
+    def test_an_x86_host_compiles_the_sse_backend(self):
+        """The skip below must never fire where the MXCSR mutants are live code."""
+        self.assertTrue(_cc_compiles_sse_backend(CC),
+                        f"{CC} on {platform.machine()} reported no SSE backend macro")
+
+    def test_mxcsr_mutants_skip_where_the_sse_backend_is_not_built(self):
+        """On an AArch64 compiler the MXCSR mutant text is dead code and the M13 harness's
+        <xmmintrin.h> is absent: those tests skip by name instead of failing falsely."""
+        names = ("test_M1_ignore_rounding_mode", "test_M9_helper_leaks_modified_mxcsr",
+                 "test_M12_drop_volatile_result_window",
+                 "test_M13_partial_restore_preserves_stickies")
+        module = sys.modules[__name__]
+        result = unittest.TestResult()
+        with mock.patch.object(module, "_cc_compiles_sse_backend", return_value=False), \
+             mock.patch.object(module, "_build_mutated_selftest",
+                               side_effect=AssertionError("built a dead-code mutant")), \
+             mock.patch.object(subprocess, "run",
+                               side_effect=AssertionError("compiled an x86-only harness")):
+            for name in names:
+                FpScalarHeaderMutantTests(name).run(result)
+        self.assertEqual([str(test) for test, _ in result.errors + result.failures], [])
+        self.assertEqual(len(result.skipped), len(names))
+        for _, reason in result.skipped:
+            self.assertIn("MXCSR backend", reason)
+
+    def test_dedicated_harness_phases_are_bounded(self):
+        """M13 and the codegen-copy mutants bound every phase; a wedged run is named INVALID."""
+        def fake_run(command, **kwargs):
+            if "timeout" not in kwargs:
+                raise RuntimeError(f"unbounded phase {command[0]}: a wedged mutant would "
+                                   "hang the suite")
+            if Path(command[0]).name in {"m13.exe", "mutant_test.exe"}:
+                raise subprocess.TimeoutExpired(cmd=command, timeout=kwargs["timeout"])
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        module = sys.modules[__name__]
+        cases = ((FpScalarHeaderMutantTests, "test_M13_partial_restore_preserves_stickies"),
+                 (FastPathRemovedStructuralTests,
+                  "test_behavioral_mul_daz_precheck_mutant_is_killed"),
+                 (Ctc1MeasuredMaskTests, "test_behavioral_wholesale_ctc1_mutant_is_killed"))
+        with mock.patch.object(module, "_cc_compiles_sse_backend", return_value=True), \
+             mock.patch.object(subprocess, "run", side_effect=fake_run):
+            for cls, name in cases:
+                with self.subTest(test=name):
+                    with self.assertRaisesRegex(AssertionError, INVALID_RUN_TIMEOUT):
+                        getattr(cls(name), name)()
 
     def test_build_failure_is_never_a_semantic_kill(self):
         staged = self._staged(build_rc=1, build_output="error: 'sr_rm_to' undeclared",
@@ -303,7 +423,15 @@ class FpMutationVerdictTests(unittest.TestCase):
 class FpScalarHeaderMutantTests(unittest.TestCase):
     """Each behavioral mutant must be killed by the committed selftest."""
 
+    def _require_sse_backend(self) -> None:
+        if CC is None:
+            self.skipTest("gcc required")
+        if not _cc_compiles_sse_backend(CC):
+            self.skipTest(f"{CC} does not build fp_convert.h's MXCSR backend, where these "
+                          "mutant anchors live: they would be dead code there")
+
     def assert_killed(self, old: str, new: str, expected_diagnostics: tuple[str, ...]) -> None:
+        self._require_sse_backend()
         original = HEADER.read_text(encoding="utf-8")
         self.assertIn(old, original, f"mutation anchor vanished from {HEADER.name}: {old!r}")
         staged = _build_mutated_selftest(original.replace(old, new))
@@ -408,8 +536,7 @@ class FpScalarHeaderMutantTests(unittest.TestCase):
         not. Both directions are proven: pristine header PASSES the same
         harness, so the discriminator is not vacuous.
         """
-        if CC is None:
-            self.skipTest("gcc required")
+        self._require_sse_backend()
 
         harness_c = """\
 #include <stdio.h>
@@ -456,10 +583,10 @@ int main(void) {
                 command = [CC, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
                            "-I", str(work),
                            str(work / "m13_harness.c"), "-lm", "-o", str(exe)]
-                compiled = subprocess.run(command, capture_output=True, text=True)
+                compiled = _bounded_run(command, BUILD_TIMEOUT_S, INVALID_BUILD_TIMEOUT)
                 if compiled.returncode != 0:
                     return None, compiled.stderr + compiled.stdout
-                ran = subprocess.run([str(exe)], capture_output=True, text=True)
+                ran = _bounded_run([str(exe)], RUN_TIMEOUT_S, INVALID_RUN_TIMEOUT)
                 return ran.returncode, ran.stderr + ran.stdout
 
         original = HEADER.read_text(encoding="utf-8")
@@ -601,10 +728,10 @@ class FastPathRemovedStructuralTests(unittest.TestCase):
             import os as _os
             env = dict(_os.environ)
             env["PYTHONPATH"] = str(ROOT / "tools") + _os.pathsep + env.get("PYTHONPATH", "")
-            gen_proc = subprocess.run(
+            gen_proc = _bounded_run(
                 [sys.executable, str(tmp_codegen), str(elf_path),
                  str(gen_dir / "m.c"), "--profile=hst"],
-                cwd=ROOT, env=env, capture_output=True, text=True)
+                BUILD_TIMEOUT_S, INVALID_BUILD_TIMEOUT, cwd=ROOT, env=env)
             self.assertEqual(
                 gen_proc.returncode, 0,
                 "MUTANT_GENERATION_FAILED: mutated codegen.py could not run")
@@ -623,14 +750,14 @@ class FastPathRemovedStructuralTests(unittest.TestCase):
                                 "-fno-sanitize-recover=all"])
             command.extend([str(gen_dir / "harness.c"), str(gen_dir / "m.c"),
                             *(str(p) for p in chunks), "-lm", "-o", str(exe)])
-            compiled = subprocess.run(command, capture_output=True, text=True)
+            compiled = _bounded_run(command, BUILD_TIMEOUT_S, INVALID_BUILD_TIMEOUT)
             self.assertEqual(
                 compiled.returncode, 0,
                 "MUTANT_BUILD_FAILED: mutant must compile cleanly to prove a "
                 "SEMANTIC kill; build output:\n" + (compiled.stderr + compiled.stdout)[-1500:])
 
             # Stage 3: executable must RUN and fail SEMANTICALLY.
-            ran = subprocess.run([str(exe)], capture_output=True, text=True)
+            ran = _bounded_run([str(exe)], RUN_TIMEOUT_S, INVALID_RUN_TIMEOUT)
             self.assertNotEqual(
                 ran.returncode, 0,
                 "MUTANT_SURVIVED: FP-comparison classifier passed the "
@@ -733,10 +860,10 @@ class Ctc1MeasuredMaskTests(unittest.TestCase):
             elf_path.write_bytes(fixture._synthetic_elf(fixture._cell5_words()))
             env = dict(os.environ)
             env["PYTHONPATH"] = str(ROOT / "tools") + os.pathsep + env.get("PYTHONPATH", "")
-            gen_proc = subprocess.run(
+            gen_proc = _bounded_run(
                 [sys.executable, str(tmp_codegen), str(elf_path),
                  str(work / "m.c"), "--profile=hst"],
-                cwd=ROOT, env=env, capture_output=True, text=True)
+                BUILD_TIMEOUT_S, INVALID_BUILD_TIMEOUT, cwd=ROOT, env=env)
             self.assertEqual(gen_proc.returncode, 0,
                              "MUTANT_GENERATION_FAILED\n" + gen_proc.stderr[-1500:])
             emitted = "\n".join(p.read_text(encoding="ascii")
@@ -752,13 +879,13 @@ class Ctc1MeasuredMaskTests(unittest.TestCase):
                        "-I", str(work), "-I", str(ROOT / "src" / "rt"),
                        str(work / "harness.c"), str(work / "m.c"),
                        *(str(p) for p in sorted(work.glob("m_*.c"))), "-lm", "-o", str(exe)]
-            compiled = subprocess.run(command, capture_output=True, text=True)
+            compiled = _bounded_run(command, BUILD_TIMEOUT_S, INVALID_BUILD_TIMEOUT)
             self.assertEqual(
                 compiled.returncode, 0,
                 "MUTANT_BUILD_FAILED: a build failure is not a semantic kill\n"
                 + (compiled.stderr + compiled.stdout)[-1500:])
 
-            ran = subprocess.run([str(exe)], capture_output=True, text=True)
+            ran = _bounded_run([str(exe)], RUN_TIMEOUT_S, INVALID_RUN_TIMEOUT)
             self.assertNotEqual(ran.returncode, 0, "MUTANT_SURVIVED: wholesale ctc1 passed CELL 5")
             combined = ran.stderr + ran.stdout
             self.assertIn(
