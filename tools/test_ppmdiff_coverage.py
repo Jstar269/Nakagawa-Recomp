@@ -10,8 +10,12 @@ Every test creates a temporary directory tree with synthetic 2×1 PPM frames
 
 Run: python -m unittest tools.test_ppmdiff_coverage -v
 """
+import contextlib
+import io
+import json
 import os
 import struct
+import subprocess
 import tempfile
 import unittest
 
@@ -219,6 +223,46 @@ class TestPPMDiffCoverage(unittest.TestCase):
 
             with self.assertRaises(ppmdiff.CoverageError):
                 ppmdiff.run_diff(a, b, threshold=3)
+
+
+class TestPPMDiffModes(unittest.TestCase):
+    """One-shot and watch mode: how the tool runs and what report it leaves."""
+
+    def test_an_inherited_sr_fbsnap_keeps_the_one_shot_run(self):
+        # SR_FBSNAP=<N> is the runtime's capture setting; a shell that exported it for a capture
+        # must still get the one-shot exit code, not an endless watch loop.
+        with tempfile.TemporaryDirectory() as td:
+            a, b = os.path.join(td, "a"), os.path.join(td, "b")
+            os.makedirs(a)
+            os.makedirs(b)
+            _write(a, "frame0000.ppm", RED_2x1)
+            _write(b, "frame0000.ppm", RED_2x1_COPY)
+            env = dict(os.environ, SR_FBSNAP="1")
+            result = subprocess.run(
+                [sys.executable, os.path.join(_TOOLS_DIR, "ppmdiff.py"), a, b],
+                cwd=td, env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Watching", result.stdout)
+            self.assertTrue(os.path.isfile(os.path.join(td, "visual_regression_report.json")))
+
+    def test_watch_mode_removes_the_report_when_a_later_comparison_fails_coverage(self):
+        with tempfile.TemporaryDirectory() as td:
+            a, b = os.path.join(td, "a"), os.path.join(td, "b")
+            os.makedirs(a)
+            os.makedirs(b)
+            _write(a, "frame0000.ppm", RED_2x1)
+            _write(b, "frame0000.ppm", RED_2x1_COPY)
+            report_path = os.path.join(td, "visual_regression_report.json")
+            self.assertTrue(ppmdiff.regenerate_watch_report(a, b, 3, report_path))
+            with open(report_path, encoding="utf-8") as f:
+                self.assertTrue(json.load(f)["summary"]["coverage_ok"])
+            _write(b, "frame0000.ppm", RED_2x1[:-2])  # a truncated capture
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertFalse(ppmdiff.regenerate_watch_report(a, b, 3, report_path))
+            self.assertFalse(os.path.exists(report_path))
+            self.assertIn("Coverage problem: truncated payload", err.getvalue())
 
 
 if __name__ == "__main__":

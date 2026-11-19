@@ -112,16 +112,22 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", type=Path, default=ROOT / OUTPUT, help="output file")
     parser.add_argument("--check", action="store_true",
-                        help="exit 1 when the committed file differs from a fresh generation")
+                        help="exit 1 when the --out file (by default the committed one) differs "
+                             "from a fresh generation")
     args = parser.parse_args(argv)
     text = render(collect())
     if args.check:
-        current = (ROOT / OUTPUT).read_bytes() if (ROOT / OUTPUT).is_file() else b""
+        target = Path(args.out)
+        try:
+            shown = target.resolve().relative_to(ROOT).as_posix()
+        except ValueError:
+            shown = str(target)
+        current = target.read_bytes() if target.is_file() else b""
         if current != text.encode("utf-8"):
-            print(f"gen_ui_assets: {OUTPUT.as_posix()} is stale; run python tools/regen_all.py",
+            print(f"gen_ui_assets: {shown} is stale; run python tools/regen_all.py",
                   file=sys.stderr)
             return 1
-        print(f"gen_ui_assets: {OUTPUT.as_posix()} is current")
+        print(f"gen_ui_assets: {shown} is current")
         return 0
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(text.encode("utf-8"))

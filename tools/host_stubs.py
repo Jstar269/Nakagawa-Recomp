@@ -9,10 +9,11 @@
 # Key  : guest address (int)
 # Value: (human-readable name (str), return_value (int))
 #
-# The return value for each entry: 1 for functions that return a meaningful
-# value to the caller, 0 for VFS/world/txcode entries that mean "no-op"
-# (just return success and do nothing). Keep real container/memory-management
-# routines out of this list: callers depend on their writes, not only r2.
+# The table is empty and must stay that way unless a function's whole PSP-visible
+# effect is its return value: an entry replaces the guest body with "set r2 and
+# return", so it is a forced return. A no-op that returns success while skipping the
+# routine's writes is the fake success AGENTS.md Section 6 forbids; a missing
+# behaviour is fixed in the runtime or the translation, never hidden here.
 
 # Retired under #363 (2026-10-27): the last five entries (0x0001c010, 0x0001c0fc,
 # 0x0001c104, 0x0001c560, 0x0001c604) were the title's archive open/close/seek/read path.

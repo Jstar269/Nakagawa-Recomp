@@ -679,8 +679,12 @@ LINK_LIBRARIES = {
 
 
 def _nm(path: Path, nm: str, dynamic: bool = False) -> set[str]:
+    """External symbols ``path`` defines. An nm that cannot read the file raises: an empty
+    set from an unreadable object would hide every L4 difference."""
     command = [nm, "-g", "--defined-only", *(["-D"] if dynamic else []), str(path)]
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        raise RuntimeError(f"{' '.join(command)} failed (exit {result.returncode}):\n{result.stderr[-2000:]}")
     names = set()
     for line in result.stdout.splitlines():
         parts = line.split()
@@ -705,11 +709,13 @@ def object_symbols(tree: Path, units: list[str], config: tuple[tuple[str, ...], 
     return found
 
 
-def library_symbols(cc: str, nm: str) -> tuple[set[str], list[str]]:
-    """Every external symbol the host's link libraries define, and the libraries found."""
+def library_symbols(cc: str, nm: str) -> tuple[set[str], list[str], list[str]]:
+    """Every external symbol the host's link libraries define, the libraries read, and the
+    libraries found that nm could not read (not checked, so never counted as found)."""
     host = "win32" if sys.platform == "win32" else "posix"
     names: set[str] = set()
     found: list[str] = []
+    unreadable: list[str] = []
     for lib in LINK_LIBRARIES[host]:
         for candidate in (f"lib{lib}.a", f"lib{lib}.dll.a", f"lib{lib}.so"):
             result = subprocess.run([cc, f"-print-file-name={candidate}"], capture_output=True, text=True)
@@ -718,10 +724,14 @@ def library_symbols(cc: str, nm: str) -> tuple[set[str], list[str]]:
                 text = path.read_bytes()[:64]
                 if text.startswith(b"/* GNU ld script"):
                     continue
-                names |= _nm(path, nm, dynamic=candidate.endswith(".so"))
-                found.append(candidate)
+                try:
+                    names |= _nm(path, nm, dynamic=candidate.endswith(".so"))
+                except RuntimeError:
+                    unreadable.append(candidate)
+                else:
+                    found.append(candidate)
                 break
-    return names, found
+    return names, found, unreadable
 
 
 def compare_symbols(base_tree: Path, base_units: list[str], new_tree: Path, new_units: list[str],
@@ -754,7 +764,9 @@ def compare_symbols(base_tree: Path, base_units: list[str], new_tree: Path, new_
             report.errors.append(f"L4: {name} is external in the new objects but neither was in the base nor lost `static`")
         for name in sorted(base_all - new_all):
             report.errors.append(f"L4: {name} was external in the base objects and is not any more")
-        libraries, found = library_symbols(cc, nm)
+        libraries, found, unreadable = library_symbols(cc, nm)
+        if unreadable:
+            report.incomplete.append(f"L4 library symbols: {nm} could not read {', '.join(unreadable)}")
         clashes = sorted(gained & libraries)
         for name in clashes:
             report.errors.append(f"L4: newly external {name} is also defined by a link library")
