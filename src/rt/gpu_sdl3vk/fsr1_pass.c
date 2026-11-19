@@ -188,13 +188,16 @@ static void set_write(Fsr1Pass *p, VkDescriptorSet set, VkSampler sampler, const
     p->UpdateDescriptorSets(p->dev, 2, w, 0, NULL);
 }
 
+/* Past the device's limit a size is invalid usage, so it is refused before anything is made. */
+static int size_within_limit(const Fsr1Pass *p, int w, int h, int ow, int oh) {
+    return (uint32_t)w <= p->max_dim && (uint32_t)h <= p->max_dim && (uint32_t)ow <= p->max_dim &&
+           (uint32_t)oh <= p->max_dim;
+}
+
 static int sized_make(Fsr1Pass *p, int w, int h, int ow, int oh) {
     p->DeviceWaitIdle(p->dev);
     sized_free(p);
     p->size_builds++;
-    if ((uint32_t)w > p->max_dim || (uint32_t)h > p->max_dim || (uint32_t)ow > p->max_dim ||
-        (uint32_t)oh > p->max_dim)
-        return 0;
     if (!img_make(p, &p->in, w, h, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT) ||
         !img_make(p, &p->mid, ow, oh, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
@@ -248,15 +251,23 @@ VkImage fsr1_record(Fsr1Pass *p, VkCommandBuffer cmd, VkImage src, int w, int h,
         /* A size whose images could not be made is not tried again: no device wait per present. */
         if (w == p->fail_w && h == p->fail_h && out_w == p->fail_ow && out_h == p->fail_oh)
             return VK_NULL_HANDLE;
-        if (!sized_make(p, w, h, out_w, out_h)) {
-            sized_free(p);
+        const char *why = NULL;
+        if (!size_within_limit(p, w, h, out_w, out_h)) {
+            /* Refused before anything is touched: the last good size's images may still be in
+             * flight, and they stay (no wait, no free, no rebuild if the caller goes back to it). */
+            why = "past the device's image limit";
+        } else if (!sized_make(p, w, h, out_w, out_h)) {
+            sized_free(p);  /* sized_make has waited for the device */
+            why = "a Vulkan image or its memory could not be made";
+        }
+        if (why) {
             p->fail_w = w;
             p->fail_h = h;
             p->fail_ow = out_w;
             p->fail_oh = out_h;
-            fprintf(stderr, "sdl3vk: FSR 1 cannot make its images for %dx%d to %dx%d (the device's "
-                            "limit is %u); this picture is scaled as before at this size\n",
-                    w, h, out_w, out_h, p->max_dim);
+            fprintf(stderr, "sdl3vk: FSR 1 cannot make its images for %dx%d to %dx%d: %s (the "
+                            "device's limit is %u); this picture is scaled as before at this size\n",
+                    w, h, out_w, out_h, why, p->max_dim);
             return VK_NULL_HANDLE;
         }
     }

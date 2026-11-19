@@ -24,7 +24,8 @@
  * lzma, huff, flac and zstd codecs, the CD codecs and self/parent hunk
  * references are covered only by libchdr upstream: there is no chdman here to
  * make them. The DVD/CD/hard-disk decision is tested through the metadata tag
- * each image carries.
+ * each image carries. Two of libchdr's local deltas are checked directly: a
+ * reused Huffman decoder's lookup gaps, and the FLAC codec's empty hunk.
  */
 
 #if !defined(_WIN32) && !defined(_WIN64)
@@ -44,6 +45,10 @@
 #include "nk_iso.h"
 #include "nk_platform.h"
 #include "nk_psp_sha1.h"
+
+#include "libchdr/bitstream.h"
+#include "libchdr/huffman.h"
+#include "../../third_party/libchdr/src/codec_flac.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -833,6 +838,53 @@ static void test_malformed_refused(void) {
     free(image.data);
 }
 
+/* libchdr LOCAL DELTA (third_party/libchdr/PROVENANCE.md): a Huffman decoder
+   that is reused across hunks (the HUFF codec's) imports a malformed tree, a
+   single one-bit code, that leaves half the lookup table unwritten. Every gap
+   decodes as the bounded placeholder (symbol 0, one bit), not as whatever the
+   previous hunk's tree, or uninitialised heap, left there. */
+static void test_chd_huffman_gap_is_deterministic(void) {
+    /* RLE-coded trees for 4 codes at most 2 bits, 3 bits per entry. */
+    static const uint8_t full_tree[] = { 0x49, 0x20, 0x00, 0x00 };  /* lengths 2,2,2,2 */
+    static const uint8_t gap_tree[] = { 0x24, 0x00, 0x00, 0x00 };   /* lengths 1,0,0,0 */
+    static const uint8_t data[] = { 0xC0, 0x00, 0x00, 0x00 };       /* window 0b11 */
+    struct huffman_decoder *decoder = create_huffman_decoder(4, 2);
+    struct bitstream *bits;
+    CHECK(decoder != NULL);
+
+    bits = create_bitstream(full_tree, sizeof(full_tree));
+    CHECK(bits != NULL);
+    CHECK(huffman_import_tree_rle(decoder, bits) == HUFFERR_NONE);
+    free(bits);
+    bits = create_bitstream(data, sizeof(data));
+    CHECK(huffman_decode_one(decoder, bits) == 3u); /* the full tree owns 0b11 */
+    free(bits);
+
+    bits = create_bitstream(gap_tree, sizeof(gap_tree));
+    CHECK(huffman_import_tree_rle(decoder, bits) == HUFFERR_NONE);
+    free(bits);
+    bits = create_bitstream(data, sizeof(data));
+    CHECK(huffman_decode_one(decoder, bits) == 0u); /* not the stale symbol 3 */
+    CHECK(bitstream_position_bits(bits) == 1u);     /* one bit consumed */
+    CHECK(huffman_decode_one(decoder, bits) == 0u);
+    free(bits);
+    delete_huffman_decoder(decoder);
+    printf("PASS CHD Huffman lookup gaps decode deterministically\n");
+}
+
+/* libchdr LOCAL DELTA: a zero-length FLAC hunk is refused before its
+   endianness byte, which does not exist, is read. NULL stands for the empty
+   buffer; the upstream order dereferences it. */
+static void test_chd_flac_empty_hunk_refused(void) {
+    flac_codec_data flac;
+    uint8_t dest[CHD_HUNK];
+    memset(&flac, 0, sizeof(flac));
+    CHECK(flac_codec_init(&flac, CHD_HUNK) == CHDERR_NONE);
+    CHECK(flac_codec_decompress(&flac, NULL, 0, dest, CHD_HUNK) == CHDERR_DECOMPRESSION_ERROR);
+    flac_codec_free(&flac);
+    printf("PASS CHD FLAC zero-length hunk refused\n");
+}
+
 static void test_cancel_removes_partial(void) {
     Buf image = { NULL, 0, 0 };
     char src[NATIVE_TEST_PATH_MAX];
@@ -1181,6 +1233,8 @@ int main(void) {
     test_cso_zso_round_trips();
     test_chd_round_trips();
     test_malformed_refused();
+    test_chd_huffman_gap_is_deterministic();
+    test_chd_flac_empty_hunk_refused();
     test_cancel_removes_partial();
     test_import_and_reuse();
     test_chd_damaged_metadata();

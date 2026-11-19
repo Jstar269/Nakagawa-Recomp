@@ -74,6 +74,9 @@ void nk_ui_sdlr_get_stats(const NkUiSdlr *renderer, NkUiSdlrStats *out) {
    size (at most 480 px wide) and are scaled up with a linear filter. */
 #define NK_UI_SDLR_WAVES_DIVISOR 3
 #define NK_UI_SDLR_WAVES_MAX_W 480
+/* A box far taller than wide keeps its height in bounds too; 4096 px is more
+   than any real window needs at a third of its size. */
+#define NK_UI_SDLR_WAVES_MAX_H 4096
 /* Image textures kept alive: a library page of disc art, the title's picture
    and every prompt glyph set fit with room to spare. */
 #define NK_UI_SDLR_IMAGE_CACHE 64
@@ -120,6 +123,7 @@ struct NkUiSdlr {
     SDL_Renderer *renderer;
     NkUiTextBackend text;
     int page_size;
+    int max_texture_side; /* the renderer's texture limit, 0 when it names none */
     float density;
     NkUiSdlrPage pages[NK_UI_SDLR_MAX_PAGES];
     int page_count;
@@ -252,9 +256,10 @@ static NkUiSdlrEntry *nk_ui_sdlr_add_entry(NkUiSdlr *r, int font, int px, uint32
     return entry;
 }
 
-/* Finds room for a w x h cell (padding included) and returns its page, or -1. A
-   new page is added when the current one is full; at the page limit the caller
-   must rebuild the atlas. */
+/* Finds room for a w x h cell (padding included) and returns its page; -1 when
+   the cell is larger than a page, -2 at the page limit (the caller must rebuild
+   the atlas), -3 when SDL cannot create a new page. A new page is added when the
+   current one is full. */
 static int nk_ui_sdlr_place(NkUiSdlr *r, int w, int h, int *x, int *y) {
     int cell_w = w + NK_UI_SDLR_PAD;
     int cell_h = h + NK_UI_SDLR_PAD;
@@ -289,7 +294,7 @@ static int nk_ui_sdlr_place(NkUiSdlr *r, int w, int h, int *x, int *y) {
                                               SDL_TEXTUREACCESS_STATIC,
                                               r->page_size, r->page_size);
             if (page->texture == NULL) {
-                return -1;
+                return -3;
             }
             SDL_SetTextureBlendMode(page->texture, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
             SDL_SetTextureScaleMode(page->texture, SDL_SCALEMODE_NEAREST);
@@ -337,12 +342,12 @@ static bool nk_ui_sdlr_upload(NkUiSdlr *r, int page, int x, int y,
     return true;
 }
 
-static void nk_ui_sdlr_flush_quads(NkUiSdlr *r, int page, int quads);
+static bool nk_ui_sdlr_flush_quads(NkUiSdlr *r, int page, int quads);
 
 /* Returns the cached entry for a glyph, rasterising and uploading it on first
    use. `pending_page` and `pending_quads` describe geometry the caller has built
    but not drawn; it is flushed before an atlas rebuild invalidates its texture.
-   Returns NULL only on allocation or backend failure. */
+   Returns NULL only on allocation or backend failure (the flush's included). */
 static NkUiSdlrEntry *nk_ui_sdlr_glyph(NkUiSdlr *r, int font, int px, uint32_t glyph,
                                        int *pending_page, int *pending_quads) {
     NkUiSdlrEntry *entry = nk_ui_sdlr_find(r, font, px, glyph);
@@ -364,7 +369,9 @@ static NkUiSdlrEntry *nk_ui_sdlr_glyph(NkUiSdlr *r, int font, int px, uint32_t g
     page = nk_ui_sdlr_place(r, bitmap.width, bitmap.height, &x, &y);
     if (page == -2) {
         /* Atlas full: draw what is queued, drop every page, start again. */
-        nk_ui_sdlr_flush_quads(r, *pending_page, *pending_quads);
+        if (!nk_ui_sdlr_flush_quads(r, *pending_page, *pending_quads)) {
+            return NULL;
+        }
         *pending_quads = 0;
         ++r->stats.atlas_rebuilds;
         nk_ui_sdlr_drop_atlas(r);
@@ -372,12 +379,18 @@ static NkUiSdlrEntry *nk_ui_sdlr_glyph(NkUiSdlr *r, int font, int px, uint32_t g
         /* The raster result may have been overwritten by the flush's text calls
            only if the backend shares scratch; flush draws no text, so it holds. */
     }
+    /* A page SDL could not create or a bitmap it could not take is a failed
+       render, not a blank glyph: nothing is cached, so the next render tries
+       again. */
+    if (page == -3 || (page >= 0 && !nk_ui_sdlr_upload(r, page, x, y, &bitmap))) {
+        return NULL;
+    }
     entry = nk_ui_sdlr_add_entry(r, font, px, glyph);
     if (entry == NULL) {
         return NULL;
     }
-    if (page < 0 || !nk_ui_sdlr_upload(r, page, x, y, &bitmap)) {
-        return entry; /* too large for a page or upload failed: skipped, cached */
+    if (page < 0) {
+        return entry; /* too large for any page: skipped, cached */
     }
     entry->page = page;
     entry->x = x;
@@ -415,6 +428,35 @@ static void nk_ui_sdlr_apply_clip(NkUiSdlr *r, NkUiSdlrClip *clip) {
     SDL_SetRenderClipRect(r->renderer, &sdl_rect);
 }
 
+/* Back to the open scissor's clip, or none when no scissor is open. */
+static void nk_ui_sdlr_restore_clip(NkUiSdlr *r, NkUiSdlrClip *clip) {
+    if (clip->depth == 1) {
+        SDL_SetRenderClipRect(r->renderer, NULL);
+        clip->empty = false;
+    } else {
+        nk_ui_sdlr_apply_clip(r, clip);
+    }
+}
+
+/* Clips the renderer to a text, waves or image command's own clip (its bounds
+   inside every open scissor, nk_ui_draw.h), as the Vulkan backend scissors each
+   draw: ink past the bounds, such as a label wider than its box, is cut alike.
+   False when the clip is empty and the command draws nothing. Rectangles and
+   borders keep the scissor's clip, since their geometry lies within their
+   bounds, so neighbours still draw as one batch. */
+static bool nk_ui_sdlr_clip_command(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
+    SDL_Rect rect;
+    if (cmd->clip[2] <= cmd->clip[0] || cmd->clip[3] <= cmd->clip[1]) {
+        return false;
+    }
+    rect.x = cmd->clip[0];
+    rect.y = cmd->clip[1];
+    rect.w = cmd->clip[2] - cmd->clip[0];
+    rect.h = cmd->clip[3] - cmd->clip[1];
+    SDL_SetRenderClipRect(r->renderer, &rect);
+    return true;
+}
+
 static SDL_FColor nk_ui_sdlr_color(uint32_t rgba_pm) {
     SDL_FColor color;
     color.r = (float)((rgba_pm >> 24) & 0xFFu) / 255.0f;
@@ -424,15 +466,16 @@ static SDL_FColor nk_ui_sdlr_color(uint32_t rgba_pm) {
     return color;
 }
 
-static void nk_ui_sdlr_flush_quads(NkUiSdlr *r, int page, int quads) {
+/* False when SDL refuses the geometry. */
+static bool nk_ui_sdlr_flush_quads(NkUiSdlr *r, int page, int quads) {
     const NkUiSdlrQuadVertex *v = r->quad_vertices;
     if (quads <= 0 || page < 0 || page >= r->page_count) {
-        return;
+        return true;
     }
-    SDL_RenderGeometryRaw(r->renderer, r->pages[page].texture,
-                          &v->x, (int)sizeof(*v), &v->color, (int)sizeof(*v),
-                          &v->u, (int)sizeof(*v), quads * 4,
-                          r->quad_indices, quads * 6, (int)sizeof(int));
+    return SDL_RenderGeometryRaw(r->renderer, r->pages[page].texture,
+                                 &v->x, (int)sizeof(*v), &v->color, (int)sizeof(*v),
+                                 &v->u, (int)sizeof(*v), quads * 4,
+                                 r->quad_indices, quads * 6, (int)sizeof(int));
 }
 
 static bool nk_ui_sdlr_reserve_quads(NkUiSdlr *r, size_t glyphs) {
@@ -504,6 +547,9 @@ static bool nk_ui_sdlr_draw_text(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
     if (count <= 0) {
         return true;
     }
+    if ((size_t)count > needed) {
+        count = (int)needed; /* never read past the glyphs the buffer holds */
+    }
     memset(&size, 0, sizeof(size));
     if (r->text.measure != NULL) {
         size = r->text.measure(r->text.user, run->font, run->size_px, run->text, run->length);
@@ -542,11 +588,14 @@ static bool nk_ui_sdlr_draw_text(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
             continue;
         }
         if (pending_quads > 0 && entry->page != pending_page) {
-            nk_ui_sdlr_flush_quads(r, pending_page, pending_quads);
+            if (!nk_ui_sdlr_flush_quads(r, pending_page, pending_quads)) {
+                return false;
+            }
             pending_quads = 0;
         }
         pending_page = entry->page;
-        x0 = (float)(origin_x + nk_ui_sdlr_round(glyph->x + run->letter_spacing * (float)i) +
+        x0 = (float)(origin_x +
+                     nk_ui_sdlr_round(glyph->x + run->letter_spacing * (float)glyph->text_index) +
                      entry->bearing_x);
         y0 = (float)(baseline_y + nk_ui_sdlr_round(glyph->y) - entry->bearing_y);
         x1 = x0 + (float)entry->w;
@@ -567,7 +616,9 @@ static bool nk_ui_sdlr_draw_text(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
         ++pending_quads;
         ++r->stats.glyphs_drawn;
     }
-    nk_ui_sdlr_flush_quads(r, pending_page, pending_quads);
+    if (!nk_ui_sdlr_flush_quads(r, pending_page, pending_quads)) {
+        return false;
+    }
     ++r->stats.text_runs_drawn;
     return true;
 }
@@ -596,6 +647,9 @@ NkUiSdlr *nk_ui_sdlr_create(struct SDL_Renderer *renderer, const NkUiTextBackend
                                   SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, 0) : 0;
     if (max_texture > 0 && max_texture < r->page_size) {
         r->page_size = (int)max_texture;
+    }
+    if (max_texture > 0 && max_texture <= INT_MAX) {
+        r->max_texture_side = (int)max_texture;
     }
     return r;
 }
@@ -723,6 +777,9 @@ static bool nk_ui_sdlr_draw_image(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
     SDL_Texture *texture;
     SDL_FColor color;
     bool transient = false;
+    bool drawn;
+    int64_t box_w;
+    int64_t box_h;
     int width;
     int height;
     int k;
@@ -733,13 +790,21 @@ static bool nk_ui_sdlr_draw_image(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
         return true;
     }
     /* Shrunk by more than a quarter: upload an area-averaged copy at the drawn
-       size, so a 64 px glyph drawn at 24 px does not alias. */
+       size, so a 64 px glyph drawn at 24 px does not alias. Only a shrinking
+       axis takes the drawn size; one drawn larger keeps the image's own, so the
+       copy is never bigger than the image and the linear filter stretches it.
+       The extents are 64-bit, so a box side past INT_MAX / 5 cannot overflow. */
     width = (int)image->width;
     height = (int)image->height;
-    if ((cmd->bounds[2] - cmd->bounds[0]) * 5 < width * 4 ||
-        (cmd->bounds[3] - cmd->bounds[1]) * 5 < height * 4) {
-        width = cmd->bounds[2] - cmd->bounds[0];
-        height = cmd->bounds[3] - cmd->bounds[1];
+    box_w = (int64_t)cmd->bounds[2] - (int64_t)cmd->bounds[0];
+    box_h = (int64_t)cmd->bounds[3] - (int64_t)cmd->bounds[1];
+    if (box_w * 5 < (int64_t)width * 4 || box_h * 5 < (int64_t)height * 4) {
+        if (box_w < (int64_t)width) {
+            width = (int)box_w;
+        }
+        if (box_h < (int64_t)height) {
+            height = (int)box_h;
+        }
     }
     texture = nk_ui_sdlr_image_texture(r, image, width, height, &transient);
     if (texture == NULL) {
@@ -754,11 +819,14 @@ static bool nk_ui_sdlr_draw_image(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
     for (k = 0; k < 4; ++k) {
         q[k].color = color;
     }
-    SDL_RenderGeometryRaw(r->renderer, texture, &q[0].x, (int)sizeof(q[0]),
-                          &q[0].color, (int)sizeof(q[0]), &q[0].u, (int)sizeof(q[0]),
-                          4, indices, 6, (int)sizeof(int));
+    drawn = SDL_RenderGeometryRaw(r->renderer, texture, &q[0].x, (int)sizeof(q[0]),
+                                  &q[0].color, (int)sizeof(q[0]), &q[0].u, (int)sizeof(q[0]),
+                                  4, indices, 6, (int)sizeof(int));
     if (transient) {
         SDL_DestroyTexture(texture);
+    }
+    if (!drawn) {
+        return false; /* SDL refused the geometry: the frame is not drawn */
     }
     ++r->stats.images_drawn;
     return true;
@@ -781,6 +849,12 @@ static bool nk_ui_sdlr_draw_waves(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
         w = NK_UI_SDLR_WAVES_MAX_W;
     }
     h = (int)((long long)bh * w / bw);
+    if (h > NK_UI_SDLR_WAVES_MAX_H) {
+        h = NK_UI_SDLR_WAVES_MAX_H;
+    }
+    if (r->max_texture_side > 0 && h > r->max_texture_side) {
+        h = r->max_texture_side;
+    }
     if (w < 1) w = 1;
     if (h < 1) h = 1;
     if (r->waves_texture == NULL || r->waves_w != w || r->waves_h != h) {
@@ -823,39 +897,26 @@ static bool nk_ui_sdlr_draw_waves(NkUiSdlr *r, const NkUiDrawCmd *cmd) {
     return SDL_RenderTexture(r->renderer, r->waves_texture, NULL, &dst);
 }
 
+/* A list the SDL renderer can draw: well formed (nk_ui_draw_list_valid, the
+   check the Vulkan backend makes too), and with vertex and index counts that
+   fit SDL_RenderGeometryRaw's int counts. */
 static bool nk_ui_sdlr_list_valid(const NkUiDrawList *list) {
-    uint32_t i;
-    if (list->nv > (uint32_t)INT_MAX || list->ni > (uint32_t)INT_MAX ||
-        (list->nv > 0 && list->v == NULL) || (list->ni > 0 && list->idx == NULL) ||
-        (list->ncmd > 0 && list->cmd == NULL)) {
-        return false;
-    }
-    for (i = 0; i < list->ni; ++i) {
-        if (list->idx[i] >= list->nv) {
-            return false;
-        }
-    }
-    for (i = 0; i < list->ncmd; ++i) {
-        const NkUiDrawCmd *cmd = &list->cmd[i];
-        if (cmd->kind == NK_UI_DRAW_RECTANGLE || cmd->kind == NK_UI_DRAW_BORDER) {
-            if (cmd->first > list->ni || cmd->count > list->ni - cmd->first) {
-                return false;
-            }
-        }
-    }
-    return true;
+    return list->nv <= (uint32_t)INT_MAX && list->ni <= (uint32_t)INT_MAX &&
+           nk_ui_draw_list_valid(list);
 }
 
-static void nk_ui_sdlr_draw_triangles(NkUiSdlr *r, const NkUiDrawList *list,
+/* False when SDL refuses the geometry. */
+static bool nk_ui_sdlr_draw_triangles(NkUiSdlr *r, const NkUiDrawList *list,
                                       uint32_t first, uint32_t count) {
     if (count == 0) {
-        return;
+        return true;
     }
-    SDL_RenderGeometryRaw(r->renderer, NULL,
-                          &list->v[0].x, (int)sizeof(NkUiVertex),
-                          r->colors, (int)sizeof(SDL_FColor),
-                          &list->v[0].u, (int)sizeof(NkUiVertex),
-                          (int)list->nv, list->idx + first, (int)count, (int)sizeof(uint32_t));
+    return SDL_RenderGeometryRaw(r->renderer, NULL,
+                                 &list->v[0].x, (int)sizeof(NkUiVertex),
+                                 r->colors, (int)sizeof(SDL_FColor),
+                                 &list->v[0].u, (int)sizeof(NkUiVertex),
+                                 (int)list->nv, list->idx + first, (int)count,
+                                 (int)sizeof(uint32_t));
 }
 
 bool nk_ui_sdlr_render(NkUiSdlr *r, const NkUiDrawList *list) {
@@ -905,21 +966,25 @@ bool nk_ui_sdlr_render(NkUiSdlr *r, const NkUiDrawList *list) {
             if (batch_count > 0 && cmd->first == batch_first + batch_count) {
                 batch_count += cmd->count;
             } else {
-                nk_ui_sdlr_draw_triangles(r, list, batch_first, batch_count);
+                ok = nk_ui_sdlr_draw_triangles(r, list, batch_first, batch_count);
                 batch_first = cmd->first;
                 batch_count = cmd->count;
             }
             continue;
         }
-        nk_ui_sdlr_draw_triangles(r, list, batch_first, batch_count);
+        ok = nk_ui_sdlr_draw_triangles(r, list, batch_first, batch_count);
         batch_count = 0;
+        if (!ok) {
+            break;
+        }
         switch (cmd->kind) {
         case NK_UI_DRAW_RECTANGLE:
         case NK_UI_DRAW_BORDER:
             break; /* clipped away */
         case NK_UI_DRAW_TEXT:
-            if (!clip.empty) {
+            if (!clip.empty && nk_ui_sdlr_clip_command(r, cmd)) {
                 ok = nk_ui_sdlr_draw_text(r, cmd);
+                nk_ui_sdlr_restore_clip(r, &clip);
             }
             break;
         case NK_UI_DRAW_SCISSOR_START:
@@ -939,22 +1004,19 @@ bool nk_ui_sdlr_render(NkUiSdlr *r, const NkUiDrawList *list) {
         case NK_UI_DRAW_SCISSOR_END:
             if (clip.depth > 1) {
                 --clip.depth;
-                if (clip.depth == 1) {
-                    SDL_SetRenderClipRect(r->renderer, NULL);
-                    clip.empty = false;
-                } else {
-                    nk_ui_sdlr_apply_clip(r, &clip);
-                }
+                nk_ui_sdlr_restore_clip(r, &clip);
             }
             break;
         case NK_UI_DRAW_CUSTOM:
             if (cmd->custom_kind == NK_UI_CUSTOM_WAVES) {
-                if (!clip.empty) {
+                if (!clip.empty && nk_ui_sdlr_clip_command(r, cmd)) {
                     ok = nk_ui_sdlr_draw_waves(r, cmd);
+                    nk_ui_sdlr_restore_clip(r, &clip);
                 }
             } else if (cmd->custom_kind == NK_UI_CUSTOM_IMAGE) {
-                if (!clip.empty) {
+                if (!clip.empty && nk_ui_sdlr_clip_command(r, cmd)) {
                     ok = nk_ui_sdlr_draw_image(r, cmd);
+                    nk_ui_sdlr_restore_clip(r, &clip);
                 }
             } else {
                 ++r->stats.custom_skipped;
@@ -965,7 +1027,9 @@ bool nk_ui_sdlr_render(NkUiSdlr *r, const NkUiDrawList *list) {
             break;
         }
     }
-    nk_ui_sdlr_draw_triangles(r, list, batch_first, batch_count);
+    if (ok && !nk_ui_sdlr_draw_triangles(r, list, batch_first, batch_count)) {
+        ok = false;
+    }
 
     SDL_SetRenderDrawBlendMode(r->renderer, previous_blend);
     SDL_SetRenderClipRect(r->renderer, had_clip ? &previous_clip : NULL);

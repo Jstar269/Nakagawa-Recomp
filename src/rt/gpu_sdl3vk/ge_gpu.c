@@ -12,9 +12,10 @@
  *
  * Architecture: ge.c keeps doing vertex decode + T&L + clipping + primitive acceptance
  * (the parts validated against PPSSPP), then hands SCREEN-SPACE primitives to this
- * backend through the GeGpuHooks seam. Every primitive renders on the GPU — there is no
- * software-rasterizer fallback; unmappable blend modes are approximated (see
- * build_state). GE framebuffers are PERSISTENT GPU images (color RGBA8 + shared D16
+ * backend through the GeGpuHooks seam. Primitives render on the GPU, except the states it
+ * cannot draw exactly (gpu_state_unsupported_reason, points, textured lines): those go to
+ * ge.c's software rasterizer, counted by reason (GEGPU_FALLBACK_*); unmappable blend modes
+ * are approximated (see build_state). GE framebuffers are PERSISTENT GPU images (color RGBA8 + shared D16
  * depth keyed by zbp): no guest-VRAM upload/readback per flush. Guest VRAM is read only
  * when a target is first created (or invalidated by a CPU write: movie decode, DMA),
  * and written only on the rare paths that genuinely consume it (CLUT load from VRAM,
@@ -83,8 +84,8 @@
  *  - Write masks: a channel whose native bits are all masked or all written maps to the
  *    colour write mask; any other mask (and in clear mode an alpha mask that is not) falls
  *    back to ge.c (gpu_state_unsupported_reason).
- *  - Approximated (no software fallback): untextured lines (1px quads, not DDA). Points and
- *    textured lines fall back to ge.c.
+ *  - Lines: an untextured line runs ge.c draw_line_vtx's DDA here and draws its pixels as
+ *    one-pixel quads (hook_line). Points and textured lines fall back to ge.c.
  *  - Render scale (default 1): SR_RESOLUTION_SCALE carries the player's Settings >
  *    Internal Render Resolution choice (1..4); SR_GPU_SCALE overrides it as an
  *    explicit diagnostic (sr_parse_render_scale in ge_gpu.h). Targets/depth/snapshot images are
@@ -308,6 +309,7 @@ typedef struct {
     VkDescriptorSet set_af;
     int w, h;
     uint32_t addr, bytes;                  /* guest source range for precise CPU-write invalidation */
+    uint32_t bufw;                         /* level 0's buffer width: compared on lookup with addr */
     TexMipKey mip;                         /* compared exactly on lookup, with key */
     uint32_t mip_bytes[7];                 /* source range of each level 1..mip.max_level */
     uint64_t range_lo[8], range_hi[8];     /* canonical source ranges, level 0 first (#282) */
@@ -892,6 +894,10 @@ static unsigned long s_cnt_ssaa_resolves = 0;
  * place of the device's (0 keeps the device's). */
 static uint64_t s_ssaa_test_budget = 0;
 static uint32_t s_ssaa_test_dim = 0;
+/* gegpu_selftest_init_fail: gegpu_init fails at its last step that can fail. */
+static int s_selftest_init_fail = 0;
+/* tex-make-fail: the next image memory allocation fails, as vkAllocateMemory out of memory. */
+static int s_selftest_alloc_fail = 0;
 #endif
 static int s_twin_unavailable = 0;         /* asked for and allowed, but this GPU refused it at init */
 static int s_twin_from_key = 0;            /* the launch line asks for the twin (twin=on): its report names the outcome */
@@ -998,6 +1004,10 @@ static uint64_t s_write_seq = 0;
 static unsigned long s_cnt_readback = 0, s_cnt_upload = 0, s_cnt_dirty = 0;
 static unsigned long s_cnt_snap = 0, s_cnt_texup = 0, s_cnt_xferblit = 0;
 static unsigned long s_cnt_depth_commit = 0;   /* depth_readback_to_guest copies (rtt-1x-reads) */
+static unsigned long s_cnt_tex_evict_failed = 0;   /* lookups a full cache could not evict for */
+static unsigned long s_cnt_target_kept = 0;        /* targets kept: their GPU pixels could not be written back */
+static unsigned long s_cnt_fallback_refused = 0;   /* software fallbacks the GPU's pixels could not be handed to */
+static unsigned long s_cnt_target_failed = 0;      /* primitives handed to ge.c because begin_target failed */
 /* Movie pictures (#2111): texture uploads that were one, and presents handed to the movie
  * upscaler because a drawn (tex) or decoded-into (target) picture covered the frame. */
 static unsigned long s_cnt_movie_tex, s_cnt_movie_present_tex, s_cnt_movie_present_target;
@@ -1153,9 +1163,21 @@ static int make_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *bu
     for (uint32_t i = 0; i < mp.memoryTypeCount; i++) type_flags[i] = mp.memoryTypes[i].propertyFlags;
     mai.memoryTypeIndex = gegpu_pick_host_mem_type(type_flags, mp.memoryTypeCount,
         mr.memoryTypeBits, (usage & VK_BUFFER_USAGE_TRANSFER_DST_BIT) != 0);
-    VKC(vkAllocateMemory(s_dev, &mai, NULL, mem));
-    VKC(vkBindBufferMemory(s_dev, *buf, *mem, 0));
-    if (map) VKC(vkMapMemory(s_dev, *mem, 0, VK_WHOLE_SIZE, 0, map));
+    /* A failure after the buffer is made frees what was made, and leaves no handle behind (a
+     * failed vkAllocateMemory's output is undefined, so it is never freed). */
+    VkResult vr = vkAllocateMemory(s_dev, &mai, NULL, mem);
+    const int allocated = vr == VK_SUCCESS;
+    if (vr == VK_SUCCESS) vr = vkBindBufferMemory(s_dev, *buf, *mem, 0);
+    if (vr == VK_SUCCESS && map) vr = vkMapMemory(s_dev, *mem, 0, VK_WHOLE_SIZE, 0, map);
+    if (vr != VK_SUCCESS) {
+        fprintf(stderr, "gegpu: a buffer's memory could not be allocated, bound or mapped: %d\n", (int)vr);
+        if (allocated) vkFreeMemory(s_dev, *mem, NULL);
+        vkDestroyBuffer(s_dev, *buf, NULL);
+        *buf = VK_NULL_HANDLE;
+        *mem = VK_NULL_HANDLE;
+        if (map) *map = NULL;
+        return 0;
+    }
     return 1;
 }
 
@@ -1172,8 +1194,24 @@ static int make_image_levels(uint32_t w, uint32_t h, uint32_t levels, VkFormat f
     VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
     mai.allocationSize = mr.size;
     mai.memoryTypeIndex = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    VKC(vkAllocateMemory(s_dev, &mai, NULL, mem));
-    VKC(vkBindImageMemory(s_dev, *img, *mem, 0));
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    const VkResult vr_alloc = s_selftest_alloc_fail ? (s_selftest_alloc_fail = 0, VK_ERROR_OUT_OF_DEVICE_MEMORY)
+                                                    : vkAllocateMemory(s_dev, &mai, NULL, mem);
+#else
+    const VkResult vr_alloc = vkAllocateMemory(s_dev, &mai, NULL, mem);
+#endif
+    /* A failure after the image is made frees what was made, and leaves no handle behind (a
+     * failed vkAllocateMemory's output is undefined, so it is never freed). */
+    VkResult vr = vr_alloc;
+    if (vr == VK_SUCCESS) vr = vkBindImageMemory(s_dev, *img, *mem, 0);
+    if (vr != VK_SUCCESS) {
+        fprintf(stderr, "gegpu: an image's memory could not be allocated or bound: %d\n", (int)vr);
+        if (vr_alloc == VK_SUCCESS) vkFreeMemory(s_dev, *mem, NULL);
+        vkDestroyImage(s_dev, *img, NULL);
+        *img = VK_NULL_HANDLE;
+        *mem = VK_NULL_HANDLE;
+        return 0;
+    }
     return 1;
 }
 
@@ -1574,9 +1612,20 @@ static void submit_poll_done(void) {
     }
 }
 
+/* Set once a GE recording could not be ended or submitted (cmd_finish_submit). The buffer's
+ * state is then unknown (after a lost device it may even be pending), so it is never reset or
+ * recorded into again, and no new recording starts: every later GPU operation fails as a
+ * cmd_begin failure does, and its caller takes its own failure path. */
+static int s_cmd_failed = 0;
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* The coherence selftest's submit-fail cell: the next queue submit reports this result. */
+static VkResult s_selftest_submit_result = VK_SUCCESS;
+#endif
+
 /* Start a fresh scoped command buffer. The selected slot cannot be reset until its fence
  * retires, which also protects every vertex-arena range previously submitted in it. */
 static int cmd_begin_fresh(void) {
+    if (s_cmd_failed) return 0;
     SubmitSlot *slot = &s_submit[s_async_submit ? s_submit_cursor : 0];
     if (!cmd_wait_slot(slot, GEGPU_BOUNDARY_OTHER)) return 0;
     /* A synchronous boundary can retire earlier queue work without acquiring every
@@ -1597,16 +1646,36 @@ static int cmd_begin_fresh(void) {
     return 1;
 }
 
+/* A recording that could not be ended or submitted is dropped: nothing in it reaches the GPU.
+ * The open recording is closed (s_cmd_slot, s_cmd) so no caller records into it or ends it again,
+ * and s_cmd_failed stops every later recording. */
+static int cmd_abandon_recording(const char *what, VkResult vr) {
+    fprintf(stderr, "gegpu: %s failed: %d: the GE recording is dropped and no further GPU work is "
+            "recorded this run\n", what, (int)vr);
+    s_cmd_slot = NULL;
+    s_cmd = VK_NULL_HANDLE;
+    s_cmd_failed = 1;
+    return 0;
+}
+
 static int cmd_finish_submit(SrPerfGeReason reason, int defer) {
     SubmitSlot *slot = s_cmd_slot;
     if (!slot) return 0;
     ts_end(slot, reason);
-    VKC(vkEndCommandBuffer(s_cmd));
+    VkResult vr = vkEndCommandBuffer(s_cmd);
+    if (vr != VK_SUCCESS) return cmd_abandon_recording("vkEndCommandBuffer", vr);
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1; si.pCommandBuffers = &s_cmd;
     uint64_t submit_started = SDL_GetTicksNS();
     uint64_t perf_submit_started = sr_perf_now_ns();
-    VKC(vkQueueSubmit(s_queue, 1, &si, slot->fence));
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    if (s_selftest_submit_result != VK_SUCCESS) {
+        vr = s_selftest_submit_result;
+        s_selftest_submit_result = VK_SUCCESS;
+    } else
+#endif
+    vr = vkQueueSubmit(s_queue, 1, &si, slot->fence);
+    if (vr != VK_SUCCESS) return cmd_abandon_recording("vkQueueSubmit", vr);
     if (perf_submit_started) sr_perf_vulkan_submit(perf_submit_started);
     replay_note_submit(reason, SDL_GetTicksNS() - submit_started);
     if (sr_perf_enabled) sr_perf_ge_submit(reason);
@@ -1901,6 +1970,10 @@ static int readback_finish(ReadbackSlot *r, int wait, int allow_commit) {
     if (allow_commit && r->commit && t && t->used && t->img == r->image &&
         t->gpu_valid && t->render_gen == r->gen) {
         if (write_guest_fb(r->map, r->fba, r->stride, r->fmt, r->y0, r->y1)) {
+            /* As target_readback: ge.c's cached depth surface over these rows is now stale. */
+            const uint32_t row = r->stride * (r->fmt == 3u ? 4u : 2u);
+            ge_zbuf_invalidate_guest_span(0x04000000u + r->fba + (uint32_t)r->y0 * row,
+                                          (uint32_t)(r->y1 - r->y0) * row);
             target_note_clean(t);
             if (sr_perf_enabled) sr_perf_vulkan_readback((uint32_t)readback_bytes(4u));
             s_cnt_readback++;
@@ -1985,14 +2058,17 @@ static int pcache_mode_parse(const char *v) {
     return -1;
 }
 
-/* The shader set the cache was made for: the renderer's SPIR-V modules, as embedded. */
+/* The shader set the cache was made for: every SPIR-V module a cached pipeline is made from, as
+ * embedded. The RMW fragment module (pipe_create's interlock pipelines) goes through the same
+ * cache, so it is in the set too. */
 static uint64_t pcache_shader_set(void) {
     uint64_t h = 0;
-    uint64_t n[3] = { sizeof(k_vert_spv), sizeof(k_frag_spv), sizeof(k_tnl_vert_spv) };
+    uint64_t n[4] = { sizeof(k_vert_spv), sizeof(k_frag_spv), sizeof(k_tnl_vert_spv), sizeof(k_frag_rmw_spv) };
     h = nk_pcache_fnv1a64(h, n, sizeof n);
     h = nk_pcache_fnv1a64(h, k_vert_spv, sizeof(k_vert_spv));
     h = nk_pcache_fnv1a64(h, k_frag_spv, sizeof(k_frag_spv));
-    return nk_pcache_fnv1a64(h, k_tnl_vert_spv, sizeof(k_tnl_vert_spv));
+    h = nk_pcache_fnv1a64(h, k_tnl_vert_spv, sizeof(k_tnl_vert_spv));
+    return nk_pcache_fnv1a64(h, k_frag_rmw_spv, sizeof(k_frag_rmw_spv));
 }
 
 /* How much data the driver's cache holds now (0 if it cannot say). */
@@ -2288,16 +2364,65 @@ static VkPipeline pipe_create(const PipeKey *k, int rmw) {
     return p;
 }
 
+/* A pipeline cache's index: open addressing over FNV-1a of the key, each slot an entry number + 1
+ * (0: empty), its capacity a power of two at least twice the slots it holds, so a lookup costs a
+ * few key compares however many pipelines the run has made. A slot names an entry by number and
+ * a hit compares that entry's key, so a slot left by entries dropped from the cache only costs a
+ * probe; the next growth rebuilds the index from the entries alone. */
+typedef struct { int *slot; uint32_t cap, used; } PipeIndex;
+static PipeIndex s_pipe_idx, s_rmw_pipe_idx[2];
+
+static uint32_t pipe_key_hash(const PipeKey *k) {
+    const uint64_t h = nk_pcache_fnv1a64(0, k, sizeof(*k));
+    return (uint32_t)(h ^ (h >> 32));
+}
+
+static int pipe_index_find(const PipeIndex *ix, const PipeEnt *ents, int n, const PipeKey *k) {
+    if (!ix->cap) return -1;
+    const uint32_t mask = ix->cap - 1u;
+    for (uint32_t i = pipe_key_hash(k) & mask, probes = 0; probes < ix->cap; i = (i + 1u) & mask, probes++) {
+        const int s = ix->slot[i];
+        if (!s) return -1;
+        if (s <= n && !memcmp(&ents[s - 1].key, k, sizeof(*k))) return s - 1;
+    }
+    return -1;
+}
+
+static void pipe_index_put(PipeIndex *ix, const PipeKey *k, int entry) {
+    const uint32_t mask = ix->cap - 1u;
+    uint32_t i = pipe_key_hash(k) & mask;
+    while (ix->slot[i]) i = (i + 1u) & mask;
+    ix->slot[i] = entry + 1;
+    ix->used++;
+}
+
+/* Room for one more slot; 0 when the index cannot grow (the caller makes no pipeline). */
+static int pipe_index_reserve(PipeIndex *ix, const PipeEnt *ents, int n) {
+    if (ix->cap && (ix->used + 1u) * 2u <= ix->cap) return 1;
+    uint32_t cap = 64u;
+    while (cap < ((uint32_t)n + 1u) * 2u) cap *= 2u;
+    int *slot = (int *)calloc(cap, sizeof(*slot));
+    if (!slot) return 0;
+    free(ix->slot);
+    ix->slot = slot; ix->cap = cap; ix->used = 0;
+    for (int i = 0; i < n; i++) pipe_index_put(ix, &ents[i].key, i);
+    return 1;
+}
+
+static void pipe_index_free(PipeIndex *ix) {
+    free(ix->slot);
+    ix->slot = NULL; ix->cap = ix->used = 0;
+}
+
 static VkPipeline pipe_get(const PipeKey *k) {
     uint64_t profile_started = cpu_profile_now();
-    for (int i = 0; i < s_pipe_n; i++) {
-        if (!memcmp(&s_pipes[i].key, k, sizeof(*k))) {
-            if (s_cpu_profile) {
-                s_cpu_profile_stats.pipeline_hits++;
-                cpu_profile_add(GEGPU_CPU_PIPELINE_LOOKUP, profile_started);
-            }
-            return s_pipes[i].pipe;
+    const int hit = pipe_index_find(&s_pipe_idx, s_pipes, s_pipe_n, k);
+    if (hit >= 0) {
+        if (s_cpu_profile) {
+            s_cpu_profile_stats.pipeline_hits++;
+            cpu_profile_add(GEGPU_CPU_PIPELINE_LOOKUP, profile_started);
         }
+        return s_pipes[hit].pipe;
     }
     if (s_cpu_profile) {
         s_cpu_profile_stats.pipeline_misses++;
@@ -2312,9 +2437,12 @@ static VkPipeline pipe_get(const PipeKey *k) {
         s_pipes = grown;
         s_pipe_cap = cap;
     }
+    if (!pipe_index_reserve(&s_pipe_idx, s_pipes, s_pipe_n)) return VK_NULL_HANDLE;
     VkPipeline p = pipe_create(k, 0);
     if (!p) return VK_NULL_HANDLE;
-    s_pipes[s_pipe_n].key = *k; s_pipes[s_pipe_n].pipe = p; s_pipe_n++;
+    s_pipes[s_pipe_n].key = *k; s_pipes[s_pipe_n].pipe = p;
+    pipe_index_put(&s_pipe_idx, k, s_pipe_n);
+    s_pipe_n++;
     return p;
 }
 
@@ -2322,8 +2450,8 @@ static VkPipeline pipe_get(const PipeKey *k) {
  * the shader tests and writes depth, record_rmw_range). */
 static VkPipeline pipe_get_rmw(const PipeKey *k, int zshader) {
     const int m = zshader ? 1 : 0;
-    for (int i = 0; i < s_rmw_pipe_n[m]; i++)
-        if (!memcmp(&s_rmw_pipes[m][i].key, k, sizeof(*k))) return s_rmw_pipes[m][i].pipe;
+    const int hit = pipe_index_find(&s_rmw_pipe_idx[m], s_rmw_pipes[m], s_rmw_pipe_n[m], k);
+    if (hit >= 0) return s_rmw_pipes[m][hit].pipe;
     if (s_rmw_pipe_n[m] == s_rmw_pipe_cap[m]) {
         int cap = s_rmw_pipe_cap[m] ? s_rmw_pipe_cap[m] * 2 : 16;
         PipeEnt *grown = (PipeEnt *)realloc(s_rmw_pipes[m], (size_t)cap * sizeof(*grown));
@@ -2331,9 +2459,12 @@ static VkPipeline pipe_get_rmw(const PipeKey *k, int zshader) {
         s_rmw_pipes[m] = grown;
         s_rmw_pipe_cap[m] = cap;
     }
+    if (!pipe_index_reserve(&s_rmw_pipe_idx[m], s_rmw_pipes[m], s_rmw_pipe_n[m])) return VK_NULL_HANDLE;
     VkPipeline p = pipe_create(k, 1 + m);
     if (!p) return VK_NULL_HANDLE;
-    s_rmw_pipes[m][s_rmw_pipe_n[m]].key = *k; s_rmw_pipes[m][s_rmw_pipe_n[m]].pipe = p; s_rmw_pipe_n[m]++;
+    s_rmw_pipes[m][s_rmw_pipe_n[m]].key = *k; s_rmw_pipes[m][s_rmw_pipe_n[m]].pipe = p;
+    pipe_index_put(&s_rmw_pipe_idx[m], k, s_rmw_pipe_n[m]);
+    s_rmw_pipe_n[m]++;
     return p;
 }
 
@@ -3296,6 +3427,19 @@ static void stats_emit(int final) {
 
 static void stats_tick(void) { stats_emit(0); }
 
+/* The exit line of the failures each said once and then counted (tex_get's full cache,
+ * target_kept_unsynced, software_fallback_refused, target_failed_fallback), written to `buf`.
+ * Returns 0, `buf` empty, when none happened. gegpu_shutdown prints it; gegpu_release clears
+ * the counts, so a later gegpu_init says each first one again. */
+static int failures_line(char *buf, size_t cap) {
+    buf[0] = '\0';
+    if (!s_cnt_tex_evict_failed && !s_cnt_target_kept && !s_cnt_fallback_refused && !s_cnt_target_failed)
+        return 0;
+    snprintf(buf, cap, "gegpu: failures: tex-evict=%lu target-kept=%lu fallback-refused=%lu target-failed=%lu\n",
+             s_cnt_tex_evict_failed, s_cnt_target_kept, s_cnt_fallback_refused, s_cnt_target_failed);
+    return 1;
+}
+
 /* ---- targets ----------------------------------------------------------------------------- */
 
 /* Write the target's GPU contents back to guest VRAM (eviction, CLUT-from-VRAM). */
@@ -4003,6 +4147,8 @@ static void twin_pc(const Batch *b, PushPC *out) {
 
 static void target_destroy(Target *t) {
     if (!t->used) return;
+    /* Ace smooth motion's HUD boxes are per slot: a target made later in this one starts with none. */
+    ace_hud_forget((int)(t - s_tgts));
     (void)cmd_drain(GEGPU_BOUNDARY_LIFETIME);
     /* Retire only submissions that actually reference this image. */
     (void)readback_wait_target(t, 0);
@@ -4027,6 +4173,26 @@ static Target *target_find_by_fba(uint32_t fba) {
     return NULL;
 }
 
+/* Queued batches may sample `t` (a render-to-texture read binds its descriptor set and image):
+ * they are recorded before it is freed. submit_pending drops them even when it fails, so no
+ * batch is left naming the freed set. */
+static void target_submit_before_destroy(Target *t) {
+    if (!s_nbatch && !s_nwbatch) return;
+    if (!submit_pending())
+        fprintf(stderr, "gegpu: the queued batches did not submit before target 0x%06x was freed: "
+                "they are dropped\n", t->fba);
+}
+
+/* `t` is about to be freed or re-made, but its GPU pixels, newer than guest VRAM, could not be
+ * written back (target_readback failed): it is kept as it is, its pixels still the only copy, and
+ * the caller makes no new target. Said once, then counted. */
+static Target *target_kept_unsynced(const Target *t, const char *why) {
+    if (!s_cnt_target_kept++)
+        fprintf(stderr, "gegpu: target 0x%06x could not be written back to guest VRAM before %s: it is kept "
+                "and no new target is made (later ones are counted)\n", t->fba, why);
+    return NULL;
+}
+
 static Target *target_slot_acquire(void) {
     for (int i = 0; i < MAX_TGT; i++)
         if (!s_tgts[i].used) return &s_tgts[i];
@@ -4041,7 +4207,8 @@ static Target *target_slot_acquire(void) {
         s_cur = NULL;
     }
     if (!old) return NULL;
-    target_readback(old);
+    target_submit_before_destroy(old);
+    if (!target_readback(old)) return target_kept_unsynced(old, "its slot was taken");
     target_destroy(old);
     return old;
 }
@@ -4058,8 +4225,9 @@ static Target *target_color_acquire(uint32_t fba, uint32_t stride, uint32_t fmt,
 
     Target *t = target_find_by_fba(fba);
     if (t && (t->stride != stride || t->fmt != fmt)) {
-        target_readback(t);
+        if (!target_readback(t)) return target_kept_unsynced(t, "it was re-made at another stride or format");
         if (t == s_cur) { submit_pending(); s_cur = NULL; }
+        else target_submit_before_destroy(t);
         target_destroy(t);
         t = NULL;
     }
@@ -4218,6 +4386,64 @@ static int depth_readback_to_guest(DepthEnt *d) {
     return 1;
 }
 
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* The coherence selftest's depth-init-fail and tex-make-fail cells: the next slot_drain reports a
+ * failure. */
+static int s_selftest_slot_drain_fail = 0;
+#endif
+
+/* The drain before a depth or texture slot's objects are freed (depth_slot_free, tex_slot_unmake,
+ * tex_left_retire): 0 when the GPU's work, which may still use them, could not be retired. */
+static int slot_drain(void) {
+    int drained = cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    if (s_selftest_slot_drain_fail) { s_selftest_slot_drain_fail = 0; drained = 0; }
+#endif
+    return drained;
+}
+
+/* Free depth slot `d`'s images and its twin, and the framebuffers every target made over them,
+ * and clear the slot. Returns 0, the slot keeping its images, when the GPU's work (which may still
+ * use them) could not be retired: a slot not used then still holds them, and depth_acquire (when
+ * it takes the slot) or depth_slots_release (at shutdown) frees them. */
+static int depth_slot_free(DepthEnt *d) {
+    if ((d->img || d->timg) && !slot_drain()) return 0;
+    if (d->view) vkDestroyImageView(s_dev, d->view, NULL);
+    if (d->img) vkDestroyImage(s_dev, d->img, NULL);
+    if (d->mem) vkFreeMemory(s_dev, d->mem, NULL);
+    twin_depth_free(d);
+    /* targets holding this depth must drop their framebuffers: every one made over its views,
+     * the interlock path's depth-only ones included (target_acquire destroys only what it
+     * finds beside fb or tfb, so one left here would be made again over itself) */
+    for (int i = 0; i < MAX_TGT; i++)
+        if (s_tgts[i].used && s_tgts[i].dep == d) {
+            Target *h = &s_tgts[i];
+            vkDestroyFramebuffer(s_dev, h->fb, NULL);
+            if (h->tfb) vkDestroyFramebuffer(s_dev, h->tfb, NULL);
+            if (h->fb_rmw) vkDestroyFramebuffer(s_dev, h->fb_rmw, NULL);
+            if (h->tfb_rmw) vkDestroyFramebuffer(s_dev, h->tfb_rmw, NULL);
+            h->fb = h->tfb = h->fb_rmw = h->tfb_rmw = VK_NULL_HANDLE;
+            h->dep = NULL;
+        }
+    memset(d, 0, sizeof(*d));
+    return 1;
+}
+
+/* Every depth slot's objects, once the device has retired its work (no drain): at shutdown and
+ * after a failed init. A slot not used is included: depth_slot_free leaves its images there when
+ * its drain fails, and every other free clears the slot. The targets' framebuffers are already
+ * gone (target_destroy). */
+static void depth_slots_release(void) {
+    for (int i = 0; i < MAX_DEP; i++) {
+        DepthEnt *d = &s_deps[i];
+        if (d->view) vkDestroyImageView(s_dev, d->view, NULL);
+        if (d->img) vkDestroyImage(s_dev, d->img, NULL);
+        if (d->mem) vkFreeMemory(s_dev, d->mem, NULL);
+        twin_depth_free(d);
+        memset(d, 0, sizeof(*d));
+    }
+}
+
 static DepthEnt *depth_acquire(uint32_t zba, uint32_t zstride) {
     for (int i = 0; i < MAX_DEP; i++)
         if (s_deps[i].used && s_deps[i].zba == zba && s_deps[i].zstride == zstride) {
@@ -4235,47 +4461,38 @@ static DepthEnt *depth_acquire(uint32_t zba, uint32_t zstride) {
          * commit it before the image goes, or a CPU read and the surface's next use (seeded
          * from VRAM) would see the older values. */
         if (!depth_readback_to_guest(d)) return NULL;
-        if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) return NULL;
-        vkDestroyImageView(s_dev, d->view, NULL);
-        vkDestroyImage(s_dev, d->img, NULL);
-        vkFreeMemory(s_dev, d->mem, NULL);
-        twin_depth_free(d);
-        /* targets holding this depth must drop their framebuffers: every one made over its views,
-         * the interlock path's depth-only ones included (target_acquire destroys only what it
-         * finds beside fb or tfb, so one left here would be made again over itself) */
-        for (int i = 0; i < MAX_TGT; i++)
-            if (s_tgts[i].used && s_tgts[i].dep == d) {
-                Target *h = &s_tgts[i];
-                vkDestroyFramebuffer(s_dev, h->fb, NULL);
-                if (h->tfb) vkDestroyFramebuffer(s_dev, h->tfb, NULL);
-                if (h->fb_rmw) vkDestroyFramebuffer(s_dev, h->fb_rmw, NULL);
-                if (h->tfb_rmw) vkDestroyFramebuffer(s_dev, h->tfb_rmw, NULL);
-                h->fb = h->tfb = h->fb_rmw = h->tfb_rmw = VK_NULL_HANDLE;
-                h->dep = NULL;
-            }
-        memset(d, 0, sizeof(*d));
+        if (!depth_slot_free(d)) return NULL;
     }
+    /* A slot an earlier attempt left its images in (their GPU work was not retired then). */
+    if ((d->img || d->view || d->mem || d->timg) && !depth_slot_free(d)) return NULL;
+    /* The slot is keyed and used only once its image holds the surface: until then a failure
+     * frees what was made, and no later lookup finds an unseeded image. The stride is set first,
+     * as depth_from_cpu reads it. */
+    d->zstride = zstride;
     if (!make_image(SCL_W, SCL_H, s_depth_fmt,
                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                    &d->img, &d->mem)) return NULL;
-    if (!make_view(d->img, s_depth_fmt, VK_IMAGE_ASPECT_DEPTH_BIT, &d->view)) return NULL;
+                    &d->img, &d->mem)) goto fail;
+    if (!make_view(d->img, s_depth_fmt, VK_IMAGE_ASPECT_DEPTH_BIT, &d->view)) goto fail;
     d->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (s_twin && !twin_depth_make(d)) { twin_depth_free(d); twin_off_for_run("a depth buffer's twin"); }
-    d->zba = zba; d->zstride = zstride; d->used = 1;
     if (__builtin_expect(g_sr_vram_read_pending, 0)) {
         uint32_t first, end;
         if (!ge_zbuf_guest_span_bounds(0x04000000u + zba, zstride,
-                                       &first, &end)) return NULL;
+                                       &first, &end)) goto fail;
         sr_ge_vram_read_prepare(first, end - first);
-        if (!ge_zbuf_prepare_current()) return NULL;
+        if (!ge_zbuf_prepare_current()) goto fail;
         s_zbuf = ge_zbuf_ptr();
-        if (!s_zbuf) return NULL;
+        if (!s_zbuf) goto fail;
     }
     /* initialize from the (CPU) software z-buffer once — games clear depth before use,
      * this just avoids garbage on the very first frame */
-    if (!depth_from_cpu(d)) return NULL;
+    if (!depth_from_cpu(d)) goto fail;
+    d->zba = zba; d->used = 1;
     return d;
+fail:
+    (void)depth_slot_free(d);   /* else its images stay, freed before the slot is next made */
+    return NULL;
 }
 
 static Target *target_acquire(void) {
@@ -4808,29 +5025,110 @@ static void tex_hm_free(TexEnt *e) {
     e->hm_levels = 0u;
 }
 
-static void tex_evict_lru(void) {
+/* tex_get's index over the cache: open addressing on the entry key, each slot an entry number + 1
+ * (0: empty), at most half full, so a lookup costs a few compares however full the cache is. A
+ * slot names an entry by number and a hit compares that entry's whole identity, so a slot left
+ * by an entry that went only costs a probe; eviction, which moves entries, rebuilds the index. */
+#define TEX_IDX_BITS 11
+#define TEX_IDX_CAP (1u << TEX_IDX_BITS)
+_Static_assert(TEX_IDX_CAP >= 2u * MAX_TEX, "the texture index stays at most half full");
+static int s_tex_idx[TEX_IDX_CAP];
+static uint32_t s_tex_idx_used;
+
+static uint32_t tex_index_home(uint64_t key) {
+    return (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> (64 - TEX_IDX_BITS));
+}
+
+static void tex_index_put_raw(int entry) {
+    uint32_t i = tex_index_home(s_tex[entry].key);
+    while (s_tex_idx[i]) i = (i + 1u) & (TEX_IDX_CAP - 1u);
+    s_tex_idx[i] = entry + 1;
+    s_tex_idx_used++;
+}
+
+static void tex_index_rebuild(void) {
+    memset(s_tex_idx, 0, sizeof s_tex_idx);
+    s_tex_idx_used = 0;
+    for (int i = 0; i < s_tex_n; i++) tex_index_put_raw(i);
+}
+
+/* Index s_tex[entry], the entry tex_get is adding at s_tex_n. */
+static void tex_index_put(int entry) {
+    if (s_tex_idx_used + 1u > TEX_IDX_CAP / 2u) tex_index_rebuild();   /* drops the slots left behind */
+    tex_index_put_raw(entry);
+}
+
+/* The entry for the current texture state: its key, level 0's address and buffer width (the key
+ * folds the width into the address bits, so two textures can share it), and the mip key. */
+static TexEnt *tex_index_find(uint64_t key, const TexMipKey *mip) {
+    uint32_t i = tex_index_home(key);
+    for (uint32_t probes = 0; probes < TEX_IDX_CAP; probes++, i = (i + 1u) & (TEX_IDX_CAP - 1u)) {
+        const int s = s_tex_idx[i];
+        if (!s) return NULL;
+        if (s > s_tex_n) continue;
+        TexEnt *e = &s_tex[s - 1];
+        if (e->key == key && e->addr == s_ge->tex_addr && e->bufw == s_ge->tex_bufw &&
+            memcmp(&e->mip, mip, sizeof(*mip)) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+/* Every object a cache entry holds, released once the GPU's work is retired (eviction, shutdown).
+ * A handle the entry never made is skipped. */
+static void tex_entry_free(TexEnt *e) {
+    tex_shadow_release(e);
+    if (e->set) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set);
+    if (e->smp) vkDestroySampler(s_dev, e->smp, NULL);
+    if (e->set_af) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set_af);
+    if (e->smp_af) vkDestroySampler(s_dev, e->smp_af, NULL);
+    tex_hm_free(e);
+    if (e->view) vkDestroyImageView(s_dev, e->view, NULL);
+    if (e->img) vkDestroyImage(s_dev, e->img, NULL);
+    if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
+    tex_xs_free(e);
+    tex_gl_free(e);
+}
+
+/* qsort order for tex_evict_lru: cache slots by their use stamp, oldest first. */
+static int tex_lru_order(const void *a, const void *b) {
+    const uint64_t la = s_tex[*(const int *)a].lru, lb = s_tex[*(const int *)b].lru;
+    return la < lb ? -1 : la > lb;
+}
+
+#ifdef SR_GPU_COHERENCE_SELFTEST
+/* The coherence selftest's tex-evict-fail cell: the next eviction's drain reports a failure. */
+static int s_selftest_tex_evict_drain_fail = 0;
+#endif
+
+/* Returns 0, having evicted nothing, when the GPU's work could not be retired: the entries
+ * may still be in use, so none of them can be freed. */
+static int tex_evict_lru(void) {
     /* The caller submits batches before eviction.  Texture uploads and render submits
      * use the scoped GE fence, so there is no device-wide lifetime dependency here. */
-    if (!cmd_drain(GEGPU_BOUNDARY_LIFETIME)) return;
-    int goal = s_tex_n - MAX_TEX / 4;
-    while (s_tex_n > goal) {
-        int v = 0;
-        for (int i = 1; i < s_tex_n; i++)
-            if (s_tex[i].lru < s_tex[v].lru) v = i;
-        TexEnt *e = &s_tex[v];
-        tex_shadow_release(e);
-        vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set);
-        vkDestroySampler(s_dev, e->smp, NULL);
-        if (e->set_af) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set_af);
-        if (e->smp_af) vkDestroySampler(s_dev, e->smp_af, NULL);
-        tex_hm_free(e);
-        vkDestroyImageView(s_dev, e->view, NULL);
-        vkDestroyImage(s_dev, e->img, NULL);
-        vkFreeMemory(s_dev, e->mem, NULL);
-        tex_xs_free(e);
-        tex_gl_free(e);
-        *e = s_tex[--s_tex_n];
+    int drained = cmd_drain(GEGPU_BOUNDARY_LIFETIME);
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    if (s_selftest_tex_evict_drain_fail) { s_selftest_tex_evict_drain_fail = 0; drained = 0; }
+#endif
+    if (!drained) return 0;
+    /* The MAX_TEX/4 least recently used entries go, oldest first, each swap-removed (the last
+     * entry moves into its slot). The stamps are unique (s_texlru++), so one sort picks the
+     * victims, in the order, and leaves the array, that a minimum scan per victim would. */
+    static int order[MAX_TEX], slot_rank[MAX_TEX], rank_slot[MAX_TEX / 4];
+    const int k = s_tex_n < MAX_TEX / 4 ? s_tex_n : MAX_TEX / 4;
+    for (int i = 0; i < s_tex_n; i++) { order[i] = i; slot_rank[i] = -1; }
+    qsort(order, (size_t)s_tex_n, sizeof(order[0]), tex_lru_order);
+    for (int r = 0; r < k; r++) { rank_slot[r] = order[r]; slot_rank[order[r]] = r; }
+    for (int r = 0; r < k; r++) {
+        const int v = rank_slot[r], last = s_tex_n - 1;
+        tex_entry_free(&s_tex[v]);
+        s_tex[v] = s_tex[last];
+        slot_rank[v] = slot_rank[last];
+        if (slot_rank[v] >= 0) rank_slot[slot_rank[v]] = v;   /* a later victim moved into the slot */
+        s_tex_n--;
     }
+    tex_index_rebuild();
+    return 1;
 }
 
 /* Copy one decoded level into mip level `level` of `img`. `lay` tracks the image layout
@@ -5216,12 +5514,17 @@ static int tex_make(int w, int h, uint32_t levels, uint32_t img_levels, int min_
                            VK_FORMAT_R8G8B8A8_UNORM,
                            VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, img, mem))
         return 0;
-    if (!make_view_levels(*img, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, levels, view))
-        return 0;
+    /* Nothing the GPU uses yet: a failure frees what was made, and leaves no handle behind. */
     VkSamplerCreateInfo sci;
     tex_sampler_info(min_linear, mag_linear, clamp_u, clamp_v, mip, &sci);
-    VKC(vkCreateSampler(s_dev, &sci, NULL, smp));
-    return 1;
+    const int viewed = make_view_levels(*img, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, levels, view);
+    if (viewed && vkCreateSampler(s_dev, &sci, NULL, smp) == VK_SUCCESS) return 1;
+    fprintf(stderr, "gegpu: a texture's %s could not be made\n", viewed ? "sampler" : "view");
+    if (viewed) vkDestroyImageView(s_dev, *view, NULL);
+    vkDestroyImage(s_dev, *img, NULL);
+    vkFreeMemory(s_dev, *mem, NULL);
+    *img = VK_NULL_HANDLE; *mem = VK_NULL_HANDLE; *view = VK_NULL_HANDLE; *smp = VK_NULL_HANDLE;
+    return 0;
 }
 
 /* The set a draw binds for cache entry `e`. Ace Mode's texture filtering (ace.h) applies to a
@@ -6083,10 +6386,13 @@ static void tex_dump_shutdown(void) {
      * stops come from HLE and display code, never from inside tex_scale.c, so none holds the
      * queue's lock here. */
     sr_texdump_exit_hook(NULL);
-    if (s_dump.inflight && (nk_tex_scale_on_worker() || (s_dump.owner && s_dump.owner != SDL_GetCurrentThreadID()))) {
+    /* The thread is tested whatever is in flight: with no file being written, the drawing thread
+     * may still be inside tex_dump_note, using the names and the scratch. */
+    if (nk_tex_scale_on_worker() || (s_dump.owner && s_dump.owner != SDL_GetCurrentThreadID())) {
         s_dump_exit_dropped = s_dump.inflight;
-        fprintf(stderr, "TEX_DUMP: note: the run ended on another thread; %u files being written are not "
-                        "waited for\n", s_dump.inflight);
+        if (s_dump.inflight)
+            fprintf(stderr, "TEX_DUMP: note: the run ended on another thread; %u files being written are not "
+                            "waited for\n", s_dump.inflight);
         if (s_dump.starts) tex_dump_line("exit");
         return;
     }
@@ -6800,6 +7106,48 @@ void gegpu_movie_counts(unsigned long *tex_matches, unsigned long *tex_frames, u
     if (target_frames) *target_frames = s_cnt_movie_present_target;
 }
 
+/* The objects of a failed texture that tex_slot_unmake could not free (its drain failed: the GPU's
+ * work may still use them). They are held here, not in the cache slot, which the next miss
+ * clears and eviction overwrites, until a drain succeeds (tex_left_retire, at the next miss) or
+ * the device is idle (gegpu_release). tex_get retires them before it makes a texture, so this
+ * holds one texture's objects at most. */
+static struct { VkSampler smp; VkImageView view; VkImage img; VkDeviceMemory mem; } s_tex_left;
+
+static int tex_left_held(void) { return s_tex_left.smp || s_tex_left.view || s_tex_left.img || s_tex_left.mem; }
+
+/* Frees what s_tex_left holds, with no drain: the caller has retired the GPU's work. */
+static void tex_left_destroy(void) {
+    if (s_tex_left.smp) vkDestroySampler(s_dev, s_tex_left.smp, NULL);
+    if (s_tex_left.view) vkDestroyImageView(s_dev, s_tex_left.view, NULL);
+    if (s_tex_left.img) vkDestroyImage(s_dev, s_tex_left.img, NULL);
+    if (s_tex_left.mem) vkFreeMemory(s_dev, s_tex_left.mem, NULL);
+    memset(&s_tex_left, 0, sizeof s_tex_left);
+}
+
+/* 1 once nothing is held (freed now if the GPU's work can be retired); 0 while the drain fails. */
+static int tex_left_retire(void) {
+    if (!tex_left_held()) return 1;
+    if (!slot_drain()) return 0;
+    tex_left_destroy();
+    return 1;
+}
+
+/* A cache slot whose texture failed after tex_make (its first upload, or its descriptor set): the
+ * slot is not counted, and the next miss clears it, so its objects go now, once the GPU's work
+ * (an upload recorded before the failure) is retired. When the drain fails they move to
+ * s_tex_left, empty here (tex_get retired it before tex_make), so the slot's reset loses none. */
+static void tex_slot_unmake(TexEnt *e) {
+    if (slot_drain()) {
+        if (e->smp) vkDestroySampler(s_dev, e->smp, NULL);
+        if (e->view) vkDestroyImageView(s_dev, e->view, NULL);
+        if (e->img) vkDestroyImage(s_dev, e->img, NULL);
+        if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
+    } else {
+        s_tex_left.smp = e->smp; s_tex_left.view = e->view; s_tex_left.img = e->img; s_tex_left.mem = e->mem;
+    }
+    e->smp = VK_NULL_HANDLE; e->view = VK_NULL_HANDLE; e->img = VK_NULL_HANDLE; e->mem = VK_NULL_HANDLE;
+}
+
 static VkDescriptorSet tex_get(void) {
     s_tex_bound_scale = 1;
     s_tex_bound_hm = 0;
@@ -6838,9 +7186,9 @@ static VkDescriptorSet tex_get(void) {
     uint64_t hash = tex_hash();
     if (mip.max_level) hash = tex_mip_hash(hash, &mip, mip_bytes);
     uint64_t lookup_started = cpu_profile_now();
-    for (int i = 0; i < s_tex_n; i++) {
-        TexEnt *e = &s_tex[i];
-        if (e->key != key || memcmp(&e->mip, &mip, sizeof(mip)) != 0) continue;
+    TexEnt *const hit = tex_index_find(key, &mip);
+    if (hit) {
+        TexEnt *e = hit;
         cpu_profile_add(GEGPU_CPU_OBJECT_LOOKUP, lookup_started);
         if (s_cpu_profile) s_cpu_profile_stats.texture_hits++;
         e->lru = s_texlru++;
@@ -6894,8 +7242,17 @@ static VkDescriptorSet tex_get(void) {
 
     if (s_tex_n >= MAX_TEX) {
         submit_pending();   /* batches reference sets about to be freed */
-        tex_evict_lru();
+        if (!tex_evict_lru() || s_tex_n >= MAX_TEX) {
+            /* No free entry: the draw samples white rather than an entry past the cache. */
+            if (!s_cnt_tex_evict_failed++)
+                fprintf(stderr, "gegpu: texture cache full (%d entries) and its eviction could not retire "
+                        "the GPU's work: textures are drawn white until it can\n", s_tex_n);
+            return s_white_set;
+        }
     }
+    /* An earlier failed texture's objects go first; while the GPU's work still cannot be retired,
+     * none is made (tex_slot_unmake has room for one failure's objects only). */
+    if (!tex_left_retire()) return s_white_set;
     TexEnt *e = &s_tex[s_tex_n];
     memset(e, 0, sizeof(*e));
     e->hm_levels = tex_hm_levels_for(w, h, levels, min_linear);
@@ -6904,13 +7261,14 @@ static VkDescriptorSet tex_get(void) {
         return s_white_set;
     e->w = w; e->h = h;
     if (e->hm_levels > 1u) tex_hm_note(e, mag_linear, clamp_u, clamp_v);
-    if (!tex_decode_upload(e->img, w, h, levels, e)) { tex_hm_free(e); return s_white_set; }
+    if (!tex_decode_upload(e->img, w, h, levels, e)) { tex_hm_free(e); tex_slot_unmake(e); return s_white_set; }
     e->set = make_descriptor(e->view, e->smp, s_dpool_tex);
-    if (!e->set) { tex_hm_free(e); return s_white_set; }
+    if (!e->set) { tex_hm_free(e); tex_slot_unmake(e); return s_white_set; }
     e->key = key; e->hash = hash;
     e->gen = ++s_tex_gen;
     e->w = w; e->h = h;
     e->addr = s_ge->tex_addr;
+    e->bufw = s_ge->tex_bufw;
     e->bytes = tex_source_size();
     e->mip = mip;
     memcpy(e->mip_bytes, mip_bytes, sizeof(e->mip_bytes));
@@ -6924,6 +7282,7 @@ static VkDescriptorSet tex_get(void) {
     e->pending = 1;
     e->lru = s_texlru++;
     s_cnt_texup++;
+    tex_index_put(s_tex_n);
     s_tex_n++;
     tex_xs_note_upload(e, levels);   /* s_texscratch still holds level 0 when levels == 1 */
     tex_dump_note(e, levels);
@@ -7759,6 +8118,7 @@ static SnapRect s_tail_prims;
  * it on the same canvas. A stencil batch that reads its own writes is never merged. */
 static int stencil_depth_blind(const Batch *b);
 static void depth_blind_pair(const Batch *b, Batch *colour, Batch *stencil);
+static int batch_extends(const Batch *last, const Batch *b, uint32_t first);
 
 static void append_wing(Batch *b, uint32_t first, uint32_t count) {
     if (b->sw <= 0 || count == 0) return;
@@ -7775,11 +8135,7 @@ static void append_wing(Batch *b, uint32_t first, uint32_t count) {
     }
     if (s_nwbatch && s_wbatch_w[s_nwbatch - 1] == s_wing_dst && !stencil_reads_own_writes(b)) {
         Batch *last = &s_wbatch[s_nwbatch - 1];
-        if (last->first + last->count == first &&
-            !memcmp(&last->key, &b->key, sizeof(b->key)) &&
-            last->sx == b->sx && last->sy == b->sy && last->sw == b->sw && last->sh == b->sh &&
-            !memcmp(last->bconst, b->bconst, sizeof(b->bconst)) &&
-            !memcmp(&last->pc, &b->pc, sizeof(b->pc)) && last->dset == b->dset) {
+        if (batch_extends(last, b, first)) {
             last->count += count;
             return;
         }
@@ -8006,33 +8362,76 @@ static unsigned long long s_fallback_sw_prims[GEGPU_FALLBACK_REASONS];
  * that falls back only under an unsupported state. `counted` 0 leaves the primitive out of the
  * per-reason count: a T&L primitive declined here reaches hook_tri as triangles, and hook_tri counts
  * those it hands to ge.c (it may draw some on the GPU instead). The readback, if any, is counted
- * either way. */
+ * either way.
+ * Returns 1 when ge.c draws the primitive, 0 when the GPU does, and -1 when neither can: the
+ * GPU's pixels or depth, newer than guest VRAM, could not be handed to ge.c (a failed submit or
+ * readback). The GPU's copy then stays valid, and the caller drops the primitive rather than
+ * have ge.c draw it over stale VRAM; said once, then counted. */
+static int software_fallback_refused(const char *why) {
+    if (!s_cnt_fallback_refused++)
+        fprintf(stderr, "gegpu: a software-fallback primitive is not drawn: %s, so ge.c would draw it over "
+                "stale guest VRAM (later ones are counted)\n", why);
+    return -1;
+}
+
+/* Hand the current colour target and depth surface to ge.c, which draws the next primitive:
+ * the target's GPU pixels are written back to guest VRAM, and the depth surface the GE state
+ * names now (zbp, and zbw or the colour stride, as ge.c's zbuf_stride) is read into ge.c's depth
+ * buffer when the GPU holds it. The target's last depth surface is that one only when its key
+ * matches: after a zbp or zbw change it is another surface, which stays GPU-resident as it is.
+ * `reason` (GEGPU_FALLBACK_*, or -1 for none) counts the readback. Returns 1, or -1 as
+ * software_fallback_begin_counted does. */
+static int software_fallback_handover(int reason) {
+    if (s_nbatch && !submit_pending()) return software_fallback_refused("the queued GPU batches did not submit");
+
+    Target *t=is_vram(s_ge->fbp)?target_find_by_fba(vram_off(s_ge->fbp)):NULL;
+    movie_note_write(t, 0, 1, 0.0f, 0.0f, 0.0f, 0.0f);   /* a GE write the GPU does not draw (#2111) */
+    if (t&&t->gpu_valid) {
+        if (reason >= 0) s_replay_stats.fallback_readbacks[reason]++;
+        if (!target_readback(t))
+            return software_fallback_refused("the target's GPU pixels could not be written back to guest VRAM");
+        readback_discard_target(t);
+        t->gpu_valid=0;
+    }
+    const uint32_t zba=vram_off(s_ge->zbp);
+    const uint32_t zs=s_ge->zbw?s_ge->zbw:(s_ge->fbw?s_ge->fbw:512);
+    DepthEnt *d=t&&t->dep&&t->dep->zba==zba&&t->dep->zstride==zs?t->dep:NULL;
+    for(int i=0;!d&&i<MAX_DEP;i++)
+        if(s_deps[i].used&&s_deps[i].zba==zba&&s_deps[i].zstride==zs) d=&s_deps[i];
+    if (s_cur==t) s_cur=NULL;
+    s_tmpl_ok=0;
+    /* depth_to_cpu fills ge.c's buffer for the current surface: one it held for another is
+     * written to guest VRAM first (ge_zbuf_prepare_current), not overwritten. */
+    if (d && !d->cpu_dirty && (!ge_zbuf_prepare_current() || (s_zbuf = ge_zbuf_ptr()) == NULL))
+        return software_fallback_refused("ge.c's depth buffer could not take the current depth surface");
+    if (d && !depth_to_cpu(d))
+        return software_fallback_refused("the GPU's depth could not be read back into ge.c's depth buffer");
+    return 1;
+}
+
 static int software_fallback_begin_counted(int forced, int counted) {
     const int reason = forced >= 0 ? forced : gpu_state_unsupported_reason();
     if (reason < 0) return 0;
     s_replay_stats.fallback_prims++;
     if (counted) s_fallback_sw_prims[reason]++;
-    if (s_nbatch&&!submit_pending()) return 1;
+    return software_fallback_handover(reason);
+}
 
-    Target *t=is_vram(s_ge->fbp)?target_find_by_fba(vram_off(s_ge->fbp)):NULL;
-    movie_note_write(t, 0, 1, 0.0f, 0.0f, 0.0f, 0.0f);   /* a GE write the GPU does not draw (#2111) */
-    if (t&&t->gpu_valid) {
-        s_replay_stats.fallback_readbacks[reason]++;
-        (void)target_readback(t);
-        readback_discard_target(t);
-        t->gpu_valid=0;
-    }
-    DepthEnt *d=t?t->dep:NULL;
-    if (!d) {
-        uint32_t zba=vram_off(s_ge->zbp);
-        uint32_t zs=s_ge->zbw?s_ge->zbw:(s_ge->fbw?s_ge->fbw:512);
-        for(int i=0;i<MAX_DEP;i++)
-            if(s_deps[i].used&&s_deps[i].zba==zba&&s_deps[i].zstride==zs){d=&s_deps[i];break;}
-    }
-    if (d) (void)depth_to_cpu(d);
-    if (s_cur==t) s_cur=NULL;
-    s_tmpl_ok=0;
-    return 1;
+/* A primitive the GPU would draw but has no target for: begin_target failed (a colour target or
+ * depth surface could not be made, or a depth stride above 512). It is handed to ge.c through
+ * the software fallback's handover, so ge.c draws it over current guest VRAM; said once, then
+ * counted. The hook's result, as fallback_hook_result gives it (0, or 1 when refused). */
+static int target_failed_fallback(void) {
+    if (!s_cnt_target_failed++)
+        fprintf(stderr, "gegpu: a primitive has no GPU target (its colour target or depth surface could "
+                "not be made); ge.c draws it (later ones are counted)\n");
+    return software_fallback_handover(-1) > 0 ? 0 : 1;
+}
+
+/* A primitive hook's result for software_fallback_begin's: 0 hands the primitive to ge.c, 1 drops
+ * it (refused), and -1 (go on) leaves the GPU to draw it. */
+static int fallback_hook_result(int fallback) {
+    return fallback > 0 ? 0 : fallback < 0 ? 1 : -1;
 }
 
 static int software_fallback_begin(int forced) {
@@ -8250,6 +8649,14 @@ static int wing_state(int persp, int sprite, int soft_ctest, Batch *b) {
     return 1;
 }
 
+/* nk_smart2d_triangle on a screen-space triangle: its texels map one to one onto pixel centres. */
+static int tri_onetoone(const GeVtx *A, const GeVtx *B, const GeVtx *C) {
+    const float x[3] = { A->x, B->x, C->x }, y[3] = { A->y, B->y, C->y };
+    const float u[3] = { A->u, B->u, C->u }, v[3] = { A->v, B->v, C->v };
+    const float rw[3] = { A->rw, B->rw, C->rw };
+    return nk_smart2d_triangle(x, y, u, v, rw);
+}
+
 static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
     if (!s_ready) return 0;
     cpu_profile_hook_enter();
@@ -8268,13 +8675,13 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
         b = s_tri_state.batch;
     } else {
         s_tri_state.valid = 0;
-        if (software_fallback_begin(soft_ctest ? GEGPU_FALLBACK_COLOR_TEST : -1))
-            return cpu_profile_hook_leave(0);
+        const int fb = fallback_hook_result(software_fallback_begin(soft_ctest ? GEGPU_FALLBACK_COLOR_TEST : -1));
+        if (fb >= 0) return cpu_profile_hook_leave(fb);
         static int nocull = -1;
         if (nocull < 0) nocull = getenv("SR_NOCULL") ? 1 : 0;
         state_get(persp, 0, &b);
         if (nocull) b.key.cull = VK_CULL_MODE_NONE;
-        if (!begin_target()) return cpu_profile_hook_leave(1); /* target alloc failed: drop draw */
+        if (!begin_target()) return cpu_profile_hook_leave(target_failed_fallback());
         s_tri_state.valid = 1;
         s_tri_state.persp = persp;
         s_tri_state.serial = ge_state_serial();
@@ -8283,18 +8690,15 @@ static int hook_tri(const GeVtx *A, const GeVtx *B, const GeVtx *C, int persp) {
         s_tri_state.batch = b;
     }
     const int movie = movie_draw_samples(&b);   /* before smart 2D or a 1:1 draw rebinds the set */
+    int onetoone = -1;   /* tri_onetoone's verdict, taken once: unknown until a candidate needs it */
     if (hm_level0_candidate(&b)) {
-        const float x[3] = { A->x, B->x, C->x }, y[3] = { A->y, B->y, C->y };
-        const float u[3] = { A->u, B->u, C->u }, v[3] = { A->v, B->v, C->v };
-        const float rw[3] = { A->rw, B->rw, C->rw };
-        if (nk_smart2d_triangle(x, y, u, v, rw)) hm_level0_apply(&b);
+        onetoone = tri_onetoone(A, B, C);
+        if (onetoone) hm_level0_apply(&b);
     }
-    const int s2d = smart2d_candidate(&b), xs1 = xs_onetoone_candidate(&b);
+    const int s2d = smart2d_candidate(&b), xs1 = xs_onetoone_candidate(&b);   /* after hm_level0_apply */
     if (s2d || xs1) {
-        const float x[3] = { A->x, B->x, C->x }, y[3] = { A->y, B->y, C->y };
-        const float u[3] = { A->u, B->u, C->u }, v[3] = { A->v, B->v, C->v };
-        const float rw[3] = { A->rw, B->rw, C->rw };
-        if (nk_smart2d_triangle(x, y, u, v, rw)) {
+        if (onetoone < 0) onetoone = tri_onetoone(A, B, C);
+        if (onetoone) {
             if (s2d) smart2d_apply(&b);
             if (xs1) xs_onetoone_plain(&b);
         }
@@ -8383,9 +8787,9 @@ static int hook_tnl_prim(const GeTnlPrim *p) {
         return 0;
     }
     cpu_profile_hook_enter();
-    if (software_fallback_begin_counted(color_test_colour_inexact(1, 1) ? GEGPU_FALLBACK_COLOR_TEST
-                                                                         : -1, 0))
-        return cpu_profile_hook_leave(0);
+    const int fb = fallback_hook_result(software_fallback_begin_counted(
+        color_test_colour_inexact(1, 1) ? GEGPU_FALLBACK_COLOR_TEST : -1, 0));
+    if (fb >= 0) return cpu_profile_hook_leave(fb);
     static int nocull = -1;
     if (nocull < 0) nocull = getenv("SR_NOCULL") ? 1 : 0;
     Batch b;
@@ -8443,10 +8847,11 @@ static int hook_sprite(const GeVtx *p0, const GeVtx *p1, int persp) {
     if (__builtin_expect(s_wing_dst != NULL, 0)) {
         if (!wing_state(persp, 1, color_test_colour_inexact(0, persp), &b)) return cpu_profile_hook_leave(1);
     } else {
-        if (software_fallback_begin(color_test_colour_inexact(0, persp) ? GEGPU_FALLBACK_COLOR_TEST : -1))
-            return cpu_profile_hook_leave(0);
+        const int fb = fallback_hook_result(software_fallback_begin(color_test_colour_inexact(0, persp)
+                                                                    ? GEGPU_FALLBACK_COLOR_TEST : -1));
+        if (fb >= 0) return cpu_profile_hook_leave(fb);
         state_get(persp, 1, &b);
-        if (!begin_target()) return cpu_profile_hook_leave(1);
+        if (!begin_target()) return cpu_profile_hook_leave(target_failed_fallback());
     }
     float xa = floorf(fminf(p0->x, p1->x)), xb = floorf(fmaxf(p0->x, p1->x));
     float ya = floorf(fminf(p0->y, p1->y)), yb = floorf(fmaxf(p0->y, p1->y));
@@ -8581,11 +8986,11 @@ static int hook_line(const GeVtx *A, const GeVtx *B, int persp) {
     { const GeVtx *vv[2] = { A, B };
       if (!hook_finite(vv, 2)) return cpu_profile_hook_leave(1); }
     const int textured = s_ge->tex_enable && !s_ge->clear && s_ge->tex_addr;
-    if (software_fallback_begin(textured ? GEGPU_FALLBACK_LINE : -1))
-        return cpu_profile_hook_leave(0);
+    const int fb = fallback_hook_result(software_fallback_begin(textured ? GEGPU_FALLBACK_LINE : -1));
+    if (fb >= 0) return cpu_profile_hook_leave(fb);
     Batch b;
     state_get(persp, 1, &b);              /* sprite semantics: no culling */
-    if (!begin_target()) return cpu_profile_hook_leave(1);
+    if (!begin_target()) return cpu_profile_hook_leave(target_failed_fallback());
 
     /* ge.c draw_line_vtx, expression for expression. */
     const float dx = B->x - A->x, dy = B->y - A->y;
@@ -8647,10 +9052,11 @@ static int hook_point(const GeVtx *A, int persp) {
     cpu_profile_hook_enter();
     { const GeVtx *vv[1] = { A };
       if (!hook_finite(vv, 1)) return cpu_profile_hook_leave(1); }
-    if (software_fallback_begin(GEGPU_FALLBACK_POINT)) return cpu_profile_hook_leave(0);
+    const int fb = fallback_hook_result(software_fallback_begin(GEGPU_FALLBACK_POINT));
+    if (fb >= 0) return cpu_profile_hook_leave(fb);
     Batch b;
     state_get(persp, 1, &b);
-    if (!begin_target()) return cpu_profile_hook_leave(1);
+    if (!begin_target()) return cpu_profile_hook_leave(target_failed_fallback());
     float x0 = floorf(A->x), y0 = floorf(A->y);
     ensure_room(6);
     uint64_t vertex_started = cpu_profile_now();
@@ -8672,13 +9078,15 @@ static int hook_point(const GeVtx *A, int persp) {
 
 static void hook_vram_dirty(uint32_t addr, uint32_t bytes) {
     if (!s_ready || !bytes) return;
-    if (g_ace_on && is_vram(addr)) ace_note_vram_write(vram_off(addr), bytes);
     /* CPU HLE calls may use any PSP address alias (KSEG mirrors for RAM or the
      * mirrored 0x04xxxxxx VRAM aperture). Compare cache ranges in the same
      * physical namespace before deciding whether a texture is stale. The
      * target path below still uses vram_off(), because framebuffer targets are
-     * indexed by their 2 MiB-local VRAM offset. */
+     * indexed by their 2 MiB-local VRAM offset; depth surfaces and Ace's write
+     * note take the canonical address too, so a store through the 0x04200000,
+     * 0x04400000 or 0x04600000 view lands where a plain-view store would. */
     uint32_t canonical_addr = tex_canonical(addr);
+    if (g_ace_on && is_vram(canonical_addr)) ace_note_vram_write(vram_off(canonical_addr), bytes);
     uint64_t dirty0 = canonical_addr, dirty1 = dirty0 + bytes;
     uint64_t page0 = dirty0 >> TEX_CLEAN_PAGE_SHIFT, page1 = (dirty1 - 1u) >> TEX_CLEAN_PAGE_SHIFT;
     int indexed = page1 < TEX_CLEAN_PAGES;
@@ -8721,7 +9129,7 @@ static void hook_vram_dirty(uint32_t addr, uint32_t bytes) {
     uint32_t a0 = vram_off(canonical_addr);
     for (int i = 0; i < MAX_DEP; i++) {
         DepthEnt *d = &s_deps[i];
-        if (!d->used || !depth_span_overlaps(d, addr, bytes)) continue;
+        if (!d->used || !depth_span_overlaps(d, canonical_addr, bytes)) continue;
         d->cpu_dirty = 1;
         d->guest_dirty = 0;
     }
@@ -8822,7 +9230,15 @@ static int hook_xfer(uint32_t startdata) {
     uint32_t dx = (s_ge->xf_dpos & 0x3FFu) + doff % dst->stride;
     uint32_t dy = ((s_ge->xf_dpos >> 10) & 0x3FFu) + doff / dst->stride;
     uint32_t w = (s_ge->xf_size & 0x3FFu) + 1, h = ((s_ge->xf_size >> 10) & 0x3FFu) + 1;
-    if (sx + w > FB_W || dx + w > FB_W || sy + h > FB_H || dy + h > FB_H) return 0;
+    /* A row past either stride wraps into the next guest row (ge.c's copy, as the GE allows a
+     * width above the stride), which the images do not hold beside it: the CPU path copies it. */
+    if (sx + w > src->stride || dx + w > dst->stride || sx + w > FB_W || dx + w > FB_W ||
+        sy + h > FB_H || dy + h > FB_H) return 0;
+    /* The transfer is the GE's next use of both targets: the CPU writes held for them come first,
+     * so the copy reads the source's newer bytes and no held span is later patched from guest VRAM
+     * over what it wrote. A failure leaves the target invalid: the CPU path copies guest VRAM. */
+    if (!target_sync_cpu_writes(src) || !src->gpu_valid) return 0;
+    if (!target_sync_cpu_writes(dst)) return 0;
     if (!dst->gpu_valid && !target_upload(dst)) return 0;   /* seed rows we don't overwrite */
     if (s_nbatch && (s_cur == src || s_cur == dst)) submit_pending();
     if (!cmd_begin()) return 0;
@@ -9495,9 +9911,12 @@ static void tex_xs_report(void) {
     nk_tex_scale_report();
 }
 
-int gegpu_init(void) {
+static void gegpu_release(void);
+
+/* Every step of gegpu_init; 0 at the first that fails, with what the steps before it made still
+ * held (gegpu_init releases it). */
+static int gegpu_init_parts(void) {
     Sdl3VkInfo vi;
-    sr_perf_set_gpu_replay_source(gpu_replay_snapshot);
     if (!sdl3vk_get_vk(&vi)) { fprintf(stderr, "gegpu: sdl3vk not initialized\n"); return 0; }
     s_pdev  = (VkPhysicalDevice)vi.physical;
     s_dev   = (VkDevice)vi.device;
@@ -9751,10 +10170,7 @@ int gegpu_init(void) {
         s_xs_smart2d = xs->smart2d;
         if (refused[0] && want_factor) ace_feature_unavailable(ACE_FEATURE_TEXSCALE, refused);
         if (refused[0] && want_smart2d) ace_feature_unavailable(ACE_FEATURE_SMART2D, refused);
-        if (s_xs_factor) ace_confirm(ACE_FEATURE_TEXSCALE);
-        if (s_xs_smart2d) ace_confirm(ACE_FEATURE_SMART2D);
-        s_xs_reported = 0;
-        if (s_xs_factor || s_xs_smart2d) ace_set_exit_report(ACE_FEATURE_TEXSCALE, tex_xs_report);
+        s_xs_reported = 0;   /* confirmed, and its exit report set, once the renderer is up (below) */
     }
     tex_repl_init(g_ace_on);
     tex_soft_init();
@@ -9775,7 +10191,6 @@ int gegpu_init(void) {
             fprintf(stderr, "GLYPHS: idle (%s)\n", why);
             ace_feature_unavailable(ACE_FEATURE_GLYPHS, why);
         }
-        if (s_glyphs) ace_confirm(ACE_FEATURE_GLYPHS);   /* the renderer that rebuilds is up */
         if (s_glyphs && !nk_tex_scale_config()->budget_bytes) {
             NkTexScaleConfig c = *nk_tex_scale_config();
             c.budget_bytes = nk_tex_scale_default_budget_bytes();
@@ -9790,8 +10205,6 @@ int gegpu_init(void) {
                                (s_hm ? 1u : 0u);
     const uint32_t tex_sets = MAX_TEX * per_entry + (xs_enabled() ? XS_RETIRE_MAX * (s_ace_af ? 2u : 1u) : 0u);
     s_tex_pool_sets = tex_sets;
-    if (s_ace_af) ace_confirm(ACE_FEATURE_AF);   /* the renderer that filters is up */
-    if (s_depth32) ace_confirm(ACE_FEATURE_DEPTH);   /* ... and the one that tests at 32 bits */
     VkDescriptorPoolSize dps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, tex_sets };
     VkDescriptorPoolCreateInfo dpc = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpc.maxSets = tex_sets; dpc.poolSizeCount = 1; dpc.pPoolSizes = &dps;
@@ -9967,15 +10380,31 @@ int gegpu_init(void) {
         if (!s_white_set) return 0;
     }
 
+#ifdef SR_GPU_COHERENCE_SELFTEST
+    if (s_selftest_init_fail) {   /* init-fail: a failure after every part's set-up */
+        fprintf(stderr, "gegpu: init failure injected (selftest)\n");
+        return 0;
+    }
+#endif
     /* Last, so a failed init leaves no query pool and the switch off. */
     if (sr_perf_gpu_timestamps_requested()) (void)ts_setup(vi.queue_family);
     /* After every step that can fail, and before the first pipeline (pipe_get runs only once
      * the renderer is ready), so the cache is either used for every pipeline or not made. */
     pcache_open((VkPhysicalDevice)vi.physical);
     s_readback_commit_failures = 0;
+    /* Registered only now, after the last step that can fail: a failed init registers nothing
+     * (ge_gpu.h), so the Ace report never confirms a part the software rasterizer stood in for. */
+    sr_perf_set_gpu_replay_source(gpu_replay_snapshot);
+    if (s_xs_factor) ace_confirm(ACE_FEATURE_TEXSCALE);
+    if (s_xs_smart2d) ace_confirm(ACE_FEATURE_SMART2D);
+    if (s_xs_factor || s_xs_smart2d) ace_set_exit_report(ACE_FEATURE_TEXSCALE, tex_xs_report);
+    if (s_glyphs) ace_confirm(ACE_FEATURE_GLYPHS);   /* the renderer that rebuilds is up */
+    if (s_ace_af) ace_confirm(ACE_FEATURE_AF);       /* ... the one that filters */
+    if (s_depth32) ace_confirm(ACE_FEATURE_DEPTH);   /* ... and the one that tests at 32 bits */
     s_ready = 1;
     ge_set_gpu_hooks(&k_hooks);
-    fprintf(stderr, "gegpu: full GPU GE active (persistent targets, %s, no software fallback)\n",
+    fprintf(stderr, "gegpu: full GPU GE active (persistent targets, %s, states it cannot draw go to the "
+                    "software rasterizer, counted by reason)\n",
             s_async_submit ? "8-slot async render/snapshot batching" : "exact synchronous submits");
     if (s_cpu_profile)
         fprintf(stderr, "gegpu: aggregate CPU profiling enabled\n");
@@ -9993,6 +10422,18 @@ int gegpu_init(void) {
     return 1;
 }
 
+int gegpu_init(void) {
+    s_dev = VK_NULL_HANDLE;   /* set by the first step, once sdl3vk lends its device */
+    if (gegpu_init_parts()) return 1;
+    /* A failed init leaves nothing behind (the host falls back to the software renderer and
+     * sdl3vk later destroys the device): what its steps made goes once the device is idle. */
+    if (s_dev) {
+        (void)vkDeviceWaitIdle(s_dev);
+        gegpu_release();
+    }
+    return 0;
+}
+
 void gegpu_shutdown(void) {
     if (!s_ready) return;
     submit_pending();
@@ -10004,6 +10445,10 @@ void gegpu_shutdown(void) {
      * object that a recorded command or descriptor can reference. */
     (void)vkDeviceWaitIdle(s_dev);
     stats_emit(1);
+    {
+        char failures[256];
+        if (failures_line(failures, sizeof failures)) fputs(failures, stderr);
+    }
     if (s_cnt_movie_tex || s_cnt_movie_present_tex || s_cnt_movie_present_target || s_cnt_movie_present_ge)
         fprintf(stderr, "gegpu: movie frames (#2111): %lu presents of a drawn movie picture, %lu of one "
                         "decoded into the target; %lu texture uploads were movie pictures; %lu presents "
@@ -10028,38 +10473,26 @@ void gegpu_shutdown(void) {
     s_ts_unavailable = 0;
     ge_set_gpu_hooks(NULL);
     s_ready = 0;
+    gegpu_release();
+}
 
+/* Releases every object gegpu_init's steps make, once the device has retired its work: at
+ * shutdown, and after an init that failed part way (a handle never made is skipped). */
+static void gegpu_release(void) {
     for (int i = 0; i < MAX_WING; i++) wing_release(&s_wings[i]);
     if (s_cnt_wide_present)
         fprintf(stderr, "gegpu: Fill presented %lu pictures, %lu of them with black wings\n",
                 s_cnt_wide_present, s_cnt_wide_black);
     s_cnt_wide_present = s_cnt_wide_black = 0;
+    /* gegpu_shutdown printed their exit line: a later gegpu_init says each first failure again. */
+    s_cnt_tex_evict_failed = s_cnt_target_kept = s_cnt_fallback_refused = s_cnt_target_failed = 0;
     wide_image_free(0);
     for (int i = 0; i < MAX_TGT; i++) target_destroy(&s_tgts[i]);
-    for (int i = 0; i < MAX_DEP; i++) {
-        DepthEnt *d = &s_deps[i];
-        if (!d->used) continue;
-        if (d->view) vkDestroyImageView(s_dev, d->view, NULL);
-        if (d->img) vkDestroyImage(s_dev, d->img, NULL);
-        if (d->mem) vkFreeMemory(s_dev, d->mem, NULL);
-        twin_depth_free(d);
-        memset(d, 0, sizeof(*d));
-    }
-    for (int i = 0; i < s_tex_n; i++) {
-        TexEnt *e = &s_tex[i];
-        tex_shadow_release(e);
-        if (e->set) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set);
-        if (e->smp) vkDestroySampler(s_dev, e->smp, NULL);
-        if (e->set_af) vkFreeDescriptorSets(s_dev, s_dpool_tex, 1, &e->set_af);
-        if (e->smp_af) vkDestroySampler(s_dev, e->smp_af, NULL);
-        tex_hm_free(e);
-        if (e->view) vkDestroyImageView(s_dev, e->view, NULL);
-        if (e->img) vkDestroyImage(s_dev, e->img, NULL);
-        if (e->mem) vkFreeMemory(s_dev, e->mem, NULL);
-        tex_xs_free(e);
-        tex_gl_free(e);
-    }
+    depth_slots_release();
+    for (int i = 0; i < s_tex_n; i++) tex_entry_free(&s_tex[i]);
     s_tex_n = 0;
+    tex_left_destroy();
+    tex_index_rebuild();
     s_submit_done = s_submit_serial;   /* the device is idle: every retired copy can go */
     tex_xs_retire_collect();
     tex_hm_shutdown();
@@ -10068,10 +10501,8 @@ void gegpu_shutdown(void) {
         s_glyphs_asked = s_glyphs = 0;
     }
     tex_dump_shutdown();   /* its exit line; nothing else depends on it */
-    const int had_repl = s_repl != NULL, had_soft = s_soft_on;
     tex_repl_shutdown();   /* the exit line, the pack closed; the scaled-copy machinery it used goes next */
     tex_soft_shutdown();
-    if ((had_repl || had_soft) && !s_xs_factor && !s_xs_smart2d) nk_tex_scale_shutdown();
     if (s_xs_factor || s_xs_smart2d) {
         nk_tex_scale_shutdown();
         tex_xs_report();
@@ -10085,12 +10516,14 @@ void gegpu_shutdown(void) {
     free(s_pipes);
     s_pipes = NULL;
     s_pipe_cap = 0;
+    pipe_index_free(&s_pipe_idx);
     for (int m = 0; m < 2; m++) {
         for (int i = 0; i < s_rmw_pipe_n[m]; i++)
             if (s_rmw_pipes[m][i].pipe) vkDestroyPipeline(s_dev, s_rmw_pipes[m][i].pipe, NULL);
         free(s_rmw_pipes[m]);
         s_rmw_pipes[m] = NULL;
         s_rmw_pipe_n[m] = s_rmw_pipe_cap[m] = 0;
+        pipe_index_free(&s_rmw_pipe_idx[m]);
     }
     if (s_fs_rmw) vkDestroyShaderModule(s_dev, s_fs_rmw, NULL);
     s_fs_rmw = VK_NULL_HANDLE;
@@ -10172,9 +10605,20 @@ void gegpu_shutdown(void) {
     s_rmw_zbuf = VK_NULL_HANDLE; s_rmw_zbuf_mem = VK_NULL_HANDLE; s_rmw_zbuf_size = 0;
     s_dst_interlock = 0;
     if (s_pool) vkDestroyCommandPool(s_dev, s_pool, NULL);
+    /* Nothing names a released object any more: a later init (or its failure) starts clean. */
+    s_pool = VK_NULL_HANDLE; s_rp = VK_NULL_HANDLE; s_playout = VK_NULL_HANDLE; s_dlayout = VK_NULL_HANDLE;
+    s_dpool_tex = VK_NULL_HANDLE; s_dpool_fix = VK_NULL_HANDLE; s_white_set = VK_NULL_HANDLE;
+    memset(s_snap_set, 0, sizeof s_snap_set);
+    s_vs = VK_NULL_HANDLE; s_fs = VK_NULL_HANDLE;
+    s_white_smp = VK_NULL_HANDLE; s_white_view = VK_NULL_HANDLE; s_white = VK_NULL_HANDLE;
+    s_white_mem = VK_NULL_HANDLE;
+    s_snap_view = VK_NULL_HANDLE; s_snapimg = VK_NULL_HANDLE; s_snapimg_mem = VK_NULL_HANDLE;
+    memset(s_smp, 0, sizeof s_smp);
+    s_xfer_map = NULL; s_xfer = VK_NULL_HANDLE; s_xfer_m = VK_NULL_HANDLE;
 
     s_cmd = VK_NULL_HANDLE;
     s_cmd_slot = NULL;
+    s_cmd_failed = 0;   /* its command pool is gone: the next init records afresh */
     s_snap_src = NULL;
     s_snap_srcgen = 0;
     s_tsnap_src = NULL;
