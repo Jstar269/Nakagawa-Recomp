@@ -33,6 +33,13 @@ _spec.loader.exec_module(cosim)
 JR_RA = 0x03E00008
 
 
+def branch_target_index(index: int, word: int) -> int:
+    """Word index a taken I-type branch at ``index`` lands on: the delay slot plus the
+    sign-extended 16-bit word offset, so a backward branch lands before the branch."""
+    offset = ((word & 0xFFFF) ^ 0x8000) - 0x8000
+    return index + 1 + offset
+
+
 def decode(word: int) -> tuple:
     """Classify one instruction the way both execution lanes dispatch on it."""
     primary = word >> 26
@@ -519,11 +526,19 @@ class FixtureSemanticTests(unittest.TestCase):
 
         # Taking the branch must skip at least one instruction, so a lane that
         # evaluated the condition after the slot lands somewhere different.
-        target_index = index + 1 + (branch & 0xFFFF)
+        target_index = branch_target_index(index, branch)
         self.assertGreater(target_index, index + 2,
                            "taken and not-taken paths converge; nothing is proven")
+        self.assertLessEqual(target_index, len(words), "the branch leaves its cell")
         skipped = words[index + 2]
         self.assertEqual(skipped >> 26, 0x09, "the skipped word should be the addiu marker")
+
+    def test_branch_target_index_sign_extends_the_offset(self):
+        beq = 0x10000000  # beq $zero, $zero, offset
+        self.assertEqual(branch_target_index(9, beq | 0x0002), 12)
+        # A backward branch lands before the branch, never past the cell's end.
+        self.assertEqual(branch_target_index(9, beq | 0xFFFE), 8)
+        self.assertEqual(branch_target_index(9, beq | 0x8000), 10 - 0x8000)
 
     def test_branch_likely_cell_covers_taken_and_nullified_paths_for_each_form(self):
         _offset, words = self.layout["branch_likely"]

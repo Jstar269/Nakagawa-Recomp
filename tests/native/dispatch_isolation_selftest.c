@@ -154,11 +154,19 @@ static int g_failures = 0;
 #define WATCH_AOT_PC      0x00608004u
 #define WATCH_RAM_ADDR    0x08801000u
 
-/* The SR_WATCH reports one store of `width` bytes at `addr` makes: 1 when the armed ADDR:LEN
- * range overlaps it, else 0. The watch itself is configured once from the same variable. */
-static uint64_t watch_hits(uint32_t addr, uint32_t width) {
+/* The ADDR:LEN this run asked SR_WATCH to arm, or NULL when it asked for none. */
+static const char *watch_requested(void) {
     const char *spec = getenv("SR_WATCH");
-    if (!SR_WATCH_ACTIVE() || !spec) return 0u;
+    return spec && spec[0] ? spec : NULL;
+}
+
+/* The SR_WATCH reports one store of `width` bytes at `addr` makes: 1 when the requested
+ * ADDR:LEN range overlaps it, else 0. The expectation comes from the request alone, never
+ * from the runtime's own armed flag: a watch that failed to arm must miss these counts
+ * (test_store_watch_is_armed_when_requested names that failure). */
+static uint64_t watch_hits(uint32_t addr, uint32_t width) {
+    const char *spec = watch_requested();
+    if (!spec) return 0u;
     char *end = NULL;
     const unsigned long long start = strtoull(spec, &end, 0);
     if (!end || *end != ':') return 0u;
@@ -972,6 +980,21 @@ static void test_valid_aot_miss_executes_guest_bytes(void) {
     sr_exec_span_reset();
 }
 
+/* Failing before: nothing asserted that SR_WATCH armed, and the expected hit counts were 0
+ * whenever it had not, so a watch that never armed passed every store-watch check. A run that
+ * asks for a watch must get one; a build without the flight recorder has no store watch, and
+ * a request for one there is a named failure, not a pass. */
+static void test_store_watch_is_armed_when_requested(void) {
+    const char *spec = watch_requested();
+    if (!spec) return;
+#if defined(SR_FLIGHT_RECORDER_LINKED) && !defined(SR_FLIGHT_RECORDER_STANDALONE)
+    CHECK(SR_WATCH_ACTIVE(), "SR_WATCH=%s was requested but sr_watch_configure did not arm it", spec);
+#else
+    CHECK(0, "SR_WATCH=%s was requested but this build has no store watch "
+          "(the flight recorder is not linked)", spec);
+#endif
+}
+
 /* This native body is the source-owned AOT side of the watchpoint regression:
  * codegen emits this same MEM_W32_PC helper for a translated `sw`. */
 static void synthetic_aot_watch_body(CpuState *s) {
@@ -1782,11 +1805,24 @@ static int run_dispatch_child(const char *self_path, const char *mode) {
 #endif
 }
 
+static int boot_event_file_names(const char *path, const char *needle);
+static void set_boot_event_file(const char *path);
+
+/* The status alone cannot tell this rejection from any other exit(1) in the child, so the
+ * child's boot event must name the target-not-executable boundary as well. */
 static void test_public_dispatch_wrapper_terminates_rejection(const char *self_path) {
+    char event_path[512];
+    snprintf(event_path, sizeof event_path, "%s.unregistered-events.txt", self_path);
+    remove(event_path);
+    set_boot_event_file(event_path);
     int child_status = run_dispatch_child(self_path, "--unregistered-dispatch-child");
+    set_boot_event_file("");
     CHECK(child_status == 1,
           "public dispatch wrapper did not terminate an unregistered executable attempt "
           "with status 1 (status=%d)", child_status);
+    CHECK(boot_event_file_names(event_path, "boundary=target-not-executable issue=308"),
+          "unregistered executable attempt did not stop at the target-not-executable boundary");
+    remove(event_path);
 }
 
 static void test_host_stack_exhaustion_is_a_named_boundary(const char *self_path) {
@@ -2155,6 +2191,306 @@ static void test_stale_hook_redirects_to_interpreter(void) {
     sr_exec_span_reset();
 }
 
+/* Portable environment setter for the child cases below; "" removes the variable. */
+static void set_env_var(const char *name, const char *value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    if (value[0]) setenv(name, value, 1);
+    else unsetenv(name);
+#endif
+}
+
+/* ---- a configured alias honours the TD-27 stale redirect ---------------------------
+ *
+ * Runs in a child started with SR_STALE_DETECT=1 (the gate is read once per process).
+ * The alias destination owns a registered AOT body and codegen-shaped stale records for
+ * its original words; after the guest overwrites a word and the invalidate-time check
+ * fires, a dispatch through the alias SOURCE must run the new bytes through the
+ * interpreter exactly as a direct dispatch to the destination does, never the AOT body
+ * translated from the old ones. The gate-on direction of the direct-dispatch test above
+ * runs here too. Returns 0 when every check holds. */
+static int run_stale_alias_child(void) {
+    if (!sr_stale_enabled()) {
+        fprintf(stderr, "stale alias child: SR_STALE_DETECT did not arm the gate\n");
+        return 2;
+    }
+    test_stale_hook_redirects_to_interpreter();
+
+    const SrTitleRuntimeConfig *cfg = sr_title_config();
+    if (cfg->dispatch_alias_count == 0u) return g_failures ? 1 : 0;
+    const uint32_t from = cfg->dispatch_aliases[0].from;
+    const uint32_t to = cfg->dispatch_aliases[0].to;
+    const uint32_t resume = to + 0x0cu;
+    const uint32_t orig_words[3] = {
+        STALE_ADDIU_V0(STALE_ORIG_IMM), 0x03e00008u, 0x00000000u,
+    };
+    uint32_t bad = 0u, exp = 0u, act = 0u;
+
+    sr_stale_reset();
+    sr_exec_span_reset();
+    for (uint32_t i = 0; i < 3u; i++) MEM_W32(to + 4u * i, orig_words[i]);
+    sr_stale_register_word(to, orig_words[0]);
+    sr_stale_register_block(to, 3u, sr_stale_fnv1a(orig_words, 3u));
+    CHECK(sr_exec_span_register(to, resume), "alias destination span registration failed");
+    sr_register(to, stale_aot_body);
+
+    MEM_W32(to, STALE_ADDIU_V0(STALE_NEW_IMM));
+    CHECK(sr_stale_check_range(to, 12u, stale_test_mem_read, NULL, &bad, &exp, &act) == 1 &&
+              sr_stale_block_is_stale(to) == 1,
+          "the overwritten alias destination 0x%08x did not read as stale", to);
+
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    s.pc = PROBE_PC;
+    s.r[29] = 0x00400000u;
+    s.r[31] = resume;
+    s.r[2] = 0xdeadbeefu;
+    g_stale_aot_hits = 0;
+    int rc = dispatch_call_try(&s, from, resume);
+    CHECK(rc == SR_GUEST_INTERP_CALL_RETURN && g_stale_aot_hits == 0,
+          "alias 0x%08x -> 0x%08x entered the stale AOT body (rc=%d hits=%d)",
+          from, to, rc, g_stale_aot_hits);
+    CHECK(s.r[2] == STALE_NEW_IMM && s.pc == resume,
+          "alias 0x%08x did not follow the destination's NEW bytes (v0=0x%08x pc=0x%08x)",
+          from, s.r[2], s.pc);
+
+    sr_stale_reset();
+    sr_exec_span_reset();
+    return g_failures ? 1 : 0;
+}
+
+static void test_configured_alias_honours_stale_redirect(const char *self_path) {
+    int status = run_dispatch_child(self_path, "--stale-alias-child");
+    CHECK(status == 0, "a configured alias or direct dispatch ignored the stale redirect "
+          "with SR_STALE_DETECT=1 (child status=%d)", status);
+}
+
+/* ---- named stops end the run with status 1, never a host crash ----------------------
+ *
+ * AGENTS.md: no host crash to signal a gap. An unsupported form (sr_unimplemented) and a
+ * raw MIPS syscall (sr_raw_syscall) are named stops like every other boundary in
+ * recomp.c: the child prints its line and exits with status 1. abort() instead reads as
+ * status 3 on Windows and as a signal (status -1 here) on POSIX hosts. */
+static void test_named_stops_exit_instead_of_crashing(const char *self_path) {
+    static const char *const modes[] = { "--unimplemented-child", "--raw-syscall-child" };
+    for (size_t i = 0; i < sizeof modes / sizeof modes[0]; i++) {
+        int status = run_dispatch_child(self_path, modes[i]);
+        CHECK(status == 1, "%s did not stop with status 1 (status=%d)", modes[i], status);
+    }
+}
+
+/* ---- SR_TRACE_PC: only in-window instructions write records -------------------------
+ *
+ * The child arms a window around TRACE_IN_PC and runs one in-window instruction, then two
+ * out of the window, through the production hooks sr_begin_impl/sr_end_impl. The window
+ * file must hold exactly the one in-window record: an out-of-window instruction must
+ * write nothing, rather than a record labelled with the last in-window pc.
+ *
+ * The window is the flight recorder's (flight_recorder.c). A build of this file without the
+ * recorder gets flight_recorder.h's stand-ins, which never arm a window, so it has nothing to
+ * record and says so by name instead of running the cell (tools/test_dispatch_call_boundary.py
+ * builds this file that way; the dispatch-isolation-selftest make target links the recorder). */
+#define TRACE_IN_PC  0x00651000u
+#define TRACE_OUT_PC 0x00652000u
+
+static int run_trace_window_child(const char *self_path) {
+    char stream_path[512];
+    snprintf(stream_path, sizeof stream_path, "%s.trace-stream.txt", self_path);
+    sr_trace_window_configure();
+    if (!sr_trace_window_armed() || sr_trace_open(stream_path, "selftest", TRACE_IN_PC) != 0) {
+        fprintf(stderr, "trace window child: the window or the trace stream did not open\n");
+        return 2;
+    }
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    sr_begin_impl(&s, TRACE_IN_PC, STALE_ADDIU_V0(1u));
+    s.r[2] = 1u;
+    sr_end_impl(&s, 0u, 0);
+    sr_begin_impl(&s, TRACE_OUT_PC, STALE_ADDIU_V0(2u));
+    s.r[2] = 2u;
+    sr_end_impl(&s, 0u, 0);
+    sr_begin_impl(&s, TRACE_OUT_PC + 4u, STALE_ADDIU_V0(3u));
+    s.r[2] = 3u;
+    sr_end_impl(&s, 0u, 0);
+    sr_trace_close();
+    remove(stream_path);
+    return 0;
+}
+
+static void test_trace_window_records_only_in_window_instructions(const char *self_path) {
+#if !defined(SR_FLIGHT_RECORDER_LINKED) || defined(SR_FLIGHT_RECORDER_STANDALONE)
+    (void)self_path;
+    fprintf(stderr, "dispatch-isolation-selftest: SKIP the SR_TRACE_PC window cell: this build has "
+            "no trace window (the flight recorder is not linked)\n");
+#else
+    char window_path[512], window[64];
+    snprintf(window_path, sizeof window_path, "%s.trace-window.txt", self_path);
+    snprintf(window, sizeof window, "0x%08x:0x%08x", TRACE_IN_PC, TRACE_IN_PC + 3u);
+    remove(window_path);
+    set_env_var("SR_TRACE_PC", window);
+    set_env_var("SR_TRACE", window_path);
+    int status = run_dispatch_child(self_path, "--trace-window-child");
+    set_env_var("SR_TRACE_PC", "");
+    set_env_var("SR_TRACE", "");
+    CHECK(status == 0, "trace window child failed (status=%d)", status);
+
+    unsigned records = 0u, in_window = 0u;
+    char line[4096];
+    FILE *fp = fopen(window_path, "rb");
+    CHECK(fp != NULL, "trace window file was not written");
+    while (fp && fgets(line, sizeof line, fp)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\0') continue;
+        records++;
+        if (strstr(line, "pc=0x00651000 ") && strstr(line, " r2=0x00000001")) in_window++;
+    }
+    if (fp) fclose(fp);
+    remove(window_path);
+    CHECK(records == 1u && in_window == 1u,
+          "the window holds %u record(s), %u of them the in-window instruction; "
+          "out-of-window instructions must write none", records, in_window);
+#endif
+}
+
+/* ---- an unwindowed trace that reaches its step limit closes and the run goes on ------
+ *
+ * AGENTS.md: no deliberate host crash to signal a limit. The child opens a plain trace
+ * (no SR_TRACE_PC window), stands at the 50M-step limit and traces one more instruction:
+ * the trace must close with a closing comment line, and the child must keep running and
+ * exit 0. Before, sr_end_impl called abort() there. */
+#define TRACE_CAP_STEPS 50000000ULL
+
+static int run_trace_cap_child(const char *self_path) {
+    char path[512];
+    snprintf(path, sizeof path, "%s.trace-cap.txt", self_path);
+    if (sr_trace_open(path, "selftest", TRACE_IN_PC) != 0) {
+        fprintf(stderr, "trace cap child: the trace stream did not open\n");
+        return 2;
+    }
+    s_step = TRACE_CAP_STEPS;   /* white-box: the instruction about to be traced is the last */
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    sr_begin_impl(&s, TRACE_IN_PC, STALE_ADDIU_V0(1u));
+    s.r[2] = 1u;
+    sr_end_impl(&s, 0u, 0);
+    if (sr_trace_active) {
+        fprintf(stderr, "trace cap child: the trace stayed open past its step limit\n");
+        return 3;
+    }
+    /* The run goes on untraced. */
+    sr_begin_impl(&s, TRACE_IN_PC + 4u, STALE_ADDIU_V0(2u));
+    s.r[2] = 2u;
+    sr_end_impl(&s, 0u, 0);
+    return 0;
+}
+
+static void test_trace_step_limit_closes_the_trace(const char *self_path) {
+    char path[512], line[4096], last[4096] = "";
+    snprintf(path, sizeof path, "%s.trace-cap.txt", self_path);
+    remove(path);
+    int status = run_dispatch_child(self_path, "--trace-cap-child");
+    CHECK(status == 0, "a trace reaching its step limit did not close and keep running "
+          "(child status=%d)", status);
+    FILE *fp = fopen(path, "rb");
+    CHECK(fp != NULL, "the step-limit trace file was not written");
+    unsigned records = 0u;
+    while (fp && fgets(line, sizeof line, fp)) {
+        if (line[0] != '#') records++;
+        snprintf(last, sizeof last, "%s", line);
+    }
+    if (fp) fclose(fp);
+    remove(path);
+    CHECK(records == 1u && strncmp(last, "# trace closed: ", 16) == 0,
+          "the step-limit trace holds %u record(s) and ends with '%s' (expected one record "
+          "and the closing comment)", records, last);
+}
+
+/* ---- SR_PROFILE: a dispatch credits no block to the stale s->pc ----------------------
+ *
+ * s->pc at a dispatch is the last return or yield point, not the target, and the entered
+ * body's own entry yield counts its entry. Before, the dispatch site's SR_YIELD credited a
+ * block to whatever s->pc held, creating a table entry for an unrelated address. */
+#define PROFILE_STALE_PC 0x00777000u
+
+static const SrProfEntry *profile_entry_for(uint32_t pc) {
+    for (uint32_t i = 0; i < PROF_HASH_SIZE; i++)
+        if (g_prof_table[i].used && g_prof_table[i].pc == pc) return &g_prof_table[i];
+    return NULL;
+}
+
+static void test_dispatch_profiles_no_stale_pc(void) {
+    sr_exec_span_reset();
+    own_synthetic_aot_word(PROBE_RA);
+    sr_register(PROBE_RA, interp_handoff_body);
+    memset(g_prof_table, 0, sizeof g_prof_table);
+    g_prof_enabled = 1;
+    CpuState s;
+    memset(&s, 0, sizeof s);
+    s.pc = PROFILE_STALE_PC;
+    s.r[29] = 0x00400000u;
+    s.r[31] = PROBE_RA;
+    g_interp_handoff_hits = 0;
+    int result = dispatch_try(&s, PROBE_RA);
+    g_prof_enabled = 0;
+    const SrProfEntry *stale = profile_entry_for(PROFILE_STALE_PC);
+    const SrProfEntry *target = profile_entry_for(PROBE_RA);
+    CHECK(result == SR_GUEST_INTERP_AOT_HANDOFF && g_interp_handoff_hits == 1,
+          "the profiled dispatch did not enter its registered body (result=%d hits=%d)",
+          result, g_interp_handoff_hits);
+    CHECK(stale == NULL, "a dispatch credited %llu block(s) to the stale s->pc 0x%08x",
+          stale ? (unsigned long long)stale->block_count : 0ull, PROFILE_STALE_PC);
+    CHECK(target != NULL && target->call_count == 1u && target->block_count == 0u,
+          "the dispatched target's profile is calls=%llu blocks=%llu (expected 1 call; its "
+          "body's own entry yield counts the block)",
+          target ? (unsigned long long)target->call_count : 0ull,
+          target ? (unsigned long long)target->block_count : 0ull);
+    memset(g_prof_table, 0, sizeof g_prof_table);
+    sr_exec_span_reset();
+}
+
+/* ---- SR_MEM_WATCH: a store that overlaps a watched range is reported ------------------
+ *
+ * The match is an overlap of the store's bytes with the range, not a test of its first
+ * byte alone: a word store two bytes below the range changes two watched bytes. The watch
+ * context logger counts each reported hit at its writer pc. */
+#define MEM_WATCH_ADDR 0x08803000u
+#define MEM_WATCH_PC   0x00608100u
+
+static void test_mem_watch_reports_overlapping_stores(void) {
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    CpuState *saved_cpu = s_cpu;
+    s_cpu = &cpu;
+    memset(&g_sr_mem_watches[0], 0, sizeof g_sr_mem_watches[0]);
+    g_sr_mem_watches[0].start = MEM_WATCH_ADDR + 2u;
+    g_sr_mem_watches[0].end = MEM_WATCH_ADDR + 4u;
+    g_sr_mem_watches[0].label = "overlap";
+    g_sr_mem_watch_count = 1;
+    g_sr_mem_watch_context_pc = MEM_WATCH_PC;
+    g_sr_mem_watch_context_limit = 16u;
+    g_sr_mem_watch_context_count = 0u;
+    g_sr_mem_watch_context_fpr = -1;
+
+    MEM_W32_PC(MEM_WATCH_ADDR, 0x11223344u, MEM_WATCH_PC);       /* bytes +0..+3: overlaps */
+    const unsigned after_word = g_sr_mem_watch_context_count;
+    MEM_W16_PC(MEM_WATCH_ADDR, 0x5566u, MEM_WATCH_PC);           /* bytes +0..+1: beside */
+    const unsigned after_low_half = g_sr_mem_watch_context_count;
+    MEM_W16_PC(MEM_WATCH_ADDR + 1u, 0x7788u, MEM_WATCH_PC);      /* bytes +1..+2: overlaps */
+    const unsigned after_straddle = g_sr_mem_watch_context_count;
+    MEM_W8_PC(MEM_WATCH_ADDR + 4u, 0x99u, MEM_WATCH_PC);         /* byte +4: beside */
+    const unsigned after_beside = g_sr_mem_watch_context_count;
+
+    g_sr_mem_watch_count = 0;
+    g_sr_mem_watch_context_pc = 0u;
+    g_sr_mem_watch_context_limit = 0u;
+    g_sr_mem_watch_context_count = 0u;
+    s_cpu = saved_cpu;
+    CHECK(after_word == 1u, "a word store over the start of a watched range was not reported");
+    CHECK(after_low_half == 1u, "a halfword store beside the watched range was reported");
+    CHECK(after_straddle == 2u, "a halfword store straddling the range start was not reported");
+    CHECK(after_beside == 2u, "a byte store past the watched range was reported");
+}
+
 /* ---- #1375: a null code pointer vs. the offset-0 function of a zero-based image ----
  *
  * The synthetic image is based at 0: its offset-0 function is registered at guest
@@ -2248,7 +2584,12 @@ static void test_null_code_pointer_is_not_the_offset0_function(const char *self_
     g_interp_handoff_v0 = 0u;
     s = nullptr_state(PROBE_PC);
     s.r[31] = PROBE_RA;
+    const int misses_before = g_miss_count;
     dispatch_result = dispatch_try(&s, 0u);
+    /* Guest address 0 is a real miss target here, not the miss table's empty slot. */
+    CHECK(g_miss_count == misses_before + 1,
+          "the miss at span-owned address 0 was not recorded in the dispatch-miss table "
+          "(misses %d -> %d)", misses_before, g_miss_count);
     CHECK(dispatch_result != SR_GUEST_INTERP_NULL_CODE_POINTER,
           "a dispatch to span-owned address 0 with no native body was refused as a null "
           "code pointer");
@@ -2350,10 +2691,15 @@ static void test_null_code_pointer_is_not_the_offset0_function(const char *self_
 
     /* Generated code's check: a nonzero pointer passes, and 0 ends the process. */
     SR_CODE_POINTER(&s, PROBE_RA, NULLPTR_EXEC_START);
+    remove(event_path);
+    set_boot_event_file(event_path);
     int child_status = run_dispatch_child(self_path, "--null-code-pointer-child");
+    set_boot_event_file("");
     CHECK(child_status == 1,
           "generated-code null code pointer check did not stop the run with status 1 "
           "(status=%d)", child_status);
+    CHECK(boot_event_file_names(event_path, "boundary=null-code-pointer issue=1375"),
+          "generated-code null code pointer stop did not record its boot event naming #1375");
 
     /* #363: a zero-based image's generated data access. An address past the PSP's unmapped
      * range passes, and a null base plus a field offset ends the process by name. */
@@ -2698,6 +3044,9 @@ static void test_host_entries_return_through_the_host_return_address(const char 
 }
 
 int main(int argc, char **argv) {
+    /* The stale-code gate is read once per process, so its child arms it first. */
+    if (argc == 2 && strcmp(argv[1], "--stale-alias-child") == 0)
+        set_env_var("SR_STALE_DETECT", "1");
     sr_mem_init();
     /* `--watch ADDR:LEN` arms SR_WATCH for this run (and the children it starts), so
      * memory-watch-selftest can run one binary under two ranges without a sub-make. */
@@ -2739,6 +3088,21 @@ int main(int argc, char **argv) {
     }
     if (argc == 2 && strcmp(argv[1], "--host-tail-return-child") == 0)
         return run_host_tail_return_child();
+    if (argc == 2 && strcmp(argv[1], "--stale-alias-child") == 0)
+        return run_stale_alias_child();
+    if (argc == 2 && strcmp(argv[1], "--trace-window-child") == 0)
+        return run_trace_window_child(argv[0]);
+    if (argc == 2 && strcmp(argv[1], "--trace-cap-child") == 0)
+        return run_trace_cap_child(argv[0]);
+    if (argc == 2 && strcmp(argv[1], "--unimplemented-child") == 0) {
+        sr_unimplemented(PROBE_PC, "synthetic unsupported form");
+        return 99; /* fail-open: a named stop must never return */
+    }
+    if (argc == 2 && strcmp(argv[1], "--raw-syscall-child") == 0) {
+        CpuState s = nullptr_state(PROBE_PC);
+        sr_raw_syscall(&s, 0x1u, PROBE_PC);
+        return 99; /* fail-open: a named stop must never return */
+    }
     if (argc == 2 && strcmp(argv[1], "--null-return-child") == 0) {
         CpuState s = nullptr_state(PROBE_PC);
         SR_AOT_RETURN_CAPTURE(&s, 0u);
@@ -2760,6 +3124,7 @@ int main(int argc, char **argv) {
 
     test_generic_build_configures_no_collection();
     test_configured_build_declares_aliases();
+    test_store_watch_is_armed_when_requested();
     test_valid_aot_miss_executes_guest_bytes();
     test_aot_store_watch_synthetic_guest();
     test_ram_store_watch_every_width();
@@ -2785,6 +3150,12 @@ int main(int argc, char **argv) {
     test_configured_aliases_redirect();
     test_foreign_aliases_do_not_redirect();
     test_stale_hook_redirects_to_interpreter();
+    test_configured_alias_honours_stale_redirect(argv[0]);
+    test_named_stops_exit_instead_of_crashing(argv[0]);
+    test_trace_window_records_only_in_window_instructions(argv[0]);
+    test_trace_step_limit_closes_the_trace(argv[0]);
+    test_dispatch_profiles_no_stale_pc();
+    test_mem_watch_reports_overlapping_stores();
     test_null_code_pointer_is_not_the_offset0_function(argv[0]);
     test_host_entries_return_through_the_host_return_address(argv[0]);
 

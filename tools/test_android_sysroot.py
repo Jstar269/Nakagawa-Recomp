@@ -10,8 +10,10 @@ the crt objects and stubs are compiled too; without it those tests are skipped.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -132,7 +134,12 @@ class SysrootTests(_SyntheticBionic):
 
     def test_the_pinned_commit_is_the_default(self) -> None:
         # The synthetic clone lacks it, so the default refuses: no silent use of another commit.
-        with self.assertRaises(sysroot.SysrootError):
+        # The refusal must name the pinned commit, so a changed default cannot pass.
+        self.assertEqual(
+            inspect.signature(sysroot.read_bionic).parameters["commit"].default,
+            sysroot.BIONIC_COMMIT,
+        )
+        with self.assertRaisesRegex(sysroot.SysrootError, re.escape(sysroot.BIONIC_COMMIT)):
             sysroot.read_bionic(self.repo)
 
     def test_headers_take_the_ndk_layout_and_only_this_architecture(self) -> None:
@@ -300,8 +307,8 @@ class BuildTests(_SyntheticBionic):
                                 ("libvulkan.so", b"nk_vulkan")):
             data = objects[f"{lib}/{library}"].data
             self.assertIn(symbol, data, library)
-            self.assertNotIn(b"LIBLOG", data, library)  # no version names
-            self.assertNotIn(b"LIBANDROID", data, library)
+            for version in (b"LIBLOG", b"LIBANDROID", b"LIBVULKAN"):  # no version names
+                self.assertNotIn(version, data, library)
         self.assertIn(b"LIBC", objects[f"{lib}/libc.so"].data)
 
 

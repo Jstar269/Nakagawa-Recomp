@@ -124,7 +124,11 @@ class TraceWindowProbeTests(unittest.TestCase):
         begin = body_of(RECOMP_C, "void sr_begin_impl(CpuState *s, uint32_t pc, uint32_t op)")
         self.assertIn("if (sr_trace_window_armed() && !sr_trace_window_begin_instruction(pc)) return;", begin)
         end = body_of(RECOMP_C, "void sr_end_impl(CpuState *s, uint32_t mem_addr, int mem_size)")
-        self.assertIn("if (sr_trace_window_armed() && !sr_trace_window_begin_instruction(s_pc)) return;", end)
+        # The end hook reads the begin hook's admission, never the window on the stale
+        # s_pc (behaviour: dispatch_isolation_selftest's trace-window child).
+        self.assertIn("s_trace_admitted = 1;", begin)
+        self.assertIn("if (sr_trace_window_armed() && !s_trace_admitted) return;", end)
+        self.assertNotIn("sr_trace_window_begin_instruction(s_pc)", end)
         record = body_of(WINDOW_C, "void sr_trace_window_record(uint32_t pc, const char *text)")
         self.assertIn("if (!s_tw_armed || s_tw_skip || !s_tw_fp) return;", record)
 

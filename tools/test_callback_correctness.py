@@ -54,6 +54,27 @@ def function_body(source, name):
     raise AssertionError(f"{name} not found")
 
 
+def cb_gated_dispatch_failures(body):
+    """Offsets of each sr_thread_dispatch_callbacks call in ``body`` whose innermost
+    enclosing block is not opened by ``if (is_cb && ...)``."""
+    failures = []
+    for call in re.finditer(r"\bsr_thread_dispatch_callbacks\s*\(", body):
+        depth = 0
+        opener = None
+        for pos in range(call.start() - 1, -1, -1):
+            if body[pos] == "}":
+                depth += 1
+            elif body[pos] == "{":
+                if depth == 0:
+                    opener = pos
+                    break
+                depth -= 1
+        head = body[:opener] if opener is not None else ""
+        if not re.search(r"\bif\s*\(\s*is_cb\s*&&[^{};]*\)\s*$", head):
+            failures.append(call.start())
+    return failures
+
+
 class CallbackCorrectnessTests(unittest.TestCase):
     def test_callback_waits_pump_callbacks(self):
         for source, name in (
@@ -69,6 +90,27 @@ class CallbackCorrectnessTests(unittest.TestCase):
                 self.assertIn("h_WaitThreadEnd_impl(s, 1)", body)
                 body = strip_comments(function_body(HLE_SOURCE, "h_WaitThreadEnd_impl"))
             self.assertIn("sr_thread_dispatch_callbacks", body)
+
+    def test_shared_wait_thread_end_pumps_callbacks_only_for_the_cb_variant(self):
+        # h_WaitThreadEnd (is_cb=0) and module stop share this impl with the CB
+        # variant: every pump must sit in a block entered only when is_cb holds, so
+        # a non-CB wait never runs a callback and the CB wait always can.
+        self.assertIn("h_WaitThreadEnd_impl(s, 0)", HLE_SOURCE)
+        body = strip_comments(function_body(HLE_SOURCE, "h_WaitThreadEnd_impl"))
+        self.assertEqual(cb_gated_dispatch_failures(body), [])
+        self.assertGreater(body.count("sr_thread_dispatch_callbacks("), 0)
+
+    def test_cb_gate_check_rejects_an_ungated_or_inverted_pump(self):
+        gated = "{ if (is_cb && pending(self)) { sr_thread_dispatch_callbacks(); } }"
+        self.assertEqual(cb_gated_dispatch_failures(gated), [])
+        for mutant in (
+            "{ if (pending(self)) { sr_thread_dispatch_callbacks(); } }",
+            "{ if (!is_cb && pending(self)) { sr_thread_dispatch_callbacks(); } }",
+            "{ if (is_cb && pending(self)) { x(); } sr_thread_dispatch_callbacks(); }",
+            "{ if (is_cb || pending(self)) { sr_thread_dispatch_callbacks(); } }",
+        ):
+            with self.subTest(mutant=mutant):
+                self.assertNotEqual(cb_gated_dispatch_failures(mutant), [])
 
     def test_callback_delay_entry_points_share_the_pumping_helper(self):
         # DelayThreadCB and DelaySysClockThreadCB both delegate to the one helper

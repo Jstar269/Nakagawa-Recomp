@@ -1281,6 +1281,8 @@ _NATIVE_SERIAL_GATES = {
         "run: python tools/format_portability_check.py",
     "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)":
         "run: NK_REQUIRE_SDL3=1 make CC=gcc native-core-tests",
+    "Run title-configured HLE behaviour tests on Linux":
+        'PYTHONPATH=tools python -m unittest -v test_hle_title_config_behavior 2>&1 | tee "$log"',
     "Compile GE frontend profiling mode":
         'make --no-print-directory CC=gcc BUILD_DIR="$build_dir" GE_FRONTEND_PROFILE=1 "$build_dir/ge.o"',
     "Build and run HLE thread selftest (links SDL3)": "run: make CC=gcc -j4 hle-thread-selftest",
@@ -1453,6 +1455,15 @@ class NativeToolsPartitionTests(unittest.TestCase):
                     self.assertEqual(self.conditions(name), [_NATIVE_OWN_CONDITION[name]])
                 else:
                     self.assertIn(name, _NATIVE_SERIAL_GATES, f"unclassified native step {name!r}")
+
+    def test_title_config_behaviour_step_fails_on_any_skip(self) -> None:
+        # The module skips without a native toolchain, so the step that runs it must
+        # accept only unittest's bare OK, never "OK (skipped=N)".
+        name = "Run title-configured HLE behaviour tests on Linux"
+        step = "\n".join(cast(list[str], self.steps[name]))
+        self.assertIn("set -euo pipefail", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertIn("tail -n 1 \"$log\" | grep -qx 'OK'", step)
 
     def test_every_part_runs_a_gate_and_dependent_steps_share_a_part(self) -> None:
         used = {self.part_of(name) for name in _NATIVE_SERIAL_GATES}
@@ -2479,6 +2490,8 @@ class CoverageWiringTests(unittest.TestCase):
         "Compile host-neutral runtime objects on Linux": "compiles only",
         "Check 32-bit format specifier portability across portable core": "a syntax-only build",
         "Compile GE frontend profiling mode": "compiles only",
+        "Run title-configured HLE behaviour tests on Linux":
+            "a Python driver over the hle-title-selftest-one build that is measured",
         _NIGHTLY_REPEAT_STEP: "reruns binaries already measured",
         _GPU_TWIN_MUTANTS_STEP: "mutants",
         "Run Linux cosimulation mutation corpus": "mutants",

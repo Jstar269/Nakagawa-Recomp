@@ -286,8 +286,13 @@ class RuntimeLauncher:
         if not manifest_file.is_file():
             raise RuntimeLaunchError(f"Missing game manifest: {manifest_file}")
 
-        with open(manifest_file, "r", encoding="utf-8") as handle:
-            manifest = json.load(handle)
+        try:
+            with open(manifest_file, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise RuntimeLaunchError(
+                f"Game manifest is unreadable: {manifest_file}: {exc}"
+            ) from exc
         if not isinstance(manifest, dict):
             raise RuntimeLaunchError(
                 f"Game manifest must be a JSON object: {manifest_file}"

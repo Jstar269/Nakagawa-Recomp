@@ -128,16 +128,27 @@ class GenericTitleProofFixtures(unittest.TestCase):
         """The three public synthetics use disjoint address families; matrix can distinguish."""
         fixtures = [SYNTHETIC, PSPDEV, SYNTHETIC2]
         bases = set()
+        used_by_fixture: dict[str, set[int]] = {}
         for path in fixtures:
             norm = title_manifest.validate_manifest(_load(path))
             bases.add(norm["executable"]["base"])
             # collect runtime binding addresses
             bindings = norm.get("runtime_bindings", {})
-            used = {v for k, v in bindings.items() if isinstance(v, int)}
+            # Address-valued bindings only: schema_version is a format number, not an address.
+            used = {v for k, v in bindings.items()
+                    if isinstance(v, int) and not isinstance(v, bool) and k != "schema_version"}
             for alias in bindings.get("dispatch_aliases", []):
                 used |= {alias["from"], alias["to"]}
             # check against HST retired span/modules
             self.assertNotIn(HST_SPAN[0], used)
+            used_by_fixture[path.name] = used
+        # No binding or dispatch-alias address is shared by two fixtures.
+        names = sorted(used_by_fixture)
+        for i, first in enumerate(names):
+            for second in names[i + 1:]:
+                shared = used_by_fixture[first] & used_by_fixture[second]
+                self.assertEqual(sorted(hex(address) for address in shared), [],
+                                 f"{first} and {second} share runtime binding addresses")
         self.assertEqual(len(bases), 3, "each fixture must have a distinct executable base")
         # synthetic-title2 sits in its own 1 MiB address family, apart from the other two,
         # so no literal can satisfy it and another fixture at once.
@@ -568,7 +579,7 @@ class MakeSpanPrecedenceTests(unittest.TestCase):
         for line in proc.stdout.splitlines():
             if line.strip().startswith("EFFECTIVE="):
                 return line.strip().split("=", 1)[1].strip()
-        return ""
+        self.fail("the Make probe printed no EFFECTIVE= line:\n" + proc.stdout)
 
     def test_undefined_is_empty(self) -> None:
         self.assertEqual(self._effective("synthetic2"), "")
@@ -819,7 +830,20 @@ class DirectMakeRetirementTests(unittest.TestCase):
             if stripped.startswith(f"{var}="):
                 value = stripped.split(f"{var}=", 1)[1].strip()
                 return value.replace(build_root, "$(BUILD_ROOT)")
-        return ""
+        self.fail(f"the Make probe printed no {var}= line:\n" + proc.stdout)
+
+    def test_the_probed_profile_variable_is_the_one_codegen_reads(self) -> None:
+        # Make expands an undefined name to "", so the empty checks below hold for a renamed
+        # variable too. Pin that CODEGEN_PROFILE_ARG is declared, fed to the codegen recipe,
+        # recorded in the profile stamp, and that the probe reports a value it is given.
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertRegex(makefile, r"(?m)^CODEGEN_PROFILE_ARG \?=")
+        pipeline = (ROOT / "mk" / "pipeline.mk").read_text(encoding="utf-8")
+        self.assertRegex(pipeline, r"(?m)^\t.*\$\(CODEGEN_TOOL\) .*\$\(CODEGEN_PROFILE_ARG\)")
+        stamps = (ROOT / "mk" / "smoke_gates.mk").read_text(encoding="utf-8")
+        self.assertIn("CODEGEN_PROFILE_ARG=$(CODEGEN_PROFILE_ARG)", stamps)
+        self.assertEqual(self._get("CODEGEN_PROFILE_ARG", "hst", "CODEGEN_PROFILE_ARG=--profile=probe"),
+                         "--profile=probe")
 
     def test_hst_name_has_no_direct_make_title_defaults(self) -> None:
         self.assertEqual(self._get("CODEGEN_PROFILE_ARG", "hst"), "")

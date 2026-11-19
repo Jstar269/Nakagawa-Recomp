@@ -278,22 +278,19 @@ raise ImportError("simulated module import failure")
         """Modules in _SERIAL_ONLY must execute sequentially after all parallel workers have finished."""
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp_path = Path(tmp_str)
-            timeline_file = tmp_path / "timeline.json"
-            timeline_file.write_text("[]", encoding="utf-8")
+            # One file per event, each written by exactly one process: nothing is shared,
+            # so overlapping modules cannot lose each other's events.
+            timeline_dir = tmp_path / "timeline"
+            timeline_dir.mkdir()
 
             timeline_code = f"""
-import json, time, unittest
+import json, os, time, unittest
 
-TIMELINE_FILE = r'{timeline_file}'
+TIMELINE_DIR = r'{timeline_dir}'
 
 def record_event(name, phase):
-    try:
-        data = json.loads(open(TIMELINE_FILE, encoding='utf-8').read())
-    except Exception:
-        data = []
-    data.append({{'name': name, 'phase': phase, 'time': time.perf_counter()}})
-    with open(TIMELINE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f)
+    with open(os.path.join(TIMELINE_DIR, name + '-' + phase + '.json'), 'x', encoding='utf-8') as f:
+        json.dump({{'time': time.perf_counter()}}, f)
 """
 
             # Parallel module: runs, sleeps briefly
@@ -342,11 +339,16 @@ class SerTests2(unittest.TestCase):
             self.assertTrue(report["successful"])
             self.assertEqual(report["inventory_b"]["count"], 3)
 
-            events = json.loads(timeline_file.read_text(encoding="utf-8"))
-            par1_end = [e["time"] for e in events if e["name"] == "par1" and e["phase"] == "end"][0]
-            ser1_start = [e["time"] for e in events if e["name"] == "ser1" and e["phase"] == "start"][0]
-            ser1_end = [e["time"] for e in events if e["name"] == "ser1" and e["phase"] == "end"][0]
-            ser2_start = [e["time"] for e in events if e["name"] == "ser2" and e["phase"] == "start"][0]
+            def event(name: str, phase: str) -> float:
+                path = timeline_dir / f"{name}-{phase}.json"
+                self.assertTrue(path.is_file(), f"{name} recorded no {phase} event")
+                return float(json.loads(path.read_text(encoding="utf-8"))["time"])
+
+            par1_end = event("par1", "end")
+            ser1_start = event("ser1", "start")
+            ser1_end = event("ser1", "end")
+            ser2_start = event("ser2", "start")
+            ser2_end = event("ser2", "end")
 
             # Serial modules must start strictly AFTER the parallel pool module finishes
             self.assertGreaterEqual(
@@ -363,7 +365,6 @@ class SerTests2(unittest.TestCase):
                     "ser2 started before ser1 finished",
                 )
             else:
-                ser2_end = [e["time"] for e in events if e["name"] == "ser2" and e["phase"] == "end"][0]
                 self.assertGreaterEqual(
                     ser1_start,
                     ser2_end,

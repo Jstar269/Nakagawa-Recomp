@@ -3,7 +3,7 @@
   "name": "nakagawa-recomp-third-party-components",
   "schema_version": 1,
   "description": "Single machine-readable source of truth for every third-party component that can enter a release artifact. tools/package_notices.py (native package), tools/generate_sbom.py (SBOM) and tools/test_third_party_notices.py (release gate) all read this file. A component without a spdx_id, a license text in the tree, and (for Python tools) a recorded license fails the gate.",
-  "version_source_policy": "No version literal is trusted. Native DLL versions are read from the toolchain's own pacman database (var/lib/pacman/local/<pkg>/desc); Python and npm versions are read from the declared lockfiles. Every license text under third_party/licenses/ was copied verbatim from the component's own distribution in the local toolchain; each record below names the exact file it was copied from.",
+  "version_source_policy": "No version literal is trusted. Native DLL versions are read from the toolchain's own pacman database (var/lib/pacman/local/<pkg>/desc); Python and npm versions are read from the declared lockfiles. Every license text under third_party/licenses/ was copied verbatim from the component's own distribution: the local toolchain package, or, for a text that package does not install, the upstream source at the exact tag; each record below names the exact file it was copied from.",
   "native": {
     "copy_routes": [
       {
@@ -108,16 +108,22 @@
       "libharfbuzz-0.dll": {
         "name": "HarfBuzz",
         "notice_file": "HarfBuzz.txt",
-        "spdx_id": "MIT-Modern-Variant",
+        "spdx_id": "MIT-Modern-Variant AND MIT",
         "pacman_package": "harfbuzz",
         "upstream_origin": "https://github.com/harfbuzz/harfbuzz",
         "disposition": "copied_into_package",
+        "note": "HarfBuzz's COPYING refers readers to COPYING files in subdirectories. At tag 14.6.0 there are six COPYING files; src/ms-use/COPYING (MIT, Microsoft Corporation) is the licence of the data files in src/ms-use/ from which gen-use-table.py generated src/hb-ot-shaper-use-table.hh and gen-vowel-constraints.py generated src/hb-ot-shaper-vowel-constraints.cc, both in hb_base_sources and so compiled into libharfbuzz-0.dll. The others (perf/texts/, test/, test/shape/data/aots/, test/shape/data/text-rendering-tests/) cover benchmark and test data that the MSYS2 build does not compile (-Dtests=disabled; benchmark is disabled by default). The MSYS2 package installs only the top-level COPYING, so the ms-use text is taken from upstream at the tag. spdx_id names both grants: MIT-Modern-Variant for the top-level COPYING and MIT for the ms-use data.",
         "license_texts": [
           {
             "file": "third_party/licenses/HarfBuzz.txt",
             "copied_from": "MSYS2 UCRT64 package mingw-w64-ucrt-x86_64-harfbuzz: ucrt64/share/licenses/harfbuzz/COPYING",
             "toolchain_license_rel": "share/licenses/harfbuzz/COPYING",
             "sha256": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64"
+          },
+          {
+            "file": "third_party/licenses/harfbuzz/ms-use-COPYING.txt",
+            "copied_from": "HarfBuzz upstream (https://github.com/harfbuzz/harfbuzz) src/ms-use/COPYING at tag 14.6.0 (commit c7a7457b7385f33178e8cf87615ca077a810bbe7), imported byte-identical (git blob 9e841e7a26e4eb057b24511e7b92d42b257a80e5)",
+            "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
           }
         ]
       },

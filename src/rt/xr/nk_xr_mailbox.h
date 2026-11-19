@@ -56,9 +56,15 @@ typedef struct NkXrMailbox {
     alignas(64) unsigned front;
     int have_front;
     // Frame id of each slot. Written by the producer before the slot is
-    // published, read by the consumer after it acquires the slot.
-    uint64_t frame_id[NK_XR_MAILBOX_SLOTS];
+    // published, read by the consumer after it acquires the slot. Its own line,
+    // so the producer's write on every publish does not evict the consumer's
+    // private words.
+    alignas(64) uint64_t frame_id[NK_XR_MAILBOX_SLOTS];
 } NkXrMailbox;
+
+// The struct is 64-byte aligned. A static or automatic NkXrMailbox gets that
+// alignment from the compiler; one on the heap needs an aligned allocator
+// (aligned_alloc, or _aligned_malloc on Windows), because malloc guarantees less.
 
 // Prepare an empty mailbox. Call before either role starts.
 void nk_xr_mailbox_init(NkXrMailbox *m);

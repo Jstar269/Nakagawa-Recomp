@@ -664,6 +664,23 @@ class InventoryShapeTests(unittest.TestCase):
 
 
 class GimPaletteUnitTests(unittest.TestCase):
+    def test_gim_scanner_constants_match_the_extractor(self) -> None:
+        extract_script = SCRIPT.with_name("extract_xb.py")
+        spec = importlib.util.spec_from_file_location(
+            "extract_xb_constants_under_test", extract_script
+        )
+        assert spec is not None and spec.loader is not None
+        decoder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(decoder)
+
+        self.assertEqual(va.GIM_MAGIC, decoder.GIM_MAGIC)
+        self.assertEqual(va.GIM_HEADER_SIZE, decoder.GIM_HEADER_SIZE)
+        self.assertEqual(va.GIM_BLOCK_HEADER_SIZE, decoder.GIM_BLOCK_HEADER_SIZE)
+        self.assertEqual(va.GIM_CONTENT_HEADER_SIZE, decoder.GIM_CONTENT_HEADER_SIZE)
+        self.assertEqual(va.GIM_SUPPORTED_IMAGE_FORMATS, decoder.GIM_SUPPORTED_IMAGE_FORMATS)
+        self.assertEqual(va.GIM_MAX_SCAN_DEPTH, decoder.GIM_MAX_NESTING)
+        self.assertEqual(va.GIM_MAX_BLOCKS, decoder.GIM_MAX_BLOCKS)
+
     def test_valid_t8_fixture_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ok.gim"

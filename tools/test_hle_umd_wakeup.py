@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+"""Source-shape tripwires for the UMD drive-state wakes in the runtime HLE sources.
+
+Evidence tier: SOURCE_SHAPE only. These checks read handler text; they do not dispatch
+anything. The PSP-visible wait results, wakes and callback arguments are asserted by the
+native hle_thread_selftest (test_wc_umd_wait_drive_stat and its neighbours).
+"""
+
 import re
 import unittest
 from pathlib import Path
@@ -13,21 +20,40 @@ ROOT = Path(__file__).resolve().parent.parent
 HLE_SOURCE = hle_sources.text()
 
 
-def function_body(name):
-    match = re.search(rf"\b{name}\s*\([^)]*\)\s*\{{", HLE_SOURCE)
+def function_body(name, source=HLE_SOURCE):
+    """The brace-delimited body of the C function ``name`` in ``source``.
+
+    The definition and its braces are found on a copy with comments and string and
+    character literals blanked (same offsets), so a brace or a name inside one of them
+    neither starts nor ends a body; the body is returned from the original text.
+    """
+    blanked = hle_sources.blank_comments_and_literals(source)
+    match = re.search(rf"\b{name}\s*\([^)]*\)\s*\{{", blanked)
     if not match:
-        raise AssertionError(f"{name} not found in src/rt/hle.c")
+        raise AssertionError(f"{name} not found in the runtime HLE sources")
     start = match.end() - 1
     depth = 0
-    for pos in range(start, len(HLE_SOURCE)):
-        char = HLE_SOURCE[pos]
+    for pos in range(start, len(blanked)):
+        char = blanked[pos]
         if char == "{":
             depth += 1
         elif char == "}":
             depth -= 1
             if depth == 0:
-                return HLE_SOURCE[start : pos + 1]
+                return source[start : pos + 1]
     raise AssertionError(f"{name} has no closing brace")
+
+
+# sceUmdWaitDriveStat's handler is a wrapper; the wait itself and its precheck are the
+# functions a drive event would have to come from.
+PLAIN_WAIT_FUNCTIONS = ("h_UmdWaitDriveStat", "umd_wait_drive_stat", "umd_wait_precheck")
+
+
+def plain_wait_drive_events(source=HLE_SOURCE):
+    """The plain-wait functions in ``source`` that call sr_umd_signal_ready."""
+    return [name for name in PLAIN_WAIT_FUNCTIONS
+            if re.search(r"\bsr_umd_signal_ready\s*\(",
+                         hle_sources.blank_comments_and_literals(function_body(name, source)))]
 
 
 class UmdWakeupIsolationTests(unittest.TestCase):
@@ -58,8 +84,30 @@ class UmdWakeupIsolationTests(unittest.TestCase):
         self.assertIn("s_umd_cb_uid = A0", body)
 
     def test_plain_wait_does_not_create_a_drive_event(self):
-        body = function_body("h_UmdWaitDriveStat")
-        self.assertNotIn("sr_umd_signal_ready", body)
+        self.assertIn("umd_wait_drive_stat(A0, 0u)", function_body("h_UmdWaitDriveStat"))
+        self.assertEqual(plain_wait_drive_events(), [])
+
+    def test_a_drive_event_inside_the_wait_helper_is_caught(self):
+        body = function_body("umd_wait_drive_stat")
+        mutated = HLE_SOURCE.replace(body, body.replace("{", "{\n    sr_umd_signal_ready();", 1), 1)
+        self.assertNotEqual(mutated, HLE_SOURCE)
+        self.assertEqual(plain_wait_drive_events(mutated), ["umd_wait_drive_stat"])
+
+    def test_braces_in_strings_and_comments_do_not_end_a_body(self):
+        source = (
+            "static int other(void) { return 0; }\n"
+            "static int probe(int x) {\n"
+            "    log(\"}\"); /* } */ // }\n"
+            "    char c = '}';\n"
+            "    if (x) { return 1; }\n"
+            "    return 2;\n"
+            "}\n"
+            "static int after(void) { return 3; }\n"
+        )
+        body = function_body("probe", source)
+        self.assertTrue(body.startswith("{\n    log("))
+        self.assertTrue(body.endswith("return 2;\n}"))
+        self.assertNotIn("after", body)
 
     def test_cb_wait_consumes_pending_callback(self):
         body = function_body("h_UmdWaitDriveStatCB")

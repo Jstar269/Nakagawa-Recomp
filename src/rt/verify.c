@@ -39,6 +39,8 @@
 #include "nksnap.h"
 #include "../ref/snapshot_ref.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,9 +126,14 @@ static uint64_t env_u64(const char *name, int *set, int base) {
     const char *v = getenv(name);
     *set = 0;
     if (!v || !v[0]) return 0;
+    /* strtoull reads "-1" as 2^64-1 and saturates an overflow with ERANGE: both are malformed. */
+    const char *digits = v;
+    while (isspace((unsigned char)*digits)) digits++;
+    if (*digits == '-') config_error(name, v);
     char *end = NULL;
+    errno = 0;
     unsigned long long n = strtoull(v, &end, base);
-    if (!end || *end != '\0' || end == v) config_error(name, v);
+    if (errno == ERANGE || !end || *end != '\0' || end == v) config_error(name, v);
     *set = 1;
     return n;
 }
@@ -170,6 +177,7 @@ void sr_verify_config_from_env(SrVerifyConfig *cfg) {
     p = getenv("SR_VERIFY_CAPTURE");
     cfg->capture_dir = (p && p[0]) ? p : NULL;
     uint64_t cmax = env_u64("SR_VERIFY_CAPTURE_MAX", &set, 10);
+    if (set && cmax > UINT32_MAX) config_error("SR_VERIFY_CAPTURE_MAX", getenv("SR_VERIFY_CAPTURE_MAX"));
     cfg->capture_max = set ? (uint32_t)cmax : 4u;
 }
 
