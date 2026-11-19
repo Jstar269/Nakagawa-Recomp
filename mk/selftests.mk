@@ -779,7 +779,7 @@ hle-thread-selftest-build: $(RT_GE_O) $(H264_SUB_OBJS) $(GENERIC_TITLE_CONFIG_HE
 		-ffunction-sections -fdata-sections \
 		-fno-asynchronous-unwind-tables -fno-unwind-tables -Wno-unused-function \
 		$(LDFLAGS) $(LD_GC_SECTIONS) $(REPRODUCIBLE_LINK_FLAG) -o $(BUILD_DIR)/hle_thread_selftest.exe \
-		$(HLE_THREAD_SELFTEST_SOURCE) $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
+		$(HLE_THREAD_SELFTEST_SOURCE) $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/cheats.c src/core/nk_cheats.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
 		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) src/rt/mp3_bridge.c src/rt/vfpu_tables.c \
 		src/rt/h264_mf.c src/rt/h264_null.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
 		src/rt/fbcap_policy.c $(RT_GE_O) src/rt/ge_capture.c $(LIBS)
@@ -819,7 +819,7 @@ hle-title-selftest-one: $(RT_GE_O) $(H264_SUB_OBJS) $(TITLE_CONFIG_TOOL) tools/t
 		-ffunction-sections -fdata-sections \
 		-fno-asynchronous-unwind-tables -fno-unwind-tables -Wno-unused-function \
 		$(LDFLAGS) $(LD_GC_SECTIONS) $(REPRODUCIBLE_LINK_FLAG) -o $(HLE_TITLE_SELFTEST_EXE) \
-		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
+		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/cheats.c src/core/nk_cheats.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
 		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) src/rt/mp3_bridge.c src/rt/vfpu_tables.c \
 		src/rt/h264_mf.c src/rt/h264_null.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
 		src/rt/fbcap_policy.c $(RT_GE_O) src/rt/ge_capture.c $(LIBS)
@@ -859,7 +859,7 @@ $(PSP_ORACLE_SMOKE_EXE): $(PSP_ORACLE_SMOKE_STAMP) $(H264_SUB_OBJS) $(PSP_ORACLE
 		-Wno-infinite-recursion -Wno-sign-compare -Wno-unused-parameter -Wno-parentheses -Wno-pointer-sign \
 		-I"$(PSP_ORACLE_SMOKE_DIR)" $(LDFLAGS) \
 		$(LD_GC_SECTIONS) $(REPRODUCIBLE_LINK_FLAG) -o "$(PSP_ORACLE_SMOKE_EXE)" \
-		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
+		tests/native/hle_thread_selftest.c $(HLE_SRCS) src/rt/ace.c src/rt/videorec.c src/rt/replay_checkpoint.c src/rt/cheats.c src/core/nk_cheats.c src/rt/audio_resample.c src/rt/osk_overlay.c src/rt/flash0_font.c src/rt/pgf_public.c src/rt/guest_printf.c src/rt/archive_vfs.c src/core/nk_xb.c src/core/nk_json.c src/core/nk_font.c src/core/nk_shared_helpers.c $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/flight_recorder.c src/rt/nested_frames.c src/rt/stale_code.c src/rt/guest_interp.c src/rt/cpu_lle.c src/rt/sr_coro.c src/rt/title_config.c src/rt/psmf_producer.c src/rt/savedata.c $(PGD_BACKEND_SRC) \
 		src/rt/atrac3p_bridge.c $(ATRAC3P_SRCS) src/rt/mp3_bridge.c src/rt/vfpu_tables.c \
 		src/rt/h264_mf.c src/rt/h264_null.c src/rt/h264_ffmpeg.c $(H264_SUB_OBJS) \
 		src/rt/fbcap_policy.c $(RT_GE_O) src/rt/ge_capture.c \
@@ -1917,6 +1917,10 @@ $(GPU_CAPTURE_BIN): shader-verify
 		tests/native/gpu_capture_selftest.c src/rt/perf.c \
 		$(SDL3VK_SRCS) $(LIBS)
 
+# The terminal-fault legs gpu-capture-selftest runs after its default run;
+# gpu-selftest-status runs the same legs, so the manager's gate covers them too.
+GPU_CAPTURE_TERMINAL_CASES := surface-lost unclassified device-lost
+
 gpu-capture-selftest: $(GPU_CAPTURE_BIN)
 	$(NK_REQUIRE_POSIX_SHELL)
 	$(GPU_CAPTURE_BIN)
@@ -1928,10 +1932,13 @@ gpu-capture-selftest: $(GPU_CAPTURE_BIN)
 # A failing recipe always leaves Make with its own generic status, so a child SKIP
 # (exit 77, "Vulkan or the validation layer unavailable") cannot travel out through a
 # Make exit code and would be misread as a failure. This target therefore prints one
-# machine-readable line per binary:
+# machine-readable line per binary and leg:
 #
-#     GPU_SELFTEST_RESULT <name> PASS|SKIP|FAIL <exit-code>
+#     GPU_SELFTEST_RESULT <name>[:<leg>] PASS|SKIP|FAIL <exit-code>
 #
+# A binary named gpu_capture_selftest.exe also runs each GPU_CAPTURE_TERMINAL_CASES leg
+# (as gpu-capture-selftest does), reported as gpu_capture_selftest.exe:<case>, so the
+# manager's gpu-capture-selftest gate covers its terminal-fault handling as well.
 # and exits nonzero only when a binary ran and failed for a real reason, so a build
 # failure and an executed semantic failure stay failures while a runtime SKIP stays a
 # SKIP. GPU_SELFTEST_BINS/GPU_SELFTEST_PREREQS are overridable so the status logic can
@@ -1943,15 +1950,27 @@ gpu-selftest-status: $(GPU_SELFTEST_PREREQS)
 	$(NK_REQUIRE_POSIX_SHELL)
 	@status=0; \
 	for sr_bin in $(GPU_SELFTEST_BINS); do \
-	  sr_name=`basename $$sr_bin`; \
-	  sr_rc=0; \
-	  "$$sr_bin" || sr_rc=$$?; \
-	  case $$sr_rc in \
-	    0) sr_verdict=PASS ;; \
-	    77) sr_verdict=SKIP ;; \
-	    *) sr_verdict=FAIL; status=1 ;; \
-	  esac; \
-	  echo "GPU_SELFTEST_RESULT $$sr_name $$sr_verdict $$sr_rc"; \
+	  sr_base=`basename $$sr_bin`; \
+	  sr_legs=default; \
+	  if [ "$$sr_base" = "$(notdir $(GPU_CAPTURE_BIN))" ]; then \
+	    sr_legs="default $(GPU_CAPTURE_TERMINAL_CASES)"; \
+	  fi; \
+	  for sr_leg in $$sr_legs; do \
+	    sr_rc=0; \
+	    if [ "$$sr_leg" = default ]; then \
+	      sr_name=$$sr_base; \
+	      "$$sr_bin" || sr_rc=$$?; \
+	    else \
+	      sr_name=$$sr_base:$$sr_leg; \
+	      SR_GPU_CAPTURE_TERMINAL_CASE=$$sr_leg "$$sr_bin" || sr_rc=$$?; \
+	    fi; \
+	    case $$sr_rc in \
+	      0) sr_verdict=PASS ;; \
+	      77) sr_verdict=SKIP ;; \
+	      *) sr_verdict=FAIL; status=1 ;; \
+	    esac; \
+	    echo "GPU_SELFTEST_RESULT $$sr_name $$sr_verdict $$sr_rc"; \
+	  done; \
 	done; \
 	exit $$status
 

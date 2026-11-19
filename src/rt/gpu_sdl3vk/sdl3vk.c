@@ -24,6 +24,7 @@
 #include "../ace.h"   /* Ace Mode: texture filtering asks for samplerAnisotropy */
 #include "sdl3vk.h"
 #include "nk_platform.h"
+#include "../../core/nk_display_size.h"
 #include "../perf.h"
 #include "../fbcap_policy.h"
 #include "../fbcap.h"
@@ -51,8 +52,8 @@
 #include <unistd.h>
 #endif
 
-#define PSP_W 480
-#define PSP_H 272
+#define PSP_W NK_PSP_DISPLAY_WIDTH
+#define PSP_H NK_PSP_DISPLAY_HEIGHT
 #define PRESENT_FRAMES SDL3VK_PRESENT_FRAMES
 #define HUD_W 240
 #define HUD_H 108

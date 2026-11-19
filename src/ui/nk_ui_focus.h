@@ -23,8 +23,11 @@ enum {
                                          with no remembered id */
     NK_UI_FOCUS_NO_DEFAULT = 1u << 3, /* never taken as a scope's first focus (a destructive
                                          action): reached only by moving to it */
-    NK_UI_FOCUS_OWNS_HORIZONTAL = 1u << 4 /* left and right change this control (a segmented
-                                             control, a slider): they never move focus off it */
+    NK_UI_FOCUS_OWNS_HORIZONTAL = 1u << 4, /* left and right change this control (a segmented
+                                              control, a slider): they never move focus off it */
+    NK_UI_FOCUS_POINTER_ONLY = 1u << 5     /* a pointer target inside a control that takes the keys
+                                              (one choice in a row of choices): a press focuses
+                                              it, but no move, Tab or first focus lands on it */
 };
 
 /* Scopes stack from the bottom: root, overlay, drawer, dialog. The highest scope that
@@ -44,13 +47,19 @@ typedef struct {
     uint32_t flags;     /* NK_UI_FOCUS_* */
     uint32_t scope;     /* NK_UI_SCOPE_*; entries at or above NK_UI_FOCUS_MAX_SCOPES are rejected */
     NkUiId scroller;    /* 0, or the id of the registered scroll container that clips this entry */
+    NkUiId up;          /* 0, or the entry an up move from this one lands on, whatever is nearer:
+                           the first row under a tab strip names the strip's active tab. */
+    NkUiId down;        /* the same for a down move. Either is ignored, and the move is by
+                           position, when that entry is missing, disabled, pointer-only or in
+                           another scope. */
 } NkUiFocusEntry;
 
 /* A scroll container. viewport is its visible rect; scroll_y and content_h describe
    the current vertical scroll state (scroll_y is how far the content has moved up,
    0 at the top). Horizontal scrolling uses scroll_x and content_w; nk_ui registers
    vertical scrollers only today (scroll_x 0, content_w the viewport width), so a
-   request's scroll_x stays 0 there and nk_ui applies scroll_y alone. */
+   request's scroll_x stays 0 there and nk_ui applies scroll_y alone. parent is the scroll
+   container this one sits in (a list inside a page that scrolls), 0 for none. */
 typedef struct {
     NkUiId id;
     NkUiRect viewport;
@@ -58,7 +67,11 @@ typedef struct {
     float scroll_y;
     float content_w;
     float content_h;
+    NkUiId parent;
 } NkUiFocusScroller;
+
+/* How deep scroll containers nest for bringing a control into view. */
+#define NK_UI_FOCUS_SCROLL_DEPTH 4
 
 /* A request, produced by a focus move, to set a container's scroll offsets so the
    newly focused entry is fully visible. The host applies it to its scroll state. */
@@ -83,7 +96,10 @@ bool nk_ui_focus_register_scroller(NkUiFocusGraph *graph, const NkUiFocusScrolle
 /* After a layout: each entry and scroller takes the rect the layout gave it,
    and each scroller its scroll offset and content height, so moves made before
    the next frame see the screen as it was drawn. Ids the layout did not place
-   keep what they were registered with. */
+   keep what they were registered with. For the two layouts after focus changed, the
+   focused entry is brought into view again where this layout put it: a page that
+   describes its focused control changes shape with the focus, after the move was
+   judged. */
 void nk_ui_focus_place(NkUiFocusGraph *graph,
                        bool (*rect_of)(void *user, NkUiId id, NkUiRect *rect),
                        bool (*scroll_of)(void *user, NkUiId id, float *scroll_y,
@@ -107,16 +123,21 @@ NkUiId nk_ui_focus_remembered(const NkUiFocusGraph *graph, uint32_t scope);
 /* Focuses id when it is registered, enabled and in the active scope. Does not scroll. */
 bool nk_ui_focus_set(NkUiFocusGraph *graph, NkUiId id);
 /* Directional move within the active scope. Returns the newly focused id, or 0 when
-   no move happened (nothing in that direction, or nothing focused). */
+   no move happened (nothing in that direction, or nothing focused). An entry its scroll
+   container clips away whole is reached only from inside that container, which a control
+   in a container nested in it is too, or as a named neighbour. */
 NkUiId nk_ui_focus_move(NkUiFocusGraph *graph, NkUiNavDir direction);
 /* Tab / Shift+Tab: next or previous enabled entry of the active scope in
-   declaration order, wrapping. With nothing focused it picks the first (or last). */
+   declaration order, wrapping, passing over NK_UI_FOCUS_POINTER_ONLY entries. With
+   nothing focused it picks the first (or last). */
 NkUiId nk_ui_focus_cycle(NkUiFocusGraph *graph, bool reverse);
 
-/* The scroll request produced by the last successful move, cycle or set-with-scroll.
-   Returns true once per request and clears it. */
+/* A scroll request produced by the last successful move, cycle or set, or by the layout
+   after it (nk_ui_focus_place). Returns true once per request and clears it: one for each
+   container that has to scroll to show the focused entry whole, the entry's own container
+   first, then the containers around it. */
 bool nk_ui_focus_take_scroll(NkUiFocusGraph *graph, NkUiFocusScrollRequest *request);
-/* Computes the scroll request that brings id fully into its container's viewport
+/* Computes the scroll request that brings id fully into its own container's viewport
    (minimal movement). Returns false when id has no scroller or is already visible. */
 bool nk_ui_focus_scroll_into_view(const NkUiFocusGraph *graph, NkUiId id,
                                   NkUiFocusScrollRequest *request);

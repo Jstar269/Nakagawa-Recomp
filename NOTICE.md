@@ -65,6 +65,13 @@ We aim to respond promptly and will remove material where appropriate.
   `proAdhocServer.cpp`, and its port offset from
   PPSSPP's `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the
   same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
+- **Cheat files (#2639)** — the CWCheat reader, the decode of each code form and
+  the applier (`src/core/nk_cheats.c`, `src/core/nk_cheats.h`) are translated
+  from PPSSPP's `Core/CwCheat.cpp` and `Core/CwCheat.h` at
+  `c437463bc5cb78a0236312ad23f9c3b56fb9ae67` (GPL-2.0-or-later), conveyed as
+  GPL-3.0-or-later. Neither upstream file carries a notice of its own; the files
+  here carry the notice of PPSSPP's source files (Copyright (c) 2012- PPSSPP
+  Project, as `Core/Core.cpp` has it at that revision). Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `third_party/licenses/PSPSDK.txt` and `assets/upstream/`.
@@ -248,15 +255,16 @@ executable (`tools/stage_runtime_dlls.py`, PE import-table walk stopping at
 Windows system DLLs). The launcher's fonts are the project's own, under
 `assets/fonts/ui/` (see Project UI fonts below). Every staged DLL ships its upstream
 license text, copied verbatim from the MSYS2 UCRT64 toolchain packages
-(`ucrt64/share/licenses/`, read-only) and recorded with its SHA-256 in
-`assets/third_party_components.json`:
+(`ucrt64/share/licenses/`, read-only), or from the upstream source at the
+packaged tag for a text the package does not install, and recorded with its
+SHA-256 in `assets/third_party_components.json`:
 
 | DLL | License | License text |
 | --- | --- | --- |
 | `SDL3.dll` | Zlib | `third_party/licenses/sdl3/LICENSE.txt` |
 | `SDL3_ttf.dll` | Zlib | `third_party/licenses/SDL3_ttf.txt` |
 | `libfreetype-6.dll` | FTL | `third_party/licenses/FreeType-FTL.txt` |
-| `libharfbuzz-0.dll` | MIT-Modern-Variant | `third_party/licenses/HarfBuzz.txt` |
+| `libharfbuzz-0.dll` | MIT-Modern-Variant AND MIT | `third_party/licenses/HarfBuzz.txt`, `third_party/licenses/harfbuzz/ms-use-COPYING.txt` |
 | `libgraphite2.dll` | MIT (chosen) | `third_party/licenses/Graphite2.txt` |
 | `libpng16-16.dll` | libpng-2.0 | `third_party/licenses/libpng.txt` |
 | `zlib1.dll` | Zlib | `third_party/licenses/zlib.txt` |
@@ -279,6 +287,12 @@ License choices and combination notes:
   repeats that statement.
 - **Graphite2** is granted under four licenses (LGPL-2.1+, MPL-2.0, GPL-2.0+,
   or MIT) by its upstream `LICENSE`; this distribution uses the **MIT** option.
+- **HarfBuzz**'s `COPYING` refers readers to `COPYING` files in subdirectories.
+  At the packaged tag, `src/ms-use/COPYING` (MIT, Microsoft Corporation) is the
+  licence of the data from which the Universal Shaping Engine and vowel-constraint
+  tables compiled into `libharfbuzz-0.dll` are generated, so the package ships it
+  beside `HarfBuzz.txt`. The other subdirectory `COPYING` files cover benchmark
+  and test data that the MSYS2 build does not compile.
 - **GLib, libintl and libiconv** are LGPL-2.1-or-later and are dynamically
   linked as separate replaceable DLLs. LGPL-2.1 section 3 permits use under
   GPL-3 terms, so they combine with this GPL-3 distribution.

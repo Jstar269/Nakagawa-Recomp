@@ -17,8 +17,14 @@
  *   of the same version is replaced by the newer original;
  * - a file at a NEWER version is never replaced: a later player wrote it, and
  *   this one cannot know what a rewrite would drop (NK_ERROR_NEWER_SCHEMA);
- * - a file with no readable version (empty, corrupt, not JSON, over the size
- *   bound) is replaced: its reader has already reported it and fallen back.
+ * - a file that is there but cannot be opened or read (a sharing violation, a
+ *   read error, no memory to read it into) is never replaced: its version is
+ *   unknown, and it may be a newer player's (NK_ERROR_IO);
+ * - a file over the size bound is first copied, byte for byte, to
+ *   "<file>.unreadable.bak" (a newer player may allow a larger file), and a
+ *   failed copy stops the write;
+ * - a file read whole with no readable version (empty, corrupt, not JSON) is
+ *   replaced: its reader has already reported it and fallen back.
  *
  * The rule lives in the writer, not in reader state, so it holds whichever path
  * reaches the write. docs/RUNTIME_PACKAGING_ARCHITECTURE.md ("Per-user data
@@ -43,26 +49,42 @@
 
 /* nk_user_data_file_version results that are not a version. */
 #define NK_USER_DATA_VERSION_ABSENT (-1L)
+/* Read whole, and not a JSON object with a schema_version. */
 #define NK_USER_DATA_VERSION_UNREADABLE (-2L)
+/* There, but it could not be opened or read, or no memory held it. */
+#define NK_USER_DATA_VERSION_IO_FAILED (-3L)
+/* Larger than the bound it was read under. */
+#define NK_USER_DATA_VERSION_OVERSIZE (-4L)
 
 /* The top-level integer schema_version of the JSON file at `path`, read under a
- * `max_bytes` bound; NK_USER_DATA_VERSION_ABSENT when there is no such file and
- * NK_USER_DATA_VERSION_UNREADABLE when it cannot be read as such an object. */
+ * `max_bytes` bound; NK_USER_DATA_VERSION_ABSENT when there is no such file,
+ * NK_USER_DATA_VERSION_IO_FAILED when it is there but cannot be read,
+ * NK_USER_DATA_VERSION_OVERSIZE when it is larger than `max_bytes`, and
+ * NK_USER_DATA_VERSION_UNREADABLE when it was read but is not such an object. */
 static inline long nk_user_data_file_version(const char *path, size_t max_bytes) {
     if (!path || !path[0]) return NK_USER_DATA_VERSION_UNREADABLE;
     if (!nk_platform_file_exists(path)) return NK_USER_DATA_VERSION_ABSENT;
+    if (max_bytes >= SIZE_MAX) return NK_USER_DATA_VERSION_IO_FAILED;
     FILE *file = nk_fopen_utf8(path, "rb");
-    if (!file) return NK_USER_DATA_VERSION_UNREADABLE;
+    if (!file) return NK_USER_DATA_VERSION_IO_FAILED;
     char *text = (char *)malloc(max_bytes + 1u);
     if (!text) {
         fclose(file);
-        return NK_USER_DATA_VERSION_UNREADABLE;
+        return NK_USER_DATA_VERSION_IO_FAILED;
     }
     size_t length = fread(text, 1u, max_bytes + 1u, file);
     bool read_failed = ferror(file) != 0;
     fclose(file);
+    if (read_failed) {
+        free(text);
+        return NK_USER_DATA_VERSION_IO_FAILED;
+    }
+    if (length > max_bytes) {
+        free(text);
+        return NK_USER_DATA_VERSION_OVERSIZE;
+    }
     long version = NK_USER_DATA_VERSION_UNREADABLE;
-    if (!read_failed && length > 0u && length <= max_bytes) {
+    if (length > 0u) {
         char error[64];
         NkJsonNode *root = nk_json_parse(text, length, error, sizeof(error));
         int64_t value = 0;
@@ -77,16 +99,19 @@ static inline long nk_user_data_file_version(const char *path, size_t max_bytes)
     return version;
 }
 
-/* "<path>.v<version>.bak", the name an older file is kept under. */
+/* "<path>.v<version>.bak", the name an older file is kept under, and
+ * "<path>.unreadable.bak" for NK_USER_DATA_VERSION_OVERSIZE. */
 static inline bool nk_user_data_backup_path(const char *path, long version, char *out,
                                             size_t out_size) {
-    if (!path || !out || out_size == 0u || version < 0) return false;
-    int written = snprintf(out, out_size, "%s.v%ld.bak", path, version);
+    if (!path || !out || out_size == 0u) return false;
+    int written = version == NK_USER_DATA_VERSION_OVERSIZE
+        ? snprintf(out, out_size, "%s.unreadable.bak", path)
+        : version >= 0 ? snprintf(out, out_size, "%s.v%ld.bak", path, version) : -1;
     return written > 0 && (size_t)written < out_size;
 }
 
-/* Copies `path` to its version backup through a temporary sibling, so a backup
- * is either the complete original or not there. */
+/* Copies `path` to its backup through a temporary sibling, so a backup is
+ * either the complete original or not there. */
 static inline bool nk_user_data_backup_version(const char *path, long version) {
     char backup[NK_MAX_PATH + 32];
     char temporary[NK_MAX_PATH + 40];
@@ -120,14 +145,18 @@ static inline bool nk_user_data_backup_version(const char *path, long version) {
 
 /* Applies the rule above to the file a writer is about to replace with one at
  * `current_version`. NK_OK lets the write go ahead (after any backup);
- * NK_ERROR_NEWER_SCHEMA refuses it for a newer file and NK_ERROR_IO for an
- * older one whose backup could not be made. `out_found_version`, when given,
- * receives what nk_user_data_file_version read. */
+ * NK_ERROR_NEWER_SCHEMA refuses it for a newer file, and NK_ERROR_IO for a file
+ * that could not be read or one whose backup could not be made.
+ * `out_found_version`, when given, receives what nk_user_data_file_version read. */
 static inline NkResult nk_user_data_prepare_replace(const char *path, long current_version,
                                                     size_t max_bytes,
                                                     long *out_found_version) {
     long found = nk_user_data_file_version(path, max_bytes);
     if (out_found_version) *out_found_version = found;
+    if (found == NK_USER_DATA_VERSION_IO_FAILED) return NK_ERROR_IO;
+    if (found == NK_USER_DATA_VERSION_OVERSIZE) {
+        return nk_user_data_backup_version(path, found) ? NK_OK : NK_ERROR_IO;
+    }
     if (found < 0 || found == current_version) return NK_OK;
     if (found > current_version) return NK_ERROR_NEWER_SCHEMA;
     return nk_user_data_backup_version(path, found) ? NK_OK : NK_ERROR_IO;

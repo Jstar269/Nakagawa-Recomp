@@ -25,17 +25,46 @@ param(
     [string]$ProjectFontDir = ''
 )
 
+# A copy that fails (a destination locked by a running player, access denied) must stop the script
+# with a non-zero exit, not print a non-terminating error and let make report a build with missing
+# or stale assets. Windows PowerShell 5.1's Copy-Item ignores -ErrorAction Stop for some file
+# system errors, so the preference is set for the whole script. Native commands whose stderr is
+# redirected run under a local 'Continue' (5.1 turns redirected native stderr into a terminating
+# error under 'Stop').
+$ErrorActionPreference = 'Stop'
+
 New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
 
-$gccCmd = Get-Command gcc -ErrorAction SilentlyContinue
-# Same order as tools/nk_cli.py: gcc on PATH wins; MSYS_PATH (or the default MSYS2 UCRT64 folder) is the fallback.
-$defaultMsysBin = if ($env:MSYS_PATH) { $env:MSYS_PATH } else { "C:\msys64\ucrt64\bin" }
-$binDir = if ($gccCmd) {
-    Split-Path $gccCmd.Source
-} elseif (Test-Path -LiteralPath $defaultMsysBin -PathType Container) {
-    $defaultMsysBin
-} else {
-    ''
+# The toolchain directories: the directory of every gcc on PATH, in PATH order. The first gcc is
+# not always the compiler: a compiler cache (ccache's masquerade link or copy, a wrapper script)
+# puts a gcc of its own ahead of the toolchain, in a directory that holds nothing else, and runs
+# the next gcc on PATH. Each toolchain file below is therefore taken from the first of these
+# directories that holds it, which is the first gcc's own directory when that gcc is the compiler.
+# Otherwise the same order as tools/nk_cli.py: gcc on PATH wins; MSYS_PATH (or the default MSYS2
+# UCRT64 folder) is the fallback when PATH has no gcc.
+$toolchainDirs = @()
+foreach ($gccCmd in @(Get-Command gcc -All -CommandType Application -ErrorAction SilentlyContinue)) {
+    $gccDir = Split-Path -Parent $gccCmd.Source
+    if ($toolchainDirs -notcontains $gccDir) {
+        $toolchainDirs += $gccDir
+    }
+}
+if (-not $toolchainDirs) {
+    $defaultMsysBin = if ($env:MSYS_PATH) { $env:MSYS_PATH } else { "C:\msys64\ucrt64\bin" }
+    if (Test-Path -LiteralPath $defaultMsysBin -PathType Container) {
+        $toolchainDirs += $defaultMsysBin
+    }
+}
+
+function Find-ToolchainFile {
+    param([string]$Name)
+    foreach ($dir in $toolchainDirs) {
+        $candidate = Join-Path $dir $Name
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+    return ''
 }
 
 $copiedSdl = $false
@@ -50,11 +79,9 @@ if (-not $copiedSdl) {
     } elseif (Test-Path '../SDL3.dll') {
         Copy-Item '../SDL3.dll' $BuildDir -Force
     } else {
-        if ($binDir) {
-            $toolchainSdl = Join-Path $binDir 'SDL3.dll'
-            if (Test-Path $toolchainSdl) {
-                Copy-Item $toolchainSdl $BuildDir -Force
-            }
+        $toolchainSdl = Find-ToolchainFile 'SDL3.dll'
+        if ($toolchainSdl) {
+            Copy-Item -LiteralPath $toolchainSdl -Destination $BuildDir -Force
         }
     }
 }
@@ -110,28 +137,49 @@ if (Test-Path -LiteralPath $generatedFontDir -PathType Container) {
     }
 }
 
-# Copy runtime DLLs from the resolved toolchain directory when imported.
-
-if ($binDir) {
-    $runtimeDlls = @('libgcc_s_seh-1.dll', 'libwinpthread-1.dll', 'libstdc++-6.dll')
-    foreach ($dll in $runtimeDlls) {
-        $srcDll = Join-Path $binDir $dll
-        $dstDll = Join-Path $BuildDir $dll
-        if ((Test-Path $srcDll) -and (-not (Test-Path $dstDll))) {
-            $objdumpCmd = Get-Command objdump -ErrorAction SilentlyContinue
-            if ($objdumpCmd) {
-                $binaries = Get-ChildItem -Path $BuildDir -File | Where-Object { $_.Extension -in '.exe', '.dll' }
-                $imported = $false
-                foreach ($bin in $binaries) {
-                    $imports = & $objdumpCmd.Source -p $bin.FullName 2>$null | Select-String "DLL Name:\s*$([regex]::Escape($dll))"
-                    if ($imports) {
-                        $imported = $true
-                        break
+# Stage the toolchain runtime DLLs the build directory's binaries import, transitively: SDL3.dll
+# imports libiconv-2.dll, and libstdc++-6.dll imports libgcc_s_seh-1.dll and libwinpthread-1.dll.
+# Each pass re-reads the imports of every .exe and .dll in the build directory, so a DLL staged in
+# one pass has its own imports staged in the next; the passes end when one copies nothing, which
+# happens after at most one copy per listed DLL. A staged copy whose bytes differ from the
+# toolchain's is replaced, so a toolchain update cannot leave a stale runtime DLL beside a relinked
+# executable (the loader searches the executable's own directory first). An imported DLL that is
+# in no toolchain directory and not already staged is a named stop. This list is the
+# compile-asset-copy route's licence obligation in assets/third_party_components.json.
+if ($toolchainDirs) {
+    $runtimeDlls = @('libgcc_s_seh-1.dll', 'libwinpthread-1.dll', 'libstdc++-6.dll', 'libiconv-2.dll')
+    $objdumpCmd = Get-Command objdump -ErrorAction SilentlyContinue
+    if ($objdumpCmd) {
+        $copiedInPass = $true
+        while ($copiedInPass) {
+            $copiedInPass = $false
+            $importer = @{}
+            $binaries = Get-ChildItem -LiteralPath $BuildDir -File | Where-Object { $_.Extension -in '.exe', '.dll' }
+            foreach ($bin in $binaries) {
+                $dump = & { $ErrorActionPreference = 'Continue'; & $objdumpCmd.Source -p $bin.FullName 2>$null }
+                foreach ($match in ($dump | Select-String -Pattern 'DLL Name:\s*(\S+)')) {
+                    $importer[$match.Matches[0].Groups[1].Value.ToLowerInvariant()] = $bin.Name
+                }
+            }
+            foreach ($dll in $runtimeDlls) {
+                $key = $dll.ToLowerInvariant()
+                if (-not $importer.ContainsKey($key)) {
+                    continue
+                }
+                $srcDll = Find-ToolchainFile $dll
+                $dstDll = Join-Path $BuildDir $dll
+                $staged = Test-Path -LiteralPath $dstDll -PathType Leaf
+                if (-not $srcDll) {
+                    if ($staged) {
+                        continue
                     }
+                    throw "RUNTIME_DLL_UNRESOLVED: $($importer[$key]) imports $dll, which is in none of the toolchain directories ($($toolchainDirs -join '; ')) and is not staged in $BuildDir"
                 }
-                if ($imported) {
-                    Copy-Item $srcDll $BuildDir -Force
+                if ($staged -and ((Get-FileHash -LiteralPath $srcDll).Hash -eq (Get-FileHash -LiteralPath $dstDll).Hash)) {
+                    continue
                 }
+                Copy-Item -LiteralPath $srcDll -Destination $dstDll -Force
+                $copiedInPass = $true
             }
         }
     }
