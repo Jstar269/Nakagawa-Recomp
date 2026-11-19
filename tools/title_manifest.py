@@ -27,6 +27,9 @@ PUBLIC_MANIFEST_MAX_BYTES = 256 * 1024
 MAX_JSON_DEPTH = 16
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+# A title id ($.id) is one character shorter: the player's title_id buffers hold
+# NK_TITLE_ID_MAX_CHARS (63, src/core/nk_types.h) and a terminator.
+TITLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 C_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 BUILD_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 DISC_ID_RE = re.compile(r"^[A-Z]{4}[0-9]{5}$")
@@ -37,10 +40,14 @@ PATH_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # Windows forbids in file names, and control characters, stay rejected.
 DISC_PATH_COMPONENT_RE = re.compile(r'^[^<>:"/\\|?*\x00-\x1f\x7f]+$')
 DEVICE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,15}:$")
+# Windows device names, the same set as manifest_reserved_device in
+# src/core/nk_title_manifest.c and zip_reserved_device in src/core/nk_zip.c: COM and
+# LPT followed by a superscript one, two or three (U+00B9, U+00B2, U+00B3) are devices too.
 WINDOWS_RESERVED = {
-    "CON", "PRN", "AUX", "NUL",
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
+    *(f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "¹²³"),
 }
 
 ROOT_KEYS = {
@@ -250,6 +257,14 @@ def identifier(value: Any, path: str) -> str:
     value = text(value, path, 64)
     if not ID_RE.fullmatch(value):
         fail(path, "must match ^[a-z0-9][a-z0-9._-]{0,63}$")
+    returned: str = value
+    return returned
+
+
+def title_identifier(value: Any, path: str) -> str:
+    value = text(value, path, 64)
+    if not TITLE_ID_RE.fullmatch(value):
+        fail(path, "must match ^[a-z0-9][a-z0-9._-]{0,62}$")
     returned: str = value
     return returned
 
@@ -1204,7 +1219,7 @@ def validate_manifest(value: Any) -> dict[str, Any]:
         fail("$.kind", "unsupported title kind")
     result: dict[str, Any] = {
         "schema_version": version,
-        "id": identifier(value["id"], "$.id"),
+        "id": title_identifier(value["id"], "$.id"),
         "display_name": text(value["display_name"], "$.display_name", 128),
         "kind": kind,
     }

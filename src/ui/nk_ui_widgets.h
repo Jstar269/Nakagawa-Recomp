@@ -18,6 +18,14 @@
 /* Focusable controls register their previous-frame Clay bounds so nk_ui can
    move focus before the next screen is built. */
 void nk_ui_register_button(NkUi *ui, NkUiId id, uint32_t flags);
+/* The same, naming where an up and a down move from `id` land (0: the nearest control that
+   way, as usual). A full-width row beside a strip of small controls names the one it means,
+   such as a tab strip's active tab, because the nearest by position may be another. A named
+   control is taken even when its container has it scrolled out of view (it is then scrolled
+   into view); it is ignored, and the move goes by position, only when it is missing,
+   disabled, pointer-only or in another focus scope. */
+void nk_ui_register_button_between(NkUi *ui, NkUiId id, uint32_t flags, NkUiId up,
+                                   NkUiId down);
 bool nk_ui_button_focused(const NkUi *ui, NkUiId id);
 /* The pointer is over control `id` and was the last input (a key or a pad button
    hides hover until the pointer moves). A control under a dialog, or a disabled
@@ -184,6 +192,9 @@ typedef struct {
     const char *label;
     bool active;
     NkUiId id;      /* nonzero: the tab is focusable and can be activated */
+    NkUiId down;    /* nonzero: the control a Down move from the tab lands on, where the
+                       nearest one below it is not the next one to a person (the first row
+                       of the list under the strip; nk_ui_register_button_between) */
 } NkUiSection;
 
 /* Top bar: brand mark and wordmark, section tabs with an accent underline on the
@@ -192,6 +203,10 @@ typedef struct {
    one), or -1. */
 int nk_ui_top_bar(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count,
                   const char *input_label, bool input_active);
+/* A horizontal set of focusable tabs with the top bar's active underline and
+   shoulder-button navigation. `height` is the tab strip's logical height. */
+int nk_ui_section_tabs(NkUi *ui, NkUiId id, const NkUiSection *sections, size_t count,
+                       float height);
 
 typedef struct {
     NkUiPromptAction action;

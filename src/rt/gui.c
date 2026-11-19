@@ -36,6 +36,7 @@
 #include "osk_overlay.h"        /* the in-window keyboard: keys in, the frame drawn over */
 #include "osk_overlay_paint.h"
 #include "ace.h"             /* Ace Mode: crisp keyboard; refused by the acceptance checkpoint */
+#include "cheats.h"          /* the user's cheats: read at start, their marker drawn (#2639) */
 #include "ge_shared.h"       /* the software renderer's twin rows (#2050) and the VRAM viewer's
                                 decoders (#314) */
 #ifdef SR_SDL3VK
@@ -860,10 +861,11 @@ static void gui_release_presenter(void);
 
 #if defined(SR_SDL3VK) && !defined(SR_GUI_PRESENT_SELFTEST)
 /* ---- Ace Mode's in-game UI (ace.h, gpu_sdl3vk/ace_ui.h) ---------------------------------------
- * Made once at start in an Ace run that shows any of it, or for the render notice (#2151) when
- * one is due; an authentic run with nothing to say never makes it and never registers the
- * presenter's UI pass. Without SDL3_ttf, the UI fonts or the Vulkan backend the three features
- * are off for the run, said once, and the keyboard keeps today's path. */
+ * Made once at start in an Ace run that shows any of it, for the render notice (#2151) when
+ * one is due, or for the cheats marker (#2639) in a run that applies cheats; an authentic run
+ * with nothing to say never makes it and never registers the presenter's UI pass. Without
+ * SDL3_ttf, the UI fonts or the Vulkan backend the three features are off for the run, said
+ * once, and the keyboard keeps today's path; cheats are then refused (gui_cheats_marker_init). */
 #define ACE_NOTICE_NS 3000000000ull              /* the launch notice stays 3 s */
 static NkOverlayFonts *s_ace_fonts;
 static AceUi *s_ace_ui;
@@ -902,6 +904,8 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
      * not in the presenter's box in the readout's corner. */
     if (p->logic_slowed)
         f.logic_notice = sdl3vk_logic_notice_text(logic, sizeof(logic), p->logic_rate);
+    /* The cheats marker (cheats.h), in any mode, for as long as the run applies cheats. */
+    f.cheats_marker = sr_cheats_marker();
     if (s_ace_ui_ready && ace->notice && s_ace_first_frame_ns &&
         now - s_ace_first_frame_ns < ACE_NOTICE_NS) {
         double left = (double)(ACE_NOTICE_NS - (now - s_ace_first_frame_ns)) / 1e9;
@@ -932,7 +936,13 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     t.image_count = p->image_count;
     t.image_index = p->image_index;
     t.swapchain_gen = p->swapchain_gen;
-    return ace_ui_record(s_ace_ui, &t, &f);
+    {
+        const int drawn = ace_ui_record(s_ace_ui, &t, &f);
+        /* A present that asked for the cheats marker and did not get it drawn (the pass, its
+         * targets or its vertex data could not be made): the cheats stop (cheats.h). */
+        if (f.cheats_marker) sr_cheats_marker_drawn(drawn);
+        return drawn;
+    }
 }
 
 static void gui_ace_ui_off(const char *why) {
@@ -990,6 +1000,15 @@ static void gui_ace_ui_init(void) {
     ace_confirm(ACE_FEATURE_TEXT);
     ace_confirm(ACE_FEATURE_READOUT);
     ace_confirm(ACE_FEATURE_NOTICE);
+}
+
+/* The cheats marker (cheats.h, #2639) is drawn by the same UI pass, in an authentic run too. The
+ * UI is made here, at start, unless an Ace run made it. A window that cannot make it cannot show
+ * the marker, and the run then refuses its cheats by name. */
+static void gui_cheats_marker_init(void) {
+    char error[256] = "";
+    if (!sr_cheats_marker() || s_ui_ready) return;
+    if (!gui_ui_create(error, sizeof(error))) sr_cheats_marker_unavailable(error);
 }
 
 /* ---- Ace Mode's smooth motion (ace.h, gpu_sdl3vk/ace_smooth.h) ----------------------------------
@@ -1365,6 +1384,9 @@ static void gui_texdump_at_start(void);   /* the texture dump, started with the 
 
 void gui_init(const char *title) {
     (void)title;
+    /* The user's cheats (cheats.h, #2639) are read before the window is made, which shows their
+     * marker or, where it cannot, refuses them. SR_CHEATS off: nothing is read. */
+    sr_cheats_init();
 #if defined(SR_SDL3VK) || defined(_WIN32)
     static int cleanup_registered;
     if (!cleanup_registered && atexit(gui_shutdown) == 0) cleanup_registered = 1;
@@ -1458,6 +1480,7 @@ void gui_init(const char *title) {
                 sr_osk_overlay_set_host(osk_overlay_paint_available());
 #ifndef SR_GUI_PRESENT_SELFTEST
                 gui_ace_ui_init();
+                gui_cheats_marker_init();
                 gui_ace_smooth_init();
                 gui_wide_init();   /* after smooth motion, which it steps aside for */
                 gui_upscale_init();
@@ -1558,6 +1581,8 @@ void gui_init(const char *title) {
         sr_gui_raise_gdi_window, "gdi");
     /* Here when SR_VIDEO=gdi asked for this window, or when Vulkan did not start. */
     gui_report_render_path(vulkan_asked, false, gpu_ge_asked, false);
+    /* This window has no in-game UI pass, so it cannot show the cheats marker (cheats.h). */
+    sr_cheats_marker_unavailable("the GDI window has no in-game UI");
 #ifdef SR_SDL3VK
     gui_texdump_at_start();   /* no Vulkan GE in the GDI window: an asked-for dump is refused and said */
 #endif

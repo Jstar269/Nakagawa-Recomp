@@ -41,6 +41,12 @@ struct NkUiTheme {
     uint32_t placeholder;    /* #3A4552 outline of an art placeholder */
     uint32_t capture;        /* #223046 a row waiting for a button press */
     uint32_t accent_hover;   /* #8FB8F2 primary button under the pointer (the site's --mark) */
+    uint32_t selected_neutral_edge; /* #6B7684 edge of a current value marked without the
+                                       accent: a selected Off, the library's value (4.2:1 on
+                                       the page, 3.5:1 on its own box) */
+    uint32_t selected_neutral_edge_dimmed; /* #576270 that edge on a dimmed row, a step
+                                              weaker so the row reads as dimmed (3.1:1 on
+                                              the page) */
 };
 
 /* nk_ui_theme_n1() is declared in nk_ui.h. */
