@@ -1533,6 +1533,28 @@ FILE *nk_platform_open_regular_file(const char *path) {
     return file;
 }
 
+FILE *nk_platform_open_read_deny_writes(const char *path) {
+    if (!path || !*path) return NULL;
+    WCHAR *wpath = (WCHAR *)malloc(NK_FINAL_PATH_CHARS * sizeof(WCHAR));
+    if (!wpath || !utf8_to_wide(path, wpath, NK_FINAL_PATH_CHARS)) {
+        free(wpath);
+        return NULL;
+    }
+    /* FILE_SHARE_READ alone: other readers open it, writers and deleters are refused. */
+    HANDLE handle = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) return NULL;
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(handle);
+        return NULL;
+    }
+    FILE *file = _fdopen(fd, "rb");
+    if (!file) _close(fd);
+    return file;
+}
+
 void nk_platform_terminate_process(NkProcessHandle *process) {
     if (!process) return;
     if (process->job_handle) {

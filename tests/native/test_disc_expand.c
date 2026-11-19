@@ -1391,29 +1391,120 @@ static void build_large_cso(Buf *image) {
     free(iso);
 }
 
-static void truncate_file(const char *path, uint64_t size) {
-#if defined(_WIN32) || defined(_WIN64)
-    FILE *f = nk_fopen_utf8(path, "r+b");
-    assert(f != NULL);
-    assert(_chsize_s(_fileno(f), (long long)size) == 0);
-    assert(fclose(f) == 0);
-#else
-    assert(truncate(path, (off_t)size) == 0);
-#endif
-}
+/* What a test does to the source once, at the first progress report past
+   `after` bytes of the import's bar (identity, expansion or comparison,
+   identity again). */
+typedef enum {
+    MEDDLE_SHRINK,  /* cut the file to `keep` bytes */
+    MEDDLE_GROW,    /* append a byte */
+    MEDDLE_REWRITE, /* write `bytes` (the same size) and give it the fixed write time again */
+    MEDDLE_TOUCH,   /* write the same bytes again: only the write time changes */
+    MEDDLE_CANCEL   /* ask for a cancel from here on */
+} MeddleKind;
 
 typedef struct {
     const char *path;
+    MeddleKind kind;
+    uint64_t after;
     uint64_t keep;
-    int calls;
-} Shrink;
+    const uint8_t *bytes;
+    size_t len;
+    bool acted;
+    bool refused; /* Windows: the change could not be made, the import holds the file */
+    bool cancel_when_refused;
+    bool cancel;
+} Meddle;
 
-/* The file shrinks once the identity has read its first piece, as one on a
-   drive that goes away does. */
-static void on_progress_shrink(uint64_t done, uint64_t total, void *user) {
-    Shrink *s = (Shrink *)user;
+/* Open the source for writing, as another program would. On Windows the
+   import holds it with writes denied, so the open fails; that is recorded,
+   nothing is changed, and the import is cancelled when the test asks. */
+static FILE *meddle_open(Meddle *m, const char *mode) {
+    FILE *f = nk_fopen_utf8(m->path, mode);
+    if (!f) {
+        m->refused = true;
+        if (m->cancel_when_refused) m->cancel = true;
+    }
+    return f;
+}
+
+static void meddle_now(Meddle *m) {
+    FILE *f;
+    switch (m->kind) {
+    case MEDDLE_SHRINK:
+#if defined(_WIN32) || defined(_WIN64)
+        f = meddle_open(m, "r+b");
+        if (f) {
+            assert(_chsize_s(_fileno(f), (long long)m->keep) == 0);
+            assert(fclose(f) == 0);
+        }
+#else
+        assert(truncate(m->path, (off_t)m->keep) == 0);
+#endif
+        break;
+    case MEDDLE_GROW:
+        f = meddle_open(m, "ab");
+        if (f) {
+            assert(fputc('G', f) == 'G');
+            assert(fclose(f) == 0);
+        }
+        break;
+    case MEDDLE_REWRITE:
+    case MEDDLE_TOUCH:
+        f = meddle_open(m, "r+b");
+        if (f) {
+            assert(fwrite(m->bytes, 1, m->len, f) == m->len);
+            assert(fclose(f) == 0);
+            if (m->kind == MEDDLE_REWRITE) stamp_write_time(m->path);
+        }
+        break;
+    case MEDDLE_CANCEL:
+        m->cancel = true;
+        break;
+    }
+}
+
+static void on_progress_meddle(uint64_t done, uint64_t total, void *user) {
+    Meddle *m = (Meddle *)user;
     (void)total;
-    if (s->calls++ == 0 && done > 0u) truncate_file(s->path, s->keep);
+    if (!m->acted && done > m->after) {
+        m->acted = true;
+        meddle_now(m);
+    }
+}
+
+static bool on_cancel_meddle(void *user) {
+    return ((Meddle *)user)->cancel;
+}
+
+static bool host_denies_writers(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    return true;
+#else
+    return false;
+#endif
+}
+
+/* After a meddle: where the host denies writers (Windows), the change was
+   refused (and the import then cancelled, or went on, as the test asked);
+   elsewhere the import stopped as `code`. */
+static void expect_meddle_refused(const char *label, const Meddle *m, bool ok,
+                                  const NkDiscExpandStatus *status, const char *code) {
+    if (!m->acted) {
+        fprintf(stderr, "%s: the change was never made\n", label);
+        CHECK(false);
+    }
+    if (host_denies_writers() && m->kind != MEDDLE_CANCEL) {
+        if (!m->refused) {
+            fprintf(stderr, "%s: a writer was let in while the import held the file\n", label);
+            CHECK(false);
+        }
+        if (m->cancel_when_refused) code = NK_DISC_CANCELLED;
+        else if (ok) return;
+    }
+    if (ok || strcmp(status->code, code) != 0) {
+        fprintf(stderr, "%s: got ok=%d %s: %s\n", label, (int)ok, status->code, status->message);
+        CHECK(false);
+    }
 }
 
 /* A file that cannot be read to its end while its identity is read is a
@@ -1426,27 +1517,40 @@ static void test_import_identity_read_error_and_cancel(void) {
     char discs[NATIVE_TEST_PATH_MAX + 16];
     NkDiscImport result;
     NkDiscExpandStatus status;
-    Shrink shrink;
-    NkDiscExpandCallbacks shrinking = { on_progress_shrink, NULL, &shrink };
+    Meddle meddle;
+    NkDiscExpandCallbacks meddling = { on_progress_meddle, on_cancel_meddle, &meddle };
     Progress progress = { 0, 0, 0, true, 0 };
     NkDiscExpandCallbacks cancelling = { on_progress, on_cancel, &progress };
+    bool ok;
     build_large_cso(&image);
     path_in(root, sizeof(root), "identity-error-root");
     CHECK(nk_platform_mkdir_p(root));
     snprintf(discs, sizeof(discs), "%s%cdiscs", root, nk_platform_path_separator());
     path_in(src, sizeof(src), "identity-error.cso");
 
+    /* Shrinks after the identity's first piece, as a file on a drive that goes
+       away does. Then the cancel below stops the import, whatever happened. */
     write_bytes(src, image.data, image.len);
-    memset(&shrink, 0, sizeof(shrink));
-    shrink.path = src;
-    shrink.keep = (uint64_t)image.len - 512u * 1024u;
-    CHECK(!nk_disc_import(src, root, &shrinking, &result, &status));
-    if (strcmp(status.code, NK_DISC_READ_FAILED) != 0) {
-        fprintf(stderr, "read error: got %s: %s\n", status.code, status.message);
-        CHECK(false);
-    }
-    CHECK(shrink.calls >= 1 && status.message[0] != '\0');
+    memset(&meddle, 0, sizeof(meddle));
+    meddle.path = src;
+    meddle.kind = MEDDLE_SHRINK;
+    meddle.keep = (uint64_t)image.len - 512u * 1024u;
+    meddle.cancel_when_refused = true;
+    ok = nk_disc_import(src, root, &meddling, &result, &status);
+    expect_meddle_refused("shrink while hashed", &meddle, ok, &status, NK_DISC_READ_FAILED);
+    CHECK(status.message[0] != '\0');
     CHECK(nk_platform_path_missing(discs));
+
+    /* Grows while it is hashed: not the file that was measured. */
+    write_bytes(src, image.data, image.len);
+    memset(&meddle, 0, sizeof(meddle));
+    meddle.path = src;
+    meddle.kind = MEDDLE_GROW;
+    meddle.cancel_when_refused = true;
+    ok = nk_disc_import(src, root, &meddling, &result, &status);
+    expect_meddle_refused("grow while hashed", &meddle, ok, &status, NK_DISC_READ_FAILED);
+    CHECK(nk_platform_path_missing(discs));
+    CHECK(nk_platform_get_file_size(src) == (int64_t)image.len + (host_denies_writers() ? 0 : 1));
 
     /* Cancelled after the first piece: nothing of the import is kept. */
     write_bytes(src, image.data, image.len);
@@ -1456,6 +1560,491 @@ static void test_import_identity_read_error_and_cancel(void) {
     CHECK(nk_platform_path_missing(discs));
     free(image.data);
     printf("PASS a read error or a cancel while the identity is read keeps nothing\n");
+}
+
+/* <root>/discs/expanded/<name> and <root>/discs/TEST00042/<name>. */
+static void expanded_path(char *out, size_t size, const char *root, const char *name) {
+    char sep = nk_platform_path_separator();
+    int n = snprintf(out, size, "%s%cdiscs%cexpanded%c%s", root, sep, sep, sep, name);
+    assert(n > 0 && (size_t)n < size);
+}
+
+static void title_path(char *out, size_t size, const char *root, const char *name) {
+    char sep = nk_platform_path_separator();
+    int n = snprintf(out, size, "%s%cdiscs%cTEST00042%c%s", root, sep, sep, sep, name);
+    assert(n > 0 && (size_t)n < size);
+}
+
+/* Two stored-block CSOs of one size, one write time and the same first
+   64 KiB: `first` holds g_iso, `second` the same disc with one byte changed in
+   DATA.BIN. Both written; bytes of each kept for rewrites. */
+typedef struct {
+    char first[NATIVE_TEST_PATH_MAX];
+    char second[NATIVE_TEST_PATH_MAX];
+    uint8_t *first_bytes;
+    uint8_t *second_bytes;
+    size_t len;
+} TwinImages;
+
+static uint8_t g_late_iso[ISO_BYTES];
+
+static void make_twins(TwinImages *t, const char *stem) {
+    Buf image = { NULL, 0, 0 };
+    char name[64];
+    memcpy(g_late_iso, g_iso, ISO_BYTES);
+    g_late_iso[(size_t)50u * SECTOR + 100u] ^= 0x5Au;
+    snprintf(name, sizeof(name), "%s-a.cso", stem);
+    path_in(t->first, sizeof(t->first), name);
+    snprintf(name, sizeof(name), "%s-b.cso", stem);
+    path_in(t->second, sizeof(t->second), name);
+    build_ciso(&image, "CISO", 1, 0, g_iso, ISO_BYTES, stored_kind);
+    write_bytes(t->first, image.data, image.len);
+    t->first_bytes = (uint8_t *)malloc(image.len);
+    assert(t->first_bytes != NULL);
+    memcpy(t->first_bytes, image.data, image.len);
+    t->len = image.len;
+    build_ciso(&image, "CISO", 1, 0, g_late_iso, ISO_BYTES, stored_kind);
+    assert(image.len == t->len);
+    write_bytes(t->second, image.data, image.len);
+    t->second_bytes = (uint8_t *)malloc(image.len);
+    assert(t->second_bytes != NULL);
+    memcpy(t->second_bytes, image.data, image.len);
+    stamp_write_time(t->first);
+    stamp_write_time(t->second);
+    free(image.data);
+}
+
+static void free_twins(TwinImages *t) {
+    free(t->first_bytes);
+    free(t->second_bytes);
+}
+
+/* Nothing of an import of `identity` under root: no ref, no staging image,
+   and no per-title image named for it. */
+static bool nothing_recorded(const char *root, const char *identity) {
+    char name[NK_DISC_IDENTITY_CHARS + 32];
+    char path[NATIVE_TEST_PATH_MAX + 192];
+    snprintf(name, sizeof(name), "%s.ref", identity);
+    expanded_path(path, sizeof(path), root, name);
+    if (!nk_platform_path_missing(path)) return false;
+    snprintf(name, sizeof(name), "%s.iso", identity);
+    expanded_path(path, sizeof(path), root, name);
+    if (!nk_platform_path_missing(path)) return false;
+    snprintf(name, sizeof(name), "TEST00042.%.16s.cso.iso", identity);
+    title_path(path, sizeof(path), root, name);
+    if (!nk_platform_path_missing(path)) return false;
+    snprintf(name, sizeof(name), "TEST00042.%s.cso.iso", identity);
+    title_path(path, sizeof(path), root, name);
+    return nk_platform_path_missing(path);
+}
+
+/* The bytes recorded are the bytes expanded (review of F-f6233fe0, finding 1):
+   a source rewritten in place after its identity was read, with the same size
+   and write time (a copy that keeps the time, on any file system), or whose
+   write time alone changes, is refused before anything is recorded, both after
+   an expansion and after the comparison that upgrades a sampled record. On
+   Windows the import holds the file with writes denied, so the rewrite itself
+   is refused and the import records the bytes it read. */
+static void test_import_source_changed(void) {
+    TwinImages t;
+    char root[NATIVE_TEST_PATH_MAX];
+    char legacy_iso[NK_MAX_PATH + 64];
+    char legacy_sidecar[NK_MAX_PATH + 80];
+    char sample[NK_DISC_LEGACY_FINGERPRINT_CHARS + 1];
+    char first_identity[NK_DISC_IDENTITY_CHARS + 1];
+    uint64_t s;
+    uint64_t e = ISO_BYTES;
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    Meddle meddle;
+    NkDiscExpandCallbacks meddling = { on_progress_meddle, on_cancel_meddle, &meddle };
+    bool ok;
+    make_twins(&t, "changed");
+    s = t.len;
+    CHECK(nk_disc_file_identity(t.first, NULL, first_identity, NULL, &status));
+
+    /* Rewritten (same size, same write time) once the expansion began. */
+    path_in(root, sizeof(root), "changed-expand-root");
+    CHECK(nk_platform_mkdir_p(root));
+    memset(&meddle, 0, sizeof(meddle));
+    meddle.path = t.first;
+    meddle.kind = MEDDLE_REWRITE;
+    meddle.after = s;
+    meddle.bytes = t.second_bytes;
+    meddle.len = t.len;
+    ok = nk_disc_import(t.first, root, &meddling, &result, &status);
+    expect_meddle_refused("rewritten during the expansion", &meddle, ok, &status,
+                          NK_DISC_READ_FAILED);
+    if (host_denies_writers()) {
+        CHECK(ok && file_equals(result.iso_path, g_iso, ISO_BYTES));
+    } else {
+        CHECK(nothing_recorded(root, first_identity));
+        write_bytes(t.first, t.first_bytes, t.len);
+        stamp_write_time(t.first);
+    }
+
+    /* Rewritten after the expansion ended, before anything is recorded: the
+       second identity is what sees it. */
+    path_in(root, sizeof(root), "changed-record-root");
+    CHECK(nk_platform_mkdir_p(root));
+    memset(&meddle, 0, sizeof(meddle));
+    meddle.path = t.first;
+    meddle.kind = MEDDLE_REWRITE;
+    meddle.after = s + e - 1u;
+    meddle.bytes = t.second_bytes;
+    meddle.len = t.len;
+    ok = nk_disc_import(t.first, root, &meddling, &result, &status);
+    expect_meddle_refused("rewritten before the record", &meddle, ok, &status,
+                          NK_DISC_READ_FAILED);
+    if (!host_denies_writers()) {
+        CHECK(nothing_recorded(root, first_identity));
+        CHECK(strstr(status.message, "changed while Nakagawa was adding it") != NULL);
+        /* A later add of the first file's bytes is a fresh import of them. */
+        write_bytes(t.first, t.first_bytes, t.len);
+        stamp_write_time(t.first);
+        CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+        CHECK(file_equals(result.iso_path, g_iso, ISO_BYTES));
+    }
+
+    /* Only the write time changes during the expansion: the stamp sees it. */
+    path_in(root, sizeof(root), "changed-touch-root");
+    CHECK(nk_platform_mkdir_p(root));
+    memset(&meddle, 0, sizeof(meddle));
+    meddle.path = t.first;
+    meddle.kind = MEDDLE_TOUCH;
+    meddle.after = s;
+    meddle.bytes = t.first_bytes;
+    meddle.len = t.len;
+    ok = nk_disc_import(t.first, root, &meddling, &result, &status);
+    expect_meddle_refused("touched during the expansion", &meddle, ok, &status,
+                          NK_DISC_READ_FAILED);
+    if (!host_denies_writers()) {
+        CHECK(nothing_recorded(root, first_identity));
+        CHECK(strstr(status.message, "changed while Nakagawa was adding it") != NULL);
+    }
+    stamp_write_time(t.first);
+
+    /* The same after the comparison that would upgrade a sampled record: the
+       record stays sampled, no identity ref is written. */
+    path_in(root, sizeof(root), "changed-upgrade-root");
+    CHECK(nk_platform_mkdir_p(root));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    make_sampled_record(root, t.first, &result, false, legacy_iso, sizeof(legacy_iso));
+    snprintf(legacy_sidecar, sizeof(legacy_sidecar), "%s.source", legacy_iso);
+    CHECK(nk_disc_legacy_fingerprint(t.first, NK_DISC_FORMAT_CSO, sample, &status));
+    memset(&meddle, 0, sizeof(meddle));
+    meddle.path = t.first;
+    meddle.kind = MEDDLE_REWRITE;
+    meddle.after = s + e - 1u;
+    meddle.bytes = t.second_bytes;
+    meddle.len = t.len;
+    ok = nk_disc_import(t.first, root, &meddling, &result, &status);
+    expect_meddle_refused("rewritten after the comparison", &meddle, ok, &status,
+                          NK_DISC_READ_FAILED);
+    if (host_denies_writers()) {
+        CHECK(ok && result.reused && strcmp(result.iso_path, legacy_iso) == 0);
+    } else {
+        char ref_name[NK_DISC_IDENTITY_CHARS + 8];
+        char ref[NATIVE_TEST_PATH_MAX + 96];
+        CHECK(line_equals(legacy_sidecar, sample));
+        snprintf(ref_name, sizeof(ref_name), "%s.ref", first_identity);
+        expanded_path(ref, sizeof(ref), root, ref_name);
+        CHECK(nk_platform_path_missing(ref));
+        CHECK(file_equals(legacy_iso, g_iso, ISO_BYTES));
+    }
+    free_twins(&t);
+    printf("PASS a source changed during its import is never recorded\n");
+}
+
+/* Cancel while a sampled record is compared: nothing is written, the record
+   stays as it was. */
+static void test_import_cancel_during_comparison(void) {
+    TwinImages t;
+    char root[NATIVE_TEST_PATH_MAX];
+    char legacy_iso[NK_MAX_PATH + 64];
+    char legacy_sidecar[NK_MAX_PATH + 80];
+    char sample[NK_DISC_LEGACY_FINGERPRINT_CHARS + 1];
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    Meddle meddle;
+    NkDiscExpandCallbacks meddling = { on_progress_meddle, on_cancel_meddle, &meddle };
+    make_twins(&t, "compare-cancel");
+    path_in(root, sizeof(root), "compare-cancel-root");
+    CHECK(nk_platform_mkdir_p(root));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    make_sampled_record(root, t.first, &result, true, legacy_iso, sizeof(legacy_iso));
+    snprintf(legacy_sidecar, sizeof(legacy_sidecar), "%s.source", legacy_iso);
+    CHECK(nk_disc_legacy_fingerprint(t.first, NK_DISC_FORMAT_CSO, sample, &status));
+    memset(&meddle, 0, sizeof(meddle));
+    meddle.path = t.first;
+    meddle.kind = MEDDLE_CANCEL;
+    meddle.after = t.len;
+    CHECK(!nk_disc_import(t.first, root, &meddling, &result, &status));
+    CHECK(strcmp(status.code, NK_DISC_CANCELLED) == 0);
+    CHECK(strstr(status.message, "before anything was written") != NULL);
+    CHECK(line_equals(legacy_sidecar, sample));
+    CHECK(file_equals(legacy_iso, g_iso, ISO_BYTES));
+    CHECK(nothing_recorded(root, result.identity));
+    free_twins(&t);
+    printf("PASS a cancel during the comparison writes nothing\n");
+}
+
+/* A sampled record whose image is short, or cannot be read, is not shown to
+   be the file's expansion: the file gets its own expansion and the record is
+   left as it was (review of F-f6233fe0, finding 5). */
+static void test_import_stored_image_short_or_unreadable(void) {
+    TwinImages t;
+    char root[NATIVE_TEST_PATH_MAX];
+    char legacy_iso[NK_MAX_PATH + 64];
+    char legacy_sidecar[NK_MAX_PATH + 80];
+    char sample[NK_DISC_LEGACY_FINGERPRINT_CHARS + 1];
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    make_twins(&t, "stored-bad");
+    CHECK(nk_disc_legacy_fingerprint(t.first, NK_DISC_FORMAT_CSO, sample, &status));
+
+    /* Short: a stored image cut by 2 KiB. */
+    path_in(root, sizeof(root), "stored-short-root");
+    CHECK(nk_platform_mkdir_p(root));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    make_sampled_record(root, t.first, &result, true, legacy_iso, sizeof(legacy_iso));
+    snprintf(legacy_sidecar, sizeof(legacy_sidecar), "%s.source", legacy_iso);
+    write_bytes(legacy_iso, g_iso, ISO_BYTES - SECTOR);
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    CHECK(strcmp(result.iso_path, legacy_iso) != 0);
+    CHECK(file_equals(result.iso_path, g_iso, ISO_BYTES));
+    CHECK(line_equals(legacy_sidecar, sample));
+
+    /* Unreadable: Windows, held open by another program with no sharing;
+       elsewhere, no read permission (skipped where the test runs as a user no
+       permission stops). */
+    path_in(root, sizeof(root), "stored-unreadable-root");
+    CHECK(nk_platform_mkdir_p(root));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    make_sampled_record(root, t.first, &result, true, legacy_iso, sizeof(legacy_iso));
+    snprintf(legacy_sidecar, sizeof(legacy_sidecar), "%s.source", legacy_iso);
+    {
+        bool unreadable;
+#if defined(_WIN32) || defined(_WIN64)
+        WCHAR wide[NATIVE_TEST_PATH_MAX];
+        HANDLE held;
+        assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, legacy_iso, -1, wide,
+                                   NATIVE_TEST_PATH_MAX) > 0);
+        held = CreateFileW(wide, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                           NULL);
+        assert(held != INVALID_HANDLE_VALUE);
+        unreadable = true;
+#else
+        FILE *probe;
+        assert(chmod(legacy_iso, 0) == 0);
+        probe = nk_fopen_utf8(legacy_iso, "rb");
+        unreadable = probe == NULL;
+        if (probe) fclose(probe);
+#endif
+        if (unreadable) {
+            bool ok = nk_disc_import(t.first, root, NULL, &result, &status);
+            if (!ok) fprintf(stderr, "unreadable stored image: %s: %s\n", status.code,
+                             status.message);
+            CHECK(ok && !result.reused && strcmp(result.iso_path, legacy_iso) != 0);
+            CHECK(file_equals(result.iso_path, g_iso, ISO_BYTES));
+            CHECK(line_equals(legacy_sidecar, sample));
+        } else {
+            printf("SKIP unreadable stored image: this user reads a file with no permission\n");
+        }
+#if defined(_WIN32) || defined(_WIN64)
+        CloseHandle(held);
+#else
+        assert(chmod(legacy_iso, 0600) == 0);
+#endif
+    }
+    free_twins(&t);
+    printf("PASS a short or unreadable stored image gets a fresh expansion\n");
+}
+
+/* Records that are not whole are never a match: an upgrade interrupted
+   between its ref and its .source, a malformed .source or ref, and a ref that
+   names an image recorded for another identity. */
+static void test_import_damaged_records(void) {
+    TwinImages t;
+    char root[NATIVE_TEST_PATH_MAX];
+    char legacy_iso[NK_MAX_PATH + 64];
+    char legacy_sidecar[NK_MAX_PATH + 80];
+    char sample[NK_DISC_LEGACY_FINGERPRINT_CHARS + 1];
+    char name[NK_DISC_IDENTITY_CHARS + 64];
+    char ref[NATIVE_TEST_PATH_MAX + 192];
+    char sidecar[NK_MAX_PATH + 16];
+    char first_iso[NK_MAX_PATH];
+    char second_iso[NK_MAX_PATH];
+    char first_identity[NK_DISC_IDENTITY_CHARS + 1];
+    char expected[NK_DISC_IDENTITY_CHARS + 16];
+    const char *base;
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    make_twins(&t, "damaged");
+    CHECK(nk_disc_legacy_fingerprint(t.first, NK_DISC_FORMAT_CSO, sample, &status));
+    CHECK(nk_disc_file_identity(t.first, NULL, first_identity, NULL, &status));
+
+    /* Interrupted upgrade: the identity's ref written, the .source still the
+       sampled one. The other file with the same sample is not matched; the
+       record's own file is compared and the upgrade finished. */
+    path_in(root, sizeof(root), "damaged-upgrade-root");
+    CHECK(nk_platform_mkdir_p(root));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    make_sampled_record(root, t.first, &result, false, legacy_iso, sizeof(legacy_iso));
+    snprintf(legacy_sidecar, sizeof(legacy_sidecar), "%s.source", legacy_iso);
+    base = strrchr(legacy_iso, nk_platform_path_separator()) + 1;
+    snprintf(name, sizeof(name), "%s.ref", first_identity);
+    expanded_path(ref, sizeof(ref), root, name);
+    snprintf(expected, sizeof(expected), "TEST00042 %s", base);
+    write_line(ref, expected);
+    CHECK(nk_disc_import(t.second, root, NULL, &result, &status) && !result.reused);
+    CHECK(strcmp(result.iso_path, legacy_iso) != 0);
+    CHECK(file_equals(result.iso_path, g_late_iso, ISO_BYTES));
+    CHECK(line_equals(legacy_sidecar, sample));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && result.reused);
+    CHECK(strcmp(result.iso_path, legacy_iso) == 0);
+    snprintf(expected, sizeof(expected), "sha256:%s", first_identity);
+    CHECK(line_equals(legacy_sidecar, expected));
+
+    /* A malformed sha256: .source: not this file's record. The image under
+       that name is left alone, as one whose owner is not known; the file gets
+       the name of its whole identity. */
+    path_in(root, sizeof(root), "damaged-source-root");
+    CHECK(nk_platform_mkdir_p(root));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    snprintf(first_iso, sizeof(first_iso), "%s", result.iso_path);
+    snprintf(sidecar, sizeof(sidecar), "%s.source", first_iso);
+    write_line(sidecar, "sha256:0123");
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    snprintf(name, sizeof(name), "TEST00042.%s.cso.iso", first_identity);
+    CHECK(strstr(result.iso_path, name) != NULL);
+    CHECK(file_equals(result.iso_path, g_iso, ISO_BYTES));
+    CHECK(line_equals(sidecar, "sha256:0123"));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && result.reused);
+    CHECK(strstr(result.iso_path, name) != NULL);
+
+    /* A malformed ref: not a match; the file's own image under its own name
+       is replaced by a fresh expansion of the same bytes. */
+    path_in(root, sizeof(root), "damaged-ref-root");
+    CHECK(nk_platform_mkdir_p(root));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    snprintf(first_iso, sizeof(first_iso), "%s", result.iso_path);
+    snprintf(name, sizeof(name), "%s.ref", first_identity);
+    expanded_path(ref, sizeof(ref), root, name);
+    write_line(ref, "TEST00042 ../../elsewhere.iso");
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    CHECK(strcmp(result.iso_path, first_iso) == 0);
+    CHECK(file_equals(first_iso, g_iso, ISO_BYTES));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && result.reused);
+
+    /* A ref naming the other file's image (recorded for its identity): not a
+       match, and that image is left as it is. */
+    path_in(root, sizeof(root), "damaged-other-root");
+    CHECK(nk_platform_mkdir_p(root));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    snprintf(first_iso, sizeof(first_iso), "%s", result.iso_path);
+    CHECK(nk_disc_import(t.second, root, NULL, &result, &status) && !result.reused);
+    snprintf(second_iso, sizeof(second_iso), "%s", result.iso_path);
+    base = strrchr(second_iso, nk_platform_path_separator()) + 1;
+    snprintf(name, sizeof(name), "%s.ref", first_identity);
+    expanded_path(ref, sizeof(ref), root, name);
+    snprintf(expected, sizeof(expected), "TEST00042 %s", base);
+    write_line(ref, expected);
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+    CHECK(strcmp(result.iso_path, first_iso) == 0);
+    CHECK(file_equals(first_iso, g_iso, ISO_BYTES));
+    CHECK(file_equals(second_iso, g_late_iso, ISO_BYTES));
+    free_twins(&t);
+    printf("PASS damaged records are never a match\n");
+}
+
+/* An image under the short per-title name that is recorded for another
+   identity (the first 16 hex digits of two identities alike, which takes a
+   crafted file) is never overwritten: the newcomer takes the name of its whole
+   identity (review of F-f6233fe0, finding 3). While that name is being placed
+   its lock is held, so another import that would take it is refused as busy;
+   and a record that cannot be written after the move removes the image again
+   and says so (finding 4). */
+static void test_import_name_collision(void) {
+    TwinImages t;
+    char root[NATIVE_TEST_PATH_MAX];
+    char identity[NK_DISC_IDENTITY_CHARS + 1];
+    char other[NK_DISC_IDENTITY_CHARS + 1];
+    char name[NK_DISC_IDENTITY_CHARS + 64];
+    char short_iso[NATIVE_TEST_PATH_MAX + 192];
+    char short_sidecar[NATIVE_TEST_PATH_MAX + 200];
+    char full_iso[NATIVE_TEST_PATH_MAX + 192];
+    char path[NATIVE_TEST_PATH_MAX + 192];
+    char line[NK_DISC_IDENTITY_CHARS + 16];
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    NkFileLock held;
+    make_twins(&t, "collide");
+    CHECK(nk_disc_file_identity(t.first, NULL, identity, NULL, &status));
+    /* Another identity with the same first 16 hex digits. */
+    snprintf(other, sizeof(other), "%.16s%s", identity,
+             "000000000000000000000000000000000000000000000000");
+    CHECK(strcmp(other, identity) != 0 && strlen(other) == NK_DISC_IDENTITY_CHARS);
+
+    /* An earlier import of that other identity sits under the short name. */
+    path_in(root, sizeof(root), "collide-root");
+    CHECK(nk_platform_mkdir_p(root));
+    snprintf(name, sizeof(name), "TEST00042.%.16s.cso.iso", identity);
+    title_path(short_iso, sizeof(short_iso), root, name);
+    title_path(path, sizeof(path), root, "");
+    CHECK(nk_platform_mkdir_p(path));
+    write_bytes(short_iso, g_late_iso, ISO_BYTES);
+    snprintf(short_sidecar, sizeof(short_sidecar), "%s.source", short_iso);
+    snprintf(line, sizeof(line), "sha256:%s", other);
+    write_line(short_sidecar, line);
+    snprintf(name, sizeof(name), "TEST00042.%s.cso.iso", identity);
+    title_path(full_iso, sizeof(full_iso), root, name);
+
+    if (!nk_disc_import(t.first, root, NULL, &result, &status)) {
+        fprintf(stderr, "collision: %s: %s\n", status.code, status.message);
+        CHECK(false);
+    }
+    CHECK(!result.reused && strcmp(result.iso_path, full_iso) == 0);
+    CHECK(file_equals(full_iso, g_iso, ISO_BYTES));
+    CHECK(file_equals(short_iso, g_late_iso, ISO_BYTES));
+    CHECK(line_equals(short_sidecar, line));
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && result.reused);
+    CHECK(strcmp(result.iso_path, full_iso) == 0);
+
+    /* The short name's lock held by another import: refused as busy, nothing
+       of this one kept. */
+    path_in(root, sizeof(root), "collide-busy-root");
+    CHECK(nk_platform_mkdir_p(root));
+    expanded_path(path, sizeof(path), root, "");
+    CHECK(nk_platform_mkdir_p(path));
+    snprintf(name, sizeof(name), "TEST00042.%.16s.cso.lock", identity);
+    expanded_path(path, sizeof(path), root, name);
+    CHECK(nk_platform_file_lock_acquire(&held, path, 0u));
+    CHECK(!nk_disc_import(t.first, root, NULL, &result, &status));
+    CHECK(strcmp(status.code, NK_DISC_IMPORT_BUSY) == 0);
+    CHECK(nothing_recorded(root, identity));
+    nk_platform_file_lock_release(&held);
+    CHECK(nk_disc_import(t.first, root, NULL, &result, &status) && !result.reused);
+
+    /* The record cannot be written after the move (its ref's name is taken by
+       a folder): the image just moved is removed again and the message says
+       what failed. */
+    path_in(root, sizeof(root), "collide-record-root");
+    CHECK(nk_platform_mkdir_p(root));
+    snprintf(name, sizeof(name), "%s.ref", identity);
+    expanded_path(path, sizeof(path), root, name);
+    CHECK(nk_platform_mkdir_p(path));
+    CHECK(!nk_disc_import(t.first, root, NULL, &result, &status));
+    CHECK(strcmp(status.code, NK_DISC_WRITE_FAILED) == 0);
+    CHECK(strstr(status.message, "record could not be written") != NULL);
+    snprintf(name, sizeof(name), "TEST00042.%.16s.cso.iso", identity);
+    title_path(path, sizeof(path), root, name);
+    CHECK(nk_platform_path_missing(path));
+    snprintf(name, sizeof(name), "%s.iso", identity);
+    expanded_path(path, sizeof(path), root, name);
+    CHECK(nk_platform_path_missing(path));
+    free_twins(&t);
+    printf("PASS an image recorded for another identity is never overwritten\n");
 }
 
 typedef struct {
@@ -1545,6 +2134,11 @@ int main(void) {
     test_import_full_content_identity();
     test_import_upgrades_sampled_record();
     test_import_identity_read_error_and_cancel();
+    test_import_source_changed();
+    test_import_cancel_during_comparison();
+    test_import_stored_image_short_or_unreadable();
+    test_import_damaged_records();
+    test_import_name_collision();
     test_import_busy();
     printf("test_disc_expand: %d checks passed\n", g_checks);
     return 0;

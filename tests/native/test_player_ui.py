@@ -7792,7 +7792,12 @@ class FirstRunRouteTests(unittest.TestCase):
                 f"--iso={cso}", events, f"--ui-test-screenshot={scratch / 'last-frame.bmp'}",
             ])
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            self.assertIn("[PLAYER] Expanded disc image cso", completed.stdout)
+            # Taken once the window is open, as a picked file: read and expanded on the
+            # conversion worker, never as a wait before the window appears.
+            self.assertIn("[PLAYER] Disc image cso: reading it, then expanding it unless it was "
+                          "added before", completed.stdout)
+            self.assertIn("[PLAYER] Disc image cso expanded into TEST00002", completed.stdout)
+            self.assertNotIn("[PLAYER] Reading disc image", completed.stdout)
             libraries = list(scratch.rglob("library.json"))
             self.assertEqual(len(libraries), 1)
             games = json.loads(libraries[0].read_text(encoding="utf-8"))["games"]
@@ -7810,8 +7815,9 @@ class FirstRunRouteTests(unittest.TestCase):
                 f"--ui-test-screenshot={scratch / 'last-frame.bmp'}",
             ])
             self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
-            self.assertNotIn("[PLAYER] Expanded disc image", again.stdout)
-            self.assertIn("[PLAYER] Disc image cso: using its expanded disc image", again.stdout)
+            self.assertNotIn("expanded into", again.stdout)
+            self.assertIn("[PLAYER] Disc image cso: using its expanded disc image for TEST00002",
+                          again.stdout)
             self.assertIn("supported", [frame["view"] for frame in parse_frames(again.stdout)])
 
     def test_add_to_library_sets_up_an_archive_disc_before_saving_it(self) -> None:

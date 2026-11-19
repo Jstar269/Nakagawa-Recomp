@@ -851,6 +851,16 @@ FILE *nk_platform_open_regular_file(const char *path) {
     return file;
 }
 
+FILE *nk_platform_open_read_deny_writes(const char *path) {
+    if (!path || !*path) return NULL;
+    /* No share modes here: an ordinary read (see nk_platform.h). */
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    FILE *file = fdopen(fd, "rb");
+    if (!file) close(fd);
+    return file;
+}
+
 bool nk_platform_get_legacy_app_data_dir(char *out_path, size_t max_len) {
     (void)out_path;
     (void)max_len;

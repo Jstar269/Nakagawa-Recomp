@@ -221,7 +221,7 @@ static void player_take_picked_compressed(PlayerApp *app, const char *path) {
         player_take_picked_disc_from(app, package.iso_path, package.pbp_path);
         return;
     }
-    printf("[PLAYER] Disc image %s: expanding it into a plain disc image\n",
+    printf("[PLAYER] Disc image %s: reading it, then expanding it unless it was added before\n",
            nk_disc_format_extension(package.disc_format));
     player_app_psn_conversion_begin(app, &package);
 }
@@ -4307,6 +4307,9 @@ typedef struct PlayerRun {
     char converted_iso_path[NK_MAX_PATH];
     char expanded_iso_path[NK_MAX_PATH];
     const char *initial_source_image;
+    /* A compressed disc image or a PSN package given as --iso in an interactive run: taken
+       once the window is open, as a picked file, so it is read and converted on the worker. */
+    char deferred_pick_path[NK_MAX_PATH];
     /* Entries at or after this index were not loaded from library.json: they are
        the bundled demo samples (or prepared showcase demos). */
     int user_library_count;
@@ -4638,8 +4641,28 @@ static int player_load_library(PlayerRun *run) {
         }
     }
 
-    /* A PSN package given as --iso converts once, here, and its disc image is
-       then inspected like any --iso (#295 phase 2). */
+    /* In an interactive run, a compressed disc image or a PSN package given as --iso is
+       taken once the window is open, exactly as a picked one: read whole for its identity
+       and converted on the worker, with the wizard's progress and Cancel, never as a
+       wait before the window appears. --stage, --stage-only, --launch-now and
+       --headless-launch need the disc image before they go on, so they convert it here,
+       with progress on the console. */
+    if (run->initial_iso_path && !run->stage_only && !run->stage_initial_iso &&
+        !run->launch_now && !app->launch_headless &&
+        (player_path_is_pbp_package(run->initial_iso_path) ||
+         nk_disc_image_format(run->initial_iso_path) != NK_DISC_FORMAT_NONE)) {
+        int n = snprintf(run->deferred_pick_path, sizeof(run->deferred_pick_path), "%s",
+                         run->initial_iso_path);
+        if (n <= 0 || (size_t)n >= sizeof(run->deferred_pick_path)) {
+            fprintf(stderr, "[PLAYER] The path given as --iso is too long.\n");
+            return 2;
+        }
+        run->initial_iso_path = NULL;
+        run->populate_sample = false;
+    }
+
+    /* A PSN package given as --iso to a command-line route converts once, here, and its
+       disc image is then inspected like any --iso (#295 phase 2). */
     if (run->initial_iso_path && player_path_is_pbp_package(run->initial_iso_path)) {
         PlayerPsnPackage package;
         char code[48];
@@ -4676,8 +4699,8 @@ static int player_load_library(PlayerRun *run) {
         }
     }
 
-    /* A compressed disc image given as --iso expands once, here, and the
-       expanded .iso is then inspected like any --iso. */
+    /* A compressed disc image given as --iso to a command-line route expands once, here,
+       and the expanded .iso is then inspected like any --iso. */
     if (run->initial_iso_path && nk_disc_image_format(run->initial_iso_path) != NK_DISC_FORMAT_NONE) {
         PlayerPsnPackage package;
         char code[48];
@@ -6236,6 +6259,13 @@ int main(int argc, char *argv[]) {
     }
 
     player_loop_start(&run);
+    if (run.deferred_pick_path[0]) {
+        if (player_path_is_pbp_package(run.deferred_pick_path)) {
+            player_take_picked_package(&run.app, run.deferred_pick_path);
+        } else {
+            player_take_picked_compressed(&run.app, run.deferred_pick_path);
+        }
+    }
     while (run.running && !run.app.should_quit) {
         player_frame_begin(&run);
         player_frame_events(&run);
