@@ -58,7 +58,8 @@ void nk_ui_input_reset(NkUiInput *input) {
         return;
     }
     memset(input->down, 0, sizeof(input->down));
-    memset(input->dir_held, 0, sizeof(input->dir_held));
+    memset(input->dir_button_holder_count, 0, sizeof(input->dir_button_holder_count));
+    memset(input->dir_stick_held, 0, sizeof(input->dir_stick_held));
     memset(input->dir_seq, 0, sizeof(input->dir_seq));
     input->stick_dir = NK_UI_DIR_NONE;
     input->repeating = false;
@@ -116,7 +117,18 @@ static NkUiNavDir nk_ui_input_dir_from_index(int index) {
 }
 
 static bool nk_ui_input_dir_held_any(const NkUiInput *input, int index) {
-    return input->dir_held[0][index] || input->dir_held[1][index];
+    return input->dir_button_holder_count[index] > 0u || input->dir_stick_held[index];
+}
+
+/* Where `device` sits among the holders of direction button `index`, or the count. */
+static size_t nk_ui_input_dir_holder_slot(const NkUiInput *input, int index, int device) {
+    size_t i;
+    for (i = 0; i < input->dir_button_holder_count[index]; ++i) {
+        if (input->dir_button_holders[index][i] == device) {
+            return i;
+        }
+    }
+    return input->dir_button_holder_count[index];
 }
 
 static void nk_ui_input_start_repeat(NkUiInput *input, NkUiNavDir dir, int device,
@@ -128,17 +140,41 @@ static void nk_ui_input_start_repeat(NkUiInput *input, NkUiNavDir dir, int devic
     input->next_repeat_s = now_s + (double)input->config.initial_delay_ms / 1000.0;
 }
 
+/* source 0 is a key or D-pad button of `device`, 1 the stick. */
 static size_t nk_ui_input_dir_press(NkUiInput *input, int source, NkUiNavDir dir, int device,
                                     NkUiPadFamily family, double now_s,
                                     NkUiEvent *out, size_t cap, size_t used) {
     int index = nk_ui_input_dir_index(dir);
     NkUiEvent event;
-    if (index < 0 || input->dir_held[source][index]) {
+    bool was_held;
+    if (index < 0) {
         return used;
     }
-    input->dir_held[source][index] = true;
-    input->dir_seq[index] = ++input->seq;
+    was_held = nk_ui_input_dir_held_any(input, index);
+    if (source == 0) {
+        size_t slot = nk_ui_input_dir_holder_slot(input, index, device);
+        if (slot < input->dir_button_holder_count[index]) {
+            return used; /* this device already holds it: an OS key repeat */
+        }
+        /* The table fits every tracked device; were it ever full, the direction is
+           held already, so the press would add nothing but the device note. */
+        if (slot < NK_UI_INPUT_DIR_HOLDERS) {
+            input->dir_button_holders[index][slot] = device;
+            input->dir_button_holder_count[index] = slot + 1u;
+        }
+    } else {
+        if (input->dir_stick_held[index]) {
+            return used;
+        }
+        input->dir_stick_held[index] = true;
+    }
     used = nk_ui_input_note_device(input, device, family, out, cap, used);
+    if (was_held) {
+        /* Another device or the stick already holds this direction: it stays one
+           hold, so no second step and no restarted repeat. */
+        return used;
+    }
+    input->dir_seq[index] = ++input->seq;
     event = nk_ui_input_make_event(NK_UI_EV_NAV, device, family);
     event.dir = dir;
     event.down = true;
@@ -147,14 +183,28 @@ static size_t nk_ui_input_dir_press(NkUiInput *input, int source, NkUiNavDir dir
     return used;
 }
 
-static void nk_ui_input_dir_release(NkUiInput *input, int source, NkUiNavDir dir, double now_s) {
+static void nk_ui_input_dir_release(NkUiInput *input, int source, NkUiNavDir dir, int device,
+                                    double now_s) {
     int index = nk_ui_input_dir_index(dir);
     int i;
     int best = -1;
-    if (index < 0 || !input->dir_held[source][index]) {
+    if (index < 0) {
         return;
     }
-    input->dir_held[source][index] = false;
+    if (source == 0) {
+        size_t slot = nk_ui_input_dir_holder_slot(input, index, device);
+        size_t count = input->dir_button_holder_count[index];
+        if (slot >= count) {
+            return; /* a release from a device that does not hold this direction */
+        }
+        input->dir_button_holders[index][slot] = input->dir_button_holders[index][count - 1u];
+        input->dir_button_holder_count[index] = count - 1u;
+    } else {
+        if (!input->dir_stick_held[index]) {
+            return;
+        }
+        input->dir_stick_held[index] = false;
+    }
     if (!input->repeating || input->repeat_dir != dir || nk_ui_input_dir_held_any(input, index)) {
         return;
     }
@@ -193,7 +243,7 @@ size_t nk_ui_input_button(NkUiInput *input, NkUiInputButton button, bool down,
         if (down) {
             used = nk_ui_input_dir_press(input, 0, dir, device, family, now_s, out, cap, used);
         } else {
-            nk_ui_input_dir_release(input, 0, dir, now_s);
+            nk_ui_input_dir_release(input, 0, dir, device, now_s);
         }
         return used;
     }
@@ -281,7 +331,7 @@ size_t nk_ui_input_stick(NkUiInput *input, float x, float y, int device,
     }
     input->stick_dir = next;
     if (previous != NK_UI_DIR_NONE) {
-        nk_ui_input_dir_release(input, 1, previous, now_s);
+        nk_ui_input_dir_release(input, 1, previous, device, now_s);
     }
     if (next != NK_UI_DIR_NONE) {
         used = nk_ui_input_dir_press(input, 1, next, device, family, now_s, out, cap, used);

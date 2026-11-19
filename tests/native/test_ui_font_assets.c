@@ -77,6 +77,14 @@ int main(int argc, char **argv)
         int miny = 0;
         int maxy = 0;
         int advance = 0;
+        /* A code point the font lacks still has metrics: SDL3_ttf answers with the
+           .notdef glyph and its nonzero advance, so ask for coverage first. */
+        if (!TTF_FontHasGlyph(japanese, title_codepoints[i])) {
+            fprintf(stderr, "UI_FONT_SELFTEST: U+%04X is not in the font\n",
+                    (unsigned)title_codepoints[i]);
+            report_failure("Japanese title contains a code point the font does not cover");
+            goto done;
+        }
         if (!TTF_GetGlyphMetrics(japanese, title_codepoints[i],
                                  &minx, &maxx, &miny, &maxy, &advance) || advance <= 0) {
             report_failure("Japanese title contains an unavailable glyph or zero advance");
@@ -100,6 +108,10 @@ int main(int argc, char **argv)
     int maxy_v = 0;
     int advance_a = 0;
     int advance_v = 0;
+    if (!TTF_FontHasGlyph(latin, 'A') || !TTF_FontHasGlyph(latin, 'V')) {
+        report_failure("Latin font does not cover the AV pair");
+        goto done;
+    }
     if (!TTF_GetGlyphMetrics(latin, 'A', &minx_a, &maxx_a, &miny_a, &maxy_a, &advance_a) ||
         !TTF_GetGlyphMetrics(latin, 'V', &minx_v, &maxx_v, &miny_v, &maxy_v, &advance_v) ||
         advance_a <= 0 || advance_v <= 0) {
