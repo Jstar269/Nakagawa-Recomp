@@ -37,9 +37,16 @@ heights (`--snap-overshoot`, [the converter specification](../docs/cleanroom/PGF
 
 The sans-serif faces of the smaller size (`ltn8`, `ltn10`, `ltn12`, `ltn14`) and the bold sans-serif faces of the
 larger size (`ltn4`, `ltn6`) set their x-height, and the bold ones their cap height, on the PSP font's rows, and
-are drawn slightly wider than Liberation Sans (`--scale-x`, 3 % for `ltn8` and `ltn10`, 4 % for `ltn4`, 8 % for
-the others) with tighter spacing, because the PSP's letters at those sizes fill more of their width. Those
-settings were tuned on 2026-11-19 against a private comparison with one PSP's own fonts (#1300).
+are drawn slightly wider than Liberation Sans (`--scale-x`, 3 % for `ltn8` and `ltn10`, 6.5 % for `ltn4`, 8 % for
+`ltn6` and `ltn12`, 10.5 % for `ltn14`) with tighter spacing, because the PSP's letters at those sizes fill more of
+their width. Those settings were tuned on 2026-11-19 against a private comparison with one PSP's own fonts (#1300).
+
+Each letter's image is cut to its ink, as in the PSP's fonts, with no blank column or row around it (rule 15 of the
+converter specification). Some games place each letter one pixel after the previous letter's image rather than by
+its advance; in such a game, Hot Shots Tennis for one, a line drawn with a stand-in is as long as the letters' ink.
+Liberation Sans leaves more space beside its letters than the PSP's fonts do, so in those games `ltn8` and `ltn10`
+lines come out 8 to 11 % shorter than on a PSP; widening them further would break the stem and line-width limits
+above.
 
 ## Without your PSP's fonts: what changes
 

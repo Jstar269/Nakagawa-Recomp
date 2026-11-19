@@ -115,6 +115,11 @@ def _glyph_map(glyphs: tuple[Glyph, ...]) -> dict[int, Glyph]:
     return {glyph.code: glyph for glyph in glyphs}
 
 
+def _untrimmed(left: int, top: int, width: int, height: int, samples: tuple[int, ...]):
+    """Stands in for ``ttf2pgf._trim_to_ink`` to convert as before rule 15: the raster box unchanged."""
+    return left, top, width, height, samples
+
+
 def _clusters(samples: list[int], row: int, width: int) -> list[int]:
     """Lengths of maximal non-zero runs in one raster row."""
     runs: list[int] = []
@@ -839,20 +844,28 @@ class IntegerRasterEquivalenceTests(unittest.TestCase):
         self.assertGreater(large_den_cases, 0)
 
     def test_latin_project_font_output_is_pinned(self) -> None:
-        # The digest the converter has produced for the Latin project font since #1309's build;
-        # the integer arithmetic must reproduce it byte for byte.
+        # The digest the converter has produced for the Latin project font since #1309's build, with
+        # the raster box as it was before rule 15's ink trim: the integer arithmetic must reproduce
+        # it byte for byte. The second digest is the same font cut to its ink (converter 0.7.0).
         fixture = ROOT / "tests" / "fixtures" / "fonts" / "mplus1p"
-        conversion = convert(
-            (fixture / "MPLUS1p-Regular.ttf").read_bytes(),
-            input_path="tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf",
-            output_path="nkltn.pgf",
-            pin=load_pin(fixture / "PIN.json", (fixture / "MPLUS1p-Regular.ttf").read_bytes()),
-            code_points=ttf2pgf.latin_1_text_code_points(),
-            ppem=13, embolden_x=6, embolden_y=4, embolden_advance=3,
-            font_name="Nakagawa Open Latin", font_type="Regular",
-        )
-        self.assertEqual(hashlib.sha256(conversion.image).hexdigest(),
+
+        def make() -> ttf2pgf.Conversion:
+            return convert(
+                (fixture / "MPLUS1p-Regular.ttf").read_bytes(),
+                input_path="tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf",
+                output_path="nkltn.pgf",
+                pin=load_pin(fixture / "PIN.json", (fixture / "MPLUS1p-Regular.ttf").read_bytes()),
+                code_points=ttf2pgf.latin_1_text_code_points(),
+                ppem=13, embolden_x=6, embolden_y=4, embolden_advance=3,
+                font_name="Nakagawa Open Latin", font_type="Regular",
+            )
+
+        with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
+            whole = make()
+        self.assertEqual(hashlib.sha256(whole.image).hexdigest(),
                          "e10068b52f117295792fe29698a97ab52faedaac1aabfee59a8cf498437b1d15")
+        self.assertEqual(hashlib.sha256(make().image).hexdigest(),
+                         "532bfec6aa133cb323a3cc11b136d31449270ec7058e96a843c4d6e74af04057")
 
 
 def _format4_subtable(segments: list[tuple[int, int, int]]) -> bytes:
@@ -1246,6 +1259,67 @@ class ReaderRoundTripTests(unittest.TestCase):
         )
         self.assertTrue(any(glyph.samples), "the composite glyph has ink")
 
+    def _render(self, conversion: ttf2pgf.Conversion, text: str) -> dict[tuple[int, int], int]:
+        """Draw ``text`` from what the reader returns: each bitmap at the pen plus its bitmap left
+        and top (CharInfo 0x08 and 0x0C), the pen moved by the advance. Keys are pixels (x right,
+        y down from the baseline); a pixel left blank is absent."""
+        glyphs = _glyph_map(conversion.glyphs)
+        codes = sorted({ord(char) for char in text})
+        lines = self._read_back(conversion.image, codes)
+        self.assertEqual(lines[0], "open ok")
+        records = lines[2:]
+        bitmaps: dict[int, tuple[int, int, int, int, int, bytes]] = {}
+        for index, code in enumerate(codes):
+            char_line = records[index * 2].split(" ")
+            draw_line = records[index * 2 + 1].split(" ")
+            if char_line[2] == "0":  # a zero-area glyph: only its advance
+                self.assertEqual(draw_line[4], "skipped", f"U+{code:04X}")
+                bitmaps[code] = (0, 0, 0, 0, cast(int, glyphs[code].advance_x), b"")
+                continue
+            info = bytes.fromhex(char_line[3])
+            width, height, left, top = struct.unpack_from("<IIii", info, 0x00)
+            advance = struct.unpack_from("<i", info, 0x30)[0]
+            bitmaps[code] = (width, height, left, top, advance, bytes.fromhex(draw_line[4]))
+        canvas: dict[tuple[int, int], int] = {}
+        pen = 0
+        for char in text:
+            width, height, left, top, advance, samples = bitmaps[ord(char)]
+            for row in range(height):
+                for column in range(width):
+                    sample = samples[row * width + column]
+                    if sample:
+                        pixel = ((pen >> 6) + left + column, row - top)
+                        canvas[pixel] = canvas.get(pixel, 0) + sample
+            pen += advance
+        return canvas
+
+    def test_ink_trim_draws_every_pixel_where_it_was(self) -> None:
+        """#1300, rule 15: each image is cut to its inked columns and rows and its bitmap left and
+        top move with the cut, so a string placed by advance draws the same pixels as before."""
+        data = FONT.read_bytes()
+        liberation = (LIBERATION_DIR / "LiberationSans-Regular.ttf").read_bytes()
+        cases = {
+            "plain": lambda: self._convert(),
+            "emboldened": lambda: convert(
+                data, input_path=str(FONT), output_path="converted.pgf", codes=DEFAULT_CODES, ppem=13,
+                pin=load_pin(PIN, data), embolden_x=4, embolden_y=4, embolden_advance=2, tracking=-2),
+            "scaled": lambda: convert(
+                liberation, input_path="LiberationSans-Regular.ttf", output_path="converted.pgf",
+                codes=DEFAULT_CODES, ppem=13, pin=load_pin(LIBERATION_DIR / "LiberationSans-Regular.pin.json",
+                                                           liberation),
+                scale_x=1080, embolden_y=4, snap_overshoot=3, digit_advance_26_6=571),
+        }
+        text = "The quick brown fox jumps over the lazy dog. NEW GAME 0123456789 {|}~ Reload? No save data found."
+        for name, make in cases.items():
+            with self.subTest(case=name):
+                trimmed = make()
+                with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
+                    whole = make()
+                self.assertNotEqual(trimmed.image, whole.image, "the trim changed no image")
+                before = self._render(whole, text)
+                self.assertTrue(before)
+                self.assertEqual(self._render(trimmed, text), before)
+
     def test_a_second_read_is_identical(self) -> None:
         conversion = self._convert()
         codes = [0x41, 0x67, 0x20]
@@ -1396,8 +1470,11 @@ class EmboldenTests(CliRefusalMixin):
         )
 
     def test_strokes_thicken_rightwards_and_upwards_without_moving_the_baseline(self) -> None:
-        plain = _glyph_map(self._convert().glyphs)
-        bold = _glyph_map(self._convert(embolden_x=6, embolden_y=4, embolden_advance=3).glyphs)
+        # Rule 10 grows the raster box; rule 15 then cuts each image to its ink, which this test
+        # leaves out so that it sees the box (InkTrimTests covers the cut).
+        with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
+            plain = _glyph_map(self._convert().glyphs)
+            bold = _glyph_map(self._convert(embolden_x=6, embolden_y=4, embolden_advance=3).glyphs)
         for code in range(self.CODES[0], self.CODES[1] + 1):
             before, after = plain[code], bold[code]
             if before.width == 0:
@@ -1688,6 +1765,65 @@ class ProjectLatinStrikeTests(unittest.TestCase):
                 self.assertEqual(glyphs[ord("l")], _glyph_map(plain.glyphs)[ord("l")])
 
 
+class InkTrimTests(unittest.TestCase):
+    """Specification section 3 rule 15 (#1300): the console's glyph images are cut to their ink in
+    both directions, and a game that places the next glyph one pixel after the image's right edge
+    (Hot Shots Tennis does) spaced the stand-ins' text by their blank columns too. Every image is now
+    tight; the advances are those of the raster box."""
+
+    @staticmethod
+    def _conversions() -> dict[str, ttf2pgf.Conversion]:
+        data = FONT.read_bytes()
+        found = {
+            "fixture": convert(data, input_path=str(FONT), output_path="converted.pgf", codes=DEFAULT_CODES,
+                               ppem=PPEM_SHAPE, pin=load_pin(PIN, data)),
+            "fixture-emboldened": convert(data, input_path=str(FONT), output_path="converted.pgf",
+                                          codes=DEFAULT_CODES, ppem=13, pin=load_pin(PIN, data),
+                                          embolden_x=8, embolden_y=8, embolden_advance=2),
+        }
+        for index in range(16):
+            found[f"latin-{index}"] = ProjectLatinStrikeTests._convert(index)
+        return found
+
+    def test_no_image_has_an_empty_edge_column_or_row(self) -> None:
+        for name, conversion in self._conversions().items():
+            with self.subTest(conversion=name):
+                loose: list[str] = []
+                for glyph in conversion.glyphs:
+                    width, height, samples = glyph.width, glyph.height, glyph.samples
+                    if width == 0 or height == 0:
+                        self.assertEqual((width, height, samples), (0, 0, ()), f"U+{glyph.code:04X}")
+                        continue
+                    edges = {
+                        "first column": samples[0::width],
+                        "last column": samples[width - 1::width],
+                        "first row": samples[:width],
+                        "last row": samples[-width:],
+                    }
+                    loose += [f"U+{glyph.code:04X} {edge}" for edge, line in edges.items() if not any(line)]
+                self.assertEqual(loose, [], f"{len(loose)} empty image edges")
+
+    def test_the_trim_keeps_every_advance(self) -> None:
+        data = FONT.read_bytes()
+        for embolden in (0, 8):
+            with self.subTest(embolden=embolden):
+                def make(strength: int = embolden) -> ttf2pgf.Conversion:
+                    return convert(data, input_path=str(FONT), output_path="converted.pgf", codes=DEFAULT_CODES,
+                                   ppem=13, pin=load_pin(PIN, data), embolden_x=strength, embolden_y=strength,
+                                   tracking=3)
+                trimmed = make()
+                with mock.patch.object(ttf2pgf, "_trim_to_ink", _untrimmed):
+                    whole = make()
+                self.assertEqual([(glyph.code, glyph.advance_x, glyph.advance_y) for glyph in trimmed.glyphs],
+                                 [(glyph.code, glyph.advance_x, glyph.advance_y) for glyph in whole.glyphs])
+                # The header's nominal size (0x24, 0x28) and advance maxima (0xEC, 0xF0) as well.
+                for offset in (0x24, 0x28, 0xEC, 0xF0):
+                    self.assertEqual(struct.unpack_from("<i", trimmed.image, offset),
+                                     struct.unpack_from("<i", whole.image, offset), hex(offset))
+                trimmed_space = _glyph_map(trimmed.glyphs)[0x20]
+                self.assertEqual((trimmed_space.width, trimmed_space.height, trimmed_space.samples), (0, 0, ()))
+
+
 class OvershootSnapTests(CliRefusalMixin):
     """#1300: ``--snap-overshoot`` (spec section 3, rule 13) sets round letters' overshoots on the
     flat edges measured from the font's own ``H`` and ``x``, and moves nothing else."""
@@ -1763,7 +1899,7 @@ class OvershootSnapTests(CliRefusalMixin):
 
     def test_the_option_is_recorded_and_absent_when_off(self) -> None:
         conversion = self._convert(13, snap_overshoot=3)
-        self.assertEqual(conversion.manifest["converter"]["version"], "0.6.0")
+        self.assertEqual(conversion.manifest["converter"]["version"], "0.7.0")
         self.assertEqual(conversion.manifest["parameters"]["snap_overshoot"], {
             "unit": "sub-sample (1/8 pixel)", "threshold": 3,
             "zones": {"baseline": 0, "x_height": 1082, "cap_height": 1409},
