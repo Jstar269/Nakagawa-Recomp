@@ -67,17 +67,20 @@ def _run_one(make: str, python: str, name: str, targets: tuple[str, ...],
     _clear_outputs(output_dir)
     env = _perf_environment(output_dir, enabled)
     env["PYTHON"] = python
+    # Targets such as production-smoke-gap, cosim-selftest and the platform ladder place
+    # their output under BUILD_ROOT, not BUILD_DIR, so the prefix is the build root too:
+    # otherwise two compilers' runs share and reuse those trees, and the overhead runs
+    # look for a build the make target never wrote.
     command = [make, *make_assignments, f"BUILD_DIR={build_prefix}/{name}"]
     if build_root is not None:
-        # Targets such as production-smoke-gap place their output under BUILD_ROOT,
-        # not BUILD_DIR. Without this the overhead runs look for a build the make
-        # target never wrote.
         command.append(f"BUILD_ROOT={build_root}")
+    elif not any(assignment.startswith("BUILD_ROOT=") for assignment in make_assignments):
+        command.append(f"BUILD_ROOT={build_prefix}")
     command.extend(targets)
     started = time.perf_counter()
     completed = subprocess.run(command, cwd=ROOT, env=env, check=False,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               text=True)
+                               text=True, encoding="utf-8", errors="replace")
     duration = time.perf_counter() - started
     summary_path = output_dir / "perf.json"
     output = completed.stdout[-4000:]
@@ -108,7 +111,7 @@ def _run_direct(command: list[str], output_dir: Path, enabled: bool) -> dict[str
     started = time.perf_counter()
     completed = subprocess.run(command, cwd=ROOT, env=env, check=False,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                               text=True)
+                               text=True, encoding="utf-8", errors="replace")
     duration = time.perf_counter() - started
     summary_path = output_dir / "perf.json"
     status = _status_from_returncode(completed.returncode)
@@ -124,9 +127,9 @@ def _run_direct(command: list[str], output_dir: Path, enabled: bool) -> dict[str
 
 
 def _run_overhead(make: str, python: str, output_root: Path, samples: int,
-                  build_prefix: str) -> dict[str, Any]:
+                  build_prefix: str, make_assignments: tuple[str, ...] = ()) -> dict[str, Any]:
     build = _run_one(make, python, "overhead-build", ("production-smoke-gap",), output_root, False,
-                     build_prefix, build_root=build_prefix)
+                     build_prefix, build_root=build_prefix, make_assignments=make_assignments)
     if build["status"] != "PASS":
         return {"status": "BLOCKED", "build": build, "ratio": None}
     command = [
@@ -166,8 +169,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--output", type=Path, default=ROOT / "build" / "perf-benchmark")
     parser.add_argument("--build-prefix", default="build/perf-benchmark",
-                        help="make-relative BUILD_DIR root; give each compiler its own so a "
-                             "candidate never reuses another compiler's objects")
+                        help="make-relative BUILD_DIR and BUILD_ROOT root; give each compiler its "
+                             "own so a candidate never reuses another compiler's objects")
     parser.add_argument("--make-arg", action="append", default=[], metavar="NAME=VALUE",
                         help="pass a Make variable assignment to every workload build")
     parser.add_argument("--overhead", action="store_true")
@@ -193,14 +196,25 @@ def main(argv: list[str] | None = None) -> int:
         "runs": runs,
     }
     if args.overhead:
-        result["overhead"] = _run_overhead(make, args.python, args.output, args.samples, args.build_prefix)
+        result["overhead"] = _run_overhead(make, args.python, args.output, args.samples,
+                                           args.build_prefix, tuple(args.make_arg))
     report_path = args.output / "benchmark.json"
     report_path.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps(result, indent=2, sort_keys=True))
-    failed = any(run["status"] == "FAIL" for run in runs)
+    counts = {status: sum(1 for run in runs if run["status"] == status)
+              for status in ("PASS", "SKIP", "FAIL")}
+    print("perf-benchmark: " + " ".join(f"{status}={count}" for status, count in counts.items()),
+          file=sys.stderr)
+    failed = counts["FAIL"] > 0
     if args.overhead and result["overhead"]["status"] != "PASS":
         failed = True
-    return 1 if failed else 0
+    if failed:
+        return 1
+    if counts["PASS"] == 0:
+        # SKIP is not a pass: a matrix in which every workload declined measured nothing.
+        print("perf-benchmark: no workload ran; nothing was measured", file=sys.stderr)
+        return 77
+    return 0
 
 
 if __name__ == "__main__":

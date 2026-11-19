@@ -123,8 +123,6 @@ def model_identity_fields(
 
     if software_model_raw_value is None:
         raw_value = "NOT_CAPTURED"
-    elif isinstance(software_model_raw_value, bool):
-        raw_value = str(software_model_raw_value)
     else:
         raw_value = str(software_model_raw_value)
 
@@ -144,20 +142,29 @@ def model_identity_fields(
             interpreted_family = "UNKNOWN"
 
         normalized_physical = re.sub(r"[^a-z0-9]", "", physical_label.lower())
-        physical_family = next(
-            (
-                family
-                for prefix, family in (
-                    ("pspn1000", "PSP-N1000"),
-                    ("pspe1000", "PSP-E1000"),
-                    ("psp1000", "PSP-1000"),
-                    ("psp2000", "PSP-2000"),
-                    ("psp3000", "PSP-3000"),
-                )
-                if normalized_physical.startswith(prefix)
-            ),
-            None,
-        )
+        retail_model = re.fullmatch(r"psp([123])\d{3}(?:series)?", normalized_physical)
+        physical_family: str | None
+        if retail_model:
+            physical_family = f"PSP-{retail_model.group(1)}000"
+        elif re.fullmatch(r"pspn100\d(?:series)?", normalized_physical):
+            physical_family = "PSP-N1000"
+        elif re.fullmatch(r"pspe100\d(?:series)?", normalized_physical):
+            physical_family = "PSP-E1000"
+        else:
+            physical_family = next(
+                (
+                    family
+                    for prefix, family in (
+                        ("pspn1000", "PSP-N1000"),
+                        ("pspe1000", "PSP-E1000"),
+                        ("psp1000", "PSP-1000"),
+                        ("psp2000", "PSP-2000"),
+                        ("psp3000", "PSP-3000"),
+                    )
+                    if normalized_physical.startswith(prefix)
+                ),
+                None,
+            )
         if interpreted_family != "UNKNOWN" and physical_family is not None:
             agreement = "AGREES" if physical_family == interpreted_family else "DISAGREES"
 
@@ -402,6 +409,8 @@ class StreamSpec:
     test_id: str
     semantic_cases: tuple[str, ...]
     terminal_case: str
+    inspection_optional_cases: frozenset[str] = frozenset()
+    fail_optional_fields: tuple[tuple[str, frozenset[str]], ...] = ()
 
     @property
     def ordered_cases(self) -> tuple[str, ...]:
@@ -438,6 +447,7 @@ class SequenceReport:
     results: dict[str, TestResult]
     metadata: dict[str, str]
     provenance: tuple[str, ...]
+    incomplete_reason: str | None = None
 
 
 def parse_sequence(
@@ -510,6 +520,7 @@ def parse_sequence(
             )
 
     terminal_present = spec.terminal_case in results
+    incomplete_reason: str | None = None
     if terminal_present:
         values = dict(results[spec.terminal_case].values)
         if "out0" not in values:
@@ -523,12 +534,35 @@ def parse_sequence(
             raise ProtocolError(
                 f"{spec.test_id}: terminal count is not an integer: {values['out0']!r}"
             ) from exc
-        if claimed != spec.terminal_count:
-            raise ProtocolError(
-                f"{spec.test_id}: terminal count mismatch: {spec.terminal_case} claims "
-                f"{claimed} semantic records, protocol expects {spec.terminal_count}"
-            )
         observed_semantic = len([c for c in observed if c != spec.terminal_case])
+        missing_semantic = [case for case in spec.semantic_cases if case not in results]
+        optional_missing = (
+            not require_complete
+            and bool(spec.inspection_optional_cases)
+            and bool(missing_semantic)
+            and set(missing_semantic) <= spec.inspection_optional_cases
+            and claimed == observed_semantic
+        )
+        if claimed != spec.terminal_count:
+            if optional_missing:
+                incomplete_reason = (
+                    "conditional cells not emitted: " + ", ".join(missing_semantic)
+                )
+            else:
+                raise ProtocolError(
+                    f"{spec.test_id}: terminal count mismatch: {spec.terminal_case} claims "
+                    f"{claimed} semantic records, protocol expects {spec.terminal_count}"
+                )
+        elif not complete and spec.inspection_optional_cases and missing_semantic:
+            if optional_missing:
+                incomplete_reason = (
+                    "conditional cells not emitted: " + ", ".join(missing_semantic)
+                )
+            else:
+                raise ProtocolError(
+                    f"{spec.test_id}: terminal count mismatch: {spec.terminal_case} claims "
+                    f"{claimed} semantic records, stream carries {observed_semantic}"
+                )
         if complete and observed_semantic != claimed:
             raise ProtocolError(
                 f"{spec.test_id}: terminal count mismatch: {spec.terminal_case} claims "
@@ -547,6 +581,7 @@ def parse_sequence(
         results=results,
         metadata=metadata,
         provenance=provenance_issues(metadata),
+        incomplete_reason=incomplete_reason,
     )
 
 
@@ -773,6 +808,13 @@ def _schema_keyword_errors(schema: Any, path: str = "") -> list[tuple[str, str]]
     unknown = sorted(set(schema) - _JSON_SCHEMA_ENFORCED - _JSON_SCHEMA_ANNOTATIONS)
     if unknown:
         errors.append((path, "schema uses keyword(s) this validator does not enforce: " + ", ".join(unknown)))
+    if "$ref" in schema:
+        siblings = sorted((set(schema) - {"$ref"}) & _JSON_SCHEMA_ENFORCED)
+        if siblings:
+            errors.append((
+                path,
+                "$ref with enforced sibling keyword(s) is unsupported: " + ", ".join(siblings),
+            ))
     for name in ("properties", "$defs"):
         children = schema.get(name)
         if isinstance(children, dict):

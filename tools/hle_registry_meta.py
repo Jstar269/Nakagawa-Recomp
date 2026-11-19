@@ -1069,7 +1069,10 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
     },
     "h_ReferMbxStatus": {
         "status": "partial",
-        "limitation": "size-field caller contract (whether Refer preserves or overwrites size) unmeasured (#339, #341)",
+        "evidence": [
+            "docs/HARDWARE_ORACLE.md (PSP-KERNEL-STATUS-001: mbx-size-zero, mbx-size-8, mbx-size-40, and mbx-size-full)",
+        ],
+        "limitation": "the cited cells establish bytes written and size-word behavior at four buffer sizes; full field values, unknown UID codes, invalid pointers, and error precedence are not established by that size row (#339, #341)",
     },
     # sceKernelReferSystemStatus: bytes written = min(size, 0x1c), return 0, and the size word reads back
     # 0x1c, all PSP-measured (PR #1003 head 3072bd7d, 2026-10-15).
@@ -1605,7 +1608,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01 and PSP-B2-01 LwMutex cells)",
         ],
-        "limitation": "owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured",
+        "limitation": "owner release, direct hand-off to one waiter, and non-owner/underflow behavior are measured; invalid workareas, negative or excessive unlock counts, and several-waiter ordering are not measured: waiters are served in arrival order, or by current priority under attr 0x100 (PPSSPP-derived, not PSP-measured)",
     },
     "h_AllocateFpl": {
         "status": "partial",
@@ -1665,7 +1668,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics: FPL blocks are blockSize apart)",
             "docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-002: block size 0 is 0x800201B7, a 0x7FFFFFFF-byte block 0x80020190)",
         ],
-        "limitation": "valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, a create with no free FPL slot keeps its pre-measurement code, and partition, attribute and option error precedence need separate evidence",
+        "limitation": "valid pool creation, block size 0 and a pool the partition cannot hold are measured; a block count of 0 still becomes 1, and partition, attribute and option error precedence need separate evidence",
     },
     "h_CreateLwMutex": {
         "status": "partial",
@@ -1694,7 +1697,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (PSP-B1-01 and PSP-B2-01: valid VPL creation, accounting, allocation, and deletion)",
         ],
-        "limitation": "valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results, allocation exhaustion, or option behavior",
+        "limitation": "valid pool creation and measured accounting are covered; the handler maps size zero to VPL_EXHAUSTED and ignores the partition argument, but the cited valid-pool cells do not establish those edge results or option behavior; a pool the partition cannot hold returns NO_MEMORY as pspautotests threads/vpl/create.expected records",
     },
     "h_DeleteFpl": {
         "status": "partial",
@@ -1702,7 +1705,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (PSP-HLE-KERNEL-STATUS-001: valid fpl-delete and refer-after-delete cells)",
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B2-01: deleting an FPL with a waiter)",
         ],
-        "limitation": "valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID currently returns success in the handler, while the cited delete cells use a valid pool, and multi-waiter teardown ordering is not measured",
+        "limitation": "valid deletion and the delete-wait outcome are covered; an invalid or already-deleted UID returns UNKNOWN_FPLID as pspautotests threads/fpl/delete.expected records, outside the cited cells, which use a valid pool, and multi-waiter teardown ordering is not measured",
     },
     "h_DeleteLwMutex": {
         "status": "partial",
@@ -1767,7 +1770,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
         "evidence": [
             "docs/HARDWARE_ORACLE.md (PSP-B3-01: ReleaseWaitThread wakes a blocked target with WAIT_RELEASE)",
         ],
-        "limitation": "the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established",
+        "limitation": "the cited cell covers releasing one blocked target and the waiter's WAIT_RELEASE result; self/UID-zero targets, already-finished targets, and multiple-waiter ordering are not established; a DelayThread wait is released with WAIT_RELEASE as PPSSPP does (PPSSPP-derived, not PSP-measured), and a ready, dormant or runtime-internally delayed target stops by name",
     },
     "h_TryAllocateFpl": {
         "status": "partial",
@@ -1921,7 +1924,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "docs/HARDWARE_ORACLE.md (PSP-WAIT-001: semaphore signal/cancel before deadline and late dispatch)",
             "docs/HARDWARE_ORACLE.md (Kernel-object semantics, PSP-B1-01: semaphore count and wait results)",
         ],
-        "limitation": "the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established",
+        "limitation": "the cited cells cover selected count, signal/cancel, and timeout outcomes; invalid timeout pointers, negative counts, general multi-waiter ordering, and all error-precedence cases are not established; the time left written back after a satisfied timed wait is PPSSPP-derived, not PSP-measured",
     },
     "h_WakeupThread": {
         "status": "partial",
@@ -2294,7 +2297,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "tests/native/hle_thread_selftest.c:test_td23_guest_pointer_validation",
             "tests/native/hle_thread_selftest.c:test_td28_partition_free_reuse",
         ],
-        "limitation": "partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), a zero size allocates 16 bytes rather than being checked against the recorded size cells, and blocks are placed from a bump heap rather than the kernel's allocator (#341)",
+        "limitation": "partition and type refusals, the volatile-partition cells and the unplaceable-Addr code match the recorded cells; where a PSP places a partition-6 block is unmeasured, partitions 2 and 6 accept a NULL name that the PSP refuses (existing callers rely on it), and blocks are placed from a bump heap rather than the kernel's allocator (#341)",
     },
     "h_CtrlReadBuffer": {
         "status": "partial",
@@ -2562,7 +2565,7 @@ HANDLER_METADATA: dict[str, HandlerMetadata] = {
             "PSPAutotests tests/threads/threads/terminate.expected (unknown and deleted ids 0x80020198; 0 and the current thread 0x80020197; created and finished threads 0x800201a2; ready, suspended and waiting threads 0; a thread waiting for the end wakes with 0x800201ac)",
             "tests/native/hle_thread_selftest.c:test_issue339_terminate_waiting_thread",
         ],
-        "limitation": "the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341)",
+        "limitation": "the recorded thread states and the waiter's wake code are reproduced; terminating a thread that holds a mutex or is blocked inside an HLE I/O wait is not measured (#341); from an interrupt handler the call answers ILLEGAL_CONTEXT for a compiled SDK version of 3.08 or later (PPSSPP-derived, not PSP-measured) and stops by name for an earlier one",
     },
     "h_TerminateDeleteThread": {
         "status": "partial",
@@ -3016,7 +3019,6 @@ PARTIAL_WITHOUT_EVIDENCE = frozenset({
     "h_PsmfGetVideo",
     "h_ReceiveMbx",
     "h_ReceiveMbxCB",
-    "h_ReferMbxStatus",
     "h_ReferProfilerNull",
     "h_ReferSemaStatus",
     "h_ReferSystemStatus",
@@ -3068,10 +3070,12 @@ ALIAS_RULES = (
 # registration whose name disagrees with this map is a `mislabeled_nid`
 # finding, so the fixed label cannot silently regress.
 #
-# tools/hle_manifest.py now also cross-checks EVERY registration against
-# src/rt/nid_names.h automatically (the exhaustive NID->name integrity pass,
-# issues #75/#78/#83/#86), so this map is only needed for NIDs whose canonical
-# name cannot come from the generated table or to override it deliberately.
+# tools/hle_manifest.py also cross-checks EVERY registration against
+# src/rt/nid_names.h (the exhaustive NID->name integrity pass, issues
+# #75/#78/#83/#86). Every entry below repeats its nid_names.h name on purpose:
+# these are regression pins for the NIDs that were once mislabeled, kept
+# independent of the generated table. A rename in tools/nid_corpus.json must
+# change the matching pin here in the same commit, or the two checks disagree.
 KNOWN_NID_NAMES = {
     0x1B4217BC: "sceKernelSetCompiledSdkVersion603_605",
     # --- sceSasCore routing integrity ---
@@ -3131,29 +3135,6 @@ FLOAT_RETURN_HANDLERS = {
     "h_PowerGetPllClockFrequencyFloat",
     "h_PowerGetCpuClockFrequencyFloat",
     "h_PowerGetBusClockFrequencyFloat",
-}
-
-# Tracking issue for each canonical NID above, so a `mislabeled_nid` finding in
-# the gate output points at the routing-correctness owner. Every key here must
-# appear in KNOWN_NID_NAMES and must be registered in hle.c
-# (tools/hle_manifest.py enforces both).
-#
-# NOTE: a corrected label and a dedicated handler are separate checks. The SAS
-# NIDs above now route through handlers with their canonical signatures. The
-# remaining issue links cover the unrelated canonical-name audits below.
-KNOWN_NID_ISSUES = {
-    0x0CAE832B: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x1D8A762E: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x28A8E98A: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x92E41280: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0xD4475AA8: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0xFA8A5739: "https://github.com/Jstar269/nakagawa-recomp/issues/78",
-    0x36CDFADE: "https://github.com/Jstar269/nakagawa-recomp/issues/83",
-    0x2085D15D: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0x0AFD0D8B: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0x87440F5E: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0xFDB5BFE9: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
-    0x478FE6F5: "https://github.com/Jstar269/nakagawa-recomp/issues/86",
 }
 
 # Acknowledged findings. The gate requires the live finding set to equal this

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 import re
 from typing import Any, cast
 
@@ -115,24 +116,12 @@ AUDIO_OUT_COUNTS = {
 def _validate_scalar_shape(sequence: SequenceReport,
                            out_counts: dict[str, int]) -> None:
     for case_id, record in sequence.results.items():
-        values = dict(record.values)
         expected = {"result", *(f"out{i}" for i in range(out_counts[case_id]))}
-        if (sequence.spec.test_id == "PSP-VCODEC-001" and case_id == "vc-csc-struct"
-                and record.status == "FAIL"):
-            # Refused geometry did not call firmware, so the failure row has no return value.
-            expected.remove("result")
-        if set(values) != expected:
-            raise ProtocolError(
-                f"{sequence.spec.test_id}: {case_id} fields must be "
-                f"{sorted(expected)}, got {sorted(values)}"
-            )
-        for field, value in values.items():
-            try:
-                int(value, 0)
-            except ValueError as exc:
-                raise ProtocolError(
-                    f"{sequence.spec.test_id}: {case_id} {field} is not an integer"
-                ) from exc
+        optional = dict(sequence.spec.fail_optional_fields).get(case_id, frozenset())
+        actual = set(dict(record.values))
+        if record.status == "FAIL" and actual == expected - optional:
+            expected.difference_update(optional)
+        _io_fields(sequence.spec.test_id, record, expected, set())
 
 
 @dataclass(frozen=True)
@@ -384,9 +373,16 @@ VRAM_MIRROR_OUT_COUNTS = {
 }
 
 
+@lru_cache(maxsize=2048)
+def _vram_mirror_values(record: TestResult) -> Mapping[str, str]:
+    """Return one parsed field map per immutable record."""
+
+    return dict(record.values)
+
+
 def _vram_mirror_integer(record: TestResult, field: str) -> int:
     try:
-        value = int(dict(record.values)[field], 0)
+        value = int(_vram_mirror_values(record)[field], 0)
     except (KeyError, ValueError) as exc:
         raise ProtocolError(
             f"PSP-VRAM-MIRROR-001: {record.case_id} {field} is not an integer"
@@ -1211,18 +1207,15 @@ DMAC_INVALID_FIELDS = frozenset({
 
 
 def _parse_dmac_invalid_values(record: TestResult, campaign_case: str) -> dict[str, int | str]:
-    values: dict[str, int | str] = dict(record.values)
-    if set(values) != DMAC_INVALID_FIELDS:
-        raise ProtocolError(f"{campaign_case}: Tier {record.case_id} fields are incomplete or unexpected")
+    raw_values = dict(record.values)
+    values = _io_fields(
+        "PSP-DMAC-001", record, set(DMAC_INVALID_FIELDS), {"api", "endpoint", "tier"}
+    )
     numeric_fields = DMAC_INVALID_FIELDS - {"api", "endpoint", "tier"}
     for field in numeric_fields:
-        value = values[field]
+        value = raw_values.get(field)
         if not isinstance(value, str) or not value.startswith("0x"):
             raise ProtocolError(f"{campaign_case}: {record.case_id} {field} is not hexadecimal")
-        try:
-            values[field] = int(value, 16)
-        except ValueError as exc:
-            raise ProtocolError(f"{campaign_case}: {record.case_id} {field} is not hexadecimal") from exc
     if values["result"] != values["rc"]:
         raise ProtocolError(f"{campaign_case}: {record.case_id} result does not match rc")
     if values["K"] != DMAC_INVALID_K:
@@ -1438,26 +1431,68 @@ CAMPAIGN_PROBE_CASES: dict[str, tuple[StreamSpec, dict[str, int]]] = {}
 def _register_campaign_probe(
     campaign_case: str,
     test_id: str,
-    semantic_cases: tuple[str, ...],
-    out_counts: dict[str, int],
+    semantic_cases: tuple[str, ...] | tuple[tuple[str, int], ...] | dict[str, int],
+    out_counts: dict[str, int] | None = None,
     *,
     terminal_case: str | None = None,
+    fail_optional_fields: dict[str, set[str] | frozenset[str]] | None = None,
 ) -> None:
+    terminal = terminal_case or f"{campaign_case}-done"
+    case_ids: tuple[str, ...]
+    case_counts: dict[str, int]
+    if out_counts is None:
+        rows = tuple(semantic_cases.items()) if isinstance(semantic_cases, dict) else tuple(semantic_cases)
+        if not all(
+            isinstance(row, tuple) and len(row) == 2
+            and isinstance(row[0], str) and isinstance(row[1], int)
+            for row in rows
+        ):
+            raise ValueError(f"{campaign_case}: registration rows must be (case_id, out_count) pairs")
+        pairs = cast("tuple[tuple[str, int], ...]", rows)
+        terminal_rows = tuple(row for row in pairs if row[0] == terminal)
+        if terminal_rows and (len(terminal_rows) != 1 or terminal_rows[0][1] != 1):
+            raise ValueError(f"{campaign_case}: terminal registration row must have count one")
+        semantic_rows = tuple(row for row in pairs if row[0] != terminal)
+        case_ids = tuple(row[0] for row in semantic_rows)
+        case_counts = dict(pairs)
+        if len(case_counts) != len(pairs):
+            raise ValueError(f"{campaign_case}: registration rows contain duplicate case IDs")
+        case_counts.pop(terminal, None)
+    else:
+        case_ids = cast("tuple[str, ...]", tuple(semantic_cases))
+        case_counts = out_counts
+    if len(set(case_ids)) != len(case_ids):
+        raise ValueError(f"{campaign_case}: semantic case list contains duplicates")
+    if terminal in case_ids:
+        raise ValueError(f"{campaign_case}: terminal case is also a semantic case")
+    count_cases = set(case_counts)
+    semantic_set = set(case_ids)
+    if count_cases != semantic_set and not (
+        terminal in count_cases and count_cases - {terminal} == semantic_set
+    ):
+        raise ValueError(f"{campaign_case}: out_counts keys must match semantic cases exactly")
+    optional = fail_optional_fields or {}
+    if set(optional) - set(case_ids):
+        raise ValueError(f"{campaign_case}: failure-field exceptions name an unregistered case")
+    for case_id, fields in optional.items():
+        allowed_fields = {"result", *(f"out{i}" for i in range(case_counts[case_id]))}
+        if set(fields) - allowed_fields:
+            raise ValueError(f"{campaign_case}: failure-field exception names an absent field")
     spec = StreamSpec(
         test_id,
-        semantic_cases,
-        terminal_case or f"{campaign_case}-done",
+        case_ids,
+        terminal,
+        fail_optional_fields=tuple(
+            (case_id, frozenset(fields)) for case_id, fields in sorted(optional.items())
+        ),
     )
-    counts = dict(out_counts)
+    counts = dict(case_counts)
     counts[spec.terminal_case] = 1
     CAMPAIGN_PROBE_CASES[campaign_case] = (spec, counts)
 
 
 _register_campaign_probe(
     "kernel-alarm", "PSP-ALARM-001",
-    ("alarm-null-handler", "alarm-zero-clock", "alarm-table-exhaustion",
-     "alarm-cancel-fired-once", "alarm-cancel-cancelled", "alarm-cancel-unknown",
-     "alarm-rearm-base", "alarm-blocking-in-handler"),
     {"alarm-null-handler": 2, "alarm-zero-clock": 3, "alarm-table-exhaustion": 3,
      "alarm-cancel-fired-once": 3, "alarm-cancel-cancelled": 3,
      "alarm-cancel-unknown": 1, "alarm-rearm-base": 5,
@@ -1465,19 +1500,12 @@ _register_campaign_probe(
 )
 _register_campaign_probe(
     "thread-scheduler", "PSP-THREAD-003",
-    ("thread-suspend-idle", "thread-suspend-self", "thread-resume-idle",
-     "thread-rotate-range", "thread-ready-order-after-rotate",
-     "thread-suspend-wait-timeout"),
     {"thread-suspend-idle": 4, "thread-suspend-self": 4,
      "thread-resume-idle": 1, "thread-rotate-range": 1,
      "thread-ready-order-after-rotate": 7, "thread-suspend-wait-timeout": 5},
 )
 _register_campaign_probe(
     "wait-outcomes", "PSP-WAIT-001",
-    ("sema-signal-before-deadline-late-dispatch",
-     "event-signal-before-deadline-late-dispatch",
-     "sema-cancel-before-deadline-late-dispatch",
-     "event-cancel-before-deadline-late-dispatch"),
     {case_id: 5 for case_id in (
         "sema-signal-before-deadline-late-dispatch",
         "event-signal-before-deadline-late-dispatch",
@@ -1487,20 +1515,12 @@ _register_campaign_probe(
 )
 _register_campaign_probe(
     "refer-status-size", "PSP-KERNEL-STATUS-001",
-    tuple(f"{kind}-size-{size}" for kind in ("sema", "event", "mbx")
-          for size in ("zero", "8", "40", "full")),
     {f"{kind}-size-{size}": 5
      for kind in ("sema", "event", "mbx")
      for size in ("zero", "8", "40", "full")},
 )
 _register_campaign_probe(
     "ge-break-continue", "PSP-GE-CONTROL-001",
-    ("ge-break-no-active-list", "ge-continue-no-paused-list",
-     "ge-break-invalid-mode", "ge-list-sync-paused", "ge-draw-sync-paused",
-     "ge-continue-drain", "ge-quiesce-after-continue",
-     "ge-break-reset-no-dequeue", "ge-list-sync-cancelled",
-     "ge-draw-sync-cancelled", "ge-quiesce-after-cancel",
-     "ge-list-dequeue-stalled", "ge-quiesce-after-dequeue"),
     {"ge-break-no-active-list": 2, "ge-continue-no-paused-list": 1,
      "ge-break-invalid-mode": 2, "ge-list-sync-paused": 3,
      "ge-draw-sync-paused": 3, "ge-continue-drain": 5,
@@ -1533,7 +1553,7 @@ GE_SYNC_IDS_OUT_COUNTS = {
     "ge-list-sync-unknown-wait": 6, "ge-list-sync-stale-wait": 6, "ge-sync-quiesce": 4,
 }
 _register_campaign_probe(
-    "ge-sync-ids", "PSP-GE-SYNC-001", GE_SYNC_IDS_CASES, GE_SYNC_IDS_OUT_COUNTS,
+    "ge-sync-ids", "PSP-GE-SYNC-001", GE_SYNC_IDS_OUT_COUNTS,
 )
 # ge-signal (181, probe.c): GE SIGNAL handler behaviours and RJUMP/RCALL offset alignment.
 # Every record is emitted on every run, so the stream is fixed-shape: a setup record, three
@@ -1553,12 +1573,10 @@ GE_SIGNAL_ROWS = (
 )
 GE_SIGNAL_CASES = tuple(case for case, _count in GE_SIGNAL_ROWS)
 _register_campaign_probe(
-    "ge-signal", "PSP-GE-SIGNAL-001", GE_SIGNAL_CASES, dict(GE_SIGNAL_ROWS),
+    "ge-signal", "PSP-GE-SIGNAL-001", GE_SIGNAL_ROWS,
 )
 _register_campaign_probe(
     "kernel-misc", "PSP-KERNEL-MISC-001",
-    ("sysclock-wide", "ctrl-sampling-mode", "thread-profiler",
-     "global-profiler", "vtimer-basic", "display-basic", "impose-basic"),
     {"sysclock-wide": 4, "ctrl-sampling-mode": 2, "thread-profiler": 2,
      "global-profiler": 2, "vtimer-basic": 13, "display-basic": 4,
      "impose-basic": 5},
@@ -1575,7 +1593,6 @@ _VFPU_COMPARE_PAIRS = (
 )
 _register_campaign_probe(
     "vfpu-compare", "PSP-VFPU-CMP-001",
-    tuple(f"{op}-{pair}" for op in ("vscmp", "vsge", "vslt") for pair in _VFPU_COMPARE_PAIRS),
     {f"{op}-{pair}": 3 for op in ("vscmp", "vsge", "vslt") for pair in _VFPU_COMPARE_PAIRS},
 )
 
@@ -1589,12 +1606,6 @@ _register_campaign_probe(
 # precondition that probe measures under; neither is a console semantic.
 _register_campaign_probe(
     "hle-kernel-status", "PSP-HLE-KERNEL-STATUS-001",
-    ("sys-status-size-0x1c", "sys-status-size-0x20", "sys-status-size-0x08",
-     "sys-status-size-0x00", "fpl-create", "fpl-refer-full-all-free",
-     "fpl-try-alloc-a", "fpl-try-alloc-b", "fpl-try-alloc-exhausted",
-     "fpl-refer-full-two-held", "fpl-refer-size-0x08-two-held",
-     "fpl-refer-size-0x00-two-held", "fpl-free-a", "fpl-refer-full-one-free",
-     "fpl-free-b", "fpl-delete", "fpl-refer-full-after-delete"),
     {"sys-status-size-0x1c": 8, "sys-status-size-0x20": 8,
      "sys-status-size-0x08": 8, "sys-status-size-0x00": 8,
      "fpl-create": 1, "fpl-refer-full-all-free": 14,
@@ -1606,12 +1617,6 @@ _register_campaign_probe(
 )
 _register_campaign_probe(
     "hle-vtimer", "PSP-HLE-VTIMER-001",
-    ("vtimer-create", "vtimer-refer-created", "vtimer-stop-not-started",
-     "vtimer-start", "vtimer-time-running-early", "vtimer-refer-running-early",
-     "vtimer-delay-20ms", "vtimer-time-running-20ms", "vtimer-stop",
-     "vtimer-time-stopped", "vtimer-refer-stopped", "vtimer-delay-20ms-stopped",
-     "vtimer-time-stopped-later", "vtimer-start-restart", "vtimer-refer-size-0x08",
-     "vtimer-delete-running", "vtimer-refer-after-delete", "vtimer-delete-again"),
     {"vtimer-create": 1, "vtimer-refer-created": 18, "vtimer-stop-not-started": 1,
      "vtimer-start": 1, "vtimer-time-running-early": 2,
      "vtimer-refer-running-early": 18, "vtimer-delay-20ms": 1,
@@ -1628,9 +1633,6 @@ _register_campaign_probe(
 # result is never read here as a return code.
 _register_campaign_probe(
     "hle-power-clock", "PSP-HLE-POWER-001",
-    ("pll-clock-int", "pll-clock-float", "cpu-clock-int", "cpu-clock-float",
-     "cpu-clock-alias", "bus-clock-int", "bus-clock-float", "bus-clock-alias",
-     "cpu-clock-int-repeat"),
     {case_id: 1 for case_id in (
         "pll-clock-int", "pll-clock-float", "cpu-clock-int", "cpu-clock-float",
         "cpu-clock-alias", "bus-clock-int", "bus-clock-float", "bus-clock-alias",
@@ -1639,8 +1641,6 @@ _register_campaign_probe(
 )
 _register_campaign_probe(
     "hle-hprm", "PSP-HLE-HPRM-001",
-    ("hprm-remote-first", "hprm-headphone-first", "hprm-microphone-first",
-     "hprm-remote-second", "hprm-headphone-second", "hprm-microphone-second"),
     {case_id: 1 for case_id in (
         "hprm-remote-first", "hprm-headphone-first", "hprm-microphone-first",
         "hprm-remote-second", "hprm-headphone-second", "hprm-microphone-second",
@@ -1648,27 +1648,18 @@ _register_campaign_probe(
 )
 _register_campaign_probe(
     "hle-ctrl-latch", "PSP-HLE-CTRL-LATCH-001",
-    ("latch-read-initial", "latch-peek-initial", "latch-poll-window",
-     "latch-read-after-poll", "latch-peek-after-poll",
-     "latch-read-clears-peek-keeps"),
     {"latch-read-initial": 4, "latch-peek-initial": 4, "latch-poll-window": 6,
      "latch-read-after-poll": 4, "latch-peek-after-poll": 4,
      "latch-read-clears-peek-keeps": 5},
 )
 _register_campaign_probe(
     "hle-sysparam", "PSP-HLE-SYSPARAM-001",
-    ("int-id-2", "int-id-3", "int-id-4", "int-id-5", "int-id-6", "int-id-7",
-     "int-id-8", "int-id-9", "int-unknown-0", "int-unknown-10", "int-unknown-64",
-     "string-id-1-len-0x80", "string-id-1-len-0x04"),
     {**{f"int-id-{i}": 1 for i in range(2, 10)},
      "int-unknown-0": 1, "int-unknown-10": 1, "int-unknown-64": 1,
      "string-id-1-len-0x80": 3, "string-id-1-len-0x04": 3},
 )
 _register_campaign_probe(
     "hle-ge-edram", "PSP-HLE-GE-EDRAM-001",
-    ("edram-size", "edram-addr", "edram-width-query-initial",
-     "edram-width-set-512", "edram-width-set-1024", "edram-width-set-2048",
-     "edram-width-set-4096", "edram-width-restore", "edram-width-query-final"),
     {case_id: 1 for case_id in (
         "edram-size", "edram-addr", "edram-width-query-initial",
         "edram-width-set-512", "edram-width-set-1024", "edram-width-set-2048",
@@ -1683,11 +1674,6 @@ _register_campaign_probe(
 # out0 0 when their create was refused (validate_hle_pool_bounds_deletes).
 _register_campaign_probe(
     "hle-vtimer-unit", "PSP-HLE-VTIMER-002",
-    ("vtimer-unit-create", "vtimer-unit-start", "vtimer-unit-time-a",
-     "vtimer-unit-systime-a", "vtimer-unit-delay", "vtimer-unit-time-b",
-     "vtimer-unit-systime-b", "vtimer-unit-base-running",
-     "vtimer-unit-refer-running", "vtimer-unit-stop", "vtimer-unit-base-stopped",
-     "vtimer-unit-refer-stopped", "vtimer-unit-delete"),
     {"vtimer-unit-create": 1, "vtimer-unit-start": 1, "vtimer-unit-time-a": 2,
      "vtimer-unit-systime-a": 2, "vtimer-unit-delay": 1, "vtimer-unit-time-b": 2,
      "vtimer-unit-systime-b": 2, "vtimer-unit-base-running": 2,
@@ -1697,11 +1683,6 @@ _register_campaign_probe(
 )
 _register_campaign_probe(
     "hle-vtimer-errors", "PSP-HLE-VTIMER-003",
-    ("vtimer-err-create-stale", "vtimer-err-delete-stale",
-     "vtimer-err-start-deleted", "vtimer-err-stop-deleted",
-     "vtimer-err-time-deleted", "vtimer-err-cleanup-stale",
-     "vtimer-err-create-live", "vtimer-err-delete-live",
-     "vtimer-err-noslot-create", "vtimer-err-noslot-cleanup"),
     {"vtimer-err-create-stale": 1, "vtimer-err-delete-stale": 1,
      "vtimer-err-start-deleted": 1, "vtimer-err-stop-deleted": 1,
      "vtimer-err-time-deleted": 2, "vtimer-err-cleanup-stale": 0,
@@ -1710,9 +1691,6 @@ _register_campaign_probe(
 )
 _register_campaign_probe(
     "hle-kernel-pool-bounds", "PSP-HLE-KERNEL-STATUS-002",
-    ("fpl-create-size-0x00", "fpl-delete-size-0x00",
-     "fpl-create-size-0x7fffffff", "fpl-delete-size-0x7fffffff", "vpl-create",
-     "vpl-try-alloc-refusal", "vpl-free-all", "vpl-delete"),
     {"fpl-create-size-0x00": 1, "fpl-delete-size-0x00": 1,
      "fpl-create-size-0x7fffffff": 1, "fpl-delete-size-0x7fffffff": 1,
      "vpl-create": 1, "vpl-try-alloc-refusal": 2, "vpl-free-all": 2,
@@ -1720,14 +1698,11 @@ _register_campaign_probe(
 )
 _register_campaign_probe(
     "hle-null-out-pointers", "PSP-HLE-NULL-OUT-001",
-    ("null-vtimer-create", "null-sys-status", "null-vtimer-time", "null-vtimer-base",
-     "null-vtimer-refer", "null-vtimer-delete"),
     {"null-vtimer-create": 0, "null-sys-status": 0, "null-vtimer-time": 0,
      "null-vtimer-base": 0, "null-vtimer-refer": 0, "null-vtimer-delete": 0},
 )
 _register_campaign_probe(
     "hle-power-float-v0", "PSP-HLE-POWER-002",
-    ("pll-clock-float-v0", "cpu-clock-float-v0", "bus-clock-float-v0"),
     {"pll-clock-float-v0": 1, "cpu-clock-float-v0": 1, "bus-clock-float-v0": 1},
 )
 _HLE_AUDIO_SRC_INVALID_CASES = (
@@ -1742,8 +1717,7 @@ _HLE_AUDIO_SRC_CASES = (
     "src-then-out2-reserve", "src-final-cleanup", "out2-final-cleanup",
 )
 _register_campaign_probe(
-    "hle-audio-src", "PSP-HLE-AUDIO-SRC-001", _HLE_AUDIO_SRC_CASES,
-    {
+    "hle-audio-src", "PSP-HLE-AUDIO-SRC-001", {
         "src-release-unreserved": 0, "src-output-unreserved": 2,
         "src-reserve-valid": 3, "src-reserve-already-held": 3,
         "src-output-blocking-0": 2, "src-release-after-output": 0,
@@ -1782,9 +1756,6 @@ _register_campaign_probe(
 # Memory Stick. Every word is an observation (see probe_hle_measure.c for each cell's layout).
 _register_campaign_probe(
     "hle-io-trunc", "PSP-HLE-IO-TRUNC-001",
-    ("trunc-open-view", "trunc-seek-read", "trunc-seek-write", "trunc-close-nowrite",
-     "trunc-recover-after-close", "two-fd-view", "two-fd-writer-survives",
-     "two-fd-trunc-writes-last", "remove-absent"),
     {
         "trunc-open-view": 7, "trunc-seek-read": 3, "trunc-seek-write": 11,
         "trunc-close-nowrite": 11, "trunc-recover-after-close": 10, "two-fd-view": 17,
@@ -1814,8 +1785,7 @@ HLE_SAVEDATA_NODATA_ROWS = (
     ("nodir-load", 15), ("nodir-delete", 13),
 )
 _register_campaign_probe(
-    "hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001",
-    tuple(row for row, _ in HLE_SAVEDATA_NODATA_ROWS), dict(HLE_SAVEDATA_NODATA_ROWS),
+    "hle-savedata-nodata", "PSP-HLE-SAVEDATA-NODATA-001", HLE_SAVEDATA_NODATA_ROWS,
 )
 _HLE_TIMER_ORDER_CASES = (
     "alarm-same-delay-set", "alarm-same-delay-a", "alarm-same-delay-b",
@@ -1827,8 +1797,7 @@ _HLE_TIMER_ORDER_CASES = (
     "timer-order-vtimer-cleanup", "alarm-zero-cleanup",
 )
 _register_campaign_probe(
-    "hle-timer-order", "PSP-HLE-TIMER-ORDER-001", _HLE_TIMER_ORDER_CASES,
-    {
+    "hle-timer-order", "PSP-HLE-TIMER-ORDER-001", {
         "alarm-same-delay-set": 1, "alarm-same-delay-a": 2,
         "alarm-same-delay-b": 2, "alarm-long-then-short-set": 1,
         "alarm-long-event": 2, "alarm-short-event": 2,
@@ -1872,8 +1841,7 @@ HLE_ISSUES_BATCH_CASES = HLE_ISSUES_MODEL_CASES + tuple(
     case for pass_index in range(HLE_ISSUES_PASSES)
     for case in _hle_issues_pass_cases(pass_index))
 _register_campaign_probe(
-    "hle-issues-batch", "PSP-HLE-ISSUES-001", HLE_ISSUES_BATCH_CASES,
-    {
+    "hle-issues-batch", "PSP-HLE-ISSUES-001", {
         **{case: 3 for case in HLE_ISSUES_MODEL_CASES},
         **{case: (16 if case.startswith("vscmp-") else 17)
            for case in HLE_ISSUES_BATCH_CASES if case not in HLE_ISSUES_MODEL_CASES},
@@ -1908,8 +1876,7 @@ def _vfpu_forms_pass_cases(p: int) -> tuple[str, ...]:
 VFPU_FORMS_CASES = tuple(case for p in range(VFPU_FORMS_PASSES)
                          for case in _vfpu_forms_pass_cases(p))
 _register_campaign_probe(
-    "vfpu-forms", "PSP-VFPU-FORMS-001", VFPU_FORMS_CASES,
-    {case: (17 if case.startswith("rndf") else 13) for case in VFPU_FORMS_CASES},
+    "vfpu-forms", "PSP-VFPU-FORMS-001", {case: (17 if case.startswith("rndf") else 13) for case in VFPU_FORMS_CASES},
 )
 
 # vfpu-funnel (118, probe_hle_issues.c): the #326 funnel add and average words, two passes.
@@ -1930,8 +1897,7 @@ VFPU_FUNNEL_CASES = tuple(
     for pfx in VFPU_FUNNEL_PREFIXES
 )
 _register_campaign_probe(
-    "vfpu-funnel", "PSP-VFPU-FUNNEL-001", VFPU_FUNNEL_CASES,
-    {case: 13 for case in VFPU_FUNNEL_CASES},
+    "vfpu-funnel", "PSP-VFPU-FUNNEL-001", {case: 13 for case in VFPU_FUNNEL_CASES},
 )
 
 # vfpu-sort (120, probe_hle_issues.c): the #326 vsrt1.q to vsrt4.q words, two passes. Every
@@ -1950,8 +1916,7 @@ VFPU_SORT_CASES = tuple(
     for pfx in VFPU_SORT_PREFIXES
 )
 _register_campaign_probe(
-    "vfpu-sort", "PSP-VFPU-SORT-001", VFPU_SORT_CASES,
-    {case: 13 for case in VFPU_SORT_CASES},
+    "vfpu-sort", "PSP-VFPU-SORT-001", {case: 13 for case in VFPU_SORT_CASES},
 )
 
 # kernel-semantics (127, probe_kernel_semantics.c): the v0.0.2 kernel cells (#1287, #1390, #1383,
@@ -1969,7 +1934,7 @@ KERNEL_SEM_ROWS = {
     "io-seek64": 16, "io-seek64-rdwr": 4, "io-cleanup": 3, "wlan-state": 2,
 }
 _register_campaign_probe(
-    "kernel-semantics", "PSP-KERNEL-SEM-001", tuple(KERNEL_SEM_ROWS), dict(KERNEL_SEM_ROWS),
+    "kernel-semantics", "PSP-KERNEL-SEM-001", KERNEL_SEM_ROWS,
 )
 
 # io-seek-eof (136, probe_kernel_semantics.c): #1380 in the probe-owned ms0:/NKKSEM01: opens
@@ -1983,8 +1948,7 @@ IO_SEEK_EOF_ROWS = (
     ("io-eof-cleanup", 3),
 )
 _register_campaign_probe(
-    "io-seek-eof", "PSP-IO-EOF-001", tuple(row for row, _ in IO_SEEK_EOF_ROWS),
-    dict(IO_SEEK_EOF_ROWS),
+    "io-seek-eof", "PSP-IO-EOF-001", IO_SEEK_EOF_ROWS,
 )
 
 # hle-utility-none (140, probe_hle_measure.c): #1386 at status NONE, with no InitStart
@@ -1995,8 +1959,7 @@ HLE_UTILITY_NONE_ROWS = (
     ("utility-none-gamedata", 7), ("utility-none-sharing", 7),
 )
 _register_campaign_probe(
-    "hle-utility-none", "PSP-HLE-UTILITY-NONE-001",
-    tuple(row for row, _ in HLE_UTILITY_NONE_ROWS), dict(HLE_UTILITY_NONE_ROWS),
+    "hle-utility-none", "PSP-HLE-UTILITY-NONE-001", HLE_UTILITY_NONE_ROWS,
 )
 
 # hle-std-handles (156, probe_hle_measure.c): #341's three standard handles, a one-byte write
@@ -2006,8 +1969,7 @@ HLE_STD_HANDLES_ROWS = (
     ("stdio-close-stdout", 3),
 )
 _register_campaign_probe(
-    "hle-std-handles", "PSP-HLE-STDIO-001",
-    tuple(row for row, _ in HLE_STD_HANDLES_ROWS), dict(HLE_STD_HANDLES_ROWS),
+    "hle-std-handles", "PSP-HLE-STDIO-001", HLE_STD_HANDLES_ROWS,
 )
 
 # hle-self-stop-unload (167, probe_hle_measure.c): #341's sceKernelSelfStopUnloadModule from a helper
@@ -2020,8 +1982,7 @@ HLE_SELF_STOP_ROWS = tuple(
     for row in ((f"self-stop-{form}", 12), (f"self-stop-{form}-cleanup", 3))
 )
 _register_campaign_probe(
-    "hle-self-stop-unload", "PSP-HLE-SELFSTOP-001",
-    tuple(row for row, _ in HLE_SELF_STOP_ROWS), dict(HLE_SELF_STOP_ROWS),
+    "hle-self-stop-unload", "PSP-HLE-SELFSTOP-001", HLE_SELF_STOP_ROWS,
 )
 
 # hle-audio-rest (159, probe_hle_measure.c): #279's rest length after each of 32 blocking
@@ -2036,8 +1997,7 @@ HLE_AUDIO_REST_ROWS = tuple(
                 (f"audio-rest-{frames}-drain", 4))
 )
 _register_campaign_probe(
-    "hle-audio-rest", "PSP-HLE-AUDIO-REST-001",
-    tuple(row for row, _ in HLE_AUDIO_REST_ROWS), dict(HLE_AUDIO_REST_ROWS),
+    "hle-audio-rest", "PSP-HLE-AUDIO-REST-001", HLE_AUDIO_REST_ROWS,
 )
 
 # hle-utility-dialogs (161, probe_hle_measure.c): #1386 in game context. Three savedata GETSIZE
@@ -2061,8 +2021,7 @@ HLE_UTILITY_DIALOGS_ROWS = (
     ("sharing-teardown", 5),
 )
 _register_campaign_probe(
-    "hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001",
-    tuple(row for row, _ in HLE_UTILITY_DIALOGS_ROWS), dict(HLE_UTILITY_DIALOGS_ROWS),
+    "hle-utility-dialogs", "PSP-HLE-UTILITY-DIALOG-001", HLE_UTILITY_DIALOGS_ROWS,
 )
 
 # hle-utility-netconf-sharing (166, probe_hle_measure.c): the game sharing and netconf rows of
@@ -2076,9 +2035,36 @@ HLE_UTILITY_NETCONF_SHARING_ROWS = (
 )
 _register_campaign_probe(
     "hle-utility-netconf-sharing", "PSP-HLE-UTILITY-DIALOG-002",
-    tuple(row for row, _ in HLE_UTILITY_NETCONF_SHARING_ROWS),
-    dict(HLE_UTILITY_NETCONF_SHARING_ROWS),
+    HLE_UTILITY_NETCONF_SHARING_ROWS,
 )
+
+# hle-utility-attended-netconf, -sharing and -gamedata (189-191, probe_hle_measure.c): #1386's
+# ATTENDED runs, one dialog type per launch. A person at the console dismisses the dialog by hand,
+# so the run can reach FINISHED, which no unattended run did (boots 204, 206 and 211 each stuck
+# RUNNING to the poll cap). Each: its net setup or gamedata precheck (case 161's record), the
+# attended run in the timing record's 24-word layout, the first ShutdownStart made in each status
+# (NONE, INIT, RUNNING, FINISHED, SHUTDOWN; four words each), then its net teardown or gamedata
+# cleanup (case 161's record).
+HLE_UTILITY_ATTENDED_SHUTDOWN_WORDS = 20
+HLE_UTILITY_ATTENDED_ROWS = {
+    "netconf": (("netconf-setup", 5), ("netconf-attended", 24),
+                ("netconf-attended-shutdown", HLE_UTILITY_ATTENDED_SHUTDOWN_WORDS),
+                ("netconf-teardown", 5)),
+    "sharing": (("sharing-setup", 5), ("sharing-attended", 24),
+                ("sharing-attended-shutdown", HLE_UTILITY_ATTENDED_SHUTDOWN_WORDS),
+                ("sharing-teardown", 5)),
+    "gamedata": (("gamedata-precheck", 5), ("gamedata-attended", 24),
+                 ("gamedata-attended-shutdown", HLE_UTILITY_ATTENDED_SHUTDOWN_WORDS),
+                 ("gamedata-cleanup", 23)),
+}
+for _kind, _test_id in (("netconf", "PSP-HLE-UTILITY-DIALOG-003"),
+                        ("sharing", "PSP-HLE-UTILITY-DIALOG-004"),
+                        ("gamedata", "PSP-HLE-UTILITY-DIALOG-005")):
+    _register_campaign_probe(
+        f"hle-utility-attended-{_kind}", _test_id,
+        tuple(row for row, _ in HLE_UTILITY_ATTENDED_ROWS[_kind]),
+        dict(HLE_UTILITY_ATTENDED_ROWS[_kind]),
+    )
 # hle-io-seek (162, probe_hle_measure.c): #1380's seeks on a flash0: file (64- and 32-bit), the
 # sceIoIoctl file commands on a probe-owned ms0: file, two writes on descriptors opened without
 # PSP_O_WRONLY, then the same ioctl seek on disc0:/UMD_DATA.BIN (last: the only calls that could
@@ -2105,8 +2091,7 @@ HLE_IO_SEEK_ROWS = (
     ("io-seek-umd-close", 1),
 )
 _register_campaign_probe(
-    "hle-io-seek", "PSP-HLE-IO-SEEK-001",
-    tuple(row for row, _ in HLE_IO_SEEK_ROWS), dict(HLE_IO_SEEK_ROWS),
+    "hle-io-seek", "PSP-HLE-IO-SEEK-001", HLE_IO_SEEK_ROWS,
 )
 # hle-io-seek-edges (186, probe_hle_measure.c): #1380's cells hle-io-seek left open. flash0:
 # SEEK_CUR seeks (64- and 32-bit), 64-bit SEEK_SET and SEEK_END past 0x100000000 and around the
@@ -2131,8 +2116,7 @@ HLE_IO_SEEK_EDGES_ROWS = (
     ("io-edge-ms-cleanup", 4),
 )
 _register_campaign_probe(
-    "hle-io-seek-edges", "PSP-HLE-IO-SEEK-002",
-    tuple(row for row, _ in HLE_IO_SEEK_EDGES_ROWS), dict(HLE_IO_SEEK_EDGES_ROWS),
+    "hle-io-seek-edges", "PSP-HLE-IO-SEEK-002", HLE_IO_SEEK_EDGES_ROWS,
 )
 # hle-nickname-limit (164, probe_hle_measure.c): W-NET-1, read-only. The registry walk to the
 # owner_name key (type and size only; no value call and no value bytes), then the system-parameter
@@ -2146,8 +2130,7 @@ HLE_NICKNAME_ROWS = (
     ("nick-len-summary", 5),
 )
 _register_campaign_probe(
-    "hle-nickname-limit", "PSP-HLE-NICKNAME-001",
-    tuple(row for row, _ in HLE_NICKNAME_ROWS), dict(HLE_NICKNAME_ROWS),
+    "hle-nickname-limit", "PSP-HLE-NICKNAME-001", HLE_NICKNAME_ROWS,
 )
 
 # io-umd-eof (137, probe_kernel_semantics.c): #1380 on the UMD, read-only: the drive state
@@ -2165,8 +2148,7 @@ IO_UMD_EOF_ROWS = (
     ("umd-eof-state-after", 2),
 )
 _register_campaign_probe(
-    "io-umd-eof", "PSP-IO-EOF-002", tuple(row for row, _ in IO_UMD_EOF_ROWS),
-    dict(IO_UMD_EOF_ROWS),
+    "io-umd-eof", "PSP-IO-EOF-002", IO_UMD_EOF_ROWS,
 )
 
 # safe-scalar (141, probe_kernel_semantics.c): #2640 cells src/rt stops at by name or answers
@@ -2205,8 +2187,7 @@ SAFE_SCALAR_ROWS = (
     ("tls-free", 3), ("tls-delete", 3), ("tls-cleanup", 4),
 )
 _register_campaign_probe(
-    "safe-scalar", "PSP-SAFE-SCALAR-001", tuple(row for row, _ in SAFE_SCALAR_ROWS),
-    dict(SAFE_SCALAR_ROWS),
+    "safe-scalar", "PSP-SAFE-SCALAR-001", SAFE_SCALAR_ROWS,
 )
 
 # memory-edge (138, probe_memory_edge.c, fixture mem_edge.h): the #303 invalid-tail and
@@ -2239,8 +2220,7 @@ def _memory_edge_rows() -> tuple[tuple[str, int], ...]:
 
 MEMORY_EDGE_ROWS = _memory_edge_rows()
 _register_campaign_probe(
-    "memory-edge", "PSP-MEMEDGE-001", tuple(row for row, _ in MEMORY_EDGE_ROWS),
-    dict(MEMORY_EDGE_ROWS),
+    "memory-edge", "PSP-MEMEDGE-001", MEMORY_EDGE_ROWS,
 )
 
 # vfpu-forms2 (121, probe_hle_issues.c): the second #326 batch of VFPU forms, two passes. Every
@@ -2280,8 +2260,7 @@ def _vfpu_forms2_pass_cases(p: int) -> tuple[str, ...]:
 VFPU_FORMS2_CASES = tuple(case for p in range(VFPU_FORMS2_PASSES)
                           for case in _vfpu_forms2_pass_cases(p))
 _register_campaign_probe(
-    "vfpu-forms2", "PSP-VFPU-FORMS2-001", VFPU_FORMS2_CASES,
-    {case: (VFPU_FORMS2_SEED_WORDS if case.startswith("rnds-")
+    "vfpu-forms2", "PSP-VFPU-FORMS2-001", {case: (VFPU_FORMS2_SEED_WORDS if case.startswith("rnds-")
             else VFPU_FORMS2_DRAW_WORDS if case.startswith("wrnd")
             else VFPU_FORMS2_CELL_WORDS) for case in VFPU_FORMS2_CASES},
 )
@@ -2320,8 +2299,7 @@ def _vfpu_unmodeled_pass_cases(p: int) -> tuple[str, ...]:
 VFPU_UNMODELED_CASES = tuple(case for p in range(VFPU_UNMODELED_PASSES)
                              for case in _vfpu_unmodeled_pass_cases(p))
 _register_campaign_probe(
-    "vfpu-unmodeled", "PSP-VFPU-UNMODELED-001", VFPU_UNMODELED_CASES,
-    {case: (VFPU_UNMODELED_CTL_WORDS if case.startswith(("mfvc255", "mtvc255"))
+    "vfpu-unmodeled", "PSP-VFPU-UNMODELED-001", {case: (VFPU_UNMODELED_CTL_WORDS if case.startswith(("mfvc255", "mtvc255"))
             else VFPU_UNMODELED_IMAGE_WORDS) for case in VFPU_UNMODELED_CASES},
 )
 
@@ -2344,8 +2322,7 @@ def _vfpu_quad_wb_pass_cases(p: int) -> tuple[str, ...]:
 VFPU_QUAD_WB_CASES = tuple(case for p in range(VFPU_QUAD_WB_PASSES)
                            for case in _vfpu_quad_wb_pass_cases(p))
 _register_campaign_probe(
-    "vfpu-quad-wb", "PSP-VFPU-QUADWB-001", VFPU_QUAD_WB_CASES,
-    {case: (VFPU_QUAD_WB_RUN_WORDS if "-run-" in case else VFPU_QUAD_WB_FORM_WORDS)
+    "vfpu-quad-wb", "PSP-VFPU-QUADWB-001", {case: (VFPU_QUAD_WB_RUN_WORDS if "-run-" in case else VFPU_QUAD_WB_FORM_WORDS)
      for case in VFPU_QUAD_WB_CASES},
 )
 
@@ -2366,8 +2343,7 @@ VFPU_CONVERT_CASES = tuple(
     f"{stem}-p{p}-{i}" for p in range(VFPU_CONVERT_PASSES) for stem in VFPU_CONVERT_STEMS
     for i in range(VFPU_CONVERT_IMAGES))
 _register_campaign_probe(
-    "vfpu-convert", "PSP-VFPU-CONVERT-001", VFPU_CONVERT_CASES,
-    {case: VFPU_CONVERT_WORDS for case in VFPU_CONVERT_CASES},
+    "vfpu-convert", "PSP-VFPU-CONVERT-001", {case: VFPU_CONVERT_WORDS for case in VFPU_CONVERT_CASES},
 )
 
 # vfpu-cc-cmov (169, probe_hle_issues.c): the #326 VFPU condition-code and conditional-move cells,
@@ -2390,8 +2366,7 @@ def _vfpu_cc_cmov_pass_cases(p: int) -> tuple[str, ...]:
 VFPU_CC_CMOV_CASES = tuple(case for p in range(VFPU_CC_CMOV_PASSES)
                            for case in _vfpu_cc_cmov_pass_cases(p))
 _register_campaign_probe(
-    "vfpu-cc-cmov", "PSP-VFPU-CCCMOV-001", VFPU_CC_CMOV_CASES,
-    {case: (VFPU_CC_CMOV_CMP_WORDS if case.startswith("vcmp-")
+    "vfpu-cc-cmov", "PSP-VFPU-CCCMOV-001", {case: (VFPU_CC_CMOV_CMP_WORDS if case.startswith("vcmp-")
             else VFPU_CC_CMOV_CMOV_WORDS if case.startswith("vcmov")
             else 1 if case.startswith("cc-initial")
             else VFPU_CC_CMOV_ROUNDTRIP_WORDS) for case in VFPU_CC_CMOV_CASES},
@@ -2413,8 +2388,7 @@ VFPU_VUS2I_CASES = tuple(
     f"{stem}-p{p}-{i}" for p in range(VFPU_VUS2I_PASSES) for stem, count in VFPU_VUS2I_FORMS
     for i in range(count))
 _register_campaign_probe(
-    "vfpu-vus2i", "PSP-VFPU-VUS2I-001", VFPU_VUS2I_CASES,
-    {case: VFPU_VUS2I_WORDS for case in VFPU_VUS2I_CASES},
+    "vfpu-vus2i", "PSP-VFPU-VUS2I-001", {case: VFPU_VUS2I_WORDS for case in VFPU_VUS2I_CASES},
 )
 
 # vfpu-basic-arith (168, probe_hle_issues.c): the #326 basic VFPU arithmetic forms, two passes,
@@ -2479,8 +2453,7 @@ VFPU_BASIC_ARITH_ROWS = tuple(
     + [(f"vidt-s-p{p}", VFPU_BASIC_ARITH_CONST_WORDS) for p in range(VFPU_BASIC_ARITH_PASSES)])
 VFPU_BASIC_ARITH_CASES = tuple(case for case, _count in VFPU_BASIC_ARITH_ROWS)
 _register_campaign_probe(
-    "vfpu-basic-arith", "PSP-VFPU-BASICARITH-001", VFPU_BASIC_ARITH_CASES,
-    dict(VFPU_BASIC_ARITH_ROWS),
+    "vfpu-basic-arith", "PSP-VFPU-BASICARITH-001", VFPU_BASIC_ARITH_ROWS,
 )
 
 # vfpu-wide-dot-matrix (173, probe_hle_issues.c): the #326 wide dot-product and matrix VFPU forms,
@@ -2517,8 +2490,7 @@ VFPU_WIDE_DOT_ROWS = tuple(
     row for p in range(VFPU_WIDE_DOT_PASSES) for row in _vfpu_wide_dot_pass_rows(p))
 VFPU_WIDE_DOT_CASES = tuple(case for case, _count in VFPU_WIDE_DOT_ROWS)
 _register_campaign_probe(
-    "vfpu-wide-dot-matrix", "PSP-VFPU-WIDEDOT-001", VFPU_WIDE_DOT_CASES,
-    dict(VFPU_WIDE_DOT_ROWS),
+    "vfpu-wide-dot-matrix", "PSP-VFPU-WIDEDOT-001", VFPU_WIDE_DOT_ROWS,
 )
 
 
@@ -2530,7 +2502,7 @@ VFPU_MFV_MTV_ROWS = tuple((f"{stem}-p{p}", VFPU_MFV_MTV_WORDS)
                           for p in range(2) for stem in ("mtv-mfv", "mtv-mfv2"))
 VFPU_MFV_MTV_CASES = tuple(case for case, _count in VFPU_MFV_MTV_ROWS)
 _register_campaign_probe(
-    "vfpu-mfv-mtv", "PSP-VFPU-MFVMTV-001", VFPU_MFV_MTV_CASES, dict(VFPU_MFV_MTV_ROWS),
+    "vfpu-mfv-mtv", "PSP-VFPU-MFVMTV-001", VFPU_MFV_MTV_ROWS,
 )
 
 
@@ -2545,7 +2517,7 @@ VFPU_CONSTANTS_ROWS = tuple(
        for p in range(2) for size, lanes in (("s", 1), ("q", 4))])
 VFPU_CONSTANTS_CASES = tuple(case for case, _count in VFPU_CONSTANTS_ROWS)
 _register_campaign_probe(
-    "vfpu-constants", "PSP-VFPU-CONSTANTS-001", VFPU_CONSTANTS_CASES, dict(VFPU_CONSTANTS_ROWS),
+    "vfpu-constants", "PSP-VFPU-CONSTANTS-001", VFPU_CONSTANTS_ROWS,
 )
 
 
@@ -2580,8 +2552,7 @@ VFPU_ROUND_SEP_ROWS = tuple(
     row for p in range(VFPU_ROUND_SEP_PASSES) for row in _vfpu_round_sep_pass_rows(p))
 VFPU_ROUND_SEP_CASES = tuple(case for case, _count in VFPU_ROUND_SEP_ROWS)
 _register_campaign_probe(
-    "vfpu-round-sep", "PSP-VFPU-ROUNDSEP-001", VFPU_ROUND_SEP_CASES,
-    dict(VFPU_ROUND_SEP_ROWS),
+    "vfpu-round-sep", "PSP-VFPU-ROUNDSEP-001", VFPU_ROUND_SEP_ROWS,
 )
 
 
@@ -2611,8 +2582,7 @@ VFPU_PREFIX_STATE_ROWS = tuple(
         + [(f"viim-{d}-p{p}", 10) for d in VFPU_PREFIX_STATE_IMMD]))
 VFPU_PREFIX_STATE_CASES = tuple(case for case, _count in VFPU_PREFIX_STATE_ROWS)
 _register_campaign_probe(
-    "vfpu-prefix-state", "PSP-VFPU-PREFIX-001", VFPU_PREFIX_STATE_CASES,
-    dict(VFPU_PREFIX_STATE_ROWS),
+    "vfpu-prefix-state", "PSP-VFPU-PREFIX-001", VFPU_PREFIX_STATE_ROWS,
 )
 
 
@@ -2697,8 +2667,7 @@ def _vfpu_wider_ops_pass_rows(p: int) -> list[tuple[str, int]]:
 VFPU_WIDER_OPS_ROWS = tuple(row for p in range(2) for row in _vfpu_wider_ops_pass_rows(p))
 VFPU_WIDER_OPS_CASES = tuple(case for case, _count in VFPU_WIDER_OPS_ROWS)
 _register_campaign_probe(
-    "vfpu-wider-ops", "PSP-VFPU-WIDEROPS-001", VFPU_WIDER_OPS_CASES,
-    dict(VFPU_WIDER_OPS_ROWS),
+    "vfpu-wider-ops", "PSP-VFPU-WIDEROPS-001", VFPU_WIDER_OPS_ROWS,
 )
 
 
@@ -2711,8 +2680,7 @@ VFPU_RESERVED_WIDTHS_ROWS = tuple((f"{stem}-p{p}", 20)
                                   for p in range(2) for stem in VFPU_RESERVED_WIDTHS_FORMS)
 VFPU_RESERVED_WIDTHS_CASES = tuple(case for case, _count in VFPU_RESERVED_WIDTHS_ROWS)
 _register_campaign_probe(
-    "vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", VFPU_RESERVED_WIDTHS_CASES,
-    dict(VFPU_RESERVED_WIDTHS_ROWS),
+    "vfpu-reserved-widths", "PSP-VFPU-RESERVED-001", VFPU_RESERVED_WIDTHS_ROWS,
 )
 
 # ge-sample (109, probe_ge_sample.c): the #282 GE texture sample-point cells. Every draw is
@@ -2730,8 +2698,7 @@ GE_SAMPLE_DRAWS = tuple(f"{prim}-{filt}-{m}-{tex}" for m in GE_SAMPLE_MAPS
 GE_SAMPLE_CASES = tuple(case for draw in GE_SAMPLE_DRAWS
                         for case in (f"{draw}-draw", *(f"{draw}-r{y:02d}" for y in GE_SAMPLE_ROWS)))
 _register_campaign_probe(
-    "ge-sample", "PSP-GE-SAMPLE-001", GE_SAMPLE_CASES,
-    {case: (7 if case.endswith("-draw") else 16) for case in GE_SAMPLE_CASES},
+    "ge-sample", "PSP-GE-SAMPLE-001", {case: (7 if case.endswith("-draw") else 16) for case in GE_SAMPLE_CASES},
 )
 
 # dma-timing (118, probe_dmac_timing.c): the #303 DMAC transfer-time and busy-channel cells.
@@ -2812,13 +2779,11 @@ INSN_TRACE_CASES = tuple(
     for case in (f"{fixture}-init", *(f"{fixture}-s{step:04d}" for step in range(steps)),
                  f"{fixture}-end"))
 _register_campaign_probe(
-    "insn-trace", "PSP-TRACE-001", INSN_TRACE_CASES,
-    {case: (44 if case.endswith("-init") else 4 if case.endswith("-end") else 44)
+    "insn-trace", "PSP-TRACE-001", {case: (44 if case.endswith("-init") else 4 if case.endswith("-end") else 44)
      for case in INSN_TRACE_CASES},
 )
 _register_campaign_probe(
-    "insn-trace-exception", "PSP-TRACE-EXCEPTION-001", (),
-    {"exception-armed": 1}, terminal_case="exception-armed",
+    "insn-trace-exception", "PSP-TRACE-EXCEPTION-001", {"exception-armed": 1}, terminal_case="exception-armed",
 )
 
 # intr-cause (120, probe_hle_issues.c): the #325 COP0 interrupt state. Every row is emitted
@@ -2834,8 +2799,7 @@ INTR_CAUSE_CASES = tuple(f"cause-enabled-{i}" for i in range(INTR_CAUSE_ENABLED)
     for case in (*(f"cause-masked-p{p}-t{k:02d}" for k in range(INTR_CAUSE_SNAPS)),
                  f"cause-resumed-p{p}", f"cause-window-p{p}"))
 _register_campaign_probe(
-    "intr-cause", "PSP-INTR-CAUSE-001", INTR_CAUSE_CASES,
-    {case: (4 if case.startswith("cause-window-") else 6) for case in INTR_CAUSE_CASES},
+    "intr-cause", "PSP-INTR-CAUSE-001", {case: (4 if case.startswith("cause-window-") else 6) for case in INTR_CAUSE_CASES},
 )
 
 # #1375 PSP-NULLCODE-001. One launch first records exact entry snapshots ($ra, $sp,
@@ -2861,12 +2825,10 @@ _register_campaign_probe(
 )
 _register_campaign_probe(
     "null-thread-invocation", "PSP-NULLCODE-001",
-    ("null-thread-armed", "null-thread-started"),
     {"null-thread-armed": 2, "null-thread-started": 7},
 )
 _register_campaign_probe(
     "null-callback-invocation", "PSP-NULLCODE-001",
-    ("null-callback-armed", "null-callback-checked"),
     {"null-callback-armed": 2, "null-callback-checked": 7},
 )
 
@@ -2892,7 +2854,7 @@ GE_THROUGH_Z_ROWS = tuple(
     row for cell in GE_THROUGH_Z_CELLS for row in ((f"{cell}-draw", 16), (f"{cell}-z", 16)))
 GE_THROUGH_Z_CASES = tuple(case for case, _count in GE_THROUGH_Z_ROWS)
 _register_campaign_probe(
-    "ge-through-z", "PSP-GE-THROUGHZ-001", GE_THROUGH_Z_CASES, dict(GE_THROUGH_Z_ROWS),
+    "ge-through-z", "PSP-GE-THROUGHZ-001", GE_THROUGH_Z_ROWS,
 )
 
 # ge-raster (123, probe_ge_sample.c): the #343 GE raster corpus. The cells are the gr_cells
@@ -2932,8 +2894,7 @@ GE_RASTER_ROWS = tuple(range(4))
 GE_RASTER_CASES = tuple(case for cell in GE_RASTER_CELLS
                         for case in (f"{cell}-draw", *(f"{cell}-r{y}" for y in GE_RASTER_ROWS)))
 _register_campaign_probe(
-    "ge-raster", "PSP-GE-RASTER-001", GE_RASTER_CASES,
-    {case: (9 if case.endswith("-draw") else 16) for case in GE_RASTER_CASES},
+    "ge-raster", "PSP-GE-RASTER-001", {case: (9 if case.endswith("-draw") else 16) for case in GE_RASTER_CASES},
 )
 
 # ge-raster-bounds (187, probe_ge_sample.c): #2193's raster bounds cells. First `display-check`
@@ -2964,7 +2925,7 @@ GE_RASTER_BOUNDS_ROWS = (
 )
 GE_RASTER_BOUNDS_CASES = tuple(case for case, _count in GE_RASTER_BOUNDS_ROWS)
 _register_campaign_probe(
-    "ge-raster-bounds", "PSP-GE-RASTER-002", GE_RASTER_BOUNDS_CASES, dict(GE_RASTER_BOUNDS_ROWS),
+    "ge-raster-bounds", "PSP-GE-RASTER-002", GE_RASTER_BOUNDS_ROWS,
 )
 
 # ge-depth-round (188, probe_ge_sample.c): #343's depth rounding cells in the ge-raster window
@@ -2976,8 +2937,7 @@ GE_DEPTH_ROUND_CASES = tuple(
     case for cell in GE_DEPTH_ROUND_CELLS
     for case in (f"{cell}-draw", *(f"{cell}-r{y}" for y in GE_RASTER_ROWS), f"{cell}-pass"))
 _register_campaign_probe(
-    "ge-depth-round", "PSP-GE-RASTER-003", GE_DEPTH_ROUND_CASES,
-    {case: 9 if case.endswith("-draw") else 4 if case.endswith("-pass") else 16
+    "ge-depth-round", "PSP-GE-RASTER-003", {case: 9 if case.endswith("-draw") else 4 if case.endswith("-pass") else 16
      for case in GE_DEPTH_ROUND_CASES},
 )
 
@@ -2998,8 +2958,7 @@ GE_MIP_CELLS = (
 GE_MIP_CASES = tuple(case for cell in GE_MIP_CELLS
                      for case in (f"{cell}-draw", *(f"{cell}-r{y}" for y in GE_RASTER_ROWS)))
 _register_campaign_probe(
-    "ge-mip", "PSP-GE-MIP-001", GE_MIP_CASES,
-    {case: (9 if case.endswith("-draw") else 16) for case in GE_MIP_CASES},
+    "ge-mip", "PSP-GE-MIP-001", {case: (9 if case.endswith("-draw") else 16) for case in GE_MIP_CASES},
 )
 
 # ge-light (139, probe_ge_sample.c): the #1732 GE lighting cells. Per specular coefficient of the
@@ -3021,8 +2980,7 @@ GE_LIGHT_CASES = tuple(
     )
 )
 _register_campaign_probe(
-    "ge-light", "PSP-GE-LIGHT-001", GE_LIGHT_CASES,
-    {case: (10 if case.endswith("-draw") else 16) for case in GE_LIGHT_CASES},
+    "ge-light", "PSP-GE-LIGHT-001", {case: (10 if case.endswith("-draw") else 16) for case in GE_LIGHT_CASES},
 )
 
 # ge-overlap (153, probe_ge_sample.c): the #2109 GE overlap cells. Per shape of the go_shapes
@@ -3036,8 +2994,7 @@ GE_OVERLAP_CELLS = tuple(f"{shape}-{fmt}" for shape in GE_OVERLAP_SHAPES
 GE_OVERLAP_CASES = tuple(case for cell in GE_OVERLAP_CELLS
                          for case in (f"{cell}-draw", *(f"{cell}-r{y}" for y in GE_RASTER_ROWS)))
 _register_campaign_probe(
-    "ge-overlap", "PSP-GE-OVERLAP-001", GE_OVERLAP_CASES,
-    {case: (9 if case.endswith("-draw") else 16) for case in GE_OVERLAP_CASES},
+    "ge-overlap", "PSP-GE-OVERLAP-001", {case: (9 if case.endswith("-draw") else 16) for case in GE_OVERLAP_CASES},
 )
 
 # ge-clut-mip (154, probe_ge_sample.c): the #2031 GE multi-CLUT mip cells. Per cell of the
@@ -3050,8 +3007,7 @@ GE_CLUT_MIP_CELLS = (*(f"{family}-l{level}" for family in GE_CLUT_MIP_FAMILIES
 GE_CLUT_MIP_CASES = tuple(case for cell in GE_CLUT_MIP_CELLS
                           for case in (f"{cell}-draw", f"{cell}-r0"))
 _register_campaign_probe(
-    "ge-clut-mip", "PSP-GE-MIP-002", GE_CLUT_MIP_CASES,
-    {case: (9 if case.endswith("-draw") else 16) for case in GE_CLUT_MIP_CASES},
+    "ge-clut-mip", "PSP-GE-MIP-002", {case: (9 if case.endswith("-draw") else 16) for case in GE_CLUT_MIP_CASES},
 )
 
 # sas-mix (155, probe.c): the #2135 and #2054 SAS volume, WithMix and pitch cells, every record
@@ -3076,8 +3032,7 @@ SAS_MIX_CASES = (
                    *(f"sas-mix-p-{cell}-g{r:02x}" for r in range(8 * grains)))),
 )
 _register_campaign_probe(
-    "sas-mix", "PSP-SAS-003", SAS_MIX_CASES,
-    {case: (4 if case == "sas-mix-load" else 16) for case in SAS_MIX_CASES},
+    "sas-mix", "PSP-SAS-003", {case: (4 if case == "sas-mix-load" else 16) for case in SAS_MIX_CASES},
 )
 
 # sas-adsr (152, probe.c): the #1296 envelope heights. probe.c's k_sas_adsr_pairs (9 SimpleADSR
@@ -3099,8 +3054,7 @@ SAS_ADSR_CASES = (
       for case in (f"sas-adsr-{name}-calls", *(f"sas-adsr-{name}-h{row:02x}" for row in range(grains // 16)))),
 )
 _register_campaign_probe(
-    "sas-adsr", "PSP-SAS-002", SAS_ADSR_CASES,
-    {case: (4 if case == "sas-adsr-load" else 11
+    "sas-adsr", "PSP-SAS-002", {case: (4 if case == "sas-adsr-load" else 11
             if case.startswith("sas-adsr-p") and case.endswith("-calls") else 16)
      for case in SAS_ADSR_CASES},
 )
@@ -3165,8 +3119,8 @@ VCODEC_WORDS_ROWS = (
     ("vc-unload", 5),
 )
 _register_campaign_probe(
-    "vcodec-words", "PSP-VCODEC-001",
-    tuple(row for row, _ in VCODEC_WORDS_ROWS), dict(VCODEC_WORDS_ROWS),
+    "vcodec-words", "PSP-VCODEC-001", VCODEC_WORDS_ROWS,
+    fail_optional_fields={"vc-csc-struct": {"result"}},
 )
 
 # ge-weight (157, probe_ge_sample.c): the #343 weighted-vertex cells. Per cell of the gw_cells
@@ -3177,8 +3131,7 @@ GE_WEIGHT_CELLS = ("f32-w1", "u8-w1", "u16-w1", "u8-hi", "u16-hi", "f32-neg", "f
 GE_WEIGHT_CASES = tuple(case for cell in GE_WEIGHT_CELLS
                         for case in (f"{cell}-draw", *(f"{cell}-r{y}" for y in range(17))))
 _register_campaign_probe(
-    "ge-weight", "PSP-GE-WEIGHT-001", GE_WEIGHT_CASES,
-    {case: (10 if case.endswith("-draw") else 16) for case in GE_WEIGHT_CASES},
+    "ge-weight", "PSP-GE-WEIGHT-001", {case: (10 if case.endswith("-draw") else 16) for case in GE_WEIGHT_CASES},
 )
 
 # ge-rtt (158, probe_ge_sample.c): the #343 render-to-texture cells. Per cell of the grt_cells
@@ -3190,8 +3143,7 @@ GE_RTT_CELLS = ("cpu", "flush", "noflush", "warm-noflush", "warm-flush", "warm-t
 GE_RTT_CASES = tuple(case for cell in GE_RTT_CELLS
                      for case in (f"{cell}-draw", f"{cell}-t0", *(f"{cell}-r{y}" for y in range(12))))
 _register_campaign_probe(
-    "ge-rtt", "PSP-GE-RTT-001", GE_RTT_CASES,
-    {case: (10 if case.endswith("-draw") else 16) for case in GE_RTT_CASES},
+    "ge-rtt", "PSP-GE-RTT-001", {case: (10 if case.endswith("-draw") else 16) for case in GE_RTT_CASES},
 )
 
 # The #343 GE pixel corpus (tests/fixtures/psp_oracle/ge_corpus.json, `probe_runs`) carries the measured
@@ -3271,7 +3223,7 @@ MODULE_START_OUT_COUNTS = {
     "ms-refer-after": 27, "ms-mem-after": 2, "ms-idlist": 6, "ms-helper-self": 27,
 }
 _register_campaign_probe(
-    "module-start", "PSP-MODULE-START-001", MODULE_START_CASES, MODULE_START_OUT_COUNTS,
+    "module-start", "PSP-MODULE-START-001", MODULE_START_OUT_COUNTS,
 )
 
 VFPU_TRANSCENDENTAL_OPS = (
@@ -3286,7 +3238,6 @@ VFPU_TRANSCENDENTAL_SEMANTIC_CASES = tuple(
 )
 _register_campaign_probe(
     "vfpu-transcendental-corpus", "PSP-VFPU-TRANSCENDENTAL-001",
-    VFPU_TRANSCENDENTAL_SEMANTIC_CASES,
     {
         case_id: (7 if case_id.endswith("-chunk-07") else 8)
         for case_id in VFPU_TRANSCENDENTAL_SEMANTIC_CASES
@@ -3352,7 +3303,7 @@ GE_TIMING_OUT_COUNTS = {
     "gt-done": 4,
 }
 _register_campaign_probe(
-    "ge-timing", "PSP-GE-TIMING-001", tuple(GE_TIMING_OUT_COUNTS), GE_TIMING_OUT_COUNTS,
+    "ge-timing", "PSP-GE-TIMING-001", GE_TIMING_OUT_COUNTS,
 )
 
 # llsc-link: three link windows and the sc behaviours they measure (see probe.c,
@@ -3360,7 +3311,6 @@ _register_campaign_probe(
 # cell, and the model words for A and B. The parser checks shape only.
 _register_campaign_probe(
     "llsc-link", "PSP-LLSC-001",
-    ("llsc-control", "llsc-second-sc", "llsc-other-address"),
     {"llsc-control": 6, "llsc-second-sc": 6, "llsc-other-address": 6},
 )
 
@@ -3370,8 +3320,7 @@ _register_campaign_probe(
 _FPU_CC_CELLS = ("fpu-cc-fcr31-bits",) + tuple(
     f"fpu-cc{n}-{kind}" for n in range(8) for kind in ("ceq", "branch"))
 _register_campaign_probe(
-    "fpu-cc", "PSP-FPU-CC-001", _FPU_CC_CELLS,
-    {cell: (2 if cell == "fpu-cc-fcr31-bits" else 1 if cell.endswith("-ceq") else 4)
+    "fpu-cc", "PSP-FPU-CC-001", {cell: (2 if cell == "fpu-cc-fcr31-bits" else 1 if cell.endswith("-ceq") else 4)
      for cell in _FPU_CC_CELLS},
 )
 
@@ -3415,7 +3364,6 @@ _CPU_TIMING_OUT_COUNTS.update({
 })
 _register_campaign_probe(
     "cpu-timing", "PSP-CPU-TIMING-001",
-    _CPU_TIMING_SEMANTIC_CASES,
     _CPU_TIMING_OUT_COUNTS,
     terminal_case="cpu-timing-complete",
 )
@@ -3662,8 +3610,24 @@ def _hle_intr_expected_cases(ids: list[str], results: dict[str, TestResult]) -> 
     if register is None or register.status == "PASS":
         expected.extend(HLE_INTR_VBL_CELLS)
         expected.append("vbl-release")
-    elif int(dict(register.values)["result"], 0) != HLE_INTR_NO_SLOT:
-        expected.append("vbl-release")
+    elif register.status == "FAIL":
+        raw_result = dict(register.values).get("result")
+        if raw_result is None:
+            raise ProtocolError(
+                f"{HLE_INTR_TEST_ID}: vbl-register FAIL has no result"
+            )
+        try:
+            slot = int(raw_result, 0)
+        except ValueError as exc:
+            raise ProtocolError(
+                f"{HLE_INTR_TEST_ID}: vbl-register FAIL result is not an integer"
+            ) from exc
+        if slot != HLE_INTR_NO_SLOT:
+            expected.append("vbl-release")
+    elif register.status != "PASS":
+        raise ProtocolError(
+            f"{HLE_INTR_TEST_ID}: vbl-register status {register.status!r} is not PASS or FAIL"
+        )
     return expected
 
 
@@ -3782,7 +3746,7 @@ def parse_registry_readonly_output(
     terminal = records[-1].case_id == "registry-done"
     body = records[2: -1 if terminal else None]
     for index, record in enumerate(body):
-        values = dict(record.values)
+        raw_fields = dict(record.values)
         if record.case_id == "registry-bad-handle":
             # The forged-handle call runs last so a fault there cannot hide
             # the census; nothing but registry-done may follow it.
@@ -3792,17 +3756,22 @@ def parse_registry_readonly_output(
                 )
             _validate_registry_fields(record, {"result", "out0", "out1"})
         elif record.case_id.startswith("registry-category-"):
-            if set(values) != {"result", "out0", "out1", "detail"}:
-                raise ProtocolError(f"{REGISTRY_TEST_ID}: {record.case_id} has invalid fields")
-            _validate_registry_name(values["detail"], category=True)
-            categories.append(values["detail"])
+            values = _io_fields(
+                REGISTRY_TEST_ID, record, {"result", "out0", "out1", "detail"}, {"detail"}
+            )
+            detail = str(values["detail"])
+            _validate_registry_name(detail, category=True)
+            categories.append(detail)
         elif record.case_id.startswith("registry-key-"):
             common = {"result", "out0", "out1", "out2", "out3", "detail"}
-            if set(values) not in (common, common | {"value_hex"}):
-                raise ProtocolError(f"{REGISTRY_TEST_ID}: {record.case_id} has invalid fields")
-            _validate_registry_name(values["detail"], category=False)
-            name = values["detail"].rsplit("/", 1)[-1]
-            has_value = int(values["out2"], 0) == 1
+            expected_fields = common | ({"value_hex"} if "value_hex" in raw_fields else set())
+            values = _io_fields(
+                REGISTRY_TEST_ID, record, expected_fields, {"detail", "value_hex"}
+            )
+            detail = str(values["detail"])
+            _validate_registry_name(detail, category=False)
+            name = detail.rsplit("/", 1)[-1]
+            has_value = values["out2"] == 1
             if name in REGISTRY_MODELED_KEYS:
                 if has_value != ("value_hex" in values):
                     raise ProtocolError(
@@ -3812,9 +3781,11 @@ def parse_registry_readonly_output(
                 raise ProtocolError(
                     f"{REGISTRY_TEST_ID}: non-modeled key value must not be recorded"
                 )
-            if "value_hex" in values and not re.fullmatch(r"(?:[0-9a-fA-F]{2})*", values["value_hex"]):
+            if "value_hex" in values and not re.fullmatch(
+                r"(?:[0-9a-fA-F]{2})*", str(values["value_hex"])
+            ):
                 raise ProtocolError(f"{REGISTRY_TEST_ID}: value_hex is not byte encoded")
-            keys.append(values["detail"])
+            keys.append(detail)
         else:
             raise ProtocolError(f"{REGISTRY_TEST_ID}: unexpected record {record.case_id!r}")
 
@@ -3824,8 +3795,9 @@ def parse_registry_readonly_output(
                 f"{REGISTRY_TEST_ID}: registry-bad-handle must precede registry-done"
             )
         done = records[-1]
-        _validate_registry_fields(done, {"result", "out0", "out1", "out2"})
-        done_values = {key: int(value, 0) for key, value in done.values if key != "detail"}
+        done_values = _io_fields(
+            REGISTRY_TEST_ID, done, {"result", "out0", "out1", "out2"}, set()
+        )
         if done_values["out0"] != len(categories) or done_values["out1"] != len(keys) or \
                 done_values["out2"] != len(records) - 1:
             raise ProtocolError(f"{REGISTRY_TEST_ID}: registry completion counts disagree")
@@ -3833,8 +3805,6 @@ def parse_registry_readonly_output(
         raise ProtocolError(f"{REGISTRY_TEST_ID}: registry stream is missing registry-done")
 
     ordered = [record.case_id for record in records]
-    if ordered[0:2] != list(expected_fixed):
-        raise ProtocolError(f"{REGISTRY_TEST_ID}: registry header order is invalid")
     if terminal and ordered[-1] != "registry-done":
         raise ProtocolError(f"{REGISTRY_TEST_ID}: registry-done must be last")
     if len(set(ordered)) != len(ordered):
@@ -3848,20 +3818,7 @@ def parse_registry_readonly_output(
 
 
 def _validate_registry_fields(record, expected: set[str]) -> None:
-    values = dict(record.values)
-    if set(values) != expected:
-        raise ProtocolError(
-            f"{REGISTRY_TEST_ID}: {record.case_id} fields must be {sorted(expected)}, "
-            f"got {sorted(values)}"
-        )
-    for field, value in values.items():
-        if field != "detail":
-            try:
-                int(value, 0)
-            except ValueError as exc:
-                raise ProtocolError(
-                    f"{REGISTRY_TEST_ID}: {record.case_id} {field} is not an integer"
-                ) from exc
+    _io_fields(REGISTRY_TEST_ID, record, expected, {"detail"})
 
 
 def _validate_registry_name(value: str, *, category: bool) -> None:
@@ -3967,28 +3924,13 @@ def _font_reopenable(name: str) -> bool:
 
 
 def _font_fields(record: TestResult, expected: set[str]) -> dict[str, int | str]:
-    values = dict(record.values)
-    if set(values) != expected:
-        raise ProtocolError(
-            f"{REGISTRY_FONT_TEST_ID}: {record.case_id} fields must be {sorted(expected)}, "
-            f"got {sorted(values)}"
-        )
-    out: dict[str, int | str] = {}
-    for field, value in values.items():
-        if field in {"detail", "value_hex", "name_hex"}:
-            if field != "detail" and not re.fullmatch(r"(?:[0-9a-f]{2})*", value):
-                raise ProtocolError(
-                    f"{REGISTRY_FONT_TEST_ID}: {record.case_id} {field} is not byte encoded"
-                )
-            out[field] = value
-            continue
-        try:
-            out[field] = int(value, 0)
-        except ValueError as exc:
-            raise ProtocolError(
-                f"{REGISTRY_FONT_TEST_ID}: {record.case_id} {field} is not an integer"
-            ) from exc
-    return out
+    return _io_fields(
+        REGISTRY_FONT_TEST_ID,
+        record,
+        expected,
+        {"detail", "value_hex", "name_hex"},
+        byte_hex_fields={"value_hex", "name_hex"},
+    )
 
 
 def parse_registry_font_output(
@@ -4269,7 +4211,12 @@ class FontFilesReport:
 
 
 def _io_fields(
-    test_id: str, record: TestResult, expected: set[str], text: set[str]
+    test_id: str,
+    record: TestResult,
+    expected: set[str] | frozenset[str],
+    text: set[str] | frozenset[str],
+    *,
+    byte_hex_fields: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, int | str]:
     values = dict(record.values)
     if set(values) != expected:
@@ -4279,6 +4226,8 @@ def _io_fields(
     out: dict[str, int | str] = {}
     for field, value in values.items():
         if field in text:
+            if field in byte_hex_fields and not re.fullmatch(r"(?:[0-9a-f]{2})*", value):
+                raise ProtocolError(f"{test_id}: {record.case_id} {field} is not byte encoded")
             out[field] = value
             continue
         try:
@@ -4876,6 +4825,13 @@ CACHE_SPEC = StreamSpec(
     semantic_cases=CACHE_SEMANTIC_CASES,
     terminal_case=CACHE_TERMINAL_CASE,
 )
+CACHE_OUT_COUNTS = {
+    "cache-alias-init": 3,
+    "cache-writeback-contrast": 3,
+    "cache-inval-contrast": 3,
+    "cache-wball": 2,
+    CACHE_TERMINAL_CASE: 1,
+}
 CACHE_EXPECTED_CASES = CACHE_SPEC.ordered_cases
 CACHE_EXPECTED_TERMINAL_COUNT = CACHE_SPEC.terminal_count
 
@@ -4917,6 +4873,7 @@ def parse_cache_alias_output(
     """
 
     sequence = parse_sequence(text, CACHE_SPEC, require_complete=require_complete)
+    _validate_scalar_shape(sequence, CACHE_OUT_COUNTS)
     return CacheAliasReport(
         sequence=sequence,
         stale_cached_read=_observable(sequence, "cache-inval-contrast", "out0"),
@@ -4959,7 +4916,21 @@ IO_SPEC = StreamSpec(
     test_id=IO_EXPECTED_TEST_ID,
     semantic_cases=IO_SEMANTIC_CASES,
     terminal_case=IO_TERMINAL_CASE,
+    inspection_optional_cases=frozenset({"io-write", "io-lseek"}),
+    fail_optional_fields=(
+        ("io-read-verify", frozenset({"out1"})),
+        ("io-append", frozenset({"out1"})),
+    ),
 )
+IO_OUT_COUNTS = {
+    "io-open-create": 1,
+    "io-write": 2,
+    "io-read-verify": 2,
+    "io-lseek": 3,
+    "io-append": 2,
+    "io-errors": 3,
+    IO_TERMINAL_CASE: 1,
+}
 IO_EXPECTED_CASES = IO_SPEC.ordered_cases
 IO_EXPECTED_TERMINAL_COUNT = IO_SPEC.terminal_count
 
@@ -4983,6 +4954,10 @@ class IoMatrixReport:
         return self.sequence.all_passed
 
     @property
+    def incomplete_reason(self) -> str | None:
+        return self.sequence.incomplete_reason
+
+    @property
     def record_count(self) -> int:
         return self.sequence.record_count
 
@@ -5000,6 +4975,7 @@ def parse_io_matrix_output(text: str, *, require_complete: bool = True) -> IoMat
     """
 
     sequence = parse_sequence(text, IO_SPEC, require_complete=require_complete)
+    _validate_scalar_shape(sequence, IO_OUT_COUNTS)
     return IoMatrixReport(
         sequence=sequence,
         # out0 of io-open-create is the raw SceUID the probe was handed.  It is
@@ -5078,19 +5054,7 @@ def parse_mbx_delete_wait_output(
         record = sequence.results.get(case_id)
         if record is None:
             continue
-        actual_fields = set(dict(record.values))
-        if actual_fields != expected_fields:
-            missing = sorted(expected_fields - actual_fields)
-            unexpected = sorted(actual_fields - expected_fields)
-            details = []
-            if missing:
-                details.append(f"missing {', '.join(missing)}")
-            if unexpected:
-                details.append(f"unexpected {', '.join(unexpected)}")
-            raise ProtocolError(
-                f"{MBX_DELETE_WAIT_SPEC.test_id}: {case_id} field set mismatch: "
-                + "; ".join(details)
-            )
+        _io_fields(MBX_DELETE_WAIT_SPEC.test_id, record, expected_fields, set())
     return MbxDeleteWaitReport(sequence=sequence)
 
 
@@ -5138,24 +5102,29 @@ def parse_ctrl_clock_output(text: str, *, require_complete: bool = True) -> Ctrl
     ordered_results: list[TestResult] = []
     seen: set[str] = set()
     active_test_id: str | None = None
+    expected_cases: list[str] | None = None
 
     for r in parsed.results:
-        if r.test_id in EXPECTED_TEST_IDS:
-            if active_test_id is None:
-                active_test_id = r.test_id
-            elif r.test_id != active_test_id:
-                raise ProtocolError(f"mixed test_ids in stream: {active_test_id} and {r.test_id}")
-            if r.case_id in seen:
-                raise ProtocolError(f"duplicate ctrl/clock case: {r.case_id}")
-            seen.add(r.case_id)
-            ordered_results.append(r)
+        if r.test_id not in EXPECTED_TEST_IDS:
+            raise ProtocolError(f"foreign ctrl/clock test_id in stream: {r.test_id}")
+        if active_test_id is None:
+            active_test_id = r.test_id
+            expected_cases = (
+                EXPECTED_SYSTEM_CASES if active_test_id == "PSP-SYSTEM-001" else EXPECTED_CTRL_CASES
+            )
+        elif r.test_id != active_test_id:
+            raise ProtocolError(f"mixed test_ids in stream: {active_test_id} and {r.test_id}")
+        if expected_cases is None or r.case_id not in expected_cases:
+            raise ProtocolError(f"unexpected ctrl/clock case: {r.case_id}")
+        if r.case_id in seen:
+            raise ProtocolError(f"duplicate ctrl/clock case: {r.case_id}")
+        seen.add(r.case_id)
+        ordered_results.append(r)
 
     if not ordered_results or active_test_id is None:
         raise ProtocolError("missing required ctrl/clock test records")
 
-    expected_cases = (
-        EXPECTED_SYSTEM_CASES if active_test_id == "PSP-SYSTEM-001" else EXPECTED_CTRL_CASES
-    )
+    assert expected_cases is not None
     results = {r.case_id: r for r in ordered_results}
     actual_order = [r.case_id for r in ordered_results]
 
@@ -5245,6 +5214,11 @@ EXPECTED_CELLS = [
 TERMINAL_CELL = "fpu-done"
 SEMANTIC_CELLS = [cid for cid in EXPECTED_CELLS if cid != TERMINAL_CELL]
 FPU_EXPECTED_TERMINAL_COUNT = len(SEMANTIC_CELLS)
+FPU_SPEC = StreamSpec(
+    test_id=FPU_EXPECTED_TEST_ID,
+    semantic_cases=tuple(SEMANTIC_CELLS),
+    terminal_case=TERMINAL_CELL,
+)
 
 
 @dataclass(frozen=True)
@@ -5275,48 +5249,11 @@ def parse_fpu_vector_output(text: str, *, require_complete: bool = True) -> FpuV
     a probe that emits its terminal record after losing middle records is
     exactly the shape the transport defect produces.
     """
-    parsed = parse_output(text)
-    fpu_ordered_results: list[TestResult] = []
-    seen: set[str] = set()
-    known = set(EXPECTED_CELLS)
-    for r in parsed.results:
-        # A foreign test_id or an unknown cell is never a truncation, so both
-        # fail closed in *both* strictness modes.  Filtering them out instead
-        # would let a complete FPU run plus an appended record from another
-        # probe's run parse as an unqualified pass.
-        if r.test_id != FPU_EXPECTED_TEST_ID:
-            raise ProtocolError(
-                f"fpu stream carries a foreign test_id {r.test_id!r} (case {r.case_id!r})"
-            )
-        if r.case_id not in known:
-            raise ProtocolError(f"fpu stream contains unknown cell: {r.case_id}")
-        if r.case_id in seen:
-            raise ProtocolError(f"duplicate fpu cell: {r.case_id}")
-        seen.add(r.case_id)
-        fpu_ordered_results.append(r)
-
-    fpu_results = {r.case_id: r for r in fpu_ordered_results}
+    sequence = parse_sequence(text, FPU_SPEC, require_complete=require_complete)
+    fpu_results = sequence.results
 
     if "fpu-boot-fcr31" not in fpu_results:
         raise ProtocolError("missing required fpu-boot-fcr31 diagnostic cell")
-
-    actual_order = [r.case_id for r in fpu_ordered_results]
-    if require_complete:
-        if actual_order != EXPECTED_CELLS:
-            missing = [cid for cid in EXPECTED_CELLS if cid not in fpu_results]
-            if missing:
-                raise ProtocolError(f"fpu stream incomplete, missing cells: {missing}")
-            # Unknown cells are rejected above, in both strictness modes, so a
-            # complete-set mismatch that is not a missing cell can only be an
-            # ordering fault.
-            raise ProtocolError(
-                f"fpu cells out of order: expected {EXPECTED_CELLS}, got {actual_order}"
-            )
-    else:
-        expected_indices = {cid: idx for idx, cid in enumerate(EXPECTED_CELLS)}
-        indices = [expected_indices.get(cid, -1) for cid in actual_order if cid in expected_indices]
-        if any(indices[i] > indices[i + 1] for i in range(len(indices) - 1)):
-            raise ProtocolError(f"fpu cells out of order: {actual_order}")
 
     boot_rec = fpu_results["fpu-boot-fcr31"]
     val_dict = dict(boot_rec.values)
@@ -5332,42 +5269,12 @@ def parse_fpu_vector_output(text: str, *, require_complete: bool = True) -> FpuV
     # Completeness is a property of the observed cell sequence, never of the
     # caller's strictness flag.  ``require_complete`` only decides whether an
     # incomplete stream raises or is returned for inspection.
-    complete = actual_order == EXPECTED_CELLS
-    terminal_present = TERMINAL_CELL in fpu_results
-
-    # A terminal record that disagrees with the protocol's semantic cell count
-    # is a corrupted or mismatched stream, not a truncation, so it fails closed
-    # in both strictness modes.  Without this check a sentinel claiming any
-    # count at all would be accepted, and the completion record would carry no
-    # verifiable meaning.
-    if terminal_present:
-        done_values = dict(fpu_results[TERMINAL_CELL].values)
-        if "out0" not in done_values:
-            raise ProtocolError(
-                f"fpu terminal record {TERMINAL_CELL!r} is missing its out0 completion count"
-            )
-        try:
-            claimed_count = int(done_values["out0"], 0)
-        except ValueError as exc:
-            raise ProtocolError(
-                f"fpu terminal count is not an integer: {done_values['out0']!r}"
-            ) from exc
-        if claimed_count != FPU_EXPECTED_TERMINAL_COUNT:
-            raise ProtocolError(
-                f"fpu terminal count mismatch: {TERMINAL_CELL} claims {claimed_count} "
-                f"semantic cells, protocol expects {FPU_EXPECTED_TERMINAL_COUNT}"
-            )
-        observed_semantic = len([cid for cid in actual_order if cid != TERMINAL_CELL])
-        if complete and observed_semantic != claimed_count:
-            raise ProtocolError(
-                f"fpu terminal count mismatch: {TERMINAL_CELL} claims {claimed_count} "
-                f"semantic cells, stream carries {observed_semantic}"
-            )
-
-    all_passed = complete and all(r.status == "PASS" for r in fpu_results.values())
+    complete = sequence.complete
+    terminal_present = sequence.terminal_present
+    all_passed = sequence.all_passed
 
     return FpuVectorReport(
-        raw_record_count=len(parsed.results),
+        raw_record_count=sequence.record_count,
         cell_count=len(fpu_results),
         boot_fcr31=boot_fcr,
         trap_enables=enables,
@@ -5416,6 +5323,11 @@ EXPECTED_ORDERED_CASES = EXPECTED_ALL_CASES + [SUMMARY_CASE]
 # measurement.  It carries the number of semantic cases the probe believes it
 # executed in ``out0`` (41 = 6 C + 4 D + 19 B + 12 A).
 PHASEB_EXPECTED_TERMINAL_COUNT = len(EXPECTED_ALL_CASES)
+PHASEB_SPEC = StreamSpec(
+    test_id=PHASEB_EXPECTED_TEST_ID,
+    semantic_cases=tuple(EXPECTED_ALL_CASES),
+    terminal_case=SUMMARY_CASE,
+)
 
 
 @dataclass(frozen=True)
@@ -5441,94 +5353,24 @@ def parse_phaseb_output(text: str, *, require_complete: bool = True) -> PhaseBRe
     the ``PHASEB-COMPLETE`` summary record is reported separately as
     ``summary_present`` and never substitutes for completeness.
     """
-    parsed = parse_output(text)
-    ordered_results: list[TestResult] = []
-    seen: set[str] = set()
-    known = set(EXPECTED_ORDERED_CASES)
-    for r in parsed.results:
-        # A foreign test_id or an unknown case is never a truncation, so both
-        # fail closed in *both* strictness modes.  Filtering them out instead
-        # would let a complete Phase-B run plus an appended record from another
-        # run parse as an unqualified pass.
-        if r.test_id != PHASEB_EXPECTED_TEST_ID:
-            raise ProtocolError(
-                f"phaseb stream carries a foreign test_id {r.test_id!r} (case {r.case_id!r})"
-            )
-        if r.case_id not in known:
-            raise ProtocolError(f"phaseb stream contains unknown case: {r.case_id}")
-        if r.case_id in seen:
-            raise ProtocolError(f"duplicate phaseb case: {r.case_id}")
-        seen.add(r.case_id)
-        ordered_results.append(r)
-
-    results = {r.case_id: r for r in ordered_results}
-    actual_order = [r.case_id for r in ordered_results]
-
-    if require_complete:
-        if actual_order != EXPECTED_ORDERED_CASES:
-            missing = [cid for cid in EXPECTED_ORDERED_CASES if cid not in results]
-            if missing:
-                raise ProtocolError(
-                    f"phaseb stream incomplete, missing {len(missing)} cases: {missing[:5]}"
-                )
-            # Unknown cases are rejected above, in both strictness modes, so a
-            # complete-set mismatch that is not a missing case can only be an
-            # ordering fault.
-            raise ProtocolError(
-                f"phaseb cases out of order: expected {EXPECTED_ORDERED_CASES}, got {actual_order}"
-            )
-    else:
-        expected_indices = {cid: idx for idx, cid in enumerate(EXPECTED_ORDERED_CASES)}
-        indices = [expected_indices.get(cid, -1) for cid in actual_order if cid in expected_indices]
-        if any(indices[i] > indices[i + 1] for i in range(len(indices) - 1)):
-            raise ProtocolError(f"phaseb cases out of order: {actual_order}")
+    sequence = parse_sequence(text, PHASEB_SPEC, require_complete=require_complete)
+    results = sequence.results
 
     sec_a = sum(1 for cid in SECTION_A_CASES if cid in results)
     sec_b = sum(1 for cid in SECTION_B_CASES if cid in results)
     sec_c = sum(1 for cid in SECTION_C_CASES if cid in results)
     sec_d = sum(1 for cid in SECTION_D_CASES if cid in results)
 
-    # Completeness is a property of the observed case sequence, never of the
-    # caller's strictness flag, and never of the summary record alone.
-    summary_present = SUMMARY_CASE in results
-
-    # A summary record disagreeing with the protocol's semantic case count is a
-    # corrupted or mismatched stream, not a truncation, so it fails closed in
-    # both strictness modes.
-    if summary_present:
-        summary_values = dict(results[SUMMARY_CASE].values)
-        if "out0" not in summary_values:
-            raise ProtocolError(
-                f"phaseb terminal record {SUMMARY_CASE!r} is missing its out0 completion count"
-            )
-        try:
-            claimed_count = int(summary_values["out0"], 0)
-        except ValueError as exc:
-            raise ProtocolError(
-                f"phaseb terminal count is not an integer: {summary_values['out0']!r}"
-            ) from exc
-        if claimed_count != PHASEB_EXPECTED_TERMINAL_COUNT:
-            raise ProtocolError(
-                f"phaseb terminal count mismatch: {SUMMARY_CASE} claims {claimed_count} "
-                f"semantic cases, protocol expects {PHASEB_EXPECTED_TERMINAL_COUNT}"
-            )
-        observed_semantic = len([cid for cid in actual_order if cid != SUMMARY_CASE])
-        if actual_order == EXPECTED_ORDERED_CASES and observed_semantic != claimed_count:
-            raise ProtocolError(
-                f"phaseb terminal count mismatch: {SUMMARY_CASE} claims {claimed_count} "
-                f"semantic cases, stream carries {observed_semantic}"
-            )
-
-    completed = actual_order == EXPECTED_ORDERED_CASES
-    all_passed = completed and all(r.status == "PASS" for r in results.values())
+    completed = sequence.complete
+    all_passed = sequence.all_passed
 
     return PhaseBReport(
-        raw_record_count=len(parsed.results),
+        raw_record_count=sequence.record_count,
         section_a_count=sec_a,
         section_b_count=sec_b,
         section_c_count=sec_c,
         section_d_count=sec_d,
-        summary_present=summary_present,
+        summary_present=sequence.terminal_present,
         completed=completed,
         all_passed=all_passed,
         results=results,

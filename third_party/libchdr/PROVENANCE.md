@@ -15,7 +15,11 @@ not linked into the runtime, which never reads a CHD.
 - Pin: commit `47d794151b2b64f6aba60304e6480f4f5a2bc24b` (2026-10-11, "Merge pull
   request #198 from 0x000NULL/fix-crafted-chd"), the head of the default branch
   `master` at the time of import. Upstream has no release tags.
-- License: BSD-3-Clause, `Copyright Romain Tisserand` (`LICENSE.txt`). libchdr
+- License: BSD-3-Clause, `Copyright Romain Tisserand` (`LICENSE.txt`); the
+  MAME-derived sources (`libchdr_chd.c`, `libchdr_cdrom.c`, `libchdr_huffman.c`,
+  `libchdr_bitstream.c`, `libchdr_flac.c`, `libchdr_codec_avhuff.c` and their
+  headers) are `Copyright Aaron Giles`, under the BSD-3-Clause text kept at the top
+  of `src/libchdr_chd.c`. libchdr
   carries three third-party codecs and a FLAC reader, each under its own terms
   (below); all are compatible with GPL-3.0-or-later, so they are imported under
   `AGENTS.md` section 4's import rules.
@@ -23,9 +27,11 @@ not linked into the runtime, which never reads a CHD.
   commit (`git cat-file blob <commit>:<path>`). Twenty of them store CRLF line
   endings upstream; the tree's text rule is LF (`.gitattributes`,
   `tools/publish_audit.py`), so those were normalised to LF and one licence file
-  gained a final newline (see [Local deltas](#local-deltas)). Nothing else
-  changed. `.gitattributes` exempts the imported files from the whitespace
-  checks, because upstream ends some lines in spaces. The upstream blob IDs below
+  gained a final newline (see [Local deltas](#local-deltas)). Two source
+  files later gained small code fixes, dated and described in
+  [Code changes](#code-changes); nothing else changed. `.gitattributes`
+  exempts the imported files from the whitespace checks, because upstream ends
+  some lines in spaces. The upstream blob IDs below
   are `git rev-parse <commit>:<path>` at the pin; the SHA-256 values were
   calculated from the bytes in this tree. Each upstream licence file named
   `LICENSE` is stored as `LICENSE.txt`, so the publication classifier
@@ -37,11 +43,17 @@ not linked into the runtime, which never reads a CHD.
 | --- | --- | --- | --- | --- |
 | `deps/miniz-3.1.2/` | miniz (inflate only) | 3.1.2 | MIT | 2013-2014 RAD Game Tools and Valve Software; 2010-2014 Rich Geldreich and Tenacious Software LLC |
 | `deps/zstd-1.5.7/` | Zstandard single-file decompressor | 1.5.7 | BSD-3-Clause (upstream also offers GPL-2.0-only; the project uses BSD-3-Clause) | Meta Platforms, Inc. and affiliates |
-| `deps/lzma-26.02/` | LZMA SDK decoder | 26.02 (`LzmaDec.c` dated 2023-04-07) | public domain (SPDX `LZMA-SDK-9.22` text) | Igor Pavlov |
-| `include/dr_libs/` | dr_flac | v0.13.4 | Unlicense or MIT-0; the project elects the Unlicense, as for `third_party/dr_libs/` | David Reid |
+| `deps/lzma-26.02/` | LZMA SDK decoder (`include/real/`, `src/real/` and `LICENSE.txt`) | 26.02 (`LzmaDec.c` dated 2023-04-07) | public domain (SPDX `LZMA-SDK-9.22` text) | Igor Pavlov |
+| `include/dr_libs/` | dr_flac | v0.13.4 development snapshot (the header reads `v0.13.4 - TBD`), as libchdr carries it at the pin; no dr_libs commit is recorded | Unlicense or MIT-0; the project elects the Unlicense, as for `third_party/dr_libs/` | David Reid |
 
 The codec sources are the copies in libchdr's `deps/` and `include/dr_libs/`
-at the pin. libchdr does not carry the miniz and Zstandard licence files, so
+at the pin. The two outer LZMA files, `deps/lzma-26.02/include/LzmaDec.h` and
+`deps/lzma-26.02/src/LzmaDec.c`, are not LZMA SDK files: they are libchdr's own
+namespacing shims (the header renames the `LzmaDec_*` symbols to `CHDR_LzmaDec_*`
+"to avoid linker errors in static libretro builds" and includes
+`real/LzmaDec.h`; the source includes it and `real/LzmaDec.c`). Their author and
+licence are libchdr's (BSD-3-Clause, `LICENSE.txt`); only the `real/` files and
+the folder's `LICENSE.txt` are the LZMA SDK's. libchdr does not carry the miniz and Zstandard licence files, so
 each was imported from its own upstream at the tag libchdr's folder names (the
 miniz one with its CRLF line endings normalised, as above):
 
@@ -53,6 +65,12 @@ miniz one with its CRLF line endings normalised, as above):
 Both were downloaded from `raw.githubusercontent.com` at those commits; the
 downloaded bytes' Git blob IDs match the files the GitHub contents API reports
 at those commits (the IDs in the manifest).
+
+libchdr carries no dr_flac licence file either. The text shipped for dr_flac is
+`third_party/dr_libs/LICENSE.txt`, the dr_libs project licence imported with
+dr_wav: the same two alternatives as the end of `dr_flac.h`, except that its
+MIT-0 copyright line reads "Copyright 2020 David Reid" where `dr_flac.h` reads
+"Copyright 2023 David Reid".
 
 ## What is built, and how
 
@@ -101,13 +119,13 @@ zstd is linked, so the player's runtime DLL set is unchanged.
 | `src/libchdr_codec_cdlz.c` | LOCAL DELTA: CRLF line endings normalised to LF | `4018a89d28361a6e217f8746e5304a76719797a9` | `7e81794d6dfc41092c41e2b4e0c0656f4c7c103ce90257df3faca23d5839e92a` |
 | `src/libchdr_codec_cdzl.c` | LOCAL DELTA: CRLF line endings normalised to LF | `8fdb721841155a2e794343cf16f7aededec181eb` | `ddad1d499cb63a146f086f3b8c6760f5c01c46e0ff85e80b7259c2ebb2a2368a` |
 | `src/libchdr_codec_cdzs.c` | LOCAL DELTA: CRLF line endings normalised to LF | `6679202e03eefef5068a8fa29d7b2f3feec8fd4c` | `3859bab33d4b3a0aff76fd7f367cf4c5eb89a7f269d0bcb89551e034425dd9d8` |
-| `src/libchdr_codec_flac.c` | LOCAL DELTA: CRLF line endings normalised to LF | `32aa7221debd5e07536017c40cb273db231104ce` | `92f3626efdad658b66da61cb91f95aadbb0a8b0d8cd7822be37ba7cbcd0d98d8` |
+| `src/libchdr_codec_flac.c` | LOCAL DELTA: CRLF line endings normalised to LF; empty-hunk check moved first (2026-11-17) | `32aa7221debd5e07536017c40cb273db231104ce` | `57461fdb8f0219f6d694b6011785358da5b584754f1900fcefd4392ea75d1f03` |
 | `src/libchdr_codec_huff.c` | LOCAL DELTA: CRLF line endings normalised to LF | `6453d6857d7b5773c533bec486d45b14d39a4f6f` | `ca71cb88148b3279f1f5e572428f4b481c5e594d5967b0a1e859d1b57d3a72ac` |
 | `src/libchdr_codec_lzma.c` | LOCAL DELTA: CRLF line endings normalised to LF | `bd308541f05193d687853cd2f9dfff187876234e` | `1f6fb7b72c2a41e56cabc67eb15b86b3779b91a383008dff134009685cd3347b` |
 | `src/libchdr_codec_zlib.c` | imported byte-identical | `6d299fe369a2a45495976e7537d77f3c60803bfd` | `f15fee532e749dfd6933291e2fb36736b62c71a8986b2b7afdb3bfd6bc0d1961` |
 | `src/libchdr_codec_zstd.c` | LOCAL DELTA: CRLF line endings normalised to LF | `5390d5d415aaadaf78a5a630b81c90e00af2464c` | `85ac736886bd5915bcc28f401295610cb473b07d04cf6c088d6e8693fd785d05` |
 | `src/libchdr_flac.c` | imported byte-identical | `2d1ad10e255deaa65a6debad641afb01b203756e` | `ee8dc53130ee5a86df4a783e6f55cdb5cba6856e340c7e7feff40ff314461cc7` |
-| `src/libchdr_huffman.c` | imported byte-identical | `16d96b5f627f6a69dd407fc1f17b51cd232a91d9` | `1d9617d27ec324674157dbe3e8284ed7ea32d6c6cf5b802996086559cef249f2` |
+| `src/libchdr_huffman.c` | imported + LOCAL DELTA: lookup table prefilled (2026-11-17) | `16d96b5f627f6a69dd407fc1f17b51cd232a91d9` | `0360fbc7e97a123419f10533c732d62c08d12ccc8717b404d20774a2326c9712` |
 | `deps/miniz-3.1.2/miniz.c` | imported byte-identical | `54fc5f39ef444e7cfd768ca8e46cee12684dc4c1` | `e2c1aeb66eef9191d8c3feb164db2def2335a61d039bf04ed849f6b042433b30` |
 | `deps/miniz-3.1.2/miniz.h` | imported byte-identical | `d8244d085b6d2353e7056045c5aff4bd11c143c6` | `b53b62ed122e559b8f679e3cb787a0b0035fe87a58f909da0e44931678f4e85f` |
 | `deps/miniz-3.1.2/LICENSE.txt` | LOCAL DELTA: CRLF line endings normalised to LF | `1982f4bb8f4afa3dcbe803887fb4af7573430e51` | `6f20fa7672b00e2e975c291df737cf227addf3ad32e36fef3fe0f416e4664d3d` |
@@ -116,21 +134,22 @@ zstd is linked, so the player's runtime DLL set is unchanged.
 | `deps/zstd-1.5.7/zstddeclib.c` | imported byte-identical | `a7623f8a417a55dcd08882a772358b94b55e7caa` | `e1dc239cb4bcf3c00a0462fdbe5f3e3c78f907c4f8cb02c048807d754bdc51b5` |
 | `deps/zstd-1.5.7/LICENSE.txt` | imported byte-identical (Zstandard `v1.5.7`) | `75800288cc243f164b9d130f125e2ffae28f8e39` | `7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8` |
 | `deps/lzma-26.02/LICENSE.txt` | LOCAL DELTA: final newline added | `5f57051693886e063b523267829fee2abbd419ce` | `80a299fe3660988ee37f93b21777b1352a7dd0375f6e0747950ad3b0386675e1` |
-| `deps/lzma-26.02/include/LzmaDec.h` | LOCAL DELTA: CRLF line endings normalised to LF | `0aeba2d5f827087c6e118ed72c074c4ab1321588` | `0c019478dd91040d01b789ec049d9434703530742d6bfe49181644e7b3ee3f44` |
+| `deps/lzma-26.02/include/LzmaDec.h` | LOCAL DELTA: CRLF line endings normalised to LF (libchdr's namespacing shim, BSD-3-Clause, not an LZMA SDK file) | `0aeba2d5f827087c6e118ed72c074c4ab1321588` | `0c019478dd91040d01b789ec049d9434703530742d6bfe49181644e7b3ee3f44` |
 | `deps/lzma-26.02/include/real/7zTypes.h` | imported byte-identical | `8aaabc8fbca8b49ba73ede50b65f3a7d97d829da` | `b166eeaf8e4cab98c1403177736a127c55c5665c4be8897b777d237cb3e36763` |
 | `deps/lzma-26.02/include/real/LzmaDec.h` | imported byte-identical | `b0ce28fa02a1adc422b7269c4e6d2c2d26fc60b9` | `3aaf07b4ae4173a2d103179455dc7089b5ddbc7fc3db3c0e40964a7499c69266` |
-| `deps/lzma-26.02/src/LzmaDec.c` | LOCAL DELTA: CRLF line endings normalised to LF | `4772470af2daa31947894f73ea25fedfd25dd8ac` | `8545ad59d1ad8b619d9749e15bdd9167fac440486040162814be5ed491e9f809` |
+| `deps/lzma-26.02/src/LzmaDec.c` | LOCAL DELTA: CRLF line endings normalised to LF (libchdr's namespacing shim, BSD-3-Clause, not an LZMA SDK file) | `4772470af2daa31947894f73ea25fedfd25dd8ac` | `8545ad59d1ad8b619d9749e15bdd9167fac440486040162814be5ed491e9f809` |
 | `deps/lzma-26.02/src/real/LzmaDec.c` | imported byte-identical | `ceeec5196af233511e50f409064f748ffdc65d4b` | `e9eaa3b0106c4c08da8080e40c9e32cf20c4bb6f1ec34ea394becec325d71d11` |
 | `PROVENANCE.md` | project-authored manifest | n/a | n/a |
 
 ## Local deltas
 
-Line endings only. The files below store CRLF line endings upstream and are
+Two files carry code changes, described in [Code changes](#code-changes); the
+rest are line endings only. The files below store CRLF line endings upstream and are
 kept with LF here, the tree's text rule; `deps/lzma-26.02/LICENSE.txt` has no final
 newline upstream and gained one. No byte other than those line endings
 changed, so the C tokens, the licence words and the copyright headers are
 exactly upstream's: `git diff --ignore-cr-at-eol` against the pinned upstream
-file is empty for each. Every other imported file is byte-identical to its
+file is empty for each, except `src/libchdr_codec_flac.c` (below). Every other imported file is byte-identical to its
 upstream blob. The table gives each changed file's upstream SHA-256; the
 manifest above gives the SHA-256 in this tree.
 
@@ -153,7 +172,29 @@ manifest above gives the SHA-256 in this tree.
 | `src/libchdr_codec_cdlz.c` | CRLF to LF | `8e62e01993aec7e27e847f1008ea6dec476de25b4800083abf6502d8c6952393` |
 | `src/libchdr_codec_cdzl.c` | CRLF to LF | `e14acfe1c44cb69bd24b052e386b81b36fc7f5f7f1a062b9a1e41de0088f985d` |
 | `src/libchdr_codec_cdzs.c` | CRLF to LF | `4fbe14e3727fcd6ed592be406ca1ea6d9c074bd3f6acca57100af07dcaf1e301` |
-| `src/libchdr_codec_flac.c` | CRLF to LF | `feafae3d2e5c342f35ae1c3d941028c7acc594c319f53d225d1c56592fc78697` |
+| `src/libchdr_codec_flac.c` | CRLF to LF; empty-hunk check moved first | `feafae3d2e5c342f35ae1c3d941028c7acc594c319f53d225d1c56592fc78697` |
 | `src/libchdr_codec_huff.c` | CRLF to LF | `b8ea9c56c436a4dfa9e97a8f78e0caad3ec490a375acb0ecc617d22cdbd91f73` |
 | `src/libchdr_codec_lzma.c` | CRLF to LF | `912932f585dc12b8f399b49b718a3c9533049efa2393b42d51240a22813d8fcd` |
 | `src/libchdr_codec_zstd.c` | CRLF to LF | `92efc390845a76d027cf2c3bbaae0c7643109f3b3654fea07ed01871a9a3b76a` |
+| `src/libchdr_huffman.c` | lookup table prefilled | `1d9617d27ec324674157dbe3e8284ed7ea32d6c6cf5b802996086559cef249f2` |
+
+### Code changes
+
+Each change is marked in the file with a `Nakagawa LOCAL DELTA (2026-11-17)`
+comment and checked by `tests/native/test_disc_expand.c`, which fails on the
+upstream bytes.
+
+- `src/libchdr_codec_flac.c` (2026-11-17): `flac_codec_decompress` checks
+  `complen == 0` before it reads `src[0]`, the endianness byte. Upstream reads
+  that byte first, so a v5 map entry of length 0 for the FLAC codec read the
+  never-written compressed buffer (uninitialised memory) before refusing the
+  hunk. The result for every input is unchanged: the hunk is still refused with
+  `CHDERR_DECOMPRESSION_ERROR`.
+- `src/libchdr_huffman.c` (2026-11-17): the full-table
+  `huffman_build_lookup_table` (the one built here, `LOWRAM_TARGET` 0) fills
+  the whole `2^maxbits` table with `MAKE_LOOKUP(0, 1)` before writing the codes,
+  as upstream's `LOWRAM_TARGET` variant already does. A malformed tree (a single
+  one-bit code, which the Kraft check exempts, or an all-zero tree) leaves slots
+  that no code writes; upstream decoded those from uninitialised heap or, for the
+  HUFF codec's decoder reused across hunks, from the previous hunk's tree. Valid
+  trees cover every slot, so their output is unchanged.

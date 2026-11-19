@@ -27,6 +27,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 #include "recomp.h"
+#include "../core/nk_display_size.h"
 #include "../core/nk_shared_helpers.h"
 #include "gpu_sdl3vk/sdl3vk.h"
 #include "fbcap.h"
@@ -35,6 +36,7 @@
 #include "osk_overlay.h"        /* the in-window keyboard: keys in, the frame drawn over */
 #include "osk_overlay_paint.h"
 #include "ace.h"             /* Ace Mode: crisp keyboard; refused by the acceptance checkpoint */
+#include "cheats.h"          /* the user's cheats: read at start, their marker drawn (#2639) */
 #include "ge_shared.h"       /* the software renderer's twin rows (#2050) and the VRAM viewer's
                                 decoders (#314) */
 #ifdef SR_SDL3VK
@@ -67,8 +69,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define PSP_W 480
-#define PSP_H 272
+#define PSP_W NK_PSP_DISPLAY_WIDTH
+#define PSP_H NK_PSP_DISPLAY_HEIGHT
 #define PSP_SCANOUT_RATE_NUMERATOR 60000ull
 #define PSP_SCANOUT_RATE_DENOMINATOR 1001ull
 #define PSP_SCANOUT_PERIOD_NS \
@@ -388,6 +390,8 @@ static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
     s_ace_present_kind = ACE_PRESENT_REAL;
     s_ace_show_pending = ACE_SHOW_REAL;
     gui_ace_collect_motion();
+    /* What the pass changes is kept until its present ends: undone if it is never submitted. */
+    ace_smooth_begin(s_ace_smooth);
     if (!src) {
         VkImage held = ace_smooth_held(s_ace_smooth, vk_cmd);
         if (!held) return NULL;
@@ -440,10 +444,17 @@ static void *gui_ace_show_pass(void *cmd, void *src, int *w, int *h) {
  * the owed frame and holds the new one again (ace.h, ace_pace_owed_failed). Failed before its
  * submission, the pass's commands never ran, so the frame is given up and counted. The new frame of a
  * failed in-between is not held, so the CPU present shows it as itself and no VBLANK shows it
- * again, and an in-between nobody saw is not measured. */
+ * again, and an in-between nobody saw is not measured. Whatever the pass showed, when its commands
+ * were never submitted the pass's own state goes back to what it was before it (ace_smooth_discard):
+ * its private frames still hold what they held, in the layouts they were in. The frame it took is
+ * then not the pass's (ace_smooth_untake), so the next one is not paired with it. */
 static void gui_ace_show_done(int result, uint64_t submission) {
     const AceShow shown = s_ace_show_pending;
     s_ace_show_pending = ACE_SHOW_REAL;
+    if (!submission) {
+        ace_smooth_discard(s_ace_smooth);
+        ace_smooth_untake();
+    }
     if (shown == ACE_SHOW_OWED) {
         if (result == 1) {
             ace_smooth_shown_owed(SDL_GetTicksNS());
@@ -850,10 +861,11 @@ static void gui_release_presenter(void);
 
 #if defined(SR_SDL3VK) && !defined(SR_GUI_PRESENT_SELFTEST)
 /* ---- Ace Mode's in-game UI (ace.h, gpu_sdl3vk/ace_ui.h) ---------------------------------------
- * Made once at start in an Ace run that shows any of it, or for the render notice (#2151) when
- * one is due; an authentic run with nothing to say never makes it and never registers the
- * presenter's UI pass. Without SDL3_ttf, the UI fonts or the Vulkan backend the three features
- * are off for the run, said once, and the keyboard keeps today's path. */
+ * Made once at start in an Ace run that shows any of it, for the render notice (#2151) when
+ * one is due, or for the cheats marker (#2639) in a run that applies cheats; an authentic run
+ * with nothing to say never makes it and never registers the presenter's UI pass. Without
+ * SDL3_ttf, the UI fonts or the Vulkan backend the three features are off for the run, said
+ * once, and the keyboard keeps today's path; cheats are then refused (gui_cheats_marker_init). */
 #define ACE_NOTICE_NS 3000000000ull              /* the launch notice stays 3 s */
 static NkOverlayFonts *s_ace_fonts;
 static AceUi *s_ace_ui;
@@ -892,6 +904,8 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
      * not in the presenter's box in the readout's corner. */
     if (p->logic_slowed)
         f.logic_notice = sdl3vk_logic_notice_text(logic, sizeof(logic), p->logic_rate);
+    /* The cheats marker (cheats.h), in any mode, for as long as the run applies cheats. */
+    f.cheats_marker = sr_cheats_marker();
     if (s_ace_ui_ready && ace->notice && s_ace_first_frame_ns &&
         now - s_ace_first_frame_ns < ACE_NOTICE_NS) {
         double left = (double)(ACE_NOTICE_NS - (now - s_ace_first_frame_ns)) / 1e9;
@@ -922,7 +936,13 @@ static int gui_ace_ui_pass(const Sdl3VkUiPass *p) {
     t.image_count = p->image_count;
     t.image_index = p->image_index;
     t.swapchain_gen = p->swapchain_gen;
-    return ace_ui_record(s_ace_ui, &t, &f);
+    {
+        const int drawn = ace_ui_record(s_ace_ui, &t, &f);
+        /* A present that asked for the cheats marker and did not get it drawn (the pass, its
+         * targets or its vertex data could not be made): the cheats stop (cheats.h). */
+        if (f.cheats_marker) sr_cheats_marker_drawn(drawn);
+        return drawn;
+    }
 }
 
 static void gui_ace_ui_off(const char *why) {
@@ -980,6 +1000,15 @@ static void gui_ace_ui_init(void) {
     ace_confirm(ACE_FEATURE_TEXT);
     ace_confirm(ACE_FEATURE_READOUT);
     ace_confirm(ACE_FEATURE_NOTICE);
+}
+
+/* The cheats marker (cheats.h, #2639) is drawn by the same UI pass, in an authentic run too. The
+ * UI is made here, at start, unless an Ace run made it. A window that cannot make it cannot show
+ * the marker, and the run then refuses its cheats by name. */
+static void gui_cheats_marker_init(void) {
+    char error[256] = "";
+    if (!sr_cheats_marker() || s_ui_ready) return;
+    if (!gui_ui_create(error, sizeof(error))) sr_cheats_marker_unavailable(error);
 }
 
 /* ---- Ace Mode's smooth motion (ace.h, gpu_sdl3vk/ace_smooth.h) ----------------------------------
@@ -1355,6 +1384,9 @@ static void gui_texdump_at_start(void);   /* the texture dump, started with the 
 
 void gui_init(const char *title) {
     (void)title;
+    /* The user's cheats (cheats.h, #2639) are read before the window is made, which shows their
+     * marker or, where it cannot, refuses them. SR_CHEATS off: nothing is read. */
+    sr_cheats_init();
 #if defined(SR_SDL3VK) || defined(_WIN32)
     static int cleanup_registered;
     if (!cleanup_registered && atexit(gui_shutdown) == 0) cleanup_registered = 1;
@@ -1448,6 +1480,7 @@ void gui_init(const char *title) {
                 sr_osk_overlay_set_host(osk_overlay_paint_available());
 #ifndef SR_GUI_PRESENT_SELFTEST
                 gui_ace_ui_init();
+                gui_cheats_marker_init();
                 gui_ace_smooth_init();
                 gui_wide_init();   /* after smooth motion, which it steps aside for */
                 gui_upscale_init();
@@ -1548,6 +1581,8 @@ void gui_init(const char *title) {
         sr_gui_raise_gdi_window, "gdi");
     /* Here when SR_VIDEO=gdi asked for this window, or when Vulkan did not start. */
     gui_report_render_path(vulkan_asked, false, gpu_ge_asked, false);
+    /* This window has no in-game UI pass, so it cannot show the cheats marker (cheats.h). */
+    sr_cheats_marker_unavailable("the GDI window has no in-game UI");
 #ifdef SR_SDL3VK
     gui_texdump_at_start();   /* no Vulkan GE in the GDI window: an asked-for dump is refused and said */
 #endif
@@ -3091,9 +3126,13 @@ typedef struct {
     int fails;                  /* how many */
     uint64_t submitted;         /* present submissions made */
     unsigned keeps;             /* pictures the recording was told to keep (sr_videorec_frame_keep) */
+    int gaps;                   /* in-betweens made of two frames that are not consecutive */
 } BusyRun;
 
 static BusyRun *s_busy;
+/* The first present made in this VBLANK fails before its submission (a capture buffer that cannot
+ * be made): the show pass ran, but its commands never reach the GPU. */
+static uint32_t s_busy_unsubmitted_vcount = BUSY_NO_FAIL;
 
 static struct {
     int have_new, have_old;     /* the frames the pass keeps, by number */
@@ -3123,6 +3162,30 @@ void ace_smooth_unrecord(AceBetween *s) {
     s_stub_smooth.have_old = 0;
 }
 
+/* The pass's frames as they were at the show pass's start, as ace_smooth.c keeps them. */
+static struct { int valid, have_new, have_old, newest, older; uint64_t serial; } s_stub_undo;
+static unsigned s_stub_discards;
+void ace_smooth_begin(AceBetween *s) {
+    (void)s;
+    s_stub_undo.valid = 1;
+    s_stub_undo.have_new = s_stub_smooth.have_new;
+    s_stub_undo.have_old = s_stub_smooth.have_old;
+    s_stub_undo.newest = s_stub_smooth.newest;
+    s_stub_undo.older = s_stub_smooth.older;
+    s_stub_undo.serial = s_stub_smooth.serial;
+}
+void ace_smooth_discard(AceBetween *s) {
+    (void)s;
+    if (!s_stub_undo.valid) return;
+    s_stub_undo.valid = 0;
+    s_stub_discards++;
+    s_stub_smooth.have_new = s_stub_undo.have_new;
+    s_stub_smooth.have_old = s_stub_undo.have_old;
+    s_stub_smooth.newest = s_stub_undo.newest;
+    s_stub_smooth.older = s_stub_undo.older;
+    s_stub_smooth.serial = s_stub_undo.serial;
+}
+
 /* A failed present is an out-of-date swapchain, unless a run makes the renderer terminal. */
 static int s_stub_terminal;
 int sdl3vk_renderer_terminal(void) { return s_stub_terminal; }
@@ -3142,6 +3205,7 @@ VkImage ace_smooth_record_aux(AceBetween *s, VkCommandBuffer cmd, VkImage src, i
     s_stub_smooth.newest = (int)(uintptr_t)src - BUSY_IMG_FRAME;
     s_stub_smooth.have_new = 1;
     if (!between || !had) return VK_NULL_HANDLE;
+    if (s_busy && s_stub_smooth.newest != s_stub_smooth.older + 1) s_busy->gaps++;
     s_stub_smooth.serial++;
     s_stub_smooth.submission[s_stub_smooth.serial % ACE_SMOOTH_MOTION_RING] = 0;   /* not submitted yet */
     return busy_image(BUSY_IMG_BETWEEN, s_stub_smooth.newest);
@@ -3200,6 +3264,9 @@ static int busy_present(VkImage src) {
     uint64_t submission = 0;
     if (!shown) {
         result = -1;                    /* nothing to show: nothing is submitted */
+    } else if (r->vcount == s_busy_unsubmitted_vcount) {
+        s_busy_unsubmitted_vcount = BUSY_NO_FAIL;
+        result = -1;                    /* failed after the show pass, before the submission */
     } else {
         submission = ++r->submitted;
         if (s_stub_smooth.serial != made)
@@ -3415,6 +3482,21 @@ static void selftest_busy_display_keeps_real_frames(void) {
      * guessed. */
     busy_run(&r, 0, busy_never, BUSY_NO_FAIL, 0, 5u);
     busy_check_motion(&r, 1u);
+
+    /* An in-between's present fails before its submission (frame 150's flip): the pass's commands
+     * never ran, so what it recorded is undone (ace_smooth_discard) and the pass still holds 149.
+     * The CPU present of the same flip shows 150 as itself, and 151 is not paired with 149, two
+     * frames back: it is shown as itself, counted unpaired, and in-betweens resume with 152. */
+    s_stub_discards = 0;
+    s_busy_unsubmitted_vcount = 300u;
+    busy_run(&r, 0, busy_never, BUSY_NO_FAIL, 0, 0u);
+    assert(s_busy_unsubmitted_vcount == BUSY_NO_FAIL);
+    assert(s_stub_discards == 1u && r.gaps == 0);
+    assert(!r.between[150] && r.real[150] == 1 && !r.between[151] && r.real[151] == 1);
+    assert(r.between[152] == 1 && busy_most(r.real) == 1);
+    assert(busy_count(r.real, 0, BUSY_FRAMES) == BUSY_FRAMES && r.order_ok);
+    busy_check_motion(&r, 0u);
+    busy_check_report("\"superseded\": 0, \"unpaired\": 1, \"busy\": 0}");
     g_ace_on = 0;
 }
 

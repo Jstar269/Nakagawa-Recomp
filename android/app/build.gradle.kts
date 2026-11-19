@@ -30,7 +30,14 @@ val titles: List<Pair<String, File>> = ((findProperty("nk.titles") as String?) ?
     .split(";").map { it.trim() }.filter { it.isNotEmpty() }.map { entry ->
         val at = entry.indexOf('=')
         require(at > 0) { "nk.titles entry '$entry' is not <title-id>=<package-dir>" }
-        entry.substring(0, at) to File(entry.substring(at + 1))
+        val id = entry.substring(0, at)
+        val dir = File(entry.substring(at + 1))
+        // stageBundledAssets copies these two files; a Sync skips a missing source without an
+        // error, so an APK would ship the title's library with no image to run it.
+        for (name in listOf("${id}_image.bin", "package.json")) {
+            require(File(dir, name).isFile) { "nk.titles '$id': $dir holds no $name; build the title's package there" }
+        }
+        id to dir
     }
 val nativeTargets: List<String> =
     listOf("nakagawa_player", "SDL3-shared", "SDL3_ttf-shared") + titles.map { "nk_title_${it.first}" }

@@ -128,6 +128,13 @@ int rc_api_process_fetch_achievement_info_server_response(rc_api_fetch_achieveme
 
       ++entry;
     }
+
+    /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): upstream rcheevos commit c0a3ebdd (#553); an array
+     * that holds a non-object stops the loop early, so a short fill is refused, not left uninitialized. */
+    if (entry < response->recently_awarded + response->num_recently_awarded) {
+      response->num_recently_awarded = (uint32_t)(entry - response->recently_awarded);
+      return RC_INVALID_VALUE;
+    }
   }
 
   return RC_OK;
@@ -239,8 +246,10 @@ int rc_api_process_fetch_leaderboard_info_server_response(rc_api_fetch_leaderboa
     return RC_MISSING_VALUE;
   if (!rc_json_get_required_unum(&response->game_id, &response->response, &leaderboarddata_fields[6], "GameID"))
     return RC_MISSING_VALUE;
-  if (!rc_json_get_required_string(&response->author, &response->response, &leaderboarddata_fields[7], "LBAuthor"))
-    return RC_MISSING_VALUE;
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): optional, as in upstream rcheevos commit 8409479c (#577). */
+  rc_json_get_optional_string(&response->author, &response->response, &leaderboarddata_fields[7], "LBAuthor", "");
+  if (!response->author)
+    response->author = ""; /* Deleted user. Ensure we don't pass NULL out to client */
   if (!rc_json_get_required_datetime(&response->created, &response->response, &leaderboarddata_fields[8], "LBCreated"))
     return RC_MISSING_VALUE;
   if (!rc_json_get_required_datetime(&response->updated, &response->response, &leaderboarddata_fields[9], "LBUpdated"))
@@ -294,6 +303,13 @@ int rc_api_process_fetch_leaderboard_info_server_response(rc_api_fetch_leaderboa
         entry->avatar_url = rc_api_build_avatar_url(&response->response.buffer, RC_IMAGE_TYPE_USER, entry->username);
 
       ++entry;
+    }
+
+    /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): upstream rcheevos commit c0a3ebdd (#553); an array
+     * that holds a non-object stops the loop early, so a short fill is refused, not left uninitialized. */
+    if (entry < response->entries + response->num_entries) {
+      response->num_entries = (uint32_t)(entry - response->entries);
+      return RC_INVALID_VALUE;
     }
   }
 
@@ -415,6 +431,13 @@ int rc_api_process_fetch_games_list_server_response(rc_api_fetch_games_list_resp
 
       ++entry;
     }
+
+    /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): upstream rcheevos commit c0a3ebdd (#553); an array
+     * that holds a non-object stops the loop early, so a short fill is refused, not left uninitialized. */
+    if (entry < response->entries + response->num_entries) {
+      response->num_entries = (uint32_t)(entry - response->entries);
+      return RC_INVALID_VALUE;
+    }
   }
 
   return RC_OK;
@@ -505,14 +528,21 @@ int rc_api_process_fetch_game_titles_server_response(rc_api_fetch_game_titles_re
 
       /* ImageIcon will be '/Images/0123456.png' - only return the '0123456' */
       rc_json_extract_filename(&entry_fields[2]);
-      if (!rc_json_get_required_string(&entry->image_name, &response->response, &entry_fields[2], "ImageIcon"))
-        return RC_MISSING_VALUE;
+      /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): optional, as in upstream rcheevos commit 8409479c (#577). */
+      rc_json_get_optional_string(&entry->image_name, &response->response, &entry_fields[2], "ImageIcon", NULL);
 
       rc_json_get_optional_string(&entry->image_url, &response->response, &entry_fields[3], "ImageUrl", "");
       if (!entry->image_url || !entry->image_url[0])
         entry->image_url = rc_api_build_avatar_url(&response->response.buffer, RC_IMAGE_TYPE_GAME, entry->image_name);
 
       ++entry;
+    }
+
+    /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): upstream rcheevos commit c0a3ebdd (#553); an array
+     * that holds a non-object stops the loop early, so a short fill is refused, not left uninitialized. */
+    if (entry < response->entries + response->num_entries) {
+      response->num_entries = (uint32_t)(entry - response->entries);
+      return RC_INVALID_VALUE;
     }
   }
 

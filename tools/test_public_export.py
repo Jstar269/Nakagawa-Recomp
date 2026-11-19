@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -88,6 +90,21 @@ def _init_synthetic_repo(root: Path, sensitive: bool) -> None:
 
 
 _READ_ONLY_EXPORT: tuple[bool, Path] | None = None
+
+# The export commits under the operator's own Git identity and refuses without one. A
+# hosted runner has none configured, so these tests name a test operator explicitly.
+_TEST_OPERATOR = {
+    "GIT_AUTHOR_NAME": "Export Test Operator",
+    "GIT_AUTHOR_EMAIL": "export-operator@nakagawa-recomp.invalid",
+    "GIT_COMMITTER_NAME": "Export Test Operator",
+    "GIT_COMMITTER_EMAIL": "export-operator@nakagawa-recomp.invalid",
+}
+
+
+def setUpModule() -> None:
+    patcher = mock.patch.dict(os.environ, _TEST_OPERATOR)
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 def _hashed_trusted_ledger(tree: Path, out: Path) -> Path:
@@ -217,6 +234,24 @@ class TestPublicExport(unittest.TestCase):
             res = history_audit_gate_result(report)
             self.assertTrue(res.passed, "sanitized multi-commit history must pass")
             self.assertIn("0 sensitive findings", res.detail)
+
+    def test_history_audit_gate_fails_closed_without_its_counts_or_on_a_failed_run(self):
+        # A report that lost its summary (schema drift, an error object) is not a clean history.
+        for report in ({}, {"error": "audit crashed"}, {"summary": {}},
+                       {"summary": {"total_findings": "0", "category_counts": {}}},
+                       {"summary": {"total_findings": 0}},
+                       {"summary": {"total_findings": 0, "category_counts": {"DEFINITE_SECRET": None}}}):
+            with self.subTest(report=report):
+                res = history_audit_gate_result(report)
+                self.assertFalse(res.passed, res.detail)
+        clean = {"summary": {"total_findings": 0, "category_counts": {}},
+                 "baseline": {"total_commits": 2, "total_objects": 9}}
+        self.assertTrue(history_audit_gate_result(clean).passed)
+        crashed = subprocess.CompletedProcess([], 2, json.dumps(clean), "history_audit: internal error")
+        with mock.patch.object(build_public_export.subprocess, "run", return_value=crashed):
+            res = build_public_export.run_history_audit(ROOT)
+        self.assertFalse(res.passed)
+        self.assertIn("history_audit exited 2", res.detail)
 
     def test_sbom_verification_gate(self):
         res = run_sbom_verification()
@@ -834,6 +869,55 @@ class TestCandidateImmutability293(unittest.TestCase):
             self.assertTrue(ok)
             materialized = target / "docs" / "dir with space" / "file name.md"
             self.assertEqual(materialized.read_text(encoding="utf-8"), "# spaced\n")
+
+    def test_export_commit_carries_the_operator_identity_and_the_index_modes(self):
+        # The export commit is the root of a public history: it is the operator's, never the
+        # isolated test identity, and a 100755 index entry stays 100755 even where the
+        # filesystem has no executable bit (NTFS sets core.filemode=false on `git init`).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            synth = Path(tmpdir) / "source"
+            synth.mkdir()
+            _git(["init", "-q"], synth)
+            (synth / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8", newline="\n")
+            (synth / "README.md").write_text("readme\n", encoding="utf-8", newline="\n")
+            _git(["add", "-A"], synth)
+            _git(["update-index", "--chmod=+x", "--", "run.sh"], synth)
+
+            target = Path(tmpdir) / "export"
+            with mock.patch.object(build_public_export, "ROOT", synth):
+                ok = export_sanitized_public_tree(target, public_safe_profile=False)
+            self.assertTrue(ok)
+            people = run_git(["log", "-1", "--format=%an <%ae>|%cn <%ce>"], cwd=target,
+                             capture_output=True, text=True, check=True).stdout.strip()
+            operator = "Export Test Operator <export-operator@nakagawa-recomp.invalid>"
+            self.assertEqual(people, f"{operator}|{operator}")
+            modes = run_git(["ls-tree", "HEAD", "--", "run.sh", "README.md"], cwd=target,
+                            capture_output=True, text=True, check=True).stdout
+            self.assertIn("100755 blob", next(line for line in modes.splitlines() if line.endswith("\trun.sh")))
+            self.assertIn("100644 blob", next(line for line in modes.splitlines() if line.endswith("\tREADME.md")))
+
+    def test_export_without_an_operator_identity_is_refused_before_staging(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            synth = Path(tmpdir) / "source"
+            synth.mkdir()
+            _git(["init", "-q"], synth)
+            (synth / "README.md").write_text("readme\n", encoding="utf-8", newline="\n")
+            _git(["add", "-A"], synth)
+            target = Path(tmpdir) / "export"
+            no_identity = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                           "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+                           "GIT_CONFIG_VALUE_0": "true"}
+            stderr = io.StringIO()
+            with mock.patch.dict(os.environ, no_identity), \
+                    mock.patch.object(build_public_export, "ROOT", synth), \
+                    contextlib.redirect_stderr(stderr):
+                for key in _TEST_OPERATOR:
+                    os.environ.pop(key, None)
+                ok = export_sanitized_public_tree(target, public_safe_profile=False)
+            self.assertFalse(ok)
+            self.assertIn("EXPORT_IDENTITY_MISSING", stderr.getvalue())
+            self.assertFalse(target.exists())
+            self.assertEqual(sorted(path.name for path in Path(tmpdir).iterdir()), ["source"])
 
 
 class TestSharedExportCache(unittest.TestCase):

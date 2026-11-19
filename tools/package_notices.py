@@ -495,6 +495,21 @@ def _validate_spdx_id(spdx_id: Any, comp_type: str, comp_name: str) -> None:
         )
 
 
+def _copyright_notices(record: dict[str, Any], label: str) -> list[str]:
+    """The record's copyright_notices lines, refusing anything but a list of strings."""
+    notices = record.get("copyright_notices")
+    if notices is None:
+        return []
+    # A string would iterate as characters and a dict as keys: refuse anything but a list of lines.
+    if not isinstance(notices, list) or not all(isinstance(line, str) for line in notices):
+        raise PackageRouteError(
+            "PACKAGE_LICENSE_RECORD_MISSING",
+            f"LICENSE_RECORD_MALFORMED: {label} "
+            f"copyright_notices must be a list of strings in {COMPONENTS_IDENTITY}",
+        )
+    return list(notices)
+
+
 def generate_package_notices(
     package_dir: Path,
     *,
@@ -571,17 +586,9 @@ def generate_package_notices(
             component["version"] = linked["upstream_revision"]
         if linked.get("relink_doc"):
             component["relink_doc"] = linked["relink_doc"]
-        notices = linked.get("copyright_notices")
-        if notices is not None:
-            # A string would iterate as characters and a dict as keys: refuse anything but a list of lines.
-            if not isinstance(notices, list) or not all(isinstance(line, str) for line in notices):
-                raise PackageRouteError(
-                    "PACKAGE_LICENSE_RECORD_MISSING",
-                    f"LICENSE_RECORD_MALFORMED: linked component {linked.get('id', linked['name'])!r} "
-                    f"copyright_notices must be a list of strings in {COMPONENTS_IDENTITY}",
-                )
-            if notices:
-                component["copyright_notices"] = list(notices)
+        notices = _copyright_notices(linked, f"linked component {linked.get('id', linked['name'])!r}")
+        if notices:
+            component["copyright_notices"] = notices
         components.append(component)
         license_files_to_copy.append((slug, sources[0][0], linked["name"]))
         for extra_src, extra_display in sources[1:]:
@@ -590,8 +597,27 @@ def generate_package_notices(
             license_files_to_copy.append(
                 (extra_name, extra_src, f"{linked['name']} ({Path(extra_display).name})")
             )
-        if linked.get("object_glob"):
-            component["relink_objects"] = linked["object_glob"]
+        if "object_glob" in linked:
+            raise PackageRouteError(
+                "PACKAGE_LICENSE_RECORD_MISSING",
+                f"LICENSE_RECORD_MALFORMED: linked component {linked.get('id', linked['name'])!r} "
+                f"uses the retired single-pattern object_glob; record object_globs in {COMPONENTS_IDENTITY}",
+            )
+        object_globs = linked.get("object_globs")
+        if object_globs is not None:
+            # Objects live both beside the build directory and in per-library
+            # subdirectories, so one glob cannot name them all: require a list.
+            if (
+                not isinstance(object_globs, list)
+                or not object_globs
+                or not all(isinstance(glob, str) and glob for glob in object_globs)
+            ):
+                raise PackageRouteError(
+                    "PACKAGE_LICENSE_RECORD_MISSING",
+                    f"LICENSE_RECORD_MALFORMED: linked component {linked.get('id', linked['name'])!r} "
+                    f"object_globs must be a non-empty list of glob strings in {COMPONENTS_IDENTITY}",
+                )
+            component["relink_objects"] = list(object_globs)
 
     # Process bundled binaries
     for binary in binaries:
@@ -679,6 +705,11 @@ def generate_package_notices(
             "upstream_origin": record.get("upstream_origin", "NOASSERTION"),
             "disposition": record.get("disposition", "bundled_binary"),
         })
+        # A credit a licence requires in the distribution documentation (the FTL's
+        # "based in part on the work of the FreeType Team") travels with the DLL's record.
+        bundled_notices = _copyright_notices(record, f"bundled binary {bin_name!r}")
+        if bundled_notices:
+            components[-1]["copyright_notices"] = bundled_notices
         license_files_to_copy.append((target_lic_name, bundled_sources[0][0], record["name"]))
         for extra_src, extra_display in bundled_sources[1:]:
             extra_name = f"{Path(clean_slug).stem}-{Path(extra_display).name}"

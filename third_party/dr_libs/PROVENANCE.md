@@ -25,6 +25,12 @@ not compiled into the native player, the runtime, or any shipped artifact.
   that officially public-domain code may be vendored with the normal
   bookkeeping. Both alternatives are kept, unchanged, at the end of `dr_wav.h`
   and in `LICENSE.txt`.
+- `LICENSE.txt` is also the licence text shipped for dr_flac, the FLAC reader libchdr carries
+  (`assets/third_party_components.json`, component `libchdr-dr-flac`; see
+  `third_party/libchdr/PROVENANCE.md`), which is compiled into the native player. It offers the same
+  two alternatives as the end of `dr_flac.h`, except that its MIT-0 copyright line reads
+  "Copyright 2020 David Reid" where `dr_flac.h` reads "Copyright 2023 David Reid"; the Unlicense is the
+  elected option. A re-pin or removal of this file changes that shipped notice too.
 - Import method: both files were downloaded from `raw.githubusercontent.com`
   at the pinned commit (`LICENSE` is unchanged since the previous pin). Upstream `LICENSE` is stored as `LICENSE.txt`, bytes
   unchanged, so the publication classifier recognises it as a licence text.
@@ -41,6 +47,6 @@ not compiled into the native player, the runtime, or any shipped artifact.
 
 ## Local deltas
 
-None. Two whitespace-only lines in upstream `dr_wav.h` end in spaces; the
+None. Three whitespace-only lines in upstream `dr_wav.h` (2673, 2690 and 6565) end in spaces; the
 repository's `.gitattributes` exempts that one file from the trailing-space
 check so the bytes stay identical to upstream.

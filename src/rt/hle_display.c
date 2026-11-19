@@ -13,6 +13,7 @@
 #include "hle_internal.h"
 #include "ge_scene.h"
 #include "replay_checkpoint.h" /* SR_REPLAY_CHECKPOINTS (#2147) */
+#include "cheats.h"            /* the user's cheats at each VBLANK (#2639) */
 #include <time.h>
 
 #ifdef _WIN32
@@ -166,9 +167,15 @@ static int display_host_span_valid(const DisplayFrameState *fb) {
     if (!fb->addr) return 1;
     if (fb->stride <= 0 || fb->fmt < 0 || fb->fmt > 3) return 0;
     uint32_t bpp = fb->fmt == 3 ? 4u : 2u;
-    uint32_t row_bytes, bytes, last;
-    if (!sr_size_mul_ok((uint32_t)fb->stride, bpp, &row_bytes) ||
-        !sr_size_mul_ok(row_bytes, 272u, &bytes) || bytes == 0u)
+    /* The readers (gui.c convert_fb_pixels, fb_decode_px, dump_fb_fmt, route_sample) take
+     * 480 pixels from each of the 272 rows, so a legal stride narrower than 480 still reads
+     * 480 pixels on the last row: the span is 271 strides plus the wider of one stride and
+     * 480 pixels. For a stride of 480 or more this is the 272 strides it always was. */
+    uint32_t stride = (uint32_t)fb->stride;
+    uint32_t last_row_px = stride > 480u ? stride : 480u;
+    uint32_t px, bytes, last;
+    if (!sr_size_mul_ok(stride, 271u, &px) || !sr_size_add_ok(px, last_row_px, &px) ||
+        !sr_size_mul_ok(px, bpp, &bytes) || bytes == 0u)
         return 0;
     uint32_t phys = (uint32_t)SR_PHYS(fb->addr);
     if (!sr_size_add_ok(phys, bytes - 1u, &last)) return 0;
@@ -554,8 +561,8 @@ static void screenshot_arm_for_present(const DisplayFrameState *fb, int framebuf
         if (!sr_screenshot_name(getenv("SR_DISC_ID"), t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
                                 t.tm_hour, t.tm_min, t.tm_sec, seq, name, sizeof name))
             break;
-        int n = snprintf(s_shot_path, sizeof s_shot_path, "%s/screenshots/%s", root, name);
-        if (n < 0 || (size_t)n >= sizeof s_shot_path || shot_file_exists(s_shot_path))
+        if (!sr_screenshot_path(root, name, s_shot_path, sizeof s_shot_path) ||
+            shot_file_exists(s_shot_path))
             s_shot_path[0] = '\0';
     }
     if (!s_shot_path[0]) {
@@ -781,7 +788,9 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
      * (8 most recent kept) without windows, snap_v<vcount>.ppm when windows are set, so
      * existing routes and tooling are unaffected. Host-side gate only: no guest work is
      * skipped, no timing changes, and the frames that are captured are byte-identical
-     * to an ungated run. */
+     * to an ungated run. The report below clears the arm, so whether this present was armed
+     * is kept for the SR_FBDUMP verdict after it. */
+    const int capture_armed = s_fbcap_armed[0] != '\0';
     if (s_fbcap_armed[0]) {
         if (s_fbcap_legacy[0]) {
             if (snapshot_sync_ok(s_display_active.addr, (uint32_t)s_display_active.fmt,
@@ -821,7 +830,7 @@ static uint32_t h_DisplaySetFrameBuf(CpuState *s) {
             fbdu = sr_fbcap_env_on("SR_FBDUMP");
             fbdu_n = fd ? atoi(fd) : 0;
         }
-        if (sync == 0u && fbdu && s_fbcap_armed[0] && s_framebuf &&
+        if (sync == 0u && fbdu && capture_armed && s_framebuf &&
             s_vcount >= (uint32_t)fbdu_n &&
             display_host_span_valid(&s_display_active)) {
             int snap_ok = snapshot_sync_ok(s_display_active.addr,
@@ -1024,7 +1033,29 @@ static uint32_t h_DisplayWaitVblankCB(CpuState *s) {
     int result = sched_wait_vblank_cb(0);
     return result < 0 ? SCE_KERNEL_ERROR_CAN_NOT_WAIT : (uint32_t)result;
 }
+/* JPCSP-derived, not PSP-measured (jpcsp/jpcsp 00ac4d6daedd89c0492093ae83fb0d3d819af414,
+ * src/jpcsp/HLE/modules/sceDisplay.java sceDisplayGetMode, whose three outputs are
+ * @CanBeNull TPointer32, and src/jpcsp/Allegrex/compiler/CompilerContext.java loadParameter):
+ * a non-null output that is not valid guest memory answers ERROR_INVALID_POINTER (0x80000103)
+ * before the function runs, so no output is written. PPSSPP 3bc60270 skips such an output and
+ * returns 0 instead; no PSP measurement settles which. Noted once per run. */
+static int s_display_get_mode_bad_span_noted;
+void sr_hle_test_display_get_mode_note_reset(void) { s_display_get_mode_bad_span_noted = 0; }
+static uint32_t display_get_mode_bad_span(uint32_t addr) {
+    if (!s_display_get_mode_bad_span_noted) {
+        s_display_get_mode_bad_span_noted = 1;
+        fprintf(stderr, "HLE: JPCSP-derived, not PSP-measured: sceDisplayGetMode output 0x%08x is not "
+                        "4 writable bytes of guest memory, answers 0x80000103 and writes no output\n",
+                addr);
+    }
+    return 0x80000103u;
+}
+
 static uint32_t h_DisplayGetMode(CpuState *s) {
+    /* Every output is checked before any is written. */
+    if (A0 && !sr_guest_span_writable(A0, 4u)) return display_get_mode_bad_span(A0);
+    if (A1 && !sr_guest_span_writable(A1, 4u)) return display_get_mode_bad_span(A1);
+    if (A2 && !sr_guest_span_writable(A2, 4u)) return display_get_mode_bad_span(A2);
     if (A0) MEM_W32(A0, 0);  /* mode 0 */
     if (A1) MEM_W32(A1, 480); /* width */
     if (A2) MEM_W32(A2, 272); /* height */
@@ -1134,6 +1165,9 @@ void sr_vblank_tick(void) {
      * rather than one frame late. */
     route_tick(s_vcount_fwd);
     sr_ctrl_sample();   /* latch one controller sample per frame (PPSSPP ring semantics) */
+    /* The user's cheats (cheats.h, #2639), after the latch so a button condition reads this
+     * VBLANK's sample. Off, it is one branch and touches nothing. */
+    sr_cheats_vblank();
     /* No-frame watchdog: vblanks keep being delivered even when every game thread is
      * blocked, so a stretch with no new sceDisplaySetFrameBuf is a NO-NEW-FLIP
      * observation. It is not by itself a hang, scheduler-stall, or scene-transition
@@ -1353,8 +1387,9 @@ void hle_register_display_setframebuf_handler(void) {
 void hle_register_display_handlers(void) {
     hle_register_display_setframebuf_handler();
     sr_hle_register(0xeeda2e54, "sceDisplayGetFrameBuf", h_DisplayGetFrameBuf);
-    /* 0x36cdfade is sceDisplayWaitVblank (issue #83); the CB variant is 0x46f186c3 and
-     * remains unregistered until the callback-aware wait transaction lands. */
+    /* The vblank waits -- 0x36cdfade sceDisplayWaitVblank (issue #83), its CB variant
+     * 0x8eb9ec49, and the Start pair 0x984c27e7 / 0x46f186c3 -- are registered in
+     * hle_register_wait_conformance_display. */
     sr_hle_register(0x0e20f177, "sceDisplaySetMode", h_DisplaySetMode);
     sr_hle_register(0x9c6eaad7, "sceDisplayGetVcount", h_DisplayGetVcount);
     sr_hle_register(0x773dd3a3, "sceDisplayGetCurrentHcount", h_DisplayGetCurrentHcount);

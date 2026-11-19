@@ -416,11 +416,15 @@ def is_object_definition(item: Item) -> bool:
 # Definitions
 
 
-@functools.lru_cache(maxsize=8)
+# function_text() (and definitions(), once per root) walk every source and header in the
+# same order on each call, so the cache holds all of them (twice over, for a test's synthetic root):
+# an LRU smaller than the cycle evicts each file before it comes round again.
+@functools.lru_cache(maxsize=2 * (len(RUNTIME_HLE_SOURCES) + len(HLE_PRIVATE_HEADERS)))
 def _items_of(body: str) -> tuple[Item, ...]:
     return tuple(split_items(body))
 
 
+@functools.lru_cache(maxsize=4)
 def definitions(root: Path = ROOT) -> dict[str, list[str]]:
     """Function and object name -> the runtime HLE files (and private headers) defining it.
 

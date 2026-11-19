@@ -96,6 +96,17 @@ class StatisticsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             g.summarize({"linked": [run, run], "absent": [run]}, "ns_per_list_median")
 
+    def test_a_bench_with_no_workload_is_refused(self) -> None:
+        empty = g.parse_bench("noise line\n")
+        with self.assertRaisesRegex(ValueError, "no workload"):
+            g.summarize({"linked": [empty, empty], "absent": [empty, empty]}, "ns_per_list_median")
+
+    def test_a_workload_missing_from_a_later_run_is_named(self) -> None:
+        full = g.parse_bench(bench_text(100, 200))
+        partial = {name: fields for name, fields in full.items() if name != "prims"}
+        with self.assertRaisesRegex(ValueError, "absent run 2"):
+            g.summarize({"linked": [full, full], "absent": [full, partial]}, "ns_per_list_median")
+
 
 if __name__ == "__main__":
     unittest.main()

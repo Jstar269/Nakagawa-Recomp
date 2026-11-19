@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -114,6 +115,39 @@ class TestPackageNotices(unittest.TestCase):
                 with self.assertRaises(PackageRouteError) as ctx:
                     package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
                 self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
+
+    def test_freetype_credit_reaches_the_notices(self) -> None:
+        """The FTL's binary-distribution credit is stated in THIRD_PARTY_NOTICES.txt, not only implied."""
+        (self.pkg_dir / "mygame.exe").write_bytes(b"MZ\0\0exe")
+        (self.pkg_dir / "libfreetype-6.dll").write_bytes(b"MZ\0\0freetype")
+
+        result = package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+
+        freetype = next(c for c in result["components"] if c.get("binary") == "libfreetype-6.dll")
+        self.assertIn(
+            "This software is based in part on the work of the FreeType Team.",
+            freetype.get("copyright_notices", []),
+        )
+        combined = (self.pkg_dir / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
+        section = combined.split("Component: FreeType", 1)[1].split("The FreeType Project LICENSE", 1)[0]
+        self.assertIn("based in part on the work of the FreeType Team", section)
+        self.assertIn("The FreeType Project (https://freetype.org)", section)
+
+    def test_malformed_bundled_copyright_notices_fail_closed(self) -> None:
+        """A bundled DLL record's copyright_notices must also be a list of strings."""
+        (self.pkg_dir / "libfreetype-6.dll").write_bytes(b"MZ\0\0freetype")
+        real = package_notices.load_component_inventory()
+        for bad in ("Portions copyright The FreeType Project", ["ok", 3]):
+            inventory = json.loads(json.dumps(real))
+            inventory["native"]["dlls"]["libfreetype-6.dll"]["copyright_notices"] = bad
+            record = inventory["native"]["dlls"]["libfreetype-6.dll"]
+            with self.subTest(bad=bad), \
+                    mock.patch.object(package_notices, "load_component_inventory", return_value=inventory), \
+                    mock.patch.dict(package_notices.KNOWN_RUNTIME_DLLS, {"libfreetype-6.dll": record}):
+                with self.assertRaises(PackageRouteError) as ctx:
+                    package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+                self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
+                self.assertIn("libfreetype-6.dll", str(ctx.exception))
 
     def test_notices_bundle_generation_with_in_tree_license_texts(self) -> None:
         """Bundle generation reads the checked-in texts, not a host toolchain."""
@@ -313,11 +347,99 @@ class TestPackageNotices(unittest.TestCase):
         """RELINK.md lists exactly the ATRAC3+ objects the Makefile builds, plus the bridge."""
         objects = package_notices.atrac3p_object_names(ROOT)
         makefile = read_makefile(ROOT)
-        self.assertGreater(len(objects), 1)
-        for obj in objects[:-1]:
-            source = "src/rt/atrac3p/" + obj[len("$(BUILD_DIR)/atrac3p_"):-2] + ".c"
-            self.assertIn(source, makefile)
-        self.assertEqual(objects[-1], "$(BUILD_DIR)/atrac3p_bridge.o")
+        runtime_mk = (ROOT / "mk" / "runtime_sources.mk").read_text(encoding="utf-8")
+        pat_match = re.search(
+            r"^ATRAC3P_OBJS\s*:=\s*\$\(patsubst\s+([^,]+),([^,]+),\$\(ATRAC3P_SRCS\)\)",
+            runtime_mk,
+            re.MULTILINE,
+        )
+        self.assertIsNotNone(pat_match)
+        assert pat_match is not None
+        src_pat, obj_pat = pat_match.group(1).strip(), pat_match.group(2).strip()
+        src_prefix, src_suffix = src_pat.split("%", 1)
+        obj_prefix, obj_suffix = obj_pat.split("%", 1)
+        srcs_match = re.search(r"^ATRAC3P_SRCS\s*:?=\s*((?:.*\\\n)*.*)$", makefile, re.MULTILINE)
+        self.assertIsNotNone(srcs_match)
+        assert srcs_match is not None
+        srcs = srcs_match.group(1).replace("\\\n", " ").split()
+        expected = [
+            obj_prefix + src[len(src_prefix):-len(src_suffix)] + obj_suffix
+            for src in srcs
+            if src.startswith(src_prefix) and src.endswith(src_suffix)
+        ] + ["$(BUILD_DIR)/atrac3p_bridge.o"]
+        self.assertGreater(len(expected), 1)
+        self.assertEqual(objects, expected)
+
+    def test_recorded_relink_globs_match_every_lgpl_object_the_makefile_builds(self) -> None:
+        """Each LGPL subset's object_globs find every object its Makefile rule derives, subdirectories included."""
+        makefile = read_makefile(ROOT)
+
+        def sources(variable: str) -> list[str]:
+            for match in re.finditer(rf"^{variable}\s*:?=\s*((?:.*\\\n)*.*)$", makefile, re.MULTILINE):
+                found = match.group(1).replace("\\\n", " ").split()
+                if found:
+                    return found
+            return []
+
+        # mk/runtime_sources.mk: $(patsubst <dir>/%.c,$(BUILD_DIR)/<prefix>%.o,$(<VAR>)).
+        rules = {
+            "ffmpeg-atrac3p": ("ATRAC3P_SRCS", "src/rt/atrac3p/", "atrac3p_", ["atrac3p_bridge.o"]),
+            "ffmpeg-h264": ("H264_SUB_SRCS", "src/rt/h264_ffmpeg_sub/", "h264sub_", []),
+        }
+        for variable, directory, prefix, _extra in rules.values():
+            self.assertIn(
+                f"$(patsubst {directory}%.c,$(BUILD_DIR)/{prefix}%.o,$({variable}))",
+                (ROOT / "mk" / "runtime_sources.mk").read_text(encoding="utf-8"),
+            )
+        inventory = package_notices.load_component_inventory()
+        by_id = {c.get("id"): c for c in inventory["native"]["linked_components"]}
+        for component_id, (variable, directory, prefix, extra) in rules.items():
+            with self.subTest(component=component_id):
+                srcs = [s for s in sources(variable) if s.startswith(directory) and s.endswith(".c")]
+                self.assertGreater(len(srcs), 1)
+                expected = {f"build/game/{prefix}{s[len(directory):-2]}.o" for s in srcs}
+                expected.update(f"build/game/{name}" for name in extra)
+                self.assertTrue(any("/" in o[len("build/game/"):] for o in expected))
+                with tempfile.TemporaryDirectory() as tree_dir:
+                    tree = Path(tree_dir)
+                    for obj in expected:
+                        (tree / obj).parent.mkdir(parents=True, exist_ok=True)
+                        (tree / obj).write_bytes(b"")
+                    globs = by_id[component_id].get("object_globs")
+                    self.assertIsInstance(globs, list)
+                    matched = {
+                        path.relative_to(tree).as_posix()
+                        for pattern in globs for path in tree.glob(pattern) if path.is_file()
+                    }
+                self.assertEqual(matched, expected)
+
+    def test_relink_objects_in_the_package_index_carry_every_recorded_glob(self) -> None:
+        (self.pkg_dir / "game.exe").write_bytes(b"MZ\0\0exe")
+        result = package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+        atrac = next(c for c in result["components"] if c["name"] == "FFmpeg ATRAC3+ subset")
+        self.assertEqual(atrac["relink_objects"], ["build/*/atrac3p_*.o", "build/*/atrac3p_*/**/*.o"])
+
+    def test_malformed_relink_globs_fail_closed(self) -> None:
+        """A single-string glob (which cannot reach the per-library subdirectories) is a named failure."""
+        (self.pkg_dir / "game.exe").write_bytes(b"MZ\0\0exe")
+        real = package_notices.load_component_inventory()
+        cases: tuple[tuple[str, object], ...] = (
+            ("object_glob", "build/*/atrac3p_*.o"),
+            ("object_globs", "build/*/atrac3p_*.o"),
+            ("object_globs", []),
+            ("object_globs", ["build/*/atrac3p_*.o", 3]),
+        )
+        for key, bad in cases:
+            inventory = json.loads(json.dumps(real))
+            linked = next(c for c in inventory["native"]["linked_components"] if c["id"] == "ffmpeg-atrac3p")
+            linked.pop("object_globs")
+            linked[key] = bad
+            with self.subTest(key=key, value=bad):
+                with mock.patch.object(package_notices, "load_component_inventory", return_value=inventory):
+                    with self.assertRaises(PackageRouteError) as ctx:
+                        package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+                self.assertEqual(ctx.exception.code, "PACKAGE_LICENSE_RECORD_MISSING")
+                self.assertIn("LICENSE_RECORD_MALFORMED", str(ctx.exception))
 
     def test_installed_package_version_reads_pacman_database(self) -> None:
         """Component versions come from the toolchain's package database, never a literal."""

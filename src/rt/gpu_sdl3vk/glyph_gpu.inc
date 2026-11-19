@@ -277,7 +277,9 @@ static void gl_sync(TexEnt *e) {
     for (int i = 0; i < g->n; i++) {
         GlTile *t = &g->t[i];
         if (t->entry_gen == GL_KEY(e)) continue;
-        if (gl_hash_rect(s_gl_page, e->w, t->x, t->y, t->w, t->h) == t->rect_hash) {
+        /* A stale tile keeps its old generation even when the page holds its first texels again (blinking text,
+         * a double-buffered page): its next draw rebuilds it, where keeping it would leave it stale and unbound. */
+        if (t->state != GL_TILE_STALE && gl_hash_rect(s_gl_page, e->w, t->x, t->y, t->w, t->h) == t->rect_hash) {
             t->entry_gen = GL_KEY(e);
             s_cnt_gl_kept++;
         } else if (t->state != GL_TILE_STALE) {

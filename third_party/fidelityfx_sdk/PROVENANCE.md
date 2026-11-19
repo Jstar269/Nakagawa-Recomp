@@ -14,16 +14,23 @@ carries it: the eight compute passes' HLSL, the upscaler headers they include, s
 downsampling (SPD), RCAS from FSR 1, and the SDK's `ffx_core` portability headers.
 `tools/shader_embed.py` compiles each pass to SPIR-V with a pinned DirectXShaderCompiler and
 embeds it as `src/rt/gpu_sdl3vk/fsr3_*_comp.inc`; `fsr3_shader_manifest.json` records the
-compiler, its options and the SHA-256 of every file each pass includes. No C file includes these
-headers: the SDK's CPU layer is C++, and the project's C host (`src/rt/fsr3_host.c`,
-`src/rt/gpu_sdl3vk/fsr3_pass.c`) is a translation of it with its own notices. The passes are built
-only into the FSR 3 selftests so far; the player does not run them.
+compiler, its options and the SHA-256 of every file each pass includes. The SDK's CPU layer is
+C++, so the project's C host is a translation of it with its own notices (Derived C host, below).
+The C host includes one of these headers,
+`upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_resources.h` (in `src/rt/fsr3_host.c`
+and `src/rt/gpu_sdl3vk/fsr3_pass.c`), for its resource-ID enums only; no other C file includes
+them. The passes are built only into the FSR 3 selftests so far; the player does not run them.
 
 FSR 3.1.6 frame generation sits beside it under `framegeneration/fsr3/`: the ten frame-interpolation
-passes other than AMD's debug view, the seven optical-flow passes, and the headers they include.
-They are compiled the same way as a second set, `fsr3fg_*_comp.inc` with
-`fsr3fg_shader_manifest.json`, and the C host `src/rt/fsr3_fg_host.c` translates AMD's
-`ffx_frameinterpolation.cpp` and `ffx_opticalflow.cpp`. They too run only in the selftests.
+passes other than AMD's debug view, the seven optical-flow passes, the headers they include, and
+one header for the C host. They are compiled the same way as a second set, `fsr3fg_*_comp.inc` with
+`fsr3fg_shader_manifest.json`, and the C host (`src/rt/fsr3_fg_host.c`,
+`src/rt/gpu_sdl3vk/fsr3_fg_pass.c`) translates AMD's `ffx_frameinterpolation.cpp`,
+`ffx_opticalflow.cpp` and `ffx_provider_fsr3framegeneration.cpp`. Both of those C files include
+`framegeneration/fsr3/include/gpu/frameinterpolation/ffx_frameinterpolation_resources.h` and
+`framegeneration/fsr3/include/gpu/opticalflow/ffx_opticalflow_resources.h`, for their resource-ID
+enums only. `ffx_opticalflow_resources.h` is in no pass's include closure: it is imported for the C
+host, not for a pass. They too run only in the selftests.
 
 The folder mirrors the SDK's `Kits/FidelityFX/` layout, so the headers' own relative includes work
 unchanged, and further SDK components can be added beside these files under this one manifest.
@@ -43,10 +50,11 @@ unchanged, and further SDK components can be added beside these files under this
   FSR 1 moves to the same pinned-DXC build.
 - License: MIT. The SDK's `docs/license.md` at the pin applies a binary-only licence to the
   repository by default and lists each file it releases under MIT, under its full
-  `Kits\FidelityFX\...` path. Every file here is on that MIT list, checked path by path against the
-  pin; `Kits/FidelityFX/docs/license.md` (blob `aef7adddbcf121c1f7f1248fe97de0f7f7a3d719`) lists
+  `Kits\FidelityFX\...` path. Every 2.4.0 file here is on that MIT list, checked path by path
+  against the pin. `api/internal/gpu/ffx_core_glsl.h` is not on it: it is from SDK v1.1.4 (above),
+  whose root `LICENSE.txt` puts the whole release under MIT. `Kits/FidelityFX/docs/license.md` (blob `aef7adddbcf121c1f7f1248fe97de0f7f7a3d719`) lists
   the same files. The MIT listing, not the binary-only default above it, is the licence of each
-  file here. Every header and shader carries the MIT notice (Copyright (C) 2026 Advanced Micro
+  2.4.0 file here. Every header and shader carries the MIT notice (Copyright (C) 2026 Advanced Micro
   Devices, Inc.; 2024 for `ffx_core_glsl.h`). `LICENSE-AMD.md` is the root `docs/license.md` at the
   pin, imported byte-identical, so the listing travels with the files. SDK v1.1.4 is MIT as a whole,
   and `LICENSE.txt` here is its root `LICENSE.txt`, the same MIT text.
@@ -56,8 +64,14 @@ unchanged, and further SDK components can be added beside these files under this
   in this tree equals the upstream blob ID (`git rev-parse <pin>:<path>`). The SHA-256 values are of
   the same bytes.
 - Not imported: every `.cpp`, the SDK's `backend/` and `api/internal/*.cpp`, `ffx_core_cpu.h`, the
-  upscaler's debug-view and automatic-reactive passes, frame interpolation's debug-view pass and its
-  header `ffx_frameinterpolation_debug_view.h`, the frame-generation swapchain (`vk/` and the two
+  upscaler's debug-view and automatic-reactive passes and its debug-view header
+  `upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_debug_view.h`, the nine FSR 2 passes in
+  `upscalers/fsr3/internal/shaders/` (`ffx_fsr2_accumulate_pass.hlsl`,
+  `ffx_fsr2_autogen_reactive_pass.hlsl`, `ffx_fsr2_compute_luminance_pyramid_pass.hlsl`,
+  `ffx_fsr2_debug_blit.hlsl`, `ffx_fsr2_depth_clip_pass.hlsl`, `ffx_fsr2_lock_pass.hlsl`,
+  `ffx_fsr2_rcas_pass.hlsl`, `ffx_fsr2_reconstruct_previous_depth_pass.hlsl` and
+  `ffx_fsr2_tcr_autogen_pass.hlsl`), frame interpolation's debug-view pass and its header
+  `ffx_frameinterpolation_debug_view.h`, the frame-generation swapchain (`vk/` and the two
   `FrameInterpolationSwapchain*.hlsl` passes), the DirectX 12 trees, and `signedbin/`.
 - `framegeneration/fsr3/include/gpu/spd/ffx_spd.h` is the same blob as the upscaler's copy; it is
   kept at its own path because the frame-generation headers include it relative to themselves.
@@ -142,6 +156,24 @@ unchanged, and further SDK components can be added beside these files under this
 | `LICENSE-AMD.md` | imported byte-identical (2.4.0) | `docs/license.md` | `abfeaf46c5aaea767cef4379d2890735dcc66207` | `410f9c138e766e846acf2dc93db768198def0293a017d7e3296815b451688dbe` |
 | `PROVENANCE.md` | project-authored manifest | n/a | n/a | n/a |
 
+## Derived C host
+
+These project files are translated from the SDK's C++ at the pin and classified
+`derived-translated`. Each keeps AMD's MIT notice and says it was modified
+(`tools/test_fsr3_port.py`, `NoticeTests.DERIVED`, checks both), and `CREDITS.md` credits them. The
+upstream files are under `Kits/FidelityFX/` at commit `7539ae8b6568ad29ed78a753404351daf3b5cca7`:
+
+| Project file | Translated from |
+| --- | --- |
+| `src/rt/fsr3_host.c`, `src/rt/fsr3_host.h` | `upscalers/fsr3/internal/ffx_fsr3upscaler.cpp`, `upscalers/fsr3/internal/ffx_fsr3upscaler_private.h`, `upscalers/fsr3/include/ffx_fsr3upscaler.h`, `upscalers/fsr3/include/gpu/spd/ffx_spd.h`, `upscalers/fsr3/include/gpu/fsr1/ffx_fsr1.h`, `api/internal/gpu/ffx_core_cpu.h` |
+| `src/rt/fsr3_jitter.c`, `src/rt/fsr3_jitter.h` | `upscalers/fsr3/internal/ffx_fsr3upscaler.cpp`, `upscalers/fsr3/include/ffx_fsr3upscaler.h` |
+| `src/rt/gpu_sdl3vk/fsr3_pass.c` | `upscalers/fsr3/internal/ffx_fsr3upscaler.cpp`, `backend/vk/ffx_vk.cpp` |
+| `src/rt/fsr3_fg_host.c`, `src/rt/fsr3_fg_host.h` | `framegeneration/fsr3/internal/ffx_frameinterpolation.cpp`, `framegeneration/fsr3/internal/ffx_frameinterpolation_private.h`, `framegeneration/fsr3/include/ffx_frameinterpolation.h`, `framegeneration/fsr3/internal/ffx_opticalflow.cpp`, `framegeneration/fsr3/internal/ffx_opticalflow_private.h`, `framegeneration/fsr3/internal/ffx_provider_fsr3framegeneration.cpp`, `framegeneration/fsr3/include/gpu/spd/ffx_spd.h` |
+| `src/rt/gpu_sdl3vk/fsr3_fg_pass.c` | `framegeneration/fsr3/internal/ffx_frameinterpolation.cpp`, `framegeneration/fsr3/internal/ffx_opticalflow.cpp`, `framegeneration/fsr3/internal/ffx_provider_fsr3framegeneration.cpp`, `backend/vk/ffx_vk.cpp` |
+
+Of those upstream files only the two GPU headers `ffx_spd.h` and `ffx_fsr1.h` are imported here,
+for the passes; the hosts translate their CPU-side setup functions (`ffxSpdSetup`, `FsrRcasCon`).
+
 ## Local deltas
 
 One file, `upscalers/fsr3/include/gpu/fsr3upscaler/ffx_fsr3upscaler_callbacks_hlsl.h` (Git blob
@@ -189,9 +221,23 @@ normal rules.
 
 ## Updating
 
-After any change to a file here, regenerate the embeddings with the pinned compiler:
-`python tools/shader_embed.py regenerate --shader-set fsr3 --dxc <DirectXShaderCompiler v1.9.2609>`,
-and `--shader-set fsr3fg` for a file under `framegeneration/`.
-`make fsr3-shader-verify` fails on any file whose SHA-256 no longer matches the manifest's include
-closure, and `make fsr3-shader-repro-verify DXC=<dxc>` recompiles every pass and fails on any byte
-difference.
+After any change to a file here, regenerate every embedding built from it:
+
+- FSR 3, with the pinned compiler:
+  `python tools/shader_embed.py regenerate --shader-set fsr3 --dxc <DirectXShaderCompiler v1.9.2609>`,
+  and `--shader-set fsr3fg` for a file under `framegeneration/`.
+- FSR 1, after a change to `ffx_fsr1.h` or to the `ffx_core` headers its GLSL build includes
+  (`ffx_common_types.h`, `ffx_core.h`, `ffx_core_glsl.h`, `ffx_core_gpu_common.h`,
+  `ffx_core_gpu_common_half.h`, `ffx_core_portability.h`):
+  `python tools/shader_embed.py regenerate --glslc <glslc>`, which rebuilds the player's
+  `src/rt/gpu_sdl3vk/fsr1_easu_comp.inc` and `fsr1_rcas_comp.inc` with the rest of the default set,
+  then `make shader-repro-verify GLSLC=<glslc>`, which recompiles that set and fails on any byte
+  difference.
+
+`make fsr3-shader-verify` fails on any file in an FSR 3 pass's include closure whose SHA-256 no
+longer matches its manifest, and `make fsr3-shader-repro-verify DXC=<dxc>` recompiles every FSR 3
+pass and fails on any byte difference. The FSR 1 entries in `src/rt/gpu_sdl3vk/shader_manifest.json`
+record no include closure: `make shader-verify` checks only each `.comp` source, its embedding and its
+SPIR-V, so it does not notice a change to a header here. `ffx_core_glsl.h` is in no FSR 3 closure
+either, so no hash gate covers it; only `make shader-repro-verify` with glslc does, and hosted CI does
+not run that target.

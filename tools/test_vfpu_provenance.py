@@ -82,6 +82,24 @@ class TestVfpuProvenance(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("skipped", errors[0])
 
+    def test_upstream_api_without_gh_fails_closed_in_main(self):
+        # The skip note is an error: `--upstream-api` without gh exits 1, as the
+        # verify_upstream_api docstring says.
+        import contextlib
+        import io
+
+        def raise_missing(*args, **kwargs):
+            raise FileNotFoundError("gh")
+
+        stderr = io.StringIO()
+        with unittest.mock.patch.object(subprocess, "run", side_effect=raise_missing), \
+                contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            status = provenance.main(["--upstream-api"])
+        self.assertEqual(status, 1)
+        self.assertIn("ERROR: upstream-api skipped", stderr.getvalue())
+        self.assertIn("exits 1", provenance.verify_upstream_api.__doc__)
+        self.assertNotIn("never hard-fails", provenance.verify_upstream_api.__doc__)
+
 
 if __name__ == "__main__":
     unittest.main()

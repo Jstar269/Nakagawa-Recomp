@@ -199,8 +199,8 @@ typedef struct NkTexReplStats {
     uint64_t evicted;
     uint64_t bad_factor;      /* counted by the renderer through nk_texrepl_note_bad_factor */
     uint64_t cache_bytes, cache_peak;
-    uint64_t decode_ns;
-    uint64_t open_ns;         /* nk_texrepl_open, by the C clock */
+    uint64_t decode_ns;       /* reading and decoding images: elapsed wall time, as open_ns and list_ns are */
+    uint64_t open_ns;         /* nk_texrepl_open: elapsed wall time on the host's monotonic clock */
     uint64_t index_bytes;     /* what the open pack's own index holds (not the ZIP reader's directory) */
     uint64_t skipped;         /* texture levels found unusable and skipped from then on, each counted once
                                  (a file several levels name is read, noted and counted in load_failed once) */

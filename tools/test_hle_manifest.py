@@ -19,7 +19,9 @@ import io
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from typing import Any, ClassVar, cast
 from unittest import mock
@@ -136,6 +138,35 @@ static void init(void) {
         with self.assertRaises(ManifestError) as ctx:
             extract_registrations(src)
         self.assertIn("cannot account for", str(ctx.exception))
+
+    def test_direct_register_entry_call_fails_closed(self) -> None:
+        src = SYNTH_SOURCE + '\nstatic void late(void) { sr_hle_register_entry(0x00000090u, "x", h_Alpha, 0u); }\n'
+        with self.assertRaises(ManifestError) as ctx:
+            extract_registrations(src)
+        self.assertIn("cannot account for", str(ctx.exception))
+
+    def test_wrapper_forwarding_text_outside_the_wrappers_fails_closed(self) -> None:
+        wrappers = (
+            "\nvoid sr_hle_register(uint32_t nid, const char *name, HleFn fn) {\n"
+            "    sr_hle_register_entry(nid, name, fn, 0u);\n"
+            "}\n"
+            "void sr_hle_register_unsupported(uint32_t nid, const char *name, uint32_t error) {\n"
+            "    sr_hle_register_entry(nid, name, h_ControlledUnsupported, error);\n"
+            "}\n"
+        )
+        extract_registrations(SYNTH_SOURCE + wrappers)
+        for copied in (
+            "static void helper(uint32_t nid, const char *name, HleFn fn) {\n"
+            "    sr_hle_register_entry(nid, name, fn, 0u);\n"
+            "}\n",
+            "static void helper(uint32_t nid, const char *name, uint32_t error) {\n"
+            "    sr_hle_register_entry(nid, name, h_ControlledUnsupported, error);\n"
+            "}\n",
+        ):
+            with self.subTest(copied=copied.splitlines()[1].strip()):
+                with self.assertRaises(ManifestError) as ctx:
+                    extract_registrations(SYNTH_SOURCE + wrappers + copied)
+                self.assertIn("cannot account for", str(ctx.exception))
 
     def test_duplicate_nid_fails(self) -> None:
         src = SYNTH_SOURCE.replace('0x00000020, "synthBeta"', '0x00000010, "synthBeta"')
@@ -375,9 +406,29 @@ class RegistrationOwnerFileTests(unittest.TestCase):
         composed = [path for path, _ in hle_manifest.runtime_hle_sources()]
         files = {
             p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8")
-            for p in sorted((ROOT / "src").rglob("*.c"))
+            for p in sorted(hle_manifest.tracked_src_c_files())
         }
         self.assertEqual(hle_manifest.registration_calls_outside(files, composed), [])
+
+    def test_tracked_src_c_files_excludes_untracked_files(self) -> None:
+        """A local untracked .c file is not part of the tree the census checks.
+
+        Built in a throwaway repository, so the run never writes into the checkout.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "src" / "rt").mkdir(parents=True)
+            (repo / "src" / "rt" / "tracked.c").write_text("int tracked;\n", encoding="utf-8")
+            (repo / "src" / "rt" / "notes.h").write_text("int header;\n", encoding="utf-8")
+            (repo / "src" / "rt" / "untracked.c").write_text(
+                'static void probe(void) { sr_hle_register(0x00000099u, "probe", h_Probe); }\n',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "add", "src/rt/tracked.c", "src/rt/notes.h"], cwd=repo, check=True)
+            with mock.patch.object(hle_manifest, "ROOT", repo):
+                found = hle_manifest.tracked_src_c_files()
+            self.assertEqual(found, [repo / "src" / "rt" / "tracked.c"])
 
     def test_nid_registered_from_two_runtime_units_is_rejected(self) -> None:
         a = (
@@ -833,7 +884,7 @@ class LiveManifestTests(unittest.TestCase):
                 if handler == "h_ClearEventFlag":
                     self.assertIn("0x8002019A", meta.HANDLER_LIMITATIONS[handler])
                 if handler == "h_DeleteFpl":
-                    self.assertIn("returns success", meta.HANDLER_LIMITATIONS[handler])
+                    self.assertIn("UNKNOWN_FPLID", meta.HANDLER_LIMITATIONS[handler])
 
     def test_route_a_kernel_lifecycle_batch_four_has_evidence_and_named_limits(self) -> None:
         expected = {
@@ -1376,6 +1427,20 @@ static uint32_t h_SynthReal(CpuState *s) {
         self.assertIn("h_SynthLogStub", stubs)
         self.assertNotIn("h_SynthReal", stubs)
 
+    def test_hex_zero_return_stub_is_flagged_as_mechanical_stub(self) -> None:
+        src = (
+            "static uint32_t h_HexZero(CpuState *s) { (void)s; return 0x0; }\n"
+            "static uint32_t h_HexZeroU(CpuState *s) { (void)s; return (uint32_t)0x00000000U; }\n"
+            "static uint32_t h_NonZero(CpuState *s) { (void)s; return 0x10; }\n"
+            "static uint32_t h_NamedOk(CpuState *s) { (void)s; return SCE_OK; }\n"
+        )
+        stubs = hle_manifest.mechanical_stub_handlers(src)
+        self.assertIn("h_HexZero", stubs)
+        self.assertIn("h_HexZeroU", stubs)
+        self.assertNotIn("h_NonZero", stubs)
+        # No runtime source defines SCE_OK, so it is not a zero spelling the census may assume.
+        self.assertNotIn("h_NamedOk", stubs)
+
     def test_mechanical_stubs_classify_as_fake_success(self) -> None:
         stubs = hle_manifest.mechanical_stub_handlers(self.SYNTH_STUB_SOURCE)
         self.assertEqual(
@@ -1478,15 +1543,7 @@ static uint32_t h_SynthReal(CpuState *s) {
              for r in manifest["registrations"] if r["name"] == "sceUmdGetErrorStat"],
             [("0x20628e6f", "sceUmdGetErrorStat", "dedicated", "compatibility")],
         )
-        # Compare against the committed baseline rather than a literal, so converting a
-        # stub into a real handler only needs the baseline refresh the gate already demands.
-        baseline_path = Path(__file__).resolve().parent / "import_audit_baseline.json"
-        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-        committed = sum(
-            1 for v in baseline.values()
-            if isinstance(v, dict) and v.get("classification") == "fake_success"
-        )
-        self.assertEqual(len(fake), committed, "live census must match the committed baseline")
+        self.assertEqual(len(fake), 4, "expected 4 fake_success registrations in the live census")
 
 
 class ControlledRefusalDiagnosticTests(unittest.TestCase):
@@ -1641,6 +1698,41 @@ class RegistrationScopeTests(unittest.TestCase):
             "as selftest-only would understate production reachability",
         )
 
+    def test_selftest_scope_elif_and_else_branches_do_not_toggle_back_to_selftest(self) -> None:
+        source = (
+            "void sr_hle_init(void) {\n"
+            "#ifdef SR_HLE_THREAD_SELFTEST\n"
+            '    sr_hle_register(0x00000081u, "synthSelf", h_Prod);\n'
+            "#elif defined(SR_OTHER)\n"
+            '    sr_hle_register(0x00000082u, "synthElif", h_Prod);\n'
+            "#else\n"
+            '    sr_hle_register(0x00000083u, "synthElse", h_Prod);\n'
+            "#endif\n"
+            "}\n"
+        )
+        scopes = hle_manifest.registration_scopes(source)
+        self.assertEqual(scopes[0x81]["reachable_from"], ["selftest"])
+        self.assertEqual(scopes[0x82]["reachable_from"], ["production"])
+        self.assertEqual(scopes[0x83]["reachable_from"], ["production"])
+
+    def test_uncalled_or_inline_called_registration_helper_is_not_assumed_production(self) -> None:
+        source = (
+            "static void register_inline(void) {\n"
+            '    sr_hle_register(0x00000091u, "synthInline", h_Prod);\n'
+            "}\n"
+            "static void register_dead(void) {\n"
+            '    sr_hle_register(0x00000092u, "synthDead", h_Prod);\n'
+            "}\n"
+            "void sr_hle_init(void) {\n"
+            "#ifdef SR_HLE_THREAD_SELFTEST\n"
+            "    if (1) register_inline();\n"
+            "#endif\n"
+            "}\n"
+        )
+        scopes = hle_manifest.registration_scopes(source)
+        self.assertEqual(scopes[0x91]["reachable_from"], ["selftest"])
+        self.assertEqual(scopes[0x92]["reachable_from"], [])
+
 
 class ConformanceJoinTests(unittest.TestCase):
     def test_probe_rows_group_by_dispatched_nid(self) -> None:
@@ -1665,12 +1757,21 @@ class ConformanceJoinTests(unittest.TestCase):
         self.assertEqual(hle_manifest.conformance_cells('{ "notAProbe", 0x1u, "" }'), {})
 
     def test_selftest_dispatch_needs_the_define_to_be_used(self) -> None:
-        used = "#define NID_USED 0x11111111u\n" "  x = sr_syscall(&cpu, NID_USED);\n"
+        used = "#define NID_USED 0x11111111u\n" "static void t(void) { CpuState cpu; sr_syscall(&cpu, NID_USED); }\n"
         unused = "#define NID_UNUSED 0x22222222u\n"
-        found = hle_manifest.selftest_dispatched_nids(used + unused)
+        non_dispatch_define = (
+            "#define NID_PREFIX 0x33333333u\n"
+            "#define NID_PREFIX_EX 0x44444444u\n"
+            "/* NID_PREFIX in a comment */\n"
+            "static void t2(void) { sr_hle_test_is_registered(NID_PREFIX); }\n"
+        )
+        found = hle_manifest.selftest_dispatched_nids(used + unused + non_dispatch_define)
         self.assertIn(0x11111111, found)
         self.assertNotIn(
             0x22222222, found, "an unreferenced NID define is not an exercise"
+        )
+        self.assertNotIn(
+            0x33333333, found, "a NID_* define mentioned only in comments/prefixes/is_registered is not dispatched"
         )
 
     def test_selftest_dispatch_sees_a_bare_literal(self) -> None:
@@ -1753,6 +1854,72 @@ class ConformanceJoinTests(unittest.TestCase):
         found = hle_manifest.selftest_dispatched_nids(source)
         self.assertIn(0x2E2E2E2E, found)
         self.assertNotIn(0x1D1D1D1D, found)
+
+    def test_selftest_dispatch_credits_an_iterated_initializer_table(self) -> None:
+        """`sr_syscall(&cpu, rows[i].nid)` over a `{NID_X, error}` table dispatches every row's NID."""
+        source = (
+            "#define NID_ROW_A 0x0a0a0a0au\n"
+            "#define NID_ROW_B 0x0b0b0b0bu\n"
+            "#define NID_TYPED 0x0c0c0c0cu\n"
+            "#define NID_PLAIN 0x0d0d0d0du\n"
+            "#define NID_ERR_ONLY 0x0e0e0e0eu\n"
+            "#define NID_UNREAD 0x0f0f0f0fu\n"
+            "#define NID_REG_ONLY 0x1a1a1a1au\n"
+            "typedef struct Row { const char *name; uint32_t init, update; } Row;\n"
+            "static const uint32_t s_file_nids[2] = { NID_PLAIN, 0x1b1b1b1bu };\n"
+            "static uint32_t call(uint32_t nid) { CpuState cpu; return sr_syscall(&cpu, nid); }\n"
+            "static void test_rows(void) {\n"
+            "    static const struct { uint32_t nid; uint32_t error; const char *name; } refused[] = {\n"
+            "        {NID_ROW_A, NID_ERR_ONLY, \"a, b\"},\n"
+            "        {NID_ROW_B, 0x80020002u, \"b\"},\n"
+            "    };\n"
+            "    static const Row rows[] = { { \"x\", NID_REG_ONLY, NID_TYPED } };\n"
+            "    static const uint32_t unread[] = { NID_UNREAD };\n"
+            "    CpuState cpu;\n"
+            "    for (size_t i = 0; i < 2; i++) {\n"
+            "        expect(sr_hle_test_is_registered(rows[i].init), \"registered\");\n"
+            "        expect(sr_syscall(&cpu, refused[i].nid) == refused[i].error, \"refused\");\n"
+            "        expect(call(rows[i].update) == 0u, \"typedef row through a helper\");\n"
+            "        expect(sr_syscall(&cpu, s_file_nids[i]) == 0u, \"file-scope table\");\n"
+            "    }\n"
+            "    (void)unread;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            hle_manifest.selftest_dispatched_nids(source),
+            {0x0A0A0A0A, 0x0B0B0B0B, 0x0C0C0C0C, 0x0D0D0D0D, 0x1B1B1B1B},
+            "only the dispatched column of an iterated table counts: not the error column, "
+            "not a column only checked for registration, and not a table no dispatch reads",
+        )
+
+    def test_selftest_dispatch_credits_both_arms_and_assigned_variables(self) -> None:
+        source = (
+            "#define NID_RECV 0x21212121u\n"
+            "#define NID_RECV_CB 0x22222222u\n"
+            "#define NID_DELAY 0x23232323u\n"
+            "#define NID_DELAY_CB 0x24242424u\n"
+            "#define NID_ALIASED 0x25252525u\n"
+            "static uint32_t s_delay_nid = NID_DELAY;\n"
+            "static void delay_entry(void) { CpuState cpu; (void)sr_syscall(&cpu, s_delay_nid); }\n"
+            "static void test_g(int cb) {\n"
+            "    CpuState cpu;\n"
+            "    const uint32_t alias = NID_ALIASED, other = 0u;\n"
+            "    s_delay_nid = NID_DELAY_CB;\n"
+            "    (void)sr_syscall(&cpu, cb ? NID_RECV_CB : NID_RECV);\n"
+            "    (void)sr_syscall(&cpu, alias);\n"
+            "    (void)other;\n"
+            "}\n"
+        )
+        self.assertEqual(
+            hle_manifest.selftest_dispatched_nids(source),
+            {0x21212121, 0x22222222, 0x23232323, 0x24242424, 0x25252525},
+        )
+
+    def test_live_selftest_table_dispatches_are_credited(self) -> None:
+        """The kernel import sweep dispatches sceGeSaveContext and sceGeRestoreContext from a table."""
+        found = hle_manifest.selftest_dispatched_nids(hle_manifest._read_optional(hle_manifest.SELFTEST_C))
+        self.assertIn(0x438A385A, found)  # sceGeSaveContext
+        self.assertIn(0x0BF608FB, found)  # sceGeRestoreContext
 
 
 class EvidenceTierTests(unittest.TestCase):
@@ -1950,6 +2117,23 @@ class EvidenceTierTests(unittest.TestCase):
                     evidence_cases=["ge-mask-primary-masked-release"],
                 )],
             })
+        # Substring prefix collision: "display-ge" is a prefix of "display-ge-mask", not its own token.
+        with self.assertRaisesRegex(ManifestError, "does not name"):
+            hle_manifest.oracle_exercised_apis({
+                "tests": [self._measured_row(
+                    case_ids=["display-ge"],
+                    evidence_cases=["display-ge"],
+                )],
+            })
+
+    def test_malformed_oracle_manifest_json_fails_closed(self) -> None:
+        with mock.patch.object(hle_manifest, "_read_optional", side_effect=lambda p: "{bad json" if p == hle_manifest.PSP_ORACLE_MANIFEST else ""):
+            with self.assertRaisesRegex(ManifestError, "not valid JSON"):
+                hle_manifest.build_evidence_chain(self._entry_manifest())
+
+    @staticmethod
+    def _entry_manifest() -> dict:
+        return {"source": "synth", "registrations": [], "findings": []}
 
     def test_the_committed_manifest_only_promotes_cited_measured_rows(self) -> None:
         document = json.loads(
@@ -2012,6 +2196,13 @@ class EvidenceTierTests(unittest.TestCase):
         )
         self.assertIn("stub", why)
 
+    def test_hardware_probe_on_fake_success_stub_stays_not_evidence(self) -> None:
+        tier, why = hle_manifest.evidence_tier(
+            self._entry(classification="fake_success", oracle=["PSP-SMOKE-001"])
+        )
+        self.assertEqual(tier, "NOT_EVIDENCE")
+        self.assertIn("stub", why)
+
     def test_a_dedicated_handler_with_no_coverage_is_only_static(self) -> None:
         tier, _ = hle_manifest.evidence_tier(self._entry())
         self.assertEqual(tier, "STATICALLY_SUPPORTED")
@@ -2069,6 +2260,17 @@ class LiveEvidenceChainTests(unittest.TestCase):
         )
 
     def test_exercised_stubs_are_reported_rather_than_counted_as_coverage(self) -> None:
+        expected_stubs = [
+            {"nid": e["nid"], "name": e["canonical_name"], "handler": e["registration"]["handler"]}
+            for e in self.chain["entries"]
+            if e["registration"]["classification"] == "fake_success"
+            and (
+                e["exercised"]["conformance_cells"]
+                or e["exercised"]["hle_selftest_dispatch"]
+                or e["exercised"]["psp_oracle_probes"]
+            )
+        ]
+        self.assertEqual(self.chain["summary"]["exercised_stubs"], expected_stubs)
         for stub in self.chain["summary"]["exercised_stubs"]:
             entry = self.by_nid[stub["nid"]]
             self.assertTrue(entry["exercised_stub"])
@@ -2078,11 +2280,13 @@ class LiveEvidenceChainTests(unittest.TestCase):
         manifest = json.loads(hle_manifest.PSP_ORACLE_MANIFEST.read_text(encoding="utf-8"))
         apis = hle_manifest.oracle_exercised_apis(manifest)
         registered = {e["canonical_name"] for e in self.chain["entries"]}
+        matched = []
         for api, probes in apis.items():
             if api in registered:
+                matched.append(api)
                 entry = next(e for e in self.chain["entries"] if e["canonical_name"] == api)
                 self.assertEqual(entry["exercised"]["psp_oracle_probes"], probes)
-
+        self.assertGreater(len(matched), 0, "at least one hardware-probe API must join a registration")
 
 
 class ProfileZeroImportGateTests(unittest.TestCase):

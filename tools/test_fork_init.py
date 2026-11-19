@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -51,7 +53,8 @@ class SeedRecordsTest(unittest.TestCase):
         records = {record["id"]: record for record in fork_init.seed_records(ledger, "c" * 40)}
         self.assertEqual(sorted(records), ["rec-a", "rec-c", "rec-d", "rec-e"])
         self.assertEqual(records["rec-a"]["paths"], ["src/a.c", "src/b.c"])
-        self.assertEqual(records["rec-a"]["classification"], "project-authored-independent")
+        # The public class cannot tell independent from behavior-informed: the seed takes the weaker.
+        self.assertEqual(records["rec-a"]["classification"], "behavior-informed")
         self.assertEqual(records["rec-c"]["classification"], "derived-translated")
         self.assertEqual(records["rec-c"]["upstream_license"], "GPL-2.0-or-later")
         self.assertNotIn("upstream_license", records["rec-d"])
@@ -189,6 +192,47 @@ class AuthorityTest(unittest.TestCase):
             with self.assertRaises(fork_init.ForkInitError) as caught:
                 self._record(authority)
             self.assertEqual(caught.exception.code, "AUTHORITY_NOT_MAIN")
+
+    def test_record_refuses_an_authority_inside_a_checkout_of_the_fork(self) -> None:
+        # init refuses this; record must too, and must honour --repo to know which fork it serves.
+        with tempfile.TemporaryDirectory(prefix="nk-fork-inside-") as scratch:
+            fork = Path(scratch) / "fork"
+            subprocess.run(["git", "init", "--quiet", str(fork)], check=True)
+            authority = fork / "authority"
+            subprocess.run(["git", "clone", "--quiet", str(self.authority), str(authority)], check=True)
+            before = (authority / fork_init.AUTHORITY_LEDGER).read_bytes()
+            stderr = io.StringIO()
+            with mock.patch.dict(os.environ, IDENTITY), contextlib.redirect_stderr(stderr):
+                status = fork_init.main([
+                    "record", "--authority", str(authority), "--repo", str(fork),
+                    "--id", "fork-inside-2026-11-18", "--path", "tools/fork_example_tool.py",
+                    "--classification", "project-authored-independent", "--evidence-tier", "S",
+                    "--statement", "mine",
+                ])
+            self.assertEqual(status, 1)
+            self.assertIn("AUTHORITY_INSIDE_REPOSITORY", stderr.getvalue())
+            self.assertEqual((authority / fork_init.AUTHORITY_LEDGER).read_bytes(), before)
+
+    def test_a_refused_record_commit_leaves_the_authority_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-fork-commit-") as scratch:
+            authority = self._clone(scratch)
+            hooks = Path(scratch) / "hooks"
+            hooks.mkdir()
+            hook = hooks / "pre-commit"
+            hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8", newline="\n")
+            hook.chmod(0o755)
+            subprocess.run(["git", "-C", str(authority), "config", "core.hooksPath", str(hooks)], check=True)
+            before = (authority / fork_init.AUTHORITY_LEDGER).read_bytes()
+            with self.assertRaises(fork_init.ForkInitError) as caught:
+                self._record(authority)
+            self.assertEqual(caught.exception.code, "AUTHORITY_COMMIT_FAILED")
+            self.assertEqual((authority / fork_init.AUTHORITY_LEDGER).read_bytes(), before)
+            status = subprocess.run(["git", "-C", str(authority), "status", "--porcelain"], capture_output=True,
+                                    text=True, check=True).stdout
+            self.assertEqual(status, "")
+            # Once the commit can go through, the same record is accepted.
+            hook.unlink()
+            self._record(authority)
 
 
 class RefusalTest(unittest.TestCase):

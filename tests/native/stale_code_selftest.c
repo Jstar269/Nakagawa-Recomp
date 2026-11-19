@@ -10,7 +10,7 @@
 // sr_stale_block_is_stale() query through a modeled AOT-vs-interpreter tier
 // branch. No title data, no image, no guest input.
 //
-// Two modes, selected by the SR_STALE_DETECT environment gate itself:
+// Two modes, selected by the SR_STALE_DETECT environment variable; the gate must agree:
 //   gate off (unset): register + overwrite + check must stay SILENT (the
 //                     opt-in contract: off by default, off the hot path).
 //   gate on  (=1):    the full matrix below; exit code 0 means every
@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int g_failed = 0;
 
@@ -294,8 +295,69 @@ static void test_forget_range(void) {
     sr_stale_reset();
 }
 
+/* A one-word loader patch (a variable-import relocation) inside a translated
+ * block: the patched word becomes expected, and the block keeps its record so
+ * an overwrite of another word in it still fires. */
+static void test_patch_word_keeps_block_coverage(void) {
+    static const uint32_t live[4] = { 0x3c040000u, 0x24840000u, 0x03e00008u, 0x00000000u };
+    uint32_t patched[4];
+    uint32_t bad = 0u;
+    uint32_t exp = 0u;
+    uint32_t act = 0u;
+    uint32_t i;
+    sr_stale_reset();
+    for (i = 0; i < 4u; i++) {
+        fake_write(BLOCK_C + i * 4u, live[i]);
+        patched[i] = live[i];
+    }
+    sr_stale_register_block(BLOCK_C, 4u, sr_stale_fnv1a(live, 4u));
+    patched[1] = 0x24841234u;
+    sr_stale_patch_word(BLOCK_C + 4u, patched[1], fake_read, NULL);
+    fake_write(BLOCK_C + 4u, patched[1]);
+    CHECK(sr_stale_entry_count() == 2u,
+          "the block record survives the patch beside the patched word (%u records)",
+          sr_stale_entry_count());
+    CHECK(sr_stale_check_range(BLOCK_C, 16u, fake_read, NULL, &bad, &exp, &act) == 0,
+          "the patched word is the expected one now");
+    CHECK(sr_stale_block_is_stale(BLOCK_C) == 0, "the patched block dispatches to its AOT body");
+    fake_write(BLOCK_C + 8u, 0x00000000u);
+    CHECK(sr_stale_check_range(BLOCK_C + 8u, 4u, fake_read, NULL, &bad, &exp, &act) == 1 &&
+              bad == BLOCK_C && exp == sr_stale_fnv1a(patched, 4u),
+          "an overwrite of another word in the patched block fires (bad 0x%08x)", bad);
+    CHECK(sr_stale_block_is_stale(BLOCK_C) == 1, "the overwritten block leaves its AOT body");
+
+    /* A block that already differs keeps its old expectation: the earlier overwrite
+     * is not absorbed by the patch. */
+    sr_stale_reset();
+    for (i = 0; i < 4u; i++) fake_write(BLOCK_C + i * 4u, live[i]);
+    sr_stale_register_block(BLOCK_C, 4u, sr_stale_fnv1a(live, 4u));
+    fake_write(BLOCK_C + 8u, 0x00000000u);
+    sr_stale_patch_word(BLOCK_C + 4u, patched[1], fake_read, NULL);
+    fake_write(BLOCK_C + 4u, patched[1]);
+    CHECK(sr_stale_check_range(BLOCK_C, 16u, fake_read, NULL, &bad, &exp, &act) == 1 &&
+              bad == BLOCK_C && exp == sr_stale_fnv1a(live, 4u),
+          "a patch does not clear an overwrite that came before it");
+    sr_stale_reset();
+}
+
+/* The mode the environment asks for, read here with the gate's documented rule (set, not empty
+ * and not "0" turns it on) and the literal variable name, so the mode is not chosen by the code
+ * under test: a gate reader that never turns on must fail the SR_STALE_DETECT=1 run, not pass
+ * it as a gate-off run. */
+static int expected_gate_on(void) {
+    const char *e = getenv("SR_STALE_DETECT");
+    return e != NULL && e[0] != '\0' && strcmp(e, "0") != 0;
+}
+
 int main(void) {
-    if (!sr_stale_enabled()) {
+    int expected = expected_gate_on();
+    if (sr_stale_enabled() != expected) {
+        fprintf(stderr, "stale_code selftest: FAILED (SR_STALE_DETECT asks for the gate %s, "
+                        "sr_stale_enabled() reads %d)\n",
+                expected ? "on" : "off", sr_stale_enabled());
+        return 1;
+    }
+    if (!expected) {
         test_gate_off_is_silent();
         test_forget_range();
         if (g_failed) {
@@ -309,6 +371,7 @@ int main(void) {
     test_detector_matrix();
     test_invalidation_half();
     test_forget_range();
+    test_patch_word_keeps_block_coverage();
     sr_stale_reset();
     if (g_failed) {
         fprintf(stderr, "stale_code selftest: FAILED\n");

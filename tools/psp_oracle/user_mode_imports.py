@@ -22,9 +22,10 @@ because its library cannot be shown to be a user library.
 
 The registry is persistent console state, and on PSP-3000 6.6.1 even a
 "read" open of a missing category creates it. Every probe, user or kernel
-mode, may therefore import only the eight read-only sceReg calls listed in
-REGISTRY_READ_NIDS; any other sceReg NID (set, create, remove, flush, exit or
-an unknown one) fails the gate. ``--exact-library LIB=NID[,NID...]`` further
+mode, may therefore import only the eight read-only calls from ``sceReg``;
+any import from another ``sceReg``-prefixed library is refused because its NID
+set is not qualified, and any other ``sceReg`` NID (set, create, remove, flush,
+exit or an unknown one) fails the gate. ``--exact-library LIB=NID[,NID...]`` further
 requires a module's imports from LIB to be exactly that set (the registry
 cases pin their sceReg imports this way). ``--forbid-library LIB`` requires a
 module to import nothing at all from LIB (the font-list case forbids every
@@ -160,12 +161,21 @@ def check_import_table(
                     continue
                 reason = kernel_reason
             violations.append(LibraryViolation(library, reason, tuple(nids)))
-    refused = tuple(nid for nid in nids_by_library.get(REGISTRY_LIBRARY, ())
-                    if nid not in REGISTRY_READ_NIDS)
-    if refused:
-        names = ", ".join(registry_call_name(nid) for nid in refused)
-        violations.append(LibraryViolation(
-            REGISTRY_LIBRARY, f"registry calls outside the read-only set ({names})", refused))
+    for library, nids in nids_by_library.items():
+        if not library.startswith(REGISTRY_LIBRARY):
+            continue
+        refused = tuple(
+            nid for nid in nids
+            if library != REGISTRY_LIBRARY or nid not in REGISTRY_READ_NIDS
+        )
+        if refused:
+            names = ", ".join(registry_call_name(nid) for nid in refused)
+            reason = (
+                f"registry library is not the qualified read-only sceReg library ({names})"
+                if library != REGISTRY_LIBRARY
+                else f"registry calls outside the read-only set ({names})"
+            )
+            violations.append(LibraryViolation(library, reason, refused))
     for library, expected in sorted((exact_libraries or {}).items()):
         found = frozenset(nids_by_library.get(library, ()))
         if found == expected:

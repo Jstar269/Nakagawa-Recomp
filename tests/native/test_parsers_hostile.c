@@ -352,7 +352,9 @@ static void test_hostile_library_json(const char *test_dir) {
     snprintf(fpath, sizeof(fpath), "%s%cunterminated_str.json", test_dir, nk_platform_path_separator());
     const char json_unterminated[] = "{\n  \"schema_version\": 1,\n  \"games\": [\n    {\n      \"disc_id\": \"TEST00001,\n      \"title_name\": \"test\"\n    }\n  ]\n}";
     write_test_file(fpath, json_unterminated, strlen(json_unterminated));
-    assert(nk_library_load(&lib, fpath) == NK_OK || nk_library_load(&lib, fpath) == NK_ERROR_GENERIC);
+    /* Malformed, so the load fails and its .bak recovery runs (subtest 4b): an NK_OK with no
+       games would let the next save write the empty library over the user's. */
+    assert(nk_library_load(&lib, fpath) == NK_ERROR_GENERIC);
     assert(nk_library_count(&lib) == 0);
 
     /* 4. String longer than destination buffer */
@@ -622,6 +624,19 @@ static void test_library_json_string_escapes(const char *test_dir) {
     assert(memcmp(value, "\xE2\x84\xA2\xF0\x9F\x8E\xAE", 7) == 0);
     nk_json_free(root);
 
+    /* 5. Numbers with leading zeroes -> REJECT per RFC 8259 */
+    const char *bad_numbers[] = {
+        "{\"k\": 01}",
+        "{\"k\": -01}",
+        "{\"k\": 00}"
+    };
+    for (size_t i = 0; i < sizeof(bad_numbers) / sizeof(bad_numbers[0]); i++) {
+        char err_buf[128] = "";
+        NkJsonNode *n = nk_json_parse(bad_numbers[i], strlen(bad_numbers[i]), err_buf, sizeof(err_buf));
+        assert(n == NULL);
+        assert(strstr(err_buf, "leading zeros") != NULL || strstr(err_buf, "Invalid number") != NULL);
+    }
+
     printf("[HOSTILE_TEST] Library string escape tests PASSED!\n"); fflush(stdout);
 }
 
@@ -672,11 +687,31 @@ static void test_hostile_iso_parser(const char *test_dir) {
     write_test_file(fpath, hostile_iso, sizeof(hostile_iso));
     assert(nk_iso_inspect(fpath, &meta) == NK_ERROR_INVALID_ISO);
 
-    /* 5. Extraction with hostile depth */
+    /* 5. Extraction from that image stops at its root, before any path component. */
     char out_file[512];
     snprintf(out_file, sizeof(out_file), "%s%cextracted.bin", test_dir, nk_platform_path_separator());
-    const char deep_path[] = "A/B/C/D/E/F/G/H/I/J/K/L/M/N/O/P/Q/R/S/T/U/V/W/X/Y/Z";
-    assert(nk_iso_extract_file(fpath, deep_path, out_file) == NK_ERROR_INVALID_ISO);
+    assert(nk_iso_extract_file(fpath, "A", out_file) == NK_ERROR_INVALID_ISO);
+
+    /* 5b. Extraction with hostile depth. The root's only record, A, is the root itself, so
+     * every component of A/A/.../A resolves and only the depth limit (16) can refuse a path
+     * of 17 components; 16 of them extract the root's own sector. */
+    printf("[HOSTILE_TEST] Subtest 5b: extraction path deeper than the limit\n"); fflush(stdout);
+    snprintf(fpath, sizeof(fpath), "%s%cself_nested.iso", test_dir, nk_platform_path_separator());
+    {
+        uint8_t nest_iso[18 * 2048];
+        char nest_path[64] = "A";
+        memset(nest_iso, 0, sizeof(nest_iso));
+        uint8_t *pvd_nest = &nest_iso[16 * 2048];
+        pvd_nest[0] = 0x01;
+        memcpy(&pvd_nest[1], "CD001", 5);
+        write_dir_record(pvd_nest, 156, "\0", 1, 17, 2048, true);
+        write_dir_record(&nest_iso[17 * 2048], 0, "A", 1, 17, 2048, true);
+        write_test_file(fpath, nest_iso, sizeof(nest_iso));
+        for (int level = 2; level <= 16; level++) strcat(nest_path, "/A");
+        assert(nk_iso_extract_file(fpath, nest_path, out_file) == NK_OK);
+        strcat(nest_path, "/A");
+        assert(nk_iso_extract_file(fpath, nest_path, out_file) == NK_ERROR_INVALID_ISO);
+    }
 
     /* 6. Directory record crossing sector boundary (ECMA-119 6.8.1.1) */
     printf("[HOSTILE_TEST] Subtest 6: directory record crossing sector boundary\n"); fflush(stdout);
@@ -724,6 +759,8 @@ static void test_hostile_iso_parser(const char *test_dir) {
     write_test_file(fpath, short_iso, sizeof(short_iso));
     memset(&meta, 0, sizeof(meta));
     assert(nk_iso_inspect(fpath, &meta) == NK_ERROR_INVALID_ISO);
+    /* Sector 19 is no PARAM.SFO either, so the refusal must name the short record. */
+    assert(strstr(meta.error_message, "too short for its identifier") != NULL);
 
     /* A one-byte record in the last byte of the directory: its fields would lie past the
      * allocation, which the sanitizer legs of fuzz-parsers and this test see as an overread. */
@@ -758,6 +795,9 @@ static void test_hostile_iso_parser(const char *test_dir) {
     memset(&meta, 0, sizeof(meta));
     assert(nk_iso_inspect(fpath, &meta) == NK_OK);
     assert(strcmp(meta.volume_id, "ENDIAN_TEST_VOL") == 0);
+    /* The disagreeing record is skipped: neither its LE nor its BE extent is trusted, so no
+     * PSP_GAME folder is found. Following LE sector 18 would set the flag. */
+    assert(!meta.has_psp_game_folder);
 
     /* 8. Duplicate SFO keys */
     printf("[HOSTILE_TEST] Subtest 8a: conflicting duplicate SFO keys (must reject as ambiguous)\n"); fflush(stdout);
@@ -872,10 +912,14 @@ static void test_hostile_iso_parser(const char *test_dir) {
     printf("[HOSTILE_TEST] Subtest 9e: truncated next sector (root size 4096 but file 18 sectors)\n"); fflush(stdout);
     char fpath_trunc[512];
     snprintf(fpath_trunc, sizeof(fpath_trunc), "%s%csector_trunc.iso", test_dir, nk_platform_path_separator());
+    /* Sector 17 back to 9a's valid state, so the missing sector is the only defect. */
+    fill_dir_chain(&pad_iso[17 * 2048], 2000);
+    pad_iso[17 * 2048 + 2000] = 0;
     /* Write only 18 sectors: sector 17 exists, but sector 18 does not! */
     write_test_file(fpath_trunc, pad_iso, 18 * 2048);
     memset(&meta, 0, sizeof(meta));
     assert(nk_iso_inspect(fpath_trunc, &meta) == NK_ERROR_INVALID_ISO);
+    assert(strstr(meta.error_message, "Root directory extends beyond ISO file bounds") != NULL);
 
     char fpath_scan[512];
     snprintf(fpath_scan, sizeof(fpath_scan), "%s%cscan_identity.iso", test_dir, nk_platform_path_separator());
@@ -1030,6 +1074,8 @@ static size_t append_iso_record_test(uint8_t *directory, size_t offset,
                                      uint32_t lba, uint32_t size, bool is_dir) {
     size_t record_size = 33u + name_size;
     if ((record_size & 1u) != 0) record_size++;
+    /* The length is one byte: a longer record would wrap and describe another one. */
+    assert(record_size <= 255u);
     uint8_t *record = directory + offset;
     memset(record, 0, record_size);
     record[0] = (uint8_t)record_size;
@@ -1398,6 +1444,22 @@ static bool test_module_walk_cb(const char *member_path, const NkIsoDirEntry *en
     return true;
 }
 
+/* Records whether the walk reported exactly one member, at the expected full path. */
+typedef struct {
+    char expected[1200];
+    size_t calls;
+    size_t matched;
+} LongPathCtx;
+
+static bool long_path_walk_cb(const char *member_path, const NkIsoDirEntry *entry,
+                              void *userdata) {
+    LongPathCtx *ctx = (LongPathCtx *)userdata;
+    (void)entry;
+    ctx->calls++;
+    if (strcmp(member_path, ctx->expected) == 0) ctx->matched++;
+    return true;
+}
+
 /* Every walk fixture uses the same geometry. The deepest record (the depth
  * case, LBA 27) fits inside these 28 sectors. */
 #define WALK_SECTOR_SIZE 2048u
@@ -1720,8 +1782,14 @@ static void test_iso_walk_module_tree(const char *test_dir) {
         free(big_image);
     }
 
-    /* 11. Path length limit */
-    printf("[HOSTILE_TEST] Walk subtest 11: overlong path lookup limit\n"); fflush(stdout);
+    /* 11. A long member path is reported whole. A record is at most 255 bytes, so an
+     * identifier is at most 221 (append_iso_record_test refuses a longer record instead of
+     * wrapping its one-byte length), and the walk descends 4 directories below USRDIR. The
+     * path below has a 221-byte file name four directories down, 721 bytes in all, inside
+     * NK_ISO_MODULE_TREE_MAX_PATH_BYTES; no legal disc reaches that limit's 1200 bytes, so
+     * NK_ISO_MODULE_WALK_PATH_LIMIT is checked with a smaller build-time limit in
+     * tools/test_iso_parity.py. */
+    printf("[HOSTILE_TEST] Walk subtest 11: long member path reported whole\n"); fflush(stdout);
     image = walk_image_new();
     off = walk_dot_records(WALK_SECTOR(image, 17), 17, 17);
     append_iso_record_test(WALK_SECTOR(image, 17), off, (const uint8_t *)"PSP_GAME", 8,
@@ -1729,35 +1797,39 @@ static void test_iso_walk_module_tree(const char *test_dir) {
     off = walk_dot_records(WALK_SECTOR(image, 18), 18, 17);
     append_iso_record_test(WALK_SECTOR(image, 18), off, (const uint8_t *)"USRDIR", 6,
                            19, WALK_SECTOR_SIZE, true);
-
-    char long_d1[241], long_d2[241], long_d3[241], long_d4[241], long_file[241];
-    memset(long_d1, 'A', 240); long_d1[240] = '\0';
-    memset(long_d2, 'B', 240); long_d2[240] = '\0';
-    memset(long_d3, 'C', 240); long_d3[240] = '\0';
-    memset(long_d4, 'D', 240); long_d4[240] = '\0';
-    memset(long_file, 'F', 230);
-    memcpy(long_file + 230, ".PRX;1", 6);
-    long_file[236] = '\0';
-
-    off = walk_dot_records(WALK_SECTOR(image, 19), 19, 18);
-    append_iso_record_test(WALK_SECTOR(image, 19), off, (const uint8_t *)long_d1, 240,
-                           20, WALK_SECTOR_SIZE, true);
-    off = walk_dot_records(WALK_SECTOR(image, 20), 20, 19);
-    append_iso_record_test(WALK_SECTOR(image, 20), off, (const uint8_t *)long_d2, 240,
-                           21, WALK_SECTOR_SIZE, true);
-    off = walk_dot_records(WALK_SECTOR(image, 21), 21, 20);
-    append_iso_record_test(WALK_SECTOR(image, 21), off, (const uint8_t *)long_d3, 240,
-                           22, WALK_SECTOR_SIZE, true);
-    off = walk_dot_records(WALK_SECTOR(image, 22), 22, 21);
-    append_iso_record_test(WALK_SECTOR(image, 22), off, (const uint8_t *)long_d4, 240,
-                           23, WALK_SECTOR_SIZE, true);
-    off = walk_dot_records(WALK_SECTOR(image, 23), 23, 22);
-    append_iso_record_test(WALK_SECTOR(image, 23), off, (const uint8_t *)long_file, 236,
-                           24, 100, false);
-
-    memset(&ctx, 0, sizeof(ctx));
-    status = walk_image(test_dir, "walk_path_limit.iso", image, &ctx);
-     assert(status == NK_ISO_MODULE_WALK_INVALID_TREE);
+    {
+        enum { DIR_NAME = 120, FILE_NAME = 221 };
+        char names[5][FILE_NAME + 1];
+        LongPathCtx long_ctx;
+        for (int level = 0; level < 5; level++) {
+            size_t length = level < 4 ? DIR_NAME : FILE_NAME;
+            memset(names[level], 'A' + level, length);
+            names[level][length] = '\0';
+        }
+        memcpy(names[4] + FILE_NAME - 4, ".PRX", 4);
+        snprintf(long_ctx.expected, sizeof(long_ctx.expected), "PSP_GAME/USRDIR/%s/%s/%s/%s/%s",
+                 names[0], names[1], names[2], names[3], names[4]);
+        assert(strlen(long_ctx.expected) == 721u);
+        for (uint32_t level = 0; level < 5; level++) {
+            uint32_t lba = 19 + level;
+            off = walk_dot_records(WALK_SECTOR(image, lba), lba, lba - 1);
+            append_iso_record_test(WALK_SECTOR(image, lba), off, (const uint8_t *)names[level],
+                                   (uint8_t)strlen(names[level]), level < 4 ? lba + 1 : 24,
+                                   level < 4 ? WALK_SECTOR_SIZE : 100u, level < 4);
+        }
+        long_ctx.calls = 0;
+        long_ctx.matched = 0;
+        char path[600];
+        snprintf(path, sizeof(path), "%s%cwalk_path_limit.iso", test_dir,
+                 nk_platform_path_separator());
+        write_test_file(path, image, WALK_TOTAL_SECTORS * WALK_SECTOR_SIZE);
+        NkIsoReader *reader = nk_iso_reader_open(path);
+        assert(reader != NULL);
+        status = nk_iso_reader_walk_module_tree(reader, long_path_walk_cb, &long_ctx);
+        nk_iso_reader_close(reader);
+        assert(status == NK_ISO_MODULE_WALK_OK);
+        assert(long_ctx.calls == 1 && long_ctx.matched == 1);
+    }
     free(image);
 
     /* 12. Invalid tree structure */

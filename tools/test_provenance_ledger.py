@@ -3668,3 +3668,225 @@ class GeneratorClassMappingRegressions(unittest.TestCase):
         refreshed = provenance_ledger._refresh_class_for("font/README.md", record)
         self.assertEqual(generated, refreshed)
         self.assertIsNone(refreshed[1].get("record_id"))
+
+
+class EditorConfigImportByteTests(unittest.TestCase):
+    """A save in an EditorConfig-aware editor must not rewrite a pinned import's bytes.
+
+    ``.gitattributes`` and the pre-commit whitespace hooks exempt vendored imports so their
+    pinned blob IDs stay the same.  ``.editorconfig`` must not ask an editor to do what they
+    then refuse to normalise, or saving an untouched import changes its content hash.  The
+    exemption covers only imported files: project-authored files in the same trees (the
+    PROVENANCE.md manifests and the files those manifests mark AUTHORED) keep the normal
+    rules.  The import set is derived from those controls and manifests, not hand-picked.
+    """
+
+    # Project-authored files the trailing-whitespace hook skips only to avoid an unrelated
+    # mass-format diff; an editor trimming them changes no pinned bytes.
+    LEGACY_PROJECT_FILES = frozenset(
+        {
+            "tests/native/sched_selftest.c",
+            "tools/gen_microtest.py",
+            "tools/test_codegen_gate_b_encoding.py",
+        }
+    )
+    # Manifests whose tables classify each file of an import tree as imported or AUTHORED.
+    CLASSIFYING_MANIFESTS = (
+        "src/rt/atrac3p/PROVENANCE.md",
+        "src/rt/h264_ffmpeg_sub/PROVENANCE.md",
+    )
+    IMPORT_MANIFESTS = (
+        "third_party/libchdr/PROVENANCE.md",
+        "third_party/stb/PROVENANCE.md",
+        "src/rt/atrac3p/PROVENANCE.md",
+        "src/rt/h264_ffmpeg_sub/PROVENANCE.md",
+        "src/rt/minimp3/PROVENANCE.md",
+        "src/rt/xr/openxr/PROVENANCE.md",
+    )
+    MANIFEST_ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|")
+
+    @staticmethod
+    def _glob_regex(glob: str) -> re.Pattern[str]:
+        """Translate an EditorConfig section glob (*, **, ?, [..], {a,b}) to an anchored regex."""
+        out: list[str] = []
+        depth = 0
+        i = 0
+        while i < len(glob):
+            ch = glob[i]
+            if glob.startswith("**", i):
+                out.append(".*")
+                i += 2
+                continue
+            if ch == "*":
+                out.append("[^/]*")
+            elif ch == "?":
+                out.append("[^/]")
+            elif ch == "[":
+                end = glob.index("]", i)
+                body = glob[i + 1 : end]
+                out.append("[^" + re.escape(body[1:]) + "]" if body.startswith("!") else "[" + re.escape(body) + "]")
+                i = end
+            elif ch == "{":
+                out.append("(?:")
+                depth += 1
+            elif ch == "}" and depth:
+                out.append(")")
+                depth -= 1
+            elif ch == "," and depth:
+                out.append("|")
+            else:
+                out.append(re.escape(ch))
+            i += 1
+        body = "".join(out)
+        if "/" in glob:
+            # A glob with a separator is relative to the .editorconfig directory.
+            return re.compile(body.removeprefix("/") + r"\Z")
+        return re.compile(r"(?:.*/)?" + body + r"\Z")
+
+    @classmethod
+    def _effective(cls, path: str) -> dict[str, str]:
+        values: dict[str, str] = {}
+        matches = False
+        for raw in (ROOT / ".editorconfig").read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith(("#", ";")):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                matches = bool(cls._glob_regex(line[1:-1]).match(path))
+                continue
+            if matches and "=" in line:
+                key, _, value = line.partition("=")
+                values[key.strip().lower()] = value.strip().lower()
+        return values
+
+    @staticmethod
+    def _hook_exclude(hook_id: str) -> re.Pattern[str]:
+        lines = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8").splitlines()
+        start = next(n for n, line in enumerate(lines) if line.strip() == f"- id: {hook_id}")
+        for n in range(start + 1, len(lines)):
+            stripped = lines[n].strip()
+            if stripped.startswith("- id:"):
+                break
+            if stripped.startswith("exclude:"):
+                value = stripped.partition(":")[2].strip()
+                if value in (">-", ">"):
+                    indent = len(lines[n]) - len(lines[n].lstrip())
+                    folded: list[str] = []
+                    for cont in lines[n + 1 :]:
+                        if cont.strip() and len(cont) - len(cont.lstrip()) <= indent:
+                            break
+                        folded.append(cont.strip())
+                    value = " ".join(part for part in folded if part)
+                return re.compile(value)
+        raise AssertionError(f"pre-commit hook {hook_id} has no exclude")
+
+    @classmethod
+    def _manifest_rows(cls, manifest: str) -> dict[str, str]:
+        base = manifest.rsplit("/", 1)[0]
+        rows: dict[str, str] = {}
+        for line in (ROOT / manifest).read_text(encoding="utf-8").splitlines():
+            match = cls.MANIFEST_ROW.match(line)
+            if match:
+                rows[f"{base}/{match.group(1)}"] = match.group(2)
+        return rows
+
+    def _assert_import_rules_unset(self, path: str, *, final_newline: bool = True) -> None:
+        values = self._effective(path)
+        self.assertEqual(values.get("trim_trailing_whitespace"), "unset", path)
+        if final_newline:
+            self.assertEqual(values.get("insert_final_newline"), "unset", path)
+
+    def _assert_normal_rules(self, path: str) -> None:
+        values = self._effective(path)
+        self.assertEqual(values.get("trim_trailing_whitespace"), "true", path)
+        self.assertEqual(values.get("insert_final_newline"), "true", path)
+
+    def test_glob_translation_follows_the_editorconfig_spec(self) -> None:
+        self.assertTrue(self._glob_regex("*.py").match("tools/x.py"))
+        self.assertFalse(self._glob_regex("src/*.c").match("src/rt/ge.c"))
+        self.assertTrue(self._glob_regex("src/**").match("src/rt/ge.c"))
+        self.assertTrue(self._glob_regex("src/{a,b}/x.{c,h}").match("src/b/x.h"))
+        self.assertFalse(self._glob_regex("src/{a,b}/x.{c,h}").match("src/ab/x.c"))
+
+    def test_precommit_and_gitattributes_whitespace_exemptions_are_editorconfig_unset(self) -> None:
+        tracked = tracked_files(".")
+        trim_exempt = self._hook_exclude("trailing-whitespace")
+        eof_exempt = self._hook_exclude("end-of-file-fixer")
+        fields = (
+            subprocess.run(
+                ["git", "check-attr", "-z", "--stdin", "whitespace"],
+                cwd=ROOT,
+                input="\0".join(tracked).encode("utf-8") + b"\0",
+                capture_output=True,
+                check=True,
+            )
+            .stdout.decode("utf-8")
+            .removesuffix("\0")
+            .split("\0")
+        )
+        attr_exempt = set()
+        for path, value in zip(fields[0::3], fields[2::3], strict=True):
+            if value == "unset" or "-blank-at-eol" in value.split(","):
+                attr_exempt.add(path)
+        precommit_trim = {p for p in tracked if trim_exempt.match(p)} - self.LEGACY_PROJECT_FILES
+        precommit_eof = {p for p in tracked if eof_exempt.match(p)}
+        for anchor in (
+            "src/core/nk_psp_aes.c",
+            "src/core/nk_psp_sha1.h",
+            "tests/fixtures/fonts/gudea/OFL.txt",
+            "src/rt/atrac3p/LICENSE.LGPLv2.1.txt",
+        ):
+            self.assertIn(anchor, precommit_trim, "the pre-commit exclude parse lost an import")
+        self.assertIn("src/rt/h264_ffmpeg_sub/libavcodec/h264_mc_template.c", attr_exempt)
+        for path in sorted(precommit_trim | attr_exempt):
+            with self.subTest(path=path):
+                self._assert_import_rules_unset(path, final_newline=False)
+        for path in sorted(precommit_eof):
+            with self.subTest(path=path):
+                self.assertEqual(self._effective(path).get("insert_final_newline"), "unset", path)
+
+    def test_files_with_upstream_whitespace_are_never_normalised(self) -> None:
+        for path in tracked_files("."):
+            file = ROOT / path
+            data = file.read_bytes() if file.is_file() else b""
+            if not data or b"\0" in data[:8192] or path in self.LEGACY_PROJECT_FILES:
+                continue
+            values = self._effective(path)
+            if re.search(rb"[ \t]\r?$", data, re.MULTILINE):
+                with self.subTest(path=path, rule="trim_trailing_whitespace"):
+                    self.assertNotEqual(values.get("trim_trailing_whitespace"), "true", path)
+            if not data.endswith(b"\n"):
+                with self.subTest(path=path, rule="insert_final_newline"):
+                    self.assertNotEqual(values.get("insert_final_newline"), "true", path)
+
+    def test_manifest_imports_are_exempt_and_authored_files_keep_the_text_rules(self) -> None:
+        authored: list[str] = []
+        imported: list[str] = []
+        for manifest in self.CLASSIFYING_MANIFESTS:
+            for path, kind in self._manifest_rows(manifest).items():
+                if kind.startswith("AUTHORED"):
+                    authored.append(path)
+                elif kind.startswith("imported"):
+                    imported.append(path)
+        self.assertIn("src/rt/atrac3p/atrac3p_api.c", authored)
+        self.assertIn("src/rt/h264_ffmpeg_sub/nk_h264_api.c", authored)
+        self.assertIn("src/rt/atrac3p/libavcodec/config.h", authored)
+        self.assertIn("src/rt/atrac3p/libavcodec/atrac3plusdec.c", imported)
+        for path in authored:
+            with self.subTest(path=path, kind="authored"):
+                self.assertTrue((ROOT / path).is_file(), f"{path} is not a tracked file")
+                self._assert_normal_rules(path)
+        for path in imported:
+            with self.subTest(path=path, kind="imported"):
+                self.assertTrue((ROOT / path).is_file(), f"{path} is not a tracked file")
+                self._assert_import_rules_unset(path)
+
+    def test_a_normal_project_file_keeps_the_text_rules(self) -> None:
+        self._assert_normal_rules("src/rt/ge.c")
+        self._assert_normal_rules("tools/provenance_ledger.py")
+
+    def test_import_manifests_keep_the_text_rules(self) -> None:
+        for manifest in self.IMPORT_MANIFESTS:
+            with self.subTest(path=manifest):
+                self.assertTrue((ROOT / manifest).is_file(), f"{manifest} is not a tracked manifest")
+                self._assert_normal_rules(manifest)

@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -21,7 +22,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import library_build  # noqa: E402
-from nk_core import decrypt_tool, disc_verify  # noqa: E402
+from nk_core import decrypt_tool, disc_verify, git_isolation  # noqa: E402
 from test_iso_parity import create_test_iso, create_test_iso_with_executables  # noqa: E402
 
 # A stand-in for `nk_cli.py bringup`: what it does depends on the disc file's name.
@@ -293,17 +294,15 @@ class LibraryBuildTests(unittest.TestCase):
     def test_a_tree_that_differs_from_its_commit_records_no_commit(self) -> None:
         repo = self.root / "repo"
         repo.mkdir()
-        env = dict(os.environ, GIT_AUTHOR_NAME="Synthetic", GIT_AUTHOR_EMAIL="synthetic@example.invalid",
-                   GIT_COMMITTER_NAME="Synthetic", GIT_COMMITTER_EMAIL="synthetic@example.invalid")
 
         def git(*args: str) -> None:
-            subprocess.run(["git", "-C", str(repo), *args], check=True, env=env,
-                           capture_output=True)
+            git_isolation.run_git(args, repo, check=True, capture_output=True)
 
-        git("init", "-q")
-        (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
-        git("add", "tracked.txt")
-        git("commit", "-q", "-m", "synthetic")
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(self.root / "nonexistent.git")}):
+            git("init", "-q")
+            (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+            git("add", "tracked.txt")
+            git("commit", "-q", "-m", "synthetic")
         commit = library_build.source_commit(repo)
         self.assertRegex(commit or "", r"^[0-9a-f]{40}$")
         # An untracked file is not the build's source; a changed tracked one is.
@@ -362,12 +361,22 @@ class LibraryBuildTests(unittest.TestCase):
         build = self.build(jobs=1)
         finished = []
         import threading
-        runner = threading.Thread(target=lambda: finished.append(build.run()))
+        entered_pause = threading.Event()
+        orig_wait = build._wait_while_paused
+
+        def tracked_wait() -> bool:
+            entered_pause.set()
+            return bool(orig_wait())
+
+        build._wait_while_paused = tracked_wait  # type: ignore[method-assign]
+        runner = threading.Thread(target=lambda: finished.append(build.run()), daemon=True)
         runner.start()
-        time.sleep(0.5)
+        self.assertTrue(entered_pause.wait(timeout=10), "runner did not reach PAUSE check")
+        time.sleep(0.1)
         self.assertEqual(self.calls(), [], "nothing starts while PAUSE is there")
         (self.work / "PAUSE").unlink()
         runner.join(timeout=60)
+        self.assertFalse(runner.is_alive())
         self.assertEqual(finished[0]["counts"], {"BUILT": 3})
 
     def test_the_disc_check_decrypts_before_the_bringup_and_never_stops_it(self) -> None:
@@ -497,6 +506,24 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual(command[1:4], [str(library_build.NK_CLI), "bringup", "disc.iso"])
         self.assertEqual(command[command.index("--user-data-root") + 1], str(self.data))
         self.assertEqual(command[command.index("--launch-timeout") + 1], "30")
+
+    def test_a_launch_timeout_beyond_the_bringup_range_is_refused_at_once(self) -> None:
+        # nk_cli bringup refuses a launch limit outside 1..120 s, so passing a larger one on
+        # would fail every title's bring-up in turn; the build refuses it before starting.
+        import nk_cli
+        limit = nk_cli.BRINGUP_LAUNCH_TIMEOUT_MAX_SECONDS
+        for value in (limit + 1, 300):
+            stderr = io.StringIO()
+            with self.subTest(value=value), mock.patch.object(
+                    library_build, "LibraryBuild") as build, contextlib.redirect_stderr(
+                    stderr), self.assertRaises(SystemExit) as raised:
+                library_build.main([str(self.discs), "--user-data-root", str(self.data),
+                                    "--work-dir", str(self.work),
+                                    "--launch-timeout", str(value)])
+            self.assertEqual(raised.exception.code, 2)
+            build.assert_not_called()
+            self.assertIn(f"--launch-timeout must be 1..{limit} seconds", stderr.getvalue())
+        self.assertEqual(library_build.MAX_LAUNCH_TIMEOUT_SECONDS, limit)
 
 
 if __name__ == "__main__":

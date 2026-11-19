@@ -13,6 +13,7 @@
 #include "nk_shared_helpers.h"
 #include <ctype.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,12 +52,17 @@ static int nk_ascii_casecmp(const char *a, const char *b) {
 }
 
 /* Mirrors MAX_TITLE_MODULES in tools/title_manifest.py: the disc module-discovery cap. */
-#define MAX_MODULES 256
-#define MAX_COMPAT_DISC_IDS 16
+/* The catalog limits come from the generated nk_title_catalog.h, so a manifest
+ * this parser accepts always fits the catalog's registry and snapshot copies. */
+#define MAX_MODULES NK_TITLE_MAX_MODULES
+#define MAX_COMPAT_DISC_IDS NK_TITLE_MAX_COMPATIBLE_DISC_IDS
 #define MAX_DISC_BUILDS 16
-#define MAX_LOOSE_CONTENT_ROOTS 16
-#define MAX_LOOSE_CONTENT_EXCLUDES 2
-#define NK_MANIFEST_MAX_OVERLAYS 8
+#define MAX_LOOSE_CONTENT_ROOTS NK_TITLE_MAX_LOOSE_CONTENT_ROOTS
+#define MAX_LOOSE_CONTENT_EXCLUDES NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES
+#define NK_MANIFEST_MAX_OVERLAYS NK_TITLE_MAX_OVERLAYS
+/* Mirrors text() in tools/title_manifest.py: limits count characters (code points). */
+#define NK_MANIFEST_DISPLAY_NAME_MAX_CHARS 128
+#define NK_MANIFEST_NOTES_MAX_CHARS 2048
 
 /* The window a guest module's base must lie in: its code and data are both placed there, so a
  * base outside it lets translated code run while every data write is dropped. Mirrors
@@ -72,7 +78,7 @@ static int nk_ascii_casecmp(const char *a, const char *b) {
 typedef struct {
     char id[65];
     char game_name[65];
-    char display_name[129];
+    char display_name[NK_MANIFEST_DISPLAY_NAME_MAX_CHARS * 4 + 1];
     NkTitleKind kind;
     char primary_disc_id[17];
     char compat_ids_storage[MAX_COMPAT_DISC_IDS][17];
@@ -333,6 +339,34 @@ static bool manifest_parse_disc_builds(const JsonNode *builds, char *error_buf, 
     return true;
 }
 
+/* A Windows device name, alone or before an extension ("NUL", "con.txt"), with
+ * the blanks Windows drops before the extension ignored ("CON .iso" is CON):
+ * CON, PRN, AUX, NUL, CONIN$, CONOUT$, COM1-COM9, LPT1-LPT9, and COM and LPT
+ * followed by a superscript one, two or three (U+00B9, U+00B2, U+00B3). The
+ * same rule as zip_reserved_device in nk_zip.c and WINDOWS_RESERVED in
+ * tools/title_manifest.py. seg holds n bytes of one path component. */
+static bool manifest_reserved_device(const char *seg, size_t n) {
+    static const char * const names[] = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"};
+    char stem[8];
+    size_t len = 0;
+    while (len < n && seg[len] != '.') ++len;
+    while (len > 0 && seg[len - 1] == ' ') --len;
+    if (len < 3 || len > 7) return false;
+    for (size_t i = 0; i < len; ++i) {
+        char c = seg[i];
+        stem[i] = (c >= 'a' && c <= 'z') ? (char)(c - ('a' - 'A')) : c;
+    }
+    stem[len] = '\0';
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        if (strcmp(stem, names[i]) == 0) return true;
+    }
+    if (memcmp(stem, "COM", 3) != 0 && memcmp(stem, "LPT", 3) != 0) return false;
+    if (len == 4) return stem[3] >= '1' && stem[3] <= '9';
+    return len == 5 && (unsigned char)stem[3] == 0xC2u &&
+           ((unsigned char)stem[4] == 0xB9u || (unsigned char)stem[4] == 0xB2u ||
+            (unsigned char)stem[4] == 0xB3u);
+}
+
 static bool is_valid_filename(const char *s) {
     if (!s || !*s) return false;
     size_t len = strlen(s);
@@ -346,21 +380,7 @@ static bool is_valid_filename(const char *s) {
     if (s[len - 1] == '.') return false;
 
     /* Check Windows reserved names */
-    static const char * const reserved[] = {
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", NULL
-    };
-    char base[16];
-    size_t blen = 0;
-    while (blen < sizeof(base) - 1 && s[blen] && s[blen] != '.') {
-        base[blen] = (char)toupper((unsigned char)s[blen]);
-        blen++;
-    }
-    base[blen] = '\0';
-    for (int r = 0; reserved[r]; r++) {
-        if (strcmp(base, reserved[r]) == 0) return false;
-    }
+    if (manifest_reserved_device(s, len)) return false;
     return true;
 }
 
@@ -392,21 +412,7 @@ static bool is_valid_relative_path(const char *s, bool allow_plus) {
                 !(allow_plus && c == '+')) return false;
         }
         /* Check Windows reserved */
-        char base[16];
-        size_t blen = 0;
-        while (blen < sizeof(base) - 1 && token[blen] && token[blen] != '.') {
-            base[blen] = (char)toupper((unsigned char)token[blen]);
-            blen++;
-        }
-        base[blen] = '\0';
-        static const char * const reserved[] = {
-            "CON", "PRN", "AUX", "NUL",
-            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", NULL
-        };
-        for (int r = 0; reserved[r]; r++) {
-            if (strcmp(base, reserved[r]) == 0) return false;
-        }
+        if (manifest_reserved_device(token, tlen)) return false;
         token = slash ? slash + 1 : NULL;
     }
     return true;
@@ -465,22 +471,7 @@ static bool is_valid_disc_image_path(const char *s) {
             if (c < 0x20 || c == 0x7f || strchr("<>:\"\\|?*", (int)c) != NULL) return false;
         }
         /* Reserved device name: the text before the first '.', trailing spaces removed. */
-        size_t pre = 0;
-        while (pre < plen && part[pre] != '.') pre++;
-        while (pre > 0 && part[pre - 1] == ' ') pre--;
-        if (pre <= 4) {
-            char base[5];
-            for (size_t i = 0; i < pre; i++) base[i] = (char)toupper((unsigned char)part[i]);
-            base[pre] = '\0';
-            static const char * const reserved[] = {
-                "CON", "PRN", "AUX", "NUL",
-                "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-                "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", NULL
-            };
-            for (int r = 0; reserved[r]; r++) {
-                if (strcmp(base, reserved[r]) == 0) return false;
-            }
-        }
+        if (manifest_reserved_device(part, plen)) return false;
         part = end ? end + 1 : part + plen;
     }
     return true;
@@ -518,23 +509,28 @@ static bool parse_uint32(const JsonNode *node, uint32_t *out_val) {
         *out_val = (uint32_t)node->u.num.int_val;
         return true;
     }
-    if (node->type == JSON_STRING) {
-        const char *s = node->u.str_val;
-        if (!s) return false;
-        size_t slen = strlen(s);
-        if (slen == 10 && (s[0] == '0') && (s[1] == 'x' || s[1] == 'X')) {
-            for (int i = 2; i < 10; i++) {
-                if (!isxdigit((unsigned char)s[i])) return false;
-            }
-            char *end = NULL;
-            unsigned long long v = strtoull(s + 2, &end, 16);
-            if (!end || *end != '\0' || v > 0xFFFFFFFFULL) return false;
-            *out_val = (uint32_t)v;
-            return true;
-        }
-        return false;
-    }
+    /* An address is a JSON integer, as in the schema and tools/title_manifest.py uint(): a
+       "0x..." string is refused, so both parsers accept the same manifests. */
     return false;
+}
+
+/* tools/title_manifest.py text(): a string of min..max characters (UTF-8 code points; the JSON
+   parser has already validated the encoding), with no leading or trailing space and no control
+   character. Returns the reason it is refused, or NULL. */
+static const char *manifest_text_problem(const JsonNode *node, size_t min_chars, size_t max_chars) {
+    if (!node || node->type != JSON_STRING || !node->u.str_val) return "must be a string";
+    const unsigned char *s = (const unsigned char *)node->u.str_val;
+    size_t len = strlen((const char *)s);
+    size_t chars = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] < 0x20) return "must not contain control characters";
+        if ((s[i] & 0xC0u) != 0x80u) chars++;
+    }
+    if (len > 0 && (s[0] == ' ' || s[len - 1] == ' ')) {
+        return "must not have leading or trailing whitespace";
+    }
+    if (chars < min_chars || chars > max_chars) return "length is out of range";
+    return NULL;
 }
 
 static bool is_core_reserved_target(uint32_t addr) {
@@ -644,15 +640,20 @@ static bool manifest_parse_identity(ManifestParse *mp) {
 
     /* 3. id: valid identifier */
     mp->id_node = obj_get(root, "id");
-    if (mp->id_node->type != JSON_STRING || !is_valid_identifier(mp->id_node->u.str_val)) {
-        if (error_buf) snprintf(error_buf, error_buf_len, "$.id: must match ^[a-z0-9][a-z0-9._-]{0,63}$");
+    /* A title id is one character shorter than the other identifiers: the player's
+     * title_id buffers hold NK_TITLE_ID_MAX_CHARS and a terminator. */
+    if (mp->id_node->type != JSON_STRING || !is_valid_identifier(mp->id_node->u.str_val) ||
+        strlen(mp->id_node->u.str_val) > NK_TITLE_ID_MAX_CHARS) {
+        if (error_buf) snprintf(error_buf, error_buf_len, "$.id: must match ^[a-z0-9][a-z0-9._-]{0,62}$");
         return false;
     }
 
     /* 4. display_name */
     mp->dn_node = obj_get(root, "display_name");
-    if (mp->dn_node->type != JSON_STRING || strlen(mp->dn_node->u.str_val) < 1 || strlen(mp->dn_node->u.str_val) > 128) {
-        if (error_buf) snprintf(error_buf, error_buf_len, "$.display_name: length must be in range 1..128");
+    const char *dn_problem = manifest_text_problem(mp->dn_node, 1, NK_MANIFEST_DISPLAY_NAME_MAX_CHARS);
+    if (dn_problem) {
+        if (error_buf) snprintf(error_buf, error_buf_len, "$.display_name: %s (1..%d characters)",
+                                dn_problem, NK_MANIFEST_DISPLAY_NAME_MAX_CHARS);
         return false;
     }
 
@@ -1344,8 +1345,10 @@ static bool manifest_parse_optional_fields(ManifestParse *mp) {
     /* 14. notes (optional) */
     JsonNode *notes_node = obj_get(root, "notes");
     if (notes_node) {
-        if (notes_node->type != JSON_STRING || strlen(notes_node->u.str_val) > 2048) {
-            if (error_buf) snprintf(error_buf, error_buf_len, "$.notes: must be a string <= 2048 characters");
+        const char *notes_problem = manifest_text_problem(notes_node, 0, NK_MANIFEST_NOTES_MAX_CHARS);
+        if (notes_problem) {
+            if (error_buf) snprintf(error_buf, error_buf_len, "$.notes: %s (0..%d characters)",
+                                    notes_problem, NK_MANIFEST_NOTES_MAX_CHARS);
             return false;
         }
     }
@@ -1675,36 +1678,14 @@ static void manifest_build_slot(const ManifestParse *mp, OverlayStorageSlot *out
         out->modules[i].required = (req && req->type == JSON_BOOL) ? req->u.bool_val : false;
     }
 
-    out->entry.id = out->id;
-    out->entry.game_name = out->game_name;
-    out->entry.display_name = out->display_name;
-    out->entry.kind = out->kind;
-    out->entry.primary_disc_id = out->primary_disc_id[0] ? out->primary_disc_id : NULL;
-    out->entry.compatible_disc_ids = out->compat_id_ptrs[0] ? out->compat_id_ptrs : NULL;
-    out->entry.executable_base = out->executable_base;
-    out->entry.executable_entry = out->executable_entry;
-    out->entry.has_executable_base = out->has_executable_base;
-    out->entry.has_executable_entry = out->has_executable_entry;
-    out->entry.run_entry = out->run_entry;
-    out->entry.bss_metadata_source = out->bss_metadata_source;
-    out->entry.data_root = out->data_root;
-    out->entry.loose_content_roots = out->loose_root_count ? out->loose_roots : NULL;
-    out->entry.loose_content_root_count = (int)out->loose_root_count;
-    out->entry.memory_stick_root = out->memory_stick_root;
-    out->entry.hle_profile = out->hle_profile;
-    out->entry.codegen_profile = out->codegen_profile;
-    out->entry.expected_data_file_count = out->expected_data_file_count;
-    out->entry.requires_font_firmware = out->requires_font_firmware;
-    out->entry.requires_psmf = out->requires_psmf;
-    out->entry.analog_dead_zone_counts = out->analog_dead_zone_counts;
-    out->entry.modules = out->modules;
-    out->entry.module_count = out->module_count;
+    overlay_slot_anchor(out);
 }
 
 /* Check the new identities against the public catalog and the loaded overlays (check 17). */
 static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_override,
                                      char *error_buf, size_t error_buf_len) {
     bool collision = false;
+    bool collision_is_overlay = false;
     const char *collision_id = NULL;
 
     /* Check against public canonical catalog */
@@ -1767,11 +1748,6 @@ static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_
             /* Allow self-update if reloading the exact same overlay id */
             if (strcmp(ov->entry.id, temp->entry.id) == 0) continue;
 
-            if (strcmp(ov->entry.id, temp->entry.id) == 0) {
-                collision = true;
-                collision_id = ov->entry.id;
-                break;
-            }
             if (temp->entry.primary_disc_id && ov->entry.primary_disc_id) {
                 if (strcmp(ov->entry.primary_disc_id, temp->entry.primary_disc_id) == 0) {
                     collision = true;
@@ -1813,14 +1789,17 @@ static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_
                 if (collision) break;
             }
         }
+        collision_is_overlay = collision;
     }
 
     if (collision) {
         if (!allow_override) {
             if (error_buf) {
                 snprintf(error_buf, error_buf_len,
-                    "Overlay identity '%s' conflicts with public canonical catalog title '%s'; override forbidden in standard mode",
-                    temp->entry.id, collision_id);
+                    "Overlay identity '%s' conflicts with %s '%s'; override forbidden in standard mode",
+                    temp->entry.id,
+                    collision_is_overlay ? "loaded overlay title" : "public canonical catalog title",
+                    collision_id);
             }
             return false;
         } else {
@@ -1832,7 +1811,8 @@ static bool manifest_check_collision(const OverlayStorageSlot *temp, bool allow_
 
 /* Store the accepted manifest in the caller slot, or publish it as a catalog generation (#670). */
 static bool manifest_publish_slot(const OverlayStorageSlot *temp, NkTitleEntry *out_entry,
-                                  OverlayStorageSlot *validate_into) {
+                                  OverlayStorageSlot *validate_into,
+                                  char *error_buf, size_t error_buf_len) {
     if (validate_into) {
         *validate_into = *temp;
         overlay_slot_anchor(validate_into);
@@ -1849,11 +1829,20 @@ static bool manifest_publish_slot(const OverlayStorageSlot *temp, NkTitleEntry *
         }
     }
     if (target_slot == -1) {
-        if (s_overlay_slot_count < NK_MANIFEST_MAX_OVERLAYS) {
-            target_slot = s_overlay_slot_count++;
-        } else {
-            target_slot = NK_MANIFEST_MAX_OVERLAYS - 1; /* bounded replacement of last slot */
+        if (s_overlay_slot_count >= NK_MANIFEST_MAX_OVERLAYS) {
+            /* Every slot holds another title (possibly a registered one). Reusing
+               one would drop that title from the catalog while its registration
+               showed this one, so the new identity is refused by name and the
+               loaded titles stay. */
+            if (error_buf) {
+                snprintf(error_buf, error_buf_len,
+                    "Overlay capacity reached: at most %d title manifests are loaded, "
+                    "so '%s' was not loaded",
+                    NK_MANIFEST_MAX_OVERLAYS, temp->entry.id);
+            }
+            return false;
         }
+        target_slot = s_overlay_slot_count++;
     }
 
     nk_title_catalog_set_overlay_storage_reset_locked(nk_manifest_reset_overlay_storage);
@@ -1925,7 +1914,8 @@ static bool nk_manifest_parse_locked(
         OverlayStorageSlot temp;
         manifest_build_slot(&mp, &temp);
         ok = manifest_check_collision(&temp, allow_override, error_buf, error_buf_len) &&
-             manifest_publish_slot(&temp, out_entry, validate_into);
+             manifest_publish_slot(&temp, out_entry, validate_into,
+                                   error_buf, error_buf_len);
     }
     json_free(root);
     return ok;
@@ -2047,7 +2037,14 @@ bool nk_title_manifest_load_overlay_ext(
         /* Find matching slot and register with catalog */
         for (int i = 0; i < s_overlay_slot_count; i++) {
             if (strcmp(s_overlay_slots[i].entry.id, entry.id) == 0) {
-                nk_title_catalog_register_overlay_locked(&s_overlay_slots[i].entry);
+                if (!nk_title_catalog_register_overlay_locked(&s_overlay_slots[i].entry)) {
+                    ok = false;
+                    if (error_buf) {
+                        snprintf(error_buf, error_buf_len,
+                            "Overlay '%s' refused: the title catalog already holds %d overlays",
+                            s_overlay_slots[i].entry.id, NK_TITLE_MAX_OVERLAYS);
+                    }
+                }
                 break;
             }
         }
@@ -2056,30 +2053,58 @@ bool nk_title_manifest_load_overlay_ext(
     return ok;
 }
 
+/* Every *.json name in the folder. The list grows as the folder is read, so
+   which manifests load depends only on the names, never on the order the host
+   lists them in, and no name is too long to be listed. */
 typedef struct {
-    char names[NK_MANIFEST_MAX_OVERLAYS * 4][256];
-    int count;
-    bool truncated;
+    char **names;
+    size_t count;
+    size_t capacity;
+    bool out_of_memory;
 } OverlayDirListing;
 
 static bool overlay_dir_collect(const char *name, void *ctx) {
     OverlayDirListing *listing = (OverlayDirListing *)ctx;
     size_t len = strlen(name);
-    if (len < 6 || len >= sizeof(listing->names[0])) return true;
+    if (len < 6) return true;
     const char *ext = name + len - 5;
     if (!(tolower((unsigned char)ext[0]) == '.' && tolower((unsigned char)ext[1]) == 'j' &&
           tolower((unsigned char)ext[2]) == 's' && tolower((unsigned char)ext[3]) == 'o' &&
           tolower((unsigned char)ext[4]) == 'n')) return true;
-    if (listing->count >= (int)(sizeof(listing->names) / sizeof(listing->names[0]))) {
-        listing->truncated = true;
+    if (listing->count == listing->capacity) {
+        size_t capacity = listing->capacity ? listing->capacity * 2u : 32u;
+        if (capacity < listing->capacity ||
+            capacity > SIZE_MAX / sizeof(listing->names[0])) {
+            listing->out_of_memory = true;
+            return false;
+        }
+        char **names = (char **)realloc(listing->names, capacity * sizeof(listing->names[0]));
+        if (!names) {
+            listing->out_of_memory = true;
+            return false;
+        }
+        listing->names = names;
+        listing->capacity = capacity;
+    }
+    char *copy = (char *)malloc(len + 1u);
+    if (!copy) {
+        listing->out_of_memory = true;
         return false;
     }
-    memcpy(listing->names[listing->count++], name, len + 1);
+    memcpy(copy, name, len + 1u);
+    listing->names[listing->count++] = copy;
     return true;
 }
 
+static void overlay_dir_listing_free(OverlayDirListing *listing) {
+    for (size_t i = 0; i < listing->count; i++) free(listing->names[i]);
+    free(listing->names);
+    listing->names = NULL;
+    listing->count = listing->capacity = 0;
+}
+
 static int overlay_name_compare(const void *a, const void *b) {
-    return strcmp((const char *)a, (const char *)b);
+    return strcmp(*(const char * const *)a, *(const char * const *)b);
 }
 
 static void overlay_report_line(char *report, size_t report_len, const char *line) {
@@ -2172,30 +2197,39 @@ static size_t overlay_declared_disc_ids(
 int nk_title_manifest_load_overlay_dir(const char *dir, char *report, size_t report_len) {
     if (report && report_len) report[0] = '\0';
     if (!dir || !*dir || !nk_platform_dir_exists(dir)) return 0;
-    OverlayDirListing *listing = (OverlayDirListing *)calloc(1, sizeof(*listing));
-    if (!listing) {
+    OverlayDirListing listing = {0};
+    bool listed = nk_platform_list_files(dir, overlay_dir_collect, &listing);
+    if (listing.out_of_memory) {
         overlay_report_line(report, report_len, "manifests: out of memory listing the folder");
+        overlay_dir_listing_free(&listing);
         return 0;
     }
-    if (!nk_platform_list_files(dir, overlay_dir_collect, listing)) {
+    if (!listed) {
         overlay_report_line(report, report_len, "manifests: the folder could not be read");
-        free(listing);
+        overlay_dir_listing_free(&listing);
         return 0;
     }
-    qsort(listing->names, (size_t)listing->count, sizeof(listing->names[0]), overlay_name_compare);
+    if (listing.count > 1) {
+        qsort(listing.names, listing.count, sizeof(listing.names[0]), overlay_name_compare);
+    }
     int loaded = 0;
     char line[1024];
-    for (int i = 0; i < listing->count; i++) {
+    for (size_t i = 0; i < listing.count; i++) {
+        const char *name = listing.names[i];
         if (loaded >= NK_MANIFEST_MAX_OVERLAYS) {
             snprintf(line, sizeof(line), "%s: skipped, at most %d title manifests are loaded",
-                     listing->names[i], NK_MANIFEST_MAX_OVERLAYS);
+                     name, NK_MANIFEST_MAX_OVERLAYS);
             overlay_report_line(report, report_len, line);
             continue;
         }
         char path[4096];
         int written = snprintf(path, sizeof(path), "%s%c%s", dir, nk_platform_path_separator(),
-                               listing->names[i]);
-        if (written < 0 || (size_t)written >= sizeof(path)) continue;
+                               name);
+        if (written < 0 || (size_t)written >= sizeof(path)) {
+            snprintf(line, sizeof(line), "%s: skipped, the path is too long", name);
+            overlay_report_line(report, report_len, line);
+            continue;
+        }
         char error[512];
         if (nk_title_manifest_load_overlay(path, error, sizeof(error))) {
             loaded++;
@@ -2206,19 +2240,16 @@ int nk_title_manifest_load_overlay_dir(const char *dir, char *report, size_t rep
             if (refused_count != 0) {
                 for (size_t disc = 0; disc < refused_count; disc++) {
                     snprintf(line, sizeof(line), "%s (disc %s): %s",
-                             listing->names[i], refused_disc_ids[disc], error);
+                             name, refused_disc_ids[disc], error);
                     overlay_report_line(report, report_len, line);
                 }
             } else {
-                snprintf(line, sizeof(line), "%s: %s", listing->names[i], error);
+                snprintf(line, sizeof(line), "%s: %s", name, error);
                 overlay_report_line(report, report_len, line);
             }
         }
     }
-    if (listing->truncated) {
-        overlay_report_line(report, report_len, "manifests: too many files; the rest were not read");
-    }
-    free(listing);
+    overlay_dir_listing_free(&listing);
     return loaded;
 }
 
@@ -2246,6 +2277,14 @@ static bool nk_manifest_normalize_disc_id(const char *source, char out[10]) {
     }
     out[9] = '\0';
     return true;
+}
+
+/* The experimental profile id of a normalized disc ID: "experimental-" and the
+   disc ID in lower case, 22 characters. out must hold 23 bytes. */
+static void experimental_profile_id(const char normalized[10], char out[23]) {
+    memcpy(out, "experimental-", 13);
+    for (size_t i = 0; i < 9; i++) out[13 + i] = (char)tolower((unsigned char)normalized[i]);
+    out[22] = '\0';
 }
 
 bool nk_title_manifest_enhancement_id_valid(const char *id) {
@@ -2470,9 +2509,7 @@ bool nk_title_manifest_write_experimental_profile(
         return false;
     }
     char profile_id[64];
-    for (size_t i = 0; i < 9; i++) profile_id[13 + i] = (char)tolower((unsigned char)normalized_id[i]);
-    memcpy(profile_id, "experimental-", 13);
-    profile_id[22] = '\0';
+    experimental_profile_id(normalized_id, profile_id);
     if (!out_profile_id || out_profile_id_len <= strlen(profile_id)) {
         if (error_buf && error_buf_len) snprintf(error_buf, error_buf_len, "Profile ID output buffer is too small.");
         return false;
@@ -2722,13 +2759,23 @@ static bool json_writer_node(NkJsonWriter *writer, const JsonNode *node,
 static bool json_writer_canonical_node(NkJsonWriter *writer, const JsonNode *node,
                                        unsigned int depth) {
     if (!writer || !node || depth > NK_MANIFEST_MAX_JSON_DEPTH) return false;
+    if (node->type == JSON_ARRAY) {
+        /* Objects inside an array are canonical too, as json.dumps(sort_keys=True)
+           writes them. */
+        if (!json_writer_append(writer, "[")) return false;
+        for (size_t i = 0; i < node->u.arr.count; i++) {
+            if (i && !json_writer_append(writer, ",")) return false;
+            if (!json_writer_canonical_node(writer, node->u.arr.items[i], depth + 1)) return false;
+        }
+        return json_writer_append(writer, "]");
+    }
     if (node->type != JSON_OBJECT) return json_writer_node(writer, node, depth);
     size_t *order = NULL;
     if (node->u.obj.count > 1) {
         order = malloc(node->u.obj.count * sizeof(*order));
         if (!order) return false;
         for (size_t i = 0; i < node->u.obj.count; i++) order[i] = i;
-        for (size_t i = 1; i < node->u.obj.count; i++) {
+        for (size_t i = 0; i + 1 < node->u.obj.count; i++) {
             size_t selected = i;
             for (size_t j = i + 1; j < node->u.obj.count; j++) {
                 if (strcmp(node->u.obj.members[order[j]].key,
@@ -2962,9 +3009,17 @@ static bool package_path_is_within(const char *root, const char *path) {
            (abs_root[root_length - 1] == '/' || abs_root[root_length - 1] == '\\')) {
         abs_root[--root_length] = '\0';
     }
-    for (size_t i = 0; i < root_length; i++) {
-        if (nk_ascii_lower((unsigned char)abs_root[i]) !=
-            nk_ascii_lower((unsigned char)abs_path[i])) return false;
+    if (nk_platform_paths_fold_case()) {
+        /* NTFS names fold case: GetFinalPathNameByHandleW gives one spelling of
+           the root, and a path under it may differ from that only in case. */
+        for (size_t i = 0; i < root_length; i++) {
+            if (nk_ascii_lower((unsigned char)abs_root[i]) !=
+                nk_ascii_lower((unsigned char)abs_path[i])) return false;
+        }
+    } else if (strncmp(abs_root, abs_path, root_length) != 0) {
+        /* realpath() names on a case-sensitive file system: a sibling that differs
+           from the root only in case is a different folder, outside the package. */
+        return false;
     }
     return abs_path[root_length] == '/' || abs_path[root_length] == '\\';
 }
@@ -3076,7 +3131,7 @@ typedef struct {
     uint32_t player_abi_version;
     char package_root[NK_MAX_PATH];
     char disc_id[NK_MAX_DISC_ID_LEN];
-    char title_id[64];
+    char title_id[NK_TITLE_ID_MAX_CHARS + 1u];
     char identity_digest[65];
     char status_identity_digest[65];
     char current_input_identity_digest[65];
@@ -4795,9 +4850,7 @@ static bool nk_title_manifest_read_experimental_profile_impl(
         return false;
     }
     char expected_id[64];
-    for (size_t i = 0; i < 9; i++) expected_id[13 + i] = (char)tolower((unsigned char)normalized[i]);
-    memcpy(expected_id, "experimental-", 13);
-    expected_id[22] = '\0';
+    experimental_profile_id(normalized, expected_id);
     if (!title_id || strcmp(title_id, expected_id) != 0) {
         if (error_buf && error_buf_len) snprintf(error_buf, error_buf_len, "Experimental title identity does not match disc %s.", normalized);
         return false;
@@ -5098,9 +5151,11 @@ bool nk_title_manifest_identify_build(const char *disc_id, const char *iso_path,
         return true;
     }
     snprintf(out->executable, sizeof(out->executable), "%s", executable_name ? executable_name : "");
-    if (!iso_path || !executable_name ||
-        !iso_executable_sha256_hex(iso_path, executable_name, out->sha256)) {
+    if (!iso_path || !executable_name) {
         out->sha256[0] = '\0';
+    } else if (!iso_executable_sha256_hex(iso_path, executable_name, out->sha256)) {
+        out->sha256[0] = '\0';
+        out->unreadable = true;
     }
     for (int b = 0; b < count; b++) {
         if (strcmp(rows[b].status, "supported") == 0) {
@@ -5135,6 +5190,15 @@ void nk_title_manifest_describe_build(const NkBuildIdentity *id, char *out, size
         snprintf(out, out_size, "Build: %s (refused). %s", id->label, id->reason);
         break;
     case NK_BUILD_UNLISTED:
+        if (id->unreadable) {
+            snprintf(out, out_size,
+                     "This copy's executable PSP_GAME/SYSDIR/%s could not be found or read in "
+                     "the disc image, so its build is unknown; it runs as experimental and the "
+                     "game's recorded runtime bindings are not applied.%s%s",
+                     id->executable, id->supported[0] ? " Supported build: " : "",
+                     id->supported);
+            break;
+        }
         snprintf(out, out_size,
                  "This copy's executable is not a build Nakagawa has recorded for this game, "
                  "so it runs as experimental and the game's recorded runtime bindings are not applied.%s%s",
@@ -5202,8 +5266,9 @@ static bool package_validate_variant(const JsonNode *package,
     return true;
 }
 
-/* A validation the host cancelled fails with that reason, whatever check the
-   abandoned hash fell through to. Only a valid package is ever cached. */
+/* A validation the host cancelled fails with that reason and
+   NK_RUNTIME_PACKAGE_UNKNOWN, whatever check the abandoned hash fell through
+   to: it says nothing about the package. Only a valid package is ever cached. */
 static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
     const char *user_data_root,
     const char *disc_id,
@@ -5243,6 +5308,7 @@ NkRuntimePackageStatus nk_title_manifest_validate_aot_package(
         if (reason && reason_size) {
             snprintf(reason, reason_size, "Package validation was cancelled.");
         }
+        return NK_RUNTIME_PACKAGE_UNKNOWN;
     }
     return status;
 }
@@ -5283,9 +5349,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         catalog_epoch = nk_title_catalog_epoch_locked();
         nk_title_catalog_unlock();
         char profile_id[64];
-        for (size_t i = 0; i < 9; i++) profile_id[13 + i] = (char)tolower((unsigned char)normalized[i]);
-        memcpy(profile_id, "experimental-", 13);
-        profile_id[22] = '\0';
+        experimental_profile_id(normalized, profile_id);
         if (strcmp(title_id, profile_id) != 0) {
             package_rebuild_reason(reason, reason_size,
                 "Experimental package identity does not match the disc.");
@@ -5396,7 +5460,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         if (out_info) *out_info = resolved_info;
         if (reason && reason_size) {
             snprintf(reason, reason_size,
-                     "Runtime package v2 is valid for %s.", normalized);
+                     "Runtime package is valid for %s.", normalized);
         }
         return NK_RUNTIME_PACKAGE_OK;
     }
@@ -5482,7 +5546,9 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         }
     }
 
-    char resolved_executable[NK_MAX_PATH];
+    /* Resolved under the package root's own bound, so a path past the player's
+       limit is reported as that below, not as a missing or escaping file. */
+    char resolved_executable[NK_MAX_PATH * 2];
     if (!package_direct_file(package_root, exe_relative, resolved_executable,
                               sizeof(resolved_executable))) {
         package_rebuild_reason(reason, reason_size,
@@ -5497,7 +5563,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         ? (size_t)(extension - exe_relative) : strlen(exe_relative);
     int image_name_length = snprintf(image_relative, sizeof(image_relative),
                                      "%.*s_image.bin", (int)stem_length, exe_relative);
-    char resolved_image[NK_MAX_PATH];
+    char resolved_image[NK_MAX_PATH * 2];
     if (image_name_length <= 0 || (size_t)image_name_length >= sizeof(image_relative) ||
         !package_direct_file(package_root, image_relative, resolved_image,
                              sizeof(resolved_image))) {
@@ -5507,7 +5573,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         return NK_RUNTIME_PACKAGE_MISSING;
     }
 
-    char report_path[NK_MAX_PATH];
+    char report_path[NK_MAX_PATH * 2];
     char *report_text = NULL;
     size_t report_length = 0;
     bool report_exceeds_limit = false;
@@ -5585,7 +5651,7 @@ static NkRuntimePackageStatus nk_title_manifest_validate_aot_package_checked(
         }
     }
     if (out_info) *out_info = resolved_info;
-    if (reason && reason_size) snprintf(reason, reason_size, "Runtime package v1 is valid for %s.", normalized);
+    if (reason && reason_size) snprintf(reason, reason_size, "Runtime package is valid for %s.", normalized);
     return NK_RUNTIME_PACKAGE_OK;
 }
 

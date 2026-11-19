@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import io
 import shutil
+import subprocess
 import struct
 import sys
 import tempfile
@@ -106,6 +107,16 @@ class CaptureFile(unittest.TestCase):
                              (b"foobar", 0x85944171F73967E8)):
             self.assertEqual(code_capture.fnv1a64(data), digest)
             self.assertEqual(codegen.fnv1a64(data), digest)
+
+    def test_naming_a_capture_does_not_load_the_code_generator(self):
+        # `code_capture.py info` only names captures; it must not import all of codegen to hash.
+        probe = ("import sys; sys.path.insert(0, sys.argv[1]); import code_capture; "
+                 "image = code_capture.CaptureImage(0x08900000, bytearray(b'foobar')); "
+                 "print(image.name, code_capture.FIXED_OVERLAY_ELF_TYPE, 'codegen' in sys.modules)")
+        result = subprocess.run([sys.executable, "-c", probe, str(ROOT / "tools")],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.split(),
+                         ["code_capture_08900000_85944171f73967e8", str(analyzer.FIXED_OVERLAY_ELF_TYPE), "False"])
 
     def test_a_malformed_capture_is_refused_by_name(self):
         good = bytearray(code_capture.capture_bytes(capture()))
@@ -229,6 +240,40 @@ class CaptureTranslation(unittest.TestCase):
         for word in (dead, dead + 4, dead + 0x100, LOAD + WINDOW - 4):
             self.assertFalse(in_ranges(word, module.spans), f"0x{word:08x} has no authority")
 
+    def _assert_unit_compiles_with_named_stub(self, edits, dead):
+        image = code_capture.group_captures([capture(edits)])[0]
+        module, err = translate(image)
+        self.assertIsNone(module.unsupported_reason, err)
+        self.assertTrue(any(address == dead for address, _reason in module.stubbed))
+
+        compiler = shutil.which("gcc")
+        self.assertIsNotNone(compiler, "the code capture regression requires the configured C compiler")
+        with tempfile.TemporaryDirectory(prefix="code_capture_compile_") as directory:
+            source = Path(directory) / "capture.c"
+            source.write_text(code_capture.unit_text([module]), encoding="ascii")
+            result = subprocess.run(
+                [compiler, "-std=c11", "-Werror=implicit-function-declaration", "-fsyntax-only",
+                 "-I", str(ROOT / "src" / "rt"), str(source)],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_kept_body_with_untranslatable_known_callee_compiles_a_named_stub(self):
+        dead = TARGET + 0x200
+        jal_dead = 0x0C000000 | ((dead >> 2) & 0x03FFFFFF)
+        self._assert_unit_compiles_with_named_stub({TARGET + 0x08: jal_dead,
+                                                    dead: 0x4C000000}, dead)
+
+    def test_a_kept_body_tail_transferring_to_untranslatable_callee_compiles_a_named_stub(self):
+        # The only reference is a tail transfer: `j leaf` passes the stub's symbol to
+        # sr_tail_record as a value, with no `(` after it, and nothing calls it with jal.
+        # The leaf is a known function (its prologue) whose body stops at an unsupported word.
+        j_leaf = 0x08000000 | ((LEAF >> 2) & 0x03FFFFFF)
+        self._assert_unit_compiles_with_named_stub({TARGET + 0x08: 0x00000000,
+                                                    TARGET + 0x14: j_leaf,
+                                                    LEAF + 0x00: 0x27BDFFF0,
+                                                    LEAF + 0x04: 0x4C000000}, LEAF)
+
     def test_executable_authority_is_exactly_the_identity(self):
         # Every word the interpreter may run inside a bound capture is a word the runtime
         # checked against the capture before binding it.
@@ -270,8 +315,8 @@ class CodegenCodeCaptureOption(unittest.TestCase):
         self.elf = self.root / "main.elf"
         self.elf.write_bytes(_elf(_text()))
 
-    def run_codegen(self, *options):
-        out_c = self.root / "game_recomp.c"
+    def run_codegen(self, *options, out_dir=None):
+        out_c = (out_dir or self.root) / "game_recomp.c"
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             status = codegen.main(["codegen.py", str(self.elf), str(out_c), *options])
@@ -294,9 +339,25 @@ class CodegenCodeCaptureOption(unittest.TestCase):
                          "a capture is reached through its descriptor only")
 
     def test_without_captures_the_output_is_unchanged(self):
-        status, err, out_c = self.run_codegen()
-        self.assertEqual(status, 0, err)
-        self.assertNotIn("code_capture_", out_c.read_text(encoding="ascii"))
+        # With no capture, the emitted main file and every chunk are byte-equal
+        # to a run given an empty capture folder: the option adds nothing.
+        empty = self.root / "empty-captures"
+        empty.mkdir()
+        outputs = []
+        for label, options in (("plain", ()), ("empty", (f"--code-capture={empty}",))):
+            out_dir = self.root / label
+            out_dir.mkdir()
+            status, err, out_c = self.run_codegen(*options, out_dir=out_dir)
+            self.assertEqual(status, 0, err)
+            self.assertNotIn("code_capture_", out_c.read_text(encoding="ascii"))
+            files = {path.name: path.read_bytes()
+                     for path in sorted(out_dir.glob("game_recomp*.c"))}
+            self.assertIn("game_recomp.c", files)
+            self.assertTrue(any(name != "game_recomp.c" for name in files), files.keys())
+            outputs.append(files)
+        self.assertEqual(outputs[0].keys(), outputs[1].keys())
+        for name in outputs[0]:
+            self.assertEqual(outputs[0][name], outputs[1][name], name)
 
     def test_codegen_refuses_a_malformed_capture(self):
         bad = self.root / "bad.nkcap"

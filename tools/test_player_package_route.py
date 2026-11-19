@@ -669,7 +669,7 @@ class TestReleaseDocumentation(unittest.TestCase):
         upload = workflow[workflow.index("- name: Upload the attested candidate bundle"):]
         upload = upload.split("\n      - name:", 1)[0]
         self.assertIn("include-hidden-files: true", upload)
-        self.assertIn("'^\\.(iso|prx|elf|eboot|sav|key|pgf|pgd)$'", preview)
+        self.assertIn("'^\\.(iso|prx|elf|pbp|cso|sfo|bin|edat|pmf|at3|vag|gim|psar|chd|dax|sav|key|pgf|pgd)$'", preview)
         self.assertIn("$relative -notmatch '^bin/font/nk[^/]*\\.pgf$'", preview)
         self.assertIn("$relative -notlike 'bin/demos/*'", preview)
         self.assertEqual(preview.count("$relative -not"), 2)
@@ -2170,6 +2170,10 @@ class TestPlayerPackageRoute(unittest.TestCase):
         timeout_output = timed_out.stdout + timed_out.stderr
         self.assertEqual(timed_out.returncode, 7, timeout_output[-4000:])
         self.assertIn("HEADLESS_ACCEPTANCE status=FAIL reason=timeout", timeout_output)
+        # The timed-out child is stopped, not left running as an orphan: the player
+        # cleared its running flag first, so player_app_stop_game returned at once
+        # and never called nk_launch_stop (audit 2026-11-17).
+        self.assertIn("[PLAYER] Stopping active game session...", timeout_output)
         self.assertEqual(tracked_status(), before)
 
         # 7. Negative control. A tampered package must fail closed at the
@@ -2683,9 +2687,10 @@ class TestRuntimeDllStaging(unittest.TestCase):
             self.assertEqual(stage.call_args.args[0], package_dir)
             self.assertEqual(stage.call_args.kwargs["roots"], ("SDL3_ttf.dll",))
 
-    def test_package_without_the_font_closure_builds_and_names_the_fallback(self) -> None:
+    def test_package_without_the_font_closure_builds_and_says_the_ui_is_off(self) -> None:
         """A toolchain without the SDL3_ttf closure still builds the package with its
-        required runtimes: the missing font closure stays a warning, never fatal."""
+        required runtimes: the missing font closure stays a warning, never fatal, and the
+        warning says the in-game UI is off (there is no bitmap fallback font)."""
         import contextlib
         import io
         from unittest import mock
@@ -2711,7 +2716,9 @@ class TestRuntimeDllStaging(unittest.TestCase):
             self.assertTrue((package / "SDL3.dll").is_file())
             self.assertTrue((package / "vulkan-1.dll").is_file())
             self.assertIn("SDL3_ttf.dll could not be resolved", stderr.getvalue())
-            self.assertIn("bitmap fallback", stderr.getvalue())
+            self.assertNotIn("bitmap fallback", stderr.getvalue())
+            self.assertIn("runs without its in-game UI", stderr.getvalue())
+            self.assertIn("sdl3-ttf", stderr.getvalue())
 
     def test_stage_runtime_dlls_file_vs_directory_collision_raises_stage_error(self) -> None:
         import stage_runtime_dlls
@@ -2812,6 +2819,30 @@ class TestRuntimeDllStaging(unittest.TestCase):
                 refresh=False,
             )
             self.assertEqual((package_dir / "SDL3.dll").read_bytes(), old)
+
+    def test_stage_runtime_dlls_copy_failure_raises_named_stage_error(self) -> None:
+        import stage_runtime_dlls
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package_dir = Path(tmp) / "package"
+            package_dir.mkdir()
+            bin_dir = Path(tmp) / "toolchain-bin"
+            self.write_fake_dlls(bin_dir)
+            imports_of, is_system = self.fake_resolver()
+
+            with patch.object(
+                stage_runtime_dlls.shutil, "copyfile", side_effect=PermissionError("locked by running player")
+            ), self.assertRaises(stage_runtime_dlls.StageError) as ctx:
+                stage_runtime_dlls.stage_runtime_dlls(
+                    package_dir,
+                    roots=["SDL3.dll"],
+                    search_dirs=[bin_dir],
+                    env={},
+                    imports_of=imports_of,
+                    is_system=is_system,
+                    notices=False,
+                )
+            self.assertIn("RUNTIME_DLL_STAGE_FAILED", str(ctx.exception))
 
     def test_runtime_package_refuses_a_font_dll_collision_instead_of_warning(self) -> None:
         """A directory named SDL3_ttf.dll is a staging collision, not an absent optional

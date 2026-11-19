@@ -134,6 +134,10 @@ rebuild with SDL3_ttf installed.
   built and launched on Linux has not been tested.
 - **Open folder** buttons (saves, build inputs, updates) go through `xdg-open`. Without it, as in a
   minimal WSL distribution, the player shows a `FOLDER_OPEN_FAILED` card with the folder's path.
+- **Add to Steam** finds the current user's Steam library under `$HOME/.local/share/Steam` or
+  `$HOME/.steam/steam`. Exit Steam first. The player checks `$HOME/.steam/steam.pid`; a missing
+  PID file is treated as closed, while a live PID or an unreadable or malformed file blocks the
+  write. Steam shortcuts and artwork stay in that user's Steam account folders.
 - **Check for updates** shows the release page only; downloading and installing an update works on
   Windows only (`UPDATE_PLATFORM_UNSUPPORTED`).
 - The launcher does not bring the game window to the front: X11 and Wayland leave focus to the

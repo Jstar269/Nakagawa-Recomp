@@ -34,7 +34,8 @@ EXPECTED_PROVENANCE_FAMILIES = frozenset({
     "vfpu",
     "stb-image",
     "stb-vorbis",
-    "kenney-ui-assets",
+    "kenney-input-prompts",
+    "kenney-interface-sounds",
 })
 
 EXPECTED_TOOLCHAIN_COMPONENTS = frozenset({

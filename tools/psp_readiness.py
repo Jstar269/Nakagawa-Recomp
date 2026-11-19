@@ -62,7 +62,7 @@ def _run(command: list[str], *, timeout: float = 5.0) -> tuple[int | None, str]:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, type(exc).__name__
-    return completed.returncode, completed.stdout[-2000:].replace("\r", "").replace("\n", " ").strip()
+    return completed.returncode, completed.stdout.replace("\r", "").replace("\n", " ").strip()
 
 
 def _git_dirty() -> bool:
@@ -192,9 +192,12 @@ def collect(*, run_focused: bool = False) -> dict[str, Any]:
     _add(checks, "source_state", "FAIL" if dirty else "PASS",
          "tracked source changes are present; review/commit before hardware evidence" if dirty else "clean tracked tree")
 
-    for tool in ("python", "git", "gcc", "mingw32-make"):
-        resolved = shutil.which(tool)
-        _add(checks, f"host_tool:{tool}", "PASS" if resolved else "FAIL", "available" if resolved else "missing")
+    make_tool = "mingw32-make" if sys.platform.startswith("win") else "make"
+    host_tools = (("python", None), ("git", "git"), ("gcc", "gcc"), (make_tool, make_tool))
+    for label, command in host_tools:
+        available = bool(sys.executable) if command is None else bool(shutil.which(command))
+        _add(checks, f"host_tool:{label}", "PASS" if available else "FAIL",
+             "available" if available else "missing")
     # The console script is often absent from PATH even when the module is
     # installed; ``python -m pre_commit`` is the form the repository actually uses.
     pre_commit = shutil.which("pre-commit")
@@ -237,8 +240,10 @@ def collect(*, run_focused: bool = False) -> dict[str, Any]:
 
     binary = ROOT / "build" / "hst" / "hst.exe"
     chunks = sorted((ROOT / "build" / "hst").glob("hst_recomp_*.c")) if (ROOT / "build" / "hst").exists() else []
-    _add(checks, "hst_buildfull_artifact", "PASS" if binary.is_file() and chunks else "FAIL",
-         f"linked executable and {len(chunks)} generated chunks present" if binary.is_file() and chunks else "BuildFull artifact is absent")
+    hst_present = binary.is_file() and bool(chunks)
+    _add(checks, "hst_buildfull_artifact", "PASS" if hst_present else "OPTIONAL_MISSING",
+         f"linked executable and {len(chunks)} generated chunks present" if hst_present
+         else "optional private BuildFull artifact is absent")
 
     fixture_root = ROOT / "tests" / "fixtures" / "psp_oracle"
     fixture_ok = (fixture_root / "probe.c").is_file() and (fixture_root / "Makefile").is_file()
@@ -300,7 +305,7 @@ def collect(*, run_focused: bool = False) -> dict[str, Any]:
 
     if run_focused:
         code, detail = _run([sys.executable, "-m", "unittest", "tools.test_psp_oracle", "tools.test_psp_issue_matrix"], timeout=120.0)
-        _add(checks, "focused_tests", "PASS" if code == 0 else "FAIL", detail or "completed")
+        _add(checks, "focused_tests", "PASS" if code == 0 else "FAIL", detail[-2000:] or "completed")
 
     software_failures = [check.name for check in checks if check.status == "FAIL" and not check.name.startswith("pspdev:")]
     hardware_missing = [check.name for check in checks if check.status in {"OPTIONAL_MISSING", "HARDWARE_NOT_CONNECTED"} and check.name.startswith("pspdev:")]

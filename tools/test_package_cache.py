@@ -955,7 +955,7 @@ class PackageCacheTests(unittest.TestCase):
                     manifest, manifest_path, executable_hash, None, None, public_safe=mode
                     , title_input_identity=identity
                 )
-            planner_key = title_codegen_plan._cache_key_for_build(
+            planner_key, _planner_options, _tool_digests = title_codegen_plan._cache_key_for_build(
                 input_hashes=input_hashes,
                 title_input_identity=identity,
                 plan=plan,
@@ -1498,29 +1498,65 @@ class PackageCacheTests(unittest.TestCase):
             target = root / "packages" / "ABCD12345"
             target.parent.mkdir(parents=True)
             for stamp, marker in ((100, "older"), (200, "newest")):
-                backup = cache_dir / f"previous-{stamp}"
+                backup = cache_dir / f"previous-ABCD12345-{stamp}"
                 backup.mkdir()
                 (backup / "package.json").write_text(marker, encoding="utf-8")
-            (cache_dir / "previous-notes").mkdir()
+            (cache_dir / "previous-ABCD12345-notes").mkdir()
             restored = nk_cli._restore_interrupted_swap(target, cache_dir)
-            self.assertEqual(restored, cache_dir / "previous-200")
+            self.assertEqual(restored, cache_dir / "previous-ABCD12345-200")
             self.assertEqual((target / "package.json").read_text(encoding="utf-8"), "newest")
-            self.assertFalse((cache_dir / "previous-200").exists())
+            self.assertFalse((cache_dir / "previous-ABCD12345-200").exists())
             # A package in place is never replaced by a backup.
             self.assertIsNone(nk_cli._restore_interrupted_swap(target, cache_dir))
             self.assertEqual((target / "package.json").read_text(encoding="utf-8"), "newest")
-            self.assertTrue((cache_dir / "previous-100").is_dir())
+            self.assertTrue((cache_dir / "previous-ABCD12345-100").is_dir())
+
+    def test_an_interrupted_swap_is_restored_only_into_its_own_variant(self) -> None:
+        """Every package variant of a disc shares one cache folder: a backup an
+        interrupted enhanced build left aside is never moved into the authentic
+        package's folder, and goes back into the enhanced one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_dir = root / "cache" / "packages" / "ABCD12345"
+            cache_dir.mkdir(parents=True)
+            authentic = root / "packages" / "ABCD12345"
+            enhanced = root / "packages" / "ABCD12345-enhanced-hd"
+            enhanced.mkdir(parents=True)
+            (enhanced / "package.json").write_text("enhanced", encoding="utf-8")
+            staging = root / "staging"
+            staging.mkdir()
+            (staging / "package.json").write_text("enhanced, rebuilt", encoding="utf-8")
+            real_helper = nk_cli._replace_package_folder
+
+            def stopped_after_the_first_rename(source, destination):
+                if Path(source) == staging:
+                    raise KeyboardInterrupt  # the build stops between the two renames
+                return real_helper(source, destination)
+
+            with mock.patch.object(nk_cli, "_replace_package_folder",
+                                   side_effect=stopped_after_the_first_rename):
+                with self.assertRaises(KeyboardInterrupt):
+                    nk_cli._swap_in_package_folder(staging, enhanced, cache_dir)
+            self.assertFalse(enhanced.exists())
+
+            self.assertIsNone(nk_cli._restore_interrupted_swap(authentic, cache_dir))
+            self.assertFalse(authentic.exists(), "another variant's package was moved in")
+            restored = nk_cli._restore_interrupted_swap(enhanced, cache_dir)
+            self.assertIsNotNone(restored)
+            self.assertEqual((enhanced / "package.json").read_text(encoding="utf-8"),
+                             "enhanced")
 
     def test_restore_recreates_a_removed_packages_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cache_dir = root / "cache"
-            (cache_dir / "previous-300").mkdir(parents=True)
-            (cache_dir / "previous-300" / "package.json").write_text("kept", encoding="utf-8")
+            (cache_dir / "previous-ABCD12345-300").mkdir(parents=True)
+            (cache_dir / "previous-ABCD12345-300" / "package.json").write_text(
+                "kept", encoding="utf-8")
             target = root / "packages" / "ABCD12345"
             self.assertFalse(target.parent.exists())
             self.assertEqual(nk_cli._restore_interrupted_swap(target, cache_dir),
-                             cache_dir / "previous-300")
+                             cache_dir / "previous-ABCD12345-300")
             self.assertEqual((target / "package.json").read_text(encoding="utf-8"), "kept")
 
     def test_an_unreadable_cache_folder_stops_the_restore_by_name(self) -> None:
@@ -2669,6 +2705,18 @@ class DecryptedElfRefusalTests(unittest.TestCase):
         self.assertIn("valid decrypted EBOOT.elf from your own copy", message)
         self.assertIn("the player decrypts the disc's own", message)
         self.assertNotIn("key", message.lower())
+
+    def test_a_failed_copy_leaves_no_partial_eboot_elf(self) -> None:
+        """A write or fsync error mid-copy removes EBOOT.elf.tmp from the package cache
+        (audit 2026-11-17): only the refused-ELF branch used to."""
+        with tempfile.TemporaryDirectory() as scratch:
+            source = Path(scratch) / "EBOOT.elf"
+            source.write_bytes(b"\x7fELF" + b"\0" * 4096)
+            cache = Path(scratch) / "cache"
+            with mock.patch.object(nk_cli.os, "fsync", side_effect=OSError("synthetic fsync failure")):
+                with self.assertRaisesRegex(nk_cli.PackageBuildError, "synthetic fsync failure"):
+                    nk_cli._copy_decrypted_elf(source, cache / "EBOOT.elf")
+            self.assertEqual(sorted(path.name for path in cache.iterdir()), [])
 
 
 class AnalyzerSourcesKeyTests(unittest.TestCase):

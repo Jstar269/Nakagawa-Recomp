@@ -17,6 +17,10 @@ rc_api_host_t g_host = { NULL, NULL };
 
 /* --- rc_json --- */
 
+/* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): arrays and objects nest at most this deep, so a
+ * deeply nested reply cannot exhaust the stack; upstream rcheevos commit 8409479c (#577) adds the same limit. */
+#define RC_JSON_MAX_DEPTH 32
+
 static int rc_json_parse_object(rc_json_iterator_t* iterator, rc_json_field_t* fields, size_t field_count, uint32_t* fields_seen);
 static int rc_json_parse_array(rc_json_iterator_t* iterator, rc_json_field_t* field);
 
@@ -108,17 +112,27 @@ static int rc_json_parse_field(rc_json_iterator_t* iterator, rc_json_field_t* fi
       break;
 
     case '[': /* array */
+      if (iterator->depth > RC_JSON_MAX_DEPTH)
+        return RC_INVALID_JSON;
+      ++iterator->depth;
+
       result = rc_json_parse_array(iterator, field);
       if (result != RC_OK)
         return result;
 
+      --iterator->depth;
       break;
 
     case '{': /* object */
+      if (iterator->depth > RC_JSON_MAX_DEPTH)
+        return RC_INVALID_JSON;
+      ++iterator->depth;
+
       result = rc_json_parse_object(iterator, NULL, 0, &field->array_size);
       if (result != RC_OK)
         return result;
 
+      --iterator->depth;
       break;
 
     default: /* non-quoted text [true,false,null] */
@@ -365,7 +379,9 @@ int rc_json_parse_server_response(rc_api_response_t* response, const rc_api_serv
     return RC_NO_RESPONSE;
   }
 
-  if (!server_response->body || !*server_response->body) {
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): a body of length 0 is empty whatever its pointer
+   * points at; upstream reads body[0] past the length. */
+  if (!server_response->body || !server_response->body_length || !*server_response->body) {
     /* expect valid HTTP status codes to have bodies that we can extract the message from,
      * but provide some default messages in case they don't. */
     switch (server_response->http_status_code) {
@@ -851,7 +867,9 @@ void rc_json_get_optional_string(const char** out, rc_api_response_t* response, 
 }
 
 int rc_json_get_required_string(const char** out, rc_api_response_t* response, const rc_json_field_t* field, const char* field_name) {
-  if (rc_json_get_string(out, &response->buffer, field, field_name))
+  /* LOCAL DELTA (Nakagawa Recomp, 2026-11-17): null is not a present required string, as in
+   * upstream rcheevos commit 8409479c (#577). */
+  if (rc_json_get_string(out, &response->buffer, field, field_name) && *out)
     return 1;
 
   return rc_json_missing_field(response, field);

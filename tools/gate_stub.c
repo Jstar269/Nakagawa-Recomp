@@ -16,7 +16,8 @@
 //   - If a supposedly dead stub is ever reached, it returns a safe value
 //     (0 / false / no-op) rather than crashing or silently skipping CPU state.
 //   - sr_syscall is the only stub reached on the intended exit path: the explicit
-//     syscall at the end of exit_stub(). It marks the HLE boundary and returns 0.
+//     syscall at the end of exit_stub(). It marks the HLE boundary, flushes the
+//     trace and exits the process.
 //
 // This is NOT a silent workaround: it does not mask or skip any instruction under
 // test. It only provides dead symbols so the host executable links headlessly.
@@ -128,7 +129,7 @@ void    sched_clear_current_join_target(void) {}
 int     sched_take_current_join_result(uint32_t uid, uint32_t *result_out) { (void)uid; (void)result_out; return 0; }
 int     sched_current_priority(void) { return 32; }
 int     sched_is_dormant(uint32_t uid) { (void)uid; return 1; }
-void    sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) { (void)entry; (void)arglen; (void)argp; }
+int     sched_run(uint32_t entry, uint32_t arglen, uint32_t argp) { (void)entry; (void)arglen; (void)argp; return 0; }
 /* sceKernelLoadExec restart seam (driver.c --sched loop). The headless gate never runs
  * sched_run, so no guest thread can queue a LoadExec request: take reports "none" and the
  * loop breaks. The remaining entries are reachable only after a request was taken, so they
@@ -253,6 +254,9 @@ int      ge_capture_exit_due(void) { return 0; }
 void     ge_capture_exit_set_deferred(int deferred) { (void)deferred; }
 /* No GPU, so no texture dump to finish where the run ends (ge.c, ge_shared.h). */
 void     sr_texdump_exit_finish(void) {}
+/* The gate never loads a cheat file (sr_cheats_init lives in gui.c, which it does not link), so
+ * the run's end has no hold counts to give; cheats.c says the same with no cheat set. */
+void     sr_cheats_run_end(void) {}
 /* The gate has no patch drawing: driver.c asks for tess=2..4, the stub keeps the PSP's division (1)
  * and ace_finish reports the feature as never run. */
 int      ge_patch_tess_init(int factor) { (void)factor; return 1; }
@@ -347,7 +351,6 @@ uint64_t SDL_GetTicksNS(void) { return 0u; }
 void     SDL_DelayPrecise(uint64_t ns) { (void)ns; }
 
 /* --- HLE / OSK stubs (dead on microtest path) --- */
-void     sr_syscall_wrapper(uint32_t nid) { (void)nid; }
 /* No SAS mixer here: Ace Mode's sas=sinc is refused, so driver.c never confirms it. */
 int      sr_hle_sas_set_band_limited(int on) { (void)on; return 0; }
 int      sr_hle_sas_set_wide_mix(int on) { (void)on; return 0; }
@@ -363,15 +366,11 @@ void sr_raw_syscall(CpuState *s, uint32_t code, uint32_t pc) {
 }
 #endif
 
-/* --- generated-entry fallback stub --- */
-void     f_00304290(void *s) { (void)s; }
-
 /* --- GE / vblank stubs (dead on microtest path) --- */
 uint32_t g_frame_prims = 0u;
 int      sr_vblank_subintr(uint32_t no, uint32_t *handler, uint32_t *arg) { (void)no; (void)handler; (void)arg; return -1; }
 int      sr_vblank_dispatch_registered(void) { return 0; }
 void     sr_vblank_tick(void) {}
-void     sr_vblank_nop(void) {}
 
 #ifdef __cplusplus
 }

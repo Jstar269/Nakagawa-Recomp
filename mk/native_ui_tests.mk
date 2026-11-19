@@ -75,18 +75,7 @@ osk-overlay-paint-selftest:
 		tests/native/osk_overlay_paint_selftest.c src/rt/osk_overlay.c src/rt/osk_overlay_paint.c $(LDFLAGS) $(LIBS)
 	$(BUILD_DIR)/osk_overlay_paint_selftest$(EXE_EXT) $(BUILD_DIR)/osk_overlay_paint_selftest.bmp
 
-# Resolve the already-supported SDL3_ttf dependency for the font selftest. Linux
-# CI installs sdl3-ttf in the SDL3_ttf job; Windows uses the discovered UCRT64 SDK.
-ifeq ($(OS),Windows_NT)
-SDL3_TTF_AVAILABLE := $(shell "$(PYTHON)" -c "from pathlib import Path; import sys; root=Path(r'$(SDL3_DIR)'); sys.exit(0 if (root/'include/SDL3_ttf/SDL_ttf.h').is_file() and (root/'lib/libSDL3_ttf.dll.a').is_file() and (root/'bin/SDL3_ttf.dll').is_file() else 1)" && echo yes)
-SDL3_TTF_CFLAGS := $(SDL3_INC_FLAGS)
-SDL3_TTF_LIBS := $(SDL3_LDFLAGS) -lSDL3_ttf -lSDL3
-else
-SDL3_TTF_AVAILABLE := $(shell command -v pkg-config >/dev/null 2>&1 && pkg-config --exists sdl3-ttf && echo yes)
-SDL3_TTF_CFLAGS := $(shell command -v pkg-config >/dev/null 2>&1 && pkg-config --cflags sdl3-ttf)
-SDL3_TTF_LIBS := $(shell command -v pkg-config >/dev/null 2>&1 && pkg-config --libs sdl3-ttf)
-endif
-
+# SDL3_TTF_AVAILABLE, SDL3_TTF_CFLAGS and SDL3_TTF_LIBS come from mk/build_common.mk.
 .PHONY: ui-font-selftest
 ifeq ($(SDL3_TTF_AVAILABLE),yes)
 ui-font-selftest:
@@ -214,6 +203,20 @@ endef
 nk-nickname-selftest:
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
 	$(call NK_NICKNAME_SELFTEST_CMD)
+
+# Cheat files (#2639, src/core/nk_cheats.h): the CWCheat reader, the checks that refuse a cheat
+# by name before it can run, and the applier, on a synthetic guest with a stretch of translated
+# code. The runtime's side, at the VBLANK seam, is in hle-thread-selftest.
+define NK_CHEATS_SELFTEST_CMD
+	$(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" -Isrc/core src/core/nk_cheats.c src/core/nk_shared_helpers.c \
+		tests/native/test_nk_cheats.c -o $(BUILD_ROOT)/test_nk_cheats$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_nk_cheats$(EXE_EXT)
+endef
+
+.PHONY: nk-cheats-selftest
+nk-cheats-selftest:
+	@"$(PYTHON)" -c "from pathlib import Path; Path('$(BUILD_ROOT)').mkdir(parents=True, exist_ok=True)"
+	$(call NK_CHEATS_SELFTEST_CMD)
 
 # The RetroAchievements bridge (src/core/nk_achievements.c, #1316) on the vendored rcheevos
 # rc_client, against an in-process fake server: login, game load, a softcore unlock on synthetic
@@ -454,8 +457,9 @@ anime4k-selftest: shader-verify
 # (invariant S1: a reference from the UI pass to the runtime fails this link). Then, for the
 # binary that runs, with src/rt/ace.c as well, whose key table gives the launch notice's longest
 # list: every part on, laid out at every window and display scale and drawn once. With SDL3_ttf
-# the pictures and that layout use the launcher's fonts. No Vulkan headers, loader or device: SKIP
-# (exit 77), visible in the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
+# the pictures and that layout use the launcher's fonts: a font that does not load from the folder
+# fails, and an SDL3_ttf library that cannot be loaded at run time is a SKIP (exit 77). No Vulkan
+# headers, loader or device: SKIP (exit 77), visible in the log; NK_UI_VK_REQUIRE=1 makes a skip fail.
 ACE_UI_SELFTEST_BUILD = $(CC) -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc/ui -Isrc/rt -Isrc/rt/gpu_sdl3vk -Ithird_party/clay \
 	$(VULKAN_INC_FLAGS) $(SDL3_INC_FLAGS) -DNK_UI_WITH_VULKAN $$ttf_defs \
 	$(NK_UI_CORE_SRCS) src/ui/backend/nk_ui_vk.c $$ttf_srcs src/rt/osk_overlay.c \
@@ -479,14 +483,15 @@ ace-ui-selftest:
 		$$ttf_libs -lm $(NK_UI_VK_SELFTEST_LIBS) -o $(BUILD_ROOT)/ace_ui_selftest$(EXE_EXT) || exit 1; \
 	rc=0; $(BUILD_ROOT_RUN)/ace_ui_selftest$(EXE_EXT) $(BUILD_ROOT) --fonts . || rc=$$?; \
 	if [ $$rc -eq 77 ] && [ "$(NK_UI_VK_REQUIRE)" = 1 ]; then \
-		echo "FAIL ace-ui-selftest (the GPU leg skipped, but NK_UI_VK_REQUIRE=1 requires a Vulkan device)"; exit 1; \
-	elif [ $$rc -eq 77 ]; then echo "SKIP ace-ui-selftest GPU leg (exit 77; the layout cells passed)"; \
+		echo "FAIL ace-ui-selftest (a leg skipped, but NK_UI_VK_REQUIRE=1 requires a Vulkan device and, with SDL3_ttf, its library)"; exit 1; \
+	elif [ $$rc -eq 77 ]; then echo "SKIP ace-ui-selftest GPU or font leg (exit 77; the reason is printed above; the layout cells passed)"; \
 	elif [ $$rc -ne 0 ]; then echo "FAIL ace-ui-selftest (exit $$rc)"; exit $$rc; fi
 
 .PHONY: nk-ui-focus-selftest
 # The focus, input and glyph checks are SDL-free. The SDL_Event translation leg is built from
 # the same sources: with SDL3 (as found by build discovery) it translates real SDL events;
-# without, it compiles without SDL and exits 77, which this recipe reports as SKIP.
+# without, it compiles without SDL and exits 77, which this recipe reports as SKIP, or as a failure
+# under NK_REQUIRE_SDL3=1 (mk/selftests.mk).
 NK_UI_FOCUS_SDL_READY := $(and $(filter-out none,$(SDL3_PROVIDER)),$(if $(strip $(SDL3_ERROR)),,yes))
 NK_UI_FOCUS_SDL_CFLAGS := $(if $(NK_UI_FOCUS_SDL_READY),-DNK_UI_WITH_SDL3 $(SDL3_INC_FLAGS),)
 NK_UI_FOCUS_SDL_LIBS := $(if $(NK_UI_FOCUS_SDL_READY),$(SDL3_LDFLAGS) -lSDL3,)
@@ -503,7 +508,9 @@ nk-ui-focus-selftest:
 		$(NK_UI_CORE_SRCS) src/ui/nk_ui_sdl_input.c tests/native/test_nk_ui_focus.c -lm \
 		$(NK_UI_FOCUS_SDL_LIBS) -o $(BUILD_ROOT)/test_nk_ui_focus_sdl$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_nk_ui_focus_sdl$(EXE_EXT) --sdl-input; rc=$$?; \
-		if [ "$$rc" = 77 ]; then echo "SKIP nk-ui-focus-selftest SDL translation leg (exit 77): SDL3 not found by build discovery"; \
+		if [ "$$rc" = 77 ] && [ "$(NK_REQUIRE_SDL3)" = 1 ]; then \
+			echo "FAIL nk-ui-focus-selftest SDL translation leg (SDL3 not found by build discovery, but NK_REQUIRE_SDL3=1 requires it)"; exit 1; \
+		elif [ "$$rc" = 77 ]; then echo "SKIP nk-ui-focus-selftest SDL translation leg (exit 77): SDL3 not found by build discovery"; \
 		elif [ "$$rc" != 0 ]; then exit "$$rc"; fi
 
 .PHONY: shared-helpers-selftest
@@ -515,6 +522,7 @@ shared-helpers-selftest:
 	$(BUILD_ROOT_RUN)/test_shared_helpers$(EXE_EXT)
 
 native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native-core-objects-core native-core-objects-player $(LIBCHDR_LIB) clay-layout-selftest nk-ui-core-selftest nk-ui-player-screens-selftest nk-ui-overlay-screens-selftest nk-ui-overlay-host-selftest nk-ui-sdlr-selftest nk-ui-vk-selftest nk-ui-focus-selftest shared-helpers-selftest
+	$(NK_REQUIRE_POSIX_SHELL)
 	$(CC) -std=c99 -Wall -Wextra -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" src/rt/pgf_public.c \
 		tests/native/test_pgf_public.c -o $(BUILD_ROOT)/test_pgf_public$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_pgf_public$(EXE_EXT)
@@ -531,6 +539,7 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 		tests/native/native_test_isolation.c tests/native/test_launch_resolution.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_launch_resolution$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_launch_resolution$(EXE_EXT)
 	$(call NK_NICKNAME_SELFTEST_CMD)
+	$(call NK_CHEATS_SELFTEST_CMD)
 	$(call PLAYER_STATE_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_player_state$(EXE_EXT)
 	$(call INPUT_SETTINGS_TEST_BIN_CMD)
@@ -538,13 +547,15 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(call PACKAGE_BUILDER_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_package_builder$(EXE_EXT)
 	$(call UPDATE_CHECK_TEST_BIN_CMD)
-	$(BUILD_ROOT_RUN)/test_update_check$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_update_check$(EXE_EXT); rc=$$?; \
+		if [ "$$rc" = 77 ]; then echo "SKIP test_update_check link-safety case (exit 77; the reason is printed above)"; \
+		elif [ "$$rc" != 0 ]; then exit "$$rc"; fi
 	$(call COVER_ART_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_cover_art$(EXE_EXT)
 	$(call DISCORD_PRESENCE_TEST_BIN_CMD)
 	$(BUILD_ROOT_RUN)/test_discord_presence$(EXE_EXT)
-	$(CC) -std=c99 -Wall -Wextra -Isrc/core -Isrc/core/generated -Isrc/rt -Isrc/player -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		$(PLAYER_CORE_SOURCES) $(PLAYER_PLAT_SOURCES) src/player/setup_staging.c src/rt/archive_vfs.c \
+	$(CC) $(NC_CFLAGS_PLAYER) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_PLAYER) \
+		src/player/setup_staging.c src/rt/archive_vfs.c \
 		tests/native/native_test_isolation.c tests/native/test_xb_parser.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_xb_parser$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_xb_parser$(EXE_EXT)
 	$(CC) $(NC_CFLAGS_CORE) -Werror $(LIBCHDR_INC) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) $(PLAYER_CHD_SRCS) \
@@ -564,8 +575,8 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(CC) -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -Itests/native -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
 		tests/native/pcm_wav_dump.c tests/native/test_pcm_wav_dump.c -o $(BUILD_ROOT)/test_pcm_wav_dump$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_pcm_wav_dump$(EXE_EXT)
-	$(CC) -std=c99 -Wall -Wextra -Isrc/core -Isrc/core/generated -Isrc/rt -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" \
-		$(PLAYER_CORE_SOURCES) $(PLAYER_PLAT_SOURCES) src/rt/prx_loader.c src/rt/archive_vfs.c \
+	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
+		src/rt/prx_loader.c src/rt/archive_vfs.c \
 		tests/native/test_fuzz_parsers.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_fuzz_parsers$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_fuzz_parsers$(EXE_EXT) --iters 100
 	$(call PSMF_PRODUCER_SELFTEST_CMD,100)
@@ -578,7 +589,9 @@ native-core-tests: cpu-lle-selftest domain-mode-selftest nkstate-selftest native
 	$(call ACHIEVEMENTS_SELFTEST_CMD)
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_portable_mode.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_portable_mode$(EXE_EXT)
-	$(BUILD_ROOT_RUN)/test_portable_mode$(EXE_EXT)
+	$(BUILD_ROOT_RUN)/test_portable_mode$(EXE_EXT); rc=$$?; \
+		if [ "$$rc" = 77 ]; then echo "SKIP test_portable_mode too-long case (exit 77; the reason is printed above)"; \
+		elif [ "$$rc" != 0 ]; then exit "$$rc"; fi
 	$(CC) $(NC_CFLAGS_CORE) -DSR_SELFTEST_BUILD_ROOT=\"$(BUILD_ROOT)\" $(NC_OBJS_CORE) \
 		tests/native/native_test_isolation.c tests/native/test_data_migrate.c $(PLAYER_PLATFORM_LIBS) -o $(BUILD_ROOT)/test_data_migrate$(EXE_EXT)
 	$(BUILD_ROOT_RUN)/test_data_migrate$(EXE_EXT)
