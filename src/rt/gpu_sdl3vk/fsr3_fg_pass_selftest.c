@@ -19,6 +19,8 @@
  *        without, and the pan around it is interpolated
  *   G-C  a cut with a reset: the generated frames keep nothing of the old scene, and the one at the
  *        reset is the new frame (the same cut without the reset is printed, not checked)
+ *   G-F  a failed image or shader-module create that leaves a non-null value in its output never
+ *        has that value destroyed, and the creation is refused
  *
  * The bars beside each cell were measured on an RTX 3080 and set between the unmutated values and
  * the nearest of tools/fsr3_mutants.py --fg-pass's defects.
@@ -255,8 +257,9 @@ static int gpu_open(char *why, size_t cap) {
     mci.pNext = NULL; /* the chain above belongs to instance creation; the messenger takes none */
     if (g.validation && (!CreateDebugUtilsMessengerEXT ||
                          CreateDebugUtilsMessengerEXT(g.instance, &mci, NULL, &g.messenger) != VK_SUCCESS)) {
+        /* The layer and VK_EXT_debug_utils were found and enabled: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDebugUtilsMessengerEXT failed");
-        return 0;
+        return -1;
     }
     VkPhysicalDevice devs[8];
     uint32_t nd = 8;
@@ -319,8 +322,9 @@ static int gpu_open(char *why, size_t cap) {
         dci.ppEnabledExtensionNames = &ext;
     }
     if (CreateDevice(g.physical, &dci, NULL, &g.device) != VK_SUCCESS) {
+        /* A device with the queue is there, and could not be made: a failure, not a skip. */
         snprintf(why, cap, "vkCreateDevice failed");
-        return 0;
+        return -1;
     }
     g.features_enabled = !g.refusal && sf.subgroupSizeControl && sf.computeFullSubgroups && f2.pNext;
 #define DEV(name) name = (PFN_vk##name)GetDeviceProcAddr(g.device, "vk" #name)
@@ -386,8 +390,12 @@ static void cmd_end(void) {
     si.pCommandBuffers = &g.cb;
     EndCommandBuffer(g.cb);
     ResetFences(g.device, 1, &g.fence);
-    QueueSubmit(g.queue, 1, &si, g.fence);
-    WaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    /* A frame that was not submitted, or whose fence never signalled, left nothing to measure. */
+    const VkResult submitted = QueueSubmit(g.queue, 1, &si, g.fence);
+    CHECK(submitted == VK_SUCCESS, "vkQueueSubmit failed (%d)", (int)submitted);
+    if (submitted != VK_SUCCESS) return;
+    const VkResult waited = WaitForFences(g.device, 1, &g.fence, VK_TRUE, UINT64_MAX);
+    CHECK(waited == VK_SUCCESS, "vkWaitForFences failed (%d)", (int)waited);
 }
 
 /* Every earlier compute or transfer access before every later one. */
@@ -636,11 +644,86 @@ static Fsr3FgHostDesc desc_for(uint32_t rw, uint32_t rh, uint32_t dw, uint32_t d
     return d;
 }
 
+/* A failed vkCreateImage or vkCreateShaderModule that leaves a non-null value in its output, as
+ * Vulkan allows (a failed command's output is undefined): the create whose turn it is fails and
+ * writes JUNK there; the destroy wrappers count JUNK instead of passing it on. Wrapped through the
+ * init's proc-addr hook, so the pass has no test seam. */
+#define JUNK_IMAGE ((VkImage)(uintptr_t)0x5EED0001u)
+#define JUNK_MODULE ((VkShaderModule)(uintptr_t)0x5EED0002u)
+static PFN_vkGetDeviceProcAddr s_real_dev_addr;
+static PFN_vkCreateImage s_real_create_image;
+static PFN_vkDestroyImage s_real_destroy_image;
+static PFN_vkCreateShaderModule s_real_create_module;
+static PFN_vkDestroyShaderModule s_real_destroy_module;
+static int s_image_fails_at = -1, s_module_fails_at = -1; /* the call that fails, counting from 0 */
+static unsigned s_junk_destroyed;
+
+static VKAPI_ATTR VkResult VKAPI_CALL junk_create_image(VkDevice device, const VkImageCreateInfo *info,
+                                                        const VkAllocationCallbacks *alloc, VkImage *image) {
+    if (s_image_fails_at >= 0 && s_image_fails_at-- == 0) {
+        *image = JUNK_IMAGE;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return s_real_create_image(device, info, alloc, image);
+}
+
+static VKAPI_ATTR void VKAPI_CALL junk_destroy_image(VkDevice device, VkImage image, const VkAllocationCallbacks *alloc) {
+    if (image == JUNK_IMAGE) { s_junk_destroyed++; return; }
+    s_real_destroy_image(device, image, alloc);
+}
+
+static VKAPI_ATTR VkResult VKAPI_CALL junk_create_module(VkDevice device, const VkShaderModuleCreateInfo *info,
+                                                         const VkAllocationCallbacks *alloc, VkShaderModule *module) {
+    if (s_module_fails_at >= 0 && s_module_fails_at-- == 0) {
+        *module = JUNK_MODULE;
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return s_real_create_module(device, info, alloc, module);
+}
+
+static VKAPI_ATTR void VKAPI_CALL junk_destroy_module(VkDevice device, VkShaderModule module,
+                                                      const VkAllocationCallbacks *alloc) {
+    if (module == JUNK_MODULE) { s_junk_destroyed++; return; }
+    s_real_destroy_module(device, module, alloc);
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL junk_dev_addr(VkDevice device, const char *name) {
+    PFN_vkVoidFunction fn = s_real_dev_addr(device, name);
+    if (!strcmp(name, "vkCreateImage")) {
+        s_real_create_image = (PFN_vkCreateImage)fn;
+        return (PFN_vkVoidFunction)junk_create_image;
+    }
+    if (!strcmp(name, "vkDestroyImage")) {
+        s_real_destroy_image = (PFN_vkDestroyImage)fn;
+        return (PFN_vkVoidFunction)junk_destroy_image;
+    }
+    if (!strcmp(name, "vkCreateShaderModule")) {
+        s_real_create_module = (PFN_vkCreateShaderModule)fn;
+        return (PFN_vkVoidFunction)junk_create_module;
+    }
+    if (!strcmp(name, "vkDestroyShaderModule")) {
+        s_real_destroy_module = (PFN_vkDestroyShaderModule)fn;
+        return (PFN_vkVoidFunction)junk_destroy_module;
+    }
+    return fn;
+}
+
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL junk_gipa(VkInstance instance, const char *name) {
+    PFN_vkVoidFunction fn = g.gipa(instance, name);
+    if (!strcmp(name, "vkGetDeviceProcAddr")) {
+        s_real_dev_addr = (PFN_vkGetDeviceProcAddr)fn;
+        return (PFN_vkVoidFunction)junk_dev_addr;
+    }
+    return fn;
+}
+
+static PFN_vkGetInstanceProcAddr s_pass_gipa; /* pass_new's hook; NULL is counting_gipa */
+
 static Fsr3FgPass *pass_new(Fsr3FgHostDesc desc, uint32_t frames, const Fsr3FgDeviceFacts *facts, int enabled,
                             char *err, size_t cap) {
     Fsr3FgPassInit init;
     memset(&init, 0, sizeof(init));
-    init.get_instance_proc_addr = counting_gipa;
+    init.get_instance_proc_addr = s_pass_gipa ? s_pass_gipa : counting_gipa;
     init.instance = g.instance;
     init.physical_device = g.physical;
     init.device = g.device;
@@ -675,6 +758,13 @@ static Fsr3FgDeviceFacts good_facts(void) {
 }
 
 static void cell_gr(void) {
+    {
+        /* No init at all: refused by name, not dereferenced. */
+        char err[160] = "";
+        Fsr3FgPass *none = fsr3_fg_pass_create(NULL, err, sizeof(err));
+        CHECK(none == NULL && strstr(err, "no init"), "G-R: a NULL init was not refused by name (%s)", err);
+        fsr3_fg_pass_destroy(none);
+    }
     /* The table: each fact alone, against the reason it must give. */
     static const struct {
         const char *name;
@@ -785,12 +875,18 @@ static int run_open(Run *r, uint32_t rw, uint32_t rh, uint32_t dw, uint32_t dh, 
     }
     const VkImageUsageFlags in = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     const VkImageUsageFlags color = in | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    return tex_make(&r->depth, rw, rh, VK_FORMAT_R32_SFLOAT, in) &&
-           tex_make(&r->mv, rw, rh, VK_FORMAT_R16G16_SFLOAT, in) &&
-           tex_make(&r->present, dw, dh, COLOR_FORMAT, color) &&
-           tex_make(&r->hudless, dw, dh, COLOR_FORMAT, color) &&
-           tex_make(&r->out, dw, dh, COLOR_FORMAT,
-                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    /* A run whose images cannot be made measures nothing: a failure, never a quiet return. */
+    if (!tex_make(&r->depth, rw, rh, VK_FORMAT_R32_SFLOAT, in) ||
+        !tex_make(&r->mv, rw, rh, VK_FORMAT_R16G16_SFLOAT, in) ||
+        !tex_make(&r->present, dw, dh, COLOR_FORMAT, color) ||
+        !tex_make(&r->hudless, dw, dh, COLOR_FORMAT, color) ||
+        !tex_make(&r->out, dw, dh, COLOR_FORMAT,
+                  VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        printf("FAIL run_open %ux%u -> %ux%u: an input or output image could not be made\n", rw, rh, dw, dh);
+        s_fail = 1;
+        return 0;
+    }
+    return 1;
 }
 
 static void run_close(Run *r) {
@@ -1442,6 +1538,34 @@ static void cell_gc(void) {
                share_no_reset[0], share_no_reset[1]);
 }
 
+/* ---- G-F ------------------------------------------------------------------------------------- */
+
+static void cell_gf(void) {
+    if (g.refusal) {
+        printf("SKIP G-F (the pass refuses this device: %s)\n", g.refusal);
+        s_skip = 1;
+        return;
+    }
+    static const struct {
+        const char *what;
+        int image, module;
+    } k_fail[] = { { "the third image", 2, -1 }, { "the fourth shader module", -1, 3 } };
+    for (unsigned i = 0; i < sizeof(k_fail) / sizeof(k_fail[0]); i++) {
+        char err[200] = "";
+        s_junk_destroyed = 0;
+        s_image_fails_at = k_fail[i].image;
+        s_module_fails_at = k_fail[i].module;
+        s_pass_gipa = junk_gipa;
+        Fsr3FgPass *p = pass_new(desc_for(480, 272, 960, 544), 1, &g.facts, g.features_enabled, err, sizeof(err));
+        s_pass_gipa = NULL;
+        s_image_fails_at = s_module_fails_at = -1;
+        CHECK(p == NULL, "G-F: the pass was made although %s failed", k_fail[i].what);
+        fsr3_fg_pass_destroy(p);
+        CHECK(s_junk_destroyed == 0, "G-F: the undefined output of a failed create (%s) was destroyed %u time(s)",
+              k_fail[i].what, s_junk_destroyed);
+    }
+}
+
 /* ---- main ------------------------------------------------------------------------------------ */
 
 static const struct {
@@ -1449,7 +1573,7 @@ static const struct {
     void (*run)(void);
 } k_cells[] = {
     { "G-R", cell_gr }, { "G-0", cell_g0 }, { "G-M", cell_gm }, { "G-D", cell_gd }, { "G-H", cell_gh },
-    { "G-C", cell_gc },
+    { "G-C", cell_gc }, { "G-F", cell_gf },
 };
 #define CELL_COUNT (sizeof(k_cells) / sizeof(k_cells[0]))
 
@@ -1473,15 +1597,21 @@ int main(int argc, char **argv) {
     if (up != 1) {
         /* G-R's table needs no device. */
         if (!any || want[0]) cell_gr();
-        printf("SKIP fsr3-fg-pass-selftest: %s\n", up == 0 ? why : "a Vulkan object could not be made");
+        printf("%s fsr3-fg-pass-selftest: %s\n", up == 0 ? "SKIP" : "FAIL",
+               why[0] ? why : "a Vulkan object could not be made");
         gpu_close();
         return s_fail || up != 0 ? 1 : 77;
     }
     syncval_canary();
     shader_canary();
-    if (g.validation && !g_syncval_shader) {
-        /* The cells still run, but nothing checks the barriers between passes. */
-        printf("SKIP the barrier proof (synchronisation validation of shader accesses is not active)\n");
+    /* Every cell but G-R dispatches; G-R alone (a table of device facts) has no barrier to prove. */
+    int dispatches = !any;
+    for (unsigned c = 1; c < CELL_COUNT; c++) dispatches |= want[c];
+    if (dispatches && (!g.validation || !g_syncval_shader)) {
+        /* The cells still run, but nothing checks the barriers between passes: without the layer no
+         * messenger exists, so a cell's "no validation messages" check would hold trivially. */
+        printf("SKIP the barrier proof (%s)\n",
+               !g.validation ? "no validation layer" : "synchronisation validation of shader accesses is not active");
         s_skip = 1;
     }
     for (unsigned c = 0; c < CELL_COUNT; c++)

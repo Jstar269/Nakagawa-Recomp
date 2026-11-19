@@ -128,6 +128,9 @@ typedef struct { uint32_t nid, target; } LateImportEntry;
 /* `part5` marks a block of partition 5, the volatile region (volatile_part_alloc). */
 typedef struct { uint32_t uid, addr, size, slot_size, prev, next; int high, part5; } Block;
 #define HLE_MAX_PARTITION_BLOCKS 256
+_Static_assert(HLE_MAX_PARTITION_BLOCKS <= SR_SCHED_ARENA_HIGH_BLOCK_MAX,
+               "the scheduler's arena range table (sched.c SR_STACK_RANGE_MAX) must hold a range "
+               "per live High block");
 
 typedef struct { uint32_t uid, backing_uid; } HleMemoryBlock;
 #define HLE_MAX_MEMORY_BLOCKS 256
@@ -215,8 +218,8 @@ typedef struct {
 #define HLE_KERNEL_ERROR_NO_MEMORY 0x80020190u      /* SCE_KERNEL_ERROR_NO_MEMORY */
 
 /* Fixed Pool (FPL) — partition-backed fixed block pool with free list,
- * waiter queuing, and blocking allocation support (PR-G). */
-#define FPL_MAX 16
+ * waiter queuing, and blocking allocation support (PR-G). The table of pools grows on
+ * demand (fpl_new_slot). */
 #define FPL_MAX_WAITERS 64
 
 typedef struct {
@@ -224,6 +227,7 @@ typedef struct {
 } FplWaiter;
 
 typedef struct {
+    uint32_t uid;          /* from sr_alloc_uid; fpl_lookup matches it */
     uint32_t base;
     uint32_t cur;
     uint32_t end;
@@ -243,8 +247,8 @@ typedef struct {
 /* Variable Pool (VPL): one SysMem partition block per pool, with a host-side free list
  * free list for the pool span, waiter queuing, and blocking allocation support (PR-G).
  * The accounting is the PSP-B1-01 measurement (hle_kernel_memory.c: a 0x20-byte pool
- * header, roundup(size, 8) + 8 bytes per block, carved from the top down). */
-#define VPL_MAX 16
+ * header, roundup(size, 8) + 8 bytes per block, carved from the top down). The table of
+ * pools grows on demand (vpl_new_slot). */
 #define VPL_MAX_WAITERS 64
 typedef struct { uint32_t addr, size; } VplSpan;
 typedef struct { uint32_t addr, size; } VplAlloc;
@@ -255,9 +259,11 @@ typedef struct { uint32_t thread_uid; uint32_t size; } VplWaiter;
  * both arrays by size / 16 + 1. A fixed table made the 129th live block of a pool
  * with free space read as exhausted, and a blocking AllocateVpl then never returned. */
 typedef struct {
+    uint32_t uid;          /* from sr_alloc_uid; vpl_lookup matches it */
     uint32_t base, size, block_uid;
     uint32_t attr;
     int used;
+    char name[32];         /* pspautotests tests/threads/vpl/refer.expected prints name=refer */
     VplSpan *free;
     int nfree, free_cap;
     VplAlloc *allocs;
@@ -782,9 +788,8 @@ typedef struct {
 
 typedef struct {
     int used;
-    int backend;                 /* 0 = ISO9660, 1 = merged host VFS namespace */
     uint32_t index;
-    SrVfsDirList list;           /* backend 1: fully materialized at Dopen */
+    SrVfsDirList list;           /* merged namespace, fully materialized at Dopen */
     char *path;
 } DirFd;
 
@@ -1029,17 +1034,19 @@ typedef struct {
 
 /* ---- mailboxes (sceKernel*Mbx), PSP-measured + PSPSDK ABI ---- */
 
-#define MBX_MAX 32
-#define MBX_MAX_WAITERS 64
-#define MBX_MAX_MSGS 128
+/* A PSP mailbox links guest-owned packets and limits neither its queue nor its number of
+ * mailboxes, so the queue (mbx_reserve_msg) and the table of mailboxes (mbx_new_slot) grow on
+ * demand. A thread waits on one object at a time, so the waiters never outnumber the
+ * scheduler's 128 threads (MAXTHREADS). */
+#define MBX_MAX_WAITERS 128
 
 typedef struct {
     int used;
     uint32_t uid;
     uint32_t attr;
     char name[32];
-    uint32_t msgs[MBX_MAX_MSGS];   /* guest SceKernelMsgPacket addresses, delivery order */
-    int nmsgs;
+    uint32_t *msgs;                /* guest SceKernelMsgPacket addresses, delivery order */
+    int nmsgs, msg_cap;
     uint32_t waiters[MBX_MAX_WAITERS];
     int nwaiters;
 } Mbx;
@@ -1164,10 +1171,21 @@ void sr_hle_umd_loadexec_reset(void);  /* LoadExec: drop the UMD callback, drive
 void hle_font_loadexec_reset(void);    /* LoadExec: drop the old program's sceFont libraries and fonts */
 int sr_hle_test_net_inited(void);
 uint32_t sr_hle_test_net_pool_uid(void);
-extern FplPool s_fpls[FPL_MAX];
+/* The FPL and VPL tables (hle.c). A PSP limits pool creation only by memory and UIDs, so each
+ * table grows by chunks that never move, as the semaphore table does (#1892): a pool pointer a
+ * handler holds across a reschedule stays valid while another thread creates pools. Slots run
+ * 0..*_slot_count()-1. *_new_slot returns an unused slot, growing the table, and stops the run by
+ * name when the host cannot allocate a chunk; *_table_reset releases every pool and chunk. */
+size_t fpl_slot_count(void);
+FplPool *fpl_slot(size_t index);
+FplPool *fpl_new_slot(void);
+void fpl_table_reset(void);
 FplPool *fpl_lookup(uint32_t uid);
 void fpl_remove_waiter(FplPool *p, uint32_t thread_uid);
-extern VplPool s_vpls[VPL_MAX];
+size_t vpl_slot_count(void);
+VplPool *vpl_slot(size_t index);
+VplPool *vpl_new_slot(void);
+void vpl_table_reset(void);
 void vpl_release(VplPool *p);
 void vpl_remove_waiter(VplPool *p, uint32_t thread_uid);
 VplPool *vpl_lookup(uint32_t uid);
@@ -1467,7 +1485,16 @@ void hle_sas_guest_reset(void);
 extern MsgPipe s_msg_pipes[MSG_PIPE_MAX];
 MsgPipe *msg_pipe_find(uint32_t uid);
 void hle_register_msgpipe_handlers(void);
-extern Mbx s_mbx[MBX_MAX];
+/* The mailbox table (hle.c): slots 0..mbx_slot_count()-1, each at a fixed address for the
+ * table's lifetime. mbx_new_slot returns an unused slot, growing the table, and stops the run by
+ * name when the host cannot allocate one; mbx_reserve_msg makes room for one more message the
+ * same way. mbx_release frees a deleted mailbox's queue; mbx_table_reset frees every mailbox. */
+size_t mbx_slot_count(void);
+Mbx *mbx_slot(size_t index);
+Mbx *mbx_new_slot(void);
+void mbx_reserve_msg(Mbx *m);
+void mbx_release(Mbx *m);
+void mbx_table_reset(void);
 Mbx *mbx_find(uint32_t uid);
 void mbx_remove_waiter(Mbx *m, uint32_t thid);
 void hle_register_mbx_handlers(void);
@@ -1478,6 +1505,10 @@ size_t hle_sync_slot_count(void);
 Sync *hle_sync_slot(size_t index);
 Sync *hle_sync_grow(void);
 void hle_sync_reset(void);
+/* LwMutex wait records (hle_kernel_sync.c): a thread torn down while it waits leaves its
+ * record and its numWaitThreads count; LoadExec forgets every record. */
+void sr_hle_lwmutex_release_thread(uint32_t thread_uid);
+void sr_hle_lwmutex_waits_reset(void);
 extern Mutex **s_mutexes;
 extern size_t s_mutex_len;
 extern size_t s_mutex_cap;
@@ -1659,13 +1690,20 @@ static inline int sreg_sync_file(FILE *f) {
 
 static inline uint32_t var_sext16(uint32_t word) { return (uint32_t)(int32_t)(int16_t)(word & 0xFFFFu); }
 
+static inline int var_import_stale_read(uint32_t addr, uint32_t *word_out, void *ctx) {
+    (void)ctx;
+    if (!sr_inrange_n(addr, 4u)) return 0;
+    *word_out = sr_r32(addr);
+    return 1;
+}
+
 static inline void var_import_write(uint32_t site, uint32_t word) {
-    MEM_W32(site, word);
     if (sr_stale_enabled()) {
-        /* A loader patch, not a code overwrite: the patched word is the expected one now. */
-        sr_stale_forget_range(site, 4u);
-        sr_stale_register_word(site, word);
+        /* A loader patch, not a code overwrite: the patched word is the expected one now, and
+         * the translated block around it keeps detecting overwrites of its other words. */
+        sr_stale_patch_word(site, word, var_import_stale_read, NULL);
     }
+    MEM_W32(site, word);
 }
 
 static inline int64_t psmf_av_x9_to_us(int64_t x9) { return (x9 >= 0 ? x9 + 4 : x9 - 4) / 9; }

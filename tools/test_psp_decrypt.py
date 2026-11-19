@@ -48,6 +48,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 CC = os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc")
 
+# Every child process in this suite is bounded.  The suite feeds the decoders
+# malformed and random input, so a decoder that starts looping on bad input must
+# fail the test that fed it (subprocess.TimeoutExpired names the command) rather
+# than hang the run until the CI job is killed.
+RUN_TIMEOUT_S = 120
+COMPILE_TIMEOUT_S = 300
+
+
+def run_bounded(cmd, *, timeout: float = RUN_TIMEOUT_S,
+                **kwargs: Any) -> subprocess.CompletedProcess:
+    """``subprocess.run`` with a time limit; a timeout raises by name."""
+    return subprocess.run(cmd, timeout=timeout, **kwargs)
+
 # ---------------------------------------------------------------------------
 # Published known-answer vectors (NIST FIPS 197 / FIPS 180-1 / RFC 4493).
 # The zero-IV CBC expectation (ZERO_START_CBC_CIPHER) is not a published value;
@@ -689,15 +702,12 @@ class TestKnownAnswers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_kat_"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = build_tool()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_aes128_ecb_fips197(self):
         import json
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "kat", "--vector", "aes-ecb"],
             capture_output=True, text=True,
         )
@@ -708,7 +718,7 @@ class TestKnownAnswers(unittest.TestCase):
 
     def test_aes128_cbc_roundtrip_and_vectors(self):
         import json
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "kat", "--vector", "aes-cbc"],
             capture_output=True, text=True,
         )
@@ -719,7 +729,7 @@ class TestKnownAnswers(unittest.TestCase):
 
     def test_aes_cmac_rfc4493(self):
         import json
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "kat", "--vector", "aes-cmac"],
             capture_output=True, text=True,
         )
@@ -730,13 +740,65 @@ class TestKnownAnswers(unittest.TestCase):
 
     def test_sha1_rfc3174(self):
         import json
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "kat", "--vector", "sha1"],
             capture_output=True, text=True,
         )
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         got = json.loads(out.stdout)
         self.assertEqual(got["digest"], SHA1_ABC_DIGEST.hex())
+
+    def test_prx_sha1_wipes_its_whole_context(self):
+        """sha1_parts, the SHA-1 every PRX decoder hashes decrypted header and
+        key-derived bytes through, wipes its whole SHA_CTX after SHAFinal: the
+        vendored SHAFinal clears only sizeof(pointer) bytes of it."""
+        from tools.nk_core import decrypt_tool
+
+        harness = self.tmp / "prx_sha1_wipe.c"
+        harness.write_text(r"""
+#include <stdio.h>
+#include <string.h>
+#define SHAFinal harness_sha_final
+#define nk_secure_zero harness_secure_zero
+#include "nk_psp_prx.c"
+#undef SHAFinal
+#undef nk_secure_zero
+void SHAFinal(BYTE *output, SHA_CTX *shsInfo);
+void nk_secure_zero(void *p, size_t len);
+static const void *final_ctx;
+static int finals, wiped;
+void harness_sha_final(BYTE *output, SHA_CTX *shsInfo) {
+    final_ctx = shsInfo;
+    finals++;
+    SHAFinal(output, shsInfo);
+}
+void harness_secure_zero(void *p, size_t len) {
+    if (finals > 0 && p == final_ctx && len >= sizeof(SHA_CTX)) wiped++;
+    nk_secure_zero(p, len);
+}
+int main(void) {
+    static const u8 ab[2] = { 'a', 'b' }, c[1] = { 'c' };
+    ShaPart parts[3] = { { ab, 2 }, { NULL, 0 }, { c, 1 } };
+    u8 digest[0x14];
+    sha1_parts(parts, 3, digest);
+    printf("finals %d wiped %d digest ", finals, wiped);
+    for (size_t i = 0; i < sizeof(digest); i++) printf("%02x", digest[i]);
+    printf("\n");
+    return 0;
+}
+""", encoding="utf-8")
+        exe = self.tmp / "prx_sha1_wipe.exe"
+        cmd = [cast(str, CC), "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+               str(harness)]
+        cmd.extend(str(ROOT / rel) for rel in decrypt_tool.SOURCES
+                   if not rel.endswith(("nk_decrypt_main.c", "nk_psp_prx.c")))
+        cmd.extend(["-o", str(exe)])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(out.stdout.split(),
+                         ["finals", "1", "wiped", "1", "digest", SHA1_ABC_DIGEST.hex()])
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
@@ -749,12 +811,9 @@ class TestSyntheticEndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_e2e_"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = build_tool()
         cls.elf = tiny_elf()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _seal(self, payload: bytes, compressed: bool,
               elf_size: int | None = None) -> tuple[bytes, dict, bytes]:
@@ -776,7 +835,7 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         keyfile = self.tmp / "keys.json"
         write_keyfile(keyfile, entries)
         dst = self.tmp / "EBOOT_plain.elf"
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", "--key-file", str(keyfile),
              "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True,
@@ -791,7 +850,7 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         keyfile = self.tmp / "keys.json"
         write_keyfile(keyfile, entries)
         dst = self.tmp / "EBOOT_gzip.elf"
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", "--key-file", str(keyfile),
              "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True,
@@ -820,7 +879,7 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         keyfile = self.tmp / "keys_mixed.json"
         write_keyfile(keyfile, entries)
         dst = self.tmp / "EBOOT_mixed.elf"
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", "--key-file", str(keyfile),
              "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True,
@@ -832,7 +891,7 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         container, _, _ = self._seal(self.elf, compressed=False)
         src = self.tmp / "EBOOT_probe.BIN"
         src.write_bytes(container)
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "probe", "--in", str(src)],
             capture_output=True, text=True,
         )
@@ -846,7 +905,7 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         src.write_bytes(container)
         keyfile = self.tmp / "absent.json"  # never created
         dst = self.tmp / "nokey.out"
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", "--key-file", str(keyfile),
              "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True,
@@ -867,7 +926,7 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         keyfile = self.tmp / "partial.json"
         write_keyfile(keyfile, partial)
         dst = self.tmp / "partial.out"
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", "--key-file", str(keyfile),
              "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True,
@@ -884,7 +943,7 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         keyfile = self.tmp / "malformed.json"
         write_keyfile(keyfile, {"kirk.cmd1.key": fake_hex(16)})
         dst = self.tmp / "malformed.out"
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", "--key-file", str(keyfile),
              "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True,
@@ -902,18 +961,16 @@ class TestSyntheticEndToEnd(unittest.TestCase):
         keyfile = self.tmp / "tampered.json"
         write_keyfile(keyfile, entries)
         dst = self.tmp / "tampered.out"
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", "--key-file", str(keyfile),
              "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True,
         )
-        self.assertNotEqual(out.returncode, 0)
-        self.assertFalse(dst.exists())
         combined = out.stdout + out.stderr
-        self.assertTrue(
-            "INTEGRITY" in combined or "MISSING" in combined,
-            f"expected a fail-closed integrity error, got: {combined}",
-        )
+        self.assertEqual(out.returncode, 5, combined)  # NK_PSP_ERR_INTEGRITY
+        self.assertFalse(dst.exists())
+        self.assertIn("INTEGRITY_FAILURE", out.stdout)
+        self.assertNotIn("KEY_REQUIRED", combined)
 
 
 # ---------------------------------------------------------------------------
@@ -993,14 +1050,11 @@ class TestBuiltinTables(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_builtin_"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = build_tool()
         cls.elf = tiny_elf(b"NK295-BUILTIN")
         cls.arrays, cls.recipes, extra = builtin_table()
         cls.values, cls.firmware = extra["values"], extra["firmware"]
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _seal_builtin(self, header_tag: int) -> bytes:
         return seal_with_builtin_table(self.elf, header_tag)
@@ -1010,7 +1064,7 @@ class TestBuiltinTables(unittest.TestCase):
         dst = self.tmp / f"{name}.out"
         src.write_bytes(data)
         dst.unlink(missing_ok=True)
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", *extra, "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True,
         )
@@ -1025,8 +1079,8 @@ class TestBuiltinTables(unittest.TestCase):
     def test_probe_names_the_builtin_recipe_keyvault_row(self):
         src = self.tmp / "builtin_probe.BIN"
         src.write_bytes(self._seal_builtin(BUILTIN_GAME_TAG))
-        out = subprocess.run([str(self.exe), "probe", "--in", str(src)],
-                             capture_output=True, text=True)
+        out = run_bounded([str(self.exe), "probe", "--in", str(src)],
+                          capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         code = self.recipes[BUILTIN_GAME_TAG]["code"]
         self.assertIn(f"kirk.keyvault.{code}", out.stdout)
@@ -1114,21 +1168,18 @@ class TestType01Containers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_type01_"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = build_tool()
         cls.elf = tiny_elf(b"NK295-T01")
         cls.arrays, cls.recipes, extra = builtin_table()
         cls.values = extra["values"]
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _decrypt(self, name: str, container: bytes, *extra: str):
         src = self.tmp / f"{name}.BIN"
         dst = self.tmp / f"{name}.out"
         src.write_bytes(container)
         dst.unlink(missing_ok=True)
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", *extra, "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True)
         return out, dst
@@ -1197,12 +1248,9 @@ class TestMatchedTypeDiagnosis(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_diag_"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = build_tool()
         cls.elf = tiny_elf()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _sealed(self) -> tuple[bytes, dict]:
         entries, _ = synthetic_entries()
@@ -1221,7 +1269,7 @@ class TestMatchedTypeDiagnosis(unittest.TestCase):
         keyfile = self.tmp / f"{name}.json"
         write_keyfile(keyfile, entries)
         dst = self.tmp / f"{name}.out"
-        out = subprocess.run(
+        out = run_bounded(
             [str(self.exe), "decrypt", "--key-file", str(keyfile),
              "--in", str(src), "--out", str(dst)],
             capture_output=True, text=True,
@@ -1326,6 +1374,18 @@ static const unsigned char CONTROL_MARKER[16] = {
     0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5
 };
 
+/* Fill a block with the control marker through a volatile pointer.  Nothing
+ * reads the control block before free(), so a plain memset is a dead store:
+ * at -O2 GCC and Clang drop the memset and the malloc/free pair with it, and
+ * the control would then never be reclaimed.  Volatile stores must all be
+ * emitted, which keeps the allocation, the fill and the free in the program. */
+static void fill_control(unsigned char *block, size_t len)
+{
+    volatile unsigned char *v = block;
+    size_t i;
+    for (i = 0; i < len; i++) v[i] = CONTROL_MARKER[i % sizeof(CONTROL_MARKER)];
+}
+
 /* Number of occurrences of needle inside haystack. */
 static size_t count_occurrences(const unsigned char *hay, size_t hay_len,
                                 const unsigned char *needle, size_t needle_len)
@@ -1420,7 +1480,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "control allocation failed\n");
         return 2;
     }
-    memset(control, 0xA5, flat_bytes);
+    fill_control(control, flat_bytes);
     free(control);
     control_probe = (unsigned char *)malloc(flat_bytes);
     if (control_probe == NULL) {
@@ -1482,11 +1542,8 @@ class TestKeystoreErasure(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_erase_"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = cls._build_harness()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     @classmethod
     def _build_harness(cls) -> Path:
@@ -1501,17 +1558,19 @@ class TestKeystoreErasure(unittest.TestCase):
         cmd.extend(str(ROOT / rel) for rel in decrypt_tool.SOURCES
                    if not rel.endswith("nk_decrypt_main.c"))
         cmd.extend(["-o", str(exe)])
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = run_bounded(cmd, timeout=COMPILE_TIMEOUT_S, capture_output=True, text=True)
+        # A compiler is present (the class is skipped only without one), so a
+        # build failure is a broken production source or harness: fail, never skip.
         if proc.returncode != 0:
-            raise unittest.SkipTest(
+            raise AssertionError(
                 f"keystore erasure harness did not build:\n{proc.stdout}{proc.stderr}")
         return exe
 
     def _run(self, payload: bytes):
         keyfile = require_scratch_path(self.tmp / f"keys_{os.urandom(6).hex()}.json")
         keyfile.write_bytes(payload)
-        return subprocess.run([str(self.exe), str(keyfile)],
-                              capture_output=True, text=True)
+        return run_bounded([str(self.exe), str(keyfile)],
+                           capture_output=True, text=True)
 
     def _report(self, out):
         """Parse the harness report, asserting on any surviving key material.
@@ -1537,24 +1596,14 @@ class TestKeystoreErasure(unittest.TestCase):
                 report[field], 0,
                 f"key material survived nk_keystore_free in {field}",
             )
-        if report["verdict"] != "measured":
-            self.skipTest(
-                "this platform's allocator scrubs freed memory, so a zero leak "
-                "count cannot be distinguished from the allocator erasing the "
-                "block for us (probes were distinct blocks: "
-                f"{report['probes_distinct']}, control marker survived: "
-                f"{report['control_reclaimed']})")
-
-    def test_wiping_does_not_change_lookup_results_before_free(self):
-        """Erasure must not disturb what a live keystore returns.
-
-        This asserts on the read-back the harness performs while the keystore is
-        still alive, so a wipe that corrupted live entries would be caught even
-        though the post-free scan only looks at released memory.
-        """
-        report = self._report(self._run(_ERASE_KEYFILE_JSON))
-        self.assertEqual(report["pre_free_matches"], 3)
-        self.assertGreater(report["post_wipe_scan_bytes"], 0)
+        # Without a reclaimed control a zero leak count proves nothing, so an
+        # inconclusive run fails rather than skips: the supported toolchains
+        # (MinGW-w64 UCRT and glibc) hand the control block back.
+        self.assertEqual(
+            report["verdict"], "measured",
+            "the erasure was not measured (probes were distinct blocks: "
+            f"{report['probes_distinct']}, control marker survived: "
+            f"{report['control_reclaimed']})")
 
 
 # ---------------------------------------------------------------------------
@@ -1868,15 +1917,12 @@ class TestNpumdimg(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_npumdimg_"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.exe = build_tool()
         cls.entries = npumdimg_entries()
         cls.keyfile = cls.tmp / "np_keys.json"
         write_keyfile(cls.keyfile, cls.entries)
         cls.iso = build_tiny_iso(cls.DISC)
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def _run(self, name: str, pbp: bytes, *extra: str, keyfile: Path | None = None):
         src = self.tmp / f"{name}.PBP"
@@ -1884,9 +1930,9 @@ class TestNpumdimg(unittest.TestCase):
         src.write_bytes(pbp)
         dst.unlink(missing_ok=True)
         keys = ("--key-file", str(keyfile if keyfile is not None else self.keyfile))
-        out = subprocess.run([str(self.exe), "npumdimg", *keys, *extra,
-                              "--in", str(src), "--out", str(dst)],
-                             capture_output=True, text=True)
+        out = run_bounded([str(self.exe), "npumdimg", *keys, *extra,
+                           "--in", str(src), "--out", str(dst)],
+                          capture_output=True, text=True)
         self.assertFalse(Path(str(dst) + ".converting").exists(),
                          "a partial image was left behind")
         return out, dst
@@ -2025,6 +2071,16 @@ class TestNpumdimg(unittest.TestCase):
         self._refused(out, dst, 4, "MALFORMED_INPUT")
 
 
+# The clear text of the well-formed coded stream the LZRC corpus below mutates
+# (synthetic bytes; lzrc_literals encodes them).
+_LZRC_SEED_CLEAR = bytes(range(0x20, 0x60)) * 2 + b"NK295 synthetic literals. " * 6
+
+
+def _c_bytes(data: bytes) -> str:
+    """``data`` as the body of a C array initialiser."""
+    return ", ".join(str(byte) for byte in data)
+
+
 # The DRM BB fuse-ID types and the LZRC decoder's bounds, through the C API.
 _AMCTRL_HARNESS_C = r"""
 #include <stdio.h>
@@ -2037,6 +2093,14 @@ _AMCTRL_HARNESS_C = r"""
 
 #define GUARD 64
 #define CAP 4096
+#define STREAMS 20000
+#define IN_MAX 512
+#define NO_ANSWER (-2) /* only the bounds are checked */
+
+/* A well-formed coded stream and the bytes it decodes to. */
+static const unsigned char seed[] = {@LZRC_SEED@};
+static const unsigned char seed_clear[] = {@LZRC_SEED_CLEAR@};
+typedef char seed_fits_the_input_buffer[sizeof(seed) <= IN_MAX ? 1 : -1];
 
 static unsigned long long rng = 0x5EED2951u;
 static unsigned rnd(void) {
@@ -2050,8 +2114,9 @@ int main(void) {
     CIPHER_KEY cipher;
     unsigned char key16[16] = {0};
     unsigned char *out = malloc(CAP + 2 * GUARD);
-    unsigned char in[512];
+    unsigned char in[IN_MAX];
     int mac2, cipher2, mac1, mode1, worst = 0, overruns = 0, accepted = 0;
+    int stored_ok = 0, coded_ok = 0, wrong = 0;
     nk_psp_ctx_init(&ctx, NULL);
     mac2 = sceDrmBBMacInit(&ctx, &mac, 2);
     printf("mac2 %s %s\n", nk_psp_status_name(mac2), ctx.message);
@@ -2065,37 +2130,96 @@ int main(void) {
     mode1 = sceDrmBBCipherInit(&ctx, &cipher, 1, 1, key16, NULL, 0);
     printf("encrypt %s\n", nk_psp_status_name(mode1));
     if (out == NULL) return 2;
-    for (int iter = 0; iter < 20000; iter++) {
+    for (int iter = 0; iter < STREAMS; iter++) {
         size_t in_len = (size_t)(rnd() % sizeof(in));
         size_t out_len = (size_t)(rnd() % CAP);
-        int got;
+        const unsigned char *clear = NULL;
+        int got, want = NO_ANSWER;
         for (size_t i = 0; i < in_len; i++) in[i] = (unsigned char)rnd();
-        if (in_len > 0 && (iter & 1)) in[0] &= 0x7F; /* mostly coded streams */
+        switch (iter & 3) {
+        case 0: /* random bytes: half of them stored streams with a random 32-bit size */
+            break;
+        case 1: /* random bytes as a coded stream */
+            if (in_len > 0) in[0] &= 0x7F;
+            break;
+        case 2: /* a stored stream whose declared size is under, at or one past what fits */
+            if (in_len >= 5) {
+                size_t body = in_len - 5;
+                size_t declared = (size_t)(rnd() % (body + 2));
+                if (rnd() & 1) out_len = (size_t)(rnd() % (body + 2));
+                in[0] |= 0x80;
+                in[1] = 0;
+                in[2] = 0;
+                in[3] = (unsigned char)(declared >> 8);
+                in[4] = (unsigned char)declared;
+                want = (declared <= body && declared <= out_len) ? (int)declared : -1;
+                clear = in + 5;
+            }
+            break;
+        default: /* the well-formed coded stream: whole, short of room, cut short, bits flipped */
+            memcpy(in, seed, sizeof(seed));
+            in_len = sizeof(seed);
+            switch (rnd() % 4) {
+            case 0:
+                out_len = sizeof(seed_clear) + (size_t)(rnd() % GUARD);
+                want = (int)sizeof(seed_clear);
+                clear = seed_clear;
+                break;
+            case 1:
+                out_len = (size_t)(rnd() % sizeof(seed_clear));
+                want = -1;
+                break;
+            case 2:
+                in_len = (size_t)(rnd() % sizeof(seed));
+                break;
+            default:
+                for (unsigned flips = 1 + rnd() % 3; flips > 0; flips--)
+                    in[rnd() % sizeof(seed)] ^= (unsigned char)(1u << (rnd() % 8));
+                break;
+            }
+            break;
+        }
         memset(out, 0xA5, CAP + 2 * GUARD);
         got = nk_psp_lzrc_decompress(out + GUARD, out_len, in, in_len);
         if (got > (int)out_len) worst = got;
-        if (got >= 0) accepted++;
+        if (got >= 0) {
+            accepted++;
+            if (in[0] & 0x80) stored_ok++; else coded_ok++;
+        }
+        if (want != NO_ANSWER &&
+            (got != want || (want > 0 && memcmp(out + GUARD, clear, (size_t)want) != 0)))
+            wrong++;
         for (size_t i = 0; i < GUARD; i++) {
             if (out[i] != 0xA5 || out[GUARD + out_len + i] != 0xA5) { overruns++; break; }
         }
     }
-    printf("lzrc accepted=%d past_len=%d overruns=%d\n", accepted, worst, overruns);
+    printf("lzrc streams=%d accepted=%d stored_ok=%d coded_ok=%d wrong=%d past_len=%d overruns=%d\n",
+           STREAMS, accepted, stored_ok, coded_ok, wrong, worst, overruns);
     free(out);
     return 0;
 }
-"""
+""".replace("@LZRC_SEED@", _c_bytes(lzrc_literals(_LZRC_SEED_CLEAR))).replace(
+    "@LZRC_SEED_CLEAR@", _c_bytes(_LZRC_SEED_CLEAR))
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestAmctrlAndLzrcBounds(unittest.TestCase):
     """The fuse-ID DRM types are refused as CONTEXT_REQUIRED, and malformed LZRC
-    streams fail closed without writing outside the caller's buffer."""
+    streams fail closed without writing outside the caller's buffer.
+
+    The LZRC corpus is 20,000 streams of four kinds: random bytes, random bytes
+    as a coded stream, stored streams whose declared size is under, at or one
+    past what the input and the output hold, and one well-formed coded stream
+    taken whole, with too little room, cut short or with flipped bits.  Random
+    bytes alone never reach an accepting path: a coded stream is accepted only at
+    its end marker, and a stored one only when its declared size fits."""
 
     @classmethod
     def setUpClass(cls):
         from tools.nk_core import decrypt_tool
 
         cls.tmp = Path(tempfile.mkdtemp(prefix="nk_psp_amctrl_"))
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         source = cls.tmp / "amctrl_harness.c"
         source.write_text(_AMCTRL_HARNESS_C, encoding="utf-8")
         exe = cls.tmp / "amctrl_harness.exe"
@@ -2104,13 +2228,9 @@ class TestAmctrlAndLzrcBounds(unittest.TestCase):
         cmd.extend(str(ROOT / rel) for rel in decrypt_tool.SOURCES
                    if not rel.endswith("nk_decrypt_main.c"))
         cmd.extend(["-o", str(exe)])
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = run_bounded(cmd, timeout=COMPILE_TIMEOUT_S, capture_output=True, text=True)
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        cls.out = subprocess.run([str(exe)], capture_output=True, text=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
+        cls.out = run_bounded([str(exe)], capture_output=True, text=True)
 
     def test_fuse_id_types_need_the_console(self):
         self.assertEqual(self.out.returncode, 0, self.out.stdout + self.out.stderr)
@@ -2129,6 +2249,16 @@ class TestAmctrlAndLzrcBounds(unittest.TestCase):
         fields = dict(item.split("=") for item in report.split()[1:])
         self.assertEqual(fields["past_len"], "0")
         self.assertEqual(fields["overruns"], "0")
+        # The bound checks mean something only if the corpus reaches the decoder's
+        # rejecting path and both of its accepting paths (a stored copy, a coded
+        # stream's end marker), and an accepted stream is one it decoded: where
+        # the answer is known, the size and the bytes are the expected ones.
+        accepted = int(fields["accepted"])
+        self.assertGreater(accepted, 0, report)
+        self.assertLess(accepted, int(fields["streams"]), report)
+        self.assertGreater(int(fields["stored_ok"]), 0, report)
+        self.assertGreater(int(fields["coded_ok"]), 0, report)
+        self.assertEqual(fields["wrong"], "0", report)
 
     def test_the_literal_writer_round_trips_through_the_decoder(self):
         from tools.nk_core import decrypt_tool
@@ -2158,23 +2288,63 @@ int main(int argc, char **argv) {
 }
 """, encoding="utf-8")
         exe = self.tmp / "lzrc_roundtrip.exe"
-        proc = subprocess.run([CC, "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
-                               str(harness), str(ROOT / "src" / "core" / "nk_psp_lzrc.c"),
-                               "-o", str(exe)], capture_output=True, text=True)
+        proc = run_bounded([CC, "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+                            str(harness), str(ROOT / "src" / "core" / "nk_psp_lzrc.c"),
+                            "-o", str(exe)], timeout=COMPILE_TIMEOUT_S,
+                           capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("src/core/nk_psp_lzrc.c", decrypt_tool.SOURCES)
         clear = bytes(3000) + bytes(range(256)) * 4 + b"NK295" * 40
         stream = self.tmp / "stream.bin"
         result = self.tmp / "stream.out"
         stream.write_bytes(lzrc_literals(clear))
-        out = subprocess.run([str(exe), str(stream), str(len(clear)), str(result)],
-                             capture_output=True)
+        out = run_bounded([str(exe), str(stream), str(len(clear)), str(result)],
+                          capture_output=True)
         self.assertEqual(out.returncode, 0, out.stdout)
         self.assertEqual(result.read_bytes(), clear)
         # One byte short of room: the decoder refuses rather than truncating.
-        out = subprocess.run([str(exe), str(stream), str(len(clear) - 1), str(result)],
-                             capture_output=True)
+        out = run_bounded([str(exe), str(stream), str(len(clear) - 1), str(result)],
+                          capture_output=True)
         self.assertEqual(out.returncode, 1, out.stdout)
+
+    def test_stored_stream_that_overstates_its_size_fails(self):
+        """A stored (plain-text) stream is a 0x80 flag byte, a big-endian length and the
+        bytes. One whose length passes its input or the output is refused, never cut
+        short and returned as a decoded block."""
+        harness = self.tmp / "lzrc_stored.c"
+        harness.write_text(r"""
+#include <stdio.h>
+#include <string.h>
+#include "nk_psp_lzrc.h"
+static int run(unsigned declared, size_t body, size_t out_len) {
+    static unsigned char in[5 + 256], out[256];
+    in[0] = 0x80;
+    in[1] = (unsigned char)(declared >> 24); in[2] = (unsigned char)(declared >> 16);
+    in[3] = (unsigned char)(declared >> 8);  in[4] = (unsigned char)declared;
+    for (size_t i = 0; i < body; i++) in[5 + i] = (unsigned char)(i * 7u + 1u);
+    memset(out, 0, sizeof(out));
+    int got = nk_psp_lzrc_decompress(out, out_len, in, 5 + body);
+    if (got > 0 && memcmp(out, in + 5, (size_t)got) != 0) return -2;
+    return got;
+}
+int main(void) {
+    printf("exact %d\n", run(100, 100, 100));
+    printf("short_input %d\n", run(200, 100, 256));
+    printf("short_output %d\n", run(100, 100, 64));
+    return 0;
+}
+""", encoding="utf-8")
+        exe = self.tmp / "lzrc_stored.exe"
+        proc = subprocess.run([CC, "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+                               str(harness), str(ROOT / "src" / "core" / "nk_psp_lzrc.c"),
+                               "-o", str(exe)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        got = dict(line.split(" ", 1) for line in out.stdout.splitlines())
+        self.assertEqual(got["exact"], "100")
+        self.assertEqual(got["short_input"], "-1")
+        self.assertEqual(got["short_output"], "-1")
 
 
 if __name__ == "__main__":

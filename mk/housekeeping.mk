@@ -135,7 +135,7 @@ PROJECT_JAPANESE_FONT_ARGS := --ppem 18 --nominal-size 648 --resolution 8192 --h
 PROJECT_KOREAN_FONT_ARGS := --ppem 20 --tracking 1 --nominal-size 648 --resolution 8192 --header-ascender 1000 --header-descender -250
 NOTO_SANS_JP := assets/fonts/ui/noto-sans-jp
 project-japanese-font: $(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf
-$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf: $(NOTO_SANS_JP)/NotoSansJP-Regular.ttf tests/fixtures/fonts/notosansjp/PIN.json $(NOTO_SANS_JP)/OFL.txt tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf tests/fixtures/fonts/mplus1p/PIN.json tests/fixtures/fonts/mplus1p/OFL.txt tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md
+$(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf: $(NOTO_SANS_JP)/NotoSansJP-Regular.ttf tests/fixtures/fonts/notosansjp/PIN.json $(NOTO_SANS_JP)/OFL.txt tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf tests/fixtures/fonts/mplus1p/PIN.json tests/fixtures/fonts/mplus1p/OFL.txt tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk
 	@"$(PYTHON)" -c "from pathlib import Path; Path('$(PROJECT_FONT_GENERATED_DIR_PY)').mkdir(parents=True, exist_ok=True)"
 	"$(PYTHON)" tools/ttf2pgf.py "$@" "$(NOTO_SANS_JP)/NotoSansJP-Regular.ttf" --pin tests/fixtures/fonts/notosansjp/PIN.json --fallback tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf --fallback-pin tests/fixtures/fonts/mplus1p/PIN.json --japanese-text $(PROJECT_JAPANESE_FONT_ARGS) --font-name "Nakagawa Open Japanese" --font-type "Regular" --manifest "$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn.json"
 	"$(PYTHON)" -c "from pathlib import Path; parts = [Path(p).read_text(encoding='utf-8') for p in ('$(NOTO_SANS_JP)/OFL.txt', 'tests/fixtures/fonts/mplus1p/OFL.txt')]; Path('$(PROJECT_FONT_GENERATED_DIR_PY)/nkjpn-OFL.txt').write_text('Noto Sans JP:\n\n' + parts[0] + '\n\nM PLUS 1p (U+2252 only):\n\n' + parts[1], encoding='utf-8')"
@@ -165,8 +165,13 @@ $(BUILD_DIR)/nk_android_title.o: android/app/src/main/cpp/nk_android_title.c $(R
 clean:
 	"$(PYTHON)" -c "import shutil, sys; from pathlib import Path; p = Path(r'$(BUILD_DIR)'); [shutil.rmtree(p) if p.is_dir() else p.unlink()] if p.exists() else None"
 
-# The shared fixture trees clean-fixtures removes, all beneath BUILD_ROOT.
-CLEAN_FIXTURE_DIRS := $(PRODUCTION_SMOKE_DIR) $(PRODUCTION_SMOKE_GAP_DIR) $(COSIM_DIR) \
+# The shared fixture trees clean-fixtures removes, all beneath BUILD_ROOT: the smoke gates
+# (production, gap, display, platform ladder), the cosimulation corpus and each of its lanes
+# (mk/cosim_snapshot.mk), the snapshot runner, the form sweep, the oracles and verify. A gate
+# that adds a fixture tree beneath BUILD_ROOT adds it here.
+CLEAN_FIXTURE_DIRS := $(PRODUCTION_SMOKE_DIR) $(PRODUCTION_SMOKE_GAP_DIR) $(DISPLAY_SMOKE_DIR) \
+	$(PLATFORM_LADDER_DIR) $(COSIM_DIR) $(COSIM_DIR)-split $(SNAPSHOT_DIR) $(FORM_SWEEP_ROOT) \
+	$(addprefix $(BUILD_ROOT)/,cosim-opt cosim-llvm cosim-llvm-mutants cosim-promoted cosim-resume) \
 	$(addprefix $(BUILD_ROOT)/,nakagawa_psp_oracle vfpu_oracle portable-core verify link)
 
 # The ephemeral build and run logs distclean and clean-all remove from LOG_DIR (the set
@@ -190,10 +195,12 @@ clean-all: clean clean-fixtures
 	$(REMOVE_EPHEMERAL_LOGS)
 
 # Preview-first workspace clean (issue #368): plans allowlisted output roots and
-# prints the exact file set. Deletion requires CONFIRM=1 (which passes --yes);
-# OLDER_THAN=<days> bounds the plan by file age. Existing clean targets are untouched.
+# prints the exact file set. Deletion requires CONFIRM=1 on the make command line (which
+# passes --yes; a CONFIRM inherited from the environment does not count); INCLUDE_TITLE=1
+# passes --include-title-outputs; OLDER_THAN=<days> bounds the plan by file age. Existing
+# clean targets are untouched.
 clean-preview:
-	"$(PYTHON)" tools/nk_clean.py $(if $(filter 1,$(CONFIRM)),--yes,) $(if $(strip $(OLDER_THAN)),--older-than $(OLDER_THAN),)
+	"$(PYTHON)" tools/nk_clean.py $(if $(and $(filter command line,$(origin CONFIRM)),$(filter 1,$(CONFIRM))),--yes,) $(if $(filter 1,$(INCLUDE_TITLE)),--include-title-outputs,) $(if $(strip $(OLDER_THAN)),--older-than $(OLDER_THAN),)
 
 # sched-selftest — white-box scheduler/lifecycle unit tests (tests/native/sched_selftest.c).
 # No game inputs needed; #includes sched.c for direct access to pick_next()/TCB state and

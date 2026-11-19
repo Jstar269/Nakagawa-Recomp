@@ -80,7 +80,9 @@ NkXbLimits nk_xb_default_limits(void);
 
 /* Open an archive from a file or from a copied in-memory buffer. The parser
  * validates every FST row, string-table name, data span, and compressed header
- * before returning NK_OK. */
+ * before returning NK_OK. nk_xb_open_file_lazy loads only the metadata and holds
+ * no payload bytes, so it checks each compressed member's header on that member's
+ * reads instead, with the same rules and text, before decoding it. */
 NkResult nk_xb_open_file(const char *path, bool big_endian,
                          const NkXbLimits *limits, NkXbArchive *out_archive,
                          char *error_message, size_t error_message_size);
@@ -115,7 +117,9 @@ typedef bool (*NkXbProgressCallback)(const NkXbEntry *entry,
 /* Decode every member in one archive into destination_root. Member paths are
  * normalized by the parser and are never re-derived by the writer. The caller
  * owns transaction-level staging; this function never follows archive paths
- * outside destination_root. */
+ * outside destination_root. Before writing anything it refuses, on every host, a
+ * member name Windows would alias (a component ending in a dot or a space, or a
+ * device name such as NUL or COM1) and two names that differ only in ASCII case. */
 NkResult nk_xb_unpack(const char *archive_path, const char *destination_root,
                       NkXbProgressCallback progress, void *userdata,
                       char *error_message, size_t error_message_size);

@@ -148,16 +148,16 @@ cosim-selftest-clean:
 #
 # The runner links recomp.c with SR_GATE_BUILD, which leaves sr_raw_syscall to the
 # harness exactly as tools/codegen_gate.py does: the runner's definition ends the run at
-# a raw syscall instead of running it. The reference interpreter carries its own
-# sr_bitrev (src/ref/interp.cpp); it is renamed in that one object so it links beside the
-# runtime's definition and the reference keeps using its own. The runner links no SDL, so
-# its copy of recomp.c reads SDL_GetTicksNS under a name the runner defines.
+# a raw syscall instead of running it. The reference interpreter keeps its own bitrev
+# (BitReverse in src/ref/interp.cpp) inside its object, so it links beside the runtime's
+# sr_bitrev without a rename. The runner links no SDL, so its copy of recomp.c reads
+# SDL_GetTicksNS under a name the runner defines.
 SNAPSHOT_DIR      := $(BUILD_ROOT)/snapshot
 SNAPSHOT_FIXTURE   := $(SNAPSHOT_DIR)/fixture
 SNAPSHOT_GENERATOR := tests/fixtures/snapshot/generate.py
 SNAPSHOT_DRIVER    := tests/fixtures/snapshot/selftest.py
 SNAPSHOT_BASE_ADDR := 0x08A00000
-SNAPSHOT_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -Dsr_bitrev=sr_ref_bitrev
+SNAPSHOT_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions
 SNAPSHOT_RUNNER_SRCS := src/rt/snapshot_runner.c src/rt/nksnap.c src/rt/guest_interp.c \
 	src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/cpu_lle.c src/rt/domain_mode.c \
 	src/rt/stale_code.c src/rt/title_config.c src/rt/vfpu_tables.c src/rt/vfpu_interp.c \
@@ -174,7 +174,9 @@ snapshot-selftest:
 	$(MAKE) snapshot-selftest-run $(SNAPSHOT_GAME_VARS)
 
 # Second phase: CHUNK_OBJS and the mutant's chunk exist only after codegen ran.
-SNAPSHOT_MUTANT_CHUNK = $(shell "$(PYTHON)" $(SNAPSHOT_DRIVER) find-chunk --build-dir $(BUILD_DIR) --game $(GAME_NAME) --cases $(SNAPSHOT_FIXTURE)/cases.json)
+# The chunk is looked up on first use and kept: the recipe names it four times, and one
+# lookup means every line mutates and filters the same chunk.
+SNAPSHOT_MUTANT_CHUNK = $(eval SNAPSHOT_MUTANT_CHUNK := $(shell "$(PYTHON)" $(SNAPSHOT_DRIVER) find-chunk --build-dir $(BUILD_DIR) --game $(GAME_NAME) --cases $(SNAPSHOT_FIXTURE)/cases.json))$(SNAPSHOT_MUTANT_CHUNK)
 SNAPSHOT_MUTANT_DIR = $(BUILD_DIR)/mutant
 SNAPSHOT_LINK_OBJS = $(BUILD_DIR)/snapshot_rt_recomp.o $(LIBRARY_OBJS) \
 	$(BUILD_DIR)/$(GAME_NAME)_recomp.o $(BUILD_DIR)/snapshot_ref_interp.o \
@@ -228,7 +230,7 @@ FORM_SWEEP_CODEGEN_ARGS ?=
 FORM_SWEEP_ROOT   := $(BUILD_ROOT)/form-sweep
 FORM_SWEEP_BASE_ADDR := 0x08C00000
 FORM_SWEEP_TOOL   := tools/form_sweep.py
-FORM_SWEEP_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions -Dsr_bitrev=sr_ref_bitrev
+FORM_SWEEP_REF_FLAGS := -std=c++17 -O1 -Isrc/ref -Isrc/rt -fno-exceptions
 FORM_SWEEP_SRCS   := src/rt/form_sweep.c src/rt/nksnap.c src/rt/guest_interp.c \
 	src/rt/sr_coro.c src/rt/flight_recorder.c src/rt/cpu_lle.c src/rt/domain_mode.c \
 	src/rt/stale_code.c src/rt/title_config.c src/rt/vfpu_tables.c src/rt/vfpu_interp.c \
@@ -297,7 +299,7 @@ form-sweep-deep:
 # The hooks are the same C the default build compiles, behind SR_VERIFY: recomp.c's
 # preprocessed text without the flag must contain no sr_verify token, so the default
 # build's runtime objects cannot differ. Everything here links the same isolated runtime
-# as the snapshot gate (see above for SR_GATE_BUILD, sr_bitrev and SDL_GetTicksNS).
+# as the snapshot gate (see above for SR_GATE_BUILD and SDL_GetTicksNS).
 VERIFY_DIR       := $(BUILD_ROOT)/verify
 VERIFY_FIXTURE   := $(VERIFY_DIR)/fixture
 VERIFY_GENERATOR := tests/fixtures/verify/generate.py
@@ -317,7 +319,8 @@ verify-selftest:
 		$(VERIFY_GAME_VARS) CODEGEN_TOOL=$(CODEGEN_TOOL)
 	$(MAKE) verify-selftest-run $(VERIFY_GAME_VARS) RECOMP_FLAGS="$(RECOMP_FLAGS) -DSR_VERIFY"
 
-VERIFY_MUTANT_CHUNK = $(shell "$(PYTHON)" $(VERIFY_DRIVER) find-chunk --build-dir $(BUILD_DIR) --game $(GAME_NAME) --cases $(VERIFY_FIXTURE)/cases.json)
+# Looked up on first use and kept, as SNAPSHOT_MUTANT_CHUNK is.
+VERIFY_MUTANT_CHUNK = $(eval VERIFY_MUTANT_CHUNK := $(shell "$(PYTHON)" $(VERIFY_DRIVER) find-chunk --build-dir $(BUILD_DIR) --game $(GAME_NAME) --cases $(VERIFY_FIXTURE)/cases.json))$(VERIFY_MUTANT_CHUNK)
 VERIFY_MUTANT_DIR = $(BUILD_DIR)/mutant
 VERIFY_LINK_OBJS = $(BUILD_DIR)/verify_rt_recomp.o $(LIBRARY_OBJS) \
 	$(BUILD_DIR)/$(GAME_NAME)_recomp.o $(BUILD_DIR)/verify_ref_interp.o \

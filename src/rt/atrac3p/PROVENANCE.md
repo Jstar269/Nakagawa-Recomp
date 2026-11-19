@@ -13,9 +13,35 @@ cores are imported from FFmpeg; thin C APIs written for this project wrap them.
   "RELEASE_NOTES: Based on the version from 4.3"). All blob SHAs in the
   manifest below are resolved as `n4.4:<path>` against that commit's tree.
   Vintage note: the PPSSPP standalone fork era that motivated the pin is dated
-  ~2021-11-19 (pre-av_tx, classic `FFTContext`); the codec files themselves
-  received no commits between the n4.4 tag and that date, so the n4.4 tree is
-  byte-verified and self-consistent.
+  ~2021-11-19 (pre-av_tx, classic `FFTContext`). The n4.4 tree is not that
+  fork's exact vintage: FFmpeg `master` holds commits to the imported files
+  that the n4.4 tag lacks (corrected 2026-11-17, measured over every
+  `imported` row of the manifest below with
+  `git log n4.4..origin/master --until=2021-11-20 -- <paths>`; dates are
+  commit dates). On the imported `libavcodec` files that is 71 commits: 62
+  touch `libavcodec/version.h` (version bumps, one of them also below), and
+  these ten touch the other codec files:
+  `e7cbbd9026` ("avcodec/put_bits: Don't set size_in_bits, fix overflow",
+  2021-03-30; `put_bits.h`), `11ff9cb5e9` ("avcodec/put_bits: Add functions
+  for amount of bytes written/left", 2021-03-30; `put_bits.h`),
+  `c197e3fe12` ("avcodec/bitstream: Remove avpriv PutBits API functions",
+  2021-04-27; `bitstream.c`, `put_bits.h`, `version.h`), `a247ac640d`
+  ("avcodec: Constify AVCodecs", 2021-04-27; `atrac3.c`,
+  `atrac3plusdec.c`), `c28823ff97` ("lavc/get_bits: avoid avcodec.h
+  dependency", 2021-06-10; `get_bits.h`), `25c8507818` ("Remove/replace
+  some unnecessary avcodec.h inclusions", 2021-07-22; `atrac.c`,
+  `bitstream.c`), `763c501432` ("avcodec/fft-internal: Remove unused
+  macros", 2021-08-05; `fft-internal.h`), `211619ad7f` ("avcodec: Remove the
+  FFT_FIXED_32 define", 2021-08-05; `fft.h`, `fft_float.c`,
+  `fft_template.c`, `fft-internal.h`, `mdct_float.c`, `mdct_template.c`),
+  `a449fb35ca` ("avcodec/fft-internal: Make it a standalone header",
+  2021-08-05; `fft-internal.h`) and `1ea3650823` ("Replace all occurences of
+  av_mallocz_array() by av_calloc()", 2021-09-20; `atrac3.c`,
+  `atrac3plusdec.c`). The imported `libavutil` files changed too: 43
+  commits in the same range touch them (`mem.c`, `common.h`, `log.h` and
+  others); they are not listed here. None of these commits is imported:
+  every file is taken from the n4.4 tree, and the byte verification below
+  rests on the n4.4 blob SHAs alone.
 - License: LGPL-2.1-or-later (see `LICENSE.LGPLv2.1.txt`, imported from
   `COPYING.LGPLv2.1` at the same pin; upstream blob
   `58af0d3787aec7d6f8d833535d64879156e7ec23`)
@@ -94,15 +120,24 @@ Legend:
 | `libavutil/macros.h` | imported byte-identical | `2007ee5619871558dd07cd516ca77324dcf75940` |
 | `libavutil/mathematics.h` | AUTHORED stand-in (upstream name exists) | `54901800ba6ad22fd33d6c8595400d378c7429ca` |
 | `libavutil/mem.c` | imported byte-identical | `cfb6d8ab8ffa6c6d51f325d4d8bbe7dc0922871f` |
-| `libavutil/mem.h` | imported byte-identical | `e21a1feaaeab14d21ef93e3053e2de6b04b4097b` |
+| `libavutil/mem.h` | imported + LOCAL DELTA | `e21a1feaaeab14d21ef93e3053e2de6b04b4097b` |
 | `libavutil/mem_internal.h` | imported byte-identical | `ee2575c85f9cd04a1d9c4f483dfc02fb598f09f4` |
 | `libavutil/qsort.h` | imported byte-identical | `39b7a088520a61a87c1565474cb4b32ea6ce766a` |
 | `libavutil/reverse.c` | imported byte-identical | `105eb03dda4c30952541347c6e6f7f2feb4f2f30` |
 | `libavutil/reverse.h` | imported byte-identical | `4eb61239328120bb77ae3ebc34f4f911ad51936b` |
 | `libavutil/thread.h` | AUTHORED stand-in (upstream name exists) | `be5c4b1340e7ad7b1bef227a44b78af44809c227` |
 | `libavutil/version.h` | imported byte-identical | `f888dbb2dc12e3f7180fe4ec639b453d924272e0` |
+| `LICENSE.LGPLv2.1.txt` | imported byte-identical (`COPYING.LGPLv2.1`) | `58af0d3787aec7d6f8d833535d64879156e7ec23` |
 
 ## LOCAL DELTAs (imported files with local modification)
+
+Each file below keeps its upstream licence header unchanged and carries, just
+under it, the dated notice `Modified by Nakagawa Recomp contributors, <date>.`
+(LGPL-2.1 section 2(a)); its changes are marked `LOCAL DELTA` in the file. The
+notices were added on 2026-11-17 and date each file's changes: `atrac3.c`
+2026-10-20 (the plain AT3 import, #1109) and 2026-11-17, `atrac3plus.c` and `sinewin.c`
+2026-08-11 (the first public release), `atrac3plusdec.c` 2026-08-11 and
+2026-11-17.
 
 ### `libavcodec/atrac3.c`
 
@@ -116,7 +151,11 @@ Legend:
   its layout.
 - The unused FFmpeg `AVFrame`/`AVPacket` decode wrappers and decoder registry
   entries are disabled, matching the standalone subset pattern in
-  `atrac3plusdec.c`.
+  `atrac3plusdec.c`. They are only wrapped in `#if 0` ... `#endif` (each
+  block marked `LOCAL DELTA` at its `#if 0`); the code inside is the upstream
+  n4.4 bytes. (2026-11-17: the disabled `atrac3_decode_frame()` wrapper had lost
+  two upstream comments, some blank lines and its `"Frame decoding error!"`
+  log; those upstream bytes are restored.)
 
 ### `libavcodec/atrac3plus.c`
 
@@ -139,17 +178,33 @@ Legend:
   so the API consumer can size `priv_data` without including this private
   header.
 - `atrac3p_init()`: exported initializer (upstream `atrac3p_decode_init()` was
-  `static av_cold`).
+  `static av_cold`). It also checks the IPQF transform's
+  `ff_mdct_init(&ctx->ipqf_dct_ctx, 5, 1, 32.0 / 32768.0)`, whose result
+  upstream ignores, and returns `AVERROR(ENOMEM)` when it fails, so
+  `atrac3p_create()` fails. The second transform (`ctx->mdct_ctx`, through the
+  `void` `ff_atrac3p_init_imdct()`) is still unchecked, as upstream.
 - `atrac3p_close()`: exported destructor, now `void` (upstream
   `atrac3p_decode_close()` was `static` returning `int`; it always succeeded).
 - `atrac3p_decode_frame()`: rewritten entry point. Upstream signature takes
   `AVFrame`/`AVPacket` and calls `ff_get_buffer()`; this subset writes planar
   float PCM into caller buffers (`out[ATRAC3P_MAX_CHANNELS]`), reports
   `*nb_samples`, zeroed on entry and set to `ATRAC3P_FRAME_SAMPLES` only on
-  success (independent implementation of the PPSSPP hardening in PPSSPP
-  commit `39b884cfb357`; PPSSPP is used as comparative evidence only), and
-  returns `FFMIN(block_align, buf_size)` consumed bytes or a negative
-  `AVERROR`.
+  success, and returns `FFMIN(block_align, buf_size)` consumed bytes or a
+  negative `AVERROR`. This shape (the plane-output signature, `*nb_samples = 0`
+  on entry in place of `ff_get_buffer()`, `*nb_samples = ATRAC3P_FRAME_SAMPLES`
+  in place of `*got_frame_ptr = 1`, and the `FFMIN` return without the
+  upstream ATRAC3PAL `avpkt->size` branch) follows PPSSPP commit
+  `39b884cfb35724ecd977901ecf6921f120e06573` ("Atrac3/3+: Improve error
+  handling"), `ext/at3_standalone/atrac3plusdec.cpp`, which is itself
+  FFmpeg-derived LGPL code. It is comparative source, not PSP measurement.
+- `atrac3p_decode_frame()` (2026-11-17): after the channel-unit loop, the
+  output planes that no unit of the frame wrote are cleared. A frame may end
+  at `CH_UNIT_TERMINATOR` before every channel block has a unit; the loop
+  writes only the planes of the units it decoded, and the API converts every
+  plane, so those planes used to report the previous frame's PCM (also after
+  `atrac3p_reset()`). They now report silence. The PSP's result for such a
+  frame is `NOT_MEASURED`; `tests/native/atrac3p_selftest.c`
+  (`test_short_frame_does_not_repeat_pcm`) is the regression.
 - `atrac3p_flush_context()`: exported state reset, Nakagawa-authored. Upstream
   FFmpeg n4.4 has no flush path and PPSSPP's `atrac3p_flush()` is an empty
   stub. The implementation zeroes all per-frame and cross-frame history state
@@ -176,7 +231,11 @@ contract:
   function pointers and crashes at RIP 0 — found by random-input fuzzing,
   2026-08-06), `CONFIG_SAFE_BITSTREAM_READER 1` (upstream configure default;
   keeps the bounds-checked bitreader), all arch/HAVE feature flags 0 except
-  `HAVE_MALLOC_H`/`HAVE_ALIGNED_MALLOC` (Win32 allocator path);
+  the allocator: on Windows `HAVE_ALIGNED_MALLOC 1` and `HAVE_MALLOC_H 1`
+  (`_aligned_malloc`), elsewhere `HAVE_POSIX_MEMALIGN 1` with the other two
+  0; `HAVE_FAST_CLZ`, `HAVE_FAST_64BIT` and `HAVE_LOCAL_ALIGNED`, which
+  imported files test with `#if`, are defined 0 explicitly (2026-11-17;
+  before that they were undefined, which `#if` also reads as 0);
   `FF_MEMORY_POISON 0x2a` (upstream n4.4 `mem.c` lines 129/334 uses it but
   only `libavutil/internal.h:88` defines it, which `mem.c` never includes —
   upstream fixed this in `0f78b26e9c`, 2024-03-28); `av_restrict` defined in
@@ -210,8 +269,33 @@ contract:
   forces `AV_CODEC_FLAG_BITEXACT`.
 - `atrac3p_api.c` — thin C wrapper: handle struct holds the `AVCodecContext`,
   planar float decode buffer, per-channel plane pointers, and a padded
-  scratch copy of the input frame; float→s16 conversion is
-  `av_clip_int16(lrintf(p * 32768.0f))`, interleaved into caller memory.
+  scratch copy of the input frame; the ATRAC3+ float→s16 conversion is
+  `atrac3p_pcm_sample()`, interleaved into caller memory. Since 2026-11-17
+  both conversions clamp the scaled float to [-32768, 32767] before
+  `lrintf()` and map NaN to 0: before that `av_clip_int16(lrintf(x))` was
+  applied to the raw product, and `lrintf()` is unspecified outside the range
+  of `long` (32 bits on Windows) and for inf/NaN, so out-of-range decoder
+  output gave 0 or wrapped instead of saturating
+  (`tests/native/atrac3p_selftest.c`, `test_pcm_saturation`).
+- `av_log()`/`av_vlog()` (also in `atrac3p_api.c`; upstream's live in the
+  unimported `libavutil/log.c`): since 2026-11-17 a message above
+  `AV_LOG_INFO` (upstream's default `av_log_level`) is dropped, so FFmpeg's
+  `AV_LOG_DEBUG` lines from `atrac3_decode_init()` no longer reach stderr on
+  every AT3 create and reset. Each kept call is one line, prefixed
+  `"atrac3p: "` (a trailing space included) and ended with a newline if
+  the format has none, written to stderr or to a sink installed with
+  `atrac3p_set_log_sink()`. Before that
+  the level was ignored and the format was written verbatim
+  (`test_decoder_log_lines`).
+- Ledger record: the public provenance ledger lists `atrac3p_api.c` and
+  `atrac3p_api.h` under the decoder import's trusted record
+  (`atrac3p-decoder-import`, class `upstream_derived`), the record they
+  were admitted with, not under a project-authored record of their own. The
+  `AUTHORED stand-in` kind in the manifest above describes their content (no
+  FFmpeg n4.4 counterpart); giving them their own project-authored record is
+  a maintainer admission step that has not been taken. The HLE bridge that
+  drives these APIs, `src/rt/atrac3p_bridge.c`/`.h`, does have its own
+  project-authored record (`atrac3p-bridge-hle`).
   Every public entry validates all arguments (including a NULL handle on
   `decode`, which previously dereferenced `h` before the check) before any
   dereference, so hostile callers get a clean `AVERROR(EINVAL)`.
@@ -226,11 +310,22 @@ contract:
   - `block_align` ≤ 4096: a project-authored bound on the scratch frame copy.
   The extension words [0-1], [2-5], [8-9] and [12-13] are not gates, matching
   upstream, because their PSP-visible values are `NOT_MEASURED`. It converts FFmpeg's 1024 planar float samples
-  per channel to interleaved s16; it never routes AT3 data through the ATRAC3+
-  context.
-- HLE's first-frame trimming from the RIFF `fact` delay remains
-  `NOT_MEASURED`; the full decoder frame is retained and the HLE emits one
-  diagnostic until a physical-PSP measurement establishes that behavior.
+  per channel to interleaved s16 with the opposite sign:
+  `atrac3_pcm_sample()` negates the float, scales it by 32768 and saturates
+  it like `atrac3p_pcm_sample()` above. The
+  negation is project-authored and MEASURED on a PSP-3000 (firmware 6.61,
+  #1096, probe `at3-decode`): the PSP decoder's waveform is FFmpeg's negated.
+  It never routes AT3 data through the ATRAC3+ context.
+- HLE's first-frame trimming from an 8-byte RIFF `fact` chunk's delay `d` is
+  MEASURED on a PSP-3000 (firmware 6.61, #1096, PSP-AT3-002
+  `at3-delay-sweep`) and lives in `src/rt/hle_audio_codec.c`
+  (`atrac3_first_frame_skip()`, `atrac3_first_frame_rule()`): for `d == 0`
+  or `955 <= d <= 1797` the first decode drops the leading
+  `(d + 69) mod 1024` samples of the first frame; for `1 <= d <= 954`
+  `sceAtracDecodeData` returns `0x80630002` with no samples; `d >= 1855` is
+  refused by `sceAtracSetData`. Delays `1798 .. 1854` (the measured length
+  rule is applied) and a 12-byte `fact` chunk (the full decoder frame is
+  kept) stay `NOT_MEASURED`, and the HLE reports `ATRAC3_NOT_MEASURED` once.
 
 ## Licensing notes
 
@@ -242,6 +337,18 @@ contract:
   per-file SPDX is preserved and deliberate. PGF/PGD licensing blockers
   for the separate PGF/font and PGD/amctrl surfaces do not apply to this
   FFmpeg-derived subtree.
+
+### `libavutil/mem.h`
+
+- `av_size_mult()`: replaced upstream's glibc-inspired trick with the
+  compiler's own `__builtin_mul_overflow()` where it exists (non-Intel GCC
+  5.1 or later, or any compiler whose `__has_builtin` reports it), and with
+  the division check `b > SIZE_MAX / a` otherwise (marked `LOCAL DELTA`). The
+  trick skipped the division whenever both operands were below sqrt(SIZE_MAX)
+  and then relied on `t / a != b`; the replacement decides every operand pair
+  directly. `*r` is still written only on success, as upstream had it: the
+  built-in stores its truncated product into a local, not into `*r`.
+  Modified 2026-11-17 by the Nakagawa Recomp authors.
 
 ## Verification
 
@@ -257,6 +364,14 @@ contract:
   hashes, and all four `LOCAL DELTA` rows differ from their upstream blobs as
   documented. Of the AT3 additions, `atrac3.c` is a `LOCAL DELTA` row and
   `atrac3data.h` and `bytestream.h` are byte-identical rows.
+- 2026-11-17: `LICENSE.LGPLv2.1.txt` became a manifest row, so the vendored
+  byte gate covers it; its `git hash-object` equals `n4.4:COPYING.LGPLv2.1`
+  (`58af0d3787aec7d6f8d833535d64879156e7ec23`).
 - The subset (16 translation units: `atrac3p_api.c` + 15 imported `.c`
   files) compiles with MinGW-w64 gcc `-std=c11 -O1 -Wall -Wextra` and the
   smoke driver passes create/garbage/decode/reset/flush/destroy checks.
+- 2026-11-17: `libavutil/mem.h` became a `LOCAL DELTA` row for its
+  `av_size_mult()` overflow check, so the current manifest has 45
+  `imported byte-identical` rows and five `LOCAL DELTA` rows. The 2026-10-20
+  note above records that run's counts (46 and four), not the current ones;
+  its byte-identical verifications still stand for the rows it covered.

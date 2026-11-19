@@ -59,7 +59,8 @@ enum {
     PLAYER_UI_TEST_ACTION_GAME_EXIT = -20261011,
     PLAYER_UI_TEST_ACTION_WAIT_UPDATE = -20261012,
     PLAYER_UI_TEST_ACTION_WAIT_LAID_OUT = -20261110,
-    PLAYER_UI_TEST_ACTION_WAIT_MUSIC = -20261112
+    PLAYER_UI_TEST_ACTION_WAIT_MUSIC = -20261112,
+    PLAYER_UI_TEST_ACTION_PICK_FILE = -20261117
 };
 
 #define UI_TEST_MAX_PACKAGE_STATUS_THREAD_CREATE_FAILURES 8
@@ -198,6 +199,12 @@ void player_ui_test_report_post_build_validation(int status, const char *reason,
 void player_ui_test_report_post_build_transition(PlayerApp *app, const char *disc_id,
                                                  int current_index);
 void player_ui_test_hold_disc_check(void);
+/* The host file picker, answered by the script's PICK_FILE=<path> the way SDL answers it: the
+   callback runs on a thread of its own, as SDL's dialog thread calls it on Windows. False, and
+   the picker stays open, until the script has picked a file. */
+bool player_ui_test_answer_picker(SDL_DialogFileCallback callback, void *userdata);
+/* A picked file reached the player's own handling; says whether that ran on the main thread. */
+void player_ui_test_report_pick_taken(const char *what);
 void player_ui_test_delay_screenshot(void);
 /* The raw NK_UI_TEST_SLOW_START_MS setting, or NULL. */
 const char *player_ui_test_slow_start_text(void);
@@ -312,6 +319,12 @@ static inline void player_ui_test_report_post_build_transition(PlayerApp *app,
     (void)app; (void)disc_id; (void)current_index;
 }
 static inline void player_ui_test_hold_disc_check(void) {}
+static inline bool player_ui_test_answer_picker(SDL_DialogFileCallback callback,
+                                                void *userdata) {
+    (void)callback; (void)userdata;
+    return false;
+}
+static inline void player_ui_test_report_pick_taken(const char *what) { (void)what; }
 static inline void player_ui_test_delay_screenshot(void) {}
 static inline const char *player_ui_test_slow_start_text(void) { return NULL; }
 static inline void player_ui_test_slow_start(const PlayerUiTestLaunch *launch) {

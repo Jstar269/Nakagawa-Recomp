@@ -50,6 +50,8 @@ Where this page and the code disagree, the code is current and this page is upda
 | `surface_high` | `#18202B` | chips, focused secondary button, focused row |
 | `line` | `#1C232D` | hairlines, card edges |
 | `line_strong` | `#2E3846` | control and chip borders, focused card edge |
+| `selected_neutral_edge` | `#6B7684` | edge of a current value marked without the accent (4.2:1 on the ground, 3.5:1 on `surface_high`) |
+| `selected_neutral_edge_dimmed` | `#576270` | that edge on a dimmed row, a step weaker (3.1:1 on the ground; 2.6:1 on `surface_high`, its own box, under 3:1 and accepted because a dimmed row is inert) |
 | `paper` | `#F5F7FA` | primary text |
 | `muted` | `#9AA4B2` | secondary text (7.6:1 on the ground) |
 | `dim` | `#6B7684` | disabled text and footnotes only (4.2:1, not for body text) |
@@ -121,7 +123,21 @@ Labels, chips and eyebrows are drawn in caps (`nk_ui_caps`); the words stay sent
   theme.
 - A focusable control calls `nk_ui_register_button` and, when focused, `nk_ui_focus_ring(ui, id, radius)`. A focused
   secondary button also fills with `surface_high`; a focused card's edge becomes `line_strong`.
-- Arrow keys move to the nearest control in that direction.
+- Arrow keys move to the nearest control in that direction. A control may name the control an Up and a Down move
+  from it land on instead (`nk_ui_register_button_between`, `nk_ui_button_between`; a tab of `nk_ui_section_tabs`
+  names its Down neighbour in `NkUiSection.down`), for a place where the nearest one by position is not the next
+  one to a person: a list of full-width rows under a strip of small tabs. Position measures to a control's middle,
+  so under a narrow tab a small button further down can be nearer than the full-width row just below the tab, and
+  a Down move would pass the whole list. A named neighbour wins over position and is taken even when its scroll
+  container has it out of view; the move then scrolls it in.
+- A control that a scroll container clips away whole is otherwise reached only from inside that container, whose
+  rows scroll it into view, never from a control outside it. A scroll container knows the one it sits in
+  (`NkUiFocusScroller.parent`), and a control in the inner one counts as inside the outer one: the last row of a
+  list in a page that scrolls reaches the button under the list while the page has that button out of view
+  (`test_nested_scrollers` in `tests/native/test_nk_ui_focus.c`).
+- A control made of several pointer targets (a row of values) registers the row as the focus stop and each target
+  with `NK_UI_BUTTON_POINTER_ONLY`: a press focuses a target and its release activates it, no move, Tab or first
+  focus lands on it, and the screen hands focus back to the row.
 - The pointer is the other way in: a press focuses the control under it, and the release on the same control
   activates it. Clay finds what is under the pointer from the last layout (`Clay_SetPointerState`, every frame),
   inside clip containers, so a control scrolled or clipped out of view takes no click, and only controls of the
@@ -139,8 +155,13 @@ A list longer than its room is a scroll container (`NkUiLayout.scroll`), scrolle
 (`Clay_UpdateScrollContainers`, every frame, with the time since the last one): a wheel notch over it moves it 48 px,
 three of its 16 px lines; a drag with the mouse held, or a finger, moves it with the pointer and a fling keeps going a
 moment; a drag that scrolls more than 8 px is no click on the control it started on. A control inside it that takes
-focus, by key, pad or pointer, is scrolled fully into view, by the least it takes. The launcher draws at 60 Hz while a
-list, or anything else, still moves (`player_ui_nk_wait_ms`) and waits for input again once it settles. A wheel over anything else is
+focus, by key, pad or pointer, is scrolled fully into view, by the least it takes. Where scroll containers nest (a
+list inside a page that scrolls, up to `NK_UI_FOCUS_SCROLL_DEPTH` deep) every container around the control scrolls,
+the innermost first, each to show what the one inside it shows of the control. A move is judged on the layout
+before it, and a page that describes its focused control changes height with the focus, so the two layouts after a
+focus change bring the focused control into view again where they put it (`NK_UI_FOCUS_REVEAL_FRAMES`). The
+launcher draws at 60 Hz while a list, or anything else, still moves (`player_ui_nk_wait_ms`) and waits for input
+again once it settles. A wheel over anything else is
 the screen's own: the library turns its page with it. Only the lines a long list shows are laid out, with spacers
 for the rest, so its length costs nothing (`test_scroll_container` in `tests/native/test_nk_ui_core.c`).
 
@@ -204,8 +225,16 @@ the window. A larger window keeps its density and gains room. Clay clips at most
 long text with `nk_ui_text_clamp` instead of clipping it, but only text the player can read whole another way (a
 value with its own editor or detail page); text with no other place to be read wraps whole on a page that scrolls.
 One exception is by design: at the design text size a setting's sentence beside its button is clamped to two lines,
-so the rows keep their side-by-side layout (Settings > Enhanced stacks its rows at every size instead). Above it, a sentence that would be cut makes the rows stack, and under
+so the rows keep their side-by-side layout (Settings > Enhanced uses compact value rows and one focused-option detail panel instead). Above it, a sentence that would be cut makes the rows stack, and under
 its button the sentence wraps whole.
+
+Wrapped text stays inside its box. Clay adds a run up word by word, and a text backend measures in whole pixels, so
+words measured one at a time, each with a lone space, fell short of the line as drawn (8 px for a ten-word line of
+14 px Geist): a line was kept that ran into the padding beside it, and a one-line run's box was narrower than its
+glyphs. `nk_ui_clay_measure` therefore counts a word as the growth of its line (the line up to the word's end, less
+the line up to the end of the word before it, less the lone space Clay adds), measured from the line's start or, in a
+long line, from a word at most 256 bytes back. The words of a line add up to what `nk_ui_text_clamp` and the
+renderer measure for it.
 
 Wrapped text keeps its wrapped height when its page is overfull. Clay took a paragraph's minimum height before
 wrapping, as one line, so compressing an overfull column squeezed the paragraph back and the next block painted over
@@ -574,10 +603,10 @@ it under the action row while BUILD PACKAGE waits for the files, with CHECK AGAI
 
 ### Settings (C6)
 
-Built now (#1302): one page under the top bar with SETTINGS active, two cards of named rows, each value on the 34 px
-button that changes it: GAME (resolution, frame pacing, VSync, fullscreen, scaling) and LAUNCHER AND SOUND (game
-volume with - and +, launcher fullscreen, accessibility, menu sounds, controller settings, CHECK FOR UPDATES,
-launcher music and music volume with - and +, then the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
+Built now (#1302): one page under the top bar with SETTINGS active, two cards of named rows: GAME (resolution, VSync,
+fullscreen, scaling and Play mode) and LAUNCHER AND SOUND (game volume with - and +, launcher fullscreen,
+accessibility, menu sounds, controller settings, CHECK FOR UPDATES, launcher music and music volume with - and +,
+then the controller and the saves folder as captions; CHECK FOR UPDATES opens the Updates card and asks GitHub, see
 [`SETUP.md`](SETUP.md#network-use)). Under them DONE (primary: saves and returns to the Library), ONLINE AND DEVELOPER,
 THIRD-PARTY NOTICES and BUILD TOOLS AND CACHE (#1306: the share libraries switch, CLEAR SHARED LIBRARY CACHE and
 REMOVE BUILD TOOLS); the online options, the notices, build tools and cache and the removal check are dialog cards.
@@ -586,43 +615,68 @@ sentence saying what it does and what Windows asks for now: INTERFACE SIZE (Auto
 100, 125, 150 or 200%; a larger size needs a window large enough for the 1280 x 720 layout at that size), TEXT SIZE
 (Standard, Large or Larger: 100, 125 or 150% type, with controls and the layout's spacing kept, in any window), HIGH
 CONTRAST and REDUCE MOTION (Automatic, On or Off; Automatic follows Windows' contrast themes and Animation effects,
-read every frame, so a change there applies at once). The four buttons share one column; at a larger text size it
-is as wide as the widest label, and the sentences go under the buttons when beside them one would be cut.
-PLAY MODE closes the GAME card (the play modes, docs/ENHANCEMENT_CONTRACT.md section 10): its value is the library's
-default (AUTHENTIC: OPTIONS or ENHANCED: OPTIONS; Authentic for a new library), and it opens Settings > Enhanced, a
-dialog card in the same pattern: PLAY MODE, then one row per Enhanced part from the player's part table (TEXTURE
-FILTERING 16x, 8x, 4x, 2x, Off; CRISP SYSTEM TEXT; SPEED READOUT; GAME BADGE; WIDESCREEN; SMOOTH MOTION; CLEAN
-PITCHED SOUND; FINER PATCHES; WIDER CULLING; SHARPER ENLARGING; STICK DEAD ZONE; SHORT LOADS; FULL 32-BIT COLOUR;
-SUPERSAMPLING 2x, 4x, 4x anyway, Off, whose sentence at a render scale of 3x or 4x warns where 4x is picked ("About
-16 times the graphics work at this resolution; may stutter. Runs at 2x; pick 4x anyway.") because the game then runs
-at 2x until 4x anyway is picked, docs/ENHANCEMENT_CONTRACT.md section 10.21; SMOOTH FAR TEXTURES; TEXTURE PACK; LATE PAD SAMPLING; SOFT SHADOWS, Ace only, which draws the shadows a game's package
-names with soft edges and changes the frame the game reads, docs/ENHANCEMENT_CONTRACT.md section 11.3.13; UNCLIPPED
-SOUND, which plays the peaks the PSP would clip through a limiter and changes only what is heard, section 10.22;
-TEXTURE SCALING 2x to 6x, Off, and SMART 2D FILTER, which both change the frame the game reads, section 11.3.3; a
-new library has 16x filtering, crisp text and the badge on and the rest off, and a graphics preset sets SHARPER
-ENLARGING, CRISP SYSTEM TEXT and, under ULTRA, FULL 32-BIT COLOUR in Enhanced and Ace, below), each beside a
-sentence that says what it does and what it costs. A new part is a new row with no change to the page. While the
-mode is Authentic the part rows are disabled (`dim`, not focusable) and keep their values. The title page's ENHANCEMENTS
-card shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable
-package; `PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the
-same page for that game alone (its play mode, and each part on LIBRARY (16X) or its own value, then TEXTURE PACK
-FOLDER, which picks the game's pack folder and shows its name and texture count or None, and, with a pack chosen,
-REMOVE TEXTURE PACK; Done returns to the title page), and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
+read every frame, so a change there applies at once). The four buttons share one column; at a larger text size it is
+as wide as the widest label, and the sentences go under the buttons when beside it a sentence would be cut.
+PLAY MODE opens Settings > Enhanced (the play modes, docs/ENHANCEMENT_CONTRACT.md section 10). The library's global
+GRAPHICS PRESET and PLAY MODE remain pinned above six category tabs: PICTURE, MOTION, SOUND, CONTROLS, ON-SCREEN and
+ADVANCED. L and R on a controller, or Q and E on a keyboard, switch tabs; clicking a tab selects it. The explicit
+part-group table covers every PlayerEnhancedPart once, with the existing part IDs, values and settings keys intact.
+PICTURE contains TEXTURE FILTERING; WIDESCREEN; SHARPER ENLARGING; TEXTURE PACK; FULL 32-BIT COLOUR; SUPERSAMPLING;
+SMOOTH FAR TEXTURES; TEXTURE SCALING; SMART 2D FILTER; CRISP SYSTEM TEXT. MOTION contains SMOOTH MOTION and the
+existing global FRAME PACING control. SOUND contains CLEAN PITCHED SOUND and UNCLIPPED SOUND. CONTROLS contains
+STICK DEAD ZONE. ON-SCREEN contains SPEED READOUT and GAME BADGE. ADVANCED contains FINER PATCHES, WIDER CULLING,
+SHORT LOADS, LATE PAD SAMPLING and SOFT SHADOWS. On a game's page TEXTURE PACK FOLDER and, with a folder chosen,
+REMOVE TEXTURE PACK are the last rows of Picture.
+Each option is one sentence-case row, as high as a control (44 px), and one focus stop: its name on the left, with an
+ACE ONLY tag beside the name where it applies, and on the right every value it can take, each in its own small box
+(34 px). The current value is filled with the accent, with `ink` text, when it is on or chosen (16X, ON, FSR 1).
+A current OFF is never filled with the accent: it is marked by the raised box (`surface_high`) with a
+`selected_neutral_edge` edge and `paper` text, so a tab whose options are off is not a column of accent boxes. That
+edge stands 4.2:1 from the list's ground and 3.5:1 from the box, so the mark is told from an unselected value's
+hairline (`line`, 1.2:1) without the accent. A dimmed row's mark has the weaker `selected_neutral_edge_dimmed`
+(3.1:1 on the ground), so that an inert row among live ones still reads as dimmed. Against its own box fill
+(`surface_high`) that edge is 2.6:1, under 3:1: accepted because a dimmed row is inert, so its mark shows a value
+and offers nothing to act on. Up and Down move row by row: Down from PLAY MODE lands on the active tab, Down from
+a tab on its first row, Down from the last row on BACK, and Up goes back the same way. The rows name those
+neighbours (`nk_ui_register_button_between`), because a full-width row and a small tab are not each other's nearest
+by position, and every tab names the active tab's first row as its Down neighbour (`NkUiSection.down`): at Larger
+text (150%) in a 1280 x 720 or 960 x 540 window the list keeps two rows, BACK under the strip was nearer to a tab
+than the middle of the first row, and Down went from the tabs to BACK past every option. The d-pad walk is tested
+at 100, 125 and 150% text (`test_enhanced_walk_at_every_text_size` in `tests/native/test_player_screens.c`, and
+`test_next_ui_enhanced_dpad_walk_reaches_every_row_without_changing_values` in `tests/native/test_player_ui.py`).
+Left and Right step the focused row's value, Confirm takes the next one, and a click picks any value; a
+value box is a pointer target only (`NK_UI_BUTTON_POINTER_ONLY`), never a focus stop. GRAPHICS PRESET, PLAY MODE
+and FRAME PACING show their value as `< value >` in one box, as does a row whose values no longer fit beside its
+name at a larger text size. Category tabs are focusable. The panel on the right shows the focused row's name, its
+value, its whole description and, for a dimmed row, the reason; with a tab or BACK focused it shows the tab's first
+option. On a game's page, a row's first value is the library's, LIBRARY (value), in a raised box with muted text,
+and a value of the game's own is marked as above. An option that cannot apply as the page stands stays in the walk, dimmed
+and inert, with the reason in the panel; WIDESCREEN under SMOOTH MOTION marks OFF, the value that runs, and keeps
+the choice it had for when SMOOTH MOTION is off. The list shows as many whole rows as the window leaves (four at
+1280 x 720, a whole tab at 1920 x 1080), the same number on every tab so that changing tabs moves nothing. A longer
+tab scrolls inside the list, with a thin thumb at the list's right edge, and the panel and BACK stay on screen. At a
+larger text size the panel narrows so that the six tabs stay whole, and a page taller than the window scrolls as a
+whole, as every page does. The title page's ENHANCEMENTS card
+shows PLAY MODE for every game (LIBRARY DEFAULT, AUTHENTIC, ENHANCED, and ACE only for a game with a usable package;
+`PRIMARY` while Enhanced or Ace is in effect, never the default focus), ENHANCED OPTIONS, which opens the same tabs
+for that game alone, and, while Ace is in effect, Ace's 60 FPS switch in the same row. Under the buttons come what is
 on and, as its own `BODY_S` `muted` paragraph, the last session. Both sentences wrap whole, however many parts are
-on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the
-art's top right. In game, the pause menu's caption names the mode and its parts and its Settings page has a live
-SPEED READOUT row; the launch notice (ENHANCED or ACE, top right, 3 s, a cut with Reduce motion) and the readout
-(top left) are chips on the 16 px safe area. When 60 FPS logic falls behind with the HUD off, its red
-`60 FPS logic: <n>/s - SLOWED` warning is a chip under the readout, never in the readout's corner. A second the
-host could not keep up with ends the readout in GPU LIMITED or PC LIMITED, in `warning` (the rule is
-docs/ENHANCEMENT_CONTRACT.md section 10.3). The notice and the caption list the parts that are on, joined by
-middle dots. A list too long for one line wraps between its parts, never inside one, and never ends in an
-ellipsis: the notice takes up to eleven lines, each at most half the window wide (one line while the on-screen
-keyboard is open), and the caption takes the lines its card has room for above RESUME. Where a list is longer
-than that, its last line counts the parts it leaves out ("and 9 more"). With every part on, the notice shows
-them all in every window, and the caption shows them all in the default 960 x 544 game window and any taller
-one (`ace-ui-selftest`, `nk-ui-overlay-screens-selftest`).
-GRAPHICS PRESET is the GAME card's last row (#2150). It steps through LOW, MEDIUM, HIGH, ULTRA and HANDHELD.
+on: the page body scrolls, so the card grows instead of ending either one in an ellipsis. A library card where
+Enhanced or Ace is in effect carries an `ENHANCED` or `ACE` badge at the art's top right. In game, the pause menu's
+caption names the mode and its parts and its Settings page has a live SPEED READOUT row; the launch notice (ENHANCED
+or ACE, top right, 3 s, a cut with Reduce motion) and the readout (top left) are chips on the 16 px safe area. When
+60 FPS logic falls behind with the HUD off, its red `60 FPS logic: <n>/s - SLOWED` warning is a chip under the readout,
+never in the readout's corner. A second the host could not keep up with ends the readout in GPU LIMITED or PC LIMITED,
+in `warning` (the rule is docs/ENHANCEMENT_CONTRACT.md section 10.3). The notice and the caption list the parts that
+are on, joined by middle dots. A list too long for one line wraps between its parts, never inside one, and never ends
+in an ellipsis: the notice takes up to eleven lines, each at most half the window wide (one line while the on-screen
+keyboard is open), and the caption takes the lines its card has room for above RESUME. Where a list is longer than
+that, its last line counts the parts it leaves out ("and 9 more"). With every part on, the notice shows them all in
+every window, and the caption shows them all in the default 960 x 544 game window and any taller one
+(`ace-ui-selftest`, `nk-ui-overlay-screens-selftest`).
+GRAPHICS PRESET is the first row on Settings > Enhanced and each game's ENHANCED OPTIONS page (#2150). It steps
+through LOW, MEDIUM, HIGH, ULTRA and HANDHELD. While the row has focus, the panel beside the list carries the
+preset's note, which says where the preset is used and which Enhanced parts it turns on.
 A preset is used only by Enhanced and Ace sessions, where its values take the place of the RESOLUTION, SCALING,
 VSYNC and GAME FULLSCREEN rows and of up to three Enhanced parts' library values: CRISP SYSTEM TEXT, SHARPER
 ENLARGING (the FSR 1 upscaler) and, under ULTRA, FULL 32-BIT COLOUR. Choosing one changes none of those rows or
@@ -678,9 +732,8 @@ CUSTOM. Going CUSTOM by any edit keeps what the pages showed: the parts the pres
 game keeps the preset, since the game's own value wins over it. A settings file from v0.0.2 with a preset chosen keeps
 its library parts as written, and an Enhanced session takes the preset's parts over them (HIGH with SHARPER ENLARGING
 on in the library launches with FSR 1 off; the page says `OFF (HIGH)`).
-Left and Right move between the two cards along a row (`NK_UI_BUTTON_ROW`), so CONTROLLER SETTINGS is reached from
-SCALING. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
-page) so every row fits 960 x 540. The tabbed layout below is a design that is not built:
+Left and Right change a focused value, while Q and E or the controller shoulders switch Enhanced tabs. Every change is saved as it is made. Below a 680 px tall window the `SETTINGS` heading is left out (the tab names the
+page) so every row fits 960 x 540. The proposed whole-Settings tabbed layout below remains a design that is not built:
 
 - Top bar with SETTINGS active; `SETTINGS` in `DISPLAY`; a tab row (`LABEL`, 10/12 px padding, 3 px accent rule
   under the active tab, `line` underneath): DISPLAY, AUDIO, CONTROLS, PATHS AND STORAGE, ACCESSIBILITY, ABOUT.

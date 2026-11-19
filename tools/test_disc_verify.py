@@ -343,6 +343,31 @@ class BringupLibraryTests(unittest.TestCase):
         with self.assertRaisesRegex(self.nk_cli.PackageBuildError, "--iso-path"):
             self.nk_cli._load_library_entry(self.root, "TEST70001", self.root / "other.iso")
 
+    def test_a_bring_up_of_the_same_image_keeps_the_players_fields(self) -> None:
+        """The player's prepare state belongs to the image; a bring-up write of the same
+        image keeps it, and one of other bytes in the same file starts the record again."""
+        self.write("retail.iso", RETAIL)
+        library = self.root / "library.json"
+        payload = json.loads(library.read_text(encoding="utf-8"))
+        player_fields = {"prepared_root": str(self.root / "titles" / "TEST70001"),
+                         "is_prepared": True, "assets_staged": True, "status": 2,
+                         "last_played": "2026-11-01T10:00:00Z"}
+        payload["games"][0].update(player_fields)
+        library.write_text(json.dumps(payload), encoding="utf-8")
+
+        self.write("retail.iso", RETAIL)
+        [game] = self.games()
+        for key, value in player_fields.items():
+            self.assertEqual(game.get(key), value, key)
+        self.assertEqual(game["content_sha1"], digest(RETAIL).sha1)
+        self.assertEqual(game["title_name"], "Title retail.iso")
+
+        self.write("retail.iso", MODIFIED)
+        [game] = self.games()
+        self.assertEqual(game["content_sha1"], digest(MODIFIED).sha1)
+        for key in player_fields:
+            self.assertNotIn(key, game)
+
     def test_a_library_built_before_hashing_keeps_its_retail_record(self) -> None:
         # Resuming an older build: the retail record has no hash, then its fan translation
         # (once a duplicate) is built. The retail file is hashed now and both are kept.

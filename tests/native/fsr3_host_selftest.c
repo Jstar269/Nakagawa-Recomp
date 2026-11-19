@@ -344,6 +344,21 @@ static void j_unit(void) {
         CHECK(fabs(x - ex) < 1e-6 && fabs(y - ey) < 1e-6, "J: offset %d is (%.9f, %.9f), Halton(2, 3) gives (%.9f, %.9f)",
               (int)i, x, y, ex, ey);
     }
+    /* fsr3_jitter.h's contract, not a replay of AMD: every phase count that is not positive is
+     * refused, for any index, with the outputs untouched. The record's jitter0 and jitterneg lines
+     * carry AMD's error code and not the count its driver passed, so the replay below tries one
+     * count for each (0 and -4) and cannot say which other counts AMD refuses. */
+    static const int32_t refused[] = { 0, -1, -2, -3, -4, -5, -8, -72, -65536, INT32_MIN + 1, INT32_MIN };
+    static const int32_t at[] = { 0, 1, -1, 71, INT32_MAX, INT32_MIN + 1 };
+    for (unsigned k = 0; k < sizeof(refused) / sizeof(refused[0]); k++) {
+        for (unsigned j = 0; j < sizeof(at) / sizeof(at[0]); j++) {
+            float x = 123.0f, y = -456.0f;
+            const int rc = fsr3_jitter_offset(&x, &y, at[j], refused[k]);
+            CHECK(rc == -1 && x == 123.0f && y == -456.0f,
+                  "J: refusal: index %d of phase count %d gave rc %d and (%g, %g), want -1 and the outputs untouched",
+                  (int)at[j], (int)refused[k], rc, x, y);
+        }
+    }
     /* The clip-space offset for the GE canvas: one render pixel is 2 / 512 of NDC across, 2 / 272 down. */
     float o[2];
     fsr3_jitter_clip_offset(0.25f, -0.375f, 512.0f, 272.0f, o);
@@ -446,6 +461,8 @@ int main(int argc, char **argv) {
         } else if (!strncmp(line, "jitter0 ", 8) || !strncmp(line, "jitterneg ", 10)) {
             int e;
             float x, y;
+            /* The line has AMD's error code only. -4 stands for "a negative count" here: it is this
+             * test's choice, not a value from the record (j_unit checks the other counts). */
             CHECK(sscanf(strchr(line, ' '), "%d", &e) == 1 && e != 0, "AMD accepted: %s", line);
             CHECK(fsr3_jitter_offset(&x, &y, 0, line[6] == '0' ? 0 : -4) == -1, "accepted: %s", line);
             helpers++;

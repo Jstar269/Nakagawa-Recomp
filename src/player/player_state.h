@@ -78,18 +78,6 @@ typedef enum {
     STATUS_VERIFIED = NK_STATUS_VERIFIED
 } GameSupportStatus;
 
-typedef enum {
-    STAGE_IDLE = 0,
-    STAGE_INSPECTING_ISO,
-    STAGE_EXTRACTING_CONTAINERS,
-    STAGE_DECRYPTING_MODULES,
-    STAGE_VALIDATING_ELFS,
-    STAGE_PREPARING_VFS,
-    STAGE_READY,
-    STAGE_FAILED,
-    STAGE_CANCELLED
-} PlayerPrepStage;
-
 typedef NkGameEntry GameRecord;
 
 /* Requested client-area geometry in SDL screen/window coordinate units. */
@@ -154,18 +142,6 @@ typedef struct {
     uint32_t failure_count;
     uint64_t retry_after_ms;
 } PlayerRuntimePackageWorkerFailure;
-
-typedef struct {
-    PlayerPrepStage stage;
-    char operation[64];
-    char current_item[128];
-    int completed_items;
-    int total_items;
-    float percentage;
-    int elapsed_ms;
-    char status_message[256];
-    bool cancellable;
-} PreparationState;
 
 /* The player and runtime are offline by default (AGENTS.md section 5). Later
  * opt-in modes ("lan", "online") get their own values; a value this build does
@@ -308,6 +284,8 @@ typedef struct {
     const char *const *labels;  /* the row's word for each value: "16x", "On", "Off" */
     const char *const *words;   /* the SR_ACE and settings.json word for each value */
     int fresh;                  /* the value a new settings file starts with */
+    bool ace_only;              /* acts only in Ace: a game's page tags its row "Ace only" and
+                                   dims it outside Ace */
 } PlayerEnhancedPartInfo;
 
 /* The library's choice. The parts' values are kept while the default is Authentic. */
@@ -438,6 +416,10 @@ typedef struct {
     /* Opt-in cover art (#2632): fetch Redump-matched PSP box art from thumbnails.libretro.com
        to the local cache folder. Off by default. */
     bool download_cover_art;
+    /* Cheats (#2639): a launch applies the user's CWCheat file for the title,
+       cheats/<DISC-ID>.ini in the user data folder, and the game shows a marker while any
+       cheat is on (src/rt/cheats.h). Off by default; an optional "cheats" key in the file. */
+    bool cheats;
     /* The folder the last file picker picked from (Add disc, PSP fonts), where
        the next one opens. Empty on a first run: the pickers then open at the
        Desktop (player_app_picker_start_folder). */
@@ -568,6 +550,9 @@ typedef struct {
     char log_file_path[MAX_PATH_LEN];
     /* The game the card is about, for its retry action; "" for none. */
     char subject_disc_id[32];
+    /* That card's own image when it is known, "" otherwise: two images can
+       share a disc ID (player_app_error_subject_index). */
+    char subject_iso_path[MAX_PATH_LEN];
     PlayerErrorRetry retry;
     /* Copy details has put this card's report on the clipboard. */
     bool details_copied;
@@ -814,6 +799,9 @@ typedef struct {
     bool scanned;
     /* main.c runs a scan: at start, after a library change, after the queue. */
     bool scan_requested;
+    /* A scan began and its result is not in yet: its worker reads the packages in the
+       user data, so a factory reset waits for it. */
+    bool scan_running;
     /* This player's own identity, from its source tree; read once a session. */
     bool identity_known;
     NkPackageBuildIdentity identity;
@@ -933,7 +921,6 @@ struct PlayerApp {
     int game_count;
     int selected_game_index;
     GameRecord inspecting_game;
-    PreparationState prep_state;
     PlayerSettings settings;
     ErrorState last_error;
     SetupWizardState wizard;
@@ -1054,9 +1041,6 @@ struct PlayerApp {
     bool launch_pending;
     char launch_pending_disc_id[NK_MAX_DISC_ID_LEN];
 
-    /* Navigation & Focus */
-    int active_tab;   /* for settings: 0=Display, 1=Audio, 2=Controller, 3=Logs */
-
     /* Controller settings and live input monitor (#357) */
     InputSettingsState input_settings;
     bool host_buttons_live[NK_HOST_BUTTON_COUNT];
@@ -1072,6 +1056,11 @@ struct PlayerApp {
        has an enhancement package and does not resolve to Authentic launches its
        enhanced build, as Ace. Never saved with the settings. */
     bool experimental_60hz_session;
+    /* --cheats or --cheats-file=<path> on the command line (#2639): cheats are on for this
+       session's launches whatever the stored setting says, reading the named file when one
+       was given (an absolute path) and the title's own file otherwise. Never saved. */
+    bool cheats_session;
+    char cheats_session_file[MAX_PATH_LEN];
     /* Settings > Enhanced opened from a title's page (player_app_open_title_enhanced): that
        game's normalised disc key, so a re-sync that reorders the games cannot point the page at
        another game; empty for the library's page. Any other view clears it, and a re-sync that
@@ -1098,6 +1087,11 @@ struct PlayerApp {
      * session runs on the defaults, and settings_notice says so on every
      * Settings page (player_app_load_settings). */
     bool settings_newer_schema;
+    /* settings.json is there but could not be opened or read in full (another
+     * program holding it, an I/O error): it is kept as it is, this session runs
+     * on the defaults, and player_app_save_settings does not replace it, so a
+     * passing failure never costs the user their settings (audit 2026-11-17). */
+    bool settings_unreadable;
     /* This run keeps the first-launch nickname prompt down (#2197): a --screenshot, --view
        or scripted run shows the page it names. Memory only: nickname_asked and settings.json
        are left as they are. */
@@ -1175,6 +1169,9 @@ struct PlayerApp {
     /* The added images waiting for their disc check, and the one running. */
     PlayerDiscCheckState disc_check;
 
+    /* The library image the running game was started from (its card's iso_path):
+       a card raised when it stops names that image, not only its disc ID. */
+    char running_iso_path[NK_MAX_PATH];
     /* Discord status (#2259): what the running game shows, set when it starts, and the
        client that sends it (player_app_discord_tick). */
     char running_title[NK_MAX_TITLE_LEN];
@@ -1252,7 +1249,9 @@ typedef enum {
     PLAYER_REMOVAL_KIND_COUNT
 } PlayerRemovalKind;
 
-#define PLAYER_REMOVAL_PATH_CAP 16
+/* The fixed folders (eleven at most) and the title's enhanced builds, one folder
+   per variant left in packages/. */
+#define PLAYER_REMOVAL_PATH_CAP 32
 
 typedef struct {
     char path[NK_MAX_PATH];
@@ -1477,7 +1476,7 @@ size_t player_app_format_error_report_for(const PlayerApp *app, const char *vers
 
 /* Report this game (docs/ONLINE_FEATURES.md "Reports"). These are links the user
    opens in their own browser; the player makes no network call for them. */
-#define PLAYER_REPORT_REPO_URL "https://github.com/Jstar269/nakagawa-recomp"
+#define PLAYER_REPORT_REPO_URL NK_UPDATE_REPOSITORY_URL
 #define PLAYER_REPORT_CATEGORY "compatibility-reports"
 /* The longest report link. Windows hands a link to the browser through the
    shell, whose limit is INTERNET_MAX_URL_LENGTH (2083 characters); GitHub's
@@ -1843,6 +1842,11 @@ bool player_app_title_60hz_released(const PlayerApp *app, int game_index);
 void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on);
 /* The --experimental-60hz flag: on for this session only, never saved. */
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on);
+/* The --cheats and --cheats-file flags (#2639): cheats on for this session only, never saved.
+ * `file` is the cheat file to read, which must exist and is made absolute here, or NULL or ""
+ * for each title's own (cheats/<DISC-ID>.ini in the user data folder). False, with nothing
+ * changed, when `file` is not a file or cannot be made an absolute path that fits. */
+bool player_app_set_cheats_session(PlayerApp *app, const char *file);
 /* An Ace launch of the title with its Wider culling part on (section 11.3.6): the launch line
    carries cull=on, and the title builds and launches with its culling package when it has a
    usable one (PlayerTitleEnhancement.cull_available). Authentic and Enhanced never. */
@@ -1981,6 +1985,9 @@ void player_app_cycle_title_play_mode(PlayerApp *app, int game_index);
 PlayerPlayMode player_app_title_play_mode(const PlayerApp *app, int game_index);
 /* A title's part: Library default, then each of the part's values, then Library default. */
 void player_app_cycle_title_part(PlayerApp *app, int game_index, int part);
+/* Sets the library part to `value_index`, or a title part to its index; -1 clears a title's
+ * override and follows the library. Values use player_enhanced_part(part)->values. */
+void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index);
 /* The title's own value for a part: -1 follows the library. */
 int player_app_title_part(const PlayerApp *app, int game_index, int part);
 /* The title's "Last session" line from the report under the user data folder; false, with
@@ -2000,6 +2007,9 @@ void player_app_close_enhanced_page_if_title_gone(PlayerApp *app);
 /* Settings > Enhanced's play mode row: the title's choice on a title's page, else the
  * library's default. On a title's page whose game is gone, it closes the page instead. */
 void player_app_enhanced_page_cycle_mode(PlayerApp *app);
+/* Selects Library, Authentic, Enhanced or Ace by its visible row index; the library has only
+ * Authentic and Enhanced. */
+void player_app_enhanced_page_set_mode(PlayerApp *app, int choice_index);
 /* Settings > Enhanced's row for `part`: the title's value on a title's page, else the
  * library's. On a title's page whose game is gone, it closes the page instead. */
 void player_app_enhanced_page_cycle_part(PlayerApp *app, int part);
@@ -2025,6 +2035,10 @@ int player_app_find_added_game(const PlayerApp *app, const GameRecord *game);
    when two images share the disc ID and neither names the file. */
 int player_app_find_built_game(const PlayerApp *app, const char *disc_id,
                                const char *iso_path);
+/* The card an error card is about (subject_disc_id, and subject_iso_path when
+   the card set it), by player_app_find_built_game's rule; -1 for none, or when
+   two images share the disc ID and the card does not name its image. */
+int player_app_error_subject_index(const PlayerApp *app, const ErrorState *error);
 /* The card a package check of game is for: the same package and image, or else
    the first card of that package. Two images of a disc ID share its package
    folder, and each card's check lands on its own card. */
@@ -2103,6 +2117,9 @@ typedef struct {
     PlayerSettings settings;
     bool launch_headless;
     uint32_t headless_accept_presented_frames;
+    /* --cheats or --cheats-file for this session (#2639), and the file it named, if any. */
+    bool cheats_session;
+    char cheats_file[NK_MAX_PATH];
     char boot_event_file_path[MAX_PATH_LEN];
     char input_profile_path[NK_MAX_PATH];
     char ui_root[MAX_PATH_LEN];
@@ -2342,6 +2359,9 @@ void player_app_outdated_scan_finish(PlayerApp *app, const PlayerOutdatedScan *s
                                      const char *player_version);
 /* The source tree a build would use: the folder above tools/nk_cli.py. */
 bool player_app_build_source_root(const PlayerApp *app, char *out, size_t out_size);
+/* That folder for the nk_cli.py path cli: "." for a relative tools/nk_cli.py, and the root
+   itself ("/", "C:\") for a tree at a filesystem or drive root. */
+bool player_source_root_from_cli(const char *cli, char *out, size_t out_size);
 
 bool player_app_game_is_outdated(const PlayerApp *app, const GameRecord *game);
 int player_app_outdated_count(const PlayerApp *app);
@@ -2494,8 +2514,9 @@ void player_app_remove_prerequisites(PlayerApp *app);
 /* Factory reset: the player goes back to a first run by
  * moving its user data aside, never by deleting it. The folders that move are
  * the config, data, cache and saves folders (library, settings, saves,
- * imported PSP fonts, keys, built games and downloaded build tools), and the
- * runtime root when one is set; a folder inside another one moves with it.
+ * imported PSP fonts, keys, built games and downloaded build tools); a folder
+ * inside another one moves with it. A runtime root (--runtime-root) does not
+ * move: it can be a checkout or an install folder.
  * Each is renamed in place to
  * "<folder>-backup-<stamp>", so the move is a rename on the same disk and the
  * user can move it back. Logs stay: the player is writing to them.
@@ -2517,6 +2538,8 @@ void player_app_clear_shared_library_cache(PlayerApp *app);
 void player_app_refresh_cover_art_cache_size(PlayerApp *app);
 void player_app_refresh_cover_art_cache(PlayerApp *app);
 void player_app_toggle_download_cover_art(PlayerApp *app);
+/* Settings > Online and developer options: the Cheats switch (#2639), stored. */
+void player_app_toggle_cheats(PlayerApp *app);
 void player_app_set_build_error(
     PlayerApp *app,
     const char *failed_stage,

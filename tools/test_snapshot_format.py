@@ -11,7 +11,10 @@ output (``src/rt/snapshot_runner.c``) and the runtime's CpuState ABI in step.
 from __future__ import annotations
 
 import re
+import shutil
 import struct
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -248,6 +251,41 @@ class VerdictGrammarTests(unittest.TestCase):
         names = re.search(r"k_stop_names\[\] = \{ ([^}]*) \}", RUNNER_C)
         self.assertIsNotNone(names)
         self.assertEqual(tuple(re.findall(r'"(\w+)"', names.group(1))), nksnap.STOP_KINDS)
+
+
+_COUNTING_DRIVER = """\
+import pathlib, sys
+if sys.argv[1:2] == ["find-chunk"]:
+    with pathlib.Path(__file__).with_name("find-chunk.log").open("a") as log:
+        log.write("find-chunk\\n")
+    print("probe/snapshot_recomp_0.c")
+"""
+
+
+@unittest.skipIf(shutil.which("mingw32-make") is None and shutil.which("make") is None, "needs GNU Make")
+class MutantChunkLookupTests(unittest.TestCase):
+    """mk/cosim_snapshot.mk looks the mutant's chunk up once per run (audit F-f10358ee)."""
+
+    def test_each_selftest_recipe_looks_the_chunk_up_once(self) -> None:
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        assert make is not None
+        for goal in ("snapshot-selftest-run", "verify-selftest-run"):
+            with self.subTest(goal=goal), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                driver = work / "driver.py"
+                driver.write_text(_COUNTING_DRIVER, encoding="utf-8")
+                proc = subprocess.run(
+                    [make, "-n", "--no-print-directory", goal, "GAME_NAME=snapshot",
+                     f"BUILD_ROOT={(work / 'build-root').as_posix()}",
+                     f"BUILD_DIR={(work / 'build').as_posix()}",
+                     f"SNAPSHOT_DRIVER={driver.as_posix()}", f"VERIFY_DRIVER={driver.as_posix()}"],
+                    cwd=ROOT, capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
+                # The recipe still mutates the chunk the lookup named.
+                self.assertIn("mutate --chunk probe/snapshot_recomp_0.c", proc.stdout)
+                calls = (work / "find-chunk.log").read_text(encoding="utf-8").splitlines()
+                self.assertEqual(len(calls), 1, f"{goal} ran find-chunk {len(calls)} times")
 
 
 if __name__ == "__main__":

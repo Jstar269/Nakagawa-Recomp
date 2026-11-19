@@ -517,8 +517,11 @@ validated again, and only then swapped in, with the old package moved back if
 the swap fails (`_promote_cache_entry` in `tools/nk_cli.py`). A failed or
 cancelled build therefore leaves the old package in place and launchable. The
 one gap is a build stopped between the swap's two renames, which leaves the old
-package in `cache/packages/<DISC_ID>/previous-<n>`: the next build of that
-title moves it back before anything else (`_restore_interrupted_swap`).
+package in `cache/packages/<DISC_ID>/previous-<package folder>-<n>`: the next
+build of that package moves it back before anything else
+(`_restore_interrupted_swap`). Every package of a disc (the authentic one, an
+enhanced one, a code-hook one) shares that cache folder, so a backup is named
+for its own package folder and is only ever moved back into it.
 Saves live outside the package and are not touched, and the cache keeps its
 reuse: when only the runtime changed, the generated C is kept and only the
 native objects are rebuilt.
@@ -577,8 +580,17 @@ one rule (`src/core/nk_user_data_schema.h`) governs each writer:
   replaced: the session runs on defaults, the screen says why, and every save
   over it is refused with `NK_ERROR_NEWER_SCHEMA`. Returning to the newer player
   finds the file as it left it.
+* A file that is there but cannot be opened or read (another program holds it, a
+  read error) is never replaced: its version is unknown, so the save is refused
+  with `NK_ERROR_IO` and the file is left as it is.
+* A file over the size bound the reader holds it to is first copied, byte for
+  byte, to `<file>.unreadable.bak` (a later player may allow a larger file), and
+  the save does not write when that copy fails.
 * A file with no readable version (empty, damaged, not JSON) is reported, and the
   reader falls back as before (`library.json` to its `.bak`, the others to defaults).
+  A controls file that does not load for this or any other reason except a newer
+  version is moved to `input_profile.json.unreadable.bak` by the first save, which
+  does not write when that move fails, and the Controls page names the copy.
 
 The folders are the per-user ones of [`SETUP.md`](SETUP.md) (on Windows
 `%LOCALAPPDATA%\Nakagawa\data` and `...\config`, plus the saves folder).

@@ -71,6 +71,14 @@ PlayerUiAction player_ui_screen_remove(NkUi *ui, const PlayerUiRemoveModel *mode
             }
             nk_ui_end_container(ui);
         }
+    }
+    /* What Remove frees: the built files listed, and the decrypted files and disc copy
+       while their box is ticked. Saves are backed up before they go, so they free
+       nothing. */
+    if (model->delete_disc_copy && model->has_disc_copy && !model->files_shared) {
+        total += model->disc_copy_bytes;
+    }
+    if (shown > 0u || total > 0ull) {
         scr_flow_bytes(size, sizeof(size), total);
         (void)snprintf(text, sizeof(text), "Frees %s", size);
         nk_ui_text_role(ui, FLOW_ID_TOTAL, nk_ui_caps(ui, text), NK_UI_TYPE_LABEL_S,
@@ -154,12 +162,15 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
     char text[320];
     char size[32];
     size_t shown;
+    size_t reach;
     bool blocked;
     if (ui == NULL || model == NULL) return result;
     theme = nk_ui_theme(ui);
     blocked = model->blocked != NULL && model->blocked[0] != '\0';
     shown = model->rows != NULL ? model->row_count : 0u;
     if (shown > PLAYER_UI_SAVES_ROW_CAP) shown = PLAYER_UI_SAVES_ROW_CAP;
+    /* The pages reach only the backups listed: Older stops at the last of them. */
+    reach = model->listed != 0u && model->listed < model->total ? model->listed : model->total;
     inner = scr_flow_begin(ui, model->logical_width > 80.0f ? model->logical_width : 1280.0f,
                            model->logical_height > 80.0f ? model->logical_height : 800.0f,
                            640.0f);
@@ -213,6 +224,12 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
             }
             nk_ui_end_container(ui);
         }
+        /* Back (B or Esc) answers the question with Cancel and keeps the card:
+           player_ui_nk.c gives Back to the screen while a question is up. */
+        if (result.kind == PLAYER_UI_ACTION_NONE && nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
+            result = action(PLAYER_UI_ACTION_SAVES, model->title_index,
+                            (PlayerUiPrimaryAction)PLAYER_UI_SAVES_CANCEL);
+        }
         scr_flow_end(ui, "", prompts, 3u);
         return result;
     }
@@ -260,6 +277,11 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
                            (unsigned long)(model->first_row + 1u),
                            (unsigned long)(model->first_row + shown),
                            (unsigned long)model->total);
+            if (reach < model->total) {
+                size_t used = strlen(text);
+                (void)snprintf(text + used, sizeof(text) - used, "; the newest %lu are listed",
+                               (unsigned long)reach);
+            }
         } else {
             (void)snprintf(text, sizeof(text), "Backups: %lu", (unsigned long)model->total);
         }
@@ -299,7 +321,7 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
             nk_ui_end_container(ui);
         }
     }
-    if (model->first_row > 0u || model->first_row + shown < model->total) {
+    if (model->first_row > 0u || model->first_row + shown < reach) {
         NkUiLayout row = layout_make(NK_UI_LAYOUT_ROW, sizing_fit(), sizing_fit(),
                                      NK_UI_SPACE_3);
         if (nk_ui_begin_container(ui, FLOW_ID_REPORT_ROW, &row, NULL)) {
@@ -309,7 +331,7 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
                 result = action(PLAYER_UI_ACTION_SAVES, model->title_index,
                                 (PlayerUiPrimaryAction)PLAYER_UI_SAVES_NEWER);
             }
-            if (model->first_row + shown < model->total &&
+            if (model->first_row + shown < reach &&
                 nk_ui_button(ui, PLAYER_UI_ID_SAVES_OLDER, "Older",
                              NK_UI_BUTTON_SMALL | NK_UI_BUTTON_NOT_DEFAULT)) {
                 result = action(PLAYER_UI_ACTION_SAVES, model->title_index,
@@ -317,6 +339,11 @@ PlayerUiAction player_ui_screen_saves(NkUi *ui, const PlayerUiSavesModel *model)
             }
             nk_ui_end_container(ui);
         }
+    }
+    /* A Back given to the screen after its question closed (a game started)
+       still closes the card, as the Back button does. */
+    if (result.kind == PLAYER_UI_ACTION_NONE && nk_ui_take_event(ui, NK_UI_EV_BACK, NULL)) {
+        result = action(PLAYER_UI_ACTION_BACK, model->title_index, PLAYER_UI_PRIMARY_NONE);
     }
     scr_flow_end(ui, "", prompts, 3u);
     return result;
