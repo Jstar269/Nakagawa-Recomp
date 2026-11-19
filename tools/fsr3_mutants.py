@@ -130,6 +130,10 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
      "*x = fsr3_halton(index % phase_count, 2) - 0.5f;\n"
      "    *y = fsr3_halton(index % phase_count, 3) - 0.5f;",
      "J: offset"),
+    ("only the phase counts 0 and -4 refused", JITTER,
+     "if (!x || !y || phase_count <= 0) return -1;",
+     "if (!x || !y || phase_count == 0 || phase_count == -4) return -1;",
+     "J: refusal"),
     ("the phase count rounded up", JITTER,
      "return (int32_t)(base_phase_count * powf((float)display_width / (float)render_width, 2.0f));",
      "return (int32_t)ceilf(base_phase_count * powf((float)display_width / (float)render_width, 2.0f));",
