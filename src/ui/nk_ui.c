@@ -1130,6 +1130,99 @@ const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *st
     return nk_ui_frame_text(ui, out);
 }
 
+/* Where text[start, end), wider than max_width, is broken: after the last character that
+   fits from start (at least one, so a box too narrow for any glyph still moves on), or after
+   the last path or name separator before that which keeps at least half of those bytes. */
+static size_t nk_ui_break_point(const NkUi *ui, const NkUiTextStyle *style, const char *text,
+                                size_t start, size_t end, float max_width) {
+    size_t fits = start; /* a character boundary whose piece fits */
+    size_t over = end;   /* one whose piece does not */
+    size_t at;
+    for (;;) {
+        size_t mid = fits + (over - fits) / 2u;
+        while (mid > fits && ((unsigned char)text[mid] & 0xC0u) == 0x80u) --mid;
+        if (mid == fits) {
+            mid = fits + 1u;
+            while (mid < over && ((unsigned char)text[mid] & 0xC0u) == 0x80u) ++mid;
+            if (mid >= over) break;
+        }
+        if (nk_ui_measure_logical(ui, style, text + start, mid - start) <= max_width) {
+            fits = mid;
+        } else {
+            over = mid;
+        }
+    }
+    if (fits == start) {
+        fits = start + 1u;
+        while (fits < end && ((unsigned char)text[fits] & 0xC0u) == 0x80u) ++fits;
+        return fits;
+    }
+    for (at = fits; at > start + 1u; --at) {
+        char c = text[at - 1u];
+        if (c == '/' || c == '\\' || c == '_' || c == '-' || c == '.') {
+            if (2u * (at - start) >= fits - start) return at;
+            break;
+        }
+    }
+    return fits;
+}
+
+const char *nk_ui_text_break(NkUi *ui, const char *text, const NkUiTextStyle *style,
+                             float max_width) {
+    const char *shown;
+    char *out;
+    size_t length;
+    size_t cap;
+    size_t used = 0u;
+    size_t cursor = 0u;
+    if (ui == NULL || !ui->frame_open || text == NULL) return "";
+    shown = nk_ui_frame_text(ui, text);
+    if (style == NULL || !(max_width > 0.0f) || shown[0] == '\0') return shown;
+    length = strlen(shown);
+    /* Each break adds one byte, and a piece holds at least one character. */
+    if (length > (SIZE_MAX - 1u) / 2u) return shown;
+    cap = 2u * length + 1u;
+    out = NULL;
+    while (cursor < length) {
+        size_t word_end = cursor;
+        size_t piece = cursor;
+        while (word_end < length && shown[word_end] != ' ' && shown[word_end] != '\n') {
+            ++word_end;
+        }
+        while (word_end > piece &&
+               nk_ui_measure_logical(ui, style, shown + piece, word_end - piece) > max_width) {
+            size_t cut = nk_ui_break_point(ui, style, shown, piece, word_end, max_width);
+            if (cut >= word_end) break;
+            if (out == NULL) {
+                /* The first break: copy what came before it into the frame's storage. */
+                out = nk_ui_frame_bytes(ui, cap);
+                if (out == NULL) {
+                    nk_ui_fail(ui, NK_UI_ERROR_FRAME_TEXT, "FRAME_TEXT_FULL",
+                               "No memory was left for the frame's text.");
+                    return "";
+                }
+                memcpy(out, shown, piece);
+                used = piece;
+            }
+            memcpy(out + used, shown + piece, cut - piece);
+            used += cut - piece;
+            out[used++] = '\n';
+            piece = cut;
+        }
+        if (word_end < length) ++word_end; /* the space or line break after it */
+        if (out != NULL) {
+            memcpy(out + used, shown + piece, word_end - piece);
+            used += word_end - piece;
+        }
+        cursor = word_end;
+    }
+    if (out == NULL) return shown;
+    out[used] = '\0';
+    /* What the breaks did not take goes back to the block, as nk_ui_frame_text does. */
+    ui->text_block->used -= cap - (used + 1u);
+    return out;
+}
+
 /* A list's items are joined by a middle dot between two spaces. */
 static const char nk_ui_list_join[] = " \xC2\xB7 ";
 #define NK_UI_LIST_RUN_BYTES 2048u /* one line as a run; a line that would be longer wraps */

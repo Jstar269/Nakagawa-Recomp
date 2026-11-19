@@ -415,6 +415,153 @@ static int test_wrapped_lines_fit_their_box(void) {
     return 1;
 }
 
+/* One frame, laid out twice: `text` through nk_ui_text_break as card text in a column `width`
+   px wide (element 7). *broken receives a copy of what nk_ui_text_break gave the layout. */
+static const NkUiDrawList *broken_lines_frame(NkUi *ui, const char *text, float width,
+                                              char *broken, size_t cap) {
+    NkUiViewport viewport;
+    NkUiLayout layout;
+    NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    const NkUiDrawList *list = NULL;
+    memset(&viewport, 0, sizeof(viewport));
+    /* Tall enough that a column one letter wide keeps every line on screen. */
+    viewport.pixel_w = 1600;
+    viewport.pixel_h = 8000;
+    viewport.display_scale = 1.0f;
+    viewport.ui_scale_pct = 100;
+    viewport.text_size_pct = 100;
+    nk_ui_set_viewport(ui, &viewport);
+    for (int frame = 0; frame < 2; ++frame) {
+        const char *shown;
+        nk_ui_begin(ui, 37.0);
+        memset(&layout, 0, sizeof(layout));
+        layout.width = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
+        layout.height = (NkUiSizing){NK_UI_SIZE_GROW, 0.0f, 0.0f, 0.0f};
+        layout.direction = NK_UI_LAYOUT_COLUMN;
+        if (!nk_ui_begin_container(ui, 1u, &layout, NULL)) return NULL;
+        memset(&layout, 0, sizeof(layout));
+        layout.width = (NkUiSizing){NK_UI_SIZE_FIXED, width, 0.0f, 0.0f};
+        layout.height = (NkUiSizing){NK_UI_SIZE_FIT, 0.0f, 0.0f, 0.0f};
+        layout.direction = NK_UI_LAYOUT_COLUMN;
+        shown = nk_ui_text_break(ui, text, &body, width);
+        (void)snprintf(broken, cap, "%s", shown);
+        if (nk_ui_begin_container(ui, 6u, &layout, NULL)) {
+            nk_ui_text(ui, 7u, shown, &body);
+            nk_ui_end_container(ui);
+        }
+        nk_ui_end_container(ui);
+        list = nk_ui_end(ui);
+    }
+    return list;
+}
+
+/* nk_ui_text_break (#2643, the follow-up to #2644): a word wider than its box is broken onto
+   lines that each fit the box, so wrapped text never runs past it, and nothing is lost: the
+   lines together are the text, spaces aside. A path breaks after a '/' or '-' where one keeps
+   at least half the line, a word with a multi-byte letter never inside that letter, words
+   that fit are left whole for the layout to wrap, and text with no word too wide is given
+   back as it is. In columns from 4 px (narrower than any letter: one letter a line) to
+   420 px. Failing before: the layout put the long word on one line wider than the box. */
+static int test_text_break_keeps_every_line_in_its_box(void) {
+    static const char *const texts[] = {
+        "ULUS10000_Remastered_HD_Texture_Pack_v2.1_final_with_widescreen_HUD",
+        "Folder: C:/Games/PSP/texture-packs/ULUS10000/replacements/high-resolution and more",
+        "Texturfilterungsqualit\xC3\xA4tsstufenauswahlmen\xC3\xBC und "
+        "Texturfilterungsqualit\xC3\xA4tsstufenauswahlmen\xC3\xBC",
+        "Short words only, which the layout wraps by itself.",
+    };
+    static char broken[1024];
+    NkUiConfig config;
+    NkUiTextBackend whole = nk_ui_text_fixed();
+    NkUiTextStyle body = nk_ui_type(NK_UI_TYPE_BODY_S, 0u);
+    NkUi *ui;
+    whole.measure = whole_pixel_measure;
+    memset(&config, 0, sizeof(config));
+    config.host = NK_UI_HOST_LAUNCHER;
+    config.text = &whole;
+    ui = nk_ui_create(&config);
+    CHECK(ui != NULL, "create a context that measures in whole pixels");
+    for (size_t t = 0u; t < sizeof(texts) / sizeof(texts[0]); ++t) {
+        for (int width = 4; width <= 420; width += (width < 40 ? 4 : 7)) {
+            const NkUiDrawList *list = broken_lines_frame(ui, texts[t], (float)width, broken,
+                                                          sizeof(broken));
+            char joined[1024];
+            char want[1024];
+            size_t used = 0u;
+            size_t wanted = 0u;
+            char message[300];
+            CHECK(list != NULL, "lay out the broken text");
+            for (uint32_t i = 0u; i < list->ncmd; ++i) {
+                const NkUiDrawCmd *cmd = &list->cmd[i];
+                const NkUiTextRun *run = cmd->kind == NK_UI_DRAW_TEXT
+                                             ? (const NkUiTextRun *)cmd->custom : NULL;
+                float measured;
+                size_t glyphs;
+                if (run == NULL || run->text == NULL || cmd->element_id != 7u) continue;
+                /* The glyphs: a line the layout ends at a word that fits only without its
+                   space keeps that space, which draws nothing. */
+                glyphs = run->length;
+                while (glyphs > 0u && run->text[glyphs - 1u] == ' ') --glyphs;
+                measured = whole_pixel_measure(NULL, run->font, run->size_px, run->text,
+                                               glyphs).width;
+                /* A box narrower than any letter still shows one letter a line. */
+                (void)snprintf(message, sizeof(message),
+                               "in a %d px column the line \"%.*s\" is %.0f px wide", width,
+                               (int)run->length, run->text, (double)measured);
+                CHECK(measured <= (float)width ||
+                          (run->length <= 2u && ((unsigned char)run->text[0] & 0x80u) == 0u) ||
+                          (run->length <= 3u && ((unsigned char)run->text[0] & 0xC0u) == 0xC0u),
+                      message);
+                (void)snprintf(message, sizeof(message),
+                               "in a %d px column a line starts inside a letter: \"%.*s\"",
+                               width, (int)run->length, run->text);
+                CHECK(run->length == 0u || ((unsigned char)run->text[0] & 0xC0u) != 0x80u,
+                      message);
+                for (size_t c = 0u; c < run->length && used + 1u < sizeof(joined); ++c) {
+                    if (run->text[c] != ' ' && run->text[c] != '\n') joined[used++] = run->text[c];
+                }
+            }
+            joined[used] = '\0';
+            for (const char *c = texts[t]; *c != '\0' && wanted + 1u < sizeof(want); ++c) {
+                if (*c != ' ') want[wanted++] = *c;
+            }
+            want[wanted] = '\0';
+            (void)snprintf(message, sizeof(message),
+                           "in a %d px column the lines together are the text: \"%.200s\"", width,
+                           joined);
+            CHECK(strcmp(joined, want) == 0, message);
+            if (t == 3u && width >= 60) {
+                (void)snprintf(message, sizeof(message),
+                               "in a %d px column text of short words is given back as it is",
+                               width);
+                CHECK(strcmp(broken, texts[t]) == 0, message);
+            }
+            if (t == 1u && width >= 200) {
+                /* "Folder:" and "and more" fit: they are left whole, with their spaces. */
+                const char *line = broken;
+                CHECK(strncmp(broken, "Folder: ", 8u) == 0 &&
+                          strstr(broken, " and more") != NULL,
+                      "the words that fit around a path keep their spaces");
+                /* Every line the break ends inside the path ends after a '/' or '-'. */
+                while ((line = strchr(line, '\n')) != NULL) {
+                    (void)snprintf(message, sizeof(message),
+                                   "in a %d px column the path breaks after '%c': \"%.200s\"",
+                                   width, line[-1], broken);
+                    CHECK(line[-1] == '/' || line[-1] == '-', message);
+                    ++line;
+                }
+            }
+        }
+    }
+    {
+        /* Without an open frame there is no storage for it: an empty string. */
+        CHECK(nk_ui_text_break(ui, texts[0], &body, 100.0f)[0] == '\0',
+              "nk_ui_text_break outside a frame gives \"\"");
+    }
+    nk_ui_destroy(ui);
+    return 1;
+}
+
 /* Each measure the layout asks of the backend, in order (audit 2026-11-17). */
 #define MEASURE_LOG_CAP 4096
 static struct {
@@ -3204,7 +3351,8 @@ int main(int argc, char **argv) {
     size_t actual_size;
     if (!test_no_platform_headers() || !test_theme_tokens() || !test_scale_model() ||
         !test_text_size_scales_type_only() ||
-        !test_wrapped_lines_fit_their_box() || !test_word_measure_reads_a_bounded_context() ||
+        !test_wrapped_lines_fit_their_box() || !test_text_break_keeps_every_line_in_its_box() ||
+        !test_word_measure_reads_a_bounded_context() ||
         !test_explicit_ui_scale_values() || !test_typed_prefs_and_events() ||
         !test_theme_access() || !test_overlay_rejects_waves() ||
         !test_container_return_contract() || !test_backend_declarations() ||

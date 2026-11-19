@@ -443,6 +443,16 @@ const char *nk_ui_frame_text(NkUi *ui, const char *text);
    most ten containers per layout, so long names are shortened, not clipped. */
 const char *nk_ui_text_clamp(NkUi *ui, const char *text, const NkUiTextStyle *style,
                              float max_width, int max_lines);
+/* Text for a wrapping box `max_width` logical px wide that shows it whole: a word (a run
+   between spaces or line breaks) wider than the box is broken onto lines of its own, each
+   piece as long as fits, after the piece's last '/', '\\', '_', '-' or '.' where that keeps at
+   least half of it, else after its last character that fits (CSS's overflow-wrap:
+   break-word). Words that fit are left to the layout's own word wrap, and no character is
+   left out or added but the line breaks. Measured after the display rules, as the run is
+   drawn. Returns frame storage, or "" when no frame is open or its text storage is full (as
+   nk_ui_frame_text). */
+const char *nk_ui_text_break(NkUi *ui, const char *text, const NkUiTextStyle *style,
+                             float max_width);
 /* One line of a list from *rest: text whose items are joined by " \xC2\xB7 "
    ("16x filtering \xC2\xB7 crisp keyboard"). The line is the whole items that
    fit max_width, each space a no-break space, so it is one run that is measured
