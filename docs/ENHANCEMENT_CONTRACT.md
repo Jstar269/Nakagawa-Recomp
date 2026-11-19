@@ -1087,6 +1087,10 @@ that builds one clip-space matrix per camera and tests object bounds against it.
 skipped. Choosing a pack sets that title's `"texpack"` part on; removing it forgets the folder (the folder itself
 is untouched) and returns the part to the library's.
 
+`"font_note_hidden": ["ULUS10000"]` lists the games whose Authentic page no longer shows the font note (the Hide on
+its FONTS card, [`docs/SETUP.md`](SETUP.md#verification-and-player-status)), at most as many as the library holds. A
+member that is not a disc ID is skipped.
+
 A title's `mode` is `library`, `authentic`, `enhanced` or `ace`; a part it does not name follows the library; its
 `"logic_60": "off"` turns Ace's 60 FPS game logic off. An entry that follows the library everywhere is not written.
 Reading never makes a choice more permissive: in an `"enhanced"` block, a part it does not name or a word this build

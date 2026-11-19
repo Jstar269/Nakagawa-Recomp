@@ -364,7 +364,7 @@ typedef enum { FLOW_NONE = 0, FLOW_BUILD, FLOW_BUILT, FLOW_BUILD_PARTS, FLOW_CON
                FLOW_PAGE_REMOVE,
                FLOW_PAGE_STOP, FLOW_PAGE_TITLE_ACE, FLOW_PAGE_TITLE_ENHANCED,
                FLOW_PAGE_TITLE_AUTHENTIC, FLOW_PAGE_TITLE_RENDER,
-               FLOW_PAGE_TITLE_RENDER_EFFECTS,
+               FLOW_PAGE_TITLE_RENDER_EFFECTS, FLOW_PAGE_TITLE_FONT_NOTE,
                FLOW_PAGE_SAVES, FLOW_PAGE_SAVES_RESTORE, FLOW_PAGE_SAVES_REPLACE,
                FLOW_PAGE_TITLE_STEAM, FLOW_PAGE_STEAM, FLOW_PAGE_STEAM_ACCOUNTS,
                FLOW_PAGE_STEAM_BLOCKED, FLOW_PAGE_TITLE_TALL,
@@ -1070,17 +1070,19 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         return player_ui_screen_title(ui, &title);
     }
     if (which == FLOW_PAGE_TITLE_ENHANCED || which == FLOW_PAGE_TITLE_AUTHENTIC ||
-        which == FLOW_PAGE_TITLE_RENDER || which == FLOW_PAGE_TITLE_RENDER_EFFECTS) {
+        which == FLOW_PAGE_TITLE_RENDER || which == FLOW_PAGE_TITLE_RENDER_EFFECTS ||
+        which == FLOW_PAGE_TITLE_FONT_NOTE) {
         /* #2245: a game's page as the player fills it for the user's own disc on Enhanced (or
            Authentic): every Enhanced part on, the longest last-session line the runtime's
            report gives, the disc check, the compatibility notes with the developer view, and
            Rebuild beside PLAY. On main the page did not scroll at the design text size, so
            this page pushed the prompt bar off the window. The render case adds #2151's notice
            with the longer of its two sentences (player_render_notice_text); the effects case
-           the longest sentence player_render_effects_text writes, every effect named. */
+           the longest sentence player_render_effects_text writes, every effect named. The
+           font note case is the Authentic page with the font note (player_app_font_note). */
         static PlayerUiTitle fixture;
         PlayerUiTitleModel title;
-        bool enhanced = which != FLOW_PAGE_TITLE_AUTHENTIC;
+        bool enhanced = which != FLOW_PAGE_TITLE_AUTHENTIC && which != FLOW_PAGE_TITLE_FONT_NOTE;
         fixture = k_titles[6];
         fixture.library_status_detail = "Built by an older Nakagawa. It still plays; rebuild "
                                         "it to use this version's fixes.";
@@ -1121,6 +1123,8 @@ static PlayerUiAction draw_page_case(NkUi *ui, FlowCase which) {
         } else if (which == FLOW_PAGE_TITLE_RENDER_EFFECTS) {
             title.render_notice_heading = "Partly drawn in software";
             title.render_notice_text = k_render_effects_all;
+        } else if (which == FLOW_PAGE_TITLE_FONT_NOTE) {
+            title.font_note_text = PLAYER_FONT_NOTE_TEXT;
         }
         return player_ui_screen_title(ui, &title);
     }
@@ -4394,6 +4398,43 @@ static void test_settings_pages(void) {
               "the render notice is never the first focus: PLAY is");
         if (ui != NULL) nk_ui_destroy(ui);
     }
+    /* The font note (owner request 2026-11-19): in Authentic with a stand-in or replacement
+       font in use, one sentence with Get fonts from my PSP and Hide. It never takes the first
+       focus and never replaces PLAY, so it never stands between the user and the game. */
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_FONT_NOTE, 1280, 720, dump, sizeof(dump)),
+          "the font note's page fits a 1280 x 720 window");
+    /* The dump holds each wrapped line on its own. */
+    CHECK(strstr(dump, "Text uses stand-in fonts.") != NULL &&
+              strstr(dump, "your PSP.") != NULL,
+          "the font note shows its sentence on the game's page");
+    CHECK(strstr(dump, "\"GET FONTS FROM MY PSP\"") != NULL && strstr(dump, "\"HIDE\"") != NULL,
+          "the font note offers Get fonts from my PSP and Hide");
+    CHECK(strstr(dump, "\"FONTS\"") != NULL, "the font note's eyebrow says Fonts");
+    CHECK(flow_case_fits(FLOW_PAGE_TITLE_FONT_NOTE, 960, 540, dump, sizeof(dump)),
+          "the font note fits the 960 x 540 minimum window");
+    CHECK(activate_flow_button(PLAYER_UI_ID_TITLE_FONT_NOTE_GET, FLOW_PAGE_TITLE_FONT_NOTE)
+                  .kind == PLAYER_UI_ACTION_FONT_NOTE_GET_FONTS,
+          "the font note's Get fonts from my PSP asks for the PSP fonts step");
+    {
+        PlayerUiAction hide = activate_flow_button(PLAYER_UI_ID_TITLE_FONT_NOTE_HIDE,
+                                                   FLOW_PAGE_TITLE_FONT_NOTE);
+        CHECK(hide.kind == PLAYER_UI_ACTION_HIDE_FONT_NOTE && hide.title_index == 6u,
+              "the font note's Hide asks to hide it for this game");
+    }
+    CHECK(activate_flow_button(PLAYER_UI_ID_TITLE_PRIMARY, FLOW_PAGE_TITLE_FONT_NOTE).kind ==
+              PLAYER_UI_ACTION_PRIMARY,
+          "PLAY still starts the game with the font note shown");
+    {
+        NkUi *ui = NULL;
+        (void)flow_case_layout(FLOW_PAGE_TITLE_FONT_NOTE, 1280, 720, &ui);
+        CHECK(ui != NULL && nk_ui_focused(ui) == PLAYER_UI_ID_TITLE_PRIMARY,
+              "the font note is never the first focus: PLAY is");
+        if (ui != NULL) nk_ui_destroy(ui);
+    }
+    CHECK(dump_flow_case(FLOW_PAGE_TITLE_AUTHENTIC, dump, sizeof(dump)) &&
+              strstr(dump, "stand-in fonts") == NULL &&
+              strstr(dump, "GET FONTS FROM MY PSP") == NULL,
+          "without the font note text the game's page has no font note");
     CHECK(dump_flow_case(FLOW_SETTINGS_NOTICES, dump, sizeof(dump)) &&
               strstr(dump, "synthetic-compiler 14.2") != NULL &&
               strstr(dump, "GPL-3.0-or-later; see LICENSE") != NULL,
@@ -7298,6 +7339,7 @@ static int capture_screens(const char *directory) {
             {FLOW_PAGE_TITLE_ENHANCED, "title-enhanced-full", PLAYER_UI_ID_TITLE_PRIMARY},
             {FLOW_PAGE_TITLE_RENDER, "title-render-notice", PLAYER_UI_ID_TITLE_PRIMARY},
             {FLOW_PAGE_TITLE_RENDER_EFFECTS, "title-render-effects", PLAYER_UI_ID_TITLE_PRIMARY},
+            {FLOW_PAGE_TITLE_FONT_NOTE, "title-font-note", PLAYER_UI_ID_TITLE_PRIMARY},
             /* Settings > Enhanced and a game's own page at their last rows, with Texture scaling at
                4x and the Smart 2D filter on (contract 11.3.3). */
             {FLOW_SETTINGS_ACE, "settings-enhanced-texture-scaling",

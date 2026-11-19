@@ -4104,7 +4104,14 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
             (void)player_app_render_notice(app, app->games[index].disc_id,
                                            &model.render_notice_heading,
                                            &model.render_notice_text);
-            model.now_s = player_app_reduce_motion(app) ? 0.0 : now_s;
+            /* The font note is about the next start, so a running game's page leaves it out. */
+            if (!app->is_game_running) {
+                if (app->wizard.font_slot_detail[0][0] == '\0') {
+                    player_app_refresh_font_status(app);
+                }
+                model.font_note_text = player_app_font_note(app, index);
+            }
+            model.now_s =player_app_reduce_motion(app) ? 0.0 : now_s;
             model.logical_width = scale.logical_w;
             model.logical_height = scale.logical_h;
             {
@@ -4167,6 +4174,9 @@ bool player_ui_nk_render(PlayerUiNk *player, PlayerApp *app,
                     player_app_open_title_enhanced(app, index);
                 }
                 action.kind = PLAYER_UI_ACTION_NONE;
+            } else if (action.kind == PLAYER_UI_ACTION_FONT_NOTE_GET_FONTS) {
+                /* main.c opens Settings > PSP fonts and looks for a PSP; Back comes here. */
+                nk_ui_router_set_focus(player->router, nk_ui_focused(player->ui));
             } else if (action.kind == PLAYER_UI_ACTION_OPEN_SAVES) {
                 if (player->titles[index].save_folder_enabled) {
                     player_ui_open_saves(player, app, index);
