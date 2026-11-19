@@ -18,7 +18,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TypeGuard
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS_PATH = ROOT / "tests" / "fixtures" / "homebrew_corpus" / "corpus.json"
@@ -51,9 +51,21 @@ def _fail(message: str) -> NoReturn:
     raise CorpusError(message)
 
 
+def _is_contained_relative(path: object) -> TypeGuard[str]:
+    """Whether ``path`` is a plain relative POSIX path that cannot leave the folder it is joined to.
+
+    Every ``/``-separated part must be a real name: no empty part (a leading ``/`` or a
+    doubled one), no ``.`` or ``..``. A backslash or a ``:`` is refused outright, because
+    Windows reads them as a separator or a drive and would join the path outside the root.
+    """
+    if not isinstance(path, str) or not path or "\\" in path or ":" in path:
+        return False
+    return all(part not in ("", ".", "..") for part in path.split("/"))
+
+
 def _check_file_entry(program_id: str, entry: dict[str, Any], seen: set[str]) -> None:
     path = entry.get("path")
-    if not isinstance(path, str) or not path or path.startswith("/") or ".." in path.split("/"):
+    if not _is_contained_relative(path):
         _fail(f"{program_id}: a file path must be relative and stay inside the samples root: {path!r}")
     if path in seen:
         _fail(f"{program_id}: {path} is listed twice")
@@ -61,7 +73,7 @@ def _check_file_entry(program_id: str, entry: dict[str, Any], seen: set[str]) ->
     if not _SHA1.match(str(entry.get("git_blob_sha1", ""))):
         _fail(f"{program_id}: {path} has no 40-hex git_blob_sha1")
     upstream = entry.get("upstream_path")
-    if not isinstance(upstream, str) or not upstream.startswith("src/samples/"):
+    if not _is_contained_relative(upstream) or not upstream.startswith("src/samples/"):
         _fail(f"{program_id}: {path} must name its upstream path under src/samples/")
 
 
@@ -108,6 +120,8 @@ def validate(corpus: dict[str, Any], lock: dict[str, Any] | None = None) -> None
         sample_dir = program.get("sample_dir")
         if not isinstance(sample_dir, str) or not sample_dir:
             _fail(f"{program_id}: sample_dir is required")
+        if not _is_contained_relative(sample_dir):
+            _fail(f"{program_id}: sample_dir must be relative and stay inside the samples root: {sample_dir!r}")
         if f"{sample_dir}/Makefile" not in seen:
             _fail(f"{program_id}: the program's Makefile is not pinned")
         if not program.get("copyright") or not program.get("title") or not program.get("target"):
@@ -134,6 +148,9 @@ def verify_sources(corpus: dict[str, Any], samples_root: Path) -> list[str]:
     differences: list[str] = []
     for program in corpus["programs"]:
         for entry in program["files"] + program["shared_files"]:
+            if not _is_contained_relative(entry["path"]):
+                differences.append(f"{entry['path']!r}: not a relative path inside the samples root")
+                continue
             file_path = samples_root / entry["path"]
             if not file_path.is_file():
                 differences.append(f"{entry['path']}: missing under {samples_root}")

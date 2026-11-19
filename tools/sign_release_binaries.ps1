@@ -14,8 +14,9 @@
 # not signed: each demo's completion-manifest.json lists the SHA-256 of its executable, and the player
 # hides a demo whose file no longer matches. Run it after the binaries are copied into
 # the staged folder and BEFORE the SBOMs are generated and the ZIP is written, so that SBOM.*,
-# bin/runtime-manifest.json and SHA256SUMS.txt describe the signed bytes. The script refreshes
-# bin/runtime-manifest.json itself and writes signing-record.json at the stage root.
+# bin/runtime-manifest.json and SHA256SUMS.txt describe the signed bytes. The script checks bin/ against the
+# attested bin/runtime-manifest.json before it signs, refreshes the manifest itself afterwards, and writes
+# signing-record.json at the stage root.
 #
 # The build attestations (SLSA Build L2) cover the UNSIGNED bytes the workflow built. A signature
 # changes the file's SHA-256, so `gh attestation verify` passes on the unsigned file, not on the signed
@@ -107,9 +108,18 @@ foreach ($file in $Files) {
 }
 if (Test-Path -LiteralPath (Join-Path $Root $RecordName)) { Fail "SIGN_RECORD_EXISTS: $RecordName is already in the stage" }
 
+$manifestPath = Join-Path (Join-Path $Root 'bin') 'runtime-manifest.json'
+$python = if ($env:PYTHON) { $env:PYTHON } else { 'python' }
+$tools = $PSScriptRoot
+# The manifest is rewritten after signing, so bin/ must match the attested one first: otherwise a DLL swapped or
+# added after staging would be recorded in the refreshed manifest as if it had been attested.
+if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+    & $python (Join-Path $tools 'stage_runtime_dlls.py') --target (Join-Path $Root 'bin') --verify-runtime-manifest
+    if ($LASTEXITCODE -ne 0) { Fail 'SIGN_MANIFEST_ATTESTED: bin/ does not match the attested bin/runtime-manifest.json; start from the attested bytes' }
+}
+
 # Every change below is undone if any step fails, so a stage is either untouched or completely signed: the
 # unsigned files and the previous runtime manifest are kept in a scratch folder until the record is written.
-$manifestPath = Join-Path (Join-Path $Root 'bin') 'runtime-manifest.json'
 $backup = Join-Path ([System.IO.Path]::GetTempPath()) ('nk-sign-backup-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $backup | Out-Null
 $hadManifest = Test-Path -LiteralPath $manifestPath -PathType Leaf
@@ -121,6 +131,7 @@ if ($hadManifest) {
 }
 $records = @()
 $certificate = $null
+$keepBackup = $false
 try {
     foreach ($file in $Files) {
         $relative = Relative $Root $file.FullName
@@ -147,8 +158,6 @@ try {
     }
 
     # bin/runtime-manifest.json lists the size and SHA-256 of every .exe and .dll in bin/: refresh it.
-    $python = if ($env:PYTHON) { $env:PYTHON } else { 'python' }
-    $tools = $PSScriptRoot
     & $python (Join-Path $tools 'stage_runtime_dlls.py') --target (Join-Path $Root 'bin') --write-runtime-manifest-only
     if ($LASTEXITCODE -ne 0) { Fail 'SIGN_MANIFEST: refreshing bin/runtime-manifest.json failed (needs Python on PATH, or $env:PYTHON)' }
     & $python (Join-Path $tools 'stage_runtime_dlls.py') --target (Join-Path $Root 'bin') --verify-runtime-manifest
@@ -174,14 +183,28 @@ try {
     $json = ($record | ConvertTo-Json -Depth 4) + "`n"
     [System.IO.File]::WriteAllText((Join-Path $Root $RecordName), $json, [System.Text.UTF8Encoding]::new($false))
 } catch {
-    foreach ($file in $Files) { Copy-Item -LiteralPath (Join-Path $backup $file.Name) -Destination $file.FullName -Force }
-    if ($hadManifest) { Copy-Item -LiteralPath (Join-Path $backup 'runtime-manifest.json') -Destination $manifestPath -Force }
-    else { Remove-Item -LiteralPath $manifestPath -Force -ErrorAction Ignore }
+    $signingError = $_
+    # Each restore runs on its own: one that fails must not stop the others, and the backup, the only local copy
+    # of the unsigned bytes, is kept until every file is back.
+    $restoreFailures = @()
+    foreach ($file in $Files) {
+        try { Copy-Item -LiteralPath (Join-Path $backup $file.Name) -Destination $file.FullName -Force }
+        catch { $restoreFailures += "$(Relative $Root $file.FullName) ($($_.Exception.Message))" }
+    }
+    try {
+        if ($hadManifest) { Copy-Item -LiteralPath (Join-Path $backup 'runtime-manifest.json') -Destination $manifestPath -Force }
+        else { Remove-Item -LiteralPath $manifestPath -Force -ErrorAction Ignore }
+    } catch { $restoreFailures += "bin/runtime-manifest.json ($($_.Exception.Message))" }
     Remove-Item -LiteralPath (Join-Path $Root $RecordName) -Force -ErrorAction Ignore
-    Write-Warning 'Signing failed: the stage was restored to its unsigned state.'
-    throw
+    if ($restoreFailures.Count -gt 0) {
+        $keepBackup = $true
+        Write-Warning "Signing failed and the stage could not be restored: $($restoreFailures -join '; '). The unsigned files and the attested manifest are kept in $backup"
+    } else {
+        Write-Warning 'Signing failed: the stage was restored to its unsigned state.'
+    }
+    throw $signingError
 } finally {
-    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Ignore
+    if (-not $keepBackup) { Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Ignore }
 }
 Write-Output "signed $($records.Count) file(s) as $($certificate.Subject); wrote $RecordName and refreshed bin/runtime-manifest.json"
 if ($TestCertificate) { Write-Warning 'TEST CERTIFICATE: this package is a rehearsal and is never published.' }

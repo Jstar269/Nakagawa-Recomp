@@ -357,7 +357,8 @@ resident-agent containment test probe.
    and the case, and a report path unique to the case and boot. With Nakagawa
    Link this is the agent's guarded probe wrapper. Every reset and launch
    re-checks the lock, and each launch and its outcome are appended to the
-   lock's `probes_run`.
+   lock's `probes_run` through the shared lock writer
+   ([writers](../tests/fixtures/psp_oracle/README.md)).
 4. **Accept or reject.** A case is `ACCEPTED` only when the runner report was
    written by this launch, names exactly `transport-write` and the case, and
    every envelope carries the plan's source commit, the staged PRX digest, the

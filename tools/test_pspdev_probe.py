@@ -8,7 +8,9 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -65,6 +67,32 @@ class ProbeTests(unittest.TestCase):
             self.assertNotIn(str(exe.parent), result["stdout"])
             self.assertNotIn("Users", result["stdout"])
             self.assertIn("<redacted-path>", result["stdout"])
+
+    def test_paths_with_spaces_are_redacted_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            exe = Path(td) / "psp-config"
+            exe.write_bytes(b"x")
+            lines = (
+                # Assembled so the source text holds no literal local path (publication audit).
+                "C:/" + "Users/Jane Doe/pspdev/psp/sdk",
+                "C:" + r"\Users\Jane Doe\pspdev\bin\psp-gcc.exe: usage",
+                "\\\\" + r"server\share\Jane Doe\pspdev",
+                "/" + "home/Jane Doe/pspdev/psp/sdk",
+            )
+
+            def runner(command, **kwargs):
+                return subprocess.CompletedProcess(
+                    command, 0, stdout="\n".join(lines).encode() + b"\n", stderr=b""
+                )
+
+            result = pspdev_probe.probe_executable(
+                "psp-config", exe, ("--pspsdk-path",), runner=runner
+            )
+            self.assertNotIn("Doe", result["stdout"])
+            self.assertNotIn("pspdev", result["stdout"])
+            self.assertEqual(result["stdout"], "<redacted-path>\n" * len(lines))
+            # An unsalted hash of a profile path can be reversed by guessing the user name.
+            self.assertNotIn("path_sha256", result)
 
     def test_include_paths_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -163,6 +191,43 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(result["status"], "output_limit")
         self.assertTrue(result["stdout_truncated"])
         self.assertEqual(len(result["stdout"]), 1024)
+
+    def test_real_runner_keeps_output_a_slow_reader_has_not_drained_yet(self) -> None:
+        # The child writes and exits before its stdout reader is scheduled. The runner must
+        # let the reader drain the pipe before closing it, or the tail is lost silently and the
+        # result still says "completed" with nothing truncated.
+        real_popen = subprocess.Popen
+
+        class SlowReader:
+            def __init__(self, process, stream):
+                self._process = process
+                self._stream = stream
+                self._first = True
+
+            def read(self, size):
+                if self._first:
+                    self._first = False
+                    self._process.wait()
+                    time.sleep(0.2)  # stands in for a reader thread the scheduler runs late
+                return self._stream.read(size)
+
+            def close(self):
+                self._stream.close()
+
+        def popen(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            process.stdout = SlowReader(process, process.stdout)
+            return process
+
+        with mock.patch.object(pspdev_probe.subprocess, "Popen", popen):
+            result = pspdev_probe._run_bounded_process(
+                [sys.executable, "-c", "import sys; sys.stdout.write('identity-tail')"],
+                timeout=10.0,
+            )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["stdout"], b"identity-tail")
+        self.assertFalse(result["stdout_truncated"])
 
     def test_oversized_executable_fails_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as td:

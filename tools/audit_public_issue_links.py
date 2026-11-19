@@ -4,15 +4,16 @@
 
 """Verify public GitHub Issue and PR references in tracked documentation.
 
-The audit has two purposes:
+The audit checks:
 
 * full ``github.com/Jstar269/Nakagawa-Recomp/{issues,pull}/N`` URLs, in any letter
   case, are checked in every tracked Markdown document;
 * shorthand ``#N`` references are checked in explicitly current-facing documents
   (including ``.github/copilot-instructions.md``);
-* docs/STATUS.md ``## At a glance`` rows whose State cell is ``Open`` must not link to a
-  closed public issue/PR, so a merged fix cannot silently leave an "Open" row
-  pointing at the closed tracker item it resolved;
+* in docs/STATUS.md ``## Live work areas``, a clause that says work remains must not
+  cite a closed issue or a closed or merged PR, so a merged fix cannot silently leave
+  the summary presenting the closed tracker item it resolved as remaining work. A
+  docs/STATUS.md without that section is itself a finding, not a silent pass;
 * in current-facing documents, a clause that says work is "in the works", and a
   table column headed "Tracking", must not cite a closed issue or a closed or
   merged PR: the work it points at is finished, so the pointer misleads readers.
@@ -105,14 +106,16 @@ TRACKER_LINK_PAT = re.compile(
 )
 # Shorthand references must look like tracker prose, not Markdown headings such as "# 1".
 SHORTHAND_PAT = re.compile(r"(?<![A-Fa-f0-9_#])#(\d+)\b")
-STATE_LABEL_PAT = re.compile(r"\[(OPEN ISSUE|CLOSED ISSUE|OPEN PR|CLOSED PR|MERGED PR)\]")
-TRACKER_SECTION = "## Current public tracker"
-# docs/STATUS.md "At a glance" rows declare a State cell ("Open") next to the tracker
-# links they cite. A row whose State says the work item is open must not point at a
-# closed issue/PR; that is exactly how the portable float-to-word row silently went
-# stale against the closed #38 after the fix merged.
-AT_A_GLANCE_SECTION = "## At a glance"
-ISSUES_ROW_STATE_PAT = re.compile(r"^\|\s*\w+\s*\|\s*(\w+)\s*\|")
+STATUS_DOC = "docs/STATUS.md"
+# docs/STATUS.md "Live work areas" bullets name the work that remains and link the live
+# issue that tracks it. A clause there saying work remains must not point at a closed
+# issue/PR; that is how an "Open" summary row once went stale against the closed #38 after
+# its fix merged.
+LIVE_WORK_SECTION = "## Live work areas"
+# The docs/STATUS.md sections this audit checks. A missing one is a named finding: the
+# summary's layout changed, and the check would otherwise run on nothing and pass.
+STATUS_AUDITED_SECTIONS = (LIVE_WORK_SECTION,)
+REMAINING_WORK_PAT = re.compile(r"\bremains?\b.*\bwork\b", re.IGNORECASE)
 IN_THE_WORKS_PAT = re.compile(r"\bin the works\b", re.IGNORECASE)
 # A clause ends at a sentence stop or semicolon followed by whitespace; the
 # periods inside link URLs are never followed by whitespace.
@@ -334,6 +337,83 @@ def stale_in_the_works_findings(
     return findings
 
 
+def status_findings(text: str, issues_map: dict[int, dict]) -> list[tuple[str, int, str, str, bool]]:
+    """Check docs/STATUS.md: every audited section exists, and live work cites open items.
+
+    A ``## Live work areas`` block (a paragraph or a list item) is split into clauses; a
+    clause saying work remains may cite only open issues/PRs.
+    """
+    findings: list[tuple[str, int, str, str, bool]] = []
+    lines = text.splitlines()
+    headings = {line.strip() for line in lines if line.startswith("## ")}
+    for section in STATUS_AUDITED_SECTIONS:
+        if section not in headings:
+            findings.append(
+                (
+                    STATUS_DOC,
+                    1,
+                    section,
+                    (
+                        f"MISSING AUDITED SECTION: {STATUS_DOC} has no '{section}' heading, so "
+                        "the check for it would run on nothing; restore the heading or retarget "
+                        "tools/audit_public_issue_links.py"
+                    ),
+                    False,
+                )
+            )
+
+    def check_block(block_text: str, line_no: int) -> None:
+        for clause in CLAUSE_SPLIT_PAT.split(block_text):
+            if not REMAINING_WORK_PAT.search(clause):
+                continue
+            for num in dict.fromkeys(_tracker_numbers(clause)):
+                obj = issues_map.get(num)
+                if obj is None or obj.get("state") == "open":
+                    continue
+                findings.append(
+                    (
+                        STATUS_DOC,
+                        line_no,
+                        f"#{num}",
+                        (
+                            f"STALE LIVE WORK POINTER: a '{LIVE_WORK_SECTION[3:]}' clause says work "
+                            f"remains but cites #{num}, a public {public_status_label(obj)}; cite "
+                            "the open item that tracks the remaining work, or describe the finished "
+                            "work plainly"
+                        ),
+                        False,
+                    )
+                )
+
+    in_section = False
+    block: list[str] = []
+    block_start = 0
+
+    def flush() -> None:
+        if block:
+            check_block(" ".join(block), block_start)
+            block.clear()
+
+    for idx, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if line.startswith("## "):
+            flush()
+            in_section = stripped == LIVE_WORK_SECTION
+            continue
+        if not in_section:
+            continue
+        if not stripped or stripped.startswith("#"):
+            flush()
+            continue
+        if LIST_ITEM_PAT.match(line):
+            flush()
+        if not block:
+            block_start = idx
+        block.append(stripped)
+    flush()
+    return findings
+
+
 def audit_markdown_files(
     repo_root: pathlib.Path, issues_map: dict[int, dict]
 ) -> list[tuple[str, int, str, str, bool]]:
@@ -348,8 +428,6 @@ def audit_markdown_files(
 
         is_current_doc = rel in SHORTHAND_AUDIT_DOCS
         is_historical_doc = rel in HISTORICAL_EVIDENCE_DOCS
-        in_tracker_section = False
-        in_at_a_glance = False
         in_fenced_code = False
 
         text = doc_path.read_text(encoding="utf-8")
@@ -357,10 +435,6 @@ def audit_markdown_files(
             stripped = line.lstrip()
             if stripped.startswith("```") or stripped.startswith("~~~"):
                 in_fenced_code = not in_fenced_code
-
-            if line.startswith("## "):
-                in_tracker_section = rel == "docs/STATUS.md" and line.strip() == TRACKER_SECTION
-                in_at_a_glance = rel == "docs/STATUS.md" and line.strip() == AT_A_GLANCE_SECTION
 
             url_matches = _canonical_url_matches(line)
             for match in MALFORMED_TRACKER_URL_PAT.finditer(line):
@@ -473,61 +547,10 @@ def audit_markdown_files(
                             )
                         )
 
-            if in_at_a_glance and url_matches:
-                row_state = ISSUES_ROW_STATE_PAT.match(line)
-                if row_state and row_state.group(1) == "Open":
-                    for match in url_matches:
-                        num = int(match.group(2))
-                        listed = issues_map.get(num)
-                        if listed is None:
-                            # An unresolvable number is already reported above.
-                            continue
-                        if listed.get("state") != "open":
-                            findings.append(
-                                (
-                                    rel,
-                                    idx,
-                                    f"#{num}",
-                                    (
-                                        "STALE TRACKER STATUS: row declares State 'Open' but "
-                                        f"#{num} is a public {public_status_label(listed)}"
-                                    ),
-                                    False,
-                                )
-                            )
-
-            if in_tracker_section and url_matches:
-                labels = STATE_LABEL_PAT.findall(line)
-                if len(labels) != len(url_matches):
-                    findings.append(
-                        (
-                            rel,
-                            idx,
-                            line.strip(),
-                            "TRACKER STATUS LABEL COUNT MISMATCH",
-                            False,
-                        )
-                    )
-                else:
-                    for match, label in zip(url_matches, labels, strict=True):
-                        num = int(match.group(2))
-                        listed = issues_map.get(num)
-                        if listed is None:
-                            continue
-                        expected = public_status_label(listed)
-                        if label != expected:
-                            findings.append(
-                                (
-                                    rel,
-                                    idx,
-                                    f"#{num} [{label}]",
-                                    f"STALE TRACKER STATUS: expected [{expected}]",
-                                    False,
-                                )
-                            )
-
         if rel in CURRENT_FACING_DOCS:
             findings.extend(stale_in_the_works_findings(rel, text, issues_map))
+        if rel == STATUS_DOC:
+            findings.extend(status_findings(text, issues_map))
 
     return findings
 

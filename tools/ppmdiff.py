@@ -8,8 +8,9 @@
 """
 Usage: python tools/ppmdiff.py [--threshold N] [--watch] [dirA] [dirB]
 Compare frames in dirA and dirB.
-If --watch is specified or SR_FBSNAP=1 is set in the environment,
-automatically watch the directories and generate a live visual_regression_report.json.
+With --watch, watch the directories and keep a live visual_regression_report.json; a comparison
+that fails coverage removes the report, so no stale pass is left behind. Watch mode is chosen
+only by --watch: SR_FBSNAP is the runtime's capture setting and never changes how this tool runs.
 Otherwise, perform a single comparison run and output the JSON report.
 Exit code in one-shot mode:
   0 = all frames passed with complete coverage
@@ -241,6 +242,28 @@ def run_diff(da, db, threshold):
     return report, ok
 
 
+def regenerate_watch_report(da, db, threshold, report_path):
+    """One watch-mode comparison. Returns True when a report was written.
+
+    A coverage failure removes the previous report instead of leaving its result in place, so
+    anything reading the live report never sees an old pass after the frames diverged.
+    """
+    try:
+        report, _ = run_diff(da, db, threshold)
+    except CoverageError as exc:
+        print(f"Coverage problem: {exc}", file=sys.stderr)
+        try:
+            os.remove(report_path)
+        except FileNotFoundError:
+            pass
+        else:
+            print(f"Removed the stale {report_path}", file=sys.stderr)
+        return False
+    with open(report_path, "w") as f:
+        json.dump(report, f, indent=2)
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description="PPM framebuffer diff reporter")
     ap.add_argument("--threshold", type=int, default=3,
@@ -254,7 +277,7 @@ def main():
     da = args.dirA
     db = args.dirB
     threshold = args.threshold
-    watch_mode = args.watch or os.environ.get("SR_FBSNAP") == "1"
+    watch_mode = args.watch
 
     report_path = "visual_regression_report.json"
 
@@ -280,7 +303,7 @@ def main():
             sys.exit(1)
         return
 
-    # --- watch mode (unchanged) ---
+    # --- watch mode ---
     print(f"Watching {da} and {db} for changes...")
     last_mtimes = {}
 
@@ -302,14 +325,7 @@ def main():
 
             if current_mtimes != last_mtimes:
                 print("Change detected. Regenerating report...")
-                try:
-                    report, _ = run_diff(da, db, threshold)
-                except CoverageError as exc:
-                    print(f"Coverage problem: {exc}", file=sys.stderr)
-                    last_mtimes = current_mtimes
-                    continue
-                with open(report_path, "w") as f:
-                    json.dump(report, f, indent=2)
+                regenerate_watch_report(da, db, threshold, report_path)
                 last_mtimes = current_mtimes
 
             time.sleep(0.5)
