@@ -25,6 +25,11 @@ extern "C" {
 /* An enhancement package id (at most 64 characters, see
    nk_title_manifest_enhancement_id_valid) plus NUL. */
 #define NK_MAX_ENHANCEMENT_PACKAGE_ID (64u + 1u)
+/* The longest title id, a manifest's $.id (^[a-z0-9][a-z0-9._-]{0,62}$ in
+   assets/title_manifest.schema.json): every player and launch buffer that
+   holds one is NK_TITLE_ID_MAX_CHARS + 1 bytes, so an id the manifest parsers
+   accept always fits. */
+#define NK_TITLE_ID_MAX_CHARS 63u
 
 typedef enum {
     NK_OK = 0,
@@ -83,7 +88,7 @@ typedef struct {
        (nk_disc_verify.h), 0 when it was not checked. */
     uint32_t disc_verification;
     char prepared_root[NK_MAX_PATH];
-    char title_id[64];
+    char title_id[NK_TITLE_ID_MAX_CHARS + 1u];
     uint64_t iso_size_bytes;
     NkGameSupportStatus status;
     bool is_experimental;

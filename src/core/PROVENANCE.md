@@ -83,7 +83,8 @@ it; the phase-1 disc route then runs unchanged.
   `ccf084593f0de93154597d47a470a7b539d4ca0cfa4773fddfd91c9a9e8a026a`), "based on benhur's code, rewrite by tpu",
   Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later, kept GPL-2.0-or-later with its notice. LOCAL DELTA: C99 with
   `size_t` lengths bounded at 64 MiB; a match distance decoded in 64 bits; a match copy and a literal stop at the first
-  byte that does not fit; a literal-context shift past the byte width selects context 0.
+  byte that does not fit; a literal-context shift past the byte width selects context 0; a stored stream whose
+  declared size passes the output or its input fails instead of being truncated (2026-11-18).
 - `nk_psp_npumdimg.c/.h` from `Core/FileSystems/BlockDevices.cpp` (SHA-256
   `d29e6d39dce987f2f88183bb0fe15112b1cba4fc09507be7a822e7bb4fb01029`, `NPDRMDemoBlockDevice`) and the `table_info`
   layout in `BlockDevices.h` (SHA-256 `8253d1c6f18b17d9c6023e59067e9e5a22b997b7703b67deb401f785f4a00fe5`),
