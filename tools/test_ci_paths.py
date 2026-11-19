@@ -686,7 +686,8 @@ class CiPathAdversarialTests(unittest.TestCase):
         # _is_unexecuted_test's own answer, so a misrouted module fails here; a gate that
         # starts or stops naming one of these modules updates its row.
         for path, expected in (
-            ("tools/test_dispatch_c.py", "false"),
+            # Gate-run through test_contrib_check and test_cpu_lle, which name it.
+            ("tools/test_dispatch_c.py", "true"),
             ("tools/test_evf_c.py", "false"),
             ("tools/test_guestmem_c.py", "false"),
             ("tools/test_pgd_c.py", "false"),
