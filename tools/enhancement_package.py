@@ -1476,21 +1476,35 @@ def ace_part_sites(data: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]
     return out
 
 
+def _published_alignments(data: Mapping[str, Any]) -> dict[str, int]:
+    """Every symbolic name a declaration resolves, with the byte alignment its address needs.
+
+    A name used as code (a site's function or alternate, an ace part site, the update boundary,
+    a hook) needs 4 bytes, as an instruction does. A name used only as a data site's symbol needs
+    the largest element size among the data sites that name it, so that each element, at an
+    offset aligned to its own size, is aligned too. A name used both ways needs 4.
+    """
+    align: dict[str, int] = {}
+    for site in data.get("data_sites", ()):
+        name = site["symbol"]
+        align[name] = max(align.get(name, 1), DATA_TYPES[site["type"]][0])
+    code: set[str] = set()
+    for site in data.get("sites", ()):
+        code.add(site["function"])
+        code.update(site.get("alternates", ()))
+    for _path, site in ace_part_sites(data):
+        code.add(site["function"])
+    if "update_boundary" in data:
+        code.add(data["update_boundary"]["function"])
+    for hook in data.get("hooks", ()):
+        code.add(hook["symbol"])
+    align.update(dict.fromkeys(code, 4))
+    return align
+
+
 def _published_names(data: Mapping[str, Any]) -> set[str]:
     """Every symbolic name a declaration resolves: the names its site map must hold."""
-    names: set[str] = set()
-    for site in data.get("sites", ()):
-        names.add(site["function"])
-        names.update(site.get("alternates", ()))
-    for _path, site in ace_part_sites(data):
-        names.add(site["function"])
-    if "update_boundary" in data:
-        names.add(data["update_boundary"]["function"])
-    for site in data.get("data_sites", ()):
-        names.add(site["symbol"])
-    for hook in data.get("hooks", ()):
-        names.add(hook["symbol"])
-    return names
+    return set(_published_alignments(data))
 
 
 def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
@@ -1525,13 +1539,17 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
     site_map = data["site_map"]
     if not isinstance(site_map, dict) or not site_map:
         fail("site_map", "site_map must be a non-empty object of symbolic name -> address")
+    alignments = _published_alignments(declaration)
     # Two names may share an address (the decomp's name and a site's own): that publishes no other address.
     for name, address in site_map.items():
         check_not_address_literal(name, f"site_map.{name}", "site map name")
         if not SYMBOL_RE.match(name):
             fail(f"site_map.{name}", f"site map name {name!r} does not match required pattern {SYMBOL_RE.pattern}")
-        if not isinstance(address, str) or not SITE_MAP_ADDRESS_RE.match(address) or int(address, 16) % 4:
-            fail(f"site_map.{name}", f"address {address!r} must be a 4-byte-aligned 0x%08x hex string")
+        # A code name, and a name no site uses (refused below), need 4 bytes; a data-only name its
+        # element size (_published_alignments).
+        align = alignments.get(name, 4)
+        if not isinstance(address, str) or not SITE_MAP_ADDRESS_RE.match(address) or int(address, 16) % align:
+            fail(f"site_map.{name}", f"address {address!r} must be a {align}-byte-aligned 0x%08x hex string")
         # A project-assigned name for a function without a decompilation name ends in its own address
         # (hst_fn_0001ea64): an 8-hex suffix is that name's address and no other value.
         suffix = ADDRESS_SUFFIX_RE.search(name)
@@ -3513,6 +3531,10 @@ def verify_and_resolve_data_sites(
             fail(f"{path}.symbol", f"Cannot resolve data symbol {symbol!r} (fail-closed refusal)")
         size = DATA_TYPES[site["type"]][0]
         addr = int(symbol_to_addr[symbol]) + int(site["offset"])
+        if addr % size:
+            # The title reads the element with an aligned load; publish refuses the same address.
+            fail(path, f"{symbol}+{site['offset']} is at 0x{addr & 0xFFFFFFFF:08x}, which is not aligned to its "
+                       f"{size}-byte {site['type']} element (fail-closed refusal)")
         length = size * int(site["count"])
         stock = read_data_fn(addr, length)
         if stock is None or len(stock) != length:
