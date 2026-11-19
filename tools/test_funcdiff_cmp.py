@@ -375,7 +375,7 @@ class TestFuncdiffReplay(unittest.TestCase):
             proc = subprocess.run(argv, capture_output=True, text=True, cwd=ROOT)
             if proc.returncode != 0:
                 raise AssertionError(proc.stdout + proc.stderr)
-        stub_src = os.path.join(work, "hle_stub.c")
+        stub_src = os.path.join(work, "funcdiff_hle_stub.c")
         with open(stub_src, "w", encoding="ascii") as fh:
             fh.write(FUNCDIFF_HLE_STUB)
         flags = [CC, "-O0", "-w", "-D_CRT_SECURE_NO_WARNINGS", "-DSR_INSTRUCTION_TRACE",

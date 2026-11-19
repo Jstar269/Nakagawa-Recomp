@@ -888,7 +888,10 @@ class Flash0FontDeviceTests(unittest.TestCase):
         # A listing the host could not allocate returns ENOMEM (0x8001000C), the runtime's other
         # ENOMEM value (hle_system.c SREG_ERR_NOMEM). Failing before: both sites returned
         # 0x80010008, which is ENOEXEC in the PSP errno space.
-        enomem = c_unsigned_define(ROOT / "src" / "rt" / "hle_system.c", "SREG_ERR_NOMEM")
+        defines = re.findall(r"^#define SREG_ERR_NOMEM\s+(0x[0-9A-Fa-f]+)u\b",
+                             hle_sources.text(headers=False), re.MULTILINE)
+        self.assertEqual(len(defines), 1, "the runtime HLE defines SREG_ERR_NOMEM once")
+        enomem = int(defines[0], 16)
         self.assertEqual(enomem, 0x8001000C)
         self.assertEqual(c_unsigned_define(FLASH0_HEADER, "SR_FLASH0_ERR_NO_MEMORY"), enomem)
         source = (ROOT / "src" / "rt" / "flash0_font.c").read_text(encoding="utf-8")
