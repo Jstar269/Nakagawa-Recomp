@@ -695,9 +695,11 @@ static void test_hostile_iso_parser(const char *test_dir) {
     snprintf(out_file, sizeof(out_file), "%s%cextracted.bin", test_dir, nk_platform_path_separator());
     assert(nk_iso_extract_file(fpath, "A", out_file) == NK_ERROR_INVALID_ISO);
 
-    /* 5b. Extraction with hostile depth. The root's only record, A, is the root itself, so
-     * every component of A/A/.../A resolves and only the depth limit (16) can refuse a path
-     * of 17 components; 16 of them extract the root's own sector. */
+    /* 5b. Extraction with hostile depth. The root's record A is the root itself, so every
+     * component of A/A/.../A resolves, and its record F is a file whose extent is the root's
+     * own sector. Only the depth limit (16) can refuse a path of 17 components; of 16, the
+     * path A/.../A/F extracts the root's own sector. A path that ends at the directory A
+     * names no file, at any depth (a directory is never extracted as a file). */
     printf("[HOSTILE_TEST] Subtest 5b: extraction path deeper than the limit\n"); fflush(stdout);
     snprintf(fpath, sizeof(fpath), "%s%cself_nested.iso", test_dir, nk_platform_path_separator());
     {
@@ -709,10 +711,19 @@ static void test_hostile_iso_parser(const char *test_dir) {
         memcpy(&pvd_nest[1], "CD001", 5);
         write_dir_record(pvd_nest, 156, "\0", 1, 17, 2048, true);
         write_dir_record(&nest_iso[17 * 2048], 0, "A", 1, 17, 2048, true);
+        write_dir_record(&nest_iso[17 * 2048], 34, "F", 1, 17, 2048, false);
         write_test_file(fpath, nest_iso, sizeof(nest_iso));
-        for (int level = 2; level <= 16; level++) strcat(nest_path, "/A");
+        for (int level = 2; level <= 15; level++) strcat(nest_path, "/A");
+        assert(nk_iso_extract_file(fpath, nest_path, out_file) == NK_ERROR_FILE_NOT_FOUND);
+        strcat(nest_path, "/F");
         assert(nk_iso_extract_file(fpath, nest_path, out_file) == NK_OK);
-        strcat(nest_path, "/A");
+        snprintf(nest_path, sizeof(nest_path), "A");
+        for (int level = 2; level <= 16; level++) strcat(nest_path, "/A");
+        assert(nk_iso_extract_file(fpath, nest_path, out_file) == NK_ERROR_FILE_NOT_FOUND);
+        strcat(nest_path, "/F");
+        assert(nk_iso_extract_file(fpath, nest_path, out_file) == NK_ERROR_INVALID_ISO);
+        snprintf(nest_path, sizeof(nest_path), "A");
+        for (int level = 2; level <= 17; level++) strcat(nest_path, "/A");
         assert(nk_iso_extract_file(fpath, nest_path, out_file) == NK_ERROR_INVALID_ISO);
     }
 
