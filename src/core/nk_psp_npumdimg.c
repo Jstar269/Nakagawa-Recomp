@@ -47,6 +47,7 @@
 
 #include "nk_psp_amctrl.h"
 #include "nk_psp_builtin_keys.h"
+#include "nk_psp_keystore.h"
 #include "nk_psp_lzrc.h"
 #include "nk_psp_npumdimg.h"
 #include "nk_platform.h"
@@ -285,8 +286,9 @@ void nk_npumdimg_close(NkNpumdimg *img)
     free(img->table_);
     free(img->tempBuf_);
     free(img->blockBuf_);
-    memset(img->vkey, 0, sizeof(img->vkey));
-    memset(img->hkey, 0, sizeof(img->hkey));
+    /* A plain memset before free is a dead store the compiler may drop. */
+    nk_secure_zero(img->vkey, sizeof(img->vkey));
+    nk_secure_zero(img->hkey, sizeof(img->hkey));
     free(img);
 }
 
@@ -361,6 +363,8 @@ int nk_npumdimg_open(NkPspCtx *ctx, const NkPsarSource *src,
     if (rc == 0) rc = sceDrmBBCipherInit(ctx, &ckey, 1, 2, img->hkey, img->vkey, 0);
     if (rc == 0) rc = sceDrmBBCipherUpdate(ctx, &ckey, np_header+0x40, 0x60);
     (void)sceDrmBBCipherFinal(&ckey);
+    nk_secure_zero(&mkey, sizeof(mkey));
+    nk_secure_zero(&ckey, sizeof(ckey));
     if (rc != 0) {
         nk_npumdimg_close(img);
         return rc;
@@ -482,6 +486,7 @@ int nk_npumdimg_read_block(NkPspCtx *ctx, NkNpumdimg *img, uint32_t block,
         rc = sceDrmBBCipherInit(ctx, &ckey, 1, 2, img->hkey, img->vkey, t->offset>>4);
         if (rc == 0) rc = sceDrmBBCipherUpdate(ctx, &ckey, readBuf, t->size);
         (void)sceDrmBBCipherFinal(&ckey);
+        nk_secure_zero(&ckey, sizeof(ckey));
         if (rc != 0) return rc;
     }
 

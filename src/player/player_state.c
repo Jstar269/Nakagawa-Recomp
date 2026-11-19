@@ -1247,89 +1247,89 @@ static const char *const k_part_texscale_words[] = {"2", "3", "4", "5", "6", "of
 static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
     {"af", "Texture filtering",
      "Keeps slanted surfaces sharp. Save pictures keep the filtering.",
-     5, k_part_af_values, k_part_af_labels, k_part_af_words, 16},
+     5, k_part_af_values, k_part_af_labels, k_part_af_words, 16, false},
     {"text", "Crisp system text",
      "Draws the on-screen keyboard at your screen's resolution.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 1},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 1, false},
     {"readout", "Speed readout",
      "The game's speed and frame rate in a corner, over its HUD.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
     {"notice", "Game badge",
      "Names the mode for a few seconds when a game starts.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 1},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 1, false},
     /* Host-only (contract 10.8): what a game reads is unchanged. Objects a game skips as off
        screen are missing from the sides until that title has its own culling item. */
     {"wide", "Widescreen",
      "Shows more 3D space; HUD stays shaped. Some objects pop in. Smooth motion disables it.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_wide_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_wide_words, 0, false},
     {"smooth", "Smooth motion",
      "Smooths steady 30 FPS scenes only where it can follow the motion. Adds about 17 ms of delay.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_smooth_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_smooth_words, 0, false},
     /* A guest-visible item (contract 11.3.1): off by default until its "nothing worse" runs
        exist (11.2 item 4), with its own off switch in the library and each title (item 2). */
     {"sas", "Clean pitched sound",
      "Resamples pitched effects without aliasing. The game receives changed samples.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_sas_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_sas_words, 0, false},
     /* A guest-visible item (contract 11.3.7) that alters GE timing (SR_GE_TIMING): off by default
        and in no preset, with its own off switch in the library and each title. */
     {"tess", "Finer patches",
      "More triangles per curved patch. Slower; alters GE timing; the game receives changed pictures.",
-     4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0},
+     4, k_part_tess_values, k_part_tess_labels, k_part_tess_words, 0, false},
     /* A guest-visible item (contract 11.3.6): off by default; it matters only for a title whose own
        package carries the culling hook, and only with Widescreen on. */
     {"cull", "Wider culling",
      "Ace only, with Widescreen, in games that have a culling build. The game's memory changes.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, true},
     /* Presentation only (contract section 2.2): the window and its recording, never the guest. */
     {"upscale", "Sharper enlarging",
      "AMD FSR 1 sharpens display and recordings; game memory and screenshots do not change.",
-     2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0},
+     2, k_part_switch_values, k_part_upscale_labels, k_part_upscale_words, 0, false},
     /* A guest-visible item (contract 11.3.11): off by default; it acts only for a title whose
        catalog entry declares the stick dead zone the game ignores. */
     {"stick", "Stick dead zone",
      "Ace only, in games that ignore part of the stick. Small pushes count; the feel changes.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, true},
     /* A guest-visible item (contract 11.3.10) that changes guest timing: off by default and in no
        preset; it matters only for a title whose own package declares a load part, and only in Ace. */
     {"load", "Short loads",
      "Ace only, in games with a loading-wait package. Skips those waits; changes the game's timing.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_load_words, 0, true},
     {"twin", "Full 32-bit colour",
      "Shows 16-bit games in full colour, without dither. Uses more memory.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
     /* Host presentation only (contract 10.21): the picture the window shows, never guest memory.
        Off by default and in every preset: it multiplies the GPU's work by 4 or 16. At a render
        scale of 3x or 4x the row warns and plain 4x runs at 2x (player_ssaa_sentence). */
     {"ssaa", "Supersampling",
      "Smooths jagged edges. 2x takes 4 times the GPU work, 4x 16 times.",
-     4, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0},
+     4, k_part_ssaa_values, k_part_ssaa_labels, k_part_ssaa_words, 0, false},
     /* A guest-visible item (contract 11.3.8): every present commits the smoothed frame to guest VRAM,
        as texture filtering does. Off by default until its "nothing worse" runs exist (11.2 item 4),
        with its own off switch in the library and each title (item 2). */
     {"mips", "Smooth far textures",
      "Slightly less shimmer on far textures. Uses CPU; may stutter on new textures.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
     /* A guest-visible item (contract 11.3.4): off by default, in no preset, and in effect only for
        a title with a pack of the player's own chosen on its page. */
     {"texpack", "Texture pack",
      "Draws the texture pack chosen on a game's page. The game receives changed pictures.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
     /* A guest-visible item (contract 11.3.9): it moves when each logic update starts, so it is off
        by default, in no preset, and matters only for a title running its 60 FPS game logic package. */
     {"pad", "Late pad sampling",
      "Ace only, with 60 FPS logic. Reads the pad later in each frame; the game's timing changes.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_pad_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_pad_words, 0, true},
     /* A guest-visible item (contract 11.3.13): off by default and in no preset; it matters only for a
        title whose own package declares its shadow textures, and only in Ace. The softened shadows
        reach the frame the game reads. */
     {"shadow", "Soft shadows",
      "Ace only, in games whose package names their shadows. Changes what the frame shows.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_shadow_words, 0, true},
     /* Host sound only (contract 10.22, #2137): the guest's SAS buffer keeps the PSP's saturated
        bytes. Off by default and in every preset; the limiter's output is 71 frames (1.6 ms) late. */
     {"peak", "Unclipped sound",
      "Softens loud sound that the PSP clips. Changes only what you hear; sound plays 1.6 ms later.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_peak_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_peak_words, 0, false},
     /* Guest-visible items (contract 10.10 and 11.3.3): every present commits the frame, scaled copies
        and nearest 2D draws included, to guest VRAM. Off by default and in no preset until their
        "nothing worse" runs exist (11.2 item 4), each with its own off switch in the library and each
@@ -1338,10 +1338,10 @@ static const PlayerEnhancedPartInfo k_enhanced_parts[PLAYER_PART_COUNT] = {
        every row's sentence under its button (scr_wizard_column). */
     {"texscale", "Texture scaling",
      "Redraws textures with xBRZ. Uses GPU memory; the game receives changed pictures.",
-     6, k_part_texscale_values, k_part_texscale_labels, k_part_texscale_words, 0},
+     6, k_part_texscale_values, k_part_texscale_labels, k_part_texscale_words, 0, false},
     {"smart2d", "Smart 2D filter",
      "Sharp HUD art above 1x, but blocky soft text. The game receives changed pictures.",
-     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0},
+     2, k_part_switch_values, k_part_switch_labels, k_part_switch_words, 0, false},
 };
 
 const PlayerEnhancedPartInfo *player_enhanced_part(int part) {
@@ -1439,6 +1439,7 @@ void player_app_settings_init_default(PlayerSettings *settings) {
     settings->check_updates_at_start = false;
     settings->discord_presence = false;
     settings->download_cover_art = false;
+    settings->cheats = false;
     settings->picker_folder[0] = '\0';
     settings->rebuild_prompt_version[0] = '\0';
     settings->developer_mode = false;
@@ -2215,6 +2216,13 @@ NkResult player_app_load_settings(PlayerApp *app, const char *file_path) {
         app->settings.download_cover_art = cover_art_val;
     }
 
+    /* Cheats (#2639): off unless the file says true. */
+    NkJsonNode *cheats_node = nk_json_obj_get(root, "cheats");
+    bool cheats_val = false;
+    if (cheats_node && nk_json_get_bool(cheats_node, &cheats_val)) {
+        app->settings.cheats = cheats_val;
+    }
+
     /* A folder that no longer fits is dropped, not cut short. */
     const char *picker_folder = nk_json_get_string(nk_json_obj_get(root, "picker_folder"));
     if (picker_folder && strlen(picker_folder) < sizeof(app->settings.picker_folder)) {
@@ -2474,6 +2482,7 @@ NkResult player_app_save_settings(const PlayerApp *app, const char *file_path) {
             app->settings.discord_presence ? "true" : "false");
     fprintf(f, "  \"download_cover_art\": %s,\n",
             app->settings.download_cover_art ? "true" : "false");
+    fprintf(f, "  \"cheats\": %s,\n", app->settings.cheats ? "true" : "false");
     player_settings_write_string(f, "picker_folder", app->settings.picker_folder);
     player_settings_write_string(f, "rebuild_prompt_version",
                                  app->settings.rebuild_prompt_version);
@@ -3409,6 +3418,24 @@ void player_app_set_title_60hz(PlayerApp *app, int game_index, bool on) {
     player_app_title_play_changed(app, game_index);
 }
 
+bool player_app_set_cheats_session(PlayerApp *app, const char *file) {
+    char absolute[MAX_PATH_LEN] = "";
+    if (!app) return false;
+    /* A named file has to be there, on every host: only then can it be made absolute
+       (nk_platform_absolute_path), and a mistyped name is said at start, not after a launch. */
+    if (file && file[0] &&
+        (!nk_platform_file_exists(file) ||
+         !nk_platform_absolute_path(file, absolute, sizeof(absolute)))) {
+        return false;
+    }
+    app->cheats_session = true;
+    snprintf(app->cheats_session_file, sizeof(app->cheats_session_file), "%s", absolute);
+    player_dev_log_add(app, "settings", "cheats on for this session, from %s",
+                       absolute[0] ? "the file named on the command line"
+                                   : "each game's file in the cheats folder");
+    return true;
+}
+
 void player_app_set_experimental_60hz_session(PlayerApp *app, bool on) {
     if (!app) return;
     app->experimental_60hz_session = on;
@@ -3935,6 +3962,40 @@ void player_app_cycle_title_part(PlayerApp *app, int game_index, int part) {
     if (part == PLAYER_PART_CULL) player_app_title_play_changed(app, game_index);
 }
 
+static bool player_app_enhanced_page_is_title(const PlayerApp *app);
+
+void player_app_enhanced_page_set_part(PlayerApp *app, int part, int value_index) {
+    const PlayerEnhancedPartInfo *info = player_enhanced_part(part);
+    int title = player_app_enhanced_page_title(app);
+    if (!app || !info || value_index < -1 || value_index >= info->value_count) return;
+    if (title >= 0) {
+        PlayerTitlePlay entry;
+        int value = value_index < 0 ? -1 : info->values[value_index];
+        if (!title_play_entry(app, title, &entry) || entry.part[part] == value) return;
+        entry.part[part] = value;
+        title_play_store(&app->settings, &entry);
+        player_dev_log_add(app, "settings", "Enhanced %s for %s: %s", info->key, entry.key,
+                           value_index < 0 ? "library default" : info->words[value_index]);
+        maybe_persist_settings(app);
+        if (part == PLAYER_PART_CULL) player_app_title_play_changed(app, title);
+    } else if (player_app_enhanced_page_is_title(app)) {
+        player_app_close_enhanced_page(app);
+    } else {
+        const PlayerGraphicsPresetRow *preset =
+            player_graphics_preset_row(app->settings.graphics_preset);
+        if (value_index < 0) return;
+        int value = info->values[value_index];
+        int effective_value = player_settings_library_part(&app->settings, part);
+        if (effective_value == value) return;
+        if (preset && preset->part[part] >= 0) graphics_preset_row_edited(app);
+        app->settings.enhanced.part[part] = value;
+        player_dev_log_add(app, "settings", "Enhanced %s for the library: %s", info->key,
+                           info->words[value_index]);
+        maybe_persist_settings(app);
+        if (part == PLAYER_PART_CULL) player_app_select_package_variants(app);
+    }
+}
+
 void player_app_open_title_enhanced(PlayerApp *app, int game_index) {
     if (!app || game_index < 0 || game_index >= app->game_count) return;
     /* The page holds the game by its disc, not by its place in the list. */
@@ -3983,6 +4044,36 @@ void player_app_enhanced_page_cycle_mode(PlayerApp *app) {
     if (title >= 0) player_app_cycle_title_play_mode(app, title);
     else if (player_app_enhanced_page_is_title(app)) player_app_close_enhanced_page(app);
     else player_app_toggle_library_play_mode(app);
+}
+
+void player_app_enhanced_page_set_mode(PlayerApp *app, int choice_index) {
+    int title = player_app_enhanced_page_title(app);
+    if (!app) return;
+    if (title >= 0) {
+        static const PlayerPlayMode modes[] = {
+            PLAYER_PLAY_LIBRARY, PLAYER_PLAY_AUTHENTIC, PLAYER_PLAY_ENHANCED, PLAYER_PLAY_ACE
+        };
+        PlayerTitlePlay entry;
+        if (choice_index < 0 || choice_index >= (int)(sizeof(modes) / sizeof(modes[0])) ||
+            (modes[choice_index] == PLAYER_PLAY_ACE &&
+             !app->title_enhancements[title].available) ||
+            !title_play_entry(app, title, &entry) || entry.mode == modes[choice_index]) return;
+        entry.mode = modes[choice_index];
+        title_play_store(&app->settings, &entry);
+        player_dev_log_add(app, "settings", "play mode for %s: %s", entry.key,
+                           player_play_mode_name(entry.mode));
+        maybe_persist_settings(app);
+        player_app_title_play_changed(app, title);
+    } else if (player_app_enhanced_page_is_title(app)) {
+        player_app_close_enhanced_page(app);
+    } else if (choice_index == 0 || choice_index == 1) {
+        PlayerPlayMode mode = choice_index == 0 ? PLAYER_PLAY_AUTHENTIC : PLAYER_PLAY_ENHANCED;
+        if (app->settings.enhanced.library == mode) return;
+        app->settings.enhanced.library = mode;
+        player_dev_log_add(app, "settings", "library default: %s", player_play_mode_name(mode));
+        maybe_persist_settings(app);
+        player_app_select_package_variants(app);
+    }
 }
 
 bool player_app_set_enhanced_page_pack(PlayerApp *app, const char *path) {
@@ -6069,6 +6160,8 @@ bool player_app_launch_begin(PlayerApp *app, int game_index, PlayerLaunchWork *w
     }
     work->launch_headless = app->launch_headless;
     work->headless_accept_presented_frames = app->headless_accept_presented_frames;
+    work->cheats_session = app->cheats_session;
+    snprintf(work->cheats_file, sizeof(work->cheats_file), "%s", app->cheats_session_file);
     /* The runtime's pause overlay draws with the UI fonts in the player's folder. */
     snprintf(work->ui_root, sizeof(work->ui_root), "%s", app->install_root);
     memcpy(work->launcher_display_bounds, app->launcher_display_bounds,
@@ -6161,6 +6254,20 @@ void player_launch_work_run(PlayerLaunchWork *work) {
     }
     session->config.headless_accept_presented_frames =
         work->headless_accept_presented_frames;
+    /* Cheats (#2639): the stored switch, or this session's --cheats, with the file
+       --cheats-file named. The acceptance checkpoint is evidence of the game as it is, so it
+       runs without them, and says so. */
+    if (work->cheats_session) {
+        session->config.cheats = true;
+        snprintf(session->config.cheats_file, sizeof(session->config.cheats_file), "%s",
+                 work->cheats_file);
+    }
+    if (session->config.cheats && work->headless_accept_presented_frames > 0u) {
+        printf("[PLAYER] Cheats are off for this launch: the acceptance checkpoint needs a run "
+               "without them\n");
+        session->config.cheats = false;
+        session->config.cheats_file[0] = '\0';
+    }
     /* The play mode (#2055, src/rt/ace.h): this title's SR_ACE line, and in Enhanced or Ace the
        folder of the runtime's per-run report. The acceptance checkpoint is evidence, so it runs
        authentic. */
@@ -6566,6 +6673,7 @@ void player_app_apply_settings_to_session(const PlayerSettings *settings,
     config->fullscreen = settings->fullscreen;
     config->master_volume = settings->master_volume;
     config->developer_mode = settings->developer_mode;
+    config->cheats = settings->cheats;
     snprintf(config->nickname, sizeof(config->nickname), "%s", settings->nickname);
     config->reduce_motion = settings->reduce_motion_choice == PLAYER_SYSTEM_CHOICE_ON
         ? NK_REDUCE_MOTION_ON
@@ -8503,6 +8611,13 @@ void player_app_clear_shared_library_cache(PlayerApp *app) {
         snprintf(app->settings_notice, sizeof(app->settings_notice),
                  "Shared library cache cleared. The next build compiles its libraries again.");
     }
+}
+
+void player_app_toggle_cheats(PlayerApp *app) {
+    if (!app) return;
+    app->settings.cheats = !app->settings.cheats;
+    player_dev_log_add(app, "settings", "cheats %s", app->settings.cheats ? "on" : "off");
+    maybe_persist_settings(app);
 }
 
 void player_app_toggle_download_cover_art(PlayerApp *app) {

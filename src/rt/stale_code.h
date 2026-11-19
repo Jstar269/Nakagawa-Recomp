@@ -130,6 +130,16 @@ void sr_stale_register_block(uint32_t addr, uint32_t nwords, uint32_t expected_h
  * range forgets nothing. */
 void sr_stale_forget_range(uint32_t addr, uint32_t size);
 
+/* A loader patch of one 4-aligned code word (a variable-import relocation in
+ * src/rt/hle.c), called BEFORE the word is written. new_word becomes the
+ * expected word at addr, and every block record containing addr keeps its
+ * coverage: when the block's live words still hash to its expected value, the
+ * expected hash is recomputed with new_word in place, so a later overwrite of
+ * any other word in that block still fires. A block that already differs, or
+ * has an unreadable word, keeps its record unchanged. Unlike
+ * sr_stale_forget_range, no block record is dropped. */
+void sr_stale_patch_word(uint32_t addr, uint32_t new_word, SrStaleReadFn read, void *ctx);
+
 /* Number of registered records (words plus blocks). */
 uint32_t sr_stale_entry_count(void);
 

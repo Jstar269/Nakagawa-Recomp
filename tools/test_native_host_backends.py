@@ -632,8 +632,10 @@ class NativeHostBackendTests(unittest.TestCase):
         self.assertEqual(order, sorted(order),
                          "the run teardown writes the perf summary, then releases the presenter, "
                          "then closes the trace")
+        # sched_run's result is checked: nonzero means no entry thread was created and the
+        # run ends as a failure before any guest code ran.
         self.assertGreater(driver.rindex("    driver_run_teardown();\n"),
-                           driver.index("sched_run(entry, s.r[4], s.r[5]);"),
+                           driver.index("if (sched_run(entry, s.r[4], s.r[5]) != 0)"),
                            "the driver must tear down after the scheduler returns")
 
     def test_presenter_claims_and_choices_match_what_happened(self) -> None:

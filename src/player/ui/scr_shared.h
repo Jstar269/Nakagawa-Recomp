@@ -48,6 +48,7 @@ static inline PlayerUiAction action(PlayerUiActionKind kind, size_t title_index,
     result.kind = kind;
     result.primary = primary;
     result.title_index = title_index;
+    result.choice_index = -1;
     return result;
 }
 

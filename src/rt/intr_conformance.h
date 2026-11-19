@@ -394,14 +394,17 @@ static const IcProbe kIcMatrix[] = {
   {IC_PREC_NA, IC_PREC_CONTEXT, IC_PREC_CONTEXT, IC_PREC_CONTEXT}, IC_HW_IMMEDIATE},
 
 /* ---- group F: lightweight mutex ----------------------------------------- */
+/* "Bad count" is count 9 on a non-recursive LwMutex: the handler answers ILLEGAL_COUNT
+ * (pspautotests tests/threads/lwmutex/lock.expected "Lock 0 => 2", 800201BD) in every
+ * context, ahead of the context checks it does not yet make. */
 { "sceKernelLockLwMutex", 0xbea46419u, "Bad count", ICG_LWMUTEX, 0,
-  {0, 184, 377, 185}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},
+  {0, 184, 377, 185}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0x800201bdu), IC_RET(0x800201bdu), IC_RET(0x800201bdu), IC_RET(0x800201bdu)},
   {IC_PREC_NA, IC_PREC_CONTEXT, IC_PREC_CONTEXT, IC_PREC_CONTEXT}, IC_HW_IMMEDIATE},
 { "sceKernelLockLwMutex", 0xbea46419u, "Valid mutex", ICG_LWMUTEX, 1,
   {0, 186, 378, 187}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},
   {IC_PREC_NA, IC_PREC_CONTEXT, IC_PREC_CONTEXT, IC_PREC_CONTEXT}, IC_HW_IMMEDIATE},
 { "sceKernelLockLwMutexCB", 0x1fc64e09u, "Bad count", ICG_LWMUTEX, 0,
-  {0, 190, 379, 191}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},
+  {0, 190, 379, 191}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0x800201bdu), IC_RET(0x800201bdu), IC_RET(0x800201bdu), IC_RET(0x800201bdu)},
   {IC_PREC_NA, IC_PREC_CONTEXT, IC_PREC_CONTEXT, IC_PREC_CONTEXT}, IC_HW_IMMEDIATE},
 { "sceKernelLockLwMutexCB", 0x1fc64e09u, "Valid mutex", ICG_LWMUTEX, 1,
   {0, 192, 380, 193}, {ICU, CNW, ILCTX, CNW}, {IC_RET(0), IC_RET(0), IC_RET(0), IC_RET(0)},

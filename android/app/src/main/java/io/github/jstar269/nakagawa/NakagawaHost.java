@@ -111,6 +111,11 @@ final class NakagawaHost {
              FileChannel channel = lockFile.getChannel()) {
             channel.lock();  // released when the channel closes
             bundlesToolchain = hasAssets(context.getAssets(), "toolchain");
+            // Before the bundled files are copied: a failed copy must not also hide the
+            // toolchain's own unpack and its panel.
+            synchronized (NakagawaHost.class) {
+                sBundlesToolchain = bundlesToolchain;
+            }
             if (!stamp.equals(ToolchainArchive.readText(stampFile))) {
                 // Replace only what the APK bundles (assets/, titles/), never the user's data.
                 String[] bundled = context.getAssets().list("app");
@@ -132,11 +137,16 @@ final class NakagawaHost {
                 Log.i(TAG, "BUNDLED_FILES_UNPACKED dir=" + app + " stamp=" + stamp);
             }
         } catch (IOException e) {
+            // The stamp is not written, so the next start copies them again; until then the
+            // launcher shows this failure (bundledFilesError) rather than only logging it.
             Log.e(TAG, "BUNDLED_FILES_UNPACK_FAILED dir=" + app, e);
+            synchronized (NakagawaHost.class) {
+                sBundledFilesError = e.getMessage() != null ? e.getMessage() : e.toString();
+            }
             return;
         }
         synchronized (NakagawaHost.class) {
-            sBundlesToolchain = bundlesToolchain;
+            sBundledFilesError = null;
         }
         // Only after a complete unpack, by an earlier start with the same stamp; otherwise the
         // variables stay unset, so nothing is pointed at a partial toolchain/.
@@ -166,6 +176,17 @@ final class NakagawaHost {
 
     /** Whether this APK bundles a toolchain, as the last {@link #prepare} found. */
     private static boolean sBundlesToolchain;
+    /** Why the last {@link #prepare} could not unpack the bundled files, or null when it did. */
+    private static String sBundledFilesError;
+
+    /**
+     * Why the bundled files (UI fonts, bundled titles) could not be unpacked by the last
+     * {@link #prepare}, or null when they were. Some of them may then be missing until a later
+     * start unpacks them again.
+     */
+    static synchronized String bundledFilesError() {
+        return sBundledFilesError;
+    }
     /** This process's toolchain unpack: one, so an activity created again finds its run. */
     private static ToolchainArchive.Install sToolchain;
     private static ExecutorService sToolchainExecutor;

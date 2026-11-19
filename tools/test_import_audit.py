@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import struct
 import sys
 from typing import Any
@@ -19,6 +20,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
+import hle_sources
 import import_audit
 import import_audit_gate
 from import_fixtures import (
@@ -261,6 +263,19 @@ class ExportTableTests(unittest.TestCase):
         with self.assertRaises(ImportTableError) as ctx:
             parse_export_table(bytes(blob))
         self.assertIn("exceeds cap", str(ctx.exception))
+
+    def test_export_library_count_matches_the_runtime_loader_limit(self) -> None:
+        # The runtime HLE sources are read only through tools/hle_sources.py (test_hle_sources).
+        loader = hle_sources.function_text("unsigned register_prx_exports(")
+        match = re.search(r"\bcount\s*>\s*(\d+)", loader)
+        assert match is not None, "runtime export count cap was not found"
+        runtime_cap = int(match.group(1))
+        exports: list[tuple[str | None, int, list[int], list[int]]] = [
+            ("SyntheticLarge", 0x4000, list(range(runtime_cap + 1)), [])
+        ]
+        with self.assertRaises(ImportTableError):
+            parse_export_table(build_module_elf(exports))
+        self.assertEqual(psp_import_table.MAX_EXPORTS_PER_LIB, runtime_cap)
 
 
 class InterleavedImportTests(unittest.TestCase):
