@@ -1749,6 +1749,9 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_COVER_ART:
             player_app_toggle_download_cover_art(app);
             break;
+        case PLAYER_UI_SETTINGS_TOGGLE_CHEATS:
+            player_app_toggle_cheats(app);
+            break;
         case PLAYER_UI_SETTINGS_REFRESH_COVER_ART:
             app->request_cover_art_refresh = true;
             break;
@@ -4365,10 +4368,20 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
                    "[--launch-index=N | --launch-title=<disc ID>] [--headless-launch] "
                    "[--headless-accept-presented-frames=N] "
                    "[--headless-timeout-ms=N] "
-                   "[--experimental-60hz]\n");
+                   "[--experimental-60hz] "
+                   "[--cheats | --cheats-file=<path>]\n");
             return 0;
         } else if (strcmp(argv[i], "--experimental-60hz") == 0) {
             player_app_set_experimental_60hz_session(app, true);
+        } else if (strcmp(argv[i], "--cheats") == 0) {
+            /* Cheats on for this session (#2639), from each game's own file. A file named by
+               --cheats-file, before or after, stays the one read. */
+            if (!app->cheats_session) (void)player_app_set_cheats_session(app, NULL);
+        } else if (strncmp(argv[i], "--cheats-file=", 14) == 0) {
+            if (!argv[i][14] || !player_app_set_cheats_session(app, argv[i] + 14)) {
+                fprintf(stderr, "[PLAYER] --cheats-file must name a cheat file that exists.\n");
+                return 2;
+            }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
         } else if (player_ui_test_parse_arg(&run->ui_test, argv[i])) {
             /* A --ui-test-* option, taken by the harness. */

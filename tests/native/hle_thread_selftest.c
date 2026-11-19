@@ -49690,6 +49690,9 @@ static void exit_game_reentered_guest_fn(CpuState *cpu) {
 
 static void exit_game_atexit_probe(void) { _Exit(EXITGAME_ATEXIT); }
 
+#define EXITGAME_NO_CHEATS 94  /* the child could not start a held cheat (SR_TEST_EXITGAME_CHEATS) */
+static int exit_game_cheats_held(const char *log_path);   /* with the cheats tests below */
+
 static int run_exit_game_poisoned(void) {
     if (getenv("SR_TEST_EXITGAME_ATEXIT")) atexit(exit_game_atexit_probe);
     CpuState cpu;
@@ -49718,6 +49721,10 @@ static int run_exit_game_poisoned(void) {
     cpu.r[5] = EXITGAME_POISON;   /* $a1 */
     cpu.r[6] = EXITGAME_POISON;   /* $a2 */
     cpu.r[7] = EXITGAME_POISON;   /* $a3 */
+    {
+        const char *cheats_log = getenv("SR_TEST_EXITGAME_CHEATS");
+        if (cheats_log && cheats_log[0] && !exit_game_cheats_held(cheats_log)) return EXITGAME_NO_CHEATS;
+    }
     (void)sr_syscall(&cpu, 0x05572a5fu);
     return EXITGAME_RETURNED;
 }
@@ -59311,6 +59318,867 @@ static void test_callback_object_cells(void) {
     s_cur = -1;
 }
 
+/* ---- the user's cheats at the VBLANK seam (src/rt/cheats.h, #2639) ----------------------------
+ *
+ * Each test writes a CWCheat file of its own, names it as the launcher does (SR_CHEATS,
+ * SR_CHEATS_FILE, SR_DISC_ID), starts cheats as a run does (sr_cheats_init) and delivers whole
+ * VBLANKs through sr_vblank_tick. What it asserts is guest memory, the marker and the named
+ * refusals. The disc ID and every address are made up; no game is involved. */
+#include "cheats.h"
+#include <stdarg.h>
+
+#define CHEAT_BASE 0x08800000u
+
+static char s_cheat_log[16384];
+
+/* The game image the host loader placed, as sr_loaded_base and sr_loaded_end report it (the
+ * fixture's stand-ins near the top of this file). A test that needs another layout calls this
+ * before cheats_start, which otherwise gives the image a generic title has: a relocatable main
+ * module at 0x08804000. cheats_end puts the fixture's own values back. */
+static uint32_t s_cheat_saved_base, s_cheat_saved_end;
+static int s_cheat_image_set;
+
+static void cheats_image(uint32_t base, uint32_t end) {
+    if (!s_cheat_image_set) {
+        s_cheat_saved_base = s_fixture_loaded_base;
+        s_cheat_saved_end = s_fixture_loaded_end;
+        s_cheat_image_set = 1;
+    }
+    s_fixture_loaded_base = base;
+    s_fixture_loaded_end = end;
+}
+
+static int cheats_file_write(char *path, size_t capacity, const char *name, const char *text) {
+    char scratch[MAX_PATH];
+    FILE *f;
+    int ok;
+    if (!hle_scratch_root(scratch, sizeof(scratch))) return 0;
+    snprintf(path, capacity, "%s/cheats_%lu_%s.ini", scratch, (unsigned long)getpid(), name);
+    f = fopen(path, "wb");
+    if (!f) return 0;
+    ok = fwrite(text, 1u, strlen(text), f) == strlen(text);
+    return fclose(f) == 0 && ok;
+}
+
+/* Starts cheats for a run whose launcher set the switch to on (NULL: left it unset) and named
+ * path, with what the start says on stderr kept in s_cheat_log. */
+static void cheats_start(const char *on, const char *path) {
+    FILE *capture = NULL;
+    int saved_fd = -1;
+    int capturing;
+    hle_test_setenv("SR_CHEATS", on);
+    hle_test_setenv("SR_CHEATS_FILE", path);
+    hle_test_setenv("SR_DISC_ID", "TEST-00001");
+    if (!s_cheat_image_set) cheats_image(CHEAT_BASE + 0x4000u, CHEAT_BASE + 0x8000u);
+    s_cheat_log[0] = '\0';
+    capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    sr_cheats_init();
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, s_cheat_log, sizeof(s_cheat_log));
+    expect(capturing, "cheats: the start's stderr is captured");
+}
+
+/* n VBLANKs, with what they say on stderr kept in s_cheat_log. */
+static void cheats_tick(unsigned n) {
+    FILE *capture = NULL;
+    int saved_fd = -1;
+    int capturing;
+    s_cheat_log[0] = '\0';
+    capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+    ctrl_tick(n);
+    if (capturing) hle_data_stderr_capture_end(capture, saved_fd, s_cheat_log, sizeof(s_cheat_log));
+    expect(capturing, "cheats: the VBLANKs' stderr is captured");
+}
+
+static void cheats_end(const char *path) {
+    sr_cheats_reset();
+    hle_test_setenv("SR_CHEATS", NULL);
+    hle_test_setenv("SR_CHEATS_FILE", NULL);
+    hle_test_setenv("SR_DISC_ID", NULL);
+    hle_test_setenv("SR_RECORD", NULL);
+    hle_test_setenv("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", NULL);
+    s_test_gui_buttons = 0u;
+    s_test_gui_on = 0;
+    sr_exec_span_reset();
+    if (s_cheat_image_set) {
+        s_fixture_loaded_base = s_cheat_saved_base;
+        s_fixture_loaded_end = s_cheat_saved_end;
+        s_cheat_image_set = 0;
+    }
+    if (path && path[0]) remove(path);
+}
+
+/* What a call says on stderr, kept in s_cheat_log. */
+#define CHEATS_CAPTURE(call)                                                                     \
+    do {                                                                                         \
+        FILE *capture_ = NULL;                                                                   \
+        int saved_fd_ = -1;                                                                      \
+        int capturing_ = hle_data_stderr_capture_begin(&capture_, &saved_fd_);                   \
+        s_cheat_log[0] = '\0';                                                                   \
+        call;                                                                                    \
+        if (capturing_) hle_data_stderr_capture_end(capture_, saved_fd_, s_cheat_log, sizeof(s_cheat_log)); \
+        expect(capturing_, "cheats: the call's stderr is captured");                             \
+    } while (0)
+
+static int cheats_marker_is(const char *want) {
+    const char *marker = sr_cheats_marker();
+    if (!want) return marker == NULL;
+    return marker != NULL && strcmp(marker, want) == 0;
+}
+
+static void test_cheats_are_off_unless_switched_on(void) {
+    static const char *const not_on[] = { NULL, "0", "true", "on", "2", "1 ", " 1", "01" };
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "off",
+                             "_S TEST-00001\n_C1 Write\n_L 0x00000100 0x000000AB\n"),
+           "cheats off: the cheat file is written");
+    for (size_t i = 0; i < sizeof(not_on) / sizeof(not_on[0]); i++) {
+        cheats_start(not_on[i], path);
+        sr_cheats_status(&status);
+        expect(!status.switched_on && !status.file_opened && !status.applying && cheats_marker_is(NULL),
+               "cheats off: any SR_CHEATS but exactly 1 leaves the named file unopened and shows no marker");
+        expect(s_cheat_log[0] == '\0', "cheats off: the start says nothing");
+        cheats_tick(2);
+        expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u, "cheats off: a VBLANK writes nothing");
+        expect(strstr(s_cheat_log, "CHEATS") == NULL, "cheats off: a VBLANK says nothing");
+    }
+    /* The same file, switched on: the control for the rows above. */
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.switched_on && status.file_opened && status.applying && status.on == 1u &&
+           cheats_marker_is("Cheats on: 1"), "cheats on: SR_CHEATS=1 opens the file and shows the marker");
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u, "cheats on: nothing is written before a VBLANK");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu, "cheats on: the VBLANK applies the write");
+    /* Forgotten: the marker goes and the next VBLANK leaves a changed byte alone. */
+    sr_cheats_reset();
+    MEM_W8(CHEAT_BASE + 0x100u, 0x01u);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0x01u && cheats_marker_is(NULL),
+           "cheats reset: nothing applies and no marker shows");
+    cheats_end(path);
+}
+
+static void test_cheats_every_code_type_at_vblank(void) {
+    static const char text[] =
+        "_S TEST-00001\n"
+        "_G A made-up game\n"
+        "_C1 Write 8, 16 and 32 bits\n"
+        "_L 0x00000100 0x000000AB\n"
+        "_L 0x10000102 0x0000BEEF\n"
+        "_L 0x20000104 0xDEADBEEF\n"
+        "_C1 Add and subtract\n"
+        "_L 0x30100005 0x00000110\n"
+        "_L 0x30400003 0x00000112\n"
+        "_L 0x30500000 0x00000114\n"
+        "_L 0x00010000 0x00000000\n"
+        "_C1 Multi-write 32\n"
+        "_L 0x40000120 0x00030002\n"
+        "_L 0x00000010 0x00000001\n"
+        "_C1 Multi-write 8 and 16\n"
+        "_L 0x80000140 0x00040001\n"
+        "_L 0x00000020 0x00000001\n"
+        "_L 0x80000150 0x00020002\n"
+        "_L 0x10001000 0x00000100\n"
+        "_C1 Copy\n"
+        "_L 0x50000160 0x00000008\n"
+        "_L 0x00000170 0x00000000\n"
+        "_C1 Pointer\n"
+        "_L 0x60000180 0x11223344\n"
+        "_L 0x00020001 0x00000010\n"
+        "_C1 OR, AND, XOR\n"
+        "_L 0x70000190 0x0000000F\n"
+        "_L 0x70000192 0x00030F0F\n"
+        "_L 0x70000194 0x000400FF\n"
+        "_C1 If a value\n"
+        "_L 0xD00001A0 0x00001234\n"
+        "_L 0x000001A4 0x00000001\n"
+        "_L 0xD00001A0 0x00101234\n"
+        "_L 0x000001A5 0x00000001\n"
+        "_C1 If two addresses\n"
+        "_L 0xD00001B0 0x400001B4\n"
+        "_L 0x00000001 0x00000002\n"
+        "_L 0x000001B8 0x00000001\n"
+        "_C1 If, for two lines\n"
+        "_L 0xE1020034 0x000001C0\n"
+        "_L 0x000001C1 0x00000011\n"
+        "_L 0x000001C2 0x00000022\n"
+        "_L 0xE1020035 0x000001C0\n"
+        "_L 0x000001C3 0x00000033\n"
+        "_L 0x000001C4 0x00000044\n"
+        "_C1 While Cross is held\n"
+        "_L 0xD0000000 0x10004000\n"
+        "_L 0x000001D0 0x00000099\n"
+        "_C0 Off\n"
+        "_L 0x000001E0 0x00000077\n"
+        "_S TEST-00002\n"
+        "_C1 Another disc's\n"
+        "_L 0x000001E1 0x00000077\n";
+    static const uint8_t source[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "types", text), "cheats types: the cheat file is written");
+    MEM_W16(CHEAT_BASE + 0x112u, 100u);
+    memcpy(SR_HOST(CHEAT_BASE + 0x160u), source, sizeof(source));
+    MEM_W32(CHEAT_BASE + 0x180u, CHEAT_BASE + 0x1000u);
+    MEM_W8(CHEAT_BASE + 0x190u, 0xF0u);
+    MEM_W16(CHEAT_BASE + 0x192u, 0xFFFFu);
+    MEM_W8(CHEAT_BASE + 0x194u, 0xAAu);
+    MEM_W16(CHEAT_BASE + 0x1A0u, 0x1234u);
+    MEM_W32(CHEAT_BASE + 0x1B0u, 7u);
+    MEM_W32(CHEAT_BASE + 0x1B4u, 7u);
+    MEM_W8(CHEAT_BASE + 0x1C0u, 0x34u);
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.applying && status.on == 11u && status.refused == 0u && status.off == 1u,
+           "cheats types: eleven cheats are on, one is off and none is refused");
+    expect(strstr(s_cheat_log, "11 on, 0 refused, 1 off, 1 for other discs") != NULL,
+           "cheats types: the start says what the file holds");
+    {
+        /* The log names the file and not the folders above it, which name the user. */
+        const char *name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+        char line[MAX_PATH + 16];
+        snprintf(line, sizeof(line), "CHEATS: %s: 11 on", name);
+        expect(name != path && strstr(s_cheat_log, line) != NULL && strstr(s_cheat_log, path) == NULL,
+               "cheats types: the start names the cheat file without its folder");
+    }
+    expect(cheats_marker_is("Cheats on: 11"), "cheats types: the marker counts the cheats that are on");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu && MEM_R16(CHEAT_BASE + 0x102u) == 0xBEEFu &&
+           MEM_R32(CHEAT_BASE + 0x104u) == 0xDEADBEEFu, "cheats types: 0x0, 0x1 and 0x2 write 8, 16 and 32 bits");
+    expect(MEM_R8(CHEAT_BASE + 0x110u) == 5u && MEM_R16(CHEAT_BASE + 0x112u) == 97u &&
+           MEM_R32(CHEAT_BASE + 0x114u) == 0x00010000u, "cheats types: 0x3 adds and subtracts once per VBLANK");
+    expect(MEM_R32(CHEAT_BASE + 0x120u) == 0x10u && MEM_R32(CHEAT_BASE + 0x124u) == 0u &&
+           MEM_R32(CHEAT_BASE + 0x128u) == 0x11u && MEM_R32(CHEAT_BASE + 0x130u) == 0x12u &&
+           MEM_R32(CHEAT_BASE + 0x138u) == 0u, "cheats types: 0x4 writes its 32-bit run, stepped and growing");
+    expect(MEM_R32(CHEAT_BASE + 0x140u) == 0x23222120u && MEM_R8(CHEAT_BASE + 0x144u) == 0u &&
+           MEM_R16(CHEAT_BASE + 0x150u) == 0x1000u && MEM_R16(CHEAT_BASE + 0x152u) == 0u &&
+           MEM_R16(CHEAT_BASE + 0x154u) == 0x1100u, "cheats types: 0x8 writes its 8-bit and 16-bit runs");
+    expect(memcmp(SR_HOST(CHEAT_BASE + 0x170u), source, sizeof(source)) == 0 &&
+           MEM_R8(CHEAT_BASE + 0x178u) == 0u, "cheats types: 0x5 copies its bytes and no more");
+    expect(MEM_R32(CHEAT_BASE + 0x1010u) == 0x11223344u && MEM_R32(CHEAT_BASE + 0x180u) == CHEAT_BASE + 0x1000u,
+           "cheats types: 0x6 writes through the pointer and leaves the pointer");
+    expect(MEM_R8(CHEAT_BASE + 0x190u) == 0xFFu && MEM_R16(CHEAT_BASE + 0x192u) == 0x0F0Fu &&
+           MEM_R8(CHEAT_BASE + 0x194u) == 0x55u, "cheats types: 0x7 ORs, ANDs and XORs");
+    expect(MEM_R8(CHEAT_BASE + 0x1A4u) == 1u && MEM_R8(CHEAT_BASE + 0x1A5u) == 0u,
+           "cheats types: 0xD runs its next line only when the value compares");
+    expect(MEM_R8(CHEAT_BASE + 0x1B8u) == 1u, "cheats types: 0xD compares two addresses");
+    expect(MEM_R8(CHEAT_BASE + 0x1C1u) == 0x11u && MEM_R8(CHEAT_BASE + 0x1C2u) == 0x22u &&
+           MEM_R8(CHEAT_BASE + 0x1C3u) == 0u && MEM_R8(CHEAT_BASE + 0x1C4u) == 0u,
+           "cheats types: 0xE guards all its lines");
+    expect(MEM_R8(CHEAT_BASE + 0x1D0u) == 0u, "cheats types: a button condition holds its line while Cross is up");
+    expect(MEM_R8(CHEAT_BASE + 0x1E0u) == 0u && MEM_R8(CHEAT_BASE + 0x1E1u) == 0u,
+           "cheats types: a cheat that is off, and another disc's, write nothing");
+    /* A second VBLANK applies each cheat once more, and the pad it reads is this VBLANK's: a
+     * window's live pad, as sr_ctrl_sample latches it. */
+    s_test_gui_on = 1;
+    s_test_gui_buttons = PSP_CTRL_CROSS_BIT;
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x110u) == 10u && MEM_R16(CHEAT_BASE + 0x112u) == 94u &&
+           MEM_R32(CHEAT_BASE + 0x114u) == 0x00020000u && MEM_R8(CHEAT_BASE + 0x194u) == 0xAAu,
+           "cheats types: every VBLANK applies each cheat exactly once");
+    expect(MEM_R8(CHEAT_BASE + 0x1D0u) == 0x99u,
+           "cheats types: the button condition reads the sample latched at this VBLANK");
+    s_test_gui_buttons = 0u;
+    MEM_W8(CHEAT_BASE + 0x1D0u, 0u);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x1D0u) == 0u, "cheats types: Cross released, the line is held again");
+    s_test_gui_on = 0;
+    expect(strstr(s_cheat_log, "CHEATS") == NULL, "cheats types: applying says nothing");
+    cheats_end(path);
+}
+
+static void test_cheats_refuse_code_writes_and_bad_lines_by_name(void) {
+    static const char text[] =
+        "_C1 Patch the game's code\n"                 /* line 1 */
+        "_L 0x00000200 0x00000011\n"
+        "_L 0x20004010 0x00000000\n"                   /* line 3: inside the translated code */
+        "_C1 Run into the code\n"
+        "_L 0x80003FFE 0x00040001\n"                   /* line 5: its last two bytes are code */
+        "_L 0x000000EE 0x00000000\n"
+        "_C1 Unsupported type\n"
+        "_L 0x00000204 0x00000022\n"
+        "_L 0xA0000300 0x00000001\n"                   /* line 9 */
+        "_C1 Not a code line\n"
+        "_L 0x00000208 0x00000033\n"
+        "_L 0x0000020C\n"                              /* line 12 */
+        "_C1 Outside user memory\n"
+        "_L 0x00000210 0x00000044\n"
+        "_L 0x2FFFFFFC 0x00000001\n"                   /* line 15 */
+        "_C1 Through a pointer\n"
+        "_L 0x00000220 0x00000055\n"
+        "_L 0x60000224 0x000000CC\n"                   /* line 18 */
+        "_L 0x00000001 0x00000000\n"
+        "_C1 Good\n"
+        "_L 0x00000230 0x00000066\n";
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "refused", text), "cheats refused: the cheat file is written");
+    expect(sr_exec_span_register(CHEAT_BASE + 0x4000u, CHEAT_BASE + 0x4100u),
+           "cheats refused: the fixture registers a translated span");
+    expect(sr_exec_span_overlaps(CHEAT_BASE + 0x4000u, 1u) && sr_exec_span_overlaps(CHEAT_BASE + 0x40FFu, 1u) &&
+           sr_exec_span_overlaps(CHEAT_BASE + 0x3FFFu, 2u) && sr_exec_span_overlaps(CHEAT_BASE, 0x10000u) &&
+           !sr_exec_span_overlaps(CHEAT_BASE + 0x3FFFu, 1u) && !sr_exec_span_overlaps(CHEAT_BASE + 0x4100u, 4u) &&
+           !sr_exec_span_overlaps(CHEAT_BASE + 0x4000u, 0u) && !sr_exec_span_overlaps(0xFFFFFFFCu, 4u),
+           "cheats refused: a span overlaps exactly the writes that touch one of its bytes");
+    MEM_W32(CHEAT_BASE + 0x224u, CHEAT_BASE + 0x1000u);   /* the pointer starts at plain data */
+    memset(SR_HOST(CHEAT_BASE + 0x4000u), 0x5Au, 0x100u);
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.on == 2u && status.refused == 5u && status.applying,
+           "cheats refused: five cheats are refused at load and two are on");
+    expect(cheats_marker_is("Cheats on: 2 (5 refused)"), "cheats refused: the marker counts the refused cheats");
+    expect(strstr(s_cheat_log, "refused \"Patch the game's code\" (line 1): line 3 writes 4 byte(s) at 0x08804010, "
+                               "inside code the recompiler translated") != NULL,
+           "cheats refused: a code write is refused by cheat, line and reason");
+    expect(strstr(s_cheat_log, "refused \"Run into the code\" (line 4): line 5 ") != NULL &&
+           strstr(s_cheat_log, "refused \"Unsupported type\" (line 7): line 9 ") != NULL &&
+           strstr(s_cheat_log, "refused \"Not a code line\" (line 10): line 12 ") != NULL &&
+           strstr(s_cheat_log, "refused \"Outside user memory\" (line 13): line 15 ") != NULL,
+           "cheats refused: each refused cheat is named with its first refused line");
+    expect(strstr(s_cheat_log, "no line of this cheat is applied") != NULL,
+           "cheats refused: the refusal says the whole cheat is left out");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x200u) == 0u && MEM_R8(CHEAT_BASE + 0x204u) == 0u &&
+           MEM_R8(CHEAT_BASE + 0x208u) == 0u && MEM_R8(CHEAT_BASE + 0x210u) == 0u &&
+           MEM_R8(CHEAT_BASE + 0x3FFEu) == 0u && MEM_R8(CHEAT_BASE + 0x3FFFu) == 0u,
+           "cheats refused: no line of a refused cheat is applied, the lines before the refused one included");
+    {
+        int code_kept = 1;
+        for (uint32_t i = 0; i < 0x100u; i++) code_kept &= MEM_R8(CHEAT_BASE + 0x4000u + i) == 0x5Au;
+        expect(code_kept, "cheats refused: no byte of the translated span changes");
+    }
+    expect(MEM_R8(CHEAT_BASE + 0x230u) == 0x66u && MEM_R8(CHEAT_BASE + 0x220u) == 0x55u &&
+           MEM_R8(CHEAT_BASE + 0x1000u) == 0xCCu, "cheats refused: the cheats that are on still apply");
+    /* The game moves the pointer into its code: that cheat is held whole on such a VBLANK, its
+     * earlier line put back, and the reason is said once. */
+    MEM_W32(CHEAT_BASE + 0x224u, CHEAT_BASE + 0x4020u);
+    MEM_W8(CHEAT_BASE + 0x220u, 0x01u);
+    MEM_W8(CHEAT_BASE + 0x230u, 0x01u);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x4020u) == 0x5Au, "cheats held: a pointer into translated code writes nothing there");
+    expect(MEM_R8(CHEAT_BASE + 0x220u) == 0x01u, "cheats held: the held cheat's earlier line is put back");
+    expect(MEM_R8(CHEAT_BASE + 0x230u) == 0x66u, "cheats held: the other cheat still applies");
+    expect(strstr(s_cheat_log, "CHEATS: cheat \"Through a pointer\" is held: line 18: its write at 0x08804020 is "
+                               "inside code the recompiler translated") != NULL,
+           "cheats held: the held cheat is named with its line and address");
+    cheats_tick(2);
+    expect(strstr(s_cheat_log, "CHEATS") == NULL && MEM_R8(CHEAT_BASE + 0x220u) == 0x01u,
+           "cheats held: the same cause is said once, not every VBLANK");
+    /* Outside user memory is the other cause, and the pointer coming back ends the hold. */
+    MEM_W32(CHEAT_BASE + 0x224u, 0x04000000u);
+    cheats_tick(1);
+    expect(strstr(s_cheat_log, "is held: line 18: its pointer leads to 0x04000000, outside user memory") != NULL,
+           "cheats held: a pointer outside user memory is named");
+    expect(MEM_R8(0x04000000u) == 0u, "cheats held: nothing is written outside user memory");
+    MEM_W32(CHEAT_BASE + 0x224u, CHEAT_BASE + 0x1100u);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x1100u) == 0xCCu && MEM_R8(CHEAT_BASE + 0x220u) == 0x55u &&
+           strstr(s_cheat_log, "CHEATS: cheat \"Through a pointer\" applies again") != NULL,
+           "cheats held: the cheat applies again, and says so, once its pointer is back in data");
+    cheats_end(path);
+}
+
+static void test_cheats_refused_for_the_whole_run(void) {
+    char path[MAX_PATH];
+    char missing[MAX_PATH + 16];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "run", "_C1 Write\n_L 0x00000100 0x000000AB\n"),
+           "cheats run: the cheat file is written");
+    /* A recording has to replay without a cheat file. */
+    hle_test_setenv("SR_RECORD", "run.nkrec");
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.switched_on && !status.file_opened && !status.applying && cheats_marker_is(NULL) &&
+           strstr(s_cheat_log, "CHEATS: refused: this run records or replays") != NULL,
+           "cheats run: a recorded run refuses cheats by name and opens no file");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u, "cheats run: a recorded run applies nothing");
+    hle_test_setenv("SR_RECORD", NULL);
+    /* No file named, and a file that is not there. */
+    cheats_start("1", NULL);
+    sr_cheats_status(&status);
+    expect(!status.file_opened && !status.applying && cheats_marker_is(NULL) &&
+           strstr(s_cheat_log, "CHEATS: on, but SR_CHEATS_FILE names no cheat file; nothing is applied") != NULL,
+           "cheats run: on with no file named is said and applies nothing");
+    snprintf(missing, sizeof(missing), "%s.missing", path);
+    cheats_start("1", missing);
+    sr_cheats_status(&status);
+    expect(status.file_opened && !status.applying && cheats_marker_is(NULL) &&
+           strstr(s_cheat_log, "CHEATS: on, but ") != NULL && strstr(s_cheat_log, "nothing is applied") != NULL,
+           "cheats run: a cheat file that is not there is said and applies nothing");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u, "cheats run: without a file nothing is written");
+    /* The RetroAchievements hardcore seam: nothing applies and no marker shows while it is set. */
+    cheats_start("1", path);
+    expect(cheats_marker_is("Cheats on: 1"), "cheats run: the marker shows before hardcore mode");
+    sr_cheats_set_hardcore(1);
+    sr_cheats_status(&status);
+    expect(!status.applying && cheats_marker_is(NULL), "cheats run: hardcore mode stops the cheats and the marker");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u, "cheats run: hardcore mode applies nothing");
+    sr_cheats_set_hardcore(0);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu && cheats_marker_is("Cheats on: 1"),
+           "cheats run: hardcore mode off, the cheats and the marker are back");
+    /* A window that cannot draw the marker refuses the cheats: none applies unmarked. */
+    MEM_W8(CHEAT_BASE + 0x100u, 0u);
+    {
+        FILE *capture = NULL;
+        int saved_fd = -1;
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        sr_cheats_marker_unavailable("a test window");
+        if (capturing) hle_data_stderr_capture_end(capture, saved_fd, s_cheat_log, sizeof(s_cheat_log));
+        expect(capturing && strstr(s_cheat_log, "CHEATS: refused: the window cannot show the cheats marker "
+                                                "(a test window)") != NULL,
+               "cheats run: a window without the marker refuses the cheats by name");
+    }
+    sr_cheats_status(&status);
+    cheats_tick(1);
+    expect(!status.applying && cheats_marker_is(NULL) && MEM_R8(CHEAT_BASE + 0x100u) == 0u,
+           "cheats run: without the marker nothing applies");
+    cheats_end(path);
+}
+
+/* AGENTS.md section 7: the meaning of the code forms is PPSSPP's, not measured on a PSP, and a
+ * run that uses it says so once, at first use. For cheats that is the first VBLANK that applies
+ * them: not the start, not a VBLANK that applies nothing, and no later VBLANK. */
+#define CHEATS_ORIGIN_LINE \
+    "CHEATS: the code forms are read as PPSSPP reads them (Core/CwCheat.cpp at " \
+    "c437463bc5cb78a0236312ad23f9c3b56fb9ae67): PPSSPP-derived, not PSP-measured"
+
+static unsigned cheats_log_count(const char *text) {
+    unsigned n = 0;
+    for (const char *p = s_cheat_log; (p = strstr(p, text)) != NULL; p += strlen(text)) n++;
+    return n;
+}
+
+static void test_cheats_say_their_origin_once_at_first_use(void) {
+    char path[MAX_PATH];
+    char refused[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "origin", "_C1 Write\n_L 0x00000100 0x000000AB\n") &&
+           cheats_file_write(refused, sizeof(refused), "origin_refused",
+                             "_C1 Delay\n_L 0xB0000000 0x00000001\n"),
+           "cheats origin: the cheat files are written");
+    /* Off, and on with every cheat refused: nothing of PPSSPP's reading is used, so nothing is said. */
+    cheats_start("0", path);
+    cheats_tick(2);
+    expect(cheats_log_count("PPSSPP") == 0u, "cheats origin: a run with cheats off never says it");
+    cheats_start("1", refused);
+    sr_cheats_status(&status);
+    expect(status.file_opened && !status.applying && status.refused == 1u &&
+           cheats_log_count("not PSP-measured") == 0u,
+           "cheats origin: the start does not say it");
+    cheats_tick(2);
+    expect(cheats_log_count("PPSSPP") == 0u, "cheats origin: a run that applies no cheat never says it");
+    /* On, but held back by the hardcore seam: the first use is the first VBLANK that applies. */
+    cheats_start("1", path);
+    expect(cheats_log_count("not PSP-measured") == 0u, "cheats origin: reading the file is not the first use");
+    sr_cheats_set_hardcore(1);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && cheats_log_count("not PSP-measured") == 0u,
+           "cheats origin: a VBLANK that applies nothing does not say it");
+    sr_cheats_set_hardcore(0);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu, "cheats origin: the first applying VBLANK writes");
+    expect(cheats_log_count(CHEATS_ORIGIN_LINE) == 1u && cheats_log_count("not PSP-measured") == 1u,
+           "cheats origin: the first applying VBLANK says PPSSPP-derived, not PSP-measured, with the revision, once");
+    cheats_tick(3);
+    expect(cheats_log_count("PPSSPP") == 0u, "cheats origin: later VBLANKs do not say it again");
+    /* Stopped and applying again in the same run is not a first use. */
+    sr_cheats_set_hardcore(1);
+    sr_cheats_set_hardcore(0);
+    MEM_W8(CHEAT_BASE + 0x100u, 0u);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu && cheats_log_count("PPSSPP") == 0u,
+           "cheats origin: cheats that apply again in the same run do not say it again");
+    /* A new start is a new run. */
+    cheats_start("1", path);
+    cheats_tick(2);
+    expect(cheats_log_count(CHEATS_ORIGIN_LINE) == 1u, "cheats origin: the next run says it once at its own first use");
+    remove(refused);
+    cheats_end(path);
+}
+
+/* A title whose manifest gives its executable "base": 0 (assets/titles/hst-ucus98701.json): the
+ * host loader puts the module's link addresses at guest address 0, so the image byte a PSP has
+ * at 0x08804000 + x is at x, the translated code's spans are registered there, and the heap
+ * starts after the image instead of where a PSP's is. A cheat names PSP addresses. Review of
+ * #2652, defect 1: the cheat's address was used as written, so a value cheat wrote memory that
+ * is not the game's variable and a code patch was not refused. */
+static void test_cheats_on_an_image_below_psp_memory(void) {
+    static const char text[] =
+        "_C1 A code patch\n"                          /* line 1 */
+        "_L 0x20005010 0x00000000\n"                  /* PSP 0x08805010: this run's 0x00001010, code */
+        "_C1 A value in the image\n"
+        "_L 0x20200000 0x000003E7\n"                  /* PSP 0x08A00000: this run's 0x001FC000 */
+        "_C1 A value in the heap\n"                   /* line 5 */
+        "_L 0x20B50000 0x000003E7\n"                  /* PSP 0x09350000: past the image */
+        "_C1 Through the game's pointer\n"
+        "_L 0x60200010 0x000000AA\n"                  /* the pointer cell is in the image */
+        "_L 0x00000001 0x00000008\n";
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "base0", text), "cheats base 0: the cheat file is written");
+    cheats_image(0x00000000u, 0x00300000u);
+    expect(sr_exec_span_register(0x00001000u, 0x00001100u), "cheats base 0: the image's code is registered where it is");
+    memset(SR_HOST(0x00001000u), 0x5Au, 0x100u);
+    MEM_W32(0x001FC010u, 0x00400000u);   /* the game's pointer into its heap, as this run holds it */
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(strstr(s_cheat_log, "CHEATS: this game's image is at 0x00000000 here and at 0x08804000 on a PSP: a cheat's "
+                               "address inside the image (0x08804000 to 0x08B03FFF) is moved with it") != NULL,
+           "cheats base 0: the start says where the image is and what that means for a cheat's address");
+    expect(status.applying && status.on == 2u && status.refused == 2u,
+           "cheats base 0: the two cheats that name the image's data are on, the other two are refused");
+    expect(strstr(s_cheat_log, "refused \"A code patch\" (line 1): line 2 writes 4 byte(s) at 0x08805010 "
+                               "(0x00001010 in this run), inside code the recompiler translated") != NULL,
+           "cheats base 0: a write into the image's code is refused by name, at the address the code has in this run");
+    expect(strstr(s_cheat_log, "refused \"A value in the heap\" (line 5): line 6 names 4 byte(s) at 0x09350000, "
+                               "outside the game's image as a PSP loads it (0x08804000 to 0x08B03FFF)") != NULL,
+           "cheats base 0: an address outside the image is refused by name, not written somewhere else");
+    cheats_tick(1);
+    expect(MEM_R32(0x001FC000u) == 0x000003E7u,
+           "cheats base 0: a data write lands on the image's bytes where this run has them");
+    expect(MEM_R32(0x08A00000u) == 0u && MEM_R32(0x09350000u) == 0u && MEM_R32(0x08805010u) == 0u,
+           "cheats base 0: nothing is written at the addresses as the file wrote them");
+    {
+        int code_kept = 1;
+        for (uint32_t i = 0; i < 0x100u; i++) code_kept &= MEM_R8(0x00001000u + i) == 0x5Au;
+        expect(code_kept, "cheats base 0: no byte of the image's translated code changes");
+    }
+    expect(MEM_R8(0x00400008u) == 0xAAu, "cheats base 0: the game's own pointer is followed as it is");
+    /* The VRAM window lies inside this layout's range and is not the game's memory. */
+    MEM_W32(0x001FC010u, 0x04000000u);
+    cheats_tick(1);
+    expect(MEM_R8(0x04000008u) == 0u &&
+           strstr(s_cheat_log, "is held: line 8: its pointer leads to 0x04000008, outside user memory") != NULL,
+           "cheats base 0: a pointer into the VRAM window holds its cheat");
+    /* A pointer the game has not set yet is null (audit 2026-11-17). On a PSP null plus the
+     * offset is below user memory and the cheat is held; here it is the image's own byte. */
+    MEM_W32(0x001FC010u, 0u);
+    MEM_W8(0x00000008u, 0x11u);
+    cheats_tick(1);
+    expect(MEM_R8(0x00000008u) == 0x11u &&
+           strstr(s_cheat_log, "is held: line 8: the pointer it follows at 0x001FC010 is null") != NULL,
+           "cheats base 0: a null pointer holds its cheat, and null plus the offset is not written");
+    cheats_end(path);
+}
+
+/* The file is read for one program's memory. A run with no host-loaded image, and a run whose
+ * program LoadExec replaced, cannot say where a PSP address is: refused by name. */
+static void test_cheats_need_the_program_they_were_read_for(void) {
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "program", "_C1 Write\n_L 0x00000100 0x000000AB\n"),
+           "cheats program: the cheat file is written");
+    cheats_image(UINT32_MAX, 0x08800000u);   /* as driver.c leaves them when LoadExec boots a module */
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.switched_on && !status.file_opened && !status.applying && cheats_marker_is(NULL) &&
+           strstr(s_cheat_log, "CHEATS: refused: this run has no game image placed by the host loader") != NULL,
+           "cheats program: without a host-loaded image cheats are refused by name and no file is opened");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u, "cheats program: and nothing is written");
+    cheats_image(CHEAT_BASE + 0x4000u, CHEAT_BASE + 0x8000u);
+    cheats_start("1", path);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu && cheats_marker_is("Cheats on: 1"),
+           "cheats program: with the image a generic title has, the cheat applies");
+    MEM_W8(CHEAT_BASE + 0x100u, 0u);
+    cheats_image(UINT32_MAX, 0x08800000u);   /* LoadExec: the old program's memory is gone */
+    cheats_tick(1);
+    sr_cheats_status(&status);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && !status.applying && cheats_marker_is(NULL) &&
+           cheats_log_count("CHEATS: refused from here on: the game started another program") == 1u,
+           "cheats program: once the game starts another program the cheats stop, by name");
+    cheats_tick(2);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && cheats_log_count("CHEATS") == 0u,
+           "cheats program: and stay stopped without saying it again");
+    cheats_end(path);
+}
+
+/* Review of #2652, defect 5: the launcher and the player refuse cheats for an acceptance
+ * checkpoint, and so does a runtime started without them. */
+static void test_cheats_refused_for_an_acceptance_checkpoint(void) {
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "accept", "_C1 Write\n_L 0x00000100 0x000000AB\n"),
+           "cheats checkpoint: the cheat file is written");
+    hle_test_setenv("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", "30");
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.switched_on && !status.file_opened && !status.applying && cheats_marker_is(NULL) &&
+           strstr(s_cheat_log, "CHEATS: refused: this run is an acceptance checkpoint "
+                               "(SR_HEADLESS_ACCEPT_PRESENTED_FRAMES)") != NULL,
+           "cheats checkpoint: the runtime refuses cheats by name and opens no file");
+    cheats_tick(2);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u, "cheats checkpoint: nothing is applied");
+    hle_test_setenv("SR_HEADLESS_ACCEPT_PRESENTED_FRAMES", NULL);
+    cheats_start("1", path);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu, "cheats checkpoint: the same run without the checkpoint applies them");
+    cheats_end(path);
+}
+
+/* Review of #2652, defect 6: a UI pass that stops drawing after the start takes the cheats with
+ * it, with one line. gui.c hands every present's answer to sr_cheats_marker_drawn. */
+static void test_cheats_stop_when_the_marker_stops_being_drawn(void) {
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    reset_fixture();
+    expect(cheats_file_write(path, sizeof(path), "drawn", "_C1 Write\n_L 0x00000100 0x000000AB\n"),
+           "cheats drawn: the cheat file is written");
+    const char *shown;
+    cheats_start("1", path);
+    sr_cheats_marker_drawn(1);
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0xABu && cheats_marker_is("Cheats on: 1"),
+           "cheats drawn: while the marker is drawn the cheats apply");
+    /* What the presenting thread was handed (audit 2026-11-17): the stop below runs on the
+     * scheduler's thread and takes the marker back without writing over the words. */
+    shown = sr_cheats_marker();
+    MEM_W8(CHEAT_BASE + 0x100u, 0u);
+    sr_cheats_marker_drawn(0);
+    sr_cheats_marker_drawn(1);   /* a later present that draws does not bring them back */
+    cheats_tick(1);
+    sr_cheats_status(&status);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && !status.applying && cheats_marker_is(NULL),
+           "cheats drawn: after a present that did not draw the marker, nothing is applied");
+    expect(shown != NULL && strcmp(shown, "Cheats on: 1") == 0,
+           "cheats drawn: the words a presenter already holds are not rewritten when the cheats stop");
+    expect(cheats_log_count("CHEATS: refused: the window cannot show the cheats marker (the in-game UI stopped "
+                            "drawing)") == 1u,
+           "cheats drawn: and one line says so");
+    sr_cheats_marker_drawn(0);
+    cheats_tick(2);
+    expect(MEM_R8(CHEAT_BASE + 0x100u) == 0u && cheats_log_count("CHEATS") == 0u,
+           "cheats drawn: it is said once");
+    cheats_end(path);
+}
+
+/* The child of the ExitGame test below: its stderr goes to log_path, it starts a cheat whose
+ * pointer is null, and one VBLANK holds it. */
+static int exit_game_cheats_held(const char *log_path) {
+    static const char text[] = "_C1 Held\n_L 0x60000200 0x00000001\n_L 0x00000001 0x00000000\n";
+    char ini[MAX_PATH + 8];
+    SrCheatsStatus status;
+    FILE *f;
+    int written;
+    if (snprintf(ini, sizeof(ini), "%s.ini", log_path) >= (int)sizeof(ini)) return 0;
+    f = fopen(ini, "wb");
+    if (!f) return 0;
+    written = fwrite(text, 1u, sizeof(text) - 1u, f) == sizeof(text) - 1u;
+    if (fclose(f) != 0 || !written) return 0;
+    if (!freopen(log_path, "w", stderr)) return 0;
+    hle_test_setenv("SR_CHEATS", "1");
+    hle_test_setenv("SR_CHEATS_FILE", ini);
+    s_fixture_loaded_base = CHEAT_BASE + 0x4000u;
+    s_fixture_loaded_end = CHEAT_BASE + 0x8000u;
+    sr_cheats_init();
+    sr_cheats_status(&status);
+    if (!status.applying) return 0;
+    sr_cheats_vblank();
+    return 1;
+}
+
+/* sceKernelExitGame ends the process without main's end (driver.c), so it gives the cheats'
+ * hold counts itself (audit 2026-11-17). A child holds a cheat on one VBLANK and exits. */
+static void test_cheats_counts_at_exit_game(const char *self) {
+    char scratch[MAX_PATH];
+    char log_path[MAX_PATH + 64];
+    char ini[MAX_PATH + 72];
+    char text[8192];
+    FILE *f;
+    intptr_t rc;
+    if (!self || !hle_scratch_root(scratch, sizeof(scratch))) {
+        expect(0, "cheats exit: the test knows its executable and its scratch folder");
+        return;
+    }
+    snprintf(log_path, sizeof(log_path), "%s/cheats_exitgame_%lu.log", scratch, (unsigned long)getpid());
+    snprintf(ini, sizeof(ini), "%s.ini", log_path);
+    hle_test_setenv("SR_TEST_EXITGAME_CHEATS", log_path);
+    rc = exit_game_spawn_child(self);
+    hle_test_setenv("SR_TEST_EXITGAME_CHEATS", NULL);
+    text[0] = '\0';
+    f = fopen(log_path, "rb");
+    if (f) {
+        size_t got = fread(text, 1u, sizeof(text) - 1u, f);
+        text[got] = '\0';
+        fclose(f);
+    }
+    expect(rc == 0, "cheats exit: the child holds a cheat and ends through sceKernelExitGame");
+    expect(strstr(text, "CHEATS: cheat \"Held\" is held: line 2: its pointer leads to 0x00000000, outside user "
+                        "memory") != NULL,
+           "cheats exit: the child's VBLANK held the cheat");
+    expect(strstr(text, "CHEATS: cheat \"Held\" was held on 1 frame(s) and applied on 0") != NULL,
+           "cheats exit: sceKernelExitGame gives the hold counts that main's end would");
+    remove(log_path);
+    remove(ini);
+}
+
+/* Review of #2652, defect 10: a button condition tests the pad as the VBLANK latched it. Ace
+ * late pad sampling may refresh that sample afterwards, before the game reads it; the cheat's
+ * pass has run by then, so a button the refresh adds reaches a condition at the next VBLANK. */
+static void test_cheats_button_condition_reads_the_vblank_latch(void) {
+    char path[MAX_PATH];
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_ctrl_sampling_reset();
+    sr_hle_test_ctrl_ring_reset();
+    expect(cheats_file_write(path, sizeof(path), "latch",
+                             "_C1 While Cross is held\n_L 0xD0000000 0x10004000\n_L 0x000001D0 0x00000099\n"),
+           "cheats latch: the cheat file is written");
+    cheats_start("1", path);
+    s_test_gui_on = 1;
+    s_test_gui_buttons = 0u;
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x1D0u) == 0u, "cheats latch: Cross up at the VBLANK, the line does not run");
+    expect(ctrl_refresh_newest(PSP_CTRL_CROSS_BIT, 128u, 128u, 1u, 0u) &&
+           (sr_ctrl_live_buttons() & PSP_CTRL_CROSS_BIT) != 0u,
+           "cheats latch: a late refresh puts Cross into the sample the game reads this frame");
+    expect(MEM_R8(CHEAT_BASE + 0x1D0u) == 0u,
+           "cheats latch: this VBLANK's cheats have run already, on the sample as latched");
+    s_test_gui_buttons = PSP_CTRL_CROSS_BIT;
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x1D0u) == 0x99u, "cheats latch: the next VBLANK's latch carries Cross, and the line runs");
+    cheats_end(path);
+}
+
+/* Review of #2652, defects 3, 4 and 9: what a file can cost a run is bounded and said. */
+static void cheat_late_body(CpuState *s) { (void)s; }
+static uint32_t s_cheat_late_base;
+static const SrModuleFunc s_cheat_late_funcs[] = { {0x100u, 2u, cheat_late_body} };
+static const SrModuleSpan s_cheat_late_spans[] = { {0x100u, 0x180u}, {0x200u, 0x240u} };
+static SrModuleCode s_cheat_late_code = {
+    "cheat-late.prx", 0u, 0u, 0u, 0x1000u, 0x40u, 1u, NULL, &s_cheat_late_base,
+    s_cheat_late_funcs, 1u, s_cheat_late_spans, 2u, 0u, 0u,
+};
+
+/* Appends formatted text to the NUL-terminated `text` of `cap` bytes that holds `*used`
+ * characters. The new length is measured from the text, not taken from what vsnprintf says it
+ * would have written, so it never passes the buffer; text that does not fit whole fails the
+ * test. */
+static void cheats_text_addf(char *text, size_t cap, size_t *used, const char *fmt, ...) {
+    va_list args;
+    size_t room;
+    int wrote;
+    if (*used >= cap) {
+        expect(0, "cheats: the test's file text has room");
+        return;
+    }
+    room = cap - *used - 1u;
+    va_start(args, fmt);
+    wrote = vsnprintf(text + *used, cap - *used, fmt, args);
+    va_end(args);
+    if (wrote < 0) text[*used] = '\0';
+    if (wrote < 0 || (size_t)wrote > room) expect(0, "cheats: the test's file text fits its buffer");
+    *used += strlen(text + *used);
+}
+
+static void test_cheats_bounds_and_late_code(void) {
+    static char text[8192];
+    char path[MAX_PATH];
+    SrCheatsStatus status;
+    SrModuleBindDetail detail;
+    size_t used = 0u;
+    reset_fixture();
+    /* Forty cheats refused for a line of their own, five fills of which four use the VBLANK's
+     * writes, and a write over memory that becomes code later. */
+    cheats_text_addf(text, sizeof(text), &used,
+                     "_C1 Over late code\n_L 0x00000300 0x00000011\n_L 0x800060FE 0x00040001\n"
+                     "_L 0x00000077 0x00000000\n");
+    for (int i = 0; i < 40; i++) {
+        cheats_text_addf(text, sizeof(text), &used, "_C1 Bad %d\n_L 0xB0000000 0x00000001\n", i);
+    }
+    for (int i = 0; i < 4; i++) {
+        cheats_text_addf(text, sizeof(text), &used,
+                         "_C1 Fill %d\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n", i);
+    }
+    cheats_text_addf(text, sizeof(text), &used,
+                     "_C1 Fill 4\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n"
+                     "_C1 Fill 5\n_L 0x80010000 0x0FFE0001\n_L 0x00000000 0x00000000\n");
+    expect(used < sizeof(text) && cheats_file_write(path, sizeof(path), "bounds", text),
+           "cheats bounds: the cheat file is written");
+    cheats_start("1", path);
+    sr_cheats_status(&status);
+    expect(status.applying && status.on == 5u && status.refused == 42u,
+           "cheats bounds: the cheats that fit the VBLANK's budget are on; the rest are refused");
+    expect(cheats_log_count("CHEATS: refused \"Bad ") == 32u &&
+           strstr(s_cheat_log, "CHEATS: and 8 more refused cheat(s), each for a line of its own") != NULL,
+           "cheats bounds: the start names a bounded number of refusals and counts the rest");
+    expect(cheats_log_count("CHEATS: refused 2 cheat(s), the first at line 97: together the cheats that are on may do "
+                            "16384 writes, 1048576 bytes and 16384 codes in one VBLANK") == 1u &&
+           cheats_log_count("Fill 4") == 0u,
+           "cheats bounds: the VBLANK's limit is said once for all the cheats it refuses");
+    {
+        /* What the limit costs: with the four fills on, a VBLANK does 16,381 of its 16,384 writes. */
+        const clock_t before = clock();
+        cheats_tick(200);
+        fprintf(stderr, "cheats bounds: a VBLANK at the write limit took about %.3f ms here\n",
+                (double)(clock() - before) * 1000.0 / CLOCKS_PER_SEC / 200.0);
+    }
+    expect(MEM_R8(CHEAT_BASE + 0x300u) == 0x11u && MEM_R16(CHEAT_BASE + 0x60FEu) == 0x7777u &&
+           MEM_R16(CHEAT_BASE + 0x6100u) == 0x7777u,
+           "cheats bounds: before any module is bound there, the write over 0x08806100 is a data write");
+    /* A module bound after the file was read: its spans are code from then on. */
+    MEM_W8(CHEAT_BASE + 0x300u, 0x01u);
+    memset(SR_HOST(CHEAT_BASE + 0x60F0u), 0x5Au, 0x20u);
+    sr_module_code_register(&s_cheat_late_code);
+    expect(sr_module_code_bind(&s_cheat_late_code, CHEAT_BASE + 0x6000u, &detail) == SR_MODULE_BIND_OK,
+           "cheats bounds: a module is bound over the range");
+    expect(!sr_exec_span_overlaps(CHEAT_BASE + 0x60FFu, 1u) && sr_exec_span_overlaps(CHEAT_BASE + 0x60FFu, 2u) &&
+           sr_exec_span_overlaps(CHEAT_BASE + 0x6100u, 1u) && sr_exec_span_overlaps(CHEAT_BASE + 0x617Fu, 1u) &&
+           !sr_exec_span_overlaps(CHEAT_BASE + 0x6180u, 0x80u) && sr_exec_span_overlaps(CHEAT_BASE + 0x6180u, 0x81u) &&
+           sr_exec_span_overlaps(CHEAT_BASE + 0x623Fu, 4u) && !sr_exec_span_overlaps(CHEAT_BASE + 0x6240u, 0xDC0u) &&
+           sr_exec_span_overlaps(CHEAT_BASE + 0x5000u, 0x2000u) && !sr_exec_span_overlaps(CHEAT_BASE + 0x6100u, 0u),
+           "cheats bounds: a bound module's spans, and only they, are code to a writer");
+    cheats_tick(1);
+    expect(MEM_R8(CHEAT_BASE + 0x300u) == 0x01u && MEM_R16(CHEAT_BASE + 0x60FEu) == 0x5A5Au &&
+           MEM_R16(CHEAT_BASE + 0x6100u) == 0x5A5Au,
+           "cheats bounds: the multi-write that now reaches the module's code is held whole");
+    expect(cheats_log_count("CHEATS: cheat \"Over late code\" is held: line 3: its write at 0x088060FE is inside "
+                            "code the recompiler translated") == 1u,
+           "cheats bounds: and the hold names the cheat, the line and the address");
+    sr_module_code_unbind(&s_cheat_late_code);
+    expect(!sr_exec_span_overlaps(CHEAT_BASE + 0x6100u, 1u), "cheats bounds: unbound, its spans are not code");
+    /* Static spans that overlap one another: a write is asked against all of them. */
+    expect(sr_exec_span_register(CHEAT_BASE + 0x7000u, CHEAT_BASE + 0x7100u) &&
+           sr_exec_span_register(CHEAT_BASE + 0x7010u, CHEAT_BASE + 0x7020u) &&
+           sr_exec_span_register(CHEAT_BASE + 0x7400u, CHEAT_BASE + 0x7500u),
+           "cheats bounds: three static spans are registered, one inside another");
+    expect(sr_exec_span_overlaps(CHEAT_BASE + 0x7080u, 1u) && sr_exec_span_overlaps(CHEAT_BASE + 0x70FFu, 0x400u) &&
+           !sr_exec_span_overlaps(CHEAT_BASE + 0x7100u, 0x300u) && sr_exec_span_overlaps(CHEAT_BASE + 0x7100u, 0x301u) &&
+           !sr_exec_span_overlaps(CHEAT_BASE + 0x6FFFu, 1u) && !sr_exec_span_overlaps(CHEAT_BASE + 0x7500u, 0x100u),
+           "cheats bounds: a byte past an inner span's end is still code when an outer span holds it");
+    /* The pointer-free cheat flickers between held and applied for 60 VBLANKs: two lines at
+     * most, and the counts at the end of the run. */
+    {
+        unsigned lines = 0u;
+        for (int i = 0; i < 60; i++) {
+            if (i & 1) sr_module_code_unbind(&s_cheat_late_code);
+            else (void)sr_module_code_bind(&s_cheat_late_code, CHEAT_BASE + 0x6000u, &detail);
+            cheats_tick(1);
+            lines += cheats_log_count("CHEATS");
+        }
+        expect(lines == 1u, "cheats bounds: a cheat held and released every VBLANK says so once, not every time");
+        sr_module_code_unbind(&s_cheat_late_code);
+        CHEATS_CAPTURE(sr_cheats_run_end());
+        expect(strstr(s_cheat_log, "CHEATS: cheat \"Over late code\" was held on 31 frame(s) and applied on 230") != NULL,
+               "cheats bounds: the end of the run gives the counts");
+    }
+    cheats_end(path);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && (strcmp(argv[1], "--psp-oracle") == 0 ||
                      strcmp(argv[1], "--exit-game-poisoned") == 0))
@@ -60137,6 +61005,18 @@ static int hle_selftest_main(int argc, char **argv) {
     test_volatile_mem_lock_departures_and_type();
     test_ctrl_sampling_contract();
     test_ctrl_late_refresh();
+    test_cheats_are_off_unless_switched_on();
+    test_cheats_every_code_type_at_vblank();
+    test_cheats_refuse_code_writes_and_bad_lines_by_name();
+    test_cheats_refused_for_the_whole_run();
+    test_cheats_say_their_origin_once_at_first_use();
+    test_cheats_on_an_image_below_psp_memory();
+    test_cheats_need_the_program_they_were_read_for();
+    test_cheats_refused_for_an_acceptance_checkpoint();
+    test_cheats_stop_when_the_marker_stops_being_drawn();
+    test_cheats_button_condition_reads_the_vblank_latch();
+    test_cheats_bounds_and_late_code();
+    test_cheats_counts_at_exit_game(argc > 0 ? argv[0] : NULL);
     test_pad_vblank_deadline();
     test_pad_late_through_the_boundary();
     test_pad_latency_charges_reads_to_new_frames();

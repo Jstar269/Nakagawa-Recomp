@@ -253,6 +253,9 @@ int      ge_capture_exit_due(void) { return 0; }
 void     ge_capture_exit_set_deferred(int deferred) { (void)deferred; }
 /* No GPU, so no texture dump to finish where the run ends (ge.c, ge_shared.h). */
 void     sr_texdump_exit_finish(void) {}
+/* The gate never loads a cheat file (sr_cheats_init lives in gui.c, which it does not link), so
+ * the run's end has no hold counts to give; cheats.c says the same with no cheat set. */
+void     sr_cheats_run_end(void) {}
 /* The gate has no patch drawing: driver.c asks for tess=2..4, the stub keeps the PSP's division (1)
  * and ace_finish reports the feature as never run. */
 int      ge_patch_tess_init(int factor) { (void)factor; return 1; }

@@ -94,6 +94,28 @@ display-smoke-run: display-smoke
 		-o $(DISPLAY_SMOKE_DIR)/videorec_fake_ffmpeg.exe tests/native/videorec_selftest.c src/rt/videorec.c
 	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) videorec --build-dir $(DISPLAY_SMOKE_DIR) \
 		--fake-ffmpeg $(DISPLAY_SMOKE_DIR)/videorec_fake_ffmpeg.exe
+	$(MAKE) display-smoke-cheats-base0
+
+# display-smoke-cheats-base0 builds the same guest with its image at 0, as a title manifest with
+# "base": 0 has its image loaded, and runs the full runtime with a CWCheat file (#2639). A cheat
+# names PSP addresses, and in this layout the image is not where a PSP has it: the run must move
+# the cheat that writes the image's data with the image, refuse by name the one that writes its
+# translated code and the one that names memory outside the image, and leave the guest's last
+# frame as it is; a second run with cheats off must leave the data byte unwritten.
+# display-smoke-run ends with it, so hosted CI runs it wherever it runs the display smoke.
+display-smoke-cheats-base0:
+	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) generate --out-dir $(DISPLAY_SMOKE_BASE0_FIXTURE) \
+		--frames $(DISPLAY_SMOKE_FRAMES)
+	$(MAKE) all \
+		GAME_NAME=$(DISPLAY_SMOKE_BASE0_NAME) \
+		GAME_ELF=$(DISPLAY_SMOKE_BASE0_FIXTURE)/guest.prx \
+		GAME_BASE=0 \
+		GAME_ENTRY=0 \
+		GAME_PSP_HEADER=$(DISPLAY_SMOKE_BASE0_FIXTURE)/guest.psp \
+		GAME_EXTRA_ELFS= TITLE_MANIFEST= \
+		BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR) \
+		FUNCS_PER_CHUNK=1 PUBLIC_SAFE=1
+	"$(PYTHON)" $(DISPLAY_SMOKE_GENERATOR) cheats-base0 --build-dir $(DISPLAY_SMOKE_BASE0_DIR)
 
 # display-smoke-picture-gate runs the picture gate (#1845) headless: no reference gives SKIP, a run
 # accepted as the reference then matches at 0.00%, and a one-pixel change to it is reported.
@@ -138,6 +160,7 @@ display-smoke-player: player display-smoke-run
 
 display-smoke-clean:
 	$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_DIR) clean
+	$(MAKE) BUILD_DIR=$(DISPLAY_SMOKE_BASE0_DIR) clean
 
 # Public title qualification (issue #699). title-qualification validates the checked-in
 # public manifests, input profiles and staging declarations without building or launching.

@@ -195,6 +195,7 @@ Sizes are `wc -l` at base `6a4f359`, as above, and are not refreshed.
 | G21 | Media Engine boundary `src/rt/hle_videocodec.c` (sceVideocodec, sceMpegbase, sceAudiocodec under a disc `mpeg.prx`; added 2026-11-07, #286) | JPCSP at 00ac4d6d (GPL-3.0-or-later; context words of `sceVideocodec.java`, `sceMpegbase.java`, `sceMeAudio.java`, `sceAudiocodec.java`) and uOFW at 28306bb5 (MIT; `audiocodec.c` wrapper checks), derived-translated (`src/rt/PROVENANCE.md`) | 1260 | A title's own `mpeg.prx` once started (guest-owned `sceMpeg`), the host H.264 seam and the ATRAC3plus decoder beneath it | `videocodec-selftest` (synthetic I_PCM H.264 and ATRAC3plus fixtures), the guest-owned `sceMpeg` cell in `hle-thread-selftest` | It is the HLE floor under LLE `mpeg.prx`: the Media Engine image is firmware and is never run, so this boundary stays; its synthetic words are replaced by PSP measurements (W-LLE-1), not rewritten |
 | G22 | OpenXR API headers `src/rt/xr/openxr/openxr.h` + `src/rt/xr/openxr/openxr_platform.h` + `src/rt/xr/openxr/openxr_platform_defines.h` (added 2026-11-08, #791) | Khronos OpenXR-SDK release-1.1.65 at 24a1f2b9, Apache-2.0 OR MIT, byte-identical imports (`src/rt/xr/openxr/PROVENANCE.md`) | 16,196 | The project-authored OpenXR module `src/rt/xr/nk_xr*.c`, which loads the runtime at run time | `xr-selftest` (fake runtime), byte identity against the pinned upstream blobs | None: opt-in VR presentation; public API declarations, kept identical to the pin |
 | G23 | Ad hoc transport `src/core/nk_adhoc_net.c` (the in-process medium's lobby) + `src/core/nk_adhoc_relay.c` (the relay codec's login checks and port offset) (added 2026-11-12, #1139) | PPSSPP (`Core/HLE/proAdhocServer.cpp`, `Core/HLE/sceNetAdhoc.cpp`) at 3bc60270, derived-translated; the login checks (`lo_login`, `nk_relay_*_ok`, the product-code check included) all written again from `login_user_data` after review; nothing in them is from aemu_postoffice | 794 | `adhoc-net-selftest`, `relay-codec-selftest`; not linked into the runtime yet | `adhoc-net-selftest` (PPSSPP login checks, join, leave and scan order, the drop count and report), `relay-codec-selftest` (packets byte by byte, PPSSPP's nickname rule) | None: host-side lobby model and wire codec beneath the HLE `sceNetAdhocctl` layer |
+| G24 | Cheat files `src/core/nk_cheats.c` + `src/core/nk_cheats.h` (the CWCheat reader, the decode of each code form and the applier; added 2026-11-16, #2639) | PPSSPP (`Core/CwCheat.cpp`, `Core/CwCheat.h`) at c437463b, derived-translated; the check made when a file is read, the refusal of writes into translated code and the whole-or-nothing apply are this project's own | 1,384 | `src/rt/cheats.c` (applies the cheats that are on at each VBLANK, behind `SR_CHEATS`) | `nk-cheats-selftest` (every code form and every refusal on synthetic guests), the cheats harness of `fuzz-parsers`, the cheats cells of `hle-thread-selftest` | None: opt-in host feature that writes a game's data memory; PPSSPP-derived, not PSP-measured |
 
 ## 3. Third-party dependencies — keep, with reasons
 
@@ -355,6 +356,13 @@ replacement by an LLE path that makes the component unnecessary ·
   players to meet; its login checks are PPSSPP's server rules applied before a packet is sent, so a
   login PPSSPP's server would refuse is never sent. Validate with `adhoc-net-selftest`'s order and login
   cells and `relay-codec-selftest`.
+- **G24 cheat files → evidence, not rewrite.** The CWCheat format has no specification, and the cheat
+  files people have were written for the meaning PPSSPP gives each code form, so the decode keeps that
+  meaning; it stays labelled `derived-translated` with PPSSPP's notice, and its behaviour is
+  PPSSPP-derived, not PSP-measured. The load-time check, the refusal of writes into translated code and
+  the whole-or-nothing apply are this project's own and stay. Validate with `nk-cheats-selftest` (every
+  code form and every refusal on synthetic guests), the cheats harness of `fuzz-parsers` and the VBLANK
+  cells of `hle-thread-selftest`; a measurement of a code form on a PSP supersedes PPSSPP's reading of it.
 
 ## 5. Clean-room protocol for AI-agent work
 

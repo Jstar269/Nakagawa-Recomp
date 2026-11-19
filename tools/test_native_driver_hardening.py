@@ -144,6 +144,8 @@ int ge_capture_exit_due(void) {{ return 0; }}
 void ge_capture_exit_set_deferred(int deferred) {{ (void)deferred; }}
 /* No GE, so no texture dump to finish where the run ends (ge.c, ge_shared.h). */
 void sr_texdump_exit_finish(void) {{}}
+/* No cheat file is loaded (sr_cheats_init is gui.c's), so the run's end has no hold counts. */
+void sr_cheats_run_end(void) {{}}
 int (*sr_sched_stop_requested)(void) = NULL;
 const SrPauseHost *sr_sched_pause_host = NULL;
 void sr_audio_pause_enter(void) {{}}

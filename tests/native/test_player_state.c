@@ -17310,6 +17310,70 @@ int main(int argc, char **argv) {
             assert(!player_app_discord_activity(s_app2, &activity));
         }
 
+        /* Cheats (#2639): off by default, an optional key that only a JSON true turns on,
+           toggled and saved by the Settings switch. --cheats and --cheats-file turn them on
+           for the session and are never saved. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.cheats && !s_app2->cheats_session &&
+               s_app2->cheats_session_file[0] == '\0');
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"cheats\": false") != NULL);
+            free(saved);
+        }
+        write_text_file(test_settings_path, "{\"schema_version\": 2}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.cheats);   /* a file from before the key: off */
+        write_text_file(test_settings_path, "{\"schema_version\": 2, \"cheats\": 1}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.cheats);
+        write_text_file(test_settings_path, "{\"schema_version\": 2, \"cheats\": true}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.cheats);
+        {
+            NkRuntimeConfig cheats_cfg;
+            memset(&cheats_cfg, 0, sizeof(cheats_cfg));
+            player_app_apply_settings_to_session(&s_app2->settings, &cheats_cfg);
+            assert(cheats_cfg.cheats && cheats_cfg.cheats_file[0] == '\0');
+            s_app2->settings.cheats = false;
+            player_app_apply_settings_to_session(&s_app2->settings, &cheats_cfg);
+            assert(!cheats_cfg.cheats);
+        }
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_cheats(s_app2);
+        assert(s_app2->settings.cheats);
+        player_app_toggle_cheats(s_app2);
+        assert(!s_app2->settings.cheats);
+        assert(player_app_set_cheats_session(s_app2, NULL));
+        assert(s_app2->cheats_session && s_app2->cheats_session_file[0] == '\0');
+        {
+            /* A named file must be there (so it can be made absolute on every host); one that
+               is not changes nothing. */
+            char named[sizeof(test_settings_path) + 32];
+            char absolute[MAX_PATH_LEN];
+            snprintf(named, sizeof(named), "%s.session-cheats.ini", test_settings_path);
+            remove(named);
+            assert(!player_app_set_cheats_session(s_app2, named));
+            assert(s_app2->cheats_session && s_app2->cheats_session_file[0] == '\0');
+            write_text_file(named, "_C1 Write\n_L 0x00000100 0x00000001\n");
+            assert(player_app_set_cheats_session(s_app2, named));
+            assert(nk_platform_absolute_path(named, absolute, sizeof(absolute)));
+            assert(s_app2->cheats_session && strcmp(s_app2->cheats_session_file, absolute) == 0);
+            remove(named);
+        }
+        assert(!s_app2->settings.cheats);   /* the session's cheats are not the stored switch */
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"cheats\": false") != NULL &&
+                   strstr(saved, "session-cheats") == NULL);
+            free(saved);
+        }
+
         /* Opt-in cover art (#2632): off by default, persisted cleanly, toggleable, and
            its cache size / clear helpers inspect only the cover-art cache under user data. */
         player_app_init(s_app2);

@@ -297,6 +297,14 @@ as the game made it, and the rest of the pack is used.
 The details, including what a pack made for an emulator cannot match here, are in
 [`ENHANCEMENT_CONTRACT.md`](ENHANCEMENT_CONTRACT.md#1012-texture-replacement).
 
+## Cheats
+
+The player can apply a CWCheat file you supply for a game, such as one you already use with
+PPSSPP. Cheats are off until you turn them on, the game's window marks a run that applies one,
+and a code that would patch the game's instructions is refused by name, because a recompiled
+game does not read its code from memory again. Where the file goes, the code forms that run and
+what is refused are in [`SETUP.md`](SETUP.md#cheats-cwcheat-files).
+
 ## Keep it to your own games
 
 - Only use games you own.
