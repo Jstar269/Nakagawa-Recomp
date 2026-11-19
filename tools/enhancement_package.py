@@ -1474,8 +1474,8 @@ def ace_part_sites(data: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]
     return out
 
 
-def _published_function_names(data: Mapping[str, Any]) -> set[str]:
-    """Names that resolve to executable functions and therefore require word alignment."""
+def _published_names(data: Mapping[str, Any]) -> set[str]:
+    """Every symbolic name a declaration resolves: the names its site map must hold."""
     names: set[str] = set()
     for site in data.get("sites", ()):
         names.add(site["function"])
@@ -1484,16 +1484,10 @@ def _published_function_names(data: Mapping[str, Any]) -> set[str]:
         names.add(site["function"])
     if "update_boundary" in data:
         names.add(data["update_boundary"]["function"])
-    for hook in data.get("hooks", ()):
-        names.add(hook["symbol"])
-    return names
-
-
-def _published_names(data: Mapping[str, Any]) -> set[str]:
-    """Every symbolic name a declaration resolves: the names its site map must hold."""
-    names = _published_function_names(data)
     for site in data.get("data_sites", ()):
         names.add(site["symbol"])
+    for hook in data.get("hooks", ()):
+        names.add(hook["symbol"])
     return names
 
 
@@ -1529,16 +1523,13 @@ def _validate_published_package(data: dict[str, Any]) -> dict[str, Any]:
     site_map = data["site_map"]
     if not isinstance(site_map, dict) or not site_map:
         fail("site_map", "site_map must be a non-empty object of symbolic name -> address")
-    function_names = _published_function_names(declaration)
     # Two names may share an address (the decomp's name and a site's own): that publishes no other address.
     for name, address in site_map.items():
         check_not_address_literal(name, f"site_map.{name}", "site map name")
         if not SYMBOL_RE.match(name):
             fail(f"site_map.{name}", f"site map name {name!r} does not match required pattern {SYMBOL_RE.pattern}")
-        if not isinstance(address, str) or not SITE_MAP_ADDRESS_RE.match(address):
-            fail(f"site_map.{name}", f"address {address!r} must be a 0x%08x hex string")
-        if name in function_names and int(address, 16) % 4:
-            fail(f"site_map.{name}", f"function address {address!r} must be 4-byte aligned")
+        if not isinstance(address, str) or not SITE_MAP_ADDRESS_RE.match(address) or int(address, 16) % 4:
+            fail(f"site_map.{name}", f"address {address!r} must be a 4-byte-aligned 0x%08x hex string")
         # A project-assigned name for a function without a decompilation name ends in its own address
         # (hst_fn_0001ea64): an 8-hex suffix is that name's address and no other value.
         suffix = ADDRESS_SUFFIX_RE.search(name)

@@ -4974,11 +4974,16 @@ class TestPublishedPackages(_SynthTimingElfFixture):
             self.assertIn("the executable's own symbols", stderr.getvalue())
             self.assertFalse(output.exists())
 
-    def test_publish_accepts_an_unaligned_byte_data_symbol(self) -> None:
+    def test_publish_refuses_an_unaligned_data_symbol(self) -> None:
+        """A data site's address is refused unless it is 4-byte aligned, as a function's is, in
+        --publish and in the published form's own check. Whether a byte table may sit at an
+        unaligned address is not decided here."""
+        refusal = (r"site_map\.synth_byte_table: address '0x00002001' must be a 4-byte-aligned "
+                   r"0x%08x hex string")
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
             words = dict(self.words)
-            words[0x00002000] = 0x00001E00  # the byte at 0x2001 is 30
+            words[0x00002000] = 0x00001E1E  # the bytes at 0x2000 and 0x2001 are 30
             elf_bytes = _write_synthetic_mips_elf(
                 tmp / "synth.elf",
                 words,
@@ -4996,20 +5001,29 @@ class TestPublishedPackages(_SynthTimingElfFixture):
                 "stock_digest": hashlib.sha256(bytes((30,))).hexdigest(),
                 "transform": "count_x2",
             }]
-            symbols["synth_byte_table"] = "0x00002001"
             read_words, read_data = self._readers(elf_bytes)
 
-            published = enhancement_package.publish_package(
-                private,
-                {name: int(address, 16) for name, address in symbols.items()},
-                executable=elf_bytes,
-                disc_id=self.DISC,
-                disc_version=self.VERSION,
-                read_words_fn=read_words,
-                read_data_fn=read_data,
-            )
+            def publish(address: str) -> dict[str, Any]:
+                return enhancement_package.publish_package(
+                    private,
+                    {name: int(value, 16) for name, value in {**symbols, "synth_byte_table": address}.items()},
+                    executable=elf_bytes,
+                    disc_id=self.DISC,
+                    disc_version=self.VERSION,
+                    read_words_fn=read_words,
+                    read_data_fn=read_data,
+                )
 
-        self.assertEqual(published["site_map"]["synth_byte_table"], "0x00002001")
+            with self.assertRaisesRegex(EnhancementPackageError, refusal):
+                publish("0x00002001")
+            # The same site at an aligned address publishes; moving its address afterwards is refused.
+            published = publish("0x00002000")
+
+        self.assertEqual(enhancement_package.published_package_findings(published), [])
+        published["site_map"]["synth_byte_table"] = "0x00002001"
+        findings = enhancement_package.published_package_findings(published)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertRegex(findings[0], refusal)
 
     def test_publish_walks_the_extracted_data_tree_once_for_multiple_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
