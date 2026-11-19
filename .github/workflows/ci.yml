@@ -2941,8 +2941,9 @@ jobs:
       # The Windows build decodes H.264 through Media Foundation (src/rt/h264_mf.c), so this
       # runs the source-authored PSMF/H.264 fixture on that backend (#283); native_tools runs
       # the same fixture on the vendored FFmpeg subset. When no decoder instance can be
-      # created, the selftest prints SKIP for its decode checks and still exits 0, so any SKIP
-      # line fails the step. The CSC no-write mutant must then die on the same backend.
+      # created, the selftest prints SKIP for its decode checks and then fails its own
+      # no-SKIP check; any SKIP line also fails the step. The CSC no-write mutant must then
+      # die on the same backend.
       - name: Build and run the Media Foundation H.264 media selftest
         if: contains(matrix.parts, 'selftests')
         shell: msys2 {0}

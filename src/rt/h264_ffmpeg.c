@@ -108,10 +108,18 @@ static int ff_append_au(FfDec *d, const SrH264AccessUnit *au) {
     return 1;
 }
 
-/* Drop decoded units from the front once they are the larger part of a big buffer. */
+/* Drop sent units from the front: all of them once every queued unit has been sent (the decoder
+ * copied each one when it took it; sceVideocodecDecode leaves the queue in that state after every
+ * call), otherwise once they are the larger part of a big buffer. */
 static void ff_es_compact(FfDec *d) {
     uint32_t done = d->next_send;
-    if (done == 0 || done >= d->n_unit || done < d->n_unit / 2u || d->es_len < (1u << 20)) return;
+    if (done != 0 && done >= d->n_unit) {
+        d->es_len = 0;
+        d->n_unit = 0;
+        d->next_send = 0;
+        return;
+    }
+    if (done == 0 || done < d->n_unit / 2u || d->es_len < (1u << 20)) return;
     uint32_t shift = d->unit[done].off;
     if (shift > d->es_len) return;
     memmove(d->es, d->es + shift, d->es_len - shift);
@@ -340,7 +348,10 @@ static int ff_deliver(const NkH264Picture *pic, const SrH264FrameTarget *t, SrH2
 
 static int ff_pull(FfDec *d, int eos, const SrH264FrameTarget *t, SrH264FrameInfo *info) {
     if (d->failed || !d->dec) return -1;
-    for (int guard = 0; guard < 4096; guard++) {
+    /* No round cap: every round returns, sends one queued unit or sends the drain once, so the
+     * loop ends within the queue's length. A cap returned 0 ("no picture yet", or "drained" at
+     * EOS) with units still queued (audit 2026-11-17). */
+    for (;;) {
         NkH264Picture pic;
         int r = nk_h264_receive(d->dec, &pic);
         if (r == NK_H264_OK) return ff_deliver(&pic, t, info) == 1 ? 1 : -1;
@@ -357,7 +368,6 @@ static int ff_pull(FfDec *d, int eos, const SrH264FrameTarget *t, SrH264FrameInf
             return 0;                                  /* waiting for more input */
         }
     }
-    return 0;
 }
 
 /* ---- seam entry points ------------------------------------------------------------------ */

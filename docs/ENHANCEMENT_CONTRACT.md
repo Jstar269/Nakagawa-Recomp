@@ -2330,7 +2330,9 @@ host's output.
   where the sum and the guest's copy differ), `frames_limited` (output frames whose bytes the gain changed) and
   `min_gain`. The part
   is confirmed once the SAS mixer and the audio backend both take the switch (`driver.c`); a link without either,
-  the headless gate, reports it as never run. Section 10.4 applies.
+  the headless gate, reports it as never run. The backend refuses the switch when there is no host output to
+  limit (`SR_AUDIO_DISABLED=1`, `SR_AUDIO_BACKEND=null` or `SR_HEADLESS=1` without a back end, or an open already
+  refused), and a run whose device never opened reports the part unavailable at exit. Section 10.4 applies.
 - **Tests.** `hle-thread-selftest` runs the overflow fixture (twenty full-scale voices over caller PCM through
   `__sceSasCoreWithMix`): the guest's bytes are identical with the part on and off; the output of that buffer
   carries the sum, past 16 bits exactly where the store saturated and the guest's value elsewhere; a buffer changed
