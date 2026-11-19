@@ -213,6 +213,26 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(proof.Report(errors=["x"], incomplete=["y"]).result, "FAIL")
 
 
+class NmFailureTests(unittest.TestCase):
+    """An nm that cannot read a file must not yield an empty symbol set that passes L4."""
+
+    @unittest.skipIf(shutil.which("nm") is None, "needs nm")
+    def test_unreadable_object_raises_instead_of_reading_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            obj = Path(tmp, "not_an_object.o")
+            obj.write_text("this is not an object file\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                proof._nm(obj, str(shutil.which("nm")))
+
+    @unittest.skipIf(shutil.which("gcc") is None, "needs gcc to locate the link libraries")
+    def test_unreadable_library_is_not_counted_as_checked(self) -> None:
+        # The Python interpreter stands in for an nm that rejects every file (it exits
+        # non-zero on nm's options).
+        names, found, unreadable = proof.library_symbols("gcc", sys.executable)
+        self.assertEqual((names, found), (set(), []))
+        self.assertTrue(unreadable, "gcc found no link library to read")
+
+
 class FlattenTests(unittest.TestCase):
     def definitions(self, **bodies: str) -> dict[str, list[str]]:
         return {name: proof._TOKEN.findall(f"void {name}(void) {{ {body} }}") for name, body in bodies.items()}

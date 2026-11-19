@@ -11,6 +11,7 @@ packages, so the same PPM inputs produce byte-identical animations.
 from __future__ import annotations
 
 import argparse
+import itertools
 from pathlib import Path
 import re
 import struct
@@ -94,7 +95,12 @@ def _frames(directory: Path) -> list[tuple[int, Path]]:
         match = FRAME_NAME.fullmatch(path.name)
         if match and path.is_file():
             frames.append((int(match.group(1)), path))
-    frames.sort(key=lambda item: item[0])
+    frames.sort(key=lambda item: (item[0], item[1].name))
+    for (vcount, first), (next_vcount, second) in itertools.pairwise(frames):
+        if vcount == next_vcount:
+            # frame_v1.ppm and frame_v01.ppm name one VCOUNT; directory order would pick
+            # which comes first, so the same inputs could give different GIF bytes.
+            raise ValueError(f"{directory}: {first.name} and {second.name} name the same VCOUNT {vcount}")
     if len(frames) < 2:
         raise ValueError(f"{directory}: need at least two frame_v*.ppm snapshots")
     return frames

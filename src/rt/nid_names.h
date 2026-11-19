@@ -512,7 +512,7 @@ static const SrNidName sr_nid_table[] = {
     {0x4aecd179u, "sceUtilityGamedataInstallUpdate"},
     {0x4b0a8fe5u, "sceUtilityRssSubscriberInitStart"},
     {0x4b1b5e82u, "sceRtcCheckValid"},
-    {0x4b4e4e71u, "sceNpLookupAbortTransaction "},
+    {0x4b4e4e71u, "sceNpLookupAbortTransaction"},
     {0x4b5c71c8u, "sceNpGetOnlineId"},
     {0x4b85c861u, "sceUtilityOskUpdate"},
     {0x4bc9bde0u, "scePsmfSpecifyStream"},

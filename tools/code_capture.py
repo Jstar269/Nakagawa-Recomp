@@ -46,10 +46,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from analyze import FIXED_OVERLAY_ELF_TYPE
+
 MAGIC = b"NKCODE01"
 HEADER = struct.Struct("<8s6I")
 SUFFIX = ".nkcap"
-FIXED_OVERLAY_ELF_TYPE = 0xFFA8   # analyze.FIXED_OVERLAY_ELF_TYPE
 _ELF_HEADER_BYTES = 52
 _PROGRAM_HEADER_BYTES = 32
 
@@ -90,9 +91,12 @@ class CaptureImage:
 
 
 def fnv1a64(data):
-    """FNV-1a, 64-bit: codegen.fnv1a64, which sr_module_code_fnv1a64 mirrors at run time."""
-    import codegen   # here, not at the top: codegen imports this module
-    return codegen.fnv1a64(data)
+    """FNV-1a, 64-bit; mirrors src/rt/guest_interp.c sr_module_code_fnv1a64 (``codegen.fnv1a64`` is this)."""
+    h = 0xCBF29CE484222325
+    for byte in data:
+        h ^= byte
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
 
 
 def parse_capture(blob, source="<capture>"):
@@ -164,9 +168,8 @@ def group_captures(captures):
             if image.data[lo - image.load:hi - image.load] != capture.data[lo - capture.load:
                                                                           hi - capture.load]:
                 continue
-            if capture.load < image.load:
-                image.data[:0] = capture.data[:image.load - capture.load]
-                image.load = capture.load
+            # Captures arrive in ascending load order and an image starts at its first
+            # capture's load, so a joining capture never starts before the image.
             if capture.end > image.end:
                 image.data.extend(capture.data[image.end - capture.load:])
             break

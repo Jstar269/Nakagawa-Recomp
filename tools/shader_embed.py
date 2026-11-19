@@ -357,7 +357,10 @@ def include_closure(
     found = set()
     for name in _LINE_MARKER.findall(out.read_text(encoding="utf-8", errors="replace")):
         path = (source.parent / name.replace("\\\\", "/").replace("\\", "/")).resolve()
-        rel = path.relative_to(root.resolve()).as_posix()
+        try:
+            rel = path.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            raise ValueError(f"{source_rel.as_posix()}: include outside the repository: {name}") from None
         if rel != source_rel.as_posix():
             found.add(rel)
     return sorted(found)
@@ -480,6 +483,9 @@ def verify_dxc(
             try:
                 rebuilt = compile_dxc(dxc, root, source_rel, temp / f"{source_rel.stem}.spv", defines)
                 closure = include_closure(dxc, root, source_rel, temp, defines)
+            except ValueError as exc:
+                errors.append(str(exc))
+                continue
             except (OSError, subprocess.SubprocessError) as exc:
                 errors.append(f"{key}: reproducibility compile failed: {exc}")
                 continue
