@@ -94,9 +94,9 @@ It contains 11,951 unique points and the selected input covers every one.
 The Korean font is built at 20 ppem with the console's 10.125-point nominal
 size, so a Hangul syllable moves about as far as on the console. The 191
 characters Gowun Dodum draws wider than the em (circled and parenthesized
-letters and numbers, squared units, the telephone sign) are narrowed to the em (`--fit-em`,
-#1300), as the console's Korean font draws every glyph within one full-width
-cell.
+letters and numbers, squared units, the telephone sign) are narrowed to the
+em (`--fit-em`, #1300), as the console's Korean font draws every glyph within
+one full-width cell.
 Hanja is out of scope; Roman numerals, Japanese kana, Greek, and Cyrillic are
 outside this Korean-text repertoire. The generated PGF name is
 `Nakagawa Open Korean`; the source-family name is not copied into its header.
