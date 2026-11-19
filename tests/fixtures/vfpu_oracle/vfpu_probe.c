@@ -91,25 +91,8 @@ static const VfpuCase CASES[] = {
     { "vfpu-vexp2", vfpu_vexp2 },
 };
 
-/* Issue #69's exact public reproduction words, plus the legal endpoints and
-   nearby out-of-domain values. Per-word records preserve the input/result
-   association that the aggregate transcendental digest cannot provide. */
-static const uint32_t VASIN_DOMAIN_INPUTS[] = {
-    0xBF800000u, /* -1.0: in-domain endpoint */
-    0x3F800000u, /* +1.0: in-domain endpoint */
-    0xBF800001u, /* immediately below -1.0 */
-    0x3F800001u, /* immediately above +1.0 */
-    0x3F80000Bu, /* eleven ULPs above +1.0 */
-    0xBF80000Bu, /* title corpus: eleven ULPs below -1.0 */
-    0xBF80DABCu,
-    0xBF82026Au,
-    0xBF8FA2B7u,
-    0xBF9A419Cu,
-    0xBFB63DDAu,
-    0xBFFB5A51u,
-    0xBFFFFE00u,
-    0xC0000000u, /* title corpus endpoint: -2.0 */
-};
+/* VASIN_DOMAIN_INPUTS (issue #69) lives in vfpu_oracle_cases.h, shared with the
+   Nakagawa-side emitter so both sides print the same per-word records. */
 
 int main(int argc, char *argv[]) {
     (void)argc;

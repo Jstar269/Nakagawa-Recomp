@@ -14,17 +14,15 @@
  *
  * sr_vfpu_interp executes one VFPU compute or prefix instruction against the CpuState and
  * returns SR_VFPU_COMPUTE (a value-producing op, compare v[]/f[] against the oracle),
- * SR_VFPU_STATE (a prefix/control or store op), or SR_VFPU_OTHER (not handled here).
+ * SR_VFPU_STATE (a prefix/control or store op), SR_VFPU_OTHER (not handled here), or
+ * SR_VFPU_ACCESS_REFUSED (a load or store whose guest span is out of range); the codes
+ * are recomp.h's.
  */
 
 #include "recomp.h"
 
 #include <math.h>
 #include <string.h>
-
-#define SR_VFPU_OTHER   0
-#define SR_VFPU_COMPUTE 1
-#define SR_VFPU_STATE   2
 
 /* SR_NAN_TRAP (issue #69): report a VFPU result that went non-finite from
  * all-finite operands, so the instruction that ORIGINATED a NaN is named rather
@@ -111,6 +109,11 @@ static uint32_t vfpu_daz(uint32_t b) {
     return (b & 0x7f800000u) == 0u ? (b & 0x80000000u) : b;
 }
 
+/* A raw word's sign-magnitude order key: vscmp and vsrt order lanes by it. */
+static int64_t vfpu_sm_key(uint32_t b) {
+    return (b >> 31) ? -(int64_t)(b & 0x7fffffffu) : (int64_t)(b & 0x7fffffffu);
+}
+
 /* One vscmp lane: -1.0, 0.0 or +1.0 for a < b, a == b, a > b, in sign-magnitude integer
  * order of the raw words after vfpu_daz flushes a denormal to a zero of its sign. Unlike
  * vsge/vslt, a NaN is not unordered: a NaN with a clear sign bit is above +infinity and
@@ -124,10 +127,8 @@ static float vscmp_lane(float a, float b) {
     uint32_t ab, bb;
     memcpy(&ab, &a, 4);
     memcpy(&bb, &b, 4);
-    ab = vfpu_daz(ab);
-    bb = vfpu_daz(bb);
-    const int64_t ka = (ab >> 31) ? -(int64_t)(ab & 0x7fffffffu) : (int64_t)(ab & 0x7fffffffu);
-    const int64_t kb = (bb >> 31) ? -(int64_t)(bb & 0x7fffffffu) : (int64_t)(bb & 0x7fffffffu);
+    const int64_t ka = vfpu_sm_key(vfpu_daz(ab));
+    const int64_t kb = vfpu_sm_key(vfpu_daz(bb));
     return ka < kb ? -1.0f : (ka > kb ? 1.0f : 0.0f);
 }
 
@@ -166,20 +167,39 @@ static uint32_t vt4444_pack(uint32_t x) {
          | (((x >> 20) & 0xfu) << 8) | (((x >> 28) & 0xfu) << 12);
 }
 
-/* vcst constant table, computed with the same float expressions as PPSSPP (MIPS.cpp). */
-static float sr_cst[32];
-static int sr_cst_init = 0;
-static void sr_cst_load(void) {
-    if (sr_cst_init) return;
-    /* Literal PSP/PPSSPP float32 results.  Host libm and extended precision must not
-     * change vcst bit patterns across compilers. */
-    static const uint32_t bits[32] = {
-        0x00000000,0x7f7fffff,0x3fb504f3,0x3f3504f3,0x3f906eba,0x3f22f983,0x3ea2f983,0x3f490fdb,
-        0x3fc90fdb,0x40490fdb,0x402df854,0x3fb8aa3b,0x3ede5bd9,0x3f317218,0x40135d8e,0x40c90fdb,
-        0x3f060a92,0x3e9a209b,0x40549a78,0x3f5db3d7,0,0,0,0,0,0,0,0,0,0,0,0,
-    };
-    memcpy(sr_cst,bits,sizeof(bits));
-    sr_cst_init = 1;
+/* vcst constant table, computed with the same float expressions as PPSSPP (MIPS.cpp).
+ * Literal PSP/PPSSPP float32 results: host libm and extended precision must not change
+ * vcst bit patterns across compilers. */
+static const uint32_t sr_cst_bits[32] = {
+    0x00000000,0x7f7fffff,0x3fb504f3,0x3f3504f3,0x3f906eba,0x3f22f983,0x3ea2f983,0x3f490fdb,
+    0x3fc90fdb,0x40490fdb,0x402df854,0x3fb8aa3b,0x3ede5bd9,0x3f317218,0x40135d8e,0x40c90fdb,
+    0x3f060a92,0x3e9a209b,0x40549a78,0x3f5db3d7,0,0,0,0,0,0,0,0,0,0,0,0,
+};
+
+/* vmscl: matrix * scalar (op 0x3c sub 4, and its VFPUMatrix1 alias). Rows 0..side-2 are
+ * copied raw; prefixes apply only to the final row, matching the vmmov convention and
+ * codegen.py's emission. `vd` is named so VFPU_NAN reports the destination. Each caller
+ * keeps its own return, so the VFPU census (tools/vfpu_coverage_report.py) still tells
+ * the two encodings apart by return site. */
+static void vfpu_vmscl(CpuState *s, int vd, int vs, int scalar_reg, int side) {
+    uint8_t sc[1], src[4], dst[4], scv[4];
+    float row[4], t[4], d[4];
+    vreg_idx(scalar_reg, 1, sc);
+    float scalar = s->v[sc[0]];
+    for (int i = 0; i < side - 1; i++)
+        for (int j = 0; j < side; j++)
+            s->v[mreg_idx(vd, side, j, i)] = sr_vfpu_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
+    for (int j = 0; j < side; j++) {
+        src[j] = (uint8_t)mreg_idx(vs, side, j, side - 1);
+        dst[j] = (uint8_t)mreg_idx(vd, side, j, side - 1);
+        scv[j] = sc[0];
+    }
+    sr_vread(row, s, src, side, s->vfpuCtrl[0]);
+    sr_vread(t, s, scv, side, s->vfpuCtrl[1]);
+    for (int j = 0; j < side; j++) d[j] = sr_vfpu_mul(row[j], t[j]);
+    VFPU_NAN("vmscl", d, side, row, side, t, side);
+    sr_vwrite(s, dst, d, side, s->vfpuCtrl[2]);
+    eat_prefix(s);
 }
 
 int sr_vfpu_interp(CpuState *s, uint32_t w) {
@@ -271,7 +291,9 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
          * state. The check reuses the overflow-safe sr_guest_span_* helpers that
          * the scalar accessors already rely on, so the accepted set is identical
          * to per-lane MEM_R32/MEM_W32; only the commit ordering changes. The
-         * rejected op returns SR_VFPU_OTHER without consuming S/T/D prefixes. */
+         * rejected op returns SR_VFPU_ACCESS_REFUSED without consuming S/T/D
+         * prefixes, so its caller names the refused access instead of reporting a
+         * missing encoding. */
         int span_ok;
         uint32_t span_start=addr, span_len=16u;
         if (op == 0x36 || op == 0x3e) {
@@ -293,7 +315,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         }
         if (!span_ok) {
             sr_oor(span_start, 0, store);
-            return SR_VFPU_OTHER;
+            return SR_VFPU_ACCESS_REFUSED;
         }
         if(op==0x36){for(int i=0;i<4;i++)s->vi[idx[i]]=MEM_R32(addr+(uint32_t)i*4);return SR_VFPU_COMPUTE;}
         if(op==0x3e){for(int i=0;i<4;i++)MEM_W32_PC(addr+(uint32_t)i*4,s->vi[idx[i]],s->pc);return SR_VFPU_STATE;}
@@ -443,9 +465,9 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
             return SR_VFPU_COMPUTE;
         }
         if (sub21 == 3) {  /* vcst: broadcast a constant */
-            sr_cst_load();
             vreg_idx(vd, n, di);
-            float d[4], c = sr_cst[(w >> 16) & 0x1F];
+            float d[4], c;
+            memcpy(&c, &sr_cst_bits[(w >> 16) & 0x1F], sizeof c);
             for (int i = 0; i < n; i++) d[i] = c;
             sr_vwrite(s, di, d, n, s->vfpuCtrl[2]); eat_prefix(s); return SR_VFPU_COMPUTE;
         }
@@ -566,9 +588,7 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                     sv[i] = raw[(sp >> (2 * i)) & 3u] ^ (((sp >> (16 + i)) & 1u) << 31);
                 for (int i = 0; i < 4; i++) {
                     const uint32_t a = sv[i], b = raw[tsw[i]];
-                    const uint32_t fa = vfpu_daz(a), fb = vfpu_daz(b);
-                    const int64_t ka = (fa >> 31) ? -(int64_t)(fa & 0x7fffffffu) : (int64_t)(fa & 0x7fffffffu);
-                    const int64_t kb = (fb >> 31) ? -(int64_t)(fb & 0x7fffffffu) : (int64_t)(fb & 0x7fffffffu);
+                    const int64_t ka = vfpu_sm_key(vfpu_daz(a)), kb = vfpu_sm_key(vfpu_daz(b));
                     d[i] = min_lane[form][i] ? (kb < ka ? b : a) : (ka > kb ? a : b);
                 }
                 vreg_idx(vd, 4, di);
@@ -680,9 +700,15 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 sr_vfpu_rnd_seed(&s->vfpuCtrl[8], s->vi[si[0]]);
                 return SR_VFPU_STATE;
             }
-            if (idx7 >= 1 && idx7 <= 3 && n >= 2 && forms_identity) {
-                /* vrndi / vrndf1 / vrndf2 at .p/.t/.q (PSP-VFPU-FORMS2-001): one step of the
-                 * random unit per lane, the LAST lane first (144 cells). */
+            if (idx7 >= 1 && idx7 <= 3 && forms_identity) {
+                /* vrndi / vrndf1 / vrndf2: one step of the random unit per lane, the LAST
+                 * lane first. vrndi.s follows PSP-HLE-ISSUES-001 (issue #326; the step is
+                 * sr_vfpu_rnd_step), vrndf1.s/vrndf2.s PSP-VFPU-FORMS-001 (a float of
+                 * [1, 2) / [2, 4)) and .p/.t/.q PSP-VFPU-FORMS2-001 (144 cells), each under
+                 * identity S/T/D prefixes only. How a pending prefix acts on them (consumed
+                 * or not, D mask and saturation) is unmeasured, so a non-identity prefix
+                 * fails closed below with no state change. VFPU_CC is not written. The
+                 * generated code (tools/codegen.py) does the same. */
                 uint32_t d[4];
                 for (int i = n - 1; i >= 0; i--)
                     d[i] = idx7 == 1 ? sr_vfpu_rnd_step(&s->vfpuCtrl[8])
@@ -725,26 +751,6 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 const uint32_t x = s->vi[si[0]] ^ (((s->vfpuCtrl[0] >> 16) & 1u) << 31);
                 for (int i = 0; i < 4; i++) s->vi[di[i]] = sr_vfpu_c2i(x >> (8 * i));
                 eat_prefix(s); return SR_VFPU_COMPUTE;
-            }
-            if (idx7 == 1 && n == 1) {  /* vrndi.s: one draw of the random unit */
-                /* PSP-HLE-ISSUES-001 (issue #326) measured vrndi.s with identity S/T/D
-                 * prefixes only: the step itself is sr_vfpu_rnd_step (recomp.h). How a
-                 * pending prefix acts on it (consumed or not, D mask and saturation) is
-                 * unmeasured, so a non-identity prefix fails closed with no state change,
-                 * as do vrndi.p/.t/.q (which lane draws first is unmeasured). VFPU_CC is
-                 * not written. The generated code (tools/codegen.py) does the same. */
-                if (s->vfpuCtrl[0] != 0xe4u || s->vfpuCtrl[1] != 0xe4u || s->vfpuCtrl[2] != 0u)
-                    return SR_VFPU_OTHER;
-                vreg_idx(vd, 1, di);
-                s->vi[di[0]] = sr_vfpu_rnd_step(&s->vfpuCtrl[8]);
-                return SR_VFPU_COMPUTE;
-            }
-            if ((idx7 == 2 || idx7 == 3) && n == 1 && forms_identity) {
-                /* vrndf1.s / vrndf2.s: one random-unit step into a float of [1, 2) / [2, 4).
-                 * Which lane draws first at .p/.t/.q is unmeasured (fail closed). */
-                vreg_idx(vd, 1, di);
-                s->vi[di[0]] = sr_vfpu_rndf_step(&s->vfpuCtrl[8], idx7 == 3);
-                return SR_VFPU_COMPUTE;
             }
             if (idx7 == 19 && n <= 2 && forms_identity) {
                 /* vh2f.s/.p: each source word's low then high half to a float32; the
@@ -979,28 +985,9 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
         for (int i = 0; i < side; i++) s->v[di[i]] = r[i];
         eat_prefix(s); return SR_VFPU_COMPUTE;
     }
-    if (op == 0x3c && sub == 4) {  /* vmscl: matrix * scalar. Rows 0..side-2 are copied
-                                    * raw; prefixes apply only to the final row, matching
-                                    * the vmmov convention and codegen.py's emission. */
-        int side = n;
-        uint8_t sc[1], src[4], dst[4], scv[4];
-        float row[4], t[4], d[4];
-        vreg_idx(vt, 1, sc);
-        float scalar = s->v[sc[0]];
-        for (int i = 0; i < side - 1; i++)
-            for (int j = 0; j < side; j++)
-                s->v[mreg_idx(vd, side, j, i)] = sr_vfpu_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
-        for (int j = 0; j < side; j++) {
-            src[j] = (uint8_t)mreg_idx(vs, side, j, side - 1);
-            dst[j] = (uint8_t)mreg_idx(vd, side, j, side - 1);
-            scv[j] = sc[0];
-        }
-        sr_vread(row, s, src, side, s->vfpuCtrl[0]);
-        sr_vread(t, s, scv, side, s->vfpuCtrl[1]);
-        for (int j = 0; j < side; j++) d[j] = sr_vfpu_mul(row[j], t[j]);
-        VFPU_NAN("vmscl", d, side, row, side, t, side);
-        sr_vwrite(s, dst, d, side, s->vfpuCtrl[2]);
-        eat_prefix(s); return SR_VFPU_COMPUTE;
+    if (op == 0x3c && sub == 4) {  /* vmscl: matrix * scalar */
+        vfpu_vmscl(s, vd, vs, vt, n);
+        return SR_VFPU_COMPUTE;
     }
     if (op == 0x3c && sub == 7) {
         int idx = (w >> 21) & 0x1F;
@@ -1025,25 +1012,8 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                 if (which > 7) return SR_VFPU_OTHER;
                 /* which 1/2/4/5: vmscl alias decoded by the static emitter (codegen.py
                  * VFPUMatrix1 "which <= 7" path); scalar register number = which. */
-                int side = n;
-                uint8_t sc[1], src[4], dst[4], scv[4];
-                float row[4], t[4], d[4];
-                vreg_idx(which & 7, 1, sc);
-                float scalar = s->v[sc[0]];
-                for (int i = 0; i < side - 1; i++)
-                    for (int j = 0; j < side; j++)
-                        s->v[mreg_idx(vd, side, j, i)] = sr_vfpu_mul(s->v[mreg_idx(vs, side, j, i)], scalar);
-                for (int j = 0; j < side; j++) {
-                    src[j] = (uint8_t)mreg_idx(vs, side, j, side - 1);
-                    dst[j] = (uint8_t)mreg_idx(vd, side, j, side - 1);
-                    scv[j] = sc[0];
-                }
-                sr_vread(row, s, src, side, s->vfpuCtrl[0]);
-                sr_vread(t, s, scv, side, s->vfpuCtrl[1]);
-                for (int j = 0; j < side; j++) d[j] = sr_vfpu_mul(row[j], t[j]);
-                VFPU_NAN("vmscl", d, side, row, side, t, side);
-                sr_vwrite(s, dst, d, side, s->vfpuCtrl[2]);
-                eat_prefix(s); return SR_VFPU_COMPUTE;
+                vfpu_vmscl(s, vd, vs, which & 7, n);
+                return SR_VFPU_COMPUTE;
             }
             int side = n;
             for (int j = 0; j < side; j++)
@@ -1086,7 +1056,10 @@ int sr_vfpu_interp(CpuState *s, uint32_t w) {
                     if (vs == dn[i]) { d[cl] = sr_vfpu_cos(d[i]); break; }
             }
             vreg_idx(vd, n, di);
-            uint32_t dmask=(3u<<cl)|(1u<<(8+cl));
+            /* The D prefix keeps lane i's saturation in bits 2i..2i+1 and its write mask in
+             * bit 8+i; both are dropped for the cosine lane (PPSSPP Int_Vrot at
+             * 154d52379a3f205002aca1f729e6761b7e06dde7: PPSSPP-derived, not PSP-measured). */
+            uint32_t dmask=(3u<<(2*cl))|(1u<<(8+cl));
             VFPU_NAN("vrot", d, n, &ang, 1, d, 0);
             sr_vwrite(s,di,d,n,s->vfpuCtrl[2]&~dmask);eat_prefix(s);return SR_VFPU_COMPUTE;
         }

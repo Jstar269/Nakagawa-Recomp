@@ -108,9 +108,10 @@ strbuf-selftest:
 # xr-selftest — the OpenXR (VR) module in src/rt/xr/ against a fake OpenXR runtime (issue
 # #791): named refusals, the session state machine, the latest-frame mailbox, frame-loop
 # decoupling from the producer, and the layout maths. No headset, loader or game needed;
-# not reachable from the player.
+# not reachable from the player. Built with -Wpedantic: the module converts no function
+# pointer to or from an object pointer.
 xr-selftest:
-	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Isrc/rt \
+	$(CC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror -Isrc/rt \
 		-o $(BUILD_DIR)/xr_selftest.exe tests/native/xr_selftest.c \
 		src/rt/xr/nk_xr.c src/rt/xr/nk_xr_mailbox.c src/rt/xr/nk_xr_layout.c -lm
 	$(BUILD_DIR)/xr_selftest.exe

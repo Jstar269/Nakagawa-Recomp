@@ -21,6 +21,10 @@ int nk_pcm_wav_write(const char *path, const int16_t *pcm, size_t frames,
     drwav_data_format format;
     drwav wav;
     drwav_uint64 written;
+    void *data = NULL;
+    size_t data_size = 0u;
+    FILE *f;
+    int ok;
     if (path == NULL || path[0] == '\0' || (pcm == NULL && frames != 0u) ||
         channels == 0u || channels > NK_PCM_WAV_MAX_CHANNELS ||
         sample_rate == 0u || sample_rate > NK_PCM_WAV_MAX_RATE) {
@@ -36,11 +40,30 @@ int nk_pcm_wav_write(const char *path, const int16_t *pcm, size_t frames,
     format.channels = channels;
     format.sampleRate = sample_rate;
     format.bitsPerSample = 16;
-    if (!drwav_init_file_write(&wav, path, &format, NULL)) {
+    /* The whole file is built in memory first: dr_wav's file writer ignores a failed
+       header seek and the final fclose, so a full volume would pass for a written file.
+       Here every write, the flush and the close are checked, and a failure removes the
+       partial file. */
+    if (!drwav_init_memory_write(&wav, &data, &data_size, &format, NULL)) {
         return 0;
     }
     written = frames != 0u ? drwav_write_pcm_frames(&wav, (drwav_uint64)frames, pcm) : 0u;
-    if (drwav_uninit(&wav) != DRWAV_SUCCESS || written != (drwav_uint64)frames) {
+    if (drwav_uninit(&wav) != DRWAV_SUCCESS || written != (drwav_uint64)frames ||
+        data == NULL || data_size == 0u) {
+        drwav_free(data, NULL);
+        return 0;
+    }
+    f = fopen(path, "wb");
+    if (f == NULL) {
+        drwav_free(data, NULL);
+        return 0;
+    }
+    ok = fwrite(data, 1u, data_size, f) == data_size;
+    ok = fflush(f) == 0 && ok;
+    ok = !ferror(f) && ok;
+    ok = fclose(f) == 0 && ok;
+    drwav_free(data, NULL);
+    if (!ok) {
         remove(path);
         return 0;
     }
