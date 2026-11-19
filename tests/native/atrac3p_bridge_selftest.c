@@ -54,6 +54,7 @@
 
 #include "atrac3p_bridge.h"
 #include "atrac3p/atrac3p_api.h"
+#include "libavutil/mem.h"
 #include "libavutil/common.h"
 #include "libavutil/error.h"
 #include "vfpu_tables.h"
@@ -535,6 +536,50 @@ static void test_title_accept_refusals(void)
           "title-accept: an input that exists but cannot be read is FAIL, not SKIP");
 }
 
+// av_size_mult() is the overflow-checked multiply the decoder's array helpers
+// call before any allocation. The vendored n4.4 form carried a glibc-inspired
+// bit trick that skipped the division below sqrt(SIZE_MAX); this project's
+// LOCAL DELTA (src/rt/atrac3p/libavutil/mem.h) decides every operand pair. The
+// checks below pin the contract the callers depend on: a product that fits is
+// returned unchanged, a product that does not is refused with AVERROR(EINVAL)
+// and leaves *r alone, and zero never divides.
+static void test_av_size_mult(void)
+{
+    size_t res = 0;
+
+    /* Products that fit are returned as they are. */
+    CHECK(av_size_mult(5, 10, &res) == 0 && res == 50,
+          "av_size_mult multiplies in range");
+    CHECK(av_size_mult(1, 100, &res) == 0 && res == 100,
+          "av_size_mult by one");
+    CHECK(av_size_mult(1, SIZE_MAX, &res) == 0 && res == SIZE_MAX,
+          "av_size_mult 1 * SIZE_MAX");
+    CHECK(av_size_mult(SIZE_MAX, 1, &res) == 0 && res == SIZE_MAX,
+          "av_size_mult SIZE_MAX * 1");
+    CHECK(av_size_mult(SIZE_MAX / 2, 2, &res) == 0 && res == (SIZE_MAX / 2) * 2,
+          "av_size_mult (SIZE_MAX / 2) * 2");
+
+    /* A zero operand is a valid product, not a division by zero. */
+    CHECK(av_size_mult(0, 12345, &res) == 0 && res == 0,
+          "av_size_mult zero left operand");
+    CHECK(av_size_mult(12345, 0, &res) == 0 && res == 0,
+          "av_size_mult zero right operand");
+    CHECK(av_size_mult(0, 0, &res) == 0 && res == 0,
+          "av_size_mult zero both operands");
+
+    /* A product that does not fit is refused, and *r is not written. */
+    res = 7;
+    CHECK(av_size_mult(SIZE_MAX, 2, &res) == AVERROR(EINVAL) && res == 7,
+          "av_size_mult SIZE_MAX * 2 overflows and leaves *r");
+    res = 7;
+    CHECK(av_size_mult(2, SIZE_MAX, &res) == AVERROR(EINVAL) && res == 7,
+          "av_size_mult 2 * SIZE_MAX overflows and leaves *r");
+    CHECK(av_size_mult(SIZE_MAX, SIZE_MAX, &res) == AVERROR(EINVAL),
+          "av_size_mult SIZE_MAX * SIZE_MAX overflows");
+    CHECK(av_size_mult((SIZE_MAX / 2) + 1, 2, &res) == AVERROR(EINVAL),
+          "av_size_mult first product above half overflows");
+}
+
 int main(void)
 {
     sr_perf_init();
@@ -545,6 +590,7 @@ int main(void)
     test_invalid_gain_frame_refuses_once();
     test_atrac3_bridge();
     test_title_accept_refusals();
+    test_av_size_mult();
 
     atrac3p_bridge_destroy(NULL);   /* no-op */
 

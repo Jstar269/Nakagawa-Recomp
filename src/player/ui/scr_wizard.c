@@ -1,10 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
-/* Setup wizard: the first-run path in five steps (Welcome, Select game, Verify, Fonts and
-   system, Ready) on the setup wizard state in player_state.c. Every control returns
-   PLAYER_UI_ACTION_WIZARD with the op main.c runs, the same handlers the existing
-   renderer's wizard buttons call. */
+/* Setup wizard on the setup wizard state in player_state.c: model->step is a
+   WizardStep, in six states (0 Welcome, 1 Online and developer options, 2 Select
+   game, 3 Verify, 4 Fonts and system, 5 Ready). A first run shows four of them as
+   chips (Welcome, Options, Game, Verify; PLAYER_UI_WIZARD_ROUTE_STEPS) and ends on
+   the library card once the files are copied; the Fonts and Ready states remain
+   only for state-only callers (docs/PLAYER_UI_DESIGN.md, First run). Every control
+   returns PLAYER_UI_ACTION_WIZARD with the op main.c runs, the same handlers the
+   existing renderer's wizard buttons call. */
 
 #include "player_ui_nk.h"
 #include "nk_ui_widgets.h"
@@ -27,11 +31,7 @@
 #define WIZ_ID_GUIDE WIZ_ID(0x000300u)
 
 static PlayerUiAction wizard_op(PlayerUiWizardOp op) {
-    PlayerUiAction result;
-    result.kind = PLAYER_UI_ACTION_WIZARD;
-    result.primary = (PlayerUiPrimaryAction)op;
-    result.title_index = 0u;
-    return result;
+    return action(PLAYER_UI_ACTION_WIZARD, 0u, (PlayerUiPrimaryAction)op);
 }
 
 static void wizard_text(NkUi *ui, uint32_t k, const char *text, NkUiTypeRole role, uint32_t rgba) {
@@ -196,8 +196,11 @@ PlayerUiAction player_ui_screen_wizard(NkUi *ui, const PlayerUiWizardModel *mode
                     "Pick the .iso of a PSP game you own. Nakagawa reads its file system and "
                     "PARAM.SFO to find out which game it is.",
                     NK_UI_TYPE_BODY, theme->muted);
-        if (scr_wizard_box_begin(ui, model->has_iso ? theme->ready : 0u)) {
-            if (model->has_iso) {
+        /* Chosen only while the pick stands: a refused pick or a cancelled
+           conversion clears iso_selected but leaves the last disc's path. */
+        bool chosen = model->has_iso && model->iso_selected;
+        if (scr_wizard_box_begin(ui, chosen ? theme->ready : 0u)) {
+            if (chosen) {
                 nk_ui_status_pill(ui, WIZ_ID_TEXT + 2u, FLOW_MARK_DOT, "Disc image chosen",
                                   theme->ready);
                 wizard_text(ui, 3u, model->iso_detail, NK_UI_TYPE_DATA, theme->muted);

@@ -236,16 +236,15 @@ static int rect_ink(const uint32_t *page, int pw, int x0, int y0, int w, int h) 
     return ink;
 }
 
-NkGlyphVerdict nk_glyph_verify(const uint32_t *page, int pw, int ph, int x0, int y0, int w, int h,
-                               int factor, const uint32_t *tile) {
+/* The downsample check of a tile against a rectangle nk_glyph_rect_check has already accepted with
+ * `colour`: nk_glyph_rebuild calls it with the colour its own check found, so the rectangle is
+ * scanned once, and nk_glyph_verify runs the rectangle check first for every other caller. */
+static NkGlyphVerdict verify_checked(const uint32_t *page, int pw, int x0, int y0, int w, int h, int factor,
+                                     uint32_t colour, const uint32_t *tile) {
 #ifdef NK_GLYPH_MUTANT_NO_DOWNSAMPLE_CHECK
-    (void)page; (void)pw; (void)ph; (void)x0; (void)y0; (void)w; (void)h; (void)factor; (void)tile;
+    (void)page; (void)pw; (void)x0; (void)y0; (void)w; (void)h; (void)factor; (void)colour; (void)tile;
     return NK_GLYPH_OK;   /* glyph-recon-mutant: whatever was built is accepted */
 #else
-    uint32_t colour = 0;
-    if (!page || !tile || factor < NK_GLYPH_MIN_FACTOR || factor > NK_GLYPH_MAX_FACTOR)
-        return NK_GLYPH_REFUSE_DOWNSAMPLE;
-    if (nk_glyph_rect_check(page, pw, ph, x0, y0, w, h, &colour) != NK_GLYPH_OK) return NK_GLYPH_REFUSE_DOWNSAMPLE;
     const int tw = w * factor;
     const int blockn = factor * factor;
     for (int y = 0; y < h; y++) {
@@ -265,6 +264,20 @@ NkGlyphVerdict nk_glyph_verify(const uint32_t *page, int pw, int ph, int x0, int
         }
     }
     return NK_GLYPH_OK;
+#endif
+}
+
+NkGlyphVerdict nk_glyph_verify(const uint32_t *page, int pw, int ph, int x0, int y0, int w, int h,
+                               int factor, const uint32_t *tile) {
+#ifdef NK_GLYPH_MUTANT_NO_DOWNSAMPLE_CHECK
+    (void)page; (void)pw; (void)ph; (void)x0; (void)y0; (void)w; (void)h; (void)factor; (void)tile;
+    return NK_GLYPH_OK;   /* glyph-recon-mutant: whatever was built is accepted */
+#else
+    uint32_t colour = 0;
+    if (!page || !tile || factor < NK_GLYPH_MIN_FACTOR || factor > NK_GLYPH_MAX_FACTOR)
+        return NK_GLYPH_REFUSE_DOWNSAMPLE;
+    if (nk_glyph_rect_check(page, pw, ph, x0, y0, w, h, &colour) != NK_GLYPH_OK) return NK_GLYPH_REFUSE_DOWNSAMPLE;
+    return verify_checked(page, pw, x0, y0, w, h, factor, colour, tile);
 #endif
 }
 
@@ -418,7 +431,7 @@ NkGlyphVerdict nk_glyph_rebuild(const uint32_t *page, int pw, int ph, int x0, in
             }
         }
     }
-    v = nk_glyph_verify(page, pw, ph, x0, y0, w, h, factor, out);
+    v = verify_checked(page, pw, x0, y0, w, h, factor, colour, out);
     if (v == NK_GLYPH_OK) memcpy(tile, out, sizeof(uint32_t) * (size_t)W * (size_t)H);
     (void)H;
     free(cov); free(hi); free(out); free(blk);
