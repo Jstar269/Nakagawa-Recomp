@@ -12,6 +12,7 @@ regenerating the controls from the private trusted ledger.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import re
 import subprocess
@@ -229,6 +230,50 @@ def _has_flag(text: str, flag: str) -> bool:
     return re.search(re.escape(flag) + r"(?![A-Za-z0-9_./-])", text) is not None
 
 
+def _python_builder_info(
+    module_path: str, func_name: str,
+) -> tuple[set[str], set[str], set[str], set[str]]:
+    """Return ``(sources, defines, includes, warnings)`` from a Python build helper."""
+    path = ROOT / module_path
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=module_path)
+    func = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == func_name),
+        None,
+    )
+    if func is None:
+        raise AssertionError(f"no function `{func_name}` in {module_path}")
+
+    sources: set[str] = set()
+    defines: set[str] = set()
+    includes: set[str] = set()
+    warnings: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value
+            if text.startswith("-D") and len(text) > 2:
+                defines.add(text[2:])
+            elif text.startswith("-I") and len(text) > 2:
+                includes.add(text[2:])
+            elif text.startswith("-Wno-"):
+                warnings.add(text)
+            elif text.endswith(".c"):
+                sources.add(text)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            parts: list[str] = []
+            cur: ast.AST = node
+            while isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Div):
+                if isinstance(cur.right, ast.Constant) and isinstance(cur.right.value, str):
+                    parts.append(cur.right.value)
+                    cur = cur.left
+                else:
+                    parts = []
+                    break
+            if parts and isinstance(cur, ast.Name) and cur.id == "ROOT":
+                sources.add("/".join(reversed(parts)))
+    return sources, defines, includes, warnings
+
+
 class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
     """Each source is compiled with the flags the build compiles it with.
 
@@ -236,7 +281,7 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
     whose hooks are declared under its own define (`SR_HLE_THREAD_SELFTEST`,
     `SR_SCHED_LIVENESS_TEST`), a player screen that includes `nk_ui.h`, and the
     Vulkan backend all failed on unchanged `origin/main`, for every contributor
-    who touched them.  The per-source table must stay the Makefile's own flags.
+    who touched them.  The per-source table must stay the build's own flags.
     """
     assignments: dict[str, list[str]]
     makefile: str
@@ -246,45 +291,87 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
         cls.makefile = _makefile_text()
         cls.assignments = _assignments(cls.makefile)
 
+    def _assert_unit_matches_build(self, source: str, unit: contrib_check.StrictUnit) -> None:
+        self.assertTrue((ROOT / source).is_file(), f"{source} is not in the tree")
+        self.assertTrue(
+            bool(unit.recipes) != bool(unit.builder),
+            f"{source} must name either Makefile recipes or a Python builder, not neither or both",
+        )
+        if unit.builder is not None:
+            module_path, func_name = unit.builder
+            self.assertTrue((ROOT / module_path).is_file(), f"{module_path} is not in the tree")
+            sources, defines, includes, warnings = _python_builder_info(module_path, func_name)
+            self.assertIn(
+                source, sources,
+                f"{module_path}:{func_name} does not compile {source}; the table names the wrong builder",
+            )
+            self.assertEqual(
+                set(unit.defines), defines,
+                f"defines for {source} ({sorted(unit.defines)}) differ from "
+                f"{module_path}:{func_name} ({sorted(defines)})",
+            )
+            for include in unit.includes:
+                self.assertIn(
+                    include, includes,
+                    f"-I{include} is listed for {source} but is not on {module_path}:{func_name}",
+                )
+            covered_includes = set(contrib_check.STRICT_C_FLAGS) | {f"-I{inc}" for inc in unit.includes}
+            for include in sorted(includes):
+                self.assertIn(
+                    f"-I{include}", covered_includes,
+                    f"{module_path}:{func_name} passes -I{include} for {source}, "
+                    "which is missing from STRICT_C_FLAGS and STRICT_C_UNITS",
+                )
+            for warning in unit.warnings:
+                self.assertIn(
+                    warning, warnings,
+                    f"{warning} is listed for {source} but is not on {module_path}:{func_name}",
+                )
+            self.assertFalse(
+                unit.generated,
+                f"{source} uses a Python builder and cannot name Makefile generated headers",
+            )
+            return
+
+        building: list[str] = []
+        raw: list[str] = []
+        for target in unit.recipes:
+            blocks = _rule_blocks(self.makefile, target)
+            self.assertTrue(blocks, f"no Makefile rule `{target}:` (named for {source})")
+            for block in blocks:
+                expanded = _expand(block, self.assignments)
+                if source in expanded:
+                    building.append(expanded)
+                    raw.append(block)
+        self.assertTrue(
+            building, f"none of {unit.recipes} compiles {source}; the table names the wrong rule",
+        )
+        recipe = "\n".join(building)
+        for define in unit.defines:
+            self.assertTrue(
+                _has_flag(recipe, f"-D{define}"),
+                f"-D{define} is listed for {source} but is not on {unit.recipes}",
+            )
+        for include in unit.includes:
+            self.assertTrue(
+                _has_flag(recipe, f"-I{include}"),
+                f"-I{include} is listed for {source} but is not on {unit.recipes}",
+            )
+        for warning in unit.warnings:
+            self.assertTrue(
+                _has_flag(recipe, warning),
+                f"{warning} is listed for {source} but is not on {unit.recipes}",
+            )
+        for header in unit.generated:
+            self.assertTrue(
+                any(header.include in block for block in raw),
+                f"{header.include} ({header.name}) is not on {unit.recipes}",
+            )
+
     def test_every_listed_flag_is_on_the_recipe_that_builds_the_source(self) -> None:
         for source, unit in contrib_check.STRICT_C_UNITS.items():
             with self.subTest(source=source):
-                self.assertTrue((ROOT / source).is_file(), f"{source} is not in the tree")
-                self.assertTrue(unit.recipes, f"{source} names no Makefile recipe")
-                building: list[str] = []
-                raw: list[str] = []
-                for target in unit.recipes:
-                    blocks = _rule_blocks(self.makefile, target)
-                    self.assertTrue(blocks, f"no Makefile rule `{target}:` (named for {source})")
-                    for block in blocks:
-                        expanded = _expand(block, self.assignments)
-                        if source in expanded:
-                            building.append(expanded)
-                            raw.append(block)
-                self.assertTrue(
-                    building, f"none of {unit.recipes} compiles {source}; the table names the wrong rule",
-                )
-                recipe = "\n".join(building)
-                for define in unit.defines:
-                    self.assertTrue(
-                        _has_flag(recipe, f"-D{define}"),
-                        f"-D{define} is listed for {source} but is not on {unit.recipes}",
-                    )
-                for include in unit.includes:
-                    self.assertTrue(
-                        _has_flag(recipe, f"-I{include}"),
-                        f"-I{include} is listed for {source} but is not on {unit.recipes}",
-                    )
-                for warning in unit.warnings:
-                    self.assertTrue(
-                        _has_flag(recipe, warning),
-                        f"{warning} is listed for {source} but is not on {unit.recipes}",
-                    )
-                for header in unit.generated:
-                    self.assertTrue(
-                        any(header.include in block for block in raw),
-                        f"{header.include} ({header.name}) is not on {unit.recipes}",
-                    )
+                self._assert_unit_matches_build(source, unit)
 
     def test_every_common_include_directory_is_one_the_makefile_uses(self) -> None:
         for flag in contrib_check.STRICT_C_FLAGS:
@@ -301,6 +388,22 @@ class TestStrictCompileFlagsMirrorTheMakefile(unittest.TestCase):
         self.assertTrue(_has_flag(recipe, "-DSR_SCHED_LIVENESS_TEST"))
         self.assertFalse(_has_flag(recipe, "-DSR_SCHED_LIVENESS"))
         self.assertFalse(_has_flag(recipe, "-DSR_HLE_THREAD_SELFTEST"))
+
+    def test_the_drift_check_catches_a_python_builder_define_mismatch(self) -> None:
+        """Guard the guard: missing or extra defines on a Python-built unit fail."""
+        missing = contrib_check.StrictUnit(
+            builder=("tools/nk_cli.py", "_build_vram_decoder"),
+            defines=(),
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_unit_matches_build("src/rt/ge_vram_cli.c", missing)
+
+        wrong = contrib_check.StrictUnit(
+            builder=("tools/nk_cli.py", "_build_vram_decoder"),
+            defines=("SR_GE_VRAM_DECODER_CLI", "SR_NOT_IN_BUILDER"),
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_unit_matches_build("src/rt/ge_vram_cli.c", wrong)
 
     def test_sources_that_include_vendored_headers_compile_clean(self) -> None:
         """The achievements and CHD sources find their vendored headers.
@@ -461,6 +564,7 @@ class TestStrictCompileOnUnchangedMain(unittest.TestCase):
         "src/rt/gpu_sdl3vk/ge_gpu.c",
         "tests/fixtures/cosim/cosim_selftest.c",
         "tests/native/texrepl_selftest.c",
+        "src/rt/ge_vram_cli.c",
     )
 
     def test_no_unchanged_source_fails_the_strict_compile(self) -> None:

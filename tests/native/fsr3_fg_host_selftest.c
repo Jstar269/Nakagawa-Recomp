@@ -16,7 +16,8 @@
  * Two kinds of word are compared more loosely, each for a stated reason:
  * - optical flow's SPD constants (cbOF_SPD) have three padding words AMD leaves uninitialised, so
  *   the record holds whatever was on its stack. The port writes 0, and the padding is not compared.
- *   No shader reads it: the one pass that declares cbOF_SPD reads only its first five words.
+ *   No compiled pass declares cbOF_SPD: the input pyramid asks SpdDownsample for 6 mips, which
+ *   returns before it reads the buffer.
  * - three words of cbFI come from <math.h> float functions, compared as fsr3_host_selftest does.
  *
  * Then the refusals: flags the project's shaders were not built for, sizes of 0, render sizes above

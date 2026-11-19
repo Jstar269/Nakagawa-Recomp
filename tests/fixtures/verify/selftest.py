@@ -221,7 +221,14 @@ def run(args: argparse.Namespace) -> None:
     print("PASS hard-exit: the report survives an _Exit, which skips atexit")
 
     for bad in ({"SR_VERIFY": "abc"}, {"SR_VERIFY": "1", "SR_VERIFY_RANGE": "10"},
-                {"SR_VERIFY": "1", "SR_VERIFY_RATE": "0"}, {"SR_VERIFY_EVERY": "0"}):
+                {"SR_VERIFY": "1", "SR_VERIFY_RATE": "0"}, {"SR_VERIFY_EVERY": "0"},
+                # strtoull reads a sign as 2^64-1 and saturates an overflow: neither may pass
+                # as an unbounded budget or as a truncated capture count.
+                {"SR_VERIFY": "1", "SR_VERIFY_STEPS": "-1"},
+                {"SR_VERIFY": "1", "SR_VERIFY_STEPS": " -1"},
+                {"SR_VERIFY": "1", "SR_VERIFY_STEPS": "99999999999999999999"},
+                {"SR_VERIFY": "1", "SR_VERIFY_CAPTURE_MAX": "-1"},
+                {"SR_VERIFY": "1", "SR_VERIFY_CAPTURE_MAX": "4294967296"}):
         # The harness reads the environment itself, before any call.
         _report, done = run_harness(harness, image, base, work, "bad", bad, "--call", f"{alu:x}:1")
         expect(done.returncode == 2 and "malformed" in done.stderr, f"{bad}: {done.returncode} {done.stderr}")

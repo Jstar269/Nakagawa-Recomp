@@ -13,7 +13,8 @@ int nk_xr_quad_extent(float width_m, float *w, float *h) {
         return -1;
     }
     *w = width_m;
-    *h = (width_m * NK_XR_PSP_HEIGHT) / NK_XR_PSP_WIDTH;
+    // The ratio is below 1, so no finite width overflows (width * 272 would above about 1.25e36).
+    *h = width_m * (NK_XR_PSP_HEIGHT / NK_XR_PSP_WIDTH);
     return 0;
 }
 
@@ -35,6 +36,10 @@ float nk_xr_eye_clip_x(float x_clip, float w_clip, float separation, float conve
     if (!isfinite(x_clip) || !isfinite(w_clip) || !isfinite(separation) || !isfinite(convergence)) {
         return NAN;
     }
-    float sign = eye < 0 ? -1.0f : (eye > 0 ? 1.0f : 0.0f);
-    return x_clip + sign * separation * (w_clip - convergence);
+    if (eye == 0) {
+        return x_clip;  // mono: x unchanged, even where s * (w - c) would overflow
+    }
+    float sign = eye < 0 ? -1.0f : 1.0f;
+    float x = x_clip + sign * separation * (w_clip - convergence);
+    return isfinite(x) ? x : NAN;  // an overflow from finite inputs is refused, not returned as inf
 }
