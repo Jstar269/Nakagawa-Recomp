@@ -979,13 +979,15 @@ static int settings_enhanced_stepper(NkUi *ui, NkUiId row_id, const char *value,
     return step;
 }
 
-/* What the keys did to the focused row `id`: -1 or 1 for Left and Right, and whether the select
-   button, or a click on the row itself, asked for the next value. */
+/* What the keys did to the row `id`: -1 or 1 for Left and Right on the focused row, and
+   whether the select button, or a click on the row itself, asked for the next value. A press
+   is the row's when the row had the focus as it was made (nk_ui_take_activation), so a row
+   takes its press even when a move queued after it has taken the focus on in the same
+   frame. */
 static int settings_enhanced_row_keys(NkUi *ui, NkUiId id, bool *activated) {
     NkUiNavDir direction = NK_UI_DIR_NONE;
     *activated = false;
-    if (!nk_ui_button_focused(ui, id)) return 0;
-    if (nk_ui_take_event(ui, NK_UI_EV_NAV, &direction)) {
+    if (nk_ui_button_focused(ui, id) && nk_ui_take_event(ui, NK_UI_EV_NAV, &direction)) {
         return direction == NK_UI_DIR_LEFT ? -1 : direction == NK_UI_DIR_RIGHT ? 1 : 0;
     }
     *activated = nk_ui_take_activation(ui, id);

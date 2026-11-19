@@ -5246,6 +5246,87 @@ static void test_enhanced_stale_ace_steps_from_ace(void) {
     g_enhanced_mode = NULL;
 }
 
+/* Main's #2686 gave an activation to the control focused when it was pressed
+   (test_activation_belongs_to_its_focus in test_nk_ui_core.c): an Enter just before a held
+   Down repeats, both in one frame's queue, is not the next control's. On Settings > Enhanced
+   the row that had the focus takes it, a pinned row and a part's row alike, and Down still
+   moves on. A row that asked for its press only while focused dropped it: focus had moved, and
+   the row under it is not the press's target either. */
+static void test_enhanced_row_takes_the_press_made_on_it(void) {
+    static const struct {
+        NkUiId id;
+        PlayerUiSettingsOp op;
+        const char *what;
+    } rows[] = {
+        {PLAYER_UI_ID_SETTINGS_PRESET, PLAYER_UI_SETTINGS_CYCLE_PRESET,
+         "Enter then Down in one frame on Graphics preset takes its next value"},
+        {PLAYER_UI_ID_SETTINGS_ACE_MODE, PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE,
+         "Enter then Down in one frame on Play mode takes its next mode"},
+        {PLAYER_UI_ID_ENHANCED_PART(PLAYER_PART_FILTERING),
+         PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART,
+         "Enter then Down in one frame on Texture filtering takes its next value"},
+    };
+    const int saved_tab = g_enhanced_tab;
+    g_enhanced_mode = NULL;
+    g_enhanced_tab = PLAYER_UI_ENHANCED_GROUP_PICTURE;
+    for (size_t i = 0u; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        NkUiConfig config;
+        NkUiTextBackend text = screen_test_text_backend();
+        NkUiViewport viewport = launcher_viewport(1280, 1600, 1.0f);
+        NkUiScale scale = nk_ui_scale_for_viewport(&viewport);
+        NkUiEvent event;
+        NkUi *ui;
+        PlayerUiAction alone = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
+        PlayerUiAction result = alone;
+        NkUiId focus_after = 0u;
+        memset(&config, 0, sizeof(config));
+        config.host = NK_UI_HOST_LAUNCHER;
+        config.text = &text;
+        ui = screen_ui_create(&config);
+        CHECK(ui != NULL, "create the Settings > Enhanced press context");
+        if (ui == NULL) continue;
+        nk_ui_set_viewport(ui, &viewport);
+        g_flow_width = scale.logical_w;
+        g_flow_height = scale.logical_h;
+        for (int frame = 0; frame < 2; ++frame) {
+            nk_ui_begin(ui, 0.0);
+            (void)draw_flow_case(ui, FLOW_SETTINGS_ACE);
+            (void)nk_ui_end(ui);
+            if (frame == 0) nk_ui_focus(ui, rows[i].id);
+        }
+        /* The press alone, with the row focused: what the row does with it. */
+        memset(&event, 0, sizeof(event));
+        event.type = NK_UI_EV_ACTIVATE;
+        event.down = true;
+        nk_ui_push_event(ui, &event);
+        nk_ui_begin(ui, 0.0);
+        alone = draw_flow_case(ui, FLOW_SETTINGS_ACE);
+        (void)nk_ui_end(ui);
+        CHECK(settings_op_is(alone, rows[i].op) && nk_ui_focused(ui) == rows[i].id,
+              "Enter on the focused row is its own, and focus stays");
+        /* The same press, then a held Down's repeat, before the next frame. */
+        nk_ui_push_event(ui, &event);
+        memset(&event, 0, sizeof(event));
+        event.type = NK_UI_EV_NAV;
+        event.dir = NK_UI_DIR_DOWN;
+        event.down = true;
+        event.repeat = true;
+        nk_ui_push_event(ui, &event);
+        nk_ui_begin(ui, 0.0);
+        result = draw_flow_case(ui, FLOW_SETTINGS_ACE);
+        (void)nk_ui_end(ui);
+        focus_after = nk_ui_focused(ui);
+        CHECK(settings_op_is(result, rows[i].op) && result.title_index == alone.title_index,
+              rows[i].what);
+        CHECK(focus_after != 0u && focus_after != rows[i].id,
+              "and the Down after it still moves focus to the next stop");
+        g_flow_width = 1280.0f;
+        g_flow_height = 800.0f;
+        nk_ui_destroy(ui);
+    }
+    g_enhanced_tab = saved_tab;
+}
+
 /* Audit 2026-11-17, F-48d858cb: Frame pacing is one value for every game. On a game's page,
    whose lead says "For <game> alone", its panel says so, as a part's says "This game". */
 static void test_enhanced_pacing_says_all_games(void) {
@@ -9654,6 +9735,7 @@ int main(int argc, char **argv) {
     test_enhanced_walk_at_every_text_size();
     test_enhanced_title_with_an_ellipsis();
     test_enhanced_stale_ace_steps_from_ace();
+    test_enhanced_row_takes_the_press_made_on_it();
     test_enhanced_pacing_says_all_games();
     test_enhanced_wheel_scrolls_past_the_focused_row();
     test_prompt_bar_stays_whole();
