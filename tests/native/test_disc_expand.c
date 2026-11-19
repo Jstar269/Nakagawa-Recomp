@@ -56,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(_WIN32) || defined(_WIN64)
+#include <io.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -966,19 +967,28 @@ static void test_import_and_reuse(void) {
     CHECK(nk_iso_inspect(src, &meta) != NK_OK);
     CHECK(strcmp(meta.boundary_code, "DISC_IMAGE_NOT_EXPANDED") == 0);
 
+    /* The probe reads the header only: no identity, never a reuse. */
     CHECK(nk_disc_import_probe(src, root, &result, &status));
     CHECK(!result.reused && result.format == NK_DISC_FORMAT_CSO);
-    CHECK(result.expanded_bytes == ISO_BYTES);
-    CHECK(strlen(result.fingerprint) == NK_DISC_FINGERPRINT_CHARS);
-    /* The per-title name carries the start of the source's fingerprint. */
-    snprintf(expected, sizeof(expected), "%s%cdiscs%cTEST00042%cTEST00042.%.16s.cso.iso", root,
-             sep, sep, sep, result.fingerprint);
+    CHECK(result.expanded_bytes == ISO_BYTES && result.source_bytes == image.len);
+    CHECK(result.identity[0] == '\0');
 
     if (!nk_disc_import(src, root, NULL, &result, &status)) {
         fprintf(stderr, "import: %s: %s\n", status.code, status.message);
         CHECK(false);
     }
     CHECK(!result.reused);
+    /* The identity is the SHA-256 of the whole file, and the per-title name
+       carries its start. */
+    {
+        char identity[NK_DISC_IDENTITY_CHARS + 1];
+        uint64_t hashed = 0;
+        CHECK(strlen(result.identity) == NK_DISC_IDENTITY_CHARS);
+        CHECK(nk_disc_file_identity(src, NULL, identity, &hashed, &status));
+        CHECK(strcmp(identity, result.identity) == 0 && hashed == image.len);
+    }
+    snprintf(expected, sizeof(expected), "%s%cdiscs%cTEST00042%cTEST00042.%.16s.cso.iso", root,
+             sep, sep, sep, result.identity);
     CHECK(strcmp(result.disc_id, "TEST00042") == 0);
     CHECK(strcmp(result.iso_path, expected) == 0);
     CHECK(file_equals(result.iso_path, g_iso, ISO_BYTES));
@@ -1020,8 +1030,6 @@ static void test_import_and_reuse(void) {
         fputc(0, f);
         fclose(f);
     }
-    CHECK(nk_disc_import_probe(src, root, &result, &status));
-    CHECK(!result.reused);
     CHECK(nk_disc_import(src, root, NULL, &result, &status));
     CHECK(!result.reused && file_equals(result.iso_path, g_iso, ISO_BYTES));
 
@@ -1052,9 +1060,10 @@ static void test_import_and_reuse(void) {
     CHECK(!nk_disc_import(src, root, NULL, &result, &status));
     CHECK(strcmp(status.code, NK_DISC_NOT_PSP) == 0);
     {
-        char staged[NATIVE_TEST_PATH_MAX + 64];
+        char staged[NATIVE_TEST_PATH_MAX + 96];
+        CHECK(strlen(result.identity) == NK_DISC_IDENTITY_CHARS);
         snprintf(staged, sizeof(staged), "%s%cdiscs%cexpanded%c%s.iso", root, sep, sep, sep,
-                 result.fingerprint);
+                 result.identity);
         CHECK(nk_platform_path_missing(staged));
     }
     free(image.data);
@@ -1132,9 +1141,8 @@ static void test_chd_unknown_codec(void) {
 
 /* Two different images of one disc ID (say a retail dump and a fan
    translation) keep two expansions: neither import replaces the other. The
-   two files here have one write time, so what keeps them apart is what the
-   fingerprint reads of each image (its size and its first 64 KiB), never
-   the moment each happened to be written. */
+   two files here have one write time, so what keeps them apart is their
+   bytes, never the moment each happened to be written. */
 static void test_import_same_disc_id(void) {
     Buf image = { NULL, 0, 0 };
     char root[NATIVE_TEST_PATH_MAX];
@@ -1178,50 +1186,293 @@ static void test_import_same_disc_id(void) {
     printf("PASS two images of one disc ID keep two expansions\n");
 }
 
-/* An expansion an earlier build wrote as <ID>.<ext>.iso is still reused. */
-static void test_import_reuses_earlier_name(void) {
+/* Every block stored as it is, so a change to one sector changes only that
+   sector's bytes in the compressed file: its size and block index stay. */
+static BlockKind stored_kind(uint32_t block) {
+    (void)block;
+    return BLOCK_STORED;
+}
+
+/* Two images with one size, one write time and the same first 64 KiB, which
+   differ only further on (two dumps of one game, or a patch that touches a
+   late file), are two imports: neither is served the other's data
+   (F-f6233fe0). The same bytes under another name, in another folder and
+   with another write time, are the same disc. */
+static void test_import_full_content_identity(void) {
+    Buf image = { NULL, 0, 0 };
+    char root[NATIVE_TEST_PATH_MAX];
+    char first_src[NATIVE_TEST_PATH_MAX];
+    char second_src[NATIVE_TEST_PATH_MAX];
+    char elsewhere[NATIVE_TEST_PATH_MAX];
+    char copy_src[NATIVE_TEST_PATH_MAX + 32];
+    char first_iso[NK_MAX_PATH];
+    static uint8_t late[ISO_BYTES];
+    uint8_t *first_bytes;
+    size_t first_len = 0;
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    memcpy(late, g_iso, ISO_BYTES);
+    late[(size_t)50u * SECTOR + 100u] ^= 0x5Au; /* in DATA.BIN, past the first 64 KiB */
+    path_in(root, sizeof(root), "identity-root");
+    CHECK(nk_platform_mkdir_p(root));
+    path_in(first_src, sizeof(first_src), "identity-a.cso");
+    path_in(second_src, sizeof(second_src), "identity-b.cso");
+    build_ciso(&image, "CISO", 1, 0, g_iso, ISO_BYTES, stored_kind);
+    write_bytes(first_src, image.data, image.len);
+    build_ciso(&image, "CISO", 1, 0, late, ISO_BYTES, stored_kind);
+    write_bytes(second_src, image.data, image.len);
+    stamp_write_time(first_src);
+    stamp_write_time(second_src);
+    first_bytes = read_all(first_src, &first_len);
+    CHECK(first_bytes != NULL && first_len == image.len && first_len > 64u * 1024u);
+    CHECK(memcmp(first_bytes, image.data, 64u * 1024u) == 0);
+    CHECK(memcmp(first_bytes, image.data, first_len) != 0);
+
+    CHECK(nk_disc_import(first_src, root, NULL, &result, &status) && !result.reused);
+    snprintf(first_iso, sizeof(first_iso), "%s", result.iso_path);
+    if (!nk_disc_import(second_src, root, NULL, &result, &status)) {
+        fprintf(stderr, "identity: %s: %s\n", status.code, status.message);
+        CHECK(false);
+    }
+    CHECK(!result.reused);
+    CHECK(strcmp(result.disc_id, "TEST00042") == 0);
+    CHECK(strcmp(result.iso_path, first_iso) != 0);
+    CHECK(file_equals(result.iso_path, late, ISO_BYTES));
+    CHECK(file_equals(first_iso, g_iso, ISO_BYTES));
+
+    /* The first image's bytes under another name and folder, written now. */
+    path_in(elsewhere, sizeof(elsewhere), "identity-elsewhere");
+    CHECK(nk_platform_mkdir_p(elsewhere));
+    snprintf(copy_src, sizeof(copy_src), "%s%crenamed.cso", elsewhere,
+             nk_platform_path_separator());
+    write_bytes(copy_src, first_bytes, first_len);
+    CHECK(nk_disc_import(copy_src, root, NULL, &result, &status) && result.reused);
+    CHECK(strcmp(result.iso_path, first_iso) == 0);
+    free(first_bytes);
+    free(image.data);
+    printf("PASS an import is matched by its whole content, not a sample of it\n");
+}
+
+static void write_line(const char *path, const char *line) {
+    FILE *f = nk_fopen_utf8(path, "wb");
+    assert(f != NULL);
+    assert(fprintf(f, "%s\n", line) > 0);
+    assert(fclose(f) == 0);
+}
+
+static bool line_equals(const char *path, const char *expected) {
+    size_t got = 0;
+    uint8_t *data = read_all(path, &got);
+    size_t want = strlen(expected);
+    bool same = data && got == want + 1u && memcmp(data, expected, want) == 0 && data[want] == '\n';
+    free(data);
+    return same;
+}
+
+/* Turns this build's import of src back into the record a build before the
+   full identity wrote: the image as <ID>.<fp>.cso.iso (or <ID>.cso.iso when
+   unnamed), its .source holding the sampled fingerprint, <fp>.ref holding the
+   disc ID, and no ref for the identity. */
+static void make_sampled_record(const char *root, const char *src, const NkDiscImport *import,
+                                bool unnamed, char *legacy_iso, size_t legacy_size) {
+    char fingerprint[NK_DISC_LEGACY_FINGERPRINT_CHARS + 1];
+    char path[NK_MAX_PATH + 96];
+    char sep = nk_platform_path_separator();
+    NkDiscExpandStatus status;
+    CHECK(nk_disc_legacy_fingerprint(src, NK_DISC_FORMAT_CSO, fingerprint, &status));
+    CHECK(strlen(fingerprint) == NK_DISC_LEGACY_FINGERPRINT_CHARS);
+    if (unnamed) {
+        snprintf(legacy_iso, legacy_size, "%s%cdiscs%cTEST00042%cTEST00042.cso.iso", root, sep,
+                 sep, sep);
+    } else {
+        snprintf(legacy_iso, legacy_size, "%s%cdiscs%cTEST00042%cTEST00042.%.16s.cso.iso", root,
+                 sep, sep, sep, fingerprint);
+    }
+    CHECK(nk_rename_utf8(import->iso_path, legacy_iso) == 0);
+    snprintf(path, sizeof(path), "%s.source", import->iso_path);
+    CHECK(nk_remove_utf8(path) == 0);
+    snprintf(path, sizeof(path), "%s.source", legacy_iso);
+    write_line(path, fingerprint);
+    snprintf(path, sizeof(path), "%s%cdiscs%cexpanded%c%s.ref", root, sep, sep, sep,
+             import->identity);
+    CHECK(nk_remove_utf8(path) == 0);
+    snprintf(path, sizeof(path), "%s%cdiscs%cexpanded%c%s.ref", root, sep, sep, sep, fingerprint);
+    write_line(path, "TEST00042");
+}
+
+/* An import an earlier build recorded under the sampled fingerprint is never
+   a match on that record alone: a different file with the same sample gets
+   its own expansion and leaves the record as it was, and the file the record
+   is for is compared with the image byte for byte, then upgraded where it is
+   (its name kept, so a library card naming it keeps working). Both earlier
+   names, <ID>.<fp>.cso.iso and <ID>.cso.iso, are found. */
+static void test_import_upgrades_sampled_record(void) {
+    Buf image = { NULL, 0, 0 };
+    char root[NATIVE_TEST_PATH_MAX];
+    char named_root[NATIVE_TEST_PATH_MAX];
+    char first_src[NATIVE_TEST_PATH_MAX];
+    char second_src[NATIVE_TEST_PATH_MAX];
+    char legacy_iso[NK_MAX_PATH + 64];
+    char legacy_sidecar[NK_MAX_PATH + 80];
+    char first_sample[NK_DISC_LEGACY_FINGERPRINT_CHARS + 1];
+    char second_sample[NK_DISC_LEGACY_FINGERPRINT_CHARS + 1];
+    char expected[NK_DISC_IDENTITY_CHARS + 16];
+    char sep = nk_platform_path_separator();
+    static uint8_t late[ISO_BYTES];
+    NkDiscImport result;
+    NkDiscExpandStatus status;
+    memcpy(late, g_iso, ISO_BYTES);
+    late[(size_t)50u * SECTOR + 100u] ^= 0x5Au;
+    path_in(root, sizeof(root), "sampled-root");
+    CHECK(nk_platform_mkdir_p(root));
+    path_in(first_src, sizeof(first_src), "sampled-a.cso");
+    path_in(second_src, sizeof(second_src), "sampled-b.cso");
+    build_ciso(&image, "CISO", 1, 0, g_iso, ISO_BYTES, stored_kind);
+    write_bytes(first_src, image.data, image.len);
+    build_ciso(&image, "CISO", 1, 0, late, ISO_BYTES, stored_kind);
+    write_bytes(second_src, image.data, image.len);
+    stamp_write_time(first_src);
+    stamp_write_time(second_src);
+    CHECK(nk_disc_legacy_fingerprint(first_src, NK_DISC_FORMAT_CSO, first_sample, &status));
+    CHECK(nk_disc_legacy_fingerprint(second_src, NK_DISC_FORMAT_CSO, second_sample, &status));
+    CHECK(strcmp(first_sample, second_sample) == 0);
+
+    CHECK(nk_disc_import(first_src, root, NULL, &result, &status) && !result.reused);
+    make_sampled_record(root, first_src, &result, true, legacy_iso, sizeof(legacy_iso));
+    snprintf(legacy_sidecar, sizeof(legacy_sidecar), "%s.source", legacy_iso);
+
+    /* The other file with the same sample: compared, not this record's. */
+    if (!nk_disc_import(second_src, root, NULL, &result, &status)) {
+        fprintf(stderr, "sampled: %s: %s\n", status.code, status.message);
+        CHECK(false);
+    }
+    CHECK(!result.reused && strcmp(result.iso_path, legacy_iso) != 0);
+    CHECK(file_equals(result.iso_path, late, ISO_BYTES));
+    CHECK(file_equals(legacy_iso, g_iso, ISO_BYTES));
+    CHECK(line_equals(legacy_sidecar, first_sample));
+
+    /* The record's own file: compared equal, upgraded in place. */
+    CHECK(nk_disc_import(first_src, root, NULL, &result, &status) && result.reused);
+    CHECK(strcmp(result.iso_path, legacy_iso) == 0);
+    CHECK(strcmp(result.disc_id, "TEST00042") == 0);
+    CHECK(file_equals(legacy_iso, g_iso, ISO_BYTES));
+    snprintf(expected, sizeof(expected), "sha256:%s", result.identity);
+    CHECK(line_equals(legacy_sidecar, expected));
+    /* From now on the identity's own ref finds it, with the sampled ref gone. */
+    {
+        char ref[NATIVE_TEST_PATH_MAX + 96];
+        snprintf(ref, sizeof(ref), "%s%cdiscs%cexpanded%c%s.ref", root, sep, sep, sep,
+                 first_sample);
+        CHECK(nk_remove_utf8(ref) == 0);
+    }
+    CHECK(nk_disc_import(first_src, root, NULL, &result, &status) && result.reused);
+    CHECK(strcmp(result.iso_path, legacy_iso) == 0);
+
+    /* The named earlier form is upgraded the same way. */
+    path_in(named_root, sizeof(named_root), "sampled-named-root");
+    CHECK(nk_platform_mkdir_p(named_root));
+    CHECK(nk_disc_import(first_src, named_root, NULL, &result, &status) && !result.reused);
+    make_sampled_record(named_root, first_src, &result, false, legacy_iso, sizeof(legacy_iso));
+    CHECK(nk_disc_import(first_src, named_root, NULL, &result, &status) && result.reused);
+    CHECK(strcmp(result.iso_path, legacy_iso) == 0);
+    free(image.data);
+    printf("PASS a sampled record is upgraded only for the file it holds\n");
+}
+
+/* A CSO of a 3 MiB image, every block stored, so its identity is read in
+   more than one piece. Only its header is valid as a disc: these tests stop
+   before the expansion. */
+static void build_large_cso(Buf *image) {
+    size_t len = 3u * 1024u * 1024u;
+    uint8_t *iso = (uint8_t *)calloc(len, 1u);
+    assert(iso != NULL);
+    memcpy(iso, g_iso, ISO_BYTES);
+    build_ciso(image, "CISO", 1, 0, iso, len, stored_kind);
+    free(iso);
+}
+
+static void truncate_file(const char *path, uint64_t size) {
+#if defined(_WIN32) || defined(_WIN64)
+    FILE *f = nk_fopen_utf8(path, "r+b");
+    assert(f != NULL);
+    assert(_chsize_s(_fileno(f), (long long)size) == 0);
+    assert(fclose(f) == 0);
+#else
+    assert(truncate(path, (off_t)size) == 0);
+#endif
+}
+
+typedef struct {
+    const char *path;
+    uint64_t keep;
+    int calls;
+} Shrink;
+
+/* The file shrinks once the identity has read its first piece, as one on a
+   drive that goes away does. */
+static void on_progress_shrink(uint64_t done, uint64_t total, void *user) {
+    Shrink *s = (Shrink *)user;
+    (void)total;
+    if (s->calls++ == 0 && done > 0u) truncate_file(s->path, s->keep);
+}
+
+/* A file that cannot be read to its end while its identity is read is a
+   named import error, never a match on what was read; and a cancel then
+   keeps nothing. */
+static void test_import_identity_read_error_and_cancel(void) {
     Buf image = { NULL, 0, 0 };
     char root[NATIVE_TEST_PATH_MAX];
     char src[NATIVE_TEST_PATH_MAX];
-    char legacy[NATIVE_TEST_PATH_MAX + 64];
-    char legacy_sidecar[NATIVE_TEST_PATH_MAX + 80];
-    char sep = nk_platform_path_separator();
+    char discs[NATIVE_TEST_PATH_MAX + 16];
     NkDiscImport result;
     NkDiscExpandStatus status;
-    path_in(root, sizeof(root), "legacy-root");
+    Shrink shrink;
+    NkDiscExpandCallbacks shrinking = { on_progress_shrink, NULL, &shrink };
+    Progress progress = { 0, 0, 0, true, 0 };
+    NkDiscExpandCallbacks cancelling = { on_progress, on_cancel, &progress };
+    build_large_cso(&image);
+    path_in(root, sizeof(root), "identity-error-root");
     CHECK(nk_platform_mkdir_p(root));
-    path_in(src, sizeof(src), "legacy.cso");
-    build_ciso(&image, "CISO", 1, 0, g_iso, ISO_BYTES, cso_v1_kind);
+    snprintf(discs, sizeof(discs), "%s%cdiscs", root, nk_platform_path_separator());
+    path_in(src, sizeof(src), "identity-error.cso");
+
     write_bytes(src, image.data, image.len);
-    CHECK(nk_disc_import(src, root, NULL, &result, &status) && !result.reused);
-    snprintf(legacy, sizeof(legacy), "%s%cdiscs%cTEST00042%cTEST00042.cso.iso", root, sep, sep,
-             sep);
-    snprintf(legacy_sidecar, sizeof(legacy_sidecar), "%s.source", legacy);
-    {
-        char sidecar[NK_MAX_PATH + 8];
-        snprintf(sidecar, sizeof(sidecar), "%s.source", result.iso_path);
-        CHECK(nk_rename_utf8(result.iso_path, legacy) == 0);
-        CHECK(nk_rename_utf8(sidecar, legacy_sidecar) == 0);
+    memset(&shrink, 0, sizeof(shrink));
+    shrink.path = src;
+    shrink.keep = (uint64_t)image.len - 512u * 1024u;
+    CHECK(!nk_disc_import(src, root, &shrinking, &result, &status));
+    if (strcmp(status.code, NK_DISC_READ_FAILED) != 0) {
+        fprintf(stderr, "read error: got %s: %s\n", status.code, status.message);
+        CHECK(false);
     }
-    CHECK(nk_disc_import(src, root, NULL, &result, &status) && result.reused);
-    CHECK(strcmp(result.iso_path, legacy) == 0);
+    CHECK(shrink.calls >= 1 && status.message[0] != '\0');
+    CHECK(nk_platform_path_missing(discs));
+
+    /* Cancelled after the first piece: nothing of the import is kept. */
+    write_bytes(src, image.data, image.len);
+    CHECK(!nk_disc_import(src, root, &cancelling, &result, &status));
+    CHECK(strcmp(status.code, NK_DISC_CANCELLED) == 0);
+    CHECK(progress.calls == 1 && progress.last_done < progress.total);
+    CHECK(nk_platform_path_missing(discs));
     free(image.data);
-    printf("PASS an expansion under its earlier name is reused\n");
+    printf("PASS a read error or a cancel while the identity is read keeps nothing\n");
 }
 
 typedef struct {
     const char *source;
     const char *root;
+    uint64_t source_bytes;
     int nested_calls;
     bool nested_ok;
     char nested_code[48];
 } NestedImport;
 
 /* Starts a second import of the same file while the first is part-way
-   through writing its partial image, as a second program would. */
+   through writing its partial image, as a second program would: past the
+   source's identity (the first source_bytes of the progress). */
 static void on_progress_import_again(uint64_t done, uint64_t total, void *user) {
     NestedImport *n = (NestedImport *)user;
-    if (done > 0u && done < total && n->nested_calls == 0) {
+    if (done > n->source_bytes && done < total && n->nested_calls == 0) {
         NkDiscImport again;
         NkDiscExpandStatus status;
         n->nested_calls++;
@@ -1246,6 +1497,7 @@ static void test_import_busy(void) {
     memset(&nested, 0, sizeof(nested));
     nested.source = src;
     nested.root = root;
+    nested.source_bytes = image.len;
     if (!nk_disc_import(src, root, &callbacks, &result, &status)) {
         fprintf(stderr, "busy: %s: %s\n", status.code, status.message);
         CHECK(false);
@@ -1290,7 +1542,9 @@ int main(void) {
     test_chd_header_caps();
     test_chd_unknown_codec();
     test_import_same_disc_id();
-    test_import_reuses_earlier_name();
+    test_import_full_content_identity();
+    test_import_upgrades_sampled_record();
+    test_import_identity_read_error_and_cancel();
     test_import_busy();
     printf("test_disc_expand: %d checks passed\n", g_checks);
     return 0;

@@ -9677,34 +9677,35 @@ static bool player_psn_disc_iso_path(char *out, size_t out_size, const char *dat
 
 /* A converted PSN image is named by its disc ID only, so another package with that ID (a
    re-release, another version, a fixed download) would find it in place. Beside it,
-   <ID>.iso.source records the fingerprint of the package it was made from and the image's
-   size (as nk_disc_import does for a compressed image), and the image is reused only for that
-   unchanged package while it still has that size (audit 2026-11-17). */
+   <ID>.iso.source records "sha256:<identity> <image size>": the identity of the package it
+   was made from (nk_disc_file_identity, the SHA-256 of all of the package's bytes) and the
+   image's size. The image is reused only for a package with that identity, computed again on
+   every add, while the image still has that size (F-f6233fe0). A record without the
+   "sha256:" mark was written by the sampled rule (the package's size, write time and first
+   64 KiB) and is never trusted: that package is converted again. */
 static bool player_psn_source_path(char *out, size_t out_size, const char *iso_path) {
     int n = snprintf(out, out_size, "%s.source", iso_path ? iso_path : "");
     return iso_path && iso_path[0] && n > 0 && (size_t)n < out_size;
 }
 
-static bool player_psn_source_line(const char *pbp_path, int64_t iso_bytes, char *out,
+static bool player_psn_source_line(const char *identity, int64_t iso_bytes, char *out,
                                    size_t out_size) {
-    char fingerprint[NK_DISC_FINGERPRINT_CHARS + 1];
-    NkDiscExpandStatus status;
     int n;
-    if (iso_bytes <= 0 || !nk_disc_source_fingerprint(pbp_path, fingerprint, &status)) {
+    if (iso_bytes <= 0 || identity == NULL || strlen(identity) != NK_DISC_IDENTITY_CHARS) {
         return false;
     }
-    n = snprintf(out, out_size, "%s %lld", fingerprint, (long long)iso_bytes);
+    n = snprintf(out, out_size, "sha256:%s %lld", identity, (long long)iso_bytes);
     return n > 0 && (size_t)n < out_size;
 }
 
-static bool player_psn_iso_from_package(const char *iso_path, const char *pbp_path) {
+static bool player_psn_iso_from_package(const char *iso_path, const char *identity) {
     char sidecar[NK_MAX_PATH + 16];
-    char expected[NK_DISC_FINGERPRINT_CHARS + 32];
-    char recorded[NK_DISC_FINGERPRINT_CHARS + 32];
+    char expected[NK_DISC_IDENTITY_CHARS + 48];
+    char recorded[NK_DISC_IDENTITY_CHARS + 48];
     size_t got;
     FILE *f;
     if (!player_psn_source_path(sidecar, sizeof(sidecar), iso_path) ||
-        !player_psn_source_line(pbp_path, nk_platform_get_file_size(iso_path), expected,
+        !player_psn_source_line(identity, nk_platform_get_file_size(iso_path), expected,
                                 sizeof(expected))) {
         return false;
     }
@@ -9719,15 +9720,15 @@ static bool player_psn_iso_from_package(const char *iso_path, const char *pbp_pa
     return strcmp(recorded, expected) == 0;
 }
 
-static bool player_psn_record_package(const char *iso_path, const char *pbp_path) {
+static bool player_psn_record_package(const char *iso_path, const char *identity) {
     char sidecar[NK_MAX_PATH + 16];
     char tmp[NK_MAX_PATH + 24];
-    char line[NK_DISC_FINGERPRINT_CHARS + 32];
+    char line[NK_DISC_IDENTITY_CHARS + 48];
     FILE *f;
     bool ok;
     int n;
     if (!player_psn_source_path(sidecar, sizeof(sidecar), iso_path) ||
-        !player_psn_source_line(pbp_path, nk_platform_get_file_size(iso_path), line,
+        !player_psn_source_line(identity, nk_platform_get_file_size(iso_path), line,
                                 sizeof(line))) {
         return false;
     }
@@ -10086,12 +10087,9 @@ bool player_psn_package_inspect(const char *pbp_path, PlayerPsnPackage *package,
     snprintf(package->pbp_path, sizeof(package->pbp_path), "%s", pbp_path);
     snprintf(package->disc_id, sizeof(package->disc_id), "%s", info.disc_id);
     snprintf(package->title, sizeof(package->title), "%s", info.title);
-    if (!nk_platform_path_missing(package->iso_path)) {
-        nk_psp_ctx_init(&ctx, NULL);
-        package->iso_ready =
-            player_psn_iso_from_package(package->iso_path, package->pbp_path) &&
-            nk_npumdimg_check_iso_file(&ctx, package->iso_path, package->disc_id) == NK_PSP_OK;
-    }
+    /* iso_ready stays false: whether a conversion in place is this package's needs the
+       package's identity, read whole on the conversion worker (player_psn_package_convert),
+       never here on the UI thread. */
     return true;
 }
 
@@ -10238,6 +10236,7 @@ bool player_psn_package_convert(const PlayerPsnPackage *package,
     char directory[NK_MAX_PATH];
     char key_error[160];
     char label[160];
+    char identity[NK_DISC_IDENTITY_CHARS + 1];
     const char *status;
     const char *slash;
     NkKeystore *keys;
@@ -10273,6 +10272,34 @@ bool player_psn_package_convert(const PlayerPsnPackage *package,
         return player_homebrew_package_convert(package, callbacks, code, code_size, message,
                                                message_size);
     }
+    /* The package's identity, read whole here on the worker on every add: the image in place
+       is used only when its record names this identity (F-f6233fe0). */
+    bridge.callbacks = callbacks;
+    {
+        NkDiscExpandCallbacks identity_hooks = { player_disc_bridge_progress,
+                                                 player_disc_bridge_cancelled, &bridge };
+        NkDiscExpandStatus identity_status;
+        if (!nk_disc_file_identity(package->pbp_path, &identity_hooks, identity, NULL,
+                                   &identity_status)) {
+            if (strcmp(identity_status.code, NK_DISC_CANCELLED) == 0) {
+                player_psn_result(code, code_size, "CANCELLED", message, message_size,
+                                  "The conversion was cancelled before anything was written.");
+            } else {
+                fprintf(stderr, "[PLAYER] PSN package could not be read: %s: %s\n",
+                        identity_status.code, identity_status.message);
+                player_psn_result(code, code_size, identity_status.code, message, message_size,
+                                  "%s", identity_status.message);
+            }
+            return false;
+        }
+    }
+    if (!nk_platform_path_missing(package->iso_path) &&
+        player_psn_iso_from_package(package->iso_path, identity)) {
+        nk_psp_ctx_init(&ctx, NULL);
+        if (nk_npumdimg_check_iso_file(&ctx, package->iso_path, package->disc_id) == NK_PSP_OK) {
+            return true;
+        }
+    }
     keys = nk_keystore_create();
     if (keys == NULL ||
         nk_keystore_load_builtin(keys, key_error, sizeof(key_error)) != NK_PSP_OK) {
@@ -10281,7 +10308,6 @@ bool player_psn_package_convert(const PlayerPsnPackage *package,
                           "%s", keys ? key_error : "Out of memory.");
         return false;
     }
-    bridge.callbacks = callbacks;
     hooks.on_progress = player_psn_bridge_progress;
     hooks.is_cancelled = player_psn_bridge_cancelled;
     hooks.user = &bridge;
@@ -10301,7 +10327,7 @@ bool player_psn_package_convert(const PlayerPsnPackage *package,
     rc = nk_npumdimg_convert_file(&ctx, package->pbp_path, package->iso_path, &hooks, &info);
     nk_keystore_free(keys);
     if (rc == NK_PSP_OK) {
-        if (player_psn_record_package(package->iso_path, package->pbp_path)) return true;
+        if (player_psn_record_package(package->iso_path, identity)) return true;
         player_psn_result(code, code_size, "IO_FAILURE", message, message_size,
                           "The disc image was made, but the record of the package it came from "
                           "could not be written beside it in Nakagawa's data folder, so the "
@@ -10352,11 +10378,6 @@ bool player_disc_image_inspect(const char *image_path, PlayerPsnPackage *package
     }
     snprintf(package->pbp_path, sizeof(package->pbp_path), "%s", image_path);
     package->disc_format = probe.format;
-    if (probe.reused) {
-        snprintf(package->iso_path, sizeof(package->iso_path), "%s", probe.iso_path);
-        snprintf(package->disc_id, sizeof(package->disc_id), "%s", probe.disc_id);
-        package->iso_ready = true;
-    }
     return true;
 }
 
@@ -10398,6 +10419,7 @@ bool player_disc_image_expand(PlayerPsnPackage *package,
     snprintf(package->iso_path, sizeof(package->iso_path), "%s", result.iso_path);
     snprintf(package->disc_id, sizeof(package->disc_id), "%s", result.disc_id);
     package->iso_ready = true;
+    package->reused = result.reused;
     return true;
 }
 
@@ -10425,8 +10447,9 @@ void player_app_psn_conversion_begin(PlayerApp *app, const PlayerPsnPackage *pac
         snprintf(app->wizard.extraction_current_file,
                  sizeof(app->wizard.extraction_current_file), "%.200s", name);
         snprintf(app->wizard.status_message, sizeof(app->wizard.status_message),
-                 "Expanding %.100s into a plain disc image on this PC. This happens once, "
-                 "and needs as much free space as the game's .iso.", name);
+                 "Reading %.100s, then expanding it into a plain disc image on this PC "
+                 "unless it was added before. That needs as much free space as the game's "
+                 ".iso.", name);
     } else if (package->homebrew) {
         snprintf(app->wizard.extraction_current_file,
                  sizeof(app->wizard.extraction_current_file), "%s.iso", package->disc_id);

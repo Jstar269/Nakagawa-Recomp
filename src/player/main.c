@@ -201,10 +201,11 @@ static void player_take_picked_disc(PlayerApp *app, const char *selected_path) {
     player_take_picked_disc_from(app, selected_path, NULL);
 }
 
-/* A compressed disc image (.cso, .zso, .chd): expanded once into a private ISO
-   on the conversion worker, then imported exactly as a picked .iso. An
-   expansion of the same unchanged file is used as it is; anything the player
-   cannot read is refused by name. */
+/* A compressed disc image (.cso, .zso, .chd): checked here, then read whole
+   for its identity on the conversion worker and expanded once into a private
+   ISO, which is imported exactly as a picked .iso. An expansion of a file with
+   the same bytes is used as it is; anything the player cannot read is refused
+   by name. */
 static void player_take_picked_compressed(PlayerApp *app, const char *path) {
     PlayerPsnPackage package;
     char code[48];
@@ -226,9 +227,10 @@ static void player_take_picked_compressed(PlayerApp *app, const char *path) {
 }
 
 /* A PSN release of a UMD game (#295 phase 2): converted once into a private
-   ISO on the conversion worker, then imported exactly as a picked disc. A
-   conversion already in place is used as it is; other packages are refused by
-   name. */
+   ISO on the conversion worker, then imported exactly as a picked disc. The
+   worker reads the package whole for its identity, and a conversion of the
+   same package already in place is used as it is; other packages are refused
+   by name. */
 static void player_take_picked_package(PlayerApp *app, const char *path) {
     PlayerPsnPackage package;
     char code[48];
@@ -3104,7 +3106,8 @@ static void finish_psn_job(PlayerApp *app, PlayerPsnJob *job) {
     job->completion_handled = true;
     player_app_psn_conversion_finish(app);
     if (job->ok && job->package.disc_format != NK_DISC_FORMAT_NONE) {
-        printf("[PLAYER] Disc image %s expanded into %s\n",
+        printf(job->package.reused ? "[PLAYER] Disc image %s: using its expanded disc image for %s\n"
+                                   : "[PLAYER] Disc image %s expanded into %s\n",
                nk_disc_format_extension(job->package.disc_format), job->package.disc_id);
         player_take_picked_disc_from(app, job->package.iso_path, job->package.pbp_path);
     } else if (job->ok) {
@@ -4681,13 +4684,18 @@ static int player_load_library(PlayerRun *run) {
         char message[512];
         bool ok = player_disc_image_inspect(run->initial_iso_path, &package, code, sizeof(code),
                                             message, sizeof(message));
-        if (ok && !package.iso_ready) {
+        if (ok) {
             int last_percent = -1;
             PlayerPsnConvertCallbacks hooks = { disc_console_progress, NULL, &last_percent };
-            printf("[PLAYER] Expanding disc image %s into a plain disc image...\n",
-                   nk_disc_format_extension(package.disc_format));
+            printf("[PLAYER] Reading disc image %s, then expanding it unless it was added "
+                   "before...\n", nk_disc_format_extension(package.disc_format));
             ok = player_disc_image_expand(&package, &hooks, code, sizeof(code), message,
                                           sizeof(message));
+            if (ok) {
+                printf(package.reused ? "[PLAYER] Disc image %s: using its expanded disc image\n"
+                                      : "[PLAYER] Expanded disc image %s into a plain disc image\n",
+                       nk_disc_format_extension(package.disc_format));
+            }
         }
         if (!ok) {
             fprintf(stderr, "[PLAYER] %s: %s\n", code, message);
