@@ -957,6 +957,24 @@ class TestToolGitNeverDetachesMaintenance(unittest.TestCase):
             self.assertEqual(stored.returncode, 1)
             self.assertEqual(stored.stdout.strip(), "")
 
+    def test_nested_git_init_drops_an_inherited_index_after_repository_discovery_changes(self):
+        with tempfile.TemporaryDirectory(prefix="git-index-cache-", dir=ROOT) as tmpdir:
+            nested = Path(tmpdir) / "staging"
+            nested.mkdir()
+            caller_index = str(Path(tmpdir) / "caller-index")
+            caller = dict(os.environ, GIT_INDEX_FILE=caller_index)
+
+            before_init = isolated_git_env(caller, root=nested)
+            self.assertEqual(before_init.get("GIT_INDEX_FILE"), caller_index)
+
+            _git(["init", "-q"], nested)
+
+            after_init = isolated_git_env(caller, root=nested)
+            self.assertFalse(
+                "GIT_INDEX_FILE" in after_init,
+                "a nested repository must not keep the enclosing repository's index",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

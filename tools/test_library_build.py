@@ -9,10 +9,12 @@ import contextlib
 import io
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -23,7 +25,9 @@ if str(TOOLS) not in sys.path:
 
 import library_build  # noqa: E402
 from nk_core import decrypt_tool, disc_verify, git_isolation  # noqa: E402
-from test_iso_parity import create_test_iso, create_test_iso_with_executables  # noqa: E402
+from test_iso_parity import (
+    build_plain_mips_elf, create_test_iso, create_test_iso_with_executables,
+)  # noqa: E402
 
 # A stand-in for `nk_cli.py bringup`: what it does depends on the disc file's name.
 STUB_BRINGUP = r'''
@@ -159,6 +163,49 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertIn("| compile | COMPILE_FAILED | 1 |", markdown)
         self.assertIn("`sceUsb:sceUsbDeactivate`", markdown)
 
+    def test_summarize_report_treats_null_import_lists_as_empty(self) -> None:
+        report = {
+            "stages": {
+                "prepare_import": {"status": "PASS"},
+                "build_package": {"status": "PASS"},
+                "launch": {"status": "PASS"},
+            },
+            "unsupported_imports": None,
+            "runtime_imports": None,
+            "counts": {},
+            "presentation": {},
+        }
+
+        summary = library_build.summarize_report(report)
+
+        self.assertEqual(summary["unsupported_imports"], [])
+        self.assertEqual(summary["launch"]["runtime_imports"], [])
+
+    def test_summarize_report_keeps_runtime_import_rows_structured_and_ordered(self) -> None:
+        first = {"library": "sceZulu", "nid_name": "sceStop", "nid": 1}
+        second = {"library": "sceAlpha", "nid_name": "sceOther", "nid": 2}
+        report = {
+            "stages": {"build_package": {"status": "PASS"}, "launch": {"status": "FAIL"}},
+            "failure_class": "UNSUPPORTED_IMPORT",
+            "runtime_imports": [first, second, first],
+        }
+
+        summary = library_build.summarize_report(report)
+
+        self.assertEqual(summary["launch"]["runtime_imports"], [first, second])
+
+    def test_post_bringup_package_measurement_error_is_recorded(self) -> None:
+        self.disc("ok-test70090.iso", "TEST70090")
+        with mock.patch.object(
+            library_build, "_directory_bytes",
+            side_effect=PermissionError("synthetic package walk failure"),
+        ):
+            result = self.build(jobs=1).run()
+
+        record = self.by_source(result)["ok-test70090.iso"]
+        self.assertEqual(record["outcome"], "NO_REPORT")
+        self.assertIn("PermissionError", record["error"])
+
     def test_only_builds_the_named_discs_and_keeps_every_other_record(self) -> None:
         self.disc("ok-test70011.iso", "TEST70011")
         self.disc("Sub/ok-test70012.iso", "TEST70012")
@@ -166,8 +213,10 @@ class LibraryBuildTests(unittest.TestCase):
         self.build(only=frozenset({"ok-test70011.iso"})).run()
         self.assertEqual(self.calls(), ["ok-test70011"])
         self.assertEqual(set(self.by_source(self.manifest())), {"ok-test70011.iso"})
-        # A later --only run of another disc rebuilds nothing else and drops no record.
-        result = self.build(only=frozenset({"sub/ok-test70012.iso"}), retry_failed=True).run()
+        # A later --only run of another disc rebuilds nothing else and drops no record. The
+        # name matches the folder in any case on Windows; on POSIX it keeps the folder's case.
+        named = "sub/ok-test70012.iso" if os.name == "nt" else "Sub/ok-test70012.iso"
+        result = self.build(only=frozenset({named}), retry_failed=True).run()
         self.assertEqual(self.calls(), ["ok-test70011", "ok-test70012"])
         self.assertEqual({source: record["outcome"] for source, record in self.by_source(result).items()},
                          {"ok-test70011.iso": "BUILT", "Sub/ok-test70012.iso": "BUILT"})
@@ -182,8 +231,36 @@ class LibraryBuildTests(unittest.TestCase):
         listing = self.root / "only.txt"
         windows_path = "\\".join(["Sub", "OK-Test70015.iso"])
         listing.write_text(windows_path + "\r\n\n  ok-test70016.iso  \n", encoding="utf-8")
-        self.assertEqual(library_build.read_only_list(listing),
-                         frozenset({"sub/ok-test70015.iso", "ok-test70016.iso"}))
+        # Any case matches on Windows only; POSIX keeps the case (its own test below) but
+        # still takes either slash and skips blank lines and surrounding spaces.
+        expected = {
+            "nt": frozenset({"sub/ok-test70015.iso", "ok-test70016.iso"}),
+            "posix": frozenset({"Sub/OK-Test70015.iso", "ok-test70016.iso"}),
+        }
+        for platform, keys in expected.items():
+            with self.subTest(os_name=platform):
+                with mock.patch.object(library_build.os, "name", platform):
+                    only = library_build.read_only_list(listing)
+                self.assertEqual(only, keys)
+
+    def test_posix_source_keys_and_only_lists_preserve_case_distinctions(self) -> None:
+        root = self.root / "case-sensitive"
+        first = root / "Games" / "foo.iso"
+        second = root / "games" / "foo.iso"
+        listing = self.root / "only-case-sensitive.txt"
+        separator = chr(92)
+        listing.write_text(
+            f"Games{separator}foo.iso\ngames{separator}foo.iso\n", encoding="utf-8"
+        )
+
+        with mock.patch.object(library_build.os, "name", "posix"):
+            first_key = library_build._source_key(first, root)
+            second_key = library_build._source_key(second, root)
+            only_keys = library_build.read_only_list(listing)
+
+        self.assertEqual(first_key, "Games/foo.iso")
+        self.assertEqual(second_key, "games/foo.iso")
+        self.assertEqual(only_keys, frozenset({"Games/foo.iso", "games/foo.iso"}))
 
     def test_a_disc_id_seen_before_is_a_duplicate_and_builds_once(self) -> None:
         self.disc("a/ok-test70010.iso", "TEST70010")
@@ -203,7 +280,13 @@ class LibraryBuildTests(unittest.TestCase):
         create_test_iso(translated, disc_id="TEST70011", title="Title TEST70011 [T-En]")
         result = self.build().run()
         records = self.by_source(result)
-        self.assertEqual([records[key]["outcome"] for key in sorted(records)], ["BUILT", "BUILT"])
+        first = records["a/ok-test70011.iso"]
+        latest = records["b/ok-test70011.iso"]
+        self.assertEqual(first["outcome"], "REPLACED")
+        self.assertEqual(first["replaced_by"], latest["source"])
+        self.assertIsNone(first["package_bytes"])
+        self.assertEqual(latest["outcome"], "BUILT")
+        self.assertIsNotNone(latest["package_bytes"])
         self.assertEqual(sorted(self.calls()), ["ok-test70011", "ok-test70011"])
         hashes = {records[key]["verification"]["sha1"] for key in records}
         self.assertEqual(len(hashes), 2)
@@ -218,11 +301,15 @@ class LibraryBuildTests(unittest.TestCase):
         self.disc("c/ok-test70017.iso", "TEST70017")
         result = self.build(jobs=2).run()
         records = self.by_source(result)
-        self.assertEqual([records[key]["outcome"] for key in sorted(records)], ["BUILT"] * 3)
+        self.assertEqual(records["a/busy-test70016.iso"]["outcome"], "REPLACED")
+        self.assertEqual(records["a/busy-test70016.iso"]["replaced_by"],
+                         "b/busy-test70016.iso")
+        self.assertEqual(records["b/busy-test70016.iso"]["outcome"], "BUILT")
+        self.assertEqual(records["c/ok-test70017.iso"]["outcome"], "BUILT")
         # No overlap was logged: the second image started only after the first one ended.
         self.assertEqual(sorted(self.calls()), ["busy-test70016", "busy-test70016", "ok-test70017"])
 
-    def test_two_discs_that_could_not_be_hashed_both_build(self) -> None:
+    def test_two_discs_that_could_not_be_hashed_still_build_sequentially(self) -> None:
         self.disc("a/ok-test70015.iso", "TEST70015")
         self.disc("b/ok-test70015.iso", "TEST70015")
 
@@ -231,7 +318,9 @@ class LibraryBuildTests(unittest.TestCase):
 
         result = self.build(hash_disc=unreadable).run()
         records = self.by_source(result)
-        self.assertEqual([records[key]["outcome"] for key in sorted(records)], ["BUILT", "BUILT"])
+        self.assertEqual(records["a/ok-test70015.iso"]["outcome"], "REPLACED")
+        self.assertEqual(records["a/ok-test70015.iso"]["replaced_by"], "b/ok-test70015.iso")
+        self.assertEqual(records["b/ok-test70015.iso"]["outcome"], "BUILT")
         self.assertEqual(records["a/ok-test70015.iso"]["verification"],
                          {"error": "DISC_IMAGE_READ_FAILED"})
 
@@ -335,6 +424,23 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual(sorted(self.calls()[4:]), ["fail-test70021", "ok-test70020"])
         self.assertEqual(self.manifest()["counts"], {"BUILD_FAILED": 1, "BUILT": 2})
 
+    def test_retry_failed_limit_preserves_unselected_failure_outcomes(self) -> None:
+        for index in range(3):
+            self.disc(f"fail-test7008{index}.iso", f"TEST7008{index}")
+        self.build(jobs=1).run()
+        self.work.mkdir(parents=True, exist_ok=True)
+        (self.work / "STOP").write_text("", encoding="utf-8")
+
+        result = self.build(jobs=1, retry_failed=True, limit=1).run()
+
+        records = self.by_source(result)
+        selected = sorted(records)[0]
+        self.assertEqual(records[selected]["outcome"], "PENDING")
+        self.assertEqual(
+            {source: record["outcome"] for source, record in records.items() if source != selected},
+            {source: "BUILD_FAILED" for source in records if source != selected},
+        )
+
     def test_a_title_over_its_time_budget_is_stopped_and_recorded(self) -> None:
         self.disc("slow-test70030.iso", "TEST70030")
         self.disc("ok-test70031.iso", "TEST70031")
@@ -346,6 +452,39 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual((slow["outcome"], slow["failed_stage"], slow["failure_class"]),
                          ("TIMED_OUT", "compile", "TITLE_TIME_BUDGET"))
         self.assertEqual(records["ok-test70031.iso"]["outcome"], "BUILT")
+
+    def test_posix_title_bringup_starts_in_a_process_session(self) -> None:
+        self.disc("ok-test70032.iso", "TEST70032")
+        process = mock.Mock()
+        process.pid = 70032
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(library_build.os, "name", "posix"),
+            mock.patch.object(library_build.subprocess, "Popen", return_value=process) as popen,
+        ):
+            self.build(jobs=1).run()
+
+        self.assertIs(popen.call_args.kwargs.get("start_new_session"), True)
+
+    def test_posix_priority_is_applied_after_spawn_without_preexec(self) -> None:
+        self.disc("ok-test70033.iso", "TEST70033")
+        process = mock.Mock()
+        process.pid = 70033
+        process.wait.return_value = 0
+
+        with (
+            mock.patch.object(library_build.os, "name", "posix"),
+            mock.patch.object(library_build.os, "PRIO_PROCESS", 0, create=True),
+            mock.patch.object(library_build.os, "getpriority", return_value=0, create=True) as getpriority,
+            mock.patch.object(library_build.os, "setpriority", create=True) as setpriority,
+            mock.patch.object(library_build.subprocess, "Popen", return_value=process) as popen,
+        ):
+            self.build(jobs=1, priority="below").run()
+
+        self.assertIsNone(popen.call_args.kwargs.get("preexec_fn"))
+        getpriority.assert_called_once_with(0, process.pid)
+        setpriority.assert_called_once_with(0, process.pid, 10)
 
     def test_stop_ends_the_run_and_pause_holds_new_titles(self) -> None:
         for index in range(3):
@@ -379,6 +518,26 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertFalse(runner.is_alive())
         self.assertEqual(finished[0]["counts"], {"BUILT": 3})
 
+    def test_a_failed_disc_identification_is_retried_for_an_unchanged_image(self) -> None:
+        self.disc("ok-test70080.iso", "TEST70080")
+
+        def fail_identification(_path: Path) -> dict:
+            raise PermissionError("synthetic transient read failure")
+
+        self.build(identify_disc=fail_identification, verify_only=True).run()
+        identify_again = mock.Mock(return_value={
+            "disc_id": "TEST70080",
+            "title": "Title TEST70080",
+            "disc_version": None,
+        })
+        result = self.build(identify_disc=identify_again, verify_only=True).run()
+
+        identify_again.assert_called_once()
+        record = self.by_source(result)["ok-test70080.iso"]
+        self.assertEqual(record["disc_id"], "TEST70080")
+        self.assertIsNone(record["identify_error"])
+        self.assertEqual(record["outcome"], "PENDING")
+
     def test_the_disc_check_decrypts_before_the_bringup_and_never_stops_it(self) -> None:
         self.disc("ok-test70050.iso", "TEST70050")
         self.disc("ok-test70051.iso", "TEST70051")
@@ -408,16 +567,49 @@ class LibraryBuildTests(unittest.TestCase):
                          "INTERNAL_ERROR")
         self.assertEqual(result["counts"], {"BUILT": 2})
 
+    def test_disc_decryptor_builds_its_tool_once_under_concurrent_first_calls(self) -> None:
+        decryptor = library_build.DiscDecryption()
+        rendezvous = threading.Barrier(2)
+        count_lock = threading.Lock()
+        build_calls = 0
+
+        def find_or_build_tool(_root: Path) -> Path:
+            nonlocal build_calls
+            with count_lock:
+                build_calls += 1
+            try:
+                rendezvous.wait(timeout=1)
+            except threading.BrokenBarrierError:
+                pass
+            return self.root / "synthetic-decrypt-tool"
+
+        with (
+            mock.patch.object(library_build.decrypt_tool, "find_or_build_tool",
+                              side_effect=find_or_build_tool),
+            mock.patch.object(library_build.decrypt_tool, "decrypt_disc", return_value=[]),
+            ThreadPoolExecutor(max_workers=2) as pool,
+        ):
+            futures = [
+                pool.submit(decryptor, self.discs / f"synthetic-{index}.iso",
+                            self.data, f"TEST{index:04d}")
+                for index in range(2)
+            ]
+            for future in futures:
+                future.result(timeout=5)
+
+        self.assertEqual(build_calls, 1)
+
     def test_decrypt_disc_writes_the_executable_where_the_player_reads_it(self) -> None:
         encrypted = self.discs / "encrypted.iso"
         create_test_iso_with_executables(encrypted, b"~PSP" + b"\0" * 60, disc_id="TEST70060")
         plain = self.discs / "plain.iso"
         create_test_iso_with_executables(plain, b"\x7fELF" + b"\0" * 60, disc_id="TEST70061")
         seen: list[bytes] = []
+        decrypted_elf = build_plain_mips_elf()
 
         def runner(source: Path, destination: Path) -> tuple[int, str]:
             seen.append(source.read_bytes()[:4])
-            destination.write_bytes(b"decrypted")
+            destination.write_bytes(decrypted_elf)
             return 0, "ok"
 
         rows = decrypt_tool.decrypt_disc(encrypted, self.data, "test70060", runner=runner)
@@ -426,7 +618,7 @@ class LibraryBuildTests(unittest.TestCase):
                           for row in rows],
                          [("PSP_GAME/SYSDIR/EBOOT.BIN", "EBOOT.elf", 0, None)])
         self.assertEqual(seen, [b"~PSP"])
-        self.assertEqual(target.read_bytes(), b"decrypted")
+        self.assertEqual(target.read_bytes(), decrypted_elf)
         again = decrypt_tool.decrypt_disc(encrypted, self.data, "TEST70060", runner=runner)
         self.assertEqual(len(seen), 1, "a decrypted copy already there is kept")
         self.assertEqual(again[0]["message"], "kept the decrypted copy already there")
@@ -444,6 +636,43 @@ class LibraryBuildTests(unittest.TestCase):
                           ("EBOOT.elf", 0, None)])
         self.assertIn("DUPLICATE_DISC_MODULE_BASENAME", rows[0]["message"])
         self.assertTrue(target.is_file())
+
+    def test_decrypt_disc_does_not_publish_a_partial_output(self) -> None:
+        encrypted = self.discs / "partial-output.iso"
+        create_test_iso_with_executables(
+            encrypted, b"~PSP" + b"\0" * 60, disc_id="TEST70063"
+        )
+        target = self.data / "titles" / "TEST70063" / "decrypted" / "EBOOT.elf"
+
+        def interrupted_runner(_source: Path, destination: Path) -> tuple[int, str]:
+            destination.write_bytes(b"partial decrypted bytes")
+            return 1, "IO_FAILURE"
+
+        rows = decrypt_tool.decrypt_disc(
+            encrypted, self.data, "TEST70063", runner=interrupted_runner
+        )
+
+        self.assertEqual(rows[0]["status"], 1)
+        self.assertFalse(target.exists(), "a failed decrypt must not leave a reusable final output")
+
+    def test_decrypt_input_staging_is_under_the_per_title_data_folder(self) -> None:
+        encrypted = self.discs / "staged-input.iso"
+        create_test_iso_with_executables(
+            encrypted, b"~PSP" + b"\0" * 60, disc_id="TEST70064"
+        )
+        output_dir = self.data / "titles" / "TEST70064" / "decrypted"
+        source_parents: list[Path] = []
+
+        def interrupted_runner(source: Path, _destination: Path) -> tuple[int, str]:
+            source_parents.append(source.parent)
+            return 1, "IO_FAILURE"
+
+        decrypt_tool.decrypt_disc(
+            encrypted, self.data, "TEST70064", runner=interrupted_runner
+        )
+
+        self.assertEqual(len(source_parents), 1)
+        self.assertTrue(source_parents[0].is_relative_to(output_dir))
 
     def test_the_manifest_names_where_each_first_launch_stopped(self) -> None:
         stages = {stage: {"status": "PASS", "duration_ms": 1} for stage in library_build.STAGES}

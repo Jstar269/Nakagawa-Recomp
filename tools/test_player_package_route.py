@@ -2525,14 +2525,21 @@ class TestRuntimeDllStaging(unittest.TestCase):
             self.write_fake_dlls(bin_dir)
             imports_of, is_system = self.fake_resolver()
 
-            staged = stage_runtime_dlls.stage_runtime_dlls(
-                package_dir,
-                roots=["SDL3.dll", "SDL3_ttf.dll"],
-                search_dirs=[bin_dir],
-                env={},
-                imports_of=imports_of,
-                is_system=is_system,
-            )
+            # The notices step re-reads every staged binary's imports, and on a host
+            # with MSYS2 it parses them as PE files; these synthetic DLLs are not PE,
+            # so that scan reads the same fake graph to keep the test hermetic.
+            with patch.object(
+                stage_runtime_dlls.package_notices, "get_binary_imports",
+                side_effect=lambda binary, *_args, **_kwargs: imports_of(binary),
+            ):
+                staged = stage_runtime_dlls.stage_runtime_dlls(
+                    package_dir,
+                    roots=["SDL3.dll", "SDL3_ttf.dll"],
+                    search_dirs=[bin_dir],
+                    env={},
+                    imports_of=imports_of,
+                    is_system=is_system,
+                )
 
             staged_names = {name.lower() for name in staged}
             self.assertEqual(
