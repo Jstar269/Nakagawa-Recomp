@@ -2285,7 +2285,12 @@ static void test_named_stops_exit_instead_of_crashing(const char *self_path) {
  * The child arms a window around TRACE_IN_PC and runs one in-window instruction, then two
  * out of the window, through the production hooks sr_begin_impl/sr_end_impl. The window
  * file must hold exactly the one in-window record: an out-of-window instruction must
- * write nothing, rather than a record labelled with the last in-window pc. */
+ * write nothing, rather than a record labelled with the last in-window pc.
+ *
+ * The window is the flight recorder's (flight_recorder.c). A build of this file without the
+ * recorder gets flight_recorder.h's stand-ins, which never arm a window, so it has nothing to
+ * record and says so by name instead of running the cell (tools/test_dispatch_call_boundary.py
+ * builds this file that way; the dispatch-isolation-selftest make target links the recorder). */
 #define TRACE_IN_PC  0x00651000u
 #define TRACE_OUT_PC 0x00652000u
 
@@ -2314,6 +2319,11 @@ static int run_trace_window_child(const char *self_path) {
 }
 
 static void test_trace_window_records_only_in_window_instructions(const char *self_path) {
+#if !defined(SR_FLIGHT_RECORDER_LINKED) || defined(SR_FLIGHT_RECORDER_STANDALONE)
+    (void)self_path;
+    fprintf(stderr, "dispatch-isolation-selftest: SKIP the SR_TRACE_PC window cell: this build has "
+            "no trace window (the flight recorder is not linked)\n");
+#else
     char window_path[512], window[64];
     snprintf(window_path, sizeof window_path, "%s.trace-window.txt", self_path);
     snprintf(window, sizeof window, "0x%08x:0x%08x", TRACE_IN_PC, TRACE_IN_PC + 3u);
@@ -2339,6 +2349,7 @@ static void test_trace_window_records_only_in_window_instructions(const char *se
     CHECK(records == 1u && in_window == 1u,
           "the window holds %u record(s), %u of them the in-window instruction; "
           "out-of-window instructions must write none", records, in_window);
+#endif
 }
 
 /* ---- an unwindowed trace that reaches its step limit closes and the run goes on ------
