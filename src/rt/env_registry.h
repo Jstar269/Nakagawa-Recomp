@@ -37,7 +37,7 @@
     X("SR_ACE_SHADOW_CANDIDATES", "string", "off (nothing listed)", "gpu_sdl3vk/ge_gpu.c", "Exactly 1, with shadow=soft declared, prints a SOFT_SHADOW: candidate line (size, keyed digest) per distinct texture hashed.") \
     X("SR_ACE_SMOOTH_DEPTH", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the GE's depth for its in-betweens.") \
     X("SR_ACE_SMOOTH_HUD", "string", "on", "gpu_sdl3vk/ace_hud.c", "Exactly 0 stops Ace Smooth reading the HUD mask of through-mode draws for its in-betweens.") \
-    X("SR_ALLOC_GUARD", "flag-nonzero", "on (guard enabled when unset)", "hle.c", "Allocator guard stays on unless set with a value starting with 0, which disables it.") \
+    X("SR_ALLOC_GUARD", "flag-nonzero", "on (refusal lines printed when unset)", "hle.c", "A value starting with 0 silences the allocator's refusal lines; a request the user partition cannot hold is refused either way.") \
     X("SR_ALLOC_MAX", "number", "0xFFFFFFFF (no extra cap)", "hle.c", "Hexadecimal optional stricter cap on the size of a user-partition allocation request.") \
     X("SR_ALLOC_TRACE", "flag-presence", "off", "hle.c,recomp.c", "When set, prints a trace line for guest memory allocations and partition frees to stderr.") \
     X("SR_ARGLOG", "flag-presence", "off", "sched.c", "Logs a THREAD_ARG_COPY line to stderr when a started thread's argument block is copied.") \
@@ -72,6 +72,7 @@
     X("SR_EXE_DIR", "path", "unset (executable directory is detected)", "hle_host.c", "Overrides the directory the host treats as the executable root; read as a wide string on Windows.") \
     X("SR_EXITSNAP", "flag-presence", "off", "hle_kernel_thread.c", "Arms capture of the last worker thread's CPU state at thread exit for later diagnostics.") \
     X("SR_EXIT_AT_VBLANK", "number", "0 (never exit)", "hle_display.c,sched.c", "Ends the run successfully once the vblank count reaches this value; also counts as pause automation.") \
+    X("SR_EXIT_DUMP", "flag-presence", "off", "hle_kernel_module.c", "Writes crash_dump.bin (CpuState and 64 KiB of guest stack) and exited.flag beside the executable at sceKernelExitGame, for tools/mem_debug.py.") \
     X("SR_EXPECT_HLE_DIAGNOSTICS", "string", "unset", "hle_thread_selftest.c", "Expected HLE diagnostics state that the title-config self-test compares against.") \
     X("SR_FBDIAG", "flag-presence", "off", "hle_display.c", "Prints a FRAMEBUF MISMATCH warning when the presented buffer differs from the GE draw target.") \
     X("SR_FBDUMP", "number", "off", "ge.c,hle_display.c", "Frame count (vcount) from which a framebuffer dump is captured; also enables the GE list snapshot.") \

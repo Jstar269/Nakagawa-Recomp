@@ -626,7 +626,9 @@ class NativeHostBackendTests(unittest.TestCase):
         self.assertIn("if (driver_stop_requested() || gui_quit_requested()) {", driver,
                       "a run the person quit is continued after the scheduler returns")
         teardown = driver.index("    sr_perf_shutdown();\n    gui_shutdown();\n    sr_trace_close();\n")
-        self.assertGreater(teardown, driver.index("sched_run(entry, s.r[4], s.r[5]);"),
+        # sched_run's result is checked: nonzero means no entry thread was created and the
+        # run ends as a failure before any guest code ran.
+        self.assertGreater(teardown, driver.index("if (sched_run(entry, s.r[4], s.r[5]) != 0)"),
                            "the driver must tear down after the scheduler returns")
 
 
