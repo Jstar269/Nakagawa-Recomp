@@ -365,6 +365,68 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             self.assertEqual((build / "libstdc++-6.dll").read_bytes(), current.read_bytes())
             self.assertEqual((build / "libgcc_s_seh-1.dll").read_bytes(), libgcc.read_bytes())
 
+    @staticmethod
+    def _compiler_cache_shim(root: Path) -> Path:
+        """A directory holding only a ``gcc``, as a compiler cache's masquerade directory does."""
+        shim = root / "compiler-cache" / "bin"
+        shim.mkdir(parents=True)
+        (shim / "gcc.exe").write_bytes(b"synthetic compiler-cache shim marker")
+        return shim
+
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_a_compiler_cache_shim_first_on_path_does_not_hide_the_toolchain(self):
+        # Hosted CI routes compiles through ccache: the first gcc on PATH is a link in a directory
+        # that holds nothing else, and the compiler it runs is the next gcc on PATH. The runtime
+        # DLLs and SDL3.dll are that toolchain's, not the shim directory's.
+        with tempfile.TemporaryDirectory(prefix="project-font-cache-shim-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            (build / "game.exe").write_bytes(b"synthetic game executable")
+            shim = self._compiler_cache_shim(root)
+            gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll",
+                                             "game.exe": "libstdc++-6.dll"})
+            sdl = gcc_bin / "SDL3.dll"
+            sdl.write_bytes(b"synthetic SDL3 runtime")
+            iconv = gcc_bin / "libiconv-2.dll"
+            iconv.write_bytes(b"synthetic libiconv runtime")
+            stdcxx = gcc_bin / "libstdc++-6.dll"
+            stdcxx.write_bytes(b"synthetic libstdc++ runtime")
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(shim), str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "SDL3.dll").read_bytes(), sdl.read_bytes())
+            self.assertEqual((build / "libiconv-2.dll").read_bytes(), iconv.read_bytes())
+            self.assertEqual((build / "libstdc++-6.dll").read_bytes(), stdcxx.read_bytes())
+
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_an_import_no_toolchain_directory_holds_is_a_named_stop(self):
+        # Skipping the shim must not turn the stop into a silent skip: with no gcc directory on
+        # PATH holding the DLL, the script names the import and every directory it looked in.
+        with tempfile.TemporaryDirectory(prefix="project-font-unresolved-dll-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            (build / "SDL3.dll").write_bytes(b"synthetic SDL3 runtime")
+            shim = self._compiler_cache_shim(root)
+            gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(shim), str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            output = "".join((result.stdout + result.stderr).split())
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("RUNTIME_DLL_UNRESOLVED:SDL3.dllimportslibiconv-2.dll", output)
+            for searched in (shim, gcc_bin):
+                self.assertIn("".join(str(searched).split()), output)
+            self.assertFalse((build / "libiconv-2.dll").exists())
+
     def test_missing_project_slot_output_fails_by_name(self):
         with tempfile.TemporaryDirectory(prefix="project-font-missing-") as tmp:
             build = Path(tmp) / "build"
