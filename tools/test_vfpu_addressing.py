@@ -25,11 +25,15 @@ Every test name below says which kind it is.
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +41,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import codegen
 import scratch_dir
+from psp_oracle import verify_vfpu_addr
 FIXTURE = ROOT / "tests" / "fixtures" / "vfpu_addressing" / "hardware_vfpu_addr_001.json"
 SELFTEST = ROOT / "tests" / "native" / "vfpu_addr_selftest.c"
 
@@ -52,6 +57,89 @@ def scalar_rule(enc: int) -> int:
 def load_fixture() -> dict:
     returned: dict[str, Any] = json.loads(FIXTURE.read_text(encoding="utf-8"))
     return returned
+
+
+class ManualVerifierTests(unittest.TestCase):
+    def _payload(self, *, scalar_pairs=None, wide_cases=None) -> str:
+        fixture = load_fixture()
+        pairs = scalar_pairs
+        if pairs is None:
+            pairs = [
+                (field, verify_vfpu_addr.scalar_map_field_to_phys(field))
+                for field in ENCODINGS
+            ]
+        lines = [
+            "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VFPU-ADDR-001 "
+            "case_id=S:map status=PASS result=0x0 map="
+            + ",".join(f"{field:02x}:{phys:02x}" for field, phys in pairs)
+            + "\n"
+        ]
+        cases = fixture["wide_cases"] if wide_cases is None else wide_cases
+        for case in cases:
+            width = {1: "s", 2: "p", 3: "t", 4: "q"}[case["width"]]
+            field = int(case["encoding"], 16)
+            lane_values = {physical: 0xDEAD0000 + physical for physical in range(128)}
+            for index, physical in enumerate(case["physical"]):
+                lane_values[physical] = verify_vfpu_addr.PAT[index]
+            lanes = ",".join(f"{physical:02x}:{value:08x}" for physical, value in lane_values.items())
+            lines.append(
+                "NAKAGAWA_PSP_TEST schema=1 test_id=PSP-VFPU-ADDR-001 "
+                f"case_id={width}:0x{field:02x} status=PASS result=0x0 lanes={lanes}\n"
+            )
+        return "".join(lines)
+
+    def _run_payloads(self, payloads: tuple[str, str]) -> tuple[int, str]:
+        with tempfile.TemporaryDirectory(prefix="vfpu-verify-") as scratch:
+            root = Path(scratch)
+            results = root / "oracle" / "hardware-results"
+            results.mkdir(parents=True)
+            fixture_path = root / "tests" / "fixtures" / "vfpu_addressing" / FIXTURE.name
+            fixture_path.parent.mkdir(parents=True)
+            shutil.copyfile(FIXTURE, fixture_path)
+            for index, raw in enumerate(payloads, 1):
+                path = results / f"vfpu-addr-run{index}.json"
+                path.write_text(json.dumps({"runs": [{"raw": raw}]}), encoding="utf-8")
+            script_path = root / "tools" / "psp_oracle" / "verify_vfpu_addr.py"
+            script_path.parent.mkdir(parents=True)
+            output = io.StringIO()
+            with patch.object(verify_vfpu_addr, "__file__", str(script_path)):
+                with contextlib.redirect_stdout(output):
+                    code = verify_vfpu_addr.main()
+        return code, output.getvalue()
+
+    def test_verifier_reuses_production_vreg_indices(self) -> None:
+        self.assertIs(verify_vfpu_addr.vreg_indices, codegen.vreg_indices)
+
+    def test_complete_two_run_measurement_passes(self) -> None:
+        raw = self._payload()
+        code, output = self._run_payloads((raw, raw))
+        self.assertEqual(code, 0, output)
+        self.assertIn("Stage A: 128/128", output)
+        self.assertIn("Stage B: 14/14 wide cases", output)
+
+    def test_verifier_refuses_incomplete_maps_empty_wide_cases_and_run_mismatch(self) -> None:
+        fixture = load_fixture()
+        complete_pairs = [
+            (field, verify_vfpu_addr.scalar_map_field_to_phys(field)) for field in ENCODINGS
+        ]
+        wide = fixture["wide_cases"]
+        mutations = {
+            "missing scalar pair": self._payload(scalar_pairs=complete_pairs[:-1]),
+            "duplicate scalar field": self._payload(scalar_pairs=complete_pairs[:-1] + [complete_pairs[0]]),
+            "empty wide corpus": self._payload(wide_cases=[]),
+            "missing wide case": self._payload(wide_cases=wide[:-1]),
+        }
+        for label, raw in mutations.items():
+            with self.subTest(label=label):
+                code, _output = self._run_payloads((raw, raw))
+                self.assertNotEqual(code, 0)
+
+        other_map = complete_pairs.copy()
+        other_map[-1] = (other_map[-1][0], other_map[-1][1] ^ 1)
+        run1 = self._payload(scalar_pairs=complete_pairs)
+        run2 = self._payload(scalar_pairs=other_map)
+        code, _output = self._run_payloads((run1, run2))
+        self.assertNotEqual(code, 0)
 
 
 def build_and_run_c() -> dict[tuple[int, int], list[int]]:

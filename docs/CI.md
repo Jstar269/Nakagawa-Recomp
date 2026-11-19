@@ -456,7 +456,9 @@ gate runs in exactly one part with the command it had in the serial job:
   the single scheduler and HLE thread runs: it reruns the three `sched_selftest_*` binaries
   and `hle_thread_selftest` they built `SELFTEST_REPEAT` times (default 20), stops at the
   first failure and prints the iteration and binary that failed (#1846). Pull requests, pushes,
-  merge groups and manual runs skip it, so their time is unchanged.
+  merge groups and manual runs skip it, so their time is unchanged. The nightly schedule also
+  runs `gpu-coherence-twin-mutants` on lavapipe: its fourteen mutants each build their own
+  coherence selftest, which is too long for every run.
 - `player`: present pacing, the player UI tests and regressions, the CMake player, the
   showcase and the two player smokes that stage its ISO.
 
@@ -698,6 +700,15 @@ snapshot path as before the shader owned depth, 16 copies the twin's shader dept
 writes depth for a batch whose depth writes are off),
 and `gpu-stencil-once-mutants` breaks the write-once stencil batch three ways (`SR_GPU_STENCIL_ONCE_MUTANT`: no
 reordering, every state called write-once, no depth condition).
+A mutant target that gets exit 77 (no Vulkan device) prints a SKIP line and fails with status 77, so a
+host without a device never counts a mutant killed; only an interlock leg on a device without the
+interlock is a SKIP that passes.
+A further step runs `gpu-ace-selftest` (Ace Mode's texture filtering: through-mode draws keep the PSP's
+sample points, a transformed linear draw gets the anisotropic sampler) and `gpu-mips-selftest` (host-built
+mip chains at render scales 4, 2 and 1, with 16x filtering and with mips off), then the mutants that must
+fail for their own reason: `gpu-mips-mutant`'s four, `tex-scale-gate-mutant` (texture scaling without its
+Ace gate) and `gpu-coherence-selftest-movie-mutant`'s three movie cells. A `SKIP` line in its log fails the
+step.
 `fsr3-pass-selftest` runs FSR 3's eight compute passes on
 lavapipe, headless, under the validation layer with synchronisation validation of shader accesses,
 and an exit 77 skip fails it, including one for synchronisation validation that is not active.
@@ -818,13 +829,19 @@ mingw32-make --no-print-directory check
 ```
 
 `check` covers documentation and policy checks, the provenance record and
-disposition gap check, both publication-audit legs, the native host-core tests,
-and a fast Python subset. Contributors run `mingw32-make contrib-check`
-(AGENTS.md Section 9), which adds the gates the change needs, before opening a
-pull request. `make readiness` is the maintainer's authority-bound aggregate:
-it additionally verifies the exact candidate against the external detailed
-ledger and therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is unavailable,
-which is expected for a fork or an outside contributor. `make provenance-refresh` is the single local command for regenerating the
+disposition gap check, both publication-audit legs, the modified-file notice
+audit, the native host-core tests, and a fast Python subset. A native leg this
+host cannot run (no Vulkan device, no SDL3_ttf) prints `SKIP` and the run goes
+on, so `check`'s last line says every step exited 0, not that every check
+passed: a `SKIP` above it is not a pass. Contributors run
+`mingw32-make contrib-check` (AGENTS.md Section 9), which adds the gates the
+change needs, before opening a pull request. `make readiness` is the
+maintainer's authority-bound aggregate: it runs the same publication checks and
+additionally verifies the exact candidate against the external detailed ledger,
+from the merge base with `origin/main` (resolved through `GIT`; an empty base is
+a named failure), and therefore remains `BLOCKED` when `NK_TRUSTED_LEDGER` is
+unavailable, which is expected for a fork or an outside contributor.
+`make provenance-refresh` is the single local command for regenerating the
 tracked public controls. It calls the same `generate_ephemeral_controls()`
 implementation as the hosted provenance attestation, reads the trusted public
 ledger from the exact base commit, and requires the external detailed ledger
@@ -949,7 +966,8 @@ and run `python tools/hle_manifest.py --write-baseline` yourself.
 Some generators are listed but not run, and `--list` says why:
 
 - embedded shaders (`make shaders GLSLC=...`): regenerating needs `glslc`, whose
-  version the manifest records; `make shader-verify` checks the committed files;
+  version the manifest records; `make shader-verify` checks the committed files
+  of both glslc sets, the GPU backend's (`psp`) and the player UI's (`ui`);
 - profile-zero prebuilt digests: rebuilding needs the pinned PSPDEV toolchain;
   CI checks `SHA256SUMS`;
 - the import-stub census and the benchmark report: both need private inputs
@@ -1198,17 +1216,18 @@ whenever their jobs run; neither can change a gate's result.
   - `gui-present-selftest`, the player UI regressions and the player UI tests (overlays,
     fonts, art).
   - On lavapipe under Xvfb, as in `native_tools`: the GPU snapshot sync, capture, coherence,
-    VRAM view identity and texture scaling self-tests, the FSR 3 pass self-test and the FSR 3
-    frame generation refusal (cell `G-R`). As in `native_tools`, the step fails when the
-  device is not llvmpipe or the texture scaling self-test prints a `SKIP`, so a skip cannot
-  shrink the number unseen.
+    VRAM view identity, texture scaling, Ace and mip chain self-tests, the FSR 3 pass self-test
+    and the FSR 3 frame generation refusal (cell `G-R`). As in `native_tools`, the step fails
+  when the device is not llvmpipe or the texture scaling, Ace or mip chain self-test prints a
+  `SKIP`, so a skip cannot shrink the number unseen.
 
   Not measured, each `native_tools` step named in `tools/test_public_ci_wiring.py`
   (`CoverageWiringTests.C_NOT_MEASURED`), so a gate added later fails that test until it is
   measured or named:
 
-  - Mutants: the separate mutant steps (`gpu-texscale-mutant`, the cosimulation mutation
-    corpus) are left out, and the objects the mutants inside measured targets compile for
+  - Mutants: the separate mutant steps (`gpu-texscale-mutant`, the mip chain, texture scaling
+    gate and movie mutants, the nightly host twin mutants, the cosimulation mutation corpus)
+    are left out, and the objects the mutants inside measured targets compile for
     themselves are skipped at collection. They run deliberately broken code. Their runs still
     count in the unmutated objects they link.
   - Not C self-tests: the import and fake-success audit, the provenance gap check, the 32-bit

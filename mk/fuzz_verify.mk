@@ -118,28 +118,36 @@ run_elf:
 	$(CXX) -std=c++17 -O1 -Isrc/ref -Isrc/rt -o $(RUN_ELF_EXE) \
 		src/ref/run_elf.cpp src/ref/interp.cpp -fno-exceptions
 
+# run starts the executable the compile goal linked (TITLE_OUTPUT, which has no .exe on
+# POSIX). A relative path gets ./ so the shell runs it from the checkout; an absolute or
+# drive-letter BUILD_DIR is run as given, the BUILD_ROOT_RUN rule. An Android title is a
+# shared library TitleActivity loads, which no host shell can start, so it is refused here.
+TITLE_RUN = $(if $(filter /%,$(TITLE_OUTPUT))$(findstring :,$(TITLE_OUTPUT)),$(TITLE_OUTPUT),./$(TITLE_OUTPUT))
+ifeq ($(NK_TARGET_OS),android)
+ifneq ($(filter run,$(MAKECMDGOALS)),)
+$(error run starts a host executable, and NK_TARGET=android links $(TITLE_OUTPUT), a shared library only TitleActivity loads; install the APK and start the title on the device)
+endif
+endif
 run: all
-	./$(BUILD_DIR)/$(GAME_NAME).exe --image $(BUILD_DIR)/$(GAME_NAME)_image.bin $(GAME_BASE) $(GAME_ENTRY) none none --gui
+	$(TITLE_RUN) --image $(BUILD_DIR)/$(GAME_NAME)_image.bin $(GAME_BASE) $(GAME_ENTRY) none none --gui
 
 # shaders — deterministic SPIR-V regeneration for the SDL3/Vulkan GPU backend.
 # Normal builds verify source/embedding/manifest hashes without requiring glslc. The
 # stricter shader-repro-verify target recompiles with glslc and compares byte-for-byte.
-SHADER_DIR     := src/rt/gpu_sdl3vk
-VERT_SHADER    := $(SHADER_DIR)/shaders/psp.vert
-FRAG_SHADER    := $(SHADER_DIR)/shaders/psp.frag
-VERT_SPV       := $(SHADER_DIR)/psp_vert.spv
-FRAG_SPV       := $(SHADER_DIR)/psp_frag.spv
-VERT_INC       := $(SHADER_DIR)/psp_vert.inc
-FRAG_INC       := $(SHADER_DIR)/psp_frag.inc
-
+# Each covers both glslc sets: psp (the GPU backend) and ui (src/ui/shaders, which
+# nk_ui_vk.c includes). tools/shader_embed.py owns every shader path; the fsr3 and fsr3fg
+# sets need the pinned DXC and have their own targets.
 shaders:
 	"$(PYTHON)" tools/shader_embed.py regenerate --glslc "$(GLSLC)"
+	"$(PYTHON)" tools/shader_embed.py regenerate --shader-set ui --glslc "$(GLSLC)"
 
 shader-verify:
 	"$(PYTHON)" tools/shader_embed.py verify
+	"$(PYTHON)" tools/shader_embed.py verify --shader-set ui
 
 shader-repro-verify:
 	"$(PYTHON)" tools/shader_embed.py verify --recompile --glslc "$(GLSLC)"
+	"$(PYTHON)" tools/shader_embed.py verify --shader-set ui --recompile --glslc "$(GLSLC)"
 
 # -----------------------------------------------------------------------------
 # Native Product Core Tests

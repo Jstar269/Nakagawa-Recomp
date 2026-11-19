@@ -119,8 +119,10 @@ bool nk_update_is_release_page(const char *url);
 bool nk_update_parse_releases(const char *json, size_t length, NkUpdateRelease *newest,
                               NkUpdateError *error);
 
-/* Release notes (Markdown) to a few plain sentences: quotes, headings and
-   formatting are dropped, links keep their text. */
+/* Release notes (Markdown) to a few plain sentences: quotes, headings, HTML
+   comments, fenced code blocks and formatting are dropped, links keep their text.
+   Cut at a word with an ellipsis; an out_size below 4 has no room for the
+   ellipsis and gets whole characters only. */
 void nk_update_short_notes(const char *markdown, char *out, size_t out_size);
 
 /* Reads a "<sha256>  <file name>" checksum file for file_name: UPDATE_CHECKSUM_INVALID

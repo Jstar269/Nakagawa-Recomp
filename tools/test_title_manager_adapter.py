@@ -456,6 +456,22 @@ class ManagerHoldsNoRunEntryCopy(unittest.TestCase):
             self.assertIn("(Get-NkRunEntry)", line)
             self.assertNotIn("0x0029a060", line)
 
+    def test_the_run_and_difffunc_call_sites_take_the_base_from_the_plan(self) -> None:
+        # The image is written at the plan's game_base (prxload --env-elf $(GAME_BASE)),
+        # so byte 0 of it is that guest address. A launch at base 0 loads every
+        # non-zero-base title (the synthetic manifest's 0x08800000 among them) at the
+        # wrong address; only a base-0 title such as HST happened to work.
+        sites = [line for line in self.manager.splitlines() if '"--image", $imagePath' in line]
+        self.assertGreaterEqual(len(sites), 2, "the driver invocation sites moved")
+        for line in sites:
+            self.assertIn('"--image", $imagePath, (Get-NkRunBase), (Get-NkRunEntry)', line)
+        body = self.manager.split("function Get-NkRunBase", 1)[1].split("\n    function ", 1)[0]
+        self.assertIn("$script:TitleManagerRunBase", body)
+        self.assertIn("throw", body)
+        self.assertEqual(
+            self.manager.count("$script:TitleManagerRunBase = $script:TitleManagerPlan.make.game_base"), 2,
+            "both the HST and the generic binding must take the run base from the plan")
+
     def test_canonical_manager_holds_zero_guest_literals(self) -> None:
         """Phase 2 milestone: tools/nk_manager.ps1 has zero hardcoded guest entry literals."""
         self.assertEqual(self.manager.count("0x0029a060"), 0)

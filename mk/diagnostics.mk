@@ -57,8 +57,14 @@ compiler-info:
 # repository. It is deliberately required rather than defaulted: skipping the
 # attestation step when the path is absent is exactly the silent pass this
 # target exists to prevent, so an unset value is BLOCKED, not "not applicable".
-READINESS_BASE ?= $(shell git merge-base origin/main HEAD)
-READINESS_WORKDIR ?= $(CURDIR)/../.nk-readiness-verify
+# The base resolves through $(GIT) and the interpreter, never a bare `$(shell git ...)` (the
+# Makefile's BUILD IDENTITY note says why), and once: the first expansion stores the value. An
+# empty base (no git, or no fetched origin/main) is refused by name below.
+READINESS_BASE ?= $(eval READINESS_BASE := $(strip $(shell "$(PYTHON)" -c "import shutil, subprocess, sys; exe = shutil.which(sys.argv[1]); print(subprocess.run([exe, 'merge-base', 'origin/main', 'HEAD'], capture_output=True, text=True).stdout.strip() if exe else '')" "$(GIT)")))$(READINESS_BASE)
+# The attestation writes and reads back its inputs and outputs in READINESS_WORKDIR, which it
+# requires outside the checkout. The default is keyed by the checkout's folder name, so sibling
+# checkouts (worktrees under one parent) running readiness at once never share one.
+READINESS_WORKDIR ?= $(CURDIR)/../.nk-readiness-verify-$(notdir $(CURDIR))
 
 readiness:
 	$(NK_REQUIRE_POSIX_SHELL)
@@ -72,16 +78,18 @@ ifndef NK_TRUSTED_LEDGER
 endif
 	@echo "== readiness: base $(READINESS_BASE)"
 	@test -n "$(NK_GIT_REV_HEAD)" || { echo "readiness: FAIL -- no source revision: $(GIT) is unavailable or this is not a git checkout, and the provenance attestation compares a candidate revision. Readiness needs a git checkout; set GIT to a git executable if it is not on PATH."; exit 1; }
+	@test -n "$(READINESS_BASE)" || { echo "readiness: FAIL -- no merge base with origin/main: $(GIT) is unavailable or origin/main was never fetched, and the attestation and the whitespace check compare against that base. Run git fetch origin, or set READINESS_BASE to the base commit."; exit 1; }
 	"$(PYTHON)" tools/policy_sync.py
 	"$(PYTHON)" tools/lint_docs.py
 	"$(PYTHON)" tools/provenance_record_gap.py --check
 	"$(PYTHON)" tools/publish_audit.py --tracked-only --public-scope --provenance-self-consistency
 	"$(PYTHON)" tools/publish_audit.py --tracked-only --worktree --public-scope --provenance-self-consistency
-	"$(PYTHON)" tools/provenance_attest_verify.py --repo . --candidate "$(NK_GIT_REV_HEAD)" --base $(READINESS_BASE) --require-immutable-revisions --trusted-ledger "$(NK_TRUSTED_LEDGER)" --workdir "$(READINESS_WORKDIR)"
-	git diff --check $(READINESS_BASE)..HEAD
+	"$(PYTHON)" tools/modified_file_notice_audit.py --tracked-only
+	"$(PYTHON)" tools/provenance_attest_verify.py --repo . --candidate "$(NK_GIT_REV_HEAD)" --base "$(READINESS_BASE)" --require-immutable-revisions --trusted-ledger "$(NK_TRUSTED_LEDGER)" --workdir "$(READINESS_WORKDIR)"
+	"$(GIT)" diff --check $(READINESS_BASE)..HEAD
 	@echo "== readiness: control-file completeness"
 	"$(PYTHON)" tools/policy_sync.py --regen-export
-	git diff --quiet -- PUBLIC_EXPORT.json assets/public_provenance_ledger.json assets/public_source_profile.json || { echo "readiness: FAIL -- regenerating the control files changed them, so the commit does not carry the evidence for its own contents. Stage and commit assets/public_provenance_ledger.json, assets/public_source_profile.json and PUBLIC_EXPORT.json."; exit 1; }
+	"$(GIT)" diff --quiet HEAD -- PUBLIC_EXPORT.json assets/public_provenance_ledger.json assets/public_source_profile.json || { echo "readiness: FAIL -- the regenerated control files differ from HEAD (staged or not), so the commit does not carry the evidence for its own contents. Stage and commit assets/public_provenance_ledger.json, assets/public_source_profile.json and PUBLIC_EXPORT.json."; exit 1; }
 	@echo "== readiness: OK (the suite is separate and still yours to run)"
 
 # One-command local refresh using the hosted attestation's control generator.
@@ -201,9 +209,10 @@ check:
 	"$(PYTHON)" -m unittest tools/test_publication_policy_gate.py
 	@echo "== [3/7] Provenance record and disposition gap check =="
 	"$(PYTHON)" tools/provenance_record_gap.py --check
-	@echo "== [4/7] Publication safety audits (index & worktree) =="
+	@echo "== [4/7] Publication safety audits (index & worktree) and modified-file notices =="
 	"$(PYTHON)" tools/publish_audit.py --tracked-only --public-scope --provenance-self-consistency
 	"$(PYTHON)" tools/publish_audit.py --tracked-only --worktree --public-scope --provenance-self-consistency
+	"$(PYTHON)" tools/modified_file_notice_audit.py --tracked-only
 	@echo "== [5/7] Native host core tests =="
 	$(MAKE) native-core-tests
 	@echo "== [6/7] Format portability check (32-bit newlib simulation) =="
@@ -217,4 +226,4 @@ check:
 		tools/test_ci_paths.py \
 		tools/test_ci_required.py \
 		tools/test_provenance_record_gap.py
-	@echo "== All public verification checks PASSED =="
+	@echo "== check: every step exited 0. A SKIP line above (a native leg whose GPU, Vulkan or SDL3_ttf this host lacks) did not run and is not a pass =="

@@ -3,6 +3,7 @@
 
 package io.github.jstar269.nakagawa;
 
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -61,10 +62,27 @@ public class LauncherActivity extends SDLActivity {
         }
         NakagawaHost.prepare(this);
         super.onCreate(savedInstanceState);
+        String unpackFailure = NakagawaHost.bundledFilesError();
+        if (unpackFailure != null && !mBrokenLibraries) showBundledFilesFailure(unpackFailure);
         // Before onResume, where SDL starts its thread and so main().
         ToolchainArchive.Install install = NakagawaHost.startToolchain(this);
         sToolchain = install;
         if (install != null && mLayout != null) mUnpackPanel = new UnpackPanel(this, install);
+    }
+
+    /**
+     * The bundled files (UI fonts, bundled titles) could not be unpacked: says so, with the
+     * reason, and that some may be missing until the next start unpacks them again. Close ends
+     * the launcher; Continue goes on with the player as it is.
+     */
+    private void showBundledFilesFailure(String reason) {
+        new AlertDialog.Builder(this)
+            .setTitle(R.string.bundled_files_failed_title)
+            .setMessage(getString(R.string.bundled_files_failed, reason))
+            .setPositiveButton(R.string.bundled_files_continue, null)
+            .setNegativeButton(R.string.bundled_files_close, (dialog, which) -> finish())
+            .setCancelable(false)
+            .show();
     }
 
     @Override

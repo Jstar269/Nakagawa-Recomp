@@ -671,9 +671,9 @@ static bool frame(Target *t, NkUiVk *vk, const NkUiDrawList *drawn, const NkUiDr
     pass.clearValueCount = 1;
     pass.pClearValues = &clear;
     g_gpu.CmdBeginRenderPass(cb, &pass, VK_SUBPASS_CONTENTS_INLINE);
-    if (*prepare_ok) {
-        *render_ok = nk_ui_vk_render(vk, rendered, cb, (uint32_t)t->w, (uint32_t)t->h);
-    }
+    /* Render runs after a refused prepare too, so a check that the target holds
+       only the clear colour tests that render itself drew nothing. */
+    *render_ok = nk_ui_vk_render(vk, rendered, cb, (uint32_t)t->w, (uint32_t)t->h);
     g_gpu.CmdEndRenderPass(cb);
     memset(&copy, 0, sizeof(copy));
     copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -774,6 +774,7 @@ static int text_shape(void *user, int font, int px, const char *s, size_t n, NkU
         memset(&out[i], 0, sizeof(out[i]));
         out[i].glyph = (uint8_t)s[i];
         out[i].codepoint = (uint8_t)s[i];
+        out[i].text_index = (uint32_t)i;
         out[i].x = font == 1 ? 0.0f : (float)(i * TEXT_ADVANCE);
         out[i].advance_x = font == 1 ? 0.0f : (float)TEXT_ADVANCE;
     }
@@ -1444,6 +1445,71 @@ static int test_waves(void) {
     return 1;
 }
 
+/* An image drawn narrower than itself but far taller is shrunk across only: the
+   texture is never taller than the image, so a box taller than the backend's
+   texture limit still draws. Box sides past INT_MAX / 5 compare without
+   overflowing and are drawn at the image's own size. */
+static int test_image_shrinks_per_axis(void) {
+    static uint8_t big[64u * 64u * 4u];
+    const uint32_t black = 0x000000FFu;
+    NkUiImage image = {64u, 64u, big, 0x5EED0101ull};
+    Target target;
+    NkUiDrawBuffer buffer;
+    NkUiVkStats stats;
+    NkUiVk *vk;
+    memset(&buffer, 0, sizeof(buffer));
+    memset(big, 0xFF, sizeof(big));
+    CHECK(target_open(&target, 64, 64), "open a 64 x 64 target");
+    vk = backend_create(NULL);
+    CHECK(vk != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_image(&buffer, &image, (NkUiPixelRect){0, 0, 30, 40000}, 0xFFFFFFFFu, 1u),
+          "a narrow image box taller than any texture");
+    CHECK(draw(&target, vk, &buffer.list, black), "render the tall image");
+    nk_ui_vk_get_stats(vk, &stats);
+    CHECK(stats.images_failed == 0u && stats.images_drawn == 1u, "the tall image is drawn");
+    CHECK(target_pixel(&target, 10, 32) == 0xFFFFFFFFu && target_pixel(&target, 40, 32) == black,
+          "it fills its box and nothing beside it");
+    nk_ui_draw_buffer_reset(&buffer);
+    CHECK(nk_ui_draw_add_image(&buffer, &image, (NkUiPixelRect){0, 0, 500000000, 64}, 0xFFFFFFFFu,
+                               2u), "an image box wider than INT_MAX / 5");
+    CHECK(draw(&target, vk, &buffer.list, black), "render the wide image");
+    nk_ui_vk_get_stats(vk, &stats);
+    CHECK(stats.images_failed == 0u && stats.images_drawn == 2u, "the wide image is drawn");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_vk_destroy(vk);
+    target_close(&target);
+    return 1;
+}
+
+/* Waves in a box far taller than wide get a texture of bounded height, within
+   the backend's texture limit; the linear scale-up covers the rest. */
+static int test_tall_waves_fit_the_texture_limit(void) {
+    NkUiWavesCommand waves;
+    NkUiWavePalette palette;
+    Target target;
+    NkUiDrawBuffer buffer;
+    NkUiVkStats stats;
+    NkUiVk *vk;
+    memset(&buffer, 0, sizeof(buffer));
+    CHECK(nk_ui_waves_palette(0u, &palette), "base wave palette");
+    nk_ui_waves_command(37.0, 3.0f, 1000000.0f, &palette, &waves);
+    CHECK(target_open(&target, 16, 16), "open a 16 x 16 target");
+    vk = backend_create(NULL);
+    CHECK(vk != NULL, "create the backend");
+    CHECK(nk_ui_draw_add_custom(&buffer, NK_UI_CUSTOM_WAVES, &waves,
+                                (NkUiPixelRect){0, 0, 3, 1000000}, 1u), "a 3 px wide waves box");
+    CHECK(nk_ui_draw_add_rect(&buffer, (NkUiRect){8.0f, 8.0f, 4.0f, 4.0f}, 1.0f, 0.0f,
+                              0xFF0000FFu, 2u), "a rectangle after the waves");
+    CHECK(draw(&target, vk, &buffer.list, 0x000000FFu), "render the tall waves");
+    nk_ui_vk_get_stats(vk, &stats);
+    CHECK(stats.waves_drawn == 1u, "the tall waves are drawn");
+    CHECK(target_pixel(&target, 9, 9) == 0xFF0000FFu, "and so is what follows them");
+    nk_ui_draw_buffer_destroy(&buffer);
+    nk_ui_vk_destroy(vk);
+    target_close(&target);
+    return 1;
+}
+
 /* Fail closed: NULL arguments, a slot out of range, a malformed list or one
    nested too deep are refused and draw nothing; render draws only the list
    prepare took; the backend recovers on the next good frame. */
@@ -1488,11 +1554,12 @@ static int test_fail_closed(void) {
 
     list.idx = bad_indices;
     CHECK(frame(&target, vk, &list, &list, 0x000000FFu, &prepared, &rendered), "submit a bad-index frame");
-    CHECK(!prepared && target_pixel(&target, 4, 4) == 0x000000FFu, "an index past the vertices is refused");
+    CHECK(!prepared && !rendered && target_pixel(&target, 4, 4) == 0x000000FFu,
+          "an index past the vertices is refused and render draws nothing");
     list.idx = good_indices;
     commands[0].first = 1;
     CHECK(frame(&target, vk, &list, &list, 0x000000FFu, &prepared, &rendered), "submit a bad-range frame");
-    CHECK(!prepared, "a command range past the indices is refused");
+    CHECK(!prepared && !rendered, "a command range past the indices is refused");
     commands[0].first = 0;
 
     /* Scissor nesting: NK_UI_DRAW_CLIP_DEPTH deep is fine, one more is not, and
@@ -1507,11 +1574,12 @@ static int test_fail_closed(void) {
     commands[NK_UI_DRAW_CLIP_DEPTH + 1u] = commands[1];
     list.ncmd = NK_UI_DRAW_CLIP_DEPTH + 2u;
     CHECK(frame(&target, vk, &list, &list, 0x000000FFu, &prepared, &rendered), "submit the deep frame");
-    CHECK(!prepared && target_pixel(&target, 4, 4) == 0x000000FFu, "one level deeper is refused");
+    CHECK(!prepared && !rendered && target_pixel(&target, 4, 4) == 0x000000FFu,
+          "one level deeper is refused and render draws nothing");
     commands[1].kind = NK_UI_DRAW_SCISSOR_END;
     list.ncmd = 2;
     CHECK(frame(&target, vk, &list, &list, 0x000000FFu, &prepared, &rendered), "submit the stray end");
-    CHECK(!prepared, "a scissor end with none open is refused");
+    CHECK(!prepared && !rendered, "a scissor end with none open is refused");
     CHECK(!nk_ui_vk_render(vk, &list, g_gpu.cb, 16, 16), "render refuses after a failed prepare");
 
     list.ncmd = 1;
@@ -1565,6 +1633,8 @@ int main(void) {
     RUN(test_image_commands);
     RUN(test_image_cache_overflow);
     RUN(test_waves);
+    RUN(test_image_shrinks_per_axis);
+    RUN(test_tall_waves_fit_the_texture_limit);
     RUN(test_fail_closed);
 #undef RUN
     gpu_close();

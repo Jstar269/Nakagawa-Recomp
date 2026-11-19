@@ -57,6 +57,10 @@ typedef struct {
 
 static void write_file_bytes(const char *path, const void *data, size_t size);
 
+/* Adversarial cases this host could not run. A run with any of them reports SKIP in its
+ * summary instead of ALL ... PASSED, so a missing case is never counted as a pass. */
+static unsigned g_skipped_cases;
+
 static void capture_environment_value(const char *name, char *value,
                                       size_t value_size, bool *was_set) {
     const char *current = getenv(name);
@@ -507,7 +511,11 @@ static void test_lazy_payload_failure_is_deferred(void) {
     assert(nk_xb_read_entry(&archive, 0u, output, sizeof(output), NULL,
                             error, sizeof(error)) != NK_OK);
     nk_xb_close(&archive);
-    assert(nk_xb_open_file(path, false, NULL, &archive, error, sizeof(error)) != NK_OK);
+    char strict_error[256];
+    assert(nk_xb_open_file(path, false, NULL, &archive, strict_error,
+                           sizeof(strict_error)) != NK_OK);
+    /* The deferred check is the strict reader's check, with its text. */
+    assert(strcmp(error, strict_error) == 0);
     remove(path);
     free(bytes.data);
     printf("[XB_TEST] deferred payload validation fails closed on first read\n");
@@ -516,7 +524,8 @@ static void test_lazy_payload_failure_is_deferred(void) {
 /* A stored entry (compressed size 0) of a compressed kind carries its expanded bytes
  * verbatim, so its payload must hold all of them. A file-backed payload shorter than
  * that is refused on read, for the LZS and Huffman kinds and for the tag-0 nested
- * stream, instead of being copied past the end of the payload. */
+ * stream, instead of being copied past the end of the payload. For LZS and Huffman the
+ * header check refuses it first, with the text the whole-file reader gives at open. */
 static void test_stored_entry_shorter_than_expanded_size(void) {
     static const NkXbCompression kinds[] = {
         NK_XB_COMPRESSION_LZS, NK_XB_COMPRESSION_HUFFMAN, NK_XB_COMPRESSION_DEFLATE
@@ -541,8 +550,16 @@ static void test_stored_entry_shorter_than_expanded_size(void) {
         error[0] = '\0';
         assert(nk_xb_read_entry(&archive, 0u, output, sizeof(output), NULL,
                                 error, sizeof(error)) != NK_OK);
-        assert(strstr(error, "shorter than its expanded size") != NULL);
         nk_xb_close(&archive);
+        if (kinds[k] == NK_XB_COMPRESSION_DEFLATE) {
+            assert(strstr(error, "shorter than its expanded size") != NULL);
+        } else {
+            char strict_error[256];
+            assert(strstr(error, "exceeds its FST span") != NULL);
+            assert(nk_xb_open_file(path, false, NULL, &archive, strict_error,
+                                   sizeof(strict_error)) != NK_OK);
+            assert(strcmp(error, strict_error) == 0);
+        }
         remove(path);
         free(bytes.data);
     }
@@ -747,6 +764,316 @@ static void test_duplicate_canonical_path(void) {
     printf("[XB_TEST] Duplicate canonical path rejected: %s\n", error);
 }
 
+/* A compressed entry whose header claims more compressed bytes than its FST span holds.
+ * The whole-file reader refuses it at open; a lazy mount, which holds no payload bytes,
+ * refuses it on the member's first read with the same text, instead of decoding the
+ * whole span as if the header had matched. */
+static void test_lazy_read_checks_compressed_header(void) {
+    static const NkXbCompression kinds[] = { NK_XB_COMPRESSION_LZS, NK_XB_COMPRESSION_HUFFMAN };
+    static const uint8_t data[] = "a compressed member whose header lies about its size";
+    for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+        const FixtureEntry entry = { "data/header.bin", data, sizeof(data) - 1u, kinds[k] };
+        ByteBuffer bytes = make_archive(&entry, 1u, false);
+        size_t header_offset = (size_t)(read_le32_test(bytes.data + 12u) & 0x0FFFFFFFu) * 4u;
+        size_t span = bytes.size - header_offset;
+        uint32_t claimed = (uint32_t)(span + 64u);
+        for (unsigned b = 0; b < 4u; b++) {
+            bytes.data[header_offset + 4u + b] = (uint8_t)(claimed >> (8u * b));
+        }
+        const char *path = SR_SELFTEST_BUILD_ROOT "/test_xb_lazy_header.xb";
+        write_file_bytes(path, bytes.data, bytes.size);
+        NkXbArchive archive;
+        char strict_error[256];
+        char error[256];
+        assert(nk_xb_open_file(path, false, NULL, &archive, strict_error,
+                               sizeof(strict_error)) != NK_OK);
+        assert(strstr(strict_error, "exceeds its FST span") != NULL);
+        assert(nk_xb_open_file_lazy(path, false, NULL, &archive, error, sizeof(error)) == NK_OK);
+        uint8_t output[128];
+        error[0] = '\0';
+        assert(nk_xb_read_entry(&archive, 0u, output, sizeof(output), NULL,
+                                error, sizeof(error)) != NK_OK);
+        assert(strcmp(error, strict_error) == 0);
+        error[0] = '\0';
+        assert(nk_xb_read_entry_range(&archive, 0u, 4u, output, 8u, NULL,
+                                      error, sizeof(error)) != NK_OK);
+        assert(strcmp(error, strict_error) == 0);
+        nk_xb_close(&archive);
+        remove(path);
+        free(bytes.data);
+    }
+    printf("[XB_TEST] a lazy read refuses a compressed header the strict reader refuses PASSED\n");
+}
+
+/* A string table in the retail form, whose compressed size counts its own 8-byte
+ * header, directly followed by one 4-byte member: the compressed size runs past the
+ * end of the file although its body does not. The lazy mount reads the same bytes the
+ * whole-file reader parses (the heap block it would otherwise parse is poisoned first)
+ * and builds the same index. */
+static void test_lazy_mount_retail_string_table_at_eof(void) {
+    static const char member_name[] = "data/a.bin";
+    static const uint8_t member[4] = { 'a', 'b', 'c', 'd' };
+    ByteBuffer names = { 0 };
+    uint8_t length = (uint8_t)(sizeof(member_name) - 1u);
+    uint8_t hash = sjis_hash_test((const uint8_t *)member_name, length);
+    uint8_t zero = 0u;
+    buffer_append(&names, &length, 1u);
+    buffer_append(&names, &hash, 1u);
+    buffer_append(&names, member_name, length);
+    buffer_append(&names, &zero, 1u);
+    ByteBuffer lzs = { 0 };
+    append_lzs_body(&lzs, names.data, names.size);
+    size_t string_offset = 8u + 8u + 8u;
+    size_t data_start = (string_offset + lzs.size + 3u) & ~(size_t)3u;
+    ByteBuffer bytes = { 0 };
+    const uint8_t signature[4] = { 0x78, 0x65, 0x00, 0x01 };
+    buffer_append(&bytes, signature, sizeof(signature));
+    buffer_u32(&bytes, 1u, false);
+    buffer_u32(&bytes, (uint32_t)sizeof(member), false);
+    buffer_u32(&bytes, ((uint32_t)NK_XB_COMPRESSION_NONE << 28) | (uint32_t)(data_start / 4u),
+               false);
+    buffer_u32(&bytes, (uint32_t)names.size, false);
+    buffer_u32(&bytes, (uint32_t)(lzs.size + 8u), false);
+    buffer_append(&bytes, lzs.data, lzs.size);
+    pad4(&bytes);
+    assert(bytes.size == data_start);
+    buffer_append(&bytes, member, sizeof(member));
+    /* The compressed size reaches past the end of the file. */
+    assert(string_offset + lzs.size + 8u > bytes.size);
+    const char *path = SR_SELFTEST_BUILD_ROOT "/test_xb_lazy_retail_strings.xb";
+    write_file_bytes(path, bytes.data, bytes.size);
+    char error[256];
+    for (int round = 0; round < 4; round++) {
+        uint8_t *poison = (uint8_t *)malloc(bytes.size);
+        assert(poison != NULL);
+        memset(poison, 0xA5, bytes.size);
+        free(poison);
+        NkXbArchive lazy;
+        NkResult lazy_result = nk_xb_open_file_lazy(path, false, NULL, &lazy, error,
+                                                    sizeof(error));
+        if (lazy_result != NK_OK) fprintf(stderr, "lazy retail strings: %s\n", error);
+        assert(lazy_result == NK_OK);
+        assert(lazy.entry_count == 1u && strcmp(lazy.entries[0].path, member_name) == 0);
+        assert(lazy.data_start == data_start);
+        uint8_t output[8];
+        size_t output_size = 0;
+        assert(nk_xb_read_entry(&lazy, 0u, output, sizeof(output), &output_size,
+                                error, sizeof(error)) == NK_OK);
+        assert(output_size == sizeof(member) && memcmp(output, member, sizeof(member)) == 0);
+        nk_xb_close(&lazy);
+    }
+    NkXbArchive strict;
+    assert(nk_xb_open_file(path, false, NULL, &strict, error, sizeof(error)) == NK_OK);
+    assert(strict.entry_count == 1u && strcmp(strict.entries[0].path, member_name) == 0);
+    assert(strict.data_start == data_start);
+    nk_xb_close(&strict);
+    remove(path);
+    free(bytes.data);
+    free(lzs.data);
+    free(names.data);
+    printf("[XB_TEST] lazy mount reads a retail string table that ends at EOF PASSED\n");
+}
+
+/* Writes a fixture archive and unpacks it into a fresh folder under the build root. */
+static NkResult unpack_fixture(const FixtureEntry *entries, size_t count, char *dest,
+                               size_t dest_size, char *error, size_t error_size) {
+    const char *path = SR_SELFTEST_BUILD_ROOT "/test_xb_unpack.xb";
+    snprintf(dest, dest_size, "%s", SR_SELFTEST_BUILD_ROOT "/test_xb_unpack.d");
+    if (nk_platform_dir_exists(dest)) assert(native_test_remove_tree(dest));
+    ByteBuffer bytes = make_archive(entries, count, false);
+    write_file_bytes(path, bytes.data, bytes.size);
+    free(bytes.data);
+    error[0] = '\0';
+    NkResult result = nk_xb_unpack(path, dest, NULL, NULL, error, error_size);
+    remove(path);
+    return result;
+}
+
+/* A member whose name Windows would map onto a device or onto another name (a
+ * reserved stem, with or without an extension, or a component ending in a dot or a
+ * space) is refused by name before anything is written, on every host, as a ZIP entry
+ * is. Names that only resemble one still unpack. */
+static void test_unpack_refuses_host_aliased_names(void) {
+    static const uint8_t data[] = "member";
+    static const char *const refused[] = {
+        "NUL", "data/con.txt", "data/COM1", "lpt9.bin", "CON .png", "aux.tar.gz",
+        "a.", "dir./x", "foo ", "dir /x"
+    };
+    char dest[512];
+    char error[256];
+    char probe[600];
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        const FixtureEntry entries[] = {
+            { "data/ok.bin", data, sizeof(data) - 1u, NK_XB_COMPRESSION_NONE },
+            { refused[i], data, sizeof(data) - 1u, NK_XB_COMPRESSION_NONE }
+        };
+        NkResult result = unpack_fixture(entries, 2u, dest, sizeof(dest), error, sizeof(error));
+        if (result == NK_OK) fprintf(stderr, "unpacked a host-aliased name: '%s'\n", refused[i]);
+        assert(result != NK_OK);
+        assert(strstr(error, "XB member") != NULL);
+        snprintf(probe, sizeof(probe), "%s/data/ok.bin", dest);
+        assert(!nk_platform_file_exists(probe));
+    }
+    const FixtureEntry allowed[] = {
+        { "data/CONSOLE.bin", data, sizeof(data) - 1u, NK_XB_COMPRESSION_NONE },
+        { "data/NULL.txt", data, sizeof(data) - 1u, NK_XB_COMPRESSION_NONE },
+        { "data/a.b", data, sizeof(data) - 1u, NK_XB_COMPRESSION_NONE },
+        { "data/.hidden", data, sizeof(data) - 1u, NK_XB_COMPRESSION_NONE },
+        { "data/COM10", data, sizeof(data) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    assert(unpack_fixture(allowed, sizeof(allowed) / sizeof(allowed[0]), dest, sizeof(dest),
+                          error, sizeof(error)) == NK_OK);
+    snprintf(probe, sizeof(probe), "%s/data/CONSOLE.bin", dest);
+    assert(nk_platform_file_exists(probe));
+    assert(native_test_remove_tree(dest));
+    printf("[XB_TEST] unpack refuses device names and trailing dots or spaces PASSED\n");
+}
+
+/* Two members whose names differ only in letter case land on one file on Windows, so
+ * the second would silently replace the first: unpack refuses them on every host. The
+ * case of an ASCII letter and of a two-byte Shift-JIS full-width Latin, Greek or
+ * Cyrillic letter counts (Windows converts CP932 to UTF-16 and NTFS folds those). A
+ * katakana trail byte in the ASCII letter range is not a letter, two different
+ * full-width letters stay distinct, and an exact duplicate with the same bytes (which
+ * the parser accepts) still unpacks. */
+static void test_unpack_refuses_case_collisions(void) {
+    static const uint8_t first[] = "first";
+    static const uint8_t second[] = "second";
+    char dest[512];
+    char error[256];
+    char probe[600];
+    const FixtureEntry folded[] = {
+        { "DATA/A.BIN", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "data/a.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    assert(unpack_fixture(folded, 2u, dest, sizeof(dest), error, sizeof(error)) != NK_OK);
+    assert(strstr(error, "letter case") != NULL);
+    snprintf(probe, sizeof(probe), "%s/DATA/A.BIN", dest);
+    assert(!nk_platform_file_exists(probe));
+    const FixtureEntry folder_case[] = {
+        { "Data/one.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "dATA/ONE.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    assert(unpack_fixture(folder_case, 2u, dest, sizeof(dest), error, sizeof(error)) != NK_OK);
+    assert(strstr(error, "letter case") != NULL);
+
+    /* Full-width Latin A (0x82 0x60, U+FF21) and a (0x82 0x81, U+FF41), Greek Alpha
+     * (0x83 0x9F) and alpha (0x83 0xBF), Cyrillic Io (0x84 0x46) and io (0x84 0x76),
+     * and Cyrillic Ya (0x84 0x60) and ya (0x84 0x91), in a file or a folder name. */
+    static const char *const wide_pairs[][2] = {
+        { "\x82\x60.BIN", "\x82\x81.BIN" },
+        { "\x83\x9F/x.bin", "\x83\xBF/x.bin" },
+        { "k\x84\x46.bin", "k\x84\x76.bin" },
+        { "\x84\x60" "z.bin", "\x84\x91" "z.bin" }
+    };
+    for (size_t p = 0; p < sizeof(wide_pairs) / sizeof(wide_pairs[0]); p++) {
+        const FixtureEntry wide[] = {
+            { wide_pairs[p][0], first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+            { wide_pairs[p][1], second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+        };
+        assert(unpack_fixture(wide, 2u, dest, sizeof(dest), error, sizeof(error)) != NK_OK);
+        assert(strstr(error, "letter case") != NULL);
+    }
+    /* Full-width A (0x82 0x60) and b (0x82 0x82), Cyrillic Ya (0x84 0x60) and yu
+     * (0x84 0x90): different letters, not two cases of one. */
+    const FixtureEntry wide_distinct[] = {
+        { "\x82\x60.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "\x82\x82.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE },
+        { "\x84\x60.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "\x84\x90.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    assert(unpack_fixture(wide_distinct, 4u, dest, sizeof(dest), error, sizeof(error)) == NK_OK);
+
+    /* 0x83 0x41 and 0x83 0x61 are two different katakana. */
+    const FixtureEntry sjis[] = {
+        { "\x83\x41.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "\x83\x61.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    assert(unpack_fixture(sjis, 2u, dest, sizeof(dest), error, sizeof(error)) == NK_OK);
+    const FixtureEntry same[] = {
+        { "data/same.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "data/same.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    assert(unpack_fixture(same, 2u, dest, sizeof(dest), error, sizeof(error)) == NK_OK);
+    snprintf(probe, sizeof(probe), "%s/data/same.bin", dest);
+    assert(nk_platform_get_file_size(probe) == (int64_t)(sizeof(first) - 1u));
+    assert(native_test_remove_tree(dest));
+    printf("[XB_TEST] unpack refuses names that differ only in letter case PASSED\n");
+}
+
+/* Windows writes a member as its CP932 name converted to UTF-16, and some different
+ * Shift-JIS bytes land on one file there: 0xED 0x40 (NEC-selected IBM extension) and
+ * 0xFA 0x5C (IBM extension) both decode to U+7E8A, and 0xFA 0x40 (small Roman numeral
+ * one, U+2170) folds onto 0x87 0x54 (capital Roman numeral one, U+2160). On a host
+ * whose file names fold case, unpack refuses each pair by name before writing either;
+ * on a POSIX host the names stay distinct Shift-JIS bytes and both members unpack. */
+static void test_unpack_refuses_windows_name_aliases(void) {
+    static const uint8_t first[] = "first";
+    static const uint8_t second[] = "second";
+    static const char *const pairs[][2] = {
+        { "\xED\x40.bin", "\xFA\x5C.bin" },
+        { "\xFA\x40.bin", "\x87\x54.bin" },
+        { "dir/\x87\x90.bin", "dir/\x81\xE0.bin" }
+    };
+    char dest[512];
+    char error[256];
+    char probe[600];
+    bool folds = nk_platform_paths_fold_case();
+    for (size_t p = 0; p < sizeof(pairs) / sizeof(pairs[0]); p++) {
+        const FixtureEntry entries[] = {
+            { pairs[p][0], first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+            { pairs[p][1], second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+        };
+        NkResult result = unpack_fixture(entries, 2u, dest, sizeof(dest), error, sizeof(error));
+        snprintf(probe, sizeof(probe), "%s/%s", dest, pairs[p][1]);
+        if (folds) {
+            if (result == NK_OK) fprintf(stderr, "unpacked a Windows name alias, pair %zu\n", p);
+            assert(result != NK_OK);
+            assert(strstr(error, "one file on this host") != NULL);
+        } else {
+            assert(result == NK_OK);
+            assert(nk_platform_get_file_size(probe) == (int64_t)(sizeof(second) - 1u));
+        }
+    }
+    /* Two distinct kanji still unpack side by side on every host. */
+    const FixtureEntry distinct[] = {
+        { "\x88\x9F.bin", first, sizeof(first) - 1u, NK_XB_COMPRESSION_NONE },
+        { "\x88\xA0.bin", second, sizeof(second) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    assert(unpack_fixture(distinct, 2u, dest, sizeof(dest), error, sizeof(error)) == NK_OK);
+    assert(native_test_remove_tree(dest));
+    printf("[XB_TEST] unpack refuses Shift-JIS names Windows writes as one file PASSED\n");
+}
+
+/* The Shift-JIS character 0x83 0x5C carries a 0x5C trail byte, a backslash in ASCII.
+ * Unpack writes the member into the destination itself: on POSIX, where the name stays
+ * Shift-JIS bytes, no folder named after its lead byte appears beside it. */
+static void test_unpack_sjis_trail_backslash_is_not_a_separator(void) {
+    static const uint8_t data[] = "katakana";
+    char dest[512];
+    char error[256];
+    const FixtureEntry entries[] = {
+        { "\x83\x5c.bin", data, sizeof(data) - 1u, NK_XB_COMPRESSION_NONE },
+        { "dir/\x95\x5c.dat", data, sizeof(data) - 1u, NK_XB_COMPRESSION_NONE }
+    };
+    NkResult result = unpack_fixture(entries, 2u, dest, sizeof(dest), error, sizeof(error));
+    if (result != NK_OK) fprintf(stderr, "unpack SJIS 0x5C trail: %s\n", error);
+    assert(result == NK_OK);
+#if !defined(_WIN32) && !defined(_WIN64)
+    char probe[600];
+    snprintf(probe, sizeof(probe), "%s/\x83", dest);
+    assert(!nk_platform_dir_exists(probe));
+    snprintf(probe, sizeof(probe), "%s/dir/\x95", dest);
+    assert(!nk_platform_dir_exists(probe));
+    snprintf(probe, sizeof(probe), "%s/\x83\x5c.bin", dest);
+    assert(nk_platform_get_file_size(probe) == (int64_t)(sizeof(data) - 1u));
+    snprintf(probe, sizeof(probe), "%s/dir/\x95\x5c.dat", dest);
+    assert(nk_platform_get_file_size(probe) == (int64_t)(sizeof(data) - 1u));
+#endif
+    assert(native_test_remove_tree(dest));
+    printf("[XB_TEST] a Shift-JIS 0x5C trail byte is not a path separator PASSED\n");
+}
+
 static uint32_t fuzz_next(uint32_t *state) {
     uint32_t value = *state;
     value ^= value << 13;
@@ -776,10 +1103,25 @@ static void test_deterministic_mutation_fuzz(void) {
         if (nk_xb_open_memory(mutated, seed.size, "mutated.xb", false, NULL,
                               &archive, error, sizeof(error)) == NK_OK) {
             for (size_t i = 0; i < archive.entry_count; i++) {
-                uint8_t output[128];
+                /* The decoder gets the first 128 bytes; the guard bytes after them must
+                 * stay untouched, so an overrun that does not crash still fails here. */
+                enum { OUTPUT_CAPACITY = 128, GUARD_BYTES = 64 };
+                uint8_t output[OUTPUT_CAPACITY + GUARD_BYTES];
+                memset(output, 0xA5, sizeof(output));
                 size_t output_size = 0;
-                (void)nk_xb_read_entry(&archive, i, output, sizeof(output),
-                                       &output_size, error, sizeof(error));
+                error[0] = '\0';
+                NkResult read = nk_xb_read_entry(&archive, i, output, OUTPUT_CAPACITY,
+                                                 &output_size, error, sizeof(error));
+                for (size_t g = OUTPUT_CAPACITY; g < sizeof(output); g++) {
+                    assert(output[g] == 0xA5);
+                }
+                if (read == NK_OK) {
+                    assert(output_size <= OUTPUT_CAPACITY);
+                    assert((uint64_t)output_size == archive.entries[i].expanded_size);
+                } else {
+                    /* A refused member is named, never a silent failure. */
+                    assert(error[0] != '\0');
+                }
             }
             nk_xb_close(&archive);
         }
@@ -841,7 +1183,18 @@ static void test_staging_cleanup_boundary(void) {
     const char *root = SR_SELFTEST_BUILD_ROOT "/.staging_xb_cleanup";
     const char *nested = SR_SELFTEST_BUILD_ROOT "/.staging_xb_cleanup/nested";
     const char *file_path = SR_SELFTEST_BUILD_ROOT "/.staging_xb_cleanup/nested/member.bin";
-    assert(!player_stage_discard(SR_SELFTEST_BUILD_ROOT));
+    /* The refusal of a name without the ".staging_" prefix is probed on a disposable
+     * folder, never on the build root itself: if the guard regressed, the recursive
+     * discard would delete only this probe, and the kept sentinel shows the refusal. */
+    const char *probe = SR_SELFTEST_BUILD_ROOT "/xb_discard_probe";
+    const char *probe_file = SR_SELFTEST_BUILD_ROOT "/xb_discard_probe/sentinel.bin";
+    static const uint8_t sentinel[] = "keep";
+    assert(nk_platform_mkdir_p(probe));
+    write_file_bytes(probe_file, sentinel, sizeof(sentinel) - 1);
+    assert(!player_stage_discard(probe));
+    assert(nk_platform_file_exists(probe_file));
+    assert(remove(probe_file) == 0);
+    test_rmdir(probe);
     (void)player_stage_discard(root);
     assert(nk_platform_mkdir_p(nested));
     static const uint8_t data[] = "cleanup";
@@ -950,6 +1303,7 @@ static void test_staging_discard_reparse_boundary(void) {
         (void)player_stage_discard(root);
         if (error == ERROR_ACCESS_DENIED || error == ERROR_PRIVILEGE_NOT_HELD) {
             printf("[XB_TEST] Windows reparse-point discard regression SKIP (symlink creation unavailable)\n");
+            g_skipped_cases++;
             return;
         }
         assert(!"CreateSymbolicLinkW failed unexpectedly");
@@ -983,6 +1337,7 @@ static void test_staging_discard_reparse_boundary(void) {
         test_rmdir(outside);
         if (error == EACCES || error == EPERM || error == ENOSYS) {
             printf("[XB_TEST] POSIX symlink discard regression SKIP (symlink creation unavailable)\n");
+            g_skipped_cases++;
             return;
         }
         assert(!"symlink failed unexpectedly");
@@ -1104,6 +1459,24 @@ static void test_iso_to_native_staging_pipeline(void) {
     capture_environment_value("USERPROFILE", old_userprofile, sizeof(old_userprofile), &had_userprofile);
     set_environment_value("APPDATA", appdata_root);
     set_environment_value("USERPROFILE", userprofile_root);
+#if !defined(_WIN32) && !defined(_WIN64)
+    /* POSIX PRX discovery checks the XDG folders and HOME layouts before APPDATA and
+     * USERPROFILE. Point them at an empty folder so only the synthetic trees above can
+     * supply the modules, never a PPSSPP profile on the developer's machine. */
+    const char *empty_home = SR_SELFTEST_BUILD_ROOT "/test_ppsspp_empty_home";
+    assert(nk_platform_mkdir_p(empty_home));
+    static const char *const posix_profile_variables[] = {
+        "HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"
+    };
+    enum { POSIX_PROFILE_VARIABLES = 3 };
+    char old_profile[POSIX_PROFILE_VARIABLES][4096];
+    bool had_profile[POSIX_PROFILE_VARIABLES];
+    for (size_t i = 0; i < POSIX_PROFILE_VARIABLES; i++) {
+        capture_environment_value(posix_profile_variables[i], old_profile[i],
+                                  sizeof(old_profile[i]), &had_profile[i]);
+        set_environment_value(posix_profile_variables[i], empty_home);
+    }
+#endif
     remove(iso_path);
     char eboot_path[256];
     char archive_path[256];
@@ -1348,6 +1721,12 @@ static void test_iso_to_native_staging_pipeline(void) {
     test_rmdir(userprofile_root);
     restore_environment_value("APPDATA", old_appdata, had_appdata);
     restore_environment_value("USERPROFILE", old_userprofile, had_userprofile);
+#if !defined(_WIN32) && !defined(_WIN64)
+    for (size_t i = 0; i < POSIX_PROFILE_VARIABLES; i++) {
+        restore_environment_value(posix_profile_variables[i], old_profile[i], had_profile[i]);
+    }
+    test_rmdir(empty_home);
+#endif
     printf("[XB_TEST] ISO EBOOT + xbdata native staging pipeline PASSED\n");
 }
 
@@ -2228,7 +2607,13 @@ static void test_title_staging_names_a_long_data_folder(void) {
         assert(!nk_platform_dir_exists(paths.final_root));
         assert(!nk_platform_dir_exists(paths.staging_root));
     } else {
+        /* This host's path limit is not reached, so only the successful stage is checked;
+           the [STAGE_PATH_TOO_LONG] report did not run here. */
         assert(result == NK_OK);
+        printf("[XB_TEST] A too-long data folder path is named, not blamed on the disc SKIP "
+               "(this host's path limit is not reached; the staged copy succeeded)\n");
+        g_skipped_cases++;
+        return;
     }
     printf("[XB_TEST] A too-long data folder path is named, not blamed on the disc PASSED\n");
 }
@@ -2527,6 +2912,12 @@ int main(void) {
     test_expansion_limit();
     test_compressed_header_expansion_limit();
     test_duplicate_canonical_path();
+    test_lazy_read_checks_compressed_header();
+    test_lazy_mount_retail_string_table_at_eof();
+    test_unpack_refuses_host_aliased_names();
+    test_unpack_refuses_case_collisions();
+    test_unpack_refuses_windows_name_aliases();
+    test_unpack_sjis_trail_backslash_is_not_a_separator();
     test_deterministic_mutation_fuzz();
     test_archive_vfs_precedence();
     test_archive_vfs_keyless_member_is_invalid();
@@ -2546,6 +2937,11 @@ int main(void) {
     test_title_staging_reuses_past_a_stuck_leftover();
     test_title_staging_recovers_an_interrupted_promotion();
     test_nk_xb_unpack();
+    if (g_skipped_cases != 0u) {
+        printf("[XB_TEST] NATIVE XB PARSER TESTS PASSED WITH %u SKIP (see the SKIP lines above)\n",
+               g_skipped_cases);
+        return 0;
+    }
     printf("[XB_TEST] ALL NATIVE XB PARSER TESTS PASSED\n");
     return 0;
 }

@@ -491,6 +491,99 @@ class PublicCiWiringTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
                          ["if: matrix.part == 'translation'"])
 
+    def test_gpu_ace_mip_chain_and_their_mutants_run_on_lavapipe_and_a_skip_fails(self) -> None:
+        """gpu-ace-selftest, gpu-mips-selftest and five mutant gates were reachable only by hand."""
+        native_tools = _ci_job_blocks()["native_tools"]
+        step = _ci_step(native_tools, _GPU_ACE_MIPS_STEP)
+        self.assertIsNotNone(step, "native_tools must run the Ace and mip chain selftests")
+        assert step is not None
+        text = "\n".join(step)
+        self.assertIn("set -euo pipefail", text)
+        # The job's "Select the lavapipe Vulkan ICD" step found the ICD and recorded it.
+        self.assertIn('export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"', text)
+        self.assertIn('xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11', text)
+        for target in ("gpu-ace-selftest", "gpu-mips-selftest", "gpu-mips-mutant", "tex-scale-gate-mutant",
+                       "gpu-coherence-selftest-movie-mutant"):
+            with self.subTest(target=target):
+                self.assertRegex(text, rf"(?m)^\s+make CC=gcc [^\n]*\b{re.escape(target)}\b")
+        # Each prints a SKIP line and exits 0 without a device; that must fail here.
+        self.assertIn("""if grep -q '^SKIP ' "$RUNNER_TEMP/gpu-ace-mips.log"; then""", text)
+        self.assertNotIn("continue-on-error", text)
+        self.assertEqual([line.strip() for line in step if line.strip().startswith("if:")],
+                         ["if: matrix.part == 'translation'"])
+        twin = _ci_step(native_tools, _GPU_TWIN_MUTANTS_STEP)
+        self.assertIsNotNone(twin, "native_tools must run gpu-coherence-twin-mutants")
+        assert twin is not None
+        twin_text = "\n".join(twin)
+        self.assertRegex(twin_text, r"(?m)^\s+make CC=gcc gpu-coherence-twin-mutants$")
+        self.assertNotIn("continue-on-error", twin_text)
+        self.assertEqual([line.strip() for line in twin if line.strip().startswith("if:")],
+                         ["if: matrix.part == 'translation'" + _NIGHTLY_ONLY_SUFFIX])
+
+    def test_sdl3_skips_in_native_core_tests_fail_where_sdl3_is_required(self) -> None:
+        """native_tools installs the pinned SDL3; a build discovery that misses it must not pass.
+
+        tex-scale-selftest printed SKIP and exited 0 when discovery found no SDL3, so
+        native-core-tests passed with it never run. NK_REQUIRE_SDL3=1 turns that SKIP into a
+        failure, and the hosted SDL3 leg sets it.
+        """
+        native_tools = _ci_job_blocks()["native_tools"]
+        step = "\n".join(_ci_step(
+            native_tools,
+            "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)") or [])
+        self.assertIn("run: NK_REQUIRE_SDL3=1 make CC=gcc native-core-tests", step)
+        make = shutil.which("mingw32-make") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make is required for the behavioural check")
+        with tempfile.TemporaryDirectory() as tmp:
+            build_root = Path(tmp) / "build"
+            base = [make, "--no-print-directory", "tex-scale-selftest", "SDL3_PROVIDER=none",
+                    f"BUILD_ROOT={build_root.as_posix()}", f"BUILD_DIR={(build_root / 'sdl3').as_posix()}"]
+            optional = subprocess.run(base, cwd=ROOT, capture_output=True, text=True, timeout=300)
+            self.assertEqual(optional.returncode, 0, optional.stdout + optional.stderr)
+            self.assertIn("SKIP tex-scale-selftest (SDL3 not found by build discovery)", optional.stdout)
+            required = subprocess.run(base + ["NK_REQUIRE_SDL3=1"], cwd=ROOT, capture_output=True,
+                                      text=True, timeout=300)
+            self.assertNotEqual(required.returncode, 0, required.stdout + required.stderr)
+            self.assertIn("FAIL tex-scale-selftest (SDL3 not found by build discovery, but NK_REQUIRE_SDL3=1 "
+                          "requires it)", required.stdout)
+        recipe = read_makefile(ROOT)
+        start = recipe.index("\nnk-ui-focus-selftest:")
+        focus = recipe[start:recipe.index("\n\n", start)]
+        self.assertIn('if [ "$$rc" = 77 ] && [ "$(NK_REQUIRE_SDL3)" = 1 ]; then', focus)
+
+    def test_gpu_mutant_targets_fail_on_a_no_device_skip(self) -> None:
+        """A mutant target that skips for want of a device fails with 77; it never counts as killed.
+
+        The snapshot-path mutants need nothing but a device, so their exit-77 branch must leave
+        the loop with that status, and the comments must say what such a host gets.
+        """
+        makefile = read_makefile(ROOT)
+        for target in ("gpu-coherence-pcache-mutant", "gpu-coherence-selftest-snapbar-mutants",
+                       "gpu-coherence-twin-mutants", "gpu-coherence-selftest-movie-mutant",
+                       "gpu-stencil-once-mutants"):
+            with self.subTest(target=target):
+                start = makefile.index(f"\n{target}:")
+                recipe = makefile[start:makefile.index("\n\n", start)]
+                skips = [line for line in recipe.splitlines() if "-eq 77" in line]
+                self.assertTrue(skips, target)
+                for line in skips:
+                    self.assertIn("SKIP", line)
+                    self.assertIn("exit 77", line)
+                    self.assertNotIn("continue", line)
+                comment_start = makefile.rindex("\n\n", 0, start)
+                comment = makefile[comment_start:start]
+                self.assertNotIn("is a SKIP", comment)
+                self.assertIn("fails the target with status", comment)
+        # The destination-read mutants skip an interlock leg on a device without the interlock;
+        # mutant 4 runs on the snapshot path, so for it exit 77 can only mean no device.
+        start = makefile.index("\ngpu-dst-read-mutants:")
+        recipe = makefile[start:makefile.index("\n\n", start)]
+        self.assertIn('if test $$result -eq 77 && test $$m -eq 4; then echo "dst-read mutant 4: SKIP '
+                      '(no Vulkan device)"; exit 77; fi; ', recipe)
+        fbd = makefile[makefile.index("\nGE_FBD_DIR = "):makefile.index("\nGE_FBD_SKIP_STATUS ?= 77\n")]
+        self.assertNotIn("not a make error", fbd)
+
     def test_fsr3_shaders_are_reproduced_with_the_pinned_linux_dxc(self) -> None:
         """The hosted job downloads the DXC release shader_embed.py pins, checks its SHA-256, and
         runs the tool itself, so a SKIP (exit 77, any other DXC) fails the step."""
@@ -1165,6 +1258,10 @@ class WindowsRuntimePartitionTests(unittest.TestCase):
 # and HLE thread selftests until one fails. It reruns the binaries the translation part built.
 _NIGHTLY_REPEAT_STEP = "Repeat the scheduler and HLE thread selftests until one fails (nightly)"
 _NIGHTLY_ONLY_SUFFIX = " && github.event_name == 'schedule'"
+_GPU_ACE_MIPS_STEP = "Run GPU Ace and mip chain selftests and their mutants on lavapipe"
+_GPU_TWIN_MUTANTS_STEP = "Run the GPU coherence host twin mutants on lavapipe (nightly)"
+#: native_tools steps that run only on the nightly schedule.
+_NIGHTLY_STEPS = frozenset({_NIGHTLY_REPEAT_STEP, _GPU_TWIN_MUTANTS_STEP})
 
 _NATIVE_SERIAL_GATES = {
     "Build and run the vendored FFmpeg H.264 media selftest":
@@ -1176,7 +1273,7 @@ _NATIVE_SERIAL_GATES = {
     "Check 32-bit format specifier portability across portable core":
         "run: python tools/format_portability_check.py",
     "Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)":
-        "run: make CC=gcc native-core-tests",
+        "run: NK_REQUIRE_SDL3=1 make CC=gcc native-core-tests",
     "Compile GE frontend profiling mode":
         'make --no-print-directory CC=gcc BUILD_DIR="$build_dir" GE_FRONTEND_PROFILE=1 "$build_dir/ge.o"',
     "Build and run HLE thread selftest (links SDL3)": "run: make CC=gcc -j4 hle-thread-selftest",
@@ -1200,6 +1297,9 @@ _NATIVE_SERIAL_GATES = {
     "Verify lavapipe and run GPU capture selftest": "make CC=gcc gpu-capture-selftest",
     "Run GPU coherence selftest on lavapipe": "make CC=gcc gpu-coherence-selftest vram-view-identity-selftest",
     "Run GPU texture scaling selftest on lavapipe": "make CC=gcc gpu-texscale-selftest gpu-texscale-mutant",
+    _GPU_ACE_MIPS_STEP: "make CC=gcc gpu-ace-selftest gpu-mips-selftest gpu-mips-mutant tex-scale-gate-mutant "
+                        "gpu-coherence-selftest-movie-mutant 2>&1",
+    _GPU_TWIN_MUTANTS_STEP: "make CC=gcc gpu-coherence-twin-mutants",
     "Run the FSR 3 pass selftest on lavapipe": "NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest",
     "Run the FSR 3 frame generation refusal on lavapipe":
         'NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-fg-pass-selftest FSR3FG_PASS_ARGS="--cell G-R"',
@@ -1318,8 +1418,8 @@ class NativeToolsPartitionTests(unittest.TestCase):
         if not conditions:
             return None
         self.assertEqual(len(conditions), 1, name)
-        # The nightly repeat step alone may add the schedule-event suffix (#1846).
-        suffix = re.escape(_NIGHTLY_ONLY_SUFFIX) if name == _NIGHTLY_REPEAT_STEP else ""
+        # Only the nightly steps may add the schedule-event suffix (#1846).
+        suffix = re.escape(_NIGHTLY_ONLY_SUFFIX) if name in _NIGHTLY_STEPS else ""
         match = re.fullmatch(r"if: matrix\.part == '([A-Za-z0-9_-]+)'" + suffix, conditions[0])
         self.assertIsNotNone(match, f"{name}: a part condition must name exactly one part")
         return _matched(match).group(1)
@@ -2351,6 +2451,7 @@ class CoverageWiringTests(unittest.TestCase):
         "Verify lavapipe and run GPU capture selftest": ("gpu-capture-selftest",),
         "Run GPU coherence selftest on lavapipe": ("gpu-coherence-selftest", "vram-view-identity-selftest"),
         "Run GPU texture scaling selftest on lavapipe": ("gpu-texscale-selftest",),
+        _GPU_ACE_MIPS_STEP: ("gpu-ace-selftest", "gpu-mips-selftest"),
         "Run the FSR 3 pass selftest on lavapipe": ("fsr3-pass-selftest",),
         "Run the FSR 3 frame generation refusal on lavapipe": ("fsr3-fg-pass-selftest",),
     }
@@ -2372,6 +2473,7 @@ class CoverageWiringTests(unittest.TestCase):
         "Check 32-bit format specifier portability across portable core": "a syntax-only build",
         "Compile GE frontend profiling mode": "compiles only",
         _NIGHTLY_REPEAT_STEP: "reruns binaries already measured",
+        _GPU_TWIN_MUTANTS_STEP: "mutants",
         "Run Linux cosimulation mutation corpus": "mutants",
         "Reproduce the FSR 3 shaders with the pinned DXC": "shader bytes, no C",
         "Configure, build, and test CMake Linux player": "an end-to-end player route",
@@ -4059,8 +4161,14 @@ class MergeQueueTriggerWiringTests(unittest.TestCase):
         required = [line.strip() for line in blocks["ci_required"] if "github.event_name" in line
                     and not line.lstrip().startswith("#")]
         self.assertEqual(required, ["EVENT_NAME: ${{ github.event_name }}"])
-        # native_tools names the event in exactly one place: the nightly repeat step (#1846).
-        self.assertEqual("\n".join(blocks["native_tools"]).count("github.event_name"), 1)
+        # native_tools names the event only in its nightly steps' conditions: the repeat step
+        # (#1846) and the host twin mutants.
+        native_tools = "\n".join(blocks["native_tools"])
+        self.assertEqual(native_tools.count("github.event_name"), len(_NIGHTLY_STEPS))
+        for name in _NIGHTLY_STEPS:
+            with self.subTest(nightly=name):
+                self.assertIn("if: matrix.part == 'translation'" + _NIGHTLY_ONLY_SUFFIX,
+                              "\n".join(_ci_step(blocks["native_tools"], name) or []))
 
     def test_selftest_repeat_runs_in_the_nightly_only(self) -> None:
         """#1846: the repeat-until-failure step is on the schedule event alone, so pull requests,

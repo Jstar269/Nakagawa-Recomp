@@ -313,6 +313,7 @@ def generate_header(digest: str, titles: List[Dict[str, Any]]) -> str:
         " * limits come from tools/title_manifest.py, so the two validators cannot drift. */",
         "#define NK_TITLE_MAX_OVERLAYS 8",
         "#define NK_TITLE_MAX_COMPATIBLE_DISC_IDS 16",
+        # title_manifest.MAX_TITLE_MODULES, which nk_title_manifest.c MAX_MODULES mirrors.
         f"#define NK_TITLE_MAX_MODULES {title_manifest.MAX_TITLE_MODULES}",
         f"#define NK_TITLE_MAX_LOOSE_CONTENT_ROOTS {title_manifest.MAX_LOOSE_CONTENT_ROOTS}",
         f"#define NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES {title_manifest.MAX_LOOSE_CONTENT_EXCLUDES}",

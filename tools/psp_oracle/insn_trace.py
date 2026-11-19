@@ -59,6 +59,9 @@ TRACE_STATE_NAMES = tuple(
 RECORD_WORDS = 2 + len(TRACE_STATE_NAMES) + 2   # pc, op, selected state, store address/value
 STORE_BITS = {0x28: 8, 0x29: 16, 0x2B: 32}     # sb, sh, sw: the store width follows from the op
 END_REACHED = 0
+# Host-side bound on one traced driver run (a few dozen steps). It is generous because a newly
+# built executable can take seconds to start on a loaded host.
+LOCAL_TRACE_TIMEOUT_SECONDS = 30.0
 
 
 class InsnTraceError(ValueError):
@@ -75,9 +78,14 @@ def parse_fixtures(path: Path = FIXTURES_H) -> dict:
         arrays[name] = [(int(word, 16), asm.strip()) for word, asm in
                         re.findall(r"(0x[0-9a-fA-F]{8})u,\s*/\*\s*(.*?)\s*\*/", body)]
     fixtures = []
-    table = text[text.index("static const NtFixture nt_fixtures"):]
+    table_start = text.find("static const NtFixture nt_fixtures")
+    if table_start < 0:
+        raise InsnTraceError("fixture table not found")
+    table = text[table_start:]
     for fid, base, count, array in re.findall(
             r'\{"([\w-]+)", (0x[0-9a-fA-F]+)u, (\d+)u, (nt_\w+)_words\}', table):
+        if array not in arrays:
+            raise InsnTraceError(f"{fid}: fixture words array {array}_words not found")
         words = arrays[array]
         if len(words) != int(count):
             raise InsnTraceError(f"{fid}: table count {count} != {len(words)} words")
@@ -133,25 +141,23 @@ def words_fnv(words) -> int:
 
 def fixture_elf(fixture: dict) -> bytes:
     """A fixed-address ELF32 image of the fixture's words followed by the exit syscall."""
+    import analyze  # noqa: PLC0415 - use the code generator's shared ELF builder
+
     text = b"".join(struct.pack("<I", w) for w in fixture["words"] + [EXIT_SYSCALL_WORD])
     base = fixture["base"]
-    names = b"\0.text\0.shstrtab\0"
-    image_off = 0x60
-    names_off = image_off + len(text)
-    shoff = (names_off + len(names) + 3) & ~3
-    sections = [(0, 0, 0, 0, 0, 0), (1, 1, 0x6, base, image_off, len(text)),
-                (7, 3, 0, 0, names_off, len(names))]
-    out = bytearray(shoff + 40 * len(sections))
-    out[:16] = b"\x7fELF\x01\x01\x01" + bytes(9)
-    struct.pack_into("<HHIIIIIHHHHHH", out, 16, 2, 8, 1, base, 52, shoff, 0,
-                     52, 32, 1, 40, len(sections), len(sections) - 1)
-    struct.pack_into("<8I", out, 52, 1, image_off, base, base, len(text), len(text), 5, 4)
-    out[image_off:image_off + len(text)] = text
-    out[names_off:names_off + len(names)] = names
-    for index, (name, typ, flags, addr, off, size) in enumerate(sections):
-        struct.pack_into("<10I", out, shoff + 40 * index, name, typ, flags, addr, off, size,
-                         0, 0, 4 if typ else 0, 0)
-    return bytes(out)
+    image = bytearray(analyze._fixed_address_elf(
+        base,
+        text,
+        len(text),
+        [(b".text", 1, 0x6, base, 0, len(text))],
+    ))
+    # The trace gate starts at the fixture address and maps its executable
+    # segment as RX; the shared analyzer writer's defaults describe a full
+    # RWX image with no entry point.
+    struct.pack_into("<I", image, 24, base)
+    struct.pack_into("<I", image, 64, base)
+    struct.pack_into("<I", image, 76, 5)
+    return bytes(image)
 
 
 def v2_header(source_tier: str, fixture: dict, steps: int, *, source_commit: str,
@@ -169,7 +175,14 @@ def _state_tokens(before: dict, after: dict) -> list[str]:
 
 def psp_records(log_text: str, fixture: dict, consts: dict) -> tuple[list[str], str]:
     """Step lines for one fixture from the probe log, and the log's source commit."""
-    meta = re.search(r"^NAKAGAWA_PSP_META .*source_commit=([0-9a-f]{40})", log_text, re.M)
+    meta_lines = [line for line in log_text.splitlines()
+                  if line.startswith("NAKAGAWA_PSP_META ")]
+    if len(meta_lines) != 1:
+        raise InsnTraceError("the log must contain exactly one NAKAGAWA_PSP_META line")
+    meta = re.search(
+        r"^NAKAGAWA_PSP_META .*source_commit=([0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?)(?![0-9a-fA-F])",
+        meta_lines[0],
+    )
     if not meta:
         raise InsnTraceError("the log has no NAKAGAWA_PSP_META line with a source commit")
     fid = fixture["id"]
@@ -178,8 +191,11 @@ def psp_records(log_text: str, fixture: dict, consts: dict) -> tuple[list[str], 
         m = re.match(rf"NAKAGAWA_PSP_TEST schema=1 test_id={TEST_ID} case_id={re.escape(fid)}-(\S+) "
                      r"status=(\S+) result=0x([0-9a-f]{8})((?: out\d+=0x[0-9a-f]{8})*)$", line)
         if m:
-            records[m.group(1)] = (m.group(2), int(m.group(3), 16),
-                                   [int(v, 16) for v in re.findall(r"=0x([0-9a-f]{8})", m.group(4))])
+            key = m.group(1)
+            if key in records:
+                raise InsnTraceError(f"{fid}: duplicate record {key}")
+            records[key] = (m.group(2), int(m.group(3), 16),
+                            [int(v, 16) for v in re.findall(r"=0x([0-9a-f]{8})", m.group(4))])
     if "init" not in records or "end" not in records:
         raise InsnTraceError(f"{fid}: the log has no init or end record")
     init = records["init"][2]
@@ -191,7 +207,12 @@ def psp_records(log_text: str, fixture: dict, consts: dict) -> tuple[list[str], 
         raise InsnTraceError(f"{fid}: the probe's words differ from the header (FNV)")
     status, result, end = records["end"]
     if status != "PASS" or result != END_REACHED:
-        raise InsnTraceError(f"{fid}: the probe did not reach the end address (status {result})")
+        raise InsnTraceError(
+            f"{fid}: the probe did not reach the end address "
+            f"(status {status}, result 0x{result:08x})"
+        )
+    if len(end) != 4:
+        raise InsnTraceError(f"{fid}: end record is malformed")
     steps = end[0]
     names = TRACE_STATE_NAMES
     state = dict(zip(names, init[4:], strict=True))
@@ -237,8 +258,19 @@ def local_records(fixture: dict, consts: dict, workdir: Path, mutate=None) -> li
     # generated code ran to the end address rather than stopping anywhere else.
     marker = workdir / "exit-reached.ppm"
     env = dict(env, SR_PPM_DUMP=str(marker))
-    proc = subprocess.run([drv, str(elf), str(init), str(out)], capture_output=True, text=True,
-                          env=env, check=False)
+    try:
+        proc = subprocess.run(
+            [drv, str(elf), str(init), str(out)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=LOCAL_TRACE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise InsnTraceError(
+            f"{fixture['id']}: traced driver timed out after {LOCAL_TRACE_TIMEOUT_SECONDS:g}s"
+        ) from exc
     if proc.returncode != 0 or not out.exists():
         raise InsnTraceError(f"{fixture['id']}: the traced driver failed ({proc.returncode})")
     if not marker.exists():
@@ -259,6 +291,35 @@ def local_records(fixture: dict, consts: dict, workdir: Path, mutate=None) -> li
 def write_trace(path: Path, header: str, lines: list[str]) -> None:
     path.write_text(header + "\n" + "".join(line + "\n" for line in lines), encoding="utf-8",
                     newline="\n")
+
+
+def _local_source_problem(source_commit: str) -> str | None:
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=normal"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"source checkout could not be verified ({type(exc).__name__})"
+    if head.returncode != 0 or status.returncode != 0:
+        return "source checkout could not be verified by Git"
+    if status.stdout.strip():
+        return "source worktree is dirty"
+    if head.stdout.strip().casefold() != source_commit.casefold():
+        return "source commit does not match the clean checkout HEAD"
+    return None
 
 
 def compare(psp_trace: str, local_trace: str) -> int:
@@ -295,24 +356,52 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "compare":
         return compare(args.psp, args.local)
-    data = parse_fixtures()
+    if args.command == "local":
+        source_problem = _local_source_problem(args.source_commit)
+        if source_problem:
+            print(f"REJECTED: {source_problem}", file=sys.stderr)
+            return 2
+    try:
+        data = parse_fixtures(FIXTURES_H)
+    except (InsnTraceError, OSError, UnicodeError, ValueError, KeyError) as exc:
+        detail = str(exc) if isinstance(exc, InsnTraceError) else type(exc).__name__
+        print(f"REJECTED: fixture header could not be parsed ({detail})", file=sys.stderr)
+        return 2
+    if args.command == "local":
+        fixture_ids = {fixture["id"] for fixture in data["fixtures"]}
+        unknown = sorted(set(args.fixture or ()) - fixture_ids)
+        if unknown:
+            print(f"REJECTED: unknown fixture id(s): {', '.join(unknown)}", file=sys.stderr)
+            return 2
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     try:
         if args.command == "psp":
+            for stale in out.glob("*.psp.trace"):
+                stale.unlink()
             text = Path(args.log).read_text(encoding="utf-8")
+            converted: list[tuple[dict, list[str], str]] = []
             for fixture in data["fixtures"]:
                 lines, commit = psp_records(text, fixture, data["consts"])
+                converted.append((fixture, lines, commit))
+            for fixture, lines, commit in converted:
                 header = v2_header("PSP_HARDWARE", fixture, len(lines), source_commit=commit,
                                    model=args.model, firmware=args.firmware)
                 write_trace(out / f"{fixture['id']}.psp.trace", header, lines)
                 print(f"{fixture['id']}: {len(lines)} PSP_HARDWARE records")
             return 0
-        for fixture in data["fixtures"]:
-            if args.fixture and fixture["id"] not in args.fixture:
-                continue
+        selected = [
+            fixture for fixture in data["fixtures"]
+            if not args.fixture or fixture["id"] in args.fixture
+        ]
+        for fixture in selected:
+            (out / f"{fixture['id']}.local.trace").unlink(missing_ok=True)
+        converted_local: list[tuple[dict, list[str]]] = []
+        for fixture in selected:
             with tempfile.TemporaryDirectory(dir=os.environ.get("NK_INSN_TRACE_TMP")) as tmp:
                 lines = local_records(fixture, data["consts"], Path(tmp))
+            converted_local.append((fixture, lines))
+        for fixture, lines in converted_local:
             header = v2_header("LOCAL_COSIM", fixture, len(lines), source_commit=args.source_commit,
                                model=args.model, firmware=args.firmware)
             write_trace(out / f"{fixture['id']}.local.trace", header, lines)
