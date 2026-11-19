@@ -9,9 +9,11 @@
 #include <stddef.h>
 
 #include "nk_shared_helpers.h"
+/* NkResult: the shared reader returns it, so the runtime's build (NK_ISO_NO_PLAYER_EXTRAS)
+ * needs it too. nk_types.h includes only standard headers. */
+#include "nk_types.h"
 
 #ifndef NK_ISO_NO_PLAYER_EXTRAS
-#include "nk_types.h"
 #include "generated/nk_title_catalog.h"
 #endif
 
