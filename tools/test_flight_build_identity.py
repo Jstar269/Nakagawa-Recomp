@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -107,10 +108,48 @@ def _recorder_env() -> dict[str, str]:
 requires_compiler = unittest.skipUnless(COMPILER, "no C compiler on PATH")
 
 
+def _find_make() -> str:
+    return shutil.which("mingw32-make") or shutil.which("make") or ""
+
+
+def _compiler_info(*overrides: str) -> dict[str, str]:
+    """Query the Makefile's ``compiler-info`` without side effects."""
+    make = _find_make()
+    if not make:
+        raise AssertionError("GNU Make is required to read Makefile build flags")
+    result = subprocess.run(
+        [make, "--no-print-directory", "NK_INFO_ONLY=1", *overrides, "compiler-info"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=COMPILE_TIMEOUT_S,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stdout + result.stderr)
+    info: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            info[key.strip()] = value.strip()
+    return info
+
+
+def _reproducible_flags(compiler: str) -> tuple[list[str], list[str]]:
+    """Return the Makefile's reproducible compile and link flags for ``compiler``."""
+    info = _compiler_info(f"CC={Path(compiler).as_posix()}")
+    return (
+        shlex.split(info.get("REPRODUCIBLE_COMPILE_FLAG", "")),
+        shlex.split(info.get("REPRODUCIBLE_LINK_FLAG", "")),
+    )
+
+
 class RecorderObjectTests(unittest.TestCase):
     """Two compiles of identical inputs must produce identical objects."""
 
-    def _compile(self, output: Path, *, source_date_epoch: int) -> None:
+    def _compile(
+        self, output: Path, *, source_date_epoch: int, extra_flags: list[str]
+    ) -> None:
         env = os.environ.copy()
         env["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
         result = subprocess.run(
@@ -118,6 +157,7 @@ class RecorderObjectTests(unittest.TestCase):
                 COMPILER,
                 "-std=c99",
                 "-O0",
+                *extra_flags,
                 "-I",
                 str(SRC_RT),
                 "-DSR_FLIGHT_RECORDER_LINKED",
@@ -137,14 +177,15 @@ class RecorderObjectTests(unittest.TestCase):
 
     @requires_compiler
     def test_two_compilations_produce_identical_objects(self):
+        compile_flags, _ = _reproducible_flags(COMPILER)
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             first = tmp_path / "first.o"
             second = tmp_path / "second.o"
             # Give the compiler two explicit, different timestamps. This exercises
             # __DATE__/__TIME__ without depending on a wall-clock delay or tick.
-            self._compile(first, source_date_epoch=1_700_000_000)
-            self._compile(second, source_date_epoch=1_700_000_001)
+            self._compile(first, source_date_epoch=1_700_000_000, extra_flags=compile_flags)
+            self._compile(second, source_date_epoch=1_700_000_001, extra_flags=compile_flags)
             left = first.read_bytes()
             right = second.read_bytes()
             self.assertEqual(
