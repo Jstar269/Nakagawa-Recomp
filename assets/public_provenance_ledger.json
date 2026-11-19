@@ -16043,6 +16043,18 @@
       }
     },
     {
+      "path": "third_party/licenses/harfbuzz/ms-use-COPYING.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "dependency-harfbuzz-ms-use-notice",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "MIT",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
       "path": "third_party/licenses/libiconv.txt",
       "classification": "upstream_derived",
       "evidence": {
