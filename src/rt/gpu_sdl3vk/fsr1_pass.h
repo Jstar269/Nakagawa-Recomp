@@ -50,9 +50,11 @@ Fsr1Pass *fsr1_create(const Fsr1Init *init, char *error, size_t error_size);
 /* Waits for the device to go idle, then frees everything. NULL is fine. */
 void fsr1_destroy(Fsr1Pass *p);
 
-/* Records the upscale of `src` (w x h, in TRANSFER_SRC_OPTIMAL, any 8-bit-per-channel colour
- * format a blit converts) to out_w x out_h into the command buffer, and returns the private
- * result in TRANSFER_SRC_OPTIMAL. `src` is only read. A sharpness at or below FSR1_SHARPNESS_OFF
+/* Records the upscale of `src` (w x h, in TRANSFER_SRC_OPTIMAL, any colour format a blit converts
+ * to R8G8B8A8_UNORM) to out_w x out_h into the command buffer, and returns the private result in
+ * TRANSFER_SRC_OPTIMAL. `src` is only read. It is first blitted 1:1 into the pass's own
+ * R8G8B8A8_UNORM input, so a float source (Anime4K's RGBA16F result on the movie path) is clamped
+ * to [0, 1] and quantized to 8 bits per channel before EASU. A sharpness at or below FSR1_SHARPNESS_OFF
  * skips RCAS. A size change waits for the device and rebuilds the images. VK_NULL_HANDLE when the
  * images cannot be made (a size past the device's image limit, or no memory); the caller then
  * shows `src` as it would without the pass. That failure is said once on stderr, and the same
