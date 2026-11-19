@@ -248,20 +248,21 @@ class TestSBOMTooling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             package_dir = Path(temp) / "package"
             package_dir.mkdir()
-            for name in ("libgcc_s_seh-1.dll", "libstdc++-6.dll"):
+            # Two DLLs of one MSYS2 package: the second reuses the first one's version lookup.
+            for name in ("libbrotlicommon.dll", "libbrotlidec.dll"):
                 (package_dir / name).write_bytes(b"synthetic runtime DLL")
             toolchain_root = Path(temp) / "ucrt64"
             with mock.patch.object(
                 package_notices, "resolve_toolchain_root", return_value=toolchain_root
             ) as resolve_root, mock.patch.object(
-                package_notices, "installed_package_version", return_value="16.2.0-6"
+                package_notices, "installed_package_version", return_value="1.2.0-1"
             ) as installed_version:
                 shipped = generate_sbom.resolve_shipped_dlls(package_dir=package_dir)
 
         self.assertEqual({item["name"] for item in shipped},
-                         {"libgcc_s_seh-1.dll", "libstdc++-6.dll"})
+                         {"libbrotlicommon.dll", "libbrotlidec.dll"})
         resolve_root.assert_called_once_with()
-        installed_version.assert_called_once_with(toolchain_root, "gcc-libs")
+        installed_version.assert_called_once_with(toolchain_root, "brotli")
 
     def test_ruff_lock_matches_pre_commit_pin(self):
         lock_text = (generate_sbom.ROOT / "tools" / "requirements-lock.txt").read_text(
