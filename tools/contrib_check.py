@@ -34,7 +34,9 @@ split.
 from __future__ import annotations
 
 import argparse
+import ast
 from dataclasses import dataclass
+from functools import lru_cache
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -263,6 +265,71 @@ SHARED_TOOL_TESTS = {
     "tools/provenance_record_gap.py": ("tools.test_provenance_record_gap",),
 }
 
+#: Source trees whose files may be read, compiled, or mutated directly by a
+#: ``tools/test_*.py`` module.
+SOURCE_TEST_ROOTS = ("src/", "tests/native/")
+
+#: Inline ``#include "<file>"`` inside generated C test harnesses.  When the
+#: included file is a ``.c`` or ``.inc`` unit that resolves uniquely under
+#: ``SOURCE_TEST_ROOTS``, the module compiles that unit and must run when it
+#: changes.
+_INLINE_C_INCLUDE = re.compile(r'#\s*include\s*"([^"]+)"')
+
+#: ``tools/test_*.py`` modules that mention literal paths under ``src/`` or
+#: ``tests/native/`` but are intentionally NOT selected by ``contrib-check``
+#: when those source files change.  Every exclusion carries its explicit reason
+#: and is verified by ``tools/test_contrib_check.py`` so no miss hides here.
+SOURCE_TEST_EXCLUSIONS: dict[str, str] = {
+    "tools.test_production_smoke": (
+        "too slow for the local fast path (~971 s in hosted CI); runs full "
+        "multi-fixture codegen and native smoke builds"
+    ),
+    "tools.test_ci_paths": (
+        "passes source paths only as synthetic inputs to ci_paths.classify(); "
+        "never reads, compiles, or mutates those files"
+    ),
+    "tools.test_dco_policy": (
+        "passes source paths only as synthetic commit paths in DCO policy "
+        "fixtures; never reads, compiles, or mutates those files"
+    ),
+    "tools.test_admit_paths": (
+        "uses source paths only as synthetic pre-commit regex and fixture "
+        "inputs; never reads, compiles, or mutates those files"
+    ),
+    "tools.test_lint_docs": (
+        "writes synthetic src/player/main.c links in temporary Markdown "
+        "fixtures; contrib-check runs tools/lint_docs.py directly on docs"
+    ),
+    "tools.test_public_export": (
+        "uses src/rt/recomp.c only in synthetic export fixtures (~78 s); "
+        "contrib-check runs policy_sync.py and publish_audit.py directly"
+    ),
+    "tools.test_publication_policy_gate": (
+        "uses src/rt/ge.c only as a policy classification string (~42 s); "
+        "contrib-check runs policy_sync.py directly"
+    ),
+    "tools.test_publish_audit": (
+        "tests publish_audit.py with synthetic fixtures and policy checks; "
+        "contrib-check runs publish_audit.py directly in publication_gate()"
+    ),
+    "tools.test_provenance_ledger": (
+        "tests provenance_ledger.py metadata and synthetic entries; "
+        "contrib-check runs publication_gate() directly"
+    ),
+    "tools.test_provenance_record_gap": (
+        "queries independence metadata by sample path string; never reads, "
+        "compiles, or mutates those C sources"
+    ),
+    "tools.test_contrib_check": (
+        "passes sample C paths to mocked contrib-check gates and unchanged-main "
+        "compiles; contrib-check already runs c_gate and purity_gate directly"
+    ),
+    "tools.test_hst_manager_manifest": (
+        "writes synthetic text to a temporary src/rt/recomp.c (~40 s); never "
+        "reads, compiles, or mutates the repository's src/rt/recomp.c"
+    ),
+}
+
 PASS, FAIL, SKIP, NOT_RUN, MAINTAINER_SIDE = "PASS", "FAIL", "SKIP", "NOT_RUN", "MAINTAINER-SIDE"
 
 #: The interpreter that runs the sub-gates. It defaults to the one running
@@ -341,10 +408,206 @@ def changed_paths(base: str) -> list[str]:
     return sorted({path for path in committed + working if path})
 
 
-def python_test_modules(paths: list[str]) -> list[str]:
-    """Map the changed tools/ modules onto the test modules that cover them."""
+def _normalise_repo_path(raw: str) -> str:
+    normalised = raw.replace("\\", "/").strip("/")
+    while normalised.startswith("./"):
+        normalised = normalised[2:]
+    return normalised
+
+
+def _extract_source_prefix(joined: str) -> str | None:
+    for root_dir in ("src", "tests/native"):
+        if joined == root_dir:
+            return root_dir
+        marker = root_dir + "/"
+        if joined.startswith(marker):
+            return joined
+        idx = joined.find("/" + marker)
+        if idx != -1:
+            return joined[idx + 1:]
+    return None
+
+
+@lru_cache(maxsize=4)
+def _existing_source_files(root: Path) -> tuple[frozenset[str], dict[str, tuple[str, ...]]]:
+    """Return every file under ``src/`` and ``tests/native/`` plus a basename map."""
+    existing: set[str] = set()
+    by_basename: dict[str, list[str]] = {}
+    for base in ("src", "tests/native"):
+        base_dir = root / base
+        if not base_dir.is_dir():
+            continue
+        for dirpath, _dirnames, filenames in os.walk(base_dir):
+            rel_dir = Path(dirpath).relative_to(root).as_posix()
+            for filename in filenames:
+                rel_path = f"{rel_dir}/{filename}"
+                existing.add(rel_path)
+                by_basename.setdefault(filename, []).append(rel_path)
+    return (
+        frozenset(existing),
+        {name: tuple(sorted(paths)) for name, paths in by_basename.items()},
+    )
+
+
+@lru_cache(maxsize=4)
+def _test_module_texts(root: Path) -> tuple[tuple[str, Path, str], ...]:
+    """Read ``tools/test_*.py`` sources once per root for literal path matching."""
+    tools_dir = root / "tools"
+    if not tools_dir.is_dir():
+        return ()
+    entries: list[tuple[str, Path, str]] = []
+    for path in sorted(tools_dir.glob("test_*.py")):
+        if not path.is_file():
+            continue
+        entries.append((f"tools.{path.stem}", path, path.read_text(encoding="utf-8")))
+    return tuple(entries)
+
+
+def _docstring_node_ids(tree: ast.AST) -> set[int]:
+    docs: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.body and isinstance(node.body[0], ast.Expr):
+                value = node.body[0].value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    docs.add(id(value))
+    return docs
+
+
+def _resolve_path_div(node: ast.BinOp, env: dict[str, str]) -> str | None:
+    parts: list[str] = []
+    cur: ast.AST = node
+    while isinstance(cur, ast.BinOp) and isinstance(cur.op, ast.Div):
+        if isinstance(cur.right, ast.Constant) and isinstance(cur.right.value, str):
+            parts.append(cur.right.value)
+        else:
+            return None
+        cur = cur.left
+    if isinstance(cur, ast.Constant) and isinstance(cur.value, str):
+        parts.append(cur.value)
+    elif isinstance(cur, ast.Name) and cur.id in env:
+        parts.append(env[cur.id])
+    elif isinstance(cur, ast.Attribute) and cur.attr in env:
+        parts.append(env[cur.attr])
+    parts.reverse()
+    joined = "/".join(_normalise_repo_path(p) for p in parts if p)
+    return _extract_source_prefix(joined)
+
+
+def _resolve_path_call(node: ast.Call, env: dict[str, str]) -> str | None:
+    fn = node.func
+    base: str | None = None
+    if isinstance(fn, ast.Attribute) and fn.attr == "joinpath":
+        if isinstance(fn.value, ast.Name) and fn.value.id in env:
+            base = env[fn.value.id]
+        elif isinstance(fn.value, ast.BinOp) and isinstance(fn.value.op, ast.Div):
+            base = _resolve_path_div(fn.value, env)
+    elif isinstance(fn, ast.Attribute) and fn.attr == "join":
+        pass
+    elif isinstance(fn, ast.Name) and fn.id in {"Path", "PurePosixPath", "PurePath"}:
+        pass
+    else:
+        return None
+    parts: list[str] = [base] if base else []
+    for index, arg in enumerate(node.args):
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            parts.append(arg.value)
+        elif isinstance(arg, ast.Name) and arg.id in env:
+            parts.append(env[arg.id])
+        elif index == 0 and base is None:
+            # Leading anchor such as ROOT or str(ROOT) in os.path.join(ROOT, "src", ...)
+            continue
+        else:
+            return None
+    if not parts:
+        return None
+    joined = "/".join(_normalise_repo_path(p) for p in parts if p)
+    return _extract_source_prefix(joined)
+
+
+@lru_cache(maxsize=512)
+def _module_source_paths(root: Path, module_path: Path, text: str) -> frozenset[str]:
+    """Extract existing ``src/`` and ``tests/native/`` paths referenced by *module_path*."""
+    existing, by_basename = _existing_source_files(root)
+    tree = ast.parse(text, filename=str(module_path))
+    docs = _docstring_node_ids(tree)
+    env: dict[str, str] = {}
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign) and len(n.targets) == 1]
+    for _ in range(2):
+        for assign in assigns:
+            target = assign.targets[0]
+            name = (
+                target.id if isinstance(target, ast.Name)
+                else target.attr if isinstance(target, ast.Attribute)
+                else None
+            )
+            if not name:
+                continue
+            resolved: str | None = None
+            if isinstance(assign.value, ast.BinOp) and isinstance(assign.value.op, ast.Div):
+                resolved = _resolve_path_div(assign.value, env)
+            elif isinstance(assign.value, ast.Call):
+                resolved = _resolve_path_call(assign.value, env)
+            elif isinstance(assign.value, ast.Constant) and isinstance(assign.value.value, str):
+                candidate = _normalise_repo_path(assign.value.value)
+                if candidate in {"src", "tests/native"} or candidate.startswith(SOURCE_TEST_ROOTS):
+                    resolved = candidate
+            if resolved:
+                env[name] = resolved
+
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) in docs:
+                continue
+            literal = _normalise_repo_path(node.value)
+            if literal in existing:
+                found.add(literal)
+            if "#include" in node.value:
+                for match in _INLINE_C_INCLUDE.finditer(node.value):
+                    inc = match.group(1).replace("\\", "/")
+                    if inc.endswith((".c", ".inc")):
+                        matches = by_basename.get(inc, ())
+                        if len(matches) == 1:
+                            found.add(matches[0])
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            div_resolved = _resolve_path_div(node, env)
+            if div_resolved and div_resolved in existing:
+                found.add(div_resolved)
+        elif isinstance(node, ast.Call):
+            call_resolved = _resolve_path_call(node, env)
+            if call_resolved and call_resolved in existing:
+                found.add(call_resolved)
+    return frozenset(found)
+
+
+def _source_tests_for_paths(paths: list[str], root: Path | None = None) -> set[str]:
+    """Select ``tools/test_*.py`` modules that reference changed ``src/`` or ``tests/native/`` files."""
+    active_root = ROOT if root is None else root
+    targets = {
+        _normalise_repo_path(path)
+        for path in paths
+        if _normalise_repo_path(path).startswith(SOURCE_TEST_ROOTS)
+    }
+    if not targets:
+        return set()
+    basenames = {PurePosixPath(path).name for path in targets}
     modules: set[str] = set()
-    for path in paths:
+    for module_name, module_path, text in _test_module_texts(active_root):
+        if module_name in SOURCE_TEST_EXCLUSIONS:
+            continue
+        if not any(name in text for name in basenames):
+            continue
+        if _module_source_paths(active_root, module_path, text) & targets:
+            modules.add(module_name)
+    return modules
+
+
+def python_test_modules(paths: list[str]) -> list[str]:
+    """Map changed ``tools/``, ``src/``, and ``tests/native/`` paths onto covering test modules."""
+    modules: set[str] = set()
+    for raw_path in paths:
+        path = _normalise_repo_path(raw_path)
         name = PurePosixPath(path).name
         if not path.startswith("tools/") or not name.endswith(".py"):
             continue
@@ -354,6 +617,7 @@ def python_test_modules(paths: list[str]) -> list[str]:
         modules.update(SHARED_TOOL_TESTS.get(path, ()))
         if (ROOT / f"tools/test_{name}").is_file():
             modules.add(f"tools.test_{name[:-3]}")
+    modules.update(_source_tests_for_paths(paths, ROOT))
     return sorted(modules)
 
 
@@ -395,7 +659,7 @@ def ruff_gate(paths: list[str]) -> Gate:
 
 def unit_gate(modules: list[str]) -> Gate:
     if not modules:
-        return Gate("python-unittest", NOT_RUN, "no changed tools/ module")
+        return Gate("python-unittest", NOT_RUN, "no matching test module for changed paths")
     return _run("python-unittest", [GATE_PYTHON, "-m", "unittest", *modules], timeout=1800)
 
 
