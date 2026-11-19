@@ -229,6 +229,16 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _install_write_error(error: OSError) -> PrerequisiteFetchError:
+    if error.errno == errno.ENOSPC:
+        return PrerequisiteFetchError(
+            "DISK_FULL: per-user storage ran out of space while writing a verified prerequisite."
+        )
+    return PrerequisiteFetchError(
+        "INSTALL_WRITE_FAILED: verified prerequisite data could not be written locally."
+    )
+
+
 def download_verified_item(
     item: dict,
     destination: Path,
@@ -253,6 +263,7 @@ def download_verified_item(
             return destination
         destination.unlink()
 
+    from http.client import HTTPException
     from urllib.error import HTTPError, URLError
     from urllib.request import Request
 
@@ -264,7 +275,7 @@ def download_verified_item(
         received = 0
         request = Request(url, headers={"Accept-Encoding": "identity", "User-Agent": "NakagawaRecomp/PrerequisiteFetcher"})
         try:
-            with opener.open(request, timeout=30) as response, partial.open("wb") as output:
+            with opener.open(request, timeout=30) as response:
                 response_length = response.headers.get("Content-Length")
                 if response_length is not None:
                     try:
@@ -277,29 +288,53 @@ def download_verified_item(
                         raise PrerequisiteFetchError(
                             f"SIZE_MISMATCH: {item['id']} declared {declared_size} bytes, expected {expected_size}."
                         )
-                while True:
-                    block = response.read(CHUNK_SIZE)
-                    if not block:
-                        break
-                    received += len(block)
-                    if received > expected_size:
-                        raise PrerequisiteFetchError(f"SIZE_MISMATCH: {item['id']} exceeded {expected_size} bytes.")
-                    output.write(block)
-                    digest.update(block)
-                    if progress:
-                        progress(item["id"], received, expected_size)
-                output.flush()
-                os.fsync(output.fileno())
+                try:
+                    output = partial.open("wb")
+                except OSError as exc:
+                    raise _install_write_error(exc) from exc
+                try:
+                    while True:
+                        block = response.read(CHUNK_SIZE)
+                        if not block:
+                            break
+                        received += len(block)
+                        if received > expected_size:
+                            raise PrerequisiteFetchError(
+                                f"SIZE_MISMATCH: {item['id']} exceeded {expected_size} bytes."
+                            )
+                        try:
+                            output.write(block)
+                        except OSError as exc:
+                            raise _install_write_error(exc) from exc
+                        digest.update(block)
+                        if progress:
+                            try:
+                                progress(item["id"], received, expected_size)
+                            except OSError as exc:
+                                raise _install_write_error(exc) from exc
+                    try:
+                        output.flush()
+                        os.fsync(output.fileno())
+                    except OSError as exc:
+                        raise _install_write_error(exc) from exc
+                finally:
+                    try:
+                        output.close()
+                    except OSError as exc:
+                        raise _install_write_error(exc) from exc
             if received != expected_size:
                 raise ConnectionError(f"interrupted after {received} of {expected_size} bytes")
             if digest.hexdigest() != expected_hash:
                 raise PrerequisiteFetchError(f"HASH_MISMATCH: SHA-256 verification failed for {item['id']}.")
-            os.replace(partial, destination)
+            try:
+                os.replace(partial, destination)
+            except OSError as exc:
+                raise _install_write_error(exc) from exc
             return destination
         except PrerequisiteFetchError:
             partial.unlink(missing_ok=True)
             raise
-        except (HTTPError, URLError, TimeoutError, OSError, ConnectionError) as exc:
+        except (HTTPError, URLError, TimeoutError, OSError, ConnectionError, HTTPException) as exc:
             partial.unlink(missing_ok=True)
             last_error = exc
             if attempt == retries:
@@ -418,35 +453,48 @@ def _extract_tar(item: dict, archive: Path, target: Path, notices_root: Path,
             elif member.issym() or member.islnk():
                 links.append((member, relative))
 
-        for member, relative in links:
-            if cancelled and cancelled():
-                raise PrerequisiteFetchError("INSTALL_CANCELLED: extraction cancelled by the user.")
-            destination = target.joinpath(*relative.parts)
-            link = PurePosixPath(member.linkname)
-            source_path = target.joinpath(*(relative.parent.joinpath(link).parts if member.issym() else link.parts))
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                if member.issym():
-                    os.symlink(os.path.relpath(source_path, destination.parent), destination,
-                               target_is_directory=source_path.is_dir())
-                else:
-                    os.link(source_path, destination)
-            except (OSError, NotImplementedError):
-                if source_path.is_file():
-                    with source_path.open("rb") as source, destination.open("wb") as output:
-                        _copy_checked(source, output, cancelled)
-                elif source_path.is_dir():
-                    shutil.copytree(source_path, destination, dirs_exist_ok=True)
-                else:
-                    raise PrerequisiteFetchError(
-                        "ARCHIVE_LINK_UNRESOLVED: package link target is missing."
-                    ) from None
+        pending_links = links
+        while pending_links:
+            deferred: list[tuple[tarfile.TarInfo, PurePosixPath]] = []
+            made_progress = False
+            for member, relative in pending_links:
+                if cancelled and cancelled():
+                    raise PrerequisiteFetchError("INSTALL_CANCELLED: extraction cancelled by the user.")
+                destination = target.joinpath(*relative.parts)
+                link = PurePosixPath(member.linkname)
+                source_path = target.joinpath(
+                    *(relative.parent.joinpath(link).parts if member.issym() else link.parts)
+                )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    if member.issym():
+                        os.symlink(os.path.relpath(source_path, destination.parent), destination,
+                                   target_is_directory=source_path.is_dir())
+                    else:
+                        os.link(source_path, destination)
+                    made_progress = True
+                except (OSError, NotImplementedError):
+                    if source_path.is_file():
+                        with source_path.open("rb") as source, destination.open("wb") as output:
+                            _copy_checked(source, output, cancelled)
+                        made_progress = True
+                    elif source_path.is_dir():
+                        shutil.copytree(source_path, destination, dirs_exist_ok=True)
+                        made_progress = True
+                    else:
+                        deferred.append((member, relative))
+            if deferred and not made_progress:
+                raise PrerequisiteFetchError(
+                    "ARCHIVE_LINK_UNRESOLVED: package link target is missing."
+                ) from None
+            pending_links = deferred
     return notices
 
 
 def _merge_staged_tree(source: Path, target: Path) -> None:
     """Move one fully extracted artifact into its shared install prefix."""
-    for path in sorted(source.rglob("*"), key=lambda value: len(value.parts)):
+    paths = sorted(source.rglob("*"), key=lambda value: len(value.parts))
+    for path in paths:
         relative = path.relative_to(source)
         destination = target / relative
         if path.is_dir() and not path.is_symlink():
@@ -454,14 +502,60 @@ def _merge_staged_tree(source: Path, target: Path) -> None:
                 raise PrerequisiteFetchError(
                     "INSTALL_PATH_CONFLICT: an installed file conflicts with an artifact directory."
                 )
-            destination.mkdir(parents=True, exist_ok=True)
             continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists() and destination.is_dir() and not destination.is_symlink():
             raise PrerequisiteFetchError(
                 "INSTALL_PATH_CONFLICT: an installed directory conflicts with an artifact file."
             )
-        os.replace(path, destination)
+
+    target.mkdir(parents=True, exist_ok=True)
+    backups: list[tuple[Path, Path]] = []
+    installed: list[Path] = []
+    created_directories: list[Path] = []
+
+    def ensure_parent(directory: Path) -> None:
+        missing: list[Path] = []
+        current = directory
+        while current != target and not current.exists():
+            missing.append(current)
+            current = current.parent
+        directory.mkdir(parents=True, exist_ok=True)
+        created_directories.extend(missing)
+
+    with tempfile.TemporaryDirectory(prefix=".prereq-merge-backup-", dir=target.parent) as backup_name:
+        backup_root = Path(backup_name)
+        try:
+            for path in paths:
+                relative = path.relative_to(source)
+                destination = target / relative
+                if path.is_dir() and not path.is_symlink():
+                    ensure_parent(destination)
+                    destination.mkdir(exist_ok=True)
+                    continue
+                ensure_parent(destination.parent)
+                if destination.exists() or destination.is_symlink():
+                    backup = backup_root / relative
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(destination, backup)
+                    backups.append((backup, destination))
+                os.replace(path, destination)
+                installed.append(destination)
+        except OSError:
+            for destination in reversed(installed):
+                if destination.is_dir() and not destination.is_symlink():
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink(missing_ok=True)
+            for backup, destination in reversed(backups):
+                if backup.exists() or backup.is_symlink():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(backup, destination)
+            for directory in reversed(created_directories):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            raise
 
 
 def _is_running_executable(path: Path) -> bool:
@@ -697,12 +791,37 @@ def _strip_documentation(root: Path) -> dict:
     return {"paths": removed, "file_count": file_count, "bytes": removed_bytes}
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction and is_junction())
+
+
 def _bundle_files(root: Path) -> list[str]:
+    if _is_link_or_junction(root):
+        raise PrerequisiteFetchError("BUNDLE_INVALID: the bundle root is a link.")
     files: list[str] = []
     for tree in BUNDLE_TREES:
-        for directory, _dirnames, filenames in os.walk(root / tree):
+        tree_root = root / tree
+        if _is_link_or_junction(tree_root):
+            raise PrerequisiteFetchError(
+                "BUNDLE_INVALID: symlinked path is not allowed in the bundle."
+            )
+        for directory, dirnames, filenames in os.walk(tree_root, followlinks=False):
+            current = Path(directory)
+            for name in dirnames:
+                if _is_link_or_junction(current / name):
+                    raise PrerequisiteFetchError(
+                        "BUNDLE_INVALID: symlinked path is not allowed in the bundle."
+                    )
             for name in filenames:
-                files.append(_check_bundle_path((Path(directory) / name).relative_to(root).as_posix()))
+                path = current / name
+                if _is_link_or_junction(path):
+                    raise PrerequisiteFetchError(
+                        "BUNDLE_INVALID: symlinked path is not allowed in the bundle."
+                    )
+                files.append(_check_bundle_path(path.relative_to(root).as_posix()))
     return sorted(files)
 
 
@@ -799,6 +918,8 @@ def verify_bundle(manifest_path: Path, bundle_root: Path) -> dict:
     # Verification downloads nothing: only the pinned names, sizes and digests matter.
     sources = _pinned_sources(manifest, allow_http=True)
     bundle_root = Path(bundle_root)
+    bundle_files = _bundle_files(bundle_root)
+    resolved_root = bundle_root.resolve(strict=False)
     try:
         record = json.loads((bundle_root / BUNDLE_RECORD).read_text(encoding="utf-8"))
         bundle = record["bundle"]
@@ -838,9 +959,15 @@ def verify_bundle(manifest_path: Path, bundle_root: Path) -> dict:
         path = bundle_root / relative
         if not path.is_file() or path.is_symlink():
             raise PrerequisiteFetchError(f"BUNDLE_INVALID: {relative} is missing.")
+        try:
+            path.resolve(strict=True).relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise PrerequisiteFetchError(
+                "BUNDLE_INVALID: a listed path resolves outside the bundle."
+            ) from exc
         if path.stat().st_size != size or _sha256_file(path) != digest:
             raise PrerequisiteFetchError(f"BUNDLE_INVALID: {relative} does not match its recorded size and SHA-256.")
-    unlisted = sorted(set(_bundle_files(bundle_root)) - set(listed))
+    unlisted = sorted(set(bundle_files) - set(listed))
     if unlisted:
         raise PrerequisiteFetchError(f"BUNDLE_INVALID: {unlisted[0]} is not in the file inventory.")
     if (BUNDLE_SOURCE_NOTICE not in listed or (bundle_root / BUNDLE_SOURCE_NOTICE).read_bytes()
@@ -1339,6 +1466,14 @@ def main(argv: list[str] | None = None) -> int:
     except PrerequisiteFetchError as exc:
         code = str(exc).partition(":")[0]
         progress_stream.write(json.dumps({"event": "install-failed", "code": code, "message": str(exc)}) + "\n")
+        progress_stream.flush()
+        return 2
+    except Exception as exc:
+        progress_stream.write(json.dumps({
+            "event": "install-failed",
+            "code": "PREREQUISITE_INSTALL_FAILED",
+            "message": f"PREREQUISITE_INSTALL_FAILED: prerequisite installation stopped ({type(exc).__name__}).",
+        }) + "\n")
         progress_stream.flush()
         return 2
     finally:

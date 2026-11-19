@@ -9,12 +9,14 @@ import argparse
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 from typing import Callable
 import unittest
+from unittest import mock
 
 TOOLS = Path(__file__).resolve().parent
 if str(TOOLS) not in sys.path:
@@ -42,7 +44,7 @@ def manifest(titles: dict[str, dict], *, commit: str | None = OLD, launch_timeou
     for index, (key, fields) in enumerate(titles.items()):
         row = {"source_key": key, "source": key, "disc_id": f"TEST{index:05d}", "title": f"Title {index}",
                "wall_seconds": 600.0}
-        if commit is not None and fields.get("outcome") not in ("PENDING", "DUPLICATE"):
+        if commit is not None and fields.get("outcome") not in ("PENDING", "DUPLICATE", "REPLACED"):
             row["run_settings"] = {"source_commit": commit, "launch_timeout_seconds": launch_timeout}
         row.update(fields)
         records.append(row)
@@ -135,8 +137,30 @@ class LadderTests(unittest.TestCase):
         self.assertEqual(self.place(timed_out)["end"], "running")  # type: ignore[index]
 
     def test_titles_this_run_did_not_end_are_not_on_the_ladder(self) -> None:
-        for outcome in ("PENDING", "RUNNING", "DUPLICATE"):
+        for outcome in ("PENDING", "RUNNING", "DUPLICATE", "REPLACED"):
             self.assertIsNone(self.place({"outcome": outcome}))
+
+    def test_first_runtime_import_is_stable_when_an_unrelated_import_is_added(self) -> None:
+        import library_build
+
+        first = {"library": "sceZulu", "nid_name": "sceStop", "nid": 1}
+        second = {"library": "sceAlpha", "nid_name": "sceOther", "nid": 2}
+        unrelated = {"library": "sceAardvark", "nid_name": "sceNoise", "nid": 3}
+
+        def stop(imports: list[dict]) -> str | None:
+            report = {
+                "stages": {"build_package": {"status": "PASS"}, "launch": {"status": "FAIL"}},
+                "failure_class": "UNSUPPORTED_IMPORT",
+                "runtime_imports": imports,
+            }
+            launch = library_build.summarize_report(report)["launch"]
+            verdict: str | None = library_regress.classify({
+                "outcome": "BUILT", "failure_class": "UNSUPPORTED_IMPORT", "launch": launch,
+            })["stop"]
+            return verdict
+
+        self.assertEqual(stop([first, second]), "UNSUPPORTED_IMPORT:sceZulu:sceStop")
+        self.assertEqual(stop([first, second, unrelated]), "UNSUPPORTED_IMPORT:sceZulu:sceStop")
 
 
 class SnapshotTests(unittest.TestCase):
@@ -160,11 +184,132 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(recorded["titles"]["a.iso"]["commit"], OLD)
         self.assertEqual(recorded["ladder"]["launch_timeout_seconds"], 30)
 
+    def test_dirty_title_run_settings_do_not_inherit_the_manifest_commit(self) -> None:
+        payload = manifest({"a.iso": built(100)}, commit=NEW, launch_timeout=30)
+        payload["titles"][0]["run_settings"]["source_commit"] = None
+
+        snapshot = library_regress.snapshot_from_manifest(payload, commit=NEW)
+
+        self.assertIsNone(snapshot["titles"]["a.iso"]["commit"])
+        self.assertEqual(snapshot["commits"], [])
+
     def test_anything_but_a_manifest_is_refused(self) -> None:
         with self.assertRaises(ValueError):
             library_regress.snapshot_from_manifest({"format": "something-else", "titles": []})
         with self.assertRaises(ValueError):
             library_regress.snapshot_from_manifest(manifest({}), mode="weekly")
+
+    def test_record_does_not_use_an_unvalidated_commit_as_a_snapshot_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = Path(temp) / "store"
+            snapshot = {
+                "recorded_at": "2026-11-18T12:00:00Z",
+                "mode": "full",
+                "commits": ["/../../../escape"],
+            }
+
+            path = library_regress.record(snapshot, store)
+
+            self.assertEqual(path.parent.resolve(), (store / "snapshots").resolve())
+            self.assertIn("nocommit", path.name)
+
+    def test_record_skips_a_sequence_number_with_an_existing_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = Path(temp) / "store"
+            claims = store / "snapshots"
+            claims.mkdir(parents=True)
+            (claims / "00001.claim").touch()
+            snapshot = {
+                "recorded_at": "2026-11-18T12:00:00Z",
+                "mode": "full",
+                "commits": [OLD],
+            }
+
+            recorded = library_regress.record(snapshot, store)
+
+        self.assertEqual(int(recorded.name.split("-", 1)[0]), 2)
+
+    def test_record_after_a_finished_record_keeps_both_snapshots(self) -> None:
+        # The second record reads the folder before the first one starts, and claims
+        # only after the first one has written its snapshot and released its claim.
+        with tempfile.TemporaryDirectory() as temp:
+            store = Path(temp) / "store"
+            (store / "snapshots").mkdir(parents=True)
+            snapshot = {
+                "recorded_at": "2026-11-18T12:00:00Z",
+                "mode": "full",
+                "commits": [OLD],
+            }
+            real_open = os.open
+            first: list[Path] = []
+
+            def open_after_the_first_record(path, flags, *args):
+                if not first:
+                    with mock.patch.object(library_regress.os, "open", real_open):
+                        first.append(library_regress.record(dict(snapshot), store))
+                return real_open(path, flags, *args)
+
+            with mock.patch.object(library_regress.os, "open", open_after_the_first_record):
+                second = library_regress.record(dict(snapshot), store)
+
+            names = sorted(path.name for path in (store / "snapshots").glob("*.json"))
+            self.assertEqual(len(names), 2, names)
+            self.assertNotEqual(first[0], second)
+            self.assertEqual(int(first[0].name.split("-", 1)[0]), 1)
+            self.assertEqual(int(second.name.split("-", 1)[0]), 2)
+            self.assertEqual(list((store / "snapshots").glob("*.claim")), [])
+
+    def test_failed_snapshot_write_removes_its_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = Path(temp) / "store"
+            snapshot = {
+                "recorded_at": "2026-11-18T12:00:00Z",
+                "mode": "full",
+                "commits": [OLD],
+            }
+            with mock.patch.object(library_regress, "_write_json", side_effect=OSError("synthetic write failure")):
+                with self.assertRaisesRegex(OSError, "synthetic write failure"):
+                    library_regress.record(snapshot, store)
+
+            snapshots = store / "snapshots"
+            self.assertEqual(list(snapshots.glob("*.json")), [])
+            self.assertEqual(list(snapshots.glob("*.claim")), [])
+
+    def test_history_skips_and_names_unreadable_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = Path(temp) / "store"
+            folder = store / "snapshots"
+            folder.mkdir(parents=True)
+            (folder / "00001-empty.json").write_text("", encoding="utf-8")
+            (folder / "00002-malformed.json").write_text("{not json", encoding="utf-8")
+            (folder / "00003-good.json").write_text(json.dumps({
+                "format": library_regress.SNAPSHOT_FORMAT,
+                "mode": "full",
+                "titles": {"a.iso": {"disc_id": "TEST00001", "rung": "frames"}},
+            }), encoding="utf-8")
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stderr(stderr):
+                rows = library_regress.history(store, "TEST00001")
+
+        self.assertEqual([row["snapshot"] for row in rows], ["00003-good.json"])
+        self.assertIn("00001-empty.json", stderr.getvalue())
+        self.assertIn("00002-malformed.json", stderr.getvalue())
+
+    def test_runtime_import_rows_remain_structured_and_in_input_order(self) -> None:
+        import library_build
+
+        first = {"library": "sceZulu", "nid_name": "sceStop", "nid": 1}
+        second = {"library": "sceAlpha", "nid_name": "sceOther", "nid": 2}
+        report = {
+            "stages": {"build_package": {"status": "PASS"}, "launch": {"status": "FAIL"}},
+            "failure_class": "UNSUPPORTED_IMPORT",
+            "runtime_imports": [first, second, first],
+        }
+
+        summary = library_build.summarize_report(report)
+
+        self.assertEqual(summary["launch"]["runtime_imports"], [first, second])
 
 
 class CompareTests(unittest.TestCase):
@@ -269,6 +414,15 @@ class CompareTests(unittest.TestCase):
         self.assertEqual([row["source_key"] for row in result["down"]], ["b.iso"])
         self.assertEqual(result["counts"]["same"], 1)
 
+    def test_fast_run_ignores_end_rank_below_the_first_frame_ceiling(self) -> None:
+        old, new = self.snapshots({"a.iso": built(61)}, {"a.iso": built(59)}, mode="fast")
+
+        result = library_regress.compare(old, new)
+
+        self.assertEqual(result["compared_up_to"], "first_frame")
+        self.assertEqual(result["counts"]["down"], 0)
+        self.assertEqual(result["verdict"], "pass")
+
     def test_runs_with_different_launch_timeouts_compare_rungs_only(self) -> None:
         old, new = self.snapshots({"a.iso": built(400), "b.iso": built(400)},
                                   {"a.iso": built(30, "NATIVE_RUNTIME_CRASH"), "b.iso": built(0)},
@@ -277,6 +431,32 @@ class CompareTests(unittest.TestCase):
         self.assertFalse(result["like_for_like"])
         self.assertEqual(result["compared_up_to"], "first_frame")
         self.assertEqual([row["source_key"] for row in result["down"]], ["b.iso"])
+
+    def test_resumed_title_uses_its_recorded_launch_timeout(self) -> None:
+        old_manifest = manifest({"a.iso": built(61)}, commit=OLD, launch_timeout=60)
+        new_manifest = manifest({"a.iso": built(59)}, commit=NEW, launch_timeout=60)
+        new_manifest["titles"][0]["run_settings"]["launch_timeout_seconds"] = 30
+
+        old = library_regress.snapshot_from_manifest(old_manifest)
+        new = library_regress.snapshot_from_manifest(new_manifest)
+        result = library_regress.compare(old, new)
+
+        self.assertFalse(result["like_for_like"])
+        self.assertEqual(result["compared_up_to"], "first_frame")
+        self.assertEqual(result["counts"]["down"], 0)
+
+    def test_title_timeout_is_part_of_each_titles_comparison_identity(self) -> None:
+        old_manifest = manifest({"a.iso": built(61)}, commit=OLD, launch_timeout=60)
+        new_manifest = manifest({"a.iso": built(59)}, commit=NEW, launch_timeout=60)
+        old_manifest["titles"][0]["run_settings"]["title_timeout_seconds"] = 1800
+        new_manifest["titles"][0]["run_settings"]["title_timeout_seconds"] = 30
+
+        old = library_regress.snapshot_from_manifest(old_manifest)
+        new = library_regress.snapshot_from_manifest(new_manifest)
+        result = library_regress.compare(old, new)
+
+        self.assertFalse(result["like_for_like"])
+        self.assertEqual(result["counts"]["down"], 0)
 
     def test_the_commit_range_of_a_regression_is_listed_from_the_checkout(self) -> None:
         old, new = self.snapshots({"a.iso": built(400)}, {"a.iso": built(0)})
@@ -603,6 +783,45 @@ class FastRunTests(unittest.TestCase):
         snapshot = json.loads((self.store / "snapshots" / state["last_snapshot"]).read_text(encoding="utf-8"))
         self.assertEqual(snapshot["mode"], "fast")
 
+    def test_a_failed_fast_build_removes_its_scratch_tree(self) -> None:
+        def failed_build(command, **_options):
+            Path(command[command.index("--user-data-root") + 1]).mkdir(parents=True)
+            Path(command[command.index("--work-dir") + 1]).mkdir(parents=True)
+            return subprocess.CompletedProcess(command, 1)
+
+        result = library_regress.run_fast(
+            self.args(), run=failed_build, log=lambda _text: None
+        )
+
+        self.assertEqual(result, library_regress.EXIT_NO_VERDICT)
+        self.assertFalse(any((self.root / "scratch").iterdir()))
+
+    def test_fast_run_reads_the_rotation_cursor_after_acquiring_its_slot(self) -> None:
+        self.store.mkdir(parents=True)
+        state_path = self.store / "fast-state.json"
+        state_path.write_text(json.dumps({"cursor": 0, "runs": 0}), encoding="utf-8")
+        baseline = library_regress.load_snapshot(self.baseline)
+        expected = library_regress.select_fast(baseline, budget_seconds=1200, jobs=1, cursor=1)
+
+        def advance_cursor_before_lock_returns(*_args, **_kwargs):
+            state_path.write_text(json.dumps({"cursor": 1, "runs": 1}), encoding="utf-8")
+            self.slots.mkdir(parents=True, exist_ok=True)
+            lock = self.slots / "library-regress.lock"
+            lock.write_text("synthetic holder\n", encoding="utf-8")
+            return lock
+
+        def no_build(command, **_options):
+            return subprocess.CompletedProcess(command, 1)
+
+        with mock.patch.object(library_regress, "acquire_slot", side_effect=advance_cursor_before_lock_returns), \
+                mock.patch.object(library_regress, "_utc_now", return_value="2026-11-18T12:00:00Z"):
+            result = library_regress.run_fast(self.args(), run=no_build, log=lambda _text: None)
+
+        self.assertEqual(result, library_regress.EXIT_NO_VERDICT)
+        run_dir = next((self.store / "runs").iterdir())
+        selection = json.loads((run_dir / "selection.json").read_text(encoding="utf-8"))
+        self.assertEqual(selection["selected"], expected["selected"])
+
     def test_a_fast_run_with_no_verdict_does_not_advance_the_rotation(self) -> None:
         _calls, run = self.fake_library_build(frames=400, drop=1)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -643,6 +862,16 @@ class FastRunTests(unittest.TestCase):
         self.assertEqual(library_regress.run_fast(self.args(dry_run=True), run=run, log=lambda _text: None), 0)
         self.assertEqual(len(next(self.store.glob("runs/*/only.txt")).read_text(encoding="utf-8").split()), 2)
         self.assertFalse((self.store / "fast-state.json").exists())
+
+    def test_two_fast_runs_with_the_same_timestamp_get_distinct_folders(self) -> None:
+        options = self.args(dry_run=True, cursor=0)
+        with mock.patch.object(library_regress, "_utc_now", return_value="2026-11-18T12:00:00Z"):
+            self.assertEqual(library_regress.run_fast(options, log=lambda _text: None), 0)
+            self.assertEqual(library_regress.run_fast(options, log=lambda _text: None), 0)
+
+        run_dirs = list((self.store / "runs").iterdir())
+        self.assertEqual(len(run_dirs), 2)
+        self.assertEqual(len({path.name for path in run_dirs}), 2)
 
 
 if __name__ == "__main__":
