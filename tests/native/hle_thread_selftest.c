@@ -1438,13 +1438,22 @@ static int write_synthetic_prx(const char *path, int malformed) {
     fixture_wr32(ph + 0, 1);            /* PT_LOAD */
     fixture_wr32(ph + 4, 0x80);         /* file offset */
     fixture_wr32(ph + 8, 0);            /* virtual address, base-relative */
-    fixture_wr32(ph + 12, MODOFF);     /* stripped-PRX module-info file hint */
+    /* stripped-PRX module-info file hint; variant 4 gives none, so the aligned scan finds it */
+    fixture_wr32(ph + 12, malformed == 4 ? 0u : MODOFF);
     fixture_wr32(ph + 16, 0x1a0);      /* file size: 0x80..0x220 is file-backed */
     fixture_wr32(ph + 20, 0x1a0);      /* memory size */
     fixture_wr32(ph + 24, 5);           /* executable/readable */
     fixture_wr32(ph + 28, 4);           /* alignment */
 
     fixture_wr32(image + 0x80, 0x285D00D1u); /* synthetic image marker */
+    if (malformed == 3) {
+        /* A decoy ahead of the real module info that passes its validation: a plausible
+         * name and an aligned export range (base-relative 0x60, zero-filled) inside the
+         * segment. Only the p_paddr hint tells the two apart. */
+        memcpy(image + 0x84 + 4, "decoy", 5);
+        fixture_wr32(image + 0x84 + 36, 0x60);
+        fixture_wr32(image + 0x84 + 40, 0x70);
+    }
     memcpy(image + MODOFF + 4, "synthetic", 9);
     fixture_wr32(image + MODOFF + 36, 0x100); /* export-table virtual start */
     fixture_wr32(image + MODOFF + 40, malformed == 1 ? 0x21101 : 0x110);
@@ -3521,6 +3530,43 @@ static void test_prx_export_relocation_behavior(void) {
                "overflowing export target remains unresolved");
     }
     remove(path);
+
+    /* The p_paddr hint is read before the aligned scan, so a 52-byte window ahead of the
+     * module info that happens to validate is not taken for it. */
+    int decoy_fixture = write_synthetic_prx(path, 3);
+    expect(decoy_fixture, "synthetic PRX fixture with a decoy module info was written");
+    if (decoy_fixture) {
+        expect(sr_hle_test_register_prx_exports(path, base) == 2,
+               "the p_paddr module-info hint wins over an earlier window that validates");
+    }
+    remove(path);
+    /* With no usable hint the aligned scan still finds the module info. */
+    int scan_fixture = write_synthetic_prx(path, 4);
+    expect(scan_fixture, "synthetic PRX fixture without a module-info hint was written");
+    if (scan_fixture) {
+        expect(sr_hle_test_register_prx_exports(path, base) == 2,
+               "the aligned scan finds module info when p_paddr gives no hint");
+    }
+    remove(path);
+
+    /* A module path that does not open is missing: the loader does not try the same name
+     * under ../ or ../../ of the working directory, which would register another tree's
+     * exports at this base. */
+    {
+        static const char probe[] = "nk_cwd_fallback.prx";
+        int probe_fixture = write_synthetic_prx(probe, 0);
+        int entered = probe_fixture && nk_platform_mkdir_p("nk_cwd_inner") &&
+                      chdir("nk_cwd_inner") == 0;
+        expect(entered, "cwd fallback: fixture written beside a nested working directory");
+        if (entered) {
+            unsigned substituted = sr_hle_test_register_prx_exports(probe, base);
+            expect(chdir("..") == 0, "cwd fallback: working directory restored");
+            expect(substituted == 0u,
+                   "a module path that does not open is not resolved against ../ of the cwd");
+        }
+        remove(probe);
+        rmdir("nk_cwd_inner");
+    }
 
     int malformed_fixture = write_synthetic_prx(path, 1);
     expect(malformed_fixture, "malformed synthetic PRX fixture was written");
@@ -21954,6 +22000,21 @@ static void test_lwmutex_hardware_codes(void) {
     b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0x800201cau,
               "second Delete returns 800201CA");
 
+    /* pspautotests lock.expected "Lock 0 => 2": count 2 on a free non-recursive
+     * mutex is ILLEGAL_COUNT and takes nothing. */
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 0u), 0u,
+              "non-recursive Create free succeeds");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 2u, 0u, 0u), 0x800201bdu,
+              "non-recursive Lock with count 2 returns 800201BD");
+    expect(MEM_R32(wa) == 0u && MEM_R32(wa + 4u) == 0u,
+           "B1 refused count-2 Lock leaves the mutex free");
+    b1_expect(b1_call(NID_B1_LOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u,
+              "non-recursive Lock with count 1 succeeds");
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u,
+              "Unlock(1) after Lock(1) succeeds");
+    expect(MEM_R32(wa) == 0u, "B1 Lock(1)/Unlock(1) leaves the mutex free");
+    b1_expect(b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u), 0u, "Delete free mutex succeeds");
+
     /* Non-recursive mutex created held by the caller. */
     b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 2u), 0x800201bdu,
               "non-recursive Create with initialCount 2 returns 800201BD");
@@ -22388,6 +22449,7 @@ static void test_expired_timed_object_waits_enter_strict_priority(void) {
 #define WCR_NAMEBUF     0x00250500u
 #define WCR_NUMWAIT     0x00250540u
 #define WCR_EVF_OUT     0x00250544u
+#define WCR_T0_DECOY    0x00250548u
 #define WCR_WAIT_CANCEL 0x800201a9u
 #define WCR_WAIT_RELEASE 0x800201aau
 #define NID_WCR_CANCEL_SEMA     0x8ffdf9a2u
@@ -22416,6 +22478,46 @@ static void wcr_waiter_body_evf(void *arg) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = s_wcr_obj; cpu.r[5] = 1u; cpu.r[6] = 0u; cpu.r[7] = WCR_EVF_OUT; cpu.r[8] = 0u;
     s_wcr_ret = sr_syscall(&cpu, NID_CNW_WAIT_EVF);
+    s_wcr_returned = 1;
+    selftest_park_on_scheduler();
+}
+
+/* A sleeper: SleepThread or SleepThreadCB, which only a wakeup or a release ends. */
+static void wcr_waiter_body_sleep(void *arg) {
+    (void)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    s_wcr_ret = sr_syscall(&cpu, NID_SCE_KERNEL_SLEEP_THREAD);
+    s_wcr_returned = 1;
+    selftest_park_on_scheduler();
+}
+
+static void wcr_waiter_body_sleep_cb(void *arg) {
+    (void)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    s_wcr_ret = sr_syscall(&cpu, NID_CNW_SLEEP_THREAD_CB);
+    s_wcr_returned = 1;
+    selftest_park_on_scheduler();
+}
+
+/* A delayer: DelayThread or DelayThreadCB for one second, which only a release ends early. */
+static void wcr_waiter_body_delay(void *arg) {
+    (void)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 1000000u;
+    s_wcr_ret = sr_syscall(&cpu, NID_CNW_DELAY_THREAD);
+    s_wcr_returned = 1;
+    selftest_park_on_scheduler();
+}
+
+static void wcr_waiter_body_delay_cb(void *arg) {
+    (void)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 1000000u;
+    s_wcr_ret = sr_syscall(&cpu, NID_CNW_DELAY_THREAD_CB);
     s_wcr_returned = 1;
     selftest_park_on_scheduler();
 }
@@ -22633,12 +22735,16 @@ static void test_cancel_release_wake_results(void) {
          * cell below would observe the caller as itself. */
         s_cur = (int)(waiter - s_tcb) - 1;
         MEM_W32(WCR_NUMWAIT, 0xFFFFFFFFu);
+        MEM_W32(WCR_T0_DECOY, 0x5a5a5a5au);
         memset(&cpu, 0, sizeof cpu);
-        cpu.r[4] = s_wcr_obj; cpu.r[5] = 0xFFFFFFFFu; cpu.r[6] = WCR_NUMWAIT; cpu.r[8] = WCR_NUMWAIT;
+        /* numWaitThreads is the third argument (a2); t0 holds an unrelated address. */
+        cpu.r[4] = s_wcr_obj; cpu.r[5] = 0xFFFFFFFFu; cpu.r[6] = WCR_NUMWAIT; cpu.r[8] = WCR_T0_DECOY;
         uint32_t rc = sr_syscall(&cpu, NID_WCR_CANCEL_SEMA);
         expect(rc == 0u, "PSP-B2-01: CancelSema succeeds");
         expect(MEM_R32(WCR_NUMWAIT) == 1u,
-               "PSP-B2-01: CancelSema reports the number of woken waiters");
+               "PSP-B2-01: CancelSema reports the number of woken waiters through a2");
+        expect(MEM_R32(WCR_T0_DECOY) == 0x5a5a5a5au,
+               "CancelSema leaves the address in t0 untouched");
         expect(wsv_count(s_wcr_obj) == 0,
                "PSP-B2-01: CancelSema(-1) resets the count to the initial count");
         s_cur = (int)(waiter - s_tcb);
@@ -22713,6 +22819,33 @@ static void test_cancel_release_wake_results(void) {
         wcr_finish(waiter, s_wcr_obj);
     }
 
+    /* ---- ReleaseWaitThread on a sleeper: the sleep ends with WAIT_RELEASE ---
+     * MUTANT: leave t->sleeping set in sched_wake_one_object_waiter_with_result -- SleepThreadCB
+     *   blocks again and swallows the release. MUTANT: return 0 from sched_thread_sleep after
+     *   the switch -- SleepThread hides the release result. */
+    for (int cb = 0; cb <= 1; cb++) {
+        waiter = wcr_begin_waiter(cb ? wcr_waiter_body_sleep_cb : wcr_waiter_body_sleep,
+                                  &s_wcr_obj, NID_CNW_CREATE_SEMA);
+        if (!waiter) continue;
+        const char *k = cb ? "SleepThreadCB" : "SleepThread";
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: the %s caller is asleep", k);
+        expect(waiter->state == TH_WAIT_OBJ && waiter->sleeping, msg);
+        uint32_t waiter_uid = waiter->uid;
+        s_cur = (int)(waiter - s_tcb) - 1;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = waiter_uid;
+        snprintf(msg, sizeof msg, "ReleaseWaitThread of a %s caller returns 0", k);
+        expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0u, msg);
+        s_cur = (int)(waiter - s_tcb);
+        waiter->state = TH_RUNNING;
+        sr_coro_switch(waiter->coro);
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: the released %s caller resumes", k);
+        expect(s_wcr_returned == 1, msg);
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: %s returns 0x800201AA and is no longer asleep", k);
+        expect(s_wcr_ret == WCR_WAIT_RELEASE && !waiter->sleeping, msg);
+        wcr_finish(waiter, s_wcr_obj);
+    }
+
     /* ---- ReleaseWaitThread(0): ILLEGAL_THID for the running caller --------- */
     {
         reset_fixture();
@@ -22725,6 +22858,324 @@ static void test_cancel_release_wake_results(void) {
                "PSP-B3-01: ReleaseWaitThread(0) on the running caller returns 0x80020197");
         s_cur = -1;
     }
+
+    /* ---- ReleaseWaitThread on sceKernelDelayThread[CB]: the delay ends with WAIT_RELEASE -
+     * PPSSPP-derived, not PSP-measured (sceKernelReleaseWaitThread resumes a WAITTYPE_DELAY
+     * wait with RELEASE_WAIT): the release returns 0, the delayed thread is ready at once and
+     * its DelayThread returns 0x800201AA instead of finishing its 1-second delay.
+     * MUTANT: drop the sched_release_thread_delay call in h_ReleaseWaitThread -- the release
+     *   stops by name and the delay runs on. MUTANT: return 0 from h_DelayThread after the
+     *   delay -- the released call hides the result. */
+    for (int cb = 0; cb <= 1; cb++) {
+        waiter = wcr_begin_waiter(cb ? wcr_waiter_body_delay_cb : wcr_waiter_body_delay,
+                                  &s_wcr_obj, NID_CNW_CREATE_SEMA);
+        if (!waiter) continue;
+        const char *k = cb ? "DelayThreadCB" : "DelayThread";
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: the %s caller is in its own delay", k);
+        expect(waiter->state == TH_WAIT_DELAY && waiter->guest_delay, msg);
+        uint32_t waiter_uid = waiter->uid;
+        s_cur = (int)(waiter - s_tcb) - 1;
+        const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = waiter_uid;
+        snprintf(msg, sizeof msg, "ReleaseWaitThread of a %s caller returns 0 and readies it", k);
+        expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0u && waiter->state == TH_READY &&
+                   sr_hle_test_unmodelled_stops() == stops_before,
+               msg);
+        s_cur = (int)(waiter - s_tcb);
+        waiter->state = TH_RUNNING;
+        sr_coro_switch(waiter->coro);
+        snprintf(msg, sizeof msg, "ReleaseWaitThread: the released %s returns 0x800201AA", k);
+        expect(s_wcr_returned == 1 && s_wcr_ret == WCR_WAIT_RELEASE && !waiter->guest_delay, msg);
+        wcr_finish(waiter, s_wcr_obj);
+    }
+
+    /* ---- ReleaseWaitThread of a live thread that is not waiting ----------------------
+     * PSP-B3-01 measures a waiter, the caller and a deleted thread. A live thread that is
+     * ready, dormant or in a delay the runtime takes inside another call (no guest_delay) is
+     * none of those: it stops by name and keeps its state, and only a uid no live thread
+     * holds answers UNKNOWN_THID.
+     * MUTANT: return UNKNOWN_THID whenever the wake fails -- a live thread reads as deleted.
+     * MUTANT: drop the guest_delay test in sched_release_thread_delay -- a runtime-internal
+     *   delay is cut short. */
+    {
+        static const struct { int state; const char *what; } cells[] = {
+            { TH_READY, "ready" }, { TH_DORMANT, "dormant" },
+            { TH_WAIT_DELAY, "runtime-internal delayed" },
+        };
+        for (size_t i = 0; i < sizeof cells / sizeof cells[0]; i++) {
+            reset_fixture();
+            sr_hle_init();
+            TCB *main_t = fixture_thread(0x1e3u, TH_RUNNING, 32);
+            main_t->started = 1;
+            TCB *target = fixture_thread(0x1e4u, cells[i].state, 40);
+            s_cur = (int)(main_t - s_tcb);
+            const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = target->uid;
+            snprintf(msg, sizeof msg,
+                     "ReleaseWaitThread of a live %s thread stops by name, not UNKNOWN_THID",
+                     cells[i].what);
+            expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+                       sr_hle_test_unmodelled_stops() == stops_before + 1u &&
+                       target->state == cells[i].state,
+                   msg);
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = 0x1e5u;
+            snprintf(msg, sizeof msg,
+                     "ReleaseWaitThread of a uid no live thread holds answers UNKNOWN_THID (%s cell)",
+                     cells[i].what);
+            expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0x80020198u &&
+                       sr_hle_test_unmodelled_stops() == stops_before + 1u,
+                   msg);
+            s_cur = -1;
+        }
+    }
+}
+
+/* ---- One guest call on its own fixture thread -------------------------------------
+ * rv_spawn runs `c` on a new thread until the call returns or blocks; rv_resume runs the
+ * thread on after a wake. Both give the CPU back to the thread that was running. */
+typedef struct {
+    uint32_t nid;
+    uint32_t a[4];
+    uint32_t ret;
+    int      returned;
+} RvCall;
+
+int s_rv_parks = 0;   /* one per returned call, for the coroutine park count */
+static void rv_call_body(void *arg) {
+    RvCall *c = (RvCall *)arg;
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = c->a[0]; cpu.r[5] = c->a[1]; cpu.r[6] = c->a[2]; cpu.r[7] = c->a[3];
+    c->ret = sr_syscall(&cpu, c->nid);
+    c->returned = 1;
+    s_rv_parks++;
+    selftest_park_on_scheduler();
+}
+
+static void rv_resume(TCB *t) {
+    const int back = s_cur;
+    s_cur = (int)(t - s_tcb);
+    t->state = TH_RUNNING;
+    sr_coro_switch(t->coro);
+    s_cur = back;
+    if (back >= 0) s_tcb[back].state = TH_RUNNING;
+}
+
+static TCB *rv_spawn(RvCall *c, uint32_t uid, int priority) {
+    c->returned = 0;
+    c->ret = 0xFFFFFFFFu;
+    TCB *t = fixture_thread(uid, TH_READY, priority);
+    t->started = 1;
+    t->coro = sr_coro_create(rv_call_body, c, (size_t)1 << 20);
+    expect(t->coro != NULL, "rv_spawn: the thread's coroutine was created");
+    if (t->coro) rv_resume(t);
+    return t;
+}
+
+static void rv_end(TCB *t) {
+    if (t && t->coro) { sr_coro_destroy(t->coro); t->coro = NULL; }
+}
+
+/* ---- TerminateThread and TerminateDeleteThread from an interrupt handler -----------
+ * PPSSPP-derived, not PSP-measured: TerminateThread answers ILLEGAL_CONTEXT there with a
+ * compiled SDK version of 3.08 or later. An earlier SDK, and TerminateDeleteThread (which
+ * PPSSPP lets through), are unmeasured and stop by name; the target is never touched.
+ * MUTANT: answer ILLEGAL_CONTEXT whatever the SDK version -- the pre-3.08 call no longer
+ *   stops by name. MUTANT: drop the interrupt test in h_TerminateDeleteThread -- the call
+ *   reaches the scheduler's silent ILLEGAL_CONTEXT. */
+extern uint32_t g_sdk_version;
+static void test_terminate_from_interrupt_handler(void) {
+    const uint32_t saved_sdk = g_sdk_version;
+    static const struct { uint32_t nid; uint32_t sdk; int stops; const char *what; } cells[] = {
+        { NID_SCE_KERNEL_TERMINATE_THREAD, 0x06060010u, 0, "TerminateThread, SDK 6.60" },
+        { NID_SCE_KERNEL_TERMINATE_THREAD, 0x03080000u, 0, "TerminateThread, SDK 3.08" },
+        { NID_SCE_KERNEL_TERMINATE_THREAD, 0x03070000u, 1, "TerminateThread, SDK 3.07" },
+        { NID_SCE_KERNEL_TERMINATE_THREAD, 0u, 1, "TerminateThread, no SDK version" },
+        { NID_SCE_KERNEL_TERMINATE_DELETE_THREAD, 0x06060010u, 1, "TerminateDeleteThread" },
+    };
+    for (size_t i = 0; i < sizeof cells / sizeof cells[0]; i++) {
+        char msg[192];
+        TCB *self = wsv_begin();
+        TCB *target = fixture_thread(0x1e6u, TH_READY, 40);
+        target->started = 1;
+        g_sdk_version = cells[i].sdk;
+        const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+        s_servicing_interrupts = 1;
+        const uint32_t rc = b1_call(cells[i].nid, target->uid, 0u, 0u, 0u);
+        s_servicing_interrupts = 0;
+        const int stopped = sr_hle_test_unmodelled_stops() == stops_before + 1u;
+        snprintf(msg, sizeof msg, "%s from an interrupt handler %s", cells[i].what,
+                 cells[i].stops ? "stops by name" : "answers ILLEGAL_CONTEXT");
+        expect(cells[i].stops ? (stopped && rc == SCE_KERNEL_ERROR_NOT_IMPLEMENTED)
+                              : (!stopped && rc == 0x80020064u),
+               msg);
+        snprintf(msg, sizeof msg, "%s from an interrupt handler leaves its target ready",
+                 cells[i].what);
+        expect(target->state == TH_READY && !target->deleted, msg);
+        (void)self;
+        s_cur = -1;
+    }
+    g_sdk_version = saved_sdk;
+}
+
+/* ---- A timed WaitSema[CB] that gets its count writes the time it had left ----------
+ * PPSSPP-derived, not PSP-measured (__KernelUnlockSemaForThread writes the unexpired time):
+ * a 100 ms wait signalled 30 ms in reads about 70 ms back, as ReceiveMbx and LockLwMutex
+ * already do. MUTANT: drop sema_write_timeout_left after the hand-over -- WaitSema leaves
+ * the caller's 100000 and WaitSemaCB the 100000 it wrote before blocking. */
+#define RV_TIMEOUT_PTR 0x00244f00u
+static void test_sema_timed_wait_writes_time_left(void) {
+    for (int cb = 0; cb <= 1; cb++) {
+        const char *k = cb ? "WaitSemaCB" : "WaitSema";
+        char msg[160];
+        TCB *self = wsv_begin();
+        uint32_t sema = wsv_create(0, 1);
+        MEM_W32(RV_TIMEOUT_PTR, 100000u);
+        RvCall c = { cb ? NID_CNW_WAIT_SEMA_CB : NID_CNW_WAIT_SEMA, { sema, 1u, RV_TIMEOUT_PTR, 0u },
+                     0u, 0 };
+        TCB *w = rv_spawn(&c, 0x1f0u, 40);
+        snprintf(msg, sizeof msg, "%s: the timed waiter blocked", k);
+        expect(!c.returned && w->state == TH_WAIT_OBJ, msg);
+        s_vtime_us += 30000u;
+        expect(wsv_wait(NID_WSV_SIGNAL_SEMA, sema, 1u, 0u) == 0u && w->state == TH_READY,
+               "SignalSema readies the timed waiter");
+        rv_resume(w);
+        const uint32_t left = MEM_R32(RV_TIMEOUT_PTR);
+        snprintf(msg, sizeof msg, "%s: the satisfied timed wait returns 0 and writes the time left "
+                 "(%u us, about 70000)", k, left);
+        expect(c.returned && c.ret == 0u && left > 0u && left <= 71000u, msg);
+        rv_end(w);
+        wsv_delete(sema);
+        (void)self;
+        s_cur = -1;
+    }
+}
+
+/* ---- LwMutex waiters are served in arrival order, or by priority under attr 0x100 --
+ * A slot freed by an earlier waiter and reused by a later one must not put the later one
+ * first. MUTANT: pick the lowest active slot in lww_grant_first -- the newest waiter, in the
+ * reused slot 0, is granted before the older one. MUTANT: ignore attr 0x100 -- the earlier
+ * weaker waiter is granted before the stronger one. */
+#define NID_RV_LOCK_LWMUTEX_CB 0x1fc64e09u
+static void test_lwmutex_waiter_order(void) {
+    const uint32_t wa = B1_LW_WORKAREA;
+    {
+        TCB *self = wsv_begin();
+        b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 1u), 0u,
+                  "order: CreateLwMutex held by the caller");
+        RvCall cx = { NID_B1_LOCK_LWMUTEX, { wa, 1u, 0u, 0u }, 0u, 0 };
+        RvCall cy = cx, cz = cx;
+        TCB *x = rv_spawn(&cx, 0x1f1u, 40);
+        TCB *y = rv_spawn(&cy, 0x1f2u, 40);
+        expect(x->state == TH_WAIT_OBJ && y->state == TH_WAIT_OBJ && MEM_R32(wa + 12u) == 2u,
+               "order: two waiters block on the held LwMutex");
+        b1_expect(b1_call(NID_WCR_RELEASE_WAIT, x->uid, 0u, 0u, 0u), 0u,
+                  "order: ReleaseWaitThread ends the first waiter's wait");
+        rv_resume(x);
+        expect(cx.returned && cx.ret == WCR_WAIT_RELEASE && MEM_R32(wa + 12u) == 1u,
+               "order: the released first waiter leaves the queue");
+        TCB *z = rv_spawn(&cz, 0x1f3u, 40);
+        expect(z->state == TH_WAIT_OBJ && MEM_R32(wa + 12u) == 2u,
+               "order: a third waiter blocks in the freed record");
+        b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u, "order: owner unlocks");
+        expect(MEM_R32(wa + 4u) == y->uid && y->state == TH_READY && z->state == TH_WAIT_OBJ,
+               "order: the unlock hands the LwMutex to the older waiter, not the newer one");
+        rv_resume(y);
+        expect(cy.returned && cy.ret == 0u, "order: the older waiter's Lock returns 0");
+        s_cur = (int)(y - s_tcb);
+        b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u, "order: older waiter unlocks");
+        s_cur = (int)(self - s_tcb);
+        expect(MEM_R32(wa + 4u) == z->uid, "order: the newer waiter gets it next");
+        rv_resume(z);
+        s_cur = (int)(z - s_tcb);
+        (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+        s_cur = (int)(self - s_tcb);
+        (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
+        rv_end(x); rv_end(y); rv_end(z);
+        s_cur = -1;
+    }
+    {
+        TCB *self = wsv_begin();
+        b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0x100u, 1u), 0u,
+                  "priority order: CreateLwMutex attr 0x100 held by the caller");
+        RvCall cweak = { NID_B1_LOCK_LWMUTEX, { wa, 1u, 0u, 0u }, 0u, 0 };
+        RvCall cstrong = cweak;
+        TCB *weak = rv_spawn(&cweak, 0x1f4u, 45);
+        TCB *strong = rv_spawn(&cstrong, 0x1f5u, 41);
+        b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u,
+                  "priority order: owner unlocks");
+        expect(MEM_R32(wa + 4u) == strong->uid && strong->state == TH_READY &&
+                   weak->state == TH_WAIT_OBJ,
+               "priority order: attr 0x100 hands the LwMutex to the stronger later waiter");
+        rv_resume(strong);
+        s_cur = (int)(strong - s_tcb);
+        (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+        s_cur = (int)(self - s_tcb);
+        rv_resume(weak);
+        s_cur = (int)(weak - s_tcb);
+        (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+        s_cur = (int)(self - s_tcb);
+        expect(cstrong.ret == 0u && cweak.ret == 0u, "priority order: both waiters lock in turn");
+        (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
+        rv_end(weak); rv_end(strong);
+        s_cur = -1;
+    }
+}
+
+/* ---- LockLwMutexCB runs the thread's callbacks while it waits ----------------------
+ * PPSSPP-derived, not PSP-measured: a callback pending when the lock would block runs
+ * before the block, the wait is callback-capable, and the lock is still granted after.
+ * MUTANT: route h_LockLwMutexCB through the plain wait -- the callback never runs and the
+ * wait is not marked callback-capable. */
+#define RV_CB_ENTRY 0x089b8000u
+#define NID_RV_DELETE_CALLBACK 0xedba5844u
+#define RV_CB_NAME  0x00244e00u
+static unsigned s_rv_cb_calls;
+static void rv_cb_count_fn(CpuState *cpu) { s_rv_cb_calls++; cpu->r[2] = 0u; }
+static uint32_t rv_make_pending_callback(TCB *owner) {
+    const int back = s_cur;
+    s_cur = (int)(owner - s_tcb);
+    static const char name[] = "rv-cb";
+    for (size_t k = 0; k < sizeof name; k++) MEM_W8(RV_CB_NAME + (uint32_t)k, (uint8_t)name[k]);
+    uint32_t cb = b1_call(NID_WSV_CREATE_CALLBACK, RV_CB_NAME, RV_CB_ENTRY, 0u, 0u);
+    expect(cb > 0 && sr_callback_is_valid(cb), "rv: callback created on its thread");
+    expect(b1_call(NID_WSV_NOTIFY_CALLBACK, cb, 1u, 0u, 0u) == 0u, "rv: callback notified");
+    s_cur = back;
+    return cb;
+}
+static void test_lock_lwmutex_cb_runs_callbacks(void) {
+    const uint32_t wa = B1_LW_WORKAREA;
+    TCB *self = wsv_begin();
+    sr_test_register_guest_fn(RV_CB_ENTRY, rv_cb_count_fn);
+    s_rv_cb_calls = 0;
+    b1_expect(b1_call(NID_B1_CREATE_LWMUTEX, wa, WSV_NAMEBUF, 0u, 1u), 0u,
+              "LockLwMutexCB: CreateLwMutex held by the caller");
+    RvCall c = { NID_RV_LOCK_LWMUTEX_CB, { wa, 1u, 0u, 0u }, 0u, 0 };
+    TCB *w = fixture_thread(0x1f6u, TH_READY, 40);
+    w->started = 1;
+    const uint32_t cb = rv_make_pending_callback(w);
+    w->coro = sr_coro_create(rv_call_body, &c, (size_t)1 << 20);
+    expect(w->coro != NULL, "LockLwMutexCB: waiter coroutine created");
+    if (!w->coro) { s_cur = -1; return; }
+    rv_resume(w);
+    expect(s_rv_cb_calls == 1u, "LockLwMutexCB: the pending callback runs before the lock blocks");
+    expect(!c.returned && w->state == TH_WAIT_OBJ && w->is_cb_wait == 1,
+           "LockLwMutexCB: the wait is a callback-capable block on the LwMutex");
+    b1_expect(b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u), 0u, "LockLwMutexCB: owner unlocks");
+    rv_resume(w);
+    expect(c.returned && c.ret == 0u && MEM_R32(wa + 4u) == w->uid && w->is_cb_wait == 0,
+           "LockLwMutexCB: the waiter takes the LwMutex after its callbacks");
+    s_cur = (int)(w - s_tcb);
+    (void)b1_call(NID_B1_UNLOCK_LWMUTEX, wa, 1u, 0u, 0u);
+    s_cur = (int)(self - s_tcb);
+    (void)b1_call(NID_B1_DELETE_LWMUTEX, wa, 0u, 0u, 0u);
+    (void)b1_call(NID_RV_DELETE_CALLBACK, cb, 0u, 0u, 0u);
+    rv_end(w);
+    sr_test_guest_fn_reset();
+    s_cur = -1;
 }
 
 /* -------------------------------------------------------------------------
@@ -22822,10 +23273,34 @@ static void test_evf_create_and_refer(void) {
               "event flag create rejects attribute 0x300");
     uint32_t evf = b1_call(NID_B1_CREATE_EVF, EVT_NAME, 0x222u, 0x29u, 0u);
     expect((int32_t)evf > 0, "event flag create accepts measured attribute 0x222");
+    /* PSP-KERNEL-STATUS-001 (event-size-8, event-size-40): a nonzero size copies only
+     * min(size, 52) bytes of the record; refer.expected reads the size word back as
+     * 0x34 for every nonzero size, size 1 included. */
+    for (uint32_t i = 0; i < 64u; i++) MEM_W8(EVT_INFO + i, 0xa5u);
     MEM_W32(EVT_INFO, 1u);
     b1_expect(b1_call(NID_B1_REFER_EVF, evf, EVT_INFO, 0u, 0u), 0u,
               "event flag refer accepts size 1");
+    expect(MEM_R32(EVT_INFO) == 52u, "event flag refer size 1 reads the size word back as 0x34");
+    expect(MEM_R8(EVT_INFO + 4u) == 0xa5u,
+           "event flag refer size 1 writes nothing past its first byte");
+    static const uint32_t sizes[2] = {8u, 40u};
+    for (int k = 0; k < 2; k++) {
+        for (uint32_t i = 0; i < 64u; i++) MEM_W8(EVT_INFO + i, 0xa5u);
+        MEM_W32(EVT_INFO, sizes[k]);
+        b1_expect(b1_call(NID_B1_REFER_EVF, evf, EVT_INFO, 0u, 0u), 0u,
+                  "event flag refer accepts a short size");
+        int tail_untouched = 1;
+        for (uint32_t i = sizes[k]; i < 64u; i++)
+            if (MEM_R8(EVT_INFO + i) != 0xa5u) tail_untouched = 0;
+        expect(MEM_R32(EVT_INFO) == 52u && MEM_R8(EVT_INFO + 4u) == '1' && tail_untouched,
+               "event flag refer with size 8 or 40 writes exactly that many bytes (event-size-8/40)");
+    }
+    for (uint32_t i = 0; i < 64u; i++) MEM_W8(EVT_INFO + i, 0xa5u);
+    MEM_W32(EVT_INFO, 52u);
+    b1_expect(b1_call(NID_B1_REFER_EVF, evf, EVT_INFO, 0u, 0u), 0u,
+              "event flag refer accepts the full size");
     expect(MEM_R32(EVT_INFO) == 52u, "event flag refer writes full structure size");
+    expect(MEM_R8(EVT_INFO + 52u) == 0xa5u, "event flag refer full size stops at byte 52");
     expect(MEM_R8(EVT_INFO + 4u) == '1' && MEM_R8(EVT_INFO + 34u) == '1' &&
            MEM_R8(EVT_INFO + 35u) == 0u, "event flag refer truncates name at 31 bytes");
     expect(MEM_R32(EVT_INFO + 36u) == 0x222u && MEM_R32(EVT_INFO + 40u) == 0x29u &&
@@ -22846,6 +23321,30 @@ static void test_evf_create_and_refer(void) {
  * before the table grows must still be found after it.
  * ------------------------------------------------------------------------- */
 #define SYNC_GROW_EVF_COUNT 1024
+
+/* A wait that would block reads and rewrites its timeout word, so an unwritable one is
+ * refused with ILLEGAL_ADDR before the wait, as ReceiveMbx and LockLwMutex refuse it;
+ * before, an unmapped word read as 0 and the wait timed out at once with the write lost. */
+static void test_sync_waits_refuse_unwritable_timeout(void) {
+    TCB *self = wsv_begin();
+    const int self_idx = (int)(self - s_tcb);
+    const uint32_t bad = 0x10000000u;
+    uint32_t sema = wsv_create(0, 1);
+    evt_expect_now(self_idx, 0x1f4u, NID_CNW_WAIT_SEMA, sema, 1u, bad, 0u, 0u,
+                   RSS_ILLEGAL_ADDR, "WaitSema with an unmapped timeout pointer");
+    evt_expect_now(self_idx, 0x1f5u, NID_CNW_WAIT_SEMA_CB, sema, 1u, bad, 0u, 0u,
+                   RSS_ILLEGAL_ADDR, "WaitSemaCB with an unmapped timeout pointer");
+    expect(wsv_count(sema) == 0, "the refused semaphore waits left the count at 0");
+    wsv_delete(sema);
+    uint32_t evf = b1_call(NID_B1_CREATE_EVF, WSV_NAMEBUF, 0x200u, 0u, 0u);
+    expect((int32_t)evf > 0, "bad-timeout fixture event flag created");
+    evt_expect_now(self_idx, 0x1f6u, NID_CNW_WAIT_EVF, evf, 1u, 0u, 0u, bad,
+                   RSS_ILLEGAL_ADDR, "WaitEventFlag with an unmapped timeout pointer");
+    evt_expect_now(self_idx, 0x1f7u, NID_CNW_WAIT_EVF_CB, evf, 1u, 0u, 0u, bad,
+                   RSS_ILLEGAL_ADDR, "WaitEventFlagCB with an unmapped timeout pointer");
+    (void)b1_call(NID_B1_DELETE_EVF, evf, 0u, 0u, 0u);
+    s_cur = -1;
+}
 
 size_t hle_sync_slot_count(void); /* src/rt/hle.c: slots in the grown table */
 
@@ -23181,6 +23680,87 @@ static void b23_waiter_lw_lock(void *arg) {
     selftest_park_on_scheduler();
 }
 
+static TCB *lww_case_begin(uint32_t *muid_out) {
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    TCB *main_t = fixture_thread(0x1e1u, TH_RUNNING, 32);
+    s_cur = (int)(main_t - s_tcb);
+    main_t->started = 1;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = B23_LW_WA; cpu.r[5] = WCR_NAMEBUF; cpu.r[6] = 0u; cpu.r[7] = 0u;
+    expect(sr_syscall(&cpu, NID_B1_CREATE_LWMUTEX) == 0u, "LwMutex wait record: create");
+    *muid_out = MEM_R32(B23_LW_WA + 0x10u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = B23_LW_WA; cpu.r[5] = 1u;
+    expect(sr_syscall(&cpu, NID_B1_TRYLOCK_LWMUTEX) == 0u, "LwMutex wait record: main locks");
+    s_b23_lw_wa = B23_LW_WA; s_b23_lw_count = 1; s_b23_lw_toptr = 0u;
+    s_b23_ret = 0xFFFFFFFFu; s_b23_returned = 0;
+    TCB *waiter = fixture_thread(0x1e2u, TH_READY, 16);
+    waiter->started = 1;
+    waiter->coro = sr_coro_create(b23_waiter_lw_lock, NULL, (size_t)4 << 20);
+    if (!waiter->coro) return NULL;
+    s_cur = (int)(waiter - s_tcb);
+    waiter->state = TH_RUNNING;
+    sr_coro_switch(waiter->coro);
+    expect(waiter->state == TH_WAIT_OBJ && MEM_R32(B23_LW_WA + 0x0cu) == 1u,
+           "LwMutex wait record: the waiter blocks and is counted");
+    s_cur = (int)(main_t - s_tcb);
+    return waiter;
+}
+
+static void test_lwmutex_wait_records_follow_the_waiter(void) {
+    CpuState cpu;
+    uint32_t muid = 0;
+
+    /* ReleaseWaitThread: the waiter answers WAIT_RELEASE and leaves no record. */
+    TCB *waiter = lww_case_begin(&muid);
+    if (waiter) {
+        const int main_idx = s_cur;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = waiter->uid;
+        expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0u,
+               "LwMutex: ReleaseWaitThread of a LockLwMutex waiter succeeds");
+        s_cur = (int)(waiter - s_tcb);
+        waiter->state = TH_RUNNING;
+        sr_coro_switch(waiter->coro);
+        expect(s_b23_returned == 1 && s_b23_ret == WCR_WAIT_RELEASE,
+               "PSP-B3-01: a released LockLwMutex answers WAIT_RELEASE (0x800201AA)");
+        expect(MEM_R32(B23_LW_WA + 0x0cu) == 0u,
+               "LwMutex: the released waiter is no longer counted in numWaitThreads");
+        s_cur = main_idx;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = B23_LW_WA; cpu.r[5] = 1u;
+        expect(sr_syscall(&cpu, NID_B1_UNLOCK_LWMUTEX) == 0u &&
+               MEM_R32(B23_LW_WA + 0x04u) == 0u && MEM_R32(B23_LW_WA + 0x00u) == 0u,
+               "LwMutex: unlock after the release hands the lock to nobody");
+        if (waiter->coro) { sr_coro_destroy(waiter->coro); waiter->coro = NULL; }
+        s_cur = -1;
+    }
+
+    /* TerminateThread: the dead waiter is neither counted nor handed the lock. */
+    waiter = lww_case_begin(&muid);
+    if (waiter) {
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = waiter->uid;
+        expect(sr_syscall(&cpu, NID_SCE_KERNEL_TERMINATE_THREAD) == 0u,
+               "LwMutex: TerminateThread of a LockLwMutex waiter succeeds");
+        expect(MEM_R32(B23_LW_WA + 0x0cu) == 0u,
+               "LwMutex: a terminated waiter is no longer counted in numWaitThreads");
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = B23_LW_WA; cpu.r[5] = 1u;
+        expect(sr_syscall(&cpu, NID_B1_UNLOCK_LWMUTEX) == 0u &&
+               MEM_R32(B23_LW_WA + 0x04u) == 0u && MEM_R32(B23_LW_WA + 0x00u) == 0u,
+               "LwMutex: unlock does not hand the lock to a terminated waiter");
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = B23_LW_WA; cpu.r[5] = 1u;
+        expect(sr_syscall(&cpu, NID_B1_TRYLOCK_LWMUTEX) == 0u,
+               "LwMutex: the mutex is free for the next locker");
+        if (waiter->coro) { sr_coro_destroy(waiter->coro); waiter->coro = NULL; }
+        s_cur = -1;
+    }
+}
+
 static void test_b23_second_round(void) {
     CpuState cpu;
     char msg[192];
@@ -23301,7 +23881,9 @@ static void test_b23_second_round(void) {
         main_t->started = 1;
         uint32_t me = main_t->uid;
         memset(&cpu, 0, sizeof cpu);
-        cpu.r[4] = B23_LW_WA; cpu.r[5] = WCR_NAMEBUF; cpu.r[6] = 0u; cpu.r[7] = 0u;
+        /* Recursive (attr 0x200): the waiter asks for count 2, which lock.expected
+         * refuses on a non-recursive LwMutex ("Lock 0 => 2", 800201BD). */
+        cpu.r[4] = B23_LW_WA; cpu.r[5] = WCR_NAMEBUF; cpu.r[6] = 0x200u; cpu.r[7] = 0u;
         expect(sr_syscall(&cpu, NID_B1_CREATE_LWMUTEX) == 0u,
                "PSP-B2-01: LwMutex created for handoff");
         uint32_t muid = MEM_R32(B23_LW_WA + 0x10u);
@@ -23581,9 +24163,7 @@ static uint32_t fpl_make_pool(void) {
     return sr_syscall(&setup, NID_FPL_CREATE);
 }
 
-/* s_fpls[] has FPL_MAX=16 slots, reset_fixture() does not clear it, and the
- * conformance matrix already uses all 16. Every pool this test creates must go
- * back or the matrix starves. */
+/* reset_fixture() does not clear the FPL table, so every pool this test creates goes back. */
 static void fpl_free_pool(uint32_t uid) {
     CpuState c;
     memset(&c, 0, sizeof c);
@@ -25269,6 +25849,7 @@ static void test_refer_thread_status(void) {
     expect(uid >= 0x110u, "CreateThread production dispatch returns a thread UID");
 
     memset((void *)SR_HOST(THREAD_INFO), 0xa5, sizeof(SrThreadInfo));
+    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo));
     s_cpu->r[4] = uid;
     s_cpu->r[5] = THREAD_INFO;
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u,
@@ -25288,10 +25869,111 @@ static void test_refer_thread_status(void) {
     s_cpu->r[5] = THREAD_INFO;
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_UNKNOWN_THID,
            "ReferThreadStatus reports an unknown thread UID");
+    MEM_W32(0x0bfffff0u, (uint32_t)sizeof(SrThreadInfo));
     s_cpu->r[4] = uid;
     s_cpu->r[5] = 0x0bfffff0u;
     expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == TEST_ILLEGAL_ADDR,
            "ReferThreadStatus validates the complete output structure span");
+
+    /* The caller's size word selects the write (the PSP-KERNEL-STATUS-001 rule of the sema,
+     * event-flag and mailbox status calls): 0 writes nothing, a smaller size writes only that
+     * many bytes of the 0x68-byte record, and an unmeasured larger one stops by name.
+     * MUTANT: write sizeof(SrThreadInfo) bytes whatever the size word says -- the size-0 and
+     *   size-8 cells see bytes past the caller's struct overwritten. */
+    enum { INFO_GUARD = 0x70u };
+    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
+    MEM_W32(THREAD_INFO, 0u);
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = THREAD_INFO;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               MEM_R32(THREAD_INFO) == 0u && MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u &&
+               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
+           "ReferThreadStatus with a size word of 0 succeeds and writes nothing");
+    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
+    MEM_W32(THREAD_INFO, 8u);
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = THREAD_INFO;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               MEM_R32(THREAD_INFO) == (uint32_t)sizeof(SrThreadInfo) &&
+               memcmp((const void *)SR_HOST(THREAD_INFO + 4u), "show", 4u) == 0 &&
+               MEM_R32(THREAD_INFO + 8u) == 0xa5a5a5a5u &&
+               MEM_R32(THREAD_INFO + 0x64u) == 0xa5a5a5a5u,
+           "ReferThreadStatus with a size word of 8 writes only the first 8 bytes of the record");
+    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
+    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo));
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = THREAD_INFO;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == 0u &&
+               MEM_R32(THREAD_INFO + 0x64u) != 0xa5a5a5a5u &&
+               MEM_R32(THREAD_INFO + 0x68u) == 0xa5a5a5a5u,
+           "ReferThreadStatus with the full size writes the record and nothing past it");
+    const uint32_t stops_before = sr_hle_test_unmodelled_stops();
+    memset((void *)SR_HOST(THREAD_INFO), 0xa5, INFO_GUARD);
+    MEM_W32(THREAD_INFO, (uint32_t)sizeof(SrThreadInfo) + 4u);
+    s_cpu->r[4] = uid;
+    s_cpu->r[5] = THREAD_INFO;
+    expect(sr_syscall(s_cpu, NID_REFER_THREAD_STATUS) == SCE_KERNEL_ERROR_NOT_IMPLEMENTED &&
+               sr_hle_test_unmodelled_stops() == stops_before + 1u &&
+               MEM_R32(THREAD_INFO + 4u) == 0xa5a5a5a5u,
+           "ReferThreadStatus with a size word above 0x68 stops by name and writes nothing");
+}
+
+/* sceKernelReferThreadRunStatus and sceKernelReferCallbackStatus check the whole record span
+ * before they write, as ReferThreadStatus does: an out pointer whose record runs off the end
+ * of guest memory answers ILLEGAL_ADDR and leaves its mapped bytes untouched.
+ * MUTANT: drop either span check -- the call returns 0 and writes the mapped part. */
+extern uint32_t sr_hle_test_refer_thread_run_status(CpuState *s);
+extern uint32_t sr_hle_test_refer_callback_status(CpuState *s);
+static void test_refer_run_and_callback_status_check_their_span(void) {
+    enum {
+        RUN_INFO = 0x08302000u,
+        RUN_EDGE = 0x0bffffe0u,      /* 0x20 mapped bytes: the 0x2c-byte record overruns */
+        CB_INFO = 0x08302100u,
+        CB_EDGE = 0x0bffffe0u,       /* 0x20 mapped bytes: the 56-byte record overruns */
+        CB_NAME = 0x08302200u,
+        TEST_ILLEGAL_ADDR = 0x80000103u,
+    };
+    TCB *self = wsv_begin();
+    CpuState cpu;
+
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = self->uid;
+    cpu.r[5] = RUN_INFO;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == 0u && MEM_R32(RUN_INFO) == 0x2cu,
+           "ReferThreadRunStatus fills a mapped 0x2c-byte record");
+    memset((void *)SR_HOST(RUN_EDGE), 0xa5, 0x20u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = self->uid;
+    cpu.r[5] = RUN_EDGE;
+    expect(sr_hle_test_refer_thread_run_status(&cpu) == TEST_ILLEGAL_ADDR &&
+               MEM_R32(RUN_EDGE) == 0xa5a5a5a5u,
+           "ReferThreadRunStatus answers ILLEGAL_ADDR for a record that runs off guest memory");
+
+    title_hle_write_cstr(CB_NAME, "span-callback");
+    uint32_t cb = b1_call(0xe81caf8fu, CB_NAME, 0u, 0u, 0u);
+    expect((int32_t)cb > 0, "a callback for the status span cells is created");
+    MEM_W32(CB_INFO, 56u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb;
+    cpu.r[5] = CB_INFO;
+    expect(sr_hle_test_refer_callback_status(&cpu) == 0u && MEM_R32(CB_INFO) == 56u &&
+               memcmp((const void *)SR_HOST(CB_INFO + 4u), "span-callback", 14u) == 0,
+           "ReferCallbackStatus fills a mapped 56-byte record");
+    memset((void *)SR_HOST(CB_EDGE), 0xa5, 0x20u);
+    MEM_W32(CB_EDGE, 56u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb;
+    cpu.r[5] = CB_EDGE;
+    expect(sr_hle_test_refer_callback_status(&cpu) == TEST_ILLEGAL_ADDR &&
+               MEM_R32(CB_EDGE) == 56u && MEM_R32(CB_EDGE + 4u) == 0xa5a5a5a5u,
+           "ReferCallbackStatus answers ILLEGAL_ADDR for a record that runs off guest memory");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb;
+    cpu.r[5] = 0x0c000000u;
+    expect(sr_hle_test_refer_callback_status(&cpu) == TEST_ILLEGAL_ADDR,
+           "ReferCallbackStatus answers ILLEGAL_ADDR for an unmapped info pointer");
+    (void)b1_call(0xedba5844u, cb, 0u, 0u, 0u);
+    s_cur = -1;
 }
 
 /* -------------------------------------------------------------------------
@@ -26158,8 +26840,8 @@ static void srt_released_wait_case(int mode, const char *what, uint32_t want_ret
         cpu.r[4] = sema; cpu.r[5] = 1u;
         expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u, "signal inside the deadline");
         if (mode == RW_TOKEN_STOLEN)
-            expect(wsv_wait(0x58b1f937u, sema, 1u, 0u) == 0u,
-                   "another thread takes the signalled count before the waiter runs");
+            expect(wsv_wait(0x58b1f937u, sema, 1u, 0u) == 0x800201adu,
+                   "a PollSema before the waiter runs finds the count handed to the waiter");
         s_vtime_us = late;               /* the waiter is READY but has not been dispatched */
         break;
     case RW_CANCEL_DELAYED:
@@ -26189,8 +26871,8 @@ static void test_released_timed_wait_reports_release_not_clock(void) {
     srt_released_wait_case(RW_SIGNAL_SUSPENDED, "signalled while suspended, resumed after the deadline", 0u);
     srt_released_wait_case(RW_SIGNAL_DELAYED, "signalled, dispatched after the deadline", 0u);
     srt_released_wait_case(RW_CANCEL_DELAYED, "cancelled, dispatched after the deadline", WCR_WAIT_CANCEL);
-    srt_released_wait_case(RW_TOKEN_STOLEN, "signalled but count taken, dispatched after the deadline",
-                           SLC_WAIT_TIMEOUT);
+    srt_released_wait_case(RW_TOKEN_STOLEN, "signalled, polled by another thread, dispatched after the deadline",
+                           0u);
 }
 
 /* A suspended DelayThread sleeper likewise reaches READY at its deadline without
@@ -28942,6 +29624,10 @@ static void test_nested_frame_depth_is_bounded_and_fails_closed(void) {
            "the owner's depth returns to zero after the nest unwinds");
     expect(sr_nested_frame_lifo_violations() == 0u,
            "the nest released its frames innermost-first");
+    expect(caller.flow_kind == SR_FLOW_FATAL,
+           "the depth refusal stops the run, and the stop reaches the outermost caller");
+    caller.flow_kind = 0u;
+    caller.flow_target = 0u;
 
     /* Pool exhaustion is a separate limit from per-owner depth: hold every slot
      * under other owners, then a call from a fresh owner must be refused rather
@@ -28964,6 +29650,12 @@ static void test_nested_frame_depth_is_bounded_and_fails_closed(void) {
                "a nested call with the pool exhausted returns zero");
         expect(s_cbabi_calls == 0u,
                "a nested call with the pool exhausted dispatches nothing");
+        /* Audit 2026-11-17 (F-04751dae): the refusal has no result to give, so it stops the
+         * run by name instead of answering a 0 the caller reads as the function's v0. */
+        expect(caller.flow_kind == SR_FLOW_FATAL && caller.flow_target == CBABI_ENTRY,
+               "a nested call refused for want of a frame stops the run at its target");
+        caller.flow_kind = 0u;
+        caller.flow_target = 0u;
         expect(sr_nested_frame_exhaustions() == 1u,
                "the pool-exhaustion refusal is counted");
         /* A GE callback (the void marshaller) that cannot get a frame does not run, and the
@@ -42153,8 +42845,8 @@ static void test_hle_liveness_sema_handoff(void) {
     cpu.r[5] = 1u;
     expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u,
            "HLE semaphore producer signals the waiting consumer");
-    expect(consumer->state == TH_READY && wsv_count(s_live_sema_obj) == 1,
-           "HLE semaphore signal readies the consumer without consuming its count");
+    expect(consumer->state == TH_READY && wsv_count(s_live_sema_obj) == 0,
+           "HLE semaphore signal hands its count to the consumer it readies");
     int selected = pick_next();
     expect(selected == (int)(consumer - s_tcb),
            "HLE semaphore producer-to-consumer order selects the consumer next");
@@ -42171,6 +42863,97 @@ static void test_hle_liveness_sema_handoff(void) {
            "HLE semaphore trace identifies producer ownership and consumer selection");
     liveness_finish_waiter(consumer);
     wsv_delete(s_live_sema_obj);
+}
+
+/* SignalSema hands its count to the waiters it releases, in the semaphore's service
+ * order (PPSSPP-derived, not PSP-measured; see sema_hand_over). Two waiters on one
+ * semaphore: the first to wait has the weaker priority. */
+static uint32_t s_svc_sema;
+static int s_svc_need[2];
+static uint32_t s_svc_ret[2];
+static int s_svc_returned[2];
+static int s_svc_phase;
+
+static void svc_sema_waiter(void *arg) {
+    (void)arg;
+    int phase = s_svc_phase++;
+    CpuState cpu = {0};
+    cpu.r[4] = s_svc_sema;
+    cpu.r[5] = (uint32_t)s_svc_need[phase];
+    s_svc_ret[phase] = sr_syscall(&cpu, NID_CNW_WAIT_SEMA);
+    s_svc_returned[phase] = 1;
+    selftest_park_on_scheduler();
+}
+
+static void svc_sema_case(uint32_t attr, int first_need, int second_need, int served,
+                          const char *what) {
+    char msg[200];
+    reset_fixture();
+    sr_hle_init();
+    TCB *producer = fixture_thread(0x2a21u, TH_RUNNING, 32);
+    producer->started = 1;
+    s_cur = (int)(producer - s_tcb);
+    CpuState cpu = {0};
+    cpu.r[4] = WSV_NAMEBUF; cpu.r[5] = attr; cpu.r[6] = 0u; cpu.r[7] = 4u;
+    s_svc_sema = sr_syscall(&cpu, NID_CNW_CREATE_SEMA);
+    s_svc_need[0] = first_need; s_svc_need[1] = second_need;
+    s_svc_ret[0] = s_svc_ret[1] = 0xffffffffu;
+    s_svc_returned[0] = s_svc_returned[1] = 0;
+    s_svc_phase = 0;
+    TCB *w[2];
+    w[0] = liveness_start_waiter(svc_sema_waiter, 0x2a22u, 48);   /* waits first, weaker */
+    w[1] = liveness_start_waiter(svc_sema_waiter, 0x2a23u, 16);   /* waits second, stronger */
+    expect(w[0] && w[0]->coro && w[1] && w[1]->coro &&
+           w[0]->state == TH_WAIT_OBJ && w[1]->state == TH_WAIT_OBJ,
+           "semaphore service order: both waiters block");
+    if (!w[0] || !w[0]->coro || !w[1] || !w[1]->coro) return;
+    s_cur = (int)(producer - s_tcb);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = s_svc_sema; cpu.r[5] = 1u;
+    expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u, "semaphore service order: signal 1");
+    const int other = 1 - served;
+    snprintf(msg, sizeof msg, "%s: the signal readies waiter %d only and takes its count",
+             what, served);
+    expect(w[served]->state == TH_READY && w[other]->state == TH_WAIT_OBJ &&
+           wsv_count(s_svc_sema) == 0, msg);
+    snprintf(msg, sizeof msg, "%s: a PollSema before the waiter runs answers SEMA_ZERO", what);
+    expect(wsv_wait(0x58b1f937u, s_svc_sema, 1u, 0u) == 0x800201adu && wsv_count(s_svc_sema) == 0,
+           msg);
+    MEM_W32(WSV_NAMEBUF + 0x40u, 56u);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = s_svc_sema; cpu.r[5] = WSV_NAMEBUF + 0x40u;
+    snprintf(msg, sizeof msg, "%s: ReferSemaStatus reports count 0 and one waiter", what);
+    expect(sr_syscall(&cpu, NID_RSS_REFER_SEMA) == 0u &&
+           MEM_R32(WSV_NAMEBUF + 0x40u + 44u) == 0u && MEM_R32(WSV_NAMEBUF + 0x40u + 52u) == 1u,
+           msg);
+    s_cur = (int)(w[served] - s_tcb);
+    w[served]->state = TH_RUNNING;
+    sr_coro_switch(w[served]->coro);
+    snprintf(msg, sizeof msg, "%s: the served waiter returns 0 without waiting again", what);
+    expect(s_svc_returned[served] == 1 && s_svc_ret[served] == 0u &&
+           wsv_count(s_svc_sema) == 0 && w[other]->state == TH_WAIT_OBJ, msg);
+    liveness_finish_waiter(w[served]);
+    s_cur = (int)(producer - s_tcb);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = s_svc_sema; cpu.r[5] = (uint32_t)s_svc_need[other];
+    expect(sr_syscall(&cpu, NID_WSV_SIGNAL_SEMA) == 0u &&
+           w[other]->state == TH_READY && wsv_count(s_svc_sema) == 0,
+           "semaphore service order: a second signal serves the other waiter");
+    s_cur = (int)(w[other] - s_tcb);
+    w[other]->state = TH_RUNNING;
+    sr_coro_switch(w[other]->coro);
+    expect(s_svc_returned[other] == 1 && s_svc_ret[other] == 0u,
+           "semaphore service order: the other waiter returns 0");
+    liveness_finish_waiter(w[other]);
+    s_cur = (int)(producer - s_tcb);
+    wsv_delete(s_svc_sema);
+    s_cur = -1;
+}
+
+static void test_sema_signal_hands_count_in_service_order(void) {
+    svc_sema_case(0x000u, 1, 1, 0, "FIFO semaphore");
+    svc_sema_case(0x100u, 1, 1, 1, "priority semaphore");
+    svc_sema_case(0x000u, 2, 1, 1, "FIFO semaphore, first need too large");
 }
 
 static void test_hle_liveness_event_handoff(void) {
@@ -42451,14 +43234,50 @@ static void test_td23_guest_pointer_validation(void) {
     expect(sr_syscall(&cpu, NID_ALLOC_PARTITION) == SCE_KERNEL_ERROR_ILLEGAL_ADDR,
            "AllocPartitionMemory rejects unmapped name pointer");
 
-    /* Non-NULL unterminated name in AllocPartitionMemory is rejected */
+    /* Audit 2026-11-17 (F-79a1ffb4): a readable name of 64 bytes or more is a valid pointer. It
+     * allocates with the name truncated, as a name longer than the 31-byte field does on a PSP
+     * (memblock.expected); only an unreadable byte before the NUL is ILLEGAL_ADDR. */
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = 2u;
     cpu.r[5] = unterminated_buf;
     cpu.r[6] = 0u;
     cpu.r[7] = 256u;
+    uint32_t uid_long = sr_syscall(&cpu, NID_ALLOC_PARTITION);
+    expect(uid_long != 0u && uid_long < 0x80000000u,
+           "AllocPartitionMemory keeps a readable name of 64 bytes or more");
+    if (uid_long != 0u && uid_long < 0x80000000u) {
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = uid_long;
+        (void)sr_syscall(&cpu, 0xb6d61d02u);   /* sceKernelFreePartitionMemory */
+    }
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = unterminated_buf;
+    cpu.r[5] = 0u;     /* type Low */
+    cpu.r[6] = 256u;   /* size */
+    uint32_t mb_long = sr_syscall(&cpu, NID_SCE_KERNEL_ALLOC_MEMORY_BLOCK);
+    expect(mb_long != 0u && mb_long < 0x80000000u,
+           "AllocMemoryBlock keeps a readable name of 64 bytes or more");
+    if (mb_long != 0u && mb_long < 0x80000000u) {
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = mb_long;
+        (void)sr_syscall(&cpu, NID_SCE_KERNEL_FREE_MEMORY_BLOCK);
+    }
+    /* A name whose bytes run off the end of guest memory before any NUL stays refused. */
+    const uint32_t name_tail = ARENA_END - 8u;
+    memset((char *)SR_HOST(name_tail), 'B', 8);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 2u;
+    cpu.r[5] = name_tail;
+    cpu.r[6] = 0u;
+    cpu.r[7] = 256u;
     expect(sr_syscall(&cpu, NID_ALLOC_PARTITION) == SCE_KERNEL_ERROR_ILLEGAL_ADDR,
-           "AllocPartitionMemory rejects unterminated name string");
+           "AllocPartitionMemory rejects a name that runs off the end of guest memory");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = name_tail;
+    cpu.r[5] = 0u;
+    cpu.r[6] = 256u;
+    expect(sr_syscall(&cpu, NID_SCE_KERNEL_ALLOC_MEMORY_BLOCK) == 0x800200d3u,
+           "AllocMemoryBlock rejects a name that runs off the end of guest memory");
 
     /* 4. Struct whose tail crosses the end of guest RAM rejected for items 2 and 4 */
     /* Item 2: sceGeSetCallback (16-byte struct) */
@@ -43876,10 +44695,12 @@ static void test_alloc_block_at_fixed_address(void) {
     uint32_t R3 = base0 + 0x30000u;
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 2u; cpu.r[7] = 0u; cpu.r[8] = R3;
+    heap_before = sr_hle_test_partition_heap_ptr();
     uint32_t uid_z = sr_syscall(&cpu, NID_ALLOC_PART);
-    memset(&cpu, 0, sizeof(cpu)); cpu.r[4] = uid_z;
-    expect(uid_z != 0u && uid_z < 0x80000000u && sr_syscall(&cpu, NID_GET_HEAD) == R3,
-           "type-2 handler maps size 0 to 16 like the existing path");
+    /* Audit 2026-11-17 (F-6235ecfb): size 0 is MEMBLOCK_ALLOC_FAILED (memblock.expected via
+     * uOFW's AllocMemoryBlock forwarding), no longer a 16-byte block. */
+    expect(uid_z == 0x800200d9u && sr_hle_test_partition_heap_ptr() == heap_before,
+           "type-2 handler refuses size 0 with MEMBLOCK_ALLOC_FAILED and places nothing");
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 3u; cpu.r[7] = 0x100u;
     uint32_t uid_t3 = sr_syscall(&cpu, NID_ALLOC_PART);
@@ -43948,7 +44769,7 @@ static void test_fpl_delete_releases_partition(void) {
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     cpu.r[8] = 0x10u;
     uint32_t fpl1 = sr_syscall(&cpu, NID_FPL_CREATE);
-    expect(fpl1 >= 0x500u, "fpl1 create succeeds");
+    expect(fpl1 != 0u && fpl1 < 0x80000000u, "fpl1 create succeeds");
 
     /* Allocate first block to get fpl1 base address */
     memset(&cpu, 0, sizeof(cpu));
@@ -43973,19 +44794,20 @@ static void test_fpl_delete_releases_partition(void) {
     expect(sr_hle_test_partition_free_block_count() == 1,
            "delete fpl1 releases its partition block to free list");
 
-    /* 5. Double-delete pool 1: assert it returns existing error/status code (0) and does not free twice */
+    /* 5. Double-delete pool 1: UNKNOWN_FPLID (0x8002019D, pspautotests threads/fpl/delete.expected),
+     * and nothing is freed twice */
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = fpl1;
     uint32_t double_del_rc = sr_syscall(&cpu, NID_FPL_DELETE);
-    expect(double_del_rc == 0u, "double-delete of fpl1 returns existing error/status (0)");
+    expect(double_del_rc == 0x8002019du, "double-delete of fpl1 returns UNKNOWN_FPLID (0x8002019D)");
     expect(sr_hle_test_partition_free_block_count() == 1,
            "double-delete of fpl1 does not free twice (free block count unchanged)");
 
-    /* Also assert deleting an unknown uid returns existing code (0) and does not free */
+    /* Deleting an unknown uid is UNKNOWN_FPLID too and frees nothing */
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = 0x9999u;
     uint32_t unknown_del_rc = sr_syscall(&cpu, NID_FPL_DELETE);
-    expect(unknown_del_rc == 0u, "delete unknown uid returns existing error/status (0)");
+    expect(unknown_del_rc == 0x8002019du, "delete unknown uid returns UNKNOWN_FPLID (0x8002019D)");
     expect(sr_hle_test_partition_free_block_count() == 1,
            "delete unknown uid does not free (free block count unchanged)");
 
@@ -43994,7 +44816,7 @@ static void test_fpl_delete_releases_partition(void) {
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     cpu.r[8] = 0x10u;
     uint32_t fpl2 = sr_syscall(&cpu, NID_FPL_CREATE);
-    expect(fpl2 >= 0x500u, "fpl2 create succeeds");
+    expect(fpl2 != 0u && fpl2 < 0x80000000u, "fpl2 create succeeds");
 
     memset(&cpu, 0, sizeof(cpu));
     cpu.r[4] = fpl2; cpu.r[5] = FPL_OUTPTR; cpu.r[6] = 0u;
@@ -44059,7 +44881,7 @@ static void test_vpl_nonblocking_roundtrip(void) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 2u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     uint32_t vpl = sr_syscall(&cpu, NID_VPL_CREATE);
-    expect(vpl >= 0x600u, "vpl create succeeds");
+    expect(vpl != 0u && vpl < 0x80000000u, "vpl create succeeds");
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
     uint32_t trailer = sr_syscall(&cpu, 0x237dbd4fu);
@@ -44135,7 +44957,7 @@ static void test_vpl_block_count_bounded_by_pool_size(void) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = FPL_NAMEBUF; cpu.r[5] = 2u; cpu.r[6] = 0u; cpu.r[7] = POOL;
     uint32_t vpl = sr_syscall(&cpu, NID_VPL_CREATE);
-    expect(vpl >= 0x600u, "vpl create succeeds for the block-count pool");
+    expect(vpl != 0u && vpl < 0x80000000u, "vpl create succeeds for the block-count pool");
 
     int all = 1;
     for (uint32_t i = 0; i < BLOCKS; i++) {
@@ -44484,7 +45306,9 @@ static uint32_t selftest_mbx_cancel(uint32_t uid, uint32_t nump) {
     return sr_syscall(&cpu, NID_MBX_CANCEL);
 }
 
+/* A full-size refer: the caller's size word says 52 (PSP-KERNEL-STATUS-001 mbx-size-full). */
 static uint32_t selftest_mbx_refer(uint32_t uid, uint32_t info) {
+    if (info) MEM_W32(info, 52u);
     CpuState cpu;
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = uid;
@@ -44765,7 +45589,7 @@ static void test_wb_tlspl_vpl_cells(void) {
     memset(&cpu, 0, sizeof cpu);
     cpu.r[4] = TLSPL_NAMEBUF; cpu.r[5] = 2u; cpu.r[6] = 0u; cpu.r[7] = 0x10000u;
     uint32_t vpl = sr_syscall(&cpu, NID_VPL_CREATE);
-    expect(vpl >= 0x600u && vpl < 0x80000000u, "wb vpl: create");
+    expect(vpl != 0u && vpl < 0x80000000u, "wb vpl: create");
     if (vpl >= 0x80000000u) return;
     for (uint32_t i = 0; i < 64u; ++i) MEM_W8(VPL_INFO + i, 0xccu);
     MEM_W32(VPL_INFO, 0u);
@@ -45119,7 +45943,7 @@ static void test_fpl_blocking_waits(void) {
 
     /* ---- 1. FreeFpl reuse and validation ---- */
     uint32_t pool = selftest_fpl_create(64, 2);
-    expect(pool >= 0x500u, "FPL: CreateFpl returns valid UID");
+    expect(pool != 0u && pool < 0x80000000u, "FPL: CreateFpl returns valid UID");
     expect(selftest_fpl_allocate(pool, out1, 0) == 0, "FPL: first allocation succeeds");
     expect(selftest_fpl_allocate(pool, out2, 0) == 0, "FPL: second allocation succeeds");
     uint32_t addr1 = MEM_R32(out1);
@@ -45129,7 +45953,7 @@ static void test_fpl_blocking_waits(void) {
     expect(selftest_fpl_try_allocate(pool, out3) == FPL_NO_MEMORY_ERR, "FPL: pool is exhausted");
     expect(MEM_R32(out3) == 0xfeedfaceu, "FPL: exhausted try_allocate leaves outptr untouched");
 
-    expect(selftest_fpl_free(0x5ffu, addr1) == FPL_UNKNOWN_ID_ERR, "FPL: bad UID free is rejected");
+    expect(selftest_fpl_free(0x7ffffff0u, addr1) == FPL_UNKNOWN_ID_ERR, "FPL: bad UID free is rejected");
     expect(selftest_fpl_free(pool, 0xdeadbeefu) == 0x80000103u, "FPL: illegal address free is rejected");
     expect(selftest_fpl_free(pool, addr1 + 1) == 0x80000103u, "FPL: unaligned address free is rejected");
 
@@ -45144,7 +45968,7 @@ static void test_fpl_blocking_waits(void) {
 
     /* ---- 2. AllocateFpl blocks then wakes on FreeFpl (FIFO order & CB check) ---- */
     pool = selftest_fpl_create(64, 1);
-    expect(pool >= 0x500u, "FPL: CreateFpl 1-block pool succeeds");
+    expect(pool != 0u && pool < 0x80000000u, "FPL: CreateFpl 1-block pool succeeds");
     expect(selftest_fpl_allocate(pool, out1, 0) == 0, "FPL: allocate exhausts pool");
     addr1 = MEM_R32(out1);
 
@@ -45344,7 +46168,7 @@ static void test_vpl_blocking_waits(void) {
     /* ---- 1. FreeVpl reuse and validation ---- */
     /* PSP-B1-01: 0x130 bytes hand out 0x110, two 128-byte blocks of 136. */
     uint32_t vpool = selftest_vpl_create(0x130u);
-    expect(vpool >= 0x600u, "VPL: CreateVpl returns valid UID");
+    expect(vpool != 0u && vpool < 0x80000000u, "VPL: CreateVpl returns valid UID");
     expect(selftest_vpl_allocate(vpool, 128, out1, 0) == 0, "VPL: first 128B allocation succeeds");
     expect(selftest_vpl_allocate(vpool, 128, out2, 0) == 0, "VPL: second 128B allocation succeeds");
     uint32_t addr1 = MEM_R32(out1);
@@ -45354,7 +46178,7 @@ static void test_vpl_blocking_waits(void) {
     expect(selftest_vpl_try_allocate(vpool, 64, out3) == VPL_NO_SPACE_ERR, "VPL: pool is exhausted");
     expect(MEM_R32(out3) == 0xfeedfaceu, "VPL: exhausted try_allocate leaves outptr untouched");
 
-    expect(selftest_vpl_free(0x6ffu, addr1) == VPL_UNKNOWN_ID_ERR, "VPL: bad UID free is rejected");
+    expect(selftest_vpl_free(0x7ffffff0u, addr1) == VPL_UNKNOWN_ID_ERR, "VPL: bad UID free is rejected");
     expect(selftest_vpl_free(vpool, 0xdeadbeefu) == VPL_UNKNOWN_ID_ERR, "VPL: unknown address free is rejected");
 
     expect(selftest_vpl_free(vpool, addr1) == 0, "VPL: FreeVpl succeeds");
@@ -45371,7 +46195,7 @@ static void test_vpl_blocking_waits(void) {
      * Their code is UNMEASURED (the pspautotests "more than the pool" code); a blocking allocate
      * must not wait for space that cannot exist. */
     vpool = selftest_vpl_create(256);
-    expect(vpool >= 0x600u, "VPL: CreateVpl for the never-fits cells succeeds");
+    expect(vpool != 0u && vpool < 0x80000000u, "VPL: CreateVpl for the never-fits cells succeeds");
     MEM_W32(out1, 0xfeedfaceu);
     expect(selftest_vpl_try_allocate(vpool, 217, out1) == 0x800201b7u &&
                selftest_vpl_try_allocate(vpool, 256, out1) == 0x800201b7u &&
@@ -45383,13 +46207,13 @@ static void test_vpl_blocking_waits(void) {
     expect(selftest_vpl_free(vpool, MEM_R32(out1)) == 0 && selftest_vpl_delete(vpool) == 0,
            "VPL: never-fits pool frees and deletes");
     vpool = selftest_vpl_create(0x20u);
-    expect(vpool >= 0x600u && selftest_vpl_try_allocate(vpool, 1, out1) == 0x800201b7u,
+    expect(vpool != 0u && vpool < 0x80000000u && selftest_vpl_try_allocate(vpool, 1, out1) == 0x800201b7u,
            "VPL: a pool of 0x20 bytes holds no block, so any request is 0x800201B7");
     expect(selftest_vpl_delete(vpool) == 0, "VPL: the 0x20-byte pool deletes");
 
     /* ---- 2. AllocateVpl blocks then wakes on FreeVpl (FIFO order & CB check) ---- */
     vpool = selftest_vpl_create(256);
-    expect(vpool >= 0x600u, "VPL: CreateVpl succeeds");
+    expect(vpool != 0u && vpool < 0x80000000u, "VPL: CreateVpl succeeds");
     /* PSP-B1-01: a 256-byte pool hands out 224 bytes, all of them to one 216-byte block. */
     expect(selftest_vpl_allocate(vpool, 216, out1, 0) == 0, "VPL: allocate 216B exhausts pool");
     addr1 = MEM_R32(out1);
@@ -45549,6 +46373,658 @@ static void test_vpl_blocking_waits(void) {
     s_cur = (int)(cur - s_tcb);
 }
 
+/* Audit 2026-11-17 (F-7460cc80): sceKernelCreateFpl sizes the pool as blockSize * numBlocks
+ * without wrapping. A product past 4 GB used to wrap to a small (or zero) pool while the large
+ * block count was recorded, so allocations ran past the partition block. Such a pool is refused
+ * with NO_MEMORY, as the measured 0x7FFFFFFF-byte block is. */
+static void test_fpl_create_size_product_does_not_wrap(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    static const struct { uint32_t bsize, nblocks; const char *what; } cases[] = {
+        {0x10000u, 0x10001u, "CreateFpl 0x10000 x 0x10001 (wraps to 0x10000) is NO_MEMORY"},
+        {0x80000000u, 2u, "CreateFpl 0x80000000 x 2 (wraps to 0) is NO_MEMORY"},
+        {0xfffffff0u, 0x10000000u, "CreateFpl 0xFFFFFFF0 x 0x10000000 (wraps to 0) is NO_MEMORY"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        uint32_t uid = selftest_fpl_create(cases[i].bsize, cases[i].nblocks);
+        expect(uid == FPL_NO_MEMORY_ERR, cases[i].what);
+        if (uid != 0u && uid < 0x80000000u) (void)selftest_fpl_delete(uid);
+    }
+    /* A product that fits is still a pool of exactly that many blocks. */
+    uint32_t uid = selftest_fpl_create(0x40u, 4u);
+    expect(uid != 0u && uid < 0x80000000u, "CreateFpl 0x40 x 4 makes a pool");
+    uint32_t out = 0x00271060u, seen = 0u;
+    for (int k = 0; k < 4; k++)
+        if (selftest_fpl_try_allocate(uid, out) == 0u) seen++;
+    expect(seen == 4u && selftest_fpl_try_allocate(uid, out) == FPL_NO_MEMORY_ERR,
+           "CreateFpl 0x40 x 4: four blocks, then NO_MEMORY");
+    (void)selftest_fpl_delete(uid);
+}
+
+/* Audit 2026-11-17 (F-30d6ed4b): FreeFpl checks the block in offsets from the pool base, so an
+ * address near 4 GB cannot wrap the end check. A 2-byte-block pool used to take 0xFFFFFFFE onto
+ * its free list and hand it to the next allocate. */
+static void test_fpl_free_bounds_do_not_wrap(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    uint32_t out = 0x00271070u;
+    uint32_t pool = selftest_fpl_create(2u, 2u);
+    expect(pool != 0u && pool < 0x80000000u, "FPL bounds: a 2 x 2-byte pool is created");
+    expect(selftest_fpl_free(pool, 0xfffffffeu) == 0x80000103u,
+           "FPL bounds: FreeFpl of 0xFFFFFFFE from a 2-byte-block pool is ILLEGAL_ADDR");
+    expect(selftest_fpl_try_allocate(pool, out) == 0u, "FPL bounds: first allocate succeeds");
+    uint32_t a = MEM_R32(out);
+    expect(selftest_fpl_try_allocate(pool, out) == 0u, "FPL bounds: second allocate succeeds");
+    uint32_t b = MEM_R32(out);
+    expect(a != 0xfffffffeu && b != 0xfffffffeu && (a < b ? b - a : a - b) == 2u,
+           "FPL bounds: both blocks lie in the pool, none at the refused address");
+    expect(selftest_fpl_try_allocate(pool, out) == FPL_NO_MEMORY_ERR,
+           "FPL bounds: the pool holds two blocks, then NO_MEMORY");
+    uint32_t lo = a < b ? a : b;
+    expect(selftest_fpl_free(pool, lo + 4u) == 0x80000103u,
+           "FPL bounds: FreeFpl one block past the end is ILLEGAL_ADDR");
+    expect(selftest_fpl_free(pool, lo) == 0u && selftest_fpl_free(pool, lo + 2u) == 0u,
+           "FPL bounds: both blocks free");
+    (void)selftest_fpl_delete(pool);
+
+    /* A 1-byte-block pool: 0xFFFFFFFF + 1 wraps to 0, and the block index used to reach the
+     * host tracking array about 4 GB past its end. */
+    pool = selftest_fpl_create(1u, 2u);
+    expect(pool != 0u && pool < 0x80000000u, "FPL bounds: a 2 x 1-byte pool is created");
+    expect(selftest_fpl_free(pool, 0xffffffffu) == 0x80000103u,
+           "FPL bounds: FreeFpl of 0xFFFFFFFF from a 1-byte-block pool is ILLEGAL_ADDR");
+    (void)selftest_fpl_delete(pool);
+}
+
+/* Audit 2026-11-17 (F-5e96c5e7): an FPL or VPL wait that ends with a latched result
+ * (sceKernelReleaseWaitThread's WAIT_RELEASE here) leaves the pool's queue. The entry used to
+ * stay, so ReferStatus counted a thread that no longer waits and a zero-timeout allocate on a
+ * pool with free space answered WAIT_TIMEOUT behind it. */
+static void test_pool_released_waiter_leaves_queue(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x101u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    const uint32_t out1 = 0x00271080u, out2 = 0x00271084u, toptr = 0x00271088u;
+    const uint32_t info = 0x00271100u;
+    CpuState cpu;
+
+    for (int vpl = 0; vpl < 2; vpl++) {
+        const char *k = vpl ? "VPL" : "FPL";
+        char msg[160];
+        uint32_t pool = vpl ? selftest_vpl_create(256u) : selftest_fpl_create(64u, 1u);
+        snprintf(msg, sizeof msg, "%s released waiter: the pool is created", k);
+        expect(pool != 0u && pool < 0x80000000u, msg);
+        uint32_t rc = vpl ? selftest_vpl_allocate(pool, 216u, out1, 0u)
+                          : selftest_fpl_allocate(pool, out1, 0u);
+        snprintf(msg, sizeof msg, "%s released waiter: the owner exhausts the pool", k);
+        expect(rc == 0u, msg);
+        uint32_t held = MEM_R32(out1);
+
+        SelftestPoolWaiterCtx w;
+        memset(&w, 0, sizeof w);
+        w.uid = vpl ? 0x139u : 0x138u;
+        w.tcb = fixture_thread(w.uid, TH_READY, 32);
+        w.tcb->started = 1;
+        w.pool_uid = pool;
+        w.req_size = 128u;
+        w.outptr = out2;
+        MEM_W32(out2, 0xfeedfaceu);
+        w.tcb->coro = sr_coro_create(vpl ? selftest_vpl_waiter_fiber_body : selftest_fpl_waiter_fiber_body,
+                                     &w, (size_t)4 << 20);
+        s_cur = (int)(w.tcb - s_tcb);
+        sr_coro_switch(w.tcb->coro);
+        snprintf(msg, sizeof msg, "%s released waiter: the waiter blocks", k);
+        expect(w.returned == 0 && w.tcb->state == TH_WAIT_OBJ, msg);
+
+        s_cur = (int)(cur - s_tcb);
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = w.uid;
+        snprintf(msg, sizeof msg, "%s released waiter: ReleaseWaitThread returns 0", k);
+        expect(sr_syscall(&cpu, NID_WCR_RELEASE_WAIT) == 0u, msg);
+        s_cur = (int)(w.tcb - s_tcb);
+        w.tcb->state = TH_RUNNING;
+        sr_coro_switch(w.tcb->coro);
+        snprintf(msg, sizeof msg, "%s released waiter: the waiter returns WAIT_RELEASE (0x800201AA)", k);
+        expect(w.returned == 1 && w.ret == 0x800201aau && MEM_R32(out2) == 0xfeedfaceu, msg);
+        s_cur = (int)(cur - s_tcb);
+
+        memset(&cpu, 0, sizeof cpu);
+        MEM_W32(info, vpl ? 52u : 56u);
+        cpu.r[4] = pool;
+        cpu.r[5] = info;
+        rc = sr_syscall(&cpu, vpl ? NID_VPL_REFER : NID_RFS_REFER_FPL);
+        snprintf(msg, sizeof msg, "%s released waiter: ReferStatus counts no waiting thread", k);
+        expect(rc == 0u && MEM_R32(info + (vpl ? 48u : 52u)) == 0u, msg);
+
+        rc = vpl ? selftest_vpl_free(pool, held) : selftest_fpl_free(pool, held);
+        snprintf(msg, sizeof msg, "%s released waiter: the owner frees its block", k);
+        expect(rc == 0u, msg);
+        MEM_W32(toptr, 0u);
+        rc = vpl ? selftest_vpl_allocate(pool, 128u, out1, toptr)
+                 : selftest_fpl_allocate(pool, out1, toptr);
+        snprintf(msg, sizeof msg, "%s released waiter: a zero-timeout allocate takes the free block", k);
+        expect(rc == 0u, msg);
+        if (rc == 0u) {
+            if (vpl) (void)selftest_vpl_free(pool, MEM_R32(out1));
+            else (void)selftest_fpl_free(pool, MEM_R32(out1));
+        }
+
+        sr_coro_destroy(w.tcb->coro);
+        w.tcb->coro = NULL;
+        if (vpl) (void)selftest_vpl_delete(pool);
+        else (void)selftest_fpl_delete(pool);
+    }
+}
+
+/* Audit 2026-11-17 (F-3720bcac): FPL and VPL UIDs come from the shared sr_alloc_uid pool. They
+ * used to be the fixed 0x500 + slot and 0x600 + slot, which a semaphore, thread or memory block
+ * also received once the shared pool reached them, and waits, deletes and the threadman id list
+ * key on the UID. */
+static void test_pool_uids_come_from_the_shared_pool(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t s_uid;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    /* Only ever moves the counter forward, as allocating that many objects would. */
+    if (s_uid < 0x4f0u) s_uid = 0x4f0u;
+    const uint32_t before = s_uid;
+    uint32_t fpl = selftest_fpl_create(64u, 1u);
+    uint32_t vpl = selftest_vpl_create(256u);
+    expect(fpl != 0u && fpl < 0x80000000u && vpl != 0u && vpl < 0x80000000u,
+           "pool uids: an FPL and a VPL are created");
+    expect(fpl >= before && fpl < s_uid && vpl >= before && vpl < s_uid && fpl != vpl,
+           "pool uids: both UIDs are ones the shared pool handed out during the creates");
+    int collided = 0;
+    for (int k = 0; k < 0x400 && s_uid <= 0x700u; k++) {
+        uint32_t u = sr_alloc_uid();
+        if (u == fpl || u == vpl) collided = 1;
+    }
+    expect(!collided, "pool uids: no later shared-pool UID equals a live FPL or VPL UID");
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    MEM_W32(0x00271200u, 56u);
+    cpu.r[4] = fpl;
+    cpu.r[5] = 0x00271200u;
+    expect(sr_syscall(&cpu, NID_RFS_REFER_FPL) == 0u, "pool uids: ReferFplStatus finds the pool by its UID");
+    expect(selftest_fpl_delete(fpl) == 0u && selftest_vpl_delete(vpl) == 0u,
+           "pool uids: both pools delete by their UIDs");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = fpl;
+    cpu.r[5] = 0x00271200u;
+    expect(sr_syscall(&cpu, NID_RFS_REFER_FPL) == FPL_UNKNOWN_ID_ERR,
+           "pool uids: a deleted FPL UID is unknown");
+}
+
+/* Audit 2026-11-17 (F-6235ecfb): sceKernelAllocPartitionMemory of size 0 on partitions 2 and 6
+ * is MEMBLOCK_ALLOC_FAILED (0x800200D9), as memblock.expected records for AllocMemoryBlock, which
+ * forwards to it on partition 2, and as the volatile partition answers. It used to hand back a
+ * 16-byte block. */
+static void test_partition_alloc_size_zero_refused(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t name = 0x00271300u;
+    MEM_W8(name, (uint8_t)'z');
+    MEM_W8(name + 1u, 0u);
+    static const struct { uint32_t part, type; const char *what; } cases[] = {
+        {2u, 0u, "AllocPartitionMemory(2, Low, size 0) is MEMBLOCK_ALLOC_FAILED"},
+        {2u, 1u, "AllocPartitionMemory(2, High, size 0) is MEMBLOCK_ALLOC_FAILED"},
+        {6u, 0u, "AllocPartitionMemory(6, Low, size 0) is MEMBLOCK_ALLOC_FAILED"},
+        {5u, 0u, "AllocPartitionMemory(5, Low, size 0) is MEMBLOCK_ALLOC_FAILED"},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        CpuState cpu;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = cases[i].part;
+        cpu.r[5] = name;
+        cpu.r[6] = cases[i].type;
+        cpu.r[7] = 0u;
+        cpu.r[8] = 0u;
+        uint32_t rc = sr_syscall(&cpu, 0x237dbd4fu);
+        expect(rc == 0x800200d9u, cases[i].what);
+        if (rc != 0u && rc < 0x80000000u) {
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = rc;
+            (void)sr_syscall(&cpu, 0xb6d61d02u);
+        }
+    }
+}
+
+/* Audit 2026-11-17 (F-6f7cbaae, F-9331313c): with every partition block record live, a Low
+ * request used to take its memory and return a UID it never recorded, whose head address read 0
+ * (an FPL or VPL built on it sat at guest address 0). It is now refused before any memory is
+ * taken, and every UID handed out names a real block. */
+static void test_partition_low_refused_when_block_records_full(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_partition_free_block_count(void);
+    extern uint32_t sr_hle_test_partition_heap_ptr(void);
+    const uint32_t NID_ALLOC_PART = 0x237dbd4fu, NID_GET_HEAD = 0x9d9a5ba1u,
+                   NID_FREE_PART = 0xb6d61d02u;
+    static uint32_t uids[600];
+    int n = 0, headless = 0;
+    uint32_t refused = 0u, heap_before = 0u;
+    int free_before = 0;
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    for (int i = 0; i < 600; i++) {
+        heap_before = sr_hle_test_partition_heap_ptr();
+        free_before = sr_hle_test_partition_free_block_count();
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
+        uint32_t uid = sr_syscall(&cpu, NID_ALLOC_PART);
+        if (uid >= 0x80000000u) { refused = uid; break; }
+        uids[n++] = uid;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = uid;
+        if (sr_syscall(&cpu, NID_GET_HEAD) == 0u) headless++;
+    }
+    expect(headless == 0, "every partition block UID handed out has a real head address");
+    expect(refused == 0x800200d9u,
+           "a Low block past the last free block record is MEMBLOCK_ALLOC_FAILED, not a UID");
+    expect(sr_hle_test_partition_heap_ptr() == heap_before &&
+               sr_hle_test_partition_free_block_count() == free_before,
+           "the refused request takes no partition memory");
+    for (int i = 0; i < n; i++) {
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = uids[i];
+        (void)sr_syscall(&cpu, NID_FREE_PART);
+    }
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
+    uint32_t again = sr_syscall(&cpu, NID_ALLOC_PART);
+    expect(again < 0x80000000u, "a Low block allocates again once the records are freed");
+    if (again < 0x80000000u) {
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = again;
+        (void)sr_syscall(&cpu, NID_FREE_PART);
+    }
+}
+
+/* Audit 2026-11-17 (F-87e96d5e): an Addr block keeps its exact, unaligned bounds, so the free
+ * block left beside it can start unaligned. A Low block taken from that free block used to start
+ * there; it now starts on the next 256-byte boundary, as a bump allocation does, and the head
+ * below it stays free. */
+static void test_partition_low_from_unaligned_free_block_is_aligned(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern int sr_hle_test_partition_free_block_count(void);
+    extern int sr_hle_test_partition_get_free_block(int idx, uint32_t *addr_out, uint32_t *size_out);
+    const uint32_t NID_ALLOC_PART = 0x237dbd4fu, NID_GET_HEAD = 0x9d9a5ba1u,
+                   NID_FREE_PART = 0xb6d61d02u;
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    uint32_t uid[2], head[2];
+    for (int i = 0; i < 2; i++) {
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x1000u;
+        uid[i] = sr_syscall(&cpu, NID_ALLOC_PART);
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = uid[i];
+        head[i] = sr_syscall(&cpu, NID_GET_HEAD);
+    }
+    expect(uid[0] < 0x80000000u && uid[1] < 0x80000000u && head[1] == head[0] + 0x1000u,
+           "two adjacent Low blocks allocate");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid[0];
+    expect(sr_syscall(&cpu, NID_FREE_PART) == 0u, "the first Low block is freed");
+    /* An Addr block of 0x234 bytes at the freed block's start leaves [+0x234, +0x1000) free. */
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 2u; cpu.r[7] = 0x234u; cpu.r[8] = head[0];
+    const uint32_t fixed = sr_syscall(&cpu, NID_ALLOC_PART);
+    expect(fixed < 0x80000000u, "an unaligned Addr block fits in the freed span");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = 2u; cpu.r[5] = 0u; cpu.r[6] = 0u; cpu.r[7] = 0x100u;
+    const uint32_t low = sr_syscall(&cpu, NID_ALLOC_PART);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = low;
+    const uint32_t low_head = sr_syscall(&cpu, NID_GET_HEAD);
+    char msg[160];
+    snprintf(msg, sizeof msg, "a Low block from the unaligned free block starts 256-byte aligned "
+             "(0x%08x, want 0x%08x)", low_head, head[0] + 0x300u);
+    expect(low < 0x80000000u && low_head == head[0] + 0x300u, msg);
+    /* Freeing both returns the whole span as one free block. */
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = low;
+    expect(sr_syscall(&cpu, NID_FREE_PART) == 0u, "the aligned Low block is freed");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = fixed;
+    expect(sr_syscall(&cpu, NID_FREE_PART) == 0u, "the Addr block is freed");
+    uint32_t fb_addr = 0u, fb_size = 0u;
+    expect(sr_hle_test_partition_free_block_count() == 1 &&
+               sr_hle_test_partition_get_free_block(0, &fb_addr, &fb_size) &&
+               fb_addr == head[0] && fb_size == 0x1000u,
+           "the head left free below the aligned block coalesces back into the whole span");
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = uid[1];
+    (void)sr_syscall(&cpu, NID_FREE_PART);
+}
+
+/* Audit 2026-11-17 (F-83135ccc): SR_ALLOC_GUARD=0 used to turn off the bump path's bounds check,
+ * so a Low request past the partition top succeeded over live memory. The switch now silences
+ * only the refusal line. */
+static void test_partition_alloc_guard_off_still_refuses(void) {
+    extern void sr_hle_test_partition_reset(void);
+    extern uint32_t sr_hle_test_partition_heap_ptr(void);
+    extern uint32_t sr_hle_test_partition_bump_top(void);
+    extern void sr_hle_test_alloc_env_reset(void);
+    extern uint32_t alloc_block(uint32_t size);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    hle_test_setenv("SR_ALLOC_GUARD", "0");
+    sr_hle_test_alloc_env_reset();
+    const uint32_t heap = sr_hle_test_partition_heap_ptr();
+    const uint32_t room = sr_hle_test_partition_bump_top() - ((heap + 0xffu) & ~0xffu);
+    expect(alloc_block(room + 0x100u) == 0xffffffffu,
+           "with SR_ALLOC_GUARD=0 a Low request past the partition top is still refused");
+    expect(sr_hle_test_partition_heap_ptr() == heap, "the refused request leaves the bump pointer");
+    hle_test_setenv("SR_ALLOC_GUARD", NULL);
+    sr_hle_test_alloc_env_reset();
+    sr_hle_test_partition_reset();
+}
+
+/* Audit 2026-11-17 (F-3bf27c21): a PSP limits FPL and VPL creation only by memory and UIDs. The
+ * runtime's tables held 16 pools each, and the 17th create returned an unmeasured 0x800200D9. A
+ * VPL the partition cannot hold is NO_MEMORY (pspautotests tests/threads/vpl/create.expected at
+ * 70e72391e95b4b5bf6cd7ffd7e0259f52abf9a99, "Size 0x10000000: Failed (80020190)"). */
+#define POOL_GROW_COUNT 40
+static void test_pools_past_the_old_table(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t count_out = 0x00271400u, out = 0x00271404u, info = 0x00271440u;
+    char msg[192];
+    for (int vpl = 0; vpl < 2; vpl++) {
+        const char *k = vpl ? "VPL" : "FPL";
+        const uint32_t tmid = vpl ? 5u : 6u;   /* SCE_KERNEL_TMID_Vpl / _Fpl */
+        uint32_t pools[POOL_GROW_COUNT];
+        MEM_W32(count_out, 0xa5a5a5a5u);
+        const uint32_t listed_before = b1_call(SYNC_GROW_TMID_EVF, tmid, 0u, 0u, count_out) == 0u
+            ? MEM_R32(count_out) : UINT32_MAX;
+        int created = 0;
+        uint32_t failed = 0u;
+        for (; created < POOL_GROW_COUNT; created++) {
+            pools[created] = vpl ? selftest_vpl_create(0x100u) : selftest_fpl_create(16u, 1u);
+            if ((int32_t)pools[created] <= 0) { failed = pools[created]; break; }
+        }
+        snprintf(msg, sizeof msg, "%s past the old table: %d pools create in a row (stopped at %d with 0x%08x)",
+                 k, POOL_GROW_COUNT, created, failed);
+        expect(created == POOL_GROW_COUNT, msg);
+        MEM_W32(count_out, 0xa5a5a5a5u);
+        const uint32_t listed_after = b1_call(SYNC_GROW_TMID_EVF, tmid, 0u, 0u, count_out) == 0u
+            ? MEM_R32(count_out) : UINT32_MAX;
+        snprintf(msg, sizeof msg, "%s past the old table: GetThreadmanIdList lists all %d new pools "
+                 "(0x%08x before, 0x%08x after)", k, created, listed_before, listed_after);
+        expect(listed_before != UINT32_MAX && listed_after == listed_before + (uint32_t)created, msg);
+        if (created > 0) {
+            const uint32_t last = pools[created - 1];
+            uint32_t rc = vpl ? selftest_vpl_try_allocate(last, 16u, out) : selftest_fpl_try_allocate(last, out);
+            snprintf(msg, sizeof msg, "%s past the old table: the last pool allocates", k);
+            expect(rc == 0u, msg);
+            if (rc == 0u) {
+                rc = vpl ? selftest_vpl_free(last, MEM_R32(out)) : selftest_fpl_free(last, MEM_R32(out));
+                snprintf(msg, sizeof msg, "%s past the old table: the last pool takes its block back", k);
+                expect(rc == 0u, msg);
+            }
+            CpuState cpu;
+            memset(&cpu, 0, sizeof cpu);
+            MEM_W32(info, vpl ? 52u : 56u);
+            cpu.r[4] = last;
+            cpu.r[5] = info;
+            snprintf(msg, sizeof msg, "%s past the old table: the last pool refers", k);
+            expect(sr_syscall(&cpu, vpl ? NID_VPL_REFER : NID_RFS_REFER_FPL) == 0u, msg);
+        }
+        uint32_t delete_failed = 0u;
+        while (--created >= 0) {
+            uint32_t rc = vpl ? selftest_vpl_delete(pools[created]) : selftest_fpl_delete(pools[created]);
+            if (rc != 0u && delete_failed == 0u) delete_failed = rc;
+        }
+        snprintf(msg, sizeof msg, "%s past the old table: every pool deletes (first failure 0x%08x)",
+                 k, delete_failed);
+        expect(delete_failed == 0u, msg);
+        MEM_W32(count_out, 0xa5a5a5a5u);
+        snprintf(msg, sizeof msg, "%s past the old table: GetThreadmanIdList lists none of the deleted pools", k);
+        expect(b1_call(SYNC_GROW_TMID_EVF, tmid, 0u, 0u, count_out) == 0u &&
+                   MEM_R32(count_out) == listed_before, msg);
+    }
+    const uint32_t big = selftest_vpl_create(0x10000000u);
+    expect(big == 0x80020190u, "CreateVpl of 0x10000000 bytes, more than the partition holds, is "
+                               "NO_MEMORY (vpl/create.expected)");
+    if ((int32_t)big > 0) (void)selftest_vpl_delete(big);
+}
+
+/* Audit 2026-11-17 (F-51d6e4b2): pspautotests tests/threads/fpl/delete.expected (70e72391, recorded
+ * on a PSP): a NULL, invalid or already deleted FPL id is 0x8002019D. DeleteFpl used to return 0. */
+static void test_delete_unknown_fpl(void) {
+    extern void sr_hle_test_partition_reset(void);
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t pool = selftest_fpl_create(64u, 1u);
+    expect(pool != 0u && pool < 0x80000000u, "DeleteFpl unknown: the pool is created");
+    expect(selftest_fpl_delete(pool) == 0u, "DeleteFpl unknown: the first delete succeeds");
+    expect(selftest_fpl_delete(pool) == FPL_UNKNOWN_ID_ERR, "DeleteFpl of a deleted pool is 0x8002019D");
+    expect(selftest_fpl_delete(0u) == FPL_UNKNOWN_ID_ERR, "DeleteFpl of id 0 is 0x8002019D");
+    expect(selftest_fpl_delete(0x7ffffff0u) == FPL_UNKNOWN_ID_ERR, "DeleteFpl of an invalid id is 0x8002019D");
+    const uint32_t vpl = selftest_vpl_create(256u);
+    expect(selftest_vpl_delete(vpl) == 0u && selftest_vpl_delete(vpl) == 0x8002019cu,
+           "DeleteVpl of a deleted pool is 0x8002019C (control)");
+}
+
+/* A waiter that, once its first allocate returns, allocates from the same pool again. */
+typedef struct {
+    TCB *tcb;
+    int vpl;
+    uint32_t pool;
+    uint32_t outptr;
+    uint32_t ret[2];
+    int returned;
+} PoolRetryCtx;
+
+static void pool_retry_waiter_body(void *arg) {
+    PoolRetryCtx *c = (PoolRetryCtx *)arg;
+    for (int i = 0; i < 2; i++) {
+        c->ret[i] = c->vpl ? selftest_vpl_allocate(c->pool, 128u, c->outptr, 0u)
+                           : selftest_fpl_allocate(c->pool, c->outptr, 0u);
+        c->returned = i + 1;
+    }
+    s_pool_parks++;
+    selftest_park_on_scheduler();
+}
+
+typedef struct {
+    TCB *tcb;
+    int vpl;
+    uint32_t pool;
+    uint32_t ret;
+    int returned;
+} PoolDeleterCtx;
+
+static void pool_deleter_body(void *arg) {
+    PoolDeleterCtx *c = (PoolDeleterCtx *)arg;
+    c->ret = c->vpl ? selftest_vpl_delete(c->pool) : selftest_fpl_delete(c->pool);
+    c->returned = 1;
+    s_pool_parks++;
+    selftest_park_on_scheduler();
+}
+
+/* Audit 2026-11-17 (F-ec89dc05): DeleteFpl and DeleteVpl woke their waiters and preempted to a
+ * stronger one while the pool was still live, and tore it down only when the deleter ran again.
+ * A woken waiter that allocated again then queued on the doomed pool and was never woken. The
+ * pool must already be unknown when the waiter runs. */
+static void test_pool_delete_tears_down_before_waking(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int vpl = 0; vpl < 2; vpl++) {
+        const char *k = vpl ? "VPL" : "FPL";
+        char msg[192];
+        reset_fixture();
+        sr_hle_test_partition_reset();
+        sr_hle_init();
+        TCB *cur = fixture_thread(0x101u, TH_RUNNING, 32);
+        s_cur = (int)(cur - s_tcb);
+        cur->started = 1;
+        const uint32_t out1 = 0x00271480u, out2 = 0x00271484u;
+        const uint32_t pool = vpl ? selftest_vpl_create(256u) : selftest_fpl_create(64u, 1u);
+        const uint32_t rc = vpl ? selftest_vpl_allocate(pool, 216u, out1, 0u) : selftest_fpl_allocate(pool, out1, 0u);
+        snprintf(msg, sizeof msg, "%s delete order: the owner exhausts a new pool", k);
+        expect(pool != 0u && pool < 0x80000000u && rc == 0u, msg);
+
+        PoolRetryCtx a;
+        memset(&a, 0, sizeof a);
+        a.tcb = fixture_thread(0x13au, TH_READY, 16);   /* stronger than the deleter */
+        a.tcb->started = 1;
+        a.vpl = vpl;
+        a.pool = pool;
+        a.outptr = out2;
+        a.tcb->coro = sr_coro_create(pool_retry_waiter_body, &a, (size_t)4 << 20);
+        s_cur = (int)(a.tcb - s_tcb);
+        sr_coro_switch(a.tcb->coro);
+        snprintf(msg, sizeof msg, "%s delete order: the stronger waiter blocks", k);
+        expect(a.returned == 0 && a.tcb->state == TH_WAIT_OBJ, msg);
+
+        PoolDeleterCtx b;
+        memset(&b, 0, sizeof b);
+        b.tcb = fixture_thread(0x13bu, TH_READY, 32);
+        b.tcb->started = 1;
+        b.vpl = vpl;
+        b.pool = pool;
+        b.tcb->coro = sr_coro_create(pool_deleter_body, &b, (size_t)4 << 20);
+        s_cur = (int)(b.tcb - s_tcb);
+        b.tcb->state = TH_RUNNING;
+        sr_coro_switch(b.tcb->coro);
+        snprintf(msg, sizeof msg, "%s delete order: the delete wakes the stronger waiter and yields to it", k);
+        expect(b.returned == 0 && a.tcb->state == TH_READY, msg);
+
+        s_cur = (int)(a.tcb - s_tcb);
+        a.tcb->state = TH_RUNNING;
+        sr_coro_switch(a.tcb->coro);
+        snprintf(msg, sizeof msg, "%s delete order: the waiter returns WAIT_DELETE (ret 0x%08x)", k, a.ret[0]);
+        expect(a.returned >= 1 && a.ret[0] == 0x800201b5u, msg);
+        snprintf(msg, sizeof msg, "%s delete order: its next allocate finds the pool unknown at once "
+                 "(returned %d, ret 0x%08x)", k, a.returned, a.ret[1]);
+        expect(a.returned == 2 && a.ret[1] == (vpl ? 0x8002019cu : FPL_UNKNOWN_ID_ERR), msg);
+
+        s_cur = (int)(b.tcb - s_tcb);
+        b.tcb->state = TH_RUNNING;
+        sr_coro_switch(b.tcb->coro);
+        snprintf(msg, sizeof msg, "%s delete order: the delete returns 0", k);
+        expect(b.returned == 1 && b.ret == 0u, msg);
+
+        sr_coro_destroy(a.tcb->coro);
+        a.tcb->coro = NULL;
+        sr_coro_destroy(b.tcb->coro);
+        b.tcb->coro = NULL;
+        s_cur = (int)(cur - s_tcb);
+    }
+}
+
+/* Audit 2026-11-17 (F-894b7467): under attribute 0x100 a freed block goes to the waiter with the
+ * best priority, first of equals; without it to the first waiter. pspautotests
+ * tests/threads/fpl/priority.expected and tests/threads/vpl/priority.expected (70e72391, recorded
+ * on a PSP) give that order. FPL and VPL used to wake the first waiter under either attribute. */
+static void test_pool_priority_attribute_orders_waiters(void) {
+    extern void sr_hle_test_partition_reset(void);
+    for (int vpl = 0; vpl < 2; vpl++) {
+        for (int prio_attr = 0; prio_attr < 2; prio_attr++) {
+            const char *k = vpl ? "VPL" : "FPL";
+            const char *order = prio_attr ? "attr 0x100" : "attr 0 (FIFO control)";
+            char msg[192];
+            reset_fixture();
+            sr_hle_test_partition_reset();
+            sr_hle_init();
+            TCB *cur = fixture_thread(0x101u, TH_RUNNING, 8);   /* never preempted by a waiter */
+            s_cur = (int)(cur - s_tcb);
+            cur->started = 1;
+            const uint32_t out0 = 0x00271500u, out1 = 0x00271504u, out2 = 0x00271508u;
+            CpuState cpu;
+            memset(&cpu, 0, sizeof cpu);
+            cpu.r[4] = FPL_NAMEBUF;
+            cpu.r[5] = 2u;
+            cpu.r[6] = prio_attr ? 0x100u : 0u;
+            cpu.r[7] = vpl ? 256u : 64u;
+            cpu.r[8] = 1u;   /* FPL numBlocks */
+            const uint32_t pool = sr_syscall(&cpu, vpl ? NID_VPL_CREATE : NID_FPL_CREATE);
+            const uint32_t rc = vpl ? selftest_vpl_allocate(pool, 216u, out0, 0u) : selftest_fpl_allocate(pool, out0, 0u);
+            snprintf(msg, sizeof msg, "%s %s: the owner exhausts a new pool", k, order);
+            expect(pool != 0u && pool < 0x80000000u && rc == 0u, msg);
+            const uint32_t held = MEM_R32(out0);
+
+            SelftestPoolWaiterCtx w[2];
+            const int prio[2] = {40, 20};   /* the weaker thread queues first */
+            for (int i = 0; i < 2; i++) {
+                memset(&w[i], 0, sizeof w[i]);
+                w[i].uid = 0x140u + (uint32_t)i;
+                w[i].tcb = fixture_thread(w[i].uid, TH_READY, prio[i]);
+                w[i].tcb->started = 1;
+                w[i].pool_uid = pool;
+                w[i].req_size = 128u;
+                w[i].outptr = i ? out2 : out1;
+                w[i].tcb->coro = sr_coro_create(vpl ? selftest_vpl_waiter_fiber_body : selftest_fpl_waiter_fiber_body,
+                                                &w[i], (size_t)4 << 20);
+                s_cur = (int)(w[i].tcb - s_tcb);
+                sr_coro_switch(w[i].tcb->coro);
+            }
+            s_cur = (int)(cur - s_tcb);
+            snprintf(msg, sizeof msg, "%s %s: both waiters block", k, order);
+            expect(w[0].tcb->state == TH_WAIT_OBJ && w[1].tcb->state == TH_WAIT_OBJ, msg);
+
+            const uint32_t frc = vpl ? selftest_vpl_free(pool, held) : selftest_fpl_free(pool, held);
+            const int woken = prio_attr ? 1 : 0;
+            snprintf(msg, sizeof msg, "%s %s: the free wakes the %s waiter only", k, order,
+                     prio_attr ? "stronger (second-queued)" : "first-queued");
+            expect(frc == 0u && w[woken].tcb->state == TH_READY && w[1 - woken].tcb->state == TH_WAIT_OBJ, msg);
+
+            s_cur = (int)(w[woken].tcb - s_tcb);
+            w[woken].tcb->state = TH_RUNNING;
+            sr_coro_switch(w[woken].tcb->coro);
+            snprintf(msg, sizeof msg, "%s %s: the woken waiter receives the freed block", k, order);
+            expect(w[woken].returned == 1 && w[woken].ret == 0u, msg);
+            s_cur = (int)(cur - s_tcb);
+
+            if (vpl) (void)selftest_vpl_delete(pool);
+            else (void)selftest_fpl_delete(pool);
+            for (int i = 0; i < 2; i++) {
+                sr_coro_destroy(w[i].tcb->coro);
+                w[i].tcb->coro = NULL;
+            }
+        }
+    }
+}
+
+/* Audit 2026-11-17 (F-9d16eaf3): the FPL create and allocate paths print only under
+ * SR_ALLOC_TRACE; they wrote a stderr line on every sceKernelTryAllocateFpl. */
+static void test_fpl_calls_are_quiet_without_trace(void) {
+    extern void sr_hle_test_partition_reset(void);
+    if (getenv("SR_ALLOC_TRACE")) return;
+    reset_fixture();
+    sr_hle_test_partition_reset();
+    sr_hle_init();
+    const uint32_t out = 0x00271580u;
+    rt_capture_begin();
+    const uint32_t pool = selftest_fpl_create(64u, 1u);
+    const uint32_t ok = selftest_fpl_try_allocate(pool, out);
+    const uint32_t full = selftest_fpl_try_allocate(pool, out);
+    const char *log = rt_capture_end();
+    expect(ok == 0u && full == FPL_NO_MEMORY_ERR, "quiet FPL: the pool allocates once, then is full");
+    expect(strstr(log, "sceKernelCreateFpl:") == NULL && strstr(log, "sceKernelTryAllocateFpl:") == NULL,
+           "quiet FPL: CreateFpl and TryAllocateFpl write no stderr line without SR_ALLOC_TRACE");
+    (void)selftest_fpl_delete(pool);
+}
+
 /* Pool bounds measured on the PSP-3000 (docs/HARDWARE_ORACLE.md, #2397):
  * - PSP-HLE-KERNEL-STATUS-002 (case hle-kernel-pool-bounds, 2026-11-10, boot 173): partition 2,
  *   attribute 0, NULL options. sceKernelCreateFpl with block size 0 and one block is 0x800201B7,
@@ -45572,7 +47048,7 @@ static void test_kernel_pool_bounds_measured(void) {
            "pool bounds: a refused CreateFpl leaves the partition as it was");
 
     uint32_t vpl = selftest_vpl_create(0x1000u);
-    expect(vpl >= 0x600u && vpl < 0x80000000u, "pool bounds: CreateVpl of 0x1000 bytes returns a UID");
+    expect(vpl != 0u && vpl < 0x80000000u, "pool bounds: CreateVpl of 0x1000 bytes returns a UID");
     uint32_t blocks[16] = {0};
     uint32_t taken = 0;
     for (; taken < 16u; ++taken) {
@@ -45593,7 +47069,7 @@ static void test_kernel_pool_bounds_measured(void) {
 
     /* PSP-B1-01: the 1024-byte pool reports 992 bytes of pool and of free space. */
     vpl = selftest_vpl_create(1024u);
-    expect(vpl >= 0x600u && vpl < 0x80000000u, "pool bounds: CreateVpl of 1024 bytes returns a UID");
+    expect(vpl != 0u && vpl < 0x80000000u, "pool bounds: CreateVpl of 1024 bytes returns a UID");
     CpuState cpu;
     MEM_W32(VPL_INFO, 0x34u);
     memset(&cpu, 0, sizeof cpu); cpu.r[4] = vpl; cpu.r[5] = VPL_INFO;
@@ -45862,6 +47338,274 @@ static void test_mbx_lifecycle_and_ordering(void) {
     expect(MEM_R32(out) == 0xfeedfaceu, "MBX: waiter woken by DeleteMbx writes no message");
     sr_coro_destroy(w.tcb->coro); w.tcb->coro = NULL;
     s_cur = (int)(cur - s_tcb);
+}
+
+/* ---- Mailboxes have no host-table limits ------------------------------------------
+ * A PSP mailbox links the guest's own packets, and the kernel limits neither the queue nor
+ * the number of mailboxes. 200 queued messages all arrive, in order; 40 mailboxes exist at
+ * once; 70 receivers wait on one mailbox and each gets its message in arrival order.
+ * MUTANT: restore the 128-message array -- the 129th SendMbx answers NO_MEMORY. MUTANT:
+ *   restore the 32-mailbox array -- the 33rd CreateMbx answers NO_MEMORY. MUTANT: restore the
+ *   64-waiter array -- the 65th receiver answers NO_MEMORY instead of waiting. */
+#define MBX_BULK_BASE   0x00244000u
+#define MBX_BULK_COUNT  200u
+#define MBX_BULK_BOXES  40u
+#define MBX_BULK_WAITERS 70u
+static void test_mbx_has_no_host_table_limits(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x160u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+
+    uint32_t mbx = selftest_mbx_create(0);
+    int sent = 1, order = 1;
+    for (uint32_t i = 0; i < MBX_BULK_COUNT; i++) {
+        mbx_init_packet(MBX_BULK_BASE + 16u * i, 0u);
+        sent &= selftest_mbx_send(mbx, MBX_BULK_BASE + 16u * i) == 0u;
+    }
+    expect(sent, "MBX: 200 SendMbx with no receiver all succeed");
+    expect(selftest_mbx_refer(mbx, MBX_INFO) == 0 && MEM_R32(MBX_INFO + 44u) == MBX_BULK_COUNT,
+           "MBX: ReferMbxStatus counts all 200 queued messages");
+    for (uint32_t i = 0; i < MBX_BULK_COUNT; i++) {
+        MEM_W32(MBX_OUTPTR, 0u);
+        order &= selftest_mbx_poll(mbx, MBX_OUTPTR) == 0u &&
+                 MEM_R32(MBX_OUTPTR) == MBX_BULK_BASE + 16u * i;
+    }
+    expect(order, "MBX: the 200 messages arrive in the order they were sent");
+    expect(selftest_mbx_delete(mbx) == 0u, "MBX: the bulk mailbox deletes");
+
+    uint32_t boxes[MBX_BULK_BOXES];
+    int made = 1;
+    for (uint32_t i = 0; i < MBX_BULK_BOXES; i++) {
+        boxes[i] = selftest_mbx_create(0);
+        made &= boxes[i] != 0u && (boxes[i] >> 31) == 0u;
+    }
+    expect(made, "MBX: 40 mailboxes exist at once");
+    int gone = 1;
+    for (uint32_t i = 0; i < MBX_BULK_BOXES; i++) gone &= selftest_mbx_delete(boxes[i]) == 0u;
+    expect(gone, "MBX: the 40 mailboxes delete");
+
+    mbx = selftest_mbx_create(0);
+    static SelftestMbxWaiterCtx ws[MBX_BULK_WAITERS];
+    int blocked = 1;
+    for (uint32_t i = 0; i < MBX_BULK_WAITERS; i++) {
+        memset(&ws[i], 0, sizeof ws[i]);
+        ws[i].uid = 0x400u + i;
+        ws[i].tcb = fixture_thread(ws[i].uid, TH_READY, 40);
+        ws[i].tcb->started = 1;
+        ws[i].mbx_uid = mbx;
+        ws[i].outptr = MBX_BULK_BASE + 0x1000u + 4u * i;
+        ws[i].tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, &ws[i], (size_t)1 << 20);
+        if (!ws[i].tcb->coro) { blocked = 0; break; }
+        s_cur = (int)(ws[i].tcb - s_tcb);
+        ws[i].tcb->state = TH_RUNNING;
+        sr_coro_switch(ws[i].tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+        blocked &= !ws[i].returned && ws[i].tcb->state == TH_WAIT_OBJ;
+    }
+    expect(blocked, "MBX: 70 receivers all block on one empty mailbox");
+    expect(selftest_mbx_refer(mbx, MBX_INFO) == 0 &&
+               MEM_R32(MBX_INFO + 40u) == MBX_BULK_WAITERS,
+           "MBX: ReferMbxStatus counts all 70 waiting receivers");
+    int served = 1;
+    for (uint32_t i = 0; i < MBX_BULK_WAITERS && blocked; i++) {
+        mbx_init_packet(MBX_BULK_BASE + 16u * i, 0u);
+        served &= selftest_mbx_send(mbx, MBX_BULK_BASE + 16u * i) == 0u &&
+                  ws[i].tcb->state == TH_READY;
+        s_cur = (int)(ws[i].tcb - s_tcb);
+        ws[i].tcb->state = TH_RUNNING;
+        sr_coro_switch(ws[i].tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+        served &= ws[i].returned && ws[i].ret == 0u &&
+                  MEM_R32(ws[i].outptr) == MBX_BULK_BASE + 16u * i;
+    }
+    expect(served, "MBX: each send serves the longest-waiting receiver its message");
+    for (uint32_t i = 0; i < MBX_BULK_WAITERS; i++)
+        if (ws[i].tcb && ws[i].tcb->coro) { sr_coro_destroy(ws[i].tcb->coro); ws[i].tcb->coro = NULL; }
+    expect(selftest_mbx_delete(mbx) == 0u, "MBX: the waited mailbox deletes");
+    s_cur = -1;
+}
+
+/* ---- A send's wake reaches a receiver that is blocked ------------------------------
+ * A receiver still on the queue but not blocked (its timed wait ran out and it has not run
+ * yet) cannot take the wake: the send goes on to the next waiter, which is blocked.
+ * MUTANT: pop only waiters[0] in h_SendMbx -- the blocked second receiver is never woken
+ * although a message is queued. */
+static void test_mbx_send_wakes_a_blocked_receiver(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x170u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    uint32_t mbx = selftest_mbx_create(0);
+    SelftestMbxWaiterCtx a, b;
+    memset(&a, 0, sizeof a);
+    memset(&b, 0, sizeof b);
+    a.uid = 0x171u; b.uid = 0x172u;
+    a.mbx_uid = b.mbx_uid = mbx;
+    a.outptr = MBX_BULK_BASE + 0x1800u;
+    b.outptr = MBX_BULK_BASE + 0x1804u;
+    MEM_W32(MBX_TIMEOUT_PTR, 500000u);
+    a.toptr = MBX_TIMEOUT_PTR;
+    SelftestMbxWaiterCtx *ctxs[2] = {&a, &b};
+    for (int i = 0; i < 2; i++) {
+        ctxs[i]->tcb = fixture_thread(ctxs[i]->uid, TH_READY, 40);
+        ctxs[i]->tcb->started = 1;
+        ctxs[i]->tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, ctxs[i],
+                                            (size_t)1 << 20);
+        s_cur = (int)(ctxs[i]->tcb - s_tcb);
+        ctxs[i]->tcb->state = TH_RUNNING;
+        sr_coro_switch(ctxs[i]->tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+    }
+    expect(a.tcb->state == TH_WAIT_OBJ && b.tcb->state == TH_WAIT_OBJ,
+           "MBX: a timed and an untimed receiver block");
+    /* The timed receiver's deadline passes: the scheduler readies it, still on the queue. */
+    a.tcb->state = TH_READY;
+    a.tcb->wake_cause = SCHED_WAKE_TIMEOUT;
+    mbx_init_packet(MBX_MSG_BASE, 0u);
+    expect(selftest_mbx_send(mbx, MBX_MSG_BASE) == 0u, "MBX: SendMbx succeeds");
+    expect(b.tcb->state == TH_READY,
+           "MBX: the send passes over the timed-out receiver and wakes the blocked one");
+    for (int i = 0; i < 2; i++) {
+        s_cur = (int)(ctxs[i]->tcb - s_tcb);
+        ctxs[i]->tcb->state = TH_RUNNING;
+        sr_coro_switch(ctxs[i]->tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+    }
+    const int one_message = (a.returned && a.ret == 0u && MEM_R32(a.outptr) == MBX_MSG_BASE) !=
+                            (b.returned && b.ret == 0u && MEM_R32(b.outptr) == MBX_MSG_BASE);
+    expect(one_message, "MBX: exactly one receiver takes the single message");
+    (void)selftest_mbx_delete(mbx);
+    for (int i = 0; i < 2; i++) {
+        if (!ctxs[i]->returned && ctxs[i]->tcb->state == TH_READY) {
+            s_cur = (int)(ctxs[i]->tcb - s_tcb);
+            ctxs[i]->tcb->state = TH_RUNNING;
+            sr_coro_switch(ctxs[i]->tcb->coro);
+            s_cur = (int)(cur - s_tcb);
+        }
+        if (ctxs[i]->tcb->coro) { sr_coro_destroy(ctxs[i]->tcb->coro); ctxs[i]->tcb->coro = NULL; }
+    }
+    s_cur = -1;
+}
+
+/* ---- ReceiveMbxCB takes a message its own callback sent ----------------------------
+ * The receiver runs a pending callback before it blocks; the callback sends to the mailbox
+ * the receiver waits on. The send finds the receiver running, not blocked, so the receiver
+ * must take the message itself when its callbacks return.
+ * MUTANT: drop the message check after sr_thread_dispatch_callbacks -- the receiver blocks
+ * with the message queued and no sender left to wake it. */
+#define MBX_CB_ENTRY 0x089b8100u
+static uint32_t s_mbx_cb_box;
+static unsigned s_mbx_cb_calls;
+static void mbx_cb_send_fn(CpuState *cpu) {
+    s_mbx_cb_calls++;
+    mbx_init_packet(MBX_MSG_BASE + 0x40u, 0u);
+    cpu->r[4] = s_mbx_cb_box;
+    cpu->r[5] = MBX_MSG_BASE + 0x40u;
+    (void)sr_syscall(cpu, NID_MBX_SEND);
+    cpu->r[2] = 0u;
+}
+static void test_mbx_receive_cb_takes_callback_message(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x180u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    sr_test_register_guest_fn(MBX_CB_ENTRY, mbx_cb_send_fn);
+    s_mbx_cb_calls = 0;
+    s_mbx_cb_box = selftest_mbx_create(0);
+    SelftestMbxWaiterCtx w;
+    memset(&w, 0, sizeof w);
+    w.uid = 0x181u;
+    w.mbx_uid = s_mbx_cb_box;
+    w.outptr = MBX_OUTPTR;
+    w.is_cb = 1;
+    MEM_W32(MBX_OUTPTR, 0xfeedfaceu);
+    w.tcb = fixture_thread(w.uid, TH_READY, 40);
+    w.tcb->started = 1;
+    s_cur = (int)(w.tcb - s_tcb);
+    static const char name[] = "mbx-cb";
+    for (size_t k = 0; k < sizeof name; k++) MEM_W8(MBX_NAMEBUF + (uint32_t)k, (uint8_t)name[k]);
+    CpuState cpu;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = MBX_NAMEBUF; cpu.r[5] = MBX_CB_ENTRY; cpu.r[6] = 0u;
+    const uint32_t cb = sr_syscall(&cpu, NID_WSV_CREATE_CALLBACK);
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb; cpu.r[5] = 1u;
+    expect(cb > 0 && sr_syscall(&cpu, NID_WSV_NOTIFY_CALLBACK) == 0u,
+           "MBX: the receiver's callback is created and pending");
+    w.tcb->coro = sr_coro_create(selftest_mbx_waiter_fiber_body, &w, (size_t)1 << 20);
+    w.tcb->state = TH_RUNNING;
+    sr_coro_switch(w.tcb->coro);
+    s_cur = (int)(cur - s_tcb);
+    expect(s_mbx_cb_calls == 1u, "MBX: ReceiveMbxCB runs the pending callback");
+    expect(w.returned && w.ret == 0u && MEM_R32(MBX_OUTPTR) == MBX_MSG_BASE + 0x40u,
+           "MBX: ReceiveMbxCB returns the message its callback sent instead of blocking");
+    expect(selftest_mbx_refer(s_mbx_cb_box, MBX_INFO) == 0 && MEM_R32(MBX_INFO + 40u) == 0u &&
+               MEM_R32(MBX_INFO + 44u) == 0u,
+           "MBX: no waiter and no message are left behind");
+    if (!w.returned) (void)selftest_mbx_delete(s_mbx_cb_box);
+    if (!w.returned) {
+        s_cur = (int)(w.tcb - s_tcb);
+        w.tcb->state = TH_RUNNING;
+        sr_coro_switch(w.tcb->coro);
+        s_cur = (int)(cur - s_tcb);
+    } else {
+        (void)selftest_mbx_delete(s_mbx_cb_box);
+    }
+    sr_coro_destroy(w.tcb->coro); w.tcb->coro = NULL;
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[4] = cb;
+    (void)sr_syscall(&cpu, 0xedba5844u);   /* sceKernelDeleteCallback */
+    sr_test_guest_fn_reset();
+    s_cur = -1;
+}
+
+/* ---- ReferMbxStatus honours the caller's size word (PSP-KERNEL-STATUS-001) ---------
+ * mbx-size-zero writes nothing; mbx-size-8 and mbx-size-40 write exactly that many bytes of
+ * the record, whose size word reads back 0x34; mbx-size-full writes 52 bytes.
+ * MUTANT: write the full 52 bytes whatever the size -- the size-0 probe is overwritten and
+ * the bytes past a short size are clobbered. */
+static void test_mbx_refer_honours_size_word(void) {
+    reset_fixture();
+    sr_hle_init();
+    TCB *cur = fixture_thread(0x190u, TH_RUNNING, 32);
+    s_cur = (int)(cur - s_tcb);
+    cur->started = 1;
+    uint32_t mbx = selftest_mbx_create(0x400u);
+    static const uint32_t sizes[4] = {0u, 8u, 40u, 52u};
+    for (int k = 0; k < 4; k++) {
+        char msg[160];
+        for (uint32_t i = 0; i < 64u; i++) MEM_W8(MBX_INFO + i, 0xa5u);
+        MEM_W32(MBX_INFO, sizes[k]);
+        CpuState cpu;
+        memset(&cpu, 0, sizeof cpu);
+        cpu.r[4] = mbx; cpu.r[5] = MBX_INFO;
+        const uint32_t rc = sr_syscall(&cpu, NID_MBX_REFER);
+        uint32_t first_changed = 64u;
+        for (uint32_t i = 0; i < 64u; i++) {
+            const uint8_t was = i < 4u ? (uint8_t)(sizes[k] >> (8u * i)) : 0xa5u;
+            if (MEM_R8(MBX_INFO + i) != was) { first_changed = i; break; }
+        }
+        int tail_untouched = 1;
+        for (uint32_t i = sizes[k]; i < 64u; i++)
+            if (i >= 4u && MEM_R8(MBX_INFO + i) != 0xa5u) tail_untouched = 0;
+        snprintf(msg, sizeof msg, "MBX: ReferMbxStatus size %u writes only min(size, 52) bytes",
+                 sizes[k]);
+        expect(rc == 0u && tail_untouched, msg);
+        if (sizes[k] == 0u) {
+            expect(first_changed == 64u, "MBX: ReferMbxStatus size 0 writes nothing (mbx-size-zero)");
+        } else {
+            snprintf(msg, sizeof msg, "MBX: ReferMbxStatus size %u reads the size word back as 0x34",
+                     sizes[k]);
+            expect(MEM_R32(MBX_INFO) == 52u, msg);
+        }
+    }
+    expect(MEM_R32(MBX_INFO + 36u) == 0x400u, "MBX: the full refer reports the attr");
+    (void)selftest_mbx_delete(mbx);
+    s_cur = -1;
 }
 
 /* =========================================================================
@@ -46656,8 +48400,9 @@ static void check_coroutine_lifecycle(void) {
         extern int s_msgpipe_parks;
         extern int s_vm_parks;
         extern int s_ctrlc_parks;
-        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 4 /* wc waiters */ + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
-        char msg[1024];
+        extern int s_rv_parks;
+        int expected_parks = 1 /* MultiCB waiter */ + 9 + 3 + 3 + 6 + 4 + 1 + 1 + 5 + 5 + 1 + 1 + 6 + 3 + 3 + 5 + 4 /* wc waiters */ + 6 /* semaphore service-order waiters */ + 1 /* released LwMutex waiter */ + 4 /* unwritable-timeout call bodies */ + 2 /* released sleepers */ + 2 /* released delayers */ + s_rv_parks + ic_expected_parks() + s_mtx_parks + s_pool_parks + s_mbx_parks + s_msgpipe_parks + s_vm_parks + s_ctrlc_parks;
+        char msg[1536];
         snprintf(msg, sizeof msg,
                  "every parking body parked exactly once (3 joiners (including #668) + 1 sema CB body "
                  "+ 1 delay body + 2 slice-C waiters + 2 nested-frame specimen threads "
@@ -46673,10 +48418,12 @@ static void check_coroutine_lifecycle(void) {
                  "+ 6 issue #1389 call bodies (4 cross-kind waits + 2 deleted waiters) "
                  "+ 3 event-flag set/cancel waiters "
                  "+ 3 flight thread-snapshot waiters "
-                 "+ %d returned conformance legs + %d mutex legs + %d pool legs + %d mailbox legs "
+                 "+ 6 semaphore service-order waiters + 1 released LwMutex waiter "
+                 "+ 4 unwritable-timeout call bodies + 2 released sleepers + 2 released delayers "
+                 "+ %d single-call bodies + %d returned conformance legs + %d mutex legs + %d pool legs + %d mailbox legs "
                  "+ %d Message Pipe waiter/owner legs + %d volatile-memory Lock waiters "
                  "+ %d controller read waiters = %d, observed %lu)",
-                 ic_expected_parks(), s_mtx_parks, s_pool_parks, s_mbx_parks,
+                 s_rv_parks, ic_expected_parks(), s_mtx_parks, s_pool_parks, s_mbx_parks,
                  s_msgpipe_parks, s_vm_parks, s_ctrlc_parks, expected_parks, s_parks);
         expect(s_parks == (unsigned long)expected_parks, msg);
     }
@@ -49902,6 +51649,68 @@ static intptr_t exit_game_spawn_child(const char *self) {
 static void exit_game_command_line_is_quoted(void) { }
 #endif
 
+/* The UTF-8 path of NAME beside this executable, resolved the way sceKernelExitGame resolves
+ * its exit artifacts; the child is this same executable, so it resolves the same folder. */
+int sr_wide_module_dir_alloc(wchar_t **out);
+int sr_wide_join_alloc(const wchar_t *left, const wchar_t *right, wchar_t **out);
+int sr_wide_to_utf8_alloc(const wchar_t *src, char **out);
+FILE *sr_fopen_utf8(const char *path, const wchar_t *mode);
+static char *exit_game_artifact_path(const wchar_t *name) {
+    wchar_t *dir = NULL, *joined = NULL;
+    char *out = NULL;
+    if (!sr_wide_module_dir_alloc(&dir) || !sr_wide_join_alloc(dir, name, &joined) ||
+        !sr_wide_to_utf8_alloc(joined, &out)) {
+        free(out);
+        out = NULL;
+    }
+    free(dir);
+    free(joined);
+    return out;
+}
+
+static int exit_game_artifact_exists(const char *path) {
+    FILE *f = path ? sr_fopen_utf8(path, L"rb") : NULL;
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+/* The exit dump holds guest memory (CpuState and 64 KiB of guest stack), a private capture: a
+ * normal sceKernelExitGame writes neither crash_dump.bin nor exited.flag beside the
+ * executable, and SR_EXIT_DUMP opts in to both.
+ * MUTANT: write the two files whatever SR_EXIT_DUMP says -- the default exit leaves them. */
+static void test_exit_game_dump_is_opt_in(const char *self) {
+    char *dump = exit_game_artifact_path(L"crash_dump.bin");
+    char *flag = exit_game_artifact_path(L"exited.flag");
+    expect(dump != NULL && flag != NULL, "exit-game artifacts resolve beside the executable");
+    if (!dump || !flag) {
+        free(dump);
+        free(flag);
+        return;
+    }
+    remove(dump);
+    remove(flag);
+    hle_test_setenv("SR_EXIT_DUMP", NULL);
+    intptr_t rc = exit_game_spawn_child(self);
+    expect(rc == 0, "exit-game child exits cleanly without SR_EXIT_DUMP");
+    expect(!exit_game_artifact_exists(dump) && !exit_game_artifact_exists(flag),
+           "a normal sceKernelExitGame writes no guest-memory dump and no exit flag");
+    hle_test_setenv("SR_EXIT_DUMP", "1");
+    rc = exit_game_spawn_child(self);
+    hle_test_setenv("SR_EXIT_DUMP", NULL);
+    expect(rc == 0, "exit-game child exits cleanly with SR_EXIT_DUMP");
+    char magic[4] = {0};
+    FILE *f = sr_fopen_utf8(dump, L"rb");
+    size_t got = f ? fread(magic, 1, sizeof magic, f) : 0u;
+    if (f) fclose(f);
+    expect(got == sizeof magic && memcmp(magic, "SRCD", 4) == 0 && exit_game_artifact_exists(flag),
+           "SR_EXIT_DUMP writes the versioned crash_dump.bin and exited.flag");
+    remove(dump);
+    remove(flag);
+    free(dump);
+    free(flag);
+}
+
 static void test_exit_game_ignores_argument_registers(const char *self) {
     intptr_t rc;
     exit_game_command_line_is_quoted();
@@ -49912,6 +51721,7 @@ static void test_exit_game_ignores_argument_registers(const char *self) {
     rc = exit_game_spawn_child(self);
     expect(rc != -1, "exit-game child process starts");
     if (rc == -1) return;
+    test_exit_game_dump_is_opt_in(self);
     expect(rc != (intptr_t)EXITGAME_NO_REQUEST,
            "exit-game child leaves a quit request's exit callback pending before ExitGame");
     expect(rc != (intptr_t)EXITGAME_REENTERED,
@@ -49992,6 +51802,14 @@ static void test_real_module_start_lifecycle(void) {
     cpu.r[4] = 0x9999u;
     expect(sr_syscall(&cpu, 0x50f0c1ecu) == SCE_ERROR_MODULE_BAD_ID,
            "gate off: start of an unknown module id fails closed");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x9999u;
+    expect(sr_syscall(&cpu, 0xd1ff982au) == SCE_ERROR_MODULE_BAD_ID,
+           "gate off: stop of an unknown module id fails closed");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0x9999u;
+    expect(sr_syscall(&cpu, 0x2e0911aau) == SCE_ERROR_MODULE_BAD_ID,
+           "gate off: unload of an unknown module id fails closed");
 
     MEM_W32(SYNTH_MOD_STATUS_ADDR, 0xdeadbeefu);
     memset(&cpu, 0, sizeof(cpu));
@@ -50127,6 +51945,41 @@ static void test_real_module_start_lifecycle(void) {
     expect(MEM_R32(SYNTH_MOD_STATUS_ADDR) == 0x12345678u,
            "gate on: untranslated entry does not write status pointer");
 
+    /* Every module whose module_start never ran is named, not only the first in the run:
+     * two more untranslated modules each print their own line with uid, path and entry.
+     * MUTANT: log only the first such start in a run -- the two lines below are missing. */
+    {
+        uint32_t uid_b = sr_hle_test_register_module("untrans_b.prx", 0x089b0100u, 0);
+        uint32_t uid_c = sr_hle_test_register_module("untrans_c.prx", 0x089b0200u, 0);
+        FILE *capture = NULL;
+        int saved_fd = -1;
+        char captured[4096];
+        char line_b[192], line_c[192];
+        captured[0] = '\0';
+        int capturing = hle_data_stderr_capture_begin(&capture, &saved_fd);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = uid_b;
+        uint32_t ret_b = sr_syscall(&cpu, 0x50f0c1ecu);
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = uid_c;
+        uint32_t ret_c = sr_syscall(&cpu, 0x50f0c1ecu);
+        if (capturing) {
+            hle_data_stderr_capture_end(capture, saved_fd, captured, sizeof(captured));
+            fprintf(stderr, "%s", captured);
+        }
+        snprintf(line_b, sizeof line_b,
+                 "sceKernelStartModule(uid=0x%x, path='untrans_b.prx', entry=0x089b0100) -> "
+                 "unknown or untranslated entry; module_start not executed", uid_b);
+        snprintf(line_c, sizeof line_c,
+                 "sceKernelStartModule(uid=0x%x, path='untrans_c.prx', entry=0x089b0200) -> "
+                 "unknown or untranslated entry; module_start not executed", uid_c);
+        expect(capturing, "gate on: the untranslated-start log capture begins");
+        expect(uid_b != 0 && uid_c != 0 && ret_b == 0u && ret_c == 0u,
+               "gate on: two more untranslated modules start without running module_start");
+        expect(strstr(captured, line_b) != NULL && strstr(captured, line_c) != NULL,
+               "gate on: each untranslated module_start names its module, not only the first");
+    }
+
     uint32_t uid_no_stop = sr_hle_test_register_module(
         "missing_stop.prx", SYNTH_MOD_START, SYNTH_MOD_STOP + 0x40u);
     expect(uid_no_stop != 0, "registered module with untranslated module_stop entry");
@@ -50210,6 +52063,135 @@ static void test_prx_stop_entry_boundaries(void) {
     hle_test_setenv("SR_REAL_MODULE_START", "0");
     sr_test_guest_fn_reset();
     sr_hle_test_module_reset();
+}
+
+/* A StopModule whose caller cannot join the stop thread. With dispatch suspended the join
+ * cannot wait, so the stop is refused before a stop thread starts: module_stop must not run
+ * later behind a module the caller was told is still started. When the caller's join is
+ * released while module_stop still runs on its thread, the module stays STOPPING, so a second
+ * StopModule cannot run module_stop a second time beside the first.
+ * MUTANT: drop the sched_wait_permitted() refusal in module_stop_thread_invoke -- the stop
+ *   thread starts and runs module_stop once dispatch resumes. MUTANT: restore STARTED when the
+ *   stop thread is still running -- the second StopModule runs module_stop again. */
+#define STOPJOIN_CALLER_ENTRY 0x089a0400u
+#define STOPJOIN_RELEASE_STOP 0x089a0080u
+static uint32_t s_stopjoin_uid, s_stopjoin_caller, s_stopjoin_rc[2];
+static int s_stopjoin_dispatch;
+static uint32_t s_stopjoin_release_calls;
+
+static uint32_t stopjoin_stop_call(CpuState *s) {
+    s->r[4] = s_stopjoin_uid;
+    s->r[5] = 0u;
+    s->r[6] = 0u;
+    s->r[7] = 0u;
+    s->r[8] = 0u;
+    return sr_syscall(s, 0xd1ff982au);
+}
+
+static void stopjoin_caller_body(CpuState *s) {
+    s_stopjoin_caller = sched_current_uid();
+    if (s_stopjoin_dispatch) {
+        uint32_t token = sched_suspend_dispatch();
+        s_stopjoin_rc[0] = stopjoin_stop_call(s);
+        sched_resume_dispatch(token);
+    } else {
+        s_stopjoin_rc[0] = stopjoin_stop_call(s);
+        s_stopjoin_rc[1] = stopjoin_stop_call(s);
+    }
+    sched_delay_current(50000u);   /* any stop thread still alive runs to its end here */
+}
+
+#define STOPJOIN_NOTDORMANT_STOP 0x089a00c0u
+/* The stop thread ends through sceKernelStopUnloadSelfModuleWithStatus, the one exit that
+ * keeps a raw status: ExitThread and a plain return latch a negative status to
+ * ILLEGAL_ARGUMENT, so only this path can end a stop thread with 0x800201A4. */
+static void stopjoin_notdormant_stop_fn(CpuState *s) {
+    s->r[4] = 0x800201a4u;
+    s->r[5] = 0u;
+    s->r[6] = 0u;
+    s->r[7] = 0u;
+    s->r[8] = 0u;
+    (void)sr_syscall(s, 0x8f2df740u);   /* sceKernelStopUnloadSelfModuleWithStatus */
+    s->r[2] = 0u;
+}
+
+/* The first call releases its caller's join and keeps running past it. */
+static void stopjoin_release_stop_fn(CpuState *s) {
+    if (s_stopjoin_release_calls++ == 0u) {
+        s->r[4] = s_stopjoin_caller;
+        (void)sr_syscall(s, 0x2c34e053u);   /* sceKernelReleaseWaitThread */
+        sched_delay_current(10000u);
+    }
+    s->r[2] = 0x84u;
+}
+
+static void test_module_stop_join_failure_keeps_stop_single(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    hle_test_setenv("SR_REAL_MODULE_START", "1");
+    sr_test_register_guest_fn(SYNTH_MOD_START, synth_module_start_fn);
+    sr_test_register_guest_fn(SYNTH_MOD_STOP, synth_module_stop_fn);
+    sr_test_register_guest_fn(STOPJOIN_RELEASE_STOP, stopjoin_release_stop_fn);
+    sr_test_register_guest_fn(STOPJOIN_NOTDORMANT_STOP, stopjoin_notdormant_stop_fn);
+    sr_test_register_guest_fn(STOPJOIN_CALLER_ENTRY, stopjoin_caller_body);
+    s_synth_start_calls = 0;
+    s_synth_stop_calls = 0;
+    s_stopjoin_release_calls = 0;
+    CpuState cpu;
+
+    s_stopjoin_uid = sr_hle_test_register_module("stopjoin_dispatch.prx", SYNTH_MOD_START,
+                                                 SYNTH_MOD_STOP);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = s_stopjoin_uid;
+    expect(s_stopjoin_uid != 0u && sr_syscall(&cpu, 0x50f0c1ecu) == 0,
+           "stop join: the dispatch-suspended module starts");
+    s_stopjoin_dispatch = 1;
+    s_stopjoin_rc[0] = s_stopjoin_rc[1] = 0u;
+    sched_run(STOPJOIN_CALLER_ENTRY, 0u, 0u);
+    expect(s_stopjoin_rc[0] == SCE_KERNEL_ERROR_CAN_NOT_WAIT && s_synth_stop_calls == 0u,
+           "stop join: StopModule with dispatch suspended is refused before module_stop runs");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = s_stopjoin_uid;
+    expect(sr_syscall(&cpu, 0xd1ff982au) == 0 && s_synth_stop_calls == 1u,
+           "stop join: the refused module is still started and stops once afterwards");
+
+    s_stopjoin_uid = sr_hle_test_register_module("stopjoin_release.prx", SYNTH_MOD_START,
+                                                 STOPJOIN_RELEASE_STOP);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = s_stopjoin_uid;
+    expect(s_stopjoin_uid != 0u && sr_syscall(&cpu, 0x50f0c1ecu) == 0,
+           "stop join: the released-join module starts");
+    s_stopjoin_dispatch = 0;
+    s_stopjoin_rc[0] = s_stopjoin_rc[1] = 0u;
+    sched_run(STOPJOIN_CALLER_ENTRY, 0u, 0u);
+    expect(s_stopjoin_rc[0] != 0u && s_stopjoin_rc[1] == SCE_KERNEL_ERROR_ALREADY_STOPPING,
+           "stop join: a released join leaves the module stopping, not started");
+    expect(s_stopjoin_release_calls == 1u,
+           "stop join: module_stop runs once although the caller's join was released");
+
+    /* A module_stop thread that ended with status NOT_DORMANT (0x800201A4) has ended: its
+     * status is a value like any other, not a sign that the stop thread still runs.
+     * MUTANT: compare the exit status with NOT_DORMANT again -- the stop is reported as
+     *   interrupted, the module stays STOPPING and the second StopModule answers
+     *   ALREADY_STOPPING. */
+    s_stopjoin_uid = sr_hle_test_register_module("stopjoin_notdormant.prx", SYNTH_MOD_START,
+                                                 STOPJOIN_NOTDORMANT_STOP);
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = s_stopjoin_uid;
+    expect(s_stopjoin_uid != 0u && sr_syscall(&cpu, 0x50f0c1ecu) == 0,
+           "stop join: the NOT_DORMANT-status module starts");
+    s_stopjoin_dispatch = 0;
+    s_stopjoin_rc[0] = s_stopjoin_rc[1] = 0xFFFFFFFFu;
+    sched_run(STOPJOIN_CALLER_ENTRY, 0u, 0u);
+    expect(s_stopjoin_rc[0] == 0u && s_stopjoin_rc[1] == SCE_KERNEL_ERROR_ALREADY_STOPPED,
+           "stop join: a module_stop thread ending with status 0x800201A4 stops the module once");
+
+    hle_test_setenv("SR_REAL_MODULE_START", "0");
+    sr_test_guest_fn_reset();
+    sr_hle_test_module_reset();
+    reset_fixture();
 }
 
 /* ---- #280: real late-PRX stop/unload/reload lifecycle and export invalidation ----
@@ -52597,6 +54579,7 @@ static void late_obj_guest_runner(CpuState *s) {
     expect(s_late_obj_returned == 0,
            "late-objects: the worker has not returned from its wait");
 
+    MEM_W32(LATE_OBJ_INFO_THREAD, (uint32_t)sizeof(SrThreadInfo));
     expect(late_obj_guest_call(s, LATE_OBJ_REFER_THREAD, s_late_obj_waiter_uid,
                                LATE_OBJ_INFO_THREAD, 0u, 0u, 0u, 0u) == 0u,
            "late-objects: the worker resolves before the stop");
@@ -52626,6 +54609,7 @@ static void late_obj_guest_runner(CpuState *s) {
     expect(s_late_obj_unload_rc == 0u,
            "late-objects: unloading the stopped module returns 0");
 
+    MEM_W32(LATE_OBJ_INFO_THREAD, (uint32_t)sizeof(SrThreadInfo));
     expect(late_obj_guest_call(s, LATE_OBJ_REFER_THREAD, s_late_obj_waiter_uid,
                                LATE_OBJ_INFO_THREAD, 0u, 0u, 0u, 0u) == 0u,
            "late-objects: the worker still resolves after unload");
@@ -52701,6 +54685,7 @@ static void test_late_prx_unload_keeps_module_owned_objects(void) {
      * that owner removes it, matching the measured #1106 post-exit observation. */
     expect(!sr_callback_is_valid(s_late_obj_callback),
            "late-objects: callback unregisters with its owner thread's exit");
+    MEM_W32(LATE_OBJ_INFO_THREAD, (uint32_t)sizeof(SrThreadInfo));
     expect(late_obj_call(LATE_OBJ_REFER_THREAD, s_late_obj_waiter_uid,
                          LATE_OBJ_INFO_THREAD, 0u) == 0u,
            "late-objects: orphaned worker remains queryable after its owner exits");
@@ -60570,6 +62555,7 @@ static int hle_selftest_main(int argc, char **argv) {
         test_evf_cancel_outputs();
         test_evf_ordered_set();
         test_evf_create_and_refer();
+        test_sync_waits_refuse_unwritable_timeout();
         test_sync_objects_past_the_old_table();
         test_evf_typed_uids_and_delete();
         fprintf(stderr, "b1-kobj: %d checks, %d failures\n", s_checks, s_failures);
@@ -60778,6 +62764,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_thread_stack_free_size_contract();
     test_check_thread_stack_contract();
     test_refer_thread_status();
+    test_refer_run_and_callback_status_check_their_span();
     test_change_current_thread_attr();
     test_suspend_resume_errors_and_ready_thread();
     test_change_thread_priority_contract();
@@ -60894,20 +62881,27 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wait_sema_count_validation();
     test_expired_timed_object_waits_enter_strict_priority();
     test_hle_liveness_sema_handoff();
+    test_sema_signal_hands_count_in_service_order();
     test_hle_liveness_event_handoff();
     test_hle_liveness_callback_reblock();
     test_hle_liveness_timeout_cancel_delete();
     test_hle_liveness_queue_full_empty();
     test_cancel_release_wake_results();
+    test_terminate_from_interrupt_handler();
+    test_sema_timed_wait_writes_time_left();
+    test_lwmutex_waiter_order();
+    test_lock_lwmutex_cb_runs_callbacks();
     test_umd_cancel_wait_drive_stat();
     test_evf_cb_immediate();
     test_evf_cancel_outputs();
     test_evf_ordered_set();
     test_evf_create_and_refer();
+    test_sync_waits_refuse_unwritable_timeout();
     test_sync_objects_past_the_old_table();
     test_evf_typed_uids_and_delete();
     test_wake_result_is_per_thread();
     test_b23_second_round();
+    test_lwmutex_wait_records_follow_the_waiter();
     test_allocate_fpl_context_precedence();
     test_atrac_context_abi();
     test_td24b_cheap_hle_batch();
@@ -60986,9 +62980,26 @@ static int hle_selftest_main(int argc, char **argv) {
     test_tlspl_highmem_pool();
     test_psp_measured_safe_scalar_tls_20261117();
     test_vpl_blocking_waits();
+    test_fpl_create_size_product_does_not_wrap();
+    test_pool_released_waiter_leaves_queue();
+    test_pool_uids_come_from_the_shared_pool();
+    test_partition_alloc_size_zero_refused();
+    test_partition_low_refused_when_block_records_full();
+    test_partition_low_from_unaligned_free_block_is_aligned();
+    test_partition_alloc_guard_off_still_refuses();
+    test_fpl_free_bounds_do_not_wrap();
+    test_pools_past_the_old_table();
+    test_delete_unknown_fpl();
+    test_pool_delete_tears_down_before_waking();
+    test_pool_priority_attribute_orders_waiters();
+    test_fpl_calls_are_quiet_without_trace();
     test_std_handles_measured();
     test_kernel_pool_bounds_measured();
     test_mbx_lifecycle_and_ordering();
+    test_mbx_has_no_host_table_limits();
+    test_mbx_send_wakes_a_blocked_receiver();
+    test_mbx_receive_cb_takes_callback_message();
+    test_mbx_refer_honours_size_word();
     test_intr_context_conformance();
     test_mpeg_create_refused_in_interrupt();
     test_psp_mutex();
@@ -60996,6 +63007,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_kernel_nested_mutex();
     test_real_module_start_lifecycle();
     test_prx_stop_entry_boundaries();
+    test_module_stop_join_failure_keeps_stop_single();
     test_late_prx_unload_reload_lifecycle();
     test_module_without_entry_runs_no_code();
     test_host_skipped_start_stop_unload_reload();
