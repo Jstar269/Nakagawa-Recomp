@@ -10,7 +10,10 @@
 //     so a capture means the same thing whichever presenter showed the frame;
 //   - a skipped present (cancel) and a refused re-arm never publish or report stale results;
 //   - a failed publication or present resolves as failed (-1), never as success;
-//   - the publisher creates the parent directory it needs;
+//   - the publisher creates the parent directory it needs, under an extended (\\?\) root too,
+//     where a screenshot's path is written on the root's plain form;
+//   - a capture's temp file is created only where no file is: another run's temp file at the
+//     same name is never truncated or written through;
 //   - SR_FBSNAP_WINDOWS alone selects the FBSNAP slot with every present captured
 //     (fbcap_policy.c), while an explicit SR_FBSNAP keeps its meaning;
 //   - the texture dump's PNG encoder (fixed-Huffman deflate) inflates, through the project's
@@ -26,6 +29,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#include "fbcap_policy.h" /* first: the header compiles on its own (it uses size_t) */
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +42,6 @@
 #endif
 
 #include "fbcap.h"
-#include "fbcap_policy.h" /* declares sr_fbcap_path with size_t: after <stdio.h> */
 #include "nk_platform.h"    /* wide-path (UTF-8) file calls for the non-ASCII folder */
 #include "nk_psp_inflate.h" /* the in-tree inflater the encoder is checked against */
 
@@ -359,6 +362,101 @@ static void test_absolute_path(void) {
     CHECK(sr_capture_serve_host(s_frame, PSP_W, PSP_H, PSP_W * 4u, SR_CAP_ORDER_BGRX) == 1,
           "absolute: publish creates the missing directories under an absolute root");
     CHECK(ppm_matches(path, PSP_W, PSP_H, s_frame_rgb), "absolute: file exact");
+}
+
+#ifdef _WIN32
+/* The absolute form of the selftest directory, or 0. */
+static int abs_dir(char *out, size_t cap) {
+    char cwd[512] = "";
+    int absolute = s_dir[0] == '/' || s_dir[0] == '\\' || (s_dir[0] && s_dir[1] == ':');
+    if (!absolute) {
+#ifdef _WIN32
+        if (!_getcwd(cwd, (int)sizeof cwd)) return 0;
+#else
+        if (!getcwd(cwd, sizeof cwd)) return 0;
+#endif
+    }
+    int n = absolute ? snprintf(out, cap, "%s", s_dir) : snprintf(out, cap, "%s/%s", cwd, s_dir);
+    return n > 0 && (size_t)n < cap;
+}
+#endif
+
+/* The runtime holds the user data root in Windows' extended form (\\?\C:\...), so a capture under
+ * it must publish: the parent directories are made below the root, the root ("\\?\C:") is never
+ * probed as a directory of its own, and a screenshot's path is written on the root's plain form,
+ * where the '/' it is joined with separates. */
+static void test_extended_root(void) {
+#ifdef _WIN32
+    char base[1100], ext[1200], path[1300], top[1300], sub[1300], plain[1300], shot[1300];
+    CHECK(abs_dir(base, sizeof base), "extended: absolute base path");
+    int n = snprintf(ext, sizeof ext, "\\\\?\\%s", base);
+    CHECK(n > 0 && (size_t)n < sizeof ext, "extended: root fits");
+    for (char *q = ext + 4; *q; q++)
+        if (*q == '/') *q = '\\';   /* '/' is not a separator in the extended form */
+    snprintf(top, sizeof top, "%s/ext", base);
+    snprintf(sub, sizeof sub, "%s/ext/sub", base);
+    snprintf(plain, sizeof plain, "%s/ext/sub/frame_v3.ppm", base);
+    snprintf(path, sizeof path, "%s\\ext\\sub\\frame_v3.ppm", ext);
+    remove(plain);
+    remove_dir(sub);
+    remove_dir(top);
+    CHECK(sr_capture_arm(path) == 1, "extended: arm accepted");
+    CHECK(sr_capture_serve_host(s_frame, PSP_W, PSP_H, PSP_W * 4u, SR_CAP_ORDER_BGRX) == 1,
+          "extended: publish creates the missing directories under an extended root");
+    CHECK(ppm_matches(plain, PSP_W, PSP_H, s_frame_rgb), "extended: file exact");
+    /* The screenshot key's path on that root (hle_display.c builds it the same way). */
+    char shots[1300];
+    snprintf(shots, sizeof shots, "%s/screenshots", base);
+    CHECK(sr_screenshot_path(ext, "ULUS10000_20261117-120000.png", shot, sizeof shot) == 1,
+          "extended: screenshot path fits");
+    remove(shot);
+    remove_dir(shots);
+    CHECK(sr_capture_arm(shot) == 1, "extended: screenshot arm accepted");
+    CHECK(sr_capture_serve_host(s_frame, PSP_W, PSP_H, PSP_W * 4u, SR_CAP_ORDER_BGRX) == 1,
+          "extended: a screenshot under an extended user data root is published");
+    CHECK(file_exists(shot), "extended: the screenshot is in <root>/screenshots");
+#endif
+}
+
+/* A file already at a capture's temp name (another run capturing to the same path, or a name
+ * left behind) is never truncated or written through: decoys at the old "<path>.tmp<n>" form keep
+ * their bytes and the capture still publishes; when every name it may try ("<path>.tmp<pid>.<n>")
+ * is taken, the capture fails visibly and still writes through none. This runs early: the decoys
+ * cover the counter's first DECOYS values. */
+static void test_temp_decoys(void) {
+    enum { DECOYS = 256 };
+    char path[600], decoy[700];
+    out_path(path, sizeof path, "decoy.ppm");
+    remove(path);
+    for (int form = 0; form < 2; form++) {
+        for (int k = 1; k <= DECOYS; k++) {
+            if (form) snprintf(decoy, sizeof decoy, "%s.tmp%lu.%d", path, nk_platform_process_id(), k);
+            else snprintf(decoy, sizeof decoy, "%s.tmp%d", path, k);
+            FILE *d = nk_fopen_utf8(decoy, "wb");
+            if (d) { fputs("decoy", d); fclose(d); }
+        }
+        CHECK(sr_capture_arm(path) == 1, "decoy: arm accepted");
+        const int got = sr_capture_serve_host(s_frame, PSP_W, PSP_H, PSP_W * 4u, SR_CAP_ORDER_BGRX);
+        if (form) CHECK(got == -1 && !file_exists(path), "decoy: every temp name taken fails visibly");
+        else CHECK(got == 1 && ppm_matches(path, PSP_W, PSP_H, s_frame_rgb),
+                   "decoy: a capture publishes past files at the old temp names");
+        int intact = 0;
+        for (int k = 1; k <= DECOYS; k++) {
+            if (form) snprintf(decoy, sizeof decoy, "%s.tmp%lu.%d", path, nk_platform_process_id(), k);
+            else snprintf(decoy, sizeof decoy, "%s.tmp%d", path, k);
+            char buf[16] = "";
+            FILE *d = nk_fopen_utf8(decoy, "rb");
+            if (d) {
+                size_t r = fread(buf, 1, sizeof buf - 1u, d);
+                buf[r] = '\0';
+                fclose(d);
+            }
+            if (strcmp(buf, "decoy") == 0) intact++;
+            nk_remove_utf8(decoy);
+        }
+        CHECK(intact == DECOYS, "decoy: a file already at a temp name is never written through");
+        remove(path);
+    }
 }
 
 /* SR_FBSNAP_WINDOWS is self-sufficient: with SR_FBSNAP unset, configured windows select the
@@ -921,6 +1019,30 @@ static void test_screenshot_name(void) {
 }
 
 /* The texture dump's folder: under the user data folder, one per disc ID, never shared. */
+/* A screenshot's path is "<user data>/screenshots/<name>", on the root's plain form: in Windows'
+ * extended form, which the runtime holds the root in, '/' does not separate. */
+static void test_screenshot_path(void) {
+    char out[96];
+    const char *name = "ULUS10000_20261117-120000.png";
+    CHECK(sr_screenshot_path("C:/data", name, out, sizeof out) == 1 &&
+              strcmp(out, "C:/data/screenshots/ULUS10000_20261117-120000.png") == 0,
+          "screenshot path: user data, screenshots, name");
+    CHECK(sr_screenshot_path("\\\\?\\C:\\data", name, out, sizeof out) == 1 &&
+              strcmp(out, "C:\\data/screenshots/ULUS10000_20261117-120000.png") == 0,
+          "screenshot path: an extended drive root is written plain");
+    CHECK(sr_screenshot_path("\\\\?\\UNC\\srv\\share\\d", name, out, sizeof out) == 1 &&
+              strcmp(out, "\\\\srv\\share\\d/screenshots/ULUS10000_20261117-120000.png") == 0,
+          "screenshot path: an extended UNC root is written plain");
+    CHECK(sr_screenshot_path("\\\\?\\Volume{0}\\d", name, out, sizeof out) == 0 && out[0] == '\0',
+          "screenshot path: an extended root with no plain spelling is refused");
+    CHECK(sr_screenshot_path("", name, out, sizeof out) == 0 && out[0] == '\0',
+          "screenshot path: no user data folder refused");
+    CHECK(sr_screenshot_path("/d", "", out, sizeof out) == 0 && out[0] == '\0',
+          "screenshot path: no name refused");
+    CHECK(sr_screenshot_path("/d", name, out, 20u) == 0 && out[0] == '\0',
+          "screenshot path: a buffer too small is refused, not truncated");
+}
+
 static void test_texdump_folder(void) {
     char out[64];
     CHECK(sr_texdump_folder("C:/data", "ULUS10000", out, sizeof out) == 1 &&
@@ -1258,6 +1380,7 @@ int main(int argc, char **argv) {
     snprintf(s_dir, sizeof s_dir, "%s", argc > 1 ? argv[1] : SR_SELFTEST_BUILD_ROOT "/fbcap_selftest");
     make_dir(s_dir);
     make_frame();
+    test_temp_decoys();
     test_refused_requests();
     test_host_capture();
     test_readback_matches_host_capture();
@@ -1268,6 +1391,7 @@ int main(int argc, char **argv) {
     test_explicit_failures();
     test_parent_directory();
     test_absolute_path();
+    test_extended_root();
     test_windows_imply_every_present();
     test_picture_probe();
     test_picture_watch();
@@ -1277,6 +1401,7 @@ int main(int argc, char **argv) {
     test_png_crc_table();
     test_png_capture();
     test_screenshot_name();
+    test_screenshot_path();
     test_texdump_folder();
     test_texdump_folder_problem();
     test_screenshot_request();

@@ -174,7 +174,7 @@ FG_MUTANTS: list[tuple[str, str, str, str, str]] = [
     ("the dispatch reads the other frame's prepare", FG_HOST,
      "const Fsr3FgHostPrepare *p = &h->prepared[d->frame_id % PROVIDER_MAX_QUEUED_FRAMES];",
      "const Fsr3FgHostPrepare *p = &h->prepared[h->shared_toggle ^ 1u];",
-     "AMD:  stage"),
+     "host: result -1"),   # the dispatch refuses a prepare that is not its frame's
     ("optical flow's level 0 kept off the shared vector", FG_HOST,
      "        if (level == 0) uav[OFB_OPTICAL_FLOW] = uav[OFB_SHARED_OPTICAL_FLOW_VECTOR];\n",
      "",
@@ -372,6 +372,19 @@ PASS_MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "d.flags = FSR3_HOST_ENABLE_DEPTH_INVERTED | FSR3_HOST_ENABLE_DEPTH_INFINITE;",
      "d.flags = FSR3_HOST_ENABLE_DEPTH_INFINITE;",
      "F-D", "the shaders are built for inverted depth"),
+    ("P-L: the probe matches a linear binding's own name, not the image it resolves to", PASS,
+     "                fsr3_host_resolve(&h, bd, &resource, &mip);",
+     "                resource = bd->id;\n                (void)mip;",
+     "P-L", "was accepted"),
+    ("P-H: a failed image create's output stored", PASS,
+     "    if (p->CreateImage(p->dev, &ii, NULL, &image) != VK_SUCCESS) return 0;\n    im->image = image;",
+     "    const VkResult made = p->CreateImage(p->dev, &ii, NULL, &image);\n    im->image = image;\n"
+     "    if (made != VK_SUCCESS) return 0;",
+     "P-H", "was destroyed"),
+    ("P-0: a flag no shader is built for accepted", PASS,
+     "        if (d->flags & unbuilt[i].flag) {",
+     "        if (0 && (d->flags & unbuilt[i].flag)) {",
+     "P-0", "no shader is built for it"),
 ]
 
 # Run and recorded, never counted as a kill: design 2.5 asks for the result either way.
@@ -460,6 +473,11 @@ FG_PASS_MUTANTS: list[tuple[str, str, str, str, str, str]] = [
      "            if (!h->fi.Reset)\n"
      "            p->CmdCopyImage(cmd, j->resource == FSR3FG_RES_PRESENT_COLOR ? v->present_image : v->hudless_image,",
      "G-C", "after it"),
+    ("G-F: a failed image create's output stored", FG_PASS,
+     "    if (p->CreateImage(p->dev, &ii, NULL, &image) != VK_SUCCESS) return 0;\n    im->image = image;",
+     "    const VkResult made = p->CreateImage(p->dev, &ii, NULL, &image);\n    im->image = image;\n"
+     "    if (made != VK_SUCCESS) return 0;",
+     "G-F", "was destroyed"),
 ]
 FG_PASS_RECORDED: list[tuple[str, str, str, str, str]] = []
 FG_PASS_SOURCES = [FG_PASS, FG_PASS_SELFTEST, FG_HOST]
