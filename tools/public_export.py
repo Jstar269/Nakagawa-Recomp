@@ -202,30 +202,54 @@ def write_document(path: Path, document: dict) -> None:
     )
 
 
+class IndexReadError(RuntimeError):
+    """The staged tree could not be read completely."""
+
+
+# Index modes whose object is a blob: regular, executable and symbolic-link files.
+_BLOB_MODES = frozenset({"100644", "100755", "120000"})
+
+
 def index_files(repo_root: Path = ROOT) -> list[tuple[str, bytes]]:
     env = isolated_git_env(root=repo_root)
     raw = subprocess.run(["git", "ls-files", "-s", "-z"], cwd=repo_root,
                          env=env, capture_output=True, check=True).stdout.decode("utf-8", errors="surrogateescape")
     requests: list[tuple[str, str]] = []
     for item in raw.split("\0"):
-        parts = item.split(None, 3)
-        if len(parts) == 4:
-            requests.append((parts[3], parts[1]))
+        if not item:
+            continue
+        # ``<mode> SP <sha> SP <stage> TAB <path>``: the path is everything after the
+        # tab, leading whitespace included.
+        meta, tab, path = item.partition("\t")
+        fields = meta.split(" ")
+        if not tab or len(fields) != 3:
+            raise IndexReadError(f"malformed git ls-files -s record: {item!r}")
+        mode, sha, _stage = fields
+        # A gitlink (160000) names a commit, not content of this tree; only blob modes
+        # carry published bytes.
+        if mode not in _BLOB_MODES:
+            continue
+        requests.append((path, sha))
     proc = subprocess.Popen(["git", "cat-file", "--batch"], cwd=repo_root,
                             env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     assert proc.stdin and proc.stdout
     output, _ = proc.communicate(("".join(f"{sha}\n" for _, sha in requests)).encode("ascii"))
+    if proc.returncode:
+        raise IndexReadError(f"git cat-file --batch exited {proc.returncode}")
     result: list[tuple[str, bytes]] = []
     pos = 0
-    for path, _ in requests:
+    for path, sha in requests:
         end = output.find(b"\n", pos)
         if end < 0:
-            break
-        header = output[pos:end].split()
+            raise IndexReadError(f"git cat-file --batch output ended before {path!r}")
+        header_line = output[pos:end]
+        header = header_line.split()
         pos = end + 1
-        if len(header) < 3 or header[1] != b"blob":
-            continue
+        if len(header) != 3 or header[0] != sha.encode("ascii"):
+            raise IndexReadError(f"cannot read the staged object for {path!r}: {header_line!r}")
         size = int(header[2])
+        if header[1] != b"blob" or pos + size + 1 > len(output):
+            raise IndexReadError(f"staged object for {path!r} is not a complete blob")
         result.append((path, output[pos:pos + size]))
         pos += size + 1
     return sorted(result)

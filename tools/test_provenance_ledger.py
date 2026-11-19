@@ -115,6 +115,16 @@ def load_ledger() -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(PUBLIC_LEDGER.read_text(encoding="utf-8")))
 
 
+#: The checks below that read only the detailed ledger have no public fallback, so without
+#: that private input they are counted as skipped, never reported as passing.
+PRIVATE_LEDGER_SKIP = "PRIVATE_INPUT: detailed implementation ledger not present"
+PRIVATE_LEDGER_ONLY_TESTS = (
+    "test_replacement_states_are_known",
+    "test_named_upstream_carries_a_license",
+    "test_derived_headers_are_not_called_independent",
+)
+
+
 class ProvenanceLedgerTest(unittest.TestCase):
     ledger: ClassVar[dict[str, Any]]
     public_only: ClassVar[bool]
@@ -127,6 +137,18 @@ class ProvenanceLedgerTest(unittest.TestCase):
         cls.public_only = not LEDGER.is_file()
         cls.records = cls.ledger.get("records", [])
         cls.public_entries = cls.ledger.get("entries", [])
+
+    def test_private_ledger_checks_skip_by_name_without_the_ledger(self) -> None:
+        result = unittest.TestResult()
+        with mock.patch.object(type(self), "public_only", True):
+            for name in PRIVATE_LEDGER_ONLY_TESTS:
+                type(self)(name).run(result)
+        self.assertEqual(result.testsRun, len(PRIVATE_LEDGER_ONLY_TESTS))
+        self.assertEqual(result.failures + result.errors, [])
+        self.assertEqual(
+            sorted((case._testMethodName, reason) for case, reason in result.skipped),
+            sorted((name, PRIVATE_LEDGER_SKIP) for name in PRIVATE_LEDGER_ONLY_TESTS),
+        )
 
     def test_vocabulary_matches_model(self) -> None:
         if self.public_only:
@@ -170,7 +192,7 @@ class ProvenanceLedgerTest(unittest.TestCase):
 
     def test_replacement_states_are_known(self) -> None:
         if self.public_only:
-            return
+            self.skipTest(PRIVATE_LEDGER_SKIP)
         for rec in self.records:
             self.assertIn(
                 rec["replacement_state"],
@@ -180,7 +202,7 @@ class ProvenanceLedgerTest(unittest.TestCase):
 
     def test_named_upstream_carries_a_license(self) -> None:
         if self.public_only:
-            return
+            self.skipTest(PRIVATE_LEDGER_SKIP)
         for rec in self.records:
             if rec.get("upstream"):
                 self.assertIn(
@@ -268,7 +290,7 @@ class ProvenanceLedgerTest(unittest.TestCase):
     def test_derived_headers_are_not_called_independent(self) -> None:
         """A file that says it is derived may not sit in an 'independent' record."""
         if self.public_only:
-            return
+            self.skipTest(PRIVATE_LEDGER_SKIP)
         by_path = {}
         for rec in self.records:
             for path in rec["paths"]:
@@ -602,6 +624,94 @@ class ProvenanceFailClosedTest(unittest.TestCase):
             "// synthetic fixture\nint x(void){return 0;}\n".encode("utf-8")
         ).hexdigest()
         self.assertEqual(by_path["src/new_widget.c"]["sha256"], expected_hash)
+
+    def test_a_non_ascii_tracked_path_keeps_its_ledger_entry(self) -> None:
+        """FAILING_BEFORE: ls-files C-quoted the name, so it matched no policy path and
+        build_ledger dropped the entry without an error."""
+        name = "docs/café.md"
+        repo, policy = self._hermetic_repo({name: "# synthetic fixture\n"}, [name])
+        output = repo.parent / "out" / "public_provenance_ledger.json"
+        document = self._run_build_ledger(repo, policy, self._detailed_ledger(repo, []), output)
+        self.assertEqual([entry["path"] for entry in document["entries"]], [name])
+        self.assertEqual(document["entries"][0]["sha256"],
+                         hashlib.sha256(b"# synthetic fixture\n").hexdigest())
+
+    def test_a_tracked_file_missing_from_the_worktree_is_hashed_from_the_index(self) -> None:
+        """FAILING_BEFORE: the ``dict.get`` default read the worktree copy first, so a
+        tracked file deleted from the worktree raised FileNotFoundError."""
+        repo, policy = self._hermetic_repo(
+            {"docs/guide.md": "# synthetic fixture\n"}, ["docs/guide.md"])
+        (repo / "docs" / "guide.md").unlink()
+        output = repo.parent / "out" / "public_provenance_ledger.json"
+        document = self._run_build_ledger(repo, policy, self._detailed_ledger(repo, []), output)
+        self.assertEqual(document["entries"][0]["sha256"],
+                         hashlib.sha256(b"# synthetic fixture\n").hexdigest())
+
+    def _stage_blob(self, repo: Path, path: str, content: bytes) -> None:
+        """Put ``path`` in the index only, so its name never meets a host filesystem."""
+        sha = run_git(["hash-object", "-w", "--stdin"], cwd=repo, input=content,
+                      check=True, capture_output=True).stdout.decode("ascii").strip()
+        run_git(["update-index", "--add", "--cacheinfo", f"100644,{sha},{path}"],
+                cwd=repo, check=True, capture_output=True)
+
+    def test_a_tracked_path_with_a_leading_space_is_hashed_under_its_own_name(self) -> None:
+        """FAILING_BEFORE: ``split(None, 3)`` stripped the leading space, so the blob was
+        keyed ``docs/lead.md`` and build_ledger stopped with 'tracked path has no index
+        blob: " docs/lead.md"'."""
+        name = " docs/lead.md"
+        repo, policy = self._hermetic_repo({}, [name])
+        self._stage_blob(repo, name, b"# synthetic fixture\n")
+        output = repo.parent / "out" / "public_provenance_ledger.json"
+        document = self._run_build_ledger(repo, policy, self._detailed_ledger(repo, []), output)
+        self.assertEqual([entry["path"] for entry in document["entries"]], [name])
+        self.assertEqual(document["entries"][0]["sha256"],
+                         hashlib.sha256(b"# synthetic fixture\n").hexdigest())
+
+    def test_a_gitlink_in_the_index_does_not_shift_later_paths(self) -> None:
+        """FAILING_BEFORE: a non-blob header was skipped without its payload, so the
+        commit's body was read as the next path's header and build_ledger stopped with
+        'tracked path has no index blob: tools/z.md'."""
+        repo, policy = self._hermetic_repo(
+            {"docs/a.md": "# synthetic fixture a\n", "tools/z.md": "# synthetic fixture z\n"},
+            ["docs/a.md", "tools/z.md"],
+        )
+        head = run_git(["rev-parse", "HEAD"], cwd=repo, check=True,
+                       capture_output=True).stdout.decode("ascii").strip()
+        run_git(["update-index", "--add", "--cacheinfo", f"160000,{head},sub"],
+                cwd=repo, check=True, capture_output=True)
+        output = repo.parent / "out" / "public_provenance_ledger.json"
+        document = self._run_build_ledger(repo, policy, self._detailed_ledger(repo, []), output)
+        by_path = {entry["path"]: entry["sha256"] for entry in document["entries"]}
+        self.assertEqual(by_path, {
+            "docs/a.md": hashlib.sha256(b"# synthetic fixture a\n").hexdigest(),
+            "tools/z.md": hashlib.sha256(b"# synthetic fixture z\n").hexdigest(),
+        })
+
+    def test_assembled_probes_and_compiled_scripts_need_implementation_authority(self) -> None:
+        """A path-rule class never covers source the build assembles or compiles.
+
+        FAILING_BEFORE: ``tests/fixtures/*.S`` (PSP probe assembly the fixture Makefiles
+        build and run), Java/Kotlin, shaders, the installer script and the Windows
+        resource script needed no exact record, so their bytes could change under the
+        ``synthetic_fixture`` or a deterministic class with no trusted record.
+        """
+        for path in (
+            "tests/fixtures/psp_oracle/mutex_imports.S",
+            "tests/fixtures/probe/payload.s",
+            "tests/fixtures/probe/payload.asm",
+            "android/app/src/main/java/example/Main.java",
+            "android/app/src/main/kotlin/example/Main.kt",
+            "android/app/build.gradle.kts",
+            "shaders/blit.hlsl",
+            "shaders/blit.glsl",
+            "assets/installer/nakagawa.iss",
+            "assets/brand/nakagawa.rc",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(provenance_ledger._admission_requires_implementation(path))
+        for path in ("tests/fixtures/probe/expected.json", "docs/guide.md", "README.md"):
+            with self.subTest(path=path):
+                self.assertFalse(provenance_ledger._admission_requires_implementation(path))
 
     # -- validation ----------------------------------------------------------
 
