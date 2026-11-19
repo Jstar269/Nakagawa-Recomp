@@ -2514,7 +2514,8 @@ def build_package(
             if arg.startswith("--extra-elf=")
         ]
         link_map = build_workspace / f"{selected_name}.map"
-        build_environment = os.environ.copy()
+        import nk_powershell
+        build_environment = nk_powershell.powershell_env(os.environ)
         # The optimization the cache key above names is what Make compiles with.
         build_environment.update(
             package_cache.package_optimization(build_environment)

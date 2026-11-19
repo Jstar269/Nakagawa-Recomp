@@ -325,9 +325,20 @@ LINK_MAP_ARG = $(if $(strip $(LINK_MAP)),$(LINK_MAP_VALUE),)
 # The Vulkan import library name differs by platform: vulkan-1.lib (Windows SDK) vs libvulkan.so
 # (Linux loader). The two are NOT interchangeable, so the name is chosen per platform rather
 # than unified to one.
+# Detect Clang once so Windows COFF reproducibility and the generated-code
+# GCC-only flag share one compiler check (#317).
+RECOMP_CC_IS_CLANG := $(findstring clang version,$(shell "$(CC)" --version 2>&1))
+
 ifeq ($(NK_TARGET_OS),windows)
 VULKAN_LIB_NAME := -lvulkan-1
 WIN_ONLY_LIBS   := -lmfplat -lgdi32 -lole32 -lshell32 -luuid -lwinmm
+# Clang's COFF object emitter stamps wall-clock time into ImageFileHeader.TimeDateStamp
+# by default and ignores SOURCE_DATE_EPOCH there; -mno-incremental-linker-compatible
+# zeroes TimeDateStamp so two compiles of identical inputs produce byte-identical
+# objects. GCC zeroes COFF TimeDateStamp by default and rejects this option, and
+# non-Windows targets emit no COFF header, so the flag is set only for Clang targeting
+# Windows.
+REPRODUCIBLE_COMPILE_FLAG := $(if $(RECOMP_CC_IS_CLANG),-mno-incremental-linker-compatible,)
 # -Wl,--no-insert-timestamp keeps the PE image byte-reproducible on the
 # MinGW/COFF linker. GNU ld publishes no such option -- an ELF link is already
 # timestamp-free -- so the flag is Windows-only and the Linux link line carries
@@ -336,6 +347,7 @@ REPRODUCIBLE_LINK_FLAG := -Wl,--no-insert-timestamp
 else
 VULKAN_LIB_NAME := -lvulkan
 WIN_ONLY_LIBS   :=
+REPRODUCIBLE_COMPILE_FLAG :=
 REPRODUCIBLE_LINK_FLAG :=
 # MinGW resolves the maths routines from the C runtime it always links, so the
 # Windows link line never names libm. A GNU/ELF link must name it: the runtime's
@@ -345,6 +357,16 @@ REPRODUCIBLE_LINK_FLAG :=
 # other GNU link line. An Android title also links the NDK's logging and native-activity
 # libraries, which the runtime's Android platform code calls.
 POSIX_RUNTIME_LIBS := -lm $(if $(filter android,$(NK_TARGET_OS)),-llog -landroid,)
+endif
+ifneq ($(strip $(REPRODUCIBLE_COMPILE_FLAG)),)
+ifeq ($(filter $(REPRODUCIBLE_COMPILE_FLAG),$(CFLAGS)),)
+override CFLAGS += $(REPRODUCIBLE_COMPILE_FLAG)
+endif
+endif
+ifneq ($(strip $(REPRODUCIBLE_LINK_FLAG)),)
+ifeq ($(filter $(REPRODUCIBLE_LINK_FLAG),$(LDFLAGS)),)
+override LDFLAGS += $(REPRODUCIBLE_LINK_FLAG)
+endif
 endif
 LIBS       ?= -lSDL3 $(VULKAN_LIB_NAME) $(WIN_ONLY_LIBS) $(POSIX_RUNTIME_LIBS)
 

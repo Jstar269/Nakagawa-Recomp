@@ -21,7 +21,7 @@ case-insensitive `true` or `false`; missing or malformed control state is red.
 | Event/change | Jobs that run | Jobs intentionally skipped |
 | --- | --- | --- |
 | Pull request, quick run: a Draft, and, while `NK_CI_TIERS` is `on`, every pull request from a branch of this repository that is not a `batch/`, `carry/` or `desk/` branch and has no `ci-full-matrix` label | the quick checks: classification, hygiene/security with its Markdown step, the public export audit, `Generated files and repository lints` and `CI quick checks` (see [Quick and full checks](#quick-and-full-checks)) | Python tooling, native/translation, the GCC 16 canary, the Android launcher build, Windows, the profile-zero fixture build and `CI required`, whatever the changed paths |
-| Pull request, full run, docs-only | classification, hygiene/security with its Markdown step, CI required | Python/native, Windows |
+| Pull request, full run, docs-only | classification, hygiene/security with its Markdown step, CI required; Python tooling (the whole suite) when a module under `tools/` names a changed document's file name, since a Python test can pin its text (`docs/SETUP.md`'s Network use list, for one) | native/translation, Windows; Python tooling when no `tools/` module names any changed document |
 | Pull request, full run, native C/build files | classification, hygiene/security, Python tooling, native/translation, Windows, Windows installer, CI required | none of the substantive public gates |
 | Pull request, full run, recipe-only edit of phony targets in `Makefile` | classification, hygiene/security, Python tooling on the Makefile-coupled modules over four shards, native/translation, Windows, Windows installer, CI required | the Python modules that cannot observe a Makefile recipe |
 | Pull request, full run, ordinary tools Python file | classification, hygiene/security, Python tooling, CI required | native/translation, Windows |
@@ -1714,13 +1714,14 @@ and each token's remaining budget.
 
 | Code | Fails when |
 | --- | --- |
-| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`, `tools/provenance_mode.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
+| `CI_CHANGE_UNAPPROVED` | the head changes `.github/workflows/**`, `.github/actions/**`, `.pre-commit-config.yaml`, a CI tool (`tools/ci_paths.py`, `tools/ci_required.py`, `tools/ci_test_shards.py`, `tools/ci_test_weights.json`, `tools/requirements-lock.txt`, `tools/ci_trust_verdict.py`, `tools/provenance_mode.py`), the publication gate's code (`.gitattributes`, `tools/publish_audit.py`, `tools/policy_sync.py`, `tools/modified_file_notice_audit.py`, `tools/provenance_record_gap.py`, `tools/history_audit.py` and every module they load or run; `PROTECTED_EXTRA` in the verifier is the list), a `tools/` module named like a standard-library one (it would be imported in place of it), a gate configuration file wherever it stands (`osv-scanner.toml`, whose ignore list would silence the OSV scan; `GATE_CONFIG_NAMES` in the verifier) or any `tools/` file a default-branch workflow runs, without a current approval: the `ci-change-approved` label and a record of this head's protected content written after it |
 | `CI_DEFINITION_BEHIND` | `main` changed one of those files after the branch point; the integrator merges `main` when it lands the pull request; the author merges it only for a real conflict in content that is not generated, or when asked (`AGENTS.md` section 10). No label waives it |
 | `CI_CONTEXT_COLLISION` | another workflow names `Trusted CI verdict`, or a check run uses that name |
 | `FOREIGN_PRODUCER` | a check run or status under an intended context is not from the intended workflow path and event at this head |
 | `JOB_MISSING`, `JOB_FAILED`, `JOB_CANCELLED`, `DUPLICATE_CONTEXT` | the latest non-cancelled intended run lacks the job, the job did not succeed, every run was cancelled, or two jobs share the name |
 | `STALE_HEAD`, `RUN_HEAD_MISMATCH` | the head is no longer the pull request's head, or a result names another SHA |
 | `RUN_FOR_OTHER_PR`, `AMBIGUOUS_HEAD` | the intended run belongs to another pull request, or another open pull request has the same head |
+| `RUN_BEFORE_RETARGET` | the pull request changed its base after the intended run was created, so that run tested the head against the old base; retargeting starts no run, so push a commit or close and reopen the pull request |
 | `PR_NOT_OPEN`, `BASE_NOT_DEFAULT` | nothing to judge for a merge into `main` |
 | `DRAFT_LIGHT_CI` | the pull request is a Draft, or its draft state cannot be read: CI ran only the quick checks ([Draft pull requests](#draft-pull-requests)); mark it Ready for review |
 
@@ -1768,7 +1769,11 @@ A run still in progress gives `pending`. While any producer has
 no run at the head yet, or its newest run is unfinished, the verifier reads only the head's
 workflow runs and posts `pending`. The full read, about a dozen API calls, waits for the
 last producer to finish. Running it on every completion exhausted the repository's
-`GITHUB_TOKEN` rate limit, and Trusted CodeQL's upload then failed. Label events are read
+`GITHUB_TOKEN` rate limit, and Trusted CodeQL's upload then failed. A `pull_request` producer
+with no run at all at the head, once every other producer has finished, does not hold the full
+read back: GitHub starts its run with the others', so the candidate deleted the workflow or edited
+its triggers, and the head is judged (`CI_CHANGE_UNAPPROVED` for an unapproved change, otherwise
+`pending` for that producer). Label events are read
 only when the `ci-change-approved` label is on the pull request. The protected `tools/`
 list is derived on each run from the default branch's workflows (a path named outside a
 comment line), so it follows the workflows as they change.

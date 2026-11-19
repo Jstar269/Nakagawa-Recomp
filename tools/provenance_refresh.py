@@ -366,7 +366,39 @@ def generate_controls(
     return controls
 
 
+def _policy_snapshot(repo: Path) -> tuple[bytes | None, str]:
+    """The profile's working-tree bytes and its ``git ls-files -s`` index entry."""
+    target = repo / POLICY
+    raw = target.read_bytes() if target.is_file() else None
+    entry = _run(repo, "git", "ls-files", "-s", "--", POLICY)
+    if entry.returncode:
+        raise verifier.VerifyError("GIT_ERROR", "cannot read the publication profile's index entry")
+    return raw, entry.stdout.strip()
+
+
+def _restore_policy(repo: Path, snapshot: tuple[bytes | None, str]) -> None:
+    """Put the profile and its index entry back as :func:`_policy_snapshot` found them."""
+    raw, entry = snapshot
+    target = repo / POLICY
+    if raw is None:
+        target.unlink(missing_ok=True)
+    else:
+        target.write_bytes(raw)
+    if entry:
+        meta, _, _path = entry.partition("\t")
+        mode, sha, _stage = meta.split(" ")
+        restored = _run(repo, "git", "update-index", "--cacheinfo", f"{mode},{sha},{POLICY}")
+    else:
+        restored = _run(repo, "git", "update-index", "--force-remove", "--", POLICY)
+    if restored.returncode:
+        raise verifier.VerifyError("GIT_ERROR", "could not restore the publication profile's index entry")
+
+
 def _policy_sync(repo: Path, *, apply_policy: bool) -> None:
+    """Check the publication policy; with *apply_policy*, apply and stage the routine update.
+
+    The caller restores the profile (:func:`_restore_policy`) when a later step refuses.
+    """
     command = [sys.executable, "tools/policy_sync.py"]
     result = _run(repo, *command)
     if result.returncode == 0:
@@ -451,29 +483,38 @@ def main(argv: list[str] | None = None) -> int:
             raise verifier.VerifyError(
                 "TRUSTED_BASE_NOT_ANCESTOR", "the trusted base must be an ancestor of HEAD",
             )
-        _policy_sync(repo, apply_policy=args.apply_policy)
-        tree = _run(repo, "git", "write-tree")
-        candidate_tree = tree.stdout.strip()
-        if tree.returncode or len(candidate_tree) != 40:
-            raise verifier.VerifyError("CANDIDATE_TREE_INVALID", "cannot read the staged candidate tree")
+        # The policy apply writes and stages the profile before the controls are generated.
+        # If anything up to writing the controls refuses, put the profile and its index entry
+        # back, so a refused refresh leaves no half-update staged.
+        policy_snapshot = _policy_snapshot(repo) if args.apply_policy else None
+        try:
+            _policy_sync(repo, apply_policy=args.apply_policy)
+            tree = _run(repo, "git", "write-tree")
+            candidate_tree = tree.stdout.strip()
+            if tree.returncode or len(candidate_tree) != 40:
+                raise verifier.VerifyError("CANDIDATE_TREE_INVALID", "cannot read the staged candidate tree")
 
-        with tempfile.TemporaryDirectory(prefix="nakagawa-provenance-refresh-") as scratch:
-            controls = generate_controls(
-                repo=repo,
-                base_rev=base_commit,
-                candidate_tree=candidate_tree,
-                trusted_ledger=trusted_ledger,
-                workdir=Path(scratch),
-                trusted_candidate_policy=args.trusted_candidate_policy,
-                policy_delta_authority=args.policy_delta_authority,
-            )
-            provenance_ledger._write_controls_atomic(
-                [
-                    (repo / LEDGER, controls.committed_ledger_bytes),
-                    (repo / EXPORT, controls.generated_export_bytes),
-                ],
-                code="REFRESH_OUTPUT_ERROR",
-            )
+            with tempfile.TemporaryDirectory(prefix="nakagawa-provenance-refresh-") as scratch:
+                controls = generate_controls(
+                    repo=repo,
+                    base_rev=base_commit,
+                    candidate_tree=candidate_tree,
+                    trusted_ledger=trusted_ledger,
+                    workdir=Path(scratch),
+                    trusted_candidate_policy=args.trusted_candidate_policy,
+                    policy_delta_authority=args.policy_delta_authority,
+                )
+                provenance_ledger._write_controls_atomic(
+                    [
+                        (repo / LEDGER, controls.committed_ledger_bytes),
+                        (repo / EXPORT, controls.generated_export_bytes),
+                    ],
+                    code="REFRESH_OUTPUT_ERROR",
+                )
+        except (verifier.VerifyError, provenance_ledger.RefreshError):
+            if policy_snapshot is not None:
+                _restore_policy(repo, policy_snapshot)
+            raise
 
         staged = _run(repo, "git", "add", "--", LEDGER, EXPORT)
         if staged.returncode:

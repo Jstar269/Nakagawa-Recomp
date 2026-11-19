@@ -35,6 +35,7 @@ Usage:
 """
 
 import argparse
+import fnmatch
 from collections.abc import Callable
 from dataclasses import dataclass
 import json
@@ -114,6 +115,15 @@ class GateResult:
     blocking: bool = True
 
 
+#: The unreviewed PGF/font components the public-safe profile must keep out of the
+#: export: the replacement font binaries and the lineage-sensitive PGF implementation.
+LEGAL_BLOCKER_PATTERNS = ("font/*.pgf", "src/rt/pgf.c", "src/rt/pgf.h")
+#: Concrete paths checked against the profile even when it does not name them.
+LEGAL_BLOCKER_PATHS = (
+    "font/jpn0.pgf", "font/kr0.pgf", "font/ltn0.pgf", "font/ltn8.pgf", "src/rt/pgf.c", "src/rt/pgf.h",
+)
+
+
 def check_unresolved_legal_blockers(public_safe_profile: bool = False) -> GateResult:
     """Check for unresolved PGF/font and PGD/amctrl review boundaries."""
     manifest_path = ROOT / "assets" / "release_manifest.json"
@@ -133,6 +143,28 @@ def check_unresolved_legal_blockers(public_safe_profile: bool = False) -> GateRe
     ]
 
     if public_safe_profile:
+        # The PASS below claims the profile keeps these components out of the export,
+        # so check that claim against the profile instead of asserting it.
+        try:
+            from . import publication_policy
+        except ImportError:  # direct script execution
+            import publication_policy  # type: ignore[no-redef]
+        profile_path = ROOT / "assets" / "public_source_profile.json"
+        try:
+            policy = publication_policy.load_policy(profile_path)
+        except publication_policy.PolicyError as error:
+            return GateResult("Legal Blockers", False, f"cannot read the public-safe profile: {error}")
+        candidates = set(LEGAL_BLOCKER_PATHS) | {
+            path for path in policy.include_paths
+            if any(fnmatch.fnmatchcase(path, pattern) for pattern in LEGAL_BLOCKER_PATTERNS)
+        }
+        included = sorted(path for path in candidates if policy.resolve(path).disposition == "included")
+        if included:
+            return GateResult(
+                "Legal Blockers",
+                False,
+                "PUBLIC-SAFE PROFILE INCLUDES UNREVIEWED COMPONENTS: " + ", ".join(included),
+            )
         return GateResult(
             "Legal Blockers",
             True,

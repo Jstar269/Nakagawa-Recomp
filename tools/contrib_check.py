@@ -10,9 +10,12 @@ target exists because a contributor who must run the whole native and tooling
 matrix to find out whether a one-line documentation fix is well formed gives up
 instead of opening the pull request.
 
-It does not decide what to run with a second, private copy of the rules.  Path
-routing comes from ``tools/ci_paths.py``, the same classifier the hosted
-workflow uses, so the local run and the hosted run cannot drift apart.  Each
+It does not classify the change with a second, private copy of the rules: the
+surfaces come from ``tools/ci_paths.py``, the same classifier the hosted
+workflow uses, and are printed.  Each local gate then checks only the files it
+can check here (ruff the changed Python, the strict compile the changed C
+sources), so a surface hosted CI builds that no local gate covers, such as a
+header-only native change, is reported ``NOT_RUN`` with that reason.  Each
 gate reports one of ``PASS``, ``FAIL``, ``SKIP`` (the tool is not installed) or
 ``NOT_RUN`` (the change does not touch that surface).  A gate that cannot run is
 never reported as a pass.
@@ -62,6 +65,9 @@ MAINTAINER_SIDE_CODES = (
     "PROVENANCE_UNVERIFIED",
     "POLICY_EXPORT_STALE",
 )
+
+#: The shape of one publish_audit finding line: ``CODE: path: detail``.
+AUDIT_FINDING = re.compile(r"^[A-Z][A-Z0-9_]+: ")
 
 STRICT_C_FLAGS = (
     "-fsyntax-only", "-std=c11", "-Wall", "-Wextra", "-Werror",
@@ -272,6 +278,9 @@ SHARED_TOOL_TESTS = {
     "tools/ci_paths.py": ("tools.test_ci_paths", "tools.test_ci_required"),
     "tools/contrib_check.py": ("tools.test_contrib_check",),
     "tools/provenance_record_gap.py": ("tools.test_provenance_record_gap",),
+    # Covered by a test module that is not named after them.
+    "tools/nk_core/disc_expand_tool.py": ("tools.test_disc_expand",),
+    "tests/fixtures/cosim/mutate.py": ("tools.test_cosim_mutation_gate_outcome",),
 }
 
 #: Source trees whose files may be read, compiled, or mutated directly by a
@@ -376,12 +385,20 @@ def find_tool(name: str) -> str | None:
 
 
 class Gate:
-    __slots__ = ("name", "status", "detail")
+    """One gate's result. ``detail`` is what is shown; ``output`` is a failed command's whole output, which
+    a caller that classifies the failure reads (``detail`` keeps only its last lines)."""
 
-    def __init__(self, name: str, status: str, detail: str = "") -> None:
+    __slots__ = ("name", "status", "detail", "output", "unchecked")
+
+    def __init__(self, name: str, status: str, detail: str = "", output: str = "",
+                 *, unchecked: bool = False) -> None:
         self.name = name
         self.status = status
         self.detail = detail
+        self.output = output
+        #: A NOT_RUN that leaves a changed surface unchecked locally, rather than one the
+        #: change does not touch; the summary names it next to the skipped gates.
+        self.unchecked = unchecked
 
 
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -392,9 +409,15 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
 
 def changed_paths(base: str) -> list[str]:
     """Committed changes against *base* plus anything still uncommitted."""
-    merge_base = _git("merge-base", base, "HEAD").stdout.strip()
-    if not merge_base:
-        raise SystemExit(f"contrib-check: cannot resolve a merge base with {base}")
+    # An unknown base (origin/main never fetched) or one with no common ancestor makes
+    # `git merge-base` exit non-zero; that is the named stop below, not a traceback.
+    found = _git("merge-base", base, "HEAD", check=False)
+    merge_base = found.stdout.strip()
+    if found.returncode != 0 or not merge_base:
+        why = found.stderr.strip() or (
+            "it has no common ancestor with HEAD" if found.returncode == 1
+            else f"git merge-base exited {found.returncode}")
+        raise SystemExit(f"contrib-check: cannot resolve a merge base with {base}: {why}")
     # NUL-separated output: paths are never quoted or split on spaces. In
     # `status --porcelain=v1 -z` each entry is one field "XY path"; a rename or
     # copy is followed by one more field holding its source path.
@@ -618,12 +641,15 @@ def python_test_modules(paths: list[str]) -> list[str]:
     for raw_path in paths:
         path = _normalise_repo_path(raw_path)
         name = PurePosixPath(path).name
+        # A shared or differently named module outside tools/ still selects its tests.
+        modules.update(SHARED_TOOL_TESTS.get(path, ()))
         if not path.startswith("tools/") or not name.endswith(".py"):
             continue
         if name.startswith("test_"):
-            modules.add("tools." + name[:-3])
+            # A deleted test module has nothing to import.
+            if (ROOT / path).is_file():
+                modules.add("tools." + name[:-3])
             continue
-        modules.update(SHARED_TOOL_TESTS.get(path, ()))
         if (ROOT / f"tools/test_{name}").is_file():
             modules.add(f"tools.test_{name[:-3]}")
     modules.update(_source_tests_for_paths(paths, ROOT))
@@ -641,8 +667,9 @@ def _run(label: str, command: list[str], *, timeout: int) -> Gate:
         return Gate(label, FAIL, f"timed out after {timeout}s: {' '.join(command)}")
     if result.returncode == 0:
         return Gate(label, PASS)
-    output = (result.stdout + result.stderr).strip().splitlines()
-    return Gate(label, FAIL, " | ".join(output[-6:]) or f"exit {result.returncode}")
+    text = (result.stdout + result.stderr).strip()
+    output = text.splitlines()
+    return Gate(label, FAIL, " | ".join(output[-6:]) or f"exit {result.returncode}", text)
 
 
 def _python_tool(tool: str, arguments: list[str], *, timeout: int) -> Gate:
@@ -767,6 +794,18 @@ def c_gate(paths: list[str]) -> Gate:
         if PurePosixPath(p).suffix.lower() == ".c" and (ROOT / p).is_file()
     ]
     if not sources:
+        headers = [p for p in paths if PurePosixPath(p).suffix.lower() in (".h", ".hpp") and (ROOT / p).is_file()]
+        if headers:
+            # A header-only change: this gate compiles changed sources only, so the headers
+            # are unchecked here and the summary says so (an OK must not read as covering them).
+            return Gate("strict-c-compile", NOT_RUN,
+                        f"changed header(s) not compiled: {', '.join(headers)}; hosted CI "
+                        "(or a local make check) builds them", unchecked=True)
+        if ci_paths.classify(paths)["native_runtime"] == "true":
+            # A native change with no C file: hosted CI builds it, this local gate compiles sources only.
+            return Gate("strict-c-compile", NOT_RUN,
+                        "no changed C source; the native_runtime surface changed, which only hosted CI "
+                        "(or a local make check) builds", unchecked=True)
         return Gate("strict-c-compile", NOT_RUN, "no changed C source")
     compiler = os.environ.get("CC") or find_tool("gcc") or find_tool("cc")
     if compiler is None:
@@ -780,7 +819,8 @@ def c_gate(paths: list[str]) -> Gate:
             continue
         gate = _run(f"cc {source}", command, timeout=600)
         if gate.status == FAIL:
-            sdk = _missing_sdk(gate.detail)
+            # The whole output: a real error printed before the missing header's last lines still fails.
+            sdk = _missing_sdk(gate.output)
             if sdk is not None:
                 # A missing SDK header is the environment, not the change: the
                 # file was not compiled, so it is a skip and never a pass.
@@ -841,15 +881,23 @@ def publication_gate() -> tuple[Gate, Gate]:
         )
     except subprocess.TimeoutExpired:
         return policy, Gate("publication-safety", FAIL, "publish_audit timed out")
-    findings = [
-        line.strip()
-        for line in (audit.stdout + audit.stderr).splitlines()
-        if line.strip() and ": " in line and not line.strip().startswith("publication audit:")
-    ]
-    maintainer = [line for line in findings if any(f"{code}:" in line for code in MAINTAINER_SIDE_CODES)]
+    lines = [line.strip() for line in (audit.stdout + audit.stderr).splitlines() if line.strip()]
+    # Only the audit's own ``CODE: path: detail`` lines are findings; its hints (such as the
+    # stale-control fix) and summary line are not.
+    findings = [line for line in lines if AUDIT_FINDING.match(line)]
+    maintainer = [line for line in findings if line.split(":", 1)[0] in MAINTAINER_SIDE_CODES]
     contributor = [line for line in findings if line not in maintainer]
+    completed = any(line.startswith("publication audit: ") for line in lines)
+    clean = audit.returncode == 0 and any(line.startswith("publication audit: OK") for line in lines)
     if contributor:
         return policy, Gate("publication-safety", FAIL, " || ".join(contributor[:6]))
+    if not completed or (not maintainer and not clean):
+        # Killed, crashed or silent: an audit that did not report its verdict is never a pass.
+        return policy, Gate(
+            "publication-safety", FAIL,
+            f"publish_audit exited {audit.returncode} without a complete verdict: "
+            + (" | ".join(lines[-6:]) or "no output"),
+        )
     if maintainer:
         codes = sorted({line.split(":", 1)[0] for line in maintainer})
         return policy, Gate(
@@ -863,8 +911,11 @@ def publication_gate() -> tuple[Gate, Gate]:
 def run(base: str) -> list[Gate]:
     paths = changed_paths(base)
     routing = ci_paths.classify(paths)
+    # A file the branch deleted still routes (its removal can break what remains), but the gates that open
+    # each named file (ruff, markdownlint) get only the files that exist; the strict compile filters likewise.
+    present = [path for path in paths if (ROOT / path).is_file()]
     python_paths = [
-        path for path in paths
+        path for path in present
         if path.endswith(".py") and path.startswith(("tools/", "tests/fixtures/"))
     ]
     print(f"contrib-check: base {base}, {len(paths)} changed path(s)")
@@ -883,7 +934,7 @@ def run(base: str) -> list[Gate]:
         ruff_gate(python_paths),
         unit_gate(modules),
         c_gate(paths),
-        markdown_gate(paths),
+        markdown_gate(present),
         docs_gate(paths),
         purity_gate(paths),
     ]
@@ -918,6 +969,7 @@ def main(argv: list[str] | None = None) -> int:
     failed = [gate.name for gate in gates if gate.status == FAIL]
     maintainer = [gate.name for gate in gates if gate.status == MAINTAINER_SIDE]
     skipped = [gate.name for gate in gates if gate.status == SKIP]
+    unchecked = [gate.name for gate in gates if gate.status == NOT_RUN and gate.unchecked]
     if maintainer:
         print("\n  a maintainer regenerates PUBLIC_EXPORT.json and the public ledger from the "
               "private trusted ledger (make provenance-refresh); a contributor cannot do that, and these findings are "
@@ -925,6 +977,9 @@ def main(argv: list[str] | None = None) -> int:
     if skipped:
         print(f"  SKIPPED because the tool is not installed: {', '.join(skipped)} -- "
               "a skipped gate is not a pass.")
+    if unchecked:
+        print(f"  NOT CHECKED here, although the change touches it: {', '.join(unchecked)} -- "
+              "hosted CI checks it; OK does not cover it.")
     print(f"\ncontrib-check: {'FAIL (' + ', '.join(failed) + ')' if failed else 'OK'}")
     return 1 if failed else 0
 

@@ -64,7 +64,9 @@ def parse_policy_spec(spec: str) -> list[tuple[str, tuple[int, ...]]]:
     for part in parts:
         if not part:
             raise ValueError("empty constraint in range specification")
-        m = re.match(r"^([<>!=]=?|[<>])\s*(\d+(?:\.\d+)*)$", part)
+        # Only the six operators compare_version evaluates: a bare "=" or "!" would parse here
+        # and then constrain nothing.
+        m = re.match(r"^(>=|<=|==|!=|>|<)\s*(\d+(?:\.\d+)*)$", part)
         if not m:
             raise ValueError(f"invalid constraint syntax: {part!r}")
         op = m.group(1)
@@ -110,10 +112,14 @@ def compare_version(v_obs: tuple[int, ...], op: str, v_target: tuple[int, ...]) 
 
 def satisfies_policy(obs_version_str: str, constraints: list[tuple[str, tuple[int, ...]]]) -> bool:
     """Check whether observed version string satisfies all policy constraints."""
-    m = re.search(r"(\d+(?:\.\d+)*)", obs_version_str)
-    if not m:
-        raise ValueError(f"cannot extract version numbers from {obs_version_str!r}")
-    obs_ver = tuple(int(x) for x in m.group(1).split("."))
+    # A dotted version that starts a token: the "2" of "MSYS2" or "Rev2" is not a version.
+    # A string with none, or with two different ones, cannot be checked.
+    found = sorted(set(re.findall(r"(?<![\w.])(\d+(?:\.\d+)+)", obs_version_str)))
+    if not found:
+        raise ValueError(f"cannot extract a dotted version from {obs_version_str!r}")
+    if len(found) > 1:
+        raise ValueError(f"ambiguous version in {obs_version_str!r}: {', '.join(found)}")
+    obs_ver = tuple(int(x) for x in found[0].split("."))
     for op, target in constraints:
         if not compare_version(obs_ver, op, target):
             return False
@@ -145,6 +151,7 @@ class _ReleaseLockState(Protocol):
     last_validated_py_lock: Path | None
     last_validated_toolchain_policy: dict[str, Any] | None
     last_validated_observed_toolchain: dict[str, Any] | None
+    last_resolved_python_metadata: generate_sbom.PythonArtifactMetadata | None
 
 
 def verify_release_locks(
@@ -159,6 +166,7 @@ def verify_release_locks(
     _release_lock_state.last_validated_py_lock = None
     _release_lock_state.last_validated_toolchain_policy = None
     _release_lock_state.last_validated_observed_toolchain = None
+    _release_lock_state.last_resolved_python_metadata = None
     errors: list[str] = []
     if not manifest_path.is_file():
         return [f"Release manifest file missing: {manifest_path}"]
@@ -169,6 +177,7 @@ def verify_release_locks(
         )
     except generate_sbom.LockfileParseError as exc:
         return [str(exc)]
+    _release_lock_state.last_resolved_python_metadata = python_artifact_metadata
 
     py_lock_path: Path | None = None
     toolchain_policy: dict | None = None
@@ -263,8 +272,13 @@ def verify_release_locks(
                                         f"observed toolchain component '{comp}' version '{obs_ver}' "
                                         f"does not satisfy policy '{spec}'"
                                     )
-                            except ValueError:
-                                pass
+                            except ValueError as exc:
+                                # An observation the policy cannot be evaluated against is
+                                # not a pass: the gate names the component instead.
+                                errors.append(
+                                    f"observed toolchain component '{comp}' version {obs_ver!r} "
+                                    f"cannot be checked against policy {spec!r}: {exc}"
+                                )
     except Exception as exc:
         errors.append(f"Failed to parse release manifest {manifest_path}: {exc}")
 
@@ -567,22 +581,30 @@ def verify_sbom_matches(
     release_index_path: Path = generate_sbom.PYTHON_RELEASE_INDEX_PATH,
     fetch_live_metadata: bool = False,
     metadata_timeout: float = 30.0,
+    python_artifact_metadata: generate_sbom.PythonArtifactMetadata | None = None,
 ) -> tuple[list[str], dict]:
-    """Verify the SPDX document against the exact Python lock inventory."""
+    """Verify the SPDX document against the exact Python lock inventory.
+
+    ``python_artifact_metadata`` is the release index ``verify_release_locks`` already
+    resolved; given, it is used instead of resolving (and with live metadata, fetching)
+    the same index again.
+    """
     errors: list[str] = []
     verified_digests: dict[str, str | None] = {"python": None}
     if not spdx_path.is_file():
-        return errors, verified_digests
+        return [f"SPDX SBOM missing or not a file: {spdx_path}"], verified_digests
     try:
         spdx_data = json.loads(spdx_path.read_text(encoding="utf-8"))
         manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
         errors.extend(verify_provenance_families(manifest_data))
         errors.extend(_spdx_root_version_errors(spdx_data, manifest_data))
         try:
-            metadata = generate_sbom.resolve_pypi_release_index(
-                release_index_path, fetch_live=fetch_live_metadata,
-                timeout=metadata_timeout,
-            )
+            metadata = python_artifact_metadata
+            if metadata is None:
+                metadata = generate_sbom.resolve_pypi_release_index(
+                    release_index_path, fetch_live=fetch_live_metadata,
+                    timeout=metadata_timeout,
+                )
             snapshot = generate_sbom.snapshot_lockfile(py_lock_path, "Python")
             verified_digests["python"] = snapshot.sha256
             py_packages = generate_sbom._parse_python_lock_text(snapshot, py_lock_path, metadata)
@@ -830,6 +852,7 @@ def main(argv: list[str] | None = None) -> int:
             release_index_path=args.release_index,
             fetch_live_metadata=args.fetch_live_metadata,
             metadata_timeout=args.metadata_timeout,
+            python_artifact_metadata=_release_lock_state.last_resolved_python_metadata,
         )
         errors.extend(match_errors)
     if args.spdx3 or args.cyclonedx:
@@ -857,6 +880,7 @@ def main(argv: list[str] | None = None) -> int:
         checked_items.append("SBOM elements")
         py_digest = verified_digests["python"]
         if py_digest is None:
+            print("SBOM Verification FAIL: no Python lockfile digest was verified", file=sys.stderr)
             return 1
         print(
             f"SBOM Verification: OK ({', '.join(checked_items)} verified)\n"

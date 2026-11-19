@@ -401,6 +401,11 @@ override GE_CFLAGS += -DSR_GE_FRONTEND_PROFILE
 override PORTABLE_CORE_CFLAGS += -DSR_GE_FRONTEND_PROFILE
 endif
 override GE_CFLAGS += -DSR_FLIGHT_RECORDER_LINKED
+ifneq ($(strip $(REPRODUCIBLE_COMPILE_FLAG)),)
+ifeq ($(filter $(REPRODUCIBLE_COMPILE_FLAG),$(GE_CFLAGS)),)
+override GE_CFLAGS += $(REPRODUCIBLE_COMPILE_FLAG)
+endif
+endif
 # A trace build compiles the runtime with the trace writer too. This must precede the
 # runtime profile hash so switching TRACE rebuilds the runtime objects.
 TRACE ?= 0
@@ -416,7 +421,7 @@ endif
 # -ftrack-macro-expansion=0: Reduces memory overhead for macro-heavy code. GCC only: Clang
 #   refuses the option, so it is passed only when $(CC) is not Clang (#317). GCC builds are unchanged.
 RECOMP_OPT ?= -O0
-RECOMP_CC_IS_CLANG := $(findstring clang version,$(shell "$(CC)" --version 2>&1))
+# RECOMP_CC_IS_CLANG is resolved in the root Makefile beside REPRODUCIBLE_COMPILE_FLAG.
 RECOMP_GCC_ONLY_FLAGS := $(if $(RECOMP_CC_IS_CLANG),,-ftrack-macro-expansion=0)
 RECOMP_FLAGS ?= $(RECOMP_OPT) -w -fno-strict-aliasing -fno-var-tracking $(RECOMP_GCC_ONLY_FLAGS) $(NAN_TRAP_CFLAG)
 # An Android title is a shared library: its generated and GE objects are position
@@ -427,6 +432,11 @@ override RECOMP_FLAGS += -fPIC
 endif
 override RECOMP_FLAGS += $(STACK_CENSUS_CFLAG)
 override RECOMP_FLAGS += -DSR_FLIGHT_RECORDER_LINKED
+ifneq ($(strip $(REPRODUCIBLE_COMPILE_FLAG)),)
+ifeq ($(filter $(REPRODUCIBLE_COMPILE_FLAG),$(RECOMP_FLAGS)),)
+override RECOMP_FLAGS += $(REPRODUCIBLE_COMPILE_FLAG)
+endif
+endif
 ifeq ($(TRACE),1)
 override RECOMP_FLAGS += -DSR_INSTRUCTION_TRACE
 endif

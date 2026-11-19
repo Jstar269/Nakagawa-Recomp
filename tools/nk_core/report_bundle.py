@@ -34,9 +34,9 @@ from dataclasses import dataclass, field
 import zipfile
 
 try:
-    from ..nk_powershell import powershell_exe
+    from ..nk_powershell import powershell_env, powershell_exe
 except ImportError:
-    from nk_powershell import powershell_exe  # type: ignore[no-redef]
+    from nk_powershell import powershell_env, powershell_exe  # type: ignore[no-redef]
 
 SCHEMA_VERSION = 1
 
@@ -430,15 +430,17 @@ def _memory_bytes() -> int | None:
 def _gpu_lines() -> list[str]:
     """The video adapters and drivers the OS reports, best effort and read-only."""
     try:
+        env: dict[str, str] | None = None
         if sys.platform == "win32":
             command = [powershell_exe(), "-NoProfile", "-NonInteractive", "-Command",
                        "Get-CimInstance Win32_VideoController | ForEach-Object "
                        "{ $_.Name + ' | driver ' + $_.DriverVersion }"]
+            env = powershell_env()
         elif sys.platform.startswith("linux"):
             command = ["lspci"]
         else:
             return []
-        done = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+        done = subprocess.run(command, capture_output=True, text=True, timeout=20, env=env, check=False)
     except (OSError, subprocess.SubprocessError):
         return []
     lines = [ln.strip() for ln in done.stdout.splitlines() if ln.strip()]
