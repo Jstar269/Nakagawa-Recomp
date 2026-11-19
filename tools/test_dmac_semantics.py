@@ -403,6 +403,28 @@ def _dmac_hle_srcs() -> list[str]:
     return match.group(1).replace("\\\n", " ").split()
 
 
+def _find_hle_thread_selftest_binary(
+    build_root: Path, *, is_windows: bool | None = None
+) -> Path | None:
+    """Return the built `hle_thread_selftest` executable under *build_root*, never a decoy."""
+    if not build_root.is_dir():
+        return None
+    windows = (os.name == "nt") if is_windows is None else is_windows
+    allowed_names: tuple[str, ...] = (
+        ("hle_thread_selftest.exe",) if windows else ("hle_thread_selftest.exe", "hle_thread_selftest")
+    )
+    for name in allowed_names:
+        for candidate in sorted(build_root.rglob(name)):
+            if candidate.name != name or not candidate.is_file():
+                continue
+            if windows:
+                if candidate.suffix.lower() == ".exe":
+                    return candidate
+            elif os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
 class TestDmacMutantList(unittest.TestCase):
     def test_every_mutant_applies_exactly_once(self) -> None:
         source = (ROOT / DMAC_TARGET).read_text(encoding="utf-8")
@@ -427,6 +449,30 @@ class TestDmacMutantList(unittest.TestCase):
         selftest = DMAC_SELFTEST.read_text(encoding="utf-8")
         self.assertIn("a large DMA reports its whole destination range to the GPU", selftest)
         self.assertTrue(any("dirty range" in m[0] for m in DMAC_MUTANTS))
+
+    def test_hle_thread_selftest_lookup_ignores_decoys_and_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            build_root = Path(tmp) / "build"
+            for rel in (
+                "tests/native/hle_thread_selftest.c",
+                "mygame/hle_thread_selftest.o",
+                "mygame/hle_thread_selftest.d",
+                "mygame/hle_thread_selftest",
+            ):
+                decoy = build_root / rel
+                decoy.parent.mkdir(parents=True, exist_ok=True)
+                decoy.write_text("decoy\n", encoding="utf-8")
+            (build_root / "aaa" / "hle_thread_selftest.exe").mkdir(parents=True)
+
+            self.assertIsNone(_find_hle_thread_selftest_binary(build_root, is_windows=True))
+            with mock.patch("os.access", return_value=False):
+                self.assertIsNone(_find_hle_thread_selftest_binary(build_root, is_windows=False))
+
+            real_exe = build_root / "mygame" / "hle_thread_selftest.exe"
+            real_exe.write_bytes(b"MZ")
+            self.assertEqual(_find_hle_thread_selftest_binary(build_root, is_windows=True), real_exe)
+            with mock.patch("os.access", side_effect=lambda p, mode: Path(p) == real_exe):
+                self.assertEqual(_find_hle_thread_selftest_binary(build_root, is_windows=False), real_exe)
 
     def test_a_filter_that_matches_no_mutant_fails_the_campaign(self) -> None:
         """NK_DMAC_MUTANTS_ONLY=<typo> must not report a campaign that judged nothing as OK."""
@@ -455,10 +501,10 @@ class TestDmacMutationCampaign(unittest.TestCase):
              f"BUILD_ROOT={root.as_posix()}", "HLE_SRCS=" + " ".join(srcs)],
             cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
         log.write_text(build.stdout, encoding="utf-8")
-        exes = sorted(root.rglob("hle_thread_selftest.exe")) if build.returncode == 0 else []
-        if not exes:
+        exe = _find_hle_thread_selftest_binary(root) if build.returncode == 0 else None
+        if exe is None:
             return "BUILD", build.stdout
-        run = subprocess.run([str(exes[0])], cwd=ROOT, text=True, stdout=subprocess.PIPE,
+        run = subprocess.run([str(exe)], cwd=ROOT, text=True, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, check=False)
         log.write_text(run.stdout, encoding="utf-8")
         return ("PASS" if run.returncode == 0 else "FAIL"), run.stdout
