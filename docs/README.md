@@ -35,6 +35,7 @@ Each row is something you are about to do. Find yours and read what it points to
 | Compare GCC and Clang on the synthetic generated-C corpus | [`COMPILER_COMPARISON.md`](COMPILER_COMPARISON.md) |
 | Qualify a public title through the native player | [`TITLE_TESTING.md`](TITLE_TESTING.md) |
 | Find out what a failure code means, or add one | [`FAILURE_CODES.md`](FAILURE_CODES.md) — every code a report, tool or the player emits, by pipeline stage |
+| Change what the launcher or the in-game overlay draws (a colour, size, screen or message) | [`PLAYER_UI_DESIGN.md`](PLAYER_UI_DESIGN.md) — the tokens with their source symbols, the contrast pairs and the checklist; `tests/native/test_player_ui.py` keeps its token record and the source in step |
 | Find your way around the code for the first time | [`CODE_TOUR.md`](CODE_TOUR.md) — one game from disc image to a frame on screen, file by file |
 | Change runtime, codegen, or the two-phase build | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | Pick up work, or check whether something is already known | [`STATUS.md`](STATUS.md) (live GitHub Issues win) |
@@ -264,7 +265,7 @@ Every substantial document carries one status.
 | `RELEASE_NOTES_v0.0.1.md` | HISTORICAL | Notes of the v0.0.1 release, kept as released |
 | `RELEASE_SIGNING.md` | CURRENT | Update-signing key procedure (minisign, offline) and what the player checks before an update download |
 | `NATIVE_PLAYER_ARCHITECTURE.md` | CURRENT | Maintained native-shell architecture; the wizard's bounded ISO/XB staging exists and the player decrypts the user's own disc locally and checks it against Redump's PSP list, while one-click play without compiling on the user's PC is not built and is marked inline |
-| `PLAYER_UI_DESIGN.md` | CURRENT | Player UI design system for the default launcher: tokens, components, and the screen specs C6-C8 build against |
+| `PLAYER_UI_DESIGN.md` | CURRENT | Player UI design system for the default launcher: tokens, components, states, messages, contrast with its known shortfalls, the screen specs C6-C8 build against, and a machine-readable token record the player UI tests check against the source |
 | `ONLINE_FEATURES.md` | DRAFT | Design for the launcher's opt-in online mode (update check, news, user-sent reports) and developer mode, asked in the setup wizard; the switches, the wizard step, the developer log panel, the update check and Discord status are built; news and in-player reports are not |
 | `AOT_PRODUCTIZATION_ARCHITECTURE.md` | CURRENT | Maintained evaluation of end-user recompilation routes A-G; the zero-toolchain recommended routes remain unimplemented |
 | `RUNTIME_PACKAGING_ARCHITECTURE.md` | CURRENT | Maintained process-isolation decision record; installers and one-click end-user preparation remain unbuilt |
