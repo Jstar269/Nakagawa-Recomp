@@ -262,6 +262,16 @@ class ModelRefusals(PrxTestBase):
         with self.assertRaisesRegex(model.RelocationModelError, "fixed-address"):
             model.model_relocations(module.build())
 
+    def test_segment_larger_than_the_flat_image_bound_is_refused(self):
+        # A forged PT_LOAD whose memsz fits the 32-bit address space but not the
+        # loader's flat-image bound must be refused before segment_image would
+        # allocate it.
+        data, _offs, _memsz = basic_seg_with_words([0x03E00008, 0], vaddr=0)
+        module = Module()
+        module.add_seg(0, data, 0xFFFFFFF0)
+        with self.assertRaisesRegex(model.RelocationModelError, "flat-image bound"):
+            model.model_relocations(module.build())
+
 
 class SiteArithmetic(unittest.TestCase):
     def test_hi16_carries_at_the_signed_low_boundary(self):

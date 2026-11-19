@@ -126,15 +126,12 @@ def validate_summary(summary: Any) -> None:
     if aot_instructions is not None:
         _require_integer(aot_instructions, "$.guest.aot_instruction_count")
     for path in RANKING_PATHS:
-        value = root
-        missing = False
-        for part in path.split("."):
-            if not isinstance(value, dict) or part not in value:
-                missing = True
-                break
-            value = value[part]
-        if missing and path in OPTIONAL_RANKING_PATHS:
-            continue
+        try:
+            value = _value_at(root, path)
+        except (KeyError, TypeError):
+            if path in OPTIONAL_RANKING_PATHS:
+                continue
+            value = None  # a missing required metric fails the number check below
         _require_number(value, f"$.{path}")
     _require_keys(root["transitions"], ("aot_to_interpreter_count", "interpreter_to_aot_count", "top_pcs"), "$.transitions")
     top_pcs = _require_object(root["transitions"]["top_pcs"], "$.transitions.top_pcs")
@@ -266,10 +263,6 @@ def diff_summaries(before: dict[str, Any], after: dict[str, Any], tolerance: flo
     changes: list[dict[str, Any]] = []
     _compare_values(before, after, "$", tolerance, changes)
     _compare_transitions(before, after, tolerance, changes)
-    changes = [change for change in changes if change["path"] not in {
-        "$.transitions.top_pcs.aot_to_interpreter",
-        "$.transitions.top_pcs.interpreter_to_aot",
-    }]
     return {
         "schema": "nakagawa-perf-diff-v1",
         "changed": bool(changes),

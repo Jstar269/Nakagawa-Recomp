@@ -457,6 +457,11 @@ typedef enum {
 
 NkHostKind nk_platform_host_kind(void);
 
+/* Linux Steam integration: discover the common per-user Steam root and conservatively check
+   `$HOME/.steam/steam.pid`. These POSIX-backend helpers return false on non-Linux hosts. */
+bool nk_platform_linux_steam_find_root(char *root, size_t root_cap);
+bool nk_platform_linux_steam_client_running(void);
+
 /* Path text comparison as the host's file system compares names: Win32 folds ASCII case
    and treats '/' and '\\' as one separator; POSIX compares bytes. Used to find a folder's
    text inside other text (the profile folder in a message, a root above a path). */

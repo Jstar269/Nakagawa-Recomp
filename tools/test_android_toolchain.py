@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -24,6 +25,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "android" / "toolchain" / "nk_ld_launcher.c"
@@ -975,9 +977,155 @@ class StampTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
             cfg = _config(Path(tmp))
             (cfg.build / "host").mkdir(parents=True)
-            toolchain._mark(cfg.build / "host")
+            toolchain._mark(cfg.build / "host", cfg.identity())
             # cmake is never started: a run would fail, as "cmake" here names nothing built.
             toolchain.stage_host(toolchain.Config(**{**cfg.__dict__, "cmake": str(Path(tmp) / "none")}))
+
+    def _run_host(self, cfg: toolchain.Config) -> list[str]:
+        ran: list[str] = []
+        with mock.patch.object(toolchain, "_run", lambda command, log, what, *a, **k: ran.append(what)):
+            toolchain.stage_host(cfg)
+        return ran
+
+    def test_a_stage_another_build_finished_is_cleared_and_built_again(self) -> None:
+        # A pin bump that reuses --work: the stage folder is not versioned, so a bare stamp
+        # would let the old binaries ship under the manifest's new versions.
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp))
+            folder = cfg.build / "host"
+            (folder / "bin").mkdir(parents=True)
+            (folder / "bin" / "clang").write_bytes(b"built from the old pins")
+            old = cfg.identity()
+            toolchain._mark(folder, old)
+            with mock.patch.object(toolchain, "PYTHON_VERSION", "3.15.99"):
+                self.assertNotEqual(cfg.identity(), old)
+                self.assertEqual(self._run_host(cfg), ["host configure", "host build"])
+                self.assertEqual((folder / ".done").read_text(encoding="utf-8"), cfg.identity())
+            self.assertFalse((folder / "bin" / "clang").exists())
+
+    def test_a_stamp_that_records_no_identity_is_built_again(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp))
+            folder = cfg.build / "host"
+            folder.mkdir(parents=True)
+            (folder / ".done").write_text("done\n", encoding="utf-8")   # the old stamp
+            self.assertEqual(self._run_host(cfg), ["host configure", "host build"])
+
+    def test_an_interrupted_stage_of_the_same_build_keeps_its_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp))
+            folder = cfg.build / "host"
+            toolchain._start(folder, cfg.identity())
+            (folder / "half-built.o").write_bytes(b"o")
+            self.assertEqual(self._run_host(cfg), ["host configure", "host build"])
+            self.assertTrue((folder / "half-built.o").is_file())
+
+    def test_the_runtimes_stage_resumes_after_a_failure_past_the_libcxx_headers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp))
+            (cfg.build / "host" / "lib" / "clang" / toolchain.CLANG_MAJOR / "include").mkdir(parents=True)
+            (cfg.sysroot / toolchain.SYSROOT_LIB).mkdir(parents=True)
+            install = cfg.build / "rt-install"
+            libcxx = {"present": False}
+
+            def run(command: list[str], log: Path, what: str, *args: object, **kwargs: object) -> None:
+                if what != "runtimes build":
+                    return
+                (cfg.build / "rt" / "lib").mkdir(parents=True, exist_ok=True)
+                (cfg.build / "rt" / "lib" / "libclang_rt.builtins-aarch64.a").write_bytes(b"a")
+                (install / "include" / "c++" / "v1").mkdir(parents=True, exist_ok=True)
+                (install / "include" / "c++" / "v1" / "vector").write_bytes(b"h")
+                (install / "lib").mkdir(parents=True, exist_ok=True)
+                (install / "lib" / "libunwind.a").write_bytes(b"a")
+                if libcxx["present"]:
+                    (install / "lib" / "libc++.a").write_bytes(b"a")
+
+            with mock.patch.object(toolchain, "_run", run):
+                with self.assertRaises(FileNotFoundError):   # libc++.a missing: after the headers
+                    toolchain.stage_runtimes(cfg)
+                libcxx["present"] = True
+                toolchain.stage_runtimes(cfg)
+            self.assertTrue(toolchain._done(cfg.build / "rt", cfg.identity()))
+            self.assertTrue((cfg.sysroot / "usr" / "include" / "c++" / "v1" / "vector").is_file())
+
+
+class StageOutputTests(unittest.TestCase):
+    """stage_output writes --out from scratch, so nothing from an earlier run ships or is listed."""
+
+    def _build(self, cfg: toolchain.Config) -> None:
+        """The stage folders stage_output copies from, with stand-in bytes."""
+        files = {
+            cfg.build / "android" / "bin" / "clang": b"clang",
+            cfg.build / "android" / "bin" / "lld": b"lld",
+            cfg.build / "android" / "lib" / "clang" / toolchain.CLANG_MAJOR / "include" / "a.h": b"h",
+            cfg.build / "make" / "make": b"make",
+            cfg.build / "python" / "lib" / f"libpython{toolchain.PYTHON_MINOR}.so": b"py",
+            cfg.build / "python" / "libnk_python.so": b"launcher",
+            cfg.build / "python" / "python-stdlib.tar": b"tar",
+            cfg.build / "python" / "LICENSE.txt": b"psf",
+            cfg.build / "sysroot.tar": b"tar",
+            cfg.resource / "lib" / "linux" / "libclang_rt.builtins-aarch64-android.a": b"a",
+            cfg.make_src / "COPYING": b"gpl",
+        }
+        files.update({cfg.src / project / "LICENSE.TXT": b"licence" for project in toolchain.LLVM_LICENSED})
+        files.update({cfg.src / relative: b"notice" for relative in toolchain.LLVM_THIRD_PARTY_FILES})
+        for path, data in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+    def _stage(self, cfg: toolchain.Config, out: Path) -> dict[str, str]:
+        def run(command: list[str], log: Path, what: str, *args: object, **kwargs: object) -> None:
+            Path(command[command.index("-o") + 1]).write_bytes(b"ld launcher")
+
+        import package_notices
+        reference = {"repository": "https://example.invalid/nakagawa", "commit": "0123abc", "local_changes": False}
+        with mock.patch.object(toolchain, "_run", run), \
+                mock.patch.object(toolchain, "read_pinned", lambda *args: b"notice"), \
+                mock.patch.object(toolchain, "third_party_notices", lambda src: "notices\n"), \
+                mock.patch.object(package_notices, "source_reference", lambda: reference):
+            staged: dict[str, str] = toolchain.stage_output(cfg, out)
+        return staged
+
+    def test_files_an_earlier_run_left_are_neither_shipped_nor_listed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp) / "work")
+            self._build(cfg)
+            out = Path(tmp) / "out"
+            stale = out / "jniLibs" / "arm64-v8a" / "libold_python.so"   # an earlier CPython pin's
+            stale.parent.mkdir(parents=True)
+            stale.write_bytes(b"old")
+            (out / "toolchain-manifest.json").write_text("{}\n", encoding="utf-8")
+            manifest = self._stage(cfg, out)
+            self.assertFalse(stale.exists())
+            self.assertNotIn("jniLibs/arm64-v8a/libold_python.so", manifest)
+            self.assertIn(f"jniLibs/arm64-v8a/libpython{toolchain.PYTHON_MINOR}.so", manifest)
+            self.assertFalse((out / toolchain.PARTIAL).exists())
+            listed = json.loads((out / "toolchain-manifest.json").read_text(encoding="utf-8"))["files"]
+            on_disk = sorted(path.relative_to(out).as_posix() for path in out.rglob("*")
+                             if path.is_file() and path.name != "toolchain-manifest.json")
+            self.assertEqual(sorted(listed), on_disk)
+
+    def test_an_interrupted_stage_output_is_cleared(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp) / "work")
+            self._build(cfg)
+            out = Path(tmp) / "out"
+            out.mkdir()
+            (out / toolchain.PARTIAL).write_text("x\n", encoding="utf-8")
+            (out / "left-over").write_bytes(b"x")
+            self.assertNotIn("left-over", self._stage(cfg, out))
+            self.assertFalse((out / "left-over").exists())
+
+    def test_a_folder_this_tool_did_not_write_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nk-tc-test-") as tmp:
+            cfg = _config(Path(tmp) / "work")
+            self._build(cfg)
+            out = Path(tmp) / "out"
+            out.mkdir()
+            (out / "keep.txt").write_bytes(b"someone else's")
+            with self.assertRaisesRegex(toolchain.ToolchainError, "refusing to clear"):
+                self._stage(cfg, out)
+            self.assertEqual((out / "keep.txt").read_bytes(), b"someone else's")
 
 
 if __name__ == "__main__":

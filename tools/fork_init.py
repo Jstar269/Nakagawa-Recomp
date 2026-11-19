@@ -21,9 +21,10 @@ with ``docs/provenance/IMPLEMENTATION_PROVENANCE.json``. Every record in it is r
 ledger entry that names a record id: its id, its exact paths, the classification and evidence tier
 the entry publishes, and the licence of an upstream-derived file. Each record says that it adopts the
 claim the upstream published at that commit; it is not a new attestation. It makes one choice of its
-own: every project-authored entry gets the detailed class ``project-authored-independent``, because the
-public ledger does not say which of the two detailed classes behind its project-authored class
-(``project-authored-independent`` or ``behavior-informed``) the upstream recorded. Documentation,
+own: every project-authored entry gets the detailed class ``behavior-informed``, the weaker of the two
+detailed classes behind the public project-authored class, because the public ledger does not say
+which of the two (``project-authored-independent`` or ``behavior-informed``) the upstream recorded,
+and an adopted claim must not assert an independence no record supports. Documentation,
 configuration, fixtures and other deterministic paths need no
 record. ``init`` then checks that the trusted verifier, given only the new authority, regenerates the
 committed public ledger byte for byte, and commits the seed with your Git identity.
@@ -62,7 +63,9 @@ AUTHORITY_README = "README.md"
 #: each back to exactly the public class and evidence the entry already has
 #: (``provenance_ledger._class_for``).
 SEED_CLASSIFICATION = {
-    "project_authored_attested": "project-authored-independent",
+    # The weaker detailed class: the public class cannot tell an independent record from a
+    # behavior-informed one, so a seeded record never claims independence on its own.
+    "project_authored_attested": "behavior-informed",
     "upstream_derived": "derived-translated",
     "generated_from_public_source": "derived-data",
 }
@@ -280,6 +283,7 @@ def init(repo: Path, authority: Path, rev: str = "HEAD", *, assisted_by: str | N
 def add_record(
     authority: Path,
     *,
+    repo: Path = ROOT,
     record_id: str,
     paths: list[str],
     classification: str,
@@ -308,6 +312,9 @@ def add_record(
     ledger_path = authority / AUTHORITY_LEDGER
     if not ledger_path.is_file():
         raise ForkInitError("AUTHORITY_MISSING", f"{ledger_path} does not exist; run `fork_init.py init` first")
+    if any(_within(authority, tree) for tree in _worktrees(_repo_root(repo))):
+        raise ForkInitError("AUTHORITY_INSIDE_REPOSITORY",
+                            "the authority must live outside every checkout of the fork, or it would be published")
     _require_fork_authority(authority)
     if _git(authority, "status", "--porcelain", "--", "docs/provenance").strip():
         raise ForkInitError("AUTHORITY_DIRTY", "docs/provenance in the authority has uncommitted changes")
@@ -328,12 +335,23 @@ def add_record(
         if value:
             record[key] = value
     records.append(record)
-    ledger_path.write_bytes(_canonical(document))
-    _git(authority, "add", "--", AUTHORITY_LEDGER)
     message = f"Record {record_id}"
     if assisted_by:
         message += f"\n\nAssisted-by: {assisted_by}"
-    _git(authority, "commit", "--quiet", "-m", message)
+    previous = ledger_path.read_bytes()
+    ledger_path.write_bytes(_canonical(document))
+    try:
+        _git(authority, "add", "--", AUTHORITY_LEDGER)
+        _git(authority, "commit", "--quiet", "-m", message)
+    except ForkInitError as error:
+        # Put the authority back as it was, so the next `record` is not refused as AUTHORITY_DIRTY.
+        _git(authority, "reset", "--quiet", "--", AUTHORITY_LEDGER, check=False)
+        ledger_path.write_bytes(previous)
+        raise ForkInitError(
+            "AUTHORITY_COMMIT_FAILED",
+            f"{error}\nThe record was not committed and the authority is unchanged. Set your Git "
+            "identity (or fix what refused the commit) and run `record` again.",
+        ) from error
     return record
 
 
@@ -370,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"fork authority reproduces {PUBLIC_LEDGER} at {sha}")
         else:
             record = add_record(
-                args.authority.absolute(), record_id=args.record_id, paths=args.paths,
+                args.authority.absolute(), repo=args.repo, record_id=args.record_id, paths=args.paths,
                 classification=args.classification, evidence_tier=args.evidence_tier, statement=args.statement,
                 upstream=args.upstream, upstream_revision=args.upstream_revision,
                 upstream_license=args.upstream_license, assisted_by=args.assisted_by,

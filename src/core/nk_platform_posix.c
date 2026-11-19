@@ -1916,6 +1916,64 @@ NkHostKind nk_platform_host_kind(void) {
 #endif
 }
 
+bool nk_platform_linux_steam_find_root(char *root, size_t root_cap) {
+    char home[NK_MAX_PATH], first_root[NK_MAX_PATH] = "";
+    static const char *const suffixes[] = {"/.local/share/Steam", "/.steam/steam"};
+    if (!root || root_cap == 0u) return false;
+    root[0] = '\0';
+    if (nk_platform_host_kind() != NK_HOST_LINUX ||
+        nk_platform_env_utf8("HOME", home, sizeof(home)) <= 0 || home[0] != '/') return false;
+    for (size_t i = 0u; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
+        char candidate[NK_MAX_PATH], userdata[NK_MAX_PATH];
+        int n = snprintf(candidate, sizeof(candidate), "%s%s", home, suffixes[i]);
+        if (n < 0 || (size_t)n >= sizeof(candidate) || !nk_platform_dir_exists(candidate)) continue;
+        if (first_root[0] == '\0') memcpy(first_root, candidate, (size_t)n + 1u);
+        n = snprintf(userdata, sizeof(userdata), "%s/userdata", candidate);
+        if (n < 0 || (size_t)n >= sizeof(userdata) || !nk_platform_dir_exists(userdata)) continue;
+        n = snprintf(root, root_cap, "%s", candidate);
+        if (n >= 0 && (size_t)n < root_cap) return true;
+        root[0] = '\0';
+    }
+    if (first_root[0] != '\0') {
+        int n = snprintf(root, root_cap, "%s", first_root);
+        if (n >= 0 && (size_t)n < root_cap) return true;
+    }
+    root[0] = '\0';
+    return false;
+}
+
+bool nk_platform_linux_steam_client_running(void) {
+    char home[NK_MAX_PATH], path[NK_MAX_PATH], contents[64];
+    struct stat info;
+    ssize_t length;
+    unsigned long value = 0u;
+    if (nk_platform_host_kind() != NK_HOST_LINUX) return false;
+    if (nk_platform_env_utf8("HOME", home, sizeof(home)) <= 0 || home[0] != '/') return true;
+    int n = snprintf(path, sizeof(path), "%s/.steam/steam.pid", home);
+    if (n < 0 || (size_t)n >= sizeof(path)) return true;
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return errno != ENOENT && errno != ENOTDIR;
+    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode)) { close(fd); return true; }
+    length = read(fd, contents, sizeof(contents));
+    close(fd);
+    if (length < 0 || length == (ssize_t)sizeof(contents)) return true;
+    if (length > 0 && contents[length - 1] == '\n') {
+        --length;
+        if (length > 0 && contents[length - 1] == '\r') --length;
+    }
+    if (length <= 0) return true;
+    for (ssize_t i = 0; i < length; ++i) {
+        unsigned digit;
+        if (contents[i] < '0' || contents[i] > '9') return true;
+        digit = (unsigned)(contents[i] - '0');
+        if (value > ((unsigned long)INT_MAX - digit) / 10u) return true;
+        value = value * 10u + digit;
+    }
+    if (value == 0u) return true;
+    if (kill((pid_t)value, 0) == 0) return true;
+    return errno != ESRCH;
+}
+
 bool nk_platform_is_path_separator(char c) {
     return c == '/';
 }

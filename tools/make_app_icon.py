@@ -453,6 +453,8 @@ def write_version_rc(args: argparse.Namespace) -> int:
         else:
             name = (title_name_from_manifest(args.manifest) if args.manifest
                     else args.title_name.strip())
+            if not name:
+                raise ResourceError("--title-name is blank")
             description = f"{name} ({PRODUCT_NAME})"
         text = render_version_rc(description, args.original_filename,
                                  read_version(args.version_header))

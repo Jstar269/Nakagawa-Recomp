@@ -9,11 +9,20 @@ absent/invalid. ``--allow-present-only`` explicitly lowers only the frame-conten
 requirement for liveness diagnostics; the JSON output still labels that evidence
 as ``present-submitted`` rather than visual success.
 
-A ``phase=stalled`` event carrying ``observation=no_new_flip`` is reported as a
-neutral observation (``observations`` JSON list), not a disqualifying reason: the
-no-frame watchdog fires on a stretch of vblanks with no new presented frame, which
-a legitimately static scene (e.g. a save-confirmation modal waiting for input) also
-produces. Legacy bare ``phase=stalled`` events remain disqualifying.
+A ``phase=stalled`` event carrying a known neutral observation is reported in the
+``observations`` JSON list, not as a disqualifying reason: ``observation=no_new_flip``
+(the no-frame watchdog fires on a stretch of vblanks with no new presented frame, which
+a legitimately static scene, e.g. a save-confirmation modal waiting for input, also
+produces) and ``observation=dark_picture`` (flips arrive but every probed frame of a
+stretch was dark, as in a long fade). Each stalled event is judged on its own: one
+without a known observation (the legacy bare ``phase=stalled``) stays disqualifying,
+whatever other stalled events the log holds.
+
+A run that ended at a named stop is not fault-free, wherever the stop falls: a
+``phase=stop`` event (a semantic boundary or an unsupported import) and the runtime's
+unimplemented-NID and unsupported-import stop lines are disqualifying. A
+``SEMANTIC_BOUNDARY:`` line alone is not: the runtime also prints it for a modeled PSP
+error it returns to the guest, and the run goes on.
 """
 
 from __future__ import annotations
@@ -33,7 +42,15 @@ PAIR_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|\S+)')
 # milestone. Interactive backends use a real window; the explicit offscreen
 # backend uses the same phase with ``backend=offscreen`` and makes no window claim.
 EXPECTED = ("image_loaded", "runtime_registered", "window_ready", "guest_start", "display_flip", "first_frame")
-FAULT_MARKERS = ("ERROR:", "MEM OOR", "Unhandled")
+# The last two are the runtime's stop at an import with no handler (src/rt/hle.c), after
+# which the run ends.
+FAULT_MARKERS = ("ERROR:", "MEM OOR", "Unhandled", "HLE: unimplemented nid", "UNSUPPORTED_IMPORT:")
+# Neutral phase=stalled observations from the current runtime (src/rt/hle_display.c), and the
+# name each is reported under in ``observations``.
+NEUTRAL_STALL_OBSERVATIONS = {
+    "no_new_flip": "no-frame-observation",
+    "dark_picture": "dark-picture-observation",
+}
 # An Ace Mode run (src/rt/ace.h) says so on its first line of runtime output and in a
 # phase=ace_mode boot event. Its pictures are enhanced, so it is never boot evidence, whatever
 # else the log shows.
@@ -122,27 +139,33 @@ def parse_log(path: str, *, allow_present_only: bool = False) -> dict:
     )
     stalled = "stalled" in phases
 
-    # A phase=stalled event from the current runtime carries
-    # observation=no_new_flip: the no-frame watchdog fires on a stretch of
-    # vblanks with no new presented frame, which a legitimately static scene
-    # (e.g. a save-confirmation modal waiting for input) also produces. That is
-    # a neutral NO-NEW-FLIP observation, not a hang/stall verdict, so it is
-    # reported as an observation instead of a disqualifying reason. Only the
-    # legacy bare phase=stalled event (old runtime logs) keeps its
-    # disqualifying meaning.
-    no_frame_observation = any(
-        event.get("phase") == "stalled" and event.get("observation") == "no_new_flip"
-        for event in events
-    )
+    # A phase=stalled event from the current runtime carries a neutral observation
+    # (no_new_flip, dark_picture): a static scene or a long fade produces them too, so they
+    # are reported, not a hang verdict. Each event is judged on its own: one without a
+    # known observation (old runtime logs) stays disqualifying beside neutral ones.
     observations: list[str] = []
-    if no_frame_observation:
-        observations.append("no-frame-observation")
+    unexplained_stall = False
+    for event in events:
+        if event.get("phase") != "stalled":
+            continue
+        name = NEUTRAL_STALL_OBSERVATIONS.get(event.get("observation", ""))
+        if name is None:
+            unexplained_stall = True
+        elif name not in observations:
+            observations.append(name)
+
+    stops = [
+        f"{event.get('reason', 'unknown')}:{event.get('boundary', 'unknown')} at line {event.get('line', '?')}"
+        for event in events if event.get("phase") == "stop"
+    ]
 
     reasons: list[str] = []
     if not sequence_ok:
         reasons.append("milestones-incomplete-or-out-of-order")
-    if stalled and not no_frame_observation:
+    if unexplained_stall:
         reasons.append("stalled")
+    if stops:
+        reasons.append("semantic-stop")
     if faults:
         reasons.append("disqualifying-fault")
     if malformed_paths:
@@ -160,6 +183,7 @@ def parse_log(path: str, *, allow_present_only: bool = False) -> dict:
         "ok": ok,
         "stalled": stalled,
         "observations": observations,
+        "stops": stops,
         "lastPhase": last_phase,
         "reached": reached,
         "sequenceOk": sequence_ok,

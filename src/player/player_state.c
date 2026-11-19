@@ -13284,7 +13284,7 @@ PlayerSteamOutcome player_app_plan_steam_shortcut(const PlayerApp *app, int game
                        PLAYER_LAUNCH_TITLE_ARG "%s", value);
     }
 
-    /* Steam's folder and its accounts, from this PC only. */
+    /* Steam's folder and its accounts, from this system only. */
     if (steam_root != NULL) {
         (void)snprintf(plan->root, sizeof(plan->root), "%s", steam_root);
         status = plan->root[0] != '\0' && nk_platform_dir_exists(plan->root)
@@ -13595,16 +13595,16 @@ size_t player_steam_outcome_text(const PlayerSteamPlan *plan, char *out, size_t 
             break;
         case PLAYER_STEAM_UNSUPPORTED:
             n = snprintf(out, out_size, "%s",
-                         "Add to Steam works on Windows only. Nothing was changed.");
+                         "Add to Steam is not available on this platform. Nothing was changed.");
             break;
         case PLAYER_STEAM_NOT_FOUND:
             n = snprintf(out, out_size, "%s",
-                         "Steam isn't installed for this Windows user, so nothing was added. "
+                         "Steam wasn't found for this user, so nothing was added. "
                          "Install Steam and sign in once, then try again.");
             break;
         case PLAYER_STEAM_NO_ACCOUNT:
             n = snprintf(out, out_size, "%s",
-                         "No Steam account has signed in on this PC yet, so nothing was added. "
+                         "No Steam account has signed in on this system yet, so nothing was added. "
                          "Start Steam, sign in, exit Steam, then try again.");
             break;
         case PLAYER_STEAM_RUNNING:

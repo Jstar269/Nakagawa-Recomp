@@ -13625,7 +13625,7 @@ static void test_add_to_steam_outcomes(void) {
     assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NOT_FOUND &&
            !plan.ready);
     (void)player_steam_outcome_text(&plan, text, sizeof(text));
-    assert(strstr(text, "Steam isn't installed") != NULL && strstr(text, "nothing was added"));
+    assert(strstr(text, "Steam wasn't found") != NULL && strstr(text, "nothing was added"));
     /* Steam with no account yet. */
     assert(nk_platform_mkdir_p(steam));
     assert(player_app_plan_steam_shortcut(app, 0, steam, exe, &plan) == PLAYER_STEAM_NO_ACCOUNT);
