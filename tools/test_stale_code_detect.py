@@ -297,8 +297,19 @@ class TestStaleCodeWiring(unittest.TestCase):
         )
         for handler in ("h_CacheInvalidateAll", "h_CacheInvalidateRange", "sr_stale_note_cache_op"):
             self.assertIn(handler, HLE_C)
-        # Each firing path aborts after its own check and flight record, not merely somewhere in
-        # the HLE sources (hle.c has unrelated aborts).
+        # Each firing path stops through stale_code_stop after its own check, and that one stop
+        # records the fatal and then aborts, not merely somewhere in the HLE sources (hle.c has
+        # unrelated aborts).
+        stop = _c_function_body(
+            HLE_CACHE_DMA_C,
+            "__attribute__((noreturn, cold)) static void stale_code_stop(uint32_t pc, uint32_t bad,",
+        )
+        at_fatal = stop.find("sr_flight_fatal(")
+        self.assertNotEqual(at_fatal, -1, "stale_code_stop must record the fatal")
+        self.assertNotEqual(stop.find("abort();", at_fatal), -1,
+                            "stale_code_stop must abort after recording the fatal")
+        self.assertEqual(HLE_CACHE_DMA_C.count("abort();"), 1,
+                         "hle_cache_dma.c aborts only in stale_code_stop")
         firing = (
             ("static uint32_t h_cache_invalidate_all_common(CpuState *s) {", "sr_stale_check_all("),
             ("static uint32_t h_cache_invalidate_range_common(CpuState *s) {",
@@ -309,12 +320,8 @@ class TestStaleCodeWiring(unittest.TestCase):
             body = _c_function_body(HLE_CACHE_DMA_C, signature)
             at_check = body.find(check)
             self.assertNotEqual(at_check, -1, f"{signature} must run {check}")
-            at_fatal = body.find("sr_flight_fatal(", at_check)
-            self.assertNotEqual(at_fatal, -1, f"{signature} must record the fatal after the check")
-            self.assertNotEqual(body.find("abort();", at_fatal), -1,
-                                f"{signature} must abort after the firing check")
-        self.assertEqual(HLE_CACHE_DMA_C.count("abort();"), 3,
-                         "hle_cache_dma.c has exactly the three stale firing aborts")
+            self.assertNotEqual(body.find("stale_code_stop(", at_check), -1,
+                                f"{signature} must stop through stale_code_stop after the firing check")
 
     def test_stale_flags_are_per_entry_and_cleared_on_match(self):
         self.assertIn("int sr_stale_block_is_stale(uint32_t addr);", STALE_H)
