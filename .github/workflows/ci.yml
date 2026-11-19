@@ -735,7 +735,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The v* release tags (each a depth-1 commit) let test_compat_manifest compare
+        # every release's notes with what that tag shipped; without them the check fails.
         with:
+          fetch-tags: true
           persist-credentials: false
 
       - name: Fetch the real-history parity commits
@@ -1163,6 +1166,19 @@ jobs:
       - name: Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)
         if: matrix.part == 'core'
         run: NK_REQUIRE_SDL3=1 make CC=gcc native-core-tests
+
+      # tools/test_hle_title_config_behavior.py builds the production-HLE selftest for
+      # synthetic title manifests (libfont startup, module-load collisions, runtime-placed
+      # modules, the diagnostics opt-in, the data-file census binding) with make. The
+      # python_tools shards have no SDL3 or Vulkan, so there it skips; this part has both,
+      # and only unittest's bare OK passes, so a skipped case fails the step.
+      - name: Run title-configured HLE behaviour tests on Linux
+        if: matrix.part == 'core'
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/hle-title-config-behavior.log"
+          PYTHONPATH=tools python -m unittest -v test_hle_title_config_behavior 2>&1 | tee "$log"
+          tail -n 1 "$log" | grep -qx 'OK'
 
       # Compile ge.c with its optional front-end attribution path enabled. Use a
       # fresh object directory so the normal unprofiled ge.o cannot satisfy the
@@ -1701,9 +1717,9 @@ jobs:
     timeout-minutes: 20
     # The display smoke's flight step needs the commit as its build identity
     # (mk/runtime_sources.mk). The job runs as root in the container and the checkout belongs to
-    # the runner's user, so git refuses the repository ("dubious ownership") and the Makefile's
-    # `git rev-parse HEAD` comes back empty. Forward the revision the checkout contains, as
-    # windows_runtime does.
+    # the runner's user, so until the safe.directory step below git refuses the repository
+    # ("dubious ownership") and the Makefile's `git rev-parse HEAD` comes back empty. Forward the
+    # revision the checkout contains, as windows_runtime does, so the identity never rests on git.
     env:
       SR_SOURCE_COMMIT: ${{ github.sha }}
     steps:
@@ -1725,6 +1741,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # The job runs as root and the checkout belongs to the runner's user, so git refuses it
+      # ("dubious ownership") and test_player_state's #511 git-clean check could not run (exit 77).
+      # The test points HOME at its own temporary folder, so the entry goes in the system
+      # configuration, which it still reads.
+      - name: Let git read the runner-owned checkout
+        run: git config --system --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Run native core test suite with GCC 16.2
         run: make -j2 CC=gcc native-core-tests
@@ -2613,9 +2636,14 @@ jobs:
           command -v pwsh
           mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 production-smoke-gap
 
+      # test_player_state's #511 git-clean check runs `git status` on the checkout, and this
+      # job's MSYS2 shell has no git of its own: the runner's Windows git, inherited from PATH,
+      # answers it. Without it the check could not run and the test exits 77.
       - name: Run native core test suite on Windows
         if: contains(matrix.parts, 'routes')
         shell: msys2 {0}
+        env:
+          MSYS2_PATH_TYPE: inherit
         run: |
           set -euo pipefail
           mingw32-make --no-print-directory CC=gcc native-core-tests

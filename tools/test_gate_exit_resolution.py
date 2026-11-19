@@ -683,7 +683,7 @@ class TestVerifyGateEvidence(unittest.TestCase):
             tier = verify_gates.report_trace_tier(label, path)
         return tier, output.getvalue()
 
-    def capture_main(self, oracle):
+    def capture_main(self, oracle, microtest_module=None, microtest_oracle=None):
         output = io.StringIO()
         argv = [
             "verify_gates.py",
@@ -693,6 +693,10 @@ class TestVerifyGateEvidence(unittest.TestCase):
             "--workdir", str(self.dir / "verify-work"),
             "--codegen-oracle", oracle,
         ]
+        if microtest_module is not None:
+            argv += ["--microtest-module", microtest_module]
+        if microtest_oracle is not None:
+            argv += ["--microtest-oracle", microtest_oracle]
         with redirect_stdout(output), patch.object(sys, "argv", argv):
             with patch("verify_gates.subprocess.run", return_value=MagicMock(returncode=0)) as runner:
                 result = verify_gates.main()
@@ -756,10 +760,21 @@ class TestVerifyGateEvidence(unittest.TestCase):
     def test_main_without_a_hardware_pair_can_still_pass(self):
         """The hardware pair is opt-in: the existing gates must be able to report success."""
         oracle = self.trace("oracle.trace", source_tier="PPSSPP_CORROBORATIVE")
-        result, output, call_args = self.capture_main(oracle)
+        microtest_oracle = self.trace("microtest.trace", source_tier="PPSSPP_CORROBORATIVE")
+        result, output, call_args = self.capture_main(
+            oracle, microtest_module="synthetic-microtest.elf", microtest_oracle=microtest_oracle)
+        # Both gates ran (subprocess.run is mocked to pass); the microtest gate was the last.
         self.assertIsNotNone(call_args)
+        self.assertTrue(str(call_args.args[0][1]).endswith("microtest_gate.py"), call_args)
         self.assertIn("hardware_trace_gate", output)
         self.assertIn("NOT_RUN: optional gate", output)
+        self.assertEqual(result, 0, output)
+
+    def test_main_without_microtest_inputs_stays_a_failure(self):
+        oracle = self.trace("oracle.trace", source_tier="PPSSPP_CORROBORATIVE")
+        result, output, call_args = self.capture_main(oracle)
+        self.assertIsNotNone(call_args)
+        self.assertIn("NOT_RUN: MICROTEST_MODULE and/or MICROTEST_ORACLE not set", output)
         # codegen passes (mocked) but microtest inputs are absent, which stays a failure
         self.assertEqual(result, 1, output)
 

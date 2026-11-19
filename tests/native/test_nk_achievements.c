@@ -44,6 +44,8 @@ typedef struct Fake {
     int requests;
     char log[16][512];       /* the post data of each request, in order */
     int award_status;        /* the HTTP status awardachievement answers */
+    int login_status;        /* the HTTP status login2 answers; 0 means 200 */
+    const char *sets;        /* the achievementsets answer; NULL means k_sets */
 } Fake;
 
 static const char k_login[] =
@@ -67,19 +69,46 @@ static const char k_award[] =
     "{\"Success\":true,\"Score\":0,\"SoftcoreScore\":17,\"AchievementID\":5501,"
     "\"AchievementsRemaining\":0}";
 static const char k_ok[] = "{\"Success\":true}";
+/* A set whose second achievement has a trigger rcheevos cannot parse ("X:" is no condition
+ * type), and the same set as the server's answer for another console (12). */
+static const char k_sets_parse_error[] =
+    "{\"Success\":true,\"GameId\":1234,\"Title\":\"Synthetic Game\",\"ConsoleId\":41,"
+    "\"ImageIconUrl\":\"\",\"RichPresenceGameId\":1234,\"RichPresencePatch\":\"\","
+    "\"Sets\":[{\"AchievementSetId\":1111,\"GameId\":1234,\"Title\":null,\"Type\":\"core\","
+    "\"ImageIconUrl\":\"\",\"Achievements\":["
+    "{\"ID\":5501,\"Title\":\"Five\",\"Description\":\"The watched byte reads 5\","
+    "\"Flags\":3,\"Points\":5,\"MemAddr\":\"0xH800100=5\",\"Author\":\"Synthetic\","
+    "\"BadgeName\":\"00001\",\"Created\":1700000000,\"Modified\":1700000000},"
+    "{\"ID\":5503,\"Title\":\"Unparsable\",\"Description\":\"A trigger with no valid form\","
+    "\"Flags\":3,\"Points\":1,\"MemAddr\":\"X:0xH800100=5\",\"Author\":\"Synthetic\","
+    "\"BadgeName\":\"00003\",\"Created\":1700000000,\"Modified\":1700000000}"
+    "],\"Leaderboards\":[]}]}";
+static const char k_sets_other_console[] =
+    "{\"Success\":true,\"GameId\":1234,\"Title\":\"Synthetic Game\",\"ConsoleId\":12,"
+    "\"ImageIconUrl\":\"\",\"RichPresenceGameId\":1234,\"RichPresencePatch\":\"\","
+    "\"Sets\":[{\"AchievementSetId\":1111,\"GameId\":1234,\"Title\":null,\"Type\":\"core\","
+    "\"ImageIconUrl\":\"\",\"Achievements\":["
+    "{\"ID\":5501,\"Title\":\"Five\",\"Description\":\"The watched byte reads 5\","
+    "\"Flags\":3,\"Points\":5,\"MemAddr\":\"0xH800100=5\",\"Author\":\"Synthetic\","
+    "\"BadgeName\":\"00001\",\"Created\":1700000000,\"Modified\":1700000000}"
+    "],\"Leaderboards\":[]}]}";
 
 static int starts_with(const char *s, const char *prefix) {
     return s && strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
-static void fake_transport(void *ctx, const NkAchRequest *req, NkAchDone done, void *done_ctx) {
-    Fake *f = (Fake *)ctx;
-    const char *post = req->post_data ? req->post_data : "";
+/* The fake server's answer to one request's post data, logged in order. */
+static NkAchResponse fake_answer(Fake *f, const char *post_data) {
+    const char *post = post_data ? post_data : "";
     if (f->requests < 16) snprintf(f->log[f->requests], sizeof f->log[0], "%s", post);
     f->requests++;
     NkAchResponse r = {k_ok, sizeof k_ok - 1u, 200};
-    if (starts_with(post, "r=login2&")) r.body = k_login;
-    else if (starts_with(post, "r=achievementsets&")) r.body = k_sets;
+    if (starts_with(post, "r=login2&")) {
+        r.body = k_login;
+        if (f->login_status) r.http_status = f->login_status;
+        if (f->login_status < 0) r.body = "";
+    }
+    else if (starts_with(post, "r=achievementsets&")) r.body = f->sets ? f->sets : k_sets;
     else if (starts_with(post, "r=startsession&")) r.body = k_session;
     else if (starts_with(post, "r=awardachievement&")) {
         r.body = k_award;
@@ -87,7 +116,75 @@ static void fake_transport(void *ctx, const NkAchRequest *req, NkAchDone done, v
         if (f->award_status < 0) r.body = "";
     }
     r.body_length = strlen(r.body);
+    return r;
+}
+
+static void fake_transport(void *ctx, const NkAchRequest *req, NkAchDone done, void *done_ctx) {
+    NkAchResponse r = fake_answer((Fake *)ctx, req->post_data);
     done(&r, done_ctx);
+}
+
+/* A transport that reached no server and says nothing more: done(NULL). */
+static void silent_transport(void *ctx, const NkAchRequest *req, NkAchDone done, void *done_ctx) {
+    (void)ctx;
+    (void)req;
+    done(NULL, done_ctx);
+}
+
+/* An asynchronous transport written to the header's contract: it keeps the request it was handed,
+ * as given, and answers later, from the caller's loop (held_pump). Unlike Deferred below, which
+ * copies the post data, it holds the request's own pointers, so a test sees whether they outlive
+ * the call, and it answers as the fake server does. */
+typedef struct Held {
+    Fake fake;
+    struct {
+        const char *url;
+        const char *post_data;
+        NkAchDone done;
+        void *done_ctx;
+    } q[16];
+    int queued;
+    int answered;
+} Held;
+
+static void held_transport(void *ctx, const NkAchRequest *req, NkAchDone done, void *done_ctx) {
+    Held *d = (Held *)ctx;
+    if (d->queued >= 16) {
+        done(NULL, done_ctx);
+        return;
+    }
+    d->q[d->queued].url = req->url;
+    d->q[d->queued].post_data = req->post_data;
+    d->q[d->queued].done = done;
+    d->q[d->queued].done_ctx = done_ctx;
+    d->queued++;
+}
+
+/* Answers one waiting request, the oldest; false when none waits. */
+static int held_answer_one(Held *d) {
+    if (d->answered >= d->queued) return 0;
+    const int i = d->answered++;
+    NkAchResponse r = fake_answer(&d->fake, d->q[i].post_data);
+    d->q[i].done(&r, d->q[i].done_ctx);
+    return 1;
+}
+
+static void held_pump(Held *d) {
+    while (held_answer_one(d)) {
+    }
+}
+
+/* Overwrites the stack below the caller, where a frame that has returned kept its locals. */
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+static void scribble_stack(void) {
+    volatile unsigned char junk[32768];
+    for (size_t i = 0; i < sizeof junk; i++) junk[i] = 0xa5u;
+}
+
+static int has_prefix_n(const char *s, const char *prefix) {
+    return s && strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
 /* A transport that answers later, as NkAchTransport allows ("now or later"): each request waits
@@ -384,6 +481,188 @@ static void test_award_offline_is_pending(uint8_t *ram) {
     CHECK(has_event(ev, n, NK_ACH_EVENT_UNLOCKED) >= 0, "the unlock is still shown");
     CHECK(has_event(ev, n, NK_ACH_EVENT_DISCONNECTED) >= 0, "the award is pending");
     CHECK(has_event(ev, n, NK_ACH_EVENT_SERVER_ERROR) < 0, "a retry is not a server error");
+    nk_ach_destroy(ach);
+}
+
+/* An asynchronous transport keeps the request it was handed until it answers: the strings stay
+ * valid after rc_client's server_call has returned and its own request buffer is gone. */
+static void test_deferred_transport_request_outlives_the_call(uint8_t *ram) {
+    static Held d;
+    memset(&d, 0, sizeof d);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, held_transport, &d);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    CHECK(nk_ach_begin_login(ach, "Player", "TOKEN"), "login starts");
+    CHECK(d.queued == 1, "one request waits (%d)", d.queued);
+    scribble_stack();
+    if (d.queued == 1) {
+        CHECK(has_prefix_n(d.q[0].url, "https://retroachievements.org/dorequest.php"),
+              "the waiting request's URL is intact after server_call returned");
+        CHECK(has_prefix_n(d.q[0].post_data, "r=login2&u=Player&"),
+              "the waiting request's post data is intact after server_call returned");
+    }
+    held_pump(&d);
+    NkAchEvent ev[8];
+    const size_t n = take(ach, ev, 8);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_LOGIN_OK) >= 0, "the late answer signs in");
+    nk_ach_destroy(ach);
+}
+
+/* nk_ach_destroy while an unlock is still in flight: the late answer reaches a client that is
+ * still whole, and the bridge is freed once it arrives (ASan or a crash shows a use after free). */
+static void test_destroy_with_a_request_in_flight(uint8_t *ram) {
+    static Held d;
+    memset(&d, 0, sizeof d);
+    d.fake.award_status = 200;
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, held_transport, &d);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    nk_ach_begin_login(ach, "Player", "TOKEN");
+    held_pump(&d);
+    nk_ach_begin_load_game(ach, HASH);
+    held_pump(&d);
+    for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(nk_ach_game_loaded(ach), "game loaded");
+    ram[ACH_ADDR] = 5;
+    nk_ach_frame(ach);
+    const int waiting = d.queued - d.answered;
+    CHECK(waiting == 1 && has_prefix_n(d.q[d.answered].post_data, "r=awardachievement&"),
+          "the award waits for its answer (%d waiting)", waiting);
+    nk_ach_destroy(ach);
+    /* What the heap held for the client is reused before the late answer arrives. */
+    void *churn[64];
+    for (int i = 0; i < 64; i++) {
+        churn[i] = malloc(64u << (i % 8));
+        if (churn[i]) memset(churn[i], 0xa5, 64u << (i % 8));
+    }
+    held_pump(&d);
+    for (int i = 0; i < 64; i++) free(churn[i]);
+    CHECK(d.answered == d.queued, "every request was answered");
+}
+
+/* A transport that reached no server gives no text: the failure still says why. */
+static void test_no_server_failures_name_a_reason(uint8_t *ram) {
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.login_status = NK_ACH_HTTP_CLIENT_ERROR;
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    nk_ach_begin_login(ach, "Player", "TOKEN");
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    int failed = has_event(ev, n, NK_ACH_EVENT_LOGIN_FAILED);
+    CHECK(failed >= 0 && strstr(ev[failed].message, "no response") != NULL,
+          "LOGIN_FAILED names the missing answer (got \"%s\")", failed >= 0 ? ev[failed].message : "");
+    nk_ach_destroy(ach);
+
+    ach = nk_ach_create(&mem, silent_transport, NULL);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    nk_ach_begin_login(ach, "Player", "TOKEN");
+    n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    failed = has_event(ev, n, NK_ACH_EVENT_LOGIN_FAILED);
+    CHECK(failed >= 0 && strstr(ev[failed].message, "no response") != NULL,
+          "done(NULL) names the missing answer (got \"%s\")", failed >= 0 ? ev[failed].message : "");
+    nk_ach_destroy(ach);
+
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = NK_ACH_HTTP_CLIENT_ERROR;
+    memset(ram, 0, USER_RAM_SIZE);
+    ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    nk_ach_begin_login(ach, "Player", "TOKEN");
+    nk_ach_begin_load_game(ach, HASH);
+    for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+    (void)take(ach, ev, NK_ACH_EVENT_QUEUE);
+    ram[ACH_ADDR] = 5;
+    nk_ach_frame(ach);
+    n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    failed = has_event(ev, n, NK_ACH_EVENT_SERVER_ERROR);
+    CHECK(failed >= 0 && ev[failed].message[0] != '\0',
+          "an award that reached no server is a SERVER_ERROR with a reason (got \"%s\")",
+          failed >= 0 ? ev[failed].message : "");
+    nk_ach_destroy(ach);
+}
+
+/* NK_ACH_HTTP_RETRY at sign-in is a final LOGIN_FAILED: rc_client retries only unlocks and
+ * leaderboard submissions, as the header says, so the caller retries the sign-in. */
+static void test_retry_at_login_is_not_retried(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.login_status = NK_ACH_HTTP_RETRY;
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    nk_ach_begin_login(ach, "Player", "TOKEN");
+    for (int i = 0; i < 8; i++) nk_ach_idle(ach);
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_LOGIN_FAILED) >= 0, "a retry at sign-in fails the sign-in");
+    CHECK(fake.requests == 1, "rc_client did not retry the sign-in (%d requests)", fake.requests);
+    CHECK(!nk_ach_logged_in(ach), "not logged in");
+    nk_ach_destroy(ach);
+}
+
+/* An achievement whose trigger this rcheevos cannot parse is reported off. */
+static void test_unparsable_achievement_is_reported(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    fake.sets = k_sets_parse_error;
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    nk_ach_begin_login(ach, "Player", "TOKEN");
+    nk_ach_begin_load_game(ach, HASH);
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    const size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    const int loaded = has_event(ev, n, NK_ACH_EVENT_GAME_LOADED);
+    CHECK(loaded >= 0, "game loads");
+    const int disabled = has_event(ev, n, NK_ACH_EVENT_DISABLED);
+    CHECK(disabled >= 0, "the unparsable achievement is reported off");
+    if (disabled >= 0)
+        CHECK(ev[disabled].id == 5503u && strstr(ev[disabled].message, "Parse error") != NULL,
+              "DISABLED names 5503 (got %u: %s)", ev[disabled].id, ev[disabled].message);
+    nk_ach_destroy(ach);
+}
+
+/* The server's set for this hash is for another console: it is not run on PSP memory. */
+static void test_set_for_another_console_is_refused(uint8_t *ram) {
+    Fake fake;
+    memset(&fake, 0, sizeof fake);
+    fake.award_status = 200;
+    fake.sets = k_sets_other_console;
+    memset(ram, 0, USER_RAM_SIZE);
+    const NkAchMemory mem = {ram, USER_RAM, USER_RAM_SIZE};
+    NkAch *ach = nk_ach_create(&mem, fake_transport, &fake);
+    CHECK(ach != NULL, "create");
+    if (!ach) return;
+    nk_ach_begin_login(ach, "Player", "TOKEN");
+    nk_ach_begin_load_game(ach, HASH);
+    NkAchEvent ev[NK_ACH_EVENT_QUEUE];
+    size_t n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_GAME_LOADED) < 0, "a set for console 12 is not loaded");
+    const int failed = has_event(ev, n, NK_ACH_EVENT_GAME_FAILED);
+    CHECK(failed >= 0 && strstr(ev[failed].message, "console 12") != NULL,
+          "GAME_FAILED names the console (got \"%s\")", failed >= 0 ? ev[failed].message : "");
+    CHECK(!nk_ach_game_loaded(ach), "no game loaded");
+    ram[ACH_ADDR] = 5;
+    for (int i = 0; i < 4; i++) nk_ach_frame(ach);
+    n = take(ach, ev, NK_ACH_EVENT_QUEUE);
+    CHECK(has_event(ev, n, NK_ACH_EVENT_UNLOCKED) < 0, "nothing unlocks");
+    CHECK(find_request(&fake, "r=awardachievement&") < 0, "no award is sent");
     nk_ach_destroy(ach);
 }
 
@@ -949,6 +1228,12 @@ int main(void) {
     test_no_transport_sends_nothing(ram);
     test_login_load_unlock(ram);
     test_award_offline_is_pending(ram);
+    test_deferred_transport_request_outlives_the_call(ram);
+    test_destroy_with_a_request_in_flight(ram);
+    test_no_server_failures_name_a_reason(ram);
+    test_retry_at_login_is_not_retried(ram);
+    test_unparsable_achievement_is_reported(ram);
+    test_set_for_another_console_is_refused(ram);
     test_award_of_another_id_is_logged(ram);
     test_session_error_after_failed_load(ram);
     test_award_reply_after_unload(ram);

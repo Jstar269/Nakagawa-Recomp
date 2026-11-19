@@ -3,6 +3,7 @@
 
 #include "nk_ui_waves.h"
 #include "nk_ui.h"
+#include "nk_ui_theme.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -38,7 +39,6 @@ static const double g_wave_frequency[3] = {0.32, 0.71, 1.37};
 static const double g_wave_speed[3] = {0.090, -0.140, 0.230};
 static const double g_wave_seed_factor[3] = {1.0, 1.7, 2.9};
 static const double g_tau = 6.28318530717958647692;
-static const uint32_t g_surface_rgba = 0x0B0F14FFu;
 
 static uint32_t nk_ui_mix_half(uint32_t a, uint32_t b) {
     uint32_t r = (((a >> 24) & 0xFFu) + ((b >> 24) & 0xFFu) + 1u) / 2u;
@@ -88,7 +88,9 @@ bool nk_ui_waves_palette(unsigned tint_index, NkUiWavePalette *out) {
         out->rgba[i] = tint_index == 0 ? g_base_colors[i] :
                        nk_ui_mix_half(g_base_colors[i], tint);
     }
-    out->cap = nk_ui_waves_compute_cap(out, g_surface_rgba);
+    /* The waves sit on the N1 page; its theme token is the one surface they are
+       solved against, never a second copy of the colour. */
+    out->cap = nk_ui_waves_compute_cap(out, nk_ui_theme_n1()->surface);
     return true;
 }
 
@@ -127,14 +129,15 @@ static float nk_ui_backdrop_channel(float wave, float surface, float fade, float
 
 float nk_ui_backdrop_scrim(float fade) {
     float surface[3];
+    uint32_t surface_rgba = nk_ui_theme_n1()->surface;
     float wave = 0.0f;
     float low;
     float high;
     unsigned i;
     if (!(fade > 0.0f)) return 0.0f;
-    surface[0] = (float)((g_surface_rgba >> 24) & 0xFFu) / 255.0f;
-    surface[1] = (float)((g_surface_rgba >> 16) & 0xFFu) / 255.0f;
-    surface[2] = (float)((g_surface_rgba >> 8) & 0xFFu) / 255.0f;
+    surface[0] = (float)((surface_rgba >> 24) & 0xFFu) / 255.0f;
+    surface[1] = (float)((surface_rgba >> 16) & 0xFFu) / 255.0f;
+    surface[2] = (float)((surface_rgba >> 8) & 0xFFu) / 255.0f;
     if (fade > 1.0f) fade = 1.0f;
     /* The grey whose luminance is the limit. */
     low = 0.0f;

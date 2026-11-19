@@ -86,15 +86,18 @@ static bool draw(void) {
     return true;
 }
 
-/* Draws until the host has nothing due, as the presenter's frame loop does. */
+/* Draws frames until the host has nothing due, as the presenter's frame loop does. The
+   eases run on the real clock, so the frames are paced like display frames; a host still
+   due after two seconds never came to rest, and settle() says so. */
 static bool settle(void) {
-    int i;
-    for (i = 0; i < 4; ++i) {
+    const Uint64 deadline = SDL_GetTicksNS() + 2000000000u;
+    do {
         if (!draw()) return false;
         if (g_last.kind != NK_OVERLAY_ACT_NONE) return true;
         if (!nk_overlay_host_due(g_host, (double)SDL_GetTicksNS() / 1e9)) return true;
-    }
-    return true;
+        SDL_DelayNS(4000000u);
+    } while (SDL_GetTicksNS() < deadline);
+    return false;
 }
 
 static bool key(SDL_Keycode code) {
@@ -257,7 +260,14 @@ int main(int argc, char **argv) {
         SDL_Quit();
         return 1;
     }
-    CHECK(canvas_make(&g_canvas, 1280, 800), "a 1280x800 canvas");
+    if (!canvas_make(&g_canvas, 1280, 800)) {
+        /* Every page check reads this canvas's pixels: stop with the reason, not a crash. */
+        fprintf(stderr, "FAIL: a 1280x800 canvas: %s\n", SDL_GetError());
+        canvas_free(&g_canvas);
+        nk_overlay_host_destroy(g_host);
+        SDL_Quit();
+        return 1;
+    }
     memset(&g_model, 0, sizeof(g_model));
     g_model.title_name = "Overlay Host Fixture";
     g_model.disc_id = "TEST00001";

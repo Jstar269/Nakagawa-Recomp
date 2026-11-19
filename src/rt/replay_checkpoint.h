@@ -66,7 +66,10 @@ typedef enum {
 typedef struct {
     NkCkptDiff kind;
     uint64_t frame;              /* the expected checkpoint's frame */
-    char name[NK_CKPT_NAME_LEN]; /* the first differing digest (NAMES: the expected name, or "") */
+    /* The first differing digest. NAMES: the expected list's name at the first difference,
+     * or, when the expected list ends first, the actual list's extra name (as
+     * tools/nkstate.py ckpt-diff reports it). FRAME: "". */
+    char name[NK_CKPT_NAME_LEN];
 } NkCkptMismatch;
 
 /* The first difference between an expected and an actual checkpoint, in the expected
@@ -126,7 +129,10 @@ void sr_replay_checkpoint_vblank(uint32_t vcount);
  *
  *   REPLAY_REFUSED reason=<name> line=<n>             exit 1, before the guest runs
  *   REPLAY_MISMATCH frame=<f> index=<i> kind=<k> digest=<name>
- *                                                     exit 1, at the first differing checkpoint;
+ *                                                     exit 1, at the first differing checkpoint
+ *                                                     (kind=frame, names or digest; kind=overflow
+ *                                                     digest=- when the replay's own checkpoint
+ *                                                     holds more threads than one can);
  *                                                     under SR_FLIGHT it first arms the flight
  *                                                     recorder (sr_flight_replay_divergence)
  *   REPLAY_MISSING_ANSWER call=osk request=<k> frame=<f> detail=<why>

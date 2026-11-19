@@ -176,13 +176,11 @@ class Instances(unittest.TestCase):
         self.assertTrue(fs.reserved_encoding(0x7C080004 | (5 << 6)))  # ins, msb 0 < lsb 5
         self.assertFalse(fs.reserved_encoding(0x7C08F804))         # ins, msb 31, lsb 0
         for name in ("ext", "ins"):
-            if name not in self.forms:
-                continue
+            self.assertIn(name, self.forms, f"the census lost the {name} form")
             instances, _total = fs.form_instances(self.forms[name], seed=1, cap=None)
             self.assertTrue(instances, name)
             for inst in instances:
                 self.assertFalse(fs.reserved_encoding(inst.word), f"{inst.word:#010x}")
-        self.assertIn("ext", self.forms)
 
     def test_addu_covers_every_aliasing_pattern_once(self):
         instances, total = fs.form_instances(self.forms["addu"], seed=1, cap=None)
@@ -360,6 +358,30 @@ class Mutant(unittest.TestCase):
             source = out.read_text()
         self.assertIn("(w & 0x3F) == 0x21", source)
         compile(source, "mutant_codegen.py", "exec")
+        # Load the wrapper's effect without installing it or running codegen.main.
+        body, installs, _tail = source.partition("\ncodegen.effect = effect\n")
+        self.assertTrue(installs, "the wrapper must install its effect over codegen.effect")
+        namespace: dict = {}
+        exec(compile(body, "mutant_codegen.py", "exec"), namespace)
+        mutant = namespace["effect"]
+        self.assertIs(namespace["_effect"], codegen.effect)
+        addr = 0x08804000
+
+        def word(op, rs, rt, low):
+            return (op << 26) | (rs << 21) | (rt << 16) | low
+
+        aliased_addu = word(0, 4, 5, (4 << 11) | 0x21)   # addu $a0, $a0, $a1
+        self.assertNotEqual(mutant(addr, aliased_addu), codegen.effect(addr, aliased_addu))
+        others = {
+            "subu": word(0, 4, 5, (4 << 11) | 0x23),
+            "or": word(0, 4, 5, (4 << 11) | 0x25),
+            "addu with op 0 but another funct (sll)": word(0, 0, 5, (4 << 11) | (3 << 6)),
+            "addiu whose immediate is 0x21": word(9, 5, 4, 0x21),
+            "lw whose offset is 0x21": word(0x23, 29, 4, 0x21),
+        }
+        for label, w in others.items():
+            with self.subTest(label):
+                self.assertEqual(mutant(addr, w), codegen.effect(addr, w), f"{w:#010x}")
 
 
 if __name__ == "__main__":

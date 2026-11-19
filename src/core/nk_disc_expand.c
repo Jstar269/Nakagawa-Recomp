@@ -43,7 +43,6 @@
 #define NK_CISO_MAX_BLOCK (1024u * 1024u)
 #define NK_CISO_MAX_ALIGN 16u
 #define NK_CISO_PLAIN_FLAG 0x80000000u
-#define NK_CHD_MAX_HUNK (16u * 1024u * 1024u)
 #define NK_DISC_FINGERPRINT_HEAD (64u * 1024u)
 #define NK_DISC_PROGRESS_STEP (1024u * 1024u)
 #define NK_DISC_IO_BUFFER (1024u * 1024u)
@@ -460,22 +459,21 @@ static bool ciso_expand(NkDiscSource *source, NkCisoImage *image, NkDiscSink *si
             }
             ok = sink_write(sink, plain, want, status);
         } else {
-            uint8_t *inflated = NULL;
             size_t inflated_len = 0;
             char why[128] = "";
-            int rc = nk_psp_inflate_raw(packed, span, &inflated, &inflated_len, image->block_size,
-                                        image->block_size, why, sizeof(why));
+            /* Into the block buffer: a block that would inflate past a whole
+               block fails as an overflow, as the cap did. */
+            int rc = nk_psp_inflate_raw_into(packed, span, plain, image->block_size,
+                                             &inflated_len, NULL, why, sizeof(why));
             /* A short last block may be padded to a whole block. */
             if (rc != NK_INFLATE_OK || inflated_len < want ||
                 (inflated_len != want && inflated_len != image->block_size)) {
-                free(inflated);
                 ok = disc_fail(status, NK_DISC_BLOCK_CORRUPT,
                                "Block %u of this disc image is damaged: %s.", (unsigned)i,
                                rc != NK_INFLATE_OK ? why : "it holds the wrong amount of data");
                 break;
             }
-            ok = sink_write(sink, inflated, want, status);
-            free(inflated);
+            ok = sink_write(sink, plain, want, status);
         }
     }
     free(packed);
@@ -486,12 +484,14 @@ static bool ciso_expand(NkDiscSource *source, NkCisoImage *image, NkDiscSink *si
 /* ---- CHD (through the registered backend) ------------------------------ */
 
 static bool chd_open_checked(const char *path, void **handle, uint64_t *logical_bytes,
-                             uint32_t *hunk_bytes, NkDiscExpandStatus *status) {
+                             uint32_t *hunk_bytes, uint8_t raw_sha1[NK_DISC_SHA1_BYTES],
+                             NkDiscExpandStatus *status) {
+    memset(raw_sha1, 0, NK_DISC_SHA1_BYTES);
     if (!s_chd_backend) {
         return disc_fail(status, NK_DISC_CHD_UNAVAILABLE,
                          "This build of Nakagawa can't read CHD disc images.");
     }
-    if (!s_chd_backend->open(path, handle, logical_bytes, hunk_bytes, status)) {
+    if (!s_chd_backend->open(path, handle, logical_bytes, hunk_bytes, raw_sha1, status)) {
         if (status && !status->code[0]) {
             disc_fail(status, NK_DISC_CHD_INVALID, "This CHD disc image could not be read.");
         }
@@ -504,7 +504,7 @@ static bool chd_open_checked(const char *path, void **handle, uint64_t *logical_
         return disc_fail(status, NK_DISC_SIZE_INVALID,
                          "This CHD disc image names an expanded size that no PSP disc has.");
     }
-    if (*hunk_bytes < NK_DISC_SECTOR_BYTES || *hunk_bytes > NK_CHD_MAX_HUNK ||
+    if (*hunk_bytes < NK_DISC_SECTOR_BYTES || *hunk_bytes > NK_DISC_CHD_MAX_HUNK_BYTES ||
         *hunk_bytes % NK_DISC_SECTOR_BYTES != 0u) {
         s_chd_backend->close(*handle);
         *handle = NULL;
@@ -515,12 +515,27 @@ static bool chd_open_checked(const char *path, void **handle, uint64_t *logical_
     return true;
 }
 
+static bool sha1_is_zero(const uint8_t sha1[NK_DISC_SHA1_BYTES]) {
+    for (unsigned i = 0; i < NK_DISC_SHA1_BYTES; i++) {
+        if (sha1[i] != 0u) return false;
+    }
+    return true;
+}
+
+/* libchdr checks a compressed hunk against its CRC16, but a hunk an
+   uncompressed CHD stores as is has no check of its own. The SHA-1 the header
+   records for the whole of the data covers both, so a header that records one
+   (every chdman image does) is held to it. */
 static bool chd_expand(void *handle, uint64_t logical_bytes, uint32_t hunk_bytes,
-                       NkDiscSink *sink, NkDiscExpandStatus *status) {
+                       const uint8_t raw_sha1[NK_DISC_SHA1_BYTES], NkDiscSink *sink,
+                       NkDiscExpandStatus *status) {
     uint8_t *hunk = (uint8_t *)malloc(hunk_bytes);
     uint64_t hunks = (logical_bytes + hunk_bytes - 1u) / hunk_bytes;
+    bool check = !sha1_is_zero(raw_sha1);
+    SHA_CTX ctx;
     bool ok = true;
     if (!hunk) return disc_fail(status, NK_DISC_INTERNAL, "Out of memory.");
+    if (check) SHAInit(&ctx);
     for (uint64_t i = 0; ok && i < hunks; i++) {
         uint64_t remaining = logical_bytes - i * hunk_bytes;
         size_t want = remaining < hunk_bytes ? (size_t)remaining : hunk_bytes;
@@ -532,9 +547,20 @@ static bool chd_expand(void *handle, uint64_t logical_bytes, uint32_t hunk_bytes
             ok = false;
             break;
         }
+        /* want <= hunk_bytes <= NK_DISC_CHD_MAX_HUNK_BYTES, so it fits an int. */
+        if (check) SHAUpdate(&ctx, hunk, (int)want);
         ok = sink_write(sink, hunk, want, status);
     }
     free(hunk);
+    if (ok && check) {
+        uint8_t digest[NK_DISC_SHA1_BYTES];
+        SHAFinal(digest, &ctx);
+        if (memcmp(digest, raw_sha1, NK_DISC_SHA1_BYTES) != 0) {
+            ok = disc_fail(status, NK_DISC_BLOCK_CORRUPT,
+                           "This CHD disc image is damaged: its data does not match the SHA-1 "
+                           "its header records.");
+        }
+    }
     return ok;
 }
 
@@ -567,7 +593,10 @@ bool nk_disc_expanded_size(const char *source_path, NkDiscFormat *out_format,
         void *handle = NULL;
         uint64_t logical = 0;
         uint32_t hunk = 0;
-        if (!chd_open_checked(source_path, &handle, &logical, &hunk, status)) return false;
+        uint8_t raw_sha1[NK_DISC_SHA1_BYTES];
+        if (!chd_open_checked(source_path, &handle, &logical, &hunk, raw_sha1, status)) {
+            return false;
+        }
         s_chd_backend->close(handle);
         if (out_expanded_bytes) *out_expanded_bytes = logical;
         return true;
@@ -598,9 +627,11 @@ bool nk_disc_expand_file(const char *source_path, const char *dest_iso,
     void *chd = NULL;
     uint64_t total = 0;
     uint32_t hunk = 0;
+    uint8_t raw_sha1[NK_DISC_SHA1_BYTES];
     bool ok;
     disc_status_clear(status);
     if (out_expanded_bytes) *out_expanded_bytes = 0;
+    memset(raw_sha1, 0, sizeof(raw_sha1));
     memset(&source, 0, sizeof(source));
     memset(&image, 0, sizeof(image));
     if (!source_path || !dest_iso || !dest_iso[0]) {
@@ -619,7 +650,7 @@ bool nk_disc_expand_file(const char *source_path, const char *dest_iso,
         }
         total = image.total_bytes;
     } else if (format == NK_DISC_FORMAT_CHD) {
-        if (!chd_open_checked(source_path, &chd, &total, &hunk, status)) return false;
+        if (!chd_open_checked(source_path, &chd, &total, &hunk, raw_sha1, status)) return false;
     } else {
         return disc_fail(status, NK_DISC_NOT_COMPRESSED,
                          "This file is not a compressed disc image (.cso, .zso or .chd).");
@@ -636,7 +667,7 @@ bool nk_disc_expand_file(const char *source_path, const char *dest_iso,
     } else {
         setvbuf(sink.f, NULL, _IOFBF, NK_DISC_IO_BUFFER);
         if (callbacks && callbacks->on_progress) callbacks->on_progress(0, total, callbacks->user);
-        ok = format == NK_DISC_FORMAT_CHD ? chd_expand(chd, total, hunk, &sink, status)
+        ok = format == NK_DISC_FORMAT_CHD ? chd_expand(chd, total, hunk, raw_sha1, &sink, status)
                                           : ciso_expand(&source, &image, &sink, status);
         if (fclose(sink.f) != 0 && ok) {
             ok = disc_fail(status, NK_DISC_WRITE_FAILED,
@@ -790,6 +821,7 @@ typedef struct {
     char expanded_dir[NK_MAX_PATH];
     char ref[NK_MAX_PATH];
     char staging[NK_MAX_PATH];
+    char lock[NK_MAX_PATH];
 } NkDiscImportPaths;
 
 static bool import_paths(const char *data_root, const char *fingerprint, NkDiscImportPaths *paths) {
@@ -801,21 +833,47 @@ static bool import_paths(const char *data_root, const char *fingerprint, NkDiscI
     }
     snprintf(name, sizeof(name), "%s.ref", fingerprint);
     if (!path_join(paths->ref, sizeof(paths->ref), paths->expanded_dir, name)) return false;
+    snprintf(name, sizeof(name), "%s.lock", fingerprint);
+    if (!path_join(paths->lock, sizeof(paths->lock), paths->expanded_dir, name)) return false;
     snprintf(name, sizeof(name), "%s.iso", fingerprint);
     return path_join(paths->staging, sizeof(paths->staging), paths->expanded_dir, name);
 }
 
-/* <data>/discs/<ID>/<ID>.<ext>.iso and its directory. */
-static bool title_iso_path(const char *data_root, const char *disc_id, NkDiscFormat format,
-                           char *dir, size_t dir_size, char *iso, size_t iso_size) {
+/* <data>/discs/<ID>/<ID>.<fp>.<ext>.iso and its directory, <fp> being the
+   start of the source's fingerprint, so two different images of one disc ID
+   never share a file. A NULL fingerprint names the <ID>.<ext>.iso that
+   earlier builds wrote, which a probe still reuses when its sidecar names
+   the same source. */
+static bool title_iso_path(const char *data_root, const char *disc_id, const char *fingerprint,
+                           NkDiscFormat format, char *dir, size_t dir_size, char *iso,
+                           size_t iso_size) {
     char discs[NK_MAX_PATH];
-    char name[32];
+    char name[64];
     if (!path_join(discs, sizeof(discs), data_root, "discs") ||
         !path_join(dir, dir_size, discs, disc_id)) {
         return false;
     }
-    snprintf(name, sizeof(name), "%s.%s.iso", disc_id, nk_disc_format_extension(format));
+    if (fingerprint) {
+        snprintf(name, sizeof(name), "%s.%.*s.%s.iso", disc_id,
+                 (int)NK_DISC_TITLE_FINGERPRINT_CHARS, fingerprint,
+                 nk_disc_format_extension(format));
+    } else {
+        snprintf(name, sizeof(name), "%s.%s.iso", disc_id, nk_disc_format_extension(format));
+    }
     return path_join(iso, iso_size, dir, name);
+}
+
+/* Whether the expansion at iso is this source's: its sidecar names the same
+   fingerprint and the image has the size the header promises. Only the size
+   of the image on the drive is checked; a change that keeps the size is not
+   seen here. */
+static bool expansion_matches(const char *iso, const NkDiscImport *out) {
+    char sidecar[NK_MAX_PATH + 8];
+    char recorded[NK_DISC_FINGERPRINT_CHARS + 8];
+    return path_suffix(sidecar, sizeof(sidecar), iso, ".source") &&
+           read_line_file(sidecar, recorded, sizeof(recorded)) &&
+           strcmp(recorded, out->fingerprint) == 0 &&
+           nk_platform_get_file_size(iso) == (int64_t)out->expanded_bytes;
 }
 
 bool nk_disc_import_probe(const char *source, const char *data_root, NkDiscImport *out,
@@ -823,8 +881,6 @@ bool nk_disc_import_probe(const char *source, const char *data_root, NkDiscImpor
     NkDiscImportPaths paths;
     char disc_id[32];
     char dir[NK_MAX_PATH];
-    char sidecar[NK_MAX_PATH + 8];
-    char recorded[NK_DISC_FINGERPRINT_CHARS + 8];
     int64_t size;
     disc_status_clear(status);
     if (!out) return disc_fail(status, NK_DISC_INTERNAL, "No result was given.");
@@ -845,20 +901,82 @@ bool nk_disc_import_probe(const char *source, const char *data_root, NkDiscImpor
         return disc_fail(status, NK_DISC_WRITE_FAILED, "The path to Nakagawa's data folder is too long.");
     }
     /* Reuse only an expansion this exact file produced: the reference names
-       the disc, the per-title sidecar names the same fingerprint, and the
-       image on the drive has the size the header promises. */
-    if (!read_line_file(paths.ref, disc_id, sizeof(disc_id)) || !disc_id_valid(disc_id) ||
-        !title_iso_path(data_root, disc_id, out->format, dir, sizeof(dir), out->iso_path,
-                        sizeof(out->iso_path)) ||
-        !path_suffix(sidecar, sizeof(sidecar), out->iso_path, ".source") ||
-        !read_line_file(sidecar, recorded, sizeof(recorded)) ||
-        strcmp(recorded, out->fingerprint) != 0 ||
-        nk_platform_get_file_size(out->iso_path) != (int64_t)out->expanded_bytes) {
-        out->iso_path[0] = '\0';
-        return true;
+       the disc, and the per-title image is this source's (expansion_matches),
+       under its own name or under the name earlier builds gave it. */
+    if (read_line_file(paths.ref, disc_id, sizeof(disc_id)) && disc_id_valid(disc_id)) {
+        const char *names[2] = { out->fingerprint, NULL };
+        for (int i = 0; i < 2; i++) {
+            if (title_iso_path(data_root, disc_id, names[i], out->format, dir, sizeof(dir),
+                               out->iso_path, sizeof(out->iso_path)) &&
+                expansion_matches(out->iso_path, out)) {
+                snprintf(out->disc_id, sizeof(out->disc_id), "%.9s", disc_id);
+                out->reused = true;
+                return true;
+            }
+        }
     }
-    snprintf(out->disc_id, sizeof(out->disc_id), "%.9s", disc_id);
-    out->reused = true;
+    out->iso_path[0] = '\0';
+    return true;
+}
+
+/* Expand, check and place the image while the caller holds paths->lock. */
+static bool disc_import_locked(const char *source, const char *data_root,
+                               const NkDiscImportPaths *paths,
+                               const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
+                               NkDiscExpandStatus *status) {
+    NkIsoMetadata meta;
+    char dir[NK_MAX_PATH];
+    char sidecar[NK_MAX_PATH + 8];
+    uint64_t written = 0;
+    /* Probe again under the lock: an import that held it a moment ago may
+       have placed this file's expansion. */
+    if (!nk_disc_import_probe(source, data_root, out, status)) return false;
+    if (out->reused) return true;
+    if (!nk_disc_expand_file(source, paths->staging, callbacks, &written, status)) return false;
+
+    /* The expansion is a disc image now: name its disc before it gets a
+       per-title folder, and refuse anything that is not a PSP game. */
+    memset(&meta, 0, sizeof(meta));
+    if (nk_iso_inspect(paths->staging, &meta) != NK_OK) {
+        (void)nk_remove_utf8(paths->staging);
+        return disc_fail(status, NK_DISC_EXPANDED_INVALID,
+                         "The compressed file expanded, but what it holds is not a readable "
+                         "disc image: %.200s", meta.error_message);
+    }
+    if (!meta.has_psp_game_folder) {
+        (void)nk_remove_utf8(paths->staging);
+        return disc_fail(status, NK_DISC_NOT_PSP,
+                         "This disc image isn't a PSP game: it has no PSP_GAME folder. "
+                         "Choose the disc image of a PSP game disc.");
+    }
+    if (!disc_id_valid(meta.disc_id)) {
+        (void)nk_remove_utf8(paths->staging);
+        return disc_fail(status, NK_DISC_ID_MISSING,
+                         "This PSP disc image does not name a valid disc ID, so Nakagawa can't "
+                         "keep it apart from other games.");
+    }
+    snprintf(out->disc_id, sizeof(out->disc_id), "%.9s", meta.disc_id);
+    if (!title_iso_path(data_root, out->disc_id, out->fingerprint, out->format, dir, sizeof(dir),
+                        out->iso_path, sizeof(out->iso_path)) ||
+        !path_suffix(sidecar, sizeof(sidecar), out->iso_path, ".source") ||
+        !nk_platform_mkdir_p_private(dir)) {
+        (void)nk_remove_utf8(paths->staging);
+        out->iso_path[0] = '\0';
+        return disc_fail(status, NK_DISC_WRITE_FAILED,
+                         "The disc image's folder could not be made in Nakagawa's data folder.");
+    }
+    /* The old sidecar goes first, so an interrupted replace never leaves an
+       earlier expansion's fingerprint beside this image. */
+    (void)nk_remove_utf8(sidecar);
+    if (nk_rename_utf8(paths->staging, out->iso_path) != 0 ||
+        !write_line_file(sidecar, out->fingerprint) ||
+        !write_line_file(paths->ref, out->disc_id)) {
+        (void)nk_remove_utf8(paths->staging);
+        out->iso_path[0] = '\0';
+        return disc_fail(status, NK_DISC_WRITE_FAILED,
+                         "The expanded disc image could not be moved into its folder.");
+    }
+    out->expanded_bytes = written;
     return true;
 }
 
@@ -866,10 +984,8 @@ bool nk_disc_import(const char *source, const char *data_root,
                     const NkDiscExpandCallbacks *callbacks, NkDiscImport *out,
                     NkDiscExpandStatus *status) {
     NkDiscImportPaths paths;
-    NkIsoMetadata meta;
-    char dir[NK_MAX_PATH];
-    char sidecar[NK_MAX_PATH + 8];
-    uint64_t written = 0;
+    NkFileLock lock;
+    bool ok;
     if (!nk_disc_import_probe(source, data_root, out, status)) return false;
     if (out->reused) return true;
     if (!import_paths(data_root, out->fingerprint, &paths)) {
@@ -879,50 +995,16 @@ bool nk_disc_import(const char *source, const char *data_root,
         return disc_fail(status, NK_DISC_WRITE_FAILED,
                          "Nakagawa's disc folder could not be made in its data folder.");
     }
-    if (!nk_disc_expand_file(source, paths.staging, callbacks, &written, status)) return false;
-
-    /* The expansion is a disc image now: name its disc before it gets a
-       per-title folder, and refuse anything that is not a PSP game. */
-    memset(&meta, 0, sizeof(meta));
-    if (nk_iso_inspect(paths.staging, &meta) != NK_OK) {
-        (void)nk_remove_utf8(paths.staging);
-        return disc_fail(status, NK_DISC_EXPANDED_INVALID,
-                         "The compressed file expanded, but what it holds is not a readable "
-                         "disc image: %.200s", meta.error_message);
+    /* The staging name comes from the fingerprint alone, so two imports of
+       one file would write the same partial image, the second one's open
+       cutting the first one's short under it. One holds the lock; the other
+       is refused by name. */
+    if (!nk_platform_file_lock_acquire(&lock, paths.lock, 0u)) {
+        return disc_fail(status, NK_DISC_IMPORT_BUSY,
+                         "This disc image is already being added by another Nakagawa window or "
+                         "tool. Wait for that to finish, then add it again.");
     }
-    if (!meta.has_psp_game_folder) {
-        (void)nk_remove_utf8(paths.staging);
-        return disc_fail(status, NK_DISC_NOT_PSP,
-                         "This disc image isn't a PSP game: it has no PSP_GAME folder. "
-                         "Choose the disc image of a PSP game disc.");
-    }
-    if (!disc_id_valid(meta.disc_id)) {
-        (void)nk_remove_utf8(paths.staging);
-        return disc_fail(status, NK_DISC_ID_MISSING,
-                         "This PSP disc image does not name a valid disc ID, so Nakagawa can't "
-                         "keep it apart from other games.");
-    }
-    snprintf(out->disc_id, sizeof(out->disc_id), "%.9s", meta.disc_id);
-    if (!title_iso_path(data_root, out->disc_id, out->format, dir, sizeof(dir), out->iso_path,
-                        sizeof(out->iso_path)) ||
-        !path_suffix(sidecar, sizeof(sidecar), out->iso_path, ".source") ||
-        !nk_platform_mkdir_p_private(dir)) {
-        (void)nk_remove_utf8(paths.staging);
-        out->iso_path[0] = '\0';
-        return disc_fail(status, NK_DISC_WRITE_FAILED,
-                         "The disc image's folder could not be made in Nakagawa's data folder.");
-    }
-    /* The old sidecar goes first, so an interrupted replace never leaves an
-       earlier source's fingerprint beside this image. */
-    (void)nk_remove_utf8(sidecar);
-    if (nk_rename_utf8(paths.staging, out->iso_path) != 0 ||
-        !write_line_file(sidecar, out->fingerprint) ||
-        !write_line_file(paths.ref, out->disc_id)) {
-        (void)nk_remove_utf8(paths.staging);
-        out->iso_path[0] = '\0';
-        return disc_fail(status, NK_DISC_WRITE_FAILED,
-                         "The expanded disc image could not be moved into its folder.");
-    }
-    out->expanded_bytes = written;
-    return true;
+    ok = disc_import_locked(source, data_root, &paths, callbacks, out, status);
+    nk_platform_file_lock_release(&lock);
+    return ok;
 }

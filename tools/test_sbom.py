@@ -2,6 +2,7 @@
 # Copyright (C) 2026 the Nakagawa Recomp authors
 
 from contextlib import redirect_stderr, redirect_stdout
+from email.message import Message
 import hashlib
 import importlib.metadata
 import io
@@ -136,6 +137,132 @@ class TestSBOMTooling(unittest.TestCase):
             cdx_names = {c["name"]: c["licenses"][0]["license"]["id"] for c in cyclonedx["components"] if "licenses" in c}
             self.assertIn("SDL3.dll", cdx_names)
             self.assertEqual(cdx_names["SDL3.dll"], "Zlib")
+
+    def test_manifest_only_sbom_merges_all_inventory_dlls_with_manifest_overrides(self):
+        import package_notices
+
+        manifest_data = json.loads(
+            (generate_sbom.ROOT / "assets" / "release_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        inventory = package_notices.load_component_inventory()
+        expected_names = set(inventory["native"]["dlls"])
+        expected_names.update(
+            record["dll"]
+            for record in inventory["native"].get("host_resolved_components", [])
+            if record.get("dll")
+        )
+
+        with mock.patch.object(package_notices, "resolve_toolchain_root", return_value=None):
+            shipped = generate_sbom.resolve_shipped_dlls(manifest_data=manifest_data)
+
+        by_name = {component["name"]: component for component in shipped}
+        self.assertEqual(
+            {name.lower() for name in by_name},
+            {name.lower() for name in expected_names},
+        )
+        self.assertNotIn(">=", by_name["SDL3.dll"]["version"])
+        self.assertEqual(by_name["SDL3.dll"]["version"], "NOASSERTION")
+
+    def test_python_license_classifier_does_not_guess_lgpl_or_agpl_as_gpl(self):
+        classifiers = (
+            "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
+            "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+            "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+        )
+        for classifier in classifiers:
+            metadata = Message()
+            metadata["Classifier"] = classifier
+            with self.subTest(classifier=classifier), \
+                    mock.patch.object(generate_sbom, "recorded_python_package_licenses", return_value={}), \
+                    mock.patch.object(importlib.metadata, "metadata", return_value=metadata):
+                self.assertEqual(
+                    generate_sbom._resolve_python_package_license("synthetic-package"),
+                    "NOASSERTION",
+                )
+        metadata = Message()
+        metadata["Classifier"] = (
+            "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)"
+        )
+        with mock.patch.object(generate_sbom, "recorded_python_package_licenses", return_value={}), \
+                mock.patch.object(importlib.metadata, "metadata", return_value=metadata):
+            self.assertEqual(
+                generate_sbom._resolve_python_package_license("synthetic-package"),
+                "GPL-3.0-or-later",
+            )
+
+    def test_python_package_spdx_id_slugs_underscores(self):
+        digest = "a" * 64
+        with tempfile.TemporaryDirectory() as temp:
+            lock = Path(temp) / "requirements-lock.txt"
+            lock.write_text(f"typing_extensions==4.12.2 --hash=sha256:{digest}\n", encoding="utf-8")
+            artifact_metadata = {
+                ("typing-extensions", "4.12.2"): [{
+                    "filename": "typing_extensions-4.12.2-py3-none-any.whl",
+                    "sha256": digest,
+                    "url": "https://files.example.invalid/typing_extensions.whl",
+                }],
+            }
+            with mock.patch.object(
+                generate_sbom, "recorded_python_package_licenses", return_value={"typing-extensions": "MIT"}
+            ):
+                packages = generate_sbom.parse_python_lockfile(lock, artifact_metadata)
+
+        self.assertEqual(packages[0]["spdx_id"], "SPDXRef-pip-typing-extensions-4.12.2")
+
+    def test_python_lock_loads_recorded_license_map_once(self):
+        first, second = "a" * 64, "b" * 64
+        with tempfile.TemporaryDirectory() as temp:
+            lock = Path(temp) / "requirements-lock.txt"
+            lock.write_text(
+                f"typing_extensions==4.12.2 --hash=sha256:{first}\n"
+                f"other_package==1.2.3 --hash=sha256:{second}\n",
+                encoding="utf-8",
+            )
+            artifact_metadata = {
+                ("typing-extensions", "4.12.2"): [{
+                    "filename": "typing_extensions-4.12.2-py3-none-any.whl",
+                    "sha256": first,
+                    "url": "https://files.example.invalid/typing_extensions.whl",
+                }],
+                ("other-package", "1.2.3"): [{
+                    "filename": "other_package-1.2.3-py3-none-any.whl",
+                    "sha256": second,
+                    "url": "https://files.example.invalid/other_package.whl",
+                }],
+            }
+            with mock.patch.object(
+                generate_sbom,
+                "recorded_python_package_licenses",
+                return_value={"typing-extensions": "MIT", "other-package": "BSD-3-Clause"},
+            ) as license_map:
+                packages = generate_sbom.parse_python_lockfile(lock, artifact_metadata)
+
+        self.assertEqual([package["license"] for package in packages], ["MIT", "BSD-3-Clause"])
+        license_map.assert_called_once_with()
+
+    def test_shipped_dll_inventory_caches_toolchain_root_and_package_versions(self):
+        import package_notices
+
+        with tempfile.TemporaryDirectory() as temp:
+            package_dir = Path(temp) / "package"
+            package_dir.mkdir()
+            # Two DLLs of one MSYS2 package: the second reuses the first one's version lookup.
+            for name in ("libbrotlicommon.dll", "libbrotlidec.dll"):
+                (package_dir / name).write_bytes(b"synthetic runtime DLL")
+            toolchain_root = Path(temp) / "ucrt64"
+            with mock.patch.object(
+                package_notices, "resolve_toolchain_root", return_value=toolchain_root
+            ) as resolve_root, mock.patch.object(
+                package_notices, "installed_package_version", return_value="1.2.0-1"
+            ) as installed_version:
+                shipped = generate_sbom.resolve_shipped_dlls(package_dir=package_dir)
+
+        self.assertEqual({item["name"] for item in shipped},
+                         {"libbrotlicommon.dll", "libbrotlidec.dll"})
+        resolve_root.assert_called_once_with()
+        installed_version.assert_called_once_with(toolchain_root, "brotli")
 
     def test_ruff_lock_matches_pre_commit_pin(self):
         lock_text = (generate_sbom.ROOT / "tools" / "requirements-lock.txt").read_text(

@@ -52,15 +52,21 @@ class TestDebugC(unittest.TestCase):
         self.assertIn("pc=0x00001234 hit=1 last_yield_pc=0x00005678", result.stderr)
         self.assertIn("r17=0x09abcdef", result.stderr)
         self.assertIn("f22=0x440b4000", result.stderr)
-        self.assertEqual(result.stderr.count("STORE_CONTEXT pc="), 1)
-        self.assertIn(
-            "pc=0x00005678 hit=1 addr=0x09000000 width=4 val=0x43110000",
-            result.stderr,
-        )
-        self.assertIn(
-            "STORE_CONTEXT_MEM r16+0x00000024 base=0x08000024 "
-            "w0=0x00000001 w1=0x00000005 w2=0x00000002",
-            result.stderr,
+        # SR_STORE_CONTEXT_LIMIT=2 with three matching stores: exactly two snapshots,
+        # each with its memory words.
+        self.assertEqual(result.stderr.count("STORE_CONTEXT pc="), 2)
+        for hit in (1, 2):
+            self.assertIn(
+                f"pc=0x00005678 hit={hit} addr=0x09000000 width=4 val=0x43110000",
+                result.stderr,
+            )
+        self.assertNotIn("pc=0x00005678 hit=3", result.stderr)
+        self.assertEqual(
+            result.stderr.count(
+                "STORE_CONTEXT_MEM r16+0x00000024 base=0x08000024 "
+                "w0=0x00000001 w1=0x00000005 w2=0x00000002"
+            ),
+            2,
         )
 
     def test_redirected_diagnostics_arrive_whole_without_a_flush(self):

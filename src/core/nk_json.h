@@ -88,7 +88,16 @@ const char *nk_json_decode_escape(const char *src, size_t avail,
  * returns its length (1 to 4). */
 size_t nk_json_utf8_encode(uint32_t cp, char out[4]);
 
-/* Parsing and Destruction */
+/* Parsing and Destruction
+ * nk_json_parse refuses a number with a leading zero ("01"), as Python's json
+ * does. Where this reader cannot hold what Python reads, it refuses instead of
+ * reading something else: a number token of 64 bytes or more (never cut to a
+ * different number) and an object key holding \u0000 (a C-string key would be
+ * cut at the NUL and match or duplicate another key). A
+ * string value holding \u0000 ends at the NUL, as nk_json_decode_escape says.
+ * Every key and string the reader allocates, its growth buffers and error paths
+ * included, is zeroed before it is released (nk_json_free too), so text such as
+ * a key file's hex values does not stay readable in freed heap. */
 NkJsonNode *nk_json_parse(const char *src, size_t len, char *err_buf, size_t err_len);
 void nk_json_free(NkJsonNode *node);
 

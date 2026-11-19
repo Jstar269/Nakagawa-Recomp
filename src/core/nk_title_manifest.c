@@ -2261,7 +2261,7 @@ bool nk_title_manifest_load_overlay(
     return nk_title_manifest_load_overlay_ext(manifest_path, false, error_buf, error_buf_len);
 }
 
-/* SHA-256 (NkSha256, nk_sha256_*) is shared with the disc identity in nk_iso.c. */
+/* SHA-256 (NkSha256, nk_sha256_*) is the shared one in nk_shared_helpers.c. */
 
 static bool nk_manifest_normalize_disc_id(const char *source, char out[10]) {
     if (!source || strlen(source) != 9) return false;
@@ -5709,7 +5709,9 @@ static bool package_source_push(char ***items, size_t *count, size_t *capacity, 
  * starts nor ends the name, compared without case as source_tree_digest's
  * suffix.lower() does. */
 static bool package_source_suffix_counts(const char *name) {
-    static const char * const suffixes[] = {".c", ".h", ".cpp", ".hpp", NULL};
+    static const char * const suffixes[] = {
+        ".c", ".h", ".cpp", ".hpp", ".inc", ".comp", ".vert", ".frag", NULL
+    };
     const char *dot = strrchr(name, '.');
     if (!dot || dot == name || dot[1] == '\0') return false;
     for (size_t i = 0; suffixes[i]; i++) {

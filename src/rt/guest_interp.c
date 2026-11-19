@@ -329,6 +329,16 @@ int sr_exec_span_owns_fetch(uint32_t pc) {
             return module_authority;
         }
     }
+    return sr_exec_span_owns_static_fetch(pc);
+}
+
+/* The static tier alone: for a caller that has already found `pc` outside every
+ * bound module image (sr_lookup), so the module-authority query above would scan
+ * the bindings again only to answer "none". */
+int sr_exec_span_owns_static_fetch(uint32_t pc) {
+    if ((pc & 3u) != 0u) {
+        return 0;
+    }
     /* Fast path: single registered span check (common case for recompiled titles). */
     if (s_exec_span_count == 1u) {
         const SrExecSpan *span = &s_exec_spans[0];
@@ -1526,6 +1536,12 @@ static SrGuestInterpResult execute_noncontrol(
                 if (vfpu_rc == SR_VFPU_OTHER) {
                     set_fault(fault, pc, opcode, pc, 1);
                     return SR_GUEST_INTERP_UNSUPPORTED;
+                }
+                if (vfpu_rc == SR_VFPU_ACCESS_REFUSED) {
+                    /* Out-of-range span, as for a scalar store: nothing was accessed. */
+                    set_fault(fault, pc, opcode,
+                              read_gpr(s, rs) + sign_extend_16(opcode & 0xFFFCu), 1);
+                    return SR_GUEST_INTERP_MEMORY_FAULT;
                 }
                 if (primary == 0x3au) {
                     *store_address = read_gpr(s, rs) + sign_extend_16(opcode & 0xFFFCu);

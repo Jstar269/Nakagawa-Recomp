@@ -127,6 +127,10 @@ class CommandTimeout(Exception):
     """The peer produced no complete frame inside its deadline."""
 
 
+class UnqualifiedEpoch(RuntimeError):
+    """A case was asked to run outside a qualified epoch."""
+
+
 def frame_encode(msg_type: int, seq: int, payload: bytes) -> bytes:
     if not 0 <= seq <= 0xFFFF:
         raise ProtocolError("seq out of range")
@@ -861,7 +865,8 @@ class Orchestrator:
         self.state = "READY"
 
     def run_case(self, case_id: str, iteration: int = 1) -> None:
-        assert self.qualified, "cases may only run in a qualified epoch"
+        if not self.qualified:
+            raise UnqualifiedEpoch("cases may only run in a qualified epoch")
         self.state = "RUN_CASE"
         try:
             self._request(LOAD_CASE, f"case={case_id}\n".encode())
@@ -908,21 +913,24 @@ class Orchestrator:
         }
 
     def _on_transport_fault(self, case_id: str, error: Exception) -> None:
-        """Bounded ladder: L0 once, L1 once, then L4. Never fabricates."""
+        """Bounded ladder: L0, then L1 while its budget lasts, then L4.
+
+        A fault ends the qualified epoch: no case runs again until qualify()
+        succeeds anew. The budget alone decides between L1 and L4, so an earlier
+        recovery or evidence rejection cannot hide exhaustion. Never fabricates.
+        """
+        self.qualified = False
         self.state = "RECOVERABLE_FAULT"
         self._escalate("L0", f"transport fault during {case_id}: {error!r}")
         if isinstance(error, TransportDead) and not self.transport.runner.alive:
             self._escalate("L3", "control process dead; standalone relaunch required")
-        if self.terminal_reason is None and self.l1_used < self.max_l1_recoveries:
+        if self.l1_used < self.max_l1_recoveries:
             self.l1_used += 1
             self._escalate("L1", "host stack restart and requalify")
             self.terminal_reason = "RECOVERED_WITH_L1"
             self.state = "OFFLINE"
             return
-        if self.terminal_reason is None:
-            self._escalate("L4", "recovery budget exhausted")
-            self.terminal_reason = "PHYSICAL_INTERVENTION_REQUIRED"
-            self.state = "SESSION_WEDGED"
+        self._escalate("L4", "recovery budget exhausted")
 
 
 def _lock_held(_session_id, boot_number=42):
@@ -1058,6 +1066,57 @@ class HardwareRunnerProtocolTests(unittest.TestCase):
         transport.drop_after_send = True
         orch.run_case("vfpu_d_09")
         self.assertEqual(orch.terminal_reason, "PHYSICAL_INTERVENTION_REQUIRED")
+
+    @staticmethod
+    def _restart_link(transport: FakeTransport) -> None:
+        """Model the L1 host stack restart: a fresh, empty, live link."""
+        transport.drop_after_send = False
+        transport.dead = False
+        transport.rx.clear()
+
+    def test_10b_fault_ends_the_qualified_epoch_until_requalified(self):
+        orch, _, transport = self.build()
+        orch.qualify()
+        transport.drop_after_send = True
+        orch.run_case("vfpu_c_04")
+        self.assertEqual(orch.terminal_reason, "RECOVERED_WITH_L1")
+        self.assertFalse(orch.qualified)
+        # The link comes back, but nobody requalified: no case may run.
+        self._restart_link(transport)
+        with self.assertRaises(UnqualifiedEpoch):
+            orch.run_case("vfpu_c_05")
+        self.assertEqual(orch.envelopes, [])
+        orch.qualify()
+        orch.run_case("vfpu_c_05")
+        self.assertEqual(len(orch.envelopes), 1)
+
+    def test_10c_second_fault_after_recovery_exhausts_to_l4(self):
+        orch, _, transport = self.build()
+        orch.qualify()
+        transport.drop_after_send = True
+        orch.run_case("vfpu_c_06")
+        self.assertEqual(orch.terminal_reason, "RECOVERED_WITH_L1")
+        self._restart_link(transport)
+        orch.qualify()
+        transport.drop_after_send = True
+        orch.run_case("vfpu_c_07")
+        self.assertTrue(orch.recovery_events[-1].startswith("L4:"))
+        self.assertEqual(orch.terminal_reason, "PHYSICAL_INTERVENTION_REQUIRED")
+        self.assertEqual(orch.state, "SESSION_WEDGED")
+        self.assertEqual(orch.envelopes, [])
+
+    def test_10d_fault_after_evidence_rejection_still_exhausts_to_l4(self):
+        runner = RunnerModel(partial_result=True)
+        transport = FakeTransport(runner)
+        orch = Orchestrator(transport, max_l1_recoveries=0)
+        orch.qualify()
+        orch.run_case("vfpu_b_08")
+        self.assertEqual(orch.terminal_reason, "EVIDENCE_REJECTED")
+        transport.drop_after_send = True
+        orch.run_case("vfpu_b_09")
+        self.assertTrue(orch.recovery_events[-1].startswith("L4:"))
+        self.assertEqual(orch.terminal_reason, "PHYSICAL_INTERVENTION_REQUIRED")
+        self.assertEqual(orch.state, "SESSION_WEDGED")
 
     # -- 5/11. duplicate/stale rejection ---------------------------------
     def test_11_result_from_prior_epoch_is_discarded_as_stale(self):

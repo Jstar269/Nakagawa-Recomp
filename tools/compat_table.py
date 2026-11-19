@@ -20,9 +20,10 @@ Tiers, in order (``docs/COMPATIBILITY.md`` explains them):
 - reaches menus, reaches gameplay, playable start to end: decided by scripted-input checks,
   which the library build does not run yet, so they are shown as not measured.
 
-Discs not built yet in the run, and copies of an image already counted, are left out and
-counted below the table. The summary names the run's settings (time budget, launch timeout,
-source commit) so two summaries are compared like for like.
+Discs without a current package in the run (not built yet or replaced by a later same-ID build),
+and copies of an image already counted, are left out and counted below the table. The summary
+names the run's settings (time budget, launch timeout, source commit) so two summaries are compared
+like for like.
 """
 
 from __future__ import annotations
@@ -116,7 +117,7 @@ def _launch(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def tier_of(record: dict[str, Any]) -> str | None:
-    """A disc's tier, or None when it is not counted (not built yet, or a copy)."""
+    """A disc's tier, or None when it has no current package or is a copy."""
     outcome = record.get("outcome")
     if outcome in BUILD_FAILURES:
         return NOT_BUILT
@@ -291,7 +292,8 @@ def render_markdown(summary: dict[str, Any], date: str) -> str:
     copies = ("copy of a disc" if left_out["copies"] == 1 else "copies of a disc")
     lines += [
         "",
-        f"Not counted: {_number(left_out['not_built_yet'])} not built yet in this run, and "
+        f"Not counted: {_number(left_out['not_built_yet'])} without a current package in this run "
+        "(not built yet or replaced by a later same-ID build), and "
         f"{_number(left_out['copies'])} {copies} already counted.",
         "",
         "Where they stop, by named cause ([`FAILURE_CODES.md`](FAILURE_CODES.md)):",
