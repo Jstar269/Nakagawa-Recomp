@@ -217,6 +217,79 @@ class CiPathClassificationTests(unittest.TestCase):
             finally:
                 clear_caches()
 
+    def test_prose_mentions_in_native_tests_do_not_route_native_and_windows_gates(self) -> None:
+        """Documents mentioned only in comments or docstrings of native tests stay off native/Windows.
+
+        Failing before: AGENTS.md, docs/COMPATIBILITY.md and docs/ENHANCEMENT_CONTRACT.md were
+        matched from docstrings/comments in tests/native/test_player_ui.py and routed the
+        expensive native, Windows and installer jobs on docs-only edits."""
+
+        for path in ("AGENTS.md", "docs/COMPATIBILITY.md", "docs/ENHANCEMENT_CONTRACT.md"):
+            with self.subTest(path=path):
+                self.assertFalse(ci_paths_module._is_native_test_read_doc(path))
+                for tier in (ci_paths_module.TIER_FULL, ci_paths_module.TIER_LIGHT):
+                    result = classify([path], tier=tier)
+                    self.assertEqual(result["docs_only"], "true")
+                    self.assertEqual(result["run_python"], "true")
+                    self.assertEqual(result["run_native"], "false")
+                    self.assertEqual(result["run_windows"], "false")
+                    self.assertEqual(result["run_installer"], "false")
+
+    def test_code_string_literals_collector_ignores_comments_and_docstrings(self) -> None:
+        """_code_string_literals keeps code strings and f-string literals, drops prose, fails closed."""
+
+        collect = ci_paths_module._code_string_literals
+        names = ci_paths_module._names_file
+
+        # Comment only: not counted.
+        comment_mod = "# see docs/COMMENT_ONLY.md for policy\nx = 1\n"
+        self.assertFalse(names(collect(comment_mod), "COMMENT_ONLY.md"))
+
+        # Module, class, function and async function docstrings: not counted.
+        docstring_mod = textwrap.dedent(
+            '''\
+            """Module docstring mentioning MOD_DOC.md."""
+
+            class Example:
+                """Class docstring mentioning CLASS_DOC.md."""
+
+                def method(self) -> None:
+                    """Method docstring mentioning FUNC_DOC.md."""
+                    pass
+
+                async def async_method(self) -> None:
+                    """Async docstring mentioning ASYNC_DOC.md."""
+                    return None
+            '''
+        )
+        extracted_docs = collect(docstring_mod)
+        for doc_name in ("MOD_DOC.md", "CLASS_DOC.md", "FUNC_DOC.md", "ASYNC_DOC.md"):
+            with self.subTest(docstring=doc_name):
+                self.assertFalse(names(extracted_docs, doc_name))
+
+        # Plain string literal (including when the same name also appears in a docstring): counted.
+        plain_mod = textwrap.dedent(
+            '''\
+            """PLAIN_CODE.md"""
+            DOC = ROOT / "docs" / "PLAIN_CODE.md"
+            '''
+        )
+        self.assertTrue(names(collect(plain_mod), "PLAIN_CODE.md"))
+
+        # Literal part of an f-string: counted.
+        fstring_mod = 'DOC = f"{base}/docs/FSTRING_DOC.md"\n'
+        self.assertTrue(names(collect(fstring_mod), "FSTRING_DOC.md"))
+
+        # Unparseable modules (SyntaxError, ValueError, RecursionError) fall back to whole text.
+        syntax_err_mod = "def broken(:\n    # SYNTAX_FALLBACK.md\n"
+        self.assertTrue(names(collect(syntax_err_mod), "SYNTAX_FALLBACK.md"))
+
+        null_byte_mod = "# VALUE_FALLBACK.md\n\x00"
+        self.assertTrue(names(collect(null_byte_mod), "VALUE_FALLBACK.md"))
+
+        with patch.object(ci_paths_module.ast, "parse", side_effect=RecursionError("too deep")):
+            self.assertTrue(names(collect("# RECURSION_FALLBACK.md\n"), "RECURSION_FALLBACK.md"))
+
     def test_tools_readme_runs_the_python_gate_that_guards_it(self) -> None:
         """tools/README.md is Markdown, but tools/test_lint_docs.py compares its module
         index against the tracked tools/ set. Routing the file that can break that

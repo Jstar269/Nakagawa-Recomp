@@ -703,11 +703,44 @@ _NATIVE_DOCS_READER_GLOBS = ("tests/native/**/*.py", "tests/**/test_*.py", "test
 _NAME_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 
 
+def _code_string_literals(text: str) -> str:
+    """Every non-docstring string literal in ``text``, or ``text`` whole when it fails to parse.
+
+    Collects every ``str`` constant in the AST, including the literal parts of f-strings,
+    and skips docstrings (the first statement of a module, class or function body when it
+    is a string expression). Comments are dropped by ``ast.parse``. An unparseable module
+    contributes its whole text so a broken file can only route more, never less.
+    """
+
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError):
+        return text
+
+    docstring_nodes: set[ast.AST] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if (
+                isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)
+            ):
+                docstring_nodes.add(first.value)
+
+    return "\n".join(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and node not in docstring_nodes
+    )
+
+
 def _read_doc_reader_sources(
     globs: Sequence[str],
     excluded: frozenset[str] = frozenset(),
     *,
     required_dir: str | None = None,
+    code_literals_only: bool = False,
 ) -> str | None:
     """Concatenated text of Python sources matching ``globs``, or None when unreadable."""
 
@@ -723,7 +756,8 @@ def _read_doc_reader_sources(
                 if path.relative_to(ROOT).as_posix() in excluded:
                     continue
                 seen.add(path)
-                chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+                text = path.read_text(encoding="utf-8", errors="replace")
+                chunks.append(_code_string_literals(text) if code_literals_only else text)
     except OSError:
         return None
     return "\n".join(chunks)
@@ -738,9 +772,18 @@ def _docs_reader_sources() -> str | None:
 
 @lru_cache(maxsize=1)
 def _native_docs_reader_sources() -> str | None:
-    """Text of every non-tools Python test module that can read a document, or None when unreadable."""
+    """Code string literals of every non-tools Python test module, or None when unreadable.
 
-    return _read_doc_reader_sources(_NATIVE_DOCS_READER_GLOBS, required_dir="tests")
+    Narrower than ``_docs_reader_sources`` (which scans whole module text): the native,
+    Windows and installer jobs this feeds are the most expensive jobs in the workflow, so
+    prose mentions in comments or docstrings (such as ``AGENTS.md``) must not start them.
+    """
+
+    return _read_doc_reader_sources(
+        _NATIVE_DOCS_READER_GLOBS,
+        required_dir="tests",
+        code_literals_only=True,
+    )
 
 
 def _names_file(text: str, name: str) -> bool:
@@ -778,14 +821,18 @@ def _is_test_read_doc(path: str) -> bool:
 
 @lru_cache(maxsize=256)
 def _is_native_test_read_doc(path: str) -> bool:
-    """True for a documentation path whose file name a non-tools Python test module names.
+    """True for a documentation path named in a code string literal of a non-tools Python test.
 
     Non-tools Python test modules (such as ``tests/native/test_player_ui.py``, which runs
     ``make player-ui-regressions`` in ``native_tools`` and ``windows_runtime``) are not run
     by the Python shards, so an edit to a document they assert against (for example
-    ``docs/PLAYER_UI_DESIGN.md``) must route the native and Windows jobs directly. Uses the
-    same whole-file-name match as ``_is_test_read_doc``; an unreadable tests tree counts as
-    naming every document.
+    ``docs/PLAYER_UI_DESIGN.md``) must route the native and Windows jobs directly.
+
+    Narrower than its sibling ``_is_test_read_doc``: the native, Windows and installer jobs
+    it starts are the most expensive in the workflow, so only names appearing in code string
+    literals (not comments or docstrings) count; an unparseable module still contributes its
+    whole text, and an unreadable tests tree still counts as naming every document. Uses the
+    same whole-file-name match (``_names_file``).
     """
 
     sources = _native_docs_reader_sources()
