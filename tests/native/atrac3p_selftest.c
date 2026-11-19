@@ -31,7 +31,14 @@
 //     real unit through decode_residual_spectrum() + reconstruct_frame()
 //     (IMDCT/IPQF) and must decode with the nb_samples=2048 contract and
 //     byte-identical PCM across instances/reset/flush (fails-before/after the
-//     CONFIG_MDCT configuration fix; see PROVENANCE.md).
+//     CONFIG_MDCT configuration fix; see PROVENANCE.md); its coded spectrum is
+//     empty, so its PCM is asserted all-zero,
+//   - transform-output pin: a second synthetic MONO frame whose coded spectrum
+//     is not empty decodes to non-silent PCM whose SHA-256 is pinned from this
+//     decoder (a regression pin for the IMDCT/IPQF output, not a PSP
+//     measurement), so a deterministic but wrong transform change fails,
+//   - the private fixture's meta.txt parser, fed a synthetic meta.txt with a
+//     64-hex digest, so the fixture route cannot reject every real fixture.
 //
 // Private fixture hook (optional, never required for the public suite):
 // if the environment variable ATRAC3P_FIXTURE points to a directory
@@ -84,6 +91,15 @@ static const uint8_t TERMINATOR_FRAME[] = { 0x60 };
  * #if CONFIG_MDCT) and this decode crashes with a NULL indirect call, so this
  * test fails-before/passes-after that configuration fix. */
 static const uint8_t MONO_UNIT_FRAME[] = { 0x16, 0x0c, 0xf6, 0x86, 0x87, 0x35, 0xd3, 0x1c, 0xb8 };
+
+/* Synthetic MONO channel-unit frame (start bit 0, unit id 0) whose coded
+ * spectrum is not empty: the first decode after create or reset yields
+ * non-silent, unsaturated PCM. The pinned SHA-256 was taken from this decoder
+ * and agrees across the MinGW and Linux gcc builds at -O0, -O1 and -O2; it is
+ * a regression pin for the transform output, not PSP-measured evidence. */
+static const uint8_t SPECTRUM_UNIT_FRAME[] = { 0x10, 0x5b, 0x7f, 0xcf, 0xf6, 0x7f, 0x67, 0xcb, 0x40 };
+static const char SPECTRUM_UNIT_PCM_SHA256[] =
+    "9d18bf04b08e57e2f40710cc650dc1fe9787839ff84e0a015c93b86dd2017794";
 
 static int pcm_sha256_hex(const int16_t *pcm, size_t samples, char out[65])
 {
@@ -260,6 +276,12 @@ static void test_imdct_path_decode(void)
     pcm_sha256_hex(pcm1, ATRAC3P_FRAME_SAMPLES, sha1);
     pcm_sha256_hex(pcm2, ATRAC3P_FRAME_SAMPLES, sha2);
     CHECK(strcmp(sha1, sha2) == 0, "mono unit PCM deterministic across instances");
+    {
+        int i, nonzero = 0;
+        for (i = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+            nonzero += pcm1[i] != 0;
+        CHECK(nonzero == 0, "mono unit canary (empty coded spectrum) decodes to all-zero PCM");
+    }
 
     CHECK(atrac3p_reset(h1) == 0, "reset h1 (mono unit)");
     ret = atrac3p_decode(h1, MONO_UNIT_FRAME, sizeof(MONO_UNIT_FRAME),
@@ -277,6 +299,41 @@ static void test_imdct_path_decode(void)
 
     atrac3p_destroy(h1);
     atrac3p_destroy(h2);
+}
+
+/* Transform-output pin: a frame with coded spectral data must decode to
+ * non-silent PCM with the pinned hash, on a fresh instance and after reset. A
+ * transform that is deterministic but wrong (scale, sign, window) changes the
+ * hash, which the determinism-only canary above cannot see. */
+static void test_transform_output_pinned(void)
+{
+    Atrac3pHandle *h = NULL;
+    int16_t pcm[ATRAC3P_FRAME_SAMPLES];
+    char sha[65];
+    int ret, samples = -1, i, nonzero = 0;
+
+    CHECK(atrac3p_create(1, 3071, &h) == 0 && h != NULL, "create (spectrum unit)");
+    if (!h)
+        return;
+    memset(pcm, 0, sizeof(pcm));
+    ret = atrac3p_decode(h, SPECTRUM_UNIT_FRAME, sizeof(SPECTRUM_UNIT_FRAME), pcm, &samples);
+    CHECK(ret == (int)sizeof(SPECTRUM_UNIT_FRAME), "spectrum unit frame consumed");
+    CHECK(samples == ATRAC3P_FRAME_SAMPLES, "spectrum unit nb_samples");
+    for (i = 0; i < ATRAC3P_FRAME_SAMPLES; i++)
+        nonzero += pcm[i] != 0;
+    CHECK(nonzero > ATRAC3P_FRAME_SAMPLES / 2, "spectrum unit frame decodes to non-silent PCM");
+    pcm_sha256_hex(pcm, ATRAC3P_FRAME_SAMPLES, sha);
+    if (strcmp(sha, SPECTRUM_UNIT_PCM_SHA256) != 0)
+        fprintf(stderr, "spectrum unit PCM sha256: %s\n", sha);
+    CHECK(strcmp(sha, SPECTRUM_UNIT_PCM_SHA256) == 0, "spectrum unit PCM matches the pinned transform output");
+
+    CHECK(atrac3p_reset(h) == 0, "reset (spectrum unit)");
+    memset(pcm, 0, sizeof(pcm));
+    ret = atrac3p_decode(h, SPECTRUM_UNIT_FRAME, sizeof(SPECTRUM_UNIT_FRAME), pcm, &samples);
+    CHECK(ret == (int)sizeof(SPECTRUM_UNIT_FRAME), "spectrum unit decode after reset");
+    pcm_sha256_hex(pcm, ATRAC3P_FRAME_SAMPLES, sha);
+    CHECK(strcmp(sha, SPECTRUM_UNIT_PCM_SHA256) == 0, "spectrum unit PCM after reset matches the pin");
+    atrac3p_destroy(h);
 }
 
 /* Plain AT3 output polarity: the PSP decoder's sign (#1096), with the same scale and
@@ -457,14 +514,61 @@ static void test_decode_rejection(void)
 /* Optional private fixture hook                                       */
 /* ------------------------------------------------------------------ */
 
+typedef struct {
+    int channels, block_align, frames;
+    char want[65];
+} FixtureMeta;
+
+/* One meta.txt line. pcm_sha256 holds 64 hex digits, so the conversion reads
+ * up to 64 characters into the 65-byte field. */
+static void fixture_meta_line(const char *line, FixtureMeta *m)
+{
+    if (sscanf(line, "channels=%d", &m->channels) == 1) return;
+    if (sscanf(line, "block_align=%d", &m->block_align) == 1) return;
+    if (sscanf(line, "frames=%d", &m->frames) == 1) return;
+    (void)sscanf(line, "pcm_sha256=%64s", m->want);
+}
+
+/* Bound the fixture parameters: the decoder supports at most 8 channels and
+ * the stream hash must stay below the 1 Mi frame sanity cap. */
+static int fixture_meta_valid(const FixtureMeta *m)
+{
+    return m->channels >= 1 && m->channels <= ATRAC3P_MAX_CHANNELS &&
+           m->block_align >= 1 && m->frames >= 1 && m->frames <= (1 << 20) &&
+           strlen(m->want) == 64;
+}
+
+/* The private fixture route parses meta.txt with the same helpers: a synthetic
+ * meta.txt in the documented form must be accepted with its full digest. */
+static void test_fixture_meta_parse(void)
+{
+    static const char *const lines[] = {
+        "channels=2\n", "block_align=1536\n", "frames=3\n",
+        "pcm_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+    };
+    FixtureMeta m;
+    size_t i;
+
+    memset(&m, 0, sizeof(m));
+    for (i = 0; i < sizeof(lines) / sizeof(lines[0]); i++)
+        fixture_meta_line(lines[i], &m);
+    CHECK(m.channels == 2 && m.block_align == 1536 && m.frames == 3,
+          "fixture meta.txt numeric fields parse");
+    CHECK(strcmp(m.want, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef") == 0,
+          "fixture meta.txt keeps all 64 digest characters");
+    CHECK(fixture_meta_valid(&m), "documented fixture meta.txt form is accepted");
+    m.want[63] = '\0';
+    CHECK(!fixture_meta_valid(&m), "a 63-character digest is refused");
+}
+
 static int run_fixture(const char *dir)
 {
     char path[1024];
     char meta[1024];
-    char want[65] = { 0 };
+    FixtureMeta m;
     char got[65];
     FILE *f;
-    int channels = 0, block_align = 0, frames = 0;
+    int channels, block_align, frames;
     Atrac3pHandle *h = NULL;
     int16_t *stream = NULL;
     uint8_t *buf = NULL;
@@ -478,22 +582,19 @@ static int run_fixture(const char *dir)
         fprintf(stderr, "FAIL: fixture meta.txt not readable: %s\n", path);
         goto out;
     }
-    while (fgets(meta, sizeof(meta), f)) {
-        if (sscanf(meta, "channels=%d", &channels) == 1) continue;
-        if (sscanf(meta, "block_align=%d", &block_align) == 1) continue;
-        if (sscanf(meta, "frames=%d", &frames) == 1) continue;
-        if (sscanf(meta, "pcm_sha256=%63s", want) == 1) continue;
-    }
+    memset(&m, 0, sizeof(m));
+    while (fgets(meta, sizeof(meta), f))
+        fixture_meta_line(meta, &m);
     fclose(f);
 
-    /* Bound the fixture parameters: the decoder supports at most 8 channels
-     * and the stream hash must stay below the 1 Mi frame sanity cap. */
-    if (channels < 1 || channels > ATRAC3P_MAX_CHANNELS || block_align < 1 ||
-        frames < 1 || frames > (1 << 20) || strlen(want) != 64) {
+    if (!fixture_meta_valid(&m)) {
         fprintf(stderr, "FAIL: fixture meta.txt malformed (channels=%d block_align=%d frames=%d want='%s')\n",
-                channels, block_align, frames, want);
+                m.channels, m.block_align, m.frames, m.want);
         goto out;
     }
+    channels = m.channels;
+    block_align = m.block_align;
+    frames = m.frames;
 
     if (atrac3p_create(channels, block_align, &h) != 0 || !h) {
         fprintf(stderr, "FAIL: fixture create\n");
@@ -534,9 +635,9 @@ static int run_fixture(const char *dir)
 
     pcm_sha256_hex(stream, stream_bytes / sizeof(int16_t), got);
     rc = 0;
-    if (strcmp(got, want) != 0) {
+    if (strcmp(got, m.want) != 0) {
         fprintf(stderr, "FAIL: fixture PCM sha256 mismatch\n  want: %s\n  got:  %s\n",
-                want, got);
+                m.want, got);
         rc = 1;
     }
 
@@ -560,6 +661,8 @@ int main(int argc, char **argv)
     test_decode_rejection();
     test_terminator_decode();
     test_imdct_path_decode();
+    test_transform_output_pinned();
+    test_fixture_meta_parse();
     test_short_frame_does_not_repeat_pcm();
 
     if (fixture && fixture[0]) {

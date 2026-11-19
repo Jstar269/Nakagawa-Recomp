@@ -1710,9 +1710,9 @@ jobs:
     timeout-minutes: 20
     # The display smoke's flight step needs the commit as its build identity
     # (mk/runtime_sources.mk). The job runs as root in the container and the checkout belongs to
-    # the runner's user, so git refuses the repository ("dubious ownership") and the Makefile's
-    # `git rev-parse HEAD` comes back empty. Forward the revision the checkout contains, as
-    # windows_runtime does.
+    # the runner's user, so until the safe.directory step below git refuses the repository
+    # ("dubious ownership") and the Makefile's `git rev-parse HEAD` comes back empty. Forward the
+    # revision the checkout contains, as windows_runtime does, so the identity never rests on git.
     env:
       SR_SOURCE_COMMIT: ${{ github.sha }}
     steps:
@@ -1734,6 +1734,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # The job runs as root and the checkout belongs to the runner's user, so git refuses it
+      # ("dubious ownership") and test_player_state's #511 git-clean check could not run (exit 77).
+      # The test points HOME at its own temporary folder, so the entry goes in the system
+      # configuration, which it still reads.
+      - name: Let git read the runner-owned checkout
+        run: git config --system --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Run native core test suite with GCC 16.2
         run: make -j2 CC=gcc native-core-tests
@@ -2622,9 +2629,14 @@ jobs:
           command -v pwsh
           mingw32-make --no-print-directory CC=gcc VULKAN_SDK=/ucrt64 production-smoke-gap
 
+      # test_player_state's #511 git-clean check runs `git status` on the checkout, and this
+      # job's MSYS2 shell has no git of its own: the runner's Windows git, inherited from PATH,
+      # answers it. Without it the check could not run and the test exits 77.
       - name: Run native core test suite on Windows
         if: contains(matrix.parts, 'routes')
         shell: msys2 {0}
+        env:
+          MSYS2_PATH_TYPE: inherit
         run: |
           set -euo pipefail
           mingw32-make --no-print-directory CC=gcc native-core-tests
@@ -2931,8 +2943,9 @@ jobs:
       # The Windows build decodes H.264 through Media Foundation (src/rt/h264_mf.c), so this
       # runs the source-authored PSMF/H.264 fixture on that backend (#283); native_tools runs
       # the same fixture on the vendored FFmpeg subset. When no decoder instance can be
-      # created, the selftest prints SKIP for its decode checks and still exits 0, so any SKIP
-      # line fails the step. The CSC no-write mutant must then die on the same backend.
+      # created, the selftest prints SKIP for its decode checks and then fails its own
+      # no-SKIP check; any SKIP line also fails the step. The CSC no-write mutant must then
+      # die on the same backend.
       - name: Build and run the Media Foundation H.264 media selftest
         if: contains(matrix.parts, 'selftests')
         shell: msys2 {0}

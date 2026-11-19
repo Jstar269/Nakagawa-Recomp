@@ -754,7 +754,7 @@ typedef struct {
  *  - a PSN release of a UMD game (an EBOOT.PBP whose DATA.PSAR is an NPUMDIMG
  *    image, #295 phase 2), converted into <data>/discs/<DISC_ID>/<DISC_ID>.iso;
  *  - a compressed disc image (.cso, .zso, .chd; disc_format names which),
- *    expanded into <data>/discs/<DISC_ID>/<DISC_ID>.<ext>.iso by
+ *    expanded into <data>/discs/<DISC_ID>/<DISC_ID>.<fingerprint>.<ext>.iso by
  *    nk_disc_import (src/core/nk_disc_expand.h). */
 typedef struct {
     char pbp_path[MAX_PATH_LEN]; /* the picked file: the package or the compressed image */

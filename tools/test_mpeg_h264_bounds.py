@@ -27,7 +27,7 @@ class TestMpegH264Bounds(unittest.TestCase):
         self.assertIn("#define RB_BYTES", MPEG)
         self.assertIn("u32_mul_checked", MPEG)
         self.assertIn("u32_add_checked", MPEG)
-        put = MPEG[MPEG.index("uint32_t mpeg_ringbuffer_put") : MPEG.index("static Mpeg *au_stream")]
+        put = MPEG[MPEG.index("uint32_t mpeg_ringbuffer_put") : MPEG.index("static int au_stream_num")]
         self.assertLess(put.index("rb_read_valid"), put.index("call_guest3"))
         self.assertIn("r.avail > r.packets", MPEG)
         self.assertIn("r.writePos >= r.packets", MPEG)
@@ -36,7 +36,7 @@ class TestMpegH264Bounds(unittest.TestCase):
         self.assertIn("sr_guest_span_writable(r.data, dataBytes)", MPEG)
 
     def test_ring_feed_span_is_preflighted_before_h264(self) -> None:
-        put = MPEG[MPEG.index("uint32_t mpeg_ringbuffer_put") : MPEG.index("static Mpeg *au_stream")]
+        put = MPEG[MPEG.index("uint32_t mpeg_ringbuffer_put") : MPEG.index("static int au_stream_num")]
         self.assertIn("sr_guest_span_writable(dst, chunkBytes)", put)
         self.assertIn("sr_guest_span_readable_current(dst, gotBytes)", put)
         self.assertIn("sr_h264_feed(ctx->h264, (const uint8_t *)SR_HOST(dst), gotBytes)", put)

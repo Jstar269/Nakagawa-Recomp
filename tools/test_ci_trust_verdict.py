@@ -29,6 +29,7 @@ try:
     import ci_trust_verdict as ctv
 except ModuleNotFoundError:  # Running as ``python -m unittest tools.test_ci_trust_verdict``.
     from tools import ci_trust_verdict as ctv
+from nk_core.git_isolation import isolated_git_env  # noqa: E402  (ci_trust_verdict put tools/ on sys.path)
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -47,6 +48,20 @@ LABELLED = "2026-10-28T10:30:00Z"     # Scenario.label's default
 RECORDED = "2026-10-28T10:31:00Z"     # after it: when Scenario.record's job completed
 PROVENANCE = next(producer for producer in ctv.PRODUCERS if producer.workflow == PROV)
 NAMED_TITLE = "Provenance attestation of {head}"   # the attestation workflow's run-name; see WorkflowWiringTests
+
+
+def _isolate_git(case: unittest.TestCase, root: Path) -> dict[str, str]:
+    """Strip the caller's repository-selecting variables and global Git configuration for the rest of ``case``.
+
+    ``git -C <scratch>`` still obeys an exported GIT_DIR, GIT_INDEX_FILE or GIT_WORK_TREE (a git hook,
+    ``git rebase --exec``, a worktree tool), and the verifier's own git calls inherit ``os.environ``, so both the
+    scratch commands and the code under test run in ``isolated_git_env``. Returns that environment.
+    """
+    env: dict[str, str] = isolated_git_env(root=root)
+    patcher = mock.patch.dict(os.environ, env, clear=True)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+    return env
 
 
 def _run(run_id: int, path: str, event: str = "pull_request", *, sha: str = HEAD, created: str = PUSHED,
@@ -366,6 +381,26 @@ class StaleHeadCanaryTests(VerdictAssertions):
         twin["number"] = 99
         scenario.raw["open_pull_requests"].append(twin)
         self.assertVerdict(scenario, "failure", "AMBIGUOUS_HEAD")
+
+    def test_runs_from_before_a_retarget_are_not_evidence_for_the_new_base(self) -> None:
+        """Failing-before: a pull request opened against another branch ran CI on merge(head, that branch),
+        and retargeting it to main starts no run, so those runs were judged as if they had tested main."""
+        scenario = Scenario(fork=True)
+        for run in scenario.raw["workflow_runs"]:
+            run["pull_requests"] = []          # GitHub lists no pull request on a fork's run
+        scenario.raw["label_events"].append(
+            {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T10:20:00Z"})
+        verdict = self.assertVerdict(scenario, "failure", "RUN_BEFORE_RETARGET")
+        self.assertIn("reopen", " ".join(item.message for item in verdict.findings))
+        # A run created after the retarget (a push, or a close and reopen) is evidence again.
+        fresh = Scenario(fork=True)
+        fresh.raw["label_events"].append(
+            {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T09:30:00Z"})
+        self.assertVerdict(fresh, "success")
+        # A retarget whose time cannot be read proves no run came after it.
+        unknown = Scenario()
+        unknown.raw["label_events"].append({"id": 9, "event": "base_ref_changed"})
+        self.assertVerdict(unknown, "failure", "RUN_BEFORE_RETARGET")
 
     def test_definitions_behind_main_fail_even_with_a_label(self) -> None:
         scenario = Scenario()
@@ -793,10 +828,24 @@ class ProtectedPathTests(unittest.TestCase):
         self.assertNotIn("tools/nk_cli.py", paths)
         self.assertNotIn("tools/hle_registry_meta.py", paths)
 
+    def test_an_added_osv_scanner_configuration_is_a_protected_change(self) -> None:
+        """OSV-Scanner reads an osv-scanner.toml beside a scanned lockfile or in a parent directory, and its
+        [[IgnoredVulns]] turn the required 'OSV Vulnerability Scan' green. Failing-before: no rule named the
+        file, so a candidate could add one with no CI_CHANGE_UNAPPROVED."""
+        trusted = {OSV: "1", "tools/requirements-lock.txt": "2"}
+        for path in ("tools/osv-scanner.toml", "osv-scanner.toml", "src/deep/osv-scanner.toml"):
+            with self.subTest(path=path):
+                candidate = trusted | {path: "3"}
+                paths = ctv.protected_paths(trusted, candidate, [])
+                self.assertIn(path, paths)
+                self.assertEqual(ctv.protected_changes(trusted, candidate, trusted, paths),
+                                 [{"path": path, "kind": "added"}])
+        self.assertNotIn("tools/osv-scanner.toml.md", ctv.protected_paths({}, {"tools/osv-scanner.toml.md": "x"}, []))
+
     def test_git_facts_on_a_real_repository(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            env = os.environ | {
+            env = _isolate_git(self, repo) | {
                 "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
             }
@@ -1193,6 +1242,41 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(gh.posts[0][1]["state"], "failure")
         self.assertIn("CI_CHANGE_UNAPPROVED", gh.posts[0][1]["description"])
 
+    def test_main_refuses_a_head_whose_candidate_deleted_a_producer_workflow(self) -> None:
+        """A required workflow the candidate deleted (or whose triggers it edited) never runs at the head, and
+        GitHub starts a pull_request run together with the others. Failing-before: the collector stopped at the
+        first producer with no run and main() posted 'Waiting for: dependency-review' for ever, so the
+        unapproved CI change was never named."""
+        scenario = Scenario()
+        scenario.drop_runs(DEP)
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts([{"path": DEP, "kind": "deleted"}])) as facts:
+            self.assertEqual(self._main(gh, "--pull-request", str(PR)), 1)
+        facts.assert_called_once()
+        self.assertEqual([body["state"] for _, body in gh.posts], ["failure"])
+        self.assertIn("CI_CHANGE_UNAPPROVED", gh.posts[0][1]["description"])
+
+    def test_a_producer_without_a_run_and_no_ci_change_stays_pending(self) -> None:
+        """The full read for an absent producer judges it pending, not passed, when nothing protected changed."""
+        scenario = Scenario()
+        scenario.drop_runs(DEP)
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()):
+            self.assertEqual(self._main(gh, "--pull-request", str(PR)), 0)
+        self.assertEqual([(body["state"], body["description"]) for _, body in gh.posts],
+                         [("pending", "Waiting for: dependency-review")])
+
+    def test_an_absent_producer_waits_while_another_is_unfinished(self) -> None:
+        """Only the last producer to finish pays for the full read (the token budget, 2026-10-30)."""
+        scenario = Scenario()
+        scenario.drop_runs(DEP)
+        scenario.raw["workflow_runs"][1].update(status="in_progress", conclusion=None)    # OSV still running
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()) as facts:
+            raw = ctv.collect(gh, Path("."), "main", HEAD, PR)
+        facts.assert_not_called()
+        self.assertEqual(raw, {"head_sha": HEAD, "waiting_producers": ["OSV Vulnerability Scan", "dependency-review"]})
+
     def test_main_replaces_an_old_verdict_with_error_when_it_cannot_judge(self) -> None:
         gh = FakeGitHub(Scenario())
         with mock.patch.object(ctv, "git_facts", side_effect=subprocess.CalledProcessError(128, "git")), \
@@ -1306,18 +1390,41 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(ctv.unfinished_producers(stale, HEAD),
                          [producer.context for producer in ctv.PRODUCERS])
 
-    def test_label_events_are_read_only_when_the_label_is_on(self) -> None:
-        gh = FakeGitHub(Scenario())
+    def test_label_events_are_judged_only_when_the_label_is_on(self) -> None:
+        """The events are always read, for a retarget (``RUN_BEFORE_RETARGET``); without the label none of
+        them is kept as a label event, so nothing asks for the labeller's permission."""
+        scenario = Scenario()
+        scenario.raw["label_events"].append({
+            "id": 1, "event": "labeled", "created_at": "2026-10-28T09:05:00Z",
+            "actor": {"login": "maintainer"}, "label": {"name": ctv.APPROVAL_LABEL},
+        })
+        gh = FakeGitHub(scenario)
         with mock.patch.object(ctv, "git_facts", return_value=_facts()):
             raw = ctv.collect(gh, Path("."), "main", HEAD, PR)
         assert raw is not None
-        self.assertNotIn(f"issues/{PR}/events", gh.reads)
+        self.assertIn(f"issues/{PR}/events", gh.reads)
+        self.assertEqual(raw["label_events"], [])
+        self.assertFalse(any(read.startswith("collaborators/") for read in gh.reads))
         labelled = Scenario()
         labelled.label(at="2026-10-28T10:05:00Z", permission="write")
         gh = FakeGitHub(labelled)
         with mock.patch.object(ctv, "git_facts", return_value=_facts()):
             ctv.collect(gh, Path("."), "main", HEAD, PR)
         self.assertIn(f"issues/{PR}/events", gh.reads)
+
+    def test_a_retarget_is_read_without_the_label(self) -> None:
+        """Failing-before: the collector read the pull request's events only under the label, so an
+        unlabelled pull request retargeted after its runs was judged on runs against its old base."""
+        scenario = Scenario()
+        scenario.raw["label_events"].append(
+            {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T10:20:00Z"})
+        gh = FakeGitHub(scenario)
+        with mock.patch.object(ctv, "git_facts", return_value=_facts()):
+            raw = ctv.collect(gh, Path("."), "main", HEAD, PR)
+        assert raw is not None
+        verdict = ctv.evaluate(ctv.normalise(raw))
+        self.assertEqual(verdict.state, "failure", verdict.findings)
+        self.assertIn("RUN_BEFORE_RETARGET", {item.code for item in verdict.findings if item.fatal})
 
     def test_main_rejects_a_malformed_head(self) -> None:
         gh = FakeGitHub(Scenario())
@@ -1508,6 +1615,36 @@ class ApprovalRecordForgeryTests(unittest.TestCase):
         assert raw is not None
         self.assertEqual(raw["approval_records"], [])
         self.assertEqual(ctv.evaluate(ctv.normalise(raw)).state, "failure")
+
+    def test_the_digest_reuses_the_trees_the_facts_read(self) -> None:
+        """Failing-before: approval_digest listed both trees and read every workflow again after git_facts had."""
+        scenario = Scenario()
+        scenario.change("tools/ci_paths.py")
+        scenario.label(at=LABELLED_AT)
+        view = ({"t": "100644:1"}, {"c": "100644:2"}, {"tools/ci_paths.py"})
+        facts = _facts(scenario.raw["protected_changes"]) | {ctv.VIEW_KEY: view}
+        with mock.patch.object(ctv, "git_facts", return_value=facts), \
+                mock.patch.object(ctv, "approval_digest", return_value=D1) as digest:
+            raw = ctv.collect(FakeGitHub(scenario), Path("."), "main", HEAD, PR)
+        assert raw is not None
+        digest.assert_called_once_with(Path("."), HEAD, view)
+        # The trees stay out of the snapshot (--snapshot-out).
+        self.assertNotIn(ctv.VIEW_KEY, raw)
+        # Given the view, the digest reads no tree.
+        with mock.patch.object(ctv, "tree_entries", side_effect=AssertionError("tree read twice")):
+            self.assertEqual(ctv.approval_digest(Path("."), HEAD, ({}, {}, set())),
+                             ctv.hashlib.sha256(ctv.DIGEST_VERSION.encode("ascii") + b"\n").hexdigest())
+
+    def test_the_verdict_and_the_approval_writer_choose_the_same_label_event(self) -> None:
+        """One selection serves normalise, collect and label_state: the newest event, ties broken by ID."""
+        older = {"event": "labeled", "id": 5, "created_at": LABELLED_AT, "actor": {"login": "maintainer"},
+                 "label": {"name": ctv.APPROVAL_LABEL}}
+        newer = older | {"event": "unlabeled", "id": 6}
+        other = older | {"id": 9, "label": {"name": "something-else"}}
+        self.assertIs(ctv.latest_label_event([newer, older, other]), newer)
+        self.assertIsNone(ctv.latest_label_event([other]))
+        raw = Scenario().raw | {"label_events": [older, newer, other]}
+        self.assertEqual(ctv.normalise(raw)["approval"]["event"], "unlabeled")
 
 
 def _dispatched(run_id: int, digest: str = D1, *, number: int = PR, head: str = HEAD, created: str = LABELLED,
@@ -1731,8 +1868,10 @@ class DispatchedApprovalTests(VerdictAssertions):
         for route, state in (("dispatch", "success"), ("head", "failure")):
             with self.subTest(route=route):
                 scenario = self._approved(route=route)
+                # Retargeted before the head's runs were created, so they are evidence for the current base
+                # (``RUN_BEFORE_RETARGET``) and only the approval route decides.
                 scenario.raw["label_events"].append(
-                    {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T10:20:00Z"})
+                    {"id": 9, "event": "base_ref_changed", "created_at": "2026-10-28T09:20:00Z"})
                 self.assertVerdict(scenario, state)
 
     def test_a_record_of_an_unknown_route_does_not_approve(self) -> None:
@@ -2232,7 +2371,7 @@ class ApprovalDigestTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.repo = Path(self._tmp.name) / "origin"
         self.repo.mkdir()
-        self.env = os.environ | {
+        self.env = _isolate_git(self, Path(self._tmp.name)) | {
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
         }
@@ -2968,6 +3107,7 @@ class NamedRouteCollectorTests(unittest.TestCase):
     def test_on_default_branch_reads_ancestry_from_the_trusted_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            _isolate_git(self, repo)
 
             def git(*args: str) -> str:
                 return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
@@ -2996,6 +3136,7 @@ class NamedRouteCollectorTests(unittest.TestCase):
         workflow = ".github/workflows/gate.yml"
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            _isolate_git(self, repo)
 
             def git(*args: str) -> str:
                 return subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c",
@@ -3119,6 +3260,34 @@ class CommandLineTests(unittest.TestCase):
     def test_snapshot_cannot_be_posted(self) -> None:
         with mock.patch("sys.stderr"), self.assertRaises(SystemExit):
             self._main(Scenario().raw, "--post")
+
+    def test_a_candidate_path_cannot_write_workflow_commands_or_table_cells(self) -> None:
+        """Failing-before: a path a pull request adds reached the trusted job's log and step summary verbatim, so a
+        newline in it started a ``::`` workflow command and a ``|`` or a backtick broke the summary's table."""
+        import io  # noqa: PLC0415
+
+        path = ".github/actions/x\n::error title=forged::verdict success|`row`\x1b"
+        scenario = Scenario()
+        scenario.change(path, "added")
+        scenario.raw["context_collisions"] = [path]
+        log = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            saved, summary = Path(tmp) / "snapshot.json", Path(tmp) / "summary.md"
+            saved.write_text(json.dumps(scenario.raw), encoding="utf-8")
+            with mock.patch("sys.stdout", log):
+                code = ctv.main(["--snapshot", str(saved), "--summary", str(summary)])
+            report = summary.read_text(encoding="utf-8")
+        self.assertEqual(code, 1)
+        self.assertIn(report, log.getvalue())
+        self.assertFalse([line for line in log.getvalue().splitlines() if line.lstrip().startswith("::")])
+        rows = [line for line in report.splitlines() if line.startswith("| ")]
+        # The header, its rule and one row per finding; each row has its four cell borders and nothing more.
+        self.assertEqual(len(rows), 4, report)
+        for row in rows:
+            self.assertEqual(row.count("|"), 4, row)
+        escaped = ".github/actions/x\\x0a::error title=forged::verdict success\\x7c\\x60row\\x60\\x1b"
+        self.assertIn(f"`CI_CHANGE_UNAPPROVED` | `{escaped}` |", report)
+        self.assertIn(f"`CI_CONTEXT_COLLISION` | `{escaped}` |", report)
 
 
 class ForkProducerTests(unittest.TestCase):
@@ -3267,6 +3436,35 @@ class ForkProducerTests(unittest.TestCase):
                 "check run: https://github.com/example-user/nakagawa-recomp/actions/runs/4")
         self.assertTrue(report.endswith(f"\n{line}\n"), report)
         self.assertIn(line, log)
+
+    def test_a_forks_saved_snapshot_replays_to_the_verdict_it_posted(self) -> None:
+        """Failing-before: --snapshot judged the upstream producers, so a fork's saved snapshot replayed as waiting
+        for the Trusted provenance attestation its repository never runs."""
+        import io  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as scratch:
+            saved = Path(scratch) / "snapshot.json"
+            gh = FakeGitHub(self._fork_scenario())
+            with mock.patch.object(ctv, "git_facts", return_value=_facts()), \
+                    mock.patch.object(ctv, "GitHub", return_value=gh), \
+                    mock.patch.dict(os.environ, {"GITHUB_TOKEN": "token", "GITHUB_REPOSITORY_ID": "42"}), \
+                    mock.patch("sys.stdout"):
+                live = ctv.main(["--repository", "example-user/nakagawa-recomp", "--pull-request", str(PR),
+                                 "--snapshot-out", str(saved)])
+            self.assertEqual(live, 0)
+            recorded = json.loads(saved.read_text(encoding="utf-8"))
+            self.assertEqual((recorded["repository"], recorded["repository_id"]),
+                             ("example-user/nakagawa-recomp", "42"))
+            log = io.StringIO()
+            # The replay reads the producer set from the snapshot, not from this shell's environment.
+            with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY_ID": str(ctv.provenance_mode.UPSTREAM_REPOSITORY_ID)}), \
+                    mock.patch("sys.stdout", log):
+                replayed = ctv.main(["--snapshot", str(saved)])
+        self.assertEqual(replayed, 0)
+        self.assertIn(f"### {ctv.VERDICT_CONTEXT}: success", log.getvalue())
+        self.assertIn("Provenance producer set: fork (repository example-user/nakagawa-recomp, ID 42); judged Fork "
+                      "provenance check run: https://github.com/example-user/nakagawa-recomp/actions/runs/4",
+                      log.getvalue())
 
     def test_a_forks_pending_verdict_names_its_own_check(self) -> None:
         # collect waits for the fork's producer, not the upstream's.
@@ -3501,6 +3699,54 @@ class GateCodeTests(unittest.TestCase):
         missing = subprocess.run([sys.executable, "-c", "import sys; sys.path.insert(0, 'tools'); import nk_core; nk_core.nope"],
                                  cwd=ROOT, check=False, capture_output=True, text=True)
         self.assertIn("AttributeError", missing.stderr)
+
+
+class ScratchRepositoryIsolationTests(unittest.TestCase):
+    """The tests that build scratch repositories act on those repositories only."""
+
+    SCRATCH_TESTS = (
+        "ProtectedPathTests.test_git_facts_on_a_real_repository",
+        "ApprovalDigestTests.test_a_change_to_a_protected_path_changes_the_digest",
+        "NamedRouteCollectorTests.test_on_default_branch_reads_ancestry_from_the_trusted_checkout",
+        "NamedRouteCollectorTests.test_only_the_default_branchs_current_copy_of_a_workflow_is_a_trusted_definition",
+    )
+
+    def test_a_callers_repository_variables_leave_the_callers_repository_alone(self) -> None:
+        """A git hook, ``git rebase --exec`` or a worktree tool exports GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE;
+        ``git -C <scratch>`` then still acts on the caller's repository. Failing-before: the scratch tests passed
+        os.environ on, and their ``add -A``, ``commit`` and ``update-ref`` wrote into the caller's repository."""
+        with tempfile.TemporaryDirectory() as tmp:
+            caller = Path(tmp) / "caller"
+            caller.mkdir()
+            clean = isolated_git_env(root=caller)
+
+            def caller_git(*args: str) -> str:
+                return subprocess.run(["git", "-C", str(caller), *args], check=True, capture_output=True, text=True,
+                                      env=clean).stdout.strip()
+
+            caller_git("init", "-q", "-b", "work")
+            (caller / "mine.txt").write_text("the caller's file\n", encoding="utf-8")
+            caller_git("add", "mine.txt")
+            caller_git("commit", "-q", "-m", "the caller's commit")
+
+            def state() -> tuple[str, str, str]:
+                return (caller_git("for-each-ref", "--format=%(refname) %(objectname)"),
+                        caller_git("status", "--porcelain", "--untracked-files=all"),
+                        caller_git("ls-files", "--stage"))
+
+            before = state()
+            exported = {"GIT_DIR": str(caller / ".git"), "GIT_INDEX_FILE": str(caller / ".git" / "index"),
+                        "GIT_WORK_TREE": str(caller)}
+            module = sys.modules[__name__]
+            suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name, module)
+                                       for name in self.SCRATCH_TESTS)
+            result = unittest.TestResult()
+            with mock.patch.dict(os.environ, exported):
+                suite.run(result)
+            self.assertEqual(state(), before, "a scratch-repository test wrote into the caller's repository")
+            self.assertEqual(result.testsRun, len(self.SCRATCH_TESTS))
+            self.assertEqual([test.id() for test, _ in result.errors + result.failures], [],
+                             "".join(trace for _, trace in result.errors + result.failures))
 
 
 if __name__ == "__main__":

@@ -454,6 +454,7 @@ extern void sr_hle_test_reset_rtc_epoch(void);
 #define NID_SCE_ATRAC_GET_REMAIN_FRAME 0x9ae849a7u
 #define NID_SCE_ATRAC_GET_MAX_SAMPLE 0xd6a5f2f7u
 #define NID_SCE_ATRAC_GET_CHANNEL 0x31668baau
+#define NID_SCE_ATRAC_GET_OUTPUT_CHANNEL 0xb3b5d042u
 #define NID_SCE_ATRAC_GET_BITRATE 0xa554a158u
 #define NID_SCE_ATRAC_GET_INTERNAL_ERROR 0xe88f759bu
 #define NID_SCE_ATRAC_IS_SECOND_BUFFER_NEEDED 0xeca32a99u
@@ -7885,8 +7886,9 @@ static void test_controlled_unsupported_registration(void) {
            "a controlled refusal returns the same visible error on each call");
 
     memset(&cpu, 0, sizeof(cpu));
-    expect(sr_syscall(&cpu, 0xb3b5d042u) == 0u,
-           "sceAtracGetOutputChannel retains its named compatibility result under #281/#286");
+    cpu.r[4] = 0x7fu;
+    expect(sr_syscall(&cpu, 0xb3b5d042u) == ATRAC_ERROR_BAD_ATRACID,
+           "sceAtracGetOutputChannel refuses an unknown ID instead of a generic success");
 }
 
 static void test_kernel_import_sweep_explicit_refusals(void) {
@@ -14686,8 +14688,8 @@ static void test_audio_regular_contract_safety(void) {
     expect(s_audio_push_first_l == 1 && s_audio_push_first_r == 1 &&
                s_audio_push_last_l == 64 && s_audio_push_last_r == 64,
            "mono 0x10 expands each source sample to equal left/right samples");
-    expect(s_audio_queue_calls == 2u,
-           "a zero-lead queue is observed once before and once inside the wait");
+    expect(s_audio_queue_calls == 1u,
+           "a zero-lead queue is read once: the first reading is also the wait loop's");
 
     expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
            "mono fixture channel releases before the stereo span case");
@@ -14744,6 +14746,196 @@ static void test_audio_regular_contract_safety(void) {
            "a negative queue report ends the wait instead of looping");
     expect(s_audio_queue_calls == 1u,
            "the negative queue sentinel takes the open-loop path after one query");
+}
+
+/* Regular output and release refuse a channel that is out of range or not reserved, and
+ * sceAudioOutputPanned is the non-blocking form (audit 2026-11-17). The refusal codes and the
+ * busy rule are PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp and __sceAudio.cpp). Entered
+ * through the production NIDs; HOST_TESTED, not PSP_HARDWARE evidence.
+ *
+ * MUTANT: drop the channel check in sceAudioOutputBlocking -- channel 9 plays 1024 frames and
+ *   returns 1024, and under fast forward its queue model indexes past its nine slots.
+ * MUTANT: drop the reservation check -- an unreserved or released channel returns its length.
+ * MUTANT: sceAudioChRelease keeps the length -- the state check after release fails.
+ * MUTANT: map sceAudioOutputPanned back to the blocking handler -- the busy check returns 64.
+ * MUTANT: (void) the Output2 output's result again -- the unreadable buffer returns 0. */
+static void test_audio_regular_output_refuses_bad_channels(void) {
+    enum {
+        STEREO_BUF = 0x08a00000u,   /* 1024 stereo frames fit inside the arena */
+        NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING = 0x13f592bcu,
+        NID_SCE_AUDIO_OUTPUT_PANNED = 0xe2d56b2du,
+    };
+    const uint32_t NOT_RESERVED = 0x80260008u, OUTPUT_BUSY = 0x80260002u;
+    CpuState cpu;
+    int reserved = -1, format = -1;
+    uint32_t frames = 0xffffffffu, left = 1u, right = 1u;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_test_audio_wait_reset();
+    const unsigned long silence_before = s_audio_silence_calls;
+
+    /* Out of range: 8 is the Output2/SRC slot, 9 has no slot, -1 is a reserve error passed back. */
+    const uint32_t bad[] = {8u, 9u, 0x7fffffffu, 0xffffffffu, 0x80260005u};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, bad[i], 0x8000u, STEREO_BUF) ==
+                   SCE_AUDIO_ERROR_INVALID_CH,
+               "AudioOutputBlocking refuses a channel outside 0..7 with INVALID_CH");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = bad[i]; cpu.r[5] = 0x8000u; cpu.r[6] = 0x8000u; cpu.r[7] = STEREO_BUF;
+        expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == SCE_AUDIO_ERROR_INVALID_CH,
+               "AudioOutputPannedBlocking refuses a channel outside 0..7 with INVALID_CH");
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, bad[i], 0u, 0u) ==
+                   SCE_AUDIO_ERROR_INVALID_CH,
+               "AudioChRelease refuses a channel outside 0..7 with INVALID_CH");
+    }
+    /* The same under fast forward, where the queue model answers. */
+    s_det_clock = 0;
+    s_ff_speed = SCHED_FAST_FORWARD_SPEED;
+    s_ff_epoch++;
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 9u, 0x8000u, STEREO_BUF) ==
+               SCE_AUDIO_ERROR_INVALID_CH,
+           "under fast forward channel 9 is refused before the queue model is reached");
+    s_ff_speed = 1u;
+    expect(s_audio_push_calls == 0u && s_audio_silence_calls == silence_before,
+           "a refused channel hands the host nothing");
+    expect(sr_hle_test_audio_wait_total_us() == 0u, "a refused channel never waits");
+
+    /* Not reserved: never reserved, then reserved and released. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 1u, 0x8000u, STEREO_BUF) ==
+               SCE_AUDIO_ERROR_NOT_INITIALIZED,
+           "AudioOutputBlocking refuses an unreserved channel with NOT_INITIALIZED");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 1u, 0u, 0u) == NOT_RESERVED,
+           "AudioChRelease refuses an unreserved channel with NOT_RESERVED");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0x10u) == 0u,
+           "release fixture reserves a 64-frame mono channel");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CHANGE_VOLUME, 0u, 0x4000u, 0x2000u) == 0u,
+           "release fixture retains a volume pair");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
+           "AudioChRelease releases a reserved channel");
+    expect(sr_hle_test_audio_state(0u, &reserved, &frames, &format) &&
+               reserved == 0 && frames == 0u && format == 0,
+           "release clears the channel's length and format");
+    expect(sr_hle_test_audio_volume(0u, &left, &right) && left == 0u && right == 0u,
+           "release clears the channel's retained volumes");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == NOT_RESERVED,
+           "a second release refuses with NOT_RESERVED");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x8000u, STEREO_BUF) ==
+               SCE_AUDIO_ERROR_NOT_INITIALIZED,
+           "a released channel no longer plays its old length");
+    expect(s_audio_push_calls == 0u && sr_hle_test_audio_wait_total_us() == 0u,
+           "an unreserved channel hands the host nothing and never waits");
+
+    /* sceAudioOutputPanned does not block: busy while the guest sees frames queued, else it
+     * hands the buffer over and returns at once. */
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "non-blocking fixture reserves a 64-frame stereo channel");
+    s_audio_queue_result = 64;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0u; cpu.r[5] = 0x8000u; cpu.r[6] = 0x8000u; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == OUTPUT_BUSY,
+           "AudioOutputPanned refuses as busy while the previous buffer is still queued");
+    expect(s_audio_push_calls == 0u, "a busy refusal hands the host nothing");
+    s_audio_queue_result = 0;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0u; cpu.r[5] = 0x8000u; cpu.r[6] = 0x4000u; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == 64u,
+           "AudioOutputPanned returns the sample count once the channel is idle");
+    expect(s_audio_push_calls == 1u && s_audio_push_vol_l == 0x8000 && s_audio_push_vol_r == 0x4000,
+           "the non-blocking output hands its buffer over at its own volumes");
+    expect(sr_hle_test_audio_wait_total_us() == 0u, "the non-blocking output never waits");
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 3u; cpu.r[5] = 0x8000u; cpu.r[6] = 0x8000u; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == SCE_AUDIO_ERROR_NOT_INITIALIZED,
+           "AudioOutputPanned refuses an unreserved channel with NOT_INITIALIZED");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
+           "non-blocking fixture releases its channel");
+
+    /* sceAudioOutput2OutputBlocking passes audio_output's span refusal to the guest. */
+    audio_fixture_reset();
+    sr_hle_test_audio_wait_reset();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, 64u, 0u, 0u) == 0u,
+           "Output2 reserves a 64-sample channel");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0x8000u,
+                          STEREO_BUF + 0x08000000u, 0u) == SCE_KERNEL_ERROR_ILLEGAL_ADDR,
+           "Output2 output with an unreadable buffer returns ILLEGAL_ADDR, not success");
+    expect(s_audio_push_calls == 0u && sr_hle_test_audio_wait_total_us() == 0u,
+           "the refused Output2 output hands the host nothing and never waits");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_OUTPUT_BLOCKING, 0x8000u, STEREO_BUF, 0u) == 0u &&
+               s_audio_push_calls == 1u,
+           "Output2 output with a readable buffer still returns 0 and plays");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RELEASE, 0u, 0u, 0u) == 0u,
+           "Output2 releases");
+
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
+}
+
+/* Regular output volumes above 0xFFFF are refused with INVALID_VOL before the channel check and
+ * nothing is played (audit 2026-11-17). PPSSPP-derived, not PSP-measured (hrydgard/ppsspp
+ * caa91b54b53585811b0fd84405ea04aec72a952b, Core/HLE/sceAudio.cpp); PSPAutotests
+ * tests/audio/sceaudio/output.expected at ea71108f00933712c4662276261b39cd42249b1e agrees, a
+ * negative volume refused by PannedBlocking alone. HOST_TESTED through the production NIDs.
+ *
+ * MUTANT: mask the volume to 16 bits again -- 0x18000 plays at 0x8000 and returns 64.
+ * MUTANT: compare PannedBlocking's volumes as signed -- a volume of -1 plays. */
+static void test_audio_regular_output_refuses_bad_volumes(void) {
+    enum {
+        STEREO_BUF = 0x08a00000u,
+        NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING = 0x13f592bcu,
+        NID_SCE_AUDIO_OUTPUT_PANNED = 0xe2d56b2du,
+    };
+    CpuState cpu;
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    sr_hle_test_audio_wait_reset();
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RESERVE, 0u, 64u, 0u) == 0u,
+           "volume fixture reserves a 64-frame stereo channel");
+    const uint32_t over[] = {0x10000u, 0x18000u, 0xfffffu, 0x7fffffffu};
+    for (size_t i = 0; i < sizeof(over) / sizeof(over[0]); i++) {
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, over[i], STEREO_BUF) ==
+                   SCE_AUDIO_ERROR_INVALID_VOL,
+               "AudioOutputBlocking refuses a volume above 0xFFFF with INVALID_VOL");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = 0u; cpu.r[5] = 0x8000u; cpu.r[6] = over[i]; cpu.r[7] = STEREO_BUF;
+        expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == SCE_AUDIO_ERROR_INVALID_VOL,
+               "AudioOutputPannedBlocking refuses a volume above 0xFFFF with INVALID_VOL");
+        memset(&cpu, 0, sizeof(cpu));
+        cpu.r[4] = 0u; cpu.r[5] = over[i]; cpu.r[6] = 0x8000u; cpu.r[7] = STEREO_BUF;
+        expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == SCE_AUDIO_ERROR_INVALID_VOL,
+               "AudioOutputPanned refuses a volume above 0xFFFF with INVALID_VOL");
+    }
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0u; cpu.r[5] = 0xffffffffu; cpu.r[6] = 0u; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED_BLOCKING) == SCE_AUDIO_ERROR_INVALID_VOL,
+           "AudioOutputPannedBlocking refuses a negative volume");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 9u, 0x10000u, STEREO_BUF) ==
+               SCE_AUDIO_ERROR_INVALID_VOL,
+           "the volume is checked before the channel");
+    expect(s_audio_push_calls == 0u && sr_hle_test_audio_wait_total_us() == 0u,
+           "a refused volume hands the host nothing and never waits");
+
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0xffffu, STEREO_BUF) == 64u &&
+               s_audio_push_calls == 1u && s_audio_push_vol_l == 0xffff,
+           "AudioOutputBlocking plays at volume 0xFFFF");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT_BLOCKING, 0u, 0x80008000u, STEREO_BUF) == 64u &&
+               s_audio_push_calls == 2u,
+           "AudioOutputBlocking takes a negative volume, as the reference does");
+    s_audio_queue_result = 0;
+    memset(&cpu, 0, sizeof(cpu));
+    cpu.r[4] = 0u; cpu.r[5] = 0xffffffffu; cpu.r[6] = 0xffffu; cpu.r[7] = STEREO_BUF;
+    expect(sr_syscall(&cpu, NID_SCE_AUDIO_OUTPUT_PANNED) == 64u && s_audio_push_calls == 3u,
+           "AudioOutputPanned takes a negative volume, as the reference does");
+    expect(audio_dispatch(&cpu, NID_SCE_AUDIO_CH_RELEASE, 0u, 0u, 0u) == 0u,
+           "volume fixture releases its channel");
+    sr_hle_test_audio_reset();
+    audio_fixture_reset();
+    reset_fixture();
 }
 
 /* sceAudioOutput2Release busy rule (issue #311).
@@ -15346,7 +15538,7 @@ static void test_audio_drift_window_reports_the_pacing_value(void) {
  * guest that does nothing else, so every wait is one the blocking output asked for, against a
  * device that takes `pull` frames at a time. The regular, Output2 and 44.1 kHz SRC calls all end in
  * the same output; each is driven through its own NIDs. */
-typedef enum { AUDIO_SIM_REGULAR, AUDIO_SIM_OUTPUT2, AUDIO_SIM_SRC } AudioSimApi;
+typedef enum { AUDIO_SIM_REGULAR, AUDIO_SIM_OUTPUT2, AUDIO_SIM_SRC, AUDIO_SIM_SRC48 } AudioSimApi;
 
 typedef struct {
     unsigned long pulls, short_pulls;
@@ -15397,9 +15589,12 @@ static void audio_sim_begin(AudioSimApi api, uint32_t frames, int pull, int repo
     else if (api == AUDIO_SIM_OUTPUT2)
         expect(audio_dispatch(&cpu, NID_SCE_AUDIO_OUTPUT2_RESERVE, frames, 0u, 0u) == 0u,
                "the device fixture reserves Output2");
-    else
+    else if (api == AUDIO_SIM_SRC)
         expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, frames, 44100u, 2u) == 0u,
                "the device fixture reserves the SRC channel at 44100 Hz");
+    else
+        expect(audio_dispatch(&cpu, NID_SCE_AUDIO_SRC_CH_RESERVE, frames, 48000u, 2u) == 0u,
+               "the device fixture reserves the SRC channel at 48000 Hz");
     s_audio_sim_pull = pull;
     s_audio_sim_reported_pull = reported_pull;
     s_audio_sim_next_pull_us = (uint64_t)pull * 1000000u / 44100u;
@@ -15497,6 +15692,28 @@ static void test_audio_host_hold_covers_a_late_wake(void) {
         expect(r.short_pulls == 0u, "a wake one display period late does not run the channel dry");
         expect(r.max_rest <= 2u * cases[i].frames, "the guest is still shown at most its two periods");
     }
+}
+
+/* A 48000 Hz SRC channel (audit 2026-11-17) converts each block to the 44100 Hz mixer and is
+ * paced like every other blocking output: the hold is queued once as silence ahead of its first
+ * push, and each output waits, through audio_wait, until the queue the guest sees is back down to
+ * two periods counted in mixer frames (256 samples at 48000 Hz are 236 mixer frames, rounded up).
+ * With every wait one display period late, the device still never finds the channel short.
+ *
+ * MUTANT: audio_src_output sleeps n * 1e6 / 48000 through sched_delay_current again -- no wait
+ *   reaches audio_wait, the device never pulls, and no hold is queued.
+ * MUTANT: audio_mixer_period returns the 48000 Hz sample count -- the guest is shown 512 frames,
+ *   more than its two mixer periods. */
+static void test_audio_src_48k_paces_against_the_host_queue(void) {
+    AudioSimRun r;
+    audio_sim_run(AUDIO_SIM_SRC48, 256u, 1024, sr_hle_test_audio_late_wake_us(), 2000u, &r);
+    expect(r.wait_us > 0u, "the 48000 Hz SRC output waits through audio_wait");
+    expect(r.pulls >= 400u, "the device pulled throughout the 48000 Hz run");
+    expect(r.short_pulls == 0u, "a 48000 Hz SRC channel paced against the host queue never runs dry");
+    expect(r.silence_calls == 1u && r.silence_frames == 1024u + 736u - 2u * 236u,
+           "the hold is queued once, as silence ahead of the first push");
+    expect(r.max_rest <= 2u * 236u, "the guest is shown at most its two periods in mixer frames");
+    expect(r.at_once == 2u, "two outputs return at once at the channel's start, and the third waits");
 }
 
 /* A channel whose two periods already cover a pull and a display period is paced exactly as
@@ -37719,6 +37936,9 @@ static void test_td24c_atrac_info_batch(void) {
     expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CHANNEL, 0x7fu, 0u, 0u, 0u) ==
                ATRAC_ERROR_BAD_ATRACID,
            "sceAtracGetChannel validates the id before the out-pointer");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_OUTPUT_CHANNEL, 0x7fu, TD24C_OUT, 0u, 0u) ==
+               ATRAC_ERROR_BAD_ATRACID && MEM_R32(TD24C_OUT) == TD24C_SENTINEL,
+           "sceAtracGetOutputChannel reports the bad-id error without writing");
 
     /* ---- 1. fully fed track: all-data mode ---- */
     {
@@ -37728,6 +37948,9 @@ static void test_td24c_atrac_info_batch(void) {
         expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CHANNEL, id, 0u, 0u, 0u) ==
                    SCE_KERNEL_ERROR_ILLEGAL_ADDR,
                "sceAtracGetChannel rejects a null out-pointer");
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_OUTPUT_CHANNEL, id, 0u, 0u, 0u) ==
+                   SCE_KERNEL_ERROR_ILLEGAL_ADDR,
+               "sceAtracGetOutputChannel rejects a null out-pointer");
         expect(td24b_dispatch4(NID_SCE_ATRAC_GET_BITRATE, id, 0u, 0u, 0u) ==
                    SCE_KERNEL_ERROR_ILLEGAL_ADDR,
                "sceAtracGetBitrate rejects a null out-pointer");
@@ -37745,6 +37968,10 @@ static void test_td24c_atrac_info_batch(void) {
         expect(td24b_dispatch4(NID_SCE_ATRAC_GET_CHANNEL, id, TD24C_OUT, 0u, 0u) == 0u &&
                    MEM_R32(TD24C_OUT) == 2u,
                "sceAtracGetChannel reports the parsed fmt channel count");
+        MEM_W32(TD24C_OUT, TD24C_SENTINEL);
+        expect(td24b_dispatch4(NID_SCE_ATRAC_GET_OUTPUT_CHANNEL, id, TD24C_OUT, 0u, 0u) == 0u &&
+                   MEM_R32(TD24C_OUT) == 2u,
+               "sceAtracGetOutputChannel writes the channel count DecodeData interleaves");
         MEM_W32(TD24C_OUT, TD24C_SENTINEL);
         expect(td24b_dispatch4(NID_SCE_ATRAC_GET_BITRATE, id, TD24C_OUT, 0u, 0u) == 0u &&
                    MEM_R32(TD24C_OUT) == 128u,
@@ -38032,6 +38259,10 @@ static void test_atrac_set_entry_points_1379(void) {
     expect(td24b_dispatch4(NID_SCE_ATRAC_SET_MOUT_DATA, got, AT_RINGBASE, AT_BUFSIZE, 0u) == 0u &&
                at1379_channels(got) == 1u,
            "#1379: sceAtracSetMOutData configures the given ID with a mono track");
+    MEM_W32(AT1379_OUT, 0xdeadbeefu);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_OUTPUT_CHANNEL, got, AT1379_OUT, 0u, 0u) == 0u &&
+               MEM_R32(AT1379_OUT) == 1u,
+           "#1379: sceAtracGetOutputChannel reports the MOut track's mono output");
     expect(td24b_dispatch4(NID_SCE_ATRAC_SET_MOUT_HALFWAY_BUFFER, got, AT_RINGBASE, READ, BUF) == 0u &&
                at1379_halfway_info(got, READ),
            "#1379: sceAtracSetMOutHalfwayBuffer configures the given ID as a halfway buffer");
@@ -38777,18 +39008,20 @@ static void test_td24d_hle_batch(void) {
                MEM_R32(TD24D_RB_ADDR + 12u) == 0u,
            "sceMpegRingbufferDestruct clears packet counters");
 
-    /* FlushAllStream clears packet counters via mpeg struct */
+    /* FlushAllStream's ring reset belongs to mpeg.c, which this harness does not link: here the
+     * handler only checks the descriptor, and never reaches a ring through a layout of its own
+     * (the psmf-media-selftest checks the reset and the refusal of a handle no context has). */
     MEM_W32(TD24D_MPEG_DESC, TD24D_MPEG_H);
     MEM_W32(TD24D_MPEG_H + 16u, TD24D_RB_ADDR);
     MEM_W32(TD24D_RB_ADDR + 4u, 11u);
     MEM_W32(TD24D_RB_ADDR + 8u, 21u);
     MEM_W32(TD24D_RB_ADDR + 12u, 31u);
     expect(td24b_dispatch4(NID_SCE_MPEG_FLUSH_ALL_STREAM, TD24D_MPEG_DESC, 0u, 0u, 0u) == 0u,
-           "sceMpegFlushAllStream succeeds on valid MPEG descriptor");
-    expect(MEM_R32(TD24D_RB_ADDR + 4u) == 0u &&
-               MEM_R32(TD24D_RB_ADDR + 8u) == 0u &&
-               MEM_R32(TD24D_RB_ADDR + 12u) == 0u,
-           "sceMpegFlushAllStream flushes ring packet counters");
+           "sceMpegFlushAllStream accepts a readable MPEG descriptor");
+    expect(MEM_R32(TD24D_RB_ADDR + 4u) == 11u &&
+               MEM_R32(TD24D_RB_ADDR + 8u) == 21u &&
+               MEM_R32(TD24D_RB_ADDR + 12u) == 31u,
+           "sceMpegFlushAllStream writes no ring through a guessed descriptor layout");
 
     /* AvcDecodeFlush flushes the video decoder and leaves the ring alone (#286): a guest PSMF
      * player fills the ring, calls it, and expects the packets to still be there. Only
@@ -40196,6 +40429,44 @@ static void test_sas_voice_volume_defaults(void) {
     cpu.r[4] = core;
     expect(!any && (sr_syscall(&cpu, NID_SAS_GET_END) & (1u << 3)) == 0,
            "a voice keyed on after an explicit __sceSasSetVolume(0, 0, 0, 0) plays silently (#2135)");
+}
+
+/* A guest reset (LoadExec, hle_sas_guest_reset) starts the noise generator again (audit
+ * 2026-11-17): the same program mixes the same noise whatever the program before it mixed.
+ * HOST_TESTED; the generator itself is this model's, not PSP-measured.
+ *
+ * MUTANT: keep the seed out of hle_sas_guest_reset -- the second run continues the first run's
+ *   sequence and its grain differs. */
+static void sas_noise_grain(CpuState *cpu, uint32_t core, uint32_t out, int16_t *grain) {
+    extern void hle_sas_guest_reset(void);
+    hle_sas_guest_reset();
+    memset(cpu, 0, sizeof(*cpu));
+    cpu->r[29] = 0x09012000u;
+    cpu->r[4] = core; cpu->r[5] = SAS_TEST_GRAIN; cpu->r[6] = 32; cpu->r[7] = 0; cpu->r[8] = 44100;
+    expect(sr_syscall(cpu, NID_SAS_INIT) == 0, "noise-seed fixture initialises the core");
+    cpu->r[4] = core; cpu->r[5] = 2; cpu->r[6] = 17;
+    expect(sr_syscall(cpu, NID_SAS_SET_NOISE) == 0, "noise-seed fixture sets a noise voice");
+    cpu->r[4] = core; cpu->r[5] = 2;
+    expect(sr_syscall(cpu, NID_SAS_SET_KEY_ON) == 0, "noise-seed fixture keys the noise voice on");
+    memset(g_mem + (out - 0x08000000u), 0, SAS_TEST_GRAIN * 4u);
+    cpu->r[4] = core; cpu->r[5] = out;
+    expect(sr_syscall(cpu, NID_SAS_CORE) == 0, "noise-seed fixture mixes one grain");
+    sas_read_pcm(out, grain, SAS_TEST_GRAIN);
+}
+
+static void test_sas_noise_restarts_on_guest_reset(void) {
+    CpuState cpu;
+    const uint32_t core = 0x08030000u, out = 0x08010000u;
+    int16_t first[SAS_TEST_GRAIN * 2], second[SAS_TEST_GRAIN * 2];
+    reset_fixture(); sr_hle_init();
+    sas_noise_grain(&cpu, core, out, first);
+    sas_noise_grain(&cpu, core, out, second);
+    int audible = 0;
+    for (uint32_t i = 0; i < SAS_TEST_GRAIN * 2u; i++) if (first[i]) { audible = 1; break; }
+    expect(audible, "the noise voice is audible in the first run");
+    expect(memcmp(first, second, sizeof(first)) == 0,
+           "after a guest reset the same program mixes the same noise grain");
+    sr_hle_test_sas_reset();
 }
 
 /* #2135: __sceSasCoreWithMix's two volumes scale the caller's PCM already in the buffer, not the
@@ -62328,6 +62599,238 @@ int main(int argc, char **argv) {
     return rc;
 }
 
+/* ---- ATRAC and sceMp3 state, audit 2026-11-17 -----------------------------------------------
+ * Production-dispatch regressions. The ATRAC3+ tracks are synthetic (terminator units, as in the
+ * ring-wrap fixture), with an optional smpl loop chunk. HOST_TESTED, not PSP_HARDWARE evidence;
+ * the ATRAC3+ end and loop rules are PPSSPP-derived, not PSP-measured. */
+enum { AU03_ALIGN = 24u, AU03_TRACK = 0x08020000u, AU03_PCM = 0x08030000u,
+       AU03_OUT_N = 0x08004100u, AU03_OUT_END = 0x08004104u, AU03_OUT_REMAIN = 0x08004108u,
+       AU03_LOOP_OUT = 0x08004110u, AU03_LOOP_FLAG = 0x08004114u };
+#define NID_SCE_ATRAC_SET_LOOP_NUM_AU03    0x868120b5u
+#define NID_SCE_ATRAC_GET_LOOP_STATUS_AU03 0xfaa4f89bu
+/* RIFF/WAVE ATRAC3+ track of `frames` frames at AU03_TRACK; `loop_end` > 0 adds a smpl loop from
+ * sample 0 to it. Returns the file size. */
+static uint32_t au03_build_at3p(uint32_t frames, uint32_t fact_samples, uint32_t loop_end) {
+    uint8_t *h = &g_mem[AU03_TRACK - 0x08000000u];
+    const uint32_t data_off = 56u + (loop_end ? 68u : 0u);
+    const uint32_t file_size = data_off + frames * AU03_ALIGN;
+    memset(h, 0, file_size);
+    memcpy(h + 0, "RIFF", 4);
+    fixture_wr32(h + 4, file_size - 8u);
+    memcpy(h + 8, "WAVE", 4);
+    memcpy(h + 12, "fmt ", 4);
+    fixture_wr32(h + 16, 16u);
+    fixture_wr16(h + 20, 0xFFFEu);
+    fixture_wr16(h + 22, 2u);
+    fixture_wr32(h + 24, 44100u);
+    fixture_wr32(h + 28, 44100u * 4u);
+    fixture_wr16(h + 32, (uint16_t)AU03_ALIGN);
+    fixture_wr16(h + 34, 16u);
+    memcpy(h + 36, "fact", 4);
+    fixture_wr32(h + 40, 4u);
+    fixture_wr32(h + 44, fact_samples);
+    uint32_t off = 48u;
+    if (loop_end) {
+        memcpy(h + off, "smpl", 4);
+        fixture_wr32(h + off + 4u, 60u);
+        fixture_wr32(h + off + 8u + 28u, 1u);           /* one loop */
+        fixture_wr32(h + off + 8u + 44u, 0u);           /* loop start */
+        fixture_wr32(h + off + 8u + 48u, loop_end);     /* loop end */
+        off += 68u;
+    }
+    memcpy(h + off, "data", 4);
+    fixture_wr32(h + off + 4u, frames * AU03_ALIGN);
+    for (uint32_t f = 0; f < frames; f++) h[data_off + f * AU03_ALIGN] = 0x60u;
+    return file_size;
+}
+
+/* A prefix with no frame grid cannot be decoded: no frame size (a fact-only ATRAC3+ prefix), or a
+ * frame size but no 'data' chunk header yet. Each DecodeData stops the run by name instead of
+ * reporting 0 samples as success or decoding the RIFF header as frame 0. */
+static void test_atrac_decode_without_frame_grid(void) {
+    reset_fixture();
+    sr_hle_init();
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_GET_ID, 0x1000u, 0u, 0u, 0u);
+    expect(id < 8u, "no frame grid: an ATRAC3+ ID");
+    if (id >= 8u) return;
+    for (uint32_t b = 0; b < 0x40u; b++) MEM_W8(AU03_TRACK + b, 0u);
+    MEM_W32(AU03_TRACK + 0x00u, 0x46464952u);
+    MEM_W32(AU03_TRACK + 0x04u, 0x1000u);
+    MEM_W32(AU03_TRACK + 0x08u, 0x45564157u);
+    MEM_W32(AU03_TRACK + 0x0cu, 0x74636166u);
+    MEM_W32(AU03_TRACK + 0x10u, 8u);
+    MEM_W32(AU03_TRACK + 0x14u, 2048u);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, AU03_TRACK, 0x40u, 0u) == 0u,
+           "no frame grid: SetData takes a fact-only ATRAC3+ prefix");
+    uint32_t stops = sr_hle_test_unmodelled_stops();
+    uint32_t ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret != 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "DecodeData on a track with no frame size stops by name, not a 0-sample success");
+
+    /* fmt and fact, then the prefix ends before the 'data' chunk header. */
+    (void)au03_build_at3p(4u, 4096u, 0u);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_DATA, id, AU03_TRACK, 48u, 0u) == 0u,
+           "no frame grid: SetData takes a prefix that ends before the data chunk");
+    stops = sr_hle_test_unmodelled_stops();
+    ret = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(ret != 0u && sr_hle_test_unmodelled_stops() == stops + 1u,
+           "DecodeData on a track with no data offset stops by name, not a decode of the header");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+/* Past the end of an ATRAC3+ track that does not loop, DecodeData is refused with 0x80630024 and
+ * decodes nothing, as plain AT3 is (frames stored after the fact sample count stay undecoded). */
+static void test_atrac3plus_decode_after_end(void) {
+    reset_fixture();
+    sr_hle_init();
+    const uint32_t size = au03_build_at3p(4u, 2u * 2048u, 0u);
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, size, 0u, 0u);
+    expect(id < 8u, "after end: the ATRAC3+ track is accepted");
+    if (id >= 8u) return;
+    uint32_t r1 = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    uint32_t n1 = MEM_R32(AU03_OUT_N), e1 = MEM_R32(AU03_OUT_END);
+    uint32_t r2 = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    uint32_t n2 = MEM_R32(AU03_OUT_N), e2 = MEM_R32(AU03_OUT_END);
+    expect(r1 == 0u && n1 == 2048u && e1 == 0u && r2 == 0u && n2 == 2048u && e2 == 1u,
+           "after end: two frames decode and the second sets the end flag");
+    uint32_t r3 = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    expect(r3 == ATRAC_ERROR_DECODE_DATA_AFTER_END && MEM_R32(AU03_OUT_N) == 0u,
+           "ATRAC3+ DecodeData after the final frame returns 0x80630024 with 0 samples "
+           "(PPSSPP-derived, not PSP-measured)");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+/* The loop end rewinds only while loops remain, in every buffer state: a streamed play-once
+ * track with a loop chunk finishes, and an all-data track with a trailer rewinds at its loop end
+ * rather than at the end of the file. PPSSPP-derived, not PSP-measured. */
+static void test_atrac_loop_end_follows_loop_num(void) {
+    enum { FRAMES = 6u, END = 3u * 2048u, LOOP_END = 2u * 2048u - 1u };
+    reset_fixture();
+    sr_hle_init();
+
+    /* Streamed: the buffer holds four of the six frames; loopNum stays 0 (play once). */
+    uint32_t size = au03_build_at3p(FRAMES, END, LOOP_END);
+    const uint32_t ring = size - 2u * AU03_ALIGN;
+    uint32_t id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, ring, 0u, 0u);
+    expect(id < 8u, "loop rule: the streamed looped ATRAC3+ track is accepted");
+    if (id >= 8u) return;
+    uint32_t finished_on = 0u;
+    for (uint32_t call = 1u; call <= 3u && !finished_on; call++) {
+        uint32_t r = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        if (r != 0u) break;
+        if (MEM_R32(AU03_OUT_END) == 1u) finished_on = call;
+    }
+    expect(finished_on == 3u,
+           "a streamed track with a loop chunk and loopNum 0 plays through its loop end and "
+           "finishes on its last frame");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+
+    /* All data loaded, one loop: the rewind comes at the loop end, before the trailer. */
+    size = au03_build_at3p(FRAMES, END, LOOP_END);
+    id = td24b_dispatch4(NID_SCE_ATRAC_SET_DATA_AND_GET_ID, AU03_TRACK, size, 0u, 0u);
+    expect(id < 8u, "loop rule: the all-data looped ATRAC3+ track is accepted");
+    if (id >= 8u) return;
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, id, 1u, 0u, 0u) == 0u,
+           "loop rule: sceAtracSetLoopNum(1)");
+    (void)td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    (void)td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+    MEM_W32(AU03_LOOP_OUT, 0xdeadbeefu);
+    expect(td24b_dispatch4(NID_SCE_ATRAC_GET_LOOP_STATUS_AU03, id, AU03_LOOP_OUT, AU03_LOOP_FLAG,
+                           0u) == 0u && MEM_R32(AU03_LOOP_OUT) == 0u,
+           "an all-data track rewinds at its loop end (sample 4095), using its one loop");
+    finished_on = 0u;
+    for (uint32_t call = 3u; call <= 8u && !finished_on; call++) {
+        uint32_t r = td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN);
+        if (r != 0u) break;
+        if (MEM_R32(AU03_OUT_END) == 1u) finished_on = call;
+    }
+    expect(finished_on == 5u,
+           "after the rewind the track plays through its trailer once and finishes on call 5");
+    expect(td1096_decode(id, AU03_PCM, AU03_OUT_N, AU03_OUT_END, AU03_OUT_REMAIN) ==
+               ATRAC_ERROR_DECODE_DATA_AFTER_END,
+           "the call after the finished one is refused with 0x80630024");
+    (void)td24b_dispatch4(NID_SCE_ATRAC_RELEASE_ID, id, 0u, 0u, 0u);
+}
+
+/* sceAtracSetLoopNum refuses an ID that is out of range or not in use, like its siblings. */
+static void test_atrac_set_loop_num_bad_id(void) {
+    reset_fixture();
+    sr_hle_init();
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, 7u, 1u, 0u, 0u) == ATRAC_ERROR_BAD_ATRACID,
+           "sceAtracSetLoopNum on an unused ID is refused (BAD_ATRACID)");
+    expect(td24b_dispatch4(NID_SCE_ATRAC_SET_LOOP_NUM_AU03, 9u, 1u, 0u, 0u) == ATRAC_ERROR_BAD_ATRACID,
+           "sceAtracSetLoopNum on an out-of-range ID is refused (BAD_ATRACID)");
+}
+
+/* sceKernelLoadExec ends the sceMp3 library's state: the next program finds it uninitialized
+ * with both handles free, as a program that never used it would. */
+static void test_mp3_loadexec_reset(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_mp3_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);
+    uint32_t len = mp3t_build_file(0, 0, 40u);
+    expect(mp3t_call(NID_MP3_INIT_RESOURCE, 0, 0, 0, 0) == 0u, "loadexec: sceMp3InitResource");
+    expect(mp3t_reserve(len) == 0u && mp3t_reserve(len) == 1u,
+           "loadexec: the first program reserves both handles");
+    sr_hle_loadexec_reset_guest_state();
+    expect(mp3t_call(NID_MP3_CHECK_NEEDED, 0u, 0, 0, 0) == MP3_ERR_UNRESERVED &&
+               mp3t_call(NID_MP3_CHECK_NEEDED, 1u, 0, 0, 0) == MP3_ERR_UNRESERVED,
+           "after sceKernelLoadExec neither of the old program's handles is reserved");
+    expect(mp3t_reserve(len) == MP3_ERR_NO_RESOURCE,
+           "after sceKernelLoadExec the library needs sceMp3InitResource again");
+    expect(mp3t_call(NID_MP3_INIT_RESOURCE, 0, 0, 0, 0) == 0u && mp3t_reserve(len) == 0u,
+           "the next program's sceMp3InitResource and sceMp3ReserveMp3Handle get handle 0");
+    sr_hle_test_mp3_reset();
+}
+
+/* A notify whose span runs past the stream area's end is not taken, and that is reported by
+ * name. The game writes less than asked once (a short read), so the write offset sits mid-half
+ * when the next half opens and the asked size runs past the area's end. */
+extern uint32_t sr_hle_test_mp3_notify_dropped(void);
+static void test_mp3_notify_past_area_end_reported(void) {
+    reset_fixture();
+    sr_hle_init();
+    sr_hle_test_mp3_reset();
+    sr_hle_test_set_compiled_sdk_version(0u);
+    uint32_t len = mp3t_build_file(0, 0, MP3T_FRAMES);
+    expect(mp3t_call(NID_MP3_INIT_RESOURCE, 0, 0, 0, 0) == 0u, "notify span: sceMp3InitResource");
+    uint32_t h = mp3t_reserve(len);
+    expect(h == 0u, "notify span: a handle");
+    if (h != 0u) { sr_hle_test_mp3_reset(); return; }
+    /* A short first refill: three quarters of the asked two halves. */
+    const uint32_t short_add = 3u * MP3T_STREAM_HALF / 2u;
+    expect(mp3t_call(NID_MP3_GET_INFO_TO_ADD, h, MP3T_OUT_DST, MP3T_OUT_SIZE, MP3T_OUT_POS) == 0u &&
+               MEM_R32(MP3T_OUT_SIZE) == 2u * MP3T_STREAM_HALF,
+           "notify span: the first refill asks for both halves");
+    uint32_t dst = MEM_R32(MP3T_OUT_DST);
+    for (uint32_t i = 0; i < short_add; i++) MEM_W8(dst + i, s_mp3t_file[i]);
+    expect(mp3t_call(NID_MP3_NOTIFY_ADD, h, short_add, 0, 0) == 0u &&
+               sr_hle_test_mp3_notify_dropped() == 0u,
+           "notify span: a span inside the stream area is taken");
+    expect(mp3t_call(NID_MP3_INIT, h, 0, 0, 0) == 0u, "notify span: sceMp3Init");
+    uint32_t want = 0u, off = 0u;
+    for (uint32_t call = 0; call < 80u; call++) {
+        if (mp3t_call(NID_MP3_DECODE, h, MP3T_OUT_PCM, 0, 0) & 0x80000000u) break;
+        (void)mp3t_call(NID_MP3_GET_INFO_TO_ADD, h, MP3T_OUT_DST, MP3T_OUT_SIZE, MP3T_OUT_POS);
+        want = MEM_R32(MP3T_OUT_SIZE);
+        off = MEM_R32(MP3T_OUT_DST) - MP3T_STREAM_AREA;
+        if (want && off + want > 2u * MP3T_STREAM_HALF) break;
+    }
+    expect(want != 0u && off + want > 2u * MP3T_STREAM_HALF,
+           "notify span: the next refill runs past the stream area's end");
+    if (want && off + want > 2u * MP3T_STREAM_HALF) {
+        uint32_t pos = MEM_R32(MP3T_OUT_POS);
+        dst = MEM_R32(MP3T_OUT_DST);
+        for (uint32_t i = 0; i < want && pos + i < len; i++) MEM_W8(dst + i, s_mp3t_file[pos + i]);
+        expect(mp3t_call(NID_MP3_NOTIFY_ADD, h, want, 0, 0) == 0u &&
+                   sr_hle_test_mp3_notify_dropped() == 1u,
+               "a notified span past the stream area's end is reported by name, not dropped "
+               "silently");
+    }
+    sr_hle_test_mp3_reset();
+}
+
 /* #322: no ATRAC call divides by a frame size of 0. Each route runs in a child process, so a
  * build that still divides fails its check with the child's crash status (0xC0000094 on Windows,
  * SIGFPE on POSIX) instead of ending this binary. */
@@ -62832,6 +63335,8 @@ static int hle_selftest_main(int argc, char **argv) {
     test_wait_thread_end_blocking_and_resume();
     test_wait_thread_end_cb_execution();
     test_audio_regular_contract_safety();
+    test_audio_regular_output_refuses_bad_channels();
+    test_audio_regular_output_refuses_bad_volumes();
     test_audio_output2_release_refuses_while_queued();
     test_audio_resampler_quality_and_streaming();
     test_audio_src_matches_the_measured_contract();
@@ -62840,6 +63345,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_audio_drift_window_reports_the_pacing_value();
     test_audio_host_hold_covers_a_device_pull();
     test_audio_host_hold_covers_a_late_wake();
+    test_audio_src_48k_paces_against_the_host_queue();
     test_audio_host_hold_leaves_long_periods_alone();
     test_audio_host_hold_starts_as_the_psp_does();
     test_audio_host_hold_restarts_as_the_psp_does();
@@ -63053,6 +63559,12 @@ static int hle_selftest_main(int argc, char **argv) {
     test_atrac_context_state_write_322();
     test_atrac_context_zero_frame_322();
     test_atrac_zero_frame_routes_322(argc > 0 ? argv[0] : NULL);
+    test_atrac_decode_without_frame_grid();
+    test_atrac3plus_decode_after_end();
+    test_atrac_loop_end_follows_loop_num();
+    test_atrac_set_loop_num_bad_id();
+    test_mp3_loadexec_reset();
+    test_mp3_notify_past_area_end_reported();
     test_texdump_finished_by_run_stops(argc > 0 ? argv[0] : NULL);
     test_td24d_hle_batch();
     test_impose_language_mode_pair();
@@ -63062,6 +63574,7 @@ static int hle_selftest_main(int argc, char **argv) {
     test_sas_state_contracts();
     test_sas_set_volume_accepts_negative();
     test_sas_voice_volume_defaults();
+    test_sas_noise_restarts_on_guest_reset();
     test_sas_core_with_mix_scales_caller_pcm();
     test_sas_band_limited_resampling();
     test_sas_end_flags_refresh_per_cycle();

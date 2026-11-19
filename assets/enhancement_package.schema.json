@@ -751,7 +751,7 @@
         "type": "string",
         "pattern": "^0x[0-9a-f]{8}$"
       },
-      "description": "Published package only: each symbolic name the package uses and its 4-byte-aligned address in the executable, as codegen loads it. It names every used symbol and no other."
+      "description": "Published package only: each symbolic name the package uses and its address in the executable, as codegen loads it. It names every used symbol and no other. A name a code site, alternate, ace part site, update boundary or hook uses is 4-byte aligned; a name only data sites use is aligned to the largest element type among them."
     }
   },
   "dependentRequired": {

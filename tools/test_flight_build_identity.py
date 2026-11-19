@@ -8,8 +8,8 @@
 runtime binary, which made two builds of identical inputs differ in the compile
 clock.  This module pins the replacement contract:
 
-* two compilations of ``src/rt/flight_recorder.c`` with identical inputs,
-  separated by at least one wall-clock second, produce byte-identical objects,
+* two compilations of ``src/rt/flight_recorder.c`` with identical inputs and
+  different explicit ``SOURCE_DATE_EPOCH`` values produce byte-identical objects,
   so the compile clock cannot hide in the object;
 * the written bundle records the reproducible identity the *build* forwarded --
   ``SOURCE_DATE_EPOCH`` as ``build.source_date_epoch`` (the
@@ -34,7 +34,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -111,7 +110,9 @@ requires_compiler = unittest.skipUnless(COMPILER, "no C compiler on PATH")
 class RecorderObjectTests(unittest.TestCase):
     """Two compiles of identical inputs must produce identical objects."""
 
-    def _compile(self, output: Path) -> None:
+    def _compile(self, output: Path, *, source_date_epoch: int) -> None:
+        env = os.environ.copy()
+        env["SOURCE_DATE_EPOCH"] = str(source_date_epoch)
         result = subprocess.run(
             [
                 COMPILER,
@@ -126,6 +127,7 @@ class RecorderObjectTests(unittest.TestCase):
                 str(output),
             ],
             cwd=ROOT,
+            env=env,
             capture_output=True,
             text=True,
             timeout=COMPILE_TIMEOUT_S,
@@ -139,11 +141,10 @@ class RecorderObjectTests(unittest.TestCase):
             tmp_path = Path(tmp)
             first = tmp_path / "first.o"
             second = tmp_path / "second.o"
-            self._compile(first)
-            # Cross at least one wall-clock second so a __TIME__ stamp (or any
-            # other clock stamp) would change the second object.
-            time.sleep(1.1)
-            self._compile(second)
+            # Give the compiler two explicit, different timestamps. This exercises
+            # __DATE__/__TIME__ without depending on a wall-clock delay or tick.
+            self._compile(first, source_date_epoch=1_700_000_000)
+            self._compile(second, source_date_epoch=1_700_000_001)
             left = first.read_bytes()
             right = second.read_bytes()
             self.assertEqual(

@@ -287,7 +287,9 @@ nk-ui-overlay-screens-capture:
 		$(NK_UI_OVERLAY_C9C_SRCS) $(NK_UI_OVERLAY_CORE_SRCS) \
 		tests/native/test_overlay_screens.c $(SDL3_TTF_LIBS) $(PLAYER_PLATFORM_LIBS) -lm \
 		-o $(BUILD_ROOT)/test_overlay_screens_capture$(EXE_EXT)
-	$(BUILD_ROOT_RUN)/test_overlay_screens_capture$(EXE_EXT) --capture-dir="$(NK_UI_CAPTURE_DIR)"
+	rc=0; $(BUILD_ROOT_RUN)/test_overlay_screens_capture$(EXE_EXT) --capture-dir="$(NK_UI_CAPTURE_DIR)" || rc=$$?; \
+	if [ $$rc -eq 77 ]; then echo "SKIP nk-ui-overlay-screens-capture (exit 77: no captures made; the reason is printed above)"; \
+	elif [ $$rc -ne 0 ]; then echo "FAIL nk-ui-overlay-screens-capture (exit $$rc)"; exit $$rc; fi
 endif
 else
 nk-ui-overlay-screens-capture:

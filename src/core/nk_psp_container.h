@@ -55,11 +55,15 @@ int nk_container_probe(NkPspCtx *ctx, const uint8_t *data, size_t size,
                        NkContainerInfo *out);
 
 /*
- * Append the canonical key-entry names this container will need into
- * entries (one NUL-terminated name per slot, at most max_entries).
- * Always names the ~PSP tag entry and "kirk.cmd1.key"; when the KeyStore
- * already holds the tag recipe the "code" also resolves the matching
- * "kirk.keyvault.<code>" entry.  Returns the number of names written.
+ * Append the canonical key-entry names every ~PSP container needs into
+ * entries (one NUL-terminated name per slot, at most max_entries).  The
+ * list is the minimum, not complete: it always names the ~PSP tag entry
+ * and "kirk.cmd1.key", and when the KeyStore already holds the tag recipe
+ * the "code" also resolves the matching "kirk.keyvault.<code>" entry.  A
+ * container whose header only decryption reveals to be ECDSA-signed
+ * (type 6) also needs the curve-1 "kirk.ecdsa.*" entries, which are not
+ * listed; a missing one is named by decrypt (ctx->missing_entry).
+ * Returns the number of names written.
  */
 int nk_container_key_entries(const NkContainerInfo *info,
                              const NkKeystore *ks,
