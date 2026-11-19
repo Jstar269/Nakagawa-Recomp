@@ -466,7 +466,9 @@ manifest in memory first and writes only after every stage succeeds.
     telephone sign) wider than the em: U+3392 came out 34 px wide with a
     35.3 px advance, and the header's maximum sizes and maximum glyph width
     with it. LocoRoco 2 lays out its button prompt from those header fields,
-    and drew it 29 px narrower than with the console's fonts. The console's
+    and drew it 85 px wide where the console's fonts give 116 (121 with the
+    fitted font; most of the rest is the maximum glyph width, 20 against the
+    console's 21). The console's
     header maxima are not a function of its glyphs (its maximum glyph width
     is 21 where no image is wider than 20), so the converter keeps deriving
     them from the glyphs (section 4) and fits the glyphs instead.

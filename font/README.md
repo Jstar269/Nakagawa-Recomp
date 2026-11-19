@@ -56,9 +56,9 @@ Each letter's image is cut to its ink, as in the PSP's fonts, with no blank colu
 converter specification). Some games place each letter one pixel after the previous letter's image rather than by
 its advance; in such a game, Hot Shots Tennis for one, a line drawn with a stand-in is as long as the letters' ink.
 Liberation Sans leaves more space beside its letters than the PSP's fonts do, so in those games its lines came out 8
-to 11 % shorter than on a PSP; that is why the regular and bold sans-serif styles are Geist. With Geist the two lines
-of Hot Shots Tennis's auto-save dialog come out one pixel longer each than with the PSP's fonts (215 and 186 pixels
-against 214 and 185). `ltn10`, Liberation Sans Italic, still draws such lines shorter.
+to 11 % shorter than on a PSP; that is why the regular and bold sans-serif styles are Geist. With Geist the first line
+of Hot Shots Tennis's auto-save dialog comes out as long as with the PSP's fonts and the second one pixel longer (214
+and 186 pixels against 214 and 185). `ltn10`, Liberation Sans Italic, still draws such lines shorter.
 
 ## Without your PSP's fonts: what changes
 
