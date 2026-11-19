@@ -945,7 +945,10 @@ static void test_hostile_iso_parser(const char *test_dir) {
     write_test_file(fpath_trunc, pad_iso, 18 * 2048);
     memset(&meta, 0, sizeof(meta));
     assert(nk_iso_inspect(fpath_trunc, &meta) == NK_ERROR_INVALID_ISO);
-    assert(strstr(meta.error_message, "Root directory extends beyond ISO file bounds") != NULL);
+    /* The refusal is the root extent's: nk_iso_inspect applies the reader's root-extent
+     * rule (nk_iso_pvd_root_extent), whose message names the bounds among its causes. */
+    assert(strstr(meta.error_message, "Root directory extent is invalid") != NULL);
+    assert(strstr(meta.error_message, "extends beyond the ISO file") != NULL);
 
     char fpath_scan[512];
     snprintf(fpath_scan, sizeof(fpath_scan), "%s%cscan_identity.iso", test_dir, nk_platform_path_separator());
