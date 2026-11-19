@@ -321,14 +321,41 @@ class TestNativePackageNoticesGate(unittest.TestCase):
 
     def test_every_dll_the_copy_route_ships_generates_a_notice(self) -> None:
         """Each DLL from the inventory's copy list gets a notice, version and text."""
+        # A copied (L)GPL DLL's written source offer needs the exact installed MSYS2 package
+        # version, so the route reads it from the toolchain's pacman database. A synthetic
+        # toolchain root holds that database, so every host runs the same check without an
+        # MSYS2 install (the license texts still resolve from the source tree).
+        records = package_notices.load_component_inventory()["native"]["dlls"]
+        msys_root = self.pkg_dir / "synthetic-msys64"  # a folder: the package scan skips it
+        toolchain_root = msys_root / "ucrt64"
+        local_db = msys_root / "var" / "lib" / "pacman" / "local"
+        versions: dict[str, str] = {}
+        for record in records.values():
+            package = record.get("pacman_package")
+            if not package or package in versions:
+                continue
+            versions[package] = f"{len(versions) + 1}.0-1"
+            entry_dir = local_db / f"mingw-w64-ucrt-x86_64-{package}-{versions[package]}"
+            entry_dir.mkdir(parents=True)
+            (entry_dir / "desc").write_text(
+                f"%NAME%\nmingw-w64-ucrt-x86_64-{package}\n\n%VERSION%\n{versions[package]}\n",
+                encoding="utf-8",
+            )
         for dll_name in sorted(package_notices.packaged_dll_names()):
             with self.subTest(dll=dll_name):
                 (self.pkg_dir / dll_name).write_bytes(b"MZ\0\0synthetic")
-                result = package_notices.generate_package_notices(self.pkg_dir, repo_root=ROOT)
+                result = package_notices.generate_package_notices(
+                    self.pkg_dir, repo_root=ROOT, toolchain_root=toolchain_root
+                )
                 entry = next(
                     c for c in result["components"] if c.get("binary", "").lower() == dll_name
                 )
                 self.assertNotIn("NOASSERTION", entry["spdx_id"])
+                if "msys2_package" in entry:
+                    self.assertEqual(
+                        entry["msys2_package_version"], versions[entry["msys2_package"]]
+                    )
+                    self.assertTrue(entry["upstream_origin"].startswith("https://"))
                 notices = self.pkg_dir / "THIRD_PARTY_NOTICES"
                 self.assertTrue((notices / entry["license_file"]).is_file())
                 for extra in entry.get("additional_license_files", []):

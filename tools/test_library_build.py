@@ -213,8 +213,10 @@ class LibraryBuildTests(unittest.TestCase):
         self.build(only=frozenset({"ok-test70011.iso"})).run()
         self.assertEqual(self.calls(), ["ok-test70011"])
         self.assertEqual(set(self.by_source(self.manifest())), {"ok-test70011.iso"})
-        # A later --only run of another disc rebuilds nothing else and drops no record.
-        result = self.build(only=frozenset({"sub/ok-test70012.iso"}), retry_failed=True).run()
+        # A later --only run of another disc rebuilds nothing else and drops no record. The
+        # name matches the folder in any case on Windows; on POSIX it keeps the folder's case.
+        named = "sub/ok-test70012.iso" if os.name == "nt" else "Sub/ok-test70012.iso"
+        result = self.build(only=frozenset({named}), retry_failed=True).run()
         self.assertEqual(self.calls(), ["ok-test70011", "ok-test70012"])
         self.assertEqual({source: record["outcome"] for source, record in self.by_source(result).items()},
                          {"ok-test70011.iso": "BUILT", "Sub/ok-test70012.iso": "BUILT"})
@@ -229,8 +231,17 @@ class LibraryBuildTests(unittest.TestCase):
         listing = self.root / "only.txt"
         windows_path = "\\".join(["Sub", "OK-Test70015.iso"])
         listing.write_text(windows_path + "\r\n\n  ok-test70016.iso  \n", encoding="utf-8")
-        self.assertEqual(library_build.read_only_list(listing),
-                         frozenset({"sub/ok-test70015.iso", "ok-test70016.iso"}))
+        # Any case matches on Windows only; POSIX keeps the case (its own test below) but
+        # still takes either slash and skips blank lines and surrounding spaces.
+        expected = {
+            "nt": frozenset({"sub/ok-test70015.iso", "ok-test70016.iso"}),
+            "posix": frozenset({"Sub/OK-Test70015.iso", "ok-test70016.iso"}),
+        }
+        for platform, keys in expected.items():
+            with self.subTest(os_name=platform):
+                with mock.patch.object(library_build.os, "name", platform):
+                    only = library_build.read_only_list(listing)
+                self.assertEqual(only, keys)
 
     def test_posix_source_keys_and_only_lists_preserve_case_distinctions(self) -> None:
         root = self.root / "case-sensitive"

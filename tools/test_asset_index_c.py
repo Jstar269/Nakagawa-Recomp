@@ -6,6 +6,7 @@
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,26 @@ ROOT = Path(__file__).resolve().parent.parent
 SELFTEST_C = ROOT / "tests" / "native" / "asset_index_selftest.c"
 CC = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
 POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
+
+
+def synthetic_sdl3_dll() -> bytes:
+    """A minimal well-formed PE32+ image with no imports, standing in for SDL3.dll.
+
+    The copy route reads every staged DLL's import table and refuses a file that is not a
+    PE image, so the stand-in carries a DOS header, the PE signature, an x86-64 COFF header
+    and a PE32+ optional header with sixteen empty data directories, then a marker.
+    """
+    optional_size = 240
+    image = bytearray(64 + 24 + optional_size)
+    image[:2] = b"MZ"
+    struct.pack_into("<I", image, 0x3C, 64)
+    image[64:68] = b"PE\0\0"
+    struct.pack_into("<H", image, 64 + 4, 0x8664)  # IMAGE_FILE_MACHINE_AMD64
+    struct.pack_into("<H", image, 64 + 20, optional_size)
+    struct.pack_into("<H", image, 64 + 22, 0x2022)  # executable, large-address-aware DLL
+    struct.pack_into("<H", image, 64 + 24, 0x20B)  # PE32+
+    struct.pack_into("<I", image, 64 + 24 + 108, 16)  # NumberOfRvaAndSizes; all zero
+    return bytes(image) + b"synthetic SDL3 runtime"
 
 CAPTION_HARNESS = r'''
 #include "recomp.h"
@@ -258,7 +279,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             msys_bin = root / "custom-ucrt64" / "bin"
             msys_bin.mkdir(parents=True)
             sdl = msys_bin / "SDL3.dll"
-            sdl.write_bytes(b"synthetic SDL3 runtime")
+            sdl.write_bytes(synthetic_sdl3_dll())
             env = os.environ.copy()
             env["MSYS_PATH"] = str(msys_bin)
             env["PATH"] = os.pathsep.join([str(root / "empty-path"), str(Path(sys.executable).parent)])
@@ -280,7 +301,7 @@ class TestProjectFontAssetCopy(unittest.TestCase):
             gcc_bin.mkdir()
             (gcc_bin / "gcc.exe").write_bytes(b"synthetic executable path marker")
             sdl = gcc_bin / "SDL3.dll"
-            sdl.write_bytes(b"synthetic SDL3 runtime")
+            sdl.write_bytes(synthetic_sdl3_dll())
             stale = root / "stale-msys" / "bin"
             stale.mkdir(parents=True)
             env = os.environ.copy()
