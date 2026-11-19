@@ -95,7 +95,8 @@ it; the phase-1 disc route then runs unchanged.
   `ccf084593f0de93154597d47a470a7b539d4ca0cfa4773fddfd91c9a9e8a026a`), "based on benhur's code, rewrite by tpu",
   Copyright (c) 2012- PPSSPP Project, GPL-2.0-or-later, kept GPL-2.0-or-later with its notice. LOCAL DELTA: C99 with
   `size_t` lengths bounded at 64 MiB; a match distance decoded in 64 bits; a match copy and a literal stop at the first
-  byte that does not fit; a literal-context shift past the byte width selects context 0.
+  byte that does not fit; a literal-context shift past the byte width selects context 0; a stored stream whose
+  declared size passes the output or its input fails instead of being truncated (2026-11-18).
 - `nk_psp_npumdimg.c/.h` from `Core/FileSystems/BlockDevices.cpp` (SHA-256
   `d29e6d39dce987f2f88183bb0fe15112b1cba4fc09507be7a822e7bb4fb01029`, `NPDRMDemoBlockDevice`) and the `table_info`
   layout in `BlockDevices.h` (SHA-256 `8253d1c6f18b17d9c6023e59067e9e5a22b997b7703b67deb401f785f4a00fe5`),
@@ -130,6 +131,52 @@ and the standards their headers cite (FIPS 197, RFC 4493, FIPS 180, RFC 1950-195
 `nk_psp_ec.c`'s `point_on_curve` refuses a coordinate that is not below the field prime (SEC 1 3.2.2.1), and in
 `nk_psp_inflate.c` a failed raw retry of a zlib-looking stream reports into no buffer, so the zlib attempt's message
 stays with the code it returns.
+
+## Cheat files (`nk_cheats.*`, issue #2639)
+
+The CWCheat reader, the load-time check and the applier. The CWCheat format has no specification; PPSSPP's
+implementation is the public reference for it, and both files are translated from it.
+
+- Upstream: PPSSPP, `https://github.com/hrydgard/ppsspp`, revision `c437463bc5cb78a0236312ad23f9c3b56fb9ae67`, GPL-2.0-or-later:
+  `Core/CwCheat.cpp` (SHA-256 `9f542a111ade55dab0fd82f2a2db0646dbb23a53ebeb23e47b52651945cb65e3`, blob
+  `0831a83f9fbabb3f900b546defe6589d7418b866`) and `Core/CwCheat.h` (SHA-256
+  `a18d57f3d9fd5f0691be8a6f543e9217e43e7d24b04dbf26b7e87bab32231415`, blob
+  `4d56915980a00590afb37e25c477949e49e680d7`). The symbols are `CheatFileParser::ParseLine` and
+  `CheatFileParser::ParseDataLine` (the `_S`, `_G`, `_C` and `_L` lines), the `CheatOp` and `CheatOperation`
+  types, `CWCheatEngine::InterpretNextCwCheat` (the fields of each code form), `CWCheatEngine::ExecuteOp` with
+  `ApplyMemoryOperator`, `TestIf` and `TestIfAddr` (what a form does), and `CWCheatEngine::GetAddress` in
+  `Core/CwCheat.h` (the `0x08800000` base and the `0x3FFFFFFF` mask).
+- Notice: neither upstream file carries a copyright or licence line of its own at that revision. The two files
+  here carry the notice PPSSPP's source files carry, `Copyright (c) 2012- PPSSPP Project.`, copied from the
+  first line of `Core/Core.cpp` at the same revision (blob `fabfe45556560ec8e0b3c2c233629d249efdbbcc`); that
+  file's notice and PPSSPP's `LICENSE.TXT` (blob `1c3210d9d1eaf47cc33a1e0c451f4704a765852d`) give the licence,
+  GPL version 2.0 or later. Both files are conveyed as GPL-3.0-or-later.
+- What follows PPSSPP and what does not. No line of PPSSPP's code was copied: the files are C99 over a host
+  interface (`NkCheatHost`) where PPSSPP is C++ over its memory map, JIT cache and controller state. A reading
+  of `nk_cheats.c` beside `Core/CwCheat.cpp` on 2026-11-16 found these parts following the upstream's
+  structure closely, and the file header names them: the operation kinds of `OpKind`, in the order of PPSSPP's
+  `CheatOp`; the operation record `CheatOp`, one per code as PPSSPP's `CheatOperation`, with a multi-write's
+  `count`, `step` and `add` fields under the same names; `check_code`, whose switch over a code's top four bits
+  and whose bit fields for each form are those of `InterpretNextCwCheat`; `run_cheat`, with one case per kind as
+  `ExecuteOp` (the multi-write loop, the copy, the pointer walk and write, the tests that skip lines);
+  `code_address` and `user_address` (`GetAddress`); and the line types and trailing-comment rule of
+  `parse_text`. This project's own, with no counterpart in PPSSPP: the text reader's code, the load-time check
+  that compiles a whole cheat to its operation list once and resolves each test's line count to the operation it
+  continues at, the refusal of a write into translated code (PPSSPP writes and invalidates its JIT cache), the
+  bound on what one frame can write, the whole-or-nothing apply with its undo journal, and every refusal by name
+  where PPSSPP picks a meaning or skips.
+- Evidence class: PPSSPP-derived, not PSP-measured (`AGENTS.md` section 7). Both files say so, and a run says
+  so once, at the first VBLANK that applies cheats (`src/rt/cheats.c`).
+
+| Path (under `src/`) | Lineage | Classification | PPSSPP pin | Local modifications | Notice lines in the file header | Commits here |
+| --- | --- | --- | --- | --- | --- | --- |
+| `core/nk_cheats.c` | PPSSPP `Core/CwCheat.cpp` (`CheatFileParser::ParseLine`, `CheatFileParser::ParseDataLine`, the `CheatOp` and `CheatOperation` types, `CWCheatEngine::InterpretNextCwCheat`, `CWCheatEngine::ExecuteOp` with `ApplyMemoryOperator`, `TestIf` and `TestIfAddr`) and `Core/CwCheat.h` (`CWCheatEngine::GetAddress`); the load-time check, the code-write refusal and the undo journal: this project | derived-translated (ledger: upstream_derived, record `nk_cheats_ppsspp_2639_20261116`); the load-time check, the code-write refusal and the whole-or-nothing apply are this project's own | `c437463bc5cb78a0236312ad23f9c3b56fb9ae67` | C99 over a host interface (`NkCheatHost`) instead of PPSSPP's memory map, JIT cache and controller state; a whole cheat is checked and compiled to an operation list when the file is read, where PPSSPP decodes each code every time it runs; a write into translated code is refused, at load and before every write, where PPSSPP writes and invalidates its JIT cache; a cheat applies whole on a frame or not at all (an undo journal, holds reported once per cause); comparisons are unsigned, and the 32-bit orderings of two addresses, which PPSSPP compares as signed, are refused; a section applies only when its `_S` disc ID is the run's; refused by name where PPSSPP picks a meaning or skips: a value wider than its form (PPSSPP widens a type 0x0 write), bits set where a form has zeros, a count of 0, an overlapping copy, a 0x6 base offset and its 0x1 and 0x9 lines, a test that guards no line, runs past the end or ends inside a multi-line code, an address outside user memory, types 0x9, 0xA, 0xB, 0xC and 0xF, and `_M` and `_N` lines (PPSSPP runs PSP Action Replay codes). The file header lists them. | SPDX GPL-3.0-or-later; PPSSPP copyright line (2012-, the form of `Core/Core.cpp`, since `Core/CwCheat.cpp` has none); Nakagawa Recomp authors copyright; derivation line naming the repository, revision, files and symbols; derived-translated label beside "PPSSPP-derived, not PSP-measured"; "conveyed as GPL-3.0-or-later" line; the note on where the PPSSPP line was taken from; modification list dated 2026-11-16, naming the parts that follow PPSSPP closely and the parts that are this project's own | 2 |
+| `core/nk_cheats.h` | PPSSPP `Core/CwCheat.cpp` (`CheatFileParser::ParseLine`, `CWCheatEngine::InterpretNextCwCheat`, `CWCheatEngine::ExecuteOp`) and `Core/CwCheat.h` (`CWCheatEngine::GetAddress`) for the line types and code forms its comment lists and for `NK_CHEATS_ADDRESS_BASE`; the declarations: this project | derived-translated (ledger: upstream_derived, record `nk_cheats_ppsspp_2639_20261116`); the declarations are this project's own | `c437463bc5cb78a0236312ad23f9c3b56fb9ae67` | the interface of `nk_cheats.c` (`NkCheatHost`, `NkCheatConfig`, `NkCheatInfo`, `NkCheatSummary`, the `nk_cheats_*` functions and the limits), which has no counterpart in PPSSPP; the table of code forms is narrowed to the forms that run here, and the list of refusals is this project's | SPDX GPL-3.0-or-later; PPSSPP copyright line (2012-, the form of `Core/Core.cpp`); Nakagawa Recomp authors copyright; derivation line naming the repository, revision, files and symbols; derived-translated label beside "PPSSPP-derived, not PSP-measured"; "conveyed as GPL-3.0-or-later" line; the note on where the PPSSPP line was taken from; modification note dated 2026-11-16 | 2 |
+
+The runtime's side, `src/rt/cheats.c` and `src/rt/cheats.h`, is project-authored (`src/rt/PROVENANCE.md`). The
+tests are project-authored on synthetic guests, with made-up disc IDs and addresses: `tests/native/test_nk_cheats.c`,
+a harness in `tests/native/test_fuzz_parsers.c` and cases in `tests/native/hle_thread_selftest.c`; what they
+expect of each code form follows PPSSPP's reading of it.
 
 ## Ad hoc transport (`nk_adhoc_*`, issue #1139)
 

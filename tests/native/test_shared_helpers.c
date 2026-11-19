@@ -324,6 +324,41 @@ static void test_boot_events(void) {
     CHECK(remove_test_file(path) == 0, "boot event test file cleanup succeeds");
     clear_boot_event_path();
 
+#if defined(_WIN32) || defined(_WIN64)
+    /* The player passes the path in a Unicode environment. A character outside the ANSI code
+       page (a Cyrillic letter here) must survive into the opened file name. */
+    char unicode_path[4096];
+    WCHAR wide_unicode_path[4096];
+    written = snprintf(unicode_path, sizeof(unicode_path), "%s/shared-boot-%lu-\xD0\x96.events",
+                       SR_SELFTEST_BUILD_ROOT, test_process_id());
+    CHECK(written > 0 && (size_t)written < sizeof(unicode_path),
+          "non-ANSI boot event test path formats");
+    CHECK(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, unicode_path, -1,
+                              wide_unicode_path,
+                              (int)(sizeof(wide_unicode_path) / sizeof(wide_unicode_path[0]))) > 0,
+          "non-ANSI boot event test path converts to UTF-16");
+    (void)remove_test_file(unicode_path);
+    CHECK(_wputenv_s(L"SR_BOOT_EVENT_FILE", wide_unicode_path) == 0,
+          "non-ANSI boot event output path is set");
+    FILE *unicode_console = tmpfile();
+    CHECK(unicode_console != NULL, "temporary stderr capture opens for the non-ANSI path");
+    if (unicode_console) {
+        emit_boot_event(unicode_console, 0u, "event=unicode-path");
+        fclose(unicode_console);
+    }
+    file = nk_fopen_utf8(unicode_path, "rb");
+    CHECK(file != NULL, "boot event writer creates a file at a non-ANSI path");
+    if (file) {
+        size_t count = fread(contents, 1u, sizeof(contents) - 1u, file);
+        contents[count] = '\0';
+        fclose(file);
+        CHECK(strcmp(contents, "event=unicode-path\n") == 0,
+              "boot event writer appends the record at a non-ANSI path");
+        CHECK(remove_test_file(unicode_path) == 0, "non-ANSI boot event file cleanup succeeds");
+    }
+    clear_boot_event_path();
+#endif
+
     char formatted[128];
     int path_length = nk_shared_boot_event_format_path(formatted, sizeof(formatted),
                                                        "cache/", '/', 42ul, 7u);

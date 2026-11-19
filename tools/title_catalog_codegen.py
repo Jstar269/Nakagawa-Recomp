@@ -301,7 +301,8 @@ def generate_header(digest: str, titles: List[Dict[str, Any]]) -> str:
         " * fits the catalog's registry and snapshot copies. */",
         "#define NK_TITLE_MAX_OVERLAYS 8",
         "#define NK_TITLE_MAX_COMPATIBLE_DISC_IDS 16",
-        "#define NK_TITLE_MAX_MODULES 256",
+        # title_manifest.MAX_TITLE_MODULES, which nk_title_manifest.c MAX_MODULES mirrors.
+        f"#define NK_TITLE_MAX_MODULES {title_manifest.MAX_TITLE_MODULES}",
         "#define NK_TITLE_MAX_LOOSE_CONTENT_ROOTS 16",
         "#define NK_TITLE_MAX_LOOSE_CONTENT_EXCLUDES 2",
         f'#define NK_TITLE_CATALOG_DIGEST "{digest}"',

@@ -2,6 +2,11 @@
 /* Copyright (C) 2026 the Nakagawa Recomp authors */
 
 #include "nk_platform.h"
+/* Every spawn, wait and environment probe runs inside assert: a release-flag build
+ * must not compile them away and report a pass for checks that never ran. */
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -369,6 +374,12 @@ int main(int argc, char *argv[]) {
     assert(_wputenv_s(L"LOCALAPPDATA", wbase) == 0);
     char expected[4096];
     assert(WideCharToMultiByte(CP_UTF8, 0, wbase, -1, expected, sizeof(expected), NULL, NULL) > 0);
+    /* A tree an earlier run left would satisfy the dir_exists check below without
+     * this run creating it: remove it first, and again once the check is done. */
+    char profile_root[4096];
+    snprintf(profile_root, sizeof(profile_root), "%s", expected);
+    assert(nk_platform_remove_tree(profile_root, NULL));
+    assert(!nk_platform_dir_exists(profile_root));
     const char *sep = "\\";
     size_t exp_len = strlen(expected);
     snprintf(expected + exp_len, sizeof(expected) - exp_len, "%sNakagawa%scache", sep, sep);
@@ -381,6 +392,8 @@ int main(int argc, char *argv[]) {
     assert(nk_platform_dir_exists(got));
     assert(_wputenv_s(L"LOCALAPPDATA",
                       saved_len > 0 && saved_len < 32768 ? saved_lad : L"") == 0);
+    assert(nk_platform_remove_tree(profile_root, NULL));
+    assert(!nk_platform_dir_exists(profile_root));
     printf("[PROCESS_TEST] Non-code-page profile directory resolved as UTF-8.\n");
 
     /* Process tree termination:

@@ -176,6 +176,7 @@ static uint32_t s_latch_seen_count = 0u;
 /* The input the next sample carries: buttons, stick and scripted-input id, latched once per
  * VBLANK by sr_ctrl_sample() (the host's input is polled once per frame). */
 CtrlSample s_ctrl_live = { 0, 0, 128, 128, 0 };
+uint32_t sr_ctrl_live_buttons(void) { return s_ctrl_live.btn; }
 /* Sampling cycle (#1390): with cycle 0 the controller is sampled once per VBLANK. With a cycle
  * of 5555 to 20000 us it is sampled every `cycle` microseconds of guest time instead, and a
  * VBLANK adds no sample: pspautotests tests/ctrl/sampling2 at f573fe8c (recorded on a PSP)

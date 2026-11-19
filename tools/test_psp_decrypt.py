@@ -748,6 +748,58 @@ class TestKnownAnswers(unittest.TestCase):
         got = json.loads(out.stdout)
         self.assertEqual(got["digest"], SHA1_ABC_DIGEST.hex())
 
+    def test_prx_sha1_wipes_its_whole_context(self):
+        """sha1_parts, the SHA-1 every PRX decoder hashes decrypted header and
+        key-derived bytes through, wipes its whole SHA_CTX after SHAFinal: the
+        vendored SHAFinal clears only sizeof(pointer) bytes of it."""
+        from tools.nk_core import decrypt_tool
+
+        harness = self.tmp / "prx_sha1_wipe.c"
+        harness.write_text(r"""
+#include <stdio.h>
+#include <string.h>
+#define SHAFinal harness_sha_final
+#define nk_secure_zero harness_secure_zero
+#include "nk_psp_prx.c"
+#undef SHAFinal
+#undef nk_secure_zero
+void SHAFinal(BYTE *output, SHA_CTX *shsInfo);
+void nk_secure_zero(void *p, size_t len);
+static const void *final_ctx;
+static int finals, wiped;
+void harness_sha_final(BYTE *output, SHA_CTX *shsInfo) {
+    final_ctx = shsInfo;
+    finals++;
+    SHAFinal(output, shsInfo);
+}
+void harness_secure_zero(void *p, size_t len) {
+    if (finals > 0 && p == final_ctx && len >= sizeof(SHA_CTX)) wiped++;
+    nk_secure_zero(p, len);
+}
+int main(void) {
+    static const u8 ab[2] = { 'a', 'b' }, c[1] = { 'c' };
+    ShaPart parts[3] = { { ab, 2 }, { NULL, 0 }, { c, 1 } };
+    u8 digest[0x14];
+    sha1_parts(parts, 3, digest);
+    printf("finals %d wiped %d digest ", finals, wiped);
+    for (size_t i = 0; i < sizeof(digest); i++) printf("%02x", digest[i]);
+    printf("\n");
+    return 0;
+}
+""", encoding="utf-8")
+        exe = self.tmp / "prx_sha1_wipe.exe"
+        cmd = [cast(str, CC), "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+               str(harness)]
+        cmd.extend(str(ROOT / rel) for rel in decrypt_tool.SOURCES
+                   if not rel.endswith(("nk_decrypt_main.c", "nk_psp_prx.c")))
+        cmd.extend(["-o", str(exe)])
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(out.stdout.split(),
+                         ["finals", "1", "wiped", "1", "digest", SHA1_ABC_DIGEST.hex()])
+
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestSyntheticEndToEnd(unittest.TestCase):
@@ -2435,6 +2487,16 @@ class TestNpumdimg(unittest.TestCase):
         self._refused(out, dst, 4, "MALFORMED_INPUT")
 
 
+# The clear text of the well-formed coded stream the LZRC corpus below mutates
+# (synthetic bytes; lzrc_literals encodes them).
+_LZRC_SEED_CLEAR = bytes(range(0x20, 0x60)) * 2 + b"NK295 synthetic literals. " * 6
+
+
+def _c_bytes(data: bytes) -> str:
+    """``data`` as the body of a C array initialiser."""
+    return ", ".join(str(byte) for byte in data)
+
+
 # The DRM BB fuse-ID types and the LZRC decoder's bounds, through the C API.
 _AMCTRL_HARNESS_C = r"""
 #include <stdio.h>
@@ -2448,6 +2510,13 @@ _AMCTRL_HARNESS_C = r"""
 #define GUARD 64
 #define CAP 4096
 #define STREAMS 20000
+#define IN_MAX 512
+#define NO_ANSWER (-2) /* only the bounds are checked */
+
+/* A well-formed coded stream and the bytes it decodes to. */
+static const unsigned char seed[] = {@LZRC_SEED@};
+static const unsigned char seed_clear[] = {@LZRC_SEED_CLEAR@};
+typedef char seed_fits_the_input_buffer[sizeof(seed) <= IN_MAX ? 1 : -1];
 
 static unsigned long long rng = 0x5EED2951u;
 static unsigned rnd(void) {
@@ -2461,8 +2530,9 @@ int main(void) {
     CIPHER_KEY cipher;
     unsigned char key16[16] = {0};
     unsigned char *out = malloc(CAP + 2 * GUARD);
-    unsigned char in[512];
+    unsigned char in[IN_MAX];
     int mac2, cipher2, mac1, mode1, worst = 0, overruns = 0, accepted = 0;
+    int stored_ok = 0, coded_ok = 0, wrong = 0;
     nk_psp_ctx_init(&ctx, NULL);
     mac2 = sceDrmBBMacInit(&ctx, &mac, 2);
     printf("mac2 %s %s\n", nk_psp_status_name(mac2), ctx.message);
@@ -2479,29 +2549,86 @@ int main(void) {
     for (int iter = 0; iter < STREAMS; iter++) {
         size_t in_len = (size_t)(rnd() % sizeof(in));
         size_t out_len = (size_t)(rnd() % CAP);
-        int got;
+        const unsigned char *clear = NULL;
+        int got, want = NO_ANSWER;
         for (size_t i = 0; i < in_len; i++) in[i] = (unsigned char)rnd();
-        if (in_len > 0 && (iter & 1)) in[0] &= 0x7F; /* mostly coded streams */
+        switch (iter & 3) {
+        case 0: /* random bytes: half of them stored streams with a random 32-bit size */
+            break;
+        case 1: /* random bytes as a coded stream */
+            if (in_len > 0) in[0] &= 0x7F;
+            break;
+        case 2: /* a stored stream whose declared size is under, at or one past what fits */
+            if (in_len >= 5) {
+                size_t body = in_len - 5;
+                size_t declared = (size_t)(rnd() % (body + 2));
+                if (rnd() & 1) out_len = (size_t)(rnd() % (body + 2));
+                in[0] |= 0x80;
+                in[1] = 0;
+                in[2] = 0;
+                in[3] = (unsigned char)(declared >> 8);
+                in[4] = (unsigned char)declared;
+                want = (declared <= body && declared <= out_len) ? (int)declared : -1;
+                clear = in + 5;
+            }
+            break;
+        default: /* the well-formed coded stream: whole, short of room, cut short, bits flipped */
+            memcpy(in, seed, sizeof(seed));
+            in_len = sizeof(seed);
+            switch (rnd() % 4) {
+            case 0:
+                out_len = sizeof(seed_clear) + (size_t)(rnd() % GUARD);
+                want = (int)sizeof(seed_clear);
+                clear = seed_clear;
+                break;
+            case 1:
+                out_len = (size_t)(rnd() % sizeof(seed_clear));
+                want = -1;
+                break;
+            case 2:
+                in_len = (size_t)(rnd() % sizeof(seed));
+                break;
+            default:
+                for (unsigned flips = 1 + rnd() % 3; flips > 0; flips--)
+                    in[rnd() % sizeof(seed)] ^= (unsigned char)(1u << (rnd() % 8));
+                break;
+            }
+            break;
+        }
         memset(out, 0xA5, CAP + 2 * GUARD);
         got = nk_psp_lzrc_decompress(out + GUARD, out_len, in, in_len);
         if (got > (int)out_len) worst = got;
-        if (got >= 0) accepted++;
+        if (got >= 0) {
+            accepted++;
+            if (in[0] & 0x80) stored_ok++; else coded_ok++;
+        }
+        if (want != NO_ANSWER &&
+            (got != want || (want > 0 && memcmp(out + GUARD, clear, (size_t)want) != 0)))
+            wrong++;
         for (size_t i = 0; i < GUARD; i++) {
             if (out[i] != 0xA5 || out[GUARD + out_len + i] != 0xA5) { overruns++; break; }
         }
     }
-    printf("lzrc streams=%d accepted=%d past_len=%d overruns=%d\n", STREAMS, accepted,
-           worst, overruns);
+    printf("lzrc streams=%d accepted=%d stored_ok=%d coded_ok=%d wrong=%d past_len=%d overruns=%d\n",
+           STREAMS, accepted, stored_ok, coded_ok, wrong, worst, overruns);
     free(out);
     return 0;
 }
-"""
+""".replace("@LZRC_SEED@", _c_bytes(lzrc_literals(_LZRC_SEED_CLEAR))).replace(
+    "@LZRC_SEED_CLEAR@", _c_bytes(_LZRC_SEED_CLEAR))
 
 
 @unittest.skipUnless(CC, "no C compiler on PATH")
 class TestAmctrlAndLzrcBounds(unittest.TestCase):
     """The fuse-ID DRM types are refused as CONTEXT_REQUIRED, and malformed LZRC
-    streams fail closed without writing outside the caller's buffer."""
+    streams fail closed without writing outside the caller's buffer.
+
+    The LZRC corpus is 20,000 streams of four kinds: random bytes, random bytes
+    as a coded stream, stored streams whose declared size is under, at or one
+    past what the input and the output hold, and one well-formed coded stream
+    taken whole, with too little room, cut short or with flipped bits.  Random
+    bytes alone never reach an accepting path: a coded stream is accepted only at
+    its end marker, and a stored one only when its declared size fits."""
 
     @classmethod
     def setUpClass(cls):
@@ -2538,11 +2665,16 @@ class TestAmctrlAndLzrcBounds(unittest.TestCase):
         fields = dict(item.split("=") for item in report.split()[1:])
         self.assertEqual(fields["past_len"], "0")
         self.assertEqual(fields["overruns"], "0")
-        # The bound checks mean something only if the random corpus reaches both
-        # the decoder's accepting path and its rejecting path.
+        # The bound checks mean something only if the corpus reaches the decoder's
+        # rejecting path and both of its accepting paths (a stored copy, a coded
+        # stream's end marker), and an accepted stream is one it decoded: where
+        # the answer is known, the size and the bytes are the expected ones.
         accepted = int(fields["accepted"])
         self.assertGreater(accepted, 0, report)
         self.assertLess(accepted, int(fields["streams"]), report)
+        self.assertGreater(int(fields["stored_ok"]), 0, report)
+        self.assertGreater(int(fields["coded_ok"]), 0, report)
+        self.assertEqual(fields["wrong"], "0", report)
 
     def test_the_literal_writer_round_trips_through_the_decoder(self):
         from tools.nk_core import decrypt_tool
@@ -2590,6 +2722,45 @@ int main(int argc, char **argv) {
         out = run_bounded([str(exe), str(stream), str(len(clear) - 1), str(result)],
                           capture_output=True)
         self.assertEqual(out.returncode, 1, out.stdout)
+
+    def test_stored_stream_that_overstates_its_size_fails(self):
+        """A stored (plain-text) stream is a 0x80 flag byte, a big-endian length and the
+        bytes. One whose length passes its input or the output is refused, never cut
+        short and returned as a decoded block."""
+        harness = self.tmp / "lzrc_stored.c"
+        harness.write_text(r"""
+#include <stdio.h>
+#include <string.h>
+#include "nk_psp_lzrc.h"
+static int run(unsigned declared, size_t body, size_t out_len) {
+    static unsigned char in[5 + 256], out[256];
+    in[0] = 0x80;
+    in[1] = (unsigned char)(declared >> 24); in[2] = (unsigned char)(declared >> 16);
+    in[3] = (unsigned char)(declared >> 8);  in[4] = (unsigned char)declared;
+    for (size_t i = 0; i < body; i++) in[5 + i] = (unsigned char)(i * 7u + 1u);
+    memset(out, 0, sizeof(out));
+    int got = nk_psp_lzrc_decompress(out, out_len, in, 5 + body);
+    if (got > 0 && memcmp(out, in + 5, (size_t)got) != 0) return -2;
+    return got;
+}
+int main(void) {
+    printf("exact %d\n", run(100, 100, 100));
+    printf("short_input %d\n", run(200, 100, 256));
+    printf("short_output %d\n", run(100, 100, 64));
+    return 0;
+}
+""", encoding="utf-8")
+        exe = self.tmp / "lzrc_stored.exe"
+        proc = subprocess.run([CC, "-std=c99", "-O2", "-I", str(ROOT / "src" / "core"),
+                               str(harness), str(ROOT / "src" / "core" / "nk_psp_lzrc.c"),
+                               "-o", str(exe)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        out = subprocess.run([str(exe)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        got = dict(line.split(" ", 1) for line in out.stdout.splitlines())
+        self.assertEqual(got["exact"], "100")
+        self.assertEqual(got["short_input"], "-1")
+        self.assertEqual(got["short_output"], "-1")
 
 
 if __name__ == "__main__":

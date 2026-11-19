@@ -177,6 +177,7 @@ static uint32_t g_test_vblank_handler;
 static unsigned g_test_handler_calls;
 static int g_test_handler_raise_ge;
 static uint32_t g_test_handler_wake_obj;
+static unsigned g_test_handler_mask_at;   /* the handler call that masks interrupts; 0 = none */
 static CpuState g_test_handler_seen;
 static uint32_t g_test_vblank_no, g_test_vblank_arg;
 /* An optional second sub-interrupt, for a title that keeps two VBLANK handlers at once. */
@@ -318,6 +319,9 @@ void dispatch(CpuState *s, uint32_t target) {
             sched_wake(g_test_handler_wake_obj);
             g_test_handler_wake_obj = 0;
         }
+        /* A handler that returns with the I-bit clear (CpuSuspendIntr, no resume). */
+        if (g_test_handler_mask_at && g_test_handler_calls == g_test_handler_mask_at)
+            (void)sched_suspend_interrupts();
         /* Prove that a handler's register mutations are discarded with its frame. */
         s->r[16] = 0xdeadbeefu;
         s->pc = 0xfeedfaceu;
@@ -401,6 +405,7 @@ static void reset_sched(void) {
     g_test_handler_calls = 0;
     g_test_handler_raise_ge = 0;
     g_test_handler_wake_obj = 0;
+    g_test_handler_mask_at = 0;
     memset(&g_test_handler_seen, 0, sizeof(g_test_handler_seen));
     s_test_uid_next = 0x110u;
     g_test_body = NULL;
@@ -553,14 +558,26 @@ static void pause_test_reset(int paced, uint64_t host_us_now) {
     g_pause_test_alarm_calls = 0;
 }
 
+/* NULL unsets NAME; any other value, the empty string included, sets it. The Windows C runtime
+ * cannot hold an empty value (_putenv("NAME=") deletes it), so there "" also unsets; the
+ * empty-value cells are checked on the POSIX legs (pause_test_env_holds_empty). */
 static void pause_test_set_env(const char *name, const char *value) {
 #if defined(_WIN32) || defined(_WIN64)
     char assignment[160];
     snprintf(assignment, sizeof(assignment), "%s=%s", name, value ? value : "");
     _putenv(assignment);
 #else
-    if (value && value[0]) setenv(name, value, 1);
+    if (value) setenv(name, value, 1);
     else unsetenv(name);
+#endif
+}
+
+/* Whether a "" given to pause_test_set_env reaches the environment as a set, empty value. */
+static int pause_test_env_holds_empty(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    return 0;
+#else
+    return 1;
 #endif
 }
 
@@ -873,6 +890,16 @@ static void test_rotate_ready_queue_moves_head_behind_peers(void) {
 
     /* A queue with no ready thread, and no caller at all, are successful no-ops. */
     expect(sched_rotate_thread_ready_queue(99) == 0u, "rotating an empty priority succeeds");
+    /* A named priority outside the user range is refused (PSP-THREAD-003 thread-rotate-range).
+     * MUTANT: drop the range check in sched_rotate_thread_ready_queue -- 0xff answers 0. */
+    expect(sched_rotate_thread_ready_queue(0xff) == SCE_KERNEL_ERROR_ILLEGAL_PRIORITY,
+           "PSP-THREAD-003 thread-rotate-range: RotateThreadReadyQueue(0xff) answers 0x80020193");
+    expect(sched_rotate_thread_ready_queue(-1) == SCE_KERNEL_ERROR_ILLEGAL_PRIORITY &&
+               sched_rotate_thread_ready_queue(7) == SCE_KERNEL_ERROR_ILLEGAL_PRIORITY &&
+               sched_rotate_thread_ready_queue(0x78) == SCE_KERNEL_ERROR_ILLEGAL_PRIORITY,
+           "RotateThreadReadyQueue refuses -1, 7 and 0x78 as thread creation does");
+    expect(sched_rotate_thread_ready_queue(8) == 0u && sched_rotate_thread_ready_queue(0x77) == 0u,
+           "RotateThreadReadyQueue accepts the user range's ends");
     s_cur = -1;
     expect(sched_rotate_thread_ready_queue(0) == 0u, "priority 0 with no calling thread is a no-op");
 
@@ -1025,6 +1052,66 @@ static void test_transfer_queue_is_arrival_order(void) {
            "the next queued waiter now holds the channel");
 }
 
+/* A thread terminated and restarted while it waited for the channel gives up its place: a
+ * queued entry or a reservation under its UID would hand the channel to a thread, restarted at its
+ * entry, that no longer waits for it, and the reservation would never end.
+ * MUTANT: drop sched_transfer_forget from sched_release_thread_resources -- the channel passes to
+ * the restarted thread and the later blocking caller is never granted it. */
+static void test_transfer_forgets_a_terminated_waiter(void) {
+    /* Queued behind an open window. */
+    reset_sched();
+    s_vtime_us = 0u;
+    int owner = mk(0x200, TH_RUNNING, 16);
+    uint32_t a_uid = sched_create_thread(0x9300u, 20, 0x1000u);
+    expect(a_uid != 0u && sched_start_thread(a_uid, 0u, 0u) == 0u, "the waiter thread is started");
+    int a = index_of_uid(a_uid);
+    int b = mk(0x202, TH_RUNNING, 24);
+    s_cur = owner;
+    expect(sched_transfer_begin(0xD0Au, 100u), "the owner opens the window");
+    s_tcb[owner].state = TH_WAIT_OBJ;
+    s_tcb[owner].wait_obj = 0xD0Au;
+    s_tcb[a].state = TH_RUNNING;
+    s_cur = a;
+    expect(sched_transfer_enqueue(0xD0Au), "the first blocking caller joins the queue");
+    s_tcb[a].state = TH_WAIT_OBJ;
+    s_tcb[a].wait_obj = 0xD0Au;
+    s_cur = -1;
+    expect(sched_terminate_thread(a_uid) == 0u, "another thread terminates the queued caller");
+    expect(sched_start_thread(a_uid, 0u, 0u) == 0u, "and starts it again at its entry");
+    s_cur = b;
+    expect(sched_transfer_enqueue(0xD0Au), "a second blocking caller joins the queue");
+    s_tcb[b].state = TH_WAIT_OBJ;
+    s_tcb[b].wait_obj = 0xD0Au;
+    s_cur = -1;
+    s_vtime_us = 100u;
+    (void)pick_next();
+    uint32_t who = 0u;
+    expect(sched_transfer_pending(0xD0Au, &who) && who == 0x202u,
+           "at the deadline the channel passes to the caller still waiting, not the restarted one");
+    expect(s_tcb[b].state == TH_READY, "the caller that now holds the channel is woken");
+
+    /* Holding the reservation. */
+    reset_sched();
+    s_vtime_us = 0u;
+    a_uid = sched_create_thread(0x9304u, 20, 0x1000u);
+    expect(a_uid != 0u && sched_start_thread(a_uid, 0u, 0u) == 0u, "the holder thread is started");
+    a = index_of_uid(a_uid);
+    b = mk(0x212, TH_RUNNING, 24);
+    s_tcb[a].state = TH_RUNNING;
+    s_cur = a;
+    expect(sched_transfer_enqueue(0xD0Au) && sched_transfer_granted(0xD0Au),
+           "an idle channel is reserved for its first caller at once");
+    s_cur = -1;
+    expect(sched_terminate_thread(a_uid) == 0u, "another thread terminates the holder");
+    expect(sched_start_thread(a_uid, 0u, 0u) == 0u, "and starts it again at its entry");
+    (void)pick_next();
+    s_cur = b;
+    expect(sched_transfer_enqueue(0xD0Au) && sched_transfer_granted(0xD0Au),
+           "the terminated holder's reservation ended: the next caller is granted the channel");
+    expect(sched_transfer_begin(0xD0Au, 10u), "and begins its transfer");
+    s_cur = -1;
+}
+
 static void test_dormant_excluded(void) {
     reset_sched();
     int dead = mk(0x200, TH_DORMANT, 1);
@@ -1095,13 +1182,15 @@ enum {
     PT_DUE_AT_YIELD = 10u,
     PT_YIELDS = 3u * TIMESLICE
 };
-static int g_pt_waiter_priority;
+static int g_pt_waiter_priority, g_pt_by_count;
 static unsigned g_pt_yield, g_pt_waiter_ran_at, g_pt_done;
+static uint64_t g_pt_waiter_armed_ns;
 
 static void preempt_timer_body(CpuState *s) {
     if (s_tcb[s_cur].entry == PT_WAITER_ENTRY) {
         sched_delay_current(PT_DELAY_US);
         g_pt_waiter_ran_at = g_pt_yield;
+        g_pt_waiter_armed_ns = s_preempt_timer_at_ns;   /* what the timer holds for it */
         return;
     }
     uint32_t waiter = sched_create_thread(PT_WAITER_ENTRY, g_pt_waiter_priority, 0);
@@ -1110,7 +1199,8 @@ static void preempt_timer_body(CpuState *s) {
     for (g_pt_yield = 0; g_pt_yield < PT_YIELDS; g_pt_yield++) {
         if (g_pt_yield == PT_DUE_AT_YIELD) {
             set_host_us(PT_START_US + PT_DELAY_US + 1u);   /* the delay has run out */
-            sched_preempt_timer_check(host_now_ns());
+            /* by_count: the slice reaches its count before the timer thread wakes */
+            if (!g_pt_by_count) sched_preempt_timer_check(host_now_ns());
         }
         SR_YIELD(s, PT_YIELD_PC);
     }
@@ -1119,15 +1209,17 @@ static void preempt_timer_body(CpuState *s) {
 
 static int preempt_timer_stop(void) { return (int)g_pt_done; }
 
-static unsigned preempt_timer_run(int waiter_priority) {
+static unsigned preempt_timer_run(int waiter_priority, int by_count) {
     reset_sched();
     begin_clock_fixture(1, PT_START_US);
     s_preempt_timer_mode = SCHED_PREEMPT_TIMER_MANUAL;
     s_preempt_timer_at_ns = UINT64_MAX;
     s_preempt_timer_published = UINT64_MAX;
     g_pt_waiter_priority = waiter_priority;
+    g_pt_by_count = by_count;
     g_pt_yield = 0;
     g_pt_waiter_ran_at = UINT32_MAX;
+    g_pt_waiter_armed_ns = 0u;
     g_pt_done = 0;
     g_test_body = preempt_timer_body;
     sr_sched_stop_requested = preempt_timer_stop;
@@ -1723,6 +1815,20 @@ static void test_clock_mode_follows_the_environment(void) {
         pause_test_set_env("SR_PADSCRIPT", cases[i].padscript);
         pause_test_set_env("SR_FBSNAP_WINDOWS", cases[i].fbsnap);
         pause_test_set_env("SR_DETERMINISTIC_SLICE_US", cases[i].slice);
+        /* An empty cell must reach pace_setup as a set, empty value, not as an unset one:
+         * otherwise "empty values count as unset" only repeats the unset cell.
+         * MUTANT: treat an empty SR_DETERMINISTIC_CLOCK as on in sched_det_parse -- the empty
+         *   cell reports a deterministic run (POSIX legs; the Windows CRT cannot hold ""). */
+        if (pause_test_env_holds_empty()) {
+            const char *const values[2] = { cases[i].novbpace, cases[i].det };
+            const char *const keys[2] = { "SR_NOVBPACE", "SR_DETERMINISTIC_CLOCK" };
+            for (int k = 0; k < 2; k++) {
+                if (!values[k] || values[k][0]) continue;
+                const char *seen = getenv(keys[k]);
+                expect(seen != NULL && seen[0] == '\0',
+                       "an empty environment cell is set to the empty string, not unset");
+            }
+        }
         s_pace_on = -1;
         s_det_clock = 0;
         s_det_slice_us = SCHED_DET_SLICE_US_DEFAULT;
@@ -1906,7 +2012,7 @@ static void module_start_param_body(CpuState *s) {
 }
 static int module_start_param_stop(void) { return g_mst_done; }
 
-static void run_module_start_thread(void) {
+static int run_module_start_thread(void) {
     reset_sched();
     memset(&g_mst_info, 0, sizeof(g_mst_info));
     g_mst_gp = 0u;
@@ -1914,8 +2020,9 @@ static void run_module_start_thread(void) {
     if (s_cpu) s_cpu->r[28] = 0u;
     g_test_body = module_start_param_body;
     sr_sched_stop_requested = module_start_param_stop;
-    sched_run(MST_ENTRY, 0u, 0u);
+    const int rc = sched_run(MST_ENTRY, 0u, 0u);
     sr_sched_stop_requested = NULL;
+    return rc;
 }
 
 static void test_module_start_thread_uses_declared_parameters(void) {
@@ -1939,12 +2046,35 @@ static void test_module_start_thread_uses_declared_parameters(void) {
            "with no module record the module-start thread keeps priority 32 and the 256 KiB stack");
 }
 
+/* A module record whose start thread cannot be created (a stack no free range holds) stops the
+ * run by name before any thread runs, and sched_run reports it so the driver exits nonzero.
+ * MUTANT: drop the t0 check in sched_run -- the NULL TCB is written and the selftest crashes.
+ * MUTANT: return 0 from the failed create -- the driver would end the run as a clean exit. */
+static void test_module_start_thread_create_failure_stops_by_name(void) {
+    sched_set_module_start_thread(32, 0x10000000u, 0u, NULL, 0u);   /* 256 MiB */
+    const int rc = run_module_start_thread();
+    expect(g_mst_done == 0 && s_ntcb == 0 && s_cur == -1,
+           "a module-start thread that cannot be created stops the run with no thread");
+    expect(rc == SCHED_RUN_NO_ENTRY_THREAD,
+           "sched_run reports the module-start thread it could not create (nonzero)");
+    sched_set_module_start_thread(32, 0u, 0u, NULL, 0u);
+}
+
 static void test_preempt_timer_hands_cpu_to_stronger_due_thread(void) {
-    expect(preempt_timer_run(16) == PT_DUE_AT_YIELD,
+    expect(preempt_timer_run(16, 0) == PT_DUE_AT_YIELD,
            "a stronger thread whose delay ran out runs at the weak thread's next yield point");
-    const unsigned equal = preempt_timer_run(32);
+    const unsigned equal = preempt_timer_run(32, 0);
     expect(equal != UINT32_MAX && equal > PT_DUE_AT_YIELD,
            "an equal-priority waiter whose delay ran out does not take the CPU early");
+    /* The weak thread's slice ends by its count before the timer fires, and the stronger
+     * thread it switches to has no stronger waiter of its own: the weak thread's deadline is
+     * spent with the slice and must not stay armed to end the new thread's slices.
+     * MUTANT: drop the s_preempt_timer_spent test in sched_preempt_timer_publish -- the switch
+     * into the waiter publishes nothing and the timer still holds the weak thread's deadline. */
+    const unsigned by_count = preempt_timer_run(16, 1);
+    expect(by_count != UINT32_MAX && by_count > PT_DUE_AT_YIELD &&
+               g_pt_waiter_armed_ns == UINT64_MAX,
+           "a slice that ends by its count leaves no stale deadline for the next thread");
 }
 
 /* #1296: the paced scheduler's thread and the preemption timer's thread each ask for high host
@@ -2153,6 +2283,57 @@ static void test_terminate_thread_excluded_after(void) {
            "terminated thread reports SCE_KERNEL_ERROR_THREAD_TERMINATED");
 }
 
+/* An interrupt handler runs on the interrupted thread's coroutine with s_cur forced
+ * to -1 (deliver_vblank, the alarm/VTimer services).  TerminateThread from there
+ * must not destroy that live coroutine: it answers ILLEGAL_CONTEXT, and the
+ * running coroutine's own thread is refused as the caller in any context. */
+static SrCoro  *g_term_intr_main;
+static uint32_t g_term_intr_uid;
+static uint32_t g_term_intr_rc;
+static uint32_t g_term_intr_self_rc;
+static void term_intr_body(void *arg) {
+    (void)arg;
+    int save_cur = s_cur; s_cur = -1;       /* as deliver_vblank does */
+    s_servicing_interrupts = 1;             /* as scheduler_service_pending does */
+    g_term_intr_rc = sched_terminate_thread(g_term_intr_uid);
+    s_servicing_interrupts = 0;
+    g_term_intr_self_rc = sched_terminate_thread(g_term_intr_uid);
+    s_cur = save_cur;
+    sr_coro_switch(g_term_intr_main);
+}
+
+static void test_terminate_thread_refused_in_interrupt_context(void) {
+    reset_sched();
+    int other = mk(0x3b0u, TH_READY, 30);
+    s_servicing_interrupts = 1;
+    expect(sched_terminate_thread(s_tcb[other].uid) == 0x80020064u,
+           "TerminateThread inside an interrupt episode answers ILLEGAL_CONTEXT");
+    s_servicing_interrupts = 0;
+    expect(s_tcb[other].state == TH_READY,
+           "a refused interrupt-context TerminateThread leaves its target READY");
+
+    int idx = mk(0x3a0u, TH_RUNNING, 20);
+    TCB *t = &s_tcb[idx];
+    g_term_intr_main = sr_coro_current();
+    g_term_intr_uid = t->uid;
+    g_term_intr_rc = g_term_intr_self_rc = 0xffffffffu;
+    t->coro = sr_coro_create(term_intr_body, NULL, (size_t)1 << 20);
+    expect(t->coro != NULL, "interrupt-terminate fixture coroutine created");
+    if (!t->coro) return;
+    SrCoro *coro = t->coro;
+    s_cur = idx;
+    sr_coro_switch(coro);
+    s_cur = -1;
+    expect(g_term_intr_rc == 0x80020064u,
+           "a handler terminating the thread it interrupted answers ILLEGAL_CONTEXT");
+    expect(g_term_intr_self_rc == SCE_KERNEL_ERROR_ILLEGAL_THID,
+           "terminating the thread whose coroutine is running answers ILLEGAL_THID");
+    expect(t->coro == coro && t->state == TH_RUNNING,
+           "the interrupted thread keeps its live coroutine and state");
+    sr_coro_destroy(coro);
+    t->coro = NULL;
+}
+
 static void test_delete_and_terminate_delete_contract(void) {
     reset_sched();
     uint32_t target_uid = sched_create_thread(0x2400u, 40, 0x2000u);
@@ -2244,13 +2425,17 @@ static const uint32_t k_candidate_counters[] = {
 static void test_title_config_foreign_entries_are_inert(void) {
     for (size_t i = 0; i < sizeof(k_candidate_entries) / sizeof(k_candidate_entries[0]); i++) {
         uint32_t entry = k_candidate_entries[i];
-        if (sr_title_config_is_worker_entry(entry) || sr_title_config_is_launcher_entry(entry)) {
+        /* The role this build's configuration gives the address, decided from the
+         * configuration itself rather than from the predicates checked here. */
+        const int worker = cfg_has(SR_TITLE_CFG_WORKER_ENTRY) && entry == cfg_worker_entry();
+        const int launcher = cfg_has(SR_TITLE_CFG_LAUNCHER_ENTRY) && entry == cfg_launcher_entry();
+        expect(!sr_title_config_is_worker_entry(entry) == !worker,
+               "a candidate entry is the worker entry exactly when this build configures it");
+        expect(!sr_title_config_is_launcher_entry(entry) == !launcher,
+               "a candidate entry is the launcher entry exactly when this build configures it");
+        if (worker || launcher) {
             continue;   /* this build configures the address; covered by the tests below */
         }
-        expect(!sr_title_config_is_worker_entry(entry),
-               "an unconfigured entry is not the worker entry");
-        expect(!sr_title_config_is_launcher_entry(entry),
-               "an unconfigured entry is not the launcher entry");
         reset_sched();
         uint32_t root = sched_create_thread(0x00001000u, 32, 0x1000u);
         expect(root != 0, "root create succeeds");
@@ -2513,22 +2698,19 @@ static uint32_t create_until_uid(uint32_t wanted, int priority) {
     return 0;
 }
 
-/* Regression A: in a build with no launcher binding, the historical launcher UID is an
- * ordinary thread: it leaves the launcher role uncaptured and gets an ordinary k0 block. */
+/* Regression A: in every build, the historical launcher UID allocated to an entry that is not
+ * the configured launcher is an ordinary thread: the UID alone confers no role, the launcher
+ * role stays uncaptured, and the thread gets an ordinary k0 block. */
 static void test_historical_launcher_uid_is_ordinary_when_unconfigured(void) {
-    if (cfg_has(SR_TITLE_CFG_LAUNCHER_ENTRY) &&
-        sr_title_config()->launcher_thread_entry == HISTORICAL_LAUNCHER_UID) {
-        return;   /* would not be an unconfigured build for this address */
-    }
     reset_sched();
     uint32_t uid = create_until_uid(HISTORICAL_LAUNCHER_UID, 32);
     expect(uid == HISTORICAL_LAUNCHER_UID, "the allocator can still produce UID 0x111");
     if (uid != HISTORICAL_LAUNCHER_UID) return;
 
     expect(!sched_uid_is_launcher(uid),
-           "UID 0x111 is not the launcher when no launcher entry is configured");
+           "UID 0x111 alone does not confer the launcher role");
     expect(g_launcher_uid == SR_ROLE_UID_NONE,
-           "the launcher role stays uncaptured in a build with no launcher binding");
+           "the launcher role stays uncaptured when no launcher entry was created");
     expect(sched_launcher_uid() == SR_ROLE_UID_NONE &&
            !sched_role_uid_captured(sched_launcher_uid()),
            "the launcher accessor reports uncaptured");
@@ -2537,18 +2719,14 @@ static void test_historical_launcher_uid_is_ordinary_when_unconfigured(void) {
 
 /* Regression B: same, for the historical worker UID. */
 static void test_historical_worker_uid_is_ordinary_when_unconfigured(void) {
-    if (cfg_has(SR_TITLE_CFG_WORKER_ENTRY) &&
-        sr_title_config()->worker_thread_entry == HISTORICAL_WORKER_UID) {
-        return;
-    }
     reset_sched();
     uint32_t uid = create_until_uid(HISTORICAL_WORKER_UID, 36);
     expect(uid == HISTORICAL_WORKER_UID, "the allocator can still produce UID 0x114");
     if (uid != HISTORICAL_WORKER_UID) return;
     expect(!sched_uid_is_worker(uid),
-           "UID 0x114 is not the worker when no worker entry is configured");
+           "UID 0x114 alone does not confer the worker role");
     expect(g_worker_uid == SR_ROLE_UID_NONE,
-           "the worker role stays uncaptured in a build with no worker binding");
+           "the worker role stays uncaptured when no worker entry was created");
     /* No entry reuses a thread: another create at the same entry gets a second TCB. */
     TCB *t = tcb_by_uid(uid);
     expect(t != NULL, "the 0x114 thread exists");
@@ -2635,6 +2813,131 @@ static void test_stack_exhaustion_fails_create(void) {
     uint32_t ok = sched_create_thread(0x2000u, 32, 0x4000u);
     expect(ok != 0, "a fitting request still succeeds after a failed one");
     expect(s_stack_top < top0, "successful create consumes arena");
+}
+
+/* A thread that exited inside an HLE call (sr_hle_call raises g_hle_depth) and is started again
+ * begins its new body inside no call: its saved HLE depth, runtime phase and execution tier are
+ * the creation values, not the ones its exit left.
+ * MUTANT: drop the hle_depth reset in sched_start_thread's restart block -- the restarted body
+ *   runs with g_hle_depth 1. */
+enum { RH_ROOT = 0x09380000u, RH_WORKER = 0x09380100u };
+static int g_rh_runs, g_rh_done, g_rh_depth_at_entry;
+static int g_rh_saved_depth, g_rh_saved_phase, g_rh_saved_tier;
+static void restart_hle_depth_body(CpuState *s) {
+    (void)s;
+    if (s_tcb[s_cur].entry == RH_WORKER) {
+        if (g_rh_runs++ == 0) {
+            g_hle_depth = 1;                    /* inside a late-import call */
+            sr_rt_phase = SR_RT_PHASE_SYSCALL;
+            sr_exec_tier = 1;
+            sched_exit_current(0);
+            return;
+        }
+        g_rh_depth_at_entry = g_hle_depth;
+        return;
+    }
+    uint32_t worker = sched_create_thread(RH_WORKER, 20, 0);
+    sched_start_thread(worker, 0, 0);
+    sched_delay_current(100u);                  /* the stronger worker runs and exits */
+    expect(sched_start_thread(worker, 0, 0) == 0u, "restart: the exited worker starts again");
+    const TCB *t = tcb_by_uid(worker);
+    g_rh_saved_depth = t ? t->hle_depth : -1;
+    g_rh_saved_phase = t ? t->rt_phase : -1;
+    g_rh_saved_tier = t ? t->exec_tier : -1;
+    sched_delay_current(100u);                  /* the restarted worker runs */
+    g_rh_done = 1;
+}
+static int restart_hle_depth_stop(void) { return g_rh_done; }
+
+static void test_restart_resets_the_saved_call_state(void) {
+    reset_sched();
+    begin_clock_fixture(0, 0u);
+    disable_vblank_sources();
+    g_rh_runs = 0;
+    g_rh_done = 0;
+    g_rh_depth_at_entry = -1;
+    g_rh_saved_depth = g_rh_saved_phase = g_rh_saved_tier = -1;
+    g_test_body = restart_hle_depth_body;
+    sr_sched_stop_requested = restart_hle_depth_stop;
+    sched_run(RH_ROOT, 0u, 0u);
+    sr_sched_stop_requested = NULL;
+    s_host_ns_fn = NULL;
+    g_hle_depth = 0;
+    sr_exec_tier = 0;
+    expect(g_rh_runs == 2, "restart: the worker ran twice");
+    expect(g_rh_saved_depth == 0 && g_rh_saved_phase == SR_RT_PHASE_OTHER &&
+               g_rh_saved_tier == SR_EXEC_TIER_NONE,
+           "restart: the saved HLE depth, phase and tier are the creation values");
+    expect(g_rh_depth_at_entry == 0, "restart: the new body runs inside no HLE call");
+}
+
+/* The argument block is copied as scalar loads at argp see it: through the swizzled 0x042 VRAM
+ * view, a block that crosses a 64-byte swizzle block takes its second half from another place in
+ * physical VRAM than a linear copy from the first byte would.
+ * MUTANT: copy with one memmove from SR_HOST(argp) again -- the bytes past 0x04200040 differ. */
+static void test_start_thread_copies_arguments_through_a_vram_mirror(void) {
+    reset_sched();
+    for (uint32_t i = 0; i < 0x4000u; i++) *SR_HOST(0x04000000u + i) = (uint8_t)(i ^ (i >> 8));
+    const uint32_t argp = 0x04200030u, len = 0x20u;
+    uint32_t uid = sched_create_thread(0x2000u, 32, 0x4000u);
+    expect(uid != 0u && sched_start_thread(uid, len, argp) == 0u,
+           "argument copy: the thread starts with a VRAM-mirror argument block");
+    const TCB *t = tcb_by_uid(uid);
+    int same = t && t->argp != 0u && t->arglen == len;
+    for (uint32_t i = 0; same && i < len; i++)
+        same = *SR_HOST(t->argp + i) == *SR_HOST(argp + i);
+    expect(same, "argument copy: the thread's block holds the bytes scalar loads at argp return");
+}
+
+/* The arena's free-range table holds a range per live extent, High blocks included: threads and
+ * High blocks freed out of order leave more holes than MAXTHREADS + 1, and every one of those frees
+ * succeeds on a PSP. A split that needs a slot in the fragmented table still fits, and a release
+ * that touches a free neighbour coalesces without one.
+ * MUTANT: size SR_STACK_RANGE_MAX as MAXTHREADS + 1 -- the 129th isolated free aborts the run. */
+static void test_arena_range_table_holds_high_blocks_and_stacks(void) {
+    enum { HB_N = 256, HB_SIZE = 0x100 };
+    static uint32_t high[HB_N], stack[MAXTHREADS];
+    reset_sched();
+    int ok = 1;
+    for (int i = 0; i < HB_N; i++) {   /* from the top: H S H S ... (MAXTHREADS pairs), then H H ... */
+        ok &= sched_partition_alloc_high(HB_SIZE, SR_STACK_ARENA_CEIL, &high[i]);
+        if (i < MAXTHREADS) ok &= stack_range_alloc(HB_SIZE, &stack[i]);
+    }
+    expect(ok && s_stack_free_count == 1, "256 High blocks and 128 stacks are carved from one range");
+    for (int i = 0; i < MAXTHREADS; i++) sched_partition_release_high(high[i], HB_SIZE);
+    for (int i = MAXTHREADS; i < HB_N; i += 2) sched_partition_release_high(high[i], HB_SIZE);
+    expect(s_stack_free_count == 1 + MAXTHREADS + (HB_N - MAXTHREADS) / 2,
+           "every isolated free is a range of its own: 193, more than MAXTHREADS + 1");
+    uint32_t mid = 0u;
+    expect(sched_partition_alloc_high(HB_SIZE, SR_STACK_ARENA_FLOOR + 0x10000u, &mid) &&
+               mid == SR_STACK_ARENA_FLOOR + 0x10000u - HB_SIZE,
+           "a High block that splits a range still gets a slot in the fragmented table");
+    const int count_split = s_stack_free_count;
+    sched_partition_release_high(mid, HB_SIZE);
+    expect(s_stack_free_count == count_split - 1, "a release between two free ranges joins both");
+    for (int i = 0; i < MAXTHREADS; i++) stack_range_return(stack[i], HB_SIZE);
+    for (int i = MAXTHREADS + 1; i < HB_N; i += 2) sched_partition_release_high(high[i], HB_SIZE);
+    expect(s_stack_free_count == 1 && s_stack_free[0].base == SR_STACK_ARENA_FLOOR &&
+               s_stack_free[0].size == SR_STACK_ARENA_CEIL - SR_STACK_ARENA_FLOOR,
+           "with every extent back the arena is one range again");
+}
+
+/* A create that fails on the MAXTHREADS reclaim path leaves the reused slot reclaimable: no UID
+ * was handed out, so no lookup may find it and the next create can take it again.
+ * MUTANT: drop `t->deleted = 1` from the stack-failure path of sched_create_thread_finish -- the
+ * slot stays a live DORMANT thread and the next create finds no slot. */
+static void test_failed_create_on_a_reused_slot_frees_it(void) {
+    reset_sched();
+    for (int i = 0; i < MAXTHREADS; i++) (void)mk(0x400u + (uint32_t)i, TH_READY, 32);
+    s_tcb[5].deleted = 1;
+    s_tcb[5].state = TH_DORMANT;
+    fprintf(stderr, "(expected: one 'exceeds available free guest stack ranges' line follows)\n");
+    expect(sched_create_thread(0x9400u, 32, 0x10000000u) == 0u,
+           "an oversized stack fails the create on the reuse path");
+    expect(s_tcb[5].deleted && s_ntcb == MAXTHREADS,
+           "the reused slot is deleted again, not a phantom DORMANT thread");
+    uint32_t again = sched_create_thread(0x9404u, 32, 0x1000u);
+    expect(again != 0u && index_of_uid(again) == 5, "the next create reclaims the same slot");
 }
 
 /* Thread stacks and the user partition share PSP user RAM. The partition ends at the
@@ -3955,6 +4258,33 @@ static void test_masked_window_keeps_the_enabled_backlog(void) {
     s_host_ns_fn = NULL;
 }
 
+/* A VBLANK handler that returns with interrupts masked cuts its batch short. The episodes it did
+ * not take were each credited to VCOUNT when they were latched, so they stay owed as episodes and
+ * resume delivers every one of them, with no second VCOUNT credit.
+ * MUTANT: restore `s_pending_vblanks = episodes - i - 1u` with the masked flag for a zero rest --
+ * N=3 delivers two episodes, N=2 credits VCOUNT three. */
+static void test_handler_mask_mid_batch_keeps_the_rest_owed(void) {
+    for (uint32_t n = 2u; n <= 3u; n++) {
+        reset_sched();
+        s_pace_on = 0;
+        disable_vblank_sources();
+        s_cur = mk(0x41cu, TH_RUNNING, 40);
+        g_test_vblank_handler = 0x00001234u;
+        g_test_vblank_no = 0u;
+        s_pending_vblanks = n;          /* as the latch leaves n elapsed periods... */
+        g_test_vcount = n;              /* ...each one credited to VCOUNT */
+        g_test_handler_mask_at = 1u;    /* the first episode's handler masks */
+        scheduler_service_pending();
+        expect(g_test_handler_calls == 1u && !s_interrupts_enabled,
+               "mid-batch mask: the batch stops after the handler that masked");
+        expect(s_pending_vblanks == n - 1u && !s_vblank_masked_pending,
+               "mid-batch mask: the episodes not taken stay owed as episodes");
+        sched_resume_interrupts(1u);
+        expect(g_test_handler_calls == n, "mid-batch mask: resume delivers every owed episode");
+        expect(g_test_vcount == n, "mid-batch mask: VCOUNT is not credited twice for a period");
+    }
+}
+
 /* An unrepresentable elapsed-period count is a named collapse, not a replay storm.
  *
  * The owed count has to stay a count the runtime can deliver.  A saturated guest
@@ -4338,16 +4668,22 @@ static void test_liveness_interrupt_wake_enters_scheduler(void) {
            "the liveness trace records both interrupt entry and object wake ownership");
 }
 
+/* A two-slot queue whose producer parks on NOT_FULL and whose consumer parks on NOT_EMPTY.
+ * The test only parks a thread (the state a blocking call leaves); every release is the
+ * scheduler's own sched_wake, and the wait set is read back through sched_count_waiters
+ * right after each wake, so the membership checks see production bookkeeping.
+ * MUTANT: make sched_wake a no-op -- the parked peer stays in its wait set and the
+ *   "wake readies" and "no membership left behind" checks fail. */
 static void test_liveness_queue_full_and_empty_without_spin(void) {
     reset_sched();
     int producer = mk(0x36fu, TH_READY, 32);
     int consumer = mk(0x370u, TH_READY, 32);
-    int queue[2] = {0, 0};
     int count = 0;
     int producer_attempts = 0;
     int consumer_attempts = 0;
     int producer_waited = 0;
     int consumer_waited = 0;
+    int wakes_ok = 1;
     for (int step = 0; step < 12; step++) {
         if (s_tcb[producer].state != TH_WAIT_OBJ) {
             if (count == 2) {
@@ -4356,38 +4692,42 @@ static void test_liveness_queue_full_and_empty_without_spin(void) {
                 producer_waited++;
             } else {
                 producer_attempts++;
-                queue[count++] = step;
+                count++;
+                const int consumer_parked = s_tcb[consumer].state == TH_WAIT_OBJ;
                 sched_wake(LIVENESS_QUEUE_NOT_EMPTY);
-                if (s_tcb[consumer].state == TH_WAIT_OBJ) {
-                    s_tcb[consumer].state = TH_READY;
-                    s_tcb[consumer].wait_obj = 0;
-                }
+                wakes_ok &= sched_count_waiters(LIVENESS_QUEUE_NOT_EMPTY) == 0;
+                if (consumer_parked) wakes_ok &= s_tcb[consumer].state == TH_READY;
             }
         }
-        if ((step & 1) != 0 && count > 0) {
+        if ((step & 1) != 0 && count > 0 && s_tcb[consumer].state != TH_WAIT_OBJ) {
             consumer_attempts++;
-            (void)queue[--count];
+            count--;
             if (step >= 7 && count > 0) {
                 consumer_attempts++;
-                (void)queue[--count];
+                count--;
             }
+            const int producer_parked = s_tcb[producer].state == TH_WAIT_OBJ;
             sched_wake(LIVENESS_QUEUE_NOT_FULL);
-            if (s_tcb[producer].state == TH_WAIT_OBJ) {
-                s_tcb[producer].state = TH_READY;
-                s_tcb[producer].wait_obj = 0;
-            }
+            wakes_ok &= sched_count_waiters(LIVENESS_QUEUE_NOT_FULL) == 0;
+            if (producer_parked) wakes_ok &= s_tcb[producer].state == TH_READY;
         }
-        if (count == 0) {
+        if (count == 0 && s_tcb[consumer].state != TH_WAIT_OBJ) {
             s_tcb[consumer].state = TH_WAIT_OBJ;
             s_tcb[consumer].wait_obj = LIVENESS_QUEUE_NOT_EMPTY;
             consumer_waited++;
         }
-        expect(count >= 0 && count <= 2, "bounded queue never exceeds its capacity");
     }
+    /* Drain: a parked consumer is released by one more item, through sched_wake alone. */
     if (s_tcb[consumer].state == TH_WAIT_OBJ) {
-        s_tcb[consumer].state = TH_READY;
-        s_tcb[consumer].wait_obj = 0;
+        producer_attempts++;
+        count++;
+        sched_wake(LIVENESS_QUEUE_NOT_EMPTY);
+        wakes_ok &= s_tcb[consumer].state == TH_READY;
     }
+    expect(wakes_ok,
+           "each sched_wake readies the parked peer and empties that object's wait set");
+    expect(s_tcb[producer].state == TH_READY && s_tcb[consumer].state == TH_READY,
+           "queue workload ends with both threads released by the scheduler");
     expect(producer_attempts > 0 && consumer_attempts > 0,
            "queue workload performs bounded producer and consumer progress");
     expect(producer_waited > 0 && consumer_waited > 0,
@@ -4408,7 +4748,12 @@ static void test_liveness_sole_runnable_becomes_nonsole(void) {
     expect(pick_next() == current,
            "the sole runnable thread owns the first scheduling decision");
     s_tcb[current].state = TH_RUNNING;
-    s_tcb[newcomer].state = TH_READY;
+    sched_wake(LIVENESS_SEMA_OBJ);
+    SrSchedLivenessSnapshot snap;
+    sched_liveness_snapshot(&snap);
+    expect(s_tcb[newcomer].state == TH_READY && sched_count_waiters(LIVENESS_SEMA_OBJ) == 0 &&
+               snap.wake_transitions == 1 && snap.waiters_readied == 1,
+           "the wake readies the parked newcomer and records one wake");
     sched_preempt();
     expect(s_tcb[current].state == TH_READY && pick_next() == newcomer,
            "a sole runnable thread yields when a higher-priority peer becomes runnable");
@@ -4674,7 +5019,7 @@ static void test_flight_recorder_thread_snapshot(void) {
     if (file) fclose(file);
     bundle[size] = '\0';
     expect(size > 0u && strstr(bundle, "\"schema_version\": 7") != NULL,
-           "thread snapshot: the bundle is schema 6");
+           "thread snapshot: the bundle is schema 7");
     expect(strstr(bundle, "\"threads\": [") != NULL, "thread snapshot: the bundle has a threads block");
 
     snprintf(needle, sizeof(needle),
@@ -5704,6 +6049,81 @@ static void test_ge_timing_completion_is_an_idle_wake_source(void) {
            "GE timing: with no hooks registered the scheduler is unchanged");
 }
 
+/* Turbo idle jump to a VTimer deadline: the jump reaches it and the handler, which releases the
+ * only waiter, runs from the service step; the run does not end as a deadlock. The deadline lies
+ * beyond the next VBLANK, so the idle wait steps a display period first and the jump in sched_run
+ * is what reaches it.
+ * MUTANT: drop scheduler_vtimer_due() from the service guard after the turbo jump in sched_run --
+ * the run stops with 'no runnable threads left after time jump' and the waiter never resumes. */
+enum { VTJ_ENTRY = 0x09360000u, VTJ_OBJ = 0x5300a001u };
+static uint64_t g_vtj_deadline = SCHED_WAIT_FOREVER;
+static unsigned g_vtj_calls;
+static int g_vtj_resumed;
+static uint64_t vtj_next_deadline(void) { return g_vtj_deadline; }
+static void vtj_service_one(void) {
+    g_vtj_calls++;
+    g_vtj_deadline = SCHED_WAIT_FOREVER;
+    sched_wake(VTJ_OBJ);
+}
+static void vtimer_jump_body(CpuState *s) {
+    (void)s;
+    g_vtj_deadline = s_vtime_us + 50000u;   /* three display periods ahead */
+    sched_block_on(VTJ_OBJ);
+    g_vtj_resumed = 1;
+}
+
+static void test_turbo_jump_services_a_vtimer_deadline(void) {
+    reset_sched();
+    begin_clock_fixture(0, 0u);   /* turbo, with the VBLANK source live */
+    g_vtj_deadline = SCHED_WAIT_FOREVER;
+    g_vtj_calls = 0;
+    g_vtj_resumed = 0;
+    sched_set_vtimer_hooks(vtj_next_deadline, vtj_service_one);
+    g_test_body = vtimer_jump_body;
+    sched_run(VTJ_ENTRY, 0u, 0u);
+    sched_set_vtimer_hooks(NULL, NULL);
+    s_host_ns_fn = NULL;
+    expect(g_vtj_calls == 1u, "turbo jump: the VTimer handler runs at its deadline");
+    expect(g_vtj_resumed, "turbo jump: the waiter it released resumes instead of a deadlock stop");
+}
+
+/* sr_yield's turbo jump for a lone runner stops at a GE completion as it does at an alarm, a
+ * VTimer or a transfer: with a sleeper 100 ms out and a list finishing 15 ms out, guest time goes
+ * to the completion, not past it.
+ * MUTANT: leave the GE deadline out of the jump in sr_yield -- the completion is delivered at the
+ *   sleeper's deadline, about 85 ms late. */
+enum { GJ_ROOT = 0x09370000u, GJ_SLEEPER = 0x09370100u, GJ_GE_AHEAD_US = 15000u };
+static int g_gj_done;
+static uint64_t g_gj_from;
+static void ge_yield_jump_body(CpuState *s) {
+    if (s_tcb[s_cur].entry == GJ_SLEEPER) {
+        while (!g_gj_done) sched_delay_current(100000u);
+        return;
+    }
+    uint32_t sleeper = sched_create_thread(GJ_SLEEPER, 20, 0);
+    sched_start_thread(sleeper, 0, 0);
+    sr_yield(s);                                /* the stronger sleeper runs and parks */
+    g_gj_from = s_vtime_us;
+    g_ge_fake_deadline = s_vtime_us + GJ_GE_AHEAD_US;
+    sr_yield(s);                                /* alone: the turbo jump */
+    g_gj_done = 1;
+}
+static int ge_yield_jump_stop(void) { return g_gj_done; }
+
+static void test_turbo_yield_jump_stops_at_a_ge_completion(void) {
+    ge_timing_fixture();                        /* turbo, VBLANK sources off */
+    g_gj_done = 0;
+    g_gj_from = 0;
+    g_test_body = ge_yield_jump_body;
+    sr_sched_stop_requested = ge_yield_jump_stop;
+    sched_run(GJ_ROOT, 0u, 0u);
+    sr_sched_stop_requested = NULL;
+    sched_set_ge_timing_hooks(NULL, NULL);
+    s_host_ns_fn = NULL;
+    expect(g_ge_fake_calls == 1u && g_ge_fake_seen_time == g_gj_from + GJ_GE_AHEAD_US,
+           "turbo jump: a lone runner's yield takes guest time to the GE completion, not past it");
+}
+
 static void test_alarm_table_capacity_and_reset(void) {
     alarm_fixture();
     uint32_t uids[SCHED_ALARM_MAX];
@@ -6157,6 +6577,15 @@ static void test_pause_s11_refusal_verdicts(void) {
         "SR_PADSCRIPT", "SR_EXIT_AT_VBLANK", "SR_HEADLESS_ACCEPT_PRESENTED_FRAMES",
         "SR_PAUSE_SCRIPT"
     };
+    enum { AUTOMATION_COUNT = sizeof(automation) / sizeof(automation[0]) };
+    char keep[AUTOMATION_COUNT][256];
+    int had[AUTOMATION_COUNT];
+    for (size_t i = 0; i < AUTOMATION_COUNT; i++) {
+        const char *v = getenv(automation[i]);
+        had[i] = v != NULL;
+        keep[i][0] = '\0';
+        if (v) snprintf(keep[i], sizeof(keep[i]), "%s", v);
+    }
     pause_test_reset(1, 2000u);
     const uint64_t host_before = g_test_host_ns;
     s_vtime_us = 1234u;
@@ -6190,6 +6619,8 @@ static void test_pause_s11_refusal_verdicts(void) {
     expect(s_vtime_us == time_before && g_test_host_ns == host_before &&
            g_pause_test_audio_enters == 0 && g_pause_test_audio_leaves == 0,
            "S11 refusal paths do not change guest time, host time or audio state");
+    for (size_t i = 0; i < AUTOMATION_COUNT; i++)
+        pause_test_set_env(automation[i], had[i] ? keep[i] : NULL);
 }
 
 static void pause_collect_turbo_sequence(int include_pause, uint64_t times[50], uint64_t vblanks[50]) {
@@ -6613,6 +7044,45 @@ static void test_fast_forward_paces_the_guest_clock(void) {
     g_ace_on = ace_was;
 }
 
+/* The preemption timer compares its deadline with the host clock, so what it is handed is the
+ * host time of the stronger waiter's guest deadline. After a fast-forward span the paced clock
+ * runs ahead of the host clock, and while fast forward is on a paced interval takes a share of
+ * host time.
+ * MUTANT: publish s_clock_epoch_ns + wake_us * 1000 again -- after 10 ms of fast forward the
+ *   deadline is 20 ms of host time late. MUTANT: drop sched_preempt_timer_rearm() from
+ *   pace_set_speed -- at the speed change the deadline keeps its host time at the old speed. */
+static void test_preempt_timer_deadline_is_a_host_time_after_fast_forward(void) {
+    reset_sched();
+    ff_reset();
+    begin_clock_fixture(1, 1000u);
+    disable_vblank_sources();
+    s_preempt_timer_mode = SCHED_PREEMPT_TIMER_MANUAL;
+    s_preempt_timer_at_ns = UINT64_MAX;
+    s_preempt_timer_published = UINT64_MAX;
+    pace_set_speed(SCHED_FAST_FORWARD_SPEED);   /* 10 ms of host time in fast forward */
+    set_host_us(11000u);
+    pace_set_speed(1u);
+    expect(pace_ns() - g_test_host_ns == 10000000ull * (SCHED_FAST_FORWARD_SPEED - 1u),
+           "preempt timer: after the span the paced clock is ahead of the host clock");
+    const int runner = mk(0x3a0u, TH_RUNNING, 32);
+    const int waiter = mk(0x3a1u, TH_WAIT_DELAY, 16);
+    s_cur = runner;
+    s_tcb[waiter].wake = host_us() + 5000u;
+    sched_preempt_timer_arm();
+    expect(s_preempt_timer_at_ns == g_test_host_ns + 5000000u,
+           "preempt timer: a deadline 5 ms of guest time away is 5 ms of host time away");
+    pace_set_speed(SCHED_FAST_FORWARD_SPEED);
+    expect(s_preempt_timer_at_ns == g_test_host_ns + 5000000u / SCHED_FAST_FORWARD_SPEED,
+           "preempt timer: in fast forward the same deadline is re-armed at its share of host time");
+    pace_set_speed(1u);
+    s_preempt_timer_mode = SCHED_PREEMPT_TIMER_OFF;
+    s_preempt_timer_at_ns = UINT64_MAX;
+    s_preempt_timer_published = UINT64_MAX;
+    s_cur = -1;
+    ff_reset();
+    s_host_ns_fn = NULL;
+}
+
 int main(int argc, char **argv) {
     g_self_path = argv[0];
     if (argc > 1 && strcmp(argv[1], "--test-pace-setup") == 0) {
@@ -6663,6 +7133,7 @@ int main(int argc, char **argv) {
     test_blocked_excluded_until_wake();
     test_transfer_window_lasts_its_duration();
     test_transfer_queue_is_arrival_order();
+    test_transfer_forgets_a_terminated_waiter();
     test_dormant_excluded();
     test_current_becomes_nonrunnable();
     test_timed_wait_promotion();
@@ -6677,6 +7148,7 @@ int main(int argc, char **argv) {
     test_explicit_exit_status((uint32_t)-17, 0x800200d2u);
     test_explicit_exit_status(0x78u, 0x78u);
     test_terminate_thread_excluded_after();
+    test_terminate_thread_refused_in_interrupt_context();
     test_delete_and_terminate_delete_contract();
     test_role_uid_capture();
     test_title_config_foreign_entries_are_inert();
@@ -6691,8 +7163,12 @@ int main(int argc, char **argv) {
     test_root_capture_without_a_historical_default();
     test_uid_zero_is_never_a_role();
     test_stack_exhaustion_fails_create();
+    test_restart_resets_the_saved_call_state();
+    test_start_thread_copies_arguments_through_a_vram_mirror();
     test_stack_floor_and_partition_overlap();
     test_stack_placement_prefers_the_highest_free_block();
+    test_arena_range_table_holds_high_blocks_and_stacks();
+    test_failed_create_on_a_reused_slot_frees_it();
     test_libc_thread_relocation();
     test_coro_self_switch_and_park();
     test_service_thread_waits_calls_and_ends();
@@ -6725,15 +7201,18 @@ int main(int argc, char **argv) {
     test_deterministic_clock_environment_is_validated();
     test_stop_raised_in_a_pause_resumes_no_thread();
     test_module_start_thread_uses_declared_parameters();
+    test_module_start_thread_create_failure_stops_by_name();
     test_module_start_thread_is_deleted_on_return();
     test_paced_vtime_is_host_anchored();
     test_fast_forward_paces_the_guest_clock();
+    test_preempt_timer_deadline_is_a_host_time_after_fast_forward();
     test_idle_wait_runs_a_wait_that_came_due();
     test_idle_virtual_clock_stops_at_a_deadline_before_the_vblank();
     test_host_work_runs_off_the_scheduler_thread();
     test_paced_vblank_has_one_authority();
     test_busy_guest_observes_every_display_period();
     test_masked_window_keeps_the_enabled_backlog();
+    test_handler_mask_mid_batch_keeps_the_rest_owed();
     test_threads_that_never_idle_still_reach_the_next_vblank();
     test_saturated_source_owes_one_deliverable_episode();
     test_expired_timed_wait_enters_strict_priority();
@@ -6777,6 +7256,8 @@ int main(int argc, char **argv) {
     test_ge_timing_completion_is_an_interrupt_source();
     test_ge_timing_completion_is_an_idle_wake_source();
     test_alarm_table_capacity_and_reset();
+    test_turbo_jump_services_a_vtimer_deadline();
+    test_turbo_yield_jump_stops_at_a_ge_completion();
 
     /* Player pause: each case maps to the mutation in the reviewed contract. */
     test_pause_s1_frozen_system_time();

@@ -1712,7 +1712,8 @@ static void player_report_shutdown(void) {
 }
 
 /* The Settings controls. Each change is saved as it is made. */
-static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size_t arg) {
+static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size_t arg,
+                                     int choice_index) {
     switch (op) {
         case PLAYER_UI_SETTINGS_CHECK_UPDATES:
             player_app_set_view(app, VIEW_UPDATES);
@@ -1748,6 +1749,9 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
             break;
         case PLAYER_UI_SETTINGS_TOGGLE_COVER_ART:
             player_app_toggle_download_cover_art(app);
+            break;
+        case PLAYER_UI_SETTINGS_TOGGLE_CHEATS:
+            player_app_toggle_cheats(app);
             break;
         case PLAYER_UI_SETTINGS_REFRESH_COVER_ART:
             app->request_cover_art_refresh = true;
@@ -1792,7 +1796,9 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_TOGGLE_VSYNC: player_app_toggle_vsync(app); break;
         case PLAYER_UI_SETTINGS_TOGGLE_FULLSCREEN: player_app_toggle_fullscreen(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_SCALING: player_app_cycle_present_scaling(app, 1); break;
-        case PLAYER_UI_SETTINGS_CYCLE_PRESET: player_app_cycle_graphics_preset(app, 1); break;
+        case PLAYER_UI_SETTINGS_CYCLE_PRESET:
+            player_app_cycle_graphics_preset(app, choice_index < 0 ? -1 : 1);
+            break;
         case PLAYER_UI_SETTINGS_VOLUME_DOWN: player_app_adjust_volume(app, -5); break;
         case PLAYER_UI_SETTINGS_VOLUME_UP: player_app_adjust_volume(app, 5); break;
         case PLAYER_UI_SETTINGS_TOGGLE_UI_SOUNDS: player_app_toggle_ui_sounds(app); break;
@@ -1812,6 +1818,13 @@ static void player_ui_settings_apply(PlayerApp *app, PlayerUiSettingsOp op, size
         case PLAYER_UI_SETTINGS_CYCLE_PLAY_MODE: player_app_enhanced_page_cycle_mode(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_ENHANCED_PART:
             if (arg < (size_t)PLAYER_PART_COUNT) player_app_enhanced_page_cycle_part(app, (int)arg);
+            break;
+        case PLAYER_UI_SETTINGS_SET_PLAY_MODE:
+            player_app_enhanced_page_set_mode(app, choice_index);
+            break;
+        case PLAYER_UI_SETTINGS_SET_ENHANCED_PART:
+            if (arg < (size_t)PLAYER_PART_COUNT)
+                player_app_enhanced_page_set_part(app, (int)arg, choice_index);
             break;
         case PLAYER_UI_SETTINGS_CYCLE_HIGH_CONTRAST: player_app_cycle_high_contrast_focus(app); break;
         case PLAYER_UI_SETTINGS_CYCLE_REDUCE_MOTION: player_app_cycle_reduce_motion(app); break;
@@ -2021,7 +2034,8 @@ static void player_ui_nk_apply_action(PlayerApp *app,
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_SETTINGS) {
-        player_ui_settings_apply(app, (PlayerUiSettingsOp)action->primary, action->title_index);
+        player_ui_settings_apply(app, (PlayerUiSettingsOp)action->primary, action->title_index,
+                                 action->choice_index);
         return;
     }
     if (action->kind == PLAYER_UI_ACTION_CONTROLLER) {
@@ -2250,7 +2264,7 @@ static void player_ui_nk_apply_action(PlayerApp *app,
 /* nk_ui draws the frame at the window's real size, from the output's pixels. */
 static void player_render_active_ui(PlayerUiNk *next_ui, PlayerApp *app,
                                     SDL_Renderer *renderer, SDL_Window *window) {
-    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u};
+    PlayerUiAction action = {PLAYER_UI_ACTION_NONE, PLAYER_UI_PRIMARY_NONE, 0u, -1};
     bool drawn = player_ui_nk_view_active(next_ui, app) &&
                  player_ui_nk_render(next_ui, app, renderer, window, &action);
     /* An action the frame committed (its dialog already closed) runs even when
@@ -4372,10 +4386,20 @@ static int player_parse_command_line(PlayerRun *run, int argc, char *argv[]) {
                    "[--launch-index=N | --launch-title=<disc ID>] [--headless-launch] "
                    "[--headless-accept-presented-frames=N] "
                    "[--headless-timeout-ms=N] "
-                   "[--experimental-60hz]\n");
+                   "[--experimental-60hz] "
+                   "[--cheats | --cheats-file=<path>]\n");
             return 0;
         } else if (strcmp(argv[i], "--experimental-60hz") == 0) {
             player_app_set_experimental_60hz_session(app, true);
+        } else if (strcmp(argv[i], "--cheats") == 0) {
+            /* Cheats on for this session (#2639), from each game's own file. A file named by
+               --cheats-file, before or after, stays the one read. */
+            if (!app->cheats_session) (void)player_app_set_cheats_session(app, NULL);
+        } else if (strncmp(argv[i], "--cheats-file=", 14) == 0) {
+            if (!argv[i][14] || !player_app_set_cheats_session(app, argv[i] + 14)) {
+                fprintf(stderr, "[PLAYER] --cheats-file must name a cheat file that exists.\n");
+                return 2;
+            }
 #ifdef NK_PLAYER_UI_REGRESSION_TEST
         } else if (player_ui_test_parse_arg(&run->ui_test, argv[i])) {
             /* A --ui-test-* option, taken by the harness. */

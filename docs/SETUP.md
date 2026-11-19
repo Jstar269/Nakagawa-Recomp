@@ -87,6 +87,14 @@ Measured on a Windows 11 x64 PC building and running Hot Shots Tennis with the p
   1 to 8 before starting the player: it replaces the speed's job count (a Background build stays
   at low priority), and the build log and screen say so. `nk_cli.py build-package` takes the
   same speeds as `--build-speed`.
+- **Enhanced options page.** The shared Graphics preset and Play mode stay above six tabs: Picture, Motion, Sound,
+  Controls, On-screen and Advanced. The same tabs appear on the library and each game's Enhanced options page. Each
+  option is one row with all of its values. Up and Down move from row to row, Left and Right change the focused
+  row's value, and a click picks a value; Q and E, or a controller's shoulder buttons, change tabs. A panel on the
+  right shows the focused option's value, description and caveats, and the graphics preset's note. On a game's page,
+  inherited values appear as `Library (value)` and a game's own value is highlighted. Ace-only options carry a tag,
+  and options that cannot apply as the page stands stay visible but dimmed, with the reason in the panel. Frame
+  pacing is on Motion. A game's Texture pack folder and Remove texture pack rows are the last rows of Picture.
 - **Texture scaling and the Smart 2D filter.** Two parts of Enhanced and Ace, off by default and in no graphics
   preset: Settings > Enhanced offers **Texture scaling** (2x to 6x, or Off) and **Smart 2D filter** (On or Off), for
   the library or for one game. Texture scaling draws each texture from a larger copy made with xBRZ. The Smart 2D
@@ -1164,6 +1172,168 @@ even while a frame is slow.
 
 The full `make verify` command needs external trace data that is not in the repository. Missing `CODEGEN_ORACLE`, `MICROTEST_MODULE`, or `MICROTEST_ORACLE` inputs report `NOT_RUN` with a non-zero result. The hardware differential gate is optional: with neither `PSP_HARDWARE_TRACE` nor `LOCAL_COSIM_TRACE` it reports `NOT_RUN` without changing the result, supplying only one fails, and a matching pair reports `STRICT_V2_AGREEMENT` from the traces' own tier metadata, which is not device attestation. Legacy v1 and `PPSSPP_CORROBORATIVE` traces are corroborative only for hardware evidence.
 
+### Cheats (CWCheat files)
+
+Cheats are off unless you turn them on ([#2639](https://github.com/Jstar269/nakagawa-recomp/issues/2639)).
+The project ships no cheats and downloads none: you supply the file, as text in the CWCheat format
+that PPSSPP's per-game cheat files and `cheat.db` use.
+
+**Where the file goes.** One file per game, named by the disc ID without its hyphen, in the
+`cheats` folder of the user data folder (create the folder if it is not there):
+
+```text
+<user data>/cheats/<DISC_ID>.ini      for example  <user data>/cheats/ULUS12345.ini
+```
+
+**Turning them on.** Either of:
+
+- **Cheats** on Settings > Online and developer options in the player (off by default; stored as
+  the optional `"cheats"` key of `settings.json`).
+- `nakagawa_player --cheats`, for that session only, or `nakagawa_player --cheats-file=<path>`
+  to read one file you name instead of the game's own (the file must exist). Neither is saved.
+
+The launcher then starts the game with `SR_CHEATS=1` and `SR_CHEATS_FILE=<the file>`. It
+exports both for every game it starts (`SR_CHEATS=0` and an empty file name while cheats are off),
+so a value left in your environment never turns cheats on. With cheats off the runtime opens no
+cheat file and writes nothing.
+
+**The file.**
+
+```text
+_S ULUS-12345
+_G The game's name
+_C1 A cheat that is on
+_L 0x20001234 0x000003E7
+_C0 A cheat that is off
+_L 0x10001238 0x00000063
+```
+
+`_S` names the disc the lines after it are for (hyphens and letter case do not count; a file with
+no `_S` line is for the game it is read for, and cheats under another disc's `_S` are counted
+and left out). `_G` is the game's name and is not read. `_C0` starts a cheat that is off and
+`_C1` one that is on; each `_L` line under it is one code line of two hexadecimal words. `//`
+and `#` start a comment. To turn a cheat on or off, change its `_C0` or `_C1` and start the
+game again. A `_C0` or `_C1` line with no name after it starts no cheat, as in PPSSPP: the log
+notes it, and the `_L` lines after it stay with the cheat before it.
+
+**While a cheat is on** the game's window shows a marker at its top left, `Cheats on: 2`, or
+`Cheats on: 2 (1 refused)` when the file also turned on a cheat that cannot run. The marker cannot
+be hidden. It is drawn on the window only, not into captures, recordings or the game's own frame.
+The run's log says what the file held and names every refusal on lines that start `CHEATS:`.
+
+**When they apply.** The cheats that are on are applied once per VBLANK, 59.94 times a second,
+after that VBLANK's interrupt handlers and its pad sample. A button condition reads that sample,
+which is the one the game reads next. The one exception is an Ace run with late pad sampling
+(`pad=late`), which may refresh the sample after the VBLANK and before the game reads it: the
+condition was then tested on the earlier state, one frame's difference.
+
+PPSSPP applies a cheat file on a timer instead, every 77 ms of emulated time unless you change its
+refresh interval, about 13 times a second. A code that sets a value behaves the same at either
+rate. A code that changes a value every time it runs (the `0x3` add and subtract forms, a `0x7`
+XOR) changes it about 4.6 times as often here as in PPSSPP at that default, so a cheat tuned to
+PPSSPP's timer counts faster here. There is no setting for the rate.
+
+A cheat applies whole on a VBLANK or not at all: when a pointer it follows leads outside user
+memory or into the game's code on some VBLANK, what it had already written on that VBLANK is put
+back and the cheat is held until the pointer is usable again. The log says so once for each
+cause, and once when the cheat first applies again; a cheat that is held and released again and
+again adds no more lines, and the end of the run gives how many VBLANKs each such cheat was held
+and applied on.
+
+**Where an address is.** A code names a PSP address: `aaaaaaa` in the table below is an offset
+from `0x08800000`, and a game's own image starts at `0x08804000` on a PSP. For almost every game
+the package's memory is laid out the same way and an address is used as written. A few title
+profiles load the game's image at address 0 instead (a title manifest whose executable has
+`"base": 0`; Hot Shots Tennis, `UCUS98701`, is the one in this repository). There the image is
+somewhere else and so are the heap and the stacks, so:
+
+- an address inside the game's image (the data and variables the executable itself holds) is
+  moved with the image and the cheat works; a write into the image's code is refused there as
+  everywhere;
+- a cheat with an address anywhere else (memory the game allocates while it runs) is refused by
+  name, because where that memory is in such a run is not known and a cheat is never applied to a
+  guess;
+- a pointer cheat whose pointer is still null (before the game has set it up) is held: null plus
+  an offset is not an address the game set up, and offsets are not moved with the image, so in
+  such a run it could land on the moved image's own bytes or on its heap. A PSP holds the same
+  cheat only when the offset is below `0x08800000`, the start of user memory.
+
+The log says so at the start, on a line that begins `CHEATS: this game's image is at`. If the game
+starts another program (a launcher that loads the real game, for example), cheats stop from there
+on, by name: the file was read for the first program's memory.
+
+**Code forms that run.** `aaaaaaa` is an offset from `0x08800000`
+([where an address is](#cheats-cwcheat-files), above). Comparisons are unsigned.
+
+| First word, second word (and a following line) | What it does |
+| --- | --- |
+| `0x0aaaaaaa 0x000000vv` | writes 8 bits |
+| `0x1aaaaaaa 0x0000vvvv` | writes 16 bits |
+| `0x2aaaaaaa 0xvvvvvvvv` | writes 32 bits |
+| `0x301000vv 0x0aaaaaaa`, `0x302000vv 0x0aaaaaaa` | adds to, or subtracts from, 8 bits |
+| `0x3030vvvv 0x0aaaaaaa`, `0x3040vvvv 0x0aaaaaaa` | adds to, or subtracts from, 16 bits |
+| `0x30500000 0x0aaaaaaa` then `0xvvvvvvvv 0x00000000` (`0x306`: subtract) | adds to, or subtracts from, 32 bits |
+| `0x4aaaaaaa 0xnnnnssss` then `0xvvvvvvvv 0xiiiiiiii` | `nnnn` 32-bit writes, `ssss` * 4 bytes apart, the value growing by `iiiiiiii` each time |
+| `0x8aaaaaaa 0xnnnnssss` then `0x000000vv 0xiiiiiiii` | the same in 8 bits, `ssss` bytes apart |
+| `0x8aaaaaaa 0xnnnnssss` then `0x1000vvvv 0xiiiiiiii` | the same in 16 bits, `ssss` * 2 bytes apart |
+| `0x5aaaaaaa 0xnnnnnnnn` then `0x0bbbbbbb 0x00000000` | copies `nnnnnnnn` bytes from `a` to `b` (the two may not overlap) |
+| `0x6aaaaaaa 0xvvvvvvvv` then `0x000tnnnn 0xiiiiiiii` | through the pointer stored at `a`: writes `v` at pointer + `i` (`t` = 0, 1, 2 for 8, 16, 32 bits) or pointer - `i` (`t` = 3, 4, 5). `nnnn` - 1 more lines follow, each `0x2ooooooo` or `0x3ooooooo`: the pointer becomes the pointer stored at pointer + `o` or pointer - `o` |
+| `0x7aaaaaaa 0x000t00vv` or `0x000tvvvv` | OR (`t` = 0, 1), AND (2, 3) or XOR (4, 5) on 8 or 16 bits |
+| `0xDaaaaaaa 0x00c0vvvv` or `0x20c000vv` | runs the next line only if 16 or 8 bits at `a` are equal (`c` = 0), not equal (1), less (2) or greater (3) |
+| `0xD00000nn 0x1bbbbbbb` | runs the next `nn` + 1 lines only while every button of the mask is held (`0x3bbbbbbb`: unless they all are) |
+| `0xDaaaaaaa 0x4bbbbbbb` then `0xnnnnnnnn 0x0000000s` | runs the next `n` lines only if the values at `a` and `b` are equal (`0x5`: not equal, `0x6`: `a` less, `0x7`: `a` greater); `s` = 0, 1, 2 for 8, 16, 32 bits, the two orderings only in 8 and 16 bits |
+| `0xE0nnvvvv 0xcaaaaaaa`, `0xE1nn00vv 0xcaaaaaaa` | runs the next `nn` lines only if 16 or 8 bits at `a` compare as `c` says |
+
+**What is refused, and why.** A cheat with a line that cannot run exactly as written is refused
+whole when the file is read: none of its lines is applied, the log names the cheat, the line and
+the reason, and the marker counts it. Nothing is skipped silently and no cheat is half applied.
+The other cheats in the file still run.
+
+| Refused | Why |
+| --- | --- |
+| A line that is not `_L` and two hexadecimal words, or a cheat with no code line | it does not say what to do |
+| Code types `0x9`, `0xA`, `0xB`, `0xC` and `0xF`, and `_M` and `_N` lines | not supported: `0xA` is PPSSPP's own additions, `0xB` a delay and `0xC` a code stopper; `0x9` and `0xF` have no meaning in the reference |
+| A form above with digits set where it shows zeros, a value wider than the form holds, a count of 0 | the reference gives it no single meaning, so none is chosen |
+| The `0x6` pointer lines `0x1ooooooo` (copy) and `0x9ooooooo` (several addresses), and a `0x6` with a base offset | not supported |
+| A condition that guards no line, runs past the end of its cheat or ends inside a two-line code | half a code would run |
+| An address outside user memory (`0x08800000` up to `0x0C000000`), or a span that leaves it | cheats write the game's memory, never the kernel's, VRAM or anything past the end |
+| In a game whose image is loaded at address 0: an address outside the game's image | where that memory is in such a run is not known ([where an address is](#cheats-cwcheat-files)) |
+| A cheat that could write more than 1 MiB in one VBLANK | it cannot be put back if it has to be held |
+| A cheat that does not fit what the file's cheats may do in one VBLANK together: 16,384 writes, 1 MiB written and 16,384 codes, handed out in file order | the cheats run between two frames of the game, so their time is the game's; a file that asked for more used to stall the game without a word. Turn another cheat off to use the refused one |
+| Code lines past the 262,144 the reader keeps for one disc; cheats past the first 4,096 for one disc are not read and are counted | a file cannot make the game start with gigabytes of cheat records (the bound is about 20 MiB at the peak of reading a file and about 17 MiB after it, beside the file's own text; a file over 64 MiB is refused whole) |
+| A write that lands in the game's code (a "code write") | a recompiled game runs the code translated when its package was built and does not read its code from memory again, so the write could not change what the game does |
+
+The last row is the difference from an emulator that matters most: cheats that patch instructions
+(many "60 FPS" and "widescreen" codes) cannot work here, and are refused instead of doing nothing
+quietly. Cheats that write values (health, money, items, timers the game stores as data) work.
+
+**Runs that refuse every cheat**, each with a `CHEATS:` line saying so:
+
+- a run that records or replays (`SR_RECORD`, `SR_REPLAY`), because a recording has to replay
+  without a cheat file;
+- an acceptance checkpoint (`SR_HEADLESS_ACCEPT_PRESENTED_FRAMES`), which is evidence of the game
+  as it is. The player's `--headless-accept-presented-frames` starts its game without cheats, the
+  launcher refuses to start one with them, and a runtime started by hand refuses them itself;
+- a run in the GDI window (`SR_VIDEO=gdi`, or when Vulkan does not start), because that window
+  cannot show the marker; and a run whose window stops drawing the marker later, from the next
+  VBLANK on;
+- a run with no game image placed by the host loader, and the rest of a run whose game started
+  another program.
+
+A package carries the runtime it was built with. One built before cheats existed would ignore the
+switch without a word, so the launcher does not start it with cheats on: it says that the package
+was built before cheats existed, and to rebuild the package or turn cheats off.
+
+RetroAchievements has no hardcore mode here yet; when it does, cheats will be refused while it is
+on.
+
+The start of a run names at most 32 refused cheats one by one and counts the rest on one line.
+
+The meaning of each code form is PPSSPP's: the reader and applier are translated from its CWCheat
+engine, the public reference for the format (lineage in
+[`src/core/PROVENANCE.md`](../src/core/PROVENANCE.md)). It is PPSSPP-derived, not measured on a
+PSP, and the log says so once per run, at the first VBLANK that applies a cheat.
+
 ### Public synthetic verification routes
 
 These routes verify the toolchain and the pipeline without any proprietary game
@@ -1318,6 +1488,10 @@ download ([#1285](https://github.com/Jstar269/nakagawa-recomp/issues/1285)).
 The disc check needs no connection either: Redump's PSP list ships beside the player
 (`assets/redump/`), and a newer list is one you download yourself and import
 ([Disc check](COMPATIBILITY.md#updating-the-disc-list)).
+
+**Cheats** (Settings > Online and developer options, off by default) make no network connection
+either: the cheat file is one you put in the user data folder yourself
+([Cheats](#cheats-cwcheat-files)).
 
 **Discord status** (Settings > Online and developer, off by default) makes no network
 connection either. While a game runs, the player passes three things to the Discord app on this

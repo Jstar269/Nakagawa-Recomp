@@ -35,6 +35,10 @@ char nk_platform_path_list_separator(void) {
     return ';';
 }
 
+bool nk_platform_paths_fold_case(void) {
+    return true;
+}
+
 /* Bounded UTF-8 -> UTF-16 conversion */
 static bool utf8_to_wide(const char *utf8, WCHAR *out_wide, size_t max_wide_chars) {
     if (!utf8 || !out_wide || max_wide_chars == 0) return false;
@@ -44,6 +48,19 @@ static bool utf8_to_wide(const char *utf8, WCHAR *out_wide, size_t max_wide_char
         return false;
     }
     return true;
+}
+
+int nk_platform_compare_file_names(const char *a, const char *b) {
+    WCHAR wide_a[NK_PLATFORM_FILE_NAME_UNITS];
+    WCHAR wide_b[NK_PLATFORM_FILE_NAME_UNITS];
+    bool a_wide = utf8_to_wide(a, wide_a, NK_PLATFORM_FILE_NAME_UNITS);
+    bool b_wide = utf8_to_wide(b, wide_b, NK_PLATFORM_FILE_NAME_UNITS);
+    if (a_wide != b_wide) return a_wide ? -1 : 1;
+    if (a_wide) {
+        int order = CompareStringOrdinal(wide_a, -1, wide_b, -1, TRUE);
+        if (order != 0) return order - CSTR_EQUAL;
+    }
+    return strcmp(a, b);
 }
 
 /* Bounded UTF-16 -> UTF-8 conversion; unpaired surrogates are refused. */

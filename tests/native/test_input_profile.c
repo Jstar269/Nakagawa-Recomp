@@ -25,6 +25,7 @@ void sr_oor(uint32_t address, uint32_t value, int store) {
 
 #include "nk_input_profile.h"
 #include "nk_platform.h"
+#include "nk_user_data_schema.h"
 
 /* Scratch root for the files this test writes: the checkout's build/ by default, or
  * the BUILD_ROOT the Makefile passes as -DSR_SELFTEST_BUILD_ROOT, so a scratch run never
@@ -1513,11 +1514,15 @@ static void test_hostile_documents_fail_closed(void) {
         expect_accepted("over-long name_hint", s_hostile_doc, len, &doc);
         assert(strlen(doc.global.name_hint) == NK_INPUT_NAME_HINT_MAX_LEN - 1);
 
-        /* A field that decides what the parser does is refused instead. */
+        /* With no name_hint the guid is bounded the same way and the hint falls back. */
         snprintf(member, sizeof(member), "\"device\": { \"guid\": \"%s\" }", field);
         len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), member, NULL, NULL, NULL);
         expect_accepted("over-long guid with no name_hint", s_hostile_doc, len, &doc);
+        assert(strlen(doc.global.guid) == NK_INPUT_GUID_MAX_LEN - 1);
+        assert(doc.global.guid[NK_INPUT_GUID_MAX_LEN - 2] == 'A');
+        assert(strcmp(doc.global.name_hint, "Generic Controller") == 0);
 
+        /* A field that decides what the parser does is refused instead. */
         snprintf(member, sizeof(member), "\"psp_bindings\": [ { \"control\": \"%s\","
                  " \"primary\": \"south\" } ]", field);
         len = render_doc(s_hostile_doc, sizeof(s_hostile_doc), NULL, NULL, member, NULL);
@@ -1974,13 +1979,26 @@ static void test_hostile_profile_file_loader(void) {
         assert(strcmp(doc.title_disc_id[0], "UCUS98701") == 0);
     }
 
-    /* The size cap: one byte past 1 MiB is refused before anything is parsed,
-     * and exactly 1 MiB is read and then refused as a malformed document. */
-    fill_repeat(s_hostile_big, sizeof(s_hostile_big), 'A', 1024 * 1024);
-    write_bytes(path, s_hostile_big, 1024 * 1024);
-    expect_load_refused("file of exactly 1 MiB", path, NULL);
-    write_bytes(path, s_hostile_big, 1024 * 1024 + 1);
-    expect_load_refused("file one byte past 1 MiB", path, "exceeds 1 MB");
+    /* The size cap: a whole document padded to exactly 1 MiB loads, and the same
+     * document one byte longer is refused for its size before anything is parsed. */
+    {
+        char entries[1024];
+        const size_t cap = (size_t)NK_INPUT_PROFILE_MAX_FILE_BYTES;
+        size_t doc_len;
+        (void)render_entry(entries, sizeof(entries), "\"UCUS98701\"", NULL);
+        doc_len = render_per_title_doc(s_hostile_big, sizeof(s_hostile_big), "2", entries);
+        assert(doc_len > 0 && doc_len < cap && cap + 1 <= sizeof(s_hostile_big));
+        memset(s_hostile_big + doc_len, '\n', cap + 1 - doc_len);
+        write_bytes(path, s_hostile_big, cap);
+        if (nk_input_profile_file_load(&doc, path, why, sizeof(why)) != NK_OK) {
+            printf("  file of exactly 1 MiB: expected it to load, got diag='%s'\n", why);
+            assert(0 && "a document of exactly the size cap was refused");
+        }
+        assert(doc.title_count == 1);
+        assert(strcmp(doc.title_disc_id[0], "UCUS98701") == 0);
+        write_bytes(path, s_hostile_big, cap + 1);
+        expect_load_refused("file one byte past 1 MiB", path, "exceeds 1 MB");
+    }
     remove(path);
 
     /* A path that is a directory, a path that is empty, and a path that is not
@@ -3572,7 +3590,58 @@ static void test_versioned_profile_files(void) {
     char *kept = versioned_read(path);
     assert(kept != NULL && strcmp(kept, newer) == 0);
     free(kept);
+
+    /* A profile that is there but cannot be read is never replaced: its version is
+     * unknown and may be a newer player's. No memory to read it into, and (on
+     * Windows) a sharing violation on open, stand in for a failed open or read. */
+    long found = 0;
+    assert(nk_user_data_prepare_replace(path, NK_INPUT_PROFILE_SCHEMA_VERSION,
+                                        SIZE_MAX / 2u, &found) == NK_ERROR_IO);
+    assert(found == NK_USER_DATA_VERSION_IO_FAILED);
+#if defined(_WIN32) || defined(_WIN64)
+    HANDLE locked = CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+    assert(locked != INVALID_HANDLE_VALUE);
+    found = 0;
+    assert(nk_user_data_prepare_replace(path, NK_INPUT_PROFILE_SCHEMA_VERSION,
+                                        NK_INPUT_PROFILE_MAX_FILE_BYTES, &found) ==
+           NK_ERROR_IO);
+    assert(found == NK_USER_DATA_VERSION_IO_FAILED);
+    assert(CloseHandle(locked));
+#endif
+    kept = versioned_read(path);
+    assert(kept != NULL && strcmp(kept, newer) == 0);
+    free(kept);
     remove(path);
+
+    /* A newer profile over this build's size bound (a later player may allow a
+     * larger one) is kept byte for byte as .unreadable.bak before a save replaces it. */
+    {
+        const char *large_path = VERSIONED_PROFILE_ROOT "/profile_oversize.json";
+        const char *large_backup =
+            VERSIONED_PROFILE_ROOT "/profile_oversize.json.unreadable.bak";
+        size_t padding = (size_t)NK_INPUT_PROFILE_MAX_FILE_BYTES + 64u;
+        char *large = (char *)malloc(padding + 128u);
+        assert(large != NULL);
+        int head = snprintf(large, 128u, "{\"schema_version\": %d, \"padding\": \"",
+                            NK_INPUT_PROFILE_SCHEMA_VERSION + 1);
+        assert(head > 0 && head < 100);
+        memset(large + head, 'x', padding);
+        memcpy(large + (size_t)head + padding, "\"}\n", 4u);
+        remove(large_backup);
+        versioned_write(large_path, large);
+        nk_input_profile_file_init_default(&doc);
+        assert(nk_input_profile_file_save(&doc, large_path, diag, sizeof(diag)) == NK_OK);
+        char *backed_up = versioned_read(large_backup);
+        assert(backed_up != NULL && strcmp(backed_up, large) == 0);
+        char *replaced = versioned_read(large_path);
+        assert(replaced != NULL && strstr(replaced, "\"schema_version\": 6,") != NULL);
+        free(backed_up);
+        free(replaced);
+        free(large);
+        remove(large_backup);
+        remove(large_path);
+    }
     printf("[INPUT_PROFILE_TEST] Versioned files PASSED!\n");
 }
 

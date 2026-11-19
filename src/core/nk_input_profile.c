@@ -2291,6 +2291,18 @@ static NkResult profile_document_write(
                  NK_INPUT_PROFILE_SCHEMA_VERSION);
         return guard;
     }
+    if (guard != NK_OK && found_version == NK_USER_DATA_VERSION_IO_FAILED) {
+        diag_set(diag_buf, diag_buf_sz,
+                 "not saved: the existing profile could not be read to check its "
+                 "schema_version, and it is kept as it is");
+        return guard;
+    }
+    if (guard != NK_OK && found_version == NK_USER_DATA_VERSION_OVERSIZE) {
+        diag_set(diag_buf, diag_buf_sz,
+                 "not saved: the existing profile is over the size limit and could not be "
+                 "copied to its .unreadable.bak backup first");
+        return guard;
+    }
     if (guard != NK_OK) {
         diag_set(diag_buf, diag_buf_sz,
                  "not saved: the schema_version %ld profile could not be copied to its "
