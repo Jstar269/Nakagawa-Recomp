@@ -79,6 +79,13 @@ INDEPENDENCE_PLAN_PATH = "docs/INDEPENDENCE_CAMPAIGN.md"
 
 _CAMPAIGN_INVENTORY_ROW = re.compile(r"^\|\s*(G\d+)\s*\|\s*(.*?)\s*\|")
 _CAMPAIGN_TARGET = re.compile(r"^\s*-\s+\*\*(G\d+)\b")
+#: The bold heading of a target item, ``- **G10 software GE → (a), late.**``; the text
+#: after the arrow is the group's own verdict.
+_CAMPAIGN_HEADING = re.compile(r"^\s*-\s+\*\*G\d+\b[^*]*?→\s*(.*?)\*\*")
+#: The start of any Markdown list item, bulleted or numbered, at any indentation.  It
+#: ends the item before it: an indented item is a new item, not a continuation line.
+_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])(?:\s|$)")
+_VERDICT = re.compile(r"^\(([abc])\)")
 _CODE_SPAN = re.compile(r"`([^`]+)`")
 _PRODUCTION_PREFIXES = ("src/", "tools/")
 #: Third-party notices and format documents under the production prefixes are not
@@ -86,6 +93,38 @@ _PRODUCTION_PREFIXES = ("src/", "tools/")
 #: independence annotation skip them; a vendored dependency's licence or notice
 #: file must never have to be pruned from the baseline when it is relocated.
 _NON_CODE_SUFFIXES = (".md", ".txt")
+#: The class names a gap row may carry: the gate's own deterministic classes, in a fixed
+#: order. A row takes its class from this tuple (``_known_class``), never from a ledger.
+_GAP_CLASSES: tuple[str, ...] = tuple(sorted(provenance_ledger.ALLOWED_CLASSES))
+#: The keys an ``independence`` annotation may carry (``independence_metadata`` and the
+#: missing-disposition default), in the order they are printed.
+_INDEPENDENCE_KEYS = ("status", "owner", "disposition", "reason", "source")
+
+
+def _known_class(value: object) -> str | None:
+    """``value`` as the matching name in ``_GAP_CLASSES``, or ``None`` when it names no class.
+
+    The result is the constant from ``_GAP_CLASSES``, not ``value`` itself, so whatever else a
+    ledger's classification field holds never reaches the inventory's output.
+    """
+    for name in _GAP_CLASSES:
+        if value == name:
+            return name
+    return None
+
+
+def _gap_row(path: str, deterministic_class: str, independence: dict[str, object] | None) -> dict[str, object]:
+    """One inventory row, projected to exactly the fields the output prints, each a plain string."""
+    row: dict[str, object] = {
+        "path": str(path),
+        "reason": "no exact trusted record",
+        "deterministic_class": deterministic_class,
+    }
+    if independence is not None:
+        row["independence"] = {
+            key: str(independence[key]) for key in _INDEPENDENCE_KEYS if key in independence
+        }
+    return row
 
 
 def _is_production_code(path: str) -> bool:
@@ -116,34 +155,61 @@ def _campaign_groups(plan_text: str) -> dict[str, tuple[str, ...]]:
 
 
 def _campaign_targets(plan_text: str) -> dict[str, str]:
-    """Return the explicit disposition text for each campaign group."""
+    """Return the explicit disposition for each campaign group.
+
+    A group's verdict is the one its own heading names after the arrow.  Its item
+    runs to the first line that is not an indented continuation, and a line that
+    starts a list item, at any indentation, is never a continuation: the prose
+    after the list, the next item and a ``(c)`` mentioned in passing never decide
+    it.  An item that names an interim ``bounded-(c)`` disposition is a bounded
+    exclusion whatever its eventual verdict.  A ``split`` heading has no single
+    verdict: it counts as a rewrite when any part of its item is an ``(a)``, else
+    as an LLE replacement when one is a ``(b)``.
+    """
     lines = plan_text.splitlines()
     targets: dict[str, str] = {}
-    starts = [
-        (index, match.group(1))
-        for index, line in enumerate(lines)
-        if (match := _CAMPAIGN_TARGET.match(line)) is not None
-    ]
-    for position, (start, group) in enumerate(starts):
-        stop = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
+    for start, line in enumerate(lines):
+        match = _CAMPAIGN_TARGET.match(line)
+        if match is None:
+            continue
+        stop = start + 1
+        while (
+            stop < len(lines) and lines[stop][:1] in (" ", "\t") and lines[stop].strip()
+            and _LIST_ITEM.match(lines[stop]) is None
+        ):
+            stop += 1
         block = " ".join(lines[start:stop])
-        if "bounded-(c)" in block or re.search(r"\(c\)", block):
-            targets[group] = "bounded-exclusion"
-        elif re.search(r"\(a\)\s*\+\s*\(a\)", block):
-            targets[group] = "clean-room-rewrite"
-        elif re.search(r"\(a\)", block):
-            targets[group] = "clean-room-rewrite"
-        elif re.search(r"\(b\)", block):
-            targets[group] = "LLE-replacement"
+        heading = _CAMPAIGN_HEADING.match(line)
+        verdict_text = heading.group(1) if heading else ""
+        verdict = _VERDICT.match(verdict_text)
+        token = verdict.group(1) if verdict else None
+        if token is None and "evidence, not rewrite" not in verdict_text:
+            token = "a" if "(a)" in block else "b" if "(b)" in block else None
+        if "bounded-(c)" in block or token == "c":
+            targets[match.group(1)] = "bounded-exclusion"
+        elif token == "a":
+            targets[match.group(1)] = "clean-room-rewrite"
+        elif token == "b":
+            targets[match.group(1)] = "LLE-replacement"
         elif "evidence, not rewrite" in block:
-            targets[group] = "evidence-hardening"
+            targets[match.group(1)] = "evidence-hardening"
     return targets
+
+
+def _campaign_index(campaign_path: Path) -> tuple[dict[str, tuple[str, ...]], dict[str, str]] | None:
+    """Parse the campaign once: its groups' paths and their dispositions, or ``None`` if unreadable."""
+    try:
+        plan_text = campaign_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return _campaign_groups(plan_text), _campaign_targets(plan_text)
 
 
 def independence_metadata(
     path: str,
     *,
     campaign_path: Path = ROOT / INDEPENDENCE_PLAN_PATH,
+    campaign: tuple[dict[str, tuple[str, ...]], dict[str, str]] | None = None,
 ) -> dict[str, object] | None:
     """Find the maintained owner/disposition for a production path.
 
@@ -151,13 +217,13 @@ def independence_metadata(
     deliberate fail-closed result: a new upstream-derived production path must
     first be named in the campaign inventory and given an explicit disposition
     (including a bounded exclusion) before it can be treated as planned work.
+    ``campaign`` is the already-parsed :func:`_campaign_index` of ``campaign_path``.
     """
-    try:
-        plan_text = campaign_path.read_text(encoding="utf-8")
-    except OSError:
+    if campaign is None:
+        campaign = _campaign_index(campaign_path)
+    if campaign is None:
         return None
-    groups = _campaign_groups(plan_text)
-    targets = _campaign_targets(plan_text)
+    groups, targets = campaign
     for group, patterns in groups.items():
         if not any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns):
             continue
@@ -185,15 +251,17 @@ def tracked_paths(repo: Path = ROOT) -> list[str]:
     )
 
 
-def exact_paths_from_public_ledger(ledger_path: Path) -> set[str]:
+def exact_paths_from_public_ledger(ledger_path: Path, *, document: dict | None = None) -> set[str]:
     """Paths the committed public ledger already attributes to a record.
 
     The public ledger names a ``record_id`` only where the trusted authority
     supplies an exact, implementation-grade record for that path; every other
     entry carries a deterministic statement about what the file *is*.  A path
     is therefore "covered" exactly when its public entry is content-gated.
+    ``document`` is the already-parsed ledger, when the caller has it.
     """
-    document = json.loads(ledger_path.read_text(encoding="utf-8"))
+    if document is None:
+        document = json.loads(ledger_path.read_text(encoding="utf-8"))
     covered: set[str] = set()
     for entry in document.get("entries", []):
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
@@ -204,9 +272,10 @@ def exact_paths_from_public_ledger(ledger_path: Path) -> set[str]:
     return covered
 
 
-def public_classifications(ledger_path: Path) -> dict[str, str]:
+def public_classifications(ledger_path: Path, *, document: dict | None = None) -> dict[str, str]:
     """Return the public ledger's path classifications for gap diagnostics."""
-    document = json.loads(ledger_path.read_text(encoding="utf-8"))
+    if document is None:
+        document = json.loads(ledger_path.read_text(encoding="utf-8"))
     return {
         entry["path"]: entry["classification"]
         for entry in document.get("entries", [])
@@ -238,16 +307,24 @@ def record_gaps(
     *,
     repo: Path = ROOT,
     covered: set[str] | None = None,
+    ledger_classes: dict[str, str] | None = None,
 ) -> list[dict[str, object]]:
     """Return the tracked public paths that no exact trusted record covers.
 
     ``covered`` is the set of paths the authority speaks about exactly.  When it
-    is ``None`` the committed public ledger is used.
+    is ``None`` the committed public ledger is used.  ``ledger_classes`` (from
+    ``--trusted-ledger``) takes precedence over the public projection for the
+    reported class, as in :func:`disposition_gaps`.  A ledger's class is used only
+    when it names one of the gate's classes; otherwise the path's deterministic
+    class is reported.  Each row is projected to its printed fields (``_gap_row``).
     """
+    ledger_path = repo / LEDGER_PATH
+    document = json.loads(ledger_path.read_text(encoding="utf-8"))
     if covered is None:
-        covered = exact_paths_from_public_ledger(repo / LEDGER_PATH)
-    classifications = public_classifications(repo / LEDGER_PATH)
+        covered = exact_paths_from_public_ledger(ledger_path, document=document)
+    classifications = public_classifications(ledger_path, document=document)
     campaign_path = repo / INDEPENDENCE_PLAN_PATH
+    campaign = _campaign_index(campaign_path)
     policy = load_policy(repo / POLICY_PATH)
     gaps: list[dict[str, object]] = []
     for path in tracked_paths(repo):
@@ -257,25 +334,23 @@ def record_gaps(
             continue
         if path in covered:
             continue
-        classification = classifications.get(path)
+        classification = _known_class((ledger_classes or {}).get(path))
+        if classification is None:
+            classification = _known_class(classifications.get(path))
         if classification is None:
             classification, _evidence = provenance_ledger.class_for(path, None)
-        gap: dict[str, object] = {
-            "path": path,
-            "reason": "no exact trusted record",
-            "deterministic_class": classification,
-        }
+        independence: dict[str, object] | None = None
         if _is_production_code(path) and classification in {
             "upstream_derived",
             "unresolved",
         }:
-            metadata = independence_metadata(path, campaign_path=campaign_path)
-            gap["independence"] = metadata or {
+            metadata = independence_metadata(path, campaign_path=campaign_path, campaign=campaign)
+            independence = metadata or {
                 "status": "missing",
                 "reason": "no explicit campaign owner or disposition",
                 "source": INDEPENDENCE_PLAN_PATH,
             }
-        gaps.append(gap)
+        gaps.append(_gap_row(path, classification, independence))
     return gaps
 
 
@@ -435,6 +510,7 @@ def disposition_gaps(
     """
     classifications = public_classifications(repo / LEDGER_PATH)
     campaign_path = repo / INDEPENDENCE_PLAN_PATH
+    campaign = _campaign_index(campaign_path)
     policy = load_policy(repo / POLICY_PATH)
     gaps: list[dict[str, object]] = []
     for path in tracked_paths(repo):
@@ -449,7 +525,7 @@ def disposition_gaps(
             classification, _evidence = provenance_ledger.class_for(path, None)
         if classification not in {"upstream_derived", "unresolved"}:
             continue
-        if independence_metadata(path, campaign_path=campaign_path) is not None:
+        if independence_metadata(path, campaign_path=campaign_path, campaign=campaign) is not None:
             continue
         gaps.append({
             "path": path,
@@ -536,13 +612,13 @@ def main(argv: list[str] | None = None) -> int:
     repo = args.repo.resolve()
     source = "committed public ledger (projection of the private authority)"
     covered = None
-    trusted_classifications = None
+    ledger_classes = None
     if args.trusted_ledger is not None:
         covered = exact_paths_from_trusted_ledger(args.trusted_ledger)
-        trusted_classifications = classifications_from_trusted_ledger(args.trusted_ledger)
+        ledger_classes = classifications_from_trusted_ledger(args.trusted_ledger)
         source = "trusted authority (--trusted-ledger)"
 
-    gaps = record_gaps(repo=repo, covered=covered)
+    gaps = record_gaps(repo=repo, covered=covered, ledger_classes=ledger_classes)
 
     if args.json:
         print(json.dumps({"source": source, "gap_count": len(gaps), "paths": gaps}, indent=2))
@@ -562,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         validate_baseline(KNOWN_DISPOSITION_GAPS)
         unlisted, stale = check_disposition_gaps(
-            disposition_gaps(repo=repo, trusted_classifications=trusted_classifications),
+            disposition_gaps(repo=repo, trusted_classifications=ledger_classes),
             baseline=KNOWN_DISPOSITION_GAPS)
         if unlisted or stale:
             if unlisted:
