@@ -1926,6 +1926,9 @@ def _convert_arguments(tokens: list[str]) -> dict:
     if "--baseline-ellipsis" in tokens:
         tokens.remove("--baseline-ellipsis")
         arguments["baseline_ellipsis"] = True
+    if "--fit-em" in tokens:
+        tokens.remove("--fit-em")
+        arguments["fit_em"] = True
     for flag, value in zip(tokens[0::2], tokens[1::2], strict=True):
         arguments[_CONVERT_FLAGS[flag]] = int(value)
     return arguments
@@ -2313,7 +2316,7 @@ class OvershootSnapTests(CliRefusalMixin):
 
     def test_the_option_is_recorded_and_absent_when_off(self) -> None:
         conversion = self._convert(13, snap_overshoot=3)
-        self.assertEqual(conversion.manifest["converter"]["version"], "0.8.0")
+        self.assertEqual(conversion.manifest["converter"]["version"], "0.9.0")
         self.assertEqual(conversion.manifest["parameters"]["snap_overshoot"], {
             "unit": "sub-sample (1/8 pixel)", "threshold": 3,
             "zones": {"baseline": 0, "x_height": 1082, "cap_height": 1409},
@@ -2398,6 +2401,43 @@ class ProjectCjkSizeTests(unittest.TestCase):
         self.assertEqual({(glyph.advance_y, glyph.y_top) for glyph in conversion.glyphs}, {(1365, 57)})
         average = sum(cast(int, glyph.advance_x) for glyph in conversion.glyphs) / 64 / len(conversion.glyphs)
         self.assertLessEqual(abs(average - 18.356), 0.25)
+
+    def test_korean_glyphs_wider_than_the_em_fit_it(self) -> None:
+        """#1300, rule 17: the console's Korean font draws every glyph within its full-width cell, and
+        LocoRoco 2 lays out its prompt from the header's maximum glyph sizes. Gowun Dodum draws the
+        circled and parenthesized characters, the squared units and the telephone sign of KS X 1001
+        wider than the em (U+3392 34 px at 20 ppem); --fit-em narrows them to the em, so the header's maxima stay
+        within the em, and leaves every narrower glyph as it was."""
+        self.assertIn("--fit-em", _makefile_flags("PROJECT_KOREAN_FONT_ARGS"))
+        korean = set(ttf2pgf.ks_x_1001_korean_code_points().codes)
+        wide = {code for code in korean if code >> 8 in (0x21, 0x24, 0x25, 0x32, 0x33)}
+        sample = wide | {0xAC00, 0xD55C, 0x3000, 0x41}
+        data = KOREAN_FONT.read_bytes()
+        fitted = self._convert("PROJECT_KOREAN_FONT_ARGS", data, sample, font_name="Nakagawa Open Korean")
+        plain = self._convert("PROJECT_KOREAN_FONT_ARGS", data, sample, font_name="Nakagawa Open Korean",
+                              fit_em=False)
+        em = 20 * 64
+        tracking = 1 * 8  # --tracking 1, one sub-sample in 26.6
+        max_w, max_h = struct.unpack_from("<ii", fitted.image, 0xF4)
+        glyph_w, _glyph_h = struct.unpack_from("<HH", fitted.image, 0xFC)
+        self.assertLessEqual(max_w, em)
+        self.assertLessEqual(glyph_w, 20)
+        self.assertGreater(struct.unpack_from("<i", plain.image, 0xF4)[0], em, "the fixture has glyphs wider than the em")
+        before = {glyph.code: glyph for glyph in plain.glyphs}
+        narrowed = fitted.manifest["parameters"]["fit_em"]["codes"]
+        self.assertIn(0x3392, narrowed)
+        for glyph in fitted.glyphs:
+            with self.subTest(code=f"U+{glyph.code:04X}"):
+                self.assertLessEqual(cast(int, glyph.advance_x), em + tracking)
+                self.assertLessEqual(glyph.width, 20)
+                if glyph.code not in narrowed:
+                    self.assertEqual(glyph, before[glyph.code], "a glyph within the em is unchanged")
+                else:
+                    self.assertLess(cast(int, glyph.advance_x), cast(int, before[glyph.code].advance_x))
+                    # Only the width is scaled; a row whose ink was a sliver can fall under the
+                    # coverage threshold and be trimmed (rule 15), so the height may lose one row.
+                    self.assertIn(before[glyph.code].height - glyph.height, (0, 1))
+        self.assertNotIn("fit_em", plain.manifest["parameters"])
 
 
 class SpacingAndFallbackOptionTests(CliRefusalMixin):

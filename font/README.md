@@ -87,7 +87,9 @@ What stays the same:
 What changes:
 
 - **Letter shapes.** The text looks like Geist, Liberation Sans and Liberation Serif (Latin), Noto Sans JP (Japanese)
-  or Gowun Dodum (Korean), not the PSP's fonts.
+  or Gowun Dodum (Korean), not the PSP's fonts. The 191 Korean-font characters Gowun Dodum draws wider than a
+  full-width cell (squared units such as `㎒`, circled and parenthesized letters and numbers, `℡`) are narrowed to
+  one cell, as the PSP's Korean font draws them.
 - **Capitals against small letters.** In the regular sans-serif faces (Geist) small letters average up to 3 % wider
   than the PSP's and capitals within 0.3 %; a sentence and a menu line each run up to 1.5 % longer. In Liberation's
   faces capitals are wider, compared with small letters, than in the PSP's, and the spacing splits the difference.

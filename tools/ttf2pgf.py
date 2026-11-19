@@ -57,7 +57,7 @@ except ImportError:  # direct script execution
     import pgf_writer  # type: ignore[no-redef]
 
 CONVERTER_NAME = "ttf2pgf"
-CONVERTER_VERSION = "0.8.0"
+CONVERTER_VERSION = "0.9.0"
 SPEC_PATH = "docs/cleanroom/PGF_CONVERTER_SPEC.md"
 PIN_SCHEMA = "font-pin/v1"
 #: The ``schema_version`` of a static font list that may serve as a pin (spec section 7).
@@ -1883,10 +1883,14 @@ class _Planner:
         fallback: _Ttf | None = None,
         snap_overshoot: int = 0,
         scale_x: int = SCALE_X_NEUTRAL,
+        fit_em: bool = False,
     ) -> None:
         self.font = font
         #: ``--scale-x`` as an exact ratio (spec section 3, rule 14); 1 leaves every outline as read.
         self.scale_x = Fraction(scale_x, SCALE_X_NEUTRAL)
+        #: ``--fit-em`` (spec section 3, rule 17): the horizontal factor of each code whose glyph is
+        #: wider than the em, so that it fits the em; codes absent here keep their width.
+        self.fit: dict[int, Fraction] = {}
         #: ``--snap-overshoot`` threshold in sub-samples (0: off) and each drawing font's flat
         #: edges, keyed by the font object's identity (spec section 3, rule 13).
         self.snap_overshoot = snap_overshoot
@@ -1920,6 +1924,15 @@ class _Planner:
             self.snap_zones[id(font)] = _overshoot_zones(font, "the font")
             if fallback is not None and self.fallback_codes:
                 self.snap_zones[id(fallback)] = _overshoot_zones(fallback, "the fallback font")
+        if fit_em:
+            # Measured before any factor is set: the glyph as --scale-x alone would draw it.
+            for code in self.codes:
+                upem = self.font_for(code).units_per_em
+                xs = [x for contour in self.outline(code) for x, _y, _on in contour]
+                left = min([0, *xs])
+                right = max([self.advance_units(code), *xs])
+                if right - left > upem:
+                    self.fit[code] = Fraction(upem) / Fraction(right - left)
 
     def check_snap_bands(self, ppem: int) -> None:
         """Refuse a ppem at which the band above the x-height would reach the cap height."""
@@ -1943,9 +1956,15 @@ class _Planner:
             return self.fallback
         return self.font
 
+    def _scale(self, code: int) -> Fraction:
+        """The code's horizontal factor: ``--scale-x`` and any ``--fit-em`` narrowing."""
+        fit = self.fit.get(code)
+        return self.scale_x if fit is None else self.scale_x * fit
+
     def advance_units(self, code: int) -> int | Fraction:
         units = self.font_for(code).advance_units(self.gids[code])
-        return units if self.scale_x == 1 else units * self.scale_x
+        scale = self._scale(code)
+        return units if scale == 1 else units * scale
 
     def _ellipsis_shift(self) -> int:
         """Font units that set the ellipsis on the full stop's line.
@@ -1967,7 +1986,7 @@ class _Planner:
         font = self.font_for(code)
         contours = font.outline(self.gids[code])
         shift = self.outline_shift.get(code, 0)
-        scale = self.scale_x
+        scale = self._scale(code)
         if not shift and scale == 1:
             return contours
         if scale == 1:
@@ -2106,6 +2125,7 @@ def convert(
     scale_x: int = SCALE_X_NEUTRAL,
     vertical_advance: int | None = None,
     vertical_origin: int | None = None,
+    fit_em: bool = False,
 ) -> Conversion:
     """Convert one pinned TrueType font into a PGF image plus its manifest.
 
@@ -2118,7 +2138,8 @@ def convert(
     many sub-samples on the flat baseline, x-height and cap height (spec section 3, rule 13).
     ``scale_x`` widens (over 1000) or narrows outlines and advances by that many thousandths
     (rule 14). ``vertical_advance`` and ``vertical_origin`` set the vertical metrics (rule 16), in
-    thousandths of the em the header declares. Every stage
+    thousandths of the em the header declares. ``fit_em`` narrows each glyph wider than the em to
+    the em (rule 17). Every stage
     validates before the next runs; the returned bytes are final. Raises
     :class:`TtfConvertError` naming the refusal on any malformed, unsupported, or
     policy-violating input.
@@ -2186,6 +2207,8 @@ def convert(
                 "vertical-metric-out-of-range",
                 f"{label} {value!r} is outside {MIN_VERTICAL}..{MAX_VERTICAL} thousandths of the em",
             )
+    if not isinstance(fit_em, bool):
+        raise _refuse("conflicting-parameters", f"fit_em must be a boolean, not {fit_em!r}")
     if (fallback_data is None) != (fallback_path is None):
         raise _refuse("conflicting-parameters", "a fallback font needs both its bytes and its path")
     if fallback_pin is not None and fallback_data is None:
@@ -2203,7 +2226,7 @@ def convert(
     fallback = _Ttf(fallback_data) if fallback_data is not None else None
     planner = _Planner(
         font, code_list, baseline_ellipsis=baseline_ellipsis, fallback=fallback, snap_overshoot=snap_overshoot,
-        scale_x=scale_x,
+        scale_x=scale_x, fit_em=fit_em,
     )
     if fallback is not None and not planner.fallback_codes:
         raise _refuse("fallback-unused", "the first font draws every code point; drop --fallback")
@@ -2338,6 +2361,7 @@ def convert(
         snap_overshoot=snap_overshoot,
         scale_x=scale_x,
         vertical=(vertical_advance, vertical_origin),
+        fit_em=fit_em,
         fallback=None if fallback is None else {
             "data": fallback_data, "font": fallback, "path": fallback_path, "pin": fallback_pin,
             "codes": planner.fallback_codes,
@@ -2451,6 +2475,7 @@ def _build_manifest(
     snap_overshoot: int = 0,
     scale_x: int = SCALE_X_NEUTRAL,
     vertical: tuple[int | None, int | None] = (None, None),
+    fit_em: bool = False,
     fallback: dict | None = None,
 ) -> dict:
     first, last = codes
@@ -2499,6 +2524,9 @@ def _build_manifest(
         parameters["vertical_advance_thousandths"] = vertical[0]
     if vertical[1] is not None:
         parameters["vertical_origin_thousandths"] = vertical[1]
+    # Added in converter 0.9.0, likewise only when given: the codes narrowed to the em.
+    if fit_em:
+        parameters["fit_em"] = {"codes": sorted(planner.fit)}
     manifest = {
         "converter": {
             "name": CONVERTER_NAME,
@@ -2689,6 +2717,12 @@ def _main(argv: list[str]) -> int:
         f"measured from H and x (0..{MAX_SNAP_OVERSHOOT}, default 0: off)",
     )
     parser.add_argument(
+        "--fit-em",
+        action="store_true",
+        help="narrow each glyph wider than the em (its advance or outline) to the em, as a "
+        "full-width cell (spec section 3, rule 17)",
+    )
+    parser.add_argument(
         "--scale-x",
         type=int,
         default=SCALE_X_NEUTRAL,
@@ -2793,6 +2827,7 @@ def _main(argv: list[str]) -> int:
             scale_x=args.scale_x,
             vertical_advance=args.vertical_advance,
             vertical_origin=args.vertical_origin,
+            fit_em=args.fit_em,
         )
         manifest = manifest_bytes(conversion.manifest)
     except TtfConvertError as exc:

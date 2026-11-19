@@ -285,7 +285,13 @@ The downloaded licence is SIL OFL 1.1 and declares no Reserved Font Name;
 removes one trailing ASCII space on line 22 without changing licence wording.
 The selected font covers all 11,951 assigned points. The converter's denied
 source-name markers are also avoided: the PGF uses the project-owned name
-`Nakagawa Open Korean` and style `Regular`.
+`Nakagawa Open Korean` and style `Regular`. The 191 characters Gowun Dodum
+draws wider than the em (the circled and parenthesized letters and numbers of
+Enclosed Alphanumerics and Enclosed CJK Letters, the squared units of CJK
+Compatibility and the telephone sign U+2121) are narrowed horizontally to the
+em by the converter (`--fit-em`, `docs/cleanroom/PGF_CONVERTER_SPEC.md` rule
+17, #1300), because the console's Korean font draws every glyph within one
+full-width cell; no glyph is edited by hand.
 
 At the target 12 ppem, a converter-generated software sample of ASCII `A`,
 Hangul U+AC00 and U+D55C, and jamo U+3131 is legible in both candidate Regular

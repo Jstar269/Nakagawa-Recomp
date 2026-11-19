@@ -178,9 +178,11 @@ $(eval $(call PROJECT_LATIN_FACE_RULE,15,latin-15,nkltn15.pgf,7,$(PROJECT_LATIN_
 # carries both licences. The header ascender and descender are the console fonts'. Vertical metrics
 # (#1300, rule 16): Japanese advances one em down from an origin 0.88 em above the baseline; Korean
 # advances 1.185 em with bearing Y at the margin. Like the Latin vertical settings, these are rounded
-# design proportions tuned against a private comparison with the console's fonts.
+# design proportions tuned against a private comparison with the console's fonts. The Korean font
+# narrows each glyph wider than the em to the em (--fit-em, rule 17): the console's Korean font draws
+# every glyph within one full-width cell, and a game lays out text from the header maxima (#1300).
 PROJECT_JAPANESE_FONT_ARGS := --ppem 18 --nominal-size 648 --resolution 8192 --header-ascender 1013 --header-descender -139 --baseline-ellipsis --vertical-origin 880
-PROJECT_KOREAN_FONT_ARGS := --ppem 20 --tracking 1 --nominal-size 648 --resolution 8192 --header-ascender 1000 --header-descender -250 --vertical-advance 1185
+PROJECT_KOREAN_FONT_ARGS := --ppem 20 --fit-em --tracking 1 --nominal-size 648 --resolution 8192 --header-ascender 1000 --header-descender -250 --vertical-advance 1185
 NOTO_SANS_JP := assets/fonts/ui/noto-sans-jp
 project-japanese-font: $(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf
 $(PROJECT_FONT_GENERATED_DIR)/nkjpn.pgf: $(NOTO_SANS_JP)/NotoSansJP-Regular.ttf tests/fixtures/fonts/notosansjp/PIN.json $(NOTO_SANS_JP)/OFL.txt tests/fixtures/fonts/mplus1p/MPLUS1p-Regular.ttf tests/fixtures/fonts/mplus1p/PIN.json tests/fixtures/fonts/mplus1p/OFL.txt tools/ttf2pgf.py tools/pgf_writer.py docs/cleanroom/PGF_CONVERTER_SPEC.md mk/housekeeping.mk

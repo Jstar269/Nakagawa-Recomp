@@ -448,6 +448,28 @@ manifest in memory first and writes only after every stage succeeds.
     by them, and the console library draws by the image alone
     (`PGF_SPEC.md` section 3.5, #1055); a game that sets text vertically or
     steps lines by the vertical advance would read them.
+17. **Fit to the em** (`--fit-em`, from converter 0.9.0; off by default, and
+    output without it is unchanged). Before rule 1, for each code, let `L`
+    be the lesser of 0 and its outline's leftmost x, and `R` the greater of
+    its advance and its outline's rightmost x, in font units after rule 14's
+    scale. When `R - L` exceeds the font's units per em, the outline's x and
+    the advance are multiplied by `units_per_em / (R - L)`, so the glyph,
+    advance included, spans one em: a full-width cell. Its y is untouched.
+    `--tracking` is added after, and rules 6, 10 and 15 then apply as to any
+    glyph, so the image can lose a row whose ink falls under the coverage
+    threshold. A code within the em keeps every byte. The manifest lists the
+    narrowed codes (`fit_em.codes`).
+    *Project decision* (#1300): the console's Korean font draws every glyph
+    within one full-width cell (its widest image is 20 px, its maximum
+    advance 19.53 px), while Gowun Dodum draws 191 characters of KS X 1001
+    (circled and parenthesized letters and numbers, squared units and the
+    telephone sign) wider than the em: U+3392 came out 34 px wide with a
+    35.3 px advance, and the header's maximum sizes and maximum glyph width
+    with it. LocoRoco 2 lays out its button prompt from those header fields,
+    and drew it 29 px narrower than with the console's fonts. The console's
+    header maxima are not a function of its glyphs (its maximum glyph width
+    is 21 where no image is wider than 20), so the converter keeps deriving
+    them from the glyphs (section 4) and fits the glyphs instead.
 
 Same pinned input plus same parameters plus same converter version therefore
 produce byte-identical `.pgf` and manifest output on every supported host,
@@ -586,7 +608,7 @@ manifest's `source` record is the list's `upstream.repository` and
 | `code_points` | For `--codepoints`: the file's leaf name, count, and SHA-256; `null` for a range. |
 | `glyphs` | Count, zero-area codes, maximum pixel dimensions. |
 | `metric_targets` | The policy, the chosen ppem, and achieved 26.6 values - or `null`. |
-| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`); `scale_x_thousandths` only when it is not 1000; `vertical_advance_thousandths` and `vertical_origin_thousandths` only when given. |
+| `parameters` | ppem, nominal em size (26.6), resolution (26.6), any header ascender and descender given, whether the ellipsis was set on the baseline, supersample, coverage bits, rounding formulas, hinting mode, and the `embolden` strengths (x, y, advance, in sub-samples); `tracking_sub_samples` and `digit_advance_26_6` only when given; `snap_overshoot` only when given: its unit, threshold `N`, and the flat edges `B`, `X` and `C` in font units of the first font (`zones`) and, with a fallback that draws codes, of the second (`fallback_zones`); `scale_x_thousandths` only when it is not 1000; `vertical_advance_thousandths` and `vertical_origin_thousandths` only when given; `fit_em` only when given: the ascending `codes` it narrowed. |
 | `fallback` | Only with `--fallback`: the second font's `input` record (as above), its `license` block, and the ascending `codes` it draws. |
 | `license` | SPDX id, copyright line, reserved font names, the **full licence text**, its digest, and the source pin's provenance record - or `null` without a pin. |
 
@@ -640,5 +662,6 @@ manifest's `source` record is the list's `upstream.repository` and
 | Overshoot alignment: round and flat letters share their rows, flat letters and deep features unchanged, manifest record and refusals | `OvershootSnapTests`, `ProjectLatinStrikeTests` |
 | Ink trim: no image starts or ends in a blank column or row, a string drawn through the reader by advance keeps every pixel, advances unchanged | `InkTrimTests`, `ReaderRoundTripTests` |
 | Vertical metrics: the reader returns bearing X, bearing Y and advance by rule 16 with and without each option; the project fonts carry the console's values; out-of-range options refused | `ReaderRoundTripTests`, `ProjectLatinStrikeTests`, `ProjectCjkSizeTests`, `SpacingAndFallbackOptionTests` |
-| Project Japanese and Korean nominal size and advances | `ProjectCjkSizeTests` |
+| Project Japanese and Korean nominal size and advances; Korean glyphs wider than the em fit it, the others unchanged | `ProjectCjkSizeTests` |
+| A font the project ships pinned by its font-list record, and that form's refusals | `FontListPinTests` |
 | Independent structural validation | `nk_core.fonts.validate_pgf_data` on the output |
