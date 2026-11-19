@@ -11539,6 +11539,64 @@
       }
     },
     {
+      "path": "tests/fixtures/fonts/play/OFL.txt",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "play-fonts-latin-1300",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/play/Play-Bold.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "play-font-pin-records-1300",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/play/Play-Bold.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "play-fonts-latin-1300",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/play/Play-Regular.pin.json",
+      "classification": "project_authored_attested",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "play-font-pin-records-1300",
+        "evidence_tier": "S",
+        "authorship": "independent implementation record",
+        "upstream_attribution": null
+      }
+    },
+    {
+      "path": "tests/fixtures/fonts/play/Play-Regular.ttf",
+      "classification": "upstream_derived",
+      "evidence": {
+        "source": "docs/provenance/IMPLEMENTATION_PROVENANCE.json",
+        "record_id": "play-fonts-latin-1300",
+        "evidence_tier": "S",
+        "upstream": "documented upstream family",
+        "license": "SIL Open Font License 1.1",
+        "modification_status": "modified_or_translated; see trusted record"
+      }
+    },
+    {
       "path": "tests/fixtures/homebrew_corpus/PROVENANCE.md",
       "classification": "project_authored_attested",
       "evidence": {
