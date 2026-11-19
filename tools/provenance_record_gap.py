@@ -82,6 +82,9 @@ _CAMPAIGN_TARGET = re.compile(r"^\s*-\s+\*\*(G\d+)\b")
 #: The bold heading of a target item, ``- **G10 software GE → (a), late.**``; the text
 #: after the arrow is the group's own verdict.
 _CAMPAIGN_HEADING = re.compile(r"^\s*-\s+\*\*G\d+\b[^*]*?→\s*(.*?)\*\*")
+#: The start of any Markdown list item, bulleted or numbered, at any indentation.  It
+#: ends the item before it: an indented item is a new item, not a continuation line.
+_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])(?:\s|$)")
 _VERDICT = re.compile(r"^\(([abc])\)")
 _CODE_SPAN = re.compile(r"`([^`]+)`")
 _PRODUCTION_PREFIXES = ("src/", "tools/")
@@ -123,12 +126,13 @@ def _campaign_targets(plan_text: str) -> dict[str, str]:
     """Return the explicit disposition for each campaign group.
 
     A group's verdict is the one its own heading names after the arrow.  Its item
-    runs to the first line that is not an indented continuation, so the prose
-    after the list, and a ``(c)`` mentioned in passing, never decide it.  An item
-    that names an interim ``bounded-(c)`` disposition is a bounded exclusion
-    whatever its eventual verdict.  A ``split`` heading has no single verdict: it
-    counts as a rewrite when any part of its item is an ``(a)``, else as an LLE
-    replacement when one is a ``(b)``.
+    runs to the first line that is not an indented continuation, and a line that
+    starts a list item, at any indentation, is never a continuation: the prose
+    after the list, the next item and a ``(c)`` mentioned in passing never decide
+    it.  An item that names an interim ``bounded-(c)`` disposition is a bounded
+    exclusion whatever its eventual verdict.  A ``split`` heading has no single
+    verdict: it counts as a rewrite when any part of its item is an ``(a)``, else
+    as an LLE replacement when one is a ``(b)``.
     """
     lines = plan_text.splitlines()
     targets: dict[str, str] = {}
@@ -137,7 +141,10 @@ def _campaign_targets(plan_text: str) -> dict[str, str]:
         if match is None:
             continue
         stop = start + 1
-        while stop < len(lines) and lines[stop][:1] in (" ", "\t") and lines[stop].strip():
+        while (
+            stop < len(lines) and lines[stop][:1] in (" ", "\t") and lines[stop].strip()
+            and _LIST_ITEM.match(lines[stop]) is None
+        ):
             stop += 1
         block = " ".join(lines[start:stop])
         heading = _CAMPAIGN_HEADING.match(line)

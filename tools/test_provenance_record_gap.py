@@ -196,6 +196,42 @@ class TestInventoryShape(unittest.TestCase):
         self.assertEqual(live["G9"], "LLE-replacement", "G9's heading names (b)")
         self.assertEqual(live["G23"], "evidence-hardening", "the last item does not run to the end of the file")
 
+    def test_an_indented_list_item_ends_the_item_before_it(self) -> None:
+        """A group's item never runs into the next list item, however that item is indented.
+
+        An indented item used to count as a continuation of the one before it, so a
+        group whose own item names no verdict took the next group's.
+        """
+        plan = "\n".join([
+            "  - **G1 scheduler.** The scheduler stays a host boundary.",
+            "  - **G2 ISO → (a).** Rewritten from the format.",
+        ])
+        self.assertEqual(gap._campaign_targets(plan), {"G2": "clean-room-rewrite"})
+        nested = "\n".join([
+            "- **G1 scheduler.** The scheduler stays a host boundary.",
+            "  - a sub-item naming (a) is its own item",
+            "  1. and so is a numbered one naming (b)",
+            "\t* or a tab-indented one naming bounded-(c)",
+            "- **G2 media → split.** `a.c` is kept as it is;",
+            "  `b.c` → (b), which this continuation line still gives it.",
+            "    - **G3 ISO → (a).** Rewritten from the format.",
+        ])
+        self.assertEqual(gap._campaign_targets(nested), {
+            "G2": "LLE-replacement",
+            "G3": "clean-room-rewrite",
+        })
+
+    def test_every_live_campaign_item_keeps_a_disposition(self) -> None:
+        """Ending an item at the next list item costs no group of the campaign its target."""
+        text = (ROOT / gap.INDEPENDENCE_PLAN_PATH).read_text(encoding="utf-8")
+        items = [
+            match.group(1) for line in text.splitlines()
+            if (match := gap._CAMPAIGN_TARGET.match(line)) is not None
+        ]
+        self.assertEqual(len(items), len(set(items)), "a group has two target items")
+        self.assertGreaterEqual(len(items), 23)
+        self.assertEqual(sorted(gap._campaign_targets(text)), sorted(items))
+
     def test_the_campaign_is_read_once_per_inventory(self) -> None:
         from unittest import mock
 
@@ -285,6 +321,40 @@ class TestOutput(unittest.TestCase):
     def test_check_mode_passes_when_no_gap_exists(self) -> None:
         rc, _ = self._check(disposition_gaps=lambda **_kwargs: [], KNOWN_DISPOSITION_GAPS={})
         self.assertEqual(rc, 0)
+
+    def test_check_mode_flags_a_group_whose_item_names_no_verdict(self) -> None:
+        """An indented item that follows gives the group before it no disposition.
+
+        The campaign here is the live one with G1's and G2's items replaced by two
+        indented one-line items: G1 names no verdict, G2 names ``(a)``.  ``--check``
+        must ask about G1's paths; when G1 took G2's verdict it passed.
+        """
+        lines = (ROOT / gap.INDEPENDENCE_PLAN_PATH).read_text(encoding="utf-8").splitlines()
+        starts = {
+            match.group(1): index for index, line in enumerate(lines)
+            if (match := gap._CAMPAIGN_TARGET.match(line)) is not None
+        }
+        self.assertLess(starts["G1"], starts["G2"])
+        self.assertLess(starts["G2"], starts["G3"])
+        lines[starts["G1"]:starts["G3"]] = [
+            "  - **G1 scheduler.** The scheduler stays a host boundary.",
+            "  - **G2 ISO/VFS → (a).** Rewritten from the format.",
+        ]
+        plan = "\n".join(lines)
+        groups = gap._campaign_groups(plan)
+        self.assertIn("src/rt/sched.c", groups["G1"])
+
+        rc, err = self._check(
+            _campaign_index=lambda _path: (groups, gap._campaign_targets(plan)),
+        )
+
+        self.assertEqual(rc, 1, err)
+        flagged = {
+            line.split()[0] for line in err.splitlines() if "(status=missing;" in line
+        }
+        self.assertIn("src/rt/sched.c", flagged)
+        self.assertLessEqual(flagged, set(groups["G1"]))
+        self.assertNotIn("stale", err)
 
     def test_a_trusted_record_does_not_hide_a_missing_disposition(self) -> None:
         """A covered upstream-derived path with no disposition still fails the gate.
