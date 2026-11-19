@@ -31,10 +31,35 @@ from test_iso_parity import (
 
 # A stand-in for `nk_cli.py bringup`: what it does depends on the disc file's name.
 STUB_BRINGUP = r'''
-import json, sys, time
+import json, os, sys, time
 from pathlib import Path
 iso, data, work = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 name = iso.stem
+
+
+def log_line(text):
+    # Stand-ins run side by side and share one log. An append on Windows is a seek to the end
+    # and then a write, so two of them can land at one offset and one line is lost: each append
+    # holds a lock on the log.
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0))
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            try:
+                os.write(fd, (text + "\n").encode("utf-8"))
+            finally:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.write(fd, (text + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
 stages = {s: {"status": "NOT_RUN", "duration_ms": 0} for s in
           ("inspect", "prepare_import", "analyze", "codegen", "compile", "build_package", "launch")}
 report = {"reached_stage": "inspect", "stages": stages, "failure_class": "NONE",
@@ -44,8 +69,7 @@ report = {"reached_stage": "inspect", "stages": stages, "failure_class": "NONE",
           "exit_classification": "NOT_RUN", "runtime_output_kind": "NOT_RUN",
           "process_exit_code": None, "presentation": {"status": "NOT_RUN", "frame_submissions": 0}}
 log = work.parent / "calls.log"
-with open(log, "a", encoding="utf-8") as stream:
-    stream.write(name + "\n")
+log_line(name)
 if name.startswith("slow"):
     progress = {"schema_version": 1, "stages": {"compile": {
         "status": "RUNNING", "started_at_unix_ms": 1, "finished_at_unix_ms": None,
@@ -58,10 +82,8 @@ if name.startswith("busy"):
     try:
         marker.touch(exist_ok=False)
     except FileExistsError:
-        with open(log, "a", encoding="utf-8") as stream:
-            stream.write("OVERLAP\n")
+        log_line("OVERLAP")
     else:
-        time.sleep(1)
         marker.unlink()
 if name.startswith("crash"):
     sys.exit(3)
@@ -299,7 +321,52 @@ class LibraryBuildTests(unittest.TestCase):
         translated.parent.mkdir(parents=True)
         create_test_iso(translated, disc_id="TEST70016", title="Title TEST70016 [T-En]")
         self.disc("c/ok-test70017.iso", "TEST70017")
-        result = self.build(jobs=2).run()
+        import queue
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        started: queue.Queue[str] = queue.Queue()
+        release_first_command = threading.Event()
+
+        def synchronized_command(iso: Path, data: Path, work: Path,
+                                 launch_timeout: int) -> list[str]:
+            source = iso.relative_to(self.discs).as_posix()
+            started.put(source)
+            if source == "a/busy-test70016.iso" and not release_first_command.wait(timeout=10):
+                raise TimeoutError("test did not release the first bring-up")
+            return self.command(iso, data, work, launch_timeout)
+
+        build = self.build(jobs=2, command=synchronized_command)
+        # Every disc ID whose build_one is still running, and each source that began while
+        # another build of its disc ID was still running: an overlap at any point of the run,
+        # with no window that depends on how long a bring-up takes.
+        in_flight: set[str | None] = set()
+        overlapped: list[str] = []
+        in_flight_lock = threading.Lock()
+        product_build_one = build.build_one
+
+        def tracked_build_one(record: dict) -> None:
+            with in_flight_lock:
+                if record.get("disc_id") in in_flight:
+                    overlapped.append(record["source"])
+                in_flight.add(record.get("disc_id"))
+            try:
+                product_build_one(record)
+            finally:
+                with in_flight_lock:
+                    in_flight.discard(record.get("disc_id"))
+
+        build.build_one = tracked_build_one  # type: ignore[method-assign]
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(build.run)
+            try:
+                first_two = [started.get(timeout=10) for _ in range(2)]
+                self.assertCountEqual(first_two, [
+                    "a/busy-test70016.iso", "c/ok-test70017.iso",
+                ], "a same-ID image must wait while the first build is still in flight")
+            finally:
+                release_first_command.set()
+            result = future.result(timeout=60)
         records = self.by_source(result)
         self.assertEqual(records["a/busy-test70016.iso"]["outcome"], "REPLACED")
         self.assertEqual(records["a/busy-test70016.iso"]["replaced_by"],
@@ -308,6 +375,7 @@ class LibraryBuildTests(unittest.TestCase):
         self.assertEqual(records["c/ok-test70017.iso"]["outcome"], "BUILT")
         # No overlap was logged: the second image started only after the first one ended.
         self.assertEqual(sorted(self.calls()), ["busy-test70016", "busy-test70016", "ok-test70017"])
+        self.assertEqual(overlapped, [], "a same-ID build began while another was still running")
 
     def test_two_discs_that_could_not_be_hashed_still_build_sequentially(self) -> None:
         self.disc("a/ok-test70015.iso", "TEST70015")
@@ -508,13 +576,29 @@ class LibraryBuildTests(unittest.TestCase):
             return bool(orig_wait())
 
         build._wait_while_paused = tracked_wait  # type: ignore[method-assign]
+        paused_sleeping = threading.Event()
+        release_pause_poll = threading.Event()
+        real_sleep = time.sleep
+
+        def controlled_pause_sleep(seconds: float) -> None:
+            # The patch reaches every time.sleep in the process (subprocess's POSIX wait loop
+            # included): once released, a sleep is a real sleep again instead of a busy loop.
+            if release_pause_poll.is_set():
+                real_sleep(seconds)
+                return
+            paused_sleeping.set()
+            if not release_pause_poll.wait(timeout=10):
+                raise TimeoutError("test did not release the paused build")
+
         runner = threading.Thread(target=lambda: finished.append(build.run()), daemon=True)
-        runner.start()
-        self.assertTrue(entered_pause.wait(timeout=10), "runner did not reach PAUSE check")
-        time.sleep(0.1)
-        self.assertEqual(self.calls(), [], "nothing starts while PAUSE is there")
-        (self.work / "PAUSE").unlink()
-        runner.join(timeout=60)
+        with mock.patch.object(library_build.time, "sleep", controlled_pause_sleep):
+            runner.start()
+            self.assertTrue(entered_pause.wait(timeout=10), "runner did not reach PAUSE check")
+            self.assertTrue(paused_sleeping.wait(timeout=10), "runner did not wait on PAUSE")
+            self.assertEqual(self.calls(), [], "nothing starts while PAUSE is there")
+            (self.work / "PAUSE").unlink()
+            release_pause_poll.set()
+            runner.join(timeout=60)
         self.assertFalse(runner.is_alive())
         self.assertEqual(finished[0]["counts"], {"BUILT": 3})
 
