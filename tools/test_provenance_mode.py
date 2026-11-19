@@ -16,6 +16,7 @@ import io
 import json
 import os
 from pathlib import Path
+import ast
 import re
 import subprocess
 import sys
@@ -55,6 +56,51 @@ def _job_condition(block: str) -> str:
     if not (expression.startswith("${{") and expression.endswith("}}")):
         raise AssertionError(f"condition is not a single expression: {expression!r}")
     return expression[3:-2].strip()
+
+
+#: Names in ``os`` through which a process reads or changes its environment.
+_ENVIRONMENT_NAMES = frozenset({"environ", "environb", "getenv", "getenvb", "putenv", "unsetenv"})
+
+
+def environment_accesses(source: str) -> list[str]:
+    """Every environment access in *source*, as ``get:NAME`` or ``other:<line>:<code>``.
+
+    A ``.get`` call on ``os.environ`` with one string-literal key is reported as
+    ``get:NAME``; any other reference to the environment (``os.getenv``, a subscript,
+    an import of ``environ`` from ``os``, an alias of ``os``, a computed key) is reported
+    as ``other`` so a guard that allows only named reads fails on it.
+    """
+    tree = ast.parse(source)
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    os_names = {"os"}
+    accesses: list[str] = []
+
+    def other(node: ast.AST) -> None:
+        accesses.append(f"other:{getattr(node, 'lineno', 0)}:{ast.unparse(node)}")
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os" and alias.asname not in (None, "os"):
+                    os_names.add(alias.asname)
+                    other(node)
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            if any(alias.name in _ENVIRONMENT_NAMES or alias.name == "*" for alias in node.names):
+                other(node)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id in os_names and node.attr in _ENVIRONMENT_NAMES):
+            continue
+        method = parents.get(node)
+        call = parents.get(method) if method is not None else None
+        if (node.attr == "environ" and isinstance(method, ast.Attribute) and method.attr == "get"
+                and isinstance(call, ast.Call) and call.func is method and not call.keywords
+                and len(call.args) == 1 and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)):
+            accesses.append(f"get:{call.args[0].value}")
+        else:
+            other(method if method is not None else node)
+    return sorted(accesses)
 
 
 _TOKEN = re.compile(r"\s*(?:(\()|(\))|(&&)|(\|\|)|(==)|(!=)|'([^']*)'|([A-Za-z_][A-Za-z0-9_.\-]*))")
@@ -235,8 +281,27 @@ class ModeDecisionTest(unittest.TestCase):
             self.assertEqual(pm.main(["--require", "fork"]), 1)
             self.assertEqual(pm.main(["--require", "upstream"]), 0)
         source = (ROOT / "tools" / "provenance_mode.py").read_text(encoding="utf-8")
-        self.assertEqual(sorted(set(re.findall(r"os\.environ\.get\(\"([A-Z_]+)\"", source))),
-                         ["GITHUB_REPOSITORY", "GITHUB_REPOSITORY_ID"])
+        self.assertEqual(environment_accesses(source),
+                         ["get:GITHUB_REPOSITORY", "get:GITHUB_REPOSITORY_ID"])
+
+    def test_the_environment_guard_sees_every_form_of_access(self) -> None:
+        # Each of these reads or changes a variable outside the two named reads, so the
+        # guard above must report it instead of passing.
+        for snippet in (
+            'import os\nos.getenv("NK_PROVENANCE_MODE")\n',
+            'import os\nos.environ["NK_PROVENANCE_MODE"]\n',
+            "import os\nos.environ.get('NK_PROVENANCE_MODE')\n",
+            'import os\nos.environ.get("GITHUB_REPOSITORY", "x")\n',
+            'import os\nname = "GITHUB_REPOSITORY"\nos.environ.get(name)\n',
+            'import os\nos.environ.copy()\n',
+            'import os\nvalues = os.environ\n',
+            'from os import environ\nenviron.get("X")\n',
+            'from os import getenv\ngetenv("X")\n',
+            'import os as system\nsystem.environ.get("X")\n',
+        ):
+            with self.subTest(snippet=snippet):
+                accesses = environment_accesses(snippet)
+                self.assertTrue(set(accesses) - {"get:GITHUB_REPOSITORY", "get:GITHUB_REPOSITORY_ID"}, accesses)
 
 
 class WorkflowConditionTest(unittest.TestCase):
@@ -542,7 +607,9 @@ class ForkCheckTest(unittest.TestCase):
         self.assertIn(f"default branch tip {tip}", lines)
         self.assertTrue(any(line.startswith(f"NOT_UP_TO_DATE: the pull request does not contain the default branch's "
                                             f"tip {tip}") for line in lines), lines)
-        # Given the stale base alone, the check still measures against the tip and fails.
+        # Without a tip the stale base stands in for it, so the lagging head passes: the library call alone
+        # cannot see the tightened rule. Only the command line, which always passes tip=HEAD, measures against
+        # the tip (test_the_command_line_measures_against_the_trusted_checkouts_head pins that).
         code, lines = pm.fork_check(self.repo, self.base, head, audit_tool=self._stub_audit(0))
         self.assertEqual(code, 0, lines)
 
