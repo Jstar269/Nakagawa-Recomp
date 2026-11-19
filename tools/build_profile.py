@@ -61,9 +61,10 @@ import tempfile
 def _command_words(command: str) -> list[str]:
     """Split a compiler command into words without eating a Windows path's backslashes.
 
-    POSIX splitting reads ``\\`` as an escape, so ``C:\\Python313\\python.exe`` would become
-    ``C:Python313python.exe``. A command that names an existing file is one word; on Windows
-    the rest splits the way cmd.exe quotes (``"C:\\Program Files\\gcc.exe" -m64``).
+    POSIX splitting reads ``\\`` as an escape, so a Windows path such as
+    ``Python313\\python.exe`` under a drive root would lose every separator. A command that
+    names an existing file is one word; on Windows the rest splits the way cmd.exe quotes (a
+    quoted compiler path with a space in it, then ``-m64``, is two words).
     """
     if Path(command).is_file():
         return [command]

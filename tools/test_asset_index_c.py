@@ -427,6 +427,30 @@ class TestProjectFontAssetCopy(unittest.TestCase):
                 self.assertIn("".join(str(searched).split()), output)
             self.assertFalse((build / "libiconv-2.dll").exists())
 
+    @unittest.skipUnless(os.name == "nt", "the Windows staging route copies DLLs")
+    def test_the_first_toolchain_directory_holding_a_dll_supplies_it(self):
+        # Two gcc directories on PATH both hold libiconv-2.dll: the earlier one on PATH supplies
+        # it, as it did when only the first gcc's directory was read. A later directory is used
+        # only for a file the earlier ones lack.
+        with tempfile.TemporaryDirectory(prefix="project-font-two-holders-") as tmp:
+            root = Path(tmp)
+            build = root / "build"
+            self._generated_fonts(build)
+            (build / "SDL3.dll").write_bytes(b"synthetic SDL3 runtime")
+            first = self._compiler_cache_shim(root)
+            (first / "libiconv-2.dll").write_bytes(b"synthetic libiconv runtime, first directory")
+            gcc_bin = self._toolchain(root, {"SDL3.dll": "libiconv-2.dll"})
+            (gcc_bin / "libiconv-2.dll").write_bytes(b"synthetic libiconv runtime, later directory")
+            env = os.environ.copy()
+            env.pop("MSYS_PATH", None)
+            env.pop("MINGW_PREFIX", None)
+            env["PATH"] = os.pathsep.join([str(first), str(gcc_bin), str(Path(sys.executable).parent)])
+
+            result = self._run_copy(build, env)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((build / "libiconv-2.dll").read_bytes(),
+                             (first / "libiconv-2.dll").read_bytes())
+
     def test_missing_project_slot_output_fails_by_name(self):
         with tempfile.TemporaryDirectory(prefix="project-font-missing-") as tmp:
             build = Path(tmp) / "build"
