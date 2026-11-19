@@ -1144,9 +1144,11 @@ jobs:
       - name: Create build directory
         run: mkdir -p build
 
+      # This job installs the pinned SDL3, so a build discovery that misses it must fail the
+      # SDL3 legs (texture scaling, the UI focus SDL translation) instead of skipping them.
       - name: Run native core test suite (hostile parsers, catalog, launch resolution, POSIX process)
         if: matrix.part == 'core'
-        run: make CC=gcc native-core-tests
+        run: NK_REQUIRE_SDL3=1 make CC=gcc native-core-tests
 
       # Compile ge.c with its optional front-end attribution path enabled. Use a
       # fresh object directory so the normal unprofiled ge.o cannot satisfy the
@@ -1285,6 +1287,33 @@ jobs:
             echo "the texture scaling selftest skipped on lavapipe" >&2
             exit 1
           fi
+
+      # Ace Mode's texture filtering (gpu-ace-selftest) and host-built mip chains
+      # (gpu-mips-selftest) on the same production path, and the mutants each must kill for
+      # its own reason: the mip chain's four, texture scaling without its Ace gate, and the
+      # movie cells' three. A SKIP line, or an exit 77 skip, fails the step.
+      - name: Run GPU Ace and mip chain selftests and their mutants on lavapipe
+        if: matrix.part == 'translation'
+        run: |
+          set -euo pipefail
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
+          xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
+            make CC=gcc gpu-ace-selftest gpu-mips-selftest gpu-mips-mutant tex-scale-gate-mutant gpu-coherence-selftest-movie-mutant 2>&1 \
+            | tee "$RUNNER_TEMP/gpu-ace-mips.log"
+          if grep -q '^SKIP ' "$RUNNER_TEMP/gpu-ace-mips.log"; then
+            echo "a GPU Ace, mip chain or mutant gate skipped on lavapipe" >&2
+            exit 1
+          fi
+
+      # The host twin's fourteen mutants (gpu-coherence-twin-mutants) each build their own
+      # coherence selftest, so they run nightly; an exit 77 skip fails the step.
+      - name: Run the GPU coherence host twin mutants on lavapipe (nightly)
+        if: matrix.part == 'translation' && github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          export VK_ICD_FILENAMES="$NK_LAVAPIPE_ICD"
+          xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
+            make CC=gcc gpu-coherence-twin-mutants
 
       # FSR 3's eight passes (src/rt/gpu_sdl3vk/fsr3_pass.c) on lavapipe under the validation layer,
       # synchronisation validation of shader accesses included. Headless: no window or SDL. An exit
@@ -2158,6 +2187,12 @@ jobs:
             make CC=gcc gpu-texscale-selftest 2>&1 | tee "$RUNNER_TEMP/texscale.log"
           if grep -q '^SKIP gpu-texscale' "$RUNNER_TEMP/texscale.log"; then
             echo "the texture scaling selftest skipped on lavapipe" >&2
+            exit 1
+          fi
+          xvfb-run -a -s "-screen 0 1280x800x24" env SDL_VIDEODRIVER=x11 \
+            make CC=gcc gpu-ace-selftest gpu-mips-selftest 2>&1 | tee build/gpu-ace-mips.log
+          if grep -q '^SKIP ' build/gpu-ace-mips.log; then
+            echo "the Ace or mip chain selftest skipped on lavapipe" >&2
             exit 1
           fi
           NK_UI_VK_REQUIRE=1 make CC=gcc fsr3-pass-selftest

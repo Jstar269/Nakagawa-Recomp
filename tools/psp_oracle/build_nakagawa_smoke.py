@@ -13,8 +13,6 @@ production-HLE selftest invoke that generated body.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 from pathlib import Path
 import re
 import struct
@@ -24,6 +22,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOLS = ROOT / "tools"
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
+import analyze  # noqa: E402
+
 ENTRY_NAME = "nakagawa_psp_oracle_sum_u32"
 FUNCTION_RE = re.compile(r"^void f_([0-9a-f]{8})\(CpuState \*s\);$", re.MULTILINE)
 
@@ -31,71 +33,34 @@ FUNCTION_RE = re.compile(r"^void f_([0-9a-f]{8})\(CpuState \*s\);$", re.MULTILIN
 def _symbol_address(elf_path: Path, symbol_name: str) -> int:
     """Return the address of one STT_FUNC symbol from a PSP ELF symtab."""
 
-    data = elf_path.read_bytes()
-    if len(data) < 52 or data[:4] != b"\x7fELF" or data[4] != 1 or data[5] != 1:
-        raise ValueError(f"{elf_path}: expected a little-endian ELF32 input")
-    shoff = struct.unpack_from("<I", data, 32)[0]
-    shentsize = struct.unpack_from("<H", data, 46)[0]
-    shnum = struct.unpack_from("<H", data, 48)[0]
-    shstrndx = struct.unpack_from("<H", data, 50)[0]
-    if not shoff or not shentsize or not shnum or shstrndx >= shnum:
-        raise ValueError(f"{elf_path}: no section table for named symbol lookup")
-
-    sections: list[tuple[int, int, int, int, int, int]] = []
-    for index in range(shnum):
-        offset = shoff + index * shentsize
-        if offset + 40 > len(data):
-            raise ValueError(f"{elf_path}: truncated section header {index}")
-        name, typ, _flags, _addr, section_offset, size = struct.unpack_from(
-            "<IIIIII", data, offset + 0
-        )
-        link = struct.unpack_from("<I", data, offset + 24)[0]
-        entsize = struct.unpack_from("<I", data, offset + 36)[0]
-        sections.append((name, typ, section_offset, size, link, entsize))
-
-    shstr_name, _, shstr_offset, shstr_size, _, _ = sections[shstrndx]
-    del shstr_name
-    shstr = data[shstr_offset : shstr_offset + shstr_size]
-
-    def section_name(name_offset: int) -> str:
-        if name_offset >= len(shstr):
-            return ""
-        end = shstr.find(b"\0", name_offset)
-        return shstr[name_offset : end if end >= 0 else len(shstr)].decode("ascii", "replace")
-
-    symtab_index = next((i for i, section in enumerate(sections) if section_name(section[0]) == ".symtab"), None)
-    strtab_index = next((i for i, section in enumerate(sections) if section_name(section[0]) == ".strtab"), None)
-    if symtab_index is None or strtab_index is None:
+    elf = analyze.Elf(elf_path)
+    symtab, strtab = elf.sec(".symtab"), elf.sec(".strtab")
+    if symtab is None or strtab is None:
         raise ValueError(f"{elf_path}: no .symtab/.strtab for {symbol_name}")
-    _, _, sym_offset, sym_size, _, sym_entsize = sections[symtab_index]
-    _, _, str_offset, str_size, _, _ = sections[strtab_index]
-    if sym_entsize < 16 or sym_offset + sym_size > len(data):
+    sym_offset, sym_size, sym_entsize = symtab["off"], symtab["size"], symtab["entsz"]
+    if not isinstance(sym_entsize, int) or sym_entsize < 16 or sym_size % sym_entsize:
         raise ValueError(f"{elf_path}: malformed symbol table")
-    strings = data[str_offset : str_offset + str_size]
+    strings = elf.data[strtab["off"] : strtab["off"] + strtab["size"]]
 
     matches: list[int] = []
-    for offset in range(sym_offset, sym_offset + sym_size, sym_entsize):
-        if offset + 16 > len(data):
+    for index in range(sym_size // sym_entsize):
+        offset = sym_offset + index * sym_entsize
+        if offset + 16 > sym_offset + sym_size:
             raise ValueError(f"{elf_path}: truncated symbol entry")
-        name_offset, value, size, info, _other, _section = struct.unpack_from("<IIIBBH", data, offset)
-        del size
+        name_offset, value, _size, info, _other, _section = struct.unpack_from(
+            "<IIIBBH", elf.data, offset
+        )
         if (info & 0x0F) != 2 or name_offset >= len(strings):  # STT_FUNC
             continue
         end = strings.find(b"\0", name_offset)
-        name = strings[name_offset : end if end >= 0 else len(strings)].decode("ascii", "replace")
+        if end < 0:
+            raise ValueError(f"{elf_path}: malformed symbol name in .strtab")
+        name = strings[name_offset:end].decode("ascii", "replace")
         if name == symbol_name:
             matches.append(value)
     if len(matches) != 1:
         raise ValueError(f"{elf_path}: expected one {symbol_name} function, found {len(matches)}")
     return matches[0]
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -149,19 +114,6 @@ def main(argv: list[str] | None = None) -> int:
         "}\n",
         encoding="utf-8",
         newline="\n",
-    )
-    manifest = {
-        "schema": 1,
-        "source_elf": str(elf_path),
-        "source_elf_sha256": _sha256(elf_path),
-        "guest_symbol": args.symbol,
-        "guest_address": f"0x{entry:08x}",
-        "generated_header": str(header),
-        "generated_chunks": [str(path) for path in generated_chunks],
-        "adapter": str(adapter),
-    }
-    (out_dir / "smoke_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n"
     )
     return 0
 

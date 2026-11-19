@@ -7,8 +7,9 @@
  *
  * Its pixels exist only on the swapchain image: no guest-visible byte, guest frame or capture
  * changes. An Ace run makes one; an authentic run makes one only when the render notice is due
- * (host_notice below; docs/ENHANCEMENT_CONTRACT.md, section 10.24), so an authentic run with
- * nothing to say registers no UI pass and draws exactly what it drew before.
+ * (host_notice below; docs/ENHANCEMENT_CONTRACT.md, section 10.24) or the run applies cheats
+ * (cheats_marker below), so an authentic run with nothing to say registers no UI pass and draws
+ * exactly what it drew before.
  *
  * It loads every Vulkan function through the instance's vkGetInstanceProcAddr and calls nothing
  * of the runtime: ace-ui-selftest's first link has it with nk_ui, its Vulkan backend and the C
@@ -58,6 +59,10 @@ typedef struct {
      * presenter hands it to the pass with the HUD off, instead of copying its own box to the
      * same corner. */
     const char *logic_notice;
+    /* The cheats marker ("Cheats on: 2", src/rt/cheats.h, #2639), in any mode, or NULL: a chip at
+     * the top left, under the readout and the slowed-logic warning. It does not fade and cannot
+     * be hidden: it shows for as long as the run applies cheats. */
+    const char *cheats_marker;
     const OskOverlay *keyboard;          /* an open keyboard, or NULL */
     /* The render notice (gui.c, #2151), in any mode: a heading, what happened in words and how
      * to hide it, in one chip at the bottom left that does not fade. It steps aside while the
@@ -109,9 +114,11 @@ void ace_ui_layout(NkUi *ui, const AceUiFrame *frame);
 #define ACE_UI_ID_SPACER ACE_UI_ID(0x005u)
 #define ACE_UI_ID_NOTICE ACE_UI_ID(0x006u)
 #define ACE_UI_ID_NOTICE_HEAD ACE_UI_ID(0x007u)
-#define ACE_UI_ID_TOP_LEFT ACE_UI_ID(0x008u)     /* the readout, and under it the logic warning */
+#define ACE_UI_ID_TOP_LEFT ACE_UI_ID(0x008u)     /* the readout, the logic warning, the cheats marker */
 #define ACE_UI_ID_LOGIC ACE_UI_ID(0x0E0u)
 #define ACE_UI_ID_LOGIC_TEXT ACE_UI_ID(0x0E1u)
+#define ACE_UI_ID_CHEATS ACE_UI_ID(0x0E4u)
+#define ACE_UI_ID_CHEATS_TEXT ACE_UI_ID(0x0E5u)
 #define ACE_UI_ID_NOTICE_TEXT ACE_UI_ID(0x040u)  /* + line, below ACE_UI_NOTICE_LINES */
 #define ACE_UI_ID_FILL ACE_UI_ID(0x009u)
 #define ACE_UI_ID_KEYBOARD ACE_UI_ID(0x010u)

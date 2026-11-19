@@ -1347,6 +1347,12 @@ static const char *g_fixture_report_extra = "";
 /* The generated-code epoch a fixture records: the current one but for the case that
    writes a package from before it. */
 static int g_fixture_generated_code_abi_epoch = NK_AOT_GENERATED_CODE_ABI_EPOCH;
+/* codegen_options the next fixture package writes as this text (any key order),
+   with its digest taken over g_fixture_codegen_options_canonical, the form
+   canonical_json() in tools/nk_core/package_cache.py hashes. NULL: the usual
+   options. */
+static const char *g_fixture_codegen_options_written = NULL;
+static const char *g_fixture_codegen_options_canonical = NULL;
 
 /* `folder_enhancement_id` names the package folder (NULL: the authentic
    packages/<disc_id>, else packages/<disc_id>-enhanced-<id>), and
@@ -1414,6 +1420,18 @@ static void write_runtime_package_fixture_variant(
         assert(used > 0 && (size_t)used < sizeof(codegen_options_json));
         int options_hash_length = snprintf(options_hash_input, sizeof(options_hash_input),
                                            "%s\n", codegen_options_json);
+        assert(options_hash_length > 0 &&
+               (size_t)options_hash_length < sizeof(options_hash_input));
+        fixture_sha_bytes(options_hash_input, (size_t)options_hash_length,
+                          codegen_options_digest);
+    }
+    if (g_fixture_codegen_options_written) {
+        char options_hash_input[sizeof(codegen_options_json) + 2];
+        int written = snprintf(codegen_options_json, sizeof(codegen_options_json), "%s",
+                               g_fixture_codegen_options_written);
+        int options_hash_length = snprintf(options_hash_input, sizeof(options_hash_input),
+                                           "%s\n", g_fixture_codegen_options_canonical);
+        assert(written > 0 && (size_t)written < sizeof(codegen_options_json));
         assert(options_hash_length > 0 &&
                (size_t)options_hash_length < sizeof(options_hash_input));
         fixture_sha_bytes(options_hash_input, (size_t)options_hash_length,
@@ -9568,6 +9586,9 @@ static void test_play_mode_settings(void) {
         assert(info && info->key && info->name && info->sentence && info->value_count >= 2);
         for (int i = 0; i < info->value_count; i++) has_off = has_off || info->values[i] == 0;
         assert(has_off);
+        /* Audit 2026-11-17, F-bf5c0482: the table's ace_only is what tags and dims a game's
+           row, and the part's sentence says it (the screen test's fixture reads the sentence). */
+        assert(info->ace_only == (strncmp(info->sentence, "Ace only", 8) == 0));
     }
     assert(player_enhanced_part(PLAYER_PART_COUNT) == NULL);
     /* The screen test's fixture is the page a new settings file shows: same names, fresh-value
@@ -12947,6 +12968,53 @@ static void test_play_mode_title_page(void) {
     assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
     player_app_enhanced_page_cycle_part(app, PLAYER_PART_TEXT);
     assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
+    player_app_enhanced_page_set_mode(app, 1);
+    assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, 1);
+    assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 8);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, 0);
+    assert(app->settings.enhanced.part[PLAYER_PART_FILTERING] == 16);
+    /* Audit 2026-11-17, F-d4cb7cec: on the library's page, a value past the part's list, the
+     * library default (-1, a game's choice only) and the play mode choices a game's page alone
+     * has (Enhanced and Ace, 2 and 3) change nothing. */
+    {
+        PlayerSettings *before = (PlayerSettings *)malloc(sizeof(PlayerSettings));
+        const PlayerEnhancedPartInfo *filtering = player_enhanced_part(PLAYER_PART_FILTERING);
+        assert(before && filtering);
+        memcpy(before, &app->settings, sizeof(*before));
+        player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, filtering->value_count);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, -1);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_FILTERING, -2);
+        player_app_enhanced_page_set_mode(app, 2);
+        player_app_enhanced_page_set_mode(app, 3);
+        player_app_enhanced_page_set_mode(app, -1);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_ACE_SETTINGS);
+        free(before);
+    }
+    /* Review of #2644, D1: with a preset the library's page shows the preset's value for a
+     * part the preset sets (Medium: Sharper enlarging on, over the library's own off).
+     * Picking the value the row shows changes nothing; picking another saves it and makes the
+     * preset Custom. */
+    {
+        const PlayerEnhancedPartInfo *upscale = player_enhanced_part(PLAYER_PART_UPSCALE);
+        const PlayerSettings kept = app->settings; /* leaving a preset keeps its values */
+        int shown;
+        assert(upscale && upscale->value_count == 2);
+        player_app_apply_graphics_preset(app, PLAYER_PRESET_MEDIUM);
+        shown = player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE);
+        assert(app->settings.graphics_preset == PLAYER_PRESET_MEDIUM);
+        assert(shown == upscale->values[0] &&
+               app->settings.enhanced.part[PLAYER_PART_UPSCALE] == upscale->values[1]);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_UPSCALE, 0);   /* as shown */
+        assert(app->settings.graphics_preset == PLAYER_PRESET_MEDIUM);
+        assert(app->settings.enhanced.part[PLAYER_PART_UPSCALE] == upscale->values[1]);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_UPSCALE, 1);   /* Off */
+        assert(app->settings.graphics_preset == PLAYER_PRESET_CUSTOM);
+        assert(player_settings_library_part(&app->settings, PLAYER_PART_UPSCALE) ==
+               upscale->values[1]);
+        app->settings = kept;
+    }
     player_app_close_enhanced_page(app);
     assert(app->active_view == VIEW_SETTINGS);
 
@@ -12955,6 +13023,29 @@ static void test_play_mode_title_page(void) {
     player_app_enhanced_page_cycle_mode(app);                     /* the title's choice */
     assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_AUTHENTIC);
     assert(app->settings.enhanced.library == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_mode(app, 2);
+    assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_ENHANCED);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, 0);
+    assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == 1);
+    player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, -1);
+    assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == -1);
+    /* Audit 2026-11-17, F-d4cb7cec: Ace for a game without its package is refused, and a value
+     * or a mode choice past its list changes nothing. */
+    {
+        PlayerSettings *before = (PlayerSettings *)malloc(sizeof(PlayerSettings));
+        const PlayerEnhancedPartInfo *text = player_enhanced_part(PLAYER_PART_TEXT);
+        assert(before && text && !app->title_enhancements[1].available);
+        memcpy(before, &app->settings, sizeof(*before));
+        player_app_enhanced_page_set_mode(app, 3);
+        assert(player_app_title_play_mode(app, 1) == PLAYER_PLAY_ENHANCED);
+        player_app_enhanced_page_set_mode(app, 4);
+        player_app_enhanced_page_set_mode(app, -1);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, text->value_count);
+        player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, -2);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_ACE_SETTINGS && player_app_enhanced_page_title(app) == 1);
+        free(before);
+    }
     player_app_enhanced_page_cycle_part(app, PLAYER_PART_TEXT);   /* library -> on */
     assert(player_app_title_part(app, 1, PLAYER_PART_TEXT) == 1);
     assert(app->settings.enhanced.part[PLAYER_PART_TEXT] == 0);
@@ -12993,6 +13084,17 @@ static void test_play_mode_title_page(void) {
         player_app_set_view(app, VIEW_ACE_SETTINGS);              /* the gone game's page again */
         memcpy(app->enhanced_page_disc, "TEST92002", sizeof("TEST92002"));
         player_app_enhanced_page_cycle_mode(app);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_LIBRARY);
+        /* Audit 2026-11-17, F-d4cb7cec: the setters the page's values call do the same. */
+        player_app_set_view(app, VIEW_ACE_SETTINGS);
+        memcpy(app->enhanced_page_disc, "TEST92002", sizeof("TEST92002"));
+        player_app_enhanced_page_set_part(app, PLAYER_PART_TEXT, 0);
+        assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
+        assert(app->active_view == VIEW_LIBRARY);
+        player_app_set_view(app, VIEW_ACE_SETTINGS);
+        memcpy(app->enhanced_page_disc, "TEST92002", sizeof("TEST92002"));
+        player_app_enhanced_page_set_mode(app, 1);
         assert(memcmp(before, &app->settings, sizeof(*before)) == 0);
         assert(app->active_view == VIEW_LIBRARY);
 
@@ -13261,6 +13363,155 @@ static void test_enhanced_package_variants(void) {
         (void)test_rmdir(enhanced_dir);
     }
     printf("[PLAYER_STATE_TEST] enhanced and authentic package variants validate apart PASS\n");
+}
+
+/* A package's cache digests are taken over canonical JSON (sorted keys at every
+ * level, objects inside arrays included), as canonical_json() in
+ * tools/nk_core/package_cache.py computes them, so the same content in another
+ * key order still validates. The native writer used to leave an object's first
+ * key in place and never sorted objects inside arrays, so such a package was
+ * refused as incompatible (audit 2026-11-17). */
+static void test_package_cache_digest_ignores_key_order(void) {
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700];
+    char disc_id[MAX_DISC_ID_LEN];
+    NkTitleEntrySnapshot snapshot = {0};
+    assert(nk_title_catalog_find_by_id("synthetic-allegrex-v1", &snapshot));
+    assert(snapshot.entry.primary_disc_id);
+    snprintf(disc_id, sizeof(disc_id), "%s", snapshot.entry.primary_disc_id);
+    nk_title_catalog_snapshot_release(&snapshot);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%ccache_key_order_probe", cache_root, sep);
+
+    NkGameEntry stock;
+    memset(&stock, 0, sizeof(stock));
+    snprintf(stock.disc_id, sizeof(stock.disc_id), "%s", disc_id);
+    snprintf(stock.title_id, sizeof(stock.title_id), "synthetic-allegrex-v1");
+    snprintf(stock.selected_executable, sizeof(stock.selected_executable), "EBOOT.BIN");
+    NkRuntimePackageInfo info;
+    char reason[1024];
+
+    static const struct {
+        const char *written;
+        const char *canonical;
+        bool valid;
+    } cases[] = {
+        /* The first key sorts after the second. */
+        {"{\"zz_probe\":0,\"aa_probe\":1}", "{\"aa_probe\":1,\"zz_probe\":0}", true},
+        /* An object inside an array, keys unsorted. */
+        {"{\"aa_probe\":[{\"zz\":1,\"aa\":2}]}", "{\"aa_probe\":[{\"aa\":2,\"zz\":1}]}", true},
+        /* Other content is still refused. */
+        {"{\"aa_probe\":1}", "{\"aa_probe\":2}", false},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+        g_fixture_codegen_options_written = cases[i].written;
+        g_fixture_codegen_options_canonical = cases[i].canonical;
+        write_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1",
+                                      SR_CPUSTATE_ABI_VERSION, "synthetic-allegrex-v1.exe",
+                                      FIXTURE_SHA256, NULL);
+        g_fixture_codegen_options_written = NULL;
+        g_fixture_codegen_options_canonical = NULL;
+        reason[0] = '\0';
+        NkRuntimePackageStatus status = nk_launch_validate_runtime_package(
+            root, &stock, &info, reason, sizeof(reason));
+        if ((status == NK_RUNTIME_PACKAGE_OK) != cases[i].valid) {
+            fprintf(stderr, "codegen_options %s: status=%d reason=%s\n", cases[i].written,
+                    (int)status, reason);
+        }
+        assert((status == NK_RUNTIME_PACKAGE_OK) == cases[i].valid);
+        if (!cases[i].valid) {
+            assert(strstr(reason, "package cache AOT key is invalid or incompatible") != NULL);
+        }
+    }
+    remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+    printf("[PLAYER_STATE_TEST] package cache digests ignore key order PASS\n");
+}
+
+/* On a case-sensitive file system a folder whose name differs from the package
+ * folder only in letter case is another folder. A symlinked directory inside
+ * the package that leads there is outside the package, so its executable and
+ * image are refused. The containment check used to fold case on every host and
+ * took them as inside (audit 2026-11-17). Windows folds case in NTFS names, so
+ * the check runs only where names are case-sensitive. */
+static void test_package_case_sibling_is_outside(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    printf("[PLAYER_STATE_TEST] SKIP package case-sibling containment: NTFS names fold case\n");
+#else
+    char sep = nk_platform_path_separator();
+    char cache_root[512], root[700], package_dir[900], sibling[900], link[960];
+    char disc_id[MAX_DISC_ID_LEN], lower_disc_id[MAX_DISC_ID_LEN];
+    NkTitleEntrySnapshot snapshot = {0};
+    assert(nk_title_catalog_find_by_id("synthetic-allegrex-v1", &snapshot));
+    assert(snapshot.entry.primary_disc_id);
+    snprintf(disc_id, sizeof(disc_id), "%s", snapshot.entry.primary_disc_id);
+    nk_title_catalog_snapshot_release(&snapshot);
+    for (size_t i = 0; i < sizeof(lower_disc_id); i++) {
+        lower_disc_id[i] = (char)tolower((unsigned char)disc_id[i]);
+        if (!disc_id[i]) break;
+    }
+    assert(strcmp(lower_disc_id, disc_id) != 0);
+    assert(nk_platform_get_path(NK_PATH_CACHE, cache_root, sizeof(cache_root)));
+    snprintf(root, sizeof(root), "%s%cpackage_case_sibling_probe", cache_root, sep);
+    snprintf(package_dir, sizeof(package_dir), "%s%cpackages%c%s", root, sep, sep, disc_id);
+    snprintf(sibling, sizeof(sibling), "%s%cpackages%c%s", root, sep, sep, lower_disc_id);
+    snprintf(link, sizeof(link), "%s%csub", package_dir, sep);
+
+    NkGameEntry stock;
+    memset(&stock, 0, sizeof(stock));
+    snprintf(stock.disc_id, sizeof(stock.disc_id), "%s", disc_id);
+    snprintf(stock.title_id, sizeof(stock.title_id), "synthetic-allegrex-v1");
+    snprintf(stock.selected_executable, sizeof(stock.selected_executable), "EBOOT.BIN");
+    NkRuntimePackageInfo info;
+    char reason[1024];
+    static const char *const moved[] = {
+        "synthetic-allegrex-v1.exe", "synthetic-allegrex-v1_image.bin"
+    };
+    char from[1100], to[1100];
+
+    /* The package records sub/<executable>; sub links to the case sibling. */
+    (void)unlink(link);
+    remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+    write_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1",
+                                  SR_CPUSTATE_ABI_VERSION, "sub/synthetic-allegrex-v1.exe",
+                                  FIXTURE_SHA256, NULL);
+    assert(nk_platform_mkdir_p(sibling));
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        snprintf(from, sizeof(from), "%s%c%s", package_dir, sep, moved[i]);
+        snprintf(to, sizeof(to), "%s%c%s", sibling, sep, moved[i]);
+        assert(rename(from, to) == 0);
+    }
+    char target[64];
+    snprintf(target, sizeof(target), "..%c%s", sep, lower_disc_id);
+    assert(symlink(target, link) == 0);
+    NkRuntimePackageStatus status = nk_launch_validate_runtime_package(
+        root, &stock, &info, reason, sizeof(reason));
+    if (status == NK_RUNTIME_PACKAGE_OK) {
+        fprintf(stderr, "case-sibling package accepted: %s\n", info.executable_path);
+    }
+    assert(status != NK_RUNTIME_PACKAGE_OK);
+
+    /* The same files in a real folder inside the package validate. */
+    assert(unlink(link) == 0);
+    assert(nk_platform_mkdir_p(link));
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        snprintf(from, sizeof(from), "%s%c%s", sibling, sep, moved[i]);
+        snprintf(to, sizeof(to), "%s%c%s", link, sep, moved[i]);
+        assert(rename(from, to) == 0);
+    }
+    status = nk_launch_validate_runtime_package(root, &stock, &info, reason, sizeof(reason));
+    if (status != NK_RUNTIME_PACKAGE_OK) fprintf(stderr, "in-package folder: %s\n", reason);
+    assert(status == NK_RUNTIME_PACKAGE_OK);
+
+    for (size_t i = 0; i < sizeof(moved) / sizeof(moved[0]); i++) {
+        snprintf(to, sizeof(to), "%s%c%s", link, sep, moved[i]);
+        assert(remove(to) == 0);
+    }
+    assert(test_rmdir(link) == 0);
+    assert(test_rmdir(sibling) == 0);
+    remove_runtime_package_fixture(root, disc_id, "synthetic-allegrex-v1");
+    printf("[PLAYER_STATE_TEST] package case-sibling containment PASS\n");
+#endif
 }
 
 /* The console nickname (#2197): "Player" until the user chooses one, and never the PC's user
@@ -14319,6 +14570,8 @@ int main(int argc, char **argv) {
     test_license_folder_request();
     test_library_card_status_text();
     test_enhanced_package_variants();
+    test_package_cache_digest_ignores_key_order();
+    test_package_case_sibling_is_outside();
     test_play_mode_settings();
     test_play_mode_settings_mapping();
     test_title_play_full_table_makes_room();
@@ -15208,8 +15461,8 @@ int main(int argc, char **argv) {
             "\"disc\":{\"id\":\"TEST00001\",\"region\":\"NA\","
             "\"revision_policy\":\"explicit-compatible-revisions\","
             "\"compatible_revisions\":[\"TEST00002\"]},"
-            "\"executable\":{\"base\":\"0x08800000\","
-            "\"entry\":\"0x08804000\",\"bss_metadata_source\":\"elf\","
+            "\"executable\":{\"base\":142606336,"
+            "\"entry\":142622720,\"bss_metadata_source\":\"elf\","
             "\"extra_executable_spans\":[]},\"modules\":[],"
             "\"filesystem\":{\"data_root\":\"data\","
             "\"memory_stick_root\":\"savedata\","
@@ -15217,7 +15470,7 @@ int main(int argc, char **argv) {
             "\"hle_profile\":\"generic\",\"feature_requirements\":[],"
             "\"verification_profile\":\"unverified\","
             "\"runtime_bindings\":{\"schema_version\":1,"
-            "\"vblank_frame_counter_addr\":\"0x08804000\"}}";
+            "\"vblank_frame_counter_addr\":142622720}}";
         write_text_file(refusal_path, refused_manifest);
         char refusal_report[2048];
         assert(nk_title_manifest_load_overlay_dir(refusal_dir, refusal_report,
@@ -17497,6 +17750,70 @@ int main(int argc, char **argv) {
             assert(!player_app_discord_activity(s_app2, &activity));
         }
 
+        /* Cheats (#2639): off by default, an optional key that only a JSON true turns on,
+           toggled and saved by the Settings switch. --cheats and --cheats-file turn them on
+           for the session and are never saved. */
+        player_app_init(s_app2);
+        assert(!s_app2->settings.cheats && !s_app2->cheats_session &&
+               s_app2->cheats_session_file[0] == '\0');
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"cheats\": false") != NULL);
+            free(saved);
+        }
+        write_text_file(test_settings_path, "{\"schema_version\": 2}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.cheats);   /* a file from before the key: off */
+        write_text_file(test_settings_path, "{\"schema_version\": 2, \"cheats\": 1}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(!s_app2->settings.cheats);
+        write_text_file(test_settings_path, "{\"schema_version\": 2, \"cheats\": true}");
+        player_app_init(s_app2);
+        assert(player_app_load_settings(s_app2, test_settings_path) == NK_OK);
+        assert(s_app2->settings.cheats);
+        {
+            NkRuntimeConfig cheats_cfg;
+            memset(&cheats_cfg, 0, sizeof(cheats_cfg));
+            player_app_apply_settings_to_session(&s_app2->settings, &cheats_cfg);
+            assert(cheats_cfg.cheats && cheats_cfg.cheats_file[0] == '\0');
+            s_app2->settings.cheats = false;
+            player_app_apply_settings_to_session(&s_app2->settings, &cheats_cfg);
+            assert(!cheats_cfg.cheats);
+        }
+        s_app2->settings_path[0] = '\0';
+        player_app_toggle_cheats(s_app2);
+        assert(s_app2->settings.cheats);
+        player_app_toggle_cheats(s_app2);
+        assert(!s_app2->settings.cheats);
+        assert(player_app_set_cheats_session(s_app2, NULL));
+        assert(s_app2->cheats_session && s_app2->cheats_session_file[0] == '\0');
+        {
+            /* A named file must be there (so it can be made absolute on every host); one that
+               is not changes nothing. */
+            char named[sizeof(test_settings_path) + 32];
+            char absolute[MAX_PATH_LEN];
+            snprintf(named, sizeof(named), "%s.session-cheats.ini", test_settings_path);
+            remove(named);
+            assert(!player_app_set_cheats_session(s_app2, named));
+            assert(s_app2->cheats_session && s_app2->cheats_session_file[0] == '\0');
+            write_text_file(named, "_C1 Write\n_L 0x00000100 0x00000001\n");
+            assert(player_app_set_cheats_session(s_app2, named));
+            assert(nk_platform_absolute_path(named, absolute, sizeof(absolute)));
+            assert(s_app2->cheats_session && strcmp(s_app2->cheats_session_file, absolute) == 0);
+            remove(named);
+        }
+        assert(!s_app2->settings.cheats);   /* the session's cheats are not the stored switch */
+        assert(player_app_save_settings(s_app2, test_settings_path) == NK_OK);
+        {
+            char *saved = read_text_file(test_settings_path);
+            assert(saved && strstr(saved, "\"cheats\": false") != NULL &&
+                   strstr(saved, "session-cheats") == NULL);
+            free(saved);
+        }
+
         /* Opt-in cover art (#2632): off by default, persisted cleanly, toggleable, and
            its cache size / clear helpers inspect only the cover-art cache under user data. */
         player_app_init(s_app2);
@@ -18028,20 +18345,28 @@ int main(int argc, char **argv) {
            it. The cancelled result says so and is never cached: the next
            validation hashes the package again and passes. */
         nk_title_manifest_set_cancel_check(test_cancel_always, NULL);
+        /* A cancelled validation says nothing about the package: UNKNOWN, not
+           the STALE or MISSING its abandoned hash fell through to. */
         assert(nk_launch_validate_runtime_package(
-                   validation_root, &game, &first_info, reason, sizeof(reason)) !=
-               NK_RUNTIME_PACKAGE_OK);
+                   validation_root, &game, &first_info, reason, sizeof(reason)) ==
+               NK_RUNTIME_PACKAGE_UNKNOWN);
         assert(strcmp(reason, "Package validation was cancelled.") == 0);
         assert(!first_info.validation_cache_hit && first_info.package_root[0] == '\0');
         nk_title_manifest_set_cancel_check(NULL, NULL);
+        char full_reason[1024];
         assert(nk_launch_validate_runtime_package(
-                   validation_root, &game, &first_info, reason, sizeof(reason)) ==
-               NK_RUNTIME_PACKAGE_OK);
+                   validation_root, &game, &first_info, full_reason,
+                   sizeof(full_reason)) == NK_RUNTIME_PACKAGE_OK);
         assert(!first_info.validation_cache_hit);
         assert(nk_launch_validate_runtime_package(
                    validation_root, &game, &cached_info, reason, sizeof(reason)) ==
                NK_RUNTIME_PACKAGE_OK);
         assert(cached_info.validation_cache_hit);
+        /* The full check and the cache hit report the same thing, and neither
+           names a package schema the package may not have. */
+        assert(strncmp(full_reason, "Runtime package is valid for ",
+                       strlen("Runtime package is valid for ")) == 0);
+        assert(strcmp(full_reason, reason) == 0);
         assert(strcmp(first_info.package_root, cached_info.package_root) == 0);
         assert(strcmp(first_info.executable_path, cached_info.executable_path) == 0);
         assert(strcmp(first_info.image_path, cached_info.image_path) == 0);
@@ -18379,8 +18704,8 @@ int main(int argc, char **argv) {
             "  \"display_name\": \"Epoch Coherence Overlay\",\n"
             "  \"kind\": \"retail\",\n"
             "  \"disc\": {\"id\": \"UCUS99901\", \"region\": \"NA\", \"revision_policy\": \"exact-disc-id\"},\n"
-            "  \"executable\": {\"base\": \"0x08800000\", \"entry\": \"0x08804000\", \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
-            "  \"modules\": [{\"name\": \"epoch.prx\", \"load_address\": \"0x08900000\", \"required\": true, \"role\": \"guest-prx\"}],\n"
+            "  \"executable\": {\"base\": 142606336, \"entry\": 142622720, \"bss_metadata_source\": \"elf\", \"extra_executable_spans\": []},\n"
+            "  \"modules\": [{\"name\": \"epoch.prx\", \"load_address\": 143654912, \"required\": true, \"role\": \"guest-prx\"}],\n"
             "  \"filesystem\": {\"data_root\": \"data/epoch\", \"memory_stick_root\": \"ms/epoch\", \"device_prefixes\": [\"host0:\"]},\n"
             "  \"hle_profile\": \"standard\",\n"
             "  \"feature_requirements\": [\"allegrex\"],\n"

@@ -65,6 +65,13 @@ We aim to respond promptly and will remove material where appropriate.
   `proAdhocServer.cpp`, and its port offset from
   PPSSPP's `Core/HLE/sceNetAdhoc.cpp` (Copyright (c) 2013- PPSSPP Project) at the
   same revision, and it is conveyed as GPL-3.0-or-later. Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
+- **Cheat files (#2639)** — the CWCheat reader, the decode of each code form and
+  the applier (`src/core/nk_cheats.c`, `src/core/nk_cheats.h`) are translated
+  from PPSSPP's `Core/CwCheat.cpp` and `Core/CwCheat.h` at
+  `c437463bc5cb78a0236312ad23f9c3b56fb9ae67` (GPL-2.0-or-later), conveyed as
+  GPL-3.0-or-later. Neither upstream file carries a notice of its own; the files
+  here carry the notice of PPSSPP's source files (Copyright (c) 2012- PPSSPP
+  Project, as `Core/Core.cpp` has it at that revision). Per-file lineage: [`src/core/PROVENANCE.md`](src/core/PROVENANCE.md).
 - **PSPSDK / PSPDEV** — permissive per-component declarations and BSD-family
   notices for public ABI definitions and source-owned fixtures. The applicable
   notices are in `third_party/licenses/PSPSDK.txt` and `assets/upstream/`.

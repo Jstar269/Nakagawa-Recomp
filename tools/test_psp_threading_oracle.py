@@ -8,8 +8,10 @@ All fixtures are synthetic and self-contained; no hardware, no retail data.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
+import io
 import json
 import pathlib
 import re
@@ -36,6 +38,7 @@ from psp_threading_oracle.parser import (
     SYNTHETIC_TEST_ONLY,
     HARDWARE_MEASURED,
 )
+from psp_threading_oracle import analyzer
 from psp_oracle.protocol import ProtocolError
 
 MATRIX = load_matrix()
@@ -441,6 +444,78 @@ class ParserStrictTests(unittest.TestCase):
         t2 = valid_campaign_text(run_id=0x11111111, attempt=0) # same run_id as t1
         with self.assertRaises(ProtocolError):
             analyze_runs([t1, t2])
+
+class AnalyzerCliTests(unittest.TestCase):
+    def _run(self, captures: list[tuple[str, bytes]], extra_args: list[str] | None = None):
+        with tempfile.TemporaryDirectory(prefix="threading-analyzer-") as raw:
+            root = pathlib.Path(raw)
+            paths = []
+            for name, data in captures:
+                path = root / name
+                path.write_bytes(data)
+                paths.append(path)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    code = analyzer.main([*(extra_args or []), *(str(path) for path in paths)])
+            except SystemExit as exc:
+                assert isinstance(exc.code, int), exc.code
+                code = exc.code
+            return code, stdout.getvalue() + stderr.getvalue(), paths
+
+    def test_incomplete_required_cases_return_nonzero(self) -> None:
+        text = valid_campaign_text()
+        missing = "\n".join(line for line in text.splitlines() if "case_id=CT-A01 " not in line) + "\n"
+        code, output, _paths = self._run([("incomplete.txt", missing.encode("utf-8"))])
+        self.assertEqual(code, 2)
+        self.assertIn("Missing: CT-A01", output)
+
+    def test_variable_case_returns_nonzero(self) -> None:
+        first = valid_campaign_text(run_id=0x11111111)
+        second = valid_campaign_text(run_id=0x22222222).replace(
+            "out0=0x00000000", "out0=0x00000001", 1
+        )
+        code, output, _paths = self._run([
+            ("run1.txt", first.encode("utf-8")),
+            ("run2.txt", second.encode("utf-8")),
+        ])
+        self.assertEqual(code, 2)
+        self.assertIn("VARIABLE", output)
+
+    def test_removed_provenance_option_is_not_silently_ignored(self) -> None:
+        text = valid_campaign_text()
+        code, output, _paths = self._run(
+            [("capture.txt", text.encode("utf-8"))], ["--provenance", "hardware"]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("unrecognized arguments: --provenance", output)
+
+    def test_malformed_capture_returns_a_named_error_not_a_traceback(self) -> None:
+        code, output, _paths = self._run([("bad.txt", b"not a capture\n")])
+        self.assertEqual(code, 2)
+        self.assertIn("MALFORMED", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_bom_encodings_are_named_and_raw_crlf_hash_is_preserved(self) -> None:
+        text = valid_campaign_text()
+        for name, data, encoding_label in (
+            ("utf8-bom.txt", b"\xef\xbb\xbf" + text.encode("utf-8"), "UTF-8 BOM"),
+            ("utf16-bom.txt", b"\xff\xfe" + text.encode("utf-16-le"), "UTF-16 BOM"),
+        ):
+            with self.subTest(name=name):
+                code, output, _paths = self._run([(name, data)])
+                self.assertEqual(code, 2)
+                self.assertIn(encoding_label, output)
+
+        raw = text.replace("\n", "\r\n").encode("utf-8")
+        code, output, paths = self._run([("capture.txt", raw)])
+        self.assertEqual(code, 0)
+        digest = hashlib.sha256(raw).hexdigest()
+        self.assertIn(f"raw_capture_sha256={digest}", output)
+        self.assertIn("capture.txt", output)
+        self.assertNotIn(str(paths[0]), output)
+
 
 class EvidenceModelTests(unittest.TestCase):
     def test_raw_capture_cannot_self_label_hardware(self) -> None:

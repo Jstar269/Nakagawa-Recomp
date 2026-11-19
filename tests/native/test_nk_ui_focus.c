@@ -49,6 +49,8 @@ static void reg(NkUiFocusGraph *g, NkUiId id, float x, float y, float w, float h
     e.flags = flags;
     e.scope = scope;
     e.scroller = scroller;
+    e.up = 0u;
+    e.down = 0u;
     if (!nk_ui_focus_register(g, &e)) {
         fprintf(stderr, "register failed for id %u\n", (unsigned)id);
         exit(2);
@@ -144,6 +146,375 @@ static int test_owns_horizontal(void) {
     return 1;
 }
 
+/* A page of option rows under a tab strip (Settings > Enhanced): each row owns left and
+   right and holds pointer-only choices, and the rows beside the strip name its active tab.
+   Ids: 1 the play mode row; 11 to 14 the tabs, 11 active; 21 and 22 the rows, with the
+   choices 31 to 33 and 41 to 42 inside them; 50 Back, a small button under the left end. */
+static void reg_between(NkUiFocusGraph *g, NkUiId id, float x, float y, float w, float h,
+                        uint32_t flags, NkUiId up, NkUiId down) {
+    NkUiFocusEntry e;
+    e.id = id;
+    e.rect.x = x;
+    e.rect.y = y;
+    e.rect.w = w;
+    e.rect.h = h;
+    e.flags = flags;
+    e.scope = NK_UI_SCOPE_ROOT;
+    e.scroller = 0u;
+    e.up = up;
+    e.down = down;
+    if (!nk_ui_focus_register(g, &e)) {
+        fprintf(stderr, "register failed for id %u\n", (unsigned)id);
+        exit(2);
+    }
+}
+
+static void rows_and_tabs_frame(NkUiFocusGraph *g, bool named) {
+    int i;
+    nk_ui_focus_begin_frame(g);
+    reg_between(g, 1u, 0.0f, 0.0f, 600.0f, 44.0f, NK_UI_FOCUS_OWNS_HORIZONTAL, 0u,
+                named ? 11u : 0u);
+    for (i = 0; i < 4; ++i) {
+        reg(g, (NkUiId)(11 + i), (float)(i * 110), 60.0f, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT,
+            0u);
+    }
+    reg_between(g, 21u, 0.0f, 110.0f, 600.0f, 44.0f, NK_UI_FOCUS_OWNS_HORIZONTAL,
+                named ? 11u : 0u, 0u);
+    for (i = 0; i < 3; ++i) {
+        reg(g, (NkUiId)(31 + i), 420.0f + (float)(i * 60), 115.0f, 50.0f, 34.0f,
+            NK_UI_FOCUS_POINTER_ONLY, NK_UI_SCOPE_ROOT, 0u);
+    }
+    reg(g, 22u, 0.0f, 160.0f, 600.0f, 44.0f, NK_UI_FOCUS_OWNS_HORIZONTAL, NK_UI_SCOPE_ROOT, 0u);
+    for (i = 0; i < 2; ++i) {
+        reg(g, (NkUiId)(41 + i), 480.0f + (float)(i * 60), 165.0f, 50.0f, 34.0f,
+            NK_UI_FOCUS_POINTER_ONLY, NK_UI_SCOPE_ROOT, 0u);
+    }
+    reg_between(g, 50u, 0.0f, 230.0f, 100.0f, 44.0f, 0u, named ? 22u : 0u, 0u);
+    nk_ui_focus_end_frame(g);
+}
+
+static int test_pointer_only_and_named_neighbours(void) {
+    static const NkUiId tab_order[] = {11u, 12u, 13u, 14u, 21u, 22u, 50u, 1u};
+    NkUiFocusGraph *g = nk_ui_focus_graph_create();
+    size_t i;
+    CHECK(g != NULL, "create graph");
+    /* A pointer-only entry is never the first focus, even when it is drawn first. */
+    nk_ui_focus_begin_frame(g);
+    reg(g, 31u, 0.0f, 0.0f, 50.0f, 34.0f, NK_UI_FOCUS_POINTER_ONLY, NK_UI_SCOPE_ROOT, 0u);
+    reg(g, 21u, 0.0f, 50.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    nk_ui_focus_end_frame(g);
+    CHECK(nk_ui_focus_current(g) == 21u, "first focus passes over a pointer-only entry");
+    nk_ui_focus_graph_destroy(g);
+
+    /* By position alone the full-width rows miss the active tab at the strip's left end, and
+       the small Back button under it jumps over both rows to it. */
+    g = nk_ui_focus_graph_create();
+    CHECK(g != NULL, "create graph");
+    rows_and_tabs_frame(g, false);
+    CHECK(nk_ui_focus_current(g) == 1u, "focus starts on the first row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 13u, "by position, down picks the nearest tab");
+    CHECK(nk_ui_focus_set(g, 50u), "focus Back");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 11u, "by position, up from Back skips the rows");
+    nk_ui_focus_graph_destroy(g);
+
+    g = nk_ui_focus_graph_create();
+    CHECK(g != NULL, "create graph");
+    rows_and_tabs_frame(g, true);
+    CHECK(nk_ui_focus_current(g) == 1u, "focus starts on the first row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 11u, "down enters the strip at the named tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_RIGHT) == 12u, "right reaches the next tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_RIGHT) == 13u, "and the one after it");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_LEFT) == 12u, "left comes back along the strip");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 21u,
+          "down from a tab reaches the first row, not a choice inside it");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_RIGHT) == 0u && nk_ui_focus_current(g) == 21u,
+          "right stays with the row: its choices are not focus stops");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 22u, "down reaches the next row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 50u, "down from the last row reaches Back");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 22u, "up from Back reaches the row it names");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 21u, "up reaches the first row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 11u, "up from the first row reaches the named tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 1u, "up from the strip reaches the row above");
+    /* Tab passes over every choice and still stops on every tab. */
+    for (i = 0; i < sizeof(tab_order) / sizeof(tab_order[0]); ++i) {
+        CHECK(nk_ui_focus_cycle(g, false) == tab_order[i], "Tab follows the rows and tabs");
+    }
+    CHECK(nk_ui_focus_cycle(g, true) == 50u, "Shift+Tab wraps to Back");
+    CHECK(nk_ui_focus_cycle(g, true) == 22u, "Shift+Tab passes over the choices");
+    /* A pointer press still focuses a choice, and the keys then leave it for a row. */
+    CHECK(nk_ui_focus_accepts_pointer(g, 32u), "a pointer can press a choice");
+    CHECK(nk_ui_focus_set(g, 32u) && nk_ui_focus_current(g) == 32u, "a press focuses the choice");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 22u, "down from a pressed choice reaches a row");
+    CHECK(nk_ui_focus_set(g, 32u), "focus the choice again");
+    CHECK(nk_ui_focus_cycle(g, false) == 22u, "Tab from a pressed choice reaches the next row");
+    /* A row its scroll container clips away whole is not a target from outside the
+       container: with the list (scroller 90) scrolled down, row 21 lies behind the play
+       mode row and row 22 behind the strip, and the moves outside the list pass them by. */
+    nk_ui_focus_begin_frame(g);
+    {
+        NkUiFocusScroller list;
+        list.id = 90u;
+        list.viewport = (NkUiRect){0.0f, 110.0f, 600.0f, 94.0f};
+        list.scroll_x = 0.0f;
+        list.scroll_y = 100.0f;
+        list.content_w = 600.0f;
+        list.content_h = 194.0f;
+        list.parent = 0u;
+        CHECK(nk_ui_focus_register_scroller(g, &list), "register the list");
+    }
+    reg(g, 1u, 0.0f, 0.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    for (i = 0; i < 4; ++i) {
+        reg(g, (NkUiId)(11 + i), (float)(i * 110), 60.0f, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT,
+            0u);
+    }
+    reg(g, 21u, 0.0f, 10.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 22u, 0.0f, 60.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 23u, 0.0f, 110.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 24u, 0.0f, 160.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 50u, 0.0f, 230.0f, 100.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    nk_ui_focus_end_frame(g);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the play mode row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 13u, "down passes the row hidden behind it");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_RIGHT) == 14u, "right along the strip passes row 22");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 1u, "up from the strip passes the hidden rows");
+    CHECK(nk_ui_focus_set(g, 13u), "focus a tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 23u, "down from the strip takes a row on screen");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 22u, "inside the list, up reaches a hidden row");
+    /* A named neighbour that is missing is ignored: the move is by position. */
+    nk_ui_focus_begin_frame(g);
+    reg_between(g, 1u, 0.0f, 0.0f, 600.0f, 44.0f, 0u, 0u, 99u);
+    reg(g, 21u, 0.0f, 110.0f, 600.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    nk_ui_focus_end_frame(g);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 21u, "a missing named neighbour falls back");
+    nk_ui_focus_graph_destroy(g);
+    return 1;
+}
+
+/* A page that scrolls (scroller 200, 300 high, 500 of content) holding a tab, a list that
+   scrolls inside it (scroller 90, 100 high, six rows of 50) and a Back button under the list,
+   as the page and the list are scrolled. `nested` tells the graph the list sits in the page. */
+static void nested_frame(NkUiFocusGraph *g, float page_scroll, float list_scroll, bool nested) {
+    NkUiFocusScroller page;
+    NkUiFocusScroller list;
+    int i;
+    nk_ui_focus_begin_frame(g);
+    page.id = 200u;
+    page.viewport = (NkUiRect){0.0f, 0.0f, 600.0f, 300.0f};
+    page.scroll_x = 0.0f;
+    page.scroll_y = page_scroll;
+    page.content_w = 600.0f;
+    page.content_h = 500.0f;
+    page.parent = 0u;
+    list.id = 90u;
+    list.viewport = (NkUiRect){0.0f, 70.0f - page_scroll, 600.0f, 100.0f};
+    list.scroll_x = 0.0f;
+    list.scroll_y = list_scroll;
+    list.content_w = 600.0f;
+    list.content_h = 300.0f;
+    list.parent = nested ? 200u : 0u;
+    if (!nk_ui_focus_register_scroller(g, &page) || !nk_ui_focus_register_scroller(g, &list)) {
+        exit(2);
+    }
+    reg(g, 11u, 0.0f, 20.0f - page_scroll, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT, 200u);
+    for (i = 0; i < 6; ++i) {
+        reg(g, (NkUiId)(21 + i), 0.0f, 70.0f - page_scroll + (float)(i * 50) - list_scroll,
+            600.0f, 50.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    }
+    reg(g, 50u, 0.0f, 340.0f - page_scroll, 100.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 200u);
+    nk_ui_focus_end_frame(g);
+}
+
+/* nk_ui_focus_place callbacks: the page of nested_frame scrolled to 200, after its content
+   grew to 640 and pushed Back down to 280, its last 24 px under the page's edge. */
+static bool grown_rect(void *user, NkUiId id, NkUiRect *rect) {
+    (void)user;
+    if (id == 200u) {
+        *rect = (NkUiRect){0.0f, 0.0f, 600.0f, 300.0f};
+        return true;
+    }
+    if (id != 50u) return false;
+    *rect = (NkUiRect){0.0f, 280.0f, 100.0f, 44.0f};
+    return true;
+}
+
+static bool grown_scroll(void *user, NkUiId id, float *scroll_y, float *content_h) {
+    (void)user;
+    if (id != 200u) return false;
+    *scroll_y = 200.0f;
+    *content_h = 640.0f;
+    return true;
+}
+
+/* A list that scrolls inside a page that scrolls (Settings > Enhanced at Larger text, review
+   of #2644). A control in the list is inside the page too: it reaches a control the page has
+   out of view. Focus is brought into view through both containers. And where the layout
+   that follows a focus change moves the focused control, it is brought into view again. */
+static int test_nested_scrollers(void) {
+    NkUiFocusGraph *g = nk_ui_focus_graph_create();
+    NkUiFocusScrollRequest r;
+    CHECK(g != NULL, "create graph");
+    /* The list at its end: its last row is on screen, Back is under the page's edge. */
+    nested_frame(g, 0.0f, 200.0f, false);
+    CHECK(nk_ui_focus_set(g, 26u), "focus the last row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 0u && nk_ui_focus_current(g) == 26u,
+          "from a container that is not in the page, Back out of view is no target");
+    nested_frame(g, 0.0f, 200.0f, true);
+    CHECK(nk_ui_focus_current(g) == 26u, "focus stays on the last row");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 50u,
+          "down from the last row of a list in the page reaches Back, out of view");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u && r.scroll_y == 84.0f,
+          "and the page scrolls Back into view");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "one scroll shows Back");
+    CHECK(nk_ui_focus_set(g, 11u), "focus the tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 25u,
+          "from the page, a row the list has out of view is still no target");
+    /* The page scrolled 100: the list's top 30 px, and its first row with them, are above
+       the page's edge. */
+    nested_frame(g, 100.0f, 0.0f, true);
+    CHECK(nk_ui_focus_set(g, 21u), "focus the first row");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u && r.scroll_y == 70.0f,
+          "a row its list shows whole is brought into view by the page");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "the list need not move");
+    /* The list scrolled too: the row needs both, its own container first. */
+    nested_frame(g, 100.0f, 100.0f, true);
+    CHECK(nk_ui_focus_set(g, 24u), "focus a row on screen");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "which needs no scroll");
+    CHECK(nk_ui_focus_set(g, 21u), "focus the first row, out of the list and of the page");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 90u && r.scroll_y == 0.0f,
+          "the list scrolls the row in");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u && r.scroll_y == 70.0f,
+          "then the page scrolls to where the list shows it");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "two scrolls show the row");
+    CHECK(nk_ui_focus_scroll_into_view(g, 21u, &r) && r.scroller == 90u,
+          "asked about one container, the answer is the row's own");
+    /* Back is whole when focus moves to it; the layout that follows moves it. */
+    nested_frame(g, 200.0f, 200.0f, true);
+    CHECK(nk_ui_focus_set(g, 50u), "focus Back, on screen");
+    CHECK(!nk_ui_focus_take_scroll(g, &r), "which needs no scroll");
+    nk_ui_focus_place(g, grown_rect, grown_scroll, NULL);
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u && r.scroll_y == 224.0f,
+          "the layout after the move put Back under the edge: it is brought into view");
+    nk_ui_focus_place(g, grown_rect, grown_scroll, NULL);
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroll_y == 224.0f,
+          "and the layout after that is judged once more");
+    nk_ui_focus_place(g, grown_rect, grown_scroll, NULL);
+    CHECK(!nk_ui_focus_take_scroll(g, &r),
+          "later layouts leave the page where the user scrolls it");
+    nk_ui_focus_graph_destroy(g);
+    return 1;
+}
+
+/* A page body that scrolls (scroller 300) under a top bar, holding one control, a button
+   far down its text (the About page's Third-party notices at Larger text). With the body
+   scrolled to text and the button out of view, the body shows none of its controls: Down from
+   the top bar still lands on the button, and the body scrolls it into view (audit 2026-11-17,
+   F-f3ac8b3e: the move found no target and did nothing). */
+static void body_frame(NkUiFocusGraph *g, float body_scroll, bool second_control) {
+    NkUiFocusScroller body;
+    nk_ui_focus_begin_frame(g);
+    body.id = 300u;
+    body.viewport = (NkUiRect){0.0f, 60.0f, 600.0f, 240.0f};
+    body.scroll_x = 0.0f;
+    body.scroll_y = body_scroll;
+    body.content_w = 600.0f;
+    body.content_h = 900.0f;
+    body.parent = 0u;
+    if (!nk_ui_focus_register_scroller(g, &body)) {
+        exit(2);
+    }
+    reg(g, 1u, 0.0f, 0.0f, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    reg(g, 31u, 0.0f, 60.0f + 700.0f - body_scroll, 200.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 300u);
+    if (second_control) {
+        reg(g, 32u, 0.0f, 60.0f + 100.0f - body_scroll, 200.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT,
+            300u);
+    }
+    nk_ui_focus_end_frame(g);
+}
+
+static int test_scroller_showing_no_control(void) {
+    NkUiFocusGraph *g = nk_ui_focus_graph_create();
+    NkUiFocusScrollRequest r;
+    CHECK(g != NULL, "create graph");
+    body_frame(g, 0.0f, false);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the top bar's tab");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 31u,
+          "down from the top bar reaches the body's one control, out of view");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 300u && r.scroll_y > 0.0f,
+          "and the body scrolls it into view");
+    /* With a control of the body on screen, the clipped one stays no target from outside. */
+    body_frame(g, 0.0f, true);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the tab again");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_DOWN) == 32u,
+          "down takes the control the body shows");
+    nk_ui_focus_graph_destroy(g);
+    return 1;
+}
+
+/* A list (scroller 90) nested in a page body (scroller 200) under a top bar, with the body
+   scrolled so the whole list is above its edge while the list itself shows its first rows,
+   and a Back button the body shows (Settings > Enhanced at Larger text in a small window).
+   The rows lie in their own list's view but not on screen: from the top bar, outside both
+   containers, Up finds no target, as a row only the list clips would not be one (audit
+   2026-11-17, F-142b3475: only the row's own container was checked, and Up jumped to a row
+   the body had out of view). From inside the body or the list, the rows are reached and
+   scrolled into view as before. */
+static void nested_hidden_frame(NkUiFocusGraph *g, bool back) {
+    NkUiFocusScroller body;
+    NkUiFocusScroller list;
+    nk_ui_focus_begin_frame(g);
+    body.id = 200u;
+    body.viewport = (NkUiRect){0.0f, 60.0f, 600.0f, 300.0f};
+    body.scroll_x = 0.0f;
+    body.scroll_y = 300.0f;
+    body.content_w = 600.0f;
+    body.content_h = 800.0f;
+    body.parent = 0u;
+    list.id = 90u;
+    list.viewport = (NkUiRect){0.0f, -240.0f, 600.0f, 100.0f};
+    list.scroll_x = 0.0f;
+    list.scroll_y = 0.0f;
+    list.content_w = 600.0f;
+    list.content_h = 300.0f;
+    list.parent = 200u;
+    if (!nk_ui_focus_register_scroller(g, &body) || !nk_ui_focus_register_scroller(g, &list)) {
+        exit(2);
+    }
+    reg(g, 1u, 0.0f, 0.0f, 100.0f, 40.0f, 0u, NK_UI_SCOPE_ROOT, 0u);
+    reg(g, 21u, 0.0f, -240.0f, 600.0f, 50.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    reg(g, 22u, 0.0f, -190.0f, 600.0f, 50.0f, 0u, NK_UI_SCOPE_ROOT, 90u);
+    if (back) {
+        reg(g, 50u, 0.0f, 160.0f, 100.0f, 44.0f, 0u, NK_UI_SCOPE_ROOT, 200u);
+    }
+    nk_ui_focus_end_frame(g);
+}
+
+static int test_nested_scroller_hides_its_list(void) {
+    NkUiFocusGraph *g = nk_ui_focus_graph_create();
+    NkUiFocusScrollRequest r;
+    CHECK(g != NULL, "create graph");
+    nested_hidden_frame(g, true);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the top bar");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 0u && nk_ui_focus_current(g) == 1u,
+          "from outside both containers, a row the body has out of view is no target");
+    CHECK(nk_ui_focus_set(g, 50u), "focus Back, in the body");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 1u,
+          "up from Back, in the body, reaches the top bar, the nearer control");
+    nk_ui_focus_graph_destroy(g);
+    g = nk_ui_focus_graph_create();
+    CHECK(g != NULL, "create graph again");
+    /* The body shows none of its controls: its clipped ones are targets, and the one a move
+       lands on is brought into view. */
+    nested_hidden_frame(g, false);
+    CHECK(nk_ui_focus_set(g, 1u), "focus the top bar again");
+    CHECK(nk_ui_focus_move(g, NK_UI_DIR_UP) == 22u,
+          "with nothing of the body on screen, up reaches the nearer row");
+    CHECK(nk_ui_focus_take_scroll(g, &r) && r.scroller == 200u,
+          "and the body scrolls it into view");
+    nk_ui_focus_graph_destroy(g);
+    return 1;
+}
+
 static int test_ragged_row(void) {
     NkUiFocusGraph *g = nk_ui_focus_graph_create();
     NkUiFocusEntry list[3];
@@ -181,6 +552,8 @@ static int test_ragged_row(void) {
     list[0].flags = list[1].flags = list[2].flags = 0u;
     list[0].scope = list[1].scope = list[2].scope = 0u;
     list[0].scroller = list[1].scroller = list[2].scroller = 0u;
+    list[0].up = list[1].up = list[2].up = 0u;
+    list[0].down = list[1].down = list[2].down = 0u;
     CHECK(nk_ui_focus_directional(list, 3, 1u, NK_UI_DIR_RIGHT) == 3u,
           "an overlapping row beats a staggered one");
     CHECK(nk_ui_focus_directional(list, 2, 1u, NK_UI_DIR_RIGHT) == 2u,
@@ -214,6 +587,7 @@ static void list_frame(NkUiFocusGraph *g, float scroll_y) {
     s.scroll_y = scroll_y;
     s.content_w = 300.0f;
     s.content_h = 1000.0f;
+    s.parent = 0u;
     if (!nk_ui_focus_register_scroller(g, &s)) {
         exit(2);
     }
@@ -1650,8 +2024,10 @@ int main(int argc, char **argv) {
         }
     }
     if (!test_grid() || !test_no_default_entry() || !test_owns_horizontal() ||
+        !test_pointer_only_and_named_neighbours() ||
         !test_ragged_row() || !test_scroll_into_view() || !test_place_follows_the_layout() ||
-        !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
+        !test_nested_scrollers() || !test_scroller_showing_no_control() ||
+        !test_nested_scroller_hides_its_list() || !test_dialog_trap_and_scope_memory() || !test_tab_cycle_and_repair() ||
         !test_repeat_timing() || !test_direction_holders() || !test_stick_hysteresis() ||
         !test_event_construction() ||
         !test_prompt_style_follows_device() ||
