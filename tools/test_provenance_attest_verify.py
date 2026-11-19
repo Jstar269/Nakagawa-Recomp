@@ -2293,6 +2293,48 @@ class MergePathTamperTests(GateCase):
         head = self._commit_workflow(".github/workflows/spoof.yml", raw)
         self.assertFatal(self.run_verify(head), "CI_CONTEXT_COLLISION")
 
+    def test_a_reserved_context_followed_by_a_combining_mark_is_still_refused(self) -> None:
+        """The normalized reading adds to the byte search; it never replaces it.
+
+        NFKC composes a combining mark with the letter before it, so a check that
+        compared only the composed text stopped seeing the reserved name once a mark
+        followed it, although the byte search it replaced refuses that file.  The
+        first two spellings hold the name as one byte run; all of them must collide.
+        """
+        mark = "\u0301".encode("utf-8")
+        reserved = RESERVED_CONTEXT.encode("utf-8")
+        spellings = {
+            "raw mark after the name": b"    name: " + reserved + mark + b"\n",
+            "escaped mark after the name": b'    name: "' + reserved + b'\\u0301"\n',
+            "raw mark, other letter case": b"    name: TRUSTED provenance attestation" + mark + b"\n",
+            "raw mark, folded block scalar":
+                b"    name: >-\n      Trusted provenance\n      attestation" + mark + b"\n",
+            "escaped mark, hex-escaped space":
+                b'    name: "Trusted provenance\\x20attestation\\u0301"\n',
+            "precomposed last letter": "    name: Trusted provenance attestatio\u0144\n".encode("utf-8"),
+            "other letter case": b"    name: trusted Provenance ATTESTATION\n",
+            "folded block scalar": b"    name: >-\n      Trusted provenance\n      attestation\n",
+        }
+        for label in ("raw mark after the name", "escaped mark after the name"):
+            self.assertIn(reserved, spellings[label], label)
+        for label, name_line in spellings.items():
+            with self.subTest(spelling=label):
+                raw = (
+                    b"on: [pull_request]\njobs:\n  spoof:\n" + name_line
+                    + b"    steps:\n      - run: exit 0\n"
+                )
+                findings = verifier._ci_findings({".github/workflows/spoof.yml": raw}, {})
+                self.assertIn(
+                    ("CI_CONTEXT_COLLISION", ".github/workflows/spoof.yml"),
+                    {(item.code, item.path) for item in findings if item.fatal},
+                )
+        raw = (
+            b"on: [pull_request]\njobs:\n  spoof:\n" + spellings["raw mark after the name"]
+            + b"    steps:\n      - run: exit 0\n"
+        )
+        head = self._commit_workflow(".github/workflows/spoof.yml", raw)
+        self.assertFatal(self.run_verify(head), "CI_CONTEXT_COLLISION")
+
     def test_an_unrelated_job_name_is_not_a_context_collision(self) -> None:
         raw = (
             b"on: [pull_request]\njobs:\n  build:\n    name: >-\n      Trusted build\n"

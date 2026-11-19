@@ -228,8 +228,8 @@ BASELINE_KIND = "public-provenance-baseline"
 BASELINE_SCHEMA_VERSION = 1
 
 #: The workflow that runs this verifier, and the required status check it
-#: reports under.  The context is matched against every static YAML spelling of
-#: it in a candidate workflow (``_reserved_context_text``), not as one byte run.
+#: reports under.  The context is matched in a candidate workflow as one byte
+#: run and against every static YAML spelling of it (``_names_reserved_context``).
 TRUSTED_WORKFLOW = ".github/workflows/provenance-attestation.yml"
 TRUSTED_CONTEXT = "Trusted provenance attestation"
 WORKFLOW_PREFIX = ".github/workflows/"
@@ -2564,7 +2564,7 @@ def _workflow_events(raw: bytes) -> list[str] | None:
     return events
 
 
-def _reserved_context_text(text: str) -> str:
+def _reserved_context_text(text: str, *, strip_marks: bool = False) -> str:
     """``text`` as a static YAML job name compares: escapes resolved, white space folded.
 
     A job name reaches GitHub after YAML has resolved double-quoted escapes and folded a
@@ -2572,9 +2572,15 @@ def _reserved_context_text(text: str) -> str:
     and a ``>-`` scalar split over two lines both name the reserved context without holding
     it as one byte run.  Escapes are resolved wherever they appear, every run of white
     space (line breaks included) becomes one space, and case and compatibility forms are
-    folded.  Each step can only add matches, never remove one, so the tripwire stays
-    conservative.  A name computed by an expression (``${{ }}``) is outside any static
-    reading; the trusted CI verdict judges each context by its producer instead.
+    folded.
+
+    This reading can lose a match the byte run has: NFKC composes a combining mark with
+    the letter before it, so the reserved name followed by U+0301 no longer ends in its
+    own last letter.  ``strip_marks`` gives the reading that survives that: the text is
+    decomposed (NFKD) and every combining mark is dropped, before and after case folding.
+    Neither reading replaces the byte search; ``_names_reserved_context`` asks all three.
+    A name computed by an expression (``${{ }}``) is outside any static reading; the
+    trusted CI verdict judges each context by its producer instead.
     """
 
     def resolve(match: re.Match[str]) -> str:
@@ -2588,8 +2594,33 @@ def _reserved_context_text(text: str) -> str:
         return _YAML_ESCAPES.get(match.group(5), whole)
 
     resolved = _YAML_ESCAPE.sub(resolve, text)
-    folded = unicodedata.normalize("NFKC", resolved).casefold()
+    if strip_marks:
+        decomposed = unicodedata.normalize("NFKD", resolved).casefold()
+        folded = "".join(
+            character for character in unicodedata.normalize("NFKD", decomposed)
+            if not unicodedata.category(character).startswith("M")
+        )
+    else:
+        folded = unicodedata.normalize("NFKC", resolved).casefold()
     return " ".join(folded.split())
+
+
+def _names_reserved_context(raw: bytes) -> bool:
+    """Whether a workflow's bytes name the reserved required-check context.
+
+    Three readings, and any one of them is a match: the context as one byte run, which
+    is the original check and stays the floor; its composed, case-folded static YAML
+    spelling; and that spelling with combining marks dropped.  The later readings only
+    add matches to the first, so the tripwire never flags less than the byte search.
+    """
+    if TRUSTED_CONTEXT.encode("utf-8") in raw:
+        return True
+    text = raw.decode("utf-8", errors="replace")
+    return any(
+        _reserved_context_text(TRUSTED_CONTEXT, strip_marks=strip_marks)
+        in _reserved_context_text(text, strip_marks=strip_marks)
+        for strip_marks in (False, True)
+    )
 
 
 def _ci_findings(candidate: dict[str, bytes], trusted: dict[str, bytes]) -> list[Finding]:
@@ -2606,11 +2637,10 @@ def _ci_findings(candidate: dict[str, bytes], trusted: dict[str, bytes]) -> list
     ``workflow_run`` without this check changing again.
     """
     findings: list[Finding] = []
-    needle = _reserved_context_text(TRUSTED_CONTEXT)
     for path, raw in sorted(candidate.items()):
         if not path.startswith(WORKFLOW_PREFIX) or path == TRUSTED_WORKFLOW:
             continue
-        if needle in _reserved_context_text(raw.decode("utf-8", errors="replace")):
+        if _names_reserved_context(raw):
             findings.append(Finding(
                 "CI_CONTEXT_COLLISION", path,
                 f"workflow names the reserved required-check context {TRUSTED_CONTEXT!r}; "
